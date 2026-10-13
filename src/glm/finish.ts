@@ -26,8 +26,8 @@
  * `gh pr edit` (broken for labels here, ADR-0034 §7); (c) the remote branch is
  * deleted only after an `ls-remote` check shows it exists; (d) an unparseable
  * author outcome takes the driver-fault ARM (a salvage release), not a driver
- * FAULT; (e) the adopt lookup filters the open-PR list by head branch
- * client-side.
+ * FAULT; (e) the adopt lookup asks for open PRs filtered SERVER-SIDE by head
+ * branch (`gh pr list --head <branch>`), not by scanning a client-side list.
  *
  * File-backed state keeps today's `$CAP_DIR` paths and formats (ADR-0040
  * Decision 3), reusing gate.ts's path/count helpers so the read side (gate)
@@ -519,11 +519,12 @@ async function readTitle(deps: FinishDeps, issue: number): Promise<string> {
 
 /**
  * The open-PR step with the adopt-on-collision fallback (issue #3900): a
- * create failure is decided by LISTING open PRs for the head branch
- * (client-side filter, delta e) — never by parsing the error text. A match is
- * adopted as success (ANOMALY line + best-effort `glm-authored` relabel via
- * `gh issue edit` on the PR number, delta b); no match, or a failed lookup,
- * is a genuine failure.
+ * create failure is decided by LISTING open PRs for the head branch — a
+ * SERVER-SIDE `gh pr list --head <branch>` filter (delta e), with the
+ * headRefName re-check on the returned rows a defensive guard, not the filter
+ * — never by parsing the error text. A match is adopted as success (ANOMALY
+ * line + best-effort `glm-authored` relabel via `gh issue edit` on the PR
+ * number, delta b); no match, or a failed lookup, is a genuine failure.
  */
 async function openOrAdoptPr(
   deps: FinishDeps,
@@ -893,10 +894,23 @@ export async function runFinish(deps: FinishDeps, input: FinishInput): Promise<F
     return await finishInner(deps, input);
   } catch (err) {
     logger.error({ err, input }, "[glm-finish] finish phase threw — best-effort plain release");
-    try {
-      await releaseClaim(deps, input.issue, false);
-    } catch (nested) {
-      logger.error({ err: nested }, "[glm-finish] best-effort release also threw (non-fatal)");
+    // Delta (a) applies here too (issue #4978): dry-run is hermetic EVEN on
+    // the fault path — the best-effort release is a would- line, never an
+    // editIssueLabels call.
+    if (!deps.config.dryRun) {
+      try {
+        await releaseClaim(deps, input.issue, false);
+      } catch (nested) {
+        logger.error({ err: nested }, "[glm-finish] best-effort release also threw (non-fatal)");
+      }
+    } else {
+      // Best-effort: a throwing log sink must not turn the fault arm into a
+      // throw out of runFinish (the never-throws contract).
+      try {
+        deps.log(`would-release issue #${input.issue} (in-progress -> ready-for-agent, withhold=false, DRY_RUN=1)`);
+      } catch {
+        /* intentional: the log sink throwing must not escape runFinish's never-throw contract */
+      }
     }
     return {
       action: "finish-fault",

@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderPlaybook } from "../src/skills/playbook.ts";
+import { planCorpus, type CorpusPlan } from "../src/skills/plan.ts";
+import { readCorpus } from "../src/skills/cli.ts";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PLAYBOOKS = join(REPO_ROOT, "docs", "operator-playbooks");
@@ -91,5 +93,63 @@ describe("skills playbook core: live parity with sync-skills.sh", () => {
   test("core skips match the script's skip stderr lines", () => {
     const scriptSkips = [...stderr.matchAll(/^skip (\S+) /gm)].map((m) => m[1]).sort();
     assert.deepEqual([...skips].sort(), scriptSkips);
+  });
+});
+
+function listFiles(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) walk(full);
+      else out.push(relative(root, full).split(sep).join("/"));
+    }
+  };
+  walk(root);
+  return out.sort();
+}
+
+describe("skills whole-corpus plan: full-tree parity with sync-skills.sh", () => {
+  let scratch = "";
+  let stderr = "";
+  let plan: CorpusPlan;
+
+  before(() => {
+    scratch = mkdtempSync(join(tmpdir(), "skills-tree-parity-"));
+    const res = spawnSync("bash", [join(REPO_ROOT, "scripts", "sync-skills.sh")], {
+      env: { ...process.env, CLAUDE_SKILLS_DIR: scratch },
+      encoding: "utf-8",
+      cwd: REPO_ROOT,
+    });
+    stderr = res.stderr ?? "";
+    assert.equal(res.status, 0, `sync-skills.sh exited ${res.status}: ${stderr}`);
+    plan = planCorpus(readCorpus(PLAYBOOKS));
+  });
+
+  after(() => {
+    if (scratch) rmSync(scratch, { recursive: true, force: true });
+  });
+
+  test("plan has no errors", () => {
+    assert.deepEqual(plan.errors, []);
+  });
+
+  test("the set of generated files equals the set of plan writes", () => {
+    assert.deepEqual(
+      plan.writes.map((w) => w.path).sort(),
+      listFiles(scratch),
+    );
+  });
+
+  test("every generated file is byte-identical to its plan write", () => {
+    for (const w of plan.writes) {
+      const script = readFileSync(join(scratch, w.path), "utf-8");
+      assert.ok(w.content === script, `${w.path}: plan diverges from sync-skills.sh — ${firstDiff(w.content, script)}`);
+    }
+  });
+
+  test("plan skips match the script's skip stderr tokens", () => {
+    const scriptSkips = [...stderr.matchAll(/^skip (\S+) /gm)].map((m) => m[1]).sort();
+    assert.deepEqual(plan.skips.map((k) => k.playbook).sort(), scriptSkips);
   });
 });

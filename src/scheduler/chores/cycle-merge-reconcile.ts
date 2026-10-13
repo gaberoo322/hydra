@@ -34,7 +34,17 @@
  * completed to tasksMerged=1); and a work-queue row with NO prNumber is joined to
  * a merged PR via its `anchorReference` (`issue-<N>`) against
  * `mergedPrReferences([pr])` over ONE REST merged-PR listing per tick — one PR
- * credits at most one row (latest recordedAt <= mergedAt), `_target` rows skipped.
+ * credits at most one row, `_target` rows skipped.
+ *
+ * **Issue #4926 — interval ownership.** Path (b) attribution is bounded
+ * structurally. For issue N the sibling set is every scanned joinable work-queue
+ * row (`completed` or `merged`, with or without a prNumber). A merged PR P is
+ * OWNED by the sibling with the greatest recordedAt <= P.mergedAt, and may credit
+ * that row ONLY if it is a still-pooled PR-less row not yet credited this tick —
+ * it never falls back to an older sibling, so a row can only be credited by a PR
+ * whose merge falls in [row.recordedAt, next sibling's recordedAt). The owner must
+ * also be within `ANCHOR_JOIN_WINDOW_MS` (72h) of the merge. Ambiguity
+ * under-credits (row stays `completed`), never mis-credits.
  *
  * **Idempotent.** Once a record is upgraded to `status='merged'` it no longer
  * matches the `completed` selection filter, so a subsequent tick skips it. Even
@@ -108,6 +118,14 @@ import { logger } from "../../logger.ts";
 const DEFAULT_SCAN_LIMIT = 200;
 /** How many candidate PRs to confirm via `gh` per tick (bounds the API cost). */
 const DEFAULT_CONFIRM_LIMIT = 10;
+/**
+ * Anchor-join window (issue #4926): a pooled PR-less row is creditable by a
+ * merged PR only when `0 <= mergedAt - recordedAt <= ANCHOR_JOIN_WINDOW_MS`.
+ * A merge outside the window credits nothing (the row stays `completed`) —
+ * under-crediting is the safe failure direction; a wrong credit corrupts
+ * tasksMerged, the capacity ledger stamp and the pending-enroll self-arm.
+ */
+export const ANCHOR_JOIN_WINDOW_MS = 72 * 60 * 60 * 1000;
 
 /** Raw `gh pr view <n> --json state,headRefName` shape. */
 interface RawPrState {
@@ -291,6 +309,8 @@ export interface CycleMergeReconcileDeps {
   scanLimit?: number;
   /** Max candidate PRs to confirm via gh this tick. Defaults to 10. */
   confirmLimit?: number;
+  /** Anchor-join window in ms (issue #4926). Defaults to ANCHOR_JOIN_WINDOW_MS. */
+  anchorJoinWindowMs?: number;
   // --- Self-arm backstop touchpoints (issue #3078; all injectable) ------------
   /**
    * List the prNumbers currently in the pending-enroll registry, as a Set for
@@ -376,6 +396,7 @@ export async function runCycleMergeReconcile(
   const listMergedPrs = deps.listMergedPrs ?? listMergedPrsViaRest;
   const scanLimit = deps.scanLimit ?? DEFAULT_SCAN_LIMIT;
   const confirmLimit = deps.confirmLimit ?? DEFAULT_CONFIRM_LIMIT;
+  const anchorJoinWindowMs = deps.anchorJoinWindowMs ?? ANCHOR_JOIN_WINDOW_MS;
   // Self-arm backstop touchpoints (issue #3078). `listPending` reads the whole
   // registry ONCE per tick and returns a Set for O(1) membership — cheaper than a
   // per-PR HGET and consistent with the bounded gh budget.
@@ -445,20 +466,18 @@ export async function runCycleMergeReconcile(
   const pool: PoolRow[] = [];
   // prNumbers carried by ANY scanned work-queue row — path (a) owns those PRs.
   const scannedWorkQueuePrs = new Set<number>();
-  // Scanned (or in-tick upgraded) `merged` work-queue rows per issue number, with
-  // the PR that credited each. An older `completed` row for the same issue is
-  // superseded (cross-tick INV-5) only when that PR merged at or after the older
-  // row's recordedAt — a row whose own PR merged earlier stays creditable.
-  interface MergedMarker {
+  // Interval-ownership sibling set (issue #4926): every scanned joinable
+  // work-queue row (`completed` or `merged`, PR or not) per issue number. Only
+  // pooled (PR-less, completed) siblings may be credited by path (b).
+  interface Sibling {
+    cycleId: string;
+    m: Record<string, string>;
     recordedAtMs: number;
-    prNumber: number | null;
+    pooled: boolean;
   }
-  const mergedMarkersByIssue = new Map<number, MergedMarker[]>();
-  function addMergedMarker(issue: number, recordedAtMs: number, prNumber: number | null): void {
-    const list = mergedMarkersByIssue.get(issue) ?? [];
-    list.push({ recordedAtMs, prNumber });
-    mergedMarkersByIssue.set(issue, list);
-  }
+  const siblingsByIssue = new Map<number, Sibling[]>();
+  /** cycleIds already credited by a path (b) PR this tick. */
+  const creditedThisTick = new Set<string>();
 
   /**
    * Everything that follows a CONFIRMED merge for one (cycle, PR): self-arm, the
@@ -569,7 +588,7 @@ export async function runCycleMergeReconcile(
       // Cheap structural filters BEFORE the cycle-hash status read (up to 200 rows
       // per tick): a row with no PR that is not a work-queue row, or a PR-less
       // work-queue row without a joinable issue ref + timestamp, can never be an
-      // upgrade candidate or a supersede marker, so it costs no Redis read.
+      // upgrade candidate or an interval-ownership sibling, so it costs no Redis read.
       const refMatch = /^issue-(\d+)$/.exec((m.anchorReference || "").trim());
       const recordedAtMs = Date.parse(m.recordedAt || "");
       const joinable = isWorkQueue && !!refMatch && Number.isFinite(recordedAtMs);
@@ -581,11 +600,17 @@ export async function runCycleMergeReconcile(
       // `merged` is terminal (the idempotency marker).
       const cycleStatus = ((await getCycleStatus(cycleId)) ?? "").trim().toLowerCase();
 
-      // Cross-tick supersede marker (INV-5): a MERGED work-queue row for issue N
-      // supersedes every older still-`completed` row for N, on every later tick too
-      // (the in-tick splice alone forgets it once the credited row turns `merged`).
-      if (cycleStatus === "merged" && joinable) {
-        addMergedMarker(issueNumber, recordedAtMs, hasPr ? prNumber : null);
+      // Interval ownership (issue #4926): register every completed/merged
+      // joinable row as a sibling for its issue, whether or not it carries a PR.
+      if (joinable && (cycleStatus === "merged" || cycleStatus === "completed")) {
+        const list = siblingsByIssue.get(issueNumber) ?? [];
+        list.push({
+          cycleId,
+          m,
+          recordedAtMs,
+          pooled: cycleStatus === "completed" && !hasPr,
+        });
+        siblingsByIssue.set(issueNumber, list);
       }
       if (cycleStatus !== "completed") continue;
 
@@ -616,10 +641,7 @@ export async function runCycleMergeReconcile(
         result.notMerged += 1;
         continue;
       }
-      const upgraded = await applyConfirmedMerge(cycleId, m, prNumber, prView.headRefName);
-      // In-tick supersede (INV-5): a path (a) upgrade of a joinable work-queue row
-      // supersedes older PR-less rows for the same issue within this very tick.
-      if (upgraded && joinable) addMergedMarker(issueNumber, recordedAtMs, prNumber);
+      await applyConfirmedMerge(cycleId, m, prNumber, prView.headRefName);
     } catch (err: any) {
       // Defensive: no dep should throw, but if one does, log and continue —
       // never abort the pass.
@@ -627,32 +649,21 @@ export async function runCycleMergeReconcile(
     }
   }
 
-  // Path (b) (issue #4762): anchor join. ONE merged-PR listing per tick; a null
-  // listing disables this path for the tick only. Attribution is one-to-one: a
-  // merged PR P credits AT MOST ONE row — among pooled rows whose issue-<N> is in
-  // mergedPrReferences([P]), the greatest recordedAt <= P.mergedAt. Oldest merge
-  // first keeps the tie-break stable. These resolutions make no per-PR gh call so
-  // they do not count against confirmLimit.
+  // Path (b) (issues #4762, #4926): anchor join under interval ownership. ONE
+  // merged-PR listing per tick; a null listing disables this path for the tick
+  // only. A merged PR P is owned, per referenced issue, by the sibling with the
+  // greatest recordedAt <= P.mergedAt; P credits that owner only when it is a
+  // still-pooled PR-less row inside the anchor-join window — never an older
+  // sibling. A PR credits at most one row across all its referenced issues (the
+  // owner with the greatest recordedAt). Oldest merge first keeps the tie-break
+  // stable. These resolutions make no per-PR gh call so they do not count
+  // against confirmLimit.
   if (pool.length > 0) {
     let merged: MergedPrRow[] | null = null;
     try {
       merged = await listMergedPrs();
     } catch (err: any) {
       logger.error({ err }, "cycle-merge-reconcile: merged-PR listing threw");
-    }
-    // Drop rows superseded by an already-merged sibling (cross-tick / path (a)).
-    // The crediting PR's mergedAt comes from the listing; a PR outside the
-    // listing horizon is treated as merged after the row (conservative).
-    const mergedAtByPr = new Map<number, number>((merged ?? []).map((p) => [p.number, p.mergedAtMs]));
-    for (let i = pool.length - 1; i >= 0; i--) {
-      const row = pool[i];
-      const markers = mergedMarkersByIssue.get(row.issueNumber) ?? [];
-      const superseded = markers.some((mk) => {
-        if (mk.recordedAtMs < row.recordedAtMs) return false;
-        const mergedAt = mk.prNumber === null ? undefined : mergedAtByPr.get(mk.prNumber);
-        return mergedAt === undefined || mergedAt >= row.recordedAtMs;
-      });
-      if (superseded) pool.splice(i, 1);
     }
     if (merged === null) {
       logger.error(
@@ -666,24 +677,30 @@ export async function runCycleMergeReconcile(
         if (scannedWorkQueuePrs.has(pr.number)) continue;
         try {
           const refs = mergedPrReferences([pr]);
-          let best: PoolRow | null = null;
-          for (const row of pool) {
-            if (!refs.has(row.issueNumber)) continue;
-            if (row.recordedAtMs > pr.mergedAtMs) continue;
-            if (best === null || row.recordedAtMs > best.recordedAtMs) best = row;
+          let best: Sibling | null = null;
+          for (const issue of refs) {
+            // The owner is the greatest recordedAt <= mergedAt. On a recordedAt
+            // tie a non-pooled sibling wins (ambiguity under-credits).
+            let owner: Sibling | null = null;
+            for (const sib of siblingsByIssue.get(issue) ?? []) {
+              if (sib.recordedAtMs > pr.mergedAtMs) continue;
+              if (
+                owner === null ||
+                sib.recordedAtMs > owner.recordedAtMs ||
+                (sib.recordedAtMs === owner.recordedAtMs && owner.pooled && !sib.pooled)
+              ) {
+                owner = sib;
+              }
+            }
+            if (owner === null || !owner.pooled) continue;
+            if (creditedThisTick.has(owner.cycleId)) continue;
+            if (pr.mergedAtMs - owner.recordedAtMs > anchorJoinWindowMs) continue;
+            if (best === null || owner.recordedAtMs > best.recordedAtMs) best = owner;
           }
           if (best === null) continue;
-          // A row is credited by at most one PR — drop it from the pool whether
-          // or not the upgrade lands (a failed upgrade retries next tick).
-          // It also supersedes every older pooled row for the same issue: those
-          // earlier attempts stay `completed` and must never be credited by a
-          // later PR referencing the same issue.
-          const credited = best;
-          for (let i = pool.length - 1; i >= 0; i--) {
-            if (pool[i].issueNumber === credited.issueNumber && pool[i].recordedAtMs <= credited.recordedAtMs) {
-              pool.splice(i, 1);
-            }
-          }
+          // A row is credited by at most one PR — mark it credited whether or
+          // not the upgrade lands (a failed upgrade retries next tick).
+          creditedThisTick.add(best.cycleId);
           result.candidates += 1;
           const ok = await applyConfirmedMerge(best.cycleId, best.m, pr.number, pr.headRefName);
           if (ok) result.anchorJoined += 1;
