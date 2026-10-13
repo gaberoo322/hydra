@@ -43,6 +43,19 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SIGNAL_CLASS_COOLDOWNS } from "../src/taxonomy/classes.ts";
 
+// Issue #4966: bootstrap.sh renders the --reap-session-echo redirect line
+// from HYDRA_AUTOPILOT_PRIMARY_MODEL / HYDRA_AUTOPILOT_FALLBACK_MODEL, and
+// the cases below pin the DEFAULT pair (fable -> opus). A dispatch running
+// under the #4839 Sonnet-parent trial inherits PRIMARY_MODEL=sonnet from the
+// host's systemd drop-in through the `...process.env` spreads here, reddening
+// those cases worktree-local while CI's fresh runner env stays green. Pin the
+// default pair explicitly in the model-sensitive helper's env so the result
+// never depends on the host's inherited values.
+const DEFAULT_MODEL_PAIR_ENV = {
+  HYDRA_AUTOPILOT_PRIMARY_MODEL: "fable",
+  HYDRA_AUTOPILOT_FALLBACK_MODEL: "opus",
+};
+
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
 
@@ -1616,7 +1629,7 @@ describe("scripts/autopilot/bootstrap.sh --reap-crash-detail (issue #2479)", () 
  */
 function reapSessionEcho(responseJson: string): string {
   const result = spawnSync(join(SCRIPTS, "bootstrap.sh"), ["--reap-session-echo", responseJson], {
-    env: { ...process.env, PATH: process.env.PATH ?? "" },
+    env: { ...process.env, ...DEFAULT_MODEL_PAIR_ENV, PATH: process.env.PATH ?? "" },
     encoding: "utf-8",
   });
   return (result.stdout ?? "").trim();

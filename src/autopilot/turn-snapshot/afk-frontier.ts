@@ -46,10 +46,10 @@ export interface AfkFrontierDeps {
   readonly ghListLimit: number;
 }
 
-export const RETRO_RUNS_PATH = "/autopilot/runs?limit=14";
-export const WAYFINDER_MAP_LABEL = "wayfinder:map";
-export const WAYFINDER_DRAFT_LABEL = "wayfinder:destination-pending";
-export const WAYFINDER_AFK_TYPES = ["wayfinder:research", "wayfinder:task"] as const;
+const RETRO_RUNS_PATH = "/autopilot/runs?limit=14";
+const WAYFINDER_MAP_LABEL = "wayfinder:map";
+const WAYFINDER_DRAFT_LABEL = "wayfinder:destination-pending";
+const WAYFINDER_AFK_TYPES = ["wayfinder:research", "wayfinder:task"] as const;
 export const NEEDS_TICKETS_LABEL = "needs-tickets";
 
 const fail = <T>(reason: string): Classified<T> => ({ ok: false, reason });
@@ -139,7 +139,7 @@ export async function collectRetro(deps: AfkFrontierDeps): Promise<CollectorOutc
  * Python's `int(x)` as `print(int(n))` printed it, or null where it raises
  * (the loop then stops: every later map is dropped, as in the heredoc).
  */
-export function pyIntText(x: unknown): string | null {
+function pyIntText(x: unknown): string | null {
   if (typeof x === "boolean") return x ? "1" : "0";
   if (typeof x === "number") return Number.isFinite(x) ? BigInt(Math.trunc(x)).toString() : null;
   if (typeof x === "string") {
@@ -264,7 +264,7 @@ export async function collectWayfinderFrontier(deps: AfkFrontierDeps): Promise<C
 // ---------------------------------------------------------------------------
 
 /** The oldest unassigned needs-tickets issue number (only a bare digit string is accepted), or null. */
-export function foldTicketsPick(read: GhJsonRead): Classified<string | null> {
+function foldTicketsPick(read: GhJsonRead): Classified<string | null> {
   const first = jqFold(read, (data) => {
     const numbers = jqIter(data)
       .filter((issue) => jqEquals(jqLength(jqField(issue, "assignees")), 0))
