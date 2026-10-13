@@ -11,7 +11,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -60,7 +60,6 @@ describe("git-remote-fence", () => {
   const DENY = [
     'git remote set-url origin https://github.com/gaberoo322/claw-street-bets.git',
     'cd "$TARGET_WS" && git remote set-url origin https://x/y.git',
-    "git -C /somewhere remote add upstream https://x/y.git",
     "git remote remove origin",
     "git remote rm origin",
     "git remote rename origin old",
@@ -109,5 +108,38 @@ describe("git-remote-fence", () => {
     const bad = spawnSync("bash", [HOOK], { input: "not json", encoding: "utf-8" });
     assert.equal(bad.status, 0);
     assert.equal(run("git remote set-url origin x", tmp).status, 0);
+  });
+
+  it("resolves the EFFECTIVE repo of the command, not just the session cwd", () => {
+    const url = "https://x/y.git";
+    // From a non-protected cwd, a command that targets the protected repo is denied.
+    assert.equal(run(`git -C ${protectedRepo} remote add up ${url}`, otherRepo).status, 2);
+    assert.equal(run(`cd ${protectedRepo} && git remote set-url origin ${url}`, otherRepo).status, 2);
+    assert.equal(run(`git --git-dir=${protectedRepo}/.git remote rm origin`, otherRepo).status, 2);
+    // From the protected cwd, a command that targets a different repo is allowed.
+    assert.equal(run(`git -C ${otherRepo} remote add up ${url}`, protectedRepo).status, 0);
+    assert.equal(run(`cd ${otherRepo} && git remote set-url origin ${url}`, protectedRepo).status, 0);
+    // An unresolvable (empty-var) target degrades to the cwd, as the shell does.
+    assert.equal(run(`git -C "$NOPE" remote set-url origin ${url}`, protectedRepo).status, 2);
+  });
+
+  it("scans a heredoc body when the consumer is a shell, ignores it otherwise", () => {
+    const body = "git remote set-url origin https://x/y.git";
+    assert.equal(run(`bash <<'EOF'\n${body}\nEOF`, protectedRepo).status, 2);
+    assert.equal(run(`sh -s <<EOS\n${body}\nEOS`, protectedRepo).status, 2);
+    assert.equal(run(`gh pr create --body-file - <<'EOF'\n${body}\nEOF`, protectedRepo).status, 0);
+    assert.equal(run(`echo $((1<<3))\n${body}`, protectedRepo).status, 2);
+  });
+
+  it("is registered as a PreToolUse Bash hook by setup-claude-hooks.sh and in the GLM drainer settings", () => {
+    const setup = readFileSync(join(REPO_ROOT, "scripts", "setup-claude-hooks.sh"), "utf-8");
+    assert.match(setup, /^\s*"git-remote-fence\.sh\|Bash"\s*$/m);
+    const drainer = JSON.parse(
+      readFileSync(join(REPO_ROOT, "config", "glm", "drainer-settings.json"), "utf-8"),
+    );
+    const entries = drainer.hooks.PreToolUse as Array<{ matcher: string; hooks: Array<{ command: string }> }>;
+    const fence = entries.find((e) => e.hooks.some((h) => /git-remote-fence\.sh/.test(h.command)));
+    assert.ok(fence, "drainer settings must register git-remote-fence.sh");
+    assert.match(fence.matcher, /\bBash\b/);
   });
 });

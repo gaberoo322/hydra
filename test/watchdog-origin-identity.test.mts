@@ -49,7 +49,7 @@ beforeEach(() => {
   mkdirSync(join(fakeRoot, ".git"), { recursive: true });
   writeFileSync(join(fakeRoot, ".git", "config"), "[core]\n");
   const fake = join(binDir, "redis-cli");
-  writeFileSync(fake, `#!/usr/bin/env bash\necho "$@" >> "${xaddLog}"\n`);
+  writeFileSync(fake, `#!/usr/bin/env bash\necho "$@" >> "${xaddLog}"\n[ -n "$FAKE_XADD_FAIL" ] || echo "1-0"\n`);
   chmodSync(fake, 0o755);
 });
 
@@ -124,6 +124,32 @@ describe("run_origin_identity (#4939)", () => {
     const second = tick(env);
     assert.match(second.out, /ALARM/);
     assert.equal(xadds().length, 1, "same episode must not re-publish");
+  });
+
+  it("never leaks URL credentials into the log line or the XADD payload", () => {
+    const r = tick({
+      HYDRA_WATCHDOG_ORIGIN_URL: "https://user:ghp_SECRETTOKEN@github.com/gaberoo322/claw-street-bets.git",
+      HYDRA_WATCHDOG_ORIGIN_MASTER_PRESENT: "1",
+    });
+    assert.match(r.out, /ALARM .*wrong-origin-url.*github\.com\/gaberoo322\/claw-street-bets/);
+    assert.doesNotMatch(r.out, /SECRETTOKEN|user:/);
+    const entries = xadds();
+    assert.equal(entries.length, 1);
+    assert.doesNotMatch(entries[0], /SECRETTOKEN|user:/);
+  });
+
+  it("does not create the dedup marker when the XADD fails, so the next tick retries", () => {
+    const env = {
+      HYDRA_WATCHDOG_ORIGIN_URL: "https://github.com/gaberoo322/claw-street-bets.git",
+      HYDRA_WATCHDOG_ORIGIN_MASTER_PRESENT: "1",
+    };
+    const first = tick({ ...env, FAKE_XADD_FAIL: "1" });
+    assert.match(first.out, /WARN in-band delivery FAILED/);
+    assert.ok(!existsSync(join(stateDir, "hydra-origin-identity.since")));
+    const second = tick(env);
+    assert.match(second.out, /in-band delivery published/);
+    assert.equal(xadds().length, 2, "retried after the failed first attempt");
+    assert.ok(existsSync(join(stateDir, "hydra-origin-identity.since")));
   });
 
   it("alarms on a correct URL when refs/remotes/origin/master does not resolve", () => {

@@ -9,7 +9,7 @@
  * tests use exec stubs + a `fetchPrMeta` override.
  */
 
-import { test, describe } from "node:test";
+import { test, describe, mock } from "node:test";
 import assert from "node:assert/strict";
 
 import {
@@ -20,7 +20,9 @@ import {
   tierFromLabels,
   clampLimit,
   prMetaFromView,
+  redactUrlUserinfo,
 } from "../src/aggregators/recent-merges.ts";
+import { logger } from "../src/logger.ts";
 
 function makeExecStub(routes: Record<string, { stdout: string; stderr?: string }>) {
   return async (cmd: string, args: readonly string[]) => {
@@ -382,9 +384,42 @@ describe("listRecentMergeCommits — wrong origin remote stays fail-open and lou
       }
       throw new Error(`exec-stub: no route for "${key}"`);
     };
-    const commits = await listRecentMergeCommits(10, { execFileAsync: exec });
-    assert.ok(calls.some((c) => c.includes("remote get-url origin")), "origin URL must be read");
-    assert.deepEqual(commits.map((c) => c.prNumber), [7]);
+    const errSpy = mock.method(logger, "error", () => {});
+    try {
+      const commits = await listRecentMergeCommits(10, { execFileAsync: exec });
+      assert.ok(calls.some((c) => c.includes("remote get-url origin")), "origin URL must be read");
+      assert.deepEqual(commits.map((c) => c.prNumber), [7]);
+      assert.equal(errSpy.mock.callCount(), 1, "logger.error fires exactly once");
+      const [fields] = errSpy.mock.calls[0].arguments as unknown as [Record<string, unknown>];
+      assert.equal(fields.originUrl, "https://github.com/gaberoo322/claw-street-bets.git");
+    } finally {
+      errSpy.mock.restore();
+    }
+  });
+
+  test("a credentialed origin URL is redacted before it is logged", async () => {
+    const exec = async (cmd: string, args: readonly string[]) => {
+      const key = `${cmd} ${args.join(" ")}`;
+      if (key.includes("fetch origin master")) {
+        const e: any = new Error("Command failed");
+        e.stderr = "fatal: couldn't find remote ref master";
+        throw e;
+      }
+      if (key.includes("remote get-url origin")) {
+        return { stdout: "https://user:ghp_SECRET@github.com/gaberoo322/claw-street-bets.git\n", stderr: "" };
+      }
+      if (key.includes("log origin/master")) return { stdout: "", stderr: "" };
+      throw new Error(`exec-stub: no route for "${key}"`);
+    };
+    const errSpy = mock.method(logger, "error", () => {});
+    try {
+      await listRecentMergeCommits(10, { execFileAsync: exec });
+      const [fields] = errSpy.mock.calls[0].arguments as unknown as [Record<string, unknown>];
+      assert.doesNotMatch(String(fields.originUrl), /SECRET|user:/);
+    } finally {
+      errSpy.mock.restore();
+    }
+    assert.equal(redactUrlUserinfo("git@github.com:a/b.git"), "git@github.com:a/b.git");
   });
 
   test("an unrelated fetch failure does not probe the remote URL", async () => {
@@ -396,7 +431,13 @@ describe("listRecentMergeCommits — wrong origin remote stays fail-open and lou
       if (key.includes("log origin/master")) return { stdout: "", stderr: "" };
       throw new Error(`exec-stub: no route for "${key}"`);
     };
-    await listRecentMergeCommits(10, { execFileAsync: exec });
+    const errSpy = mock.method(logger, "error", () => {});
+    try {
+      await listRecentMergeCommits(10, { execFileAsync: exec });
+      assert.equal(errSpy.mock.callCount(), 0, "no origin-wrong error for an unrelated failure");
+    } finally {
+      errSpy.mock.restore();
+    }
     assert.ok(!calls.some((c) => c.includes("remote get-url")));
   });
 });

@@ -1989,12 +1989,13 @@ run_origin_identity() {
     echo "hydra-origin-identity-watchdog: $*"
   }
 
-  # Fire-and-forget mutation, same best-effort contract as the sibling blocks.
-  rc_write() {
+  # Output-returning call ("" on any failure) so the XADD result can gate the
+  # dedup marker.
+  rc_read() {
     if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
+      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
     else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
     fi
   }
 
@@ -2072,23 +2073,33 @@ run_origin_identity() {
 
   local reason_str
   reason_str="$(IFS=+; echo "${reasons[*]}")"
-  local shown_url="${url:-<unset>}"
+  # Strip any userinfo (https://user:TOKEN@host/...) BEFORE the URL reaches the
+  # log line, the notifications payload or the dashboard alert (#4939 QA).
+  local shown_url
+  shown_url="$(printf '%s' "${url:-<unset>}" | sed -E 's#^([A-Za-z+]+://)[^/@]*@#\1#')"
   log "ALARM ~/hydra origin identity broken: ${reason_str} — remote.origin.url=${shown_url} (expected ${EXPECTED}); refs/remotes/origin/master $([[ "$master_present" == "1" ]] && echo present || echo MISSING) (issue #4939; read-only watchdog, restore from an operator shell)"
 
   if [[ ! -f "$SINCE_MARKER" ]]; then
-    date +%s > "$SINCE_MARKER" 2>/dev/null || true
-    local iso_now payload url_clean
+    local iso_now payload url_clean xadd_out
     iso_now="$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || echo "")"
     url_clean="$(printf '%s' "$shown_url" | tr -dc 'a-zA-Z0-9_.:/@<>-')"
     payload="$(printf '{"signal":"origin-identity","reason":"%s","url":"%s"}' "$reason_str" "$url_clean")"
-    rc_write XADD "$NOTIFY_STREAM" '*' \
+    # The since-marker is created ONLY after the XADD succeeds (a stream id
+    # comes back), so a Redis blip on the first tick retries next tick instead
+    # of suppressing the alert for the whole episode.
+    xadd_out="$(rc_read XADD "$NOTIFY_STREAM" '*' \
       id "origin-identity-$(date +%s 2>/dev/null || echo 0)-$$" \
       type "infra:origin_identity_wrong" \
       source "watchdog-origin-identity" \
       timestamp "$iso_now" \
       correlationId "origin-identity" \
-      payload "$payload"
-    log "in-band delivery published (best-effort) type=infra:origin_identity_wrong -> ${NOTIFY_STREAM}"
+      payload "$payload")"
+    if [[ -n "$xadd_out" ]]; then
+      date +%s > "$SINCE_MARKER" 2>/dev/null || true
+      log "in-band delivery published type=infra:origin_identity_wrong -> ${NOTIFY_STREAM}"
+    else
+      log "WARN in-band delivery FAILED (XADD returned nothing) — will retry next tick"
+    fi
   fi
   return 0
 }

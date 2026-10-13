@@ -221,6 +221,15 @@ const FETCH_TIMEOUT_MS = 5000;
 // imported above — the git-log pretty format here must use the same literal.
 
 /**
+ * Strip `user[:token]@` userinfo from a remote URL so a credentialed origin
+ * (https://user:TOKEN@github.com/...) never reaches a log sink (#4939 QA).
+ * scp-style `git@host:path` has no scheme and is left alone (no secret).
+ */
+export function redactUrlUserinfo(url: string): string {
+  return url.replace(/^([A-Za-z+]+:\/\/)[^/@]*@/, "$1");
+}
+
+/**
  * Public primitive (issue #2177) — the intermediate "list recent merge
  * commits" step: bounded fail-open `git fetch` + first-parent `git log` read +
  * pure parse, and NOTHING else (no per-PR `gh pr view` fan-out). Returns
@@ -279,7 +288,7 @@ export async function listRecentMergeCommits(
           timeout: 5000,
           maxBuffer: 64 * 1024,
         });
-        originUrl = String(stdout).trim() || "<empty>";
+        originUrl = redactUrlUserinfo(String(stdout).trim()) || "<empty>";
       } catch (urlErr: any) {
         originUrl = `<unreadable: ${urlErr?.message || urlErr}>`;
       }

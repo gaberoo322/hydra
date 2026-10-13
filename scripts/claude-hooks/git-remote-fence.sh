@@ -64,10 +64,24 @@ if not cmd or not cwd:
     print("ALLOW")
     raise SystemExit(0)
 
-# Drop heredoc bodies (keep the opener line): `<<'EOF' ... EOF`.
+# Drop heredoc bodies (keep the opener line) ONLY when the consumer is clearly
+# not a shell: `bash <<'EOF' ... git remote set-url ... EOF` is a program, so
+# its body must still be scanned. Delimiters must be identifiers (so `1<<3`
+# arithmetic and `<<<` here-strings are not mistaken for heredocs).
+SHELLISH = re.compile(
+    r"\b(?:ba|z|da|k|c)?sh\b|\bsource\b|\beval\b|\bpython\d?\b|\bnode\b|\bperl\b|\bxargs\b|\bssh\b|\bsu\b|\bsudo\b"
+)
+
+def _strip_heredoc(m):
+    line_start = cmd_before_strip.rfind("\n", 0, m.start()) + 1
+    if SHELLISH.search(cmd_before_strip[line_start:m.start()]):
+        return m.group(0)
+    return m.group(1)
+
+cmd_before_strip = cmd
 cmd = re.sub(
-    r"(<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n).*?\n[ \t]*\2[ \t]*(?=\n|$)",
-    r"\1",
+    r"(?<!<)(<<-?\s*['\"]?([A-Za-z_]\w*)['\"]?[^\n]*\n).*?\n[ \t]*\2[ \t]*(?=\n|$)",
+    _strip_heredoc,
     cmd,
     flags=re.S,
 )
@@ -89,34 +103,78 @@ CONFIG = re.compile(START + GIT + r"\s+config\b([^;&|\n]*)", re.M)
 READ_FLAG = re.compile(r"(?:^|\s)(?:--get(?:-all|-regexp|-urlmatch)?|--list|-l)(?:\s|$)")
 REMOTE_KEY = re.compile(r"(?:^|[\s\"'])remote\.[^\s\"']+")
 
-hit = REMOTE_MUT.search(cmd) is not None
-if not hit:
-    for m in CONFIG.finditer(cmd):
-        rest = m.group(1)
-        if REMOTE_KEY.search(rest) and not READ_FLAG.search(rest):
-            hit = True
-            break
+# Every mutating invocation: (match start, GIT-prefix text).
+mutations = [(m.start(), m.group(0)) for m in REMOTE_MUT.finditer(cmd)]
+for m in CONFIG.finditer(cmd):
+    rest = m.group(1)
+    if REMOTE_KEY.search(rest) and not READ_FLAG.search(rest):
+        mutations.append((m.start(), m.group(0)))
+hit = bool(mutations)
 
 if not hit:
     print("ALLOW")
     raise SystemExit(0)
 
 protected = os.environ.get("HYDRA_REMOTE_FENCE_PROTECTED_GITDIR", "/home/gabe/hydra/.git")
-try:
+protected_real = os.path.realpath(protected)
+
+UNRESOLVED = re.compile(r"[$`]|^~")
+CD = re.compile(START + r"cd\s+(" + VAL + r")", re.M)
+OPT_C = re.compile(r"(?:^|\s)-C\s+(" + VAL + r")")
+OPT_GITDIR = re.compile(r"--git-dir(?:=|\s+)(" + VAL + r")")
+
+def unquote(v):
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        return v[1:-1]
+    return v
+
+def literal(v):
+    v = unquote(v)
+    return None if (not v or UNRESOLVED.search(v)) else v
+
+def common_dir(args):
     out = subprocess.run(
-        ["git", "-C", cwd, "rev-parse", "--git-common-dir"],
+        ["git"] + args + ["rev-parse", "--git-common-dir"],
         capture_output=True, text=True, timeout=5,
     )
-    common = out.stdout.strip()
-    if out.returncode != 0 or not common:
-        print("ALLOW")
-        raise SystemExit(0)
-    if not os.path.isabs(common):
-        common = os.path.join(cwd, common)
-    if os.path.realpath(common) == os.path.realpath(protected):
-        print("DENY")
-    else:
-        print("ALLOW")
+    c = out.stdout.strip()
+    if out.returncode != 0 or not c:
+        return None
+    return c
+
+def is_protected(pos, prefix):
+    """Resolve the EFFECTIVE repo of one mutating git invocation: --git-dir,
+    else the last literal `cd <dir>` before it, then `git -C <dir>` chain, else
+    the session cwd. An unresolvable value (a `$VAR` / backtick / `~`, the
+    empty-seam-var incident shape) falls back to the previous directory, which
+    is exactly what the shell does for an empty value."""
+    gd = OPT_GITDIR.search(prefix)
+    if gd and literal(gd.group(1)):
+        base = cwd
+        c = common_dir(["--git-dir", os.path.join(base, literal(gd.group(1)))])
+        if c is None:
+            return False
+        c = c if os.path.isabs(c) else os.path.join(base, literal(gd.group(1)), c)
+        return os.path.realpath(c) == protected_real
+    eff = cwd
+    last_cd = None
+    for cm in CD.finditer(cmd[:pos]):
+        last_cd = cm.group(1)
+    if last_cd and literal(last_cd):
+        eff = os.path.join(eff, os.path.expanduser(literal(last_cd)))
+    for cm in OPT_C.finditer(prefix):
+        v = literal(cm.group(1))
+        if v:
+            eff = os.path.join(eff, v)
+    c = common_dir(["-C", eff])
+    if c is None:
+        return False
+    if not os.path.isabs(c):
+        c = os.path.join(eff, c)
+    return os.path.realpath(c) == protected_real
+
+try:
+    print("DENY" if any(is_protected(p_, t_) for p_, t_ in mutations) else "ALLOW")
 except SystemExit:
     raise
 except Exception:
