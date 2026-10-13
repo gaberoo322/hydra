@@ -56,8 +56,8 @@ export const ARCH_BOARD_SATURATION_CAP = 6;
 export const ARCH_BOARD_ENHANCEMENT_CAP = 20;
 const CLEANUP_SCAN_LABEL = "cleanup-scan";
 const CLEANUP_BOARD_SATURATION_CAP = 10;
-export const SKILL_PRUNE_LABEL = "skill-prune";
-export const SKILL_PRUNE_BOARD_SATURATION_CAP = 3;
+const SKILL_PRUNE_LABEL = "skill-prune";
+const SKILL_PRUNE_BOARD_SATURATION_CAP = 3;
 export const HITL_GRILL_LABEL = "hitl-grill";
 export const HITL_GRILL_INBOX_CAP = 10;
 const SCOUT_ENHANCEMENT_LABEL = "enhancement";
@@ -158,7 +158,7 @@ function foldLength(read: GhJsonRead): Classified<string> {
 }
 
 /** UTC `date -u +%Y-%m-%d`. */
-export const utcDate = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+const utcDate = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
 export async function collectScout(deps: BoardSaturationDeps): Promise<CollectorOutcome<ScoutValue>> {
   const date = utcDate(deps.now());
