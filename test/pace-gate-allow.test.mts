@@ -40,6 +40,20 @@ import { tmpdir } from "node:os";
 import { getRedisConnection } from "../src/redis/connection.ts";
 import { WATCHDOG_REDIS_TIMEOUT_MS } from "./_helpers/watchdog-timeouts.mts";
 
+// Issue #4966: the spawn helpers below pass `...process.env` through to
+// pace-gate.sh, and the model-fallback suites pin the script's DEFAULT launch
+// pair (fable -> opus). A dispatch running under the #4839 Sonnet-parent
+// trial inherits HYDRA_AUTOPILOT_PRIMARY_MODEL=sonnet from the host's systemd
+// drop-in, flipping every default-pair assertion (6 not-ok worktree-local
+// while CI's fresh runner env stays green). Pin the default pair explicitly in
+// each model-sensitive helper's env — spread AFTER `...process.env` and
+// BEFORE the per-call extraEnv, so the explicit-override case
+// (pri-test/fbk-test via runExecDry's extraEnv) still wins.
+const DEFAULT_MODEL_PAIR_ENV = {
+  HYDRA_AUTOPILOT_PRIMARY_MODEL: "fable",
+  HYDRA_AUTOPILOT_FALLBACK_MODEL: "opus",
+};
+
 const PACE_GATE = join(
   dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -74,6 +88,7 @@ function runPaceGate(
     const child = spawn("bash", [PACE_GATE, ...args], {
       env: {
         ...process.env,
+        ...DEFAULT_MODEL_PAIR_ENV,
         HYDRA_PACE_GATE_FORCE_SERVICE_INACTIVE: "1",
         HYDRA_PACE_GATE_DRY_RUN: "1",
         HYDRA_PACE_GATE_ELIGIBILITY_URL: eligibilityUrl,
@@ -608,6 +623,7 @@ describe("pace-gate.sh exec-mode launch-model selection (issue #4585)", () => {
       const child = spawn("bash", [PACE_GATE, "--exec-autopilot"], {
         env: {
           ...process.env,
+          ...DEFAULT_MODEL_PAIR_ENV,
           HYDRA_PACE_GATE_ELIGIBILITY_URL: eligibilityUrl,
           HYDRA_AUTOPILOT_STATE: "/tmp/hydra-pace-gate-allow-nonexistent.json",
           HYDRA_PACE_GATE_DRY_RUN: "1",
