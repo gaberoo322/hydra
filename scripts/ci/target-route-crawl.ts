@@ -497,6 +497,9 @@ function crawlRoute(baseUrl: string, route: string): { status: number; bytes: nu
       "curl",
       [
         "-s",
+        // Follow redirects: judge the FINAL status so redirect-only / auth-gated
+        // pages (3xx -> login 200) are not filed as crashes.
+        "-L",
         "-o",
         "/dev/null",
         "-w",
@@ -524,8 +527,9 @@ function journalDigest(serviceName: string): string {
   try {
     const out = execFileSync(
       "journalctl",
-      ["--user", "-u", serviceName, "--since", "5 min ago", "--no-pager"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      ["--user", "-u", serviceName, "--since", "5 min ago", "--no-pager", "-n", "2000"],
+      // A crashing service is chatty: lift the 1 MiB default so ENOBUFS never blanks the digest.
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 },
     );
     return out
       .split("\n")
@@ -551,7 +555,7 @@ function readOpenIssueTitles(repo: string): string[] {
     "gh",
     [
       "api",
-      `repos/${repo}/issues?state=open&per_page=100`,
+      `repos/${repo}/issues?state=open&labels=needs-triage&per_page=100`,
       "--paginate",
       "--jq",
       '.[] | select(has("pull_request")|not) | .title',
@@ -588,15 +592,16 @@ function main(): void {
   const apply = args.includes("--apply");
 
   const facts = collectTargetFacts();
+  // Only appSubdir is needed from the manifest: an unrelated manifest error
+  // degrades to the workspace root (loudly) instead of killing the heartbeat.
+  let appDir = facts.workspace;
   if (facts.manifest.ok === false) {
     console.error(
-      `target-route-crawl: Target manifest unresolved — aborting: ${facts.manifest.errors.join("; ")}`,
+      `target-route-crawl: Target manifest unresolved (${facts.manifest.errors.join("; ")}) — falling back to workspace root ${facts.workspace}`,
     );
-    process.exit(1);
+  } else if (facts.manifest.appSubdir) {
+    appDir = join(facts.workspace, facts.manifest.appSubdir);
   }
-  const appDir = facts.manifest.appSubdir
-    ? join(facts.workspace, facts.manifest.appSubdir)
-    : facts.workspace;
 
   const baseIdx = args.indexOf("--base");
   const baseUrl = baseIdx !== -1 && args[baseIdx + 1] ? args[baseIdx + 1] : facts.webUrl;
