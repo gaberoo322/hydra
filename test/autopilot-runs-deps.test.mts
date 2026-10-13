@@ -210,6 +210,7 @@ function makeDeps(store: MemStore, opts: FixtureOpts = {}): AutopilotRunsDeps & 
         return null;
       },
     },
+    hasPendingDurableMergeSince: () => false,
     isPidAlive: opts.isPidAlive ?? (() => true),
     now: () => nowMs,
     // Issue #2956: capture-only fake for the workless-hint stamp so endRun's
