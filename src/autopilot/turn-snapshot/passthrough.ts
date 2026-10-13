@@ -127,7 +127,7 @@ const fail = <T>(reason: string): Classified<T> => ({ ok: false, reason });
 const okv = <T>(value: T): Classified<T> => ({ ok: true, value });
 
 /** `health={d["status"]} redis={d["redis"]}` needs a dict carrying both keys. */
-export function foldHealth(p: Parsed): HealthValue["service"] {
+function foldHealth(p: Parsed): HealthValue["service"] {
   if ("reason" in p) return fail(p.reason);
   const d = p.value;
   if (!isPyDict(d) || !("status" in d) || !("redis" in d)) return fail("shape");
@@ -135,13 +135,13 @@ export function foldHealth(p: Parsed): HealthValue["service"] {
 }
 
 /** `grep -c hydra` over the listing, plus whether the pipeline's `|| echo 0` arm fired. */
-export function foldFailedServices(read: { ok: boolean; stdout: string }): number {
+function foldFailedServices(read: { ok: boolean; stdout: string }): number {
   const lines = read.stdout === "" ? [] : read.stdout.replace(/\n$/, "").split("\n");
   return lines.filter((l) => l.includes("hydra")).length;
 }
 
 /** `len(d.get('eligible', []))`. */
-export function foldScoutAlerts(p: Parsed): Classified<number> {
+function foldScoutAlerts(p: Parsed): Classified<number> {
   if ("reason" in p) return fail(p.reason);
   if (!isPyDict(p.value)) return fail("shape");
   const n = pyLen("eligible" in p.value ? p.value.eligible : []);
@@ -149,7 +149,7 @@ export function foldScoutAlerts(p: Parsed): Classified<number> {
 }
 
 /** The #4161 realm fold. `taxonomy` is the decoded classes.json, or a failure reason. */
-export function foldRealmShare(p: Parsed, taxonomy: Parsed): Classified<number> {
+function foldRealmShare(p: Parsed, taxonomy: Parsed): Classified<number> {
   if ("reason" in p) return fail(p.reason);
   const bsm = isPyDict(p.value) ? p.value.bySkillByModel : undefined;
   if (!isPyDict(bsm)) return fail("no-bySkillByModel");
@@ -189,7 +189,7 @@ export function foldRealmShare(p: Parsed, taxonomy: Parsed): Classified<number> 
 }
 
 /** `d['orchestrator']['share']:.2f` + `d.get('floorMet')`, `d.get('floorStatus')`, `o['window']`. */
-export function foldCapacity(p: Parsed): Classified<CapacityValue> {
+function foldCapacity(p: Parsed): Classified<CapacityValue> {
   if ("reason" in p) return fail(p.reason);
   const d = p.value;
   if (!isPyDict(d) || !("orchestrator" in d)) return fail("no-orchestrator");
@@ -201,14 +201,14 @@ export function foldCapacity(p: Parsed): Classified<CapacityValue> {
 }
 
 /** `'CODEX_ACTIVE' if d.get('running') else 'CODEX_IDLE'`. */
-export function foldCycleRunning(p: Parsed): Classified<boolean> {
+function foldCycleRunning(p: Parsed): Classified<boolean> {
   if ("reason" in p) return fail(p.reason);
   if (!isPyDict(p.value)) return fail("shape");
   return okv(pyTruthy(p.value.running));
 }
 
 /** `d.get('state','?')`, `d.get('consecutiveNonMerges',0)` — which must compare with an int. */
-export function foldScheduler(p: Parsed): SchedulerValue["scheduler"] {
+function foldScheduler(p: Parsed): SchedulerValue["scheduler"] {
   if ("reason" in p) return fail(p.reason);
   const d = p.value;
   if (!isPyDict(d)) return fail("shape");
@@ -224,7 +224,7 @@ export function stallBand(nonMerges: number | boolean): "ok" | "alert" | "hard-s
 }
 
 /** `len(items)` + `items[0].get("action","?")[:60]` when the payload is truthy. */
-export function foldRecommendations(p: Parsed): Classified<RecommendationsValue> {
+function foldRecommendations(p: Parsed): Classified<RecommendationsValue> {
   if ("reason" in p) return fail(p.reason);
   const items = p.value;
   if (!pyTruthy(items)) return okv({ count: 0, firstAction: null });
@@ -248,7 +248,7 @@ export function jqUri(s: string): string {
 }
 
 /** The slot-events GET path for a cursor/count env (bash `${VAR:-default}` defaults). */
-export function slotEventsPath(env: PassthroughEnv): string {
+function slotEventsPath(env: PassthroughEnv): string {
   const lastId = env.HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID || "0";
   const count = env.HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT || "100";
   return `/autopilot/slot-events?last_id=${jqUri(lastId)}&count=${count}`;
@@ -264,14 +264,14 @@ function outcome<T>(collector: string, value: T, degraded: DegradedMarker[]): Co
   return { collector, value, degraded, notes: [] };
 }
 
-export async function collectHealth(deps: PassthroughDeps): Promise<CollectorOutcome<HealthValue>> {
+async function collectHealth(deps: PassthroughDeps): Promise<CollectorOutcome<HealthValue>> {
   const [read, units] = await Promise.all([deps.hydra.get("/health"), deps.host.failedServiceUnits()]);
   const service = foldHealth(parseRead(read));
   const degraded = [...marker("health", service), ...(units.ok ? [] : [{ field: "failedServices", reason: "systemctl-failed" }])];
   return outcome("health", { service, failedServices: foldFailedServices(units) }, degraded);
 }
 
-export const DIRECTION_DOCS = ["priorities.md", "roadmap.md"] as const;
+const DIRECTION_DOCS = ["priorities.md", "roadmap.md"] as const;
 
 export async function collectDirectionDrift(deps: PassthroughDeps): Promise<CollectorOutcome<boolean>> {
   const targetDir = join(deps.env.HYDRA_TARGET_REPO || deps.targetWorkspace(), "direction");
@@ -287,13 +287,13 @@ export async function collectDirectionDrift(deps: PassthroughDeps): Promise<Coll
   return outcome("direction-drift", drift, []);
 }
 
-export async function collectScoutAlerts(deps: PassthroughDeps): Promise<CollectorOutcome<ScoutAlertsValue>> {
+async function collectScoutAlerts(deps: PassthroughDeps): Promise<CollectorOutcome<ScoutAlertsValue>> {
   const read = await deps.hydra.get("/scout/alert-plan");
   const eligible = foldScoutAlerts(parseRead(read));
   return outcome("scout-alerts", { eligible }, marker("eligible", eligible));
 }
 
-export async function collectRealmShare(deps: PassthroughDeps): Promise<CollectorOutcome<Classified<number>>> {
+async function collectRealmShare(deps: PassthroughDeps): Promise<CollectorOutcome<Classified<number>>> {
   const [read, taxonomyBytes] = await Promise.all([deps.hydra.get("/usage"), deps.host.readFile(deps.taxonomyPath)]);
   let taxonomy: Parsed;
   if (taxonomyBytes === null) taxonomy = { ok: false, reason: "unreadable" };
@@ -311,8 +311,8 @@ async function collectBody(deps: PassthroughDeps, collector: string, path: strin
   return outcome(collector, body, marker(collector, body));
 }
 
-export const collectUsageEligibility = (deps: PassthroughDeps) => collectBody(deps, "usage-eligibility", "/usage/eligibility");
-export const collectEmergencyBrake = (deps: PassthroughDeps) => collectBody(deps, "emergency-brake", "/autopilot/emergency-brake");
+const collectUsageEligibility = (deps: PassthroughDeps) => collectBody(deps, "usage-eligibility", "/usage/eligibility");
+const collectEmergencyBrake = (deps: PassthroughDeps) => collectBody(deps, "emergency-brake", "/autopilot/emergency-brake");
 export const collectClassStats = (deps: PassthroughDeps) => collectBody(deps, "class-stats", "/autopilot/class-stats");
 
 export async function collectCapacity(deps: PassthroughDeps): Promise<CollectorOutcome<Classified<CapacityValue>>> {
@@ -320,14 +320,14 @@ export async function collectCapacity(deps: PassthroughDeps): Promise<CollectorO
   return outcome("capacity", capacity, marker("capacity", capacity));
 }
 
-export async function collectScheduler(deps: PassthroughDeps): Promise<CollectorOutcome<SchedulerValue>> {
+async function collectScheduler(deps: PassthroughDeps): Promise<CollectorOutcome<SchedulerValue>> {
   const [cycle, sched] = await Promise.all([deps.hydra.get("/cycle/status"), deps.hydra.get("/scheduler/status")]);
   const codexRunning = foldCycleRunning(parseRead(cycle));
   const scheduler = foldScheduler(parseRead(sched));
   return outcome("scheduler", { codexRunning, scheduler }, [...marker("codexRunning", codexRunning), ...marker("scheduler", scheduler)]);
 }
 
-export async function collectRecommendations(deps: PassthroughDeps): Promise<CollectorOutcome<Classified<RecommendationsValue>>> {
+async function collectRecommendations(deps: PassthroughDeps): Promise<CollectorOutcome<Classified<RecommendationsValue>>> {
   const recs = foldRecommendations(parseRead(await deps.hydra.get("/recommendations")));
   return outcome("recommendations", recs, marker("recommendations", recs));
 }
