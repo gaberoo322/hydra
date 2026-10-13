@@ -1007,6 +1007,78 @@ def _recover_worktree_branch(task_id: str) -> str | None:
     return branch
 
 
+# Issue #4985: a dev_orch dispatch that ended with NO work (nothing eligible,
+# worktree auto-cleaned or left clean with zero commits) used to be recorded
+# `completed` -> dispatch.sh `tasksMerged=1`, so emptyRate read 0% while ~25% of
+# dev rows produced nothing. The no-work evidence is the harness worktree's
+# LOCAL repo state, keyed on the bare task_id — local reads only, never `gh`
+# or the network (design-concept INV-5: accounting before gh, #4248).
+_NO_WORK_PROBE_TIMEOUT_S = 5
+
+
+def _local_probe(args: list[str]) -> tuple[int, str] | None:
+    """Run one bounded local probe; (returncode, stdout) or None on any error."""
+    try:
+        r = subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            timeout=_NO_WORK_PROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"[autopilot] reap: no-work probe failed: {exc}", file=sys.stderr)
+        return None
+    return r.returncode, r.stdout
+
+
+def _dispatch_made_no_work(task_id: str) -> bool | None:
+    """True iff positive local evidence says the harness worktree did no work.
+
+    Issue #4985 (design-concept INV-2/INV-3). `True` when EITHER (a) the harness
+    auto-cleaned it: the worktree dir, `refs/heads/worktree-agent-<T>` and
+    `refs/remotes/origin/worktree-agent-<T>` are ALL absent; OR (b) the dir
+    exists, `rev-list --count origin/master..HEAD` is 0 and `status --porcelain`
+    is empty (HEAD, not the branch name: hydra-dev may `checkout -b dev/<slug>`).
+    `False` when work is evident; `None` for any error / missing task_id /
+    ambiguity — the caller keeps `completed` (may under-classify, never over).
+    """
+    if not task_id or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+        return None
+    root = os.environ.get("HYDRA_AUTOPILOT_REPO_ROOT", "/home/gabe/hydra")
+    if not Path(root).is_dir():
+        return None
+    probe = _local_probe(["-C", root, "rev-parse", "--git-dir"])
+    if probe is None or probe[0] != 0:
+        return None
+    wt = Path(root) / ".claude" / "worktrees" / f"agent-{task_id}"
+    if wt.is_dir():
+        count = _local_probe(["-C", str(wt), "rev-list", "--count", "origin/master..HEAD"])
+        if count is None or count[0] != 0:
+            return None
+        try:
+            n = int(count[1].strip())
+        except ValueError:
+            return None
+        if n != 0:
+            return False
+        porcelain = _local_probe(["-C", str(wt), "status", "--porcelain"])
+        if porcelain is None or porcelain[0] != 0:
+            return None
+        return porcelain[1].strip() == ""
+    for ref in (
+        f"refs/heads/worktree-agent-{task_id}",
+        f"refs/remotes/origin/worktree-agent-{task_id}",
+    ):
+        r = _local_probe(["-C", root, "show-ref", "--verify", "--quiet", ref])
+        if r is None:
+            return None
+        if r[0] == 0:
+            return False  # ref survives: the dispatch produced something
+        if r[0] != 1:
+            return None  # error, not "ref absent"
+    return True
+
+
 def _post_token_record(cycle_id: str, skill: str, total_tokens: int) -> None:
     """POST a single per-cycle token record for `cycle_id`. Best-effort; swallows all errors.
 
@@ -1740,6 +1812,10 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     cap_check_value = last_segment_tokens if last_segment_tokens is not None else total_tokens
     soft_cap_hit = soft is not None and cap_check_value >= soft
     status = "failed" if soft_cap_hit else "completed"
+    # Issue #4985 (INV-1/INV-4): only a dev_orch `completed` can become `empty`;
+    # soft-cap `failed` wins, and every other class keeps `completed`.
+    if status == "completed" and cls == "dev_orch" and _dispatch_made_no_work(task_id) is True:
+        status = "empty"
     if soft_cap_hit and cls not in s.get("burned_classes", []):
         s.setdefault("burned_classes", []).append(cls)
 

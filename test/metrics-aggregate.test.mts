@@ -28,6 +28,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import { computeRollingMergeRateFromTrend, computeEmptyRateFromTrend } from "../src/metrics/stats-projection.ts";
+import { countsAsMerge } from "../src/metrics/merge-predicate.ts";
 
 describe("computeRollingMergeRateFromTrend (issue #2169)", () => {
   test("empty trend returns null (no data, not 0%)", () => {
@@ -144,5 +145,18 @@ describe("computeEmptyRateFromTrend (issue #2818)", () => {
     assert.strictEqual(computeEmptyRateFromTrend([{ tasksAttempted: 1 }]), 100);
     // Entirely absent tasksAttempted → not empty (0 attempted).
     assert.strictEqual(computeEmptyRateFromTrend([{}]), 0);
+  });
+
+  test("a status='empty' dev row (issue #4985) is counted empty and never counts as a merge", () => {
+    const noWork = {
+      status: "empty",
+      anchorType: "work-queue",
+      tasksAttempted: 1,
+      tasksMerged: 0,
+      tasksFailed: 0,
+      tasksAbandoned: 0,
+    };
+    assert.strictEqual(computeEmptyRateFromTrend([noWork]), 100);
+    assert.strictEqual(countsAsMerge(noWork), false);
   });
 });
