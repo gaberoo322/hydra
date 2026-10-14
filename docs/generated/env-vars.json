@@ -113,7 +113,7 @@
         },
         {
           "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 121
+          "line": 123
         },
         {
           "path": "scripts/deploy-drift-check.ts",
