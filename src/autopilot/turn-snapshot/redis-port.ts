@@ -32,7 +32,7 @@ import {
 export type { AnchorQueueName } from "../../redis/turn-snapshot.ts";
 
 /** The skill whose daily token spend the scout cost-cap mirrors (issue #532). */
-export const SCOUT_SKILL = "hydra-tool-scout";
+const SCOUT_SKILL = "hydra-tool-scout";
 
 export interface TurnSnapshotRedis {
   anchorQueueLength(queue: AnchorQueueName): Promise<Classified<number>>;
@@ -58,7 +58,7 @@ export interface TurnSnapshotRedisOps {
 }
 
 /** The production ops: the src/redis typed accessors over the shared connection. */
-export const accessorOps: TurnSnapshotRedisOps = {
+const accessorOps: TurnSnapshotRedisOps = {
   anchorQueueLength: getAnchorQueueLength,
   scoutLastCalendarWalk: getScoutLastCalendarWalk,
   architectureLastRun: getArchitectureLastRun,
@@ -76,12 +76,12 @@ export const accessorOps: TurnSnapshotRedisOps = {
  * a stopped one would otherwise hold each command in ioredis's offline queue
  * through its whole reconnect ladder (~10s+).
  */
-export const TURN_SNAPSHOT_REDIS_TIMEOUT_MS = 3_000;
+const TURN_SNAPSHOT_REDIS_TIMEOUT_MS = 3_000;
 
 /** `ok:false` reason prefix: Redis could not be reached (refused, closed, timed out). */
 export const REDIS_UNREACHABLE = "redis-unreachable";
 /** `ok:false` reason prefix: Redis answered with an error reply (e.g. WRONGTYPE). */
-export const REDIS_REPLY_ERROR = "redis-reply";
+const REDIS_REPLY_ERROR = "redis-reply";
 
 export interface TurnSnapshotRedisOptions {
   ops?: TurnSnapshotRedisOps;

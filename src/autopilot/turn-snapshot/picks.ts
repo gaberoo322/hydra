@@ -57,13 +57,13 @@ import { pyEpochSeconds, pyJsonLoads, pyStr, pyTruthy } from "./py-compat.ts";
 export const PICKS_COLLECTOR = "picks";
 
 /** How many ascending candidates the pick walk may consider (#3711). */
-export const GRILL_CANDIDATE_CAP = 10;
+const GRILL_CANDIDATE_CAP = 10;
 /** An open dev PR counts toward `active_dev_orch` while updated within this window (#412). */
 const ACTIVE_DEV_WINDOW_SECONDS = 5400;
 /** The head-branch prefixes hydra-dev creates (#412). */
-export const DEV_BRANCH_PREFIXES: readonly string[] = ["issue-", "hydra-dev/", "worktree-agent-"];
+const DEV_BRANCH_PREFIXES: readonly string[] = ["issue-", "hydra-dev/", "worktree-agent-"];
 /** The merged-PR read's page size (the bash's literal `--limit 100`, #4690). */
-export const MERGED_PR_LIMIT = 100;
+const MERGED_PR_LIMIT = 100;
 
 /** One Candidate Exclusion evaluation (#3964) — `candidate_exclusions_json` rows. */
 interface CandidateExclusionRecord {
@@ -191,7 +191,7 @@ function jqLabelNames(row: unknown, orEmpty: boolean): unknown[] {
  * map(.name) | index("target-backlog")) | not) ]`. `null` = the jq raised (the
  * read FAILED, exactly as the bash saw it).
  */
-export function dropTargetBacklog(data: unknown): unknown[] | null {
+function dropTargetBacklog(data: unknown): unknown[] | null {
   try {
     return jqIter(data).filter((row) => !jqLabelNames(row, false).includes(ORCH_BOARD_LABELS.target_backlog));
   } catch (err) {
@@ -310,7 +310,7 @@ export function mergedRefIssues(read: GhJsonRead): ReadonlySet<number> {
  * DESIGN_CONCEPT_MAX_AGE_MS of now; a draft counts — Phase B warn-only.)
  * Unparseable / non-object / unreadable `createdAt` → not fresh.
  */
-export function isFreshArtifact(body: string, nowMs: number): boolean {
+function isFreshArtifact(body: string, nowMs: number): boolean {
   if (body === "") return false;
   const parsed = pyJsonLoads(body);
   if (!parsed.ok || !isDict(parsed.value)) return false;
@@ -333,7 +333,7 @@ function pyIntOf(v: unknown): number | null {
  * over the candidate's row (`null` = it must be grilled; also `null` when the
  * row cannot be found or read, the old fail-toward-grill default).
  */
-export function candidateExemption(items: readonly unknown[], n: number): GlmGrillExemption | null {
+function candidateExemption(items: readonly unknown[], n: number): GlmGrillExemption | null {
   return block<GlmGrillExemption | null>(() => {
     const row = items.find((x) => {
       const num = pyGet(x, "number", -1);
