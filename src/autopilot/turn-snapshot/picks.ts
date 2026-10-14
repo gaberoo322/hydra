@@ -59,14 +59,14 @@ export const PICKS_COLLECTOR = "picks";
 /** How many ascending candidates the pick walk may consider (#3711). */
 export const GRILL_CANDIDATE_CAP = 10;
 /** An open dev PR counts toward `active_dev_orch` while updated within this window (#412). */
-export const ACTIVE_DEV_WINDOW_SECONDS = 5400;
+const ACTIVE_DEV_WINDOW_SECONDS = 5400;
 /** The head-branch prefixes hydra-dev creates (#412). */
 export const DEV_BRANCH_PREFIXES: readonly string[] = ["issue-", "hydra-dev/", "worktree-agent-"];
 /** The merged-PR read's page size (the bash's literal `--limit 100`, #4690). */
 export const MERGED_PR_LIMIT = 100;
 
 /** One Candidate Exclusion evaluation (#3964) — `candidate_exclusions_json` rows. */
-export interface CandidateExclusionRecord {
+interface CandidateExclusionRecord {
   readonly anchor: string;
   readonly member: "target-scope-exclusion" | "in-flight-dev-exclusion" | "mechanical-exclusion" | "trivial-anchor-exclusion";
   readonly verdict: "excluded" | "survived";
@@ -350,7 +350,7 @@ export function candidateExemption(items: readonly unknown[], n: number): GlmGri
 }
 
 /** The Candidate Exclusion records (#3964) over the RAW pool; a malformed payload is `[]`. */
-export function candidateExclusionRecords(
+function candidateExclusionRecords(
   read: GhJsonRead,
   branchIssues: ReadonlySet<number>,
   bodyRefIssues: ReadonlySet<number>,
