@@ -74,7 +74,7 @@ SHELLISH = re.compile(
 
 def _strip_heredoc(m):
     line_start = cmd_before_strip.rfind("\n", 0, m.start()) + 1
-    if SHELLISH.search(cmd_before_strip[line_start:m.start()]):
+    if SHELLISH.search(cmd_before_strip[line_start:m.end(1)]):
         return m.group(0)
     return m.group(1)
 
@@ -94,7 +94,9 @@ START = (
 )
 VAL = r"(?:\"[^\"]*\"|'[^']*'|\S+)"
 GIT = (
-    r"git(?:\s+(?:-[Cc]\s+" + VAL + r"|--[\w-]+(?:=\S+)?))*"
+    r"git(?:\s+(?:-[Cc]\s+" + VAL
+    + r"|--(?:git-dir|work-tree|namespace|exec-path|super-prefix|config-env)\s+" + VAL
+    + r"|--[\w-]+(?:=\S+)?))*"
 )
 REMOTE_MUT = re.compile(
     START + GIT + r"\s+remote\s+(?:set-url|add|remove|rm|rename)\b", re.M

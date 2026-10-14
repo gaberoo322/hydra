@@ -136,6 +136,17 @@ describe("git-remote-fence", () => {
     assert.equal(run(`sh -s <<EOS\n${body}\nEOS`, protectedRepo).status, 2);
     assert.equal(run(`gh pr create --body-file - <<'EOF'\n${body}\nEOF`, protectedRepo).status, 0);
     assert.equal(run(`echo $((1<<3))\n${body}`, protectedRepo).status, 2);
+    // SHELLISH is checked against the whole opener line (QA round 3): a pipe to a shell.
+    assert.equal(run(`cat <<'EOF' | bash\n${body}\nEOF`, protectedRepo).status, 2);
+    assert.equal(run(`cat <<'EOF' | gh pr create --body-file -\n${body}\nEOF`, protectedRepo).status, 0);
+  });
+
+  it("accepts the space-separated form of value-taking long options (QA round 3)", () => {
+    const url = "https://x/y.git";
+    assert.equal(run(`git --git-dir ${protectedRepo}/.git remote rm origin`, otherRepo).status, 2);
+    assert.equal(run(`git --namespace ns --git-dir ${protectedRepo}/.git remote set-url origin ${url}`, otherRepo).status, 2);
+    assert.equal(run(`git --work-tree ${tmp} remote set-url origin ${url}`, protectedRepo).status, 2);
+    assert.equal(run(`git --git-dir ${otherRepo}/.git remote set-url origin ${url}`, protectedRepo).status, 0);
   });
 
   it("is registered as a PreToolUse Bash hook by setup-claude-hooks.sh and in the GLM drainer settings", () => {
