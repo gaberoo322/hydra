@@ -37,7 +37,7 @@ export function formatTokens(n: number | null | undefined): string {
   return String(Math.round(v));
 }
 
-export type DurationPrecision = "seconds" | "minutes";
+type DurationPrecision = "seconds" | "minutes";
 
 export interface FormatDurationOptions {
   /** Smallest unit rendered; the input is floored to it. */

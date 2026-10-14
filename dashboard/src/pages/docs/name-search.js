@@ -3,7 +3,7 @@
 // excluded unless `includeHistory`. Pure and dependency-free — the index is a
 // build-time virtual module (virtual:hydra-docs), never loaded over the network.
 
-export const SEARCH_LIMIT = 100;
+const SEARCH_LIMIT = 100;
 
 /** Filter `entries` ({name, href, kind, historical}) by `query`. Empty query -> []. */
 export function filterNameIndex(entries, query, { includeHistory = false, limit = SEARCH_LIMIT } = {}) {
