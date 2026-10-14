@@ -21,8 +21,9 @@
  * # Single classifier definition
  *
  * The failing / green conclusion sets and the per-context latest-wins collapse
- * live HERE as exported pure helpers; stuck-items' `selectPrsWithFailedCi`
- * delegates to them rather than keeping a second copy.
+ * live HERE as pure helpers (the sets stay module-private; the collapse /
+ * classify entrypoints stay exported for delegation); stuck-items'
+ * `selectPrsWithFailedCi` delegates to them rather than keeping a second copy.
  *
  * # Design contract
  *
@@ -93,7 +94,7 @@ export const STALLED_PR_FIELDS = `${PR_LIST_JSON_FIELDS},isDraft,mergeable,autoM
 // ---------------------------------------------------------------------------
 
 /** CheckRun conclusions that count as a failed check. */
-export const FAILING_CHECK_CONCLUSIONS: ReadonlySet<string> = new Set([
+const FAILING_CHECK_CONCLUSIONS: ReadonlySet<string> = new Set([
   "FAILURE",
   "TIMED_OUT",
   "CANCELLED",
@@ -102,10 +103,10 @@ export const FAILING_CHECK_CONCLUSIONS: ReadonlySet<string> = new Set([
 ]);
 
 /** StatusContext states that count as a failed check. */
-export const FAILING_STATUS_STATES: ReadonlySet<string> = new Set(["FAILURE", "ERROR"]);
+const FAILING_STATUS_STATES: ReadonlySet<string> = new Set(["FAILURE", "ERROR"]);
 
 /** Conclusions / states that count as green. */
-export const GREEN_CHECK_CONCLUSIONS: ReadonlySet<string> = new Set([
+const GREEN_CHECK_CONCLUSIONS: ReadonlySet<string> = new Set([
   "SUCCESS",
   "NEUTRAL",
   "SKIPPED",
@@ -115,7 +116,7 @@ export type RollupEntry = PrRow["statusCheckRollup"][number];
 export type CheckVerdict = "failing" | "green" | "pending";
 
 /** The context name a rollup entry reports under (CheckRun name, else StatusContext context). */
-export function rollupEntryName(entry: RollupEntry): string {
+function rollupEntryName(entry: RollupEntry): string {
   if (typeof entry.name === "string" && entry.name.length > 0) return entry.name;
   if (typeof entry.context === "string" && entry.context.length > 0) return entry.context;
   return "check";

@@ -50,7 +50,7 @@ export type GlmLaneName = "glm" | "claude" | "neither";
  * Deliberately NOT spelled like a label name — this module carries no label
  * string literal of its own (INV-1).
  */
-export type GlmLaneReason =
+type GlmLaneReason =
   | "not-ready-for-agent"
   | "claude-pinned"
   | "claimed"

@@ -70,6 +70,8 @@ const EXPECTED_MEMBERS = [
   "LAUNCH_PAUSE_FORGOTTEN",
   // Infra integrity watchdog signals (issue #4175)
   "INFRA_NODE_MODULES_WIPED",
+  // Origin-identity watchdog signal (issue #4939)
+  "INFRA_ORIGIN_IDENTITY_WRONG",
   // GLM drainer health signals (issue #3868)
   "GLM_DRAINER_STERILE",
   // Learning-system pattern alerts

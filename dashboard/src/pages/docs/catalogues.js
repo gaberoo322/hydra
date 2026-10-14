@@ -22,7 +22,7 @@ export function catalogueKey(family) {
 }
 
 /** Families whose rows carry a `home` deep link (Live state lives on). */
-export const HOMED_FAMILIES = new Set(["redis-keys", "streams"]);
+const HOMED_FAMILIES = new Set(["redis-keys", "streams"]);
 
 /** Distinct cockpit-page homes (non-/api) of a homed family's rows, in row order. */
 export function liveHomes(family, inventory) {

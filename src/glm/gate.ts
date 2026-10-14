@@ -52,7 +52,7 @@ import { loadDrainerConfig, type DrainerConfig } from "./drainer-config.ts";
 /** A pause read that has not settled by then is treated as paused (curl `--max-time 10`). */
 export const PAUSE_READ_TIMEOUT_MS = 10_000;
 
-export type GateReason = "paused" | "cap-exhausted" | "quota-blocked";
+type GateReason = "paused" | "cap-exhausted" | "quota-blocked";
 
 export type GateVerdict = { able: true } | { able: false; reason: GateReason };
 
