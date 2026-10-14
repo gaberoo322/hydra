@@ -294,10 +294,10 @@ describe("reap.py no-work probe — QA round 2 (issue #4985)", () => {
     });
   });
 
-  test("anchored zero-commit dispatch is a needs-dev-resume handoff => completed", () => {
+  test("anchored zero-commit dispatch is recorded empty (stall handler ignores status)", () => {
     withFixture((f) => {
       addWorktree(f, "cccc0004");
-      assert.equal(reapStatus(f, "dev_orch", "cccc0004", 1000, undefined, "issue-4985"), "completed");
+      assert.equal(reapStatus(f, "dev_orch", "cccc0004", 1000, undefined, "issue-4985"), "empty");
     });
   });
 
