@@ -5538,6 +5538,16 @@ describe("decide.py — discover_target zero-yield back-off (issue #4999)", () =
       "while the board stays idle the class still fires at least once per 24h (#4302)");
   });
 
+  test("#4999 INV-2: a FUTURE last_fired stamp fails open — never suppresses past the floor", () => {
+    const state = baseState({
+      signals: { target_backfill_idle: true },
+      zero_yield_backoff: zy(6, nowSec() + 10 * 24 * HOUR),
+    });
+    const plan = runDecide(state, null);
+    assert.ok(findAction(plan, isDiscoverTarget),
+      "a corrupt/future last_fired must not yield negative elapsed and wedge the class dark");
+  });
+
   test("#4999 INV-3: the 1800s signal cooldown stays an independent necessary condition", () => {
     const state = baseState({
       signals: { target_backfill_idle: true },

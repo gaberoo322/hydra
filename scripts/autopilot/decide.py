@@ -744,29 +744,17 @@ ZERO_YIELD_BACKOFF_LADDER: tuple[tuple[int, int], ...] = (
     (6, BACKFILL_STARVATION_FLOOR_SEC),  # 6+ → 24h (the #4302 floor, INV-2)
 )
 
-# Issue #4999 — the enrolment table, keyed by class (INV-9) so a future
-# enrolment (cleanup_target / research_target, when evidence demands it) is a
-# new row + one literal read branch, not a rewrite of the gate/reset logic.
-# Each row names the idle signal the class rides (the presence-scoped trigger
-# the back-off gates) and the POSITIVE non-idle evidence signals that reset
-# the streak. The decide.py READS pass those names as string LITERALS in the
-# per-class branches (_zy_idle_signal_present / _zy_positive_evidence_present
-# below): the #4934 schema read guard's textual extractor cannot see computed
-# names, and its whole point is that every signal read stays greppable.
-# `idle_signal` is the signal whose presence makes a fire "zero-yield
-# suspicious"; `reset_signals` fail closed to false on a degraded board read
+# Issue #4999 — the enrolment list (INV-9): a future enrolment
+# (cleanup_target / research_target, when evidence demands it) is a new entry
+# plus one literal read branch in each of _zy_idle_signal_present /
+# _zy_positive_evidence_present, not a rewrite of the gate/reset logic. The
+# idle and reset signal names live ONLY in those two helpers as string
+# LITERALS (the #4934 schema read guard's textual extractor cannot see
+# computed names, so a table of names would be dead, drift-prone data).
+# Reset signals fail closed to false on a degraded board read
 # (ALL_DEGRADED_SIGNALS), which HOLDS the ladder instead of resetting it —
 # an outage must not silently restart the back-off clock.
-ZERO_YIELD_BACKOFF_CLASSES: dict[str, dict] = {
-    "discover_target": {
-        "idle_signal": "target_backfill_idle",
-        "reset_signals": (
-            "needs_triage_target",
-            "target_board_work_available",
-            "target_work_available",
-        ),
-    },
-}
+ZERO_YIELD_BACKOFF_CLASSES: tuple[str, ...] = ("discover_target",)
 
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
 WALL_CLOCK_HEARTBEAT_SEC = 900
@@ -6026,7 +6014,12 @@ def _zero_yield_gate(
     which bootstrap re-arms to 0 each run by design (INV-3)."""
     entry = _zero_yield_entry(state, cls)
     required = _zero_yield_required_sec(entry["streak"])
-    elapsed = now - entry["last_fired"]
+    # A future/corrupt last_fired (clock step, hand-edited state) must never
+    # suppress past the ladder wait — fail open (the #4302 never-dark floor).
+    last_fired = entry["last_fired"]
+    if last_fired > now:
+        last_fired = 0
+    elapsed = now - last_fired
     return elapsed >= required, entry["streak"], entry["last_fired"], required
 
 
@@ -6037,7 +6030,13 @@ def _stamp_zero_yield(state: dict, cls: str, now: int) -> None:
     (#3729) / `_research_force_stamp` (#1666); main() persists a changed
     `zero_yield_backoff` via the snapshot-before/compare-after writeback.
     Called ONLY from the selector, on the exact line it returns a dispatch —
-    nothing else increments."""
+    nothing else increments.
+
+    Known, accepted semantics: this is a PLAN-time stamp (the #3729 pattern),
+    so a planned dispatch that a LATER gate drops or whose launch fails still
+    counts as one fire on the ladder. That errs toward fewer idle-board
+    dispatches and is bounded by the 24h never-dark floor (INV-2), so it can
+    never wedge the class dark."""
     entry = _zero_yield_entry(state, cls)
     stamped = dict(state.get("zero_yield_backoff") or {}) \
         if isinstance(state.get("zero_yield_backoff"), dict) else {}
