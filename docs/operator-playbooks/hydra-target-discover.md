@@ -71,7 +71,7 @@ journalctl --user -u "$TARGET_SERVICE" --since "30 min ago" --no-pager 2>&1 \
 # Test health (cached, hourly)
 TEST_CMD=$(jq -r '.verify.test' "$TARGET_WS/.hydra/manifest.json")
 if [ ! -f /tmp/hydra-target-test-cache.txt ] || [ $(( $(date +%s) - $(stat -c %Y /tmp/hydra-target-test-cache.txt 2>/dev/null || echo 0) )) -gt 3600 ]; then
-  ( cd "$TARGET_APP_DIR" && eval "$TEST_CMD" 2>&1 | tail -3 ) > /tmp/hydra-target-test-cache.txt
+  ( cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" && eval "$TEST_CMD" 2>&1 | tail -3 ) > /tmp/hydra-target-test-cache.txt
 fi
 cat /tmp/hydra-target-test-cache.txt
 ```
