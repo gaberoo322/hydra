@@ -1884,13 +1884,9 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # prose comments this block replaces.
     # ------------------------------------------------------------------
     snap = _snapshot_completion_slot(s, cls, task_id)
-    # Issue #4985 (QA round 2): `empty` requires no needs-dev-resume handoff. A
-    # dev_orch completion carrying a resolved anchor with no PR is the #3866
-    # stall path (relabel + dev_resume_pending), a handoff, not an empty
-    # cycle. Local-only check (INV-5: accounting before gh), so keep
-    # `completed` and let the stall handler own it.
-    if status == "empty" and snap.anchor_ref:
-        status = "completed"
+    # Issue #4985: an anchored zero-commit dev_orch dispatch is recorded
+    # `empty` too (merged=0). _handle_dev_orch_stall never reads `status`, so
+    # the needs-dev-resume handoff is unaffected.
 
     # ------------------------------------------------------------------
     # Phase boundary — release the slot. The snapshot already holds every
