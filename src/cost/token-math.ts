@@ -479,7 +479,7 @@ export function parseSessionLimitReset(line: string, nowMs: number): number | nu
  * fallback) may reuse this pattern to detect the same exhaustion for model
  * routing.
  */
-export const OUT_OF_CREDITS_RE = /out of usage credits/i;
+const OUT_OF_CREDITS_RE = /out of usage credits/i;
 
 /**
  * Fixed backoff duration for an out-of-usage-credits block (issue #4583). The
