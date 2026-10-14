@@ -313,7 +313,7 @@ async function collectBody(deps: PassthroughDeps, collector: string, path: strin
 
 const collectUsageEligibility = (deps: PassthroughDeps) => collectBody(deps, "usage-eligibility", "/usage/eligibility");
 const collectEmergencyBrake = (deps: PassthroughDeps) => collectBody(deps, "emergency-brake", "/autopilot/emergency-brake");
-export const collectClassStats = (deps: PassthroughDeps) => collectBody(deps, "class-stats", "/autopilot/class-stats");
+const collectClassStats = (deps: PassthroughDeps) => collectBody(deps, "class-stats", "/autopilot/class-stats");
 
 async function collectCapacity(deps: PassthroughDeps): Promise<CollectorOutcome<Classified<CapacityValue>>> {
   const capacity = foldCapacity(parseRead(await deps.hydra.get("/capacity")));
