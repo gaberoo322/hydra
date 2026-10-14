@@ -36,8 +36,9 @@
  * IO, no `Date.now()`, no snapshot type), it is called from INSIDE the tracker's
  * assembly function (never at module-init), and it consumes nothing from
  * `usage-tracker.ts` — so the value+type edge between the two modules cannot
- * initialise a cycle. The JSONL walk, OAuth precedence, weekly Reset-Anchor math,
- * and quota-weight accounting still live in `usage-tracker.ts`; only the
+ * initialise a cycle. The JSONL walk lives in `transcript-scan.ts`; OAuth precedence,
+ * weekly Reset-Anchor math, and quota-weight accounting live in
+ * `snapshot-assembly.ts`; only the
  * two-line threshold fold (which scalar percentages clear the cap) moved here.
  * This fold ({@link projectEligibility} and friends) only READS the
  * already-computed snapshot. The Pacing-Ceiling env READER it consumes

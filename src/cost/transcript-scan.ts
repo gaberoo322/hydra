@@ -1,34 +1,32 @@
 /**
  * src/cost/transcript-scan.ts — the **TranscriptScan** seam (issue #1971).
  *
- * Owns the two I/O concerns the Subscription Usage Tracker depends on, lifted
- * verbatim out of `usage-tracker.ts`'s former private `scanUsage()`:
+ * Owns the transcript-walk I/O concern the Subscription Usage Tracker depends
+ * on, lifted verbatim out of `usage-tracker.ts`'s former private `scanUsage()`:
  *
  *   1. The JSONL transcript walk — `transcriptScan()` reads the
- *      `~/.claude/projects` JSONL session transcripts, parses every usage line via
- *      `parseUsageLine` (pure leaf `./token-math.ts`), and accumulates the
- *      per-family / per-skill token breakdowns over the rolling 5h / 24h / 7d
- *      windows plus the buffered since-reset entries. This is filesystem I/O
- *      (`readFile`, `stat`, `listTranscriptFiles`).
+ *      `~/.claude/projects` JSONL session transcripts, delegates the pure
+ *      per-file parse + bucketing to `./transcript-fold.ts` (issue #4791), and
+ *      accumulates the per-family / per-skill token breakdowns over the rolling
+ *      5h / 24h / 7d windows plus the buffered since-reset entries. This module
+ *      keeps the filesystem I/O (`readFile`, `stat`, `listTranscriptFiles`) and
+ *      the parse-memo persistence.
  *
- *   2. The OAuth cached meter read — `readOAuthCached()` + the module-level
- *      `oauthCache` singleton decouple the OAuth read cadence (HTTP I/O) from
- *      the 60s transcript-scan cache and serve a last-good value through
- *      transient 429s (issue #1090). Its TTL policy is fully independent of the
- *      snapshot cache.
+ *   2. The OAuth read wiring — `makeReadOAuth()` wires the cached meter read
+ *      into a scan. The cache + backoff ladder themselves (`readOAuthCached()`,
+ *      the `oauthCache` singleton) live in `./oauth-read-cache.ts` (issue
+ *      #2923); this file only chooses cached vs bypass.
  *
- * The PURE quota-math (weighted burn numerators, estimate percents,
- * pacingState, OAuth rebase, drift detection, since-reset derivation, final
- * `UsageSnapshot` assembly) stays in `usage-tracker.ts` as a behaviour-neutral
- * function over the {@link ScanResult} record this module returns. `getUsage()`
- * coordinates the two halves; the public surface (`src/cost/index.ts`) is
- * unchanged — {@link ScanResult} is an INTERNAL boundary type, never exported
- * from the barrel.
+ * Quota math and final `UsageSnapshot` assembly live in `./snapshot-assembly.ts`
+ * (folds #2279, `assembleSnapshot` #2988) as behaviour-neutral functions over
+ * the {@link ScanResult} record this module returns. `getUsage()` in
+ * `usage-tracker.ts` coordinates the halves; the public surface
+ * (`src/cost/index.ts`) is unchanged — {@link ScanResult} is an INTERNAL
+ * boundary type, never exported from the barrel.
  *
- * One-way import: this module imports FROM `./token-math.ts`, `./config.ts`,
- * `./oauth-usage.ts`, `../transcript-store.ts`, and
- * `../redis/transcript-parse-memo.ts`; `usage-tracker.ts` imports the scan +
- * OAuth-cache primitives FROM here.
+ * Layer: L4 I/O source. For the import direction and the consumers of each
+ * layer see the layer table in `src/cost/CONTEXT.md` (enforced by
+ * `test/cost-layers.test.mts`) rather than a list restated here.
  *
  * Per-file parse memo (issue #3805): transcripts are append-only and
  * immutable once a session ends, so a file whose `(size, mtimeMs)` is
@@ -127,15 +125,15 @@ const WINDOW_7D_MS = 7 * MS_PER_DAY;
 // projection, and the {@link emptyByDispatchKind} factory moved to the pure
 // `./token-breakdown.ts` leaf (issue #3513). They are imported at the top of this
 // file (the scan accumulator still uses them) and re-exported at the bottom so
-// `usage-tracker.ts`, `index.ts`, and the tests keep resolving them by name. The
+// `index.ts` and the tests keep resolving them by name. The
 // module-private `UNATTRIBUTED_SKILL` back-compat alias (issue #2402/#3083) went
 // with them — it had no remaining reference here.
 
 // `EMPTY_BREAKDOWN`, `emptyByModel`, and `addBreakdown` moved to the pure
 // `./token-breakdown.ts` leaf (issue #3513); imported at the top of this file
 // because the scan accumulator shares them. `EMPTY_BREAKDOWN` + `emptyByModel`
-// are also re-exported at the bottom for the `usage-tracker.ts` +
-// `snapshot-assembly.ts` importers; `addBreakdown` is NOT re-exported (issue
+// are also re-exported at the bottom for back-compat importers (the tests and
+// the `index.ts` barrel); `addBreakdown` is NOT re-exported (issue
 // #3525 — those callers import it directly from `./token-breakdown.ts`).
 
 /**
@@ -258,8 +256,8 @@ export async function tokensForSession(
 // `./types.ts` (ADR-0042 Decision 5, issue #4781): `snapshot-assembly.ts` (L3,
 // pure) reads slices of it, and importing it from this L4 I/O seam was an
 // upward edge. Imported at the top of this file for `transcriptScan()`'s
-// return type and re-exported at the bottom so `usage-tracker.ts`,
-// `test/snapshot-assembly.test.mts`, and every other existing importer keep
+// return type and re-exported at the bottom so
+// `test/snapshot-assembly.test.mts` and every other existing importer keep
 // resolving it at the old `./transcript-scan.ts` path unchanged.
 
 /**
@@ -279,7 +277,7 @@ export interface TranscriptParseMemoIo {
 /**
  * Walk the JSONL transcripts under `root`, fire the OAuth meter read
  * concurrently, and return the raw {@link ScanResult} accumulation — WITHOUT
- * computing any quota percentages (that pure math lives in `usage-tracker.ts`).
+ * computing any quota percentages (that pure math lives in `snapshot-assembly.ts`).
  *
  * The injectables mirror what the former private `scanUsage()` accepted:
  *   - `root`         the projects root to walk (a fixture dir in tests)
@@ -359,7 +357,7 @@ export async function transcriptScan(
   try {
     memoMap = await loadMemo();
   } catch (err: any) {
-    logger.error({ err }, "[usage-tracker] transcript-parse-memo load failed; scanning cold");
+    logger.error({ err }, "[transcript-scan] transcript-parse-memo load failed; scanning cold");
     memoMap = new Map();
   }
   const memoUpserts = new Map<string, FileParseMemoEntry>();
@@ -455,7 +453,7 @@ export async function transcriptScan(
     try {
       content = await readFile(file, "utf-8");
     } catch (err: any) {
-      logger.error({ file, err }, "[usage-tracker] transcript read failed");
+      logger.error({ file, err }, "[transcript-scan] transcript read failed");
       continue;
     }
 
@@ -508,7 +506,7 @@ export async function transcriptScan(
   } catch (err: any) {
     logger.error(
       { upserts: memoUpserts.size, deletes: memoDeletes.length, err },
-      "[usage-tracker] transcript-parse-memo write failed",
+      "[transcript-scan] transcript-parse-memo write failed",
     );
   }
 
@@ -521,7 +519,7 @@ export async function transcriptScan(
         models: [...foreignModelsSeen],
         tokens: acc.foreign7d.total,
       },
-      "[usage-tracker] foreign-provider tokens excluded from Anthropic quota aggregates (issue #3769)",
+      "[transcript-scan] foreign-provider tokens excluded from Anthropic quota aggregates (issue #3769)",
     );
   }
 
@@ -533,7 +531,7 @@ export async function transcriptScan(
         count: unknownModelsSeen.size,
         models: [...unknownModelsSeen].map((m) => (m === "" ? "<missing>" : m)),
       },
-      "[usage-tracker] unrecognised model string(s) bucketed to 'unknown' (implicit quota-weight 1.0)",
+      "[transcript-scan] unrecognised model string(s) bucketed to 'unknown' (implicit quota-weight 1.0)",
     );
   }
 
@@ -572,8 +570,9 @@ export async function transcriptScan(
  * #1083 test contract) — unless `useOAuthCache` is explicitly set true, which
  * the #1090 tests use to drive the cache with a pinned reader.
  *
- * Kept here (with the cache it gates) so `usage-tracker.ts` stays the pure
- * coordinator/assembler; it passes the already-resolved defaults in.
+ * Kept here (the cache itself lives in `oauth-read-cache.ts`, #2923) so
+ * `usage-tracker.ts` stays the I/O coordinator; it passes the already-resolved
+ * defaults in.
  */
 export function makeReadOAuth(opts: {
   readUsage: () => Promise<OAuthUsageResult>;
@@ -623,8 +622,8 @@ export { projectsRoot, readOAuthUsage };
 
 // Re-export the token-breakdown data-model primitives from their new focused
 // pure leaf (issue #3513) at the SAME names this module used to own, so existing
-// importers of `./transcript-scan.ts` — `usage-tracker.ts` and
-// `test/usage-tracker.test.mts` — keep resolving unchanged. The canonical owner
+// importers of `./transcript-scan.ts` (see `src/cost/CONTEXT.md`)
+// keep resolving unchanged. The canonical owner
 // is now `./token-breakdown.ts`; new code (and `snapshot-assembly.ts`) should
 // import directly from there.
 export {
@@ -642,8 +641,8 @@ export { firstUserMessageText, sumSessionTokens };
 
 // Re-export the OAuth backoff/cache seam surface from its new focused leaf
 // (issue #2923) at the SAME names this module used to own, so existing importers
-// of `./transcript-scan.ts` — `usage-tracker.ts` and `test/usage-tracker.test.mts`
-// — keep resolving unchanged. The canonical owner is now `./oauth-read-cache.ts`;
+// of `./transcript-scan.ts` (see `src/cost/CONTEXT.md`)
+// keep resolving unchanged. The canonical owner is now `./oauth-read-cache.ts`;
 // new code should import directly from there.
 export {
   setOAuthBackoffPersistence,
