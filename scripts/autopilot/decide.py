@@ -724,6 +724,50 @@ PIPELINE_REFIRE_SEC: dict[str, int] = {
     "research_target": RESEARCH_TARGET_REFIRE_SEC,
 }
 
+# Issue #4999 — zero-yield back-off ladder for idle-board producer classes.
+# discover_target's only trigger (`target_backfill_idle`) stays true whenever
+# a dispatch finds nothing (the board stays idle, the signal stays true), so
+# the 30m class cooldown was the ONLY gate — and bootstrap re-arms its
+# signal_last_fired to 0 every run (ALWAYS_ON_REARMED, by design), so on the
+# ~15-min pace-gate relaunch cadence the class re-fired ~every 30 minutes for
+# as long as the Target board sat idle (measured 2026-10-13: 14 straight
+# runs, 26 dispatches, 0 filed, ~73k tokens each ≈ 3.5M tokens/day). The
+# ladder backs off the EFFECTIVE interval after consecutive zero-yield fires:
+# streak 0-2 → base behaviour, 3-5 → 4h between fires, 6+ → 24h. The 24h top
+# rung IS BACKFILL_STARVATION_FLOOR_SEC, so the #4302 never-dark property
+# holds by construction (INV-2): the class never goes fully dark on an idle
+# board, it just stops paying 73k tokens every 30 minutes to reconfirm it.
+# Fixed constants, deliberately NOT env-tunable (the operator specified the
+# three rungs via /hydra-hitl-grill; an exponential ladder was rejected).
+ZERO_YIELD_BACKOFF_LADDER: tuple[tuple[int, int], ...] = (
+    (3, 4 * 3600),  # 3-5 consecutive zero-yield fires → wait 4h since the last
+    (6, BACKFILL_STARVATION_FLOOR_SEC),  # 6+ → 24h (the #4302 floor, INV-2)
+)
+
+# Issue #4999 — the enrolment table, keyed by class (INV-9) so a future
+# enrolment (cleanup_target / research_target, when evidence demands it) is a
+# new row + one literal read branch, not a rewrite of the gate/reset logic.
+# Each row names the idle signal the class rides (the presence-scoped trigger
+# the back-off gates) and the POSITIVE non-idle evidence signals that reset
+# the streak. The decide.py READS pass those names as string LITERALS in the
+# per-class branches (_zy_idle_signal_present / _zy_positive_evidence_present
+# below): the #4934 schema read guard's textual extractor cannot see computed
+# names, and its whole point is that every signal read stays greppable.
+# `idle_signal` is the signal whose presence makes a fire "zero-yield
+# suspicious"; `reset_signals` fail closed to false on a degraded board read
+# (ALL_DEGRADED_SIGNALS), which HOLDS the ladder instead of resetting it —
+# an outage must not silently restart the back-off clock.
+ZERO_YIELD_BACKOFF_CLASSES: dict[str, dict] = {
+    "discover_target": {
+        "idle_signal": "target_backfill_idle",
+        "reset_signals": (
+            "needs_triage_target",
+            "target_board_work_available",
+            "target_work_available",
+        ),
+    },
+}
+
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
 WALL_CLOCK_HEARTBEAT_SEC = 900
 
@@ -3803,6 +3847,15 @@ def _rule_signal_classes(
     """
     out = _RuleOutput()
     burned = set(state.get("burned_classes") or [])
+    # Issue #4999 (INV-5) — zero the zero-yield back-off streaks FIRST, every
+    # turn, BEFORE the per-class loop: the reset must not be skip-able by the
+    # cooldown / scope / burned / budget gates inside the loop, because a
+    # board that just went non-idle (positive evidence present) must restart
+    # the ladder exactly on the turn the evidence appears — a delayed reset
+    # would wrongly hold the 4h/24h rungs against a board that has work.
+    # Mutates state in place; main() persists a changed zero_yield_backoff
+    # via the same snapshot-before/compare-after writeback as the increment.
+    _reset_zero_yield_streaks(state, events)
     backfill_dispatched = False
     for sig in (
         "health",
@@ -4007,6 +4060,42 @@ def _rule_signal_classes(
                     make_dispatch_decision_event(
                         state, now, cls=sig, outcome="budget",
                         reason="target risk surface unresolved",
+                    )
+                )
+                out.skipped += 1
+                continue
+        # Zero-yield back-off (issue #4999) — a dedicated pre-selector gate,
+        # the structural twin of the #4411 wire_or_retire risk-surface gate
+        # above: without it, a back-off-suppressed discover_target would fall
+        # into the post-selector disambiguation below and read as a generic
+        # "no triggering signal" / "signal cooldown active" skip, hiding the
+        # back-off from the retro. AND-composed with the 1800s
+        # SIGNAL_COOLDOWNS check inside _select_for_signal (INV-3 — the
+        # back-off never bypasses or replaces it): this gate only ever
+        # ADDS a suppression, and only while the idle signal is PRESENT (an
+        # absent idle signal keeps the generic idle attribution correct).
+        # Satisfied → falls through to the normal cooldown+selector path,
+        # which is where the plan-time increment (INV-4) lives.
+        if sig in ZERO_YIELD_BACKOFF_CLASSES and _zy_idle_signal_present(
+            state, events, sig
+        ):
+            satisfied, zy_streak, zy_last_fired, zy_required = _zero_yield_gate(
+                state, sig, now
+            )
+            if not satisfied:
+                remaining = zy_required - (now - zy_last_fired)
+                out.debug[f"{sig}_backoff"] = {
+                    "streak": zy_streak,
+                    "last_fired": zy_last_fired,
+                    "required_sec": zy_required,
+                }
+                out.events.append(
+                    make_dispatch_decision_event(
+                        state, now, cls=sig, outcome="cooldown",
+                        reason=(
+                            f"zero-yield back-off (#4999): "
+                            f"streak={zy_streak}, {remaining}s remaining"
+                        ),
                     )
                 )
                 out.skipped += 1
@@ -5895,13 +5984,126 @@ def _select_signal_discover_orch(
     return None
 
 
+def _zero_yield_entry(state: dict, cls: str) -> dict:
+    """`cls`'s zero-yield back-off entry, degrading to the streak-0 identity
+    (issue #4999, INV-9).
+
+    Any malformed shape — a non-map `zero_yield_backoff`, a non-map entry, or
+    a non-int `streak` / `last_fired` (bools are ints in Python, hence the
+    explicit exclusion) — reads as `{"streak": 0, "last_fired": 0}`, exactly
+    the absent-entry behaviour: streak 0 means "no back-off", so a corrupt
+    state file can never wedge the class dark.
+    """
+    container = state.get("zero_yield_backoff")
+    entry = container.get(cls) if isinstance(container, dict) else None
+    if not isinstance(entry, dict):
+        return {"streak": 0, "last_fired": 0}
+    streak = entry.get("streak")
+    last_fired = entry.get("last_fired")
+    for v in (streak, last_fired):
+        if not isinstance(v, int) or isinstance(v, bool):
+            return {"streak": 0, "last_fired": 0}
+    return {"streak": streak, "last_fired": last_fired}
+
+
+def _zero_yield_required_sec(streak: int) -> int:
+    """The ladder wait (seconds) for `streak` consecutive zero-yield fires
+    (issue #4999, INV-1). The ladder is ascending, so the LAST threshold the
+    streak reaches wins: <3 → 0 (base behaviour), 3-5 → 4h, 6+ → 24h."""
+    required = 0
+    for threshold, wait_sec in ZERO_YIELD_BACKOFF_LADDER:
+        if streak >= threshold:
+            required = wait_sec
+    return required
+
+
+def _zero_yield_gate(
+    state: dict, cls: str, now: int
+) -> tuple[bool, int, int, int]:
+    """(satisfied?, streak, last_fired, required_sec) for `cls`'s back-off at
+    `now` (issue #4999, INV-1). Reads ONLY the class's own
+    `zero_yield_backoff.<cls>.last_fired` stamp — never `signal_last_fired`,
+    which bootstrap re-arms to 0 each run by design (INV-3)."""
+    entry = _zero_yield_entry(state, cls)
+    required = _zero_yield_required_sec(entry["streak"])
+    elapsed = now - entry["last_fired"]
+    return elapsed >= required, entry["streak"], entry["last_fired"], required
+
+
+def _stamp_zero_yield(state: dict, cls: str, now: int) -> None:
+    """Bump `cls`'s zero-yield streak + last_fired at plan time (INV-4).
+
+    The same sanctioned in-selector state mutation as `_stamp_triage_items`
+    (#3729) / `_research_force_stamp` (#1666); main() persists a changed
+    `zero_yield_backoff` via the snapshot-before/compare-after writeback.
+    Called ONLY from the selector, on the exact line it returns a dispatch —
+    nothing else increments."""
+    entry = _zero_yield_entry(state, cls)
+    stamped = dict(state.get("zero_yield_backoff") or {}) \
+        if isinstance(state.get("zero_yield_backoff"), dict) else {}
+    stamped[cls] = {"streak": entry["streak"] + 1, "last_fired": now}
+    state["zero_yield_backoff"] = stamped
+
+
+def _zy_idle_signal_present(state: dict, events: list[dict], cls: str) -> bool:
+    """Idle-signal presence for an enrolled back-off class (issue #4999).
+
+    Per-class LITERAL read: the #4934 schema read guard requires string
+    literals at read sites, so each enrolled class names its idle signal in
+    ONE branch here, mirroring its ZERO_YIELD_BACKOFF_CLASSES row. An unknown
+    class reads as not-idle — the back-off gate fails open (INV-9)."""
+    if cls == "discover_target":
+        return _signal_present(state, events, "target_backfill_idle")
+    return False
+
+
+def _zy_positive_evidence_present(state: dict, events: list[dict], cls: str) -> bool:
+    """Positive non-idle evidence for an enrolled back-off class (issue #4999,
+    INV-5) — same literal-read discipline as `_zy_idle_signal_present`.
+
+    POSITIVE-only by design: all three signals fail closed to false on a
+    degraded board read (ALL_DEGRADED_SIGNALS), so an API outage HOLDS the
+    ladder (no reset — and no increment either, because the idle signal
+    reads false too) instead of silently restarting the back-off clock. A
+    pass that files a needs-triage finding lands here via
+    `needs_triage_target` on the NEXT turn's snapshot, so "reset when a pass
+    files something" needs no parsing of the agent's output."""
+    if cls == "discover_target":
+        return (
+            _signal_present(state, events, "needs_triage_target")
+            or _signal_present(state, events, "target_board_work_available")
+            or _signal_present(state, events, "target_work_available")
+        )
+    return False
+
+
+def _reset_zero_yield_streaks(state: dict, events: list[dict]) -> None:
+    """INV-5 reset — zero every enrolled class's streak on positive evidence.
+
+    Runs at the TOP of `_rule_signal_classes`, before the per-class loop, so
+    no cooldown / scope / burned / budget skip can hide a reset turn. Only
+    the streak zeroes; `last_fired` stays (a re-climbing ladder measures from
+    the most recent FIRE either way, since every fire re-stamps it)."""
+    container = state.get("zero_yield_backoff")
+    if not isinstance(container, dict):
+        return
+    for cls in ZERO_YIELD_BACKOFF_CLASSES:
+        entry = container.get(cls)
+        if not isinstance(entry, dict) or not entry.get("streak"):
+            continue
+        if _zy_positive_evidence_present(state, events, cls):
+            reset = dict(entry)
+            reset["streak"] = 0
+            container[cls] = reset
+
+
 def _select_signal_discover_target(
     sig: str,
     state: dict,
     events: list[dict],
     now: int,
 ) -> dict | None:
-    """`discover_target` signal-class selector (no issue provenance cited; trigger rewired by #4607)."""
+    """`discover_target` signal-class selector (provenance: #4607, #4999)."""
     # Issue #4607: this class used to gate on `target_idle` — a signal NO
     # producer ever emitted, so the class could NEVER fire (its trigger was
     # dead, silently tolerated on signal-parity-check's PRODUCERLESS list).
@@ -5913,12 +6115,31 @@ def _select_signal_discover_target(
     # the old name (the #959 anti-alias-drift stance). The bare read needs no
     # degraded-read guard: the producer already fails closed to `false` on a
     # failed board read, and `target_board_signals_degraded` is
-    # advisory-observable by design. Self-limiting: any finding files
-    # needs-triage on the Target board, un-idling target_backfill_idle until
-    # sweep_target drains it. decide.py reads the precomputed signal only
-    # (the signal-seam discipline).
+    # advisory-observable by design. decide.py reads the precomputed signal
+    # only (the signal-seam discipline).
+    #
+    # Issue #4999: the docstring's old "self-limiting" assumption — any
+    # finding un-idles the board — only holds when the dispatch FINDS
+    # something. When it finds nothing the board stays idle, the signal
+    # stays true, and (bootstrap re-arming signal_last_fired.discover_target
+    # to 0 every run) the class re-fired every ~30 minutes forever. The
+    # signal-loop's pre-selector zero-yield gate now suppresses a fire whose
+    # ladder rung has not elapsed; this selector's job on a surviving fire
+    # is the plan-time INCREMENT (INV-4): streak += 1, last_fired = now, the
+    # #3729/#4611 stamping pattern. A fire on a rung above 0 (the old streak
+    # already >= the first threshold — the fire happened because a rung's
+    # wait ELAPSED) annotates its reason with the streak so the audit trail
+    # shows the ladder selected it (INV-8).
     if _signal_present(state, events, "target_backfill_idle"):
-        return make_dispatch(sig, "hydra-target-discover", reason="target diagnostics due")
+        entry = _zero_yield_entry(state, "discover_target")
+        _stamp_zero_yield(state, "discover_target", now)
+        reason = "target diagnostics due"
+        if entry["streak"] >= ZERO_YIELD_BACKOFF_LADDER[0][0]:
+            reason = (
+                f"target diagnostics due "
+                f"(zero-yield back-off rung elapsed, streak={entry['streak'] + 1})"
+            )
+        return make_dispatch(sig, "hydra-target-discover", reason=reason)
     return None
 
 
@@ -7596,6 +7817,16 @@ def main(argv: list[str]) -> int:
         dev_target_resume_before = json.dumps(
             state.get("dev_target_resume_inflight"), sort_keys=True,
         )
+        # Issue #4999 — same change-detection for the zero-yield back-off
+        # ladder state. The discover_target selector stamps
+        # `state.zero_yield_backoff.discover_target` at plan time on every
+        # idle-board fire (INV-4) and `_reset_zero_yield_streaks` zeroes the
+        # streak on positive board evidence (INV-5); this compare persists
+        # either mutation via the SAME `_persist_state_writeback` helper — no
+        # new persistence mechanism (INV-7).
+        zero_yield_backoff_before = json.dumps(
+            state.get("zero_yield_backoff"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -7666,6 +7897,13 @@ def main(argv: list[str]) -> int:
         if dev_target_resume_after != dev_target_resume_before:
             _persist_state_writeback(
                 argv[2], state, what="dev_target_resume_inflight stamp (#4795)",
+            )
+        zero_yield_backoff_after = json.dumps(
+            state.get("zero_yield_backoff"), sort_keys=True,
+        )
+        if zero_yield_backoff_after != zero_yield_backoff_before:
+            _persist_state_writeback(
+                argv[2], state, what="zero_yield_backoff stamp/reset (#4999)",
             )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the
