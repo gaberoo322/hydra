@@ -5447,7 +5447,7 @@ describe("decide.py — discover_target zero-yield back-off (issue #4999)", () =
     return { discover_target: { streak, last_fired: lastFired } };
   }
 
-  test("INV-9: absent zero_yield_backoff behaves exactly like today — dispatch + first stamp", () => {
+  test("#4999 INV-9: absent zero_yield_backoff behaves exactly like today — dispatch + first stamp", () => {
     const t = makeTmp();
     try {
       const before = nowSec();
@@ -5465,7 +5465,7 @@ describe("decide.py — discover_target zero-yield back-off (issue #4999)", () =
     }
   });
 
-  test("INV-1: streak < 3 is the base rung — recent last_fired still dispatches", () => {
+  test("#4999 INV-1: streak < 3 is the base rung — recent last_fired still dispatches", () => {
     const state = baseState({
       signals: { target_backfill_idle: true },
       zero_yield_backoff: zy(2, nowSec() - 60),
@@ -5475,7 +5475,7 @@ describe("decide.py — discover_target zero-yield back-off (issue #4999)", () =
       "streak 2 → required_sec 0 → no back-off suppression");
   });
 
-  test("INV-1: streak 3-5 inside 4h suppresses with a dedicated cooldown reason + debug payload", () => {
+  test("#4999 INV-1: streak 3-5 inside 4h suppresses with a dedicated cooldown reason + debug payload", () => {
     const last = nowSec() - HOUR;
     const state = baseState({
       signals: { target_backfill_idle: true },
@@ -5496,7 +5496,7 @@ describe("decide.py — discover_target zero-yield back-off (issue #4999)", () =
     }, "plan.debug.discover_target_backoff records {streak, last_fired, required_sec} (INV-8)");
   });
 
-  test("INV-1/INV-8: streak 3 past 4h dispatches, annotates the reason with the streak, persists streak=4", () => {
+  test("#4999 INV-1/INV-8: streak 3 past 4h dispatches, annotates the reason with the streak, persists streak=4", () => {
     const t = makeTmp();
     try {
       const state = baseState({
@@ -5516,7 +5516,7 @@ describe("decide.py — discover_target zero-yield back-off (issue #4999)", () =
     }
   });
 
-  test("INV-1/INV-2: streak >= 6 waits 24h (the top rung equals the #4302 starvation floor)", () => {
+  test("#4999 INV-1/INV-2: streak >= 6 waits 24h (the top rung equals the #4302 starvation floor)", () => {
     const state = baseState({
       signals: { target_backfill_idle: true },
       zero_yield_backoff: zy(6, nowSec() - 5 * HOUR),
@@ -5528,7 +5528,7 @@ describe("decide.py — discover_target zero-yield back-off (issue #4999)", () =
       "the top rung is exactly 24h — no rung exceeds the starvation floor (INV-2)");
   });
 
-  test("INV-2: streak >= 6 past 24h dispatches — the back-off never goes fully dark", () => {
+  test("#4999 INV-2: streak >= 6 past 24h dispatches — the back-off never goes fully dark", () => {
     const state = baseState({
       signals: { target_backfill_idle: true },
       zero_yield_backoff: zy(6, nowSec() - 25 * HOUR),
@@ -5538,7 +5538,7 @@ describe("decide.py — discover_target zero-yield back-off (issue #4999)", () =
       "while the board stays idle the class still fires at least once per 24h (#4302)");
   });
 
-  test("INV-3: the 1800s signal cooldown stays an independent necessary condition", () => {
+  test("#4999 INV-3: the 1800s signal cooldown stays an independent necessary condition", () => {
     const state = baseState({
       signals: { target_backfill_idle: true },
       // Back-off SATISFIED (streak 3, fired 5h ago) …
@@ -5558,7 +5558,7 @@ describe("decide.py — discover_target zero-yield back-off (issue #4999)", () =
       "no back-off debug payload on a turn the back-off did not suppress");
   });
 
-  test("INV-4: a suppressed turn never increments — only a dispatch stamps", () => {
+  test("#4999 INV-4: a suppressed turn never increments — only a dispatch stamps", () => {
     const t = makeTmp();
     try {
       const last = nowSec() - HOUR;
@@ -5575,7 +5575,7 @@ describe("decide.py — discover_target zero-yield back-off (issue #4999)", () =
     }
   });
 
-  test("INV-5: positive non-idle evidence resets the streak (a filed pass un-arms the ladder)", () => {
+  test("#4999 INV-5: positive non-idle evidence resets the streak (a filed pass un-arms the ladder)", () => {
     const t = makeTmp();
     try {
       const state = baseState({
@@ -5593,7 +5593,7 @@ describe("decide.py — discover_target zero-yield back-off (issue #4999)", () =
     }
   });
 
-  test("INV-5: the reset runs before the scope skip — an orch-only scope still resets", () => {
+  test("#4999 INV-5: the reset runs before the scope skip — an orch-only scope still resets", () => {
     const t = makeTmp();
     try {
       const state = baseState({
@@ -5610,7 +5610,7 @@ describe("decide.py — discover_target zero-yield back-off (issue #4999)", () =
     }
   });
 
-  test("INV-5: a degraded board read HOLDS the ladder — no positive evidence, no reset", () => {
+  test("#4999 INV-5: a degraded board read HOLDS the ladder — no positive evidence, no reset", () => {
     const t = makeTmp();
     try {
       const last = nowSec() - HOUR;

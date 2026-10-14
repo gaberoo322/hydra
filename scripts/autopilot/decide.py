@@ -4075,7 +4075,7 @@ def _rule_signal_classes(
         # ADDS a suppression, and only while the idle signal is PRESENT (an
         # absent idle signal keeps the generic idle attribution correct).
         # Satisfied → falls through to the normal cooldown+selector path,
-        # which is where the plan-time increment (INV-4) lives.
+        # which is where the plan-time increment (INV-4, #4999) lives.
         if sig in ZERO_YIELD_BACKOFF_CLASSES and _zy_idle_signal_present(
             state, events, sig
         ):
@@ -6031,7 +6031,7 @@ def _zero_yield_gate(
 
 
 def _stamp_zero_yield(state: dict, cls: str, now: int) -> None:
-    """Bump `cls`'s zero-yield streak + last_fired at plan time (INV-4).
+    """Bump `cls`'s zero-yield streak + last_fired at plan time (INV-4, #4999).
 
     The same sanctioned in-selector state mutation as `_stamp_triage_items`
     (#3729) / `_research_force_stamp` (#1666); main() persists a changed
@@ -6078,7 +6078,7 @@ def _zy_positive_evidence_present(state: dict, events: list[dict], cls: str) -> 
 
 
 def _reset_zero_yield_streaks(state: dict, events: list[dict]) -> None:
-    """INV-5 reset — zero every enrolled class's streak on positive evidence.
+    """INV-5 reset (#4999) — zero every enrolled class's streak on positive evidence.
 
     Runs at the TOP of `_rule_signal_classes`, before the per-class loop, so
     no cooldown / scope / burned / budget skip can hide a reset turn. Only
