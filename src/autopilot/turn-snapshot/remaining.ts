@@ -42,7 +42,7 @@ export interface RemainingDeps extends BoardSaturationDeps, AfkFrontierDeps {
 }
 
 /** Each slice-5B collector's typed value (the JSON Turn Snapshot is built from these, ADR-0043 slice 6). */
-export interface RemainingValueMap {
+interface RemainingValueMap {
   "redis-queues": RedisQueuesValue;
   scout: ScoutValue;
   "arch-cleanup-boards": ArchBoardsValue;

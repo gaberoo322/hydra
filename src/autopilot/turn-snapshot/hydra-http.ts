@@ -38,7 +38,7 @@
 export type HydraRead = { readonly kind: "ok"; readonly body: string } | { readonly kind: "failed"; readonly reason: string };
 
 /** Per-read options for {@link TurnSnapshotHydra.get}. */
-export interface HydraGetOptions {
+interface HydraGetOptions {
   /** Per-call timeout; defaults to {@link HYDRA_HTTP_TIMEOUT_MS}. */
   readonly timeoutMs?: number;
 }
@@ -62,23 +62,23 @@ export interface TurnSnapshotHydra {
 /** The raw HTTP GET under the client: resolves with status + body, rejects on a transport error. */
 export type HydraTransport = (url: string, timeoutMs: number) => Promise<{ status: number; body: string }>;
 
-export const DEFAULT_HYDRA_BASE_URL = "http://localhost:4000";
+const DEFAULT_HYDRA_BASE_URL = "http://localhost:4000";
 
 /**
  * Default per-request timeout. `hydra raw` (curl without `--max-time`) had
  * none; a hung data plane then wedged the whole turn. 60s keeps every healthy
  * read and turns a hang into the collector's degraded fallback instead.
  */
-export const HYDRA_HTTP_TIMEOUT_MS = 60_000;
+const HYDRA_HTTP_TIMEOUT_MS = 60_000;
 /** The board-state reads' budget, orch and Target (one local read; generous so a busy service is not misread as down). */
-export const BOARD_STATE_TIMEOUT_MS = 30_000;
+const BOARD_STATE_TIMEOUT_MS = 30_000;
 /** `curl --max-time 3` — the design-concept probe's budget per anchor. */
-export const DESIGN_CONCEPT_TIMEOUT_MS = 3_000;
+const DESIGN_CONCEPT_TIMEOUT_MS = 3_000;
 
 const HTML_PREFIXES = ["<!DOCTYPE", "<!doctype", "<html", "<HTML"];
 
 /** The default transport: global `fetch`, no redirect following (curl without `-L`), with an abort timeout. */
-export const fetchTransport: HydraTransport = async (url, timeoutMs) => {
+const fetchTransport: HydraTransport = async (url, timeoutMs) => {
   const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
   return { status: res.status, body: await res.text() };
 };
