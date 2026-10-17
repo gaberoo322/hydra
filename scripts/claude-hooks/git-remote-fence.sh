@@ -16,9 +16,10 @@
 # DENIES (statement-start `git`, optional -C/-c/--opt prefix) when the cwd's
 # `git rev-parse --git-common-dir` resolves to the protected gitdir:
 #   git remote set-url|add|remove|rm|rename ...
-#   git config ... remote.<name>.<key> ...   (a WRITE: any form without a
-#                                             read flag --get/--get-all/
-#                                             --get-regexp/--list/-l)
+#   git config ... remote.<name>.<key> ...   (a WRITE: a value follows the key,
+#                                             or --unset/--add/--edit/set/...;
+#                                             a bare key or a read flag is a
+#                                             READ — see config_is_write)
 # ALLOWS everything else — `git remote -v`, `git remote get-url`, `git remote
 # show`, `git config --get remote.origin.url`, and any command from a cwd
 # outside the protected gitdir (operator shells outside Claude Code are not
@@ -30,8 +31,15 @@
 # Heredoc bodies are ignored so a PR body that merely quotes the command text
 # does not trip it.
 #
-# Fail-open: malformed stdin, a non-Bash tool, an empty command, a cwd that is
-# not a git repo, or any python/git failure exits 0. Exit codes are 0 and 2.
+# Path expansion (issue #5026): only HOME (`~`, $HOME, ${HOME}) is expanded;
+# any other $VAR / backtick / $(...) is UNRESOLVED (the hook cannot see the
+# Bash tool's shell env) and falls back to the enclosing directory. A literal
+# target that is not a repo falls back to the SESSION CWD (deny iff protected),
+# never to ALLOW. `cd` inside a group that closed before the git is ignored.
+#
+# Fail-open ONLY on tooling failure: malformed stdin, a non-Bash tool, an empty
+# command or cwd, a session cwd that is not a git repo, or any python/git
+# crash exits 0. Exit codes are 0 and 2.
 #
 # Deny payload (claude-code hook contract, same as worktree-write-fence.sh):
 #   stderr: JSON hookSpecificOutput.permissionDecision="deny"
@@ -88,11 +96,14 @@ cmd = re.sub(
 # Collapse backslash line-continuations.
 cmd = re.sub(r"\\\n", " ", cmd)
 
+# A shell WORD is one or more adjacent fragments: "dq", 'sq', or bare text
+# (INV-4: `"$HOME"/orch` is ONE word, not `"$HOME"` followed by junk).
+WORD = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"';&|()])+"
 START = (
     r"(?:^|[;&|(){`\n]|\$\(|\b(?:then|do|else)\b|-c\s+[\"']|\beval\s+[\"']?)"
-    r"\s*(?:\w+=\S*\s+)*(?:(?:sudo|command|env|exec|xargs)\s+)*"
+    r"\s*(?:\w+=(?:" + WORD + r")?\s+)*(?:(?:sudo|command|env|exec|xargs)\s+)*"
 )
-VAL = r"(?:\"[^\"]*\"|'[^']*'|\S+)"
+VAL = WORD
 GIT = (
     r"git(?:\s+(?:-[Cc]\s+" + VAL
     + r"|--(?:git-dir|work-tree|namespace|exec-path|super-prefix|config-env)\s+" + VAL
@@ -102,14 +113,42 @@ REMOTE_MUT = re.compile(
     START + GIT + r"\s+remote\s+(?:set-url|add|remove|rm|rename)\b", re.M
 )
 CONFIG = re.compile(START + GIT + r"\s+config\b([^;&|\n]*)", re.M)
-READ_FLAG = re.compile(r"(?:^|\s)(?:--get(?:-all|-regexp|-urlmatch)?|--list|-l)(?:\s|$)")
-REMOTE_KEY = re.compile(r"(?:^|[\s\"'])remote\.[^\s\"']+")
+CONFIG_READ_FLAGS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"}
+CONFIG_WRITE_FLAGS = {
+    "--unset", "--unset-all", "--add", "--replace-all", "--rename-section",
+    "--remove-section", "-e", "--edit",
+}
+CONFIG_READ_SUBCMDS = {"get", "list"}
+CONFIG_WRITE_SUBCMDS = {"set", "unset"}
+SUBST = re.compile(r"\$\([^)]*\)|`[^`]*`")
+REMOTE_KEY_TOKEN = re.compile(r"remote\.\S+")
+
+def config_is_write(rest):
+    """INV-6: classify the argument list of a `git config` invocation.
+    Substitutions become one opaque VALUE token first, so a flag inside
+    `$(...)` can never count as a read flag but the word still counts as a
+    value. Returns True iff it names a remote.* key AND is a write."""
+    rest = SUBST.sub(" VALUE ", rest)
+    toks = [t.rstrip(")") for t in rest.split()]
+    toks = [t for t in toks if t]
+    key_idx = None
+    for i, t in enumerate(toks):
+        if REMOTE_KEY_TOKEN.fullmatch(t.strip("\"'")):
+            key_idx = i
+            break
+    if key_idx is None:
+        return False
+    before, after = toks[:key_idx], toks[key_idx + 1:]
+    if any(t in CONFIG_WRITE_FLAGS for t in toks) or any(t in CONFIG_WRITE_SUBCMDS for t in before):
+        return True
+    if any(t in CONFIG_READ_FLAGS for t in toks) or any(t in CONFIG_READ_SUBCMDS for t in before):
+        return False
+    return any(not t.startswith("-") for t in after)  # a value follows the key
 
 # Every mutating invocation: (match start, GIT-prefix text).
 mutations = [(m.start(), m.group(0)) for m in REMOTE_MUT.finditer(cmd)]
 for m in CONFIG.finditer(cmd):
-    rest = m.group(1)
-    if REMOTE_KEY.search(rest) and not READ_FLAG.search(rest):
+    if config_is_write(m.group(1)):
         mutations.append((m.start(), m.group(0)))
 hit = bool(mutations)
 
@@ -120,18 +159,33 @@ if not hit:
 protected = os.environ.get("HYDRA_REMOTE_FENCE_PROTECTED_GITDIR", "/home/gabe/hydra/.git")
 protected_real = os.path.realpath(protected)
 
-UNRESOLVED = re.compile(r"[$`]|^~")  # checked AFTER ~/$HOME expansion: only still-unset vars remain
+UNRESOLVED = re.compile(r"[$`]|^~")  # checked AFTER ~/$HOME expansion: only unresolvable tokens remain
 CD = re.compile(START + r"cd\s+(" + VAL + r")", re.M)
 OPT_C = re.compile(r"(?:^|\s)-C\s+(" + VAL + r")")
 OPT_GITDIR = re.compile(r"--git-dir(?:=|\s+)(" + VAL + r")")
+ENV_GITDIR = re.compile(r"(?<![\w])GIT_DIR=(" + VAL + r")")
+FRAGMENT = re.compile(r"\"[^\"]*\"|'[^']*'|[^\"']+")
 
 def unquote(v):
-    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-        return v[1:-1]
-    return v
+    """Strip quotes per adjacent fragment (INV-4). `$` inside single quotes is
+    literal, so it is masked from the HOME expansion below."""
+    out = []
+    for f in FRAGMENT.findall(v):
+        if f[0] == "'" and f[-1] == "'" and len(f) >= 2:
+            out.append(f[1:-1].replace("$", "\x01"))
+        elif f[0] == '"' and f[-1] == '"' and len(f) >= 2:
+            out.append(f[1:-1])
+        else:
+            out.append(f)
+    return "".join(out)
 
 def literal(v):
-    v = os.path.expandvars(os.path.expanduser(unquote(v)))
+    """INV-1: the hook consults ONLY HOME (`~`, $HOME, ${HOME}); every other
+    variable is unresolved because the hook cannot see the Bash tool's env."""
+    v = os.path.expanduser(unquote(v))
+    home = os.environ.get("HOME", "")
+    if home:
+        v = re.sub(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])", lambda _m: home, v)
     return None if (not v or UNRESOLVED.search(v)) else v
 
 def common_dir(args):
@@ -144,36 +198,82 @@ def common_dir(args):
         return None
     return c
 
-def is_protected(pos, prefix):
-    """Resolve the EFFECTIVE repo of one mutating git invocation: --git-dir,
-    else the last literal `cd <dir>` before it, then `git -C <dir>` chain, else
-    the session cwd. An unresolvable value (a `$VAR` / backtick / `~`, the
-    empty-seam-var incident shape) falls back to the previous directory, which
-    is exactly what the shell does for an empty value."""
-    gd = OPT_GITDIR.search(prefix)
-    if gd and literal(gd.group(1)):
-        base = cwd
-        c = common_dir(["--git-dir", os.path.join(base, literal(gd.group(1)))])
-        if c is None:
-            return False
-        c = c if os.path.isabs(c) else os.path.join(base, literal(gd.group(1)), c)
-        return os.path.realpath(c) == protected_real
-    eff = cwd
-    last_cd = None
+def paren_depths(text):
+    """depth[i] = shell group depth before text[i] (INV-3). `(` and `$(` open a
+    group, `)` closes it; quoted spans are skipped."""
+    depth = [0] * (len(text) + 1)
+    d = 0
+    quote = None
+    i = 0
+    while i < len(text):
+        depth[i] = d
+        ch = text[i]
+        if quote:
+            if quote == '"' and ch == "\\":
+                i += 1
+                if i < len(text):
+                    depth[i] = d
+            elif ch == quote:
+                quote = None
+        elif ch == "\\":
+            i += 1
+            if i < len(text):
+                depth[i] = d
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "(":
+            d += 1
+        elif ch == ")":
+            d = max(0, d - 1)
+        i += 1
+    depth[len(text)] = d
+    return depth
+
+DEPTHS = paren_depths(cmd)
+
+def effective_cd(pos):
+    """The last literal `cd` before pos whose group is still open at pos."""
+    last = None
     for cm in CD.finditer(cmd[:pos]):
-        last_cd = cm.group(1)
+        d = DEPTHS[cm.end()]
+        if min(DEPTHS[cm.end():pos + 1]) >= d:
+            last = cm.group(1)
+    return last
+
+def resolves_protected(c, base):
+    if c is None:
+        return None
+    if not os.path.isabs(c):
+        c = os.path.join(base, c)
+    return os.path.realpath(c) == protected_real
+
+def is_protected(pos, prefix):
+    """Resolve the EFFECTIVE repo of one mutating git invocation: the last
+    in-scope literal `cd <dir>`, then `git -C <dir>` chain, then --git-dir /
+    GIT_DIR=. An unresolvable value (`$VAR`, backtick, the empty-seam-var
+    incident shape) falls back to the previous directory, exactly as the shell
+    does for an empty value. If the effective repo cannot be resolved at all
+    (nonexistent dir, not a repo) the SESSION CWD is the effective repo
+    (INV-2): unresolvable never allows."""
+    eff = cwd
+    last_cd = effective_cd(pos)
     if last_cd and literal(last_cd):
         eff = os.path.join(eff, literal(last_cd))
     for cm in OPT_C.finditer(prefix):
         v = literal(cm.group(1))
         if v:
             eff = os.path.join(eff, v)
-    c = common_dir(["-C", eff])
-    if c is None:
-        return False
-    if not os.path.isabs(c):
-        c = os.path.join(eff, c)
-    return os.path.realpath(c) == protected_real
+    gd = OPT_GITDIR.search(prefix) or ENV_GITDIR.search(prefix)
+    gd_val = literal(gd.group(1)) if gd else None
+    res = None
+    if gd_val:
+        gpath = os.path.join(eff, gd_val)
+        res = resolves_protected(common_dir(["--git-dir", gpath]), gpath)
+    else:
+        res = resolves_protected(common_dir(["-C", eff]), eff)
+    if res is None:
+        res = resolves_protected(common_dir(["-C", cwd]), cwd)
+    return bool(res)
 
 try:
     print("DENY" if any(is_protected(p_, t_) for p_, t_ in mutations) else "ALLOW")

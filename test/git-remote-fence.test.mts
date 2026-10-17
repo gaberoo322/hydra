@@ -149,6 +149,53 @@ describe("git-remote-fence", () => {
     assert.equal(run(`git --git-dir ${otherRepo}/.git remote set-url origin ${url}`, protectedRepo).status, 0);
   });
 
+  describe("issue #5026 bypass shapes", () => {
+    const url = "https://x/y.git";
+    const set = `git remote set-url origin ${url}`;
+
+    it("INV-1: a non-HOME $VAR in the hook env is unresolved, not expanded", () => {
+      assert.equal(run(`cd "$TARGET_WS" && ${set}`, protectedRepo, "Bash", { TARGET_WS: otherRepo }).status, 2);
+      assert.equal(run(`cd \${TARGET_WS} && ${set}`, protectedRepo, "Bash", { TARGET_WS: otherRepo }).status, 2);
+    });
+
+    it("INV-2: a literal but non-repo target falls back to the session cwd", () => {
+      assert.equal(run(`cd ${tmp}/nonexistent ; ${set}`, protectedRepo).status, 2);
+      assert.equal(run(`git -C ${tmp}/nonexistent remote add up ${url}`, protectedRepo).status, 2);
+      assert.equal(run(`cd ${tmp}/nonexistent ; ${set}`, otherRepo).status, 0);
+      assert.equal(run(`cd ${tmp}/nonexistent ; ${set}`, tmp).status, 0);
+    });
+
+    it("INV-3: cd scope follows shell scope", () => {
+      assert.equal(run(`(cd ${otherRepo}) ; ${set}`, protectedRepo).status, 2);
+      assert.equal(run(`x=$(cd ${otherRepo}); ${set}`, protectedRepo).status, 2);
+      assert.equal(run(`(cd ${otherRepo} && ${set})`, protectedRepo).status, 0);
+      assert.equal(run(`cd ${otherRepo} && (true) && ${set}`, protectedRepo).status, 0);
+    });
+
+    it("INV-4: a word is all its adjacent fragments", () => {
+      const rel = basename(protectedRepo);
+      const homeEnv = { HOME: dirname(protectedRepo) };
+      assert.equal(run(`cd "$HOME"/${rel} && ${set}`, otherRepo, "Bash", homeEnv).status, 2);
+      assert.equal(run(`cd "$HOME"/${basename(otherRepo)} && ${set}`, protectedRepo, "Bash", homeEnv).status, 0);
+      assert.equal(run(`cd '${dirname(protectedRepo)}'/${rel} && ${set}`, otherRepo).status, 2);
+    });
+
+    it("INV-5: a GIT_DIR= prefix is resolved like --git-dir", () => {
+      assert.equal(run(`GIT_DIR=${protectedRepo}/.git ${set}`, otherRepo).status, 2);
+      assert.equal(run(`GIT_DIR=${otherRepo}/.git ${set}`, protectedRepo).status, 0);
+    });
+
+    it("INV-6: git config read/write classification", () => {
+      assert.equal(run("git config remote.origin.url $(git config --get remote.origin.url)", protectedRepo).status, 2);
+      assert.equal(run("git config remote.origin.url `git config --get remote.origin.url`", protectedRepo).status, 2);
+      assert.equal(run("git config remote.origin.url", protectedRepo).status, 0);
+      assert.equal(run("git config --local remote.origin.url", protectedRepo).status, 0);
+      assert.equal(run("git config --unset remote.origin.url", protectedRepo).status, 2);
+      assert.equal(run("git config --get remote.origin.url", protectedRepo).status, 0);
+      assert.equal(run("(git config remote.origin.url)", protectedRepo).status, 0);
+    });
+  });
+
   it("is registered as a PreToolUse Bash hook by setup-claude-hooks.sh and in the GLM drainer settings", () => {
     const setup = readFileSync(join(REPO_ROOT, "scripts", "setup-claude-hooks.sh"), "utf-8");
     assert.match(setup, /^\s*"git-remote-fence\.sh\|Bash"\s*$/m);
