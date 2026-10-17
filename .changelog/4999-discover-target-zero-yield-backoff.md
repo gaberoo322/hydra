@@ -1,0 +1,1 @@
+- fix: back off discover_target after consecutive zero-yield dispatches on an idle Target board (30m → 4h → 24h ladder, #4302 floor kept) (#4999)
