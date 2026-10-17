@@ -1030,7 +1030,7 @@
       ],
       "source": {
         "path": "src/schemas/dispatches.ts",
-        "line": 74
+        "line": 78
       }
     },
     {
@@ -1148,7 +1148,7 @@
       ],
       "source": {
         "path": "src/schemas/dispatches.ts",
-        "line": 96
+        "line": 100
       }
     },
     {

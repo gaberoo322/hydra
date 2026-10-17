@@ -30,7 +30,8 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { statSync, readFileSync, existsSync } from "node:fs";
+import { statSync, readFileSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -76,10 +77,41 @@ function redisXrange(key: string): Array<{ id: string; fields: Record<string, st
   return events;
 }
 
+/**
+ * Build a child transcript carrying a dispatch sentinel (issue #4965): the hook
+ * only emits for Agent-tool children (payload `agent_id`) whose own transcript
+ * carries the sentinel. Returns the agent id + child transcript path.
+ */
+function sentinelChild(dispatchId = "worktree-agent-feedc0de1234"): { agentId: string; path: string } {
+  const dir = mkdtempSync(join(tmpdir(), "hydra-4965-child-"));
+  const path = join(dir, "agent-child.jsonl");
+  const sentinel = `<!-- hydra-dispatch v1 skill=hydra-dev dispatchId=${dispatchId} runId=run-4965 -->`;
+  writeFileSync(
+    path,
+    JSON.stringify({ type: "user", message: { role: "user", content: `${sentinel}\nwork` } }) + "\n",
+  );
+  return { agentId: "feedc0de12345678", path };
+}
+
 function runHook(payload: object, stream: string): { status: number | null; stderr: string } {
+  const child = sentinelChild();
+  const markerDir = mkdtempSync(join(tmpdir(), "hydra-4965-marker-"));
+  const full = {
+    agent_id: child.agentId,
+    agent_transcript_path: child.path,
+    session_id: "11111111-2222-3333-4444-555555555555",
+    ...payload,
+  };
   const r = spawnSync(HOOK, [], {
-    input: JSON.stringify(payload),
-    env: { ...process.env, HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM: stream },
+    input: JSON.stringify(full),
+    env: {
+      ...process.env,
+      HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM: stream,
+      HYDRA_DISPATCH_REGISTER_MARKER_DIR: markerDir,
+      // Registry POST target unreachable: slot-event tests must not touch the
+      // live registry.
+      HYDRA_API_BASE: "http://127.0.0.1:1",
+    },
     encoding: "utf-8",
   });
   return { status: r.status, stderr: r.stderr ?? "" };
@@ -389,6 +421,66 @@ describe("scripts/autopilot/hooks/on-subagent-tool-call.sh", () => {
       redisDel(stream);
     }
   });
+
+  test(
+    "main-thread call (no agent_id) → exit 0, no event",
+    { skip: !dockerRedisAvailable() },
+    () => {
+      const stream = uniqueStream("no-agent-id");
+      try {
+        const r = spawnSync(HOOK, [], {
+          input: JSON.stringify({
+            tool_name: "Read",
+            session_id: "11111111-2222-3333-4444-555555555555",
+            tool_input: { file_path: "/tmp/x" },
+          }),
+          env: {
+            ...process.env,
+            HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM: stream,
+            HYDRA_API_BASE: "http://127.0.0.1:1",
+          },
+          encoding: "utf-8",
+        });
+        assert.equal(r.status, 0);
+        assert.equal(redisXrange(stream).length, 0, "no agent_id must emit nothing");
+      } finally {
+        redisDel(stream);
+      }
+    },
+  );
+
+  test(
+    "sentinel-bearing child → task_id is agent_id, slot from dispatchId class suffix",
+    { skip: !dockerRedisAvailable() },
+    () => {
+      const stream = uniqueStream("agent-slot");
+      try {
+        const child = sentinelChild("worktree-agent-feedc0de1234-t7-design_concept_orch");
+        const r = spawnSync(HOOK, [], {
+          input: JSON.stringify({
+            tool_name: "Read",
+            agent_id: child.agentId,
+            agent_transcript_path: child.path,
+            session_id: "11111111-2222-3333-4444-555555555555",
+            tool_input: { file_path: "/tmp/x" },
+          }),
+          env: {
+            ...process.env,
+            HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM: stream,
+            HYDRA_DISPATCH_REGISTER_MARKER_DIR: mkdtempSync(join(tmpdir(), "hydra-4965-m-")),
+            HYDRA_API_BASE: "http://127.0.0.1:1",
+          },
+          encoding: "utf-8",
+        });
+        assert.equal(r.status, 0, r.stderr);
+        const ev = redisXrange(stream)[0].fields;
+        assert.equal(ev.task_id, child.agentId);
+        assert.equal(ev.slot, "design_concept_orch");
+      } finally {
+        redisDel(stream);
+      }
+    },
+  );
 
   test("Hook script has executable bit + bash shebang", () => {
     assert.ok(existsSync(HOOK), "hook script missing");
