@@ -420,6 +420,10 @@ describe("listRecentMergeCommits — wrong origin remote stays fail-open and lou
       errSpy.mock.restore();
     }
     assert.equal(redactUrlUserinfo("git@github.com:a/b.git"), "git@github.com:a/b.git");
+    assert.equal(
+      redactUrlUserinfo("https://user:ghp_ab@cd@github.com/a/b.git"),
+      "https://github.com/a/b.git",
+    );
   });
 
   test("an unrelated fetch failure does not probe the remote URL", async () => {

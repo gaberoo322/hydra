@@ -113,7 +113,15 @@
         },
         {
           "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 123
+          "line": 162
+        },
+        {
+          "path": "scripts/claude-hooks/git-remote-fence.sh",
+          "line": 183
+        },
+        {
+          "path": "scripts/claude-hooks/git-remote-fence.sh",
+          "line": 188
         },
         {
           "path": "scripts/deploy-drift-check.ts",
@@ -2792,7 +2800,7 @@
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 1983
+          "line": 1985
         }
       ],
       "inEnvExample": false,
@@ -2834,7 +2842,7 @@
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 1981
+          "line": 1983
         }
       ],
       "inEnvExample": false,
@@ -2876,7 +2884,7 @@
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 1982
+          "line": 1984
         }
       ],
       "inEnvExample": false,
@@ -3016,27 +3024,27 @@
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 1977
+          "line": 1979
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2008
+          "line": 2010
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2026
+          "line": 2028
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2030
+          "line": 2032
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2036
+          "line": 2038
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2045
+          "line": 2047
         },
         {
           "path": "src/aggregators/architecture-graph.ts",
@@ -3713,17 +3721,31 @@
       }
     },
     {
-      "name": "HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO",
+      "name": "HYDRA_WATCHDOG_EXPECTED_ORIGIN_HOST",
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 1978
+          "line": 2061
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh",
-        "line": 1978
+        "line": 2061
+      }
+    },
+    {
+      "name": "HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 1980
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.sh",
+        "line": 1980
       }
     },
     {
@@ -3953,17 +3975,17 @@
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2043
+          "line": 2045
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2044
+          "line": 2046
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh",
-        "line": 2043
+        "line": 2045
       }
     },
     {
@@ -3971,13 +3993,13 @@
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 1980
+          "line": 1982
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh",
-        "line": 1980
+        "line": 1982
       }
     },
     {
@@ -3985,13 +4007,13 @@
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 1979
+          "line": 1981
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh",
-        "line": 1979
+        "line": 1981
       }
     },
     {
@@ -3999,17 +4021,17 @@
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2024
+          "line": 2026
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2025
+          "line": 2027
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh",
-        "line": 2024
+        "line": 2026
       }
     },
     {

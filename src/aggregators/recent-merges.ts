@@ -226,7 +226,7 @@ const FETCH_TIMEOUT_MS = 5000;
  * scp-style `git@host:path` has no scheme and is left alone (no secret).
  */
 export function redactUrlUserinfo(url: string): string {
-  return url.replace(/^([A-Za-z+]+:\/\/)[^/@]*@/, "$1");
+  return url.replace(/^([A-Za-z+]+:\/\/)[^/]*@/, "$1");
 }
 
 /**

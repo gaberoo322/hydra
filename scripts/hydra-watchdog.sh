@@ -1953,6 +1953,8 @@ run_launch_flow() {
 # the single alarm owner for that failure class. Fails (alarms) when
 #   (a) the normalised remote.origin.url is not
 #       ${HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO:-gaberoo322/hydra}, OR
+#   (a') the origin host is not ${HYDRA_WATCHDOG_EXPECTED_ORIGIN_HOST:-github.com}
+#       (reason wrong-origin-host, issue #5026), OR
 #   (b) refs/remotes/origin/master does not resolve.
 #
 # STRICTLY READ-ONLY: only `git config --get`, `git rev-parse --verify`, `stat`.
@@ -2050,13 +2052,20 @@ run_origin_identity() {
 
   # --- Normalise: strip scheme, user@, host, trailing .git and slashes ---
   local norm
-  norm="$(printf '%s' "$url" | sed -E 's#^[A-Za-z+]+://##; s#^[^@/]*@##; s#^[^/:]+[:/]##; s#/+$##; s#\.git$##' | tr 'A-Z' 'a-z')"
+  norm="$(printf '%s' "$url" | sed -E 's#^[A-Za-z+]+://##; s#^[^/]*@##; s#^[^/:]+[:/]##; s#/+$##; s#\.git$##' | tr 'A-Z' 'a-z')"
   local want
   want="$(printf '%s' "$EXPECTED" | tr 'A-Z' 'a-z')"
+  # Host (issue #5026, INV-9): scheme + userinfo stripped, then `^[^/:]+`.
+  local host want_host
+  host="$(printf '%s' "$url" | sed -E 's#^[A-Za-z+]+://##; s#^[^/]*@##; s#^([^/:]+).*#\1#' | tr 'A-Z' 'a-z')"
+  want_host="$(printf '%s' "${HYDRA_WATCHDOG_EXPECTED_ORIGIN_HOST:-github.com}" | tr 'A-Z' 'a-z')"
 
   local reasons=()
   if [[ "$norm" != "$want" ]]; then
     reasons+=("wrong-origin-url")
+  fi
+  if [[ "$host" != "$want_host" ]]; then
+    reasons+=("wrong-origin-host")
   fi
   if [[ "$master_present" != "1" ]]; then
     reasons+=("origin-master-missing")
@@ -2076,7 +2085,7 @@ run_origin_identity() {
   # Strip any userinfo (https://user:TOKEN@host/...) BEFORE the URL reaches the
   # log line, the notifications payload or the dashboard alert (#4939 QA).
   local shown_url
-  shown_url="$(printf '%s' "${url:-<unset>}" | sed -E 's#^([A-Za-z+]+://)[^/@]*@#\1#')"
+  shown_url="$(printf '%s' "${url:-<unset>}" | sed -E 's#^([A-Za-z+]+://)[^/]*@#\1#')"
   log "ALARM ~/hydra origin identity broken: ${reason_str} — remote.origin.url=${shown_url} (expected ${EXPECTED}); refs/remotes/origin/master $([[ "$master_present" == "1" ]] && echo present || echo MISSING) (issue #4939; read-only watchdog, restore from an operator shell)"
 
   if [[ ! -f "$SINCE_MARKER" ]]; then

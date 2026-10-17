@@ -1,0 +1,1 @@
+- fix: close git-remote-fence shell-parser bypass shapes and harden watchdog origin identity (host check, last-@ redaction) (#5026)
