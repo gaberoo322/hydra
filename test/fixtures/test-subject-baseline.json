@@ -248,7 +248,7 @@
   "src/notification/cycle-completed-reactor.ts": 1,
   "src/notify-format.ts": 2,
   "src/notify.ts": 1,
-  "src/operator-actions/registry.ts": 1,
+  "src/operator-actions/registry.ts": 2,
   "src/outcome-attribution/estimator.ts": 1,
   "src/outcome-attribution/impact-ranking.ts": 1,
   "src/outcome-attribution/recorder.ts": 1,

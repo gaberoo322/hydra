@@ -343,6 +343,7 @@
   "test/oauth-usage.test.mts": 4,
   "test/observability-trace-url.test.mts": 8,
   "test/on-subagent-tool-call.test.mts": 1,
+  "test/operator-actions-affordance.test.mts": 6,
   "test/operator-actions-registry.test.mts": 10,
   "test/outcome-attribution-estimator.test.mts": 9,
   "test/outcome-attribution-impact-ranking.test.mts": 1,
