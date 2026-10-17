@@ -106,7 +106,6 @@ import { logger } from "../logger.ts";
 // importers of `./eligibility-usage.ts` — `src/aggregators/usage-eligibility.ts`
 // and the tests — keep resolving unchanged. The canonical owner is now
 // `./types.ts`; `eligibility.ts` imports it directly from there.
-export type { EligibilityUsageInput } from "./types.ts";
 
 /** Outcome of a meter-only eligibility read. Never throws. */
 export interface EligibilityUsageResult {
