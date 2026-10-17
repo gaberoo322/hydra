@@ -68,6 +68,11 @@ function makeFixtureRepo(): { dir: string; playbooks: string } {
   mkdirSync(scripts, { recursive: true });
   mkdirSync(playbooks, { recursive: true });
   copyFileSync(SYNC_SKILLS, join(scripts, "sync-skills.sh"));
+  // The script delegates planning to the TS core (issue #4720): stage it too.
+  for (const rel of ["src/skills/cli.ts", "src/skills/plan.ts", "src/skills/playbook.ts", "src/cli-args.ts"]) {
+    mkdirSync(join(dir, rel, ".."), { recursive: true });
+    copyFileSync(join(REPO_ROOT, rel), join(dir, rel));
+  }
   writeFileSync(
     join(playbooks, "demo.md"),
     "---\nname: demo\ndescription: a demo skill\n---\n\n# Demo\n\nbody v1\n",
