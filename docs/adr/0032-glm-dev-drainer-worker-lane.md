@@ -138,3 +138,19 @@ The CLI resolves an Anthropic slot alias locally to a first-party model id and c
 **Claim ordering preserved.** The block is recorded strictly *after* the existing release in the nothing-usable branch, so a quota-blocked drainer never holds an in-progress claim; the label state machine (`ready-for-agent` → `in-progress` → `ready-for-agent` on release) is unchanged, and `glm-withhold` is never added by a 429 — the work stays free-lane-eligible for when z.ai quota returns.
 
 **What did not change.** The watchdog's `glm-sterile` signal (`scripts/hydra-watchdog.sh`) is untouched: with the heartbeat correctly lapsed, it stays silent (the "down" arm — the work is now visible to `dev_orch`, so nothing is starved), and it remains the backstop for sterility that is *not* a parseable 429. Making the watchdog a second writer of the drainer's heartbeat key was considered and rejected — it would race the drainer's own refresh, the exact control-loop shape ADR-0012 / Decision 6 reject.
+
+## Amendment — a durable operator off switch (2026-10-17, issue #5038)
+
+**Why.** The operator wanted to stop using the lane while keeping its code, units and tests for a later re-enable or a move to another subscription provider. `systemctl --user disable` did not stick: `scripts/deploy.sh` re-enabled the timer on every master merge. `mask` would break that deploy step under `set -e`. Removing the z.ai credential is worse: the heartbeat is written before the credential check, so the partition stays active and starves `glm-eligible` work.
+
+**The rule.** The lane is off while a sentinel file exists: `$HOME/.config/hydra-glm/disabled`, overridable with `HYDRA_GLM_DISABLED_FILE`. `src/glm/disabled.ts` owns the rule. Every layer reads the same path:
+
+- `scripts/deploy.sh` installs the units but disables the timer.
+- `scripts/glm/drainer-loop.sh` exits before flock.
+- The gate returns a `disabled` verdict ahead of `paused`, making no other read.
+- The eligibility sweep stamps nothing.
+- The beachhead report prints a single DISABLED line.
+
+None of them writes the heartbeat, so the existing 45-minute fail-open hands every `glm-eligible` row to the Claude lane. No heartbeat consumer changes. Re-enable with `rm` of the sentinel plus `systemctl --user enable --now hydra-glm-drainer.timer`, or the next deploy.
+
+**What did not change.** Decision 6's operator-pause kill switch is unchanged. Nothing in the repo ever writes the sentinel: turning the lane off is an operator action, never an auto-flip (the #3671 rejection stands). The test launcher points `HYDRA_GLM_DISABLED_FILE` at a path that never exists, so a live sentinel on the shared CI host cannot reach the suite.

@@ -199,3 +199,24 @@ describe("scripts/glm/drainer-loop.sh — one dry-run tick end to end through re
     assert.match(r.combined, /\{"gate":\{"able":false,"reason":"paused"\},"pick":null,"finish":null\}/);
   });
 });
+
+describe("scripts/glm/drainer-loop.sh — the operator off switch (src/glm/disabled.ts)", () => {
+  test("sentinel present: exits 0 before flock and the tick, writing no heartbeat", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-disabled-test-"));
+    try {
+      const sentinel = join(tmp, "disabled");
+      writeFileSync(sentinel, "");
+      const r = await runDrainerLoop({ HYDRA_GLM_DISABLED_FILE: sentinel });
+      assert.equal(r.status, 0);
+      assert.match(r.combined, /lane disabled by operator \(sentinel .*disabled present\) — skip \(no heartbeat\)/);
+      assert.doesNotMatch(r.combined, /heartbeat written|would-heartbeat|flock blocked/);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("sentinel absent: the tick runs as usual", async () => {
+    const r = await runDrainerLoop({ HYDRA_GLM_DISABLED_FILE: "/nonexistent/glm-disabled" });
+    assert.doesNotMatch(r.combined, /lane disabled by operator/);
+  });
+});
