@@ -185,7 +185,7 @@ export async function resolveTranscriptPath(
 /** An Agent-tool child's `agent_id` is a lowercase hex hash (#4965). */
 const AGENT_ID_RE = /^[0-9a-f]{8,40}$/;
 
-export function isAgentIdShaped(value: string): boolean {
+function isAgentIdShaped(value: string): boolean {
   return typeof value === "string" && AGENT_ID_RE.test(value);
 }
 

@@ -364,6 +364,74 @@ describe("on-subagent-tool-call.sh — subagent-dispatch registration (#2406)", 
     }
   });
 
+  test("sentinel-less child (agent_id present) -> no POST, no XADD, negative marker is `none`", async () => {
+    const srv = await startCaptureServer(workdir);
+    try {
+      const id = "cccc000000000001";
+      const transcript = writeTranscript(workdir, id, "plain child prompt, no sentinel");
+      const payload = {
+        tool_name: "Read",
+        session_id: PARENT_SESSION,
+        agent_id: id,
+        transcript_path: transcript,
+        cwd: workdir,
+        tool_input: { file_path: "/tmp/x" },
+      };
+      const opts = {
+        apiBase: srv.url,
+        markerDir,
+        stream: "hydra:autopilot:slot-events:test-4965-nosentinel",
+      };
+      const r = runHook(payload, opts);
+      assert.equal(r.status, 0);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(srv.readBodies().length, 0, "no registration POST for a sentinel-less child");
+      // Negative marker is keyed on agent_id and holds `none`.
+      const marker = join(markerDir, `hydra-dispatch-registered-${id}`);
+      assert.ok(existsSync(marker), "negative marker must be written per agent_id");
+      assert.equal(readFileSync(marker, "utf-8").trim(), "none");
+      // XADD side: the hook exits before emitting for a sentinel-less child.
+      // Redis host is pointed at an unreachable port by runHook, so assert via
+      // the hook source ordering instead: the exit precedes any XADD.
+      const src = readFileSync(HOOK, "utf-8");
+      const exitIdx = src.indexOf("resolve_child_dispatch || exit 0");
+      const xaddIdx = src.indexOf("XADD");
+      assert.ok(exitIdx > 0 && xaddIdx > exitIdx, "sentinel-less exit must precede the XADD");
+      // A second call hits the negative marker and still does not POST.
+      const r2 = runHook(payload, opts);
+      assert.equal(r2.status, 0);
+      await new Promise((r) => setTimeout(r, 200));
+      assert.equal(srv.readBodies().length, 0);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("once-per-agent marker is keyed on agent_id (file named by agent hash)", async () => {
+    const srv = await startCaptureServer(workdir);
+    try {
+      const id = "dddd000000000001";
+      const transcript = writeTranscript(workdir, id, `${SENTINEL}\nwork`);
+      const r = runHook(
+        {
+          tool_name: "Read",
+          session_id: PARENT_SESSION,
+          agent_id: id,
+          transcript_path: transcript,
+          cwd: workdir,
+          tool_input: { file_path: "/tmp/x" },
+        },
+        { apiBase: srv.url, markerDir, stream: "hydra:autopilot:slot-events:test-4965-mk" },
+      );
+      assert.equal(r.status, 0);
+      await srv.waitForBodies(1);
+      assert.ok(existsSync(join(markerDir, `hydra-dispatch-registered-${id}`)));
+      assert.ok(!existsSync(join(markerDir, `hydra-dispatch-registered-${PARENT_SESSION}`)));
+    } finally {
+      srv.close();
+    }
+  });
+
   test("two sibling children of one parent both register under their own agent_id", async () => {
     const srv = await startCaptureServer(workdir);
     try {
