@@ -125,7 +125,8 @@ fi
 # prints the WHOLE-corpus write plan as one JSON document `{writes, skips}`
 # and performs no writes; bash only applies it. A fail-loud grammar error in
 # ANY playbook exits non-zero here, BEFORE anything below touches the
-# filesystem -- the run is all-or-nothing (no half-regenerated skill set).
+# filesystem -- PLANNING is all-or-nothing (no half-regenerated skill set from
+# a grammar error). The apply loop below is per-file tmp+mv and counts records.
 PLAN_FILE="$(mktemp "${TMPDIR:-/tmp}/sync-skills-plan.XXXXXX")"
 trap 'rm -f "$PLAN_FILE"' EXIT
 
@@ -134,7 +135,15 @@ if ! node --experimental-strip-types "$REPO_ROOT/src/skills/cli.ts" --playbooks-
   exit 1
 fi
 
-if ! jq -e '(.writes|type=="array") and (.skips|type=="array")' "$PLAN_FILE" >/dev/null; then
+# Strict shape check: typed fields, and every write path is relative with no
+# `..` segment (a malformed plan must never escape $CLAUDE_DIR).
+if ! jq -e '
+  (.writes|type=="array") and (.skips|type=="array")
+  and all(.writes[]; (.path|type=="string") and (.content|type=="string")
+    and (.path|length>0) and (.path|startswith("/")|not)
+    and ((.path|split("/")|index(".."))==null))
+  and all(.skips[]; (.playbook|type=="string") and (.reason|type=="string"))
+' "$PLAN_FILE" >/dev/null; then
   echo "sync-skills: core plan has an unexpected shape — no skills written" >&2
   exit 1
 fi
@@ -146,15 +155,32 @@ shopt -u nullglob
 generated_count=0
 errors=0
 
+# Materialise the jq streams to files first so a jq failure is visible to
+# `set -e` (a process substitution's exit status is never observed).
+SKIPS_FILE="$PLAN_FILE.skips"
+WRITES_FILE="$PLAN_FILE.writes"
+trap 'rm -f "$PLAN_FILE" "$SKIPS_FILE" "$WRITES_FILE"' EXIT
+if ! jq -r '.skips[] | [.playbook, .reason] | @tsv' "$PLAN_FILE" > "$SKIPS_FILE"; then
+  echo "sync-skills: could not decode skips from the plan — no skills written" >&2
+  exit 1
+fi
+if ! jq -j '.writes[] | .path, "\u0000", .content, "\u0000"' "$PLAN_FILE" > "$WRITES_FILE"; then
+  echo "sync-skills: could not decode writes from the plan — no skills written" >&2
+  exit 1
+fi
+expected_writes="$(jq '.writes|length' "$PLAN_FILE")"
+applied_writes=0
+
 # A playbook whose frontmatter fails to parse is SKIPPED, not fatal (issue
 # #433 deploy contract): one `skip ...` line, `errors` incremented, exit 0.
 while IFS=$'\t' read -r skip_playbook skip_reason; do
   case "$skip_reason" in
     no-frontmatter) echo "skip $skip_playbook — no valid frontmatter" >&2 ;;
-    *) echo "skip $skip_playbook — missing name or description" >&2 ;;
+    missing-name-or-description) echo "skip $skip_playbook — missing name or description" >&2 ;;
+    *) echo "skip $skip_playbook — $skip_reason" >&2 ;;
   esac
   errors=$((errors+1))
-done < <(jq -r '.skips[] | [.playbook, .reason] | @tsv' "$PLAN_FILE")
+done < "$SKIPS_FILE"
 
 if [ "$DRY_RUN" != 1 ]; then
   mkdir -p "$CLAUDE_DIR"
@@ -165,6 +191,7 @@ fi
 # Each file lands via tmp-file in its own directory + mv.
 while IFS= read -r -d '' plan_path && IFS= read -r -d '' plan_content; do
   target="$CLAUDE_DIR/$plan_path"
+  applied_writes=$((applied_writes+1))
   if [ "$DRY_RUN" = 1 ]; then
     echo "would write $target"
   else
@@ -175,7 +202,11 @@ while IFS= read -r -d '' plan_path && IFS= read -r -d '' plan_content; do
       */SKILL.md) generated_count=$((generated_count+1)) ;;
     esac
   fi
-done < <(jq -j '.writes[] | .path, "\u0000", .content, "\u0000"' "$PLAN_FILE")
+done < "$WRITES_FILE"
+if [ "$applied_writes" != "$expected_writes" ]; then
+  echo "sync-skills: applied $applied_writes of $expected_writes planned writes — truncated plan stream" >&2
+  exit 1
+fi
 
 # ---- Banner-guarded orphan prune (issue #3693) ----
 # sync-skills.sh only ever WROTE generated skills; a playbook deleted from
@@ -185,7 +216,7 @@ done < <(jq -j '.writes[] | .path, "\u0000", .content, "\u0000"' "$PLAN_FILE")
 #
 # Ownership signal: a generated SKILL.md carries the exact banner
 #   <!-- DO NOT EDIT. Generated from docs/operator-playbooks/<X>.md. ... -->
-# (emitted at the banner_claude line above). We extract <X> from
+# (emitted by the banner constant in src/skills/playbook.ts). We extract <X> from
 # that line and prune the dir iff docs/operator-playbooks/<X>.md no longer
 # exists. A dir whose SKILL.md LACKS that banner is a third-party / upstream
 # skill (code-review, grilling, prototype, deep-research, …) and is NEVER
