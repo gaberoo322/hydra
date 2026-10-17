@@ -143,7 +143,7 @@ The in-process heartbeat in `src/scheduler/heartbeat.ts` (renamed from the forme
 _Avoid_: "scheduler" (unqualified — could mean this loop, the systemd timers, or the scheduling concept generally), "control loop" (was retired in [[ADR-0006]]; do not use), "in-process loop" (informal)
 
 **Empty Cycle** (a.k.a. **Unaccounted Cycle**):
-A recorded cycle that attempted work but produced no terminal outcome — `tasksAttempted>0` with `tasksMerged==0 && tasksFailed==0 && tasksAbandoned==0` (the read-side name); on the write side, a status in neither `MERGED_STATUSES` nor `FAILED_STATUSES`, bucketed to `unaccounted` and counted lifetime as `cyclesUnaccounted` (issue #1919). The two names denote the same cycle and must stay in lockstep. Surfaced live as the rolling-window `emptyRate` on `/api/scheduler/status` (issue #2818), mirroring the merge-rate window so historical unaccounted cycles don't skew the signal.
+A recorded cycle that attempted work but produced no terminal outcome — `tasksAttempted>0` with `tasksMerged==0 && tasksFailed==0 && tasksAbandoned==0` (the read-side name); on the write side, a status in neither `MERGED_STATUSES` nor `FAILED_STATUSES`, bucketed to `unaccounted` and counted lifetime as `cyclesUnaccounted` (issue #1919); `reap.py` writes the `empty` cycle-record status for a `dev_orch` dispatch whose harness worktree made no commits (issue #4985). The two names denote the same cycle and must stay in lockstep. Surfaced live as the rolling-window `emptyRate` on `/api/scheduler/status` (issue #2818), mirroring the merge-rate window so historical unaccounted cycles don't skew the signal.
 _Avoid_: "no-op cycle" (overloaded — a no-op *merge* is a distinct silent-rot signal), "idle cycle" (informal)
 
 **Housekeeping**:
