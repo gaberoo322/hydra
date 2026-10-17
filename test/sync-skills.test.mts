@@ -31,7 +31,7 @@
  * remote) are NOT exercised — we test the bash plumbing.
  */
 
-import test, { after, describe } from "node:test";
+import test, { after, afterEach, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
@@ -2666,5 +2666,88 @@ describe("docs/operator-playbooks — no playbook frontmatter declares the retir
       if (/^(claude_only|codex_delegation):/m.test(m[1])) offenders.push(file);
     }
     assert.deepEqual(offenders, [], "drop the retired `claude_only:` / `codex_delegation:` keys");
+  });
+});
+
+describe("scripts/sync-skills.sh — plan-shape and decode guards reject a malformed core plan (issue #4720)", () => {
+  /**
+   * The strict jq shape check, the could-not-decode exits and the core-failure
+   * exit are the only things standing between a malformed `{writes, skips}`
+   * plan and a write outside $CLAUDE_DIR. The real core never emits such a
+   * plan, so each case stubs src/skills/cli.ts in a throwaway repo with a
+   * script that prints a canned document, then asserts exit 1, the guard's
+   * message, and that NOTHING was written.
+   */
+  let dir = "";
+  let claudeDir = "";
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "sync-skills-shape-"));
+    claudeDir = join(dir, "claude");
+    mkdirSync(join(dir, "scripts"), { recursive: true });
+    mkdirSync(join(dir, "docs", "operator-playbooks"), { recursive: true });
+    copyFileSync(join(SCRIPTS, "sync-skills.sh"), join(dir, "scripts", "sync-skills.sh"));
+    stageSkillsCore(dir);
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function runWithStub(stubBody: string): { status: number | null; stderr: string } {
+    writeFileSync(join(dir, "src", "skills", "cli.ts"), stubBody);
+    const r = spawnSync("bash", [join(dir, "scripts", "sync-skills.sh")], {
+      env: {
+        ...process.env,
+        CLAUDE_SKILLS_DIR: claudeDir,
+        CODEX_SKILLS_DIR: join(dir, "codex"),
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+    return { status: r.status, stderr: r.stderr };
+  }
+
+  function emitPlan(plan: unknown): string {
+    return `process.stdout.write(${JSON.stringify(JSON.stringify(plan))});\n`;
+  }
+
+  const MALFORMED: Array<[string, unknown]> = [
+    ["a `..` escaping path", { writes: [{ path: "../escape/SKILL.md", content: "x" }], skips: [] }],
+    ["an embedded `..` segment", { writes: [{ path: "a/../../b", content: "x" }], skips: [] }],
+    ["an absolute path", { writes: [{ path: "/tmp/abs/SKILL.md", content: "x" }], skips: [] }],
+    ["a null path", { writes: [{ path: null, content: "x" }], skips: [] }],
+    ["non-string content", { writes: [{ path: "ok/SKILL.md", content: 7 }], skips: [] }],
+    ["a non-string skip reason", { writes: [], skips: [{ playbook: "p.md", reason: 3 }] }],
+    ["a missing skips array", { writes: [] }],
+  ];
+
+  for (const [label, plan] of MALFORMED) {
+    test(`rejects a plan with ${label}: exit 1, 'unexpected shape', nothing written`, () => {
+      const r = runWithStub(emitPlan(plan));
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /unexpected shape/);
+      assert.equal(existsSync(claudeDir), false, "no skills dir may be created");
+      assert.equal(existsSync(join(dir, "escape")), false);
+    });
+  }
+
+  test("a non-JSON plan stream fails closed before any write", () => {
+    const r = runWithStub(`process.stdout.write("not json");\n`);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /unexpected shape/);
+    assert.equal(existsSync(claudeDir), false);
+  });
+
+  test("a core that exits non-zero aborts with 'core plan failed' and writes nothing", () => {
+    const r = runWithStub(`process.exit(2);\n`);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /core plan failed/);
+    assert.equal(existsSync(claudeDir), false);
+  });
+
+  test("a well-formed plan is applied (control: the stub harness itself works)", () => {
+    const r = runWithStub(emitPlan({ writes: [{ path: "ok/SKILL.md", content: "hello" }], skips: [] }));
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(join(claudeDir, "ok", "SKILL.md"), "utf-8"), "hello");
   });
 });
