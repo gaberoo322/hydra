@@ -395,7 +395,7 @@ describe("on-subagent-tool-call.sh — subagent-dispatch registration (#2406)", 
       // the hook source ordering instead: the exit precedes any XADD.
       const src = readFileSync(HOOK, "utf-8");
       const exitIdx = src.indexOf("resolve_child_dispatch || exit 0");
-      const xaddIdx = src.indexOf("XADD");
+      const xaddIdx = src.indexOf("XADD \"$STREAM_KEY\"");
       assert.ok(exitIdx > 0 && xaddIdx > exitIdx, "sentinel-less exit must precede the XADD");
       // A second call hits the negative marker and still does not POST.
       const r2 = runHook(payload, opts);
