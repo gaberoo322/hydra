@@ -442,6 +442,12 @@
       "title": "Hydra observability — Tier-3 dashboard panels (issue #207)"
     },
     {
+      "path": "docs/operations/glm-lane.md",
+      "tier": "living",
+      "route": "/docs/ref/operations/glm-lane",
+      "title": "GLM lane — turning it off and on"
+    },
+    {
       "path": "docs/operations/ineffective-promoted-patterns.md",
       "tier": "living",
       "route": "/docs/ref/operations/ineffective-promoted-patterns",
