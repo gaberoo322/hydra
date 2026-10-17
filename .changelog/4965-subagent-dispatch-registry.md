@@ -1,1 +1,1 @@
-- fix: register the subagent PostToolUse hook in project settings and key dispatches on agent_id so /api/dispatches/:id/transcript resolves Agent-tool children (#4965)
+- fix: register the subagent PostToolUse hook in project settings and key dispatches on agent_id so /api/dispatches/:id/transcript resolves Agent-tool children, with API-level and sentinel-less-child test coverage (#4965)
