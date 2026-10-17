@@ -137,10 +137,21 @@ echo "==> Installing GLM dev-drainer timer (ADR-0032, issue #3689)..."
 # src/glm/drainer-runner.ts) mean an absent/blank z.ai credential or an
 # operator pause makes each tick a cheap no-op, never an accidental spend of
 # Anthropic quota. `enable --now` is idempotent on an already-running timer.
+#
+# The operator off switch (src/glm/disabled.ts): while the sentinel exists the
+# units are still installed (so re-enabling needs no deploy) but the timer is
+# disabled instead of enabled, so a deploy can't undo the switch. `mask` is
+# deliberately not used: a masked unit would fail `enable` here under `set -e`.
 install -D -m 0644 scripts/systemd/hydra-glm-drainer.service "$HOME/.config/systemd/user/hydra-glm-drainer.service"
 install -D -m 0644 scripts/systemd/hydra-glm-drainer.timer "$HOME/.config/systemd/user/hydra-glm-drainer.timer"
 systemctl --user daemon-reload
-systemctl --user enable --now hydra-glm-drainer.timer
+GLM_DISABLED_FILE="${HYDRA_GLM_DISABLED_FILE:-$HOME/.config/hydra-glm/disabled}"
+if [[ -e "$GLM_DISABLED_FILE" ]]; then
+  echo "    GLM lane disabled by operator ($GLM_DISABLED_FILE present) — disabling timer"
+  systemctl --user disable --now hydra-glm-drainer.timer
+else
+  systemctl --user enable --now hydra-glm-drainer.timer
+fi
 
 echo "==> Installing Redis backup timer (issue #4604)..."
 # The nightly Redis backup (docs/reference.md "## Backups") shipped in #2742

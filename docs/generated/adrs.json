@@ -960,6 +960,7 @@
         "CONTEXT-MAP.md",
         "docs/adr/0040-glm-drainer-typed-tick-and-shared-eligibility.md",
         "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",
+        "docs/operations/glm-lane.md",
         "docs/operator-playbooks/hydra-review.md"
       ],
       "source": {

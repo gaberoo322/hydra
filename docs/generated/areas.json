@@ -799,7 +799,12 @@
         "0040"
       ],
       "adrsCited": [],
-      "referenceDocs": [],
+      "referenceDocs": [
+        {
+          "path": "docs/operations/glm-lane.md",
+          "anchor": null
+        }
+      ],
       "slices": {
         "env-vars": [
           "HYDRA_GLM_DRAINER_CAP_DIR",

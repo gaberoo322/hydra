@@ -19,7 +19,7 @@ process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -830,5 +830,20 @@ describe("scripts/test/redis-db-launch.mjs — file-set coverage gate (issue #41
       /HYDRA_FULL_SUITE/,
       "test:file runs a hand-picked subset and must never claim full-suite coverage",
     );
+  });
+});
+
+describe("scripts/test/redis-db-launch.mjs — hermeticChildEnv (GLM off-switch isolation)", () => {
+  test("points HYDRA_GLM_DISABLED_FILE at a never-existing path when unset", async () => {
+    const { hermeticChildEnv, TEST_GLM_DISABLED_FILE } = await import("../scripts/test/redis-db-launch.mjs");
+    const env = hermeticChildEnv({ FOO: "bar" });
+    assert.equal(env.HYDRA_GLM_DISABLED_FILE, TEST_GLM_DISABLED_FILE);
+    assert.equal(env.FOO, "bar", "the base env must be preserved");
+    assert.equal(existsSync(TEST_GLM_DISABLED_FILE), false);
+  });
+
+  test("a caller-set HYDRA_GLM_DISABLED_FILE is kept verbatim", async () => {
+    const { hermeticChildEnv } = await import("../scripts/test/redis-db-launch.mjs");
+    assert.equal(hermeticChildEnv({ HYDRA_GLM_DISABLED_FILE: "/x" }).HYDRA_GLM_DISABLED_FILE, "/x");
   });
 });

@@ -1327,6 +1327,15 @@ main_ab_report() {
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  # The operator off switch (src/glm/disabled.ts owns the rule): the default
+  # readout is the hydra-review context line, so a disabled lane says so
+  # instead of re-reporting a keep/kill window nobody is acting on.
+  # --ab-report stays available as a historical query.
+  GLM_DISABLED_FILE="${HYDRA_GLM_DISABLED_FILE:-${HOME:+$HOME/.config/hydra-glm/disabled}}"
+  if [[ "${1:-}" != "--ab-report" && -n "$GLM_DISABLED_FILE" && -e "$GLM_DISABLED_FILE" ]]; then
+    echo "GLM beachhead: lane DISABLED by operator (sentinel $GLM_DISABLED_FILE present) — re-enable: rm $GLM_DISABLED_FILE && systemctl --user enable --now hydra-glm-drainer.timer"
+    exit 0
+  fi
   if [[ "${1:-}" == "--ab-report" ]]; then
     shift
     main_ab_report "$@"

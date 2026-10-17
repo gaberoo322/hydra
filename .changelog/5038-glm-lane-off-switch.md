@@ -1,0 +1,1 @@
+- feat: durable GLM lane off switch — while `~/.config/hydra-glm/disabled` exists, deploy disables the drainer timer and the drainer, gate, eligibility sweep and beachhead report all stand down, so the Claude lane takes the work back (#5038)

@@ -138,6 +138,7 @@
 
 import { randomUUID } from "node:crypto";
 import { logger } from "../../logger.ts";
+import { isGlmLaneDisabled } from "../../glm/disabled.ts";
 import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
 import { glmLane } from "../../glm/eligibility.ts";
 import {
@@ -171,6 +172,12 @@ import { getGlmAbAssignmentFraction } from "../../cost/config.ts";
  * depends on externally.
  */
 export interface GlmEligibilitySweepDeps {
+  /**
+   * The operator off switch (`src/glm/disabled.ts`). While it is on, the sweep
+   * stamps nothing: new work stays on the Claude lane instead of collecting a
+   * `glm-eligible` label for a drainer that isn't running.
+   */
+  isGlmLaneDisabled?: () => boolean;
   /** Read the open orchestrator board. Defaults to the seam's `listOpenIssues`. */
   listOpenIssues?: typeof listOpenIssues;
   /** Add one label to one issue. Defaults to the seam's `addIssueLabel`. */
@@ -296,6 +303,12 @@ export async function runGlmEligibilitySweep(
   // One run ID per sweep invocation, shared across every assignment this
   // tick makes (issue #4125) — not per-issue.
   const sweepRunId = deps.sweepRunId ?? randomUUID();
+  const laneDisabled = deps.isGlmLaneDisabled ?? (() => isGlmLaneDisabled());
+
+  if (laneDisabled()) {
+    logger.info("glm-eligibility-sweep: GLM lane disabled by operator; labelling nothing");
+    return 0;
+  }
 
   try {
     const board: IssueReadResult<IssueRow> = await readBoard();
