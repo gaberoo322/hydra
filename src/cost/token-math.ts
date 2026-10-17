@@ -4,14 +4,13 @@
  * Extracted out of `usage-tracker.ts` (issue #1909) so the model-family table,
  * the JSONL-line parser, the quota-weight / cache-hit formulas, and the
  * weekly-reset / session-limit time math live in a focused leaf named after
- * the concept — not buried in 1391 lines of JSONL-scan + snapshot-assembly
- * code. Same axis the env-reader leaf `config.ts` (#1896) and the eligibility
+ * the concept — not buried in the JSONL-scan + snapshot-assembly code. Same axis the env-reader leaf `config.ts` (#1896) and the eligibility
  * fold `eligibility.ts` (#1377) split along.
  *
  * PURE: no IO (no readFile/stat), no Redis, no `process.env` reads, no
  * `Date.now()` — every time/env input enters as a function argument. The
  * import direction is strictly one-way: this leaf imports NOTHING from
- * `src/cost/`; `usage-tracker.ts` imports its math from here. The barrel
+ * `src/cost/` (L1; consumers are in the layer table in `src/cost/CONTEXT.md`). The barrel
  * `src/cost/index.ts` re-exports these symbols at the SAME names, so no
  * external import line changes.
  *

@@ -30,10 +30,10 @@ import { logger } from "../logger.ts";
  * meter lag (~25 min) and costs at most two ~15-min gate ticks. Overridable via
  * `HYDRA_POST_QUOTA_BACKOFF_SEC`.
  */
-export const POST_QUOTA_BACKOFF_DEFAULT_SEC = 30 * 60;
+const POST_QUOTA_BACKOFF_DEFAULT_SEC = 30 * 60;
 
 /** Extra TTL seconds beyond the hint instant (host-vs-Redis clock skew). */
-export const POST_QUOTA_TTL_BUFFER_SEC = 60;
+const POST_QUOTA_TTL_BUFFER_SEC = 60;
 
 /**
  * Resolve the configured cooldown window in seconds. A missing / non-positive /
@@ -88,10 +88,4 @@ export async function setPostQuotaUntil(
   const r = getRedisConnection();
   await r.set(redisKeys.autopilotPostQuotaUntil(), String(untilMs), "EX", ttlSec);
   return untilMs;
-}
-
-/** Clear the post-quota hint. Idempotent. */
-export async function clearPostQuotaUntil(): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(redisKeys.autopilotPostQuotaUntil());
 }

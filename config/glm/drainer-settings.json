@@ -111,6 +111,15 @@
             "command": "bash /home/gabe/hydra/scripts/claude-hooks/worktree-write-fence.sh"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/gabe/hydra/scripts/claude-hooks/git-remote-fence.sh"
+          }
+        ]
       }
     ]
   }

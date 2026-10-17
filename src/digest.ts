@@ -96,6 +96,9 @@ export const CRITICAL_EVENT_TYPES: readonly string[] = [
   // renders it) as the launch-flow signals above; a wiped install under a
   // live money-critical service must not wait up to 4h for the next digest.
   E.INFRA_NODE_MODULES_WIPED,
+  // Issue #4939: ~/hydra origin URL wrong / origin/master missing — immediate
+  // CRITICAL bypass; every worktree shares the gitdir.
+  E.INFRA_ORIGIN_IDENTITY_WRONG,
   // Issue #3868: live-but-sterile GLM drainer — same immediate CRITICAL
   // bypass; while the drainer heartbeat is fresh the #3754 partition hides
   // glm-eligible work from the Opus lane, so every hour of sterility is an

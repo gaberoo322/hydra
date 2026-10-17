@@ -101,14 +101,14 @@ describe("dispatch.sh cycle-record → anchorType is always explicit (issue #268
   // hits the mock. HYDRA_API points at the mock; HYDRA_API_BASE is deliberately
   // left unset so the legacy HYDRA_API path is taken (that path appends nothing
   // extra and reaches the mock).
-  function recordCycle(skill: string): Record<string, unknown> {
+  function recordCycle(skill: string, cycleStatus = "completed"): Record<string, unknown> {
     const realPath = process.env.PATH ?? "";
     const keptDirs = realPath.split(":").filter((d) => d && !existsSync(join(d, "hydra")));
     const trimmedPath = [binDir, ...keptDirs].join(":");
     const before = mockBodyCount();
     const r = spawnSync(
       "bash",
-      [SCRIPT, "cycle-record", `t-${skill}`, "completed", skill],
+      [SCRIPT, "cycle-record", `t-${skill}-${cycleStatus}`, cycleStatus, skill],
       {
         env: (() => {
           const e = { ...process.env, PATH: trimmedPath } as Record<string, string>;
@@ -138,6 +138,16 @@ describe("dispatch.sh cycle-record → anchorType is always explicit (issue #268
 
   test("hydra-dev → work-queue", () => {
     assert.equal(recordCycle("hydra-dev").anchorType, "work-queue");
+  });
+
+  test("status 'empty' → tasksMerged=0 / tasksAttempted=1 (issue #4985), 'completed' stays tasksMerged=1", () => {
+    const empty = recordCycle("hydra-dev", "empty");
+    assert.equal(empty.status, "empty");
+    assert.equal(empty.tasksMerged, 0);
+    assert.equal(empty.tasksFailed, 0);
+    assert.equal(empty.tasksAbandoned, 0);
+    assert.equal(empty.tasksAttempted, 1);
+    assert.equal(recordCycle("hydra-dev", "completed").tasksMerged, 1);
   });
 
   test("hydra-target-build → work-queue", () => {
