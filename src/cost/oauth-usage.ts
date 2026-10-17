@@ -83,7 +83,7 @@ export {
   OAUTH_USAGE_URL,
   OAUTH_USAGE_BETA,
 } from "./oauth-meter-shape.ts";
-export type { OAuthUsageErrorCode, OAuthUsageData, OAuthUsageResult } from "./types.ts";
+export type { OAuthUsageResult } from "./types.ts";
 
 /**
  * Default request timeout — the seam-level discipline every boundary Seam

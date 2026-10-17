@@ -88,7 +88,7 @@
     {
       "family": "corpus",
       "metric": "living",
-      "value": 21
+      "value": 22
     },
     {
       "family": "corpus",
@@ -103,12 +103,12 @@
     {
       "family": "corpus",
       "metric": "rows",
-      "value": 117
+      "value": 118
     },
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 249
+      "value": 255
     },
     {
       "family": "pages",
@@ -148,7 +148,7 @@
     {
       "family": "schemas",
       "metric": "rows",
-      "value": 107
+      "value": 94
     },
     {
       "family": "skills",

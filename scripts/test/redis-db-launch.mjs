@@ -256,6 +256,20 @@ export function parseOwnedDbIndex(url) {
  * resolveRedisUrl above) deliberately omits the var — bash's own `${HYDRA_REDIS_DB:-0}`
  * default then matches that same "not owned by this launcher" case.
  */
+/**
+ * Host-state isolation for the test child (beside the Redis isolation above).
+ * The 4 CI runners share this host's $HOME with the live services, so a
+ * host-level operator switch read from $HOME would leak into the suite. Today
+ * that is the GLM lane's off-switch sentinel (src/glm/disabled.ts): it is
+ * pointed at a path that never exists unless the caller already set it.
+ */
+export const TEST_GLM_DISABLED_FILE = "/nonexistent/hydra-test/glm-disabled";
+
+export function hermeticChildEnv(env) {
+  if (env.HYDRA_GLM_DISABLED_FILE) return env;
+  return { ...env, HYDRA_GLM_DISABLED_FILE: TEST_GLM_DISABLED_FILE };
+}
+
 export function redisChildEnv(baseEnv, url, db) {
   const overlay = { ...baseEnv, REDIS_URL: url };
   if (db !== null) overlay.HYDRA_REDIS_DB = String(db);
@@ -540,7 +554,7 @@ async function retryShortfallsInIsolation(result, baseline, redisUrl) {
         ],
         {
           cwd: process.cwd(),
-          env: redisChildEnv(process.env, redisUrl, parseOwnedDbIndex(redisUrl)),
+          env: hermeticChildEnv(redisChildEnv(process.env, redisUrl, parseOwnedDbIndex(redisUrl))),
           stdio: ["ignore", "ignore", "inherit"],
           timeout: RETRY_TIMEOUT_MS,
         },
@@ -782,7 +796,7 @@ if (testFiles.length > 0) {
 launcherPhase = "test-suite";
 const child = spawn(args[0], args.slice(1), {
   stdio: "inherit",
-  env: redisChildEnv(process.env, resolved.url, resolved.db),
+  env: hermeticChildEnv(redisChildEnv(process.env, resolved.url, resolved.db)),
 });
 if (child.pid !== undefined) {
   // INV-6 (#4292): the test child's pid, for post-mortem attribution.

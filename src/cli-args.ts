@@ -34,7 +34,7 @@ type StrictConfig<T extends ParseArgsOptionsConfig> = {
 };
 
 /** The typed `values` object node:util infers for option config `T`. */
-export type CliValues<T extends ParseArgsOptionsConfig> = ReturnType<
+type CliValues<T extends ParseArgsOptionsConfig> = ReturnType<
   typeof parseArgs<StrictConfig<T>>
 >["values"];
 

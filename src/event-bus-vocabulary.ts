@@ -105,6 +105,13 @@ const NOTIFICATION_EVENT_TYPES = {
   // warrants both the dashboard alert and the immediate digest line.
   INFRA_NODE_MODULES_WIPED: "infra:node_modules_wiped",
 
+  // Published by the watchdog's run_origin_identity block (same ADR-0017
+  // Category A enveloped XADD from bash) once per episode when ~/hydra's
+  // remote.origin.url is not the orchestrator repo, or refs/remotes/origin/master
+  // no longer resolves (issue #4939). In both ALERT_TYPES and
+  // CRITICAL_EVENT_TYPES.
+  INFRA_ORIGIN_IDENTITY_WRONG: "infra:origin_identity_wrong",
+
   // --- GLM dev-drainer zero-throughput watchdog signal (issue #3868) ---
   // Published by the watchdog's run_launch_flow block (same ADR-0017
   // Category A enveloped XADD from bash as the launch-flow signals above)

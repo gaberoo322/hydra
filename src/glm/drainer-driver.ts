@@ -326,7 +326,9 @@ export function buildDefaultTickDeps(env: NodeJS.ProcessEnv = process.env): Tick
  */
 function logGateLine(log: (msg: string) => void, line: GateLine): void {
   if (line.able === false) {
-    if (line.reason === "paused") {
+    if (line.reason === "disabled") {
+      log(`lane disabled by operator (sentinel ${line.detail ?? ""} present) — skip (no heartbeat)`);
+    } else if (line.reason === "paused") {
       if (line.detail) log(`WARN ${line.detail} — failing safe (treating as paused)`);
       log(
         "operator paused — skip (no heartbeat; kill-switch honors ONLY operator paused, ignoring Anthropic reasons per ADR-0032 Decision 6)",
