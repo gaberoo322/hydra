@@ -78,11 +78,21 @@ describe("shouldSendDigest", () => {
 // ---------------------------------------------------------------------------
 
 describe("CRITICAL_EVENT_TYPES policy constant", () => {
-  test("includes the rollback-failed and scheduler-stop events", () => {
-    assert.ok(CRITICAL_EVENT_TYPES.includes("cycle:rollback_failed"));
-    assert.ok(CRITICAL_EVENT_TYPES.includes("scheduler:stopped"));
-    assert.ok(CRITICAL_EVENT_TYPES.includes("scheduler:paused_repetition"));
-    assert.ok(CRITICAL_EVENT_TYPES.includes("scheduler:backlog_empty"));
+  test("holds exactly the 6 live watchdog signals (issue #5044)", () => {
+    assert.deepEqual([...CRITICAL_EVENT_TYPES].sort(), [
+      "glm:drainer_sterile",
+      "infra:node_modules_wiped",
+      "infra:origin_identity_wrong",
+      "launch:latency_breach",
+      "launch:pause_forgotten",
+      "launch:quota_stretch",
+    ]);
+  });
+
+  test("no longer includes the codex-era rollback/scheduler types (issue #5044)", () => {
+    for (const t of ["cycle:rollback_failed", "scheduler:stopped", "scheduler:paused_repetition", "scheduler:backlog_empty"]) {
+      assert.equal(CRITICAL_EVENT_TYPES.includes(t), false, t);
+    }
   });
 
   test("does NOT include an ordinary batched event type", () => {
@@ -125,21 +135,21 @@ describe("DigestAccumulator — critical-bypass routing", () => {
   test("a critical event sends immediately (bypasses the batch)", async () => {
     const { acc, sent } = makeAccumulator(12);
     acc.recordEvent({
-      type: "cycle:rollback_failed",
-      payload: { title: "t", commitSha: "deadbeef", error: "boom" },
+      type: "launch:quota_stretch",
+      payload: { reason: "5h cap" },
     });
     // sendImmediate is fire-and-forget (void); let the microtask settle.
     await Promise.resolve();
     assert.equal(sent.length, 1);
-    assert.match(sent[0], /Rollback Failed/);
+    assert.match(sent[0], /Critical alert\* `launch:quota_stretch`/);
   });
 
   test("a critical event during quiet hours still sends", async () => {
     const { acc, sent } = makeAccumulator(23);
-    acc.recordEvent({ type: "scheduler:stopped", payload: { reason: "x", cyclesRun: 3 } });
+    acc.recordEvent({ type: "infra:node_modules_wiped", payload: { reason: "x" } });
     await Promise.resolve();
     assert.equal(sent.length, 1);
-    assert.match(sent[0], /Scheduler Stopped/);
+    assert.match(sent[0], /Critical alert\* `infra:node_modules_wiped`/);
   });
 });
 
