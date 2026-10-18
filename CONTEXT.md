@@ -40,7 +40,7 @@ _Avoid_: health state (vague), health payload (that is the HTTP wire envelope, a
 
 **Health Diagnostic**:
 One finding emitted by the `/api/health/deep` ruleset — a structured `{severity, component, what, why, impact, action, autoRecovery}` record describing a single thing that is or may be wrong. Produced by a pure rule function `(snapshot: HealthSnapshot) => HealthDiagnostic | null` in `src/health/diagnostics.ts`; adding a condition = appending one rule. Distinct from a `/recommendations` operator action item (a different surface).
-_Avoid_: alert (implies a push/notification channel we do not have), check (the probe is the check; this is its interpreted result), warning (one severity, not the category)
+_Avoid_: alert (a **Page** is the push message; a Health Diagnostic is the finding it may report), check (the probe is the check; this is its interpreted result), warning (one severity, not the category)
 
 **Health Assessment**:
 The folded result of running every **Health Diagnostic** rule over a **Health Snapshot** — `{diagnostics, status, summary}`, where `status` is the worst-severity fold (`critical > unhealthy > degraded > healthy`) and `summary` is the human banner. Produced by `assessHealth()` in `src/health/diagnostics.ts` and projected verbatim onto the `/api/health/deep` response. Distinct from **Builder Health** (capability trend, not a point-in-time fault scan).
@@ -105,6 +105,18 @@ _Avoid_: signals file, collect output, `state.signals` (the retired kv-era form)
 **Operator-Required Intervention**:
 The closed list of categories where Hydra escalates to the operator instead of attempting autonomous remedy: credentials/secrets, external-account actions, vision-level conflicts, and a **second** failed **Deep-QA Remediation Loop** pass on a T4 change. Everything else Hydra researches and tries. Tier no longer triggers escalation (ADR-0015 retired the operator-only tier); only an exhausted remediation loop does. Defined by ADR-0005 (amended by ADR-0015).
 _Avoid_: blocker (overloaded), needs-human (informal), "Tier 0 changes" (retired escalation trigger)
+
+**Operator Channel**:
+The single outbound Hydra→operator Telegram delivery Module ([[ADR-0045]]). TypeScript callers use it in-process; bash and systemd callers use its CLI. Outbound only — nothing reads Telegram updates — and the only code allowed to talk to `api.telegram.org`. Carries two message kinds: a **Page** and the **Morning Brief**. Not an escalation category: it never widens ADR-0005's list.
+_Avoid_: notifier (the retired per-producer senders), alert channel, bot (the credential is an implementation detail)
+
+**Page**:
+An immediate, deduped **Operator Channel** message for an event on the closed page list held in code (infra alarms, notification consumer dead, holdback revert failed, orchestrator/autopilot/tunnel/backup service failures, review-pickup going non-empty). Edge-triggered per `dedupKey`: one send when bad, at most one reminder per 6h, one recovered message on resolve. Severity is decided by the list, never by the producer; every other event is a **Morning Brief** item.
+_Avoid_: alert (overloaded with **Health Diagnostic**), notification (the generic event-bus term), ping
+
+**Morning Brief**:
+The once-daily 07:30 local-time summary the **Operator Channel** sends, even when empty: overnight merges and QA, waiting-on-you items with recommended action and link, autopilot and quota state, builder-health line, and non-page events; Mondays append the weekly summary. Timed by a Redis last-sent key so it is restart-proof and catches up after downtime. Replaces the 4-hourly digest, heartbeat message and standalone weekly digest.
+_Avoid_: digest (the retired cadence it replaces), daily report, heartbeat
 
 **Pattern Memory**:
 The Redis-backed per-agent / per-skill pattern store (`hydra:memory:{agent}:patterns`, `hydra:friction:{skill}:patterns`) that captures recurring lessons and friction from cycle outcomes. Auto-promotes patterns to `config/feedback/to-{agent}.md` at the 3-hit threshold and dispatches recurring friction to GitHub issues via the **Escalation** seam at the same threshold (+ every multiple of 10 thereafter). Lives in `src/pattern-memory/`.

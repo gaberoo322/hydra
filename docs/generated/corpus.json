@@ -346,6 +346,12 @@
       "title": "ADR-0044: An operator-attended epic sprint may stand in for hydra-qa, but never for CI"
     },
     {
+      "path": "docs/adr/0045-operator-channel.md",
+      "tier": "adr",
+      "route": "/docs/adr/0045",
+      "title": "ADR-0045: The Operator Channel is one outbound-only Telegram module with a closed page list and a daily Morning Brief"
+    },
+    {
       "path": "docs/agents/domain.md",
       "tier": "living",
       "route": "/docs/ref/agents/domain",
