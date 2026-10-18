@@ -19,7 +19,7 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | `src/autopilot/` | Autopilot Run, Autopilot Turn, Autopilot Focus | [`src/autopilot/CONTEXT.md`](./src/autopilot/CONTEXT.md) | ADR-0006, ADR-0007, ADR-0012, ADR-0016, ADR-0043 | [Model Tiers](docs/reference.md#model-tiers), [Learning System](docs/reference.md#learning-system-operational) |
 | `src/taxonomy/` | Dispatch-Class Taxonomy | — | ADR-0012, ADR-0030 | — |
 | `src/glm/`, `scripts/glm/` | — | — | ADR-0032, ADR-0040 | [GLM lane on/off](./docs/operations/glm-lane.md) |
-| `src/scheduler/` | Orchestrator Scheduler (Observability Heartbeat), Housekeeping | — | ADR-0012 | [Observability](docs/observability/README.md), [Watchdog](docs/operations/watchdog.md) |
+| `src/scheduler/` | Orchestrator Scheduler (Observability Heartbeat), Housekeeping, Operator Channel, Page, Morning Brief | — | ADR-0012, ADR-0045 | [Observability](docs/observability/README.md), [Watchdog](docs/operations/watchdog.md) |
 | `src/pattern-memory/` | Pattern Memory | — | — | [Ineffective promoted patterns](docs/operations/ineffective-promoted-patterns.md), [Learning System](docs/reference.md#learning-system-operational) |
 | `src/reflections/` | Reflections | — | ADR-0023 | — |
 | `src/metrics/`, `src/aggregators/` | Cost, Quota Weight | — | ADR-0016, ADR-0028, ADR-0039 | [Cost reconciliation](docs/reference.md#cost-reconciliation-issue-296--historical) |

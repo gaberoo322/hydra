@@ -836,11 +836,24 @@
         {
           "name": "Housekeeping",
           "anchor": "term-housekeeping"
+        },
+        {
+          "name": "Operator Channel",
+          "anchor": "term-operator-channel"
+        },
+        {
+          "name": "Page",
+          "anchor": "term-page"
+        },
+        {
+          "name": "Morning Brief",
+          "anchor": "term-morning-brief"
         }
       ],
       "moduleMap": null,
       "adrs": [
-        "0012"
+        "0012",
+        "0045"
       ],
       "adrsCited": [
         "0001",
@@ -2108,7 +2121,8 @@
           "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md [adr]",
           "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md [adr]",
           "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md [adr]",
-          "docs/adr/0044-operator-attended-epic-sprint-lane.md [adr]"
+          "docs/adr/0044-operator-attended-epic-sprint-lane.md [adr]",
+          "docs/adr/0045-operator-channel.md [adr]"
         ],
         "adrs": [
           "ADR-0001 [superseded-in-part]",
@@ -2154,7 +2168,8 @@
           "ADR-0041 [accepted]",
           "ADR-0042 [accepted]",
           "ADR-0043 [accepted]",
-          "ADR-0044 [accepted]"
+          "ADR-0044 [accepted]",
+          "ADR-0045 [accepted]"
         ]
       },
       "homes": [],
