@@ -6,13 +6,13 @@ status: accepted
 
 Hydra reaches the operator's phone from several unrelated places: the weekly digest, the review-pickup chore, the watchdog scripts and systemd `OnFailure` units. Each had its own formatting, its own chat-id handling and its own idea of what deserves a message. A formatting error dropped whole messages (#5040), a hard-coded chat id lived in a script, and the volume drifted toward noise.
 
-This ADR records the design chosen in issue #5041 as normative for the slices that implement it (#5044–#5049). Nothing here describes code that exists on the day it is accepted.
+This ADR records the design chosen in issue #5041 as normative for the slices that implement it (#5044–#5049). It describes the target shape; of it, only the #5040 plain-text resend exists on the day it is accepted.
 
 ## Decision
 
 ### Decision 1 — The channel is outbound only
 
-Nothing reads Telegram updates, webhooks or callback queries. No inline buttons, no commands. The orchestrator API is unauthenticated, so an inbound control surface needs its own auth design first and is a separate decision. The model stays extensible for actions later, but this ADR adds none. It does not widen the escalation list in ADR-0005: a **Page** is how an existing Operator-Required Intervention reaches the phone, not a new category.
+Nothing reads Telegram updates, webhooks or callback queries. No inline buttons, no commands. The orchestrator API is unauthenticated, so an inbound control surface needs its own auth design first and is a separate decision. The model stays extensible for actions later, but this ADR adds none. It does not widen the escalation list in ADR-0005: a **Page** is a delivery mechanism, not an escalation. An Operator-Required Intervention may be carried as a Page, but most pages (service failures, infra alarms) are not on ADR-0005's list.
 
 ### Decision 2 — One channel for every runtime
 
@@ -53,6 +53,8 @@ The bot token and chat id are read by exactly one loader. There is no hard-coded
 
 - Adding a page type is deliberately a code and ADR edit.
 - Telegram delivery code outside the channel fails the widened seam check.
+- Retired once the slices land: the 4-hourly digest, the 24h heartbeat, the weekly digest chore, and the watchdog and systemd `curl` senders.
+- #5035 (clean SIGTERM restarts paging) is resolved by Decision 4.
 
 ## Alternatives considered
 

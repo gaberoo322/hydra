@@ -107,7 +107,7 @@ The closed list of categories where Hydra escalates to the operator instead of a
 _Avoid_: blocker (overloaded), needs-human (informal), "Tier 0 changes" (retired escalation trigger)
 
 **Operator Channel**:
-The single outbound Hydra→operator Telegram delivery Module ([[ADR-0045]]). TypeScript callers use it in-process; bash and systemd callers use its CLI. Outbound only — nothing reads Telegram updates — and the only code allowed to talk to `api.telegram.org`. Carries two message kinds: a **Page** and the **Morning Brief**. Not a new escalation category: it delivers what ADR-0005 already says needs the operator.
+The single outbound Hydra→operator Telegram delivery Module ([[ADR-0045]]). TypeScript callers use it in-process; bash and systemd callers use its CLI. Outbound only — nothing reads Telegram updates — and the only code allowed to talk to `api.telegram.org`. Carries two message kinds: a **Page** and the **Morning Brief**. Not an escalation category: it never widens ADR-0005's list.
 _Avoid_: notifier (the retired per-producer senders), alert channel, bot (the credential is an implementation detail)
 
 **Page**:
