@@ -25,6 +25,10 @@ import type {
   NotificationEventPayload,
 } from "../src/event-bus-vocabulary.ts";
 import { formatMessage } from "../src/notify-format.ts";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, dirname, extname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { stripComments } from "../scripts/ci/seam-check-lib.ts";
 
 // The event-type member names the module is contracted to expose. Pinned here
 // so a REMOVED or RENAMED member is caught even if nothing else in the suite
@@ -247,4 +251,173 @@ describe("event-bus-vocabulary — downstream formatter completeness", () => {
       assert.ok((msg as string).length > 0, `${name} produced an empty message`);
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Live-producer audit (issue #5044, epic #5041).
+//
+// Every NOTIFICATION_EVENT_TYPES member must have at least one LIVE PRODUCER
+// in this repo, found in exactly one of three lanes:
+//
+//   (a) src/**/*.ts — a comment-stripped event CONSTRUCTION site: a `type:`
+//       object key whose value is `E.<MEMBER>` /
+//       `NOTIFICATION_EVENT_TYPES.<MEMBER>` or the quoted on-wire value.
+//       `case E.X:` and Set/array members (ALERT_TYPES, CRITICAL_EVENT_TYPES,
+//       the formatters) are CONSUMER positions and never count — otherwise the
+//       audit would be satisfied by the very formatters it audits.
+//   (b) scripts/**/*.{sh,py,ts,mjs} — a non-comment line containing the quoted
+//       on-wire value (the watchdog's enveloped redis-cli XADDs).
+//   (c) docs/operator-playbooks/**/*.md — a `"type":"<value>"` /
+//       `type: "<value>"` publish payload (backslash-escaped quotes allowed:
+//       the merge-flow fragment builds its /events/publish body in bash).
+//
+// Tests are never a lane: a type produced only by a test is not live.
+// ---------------------------------------------------------------------------
+
+/**
+ * Members whose ONLY producer lives outside this repo (e.g. a Target-repo
+ * script POSTing /events/publish). Each entry must cite that producer.
+ * SHRINK-ONLY: a second assertion fails for any entry that has an in-repo
+ * producer, so an entry is removed the moment its producer lands here.
+ * Empty on purpose — every live member has an in-repo producer.
+ */
+const EXTERNAL_PRODUCER_ALLOWLIST: ReadonlySet<string> = new Set<string>([]);
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+function walk(dir: string, exts: ReadonlySet<string>): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...walk(full, exts));
+    else if (entry.isFile() && exts.has(extname(entry.name))) out.push(full);
+  }
+  return out;
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+interface Lanes {
+  /** Comment-stripped src/ TypeScript sources. */
+  src: string[];
+  /** Non-comment lines of scripts/. */
+  scriptLines: string[];
+  /** Raw playbook markdown. */
+  playbooks: string[];
+}
+
+function loadLanes(): Lanes {
+  const src = walk(join(REPO_ROOT, "src"), new Set([".ts"])).map((f) =>
+    stripComments(readFileSync(f, "utf8")),
+  );
+  const scriptLines: string[] = [];
+  for (const f of walk(join(REPO_ROOT, "scripts"), new Set([".sh", ".py", ".ts", ".mjs"]))) {
+    const ext = extname(f);
+    const body = ext === ".ts" || ext === ".mjs"
+      ? stripComments(readFileSync(f, "utf8"))
+      : readFileSync(f, "utf8");
+    for (const line of body.split("\n")) {
+      if ((ext === ".sh" || ext === ".py") && line.trimStart().startsWith("#")) continue;
+      scriptLines.push(line);
+    }
+  }
+  const playbooks = walk(join(REPO_ROOT, "docs", "operator-playbooks"), new Set([".md"])).map(
+    (f) => readFileSync(f, "utf8"),
+  );
+  return { src, scriptLines, playbooks };
+}
+
+/** The lanes ("src" / "scripts" / "playbooks") holding a producer for a member. */
+function producerLanes(lanes: Lanes, member: string, value: string): string[] {
+  const v = escapeRe(value);
+  const found: string[] = [];
+  const srcRe = new RegExp(
+    `\\btype:\\s*(?:(?:E|NOTIFICATION_EVENT_TYPES)\\.${member}\\b|"${v}")`,
+  );
+  if (lanes.src.some((body) => srcRe.test(body))) found.push("src");
+  if (lanes.scriptLines.some((line) => line.includes(`"${value}"`) || line.includes(`'${value}'`))) {
+    found.push("scripts");
+  }
+  const pbRe = new RegExp(
+    `(?:\\\\?["']type\\\\?["']|\\btype)\\s*:\\s*\\\\?["']${v}\\\\?["']`,
+  );
+  if (lanes.playbooks.some((body) => pbRe.test(body))) found.push("playbooks");
+  return found;
+}
+
+describe("event-bus-vocabulary — live-producer audit (issue #5044)", () => {
+  const lanes = loadLanes();
+
+  test("every NOTIFICATION_EVENT_TYPES member has at least one live producer", () => {
+    const orphans: string[] = [];
+    for (const [member, value] of Object.entries(NOTIFICATION_EVENT_TYPES)) {
+      if (EXTERNAL_PRODUCER_ALLOWLIST.has(member)) continue;
+      if (producerLanes(lanes, member, value).length === 0) {
+        orphans.push(`${member} (${value})`);
+      }
+    }
+    assert.deepEqual(
+      orphans,
+      [],
+      `notification event type(s) with no live producer in src/, scripts/ or ` +
+        `docs/operator-playbooks/: ${orphans.join(", ")} — delete the type and ` +
+        `its formatter arms, or land its producer`,
+    );
+  });
+
+  test("EXTERNAL_PRODUCER_ALLOWLIST is shrink-only (no entry has an in-repo producer)", () => {
+    const stale: string[] = [];
+    for (const member of EXTERNAL_PRODUCER_ALLOWLIST) {
+      const value = (NOTIFICATION_EVENT_TYPES as Record<string, string>)[member];
+      if (value === undefined) {
+        stale.push(`${member} (no longer a member)`);
+        continue;
+      }
+      const lanesFound = producerLanes(lanes, member, value);
+      if (lanesFound.length > 0) stale.push(`${member} (${value}) — in-repo producer in ${lanesFound.join(", ")}`);
+    }
+    assert.deepEqual(stale, [], `remove these EXTERNAL_PRODUCER_ALLOWLIST entries: ${stale.join("; ")}`);
+  });
+
+  test("the retired codex-era types have no producer in any lane", () => {
+    // Sanity anchor for the predicate: the 28 members deleted by issue #5044
+    // were deleted BECAUSE no lane produces them.
+    for (const [member, value] of [
+      ["CYCLE_START", "cycle:start"],
+      ["CYCLE_FAILED", "cycle:failed"],
+      ["TASK_REJECTED", "task:rejected"],
+      ["SCHEDULER_STOPPED", "scheduler:stopped"],
+      ["RESEARCH_COMPLETED", "research:completed"],
+      ["DEPLOY_FAILED", "deploy:failed"],
+      ["PATTERN_TEST_DECLINE", "pattern:test_decline"],
+    ]) {
+      assert.deepEqual(producerLanes(lanes, member, value), [], `${member} (${value})`);
+    }
+  });
+
+  test("the predicate ignores consumer positions (case arms, Set members, comparisons)", () => {
+    // Guards the audit against becoming self-satisfying: the formatters name
+    // every member in `case E.X:` / Set positions, which must never count.
+    const fake: Lanes = {
+      src: [
+        "switch (t) { case E.FAKE_MEMBER: return 1; }",
+        "const S = new Set([E.FAKE_MEMBER, NOTIFICATION_EVENT_TYPES.FAKE_MEMBER]);",
+        'if (event.type === "fake:member") {}',
+      ],
+      scriptLines: [],
+      playbooks: ["The `fake:member` event is described here but never published."],
+    };
+    assert.deepEqual(producerLanes(fake, "FAKE_MEMBER", "fake:member"), []);
+  });
+
+  test("the predicate recognises each lane's construction shape", () => {
+    const one = (l: Partial<Lanes>): Lanes => ({ src: [], scriptLines: [], playbooks: [], ...l });
+    assert.deepEqual(producerLanes(one({ src: ["publish({ type: E.FAKE_MEMBER, payload })"] }), "FAKE_MEMBER", "fake:member"), ["src"]);
+    assert.deepEqual(producerLanes(one({ src: ['publish({ type: "fake:member" })'] }), "FAKE_MEMBER", "fake:member"), ["src"]);
+    assert.deepEqual(producerLanes(one({ scriptLines: ['etype="fake:member"'] }), "FAKE_MEMBER", "fake:member"), ["scripts"]);
+    assert.deepEqual(producerLanes(one({ playbooks: ['-d "{\\"type\\":\\"fake:member\\",\\"source\\":\\"x\\"}"'] }), "FAKE_MEMBER", "fake:member"), ["playbooks"]);
+  });
 });
