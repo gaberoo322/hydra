@@ -47,8 +47,22 @@ test("ALERT_TYPES is an exported, non-empty Set of event-type strings", () => {
     assert.ok(t.length > 0, "each ALERT_TYPES entry should be a non-empty string");
   }
   // Spot-check a couple of the canonical members survived the extraction.
-  assert.ok(ALERT_TYPES.has("cycle:failed"));
+  assert.ok(ALERT_TYPES.has("launch:quota_stretch"));
   assert.ok(ALERT_TYPES.has("consumer:dead"));
+});
+
+test("ALERT_TYPES holds exactly the 7 live alert types (issue #5044)", () => {
+  assert.deepEqual([...ALERT_TYPES].sort(), [
+    "consumer:dead",
+    "dlq:alert",
+    "glm:drainer_sterile",
+    "infra:node_modules_wiped",
+    "infra:origin_identity_wrong",
+    "launch:latency_breach",
+    "launch:quota_stretch",
+  ]);
+  // launch:pause_forgotten is deliberately a digest line only, never an alert.
+  assert.equal(ALERT_TYPES.has("launch:pause_forgotten"), false);
 });
 
 test("formatAlertMessage maps every ALERT_TYPES event to a non-empty string", () => {
@@ -71,13 +85,13 @@ test("formatAlertMessage default branch fires for an unknown event type", () => 
   assert.ok(msg.includes("foo"), "default branch should include the payload");
 });
 
-test("formatAlertMessage uses dedicated arms for known cycle events", () => {
-  const failed = formatAlertMessage({
-    type: "cycle:failed",
-    payload: { taskTitle: "build X", reason: "tsc error" },
+test("formatAlertMessage uses dedicated arms for the live alert types", () => {
+  const stretch = formatAlertMessage({
+    type: "launch:quota_stretch",
+    payload: { reason: "5h cap", durationMs: 5400000, thresholdMs: 1800000 },
   });
-  assert.ok(failed.includes("build X"));
-  assert.ok(failed.includes("tsc error"));
+  assert.ok(stretch.includes("5h cap"));
+  assert.ok(stretch.includes("1.5h"));
 
   const dead = formatAlertMessage({
     type: "consumer:dead",
@@ -93,12 +107,12 @@ test("formatAlertMessage accepts a typed AlertGrammarEvent (issue #1889)", () =>
   // DigestGrammarEvent (digest-format.ts). A field declared here is contract-
   // checked at the access site, so a renamed read field is a compile error.
   const event: AlertGrammarEvent = {
-    type: "cycle:operator_blocked",
-    payload: { title: "ship the thing", blockedReason: "needs creds" },
+    type: "infra:origin_identity_wrong",
+    payload: { reason: "url mismatch", url: "https://elsewhere" },
   };
   const msg = formatAlertMessage(event);
-  assert.ok(msg.includes("ship the thing"));
-  assert.ok(msg.includes("needs creds"));
+  assert.ok(msg.includes("url mismatch"));
+  assert.ok(msg.includes("https://elsewhere"));
 });
 
 test("AlertGrammarEvent is a structural subset of NotificationEvent (assignable both ways at the call site)", () => {
@@ -116,19 +130,24 @@ test("AlertGrammarEvent is a structural subset of NotificationEvent (assignable 
 });
 
 test("classifyAlertSeverity maps each tier from its canonical event type", () => {
-  // One row per severity tier — the boundary the inline ternary used to spell
-  // out (issue #1855). Error tier: failed / rolled-back / dead.
-  assert.equal(classifyAlertSeverity("cycle:failed"), "error");
-  assert.equal(classifyAlertSeverity("cycle:rolled_back"), "error");
+  // Error tier: a dead consumer — the only live type with a dedicated arm.
   assert.equal(classifyAlertSeverity("consumer:dead"), "error");
-  // Warning tier: stalled / auto-killed.
-  assert.equal(classifyAlertSeverity("cycle:stalled"), "warning");
-  assert.equal(classifyAlertSeverity("cycle:auto_killed"), "warning");
-  // Info tier: everything else.
-  assert.equal(classifyAlertSeverity("research:completed"), "info");
-  assert.equal(classifyAlertSeverity("scheduler:error"), "info");
-  assert.equal(classifyAlertSeverity("dlq:alert"), "info");
-  assert.equal(classifyAlertSeverity("pattern:low_merge_rate"), "info");
+  // Info tier: every other live type.
+  for (const t of [
+    "cycle:completed", "dlq:alert", "dlq:entry", "review:pickup_ready",
+    "launch:quota_stretch", "launch:latency_breach", "launch:pause_forgotten",
+    "infra:node_modules_wiped", "infra:origin_identity_wrong", "glm:drainer_sterile",
+  ]) {
+    assert.equal(classifyAlertSeverity(t), "info", t);
+  }
+});
+
+test("classifyAlertSeverity: codex-era types retired by issue #5044 have no dedicated tier", () => {
+  // cycle:failed / cycle:rolled_back (error) and cycle:stalled /
+  // cycle:auto_killed (warning) lost their arms with the types themselves.
+  for (const t of ["cycle:failed", "cycle:rolled_back", "cycle:stalled", "cycle:auto_killed"]) {
+    assert.equal(classifyAlertSeverity(t), "info", t);
+  }
 });
 
 test("classifyAlertSeverity returns 'info' for unknown event types (default branch)", () => {
@@ -205,4 +224,34 @@ test("startConsumerWithRecovery never throws to its caller on persistent crash",
       async () => { /* no-op sleep */ },
     ),
   );
+});
+
+test("formatAlertMessage renders every live alert type byte-identically (issue #5044)", () => {
+  const cases: Array<[AlertGrammarEvent, string]> = [
+    [{ type: "dlq:alert", payload: { eventType: "task:foo", deliveryCount: 3, error: "bad" } },
+      "Dead letter: task:foo failed 3x — bad"],
+    [{ type: "consumer:dead", payload: { consumer: "notifications", restarts: 6 } },
+      "Consumer notifications died after 6 restarts"],
+    [{ type: "launch:quota_stretch", payload: { reason: "5h cap", durationMs: 5400000, thresholdMs: 1800000 } },
+      "Launch quota stretch: autopilot blocked (5h cap) for 1.5h — sustained past the 30min alarm threshold"],
+    [{ type: "launch:latency_breach", payload: { durationMs: 45000, thresholdMs: 600000 } },
+      "Launch latency breach: eligibility probe took 45s — sustained past the 10min alarm threshold"],
+    [{ type: "infra:node_modules_wiped", payload: { signal: "/home/x/node_modules", reason: "absent" } },
+      "node_modules integrity: /home/x/node_modules — absent"],
+    [{ type: "infra:origin_identity_wrong", payload: { reason: "url mismatch", url: "https://evil" } },
+      "~/hydra origin identity: url mismatch — observed origin https://evil; restore the orchestrator remote from an operator shell and fetch origin"],
+    [{ type: "glm:drainer_sterile", payload: { durationMs: 7200000, thresholdMs: 3600000 } },
+      "GLM drainer sterile: heartbeat live and eligible work queued, but zero drainer PRs — sustained 2h past the 1h threshold; the #3754 partition is hiding glm-eligible work from the Opus lane"],
+    [{ type: "launch:pause_forgotten", payload: { a: 1 } },
+      'launch:pause_forgotten: {"a":1}'],
+  ];
+  for (const [event, expected] of cases) {
+    assert.equal(formatAlertMessage(event), expected, event.type);
+  }
+});
+
+test("formatAlertMessage: codex-era types retired by issue #5044 reach only the default arm", () => {
+  for (const type of ["cycle:failed", "cycle:operator_blocked", "scheduler:error", "research:completed"]) {
+    assert.equal(formatAlertMessage({ type, payload: { a: 1 } }), `${type}: {"a":1}`);
+  }
 });

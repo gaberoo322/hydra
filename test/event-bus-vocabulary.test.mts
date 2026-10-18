@@ -26,38 +26,13 @@ import type {
 } from "../src/event-bus-vocabulary.ts";
 import { formatMessage } from "../src/notify-format.ts";
 
-// The event-type member names the module is contracted to expose (issue #3271
-// enumerates "12+ event types"). Pinned here so a REMOVED or RENAMED member is
-// caught even if nothing else in the suite references it by name.
+// The event-type member names the module is contracted to expose. Pinned here
+// so a REMOVED or RENAMED member is caught even if nothing else in the suite
+// references it by name. Issue #5044 cut the map to the 11 members with a live
+// producer (see the live-producer audit describe at the bottom of this file).
 const EXPECTED_MEMBERS = [
   // Cycle lifecycle
-  "CYCLE_START",
   "CYCLE_COMPLETED",
-  "CYCLE_STALLED",
-  "CYCLE_FAILED",
-  "CYCLE_AUTO_KILLED",
-  "CYCLE_STALE_PRIORITIES",
-  "CYCLE_ROLLBACK",
-  "CYCLE_ROLLBACK_FAILED",
-  "CYCLE_ROLLED_BACK",
-  "CYCLE_OPERATOR_BLOCKED",
-  // Task events
-  "TASK_REJECTED",
-  "TASK_VERIFICATION_FAILED",
-  "TASK_DRIFT_DETECTED",
-  "TASK_MERGE_FAILED",
-  "TASK_SHELVED",
-  // Scheduler
-  "SCHEDULER_STOPPED",
-  "SCHEDULER_BACKLOG_EMPTY",
-  "SCHEDULER_PAUSED_REPETITION",
-  "SCHEDULER_ERROR",
-  // Research / Architect
-  "RESEARCH_COMPLETED",
-  "ARCHITECT_REVIEW_COMPLETED",
-  // Deploy
-  "DEPLOY_COMPLETED",
-  "DEPLOY_FAILED",
   // DLQ / consumer health
   "DLQ_ALERT",
   "DLQ_ENTRY",
@@ -74,25 +49,40 @@ const EXPECTED_MEMBERS = [
   "INFRA_ORIGIN_IDENTITY_WRONG",
   // GLM drainer health signals (issue #3868)
   "GLM_DRAINER_STERILE",
-  // Learning-system pattern alerts
-  "PATTERN_LOW_MERGE_RATE",
-  "PATTERN_CONSECUTIVE_FAILURES",
-  "PATTERN_RECURRING_REGRESSIONS",
-  "PATTERN_ANCHOR_STUCK",
-  "PATTERN_TEST_DECLINE",
-  "PATTERN_HIGH_ABANDONMENT",
 ] as const;
 
 const MEMBER_NAMES = Object.keys(NOTIFICATION_EVENT_TYPES);
 const WIRE_VALUES = Object.values(NOTIFICATION_EVENT_TYPES);
 
 describe("event-bus-vocabulary — NOTIFICATION_EVENT_TYPES enum completeness", () => {
-  test("exposes at least the 12 event types the contract promises", () => {
-    // Issue #3271 success criterion: "All 12+ event types are explicitly tested".
-    assert.ok(
-      MEMBER_NAMES.length >= 12,
-      `expected >= 12 event types, got ${MEMBER_NAMES.length}`,
+  test("exposes the 11 live event types (issue #5044)", () => {
+    // Issue #5044 deleted the 28 codex-era members with no live producer; the
+    // live-producer audit below keeps every remaining member honest.
+    assert.equal(
+      MEMBER_NAMES.length,
+      11,
+      `expected 11 event types, got ${MEMBER_NAMES.length}`,
     );
+  });
+
+  test("the codex-era members retired by issue #5044 stay deleted", () => {
+    const retired = [
+      "CYCLE_START", "CYCLE_STALLED", "CYCLE_FAILED", "CYCLE_AUTO_KILLED",
+      "CYCLE_STALE_PRIORITIES", "CYCLE_ROLLBACK", "CYCLE_ROLLBACK_FAILED",
+      "CYCLE_ROLLED_BACK", "CYCLE_OPERATOR_BLOCKED",
+      "TASK_REJECTED", "TASK_VERIFICATION_FAILED", "TASK_DRIFT_DETECTED",
+      "TASK_MERGE_FAILED", "TASK_SHELVED",
+      "SCHEDULER_STOPPED", "SCHEDULER_BACKLOG_EMPTY",
+      "SCHEDULER_PAUSED_REPETITION", "SCHEDULER_ERROR",
+      "RESEARCH_COMPLETED", "ARCHITECT_REVIEW_COMPLETED",
+      "DEPLOY_COMPLETED", "DEPLOY_FAILED",
+      "PATTERN_LOW_MERGE_RATE", "PATTERN_CONSECUTIVE_FAILURES",
+      "PATTERN_RECURRING_REGRESSIONS", "PATTERN_ANCHOR_STUCK",
+      "PATTERN_TEST_DECLINE", "PATTERN_HIGH_ABANDONMENT",
+    ];
+    assert.equal(retired.length, 28);
+    const present = retired.filter((m) => MEMBER_NAMES.includes(m));
+    assert.deepEqual(present, [], `retired members reintroduced: ${present.join(", ")}`);
   });
 
   test("exposes exactly the expected member set (no additions or removals)", () => {
@@ -155,19 +145,18 @@ describe("event-bus-vocabulary — discriminator string shape", () => {
     // Spot-pins for the discriminators the notes in the module call out as
     // "byte-identical to the pre-extraction event-bus.ts definitions". A silent
     // rename of any of these breaks live consumers already parsing the stream.
-    assert.equal(NOTIFICATION_EVENT_TYPES.CYCLE_START, "cycle:start");
     assert.equal(NOTIFICATION_EVENT_TYPES.CYCLE_COMPLETED, "cycle:completed");
-    assert.equal(NOTIFICATION_EVENT_TYPES.CYCLE_STALLED, "cycle:stalled");
-    assert.equal(NOTIFICATION_EVENT_TYPES.TASK_MERGE_FAILED, "task:merge_failed");
-    assert.equal(NOTIFICATION_EVENT_TYPES.DEPLOY_FAILED, "deploy:failed");
+    assert.equal(NOTIFICATION_EVENT_TYPES.CONSUMER_DEAD, "consumer:dead");
+    assert.equal(NOTIFICATION_EVENT_TYPES.DLQ_ENTRY, "dlq:entry");
+    assert.equal(NOTIFICATION_EVENT_TYPES.LAUNCH_QUOTA_STRETCH, "launch:quota_stretch");
     assert.equal(NOTIFICATION_EVENT_TYPES.DLQ_ALERT, "dlq:alert");
     assert.equal(
       NOTIFICATION_EVENT_TYPES.REVIEW_PICKUP_READY,
       "review:pickup_ready",
     );
     assert.equal(
-      NOTIFICATION_EVENT_TYPES.PATTERN_LOW_MERGE_RATE,
-      "pattern:low_merge_rate",
+      NOTIFICATION_EVENT_TYPES.INFRA_ORIGIN_IDENTITY_WRONG,
+      "infra:origin_identity_wrong",
     );
   });
 
@@ -191,7 +180,7 @@ describe("event-bus-vocabulary — NotificationEventType union", () => {
     // every union member is one of the map values. If the union stopped being
     // derived from the map (e.g. a hand-maintained literal drifted), one of
     // these assignments would fail `npm run typecheck`.
-    const fromValue: NotificationEventType = NOTIFICATION_EVENT_TYPES.CYCLE_START;
+    const fromValue: NotificationEventType = NOTIFICATION_EVENT_TYPES.CYCLE_COMPLETED;
     const anyValue: NotificationEventType = WIRE_VALUES[0] as NotificationEventType;
     assert.equal(typeof fromValue, "string");
     assert.equal(typeof anyValue, "string");
