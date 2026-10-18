@@ -127,6 +127,13 @@ those, read the full transcript:
 curl -sf "http://localhost:4000/api/dispatches/<id>/transcript"
 ```
 
+If the route 404s (`dispatch-not-found` — the registry row expired or was never
+written), fall back to the on-disk JSONL:
+`<projects-root>/<encoded-parent-cwd>/<parent-session>/subagents/agent-<hash>.jsonl`
+(`~/.claude/projects/-home-gabe-hydra/<parent-session>/subagents/agent-<hash>.jsonl`;
+the `<hash>` is the bare agent id, the same value as `slot.task_id`). Do not let
+a 404 block the retro.
+
 This is the cost bound: a clean run flags nothing and reads no transcripts. A
 happy-path (merged, regression-free) dispatch is never drilled.
 
