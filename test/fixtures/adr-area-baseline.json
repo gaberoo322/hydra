@@ -5,7 +5,7 @@
   "src/cost/": 20328,
   "src/autopilot/": 49420,
   "src/taxonomy/": 33529,
-  "src/scheduler/": 25833,
+  "src/scheduler/": 20409,
   "src/pattern-memory/": 0,
   "src/reflections/": 5611,
   "src/metrics/, src/aggregators/": 26596,
@@ -26,5 +26,6 @@
   "process / policy (no code area)": 38154,
   "test/, scripts/test/ (the suite itself)": 5978,
   "src/glm/, scripts/glm/": 39748,
-  "scripts/sync-skills.sh, src/skills/ (skill generation)": 7008
+  "scripts/sync-skills.sh, src/skills/ (skill generation)": 7008,
+  "src/notification/, src/notify.ts, src/digest.ts": 5424
 }
