@@ -159,8 +159,28 @@ describe("formatCriticalAlert", () => {
 
   it("falls back to a generic alert for unknown types", () => {
     const out = formatCriticalAlert({ type: "something:weird", payload: { a: 1 } });
-    assert.match(out, /⚠️ \*something:weird\*/);
+    assert.match(out, /⚠️ \*Critical alert\* `something:weird`/);
     assert.match(out, /"a":1/);
+  });
+
+  // Issue #5040: the generic arm used to put the raw type + JSON payload into
+  // legacy Markdown, so `node_modules` left an unpaired `_` and Telegram
+  // rejected the alert with a 400. Outside code spans/blocks, every `*` and
+  // `_` must now pair up.
+  it("keeps Markdown entities balanced for underscore/asterisk-laden alerts", () => {
+    const cases = [
+      { type: "infra:node_modules_wiped", payload: { service: "hydra-orchestrator", path: "/home/x/node_modules" } },
+      { type: "launch:quota_stretch", payload: { note: "5h *cap* at 90%", streak_count: 3 } },
+      { type: "glm:drainer_sterile", payload: { detail: "a`b`c" } },
+    ];
+    for (const ev of cases) {
+      const out = formatCriticalAlert(ev);
+      const outsideCode = out.replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "");
+      assert.equal((outsideCode.match(/\*/g) ?? []).length % 2, 0, `unbalanced * in ${ev.type}: ${out}`);
+      assert.equal((outsideCode.match(/_/g) ?? []).length % 2, 0, `unbalanced _ in ${ev.type}: ${out}`);
+      assert.equal((out.match(/`/g) ?? []).length % 2, 0, `unbalanced backtick in ${ev.type}: ${out}`);
+      assert.ok(out.includes(ev.type), `type missing from ${out}`);
+    }
   });
 });
 
