@@ -467,7 +467,15 @@ export function formatCriticalAlert(event: CriticalAlertEvent): string {
       return `🔁 *Scheduler Paused — Repetitive Work*\n${payload.reason}\n\nRecent tasks:\n${(payload.recentTitles || []).map(t => `• ${t.slice(0, 70)}`).join("\n")}\n\n${payload.suggestion}`;
     case E.SCHEDULER_BACKLOG_EMPTY:
       return `📭 *Backlog Empty*\n${payload.message}\n\n${payload.suggestion}`;
-    default:
-      return `⚠️ *${type}*\n${JSON.stringify(payload).slice(0, 300)}`;
+    default: {
+      // Legacy Telegram Markdown parses no entities inside code, so the raw
+      // type and payload go in a code span / block: an unpaired `_` or `*`
+      // (`node_modules`, `quota_stretch`) can no longer get the alert
+      // rejected with a 400 (issue #5040). A backtick would end the code
+      // early, so it is swapped for a quote.
+      const safeType = type.replace(/`/g, "'");
+      const json = JSON.stringify(payload).slice(0, 300).replace(/`/g, "'");
+      return `⚠️ *Critical alert* \`${safeType}\`\n\`\`\`\n${json}\n\`\`\``;
+    }
   }
 }
