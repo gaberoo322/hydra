@@ -165,51 +165,63 @@
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 140
+          "line": 145
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 141
+          "line": 146
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 153
+          "line": 148
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 154
+          "line": 164
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 155
+          "line": 165
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 182
+          "line": 166
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 188
+          "line": 193
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 189
+          "line": 199
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 191
+          "line": 200
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 192
+          "line": 202
         },
         {
           "path": "scripts/deploy.sh",
           "line": 203
         },
         {
+          "path": "scripts/deploy.sh",
+          "line": 214
+        },
+        {
           "path": "scripts/glm-beachhead-report.sh",
           "line": 227
+        },
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 1334
+        },
+        {
+          "path": "scripts/glm/drainer-loop.sh",
+          "line": 90
         },
         {
           "path": "scripts/headroom-spike.sh",
@@ -1601,13 +1613,13 @@
       "readSites": [
         {
           "path": "scripts/deploy.sh",
-          "line": 164
+          "line": 175
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/deploy.sh",
-        "line": 164
+        "line": 175
       }
     },
     {
@@ -2108,6 +2120,28 @@
       "source": {
         "path": "scripts/glm-beachhead-report.sh",
         "line": 229
+      }
+    },
+    {
+      "name": "HYDRA_GLM_DISABLED_FILE",
+      "readSites": [
+        {
+          "path": "scripts/deploy.sh",
+          "line": 148
+        },
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 1334
+        },
+        {
+          "path": "scripts/glm/drainer-loop.sh",
+          "line": 90
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/deploy.sh",
+        "line": 148
       }
     },
     {

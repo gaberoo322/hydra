@@ -23,12 +23,12 @@
     {
       "family": "adrs",
       "metric": "rows",
-      "value": 44
+      "value": 45
     },
     {
       "family": "areas",
       "metric": "live",
-      "value": 26
+      "value": 27
     },
     {
       "family": "areas",
@@ -38,7 +38,7 @@
     {
       "family": "areas",
       "metric": "rows",
-      "value": 28
+      "value": 29
     },
     {
       "family": "chores",
@@ -78,7 +78,7 @@
     {
       "family": "corpus",
       "metric": "adr",
-      "value": 44
+      "value": 45
     },
     {
       "family": "corpus",
@@ -88,7 +88,7 @@
     {
       "family": "corpus",
       "metric": "living",
-      "value": 21
+      "value": 22
     },
     {
       "family": "corpus",
@@ -103,12 +103,12 @@
     {
       "family": "corpus",
       "metric": "rows",
-      "value": 117
+      "value": 119
     },
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 254
+      "value": 255
     },
     {
       "family": "pages",

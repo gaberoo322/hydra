@@ -183,6 +183,86 @@ if [ -z "$tool" ]; then
   exit 0
 fi
 
+# ---------------------------------------------------------------------------
+# Child identity (issue #4965). Inside an Agent-tool child the payload's
+# `session_id` / `transcript_path` belong to the PARENT; only `agent_id` is
+# per-child (present ONLY inside a subagent). So:
+#   - No agent_id (operator session, autopilot parent main thread) -> exit 0
+#     here, before any XADD / docker exec / curl / transcript read. Registering
+#     this hook project-wide therefore costs main-thread sessions nothing.
+#   - The child transcript is `agent_transcript_path` when the harness supplies
+#     it, else `${transcript_path%.jsonl}/subagents/agent-${agent_id}.jsonl`.
+#   - The registry key + once-per-dispatch marker are keyed on agent_id (never
+#     session_id, which every sibling child shares).
+# ---------------------------------------------------------------------------
+agent_id=""
+parent_session_id=""
+child_transcript=""
+project_dir=""
+if command -v jq >/dev/null 2>&1 && [ -n "$payload" ]; then
+  agent_id="$(printf '%s' "$payload" | jq -r '(.agent_id // "") | tostring' 2>/dev/null || printf '')"
+  parent_session_id="$(printf '%s' "$payload" | jq -r '(.session_id // .sessionId // "") | tostring' 2>/dev/null || printf '')"
+  project_dir="$(printf '%s' "$payload" | jq -r '(.cwd // .project_dir // "") | tostring' 2>/dev/null || printf '')"
+  child_transcript="$(printf '%s' "$payload" | jq -r '(.agent_transcript_path // "") | tostring' 2>/dev/null || printf '')"
+  if [ -z "$child_transcript" ]; then
+    parent_transcript="$(printf '%s' "$payload" | jq -r '(.transcript_path // .transcriptPath // "") | tostring' 2>/dev/null || printf '')"
+    if [ -n "$parent_transcript" ] && [ -n "$agent_id" ]; then
+      child_transcript="${parent_transcript%.jsonl}/subagents/agent-${agent_id}.jsonl"
+    fi
+  fi
+fi
+
+[ -n "$agent_id" ] || exit 0
+if ! [[ "$agent_id" =~ ^[0-9a-f]{8,40}$ ]]; then
+  warn "agent_id not hex-shaped; skipping"
+  exit 0
+fi
+task_id="$agent_id"
+
+# Resolve the child's dispatch sentinel (cached per agent_id). Sets d_skill,
+# d_dispatch_id, d_run_id and returns 0 when the child is sentinel-bearing;
+# returns 1 otherwise (sentinel-less children write a negative marker so their
+# later tool calls skip the transcript scrape).
+d_skill=""; d_dispatch_id=""; d_run_id=""
+child_marker="${DISPATCH_REGISTER_MARKER_DIR%/}/hydra-dispatch-registered-${agent_id}"
+child_registered=0
+resolve_child_dispatch() {
+  if [ -e "$child_marker" ]; then
+    local first
+    first="$(head -n 1 "$child_marker" 2>/dev/null || printf '')"
+    [ "$first" = "none" ] && return 1
+    IFS=$'\t' read -r d_skill d_dispatch_id d_run_id <<<"$first"
+    if [ -n "$d_skill" ] && [ -n "$d_dispatch_id" ]; then
+      child_registered=1
+      return 0
+    fi
+  fi
+  [ -n "$child_transcript" ] && [ -f "$child_transcript" ] || return 1
+  local hook_dir helper first_user_text sentinel_line
+  hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+  helper="$hook_dir/../../hooks/extract-dispatch-sentinel.sh"
+  [ -f "$helper" ] || { warn "sentinel helper not found at $helper"; return 1; }
+  # shellcheck source=scripts/hooks/extract-dispatch-sentinel.sh
+  . "$helper" 2>/dev/null || { warn "could not source $helper"; return 1; }
+  first_user_text="$(extract_first_user_text "$child_transcript")"
+  [ -n "$first_user_text" ] || return 1
+  sentinel_line="$(extract_sentinel_line "$first_user_text")"
+  if [ -z "$sentinel_line" ]; then
+    printf 'none\n' > "$child_marker" 2>/dev/null || true
+    return 1
+  fi
+  d_skill="$(extract_sentinel_field "$sentinel_line" skill)"
+  d_dispatch_id="$(extract_sentinel_field "$sentinel_line" dispatchId)"
+  d_run_id="$(extract_sentinel_field "$sentinel_line" runId)"
+  if [ -z "$d_skill" ] || [ -z "$d_dispatch_id" ]; then
+    warn "malformed sentinel (skill='$d_skill' dispatchId='$d_dispatch_id')"
+    return 1
+  fi
+  return 0
+}
+
+resolve_child_dispatch || exit 0
+
 # Slot derivation: walk known prefixes on description.
 slot="unknown"
 if [ -n "$description" ]; then
@@ -196,7 +276,22 @@ if [ -n "$description" ]; then
   done
 fi
 
-# Fall back to subagent_type → slot mapping when description didn't match.
+# Sentinel-derived slot: the dispatchId `-t<N>-<class>` suffix.
+if [ "$slot" = "unknown" ]; then
+  case "$d_dispatch_id" in
+    *-t[0-9]*-*)
+      suffix_class="${d_dispatch_id#*-t[0-9]*-}"
+      for s in "${KNOWN_SLOTS[@]}"; do
+        if [ "$suffix_class" = "$s" ]; then slot="$s"; break; fi
+      done
+      ;;
+  esac
+fi
+
+# Fall back to subagent_type (else the sentinel's skill) → slot mapping.
+if [ "$slot" = "unknown" ] && [ -z "$subagent_type" ]; then
+  subagent_type="$d_skill"
+fi
 if [ "$slot" = "unknown" ] && [ -n "$subagent_type" ]; then
   case "$subagent_type" in
     hydra-dev)            slot="dev_orch" ;;
@@ -358,77 +453,27 @@ fi
 # existing /api/dispatches/subagent body. Every failure path exits 0.
 # ===========================================================================
 register_subagent_dispatch() {
-  # jq is required to read the payload + build the body; without it, no-op.
+  # jq is required to build the body; without it, no-op.
   command -v jq >/dev/null 2>&1 || { warn "jq not found — skipping dispatch registration"; return 0; }
-  [ -n "$payload" ] || return 0
-
-  # PostToolUse carries the child's own session_id, transcript_path, and cwd at
-  # the top level (same shape SessionStart uses). These are DISTINCT from the
-  # `task_id` derived above (which the slot-event uses): the registry is keyed
-  # on the harness session_id, the JSONL filename stem.
-  local session_id transcript_path project_dir
-  session_id="$(printf '%s' "$payload" | jq -r '(.session_id // .sessionId // "") | tostring' 2>/dev/null || printf '')"
-  transcript_path="$(printf '%s' "$payload" | jq -r '(.transcript_path // .transcriptPath // "") | tostring' 2>/dev/null || printf '')"
-  project_dir="$(printf '%s' "$payload" | jq -r '(.cwd // .project_dir // "") | tostring' 2>/dev/null || printf '')"
-
-  [ -n "$session_id" ] || { warn "no session_id in payload — skipping dispatch registration"; return 0; }
-  if [ -z "$transcript_path" ] || [ ! -f "$transcript_path" ]; then
-    warn "transcript not found ($transcript_path) — skipping dispatch registration"
-    return 0
-  fi
-
-  # Once-per-session guard. The registry write is idempotent (ZADD without
-  # XX/NX, keyed on sessionId), so re-registering on every tool call is a
-  # harmless no-op — this marker is purely an optimisation to avoid re-scraping
-  # the transcript and re-POSTing on every subsequent tool call. Best-effort:
-  # if we can't create the marker (read-only TMPDIR), we just register again,
-  # which is safe.
-  local marker
-  marker="${DISPATCH_REGISTER_MARKER_DIR%/}/hydra-dispatch-registered-${session_id}"
-  if [ -e "$marker" ]; then
-    return 0
-  fi
-
-  # Source the shared sentinel grammar relative to THIS hook's location. The
-  # helper lives under scripts/hooks/, this hook under scripts/autopilot/hooks/.
-  local hook_dir helper
-  hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-  helper="$hook_dir/../../hooks/extract-dispatch-sentinel.sh"
-  if [ ! -f "$helper" ]; then
-    warn "sentinel helper not found at $helper — skipping dispatch registration"
-    return 0
-  fi
-  # shellcheck source=scripts/hooks/extract-dispatch-sentinel.sh
-  . "$helper" 2>/dev/null || { warn "could not source $helper — skipping dispatch registration"; return 0; }
-
-  local first_user_text sentinel_line d_skill d_dispatch_id d_run_id
-  first_user_text="$(extract_first_user_text "$transcript_path")"
-  [ -n "$first_user_text" ] || { warn "no first user message — skipping dispatch registration"; return 0; }
-
-  sentinel_line="$(extract_sentinel_line "$first_user_text")"
-  # No sentinel — interactive operator subagent / non-dispatch session. Silent
-  # no-op (don't even write the marker; a later resume might carry one).
-  [ -n "$sentinel_line" ] || return 0
-
-  d_skill="$(extract_sentinel_field "$sentinel_line" skill)"
-  d_dispatch_id="$(extract_sentinel_field "$sentinel_line" dispatchId)"
-  d_run_id="$(extract_sentinel_field "$sentinel_line" runId)"
-
-  if [ -z "$d_skill" ] || [ -z "$d_dispatch_id" ]; then
-    warn "malformed sentinel (skill='$d_skill' dispatchId='$d_dispatch_id') — skipping dispatch registration"
-    return 0
-  fi
+  # The sentinel was resolved (and the once-per-agent marker consulted) up top
+  # by resolve_child_dispatch. Already registered -> nothing to do.
+  [ "$child_registered" = "1" ] && return 0
 
   local started_at body
   started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  # Registry key = the bare agent_id hash (matches reap's slot.task_id
+  # convention); the parent's session_id rides along as parentSessionId so the
+  # transcript route can find <parent>/subagents/agent-<id>.jsonl.
   body="$(jq -nc \
-    --arg sessionId "$session_id" \
+    --arg sessionId "$agent_id" \
+    --arg parentSessionId "$parent_session_id" \
     --arg skill "$d_skill" \
     --arg dispatchId "$d_dispatch_id" \
     --arg startedAt "$started_at" \
     --arg runId "$d_run_id" \
     --arg projectDir "$project_dir" \
     '{sessionId: $sessionId, skill: $skill, dispatchId: $dispatchId, startedAt: $startedAt}
+     + (if ($parentSessionId | length) > 0 then {parentSessionId: $parentSessionId} else {} end)
      + (if ($runId | length) > 0 then {runId: $runId} else {} end)
      + (if ($projectDir | length) > 0 then {projectDir: $projectDir} else {} end)' \
     2>/dev/null || printf '')"
@@ -446,7 +491,7 @@ register_subagent_dispatch() {
   # Registered. Drop the once-per-session marker so subsequent tool calls in
   # this session skip the scrape+POST. Best-effort: a failure here just means
   # we re-register (idempotent) on the next tool call.
-  : > "$marker" 2>/dev/null || true
+  printf '%s\t%s\t%s\n' "$d_skill" "$d_dispatch_id" "$d_run_id" > "$child_marker" 2>/dev/null || true
   return 0
 }
 

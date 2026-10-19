@@ -84,6 +84,10 @@ LOCKFILE="${HYDRA_GLM_DRAINER_LOCKFILE:-/tmp/hydra-glm-drainer.lock}"
 # bash's one remaining responsibility for CAP_DIR is making it exist; the gate
 # (read side) and finish (write side) phases own every counter file in it.
 CAP_DIR="${HYDRA_GLM_DRAINER_CAP_DIR:-/tmp}"
+# The operator off switch (src/glm/disabled.ts owns the rule; same path here):
+# while this file exists the lane does nothing — not even the lock-held
+# heartbeat — so the heartbeat lapses and the Claude lane takes the work back.
+DISABLED_FILE="${HYDRA_GLM_DISABLED_FILE:-${HOME:+$HOME/.config/hydra-glm/disabled}}"
 
 log() {
   echo "hydra-glm-drainer: $*" >&2
@@ -122,6 +126,11 @@ acquire_lock_or_heartbeat_and_exit() {
 }
 
 main() {
+  if [[ -n "$DISABLED_FILE" && -e "$DISABLED_FILE" ]]; then
+    log "lane disabled by operator (sentinel $DISABLED_FILE present) — skip (no heartbeat)"
+    exit 0
+  fi
+
   mkdir -p "$CAP_DIR" 2>/dev/null || true
 
   acquire_lock_or_heartbeat_and_exit

@@ -83,8 +83,8 @@ describe("DigestAccumulator — critical-event bypass", () => {
     const { acc, sent } = makeAccumulator(DAYTIME);
 
     acc.recordEvent({
-      type: E.CYCLE_ROLLBACK_FAILED,
-      payload: { cycleId: "c1", error: "boom" },
+      type: E.INFRA_NODE_MODULES_WIPED,
+      payload: { signal: "/home/x/node_modules", reason: "absent" },
     });
 
     // recordEvent fires the immediate send synchronously (fire-and-forget);
@@ -99,10 +99,12 @@ describe("DigestAccumulator — critical-event bypass", () => {
 
   it("treats every member of the critical set as a bypass", async () => {
     const critical = [
-      E.CYCLE_ROLLBACK_FAILED,
-      E.SCHEDULER_STOPPED,
-      E.SCHEDULER_PAUSED_REPETITION,
-      E.SCHEDULER_BACKLOG_EMPTY,
+      E.LAUNCH_QUOTA_STRETCH,
+      E.LAUNCH_LATENCY_BREACH,
+      E.LAUNCH_PAUSE_FORGOTTEN,
+      E.INFRA_NODE_MODULES_WIPED,
+      E.INFRA_ORIGIN_IDENTITY_WRONG,
+      E.GLM_DRAINER_STERILE,
     ];
 
     for (const type of critical) {
@@ -128,7 +130,7 @@ describe("DigestAccumulator — quiet-hours skip", () => {
   it("critical events still send during quiet hours", async () => {
     const { acc, sent } = makeAccumulator(NIGHT);
 
-    acc.recordEvent({ type: E.CYCLE_ROLLBACK_FAILED, payload: {} });
+    acc.recordEvent({ type: E.LAUNCH_QUOTA_STRETCH, payload: {} });
     await Promise.resolve();
 
     assert.equal(sent.length, 1);
@@ -185,10 +187,12 @@ describe("shouldSendDigest — flush-threshold policy (issue #2212)", () => {
 describe("CRITICAL_EVENT_TYPES — named bypass set (issue #2212)", () => {
   it("includes every critical event type that bypasses the digest", () => {
     for (const type of [
-      E.CYCLE_ROLLBACK_FAILED,
-      E.SCHEDULER_STOPPED,
-      E.SCHEDULER_PAUSED_REPETITION,
-      E.SCHEDULER_BACKLOG_EMPTY,
+      E.LAUNCH_QUOTA_STRETCH,
+      E.LAUNCH_LATENCY_BREACH,
+      E.LAUNCH_PAUSE_FORGOTTEN,
+      E.INFRA_NODE_MODULES_WIPED,
+      E.INFRA_ORIGIN_IDENTITY_WRONG,
+      E.GLM_DRAINER_STERILE,
     ]) {
       assert.ok(
         CRITICAL_EVENT_TYPES.includes(type),

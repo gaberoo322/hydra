@@ -248,6 +248,8 @@ export interface SubagentDispatch {
   dispatchId: string;
   startedAt: string;
   runId?: string;
+  /** Parent session id for Agent-tool children (#4965); `sessionId` is then the bare agent hash. */
+  parentSessionId?: string;
   projectDir?: string;
   currentStep?: string;
   issueRef?: string;
@@ -273,6 +275,7 @@ export async function registerSubagentDispatch(
     startedAt: dispatch.startedAt,
   };
   if (dispatch.runId !== undefined) fields.runId = dispatch.runId;
+  if (dispatch.parentSessionId !== undefined) fields.parentSessionId = dispatch.parentSessionId;
   if (dispatch.projectDir !== undefined) fields.projectDir = dispatch.projectDir;
   if (dispatch.currentStep !== undefined) fields.currentStep = dispatch.currentStep;
   if (dispatch.issueRef !== undefined) fields.issueRef = dispatch.issueRef;
@@ -369,6 +372,7 @@ export function projectSubagentRow(
     startedAt: row.startedAt,
   };
   if (row.runId) dispatch.runId = row.runId;
+  if (row.parentSessionId) dispatch.parentSessionId = row.parentSessionId;
   if (row.projectDir) dispatch.projectDir = row.projectDir;
   if (row.currentStep) dispatch.currentStep = row.currentStep;
   if (row.issueRef) dispatch.issueRef = row.issueRef;

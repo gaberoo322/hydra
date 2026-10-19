@@ -1,0 +1,1 @@
+- fix: critical Telegram alerts no longer get rejected by Telegram (400 `can't parse entities`). The generic critical-alert arm now puts the raw type and payload in code, and the sender resends as plain text once if Telegram still rejects the Markdown (#5040)
