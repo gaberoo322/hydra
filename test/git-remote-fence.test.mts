@@ -175,11 +175,17 @@ describe("git-remote-fence", () => {
       assert.equal(run(`cd ${otherRepo} | ${set}`, protectedRepo).status, 2);
       assert.equal(run(`cd ${otherRepo} & ${set}`, protectedRepo).status, 2);
       assert.equal(run(`cd ${otherRepo} && true | ${set}`, protectedRepo).status, 0);
+      // guarded-cd idiom: `cd X || exit 1` still runs git in X
+      assert.equal(run(`cd ${protectedRepo} || exit 1; ${set}`, otherRepo).status, 2);
+      assert.equal(run(`cd ${otherRepo} || exit 1; ${set}`, protectedRepo).status, 0);
     });
 
     it("a $(...) / backtick value in -C is still a mutation (not an allow)", () => {
       assert.equal(run(`git -C $(pwd) remote set-url origin ${url}`, protectedRepo).status, 2);
       assert.equal(run(`git -C \`pwd\` remote set-url origin ${url}`, protectedRepo).status, 2);
+      // nesting deeper than the WORD regex balances fails closed
+      assert.equal(run(`git -C $(echo $(echo $(echo $(pwd)))) remote set-url origin ${url}`, protectedRepo).status, 2);
+      assert.equal(run(`git -C $(echo $(echo $(echo $(pwd)))) remote -v`, protectedRepo).status, 0);
     });
 
     it("INV-4: a word is all its adjacent fragments", () => {

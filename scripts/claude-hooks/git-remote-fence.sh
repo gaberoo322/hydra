@@ -150,6 +150,14 @@ mutations = [(m.start(), m.group(0)) for m in REMOTE_MUT.finditer(cmd)]
 for m in CONFIG.finditer(cmd):
     if config_is_write(m.group(1)):
         mutations.append((m.start(), m.group(0)))
+# Fail closed on $(...) nesting deeper than WORD's regex can balance: a loose
+# `... remote <mutation>` match not covered by any strict match is still a
+# mutation (its prefix resolves unparseably, so the session cwd decides).
+DEEP_SUBST = re.compile(r"\$\([^()]*\([^()]*\([^()]*\(")
+if DEEP_SUBST.search(cmd):
+    for lm in re.finditer(r"\bgit\b[^\n]*?\bremote\s+(?:set-url|add|remove|rm|rename)\b", cmd):
+        if not any(ms <= lm.start() <= ms + len(mt) for ms, mt in mutations):
+            mutations.append((lm.start(), lm.group(0)))
 hit = bool(mutations)
 
 if not hit:
@@ -245,9 +253,10 @@ def effective_cd(pos):
     last = None
     for cm in CD.finditer(cmd[:pos]):
         d = DEPTHS[cm.end()]
-        # `cd X | git ...` / `cd X & git ...` / `cd X || git ...`: the cd runs
-        # in a pipeline stage or background job, not the shell that runs git.
-        if re.match(r"[ \t]*(?:\|(?!\|)|\|\||&(?!&))", cmd[cm.end():]):
+        # `cd X | git ...` / `cd X & git ...`: the cd runs in a pipeline stage
+        # or background job, not the shell that runs git. `cd X || ...` is NOT
+        # skipped: the guarded-cd idiom (`cd X || exit 1; git ...`) runs git in X.
+        if re.match(r"[ \t]*(?:\|(?!\|)|&(?!&))", cmd[cm.end():]):
             continue
         if min(DEPTHS[cm.end():pos + 1]) >= d:
             last = cm.group(1)
