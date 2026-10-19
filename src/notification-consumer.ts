@@ -36,7 +36,11 @@ import {
   NOTIFICATION_EVENT_TYPES as E,
   type NotificationEventPayload,
 } from "./event-bus-vocabulary.ts";
-import { sendNotification } from "./notify.ts";
+import {
+  operatorChannel,
+  messageFromEvent,
+  type OperatorChannel,
+} from "./operator-channel/index.ts";
 import { recordEvent } from "./digest.ts";
 import { pushAlert } from "./redis/alerts.ts";
 import { reactToCycleCompleted } from "./notification/cycle-completed-reactor.ts";
@@ -51,6 +55,8 @@ import { logger } from "./logger.ts";
 
 export const MAX_CONSUMER_RESTARTS = 5;
 export const BACKOFF_BASE_MS = 5000;
+
+const CONSUMER_NAMES = ["notifications", "dlq", "slot-events-bridge", "recs-engine"] as const;
 
 /**
  * A bus-published event as the notification consumers observe it. Loosely
@@ -103,6 +109,7 @@ export async function startConsumerWithRecovery(
   name: string,
   startFn: () => Promise<unknown>,
   sleep: Sleep = realSleep,
+  channel: Pick<OperatorChannel, "page"> = operatorChannel,
 ): Promise<void> {
   let restarts = 0;
   while (true) {
@@ -117,10 +124,17 @@ export async function startConsumerWithRecovery(
       );
       if (restarts > MAX_CONSUMER_RESTARTS) {
         logger.error({ name, restarts }, "[Consumer] exceeded max restarts — giving up");
-        await sendNotification({
-          type: E.CONSUMER_DEAD,
-          payload: { consumer: name, error: err.message, restarts },
-        });
+        // A dead consumer is a Page (ADR-0045), deduped per consumer name.
+        await channel
+          .page(
+            messageFromEvent({
+              type: E.CONSUMER_DEAD,
+              payload: { consumer: name, error: err.message, restarts },
+            }),
+          )
+          .catch((pageErr) =>
+            logger.error({ name, err: pageErr }, "[Consumer] failed to page consumer:dead"),
+          );
         break;
       }
       const delay = BACKOFF_BASE_MS * restarts;
@@ -170,12 +184,27 @@ async function handleNotificationEvent(event: NotificationEvent): Promise<void> 
  * delegates to — index.ts retains process lifecycle, this Module owns
  * consumer registration + grammar.
  */
-export function startConsumers(eventBus: EventBus): void {
+export function startConsumers(
+  eventBus: EventBus,
+  channel: Pick<OperatorChannel, "page" | "brief" | "resolve"> = operatorChannel,
+): void {
+  // A restart means the consumers are alive again: publish the one "recovered"
+  // message for any consumer:dead page still open (no-op when none is).
+  for (const consumerName of CONSUMER_NAMES) {
+    channel
+      .resolve(`consumer:dead:${consumerName}`, `Consumer ${consumerName} is running again`)
+      .catch((err) =>
+        logger.error({ consumerName, err }, "[Consumer] failed to resolve consumer:dead"),
+      );
+  }
+
   // Notification consumer — stores alerts in Redis for dashboard + digest
   startConsumerWithRecovery("notifications", () =>
     eventBus.consume(STREAMS.NOTIFICATIONS, "openclaw", `notify-${process.pid}`,
       (event) => handleNotificationEvent(event as NotificationEvent),
       { count: 1, blockMs: 5000 }),
+    undefined,
+    channel,
   );
 
   // Dead-letter queue consumer — alert and mark tasks failed
@@ -186,11 +215,18 @@ export function startConsumers(eventBus: EventBus): void {
         { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
         "[DLQ] failed event",
       );
-      await sendNotification({
-        type: E.DLQ_ALERT,
-        payload: { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
-      });
+      // Dead-letter is not on the closed page list (ADR-0045): a brief item.
+      await channel
+        .brief(
+          messageFromEvent({
+            type: E.DLQ_ALERT,
+            payload: { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
+          }),
+        )
+        .catch((err) => logger.error({ err }, "[DLQ] failed to append brief item"));
     }, { count: 1, blockMs: 10000 }),
+    undefined,
+    channel,
   );
 
   // Slot-events bridge — re-broadcasts hydra:autopilot:slot-events over WS
@@ -199,6 +235,8 @@ export function startConsumers(eventBus: EventBus): void {
   // unaffected.
   startConsumerWithRecovery("slot-events-bridge", () =>
     startSlotEventsBridge(eventBus),
+    undefined,
+    channel,
   );
 
   // Recommendation engine — reacts to `turn_end` events from slice A
@@ -207,10 +245,12 @@ export function startConsumers(eventBus: EventBus): void {
   // Slice F of /now-pixel observability (#674).
   startConsumerWithRecovery("recs-engine", () =>
     startRecommendationConsumer(eventBus),
+    undefined,
+    channel,
   );
 
   logger.info(
-    { consumers: ["notifications", "dlq", "slot-events-bridge", "recs-engine"] },
+    { consumers: [...CONSUMER_NAMES] },
     "[Hydra] background consumers started",
   );
 }
