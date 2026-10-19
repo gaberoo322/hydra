@@ -624,7 +624,7 @@ describe("usage-tracker", () => {
 
         const trackerWarnings = cap
           .lines()
-          .filter((w) => w.includes("[usage-tracker]") && w.includes("unrecognised model"));
+          .filter((w) => w.includes("[transcript-scan]") && w.includes("unrecognised model"));
         assert.equal(trackerWarnings.length, 1, "expected exactly one warn per scan");
       } finally {
         cap.restore();

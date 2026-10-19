@@ -472,7 +472,7 @@ describe("code-imported catalogue families on /docs (#4594)", () => {
     assert.match(shell, /catalogueKey\(family\), catalogueView\(family, label\)/);
     const table = await readSource("../dashboard/src/pages/docs/Catalogue.jsx");
     assert.ok(table.includes("no route reads this directly"));
-    assert.match(table, /export const COLUMN_SPECS = \{/);
+    assert.match(table, /const COLUMN_SPECS = \{/);
   });
 
   test("ci-gates catalogue is honest about the ci.yml convention (#4595)", async () => {

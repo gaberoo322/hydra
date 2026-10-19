@@ -112,6 +112,10 @@
           "line": 93
         },
         {
+          "path": "scripts/claude-hooks/git-remote-fence.sh",
+          "line": 123
+        },
+        {
           "path": "scripts/deploy-drift-check.ts",
           "line": 55
         },
@@ -161,51 +165,63 @@
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 140
+          "line": 145
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 141
+          "line": 146
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 153
+          "line": 148
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 154
+          "line": 164
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 155
+          "line": 165
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 182
+          "line": 166
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 188
+          "line": 193
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 189
+          "line": 199
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 191
+          "line": 200
         },
         {
           "path": "scripts/deploy.sh",
-          "line": 192
+          "line": 202
         },
         {
           "path": "scripts/deploy.sh",
           "line": 203
         },
         {
+          "path": "scripts/deploy.sh",
+          "line": 214
+        },
+        {
           "path": "scripts/glm-beachhead-report.sh",
           "line": 227
+        },
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 1334
+        },
+        {
+          "path": "scripts/glm/drainer-loop.sh",
+          "line": 90
         },
         {
           "path": "scripts/headroom-spike.sh",
@@ -229,11 +245,11 @@
         },
         {
           "path": "scripts/setup-claude-hooks.sh",
-          "line": 21
+          "line": 23
         },
         {
           "path": "scripts/setup-claude-hooks.sh",
-          "line": 22
+          "line": 24
         },
         {
           "path": "scripts/sync-skills.sh",
@@ -257,7 +273,7 @@
         },
         {
           "path": "src/aggregators/recent-merges.ts",
-          "line": 335
+          "line": 369
         },
         {
           "path": "src/aggregators/service-strip.ts",
@@ -340,17 +356,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 395
+          "line": 401
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 536
+          "line": 542
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/dispatch.sh",
-        "line": 395
+        "line": 401
       }
     },
     {
@@ -370,43 +386,43 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1500
+          "line": 1543
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1662
+          "line": 1712
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1689
+          "line": 1739
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 215
+          "line": 220
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 384
+          "line": 390
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 392
+          "line": 398
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 393
-        },
-        {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 528
-        },
-        {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 533
+          "line": 399
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
           "line": 534
+        },
+        {
+          "path": "scripts/autopilot/dispatch.sh",
+          "line": 539
+        },
+        {
+          "path": "scripts/autopilot/dispatch.sh",
+          "line": 540
         },
         {
           "path": "scripts/autopilot/drain.sh",
@@ -458,21 +474,21 @@
       "readSites": [
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 476
+          "line": 482
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 477
+          "line": 483
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 480
+          "line": 486
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/dispatch.sh",
-        "line": 476
+        "line": 482
       }
     },
     {
@@ -1020,7 +1036,7 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1431
+          "line": 1474
         }
       ],
       "inEnvExample": false,
@@ -1052,25 +1068,21 @@
       "readSites": [
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 213
+          "line": 218
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 216
+          "line": 221
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
           "line": 21
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 217
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/dispatch.sh",
-        "line": 213
+        "line": 218
       }
     },
     {
@@ -1330,7 +1342,7 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1660
+          "line": 1710
         }
       ],
       "inEnvExample": false,
@@ -1416,11 +1428,11 @@
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 384
+          "line": 390
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 528
+          "line": 534
         },
         {
           "path": "src/autopilot/turn-snapshot/hydra-http.ts",
@@ -1601,13 +1613,13 @@
       "readSites": [
         {
           "path": "scripts/deploy.sh",
-          "line": 164
+          "line": 175
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/deploy.sh",
-        "line": 164
+        "line": 175
       }
     },
     {
@@ -2111,17 +2123,39 @@
       }
     },
     {
+      "name": "HYDRA_GLM_DISABLED_FILE",
+      "readSites": [
+        {
+          "path": "scripts/deploy.sh",
+          "line": 148
+        },
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 1334
+        },
+        {
+          "path": "scripts/glm/drainer-loop.sh",
+          "line": 90
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/deploy.sh",
+        "line": 148
+      }
+    },
+    {
       "name": "HYDRA_GLM_DRAINER_CAP_DIR",
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 223
+          "line": 86
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 223
+        "line": 86
       }
     },
     {
@@ -2129,13 +2163,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 218
+          "line": 82
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 218
+        "line": 82
       }
     },
     {
@@ -2143,13 +2177,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 219
+          "line": 83
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 219
+        "line": 83
       }
     },
     {
@@ -2157,27 +2191,13 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 215
+          "line": 80
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 215
-      }
-    },
-    {
-      "name": "HYDRA_GLM_DRAINER_WORKTREE_ROOT",
-      "readSites": [
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 224
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 224
+        "line": 80
       }
     },
     {
@@ -2803,6 +2823,10 @@
         {
           "path": "scripts/hydra-watchdog.sh",
           "line": 1538
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 1983
         }
       ],
       "inEnvExample": false,
@@ -2841,6 +2865,10 @@
         {
           "path": "scripts/hydra-watchdog.sh",
           "line": 1530
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 1981
         }
       ],
       "inEnvExample": false,
@@ -2879,6 +2907,10 @@
         {
           "path": "scripts/hydra-watchdog.sh",
           "line": 1531
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 1982
         }
       ],
       "inEnvExample": false,
@@ -3017,6 +3049,30 @@
           "line": 1082
         },
         {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 1977
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2008
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2026
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2030
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2036
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2045
+        },
+        {
           "path": "src/aggregators/architecture-graph.ts",
           "line": 289
         },
@@ -3026,7 +3082,7 @@
         },
         {
           "path": "src/aggregators/recent-merges.ts",
-          "line": 333
+          "line": 367
         },
         {
           "path": "src/aggregators/service-strip.ts",
@@ -3691,6 +3747,20 @@
       }
     },
     {
+      "name": "HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 1978
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.sh",
+        "line": 1978
+      }
+    },
+    {
       "name": "HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS",
       "readSites": [
         {
@@ -3910,6 +3980,70 @@
       "source": {
         "path": "scripts/hydra-watchdog.sh",
         "line": 1210
+      }
+    },
+    {
+      "name": "HYDRA_WATCHDOG_ORIGIN_MASTER_PRESENT",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2043
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2044
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.sh",
+        "line": 2043
+      }
+    },
+    {
+      "name": "HYDRA_WATCHDOG_ORIGIN_NOTIFY_STREAM",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 1980
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.sh",
+        "line": 1980
+      }
+    },
+    {
+      "name": "HYDRA_WATCHDOG_ORIGIN_STATE_DIR",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 1979
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.sh",
+        "line": 1979
+      }
+    },
+    {
+      "name": "HYDRA_WATCHDOG_ORIGIN_URL",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2024
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2025
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.sh",
+        "line": 2024
       }
     },
     {
@@ -4370,26 +4504,6 @@
         {
           "path": "scripts/glm-beachhead-report.sh",
           "line": 956
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 316
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 336
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 342
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 349
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 573
         }
       ],
       "inEnvExample": false,

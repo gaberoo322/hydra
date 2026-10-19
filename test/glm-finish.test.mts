@@ -809,6 +809,41 @@ describe("runFinish — DRY_RUN walks the would-ladder with ZERO effect calls", 
   });
 });
 
+describe("runFinish — dry-run is hermetic on the fault path (issue #4978 INV-6)", () => {
+  test("a throwing dep under dryRun: finish-fault, zero label edits, one would-release line, never throws", async () => {
+    const h = makeFinishDeps({ dryRun: true, commitCount: 1 });
+    h.deps.now = () => {
+      throw new Error("injected fault");
+    };
+    const r = await runFinish(h.deps, ranInput());
+    assert.equal(r.action, "finish-fault");
+    assert.equal(r.dryRun, true);
+    assert.equal(r.detail, "injected fault");
+    assert.equal(
+      h.calls.filter((c) => c.startsWith("label:")).length,
+      0,
+      `dry-run fault arm must not edit labels:\n${h.calls.join("\n")}`,
+    );
+    assert.ok(
+      h.logs.some((l) => l.includes("would-release issue #77 (in-progress -> ready-for-agent, withhold=false, DRY_RUN=1)")),
+      `expected would-release line in:\n${h.logs.join("\n")}`,
+    );
+  });
+
+  test("a throwing log sink on top of a fault under dryRun still returns finish-fault", async () => {
+    const h = makeFinishDeps({ dryRun: true, commitCount: 1 });
+    h.deps.now = () => {
+      throw new Error("injected fault");
+    };
+    h.deps.log = () => {
+      throw new Error("injected log failure");
+    };
+    const r = await runFinish(h.deps, ranInput());
+    assert.equal(r.action, "finish-fault");
+    assert.equal(h.calls.filter((c) => c.startsWith("label:")).length, 0);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // The `finish` driver mode (INV-10)
 // ---------------------------------------------------------------------------

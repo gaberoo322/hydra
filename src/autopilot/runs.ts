@@ -111,7 +111,11 @@ import type {
 // imported from `run-projections.ts` (issue #1183); the composite READ
 // projections moved to `run-reads.ts` along with the readers that drove them.
 import { isPidAlive, countWindowMerges } from "./run-projections.ts";
-import { PR_MERGES_STREAM, PR_MERGES_MAXLEN } from "./pr-lifecycle-bridge.ts";
+import {
+  PR_MERGES_STREAM,
+  PR_MERGES_MAXLEN,
+  hasPendingDurableMergeSince,
+} from "./pr-lifecycle-bridge.ts";
 
 /**
  * COUNT cap on the single run-end merge-stream XRANGE (issue #4700). The
@@ -311,6 +315,12 @@ interface AutopilotRunsRunFacade {
 export interface AutopilotRunsDeps {
   runs: AutopilotRunsRunFacade;
   /**
+   * Synchronous probe: is a durable merge write with `merged_at >= startedEpoch`
+   * still unflushed in the PR-lifecycle bridge (issue #4979)? REQUIRED: a
+   * missing wiring must fail to typecheck, never silently skip the check.
+   */
+  hasPendingDurableMergeSince: (startedEpoch: number) => boolean;
+  /**
    * Liveness probe used by the dead-pid sweeper. Same field name as
    * `ProjectionDeps.isPidAlive` (by convention, not inheritance) and defaults
    * to the same `isPidAlive` imported from run-projections.ts. Injecting it
@@ -354,6 +364,7 @@ const defaultAutopilotRunsDeps: AutopilotRunsDeps = {
     hasAutopilotRunTurnAt,
     listStreamEntriesSince,
   },
+  hasPendingDurableMergeSince,
   isPidAlive,
   now: Date.now,
   stampWorklessHint: setWorklessUntil,
@@ -512,6 +523,20 @@ export async function endRun(
       const startedEpoch = Number(existing.started_epoch);
       if (!Number.isFinite(startedEpoch) || startedEpoch <= 0) {
         throw new Error(`unparseable started_epoch: ${existing.started_epoch}`);
+      }
+      // Issue #4979: 'window' only when the stream provably covers the run
+      // start. The oldest retained entry must predate (<=) run start; an
+      // empty stream, a stream born mid-run (deploy straddle) or retention
+      // trimmed into the window all fall through to 'unavailable'.
+      const oldest = await deps.runs.listStreamEntriesSince(PR_MERGES_STREAM, 0, 1);
+      const oldestMs = oldest.length > 0 ? Number(String(oldest[0].id).split("-")[0]) : NaN;
+      if (!Number.isFinite(oldestMs) || oldestMs > startedEpoch * 1000) {
+        throw new Error(
+          `merge-stream does not cover run start (oldest entry id ms=${oldest.length > 0 ? oldestMs : "none"}, started_epoch=${startedEpoch})`,
+        );
+      }
+      if (deps.hasPendingDurableMergeSince(startedEpoch)) {
+        throw new Error("durable merge write pending (XADD failed, not yet flushed); window count would undercount");
       }
       const entries = await deps.runs.listStreamEntriesSince(
         PR_MERGES_STREAM,

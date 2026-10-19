@@ -67,7 +67,7 @@ export const UNTRIAGED_ORPHANS_COLLECTOR = "untriaged-orphans";
 export const NEEDS_QA_COLLECTOR = "needs-qa";
 
 /** The board-state count keys, in the emitted line's order (the `deriveBoardState` projection). */
-export const BOARD_COUNT_KEYS = [
+const BOARD_COUNT_KEYS = [
   "needs_qa",
   "ready_for_agent",
   "needs_triage",
@@ -77,11 +77,11 @@ export const BOARD_COUNT_KEYS = [
   "stale_in_progress",
   "stale_blocked",
 ] as const;
-export type BoardCountKey = (typeof BOARD_COUNT_KEYS)[number];
-export type DerivedBoardCounts = ReturnType<typeof deriveBoardState>;
+type BoardCountKey = (typeof BOARD_COUNT_KEYS)[number];
+type DerivedBoardCounts = ReturnType<typeof deriveBoardState>;
 
 /** Where this turn's board counts came from — the renderer prints each source in its historical format. */
-export type BoardCounts =
+type BoardCounts =
   /** The service's own counts, verbatim per key (the healthy path). */
   | { readonly source: "service"; readonly values: Readonly<Record<BoardCountKey, unknown>> }
   /** `deriveBoardState` over the gh rows (the degraded path). */
@@ -118,7 +118,7 @@ export interface OrchBoardDeps {
  * carrying `ready_for_agent`. Returns the body, or `null` when unusable.
  */
 /** A service read as the Python `json.load` the bash piped it through saw it. */
-export function serviceJsonRead(read: HydraRead): GhJsonRead {
+function serviceJsonRead(read: HydraRead): GhJsonRead {
   if (read.kind === "failed") return { kind: "empty" };
   const parsed = pyJsonLoads(read.body);
   return "error" in parsed ? { kind: "unparseable", error: parsed.error } : { kind: "ok", data: parsed.value };
@@ -216,7 +216,7 @@ export const UNTRIAGED_ORPHAN_EXCLUDED_LABELS: readonly string[] = [
  * future ticket type is covered by construction; an issue with genuinely no
  * labels still matches neither test and stays counted.
  */
-export const WAYFINDER_LABEL_PREFIX = "wayfinder:";
+const WAYFINDER_LABEL_PREFIX = "wayfinder:";
 
 /** The untriaged-orphan count over `number,labels` rows, or `null` when the read failed. */
 export function countUntriagedOrphans(read: GhJsonRead): number | null {

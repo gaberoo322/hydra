@@ -58,12 +58,12 @@ hydra health
 systemctl --user status "$TARGET_SERVICE" 2>&1 | head -5
 TEST_CMD=$(jq -r '.verify.test' "$TARGET_WS/.hydra/manifest.json")
 TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$TARGET_WS/.hydra/manifest.json")
-( cd "$TARGET_APP_DIR" && eval "$TYPECHECK_CMD" 2>&1 | tail -3 )
-( cd "$TARGET_APP_DIR" && eval "$TEST_CMD" 2>&1 | tail -8 )   # the manifest's real suite, never assume bare `npm test`
+( cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" && eval "$TYPECHECK_CMD" 2>&1 | tail -3 )
+( cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" && eval "$TEST_CMD" 2>&1 | tail -8 )   # the manifest's real suite, never assume bare `npm test`
 
-git -C "$TARGET_WS" log --oneline -10
-git -C "$TARGET_WS" diff HEAD~1 --stat
-git -C "$TARGET_WS" log --oneline -20 | grep -i "revert"
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" log --oneline -10
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" diff HEAD~1 --stat
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" log --oneline -20 | grep -i "revert"
 
 # Per-service post-merge health — the same signal that fired the watcher.
 curl -s "$TARGET_WEB_URL/api/health/full" 2>/dev/null | python3 -m json.tool | head -40
@@ -99,8 +99,8 @@ intentionally does not restate target-specific vocabulary (INV-8, issue #4411).
 
 #### Test regressions
 ```bash
-git -C "$TARGET_WS" show --stat <suspect_sha>
-( cd "$TARGET_APP_DIR" && eval "$TEST_CMD" 2>&1 | grep -iE "fail|✗" | head -20 )
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" show --stat <suspect_sha>
+( cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" && eval "$TEST_CMD" 2>&1 | grep -iE "fail|✗" | head -20 )
 ```
 **Don't** run `git bisect` on a dirty tree. Use the watcher's health delta +
 git diff to identify the suspect cycle.
@@ -109,13 +109,13 @@ git diff to identify the suspect cycle.
 ```bash
 journalctl --user -u "$TARGET_SERVICE" --no-pager -n 30 2>&1 | grep -v "systemd\|Consumed" | tail -15
 BUILD_CMD=$(jq -r '.verify.build' "$TARGET_WS/.hydra/manifest.json")
-( cd "$TARGET_APP_DIR" && eval "$BUILD_CMD" 2>&1 | tail -20 )
+( cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" && eval "$BUILD_CMD" 2>&1 | tail -20 )
 journalctl --user -u "$TARGET_SERVICE" --no-pager -n 50 2>&1 | grep "MODULE_NOT_FOUND\|Cannot find\|ERR_MODULE"
 ```
 
 #### Typecheck failures
 ```bash
-( cd "$TARGET_APP_DIR" && eval "$TYPECHECK_CMD" 2>&1 | head -30 )
+( cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" && eval "$TYPECHECK_CMD" 2>&1 | head -30 )
 ```
 
 #### External-dependency / domain-data drift
@@ -143,17 +143,17 @@ journalctl --user -u "$TARGET_SERVICE" --no-pager -n 80 2>&1 | grep -iE "error|s
 Auto-fix only if: ≤10 lines, mechanical (not design), the manifest's `verify.test` passes after.
 
 ```bash
-cd "$TARGET_WS"
+cd "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}"
 git checkout -b fix/incident-$(date -u +%Y-%m-%d-%H%M)
 # fix
-( cd "$TARGET_APP_DIR" && eval "$TYPECHECK_CMD" && eval "$TEST_CMD" )
+( cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" && eval "$TYPECHECK_CMD" && eval "$TEST_CMD" )
 git add <files> && git commit -m "fix: <description>"
 # acquire merge lock, merge, push, release (use hydra raw POST /merge/lock and /merge/unlock)
 ```
 
 #### Revert
 ```bash
-cd "$TARGET_WS"
+cd "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}"
 git revert --no-edit <breaking_sha>
 git push origin main
 systemctl --user restart "$TARGET_SERVICE"

@@ -285,7 +285,7 @@
       "builder": "autopilotPostQuotaUntil",
       "pattern": "hydra:autopilot:post-quota-until",
       "params": [],
-      "callSites": 3,
+      "callSites": 2,
       "accessors": [
         "src/redis/post-quota-hint.ts"
       ],

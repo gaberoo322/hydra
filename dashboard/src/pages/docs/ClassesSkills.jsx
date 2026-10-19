@@ -15,7 +15,7 @@ import Generated, { SourceRail } from "./Generated.jsx";
 import { loadInventory } from "./inventories.js";
 
 /** The stage-column display order (values of the column, never class/skill names). */
-export const STAGE_ORDER = [
+const STAGE_ORDER = [
   "brain",
   "plan",
   "spec",
@@ -29,7 +29,7 @@ export const STAGE_ORDER = [
 ];
 
 /** Human label for a stage value — derived from the string itself. */
-export function stageLabel(stage) {
+function stageLabel(stage) {
   return String(stage)
     .split("-")
     .map((w) => (w === "" ? w : w[0].toUpperCase() + w.slice(1)))
@@ -37,7 +37,7 @@ export function stageLabel(stage) {
 }
 
 /** Rows bucketed by stage, in STAGE_ORDER (unknown stages trail, in seen order). */
-export function stageGroups(rows) {
+function stageGroups(rows) {
   const buckets = new Map(STAGE_ORDER.map((s) => [s, []]));
   const extra = [];
   for (const r of rows ?? []) {
@@ -79,7 +79,7 @@ function Chip({ children }) {
 }
 
 /** One dispatch-class card: the table row, linked to its skill views (INV-20). */
-export function ClassCard({ row }) {
+function ClassCard({ row }) {
   return (
     <div id={row.name} data-testid="class-card" className="rounded border border-zinc-800 bg-zinc-900/40 p-2 text-sm">
       <div className="flex flex-wrap items-center gap-2">
@@ -131,7 +131,7 @@ export function SkillCard({ row, linked = true, showDescription = true }) {
 }
 
 /** Skill cards grouped by stage (INV-19's grouping, inside a Generated/skills frame). */
-export function SkillGroups({ rows }) {
+function SkillGroups({ rows }) {
   return (
     <div className="space-y-4">
       {stageGroups(rows).map((g) => (
@@ -146,7 +146,7 @@ export function SkillGroups({ rows }) {
 }
 
 /** Class cards grouped by stage (inside a Generated/classes frame). */
-export function ClassGroups({ rows }) {
+function ClassGroups({ rows }) {
   return (
     <div className="space-y-4">
       {stageGroups(rows).map((g) => (

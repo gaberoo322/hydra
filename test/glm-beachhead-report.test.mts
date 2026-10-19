@@ -2402,3 +2402,21 @@ describe("glm-beachhead-report.sh --ab-report — end-to-end (issue #4127)", () 
     }
   });
 });
+
+describe("glm-beachhead-report.sh — the operator off switch (src/glm/disabled.ts)", () => {
+  test("sentinel present: one DISABLED line with the re-enable recipe, exit 0", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-disabled-"));
+    try {
+      const sentinel = join(tmp, "disabled");
+      writeFileSync(sentinel, "");
+      const r = await runReport({ HYDRA_GLM_DISABLED_FILE: sentinel });
+      assert.equal(r.status, 0);
+      assert.equal(
+        r.stdout.trim(),
+        `GLM beachhead: lane DISABLED by operator (sentinel ${sentinel} present) — re-enable: rm ${sentinel} && systemctl --user enable --now hydra-glm-drainer.timer`,
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

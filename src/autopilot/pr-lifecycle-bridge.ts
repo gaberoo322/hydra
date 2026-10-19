@@ -229,6 +229,9 @@ export async function startPrLifecycleBridge(
 
   async function tick(): Promise<void> {
     if (stopped) return;
+    // Issue #4979: retry durable merge writes that failed on an earlier tick
+    // BEFORE diffing, so a recovered Redis heals the merge stream.
+    await flushPendingDurableMerges(eventBus);
     for (const repo of repos) {
       try {
         const rows = await fetcher(repo);
@@ -288,6 +291,61 @@ export async function startPrLifecycleBridge(
 // ---------------------------------------------------------------------------
 
 /**
+ * Durable merge writes whose XADD to {@link PR_MERGES_STREAM} failed (issue
+ * #4979), keyed `repo#pr_number`. Module-level (in-process) on purpose: the
+ * failure mode is Redis being unreachable, so a Redis-side marker would fail
+ * for the same reason, and the bridge + `endRun` share the orchestrator
+ * process. Flushed (durable-only re-XADD) at the start of every bridge tick;
+ * a restart drops it but the first tick re-emits every recent merged PR.
+ */
+interface PendingDurableMerge {
+  fields: string[];
+  /** GitHub mergedAt as epoch seconds; null when empty/unparseable. */
+  mergedAtEpoch: number | null;
+}
+const pendingDurableMerges = new Map<string, PendingDurableMerge>();
+
+function parseMergedAtEpoch(mergedAt: string | undefined | null): number | null {
+  if (!mergedAt) return null;
+  const ms = Date.parse(mergedAt);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
+/**
+ * True when an unflushed durable merge write could belong to a run window
+ * starting at `startedEpoch` (seconds): `merged_at >= startedEpoch`, or
+ * empty/unparseable `merged_at` (conservatively pending-in-window).
+ * Synchronous and never throws (issue #4979).
+ */
+export function hasPendingDurableMergeSince(startedEpoch: number): boolean {
+  for (const p of pendingDurableMerges.values()) {
+    if (p.mergedAtEpoch === null || p.mergedAtEpoch >= startedEpoch) return true;
+  }
+  return false;
+}
+
+/** Test-only reset of the pending map. */
+export function _resetPendingDurableMergesForTest(): void {
+  pendingDurableMerges.clear();
+}
+
+/**
+ * Re-XADD pending durable merges to {@link PR_MERGES_STREAM} only (never the
+ * live stream, so no duplicate dashboard events). Entries stay pending on
+ * failure. Never throws.
+ */
+export async function flushPendingDurableMerges(eventBus: EventBus = getDefaultEventBus()): Promise<void> {
+  for (const [key, p] of [...pendingDurableMerges]) {
+    try {
+      await eventBus.publishRaw(PR_MERGES_STREAM, p.fields, { maxlen: PR_MERGES_MAXLEN });
+      pendingDurableMerges.delete(key);
+    } catch (err: any) {
+      logger.error({ err, key }, "[pr-lifecycle-bridge] durable merge-stream retry failed; still pending");
+    }
+  }
+}
+
+/**
  * XADD a `pr_lifecycle` event onto the slot-events stream. The flat field-
  * value layout matches `on-subagent-stop.sh` — `event` is the discriminator
  * and consumers (slot-events-bridge, dashboard subscribers) pattern-match
@@ -322,9 +380,15 @@ export async function emitPrLifecycleEvent(
     try {
       await eventBus.publishRaw(PR_MERGES_STREAM, fields, { maxlen: PR_MERGES_MAXLEN });
     } catch (err: any) {
+      // Issue #4979: record for retry at the next tick and make endRun stamp
+      // 'unavailable' while unflushed (never a silent undercount).
+      pendingDurableMerges.set(`${event.repo}#${event.pr_number}`, {
+        fields,
+        mergedAtEpoch: parseMergedAtEpoch(event.merged_at),
+      });
       logger.error(
         { err, pr: event.pr_number },
-        "[pr-lifecycle-bridge] durable merge-stream XADD failed; run-window count may undercount",
+        "[pr-lifecycle-bridge] durable merge-stream XADD failed; queued for retry, run-window count unavailable until flushed",
       );
     }
   }

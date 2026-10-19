@@ -97,6 +97,11 @@ function runCompletion(
       HYDRA_AUTOPILOT_LOG: paths.log,
       // Keep the worktree-GC side-effect out of the test.
       HYDRA_REAP_WORKTREE_GC: "0",
+      // Issue #4985: a fake task_id has no worktree, which reap would now read
+      // as a no-work dev_orch (`empty`). Point the no-work probe at a
+      // nonexistent root (=> unknown => `completed`) so this suite keeps
+      // isolating the soft-cap classification.
+      HYDRA_AUTOPILOT_REPO_ROOT: join(paths.dir, "no-such-repo-root"),
     },
     encoding: "utf-8",
   });

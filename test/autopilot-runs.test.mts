@@ -1453,6 +1453,7 @@ describe("merged_count window merge events (issue #4700)", () => {
           return entries.map((fields, i) => ({ id: `${i}-0`, fields }));
         },
       },
+      hasPendingDurableMergeSince: () => false,
       isPidAlive: () => true,
       now: () => (END + 5) * 1000,
       stampWorklessHint: async () => null,
@@ -1472,7 +1473,7 @@ describe("merged_count window merge events (issue #4700)", () => {
     assert.equal(rows.get("run-4700")!.merged_count_source, "window");
     const again: any = await endRun({ run_id: "run-4700", cause: "idle", ended_epoch: END } as any, deps);
     assert.equal(again.deduped, true);
-    assert.equal(reads(), 1, "deduped re-end does not re-read or re-stamp");
+    assert.equal(reads(), 2, "coverage probe + window read once; deduped re-end does not re-read or re-stamp");
     const digest: any = await projectRunDigest("run-4700", rows.get("run-4700")!, digestDeps);
     assert.equal(digest.merged_count, 2);
     assert.equal(digest.merged_count_source, "window");
@@ -1515,5 +1516,216 @@ describe("merged_count window merge events (issue #4700)", () => {
     const digest: any = await projectRunDigest("r", { run_id: "r", started_epoch: "1", status: "ended" }, deps);
     assert.equal(digest.merged_count, 1);
     assert.equal(digest.merged_count_source, "actions");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4979 — merged_count follow-ups from PR #4964: stream-coverage probe,
+// durable-XADD failure visibility, and a Redis-backed eviction regression.
+// NEW top-level describes with their own lifecycle (no shared teardown).
+// ---------------------------------------------------------------------------
+
+describe("merged_count stream coverage + pending durable writes (issue #4979)", () => {
+  const START = 1_790_000_000;
+  const END = START + 3600;
+  const iso = (epochS: number) => new Date(epochS * 1000).toISOString();
+
+  function makeDeps(oldestIdMs: number | null, opts: { pending?: boolean } = {}) {
+    const rows = new Map<string, Record<string, string>>();
+    rows.set("run-4979", { run_id: "run-4979", started: "x", started_epoch: String(START), status: "running", dispatches: "5" });
+    const entry = {
+      id: `${oldestIdMs}-0`,
+      fields: { event: "pr_lifecycle", transition: "merged", repo: "a/b", pr_number: "1", merged_at: iso(START + 60) },
+    };
+    const deps: any = {
+      runs: {
+        async getAutopilotRun(id: string) {
+          return { ...(rows.get(id) ?? {}) };
+        },
+        async updateAutopilotRunFields(id: string, f: Record<string, string>) {
+          Object.assign(rows.get(id)!, f);
+        },
+        // One retained entry (or none): XRANGE-from-sinceMs semantics.
+        async listStreamEntriesSince(_s: string, sinceMs: number) {
+          if (oldestIdMs === null) return [];
+          return oldestIdMs >= sinceMs ? [entry] : [];
+        },
+      },
+      hasPendingDurableMergeSince: () => opts.pending === true,
+      isPidAlive: () => true,
+      now: () => (END + 5) * 1000,
+      stampWorklessHint: async () => null,
+      stampPostQuotaHint: async () => null,
+    };
+    return { deps, rows };
+  }
+
+  test("stream oldest entry predates run start: source 'window'", async () => {
+    const { endRun } = await import("../src/autopilot/runs.ts");
+    const { deps, rows } = makeDeps((START - 10) * 1000);
+    await endRun({ run_id: "run-4979", cause: "idle", ended_epoch: END } as any, deps);
+    assert.equal(rows.get("run-4979")!.merged_count_source, "window");
+  });
+
+  test("stream born after run start (deploy straddle): source 'unavailable', no merged_count", async () => {
+    const { endRun } = await import("../src/autopilot/runs.ts");
+    const { deps, rows } = makeDeps((START + 30) * 1000);
+    const res: any = await endRun({ run_id: "run-4979", cause: "idle", ended_epoch: END } as any, deps);
+    assert.equal(res.ok, true);
+    assert.equal(rows.get("run-4979")!.merged_count_source, "unavailable");
+    assert.equal("merged_count" in rows.get("run-4979")!, false);
+  });
+
+  test("empty merge stream: source 'unavailable'", async () => {
+    const { endRun } = await import("../src/autopilot/runs.ts");
+    const { deps, rows } = makeDeps(null);
+    await endRun({ run_id: "run-4979", cause: "idle", ended_epoch: END } as any, deps);
+    assert.equal(rows.get("run-4979")!.merged_count_source, "unavailable");
+  });
+
+  test("pending durable merge in window: source 'unavailable' even with full coverage", async () => {
+    const { endRun } = await import("../src/autopilot/runs.ts");
+    const { deps, rows } = makeDeps((START - 10) * 1000, { pending: true });
+    await endRun({ run_id: "run-4979", cause: "idle", ended_epoch: END } as any, deps);
+    assert.equal(rows.get("run-4979")!.merged_count_source, "unavailable");
+  });
+
+  test("failed durable XADD is queued, reported pending, and flushed on the next tick", async () => {
+    const bridge = await import("../src/autopilot/pr-lifecycle-bridge.ts");
+    bridge._resetPendingDurableMergesForTest();
+    let failDurable = true;
+    const published: string[] = [];
+    const bus: any = {
+      async publishRaw(stream: string) {
+        if (stream === bridge.PR_MERGES_STREAM && failDurable) throw new Error("redis down");
+        published.push(stream);
+        return "1-0";
+      },
+    };
+    const event: any = {
+      transition: "merged", repo: "a/b", pr_number: 7, title: "t", url: "u",
+      task_id: "", head_branch: "h", merged_at: iso(START + 120),
+    };
+    const id = await bridge.emitPrLifecycleEvent(event, bus);
+    assert.equal(id, "1-0", "live event still published; never throws for the durable leg");
+    assert.equal(bridge.hasPendingDurableMergeSince(START), true);
+    assert.equal(bridge.hasPendingDurableMergeSince(START + 3600), false, "merged before the window is not pending-in-window");
+    failDurable = false;
+    await bridge.flushPendingDurableMerges(bus);
+    assert.equal(bridge.hasPendingDurableMergeSince(START), false);
+    assert.deepEqual(published, [bridge.SLOT_EVENTS_STREAM, bridge.PR_MERGES_STREAM]);
+    // empty merged_at counts as pending-in-window
+    failDurable = true;
+    await bridge.emitPrLifecycleEvent({ ...event, pr_number: 8, merged_at: "" }, bus);
+    assert.equal(bridge.hasPendingDurableMergeSince(Number.MAX_SAFE_INTEGER), true);
+    bridge._resetPendingDurableMergesForTest();
+  });
+
+  test("bridge tick flushes pending durable merges before diffing, durable stream only (INV-3)", async () => {
+    const bridge = await import("../src/autopilot/pr-lifecycle-bridge.ts");
+    bridge._resetPendingDurableMergesForTest();
+    try {
+      let failDurable = true;
+      const published: string[] = [];
+      const bus: any = {
+        async publishRaw(stream: string) {
+          if (stream === bridge.PR_MERGES_STREAM && failDurable) throw new Error("redis down");
+          published.push(stream);
+          return "1-0";
+        },
+      };
+      await bridge.emitPrLifecycleEvent(
+        { transition: "merged", repo: "a/b", pr_number: 9, title: "t", url: "u", task_id: "", head_branch: "h", merged_at: iso(START + 120) } as any,
+        bus,
+      );
+      assert.equal(bridge.hasPendingDurableMergeSince(START), true);
+      published.length = 0;
+      failDurable = false;
+      let fetched = 0;
+      const handle = await bridge.startPrLifecycleBridge({
+        oneShot: true,
+        repos: ["a/b"],
+        eventBus: bus,
+        ghFetcher: async () => {
+          fetched += 1;
+          assert.deepEqual(published, [bridge.PR_MERGES_STREAM], "flush ran before the fetch/diff");
+          return [];
+        },
+      });
+      handle.stop();
+      assert.equal(fetched, 1);
+      assert.deepEqual(published, [bridge.PR_MERGES_STREAM], "only the durable stream is re-published, no live duplicate");
+      assert.equal(bridge.hasPendingDurableMergeSince(START), false);
+    } finally {
+      bridge._resetPendingDurableMergesForTest();
+    }
+  });
+});
+
+describe("merged_count survives slot-events eviction on real Redis (issue #4979)", () => {
+  let r: any;
+  let bus: any;
+
+  async function clean() {
+    const { SLOT_EVENTS_STREAM, PR_MERGES_STREAM } = await import("../src/autopilot/pr-lifecycle-bridge.ts");
+    await r.del(SLOT_EVENTS_STREAM, PR_MERGES_STREAM);
+    const keys = await r.keys("hydra:autopilot:run:run-4979-real*");
+    if (keys.length > 0) await r.del(...keys);
+  }
+
+  beforeEach(async () => {
+    if (!r) r = new Redis(REDIS_URL);
+    (await import("../src/autopilot/pr-lifecycle-bridge.ts"))._resetPendingDurableMergesForTest();
+    await clean();
+  });
+
+  after(async () => {
+    if (r) {
+      await clean();
+      r.disconnect();
+    }
+    if (bus) await bus.close();
+  });
+
+  test("a merge survives >1000 slot-events XADDs: merged_count '1', source 'window' via default deps", async () => {
+    const { EventBus } = await import("../src/event-bus.ts");
+    const { emitPrLifecycleEvent, SLOT_EVENTS_STREAM, PR_MERGES_STREAM } = await import("../src/autopilot/pr-lifecycle-bridge.ts");
+    const { startRun, endRun } = await import("../src/autopilot/runs.ts");
+    const { getAutopilotRun } = await import("../src/redis/autopilot-runs.ts");
+    bus = new EventBus();
+
+    const nowS = Math.floor(Date.now() / 1000);
+    const startedEpoch = nowS - 600;
+    // Pre-run entry so the coverage rule (oldest entry <= run start) passes.
+    await r.xadd(PR_MERGES_STREAM, `${(startedEpoch - 100) * 1000}-0`, "event", "pr_lifecycle", "transition", "merged",
+      "repo", "x/y", "pr_number", "1", "merged_at", new Date((startedEpoch - 100) * 1000).toISOString());
+
+    const runId = "run-4979-real";
+    const started: any = await startRun({ run_id: runId, started_epoch: startedEpoch, pid: 1, trigger: "manual" } as any);
+    assert.equal(started.ok, true);
+
+    await emitPrLifecycleEvent(
+      {
+        transition: "merged", repo: "gaberoo322/hydra", pr_number: 4979, title: "t", url: "u",
+        task_id: "", head_branch: "h", merged_at: new Date((nowS - 60) * 1000).toISOString(),
+      } as any,
+      bus,
+    );
+    for (let i = 0; i < 1100; i++) {
+      await r.xadd(SLOT_EVENTS_STREAM, "MAXLEN", "1000", "*", "event", "subagent_tool_call", "i", String(i));
+    }
+    // Prove eviction: PR 4979's merge event is gone from the slot-events stream.
+    const slotEntries: any[] = await r.xrange(SLOT_EVENTS_STREAM, "-", "+");
+    assert.ok(slotEntries.length <= 1100, "slot-events stream is bounded");
+    assert.equal(
+      slotEntries.some(([, f]: [string, string[]]) => f.includes("pr_number") && f[f.indexOf("pr_number") + 1] === "4979"),
+      false,
+      "merge event must have been evicted from SLOT_EVENTS_STREAM",
+    );
+    const res: any = await endRun({ run_id: runId, cause: "idle", ended_epoch: nowS } as any);
+    assert.equal(res.ok, true);
+    const row: any = await getAutopilotRun(runId);
+    assert.equal(row.merged_count, "1");
+    assert.equal(row.merged_count_source, "window");
   });
 });

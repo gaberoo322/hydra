@@ -41,6 +41,8 @@ function issue(number: number, line: WaitingIssue["line"], over: Partial<Waiting
     line,
     blockerNumbers: [],
     openBlockerNumbers: [],
+    humanBlockers: [],
+    hasFilesInScope: true,
     ...over,
   };
 }
