@@ -865,10 +865,12 @@ const RAW_ENTRIES = [
     reviewBucket: "Stale-blocked",
     recommended: {
       kind: "terminal-skill",
-      command: "/hydra-review",
+      command: "gh issue edit {number} --repo {repo} --remove-label blocked --add-label ready-for-agent",
       label: "Unblock",
-      preconditions: ["the referenced blocker is closed, or was never a real blocker"],
-      consequence: "removes the blocked label and returns the issue to normal triage",
+      preconditions: [
+        "the issue body has a ## Files in scope section (issue-label-validation reverts ready-for-agent without one)",
+      ],
+      consequence: "removes the blocked label and returns the issue to the agent queue",
     },
     alternatives: [
       {

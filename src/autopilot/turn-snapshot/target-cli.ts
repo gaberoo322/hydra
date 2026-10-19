@@ -63,7 +63,7 @@ export interface TargetCliIo {
 }
 
 /** Each Target collector's typed value (the JSON Turn Snapshot is built from these, ADR-0043 slice 6). */
-export interface TargetValues {
+interface TargetValues {
   targetBoard?: TargetBoardSnapshot;
   targetScan?: TargetScanSnapshot;
   targetRiskSurface?: TargetRiskSurfaceSnapshot;

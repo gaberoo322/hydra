@@ -189,6 +189,53 @@ export async function countAutopilotRunsSince(sinceEpochSeconds: number): Promis
 }
 
 // ---------------------------------------------------------------------------
+// Stream range read (issue #4700)
+// ---------------------------------------------------------------------------
+
+/** One stream entry with its flat field/value list folded into a record. */
+export interface StreamEntry {
+  id: string;
+  fields: Record<string, string>;
+}
+
+/**
+ * ONE bounded XRANGE over `stream` from stream-id `${sinceMs}-0` to `+`, capped
+ * at `count` entries. Stream ids are emission milliseconds, so this returns
+ * everything emitted at or after `sinceMs`. The caller owns the stream name
+ * (keys stay outside this module). Unlike `EventBus.readRaw` this THROWS on a
+ * Redis error - run-end merge counting must never read a failure as zero.
+ */
+export async function listStreamEntriesSince(
+  stream: string,
+  sinceMs: number,
+  count: number,
+): Promise<StreamEntry[]> {
+  // `xrange` is among the verbs the aggregate compile truncates off the
+  // client type (issue #3037); narrow-cast just this call instead of widening
+  // connection.ts's RedisCommands for a single reader.
+  const r = getRedisConnection() as unknown as {
+    xrange(
+      key: string,
+      start: string,
+      end: string,
+      ...args: (string | number)[]
+    ): Promise<Array<[string, string[]]>>;
+  };
+  const raw = await r.xrange(
+    stream,
+    `${Math.max(0, Math.floor(sinceMs))}-0`,
+    "+",
+    "COUNT",
+    count,
+  );
+  return raw.map(([id, flat]) => {
+    const fields: Record<string, string> = {};
+    for (let i = 0; i + 1 < flat.length; i += 2) fields[flat[i]] = flat[i + 1];
+    return { id, fields };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Turn records (ZSET scored by turn_n)
 // ---------------------------------------------------------------------------
 

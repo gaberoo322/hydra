@@ -737,4 +737,32 @@ describe("transcriptScan walk-level characterization (issue #4790)", () => {
       "operator-invoked",
     ]);
   });
+
+  // #4778 attribution symmetry (folded into #4792): a memo-hit shard must seed
+  // the session skill/kind cache so a later FRESH shard of the same session
+  // attributes identically to the all-fresh case.
+  test("two-shard same-session: memo-hit shard 1 + fresh shard 2 attributes like two fresh shards (#4778)", async () => {
+    const root = await makeRoot();
+    const sid = "11111111-2222-3333-4444-555555555555";
+    // Shard 1 carries the dispatch sentinel; shard 2 (a resumed append) does not.
+    await writeFixture(root, `a/${sid}.jsonl`, [
+      sentinelLine("hydra-dev"),
+      assistantLine("2026-05-25T11:00:00Z", { in: 100 }, "claude-opus-4-7"),
+    ]);
+    await writeFixture(root, `b/${sid}.jsonl`, [
+      userLine("continue"),
+      assistantLine("2026-05-25T11:30:00Z", { in: 40 }, "claude-opus-4-7"),
+    ]);
+    const { scan: fresh, captured } = await freshScan(root);
+    assert.equal(fresh.bySkillByModel["hydra-dev"].opus.total, 140);
+    assert.equal(fresh.byDispatchKind["autopilot-dispatched"].opus.total, 140);
+
+    const shard1 = join(root, `a/${sid}.jsonl`);
+    const partial = new Map([[shard1, captured.get(shard1)!]]);
+    const mixed = await replayScan(root, partial);
+    assert.equal(mixed.filesServedFromMemo, 1);
+    assert.deepEqual(mixed.bySkillByModel, fresh.bySkillByModel);
+    assert.deepEqual(mixed.bySkillByModel24h, fresh.bySkillByModel24h);
+    assert.deepEqual(mixed.byDispatchKind, fresh.byDispatchKind);
+  });
 });

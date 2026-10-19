@@ -168,6 +168,29 @@ slot semantics, just cooldowns. The scope filter (`limits.scope`) is an
 the only scope-agnostic class. See `decide.py:scope_excluded()` and
 INV-008.
 
+**Zero-yield back-off ladder (issue #4999).** A class whose only trigger is
+an idle board (`discover_target` on `target_backfill_idle`) can re-fire
+forever while its dispatches file nothing — the board stays idle, the signal
+stays true, and the always-on per-run re-arm defeats the class cooldown
+across pace-gate relaunches (measured: ~73k tokens every 30 min, 0 filed).
+`decide.py` keeps a per-class ladder in `state.zero_yield_backoff.<class> =
+{streak, last_fired}`: streak 0-2 → base behaviour, 3-5 consecutive zero-yield
+fires → 4h between fires, 6+ → 24h (equal to `BACKFILL_STARVATION_FLOOR_SEC`,
+so the class is never fully dark). The streak increments only on a real
+dispatch (plan-time stamp), resets only on POSITIVE non-idle evidence
+(`needs_triage_target` / `target_board_work_available` /
+`target_work_available` — a degraded board read HOLDS the ladder, and a pass
+that files something resets it on the next snapshot with no output parsing),
+and survives relaunches via bootstrap's file-only carry-forward
+(`ZERO_YIELD_BACKOFF_SEED`). Suppressed turns surface as their own
+`dispatch_decision` cooldown reason (`zero-yield back-off (#4999): streak=N,
+Ns remaining`) plus a `plan.debug.<class>_backoff` payload. `discover_target`
+and `cleanup_target` (#5051; same idle signal and reset set, the 1h cooldown
+still ANDs with the ladder) are enrolled (`ZERO_YIELD_BACKOFF_CLASSES` —
+enrolling a sibling is a new table row + a literal read branch or membership
+in an existing one, per the #4934 schema read guard). `research_target` is
+deliberately not enrolled: its own 6h re-fire is within budget. `decide.py` is authoritative.
+
 ## Action-to-tool table
 
 | Action type | Tool the model invokes |
@@ -322,7 +345,7 @@ completed dispatch's live agent handle is not something `decide.py` can act
 on), but reusing the branch avoids re-paying the tokens already spent on the
 committed portion of the prior attempt.
 
-> **CONTEXT POINTER:** how a resume gets queued and survives a relaunch — the reap-side no-PR-stall backstop (issue #3866) and durable dev resume (issue #4518) — lives in `hydra-autopilot-dispatch-reference.md` § dev_orch resume internals (sibling of this SKILL.md). One rule from it applies at dispatch time: a `prompt_args.forward_fix_pr` action for a NON-GLM PR (the `orch_dev_resume_pick` pin, issue #4518) carries the forward-fix contract below verbatim, minus its `glm-authored` clause and its attempt cap, which stay #4460-only.
+> **CONTEXT POINTER:** how a resume gets queued and survives a relaunch — the reap-side no-PR-stall backstop (issue #3866) and durable dev resume (issue #4518), including the label-derived no-PR pin `orch_dev_resume_nopr_anchor` and its reap-time cap (issue #4808) — lives in `hydra-autopilot-dispatch-reference.md` § dev_orch resume internals (sibling of this SKILL.md). One rule from it applies at dispatch time: a `prompt_args.forward_fix_pr` action for a NON-GLM PR (the `orch_dev_resume_pick` pin, issue #4518) carries the forward-fix contract below verbatim, minus its `glm-authored` clause and its attempt cap, which stay #4460-only.
 
 **GLM red-PR forward-fix dispatch contract (issue #4460, INV-10).** When the
 `dev_orch` selector's dispatch action carries

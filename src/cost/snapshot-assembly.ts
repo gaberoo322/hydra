@@ -7,7 +7,7 @@
  * sub-accumulators and return a `UsageSnapshot` slice (weighted burns, estimate
  * percents, Quota-Weight totals, pacing state, OAuth headline rebase, since-reset
  * fixed-window math, calibration-drift detection) — live in one focused leaf named
- * after the concept, not buried in the 1,130-line I/O coordinator. Same axis the
+ * after the concept, not buried in the I/O coordinator. Same axis the
  * pure-math leaf `token-math.ts` (#1909), the env-reader leaf `config.ts` (#1896),
  * the eligibility fold `eligibility.ts` (#1377), and the JSONL-walk seam
  * `transcript-scan.ts` (#1971) each split along; the recognized #2188 deepening
@@ -20,17 +20,19 @@
  * `logger.warn`/`logger.error` calls retained here (the OAuth-fallback fail-loud,
  * the Anchor auto-correct, the drift detector) are intrinsic to the derivation
  * each helper performs, NOT assembly orchestration. The import direction is
- * strictly one-way: this leaf imports its primitives from the sibling pure
- * leaves (`token-math.ts`, `token-breakdown.ts`, `oauth-meter-shape.ts`,
- * `types.ts` — the last two since #4781, which moved `isOAuthUsageOk` and
- * `ScanResult` down so this fold no longer edges up into `oauth-usage.ts` /
- * `transcript-scan.ts`) and NOTHING from `usage-tracker.ts` (which imports FROM
- * here) — no cycle. The shared primitives `familyWeight` + `MODEL_FAMILIES` live
- * in the `token-math.ts` leaf both modules import downward.
+ * strictly one-way: this leaf imports its primitives from the
+ * layers below it (see the layer table in `src/cost/CONTEXT.md`, enforced by
+ * `test/cost-layers.test.mts`) and NOTHING from `usage-tracker.ts` (which
+ * imports FROM here) — no cycle. The one named in-layer edge is
+ * `snapshot-assembly.ts -> eligibility.ts` (`deriveHardStop`, the documented
+ * in-L3 edge). The shared primitives `familyWeight` + `MODEL_FAMILIES` live in
+ * the `token-math.ts` leaf both modules import downward.
  *
- * Functions moved here are VERBATIM relocations (same body, signature,
- * doc-comment) of the helpers that previously lived in `usage-tracker.ts`:
- * behaviour is byte-for-byte unchanged. They stay exported FOR DIRECT UNIT TEST
+ * Most functions here are VERBATIM relocations (same body, signature,
+ * doc-comment) of helpers that previously lived in `usage-tracker.ts`
+ * (behaviour byte-for-byte unchanged); later folds were authored in this file
+ * (`weightedQuotaBurnByCategory` #3825, `deriveWindowPace` #4121,
+ * `detectEstimateOAuthDivergence` #2832, `deriveBySkillWoW` #2404). They stay exported FOR DIRECT UNIT TEST
  * only and are deliberately NOT added to the `cost/index.ts` public barrel —
  * same module-internal visibility as eligibility.ts's `deriveHardStop`.
  */
@@ -830,8 +832,9 @@ export function assembleSnapshot(
   // silently reads 0 (which would unblock dispatch during an outage). Since
   // #1124 BOTH hard-stops (5h `emergencyStop` and `weeklyEmergencyStop`) are
   // gated on `usageSource === "oauth"` so a failed read can no longer trigger a
-  // stop on the estimate — autopilot fails open and defers to Claude's own
-  // session-limit enforcement (#1089) + the operator. The ADR-0021 since-reset /
+  // stop on the estimate. Admission during a sustained OAuth outage is decided
+  // at the eligibility layer, which blocks (`meterUnavailable` -> `allow:false`,
+  // #3804/#4165). The ADR-0021 since-reset /
   // Pace-Gate PACING machinery (percentSinceReset, projectPacingCurve) is
   // byte-for-byte untouched — only the two hard-stops + rolling headline move.
   // The OAuth read was fired + awaited inside the TranscriptScan seam (issue
@@ -858,9 +861,10 @@ export function assembleSnapshot(
   // estimate fallback path the headline is the transcript+calibration guess
   // (~half-of-real, #1083), which caused FALSE stops during OAuth outages — so
   // the estimate NEVER triggers either stop regardless of percent. During a
-  // prolonged OAuth outage autopilot does not self-stop on usage; it fails open
-  // and defers to Claude's own session-limit enforcement (the #1089 pace-gate
-  // block) plus the operator. The estimate is still surfaced as the displayed
+  // prolonged OAuth outage these snapshot fields do not stop on usage; the
+  // admission decision during a sustained outage lives at the eligibility layer,
+  // which blocks (`meterUnavailable` -> `allow:false`, #3804/#4165). The
+  // estimate is still surfaced as the displayed
   // headline (#1090) — only the STOP decision is decoupled from it. The weekly
   // analogue previously rode `percentSinceReset` (the ADR-0021 since-reset
   // CALIBRATION estimate) before #1124 moved it onto the real `percentLast7d`

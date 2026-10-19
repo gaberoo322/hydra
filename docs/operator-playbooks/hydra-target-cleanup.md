@@ -60,19 +60,27 @@ One pass: detect → filter → emit → report, then exit.
 
 Sync the scan base to current Target `main` first (the #1318 stale-base lesson, applied to the Target):
 
+Shell state does NOT persist across Bash tool calls, so each block below re-resolves the Target seam itself instead of relying on a variable exported by an earlier block (issue #4939: an empty `$TARGET_WS` made `cd ""` a silent no-op, the fetch ran in `~/hydra`, and the agent then "corrected" `~/hydra`'s `origin` to the Target repo). Never run `git remote set-url|add|remove` — if `origin` looks wrong, the seam var is empty: re-run the seam preamble in THIS Bash call.
+
 ```bash
-cd "$TARGET_WS" \
+_target_seam_sh="$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts --sh)" \
+  || { echo "hydra-target-cleanup: target seam unresolved — aborting" >&2; exit 1; }
+eval "$_target_seam_sh"; unset _target_seam_sh
+cd "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" \
   && git fetch origin main \
   || { echo "hydra-target-cleanup: fetch origin/main failed — aborting (cannot guarantee a current scan base)"; exit 1; }
-git -C "$TARGET_WS" merge-base --is-ancestor origin/main HEAD \
-  || git -C "$TARGET_WS" merge --ff-only origin/main \
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" merge-base --is-ancestor origin/main HEAD \
+  || git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" merge --ff-only origin/main \
   || { echo "hydra-target-cleanup: working tree not fast-forwardable onto origin/main — aborting (stale/diverged base)"; exit 1; }
 ```
 
 Then run knip in the Target's app workspace (knip is a Target devDependency; `knip.json` in `$TARGET_APP_DIR` is the committed config):
 
 ```bash
-cd "$TARGET_APP_DIR" \
+_target_seam_sh="$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts --sh)" \
+  || { echo "hydra-target-cleanup: target seam unresolved — aborting" >&2; exit 1; }
+eval "$_target_seam_sh"; unset _target_seam_sh
+cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" \
   && npx knip --reporter json --no-exit-code > /tmp/knip-target-report.json 2>/dev/null || true
 ```
 

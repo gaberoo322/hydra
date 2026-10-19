@@ -1,0 +1,1 @@
+- fix: stamp run merged_count unavailable when the merge stream does not cover the run or a durable merge write is pending (#4979)

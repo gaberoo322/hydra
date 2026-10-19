@@ -29,38 +29,74 @@ const TELEGRAM_TARGET = process.env.TELEGRAM_CHAT_ID || "8291726150";
  */
 export type TelegramSendFn = (message: string, target?: string) => Promise<void>;
 
-/**
- * Send a message to Telegram via the Bot API.
- */
-const sendToTelegram: TelegramSendFn = async function sendToTelegram(message, target = TELEGRAM_TARGET) {
-  if (!TELEGRAM_BOT_TOKEN) {
-    console.error("[Notify] TELEGRAM_BOT_TOKEN not set — skipping");
-    return;
-  }
+/** Collaborators for {@link createTelegramSender}; `fetchImpl` is the test seam. */
+export interface TelegramSenderDeps {
+  token: string;
+  defaultTarget: string;
+  fetchImpl?: typeof fetch;
+}
 
-  try {
-    const response = await fetch(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-      {
+/**
+ * True when Telegram rejected a message because its Markdown entities did not
+ * parse (an unpaired `_` or `*`, e.g. `node_modules` in an alert body). That
+ * failure is the sender's to recover from: the text itself is still worth
+ * delivering, just without formatting (issue #5040).
+ */
+export function isEntityParseError(status: number, body: string): boolean {
+  return status === 400 && /can't parse entities/i.test(body);
+}
+
+/**
+ * Build a Telegram sender. On an entity-parse 400 it resends the same text
+ * once as plain text (no `parse_mode`), so a formatting bug in any producer can
+ * make an alert ugly but can never make it disappear (issue #5040). Any other
+ * failure is logged and dropped, as before.
+ */
+export function createTelegramSender(deps: TelegramSenderDeps): TelegramSendFn {
+  return async function sendToTelegram(message, target = deps.defaultTarget) {
+    if (!deps.token) {
+      console.error("[Notify] TELEGRAM_BOT_TOKEN not set — skipping");
+      return;
+    }
+    const fetchImpl = deps.fetchImpl ?? fetch;
+    const post = (parseMode: "Markdown" | null) =>
+      fetchImpl(`https://api.telegram.org/bot${deps.token}/sendMessage`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           chat_id: target,
           text: message,
-          parse_mode: "Markdown",
+          ...(parseMode ? { parse_mode: parseMode } : {}),
           disable_web_page_preview: true,
         }),
-      },
-    );
+      });
 
-    if (!response.ok) {
+    try {
+      const response = await post("Markdown");
+      if (response.ok) return;
       const body = await response.text();
-      console.error(`[Notify] Telegram API error (${response.status}):`, body);
+      if (!isEntityParseError(response.status, body)) {
+        console.error(`[Notify] Telegram API error (${response.status}):`, body);
+        return;
+      }
+      console.error(`[Notify] Telegram rejected Markdown entities — resending as plain text:`, body);
+      const plain = await post(null);
+      if (!plain.ok) {
+        console.error(`[Notify] Telegram plain-text resend failed (${plain.status}):`, await plain.text());
+      }
+    } catch (err) {
+      console.error(`[Notify] Telegram send failed:`, err.message);
     }
-  } catch (err) {
-    console.error(`[Notify] Telegram send failed:`, err.message);
-  }
-};
+  };
+}
+
+/**
+ * Send a message to Telegram via the Bot API, with the plain-text fallback.
+ */
+const sendToTelegram: TelegramSendFn = createTelegramSender({
+  token: TELEGRAM_BOT_TOKEN,
+  defaultTarget: TELEGRAM_TARGET,
+});
 
 /**
  * Send a notification to Telegram.

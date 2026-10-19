@@ -5,14 +5,16 @@
  * `digest.ts` / `digest-format.ts` precedent (#1181). `formatMessage` maps a
  * `NOTIFICATION_EVENT_TYPES` event to a Telegram-flavored Markdown string with
  * **no env reads, no `fetch`, and no module-level mutable state** — so every
- * arm of the switch (30+ event types, the dual-shape `cycle:completed` payload,
- * the `reescalation` branch in `cycle:operator_blocked`) is testable without a
- * network or a fake Telegram endpoint.
+ * arm of the switch (the 3 live types with a dedicated arm — the dual-shape
+ * `cycle:completed` payload, `dlq:alert`, `review:pickup_ready` — plus the two
+ * generic `default` fallbacks) is testable without a network or a fake
+ * Telegram endpoint. The codex-era arms whose types had no live producer were
+ * deleted in issue #5044.
  *
  * The I/O transport (`sendToTelegram` / `sendNotification`) stays in
  * `src/notify.ts`, which imports this module one-directionally and re-exports
- * `formatMessage` so existing callers (`notification-consumer.ts`, `digest.ts`,
- * `scheduler/housekeeping.ts`, and the review-pickup test) need zero changes.
+ * `formatMessage`; its only production caller is `notification-consumer.ts`
+ * (via `sendNotification`).
  *
  * The on-wire output is unchanged from the pre-extraction `notify.ts` — this
  * concentrates where the grammar lives, not the format itself.
@@ -54,7 +56,7 @@ import {
  *
  * The `Pick` list below is the exhaustive read set of the switch — every
  * top-level `payload.<x>` and nested `payload.task?.…` / `payload.grounding?.…`
- * / `payload.drift?.…` path an arm dereferences. On-wire output is unchanged;
+ * path an arm dereferences. On-wire output is unchanged;
  * this concentrates the payload contract in the shared vocabulary, not the
  * format.
  */
@@ -62,7 +64,7 @@ export interface FormatMessageEvent {
   type?: string;
   payload?: Record<string, unknown> & Pick<
     NotificationEventPayload,
-    // --- Cycle lifecycle ---
+    // --- Cycle lifecycle (cycle:completed) ---
     | "cycleId"
     | "task"
     | "grounding"
@@ -74,51 +76,19 @@ export interface FormatMessageEvent {
     | "total"
     | "completed"
     | "failed"
-    | "elapsed"
-    | "inProgress"
-    | "error"
-    | "ttl"
-    | "tasksTimedOut"
-    | "message"
-    // --- Task events ---
-    | "taskId"
-    | "title"
-    | "reason"
-    | "failedSteps"
-    | "drift"
-    // --- Rollback ---
-    | "revertedCommit"
-    | "testsBefore"
-    | "testsAfter"
-    // --- Scheduler ---
-    | "cyclesRun"
-    | "suggestion"
-    | "recentTitles"
-    // --- Research ---
-    | "projectName"
-    | "opportunityCount"
-    | "autoQueued"
-    | "duration"
-    | "cost"
-    | "topOpportunities"
-    | "summary"
-    | "researchCyclesReviewed"
-    | "executionCyclesReviewed"
-    | "updatesApplied"
-    | "calibration"
     // --- DLQ ---
     | "originalStream"
     | "eventType"
     | "deliveryCount"
+    | "error"
     // --- Review pickup ---
     | "count"
     | "firstTitle"
     | "firstUrl"
-    // --- Operator blocked ---
-    | "unblockCommands"
-    | "blockedReason"
-    | "reescalation"
-    | "blockedDays"
+    // --- default arms ---
+    | "reason"
+    | "summary"
+    | "title"
   >;
 }
 
@@ -138,9 +108,6 @@ export function formatMessage(event: FormatMessageEvent): string {
 
   switch (type) {
     // --- Cycle lifecycle ---
-
-    case E.CYCLE_START:
-      return `🔄 *Cycle Started*\n\`${payload.cycleId}\``;
 
     case E.CYCLE_COMPLETED: {
       // V2 control loop sends the full reality report as payload
@@ -169,82 +136,6 @@ export function formatMessage(event: FormatMessageEvent): string {
       return `✅ *Cycle Complete*\n${completed}/${total} tasks succeeded${failed > 0 ? `, ${failed} failed` : ""}`;
     }
 
-    case E.CYCLE_STALLED:
-      return `🐢 *Cycle Stalled*\n\`${payload.cycleId}\`\nElapsed: ${payload.elapsed}\n${payload.inProgress} tasks still active`;
-
-    case E.CYCLE_FAILED:
-      return `❌ *Cycle Failed*\n\`${payload.cycleId}\`\nError: ${payload.error}`;
-
-    case E.CYCLE_AUTO_KILLED:
-      return `💀 *Cycle Auto-Killed*\n\`${payload.cycleId}\`\nExceeded TTL (${payload.elapsed} > ${payload.ttl})\n${payload.tasksTimedOut} tasks timed out`;
-
-    case E.CYCLE_STALE_PRIORITIES:
-      return `📝 *Stale Priorities*\n${payload.message}`;
-
-    // --- Task events ---
-
-    case E.TASK_REJECTED:
-      return `🚫 *Task Rejected by Skeptic*\n\`${payload.taskId}\`\n"${payload.title}"\nReason: ${payload.reason}`;
-
-    case E.TASK_VERIFICATION_FAILED:
-      return `❌ *Verification Failed*\n\`${payload.taskId}\`\n"${payload.title}"\nFailed: ${(payload.failedSteps || []).join(", ")}`;
-
-    case E.TASK_DRIFT_DETECTED:
-      return `🔁 *Drift Detected*\n\`${payload.taskId}\`\n"${payload.title}"\n${payload.drift?.reason || "Duplicate of recent work"}`;
-
-    case E.TASK_MERGE_FAILED:
-      return `⚠️ *Merge Failed*\n\`${payload.taskId}\`\n"${payload.title}"\nError: ${payload.error}`;
-
-    case E.TASK_SHELVED:
-      return `📦 *Task Shelved*\n\`${payload.taskId}\`\nReason: ${payload.reason}`;
-
-    // --- Rollback ---
-
-    case E.CYCLE_ROLLBACK:
-      return `⏪ *Auto-Rollback*\n\`${payload.cycleId}\`\nTask: ${payload.title}\nReverted: \`${payload.revertedCommit?.slice(0, 7)}\`\nTests: ${payload.testsBefore} → ${payload.testsAfter} passing`;
-
-    case E.CYCLE_ROLLBACK_FAILED:
-      return `🚨 *Rollback FAILED — Manual Fix Needed*\n\`${payload.cycleId}\`\nTask: ${payload.title}\nCommit: \`${payload.commitSha?.slice(0, 7)}\`\nError: ${payload.error}\nTests: ${payload.testsBefore} → ${payload.testsAfter}`;
-
-    // --- Scheduler ---
-
-    case E.SCHEDULER_STOPPED:
-      return `⏹️ *Scheduler Stopped*\nReason: ${payload.reason}\nCycles run: ${payload.cyclesRun}`;
-
-    case E.SCHEDULER_BACKLOG_EMPTY:
-      return `📭 *Backlog Empty*\n${payload.message}\n\n${payload.suggestion}`;
-
-    case E.SCHEDULER_PAUSED_REPETITION:
-      return `🔁 *Scheduler Paused — Repetitive Work Detected*\n${payload.reason}\n\nRecent tasks:\n${(payload.recentTitles || []).map(t => `• ${t.slice(0, 70)}`).join("\n")}\n\n${payload.suggestion}`;
-
-    // --- Research ---
-
-    case E.RESEARCH_COMPLETED: {
-      const lines = [
-        `🔬 *Research Complete*`,
-        `Project: ${payload.projectName}`,
-        `${payload.opportunityCount} opportunities found, ${payload.autoQueued} auto-queued`,
-        `Duration: ${payload.duration} | Cost: ${payload.cost}`,
-      ];
-      if (payload.topOpportunities?.length > 0) {
-        lines.push("", "Top picks:");
-        for (const opp of payload.topOpportunities) lines.push(`• ${opp}`);
-      }
-      if (payload.summary) lines.push("", payload.summary);
-      return lines.join("\n");
-    }
-
-    case E.ARCHITECT_REVIEW_COMPLETED:
-      return `🏗️ *Architect Review*\n${payload.researchCyclesReviewed} research + ${payload.executionCyclesReviewed} execution cycles reviewed\n${payload.updatesApplied} methodology updates\nCalibration: ${payload.calibration}`;
-
-    // --- Deploy ---
-
-    case E.DEPLOY_COMPLETED:
-      return `🚀 *Deployed*\n\`${payload.taskId}\``;
-
-    case E.DEPLOY_FAILED:
-      return `⚠️ *Deploy Failed*\n\`${payload.taskId}\`\nReason: ${payload.reason || "unknown"}`;
-
     // --- DLQ ---
 
     case E.DLQ_ALERT:
@@ -261,24 +152,6 @@ export function formatMessage(event: FormatMessageEvent): string {
       if (payload.firstTitle) {
         const link = payload.firstUrl ? ` — ${payload.firstUrl}` : "";
         lines.push("", `First: ${payload.firstTitle}${link}`);
-      }
-      return lines.join("\n");
-    }
-
-    // --- Operator blocked ---
-
-    case E.CYCLE_OPERATOR_BLOCKED: {
-      const cmds = (payload.unblockCommands || []).map(c => `\`${c}\``).join("\n");
-      const lines = [
-        `🚧 *BLOCKED — Operator Action Required*`,
-        `Task: "${payload.title}"`,
-        `Reason: ${payload.blockedReason || "unknown"}`,
-      ];
-      if (cmds) {
-        lines.push("", "*To unblock, run:*", cmds);
-      }
-      if (payload.reescalation) {
-        lines.push("", `_Re-alert — blocked for ${payload.blockedDays || "?"}+ days_`);
       }
       return lines.join("\n");
     }

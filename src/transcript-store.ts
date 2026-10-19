@@ -182,6 +182,64 @@ export async function resolveTranscriptPath(
   return null;
 }
 
+/** An Agent-tool child's `agent_id` is a lowercase hex hash (#4965). */
+const AGENT_ID_RE = /^[0-9a-f]{8,40}$/;
+
+function isAgentIdShaped(value: string): boolean {
+  return typeof value === "string" && AGENT_ID_RE.test(value);
+}
+
+/**
+ * Resolve the on-disk JSONL for an Agent-tool child (#4965):
+ * `<root>/<projectDir>/<parentSessionId>/subagents/agent-<agentId>.jsonl`.
+ *
+ * The child's own cwd is a worktree, so its encoded cwd is NOT the transcript's
+ * project dir — scan the project dirs instead. `parentSessionId` must be
+ * UUID-shaped and `agentId` hex; every candidate passes `confineToRoot`.
+ * Returns null when not found or either id is malformed.
+ */
+export async function resolveSubagentTranscriptPath(
+  parentSessionId: string,
+  agentId: string,
+  deps: ResolveDeps = {},
+): Promise<string | null> {
+  if (!isUuidShaped(parentSessionId) || !isAgentIdShaped(agentId)) return null;
+  const root = deps.root ?? projectsRoot();
+  const parent = parentSessionId.trim();
+
+  const statExists =
+    deps.stat ??
+    (async (p: string) => {
+      try {
+        await stat(p);
+        return true;
+      } catch {
+        /* intentional: missing file is the normal not-available path */
+        return false;
+      }
+    });
+  const listDirs =
+    deps.listProjectDirs ??
+    (async (r: string) => {
+      try {
+        const entries = await readdir(r, { withFileTypes: true });
+        return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+      } catch (err) {
+        console.error(`[transcript-store] failed to list transcript root ${r}:`, err);
+        return [];
+      }
+    });
+
+  for (const dir of await listDirs(root)) {
+    const candidate = confineToRoot(
+      root,
+      join(root, dir, parent, "subagents", `agent-${agentId}.jsonl`),
+    );
+    if (candidate && (await statExists(candidate))) return candidate;
+  }
+  return null;
+}
+
 /**
  * Walk the projects tree under `root` and return every `.jsonl` file. Walks
  * arbitrarily deep — two levels is enough for today's layout

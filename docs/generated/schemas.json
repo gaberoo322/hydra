@@ -32,7 +32,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/turn-snapshot.ts",
-        "line": 156
+        "line": 159
       }
     },
     {
@@ -42,7 +42,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 277
+        "line": 275
       }
     },
     {
@@ -362,26 +362,6 @@
       }
     },
     {
-      "name": "ConfigEnvActionSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 255
-      }
-    },
-    {
-      "name": "ConfirmTierSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 215
-      }
-    },
-    {
       "name": "ContextTraceQuerySchema",
       "file": "src/schemas/learning.ts",
       "importedBy": [
@@ -403,16 +383,6 @@
       "source": {
         "path": "src/schemas/now-page.ts",
         "line": 148
-      }
-    },
-    {
-      "name": "CredentialActionSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 267
       }
     },
     {
@@ -552,16 +522,6 @@
       }
     },
     {
-      "name": "EntryKeySchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 135
-      }
-    },
-    {
       "name": "ExemptLogEntryInputSchema",
       "file": "src/schemas/design-concept.ts",
       "importedBy": [
@@ -619,26 +579,6 @@
       "source": {
         "path": "src/schemas/autopilot-board.ts",
         "line": 249
-      }
-    },
-    {
-      "name": "HOLDBACK_ENROL_SOURCES",
-      "file": "src/schemas/holdback.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/holdback.ts",
-        "line": 103
-      }
-    },
-    {
-      "name": "HOLDBACK_ENROL_STATES",
-      "file": "src/schemas/holdback.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/holdback.ts",
-        "line": 87
       }
     },
     {
@@ -724,16 +664,6 @@
       }
     },
     {
-      "name": "InDashboardActionSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 229
-      }
-    },
-    {
       "name": "LessonsExplorerQuerySchema",
       "file": "src/schemas/explore-page.ts",
       "importedBy": [
@@ -778,7 +708,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 292
+        "line": 289
       }
     },
     {
@@ -790,7 +720,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 313
+        "line": 310
       }
     },
     {
@@ -800,7 +730,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 331
+        "line": 328
       }
     },
     {
@@ -934,16 +864,6 @@
       }
     },
     {
-      "name": "ResearchBeyondAutonomyActionSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 270
-      }
-    },
-    {
       "name": "RetroArtifactSchema",
       "file": "src/schemas/retro.ts",
       "importedBy": [],
@@ -965,16 +885,6 @@
       "source": {
         "path": "src/schemas/retro.ts",
         "line": 27
-      }
-    },
-    {
-      "name": "ReviewBucketSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 208
       }
     },
     {
@@ -1120,7 +1030,7 @@
       ],
       "source": {
         "path": "src/schemas/dispatches.ts",
-        "line": 74
+        "line": 78
       }
     },
     {
@@ -1214,16 +1124,6 @@
       }
     },
     {
-      "name": "TerminalSkillActionSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 245
-      }
-    },
-    {
       "name": "TierQuerySchema",
       "file": "src/schemas/tier.ts",
       "importedBy": [
@@ -1248,7 +1148,7 @@
       ],
       "source": {
         "path": "src/schemas/dispatches.ts",
-        "line": 96
+        "line": 100
       }
     },
     {
@@ -1260,7 +1160,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/turn-snapshot.ts",
-        "line": 244
+        "line": 248
       }
     },
     {
@@ -1275,36 +1175,6 @@
       "source": {
         "path": "src/schemas/usage.ts",
         "line": 50
-      }
-    },
-    {
-      "name": "VARIANTS",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 177
-      }
-    },
-    {
-      "name": "VariantSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 184
-      }
-    },
-    {
-      "name": "VisionDecisionActionSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 273
       }
     },
     {

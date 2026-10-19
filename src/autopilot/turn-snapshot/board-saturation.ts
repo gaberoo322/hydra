@@ -54,15 +54,15 @@ export interface BoardSaturationDeps {
 export const ARCH_SCAN_LABEL = "architecture-scan";
 export const ARCH_BOARD_SATURATION_CAP = 6;
 export const ARCH_BOARD_ENHANCEMENT_CAP = 20;
-export const CLEANUP_SCAN_LABEL = "cleanup-scan";
-export const CLEANUP_BOARD_SATURATION_CAP = 10;
-export const SKILL_PRUNE_LABEL = "skill-prune";
-export const SKILL_PRUNE_BOARD_SATURATION_CAP = 3;
+const CLEANUP_SCAN_LABEL = "cleanup-scan";
+const CLEANUP_BOARD_SATURATION_CAP = 10;
+const SKILL_PRUNE_LABEL = "skill-prune";
+const SKILL_PRUNE_BOARD_SATURATION_CAP = 3;
 export const HITL_GRILL_LABEL = "hitl-grill";
 export const HITL_GRILL_INBOX_CAP = 10;
-export const SCOUT_ENHANCEMENT_LABEL = "enhancement";
+const SCOUT_ENHANCEMENT_LABEL = "enhancement";
 /** The scout spend mirror's TTL: 7 days (issue #532). */
-export const SCOUT_SPEND_TTL_SECONDS = 604_800;
+const SCOUT_SPEND_TTL_SECONDS = 604_800;
 
 const fail = <T>(reason: string): Classified<T> => ({ ok: false, reason });
 const okv = <T>(value: T): Classified<T> => ({ ok: true, value });
@@ -90,7 +90,7 @@ function jqFold<T>(c: Classified<unknown>, fold: (data: unknown) => T): Classifi
 // Redis queues
 // ---------------------------------------------------------------------------
 
-export const ANCHOR_QUEUES = ["work-queue", "reframe-queue", "prior-failures"] as const satisfies readonly AnchorQueueName[];
+const ANCHOR_QUEUES = ["work-queue", "reframe-queue", "prior-failures"] as const satisfies readonly AnchorQueueName[];
 
 export type RedisQueuesValue = Readonly<Record<AnchorQueueName, Classified<number>>>;
 
@@ -138,7 +138,7 @@ export function scoutSpendUsd(tokens: string, rate: string): string {
 const stripQuotes = (v: string | null): string => (v ?? "").replaceAll('"', "");
 
 /** The scout token count: `$(… | tr -d '"')` then `^[0-9]+$`, else `0`. */
-export function scoutTokensValue(read: Classified<string | null>): string {
+function scoutTokensValue(read: Classified<string | null>): string {
   const v = read.ok ? stripQuotes(read.value).replace(/\n+$/, "") : "";
   return /^[0-9]+$/.test(v) ? v : "0";
 }
@@ -153,12 +153,12 @@ export interface ScoutValue {
 }
 
 /** `gh … --jq length`, as text, or failed. */
-export function foldLength(read: GhJsonRead): Classified<string> {
+function foldLength(read: GhJsonRead): Classified<string> {
   return jqFold(ghData(read), (d) => jqText(jqLength(d)));
 }
 
 /** UTC `date -u +%Y-%m-%d`. */
-export const utcDate = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+const utcDate = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
 export async function collectScout(deps: BoardSaturationDeps): Promise<CollectorOutcome<ScoutValue>> {
   const date = utcDate(deps.now());
@@ -194,7 +194,7 @@ export async function collectScout(deps: BoardSaturationDeps): Promise<Collector
 // Arch / cleanup / skill-prune boards
 // ---------------------------------------------------------------------------
 
-export interface BoardCounts {
+interface BoardCounts {
   readonly readyForAgent: number;
   readonly needsResearch: number;
   readonly needsTriage: number;
@@ -212,7 +212,7 @@ export function labelNames(issue: unknown): unknown[] {
 const has = (names: readonly unknown[], label: string) => names.some((n) => jqEquals(n, label));
 
 /** The bash's single board `--jq` object, over the raw `number,labels` payload. */
-export function countOpenBoard(read: GhJsonRead): Classified<BoardCounts> {
+function countOpenBoard(read: GhJsonRead): Classified<BoardCounts> {
   return jqFold(ghData(read), (data) => {
     const boards = jqIter(data).map(labelNames);
     const count = (pred: (n: unknown[]) => boolean) => boards.filter(pred).length;
@@ -240,7 +240,7 @@ export interface BoardSignals {
 }
 
 /** The python emitter: idle / saturation verdicts from the counts and the work queue. */
-export function foldBoardSignals(c: BoardCounts, workQueue: number): BoardSignals {
+function foldBoardSignals(c: BoardCounts, workQueue: number): BoardSignals {
   return {
     backfillIdle: c.readyForAgent === 0 && c.needsResearch === 0 && c.needsTriage === 0 && workQueue === 0,
     archOpenScan: c.archSourced,
@@ -297,7 +297,7 @@ export interface HitlGrillValue {
 }
 
 /** Python `int(raw)` over the printed length: a failed or non-integer read saturates with open=0. */
-export function foldHitlGrill(read: GhJsonRead): Classified<HitlGrillValue> {
+function foldHitlGrill(read: GhJsonRead): Classified<HitlGrillValue> {
   const len = foldLength(read);
   if ("reason" in len) return fail(len.reason);
   if (!/^[0-9]+$/.test(len.value)) return fail("non-integer-count");

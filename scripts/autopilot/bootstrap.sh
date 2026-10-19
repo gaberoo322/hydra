@@ -1317,6 +1317,49 @@ if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
   fi
 fi
 
+# Issue #4999 — carry the zero-yield back-off ladder state forward from the
+# prior state file, the same read-BEFORE-the-heredoc-clobbers pattern as
+# DEV_RESUME_PENDING_SEED above (#4518). decide.py stamps
+# `state.zero_yield_backoff.<cls> = {streak, last_fired}` at plan time to back
+# discover_target off an idle Target board (30m → 4h → 24h); the heredoc
+# clobbers it on EVERY bootstrap, and the pace gate relaunches every ~15 min —
+# so WITHOUT this carry the ladder resets to streak 0 on every relaunch and
+# the back-off is a no-op against exactly the refire loop it exists to stop
+# (discover_target is ALWAYS_ON_REARMED below, so its signal_last_fired re-arm
+# is by design and stays untouched; the back-off reads only its own stamp).
+# Malformed entries (a non-object map, a non-object entry, or a non-int
+# streak / last_fired — jq bools are type "boolean", not "number", so they
+# drop) are dropped per-entry; missing file, missing jq, or a parse failure
+# degrades to {} — a seed failure must NEVER block bootstrap. Deliberately
+# FILE-ONLY (no #2715 Redis tier): losing it on a reboot fails open, at worst
+# restarting one ladder (a few extra 30m-cadence fires), which is not worth a
+# second persistence tier.
+ZERO_YIELD_BACKOFF_SEED="{}"
+if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
+  ZERO_YIELD_BACKOFF_SEED="$(jq -c '
+    (.zero_yield_backoff // {}) as $z
+    | if ($z | type) == "object"
+      then
+        [ $z | to_entries[]
+          | select(.value | type == "object")
+          | select((.value.streak | type) == "number" and ((.value.streak | floor) == .value.streak))
+          | select((.value.last_fired | type) == "number" and ((.value.last_fired | floor) == .value.last_fired))
+          | {key: .key, value: {streak: (.value.streak | floor), last_fired: (.value.last_fired | floor)}}
+        ] | from_entries
+      else {}
+      end
+  ' "${STATE_PATH}" 2>/dev/null || echo "{}")"
+  # Belt-and-braces: anything that does not look like a JSON object would
+  # corrupt the heredoc below into invalid JSON — degrade to {}.
+  case "${ZERO_YIELD_BACKOFF_SEED}" in
+    "{"*) ;;
+    *) ZERO_YIELD_BACKOFF_SEED="{}" ;;
+  esac
+  if [ "${ZERO_YIELD_BACKOFF_SEED}" != "{}" ]; then
+    echo "[autopilot] carried zero_yield_backoff forward from prior state: ${ZERO_YIELD_BACKOFF_SEED} (issue #4999)"
+  fi
+fi
+
 # Issue #2575 — carry the cooled-class last-fired timestamps across runs.
 #
 # Same hazard as RESEARCH_FORCE_SEED above: the state-file heredoc clobbers
@@ -1563,6 +1606,12 @@ fi
 #     which queued it. Additive + tolerated-missing by all readers (decide.py
 #     and reap_stall.py both treat a non-list as empty), so no schema_version
 #     bump.
+#   - `zero_yield_backoff` (issue #4999) is carried forward from the prior
+#     state file (see ZERO_YIELD_BACKOFF_SEED above) — the discover_target
+#     idle-board back-off ladder ({class: {streak, last_fired}}) must survive
+#     the pace-gate relaunch or the back-off never climbs past rung 0.
+#     Additive + tolerated-missing by all readers (decide.py degrades a
+#     malformed entry to the streak-0 identity), so no schema_version bump.
 #   - `schema_version` (issue #434) participates in the Phase 0 handshake.
 #   - `limits.quota_5h_max_pts` / `limits.quota_week_max_pts` (issue #3867) are
 #     the opt-in quota-percent budget, in utilization POINTS over this run's own
@@ -1615,6 +1664,7 @@ cat > "${STATE_PATH}" <<EOF
   "failure_log": [],
   "research_force_counter": ${RESEARCH_FORCE_SEED},
   "dev_resume_pending": ${DEV_RESUME_PENDING_SEED},
+  "zero_yield_backoff": ${ZERO_YIELD_BACKOFF_SEED},
   "slots": ${SLOTS_JSON},
   "signal_last_fired": ${SIGNAL_LAST_FIRED_JSON}
 }

@@ -84,3 +84,57 @@ export function pickDevResume<C extends DevResumeCandidate>(inputs: DevResumePic
   const only = (perIssue.get(unambiguous[0]) ?? [])[0];
   return { issue: only.issue, pr: only.candidate.pr, headRefName: only.head };
 }
+
+// ---------------------------------------------------------------------------
+// The no-PR resume pick (issue #4808)
+// ---------------------------------------------------------------------------
+
+/**
+ * The quiescence window (seconds) a `needs-dev-resume` issue must have sat
+ * UNCHANGED before the no-PR pick may name it — the label is applied by reap's
+ * stall handler the moment a dispatch stalls, so without a window the very
+ * next turn would pin the same anchor a still-standing dispatch just failed
+ * on. Env-overridable through PrGateEnv like the existing windows.
+ */
+export const DEFAULT_NOPR_RESUME_QUIESCENCE_SECONDS = 5400;
+
+/** One `needs-dev-resume` issue row from the widened label read (#4808, INV-3). */
+export interface NoPrResumeRow {
+  readonly number: number;
+  readonly labels: ReadonlySet<string>;
+  /** Epoch seconds, or `null` when missing/unparseable — the row is SKIPPED, never a failed read (INV-2). */
+  readonly updatedAt: number | null;
+}
+
+export interface NoPrResumeInputs {
+  readonly rows: readonly NoPrResumeRow[];
+  /**
+   * `inflight.union` — every issue ANY open PR references (head-branch OR
+   * body, drafts and GLM PRs included). An issue in this set HAS a durable
+   * owner already (the #4807/#4518/#4460 PR-keyed pins), so it never
+   * qualifies here (INV-7).
+   */
+  readonly inflightUnion: ReadonlySet<number>;
+  readonly nowSeconds: number;
+  readonly quiescenceSeconds: number;
+}
+
+/**
+ * The no-PR durable dev-resume pick (#4808): the LOWEST-numbered issue that
+ * (a) carries `needs-dev-resume`, (b) is NOT referenced by any open PR,
+ * (c) carries neither `in-progress` nor `ready-for-human`, and (d) has been
+ * quiescent for at least `quiescenceSeconds`. The min is an EXPLICIT numeric
+ * comparison, never payload order. Pure — no I/O; never throws.
+ */
+export function pickNoPrResume(inputs: NoPrResumeInputs): number | null {
+  let pick: number | null = null;
+  for (const row of inputs.rows) {
+    if (!row.labels.has("needs-dev-resume")) continue;
+    if (inputs.inflightUnion.has(row.number)) continue;
+    if (row.labels.has("in-progress") || row.labels.has("ready-for-human")) continue;
+    if (row.updatedAt === null) continue;
+    if (inputs.nowSeconds - row.updatedAt < inputs.quiescenceSeconds) continue;
+    if (pick === null || row.number < pick) pick = row.number;
+  }
+  return pick;
+}

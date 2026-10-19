@@ -16,6 +16,8 @@
  * its default rather than propagating `NaN` into a comparison.
  */
 
+import { glmDisabledFilePath } from "./disabled.ts";
+
 /** Default daily PR cap (bash: `DAILY_CAP=${HYDRA_GLM_DRAINER_DAILY_CAP:-5}`). */
 export const DEFAULT_DAILY_CAP = 5;
 
@@ -43,6 +45,12 @@ export interface DrainerConfig {
   quotaResetTzOffset: string;
   /** `HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL`. */
   designConceptUrl: string;
+  /**
+   * The operator off-switch sentinel (`./disabled.ts`); `null` when there is
+   * no `HOME` or override to locate it. Optional so a hand-built config
+   * without it reads as "lane on".
+   */
+  disabledFile?: string | null;
 }
 
 function nonNegativeInt(raw: string | undefined, fallback: number): number {
@@ -68,5 +76,6 @@ export function loadDrainerConfig(env: NodeJS.ProcessEnv = process.env): Drainer
     quotaResetTzOffset: env.HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET || "+0800",
     designConceptUrl:
       env.HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL || "http://localhost:4000/api/design-concepts",
+    disabledFile: glmDisabledFilePath(env),
   };
 }

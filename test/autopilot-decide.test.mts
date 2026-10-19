@@ -76,6 +76,8 @@ interface StateOverrides {
   target_risk_surface?: Record<string, unknown>;
   /** issue #4460: per-PR pinned forward-fix attempt counts. */
   glm_red_forward_fix_attempts?: Record<string, number>;
+  /** issue #4999: per-class zero-yield back-off ladder state. */
+  zero_yield_backoff?: Record<string, { streak: number; last_fired: number }>;
 }
 
 function baseState(o: StateOverrides = {}): any {
@@ -137,6 +139,9 @@ function baseState(o: StateOverrides = {}): any {
       surface: ["src/lib/execution/", "src/bin/"],
       surfaceRepoRelative: ["web/src/lib/execution/", "web/src/bin/"],
     },
+    // Issue #4999 — the key is ABSENT until the selector's first stamp,
+    // mirroring production (an absent/empty map reads as streak 0, INV-9).
+    ...(o.zero_yield_backoff ? { zero_yield_backoff: o.zero_yield_backoff } : {}),
   };
 }
 
@@ -5291,5 +5296,492 @@ describe("decide.py — dirty PR conflict fix-forward pin (issue #4807)", () => 
     );
     assert.equal((plan.actions ?? []).filter((a: any) => a.type === "auto-merge").length, 0);
     assert.ok((plan.reasons ?? []).includes("hold:#4818:dirty"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4808 — the no-PR durable resume pin (dev_orch selector). A
+// `needs-dev-resume` issue with NO open PR referencing it is invisible to the
+// #4518 pick (keys off an open PR) and the #4460 pin (GLM provenance only);
+// the Turn Snapshot's `orch_dev_resume_nopr_anchor` (lowest-numbered
+// needs-dev-resume issue, in-flight-excluded, quiescent, fail-closed
+// upstream) is the durable owner. Ordered AFTER the #3866 in-state drain and
+// BEFORE the #4807/#4518/#4460 PR-keyed pins; NO state key — the durable cap
+// is enforced at reap time (reap_stall.py), not here.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — no-PR durable resume pin (issue #4808)", () => {
+  const NOPR_ANCHOR = "issue-4806";
+  const RESUME_PICK = "issue-4510:4532:worktree-agent-a5706403c05633ec3";
+  const DIRTY_FIX = "issue-4511:4818:worktree-agent-abc123";
+  const GLM_FIX = "issue-4240:4433:worktree-agent-glm-4240-1789";
+
+  function noprState(overrides: StateOverrides = {}): any {
+    const merged: StateOverrides = { ...overrides };
+    merged.signals = {
+      orch_dev_resume_nopr_anchor: NOPR_ANCHOR,
+      ...(overrides.signals ?? {}),
+    };
+    return baseState(merged);
+  }
+
+  function devOrch(plan: any): any[] {
+    return (plan.actions ?? []).filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
+  }
+
+  test("no-PR resume pin (#4808): dispatches hydra-dev with anchor+resume only, before the #4807/#4518/#4460 pins", () => {
+    // All three PR-keyed pins are simultaneously live and LOSE to the no-PR
+    // pin — placement before them is what makes the four picks disjoint.
+    const s = noprState({
+      signals: {
+        orch_dirty_forward_fix: DIRTY_FIX,
+        orch_dev_resume_pick: RESUME_PICK,
+        orch_glm_red_forward_fix: GLM_FIX,
+      },
+    });
+    const d = devOrch(runDecide(s, null));
+    assert.equal(d.length, 1, `expected exactly one pinned dispatch: ${JSON.stringify(d)}`);
+    assert.equal(d[0].skill, "hydra-dev");
+    // INV-6: EXACTLY anchor + resume — no branch, no forward_fix_pr, no
+    // conflict_fix (there is no PR to name; the cap is reap-time, not here).
+    assert.deepEqual(d[0].prompt_args, { anchor: NOPR_ANCHOR, resume: true });
+    assert.match(d[0].reason, /#4808/);
+  });
+
+  test("the pin fires with orch_work_available false and bypasses a pending grill anchor", () => {
+    const s = noprState({
+      signals: { orch_work_available: false, orch_pending_grill_anchor: "issue-999" },
+    });
+    const d = devOrch(runDecide(s, null));
+    assert.equal(d.length, 1);
+    assert.equal(d[0].prompt_args.anchor, NOPR_ANCHOR);
+  });
+
+  test("ordering: an in-state dev_resume_pending record outranks the no-PR pin (the #3866 drain runs first)", () => {
+    const s = noprState();
+    s.dev_resume_pending = [{ anchor: "issue-100", branch: "worktree-agent-abc" }];
+    const d = devOrch(runDecide(s, null));
+    assert.equal(d.length, 1, "the drain pops its record and returns — never two resumes in one turn");
+    assert.equal(d[0].prompt_args.anchor, "issue-100");
+    assert.equal(d[0].prompt_args.resume_branch, "worktree-agent-abc");
+  });
+
+  test("`none` / absent spellings pin nothing", () => {
+    for (const bad of ["none", ""] ) {
+      const plan = runDecide(baseState({ signals: { orch_dev_resume_nopr_anchor: bad } }), null);
+      assert.equal(devOrch(plan).length, 0, `signal "${bad}" must never pin`);
+    }
+    assert.equal(devOrch(runDecide(baseState(), null)).length, 0);
+  });
+
+  test("a malformed anchor value never pins (anchor_ref collapses non-positive/non-int)", () => {
+    const t = makeTmp();
+    try {
+      const s = baseState();
+      delete s.signals;
+      s.turn_snapshot = turnSnapshot({});
+      (s.turn_snapshot.signals as Record<string, unknown>).orch_dev_resume_nopr_anchor = "garbage";
+      writeFileSync(t.state, JSON.stringify(s));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      assert.equal(devOrch(runDecideOnFiles(t)).length, 0);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a busy dev_orch slot means no pin (the anchor rides the normal slot-free pipeline)", () => {
+    const s = noprState({
+      slots: {
+        dev_orch: { task_id: "abc", status: "running" },
+        qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null,
+        design_concept_orch: null,
+      },
+    });
+    assert.equal(devOrch(runDecide(s, null)).length, 0);
+  });
+
+  test("the pin writes NO state: nothing is queued into dev_resume_pending and no cap tracker exists", () => {
+    const t = makeTmp();
+    try {
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(noprState())));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      const d = devOrch(runDecideOnFiles(t));
+      assert.equal(d.length, 1);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.dev_resume_pending, undefined, "the durable cap lives at reap time (INV-8), not in state");
+      assert.equal(persisted.glm_red_forward_fix_attempts, undefined);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// discover_target zero-yield back-off ladder (issue #4999)
+//
+// `target_backfill_idle` stays true whenever a discover_target dispatch finds
+// NOTHING (the board stays idle), bootstrap re-arms the class's
+// signal_last_fired to 0 every run (ALWAYS_ON_REARMED, by design), so the
+// 30m class cooldown was the only gate — and it never held across the ~15-min
+// pace-gate relaunch: 14 straight runs re-fired the class every ~30 minutes
+// at ~73k tokens each, 0 filed. decide.py now keeps a per-class
+// `state.zero_yield_backoff.<cls> = {streak, last_fired}` ladder:
+// streak 0-2 → base behaviour, 3-5 → 4h between fires, 6+ → 24h (the #4302
+// starvation floor — never fully dark). The streak resets ONLY on positive
+// non-idle evidence (a needs-triage finding a productive pass files resets it
+// on the next snapshot — no agent-output parsing).
+// ---------------------------------------------------------------------------
+describe("decide.py — discover_target zero-yield back-off (issue #4999)", () => {
+  const isDiscoverTarget = (a: any) => a.type === "dispatch" && a.slot === "discover_target";
+  const dtDecision = (plan: any) =>
+    (plan.events ?? []).find(
+      (e: any) => e.event === "dispatch_decision" && e.class === "discover_target",
+    );
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  const HOUR = 3600;
+
+  function zy(streak: number, lastFired: number) {
+    return { discover_target: { streak, last_fired: lastFired } };
+  }
+
+  test("#4999 INV-9: absent zero_yield_backoff behaves exactly like today — dispatch + first stamp", () => {
+    const t = makeTmp();
+    try {
+      const before = nowSec();
+      const state = baseState({ signals: { target_backfill_idle: true } });
+      const plan = runDecide(state, null, [], t);
+      assert.ok(findAction(plan, isDiscoverTarget),
+        "a never-fired class (streak 0) must dispatch on the idle signal");
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.zero_yield_backoff.discover_target.streak, 1,
+        "the dispatch stamps streak=1 at plan time (INV-4)");
+      assert.ok(persisted.zero_yield_backoff.discover_target.last_fired >= before,
+        "the dispatch stamps last_fired=now at plan time (INV-4)");
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("#4999 INV-1: streak < 3 is the base rung — recent last_fired still dispatches", () => {
+    const state = baseState({
+      signals: { target_backfill_idle: true },
+      zero_yield_backoff: zy(2, nowSec() - 60),
+    });
+    const plan = runDecide(state, null);
+    assert.ok(findAction(plan, isDiscoverTarget),
+      "streak 2 → required_sec 0 → no back-off suppression");
+  });
+
+  test("#4999 INV-1: streak 3-5 inside 4h suppresses with a dedicated cooldown reason + debug payload", () => {
+    const last = nowSec() - HOUR;
+    const state = baseState({
+      signals: { target_backfill_idle: true },
+      zero_yield_backoff: zy(3, last),
+    });
+    const plan = runDecide(state, null);
+    assert.equal(findAction(plan, isDiscoverTarget), undefined,
+      "streak 3 inside the 4h rung must not dispatch");
+    const ev = dtDecision(plan);
+    assert.ok(ev, "a dispatch_decision event must be emitted for discover_target");
+    assert.equal(ev.outcome, "cooldown");
+    assert.match(String(ev.reason), /zero-yield back-off \(#4999\): streak=3, \d+s remaining/,
+      "the reason must name the back-off and the streak (INV-8), not the generic no-signal attribution");
+    assert.deepEqual(plan.debug.discover_target_backoff, {
+      streak: 3,
+      last_fired: last,
+      required_sec: 4 * HOUR,
+    }, "plan.debug.discover_target_backoff records {streak, last_fired, required_sec} (INV-8)");
+  });
+
+  test("#4999 INV-1/INV-8: streak 3 past 4h dispatches, annotates the reason with the streak, persists streak=4", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState({
+        signals: { target_backfill_idle: true },
+        zero_yield_backoff: zy(3, nowSec() - 5 * HOUR),
+      });
+      const plan = runDecide(state, null, [], t);
+      const dispatch = findAction(plan, isDiscoverTarget);
+      assert.ok(dispatch, "a rung whose wait elapsed must dispatch (never dark past the rung)");
+      assert.match(String(dispatch.reason), /zero-yield back-off rung elapsed, streak=4/,
+        "a dispatch on a rung above 0 annotates its reason with the streak (INV-8)");
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.zero_yield_backoff.discover_target.streak, 4,
+        "the dispatch increments the persisted streak (INV-4)");
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("#4999 INV-1/INV-2: streak >= 6 waits 24h (the top rung equals the #4302 starvation floor)", () => {
+    const state = baseState({
+      signals: { target_backfill_idle: true },
+      zero_yield_backoff: zy(6, nowSec() - 5 * HOUR),
+    });
+    const plan = runDecide(state, null);
+    assert.equal(findAction(plan, isDiscoverTarget), undefined,
+      "streak 6 past the 4h rung but inside 24h must stay suppressed");
+    assert.equal(plan.debug.discover_target_backoff.required_sec, 24 * HOUR,
+      "the top rung is exactly 24h — no rung exceeds the starvation floor (INV-2)");
+  });
+
+  test("#4999 INV-2: streak >= 6 past 24h dispatches — the back-off never goes fully dark", () => {
+    const state = baseState({
+      signals: { target_backfill_idle: true },
+      zero_yield_backoff: zy(6, nowSec() - 25 * HOUR),
+    });
+    const plan = runDecide(state, null);
+    assert.ok(findAction(plan, isDiscoverTarget),
+      "while the board stays idle the class still fires at least once per 24h (#4302)");
+  });
+
+  test("#4999 INV-2: a FUTURE last_fired stamp fails open — never suppresses past the floor", () => {
+    const state = baseState({
+      signals: { target_backfill_idle: true },
+      zero_yield_backoff: zy(6, nowSec() + 10 * 24 * HOUR),
+    });
+    const plan = runDecide(state, null);
+    assert.ok(findAction(plan, isDiscoverTarget),
+      "a corrupt/future last_fired must not yield negative elapsed and wedge the class dark");
+  });
+
+  test("#4999 INV-3: the 1800s signal cooldown stays an independent necessary condition", () => {
+    const state = baseState({
+      signals: { target_backfill_idle: true },
+      // Back-off SATISFIED (streak 3, fired 5h ago) …
+      zero_yield_backoff: zy(3, nowSec() - 5 * HOUR),
+      // … but the ordinary 1800s class cooldown is ACTIVE (stamped by
+      // stamp-slot.py at playbook time — decide.py only reads it).
+      signal_last_fired: { health: 0, discover_target: nowSec() - 60 },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(findAction(plan, isDiscoverTarget), undefined,
+      "a satisfied back-off must not bypass the ordinary class cooldown");
+    const ev = dtDecision(plan);
+    assert.equal(ev.outcome, "cooldown");
+    assert.match(String(ev.reason), /signal cooldown active/,
+      "the ordinary cooldown keeps its own attribution (the back-off ANDs, never replaces)");
+    assert.equal(plan.debug.discover_target_backoff, undefined,
+      "no back-off debug payload on a turn the back-off did not suppress");
+  });
+
+  test("#4999 INV-4: a suppressed turn never increments — only a dispatch stamps", () => {
+    const t = makeTmp();
+    try {
+      const last = nowSec() - HOUR;
+      const state = baseState({
+        signals: { target_backfill_idle: true },
+        zero_yield_backoff: zy(3, last),
+      });
+      runDecide(state, null, [], t);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.deepEqual(persisted.zero_yield_backoff.discover_target, { streak: 3, last_fired: last },
+        "a back-off-suppressed turn must leave the ladder state byte-identical");
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("#4999 INV-5: positive non-idle evidence resets the streak (a filed pass un-arms the ladder)", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState({
+        // A productive pass files needs-triage → the NEXT snapshot carries
+        // needs_triage_target (idle is definitionally false then).
+        signals: { needs_triage_target: true },
+        zero_yield_backoff: zy(5, nowSec() - HOUR),
+      });
+      runDecide(state, null, [], t);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.zero_yield_backoff.discover_target.streak, 0,
+        "positive evidence zeroes the streak on the very turn it appears");
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("#4999 INV-5: the reset runs before the scope skip — an orch-only scope still resets", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState({
+        scope: "orch-only",
+        signals: { target_board_work_available: true },
+        zero_yield_backoff: zy(5, nowSec() - HOUR),
+      });
+      runDecide(state, null, [], t);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.zero_yield_backoff.discover_target.streak, 0,
+        "the reset is independent of the cooldown/scope/burned/budget skips inside the loop");
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("#4999 INV-5: a degraded board read HOLDS the ladder — no positive evidence, no reset", () => {
+    const t = makeTmp();
+    try {
+      const last = nowSec() - HOUR;
+      const state = baseState({
+        // No idle signal AND no positive signal: the failed-read shape. The
+        // three reset signals fail closed to false, so the streak must hold.
+        signals: {},
+        zero_yield_backoff: zy(5, last),
+      });
+      runDecide(state, null, [], t);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.deepEqual(persisted.zero_yield_backoff.discover_target, { streak: 5, last_fired: last },
+        "an outage must not silently restart the back-off clock");
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("end to end: three consecutive idle fires arm the 4h rung against the fourth", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState({ signals: { target_backfill_idle: true } });
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      // Fires 1-3: each dispatches (decide.py does not stamp
+      // signal_last_fired for signal classes — stamp-slot.py does, at
+      // playbook time — so consecutive CLI turns stay "cooled" here).
+      for (let i = 1; i <= 3; i++) {
+        const plan = runDecideOnFiles(t);
+        assert.ok(findAction(plan, isDiscoverTarget), `fire ${i} must dispatch`);
+        const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+        assert.equal(persisted.zero_yield_backoff.discover_target.streak, i);
+      }
+      // Fire 4, moments later: suppressed by the ladder (the observed
+      // 14-run refire loop is what this rung stops).
+      const suppressed = runDecideOnFiles(t);
+      assert.equal(findAction(suppressed, isDiscoverTarget), undefined,
+        "the 4th consecutive idle fire must hit the 4h rung");
+      assert.match(String(dtDecision(suppressed)?.reason), /zero-yield back-off/);
+      const held = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(held.zero_yield_backoff.discover_target.streak, 3,
+        "the suppressed turn does not further increment");
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cleanup_target zero-yield back-off (issue #5051) — enrolled in the #4999 ladder
+// ---------------------------------------------------------------------------
+describe("decide.py — cleanup_target zero-yield back-off (issue #5051)", () => {
+  const isCleanup = (a: any) => a.type === "dispatch" && a.slot === "cleanup_target";
+  const decision = (plan: any) =>
+    (plan.events ?? []).find(
+      (e: any) => e.event === "dispatch_decision" && e.class === "cleanup_target",
+    );
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  const HOUR = 3600;
+  const zy = (streak: number, lastFired: number) => ({
+    cleanup_target: { streak, last_fired: lastFired },
+  });
+
+  test("#5051 INV-G: absent state dispatches and stamps streak=1", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState({ signals: { target_backfill_idle: true } });
+      const plan = runDecide(state, null, [], t);
+      assert.ok(findAction(plan, isCleanup));
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.zero_yield_backoff.cleanup_target.streak, 1);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("streak 3 inside 4h suppresses with a cooldown decision naming the back-off", () => {
+    const last = nowSec() - 2 * HOUR;
+    const state = baseState({
+      signals: { target_backfill_idle: true },
+      zero_yield_backoff: zy(3, last),
+    });
+    const plan = runDecide(state, null);
+    assert.equal(findAction(plan, isCleanup), undefined);
+    const ev = decision(plan);
+    assert.equal(ev.outcome, "cooldown");
+    assert.match(String(ev.reason), /zero-yield back-off \(#4999\): streak=3, \d+s remaining/);
+    assert.deepEqual(plan.debug.cleanup_target_backoff, {
+      streak: 3, last_fired: last, required_sec: 4 * HOUR,
+    });
+  });
+
+  test("streak 3 past 4h dispatches with an annotated reason and apply=true", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState({
+        signals: { target_backfill_idle: true },
+        zero_yield_backoff: zy(3, nowSec() - 5 * HOUR),
+      });
+      const plan = runDecide(state, null, [], t);
+      const d = findAction(plan, isCleanup);
+      assert.ok(d);
+      assert.match(String(d.reason), /demote-only dead-export backfill/);
+      assert.match(String(d.reason), /zero-yield back-off rung elapsed, streak=4/);
+      assert.equal(d.prompt_args.apply, true);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.zero_yield_backoff.cleanup_target.streak, 4);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("streak 6 waits 24h, then dispatches", () => {
+    const suppressed = runDecide(baseState({
+      signals: { target_backfill_idle: true },
+      zero_yield_backoff: zy(6, nowSec() - 5 * HOUR),
+    }), null);
+    assert.equal(findAction(suppressed, isCleanup), undefined);
+    assert.equal(suppressed.debug.cleanup_target_backoff.required_sec, 24 * HOUR);
+    const fired = runDecide(baseState({
+      signals: { target_backfill_idle: true },
+      zero_yield_backoff: zy(6, nowSec() - 25 * HOUR),
+    }), null);
+    assert.ok(findAction(fired, isCleanup));
+  });
+
+  test("#5051 INV-D: a saturated skip never stamps", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState({
+        signals: { target_backfill_idle: true, target_cleanup_board_saturated: true },
+        zero_yield_backoff: zy(1, nowSec() - 5 * HOUR),
+      });
+      const plan = runDecide(state, null, [], t);
+      assert.equal(findAction(plan, isCleanup), undefined);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.zero_yield_backoff.cleanup_target.streak, 1);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("positive evidence resets the streak; a degraded read holds it", () => {
+    const t1 = makeTmp();
+    const t2 = makeTmp();
+    try {
+      runDecide(baseState({
+        signals: { needs_triage_target: true },
+        zero_yield_backoff: zy(5, nowSec() - HOUR),
+      }), null, [], t1);
+      assert.equal(
+        JSON.parse(readFileSync(t1.state, "utf-8")).zero_yield_backoff.cleanup_target.streak, 0);
+      const last = nowSec() - HOUR;
+      runDecide(baseState({ signals: {}, zero_yield_backoff: zy(5, last) }), null, [], t2);
+      assert.deepEqual(
+        JSON.parse(readFileSync(t2.state, "utf-8")).zero_yield_backoff.cleanup_target,
+        { streak: 5, last_fired: last });
+    } finally {
+      rmSync(t1.dir, { recursive: true, force: true });
+      rmSync(t2.dir, { recursive: true, force: true });
+    }
   });
 });
