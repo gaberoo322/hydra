@@ -81,6 +81,9 @@ const FIXED_NOW_MS = 1_750_000_000_000;
 function makeDeps(store: MemStore): AutopilotRunsDeps & CycleCloseDeps {
   return {
     runs: {
+      async listStreamEntriesSince() {
+        return [];
+      },
       async getAutopilotRun(runId) {
         return { ...(store.runs.get(runId) ?? {}) };
       },
@@ -172,6 +175,7 @@ function makeDeps(store: MemStore): AutopilotRunsDeps & CycleCloseDeps {
         return null;
       },
     },
+    hasPendingDurableMergeSince: () => false,
     isPidAlive: () => true,
     now: () => FIXED_NOW_MS,
     // Issue #2956: no-op workless-hint stamp (this suite never exercises the

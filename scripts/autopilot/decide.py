@@ -320,9 +320,11 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 from decide_base import (
+    BACKFILL_STARVATION_FLOOR_SEC,
     ESCALATION_POLICY,
     GLM_RED_FORWARD_FIX_CAP,
     QA_STALL_MAX_ATTEMPTS,
+    ZERO_YIELD_BACKOFF_LADDER,
     _glm_red_attempt_count,
     _glm_red_forward_fix_signal,
     _needs_qa_target_pr_ref,
@@ -330,6 +332,7 @@ from decide_base import (
     _orch_board_read_degraded,
     _signal_present,
     _target_dev_resume_pick_signal,
+    _zero_yield_entry,
     make_dispatch,
 )
 from decide_selectors.architecture import _select_signal_architecture_orch
@@ -681,25 +684,6 @@ SIGNAL_COOLDOWNS = {
 # deliberately NOT in this set.
 BACKFILL_SIGNAL_CLASSES = ("discover_orch", "architecture_orch")
 
-# Backfill starvation floor (issue #2428). The one-per-turn stagger guard above
-# means that on a busy run a staggered backfill class (discover_orch /
-# architecture_orch) can LOSE the stagger slot every idle turn and go fully dark
-# for a day or more — nobody chose that, it just emerges from the round-robin.
-# The floor is a safety net: a backfill class that has NOT dispatched in
-# >BACKFILL_STARVATION_FLOOR_SEC AND is otherwise eligible this turn (idle
-# signal present, not saturated, not burned, cooled, in scope) BYPASSES the
-# stagger suppression so it is forced through. Derived purely from the existing
-# `signal_last_fired` timestamp (the same source signal_is_cooled reads) + now,
-# so decide.py stays a pure function of (state, events, now) with NO new
-# rotation state. cleanup_orch is exempt from the stagger guard entirely (it
-# co-fires every idle turn) so it can never starve and needs no floor.
-#
-# An UNSEEN class (no signal_last_fired entry) is treated as having NEVER run,
-# so it is floor-eligible immediately — the first idle turn after a fresh
-# bootstrap forces any still-dark backfill class through rather than letting the
-# stagger starve it for another full window.
-BACKFILL_STARVATION_FLOOR_SEC = 24 * 60 * 60
-
 # Issue #4611 — minimum re-fire interval for the `research_target` pipeline
 # slot. Its only trigger (`target_board_research_due` = the Target board has 0
 # `ready-for-agent` items) is also true whenever the board is PR-SATURATED
@@ -723,6 +707,20 @@ RESEARCH_TARGET_REFIRE_SEC = int(
 PIPELINE_REFIRE_SEC: dict[str, int] = {
     "research_target": RESEARCH_TARGET_REFIRE_SEC,
 }
+
+# Issue #4999 — the enrolment list (INV-9): a future enrolment
+# (cleanup_target / research_target, when evidence demands it) is a new entry
+# plus one literal read branch in each of _zy_idle_signal_present /
+# _zy_positive_evidence_present, not a rewrite of the gate/reset logic. The
+# idle and reset signal names live ONLY in those two helpers as string
+# LITERALS (the #4934 schema read guard's textual extractor cannot see
+# computed names, so a table of names would be dead, drift-prone data).
+# Reset signals fail closed to false on a degraded board read
+# (ALL_DEGRADED_SIGNALS), which HOLDS the ladder instead of resetting it —
+# an outage must not silently restart the back-off clock.
+# #5051 enrolled cleanup_target: a new entry plus membership in the existing
+# literal branch when the signals are identical (both ride target_backfill_idle).
+ZERO_YIELD_BACKOFF_CLASSES: tuple[str, ...] = ("discover_target", "cleanup_target")
 
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
 WALL_CLOCK_HEARTBEAT_SEC = 900
@@ -3410,6 +3408,15 @@ def _rule_signal_classes(
     """
     out = _RuleOutput()
     burned = set(state.get("burned_classes") or [])
+    # Issue #4999 (INV-5) — zero the zero-yield back-off streaks FIRST, every
+    # turn, BEFORE the per-class loop: the reset must not be skip-able by the
+    # cooldown / scope / burned / budget gates inside the loop, because a
+    # board that just went non-idle (positive evidence present) must restart
+    # the ladder exactly on the turn the evidence appears — a delayed reset
+    # would wrongly hold the 4h/24h rungs against a board that has work.
+    # Mutates state in place; main() persists a changed zero_yield_backoff
+    # via the same snapshot-before/compare-after writeback as the increment.
+    _reset_zero_yield_streaks(state, events)
     backfill_dispatched = False
     for sig in (
         "health",
@@ -3614,6 +3621,42 @@ def _rule_signal_classes(
                     make_dispatch_decision_event(
                         state, now, cls=sig, outcome="budget",
                         reason="target risk surface unresolved",
+                    )
+                )
+                out.skipped += 1
+                continue
+        # Zero-yield back-off (issue #4999) — a dedicated pre-selector gate,
+        # the structural twin of the #4411 wire_or_retire risk-surface gate
+        # above: without it, a back-off-suppressed discover_target would fall
+        # into the post-selector disambiguation below and read as a generic
+        # "no triggering signal" / "signal cooldown active" skip, hiding the
+        # back-off from the retro. AND-composed with the 1800s
+        # SIGNAL_COOLDOWNS check inside _select_for_signal (INV-3 — the
+        # back-off never bypasses or replaces it): this gate only ever
+        # ADDS a suppression, and only while the idle signal is PRESENT (an
+        # absent idle signal keeps the generic idle attribution correct).
+        # Satisfied → falls through to the normal cooldown+selector path,
+        # which is where the plan-time increment (INV-4, #4999) lives.
+        if sig in ZERO_YIELD_BACKOFF_CLASSES and _zy_idle_signal_present(
+            state, events, sig
+        ):
+            satisfied, zy_streak, zy_last_fired, zy_required = _zero_yield_gate(
+                state, sig, now
+            )
+            if not satisfied:
+                remaining = zy_required - (now - zy_last_fired)
+                out.debug[f"{sig}_backoff"] = {
+                    "streak": zy_streak,
+                    "last_fired": zy_last_fired,
+                    "required_sec": zy_required,
+                }
+                out.events.append(
+                    make_dispatch_decision_event(
+                        state, now, cls=sig, outcome="cooldown",
+                        reason=(
+                            f"zero-yield back-off (#4999): "
+                            f"streak={zy_streak}, {remaining}s remaining"
+                        ),
                     )
                 )
                 out.skipped += 1
@@ -4380,6 +4423,88 @@ def _qa_target_builder_hold(state: dict, events: list[dict]) -> tuple[str | None
     if not isinstance(branch, str) or not branch or head != branch:
         return None, None
     return _needs_qa_target_pr_ref(state, events), branch
+
+
+def _zero_yield_required_sec(streak: int) -> int:
+    """The ladder wait (seconds) for `streak` consecutive zero-yield fires
+    (issue #4999, INV-1). The ladder is ascending, so the LAST threshold the
+    streak reaches wins: <3 → 0 (base behaviour), 3-5 → 4h, 6+ → 24h."""
+    required = 0
+    for threshold, wait_sec in ZERO_YIELD_BACKOFF_LADDER:
+        if streak >= threshold:
+            required = wait_sec
+    return required
+
+
+def _zero_yield_gate(
+    state: dict, cls: str, now: int
+) -> tuple[bool, int, int, int]:
+    """(satisfied?, streak, last_fired, required_sec) for `cls`'s back-off at
+    `now` (issue #4999, INV-1). Reads ONLY the class's own
+    `zero_yield_backoff.<cls>.last_fired` stamp — never `signal_last_fired`,
+    which bootstrap re-arms to 0 each run by design (INV-3)."""
+    entry = _zero_yield_entry(state, cls)
+    required = _zero_yield_required_sec(entry["streak"])
+    # A future/corrupt last_fired (clock step, hand-edited state) must never
+    # suppress past the ladder wait — fail open (the #4302 never-dark floor).
+    last_fired = entry["last_fired"]
+    if last_fired > now:
+        last_fired = 0
+    elapsed = now - last_fired
+    return elapsed >= required, entry["streak"], entry["last_fired"], required
+
+
+def _zy_idle_signal_present(state: dict, events: list[dict], cls: str) -> bool:
+    """Idle-signal presence for an enrolled back-off class (issue #4999).
+
+    Per-class LITERAL read: the #4934 schema read guard requires string
+    literals at read sites, so each enrolled class names its idle signal in
+    ONE branch here, mirroring its ZERO_YIELD_BACKOFF_CLASSES row. An unknown
+    class reads as not-idle — the back-off gate fails open (INV-9)."""
+    if cls in ("discover_target", "cleanup_target"):
+        return _signal_present(state, events, "target_backfill_idle")
+    return False
+
+
+def _zy_positive_evidence_present(state: dict, events: list[dict], cls: str) -> bool:
+    """Positive non-idle evidence for an enrolled back-off class (issue #4999,
+    INV-5) — same literal-read discipline as `_zy_idle_signal_present`.
+
+    POSITIVE-only by design: all three signals fail closed to false on a
+    degraded board read (ALL_DEGRADED_SIGNALS), so an API outage HOLDS the
+    ladder (no reset — and no increment either, because the idle signal
+    reads false too) instead of silently restarting the back-off clock. A
+    pass that files a needs-triage finding lands here via
+    `needs_triage_target` on the NEXT turn's snapshot, so "reset when a pass
+    files something" needs no parsing of the agent's output."""
+    if cls in ("discover_target", "cleanup_target"):
+        return (
+            _signal_present(state, events, "needs_triage_target")
+            or _signal_present(state, events, "target_board_work_available")
+            or _signal_present(state, events, "target_work_available")
+        )
+    return False
+
+
+def _reset_zero_yield_streaks(state: dict, events: list[dict]) -> None:
+    """INV-5 reset (#4999) — zero every enrolled class's streak on positive evidence.
+
+    Runs at the TOP of `_rule_signal_classes`, before the per-class loop, so
+    no cooldown / scope / burned / budget skip can hide a reset turn. Only
+    the streak zeroes; `last_fired` stays (a re-climbing ladder measures from
+    the most recent FIRE either way, since every fire re-stamps it)."""
+    container = state.get("zero_yield_backoff")
+    if not isinstance(container, dict):
+        return
+    for cls in ZERO_YIELD_BACKOFF_CLASSES:
+        entry = container.get(cls)
+        if not isinstance(entry, dict) or not entry.get("streak"):
+            continue
+        if _zy_positive_evidence_present(state, events, cls):
+            reset = dict(entry)
+            reset["streak"] = 0
+            container[cls] = reset
+
 
 
 # Per-class pipeline-slot selector registry (issue #4265). A LOOKUP only — dispatch
@@ -5380,6 +5505,16 @@ def main(argv: list[str]) -> int:
         dev_target_resume_before = json.dumps(
             state.get("dev_target_resume_inflight"), sort_keys=True,
         )
+        # Issue #4999 — same change-detection for the zero-yield back-off
+        # ladder state. The discover_target selector stamps
+        # `state.zero_yield_backoff.discover_target` at plan time on every
+        # idle-board fire (INV-4) and `_reset_zero_yield_streaks` zeroes the
+        # streak on positive board evidence (INV-5); this compare persists
+        # either mutation via the SAME `_persist_state_writeback` helper — no
+        # new persistence mechanism (INV-7).
+        zero_yield_backoff_before = json.dumps(
+            state.get("zero_yield_backoff"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -5450,6 +5585,13 @@ def main(argv: list[str]) -> int:
         if dev_target_resume_after != dev_target_resume_before:
             _persist_state_writeback(
                 argv[2], state, what="dev_target_resume_inflight stamp (#4795)",
+            )
+        zero_yield_backoff_after = json.dumps(
+            state.get("zero_yield_backoff"), sort_keys=True,
+        )
+        if zero_yield_backoff_after != zero_yield_backoff_before:
+            _persist_state_writeback(
+                argv[2], state, what="zero_yield_backoff stamp/reset (#4999)",
             )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the

@@ -9,8 +9,11 @@ Every definition here moved verbatim from decide.py.
 from __future__ import annotations
 
 from decide_base import (
+    ZERO_YIELD_BACKOFF_LADDER,
     _orch_backfill_idle_present,
     _signal_present,
+    _stamp_zero_yield,
+    _zero_yield_entry,
     make_dispatch,
 )
 
@@ -77,7 +80,7 @@ def _select_signal_cleanup_target(
     # emits `target_backfill_idle` — triage, queued, and the Redis
     # work-queue are all empty), reclaim spare capacity by dispatching the
     # headless /hydra-target-cleanup skill: a DETERMINISTIC demote-only
-    # dead-export sweep over the Target repo web app. It emits ONLY findings
+    # dead-export sweep over ~/hydra-betting/web. It emits ONLY findings
     # the Target's CLAUDE.md rule-3 carve-out authorises (demote-class,
     # past the 45-day wiring grace) as ready-for-agent backlog items whose
     # acceptance check is self-checking ("drop the export keyword AND
@@ -95,10 +98,20 @@ def _select_signal_cleanup_target(
     if _signal_present(state, events, "target_cleanup_board_saturated"):
         return None
     if _signal_present(state, events, "target_backfill_idle"):
+        # Issue #5051: zero-yield back-off (#4999 ladder). Increment ONLY here,
+        # after the saturated early-return, on an actual dispatch.
+        entry = _zero_yield_entry(state, "cleanup_target")
+        _stamp_zero_yield(state, "cleanup_target", now)
+        reason = "target backlog idle — demote-only dead-export backfill"
+        if entry["streak"] >= ZERO_YIELD_BACKOFF_LADDER[0][0]:
+            reason += (
+                f" (zero-yield back-off rung elapsed, "
+                f"streak={entry['streak'] + 1})"
+            )
         return make_dispatch(
             sig,
             "hydra-target-cleanup",
             prompt_args={"apply": True},
-            reason="target backlog idle — demote-only dead-export backfill",
+            reason=reason,
         )
     return None

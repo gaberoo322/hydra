@@ -30,13 +30,8 @@ supersedes:
 > MUST pass `run_in_background: false`. The `Agent` tool defaults to background
 > dispatch — a spawn without this flag returns immediately, and the parent turn
 > (and this session) can end with no verdict posted while reviewers are still
-> running. This is not a new rule; it already lives at step 7 below. It failed to
-> hold on 2026-08-05 even though step 7 carried it: the mandate was true but sat
-> ~250 lines past this preface, *after the base's entire unconstrained "spawn in
-> parallel" body*, so a dispatch could reach and act on a spawn instruction well
-> before ever reading it. That body is now excised outright (#3990), so the only
-> spawn instruction in this skill is step 7's — but the mandate stays hoisted
-> here, because a top-down read must hit it before any spawn happens. Step 7.5's
+> running. It is hoisted here from step 7 so a top-down read hits it before any
+> spawn instruction. Step 7.5's
 > reviewer-completeness check is equally mandatory: never aggregate or emit a
 > verdict for a fan-out where any spawned reviewer did not return a real
 > result — see step 7.5 below.
@@ -49,8 +44,6 @@ Automated QA verification for PRs against the Hydra orchestrator. This skill is 
 
 The Spec axis reads the **design-concept artifact** for the issue (Phase A of #437) — produced by `hydra-grill` and persisted at `GET /api/design-concepts/:anchorRef`. The Standards axis reads `CLAUDE.md`, `CONTEXT.md`, `docs/adr/`, and lint configs. The two axes deliberately do not share context.
 
-> **Retired prompt artifact (issue #2556).** A standalone single-agent "Reality Checker" prompt (`AGENT-PROMPT.md`) used to be bundled alongside this skill. It predates the current parallel Standards/Spec fan-out and is **no longer injected by any flow** — the live reviewer prompts are embedded in this playbook (the `code-review`-skill sub-agents above). The stale artifact has been removed; it is not referenced anywhere. Do not re-introduce a separate prompt file: the reviewer prompts live here, in the playbook that `scripts/sync-skills.sh` regenerates the skill from.
-
 > **NEVER end your session waiting on CI, a monitor, or a background process
 > (issue #3866).** The full rule lives ONCE, canonically, in
 > `hydra-autopilot.md`'s "Worktree-guard preamble" section — as of issue #4272
@@ -59,14 +52,8 @@ The Spec axis reads the **design-concept artifact** for the issue (Phase A of #4
 > receive it at dispatch time regardless of this pointer. The variant permits
 > exactly the blocking (`run_in_background: false`) reviewer spawns step 7
 > below directs — never a background spawn, and never ending your turn with
-> any child still running. Restated here only as a cross-reference (not
-> duplicated, to avoid drift): this skill already never loops waiting on CI by
-> design (the four-verdict system below exists exactly to avoid that), but the
-> design was violated in practice — a `qa_orch` T4 re-check on PR #3853 posted
-> the Deep-QA PASS marker and then ended its turn waiting for the
-> `deep-qa-gate` re-check to complete instead of returning. Once you have
-> computed a verdict and executed its step-10 routing, you are DONE — return
-> immediately.
+> any child still running. Once you have computed a verdict and executed its
+> step-10 routing, you are DONE — return immediately.
 
 ## Tier-aware verification depth (issue #739, ADR-0015)
 
@@ -149,67 +136,28 @@ The skill **never loops waiting on CI**. After the two-axis review it emits exac
 | `PASS-pending-CI` | Both axes pass, no required check has failed, but at least one check (required or optional) is still `queued` / `in_progress` / `pending`. | Re-poll CI on the autopilot tick; merge once green or downgrade to `FAIL` if a required check later fails. The `hydra-qa` subagent has already exited. |
 | `FAIL-pending-CI` | Reserved tier — currently unused by the classifier. Documented so operators / future playbooks can route a "review passed but a non-required check is in a soft-failure tier that we want to surface" case without re-running QA. | Treat as `PASS-pending-CI` for merge gating; surface in the verdict body. |
 
-**Why single-pass exit matters:** before #405 the subagent looped on `mutation-test: QUEUED` for hours. PR #403 auto-merged before a (correct) `FAIL` verdict landed. Autopilot polls CI; this skill does not.
-
 Pure helpers backing the classifier live in `scripts/ci/qa-verdict.ts`. The regression test `test/hydra-qa-prompt-verdict.test.mts` locks in the smoking-gun case: `mutation-test: QUEUED` + everything-else-green → `PASS-pending-CI` (not a wait).
 
 **An incomplete reviewer fan-out is not a fifth verdict — it is a pre-verdict exit.** If step 7.5 finds a spawned reviewer missing (e.g. its worktree was reaped mid-review), the skill exits before reaching step 8/9 with none of the four verdicts above and `needs-qa` left in place for automatic retry — see step 7.5.
 
 ## Measuring the QA catch rate (AC1, issue #3815)
 
-Issue #3815's own acceptance criterion 1 gates every further fan-out-reducing
-lever (in particular the RC2 mid-fan-out short-circuit) on measuring the
-**true** QA catch rate — counting a FAIL wherever it is recorded (PR review
-state, a verdict comment, or the `ready-for-agent` bounce path), not just
-`CHANGES_REQUESTED` on closed PRs, which is the issue's own flawed original
-0/36 methodology (a FAILed-then-fixed-then-PASSed PR shows no lasting
-`CHANGES_REQUESTED`, and the `skip-required-failed` admission-gate branch at
-step 6.6 computes a FAIL without ever spawning a reviewer, so it leaves no
-review-state trace either).
-
-`npm run qa:catch-rate -- --repo gaberoo322/hydra --limit 60` (implemented in
-`scripts/ci/qa-catch-rate.ts`, pure classifier tested in
-`test/qa-catch-rate.test.mts`) reproduces this number on demand: it fetches a
-window of PRs, resolves each PR's linked issue for the bounce-path signal,
-classifies every PR as `caught` / `clean-pass` / `not-reviewed` against the
-three signals above, and prints the aggregate catch rate as JSON. Since issue
-#4729 it parses the step-9.5 `QA-Verdict:` trailer FIRST and attributes it only
-to the PR its `pr=` names (a shared linked issue no longer leaks a sibling PR's
-bounce); the three legacy signals are the fallback for trailer-less historical
-comments. This is the *instrument*, not the *lever* — it imports only the
-read-only trailer parser from `qa-verdict.ts` and ships no change to `aggregateAdversarialReview()`, `classifyVerdict()`, or any
-verdict literal (INV-A/INV-D); running it neither ships nor gates RC2, it only
-produces the number RC2's own sequencing gate is waiting on.
-
-**Measured baseline (2026-08-10, 60-PR window): 41% catch rate — 16 caught / 39
-reviewed (21 not-reviewed, excluded from the denominator).** This is the number
-the AC1 sequencing gate was waiting on; it is materially different from the
-issue's original 0/36 figure and is direct evidence the
-`CHANGES_REQUESTED`-only method undercounted, since several of the 16 catches
-are FAILs recorded only as an `Automated QA failed` bounce comment on the linked
-issue — structurally invisible to that method. Re-run `npm run qa:catch-rate
--- --limit 60` after any further fan-out change to refresh this baseline; AC6's
-post-lever 5h share scan is the complementary measurement.
+`npm run qa:catch-rate -- --repo gaberoo322/hydra --limit 60`
+(`scripts/ci/qa-catch-rate.ts`) measures the true catch rate: it classifies each
+PR as `caught` / `clean-pass` / `not-reviewed`, keying on the step-9.5
+`QA-Verdict:` trailer first (attributed only to the PR its `pr=` names) and
+falling back to review state, verdict comments, and the linked-issue bounce
+comment for trailer-less history. It is a read-only instrument — it changes no
+verdict logic. Re-run it after any fan-out change.
 
 ## Never end a turn on a pending wait (issue #3953)
 
 A backgrounded wait is **structurally unrecoverable**: end the turn while a
 result is still pending and the result is delivered to a session that has
-already exited — the only path back is an external `SendMessage` resume. In
-autopilot run `028f420d` (2026-08-11) a `qa_orch` dispatch said *"I'll wait for
-the monitor to report settlement, then post final verdicts"* and stopped;
-**7 completed PR reviews were never posted as verdicts** until an operator
-resumed it.
-
-This skill's single-pass-exit design already obeys this rule for CI: it checks
-CI state **once**, emits `PASS-pending-CI` / `FAIL-pending-CI`, and **exits**
-(issue #405 — it deliberately does NOT loop on CI; an earlier version looped on
-`mutation-test: QUEUED` for hours and let PR #403 auto-merge before a correct
-`FAIL` landed). That design is **unchanged**. The contract below generalises the
-existing **Blocking-dispatch mandate** (`run_in_background: false` on every
-reviewer `Agent` spawn, issue #3880) to *every* backgrounding mechanism a QA
-dispatch can reach — a `Monitor`, a backgrounded bash, a reviewer spawn missing
-the flag.
+already exited — the only path back is an external `SendMessage` resume. This
+generalises the **Blocking-dispatch mandate** to *every* backgrounding
+mechanism a QA dispatch can reach — a `Monitor`, a backgrounded bash, a
+reviewer spawn missing the flag.
 
 **The rule: a turn ends only when every spawned reviewer has returned a real
 result (step 7.5) and the verdict is posted.** If something you need is not
@@ -228,12 +176,7 @@ confuse the two:
 # BOUNDED FOREGROUND POLL — block in THIS turn until the observed $PR settles.
 # This is the foreground alternative to backgrounding a Monitor/wait and ending
 # the turn.
-#
-# zsh $status pitfall: name the state variable `run_state` (or `st`), never
-# `status` — zsh aliases `$status` to `$?`, so assigning a value to a variable
-# named `status` silently fails and the loop exits 1. `status` is the natural
-# spelling of this variable; that is exactly why the loop breaks. (Documented
-# CLAUDE.md pitfall.)
+# Never name the variable `status` (zsh read-only alias — CLAUDE.md pitfall).
 deadline=$((SECONDS + 600))            # 10-min budget; size to your slowest check
 while [ "$SECONDS" -lt "$deadline" ]; do
   run_state=$(gh pr view "$PR" --repo "$REPO" --json statusCheckRollup \
@@ -1202,27 +1145,11 @@ BLOCKER_SUMMARY="${BLOCKERS:-0} blocker(s), worst: ${MAX_SEVERITY:-none}${WORST_
 
 **Verdict `PASS`** (both axes pass + all required checks green):
 ```bash
-# Strip needs-qa from the source issue FIRST (issue #974), before any command
-# that can abort this branch on a self-authored PR. The PASS verdict is final
-# the moment it is computed; the label routing must not be hostage to the
-# comment/merge calls below. The old first command here was
-# `gh pr review --approve`, which ALWAYS errors on a self-authored PR (shared
-# gaberoo322 identity — reference_qa_cannot_self_approve / #848); that abort
-# left needs-qa lingering ~1h23m until a LATER autopilot run cleared it — the
-# #974 busy-loop (QA-side twin of #846). Use the PR-event-safe `gh issue edit`
-# path (NOT the broken `gh pr edit` — feedback_gh_rerun_label_quirk), tolerant
-# of an already-cleared label via `|| true`.
-#
-# Apply `in-progress` as a bridging label in the SAME call (issue #3788 Cause
-# 1): a PR is confirmed open at this point (located in step 2), so leaving the
-# issue fully label-less between the needs-qa strip and the eventual merge is
-# never correct — under CI queue backpressure (single self-hosted runner
-# serializing PR CI + deploys) a green, auto-mergeable PR can sit
-# `mergeStateStatus: BLOCKED` for the entire queue-wait window, during which
-# the source issue was an untriaged-orphan false positive. `in-progress` does
-# not key into the #974 redispatch loop (that loop is keyed specifically on a
-# lingering `needs-qa` label), so this closes the gap without reintroducing
-# #974.
+# Strip needs-qa FIRST (issue #974), before any command that can abort on a
+# self-authored PR, so a lingering needs-qa never re-dispatches QA. Use
+# `gh issue edit` (not the broken `gh pr edit`). Add `in-progress` in the SAME
+# call (issue #3788): the PR is open, so the issue must never sit label-less
+# while it waits in the merge queue; `in-progress` does not key the #974 loop.
 gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" --add-label "in-progress" 2>/dev/null \
   || true  # already cleared (e.g. by a prior auto-close) — expected and non-fatal
 
@@ -1309,27 +1236,10 @@ Verdict: \`PASS-pending-CI\`. Autopilot will re-evaluate once required checks co
 
 ${QA_VERDICT_TRAILER}"
 
-# Clear needs-qa from the source issue (issue #638) — the diff-review portion
-# of QA is complete; what remains is CI polling, which the autopilot does
-# directly via `gh pr view --json statusCheckRollup` without re-running this
-# skill. Leaving `needs-qa` on the issue caused `signals.needs_qa_orch=True`
-# to fire on every autopilot tick (`src/autopilot/turn-snapshot/orch-board.ts`
-# counts `needs-qa` on issues), and decide.py re-dispatched hydra-qa every
-# turn — a busy-loop that burned ~30-65k tokens per tick while the PR sat
-# waiting on CI or operator merge.
-#
-# The PR keeps its own status via the verdict comment above; when CI goes
-# green and the PR is merged, `Closes #N` in the PR body auto-closes the
-# issue. If CI later FAILS, the autopilot poll loop (which reads
-# statusCheckRollup directly, not labels) re-labels the issue
-# `ready-for-agent` for retry — the same path as a fresh FAIL verdict.
-#
-# Apply `in-progress` as a bridging label in the SAME call (issue #3788 Cause
-# 1) — same rationale as the PASS branch above: a confirmed-open PR is still
-# awaiting CI/merge, so the issue must never sit fully label-less in the
-# meantime. `in-progress` is inert with respect to both the #974 redispatch
-# loop (keyed on `needs-qa`) and the autopilot's CI-poll re-label-on-FAIL path
-# (which sets `ready-for-agent` directly, superseding `in-progress`).
+# Clear needs-qa (issue #638): review is done; the autopilot polls CI itself
+# via statusCheckRollup, so a lingering needs-qa would re-dispatch QA every
+# tick. A later CI failure is re-labelled by the autopilot poll loop. Bridge
+# with `in-progress` in the same call — same rationale as the PASS branch.
 gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" --add-label "in-progress" 2>/dev/null \
   || echo "WARN: failed to clear needs-qa from issue #$issue_number (non-fatal)"
 ```

@@ -1,0 +1,1 @@
+- refactor: demote two unused type exports in src/glm (#4995)

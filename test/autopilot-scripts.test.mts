@@ -44,6 +44,19 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SIGNAL_CLASS_COOLDOWNS } from "../src/taxonomy/classes.ts";
 
+// Issue #4966: bootstrap.sh renders the --reap-session-echo redirect line
+// from HYDRA_AUTOPILOT_PRIMARY_MODEL / HYDRA_AUTOPILOT_FALLBACK_MODEL, and
+// the cases below pin the DEFAULT pair (fable -> opus). A dispatch running
+// under the #4839 Sonnet-parent trial inherits PRIMARY_MODEL=sonnet from the
+// host's systemd drop-in through the `...process.env` spreads here, reddening
+// those cases worktree-local while CI's fresh runner env stays green. Pin the
+// default pair explicitly in the model-sensitive helper's env so the result
+// never depends on the host's inherited values.
+const DEFAULT_MODEL_PAIR_ENV = {
+  HYDRA_AUTOPILOT_PRIMARY_MODEL: "fable",
+  HYDRA_AUTOPILOT_FALLBACK_MODEL: "opus",
+};
+
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
 
@@ -1617,7 +1630,7 @@ describe("scripts/autopilot/bootstrap.sh --reap-crash-detail (issue #2479)", () 
  */
 function reapSessionEcho(responseJson: string): string {
   const result = spawnSync(join(SCRIPTS, "bootstrap.sh"), ["--reap-session-echo", responseJson], {
-    env: { ...process.env, PATH: process.env.PATH ?? "" },
+    env: { ...process.env, ...DEFAULT_MODEL_PAIR_ENV, PATH: process.env.PATH ?? "" },
     encoding: "utf-8",
   });
   return (result.stdout ?? "").trim();
@@ -2723,5 +2736,87 @@ describe("scripts/autopilot/drain.sh run-tally tail (issue #4551)", () => {
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
+  });
+});
+
+// Issue #4999 (INV-6) — `state.zero_yield_backoff` (the discover_target
+// idle-board back-off ladder) survives a Pace Gate relaunch. decide.py
+// stamps it at plan time, but bootstrap.sh rewrites state.json from a heredoc
+// on EVERY run and the pace gate relaunches every ~15 min — without a
+// carry-forward the ladder resets to streak 0 on every relaunch and the
+// back-off is a no-op against exactly the refire loop it exists to stop
+// (the #2575 bug class; the DEV_RESUME_PENDING_SEED #4518 pattern). Unlike
+// the cooldown carry this is FILE-ONLY (no Redis tier): losing it on a reboot
+// fails open, at worst restarting one ladder.
+describe("scripts/autopilot/bootstrap.sh — zero_yield_backoff carry-forward (issue #4999)", () => {
+  function bootstrapWithPrior(prior: string | null): any {
+    const tmp = makeTempState();
+    try {
+      if (prior !== null) writeFileSync(tmp.state, prior);
+      const r = runBootstrap({ HYDRA_AUTOPILOT_SCOPE: "all" }, tmp);
+      assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+      return JSON.parse(readFileSync(tmp.state, "utf-8"));
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  }
+
+  const entry = { streak: 3, last_fired: 1_790_000_000 };
+
+  test("a stamped ladder entry survives the heredoc rewrite verbatim (INV-6)", () => {
+    const s = bootstrapWithPrior(JSON.stringify({
+      pid: 0,
+      zero_yield_backoff: { discover_target: entry },
+    }));
+    assert.deepEqual(s.zero_yield_backoff, { discover_target: entry });
+  });
+
+  test("the carried ladder coexists with the ALWAYS_ON re-arm: signal_last_fired.discover_target stays 0 (INV-3)", () => {
+    // discover_target is one of the 4 always-on classes re-armed to 0 each run
+    // BY DESIGN (#4607: discover on every fresh run) — the back-off must hold
+    // through its OWN stamp, never by changing that contract.
+    const s = bootstrapWithPrior(JSON.stringify({
+      pid: 0,
+      signal_last_fired: { discover_target: 1_790_000_005 },
+      zero_yield_backoff: { discover_target: entry },
+    }));
+    assert.equal(s.signal_last_fired.discover_target, 0,
+      "the always-on re-arm is unchanged (#4999 INV-3)");
+    assert.deepEqual(s.zero_yield_backoff, { discover_target: entry },
+      "the ladder carries instead — it reads only its own stamp");
+  });
+
+  test("malformed entries (non-object entry, non-int streak/last_fired) drop to {}, never carried (INV-6)", () => {
+    const s = bootstrapWithPrior(JSON.stringify({
+      pid: 0,
+      zero_yield_backoff: {
+        discover_target: entry,
+        "bad-bool": { streak: true, last_fired: 5 },
+        "bad-float": { streak: 1.5, last_fired: 5 },
+        "bad-missing": { streak: 3 },
+        "bad-nonobj": 7,
+      },
+    }));
+    assert.deepEqual(s.zero_yield_backoff, { discover_target: entry },
+      "only well-formed integer entries carry; the rest drop per-entry");
+  });
+
+  test("no prior state file, an unparseable prior file, or a non-object shape all seed {}", () => {
+    assert.deepEqual(bootstrapWithPrior(null).zero_yield_backoff, {});
+    assert.deepEqual(bootstrapWithPrior("not json at all").zero_yield_backoff, {});
+    assert.deepEqual(
+      bootstrapWithPrior(JSON.stringify({ pid: 0, zero_yield_backoff: "corrupt" })).zero_yield_backoff,
+      {},
+    );
+    assert.deepEqual(
+      bootstrapWithPrior(JSON.stringify({ pid: 0, zero_yield_backoff: [entry] })).zero_yield_backoff,
+      {},
+    );
+  });
+
+  test("a prior state file WITHOUT the key still seeds a present {} (the heredoc always emits it)", () => {
+    const s = bootstrapWithPrior(JSON.stringify({ pid: 0, signal_last_fired: { health: 5 } }));
+    assert.deepEqual(s.zero_yield_backoff, {},
+      "decide.py must always read a present map — absent key on the prior file is not a missing field");
   });
 });

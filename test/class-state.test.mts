@@ -754,7 +754,9 @@ describe("recordTurn persists + sanitises the observability fields (INV-2/INV-3)
           captured.push({ runId, turnN, member });
         },
         hasAutopilotRunTurnAt: async () => false,
+        listStreamEntriesSince: async () => [],
       },
+      hasPendingDurableMergeSince: () => false,
       isPidAlive: () => true,
       now: () => NOW_MS,
       stampWorklessHint: async () => null,

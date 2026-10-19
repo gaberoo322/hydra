@@ -387,13 +387,26 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
             out.append(UNPINNED_RANKING)
         if pa.get("resume"):
             branch = pa.get("resume_branch")
-            branch_txt = f" (branch `{branch}`)" if branch else ""
-            out.append(
-                f"This anchor previously stalled without a landed result{branch_txt}. Before implementing from "
-                "scratch, check whether that branch still exists (`git ls-remote origin <branch>`) and continue "
-                "from it if so — do not silently redo already-committed work. This is a fresh session, not a "
-                "resumed one; reusing the branch is what avoids re-paying for the committed portion."
-            )
+            if branch:
+                # #3866 wording — unchanged (issue #4808 INV-10).
+                out.append(
+                    f"This anchor previously stalled without a landed result (branch `{branch}`). Before implementing from "
+                    "scratch, check whether that branch still exists (`git ls-remote origin <branch>`) and continue "
+                    "from it if so — do not silently redo already-committed work. This is a fresh session, not a "
+                    "resumed one; reusing the branch is what avoids re-paying for the committed portion."
+                )
+            else:
+                # #4808: the no-PR resume pin has no headRefName to carry — the
+                # salvage branch (if any) lives in the issue's own comment
+                # history, in the last reap stall comment's **Branch:** line or
+                # a recovery comment an operator/supervisor left behind.
+                out.append(
+                    f"This anchor previously stalled without a landed result and no branch was recorded in the resume "
+                    f"pin. Read the issue's comments (`gh issue view {anchor_n} --json comments`) for the latest reap "
+                    "stall comment's `**Branch:**` line, or a recovery comment naming a salvage branch; check whether "
+                    "that branch still exists (`git ls-remote origin <branch>`), and judge whether continuing it "
+                    "against current origin/master beats starting fresh — do not silently redo already-committed work."
+                )
         if pa.get("forward_fix_pr"):
             out.append(FORWARD_FIX_CONTRACT.format(pr=pa.get("forward_fix_pr"), branch=pa.get("resume_branch") or "<resume_branch>"))
         else:

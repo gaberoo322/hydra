@@ -56,7 +56,8 @@ export interface BehaviorRow {
   trigger: string;
   turns: number;
   dispatches: number;
-  mergedCount: number;
+  /** null when the run-end window read failed (merged_count_source=unavailable, #4700). */
+  mergedCount: number | null;
   failedCount: number;
   totalTokens: number;
   exitCode: number | null;
@@ -217,7 +218,12 @@ async function liftRunDigest(
     trigger: typeof raw.trigger === "string" ? raw.trigger : "manual",
     turns: typeof raw.turns === "number" ? raw.turns : 0,
     dispatches: typeof raw.dispatches === "number" ? raw.dispatches : 0,
-    mergedCount: typeof raw.merged_count === "number" ? raw.merged_count : 0,
+    mergedCount:
+      typeof raw.merged_count === "number"
+        ? raw.merged_count
+        : raw.merged_count === null
+          ? null
+          : 0,
     failedCount: typeof raw.failed_count === "number" ? raw.failed_count : 0,
     totalTokens: typeof raw.total_tokens === "number" ? raw.total_tokens : 0,
     exitCode,

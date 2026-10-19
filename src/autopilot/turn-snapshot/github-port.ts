@@ -61,6 +61,14 @@ export interface TurnSnapshotGithub {
   requiredStatusContexts(): Promise<GhJsonRead>;
   /** Open issue numbers carrying `label` (`[{"number": N}, …]`). */
   openIssueNumbersByLabel(label: string, limit: number): Promise<GhJsonRead>;
+  /**
+   * Open issues carrying `label` with {@link ORCH_BOARD_ROW_FIELDS}
+   * (`number,labels,updatedAt`) — the #4808 no-PR resume pick read. The SAME
+   * single per-turn call the needs-dev-resume number read was, widened in
+   * place (INV-3): parseDevResumeIssues keeps reading just `.number` off the
+   * wider rows, so its output is unchanged.
+   */
+  listOpenIssueRowsByLabel(label: string, limit: number): Promise<GhJsonRead>;
   /** Open issues with {@link ORCH_BOARD_ROW_FIELDS} — the degraded board-state read (ADR-0043 slice 2). */
   listOpenIssueBoardRows(limit: number): Promise<GhJsonRead>;
   /** Open issues with `number,labels` — the untriaged-orphan backstop read (ADR-0043 slice 2). */
@@ -207,6 +215,11 @@ export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): 
     async openIssueNumbersByLabel(label, limit) {
       return jsonRead(
         await read(["issue", "list", "--repo", repo, "--label", label, "--state", "open", "--limit", String(limit), "--json", "number", "--jq", "."]),
+      );
+    },
+    async listOpenIssueRowsByLabel(label, limit) {
+      return jsonRead(
+        await read(["issue", "list", "--repo", repo, "--label", label, "--state", "open", "--limit", String(limit), "--json", ORCH_BOARD_ROW_FIELDS]),
       );
     },
     async listOpenIssueBoardRows(limit) {

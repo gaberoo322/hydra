@@ -50,11 +50,6 @@ export function jqLength(v: unknown): number {
   throw new JqError(`${jqType(v)} has no length`);
 }
 
-/** jq truthiness: everything except `null` and `false`. */
-export function jqTruthy(v: unknown): boolean {
-  return v !== null && v !== undefined && v !== false;
-}
-
 function jqType(v: unknown): string {
   if (v === null || v === undefined) return "null";
   if (Array.isArray(v)) return "array";

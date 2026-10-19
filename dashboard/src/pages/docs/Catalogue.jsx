@@ -74,7 +74,7 @@ function RouteLinks({ routes }) {
 const mono = (v) => <span className="font-mono text-zinc-200">{v}</span>;
 
 /** Per-family column spec: [header, (row) => cell]. */
-export const COLUMN_SPECS = {
+const COLUMN_SPECS = {
   "redis-keys": [
     ["builder", (r) => (r.retired ? <span className="text-amber-400">retired</span> : mono(r.builder))],
     ["pattern", (r) => <span className="font-mono text-[11px] text-zinc-300">{r.pattern}</span>],

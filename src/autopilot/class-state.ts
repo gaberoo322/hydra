@@ -90,9 +90,9 @@ export interface ClassStateTurn {
 }
 
 /** Per-row verdict freshness. `unknown` = no active run / no decisions on the latest turn. */
-export type RowFreshness = "fresh" | "stale" | "unknown" | "not-evaluated";
+type RowFreshness = "fresh" | "stale" | "unknown" | "not-evaluated";
 
-export interface ClassStateVerdict {
+interface ClassStateVerdict {
   outcome: string;
   reason: string;
   turnN: number;
@@ -117,7 +117,7 @@ export interface ClassStateRow {
   deadReason?: string;
 }
 
-export interface ClassStateHeader {
+interface ClassStateHeader {
   run: {
     runId: string;
     lifecycle: AutopilotLifecycle["state"];

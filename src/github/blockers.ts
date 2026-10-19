@@ -116,10 +116,41 @@ const PARENT_REF_PATTERNS: RegExp[] = PARENT_REF_PATTERN_SOURCES.map(
  * PARENT_REF_PATTERN_SOURCES}), deduped, code-span-safe. `[]` for an
  * empty/absent body. Pure.
  */
-function extractDeclaredEpicRefs(
+export function extractDeclaredEpicRefs(
   body: string | null | undefined,
 ): number[] {
   return scanRefs(body, PARENT_REF_PATTERNS);
+}
+
+/**
+ * The Epic-children marker (issue #4805) — the inverse of
+ * {@link PARENT_REF_PATTERN_SOURCES}: a body that carries a `## Sub-issues`
+ * heading (any level; the CONTEXT.md **Epic** definition and the hydra-prd
+ * `renderParentBody` shape) declares ITSELF an Epic. The heading line is
+ * matched here; {@link declaresEpicChildren} additionally requires at least one
+ * `#N` ref beneath it, before the next heading.
+ */
+export const EPIC_CHILDREN_HEADING_SOURCE =
+  "^[ \\t]*#{1,6}[ \\t]+sub-issues\\b[^\\n]*$";
+
+/**
+ * True when `body` declares itself an Epic: a `## Sub-issues` heading with at
+ * least one `#N` ref in the section beneath it (up to the next heading).
+ * Code-span-safe. `false` for an empty/absent body. Pure.
+ */
+export function declaresEpicChildren(body: string | null | undefined): boolean {
+  if (!body) return false;
+  const stripped = body.replace(/`[^`]*`/g, "");
+  const lines = stripped.split(/\r?\n/);
+  const heading = new RegExp(EPIC_CHILDREN_HEADING_SOURCE, "i");
+  for (let i = 0; i < lines.length; i++) {
+    if (!heading.test(lines[i])) continue;
+    for (let j = i + 1; j < lines.length; j++) {
+      if (/^[ \t]*#{1,6}[ \t]+\S/.test(lines[j])) break;
+      if (/#\d+/.test(lines[j])) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -194,16 +225,42 @@ export async function fetchOpenBlockerNumbers(
   numbers: number[],
   deps: OpenBlockerLookupDeps = {},
 ): Promise<Set<number>> {
-  if (numbers.length === 0) return new Set();
+  const res = await fetchOpenBlockerRows(numbers, deps);
+  if (!res.ok) {
+    // Conservative: treat all referenced blockers as open.
+    return new Set(numbers);
+  }
+  return new Set(res.rows.map((r) => r.number));
+}
+
+/** Result of {@link fetchOpenBlockerRows}: the open rows, or a named failure. */
+export type OpenBlockerRowsResult =
+  | { ok: true; rows: IssueRow[] }
+  | { ok: false; code: string };
+
+/**
+ * The discriminated, row-returning form of the batched open-blocker lookup
+ * (issue #4805): ONE `--state open --search "<n1> <n2> ..."` read, rows
+ * narrowed to the requested numbers so a search hit that merely mentions a
+ * number is dropped. Rows carry `labels`, so a caller can tell WHO each open
+ * blocker is waiting on without a second read. Never throws on a read failure
+ * (returns `{ok:false}`); {@link fetchOpenBlockerNumbers} layers its
+ * "failure => every ref open" fail-safe on top.
+ */
+export async function fetchOpenBlockerRows(
+  numbers: number[],
+  deps: OpenBlockerLookupDeps = {},
+): Promise<OpenBlockerRowsResult> {
+  if (numbers.length === 0) return { ok: true, rows: [] };
   const search = numbers.map((n) => `${n}`).join(" ");
   const read = deps.listIssuesBySearch ?? listIssuesBySearch;
   const res = await read(search, { state: "open", repo: deps.githubRepo });
   if (isIssueReadFailure(res)) {
     console.error(`[blockers] open-blocker lookup failed (${res.code})`);
-    // Conservative: treat all referenced blockers as open.
-    return new Set(numbers);
+    return { ok: false, code: res.code };
   }
-  return openNumbersFromRows(res.rows, numbers);
+  const requested = new Set(numbers);
+  return { ok: true, rows: res.rows.filter((r) => requested.has(r.number)) };
 }
 
 /**

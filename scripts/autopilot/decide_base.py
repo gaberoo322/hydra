@@ -166,6 +166,46 @@ ESCALATION_POLICY: dict[str, dict] = {
 }
 
 
+# Backfill starvation floor (issue #2428). The one-per-turn stagger guard above
+# means that on a busy run a staggered backfill class (discover_orch /
+# architecture_orch) can LOSE the stagger slot every idle turn and go fully dark
+# for a day or more — nobody chose that, it just emerges from the round-robin.
+# The floor is a safety net: a backfill class that has NOT dispatched in
+# >BACKFILL_STARVATION_FLOOR_SEC AND is otherwise eligible this turn (idle
+# signal present, not saturated, not burned, cooled, in scope) BYPASSES the
+# stagger suppression so it is forced through. Derived purely from the existing
+# `signal_last_fired` timestamp (the same source signal_is_cooled reads) + now,
+# so decide.py stays a pure function of (state, events, now) with NO new
+# rotation state. cleanup_orch is exempt from the stagger guard entirely (it
+# co-fires every idle turn) so it can never starve and needs no floor.
+#
+# An UNSEEN class (no signal_last_fired entry) is treated as having NEVER run,
+# so it is floor-eligible immediately — the first idle turn after a fresh
+# bootstrap forces any still-dark backfill class through rather than letting the
+# stagger starve it for another full window.
+BACKFILL_STARVATION_FLOOR_SEC = 24 * 60 * 60
+
+# Issue #4999 — zero-yield back-off ladder for idle-board producer classes.
+# discover_target's only trigger (`target_backfill_idle`) stays true whenever
+# a dispatch finds nothing (the board stays idle, the signal stays true), so
+# the 30m class cooldown was the ONLY gate — and bootstrap re-arms its
+# signal_last_fired to 0 every run (ALWAYS_ON_REARMED, by design), so on the
+# ~15-min pace-gate relaunch cadence the class re-fired ~every 30 minutes for
+# as long as the Target board sat idle (measured 2026-10-13: 14 straight
+# runs, 26 dispatches, 0 filed, ~73k tokens each ≈ 3.5M tokens/day). The
+# ladder backs off the EFFECTIVE interval after consecutive zero-yield fires:
+# streak 0-2 → base behaviour, 3-5 → 4h between fires, 6+ → 24h. The 24h top
+# rung IS BACKFILL_STARVATION_FLOOR_SEC, so the #4302 never-dark property
+# holds by construction (INV-2): the class never goes fully dark on an idle
+# board, it just stops paying 73k tokens every 30 minutes to reconfirm it.
+# Fixed constants, deliberately NOT env-tunable (the operator specified the
+# three rungs via /hydra-hitl-grill; an exponential ladder was rejected).
+ZERO_YIELD_BACKOFF_LADDER: tuple[tuple[int, int], ...] = (
+    (3, 4 * 3600),  # 3-5 consecutive zero-yield fires → wait 4h since the last
+    (6, BACKFILL_STARVATION_FLOOR_SEC),  # 6+ → 24h (the #4302 floor, INV-2)
+)
+
+
 def make_dispatch(
     slot: str,
     skill: str,
@@ -407,3 +447,46 @@ def _orch_backfill_idle_present(state: dict, events: list[dict]) -> bool:
     return _signal_present(state, events, "orch_backfill_idle") and not _orch_board_read_degraded(
         state, events
     )
+
+
+def _zero_yield_entry(state: dict, cls: str) -> dict:
+    """`cls`'s zero-yield back-off entry, degrading to the streak-0 identity
+    (issue #4999, INV-9).
+
+    Any malformed shape — a non-map `zero_yield_backoff`, a non-map entry, or
+    a non-int `streak` / `last_fired` (bools are ints in Python, hence the
+    explicit exclusion) — reads as `{"streak": 0, "last_fired": 0}`, exactly
+    the absent-entry behaviour: streak 0 means "no back-off", so a corrupt
+    state file can never wedge the class dark.
+    """
+    container = state.get("zero_yield_backoff")
+    entry = container.get(cls) if isinstance(container, dict) else None
+    if not isinstance(entry, dict):
+        return {"streak": 0, "last_fired": 0}
+    streak = entry.get("streak")
+    last_fired = entry.get("last_fired")
+    for v in (streak, last_fired):
+        if not isinstance(v, int) or isinstance(v, bool):
+            return {"streak": 0, "last_fired": 0}
+    return {"streak": streak, "last_fired": last_fired}
+
+
+def _stamp_zero_yield(state: dict, cls: str, now: int) -> None:
+    """Bump `cls`'s zero-yield streak + last_fired at plan time (INV-4, #4999).
+
+    The same sanctioned in-selector state mutation as `_stamp_triage_items`
+    (#3729) / `_research_force_stamp` (#1666); main() persists a changed
+    `zero_yield_backoff` via the snapshot-before/compare-after writeback.
+    Called ONLY from the selector, on the exact line it returns a dispatch —
+    nothing else increments.
+
+    Known, accepted semantics: this is a PLAN-time stamp (the #3729 pattern),
+    so a planned dispatch that a LATER gate drops or whose launch fails still
+    counts as one fire on the ladder. That errs toward fewer idle-board
+    dispatches and is bounded by the 24h never-dark floor (INV-2), so it can
+    never wedge the class dark."""
+    entry = _zero_yield_entry(state, cls)
+    stamped = dict(state.get("zero_yield_backoff") or {}) \
+        if isinstance(state.get("zero_yield_backoff"), dict) else {}
+    stamped[cls] = {"streak": entry["streak"] + 1, "last_fired": now}
+    state["zero_yield_backoff"] = stamped

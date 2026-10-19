@@ -35,6 +35,7 @@ import assert from "node:assert/strict";
 import { spawnSync, spawn, type ChildProcess } from "node:child_process";
 import {
   mkdtempSync,
+  mkdirSync,
   writeFileSync,
   rmSync,
   existsSync,
@@ -52,14 +53,24 @@ const HELPER = join(REPO_ROOT, "scripts", "hooks", "extract-dispatch-sentinel.sh
 const SENTINEL =
   "<!-- hydra-dispatch v1 skill=hydra-dev dispatchId=worktree-agent-deadbeefcafe-t1-dev_orch runId=run-2406 -->";
 
-function writeTranscript(dir: string, sessionId: string, firstUserText: string): string {
-  const path = join(dir, `${sessionId}.jsonl`);
+const PARENT_SESSION = "50cc29b7-1111-4222-8333-444455556666";
+
+/**
+ * Write a CHILD transcript at the derived layout
+ * `<dir>/<parent>.jsonl`'s sibling `<dir>/<parent>/subagents/agent-<id>.jsonl`
+ * (issue #4965) and return the PARENT transcript_path the payload carries -
+ * the hook must derive the child path from it + agent_id.
+ */
+function writeTranscript(dir: string, agentId: string, firstUserText: string): string {
+  const subDir = join(dir, PARENT_SESSION, "subagents");
+  mkdirSync(subDir, { recursive: true });
+  const path = join(subDir, `agent-${agentId}.jsonl`);
   const lines = [
     JSON.stringify({ type: "user", message: { role: "user", content: firstUserText } }),
     JSON.stringify({ type: "assistant", message: { role: "assistant", content: "ok" } }),
   ].join("\n");
   writeFileSync(path, lines + "\n");
-  return path;
+  return join(dir, `${PARENT_SESSION}.jsonl`);
 }
 
 /**
@@ -219,12 +230,13 @@ describe("on-subagent-tool-call.sh — subagent-dispatch registration (#2406)", 
   test("sentinel-bearing transcript → POSTs a well-formed registration body", async () => {
     const srv = await startCaptureServer(workdir);
     try {
-      const sessionId = "sess-2406-ok";
+      const sessionId = "aaaa000000000001";
       const transcript = writeTranscript(workdir, sessionId, `${SENTINEL}\nDo the thing`);
       const r = runHook(
         {
           tool_name: "Read",
-          session_id: sessionId,
+          session_id: PARENT_SESSION,
+          agent_id: sessionId,
           transcript_path: transcript,
           cwd: workdir,
           tool_input: { file_path: "/tmp/x" },
@@ -238,6 +250,7 @@ describe("on-subagent-tool-call.sh — subagent-dispatch registration (#2406)", 
       assert.equal(bodies.length, 1, "expected exactly one registration POST");
       const body = bodies[0];
       assert.equal(body.sessionId, sessionId);
+      assert.equal(body.parentSessionId, PARENT_SESSION);
       assert.equal(body.skill, "hydra-dev");
       assert.equal(body.dispatchId, "worktree-agent-deadbeefcafe-t1-dev_orch");
       assert.equal(body.runId, "run-2406");
@@ -251,12 +264,13 @@ describe("on-subagent-tool-call.sh — subagent-dispatch registration (#2406)", 
   test("no sentinel (interactive operator session) → never POSTs", async () => {
     const srv = await startCaptureServer(workdir);
     try {
-      const sessionId = "sess-2406-nosentinel";
+      const sessionId = "aaaa000000000002";
       const transcript = writeTranscript(workdir, sessionId, "just a normal operator message");
       const r = runHook(
         {
           tool_name: "Read",
-          session_id: sessionId,
+          session_id: PARENT_SESSION,
+          agent_id: sessionId,
           transcript_path: transcript,
           cwd: workdir,
           tool_input: { file_path: "/tmp/x" },
@@ -274,13 +288,14 @@ describe("on-subagent-tool-call.sh — subagent-dispatch registration (#2406)", 
   });
 
   test("API unreachable → exits 0, never propagates an error to the parent", () => {
-    const sessionId = "sess-2406-apidown";
+    const sessionId = "aaaa000000000003";
     const transcript = writeTranscript(workdir, sessionId, `${SENTINEL}\nwork`);
     // Port 1 is unreachable — the POST must fail, but the hook MUST exit 0.
     const r = runHook(
       {
         tool_name: "Read",
-        session_id: sessionId,
+        session_id: PARENT_SESSION,
+        agent_id: sessionId,
         transcript_path: transcript,
         cwd: workdir,
         tool_input: { file_path: "/tmp/x" },
@@ -294,11 +309,12 @@ describe("on-subagent-tool-call.sh — subagent-dispatch registration (#2406)", 
   test("once-per-session marker → a 2nd tool call does NOT re-POST", async () => {
     const srv = await startCaptureServer(workdir);
     try {
-      const sessionId = "sess-2406-idem";
+      const sessionId = "aaaa000000000004";
       const transcript = writeTranscript(workdir, sessionId, `${SENTINEL}\nwork`);
       const payload = {
         tool_name: "Read",
-        session_id: sessionId,
+        session_id: PARENT_SESSION,
+        agent_id: sessionId,
         transcript_path: transcript,
         cwd: workdir,
         tool_input: { file_path: "/tmp/x" },
@@ -324,6 +340,138 @@ describe("on-subagent-tool-call.sh — subagent-dispatch registration (#2406)", 
     } finally {
       srv.close();
     }
+  });
+
+  test("main-thread call (no agent_id) -> never POSTs, even with a sentinel parent transcript", async () => {
+    const srv = await startCaptureServer(workdir);
+    try {
+      const transcript = writeTranscript(workdir, "aaaa000000000009", `${SENTINEL}\nwork`);
+      const r = runHook(
+        {
+          tool_name: "Read",
+          session_id: PARENT_SESSION,
+          transcript_path: transcript,
+          cwd: workdir,
+          tool_input: { file_path: "/tmp/x" },
+        },
+        { apiBase: srv.url, markerDir, stream: "hydra:autopilot:slot-events:test-4965-main" },
+      );
+      assert.equal(r.status, 0);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(srv.readBodies().length, 0);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("sentinel-less child (agent_id present) -> no POST, no XADD, negative marker is `none`", async () => {
+    const srv = await startCaptureServer(workdir);
+    try {
+      const id = "cccc000000000001";
+      const transcript = writeTranscript(workdir, id, "plain child prompt, no sentinel");
+      const payload = {
+        tool_name: "Read",
+        session_id: PARENT_SESSION,
+        agent_id: id,
+        transcript_path: transcript,
+        cwd: workdir,
+        tool_input: { file_path: "/tmp/x" },
+      };
+      const opts = {
+        apiBase: srv.url,
+        markerDir,
+        stream: "hydra:autopilot:slot-events:test-4965-nosentinel",
+      };
+      const r = runHook(payload, opts);
+      assert.equal(r.status, 0);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(srv.readBodies().length, 0, "no registration POST for a sentinel-less child");
+      // Negative marker is keyed on agent_id and holds `none`.
+      const marker = join(markerDir, `hydra-dispatch-registered-${id}`);
+      assert.ok(existsSync(marker), "negative marker must be written per agent_id");
+      assert.equal(readFileSync(marker, "utf-8").trim(), "none");
+      // XADD side: the hook exits before emitting for a sentinel-less child.
+      // Redis host is pointed at an unreachable port by runHook, so assert via
+      // the hook source ordering instead: the exit precedes any XADD.
+      const src = readFileSync(HOOK, "utf-8");
+      const exitIdx = src.indexOf("resolve_child_dispatch || exit 0");
+      const xaddIdx = src.indexOf("XADD \"$STREAM_KEY\"");
+      assert.ok(exitIdx > 0 && xaddIdx > exitIdx, "sentinel-less exit must precede the XADD");
+      // A second call hits the negative marker and still does not POST.
+      const r2 = runHook(payload, opts);
+      assert.equal(r2.status, 0);
+      await new Promise((r) => setTimeout(r, 200));
+      assert.equal(srv.readBodies().length, 0);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("once-per-agent marker is keyed on agent_id (file named by agent hash)", async () => {
+    const srv = await startCaptureServer(workdir);
+    try {
+      const id = "dddd000000000001";
+      const transcript = writeTranscript(workdir, id, `${SENTINEL}\nwork`);
+      const r = runHook(
+        {
+          tool_name: "Read",
+          session_id: PARENT_SESSION,
+          agent_id: id,
+          transcript_path: transcript,
+          cwd: workdir,
+          tool_input: { file_path: "/tmp/x" },
+        },
+        { apiBase: srv.url, markerDir, stream: "hydra:autopilot:slot-events:test-4965-mk" },
+      );
+      assert.equal(r.status, 0);
+      await srv.waitForBodies(1);
+      assert.ok(existsSync(join(markerDir, `hydra-dispatch-registered-${id}`)));
+      assert.ok(!existsSync(join(markerDir, `hydra-dispatch-registered-${PARENT_SESSION}`)));
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("two sibling children of one parent both register under their own agent_id", async () => {
+    const srv = await startCaptureServer(workdir);
+    try {
+      for (const id of ["bbbb000000000001", "bbbb000000000002"]) {
+        const transcript = writeTranscript(workdir, id, `${SENTINEL}\nwork`);
+        const r = runHook(
+          {
+            tool_name: "Read",
+            session_id: PARENT_SESSION,
+            agent_id: id,
+            transcript_path: transcript,
+            cwd: workdir,
+            tool_input: { file_path: "/tmp/x" },
+          },
+          { apiBase: srv.url, markerDir, stream: "hydra:autopilot:slot-events:test-4965-sib" },
+        );
+        assert.equal(r.status, 0);
+      }
+      await srv.waitForBodies(2);
+      const ids = srv.readBodies().map((b) => b.sessionId).sort();
+      assert.deepEqual(ids, ["bbbb000000000001", "bbbb000000000002"]);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("project settings.json registers on-subagent-tool-call.sh under PostToolUse (drift guard)", () => {
+    const settings = JSON.parse(
+      readFileSync(join(REPO_ROOT, ".claude", "settings.json"), "utf-8"),
+    );
+    const entries: any[] = settings?.hooks?.PostToolUse ?? [];
+    const entry = entries.find((e) =>
+      (e.hooks ?? []).some((h: any) => /on-subagent-tool-call\.sh$/.test(h.command)),
+    );
+    assert.ok(
+      entry,
+      "project .claude/settings.json must register on-subagent-tool-call.sh under hooks.PostToolUse",
+    );
+    assert.equal(entry.matcher, "");
+    assert.equal(entry.hooks[0].async, true);
   });
 
   test("shared sentinel helper is sourceable + exposes its three functions", () => {

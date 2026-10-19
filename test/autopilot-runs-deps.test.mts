@@ -116,6 +116,9 @@ function makeDeps(store: MemStore, opts: FixtureOpts = {}): AutopilotRunsDeps & 
   const nowMs = opts.nowMs ?? FIXED_NOW_MS;
   return {
     runs: {
+      async listStreamEntriesSince() {
+        return [];
+      },
       async getAutopilotRun(runId) {
         return { ...(store.runs.get(runId) ?? {}) };
       },
@@ -207,6 +210,7 @@ function makeDeps(store: MemStore, opts: FixtureOpts = {}): AutopilotRunsDeps & 
         return null;
       },
     },
+    hasPendingDurableMergeSince: () => false,
     isPidAlive: opts.isPidAlive ?? (() => true),
     now: () => nowMs,
     // Issue #2956: capture-only fake for the workless-hint stamp so endRun's

@@ -26,7 +26,8 @@ On `/loop`, run `/compact` (Claude) / restart context (Codex) at start.
 curl -s "$TARGET_WEB_URL/api/health" 2>/dev/null || echo "UNREACHABLE"
 systemctl --user status "$TARGET_SERVICE" 2>&1 | head -5
 
-# Production route crawl (issue #2735) — curl every nav-registry route against
+# Production route crawl (issue #2735) — curl every Target page route (app-router
+# enumeration, nav-registry fallback; #4846) against
 # the LIVE service and report per-route status. This is the ONLY tier that
 # catches data-drift 500s: a runtime failure class that renders fine in CI but
 # crashes against real production data. PR-time CI never sees the production
@@ -70,7 +71,7 @@ journalctl --user -u "$TARGET_SERVICE" --since "30 min ago" --no-pager 2>&1 \
 # Test health (cached, hourly)
 TEST_CMD=$(jq -r '.verify.test' "$TARGET_WS/.hydra/manifest.json")
 if [ ! -f /tmp/hydra-target-test-cache.txt ] || [ $(( $(date +%s) - $(stat -c %Y /tmp/hydra-target-test-cache.txt 2>/dev/null || echo 0) )) -gt 3600 ]; then
-  ( cd "$TARGET_APP_DIR" && eval "$TEST_CMD" 2>&1 | tail -3 ) > /tmp/hydra-target-test-cache.txt
+  ( cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" && eval "$TEST_CMD" 2>&1 | tail -3 ) > /tmp/hydra-target-test-cache.txt
 fi
 cat /tmp/hydra-target-test-cache.txt
 ```
@@ -79,7 +80,7 @@ cat /tmp/hydra-target-test-cache.txt
 
 **Service:** unreachable / restart loop / build failures (>5 min activating) / high mem (>2GB)
 **API errors:** 500s in routes / timeout patterns (external API degradation) / auth failures
-**Route crawl:** any non-200 in the per-route table is a data-drift page crash — filed deterministically by the crawl runner (see step 3), one deduped item per route
+**Route crawl:** a `route-crawl: SKIPPED` / `SERVICE UNREACHABLE` line (exit 1) is a loud no-measurement, never a healthy verdict; any non-200 in the per-route table is a data-drift page crash — filed deterministically by the crawl runner (see step 3), one deduped item per route
 **DB / data freshness:** connections approaching max / no recent ingest per the target's own timer cadence / size growing rapidly / stale rows past the target's declared freshness window
 **Execution:** stuck runs (non-terminal beyond the target's own expected duration) / high failure rate on whatever the target's execution path is / reconciliation orphans
 **Timers:** any inactive / last trigger beyond 2× the target's declared interval

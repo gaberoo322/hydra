@@ -25,6 +25,9 @@ export function detectIssuePrChurn(
   // ref → { count, merged }
   const byRef = new Map<string, { count: number; merged: number }>();
   for (const run of history) {
+    // merged_count === null = unavailable window read (#4700): merges unknown,
+    // not zero - skip so a failed read never counts as "nothing merged".
+    if (run.merged_count === null) continue;
     const refs = extractRefs(run);
     const mergedHere = toNum(run.merged_count);
     for (const ref of refs) {

@@ -9,8 +9,11 @@ Every definition here moved verbatim from decide.py.
 from __future__ import annotations
 
 from decide_base import (
+    ZERO_YIELD_BACKOFF_LADDER,
     _orch_backfill_idle_present,
     _signal_present,
+    _stamp_zero_yield,
+    _zero_yield_entry,
     make_dispatch,
     signal_dark_past_floor,
 )
@@ -104,7 +107,7 @@ def _select_signal_discover_target(
     events: list[dict],
     now: int,
 ) -> dict | None:
-    """`discover_target` signal-class selector (no issue provenance cited; trigger rewired by #4607)."""
+    """`discover_target` signal-class selector (provenance: #4607, #4999)."""
     # Issue #4607: this class used to gate on `target_idle` — a signal NO
     # producer ever emitted, so the class could NEVER fire (its trigger was
     # dead, silently tolerated on signal-parity-check's PRODUCERLESS list).
@@ -116,10 +119,29 @@ def _select_signal_discover_target(
     # the old name (the #959 anti-alias-drift stance). The bare read needs no
     # degraded-read guard: the producer already fails closed to `false` on a
     # failed board read, and `target_board_signals_degraded` is
-    # advisory-observable by design. Self-limiting: any finding files
-    # needs-triage on the Target board, un-idling target_backfill_idle until
-    # sweep_target drains it. decide.py reads the precomputed signal only
-    # (the signal-seam discipline).
+    # advisory-observable by design. decide.py reads the precomputed signal
+    # only (the signal-seam discipline).
+    #
+    # Issue #4999: the docstring's old "self-limiting" assumption — any
+    # finding un-idles the board — only holds when the dispatch FINDS
+    # something. When it finds nothing the board stays idle, the signal
+    # stays true, and (bootstrap re-arming signal_last_fired.discover_target
+    # to 0 every run) the class re-fired every ~30 minutes forever. The
+    # signal-loop's pre-selector zero-yield gate now suppresses a fire whose
+    # ladder rung has not elapsed; this selector's job on a surviving fire
+    # is the plan-time INCREMENT (INV-4): streak += 1, last_fired = now, the
+    # #3729/#4611 stamping pattern. A fire on a rung above 0 (the old streak
+    # already >= the first threshold — the fire happened because a rung's
+    # wait ELAPSED) annotates its reason with the streak so the audit trail
+    # shows the ladder selected it (INV-8).
     if _signal_present(state, events, "target_backfill_idle"):
-        return make_dispatch(sig, "hydra-target-discover", reason="target diagnostics due")
+        entry = _zero_yield_entry(state, "discover_target")
+        _stamp_zero_yield(state, "discover_target", now)
+        reason = "target diagnostics due"
+        if entry["streak"] >= ZERO_YIELD_BACKOFF_LADDER[0][0]:
+            reason = (
+                f"target diagnostics due "
+                f"(zero-yield back-off rung elapsed, streak={entry['streak'] + 1})"
+            )
+        return make_dispatch(sig, "hydra-target-discover", reason=reason)
     return None

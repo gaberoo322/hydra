@@ -1,0 +1,1 @@
+- fix: count qa_orch-armed merges in autopilot run merged_count via window-joined pr_lifecycle merged events (#4700)

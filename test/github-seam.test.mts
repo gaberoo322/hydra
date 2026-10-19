@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 
 import { ghExec, ghJson } from "../src/github/gh.ts";
-import { gitExec } from "../src/github/git.ts";
+import { gitExec, worktreeRemove, pushBranchUpstream, deleteRemoteBranch } from "../src/github/git.ts";
 import {
   ghBin,
   gitBin,
@@ -38,6 +38,7 @@ import {
   isGhFailure,
   type RawExecResult,
   type GhResult,
+  type GhExecOptions,
 } from "../src/github/exec.ts";
 
 let workDir: string;
@@ -369,5 +370,74 @@ describe("GitHub CLI Adapter seam (issue #896)", () => {
     assert.equal(isGhFailure(bad), true);
     if (isGhOk(ok)) assert.equal(ok.data, 7);
     if (isGhFailure(bad)) assert.equal(bad.code, "gh-failed");
+  });
+});
+
+describe("github/git.ts write-shaped helpers — argv pinned via the injectable transport (issue #4685 INV-9/16)", () => {
+  // The GLM finish phase (src/glm/finish.ts) rides these helpers; their
+  // CONTRACT is the exact git argv each one issues, so these cases inject a
+  // recording transport (no process, no fixture repo — the #4679 port rule)
+  // and assert each helper issues the bash command it replaces, verbatim.
+  interface Recorded {
+    args: string[];
+    cwd?: string;
+  }
+
+  function recorder(result: GhResult<{ stdout: string; stderr: string }>) {
+    const calls: Recorded[] = [];
+    const transport = async (args: string[], opts: GhExecOptions) => {
+      calls.push({ args, cwd: opts.cwd });
+      return result;
+    };
+    return { calls, transport };
+  }
+
+  const OK: GhResult<{ stdout: string; stderr: string }> = {
+    ok: true,
+    data: { stdout: "", stderr: "" },
+  };
+
+  test("worktreeRemove issues git worktree remove --force <path> from the repo root", async () => {
+    const { calls, transport } = recorder(OK);
+    const r = await worktreeRemove("/repo/wts/agent-glm-77-1", { cwd: "/repo", transport });
+    assert.equal(r.ok, true);
+    assert.deepEqual(calls, [
+      { args: ["worktree", "remove", "--force", "/repo/wts/agent-glm-77-1"], cwd: "/repo" },
+    ]);
+  });
+
+  test("pushBranchUpstream issues git push -u origin <branch> --quiet from inside the worktree", async () => {
+    const { calls, transport } = recorder(OK);
+    const r = await pushBranchUpstream("worktree-agent-glm-77-1", {
+      cwd: "/repo/wts/agent-glm-77-1",
+      transport,
+    });
+    assert.equal(r.ok, true);
+    assert.deepEqual(calls, [
+      {
+        args: ["push", "-u", "origin", "worktree-agent-glm-77-1", "--quiet"],
+        cwd: "/repo/wts/agent-glm-77-1",
+      },
+    ]);
+  });
+
+  test("deleteRemoteBranch issues git push origin --delete <branch> from the repo root", async () => {
+    const { calls, transport } = recorder(OK);
+    const r = await deleteRemoteBranch("worktree-agent-glm-77-1", { cwd: "/repo", transport });
+    assert.equal(r.ok, true);
+    assert.deepEqual(calls, [
+      { args: ["push", "origin", "--delete", "worktree-agent-glm-77-1"], cwd: "/repo" },
+    ]);
+  });
+
+  test("a failing transport flows through untouched (ok:false — the caller logs it non-fatal)", async () => {
+    const { calls, transport } = recorder({
+      ok: false,
+      code: "gh-failed",
+      stderr: "remote branch not found",
+    });
+    const r = await deleteRemoteBranch("worktree-agent-glm-77-1", { transport });
+    assert.deepEqual(r, { ok: false, code: "gh-failed", stderr: "remote branch not found" });
+    assert.equal(calls.length, 1);
   });
 });

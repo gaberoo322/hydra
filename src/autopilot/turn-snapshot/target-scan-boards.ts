@@ -46,8 +46,8 @@ export const TARGET_SCAN_LABELS = {
   blocked: TARGET_BOARD_LABELS.blocked,
 } as const;
 
-export const TARGET_CLEANUP_BOARD_SATURATION_CAP = 10;
-export const TARGET_DESIGN_QA_BOARD_SATURATION_CAP = 5;
+const TARGET_CLEANUP_BOARD_SATURATION_CAP = 10;
+const TARGET_DESIGN_QA_BOARD_SATURATION_CAP = 5;
 
 /** The design-language ADR convention, relative to the Target workspace (#4528; the playbook re-checks it). */
 export const DESIGN_QA_ADR_GLOB = "docs/adr/*design-language*.md";
