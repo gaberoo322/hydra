@@ -5685,7 +5685,7 @@ describe("decide.py — cleanup_target zero-yield back-off (issue #5051)", () =>
     cleanup_target: { streak, last_fired: lastFired },
   });
 
-  test("absent state dispatches and stamps streak=1 (INV-G)", () => {
+  test("#5051 INV-G: absent state dispatches and stamps streak=1", () => {
     const t = makeTmp();
     try {
       const state = baseState({ signals: { target_backfill_idle: true } });
@@ -5748,7 +5748,7 @@ describe("decide.py — cleanup_target zero-yield back-off (issue #5051)", () =>
     assert.ok(findAction(fired, isCleanup));
   });
 
-  test("a saturated skip never stamps (INV-D)", () => {
+  test("#5051 INV-D: a saturated skip never stamps", () => {
     const t = makeTmp();
     try {
       const state = baseState({
