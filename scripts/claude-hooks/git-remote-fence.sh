@@ -98,7 +98,7 @@ cmd = re.sub(r"\\\n", " ", cmd)
 
 # A shell WORD is one or more adjacent fragments: "dq", 'sq', or bare text
 # (INV-4: `"$HOME"/orch` is ONE word, not `"$HOME"` followed by junk).
-WORD = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"';&|()])+"
+WORD = r"(?:\"[^\"]*\"|'[^']*'|\$\((?:[^()]|\([^()]*\))*\)|`[^`]*`|[^\s\"';&|()`])+"
 START = (
     r"(?:^|[;&|(){`\n]|\$\(|\b(?:then|do|else)\b|-c\s+[\"']|\beval\s+[\"']?)"
     r"\s*(?:\w+=(?:" + WORD + r")?\s+)*(?:(?:sudo|command|env|exec|xargs)\s+)*"
@@ -203,6 +203,7 @@ def paren_depths(text):
     group, `)` closes it; quoted spans are skipped."""
     depth = [0] * (len(text) + 1)
     d = 0
+    bt = False
     quote = None
     i = 0
     while i < len(text):
@@ -221,6 +222,14 @@ def paren_depths(text):
                 depth[i] = d
         elif ch in "\"'":
             quote = ch
+        elif ch == "`":
+            # Backtick substitution is a group too: open on the first, close on the next.
+            if bt:
+                d = max(0, d - 1)
+                bt = False
+            else:
+                d += 1
+                bt = True
         elif ch == "(":
             d += 1
         elif ch == ")":
@@ -236,6 +245,10 @@ def effective_cd(pos):
     last = None
     for cm in CD.finditer(cmd[:pos]):
         d = DEPTHS[cm.end()]
+        # `cd X | git ...` / `cd X & git ...` / `cd X || git ...`: the cd runs
+        # in a pipeline stage or background job, not the shell that runs git.
+        if re.match(r"[ \t]*(?:\|(?!\|)|\|\||&(?!&))", cmd[cm.end():]):
+            continue
         if min(DEPTHS[cm.end():pos + 1]) >= d:
             last = cm.group(1)
     return last

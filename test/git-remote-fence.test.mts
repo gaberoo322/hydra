@@ -170,6 +170,16 @@ describe("git-remote-fence", () => {
       assert.equal(run(`x=$(cd ${otherRepo}); ${set}`, protectedRepo).status, 2);
       assert.equal(run(`(cd ${otherRepo} && ${set})`, protectedRepo).status, 0);
       assert.equal(run(`cd ${otherRepo} && (true) && ${set}`, protectedRepo).status, 0);
+      // backtick substitution, pipeline stage and background job are not the git shell
+      assert.equal(run(`x=\`cd ${otherRepo}\`; ${set}`, protectedRepo).status, 2);
+      assert.equal(run(`cd ${otherRepo} | ${set}`, protectedRepo).status, 2);
+      assert.equal(run(`cd ${otherRepo} & ${set}`, protectedRepo).status, 2);
+      assert.equal(run(`cd ${otherRepo} && true | ${set}`, protectedRepo).status, 0);
+    });
+
+    it("a $(...) / backtick value in -C is still a mutation (not an allow)", () => {
+      assert.equal(run(`git -C $(pwd) remote set-url origin ${url}`, protectedRepo).status, 2);
+      assert.equal(run(`git -C \`pwd\` remote set-url origin ${url}`, protectedRepo).status, 2);
     });
 
     it("INV-4: a word is all its adjacent fragments", () => {
