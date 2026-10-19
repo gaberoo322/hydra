@@ -37,7 +37,34 @@ import {
   MAX_CONSUMER_RESTARTS,
   BACKOFF_BASE_MS,
   type NotificationEvent,
+  startConsumers,
 } from "../src/notification-consumer.ts";
+import type { OperatorMessage } from "../src/operator-channel/message.ts";
+import type { EventBus } from "../src/event-bus.ts";
+
+/** A recording channel so consumer tests never reach Redis or Telegram. */
+function stubChannel() {
+  const pages: OperatorMessage[] = [];
+  const briefs: OperatorMessage[] = [];
+  const resolved: string[] = [];
+  return {
+    pages,
+    briefs,
+    resolved,
+    page: async (m: OperatorMessage) => {
+      pages.push(m);
+      return { sent: true as const, kind: "page" as const };
+    },
+    brief: async (m: OperatorMessage) => {
+      briefs.push(m);
+      return { appended: true };
+    },
+    resolve: async (key: string) => {
+      resolved.push(key);
+      return { sent: false as const, reason: "not-bad" as const };
+    },
+  };
+}
 
 test("ALERT_TYPES is an exported, non-empty Set of event-type strings", () => {
   assert.ok(ALERT_TYPES instanceof Set, "ALERT_TYPES should be a Set instance");
@@ -201,6 +228,7 @@ test("startConsumerWithRecovery caps at MAX_CONSUMER_RESTARTS with linear backof
     "always-crashes",
     async () => { attempts++; throw new Error("boom"); },
     async (ms) => { delays.push(ms); },
+    stubChannel(),
   );
 
   // Loop body runs MAX_CONSUMER_RESTARTS + 1 times: restarts increment to 1..5
@@ -222,6 +250,7 @@ test("startConsumerWithRecovery never throws to its caller on persistent crash",
       "noisy",
       async () => { throw new Error("persistent failure"); },
       async () => { /* no-op sleep */ },
+      stubChannel(),
     ),
   );
 });
@@ -254,4 +283,33 @@ test("formatAlertMessage: codex-era types retired by issue #5044 reach only the 
   for (const type of ["cycle:failed", "cycle:operator_blocked", "scheduler:error", "research:completed"]) {
     assert.equal(formatAlertMessage({ type, payload: { a: 1 } }), `${type}: {"a":1}`);
   }
+});
+
+test("a dead consumer is paged once through the channel, deduped per consumer name", async () => {
+  const ch = stubChannel();
+  await startConsumerWithRecovery(
+    "dlq",
+    async () => { throw new Error("boom"); },
+    async () => {},
+    ch,
+  );
+  assert.equal(ch.pages.length, 1);
+  assert.equal(ch.pages[0].kind, "consumer:dead");
+  assert.equal(ch.pages[0].dedupKey, "consumer:dead:dlq");
+  assert.equal(ch.pages[0].severity, "page");
+});
+
+test("startConsumers resolves consumer:dead:<name> for every consumer at boot", () => {
+  const ch = stubChannel();
+  // consume() never settles, so the registered consumers just park.
+  const bus = {
+    consume: () => new Promise(() => {}),
+  } as unknown as EventBus;
+  startConsumers(bus, ch);
+  assert.deepEqual(ch.resolved.sort(), [
+    "consumer:dead:dlq",
+    "consumer:dead:notifications",
+    "consumer:dead:recs-engine",
+    "consumer:dead:slot-events-bridge",
+  ]);
 });
