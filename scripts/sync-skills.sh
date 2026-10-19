@@ -136,12 +136,16 @@ if ! node --experimental-strip-types "$REPO_ROOT/src/skills/cli.ts" --playbooks-
 fi
 
 # Strict shape check: typed fields, and every write path is relative with no
-# `..` segment (a malformed plan must never escape $CLAUDE_DIR).
+# `..` segment (a malformed plan must never escape $CLAUDE_DIR). A U+0000 in a
+# path or content is rejected too: the apply stream below is NUL-delimited, so
+# an embedded NUL would split one record into two and truncate the file.
 if ! jq -e '
   (.writes|type=="array") and (.skips|type=="array")
   and all(.writes[]; (.path|type=="string") and (.content|type=="string")
     and (.path|length>0) and (.path|startswith("/")|not)
-    and ((.path|split("/")|index(".."))==null))
+    and ((.path|split("/")|index(".."))==null)
+    and (any(.path|explode[]; .==0)|not)
+    and (any(.content|explode[]; .==0)|not))
   and all(.skips[]; (.playbook|type=="string") and (.reason|type=="string"))
 ' "$PLAN_FILE" >/dev/null; then
   echo "sync-skills: core plan has an unexpected shape — no skills written" >&2

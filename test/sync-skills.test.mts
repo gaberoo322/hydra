@@ -2693,14 +2693,38 @@ describe("scripts/sync-skills.sh — plan-shape and decode guards reject a malfo
     rmSync(dir, { recursive: true, force: true });
   });
 
-  function runWithStub(stubBody: string): { status: number | null; stderr: string } {
+  function runWithStub(stubBody: string, jqMode?: string): { status: number | null; stderr: string } {
     writeFileSync(join(dir, "src", "skills", "cli.ts"), stubBody);
+    let path = process.env.PATH ?? "";
+    if (jqMode) {
+      // A jq shim ahead of the real one on PATH: it fails (or lies about) one
+      // specific projection and forwards every other call unchanged.
+      const realJq = spawnSync("bash", ["-c", "command -v jq"], { encoding: "utf-8" }).stdout.trim();
+      const binDir = join(dir, "stub-bin");
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(
+        join(binDir, "jq"),
+        [
+          "#!/usr/bin/env bash",
+          `case "$STUB_JQ_MODE:$*" in`,
+          "  fail-skips:*'.skips[] |'*) exit 3 ;;",
+          "  fail-writes:*'.writes[] |'*) exit 3 ;;",
+          "  miscount:*'.writes|length'*) echo 5; exit 0 ;;",
+          "esac",
+          `exec ${JSON.stringify(realJq)} "$@"`,
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      path = `${binDir}:${path}`;
+    }
     const r = spawnSync("bash", [join(dir, "scripts", "sync-skills.sh")], {
       env: {
         ...process.env,
         CLAUDE_SKILLS_DIR: claudeDir,
         CODEX_SKILLS_DIR: join(dir, "codex"),
-        PATH: process.env.PATH ?? "",
+        PATH: path,
+        STUB_JQ_MODE: jqMode ?? "",
       },
       encoding: "utf-8",
     });
@@ -2719,6 +2743,8 @@ describe("scripts/sync-skills.sh — plan-shape and decode guards reject a malfo
     ["non-string content", { writes: [{ path: "ok/SKILL.md", content: 7 }], skips: [] }],
     ["a non-string skip reason", { writes: [], skips: [{ playbook: "p.md", reason: 3 }] }],
     ["a missing skips array", { writes: [] }],
+    ["a NUL in content", { writes: [{ path: "ok/SKILL.md", content: "x\u0000y" }], skips: [] }],
+    ["a NUL in a path", { writes: [{ path: "ok\u0000/SKILL.md", content: "x" }], skips: [] }],
   ];
 
   for (const [label, plan] of MALFORMED) {
@@ -2743,6 +2769,23 @@ describe("scripts/sync-skills.sh — plan-shape and decode guards reject a malfo
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, /core plan failed/);
     assert.equal(existsSync(claudeDir), false);
+  });
+
+  const WELL_FORMED = { writes: [{ path: "ok/SKILL.md", content: "hello" }], skips: [] };
+
+  for (const [mode, what] of [["fail-skips", "skips"], ["fail-writes", "writes"]] as const) {
+    test(`a jq failure decoding ${what} exits 1 with 'could not decode ${what}' and writes nothing`, () => {
+      const r = runWithStub(emitPlan(WELL_FORMED), mode);
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, new RegExp(`could not decode ${what} from the plan`));
+      assert.equal(existsSync(join(claudeDir, "ok", "SKILL.md")), false);
+    });
+  }
+
+  test("an applied-vs-planned count mismatch fails closed as a truncated plan stream", () => {
+    const r = runWithStub(emitPlan(WELL_FORMED), "miscount");
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /applied 1 of 5 planned writes — truncated plan stream/);
   });
 
   test("a well-formed plan is applied (control: the stub harness itself works)", () => {
