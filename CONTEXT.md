@@ -40,7 +40,7 @@ _Avoid_: health state (vague), health payload (that is the HTTP wire envelope, a
 
 **Health Diagnostic**:
 One finding emitted by the `/api/health/deep` ruleset — a structured `{severity, component, what, why, impact, action, autoRecovery}` record describing a single thing that is or may be wrong. Produced by a pure rule function `(snapshot: HealthSnapshot) => HealthDiagnostic | null` in `src/health/diagnostics.ts`; adding a condition = appending one rule. Distinct from a `/recommendations` operator action item (a different surface).
-_Avoid_: alert (implies a push/notification channel we do not have), check (the probe is the check; this is its interpreted result), warning (one severity, not the category)
+_Avoid_: alert (a **Page** is the push message; a Health Diagnostic is the finding it may report), check (the probe is the check; this is its interpreted result), warning (one severity, not the category)
 
 **Health Assessment**:
 The folded result of running every **Health Diagnostic** rule over a **Health Snapshot** — `{diagnostics, status, summary}`, where `status` is the worst-severity fold (`critical > unhealthy > degraded > healthy`) and `summary` is the human banner. Produced by `assessHealth()` in `src/health/diagnostics.ts` and projected verbatim onto the `/api/health/deep` response. Distinct from **Builder Health** (capability trend, not a point-in-time fault scan).
@@ -98,9 +98,25 @@ _Avoid_: design doc (overloaded), plan (informal), spec (overloaded with `src/sp
 The ranked, scored list of eligible anchors the autopilot brain (`decide.py`) reads to choose a dispatch, served at `GET /api/anchor/candidates` (issue #424). Sourced from the two live work lanes — backlog kanban ∪ work-queue (the only lanes with live writers) — scored by tier base + reflection penalty + blocker-just-cleared bonus, and filtered by eligibility (in-flight-PR freshness window, design-concept gate, research-recommended threshold). Owned end-to-end by `src/anchor-candidates.ts`; `src/api/anchor.ts` is a thin route over it. The pure **scoring policy** — the tier-base ladder, freshness/reflection penalties, blocker bonus, and the [0,1] clamp (`scoreCandidate`, `PRIORITY_TIER_BASE_SCORE`) — lives in the sibling Module `src/backlog/candidate-scoring.ts` (issue #2040, a pure-arithmetic extraction mirroring `merged-refs.ts` #1880 and `work-queue-hygiene.ts` #1844); `src/anchor-candidates.ts` imports the scorer (and re-exports it for back-compat) while keeping enumeration + the stateful eligibility guards. ADR-0036 Locality holds: scoring has exactly one home (the new module), never duplicated back. The feed carries **data, not decisions** — retry / escalation / abandonment *policy*, if ever wanted, belongs to `decide.py` per [[ADR-0012]], not to a TypeScript work-picker. Defined by [[ADR-0036]], which retired the orphaned `selectAnchor()` priority waterfall.
 _Avoid_: "priority waterfall" / "anchor selection" / "selectAnchor()" (the 13-tier chain was retired with the in-process control loop — ADR-0006/0036), "Reframe Queue" (the retry lane it described had no live writer and was deleted by ADR-0036), candidate list (too generic)
 
+**Turn Snapshot**:
+Everything the autopilot brain (`decide.py`) sees at one turn, gathered once by the typed collectors in `src/autopilot/turn-snapshot/` (ADR-0043), validated against `src/schemas/turn-snapshot.ts` on emit and stored on `state.turn_snapshot`, which `decide.py` reads only through `scripts/autopilot/turn_snapshot.py`. Each collector reads through injected adapters (the `gh` port, the hydra HTTP client) and reports degradation explicitly; an invalid field degrades alone, and an unusable document is replaced by the conservative **all-degraded snapshot**. The board-state counts are one field of it.
+_Avoid_: signals file, collect output, `state.signals` (the retired kv-era form), board state (that is the `deriveBoardState` counts projection), collect-state (the bash script it replaced, deleted in #4934)
+
 **Operator-Required Intervention**:
 The closed list of categories where Hydra escalates to the operator instead of attempting autonomous remedy: credentials/secrets, external-account actions, vision-level conflicts, and a **second** failed **Deep-QA Remediation Loop** pass on a T4 change. Everything else Hydra researches and tries. Tier no longer triggers escalation (ADR-0015 retired the operator-only tier); only an exhausted remediation loop does. Defined by ADR-0005 (amended by ADR-0015).
 _Avoid_: blocker (overloaded), needs-human (informal), "Tier 0 changes" (retired escalation trigger)
+
+**Operator Channel**:
+The single outbound Hydra→operator Telegram delivery Module ([[ADR-0045]]). TypeScript callers use it in-process; bash and systemd callers use its CLI. Outbound only — nothing reads Telegram updates — and the only code allowed to talk to `api.telegram.org`. Carries two message kinds: a **Page** and the **Morning Brief**. Not an escalation category: it never widens ADR-0005's list.
+_Avoid_: notifier (the retired per-producer senders), alert channel, bot (the credential is an implementation detail)
+
+**Page**:
+An immediate, deduped **Operator Channel** message for an event on the closed page list held in code (infra alarms, notification consumer dead, holdback revert failed, orchestrator/autopilot/tunnel/backup service failures, review-pickup going non-empty). Edge-triggered per `dedupKey`: one send when bad, at most one reminder per 6h, one recovered message on resolve. Severity is decided by the list, never by the producer; every other event is a **Morning Brief** item.
+_Avoid_: alert (overloaded with **Health Diagnostic**), notification (the generic event-bus term), ping
+
+**Morning Brief**:
+The once-daily 07:30 local-time summary the **Operator Channel** sends, even when empty: overnight merges and QA, waiting-on-you items with recommended action and link, autopilot and quota state, builder-health line, and non-page events; Mondays append the weekly summary. Timed by a Redis last-sent key so it is restart-proof and catches up after downtime. Replaces the 4-hourly digest, heartbeat message and standalone weekly digest.
+_Avoid_: digest (the retired cadence it replaces), daily report, heartbeat
 
 **Pattern Memory**:
 The Redis-backed per-agent / per-skill pattern store (`hydra:memory:{agent}:patterns`, `hydra:friction:{skill}:patterns`) that captures recurring lessons and friction from cycle outcomes. Auto-promotes patterns to `config/feedback/to-{agent}.md` at the 3-hit threshold and dispatches recurring friction to GitHub issues via the **Escalation** seam at the same threshold (+ every multiple of 10 thereafter). Lives in `src/pattern-memory/`.
@@ -139,7 +155,7 @@ The in-process heartbeat in `src/scheduler/heartbeat.ts` (renamed from the forme
 _Avoid_: "scheduler" (unqualified — could mean this loop, the systemd timers, or the scheduling concept generally), "control loop" (was retired in [[ADR-0006]]; do not use), "in-process loop" (informal)
 
 **Empty Cycle** (a.k.a. **Unaccounted Cycle**):
-A recorded cycle that attempted work but produced no terminal outcome — `tasksAttempted>0` with `tasksMerged==0 && tasksFailed==0 && tasksAbandoned==0` (the read-side name); on the write side, a status in neither `MERGED_STATUSES` nor `FAILED_STATUSES`, bucketed to `unaccounted` and counted lifetime as `cyclesUnaccounted` (issue #1919). The two names denote the same cycle and must stay in lockstep. Surfaced live as the rolling-window `emptyRate` on `/api/scheduler/status` (issue #2818), mirroring the merge-rate window so historical unaccounted cycles don't skew the signal.
+A recorded cycle that attempted work but produced no terminal outcome — `tasksAttempted>0` with `tasksMerged==0 && tasksFailed==0 && tasksAbandoned==0` (the read-side name); on the write side, a status in neither `MERGED_STATUSES` nor `FAILED_STATUSES`, bucketed to `unaccounted` and counted lifetime as `cyclesUnaccounted` (issue #1919); `reap.py` writes the `empty` cycle-record status for a `dev_orch` dispatch whose harness worktree made no commits (issue #4985). The two names denote the same cycle and must stay in lockstep. Surfaced live as the rolling-window `emptyRate` on `/api/scheduler/status` (issue #2818), mirroring the merge-rate window so historical unaccounted cycles don't skew the signal.
 _Avoid_: "no-op cycle" (overloaded — a no-op *merge* is a distinct silent-rot signal), "idle cycle" (informal)
 
 **Housekeeping**:

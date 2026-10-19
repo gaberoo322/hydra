@@ -55,21 +55,19 @@ import {
  * "what counts as a strict blocker ref". Reused verbatim from
  * `scripts/ci/epic-close.ts` (`parseEpicReferences`).
  *
- * Exported (issue #3965) because the autopilot's anchor-SELECTION path
- * (`scripts/autopilot/collect-state.sh`) must apply the SAME predicate the
+ * The autopilot's anchor-SELECTION path (the Turn Snapshot picks collector,
+ * src/autopilot/turn-snapshot/picks.ts) applies the SAME predicate the
  * anchor-COUNT path (`src/autopilot/board-state.ts::hasOpenStrictBlocker`)
- * uses — "do not write a second parser". collect-state.sh has no TypeScript
- * bridge, so its candidate exclusion mirrors these patterns in python; the
- * export gives `test/board-state.test.mts` a stable, named anchor to pin the
- * python port against (a byte-identical drift guard + a behavioural-parity
- * check on a golden fixture). One predicate, two call sites, machine-checked
- * for drift.
+ * uses — "do not write a second parser" (issue #3965). Until ADR-0043 slice 3
+ * (#4931) that path was a python mirror inside collect-state.sh pinned to this
+ * array by a byte-identity drift guard; the mirror and its guard are gone, so
+ * the array is module-private again.
  *
  * Each entry is a plain regex SOURCE string (no flags); the {@link gi} flags
  * are applied once, below, when the compiled {@link STRICT_BLOCKER_PATTERNS} is
  * derived. Do not inline a second copy elsewhere — extend this array.
  */
-export const STRICT_BLOCKER_PATTERN_SOURCES: readonly string[] = [
+const STRICT_BLOCKER_PATTERN_SOURCES: readonly string[] = [
   "\\bblock(?:ed|s)?(?:[\\s-]+by)?\\s*:?\\s*#(\\d+)",
   "\\bdepend(?:s|ent)?(?:[\\s-]+on)?\\s*:?\\s*#(\\d+)",
 ];
@@ -95,17 +93,18 @@ const STRICT_BLOCKER_PATTERNS: RegExp[] = STRICT_BLOCKER_PATTERN_SOURCES.map(
  * satisfiable dispatch blocker: gating a child on it is a logical cycle that
  * starves the lane permanently (membership is not ordering).
  *
- * Exported for the same reason as {@link STRICT_BLOCKER_PATTERN_SOURCES}: the
- * anchor-SELECTION mirror in `scripts/autopilot/collect-state.sh` spells these
- * in python (`PARENT_PATTERNS`) and `test/board-state.test.mts` pins the port
- * byte-identically. Plain regex SOURCE strings (no flags; `gi` is applied
- * below) — line anchoring is spelled `(?:^|\n)` so no multiline flag is needed
- * and the python port needs only IGNORECASE.
+ * Plain regex SOURCE strings (no flags; `gi` is applied below) — line
+ * anchoring is spelled `(?:^|\n)` so no multiline flag is needed. (The python
+ * `PARENT_PATTERNS` mirror in collect-state.sh retired with ADR-0043 slice 3.)
  */
-export const PARENT_REF_PATTERN_SOURCES: readonly string[] = [
+const PARENT_REF_PATTERN_SOURCES: readonly string[] = [
   "(?:^|\\n)[ \\t]*#{1,6}[ \\t]+parent(?:[ \\t]+epic)?[ \\t]*\\r?\\n(?:[ \\t]*\\r?\\n)*[ \\t]*(?:[-*][ \\t]+)?#(\\d+)",
   "(?:^|\\n)[ \\t]*(?:[-*][ \\t]+)?parent(?:[ \\t]+epic)?[ \\t]*:[ \\t]*#(\\d+)",
-  "\\bchild[ \\t]+of[ \\t]+#(\\d+)",
+  // Form (c) is SENTENCE-anchored (issue #4880): line start, or after sentence
+  // punctuation (+ optional closing ** / __). Rejects negations such as
+  // "Not a child of #194; blocked by #194." while keeping the mid-line
+  // producer shape "**Follow-up of #202 (...).** Child of #194 (M5)."
+  "(?:^|\\n|[.!?](?:\\*\\*|__)?[ \\t]+)[ \\t]*(?:[-*][ \\t]+)?(?:\\*\\*|__)?child[ \\t]+of[ \\t]+#(\\d+)",
 ];
 
 const PARENT_REF_PATTERNS: RegExp[] = PARENT_REF_PATTERN_SOURCES.map(
@@ -121,6 +120,37 @@ export function extractDeclaredEpicRefs(
   body: string | null | undefined,
 ): number[] {
   return scanRefs(body, PARENT_REF_PATTERNS);
+}
+
+/**
+ * The Epic-children marker (issue #4805) — the inverse of
+ * {@link PARENT_REF_PATTERN_SOURCES}: a body that carries a `## Sub-issues`
+ * heading (any level; the CONTEXT.md **Epic** definition and the hydra-prd
+ * `renderParentBody` shape) declares ITSELF an Epic. The heading line is
+ * matched here; {@link declaresEpicChildren} additionally requires at least one
+ * `#N` ref beneath it, before the next heading.
+ */
+export const EPIC_CHILDREN_HEADING_SOURCE =
+  "^[ \\t]*#{1,6}[ \\t]+sub-issues\\b[^\\n]*$";
+
+/**
+ * True when `body` declares itself an Epic: a `## Sub-issues` heading with at
+ * least one `#N` ref in the section beneath it (up to the next heading).
+ * Code-span-safe. `false` for an empty/absent body. Pure.
+ */
+export function declaresEpicChildren(body: string | null | undefined): boolean {
+  if (!body) return false;
+  const stripped = body.replace(/`[^`]*`/g, "");
+  const lines = stripped.split(/\r?\n/);
+  const heading = new RegExp(EPIC_CHILDREN_HEADING_SOURCE, "i");
+  for (let i = 0; i < lines.length; i++) {
+    if (!heading.test(lines[i])) continue;
+    for (let j = i + 1; j < lines.length; j++) {
+      if (/^[ \t]*#{1,6}[ \t]+\S/.test(lines[j])) break;
+      if (/#\d+/.test(lines[j])) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -195,16 +225,42 @@ export async function fetchOpenBlockerNumbers(
   numbers: number[],
   deps: OpenBlockerLookupDeps = {},
 ): Promise<Set<number>> {
-  if (numbers.length === 0) return new Set();
+  const res = await fetchOpenBlockerRows(numbers, deps);
+  if (!res.ok) {
+    // Conservative: treat all referenced blockers as open.
+    return new Set(numbers);
+  }
+  return new Set(res.rows.map((r) => r.number));
+}
+
+/** Result of {@link fetchOpenBlockerRows}: the open rows, or a named failure. */
+export type OpenBlockerRowsResult =
+  | { ok: true; rows: IssueRow[] }
+  | { ok: false; code: string };
+
+/**
+ * The discriminated, row-returning form of the batched open-blocker lookup
+ * (issue #4805): ONE `--state open --search "<n1> <n2> ..."` read, rows
+ * narrowed to the requested numbers so a search hit that merely mentions a
+ * number is dropped. Rows carry `labels`, so a caller can tell WHO each open
+ * blocker is waiting on without a second read. Never throws on a read failure
+ * (returns `{ok:false}`); {@link fetchOpenBlockerNumbers} layers its
+ * "failure => every ref open" fail-safe on top.
+ */
+export async function fetchOpenBlockerRows(
+  numbers: number[],
+  deps: OpenBlockerLookupDeps = {},
+): Promise<OpenBlockerRowsResult> {
+  if (numbers.length === 0) return { ok: true, rows: [] };
   const search = numbers.map((n) => `${n}`).join(" ");
   const read = deps.listIssuesBySearch ?? listIssuesBySearch;
   const res = await read(search, { state: "open", repo: deps.githubRepo });
   if (isIssueReadFailure(res)) {
     console.error(`[blockers] open-blocker lookup failed (${res.code})`);
-    // Conservative: treat all referenced blockers as open.
-    return new Set(numbers);
+    return { ok: false, code: res.code };
   }
-  return openNumbersFromRows(res.rows, numbers);
+  const requested = new Set(numbers);
+  return { ok: true, rows: res.rows.filter((r) => requested.has(r.number)) };
 }
 
 /**

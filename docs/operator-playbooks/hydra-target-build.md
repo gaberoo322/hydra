@@ -43,7 +43,7 @@ CLAUDE_LOCK=$(docker exec hydra-redis-1 redis-cli GET hydra:cycle:active:claude 
 if [ -n "$CLAUDE_LOCK" ]; then echo "BLOCKED: another Claude cycle running ($CLAUDE_LOCK)"; fi
 ```
 
-**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4, liveness-aware since #4475):** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, not the Redis backlog. The WIP limit AND the rule for which `in-progress` claims count toward it live in ONE place — `~/hydra/scripts/autopilot/target-wip.py` — which the autopilot's `collect-state.sh` also calls, so `decide.py` never dispatches `dev_target` into a gate that would bounce it (and vice versa). A claim counts as live WIP only when an OPEN Target PR references it; an orphaned `in-progress` label with no PR (a crashed build — such claims are released at reap time by #4195) does not. Never hard-code the limit here. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6, #3427). **A resume dispatch (Step 0.7, `prompt_args.resume`) SKIPS this check** — the resume issue carries `needs-dev-resume`, not `in-progress`, and the PR already exists; this is not new WIP.
+**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4, liveness-aware since #4475):** Target tracking now lives as GitHub Issues on `$TARGET_GH_REPO`, not the Redis backlog. The WIP limit AND the rule for which `in-progress` claims count toward it live in `~/hydra/scripts/autopilot/target-wip.py` for this gate. The autopilot computes the same liveness in its Turn Snapshot `target-board` collector (ADR-0043 slice 4), whose limit is test-pinned to `target-wip.py --limit` and whose reference predicate is held in parity with pr-refs.py by `test/github-pr-refs.test.mts` — so `decide.py` never dispatches `dev_target` into a gate that would bounce it (and vice versa). A claim counts as live WIP only when an OPEN Target PR references it; an orphaned `in-progress` label with no PR (a crashed build — such claims are released at reap time by #4195) does not. Never hard-code the limit here. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6, #3427). **A resume dispatch (Step 0.7, `prompt_args.resume`) SKIPS this check** — the resume issue carries `needs-dev-resume`, not `in-progress`, and the PR already exists; this is not new WIP.
 ```bash
 # REST reads only (never GraphQL): open in-progress issue numbers + open PRs
 # projected to target-wip.py's {headRefName, body} input rows.
@@ -135,7 +135,7 @@ Then, still inside `$TARGET_WT`:
 # dependency gets a LOCAL `npm ci` in Step 6 (Verify), only when the diff
 # touches package.json/package-lock.json. appSubdir comes from the Target
 # Manifest (verify.appSubdir; epic #3014, ADR-0026, issue #3019) — not
-# hardcoded — because later steps `cd "$TARGET_WT/$APP_SUBDIR"`. Re-read it
+# hardcoded — because later steps `cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$APP_SUBDIR"`. Re-read it
 # from the worktree's own manifest copy (not just $TARGET_APP_SUBDIR from the
 # seam preamble) since the worktree is the canonical checkout for this cycle.
 APP_SUBDIR=$(jq -r '.verify.appSubdir' "$TARGET_WT/.hydra/manifest.json")
@@ -195,6 +195,31 @@ RESUME_BRANCH="$resume_branch"    # that PR's head.ref
 
 **The work, bounded by the decision:** read the LATEST `hydra-target-qa` verdict comment on PR `$RESUME_PR` (the FAIL findings) and the operator's fix-forward decision on issue `$RESUME_ISSUE` (the resolution that stamped `needs-dev-resume`). Fix ONLY what those two name — no drive-by refactors, no scope creep beyond the verdict's findings list. Then verify (Step 6) and commit.
 
+**Pre-push guards (issue #4854 — run in this order, BOTH before the push; the PR must carry the fence label before the new head's CI run starts, because the Target's `automerge.yml` reads labels when that run concludes).** A resume never rewrites a closing ref (`Closes/Fixes/Resolves #$RESUME_ISSUE`) to a non-closing one (`Refs #N`) — on ANY anchor. Scoping a resume down is not the resume's decision: fix what the verdict named, push with the ref intact, and report partial delivery in the summary (splitting a child issue is an operator / hydra-review act). Never remove a fencing label from the issue or the PR. If any guard command below fails, do NOT push — fall into the "If nothing can be pushed" terminal state (leave `needs-dev-resume`, report why).
+
+```bash
+# 1. Closing-ref guard (fail closed): the PR body must still close the anchor.
+PR_BODY=$(gh pr view "$RESUME_PR" --repo "$TARGET_GH_REPO" --json body --jq .body) || exit 1
+# (The PR-edit subcommand is documented broken for labels/body in this repo; mutate via `gh api`.)
+if ! printf '%s' "$PR_BODY" | grep -qiE "(^|[^[:alnum:]])(close[sd]?|fix(e[sd])?|resolve[sd]?) #${RESUME_ISSUE}([^0-9]|$)"; then
+  gh api -X PATCH "repos/$TARGET_GH_REPO/pulls/$RESUME_PR" \
+    -f body="$(printf '%s\n\nCloses #%s' "$PR_BODY" "$RESUME_ISSUE")" >/dev/null || exit 1
+fi
+# 2. Fence-label mirror (fail closed): copy the anchor's fencing labels onto the PR.
+#    Same literal set as the merge-flow fragment's 7b lookup and the Target workflow.
+#    The read is its OWN assignment so a failed `gh issue view` aborts here (a
+#    pipeline would report only grep's status and read a failure as "unfenced").
+ANCHOR_LABELS=$(gh issue view "$RESUME_ISSUE" --repo "$TARGET_GH_REPO" --json labels --jq '.labels[].name') || exit 1
+FENCE_LABELS=$(printf '%s\n' "$ANCHOR_LABELS" | grep -xE 'money-critical|hold-for-operator') || [ $? -eq 1 ] || exit 1   # grep exit 1 = no match = unfenced
+# One label per line; here-string + `read` (a plain `for` over the variable relies on word-splitting, which zsh does not do).
+while IFS= read -r L; do
+  [ -n "$L" ] || continue
+  gh api -X POST "repos/$TARGET_GH_REPO/issues/$RESUME_PR/labels" -f "labels[]=$L" >/dev/null || exit 1
+done <<< "$FENCE_LABELS"
+```
+
+A non-zero exit from this block means NO push: leave `needs-dev-resume` on the issue and report the failing command.
+
 **Push contract (the ONLY shipping step):**
 
 ```bash
@@ -228,7 +253,7 @@ MANIFEST="$TARGET_WT/.hydra/manifest.json"
 APP_SUBDIR=$(jq -r '.verify.appSubdir' "$MANIFEST")
 TEST_CMD=$(jq -r '.verify.test' "$MANIFEST")
 TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$MANIFEST")
-cd "$TARGET_WT/$APP_SUBDIR"      # appSubdir='' => repo root
+cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$APP_SUBDIR"      # appSubdir='' => repo root
 # eval word-splits the multi-word manifest commands under zsh (a bare `$TEST_CMD`
 # is taken as one command word — `command not found: npm run <script>`). Portable.
 eval "$TEST_CMD"                  # the manifest's declared REAL suite, NEVER assume bare `npm test` is it
@@ -252,7 +277,7 @@ Load context (parallel):
 > `HYDRA_TARGET_REPO` is unset — see `src/target-config.ts`).
 > Nothing auto-syncs the two, so the orch copy can lag the research cycle by
 > milestones. The
-> `collect-state.sh` Phase-1 collector emits `direction_drift=true` when the
+> Turn Snapshot's `direction-drift` collector sets `direction_drift` true when the
 > committed orch copy no longer matches the live Target docs. When you see that
 > signal (or notice the loaded `priorities.md` frontmatter `updated:` lagging
 > the Target's), refresh the committed copy on a feature branch and open a PR —
@@ -558,7 +583,7 @@ Read `~/hydra/config/feedback/to-executor.md` if present.
 Step 0.6 already created `$TARGET_WT` on branch `feature/$CYCLE_ID` off `origin/main`. Stay in that worktree — do NOT `cd` into `$TARGET_WS`, do NOT `git checkout main`, do NOT `git pull` from the main checkout (that's the race that #542 is fixing).
 
 ```bash
-cd "$TARGET_WT"
+cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}"
 git status --short    # must be clean — we just branched off origin/main
 ```
 
@@ -593,7 +618,7 @@ BUILD_CMD=$(jq -r '.verify.build' "$MANIFEST")
 # verify.lint is optional (issue #4526): `// empty` yields "" for a target
 # that declares no lint gate — the rung is then skipped entirely.
 LINT_CMD=$(jq -r '.verify.lint // empty' "$MANIFEST")
-cd "$TARGET_WT/$APP_SUBDIR"
+cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}/$APP_SUBDIR"
 
 # --- Install decision, trigger 1 (lockfile diff — #4177, kept) -------------
 # The leaf probes worktree-local node_modules presence/symlink itself and
@@ -662,9 +687,9 @@ fi
 
 After the first edit batch, sanity-check that the edits actually landed in the worktree (cheap canary against the #542 ghost-edit symptom):
 ```bash
-( cd "$TARGET_WT" && git diff --name-only ) | head
+( cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}" && git diff --name-only ) | head
 # If this is empty when Edit calls were made, edits leaked to the main checkout —
-# ABORT and do not push. Run `git -C "$TARGET_WS" status --short` to confirm.
+# ABORT and do not push. Run `git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" status --short` to confirm.
 ```
 
 Fail → fix → re-verify. After 2 failed fixes, abandon branch.
@@ -736,7 +761,7 @@ Handle it as follows:
   reach for the skip.
 
 ```bash
-cd "$TARGET_WT"
+cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}"
 # CHANGED_FILES is the newline-separated diff against origin/main's merge base,
 # in raw repo-rooted form — the gate strips the manifest's appSubdir itself,
 # do NOT strip it.
@@ -858,7 +883,7 @@ failure mode.
 
 ### 7–10. Merge, deploy, verify, state sync, and report
 
-> **Resume dispatches (Step 0.7) NEVER reach this phase** — the PR already exists (`resume_pr`) and the Target's automerge owns merging. The resume's shipping step is one fast-forward push (`git push origin HEAD:$RESUME_BRANCH`, Step 0.7's push contract) plus the `needs-dev-resume` → `needs-qa` relabel; no PR creation, no merge, no changelog fragment, no deploy steps.
+> **Resume dispatches (Step 0.7) NEVER reach this phase** — the PR already exists (`resume_pr`) and the Target's automerge owns merging. The resume's shipping step is one fast-forward push (`git push origin HEAD:$RESUME_BRANCH`, Step 0.7's push contract) plus the `needs-dev-resume` → `needs-qa` relabel, preceded by the closing-ref guard and fence-label mirror (Step 0.7 pre-push guards, #4854); no PR creation, no merge, no changelog fragment, no deploy steps.
 
 > **CONTEXT POINTER:** when you reach the merge phase, read `hydra-target-build-merge-flow.md` (sibling of this SKILL.md). It covers: pre-merge health baseline snapshot (MANDATORY), the PR-only merge path (the Target's `main` may be branch-protected, so the build never pushes to it; already-merged-post-green is SUCCESS not friction; and the operator-review fence — a PR that itself, whose linked issue(s), or whose anchor carries `money-critical` or `hold-for-operator` is NEVER merged by the build, AND is fenced at the SOURCE: the target's own `automerge.yml` skips the squash-merge when the PR's own labels, or any issue it closes in that repo, carry either label. Both fences resolve the same subjects — the PR's own labels first (a Target's CI may apply the fencing label to the PR itself during its CI run, so read them only after that run concludes), then every same-repo issue the PR links via `closingIssuesReferences`, plus the anchor — and both FAIL CLOSED, so a failed lookup counts as fenced. Green-but-unmerged is a handoff to the operator, not friction; see gaberoo322/hydra#4224), deploy verification — wait for the Target's own CI-owned deploy and compare the deployed SHA; the build never deploys, restarts, or tests in the serving tree — post-merge verify via the main-branch CI run (revert PR on regression), operational-health smoke check (alarm-only), worktree cleanup, state sync, friction report, and the summary table.
 
@@ -867,7 +892,7 @@ failure mode.
 On success, remove the target worktree created in Step 0.6. Leaking on crash is acceptable — `scripts/branch-prune.sh` will GC it — but on the happy path we clean up so `$TARGET_APP_DIR/.worktrees/` does not fill with stale directories (issues #3173, #542, #4177):
 
 ```bash
-git -C "$TARGET_WS" worktree remove --force "$TARGET_WT" 2>&1 || \
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" worktree remove --force "$TARGET_WT" 2>&1 || \
   echo "warn: worktree remove failed for $TARGET_WT — branch-prune.sh will GC it later"
 # Remove the SIBLING gate dir alongside the worktree (issue #4526): it holds
 # the gate mirror, pmh-baseline.json, and build logs — all disposable. A
@@ -877,7 +902,7 @@ rm -rf "$HYDRA_GATE_DIR"
 # Prune stale metadata: an interrupted remove (or an out-of-band `rm -rf` of
 # $TARGET_WT) can leave an orphaned .git/worktrees/<id> entry that blocks the
 # next `git branch -d` with "branch ... used by worktree at '...'".
-git -C "$TARGET_WS" worktree prune 2>&1 || true
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" worktree prune 2>&1 || true
 ```
 
 </child-prompt>

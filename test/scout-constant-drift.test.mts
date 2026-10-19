@@ -30,7 +30,7 @@
  * 2. Per-category cooldown (`CATEGORY_COOLDOWN_DAYS` in TS):
  *    Verified via grep that `decide.py` does NOT carry a Python counterpart
  *    — the category cooldown is intentionally TS-only because Python only
- *    reads the pre-computed `scout_walk_due` signal from `collect-state.sh`
+ *    reads the pre-computed `scout_walk_due` signal from the Turn Snapshot
  *    and never re-checks category state. This is the architecture the
  *    issue asked us to "verify": Python delegates category gating to the
  *    TS planWalk. The test pins this asymmetry so a future drift (someone
@@ -119,7 +119,7 @@ describe("scout cooldown constant drift — TS ↔ Python", () => {
 
   test("CATEGORY_COOLDOWN_DAYS (TS) has no Python mirror — decide.py delegates category gating to TS", () => {
     // The category cooldown is intentionally TS-only: decide.py reads
-    // `scout_walk_due` (computed by collect-state.sh + planWalk) and never
+    // `scout_walk_due` (computed by the Turn Snapshot + planWalk) and never
     // re-checks per-category state. We assert this asymmetry by grepping
     // decide.py for any `CATEGORY` reference that would suggest someone
     // bolted on a Python-side copy without making it shared.

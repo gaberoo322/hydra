@@ -1,0 +1,44 @@
+{
+  "name": "retro-dispatches-not-list",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_retro)",
+  "collectors": [
+    "retro"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {},
+  "redis": {},
+  "http": {
+    "/autopilot/runs?limit=14": {
+      "status": 200,
+      "body": "{\"runs\":[{\"run_id\":\"r-running\",\"status\":\"running\"},{\"run_id\":\"r1\",\"status\":\"ended\"}]}"
+    },
+    "/autopilot/runs/r1/retro": {
+      "status": 200,
+      "body": "{\"runFound\":true,\"dispatches\":{\"flagged\":true},\"reflections\":[],\"stuckSignals\":[],\"recommendations\":[]}"
+    }
+  },
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [],
+    "httpCalls": [
+      "/autopilot/runs?limit=14",
+      "/autopilot/runs/r1/retro"
+    ],
+    "redisWrites": [],
+    "values": {
+      "retro": {
+        "runs": {
+          "ok": true,
+          "value": {
+            "available": true,
+            "candidate": "r1"
+          }
+        },
+        "drillable": false
+      }
+    }
+  }
+}

@@ -32,7 +32,7 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 > for `scout_orch` reads `state.limits.scout_cost_share` (default
 > `SCOUT_DAILY_COST_SHARE = 0.04`) and `state.limits.daily_spend_cap_usd`
 > (default `$50.0`) — computes `cap_usd = share * daily_cap` — reads
-> `state.scout_spend_usd_today` (emitted by `collect-state.sh` from the
+> `state.scout_spend_usd_today` (carried by the Turn Snapshot from the
 > `hydra:metrics:tokens:by-skill:daily:<DATE>[hydra-tool-scout]`
 > surrogate, USD via `HYDRA_TOKEN_USD_RATE`) — and suppresses dispatch
 > when `spend_usd >= cap_usd`. The check fires BEFORE the 7d class
@@ -51,7 +51,7 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 >   haven't opted in to a per-token USD rate yet.
 >
 > The daily mirror at `hydra:scout:spend:<YYYY-MM-DD>` (7d TTL) is
-> populated by `collect-state.sh` each turn from the existing
+> populated by the Turn Snapshot's `scout` collector each turn from the existing
 > `/api/metrics/tokens` accumulator (`hydra-tool-scout` skill) — no
 > separate writer is needed and the gate sees real usage.
 
@@ -95,7 +95,7 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 > (`decide.py`) — a daily idle-reclamation cadence, in contrast to
 > `scout_orch`'s weekly 7d walk.
 >
-> Two precomputed signals from `collect-state.sh` gate it (decide.py reads
+> Two precomputed Turn Snapshot signals gate it (decide.py reads
 > them verbatim, never recomputing board-empty or cooldown here — the
 > signal seam exists precisely to prevent that gate-re-parsing round-trip):
 >
@@ -103,8 +103,8 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 >   FIRST in `decide.py:_select_for_signal` (mirroring scout's
 >   `scout_board_saturated` early-return). It is true when the count of
 >   OPEN issues carrying the stable `architecture-scan` label exceeds
->   `ARCH_BOARD_SATURATION_CAP = 6` (the cap lives in `collect-state.sh`,
->   not this playbook, so the playbook never greps state JSON — the scout
+>   `ARCH_BOARD_SATURATION_CAP = 6` (the cap lives in
+>   `src/autopilot/turn-snapshot/board-saturation.ts`, not this playbook, so the playbook never greps state JSON — the scout
 >   saturation precedent). This is the anti-feedback-loop guard: once the
 >   board already holds enough proposal-grade architecture work, the scan
 >   suppresses itself rather than manufacturing low-value work.
@@ -125,7 +125,7 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 > target work that cannot merge. When #718 clears, the mirror is added the
 > same way (`SCOPE_TARGET_ONLY_EXCLUDE` gains no target entry; a
 > target-scope saturation count + fallback predicate land in
-> `collect-state.sh`).
+> a Turn Snapshot collector).
 
 > **Retrospective wiring (issue #920, parent #917):** `retro_orch` is the
 > daily per-run retrospective signal class. It dispatches the `/hydra-retro`
@@ -156,7 +156,7 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 >   mirroring `scout_orch` / `architecture_orch`. There is no
 >   `retro_target` mirror (the Target produces no autopilot runs to retro).
 > - **Signal seam:** the single gate is **`retro_run_available`** — true when
->   a COMPLETED run exists to analyse (`collect-state.sh` reads the
+>   a COMPLETED run exists to analyse (the Turn Snapshot `retro` collector reads the
 >   `/api/autopilot/runs` index and counts non-`running` runs). `decide.py`
 >   reads it verbatim and never recomputes run state. No `run_id` is threaded
 >   through `prompt_args`: the `hydra-retro` skill defaults to the latest
@@ -189,7 +189,7 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 >   suppressor (checked FIRST in `decide.py:_select_for_signal`, before the 1h
 >   cooldown) — true when the count of OPEN issues carrying the stable
 >   `cleanup-scan` label exceeds `CLEANUP_BOARD_SATURATION_CAP = 10` (the cap
->   lives in `collect-state.sh`, not this playbook, mirroring
+>   lives in `src/autopilot/turn-snapshot/board-saturation.ts`, not this playbook, mirroring
 >   `arch_board_saturated`). This is the anti-feedback-loop guard.
 > - **NOT staggered:** unlike `discover_orch` / `architecture_orch`,
 >   `cleanup_orch` is deliberately **NOT** in `decide.py`'s

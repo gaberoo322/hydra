@@ -16,7 +16,7 @@
 # ONE shared required-check fetch (issue #4757). Required-ness NEVER comes
 # from the rollup — its entries carry no required-ness field (verified live
 # on PRs #4754/#4764) — only from branch protection, the same ONE gh api read
-# collect-state.sh's glm-red classifier makes (#4460 INV-4). A well-formed
+# Turn Snapshot pr-gate collector's glm-red classifier makes (#4460 INV-4). A well-formed
 # contexts=null payload is a KNOWN EMPTY set ([]), not a failure.
 REQUIRED_CONTEXTS=$(gh api 'repos/gaberoo322/hydra/branches/master/protection/required_status_checks' \
   --jq '.contexts' 2>/dev/null || true)

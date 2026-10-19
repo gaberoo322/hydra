@@ -65,7 +65,7 @@ always the operator's own decision, made by hand outside this script.
 `/hydra-review` no longer carries the wayfinder/spec drain procedure. Three of
 its four gating labels (`wayfinder:destination-pending`, `wayfinder:handoff-pending`,
 `needs-tickets`) had never been applied to a single issue in the repo's history,
-and `needs-tickets` already has an autonomous consumer (`collect-state.sh` emits
+and `needs-tickets` already has an autonomous consumer (the Turn Snapshot emits
 `tickets_available`; `decide.py` dispatches `tickets_orch` on it). Deleting a
 procedure that has never had an input is free — but silently losing track of a
 chartered map is not, because its whole AFK frontier stalls with nothing alarming.
@@ -429,7 +429,7 @@ B60205 || true`), then add `needs-dev-resume` — **never `ready-for-agent`**.
 `ready-for-agent` would strand the PR: the autopilot's #4474 in-flight
 exclusion subtracts every `ready-for-agent` issue referenced by an open Target
 PR from `target_ready_for_agent`, so `dev_target` would never dispatch it.
-`needs-dev-resume` is the marker `collect-state.sh`'s
+`needs-dev-resume` is the marker the Turn Snapshot's
 `target_dev_resume_pick` reads; /hydra-review is the ONLY writer of that
 label on the Target repo (hydra-target-qa's FAIL routing never stamps it —
 the FAIL goes to the operator here first). The slot labels 2–4 and the

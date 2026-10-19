@@ -11,12 +11,12 @@
  * `~/.claude/projects/<project>/*.jsonl` layout for the watchdog and the
  * lesson-capture hook, so reading them here adds no new fragility.
  *
- * Scope today: pure reader + calibration. No Redis writes. No event bus.
- * No dispatch decisions — the scheduler/autopilot integration that
- * actually consumes `emergencyStop` / `pacingState` lands in a follow-up
- * PR. PR A ships the Module + `/api/usage` so the operator can sanity-
- * check the numbers against `/usage` and calibrate the env vars before
- * any behaviour changes.
+ * Scope: the I/O coordinator (`getUsage`) — scan + OAuth meter + prior-week
+ * snapshot read + assembly hand-off. It reads Redis (prior-week snapshot,
+ * issue #2404; the scan's parse memo, #3805; OAuth backoff persistence, #2840)
+ * but publishes no events and makes no dispatch decision itself — the
+ * autopilot gates on this snapshot through the eligibility layer
+ * (`./eligibility.ts`). Layer map: `src/cost/CONTEXT.md`.
  *
  * Calibration env:
  *   - HYDRA_USAGE_WEEKLY_QUOTA_TOKENS  — operator's eyeballed weekly cap
@@ -155,8 +155,9 @@ import type { WeeklyUsageSnapshot } from "../redis/usage-snapshots.ts";
 // coordinator no longer imports them directly. `index.ts` re-exports them so the
 // public surface is unchanged.
 // TranscriptScan seam (issue #1971): the JSONL transcript walk + the
-// independent-TTL OAuth cached meter read. `usage-tracker.ts` is now the pure
-// coordinator/assembler over the `ScanResult` this module returns. The
+// independent-TTL OAuth cached meter read. `usage-tracker.ts` is the I/O
+// coordinator over the `ScanResult` this module returns; assembly lives in
+// `./snapshot-assembly.ts` (issue #2988). The
 // `ScanResult` boundary type stays INTERNAL — never re-exported from index.ts.
 import {
   transcriptScan,
@@ -206,9 +207,8 @@ const CACHE_TTL_MS = 60_000;
 // alongside its `SkillWoWEntry` field type. It is imported at the top of this
 // file (downward, as the sole consumer of the type it assembles) and re-exported
 // from `index.ts` via that leaf, so every import site resolves unchanged.
-// `EMPTY_BREAKDOWN` + `emptyByModel` + `addBreakdown` now live in the
-// TranscriptScan seam (issue #1971) and are imported at the top of this file —
-// the assembler below shares them with the scan.
+// `EMPTY_BREAKDOWN` + `emptyByModel` + `addBreakdown` live in the pure leaf
+// `./token-breakdown.ts` (issue #3513); this file does not import them.
 
 interface CacheEntry {
   snapshot: UsageSnapshot;
@@ -217,9 +217,9 @@ interface CacheEntry {
 
 let cache: CacheEntry | null = null;
 
-// The OAuth last-good cache (`oauthCache` + `OAuthCacheEntry`) moved to the
-// TranscriptScan seam with `readOAuthCached` (issue #1090, #1971); the snapshot
-// cache above stays here. `clearUsageCache()` below nulls BOTH via the seam's
+// The OAuth last-good cache (`oauthCache` + `OAuthCacheEntry`) lives in
+// `./oauth-read-cache.ts` with `readOAuthCached` (issue #1090, #2923); the
+// snapshot cache above stays here. `clearUsageCache()` below nulls BOTH via the seam's
 // exported `clearOAuthCache()`.
 
 // The hard-stop threshold constant `EMERGENCY_STOP_PERCENT` and the two-line
@@ -230,10 +230,9 @@ let cache: CacheEntry | null = null;
 // directly; `EMERGENCY_STOP_PERCENT` is also consumed from `./eligibility.ts` by
 // its other callers (and `test/usage-tracker.test.mts`).
 
-// `familyWeight`, `MODEL_FAMILIES`, `weightedQuotaBurn`, the seven pure
-// snapshot-assembly slice helpers (`deriveWeightedBurns`, `deriveEstimatePercents`,
-// `deriveQuotaWeightTotals`, `derivePacingState`, `rebaseOnOAuth`, `deriveSinceReset`,
-// `detectCalibrationDrift`) + their slice interfaces, AND the `assembleSnapshot`
+// `familyWeight`, `MODEL_FAMILIES`, `weightedQuotaBurn`, the pure
+// snapshot-assembly fold helpers (see `./snapshot-assembly.ts` for the current
+// set) + their slice interfaces, AND the `assembleSnapshot`
 // coordinator that composes them, moved to the pure leaves `./token-math.ts` (the
 // shared primitives, issue #1909/#2279) and `./snapshot-assembly.ts` (the folds +
 // coordinator, issue #2279 finished by #2988). `getUsage()` below imports only
@@ -242,8 +241,8 @@ let cache: CacheEntry | null = null;
 
 export function clearUsageCache(): void {
   cache = null;
-  // The OAuth last-good cache lives in the TranscriptScan seam now (issue
-  // #1971); clearing it through the seam's reset fn keeps this the single reset
+  // The OAuth last-good cache lives in `oauth-read-cache.ts` (issue #2923);
+  // clearing it through the seam's reset fn keeps this the single reset
   // entry point that nulls BOTH caches (the #1090 invariant 17 test sites rely on).
   clearOAuthCache();
 }
@@ -412,7 +411,7 @@ export const sessionIdFromPath = transcriptScanSessionIdFromPath;
 // `parseUsageLine`, `parseObservedResetMs` (+ its `coerceInstantMs` helper),
 // `parseSessionLimitReset` (+ its `SESSION_LIMIT_RE` / `resolveWallClockInZone`
 // helpers), and `cacheHitRatio` moved to `./token-math.ts` (issue #1909).
-// `addBreakdown` + `emptyByModel` + `EMPTY_BREAKDOWN` moved to the TranscriptScan
-// seam `./transcript-scan.ts` (issue #1971). All three are consumed by the
-// `./snapshot-assembly.ts` leaf (issue #2279/#2988, which now owns `assembleSnapshot`),
-// not directly by this coordinator.
+// `addBreakdown` + `emptyByModel` + `EMPTY_BREAKDOWN` live in
+// `./token-breakdown.ts` (issue #3513; originally the TranscriptScan seam, #1971).
+// They are consumed by the `./snapshot-assembly.ts` leaf (issue #2279/#2988,
+// which owns `assembleSnapshot`), not directly by this coordinator.

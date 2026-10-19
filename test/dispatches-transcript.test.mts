@@ -255,6 +255,42 @@ describe("GET /dispatches/:dispatchId/transcript — route contract", () => {
     assert.equal(body.limit, 200);
   });
 
+  test("Agent-tool child (#4965): POST with parentSessionId then GET /transcript resolves <parent>/subagents/agent-<id>.jsonl", async () => {
+    const agentId = "a1b2c3d4e5f60718";
+    const post = await fetch(`${baseUrl}/api/dispatches/subagent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sessionId: agentId,
+        parentSessionId: UUID,
+        skill: "hydra-dev",
+        dispatchId: "worktree-agent-a1b2c3d4e5f60718-t1-dev_orch",
+        startedAt: "2026-10-17T00:00:00Z",
+        projectDir: "/home/gabe/hydra",
+      }),
+    });
+    assert.equal(post.status, 200);
+    // Child JSONL lives under the PARENT's dir, in a different project dir
+    // than the child's own cwd - the resolver must scan for it.
+    const subDir = join(tmpRoot, ".claude", "projects", "-home-gabe-hydra", UUID, "subagents");
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(
+      join(subDir, `agent-${agentId}.jsonl`),
+      [
+        JSON.stringify({ type: "user", message: { content: "child question" } }),
+        JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "child answer" }] } }),
+      ].join("\n"),
+      "utf8",
+    );
+    const res = await fetch(`${baseUrl}/api/dispatches/${agentId}/transcript`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.transcriptStatus, "available");
+    assert.equal(body.total, 2);
+    assert.equal(body.messages[1].blocks[0].text, "child answer");
+    assert.equal(body.sessionMetadata.dispatchId, "worktree-agent-a1b2c3d4e5f60718-t1-dev_orch");
+  });
+
   test("invalid query params → 400 schema-validation-failed", async () => {
     await registerSubagentDispatch({
       sessionId: UUID,

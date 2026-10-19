@@ -60,19 +60,27 @@ One pass: detect → filter → emit → report, then exit.
 
 Sync the scan base to current Target `main` first (the #1318 stale-base lesson, applied to the Target):
 
+Shell state does NOT persist across Bash tool calls, so each block below re-resolves the Target seam itself instead of relying on a variable exported by an earlier block (issue #4939: an empty `$TARGET_WS` made `cd ""` a silent no-op, the fetch ran in `~/hydra`, and the agent then "corrected" `~/hydra`'s `origin` to the Target repo). Never run `git remote set-url|add|remove` — if `origin` looks wrong, the seam var is empty: re-run the seam preamble in THIS Bash call.
+
 ```bash
-cd "$TARGET_WS" \
+_target_seam_sh="$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts --sh)" \
+  || { echo "hydra-target-cleanup: target seam unresolved — aborting" >&2; exit 1; }
+eval "$_target_seam_sh"; unset _target_seam_sh
+cd "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" \
   && git fetch origin main \
   || { echo "hydra-target-cleanup: fetch origin/main failed — aborting (cannot guarantee a current scan base)"; exit 1; }
-git -C "$TARGET_WS" merge-base --is-ancestor origin/main HEAD \
-  || git -C "$TARGET_WS" merge --ff-only origin/main \
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" merge-base --is-ancestor origin/main HEAD \
+  || git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" merge --ff-only origin/main \
   || { echo "hydra-target-cleanup: working tree not fast-forwardable onto origin/main — aborting (stale/diverged base)"; exit 1; }
 ```
 
 Then run knip in the Target's app workspace (knip is a Target devDependency; `knip.json` in `$TARGET_APP_DIR` is the committed config):
 
 ```bash
-cd "$TARGET_APP_DIR" \
+_target_seam_sh="$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts --sh)" \
+  || { echo "hydra-target-cleanup: target seam unresolved — aborting" >&2; exit 1; }
+eval "$_target_seam_sh"; unset _target_seam_sh
+cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" \
   && npx knip --reporter json --no-exit-code > /tmp/knip-target-report.json 2>/dev/null || true
 ```
 
@@ -89,6 +97,8 @@ npx tsx scripts/ci/hydra-target-cleanup-emit.ts /tmp/knip-target-report.json
 # Apply (files one cleanup-scan + ready-for-agent GitHub issue per file on the target repo):
 npx tsx scripts/ci/hydra-target-cleanup-emit.ts /tmp/knip-target-report.json --apply
 ```
+
+**Target resolution (issue #4902 — same seam as the wire-or-retire runner's #4553).** The runner resolves the workspace, app dir and findings repo itself, lazily at CLI time through `scripts/target/print-target-facts.ts` (the target-config seam, ADR-0002) — the same resolution the seam preamble above exports. Nothing Target-identity-shaped is hardcoded: a manifest failure degrades the app dir to the bare workspace and the run then drops every finding (fail closed) rather than file against a guessed path or repo. Knip report paths stay app-relative exactly as knip emits them; the runner joins them onto repo-relative form with the one shared `toRepoRelative(appSubdir, path)` rule for the age probe, the source read and every rendered body alike.
 
 The runner (`planTargetCleanupEmit()`, pure + tested) owns the whole pipeline:
 
@@ -162,7 +172,7 @@ Expected: demote-class findings batch one-item-per-file with the symbol-led titl
 - `scripts/ci/hydra-knip-source.ts` — the shared knip-report source loader (issue #4523): `loadKnipReport()` (exists → staleness → parse, Result-shaped, never throws) + `KNIP_REPORT_MAX_AGE_MS`. Shared with `scripts/ci/hydra-cleanup-emit.ts` (Orchestrator) so the #1766 staleness guard is lane-symmetric.
 - `test/hydra-target-cleanup-emit.test.mts` — demote-only filter, grace gate, per-file batching, dedup, cap, title/body coherence, fuzzy-dedup title diversity.
 - `scripts/autopilot/decide.py` — the `cleanup_target` signal class + selector that dispatches this skill.
-- `scripts/autopilot/collect-state.sh` — emits `target_backfill_idle` + `target_cleanup_board_saturated`.
+- The Turn Snapshot collectors (`src/autopilot/turn-snapshot/`) — emit `target_backfill_idle` + `target_cleanup_board_saturated`.
 - `$TARGET_WS/CLAUDE.md` — the Target policy this sweep enforces (rule 3 carve-out, rule 1 demote-only providers, the deadcode ratchet section).
 
 ## Tier

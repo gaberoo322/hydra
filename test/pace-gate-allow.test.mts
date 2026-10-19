@@ -40,6 +40,20 @@ import { tmpdir } from "node:os";
 import { getRedisConnection } from "../src/redis/connection.ts";
 import { WATCHDOG_REDIS_TIMEOUT_MS } from "./_helpers/watchdog-timeouts.mts";
 
+// Issue #4966: the spawn helpers below pass `...process.env` through to
+// pace-gate.sh, and the model-fallback suites pin the script's DEFAULT launch
+// pair (fable -> opus). A dispatch running under the #4839 Sonnet-parent
+// trial inherits HYDRA_AUTOPILOT_PRIMARY_MODEL=sonnet from the host's systemd
+// drop-in, flipping every default-pair assertion (6 not-ok worktree-local
+// while CI's fresh runner env stays green). Pin the default pair explicitly in
+// each model-sensitive helper's env — spread AFTER `...process.env` and
+// BEFORE the per-call extraEnv, so the explicit-override case
+// (pri-test/fbk-test via runExecDry's extraEnv) still wins.
+const DEFAULT_MODEL_PAIR_ENV = {
+  HYDRA_AUTOPILOT_PRIMARY_MODEL: "fable",
+  HYDRA_AUTOPILOT_FALLBACK_MODEL: "opus",
+};
+
 const PACE_GATE = join(
   dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -74,6 +88,7 @@ function runPaceGate(
     const child = spawn("bash", [PACE_GATE, ...args], {
       env: {
         ...process.env,
+        ...DEFAULT_MODEL_PAIR_ENV,
         HYDRA_PACE_GATE_FORCE_SERVICE_INACTIVE: "1",
         HYDRA_PACE_GATE_DRY_RUN: "1",
         HYDRA_PACE_GATE_ELIGIBILITY_URL: eligibilityUrl,
@@ -96,6 +111,9 @@ const baseReasons = {
   paused: false,
   sessionBlockedUntil: null as string | null,
   worklessUntil: null as string | null,
+  // Issue #4836: launcher-only admission signals (never flip .allow).
+  fiveHourThrottleShed: false,
+  postQuotaUntil: null as string | null,
   // Issue #4585: the model-scoped exhaustion redirect (advisory — never flips
   // .allow; consumed by the exec branch's launch-model selection).
   fableExhaustedUntil: null as string | null,
@@ -326,6 +344,109 @@ describe("pace-gate.sh composed-verdict admission (issue #1790)", () => {
     }
   });
 
+  test("fiveHourThrottleShed:true + allow:true => skip five-hour-headroom, no launch (#4836)", async () => {
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, fiveHourThrottleShed: true },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /throttle band/);
+      assert.doesNotMatch(r.stdout, /would-start/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("fiveHourThrottleShed:true in --exec-autopilot => exit 0, no would-exec (#4836)", async () => {
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, fiveHourThrottleShed: true },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url, ["--exec-autopilot"]);
+      assert.equal(r.status, 0);
+      assert.doesNotMatch(r.stdout, /would-exec/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("fiveHourThrottleShed:false => launch unchanged (#4836)", async () => {
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, fiveHourThrottleShed: false },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /would-start/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("postQuotaUntil in the FUTURE => skip post-quota-cooldown, no launch (#4836)", async () => {
+    const future = new Date(Date.now() + 20 * 60 * 1000).toISOString();
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, postQuotaUntil: future },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /post-quota cooldown/);
+      assert.doesNotMatch(r.stdout, /would-start/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("postQuotaUntil in the FUTURE in --exec-autopilot => exit 0, no would-exec (#4836)", async () => {
+    const future = new Date(Date.now() + 20 * 60 * 1000).toISOString();
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, postQuotaUntil: future },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url, ["--exec-autopilot"]);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /post-quota cooldown/);
+      assert.doesNotMatch(r.stdout, /would-exec/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("postQuotaUntil in the PAST => launch normally (self-heals) (#4836)", async () => {
+    const past = new Date(Date.now() - 60 * 1000).toISOString();
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, postQuotaUntil: past },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /would-start/);
+      assert.doesNotMatch(r.stdout, /post-quota cooldown/);
+    } finally {
+      srv.close();
+    }
+  });
+
   test("exec mode ineligible exit does NOT reach the trigger export (issue #2955)", async () => {
     const srv = await eligibilityServer({
       allow: false,
@@ -502,6 +623,7 @@ describe("pace-gate.sh exec-mode launch-model selection (issue #4585)", () => {
       const child = spawn("bash", [PACE_GATE, "--exec-autopilot"], {
         env: {
           ...process.env,
+          ...DEFAULT_MODEL_PAIR_ENV,
           HYDRA_PACE_GATE_ELIGIBILITY_URL: eligibilityUrl,
           HYDRA_AUTOPILOT_STATE: "/tmp/hydra-pace-gate-allow-nonexistent.json",
           HYDRA_PACE_GATE_DRY_RUN: "1",

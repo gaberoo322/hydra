@@ -1,0 +1,1 @@
+- refactor: move the in-flight PR + PR-gate collectors out of collect-state.sh into the typed Turn Snapshot module, byte-identical on the wire (#4929)

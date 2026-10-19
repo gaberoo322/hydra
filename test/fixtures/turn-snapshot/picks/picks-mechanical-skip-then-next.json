@@ -1,0 +1,155 @@
+{
+  "name": "mechanical-skip-then-next",
+  "source": "test/autopilot-grill-gate.test.mts › mechanical #1230",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 61b9496e39518939497a4ee764f1f0ea4b0d3b9a (collect_orch_grill_candidates + collect_orch_merged_prs + collect_orch_grill_and_dev_ready_picks + collect_candidate_exclusions + collect_active_dev_orch)",
+  "nowMs": 1791350429000,
+  "inputs": {
+    "inflight": {
+      "union": "",
+      "branch": "",
+      "body": ""
+    },
+    "boardState": null
+  },
+  "reads": {
+    "readyForAgent": {
+      "stdout": "[{\"number\":601,\"updatedAt\":\"2026-10-07T05:10:28.000Z\",\"body\":\"remove dead code.\\n\",\"labels\":[{\"name\":\"ready-for-agent\"},{\"name\":\"cleanup-scan\"}],\"title\":\"Some implementation work\"},{\"number\":602,\"updatedAt\":\"2026-10-07T05:10:27.000Z\",\"body\":\"Complex refactor, no stamp.\\n\",\"labels\":[{\"name\":\"ready-for-agent\"}],\"title\":\"Some implementation work\"}]",
+      "exitCode": 0
+    },
+    "openBlockerSearch": {
+      "stdout": "[]",
+      "exitCode": 0
+    },
+    "mergedPrs": {
+      "stdout": "[]",
+      "exitCode": 0
+    },
+    "openDevPrs": {
+      "stdout": "[]",
+      "exitCode": 0
+    },
+    "designConcepts": {}
+  },
+  "expected": {
+    "stderrLines": [],
+    "boardDegraded": false,
+    "bashGhCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "ready-for-agent",
+        "--limit",
+        "100",
+        "--json",
+        "number,updatedAt,body,labels,title",
+        "--jq",
+        "\n  [ .[] | select((.labels | map(.name) | index(\"target-backlog\")) | not) ]\n"
+      ],
+      [
+        "pr",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "merged",
+        "--limit",
+        "100",
+        "--json",
+        "number,title,body"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "ready-for-agent",
+        "--limit",
+        "100",
+        "--json",
+        "number,updatedAt,body,labels,title"
+      ],
+      [
+        "pr",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--json",
+        "updatedAt,headRefName,labels",
+        "--jq",
+        "[\n  .[]\n  | select(\n      (.headRefName | startswith(\"issue-\"))\n      or (.headRefName | startswith(\"hydra-dev/\"))\n      or (.headRefName | startswith(\"worktree-agent-\"))\n    )\n  | select(\n      (((.labels // []) | map(.name) | index(\"glm-authored\"))\n        or (.headRefName | startswith(\"worktree-agent-glm-\")))\n      | not\n    )\n  | select((now - (.updatedAt | fromdateiso8601)) < 5400)\n] | length"
+      ]
+    ],
+    "designConceptProbes": [
+      601,
+      602
+    ],
+    "values": {
+      "picks": {
+        "grillPick": 602,
+        "devReadyPick": 601,
+        "candidateExclusions": [
+          {
+            "anchor": "issue-601",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-601",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-601",
+            "member": "mechanical-exclusion",
+            "verdict": "excluded",
+            "evidence": "cleanup-scan-label"
+          },
+          {
+            "anchor": "issue-601",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-602",
+            "member": "target-scope-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-602",
+            "member": "in-flight-dev-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-602",
+            "member": "mechanical-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          },
+          {
+            "anchor": "issue-602",
+            "member": "trivial-anchor-exclusion",
+            "verdict": "survived",
+            "evidence": ""
+          }
+        ],
+        "activeDevOrch": 0,
+        "boardDegraded": false
+      }
+    }
+  }
+}

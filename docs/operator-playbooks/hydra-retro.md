@@ -31,7 +31,7 @@ cost a full `/hydra-retro` dispatch (~115k tokens / 28 tool calls, observed on
 the 2026-08-05 run `2bcba309`) just to discover the bundle's `reflections` /
 `stuckSignals` / `recommendations` were all empty and no dispatch was flagged.
 
-`collect-state.sh` now precomputes a second signal, `retro_run_drillable`, from
+The Turn Snapshot now precomputes a second signal, `retro_run_drillable`, from
 the SAME candidate run's retro bundle (`GET /autopilot/runs/:runId/retro`) —
 `true` iff any `dispatches[].flagged` is set OR `reflections` /
 `stuckSignals` / `recommendations` is non-empty OR the bundle's run-level
@@ -41,7 +41,7 @@ computed by the pure TS selector `flagRunForDrill`
 `term_reason` `crash` / `failure_backstop` or carries a `crash_detail` object
 (`runFlagReason` names which). A crash-terminated run's dispatches are all
 undrillable `run-crash` slots with an empty `cycleId`, so before #4584 it read
-as clean and only the weekly override ever looked at it. `collect-state.sh`
+as clean and only the weekly override ever looked at it. The Turn Snapshot
 reads the boolean and never re-derives it, so skill and pre-check cannot
 drift; a bundle without the field reads as not-run-flagged. `decide.py`'s `retro_orch`
 selector now dispatches only when **both** `retro_run_available` AND
@@ -126,6 +126,13 @@ those, read the full transcript:
 ```bash
 curl -sf "http://localhost:4000/api/dispatches/<id>/transcript"
 ```
+
+If the route 404s (`dispatch-not-found` — the registry row expired or was never
+written), fall back to the on-disk JSONL:
+`<projects-root>/<encoded-parent-cwd>/<parent-session>/subagents/agent-<hash>.jsonl`
+(`~/.claude/projects/-home-gabe-hydra/<parent-session>/subagents/agent-<hash>.jsonl`;
+the `<hash>` is the bare agent id, the same value as `slot.task_id`). Do not let
+a 404 block the retro.
 
 This is the cost bound: a clean run flags nothing and reads no transcripts. A
 happy-path (merged, regression-free) dispatch is never drilled.

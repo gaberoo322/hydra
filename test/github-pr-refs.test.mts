@@ -156,23 +156,13 @@ describe("github/pr-refs (issue #4683)", () => {
   });
 
   // -------------------------------------------------------------------------
-  // The --merged rule's regex literal (issue #4690, ADR-0040 Decision 4 row 7)
+  // The merged-PR rule (issue #4690). Its python twin (`pr-refs.py --merged`,
+  // `_TITLE_ANCHOR_RE`) was deleted by ADR-0043 slice 3 (#4931) when its only
+  // caller became the typed picks collector, so the byte-identity and CLI
+  // parity guards retired with it; the rule's case table stays, TS-only.
   // -------------------------------------------------------------------------
 
-  test("_TITLE_ANCHOR_RE is byte-identical to pr-refs.py's _TITLE_ANCHOR_RE (the --merged rule's own regex)", () => {
-    const pySrc = readFileSync(PY_SCRIPT, "utf-8");
-    const pyAnchor = extractPyRegex(pySrc, "_TITLE_ANCHOR_RE");
-    assert.ok(pyAnchor, 'pr-refs.py must define _TITLE_ANCHOR_RE via re.compile(r"...")');
-    // The closing-verb half of the rule reuses _CLOSE_RE, already pinned
-    // byte-identical above — so the title-anchor literal is the only NEW
-    // regex source the --merged mode adds, and it must equal the TS constant
-    // mergedPrReferences composes (TITLE_ANCHOR_RE).
-    assert.equal(TITLE_ANCHOR_RE.source, pyAnchor!.source);
-    assert.equal(pyAnchor!.ignoreCase, false);
-    assert.equal(TITLE_ANCHOR_RE.flags.includes("i"), pyAnchor!.ignoreCase);
-  });
-
-  test("pr-refs.py --merged emits exactly mergedPrReferences's set (CLI parity, issue #4690)", () => {
+  test("mergedPrReferences: the #4690 case table (title anchor, closing verb in title or body; never branch, Refs, or a bare mention)", () => {
     const rows: PrRefRow[] = [
       { title: "fix: x (#40)", body: "" }, // the (#N) title anchor
       { title: "Closes #41: thing", body: "" }, // closing verb in the title
@@ -183,19 +173,7 @@ describe("github/pr-refs (issue #4683)", () => {
       { body: "Refs #47" }, // non-closing Refs #N is NOT part of the merged rule
       {}, // null/missing fields never throw
     ];
-    const expected = [...mergedPrReferences(rows)].sort((a, b) => a - b);
-    const r = spawnSync("python3", [PY_SCRIPT, "--merged"], {
-      input: JSON.stringify(rows),
-      encoding: "utf-8",
-    });
-    assert.equal(r.status, 0, `pr-refs.py --merged exited non-zero: ${r.stderr}`);
-    const got = (r.stdout ?? "")
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean)
-      .map(Number)
-      .sort((a, b) => a - b);
-    assert.deepEqual(got, expected);
+    assert.deepEqual([...mergedPrReferences(rows)].sort((a, b) => a - b), [40, 41, 42, 44, 45]);
   });
 
   test("pr-refs.py --closing emits exactly closedIssues's set (CLI parity, issue #4694)", () => {
@@ -222,14 +200,6 @@ describe("github/pr-refs (issue #4683)", () => {
       .sort((a, b) => a - b);
     assert.deepEqual(got, expected);
     assert.deepEqual(got, [40, 41, 42]);
-  });
-
-  test("pr-refs.py --merged fails open on unparsable stdin (empty set, exit 0)", () => {
-    for (const input of ["", "not json", '{"not":"a list"}']) {
-      const r = spawnSync("python3", [PY_SCRIPT, "--merged"], { input, encoding: "utf-8" });
-      assert.equal(r.status, 0, `--merged must never abort on bad stdin: ${r.stderr}`);
-      assert.equal((r.stdout ?? "").trim(), "");
-    }
   });
 
   // -------------------------------------------------------------------------
@@ -358,12 +328,19 @@ describe("github/pr-refs (issue #4683)", () => {
       // Contraction and typographic-apostrophe negations.
       ["doesn't fix #5", []],
       ["won’t resolve #8", []],
-      // Case-insensitive negation and a newline between not and the verb.
+      // Case-insensitive negation.
       ["Do NOT close #7", []],
-      ["does not\nclose #11", []],
-      // More than one whitespace between the negation and the verb (QA #4810).
+      // More than one horizontal whitespace between negation and verb (QA #4810).
       ["does not  close #12", []],
-      ["does not\n\nclose #13", []],
+      ["does not\t close #13", []],
+      // A LINE BREAK ends the negation's reach (QA FAIL at a4c78a3a): the gap
+      // is horizontal whitespace only, so a negation on one line never
+      // swallows a real close on the next.
+      ["This is not\n\nCloses #5", [5]],
+      ["does not\nclose #11", [11]],
+      ["does not\r\nclose #24", [24]],
+      ["does not yet\nfix #25", [25]],
+      ["no\nlonger fixes #27", [27]],
       // `cannot`, `never`, `no longer` negations (QA #4810).
       ["cannot close #10", []],
       ["never closes #15", []],
@@ -414,7 +391,7 @@ describe("github/pr-refs (issue #4683)", () => {
     // The verb-list constant stays byte-for-byte what it was (pinned above);
     // the guard lives only in the CLOSE_RE composition, as its leading arm.
     assert.equal(CLOSING_VERB_ALTERNATION, "close[sd]?|fix(?:e[sd])?|resolve[sd]?");
-    if (!CLOSE_RE.source.startsWith(String.raw`(?:\b(?:can)?not|n't|n’t|\bnever|\bno\s+longer)\s+`)) {
+    if (!CLOSE_RE.source.startsWith(String.raw`(?:\b(?:can)?not|n't|n’t|\bnever|\bno[ \t]+longer)[ \t]+`)) {
       assert.fail(`CLOSE_RE must lead with the negation arm: ${CLOSE_RE.source}`);
     }
   });
@@ -428,16 +405,8 @@ describe("github/pr-refs (issue #4683)", () => {
     // is untouched and still fires.
     const anchored = { title: "docs: glossary touch-up (#51)", body: "Does not close #51 — the code PR does." };
     assert.deepEqual([...mergedPrReferences([anchored])], [51]);
-    // Python --merged parity on the negated-body row (CLI, same as #4690's test).
-    const r = spawnSync("python3", [PY_SCRIPT, "--merged"], {
-      input: JSON.stringify([companion, anchored]),
-      encoding: "utf-8",
-    });
-    assert.equal(r.status, 0, `pr-refs.py --merged exited non-zero: ${r.stderr}`);
-    assert.deepEqual(
-      (r.stdout ?? "").trim().split(/\s+/).filter(Boolean).map(Number).sort((a, b) => a - b),
-      [51],
-    );
+    // (The Python `--merged` twin was retired on master — ADR-0043 slice 3,
+    // #4931 — so this rule is TS-only now; no CLI parity leg.)
   });
 
   test("playbooks pin the companion-PR rules: Refs/Part-of referencing and fenced-anchor label stamping", () => {

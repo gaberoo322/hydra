@@ -106,6 +106,11 @@ export const redisKeys = {
   anchorAbandonmentCount: (ref: string) => `hydra:anchors:abandonment-count:${ref}`,
   anchorPermSkip: (ref: string) => `hydra:anchors:perm-skip:${ref}`,
 
+  // Architecture-deepening backfill (issue #789): ISO-8601 stamp of the last
+  // architecture_orch pass, written by the dispatched skill and read by the
+  // Turn Snapshot (`arch_last_run_iso`, ADR-0043 slice 5B / #4933).
+  architectureLastRun: () => "hydra:architecture:last-run",
+
   // ---------------------------------------------------------------------------
   // Metrics
   // ---------------------------------------------------------------------------
@@ -218,7 +223,7 @@ export const redisKeys = {
   // 60s-TTL merge-lock) that, while engaged, forces ALL auto-merge to pause
   // regardless of tier/depth verdict and routes every open PR to the
   // /hydra-review pickup set. The SOLE write path is the operator-facing API
-  // route (src/api/autopilot-control.ts); decide.py and collect-state.sh only READ
+  // route (src/api/autopilot-control.ts); decide.py and the Turn Snapshot only READ
   // it. Stored as a JSON blob `{engaged, since, engagedBy}` so /health can
   // surface "since when / by whom" for incident audit. Absent => disengaged
   // (default-off).
@@ -231,7 +236,7 @@ export const redisKeys = {
   // while in-flight subagents finish their atomic unit. INDEPENDENT of and
   // composes with the emergency-brake (which is merge-only). The SOLE write
   // path is the operator-facing API route (src/api/autopilot-control.ts); decide.py
-  // and collect-state.sh only READ it (folded into /api/usage/eligibility).
+  // and the Turn Snapshot only READ it (folded into /api/usage/eligibility).
   // Stored as a JSON blob `{paused, since}` (no attribution). Absent =>
   // not paused (default-off, fail-safe to running).
   autopilotPaused: () => "hydra:autopilot:paused",
@@ -275,6 +280,13 @@ export const redisKeys = {
   // fails safe to "not workless". Absent => launch normally.
   autopilotWorklessUntil: () => "hydra:autopilot:workless-until",
 
+  // Issue #4836: post-quota admission cooldown. Stamped by endRun when a run
+  // ends term_reason=quota (the 5h meter lags the wave that just burned, so the
+  // gate's next reading can still look healthy). Epoch-ms value; LAUNCHER-ONLY
+  // (surfaced as `reasons.postQuotaUntil`, acted on only by pace-gate.sh, never
+  // flips `allow`). TTL'd to the instant so it self-clears. Absent => launch.
+  autopilotPostQuotaUntil: () => "hydra:autopilot:post-quota-until",
+
   // Issue #673 budget-threshold idempotency sentinel removed in #703 along
   // with the dead budget-threshold bridge that wrote it. The bridge polled
   // `hydra:scheduler:daily-spend` (no live writer) and never emitted.
@@ -297,7 +309,7 @@ export const redisKeys = {
   // Tool Scout — Phase B calendar walk (issue #485).
   //
   // `scoutLastCalendarWalk`: ISO-8601 UTC timestamp of the most recent
-  //   weekly walk dispatch. Read by collect-state.sh to compute the
+  //   weekly walk dispatch. Read by the Turn Snapshot to compute the
   //   `scout_walk_due` signal (true when >7d old). Not TTLed — the value
   //   is a heartbeat, not a session record.
   //
@@ -316,7 +328,7 @@ export const redisKeys = {
   // Tool Scout — Phase B cost-cap gate (issue #532).
   //
   // Per-day per-class scout token spend mirror, written by
-  // `collect-state.sh` from the existing `hydra:metrics:tokens:by-skill:
+  // the Turn Snapshot from the existing `hydra:metrics:tokens:by-skill:
   // daily:<DATE>[hydra-tool-scout]` surrogate (issue #394 accumulator).
   // The gate in `scripts/autopilot/decide.py:_select_for_signal("scout_orch")`
   // reads this via `state.scout_spend_usd_today` and suppresses dispatch
@@ -324,7 +336,7 @@ export const redisKeys = {
   //
   // Value is an INT-string of tokens consumed today by `hydra-tool-scout`
   // dispatches; the dollar conversion uses `HYDRA_TOKEN_USD_RATE` at the
-  // emitter (collect-state.sh) so the gate's input is already in USD. 7d
+  // emitter (the Turn Snapshot) so the gate's input is already in USD. 7d
   // TTL keeps Redis tidy; one week of audit headroom matches the
   // `/api/scout/stats` window.
   scoutSpendDaily: (isoDate: string) => `hydra:scout:spend:${isoDate}`,
@@ -412,27 +424,35 @@ export const redisKeys = {
   stream: (name: string) => `hydra:${name}`,
 
   // ---------------------------------------------------------------------------
-  // Attention feed (issue #4007, ADR-0034 §4 — threshold-crossing surface).
+  // Attention feed (issue #4007, ADR-0034 §4; per-line calibration ledger
+  // issue #4627, ADR-0034 §8.4).
   //
-  // Per-signal (three members: blocked-on-human / breakage / repetition):
+  // `attentionDismissed` / `attentionSurfaced` — hashes keyed by the
+  //   `<bucket>:<line>` ADMISSION-LINE key (not the retired three signals):
+  //   dismissed `{itemId → dismissedAt}`, surfaced `{itemId → firstSeenAt}`.
+  //   The pair IS the episode ledger of §8.4 — one hash per line, one field
+  //   per item id, cleared by the composer's reconcile when a healthy source
+  //   no longer admits the id. The dismissed hash keeps the read-side 30-day
+  //   snooze filter (NOT a key TTL — a Redis hash cannot TTL members).
   //
-  // `attentionDismissed` — hash, field=item id, value=ISO dismissed-at. The
-  //   durable dismissal ledger; feed reads filter members younger than the
-  //   30-day snooze TTL and lazily prune older ones, so a genuinely
-  //   still-crossing item resurfaces after a month rather than being
-  //   silently gone forever. NOT TTLed as a key — the read-side filter owns
-  //   the snooze semantics.
+  // `attentionCalibrationDay` — one hash per UTC day, fields
+  //   `<key>:surfaced | :not-a-problem | :handled-elsewhere | :later |
+  //   :resolved`, TTL 35 d (CALIBRATION_TTL_DAYS) stamped on every write so
+  //   the rolling 30-day verdict window self-cleans (precedent:
+  //   scope-violations.ts).
   //
-  // `attentionSurfaced` — hash, field=item id, value=ISO first-surfaced-at.
-  //   The once-per-item dedup ledger behind the surfaced counter, so a 30s
-  //   poll cadence cannot inflate the calibration count.
+  // `attentionDismissals` — capped audit stream (XADD MAXLEN ~ 500) of
+  //   `{id, key, reason, at}` dismiss events.
   //
-  // `attentionCountSurfaced` / `attentionCountDismissed` — INT counters keyed
-  //   per threshold (signal), NOT per item: the calibration signal is about
-  //   the LINE, not the item (ADR-0034 §4's falsifiability rule).
+  // The per-signal INT counters (the retired `counts` key family, one INT per
+  // old signal) were RETIRED with issue #4627, not migrated (#4444 decision 1
+  // — reset, don't dual-write): no builder here references them, and the 12
+  // live legacy keys are inert orphans awaiting a one-time operator DEL (the
+  // exact key list travels in the PR body; test/attention-calibration.test.mts
+  // scans src/ for any surviving builder or literal).
   // ---------------------------------------------------------------------------
-  attentionDismissed: (signal: string) => `hydra:attention:dismissed:${signal}`,
-  attentionSurfaced: (signal: string) => `hydra:attention:surfaced:${signal}`,
-  attentionCountSurfaced: (signal: string) => `hydra:attention:counts:${signal}:surfaced`,
-  attentionCountDismissed: (signal: string) => `hydra:attention:counts:${signal}:dismissed`,
+  attentionDismissed: (key: string) => `hydra:attention:dismissed:${key}`,
+  attentionSurfaced: (key: string) => `hydra:attention:surfaced:${key}`,
+  attentionCalibrationDay: (date: string) => `hydra:attention:calib:${date}`,
+  attentionDismissals: () => "hydra:attention:dismissals",
 };

@@ -2,7 +2,7 @@
  * candidate-exclusions.ts — pure aggregator leaf for Candidate Exclusion
  * telemetry (issue #3964, design decided on wayfinder #3954).
  *
- * `scripts/autopilot/collect-state.sh` evaluates four pre-dispatch filters
+ * The Turn Snapshot collectors (`src/autopilot/turn-snapshot/`) evaluate four pre-dispatch filters
  * against every open `ready-for-agent` orchestrator issue, every turn:
  *
  *   - `target-scope-exclusion`    (issue #2701/#2704) — a `target-backlog`-

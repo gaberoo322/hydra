@@ -27,7 +27,7 @@
  * The triage/dispatch label literals the autopilot board projection counts.
  * Each maps a response field to the GitHub label name it counts. This is the
  * SINGLE place the bash `--jq` bucketing used to re-spell; a label rename is
- * now a one-line edit here, not a parallel edit in `collect-state.sh`.
+ * now a one-line edit here, not a parallel edit in the Turn Snapshot.
  *
  * NOTE: this is the orchestrator's triage vocabulary (see
  * `docs/agents/triage-labels.md`), distinct from the Dispatch-Class Taxonomy
@@ -65,7 +65,7 @@ export const ORCH_BOARD_LABELS = {
   // (`glm-eligible` ↔ issues/`ready-for-agent`, `glm-authored` ↔
   // PRs/`active_dev_orch`), and this leaf is the *board-state* (issue) label
   // set. `glm-authored` is consumed by the `active_dev_orch` PR collector in
-  // `scripts/autopilot/collect-state.sh`, which reads no TS vocabulary.
+  // the Turn Snapshot picks collector (`src/autopilot/turn-snapshot/picks.ts`).
   glm_eligible: "glm-eligible",
   // `glm-withhold` is the sticky opt-out marker for the GLM dev-drainer worker
   // lane (ADR-0032, issue #3755). Where `glm-eligible` says "the drainer may
@@ -137,7 +137,7 @@ export const ORCH_BOARD_LABELS = {
 } as const;
 
 /**
- * Staleness windows (seconds) — preserved verbatim from `collect-state.sh`:
+ * Staleness windows (seconds) — preserved verbatim from the retired collect-state.sh:
  * an `in-progress` issue untouched for 90 min, or a `blocked` issue untouched
  * for 12 h, is "stale" and listed by number so the autopilot can re-route it.
  */

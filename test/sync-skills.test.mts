@@ -2058,6 +2058,28 @@ describe("scripts/autopilot/classes.json — every dispatched skill resolves to 
       "hydra-autopilot must keep the flag — it is the documented exemption the rule exists to permit",
     );
   });
+
+  test("hydra-epic-sprint keeps disable-model-invocation and is NOT a classes.json-dispatched skill (ADR-0044: operator-attended only)", () => {
+    // ADR-0044 Decision 2 lets a sprint session post QA-Override lines on its own
+    // reviewer's PASS. That is sound only with the operator attending; a model-
+    // invoked load (autopilot, sweep, another skill) would be self-approval.
+    const raw = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8");
+    const parsed = JSON.parse(raw) as { classes: Array<{ name: string; skill?: string }> };
+    assert.equal(
+      parsed.classes.some(row => row.skill === "hydra-epic-sprint"),
+      false,
+      "hydra-epic-sprint must never be a classes.json dispatched skill — ADR-0044 rejects an unattended sprint",
+    );
+
+    const r = liveSync();
+    assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+    const generated = readFileSync(join(r.claudeDir, "hydra-epic-sprint", "SKILL.md"), "utf-8");
+    assert.match(
+      generated,
+      /^disable-model-invocation: true$/m,
+      "hydra-epic-sprint must keep the flag — only an operator slash-launch may start a sprint",
+    );
+  });
 });
 
 describe("live hydra-autopilot — every sidecar pointer resolves to an emitted file and a real section (issue #4827)", () => {

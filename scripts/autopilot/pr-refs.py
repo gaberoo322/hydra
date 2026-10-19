@@ -9,23 +9,14 @@ space-separated set of issue numbers that the open PRs reference, via EITHER:
   * a keyword ref in the PR body — a GitHub closing verb (Closes / Fixes /
     Resolves, any tense) OR the non-closing `Refs #N` form.
 
-This is the shared extractor issue #3852 asks for, and since #4334 it is the
-ONLY copy: collect-state.sh computes all three of its orch-lane in-flight
-exclusion sets by piping its `gh pr list` payload through THIS script (no
-selector = the union `ORCH_INFLIGHT_ISSUES`; `--source branch` / `--source
-body` = the per-channel subsets its Candidate Exclusion telemetry attributes,
-#3964), recover-stale.sh pipes its payload through the zero-arg union form,
-and reap.py imports the narrower `closing_issues()` predicate. Since #4474
-collect-state.sh's Target lane is a FOURTH caller (`collect_target_board`'s
-`TARGET_INFLIGHT_ISSUES`, zero-arg union form): it feeds this script a REST
-`gh api repos/<target-repo>/pulls` payload projected to the same
-`{headRefName, body}` shape rather than a `gh pr list --json` one (ADR-0031
-Decision 6 forbids GraphQL-backed `gh --json` reads on the Target hot path) —
-this script itself stays PURE stdin-in/numbers-out and gains no repo argument;
-the repo is parameterised entirely at the caller's fetch
-(`$TARGET_GH_REPO` / `HYDRA_TARGET_GITHUB_REPO`). A change to the
-reference-detection rule (a new closing verb, a branch-naming convention
-change) is therefore made ONCE here, for every caller.
+This is the shared extractor issue #3852 asks for. recover-stale.sh pipes its
+`gh pr list` payload through the zero-arg union form and reap.py imports the
+narrower `closing_issues()` predicate. Its former biggest caller,
+collect-state.sh (the orch-lane in-flight exclusion sets and, since #4474,
+the Target lane), was replaced by the typed Turn Snapshot collectors (ADR-0043),
+which use the TypeScript twin `src/github/pr-refs.ts`; collect-state.sh was
+deleted with the kv wire (#4934). A change to the reference-detection rule (a
+new closing verb, a branch-naming convention change) must be made in BOTH.
 
 `closing_issues()` (issue #4045) is a second, NARROWER predicate over the
 same JSON shape: issue numbers an open PR actually CLOSES (body closing verb
@@ -39,27 +30,22 @@ as `yet` / `fully`) does NOT count — "Does not close #N" is the companion-PR
 idiom, not a close.
 
 `branch_issues()` / `bodyref_issues()` (issue #4334) expose the two evidence
-CHANNELS of `referenced_issues()` separately, for the per-source attribution
-collect-state.sh's Candidate Exclusion telemetry needs — which matcher
-actually fired for a given anchor. They are strict subsets of the union by
+CHANNELS of `referenced_issues()` separately, for per-source attribution
+(the Candidate Exclusion telemetry the Turn Snapshot now computes in
+TypeScript) — which matcher actually fired for a given anchor. They are strict subsets of the union by
 construction (same regexes, one channel each).
 
-`merged_issues()` (issue #4690, ADR-0040 Decision 4 row 7) is the MERGED-PR
-shipped-work rule the GLM drainer's `issue_has_merged_pr` already enforces,
-adopted by the Claude lane: a closing verb over `title + body`, UNION a bare
-`(#N)` title anchor (this repo's title convention names the issue even when
-the body has no closing keyword). Selected via `--merged`; the caller
-(collect-state.sh's dev-pin guard) feeds its `gh pr list --state merged`
-payload and refuses to pin any issue in the result — the parity test pins
-the regex literal byte-identical to src/github/pr-refs.ts's
-`mergedPrReferences()` constants (the #4683 port).
+The MERGED-PR shipped-work rule (`--merged`, issue #4690) is gone from this
+script: its only caller, collect-state.sh's dev-pin guard, became the typed
+Turn Snapshot picks collector (ADR-0043 slice 3, #4931), which calls
+src/github/pr-refs.ts's `mergedPrReferences()` directly.
 
 `--closing` (issue #4694) selects the narrow `closing_issues()` predicate
 (body closing verb only) from the CLI; hydra-target-build's shipped-anchor
 preflight pipes a REST merged-pulls payload through it.
 
 Pure: stdin JSON in, stdout numbers out. It NEVER shells out to `gh` — the
-callers (collect-state.sh, recover-stale.sh) own the `gh pr list` call and
+callers (recover-stale.sh, the target-build preflight) own the `gh pr list` call and
 the never-abort degradation contract. Any parse error prints nothing and
 exits 0: an empty result is the caller's "no open PR" signal, which falls
 through to today's behaviour (re-queue to ready-for-agent). An unknown
@@ -98,7 +84,9 @@ _BODY_RE = re.compile(
 # rejects variable-width lookbehind, and the guard needs variable width):
 #
 #   arm 1 (non-capturing) — a negation (`not` / `cannot` / `n't` / `n’t` /
-#     `never` / `no longer`), whitespace, at most ONE bounded filler adverb
+#     `never` / `no longer`), HORIZONTAL whitespace only (`[ \t]+` — a line
+#     break ends the negation's reach, so "This is not\n\nCloses #5" still
+#     closes; QA #4810), at most ONE bounded filler adverb
 #     (yet / fully / actually / necessarily / really / entirely /
 #     completely), then the verb + `#N`. It CONSUMES the negated ref without
 #     capturing, so group(1) is None for that match and the caller skips it.
@@ -119,17 +107,10 @@ _BODY_RE = re.compile(
 # narrows ONLY this predicate: _BODY_RE still counts a negated ref as a
 # reference, so the in-flight exclusion stays conservative.
 _CLOSE_RE = re.compile(
-    r"(?:\b(?:can)?not|n't|n’t|\bnever|\bno\s+longer)\s+(?:(?:yet|fully|actually|necessarily|really|entirely|completely)\s+)?(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#\d+\b|\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b",
+    r"(?:\b(?:can)?not|n't|n’t|\bnever|\bno[ \t]+longer)[ \t]+(?:(?:yet|fully|actually|necessarily|really|entirely|completely)[ \t]+)?(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#\d+\b|\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b",
     re.IGNORECASE,
 )
 
-# `(#N)` title anchor (issue #4690, ADR-0040 Decision 4 row 7) — the
-# `fix(scope): subject (#4130) (#4236)` suffix shape this repo's PR-title
-# convention carries even when the body has no closing keyword at all, so a
-# merged PR whose work shipped still names its issue. Byte-identical to
-# src/github/pr-refs.ts's TITLE_ANCHOR_RE (pinned by the parity test); the
-# drainer's `issue_has_merged_pr` jq rule recognises the same shape.
-_TITLE_ANCHOR_RE = re.compile(r"\(#(\d+)\)")
 
 def _prs(pr_json):
     """Parse a `gh pr list --json` payload into its PR dict rows.
@@ -175,7 +156,7 @@ def branch_issues(pr_json):
     """Return the set of ints referenced via the head-branch convention only.
 
     One channel of `referenced_issues()` in isolation (issue #4334), exposed
-    for collect-state.sh's per-source Candidate Exclusion telemetry (#3964):
+    for per-source Candidate Exclusion telemetry (#3964):
     distinguishing "the branch matcher fired" from "the body matcher fired".
     """
     out = set()
@@ -220,52 +201,20 @@ def closing_issues(pr_json):
     return out
 
 
-def merged_issues(pr_json):
-    """Return the set of ints a (typically MERGED) PR references via the
-    drainer's shipped-work rule (issue #4690, ADR-0040 Decision 4 row 7):
-    a closing verb over `title + "\\n" + body`, UNION a bare `(#N)` title
-    anchor. Mirrors src/github/pr-refs.ts's `mergedPrReferences()` — the
-    TS side is the canonical port and this function is kept in lockstep by
-    the CLI-parity test in test/github-pr-refs.test.mts.
-
-    Deliberately WIDER than `closing_issues()` and deliberately WITHOUT the
-    branch channel of `referenced_issues()`: a MERGED PR answers "did work
-    for this issue already ship", and this repo's title convention names
-    the issue as a `(#N)` suffix even when the body carries no closing
-    keyword — the exact shape that left #4130 open after PR #4236 merged
-    (2026-08-27 incident) and got it re-dispatched every tick. The caller
-    (collect-state.sh's dev-pin guard) only refuses to PIN the issue;
-    closing or re-scoping it stays a human call.
-    """
-    out = set()
-    for pr in _prs(pr_json):
-        combined = "{}\n{}".format(pr.get("title") or "", pr.get("body") or "")
-        for m in _CLOSE_RE.finditer(combined):
-            if m.group(1) is not None:  # None = the negated arm (#4767)
-                out.add(int(m.group(1)))
-        for m in _TITLE_ANCHOR_RE.finditer(pr.get("title") or ""):
-            out.add(int(m.group(1)))
-    return out
-
-
 def _selector_for(argv):
     """Map argv onto a predicate. Zero args = the union (the contract
     recover-stale.sh and the hydra-dev parent flow already depend on);
-    `--source branch|body` picks one channel; `--closing` selects the
-    closing-verb-only predicate (issue #4767 — exposed so the parity test
-    can exercise `closing_issues()` behaviourally through the CLI, the same
-    way `--merged` is); `--merged` selects the merged-PR shipped-work rule
-    (issue #4690); anything else exits 2."""
+    `--source branch|body` picks one channel; `--closing` the narrow closing
+    predicate (issue #4694; negation-aware since #4767); anything else
+    exits 2."""
     if not argv:
         return referenced_issues
-    if len(argv) == 1 and argv[0] == "--merged":
-        return merged_issues
     if len(argv) == 1 and argv[0] == "--closing":
         return closing_issues
     if len(argv) == 2 and argv[0] == "--source" and argv[1] in ("branch", "body"):
         return branch_issues if argv[1] == "branch" else bodyref_issues
     sys.stderr.write(
-        "usage: pr-refs.py [--source branch|body] [--merged] [--closing] < gh-pr-list-JSON\n"
+        "usage: pr-refs.py [--source branch|body] [--closing] < gh-pr-list-JSON\n"
         f"unknown arguments: {' '.join(argv)}\n"
     )
     sys.exit(2)

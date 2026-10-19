@@ -98,7 +98,7 @@ export function createScoutRouter() {
 
   // GET /scout/alert-plan — Phase C (issue #486) read-only preview of what
   // the alert listener WOULD dispatch right now. The autopilot consumes
-  // this via collect-state.sh; operators can hit it directly to debug
+  // this via the Turn Snapshot; operators can hit it directly to debug
   // why a known alert pattern didn't fire a scout. Doesn't advance the
   // cursor or stamp any cooldown — purely diagnostic.
   router.get("/scout/alert-plan", async (_req, res) =>

@@ -11,7 +11,7 @@
  * a best-effort notification on the event bus.
  *
  * This router IS the sole write path for both flags. The autopilot
- * (decide.py / collect-state.sh / pace-gate.sh) only READS them; there is no
+ * (decide.py / the Turn Snapshot / pace-gate.sh) only READS them; there is no
  * engage/disengage *action type*, so the autopilot has no structural way to set
  * or clear either flag.
  */

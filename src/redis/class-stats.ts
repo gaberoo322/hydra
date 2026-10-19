@@ -4,7 +4,7 @@
  * The rolling class scoreboard (`src/autopilot/class-stats.ts`) is DERIVED from
  * the per-dispatch outcome records (#2942) + the spine estimate, but the
  * autopilot turn reads a single pre-computed snapshot rather than re-deriving it
- * every collect-state tick. This seam persists that snapshot at
+ * every Turn Snapshot tick. This seam persists that snapshot at
  * `hydra:autopilot:class-stats:7d` (a single JSON blob, refreshed on a cadence)
  * and reads it back.
  *

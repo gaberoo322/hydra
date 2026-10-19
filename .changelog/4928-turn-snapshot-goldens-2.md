@@ -1,0 +1,1 @@
+- test: picks and remaining Turn Snapshot goldens carry their typed values and drop the retired kv fields (#4928)

@@ -4,7 +4,7 @@
  * wayfinder #4517, issue #4683).
  *
  * `pr-refs.py` is the ONE reference-detection predicate the bash autopilot
- * lane (`collect-state.sh`, `recover-stale.sh`) and `reap.py` share — see its
+ * lane (the Turn Snapshot, `recover-stale.sh`) and `reap.py` share — see its
  * own docstring for the full history. This module ports the same three
  * regexes and three matcher semantics into TypeScript for the two
  * `scripts/ci/*.ts` consumers (`epic-close.ts`, `design-concept-reconcile-check.ts`)
@@ -12,10 +12,10 @@
  * `pr-refs.py` itself is NOT edited or replaced — it stays the bash-facing
  * predicate until #4686/#4688 give the bash lane a TS-backed path. This
  * module and the Python script are two independent implementations kept in
- * sync by a source-string parity test (`test/github-pr-refs.test.mts`, the
- * #3965 convention already used for `STRICT_BLOCKER_PATTERN_SOURCES` vs the
- * `collect-state.sh` jq literal): a change to either side alone fails the
- * test.
+ * sync by a source-string parity test (`test/github-pr-refs.test.mts`): a
+ * change to either side alone fails the test. The orch-lane picks collector
+ * (src/autopilot/turn-snapshot/picks.ts, ADR-0043 slice 3) calls
+ * {@link mergedPrReferences} directly, so `pr-refs.py --merged` is gone.
  *
  * # Family membership (CONTEXT.md: GitHub CLI Adapter)
  *
@@ -71,7 +71,7 @@ export const BODY_RE = new RegExp(
  * `no longer`. A bare regex-alternation fragment, like
  * {@link CLOSING_VERB_ALTERNATION}.
  */
-const NEGATION_ALTERNATION = String.raw`\b(?:can)?not|n't|n’t|\bnever|\bno\s+longer`;
+const NEGATION_ALTERNATION = String.raw`\b(?:can)?not|n't|n’t|\bnever|\bno[ \t]+longer`;
 
 /**
  * The bounded set of filler adverbs {@link CLOSE_RE}'s guard tolerates
@@ -93,7 +93,9 @@ const NEGATION_FILLER_ALTERNATION = "yet|fully|actually|necessarily|really|entir
  * byte-identical to the Python literal):
  *
  * - arm 1 (non-capturing): a negation ({@link NEGATION_ALTERNATION}),
- *   whitespace, at most ONE bounded filler adverb
+ *   HORIZONTAL whitespace only (`[ \t]+` — a line break ends the
+ *   negation's reach, so "This is not\n\nCloses #5" still closes; QA
+ *   #4810), at most ONE bounded filler adverb
  *   ({@link NEGATION_FILLER_ALTERNATION}), then the verb + `#N`. It CONSUMES
  *   the negated ref without capturing, so `m[1]` is `undefined` and
  *   {@link matchAllNumbers} drops it (`Number(undefined)` is `NaN`).
@@ -112,7 +114,7 @@ const NEGATION_FILLER_ALTERNATION = "yet|fully|actually|necessarily|really|entir
  * counts as a close.
  */
 export const CLOSE_RE = new RegExp(
-  String.raw`(?:${NEGATION_ALTERNATION})\s+(?:(?:${NEGATION_FILLER_ALTERNATION})\s+)?(?:${CLOSING_VERB_ALTERNATION})\s*:?\s+#\d+\b|\b(?:${CLOSING_VERB_ALTERNATION})\s*:?\s+#(\d+)\b`,
+  String.raw`(?:${NEGATION_ALTERNATION})[ \t]+(?:(?:${NEGATION_FILLER_ALTERNATION})[ \t]+)?(?:${CLOSING_VERB_ALTERNATION})\s*:?\s+#\d+\b|\b(?:${CLOSING_VERB_ALTERNATION})\s*:?\s+#(\d+)\b`,
   "gi",
 );
 

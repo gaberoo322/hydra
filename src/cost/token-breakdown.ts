@@ -2,7 +2,8 @@
  * src/cost/token-breakdown.ts — the pure **token-breakdown data-model** leaf of
  * the **Cost** Module's Subscription Usage Tracker (issue #3513).
  *
- * Extracted OUT of the `transcript-scan.ts` I/O coordinator (issue #1971) so the
+ * Extracted OUT of the `transcript-scan.ts` I/O coordinator (issue #3513; the
+ * coordinator itself was created by #1971) so the
  * token-breakdown data model's null-state, mutation, and vocabulary primitives
  * live in one focused pure leaf — NOT next to the JSONL filesystem walk. Before
  * this split, `snapshot-assembly.ts` (a self-described pure, no-I/O leaf) had to

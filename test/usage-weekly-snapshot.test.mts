@@ -16,6 +16,7 @@
 import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
+import { isoWeekLabel } from "../src/redis/usage-snapshots.ts";
 
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
@@ -138,5 +139,29 @@ describe("weekly usage snapshot seam + chore (#2404)", () => {
     });
     assert.ok(stamped !== null, "setLastWeekly must be called on success");
     assert.ok(/^\d+$/.test(stamped!), "stamped value must be a numeric timestamp string");
+  });
+});
+
+describe("isoWeekLabel (pure ISO-8601 week math, issue #2404)", () => {
+  test("a mid-week date maps to the correct ISO week", () => {
+    // 2026-06-23 is a Tuesday in ISO week 26 of 2026.
+    assert.equal(isoWeekLabel(new Date("2026-06-23T12:00:00.000Z")), "2026-W26");
+  });
+
+  test("zero-pads the week number to two digits", () => {
+    // 2026-01-05 is a Monday — ISO week 2 of 2026.
+    assert.equal(isoWeekLabel(new Date("2026-01-05T00:00:00.000Z")), "2026-W02");
+  });
+
+  test("year-boundary day belongs to the prior ISO year's last week", () => {
+    // 2027-01-01 is a Friday; ISO-8601 places it in 2026-W53.
+    assert.equal(isoWeekLabel(new Date("2027-01-01T00:00:00.000Z")), "2026-W53");
+  });
+
+  test("is stable regardless of host timezone (UTC-based)", () => {
+    // Same instant, expressed as a Date — the label is derived in UTC.
+    const a = isoWeekLabel(new Date("2026-06-23T23:59:59.000Z"));
+    const b = isoWeekLabel(new Date("2026-06-23T00:00:01.000Z"));
+    assert.equal(a, b);
   });
 });

@@ -1,0 +1,1 @@
+- refactor: move the last slice-5 collectors (redis queues, scout incl. its spend mirror, arch/cleanup/skill-prune boards, hitl-grill, retro, wayfinder frontier, tickets) out of collect-state.sh into the typed Turn Snapshot module, byte-identical on the wire (#4933)

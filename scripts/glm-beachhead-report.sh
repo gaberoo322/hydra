@@ -219,7 +219,7 @@ GLM_DRAINER_BRANCH_PREFIX="worktree-agent-glm-"
 # its head branch carries the drainer prefix — used by BOTH the measurement
 # fetch (positively) and the churn-baseline sample (negated), so the report's
 # two sides can never disagree on what a GLM PR is (issue #4048, same
-# OR-predicate scripts/autopilot/collect-state.sh's GLM partition applies).
+# OR-predicate the Turn Snapshot picks collector's GLM partition applies).
 # `$label` / `$prefix` are jq --arg bindings supplied at each call site.
 GLM_PR_MATCH_JQ='((.labels // []) | map(.name) | index($label)) or ((.headRefName // "") | startswith($prefix))'
 REPO="${HYDRA_GLM_BEACHHEAD_REPO:-gaberoo322/hydra}"
@@ -1327,6 +1327,15 @@ main_ab_report() {
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  # The operator off switch (src/glm/disabled.ts owns the rule): the default
+  # readout is the hydra-review context line, so a disabled lane says so
+  # instead of re-reporting a keep/kill window nobody is acting on.
+  # --ab-report stays available as a historical query.
+  GLM_DISABLED_FILE="${HYDRA_GLM_DISABLED_FILE:-${HOME:+$HOME/.config/hydra-glm/disabled}}"
+  if [[ "${1:-}" != "--ab-report" && -n "$GLM_DISABLED_FILE" && -e "$GLM_DISABLED_FILE" ]]; then
+    echo "GLM beachhead: lane DISABLED by operator (sentinel $GLM_DISABLED_FILE present) — re-enable: rm $GLM_DISABLED_FILE && systemctl --user enable --now hydra-glm-drainer.timer"
+    exit 0
+  fi
   if [[ "${1:-}" == "--ab-report" ]]; then
     shift
     main_ab_report "$@"

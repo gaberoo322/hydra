@@ -30,7 +30,7 @@ describe("buildWeeklySummary", () => {
     const out = await buildWeeklySummary({
       now: () => fixedNow,
       getMetricsTrend: async () => [
-        { recordedAt: beforeWeek, tasksMerged: "1" },
+        { recordedAt: beforeWeek, tasksMerged: "1", status: "merged" },
       ],
       getFixFeatureRatio: async () => ({ fixes: 0, features: 0, ratio: 0 }),
       getCurrentMilestoneProgress: async () => null,
@@ -42,9 +42,9 @@ describe("buildWeeklySummary", () => {
     const out = await buildWeeklySummary({
       now: () => fixedNow,
       getMetricsTrend: async () => [
-        { recordedAt: inWeek, tasksMerged: "1", tasksFailed: "0", tasksAbandoned: "0", rolledBack: false },
+        { recordedAt: inWeek, tasksMerged: "1", status: "merged", tasksFailed: "0", tasksAbandoned: "0", rolledBack: false },
         { recordedAt: inWeek, tasksMerged: "0", tasksFailed: "1", tasksAbandoned: "0", rolledBack: false },
-        { recordedAt: beforeWeek, tasksMerged: "5" }, // excluded — outside the 7d window
+        { recordedAt: beforeWeek, tasksMerged: "5", status: "merged" }, // excluded — outside the 7d window
       ],
       getFixFeatureRatio: async () => ({ fixes: 3, features: 2, ratio: 1.5 }),
       getCurrentMilestoneProgress: async () => ({

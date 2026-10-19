@@ -13,15 +13,19 @@
  * redis seam here (a type-only import — no I/O function is pulled in, so a test
  * that asserts fold behaviour imports zero Redis runtime surface).
  *
- * Outcome bucketing delegates to the EXISTING {@link bucketCycleStatus}
- * taxonomy from `src/autopilot/cycle-status.ts` — there is NO second
- * merged/failed status set defined in this file (issue #1919's "one canonical
- * home" rule). A record whose `outcome` is in `MERGED_STATUSES`
- * (merged/completed/succeeded) buckets `merged`; one in `FAILED_STATUSES` buckets
- * `failed`; anything else (null, unknown, in-flight) buckets `unaccounted`. The
- * three-way identity `dispatches == merged + failed + unaccounted` therefore
- * holds for every `byClass` row by construction — the fold never drops a record
- * into a fourth bucket or silently folds one away.
+ * Outcome bucketing delegates to the EXISTING {@link bucketDispatchOutcome}
+ * taxonomy from `src/autopilot/cycle-status.ts` — there is NO second status set
+ * defined in this file (issue #1919's "one canonical home" rule). A record whose
+ * `outcome` is the LITERAL `merged` buckets `merged`; `completed`/`succeeded`
+ * (the other `MERGED_STATUSES` members) bucket `completed`; `FAILED_STATUSES`
+ * buckets `failed`; anything else (null, unknown, in-flight) buckets
+ * `unaccounted` (issue #4856 — the #4343 read-side fix: autopilot reaps record
+ * `completed` regardless of what the dispatch produced, so folding `completed`
+ * into `merged` read every finished QA FAIL / no-op hand-off as a landed PR;
+ * before #4856 this fold read 927/931 dispatches over 90 days as merged). The
+ * four-way identity `dispatches == merged + completed + failed + unaccounted`
+ * therefore holds for every `byClass` and `byRun` row by construction — the
+ * fold never drops a record into a fifth bucket or silently folds one away.
  *
  * The {@link RANKING_SOUND_THRESHOLD} + `coverage.rankingSound` field gate any
  * class ranking derived from this fold: when too much of the window's token
@@ -33,7 +37,7 @@
  */
 
 import type { DispatchOutcomeRecord } from "../redis/dispatch-outcomes.ts";
-import { bucketCycleStatus } from "../autopilot/cycle-status.ts";
+import { bucketDispatchOutcome } from "../autopilot/cycle-status.ts";
 // Issue #4392: the taxonomy-derived complement of reap.py's CYCLE_RECORD_SKILLS
 // (a constant import — no I/O function is pulled in beyond the taxonomy's
 // one-time classes.json load, so the fold stays Redis-free as documented).
@@ -76,14 +80,18 @@ export const RANKING_SOUND_THRESHOLD = 0.5;
 // ---------------------------------------------------------------------------
 
 /**
- * The three-way outcome split for one class (or the unattributable bucket).
- * `merged` buckets via {@link bucketCycleStatus} (so `completed`/`succeeded`
- * count as merged, per `MERGED_STATUSES`); `failed` likewise; `unaccounted` is
- * everything else (null / unknown / in-flight). The identity
- * `dispatches == merged + failed + unaccounted` holds by construction.
+ * The four-way outcome split for one class (or the unattributable bucket).
+ * `merged` is the LITERAL `merged` status only (a confirmed merge);
+ * `completed` buckets `completed`/`succeeded` via {@link bucketDispatchOutcome}
+ * — a finished session with NO confirmed merge (issue #4856: before the split,
+ * these counted as merged and every normally-ended dispatch read as a landed
+ * PR); `failed` likewise; `unaccounted` is everything else (null / unknown /
+ * in-flight). The identity `dispatches == merged + completed + failed +
+ * unaccounted` holds by construction.
  */
 interface CrossRunOutcomeCounts {
   merged: number;
+  completed: number;
   failed: number;
   unaccounted: number;
 }
@@ -101,7 +109,10 @@ interface CrossRunClassRow {
   className: string;
   /** Skill the class dispatches (taxonomy join). `null` when the class is unknown. */
   skill: string | null;
-  /** Total dispatches for the class. Always `merged + failed + unaccounted`. */
+  /**
+   * Total dispatches for the class. Always
+   * `merged + completed + failed + unaccounted`.
+   */
   dispatches: number;
   /**
    * Sum of raw `tokens` over the class's records (null tokens contribute 0).
@@ -109,19 +120,33 @@ interface CrossRunClassRow {
    * model-weighted metric); do not conflate the two.
    */
   tokens: number;
-  /** The three-way outcome split. `dispatches === merged + failed + unaccounted`. */
+  /**
+   * The four-way outcome split.
+   * `dispatches === merged + completed + failed + unaccounted`.
+   */
   outcomes: CrossRunOutcomeCounts;
   /**
-   * Mean tokens of the class's MERGED dispatches: the sum of their tokens ÷ the
-   * merged count, rounded. Only dispatches that bucket as `merged`
-   * (`completed`/`succeeded` count as merged via {@link bucketCycleStatus} /
-   * `MERGED_STATUSES`, per issue #3972) contribute to the numerator — the same
-   * subset-sum convention the sibling `cascade-routing.ts` fold uses for
-   * `avgCostDeltaPerEscalation`. `0` when the class has no merged dispatches
-   * (nothing to average over; a token-burning class with zero merges is flagged
-   * by high `tokens` + zero `outcomes.merged`, not by this field).
+   * Mean tokens of the class's literal-`merged` dispatches: the sum of their
+   * tokens ÷ the merged count, rounded (the same subset-sum convention the
+   * sibling `cascade-routing.ts` fold uses for `avgCostDeltaPerEscalation`).
+   * After #4856 only a CONFIRMED merge (`status === "merged"`) contributes —
+   * which makes this field a documented LOWER BOUND, not the class's true cost
+   * per finished session: the `completed → merged` upgrade is posted by the
+   * merge-watch backstop over a bounded horizon, so a genuinely-merged dispatch
+   * can still be recorded `completed`. Read it as "confirmed-merge cost"; for
+   * the class's cost per finished session use {@link tokensPerCompletion}.
+   * `0` when the class has no literal-merged records (a non-PR class like
+   * `qa_orch` ALWAYS reads 0 here — that is correct, not a bug).
    */
   tokensPerMerged: number;
+  /**
+   * Mean tokens of the class's FINISHED dispatches — literal-`merged` PLUS
+   * `completed` — rounded (issue #4856 INV-4: the cross-class "cost per
+   * finished session" number). Unlike {@link tokensPerMerged} this is not
+   * sensitive to the merge-reconcile horizon, so it is comparable across PR-
+   * producing and non-PR classes alike. `0` when the class has neither.
+   */
+  tokensPerCompletion: number;
 }
 
 /**
@@ -137,9 +162,16 @@ interface CrossRunRunRow {
   /** Sum of raw `tokens` over the run's records (null tokens contribute 0). */
   tokens: number;
   /**
-   * Terminal merge rate: `merged / (merged + failed)`, rounded to 3dp.
-   * Excludes `unaccounted`/in-flight records from the denominator so a
-   * not-yet-settled dispatch never dilutes the rate (matches the cascade
+   * The run's four-way outcome split.
+   * `dispatches === merged + completed + failed + unaccounted` (issue #4856).
+   */
+  outcomes: CrossRunOutcomeCounts;
+  /**
+   * Terminal merge rate: `merged / (merged + completed + failed)`, rounded to
+   * 3dp (issue #4856 INV-4 — `completed` counts in the DENOMINATOR: a finished
+   * unmerged dispatch is a settled outcome that failed to ship, not an
+   * unresolved one; only `unaccounted`/in-flight records are excluded so a
+   * not-yet-settled dispatch never dilutes the rate, matching the cascade
    * `postEscalationMergeRate` convention). `0` when the run has no terminal
    * dispatches.
    */
@@ -246,18 +278,23 @@ interface ClassAcc {
   className: string;
   skill: string | null;
   merged: number;
+  completed: number;
   failed: number;
   unaccounted: number;
   tokens: number;
-  /** Sum of tokens over the class's MERGED dispatches only (the tokensPerMerged numerator). */
+  /** Sum of tokens over the class's literal-merged dispatches only (the tokensPerMerged numerator). */
   mergedTokens: number;
+  /** Sum of tokens over merged + completed dispatches (the tokensPerCompletion numerator). */
+  completionTokens: number;
 }
 
 interface RunAcc {
   dispatches: number;
   tokens: number;
   merged: number;
+  completed: number;
   failed: number;
+  unaccounted: number;
 }
 
 /** Coerce a record's `tokens` to a finite number, else treat as 0 contribution. */
@@ -271,9 +308,10 @@ function tokenOf(rec: DispatchOutcomeRecord): number {
  * Fold a rolling window of dispatch-outcome records into a {@link CrossRunTrend}.
  * PURE — no Redis, no clock, no I/O.
  *
- * Rates are 0 (never NaN) when their denominator is 0. The
- * `dispatches == merged + failed + unaccounted` identity holds for every
- * `byClass` row by construction (every record lands in exactly one bucket). The
+ * Rates are 0 (never NaN) when their denominator is 0. The four-way
+ * `dispatches == merged + completed + failed + unaccounted` identity holds for
+ * every `byClass` and `byRun` row by construction (every record lands in
+ * exactly one bucket). The
  * window bounds are carried through verbatim from `window`; this leaf does not
  * derive them (the assembler does, from the clock + `DISPATCH_OUTCOME_TTL_SECONDS`).
  */
@@ -311,9 +349,11 @@ export function rollupCrossRunTrend(
       classAttributedTokens += tokens;
     }
 
-    // Three-way bucket via the EXISTING taxonomy (no second status set here).
-    // bucketCycleStatus returns null for a status in NEITHER set → unaccounted.
-    const bucket = bucketCycleStatus(rec.outcome);
+    // Four-way bucket via the EXISTING taxonomy (no second status set here —
+    // #1919). bucketDispatchOutcome returns null for a status in NEITHER set →
+    // unaccounted; `completed` (not literal `merged`) for completed/succeeded
+    // (#4856).
+    const bucket = bucketDispatchOutcome(rec.outcome);
 
     // byClass row — null className collapses into the unattributable bucket.
     const key = isClassAttributed
@@ -327,10 +367,12 @@ export function rollupCrossRunTrend(
         // seam's newest-first order); null for the unattributable bucket.
         skill: isClassAttributed ? (rec.skill ?? null) : null,
         merged: 0,
+        completed: 0,
         failed: 0,
         unaccounted: 0,
         tokens: 0,
         mergedTokens: 0,
+        completionTokens: 0,
       };
       classMap.set(key, classAcc);
     } else if (classAcc.skill === null && rec.skill) {
@@ -339,6 +381,10 @@ export function rollupCrossRunTrend(
     if (bucket === "merged") {
       classAcc.merged += 1;
       classAcc.mergedTokens += tokens;
+      classAcc.completionTokens += tokens;
+    } else if (bucket === "completed") {
+      classAcc.completed += 1;
+      classAcc.completionTokens += tokens;
     } else if (bucket === "failed") {
       classAcc.failed += 1;
     } else {
@@ -351,30 +397,43 @@ export function rollupCrossRunTrend(
       const prefix = rec.runIdPrefix as string;
       let runAcc = runMap.get(prefix);
       if (!runAcc) {
-        runAcc = { dispatches: 0, tokens: 0, merged: 0, failed: 0 };
+        runAcc = {
+          dispatches: 0,
+          tokens: 0,
+          merged: 0,
+          completed: 0,
+          failed: 0,
+          unaccounted: 0,
+        };
         runMap.set(prefix, runAcc);
       }
       runAcc.dispatches += 1;
       runAcc.tokens += tokens;
       if (bucket === "merged") runAcc.merged += 1;
+      else if (bucket === "completed") runAcc.completed += 1;
       else if (bucket === "failed") runAcc.failed += 1;
+      else runAcc.unaccounted += 1;
     }
   }
 
   const byClass: CrossRunClassRow[] = [];
   for (const acc of classMap.values()) {
+    const finished = acc.merged + acc.completed;
     byClass.push({
       className: acc.className,
       skill: acc.skill,
-      dispatches: acc.merged + acc.failed + acc.unaccounted,
+      dispatches: acc.merged + acc.completed + acc.failed + acc.unaccounted,
       tokens: acc.tokens,
       outcomes: {
         merged: acc.merged,
+        completed: acc.completed,
         failed: acc.failed,
         unaccounted: acc.unaccounted,
       },
       tokensPerMerged:
         acc.merged > 0 ? Math.round(acc.mergedTokens / acc.merged) : 0,
+      tokensPerCompletion:
+        finished > 0 ? Math.round(acc.completionTokens / finished) : 0,
     });
   }
   // Deterministic order: biggest token burner first, tie-broken by class name.
@@ -384,11 +443,19 @@ export function rollupCrossRunTrend(
 
   const byRun: CrossRunRunRow[] = [];
   for (const [runIdPrefix, acc] of runMap) {
-    const terminal = acc.merged + acc.failed;
+    // INV-4 (#4856): completed counts in the denominator — a finished unmerged
+    // dispatch is a settled outcome, not an unresolved one.
+    const terminal = acc.merged + acc.completed + acc.failed;
     byRun.push({
       runIdPrefix,
       dispatches: acc.dispatches,
       tokens: acc.tokens,
+      outcomes: {
+        merged: acc.merged,
+        completed: acc.completed,
+        failed: acc.failed,
+        unaccounted: acc.unaccounted,
+      },
       mergedRate:
         terminal > 0 ? Math.round((acc.merged / terminal) * 1000) / 1000 : 0,
     });

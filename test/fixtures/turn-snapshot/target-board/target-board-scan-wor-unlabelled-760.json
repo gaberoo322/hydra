@@ -1,0 +1,57 @@
+{
+  "name": "target-board-scan-wor-unlabelled-760",
+  "collector": "target-scan-boards",
+  "source": "autopilot-target-board-signals › wire-or-retire + bug only (#760)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_scan_boards)",
+  "repo": "acme/target-app",
+  "limit": 100,
+  "laneDegraded": "0",
+  "workQueue": 0,
+  "adr": "absent",
+  "gh": {
+    "scanIssues": {
+      "stdout": "[{\"number\":760,\"labels\":[\"wire-or-retire\",\"bug\"]}]\n",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "acme/target-app",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels",
+        "--jq",
+        "[ .[] | { number: .number, labels: (.labels | map(.name)) } ]"
+      ]
+    ],
+    "values": {
+      "target-scan-boards": {
+        "signalsDegraded": false,
+        "signals": {
+          "ok": true,
+          "value": {
+            "truncated": false,
+            "needsTriageItems": [],
+            "backfillIdle": true,
+            "cleanupOpenScan": 0,
+            "cleanupSaturated": false,
+            "wireOrRetireTriage": 0,
+            "wireOrRetireUnlabelled": 1,
+            "designQaOpen": 0,
+            "designQaSaturated": false
+          }
+        },
+        "adrPresent": false
+      }
+    }
+  }
+}

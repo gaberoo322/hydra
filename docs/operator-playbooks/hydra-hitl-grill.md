@@ -85,7 +85,7 @@ per row is cheaper than a fan-out.
 | **Premise** | Open the cited file(s) on `origin/master`; search closed PRs/issues for the same symptom (`gh search prs --repo gaberoo322/hydra --merged "<key phrase>"`). Does the defect still exist? | `holds` / `fixed (#PR)` / `superseded (#issue)` / `moot (subsystem retired)` |
 | **Duplicate** | Same symptom in another OPEN `hitl-grill` item, an open epic/map ticket, or a CLOSED `not planned` item still carrying `hitl-grill` (the producers' dedup baseline). | `none` / `dup of #N` / `belongs to map/epic #N` |
 | **Scoped** | Body contains a `## Files in scope` section (the promote route refuses without it). | `yes` / `no` |
-| **Cluster** | By subject. Seeds: `target-machinery` (hydra-target-*, dev_target, Target CI/QA), `glm-drainer`, `architecture-scan` (provenance label), `autopilot-signals` (collect-state / decide.py / reap.py), `docs`. Add a cluster when three or more items share a subject. | cluster name |
+| **Cluster** | By subject. Seeds: `target-machinery` (hydra-target-*, dev_target, Target CI/QA), `glm-drainer`, `architecture-scan` (provenance label), `autopilot-signals` (the Turn Snapshot / decide.py / reap.py), `docs`. Add a cluster when three or more items share a subject. | cluster name |
 
 Print the table (number, age, cluster, premise, duplicate, scoped, title). This is
 the whole output of `--dry-run`. When the operator passed a `cluster`, drop every

@@ -1,0 +1,1 @@
+- fix: dev_target resume mirrors fence labels onto the PR and never rewrites Closes to Refs (#4854)

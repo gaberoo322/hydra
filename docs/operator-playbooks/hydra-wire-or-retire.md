@@ -46,7 +46,7 @@ the retired Redis `/backlog` API. The deletion, if any, happens later inside the
 ## Trigger
 
 Dispatched by the autopilot `wire_or_retire_target` signal class (issue #2722) when
-`collect-state.sh` emits **`wire_or_retire_target_available`** — true when ≥1 open issue
+the Turn Snapshot emits **`wire_or_retire_target_available`** — true when ≥1 open issue
 carrying **`wire-or-retire` + `needs-triage`** sits on the Target board
 (`$TARGET_GH_REPO`). The class carries a
 **24h cooldown** (`SIGNAL_COOLDOWNS["wire_or_retire_target"]`, seeded in `bootstrap.sh`'s

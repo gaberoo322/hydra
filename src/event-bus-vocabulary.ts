@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // Notification event vocabulary Seam (issue #1985) — the notification
-// sub-alphabet of the Event Bus alphabet (CONTEXT.md).
+// sub-alphabet of the Event Bus alphabet (docs/reference.md#event-bus).
 //
 // `src/event-bus.ts` owns the *stream-key* alphabet (STREAMS / RETAINED_STREAMS
 // / CONSUMER_GROUPS) AND the Redis-connected `EventBus` class. This module owns
@@ -40,40 +40,19 @@
 //
 // The on-wire string values are UNCHANGED — this is a type-safety pass over the
 // existing vocabulary, not a behaviour change.
+//
+// LIVE MEMBERS ONLY (issue #5044): every member must have at least one live
+// producer — a `type:` construction site in src/, a quoted on-wire value in a
+// scripts/ XADD, or a `/events/publish` payload in docs/operator-playbooks/.
+// The live-producer audit in test/event-bus-vocabulary.test.mts enforces it,
+// naming any member that has none. The 28 codex-era members (cycle:start …
+// pattern:high_abandonment) that no longer had a producer were deleted with
+// their formatter arms; do not re-add a type without landing its producer.
 // ---------------------------------------------------------------------------
 const NOTIFICATION_EVENT_TYPES = {
   // --- Cycle lifecycle ---
-  CYCLE_START: "cycle:start",
+  // Published by the hydra-target-build merge flow (POST /events/publish).
   CYCLE_COMPLETED: "cycle:completed",
-  CYCLE_STALLED: "cycle:stalled",
-  CYCLE_FAILED: "cycle:failed",
-  CYCLE_AUTO_KILLED: "cycle:auto_killed",
-  CYCLE_STALE_PRIORITIES: "cycle:stale_priorities",
-  CYCLE_ROLLBACK: "cycle:rollback",
-  CYCLE_ROLLBACK_FAILED: "cycle:rollback_failed",
-  CYCLE_ROLLED_BACK: "cycle:rolled_back",
-  CYCLE_OPERATOR_BLOCKED: "cycle:operator_blocked",
-
-  // --- Task events ---
-  TASK_REJECTED: "task:rejected",
-  TASK_VERIFICATION_FAILED: "task:verification_failed",
-  TASK_DRIFT_DETECTED: "task:drift_detected",
-  TASK_MERGE_FAILED: "task:merge_failed",
-  TASK_SHELVED: "task:shelved",
-
-  // --- Scheduler ---
-  SCHEDULER_STOPPED: "scheduler:stopped",
-  SCHEDULER_BACKLOG_EMPTY: "scheduler:backlog_empty",
-  SCHEDULER_PAUSED_REPETITION: "scheduler:paused_repetition",
-  SCHEDULER_ERROR: "scheduler:error",
-
-  // --- Research / Architect ---
-  RESEARCH_COMPLETED: "research:completed",
-  ARCHITECT_REVIEW_COMPLETED: "architect:review_completed",
-
-  // --- Deploy ---
-  DEPLOY_COMPLETED: "deploy:completed",
-  DEPLOY_FAILED: "deploy:failed",
 
   // --- DLQ / consumer health ---
   DLQ_ALERT: "dlq:alert",
@@ -105,6 +84,13 @@ const NOTIFICATION_EVENT_TYPES = {
   // warrants both the dashboard alert and the immediate digest line.
   INFRA_NODE_MODULES_WIPED: "infra:node_modules_wiped",
 
+  // Published by the watchdog's run_origin_identity block (same ADR-0017
+  // Category A enveloped XADD from bash) once per episode when ~/hydra's
+  // remote.origin.url is not the orchestrator repo, or refs/remotes/origin/master
+  // no longer resolves (issue #4939). In both ALERT_TYPES and
+  // CRITICAL_EVENT_TYPES.
+  INFRA_ORIGIN_IDENTITY_WRONG: "infra:origin_identity_wrong",
+
   // --- GLM dev-drainer zero-throughput watchdog signal (issue #3868) ---
   // Published by the watchdog's run_launch_flow block (same ADR-0017
   // Category A enveloped XADD from bash as the launch-flow signals above)
@@ -118,13 +104,6 @@ const NOTIFICATION_EVENT_TYPES = {
   // a sterile drainer silently starves the whole board (observed #3863).
   GLM_DRAINER_STERILE: "glm:drainer_sterile",
 
-  // --- Learning-system pattern alerts ---
-  PATTERN_LOW_MERGE_RATE: "pattern:low_merge_rate",
-  PATTERN_CONSECUTIVE_FAILURES: "pattern:consecutive_failures",
-  PATTERN_RECURRING_REGRESSIONS: "pattern:recurring_regressions",
-  PATTERN_ANCHOR_STUCK: "pattern:anchor_stuck",
-  PATTERN_TEST_DECLINE: "pattern:test_decline",
-  PATTERN_HIGH_ABANDONMENT: "pattern:high_abandonment",
 } as const;
 
 /**
@@ -164,7 +143,7 @@ type NotificationEventType =
 // existing field vocabulary, not a behaviour change.
 // ---------------------------------------------------------------------------
 type NotificationEventPayload = Record<string, unknown> & {
-  // --- Cycle lifecycle ---
+  // --- Cycle lifecycle (cycle:completed) ---
   cycleId?: string;
   task?: { finalState?: string; title?: string };
   grounding?: {
@@ -179,42 +158,15 @@ type NotificationEventPayload = Record<string, unknown> & {
   total?: number | string;
   completed?: number | string;
   failed?: number;
-  elapsed?: string;
-  inProgress?: number;
   error?: string;
-  ttl?: string;
-  tasksTimedOut?: number;
-  message?: string;
-  // --- Task events ---
-  taskId?: string;
-  taskTitle?: string;
   title?: string;
   reason?: string;
-  failedSteps?: string[];
-  drift?: { reason?: string };
-  // --- Rollback ---
-  revertedCommit?: string;
-  testsBefore?: number | string;
-  testsAfter?: number | string;
+  summary?: string;
+  // --- Outcome Holdback (digest action items) ---
   regressedOutcomes?: unknown;
-  // --- Scheduler ---
-  cyclesRun?: number;
-  suggestion?: string;
-  recentTitles?: string[];
+  // --- Consumer health ---
   consumer?: string;
   restarts?: number;
-  // --- Research / Architect ---
-  projectName?: string;
-  opportunityCount?: number;
-  autoQueued?: number;
-  duration?: string;
-  cost?: string;
-  topOpportunities?: string[];
-  summary?: string;
-  researchCyclesReviewed?: number;
-  executionCyclesReviewed?: number;
-  updatesApplied?: number;
-  calibration?: string;
   // --- Cycle merge flag (top-level, as emitted by the reap path) ---
   merged?: boolean;
   // --- DLQ ---
@@ -225,14 +177,10 @@ type NotificationEventPayload = Record<string, unknown> & {
   count?: number;
   firstTitle?: string;
   firstUrl?: string;
-  // --- Operator blocked ---
-  unblockCommands?: string[];
-  blockedReason?: string;
-  reescalation?: boolean;
-  blockedDays?: number | string;
-  // --- Launch-flow watchdog signals (issue #3848) ---
+  // --- Launch-flow / infra watchdog signals (issues #3848, #4175, #4939) ---
   signal?: string;
   thresholdMs?: number;
+  url?: string;
 };
 
 export { NOTIFICATION_EVENT_TYPES };

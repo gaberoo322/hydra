@@ -63,7 +63,6 @@
       "path": "config/direction/liveness.yaml",
       "section": "direction",
       "readBy": [
-        "scripts/ci/signal-parity-check.ts",
         "scripts/ci/wiring-caller-check.ts",
         "src/scheduler/chores/wiring-liveness-timer.ts",
         "src/scheduler/chores/wiring-liveness.ts",
@@ -167,7 +166,8 @@
       "section": null,
       "readBy": [
         "scripts/glm/drainer-loop.sh",
-        "src/glm/drainer-runner.ts"
+        "src/glm/drainer-runner.ts",
+        "src/glm/prompt.ts"
       ],
       "unread": false,
       "source": {

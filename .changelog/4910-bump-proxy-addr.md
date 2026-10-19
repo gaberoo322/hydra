@@ -1,0 +1,1 @@
+- fix: bump proxy-addr to 2.0.8 to clear critical GHSA-jqcg-44mw-7w3h (#4910)

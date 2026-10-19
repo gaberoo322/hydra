@@ -17,7 +17,7 @@
  * straight from the Target Manifest's `riskCritical.surface`
  * (`scripts/target/print-target-facts.ts`, ADR-0026). There is no longer a
  * SECOND copy of the carve-out list to drift out of sync with a first — the
- * manifest is read once, by collect-state.sh, and every consumer downstream
+ * manifest is read once, by the Turn Snapshot, and every consumer downstream
  * (decide.py's dispatch, this playbook's step 2, its RETIRE-task template)
  * reads the SAME `prompt_args.risk_carveout` value. So the #3957 drift class
  * is structurally impossible now, not just guarded against.

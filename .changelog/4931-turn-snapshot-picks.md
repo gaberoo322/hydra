@@ -1,0 +1,1 @@
+- refactor: move the grill/dev-ready picks, Candidate Exclusions, merged-PR and active_dev_orch collectors out of collect-state.sh into the typed Turn Snapshot module; the inline blocker-pattern and grill-exemption python twins and `pr-refs.py --merged` are gone (#4931)

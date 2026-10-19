@@ -1,0 +1,113 @@
+{
+  "name": "arch-target-backlog-only-is-idle",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_arch_cleanup_boards)",
+  "collectors": [
+    "arch-cleanup-boards"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {
+    "issue-list:-:number,labels": {
+      "json": [
+        {
+          "number": 1,
+          "labels": [
+            {
+              "id": "L_ready-for-agent",
+              "name": "ready-for-agent"
+            },
+            {
+              "id": "L_target-backlog",
+              "name": "target-backlog"
+            }
+          ]
+        },
+        {
+          "number": 2,
+          "labels": [
+            {
+              "id": "L_ready-for-agent",
+              "name": "ready-for-agent"
+            },
+            {
+              "id": "L_target-backlog",
+              "name": "target-backlog"
+            }
+          ]
+        },
+        {
+          "number": 3,
+          "labels": [
+            {
+              "id": "L_ready-for-agent",
+              "name": "ready-for-agent"
+            },
+            {
+              "id": "L_target-backlog",
+              "name": "target-backlog"
+            }
+          ]
+        },
+        {
+          "number": 4,
+          "labels": [
+            {
+              "id": "L_ready-for-agent",
+              "name": "ready-for-agent"
+            },
+            {
+              "id": "L_target-backlog",
+              "name": "target-backlog"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "redis": {},
+  "http": {},
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [],
+    "values": {
+      "arch-cleanup-boards": {
+        "lastRunIso": {
+          "ok": true,
+          "value": null
+        },
+        "workQueue": 0,
+        "board": {
+          "ok": true,
+          "value": {
+            "backfillIdle": true,
+            "archOpenScan": 0,
+            "archOpenEnhancements": 0,
+            "archSaturated": false,
+            "cleanupOpenScan": 0,
+            "cleanupSaturated": false,
+            "skillPruneOpen": 0,
+            "skillPruneSaturated": false
+          }
+        },
+        "orchBoardDegraded": "0"
+      }
+    }
+  }
+}

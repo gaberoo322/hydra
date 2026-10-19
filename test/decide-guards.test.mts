@@ -24,6 +24,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 // ===========================================================================
 // Merged from test/decide-qa-stall-cap.test.mts (issue #4136) — every test verbatim.
@@ -57,7 +58,7 @@ import { join, resolve } from "node:path";
  * actually reviewed, risking a false "stalled" verdict on a healthy-but-
  * queued issue the moment it becomes the new head.
  *
- * `collect-state.sh` emits the current needs-qa issue-number list as a fresh
+ * The Turn Snapshot emits the current needs-qa issue-number list as a fresh
  * per-turn fact (`needs_qa_numbers`, order-preserving — no sort — to match
  * hydra-qa's own query), and decide.py keeps a persisted attempt counter for
  * the head only (`state.qa_orch_item_attempts`, at most one entry by
@@ -155,7 +156,7 @@ interface RunResult {
 function runDecide(state: any, candidates: any = null, events: any[] = []): RunResult {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(candidates));
     writeFileSync(t.events, JSON.stringify(events));
     const r = spawnSync(
@@ -473,7 +474,7 @@ function baseState(o: StateOverrides = {}): any {
 
 function runDecide(state: any, candidates: any = null, events: any[] = []): { plan: any; statePath: string } {
   const t = makeTmp();
-  writeFileSync(t.state, JSON.stringify(state));
+  writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
   writeFileSync(t.cands, JSON.stringify(candidates));
   writeFileSync(t.events, JSON.stringify(events));
   const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
@@ -731,7 +732,7 @@ function runDecide(state: unknown): {
 } {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(null));
     writeFileSync(t.events, JSON.stringify([]));
     const r = spawnSync(
@@ -984,7 +985,7 @@ function baseState(o: StateOverrides = {}): any {
 function runDecide(state: any, candidates: any = null, events: any[] = []): any {
   const t = makeTmp();
   try {
-    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(t.cands, JSON.stringify(candidates));
     writeFileSync(t.events, JSON.stringify(events));
     const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
@@ -1217,7 +1218,7 @@ describe("decide.py — discover_orch staleness floor (issue #4114)", () => {
  *     computation present vs absent — no dispatch behavior changes in this issue.
  *   - decide.py stays a PURE function of state.json: it reads the injected
  *     class-stats verdict but NEVER fetches dispatch history itself; the verdict
- *     arrives via collect-state.sh injection only.
+ *     arrives via the Turn Snapshot injection only.
  *   - The shadow log records, per turn, the cadence multiplier that WOULD be
  *     applied and the verdict behind it — and ONLY for classes it would dampen
  *     (multiplier != 1.0). It actuates nothing (`actuated: false`).
@@ -1334,7 +1335,7 @@ function runDecide(
     const sPath = join(dir, "state.json");
     const cPath = join(dir, "candidates.json");
     const ePath = join(dir, "events.json");
-    writeFileSync(sPath, JSON.stringify(state));
+    writeFileSync(sPath, JSON.stringify(withTurnSnapshot(state)));
     writeFileSync(cPath, JSON.stringify(null));
     writeFileSync(ePath, JSON.stringify([]));
     // --now pins the decision clock so the two runs (shadow on/off) are
@@ -1425,7 +1426,7 @@ describe("decide.py — shadow-mode dampener (issue #2943)", () => {
 {
 /**
  * `scripts/autopilot/target-wip.py` is the ONE source of truth for the Target
- * WIP limit and the liveness predicate both collect-state.sh (→ the
+ * WIP limit and the liveness predicate both the Turn Snapshot (→ the
  * `target_wip_saturated` signal decide.py gates dev_target on) and
  * hydra-target-build Step 1's pre-flight gate call. These cases run the REAL
  * leaf over synthetic stdin — no `gh`, no network — and pin the
@@ -1537,14 +1538,14 @@ describe("target-wip.py — liveness-aware Target WIP predicate (issue #4475)", 
         for (const saturated of [false, true]) {
           writeFileSync(
             statePath,
-            JSON.stringify({
+            JSON.stringify(withTurnSnapshot({
               run_id: "wip-guard",
               turn: 0,
               started_epoch: 9_999_000,
               limits: { scope: "all", token_budget: 10_000_000, wall_clock_max_sec: 999_999 },
               slots: { dev_target: null },
               signals: { [trigger]: true, target_wip_saturated: saturated },
-            }),
+            })),
           );
           const env: NodeJS.ProcessEnv = { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" };
           delete env.HYDRA_AUTOPILOT_EMIT_TURN_EVENTS;

@@ -618,6 +618,7 @@ describe("overlaySessionBlockEligibility (issue #1089)", () => {
       paused: false,
       sessionBlockedUntil: null,
       worklessUntil: null,
+      postQuotaUntil: null,
       fableExhaustedUntil: null,
       meterUnavailable: false,
       meterStale: false,

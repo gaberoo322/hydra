@@ -41,7 +41,7 @@
  *      c. Coalescing — if multiple patterns in this batch map to the
  *         same category, only the first proposes a dispatch.
  *   4. Returns the surviving `AlertDispatchTarget[]` to the caller
- *      (autopilot decide.py via collect-state.sh). The caller dispatches
+ *      (autopilot decide.py via the Turn Snapshot). The caller dispatches
  *      the scout skill once per target.
  *   5. After a successful dispatch, the caller MUST call
  *      `recordDispatch()` to (a) XADD to the audit-trail stream,
@@ -137,7 +137,7 @@ export interface AlertPlan {
 /**
  * Read recent alerts + cooldown state from Redis and return the planning
  * result. Doesn't dispatch anything — the caller (autopilot decide.py via
- * collect-state.sh, or the dev exerciser) decides whether to act on
+ * the Turn Snapshot, or the dev exerciser) decides whether to act on
  * `eligible`.
  *
  * `now` is injectable for deterministic tests.

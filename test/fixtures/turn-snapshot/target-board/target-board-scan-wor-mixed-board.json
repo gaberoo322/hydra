@@ -1,0 +1,59 @@
+{
+  "name": "target-board-scan-wor-mixed-board",
+  "collector": "target-scan-boards",
+  "source": "autopilot-target-board-signals › a mixed board counts only lifecycle-less wor items",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_scan_boards)",
+  "repo": "acme/target-app",
+  "limit": 100,
+  "laneDegraded": "0",
+  "workQueue": 0,
+  "adr": "absent",
+  "gh": {
+    "scanIssues": {
+      "stdout": "[{\"number\":760,\"labels\":[\"wire-or-retire\",\"bug\"]},{\"number\":2,\"labels\":[\"wire-or-retire\",\"needs-triage\"]},{\"number\":3,\"labels\":[\"wire-or-retire\",\"ready-for-agent\"]},{\"number\":4,\"labels\":[\"wire-or-retire\",\"ready-for-human\"]},{\"number\":5,\"labels\":[\"wire-or-retire\",\"blocked\"]},{\"number\":6,\"labels\":[\"wire-or-retire\"]},{\"number\":7,\"labels\":[\"bug\"]}]\n",
+      "stderr": "",
+      "exitCode": 0
+    }
+  },
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "acme/target-app",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels",
+        "--jq",
+        "[ .[] | { number: .number, labels: (.labels | map(.name)) } ]"
+      ]
+    ],
+    "values": {
+      "target-scan-boards": {
+        "signalsDegraded": false,
+        "signals": {
+          "ok": true,
+          "value": {
+            "truncated": false,
+            "needsTriageItems": [
+              2
+            ],
+            "backfillIdle": false,
+            "cleanupOpenScan": 0,
+            "cleanupSaturated": false,
+            "wireOrRetireTriage": 1,
+            "wireOrRetireUnlabelled": 2,
+            "designQaOpen": 0,
+            "designQaSaturated": false
+          }
+        },
+        "adrPresent": false
+      }
+    }
+  }
+}

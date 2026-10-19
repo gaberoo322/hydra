@@ -130,7 +130,7 @@ for m in trend[:5]:
 # retired by the ADR-0031 Target-tracking migration (#3439, PR #3455) —
 # `/api/backlog` 404s and `hydra backlog` is a retired stub (issue #3745).
 # Orchestrator work tracking is GitHub Issues on gaberoo322/hydra; read the
-# board the way collect-state.sh's Target-board signals do, via `gh issue
+# board the way the Turn Snapshot's Target-board signals do, via `gh issue
 # list` (REST, not GraphQL — cheap enough for an on-demand doctor run).
 gh issue list --repo gaberoo322/hydra --state open --limit 200 \
   --json number,title,labels 2>/dev/null | python3 -c "
@@ -215,8 +215,8 @@ git -C "$HOME/hydra" status --short | head -10
 TARGET_FACTS_JSON=$(cd "$HOME/hydra" && npx tsx scripts/target/print-target-facts.ts 2>/dev/null || true)
 TARGET_WS=$(printf '%s' "$TARGET_FACTS_JSON" | jq -r '.workspace // empty' 2>/dev/null || true)
 if [ -n "$TARGET_WS" ]; then
-  git -C "$TARGET_WS" status --short | head -10
-  git -C "$TARGET_WS" log --oneline --since="6 hours ago" | head -10
+  git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" status --short | head -10
+  git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" log --oneline --since="6 hours ago" | head -10
 else
   echo "target git: skipped (Target unresolved)"
 fi

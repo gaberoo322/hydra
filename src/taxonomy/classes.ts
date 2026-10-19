@@ -48,6 +48,37 @@ type DispatchClassScope = "orch" | "target" | "both";
 /** Which pattern-memory agent the class's lessons train (null = neither). */
 type LearningAgent = "planner" | "executor";
 
+/**
+ * The ADR-0030 lifecycle stage a CLASS row may occupy (issue #4592). The two
+ * skill-only values `operator-interactive` and `brain` are deliberately NOT
+ * members: they exist only on docs/generated/skills.json rows (derived), and
+ * rejecting them here is what makes "exactly one brain" enforceable — a class
+ * row can never claim the brain stage.
+ */
+export type DispatchClassStage =
+  | "plan"
+  | "spec"
+  | "tickets"
+  | "implement"
+  | "review"
+  | "pre-plan-producer"
+  | "ops"
+  | "target";
+
+/**
+ * The full ten-value stage enum — the eight class stages plus the two
+ * skill-only values. This is the closed set for skills.json rows (#4592).
+ */
+export type SkillStage = DispatchClassStage | "operator-interactive" | "brain";
+
+/**
+ * The dispatch tier a class's playbook dispatch reads at dispatch time
+ * (issue #1093 keeps the model lever in the playbook; decide.py NEVER
+ * consumes this column). `inherit` means the dispatch omits the `model`
+ * kwarg and the subagent inherits the parent session's model.
+ */
+export type DispatchClassModel = "fable" | "sonnet" | "haiku" | "opus" | "inherit";
+
 /** One row of the Dispatch-Class Taxonomy. Nullable columns are always
  * present (explicit `null`, never absent) so a projection miss is loud. */
 export interface DispatchClassRow {
@@ -56,6 +87,20 @@ export interface DispatchClassRow {
   readonly kind: DispatchClassKind;
   /** The Claude Code skill the class dispatches, e.g. `hydra-dev`. */
   readonly skill: string;
+  /** The ADR-0030 lifecycle stage (see {@link DispatchClassStage}). */
+  readonly stage: DispatchClassStage;
+  /** Documentation-only dispatch tier (see {@link DispatchClassModel}). */
+  readonly model: DispatchClassModel;
+  /**
+   * OPTIONAL ticket-type → skill routing (issue #4592; today only
+   * `wayfinder_orch` carries it). Deliberately snake_case everywhere —
+   * classes.json, this interface, docs/generated/classes.json and the
+   * playbook — mirroring the `prompt_args.ticket_type` signal it keys on
+   * (the operator-ratified #4545 finding-5 spelling; an explicit exception
+   * to the camelCase of costClass/learningAgent). When present, one of its
+   * values must equal the row's `skill` so the default stays reachable.
+   */
+  readonly skill_by_ticket_type?: Readonly<Record<string, string>>;
   /** Cost-attribution bucket (`src/cost/cost-by-class.ts` CostClass). */
   readonly costClass: string;
   readonly learningAgent: LearningAgent | null;
@@ -76,6 +121,8 @@ const REQUIRED_COLUMNS = [
   "name",
   "kind",
   "skill",
+  "stage",
+  "model",
   "costClass",
   "learningAgent",
   "cooldownSeconds",
@@ -86,6 +133,39 @@ const REQUIRED_COLUMNS = [
 const KINDS: readonly string[] = ["pipeline", "signal"];
 const SCOPES: readonly string[] = ["orch", "target", "both"];
 const LEARNING_AGENTS: readonly string[] = ["planner", "executor"];
+
+/**
+ * The eight stage values a CLASS row may carry (#4592). Exported so the
+ * decide.py-parity test can text-scan `_TAXONOMY_STAGES` and assert the two
+ * parsers' enum lists cannot drift.
+ */
+export const CLASS_STAGES: readonly DispatchClassStage[] = Object.freeze([
+  "plan",
+  "spec",
+  "tickets",
+  "implement",
+  "review",
+  "pre-plan-producer",
+  "ops",
+  "target",
+]);
+
+/** The two skill-only stage values (#4592) — see {@link SkillStage}. */
+export const SKILL_ONLY_STAGES: readonly ("operator-interactive" | "brain")[] =
+  Object.freeze(["operator-interactive", "brain"]);
+
+/** The full ten-value closed set for skills.json rows (#4592). */
+export const SKILL_STAGES: readonly SkillStage[] = Object.freeze([
+  ...CLASS_STAGES,
+  ...SKILL_ONLY_STAGES,
+]);
+
+/**
+ * The five closed `model` values (#4592). Exported for the same
+ * decide.py-parity text-scan as {@link CLASS_STAGES}.
+ */
+export const DISPATCH_CLASS_MODELS: readonly DispatchClassModel[] =
+  Object.freeze(["fable", "sonnet", "haiku", "opus", "inherit"]);
 
 function fail(reason: string): never {
   throw new InvariantViolationError(
@@ -142,6 +222,58 @@ export function parseClassTaxonomy(jsonText: string): readonly DispatchClassRow[
     if (typeof row.skill !== "string" || row.skill === "") {
       fail(`${name}: skill must be a non-empty string`);
     }
+    if (
+      typeof row.stage !== "string" ||
+      !(CLASS_STAGES as readonly string[]).includes(row.stage)
+    ) {
+      fail(
+        `${name}: stage must be one of ${CLASS_STAGES.join("|")} — the skill-only ` +
+          `values ${SKILL_ONLY_STAGES.join("|")} are rejected on class rows (#4592), ` +
+          `got ${JSON.stringify(row.stage)}`,
+      );
+    }
+    if (
+      typeof row.model !== "string" ||
+      !(DISPATCH_CLASS_MODELS as readonly string[]).includes(row.model)
+    ) {
+      fail(
+        `${name}: model must be one of ${DISPATCH_CLASS_MODELS.join("|")} ` +
+          `(non-nullable; inherit means the dispatch omits the model kwarg), ` +
+          `got ${JSON.stringify(row.model)}`,
+      );
+    }
+    if ("skill_by_ticket_type" in row && row.skill_by_ticket_type !== undefined) {
+      const mapping = row.skill_by_ticket_type;
+      if (
+        typeof mapping !== "object" ||
+        mapping === null ||
+        Array.isArray(mapping) ||
+        Object.keys(mapping).length === 0
+      ) {
+        fail(
+          `${name}: skill_by_ticket_type must be a non-empty object mapping ` +
+            "ticket-type strings to skill names",
+        );
+      }
+      let defaultReachable = false;
+      for (const [ticketType, skillName] of Object.entries(mapping)) {
+        if (ticketType === "") {
+          fail(`${name}: skill_by_ticket_type keys must be non-empty strings`);
+        }
+        if (typeof skillName !== "string" || skillName === "") {
+          fail(
+            `${name}: skill_by_ticket_type["${ticketType}"] must be a non-empty skill name`,
+          );
+        }
+        if (skillName === row.skill) defaultReachable = true;
+      }
+      if (!defaultReachable) {
+        fail(
+          `${name}: one skill_by_ticket_type value must equal the row's skill ` +
+            `"${row.skill}" (the default stays reachable)`,
+        );
+      }
+    }
     if (typeof row.costClass !== "string" || row.costClass === "") {
       fail(`${name}: costClass must be a non-empty string`);
     }
@@ -173,6 +305,15 @@ export function parseClassTaxonomy(jsonText: string): readonly DispatchClassRow[
       name,
       kind: row.kind as DispatchClassKind,
       skill: row.skill,
+      stage: row.stage as DispatchClassStage,
+      model: row.model as DispatchClassModel,
+      ...(row.skill_by_ticket_type !== undefined
+        ? {
+            skill_by_ticket_type: Object.fromEntries(
+              Object.entries(row.skill_by_ticket_type as Record<string, string>),
+            ) as Readonly<Record<string, string>>,
+          }
+        : {}),
       costClass: row.costClass,
       learningAgent: row.learningAgent as LearningAgent | null,
       cooldownSeconds: cooldown as number | null,
@@ -292,6 +433,44 @@ export const CLASSES_WITH_CYCLE_RECORD: readonly string[] = Object.freeze(
  */
 export const CLASSES_WITHOUT_CYCLE_RECORD: readonly string[] = Object.freeze(
   DISPATCH_CLASSES.filter((r) => !CYCLE_RECORD_SKILLS.has(r.skill)).map(
+    (r) => r.name,
+  ),
+);
+
+// ---------------------------------------------------------------------------
+// PR-producing classes (issue #4856)
+// ---------------------------------------------------------------------------
+
+/**
+ * The skills whose dispatch is EXPECTED to open a PR as its terminal artifact —
+ * the code-writing classes (issue #4856 design-concept INV-8). This is the
+ * retro drill filter's notion of "a dispatch that should have landed code":
+ * only a PR-producing dispatch can *short-circuit* (finish suspiciously fast
+ * without a merge), so only these classes carry the short-circuit drill
+ * signal. A non-PR class finishing in 90 seconds (`qa_orch`, `health`) is
+ * normal, not a red flag.
+ *
+ * A strict subset of {@link CYCLE_RECORD_SKILLS} BY CONSTRUCTION here, and
+ * pinned by a test (`test/retro-bundle.test.mts`): the short-circuit signal
+ * reads the dispatch-outcome ledger's `durationMs`, which only
+ * `CYCLE_RECORD_SKILLS` completions write — so adding a PR-producing skill
+ * without a cycle record would make the predicate structurally blind to it.
+ * Deliberately NOT sourced from reap.py: this labels read-side drill semantics
+ * (which dispatches can short-circuit), not a write-side gate.
+ */
+export const PR_PRODUCING_SKILLS: ReadonlySet<string> = new Set([
+  "hydra-dev",
+  "hydra-target-build",
+]);
+
+/**
+ * Dispatch classes whose dispatches are expected to open a PR — DERIVED from
+ * the taxonomy join (rows whose `skill` is in {@link PR_PRODUCING_SKILLS}),
+ * never hand-listed, in file (dispatch) order (issue #4856 INV-8). Today this
+ * is `dev_orch` and `dev_target`.
+ */
+export const CLASSES_PRODUCING_PRS: readonly string[] = Object.freeze(
+  DISPATCH_CLASSES.filter((r) => PR_PRODUCING_SKILLS.has(r.skill)).map(
     (r) => r.name,
   ),
 );

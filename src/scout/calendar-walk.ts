@@ -205,7 +205,7 @@ export function scoutSpendDateString(now: Date = new Date()): string {
  * Record (overwrite) the per-day scout token spend mirror used by the
  * autopilot's cost-cap gate (issue #532).
  *
- * This is intentionally a SET (not INCR): `collect-state.sh` derives the
+ * This is intentionally a SET (not INCR): the Turn Snapshot derives the
  * value each turn from the authoritative `hydra:metrics:tokens:by-skill:
  * daily:<DATE>[hydra-tool-scout]` surrogate populated by the existing
  * `/api/metrics/tokens` writer (issue #394). A mirror keeps the gate's

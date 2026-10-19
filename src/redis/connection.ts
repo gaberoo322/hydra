@@ -126,6 +126,9 @@ interface RedisCommands {
   ): Promise<string[]>;
   pipeline(commands?: unknown[][]): PipelineCommander;
   mget(...keys: RedisKey[]): Promise<(string | null)[]>;
+  // EventEmitter surface, also dropped by the aggregate compile; used by the
+  // one-shot Turn Snapshot CLI to route connection errors (#4933).
+  on(event: "error", listener: (err: Error) => void): unknown;
 }
 
 /**

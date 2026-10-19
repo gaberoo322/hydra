@@ -55,7 +55,7 @@ import {
   toHitlGrillRow,
   compareHitlGrillRows,
 } from "../src/autopilot/work-projections.ts";
-import { closeIssue } from "../src/github/issue-actions.ts";
+import { closeIssue, editIssueLabels } from "../src/github/issue-actions.ts";
 import { HITL_GRILL_CAP, HITL_GRILL_LABEL } from "../src/schemas/autopilot-board.ts";
 import {
   hasScopeSection,
@@ -195,7 +195,7 @@ describe("toWorkQueueRow — queue projection", () => {
     const row = toWorkQueueRow(
       issue({ number: 7, labels: ["ready-for-agent", "glm-eligible"] }),
       new Set(),
-      true, // partition live — the badge's glmLane ruling (issue #4692)
+      { glmPartitionActive: true }, // partition live — the badge's glmLane ruling (issue #4692)
     );
     assert.ok(row);
     assert.equal(row!.number, 7);
@@ -213,7 +213,7 @@ describe("toWorkQueueRow — queue projection", () => {
         body: "## Files in scope\n\n- `src/a.ts`\n\nBlocked by #9\nblocks #5\ndepends on #12",
       }),
       new Set([9, 11]),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.deepEqual(row!.openBlockers, [9]); // #5 self-ref dropped, #12 not open
@@ -223,7 +223,7 @@ describe("toWorkQueueRow — queue projection", () => {
     const row = toWorkQueueRow(
       issue({ number: 5, labels: ["needs-triage"], body: "Blocked by #9" }),
       new Set([9]),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.deepEqual(row!.openBlockers, []);
@@ -231,7 +231,9 @@ describe("toWorkQueueRow — queue projection", () => {
 
   test("no operator lane → null (not in the queue)", () => {
     assert.equal(
-      toWorkQueueRow(issue({ labels: ["in-progress"] }), new Set(), true),
+      toWorkQueueRow(issue({ labels: ["in-progress"] }), new Set(), {
+        glmPartitionActive: true,
+      }),
       null,
     );
   });
@@ -1080,6 +1082,97 @@ describe("closeIssue — the optional --reason argv", () => {
 });
 
 // ---------------------------------------------------------------------------
+// editIssueLabels — the ONE multi-flag gh issue edit the GLM finish phase
+// rides (issue #4685 INV-9/16; gh pr edit is broken for labels here,
+// ADR-0034 §7, so label writes go through the issue-edit seam)
+// ---------------------------------------------------------------------------
+
+describe("editIssueLabels — one gh issue edit carrying every remove/add flag", () => {
+  function transportRecorder() {
+    const calls: any[][] = [];
+    const transport: any = async (args: any[], _opts: any) => {
+      calls.push(args);
+      return { ok: true, stdout: "", stderr: "" };
+    };
+    return { transport, calls };
+  }
+
+  test("a release write: remove in-progress, add ready-for-agent — ONE invocation, removes before adds", async () => {
+    const { transport, calls } = transportRecorder();
+    const res = await editIssueLabels(
+      77,
+      { remove: ["in-progress"], add: ["ready-for-agent"] },
+      { repo: "gaberoo322/hydra", transport },
+    );
+    assert.deepEqual(res, { ok: true });
+    assert.deepEqual(calls, [
+      [
+        "issue",
+        "edit",
+        "77",
+        "--repo",
+        "gaberoo322/hydra",
+        "--remove-label",
+        "in-progress",
+        "--add-label",
+        "ready-for-agent",
+      ],
+    ]);
+  });
+
+  test("the advance write: TWO removes and ONE add in a single invocation", async () => {
+    const { transport, calls } = transportRecorder();
+    const res = await editIssueLabels(
+      77,
+      { remove: ["ready-for-agent", "in-progress"], add: ["needs-qa"] },
+      { repo: "gaberoo322/hydra", transport },
+    );
+    assert.deepEqual(res, { ok: true });
+    assert.deepEqual(calls, [
+      [
+        "issue",
+        "edit",
+        "77",
+        "--repo",
+        "gaberoo322/hydra",
+        "--remove-label",
+        "ready-for-agent",
+        "--remove-label",
+        "in-progress",
+        "--add-label",
+        "needs-qa",
+      ],
+    ]);
+  });
+
+  test("the adopted-PR relabel (delta b): add-only on the PR NUMBER via the same issue seam", async () => {
+    const { transport, calls } = transportRecorder();
+    const res = await editIssueLabels(999, { add: ["glm-authored"] }, { repo: "gaberoo322/hydra", transport });
+    assert.deepEqual(res, { ok: true });
+    assert.deepEqual(calls, [
+      ["issue", "edit", "999", "--repo", "gaberoo322/hydra", "--add-label", "glm-authored"],
+    ]);
+  });
+
+  test("an empty label input short-circuits WITHOUT invoking the transport", async () => {
+    const { transport, calls } = transportRecorder();
+    const res = await editIssueLabels(77, {}, { repo: "gaberoo322/hydra", transport });
+    assert.deepEqual(res, { ok: true });
+    assert.deepEqual(calls, []);
+  });
+
+  test("a failing transport flows through as ok:false (the finish phase logs it WARN and continues)", async () => {
+    const transport: any = async () => ({ ok: false, code: "gh-failed", stderr: "label not found" });
+    const res = await editIssueLabels(
+      77,
+      { remove: ["in-progress"], add: ["ready-for-agent"] },
+      { repo: "gaberoo322/hydra", transport },
+    );
+    assert.equal(res.ok, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // parseParkReason / toHitlGrillRow / compareHitlGrillRows — the hitl-grill
 // lane's pure projections (issue #4028 slice 4)
 // ---------------------------------------------------------------------------
@@ -1331,7 +1424,7 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     const row = toWorkQueueRow(
       issue({ number: 7, labels: ["ready-for-agent", "glm-eligible"] }),
       new Set<number>(),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.equal(row.glmEligible, true);
@@ -1344,7 +1437,7 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
         labels: ["ready-for-agent", "glm-eligible", "glm-withhold"],
       }),
       new Set<number>(),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.equal(row.glmEligible, false);
@@ -1354,7 +1447,7 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     const row = toWorkQueueRow(
       issue({ number: 9, labels: ["ready-for-agent", "glm-ab-control"] }),
       new Set<number>(),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row);
     assert.equal(row.glmEligible, false);
@@ -1364,7 +1457,7 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     const row = toWorkQueueRow(
       issue({ number: 10, labels: ["ready-for-agent", "glm-eligible"] }),
       new Set<number>(),
-      false,
+      { glmPartitionActive: false },
     );
     assert.ok(row);
     assert.equal(row.glmEligible, false);
@@ -1374,10 +1467,23 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     const row = toWorkQueueRow(
       issue({ number: 11, labels: ["needs-triage", "glm-eligible"] }),
       new Set<number>(),
-      true,
+      { glmPartitionActive: true },
     );
     assert.ok(row); // needs-triage IS an operator lane: the row is queued…
     assert.equal(row.lane, "needs-triage");
     assert.equal(row.glmEligible, false); // …but never badged GLM
+  });
+
+  test("ready-for-agent WITHOUT glm-eligible, partition live → badge false (the last unpinned #4692 INV-5 truth-table row)", () => {
+    const row = toWorkQueueRow(
+      issue({ number: 12, labels: ["ready-for-agent"] }),
+      new Set<number>(),
+      { glmPartitionActive: true },
+    );
+    assert.ok(row);
+    // glmLane → { lane: "claude", reason: "not-glm-owned" }: an unlabelled
+    // ready row is Claude-owned even at full partition liveness — the badge
+    // is the lane predicate's ruling, never a glm-eligible label read.
+    assert.equal(row.glmEligible, false);
   });
 });

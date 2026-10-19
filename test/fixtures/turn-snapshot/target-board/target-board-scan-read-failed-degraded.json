@@ -1,0 +1,47 @@
+{
+  "name": "target-board-scan-read-failed-degraded",
+  "collector": "target-scan-boards",
+  "source": "autopilot-target-board-signals › degraded branch (no ADR)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_scan_boards)",
+  "repo": "acme/target-app",
+  "limit": 100,
+  "laneDegraded": "0",
+  "workQueue": 0,
+  "adr": "absent",
+  "gh": {
+    "scanIssues": {
+      "stdout": "",
+      "stderr": "gh: HTTP 502\n",
+      "exitCode": 1
+    }
+  },
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "acme/target-app",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels",
+        "--jq",
+        "[ .[] | { number: .number, labels: (.labels | map(.name)) } ]"
+      ]
+    ],
+    "values": {
+      "target-scan-boards": {
+        "signalsDegraded": true,
+        "signals": {
+          "ok": false,
+          "reason": "board-read-failed"
+        },
+        "adrPresent": false
+      }
+    }
+  }
+}

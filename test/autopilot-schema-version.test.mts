@@ -206,7 +206,7 @@ describe("issue #434 — schema_version handshake", () => {
   });
 
   describe("bootstrap.sh seeds slot_events_last_id at run start (issue #4441)", () => {
-    // collect-state.sh reads its hydra:autopilot:slot-events cursor from
+    // the Turn Snapshot reads its hydra:autopilot:slot-events cursor from
     // HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID (default "0") and never reads
     // state.json (its documented statelessness contract). A fresh bootstrap
     // with no cursor exported therefore replayed the stream from 0 on turn 1
@@ -231,7 +231,7 @@ describe("issue #434 — schema_version handshake", () => {
       }
     });
 
-    test("the seed is never the collect-state.sh default cursor literal `0`", () => {
+    test("the seed is never the Turn Snapshot default cursor literal `0`", () => {
       // The whole point: a fresh state.json must never leave the brain to
       // fall back to HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID's own default (`0`,
       // which replays the entire stream) when it forgets to export the

@@ -1,34 +1,32 @@
 /**
  * src/cost/transcript-scan.ts — the **TranscriptScan** seam (issue #1971).
  *
- * Owns the two I/O concerns the Subscription Usage Tracker depends on, lifted
- * verbatim out of `usage-tracker.ts`'s former private `scanUsage()`:
+ * Owns the transcript-walk I/O concern the Subscription Usage Tracker depends
+ * on, lifted verbatim out of `usage-tracker.ts`'s former private `scanUsage()`:
  *
  *   1. The JSONL transcript walk — `transcriptScan()` reads the
- *      `~/.claude/projects` JSONL session transcripts, parses every usage line via
- *      `parseUsageLine` (pure leaf `./token-math.ts`), and accumulates the
- *      per-family / per-skill token breakdowns over the rolling 5h / 24h / 7d
- *      windows plus the buffered since-reset entries. This is filesystem I/O
- *      (`readFile`, `stat`, `listTranscriptFiles`).
+ *      `~/.claude/projects` JSONL session transcripts, delegates the pure
+ *      per-file parse + bucketing to `./transcript-fold.ts` (issue #4791), and
+ *      accumulates the per-family / per-skill token breakdowns over the rolling
+ *      5h / 24h / 7d windows plus the buffered since-reset entries. This module
+ *      keeps the filesystem I/O (`readFile`, `stat`, `listTranscriptFiles`) and
+ *      the parse-memo persistence.
  *
- *   2. The OAuth cached meter read — `readOAuthCached()` + the module-level
- *      `oauthCache` singleton decouple the OAuth read cadence (HTTP I/O) from
- *      the 60s transcript-scan cache and serve a last-good value through
- *      transient 429s (issue #1090). Its TTL policy is fully independent of the
- *      snapshot cache.
+ *   2. The OAuth read wiring — `makeReadOAuth()` wires the cached meter read
+ *      into a scan. The cache + backoff ladder themselves (`readOAuthCached()`,
+ *      the `oauthCache` singleton) live in `./oauth-read-cache.ts` (issue
+ *      #2923); this file only chooses cached vs bypass.
  *
- * The PURE quota-math (weighted burn numerators, estimate percents,
- * pacingState, OAuth rebase, drift detection, since-reset derivation, final
- * `UsageSnapshot` assembly) stays in `usage-tracker.ts` as a behaviour-neutral
- * function over the {@link ScanResult} record this module returns. `getUsage()`
- * coordinates the two halves; the public surface (`src/cost/index.ts`) is
- * unchanged — {@link ScanResult} is an INTERNAL boundary type, never exported
- * from the barrel.
+ * Quota math and final `UsageSnapshot` assembly live in `./snapshot-assembly.ts`
+ * (folds #2279, `assembleSnapshot` #2988) as behaviour-neutral functions over
+ * the {@link ScanResult} record this module returns. `getUsage()` in
+ * `usage-tracker.ts` coordinates the halves; the public surface
+ * (`src/cost/index.ts`) is unchanged — {@link ScanResult} is an INTERNAL
+ * boundary type, never exported from the barrel.
  *
- * One-way import: this module imports FROM `./token-math.ts`, `./config.ts`,
- * `./oauth-usage.ts`, `../transcript-store.ts`, and
- * `../redis/transcript-parse-memo.ts`; `usage-tracker.ts` imports the scan +
- * OAuth-cache primitives FROM here.
+ * Layer: L4 I/O source. For the import direction and the consumers of each
+ * layer see the layer table in `src/cost/CONTEXT.md` (enforced by
+ * `test/cost-layers.test.mts`) rather than a list restated here.
  *
  * Per-file parse memo (issue #3805): transcripts are append-only and
  * immutable once a session ends, so a file whose `(size, mtimeMs)` is
@@ -36,7 +34,7 @@
  * loads the durable `path -> parsed contribution` memo ONCE at the top of the
  * walk, replays a cache HIT through the SAME cutoff/bucketing logic a fresh
  * parse uses (never a second, independently-maintained copy — see
- * `foldParsedLine` below), and writes back changed/evicted entries in ONE
+ * `foldFileContribution` below), and writes back changed/evicted entries in ONE
  * pipelined batch at the end. A memo miss, a structurally-corrupt entry, or a
  * Redis outage all degrade to a full parse of that one file — the memo is
  * never load-bearing for correctness, only for cost.
@@ -60,13 +58,19 @@ import { readOAuthUsage } from "./oauth-usage.ts";
 // (`snapshot-assembly.ts`) no longer edge up into the I/O shell; imported here
 // from its canonical L1 home.
 import { isOAuthUsageOk } from "./oauth-meter-shape.ts";
+import type { ModelFamily } from "./token-math.ts";
+// The pure per-file parse core + the two pure transcript-content helpers
+// (ADR-0042 Decision 6, issue #4791). `firstUserMessageText` and
+// `sumSessionTokens` are re-exported below at their old names.
 import {
-  modelToFamily,
-  isForeignProviderModel,
-  parseUsageLine,
-  parseObservedResetMs,
-} from "./token-math.ts";
-import type { TokenBreakdown, ModelFamily } from "./token-math.ts";
+  parseTranscriptFile,
+  firstUserMessageText,
+  sumSessionTokens,
+  createScanAccumulator,
+  foldFileContribution,
+  MODEL_FAMILIES,
+} from "./transcript-fold.ts";
+import type { ScanCutoffs } from "./transcript-fold.ts";
 // The token-breakdown data-model primitives — the empty-breakdown constant, the
 // per-family / per-dispatch-kind accumulator factories + mutation, and the pure
 // skill / dispatch-kind classifiers — live in the focused pure leaf
@@ -80,7 +84,6 @@ import {
   deriveDispatchKind,
   EMPTY_BREAKDOWN,
   emptyByModel,
-  addBreakdown,
   emptyByDispatchKind,
 } from "./token-breakdown.ts";
 import type { SkillResolver, DispatchKind } from "./token-breakdown.ts";
@@ -107,7 +110,7 @@ import {
   loadTranscriptParseMemo,
   writeTranscriptParseMemoBatch,
 } from "../redis/transcript-parse-memo.ts";
-import type { FileParseMemoEntry, MemoLineEntry } from "../redis/transcript-parse-memo.ts";
+import type { FileParseMemoEntry } from "../redis/transcript-parse-memo.ts";
 
 const MS_PER_HOUR = 3_600_000;
 const MS_PER_DAY = 86_400_000;
@@ -115,7 +118,6 @@ const WINDOW_5H_MS = 5 * MS_PER_HOUR;
 const WINDOW_24H_MS = MS_PER_DAY;
 const WINDOW_7D_MS = 7 * MS_PER_DAY;
 
-const MODEL_FAMILIES: readonly ModelFamily[] = ["opus", "sonnet", "haiku", "unknown"];
 
 // The residual-bucket key {@link INTERACTIVE_SKILL}, the pure skill classifier
 // {@link deriveSkill} + its {@link SkillResolver} type, the {@link DISPATCH_KINDS}
@@ -123,53 +125,15 @@ const MODEL_FAMILIES: readonly ModelFamily[] = ["opus", "sonnet", "haiku", "unkn
 // projection, and the {@link emptyByDispatchKind} factory moved to the pure
 // `./token-breakdown.ts` leaf (issue #3513). They are imported at the top of this
 // file (the scan accumulator still uses them) and re-exported at the bottom so
-// `usage-tracker.ts`, `index.ts`, and the tests keep resolving them by name. The
+// `index.ts` and the tests keep resolving them by name. The
 // module-private `UNATTRIBUTED_SKILL` back-compat alias (issue #2402/#3083) went
 // with them — it had no remaining reference here.
-
-/**
- * Extract the text of a transcript's FIRST user message from its already-read
- * content (issue #2402) — the signal `deriveSkill` reads. Walks the JSONL lines
- * the scan already split, returns the text of the first `type:"user"` record
- * that is NOT a harness-injected meta line (`isMeta:true`, e.g. the
- * `<local-command-caveat>` banner or the skill-template echo), and whose content
- * is non-empty. `content` may be a plain string OR an array of content blocks
- * (the harness emits both shapes); text blocks are concatenated. Returns `null`
- * when no readable first user message exists. Cheap: stops at the first match.
- */
-export function firstUserMessageText(lines: readonly string[]): string | null {
-  for (const line of lines) {
-    if (!line || line[0] !== "{") continue;
-    let obj: any;
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      /* intentional: a non-JSON line cannot be the first user message — skip it */
-      continue;
-    }
-    if (obj?.type !== "user" || obj?.isMeta === true) continue;
-    const content = obj?.message?.content;
-    let text: string;
-    if (typeof content === "string") {
-      text = content;
-    } else if (Array.isArray(content)) {
-      text = content
-        .map((b: any) => (b && typeof b.text === "string" ? b.text : ""))
-        .join(" ");
-    } else {
-      continue;
-    }
-    if (text.trim() === "") continue;
-    return text;
-  }
-  return null;
-}
 
 // `EMPTY_BREAKDOWN`, `emptyByModel`, and `addBreakdown` moved to the pure
 // `./token-breakdown.ts` leaf (issue #3513); imported at the top of this file
 // because the scan accumulator shares them. `EMPTY_BREAKDOWN` + `emptyByModel`
-// are also re-exported at the bottom for the `usage-tracker.ts` +
-// `snapshot-assembly.ts` importers; `addBreakdown` is NOT re-exported (issue
+// are also re-exported at the bottom for back-compat importers (the tests and
+// the `index.ts` barrel); `addBreakdown` is NOT re-exported (issue
 // #3525 — those callers import it directly from `./token-breakdown.ts`).
 
 /**
@@ -202,27 +166,6 @@ export const sessionIdFromPath = transcriptSessionIdFromPath;
 // 3): a missing transcript, an empty shard, or a parse miss all sum to 0 —
 // never a fabricated estimate. All I/O is best-effort and never throws
 // (invariant 4): callers get 0 and continue.
-
-/**
- * Sum the total tokens across every usage-bearing line of ONE session's
- * transcript content. Pure and Redis-free — reuses `parseUsageLine` (the same
- * authoritative parser the windowed scan uses), so the per-dispatch count is
- * reconcilable with the per-skill/per-family cross-tabs. Non-JSON lines, lines
- * with no usage block, and zero-usage lines all contribute nothing. Unlike the
- * rolling-window scan this applies NO time cutoff: a completed dispatch's whole
- * transcript is its usage, regardless of when it started. Exported for direct
- * unit test. Total: always returns a non-negative integer.
- */
-export function sumSessionTokens(lines: readonly string[]): number {
-  let total = 0;
-  for (const line of lines) {
-    if (!line || line[0] !== "{") continue;
-    const parsed = parseUsageLine(line);
-    if (parsed === null || parsed === "skip") continue;
-    total += parsed.tokens.total;
-  }
-  return total;
-}
 
 /**
  * List a session's subagent transcript shards, if any. A resumed / delegating
@@ -313,8 +256,8 @@ export async function tokensForSession(
 // `./types.ts` (ADR-0042 Decision 5, issue #4781): `snapshot-assembly.ts` (L3,
 // pure) reads slices of it, and importing it from this L4 I/O seam was an
 // upward edge. Imported at the top of this file for `transcriptScan()`'s
-// return type and re-exported at the bottom so `usage-tracker.ts`,
-// `test/snapshot-assembly.test.mts`, and every other existing importer keep
+// return type and re-exported at the bottom so
+// `test/snapshot-assembly.test.mts` and every other existing importer keep
 // resolving it at the old `./transcript-scan.ts` path unchanged.
 
 /**
@@ -334,7 +277,7 @@ export interface TranscriptParseMemoIo {
 /**
  * Walk the JSONL transcripts under `root`, fire the OAuth meter read
  * concurrently, and return the raw {@link ScanResult} accumulation — WITHOUT
- * computing any quota percentages (that pure math lives in `usage-tracker.ts`).
+ * computing any quota percentages (that pure math lives in `snapshot-assembly.ts`).
  *
  * The injectables mirror what the former private `scanUsage()` accepted:
  *   - `root`         the projects root to walk (a fixture dir in tests)
@@ -374,48 +317,20 @@ export async function transcriptScan(
   // throws.
   const oauthPromise = readOAuth();
 
-  const acc5h: TokenBreakdown = { ...EMPTY_BREAKDOWN };
-  const acc7d: TokenBreakdown = { ...EMPTY_BREAKDOWN };
-  // Per-family 5h/7d accumulators. `byModel` (the snapshot field) reports the
-  // 7d window; the 5h split is internal, used only for the 5h Quota Weight.
-  const byModel5h = emptyByModel();
-  const byModel7d = emptyByModel();
-  // Per-family 24h accumulator. The scalar `tokens24h` (raw .total) is kept for
-  // the unchanged `tokensLast24h` snapshot field; this per-family split feeds
-  // the WEIGHTED `projectedWeeklyPercent` numerator so the projection composes
-  // both weighting axes exactly like the 7d path. (issue #873)
-  const byModel24h = emptyByModel();
-  // Per-skill × per-family 7d accumulator (the `bySkillByModel` snapshot
-  // field). Skills are added lazily as transcripts resolve to them.
-  const bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>> = {};
-  // Per-skill × per-family 24h accumulator (issue #3752). A mirror of
-  // `bySkillByModel` gated on the 24h cutoff, accumulated during the SAME walk
-  // so `Σ_skill Σ_family === tokens24h` by construction — the comprehensive
-  // cost-by-class arm re-projects this through `skillToCostClass` for a
-  // per-class breakdown that sums to the snapshot's `tokensLast24h`.
-  const bySkillByModel24h: Record<string, Record<ModelFamily, TokenBreakdown>> = {};
-  // Per-dispatch-kind × per-family 7d accumulator (issue #2403). A parallel
-  // partition over the SAME per-file tokens as `bySkillByModel`, pre-seeded
-  // with all three kind buckets so the snapshot always carries the full split.
-  const byDispatchKind = emptyByDispatchKind();
-  let tokens24h = 0;
-
-  // Weekly Reset Anchor (issue #856). The since-reset boundary can be moved
-  // FORWARD by an observed rate-limit reset, which we only learn mid-scan — so
-  // buffer the in-7d-window (tsMs, tokens) entries and sum them once the
-  // effective boundary is known. The set buffered is exactly the lines already
-  // iterated for the rolling 7d window, bounded by the 7d cutoff. Only buffered
-  // when the env Anchor is set, so the unset case adds zero overhead/memory.
+  // The scan accumulators (acc5h/acc7d, per-family windows, skill/kind
+  // cross-tabs, foreign7d, since-reset buffer, line counters) live in one
+  // record mutated ONLY by `foldFileContribution` (issue #4792, ADR-0042
+  // Decision 6). The Weekly Reset Anchor (issue #856) gates the since-reset
+  // buffer and the observed-reset advance inside the fold.
+  const acc = createScanAccumulator();
+  const cutoffs: ScanCutoffs = { cutoff7d, cutoff24h, cutoff5h };
   const anchorEnvMs = getWeeklyResetAnchorMs();
-  const sinceResetEntries: { tsMs: number; tokens: TokenBreakdown; family: ModelFamily }[] = [];
-  let mostRecentObservedResetMs: number | null = null;
 
   // Dedup unknown-model warnings to AT MOST one per scan (never per-line).
   const unknownModelsSeen = new Set<string>();
   // Foreign-provider (non-Anthropic-quota) accumulation, issue #3769. Kept
   // entirely OUTSIDE the Anthropic windows/families: this is a different meter.
   const foreignModelsSeen = new Set<string>();
-  const foreign7d: TokenBreakdown = { ...EMPTY_BREAKDOWN };
   // Memoise sessionId → skill within a scan so a session with many transcript
   // shards resolves once, not once-per-shard (issue #693; preserved #2402).
   // (Distinct files usually carry distinct sessionIds, but a resumed session
@@ -433,9 +348,6 @@ export async function transcriptScan(
 
   let filesScanned = 0;
   let filesSkippedByMtime = 0;
-  let linesParsed = 0;
-  let linesWithUsage = 0;
-  let parseErrors = 0;
   let filesServedFromMemo = 0;
 
   // Per-file parse memo (issue #3805). Loaded ONCE, up front, in a single
@@ -445,7 +357,7 @@ export async function transcriptScan(
   try {
     memoMap = await loadMemo();
   } catch (err: any) {
-    logger.error({ err }, "[usage-tracker] transcript-parse-memo load failed; scanning cold");
+    logger.error({ err }, "[transcript-scan] transcript-parse-memo load failed; scanning cold");
     memoMap = new Map();
   }
   const memoUpserts = new Map<string, FileParseMemoEntry>();
@@ -470,47 +382,6 @@ export async function transcriptScan(
     }
     return true;
   };
-
-  /**
-   * The ONE shared bucketing function both the fresh-parse path and the
-   * memo-replay path call (issue #3805 design invariant: never two
-   * independently-maintained copies of the cutoff/window logic, or the two
-   * paths could silently drift apart). Mutates the scan-wide accumulators
-   * declared above via closure. `cutoff7d`/`cutoff24h`/`cutoff5h` are always
-   * evaluated against the CURRENT `now` — a memoized entry's `tsMs` is fixed,
-   * but which windows it falls in is re-derived every call, so a line that
-   * has aged out of `acc5h` since it was memoized correctly stops counting
-   * there without the entry ever being invalidated.
-   */
-  function foldParsedLine(
-    tsMs: number,
-    tokens: TokenBreakdown,
-    foreign: boolean,
-    family: ModelFamily,
-    fileByFamily7d: Record<ModelFamily, TokenBreakdown>,
-  ): void {
-    if (tsMs < cutoff7d) return;
-    if (foreign) {
-      addBreakdown(foreign7d, tokens);
-      return;
-    }
-    addBreakdown(acc7d, tokens);
-    addBreakdown(byModel7d[family], tokens);
-    addBreakdown(fileByFamily7d[family], tokens);
-    if (tsMs >= cutoff24h) {
-      tokens24h += tokens.total;
-      addBreakdown(byModel24h[family], tokens);
-    }
-    if (tsMs >= cutoff5h) {
-      addBreakdown(acc5h, tokens);
-      addBreakdown(byModel5h[family], tokens);
-    }
-    // Buffer for the fixed since-reset window (issue #856). Only when an env
-    // Anchor is set — keeps the unset path zero-overhead.
-    if (anchorEnvMs !== null) {
-      sinceResetEntries.push({ tsMs, tokens, family });
-    }
-  }
 
   const files = await listTranscriptFiles(root);
   for (const file of files) {
@@ -539,7 +410,7 @@ export async function transcriptScan(
 
     // Memo hit (issue #3805): unchanged (size, mtimeMs) means the file cannot
     // have gained usage lines since it was last parsed — replay its cached
-    // per-line contribution through the SAME `foldParsedLine` the fresh path
+    // per-line contribution through the SAME `foldFileContribution` the fresh path
     // uses, with NO read + NO JSON.parse of this file's bytes.
     const cached = memoMap.get(file);
     if (
@@ -549,63 +420,30 @@ export async function transcriptScan(
       isMemoEntryUsable(cached)
     ) {
       filesServedFromMemo++;
-      const fileByFamily7d = emptyByModel();
-      // Same-file 24h per-family accumulator, replayed from the memo entries'
-      // preserved `tsMs` (issue #3752 + #3805). Mirrors the fresh-parse path's
-      // `fileByFamily24h` so a memo-cache-hit file keeps contributing to
-      // `bySkillByModel24h` — otherwise the per-skill 24h cross-tab would
-      // silently under-count every file once it ages into the memo, breaking
-      // the `Σ_skill bySkillByModel24h[skill][f].total === byModel24h[f].total`
-      // invariant `foldParsedLine` (which DOES update `byModel24h`/`tokens24h`
-      // on a cache hit) otherwise implies.
-      const fileByFamily24h = emptyByModel();
-      let fileHadInWindow24h = false;
+      // Replay through the SAME `foldFileContribution` the fresh path uses.
+      // Log-only model-name placeholders stay here: they never enter the
+      // accumulator (issue #4792).
       for (const e of cached.entries) {
-        if (e.foreign) {
-          foreignModelsSeen.add("<memoized-foreign>");
-          foldParsedLine(e.tsMs, e.tokens, true, "unknown", fileByFamily7d);
-        } else {
-          const family = e.family as ModelFamily; // validated by isMemoEntryUsable above
-          if (family === "unknown") unknownModelsSeen.add("<memoized-unknown>");
-          foldParsedLine(e.tsMs, e.tokens, false, family, fileByFamily7d);
-          if (e.tsMs >= cutoff24h) {
-            addBreakdown(fileByFamily24h[family], e.tokens);
-            fileHadInWindow24h = true;
-          }
-        }
+        if (e.foreign) foreignModelsSeen.add("<memoized-foreign>");
+        else if (e.family === "unknown") unknownModelsSeen.add("<memoized-unknown>");
       }
-      linesParsed += cached.linesParsed;
-      linesWithUsage += cached.linesWithUsage;
-      parseErrors += cached.parseErrors;
+      foldFileContribution(acc, cached, cutoffs, anchorEnvMs);
+      // Attribution symmetry (issue #4792, folded in from #4778): a fresh parse
+      // of this shard would have resolved + cached the session's skill/kind
+      // (iff it had an in-7d non-foreign line under the CURRENT cutoff), so a
+      // LATER fresh shard of the same session attributes uniformly. Seed the
+      // cache in lockstep on replay under that same condition; the first
+      // shard's resolution wins, exactly as on the fresh path.
       if (
-        anchorEnvMs !== null &&
-        cached.observedResetMs !== null &&
-        (mostRecentObservedResetMs === null || cached.observedResetMs > mostRecentObservedResetMs)
+        cached.skill !== null &&
+        cached.dispatchKind !== null &&
+        isKnownDispatchKind(cached.dispatchKind) &&
+        cached.entries.some((e) => !e.foreign && e.tsMs >= cutoff7d)
       ) {
-        mostRecentObservedResetMs = cached.observedResetMs;
-      }
-      // Per-file skill/dispatchKind attribution stays keyed by whatever the
-      // session-level resolution assigned AT WRITE TIME (design invariant,
-      // issue #3805) — never affects acc5h/acc7d/byModel*/tokens24h, only the
-      // bySkillByModel/byDispatchKind/bySkillByModel24h cross-tabs.
-      const cachedSkill = cached.skill;
-      const cachedKind = cached.dispatchKind;
-      if (cachedSkill !== null && cachedKind !== null && isKnownDispatchKind(cachedKind)) {
-        const row = (bySkillByModel[cachedSkill] ??= emptyByModel());
-        const kindRow = byDispatchKind[cachedKind];
-        for (const f of MODEL_FAMILIES) {
-          addBreakdown(row[f], fileByFamily7d[f]);
-          addBreakdown(kindRow[f], fileByFamily7d[f]);
-        }
-        // 24h cross-tab replay (issue #3752). 24h ⊆ 7d, so `fileHadInWindow24h`
-        // can only be true when the file had a resolvable skill (guaranteed by
-        // this outer `cachedSkill !== null` branch, which mirrors the
-        // fresh-parse path's `fileHadInWindow7d` gate).
-        if (fileHadInWindow24h) {
-          const row24 = (bySkillByModel24h[cachedSkill] ??= emptyByModel());
-          for (const f of MODEL_FAMILIES) {
-            addBreakdown(row24[f], fileByFamily24h[f]);
-          }
+        const sid = sessionIdFromPath(file);
+        if (!skillCache.has(sid) || !kindCache.has(sid)) {
+          skillCache.set(sid, cached.skill);
+          kindCache.set(sid, cached.dispatchKind);
         }
       }
       continue;
@@ -615,146 +453,47 @@ export async function transcriptScan(
     try {
       content = await readFile(file, "utf-8");
     } catch (err: any) {
-      logger.error({ file, err }, "[usage-tracker] transcript read failed");
+      logger.error({ file, err }, "[transcript-scan] transcript read failed");
       continue;
     }
 
-    // Accumulate this file's in-window 7d tokens per family locally, then fold
-    // into the global per-family AND per-skill tables once the file is parsed.
-    // Resolving the skill per FILE (not per line) keeps attribution O(files).
-    const fileByFamily7d = emptyByModel();
-    let fileHadInWindow7d = false;
-    // Per-line contribution this file will persist to the parse memo (issue
-    // #3805) — only usage-bearing, in-7d-window lines are kept (a window can
-    // only narrow toward "now" on a later read, so an excluded line stays
-    // permanently irrelevant).
-    const memoEntries: MemoLineEntry[] = [];
-    let fileLinesParsed = 0;
-    let fileLinesWithUsage = 0;
-    let fileParseErrors = 0;
-    let fileObservedResetMs: number | null = null;
-    // Same-file 24h per-family accumulator (issue #3752), folded into the
-    // per-skill 24h cross-tab at the SAME skill-resolution seam below.
-    const fileByFamily24h = emptyByModel();
-    let fileHadInWindow24h = false;
-
-    const lines = content.split("\n");
-    for (const line of lines) {
-      // Fast reject: most lines are JSON objects; skip blanks instantly.
-      if (!line || line[0] !== "{") continue;
-      linesParsed++;
-      fileLinesParsed++;
-
-      // Observed rate-limit reset (issue #856). Probed on EVERY line —
-      // deliberately NOT gated on `anchorEnvMs` (issue #3805): this file's
-      // memo entry must carry an accurate `observedResetMs` regardless of
-      // whether the Anchor env happens to be set on THIS scan, since a LATER
-      // scan that DOES set it may replay this file from the memo instead of
-      // re-parsing it. The extra probe is on an already-read line — no new I/O.
-      const observed = parseObservedResetMs(line);
-      if (observed !== null) {
-        if (fileObservedResetMs === null || observed > fileObservedResetMs) {
-          fileObservedResetMs = observed;
+    // The pure parse core (ADR-0042 Decision 6, issue #4791) turns the file's
+    // content into its memoizable contribution. Skill/dispatch-kind attribution
+    // is injected as a callback so the session-keyed cache and
+    // `sessionIdFromPath` stay in this I/O shell. Exactly one resolution per
+    // contributing SESSION (memoised by sessionId) -- the resolver derives the
+    // skill from the first user message text the walk already read (issue
+    // #2402), so attribution stays O(files) and Redis-free. The core invokes the
+    // callback only when the file had in-7d Anthropic tokens, so files with none
+    // never conjure empty skill rows.
+    const { entry, unknownModels, foreignModels } = parseTranscriptFile(
+      content,
+      cutoff7d,
+      (lines) => {
+        const sessionId = sessionIdFromPath(file);
+        let skill = skillCache.get(sessionId);
+        let kind = kindCache.get(sessionId);
+        if (skill === undefined || kind === undefined) {
+          // Resolve BOTH from the same first-user-message text (one extraction).
+          const firstText = firstUserMessageText(lines);
+          skill = resolveSkill(firstText);
+          kind = deriveDispatchKind(firstText);
+          skillCache.set(sessionId, skill);
+          kindCache.set(sessionId, kind);
         }
-        if (anchorEnvMs !== null && (mostRecentObservedResetMs === null || observed > mostRecentObservedResetMs)) {
-          mostRecentObservedResetMs = observed;
-        }
-      }
+        return { skill, dispatchKind: kind };
+      },
+    );
+    for (const m of foreignModels) foreignModelsSeen.add(m);
+    for (const m of unknownModels) unknownModelsSeen.add(m);
 
-      const parsed = parseUsageLine(line);
-      if (parsed === null) {
-        parseErrors++;
-        fileParseErrors++;
-        continue;
-      }
-      if (parsed === "skip") continue;
-      linesWithUsage++;
-      fileLinesWithUsage++;
-
-      const tsMs = parsed.tsMs;
-      if (tsMs < cutoff7d) continue;
-
-      // Foreign-provider lines (issue #3769) are billed to a SEPARATE quota
-      // (today: `glm-*` on z.ai, ADR-0032) and must not touch a single
-      // Anthropic accumulator — not the flat window totals, not `byModel`, not
-      // the per-skill/per-kind cross-tabs, not the since-reset buffer. They are
-      // counted on their own axis so the spend stays visible. Placed BEFORE the
-      // family classification so a foreign model can never reach the `unknown`
-      // bucket, whose implicit 1.0 Quota-Weight is what inverted the meter.
-      if (isForeignProviderModel(parsed.model)) {
-        foreignModelsSeen.add(parsed.model);
-        foldParsedLine(tsMs, parsed.tokens, true, "unknown", fileByFamily7d);
-        memoEntries.push({ tsMs, tokens: parsed.tokens, foreign: true, family: "unknown" });
-        continue;
-      }
-
-      const family = modelToFamily(parsed.model);
-      if (family === "unknown" && !unknownModelsSeen.has(parsed.model)) {
-        unknownModelsSeen.add(parsed.model);
-      }
-
-      fileHadInWindow7d = true;
-      foldParsedLine(tsMs, parsed.tokens, false, family, fileByFamily7d);
-      memoEntries.push({ tsMs, tokens: parsed.tokens, foreign: false, family });
-      // Same-file 24h per-family accumulation (issue #3752). `foldParsedLine`
-      // above already folded this line into the GLOBAL `byModel24h`/`tokens24h`
-      // when in-window; this additionally keeps the PER-FILE breakdown so the
-      // skill-resolution seam below can fold it into `bySkillByModel24h`.
-      if (tsMs >= cutoff24h) {
-        addBreakdown(fileByFamily24h[family], parsed.tokens);
-        fileHadInWindow24h = true;
-      }
-    }
-
-    // Bucket this file's 7d tokens into the per-skill cross-tab. Skip files
-    // with no in-window tokens so we don't conjure empty skill rows. Exactly
-    // one skill resolution per contributing SESSION (memoised by sessionId) —
-    // the resolver derives the skill from the first user message text the walk
-    // already read (issue #2402), so attribution stays O(files) and Redis-free.
-    let fileSkill: string | null = null;
-    let fileDispatchKind: DispatchKind | null = null;
-    if (fileHadInWindow7d) {
-      const sessionId = sessionIdFromPath(file);
-      let skill = skillCache.get(sessionId);
-      let kind = kindCache.get(sessionId);
-      if (skill === undefined || kind === undefined) {
-        // Resolve BOTH from the same first-user-message text (one extraction).
-        const firstText = firstUserMessageText(lines);
-        skill = resolveSkill(firstText);
-        kind = deriveDispatchKind(firstText);
-        skillCache.set(sessionId, skill);
-        kindCache.set(sessionId, kind);
-      }
-      fileSkill = skill;
-      fileDispatchKind = kind;
-      const row = (bySkillByModel[skill] ??= emptyByModel());
-      const kindRow = byDispatchKind[kind];
-      for (const f of MODEL_FAMILIES) {
-        addBreakdown(row[f], fileByFamily7d[f]);
-        addBreakdown(kindRow[f], fileByFamily7d[f]);
-      }
-      // 24h cross-tab (issue #3752). 24h ⊆ 7d, so `fileHadInWindow24h` can only
-      // be true when `fileHadInWindow7d` is — the skill is already resolved
-      // above. Fold the SAME per-file 24h tokens into the per-skill 24h table so
-      // it reconciles against `tokens24h` by construction.
-      if (fileHadInWindow24h) {
-        const row24 = (bySkillByModel24h[skill] ??= emptyByModel());
-        for (const f of MODEL_FAMILIES) {
-          addBreakdown(row24[f], fileByFamily24h[f]);
-        }
-      }
-    }
+    // Fold through the SAME `foldFileContribution` the memo-hit path uses.
+    foldFileContribution(acc, entry, cutoffs, anchorEnvMs);
 
     memoUpserts.set(file, {
       size: st.size,
       mtimeMs: st.mtimeMs,
-      entries: memoEntries,
-      skill: fileSkill,
-      dispatchKind: fileDispatchKind,
-      observedResetMs: fileObservedResetMs,
-      linesParsed: fileLinesParsed,
-      linesWithUsage: fileLinesWithUsage,
-      parseErrors: fileParseErrors,
+      ...entry,
     });
   }
 
@@ -767,7 +506,7 @@ export async function transcriptScan(
   } catch (err: any) {
     logger.error(
       { upserts: memoUpserts.size, deletes: memoDeletes.length, err },
-      "[usage-tracker] transcript-parse-memo write failed",
+      "[transcript-scan] transcript-parse-memo write failed",
     );
   }
 
@@ -778,9 +517,9 @@ export async function transcriptScan(
     logger.info(
       {
         models: [...foreignModelsSeen],
-        tokens: foreign7d.total,
+        tokens: acc.foreign7d.total,
       },
-      "[usage-tracker] foreign-provider tokens excluded from Anthropic quota aggregates (issue #3769)",
+      "[transcript-scan] foreign-provider tokens excluded from Anthropic quota aggregates (issue #3769)",
     );
   }
 
@@ -792,31 +531,31 @@ export async function transcriptScan(
         count: unknownModelsSeen.size,
         models: [...unknownModelsSeen].map((m) => (m === "" ? "<missing>" : m)),
       },
-      "[usage-tracker] unrecognised model string(s) bucketed to 'unknown' (implicit quota-weight 1.0)",
+      "[transcript-scan] unrecognised model string(s) bucketed to 'unknown' (implicit quota-weight 1.0)",
     );
   }
 
   const oauth = await oauthPromise;
 
   return {
-    acc5h,
-    acc7d,
-    byModel5h,
-    byModel7d,
-    byModel24h,
-    bySkillByModel,
-    bySkillByModel24h,
-    byDispatchKind,
-    tokens24h,
-    foreign7d,
+    acc5h: acc.acc5h,
+    acc7d: acc.acc7d,
+    byModel5h: acc.byModel5h,
+    byModel7d: acc.byModel7d,
+    byModel24h: acc.byModel24h,
+    bySkillByModel: acc.bySkillByModel,
+    bySkillByModel24h: acc.bySkillByModel24h,
+    byDispatchKind: acc.byDispatchKind,
+    tokens24h: acc.tokens24h,
+    foreign7d: acc.foreign7d,
     oauth,
-    mostRecentObservedResetMs,
-    sinceResetEntries,
+    mostRecentObservedResetMs: acc.mostRecentObservedResetMs,
+    sinceResetEntries: acc.sinceResetEntries,
     filesScanned,
     filesSkippedByMtime,
-    linesParsed,
-    linesWithUsage,
-    parseErrors,
+    linesParsed: acc.linesParsed,
+    linesWithUsage: acc.linesWithUsage,
+    parseErrors: acc.parseErrors,
     filesServedFromMemo,
   };
 }
@@ -831,8 +570,9 @@ export async function transcriptScan(
  * #1083 test contract) — unless `useOAuthCache` is explicitly set true, which
  * the #1090 tests use to drive the cache with a pinned reader.
  *
- * Kept here (with the cache it gates) so `usage-tracker.ts` stays the pure
- * coordinator/assembler; it passes the already-resolved defaults in.
+ * Kept here (the cache itself lives in `oauth-read-cache.ts`, #2923) so
+ * `usage-tracker.ts` stays the I/O coordinator; it passes the already-resolved
+ * defaults in.
  */
 export function makeReadOAuth(opts: {
   readUsage: () => Promise<OAuthUsageResult>;
@@ -882,8 +622,8 @@ export { projectsRoot, readOAuthUsage };
 
 // Re-export the token-breakdown data-model primitives from their new focused
 // pure leaf (issue #3513) at the SAME names this module used to own, so existing
-// importers of `./transcript-scan.ts` — `usage-tracker.ts` and
-// `test/usage-tracker.test.mts` — keep resolving unchanged. The canonical owner
+// importers of `./transcript-scan.ts` (see `src/cost/CONTEXT.md`)
+// keep resolving unchanged. The canonical owner
 // is now `./token-breakdown.ts`; new code (and `snapshot-assembly.ts`) should
 // import directly from there.
 export {
@@ -896,11 +636,13 @@ export {
   emptyByDispatchKind,
 };
 export type { SkillResolver, DispatchKind };
+// Pure transcript-content helpers -- canonical home is `./transcript-fold.ts`.
+export { firstUserMessageText, sumSessionTokens };
 
 // Re-export the OAuth backoff/cache seam surface from its new focused leaf
 // (issue #2923) at the SAME names this module used to own, so existing importers
-// of `./transcript-scan.ts` — `usage-tracker.ts` and `test/usage-tracker.test.mts`
-// — keep resolving unchanged. The canonical owner is now `./oauth-read-cache.ts`;
+// of `./transcript-scan.ts` (see `src/cost/CONTEXT.md`)
+// keep resolving unchanged. The canonical owner is now `./oauth-read-cache.ts`;
 // new code should import directly from there.
 export {
   setOAuthBackoffPersistence,

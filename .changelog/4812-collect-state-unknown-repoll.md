@@ -1,0 +1,1 @@
+- fix: re-poll UNKNOWN mergeStateStatus once in collect-state so quiet PRs are not dropped from the resume and glm-red picks (#4812)

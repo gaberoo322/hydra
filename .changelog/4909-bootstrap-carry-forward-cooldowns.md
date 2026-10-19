@@ -1,0 +1,1 @@
+- fix: carry cleanup_target / wayfinder_orch / tickets_orch cooldown stamps across pace-gate relaunches (their 1h cooldowns were resetting to epoch 0 every ~15 min, ~2x dispatch cadence); bootstrap's carry list is now one generated variable CI-checked against classes.json (#4909)

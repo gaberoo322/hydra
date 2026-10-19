@@ -346,7 +346,7 @@ describe("getBuilderHealthScorecard — composition", () => {
     const trend: TrendRow[] = Array.from({ length: 14 }, (_, i) => ({
       completedAt: `2026-05-${String(16 + i).padStart(2, "0")}T10:00:00Z`,
       tasksAttempted: 1,
-      tasksMerged: 1,
+      tasksMerged: 1, status: "merged",
       regressionIntroduced: false,
       mutationKillRate: 80,
       anchorType: "kanban",
@@ -494,7 +494,7 @@ describe("computeStagnationPanel — pure per-realm projection", () => {
     // Oldest-first, then reverse to newest-first (as getMetricsTrend returns).
     const rows: TrendRow[] = [];
     for (let i = 0; i < n; i++) {
-      rows.push({ tasksAttempted: 1, tasksMerged: 1, ...per(i) });
+      rows.push({ tasksAttempted: 1, tasksMerged: 1, status: "merged", ...per(i) });
     }
     return rows.reverse();
   }
@@ -510,7 +510,7 @@ describe("computeStagnationPanel — pure per-realm projection", () => {
   test("cycleYield breach: a sustained collapse from a high self-baseline fires", () => {
     // 20 cycles merged (yield 1), then 4 cycles that did NOT merge (yield 0).
     const rows = trend(24, (i) =>
-      i < 20 ? { tasksMerged: 1 } : { tasksMerged: 0 },
+      i < 20 ? { tasksMerged: 1, status: "merged" } : { tasksMerged: 0 },
     );
     const panel = computeStagnationPanel(rows, {
       sustain: 3,
@@ -538,7 +538,7 @@ describe("computeStagnationPanel — pure per-realm projection", () => {
 
   test("healthy flat series => ok on every signal, no composite emitted", () => {
     const rows = trend(20, () => ({
-      tasksMerged: 1,
+      tasksMerged: 1, status: "merged",
       regressionIntroduced: false,
       mutationKillRate: 85,
     }));
@@ -571,7 +571,7 @@ describe("computeStagnationPanel — pure per-realm projection", () => {
 
   test("window context: cleanup-vs-feature mix + anchor-type distribution", () => {
     const rows = trend(6, (i) => ({
-      tasksMerged: 1,
+      tasksMerged: 1, status: "merged",
       anchorType: i < 2 ? "prior-failure" : i < 4 ? "failing-test" : "kanban",
     }));
     const panel = computeStagnationPanel(rows, { minBaselineCycles: 1 });

@@ -3,7 +3,7 @@
  *
  * WHY THIS EXISTS. The suite grew one test file per ISSUE rather than per
  * module — `scripts/autopilot/decide.py` owns 20 test files,
- * `scripts/autopilot/collect-state.sh` 8, `src/autopilot/anchor-type.ts` 6 —
+ * the Turn Snapshot collectors (`src/autopilot/turn-snapshot/`) 8, `src/autopilot/anchor-type.ts` 6 —
  * and 14 files carry a bare issue number in their basename. It costs nothing
  * at runtime and a great deal in agent context: every dispatch touching one
  * module must first discover and read a dozen files. Epic #4131 measured this

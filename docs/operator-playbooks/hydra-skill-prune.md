@@ -131,7 +131,7 @@ EVAL_RC=$?
   the cleanup-scan precedent) — listing the candidate deletions (bucketed
   by Pocock taxonomy) so a human/triage pass can decide. The `skill-prune`
   label is the COUNT SEAM for the autopilot's `skill_prune_board_saturated`
-  anti-flood cap (issue #4607: collect-state.sh counts open
+  anti-flood cap (issue #4607: the Turn Snapshot counts open
   `skill-prune`-labelled issues against the cap of 3 and suppresses the
   class above it) — omitting it disarms the cap and lets a failing eval
   re-file candidate lists every 7d cooldown. Under dry-run, just print

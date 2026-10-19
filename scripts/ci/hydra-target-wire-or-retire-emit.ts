@@ -284,7 +284,7 @@ function readOpenWireOrRetireItemTitles(targetRepo: string): string[] {
 /**
  * File one decision item via GitHub Issues on the Target repo. Stamps BOTH
  * {@link WIRE_OR_RETIRE_TRIAGE_LABEL} and {@link WIRE_OR_RETIRE_LABEL} in the
- * SAME `gh issue create` call — the co-presence invariant collect-state.sh
+ * SAME `gh issue create` call — the co-presence invariant the Turn Snapshot
  * keys its count on (#3720).
  */
 function createTriageItem(targetRepo: string, title: string, body: string): string {

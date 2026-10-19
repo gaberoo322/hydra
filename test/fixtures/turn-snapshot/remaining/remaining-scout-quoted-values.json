@@ -1,0 +1,80 @@
+{
+  "name": "scout-quoted-values",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_scout)",
+  "collectors": [
+    "scout"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {
+    "HYDRA_TOKEN_USD_RATE": "2"
+  },
+  "gh": {
+    "issue-list:enhancement:number": {
+      "json": [
+        {
+          "number": 1
+        }
+      ]
+    }
+  },
+  "redis": {
+    "strings": {
+      "hydra:scout:last-calendar-walk": "\"2026-09-01T00:00:00Z\""
+    },
+    "hashes": {
+      "hydra:metrics:tokens:by-skill:daily:2026-10-07": {
+        "hydra-tool-scout": "\"500\""
+      }
+    }
+  },
+  "http": {},
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "enhancement",
+        "--limit",
+        "100",
+        "--json",
+        "number"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [
+      [
+        "SET",
+        "hydra:scout:spend:2026-10-07",
+        "500",
+        "EX",
+        "604800"
+      ]
+    ],
+    "values": {
+      "scout": {
+        "lastWalkIso": {
+          "ok": true,
+          "value": "\"2026-09-01T00:00:00Z\""
+        },
+        "openEnhancements": {
+          "ok": true,
+          "value": "1"
+        },
+        "tokensToday": "500",
+        "spendUsd": "0.001000",
+        "mirrored": {
+          "ok": true,
+          "value": true
+        }
+      }
+    }
+  }
+}

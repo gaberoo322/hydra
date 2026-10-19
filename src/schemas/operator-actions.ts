@@ -114,7 +114,7 @@ export function isAdmissionLineKey(key: string): boolean {
   return ADMISSION_LINE_KEYS.includes(key);
 }
 
-export function isClassKey(key: string): boolean {
+function isClassKey(key: string): boolean {
   return CLASS_KEY_PATTERN.test(key);
 }
 
@@ -132,7 +132,7 @@ export function bucketOfKey(key: string): Bucket | "class" | null {
     : null;
 }
 
-export const EntryKeySchema = z.string().refine(
+const EntryKeySchema = z.string().refine(
   (key) => isAdmissionLineKey(key) || isClassKey(key),
   {
     message:
@@ -174,14 +174,14 @@ export const BUCKET_CONTEXT: Readonly<Record<Bucket | "class", readonly string[]
  * but the schema admits the vocabulary now so a later slice's entries are a
  * pure data addition, never a schema reshape.
  */
-export const VARIANTS = [
+const VARIANTS = [
   "triage-origin",
   "tracking-parent",
   "dev-failure",
   "reframe",
   "grill-handoff",
 ] as const;
-export const VariantSchema = z.enum(VARIANTS);
+const VariantSchema = z.enum(VARIANTS);
 export type Variant = z.infer<typeof VariantSchema>;
 
 /**
@@ -205,15 +205,13 @@ export const REVIEW_BUCKETS = [
   "Target reframe",
   "Target stale-blocked",
 ] as const;
-export const ReviewBucketSchema = z.enum(REVIEW_BUCKETS);
-export type ReviewBucket = z.infer<typeof ReviewBucketSchema>;
+const ReviewBucketSchema = z.enum(REVIEW_BUCKETS);
 
 // ---------------------------------------------------------------------------
 // Action (ADR-0034 §8.2) — six closed kinds
 // ---------------------------------------------------------------------------
 
-export const ConfirmTierSchema = z.enum(["immediate-undo", "confirm-first"]);
-export type ConfirmTier = z.infer<typeof ConfirmTierSchema>;
+const ConfirmTierSchema = z.enum(["immediate-undo", "confirm-first"]);
 
 /** Fields every Action carries regardless of `kind`. */
 const ActionCommonShape = {
@@ -226,7 +224,7 @@ const ActionCommonShape = {
  * `in-dashboard` — fires an existing write route. `method` is a deliberate
  * extension beyond the ADR-0034 §8.2 sketch (see module docstring).
  */
-export const InDashboardActionSchema = z
+const InDashboardActionSchema = z
   .object({
     kind: z.literal("in-dashboard"),
     route: z.string().min(1),
@@ -242,7 +240,7 @@ export const InDashboardActionSchema = z
  * item's context by the feed composer (slice 4) — this router serves
  * templates UNRESOLVED.
  */
-export const TerminalSkillActionSchema = z
+const TerminalSkillActionSchema = z
   .object({
     kind: z.literal("terminal-skill"),
     command: z.string().min(1),
@@ -252,7 +250,7 @@ export const TerminalSkillActionSchema = z
 
 /** `config-env` — a hand-off to a tracked config file; the dashboard never
  * writes tracked config (ADR-0034 §9.1). */
-export const ConfigEnvActionSchema = z
+const ConfigEnvActionSchema = z
   .object({
     kind: z.literal("config-env"),
     project: z.enum(["orchestrator", "target"]),
@@ -264,13 +262,13 @@ export const ConfigEnvActionSchema = z
 /** The three ADR-0005 closed-escalation kinds — doc link + instruction, no
  * control. Each is `.strict()` with no kind-specific fields: the link is the
  * entry's own `doc`. */
-export const CredentialActionSchema = z
+const CredentialActionSchema = z
   .object({ kind: z.literal("credential"), ...ActionCommonShape })
   .strict();
-export const ResearchBeyondAutonomyActionSchema = z
+const ResearchBeyondAutonomyActionSchema = z
   .object({ kind: z.literal("research-beyond-autonomy"), ...ActionCommonShape })
   .strict();
-export const VisionDecisionActionSchema = z
+const VisionDecisionActionSchema = z
   .object({ kind: z.literal("vision-decision"), ...ActionCommonShape })
   .strict();
 
@@ -283,7 +281,6 @@ export const ActionSchema = z.discriminatedUnion("kind", [
   VisionDecisionActionSchema,
 ]);
 export type Action = z.infer<typeof ActionSchema>;
-export type ActionKind = Action["kind"];
 
 // ---------------------------------------------------------------------------
 // Entry + registry

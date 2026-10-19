@@ -5,7 +5,7 @@
  * Sends a digest every 4 hours during daytime (7am-10pm).
  *
  * Collects events in memory, then formats a summary covering:
- * - Cycles completed since last digest (merged, failed, abandoned)
+ * - Cycles completed since last digest (merged, failed)
  * - Research cycles run
  * - Test count changes
  * - Backlog/queue state
@@ -78,10 +78,6 @@ const QUIET_END_HOUR = 7; // 7am
  * assembly grammar that `digest-format.ts` owns.
  */
 export const CRITICAL_EVENT_TYPES: readonly string[] = [
-  E.CYCLE_ROLLBACK_FAILED,
-  E.SCHEDULER_STOPPED,
-  E.SCHEDULER_PAUSED_REPETITION,
-  E.SCHEDULER_BACKLOG_EMPTY,
   // Issue #3848 (epic #3844): the three in-band launch-flow signals ride the
   // immediate CRITICAL bypass (formatCriticalAlert's generic default arm
   // renders them) rather than the batched digest — a sustained-streak alarm
@@ -96,6 +92,9 @@ export const CRITICAL_EVENT_TYPES: readonly string[] = [
   // renders it) as the launch-flow signals above; a wiped install under a
   // live money-critical service must not wait up to 4h for the next digest.
   E.INFRA_NODE_MODULES_WIPED,
+  // Issue #4939: ~/hydra origin URL wrong / origin/master missing — immediate
+  // CRITICAL bypass; every worktree shares the gitdir.
+  E.INFRA_ORIGIN_IDENTITY_WRONG,
   // Issue #3868: live-but-sterile GLM drainer — same immediate CRITICAL
   // bypass; while the drainer heartbeat is fresh the #3754 partition hides
   // glm-eligible work from the Opus lane, so every hour of sterility is an

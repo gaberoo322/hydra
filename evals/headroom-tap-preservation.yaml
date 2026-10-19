@@ -1,0 +1,117 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+#
+# Headroom offline spike (issue #4769) — golden check: is a failing test still
+# recoverable from a Headroom-compressed TAP? Contract: docs/evals.md.
+#
+# OFFLINE, NO API KEY: the `echo` provider returns the rendered prompt verbatim,
+# so this asserts on the TEXT, not on a model. No Headroom is needed at CI time:
+# the compressed TAP is embedded INLINE below as a verbatim excerpt of the real
+# spike output (scripts/headroom-spike.sh, headroom-ai 0.40.0, Anthropic
+# tool_result with compress_user_messages=True) — the lines around the one
+# planted `not ok` in an 86 KB / 600-case TAP. The excerpt is cut from the
+# compressed text, not hand-written; see
+# docs/research/2026-09-headroom-offline-spike.md for the full-corpus numbers.
+#
+# NEVER weaken these assertions to make them pass. If a future re-run of the
+# spike loses the failing test name, commit the red eval as the NO-GO evidence.
+
+description: >-
+  Headroom spike — a failing test name and its `not ok` line must be
+  recoverable verbatim from compressed TAP (control on uncompressed TAP first).
+
+prompts:
+  - >-
+    You are triaging a red test run. Report which test failed.
+    TAP output follows.
+
+    {{tap}}
+
+providers:
+  - id: echo
+
+tests:
+  - description: CONTROL — uncompressed TAP excerpt carries the failing test (proves the assertions work)
+    vars:
+      tap: |
+            # Subtest: passing filler case 299
+            ok 299 - passing filler case 299
+              ---
+              duration_ms: 0.018534
+              type: 'test'
+              ...
+            # Subtest: planted-failing-test-4769 detects the planted regression
+            not ok 300 - planted-failing-test-4769 detects the planted regression
+              ---
+              duration_ms: 0.657578
+              type: 'test'
+              location: '/tmp/hydra-headroom-spike/planted/planted-failure.test.mts:9:7'
+              failureType: 'testCodeFailure'
+              error: |-
+                planted failure for the headroom spike
+
+                2 !== 3
+
+              code: 'ERR_ASSERTION'
+              name: 'AssertionError'
+              expected: 3
+              actual: 2
+              operator: 'strictEqual'
+              stack: |-
+                TestContext.<anonymous> (file:///tmp/hydra-headroom-spike/planted/planted-failure.test.mts:10:16)
+                Test.runInAsyncScope (node:async_hooks:214:14)
+                Test.run (node:internal/test_runner/test:1047:25)
+                Suite.processPendingSubtests (node:internal/test_runner/test:744:18)
+                Test.postRun (node:internal/test_runner/test:1173:19)
+                Test.run (node:internal/test_runner/test:1101:12)
+                async Suite.processPendingSubtests (node:internal/test_runner/test:744:7)
+              ...
+            # Subtest: passing filler case 301
+    assert:
+      - type: contains
+        value: "not ok 300 - planted-failing-test-4769 detects the planted regression"
+      - type: contains
+        value: "# Subtest: planted-failing-test-4769 detects the planted regression"
+
+  - description: COMPRESSED — the same region after Headroom still names the failing test
+    vars:
+      tap: |
+            # Subtest: passing filler case 299
+            ok 299 - passing filler case 299
+              ---
+              duration_ms: 0.018534
+              type: 'test'
+              ...
+            # Subtest: planted-failing-test-4769 detects the planted regression
+            not ok 300 - planted-failing-test-4769 detects the planted regression
+              ---
+              duration_ms: 0.657578
+              type: 'test'
+              location: '/tmp/hydra-headroom-spike/planted/planted-failure.test.mts:9:7'
+              failureType: 'testCodeFailure'
+              error: |-
+                planted failure for the headroom spike
+
+                2 !== 3
+
+              code: 'ERR_ASSERTION'
+              name: 'AssertionError'
+              expected: 3
+              actual: 2
+              operator: 'strictEqual'
+              stack: |-
+                TestContext.<anonymous> (file:///tmp/hydra-headroom-spike/planted/planted-failure.test.mts:10:16)
+                Test.runInAsyncScope (node:async_hooks:214:14)
+                Test.run (node:internal/test_runner/test:1047:25)
+                Suite.processPendingSubtests (node:internal/test_runner/test:744:18)
+                Test.postRun (node:internal/test_runner/test:1173:19)
+                Test.run (node:internal/test_runner/test:1101:12)
+                async Suite.processPendingSubtests (node:internal/test_runner/test:744:7)
+              ...
+            # Subtest: passing filler case 301
+    assert:
+      - type: contains
+        value: "not ok 300 - planted-failing-test-4769 detects the planted regression"
+      - type: contains
+        value: "# Subtest: planted-failing-test-4769 detects the planted regression"
+      - type: contains
+        value: "planted-failing-test-4769"

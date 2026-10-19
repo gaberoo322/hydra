@@ -299,6 +299,8 @@ export async function recordCycle(
         const upgradeMerged = numberOrDefault(body.tasksMerged, 1);
         await deps.metrics.recordCycleMetrics(cycleId, {
           tasksMerged: upgradeMerged > 0 ? upgradeMerged : 1,
+          // Issue #4747: persist the merge evidence `countsAsMerge` reads.
+          status: "merged",
         });
         await deps.cycle.updateCycleHash(cycleId, { status: "merged" });
         statusUpgraded = true;
@@ -400,6 +402,9 @@ export async function recordCycle(
 
     const metrics: CycleMetricsInput = {
       source,
+      // Issue #4747: persist the cycle status verbatim so readers can tell a
+      // `completed` dev row from a `merged` one (`countsAsMerge`).
+      status,
       // Issue #2689: classify EXPLICITLY. An absent/empty anchorType would be
       // stripped by the field-cleanup loop below and then bucket as "unknown"
       // in the aggregator — the data-quality failure that made 24% of cycles

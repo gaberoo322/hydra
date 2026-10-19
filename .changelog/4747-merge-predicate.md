@@ -1,0 +1,1 @@
+- fix: merge-rate and cost-per-merge metrics no longer count qa/grill rows or merely-completed dev rows as merges (#4747)

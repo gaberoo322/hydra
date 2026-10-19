@@ -24,7 +24,7 @@ const inventoryModules = import.meta.glob("../../../../docs/generated/*.json", {
  * Parse one inventory's raw text into { ok: true, rows, generatedFrom } or
  * { ok: false, reason }.
  */
-export function parseInventory(raw, family) {
+function parseInventory(raw, family) {
   if (raw == null) return { ok: false, reason: "missing" };
   let inv;
   try {

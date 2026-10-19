@@ -49,8 +49,8 @@ export interface CountRow {
   value: number;
 }
 
-/** Corpus tier (#4544 decision 2): which part of the /docs page a member belongs to. */
-export type CorpusTier = "living" | "playbook" | "historical" | "adr";
+/** Corpus tier (#4544 decision 2, widened by #4596): which part of the /docs page a member belongs to. */
+export type CorpusTier = "living" | "playbook" | "historical" | "adr" | "module-map";
 
 /** One row of the corpus family (docs/generated/corpus.json, #4591). */
 export interface CorpusRow {
@@ -67,6 +67,47 @@ export interface CorpusRow {
 export interface SourceRef {
   path: string;
   line: number;
+}
+
+/** One row of the classes family (docs/generated/classes.json, #4592): one dispatch-class table row. */
+export interface ClassRow {
+  /** 0-based file order in scripts/autopilot/classes.json (the stage-derivation order for skills). */
+  order: number;
+  name: string;
+  kind: string;
+  skill: string;
+  stage: string;
+  model: string;
+  /** snake_case by design (#4545 finding-5 spelling) — null when the row omits the column. */
+  skill_by_ticket_type: Record<string, string> | null;
+  costClass: string;
+  learningAgent: string | null;
+  cooldownSeconds: number | null;
+  scope: string;
+  provenanceLabel: string | null;
+  notes: string | null;
+  /** The cockpit page every class's live state lives on — one constant rule (INV-13). */
+  home: string;
+  secondaryHome: string;
+  source: SourceRef;
+}
+
+/** One row of the skills family (docs/generated/skills.json, #4592): one operator playbook. */
+export interface SkillRow {
+  /** The frontmatter name (== file basename, enforced by the extractor). */
+  name: string;
+  /** Repo-relative playbook path. */
+  path: string;
+  /** DERIVED from the class table (INV-15); one of the ten-value stage enum. */
+  stage: string;
+  description: string | null;
+  /** Classes that dispatch this skill and how — `via` is "default" or the ticket type. */
+  dispatchedBy: Array<{ class: string; via: string }>;
+  /** compose_base + reference_files + @include targets (repo-relative, on disk or extraction fails). */
+  composedFrom: string[];
+  /** The skill view route — /docs/skill/<name>. */
+  route: string;
+  source: SourceRef;
 }
 
 /** One row of the redis-keys family (docs/generated/redis-keys.json, #4594). */
@@ -274,6 +315,56 @@ export interface AdrRow {
 /** The counts inventory: envelope + metric rows. */
 export type CountsInventory = Inventory<CountRow>;
 
+/**
+ * One term a CONTEXT-MAP row's Glossary-terms cell names (#4596): the term's
+ * name plus its CONTEXT.md paragraph anchor (`term-<slug>`), or null for a
+ * retired row's verbatim, never-resolved term.
+ */
+export interface AreaTerm {
+  name: string;
+  /** `term-<slug>` into /docs/ref/context for resolved terms; null (retired rows). */
+  anchor: string | null;
+}
+
+/** One Reference docs cell link (#4596): target path plus optional heading anchor. */
+export interface AreaReferenceDoc {
+  path: string;
+  anchor: string | null;
+}
+
+/**
+ * One row of the areas family (docs/generated/areas.json, #4596): one
+ * CONTEXT-MAP row joined with every inventory family. Everything is DERIVED
+ * at extraction time (INV-6) — counts are `slices[family].length`, never a
+ * separate typed field.
+ */
+export interface AreaRow {
+  /** areaSlug(first code path), else areaSlug(normalised name) (INV-7). */
+  slug: string;
+  /** Normalised first cell of the CONTEXT-MAP row. */
+  name: string;
+  table: "domain" | "infra";
+  /** Code spans of the first cell containing a '/' (INV-5). */
+  paths: string[];
+  /** Struck-through row — renders as a tombstone, never an area view. */
+  retired: boolean;
+  terms: AreaTerm[];
+  /** The Module map cell's file, repo-relative; null when the row has none. */
+  moduleMap: string | null;
+  /** ADR-NNNN numbers of the Relevant ADRs cell, CELL ORDER. */
+  adrs: string[];
+  /** adrs.json numbers whose citedBy covers the module map or a reference doc, minus `adrs`, sorted. */
+  adrsCited: string[];
+  referenceDocs: AreaReferenceDoc[];
+  /** Registry label strings of the joined rows, one key per family with >= 1 row. */
+  slices: Record<string, string[]>;
+  /** Distinct non-/api homes of joined routes + redis-keys + streams rows, first-seen order. */
+  homes: string[];
+  /** /docs/area/<slug>, or null for retired rows. */
+  route: string | null;
+  source: SourceRef;
+}
+
 export type RedisKeysInventory = Inventory<RedisKeyRow>;
 export type StreamsInventory = Inventory<StreamRow>;
 export type SchemasInventory = Inventory<SchemaRow>;
@@ -284,7 +375,10 @@ export type PagesInventory = Inventory<PageRow>;
 export type ConfigInventory = Inventory<ConfigRow>;
 export type CiGatesInventory = Inventory<CiGateRow>;
 export type UnitsScriptsInventory = Inventory<UnitScriptRow>;
+export type ClassesInventory = Inventory<ClassRow>;
+export type SkillsInventory = Inventory<SkillRow>;
 export type AdrsInventory = Inventory<AdrRow>;
+export type AreasInventory = Inventory<AreaRow>;
 
 /** The committed byte form: two-space JSON + trailing newline. */
 export function serializeInventory<Row>(inventory: Inventory<Row>): string {

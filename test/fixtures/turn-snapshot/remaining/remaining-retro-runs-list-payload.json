@@ -1,0 +1,39 @@
+{
+  "name": "retro-runs-list-payload",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_retro)",
+  "collectors": [
+    "retro"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {},
+  "redis": {},
+  "http": {
+    "/autopilot/runs?limit=14": {
+      "status": 200,
+      "body": "[]"
+    }
+  },
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [],
+    "httpCalls": [
+      "/autopilot/runs?limit=14"
+    ],
+    "redisWrites": [],
+    "values": {
+      "retro": {
+        "runs": {
+          "ok": true,
+          "value": {
+            "available": false,
+            "candidate": null
+          }
+        },
+        "drillable": null
+      }
+    }
+  }
+}

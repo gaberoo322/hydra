@@ -272,7 +272,7 @@ test("autopilot lane: a hardcoded env fallback in a shell script is a fatal name
   // Either way the line is a FATAL name leak (that is what the ratchet needs);
   // this pins the outcome, not the token the pre-existing matcher picks.
   const vs = classifyFile(
-    "scripts/autopilot/collect-state.sh",
+    "scripts/autopilot/turn.sh",
     'TARGET_GH_REPO="${HYDRA_TARGET_GITHUB_REPO:-gaberoo322/hydra-betting}"',
   );
   const fatal = vs.filter(v => v.lane === "autopilot" && v.severity === "name");
@@ -288,7 +288,7 @@ test("autopilot lane: a hardcoded env fallback in a shell script is a fatal name
 
 test("autopilot lane: a `#` comment mention is advisory (name-comment / vocab-comment)", () => {
   const sh = classifyFile(
-    "scripts/autopilot/collect-state.sh",
+    "scripts/autopilot/turn.sh",
     "# Target repo (gaberoo322/hydra-betting). Parity with the orch block above.",
   );
   assert.ok(sh.length > 0);
@@ -314,7 +314,7 @@ test("autopilot lane: docstring and heredoc bodies classify as code (stricter-is
   assert.ok(docstring.some(v => v.severity === "name"), `docstring: ${JSON.stringify(names(docstring))}`);
 
   const heredoc = classifyFile(
-    "scripts/autopilot/collect-state.sh",
+    "scripts/autopilot/turn.sh",
     ["cat <<'EOF'", "board: gaberoo322/hydra-betting", "EOF"].join("\n"),
   );
   assert.ok(heredoc.some(v => v.severity === "name"), `heredoc: ${JSON.stringify(names(heredoc))}`);

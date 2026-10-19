@@ -157,7 +157,7 @@ export type DegradedReadResult<T> = { ok: true; rows: T[] } | { ok: false };
  * layer on top of it: `isolateAggregator` / `aggregatorRouteNoQuery` convert a
  * throw into a logged **500**, whereas the `/autopilot/*` read routes
  * (`board-state`, `work-queue`, `hitl-grill`) promise a **200** safe default
- * with `degraded: true` on ANY read failure — `collect-state.sh` parses that
+ * with `degraded: true` on ANY read failure — the Turn Snapshot parses that
  * body to decide whether to fall back to its inline `gh` call, so a 500 would
  * wedge the autopilot turn. The helper therefore never touches `res` and
  * never throws; failure is reported purely through the return value, and the

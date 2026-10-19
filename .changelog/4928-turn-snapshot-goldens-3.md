@@ -1,0 +1,1 @@
+- test: target-board Turn Snapshot goldens carry their typed values; the golden-values sidecar and its helper are retired (#4928)

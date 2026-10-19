@@ -133,7 +133,7 @@ describe("design-concept Redis store + gate", () => {
 
   test("#736 write under bare number → read by the dispatched issue-<N> string", async () => {
     // This is the exact orphaning repro: the grill writes `"736"`, but
-    // collect-state.sh / decide.py read `"issue-736"`. After normalization
+    // the Turn Snapshot / decide.py read `"issue-736"`. After normalization
     // both must resolve to the same artifact.
     const saved = await dc.saveDesignConcept(buildComplete({ anchorRef: "736" } as any));
     assert.equal(saved.anchorRef, "issue-736", "persisted ref is canonicalized");

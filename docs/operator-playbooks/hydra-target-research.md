@@ -31,7 +31,7 @@ Files:
 Live state (parallel):
 ```bash
 TEST_CMD=$(jq -r '.verify.test' "$TARGET_WS/.hydra/manifest.json")
-( cd "$TARGET_APP_DIR" && eval "$TEST_CMD" 2>&1 | tail -5 )
+( cd "${TARGET_APP_DIR:?unset - re-run the seam preamble in this Bash call}" && eval "$TEST_CMD" 2>&1 | tail -5 )
 
 # Board state — GitHub Issues on $TARGET_GH_REPO (ADR-0031). REST only
 # (gh api repos/...), never gh --json / GraphQL on the hot path (Decision 6).
@@ -57,7 +57,7 @@ print('Recently merged:')
 for t in titles[:10]: print(f'  - {t[:80]}')
 "
 
-git -C "$TARGET_WS" log --oneline -10
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" log --oneline -10
 ```
 
 Compute **backlog gap**: `gap = max(0, 30 - $TOTAL_ACTIVE)` (the open-board active count from the loop above).
@@ -211,7 +211,7 @@ path every other Target change uses. **Never push direct to `main`**, and
 orchestrator reads as live state, with a deliberate commit history).
 
 ```bash
-cd "$TARGET_WS"
+cd "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}"
 # Only proceed if a direction doc actually changed this cycle.
 if [ -n "$(git status --porcelain -- direction/priorities.md direction/roadmap.md)" ]; then
   DATE_TAG=$(date +%Y-%m-%d)

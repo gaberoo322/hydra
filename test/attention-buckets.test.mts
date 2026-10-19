@@ -58,8 +58,8 @@ function stuckSnapshot(over: Partial<StuckItems> = {}): IssuesWaitingResult {
   };
   return {
     items: [
-      ...s.blockedOver2d.map((i) => ({ ...i, line: "blocked-live" as const, blockerNumbers: [], openBlockerNumbers: [] })),
-      ...s.needsInfoWaiting.map((i) => ({ ...i, line: "needs-info" as const, blockerNumbers: [], openBlockerNumbers: [] })),
+      ...s.blockedOver2d.map((i) => ({ ...i, line: "blocked-live" as const, blockerNumbers: [], openBlockerNumbers: [], humanBlockers: [], hasFilesInScope: true })),
+      ...s.needsInfoWaiting.map((i) => ({ ...i, line: "needs-info" as const, blockerNumbers: [], openBlockerNumbers: [], humanBlockers: [], hasFilesInScope: true })),
     ],
     scanned: s.scanned,
     sourcesOk: s.sourcesOk,
@@ -127,8 +127,9 @@ function deps(over: Partial<AttentionFeedDeps> = {}): AttentionFeedDeps {
     getIssuesWaiting: async () => stuckSnapshot(),
     getStalledPrs: async () => stalledSnapshot(),
     getFrictionPatterns: async () => frictionSnapshot(),
-    loadDismissedIds: async () => [],
-    recordSurfaced: async () => {},
+    loadDismissed: async () => new Map(),
+    reconcileLedgers: async () => {},
+    readHitlGrillIssues: async () => ({ ok: true as const, rows: [] }),
     readPaused: async () => ({ paused: false }),
     readSessionBlockedUntil: async () => null,
     readSchedulerStopReason: async () => null,
@@ -249,16 +250,14 @@ describe("bucket summaries (INV-2, INV-4)", () => {
     );
   });
 
-  test("unwired buckets (parked-over-cap only) are never an asserted zero", async () => {
+  test("parked-over-cap is wired: below cap => wired, sourcesOk, count 0 (never not-wired)", async () => {
     const result = await getAttentionFeed(deps());
-    for (const name of ["parked-over-cap"]) {
-      const b = result.buckets.find((x) => x.bucket === name)!;
-      assert.deepEqual(
-        { wired: b.wired, sourcesOk: b.sourcesOk, scanned: b.scanned, count: b.count, sourceErrors: b.sourceErrors },
-        { wired: false, sourcesOk: false, scanned: 0, count: 0, sourceErrors: ["not-wired"] },
-      );
-    }
-    // Top-level sourcesOk ANDs only wired buckets — a quiet day is still asserted.
+    const b = result.buckets.find((x) => x.bucket === "parked-over-cap")!;
+    assert.deepEqual(
+      { wired: b.wired, sourcesOk: b.sourcesOk, count: b.count, sourceErrors: b.sourceErrors },
+      { wired: true, sourcesOk: true, count: 0, sourceErrors: [] },
+    );
+    assert.equal(result.buckets.every((x) => x.wired), true);
     assert.equal(result.sourcesOk, true);
     assert.equal(result.scanned, result.buckets.reduce((s, b) => s + b.scanned, 0));
   });
@@ -577,5 +576,70 @@ describe("resolved registry actions (INV-9, INV-10)", () => {
     assert.equal(bucket.sourcesOk, false);
     assert.deepEqual(bucket.sourceErrors, ["registry:prs-not-landing:failed-required"]);
     assert.equal(result.sourcesOk, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4805 — blocker-aware detail text and the stale-blocked relabel action
+// ---------------------------------------------------------------------------
+
+describe("blocker-aware waiting rows (#4805)", () => {
+  const waiting = (over: Partial<IssuesWaitingResult["items"][number]>): IssuesWaitingResult => ({
+    items: [
+      {
+        number: 40,
+        title: "slice",
+        url: "u40",
+        createdAt: "2026-08-01T00:00:00.000Z",
+        ageDays: 13,
+        labels: ["blocked"],
+        line: "blocked-live",
+        blockerNumbers: [4624],
+        openBlockerNumbers: [4624],
+        humanBlockers: [{ number: 4624, reason: "ready-for-human" }],
+        hasFilesInScope: true,
+        ...over,
+      },
+    ],
+    scanned: 1,
+    sourcesOk: true,
+    sourceErrors: [],
+    thresholds: DEFAULT_THRESHOLDS,
+  });
+
+  test("blocked-live detail names the human-waiting blocker and its reason", async () => {
+    const result = await getAttentionFeed(deps({ getIssuesWaiting: async () => waiting({}) }));
+    const item = result.items.find((i) => i.id === "blocked-issue-40")!;
+    assert.equal(item.detail, "blocked on #4624 (ready-for-human)");
+  });
+
+  test("a failed blocker lookup renders the unknown-state detail", async () => {
+    const result = await getAttentionFeed(
+      deps({
+        getIssuesWaiting: async () => waiting({ humanBlockers: [], blockerLookupFailed: true }),
+      }),
+    );
+    const item = result.items.find((i) => i.id === "blocked-issue-40")!;
+    assert.equal(item.detail, "blocked by #4624 (state unknown — blocker lookup failed)");
+  });
+
+  test("stale-blocked recommends the relabel to ready-for-agent and warns when no Files in scope", async () => {
+    const result = await getAttentionFeed(
+      deps({
+        getIssuesWaiting: async () =>
+          waiting({ line: "stale-blocked", openBlockerNumbers: [], humanBlockers: [], hasFilesInScope: false }),
+      }),
+    );
+    const item = result.items.find((i) => i.id === "stale-blocked-issue-40")!;
+    assert.match(item.detail ?? "", /add a ## Files in scope section before relabelling/);
+    const rec = item.action.recommended;
+    assert.ok(
+      rec.kind === "terminal-skill" &&
+        rec.command.includes("--remove-label blocked --add-label ready-for-agent"),
+    );
+    assert.deepEqual(
+      (item.action.alternatives as { label: string }[]).map((a) => a.label),
+      ["Still blocked (update ref)", "No longer relevant"],
+    );
   });
 });

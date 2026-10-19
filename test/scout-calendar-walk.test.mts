@@ -354,7 +354,7 @@ describe("recordScoutSpend / getScoutSpendToday (issue #532)", () => {
     assert.equal(await getScoutSpendToday(now), 35_000);
   });
 
-  test("recordScoutSpend overwrites (not increments) so collect-state mirror is idempotent", async () => {
+  test("recordScoutSpend overwrites (not increments) so the Turn Snapshot mirror is idempotent", async () => {
     const now = new Date("2026-05-19T10:00:00Z");
     await recordScoutSpend(10_000, now);
     await recordScoutSpend(45_000, now);

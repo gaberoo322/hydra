@@ -45,6 +45,10 @@ from pathlib import Path
 from run_termination import count_slots_occupied as _shared_count_slots_occupied
 from run_termination import post_run_end as _shared_post_run_end
 
+# The Turn Snapshot accessor (ADR-0043, #4934) — usage eligibility is read
+# through it, the same source decide.py's quota cap reads.
+import turn_snapshot as ts  # noqa: E402
+
 STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json"))
 HYDRA_API_BASE = os.environ.get("HYDRA_API_BASE", "http://localhost:4000")
 
@@ -117,14 +121,12 @@ def _quota_caps(limits: dict) -> tuple[float, float]:
 def _quota_current_percents(s: dict) -> tuple[float | None, float | None]:
     """Mirror of `decide.py._quota_current_percents`.
 
-    Reads `state.usage_eligibility.usage` (injected every turn by
-    collect-state.sh — zero new I/O). `(None, None)` when the meter is not usable:
-    an absent / malformed payload, or `calibrated` anything other than `True`.
+    Reads the usage-eligibility body through the Turn Snapshot accessor
+    (injected every turn by turn_snapshot.py apply — zero new I/O). `(None,
+    None)` when the meter is not usable: an absent / malformed payload, or
+    `calibrated` anything other than `True`.
     """
-    raw = s.get("usage_eligibility")
-    if not isinstance(raw, dict):
-        return (None, None)
-    usage = raw.get("usage")
+    usage = ts.usage_eligibility(s).get("usage")
     if not isinstance(usage, dict) or usage.get("calibrated") is not True:
         return (None, None)
     return (

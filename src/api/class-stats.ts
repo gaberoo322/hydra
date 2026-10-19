@@ -4,7 +4,7 @@
  *   GET /api/autopilot/class-stats
  *     → { scoreboard: ClassScoreboard, shadow: ShadowDampenerPlan, generatedAt }
  *
- * The READ-ONLY view the autopilot turn consumes. `collect-state.sh` reads this
+ * The READ-ONLY view the autopilot turn consumes. The Turn Snapshot reads this
  * one surface via `hydra raw GET /autopilot/class-stats`, stitches it into
  * `state.class_stats`, and `decide.py` logs the shadow-mode multipliers it WOULD
  * apply — actuating NOTHING (the #2943 byte-identical-dispatch invariant).

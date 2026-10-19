@@ -4,21 +4,31 @@
 #
 #   bash scripts/autopilot/turn.sh [events.json]
 #
-# Runs, in order, the five scripts the playbook's Loop used to list as
-# separate session steps — each of which an unattended session issued as its
-# own model call, with hand-written glue between them:
+# Runs, in order, the scripts the playbook's Loop used to list as separate
+# session steps — each of which an unattended session issued as its own model
+# call, with hand-written glue between them:
 #
-#   1. collect-state.sh  (Phase 1)   with the slot-events cursor read from state
-#   2. merge-signals.py  (Phase 1)   collect output → state.signals + blobs (#4829)
+#   1. turn-snapshot.ts  (Phase 1)   the JSON Turn Snapshot (ADR-0043, #4934):
+#                                   every collector in one process, with the
+#                                   slot-events cursor read from state,
+#                                   validated (and repaired per field) on emit
+#   2. turn_snapshot.py apply (Phase 1)  stores it on state.turn_snapshot — the
+#                                   ONE form decide.py, render-dispatch.py and
+#                                   term-check.py read, through
+#                                   scripts/autopilot/turn_snapshot.py. A failed
+#                                   emit or an unusable document stores the
+#                                   ALL-DEGRADED snapshot instead (conservative:
+#                                   nothing available, every producer cap
+#                                   saturated, health_fail) — the turn still plans.
 #   3. term-check.py     (Phase 3)   prints TERM:<cause> | OK — informational here;
 #                                   decide.py emits the `terminate` action itself
 #   4. decide.py decide  (Phase 3)   the plan, written to $HYDRA_AUTOPILOT_PLAN
 #   5. assert_invariants.py (Phase 4)
 #
 # then prints a compact plan summary (turn, actions without the sentinel,
-# reasons, the usage percentages) so the session reads one result instead of
-# five. The session still owns Phase 5 (executing the actions) and 5a (the
-# heartbeat), because those need the Agent tool.
+# reasons) and the usage summary (`turn_snapshot.py summary`) so the session
+# reads one result instead of five. The session still owns Phase 5 (executing
+# the actions) and 5a (the heartbeat), because those need the Agent tool.
 #
 # Inputs
 #   events.json   typed-event list for decide.py (default
@@ -32,20 +42,21 @@
 #
 # Env overrides (tests, replays)
 #   HYDRA_AUTOPILOT_STATE / _PLAN / _CANDIDATES / _EVENTS   the /tmp paths
-#   HYDRA_AUTOPILOT_COLLECT_OUT    where collect output is written
-#                                  (default /tmp/hydra-autopilot-collect.txt)
-#   HYDRA_AUTOPILOT_COLLECT_REPLAY a recorded collect output to use INSTEAD of
-#                                  running collect-state.sh (the fixture suite,
-#                                  and an operator replaying a turn offline)
+#   HYDRA_AUTOPILOT_SNAPSHOT       where the JSON Turn Snapshot is written
+#                                  (default /tmp/hydra-autopilot-snapshot.json)
+#   HYDRA_AUTOPILOT_SNAPSHOT_REPLAY  a recorded JSON snapshot to apply INSTEAD
+#                                  of running the collectors (the fixture
+#                                  suite, and an operator replaying a turn
+#                                  offline); unusable → all-degraded, as live
 #
 # Exit codes: 0 — plan written and invariants hold; decide.py's own non-zero
 # code when it fails (its stderr tail is echoed); 1 when assert_invariants.py
-# rejects the plan. collect-state.sh failing is NOT fatal: it degrades its own
-# signals (orch_board_signals_degraded etc.) and the turn proceeds on what it
-# emitted, exactly as the hand-run loop did.
+# rejects the plan; 2 when the state is missing or cannot be written. A failed
+# or unusable snapshot is NOT fatal: the all-degraded snapshot is applied and
+# the turn proceeds on it.
 #
 # Never writes state.turn (the decide.py CLI owns it, #1769) and never edits
-# state.json itself — merge-signals.py and decide.py are the only writers here.
+# state.json itself — turn_snapshot.py and decide.py are the only writers here.
 
 set -uo pipefail
 
@@ -57,11 +68,11 @@ STATE="${HYDRA_AUTOPILOT_STATE:-/tmp/hydra-autopilot-state.json}"
 PLAN="${HYDRA_AUTOPILOT_PLAN:-/tmp/hydra-autopilot-plan.json}"
 CANDIDATES="${HYDRA_AUTOPILOT_CANDIDATES:-/tmp/hydra-autopilot-candidates.json}"
 EVENTS="${1:-${HYDRA_AUTOPILOT_EVENTS:-/tmp/hydra-autopilot-events.json}}"
-COLLECT_OUT="${HYDRA_AUTOPILOT_COLLECT_OUT:-/tmp/hydra-autopilot-collect.txt}"
-COLLECT_ERR="${COLLECT_OUT%.txt}.err"
+SNAPSHOT="${HYDRA_AUTOPILOT_SNAPSHOT:-/tmp/hydra-autopilot-snapshot.json}"
+SNAPSHOT_ERR="${SNAPSHOT%.json}.err"
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-  sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 
@@ -71,23 +82,33 @@ if [ ! -s "$STATE" ]; then
 fi
 
 # --- Phase 1: collect ------------------------------------------------------
-if [ -n "${HYDRA_AUTOPILOT_COLLECT_REPLAY:-}" ]; then
-  cp "$HYDRA_AUTOPILOT_COLLECT_REPLAY" "$COLLECT_OUT" || { echo "[turn] FATAL: cannot read replay $HYDRA_AUTOPILOT_COLLECT_REPLAY" >&2; exit 2; }
-  echo "[turn] collect: replayed $HYDRA_AUTOPILOT_COLLECT_REPLAY"
+# The cursor lives on state (bootstrap seeds it; the snapshot apply advances
+# it) — pass it so the slot-events read resumes where the last turn ended.
+cursor=$(jq -r '.slot_events_last_id // 0' "$STATE" 2>/dev/null || echo 0)
+
+if [ -n "${HYDRA_AUTOPILOT_SNAPSHOT_REPLAY:-}" ]; then
+  echo "[turn] snapshot: replaying $HYDRA_AUTOPILOT_SNAPSHOT_REPLAY"
+  apply_args=("$HYDRA_AUTOPILOT_SNAPSHOT_REPLAY")
 else
-  # The cursor lives on state (bootstrap seeds it; merge-signals.py advances
-  # it) — pass it so the slot-events read resumes where the last turn ended.
-  cursor=$(jq -r '.slot_events_last_id // 0' "$STATE" 2>/dev/null || echo 0)
-  HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID="$cursor" bash "$SCRIPT_DIR/collect-state.sh" >"$COLLECT_OUT" 2>"$COLLECT_ERR"
-  collect_rc=$?
-  echo "[turn] collect: exit=$collect_rc lines=$(wc -l <"$COLLECT_OUT") cursor=$cursor"
-  if [ "$collect_rc" -ne 0 ]; then
-    echo "[turn] collect-state.sh stderr tail:" >&2
-    tail -5 "$COLLECT_ERR" >&2
+  HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID="$cursor" node --no-warnings --experimental-strip-types \
+    "$SCRIPT_DIR/turn-snapshot.ts" --format json --gh-list-limit "${HYDRA_GH_ISSUE_LIST_LIMIT:-100}" \
+    >"$SNAPSHOT" 2>"$SNAPSHOT_ERR"
+  snapshot_rc=$?
+  if [ "$snapshot_rc" -eq 0 ]; then
+    apply_args=("$SNAPSHOT")
+  else
+    # Never trust a partial document from a failed emit: the turn plans on
+    # the all-degraded snapshot instead.
+    echo "[turn] JSON Turn Snapshot emit failed (exit=$snapshot_rc) — applying the all-degraded snapshot for this turn" >&2
+    tail -3 "$SNAPSHOT_ERR" >&2
+    apply_args=(--degraded "turn-snapshot.ts exited $snapshot_rc")
   fi
 fi
-
-python3 "$SCRIPT_DIR/merge-signals.py" "$COLLECT_OUT" "$STATE" || { echo "[turn] FATAL: merge-signals.py failed" >&2; exit 2; }
+if ! applied=$(python3 "$SCRIPT_DIR/turn_snapshot.py" apply "${apply_args[@]}" "$STATE"); then
+  echo "[turn] FATAL: turn_snapshot.py apply could not update $STATE" >&2
+  exit 2
+fi
+echo "[turn] snapshot: $(jq -r '"form=\(.form) degraded=\(.degraded)"' <<<"$applied" 2>/dev/null || echo "$applied") cursor=$cursor"
 
 # --- Phase 3: term-check (informational) + decide ----------------------------
 HYDRA_AUTOPILOT_STATE="$STATE" python3 "$SCRIPT_DIR/term-check.py" 2>&1 | tail -1 | sed 's/^/[turn] term-check: /'
@@ -115,5 +136,5 @@ fi
 
 # --- Summary -----------------------------------------------------------------
 jq -c '{turn, actions: [.actions[] | del(.dispatchSentinel)], reasons: (.reasons // [])}' "$PLAN"
-jq -c '{percentLast5h: .usage_eligibility.usage.percentLast5h, percentSinceReset: .usage_eligibility.usage.percentSinceReset, allow: .usage_eligibility.allow, quota_baseline, cumulative_tokens, slots_occupied: ([.slots | to_entries[] | select(.value != null) | .key])}' "$STATE"
+python3 "$SCRIPT_DIR/turn_snapshot.py" summary "$STATE"
 echo "[turn] OK — plan at $PLAN. Next: execute each action (Phase 5), stamp every dispatch with stamp-slot.py, then heartbeat.py --last-action=<type>."

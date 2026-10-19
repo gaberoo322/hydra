@@ -135,8 +135,8 @@ describe("parseCycleTokenTotal pure parse (issue #2930)", () => {
 describe("projectTokensPerMergedPR pure arithmetic (issue #2930)", () => {
   test("averages tokenCost over merged cycles that carry a token record", () => {
     const trend = [
-      { tasksMerged: 1, tokenCost: 1000 },
-      { tasksMerged: 2, tokenCost: 3000 },
+      { tasksMerged: 1, status: "merged", tokenCost: 1000 },
+      { tasksMerged: 2, status: "merged", tokenCost: 3000 },
     ];
     // (1000 + 3000) / 2 = 2000
     assert.strictEqual(projectTokensPerMergedPR(trend), 2000);
@@ -144,8 +144,8 @@ describe("projectTokensPerMergedPR pure arithmetic (issue #2930)", () => {
 
   test("excludes merged cycles whose tokenCost is null (unattributed), never counts them as 0", () => {
     const trend = [
-      { tasksMerged: 1, tokenCost: 1000 },
-      { tasksMerged: 1, tokenCost: null }, // unattributed — excluded entirely
+      { tasksMerged: 1, status: "merged", tokenCost: 1000 },
+      { tasksMerged: 1, status: "merged", tokenCost: null }, // unattributed — excluded entirely
     ];
     // Only the attributed cycle contributes: 1000 / 1 = 1000 (NOT 500).
     assert.strictEqual(projectTokensPerMergedPR(trend), 1000);
@@ -154,14 +154,14 @@ describe("projectTokensPerMergedPR pure arithmetic (issue #2930)", () => {
   test("excludes non-merged cycles even when they carry a token record", () => {
     const trend = [
       { tasksMerged: 0, tokenCost: 9999 }, // not merged — excluded
-      { tasksMerged: 1, tokenCost: 800 },
+      { tasksMerged: 1, status: "merged", tokenCost: 800 },
     ];
     assert.strictEqual(projectTokensPerMergedPR(trend), 800);
   });
 
   test("returns null (not 0) when no merged cycle carries a token record", () => {
     const trend = [
-      { tasksMerged: 1, tokenCost: null },
+      { tasksMerged: 1, status: "merged", tokenCost: null },
       { tasksMerged: 0, tokenCost: 500 },
     ];
     assert.strictEqual(
@@ -177,8 +177,8 @@ describe("projectTokensPerMergedPR pure arithmetic (issue #2930)", () => {
 
   test("projectAggregateStats surfaces tokensPerMergedPR from the trend", () => {
     const stats = projectAggregateStats([
-      { tasksMerged: 1, tokenCost: 2000 },
-      { tasksMerged: 1, tokenCost: 4000 },
+      { tasksMerged: 1, status: "merged", tokenCost: 2000 },
+      { tasksMerged: 1, status: "merged", tokenCost: 4000 },
     ]);
     assert.strictEqual((stats as any).tokensPerMergedPR, 3000);
   });
@@ -188,16 +188,16 @@ describe("projectTokensPerMergedPR outlier guard (issue #3201)", () => {  test("
     // Real scenario: 14 clean records (~64-101k tokens) + 3 legacy M-scale records.
     // Median of attributed set ≈ ~84k → threshold ≈ 840k → 42M/63M/12M all exceed it.
     const clean = [
-      { tasksMerged: 1, tokenCost: 101287 },
-      { tasksMerged: 1, tokenCost: 84289 },
-      { tasksMerged: 1, tokenCost: 72463 },
-      { tasksMerged: 1, tokenCost: 65000 },
-      { tasksMerged: 1, tokenCost: 60000 },
+      { tasksMerged: 1, status: "merged", tokenCost: 101287 },
+      { tasksMerged: 1, status: "merged", tokenCost: 84289 },
+      { tasksMerged: 1, status: "merged", tokenCost: 72463 },
+      { tasksMerged: 1, status: "merged", tokenCost: 65000 },
+      { tasksMerged: 1, status: "merged", tokenCost: 60000 },
     ];
     const outliers = [
-      { tasksMerged: 1, tokenCost: 42_000_000 }, // legacy-iso-task
-      { tasksMerged: 1, tokenCost: 63_120_000 }, // betting-build-1591
-      { tasksMerged: 1, tokenCost: 12_880_000 }, // task-B
+      { tasksMerged: 1, status: "merged", tokenCost: 42_000_000 }, // legacy-iso-task
+      { tasksMerged: 1, status: "merged", tokenCost: 63_120_000 }, // betting-build-1591
+      { tasksMerged: 1, status: "merged", tokenCost: 12_880_000 }, // task-B
     ];
     const trend = [...clean, ...outliers];
     const result = projectTokensPerMergedPR(trend);
@@ -210,16 +210,16 @@ describe("projectTokensPerMergedPR outlier guard (issue #3201)", () => {  test("
 
   test("outlier guard: single M-scale record in a 1-record trend falls back to full set (no null)", () => {
     // When every record is an outlier, return all of them rather than null.
-    const trend = [{ tasksMerged: 1, tokenCost: 50_000_000 }];
+    const trend = [{ tasksMerged: 1, status: "merged", tokenCost: 50_000_000 }];
     assert.strictEqual(projectTokensPerMergedPR(trend), 50_000_000);
   });
 
   test("outlier guard: does not drop legitimate high-cost cycles that are within 10x of median", () => {
     // If median is 100k and one cycle costs 900k (9× median), it must stay in.
     const trend = [
-      { tasksMerged: 1, tokenCost: 100_000 },
-      { tasksMerged: 1, tokenCost: 100_000 },
-      { tasksMerged: 1, tokenCost: 900_000 }, // 9× median, within threshold
+      { tasksMerged: 1, status: "merged", tokenCost: 100_000 },
+      { tasksMerged: 1, status: "merged", tokenCost: 100_000 },
+      { tasksMerged: 1, status: "merged", tokenCost: 900_000 }, // 9× median, within threshold
     ];
     // Should include all three: (100000 + 100000 + 900000) / 3 = 366667
     assert.strictEqual(projectTokensPerMergedPR(trend), 366667);

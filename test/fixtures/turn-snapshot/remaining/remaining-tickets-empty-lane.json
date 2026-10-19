@@ -1,0 +1,45 @@
+{
+  "name": "tickets-empty-lane",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_tickets)",
+  "collectors": [
+    "tickets"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {},
+  "gh": {
+    "issue-list:needs-tickets:number,assignees": {
+      "json": []
+    }
+  },
+  "redis": {},
+  "http": {},
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "needs-tickets",
+        "--limit",
+        "100",
+        "--json",
+        "number,assignees"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [],
+    "values": {
+      "tickets": {
+        "ok": true,
+        "value": null
+      }
+    }
+  }
+}

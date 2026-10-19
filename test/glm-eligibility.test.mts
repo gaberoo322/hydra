@@ -5,10 +5,9 @@
  * Table-driven, fake deps, no golden files, no processes (the #4679
  * test-port rule).
  *
- * The cross-language grill-exemption parity table (collect-state.sh's
- * MECHANICAL / TRIVIAL python vs `glmGrillExemption` / `glmPickVerdict`) lives
- * in `test/autopilot-grill-gate.test.mts`, the file that already owns those
- * collect-state gates. A file here that read collect-state.sh would resolve
+ * The grill-exemption case table (`glmGrillExemption` / `glmPickVerdict`)
+ * lives in `test/turn-snapshot-picks.test.mts` beside the picks collector that
+ * consumes it (its python twins retired with ADR-0043 slice 3). A file here that read collect-state.sh would resolve
  * to it as its #4134 sprawl-ratchet subject, which #4519 INV-1 forbids.
  */
 
@@ -194,7 +193,7 @@ describe("label home — no label literal outside src/board-labels.ts (issue #46
 // glmPickVerdict — the non-grill arms (INV-6)
 // ---------------------------------------------------------------------------
 
-describe("glmGrillExemption — collect-state's precedence (INV-7)", () => {
+describe("glmGrillExemption — the Turn Snapshot's precedence (INV-7)", () => {
   const base: GlmPickRow = { number: 1, labels: [RFA, ELIG], title: "Do a thing", body: "" };
   const CASES: Array<{ name: string; row: GlmPickRow; expected: ReturnType<typeof glmGrillExemption> }> = [
     { name: "cleanup-scan label -> cleanup-scan", row: { ...base, labels: [CLEANUP] }, expected: CLEANUP },

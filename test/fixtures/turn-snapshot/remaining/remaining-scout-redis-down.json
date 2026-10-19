@@ -1,0 +1,71 @@
+{
+  "name": "scout-redis-down",
+  "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ 46347d1714f563e41a579cebadc1d102e8efaf4c (collect_scout)",
+  "collectors": [
+    "scout"
+  ],
+  "date": "2026-10-07",
+  "orchBoardDegraded": "0",
+  "env": {
+    "HYDRA_TOKEN_USD_RATE": "3"
+  },
+  "gh": {
+    "issue-list:enhancement:number": {
+      "json": [
+        {
+          "number": 1
+        },
+        {
+          "number": 2
+        },
+        {
+          "number": 3
+        }
+      ]
+    }
+  },
+  "redis": {
+    "down": true
+  },
+  "http": {},
+  "expected": {
+    "stderrNotes": [],
+    "ghCalls": [
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--state",
+        "open",
+        "--label",
+        "enhancement",
+        "--limit",
+        "100",
+        "--json",
+        "number"
+      ]
+    ],
+    "httpCalls": [],
+    "redisWrites": [],
+    "values": {
+      "scout": {
+        "lastWalkIso": {
+          "ok": false,
+          "reason": "redis-unreachable: down"
+        },
+        "openEnhancements": {
+          "ok": true,
+          "value": "3"
+        },
+        "tokensToday": "0",
+        "spendUsd": "0.00",
+        "mirrored": {
+          "ok": false,
+          "reason": "skipped: redis unreachable"
+        }
+      }
+    }
+  }
+}

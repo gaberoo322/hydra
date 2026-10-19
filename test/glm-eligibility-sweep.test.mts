@@ -723,3 +723,40 @@ describe("glm-eligibility-sweep — vocabulary preflight (issue #4363)", () => {
     assert.equal(inventoryCalls, 1);
   });
 });
+
+describe("glm-eligibility-sweep — the operator off switch (src/glm/disabled.ts)", () => {
+  test("lane disabled: no board read, no label write, returns 0", async () => {
+    let reads = 0;
+    let writes = 0;
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      isGlmLaneDisabled: () => true,
+      listOpenIssues: async () => {
+        reads++;
+        return okBoard([row(11, [RFA])]);
+      },
+      addIssueLabel: async () => {
+        writes++;
+        return { ok: true };
+      },
+    };
+    assert.equal(await runGlmEligibilitySweep(deps), 0);
+    assert.equal(reads, 0, "a disabled lane never reads the board");
+    assert.equal(writes, 0);
+  });
+
+  test("lane on: the same board is labelled as usual", async () => {
+    const labelled: number[] = [];
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      isGlmLaneDisabled: () => false,
+      listOpenIssues: async () => okBoard([row(11, [RFA])]),
+      addIssueLabel: async (n) => {
+        labelled.push(n);
+        return { ok: true };
+      },
+    };
+    assert.equal(await runGlmEligibilitySweep(deps), 1);
+    assert.deepEqual(labelled, [11]);
+  });
+});

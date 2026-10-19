@@ -39,7 +39,7 @@
  * of already-read inputs, no I/O, never throws. The Redis reads live in the
  * sibling composer `class-stats.ts` (`buildClassScoreboard`), which imports DOWN
  * from this leaf. `decide.py` NEVER calls any of this: the scoreboard is computed
- * orchestrator-side and injected into `state.json` via `collect-state.sh`;
+ * orchestrator-side and injected into `state.json` via the Turn Snapshot;
  * decide.py stays a pure function of `state.json` (the #2943 byte-identical-
  * dispatch invariant).
  *

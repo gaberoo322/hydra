@@ -1,0 +1,1 @@
+- feat: try one agent conflict fix-forward on a DIRTY PR before surfacing it, and hand the issue to the operator when it does surface (#4807)
