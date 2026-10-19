@@ -33,10 +33,7 @@ import {
   type Realm,
 } from "./aggregators/builder-health-stagnation-panel.ts";
 import { type StagnationResult } from "./aggregators/builder-health-stagnation.ts";
-import {
-  NOTIFICATION_EVENT_TYPES as E,
-  type NotificationEventPayload,
-} from "./event-bus-vocabulary.ts";
+import { type NotificationEventPayload } from "./event-bus-vocabulary.ts";
 
 const MAX_DIGEST_LENGTH = 4000; // Telegram's ~4096 char limit with margin
 
@@ -67,9 +64,6 @@ export interface DigestGrammarEvent {
       | "task"
       | "commitSha"
       | "grounding"
-      | "opportunityCount"
-      | "autoQueued"
-      | "updatesApplied"
       | "regressedOutcomes"
     >;
 }
@@ -85,10 +79,12 @@ export function buildDigestMessage(
   const cycleCompletes = events.filter(e => e.type === "cycle:completed");
   const merged = cycleCompletes.filter(e => e.payload?.task?.finalState === "merged");
   const failed = cycleCompletes.filter(e => e.payload?.task?.finalState === "failed" || e.payload?.task?.finalState === "rolled-back");
-  const abandoned = events.filter(e => e.type === "task:rejected" || e.type === "task:drift_detected");
 
   if (cycleCompletes.length > 0) {
-    lines.push(`*Cycles:* ${cycleCompletes.length} completed — ${merged.length} merged, ${failed.length} failed, ${abandoned.length} abandoned`);
+    // Issue #5044: the `, N abandoned` suffix was derived solely from the
+    // retired task:rejected / task:drift_detected types (no live producer),
+    // so it could never be non-zero and was dropped.
+    lines.push(`*Cycles:* ${cycleCompletes.length} completed — ${merged.length} merged, ${failed.length} failed`);
     lines.push("");
 
     // List merged tasks (truncate to top 10 to avoid message-too-long)
@@ -164,41 +160,13 @@ export function buildDigestMessage(
   // single "no data yet" line when every sub-source is empty.
   for (const l of formatBuilderHealthLines(builderHealth)) lines.push(l);
 
-  // Research
-  const researchCompletes = events.filter(e => e.type === "research:completed");
-  if (researchCompletes.length > 0) {
-    for (const e of researchCompletes) {
-      lines.push(`*Research:* ${e.payload?.opportunityCount || 0} opportunities found, ${e.payload?.autoQueued || 0} auto-queued`);
-    }
-    lines.push("");
-  }
-
-  // Architect reviews
-  const architectReviews = events.filter(e => e.type === "architect:review_completed");
-  if (architectReviews.length > 0) {
-    for (const e of architectReviews) {
-      lines.push(`*Architect Review:* ${e.payload?.updatesApplied || 0} methodology updates`);
-    }
-    lines.push("");
-  }
-
-  // Action items
+  // Action items. The codex-era research / architect sections and the
+  // stale-priorities / verification-failure / auto-rollback action items were
+  // keyed on types with no live producer and were deleted in issue #5044.
   const actionItems = [];
-  const stalePriorities = events.filter(e => e.type === "cycle:stale_priorities");
-  if (stalePriorities.length > 0) {
-    actionItems.push("⚠️ Priorities doc is stale — update direction/priorities.md");
-  }
-  const verificationFailures = events.filter(e => e.type === "task:verification_failed");
-  if (verificationFailures.length >= 3) {
-    actionItems.push(`⚠️ ${verificationFailures.length} verification failures — check agent feedback or priorities`);
-  }
-  const rollbacks = events.filter(e => e.type === "cycle:rollback");
-  if (rollbacks.length > 0) {
-    actionItems.push(`⚠️ ${rollbacks.length} auto-rollback(s) — regressions detected and reverted`);
-  }
   // Outcome Holdback events (issue #244, ADR-0004 step 4; #741 carry-up).
-  // These are self-modification reverts driven by leading-outcome regression,
-  // distinct from the test-regression rollbacks above. The holdback now carries
+  // These are self-modification reverts driven by leading-outcome regression.
+  // The holdback now carries
   // up the ladder (T2/T3/T4 enroll; T1 exempt — #741), so the label is
   // tier-neutral rather than implying Tier-2 only.
   const holdbackReverts = events.filter(e => e.type === "holdback.reverted");
@@ -414,31 +382,15 @@ function formatMinutes(mins: number): string {
 }
 
 /**
- * The payload shape the critical-alert switch narrows on (issue #2229).
+ * The payload shape the critical-alert formatter reads (issue #2229).
  *
- * `Pick`ed from the shared `NotificationEventPayload` vocabulary
- * (`event-bus-vocabulary.ts`) — exactly the fields a `case` below reads off
- * `event.payload`. Deriving the slice rather than re-declaring it is the
- * correctness property: a renamed payload key (e.g. `cyclesRun` → `cycleCount`)
- * in the shared vocabulary becomes a compile error *here* (the `Pick` member no
- * longer exists) rather than a silent `undefined` in the rendered alert. The
- * `Record<string, unknown> &` half keeps the type a structural supertype of the
- * bus's loosely-typed payloads (so the `DigestEvent` call site in `digest.ts`
- * stays assignable) and lets the `default` case `JSON.stringify` an arbitrary
- * unknown payload.
+ * Plain `Record<string, unknown>` since issue #5044: the four dedicated arms
+ * that `Pick`ed named fields belonged to the retired rollback/scheduler types,
+ * and the one surviving body only `JSON.stringify`s the payload. It stays a
+ * structural supertype of the bus's loosely-typed payloads, so the
+ * `DigestEvent` call site in `digest.ts` stays assignable.
  */
-type CriticalAlertPayload = Record<string, unknown> &
-  Pick<
-    NotificationEventPayload,
-    | "title"
-    | "commitSha"
-    | "error"
-    | "reason"
-    | "cyclesRun"
-    | "recentTitles"
-    | "suggestion"
-    | "message"
-  >;
+type CriticalAlertPayload = Record<string, unknown>;
 
 export interface CriticalAlertEvent {
   type?: string;
@@ -448,26 +400,20 @@ export interface CriticalAlertEvent {
 /**
  * Format a critical alert event into its Telegram string.
  *
- * Every `case` references a `NOTIFICATION_EVENT_TYPES` member (aliased `E`) —
- * the typed vocabulary in `event-bus.ts` (issue #1182), satisfying the
- * design-concept invariant that the digest critical-alert switch is typed
- * against the source-of-truth map — so a misspelled event type is a compile
- * error, and adding a new type surfaces here as a non-exhaustive switch.
+ * Every live critical type (`CRITICAL_EVENT_TYPES` in `digest.ts` — the six
+ * watchdog signals) renders through this one generic body; the four dedicated
+ * arms belonged to the rollback/scheduler types retired in issue #5044.
  */
 export function formatCriticalAlert(event: CriticalAlertEvent): string {
   const type = event.type || "unknown";
   const payload: CriticalAlertPayload = event.payload || {};
 
-  switch (type) {
-    case E.CYCLE_ROLLBACK_FAILED:
-      return `🚨 *CRITICAL: Rollback Failed*\nTask: ${payload.title}\nCommit: \`${payload.commitSha?.slice(0, 7)}\`\nError: ${payload.error}\n\n⚠️ Manual intervention required immediately`;
-    case E.SCHEDULER_STOPPED:
-      return `🛑 *Scheduler Stopped*\nReason: ${payload.reason}\nCycles run: ${payload.cyclesRun}`;
-    case E.SCHEDULER_PAUSED_REPETITION:
-      return `🔁 *Scheduler Paused — Repetitive Work*\n${payload.reason}\n\nRecent tasks:\n${(payload.recentTitles || []).map(t => `• ${t.slice(0, 70)}`).join("\n")}\n\n${payload.suggestion}`;
-    case E.SCHEDULER_BACKLOG_EMPTY:
-      return `📭 *Backlog Empty*\n${payload.message}\n\n${payload.suggestion}`;
-    default:
-      return `⚠️ *${type}*\n${JSON.stringify(payload).slice(0, 300)}`;
-  }
+  // Legacy Telegram Markdown parses no entities inside code, so the raw
+  // type and payload go in a code span / block: an unpaired `_` or `*`
+  // (`node_modules`, `quota_stretch`) can no longer get the alert
+  // rejected with a 400 (issue #5040). A backtick would end the code
+  // early, so it is swapped for a quote.
+  const safeType = type.replace(/`/g, "'");
+  const json = JSON.stringify(payload).slice(0, 300).replace(/`/g, "'");
+  return `⚠️ *Critical alert* \`${safeType}\`\n\`\`\`\n${json}\n\`\`\``;
 }

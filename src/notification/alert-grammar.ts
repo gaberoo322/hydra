@@ -33,12 +33,9 @@ import {
  * (issue #1182 contract preserved).
  */
 export const ALERT_TYPES: ReadonlySet<string> = new Set<string>([
-  E.CYCLE_FAILED, E.CYCLE_ROLLED_BACK, E.CYCLE_AUTO_KILLED, E.CYCLE_STALLED,
+  // Issue #5044: the codex-era cycle/research/scheduler/pattern members were
+  // deleted with their types (no live producer); only live types remain.
   E.DLQ_ALERT, E.CONSUMER_DEAD,
-  E.RESEARCH_COMPLETED, E.SCHEDULER_ERROR, E.CYCLE_OPERATOR_BLOCKED,
-  E.PATTERN_LOW_MERGE_RATE, E.PATTERN_CONSECUTIVE_FAILURES,
-  E.PATTERN_RECURRING_REGRESSIONS, E.PATTERN_ANCHOR_STUCK,
-  E.PATTERN_TEST_DECLINE, E.PATTERN_HIGH_ABANDONMENT,
   // Issue #3848: the two in-band launch-flow signals. Both are reached only
   // via a successfully-read pace-gate verdict, which proves the Orchestrator
   // was up at detection time, so a dashboard alert is the right surface. The
@@ -95,15 +92,8 @@ function fmtStreakMs(ms: unknown): string {
 export function formatAlertMessage(event: AlertGrammarEvent): string {
   const p = event.payload || {};
   switch (event.type) {
-    case E.CYCLE_FAILED: return `Cycle failed: ${p.taskTitle || p.cycleId || "unknown"} — ${p.reason || "verification failed"}`;
-    case E.CYCLE_ROLLED_BACK: return `Cycle rolled back: ${p.taskTitle || ""} — tests regressed`;
-    case E.CYCLE_AUTO_KILLED: return `Cycle auto-killed after ${p.elapsed || "?"} (TTL exceeded)`;
-    case E.CYCLE_STALLED: return `Cycle stalled: ${p.inProgress || 0} tasks running for ${p.elapsed || "?"}`;
     case E.DLQ_ALERT: return `Dead letter: ${p.eventType || "unknown"} failed ${p.deliveryCount || 0}x — ${p.error || ""}`;
     case E.CONSUMER_DEAD: return `Consumer ${p.consumer || "unknown"} died after ${p.restarts || 0} restarts`;
-    case E.RESEARCH_COMPLETED: return `Research cycle complete: ${p.opportunityCount || 0} opportunities found`;
-    case E.SCHEDULER_ERROR: return `Scheduler error: ${p.message || p.error || "unknown"}`;
-    case E.CYCLE_OPERATOR_BLOCKED: return `BLOCKED — needs your action: "${p.title}" — ${p.blockedReason}`;
     case E.LAUNCH_QUOTA_STRETCH: return `Launch quota stretch: autopilot blocked (${p.reason || "unknown reason"}) for ${fmtStreakMs(p.durationMs)} — sustained past the ${fmtStreakMs(p.thresholdMs)} alarm threshold`;
     case E.LAUNCH_LATENCY_BREACH: return `Launch latency breach: eligibility probe took ${fmtStreakMs(p.durationMs)} — sustained past the ${fmtStreakMs(p.thresholdMs)} alarm threshold`;
     case E.INFRA_NODE_MODULES_WIPED: return `node_modules integrity: ${p.signal || "unknown root"} — ${p.reason || "broken"}`;
@@ -121,7 +111,7 @@ export function formatAlertMessage(event: AlertGrammarEvent): string {
  * notification-consumer Module carries). This type names exactly the payload
  * fields the `formatAlertMessage` switch dereferences via the
  * `p = event.payload || {}` accessor — so a renamed payload field (e.g.
- * `taskTitle` → `title`, or `cycleId` → `id`) becomes a compile error at the
+ * `consumer` → `name`, or `signal` → `root`) becomes a compile error at the
  * access site rather than a silent runtime miss in the dashboard-alert body.
  *
  * This mirrors `FormatMessageEvent` (`notify-format.ts`, issue #1857) and
@@ -151,30 +141,25 @@ export interface AlertGrammarEvent {
   payload?: Record<string, unknown> &
     Pick<
       NotificationEventPayload,
-      | "taskTitle"
-      | "cycleId"
       | "reason"
-      | "elapsed"
-      | "inProgress"
       | "eventType"
       | "deliveryCount"
       | "error"
       | "consumer"
       | "restarts"
-      | "opportunityCount"
-      | "message"
-      | "title"
-      | "blockedReason"
       | "signal"
       | "durationMs"
       | "thresholdMs"
+      | "url"
     >;
 }
 
 /**
  * Severity tiers a dashboard alert can carry. The third leg of the
  * alert-build grammar alongside `ALERT_TYPES` (which events become alerts)
- * and `formatAlertMessage` (what the alert says).
+ * and `formatAlertMessage` (what the alert says). `"warning"` stays in the
+ * union even though no live type maps to it since issue #5044 — the dashboard
+ * reads this field, so the union is a wire contract, not a formatter arm.
  */
 export type AlertSeverity = "error" | "warning" | "info";
 
@@ -187,19 +172,14 @@ export type AlertSeverity = "error" | "warning" | "info";
  * typed vocabulary in event-bus.ts (issue #1182) — so a misspelled event type
  * is a compile error, the same compile-time-safety win that motivated the
  * member references in `ALERT_TYPES` / `formatAlertMessage`. Any event type
- * without a dedicated `error`/`warning` mapping falls through to `"info"`,
+ * without a dedicated `error` mapping falls through to `"info"`,
  * preserving the pre-extraction ternary's behaviour for every ALERT_TYPES
  * member (verified row-by-row in test/notification-consumer.test.mts).
  */
 export function classifyAlertSeverity(eventType: string): AlertSeverity {
   switch (eventType) {
-    case E.CYCLE_FAILED:
-    case E.CYCLE_ROLLED_BACK:
     case E.CONSUMER_DEAD:
       return "error";
-    case E.CYCLE_STALLED:
-    case E.CYCLE_AUTO_KILLED:
-      return "warning";
     default:
       return "info";
   }

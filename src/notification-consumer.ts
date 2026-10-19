@@ -66,20 +66,14 @@ export interface NotificationEvent {
   payload?: Record<string, unknown> &
     Pick<
       NotificationEventPayload,
-      | "taskTitle"
       | "cycleId"
       | "reason"
-      | "elapsed"
-      | "inProgress"
       | "eventType"
       | "deliveryCount"
       | "error"
       | "consumer"
       | "restarts"
-      | "opportunityCount"
-      | "message"
       | "title"
-      | "blockedReason"
       | "task"
       | "filesChanged"
       | "rolledBack"

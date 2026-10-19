@@ -754,7 +754,9 @@ ZERO_YIELD_BACKOFF_LADDER: tuple[tuple[int, int], ...] = (
 # Reset signals fail closed to false on a degraded board read
 # (ALL_DEGRADED_SIGNALS), which HOLDS the ladder instead of resetting it —
 # an outage must not silently restart the back-off clock.
-ZERO_YIELD_BACKOFF_CLASSES: tuple[str, ...] = ("discover_target",)
+# #5051 enrolled cleanup_target: a new entry plus membership in the existing
+# literal branch when the signals are identical (both ride target_backfill_idle).
+ZERO_YIELD_BACKOFF_CLASSES: tuple[str, ...] = ("discover_target", "cleanup_target")
 
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
 WALL_CLOCK_HEARTBEAT_SEC = 900
@@ -6051,7 +6053,7 @@ def _zy_idle_signal_present(state: dict, events: list[dict], cls: str) -> bool:
     literals at read sites, so each enrolled class names its idle signal in
     ONE branch here, mirroring its ZERO_YIELD_BACKOFF_CLASSES row. An unknown
     class reads as not-idle — the back-off gate fails open (INV-9)."""
-    if cls == "discover_target":
+    if cls in ("discover_target", "cleanup_target"):
         return _signal_present(state, events, "target_backfill_idle")
     return False
 
@@ -6067,7 +6069,7 @@ def _zy_positive_evidence_present(state: dict, events: list[dict], cls: str) -> 
     pass that files a needs-triage finding lands here via
     `needs_triage_target` on the NEXT turn's snapshot, so "reset when a pass
     files something" needs no parsing of the agent's output."""
-    if cls == "discover_target":
+    if cls in ("discover_target", "cleanup_target"):
         return (
             _signal_present(state, events, "needs_triage_target")
             or _signal_present(state, events, "target_board_work_available")
@@ -6429,11 +6431,21 @@ def _select_signal_cleanup_target(
     if _signal_present(state, events, "target_cleanup_board_saturated"):
         return None
     if _signal_present(state, events, "target_backfill_idle"):
+        # Issue #5051: zero-yield back-off (#4999 ladder). Increment ONLY here,
+        # after the saturated early-return, on an actual dispatch.
+        entry = _zero_yield_entry(state, "cleanup_target")
+        _stamp_zero_yield(state, "cleanup_target", now)
+        reason = "target backlog idle — demote-only dead-export backfill"
+        if entry["streak"] >= ZERO_YIELD_BACKOFF_LADDER[0][0]:
+            reason += (
+                f" (zero-yield back-off rung elapsed, "
+                f"streak={entry['streak'] + 1})"
+            )
         return make_dispatch(
             sig,
             "hydra-target-cleanup",
             prompt_args={"apply": True},
-            reason="target backlog idle — demote-only dead-export backfill",
+            reason=reason,
         )
     return None
 

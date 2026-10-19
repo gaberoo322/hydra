@@ -799,7 +799,12 @@
         "0040"
       ],
       "adrsCited": [],
-      "referenceDocs": [],
+      "referenceDocs": [
+        {
+          "path": "docs/operations/glm-lane.md",
+          "anchor": null
+        }
+      ],
       "slices": {
         "env-vars": [
           "HYDRA_GLM_DRAINER_CAP_DIR",
@@ -891,6 +896,49 @@
       }
     },
     {
+      "slug": "src-notification",
+      "name": "src/notification/, src/notify.ts, src/digest.ts",
+      "table": "domain",
+      "paths": [
+        "src/notification/",
+        "src/notify.ts",
+        "src/digest.ts"
+      ],
+      "retired": false,
+      "terms": [
+        {
+          "name": "Operator Channel",
+          "anchor": "term-operator-channel"
+        },
+        {
+          "name": "Page",
+          "anchor": "term-page"
+        },
+        {
+          "name": "Morning Brief",
+          "anchor": "term-morning-brief"
+        }
+      ],
+      "moduleMap": null,
+      "adrs": [
+        "0045"
+      ],
+      "adrsCited": [],
+      "referenceDocs": [],
+      "slices": {
+        "routes": [
+          "POST /api/digest/send",
+          "POST /api/digest/heartbeat"
+        ]
+      },
+      "homes": [],
+      "route": "/docs/area/src-notification",
+      "source": {
+        "path": "CONTEXT-MAP.md",
+        "line": 23
+      }
+    },
+    {
       "slug": "src-pattern-memory",
       "name": "src/pattern-memory/",
       "table": "domain",
@@ -952,7 +1000,7 @@
       "route": "/docs/area/src-pattern-memory",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 23
+        "line": 24
       }
     },
     {
@@ -993,7 +1041,7 @@
       "route": "/docs/area/src-reflections",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 24
+        "line": 25
       }
     },
     {
@@ -1111,7 +1159,7 @@
       "route": "/docs/area/src-metrics",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 25
+        "line": 26
       }
     },
     {
@@ -1164,7 +1212,7 @@
       "route": "/docs/area/src-api",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 26
+        "line": 27
       }
     },
     {
@@ -1281,7 +1329,7 @@
       "route": "/docs/area/src-logger-ts",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 27
+        "line": 28
       }
     },
     {
@@ -1359,7 +1407,7 @@
       "route": "/docs/area/src-target-config-ts",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 28
+        "line": 29
       }
     },
     {
@@ -1387,7 +1435,7 @@
       "route": null,
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 29
+        "line": 30
       }
     },
     {
@@ -1416,7 +1464,7 @@
       "route": null,
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 30
+        "line": 31
       }
     },
     {
@@ -1457,7 +1505,7 @@
       "route": "/docs/area/src-design-concept-ts",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 31
+        "line": 32
       }
     },
     {
@@ -1520,7 +1568,7 @@
       "route": "/docs/area/backlog-github-issues",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 32
+        "line": 33
       }
     },
     {
@@ -1577,7 +1625,7 @@
       "route": "/docs/area/self-modification",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 33
+        "line": 34
       }
     },
     {
@@ -1700,7 +1748,7 @@
       "route": "/docs/area/claude-skills",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 42
+        "line": 43
       }
     },
     {
@@ -1765,7 +1813,7 @@
       "route": "/docs/area/github-workflows",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 43
+        "line": 44
       }
     },
     {
@@ -1883,7 +1931,7 @@
       "route": "/docs/area/scripts-autopilot",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 44
+        "line": 45
       }
     },
     {
@@ -1944,7 +1992,7 @@
       "route": "/docs/area/dashboard",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 45
+        "line": 46
       }
     },
     {
@@ -2009,7 +2057,7 @@
       "route": "/docs/area/config-direction",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 46
+        "line": 47
       }
     },
     {
@@ -2040,7 +2088,7 @@
       "route": "/docs/area/scripts-sync-skills-sh",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 47
+        "line": 48
       }
     },
     {
@@ -2103,7 +2151,8 @@
           "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md [adr]",
           "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md [adr]",
           "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md [adr]",
-          "docs/adr/0044-operator-attended-epic-sprint-lane.md [adr]"
+          "docs/adr/0044-operator-attended-epic-sprint-lane.md [adr]",
+          "docs/adr/0045-operator-channel.md [adr]"
         ],
         "adrs": [
           "ADR-0001 [superseded-in-part]",
@@ -2149,14 +2198,15 @@
           "ADR-0041 [accepted]",
           "ADR-0042 [accepted]",
           "ADR-0043 [accepted]",
-          "ADR-0044 [accepted]"
+          "ADR-0044 [accepted]",
+          "ADR-0045 [accepted]"
         ]
       },
       "homes": [],
       "route": "/docs/area/docs-adr",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 48
+        "line": 49
       }
     },
     {
@@ -2185,7 +2235,7 @@
       "route": "/docs/area/test",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 49
+        "line": 50
       }
     },
     {
@@ -2217,7 +2267,7 @@
       "route": "/docs/area/process-policy-no-code-area",
       "source": {
         "path": "CONTEXT-MAP.md",
-        "line": 50
+        "line": 51
       }
     }
   ]

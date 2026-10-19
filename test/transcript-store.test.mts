@@ -21,6 +21,7 @@ import {
   isUuidShaped,
   confineToRoot,
   resolveTranscriptPath,
+  resolveSubagentTranscriptPath,
   listTranscriptFiles,
 } from "../src/transcript-store.ts";
 
@@ -213,5 +214,42 @@ describe("listTranscriptFiles", () => {
   test("returns [] for a missing root rather than throwing", async () => {
     const files = await listTranscriptFiles("/does/not/exist/anywhere");
     assert.deepEqual(files, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveSubagentTranscriptPath - Agent-tool child JSONL (issue #4965)
+// ---------------------------------------------------------------------------
+
+describe("resolveSubagentTranscriptPath", () => {
+  const AGENT = "afc1c839eb98da29";
+
+  test("finds <root>/<projectDir>/<parent>/subagents/agent-<id>.jsonl by scanning project dirs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hydra-4965-ts-"));
+    try {
+      const dir = join(root, "-home-gabe-hydra", UUID, "subagents");
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, `agent-${AGENT}.jsonl`), "{}\n");
+      const out = await resolveSubagentTranscriptPath(UUID, AGENT, { root });
+      assert.equal(out, join(dir, `agent-${AGENT}.jsonl`));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects traversal / non-hex agent ids and non-UUID parents", async () => {
+    const deps = { root: "/nonexistent-root", listProjectDirs: async () => ["p"], stat: async () => true };
+    assert.equal(await resolveSubagentTranscriptPath(UUID, "../../etc/passwd", deps), null);
+    assert.equal(await resolveSubagentTranscriptPath(UUID, "NOTHEX!!", deps), null);
+    assert.equal(await resolveSubagentTranscriptPath("../x", AGENT, deps), null);
+  });
+
+  test("returns null when no project dir holds the child", async () => {
+    const out = await resolveSubagentTranscriptPath(UUID, AGENT, {
+      root: "/r",
+      listProjectDirs: async () => ["a", "b"],
+      stat: async () => false,
+    });
+    assert.equal(out, null);
   });
 });
