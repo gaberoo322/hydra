@@ -4595,58 +4595,6 @@
         "path": "scripts/target/mutation-check.ts",
         "line": 360
       }
-    },
-    {
-      "name": "TELEGRAM_BOT_TOKEN",
-      "readSites": [
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1618
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1620
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1632
-        },
-        {
-          "path": "src/notify.ts",
-          "line": 17
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1618
-      }
-    },
-    {
-      "name": "TELEGRAM_CHAT_ID",
-      "readSites": [
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1618
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1621
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1633
-        },
-        {
-          "path": "src/notify.ts",
-          "line": 18
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1618
-      }
     }
   ]
 }
