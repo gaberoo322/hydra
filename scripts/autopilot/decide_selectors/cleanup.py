@@ -80,7 +80,7 @@ def _select_signal_cleanup_target(
     # emits `target_backfill_idle` — triage, queued, and the Redis
     # work-queue are all empty), reclaim spare capacity by dispatching the
     # headless /hydra-target-cleanup skill: a DETERMINISTIC demote-only
-    # dead-export sweep over ~/hydra-betting/web. It emits ONLY findings
+    # dead-export sweep over the Target repo web app. It emits ONLY findings
     # the Target's CLAUDE.md rule-3 carve-out authorises (demote-class,
     # past the 45-day wiring grace) as ready-for-agent backlog items whose
     # acceptance check is self-checking ("drop the export keyword AND

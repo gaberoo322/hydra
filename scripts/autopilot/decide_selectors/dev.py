@@ -311,7 +311,7 @@ def _select_slot_dev_orch(
     # ISSUE #458: dev_orch must consume the orchestrator GH `ready-for-agent`
     # board, NOT /api/anchor/candidates. The unified candidates feed is
     # dominated by target-product work in this deployment (item-26x are all
-    # hydra-betting tasks), and routing them to dev_orch caused hydra-dev
+    # Target-product tasks), and routing them to dev_orch caused hydra-dev
     # to receive target-only anchors and either escalate or misroute.
     #
     # New contract: dev_orch fires iff `orch_work_available` is set
