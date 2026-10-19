@@ -5669,3 +5669,119 @@ describe("decide.py — discover_target zero-yield back-off (issue #4999)", () =
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// cleanup_target zero-yield back-off (issue #5051) — enrolled in the #4999 ladder
+// ---------------------------------------------------------------------------
+describe("decide.py — cleanup_target zero-yield back-off (issue #5051)", () => {
+  const isCleanup = (a: any) => a.type === "dispatch" && a.slot === "cleanup_target";
+  const decision = (plan: any) =>
+    (plan.events ?? []).find(
+      (e: any) => e.event === "dispatch_decision" && e.class === "cleanup_target",
+    );
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  const HOUR = 3600;
+  const zy = (streak: number, lastFired: number) => ({
+    cleanup_target: { streak, last_fired: lastFired },
+  });
+
+  test("absent state dispatches and stamps streak=1 (INV-G)", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState({ signals: { target_backfill_idle: true } });
+      const plan = runDecide(state, null, [], t);
+      assert.ok(findAction(plan, isCleanup));
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.zero_yield_backoff.cleanup_target.streak, 1);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("streak 3 inside 4h suppresses with a cooldown decision naming the back-off", () => {
+    const last = nowSec() - 2 * HOUR;
+    const state = baseState({
+      signals: { target_backfill_idle: true },
+      zero_yield_backoff: zy(3, last),
+    });
+    const plan = runDecide(state, null);
+    assert.equal(findAction(plan, isCleanup), undefined);
+    const ev = decision(plan);
+    assert.equal(ev.outcome, "cooldown");
+    assert.match(String(ev.reason), /zero-yield back-off \(#4999\): streak=3, \d+s remaining/);
+    assert.deepEqual(plan.debug.cleanup_target_backoff, {
+      streak: 3, last_fired: last, required_sec: 4 * HOUR,
+    });
+  });
+
+  test("streak 3 past 4h dispatches with an annotated reason and apply=true", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState({
+        signals: { target_backfill_idle: true },
+        zero_yield_backoff: zy(3, nowSec() - 5 * HOUR),
+      });
+      const plan = runDecide(state, null, [], t);
+      const d = findAction(plan, isCleanup);
+      assert.ok(d);
+      assert.match(String(d.reason), /demote-only dead-export backfill/);
+      assert.match(String(d.reason), /zero-yield back-off rung elapsed, streak=4/);
+      assert.equal(d.prompt_args.apply, true);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.zero_yield_backoff.cleanup_target.streak, 4);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("streak 6 waits 24h, then dispatches", () => {
+    const suppressed = runDecide(baseState({
+      signals: { target_backfill_idle: true },
+      zero_yield_backoff: zy(6, nowSec() - 5 * HOUR),
+    }), null);
+    assert.equal(findAction(suppressed, isCleanup), undefined);
+    assert.equal(suppressed.debug.cleanup_target_backoff.required_sec, 24 * HOUR);
+    const fired = runDecide(baseState({
+      signals: { target_backfill_idle: true },
+      zero_yield_backoff: zy(6, nowSec() - 25 * HOUR),
+    }), null);
+    assert.ok(findAction(fired, isCleanup));
+  });
+
+  test("a saturated skip never stamps (INV-D)", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState({
+        signals: { target_backfill_idle: true, target_cleanup_board_saturated: true },
+        zero_yield_backoff: zy(1, nowSec() - 5 * HOUR),
+      });
+      const plan = runDecide(state, null, [], t);
+      assert.equal(findAction(plan, isCleanup), undefined);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.zero_yield_backoff.cleanup_target.streak, 1);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("positive evidence resets the streak; a degraded read holds it", () => {
+    const t1 = makeTmp();
+    const t2 = makeTmp();
+    try {
+      runDecide(baseState({
+        signals: { needs_triage_target: true },
+        zero_yield_backoff: zy(5, nowSec() - HOUR),
+      }), null, [], t1);
+      assert.equal(
+        JSON.parse(readFileSync(t1.state, "utf-8")).zero_yield_backoff.cleanup_target.streak, 0);
+      const last = nowSec() - HOUR;
+      runDecide(baseState({ signals: {}, zero_yield_backoff: zy(5, last) }), null, [], t2);
+      assert.deepEqual(
+        JSON.parse(readFileSync(t2.state, "utf-8")).zero_yield_backoff.cleanup_target,
+        { streak: 5, last_fired: last });
+    } finally {
+      rmSync(t1.dir, { recursive: true, force: true });
+      rmSync(t2.dir, { recursive: true, force: true });
+    }
+  });
+});
