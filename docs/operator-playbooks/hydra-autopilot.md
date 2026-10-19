@@ -184,10 +184,12 @@ that files something resets it on the next snapshot with no output parsing),
 and survives relaunches via bootstrap's file-only carry-forward
 (`ZERO_YIELD_BACKOFF_SEED`). Suppressed turns surface as their own
 `dispatch_decision` cooldown reason (`zero-yield back-off (#4999): streak=N,
-Ns remaining`) plus a `plan.debug.<class>_backoff` payload. Only
-`discover_target` is enrolled (`ZERO_YIELD_BACKOFF_CLASSES` — enrolling a
-sibling is a new table row + one literal read branch, per the #4934 schema
-read guard). `decide.py` is authoritative.
+Ns remaining`) plus a `plan.debug.<class>_backoff` payload. `discover_target`
+and `cleanup_target` (#5051; same idle signal and reset set, the 1h cooldown
+still ANDs with the ladder) are enrolled (`ZERO_YIELD_BACKOFF_CLASSES` —
+enrolling a sibling is a new table row + a literal read branch or membership
+in an existing one, per the #4934 schema read guard). `research_target` is
+deliberately not enrolled: its own 6h re-fire is within budget. `decide.py` is authoritative.
 
 ## Action-to-tool table
 
