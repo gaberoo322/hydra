@@ -2118,7 +2118,9 @@ run_origin_identity() {
   if [[ -z "$want" || ( "$norm" != "$want" && "$norm" != "$canon_norm" ) ]]; then
     reasons+=("wrong-origin-url")
   fi
-  if [[ "$host" != "$want_host" ]]; then
+  # An operator-overridden canonical URL is by definition
+  # acceptable, so an auto-repaired tree does not re-alarm on its host (#5065).
+  if [[ "$host" != "$want_host" && ( -z "${HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL:-}" || "$norm" != "$canon_norm" ) ]]; then
     reasons+=("wrong-origin-host")
   fi
   if [[ "$master_present" != "1" ]]; then
@@ -2150,7 +2152,7 @@ run_origin_identity() {
     repair_note="auto-repair skipped (no gitdir under ${HYDRA_ROOT})"
   else
     outcome="repaired"
-    if [[ " ${reasons[*]} " == *" wrong-origin-url "* ]]; then
+    if [[ " ${reasons[*]} " == *" wrong-origin-url "* || " ${reasons[*]} " == *" wrong-origin-host "* ]]; then
       if git -C "$HYDRA_ROOT" config remote.origin.url "$CANONICAL" >/dev/null 2>&1; then
         new_url="$CANONICAL"
         # A remote that was removed outright has no fetch refspec, and a bare
