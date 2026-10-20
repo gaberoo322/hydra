@@ -213,14 +213,35 @@ RREPO=gaberoo322/hydra
 PR=<pr>          # the stalled PR
 ISSUE=<issue>    # its single closing issue
 LANE=needs-dev-resume   # or needs-qa — the lane the operator's resolution names
+# The subshell scopes every `exit 1` below: a failure aborts the recipe loudly
+# without closing the operator's shell.
+(
 # 1. Clear the PR's stranding labels. Name in the URL path — the `-f name=` form
-#    wipes ALL labels. A 404 means the label is already absent (tolerated, noted).
+#    wipes ALL labels. ONLY an HTTP 404 / "Label does not exist" means the label
+#    is already absent and is tolerated. Any other failure (auth, rate limit,
+#    network) prints the error and aborts BEFORE the issue is relabelled.
 for L in ready-for-human conflict-fix-attempted; do
-  gh api -X DELETE "repos/$RREPO/issues/$PR/labels/$L" --silent 2>/dev/null \
-    || echo "note: '$L' was not on PR #$PR (404 tolerated)"
+  if ! ERR=$(gh api -X DELETE "repos/$RREPO/issues/$PR/labels/$L" --silent 2>&1); then
+    if grep -qE 'HTTP 404|Label does not exist' <<<"$ERR"; then
+      echo "note: '$L' was not on PR #$PR (HTTP 404 tolerated)"
+    else
+      echo "ERROR: could not remove '$L' from PR #$PR: $ERR" >&2
+      exit 1
+    fi
+  fi
 done
-# 2. Route the linked issue to the chosen lane.
+# 2. Re-read the PR's labels. Refuse to relabel the issue while either
+#    stranding label is still present, because the PR would stay stranded.
+LEFT=$(gh api "repos/$RREPO/issues/$PR/labels" \
+  --jq '[.[].name | select(. == "ready-for-human" or . == "conflict-fix-attempted")] | join(",")') \
+  || { echo "ERROR: could not re-read PR #$PR labels; issue #$ISSUE NOT relabelled" >&2; exit 1; }
+if [ -n "$LEFT" ]; then
+  echo "ERROR: PR #$PR still carries $LEFT; issue #$ISSUE NOT relabelled" >&2
+  exit 1
+fi
+# 3. Route the linked issue to the chosen lane.
 gh issue edit "$ISSUE" --repo "$RREPO" --remove-label ready-for-human --add-label "$LANE"
+)
 ```
 
 The stalled-PR option labels in §4 are unchanged. Only the resolution side effect

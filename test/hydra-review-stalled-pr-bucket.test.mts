@@ -251,6 +251,30 @@ describe("hydra-review playbook — hand-back clears the PR's stranding labels (
     assert.match(body, /gh issue edit "\$ISSUE" --repo "\$RREPO" --remove-label ready-for-human --add-label "\$LANE"/);
   });
 
+  test("the label DELETE fails loud: only an HTTP 404 is tolerated, anything else aborts before the issue relabel (QA round 1)", () => {
+    const rule = handBackRule();
+    const recipe = /```bash\n([\s\S]*?)```/.exec(rule);
+    assert.ok(recipe, "the rule must carry a concrete bash recipe block");
+    const body = recipe[1];
+    // No silent swallow: discarding stderr behind an `||` fallback reports
+    // every failure (auth, rate limit, network) as a harmless 404.
+    assert.doesNotMatch(body, /2>\/dev\/null/, "the DELETE must not discard stderr");
+    assert.doesNotMatch(body, /--silent[^\n]*\|\|/, "the DELETE must not swallow failures with an || fallback");
+    // stderr is captured and only a 404 / "Label does not exist" is tolerated.
+    assert.match(body, /ERR=\$\(gh api -X DELETE [^\n]*2>&1\)/, "the DELETE's stderr must be captured");
+    assert.match(body, /grep -qE 'HTTP 404\|Label does not exist'/, "only a 404 is tolerated");
+    // Any other failure prints the error and exits non-zero.
+    assert.match(body, /could not remove[^\n]*>&2\n\s*exit 1/, "a non-404 failure must print and exit non-zero");
+    // The PR's labels are re-read; the issue relabel is refused while a
+    // stranding label is still present.
+    assert.match(body, /gh api "repos\/\$RREPO\/issues\/\$PR\/labels"/, "the PR's labels must be re-read");
+    assert.match(body, /still carries[^\n]*NOT relabelled/);
+    // Ordering: every abort sits BEFORE the issue relabel.
+    const relabel = body.indexOf('gh issue edit "$ISSUE"');
+    const lastExit = body.lastIndexOf("exit 1");
+    assert.ok(relabel > -1 && lastExit > -1 && lastExit < relabel, "every abort must precede the issue relabel");
+  });
+
   test("a QA round-cap escalation (#4735) the operator keeps is explicitly NOT a hand-back", () => {
     assert.match(handBackRule(), /#4735[\s\S]{0,120}NOT a hand-back/);
   });
