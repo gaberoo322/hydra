@@ -2,7 +2,7 @@
  * DigestAccumulator seam tests (issue #1487).
  *
  * Exercises the last side-effecting surface of the digest module — event
- * batching, critical-event bypass, and quiet-hours skip — by constructing a
+ * batching, page routing, and quiet-hours skip — by constructing a
  * FRESH `DigestAccumulator` per case with an injected clock and a capturing
  * sender. No module-level state to reset: each test owns its own instance.
  *
@@ -14,11 +14,9 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  DigestAccumulator,
-  shouldSendDigest,
-  CRITICAL_EVENT_TYPES,
-} from "../src/digest.ts";
+import { DigestAccumulator, shouldSendDigest } from "../src/digest.ts";
+import { PAGE_KINDS, isPageKind } from "../src/operator-channel/page-list.ts";
+import type { OperatorMessage } from "../src/operator-channel/message.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
 
 // A clock pinned to a daytime hour (noon) on a fixed date, so isQuietHours()
@@ -31,7 +29,16 @@ const NIGHT = () => at(23); // 11pm — quiet hours (>= 22)
 /** Build a fresh accumulator with a capturing sender and stubbed readers. */
 function makeAccumulator(now: () => Date) {
   const sent: string[] = [];
+  const pages: OperatorMessage[] = [];
+  const channel = {
+    page: async (m: OperatorMessage) => {
+      pages.push(m);
+      return { sent: true as const, kind: "page" as const };
+    },
+    brief: async () => ({ appended: true }),
+  };
   const acc = new DigestAccumulator({
+    channel,
     now,
     send: async (message: string) => {
       sent.push(message);
@@ -39,7 +46,7 @@ function makeAccumulator(now: () => Date) {
     getCapacity: async () => null,
     getBuilderHealth: async () => null,
   });
-  return { acc, sent };
+  return { acc, sent, pages };
 }
 
 describe("DigestAccumulator — batching", () => {
@@ -78,40 +85,30 @@ describe("DigestAccumulator — batching", () => {
   });
 });
 
-describe("DigestAccumulator — critical-event bypass", () => {
-  it("sends a critical event immediately, bypassing the batch", async () => {
-    const { acc, sent } = makeAccumulator(DAYTIME);
+describe("DigestAccumulator — page routing", () => {
+  it("routes a page-kind event to the channel, not the batch", async () => {
+    const { acc, sent, pages } = makeAccumulator(DAYTIME);
 
     acc.recordEvent({
       type: E.INFRA_NODE_MODULES_WIPED,
       payload: { signal: "/home/x/node_modules", reason: "absent" },
     });
 
-    // recordEvent fires the immediate send synchronously (fire-and-forget);
-    // the capturing sender resolves on the microtask queue.
     await Promise.resolve();
-    assert.equal(sent.length, 1);
+    assert.equal(pages.length, 1);
+    assert.equal(sent.length, 0);
 
-    // The bypassed event is NOT also buffered into the next digest.
+    // The paged event is NOT also buffered into the next digest.
     await acc.sendDigest();
-    assert.equal(sent.length, 1);
+    assert.equal(sent.length, 0);
   });
 
-  it("treats every member of the critical set as a bypass", async () => {
-    const critical = [
-      E.LAUNCH_QUOTA_STRETCH,
-      E.LAUNCH_LATENCY_BREACH,
-      E.LAUNCH_PAUSE_FORGOTTEN,
-      E.INFRA_NODE_MODULES_WIPED,
-      E.INFRA_ORIGIN_IDENTITY_WRONG,
-      E.GLM_DRAINER_STERILE,
-    ];
-
-    for (const type of critical) {
-      const { acc, sent } = makeAccumulator(DAYTIME);
+  it("treats every member of the page list as a page", async () => {
+    for (const type of PAGE_KINDS) {
+      const { acc, pages } = makeAccumulator(DAYTIME);
       acc.recordEvent({ type, payload: {} });
       await Promise.resolve();
-      assert.equal(sent.length, 1, `expected immediate send for ${type}`);
+      assert.equal(pages.length, 1, `expected a page for ${type}`);
     }
   });
 });
@@ -127,13 +124,13 @@ describe("DigestAccumulator — quiet-hours skip", () => {
     assert.equal(sent.length, 0);
   });
 
-  it("critical events still send during quiet hours", async () => {
-    const { acc, sent } = makeAccumulator(NIGHT);
+  it("page-kind events still page during quiet hours", async () => {
+    const { acc, pages } = makeAccumulator(NIGHT);
 
     acc.recordEvent({ type: E.LAUNCH_QUOTA_STRETCH, payload: {} });
     await Promise.resolve();
 
-    assert.equal(sent.length, 1);
+    assert.equal(pages.length, 1);
   });
 
   it("daily heartbeat always sends, ignoring quiet hours", async () => {
@@ -184,8 +181,8 @@ describe("shouldSendDigest — flush-threshold policy (issue #2212)", () => {
   });
 });
 
-describe("CRITICAL_EVENT_TYPES — named bypass set (issue #2212)", () => {
-  it("includes every critical event type that bypasses the digest", () => {
+describe("page list — membership (ADR-0045)", () => {
+  it("includes every watchdog signal that used to bypass the digest", () => {
     for (const type of [
       E.LAUNCH_QUOTA_STRETCH,
       E.LAUNCH_LATENCY_BREACH,
@@ -194,15 +191,12 @@ describe("CRITICAL_EVENT_TYPES — named bypass set (issue #2212)", () => {
       E.INFRA_ORIGIN_IDENTITY_WRONG,
       E.GLM_DRAINER_STERILE,
     ]) {
-      assert.ok(
-        CRITICAL_EVENT_TYPES.includes(type),
-        `expected ${type} in CRITICAL_EVENT_TYPES`,
-      );
+      assert.ok(isPageKind(type), `expected ${type} on the page list`);
     }
   });
 
   it("does not include a routine batched event type", () => {
-    assert.equal(CRITICAL_EVENT_TYPES.includes(E.CYCLE_COMPLETED), false);
+    assert.equal(isPageKind(E.CYCLE_COMPLETED), false);
   });
 });
 

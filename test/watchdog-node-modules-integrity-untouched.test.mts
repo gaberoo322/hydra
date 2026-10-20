@@ -38,8 +38,8 @@ describe("issue #4177 must not touch the #4175 node_modules integrity watchdog (
     assert.match(src, /E\.INFRA_NODE_MODULES_WIPED/);
   });
 
-  test("src/digest.ts still routes INFRA_NODE_MODULES_WIPED through the immediate CRITICAL bypass", () => {
-    const src = read("src/digest.ts");
+  test("src/operator-channel/page-list.ts still pages INFRA_NODE_MODULES_WIPED (ADR-0045 closed page list)", () => {
+    const src = read("src/operator-channel/page-list.ts");
     assert.match(src, /E\.INFRA_NODE_MODULES_WIPED/);
   });
 });

@@ -13,7 +13,7 @@
  *
  * # Pure core vs. orchestration (issue #1181)
  *
- * The pure assembly grammar (`buildDigestMessage`, `formatCriticalAlert`,
+ * The pure assembly grammar (`buildDigestMessage`,
  * `formatBuilderHealthLines`) lives in `./digest-format.ts` — no timers, no
  * Telegram calls, no dynamic imports, no module state, and fully testable. The
  * two async fan-out assemblers that fetch their own data live in their own
@@ -25,12 +25,11 @@
  *
  * # Injectable accumulator seam (issue #1487)
  *
- * The remaining side-effecting surface — event batching, critical-event
- * bypass, quiet-hours skip, and timer lifecycle — is encapsulated in the
+ * The remaining side-effecting surface — event batching, page routing to the Operator Channel,
+ * quiet-hours skip, and timer lifecycle — is encapsulated in the
  * `DigestAccumulator` class below. The flush-threshold *policy* itself (the
  * "should we send a digest now?" decision) is lifted out of the class into the
- * pure `shouldSendDigest` predicate + the `CRITICAL_EVENT_TYPES` constant
- * (issue #2212), so the accumulator owns only mutable timer/ring state while the
+ * pure `shouldSendDigest` predicate (issue #2212), so the accumulator owns only mutable timer/ring state while the
  * policy is independently testable. Its constructor takes injected deps
  * (`now`, `send`, `getCapacity`, `getBuilderHealth`) that default to the real
  * `new Date()` clock / `sendToTelegram` / capacity + builder-health readers,
@@ -43,14 +42,15 @@
  */
 
 import { sendToTelegram, type TelegramSendFn } from "./notify.ts";
-import { NOTIFICATION_EVENT_TYPES as E } from "./event-bus-vocabulary.ts";
 import { getCapacitySnapshot, DEFAULT_WINDOW_CYCLES } from "./capacity-floor.ts";
 import { getBuilderHealthScorecard } from "./aggregators/builder-health.ts";
+import { buildDigestMessage, formatBuilderHealthLines } from "./digest-format.ts";
 import {
-  buildDigestMessage,
-  formatCriticalAlert,
-  formatBuilderHealthLines,
-} from "./digest-format.ts";
+  operatorChannel,
+  messageFromEvent,
+  isPageKind,
+  type OperatorChannel,
+} from "./operator-channel/index.ts";
 import { buildDailyHeartbeat } from "./digest-fanout.ts";
 import { buildWeeklySummary } from "./digest-weekly.ts";
 import { logger } from "./logger.ts";
@@ -64,43 +64,6 @@ export { formatBuilderHealthLines, buildWeeklySummary };
 const DIGEST_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const QUIET_START_HOUR = 22; // 10pm
 const QUIET_END_HOUR = 7; // 7am
-
-/**
- * Event types that bypass the batched digest and send immediately (issue #2212).
- *
- * Exported as a named policy surface so a test can assert "this event type
- * bypasses the digest" without constructing a {@link DigestAccumulator}. Members
- * reference the typed {@link NOTIFICATION_EVENT_TYPES} vocabulary (issue #1182)
- * so a misspelled event type here is a compile error.
- *
- * Kept as a module constant (not a `digest-format.ts` export) because it is a
- * *policy* of the accumulator's batching behavior, not part of the pure
- * assembly grammar that `digest-format.ts` owns.
- */
-export const CRITICAL_EVENT_TYPES: readonly string[] = [
-  // Issue #3848 (epic #3844): the three in-band launch-flow signals ride the
-  // immediate CRITICAL bypass (formatCriticalAlert's generic default arm
-  // renders them) rather than the batched digest — a sustained-streak alarm
-  // must not wait up to 4h for the next batch window. All three reach the
-  // digest/Telegram surface this way; only quota/latency are ALSO in
-  // ALERT_TYPES (pause must never raise a dashboard alert).
-  E.LAUNCH_QUOTA_STRETCH,
-  E.LAUNCH_LATENCY_BREACH,
-  E.LAUNCH_PAUSE_FORGOTTEN,
-  // Issue #4175: node_modules integrity watchdog signal — rides the same
-  // immediate CRITICAL bypass (formatCriticalAlert's generic default arm
-  // renders it) as the launch-flow signals above; a wiped install under a
-  // live money-critical service must not wait up to 4h for the next digest.
-  E.INFRA_NODE_MODULES_WIPED,
-  // Issue #4939: ~/hydra origin URL wrong / origin/master missing — immediate
-  // CRITICAL bypass; every worktree shares the gitdir.
-  E.INFRA_ORIGIN_IDENTITY_WRONG,
-  // Issue #3868: live-but-sterile GLM drainer — same immediate CRITICAL
-  // bypass; while the drainer heartbeat is fresh the #3754 partition hides
-  // glm-eligible work from the Opus lane, so every hour of sterility is an
-  // hour of silent board starvation. Also in ALERT_TYPES (dashboard alert).
-  E.GLM_DRAINER_STERILE,
-];
 
 /**
  * The verdict of the flush-threshold policy (issue #2212). `send` is the
@@ -161,7 +124,7 @@ interface PendingEvent {
 
 /**
  * An inbound event handed to `recordEvent`. `type` discriminates batching vs.
- * critical-bypass; `payload` rides along into the digest grammar.
+ * page routing; `payload` rides along into the digest grammar.
  */
 interface DigestEvent {
   type?: string;
@@ -183,12 +146,14 @@ export interface DigestAccumulatorDeps {
   getCapacity?: () => Promise<unknown>;
   /** Builder-health scorecard reader. Defaults to `getBuilderHealthScorecard`. */
   getBuilderHealth?: () => Promise<unknown>;
+  /** Operator Channel receiving page-kind events and brief items. Defaults to the singleton. */
+  channel?: Pick<OperatorChannel, "page" | "brief">;
 }
 
 /**
  * Owns the digest's mutable state (pending events, last-digest marker, timer
- * handles) and the side-effecting behavior over it: batching, critical-event
- * bypass, quiet-hours skip, and timer lifecycle. Construct with injected deps
+ * handles) and the side-effecting behavior over it: batching, page routing,
+ * quiet-hours skip, and timer lifecycle. Construct with injected deps
  * for testability; production uses the {@link defaultAccumulator} singleton.
  */
 export class DigestAccumulator {
@@ -201,6 +166,7 @@ export class DigestAccumulator {
   private readonly send: TelegramSendFn;
   private readonly getCapacity: () => Promise<unknown>;
   private readonly getBuilderHealth: () => Promise<unknown>;
+  private readonly channel: Pick<OperatorChannel, "page" | "brief">;
 
   constructor(deps: DigestAccumulatorDeps = {}) {
     this.now = deps.now ?? (() => new Date());
@@ -208,27 +174,23 @@ export class DigestAccumulator {
     this.getCapacity =
       deps.getCapacity ?? (() => getCapacitySnapshot(DEFAULT_WINDOW_CYCLES));
     this.getBuilderHealth = deps.getBuilderHealth ?? getBuilderHealthScorecard;
-  }
-
-  private isQuietHours(): boolean {
-    // Reuse the flush policy's quiet-hours gate so the "what counts as quiet?"
-    // rule has one home (issue #2212). With zero pending events the predicate
-    // reports "quiet-hours" iff the hour is quiet; otherwise it reports
-    // "no-events" — which is exactly !isQuietHours.
-    return shouldSendDigest(0, this.now().getHours()).reason === "quiet-hours";
+    this.channel = deps.channel ?? operatorChannel;
   }
 
   /**
-   * Record an event for the next digest. Does NOT send immediately.
-   * Critical alerts (rollback failures, scheduler stops) still send immediately.
+   * Record an event for the next digest. Does NOT send a digest immediately.
+   * A page-kind event (the closed list in `operator-channel/page-list.ts`,
+   * ADR-0045) goes straight to the Operator Channel and is not buffered. Every
+   * other event is buffered for the legacy digest AND appended as a Morning
+   * Brief item; appending never blocks or fails the legacy path.
    */
   recordEvent(event: DigestEvent): void {
     const type = event.type || "unknown";
 
-    // Critical events bypass digest and send immediately. The bypass set is the
-    // named CRITICAL_EVENT_TYPES policy (issue #2212).
-    if (CRITICAL_EVENT_TYPES.includes(type)) {
-      void this.sendImmediate(formatCriticalAlert(event));
+    if (isPageKind(type)) {
+      this.channel.page(messageFromEvent(event)).catch((err) =>
+        logger.error({ err, type }, "[Digest] operator-channel page failed (non-fatal)"),
+      );
       return;
     }
 
@@ -237,6 +199,9 @@ export class DigestAccumulator {
       payload: event.payload || {},
       timestamp: this.now().toISOString(),
     });
+    this.channel.brief(messageFromEvent(event)).catch((err) =>
+      logger.error({ err, type }, "[Digest] operator-channel brief append failed (non-fatal)"),
+    );
   }
 
   /**
@@ -285,13 +250,6 @@ export class DigestAccumulator {
     const message = buildDigestMessage(events, capacitySnapshot, builderHealth);
     await this.send(message);
     logger.info({ eventCount: events.length }, "[Digest] Sent digest");
-  }
-
-  private async sendImmediate(message: string): Promise<void> {
-    if (this.isQuietHours()) {
-      logger.info("[Digest] Critical alert during quiet hours — sending anyway");
-    }
-    await this.send(message);
   }
 
   /**
@@ -344,8 +302,8 @@ export class DigestAccumulator {
 const defaultAccumulator = new DigestAccumulator();
 
 /**
- * Record an event for the next digest. Does NOT send immediately.
- * Critical alerts (rollback failures, scheduler stops) still send immediately.
+ * Record an event for the next digest. Page-kind events are routed to the
+ * Operator Channel instead (ADR-0045).
  */
 export function recordEvent(event: DigestEvent): void {
   defaultAccumulator.recordEvent(event);

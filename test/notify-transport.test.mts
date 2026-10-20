@@ -7,7 +7,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { createTelegramSender, isEntityParseError } from "../src/notify.ts";
+import { createTelegramSender, createTelegramTransport, isEntityParseError } from "../src/notify.ts";
 
 interface Call {
   url: string;
@@ -77,6 +77,41 @@ describe("createTelegramSender", () => {
   it("skips the network entirely without a token", async () => {
     const { impl, calls } = fakeFetch([]);
     await createTelegramSender({ token: "", defaultTarget: "42", fetchImpl: impl })("x");
+    assert.equal(calls.length, 0);
+  });
+});
+
+describe("createTelegramTransport (issue #5045)", () => {
+  it("posts parse_mode HTML and reports mode HTML on success", async () => {
+    const { impl, calls } = fakeFetch([{ status: 200, body: "{}" }]);
+    const r = await createTelegramTransport({ token: "t", defaultTarget: "42", fetchImpl: impl, parseMode: "HTML" })("<b>x</b>");
+    assert.deepEqual(r, { ok: true, mode: "HTML" });
+    assert.equal(calls[0].body.parse_mode, "HTML");
+  });
+
+  it("resends once as plain text after an HTML entity-parse 400 and reports mode plain", async () => {
+    const { impl, calls } = fakeFetch([
+      { status: 400, body: PARSE_400 },
+      { status: 200, body: "{}" },
+    ]);
+    const r = await createTelegramTransport({ token: "t", defaultTarget: "42", fetchImpl: impl, parseMode: "HTML" })("<b>x");
+    assert.deepEqual(r, { ok: true, mode: "plain" });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].body.parse_mode, undefined);
+  });
+
+  it("reports failure with status and never throws", async () => {
+    const { impl } = fakeFetch([{ status: 500, body: "boom" }]);
+    const r = await createTelegramTransport({ token: "t", defaultTarget: "42", fetchImpl: impl })("x");
+    assert.equal(r.ok, false);
+    assert.equal((r as { status?: number }).status, 500);
+  });
+
+  it("reports no-credentials without touching the network when the token is empty", async () => {
+    const { impl, calls } = fakeFetch([]);
+    const r = await createTelegramTransport({ token: "", defaultTarget: "42", fetchImpl: impl })("x");
+    assert.equal(r.ok, false);
+    assert.equal((r as { reason?: string }).reason, "no-credentials");
     assert.equal(calls.length, 0);
   });
 });

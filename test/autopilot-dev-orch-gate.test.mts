@@ -30,6 +30,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
+import { brainFunctionSource, readBrainSource } from "../scripts/ci/brain-source.ts";
 import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -50,10 +51,9 @@ describe("hydra-autopilot dev_orch rule (issue #412)", () => {
   // guard in decide.py and the PR-signal field of the Turn Snapshot
   // (ADR-0043; collect-state.sh was retired in #4934) so a future edit
   // can't silently re-introduce the label-based gate.
-  const decide = readFileSync(
-    join(REPO_ROOT, "scripts", "autopilot", "decide.py"),
-    "utf-8",
-  );
+  // The whole brain corpus (#4511): the dev_orch handler body now lives in
+  // decide_selectors/dev.py, so the negative pin below must cover it there.
+  const decide = readBrainSource().joined;
   const snapshotBuilder = readFileSync(
     join(REPO_ROOT, "src", "autopilot", "turn-snapshot", "json-snapshot.ts"),
     "utf-8",
@@ -233,14 +233,16 @@ describe("decide.py — first-attempt dev_orch dispatches carry no frontier rout
   });
 
   test("decide.py has no first-attempt routing channel left to re-arm by accident", () => {
-    const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    // Issue #4511: the dev_orch selector lives in decide_selectors/dev.py, so
+    // scan the whole brain corpus, not decide.py alone.
+    const src = readBrainSource().joined;
     for (const retired of [
       "route_model",
       "design_concept_permits_frontier",
       "orch_dev_ready_anchor_design_concept_status",
     ]) {
       assert.equal(src.includes(retired), false,
-        `decide.py must not mention the retired "${retired}" (issue #4821)`);
+        `the decide brain source must not mention the retired "${retired}" (issue #4821)`);
     }
   });
 
@@ -249,14 +251,13 @@ describe("decide.py — first-attempt dev_orch dispatches carry no frontier rout
     // `best.designConcept` from the RETIRED /api/anchor/candidates feed and
     // were removed from the decision path by #751. The dev_orch selector
     // reads only the pre-resolved Turn Snapshot anchor signals.
-    const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
     // Issue #4265: the dev_orch branch is its own `_select_slot_dev_orch`
-    // handler — slice from its `def` to the next top-level `def`.
-    const start = src.indexOf("def _select_slot_dev_orch(");
-    assert.ok(start > 0, "could not locate the dev_orch selector handler in decide.py");
-    const after = src.indexOf("\ndef ", start + 1);
-    assert.ok(after > start, "could not locate the end of the dev_orch selector handler");
-    const body = src.slice(start, after);
+    // handler — slice from its `def` to the next top-level `def`. Issue #4511:
+    // the handler lives in a selector module, so slice it out of the brain
+    // corpus (per file) rather than decide.py.
+    const found = brainFunctionSource(readBrainSource(), "_select_slot_dev_orch");
+    assert.ok(found, "could not locate the dev_orch selector handler in the brain source corpus");
+    const body = found.body;
     assert.match(body, /_orch_anchor_signal\(state, "orch_dev_ready_anchor"\)/,
       "sanity: the sliced region must be the branch that reads the dev-ready pin");
     for (const forbidden of ["_candidate_design_concept(", "_design_concept_is_fresh(", 'best.get("designConcept")']) {
