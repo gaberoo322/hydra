@@ -49,8 +49,10 @@ import type { PendingCommit, PendingWindow } from "../dashboard/src/lib/delayed-
 import {
   UNDO_WINDOW_MS,
   createDelayedCommit,
+  createInFlightTracker,
   createUndoWindowRegistry,
   triggerDisabled,
+  undoWindowSeconds,
 } from "../dashboard/src/lib/delayed-commit.ts";
 import type { BucketSummary } from "../dashboard/src/lib/attention-buckets.ts";
 import { deriveFeedBuckets, recordDismissOutcome } from "../dashboard/src/lib/attention-buckets.ts";
@@ -474,6 +476,88 @@ describe("triggerDisabled — the pure trigger-state rule", () => {
   });
 });
 
+describe("dismiss trigger stays disabled while the expired window's POST is in flight (QA round 5)", () => {
+  /** The feed's dismiss wiring, framework-free: a registry window whose
+   * closure marks the item in flight, awaits a controllable POST, and clears
+   * the id in `finally` — exactly dismissItem's shape. */
+  function dismissHarness() {
+    let windows: PendingWindow[] = [];
+    let inFlightIds: ReadonlySet<string> = new Set();
+    const reg = createUndoWindowRegistry((w) => {
+      windows = w;
+    });
+    const inFlight = createInFlightTracker((ids) => {
+      inFlightIds = ids;
+    });
+    const posts: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
+    let settledCount = 0;
+    const dismissItem = async (itemId: string) => {
+      inFlight.begin(itemId);
+      try {
+        await new Promise<void>((resolve, reject) => posts.push({ resolve, reject }));
+      } catch {
+        /* intentional: the harness only models the finally-clear */
+      } finally {
+        inFlight.end(itemId);
+        settledCount += 1;
+      }
+    };
+    const start = (itemId: string) => reg.start(`dismiss:${itemId}`, "Dismissing · Later", () => dismissItem(itemId));
+    const disabled = (itemId: string) =>
+      triggerDisabled(inFlightIds.has(itemId), windows, `dismiss:${itemId}`);
+    return { start, disabled, posts, settled: () => settledCount, inFlight: () => inFlightIds };
+  }
+
+  test("after the window fires and while the POST is pending, the trigger stays disabled; it re-enables after settle", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const h = dismissHarness();
+    assert.equal(h.disabled("a"), false, "idle trigger is enabled");
+    assert.equal(h.start("a"), true);
+    assert.equal(h.disabled("a"), true, "disabled while the window is pending");
+    t.mock.timers.tick(UNDO_WINDOW_MS);
+    assert.equal(h.posts.length, 1, "expiry fired exactly one POST");
+    assert.equal(h.disabled("a"), true, "window gone but POST in flight — still disabled");
+    assert.equal(h.disabled("b"), false, "another item stays dismissable");
+    h.posts[0].resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(h.settled(), 1);
+    assert.equal(h.disabled("a"), false, "re-enabled once the POST settles");
+    assert.equal(h.inFlight().size, 0);
+  });
+
+  test("a failed POST also clears the in-flight id", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const h = dismissHarness();
+    h.start("a");
+    t.mock.timers.tick(UNDO_WINDOW_MS);
+    assert.equal(h.disabled("a"), true);
+    h.posts[0].reject(new Error("500"));
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(h.disabled("a"), false, "re-enabled after a failed settle");
+  });
+
+  test("the tracker emits a fresh Set per change and ignores no-op begin/end", () => {
+    const seen: Array<ReadonlySet<string>> = [];
+    const tr = createInFlightTracker((ids) => seen.push(ids));
+    tr.begin("a");
+    tr.begin("a");
+    tr.end("b");
+    tr.end("a");
+    tr.end("a");
+    assert.equal(seen.length, 2, "only real changes notify");
+    assert.notEqual(seen[0], seen[1], "a new Set each time, so React re-renders");
+    assert.deepEqual([...seen[0]], ["a"]);
+    assert.deepEqual([...seen[1]], []);
+  });
+
+  test("the toast label derives its seconds from the delay", () => {
+    assert.equal(undoWindowSeconds(UNDO_WINDOW_MS), "5s");
+    assert.equal(undoWindowSeconds(3_000), "3s");
+  });
+});
+
 describe("the dismiss + immediate triggers bind to the feed-level host", () => {
   test("the host wraps the tested registry and only the HOST flushes", async () => {
     const src = await readSource(AFFORDANCE);
@@ -490,7 +574,10 @@ describe("the dismiss + immediate triggers bind to the feed-level host", () => {
     const aff = await readSource(AFFORDANCE);
     assert.ok(aff.includes("disabled={triggerDisabled(busy, undoHost.windows, windowId)}"), "immediate in-dashboard button");
     const feed = await readSource(FEED);
-    assert.ok(feed.includes("triggerDisabled(false, undoHost.windows, dismissWindowId(item))"), "each dismiss reason button");
+    assert.ok(feed.includes("triggerDisabled(busy, undoHost.windows, dismissWindowId(item))"), "each dismiss reason button");
+    assert.ok(!feed.includes("triggerDisabled(false,"), "no trigger hardcodes busy=false (QA round 5)");
+    assert.ok(feed.includes("dismissBusy={dismissInFlight.has(item.id)}"), "rows read busy from the in-flight set");
+    assert.ok(feed.includes("inFlight.current.end(item.id)"), "dismissItem clears its in-flight id");
   });
 });
 

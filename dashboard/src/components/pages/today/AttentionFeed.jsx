@@ -4,7 +4,7 @@ import { apiFetch } from "../../../hooks/useApi.js";
 import { relativeAge } from "../../../lib/page-item-format.ts";
 import { deriveFeedBuckets, recordDismissOutcome } from "../../../lib/attention-buckets.ts";
 import { Section } from "./Section.jsx";
-import { triggerDisabled } from "../../../lib/delayed-commit.ts";
+import { createInFlightTracker, triggerDisabled } from "../../../lib/delayed-commit.ts";
 import {
   ActionAffordance,
   UndoToastStack,
@@ -131,10 +131,12 @@ function dismissWindowId(item) {
  * through the feed-level delayed-commit window (onDismissStart). Every
  * reason button is DISABLED while THIS item's window holds a pending
  * dismiss — one commit per window, so a second click can never break the
- * first's Undo (INV-7/INV-14); other items stay dismissable. */
-function DismissControl({ item, onDismissStart }) {
+ * first's Undo (INV-7/INV-14) — AND while its expired window's POST is still
+ * in flight (`busy`, QA round 5), so a second click can never arm a second
+ * dismiss for the same item; other items stay dismissable. */
+function DismissControl({ item, busy, onDismissStart }) {
   const undoHost = useContext(UndoWindowContext);
-  const disabled = triggerDisabled(false, undoHost.windows, dismissWindowId(item));
+  const disabled = triggerDisabled(busy, undoHost.windows, dismissWindowId(item));
   return (
     <div className="mt-1.5 flex flex-wrap items-baseline gap-x-1.5 text-[11px] text-zinc-600">
       <span>dismiss:</span>
@@ -146,6 +148,7 @@ function DismissControl({ item, onDismissStart }) {
             onClick={() => onDismissStart(item, r)}
             disabled={disabled}
             title={`30-day snooze · ${r.value}`}
+            aria-label={`Dismiss "${item.title}" · ${r.label}`}
             className="text-zinc-500 underline hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {r.label}
@@ -158,7 +161,7 @@ function DismissControl({ item, onDismissStart }) {
 
 /** One per-item row: the crossed line and its explanation on the left, the
  * action grammar on the right. */
-function FeedItem({ item, onFired, onResult, onDismissStart }) {
+function FeedItem({ item, onFired, onResult, onDismissStart, dismissBusy }) {
   return (
     <div className="grid gap-2 border-t border-zinc-700/50 py-2.5 md:grid-cols-[minmax(0,1fr)_minmax(280px,40%)]">
       <div className="min-w-0">
@@ -178,7 +181,7 @@ function FeedItem({ item, onFired, onResult, onDismissStart }) {
         </div>
         <div className="mt-1 text-xs italic text-zinc-500">{item.action.rationale}</div>
         {item.detail && <div className="mt-0.5 text-[11px] text-zinc-500">{item.detail}</div>}
-        <DismissControl item={item} onDismissStart={onDismissStart} />
+        <DismissControl item={item} busy={dismissBusy} onDismissStart={onDismissStart} />
       </div>
       <ActionColumn entry={item.action} onFired={onFired} onResult={onResult} />
     </div>
@@ -192,7 +195,7 @@ function FeedItem({ item, onFired, onResult, onDismissStart }) {
  * not collapse to the parent's. The two single-line aggregates (parked over
  * cap, archived Target) render the parent's action block directly.
  */
-function AggregateWell({ item, onFired, onResult, onDismissStart }) {
+function AggregateWell({ item, onFired, onResult, onDismissStart, dismissBusy }) {
   return (
     <div className="mt-2 grid gap-2.5 rounded-md border border-zinc-700/60 bg-zinc-900/60 p-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
@@ -200,7 +203,7 @@ function AggregateWell({ item, onFired, onResult, onDismissStart }) {
           <div className="text-sm font-semibold text-zinc-100">{item.title}</div>
           {item.detail && <div className="mt-0.5 text-[11px] text-zinc-500">{item.detail}</div>}
         </div>
-        <DismissControl item={item} onDismissStart={onDismissStart} />
+        <DismissControl item={item} busy={dismissBusy} onDismissStart={onDismissStart} />
       </div>
       {(item.subLines?.length ?? 0) > 0
         ? item.subLines.map((sub) => (
@@ -223,7 +226,7 @@ function AggregateWell({ item, onFired, onResult, onDismissStart }) {
 /** One bucket section: header (rank · name · count · why), then the trust
  * branch — UNKNOWN on an unproven bucket, a muted asserted zero, or the
  * items in the server's within-bucket order. */
-function BucketSection({ summary, items, onFired, onResult, onDismissStart }) {
+function BucketSection({ summary, items, onFired, onResult, onDismissStart, dismissInFlight }) {
   const unproved = !summary.wired || !summary.sourcesOk;
   return (
     <div>
@@ -255,9 +258,23 @@ function BucketSection({ summary, items, onFired, onResult, onDismissStart }) {
         <div>
           {items.map((item) =>
             isAggregate(item) ? (
-              <AggregateWell key={item.id} item={item} onFired={onFired} onResult={onResult} onDismissStart={onDismissStart} />
+              <AggregateWell
+                key={item.id}
+                item={item}
+                onFired={onFired}
+                onResult={onResult}
+                onDismissStart={onDismissStart}
+                dismissBusy={dismissInFlight.has(item.id)}
+              />
             ) : (
-              <FeedItem key={item.id} item={item} onFired={onFired} onResult={onResult} onDismissStart={onDismissStart} />
+              <FeedItem
+                key={item.id}
+                item={item}
+                onFired={onFired}
+                onResult={onResult}
+                onDismissStart={onDismissStart}
+                dismissBusy={dismissInFlight.has(item.id)}
+              />
             ),
           )}
         </div>
@@ -289,6 +306,20 @@ export function AttentionFeed() {
   // resolves it once a render shows the read settled (loading false) —
   // true when that render carries no read error, false when it does.
   const rereadWaiters = useRef([]);
+  // QA round 5: if the feed unmounts (the host flush commits a pending
+  // dismiss), no render will ever settle a queued waiter — resolve every
+  // waiter `false` on unmount and skip the re-read once unmounted, so a
+  // dismiss always settles instead of hanging on a waiter nothing resolves.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      const waiters = rereadWaiters.current;
+      rereadWaiters.current = [];
+      for (const resolve of waiters) resolve(false);
+    };
+  }, []);
   useEffect(() => {
     if (loading || rereadWaiters.current.length === 0) return;
     const waiters = rereadWaiters.current;
@@ -296,11 +327,20 @@ export function AttentionFeed() {
     for (const resolve of waiters) resolve(error == null);
   }, [loading, error, data]);
   const refreshChecked = useCallback(() => {
+    if (!mounted.current) return Promise.resolve(false);
     const settled = new Promise((resolve) => rereadWaiters.current.push(resolve));
     refresh();
     return settled;
   }, [refresh]);
   const undoHost = useUndoWindowHost();
+
+  // Item ids whose dismiss POST is in flight (QA round 5): the window drops
+  // out of the registry the moment it expires, BEFORE the POST settles, so
+  // the reason buttons read this as their `busy` input — they stay disabled
+  // until dismissItem's finally clears the id.
+  const [dismissInFlight, setDismissInFlight] = useState(() => new Set());
+  const inFlight = useRef(null);
+  if (inFlight.current === null) inFlight.current = createInFlightTracker(setDismissInFlight);
 
   // The typed dismiss (ADR-0034 §8.4): { reason, key } is the strict #4627
   // body — the legacy free-text { reason, signal } is a 400 there. Fires
@@ -309,19 +349,24 @@ export function AttentionFeed() {
   // persistently, keyed to its item.
   const dismissItem = useCallback(
     async (item, reason) => {
+      inFlight.current.begin(item.id);
       try {
-        await apiFetch(`/attention/${encodeURIComponent(item.id)}/dismiss`, {
-          method: "POST",
-          body: JSON.stringify({ reason, key: item.key }),
-        });
-      } catch (err) {
-        /* intentional: the inline per-item dismiss-failed line is the
-           failure surface — visible until that item's dismiss succeeds */
-        setDismissErrors((prev) => recordDismissOutcome(prev, item, { ok: false, error: err }));
-        return;
+        try {
+          await apiFetch(`/attention/${encodeURIComponent(item.id)}/dismiss`, {
+            method: "POST",
+            body: JSON.stringify({ reason, key: item.key }),
+          });
+        } catch (err) {
+          /* intentional: the inline per-item dismiss-failed line is the
+             failure surface — visible until that item's dismiss succeeds */
+          setDismissErrors((prev) => recordDismissOutcome(prev, item, { ok: false, error: err }));
+          return;
+        }
+        const reread = await refreshChecked();
+        setDismissErrors((prev) => recordDismissOutcome(prev, item, { ok: true, reread }));
+      } finally {
+        inFlight.current.end(item.id);
       }
-      const reread = await refreshChecked();
-      setDismissErrors((prev) => recordDismissOutcome(prev, item, { ok: true, reread }));
     },
     [refreshChecked],
   );
@@ -379,6 +424,8 @@ export function AttentionFeed() {
       )}
       {actionResult && (
         <div
+          role={actionResult.ok ? "status" : "alert"}
+          aria-live="polite"
           className={`mb-2 break-all font-mono text-xs ${actionResult.ok ? "text-emerald-300" : "text-red-300"}`}
         >
           {actionResult.text}
@@ -394,6 +441,7 @@ export function AttentionFeed() {
               onFired={refreshChecked}
               onResult={setActionResult}
               onDismissStart={onDismissStart}
+              dismissInFlight={dismissInFlight}
             />
           ))}
         </div>

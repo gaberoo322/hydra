@@ -156,3 +156,45 @@ export function createUndoWindowRegistry(
 export function triggerDisabled(busy: boolean, windows: PendingWindow[], id: string): boolean {
   return busy || windows.some((w) => w.id === id);
 }
+
+/**
+ * In-flight request ids (QA round 5, PR #4976). A window's expiry drops it
+ * from the registry BEFORE its closure's request settles, so the window alone
+ * cannot keep a trigger disabled for the request's lifetime. The feed marks
+ * an id in flight when the expired closure starts its request and clears it
+ * in that closure's `finally`; the trigger reads `has(id)` as its `busy`
+ * input to `triggerDisabled`. `onChange` receives a fresh Set on every
+ * change so a React state setter re-renders.
+ */
+export interface InFlightTracker {
+  /** Mark `id` in flight. */
+  begin(id: string): void;
+  /** Clear `id` (idempotent). */
+  end(id: string): void;
+  /** Is `id` in flight? */
+  has(id: string): boolean;
+}
+
+export function createInFlightTracker(onChange: (ids: ReadonlySet<string>) => void): InFlightTracker {
+  const ids = new Set<string>();
+  return {
+    begin(id) {
+      if (ids.has(id)) return;
+      ids.add(id);
+      onChange(new Set(ids));
+    },
+    end(id) {
+      if (!ids.delete(id)) return;
+      onChange(new Set(ids));
+    },
+    has(id) {
+      return ids.has(id);
+    },
+  };
+}
+
+/** The toast label's window length, derived from the actual delay so the
+ * text can never drift from the timer (e.g. 5000 ms → "5s"). */
+export function undoWindowSeconds(delayMs: number = UNDO_WINDOW_MS): string {
+  return `${Math.round(delayMs / 1000)}s`;
+}

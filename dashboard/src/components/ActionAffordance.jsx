@@ -2,7 +2,12 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { apiFetch } from "../hooks/useApi.js";
 import { views } from "virtual:hydra-docs";
 import { REPO_URL } from "../pages/docs/build-info.js";
-import { UNDO_WINDOW_MS, createUndoWindowRegistry, triggerDisabled } from "../lib/delayed-commit.ts";
+import {
+  UNDO_WINDOW_MS,
+  createUndoWindowRegistry,
+  triggerDisabled,
+  undoWindowSeconds,
+} from "../lib/delayed-commit.ts";
 
 /**
  * ActionAffordance — ONE component, keyed by the registry Action's `kind`
@@ -132,6 +137,7 @@ export function UndoToastStack({ windows, onUndo }) {
         <div
           key={w.id}
           role="status"
+          aria-live="polite"
           className="flex items-center gap-3 rounded-lg border border-zinc-600 bg-zinc-900 px-4 py-2.5 text-xs text-zinc-200 shadow-lg"
         >
           <span>{w.label}</span>
@@ -294,7 +300,7 @@ function InDashboardAffordance({ action, onFired, onResult }) {
       ) : (
         <button
           type="button"
-          onClick={() => undoHost.start(windowId, `Firing ${action.label} in 5s`, fire)}
+          onClick={() => undoHost.start(windowId, `Firing ${action.label} in ${undoWindowSeconds(UNDO_WINDOW_MS)}`, fire)}
           disabled={triggerDisabled(busy, undoHost.windows, windowId)}
           className="rounded border border-emerald-500/45 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40"
         >

@@ -95,7 +95,6 @@
   "scripts/probe-search.ts": 1,
   "scripts/reap-stale-test-procs.sh": 2,
   "scripts/reflection-deposit.sh": 1,
-  "scripts/sync-skills.sh": 1,
   "scripts/sync-target-gate.sh": 1,
   "scripts/target/mutation-check.ts": 1,
   "scripts/target/post-merge-health.ts": 1,
