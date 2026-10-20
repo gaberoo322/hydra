@@ -19,7 +19,9 @@ import { before, describe, test } from "node:test";
 import {
   BASELINE_FILE,
   FIX_COMMAND,
+  NEW_FIX_COMMAND,
   RETIRED_TERMS_FILE,
+  kindOfRow,
   blankProse,
   classifyToken,
   compareBaseline,
@@ -210,7 +212,17 @@ describe("docs-prose-drift", () => {
     ]);
     const report = renderReport("new", ["docs/x.md:path:src/gone.ts"], byRow);
     ok(report.includes("docs/x.md:9 — path — src/gone.ts — fix the path"), report);
-    ok(report.endsWith(FIX_COMMAND), report);
+    // The NEW arm cannot be fixed by a bare --update-baseline (it refuses to
+    // grow): it points at the prose, or a deliberate --allow-grow.
+    ok(report.endsWith(NEW_FIX_COMMAND), report);
+    ok(NEW_FIX_COMMAND.includes("--allow-grow"), NEW_FIX_COMMAND);
+    // A row with no live offender takes the fix hint of its OWN kind.
+    const orphan = renderReport("new", ["docs/y.md:route:/api/gone"], new Map());
+    ok(orphan.includes("docs/y.md:route:/api/gone — not in docs/generated/routes.json"), orphan);
+    ok(!orphan.includes("counts.json disagrees"), orphan);
+    strictEqual(kindOfRow("docs/y.md:route:/api/gone"), "route");
+    strictEqual(kindOfRow("docs/y.md:retired-term:codex"), "retired-term");
+    strictEqual(kindOfRow("no-kind-here"), null);
     const stale = renderReport("stale", ["docs/x.md:path:src/gone.ts"], byRow);
     ok(stale.includes("docs/x.md:path:src/gone.ts — stale baseline row — regenerate"), stale);
     ok(stale.endsWith(FIX_COMMAND), stale);
@@ -448,6 +460,30 @@ describe("prose-drift: verification never throws on unreadable inputs", () => {
           }),
         TypeError,
       );
+    });
+  });
+
+  test("an unreadable scoped doc aborts the scan as unreadable-input, never a fake link row", async () => {
+    await withFixture({ "docs/present.md": "# Present\n" }, (root) => {
+      const offenders = scanProseDrift(root, {
+        corpusRows: [
+          { path: "docs/present.md", tier: "living" },
+          { path: "docs/vanished.md", tier: "living" },
+        ],
+        fragmentFiles: [],
+        tracked: ["docs/present.md"],
+        retiredTerms: [],
+        routePaths: [],
+        redisKeyPatterns: [],
+        skillNames: [],
+        envVarNames: [],
+        counts: [],
+        sourceBlob: "",
+      });
+      strictEqual(offenders.length, 1);
+      strictEqual(offenders[0].kind, "unreadable-input");
+      ok(offenders[0].token.includes("docs/vanished.md"), offenders[0].token);
+      ok(!offenders.some((o) => o.kind === "link"), JSON.stringify(offenders));
     });
   });
 

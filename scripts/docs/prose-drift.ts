@@ -55,7 +55,10 @@ export interface RetiredTerm {
   retiredBy: string;
 }
 
-/** The eight offender kinds (five identifier kinds + the three prose checks). */
+/**
+ * The nine offender kinds: five identifier kinds, three prose checks
+ * (retired-term, count, link), and the unreadable-input sentinel.
+ */
 export type OffenderKind = "path" | "route" | "redis-key" | "skill" | "env-var" | "retired-term" | "count" | "link" | "unreadable-input";
 
 /** One unresolved claim: where, what kind, the token, and the per-kind remedy. */
@@ -100,7 +103,14 @@ export interface ProseScanOptions {
 
 export const BASELINE_FILE = "test/fixtures/docs-drift-baseline.json";
 export const RETIRED_TERMS_FILE = "test/fixtures/docs-retired-terms.json";
+/** STALE arm: the offender is gone, so regenerating the baseline shrinks it. */
 export const FIX_COMMAND = "Fix: npm run docs:drift -- --update-baseline";
+/**
+ * NEW arm: --update-baseline refuses to ADD rows without --allow-grow, so the
+ * fix is the prose itself; absorbing the row is a deliberate operator choice.
+ */
+export const NEW_FIX_COMMAND =
+  "Fix: correct the prose, or (deliberately) npm run docs:drift -- --update-baseline --allow-grow";
 
 // ---------------------------------------------------------------------------
 // Prose blanking + paragraph segmentation
@@ -575,9 +585,12 @@ function scanProseDriftUnguarded(repoRoot: string, opts: ProseScanOptions): Offe
     try {
       raw = readFileSync(join(repoRoot, file), "utf8");
     } catch (err) {
-      console.error(`[prose-drift] could not read scoped doc ${file}: ${(err as Error).message}`);
-      offenders.push({ file, line: 1, kind: "link", token: "(unreadable scoped doc)", fix: "scoped doc missing — regenerate docs/generated/corpus.json" });
-      return;
+      // A scoped doc that cannot be read is an unreadable INPUT (stale
+      // corpus.json), never a prose offender: abort the scan so no fake row
+      // can reach the baseline.
+      throw new ProseDriftInputError(
+        `[prose-drift] could not read scoped doc ${file} (regenerate docs/generated/corpus.json): ${(err as Error).message}`,
+      );
     }
     const blanked = blankProse(raw);
     const spans = paragraphSpans(blanked);
@@ -705,6 +718,20 @@ export function offenderRow(o: Offender): string {
   return `${o.file}:${o.kind}:${o.token}`;
 }
 
+/** Recover the kind of a `file:kind:token` row (null when no known kind segment is present). */
+export function kindOfRow(row: string): OffenderKind | null {
+  for (const kind of Object.keys(FIXES) as OffenderKind[]) {
+    if (row.includes(`:${kind}:`)) return kind;
+  }
+  return null;
+}
+
+/** The fix hint for a row with no live offender, derived from the row's own kind. */
+function fixForRow(row: string): string {
+  const kind = kindOfRow(row);
+  return kind === null ? "unrecognised baseline row — regenerate the baseline" : FIXES[kind];
+}
+
 /**
  * The sorted, deduped baseline rows for a scan — one row per distinct
  * file:kind:token, carrying the FIRST occurrence's line for the report.
@@ -748,13 +775,13 @@ export function renderReport(arm: "new" | "stale", rows: string[], byRow: Map<st
       lines.push(
         o
           ? `${o.file}:${o.line} — ${o.kind} — ${o.token} — ${o.fix}`
-          : `${row} — ${FIXES.count}`,
+          : `${row} — ${fixForRow(row)}`,
       );
     } else {
       lines.push(`${row} — stale baseline row — regenerate`);
     }
   }
-  lines.push(FIX_COMMAND);
+  lines.push(arm === "new" ? NEW_FIX_COMMAND : FIX_COMMAND);
   return lines.join("\n");
 }
 
