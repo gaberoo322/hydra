@@ -1355,7 +1355,7 @@ describe("pr-gate — QA-verdict recheck (#5052)", () => {
     assert.equal(log.length, 12);
     assert.equal(value(o)?.length, 12);
     assert.equal(new Set(log).size, 12, "12 distinct PRs run");
-    const skipped = prs.map((p) => p.number).filter((n) => !log.includes(n));
+    const skipped = prs.map((p) => (p as { number: number }).number).filter((n) => !log.includes(n));
     assert.equal(skipped.length, 3);
     assert.ok(o.notes.some((n) => n.includes("capped at 12") && skipped.every((n2) => n.includes(`#${n2}`))));
   });
