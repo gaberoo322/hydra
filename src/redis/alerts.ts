@@ -12,10 +12,9 @@ import { logger } from "../logger.ts";
  * Push an alert to the alerts list (capped at maxLen).
  *
  * Pre-validates `alertJson` as parseable JSON before storing (issue #3609).
- * The scout alert-listener (`src/scout/alert-listener.ts:planAlertDispatches`)
- * consumes this list with `JSON.parse` and silently drops any entry it can't
- * parse — a truncated / malformed entry there costs a scout dispatch
- * opportunity with only a log line. Rejecting an unparseable string at the
+ * The readers of this list (`src/digest-fanout.ts`, `src/api/now-page.ts`,
+ * `src/api/alerts.ts`) consume it with `JSON.parse`; a truncated / malformed
+ * entry costs them a dropped row with only a log line. Rejecting an unparseable string at the
  * write boundary keeps the list an invariant of parseable objects, so a
  * corrupt / truncated string never reaches (and never poisons) the reader.
  *

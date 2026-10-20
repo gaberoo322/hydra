@@ -1,0 +1,1 @@
+- refactor: retire the tool-scout alert-driven trigger — its pattern:* input never had a producer (#5054)

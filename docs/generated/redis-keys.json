@@ -32,7 +32,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 372
+        "line": 361
       }
     },
     {
@@ -164,7 +164,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 456
+        "line": 445
       }
     },
     {
@@ -184,7 +184,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 457
+        "line": 446
       }
     },
     {
@@ -206,7 +206,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 454
+        "line": 443
       }
     },
     {
@@ -228,7 +228,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 455
+        "line": 444
       }
     },
     {
@@ -474,7 +474,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 396
+        "line": 385
       }
     },
     {
@@ -490,7 +490,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 390
+        "line": 379
       }
     },
     {
@@ -504,7 +504,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 391
+        "line": 380
       }
     },
     {
@@ -518,7 +518,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 389
+        "line": 378
       }
     },
     {
@@ -734,7 +734,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 401
+        "line": 390
       }
     },
     {
@@ -873,7 +873,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 367
+        "line": 356
       }
     },
     {
@@ -923,7 +923,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 382
+        "line": 371
       }
     },
     {
@@ -971,7 +971,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 412
+        "line": 401
       }
     },
     {
@@ -1135,26 +1135,6 @@
       }
     },
     {
-      "builder": "scoutAlertCursor",
-      "pattern": "hydra:scout:alert-cursor",
-      "params": [],
-      "callSites": 2,
-      "accessors": [
-        "src/redis/scout.ts"
-      ],
-      "servedBy": [
-        "GET /api/scout/alert-plan",
-        "GET /api/scout/dispatches",
-        "GET /api/scout/stats"
-      ],
-      "home": "/api/scout/alert-plan",
-      "retired": false,
-      "source": {
-        "path": "src/redis/keys.ts",
-        "line": 361
-      }
-    },
-    {
       "builder": "scoutCategoryLastWalked",
       "pattern": "hydra:scout:category-last-walked:{category}",
       "params": [
@@ -1165,11 +1145,10 @@
         "src/redis/scout.ts"
       ],
       "servedBy": [
-        "GET /api/scout/alert-plan",
         "GET /api/scout/dispatches",
         "GET /api/scout/stats"
       ],
-      "home": "/api/scout/alert-plan",
+      "home": "/api/scout/dispatches",
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
@@ -1185,15 +1164,14 @@
         "src/redis/scout.ts"
       ],
       "servedBy": [
-        "GET /api/scout/alert-plan",
         "GET /api/scout/dispatches",
         "GET /api/scout/stats"
       ],
-      "home": "/api/scout/alert-plan",
+      "home": "/api/scout/dispatches",
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 360
+        "line": 351
       }
     },
     {
@@ -1205,37 +1183,14 @@
         "src/redis/scout.ts"
       ],
       "servedBy": [
-        "GET /api/scout/alert-plan",
         "GET /api/scout/dispatches",
         "GET /api/scout/stats"
       ],
-      "home": "/api/scout/alert-plan",
+      "home": "/api/scout/dispatches",
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
         "line": 324
-      }
-    },
-    {
-      "builder": "scoutPatternLastFired",
-      "pattern": "hydra:scout:pattern-last-fired:{pattern}",
-      "params": [
-        "pattern"
-      ],
-      "callSites": 2,
-      "accessors": [
-        "src/redis/scout.ts"
-      ],
-      "servedBy": [
-        "GET /api/scout/alert-plan",
-        "GET /api/scout/dispatches",
-        "GET /api/scout/stats"
-      ],
-      "home": "/api/scout/alert-plan",
-      "retired": false,
-      "source": {
-        "path": "src/redis/keys.ts",
-        "line": 362
       }
     },
     {
@@ -1249,11 +1204,10 @@
         "src/redis/scout.ts"
       ],
       "servedBy": [
-        "GET /api/scout/alert-plan",
         "GET /api/scout/dispatches",
         "GET /api/scout/stats"
       ],
-      "home": "/api/scout/alert-plan",
+      "home": "/api/scout/dispatches",
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
@@ -1271,11 +1225,10 @@
         "src/redis/scout.ts"
       ],
       "servedBy": [
-        "GET /api/scout/alert-plan",
         "GET /api/scout/dispatches",
         "GET /api/scout/stats"
       ],
-      "home": "/api/scout/alert-plan",
+      "home": "/api/scout/dispatches",
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
@@ -1293,11 +1246,10 @@
         "src/redis/scout.ts"
       ],
       "servedBy": [
-        "GET /api/scout/alert-plan",
         "GET /api/scout/dispatches",
         "GET /api/scout/stats"
       ],
-      "home": "/api/scout/alert-plan",
+      "home": "/api/scout/dispatches",
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
@@ -1317,7 +1269,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 424
+        "line": 413
       }
     },
     {
@@ -1331,7 +1283,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 419
+        "line": 408
       }
     },
     {
@@ -1345,7 +1297,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 418
+        "line": 407
       }
     },
     {
@@ -1359,7 +1311,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 417
+        "line": 406
       }
     },
     {
@@ -1424,7 +1376,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 407
+        "line": 396
       }
     }
   ]

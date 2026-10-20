@@ -2476,7 +2476,7 @@
       ],
       "source": {
         "path": "src/api/scout.ts",
-        "line": 41
+        "line": 40
       }
     },
     {
@@ -2493,24 +2493,7 @@
       ],
       "source": {
         "path": "src/api/scout.ts",
-        "line": 90
-      }
-    },
-    {
-      "method": "GET",
-      "path": "/api/scout/alert-plan",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/scout/alert-plan",
-      "areas": [
-        "src/redis/",
-        "src/schemas/",
-        "src/scout/"
-      ],
-      "source": {
-        "path": "src/api/scout.ts",
-        "line": 104
+        "line": 89
       }
     },
     {

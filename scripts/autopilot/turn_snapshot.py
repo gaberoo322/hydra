@@ -87,7 +87,7 @@ _LIST_SIGNALS = (
     "orch_prs_behind",
     "orch_prs_glm_red",
 )
-_COUNT_SIGNALS = ("scout_alert_eligible_count", "hitl_grill_open", "wayfinder_orch_inflight_global")
+_COUNT_SIGNALS = ("hitl_grill_open", "wayfinder_orch_inflight_global")
 _TEXT_SIGNALS = ("target_needs_qa_pr_ref", "target_needs_qa_pr_head", "wayfinder_orch_ticket_type")
 _SURFACE_SIGNAL = "orch_prs_dirty_surface"
 _SHARE_SIGNAL = "orch_realm_weekly_share"
@@ -122,7 +122,6 @@ ALL_DEGRADED_SIGNALS: dict[str, Any] = {
     "health_fail": True,
     "scout_walk_due": False,
     "scout_board_saturated": True,
-    "scout_alert_eligible_count": 0,
     "orch_backfill_idle": False,
     "arch_board_saturated": True,
     "hitl_grill_open": 0,

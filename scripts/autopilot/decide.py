@@ -2482,9 +2482,8 @@ def _normalise_events(raw: object) -> tuple[list[dict], list[str]]:
     Runs ONCE, as the first statement of `decide()`, ahead of EVERY consumer
     (`_orch_board_read_degraded`, `_rule_termination` -> `_signal_present`,
     `_rule_completion_reaps`, the qa-verdict auto-merge sweep, the
-    wait_or_reap ``completed_task_ids`` fold, the signal readers, the scout
-    ``alert_count`` read), so no downstream ``for ev in events`` loop needs
-    its own ``isinstance`` guard.
+    wait_or_reap ``completed_task_ids`` fold, the signal readers), so no
+    downstream ``for ev in events`` loop needs its own ``isinstance`` guard.
 
     Returns ``(events, reasons)``:
 
@@ -6150,7 +6149,7 @@ def _select_signal_scout_orch(
     events: list[dict],
     now: int,
 ) -> dict | None:
-    """`scout_orch` signal-class selector (provenance: #485, #483, #486)."""
+    """`scout_orch` signal-class selector (provenance: #485, #483, #486, #5054)."""
     # Issue #485 (Phase B of /hydra-tool-scout, parent #483). Calendar-
     # driven path: fires when the weekly walk is due AND the orchestrator
     # board isn't already saturated with proposal-grade work — the
@@ -6163,35 +6162,10 @@ def _select_signal_scout_orch(
     # decide.py only emits the dispatch — the skill itself walks the
     # planner output and invokes one scout per eligible target.
     #
-    # Issue #486 (Phase C) — ALERT-driven path: when
-    # `scout_alert_eligible_count > 0` AND the orchestrator board
-    # isn't saturated, fire the same skill with `trigger: "alert"` so
-    # acute failure patterns (test_decline, rollback_cluster, etc.)
-    # get a same-day investigation instead of waiting for the weekly
-    # walk. The skill reads `/api/scout/alert-plan` to learn which
-    # categories to research. Per-class cooldown DOES still apply
-    # (SIGNAL_COOLDOWNS["scout_orch"] = 7d) — that's the back-stop
-    # against the listener firing more than once per week even
-    # under sustained alert pressure. The 24h per-pattern dedup
-    # inside the listener is the primary suppressor; the 7d class
-    # cooldown is the safety net.
+    # The Phase C alert-driven arm (#486) was retired in #5054: the
+    # `pattern:*` alerts it consumed never had a producer (#5053).
     if _signal_present(state, events, "scout_board_saturated"):
         return None
-    alert_count = int(ts.scalar(state, "scout_alert_eligible_count") or 0)
-    for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == "scout_alert_eligible_count":
-            try:
-                alert_count = int(ev.get("value") or 0)
-            except (TypeError, ValueError):
-                alert_count = 0
-            break
-    if alert_count > 0:
-        return make_dispatch(
-            sig,
-            "hydra-tool-scout",
-            prompt_args={"trigger": "alert"},
-            reason=f"alert-driven scout: {alert_count} eligible alert(s)",
-        )
     if _signal_present(state, events, "scout_walk_due"):
         return make_dispatch(
             sig,

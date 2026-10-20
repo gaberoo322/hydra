@@ -338,7 +338,7 @@ describe("Turn Snapshot passthrough — CLI and fail-open runner", () => {
     const noReasons = (v: unknown): unknown =>
       JSON.parse(JSON.stringify(v), (k, x) => (k === "reason" && typeof x === "string" ? "<reason>" : x));
     const fb = (names: string[]) => noReasons(Object.fromEntries(names.map((n) => [n, PASSTHROUGH_COLLECTORS[n as keyof typeof PASSTHROUGH_COLLECTORS].fallbackValue])));
-    const tailNames = ["scout-alerts", "realm-share", "usage-eligibility", "emergency-brake", "class-stats", "capacity", "scheduler", "recommendations", "slot-events"];
+    const tailNames = ["realm-share", "usage-eligibility", "emergency-brake", "class-stats", "capacity", "scheduler", "recommendations", "slot-events"];
     assert.deepEqual(fb(["health", "direction-drift"]), noReasons(loadGolden("passthrough-group-head-all-failed.json").expected.values));
     assert.deepEqual(fb(tailNames), noReasons(loadGolden("passthrough-group-tail-all-failed.json").expected.values));
   });

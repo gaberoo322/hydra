@@ -105,7 +105,7 @@
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 523
+          "line": 522
         },
         {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
@@ -1132,20 +1132,6 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 527
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 527
-      }
-    },
-    {
-      "name": "HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/turn-snapshot.ts",
           "line": 526
         }
       ],
@@ -1153,6 +1139,20 @@
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
         "line": 526
+      }
+    },
+    {
+      "name": "HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 525
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 525
       }
     },
     {
@@ -1552,7 +1552,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 524
+          "line": 523
         },
         {
           "path": "src/api/config.ts",
@@ -1582,7 +1582,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 524
+        "line": 523
       }
     },
     {
@@ -2444,31 +2444,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 518
+          "line": 517
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 518
+        "line": 517
       }
     },
     {
       "name": "HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 516
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 516
-      }
-    },
-    {
-      "name": "HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS",
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
@@ -2482,17 +2468,31 @@
       }
     },
     {
-      "name": "HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS",
+      "name": "HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS",
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 517
+          "line": 514
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 517
+        "line": 514
+      }
+    },
+    {
+      "name": "HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/turn-snapshot.ts",
+          "line": 516
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/turn-snapshot.ts",
+        "line": 516
       }
     },
     {
@@ -3232,11 +3232,11 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 525
+          "line": 524
         },
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 572
+          "line": 571
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3246,7 +3246,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 525
+        "line": 524
       }
     },
     {
@@ -3268,13 +3268,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 534
+          "line": 533
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 534
+        "line": 533
       }
     },
     {

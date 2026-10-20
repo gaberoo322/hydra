@@ -32,7 +32,7 @@ import {
 export type ScoutDecision = "filed" | "rejected" | "skipped-cooldown";
 
 /** Trigger source for the scout invocation that recorded this entry. */
-type ScoutTrigger = "manual" | "calendar" | "alert" | "gap";
+type ScoutTrigger = "manual" | "calendar" | "gap";
 
 /**
  * Strongly-typed shape of a seen-list entry. Redis stores everything as
