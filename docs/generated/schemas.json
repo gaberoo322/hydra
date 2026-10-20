@@ -16,7 +16,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 101
+        "line": 98
       }
     },
     {
@@ -26,7 +26,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 277
+        "line": 274
       }
     },
     {
@@ -70,7 +70,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/attention.ts",
-        "line": 137
+        "line": 131
       }
     },
     {
@@ -90,7 +90,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/attention.ts",
-        "line": 151
+        "line": 145
       }
     },
     {
@@ -234,7 +234,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 156
+        "line": 153
       }
     },
     {
@@ -246,7 +246,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 74
+        "line": 72
       }
     },
     {
@@ -274,7 +274,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 337
+        "line": 327
       }
     },
     {
@@ -288,7 +288,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 345
+        "line": 335
       }
     },
     {
@@ -302,7 +302,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 311
+        "line": 301
       }
     },
     {
@@ -316,7 +316,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 319
+        "line": 309
       }
     },
     {
@@ -352,7 +352,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 255
+        "line": 252
       }
     },
     {
@@ -362,7 +362,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 215
+        "line": 212
       }
     },
     {
@@ -396,7 +396,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 267
+        "line": 264
       }
     },
     {
@@ -490,7 +490,7 @@
       ],
       "source": {
         "path": "src/schemas/attention.ts",
-        "line": 173
+        "line": 167
       }
     },
     {
@@ -542,7 +542,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 135
+        "line": 132
       }
     },
     {
@@ -584,7 +584,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 248
+        "line": 238
       }
     },
     {
@@ -600,7 +600,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 240
+        "line": 230
       }
     },
     {
@@ -712,7 +712,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 229
+        "line": 226
       }
     },
     {
@@ -760,7 +760,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 292
+        "line": 289
       }
     },
     {
@@ -772,7 +772,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 313
+        "line": 310
       }
     },
     {
@@ -782,7 +782,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 331
+        "line": 328
       }
     },
     {
@@ -846,7 +846,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 179
+        "line": 169
       }
     },
     {
@@ -856,7 +856,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 197
+        "line": 194
       }
     },
     {
@@ -922,7 +922,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 270
+        "line": 267
       }
     },
     {
@@ -956,7 +956,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 208
+        "line": 205
       }
     },
     {
@@ -1190,7 +1190,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 245
+        "line": 242
       }
     },
     {
@@ -1242,7 +1242,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 177
+        "line": 174
       }
     },
     {
@@ -1252,7 +1252,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 184
+        "line": 181
       }
     },
     {
@@ -1262,7 +1262,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 273
+        "line": 270
       }
     },
     {
@@ -1274,7 +1274,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 164
+        "line": 154
       }
     },
     {

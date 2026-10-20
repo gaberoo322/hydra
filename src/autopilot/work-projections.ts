@@ -45,7 +45,6 @@ import {
 import type { IssueRow } from "../github/issues.ts";
 import { extractStrictBlockerRefs } from "../github/blockers.ts";
 import { hasScopeSection } from "../scope-section.ts";
-import { glmLane } from "../glm/eligibility.ts";
 
 // ---------------------------------------------------------------------------
 // Pure /work projections (issue #4010) — exported for the route and tests
@@ -71,18 +70,10 @@ export function deriveWorkLane(labels: readonly string[]): WorkQueueLane | null 
  * strict-blocker set (only meaningful for `ready-for-agent` rows — the same
  * population `resolveOpenBlockers` resolves); per-row numbers are this row's
  * strict refs intersected with that set, self-references excluded.
- * `glmPartitionActive` is whether the GLM drainer partition is LIVE — the SAME
- * resolved liveness the route feeds `resolveOpenBlockers`, threaded here so
- * the GLM badge is the ONE lane predicate's ruling, not a second label read
- * (issue #4692, ADR-0040 Decision 4 row 13): `glmLane(...).lane === "glm"`,
- * mirroring board-state's count predicate (#4684). A withheld
- * (`glm-withhold`) or A/B-control issue is Claude-pinned, and a dead
- * partition owns no rows (fail-open, #3754), so neither shows the badge.
  */
 export function toWorkQueueRow(
   row: IssueRow,
   openBlockers: ReadonlySet<number>,
-  glmPartitionActive: boolean,
 ): WorkQueueRow | null {
   const lane = deriveWorkLane(row.labels);
   if (lane === null) return null;
@@ -100,7 +91,7 @@ export function toWorkQueueRow(
     lane,
     updatedAt: row.updatedAt ?? "",
     openBlockers: rowBlockers,
-    glmEligible: glmLane(row.labels, glmPartitionActive).lane === "glm",
+    glmEligible: row.labels.includes("glm-eligible"),
   };
 }
 

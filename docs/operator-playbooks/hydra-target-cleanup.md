@@ -4,6 +4,7 @@ description: Non-interactive two-phase dead-code pass over the Target — a knip
 when_to_use: "When the Target backlog is idle, or the operator says 'target cleanup scan' or 'sweep target dead code'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 arguments: [apply]
+claude_only: true
 ---
 
 # Hydra Target Cleanup (headless demote-only dead-export sweep)

@@ -225,7 +225,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 218
+        "line": 217
       }
     },
     {
@@ -247,7 +247,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 337
+        "line": 325
       }
     },
     {
@@ -269,7 +269,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 400
+        "line": 388
       }
     },
     {
@@ -289,7 +289,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 522
+        "line": 510
       }
     },
     {
@@ -309,7 +309,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 583
+        "line": 571
       }
     },
     {
@@ -329,7 +329,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 626
+        "line": 614
       }
     },
     {
@@ -349,7 +349,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 644
+        "line": 632
       }
     },
     {
@@ -1604,7 +1604,7 @@
       ],
       "source": {
         "path": "src/api/metrics-cost.ts",
-        "line": 106
+        "line": 103
       }
     },
     {
@@ -1623,7 +1623,7 @@
       ],
       "source": {
         "path": "src/api/metrics-cost.ts",
-        "line": 140
+        "line": 137
       }
     },
     {
@@ -1642,7 +1642,7 @@
       ],
       "source": {
         "path": "src/api/metrics-cost.ts",
-        "line": 169
+        "line": 166
       }
     },
     {
@@ -1661,7 +1661,7 @@
       ],
       "source": {
         "path": "src/api/metrics-cost.ts",
-        "line": 212
+        "line": 209
       }
     },
     {
@@ -1680,7 +1680,7 @@
       ],
       "source": {
         "path": "src/api/metrics-cost.ts",
-        "line": 243
+        "line": 240
       }
     },
     {

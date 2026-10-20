@@ -82,4 +82,3 @@ config/feedback/*-iotest.md
 # loads them via promptfoo `file://` vars. Regenerated every run, never
 # committed.
 evals/skill-prune/.staged/
-.hydra-refl.json

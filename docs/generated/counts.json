@@ -2,7 +2,6 @@
   "family": "counts",
   "schemaVersion": 1,
   "generatedFrom": [
-    "docs/generated/adrs.json",
     "docs/generated/chores.json",
     "docs/generated/ci-gates.json",
     "docs/generated/config.json",
@@ -17,11 +16,6 @@
     "docs/generated/units-scripts.json"
   ],
   "rows": [
-    {
-      "family": "adrs",
-      "metric": "rows",
-      "value": 43
-    },
     {
       "family": "chores",
       "metric": "rows",
@@ -54,11 +48,6 @@
     },
     {
       "family": "corpus",
-      "metric": "adr",
-      "value": 43
-    },
-    {
-      "family": "corpus",
       "metric": "historical",
       "value": 11
     },
@@ -75,12 +64,12 @@
     {
       "family": "corpus",
       "metric": "rows",
-      "value": 75
+      "value": 32
     },
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 251
+      "value": 243
     },
     {
       "family": "pages",
@@ -135,7 +124,7 @@
     {
       "family": "units-scripts",
       "metric": "rows",
-      "value": 39
+      "value": 38
     }
   ]
 }

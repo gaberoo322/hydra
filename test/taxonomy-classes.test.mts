@@ -450,14 +450,12 @@ describe("decide.py brain layout: selectors live in decide_selectors/, imports p
   });
 
   test("ESCALATION_POLICY is one dict object shared by decide, decide_base and the selector modules", () => {
-    // #4821 retired the dev_orch selector's own read, so no selector module
-    // binds the name today; any that does (now or later) must share the object.
     const same = runBrainProbe([
-      "import decide, decide_base, importlib, pkgutil, decide_selectors",
-      "mods = [importlib.import_module('decide_selectors.' + m.name) for m in pkgutil.iter_modules(decide_selectors.__path__)]",
-      "print(json.dumps(decide.ESCALATION_POLICY is decide_base.ESCALATION_POLICY and all(getattr(m, 'ESCALATION_POLICY', decide_base.ESCALATION_POLICY) is decide_base.ESCALATION_POLICY for m in mods)))",
+      "import decide, decide_base",
+      "from decide_selectors import dev",
+      "print(json.dumps(decide.ESCALATION_POLICY is decide_base.ESCALATION_POLICY is dev.ESCALATION_POLICY))",
     ]);
-    assert.equal(same, true, "an in-place ESCALATION_POLICY mutation through decide must reach decide_base and every selector module that binds it (issue #4511 INV-9)");
+    assert.equal(same, true, "an in-place ESCALATION_POLICY mutation through decide must reach the dev_orch selector (issue #4511 INV-9)");
   });
 });
 

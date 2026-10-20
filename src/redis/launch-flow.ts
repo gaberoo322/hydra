@@ -138,7 +138,6 @@ export const LAUNCH_FLOW_REASON_SIGNAL: Readonly<
   "eligibility-unparseable": "fail-safe",
   "allow-invalid": "fail-safe",
   "meter-unavailable": "meter-dark",
-  "token-refresh-nudge": "meter-dark",
   "session-blocked": "quota",
   "emergency-stop": "quota",
   "weekly-emergency-stop": "quota",

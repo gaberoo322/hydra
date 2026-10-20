@@ -100,14 +100,6 @@
           "line": 128
         },
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 520
-        },
-        {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 521
-        },
-        {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
           "line": 93
         },
@@ -205,15 +197,7 @@
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 227
-        },
-        {
-          "path": "scripts/headroom-spike.sh",
-          "line": 37
-        },
-        {
-          "path": "scripts/headroom-spike.sh",
-          "line": 41
+          "line": 216
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -241,11 +225,7 @@
         },
         {
           "path": "scripts/sync-skills.sh",
-          "line": 637
-        },
-        {
-          "path": "scripts/sync-skills.sh",
-          "line": 638
+          "line": 45
         },
         {
           "path": "src/aggregators/architecture-graph.ts",
@@ -370,15 +350,15 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1478
+          "line": 1409
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1636
+          "line": 1567
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1663
+          "line": 1594
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
@@ -560,81 +540,17 @@
       }
     },
     {
-      "name": "HYDRA_AUTOPILOT_ALLOW_INSESSION_REBOOTSTRAP",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 885
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 885
-      }
-    },
-    {
-      "name": "HYDRA_AUTOPILOT_CANDIDATES",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 58
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/turn.sh",
-        "line": 58
-      }
-    },
-    {
-      "name": "HYDRA_AUTOPILOT_COLLECT_OUT",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 60
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/turn.sh",
-        "line": 60
-      }
-    },
-    {
-      "name": "HYDRA_AUTOPILOT_COLLECT_REPLAY",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 74
-        },
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 75
-        },
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 76
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/turn.sh",
-        "line": 74
-      }
-    },
-    {
       "name": "HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS",
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1055
+          "line": 986
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1055
+        "line": 986
       }
     },
     {
@@ -684,27 +600,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1119
+          "line": 1050
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1119
-      }
-    },
-    {
-      "name": "HYDRA_AUTOPILOT_EVENTS",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 59
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/turn.sh",
-        "line": 59
+        "line": 1050
       }
     },
     {
@@ -716,7 +618,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 197
+          "line": 188
         },
         {
           "path": "src/api/usage.ts",
@@ -738,7 +640,7 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 912
+          "line": 862
         },
         {
           "path": "scripts/autopilot/status.sh",
@@ -764,13 +666,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1049
+          "line": 980
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1049
+        "line": 980
       }
     },
     {
@@ -828,7 +730,7 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 913
+          "line": 863
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
@@ -872,27 +774,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1048
+          "line": 979
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1048
-      }
-    },
-    {
-      "name": "HYDRA_AUTOPILOT_PLAN",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 57
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/turn.sh",
-        "line": 57
+        "line": 979
       }
     },
     {
@@ -904,7 +792,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 196
+          "line": 187
         },
         {
           "path": "src/api/usage.ts",
@@ -922,13 +810,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1074
+          "line": 1005
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1074
+        "line": 1005
       }
     },
     {
@@ -936,13 +824,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1075
+          "line": 1006
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1075
+        "line": 1006
       }
     },
     {
@@ -1044,19 +932,19 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 948
+          "line": 898
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 952
+          "line": 902
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1248
+          "line": 1179
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1407
+          "line": 1338
         }
       ],
       "inEnvExample": false,
@@ -1074,7 +962,7 @@
         },
         {
           "path": "scripts/reflection-deposit.sh",
-          "line": 138
+          "line": 107
         }
       ],
       "inEnvExample": false,
@@ -1128,13 +1016,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1123
+          "line": 1054
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1123
+        "line": 1054
       }
     },
     {
@@ -1142,13 +1030,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1120
+          "line": 1051
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1120
+        "line": 1051
       }
     },
     {
@@ -1156,13 +1044,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3658
+          "line": 3568
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3658
+        "line": 3568
       }
     },
     {
@@ -1170,13 +1058,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 3657
+          "line": 3567
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 3657
+        "line": 3567
       }
     },
     {
@@ -1232,7 +1120,7 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 911
+          "line": 861
         },
         {
           "path": "scripts/autopilot/drain.sh",
@@ -1240,15 +1128,11 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 179
+          "line": 170
         },
         {
           "path": "scripts/autopilot/status.sh",
           "line": 32
-        },
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 56
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -1270,13 +1154,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1104
+          "line": 1035
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1104
+        "line": 1035
       }
     },
     {
@@ -1284,13 +1168,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1103
+          "line": 1034
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1103
+        "line": 1034
       }
     },
     {
@@ -1298,13 +1182,13 @@
       "readSites": [
         {
           "path": "scripts/reflection-deposit.sh",
-          "line": 112
+          "line": 103
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/reflection-deposit.sh",
-        "line": 112
+        "line": 103
       }
     },
     {
@@ -1312,13 +1196,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1047
+          "line": 978
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1047
+        "line": 978
       }
     },
     {
@@ -1326,17 +1210,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 883
-        },
-        {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1634
+          "line": 1565
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 883
+        "line": 1565
       }
     },
     {
@@ -1344,21 +1224,21 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1137
+          "line": 1068
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1138
+          "line": 1069
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1141
+          "line": 1072
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1137
+        "line": 1068
       }
     },
     {
@@ -1503,18 +1383,14 @@
       "name": "HYDRA_CLAUDE_CREDENTIALS_PATH",
       "readSites": [
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 520
-        },
-        {
           "path": "src/cost/oauth-usage.ts",
-          "line": 104
+          "line": 172
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/pace-gate.sh",
-        "line": 520
+        "path": "src/cost/oauth-usage.ts",
+        "line": 172
       }
     },
     {
@@ -1943,62 +1819,6 @@
       "readSites": [
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 242
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 242
-      }
-    },
-    {
-      "name": "HYDRA_GLM_AB_MIN_N",
-      "readSites": [
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 243
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 243
-      }
-    },
-    {
-      "name": "HYDRA_GLM_AB_POOL_LIMIT",
-      "readSites": [
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 244
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 244
-      }
-    },
-    {
-      "name": "HYDRA_GLM_AB_USAGE_BY_ISSUE_URL",
-      "readSites": [
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 245
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 245
-      }
-    },
-    {
-      "name": "HYDRA_GLM_BEACHHEAD_BASELINE_FILE",
-      "readSites": [
-        {
-          "path": "scripts/glm-beachhead-report.sh",
           "line": 227
         }
       ],
@@ -2009,77 +1829,7 @@
       }
     },
     {
-      "name": "HYDRA_GLM_BEACHHEAD_BASELINE_SAMPLE",
-      "readSites": [
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 230
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 230
-      }
-    },
-    {
-      "name": "HYDRA_GLM_BEACHHEAD_MIN_DAYS_INTO_WINDOW",
-      "readSites": [
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 231
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 231
-      }
-    },
-    {
-      "name": "HYDRA_GLM_BEACHHEAD_NOW_EPOCH",
-      "readSites": [
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 232
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 232
-      }
-    },
-    {
-      "name": "HYDRA_GLM_BEACHHEAD_REPO",
-      "readSites": [
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 225
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 225
-      }
-    },
-    {
-      "name": "HYDRA_GLM_BEACHHEAD_USAGE_URL",
-      "readSites": [
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 226
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 226
-      }
-    },
-    {
-      "name": "HYDRA_GLM_BEACHHEAD_WINDOW_DAYS",
+      "name": "HYDRA_GLM_AB_MIN_N",
       "readSites": [
         {
           "path": "scripts/glm-beachhead-report.sh",
@@ -2093,7 +1843,7 @@
       }
     },
     {
-      "name": "HYDRA_GLM_BEACHHEAD_WINDOW_PRS",
+      "name": "HYDRA_GLM_AB_POOL_LIMIT",
       "readSites": [
         {
           "path": "scripts/glm-beachhead-report.sh",
@@ -2104,6 +1854,132 @@
       "source": {
         "path": "scripts/glm-beachhead-report.sh",
         "line": 229
+      }
+    },
+    {
+      "name": "HYDRA_GLM_AB_USAGE_BY_ISSUE_URL",
+      "readSites": [
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 230
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/glm-beachhead-report.sh",
+        "line": 230
+      }
+    },
+    {
+      "name": "HYDRA_GLM_BEACHHEAD_BASELINE_FILE",
+      "readSites": [
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 216
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/glm-beachhead-report.sh",
+        "line": 216
+      }
+    },
+    {
+      "name": "HYDRA_GLM_BEACHHEAD_BASELINE_SAMPLE",
+      "readSites": [
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 219
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/glm-beachhead-report.sh",
+        "line": 219
+      }
+    },
+    {
+      "name": "HYDRA_GLM_BEACHHEAD_MIN_DAYS_INTO_WINDOW",
+      "readSites": [
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 220
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/glm-beachhead-report.sh",
+        "line": 220
+      }
+    },
+    {
+      "name": "HYDRA_GLM_BEACHHEAD_NOW_EPOCH",
+      "readSites": [
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 221
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/glm-beachhead-report.sh",
+        "line": 221
+      }
+    },
+    {
+      "name": "HYDRA_GLM_BEACHHEAD_REPO",
+      "readSites": [
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 214
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/glm-beachhead-report.sh",
+        "line": 214
+      }
+    },
+    {
+      "name": "HYDRA_GLM_BEACHHEAD_USAGE_URL",
+      "readSites": [
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 215
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/glm-beachhead-report.sh",
+        "line": 215
+      }
+    },
+    {
+      "name": "HYDRA_GLM_BEACHHEAD_WINDOW_DAYS",
+      "readSites": [
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 217
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/glm-beachhead-report.sh",
+        "line": 217
+      }
+    },
+    {
+      "name": "HYDRA_GLM_BEACHHEAD_WINDOW_PRS",
+      "readSites": [
+        {
+          "path": "scripts/glm-beachhead-report.sh",
+          "line": 218
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/glm-beachhead-report.sh",
+        "line": 218
       }
     },
     {
@@ -2462,13 +2338,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 1250
+          "line": 1216
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 1250
+        "line": 1216
       }
     },
     {
@@ -2476,13 +2352,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 1225
+          "line": 1191
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 1225
+        "line": 1191
       }
     },
     {
@@ -2504,17 +2380,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 666
+          "line": 615
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 698
+          "line": 647
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 666
+        "line": 615
       }
     },
     {
@@ -2522,13 +2398,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 180
+          "line": 171
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 180
+        "line": 171
       }
     },
     {
@@ -2536,17 +2412,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 678
+          "line": 627
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 685
+          "line": 634
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 678
+        "line": 627
       }
     },
     {
@@ -2554,13 +2430,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 303
+          "line": 294
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 303
+        "line": 294
       }
     },
     {
@@ -2575,38 +2451,6 @@
       "source": {
         "path": "src/api/autopilot-idle.ts",
         "line": 135
-      }
-    },
-    {
-      "name": "HYDRA_PACE_GATE_NUDGE_CMD",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 541
-        },
-        {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 543
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/pace-gate.sh",
-        "line": 541
-      }
-    },
-    {
-      "name": "HYDRA_PACE_GATE_NUDGE_STAMP",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 521
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/pace-gate.sh",
-        "line": 521
       }
     },
     {
@@ -2800,7 +2644,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 186
+          "line": 177
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -2818,7 +2662,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 186
+        "line": 177
       }
     },
     {
@@ -2838,7 +2682,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 181
+          "line": 172
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -2876,7 +2720,7 @@
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 182
+          "line": 173
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -3130,13 +2974,13 @@
       "readSites": [
         {
           "path": "scripts/sync-skills.sh",
-          "line": 47
+          "line": 48
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/sync-skills.sh",
-        "line": 47
+        "line": 48
       }
     },
     {
@@ -3202,7 +3046,7 @@
         },
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2814
+          "line": 2724
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -3234,13 +3078,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/collect-state.sh",
-          "line": 2476
+          "line": 2386
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/collect-state.sh",
-        "line": 2476
+        "line": 2386
       }
     },
     {
@@ -4287,47 +4131,35 @@
       "readSites": [
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 140
+          "line": 136
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 163
+          "line": 148
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 164
+          "line": 149
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 170
+          "line": 155
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 171
+          "line": 156
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 191
+          "line": 167
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 209
+          "line": 180
         },
         {
           "path": "scripts/autopilot/recover-stale.sh",
-          "line": 226
-        },
-        {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 227
-        },
-        {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 232
-        },
-        {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 233
+          "line": 184
         },
         {
           "path": "scripts/branch-prune.sh",
@@ -4363,35 +4195,35 @@
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 649
+          "line": 634
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 702
+          "line": 687
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 711
+          "line": 696
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 795
+          "line": 780
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 927
+          "line": 912
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 930
+          "line": 915
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 946
+          "line": 931
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 956
+          "line": 941
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
@@ -4433,7 +4265,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/recover-stale.sh",
-        "line": 140
+        "line": 136
       }
     },
     {

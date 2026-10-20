@@ -1,1 +1,0 @@
-- fix: a parent-epic blocker declared by the same body no longer starves ready-for-agent issues, and the blocker-excluded count is surfaced as target_ready_blocker_excluded (#4823)
