@@ -14,10 +14,12 @@ export interface TelegramCredentials {
 }
 
 export function loadTelegramCredentials(
-  env: Record<string, string | undefined> = process.env,
+  env?: Record<string, string | undefined>,
 ): TelegramCredentials | null {
-  const token = env.TELEGRAM_BOT_TOKEN || "";
-  const chatId = env.TELEGRAM_CHAT_ID || "";
+  // Literal `process.env.X` reads (not an aliased env object) so the generated
+  // env-vars inventory (npm run docs:inventories) still sees these vars.
+  const token = (env ? env.TELEGRAM_BOT_TOKEN : process.env.TELEGRAM_BOT_TOKEN) || "";
+  const chatId = (env ? env.TELEGRAM_CHAT_ID : process.env.TELEGRAM_CHAT_ID) || "";
   if (!token || !chatId) {
     const missing = [!token && "TELEGRAM_BOT_TOKEN", !chatId && "TELEGRAM_CHAT_ID"]
       .filter(Boolean)

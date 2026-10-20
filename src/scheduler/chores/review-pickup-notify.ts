@@ -22,7 +22,6 @@ import {
   setReviewPickupNotified,
   clearReviewPickupNotified,
 } from "../../redis/review.ts";
-import { operatorChannel } from "../../operator-channel/index.ts";
 import { getReviewPickupSet } from "../../review-pickup.ts";
 import type { PublishableBus } from "../../event-bus-seams.ts";
 import { logger } from "../../logger.ts";
@@ -63,9 +62,6 @@ export async function runReviewPickupNotify(
     // Set is empty — re-arm if a prior notification is still suppressing.
     if (alreadyNotified) {
       await clearNotified();
-      await operatorChannel
-        .resolve("review:pickup_ready", "Review pickup set is empty")
-        .catch((err) => logger.error({ err }, "review-pickup-notify: failed to resolve page"));
       logger.info({}, "review-pickup-notify: set drained — re-armed notify hook");
       return { fired: false, count: 0, transitioned: true };
     }
