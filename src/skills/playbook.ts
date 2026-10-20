@@ -319,7 +319,7 @@ export function composeBase(
     const baseLines = baseBody.split("\n");
     for (const target of supersedes) {
       const want = normHeading(target);
-      const headings = collectHeadings(baseBody);
+      const headings = collectHeadings(baseLines.join("\n")); // re-scan: earlier targets already spliced baseLines
       const matches = headings.filter((h) => normHeading(h.text) === want);
       if (matches.length === 0) {
         return new PlaybookFailure(
