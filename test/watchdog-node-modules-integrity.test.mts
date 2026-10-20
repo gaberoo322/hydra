@@ -43,7 +43,7 @@ import { join, resolve } from "node:path";
 import { STREAMS } from "../src/event-bus-stream-keys.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
 import { ALERT_TYPES } from "../src/notification/alert-grammar.ts";
-import { CRITICAL_EVENT_TYPES } from "../src/digest.ts";
+import { isPageKind } from "../src/operator-channel/page-list.ts";
 import {
   WATCHDOG_SPAWN_TIMEOUT_MS,
   WATCHDOG_REDIS_TIMEOUT_MS,
@@ -197,14 +197,14 @@ describe("issue #4175 — TypeScript vocabulary wiring", () => {
     assert.equal(E.INFRA_NODE_MODULES_WIPED, "infra:node_modules_wiped");
   });
 
-  test("is in BOTH ALERT_TYPES and CRITICAL_EVENT_TYPES", () => {
+  test("is in BOTH ALERT_TYPES and the page list", () => {
     assert.ok(
       ALERT_TYPES.has(E.INFRA_NODE_MODULES_WIPED),
       "a wiped node_modules must raise a dashboard alert",
     );
     assert.ok(
-      CRITICAL_EVENT_TYPES.includes(E.INFRA_NODE_MODULES_WIPED),
-      "a wiped node_modules must bypass the batched digest",
+      isPageKind(E.INFRA_NODE_MODULES_WIPED),
+      "a wiped node_modules must be a Page",
     );
   });
 });
