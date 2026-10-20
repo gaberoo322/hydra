@@ -40,6 +40,12 @@
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
+import {
+  collectHeadings,
+  normHeading,
+  parseFrontmatter,
+  supersedesOf,
+} from "../../src/skills/playbook.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 const VENDOR_DIR = join(REPO_ROOT, "docs/operator-playbooks/_vendor");
@@ -107,54 +113,16 @@ export function collectSupersedes(
   for (const file of readdirSync(playbookDir)) {
     if (!file.endsWith(".md")) continue;
     const text = readFileSync(join(playbookDir, file), "utf-8");
-    const fm = text.match(/^---\n([\s\S]*?)\n---\n/);
-    if (!fm) continue;
-    const baseMatch = fm[1].match(/^compose_base:\s*(.+)$/m);
-    if (!baseMatch) continue;
-    const base = baseMatch[1].trim().replace(/^_vendor\//, "");
-    // Block-sequence entries under `supersedes:`, parsed line-by-line to match
-    // how sync-skills.sh reads them. Deliberately NOT a regex: the obvious
-    // `/^supersedes:\s*$([\s\S]*?)(?=^\S|\Z)/m` is wrong — `\Z` is not a JS
-    // anchor (it matches a literal "Z"), so the lookahead never fires when the
-    // block ends the frontmatter, and the collector silently returns nothing.
-    // A drift checker that finds no entries looks exactly like one where every
-    // entry resolves, which is the failure class this whole check exists for.
-    const lines = fm[1].split("\n");
-    let inBlock = false;
-    for (const raw of lines) {
-      if (/^supersedes:\s*$/.test(raw)) {
-        inBlock = true;
-        continue;
-      }
-      if (!inBlock) continue;
-      const item = raw.trim();
-      if (item.startsWith("- ")) {
-        out.push({
-          playbook: file,
-          base,
-          heading: item.slice(2).trim().replace(/^["']|["']$/g, ""),
-        });
-        continue;
-      }
-      // Any non-item line ends the block (a sibling key, or a blank line).
-      inBlock = false;
+    const parsed = parseFrontmatter(text);
+    if (!parsed) continue;
+    const composeBase = parsed.fm.get("compose_base");
+    if (typeof composeBase !== "string" || composeBase === "") continue;
+    const base = composeBase.replace(/^_vendor\//, "");
+    for (const heading of supersedesOf(parsed.fm)) {
+      out.push({ playbook: file, base, heading });
     }
   }
   return out;
-}
-
-/** Headings present in a markdown body, normalised (no leading #'s). */
-export function headingsOf(markdown: string): string[] {
-  return markdown
-    .split("\n")
-    .filter((l) => /^#{1,6}\s+/.test(l))
-    .map((l) => l.replace(/^#+\s*/, "").trim());
-}
-
-/** The body of a SKILL.md (frontmatter stripped). Returns null if malformed. */
-export function bodyOf(text: string): string | null {
-  const m = text.match(/^---\n[\s\S]*?\n---\n([\s\S]*)$/);
-  return m ? m[1] : null;
 }
 
 export function check(opts: {
@@ -234,8 +202,8 @@ export function check(opts: {
     if (opts.pluginSkillsDir) {
       const upstreamPath = join(opts.pluginSkillsDir, prov.skill, "SKILL.md");
       if (existsSync(upstreamPath)) {
-        const vendoredBody = bodyOf(readFileSync(join(opts.vendorDir, file), "utf-8"));
-        const upstreamBody = bodyOf(readFileSync(upstreamPath, "utf-8"));
+        const vendoredBody = parseFrontmatter(readFileSync(join(opts.vendorDir, file), "utf-8"))?.body ?? null;
+        const upstreamBody = parseFrontmatter(readFileSync(upstreamPath, "utf-8"))?.body ?? null;
         if (vendoredBody !== null && upstreamBody !== null && vendoredBody !== upstreamBody) {
           findings.push({
             kind: "content-drift",
@@ -252,10 +220,10 @@ export function check(opts: {
   for (const entry of collectSupersedes(opts.playbookDir)) {
     const basePath = join(opts.vendorDir, entry.base);
     if (!existsSync(basePath)) continue;
-    const body = bodyOf(readFileSync(basePath, "utf-8"));
+    const body = parseFrontmatter(readFileSync(basePath, "utf-8"))?.body ?? null;
     if (body === null) continue;
-    const want = entry.heading.replace(/^#+\s*/, "").trim();
-    const matches = headingsOf(body).filter((h) => h === want);
+    const want = normHeading(entry.heading);
+    const matches = collectHeadings(body).filter((h) => normHeading(h.text) === want);
     if (matches.length !== 1) {
       findings.push({
         kind: "supersedes-unresolved",

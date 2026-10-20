@@ -13,8 +13,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 const {
-  splitFrontmatter,
-  extractDescription,
+  measureSkillSource,
   countWords,
   effectiveDescriptionCap,
   compareAgainstBaseline,
@@ -28,39 +27,37 @@ function baselineOf(files: Record<string, { body: number; description?: number }
   return { note: "synthetic baseline for tests", files };
 }
 
-describe("skill-size-ratchet: frontmatter split + description extraction", () => {
-  test("splits frontmatter from body (sync-skills grammar)", () => {
-    const { frontmatter, body } = splitFrontmatter(
-      "---\nname: hydra-example\ndescription: Does a thing.\n---\n# Title\n\nBody text here.\n",
+describe("skill-size-ratchet: measureSkillSource (core grammar)", () => {
+  test("splits frontmatter from body and counts both", () => {
+    assert.deepEqual(
+      measureSkillSource(
+        "---\nname: hydra-example\ndescription: Does a thing.\n---\n# Title\n\nBody text here.\n",
+      ),
+      { body: 5, description: 3 },
     );
-    assert.ok(frontmatter !== null);
-    assert.match(frontmatter!, /name: hydra-example/);
-    assert.equal(body, "# Title\n\nBody text here.\n");
   });
 
-  test("frontmatter-less doc returns null frontmatter (exempt, not an error)", () => {
-    const { frontmatter, body } = splitFrontmatter("# Ollama Recovery\n\nProse.\n");
-    assert.equal(frontmatter, null);
-    assert.equal(body, "# Ollama Recovery\n\nProse.\n");
+  test("frontmatter-less doc is exempt (null), not an error", () => {
+    assert.equal(measureSkillSource("# Ollama Recovery\n\nProse.\n"), null);
   });
 
-  test("MALFORMED frontmatter (opens with --- but never closes) throws — fail loud", () => {
+  test("MALFORMED frontmatter (opens with --- but never closes) throws - fail loud", () => {
     assert.throws(
-      () => splitFrontmatter("---\nname: truncated\n# no closing delimiter\n"),
+      () => measureSkillSource("---\nname: truncated\n# no closing delimiter\n"),
       /malformed frontmatter/,
     );
   });
 
-  test("extracts a quoted description and strips the quotes", () => {
+  test("counts a quoted description without its quotes", () => {
     assert.equal(
-      extractDescription('name: x\ndescription: "Quoted words here."\nclaude_only: true'),
-      "Quoted words here.",
+      measureSkillSource('---\nname: x\ndescription: "Quoted words here."\n---\nb\n')!.description,
+      3,
     );
   });
 
-  test("extracts an unquoted description; absent description yields empty string", () => {
-    assert.equal(extractDescription("description: Plain words."), "Plain words.");
-    assert.equal(extractDescription("name: x\nwhen_to_use: whenever"), "");
+  test("unquoted description counted; absent description counts zero", () => {
+    assert.equal(measureSkillSource("---\ndescription: Plain words.\n---\nb\n")!.description, 2);
+    assert.equal(measureSkillSource("---\nname: x\nwhen_to_use: whenever\n---\nb\n")!.description, 0);
   });
 });
 
