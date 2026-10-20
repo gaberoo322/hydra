@@ -283,6 +283,7 @@ function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => numb
     listOpenIssueLabelNames: unusedRead,
     listOpenPullsRest: unusedRead,
     listOpenIssuesByLabelRest: unusedRead,
+    listQaVerdictCommentsRest: unusedRead,
     // #4946 read — issued against the Target repo's port, never this one.
     listOpenIssueBlockerRows: unusedRead,
   };

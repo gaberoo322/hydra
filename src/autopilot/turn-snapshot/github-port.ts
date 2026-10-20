@@ -106,6 +106,8 @@ export interface TurnSnapshotGithub {
   listOpenIssuesByLabelRest(label: string, limit: number): Promise<GhJsonRead>;
   /** Open issues with {@link TARGET_FALLBACK_ROW_FIELDS} — the Target board's degraded-arm read (issue #4946). */
   listOpenIssueBlockerRows(limit: number): Promise<GhJsonRead>;
+  /** Repo-wide issue/PR comments, newest first, reduced to `{body, created_at, author_association}` for bodies containing `QA-Verdict:` (#4796 PASS-at-head skip). */
+  listQaVerdictCommentsRest(limit: number): Promise<GhJsonRead>;
 }
 
 /**
@@ -282,6 +284,16 @@ export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): 
     },
     async listOpenIssueBlockerRows(limit) {
       return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", TARGET_FALLBACK_ROW_FIELDS]));
+    },
+    async listQaVerdictCommentsRest(limit) {
+      return jsonRead(
+        await read([
+          "api",
+          `repos/${repo}/issues/comments?sort=created&direction=desc&per_page=${limit}`,
+          "--jq",
+          '[.[] | select((.body // "") | contains("QA-Verdict:")) | {body, created_at, author_association}]',
+        ]),
+      );
     },
   };
 }
