@@ -40,3 +40,26 @@ export default function Generated({ family, title, inventory, children }) {
     </section>
   );
 }
+
+/**
+ * The rail Source section for one inventory family (#4592): the committed
+ * file plus its generatedFrom globs. Shared by the code-imported catalogue
+ * views (Docs.jsx) and the classes/skills views (ClassesSkills.jsx).
+ */
+export function SourceRail({ family, inventory }) {
+  return (
+    <div className="space-y-1 font-mono text-[11px] text-zinc-500">
+      <div>{inventoryFile(family)}</div>
+      {inventory?.ok && inventory.generatedFrom.length > 0 && (
+        <div>
+          <div className="text-zinc-600">generated from</div>
+          <ul>
+            {inventory.generatedFrom.map((g) => (
+              <li key={g}>{g}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}

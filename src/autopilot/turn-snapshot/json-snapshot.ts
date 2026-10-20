@@ -212,7 +212,6 @@ function orchBoardCount(s: OrchBoardSnapshot, key: OrchBoardCountKey): number {
 /** A Target count line's value (`<key>=<value>`, the last one wins), or `0` when not printed. */
 function targetCount(s: TargetBoardSnapshot, key: string): number {
   if (!s.counts.ok) return 0;
-  if (s.counts.value === null) return 0;
   let raw: string | undefined;
   for (const [k, v] of s.counts.value) if (k === key) raw = v;
   return pyIntOr0(raw);
@@ -266,7 +265,7 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     target_board_work_available: targetCount(v.targetBoard, "target_ready_for_agent") > 0,
     target_board_research_due: targetCount(v.targetBoard, "target_ready_for_agent") === 0,
     target_wip_saturated: wip?.saturated ?? false,
-    needs_qa_target: targetCount(v.targetBoard, "target_needs_qa") > 0 && v.targetBoard.needsQaPr.allSkipped !== true, // #4796: all closing PRs already PASSed at head
+    needs_qa_target: targetCount(v.targetBoard, "target_needs_qa") > 0 && v.targetBoard.needsQaPr.allSkipped !== true, // #4796: every needs-qa issue fully PASSed at head (unknown/truncated → kept)
     target_needs_qa_pr_ref: v.targetBoard.needsQaPr.ref,
     target_needs_qa_pr_head: v.targetBoard.needsQaPr.head,
     target_dev_resume_pick: pin(v.targetBoard.devResumePick.ok ? v.targetBoard.devResumePick.value : null),
@@ -300,6 +299,8 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     orch_prs_glm_red: [...glm.bucket],
     orch_glm_red_forward_fix: pin(glm.pick),
     orch_dev_resume_pick: pin(v.prGate.devResumePick.ok ? v.prGate.devResumePick.value : null),
+    // #4808: a bare anchor, not a pin — there is no PR, branch or head to name.
+    orch_dev_resume_nopr_anchor: v.prGate.devResumeNoprPick.ok ? v.prGate.devResumeNoprPick.value : null,
     orch_dirty_forward_fix: pin(dirtyFix.pick),
     orch_prs_dirty_surface: dirtyFix.surface.map((e) => ({ pr: e.pr, closing_issue: e.closingIssue })),
 

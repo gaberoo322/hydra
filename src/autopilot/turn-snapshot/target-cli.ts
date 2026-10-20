@@ -46,6 +46,8 @@ export interface TargetCliDeps {
   readonly workspace: () => string;
   /** The Target facts (print-target-facts.ts's `collectTargetFacts`). */
   readonly facts: () => unknown;
+  /** Epoch milliseconds — the board collector's degraded-arm `deriveBoardState` clock. */
+  readonly now: () => number;
   readonly prRefs?: PrRefsAvailability;
   readonly adrPresent?: (workspace: string) => boolean;
 }
@@ -61,7 +63,7 @@ export interface TargetCliIo {
 }
 
 /** Each Target collector's typed value (the JSON Turn Snapshot is built from these, ADR-0043 slice 6). */
-export interface TargetValues {
+interface TargetValues {
   targetBoard?: TargetBoardSnapshot;
   targetScan?: TargetScanSnapshot;
   targetRiskSurface?: TargetRiskSurfaceSnapshot;
@@ -129,7 +131,7 @@ export async function runTargetCollectors(
         io,
         () => {
           const d = getDeps();
-          return collectTargetBoard({ github: d.github, hydra: d.hydra, ghListLimit: args.ghListLimit, prRefs: d.prRefs });
+          return collectTargetBoard({ github: d.github, hydra: d.hydra, now: d.now, ghListLimit: args.ghListLimit, prRefs: d.prRefs });
         },
         () => targetBoardFallbackSnapshot("collector-crashed"),
         degraded,

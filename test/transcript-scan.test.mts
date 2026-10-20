@@ -8,7 +8,8 @@
 // re-exports it. Everything below was moved VERBATIM from
 // test/usage-tracker.test.mts:
 //
-//   - firstUserMessageText — defined on src/cost/transcript-scan.ts
+//   - firstUserMessageText — since moved on to test/transcript-fold.test.mts
+//     with the function itself (src/cost/transcript-fold.ts, issue #4791)
 //   - makeReadOAuth (OAuth single-flight + Retry-After) — same file
 //   - the transcript-parse-memo seam round-trip — src/redis/transcript-parse-memo.ts
 //   - the memo degrade paths via transcriptScan() — src/cost/transcript-scan.ts
@@ -40,7 +41,6 @@ import {
 // directly to unit-test the derivation grammar without the JSONL-scan machinery.
 import {
   deriveSkill,
-  firstUserMessageText,
   makeReadOAuth,
   transcriptScan,
 } from "../src/cost/transcript-scan.ts";
@@ -67,43 +67,6 @@ import {
   withEnvSnapshot,
   writeFixture,
 } from "./_helpers/cost-fixtures.mts";
-
-describe("firstUserMessageText — extractor (issue #2402)", () => {
-  test("returns the first non-meta user message text (string content)", () => {
-    const lines = [
-      assistantLine("2026-05-25T10:00:00Z", { in: 1 }, "claude-opus-4-7"),
-      userLine("<local-command-caveat>banner</local-command-caveat>", { meta: true }),
-      userLine("/hydra-dev real prompt"),
-      userLine("a later message"),
-    ];
-    assert.equal(firstUserMessageText(lines), "/hydra-dev real prompt");
-  });
-
-  test("concatenates text blocks of an array content; skips blank/meta lines", () => {
-    const arrayContentLine = JSON.stringify({
-      type: "user",
-      timestamp: "2026-05-25T10:00:00Z",
-      message: {
-        role: "user",
-        content: [
-          { type: "text", text: "<command-name>/hydra-qa</command-name>" },
-          { type: "image", source: {} },
-        ],
-      },
-    });
-    assert.equal(firstUserMessageText([arrayContentLine]).trim(), "<command-name>/hydra-qa</command-name>");
-  });
-
-  test("returns null when there is no readable first user message", () => {
-    assert.equal(firstUserMessageText([]), null);
-    assert.equal(
-      firstUserMessageText([assistantLine("2026-05-25T10:00:00Z", { in: 1 }, "claude-opus-4-7")]),
-      null,
-    );
-    // A user line whose content is only whitespace is skipped.
-    assert.equal(firstUserMessageText([userLine("   ")]), null);
-  });
-});
 
 // Single-flight + Retry-After honor on the OAuth meter GET (issue #2666).
 // Journalctl 2026-07-02 showed every 429 as a SAME-SECOND DUPLICATE PAIR: two
@@ -773,5 +736,33 @@ describe("transcriptScan walk-level characterization (issue #4790)", () => {
       "interactive",
       "operator-invoked",
     ]);
+  });
+
+  // #4778 attribution symmetry (folded into #4792): a memo-hit shard must seed
+  // the session skill/kind cache so a later FRESH shard of the same session
+  // attributes identically to the all-fresh case.
+  test("two-shard same-session: memo-hit shard 1 + fresh shard 2 attributes like two fresh shards (#4778)", async () => {
+    const root = await makeRoot();
+    const sid = "11111111-2222-3333-4444-555555555555";
+    // Shard 1 carries the dispatch sentinel; shard 2 (a resumed append) does not.
+    await writeFixture(root, `a/${sid}.jsonl`, [
+      sentinelLine("hydra-dev"),
+      assistantLine("2026-05-25T11:00:00Z", { in: 100 }, "claude-opus-4-7"),
+    ]);
+    await writeFixture(root, `b/${sid}.jsonl`, [
+      userLine("continue"),
+      assistantLine("2026-05-25T11:30:00Z", { in: 40 }, "claude-opus-4-7"),
+    ]);
+    const { scan: fresh, captured } = await freshScan(root);
+    assert.equal(fresh.bySkillByModel["hydra-dev"].opus.total, 140);
+    assert.equal(fresh.byDispatchKind["autopilot-dispatched"].opus.total, 140);
+
+    const shard1 = join(root, `a/${sid}.jsonl`);
+    const partial = new Map([[shard1, captured.get(shard1)!]]);
+    const mixed = await replayScan(root, partial);
+    assert.equal(mixed.filesServedFromMemo, 1);
+    assert.deepEqual(mixed.bySkillByModel, fresh.bySkillByModel);
+    assert.deepEqual(mixed.bySkillByModel24h, fresh.bySkillByModel24h);
+    assert.deepEqual(mixed.byDispatchKind, fresh.byDispatchKind);
   });
 });

@@ -11,7 +11,11 @@
       "name": "ADMISSION_LINE_KEYS",
       "file": "src/schemas/operator-actions.ts",
       "importedBy": [
-        "src/operator-actions/registry.ts"
+        "src/attention-calibration.ts",
+        "src/attention.ts",
+        "src/operator-actions/registry.ts",
+        "src/redis/attention.ts",
+        "src/schemas/attention.ts"
       ],
       "routes": [],
       "source": {
@@ -28,7 +32,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/turn-snapshot.ts",
-        "line": 156
+        "line": 159
       }
     },
     {
@@ -38,7 +42,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 277
+        "line": 275
       }
     },
     {
@@ -82,7 +86,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/attention.ts",
-        "line": 137
+        "line": 142
       }
     },
     {
@@ -92,7 +96,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/attention.ts",
-        "line": 87
+        "line": 92
       }
     },
     {
@@ -102,7 +106,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/attention.ts",
-        "line": 151
+        "line": 156
       }
     },
     {
@@ -286,7 +290,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 337
+        "line": 346
       }
     },
     {
@@ -300,7 +304,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 345
+        "line": 354
       }
     },
     {
@@ -314,7 +318,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 311
+        "line": 320
       }
     },
     {
@@ -328,7 +332,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 319
+        "line": 328
       }
     },
     {
@@ -358,26 +362,6 @@
       }
     },
     {
-      "name": "ConfigEnvActionSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 255
-      }
-    },
-    {
-      "name": "ConfirmTierSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 215
-      }
-    },
-    {
       "name": "ContextTraceQuerySchema",
       "file": "src/schemas/learning.ts",
       "importedBy": [
@@ -399,16 +383,6 @@
       "source": {
         "path": "src/schemas/now-page.ts",
         "line": 148
-      }
-    },
-    {
-      "name": "CredentialActionSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 267
       }
     },
     {
@@ -502,7 +476,7 @@
       ],
       "source": {
         "path": "src/schemas/attention.ts",
-        "line": 173
+        "line": 179
       }
     },
     {
@@ -548,16 +522,6 @@
       }
     },
     {
-      "name": "EntryKeySchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 135
-      }
-    },
-    {
       "name": "ExemptLogEntryInputSchema",
       "file": "src/schemas/design-concept.ts",
       "importedBy": [
@@ -589,14 +553,15 @@
       "name": "HITL_GRILL_CAP",
       "file": "src/schemas/autopilot-board.ts",
       "importedBy": [
-        "src/api/autopilot-board.ts"
+        "src/api/autopilot-board.ts",
+        "src/attention.ts"
       ],
       "routes": [
         "GET /api/autopilot/hitl-grill"
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 248
+        "line": 257
       }
     },
     {
@@ -604,6 +569,7 @@
       "file": "src/schemas/autopilot-board.ts",
       "importedBy": [
         "src/api/autopilot-board.ts",
+        "src/attention.ts",
         "src/autopilot/work-projections.ts"
       ],
       "routes": [
@@ -612,27 +578,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 240
-      }
-    },
-    {
-      "name": "HOLDBACK_ENROL_SOURCES",
-      "file": "src/schemas/holdback.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/holdback.ts",
-        "line": 103
-      }
-    },
-    {
-      "name": "HOLDBACK_ENROL_STATES",
-      "file": "src/schemas/holdback.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/holdback.ts",
-        "line": 87
+        "line": 249
       }
     },
     {
@@ -718,16 +664,6 @@
       }
     },
     {
-      "name": "InDashboardActionSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 229
-      }
-    },
-    {
       "name": "LessonsExplorerQuerySchema",
       "file": "src/schemas/explore-page.ts",
       "importedBy": [
@@ -760,7 +696,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/attention.ts",
-        "line": 76
+        "line": 81
       }
     },
     {
@@ -772,7 +708,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 292
+        "line": 289
       }
     },
     {
@@ -784,7 +720,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 313
+        "line": 310
       }
     },
     {
@@ -794,7 +730,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 331
+        "line": 328
       }
     },
     {
@@ -928,16 +864,6 @@
       }
     },
     {
-      "name": "ResearchBeyondAutonomyActionSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 270
-      }
-    },
-    {
       "name": "RetroArtifactSchema",
       "file": "src/schemas/retro.ts",
       "importedBy": [],
@@ -959,16 +885,6 @@
       "source": {
         "path": "src/schemas/retro.ts",
         "line": 27
-      }
-    },
-    {
-      "name": "ReviewBucketSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 208
       }
     },
     {
@@ -1114,7 +1030,7 @@
       ],
       "source": {
         "path": "src/schemas/dispatches.ts",
-        "line": 74
+        "line": 78
       }
     },
     {
@@ -1208,16 +1124,6 @@
       }
     },
     {
-      "name": "TerminalSkillActionSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 245
-      }
-    },
-    {
       "name": "TierQuerySchema",
       "file": "src/schemas/tier.ts",
       "importedBy": [
@@ -1242,7 +1148,7 @@
       ],
       "source": {
         "path": "src/schemas/dispatches.ts",
-        "line": 96
+        "line": 100
       }
     },
     {
@@ -1254,7 +1160,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/turn-snapshot.ts",
-        "line": 244
+        "line": 248
       }
     },
     {
@@ -1269,36 +1175,6 @@
       "source": {
         "path": "src/schemas/usage.ts",
         "line": 50
-      }
-    },
-    {
-      "name": "VARIANTS",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 177
-      }
-    },
-    {
-      "name": "VariantSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 184
-      }
-    },
-    {
-      "name": "VisionDecisionActionSchema",
-      "file": "src/schemas/operator-actions.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 273
       }
     },
     {

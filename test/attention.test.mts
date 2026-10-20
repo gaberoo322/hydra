@@ -48,13 +48,11 @@ import {
 import { PROMOTION_THRESHOLD, escalationThresholdForCue } from "../src/pattern-memory/index.ts";
 import {
   dismissAttentionItem,
-  loadDismissedIds,
-  recordSurfacedItems,
-  readAttentionCounts,
+  loadDismissed,
 } from "../src/redis/attention.ts";
 import type { AttentionFeedItem } from "../src/schemas/attention.ts";
 import { resolveAction } from "../src/attention.ts";
-import { BUCKETS } from "../src/schemas/operator-actions.ts";
+import { ADMISSION_LINE_KEYS, BUCKETS } from "../src/schemas/operator-actions.ts";
 import type { StalledPr, StalledPrsResult } from "../src/aggregators/stalled-prs.ts";
 
 const NOW = new Date("2026-08-14T12:00:00.000Z");
@@ -77,8 +75,8 @@ function stuckSnapshot(over: Partial<StuckItems> = {}): IssuesWaitingResult {
   };
   return {
     items: [
-      ...s.blockedOver2d.map((i) => ({ ...i, line: "blocked-live" as const, blockerNumbers: [], openBlockerNumbers: [] })),
-      ...s.needsInfoWaiting.map((i) => ({ ...i, line: "needs-info" as const, blockerNumbers: [], openBlockerNumbers: [] })),
+      ...s.blockedOver2d.map((i) => ({ ...i, line: "blocked-live" as const, blockerNumbers: [], openBlockerNumbers: [], humanBlockers: [], hasFilesInScope: true })),
+      ...s.needsInfoWaiting.map((i) => ({ ...i, line: "needs-info" as const, blockerNumbers: [], openBlockerNumbers: [], humanBlockers: [], hasFilesInScope: true })),
     ],
     scanned: s.scanned,
     sourcesOk: s.sourcesOk,
@@ -195,6 +193,7 @@ const QUIET_RANK0 = {
   getTargetIssuesWaiting: quietTargetWaiting,
   // Issue #4624: rank 1 reads PRs through stalled-prs — stub it quiet too.
   getStalledPrs: async (): Promise<StalledPrsResult> => stalledSnapshot(),
+  readHitlGrillIssues: async () => ({ ok: true as const, rows: [] }),
   readPaused: async () => ({ paused: false }),
   readSessionBlockedUntil: async () => null,
   readSchedulerStopReason: async () => null,
@@ -209,10 +208,10 @@ const QUIET_RANK0 = {
 const RANK0_SCANNED = 4;
 
 const NO_DISMISSALS = {
-  loadDismissedIds: async () => [] as string[],
+  loadDismissed: async () => new Map<string, Set<string>>(),
 };
 const NO_COUNTING = {
-  recordSurfaced: async () => {},
+  reconcileLedgers: async () => {},
 };
 
 // ---------------------------------------------------------------------------
@@ -291,29 +290,65 @@ describe("AttentionFeedResponseSchema — trust fields", () => {
   });
 });
 
-describe("DismissAttentionRequestSchema — strict dismiss body (INV-7)", () => {
-  test("accepts a reason + signal", () => {
+describe("DismissAttentionRequestSchema — typed dismiss body (INV-8)", () => {
+  test("accepts a typed reason + admission-line key", () => {
     const result = DismissAttentionRequestSchema.safeParse({
-      reason: "already handled",
-      signal: "breakage",
+      reason: "not-a-problem",
+      key: "waiting-on-you:blocked-live",
     });
     assert.equal(result.success, true);
   });
 
-  test("rejects an empty / whitespace-only reason", () => {
+  test("accepts each of the three typed reasons", () => {
+    for (const reason of ["not-a-problem", "handled-elsewhere", "later"] as const) {
+      assert.equal(
+        DismissAttentionRequestSchema.safeParse({
+          reason,
+          key: "repetition:hits",
+        }).success,
+        true,
+      );
+    }
+  });
+
+  test("rejects a free-text reason (the enum is closed)", () => {
     assert.equal(
-      DismissAttentionRequestSchema.safeParse({ reason: "   ", signal: "breakage" }).success,
+      DismissAttentionRequestSchema.safeParse({
+        reason: "already handled",
+        key: "waiting-on-you:blocked-live",
+      }).success,
       false,
     );
     assert.equal(
-      DismissAttentionRequestSchema.safeParse({ signal: "breakage" }).success,
+      DismissAttentionRequestSchema.safeParse({ key: "waiting-on-you:blocked-live" }).success,
       false,
     );
   });
 
-  test("rejects a missing signal", () => {
+  test("rejects a missing key", () => {
     assert.equal(
-      DismissAttentionRequestSchema.safeParse({ reason: "x" }).success,
+      DismissAttentionRequestSchema.safeParse({ reason: "later" }).success,
+      false,
+    );
+  });
+
+  test("rejects a key outside BUCKET_LINES", () => {
+    assert.equal(
+      DismissAttentionRequestSchema.safeParse({
+        reason: "later",
+        key: "waiting-on-you:spend",
+      }).success,
+      false,
+    );
+  });
+
+  test("rejects the legacy signal key (.strict())", () => {
+    assert.equal(
+      DismissAttentionRequestSchema.safeParse({
+        reason: "not-a-problem",
+        key: "waiting-on-you:blocked-live",
+        signal: "blocked-on-human",
+      }).success,
       false,
     );
   });
@@ -321,8 +356,8 @@ describe("DismissAttentionRequestSchema — strict dismiss body (INV-7)", () => 
   test("rejects an unknown extra key (.strict())", () => {
     assert.equal(
       DismissAttentionRequestSchema.safeParse({
-        reason: "x",
-        signal: "breakage",
+        reason: "later",
+        key: "waiting-on-you:blocked-live",
         extra: 1,
       }).success,
       false,
@@ -650,7 +685,7 @@ describe("getAttentionFeed — INV-2: no deviation/spend/quota anywhere in the s
 });
 
 describe("getAttentionFeed — dismissal + calibration wiring", () => {
-  test("a dismissed item id is filtered out of the feed (durable per id)", async () => {
+  test("a dismissed item id is filtered out of the feed (durable per episode)", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
       getIssuesWaiting: async () =>
@@ -662,14 +697,14 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
           scanned: 2,
         }),
       getFrictionPatterns: async () => frictionSnapshot(),
-      loadDismissedIds: async (signal) =>
-        signal === "blocked-on-human" ? ["blocked-issue-1"] : [],
+      loadDismissed: async () =>
+        new Map([["waiting-on-you:blocked-live", new Set(["blocked-issue-1"])]]),
       ...NO_COUNTING,
     });
     assert.deepEqual(result.items.map((i) => i.id), ["blocked-issue-2"]);
   });
 
-  test("dismissal filtering is keyed by signal — a breakage dismissal never hides a blocked item", async () => {
+  test("dismissal filtering is keyed by admission line — a dismissal on another line never hides this item", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
       getIssuesWaiting: async () =>
@@ -680,8 +715,8 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
           scanned: 1,
         }),
       getFrictionPatterns: async () => frictionSnapshot(),
-      loadDismissedIds: async (signal) =>
-        signal === "breakage" ? ["blocked-issue-1"] : [],
+      loadDismissed: async () =>
+        new Map([["target-items:blocked-live", new Set(["blocked-issue-1"])]]),
       ...NO_COUNTING,
     });
     assert.equal(result.items.length, 1);
@@ -698,7 +733,7 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
           scanned: 1,
         }),
       getFrictionPatterns: async () => frictionSnapshot(),
-      loadDismissedIds: async () => {
+      loadDismissed: async () => {
         throw new Error("redis blip");
       },
       ...NO_COUNTING,
@@ -706,8 +741,8 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
     assert.equal(result.items.length, 1);
   });
 
-  test("surfaced counters receive the VISIBLE items (post-dismissal-filter)", async () => {
-    const surfaced: AttentionFeedItem[][] = [];
+  test("reconcile receives the ADMITTED items (pre-dismissal-filter), keyed by line, with bucket health", async () => {
+    const calls: Array<ReadonlyMap<string, { admitted: ReadonlySet<string>; healthy: boolean }>> = [];
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
       getIssuesWaiting: async () =>
@@ -719,24 +754,70 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
           scanned: 2,
         }),
       getFrictionPatterns: async () => frictionSnapshot(),
-      loadDismissedIds: async (signal) =>
-        signal === "blocked-on-human" ? ["blocked-issue-1"] : [],
-      recordSurfaced: async (items) => {
-        surfaced.push([...items]);
+      loadDismissed: async () =>
+        new Map([["waiting-on-you:blocked-live", new Set(["blocked-issue-1"])]]),
+      reconcileLedgers: async (admittedByLine) => {
+        calls.push(admittedByLine);
       },
     });
     assert.equal(result.items.length, 1);
-    assert.equal(surfaced.length, 1);
-    assert.deepEqual(surfaced[0].map((i) => i.id), ["blocked-issue-2"]);
+    assert.equal(calls.length, 1);
+    const line = calls[0].get("waiting-on-you:blocked-live")!;
+    // The DISMISSED item is still admitted — still crossing, just hidden
+    // (ADR-0034 §8.4: admitted is the pre-filter set).
+    assert.deepEqual([...line.admitted].sort(), ["blocked-issue-1", "blocked-issue-2"]);
+    assert.equal(line.healthy, true);
+    // Every registry line is present — an empty admitted set still prunes.
+    assert.equal(calls[0].size, ADMISSION_LINE_KEYS.length);
   });
 
-  test("a surfaced-counter failure never fails the feed read", async () => {
+  test("a line whose bucket reported source errors is handed healthy:false (no prune)", async () => {
+    const calls: Array<ReadonlyMap<string, { admitted: ReadonlySet<string>; healthy: boolean }>> = [];
+    await getAttentionFeed({
+      ...QUIET_RANK0,
+      getIssuesWaiting: async () =>
+        stuckSnapshot({
+          blockedOver2d: [
+            { number: 1, title: "blocked", url: "u1", createdAt: "2026-08-10T00:00:00.000Z", ageDays: 4, labels: [] },
+          ],
+          scanned: 1,
+          sourcesOk: false,
+        }),
+      getFrictionPatterns: async () => frictionSnapshot(),
+      ...NO_DISMISSALS,
+      reconcileLedgers: async (admittedByLine) => {
+        calls.push(admittedByLine);
+      },
+    });
+    assert.equal(calls[0].get("waiting-on-you:blocked-live")!.healthy, false);
+    // A healthy bucket's lines stay prunable.
+    assert.equal(calls[0].get("machine-stopped:paused")!.healthy, true);
+  });
+
+  test("reconcile runs BEFORE the dismissed-ledger read (a pruned dismissal cannot hide a new episode)", async () => {
+    const order: string[] = [];
+    await getAttentionFeed({
+      ...QUIET_RANK0,
+      getIssuesWaiting: async () => stuckSnapshot(),
+      getFrictionPatterns: async () => frictionSnapshot(),
+      loadDismissed: async () => {
+        order.push("read");
+        return new Map();
+      },
+      reconcileLedgers: async () => {
+        order.push("reconcile");
+      },
+    });
+    assert.deepEqual(order, ["reconcile", "read"]);
+  });
+
+  test("a reconcile failure never fails the feed read", async () => {
     const result = await getAttentionFeed({
       ...QUIET_RANK0,
       getIssuesWaiting: async () => stuckSnapshot(),
       getFrictionPatterns: async () => frictionSnapshot(),
       ...NO_DISMISSALS,
-      recordSurfaced: async () => {
+      reconcileLedgers: async () => {
         throw new Error("counter write failed");
       },
     });
@@ -823,13 +904,30 @@ function testRouter() {
         scanned: 1,
       }),
     getFrictionPatterns: async () => frictionSnapshot(),
-    loadDismissedIds: async () => [],
-    recordSurfaced: async () => {},
+    loadDismissed: async () => new Map(),
+    reconcileLedgers: async () => {},
     dismissItem: async () => true,
     readCounts: async () => [
-      { signal: "blocked-on-human", surfaced: 3, dismissed: 1 },
-      { signal: "breakage", surfaced: 0, dismissed: 0 },
-      { signal: "repetition", surfaced: 2, dismissed: 2 },
+      {
+        key: "machine-stopped:paused",
+        surfaced: 6,
+        resolved: 1,
+        notAProblem: 0,
+        handledElsewhere: 0,
+        later: 1,
+        verdict: "calibrated",
+        because: "0 not-a-problem / 6 surfaced = 0 < 0.5 over 30d",
+      },
+      {
+        key: "repetition:hits",
+        surfaced: 0,
+        resolved: 0,
+        notAProblem: 0,
+        handledElsewhere: 0,
+        later: 0,
+        verdict: "insufficient-data",
+        because: "0 surfaced < 5 minimum over 30d",
+      },
     ],
   });
 }
@@ -859,8 +957,8 @@ describe("GET /attention/feed — route", () => {
       getFrictionPatterns: async () => {
         throw new Error("down");
       },
-      loadDismissedIds: async () => [],
-      recordSurfaced: async () => {},
+      loadDismissed: async () => new Map(),
+      reconcileLedgers: async () => {},
     });
     const handler = findHandler(router, "GET", "/attention/feed")!;
     const res = mockRes();
@@ -877,7 +975,11 @@ describe("POST /attention/:id/dismiss — route", () => {
     const handler = findHandler(router, "POST", "/attention/:id/dismiss")!;
     const res = mockRes();
     await handler(
-      mockReq({ method: "POST", params: { id: "blocked-issue-1" }, body: { reason: "handled", signal: "blocked-on-human" } }),
+      mockReq({
+        method: "POST",
+        params: { id: "blocked-issue-1" },
+        body: { reason: "not-a-problem", key: "waiting-on-you:blocked-live" },
+      }),
       res,
     );
     assert.equal(res._status, 200);
@@ -885,7 +987,39 @@ describe("POST /attention/:id/dismiss — route", () => {
     assert.equal(res._body.recorded, true);
   });
 
-  test("a malformed body returns 400 schema-validation-failed (INV-7)", async () => {
+  test("a free-text reason returns 400 (the enum is closed)", async () => {
+    const router = testRouter();
+    const handler = findHandler(router, "POST", "/attention/:id/dismiss")!;
+    const res = mockRes();
+    await handler(
+      mockReq({
+        method: "POST",
+        params: { id: "x" },
+        body: { reason: "already handled", key: "waiting-on-you:blocked-live" },
+      }),
+      res,
+    );
+    assert.equal(res._status, 400);
+    assert.equal(res._body.code, "schema-validation-failed");
+  });
+
+  test("a signal-shaped body returns 400 (.strict() — the body carries key + typed reason)", async () => {
+    const router = testRouter();
+    const handler = findHandler(router, "POST", "/attention/:id/dismiss")!;
+    const res = mockRes();
+    await handler(
+      mockReq({
+        method: "POST",
+        params: { id: "x" },
+        body: { reason: "not-a-problem", key: "waiting-on-you:blocked-live", signal: "blocked-on-human" },
+      }),
+      res,
+    );
+    assert.equal(res._status, 400);
+    assert.equal(res._body.code, "schema-validation-failed");
+  });
+
+  test("a malformed body returns 400 schema-validation-failed (INV-8)", async () => {
     const router = testRouter();
     const handler = findHandler(router, "POST", "/attention/:id/dismiss")!;
     const res = mockRes();
@@ -903,19 +1037,27 @@ describe("POST /attention/:id/dismiss — route", () => {
     const handler = findHandler(router, "POST", "/attention/:id/dismiss")!;
     const res = mockRes();
     await handler(
-      mockReq({ method: "POST", params: { id: "x" }, body: { reason: "r", signal: "breakage", extra: 1 } }),
+      mockReq({
+        method: "POST",
+        params: { id: "x" },
+        body: { reason: "later", key: "waiting-on-you:blocked-live", extra: 1 },
+      }),
       res,
     );
     assert.equal(res._status, 400);
     assert.equal(res._body.code, "schema-validation-failed");
   });
 
-  test("a deviation-shaped signal value returns 400 (closed enum)", async () => {
+  test("a key outside BUCKET_LINES returns 400 (admission-line vocabulary is closed)", async () => {
     const router = testRouter();
     const handler = findHandler(router, "POST", "/attention/:id/dismiss")!;
     const res = mockRes();
     await handler(
-      mockReq({ method: "POST", params: { id: "x" }, body: { reason: "r", signal: "spend" } }),
+      mockReq({
+        method: "POST",
+        params: { id: "x" },
+        body: { reason: "later", key: "machine-stopped:spend" },
+      }),
       res,
     );
     assert.equal(res._status, 400);
@@ -926,8 +1068,8 @@ describe("POST /attention/:id/dismiss — route", () => {
     ...QUIET_RANK0,
       getIssuesWaiting: async () => stuckSnapshot(),
       getFrictionPatterns: async () => frictionSnapshot(),
-      loadDismissedIds: async () => [],
-      recordSurfaced: async () => {},
+      loadDismissed: async () => new Map(),
+      reconcileLedgers: async () => {},
       dismissItem: async () => {
         throw new Error("redis down");
       },
@@ -935,7 +1077,11 @@ describe("POST /attention/:id/dismiss — route", () => {
     const handler = findHandler(router, "POST", "/attention/:id/dismiss")!;
     const res = mockRes();
     await handler(
-      mockReq({ method: "POST", params: { id: "x" }, body: { reason: "r", signal: "breakage" } }),
+      mockReq({
+        method: "POST",
+        params: { id: "x" },
+        body: { reason: "not-a-problem", key: "waiting-on-you:blocked-live" },
+      }),
       res,
     );
     assert.equal(res._status, 500);
@@ -944,28 +1090,33 @@ describe("POST /attention/:id/dismiss — route", () => {
 });
 
 describe("GET /attention/counts — route", () => {
-  test("returns per-threshold surfaced/dismissed rows", async () => {
+  test("returns the per-line calibration read with windowDays 30", async () => {
     const router = testRouter();
     const handler = findHandler(router, "GET", "/attention/counts")!;
     const res = mockRes();
     await handler(mockReq({ url: "/attention/counts" }), res);
     assert.equal(res._status, 200);
-    assert.equal(res._body.counts.length, 3);
-    assert.deepEqual(res._body.counts[0], {
-      signal: "blocked-on-human",
-      surfaced: 3,
-      dismissed: 1,
+    assert.equal(res._body.windowDays, 30);
+    assert.equal(res._body.lines.length, 2);
+    assert.deepEqual(res._body.lines[0], {
+      key: "machine-stopped:paused",
+      surfaced: 6,
+      resolved: 1,
+      notAProblem: 0,
+      handledElsewhere: 0,
+      later: 1,
+      verdict: "calibrated",
+      because: "0 not-a-problem / 6 surfaced = 0 < 0.5 over 30d",
     });
+    assert.ok(typeof res._body.generatedAt === "string");
   });
 });
 
 // ---------------------------------------------------------------------------
-// Redis accessor — record-once, snooze, per-threshold counters
+// Redis accessor — typed dismiss, snooze, per-line ledgers
 // (real Redis; the per-run DB isolation from scripts/test/redis-db-launch.mjs
 // keeps this keyspace private to the run)
 // ---------------------------------------------------------------------------
-
-const SIGNAL_KEYS = ["blocked-on-human", "breakage", "repetition"];
 
 let testRedis: any = null;
 function getTestRedis(): any {
@@ -975,7 +1126,7 @@ function getTestRedis(): any {
   return testRedis;
 }
 
-describe("redis/attention — dismissal ledger + calibration counters", () => {
+describe("redis/attention — typed dismiss + dismissal ledger", () => {
   before(async () => {
     getTestRedis();
   });
@@ -987,71 +1138,108 @@ describe("redis/attention — dismissal ledger + calibration counters", () => {
   beforeEach(async () => {
     // Fresh attention keyspace per case — these tests mutate shared state.
     const r = getTestRedis();
-    for (const signal of SIGNAL_KEYS) {
-      await r.del(
-        `hydra:attention:dismissed:${signal}`,
-        `hydra:attention:surfaced:${signal}`,
-        `hydra:attention:counts:${signal}:surfaced`,
-        `hydra:attention:counts:${signal}:dismissed`,
-      );
-    }
+    const keys = await r.keys("hydra:attention:*");
+    if (keys.length > 0) await r.del(...keys);
   });
 
-  test("dismiss is durable per id and counted once per threshold (INV-5)", async () => {
-    const first = await dismissAttentionItem("blocked-issue-9", "blocked-on-human");
+  const dayKey = () =>
+    `hydra:attention:calib:${new Date().toISOString().slice(0, 10)}`;
+
+  test("dismiss is durable per episode and counted once per line + typed reason (INV-8)", async () => {
+    await getTestRedis().hset("hydra:attention:surfaced:waiting-on-you:blocked-live", "blocked-issue-9", "2026-01-01T00:00:00.000Z");
+    const first = await dismissAttentionItem(
+      "blocked-issue-9",
+      "waiting-on-you:blocked-live",
+      "not-a-problem",
+    );
     assert.equal(first, true);
-    // A repeat dismissal (double-click) is a no-op for the counter.
-    const second = await dismissAttentionItem("blocked-issue-9", "blocked-on-human");
+    // A repeat dismissal (double-click) is a no-op for the counter AND the
+    // audit stream.
+    const second = await dismissAttentionItem(
+      "blocked-issue-9",
+      "waiting-on-you:blocked-live",
+      "not-a-problem",
+    );
     assert.equal(second, false);
 
-    const dismissed = await loadDismissedIds("blocked-on-human");
-    assert.deepEqual(dismissed, ["blocked-issue-9"]);
+    const dismissed = await loadDismissed();
+    assert.ok(dismissed.get("waiting-on-you:blocked-live")!.has("blocked-issue-9"));
 
-    const counts = await readAttentionCounts();
-    const blocked = counts.find((c) => c.signal === "blocked-on-human")!;
-    assert.equal(blocked.dismissed, 1);
-    assert.equal(blocked.surfaced, 0);
-    // Fresh install reads as honest zeros on the untouched lines.
-    assert.deepEqual(
-      counts.find((c) => c.signal === "repetition")!,
-      { signal: "repetition", surfaced: 0, dismissed: 0 },
-    );
+    const counters = await getTestRedis().hgetall(dayKey());
+    assert.equal(counters["waiting-on-you:blocked-live:not-a-problem"], "1");
+
+    const entries = await getTestRedis().xrange("hydra:attention:dismissals", "-", "+");
+    assert.equal(entries.length, 1);
+    const flat: string[] = entries[0][1];
+    const fields: Record<string, string> = {};
+    for (let i = 0; i < flat.length; i += 2) fields[flat[i]] = flat[i + 1];
+    assert.equal(fields.id, "blocked-issue-9");
+    assert.equal(fields.key, "waiting-on-you:blocked-live");
+    assert.equal(fields.reason, "not-a-problem");
+    assert.ok(fields.at);
   });
 
-  test("a dismissal older than the 30-day snooze no longer suppresses and is pruned", async () => {
+  test("typed reasons land in separate daily-counter fields (INV-8/INV-9)", async () => {
+    for (const n of [1, 2, 3]) {
+      await getTestRedis().hset("hydra:attention:surfaced:waiting-on-you:blocked-live", `blocked-issue-${n}`, "2026-01-01T00:00:00.000Z");
+    }
+    await dismissAttentionItem("blocked-issue-1", "waiting-on-you:blocked-live", "not-a-problem");
+    await dismissAttentionItem("blocked-issue-2", "waiting-on-you:blocked-live", "handled-elsewhere");
+    await dismissAttentionItem("blocked-issue-3", "waiting-on-you:blocked-live", "later");
+    const counters = await getTestRedis().hgetall(dayKey());
+    assert.equal(counters["waiting-on-you:blocked-live:not-a-problem"], "1");
+    assert.equal(counters["waiting-on-you:blocked-live:handled-elsewhere"], "1");
+    assert.equal(counters["waiting-on-you:blocked-live:later"], "1");
+    // No surfaced write comes from a dismiss.
+    assert.equal(counters["waiting-on-you:blocked-live:surfaced"], undefined);
+  });
+
+  test("a dismissal older than the 30-day snooze no longer suppresses and is kept as the episode tombstone", async () => {
     // Seed a stale ledger entry directly — the snooze boundary is read-side.
     await getTestRedis().hset(
-      "hydra:attention:dismissed:breakage",
+      "hydra:attention:dismissed:prs-not-landing:failed-required",
       "pr-failed-ci-42",
       "2026-01-01T00:00:00.000Z",
     );
-    const active = await loadDismissedIds("breakage");
-    assert.deepEqual(active, []);
-    // Lazily pruned: the dead field is gone, not just ignored.
-    const remaining = await getTestRedis().hlen("hydra:attention:dismissed:breakage");
-    assert.equal(remaining, 0);
+    const active = await loadDismissed();
+    assert.deepEqual([...(active.get("prs-not-landing:failed-required") ?? new Set<string>())], []);
+    // NOT pruned: the field is the tombstone that stops a re-dismissal of the
+    // same continuous episode from recounting not-a-problem.
+    const remaining = await getTestRedis().hlen(
+      "hydra:attention:dismissed:prs-not-landing:failed-required",
+    );
+    assert.equal(remaining, 1);
   });
 
-  test("surfaced counters count an item id ONCE regardless of poll cadence", async () => {
-    const items = [
-      feedItem({ id: "blocked-issue-1" }),
-      feedItem({ id: "blocked-issue-2" }),
-    ];
-    await recordSurfacedItems(items);
-    await recordSurfacedItems(items); // the 30s poll re-read
-    await recordSurfacedItems(items); // and again
-
-    const counts = await readAttentionCounts();
-    assert.equal(counts.find((c) => c.signal === "blocked-on-human")!.surfaced, 2);
+  test("dismiss of an id not in the line's surfaced hash is a no-op (cannot falsify a line)", async () => {
+    const recorded = await dismissAttentionItem("forged-id", "waiting-on-you:blocked-live", "not-a-problem");
+    assert.equal(recorded, false);
+    assert.equal(await getTestRedis().hget(dayKey(), "waiting-on-you:blocked-live:not-a-problem"), null);
+    assert.equal(await getTestRedis().hlen("hydra:attention:dismissed:waiting-on-you:blocked-live"), 0);
+    assert.equal(await getTestRedis().xlen("hydra:attention:dismissals"), 0);
   });
 
-  test("surfaced counters are keyed by signal, not by item (calibration survives)", async () => {
-    await recordSurfacedItems([
-      feedItem({ id: "blocked-issue-1" }),
-      feedItem({ id: "pr-failed-ci-5", signal: "breakage", threshold: 1, thresholdLabel: "≥ 1 failed check" }),
-    ]);
-    const counts = await readAttentionCounts();
-    assert.equal(counts.find((c) => c.signal === "blocked-on-human")!.surfaced, 1);
-    assert.equal(counts.find((c) => c.signal === "breakage")!.surfaced, 1);
+  test("re-dismissal after snooze expiry re-snoozes the same episode without recounting not-a-problem", async () => {
+    const key = "waiting-on-you:blocked-live";
+    const r = getTestRedis();
+    await r.hset(`hydra:attention:surfaced:${key}`, "issue-5", "2026-01-01T00:00:00.000Z");
+    const t0 = new Date("2026-01-01T00:00:00.000Z");
+    assert.equal(await dismissAttentionItem("issue-5", key, "not-a-problem", t0), true);
+    const later = new Date(t0.getTime() + 31 * 24 * 60 * 60 * 1000);
+    // Snooze lapsed: not suppressing, but the tombstone survives loadDismissed.
+    assert.equal((await loadDismissed(later)).get(key)!.has("issue-5"), false);
+    // Re-dismiss: not counted again, but the snooze is refreshed.
+    assert.equal(await dismissAttentionItem("issue-5", key, "not-a-problem", later), false);
+    const dayKeyT0 = "hydra:attention:calib:2026-01-01";
+    assert.equal(await r.hget(dayKeyT0, `${key}:not-a-problem`), "1");
+    const laterDay = `hydra:attention:calib:${later.toISOString().slice(0, 10)}`;
+    assert.equal(await r.hget(laterDay, `${key}:not-a-problem`), null);
+    assert.equal((await loadDismissed(later)).get(key)!.has("issue-5"), true);
+  });
+
+  test("loadDismissed covers every registry line (an empty ledger reads as 19 empty sets)", async () => {
+    const dismissed = await loadDismissed();
+    assert.equal(dismissed.size, ADMISSION_LINE_KEYS.length);
+    for (const ids of dismissed.values()) assert.equal(ids.size, 0);
   });
 });

@@ -1,0 +1,1 @@
+- fix: target route crawl resolves URL, app dir, service and findings repo through the Target seam, discovers routes from the live checkout, and never reports an unreachable service as healthy (#4846)

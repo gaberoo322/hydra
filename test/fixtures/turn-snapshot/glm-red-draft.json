@@ -81,9 +81,7 @@
         "--limit",
         "100",
         "--json",
-        "number",
-        "--jq",
-        "."
+        "number,labels,updatedAt"
       ]
     ],
     "sleeps": [],
@@ -113,6 +111,10 @@
           }
         },
         "devResumePick": {
+          "ok": true,
+          "value": null
+        },
+        "devResumeNoprPick": {
           "ok": true,
           "value": null
         },

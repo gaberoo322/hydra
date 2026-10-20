@@ -3,8 +3,10 @@
   "schemaVersion": 1,
   "generatedFrom": [
     "docs/generated/adrs.json",
+    "docs/generated/areas.json",
     "docs/generated/chores.json",
     "docs/generated/ci-gates.json",
+    "docs/generated/classes.json",
     "docs/generated/config.json",
     "docs/generated/corpus.json",
     "docs/generated/env-vars.json",
@@ -12,6 +14,7 @@
     "docs/generated/redis-keys.json",
     "docs/generated/routes.json",
     "docs/generated/schemas.json",
+    "docs/generated/skills.json",
     "docs/generated/streams.json",
     "docs/generated/tier-paths.json",
     "docs/generated/units-scripts.json"
@@ -20,7 +23,22 @@
     {
       "family": "adrs",
       "metric": "rows",
-      "value": 44
+      "value": 45
+    },
+    {
+      "family": "areas",
+      "metric": "live",
+      "value": 27
+    },
+    {
+      "family": "areas",
+      "metric": "retired",
+      "value": 2
+    },
+    {
+      "family": "areas",
+      "metric": "rows",
+      "value": 29
     },
     {
       "family": "chores",
@@ -36,6 +54,11 @@
       "family": "ci-gates",
       "metric": "rows",
       "value": 24
+    },
+    {
+      "family": "classes",
+      "metric": "rows",
+      "value": 22
     },
     {
       "family": "config",
@@ -55,7 +78,7 @@
     {
       "family": "corpus",
       "metric": "adr",
-      "value": 44
+      "value": 45
     },
     {
       "family": "corpus",
@@ -65,22 +88,27 @@
     {
       "family": "corpus",
       "metric": "living",
-      "value": 21
+      "value": 22
+    },
+    {
+      "family": "corpus",
+      "metric": "module-map",
+      "value": 2
     },
     {
       "family": "corpus",
       "metric": "playbook",
-      "value": 0
+      "value": 39
     },
     {
       "family": "corpus",
       "metric": "rows",
-      "value": 76
+      "value": 119
     },
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 252
+      "value": 255
     },
     {
       "family": "pages",
@@ -120,7 +148,12 @@
     {
       "family": "schemas",
       "metric": "rows",
-      "value": 107
+      "value": 94
+    },
+    {
+      "family": "skills",
+      "metric": "rows",
+      "value": 39
     },
     {
       "family": "streams",

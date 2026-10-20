@@ -69,6 +69,23 @@ describe("run-health seam (issue #1378) — pure heuristics, no aggregator deps"
     assert.equal(sig[0].type, "unproductive-loop");
   });
 
+  test("detectUnproductiveLoops skips runs whose merged_count is null (unavailable, #4700)", () => {
+    const history: RunDigest[] = [
+      { dispatches: 2, merged_count: null, failed_count: 1 },
+      { dispatches: 2, merged_count: null, failed_count: 2 },
+    ];
+    assert.equal(detectUnproductiveLoops(history, T, 0).length, 0);
+  });
+
+  test("detectIssuePrChurn skips runs whose merged_count is null (unavailable, #4700)", () => {
+    const history = [
+      { issue_ref: "issue-42", merged_count: null },
+      { issue_ref: "issue-42", merged_count: null },
+      { issue_ref: "issue-42", merged_count: null },
+    ] as unknown as RunDigest[];
+    assert.equal(detectIssuePrChurn(history, T).length, 0);
+  });
+
   test("detectUnproductiveLoops suppresses when real master merges landed", () => {
     const history: RunDigest[] = [
       { dispatches: 4, merged_count: 0, failed_count: 0 },

@@ -51,7 +51,10 @@ describe("buildDigestMessage", () => {
       },
     ];
     const msg = buildDigestMessage(events);
-    assert.match(msg, /\*Cycles:\* 2 completed — 1 merged, 1 failed, 0 abandoned/);
+    // Issue #5044: the always-zero `, 0 abandoned` suffix (derived only from
+    // the retired task:rejected / task:drift_detected types) is gone.
+    assert.match(msg, /\*Cycles:\* 2 completed — 1 merged, 1 failed\n/);
+    assert.doesNotMatch(msg, /abandoned/);
     assert.match(msg, /\*Merged:\*/);
     assert.match(msg, /• Add thing/);
     assert.match(msg, /\*Failed:\*/);
@@ -103,15 +106,74 @@ describe("buildDigestMessage", () => {
     assert.doesNotMatch(msg, /✅ floor/);
   });
 
-  it("flags an action item when verification failures cross the threshold", () => {
-    const events = Array.from({ length: 3 }, (_, i) => ({
-      type: "task:verification_failed",
-      timestamp: `2026-06-07T0${i}:00:00.000Z`,
-      payload: {},
-    }));
+  it("flags an action item for an Outcome Holdback auto-revert", () => {
+    const events = [{
+      type: "holdback.reverted",
+      timestamp: "2026-06-07T08:00:00.000Z",
+      payload: { commitSha: "abcdef1234567", regressedOutcomes: ["merge-rate"] },
+    }];
     const msg = buildDigestMessage(events);
     assert.match(msg, /\*Action items:\*/);
-    assert.match(msg, /3 verification failures/);
+    assert.match(msg, /1 Outcome Holdback auto-revert\(s\)/);
+    assert.match(msg, /  • abcdef1 — merge-rate/);
+  });
+
+  it("retired codex-era types (issue #5044) add no section or action item", () => {
+    const retired = [
+      "task:verification_failed", "task:verification_failed", "task:verification_failed",
+      "task:rejected", "task:drift_detected", "cycle:rollback", "cycle:stale_priorities",
+      "research:completed", "architect:review_completed",
+    ];
+    const msg = buildDigestMessage(retired.map((type, i) => ({
+      type,
+      timestamp: `2026-06-07T0${i}:00:00.000Z`,
+      payload: {},
+    })));
+    assert.doesNotMatch(msg, /Action items/);
+    assert.doesNotMatch(msg, /\*Research:\*/);
+    assert.doesNotMatch(msg, /\*Architect Review:\*/);
+  });
+
+  it("renders a live-only event set byte-identically (issue #5044)", () => {
+    const events = [
+      {
+        type: "cycle:completed",
+        timestamp: "2026-06-07T08:00:00.000Z",
+        payload: { task: { title: "Add thing", finalState: "merged" }, grounding: { before: { passed: 10 }, after: { passed: 11 } } },
+      },
+      {
+        type: "cycle:completed",
+        timestamp: "2026-06-07T09:15:00.000Z",
+        payload: { task: { title: "Broke thing", finalState: "rolled-back" }, grounding: { before: { passed: 11 }, after: { passed: 12 } } },
+      },
+      { type: "holdback.cap-reached", timestamp: "2026-06-07T09:30:00.000Z", payload: {} },
+      { type: "holdback.revert_failed", timestamp: "2026-06-07T09:45:00.000Z", payload: {} },
+    ];
+    assert.equal(buildDigestMessage(events), [
+      "📊 *Hydra Digest*",
+      "",
+      "*Cycles:* 2 completed — 1 merged, 1 failed",
+      "",
+      "*Merged:*",
+      "• Add thing",
+      "",
+      "*Failed:*",
+      "• Broke thing — rolled-back",
+      "",
+      "*Tests:* 10 → 12",
+      "",
+      "*Capacity split:*",
+      "• No cycle history yet — capacity floor not enforceable",
+      "",
+      "*Builder health:*",
+      "• No builder-health data yet — scorecard tracking enabled",
+      "",
+      "*Action items:*",
+      "⚠️ Per-day Outcome Holdback revert cap reached — additional regressions suppressed (1 event(s))",
+      "⚠️ 1 Outcome Holdback revert attempt(s) failed — manual intervention needed",
+      "",
+      "_Period: 08:00 — 09:45_",
+    ].join("\n"));
   });
 
   it("truncates messages that exceed the Telegram limit", () => {
@@ -136,31 +198,52 @@ describe("buildDigestMessage", () => {
 // formatCriticalAlert
 // ---------------------------------------------------------------------------
 describe("formatCriticalAlert", () => {
-  it("formats a rollback-failed alert", () => {
-    const out = formatCriticalAlert({
-      type: "cycle:rollback_failed",
-      payload: { title: "Risky change", commitSha: "deadbeefcafe", error: "merge conflict" },
-    });
-    assert.match(out, /🚨 \*CRITICAL: Rollback Failed\*/);
-    assert.match(out, /Task: Risky change/);
-    assert.match(out, /deadbee/);
-    assert.match(out, /merge conflict/);
+  it("retired codex-era types (issue #5044) have no dedicated arm", () => {
+    for (const type of ["cycle:rollback_failed", "scheduler:stopped", "scheduler:paused_repetition", "scheduler:backlog_empty"]) {
+      const out = formatCriticalAlert({ type, payload: { reason: "r" } });
+      assert.equal(out, `⚠️ *Critical alert* \`${type}\`\n\`\`\`\n{"reason":"r"}\n\`\`\``);
+    }
   });
 
-  it("formats a scheduler-stopped alert", () => {
-    const out = formatCriticalAlert({
-      type: "scheduler:stopped",
-      payload: { reason: "budget exhausted", cyclesRun: 12 },
-    });
-    assert.match(out, /🛑 \*Scheduler Stopped\*/);
-    assert.match(out, /Reason: budget exhausted/);
-    assert.match(out, /Cycles run: 12/);
+  it("renders the live critical types byte-identically (issue #5044)", () => {
+    assert.equal(
+      formatCriticalAlert({ type: "launch:quota_stretch", payload: { reason: "5h *cap*", streak_count: 3 } }),
+      '⚠️ *Critical alert* `launch:quota_stretch`\n```\n{"reason":"5h *cap*","streak_count":3}\n```',
+    );
+    assert.equal(
+      formatCriticalAlert({ type: "infra:node_modules_wiped", payload: { signal: "/home/x/node_modules", reason: "absent" } }),
+      '⚠️ *Critical alert* `infra:node_modules_wiped`\n```\n{"signal":"/home/x/node_modules","reason":"absent"}\n```',
+    );
+    assert.equal(
+      formatCriticalAlert({ type: "glm:drainer_sterile", payload: { detail: "a`b" } }),
+      '⚠️ *Critical alert* `glm:drainer_sterile`\n```\n{"detail":"a\'b"}\n```',
+    );
   });
 
   it("falls back to a generic alert for unknown types", () => {
     const out = formatCriticalAlert({ type: "something:weird", payload: { a: 1 } });
-    assert.match(out, /⚠️ \*something:weird\*/);
+    assert.match(out, /⚠️ \*Critical alert\* `something:weird`/);
     assert.match(out, /"a":1/);
+  });
+
+  // Issue #5040: the generic arm used to put the raw type + JSON payload into
+  // legacy Markdown, so `node_modules` left an unpaired `_` and Telegram
+  // rejected the alert with a 400. Outside code spans/blocks, every `*` and
+  // `_` must now pair up.
+  it("keeps Markdown entities balanced for underscore/asterisk-laden alerts", () => {
+    const cases = [
+      { type: "infra:node_modules_wiped", payload: { service: "hydra-orchestrator", path: "/home/x/node_modules" } },
+      { type: "launch:quota_stretch", payload: { note: "5h *cap* at 90%", streak_count: 3 } },
+      { type: "glm:drainer_sterile", payload: { detail: "a`b`c" } },
+    ];
+    for (const ev of cases) {
+      const out = formatCriticalAlert(ev);
+      const outsideCode = out.replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "");
+      assert.equal((outsideCode.match(/\*/g) ?? []).length % 2, 0, `unbalanced * in ${ev.type}: ${out}`);
+      assert.equal((outsideCode.match(/_/g) ?? []).length % 2, 0, `unbalanced _ in ${ev.type}: ${out}`);
+      assert.equal((out.match(/`/g) ?? []).length % 2, 0, `unbalanced backtick in ${ev.type}: ${out}`);
+      assert.ok(out.includes(ev.type), `type missing from ${out}`);
+    }
   });
 });
 

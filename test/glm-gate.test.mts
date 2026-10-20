@@ -35,6 +35,11 @@ import {
   type GateVerdict,
 } from "../src/glm/gate.ts";
 import {
+  GLM_DISABLED_FILE_RELATIVE,
+  glmDisabledFilePath,
+  isGlmLaneDisabled,
+} from "../src/glm/disabled.ts";
+import {
   DEFAULT_DAILY_CAP,
   DEFAULT_TIMEOUT_RESUME_CAP,
   loadDrainerConfig,
@@ -383,6 +388,7 @@ describe("loadDrainerConfig — same names and defaults as drainer-loop.sh", () 
       worktreeRoot: "/home/gabe/hydra/.claude/worktrees",
       quotaResetTzOffset: "+0800",
       designConceptUrl: "http://localhost:4000/api/design-concepts",
+      disabledFile: null,
     });
   });
 
@@ -398,6 +404,7 @@ describe("loadDrainerConfig — same names and defaults as drainer-loop.sh", () 
       HYDRA_GLM_DRAINER_WORKTREE_ROOT: "/w",
       HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET: "+0000",
       HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: "http://x",
+      HYDRA_GLM_DISABLED_FILE: "/d",
     });
     assert.deepEqual(c, {
       repoRoot: "/r",
@@ -410,6 +417,7 @@ describe("loadDrainerConfig — same names and defaults as drainer-loop.sh", () 
       worktreeRoot: "/w",
       quotaResetTzOffset: "+0000",
       designConceptUrl: "http://x",
+      disabledFile: "/d",
     });
   });
 
@@ -424,5 +432,74 @@ describe("loadDrainerConfig — same names and defaults as drainer-loop.sh", () 
     });
     assert.equal(c.dailyCap, DEFAULT_DAILY_CAP);
     assert.equal(c.timeoutResumeCap, DEFAULT_TIMEOUT_RESUME_CAP);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The operator off switch (src/glm/disabled.ts)
+// ---------------------------------------------------------------------------
+
+describe("glmDisabledFilePath / isGlmLaneDisabled — the off-switch sentinel", () => {
+  test("the override wins, then $HOME, else null (lane on)", () => {
+    assert.equal(glmDisabledFilePath({ HYDRA_GLM_DISABLED_FILE: "/x", HOME: "/h" }), "/x");
+    assert.equal(glmDisabledFilePath({ HOME: "/h" }), join("/h", GLM_DISABLED_FILE_RELATIVE));
+    assert.equal(glmDisabledFilePath({}), null);
+  });
+
+  test("disabled exactly when the sentinel path exists", () => {
+    const seen: string[] = [];
+    const exists = (p: string) => {
+      seen.push(p);
+      return p === "/on";
+    };
+    assert.equal(isGlmLaneDisabled({ HYDRA_GLM_DISABLED_FILE: "/on" }, exists), true);
+    assert.equal(isGlmLaneDisabled({ HYDRA_GLM_DISABLED_FILE: "/off" }, exists), false);
+    assert.deepEqual(seen, ["/on", "/off"]);
+    assert.equal(isGlmLaneDisabled({}, () => true), false, "no path to look at means lane on");
+  });
+
+  test("a real empty sentinel file counts", () => {
+    const dir = mkdtempSync(join(tmpdir(), "glm-disabled-"));
+    try {
+      const path = join(dir, "disabled");
+      assert.equal(isGlmLaneDisabled({ HYDRA_GLM_DISABLED_FILE: path }), false);
+      writeFileSync(path, "");
+      assert.equal(isGlmLaneDisabled({ HYDRA_GLM_DISABLED_FILE: path }), true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("gate — the disabled verdict", () => {
+  test("decideGate: disabled beats every other input", () => {
+    assert.deepEqual(
+      decideGate({ disabled: true, paused: true, capCount: 9, dailyCap: 5, quotaBlockedUntil: 2e9, now: 1 }),
+      { able: false, reason: "disabled" },
+    );
+    assert.deepEqual(
+      decideGate({ disabled: false, paused: false, capCount: 0, dailyCap: 5, quotaBlockedUntil: null, now: 1 }),
+      { able: true },
+    );
+  });
+
+  test("runGate: sentinel present → disabled, no pause read, no heartbeat", async () => {
+    const h = makeGateDeps({ files: { "/sentinel": "" } });
+    h.deps.config = { ...h.deps.config, disabledFile: "/sentinel" };
+    let pauseReads = 0;
+    h.deps.getAutopilotPaused = async () => {
+      pauseReads += 1;
+      return { paused: false };
+    };
+    assert.deepEqual(await runGate(h.deps), { able: false, reason: "disabled", detail: "/sentinel" });
+    assert.equal(pauseReads, 0);
+    assert.equal(h.heartbeats, 0);
+  });
+
+  test("runGate: sentinel configured but absent → normal able path", async () => {
+    const h = makeGateDeps();
+    h.deps.config = { ...h.deps.config, disabledFile: "/sentinel" };
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.equal(h.heartbeats, 1);
   });
 });

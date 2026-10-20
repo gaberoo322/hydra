@@ -1942,6 +1942,168 @@ run_launch_flow() {
   return 0
 }
 
+# =============================================================================
+# ## ORIGIN IDENTITY
+# =============================================================================
+#
+# Issue #4939. Every ~/hydra worktree shares /home/gabe/hydra/.git/config. On
+# 2026-10-07 a Target dispatch rewrote remote.origin.url to the Target repo
+# (claw-street-bets) and a pruning fetch then deleted refs/remotes/origin/master;
+# recent-merges failed open for ~80 minutes with nothing alarming. This block is
+# the single alarm owner for that failure class. Fails (alarms) when
+#   (a) the normalised remote.origin.url is not
+#       ${HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO:-gaberoo322/hydra}, OR
+#   (b) refs/remotes/origin/master does not resolve.
+#
+# STRICTLY READ-ONLY: only `git config --get`, `git rev-parse --verify`, `stat`.
+# Never `git remote`, config writes, `git fetch` or any ref mutation — a wrong
+# URL is never auto-corrected (that mutation is the forbidden class and would
+# mask the writer). Each tick also records the .git/config mtime and logs one
+# INFO line when it moved, so the next rewrite is attributable from the journal.
+# One enveloped XADD onto hydra:notifications per episode, dedup'd by a since
+# marker under the state dir; cleared (re-armed) when both checks pass.
+#
+# Fail-safe (like ## DEPLOY DRIFT): any tooling failure logs WARN and returns 0.
+#
+# Testability hooks (off-by-default; pinned by
+# test/watchdog-origin-identity.test.mts):
+#   HYDRA_WATCHDOG_ORIGIN_URL             Inject the observed origin URL.
+#   HYDRA_WATCHDOG_ORIGIN_MASTER_PRESENT  Inject 1/0 for origin/master resolving.
+#   HYDRA_WATCHDOG_ORIGIN_STATE_DIR       Marker dir (default /tmp).
+#   HYDRA_WATCHDOG_ORIGIN_NOTIFY_STREAM   Notification stream (default
+#                                         hydra:notifications).
+
+run_origin_identity() {
+  local HYDRA_ROOT="${HYDRA_ROOT:-/home/gabe/hydra}"
+  local EXPECTED="${HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO:-gaberoo322/hydra}"
+  local STATE_DIR="${HYDRA_WATCHDOG_ORIGIN_STATE_DIR:-/tmp}"
+  local NOTIFY_STREAM="${HYDRA_WATCHDOG_ORIGIN_NOTIFY_STREAM:-hydra:notifications}"
+  local REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
+  local REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
+  local REDIS_DB="${HYDRA_REDIS_DB:-0}"
+  [[ "$REDIS_DB" =~ ^[0-9]+$ ]] || REDIS_DB=0
+  local SINCE_MARKER="${STATE_DIR}/hydra-origin-identity.since"
+  local MTIME_MARKER="${STATE_DIR}/hydra-origin-identity.config-mtime"
+
+  log() {
+    echo "hydra-origin-identity-watchdog: $*"
+  }
+
+  # Output-returning call ("" on any failure) so the XADD result can gate the
+  # dedup marker.
+  rc_read() {
+    if [[ "$REDIS_HOST" == "docker" ]]; then
+      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
+    else
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
+    fi
+  }
+
+  mkdir -p "$STATE_DIR" 2>/dev/null || {
+    log "WARN cannot create state dir ${STATE_DIR} — skipping origin identity check"
+    return 0
+  }
+
+  # --- Forensic breadcrumb (read-only stat) ---
+  local cfg="${HYDRA_ROOT}/.git/config"
+  if [[ -f "$cfg" ]]; then
+    local mt prev_mt iso
+    mt="$(stat -c %Y "$cfg" 2>/dev/null || true)"
+    if [[ "$mt" =~ ^[0-9]+$ ]]; then
+      prev_mt="$(cat "$MTIME_MARKER" 2>/dev/null || true)"
+      if [[ -n "$prev_mt" && "$prev_mt" != "$mt" ]]; then
+        iso="$(date -u -d "@${mt}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$mt")"
+        log "INFO .git/config changed at ${iso}"
+      fi
+      printf '%s' "$mt" > "$MTIME_MARKER" 2>/dev/null || true
+    fi
+  fi
+
+  # --- Observed origin URL ---
+  local url="" url_ok=1
+  if [[ -n "${HYDRA_WATCHDOG_ORIGIN_URL+x}" ]]; then
+    url="$HYDRA_WATCHDOG_ORIGIN_URL"
+  elif [[ -e "${HYDRA_ROOT}/.git" ]]; then
+    # `git config --get` exits 1 when the key is absent (a finding: no origin);
+    # >1 is a tooling failure.
+    local rc=0
+    url="$(git -C "$HYDRA_ROOT" config --get remote.origin.url 2>/dev/null)" || rc=$?
+    if (( rc > 1 )); then
+      log "WARN git config read failed (rc=${rc}) — skipping origin identity check"
+      return 0
+    fi
+  else
+    log "WARN ${HYDRA_ROOT}/.git not found — skipping origin identity check"
+    url_ok=0
+  fi
+  (( url_ok == 1 )) || return 0
+
+  # --- origin/master resolves? (read-only rev-parse) ---
+  local master_present
+  if [[ -n "${HYDRA_WATCHDOG_ORIGIN_MASTER_PRESENT+x}" ]]; then
+    master_present="$HYDRA_WATCHDOG_ORIGIN_MASTER_PRESENT"
+  elif git -C "$HYDRA_ROOT" rev-parse --verify -q refs/remotes/origin/master >/dev/null 2>&1; then
+    master_present=1
+  else
+    master_present=0
+  fi
+
+  # --- Normalise: strip scheme, user@, host, trailing .git and slashes ---
+  local norm
+  norm="$(printf '%s' "$url" | sed -E 's#^[A-Za-z+]+://##; s#^[^@/]*@##; s#^[^/:]+[:/]##; s#/+$##; s#\.git$##' | tr 'A-Z' 'a-z')"
+  local want
+  want="$(printf '%s' "$EXPECTED" | tr 'A-Z' 'a-z')"
+
+  local reasons=()
+  if [[ "$norm" != "$want" ]]; then
+    reasons+=("wrong-origin-url")
+  fi
+  if [[ "$master_present" != "1" ]]; then
+    reasons+=("origin-master-missing")
+  fi
+
+  if (( ${#reasons[@]} == 0 )); then
+    if [[ -f "$SINCE_MARKER" ]]; then
+      log "origin identity healthy again (origin=${norm}, origin/master resolves) — dedup re-armed"
+    fi
+    rm -f "$SINCE_MARKER" 2>/dev/null || true
+    log "origin-identity tick processed (origin=${norm}, origin_master=present)"
+    return 0
+  fi
+
+  local reason_str
+  reason_str="$(IFS=+; echo "${reasons[*]}")"
+  # Strip any userinfo (https://user:TOKEN@host/...) BEFORE the URL reaches the
+  # log line, the notifications payload or the dashboard alert (#4939 QA).
+  local shown_url
+  shown_url="$(printf '%s' "${url:-<unset>}" | sed -E 's#^([A-Za-z+]+://)[^/@]*@#\1#')"
+  log "ALARM ~/hydra origin identity broken: ${reason_str} — remote.origin.url=${shown_url} (expected ${EXPECTED}); refs/remotes/origin/master $([[ "$master_present" == "1" ]] && echo present || echo MISSING) (issue #4939; read-only watchdog, restore from an operator shell)"
+
+  if [[ ! -f "$SINCE_MARKER" ]]; then
+    local iso_now payload url_clean xadd_out
+    iso_now="$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || echo "")"
+    url_clean="$(printf '%s' "$shown_url" | tr -dc 'a-zA-Z0-9_.:/@<>-')"
+    payload="$(printf '{"signal":"origin-identity","reason":"%s","url":"%s"}' "$reason_str" "$url_clean")"
+    # The since-marker is created ONLY after the XADD succeeds (a stream id
+    # comes back), so a Redis blip on the first tick retries next tick instead
+    # of suppressing the alert for the whole episode.
+    xadd_out="$(rc_read XADD "$NOTIFY_STREAM" '*' \
+      id "origin-identity-$(date +%s 2>/dev/null || echo 0)-$$" \
+      type "infra:origin_identity_wrong" \
+      source "watchdog-origin-identity" \
+      timestamp "$iso_now" \
+      correlationId "origin-identity" \
+      payload "$payload")"
+    if [[ -n "$xadd_out" ]]; then
+      date +%s > "$SINCE_MARKER" 2>/dev/null || true
+      log "in-band delivery published type=infra:origin_identity_wrong -> ${NOTIFY_STREAM}"
+    else
+      log "WARN in-band delivery FAILED (XADD returned nothing) — will retry next tick"
+    fi
+  fi
+  return 0
+}
+
 
 # =============================================================================
 # Entry point — run all blocks on every tick ONLY when the script is executed
@@ -1959,5 +2121,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   run_skill_mirror_drift
   run_launch_flow
   run_node_modules_integrity
+  run_origin_identity
   exit 0
 fi

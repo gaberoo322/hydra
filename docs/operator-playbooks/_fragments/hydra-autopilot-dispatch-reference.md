@@ -8,37 +8,19 @@ for dispatch policy is `scripts/autopilot/decide.py`.
 
 ## Class taxonomy (7 pipeline slots + 15 signal classes)
 
-| Kind | Class | Skill |
-|---|---|---|
-| pipeline | `dev_orch` | hydra-dev (**implement** stage — composed on the vendored upstream `implement` base, ADR-0030 Decision 2 / #3422) |
-| pipeline | `qa_orch` | hydra-qa (**review** stage — composed on the vendored upstream `code-review` base, ADR-0030 Decision 2 / #3420) |
-| pipeline | `research_orch` | hydra-research / hydra-issue-research |
-| pipeline | `dev_target` | hydra-target-build |
-| pipeline | `qa_target` | hydra-target-qa (issue #4576 — the purpose-built Target QA skill, dispatched with a pre-resolved PR ref; `hydra-qa` has no target-scope path) |
-| pipeline | `research_target` | hydra-target-research |
-| pipeline | `design_concept_orch` | hydra-grill (Phase B, warn-only — the **spec** stage of the one-lineage refit; ADR-0030 Decision 2, superseded for this stage's base by ADR-0035) |
-| signal | `health` | hydra-doctor (scope-agnostic) |
-| signal | `sweep_orch` | hydra-sweep |
-| signal | `sweep_target` | hydra-target-sweep |
-| signal | `discover_orch` | hydra-discover |
-| signal | `discover_target` | hydra-target-discover |
-| signal | `scout_orch` | hydra-tool-scout (Phase B, weekly calendar walk) |
-| signal | `architecture_orch` | hydra-architecture-scan (#788; idle-time fallback, issue-producing) |
-| signal | `retro_orch` | hydra-retro (#919; daily per-run retrospective, issue-producing + ≤1 gated PR) |
-| signal | `cleanup_orch` | hydra-cleanup (#960; board-idle deterministic dead-code/simplification scan, issue-producing → `ready-for-agent`) |
-| signal | `cleanup_target` | hydra-target-cleanup (Target mirror of cleanup_orch; demote-only dead-export sweep over the Target workspace (`$TARGET_WS`), backlog-item-producing → `ready-for-agent` + `queued`) |
-| signal | `wire_or_retire_target` | hydra-wire-or-retire (#2722, epic #2720; judgment counterpart to cleanup_target — resolves triage `wire-or-retire` items into WIRE/RETIRE/UNCLEAR verdicts; 24h cooldown, ≤2 items/run, model param omitted) |
-| signal | `design_qa_target` | hydra-design-qa (#2739, parent #2732; periodic VISUAL QA — screenshots every nav-registry route + judges vs the Target design ADR's [judgment] rules, files ≤3 deduped `needs-triage` design-qa items/run; 7d calendar cooldown, >5-open saturation backstop, model param omitted) |
-| signal | `skill_prune` | hydra-skill-prune (#2949, epic #2944; eval-gated PROMPT counterpart to cleanup_orch — prunes ONE playbook-generated skill/run along the Pocock taxonomy [duplication/sediment/no-op], gated on promptfoo golden-task parity, ≤1 T1/T2 PR/run editing only that playbook + its regenerated skill + tightened ratchet baseline, else files a `needs-triage` candidate list; 7d calendar cooldown, saturation backstop, `apply:true`, model param omitted) |
-| signal | `wayfinder_orch` | **ticket-type routed** (#3351, epic #3350, ADR-0029; the single AFK working class for wayfinder maps — works the next unblocked, unclaimed AFK-typed frontier ticket on an open approved `wayfinder:map`. The `skill` is resolved at dispatch time from `prompt_args.ticket_type`: `research` → hydra-issue-research, `task` → hydra-dev. 1h cooldown, one ticket/fire, model param omitted; the Turn Snapshot `wayfinder-frontier` collector owns the native GraphQL frontier enumeration, decide.py stays pure) |
-| signal | `tickets_orch` | hydra-tickets (#3423, epic #3419, ADR-0030 Decision 2/5; the **tickets**-STAGE producer — turns a resolved plan into one parent epic + N tracer-bullet child issues. Dispatches the COMPOSED `hydra-tickets` skill (vendored `to-tickets` base + AFK overlay, #3992), never the bare upstream `to-tickets` (disable-model-invocation hard-errors) nor the demoted `hydra-prd` renderer. Fires on the `tickets_available` signal the Turn Snapshot `tickets` collector emits from the oldest unassigned `needs-tickets` spec (#4014) — structural twin of `wayfinder_orch` (1h, plan-anchored, signal class, not pipeline), so likewise deliberately NOT seeded into bootstrap's carry-forward `signal_last_fired`. 1h cooldown, one spec/fire, model param omitted; the Turn Snapshot `tickets` collector owns the GH enumeration + ref pre-resolution, decide.py stays pure) |
+The class → skill table is DATA, not prose (issue #4592): every row — class,
+skill, stage, model, ticket-type routing, cooldown, scope and the per-class
+rationale in its `notes` column — lives in `scripts/autopilot/classes.json`,
+rendered at `docs/generated/classes.json` (`/docs/cat/classes` on the
+dashboard). Read a class's row there; this fragment no longer keeps a
+hand-maintained copy that could drift.
 
 > **One-lineage stage bindings (ADR-0030 Decision 2; ADR-0035 supersedes the spec-stage base).** The three code-writing pipeline stages compose against the *same* vendored upstream Pocock skills the operator runs interactively (lineage home `docs/operator-playbooks/_vendor/`, ADR-0030 Decision 4 / Option C): the **implement** stage (`dev_orch` → `hydra-dev`) rides `_vendor/implement.md`, the **review** stage (`qa_orch` → `hydra-qa`) rides `_vendor/code-review.md`, and the **spec** stage (`design_concept_orch` → `hydra-grill`) composes on NO upstream base. The `decide.py` `make_dispatch` string literals (`hydra-dev` / `hydra-qa` / `hydra-grill`) **stay live and unchanged** — they are the class rows that *select* these composed stages, not a second inline copy of the pattern. The grill-before-build sequencing (the #628 gate; post-#3711 `dev_orch` yields **per-anchor** rather than board-wide — the `orch_dev_ready_anchor` Turn Snapshot signal) is a documentation/lineage rebind here, **not** a change to that `decide.py` gate.
 
 ## Model routing rationale
 
-The routing table itself (class → model) stays in SKILL.md § Per-class model
-routing. This is the reasoning behind it.
+The routing data itself (class → model) is the `model` column of
+`scripts/autopilot/classes.json`. This is the reasoning behind it.
 
 Right-sized by **stakes × frequency** — drop the high-frequency non-authoring
 classes off the frontier model; keep behaviour-reshaping and money-critical
@@ -144,8 +126,8 @@ ending early acceptable. The check fails OPEN (no mutation) on any `gh`
 hiccup, so a transient network blip never mislabels a healthy in-flight
 anchor.
 
-**Durable dev resume (issue #4518).** `/tmp/hydra-autopilot-state.json` is a
-cache, so the resume path no longer depends on it surviving. Three mechanisms:
+**Durable dev resume (issues #4518, #4808).** `/tmp/hydra-autopilot-state.json` is a
+cache, so the resume path no longer depends on it surviving. Four mechanisms:
 
 1. **The kill itself.** `scripts/systemd/hydra-autopilot.service` sets
    `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=3600000`. Print mode waits at most
@@ -171,6 +153,27 @@ cache, so the resume path no longer depends on it surviving. Three mechanisms:
    below applies verbatim (continue the PR's head, push to the SAME branch,
    NEVER `gh pr create`) — minus the `glm-authored` clause and the attempt
    cap, which stay #4460-only. Reap's needs-qa promotion clears the label.
+4. **The label alone covers the no-PR case (issue #4808).** A `needs-dev-resume`
+   issue with NO open PR referencing it is invisible to mechanism 3 (which keys
+   off an open PR) and to the #4460 GLM pin (GLM provenance only). The Turn
+   Snapshot's `orch_dev_resume_nopr_anchor` (an anchor, not a pin — there is
+   no PR, branch or head to name) is the lowest-numbered `needs-dev-resume`
+   issue that NO open PR references (head-branch or body, drafts included),
+   that is not `in-progress`/`ready-for-human`, and that has been quiescent
+   for the pr-gate window (default 5400s, `HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS`);
+   derived from the SAME single needs-dev-resume `gh` read mechanism 3 uses
+   (widened to `--json number,labels,updatedAt` — zero added reads) and
+   fail-closed to `none` on any unusable input. The `dev_orch` selector pins it
+   immediately AFTER the in-state drain (mechanism 2) and BEFORE the
+   #4807/#4518/#4460 PR-keyed pins, with `prompt_args` exactly
+   `{"anchor": "issue-<N>", "resume": true}` — no branch to continue, so the
+   dispatch prompt reads the issue's own comments for the last reap stall's
+   `**Branch:**` line instead. There is NO state key: the durable cap is
+   enforced at reap time — `_handle_dev_orch_stall` counts the issue's prior
+   no-PR stall comments (one `gh issue view --json comments` read on the
+   already-narrow confirmed-stall branch; an unreadable count falls back to
+   today's behaviour) and at the third stall relabels `ready-for-human` and
+   posts one cap comment instead of queueing another resume.
 
 On the disk side, `scripts/branch-prune.sh` — the only deleter of
 `.claude/worktrees/agent-*` — never removes a worktree holding uncommitted

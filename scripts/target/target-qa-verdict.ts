@@ -304,8 +304,9 @@ function fail(
  * Render the machine-readable `QA-Verdict:` trailer that ends every Target QA
  * verdict comment (issue #4796). It IS the orchestrator's #4729 grammar —
  * delegated to `buildQaVerdictTrailer`, never a second format — so the
- * `qa_target` PR resolver in `collect-state.sh` can skip a PR already PASSed
- * at its current head.
+ * `qa_target` PR resolver (`resolveNeedsQaPr` / `passAtHead` in
+ * `src/autopilot/turn-snapshot/target-board.ts`; ADR-0043 retired
+ * `collect-state.sh`) can skip a PR already PASSed at its current head.
  *
  * Normalisation: PASS always renders `blockers=0 max_severity=none`; any other
  * verdict renders FAIL with `blockers=max(1, input)` and `max_severity=high`;

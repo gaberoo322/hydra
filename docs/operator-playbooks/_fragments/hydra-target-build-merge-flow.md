@@ -22,7 +22,7 @@ board, the orchestrator API, and (on regression) a revert PR opened from
 
 **Close-discipline (ADR-0031 Decision 5 — enforced `Closes #N`).** When this build was anchored on a `$TARGET_GH_REPO` GitHub issue (Step 2 priority 3, the board pick), the Target PR body MUST end with `Closes #<ANCHOR_NUM>` for the issue it resolves. The Target's automerge then **auto-closes the issue and removes it from the open board for free** — this is the label-model replacement for the retired Redis merged/shipped-subject suppression cascade. There is NO separate suppression / lane-move / work-queue-eviction step to take the item off the board; the issue-close IS the terminal signal. A failing-test / priorities-doc anchor has no issue number, so it opens a PR with no `Closes` line (nothing to close), exactly as before.
 
-For an anchor carrying a fencing label (`money-critical` / `hold-for-operator`) this link is load-bearing for the operator-review fence itself (gaberoo322/hydra#4224): the workflow's fence reads the PR's own labels directly (gaberoo322/hydra#4558) but resolves the ANCHOR's labels only through the PR's linked issues, so without the `Closes #<ANCHOR_NUM>` link the workflow's fence cannot see the anchor, and the PR squash-merges on green unreviewed — the PR #1026 class. Verify the link is present in the PR body BEFORE its CI can conclude (i.e. at PR creation), not at merge time; the 7b fence-blind branch below handles the case where it was missed.
+For an anchor carrying a fencing label (`money-critical` / `hold-for-operator`) this link is load-bearing for the operator-review fence itself (gaberoo322/hydra#4224): the workflow's fence reads the PR's own labels directly (gaberoo322/hydra#4558) but resolves the ANCHOR's labels only through the PR's linked issues, so without the `Closes #<ANCHOR_NUM>` link the workflow's fence cannot see the anchor, and the PR squash-merges on green unreviewed — the PR #1026 class. A resume (Step 0.7) must therefore keep the `Closes` link and mirror the fencing label onto the PR — a `Refs`-only resume PR with no label of its own is the #4854 class (CSB PR #236). Verify the link is present in the PR body BEFORE its CI can conclude (i.e. at PR creation), not at merge time; the 7b fence-blind branch below handles the case where it was missed.
 
 The PR body MUST include the self-declared scope captured in Step 3.5:
 
@@ -73,7 +73,7 @@ the PR against `main`; never merge locally and never push to `main` (a
 branch-protected `main` rejects it, and the serving tree must not be touched):
 
 ```bash
-cd "$TARGET_WT"
+cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}"
 git push -u origin "feature/$CYCLE_ID"
 # Body carries the Self-declared scope block above + Closes #$ANCHOR_NUM (board anchors).
 PR_URL=$(gh pr create --repo "$TARGET_GH_REPO" --base main --head "feature/$CYCLE_ID" \
@@ -366,10 +366,10 @@ this check — absence is not a failure.
 
 ```bash
 DEPLOYED_SHA=$(curl -sf "$TARGET_WEB_URL/deploy-sha.txt" | tr -d '[:space:]' | grep -xE '[0-9a-f]{40}' || true)
-git -C "$TARGET_WT" fetch --quiet origin main
+git -C "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}" fetch --quiet origin main
 if [ -z "$DEPLOYED_SHA" ]; then
   echo "deploy-sha marker: absent — skipping SHA comparison"
-elif git -C "$TARGET_WT" merge-base --is-ancestor "$COMMIT_SHA" "$DEPLOYED_SHA"; then
+elif git -C "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}" merge-base --is-ancestor "$COMMIT_SHA" "$DEPLOYED_SHA"; then
   echo "deploy-sha marker: serving $DEPLOYED_SHA, which contains merge commit $COMMIT_SHA"
 else
   echo "DEPLOY DRIFT: serving $DEPLOYED_SHA, which does not contain $COMMIT_SHA"
@@ -408,7 +408,7 @@ PR's pre-merge run as post-merge proof.
   worktree — never push to `main`, never revert in `$TARGET_WS`:
 
 ```bash
-cd "$TARGET_WT"
+cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}"
 git fetch --quiet origin main
 git checkout -b "revert/$CYCLE_ID" origin/main
 git revert --no-edit "$COMMIT_SHA"     # a squash merge has a single parent
@@ -451,7 +451,7 @@ invoke it from `~/hydra`. This step runs BEFORE the Step 8.5 worktree cleanup,
 so the mirror is still present.
 
 ```bash
-cd "$TARGET_WT"
+cd "${TARGET_WT:?unset - re-run the seam preamble in this Bash call}"
 # Pass --dispatch so a real regression actually fires hydra-target-incident.
 # Without --dispatch it is a dry-run (prints the alarm context, spawns nothing),
 # which is what you want when smoke-testing the watcher itself.
@@ -522,7 +522,7 @@ branch the cycle on it.
 On success, remove the target worktree we created in Step 0.6, **prune stale worktree metadata**, THEN delete the merged feature branch — in that order. `git branch -d` fails with "branch ... used by worktree" while the worktree still holds the branch checked out, which is why the delete lives here and not in Step 7 (friction cue: `worktree-held-branch-blocks-local-delete`). The `git worktree prune` between the two is load-bearing (issue #2272): an interrupted remove (or an out-of-band `rm -rf` of `$TARGET_WT`) can leave an orphaned `.git/worktrees/<id>` entry that still claims the branch is "used by worktree at '...'" even though the directory is long gone (9 such failures for one cycle in 24h on a prior Target). `git worktree prune` is git's own sanctioned metadata reconcile — it only drops entries git itself agrees are no longer in use, so it never touches a live worktree. On failure, `scripts/branch-prune.sh` will GC both on the next daily sweep — leaking is acceptable on crash but not on the happy path.
 
 ```bash
-git -C "$TARGET_WS" worktree remove --force "$TARGET_WT" 2>&1 || \
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" worktree remove --force "$TARGET_WT" 2>&1 || \
   echo "warn: worktree remove failed for $TARGET_WT — branch-prune.sh will GC it later"
 # Remove the SIBLING gate dir alongside the worktree (issue #4526): the mirror,
 # pmh-baseline.json, and build logs live there — all disposable. This runs AFTER
@@ -532,9 +532,9 @@ rm -rf "$HYDRA_GATE_DIR"
 # an interrupted remove above (or an out-of-band deletion of $TARGET_WT) can
 # leave an orphaned .git/worktrees/<id> entry that makes the next
 # `git branch -d` fail with "branch ... used by worktree at '...'".
-git -C "$TARGET_WS" worktree prune 2>&1 || \
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" worktree prune 2>&1 || \
   echo "warn: worktree prune failed in $TARGET_WS — branch-prune.sh will reconcile later"
-git -C "$TARGET_WS" branch -d "feature/$CYCLE_ID" 2>&1 || \
+git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" branch -d "feature/$CYCLE_ID" 2>&1 || \
   echo "warn: branch delete failed for feature/$CYCLE_ID — branch-prune.sh will GC it later"
 ```
 

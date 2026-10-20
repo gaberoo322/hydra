@@ -9,6 +9,8 @@
 #   - worktree-write-fence.sh — issue #549 ghost-write fence for the
 #     Edit/Write/MultiEdit tools used by hydra-dev / hydra-target-build
 #     subagents.
+#   - git-remote-fence.sh — issue #4939 Bash fence denying git remote
+#     mutation from the orchestrator gitdir.
 #
 # Usage:
 #   bash scripts/setup-claude-hooks.sh           # install / refresh
@@ -35,6 +37,11 @@ command -v python3 >/dev/null || { echo "setup-claude-hooks: python3 required" >
 # later ghost-writes.
 HOOKS=(
   "worktree-write-fence.sh|Edit|Write|MultiEdit|Read"
+  # Issue #4939: deny `git remote set-url|add|remove|rm|rename` / `git config
+  # remote.*` writes from a session whose cwd is in the orchestrator gitdir.
+  # Registered on Bash, inspecting the full command text (no `if:` prefix
+  # rule — it would not reliably fire on a compound `cd … && git remote …`).
+  "git-remote-fence.sh|Bash"
 )
 
 install_hook() {

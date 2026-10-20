@@ -41,6 +41,8 @@ function issue(number: number, line: WaitingIssue["line"], over: Partial<Waiting
     line,
     blockerNumbers: [],
     openBlockerNumbers: [],
+    humanBlockers: [],
+    hasFilesInScope: true,
     ...over,
   };
 }
@@ -84,8 +86,9 @@ function deps(over: Partial<AttentionFeedDeps> = {}): AttentionFeedDeps {
       scanned: 0,
       sourcesOk: true,
     }),
-    loadDismissedIds: async () => [],
-    recordSurfaced: async () => {},
+    loadDismissed: async () => new Map(),
+    reconcileLedgers: async () => {},
+    readHitlGrillIssues: async () => ({ ok: true as const, rows: [] }),
     readPaused: async () => ({ paused: false }),
     readSessionBlockedUntil: async () => null,
     readSchedulerStopReason: async () => null,

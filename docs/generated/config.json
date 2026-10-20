@@ -166,7 +166,8 @@
       "section": null,
       "readBy": [
         "scripts/glm/drainer-loop.sh",
-        "src/glm/drainer-runner.ts"
+        "src/glm/drainer-runner.ts",
+        "src/glm/prompt.ts"
       ],
       "unread": false,
       "source": {

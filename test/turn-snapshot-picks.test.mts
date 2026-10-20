@@ -234,6 +234,8 @@ function fakeGithub(issues: unknown[], opts: GateOpts, counters: { merged: numbe
     // slice 2 (#4930) reads — unused by pr-gate/picks
     listOpenIssueBoardRows: async () => ok([]),
     listOpenIssueLabelRows: async () => ok([]),
+    listOpenIssueBlockerRows: async () => ok([]),
+    listOpenIssueRowsByLabel: async () => ok([]),
     listOpenPrs: async () => ok(opts.openPrs ?? []),
     listOpenPrMergeStates: async () => ({ read: ok([]), stderrHead: "" }),
     latestWorkflowRunCreatedAt: async () => null,

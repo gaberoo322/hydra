@@ -2,14 +2,15 @@
  * src/cost/config.ts — the env-config reader cluster for the **Subscription
  * Usage Tracker** (issue #1896).
  *
- * Extracted out of `usage-tracker.ts` (the 1,564-line JSONL-scan / OAuth-cache
+ * Extracted out of `usage-tracker.ts` (the former JSONL-scan / OAuth-cache
  * / snapshot-assembly module) so the env-reader boilerplate lives apart from
  * the domain scan logic it configures. This module is a PURE LEAF: it reads
  * `process.env`, parses, and falls back — no IO, no Redis, no module state, and
  * it imports NOTHING from `usage-tracker.ts` or `eligibility.ts` (the import
- * graph stays acyclic). `usage-tracker.ts` imports the readers it consumes
- * internally from here; `eligibility.ts` imports `getWeeklyPaceCeiling` from
- * here for its Pacing-Curve verdict. Everything outside `src/cost/` keeps
+ * graph stays acyclic; its sole src/cost/ edge is the type-only
+ * `SnapshotCalibration` import from `types.ts`, #4793). This is the L2 config
+ * layer; its consumers are listed in the layer table in `src/cost/CONTEXT.md`
+ * (enforced by `test/cost-layers.test.mts`), not restated here. Everything outside `src/cost/` keeps
  * importing via `src/cost/index.ts`, which re-exports every symbol below at the
  * same name — no external import line changes.
  *
@@ -27,6 +28,10 @@ import { logger } from "../logger.ts";
 // acyclic. A VALUE import would be fine too, but type-only keeps the env-reader
 // leaf pure-leaf-shaped.
 import type { CategoryWeights } from "./token-math.ts";
+// Type-only downward edge to the L1 types leaf (issue #4793) for the
+// `SnapshotCalibration` record `readSnapshotCalibration` returns; types.ts
+// imports nothing from this file, so no cycle.
+import type { SnapshotCalibration } from "./types.ts";
 
 /**
  * Default OAuth-meter cache TTL (issue #1090): how long a successful OAuth
@@ -424,6 +429,28 @@ export function getQuotaWeightSonnet(): number {
 
 export function getQuotaWeightHaiku(): number {
   return parseQuotaEnv(process.env.HYDRA_QUOTA_WEIGHT_HAIKU);
+}
+
+/**
+ * Gather the ten calibration env reads `assembleSnapshot` needs into one typed
+ * record (ADR-0042 Decision 7, issue #4793). Calls each existing getter exactly
+ * once — no new parsing; the getters keep their own fail-loud fallbacks. It is
+ * `assembleSnapshot`'s default fourth argument, so it is evaluated at CALL time
+ * (never cached at module load) and env semantics are unchanged.
+ */
+export function readSnapshotCalibration(): SnapshotCalibration {
+  return {
+    weeklyQuotaTokens: getWeeklyQuotaTokens(),
+    fiveHourQuotaTokens: getFiveHourQuotaTokens(),
+    weeklyResetAnchorMs: getWeeklyResetAnchorMs(),
+    cacheReadWeight: getCacheReadWeight(),
+    driftReferencePercent: getDriftReferencePercent(),
+    driftFactor: getDriftFactor(),
+    oauthEstimateDivergenceFactor: getOAuthEstimateDivergenceFactor(),
+    quotaWeightOpus: getQuotaWeightOpus(),
+    quotaWeightSonnet: getQuotaWeightSonnet(),
+    quotaWeightHaiku: getQuotaWeightHaiku(),
+  };
 }
 
 /**

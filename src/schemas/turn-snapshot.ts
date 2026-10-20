@@ -127,6 +127,9 @@ const SignalsSchema = z
     orch_prs_glm_red: NumberList,
     orch_glm_red_forward_fix: PinSchema.nullable(),
     orch_dev_resume_pick: PinSchema.nullable(),
+    // #4808: the no-PR durable resume pick — a needs-dev-resume issue NO open
+    // PR references, so the PR-keyed pins above structurally can't name it.
+    orch_dev_resume_nopr_anchor: IssueNumber.nullable(),
     orch_dirty_forward_fix: PinSchema.nullable(),
     orch_prs_dirty_surface: DirtySurfaceSchema,
     // grill gate (#628 / #3711)
@@ -196,6 +199,7 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   orch_prs_glm_red: [],
   orch_glm_red_forward_fix: null,
   orch_dev_resume_pick: null,
+  orch_dev_resume_nopr_anchor: null,
   orch_dirty_forward_fix: null,
   orch_prs_dirty_surface: [],
   orch_pending_grill_anchor: null,

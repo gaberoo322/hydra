@@ -107,6 +107,11 @@ print(json.dumps({
     #
     # Usage: dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json] [tokens] [worktree_branch] [escalation_json]
     #
+    # <status> vocabulary: merged|completed|succeeded (tasksMerged=1),
+    # failed|timeout|timed-out (tasksFailed=1), abandoned|aborted
+    # (tasksAbandoned=1), and `empty` (issue #4985: a dev_orch dispatch that
+    # made no commits — reap.py's no-work probe — all counters 0 => Empty Cycle).
+    #
     # Issue #1136 (Slice 2 of #1119): the optional 8th positional arg
     # `reflection_sources` is the comma-separated reflection bucket tokens
     # (`per-anchor` / `by-file` / ...) the code-writing dispatch was SERVED at
@@ -267,6 +272,7 @@ print(json.dumps({
     # having to think about it.
     case "$status" in
       merged|completed|succeeded) tasks_merged=1; tasks_failed=0; tasks_abandoned=0 ;;
+      empty)                      tasks_merged=0; tasks_failed=0; tasks_abandoned=0 ;;
       failed|timeout|timed-out)   tasks_merged=0; tasks_failed=1; tasks_abandoned=0 ;;
       abandoned|aborted)          tasks_merged=0; tasks_failed=0; tasks_abandoned=1 ;;
       *)                          tasks_merged=0; tasks_failed=0; tasks_abandoned=0 ;;

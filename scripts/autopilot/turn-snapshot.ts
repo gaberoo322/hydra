@@ -515,6 +515,7 @@ export function productionDeps(): CliDeps {
       uncheckedGraceSeconds: process.env.HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS,
       glmRedQuiescenceSeconds: process.env.HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS,
       unknownRepollDelaySeconds: process.env.HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS,
+      devResumeNoprQuiescenceSeconds: process.env.HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS,
     },
     passthrough: {
       host: createTurnSnapshotHost(),
@@ -570,6 +571,7 @@ export function productionTargetDeps(opts: { transport?: GhTransport; hydra?: Tu
     hydra: opts.hydra ?? createTurnSnapshotHydra(),
     workspace: () => process.env.HYDRA_TARGET_REPO || quietTargetConfig(getTargetWorkspace),
     facts: () => quietTargetConfig(() => collectTargetFacts()),
+    now: () => Date.now(),
   };
 }
 

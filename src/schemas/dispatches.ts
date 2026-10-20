@@ -55,6 +55,10 @@ export const SubagentDispatchPostBodySchema = z
     skill: requiredHandle("skill"),
     dispatchId: requiredHandle("dispatchId"),
     runId: z.string().trim().min(1).optional(),
+    // Agent-tool children (#4965): `sessionId` is the bare agent_id hash and
+    // this carries the PARENT session id whose `<parent>/subagents/` dir holds
+    // the child's JSONL.
+    parentSessionId: z.string().trim().min(1).optional(),
     startedAt: z.string().trim().min(1).optional(),
     projectDir: z.string().trim().min(1).optional(),
     currentStep: z.string().optional(),

@@ -102,6 +102,7 @@ import {
 import {
   projectDispatches,
   flagDispatchesForDrill,
+  drillReasonOf,
   flagRunForDrill,
 } from "./retro-projections.ts";
 import type { RetroDispatch } from "./retro-projections.ts";
@@ -332,16 +333,25 @@ export async function assembleRetroBundle(
   //    drill-on-flag bound keeps the read fan-out to the dispatches that went
   //    wrong.
   const flagged = flagDispatchesForDrill(dispatches);
-  // Materialise the drill-flag onto the served dispatches. The bundle's JSON
-  // consumers (the hydra-retro skill curls the endpoint and cannot call the
-  // pure TS selector) read `dispatches[].flagged` directly, and the
+  // Materialise the drill-flag AND its clause name onto the served dispatches
+  // (issue #4856 INV-7). The bundle's JSON consumers (the hydra-retro skill
+  // curls the endpoint and cannot call the pure TS selector) read
+  // `dispatches[].flagged` / `dispatches[].drillReason` directly, and the
   // SKILL.md contract is that `dispatches[]` already carries the flagged
   // signal. Without this write-back every served dispatch reported
   // `flagged: undefined` and the rollup was `flagged: 0` even on a crashed run
   // where every dispatch carried `abandonReason: run-crash` (issue #1094).
   // flagDispatchesForDrill returns members of `dispatches` (filter, not map),
-  // so mutating them here is mutating the served objects in place.
-  for (const d of flagged) d.flagged = true;
+  // so mutating them here is mutating the served objects in place. The reason
+  // is written in the SAME loop from the same pure selector
+  // (`flagged === true` ⟺ `drillReason !== null`, first matching clause of
+  // INV-5's order), so the served flag and the served reason can never
+  // disagree.
+  const flaggedSet = new Set(flagged);
+  for (const d of dispatches) {
+    d.flagged = flaggedSet.has(d);
+    d.drillReason = d.flagged ? drillReasonOf(d) : null;
+  }
   // Materialise the undrillable signal onto the served dispatches (issues
   // #1184 / #3738). A dispatch with NO terminal record attributable to the run
   // — neither a resolved `status` NOR a non-empty `cycleId` transcript handle —

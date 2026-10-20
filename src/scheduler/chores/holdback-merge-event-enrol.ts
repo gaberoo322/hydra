@@ -125,7 +125,7 @@ interface RawClosedPr {
  * (never throws) — the caller treats `null` as "could not scan this tick".
  * Exported (test-only) so a wired test can drive it through a fake `gh`.
  */
-export async function listMergedPrsViaGh(): Promise<MergedPrCandidate[] | null> {
+async function listMergedPrsViaGh(): Promise<MergedPrCandidate[] | null> {
   const repo = resolveGithubRepo();
   if (!repo) return null;
   const res = await ghJson<RawClosedPr[]>([
@@ -156,7 +156,7 @@ interface RawPrFile {
  * Returns `null` on any failure (never throws). Exported (test-only) so a
  * wired test can drive it through a fake `gh` and count invocations.
  */
-export async function fetchPrFilesViaGh(prNumber: number): Promise<string[] | null> {
+async function fetchPrFilesViaGh(prNumber: number): Promise<string[] | null> {
   const repo = resolveGithubRepo();
   if (!repo) return null;
   const res = await ghJson<RawPrFile[]>(["api", `repos/${repo}/pulls/${prNumber}/files`, "--paginate"]);

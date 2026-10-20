@@ -4,8 +4,12 @@
  *
  * Replaces the bash pre-authoring sequence in `scripts/glm/drainer-loop.sh`'s
  * `main()`: operator pause → daily PR cap → z.ai quota block → heartbeat.
- * First match wins, in that order, exactly as bash exited:
+ * First match wins, in that order, exactly as bash exited — preceded by the
+ * operator off switch:
  *
+ *   - `disabled`      — the lane's off-switch sentinel file exists
+ *                       (`./disabled.ts`). Checked first and alone: no pause,
+ *                       cap or quota read is made.
  *   - `paused`        — the operator pause flag (Redis, `getAutopilotPaused()`).
  *                       The kill-switch honours ONLY the operator pause, never
  *                       Anthropic usage reasons (ADR-0032 Decision 6).
@@ -52,11 +56,13 @@ import { loadDrainerConfig, type DrainerConfig } from "./drainer-config.ts";
 /** A pause read that has not settled by then is treated as paused (curl `--max-time 10`). */
 export const PAUSE_READ_TIMEOUT_MS = 10_000;
 
-export type GateReason = "paused" | "cap-exhausted" | "quota-blocked";
+type GateReason = "disabled" | "paused" | "cap-exhausted" | "quota-blocked";
 
 export type GateVerdict = { able: true } | { able: false; reason: GateReason };
 
 export interface GateInput {
+  /** The off-switch sentinel exists. Optional: absent reads as lane on. */
+  disabled?: boolean;
   paused: boolean;
   capCount: number;
   dailyCap: number;
@@ -79,8 +85,9 @@ export type GateLine =
 // Pure rules
 // ---------------------------------------------------------------------------
 
-/** The gate verdict. Pure. First match wins: paused → cap → quota block. */
+/** The gate verdict. Pure. First match wins: disabled → paused → cap → quota block. */
 export function decideGate(input: GateInput): GateVerdict {
+  if (input.disabled === true) return { able: false, reason: "disabled" };
   if (input.paused) return { able: false, reason: "paused" };
   if (input.capCount >= input.dailyCap) return { able: false, reason: "cap-exhausted" };
   if (input.quotaBlockedUntil !== null && input.quotaBlockedUntil > input.now) {
@@ -189,6 +196,12 @@ async function gateInner(deps: GateDeps): Promise<GateLine> {
   const { config } = deps;
   const nowMs = deps.now();
   const nowSec = Math.floor(nowMs / 1000);
+
+  // The off switch short-circuits every other read: a disabled lane makes no
+  // Redis or state-file call and writes no heartbeat.
+  if (config.disabledFile && deps.readFileIfExists(config.disabledFile) !== null) {
+    return { able: false, reason: "disabled", detail: config.disabledFile };
+  }
 
   const pause = await readPause(deps);
   const capCount = parseCapCount(deps.readFileIfExists(capFilePath(config.capDir, nowMs)));
