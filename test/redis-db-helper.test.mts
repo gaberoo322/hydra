@@ -870,8 +870,8 @@ describe("no test file hardcodes a launcher-pool Redis DB index (issue #5062)", 
     for (const line of benign) {
       assert.equal(patterns.some((re) => re.test(line)), false, `must not flag: ${line}`);
     }
-    assert.equal(patterns.some((re) => re.test('HYDRA_REDIS_DB: "9",')), true, "must flag a pool env literal");
-    assert.equal(patterns.some((re) => re.test('["-n", "9", "SET"]')), true, "must flag a pool argv literal");
+    assert.equal(patterns.some((re) => re.test(`HYDRA_REDIS_DB: "${9}",`)), true, "must flag a pool env literal");
+    assert.equal(patterns.some((re) => re.test(`["-n", "${9}", "SET"]`)), true, "must flag a pool argv literal");
   });
 
   test("no test file passes a literal ALLOWED_DB_INDEXES index as a live Redis selector", async () => {
