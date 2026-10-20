@@ -19,11 +19,11 @@ import { join, resolve } from "node:path";
 
 import {
   collectSupersedes,
-  headingsOf,
-  bodyOf,
   readInstalledPluginSha,
   check,
 } from "../scripts/ci/vendor-drift-check.ts";
+
+import { collectHeadings, normHeading, parseFrontmatter } from "../src/skills/playbook.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 
@@ -196,12 +196,12 @@ describe("vendor-drift-check — drift findings (issue #3994)", () => {
 });
 
 describe("vendor-drift-check — helpers (issue #3994)", () => {
-  test("headingsOf strips hashes and ignores non-heading lines", () => {
-    assert.deepEqual(headingsOf("# A\ntext\n### B c\n#notaheading\n"), ["A", "B c"]);
+  test("core collectHeadings/normHeading strip hashes and ignores non-heading lines", () => {
+    assert.deepEqual(collectHeadings("# A\ntext\n### B c\n#notaheading\n").map((h) => normHeading(h.text)), ["A", "B c"]);
   });
 
-  test("bodyOf strips frontmatter and returns null when it is malformed", () => {
-    assert.equal(bodyOf("---\nname: x\n---\nbody\n"), "body\n");
-    assert.equal(bodyOf("no frontmatter here"), null);
+  test("core parseFrontmatter body strips frontmatter and returns null when it is malformed", () => {
+    assert.equal(parseFrontmatter("---\nname: x\n---\nbody\n")?.body, "body\n");
+    assert.equal(parseFrontmatter("no frontmatter here")?.body ?? null, null);
   });
 });

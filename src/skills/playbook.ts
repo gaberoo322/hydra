@@ -251,8 +251,32 @@ export function resolveIncludes(body: string, ctx: IncludeContext): string | Pla
 
 // ---- compose_base ----------------------------------------------------------
 
-function normHeading(s: string): string {
+export function normHeading(s: string): string {
   return pyStrip(s.replace(/^#+/, ""));
+}
+
+/** Markdown headings of a body, in order (`text` keeps its leading hashes). */
+export function collectHeadings(body: string): Array<{ idx: number; depth: number; text: string }> {
+  const headings: Array<{ idx: number; depth: number; text: string }> = [];
+  body.split("\n").forEach((ln, idx) => {
+    const hm = HEADING_RE.exec(ln);
+    if (hm) headings.push({ idx, depth: hm[1].length, text: pyStrip(ln) });
+  });
+  return headings;
+}
+
+/** Normalise a frontmatter `supersedes` value to its list of heading strings. */
+export function supersedesOf(fm: Frontmatter): string[] {
+  const declared = fm.get("supersedes");
+  if (typeof declared === "string") return pyStrip(declared) !== "" ? [declared] : [];
+  if (Array.isArray(declared)) return declared;
+  return [];
+}
+
+/** A frontmatter field as it lands in the rendered SKILL.md ("" when absent). */
+export function frontmatterText(fm: Frontmatter, key: string): string {
+  const v = fm.get(key);
+  return v === undefined ? "" : stripTrailingNewlines(pyStr(v));
 }
 
 /**
@@ -289,21 +313,13 @@ export function composeBase(
   }
   let baseBody = bm[2];
 
-  const declared = fm.get("supersedes");
-  let supersedes: string[];
-  if (typeof declared === "string") supersedes = pyStrip(declared) !== "" ? [declared] : [];
-  else if (Array.isArray(declared)) supersedes = declared;
-  else supersedes = [];
+  const supersedes = supersedesOf(fm);
 
   if (supersedes.length > 0) {
     const baseLines = baseBody.split("\n");
     for (const target of supersedes) {
       const want = normHeading(target);
-      const headings: Array<{ idx: number; depth: number; text: string }> = [];
-      baseLines.forEach((ln, idx) => {
-        const hm = HEADING_RE.exec(ln);
-        if (hm) headings.push({ idx, depth: hm[1].length, text: pyStrip(ln) });
-      });
+      const headings = collectHeadings(baseBody);
       const matches = headings.filter((h) => normHeading(h.text) === want);
       if (matches.length === 0) {
         return new PlaybookFailure(
@@ -370,10 +386,7 @@ export interface RenderParts {
 /** Project frontmatter + body into the Claude SKILL.md string (or a skip). */
 export function renderSkillMd(parts: RenderParts): RenderResult {
   const { fm, compose } = parts;
-  const field = (key: string): string => {
-    const v = fm.get(key);
-    return v === undefined ? "" : stripTrailingNewlines(pyStr(v));
-  };
+  const field = (key: string): string => frontmatterText(fm, key);
   const name = field("name");
   const desc = field("description");
   if (name === "" || desc === "") {
