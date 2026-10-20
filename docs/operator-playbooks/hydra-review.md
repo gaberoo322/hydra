@@ -190,6 +190,42 @@ No path here re-bases or merges automatically; a merge fires only when the
 operator explicitly picks **Enable auto-merge** or **Merge now** for that row. Do
 not yield to the later steps until every stalled PR is resolved or skipped.
 
+**Handing an Orchestrator stalled PR back to an autonomous lane clears the PR's
+stranding labels (issue #5058).** An Orchestrator (`gaberoo322/hydra`) row whose
+resolution returns the PR to the autopilot must clear `ready-for-human` AND
+`conflict-fix-attempted` from the **PR itself**, not only relabel the linked
+issue. That covers three resolutions: **fix forward**, the slot-1 escape hatch
+**"Fix and push"**, or routing the linked issue to `needs-dev-resume` /
+`needs-qa`. Both durable resume picks in the Turn Snapshot (`orch_dev_resume_pick`,
+and the #4807 dirty-PR conflict fix-forward) skip a PR that still carries
+`ready-for-human`. The conflict lane also never re-attempts a PR marked
+`conflict-fix-attempted`. So an issue-only relabel strands the PR forever: PRs #4810
+and #4818 sat 8+ days after "fix forward" decisions this way. Clearing both labels
+gives the conflict lane a fresh attempt on a still-DIRTY PR, and the resume pick
+then takes it once it is clean. A QA round-cap escalation (#4735) that the operator
+leaves with the operator is NOT a hand-back, so leave its labels alone. Run from
+`~/hydra`, substituting the row's values. This mirrors the #4739 Target
+fix-forward recipe in §4:
+
+```bash
+# Orchestrator stalled-PR row handed back to an autonomous lane (issue #5058).
+RREPO=gaberoo322/hydra
+PR=<pr>          # the stalled PR
+ISSUE=<issue>    # its single closing issue
+LANE=needs-dev-resume   # or needs-qa — the lane the operator's resolution names
+# 1. Clear the PR's stranding labels. Name in the URL path — the `-f name=` form
+#    wipes ALL labels. A 404 means the label is already absent (tolerated, noted).
+for L in ready-for-human conflict-fix-attempted; do
+  gh api -X DELETE "repos/$RREPO/issues/$PR/labels/$L" --silent 2>/dev/null \
+    || echo "note: '$L' was not on PR #$PR (404 tolerated)"
+done
+# 2. Route the linked issue to the chosen lane.
+gh issue edit "$ISSUE" --repo "$RREPO" --remove-label ready-for-human --add-label "$LANE"
+```
+
+The stalled-PR option labels in §4 are unchanged. Only the resolution side effect
+above is new.
+
 **QA-Override recipe (issue #4738).** Run from `~/hydra`. Paste the operator's
 reason VERBATIM between the quoted-heredoc markers. The quoted delimiter means
 no quote, `$(…)` or backtick in it is ever expanded, and the reason is never
@@ -434,7 +470,10 @@ PR from `target_ready_for_agent`, so `dev_target` would never dispatch it.
 label on the Target repo (hydra-target-qa's FAIL routing never stamps it —
 the FAIL goes to the operator here first). The slot labels 2–4 and the
 registry-asserted cells are unchanged; only the resolution semantics above
-are new.
+are new. The Orchestrator analogue is the PR-side stranding-label clear in §0.9
+(issue #5058). An Orchestrator stalled PR handed back to a lane drops
+`ready-for-human` and `conflict-fix-attempted` from the PR itself, in addition to
+the issue relabel.
 
 ### 5. Wrap-up
 

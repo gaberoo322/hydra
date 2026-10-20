@@ -345,13 +345,14 @@ completed dispatch's live agent handle is not something `decide.py` can act
 on), but reusing the branch avoids re-paying the tokens already spent on the
 committed portion of the prior attempt.
 
-> **CONTEXT POINTER:** how a resume gets queued and survives a relaunch — the reap-side no-PR-stall backstop (issue #3866) and durable dev resume (issue #4518), including the label-derived no-PR pin `orch_dev_resume_nopr_anchor` and its reap-time cap (issue #4808) — lives in `hydra-autopilot-dispatch-reference.md` § dev_orch resume internals (sibling of this SKILL.md). One rule from it applies at dispatch time: a `prompt_args.forward_fix_pr` action for a NON-GLM PR (the `orch_dev_resume_pick` pin, issue #4518) carries the forward-fix contract below verbatim, minus its `glm-authored` clause and its attempt cap, which stay #4460-only.
+> **CONTEXT POINTER:** how a resume gets queued and survives a relaunch — the reap-side no-PR-stall backstop (issue #3866) and durable dev resume (issue #4518), including the label-derived no-PR pin `orch_dev_resume_nopr_anchor` and its reap-time cap (issue #4808) — lives in `hydra-autopilot-dispatch-reference.md` § dev_orch resume internals (sibling of this SKILL.md). One rule from it applies at dispatch time: every `prompt_args.forward_fix_pr` action from the `orch_dev_resume_pick` pin — ANY provenance since issue #5058 — carries the forward-fix contract below verbatim; the attempt cap applies only to its red-CI arm.
 
-**GLM red-PR forward-fix dispatch contract (issue #4460, INV-10).** When the
+**Red-PR forward-fix dispatch contract (issues #4460, #5058, INV-10).** When the
 `dev_orch` selector's dispatch action carries
 `prompt_args.forward_fix_pr = <pr>` (alongside `anchor`/`resume`/`resume_branch`,
-emitted for a GLM-authored PR stranded red on one required check — see the
-`orch_glm_red_forward_fix` signal, produced by the Turn Snapshot `pr-gate` collector), the dispatch
+emitted for an open PR of ANY provenance whose closing issue is `needs-dev-resume`
+or that is stranded red on a required check — see the provenance-agnostic
+`orch_dev_resume_pick` signal, produced by the Turn Snapshot `pr-gate` collector), the dispatch
 prompt MUST carry this contract verbatim. The target is NOT a fresh
 implementation: a PR already exists and the work is to make its required
 checks pass AND resolve the blocking findings of its latest QA FAIL.
@@ -360,8 +361,8 @@ checks pass AND resolve the blocking findings of its latest QA FAIL.
    `git fetch origin <resume_branch> && git reset --hard FETCH_HEAD` — the
    forward-fix continues the PR's exact head, never a rebase or a new branch.
    NEVER `gh pr create`: the PR exists; a second PR duplicates the anchor.
-   NEVER remove the `glm-authored` label — it is the provenance key the whole
-   #4460 predicate (and #4048's lane) keys on.
+   NEVER remove the `glm-authored` label (or any provenance label) — provenance
+   is display / telemetry the retro surfaces read (no selector gates on it since #5058).
 2. **Read the failure before fixing it.** For a CI-required-check failure,
    `gh run view <run-id> --log-failed` for the failing run (find the run id via
    `gh pr checks <pr> --json` or the PR's checks UI). For a QA-FAIL bounce
@@ -392,10 +393,12 @@ checks pass AND resolve the blocking findings of its latest QA FAIL.
    anchor issue by hand — reap's needs-qa promotion (INV-9) advances it when
    the closing PR is confirmed.
 
-The cap: `state.glm_red_forward_fix_attempts` allows
-`GLM_RED_FORWARD_FIX_CAP = 2` pinned dispatches per PR (in-run state). At cap,
-no dispatch fires and `_rule_pr_gate` emits
-`surface-pr {cause: glm-red-forward-fix-exhausted}` — the operator owns it.
+The cap (red-CI arm only): `state.red_forward_fix_attempts` allows
+`RED_FORWARD_FIX_CAP = 2` pinned dispatches per PR (in-run state) for a pick the
+Turn Snapshot lists in `orch_prs_red_resume` (red on a required check, closing
+issue NOT `needs-dev-resume`). At cap, no dispatch fires and `_rule_pr_gate` emits
+`surface-pr {cause: red-forward-fix-exhausted}` — the operator owns it. The
+`needs-dev-resume` arm is uncapped: the label is its idempotency key.
 
 **Conflict fix-forward delta (issue #4807).** When `prompt_args.conflict_fix` is true (the `orch_dirty_forward_fix` pin), first apply `conflict-fix-attempted` to the PR via `gh api repos/gaberoo322/hydra/issues/<pr>/labels -f 'labels[]=conflict-fix-attempted'` (never `gh pr edit`), then carry the contract above with step 1's reset kept and: merge `origin/master` into the head (NEVER rebase, force-push or `gh pr create`); keep both sides' intent; regenerate `npm run docs:inventories` and union `test/fixtures/suite-count-baseline.json` keys then `--update-baseline`; run targeted tests + `typecheck` + `typecheck:test`; push to the SAME branch; do NOT address review findings. An unresolvable conflict ends with no push and one PR comment naming the paths; never remove the marker.
 

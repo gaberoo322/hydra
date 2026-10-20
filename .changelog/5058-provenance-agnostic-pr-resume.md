@@ -1,0 +1,1 @@
+- fix: the autopilot resume pick is provenance-agnostic (the GLM-only red-PR forward-fix is folded into `orch_dev_resume_pick`, red-CI arm still capped at 2), and /hydra-review clears `ready-for-human` + `conflict-fix-attempted` from an Orchestrator PR it hands back to a lane, so fix-forward PRs no longer strand (#5058)

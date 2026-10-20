@@ -279,32 +279,43 @@ def signal_dark_past_floor(
     return (now - last_i) >= floor_sec
 
 
-# Cap on pinned glm-red forward-fix dispatches per PR (issue #4460 INV-6/8):
-# a stranded GLM-authored PR red on one required check gets at most two
-# autopilot-funded attempts before the operator owns it via `surface-pr`.
-# In-run state (`state.glm_red_forward_fix_attempts`), NOT persisted to the
+# Cap on pinned RED-CI forward-fix dispatches per PR (issue #5058, ex-#4460
+# INV-6/8, now provenance-agnostic): a PR the unified resume pick names ONLY
+# because a required check is red (its closing issue is NOT `needs-dev-resume`
+# — the Turn Snapshot's `orch_prs_red_resume` set) gets at most two
+# autopilot-funded attempts before the operator owns it via `surface-pr`. The
+# `needs-dev-resume` arm stays uncapped (#4518: the label is its idempotency
+# key). In-run state (`state.red_forward_fix_attempts`), NOT persisted to the
 # board — a new run re-arms the cap exactly like every other in-run tracker.
-GLM_RED_FORWARD_FIX_CAP = 2
+RED_FORWARD_FIX_CAP = 2
 
 
-def _glm_red_forward_fix_signal(
+def _dev_resume_pick_signal(
     state: dict, events: list[dict]
 ) -> tuple[int, int, str] | None:
-    """Parse the `orch_glm_red_forward_fix` signal (issue #4460, INV-2/6).
+    """Parse the `orch_dev_resume_pick` signal (issues #4518, #5058).
 
     The Turn Snapshot carries it as an `{issue, pr, branch}` pin for the
-    lowest-numbered qualifying GLM PR, or no pin (no qualifier,
-    or the fail-closed INV-5 path where a supporting read failed). Events
-    take precedence over state, mirroring `_pr_gate_numbers` /
-    `_signal_present` — the same turn-local override seam.
-
-    Absent / "none" / malformed → None. Malformed NEVER raises: a bad signal
-    means "no dispatch this turn" (fail-closed), never a crash — the same
-    #4130 discipline as `_orch_anchor_signal`'s non-string collapse.
+    lowest-numbered open, non-draft, not-`ready-for-human`, quiescent PR — of
+    ANY provenance (GLM, Claude, a future worker lane) — whose single closing
+    issue carries `needs-dev-resume` OR that is red on a required check, or no
+    pin. The label + the open-PR ledger are the source of truth;
+    `state.dev_resume_pending` is only a cache that a Pace Gate relaunch or a
+    quota-capped run can lose. Events take precedence over state (the
+    `_signal_present` seam). Absent / `none` / malformed fails CLOSED to no
+    pin — a bad signal means "no dispatch this turn", never a crash (#4130).
 
     Pure: reads the passed-in dicts only, no I/O (ADR-0007).
     """
-    return _issue_pr_branch_signal(state, events, "orch_glm_red_forward_fix")
+    return _issue_pr_branch_signal(state, events, "orch_dev_resume_pick")
+
+
+def _red_resume_prs(state: dict, events: list[dict]) -> set[int]:
+    """The `orch_prs_red_resume` set (issue #5058): resume-pick candidates that
+    qualified ONLY through the red-CI arm — the scope of RED_FORWARD_FIX_CAP.
+    Absent / malformed -> empty (fail toward the uncapped label arm, never a
+    phantom exhausted cap). Pure."""
+    return set(ts.pr_numbers(state, events, "orch_prs_red_resume"))
 
 
 def _target_dev_resume_pick_signal(
@@ -334,8 +345,8 @@ def _issue_pr_branch_signal(
     """Read an `{issue, pr, branch}` pinned-PR signal by name.
 
     The shared shape of the Turn Snapshot's pre-resolved dev pins:
-    `orch_glm_red_forward_fix` (#4460), `orch_dev_resume_pick` (#4518), and
-    `target_dev_resume_pick` (#4739). Events take precedence over state (the
+    `orch_dev_resume_pick` (#4518/#5058), `orch_dirty_forward_fix` (#4807),
+    and `target_dev_resume_pick` (#4739). Events take precedence over state (the
     `_signal_present` seam). Absent / "none" / malformed -> None; NEVER
     raises. The Turn Snapshot accessor owns the shapes (the snapshot's
     `{issue, pr, branch}` object, and the packed `issue-<N>:<pr>:<branch>`
@@ -344,18 +355,18 @@ def _issue_pr_branch_signal(
     return ts.pin(state, events, name)
 
 
-def _glm_red_attempt_count(state: dict, pr_number: int) -> int:
-    """Forward-fix attempts already spent on one GLM red PR (issue #4460).
+def _red_forward_fix_attempt_count(state: dict, pr_number: int) -> int:
+    """Red-CI forward-fix attempts already spent on one PR (issue #5058).
 
-    `state.glm_red_forward_fix_attempts` maps the PR number (string key —
-    JSON round-trips collapse int keys) to the count of pinned dispatches
-    the dev_orch selector has already burned on it. Missing map, missing
-    key, or a non-int value → 0 (a malformed tracker must never strand a PR
-    by masquerading as an exhausted cap).
+    `state.red_forward_fix_attempts` maps the PR number (string key — JSON
+    round-trips collapse int keys) to the count of pinned red-arm dispatches
+    the dev_orch selector has already burned on it. Missing map, missing key,
+    or a non-int value → 0 (a malformed tracker must never strand a PR by
+    masquerading as an exhausted cap).
 
     Pure: reads the passed-in dict only.
     """
-    tracker = state.get("glm_red_forward_fix_attempts")
+    tracker = state.get("red_forward_fix_attempts")
     if not isinstance(tracker, dict):
         return 0
     try:

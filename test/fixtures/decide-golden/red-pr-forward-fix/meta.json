@@ -1,0 +1,5 @@
+{
+ "now": 1783063600,
+ "capturedAt": "2026-09-14",
+ "note": "Synthesized #4460 golden, re-pointed by #5058 (modeled on the real turn-1 captured shape): a PR red on a required check, named by the provenance-agnostic orch_dev_resume_pick and listed in orch_prs_red_resume, with orch_work_available absent \u2014 the pick must fire WITHOUT the pool signal, attempt 1/2, tracker bump persisted."
+}
