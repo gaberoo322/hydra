@@ -7,6 +7,9 @@
 # - Existing skills outside the managed set are left alone.
 # - Codex output is retired (ADR-0041 Decision 4): nothing is written under any
 #   Codex dir. A one-time, banner-guarded sweep removes the stale generated ones.
+# - Rendering is done by the pure TypeScript core (src/skills/, ADR-0041): this
+#   script calls `src/skills/cli.ts` once, then applies the whole-corpus write
+#   plan (tmp-file + mv). Any grammar error aborts BEFORE any write (issue #4720).
 #
 # compose_base composition (issue #3420, ADR-0030 Decision 4 / Option C):
 #   A playbook may declare `compose_base: _vendor/<name>.md`. When it does, the
@@ -55,7 +58,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-command -v python3 >/dev/null || { echo "sync-skills: python3 required" >&2; exit 127; }
+command -v node >/dev/null || { echo "sync-skills: node required" >&2; exit 127; }
+command -v jq >/dev/null || { echo "sync-skills: jq required" >&2; exit 127; }
 
 # ---- Default-mirror content guard (issue #3828) ----------------------------
 # $HOME/.claude/skills (the UNOVERRIDDEN default) is
@@ -115,460 +119,98 @@ if [ "$GUARD_DEFAULT_PATH" = 1 ] && [ "$FORCE" != 1 ]; then
   fi
 fi
 
-mkdir -p "$CLAUDE_DIR"
+# ---- Core plan (ADR-0041 Decisions 2 and 3, issue #4720) -------------------
+# Parsing, @include/compose resolution, frontmatter projection and reference
+# files all live in the pure TypeScript core (src/skills/plan.ts). The CLI
+# prints the WHOLE-corpus write plan as one JSON document `{writes, skips}`
+# and performs no writes; bash only applies it. A fail-loud grammar error in
+# ANY playbook exits non-zero here, BEFORE anything below touches the
+# filesystem -- PLANNING is all-or-nothing (no half-regenerated skill set from
+# a grammar error). The apply loop below is per-file tmp+mv and counts records.
+PLAN_FILE="$(mktemp "${TMPDIR:-/tmp}/sync-skills-plan.XXXXXX")"
+trap 'rm -f "$PLAN_FILE"' EXIT
+
+if ! node --experimental-strip-types "$REPO_ROOT/src/skills/cli.ts" --playbooks-dir "$PLAYBOOKS" > "$PLAN_FILE"; then
+  echo "sync-skills: core plan failed — no skills written" >&2
+  exit 1
+fi
+
+# Strict shape check: typed fields, and every write path is relative with no
+# `..` segment (a malformed plan must never escape $CLAUDE_DIR). A U+0000 in a
+# path or content is rejected too: the apply stream below is NUL-delimited, so
+# an embedded NUL would split one record into two and truncate the file.
+if ! jq -e '
+  (.writes|type=="array") and (.skips|type=="array")
+  and all(.writes[]; (.path|type=="string") and (.content|type=="string")
+    and (.path|length>0) and (.path|startswith("/")|not)
+    and ((.path|split("/")|index(".."))==null)
+    and (any(.path|explode[]; .==0)|not)
+    and (any(.content|explode[]; .==0)|not))
+  and all(.skips[]; (.playbook|type=="string") and (.reason|type=="string"))
+' "$PLAN_FILE" >/dev/null; then
+  echo "sync-skills: core plan has an unexpected shape — no skills written" >&2
+  exit 1
+fi
 
 shopt -s nullglob
 PLAYBOOK_FILES=("$PLAYBOOKS"/*.md)
 shopt -u nullglob
 
-# Skip the README and any file that doesn't have frontmatter.
 generated_count=0
 errors=0
 
-for pb in "${PLAYBOOK_FILES[@]}"; do
-  base=$(basename "$pb" .md)
-  [ "$base" = "README" ] && continue
+# Materialise the jq streams to files first so a jq failure is visible to
+# `set -e` (a process substitution's exit status is never observed).
+SKIPS_FILE="$PLAN_FILE.skips"
+WRITES_FILE="$PLAN_FILE.writes"
+trap 'rm -f "$PLAN_FILE" "$SKIPS_FILE" "$WRITES_FILE"' EXIT
+if ! jq -r '.skips[] | [.playbook, .reason] | @tsv' "$PLAN_FILE" > "$SKIPS_FILE"; then
+  echo "sync-skills: could not decode skips from the plan — no skills written" >&2
+  exit 1
+fi
+if ! jq -j '.writes[] | .path, "\u0000", .content, "\u0000"' "$PLAN_FILE" > "$WRITES_FILE"; then
+  echo "sync-skills: could not decode writes from the plan — no skills written" >&2
+  exit 1
+fi
+expected_writes="$(jq '.writes|length' "$PLAN_FILE")"
+applied_writes=0
 
-  # Parse frontmatter + body via Python; emit JSON. The same Python pass also
-  # resolves `@include _fragments/<name>.md` directives in the body (issue
-  # #2552): a line matching `^@include\s+(\S+)$` is replaced verbatim by the
-  # referenced fragment's content, with a flat `{{SKILL_NAME}}` substitution so
-  # a single shared fragment can carry a per-skill log-tag prefix. Includes are
-  # non-recursive (one level) and FAIL LOUD — a missing/typo'd fragment makes
-  # this pass exit non-zero so `set -euo pipefail` aborts the sync (and, via the
-  # issue #433 deploy contract, the deploy) before a skill ships a literal
-  # `@include ...` line. Fragments live under docs/operator-playbooks/_fragments/
-  # — a subdirectory the non-recursive PLAYBOOK_FILES glob never matches, so a
-  # fragment is never itself emitted as a SKILL.md.
-  parsed=$(python3 - "$pb" "$PLAYBOOKS" <<'PY'
-import sys, json, re, os
-path = sys.argv[1]
-playbooks_dir = sys.argv[2]
-with open(path, "r", encoding="utf-8") as f:
-    text = f.read()
-m = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.DOTALL)
-if not m:
-    print(json.dumps({"error": "no frontmatter"}))
-    sys.exit(0)
-fm_raw, body = m.group(1), m.group(2)
-fm = {}
-fm_lines = fm_raw.splitlines()
-fm_i = 0
-while fm_i < len(fm_lines):
-    line = fm_lines[fm_i].rstrip()
-    fm_i += 1
-    if not line or line.startswith("#"):
-        continue
-    if ":" not in line:
-        continue
-    k, _, v = line.partition(":")
-    k = k.strip()
-    v = v.strip()
-    if v == "":
-        # YAML block sequence — `key:` followed by indented `- item` lines
-        # (issue #3990). Needed for `supersedes:`, whose entries are markdown
-        # headings that routinely contain a colon or a comma; the inline
-        # `[a, b]` form splits on commas and would corrupt them. Only consumed
-        # when at least one `- ` item actually follows, so an empty-valued key
-        # with no items still falls through to the scalar path below and stays
-        # byte-identical to the pre-#3990 behaviour.
-        items = []
-        while fm_i < len(fm_lines):
-            item = fm_lines[fm_i].strip()
-            if not item.startswith("- "):
-                break
-            item = item[2:].strip()
-            if (item.startswith('"') and item.endswith('"')) or (item.startswith("'") and item.endswith("'")):
-                item = item[1:-1]
-            items.append(item)
-            fm_i += 1
-        if items:
-            fm[k] = items
-            continue
-    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
-        v = v[1:-1]
-    if v.startswith("[") and v.endswith("]"):
-        # naive list parse
-        inner = v[1:-1].strip()
-        v = [x.strip().strip('"').strip("'") for x in inner.split(",") if x.strip()]
-    elif v.lower() in ("true","false"):
-        v = (v.lower() == "true")
-    fm[k] = v
+# A playbook whose frontmatter fails to parse is SKIPPED, not fatal (issue
+# #433 deploy contract): one `skip ...` line, `errors` incremented, exit 0.
+while IFS=$'\t' read -r skip_playbook skip_reason; do
+  case "$skip_reason" in
+    no-frontmatter) echo "skip $skip_playbook — no valid frontmatter" >&2 ;;
+    missing-name-or-description) echo "skip $skip_playbook — missing name or description" >&2 ;;
+    *) echo "skip $skip_playbook — $skip_reason" >&2 ;;
+  esac
+  errors=$((errors+1))
+done < "$SKIPS_FILE"
 
-# Resolve @include directives in the body. The directive must be the whole
-# line (leading/trailing whitespace allowed). `{{SKILL_NAME}}` in the fragment
-# body is substituted with the skill's frontmatter name so a shared fragment
-# can carry a per-skill prefix (the [hydra-dev] vs [hydra-target-build] log
-# tag). Fragment paths are relative to docs/operator-playbooks/.
-skill_name = fm.get("name", "")
-include_re = re.compile(r"^[ \t]*@include[ \t]+(\S+)[ \t]*$")
+if [ "$DRY_RUN" != 1 ]; then
+  mkdir -p "$CLAUDE_DIR"
+fi
 
-def resolve_line(line):
-    mm = include_re.match(line)
-    if not mm:
-        return line
-    frag_rel = mm.group(1)
-    frag_path = os.path.normpath(os.path.join(playbooks_dir, frag_rel))
-    # Contain the include within the playbooks dir — refuse path-escapes.
-    if not frag_path.startswith(os.path.normpath(playbooks_dir) + os.sep):
-        raise SystemExit(
-            "sync-skills: @include path escapes operator-playbooks/: "
-            + frag_rel + " (in " + os.path.basename(path) + ")"
-        )
-    if not os.path.isfile(frag_path):
-        # FAIL LOUD (issue #2552 invariant): an unresolved include must abort
-        # the sync, never silently emit a literal `@include` line.
-        raise SystemExit(
-            "sync-skills: unresolved @include " + frag_rel
-            + " (in " + os.path.basename(path) + "): no such fragment at "
-            + frag_path
-        )
-    with open(frag_path, "r", encoding="utf-8") as ff:
-        frag = ff.read()
-    # Strip a single trailing newline so the fragment slots in cleanly where
-    # the directive line was, regardless of the fragment file's final newline.
-    if frag.endswith("\n"):
-        frag = frag[:-1]
-    frag = frag.replace("{{SKILL_NAME}}", skill_name)
-    # Guard against a fragment that itself contains an @include (non-recursive
-    # by design — ADR-0014 simplicity). FAIL LOUD rather than silently leave it.
-    for fl in frag.splitlines():
-        if include_re.match(fl):
-            raise SystemExit(
-                "sync-skills: nested @include in fragment " + frag_rel
-                + " — includes are non-recursive (one level)"
-            )
-    return frag
-
-resolved = "\n".join(resolve_line(l) for l in body.split("\n"))
-
-# Resolve a `compose_base:` directive (issue #3420, ADR-0030 Decision 4 /
-# Option C — the lineage-home compose step). When a playbook declares
-#   compose_base: _vendor/<name>.md
-# the generated Claude SKILL.md body is the VENDORED upstream Pocock base body
-# followed by this playbook's own body as a thin Hydra AFK overlay. The vendored
-# base lives under docs/operator-playbooks/_vendor/ — git-tracked (no #666
-# off-repo clobber), gate-eligible, never itself emitted (the non-recursive
-# *.md glob skips the subdirectory, exactly like _fragments/).
-#
-# HARD INVARIANT (from #3386, carried into the epic): every dispatched upstream
-# Pocock skill ships `disable-model-invocation: true`, which HARD-ERRORS under
-# Skill-tool dispatch. The compose step MUST strip that key so the composed AFK
-# output never carries it — we surface `compose: true` so the shell forces the
-# strip regardless of what the OVERLAY playbook's own frontmatter declares.
-compose_base = fm.get("compose_base")
-compose = False
-
-# `supersedes:` is meaningless without a base to supersede — a playbook that
-# declares it alone has almost certainly lost its compose_base in an edit, and
-# silently ignoring the key would leave the author believing an instruction was
-# excised when nothing was. FAIL LOUD (issue #3990).
-_supersedes_declared = fm.get("supersedes")
-if _supersedes_declared and not compose_base:
-    raise SystemExit(
-        "sync-skills: `supersedes:` without `compose_base:` in "
-        + os.path.basename(path)
-        + " — there is no vendored base to excise sections from."
-    )
-
-if compose_base:
-    compose = True
-    base_path = os.path.normpath(os.path.join(playbooks_dir, compose_base))
-    # Contain the base within the playbooks dir — refuse path-escapes.
-    if not base_path.startswith(os.path.normpath(playbooks_dir) + os.sep):
-        raise SystemExit(
-            "sync-skills: compose_base path escapes operator-playbooks/: "
-            + compose_base + " (in " + os.path.basename(path) + ")"
-        )
-    if not os.path.isfile(base_path):
-        # FAIL LOUD (mirrors the @include / reference_files contract): a missing
-        # vendored base must abort the sync, never silently emit the overlay
-        # alone (which would drop the whole upstream skill body).
-        raise SystemExit(
-            "sync-skills: unresolved compose_base " + compose_base
-            + " (in " + os.path.basename(path) + "): no such vendored base at "
-            + base_path
-        )
-    with open(base_path, "r", encoding="utf-8") as bf:
-        base_text = bf.read()
-    bm = re.match(r"^---\n(.*?)\n---\n(.*)$", base_text, re.DOTALL)
-    if not bm:
-        raise SystemExit(
-            "sync-skills: compose_base " + compose_base + " has no frontmatter "
-            + "(in " + os.path.basename(path) + "): a vendored base must be a "
-            + "well-formed upstream SKILL.md"
-        )
-    base_body = bm.group(2)
-
-    # ---- Structural supersession (issue #3990) -------------------------------
-    # An overlay may declare, alongside its compose_base:
-    #
-    #   supersedes:
-    #     - "## Heading in the vendored base"
-    #
-    # and this pass EXCISES each named section from the base body before the
-    # compose — from the heading line through to the next heading of equal or
-    # shallower depth. The vendored base FILE is never modified; the excision is
-    # visible as a reviewable diff in the generated mirror, and leaves an
-    # auditable marker naming the overlay that removed it.
-    #
-    # Why excision rather than ordering. The `<!-- compose-seam-supersede -->`
-    # marker below (issue #3818) only HOISTS overlay prose ahead of the base.
-    # Hoisting reorders; it does not remove — both instructions still ship, and a
-    # model reading top-down can still act on the base's copy after reading the
-    # override. #3880 is what that looks like in production: the overlay's
-    # blocking-dispatch mandate was hoisted and the reviewers still fanned out
-    # non-blocking, so a PR passed review with no verdict posted. Excision is the
-    # only mechanism that guarantees exactly ONE live instruction exists in the
-    # emitted bytes.
-    #
-    # Matching is on the heading TEXT, normalised for leading #'s and surrounding
-    # whitespace, so a declaration may include the hashes or omit them. Zero
-    # matches and multiple matches are both hard errors — see the FAIL LOUD note
-    # on the refresh path in _vendor/README.md: an automated base refresh that
-    # renames a heading MUST break the sync loudly rather than silently
-    # un-suppress the instruction the overlay meant to kill.
-    supersedes = fm.get("supersedes")
-    if isinstance(supersedes, str):
-        supersedes = [supersedes] if supersedes.strip() else []
-    elif not isinstance(supersedes, list):
-        supersedes = []
-
-    if supersedes:
-        heading_re = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*$")
-        base_lines = base_body.split("\n")
-
-        def norm(s):
-            return s.lstrip("#").strip()
-
-        for target in supersedes:
-            want = norm(target)
-            headings = []
-            for idx, ln in enumerate(base_lines):
-                hm2 = heading_re.match(ln)
-                if hm2:
-                    headings.append((idx, len(hm2.group(1)), ln.strip()))
-            matches = [h for h in headings if norm(h[2]) == want]
-
-            if not matches:
-                raise SystemExit(
-                    "sync-skills: unresolved `supersedes:` heading "
-                    + repr(target) + " (in " + os.path.basename(path) + "): the "
-                    + "vendored base " + compose_base + " has no such heading. "
-                    + "Its headings are: "
-                    + ("; ".join(h[2] for h in headings) if headings else "(none)")
-                )
-            if len(matches) > 1:
-                raise SystemExit(
-                    "sync-skills: ambiguous `supersedes:` heading "
-                    + repr(target) + " (in " + os.path.basename(path) + "): it "
-                    + "matches " + str(len(matches)) + " headings in "
-                    + compose_base + " at lines "
-                    + ", ".join(str(h[0] + 1) for h in matches)
-                    + " — a supersedes entry must identify exactly one section."
-                )
-
-            start, depth, _hdr = matches[0]
-            end = len(base_lines)
-            for idx2 in range(start + 1, len(base_lines)):
-                hm3 = heading_re.match(base_lines[idx2])
-                if hm3 and len(hm3.group(1)) <= depth:
-                    end = idx2
-                    break
-            base_lines[start:end] = [
-                "<!-- superseded by the " + skill_name + " overlay: "
-                + repr(target) + " excised at compose time (issue #3990) -->",
-                "",
-            ]
-
-        base_body = "\n".join(base_lines)
-
-    # Compose-seam supersession marker (issue #3818, from the #3815 design
-    # concept: "an explicit supersede marker emitted by sync-skills.sh"). An
-    # overlay MAY place a `<!-- compose-seam-supersede -->` marker line in its
-    # own body. Everything BEFORE that marker is hoisted to precede the
-    # vendored base body, instead of the default "base, then overlay" order.
-    # This is the ONLY mechanism that lets an overlay's own prose land ahead
-    # of the base's instructions in the composed file — needed when the base
-    # carries an instruction (e.g. "spawn N sub-agents in parallel") that a
-    # LATER overlay step supersedes: a model reading top-down must hit the
-    # override BEFORE the instruction it overrides, not only after it (the
-    # default compose order previously made that impossible — the overlay
-    # always followed the base in its entirety). The marker line itself is
-    # stripped and never shipped, same convention as `@include`. A playbook
-    # that never declares the marker composes exactly as before (byte-
-    # identical) — this is purely additive.
-    SUPERSEDE_MARKER = "<!-- compose-seam-supersede -->"
-    preface = ""
-    overlay_rest = resolved
-    if SUPERSEDE_MARKER in resolved:
-        pre, _, post = resolved.partition(SUPERSEDE_MARKER)
-        preface = pre.strip("\n")
-        overlay_rest = post.lstrip("\n")
-
-    # Compose: [optional hoisted preface], vendored upstream base body, a
-    # separator, then the rest of the overlay.
-    segments = []
-    if preface:
-        segments.append(preface)
-        segments.append("---")
-    segments.append(base_body.rstrip("\n"))
-    segments.append("---")
-    segments.append("## Hydra AFK overlay (" + skill_name + ")")
-    segments.append(overlay_rest.lstrip("\n"))
-    resolved = "\n\n".join(segments)
-
-print(json.dumps({"fm": fm, "body": resolved, "compose": compose}))
-PY
-)
-
-  if echo "$parsed" | grep -q '"error"'; then
-    echo "skip $base — no valid frontmatter" >&2
-    errors=$((errors+1))
-    continue
-  fi
-
-  name=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["fm"].get("name",""))')
-  desc=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["fm"].get("description",""))')
-  when=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["fm"].get("when_to_use",""))')
-  allowed_claude=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["fm"].get("allowed_tools_claude","Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)"))')
-  args_yaml=$(echo "$parsed" | python3 -c '
-import sys,json
-d=json.load(sys.stdin)
-a=d["fm"].get("arguments")
-if isinstance(a,list): print("[" + ", ".join(a) + "]")
-elif a: print(a)
-else: print("")')
-  # disable-model-invocation (issue #2945): the frontmatter parser coerces the
-  # kebab-case key's true/false value to a Python bool, so print "1" only when it
-  # is truthy — never the literal Python "True". "1" here means "emit the key".
-  disable_model_invocation=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("1" if d["fm"].get("disable-model-invocation") else "0")')
-  # compose (issue #3420, ADR-0030 Decision 4 / Option C): "1" when this playbook
-  # declared a compose_base and the body is now [vendored upstream base] +
-  # [overlay]. It forces the disable-model-invocation STRIP below regardless of
-  # any key the overlay's own frontmatter carries — a composed AFK skill is
-  # dispatched through the Skill tool, where the flag hard-errors.
-  compose=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("1" if d.get("compose") else "0")')
-  # reference_files (issue #2947): an optional list of _fragments/<name>.md files
-  # COPIED VERBATIM into the generated skill folder as siblings of SKILL.md — the
-  # progressive-disclosure escape valve that keeps the SKILL.md body small
-  # (parent-flow / child-flow reference files that SKILL.md POINTS to behind a
-  # context pointer, never @includes — @include grows the body, it cannot shrink
-  # it). One fragment path per line for the shell loop below. FAIL LOUD on a
-  # missing/escaping fragment, mirroring the @include contract.
-  reference_files=$(echo "$parsed" | python3 -c '
-import sys,json
-d=json.load(sys.stdin)
-r=d["fm"].get("reference_files")
-if isinstance(r,list):
-    for x in r: print(x)
-elif r:
-    print(r)')
-  body=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["body"])')
-
-  if [ -z "$name" ] || [ -z "$desc" ]; then
-    echo "skip $base — missing name or description" >&2
-    errors=$((errors+1))
-    continue
-  fi
-
-  banner_claude="<!-- DO NOT EDIT. Generated from docs/operator-playbooks/${name}.md. Run scripts/sync-skills.sh after editing the playbook. -->"
-
-  # ---- Claude SKILL.md ----
-  claude_target="$CLAUDE_DIR/$name/SKILL.md"
-  {
-    echo "---"
-    echo "name: $name"
-    echo "description: $desc"
-    [ -n "$when" ] && echo "when_to_use: \"$when\""
-    echo "allowed-tools: $allowed_claude"
-    # Emit disable-model-invocation only when the playbook opted in; lowercase
-    # `true` (never Python's "True"). Omitted entirely otherwise so untouched
-    # playbooks regenerate byte-identical (issue #2945). A COMPOSED skill (#3420)
-    # ALWAYS strips the key — the vendored upstream base ships it, but the
-    # composed AFK output is dispatched through the Skill tool where it
-    # hard-errors (ADR-0030 Decision 4 hard invariant); the `compose` guard wins
-    # over the overlay's own frontmatter.
-    [ "$disable_model_invocation" = "1" ] && [ "$compose" != "1" ] && echo "disable-model-invocation: true"
-    [ -n "$args_yaml" ] && echo "arguments: $args_yaml"
-    echo "---"
-    echo
-    echo "$banner_claude"
-    echo
-    echo "$body"
-  } > /tmp/sync-skills.claude.$$ || true
-
+# Apply every write: NUL-delimited path/content records, one jq pass, read in
+# the CURRENT shell (process substitution, not a pipe) so counters survive.
+# Each file lands via tmp-file in its own directory + mv.
+while IFS= read -r -d '' plan_path && IFS= read -r -d '' plan_content; do
+  target="$CLAUDE_DIR/$plan_path"
+  applied_writes=$((applied_writes+1))
   if [ "$DRY_RUN" = 1 ]; then
-    echo "would write $claude_target"
+    echo "would write $target"
   else
-    mkdir -p "$(dirname "$claude_target")"
-    mv /tmp/sync-skills.claude.$$ "$claude_target"
-    generated_count=$((generated_count+1))
+    mkdir -p "$(dirname "$target")"
+    printf '%s' "$plan_content" > "$target.tmp.$$"
+    mv "$target.tmp.$$" "$target"
+    case "$plan_path" in
+      */SKILL.md) generated_count=$((generated_count+1)) ;;
+    esac
   fi
-
-  # Companion settings.json (issue #509): if the playbook ships a sibling
-  # `<name>.settings.json` (currently used by hydra-autopilot for hook
-  # registration), copy it to the skill's `.claude/settings.json` so the
-  # harness picks it up on next session start. The companion file is a
-  # plain JSON object; we don't mutate it during sync. Hook scripts that
-  # the settings reference are expected to live in the orchestrator repo
-  # at stable absolute paths (e.g. /home/gabe/hydra/scripts/autopilot/hooks/).
-  settings_src="$PLAYBOOKS/${name}.settings.json"
-  if [ -f "$settings_src" ]; then
-    settings_target="$CLAUDE_DIR/$name/.claude/settings.json"
-    if [ "$DRY_RUN" = 1 ]; then
-      echo "would write $settings_target"
-    else
-      mkdir -p "$(dirname "$settings_target")"
-      cp "$settings_src" "$settings_target"
-    fi
-  fi
-
-  # ---- Reference files (issue #2947) ----
-  # Copy each `reference_files:` fragment VERBATIM into the generated skill
-  # folder as a sibling of SKILL.md. This is the progressive-disclosure path:
-  # SKILL.md stays small and POINTS to these files behind a context pointer,
-  # rather than @include-ing them (which would grow the body). Substitutes
-  # {{SKILL_NAME}} exactly as @include does so a shared reference fragment can
-  # carry a per-skill log tag. FAIL LOUD (aborting the sync, and via the #433
-  # deploy contract the deploy) on a missing fragment or a path that escapes
-  # operator-playbooks/ — a broken reference pointer must never ship silently.
-  if [ -n "$reference_files" ]; then
-    while IFS= read -r ref_rel; do
-      [ -z "$ref_rel" ] && continue
-      ref_out=$(REPO_ROOT="$REPO_ROOT" PLAYBOOKS="$PLAYBOOKS" NAME="$name" \
-        REF_REL="$ref_rel" python3 - <<'PY'
-import os, sys
-playbooks = os.environ["PLAYBOOKS"]
-ref_rel = os.environ["REF_REL"]
-skill_name = os.environ["NAME"]
-frag_path = os.path.normpath(os.path.join(playbooks, ref_rel))
-if not frag_path.startswith(os.path.normpath(playbooks) + os.sep):
-    sys.stderr.write(
-        "sync-skills: reference_files path escapes operator-playbooks/: "
-        + ref_rel + " (in " + skill_name + ")\n")
-    sys.exit(3)
-if not os.path.isfile(frag_path):
-    sys.stderr.write(
-        "sync-skills: unresolved reference_files " + ref_rel
-        + " (in " + skill_name + "): no such fragment at " + frag_path + "\n")
-    sys.exit(3)
-with open(frag_path, "r", encoding="utf-8") as f:
-    content = f.read()
-sys.stdout.write(content.replace("{{SKILL_NAME}}", skill_name))
-PY
-      ) || { echo "sync-skills: reference_files emission failed for $name" >&2; errors=$((errors+1)); exit 3; }
-      ref_basename=$(basename "$ref_rel")
-      ref_target="$CLAUDE_DIR/$name/$ref_basename"
-      if [ "$DRY_RUN" = 1 ]; then
-        echo "would write $ref_target (reference file from $ref_rel)"
-      else
-        mkdir -p "$(dirname "$ref_target")"
-        printf '%s' "$ref_out" > "$ref_target"
-      fi
-    done <<< "$reference_files"
-  fi
-done
+done < "$WRITES_FILE"
+if [ "$applied_writes" != "$expected_writes" ]; then
+  echo "sync-skills: applied $applied_writes of $expected_writes planned writes — truncated plan stream" >&2
+  exit 1
+fi
 
 # ---- Banner-guarded orphan prune (issue #3693) ----
 # sync-skills.sh only ever WROTE generated skills; a playbook deleted from
@@ -578,7 +220,7 @@ done
 #
 # Ownership signal: a generated SKILL.md carries the exact banner
 #   <!-- DO NOT EDIT. Generated from docs/operator-playbooks/<X>.md. ... -->
-# (emitted at the banner_claude line above). We extract <X> from
+# (emitted by the banner constant in src/skills/playbook.ts). We extract <X> from
 # that line and prune the dir iff docs/operator-playbooks/<X>.md no longer
 # exists. A dir whose SKILL.md LACKS that banner is a third-party / upstream
 # skill (code-review, grilling, prototype, deep-research, …) and is NEVER
