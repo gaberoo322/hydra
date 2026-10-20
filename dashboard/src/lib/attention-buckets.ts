@@ -63,3 +63,35 @@ export function deriveFeedBuckets<I extends FeedItemLike>(
     malformed: Boolean(data) && reported.length === 0,
   };
 }
+
+/** Per-item dismiss outcome lines, keyed by item id (QA round 4, PR #4976). */
+export type DismissOutcomes = Record<string, string>;
+
+export type DismissResult =
+  | { ok: false; error: unknown }
+  | { ok: true; reread: boolean };
+
+/**
+ * Fold one dismiss outcome into the per-item map — pure, so the feed's
+ * banner rules are unit-tested behaviourally:
+ *   - a failure records `<title>: dismiss failed — <message>` under THAT
+ *     item's id; another item's attempt never clears it;
+ *   - a success clears that item's entry — unless the post-dismiss feed
+ *     re-read FAILED, which is named (never a silent stale list).
+ */
+export function recordDismissOutcome(
+  prev: DismissOutcomes,
+  item: { id: string; title: string },
+  result: DismissResult,
+): DismissOutcomes {
+  const next = { ...prev };
+  if ("error" in result) {
+    const err = result.error as { message?: string } | null | undefined;
+    next[item.id] = `${item.title}: dismiss failed — ${err?.message ?? String(result.error)}`;
+  } else if (result.ok && result.reread === false) {
+    next[item.id] = `${item.title}: dismissed · feed re-read FAILED — list may be stale`;
+  } else {
+    delete next[item.id];
+  }
+  return next;
+}

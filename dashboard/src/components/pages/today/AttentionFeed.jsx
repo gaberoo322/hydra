@@ -1,10 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { usePageItems } from "../../../hooks/usePageItems.js";
 import { apiFetch } from "../../../hooks/useApi.js";
 import { relativeAge } from "../../../lib/page-item-format.ts";
-import { deriveFeedBuckets } from "../../../lib/attention-buckets.ts";
+import { deriveFeedBuckets, recordDismissOutcome } from "../../../lib/attention-buckets.ts";
 import { Section } from "./Section.jsx";
-import { ActionAffordance, DelayedCommitToast, useDelayedCommit } from "../../ActionAffordance.jsx";
+import { triggerDisabled } from "../../../lib/delayed-commit.ts";
+import {
+  ActionAffordance,
+  UndoToastStack,
+  UndoWindowContext,
+  useUndoWindowHost,
+} from "../../ActionAffordance.jsx";
 
 /**
  * AttentionFeed — the `/` page's "what needs me" surface (issue #4007,
@@ -37,6 +43,10 @@ import { ActionAffordance, DelayedCommitToast, useDelayedCommit } from "../../Ac
  * window as immediate-tier actions (there is no undismiss route), via this
  * component's own apiFetch call (the confirmed-write fence,
  * test/dashboard-server-confirmed-write.test.mts INV-7).
+ *
+ * Undo windows are hosted HERE, not in the rows (UndoWindowContext + one
+ * UndoToastStack): concurrent windows each keep their own Undo, and a row
+ * removed by a poll refresh neither commits early nor loses its Undo.
  */
 
 /** Why each bucket ranks where it does — the header's one-line rationale.
@@ -112,12 +122,19 @@ function ActionColumn({ entry, onFired, onResult }) {
   );
 }
 
+/** The undo-window id an item's dismiss is armed under (one per item). */
+function dismissWindowId(item) {
+  return `dismiss:${item.id}`;
+}
+
 /** The typed-dismiss control: exactly the three schema reasons, each firing
- * through the page-level delayed-commit window (onDismissStart). Every
- * reason button is DISABLED while that window holds a pending dismiss — one
- * commit per window, so a second click can never break the first's Undo
- * (INV-7/INV-14). */
-function DismissControl({ item, onDismissStart, dismissPending }) {
+ * through the feed-level delayed-commit window (onDismissStart). Every
+ * reason button is DISABLED while THIS item's window holds a pending
+ * dismiss — one commit per window, so a second click can never break the
+ * first's Undo (INV-7/INV-14); other items stay dismissable. */
+function DismissControl({ item, onDismissStart }) {
+  const undoHost = useContext(UndoWindowContext);
+  const disabled = triggerDisabled(false, undoHost.windows, dismissWindowId(item));
   return (
     <div className="mt-1.5 flex flex-wrap items-baseline gap-x-1.5 text-[11px] text-zinc-600">
       <span>dismiss:</span>
@@ -127,7 +144,7 @@ function DismissControl({ item, onDismissStart, dismissPending }) {
           <button
             type="button"
             onClick={() => onDismissStart(item, r)}
-            disabled={dismissPending}
+            disabled={disabled}
             title={`30-day snooze · ${r.value}`}
             className="text-zinc-500 underline hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -141,7 +158,7 @@ function DismissControl({ item, onDismissStart, dismissPending }) {
 
 /** One per-item row: the crossed line and its explanation on the left, the
  * action grammar on the right. */
-function FeedItem({ item, onFired, onResult, onDismissStart, dismissPending }) {
+function FeedItem({ item, onFired, onResult, onDismissStart }) {
   return (
     <div className="grid gap-2 border-t border-zinc-700/50 py-2.5 md:grid-cols-[minmax(0,1fr)_minmax(280px,40%)]">
       <div className="min-w-0">
@@ -161,7 +178,7 @@ function FeedItem({ item, onFired, onResult, onDismissStart, dismissPending }) {
         </div>
         <div className="mt-1 text-xs italic text-zinc-500">{item.action.rationale}</div>
         {item.detail && <div className="mt-0.5 text-[11px] text-zinc-500">{item.detail}</div>}
-        <DismissControl item={item} onDismissStart={onDismissStart} dismissPending={dismissPending} />
+        <DismissControl item={item} onDismissStart={onDismissStart} />
       </div>
       <ActionColumn entry={item.action} onFired={onFired} onResult={onResult} />
     </div>
@@ -175,7 +192,7 @@ function FeedItem({ item, onFired, onResult, onDismissStart, dismissPending }) {
  * not collapse to the parent's. The two single-line aggregates (parked over
  * cap, archived Target) render the parent's action block directly.
  */
-function AggregateWell({ item, onFired, onResult, onDismissStart, dismissPending }) {
+function AggregateWell({ item, onFired, onResult, onDismissStart }) {
   return (
     <div className="mt-2 grid gap-2.5 rounded-md border border-zinc-700/60 bg-zinc-900/60 p-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
@@ -183,7 +200,7 @@ function AggregateWell({ item, onFired, onResult, onDismissStart, dismissPending
           <div className="text-sm font-semibold text-zinc-100">{item.title}</div>
           {item.detail && <div className="mt-0.5 text-[11px] text-zinc-500">{item.detail}</div>}
         </div>
-        <DismissControl item={item} onDismissStart={onDismissStart} dismissPending={dismissPending} />
+        <DismissControl item={item} onDismissStart={onDismissStart} />
       </div>
       {(item.subLines?.length ?? 0) > 0
         ? item.subLines.map((sub) => (
@@ -206,7 +223,7 @@ function AggregateWell({ item, onFired, onResult, onDismissStart, dismissPending
 /** One bucket section: header (rank · name · count · why), then the trust
  * branch — UNKNOWN on an unproven bucket, a muted asserted zero, or the
  * items in the server's within-bucket order. */
-function BucketSection({ summary, items, onFired, onResult, onDismissStart, dismissPending }) {
+function BucketSection({ summary, items, onFired, onResult, onDismissStart }) {
   const unproved = !summary.wired || !summary.sourcesOk;
   return (
     <div>
@@ -238,9 +255,9 @@ function BucketSection({ summary, items, onFired, onResult, onDismissStart, dism
         <div>
           {items.map((item) =>
             isAggregate(item) ? (
-              <AggregateWell key={item.id} item={item} onFired={onFired} onResult={onResult} onDismissStart={onDismissStart} dismissPending={dismissPending} />
+              <AggregateWell key={item.id} item={item} onFired={onFired} onResult={onResult} onDismissStart={onDismissStart} />
             ) : (
-              <FeedItem key={item.id} item={item} onFired={onFired} onResult={onResult} onDismissStart={onDismissStart} dismissPending={dismissPending} />
+              <FeedItem key={item.id} item={item} onFired={onFired} onResult={onResult} onDismissStart={onDismissStart} />
             ),
           )}
         </div>
@@ -257,7 +274,10 @@ export function AttentionFeed() {
     freshnessMs: 5 * 60 * 1000,
   });
 
-  const [dismissError, setDismissError] = useState(null);
+  // Dismiss outcomes keyed per item id (lib/delayed-commit.ts
+  // recordDismissOutcome): one item's failure is never wiped by another
+  // item's attempt, and an entry clears only on THAT item's success.
+  const [dismissErrors, setDismissErrors] = useState({});
   // The last in-dashboard action's verified result, lifted OUT of the row: a
   // successful action usually removes its row on refresh, which would unmount
   // the row-local ✓/✗ line before the operator ever saw it (INV-10).
@@ -280,28 +300,30 @@ export function AttentionFeed() {
     refresh();
     return settled;
   }, [refresh]);
-  const undoWindow = useDelayedCommit();
+  const undoHost = useUndoWindowHost();
 
   // The typed dismiss (ADR-0034 §8.4): { reason, key } is the strict #4627
   // body — the legacy free-text { reason, signal } is a 400 there. Fires
   // through this component's own apiFetch (the confirmed-write fence),
-  // then refreshes; a failure surfaces inline, persistently.
+  // then re-reads the feed; a failure (or a failed re-read) surfaces inline,
+  // persistently, keyed to its item.
   const dismissItem = useCallback(
     async (item, reason) => {
-      setDismissError(null);
       try {
         await apiFetch(`/attention/${encodeURIComponent(item.id)}/dismiss`, {
           method: "POST",
           body: JSON.stringify({ reason, key: item.key }),
         });
-        await refresh();
       } catch (err) {
-        /* intentional: the inline dismiss-failed banner is the failure
-           surface — visible until the next attempt, never a silent catch */
-        setDismissError(`${item.title}: ${err?.message ?? String(err)}`);
+        /* intentional: the inline per-item dismiss-failed line is the
+           failure surface — visible until that item's dismiss succeeds */
+        setDismissErrors((prev) => recordDismissOutcome(prev, item, { ok: false, error: err }));
+        return;
       }
+      const reread = await refreshChecked();
+      setDismissErrors((prev) => recordDismissOutcome(prev, item, { ok: true, reread }));
     },
-    [refresh],
+    [refreshChecked],
   );
 
   // The dismiss row's entry point: arm the delayed-commit window with the
@@ -309,8 +331,10 @@ export function AttentionFeed() {
   // never fire a stale pair after a re-render.
   const onDismissStart = useCallback(
     (item, reason) =>
-      undoWindow.start(`Dismissing · ${reason.label}`, () => dismissItem(item, reason.value)),
-    [undoWindow.start, dismissItem],
+      undoHost.start(dismissWindowId(item), `Dismissing · ${reason.label}`, () =>
+        dismissItem(item, reason.value),
+      ),
+    [undoHost.start, dismissItem],
   );
 
   // ADR-0034 §5 trust rules (lib/attention-buckets.ts, unit-tested): a
@@ -343,11 +367,11 @@ export function AttentionFeed() {
       stale={status === "stale"}
       generatedAt={data?.generatedAt}
     >
-      {dismissError && (
-        <div className="mb-2 break-all font-mono text-xs text-red-300">
-          dismiss failed: {dismissError}
+      {Object.entries(dismissErrors).map(([id, text]) => (
+        <div key={id} className="mb-2 break-all font-mono text-xs text-red-300">
+          {text}
         </div>
-      )}
+      ))}
       {orphaned.length > 0 && (
         <div className="mb-2 font-mono text-xs text-amber-300">
           UNKNOWN: {orphaned.length} item(s) in a bucket the payload did not summarise
@@ -360,20 +384,21 @@ export function AttentionFeed() {
           {actionResult.text}
         </div>
       )}
-      <div className="grid gap-5">
-        {buckets.map((summary) => (
-          <BucketSection
-            key={summary.bucket}
-            summary={summary}
-            items={items.filter((item) => item.bucket === summary.bucket)}
-            onFired={refreshChecked}
-            onResult={setActionResult}
-            onDismissStart={onDismissStart}
-            dismissPending={Boolean(undoWindow.pending)}
-          />
-        ))}
-      </div>
-      <DelayedCommitToast pending={undoWindow.pending} onUndo={undoWindow.undo} />
+      <UndoWindowContext.Provider value={undoHost}>
+        <div className="grid gap-5">
+          {buckets.map((summary) => (
+            <BucketSection
+              key={summary.bucket}
+              summary={summary}
+              items={items.filter((item) => item.bucket === summary.bucket)}
+              onFired={refreshChecked}
+              onResult={setActionResult}
+              onDismissStart={onDismissStart}
+            />
+          ))}
+        </div>
+      </UndoWindowContext.Provider>
+      <UndoToastStack windows={undoHost.windows} onUndo={undoHost.undo} />
     </Section>
   );
 }

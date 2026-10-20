@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "../hooks/useApi.js";
 import { views } from "virtual:hydra-docs";
 import { REPO_URL } from "../pages/docs/build-info.js";
-import { UNDO_WINDOW_MS, createDelayedCommit } from "../lib/delayed-commit.ts";
+import { UNDO_WINDOW_MS, createUndoWindowRegistry, triggerDisabled } from "../lib/delayed-commit.ts";
 
 /**
  * ActionAffordance — ONE component, keyed by the registry Action's `kind`
@@ -21,8 +21,9 @@ import { UNDO_WINDOW_MS, createDelayedCommit } from "../lib/delayed-commit.ts";
  *                     reason — never a guessed body). confirmTier picks the
  *                     interaction: `confirm-first` arms then confirms;
  *                     `immediate-undo` fires through a ~5 s client-side
- *                     cancel window (no undo/inverse route exists in the
- *                     registry vocabulary, so the undo IS the delay).
+ *                     cancel window hosted at feed level (UndoWindowContext;
+ *                     no undo/inverse route exists in the registry
+ *                     vocabulary, so the undo IS the delay).
  *   - terminal-skill  the resolved command, mono, + Copy
  *                     (navigator.clipboard; a rejected clipboard says so).
  *                     Nothing executes from the browser (ADR-0012).
@@ -93,50 +94,90 @@ function docHref(doc) {
 }
 
 /**
- * useDelayedCommit — the React binding of the delayed-commit controller
- * (lib/delayed-commit.ts), the ~5 s cancel window behind every
- * immediate-tier action AND the feed's typed dismiss (INV-7/INV-14: no
- * undo/inverse route exists in the registry vocabulary, so "immediate, with
- * undo" is a delayed commit — Undo cancels before ANY request is sent;
- * expiry fires it).
- *
- * `start(label, fire)` captures the exact closure that was clicked, so the
- * timer can never fire a stale item/reason after a re-render. A `start()`
- * while a commit is pending is refused (the controller's one-commit rule) —
- * callers also disable their triggers while `pending` is set. Exported for
- * AttentionFeed's dismiss, which shares the window but not the renderer.
+ * The feed-level undo-window host (QA round 4, PR #4976). Every
+ * immediate-tier action AND the feed's typed dismiss arm their ~5 s
+ * delayed-commit window (INV-7/INV-14: no undo/inverse route exists in the
+ * registry vocabulary, so "immediate, with undo" is a delayed commit — Undo
+ * cancels before ANY request is sent; expiry fires it) in ONE registry owned
+ * by the host component (lib/delayed-commit.ts `createUndoWindowRegistry`),
+ * never in the row that started it:
+ *   - concurrent windows each get their own stacked toast + Undo;
+ *   - a row unmounting on a poll refresh neither commits early nor loses
+ *     Undo — only the HOST unmounting flushes (the operator clicked it and
+ *     only Undo may cancel it).
+ * `start(id, label, fire)` captures the exact closure that was clicked, so
+ * expiry can never fire a stale item/reason after a re-render; a second
+ * start on an id already pending is refused (one commit per window).
  */
-export function useDelayedCommit(delayMs = UNDO_WINDOW_MS) {
-  const [pending, setPending] = useState(null);
-  const controller = useRef(null);
-  if (controller.current === null) controller.current = createDelayedCommit(setPending, delayMs);
+export const UndoWindowContext = createContext(null);
 
-  const start = useCallback((label, fire) => controller.current.start(label, fire), []);
-  const undo = useCallback(() => controller.current.undo(), []);
-
-  // A pending window never silently outlives its component (a feed row
-  // unmounts on refresh/poll or navigation): the unmount COMMITS the pending
-  // action — the operator clicked it and only Undo may cancel it.
-  useEffect(() => () => controller.current.flush(), []);
-
-  return { pending, start, undo };
+export function useUndoWindowHost(delayMs = UNDO_WINDOW_MS) {
+  const [windows, setWindows] = useState([]);
+  const registry = useRef(null);
+  if (registry.current === null) registry.current = createUndoWindowRegistry(setWindows, delayMs);
+  useEffect(() => () => registry.current.flushAll(), []);
+  return useMemo(
+    () => ({ windows, start: registry.current.start, undo: registry.current.undo }),
+    [windows],
+  );
 }
 
-/** The one toast shape: `<label> in 5s · Undo`. Rendered by whoever owns the
- * window (an affordance instance or the feed's dismiss row). */
-export function DelayedCommitToast({ pending, onUndo }) {
-  if (!pending) return null;
+/** The one toast host: every pending window stacked bottom-right, each
+ * `<label> · Undo` with its OWN Undo — no window can hide another's. */
+export function UndoToastStack({ windows, onUndo }) {
+  if (windows.length === 0) return null;
   return (
-    <div
-      role="status"
-      className="fixed bottom-4 right-4 z-50 flex items-center gap-3 rounded-lg border border-zinc-600 bg-zinc-900 px-4 py-2.5 text-xs text-zinc-200 shadow-lg"
-    >
-      <span>{pending.label}</span>
-      <button type="button" onClick={onUndo} className="text-violet-300 underline hover:text-violet-200">
-        Undo
-      </button>
+    <div className="fixed bottom-4 right-4 z-50 flex flex-col items-end gap-2">
+      {windows.map((w) => (
+        <div
+          key={w.id}
+          role="status"
+          className="flex items-center gap-3 rounded-lg border border-zinc-600 bg-zinc-900 px-4 py-2.5 text-xs text-zinc-200 shadow-lg"
+        >
+          <span>{w.label}</span>
+          <button type="button" onClick={() => onUndo(w.id)} className="text-violet-300 underline hover:text-violet-200">
+            Undo
+          </button>
+        </div>
+      ))}
     </div>
   );
+}
+
+/** Tracks whether the component is still mounted, so a window that fires
+ * after its row left the feed never sets state on the gone row. */
+function useMounted() {
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  return mounted;
+}
+
+/** Copy-to-clipboard state for the Terminal/ConfigEnv affordances: `copied`
+ * for 2 s, or `copyFailed` when the clipboard rejects. The reset timer is
+ * cleared on unmount — never a setState on a gone component. */
+function useCopy(text) {
+  const [state, setState] = useState(null);
+  const timer = useRef(null);
+  const mounted = useMounted();
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const copy = useCallback(async () => {
+    clearTimeout(timer.current);
+    try {
+      await navigator.clipboard.writeText(text);
+      if (!mounted.current) return;
+      setState("copied");
+      timer.current = setTimeout(() => setState(null), 2000);
+    } catch (err) {
+      /* intentional: the visible copy-failed line is the failure surface */
+      if (mounted.current) setState("failed");
+    }
+  }, [text, mounted]);
+  return { copy, copied: state === "copied", copyFailed: state === "failed" };
 }
 
 // ---------------------------------------------------------------------------
@@ -148,10 +189,15 @@ function InDashboardAffordance({ action, onFired, onResult }) {
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
-  const undoWindow = useDelayedCommit();
+  const undoHost = useContext(UndoWindowContext);
+  const mounted = useMounted();
+  const windowId = `action:${action.method} ${action.route}`;
 
+  // Safe to run after this row has unmounted (the window lives at feed
+  // level): the verified result is lifted through onResult, and row-local
+  // state is only touched while the row is still mounted.
   const fire = useCallback(async () => {
-    setBusy(true);
+    if (mounted.current) setBusy(true);
     try {
       // The route is fired exactly as served — templates were resolved
       // server-side by the composer; the body comes from the closed map.
@@ -174,22 +220,27 @@ function InDashboardAffordance({ action, onFired, onResult }) {
               ok: true,
               text: `✓ ${action.method} ${action.route} accepted · feed re-read`,
             };
-      setResult(next);
+      if (mounted.current) setResult(next);
       onResult?.(next);
     } catch (err) {
       /* intentional: the persistent ✗ line below is the failure surface —
          surfaced inline, never a silent catch */
       const next = { ok: false, text: `✗ ${err?.message ?? String(err)}` };
-      setResult(next);
+      if (mounted.current) setResult(next);
       onResult?.(next);
     } finally {
-      setBusy(false);
-      setArmed(false);
+      if (mounted.current) {
+        setBusy(false);
+        setArmed(false);
+      }
     }
-  }, [action.method, action.route, onFired, onResult]);
+  }, [action.method, action.route, onFired, onResult, mounted]);
 
-  // No defined body for this route: disabled + the reason — never a guess.
-  if (body === undefined) {
+  // No defined body for this route — or an immediate-tier action rendered
+  // outside an undo-window host: disabled + the reason — never a guess, and
+  // never an immediate fire without its Undo.
+  const noHost = action.confirmTier !== "confirm-first" && undoHost === null;
+  if (body === undefined || noHost) {
     return (
       <span className="inline-flex flex-wrap items-center gap-2">
         <button
@@ -200,7 +251,9 @@ function InDashboardAffordance({ action, onFired, onResult }) {
           {action.label}
         </button>
         <span className="text-[11px] text-zinc-500">
-          no request body defined for {action.method} {action.route}
+          {body === undefined
+            ? `no request body defined for ${action.method} ${action.route}`
+            : "no undo-window host — render inside UndoWindowContext"}
         </span>
       </span>
     );
@@ -241,8 +294,8 @@ function InDashboardAffordance({ action, onFired, onResult }) {
       ) : (
         <button
           type="button"
-          onClick={() => undoWindow.start(`Firing ${action.label} in 5s`, fire)}
-          disabled={busy || Boolean(undoWindow.pending)}
+          onClick={() => undoHost.start(windowId, `Firing ${action.label} in 5s`, fire)}
+          disabled={triggerDisabled(busy, undoHost.windows, windowId)}
           className="rounded border border-emerald-500/45 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40"
         >
           {busy ? "…" : action.label}
@@ -258,7 +311,6 @@ function InDashboardAffordance({ action, onFired, onResult }) {
           {result.text}
         </span>
       )}
-      <DelayedCommitToast pending={undoWindow.pending} onUndo={undoWindow.undo} />
     </span>
   );
 }
@@ -268,21 +320,7 @@ function InDashboardAffordance({ action, onFired, onResult }) {
 // ---------------------------------------------------------------------------
 
 function TerminalSkillAffordance({ action }) {
-  const [copied, setCopied] = useState(false);
-  const [copyFailed, setCopyFailed] = useState(false);
-
-  const copy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(action.command);
-      setCopyFailed(false);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      /* intentional: the visible copy-failed line is the failure surface */
-      setCopied(false);
-      setCopyFailed(true);
-    }
-  }, [action.command]);
+  const { copy, copied, copyFailed } = useCopy(action.command);
 
   return (
     <span className="inline-flex flex-wrap items-center gap-2">
@@ -307,21 +345,7 @@ function TerminalSkillAffordance({ action }) {
 // ---------------------------------------------------------------------------
 
 function ConfigEnvAffordance({ action }) {
-  const [copied, setCopied] = useState(false);
-  const [copyFailed, setCopyFailed] = useState(false);
-
-  const copy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(action.file);
-      setCopyFailed(false);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      /* intentional: the visible copy-failed line is the failure surface */
-      setCopied(false);
-      setCopyFailed(true);
-    }
-  }, [action.file]);
+  const { copy, copied, copyFailed } = useCopy(action.file);
 
   // View file links to the GitHub blob on master ONLY for a repo-relative
   // path; a home-dir/absolute path is a local file the repo does not carry.

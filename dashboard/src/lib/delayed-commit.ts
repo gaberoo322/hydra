@@ -18,9 +18,16 @@
  *     disable their trigger buttons while `pending` is set; the refusal is
  *     the backstop.
  *   - `undo()` cancels the pending commit; nothing fires.
- *   - `flush()` (the owning component unmounting) COMMITS the pending action
+ *   - `flush()` (the owning host unmounting) COMMITS the pending action
  *     at once — the operator clicked it and only Undo may cancel it, so a
  *     window never silently drops an action the toast promised.
+ *
+ * Hosting (QA round 4, PR #4976): windows are NOT owned by the feed row that
+ * started them. `createUndoWindowRegistry` keeps every pending window at
+ * FEED level, keyed by a caller-chosen id (one window per id, any number of
+ * ids at once), so two concurrent windows are each undoable from their own
+ * toast, and a row unmounting on a poll refresh neither commits its window
+ * early nor loses its Undo. Only the host (the feed) unmounting flushes.
  */
 
 export const UNDO_WINDOW_MS = 5_000;
@@ -83,4 +90,69 @@ export function createDelayedCommit(
       return current;
     },
   };
+}
+
+/** One pending window as the toast stack renders it. */
+export type PendingWindow = { id: string; label: string };
+
+export interface UndoWindowRegistry {
+  /** Arm the window for `id`. Returns false (and does nothing) when that id
+   * already holds a pending commit; other ids are unaffected. */
+  start(id: string, label: string, fire: () => unknown): boolean;
+  /** Cancel `id`'s pending commit before anything is sent. No-op when idle. */
+  undo(id: string): void;
+  /** Every pending window, in start order. */
+  pending(): PendingWindow[];
+  /** Commit every pending window at once (the HOST unmounting — never a row). */
+  flushAll(): void;
+}
+
+/**
+ * The feed-level registry of undo windows: one `createDelayedCommit`
+ * controller per pending id. `onChange` receives the full pending list on
+ * every arm/settle, so a single toast host renders each window stacked with
+ * its own Undo.
+ */
+export function createUndoWindowRegistry(
+  onChange: (windows: PendingWindow[]) => void,
+  delayMs: number = UNDO_WINDOW_MS,
+): UndoWindowRegistry {
+  const windows = new Map<string, { label: string; ctl: DelayedCommitController }>();
+
+  function snapshot(): PendingWindow[] {
+    return [...windows].map(([id, w]) => ({ id, label: w.label }));
+  }
+
+  return {
+    start(id, label, fire) {
+      if (windows.has(id)) return false;
+      const ctl = createDelayedCommit((p) => {
+        // The controller settles (expiry, undo, flush) by emitting null —
+        // drop the window from the registry BEFORE its closure fires.
+        if (p === null && windows.get(id)?.ctl === ctl) {
+          windows.delete(id);
+          onChange(snapshot());
+        }
+      }, delayMs);
+      windows.set(id, { label, ctl });
+      ctl.start(label, fire);
+      onChange(snapshot());
+      return true;
+    },
+    undo(id) {
+      windows.get(id)?.ctl.undo();
+    },
+    pending() {
+      return snapshot();
+    },
+    flushAll() {
+      for (const { ctl } of [...windows.values()]) ctl.flush();
+    },
+  };
+}
+
+/** Pure trigger-state rule: a trigger is disabled while its request is in
+ * flight OR while its own window holds a pending commit. */
+export function triggerDisabled(busy: boolean, windows: PendingWindow[], id: string): boolean {
+  return busy || windows.some((w) => w.id === id);
 }

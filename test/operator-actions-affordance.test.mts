@@ -45,10 +45,15 @@ import { existsSync } from "node:fs";
 import type { OperatorActionEntry } from "../src/schemas/operator-actions.ts";
 import { ActionSchema, BUCKETS } from "../src/schemas/operator-actions.ts";
 import { REGISTRY } from "../src/operator-actions/registry.ts";
-import type { PendingCommit } from "../dashboard/src/lib/delayed-commit.ts";
-import { UNDO_WINDOW_MS, createDelayedCommit } from "../dashboard/src/lib/delayed-commit.ts";
+import type { PendingCommit, PendingWindow } from "../dashboard/src/lib/delayed-commit.ts";
+import {
+  UNDO_WINDOW_MS,
+  createDelayedCommit,
+  createUndoWindowRegistry,
+  triggerDisabled,
+} from "../dashboard/src/lib/delayed-commit.ts";
 import type { BucketSummary } from "../dashboard/src/lib/attention-buckets.ts";
-import { deriveFeedBuckets } from "../dashboard/src/lib/attention-buckets.ts";
+import { deriveFeedBuckets, recordDismissOutcome } from "../dashboard/src/lib/attention-buckets.ts";
 
 const AFFORDANCE = "../dashboard/src/components/ActionAffordance.jsx";
 const FEED = "../dashboard/src/components/pages/today/AttentionFeed.jsx";
@@ -357,19 +362,135 @@ describe("delayed commit — the undo window (INV-7 / INV-14)", () => {
   });
 });
 
-describe("the dismiss + immediate triggers bind to the one-commit window", () => {
-  test("useDelayedCommit delegates to the tested controller", async () => {
-    const src = await readSource(AFFORDANCE);
-    assert.ok(src.includes("createDelayedCommit(setPending, delayMs)"), "the hook wraps lib/delayed-commit.ts");
-    assert.ok(src.includes("controller.current.flush()"), "unmount commits through the controller");
+/** A feed-level registry wired to a recording onChange, plus a fire log. */
+function registryHarness(delayMs = UNDO_WINDOW_MS) {
+  const changes: PendingWindow[][] = [];
+  const reg = createUndoWindowRegistry((w) => changes.push(w), delayMs);
+  const fired: string[] = [];
+  const fire = (name: string) => () => {
+    fired.push(name);
+  };
+  return { reg, changes, fired, fire };
+}
+
+describe("feed-level undo-window registry — concurrent windows (QA round 4, PR #4976)", () => {
+  test("two concurrent windows are BOTH listed and each is undoable on its own", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const { reg, fired, fire } = registryHarness();
+    assert.equal(reg.start("action:POST /scheduler/start", "Firing Start in 5s", fire("start")), true);
+    t.mock.timers.tick(1_000);
+    assert.equal(reg.start("dismiss:item-1", "Dismissing · Later", fire("dismiss")), true);
+    assert.deepEqual(reg.pending(), [
+      { id: "action:POST /scheduler/start", label: "Firing Start in 5s" },
+      { id: "dismiss:item-1", label: "Dismissing · Later" },
+    ], "the toast host renders BOTH windows — neither hides the other's Undo");
+    reg.undo("dismiss:item-1");
+    assert.deepEqual(reg.pending().map((w) => w.id), ["action:POST /scheduler/start"], "undo is per window");
+    reg.undo("action:POST /scheduler/start");
+    t.mock.timers.tick(UNDO_WINDOW_MS * 2);
+    assert.deepEqual(fired, [], "both Undos cancelled before anything was sent");
+    assert.deepEqual(reg.pending(), []);
   });
 
-  test("every trigger is disabled while its window holds a pending commit", async () => {
-    const aff = await readSource(AFFORDANCE);
-    assert.ok(aff.includes("disabled={busy || Boolean(undoWindow.pending)}"), "immediate in-dashboard button");
+  test("undoing one window leaves the other on its own deadline", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const { reg, fired, fire } = registryHarness();
+    reg.start("a", "A", fire("a"));
+    t.mock.timers.tick(2_000);
+    reg.start("b", "B", fire("b"));
+    reg.undo("a");
+    t.mock.timers.tick(UNDO_WINDOW_MS - 1);
+    assert.deepEqual(fired, []);
+    t.mock.timers.tick(1);
+    assert.deepEqual(fired, ["b"]);
+    assert.deepEqual(reg.pending(), []);
+  });
+
+  test("a second start on the SAME id is refused; a different id is not", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const { reg, fired, fire } = registryHarness();
+    assert.equal(reg.start("dismiss:x", "Dismissing · Later", fire("x1")), true);
+    assert.equal(reg.start("dismiss:x", "Dismissing · Later", fire("x2")), false);
+    assert.equal(reg.start("dismiss:y", "Dismissing · Later", fire("y")), true);
+    t.mock.timers.tick(UNDO_WINDOW_MS);
+    assert.deepEqual(fired.sort(), ["x1", "y"], "the refused second click never fires");
+    assert.equal(reg.start("dismiss:x", "again", fire("x3")), true, "the id re-opens once settled");
+  });
+
+  test("a row unmounting does NOT commit its window early — only expiry or the HOST flush fires it", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const { reg, fired, fire } = registryHarness();
+    // A row arms its window, then a poll refresh removes the row: the row
+    // holds no controller, so there is nothing for its unmount to flush.
+    reg.start("action:POST /autopilot/paused", "Firing Resume in 5s", fire("resume"));
+    const rowWindows = reg.pending();
+    t.mock.timers.tick(UNDO_WINDOW_MS - 1);
+    assert.deepEqual(fired, [], "nothing fired while the row is gone and the window is open");
+    assert.deepEqual(reg.pending(), rowWindows, "the window (and its Undo) survives the row");
+    reg.undo("action:POST /autopilot/paused");
+    t.mock.timers.tick(UNDO_WINDOW_MS);
+    assert.deepEqual(fired, [], "Undo still cancels after the row left the feed");
+  });
+
+  test("flushAll (the HOST unmounting) commits every pending window once", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const { reg, changes, fired, fire } = registryHarness();
+    reg.start("a", "A", fire("a"));
+    reg.start("b", "B", fire("b"));
+    reg.flushAll();
+    assert.deepEqual(fired, ["a", "b"], "the operator's clicks are never silently dropped");
+    assert.deepEqual(reg.pending(), []);
+    assert.deepEqual(changes.at(-1), []);
+    t.mock.timers.tick(UNDO_WINDOW_MS * 2);
+    assert.deepEqual(fired, ["a", "b"], "flushed windows never fire twice");
+  });
+
+  test("a window is removed from the list BEFORE its closure fires", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const changes: PendingWindow[][] = [];
+    let listAtFire: PendingWindow[] | null = null;
+    const reg = createUndoWindowRegistry((w) => changes.push(w));
+    reg.start("a", "A", () => {
+      listAtFire = reg.pending();
+    });
+    t.mock.timers.tick(UNDO_WINDOW_MS);
+    assert.deepEqual(listAtFire, [], "the toast is gone when the request goes out");
+  });
+});
+
+describe("triggerDisabled — the pure trigger-state rule", () => {
+  const windows: PendingWindow[] = [{ id: "dismiss:a", label: "Dismissing · Later" }];
+  test("disabled while its own window is pending", () => {
+    assert.equal(triggerDisabled(false, windows, "dismiss:a"), true);
+  });
+  test("another id's pending window does not disable it", () => {
+    assert.equal(triggerDisabled(false, windows, "dismiss:b"), false);
+  });
+  test("disabled while its request is in flight", () => {
+    assert.equal(triggerDisabled(true, [], "action:POST /scheduler/start"), true);
+  });
+  test("enabled when idle", () => {
+    assert.equal(triggerDisabled(false, [], "dismiss:a"), false);
+  });
+});
+
+describe("the dismiss + immediate triggers bind to the feed-level host", () => {
+  test("the host wraps the tested registry and only the HOST flushes", async () => {
+    const src = await readSource(AFFORDANCE);
+    assert.ok(src.includes("createUndoWindowRegistry(setWindows, delayMs)"), "the hook wraps lib/delayed-commit.ts");
+    assert.ok(src.includes("registry.current.flushAll()"), "host unmount commits through the registry");
+    assert.ok(!src.includes("createDelayedCommit("), "no row-owned controller remains in the affordance");
     const feed = await readSource(FEED);
-    assert.ok(feed.includes("disabled={dismissPending}"), "each dismiss reason button");
-    assert.ok(feed.includes("dismissPending={Boolean(undoWindow.pending)}"), "the feed threads its window state down");
+    assert.ok(feed.includes("useUndoWindowHost()"), "the feed hosts the windows");
+    assert.ok(feed.includes("<UndoToastStack"), "one toast host renders every window");
+    assert.ok(!feed.includes("DelayedCommitToast"), "no per-owner toast remains");
+  });
+
+  test("every trigger derives its disabled state from triggerDisabled", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes("disabled={triggerDisabled(busy, undoHost.windows, windowId)}"), "immediate in-dashboard button");
+    const feed = await readSource(FEED);
+    assert.ok(feed.includes("triggerDisabled(false, undoHost.windows, dismissWindowId(item))"), "each dismiss reason button");
   });
 });
 
@@ -466,9 +587,33 @@ describe("the verified-result line does not overclaim a failed re-read", () => {
   });
 });
 
-describe("dismiss banner", () => {
-  test("dismissItem clears the stale failure banner on each attempt", async () => {
+describe("dismiss banner — per-item outcomes (recordDismissOutcome)", () => {
+  const a = { id: "a", title: "Item A" };
+  const b = { id: "b", title: "Item B" };
+  test("a failure is recorded under its own item id", () => {
+    const out = recordDismissOutcome({}, a, { ok: false, error: new Error("boom") });
+    assert.deepEqual(out, { a: "Item A: dismiss failed — boom" });
+  });
+  test("another item's attempt never wipes an earlier failure", () => {
+    let out = recordDismissOutcome({}, a, { ok: false, error: new Error("boom") });
+    out = recordDismissOutcome(out, b, { ok: true, reread: true });
+    assert.deepEqual(out, { a: "Item A: dismiss failed — boom" });
+    out = recordDismissOutcome(out, b, { ok: false, error: "nope" });
+    assert.deepEqual(Object.keys(out).sort(), ["a", "b"]);
+  });
+  test("a success clears only that item's entry", () => {
+    let out = recordDismissOutcome({}, a, { ok: false, error: new Error("boom") });
+    out = recordDismissOutcome(out, a, { ok: true, reread: true });
+    assert.deepEqual(out, {});
+  });
+  test("a success whose feed re-read FAILED is named, not silent", () => {
+    const out = recordDismissOutcome({}, a, { ok: true, reread: false });
+    assert.match(out.a, /feed re-read FAILED/);
+  });
+  test("the feed folds dismiss outcomes through the helper after a checked re-read", async () => {
     const src = await readSource(FEED);
-    assert.match(src, /async \(item, reason\) => \{\s*\n\s*setDismissError\(null\);/);
+    assert.ok(src.includes("const reread = await refreshChecked();"), "dismiss verifies its re-read");
+    assert.ok(src.includes("recordDismissOutcome(prev, item,"), "outcomes fold through the tested helper");
+    assert.ok(!src.includes("setDismissError(null)"), "no blanket clear on each attempt");
   });
 });
