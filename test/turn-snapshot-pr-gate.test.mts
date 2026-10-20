@@ -1373,6 +1373,17 @@ describe("pr-gate — QA-verdict recheck (#5052)", () => {
     assert.deepEqual(rotateQaRecheckBatch([1, 2, 3], 12, 999_999), [1, 2, 3]);
   });
 
+  test("rotation does not alias with a fixed 5-minute turn cadence (n = 15/20/30/60)", () => {
+    for (const n of [15, 20, 30, 60]) {
+      const cands = Array.from({ length: n }, (_, i) => i + 1);
+      const seen = new Set<number>();
+      for (let turn = 0; turn < 60; turn++) {
+        rotateQaRecheckBatch(cands, 12, 1_700_000_000_000 + turn * 300_000).forEach((c) => seen.add(c));
+      }
+      assert.equal(seen.size, n, `every candidate reached at n=${n}`);
+    }
+  });
+
   test("fail closed: a candidate with no host port yields [] plus a marker", async () => {
     const o = await run([candidatePr(7)], { host: null });
     assert.equal(o.value.qaVerdictRecheck.ok, false);

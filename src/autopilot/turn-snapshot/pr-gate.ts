@@ -941,20 +941,23 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
 
 /** Max `qa-verdict-event.sh` runs in flight at once, and per snapshot turn (#5052 QA round 1). */
 const QA_RECHECK_CONCURRENCY = 3; // matches the gh secondary-rate-limit-safe parallelism used elsewhere in the snapshot
-const QA_RECHECK_MAX_PER_TURN = 12; // ~one minute of script work at concurrency 3 (90s per-script timeout worst case)
-/** The rotation advances once per minute so consecutive turns see different windows. */
-const QA_RECHECK_ROTATION_MS = 60_000;
-
+const QA_RECHECK_MAX_PER_TURN = 12; // 4 waves at concurrency 3: ~1 minute typical, up to 4 x 90s per-script timeout worst case
 /**
- * #5052 QA round 2: pick at most `max` candidates, starting at a time-derived
- * offset and wrapping, so a persistent set of non-mergeable low-numbered PRs
- * cannot starve higher-numbered PASS-pending-CI PRs. Stateless: every
- * candidate is reached within ceil(n / max) rotation steps.
+ * #5052 QA rounds 2-3: pick at most `max` candidates, starting at a pseudo-random
+ * offset derived from a hash of the wall-clock millisecond and wrapping, so a
+ * persistent set of non-mergeable low-numbered PRs cannot starve higher-numbered
+ * PASS-pending-CI PRs. Stateless, and (unlike a linear `floor(now/period)*max`
+ * offset) it cannot alias with a fixed turn cadence: the start is a mixed hash,
+ * not an arithmetic progression, so no turn spacing pins the same window.
  */
 export function rotateQaRecheckBatch<T>(candidates: readonly T[], max: number, nowMs: number): T[] {
   if (candidates.length <= max) return [...candidates];
-  const step = Math.floor(nowMs / QA_RECHECK_ROTATION_MS);
-  const start = (step * max) % candidates.length;
+  // 32-bit integer mix (murmur3 finalizer) of the epoch-ms value.
+  let h = (Math.floor(nowMs) ^ Math.floor(nowMs / 4294967296)) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x85ebca6b) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+  h = (h ^ (h >>> 16)) >>> 0;
+  const start = h % candidates.length;
   return Array.from({ length: max }, (_, k) => candidates[(start + k) % candidates.length]);
 }
 
