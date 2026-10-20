@@ -5785,3 +5785,83 @@ describe("decide.py — cleanup_target zero-yield back-off (issue #5051)", () =>
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Durable QA-verdict recheck (issue #5052): a PASS-pending-CI PR the session
+// forgot lands from the Turn Snapshot's orch_qa_verdict_recheck signal.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — durable QA-verdict recheck (#5052)", () => {
+  const HEAD = "0123456789abcdef0123456789abcdef01234567";
+  const entry = (pr: number, extra: Record<string, unknown> = {}) => ({
+    pr,
+    tier: 3,
+    verdict: "PASS",
+    verdict_sha: HEAD.slice(0, 12),
+    head_sha: HEAD,
+    ...extra,
+  });
+  const armed = (plan: any, pr: number) => findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === pr);
+  const withRecheck = (entries: unknown[], extra: Record<string, unknown> = {}, o: StateOverrides = {}) =>
+    baseState({ ...o, signals: { orch_qa_verdict_recheck: entries, ...extra } });
+
+  test("INV-1/INV-9: a head-bound PASS recheck entry auto-merges with no session event, reason qa-recheck:#N", () => {
+    const plan = runDecide(withRecheck([entry(5001)]), null, []);
+    assert.ok(armed(plan, 5001), "the recheck entry must arm auto-merge");
+    assert.ok((plan.reasons ?? []).includes("qa-recheck:#5001"));
+    assert.ok((plan.reasons ?? []).includes("auto-merge:#5001"));
+  });
+
+  test("INV-4: a stale-SHA recheck entry holds (hold:#N:stale-verdict), never merges", () => {
+    const plan = runDecide(withRecheck([entry(5002, { verdict_sha: "fedcba987654" })]), null, []);
+    assert.equal(armed(plan, 5002), undefined);
+    assert.ok((plan.reasons ?? []).includes("hold:#5002:stale-verdict"));
+  });
+
+  test("INV-4: an unknown verdict_sha (unreadable guard) never merges", () => {
+    const plan = runDecide(withRecheck([entry(5003, { verdict_sha: "unknown", verdict: "PENDING" })]), null, []);
+    assert.equal(armed(plan, 5003), undefined);
+  });
+
+  test("INV-4: FAIL and PENDING recheck entries never merge", () => {
+    const plan = runDecide(withRecheck([entry(5004, { verdict: "FAIL" }), entry(5005, { verdict: "PENDING" })]), null, []);
+    assert.equal(armed(plan, 5004), undefined);
+    assert.equal(armed(plan, 5005), undefined);
+  });
+
+  test("INV-4: the dirty hold applies to recheck entries exactly as to session events", () => {
+    const plan = runDecide(withRecheck([entry(5006)], { orch_prs_dirty: [5006] }), null, []);
+    assert.equal(armed(plan, 5006), undefined);
+    assert.ok((plan.reasons ?? []).includes("hold:#5006:dirty"));
+  });
+
+  test("INV-4: the emergency brake overrides recheck entries (zero auto-merge)", () => {
+    const s = withRecheck([entry(5007)]);
+    s.emergency_brake = { engaged: true };
+    const plan = runDecide(s, null, []);
+    assert.equal(armed(plan, 5007), undefined);
+    assert.ok(findAction(plan, (a) => a.type === "route-prs-to-review"));
+  });
+
+  test("INV-5: a PR named by a session qa-verdict event is skipped by the recheck (event wins, one action)", () => {
+    const sessionEvent = { type: "qa-verdict", pr_number: 5008, tier: 3, verdict: "PASS", verdict_sha: HEAD.slice(0, 12), head_sha: HEAD };
+    const plan = runDecide(withRecheck([entry(5008), entry(5009)]), null, [sessionEvent]);
+    const merges = (plan.actions ?? []).filter((a: any) => a.type === "auto-merge" && a.pr_number === 5008);
+    assert.equal(merges.length, 1);
+    assert.ok(!(plan.reasons ?? []).includes("qa-recheck:#5008"));
+    assert.ok(armed(plan, 5009), "an unnamed recheck PR still lands the same turn");
+  });
+
+  test("INV-3/INV-7: a malformed recheck signal fails closed to no entries; the plan never raises", () => {
+    for (const bad of ["5010", [{ pr: "x" }], [{ pr: 5011, tier: 9, verdict: "PASS", verdict_sha: "a", head_sha: "a" }], null]) {
+      const plan = runDecide(baseState({ signals: { orch_qa_verdict_recheck: bad } }), null, []);
+      assert.equal(armed(plan, 5010), undefined);
+      assert.equal(armed(plan, 5011), undefined);
+    }
+  });
+
+  test("INV-3: with no recheck signal at all (all-degraded) nothing merges", () => {
+    const plan = runDecide(baseState(), null, []);
+    assert.equal((plan.actions ?? []).filter((a: any) => a.type === "auto-merge").length, 0);
+  });
+});

@@ -55,7 +55,7 @@
         "--limit",
         "100",
         "--json",
-        "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels"
+        "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels,autoMergeRequest"
       ],
       [
         "pr",
@@ -148,6 +148,10 @@
             "pick": null,
             "surface": []
           }
+        },
+        "qaVerdictRecheck": {
+          "ok": true,
+          "value": []
         }
       }
     }

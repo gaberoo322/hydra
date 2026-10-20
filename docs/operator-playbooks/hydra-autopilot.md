@@ -72,8 +72,12 @@ Each tick:
 
 `bash scripts/autopilot/qa-verdict-event.sh <PR> <TIER>` prints one event
 (issue #4831); the session appends it to `events.json` in step 2, one per PR
-whose latest `QA-Verdict:` trailer it acts on: right after a `qa_orch` reap,
-and again on later ticks for a PR still waiting on CI. `<TIER>` is the PR
+whose latest `QA-Verdict:` trailer it acts on: right after a `qa_orch` reap.
+A PR still waiting on CI is NOT tracked in session memory: the Turn Snapshot's
+`orch_qa_verdict_recheck` signal (issue #5052) re-runs this same script on
+every turn for each open, non-draft, unarmed PR whose required checks are
+settled green, and `decide.py` feeds the entries through the same sweep. A
+session event for a PR wins over its recheck entry. `<TIER>` is the PR
 body's `Tier:` line. **Every field comes from the QA merge guard and the shared
 required-check helpers, never from memory or a hand-parsed comment** — the
 script is the recipe below, verbatim (its `ci-state` / `qa-verdict-event`
@@ -117,7 +121,8 @@ jq -nc --argjson pr "$PR" --argjson tier "$TIER" --argjson guard "$GUARD_JSON" -
 - **`verdict`:** a `PASS` or `PASS-pending-CI` trailer becomes `"PASS"` once
   every required check is green, `"PENDING"` while one is still pending, and
   `"FAIL"` if one went red. QA never re-runs to promote `PASS-pending-CI`, so
-  this re-evaluation on later ticks is what lands those PRs. A `FAIL*` trailer
+  the Turn Snapshot's per-turn recheck (`reasons`: `qa-recheck:#N`) is what
+  lands those PRs, even in a later run. A `FAIL*` trailer
   is always `"FAIL"`. An unreadable guard or CI read is `"PENDING"` (fail
   closed).
 - **`verdict_sha` / `head_sha`** are the guard's `verdictSha` / `headSha`.

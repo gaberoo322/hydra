@@ -39,12 +39,14 @@ import {
   applyMergeStateRepoll,
   collectPrGate,
   hasUnknownMergeState,
+  parseTierLine,
   prGateFallbackSnapshot,
   type PrGateEnv,
   type PrRefsAvailability,
 } from "../src/autopilot/turn-snapshot/pr-gate.ts";
 import {
   createTurnSnapshotGithub,
+  PR_GATE_PR_FIELDS,
   type GhJsonRead,
   type GhTransport,
   type TurnSnapshotGithub,
@@ -1223,3 +1225,114 @@ async function collectNoprOutcome(o: {
     ...(o.prRefs ? { prRefs: o.prRefs } : {}),
   });
 }
+
+// ---------------------------------------------------------------------------
+// #5052 - the durable QA-verdict recheck signal (orch_qa_verdict_recheck)
+// ---------------------------------------------------------------------------
+
+describe("pr-gate — QA-verdict recheck (#5052)", () => {
+  const REQUIRED = ["test", "typecheck"];
+  const greenRollup = REQUIRED.map((name) => ({ __typename: "CheckRun", name, status: "COMPLETED", conclusion: "SUCCESS", startedAt: isoSecondsAgo(900) }));
+  const redRollup = [{ ...greenRollup[0], conclusion: "FAILURE" }, greenRollup[1]];
+  const pendingRollup = [{ ...greenRollup[0], status: "IN_PROGRESS", conclusion: null }, greenRollup[1]];
+
+  const candidatePr = (n: number, extra: Record<string, unknown> = {}) =>
+    ({
+      ...basePrGate({ number: n, mergeStateStatus: "CLEAN", statusCheckRollup: greenRollup }),
+      body: "Tier: 3 (core)\n\nCloses #1",
+      autoMergeRequest: null,
+      ...extra,
+    }) as unknown;
+
+  type Runner = { runQaVerdictEvent(pr: number, tier: number): Promise<unknown> };
+  function run(prs: unknown[], opts: { required?: GhJsonRead; first?: GhJsonRead; host?: Runner | null } = {}) {
+    return collectPrGate({
+      github: fakeGithub({ first: opts.first ?? ok(prs), repoll: ok([]), required: opts.required ?? ok(REQUIRED), resume: ok([]) }),
+      now: () => NOW_MS,
+      sleep: async () => {},
+      ghListLimit: 100,
+      ...(opts.host === null ? {} : { host: opts.host ?? passHost() }),
+    });
+  }
+  const passHost = (log: number[] = []): Runner => ({
+    runQaVerdictEvent: async (pr: number, tier: number) => {
+      log.push(pr);
+      return { type: "qa-verdict", pr_number: pr, tier, verdict: "PASS", verdict_sha: "abc1234", head_sha: "abc1234def" };
+    },
+  });
+  const value = (o: Awaited<ReturnType<typeof run>>) => (o.value.qaVerdictRecheck.ok ? o.value.qaVerdictRecheck.value : null);
+
+  test("parseTierLine reads a line-anchored Tier N in 1-4 only", () => {
+    assert.equal(parseTierLine("Tier: 3 (core)"), 3);
+    assert.equal(parseTierLine("intro\n**Tier:** 2\n"), 2);
+    assert.equal(parseTierLine("Tier: 0 (docs)"), null);
+    assert.equal(parseTierLine("we think Tier: 3 is right"), null);
+    assert.equal(parseTierLine(undefined), null);
+  });
+
+  test("a green, unarmed, tiered PR becomes a recheck entry whose fields are the script's stdout", async () => {
+    const log: number[] = [];
+    const o = await run([candidatePr(7)], { host: passHost(log) });
+    assert.deepEqual(value(o), [{ pr: 7, tier: 3, verdict: "PASS", verdictSha: "abc1234", headSha: "abc1234def" }]);
+    assert.deepEqual(log, [7]);
+  });
+
+  test("exclusions spend no script run: draft, ready-for-human, armed, DIRTY, UNKNOWN, no tier, red, pending", async () => {
+    const log: number[] = [];
+    const prs = [
+      candidatePr(1, { isDraft: true }),
+      candidatePr(2, { labels: [{ name: "ready-for-human" }] }),
+      candidatePr(3, { autoMergeRequest: { enabledAt: "2026-10-01T00:00:00Z" } }),
+      candidatePr(4, { mergeStateStatus: "DIRTY" }),
+      candidatePr(5, { mergeStateStatus: "UNKNOWN" }),
+      candidatePr(6, { body: "no tier here" }),
+      candidatePr(8, { statusCheckRollup: redRollup }),
+      candidatePr(9, { statusCheckRollup: pendingRollup }),
+      candidatePr(10, { autoMergeRequest: undefined }),
+    ];
+    const o = await run(prs, { host: passHost(log) });
+    assert.deepEqual(value(o), []);
+    assert.deepEqual(log, [], "no excluded PR may cost a script run");
+  });
+
+  test("fail closed: unreadable PR list or required contexts yields [] plus a qaVerdictRecheck marker", async () => {
+    for (const opts of [{ first: EMPTY }, { required: EMPTY }]) {
+      const log: number[] = [];
+      const o = await run([candidatePr(7)], { ...opts, host: passHost(log) });
+      assert.equal(o.value.qaVerdictRecheck.ok, false);
+      assert.ok(o.degraded.some((d) => d.field === "qaVerdictRecheck"));
+      assert.deepEqual(log, []);
+    }
+  });
+
+  test("fail closed: a null / throwing / mis-shaped script run omits that PR only; no PASS is synthesised", async () => {
+    const host: Runner = {
+      runQaVerdictEvent: async (pr: number, tier: number): Promise<unknown> => {
+        if (pr === 11) return null;
+        if (pr === 12) throw new Error("spawn failed");
+        if (pr === 13) return { type: "qa-verdict", pr_number: 99, tier, verdict: "PASS", verdict_sha: "a", head_sha: "a" };
+        return { type: "qa-verdict", pr_number: pr, tier, verdict: "PENDING", verdict_sha: "unknown", head_sha: "" };
+      },
+    };
+    const o = await run([candidatePr(11), candidatePr(12), candidatePr(13), candidatePr(14)], { host });
+    assert.deepEqual(value(o), [{ pr: 14, tier: 3, verdict: "PENDING", verdictSha: "unknown", headSha: "" }]);
+    assert.equal(o.notes.filter((n) => n.includes("#5052")).length, 4, "one note per omission plus the thrown call");
+  });
+
+  test("fail closed: a candidate with no host port yields [] plus a marker", async () => {
+    const o = await run([candidatePr(7)], { host: null });
+    assert.equal(o.value.qaVerdictRecheck.ok, false);
+    assert.ok(o.degraded.some((d) => d.field === "qaVerdictRecheck"));
+  });
+
+  test("the five-read order is unchanged; only the open-PR read gains autoMergeRequest", async () => {
+    const github = fakeGithub({ first: ok([candidatePr(7)]), repoll: ok([]), required: ok(REQUIRED), resume: ok([]) });
+    await collectPrGate({ github, now: () => NOW_MS, sleep: async () => {}, ghListLimit: 100, host: passHost() });
+    assert.equal(github.totalReads(), 5);
+    assert.ok(PR_GATE_PR_FIELDS.endsWith(",autoMergeRequest"));
+  });
+
+  test("prGateFallbackSnapshot carries the recheck degraded", () => {
+    assert.equal(prGateFallbackSnapshot("x").qaVerdictRecheck.ok, false);
+  });
+});
