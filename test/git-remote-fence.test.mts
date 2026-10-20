@@ -212,6 +212,94 @@ describe("git-remote-fence", () => {
     });
   });
 
+  describe("QA round 3: fail-closed loose scan (unparseable remote mutation)", () => {
+    const url = "https://x/y.git";
+    // `$(dirname $(dirname $(pwd)))` is depth 3; the extra $(echo ...) is depth 4.
+    const nest = (depth: number, inner: string) =>
+      "$(echo ".repeat(depth - 1) + `$(echo ${inner})` + ")".repeat(depth - 1);
+    const unparseable = (cwd: string, cmd: string) => {
+      const r = run(cmd, cwd);
+      assert.equal(r.status, 2, `${cmd}\n${r.stderr}`);
+      assert.match(r.stderr, /unparseable remote mutation — denied fail-closed/);
+    };
+
+    it("denies -C / -c / --git-dir values nested 3 and 4 deep", () => {
+      for (const depth of [3, 4]) {
+        for (const [cwd, target] of [[protectedRepo, protectedRepo], [otherRepo, protectedRepo]]) {
+          const v = nest(depth, target);
+          unparseable(cwd, `git -C ${v} remote set-url origin ${url}`);
+          unparseable(cwd, `git -c core.x=${v} remote set-url origin ${url}`);
+          unparseable(cwd, `git --git-dir=${nest(depth, `${target}/.git`)} remote add up ${url}`);
+        }
+      }
+      // the QA-reported literal shape
+      unparseable(protectedRepo, "git -C $(dirname $(dirname $(pwd))) remote set-url o x");
+    });
+
+    it("denies a config write at depth 3 (no strict match for config either)", () => {
+      unparseable(protectedRepo, `git -C ${nest(3, protectedRepo)} config remote.origin.url x`);
+      unparseable(otherRepo, `git -C ${nest(3, protectedRepo)} config remote.origin.url x`);
+      unparseable(protectedRepo, "git -C $(a $(b $(c))) config remote.origin.url x");
+    });
+
+    it("denies every git spelling / wrapper / global flag the strict parser does not model", () => {
+      const forms = [
+        `/usr/bin/git remote set-url origin ${url}`,
+        `time git remote set-url origin ${url}`,
+        `nohup git remote set-url origin ${url}`,
+        `timeout 5 git remote set-url origin ${url}`,
+        `command -p git remote set-url origin ${url}`,
+        `"git" remote set-url origin ${url}`,
+        `'git' remote set-url origin ${url}`,
+        `git -p remote set-url origin ${url}`,
+        `git -P remote set-url origin ${url}`,
+        `git -p --no-pager remote set-url origin ${url}`,
+        `env GIT_DIR=${protectedRepo}/.git git remote set-url origin ${url}`,
+        `nice -n 5 git config remote.origin.url ${url}`,
+      ];
+      for (const f of forms) {
+        unparseable(protectedRepo, f);
+        unparseable(otherRepo, f.replace(" remote ", ` -C ${protectedRepo} remote `));
+      }
+    });
+
+    it("still denies plain --no-pager (strict) from the protected repo and from a repo targeting it", () => {
+      assert.equal(run(`git --no-pager remote set-url origin ${url}`, protectedRepo).status, 2);
+      assert.equal(run(`git --no-pager -C ${protectedRepo} remote set-url origin ${url}`, otherRepo).status, 2);
+    });
+
+    it("strict-parses the new mutation subcommands (set-head / set-branches / prune)", () => {
+      for (const sub of ["set-head origin -a", "set-branches origin master", "prune origin"]) {
+        assert.equal(run(`git remote ${sub}`, protectedRepo).status, 2, sub);
+        assert.equal(run(`git remote ${sub}`, otherRepo).status, 0, sub);
+      }
+    });
+
+    it("allows read-only forms, including deep nesting and a bare read with a redirect", () => {
+      for (const cmd of [
+        "git remote -v",
+        "git remote get-url origin",
+        "git config --get remote.origin.url",
+        "git config remote.origin.url 2>/dev/null",
+        "git config remote.origin.url > /tmp/x 2>&1",
+        "time git remote -v",
+        "/usr/bin/git config --get remote.origin.url",
+        `git -C ${nest(3, protectedRepo)} remote -v`,
+        `git -C ${nest(4, protectedRepo)} config --get remote.origin.url`,
+        "echo \"time git remote set-url origin x\"",
+      ]) {
+        assert.equal(run(cmd, protectedRepo).status, 0, cmd);
+      }
+    });
+
+    it("allows a strictly-resolved mutation of a clearly non-protected repo", () => {
+      assert.equal(run(`git -C ${otherRepo} remote add up ${url}`, protectedRepo).status, 0);
+      assert.equal(run(`git remote set-url origin ${url}`, otherRepo).status, 0);
+      assert.equal(run(`git config remote.origin.url ${url}`, otherRepo).status, 0);
+      assert.equal(run(`cd ${otherRepo} || exit 1; git remote set-url origin ${url}`, protectedRepo).status, 0);
+    });
+  });
+
   it("is registered as a PreToolUse Bash hook by setup-claude-hooks.sh and in the GLM drainer settings", () => {
     const setup = readFileSync(join(REPO_ROOT, "scripts", "setup-claude-hooks.sh"), "utf-8");
     assert.match(setup, /^\s*"git-remote-fence\.sh\|Bash"\s*$/m);

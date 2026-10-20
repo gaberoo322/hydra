@@ -13,17 +13,29 @@
 # (defense in depth behind the `${VAR:?}` playbook guards and the watchdog's
 # run_origin_identity alarm).
 #
-# DENIES (statement-start `git`, optional -C/-c/--opt prefix) when the cwd's
-# `git rev-parse --git-common-dir` resolves to the protected gitdir:
-#   git remote set-url|add|remove|rm|rename ...
+# Two layers (issue #5026):
+#  1. STRICT parser (regex) — positively identifies a statement-start `git`
+#     (optional VAR=/GIT_DIR= prefix, sudo/command/env/exec/xargs, -C/-c/--opt)
+#     and resolves its effective repo (cd scope, -C chain, --git-dir/GIT_DIR=).
+#     It DENIES when that repo's `git rev-parse --git-common-dir` is the
+#     protected gitdir.
+#  2. LOOSE tokenizer — runs UNCONDITIONALLY over the whole command (balanced
+#     quotes and $(...) at any depth, shell -c / eval strings) and finds every
+#     remote mutation however `git` is spelled (/usr/bin/git, "git", time /
+#     nohup / timeout N / command -p ... git, git -p/-P/--no-pager ...). Any
+#     loose hit the strict parser did not resolve is DENIED FAIL-CLOSED, from
+#     ANY cwd ("unparseable remote mutation — run it by hand if intended").
+# Mutations (both layers):
+#   git remote set-url|add|remove|rm|rename|set-head|set-branches|prune ...
 #   git config ... remote.<name>.<key> ...   (a WRITE: a value follows the key,
 #                                             or --unset/--add/--edit/set/...;
 #                                             a bare key or a read flag is a
 #                                             READ — see config_is_write)
 # ALLOWS everything else — `git remote -v`, `git remote get-url`, `git remote
-# show`, `git config --get remote.origin.url`, and any command from a cwd
-# outside the protected gitdir (operator shells outside Claude Code are not
-# hooked at all).
+# show`, `git config --get remote.origin.url` (with or without a redirect), and
+# any STRICTLY-parsed mutation whose effective repo is not the protected gitdir
+# (operator shells outside Claude Code are not hooked at all). Known limit: a
+# git reached through a variable (`$GIT remote add`) or an alias is not seen.
 #
 # The hook inspects the FULL command text, so a compound
 # `cd "$X" && git remote set-url ...` is caught (the observed shape). A
@@ -109,8 +121,9 @@ GIT = (
     + r"|--(?:git-dir|work-tree|namespace|exec-path|super-prefix|config-env)\s+" + VAL
     + r"|--[\w-]+(?:=\S+)?))*"
 )
+REMOTE_MUT_SUBCMDS = ("set-url", "add", "remove", "rm", "rename", "set-head", "set-branches", "prune")
 REMOTE_MUT = re.compile(
-    START + GIT + r"\s+remote\s+(?:set-url|add|remove|rm|rename)\b", re.M
+    START + GIT + r"\s+remote\s+(?:" + "|".join(REMOTE_MUT_SUBCMDS) + r")(?![\w-])", re.M
 )
 CONFIG = re.compile(START + GIT + r"\s+config\b([^;&|\n]*)", re.M)
 CONFIG_READ_FLAGS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"}
@@ -120,20 +133,39 @@ CONFIG_WRITE_FLAGS = {
 }
 CONFIG_READ_SUBCMDS = {"get", "list"}
 CONFIG_WRITE_SUBCMDS = {"set", "unset"}
-SUBST = re.compile(r"\$\([^)]*\)|`[^`]*`")
 REMOTE_KEY_TOKEN = re.compile(r"remote\.\S+")
 
-def config_is_write(rest):
-    """INV-6: classify the argument list of a `git config` invocation.
-    Substitutions become one opaque VALUE token first, so a flag inside
-    `$(...)` can never count as a read flag but the word still counts as a
-    value. Returns True iff it names a remote.* key AND is a write."""
-    rest = SUBST.sub(" VALUE ", rest)
-    toks = [t.rstrip(")") for t in rest.split()]
+REDIRECT = re.compile(r"^\d*(?:>>?|<<?<?|>&|<&|&>>?|>\|)")
+
+def drop_redirects(words):
+    """Remove redirection tokens (`2>/dev/null`, `> f`, `2>&1`) so a redirect
+    target is never mistaken for a config VALUE."""
+    out, skip = [], False
+    for w in words:
+        if skip:
+            skip = False
+            continue
+        m = REDIRECT.match(w)
+        if m:
+            skip = m.end() == len(w)  # bare operator: its target is the next word
+            continue
+        out.append(w)
+    return out
+
+def bare(w):
+    """A shell word with its quoting removed (`"git"`, 'git', \\git -> git)."""
+    return re.sub(r"[\"'\\]", "", w)
+
+def config_words_is_write(words):
+    """Classify the argument words of a `git config` invocation (#5026 INV-6:
+    config read/write). A substitution word is one opaque VALUE, so a flag
+    inside `$(...)` never counts as a read flag but the word still counts as a
+    value; redirects are dropped. True iff it names a remote.* key AND writes."""
+    toks = ["VALUE" if ("$(" in t or "`" in t) else bare(t) for t in drop_redirects(words)]
     toks = [t for t in toks if t]
     key_idx = None
     for i, t in enumerate(toks):
-        if REMOTE_KEY_TOKEN.fullmatch(t.strip("\"'")):
+        if REMOTE_KEY_TOKEN.fullmatch(t):
             key_idx = i
             break
     if key_idx is None:
@@ -145,19 +177,194 @@ def config_is_write(rest):
         return False
     return any(not t.startswith("-") for t in after)  # a value follows the key
 
+def config_is_write(rest):
+    cmds = split_commands(rest)
+    return config_words_is_write([w for _o, w in cmds[0]] if cmds else [])
+
+# ---------------------------------------------------------------------------
+# Loose tokenizer: the fail-closed backstop (#5026, QA round 3). It splits the
+# command into simple commands with balanced $(...) / backtick / quote handling
+# at ANY nesting depth, recursing into substitutions and into the quoted
+# arguments of a shell (`bash -c "..."`, `eval '...'`). It only FINDS remote
+# mutations; resolving their target is the strict parser's job.
+# ---------------------------------------------------------------------------
+def match_paren(text, j):
+    """Index of the `)` balancing the `(` at text[j] (len(text) if unbalanced)."""
+    d, i, n = 0, j, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'":
+            k = text.find("'", i + 1)
+            i = n if k < 0 else k + 1
+            continue
+        if c == '"':
+            i = scan_dq(text, i, [])
+            continue
+        if c == "(":
+            d += 1
+        elif c == ")":
+            d -= 1
+            if d == 0:
+                return i
+        i += 1
+    return n
+
+def scan_dq(text, i, subs):
+    """text[i] is `"`: return the index after its closing quote, recording each
+    $(...) / backtick body inside it in subs as (offset, body)."""
+    i += 1
+    n = len(text)
+    while i < n and text[i] != '"':
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "$" and text[i + 1:i + 2] == "(":
+            end = match_paren(text, i + 1)
+            subs.append((i + 2, text[i + 2:end]))
+            i = end + 1
+            continue
+        if c == "`":
+            k = text.find("`", i + 1)
+            k = n if k < 0 else k
+            subs.append((i + 1, text[i + 1:k]))
+            i = k + 1
+            continue
+        i += 1
+    return i + 1
+
+WORD_END = set(" \t;&|\n()")
+
+def split_commands(text, base=0):
+    """[[(offset, raw_word), ...], ...]: every simple command in text, the
+    top-level ones first, then those nested inside substitutions."""
+    cmds, nested, cur = [], [], []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in " \t":
+            i += 1
+            continue
+        if ch in ";&|\n()":
+            if cur:
+                cmds.append(cur)
+            cur = []
+            i += 1
+            continue
+        if ch == "#":
+            k = text.find("\n", i)
+            i = n if k < 0 else k
+            continue
+        start, subs = i, []
+        while i < n and text[i] not in WORD_END:
+            c = text[i]
+            if c == "\\":
+                i += 2
+            elif c == "'":
+                k = text.find("'", i + 1)
+                i = n if k < 0 else k + 1
+            elif c == '"':
+                i = scan_dq(text, i, subs)
+            elif c in "$<>" and text[i + 1:i + 2] == "(":
+                end = match_paren(text, i + 1)
+                subs.append((i + 2, text[i + 2:end]))
+                i = end + 1
+            elif c == "`":
+                k = text.find("`", i + 1)
+                k = n if k < 0 else k
+                subs.append((i + 1, text[i + 1:k]))
+                i = k + 1
+            elif c in "<>" and text[i + 1:i + 2] in ("&", "|"):
+                i += 2
+            else:
+                i += 1
+        word = text[start:min(i, n)]
+        if word in ("{", "}"):
+            if cur:
+                cmds.append(cur)
+            cur = []
+        else:
+            cur.append((base + start, word))
+        for off, body in subs:
+            nested.extend(split_commands(body, base + off))
+    if cur:
+        cmds.append(cur)
+    return cmds + nested
+
+ASSIGN = re.compile(r"^[A-Za-z_]\w*=")
+# Words that may precede the real command word. After one of these, the first
+# git token anywhere later in the simple command is taken as the command (so
+# `timeout 5 git`, `command -p git`, `env -i X=1 git`, `nice -n 5 git` all match).
+WRAPPERS = {
+    "sudo", "doas", "command", "builtin", "env", "exec", "xargs", "time", "nohup",
+    "timeout", "nice", "ionice", "stdbuf", "chrt", "taskset", "setsid", "unbuffer",
+    "flock", "watch", "strace", "ltrace", "eatmydata", "chronic", "runuser",
+    "then", "do", "else", "elif", "if", "while", "until", "!",
+}
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "eval", "su"}
+GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
+
+def is_git(w):
+    return os.path.basename(bare(w)) == "git"
+
+def loose_mutations(text):
+    """Offsets of every git token that starts a remote MUTATION, whatever its
+    spelling (`/usr/bin/git`, `"git"`, `time git`, `git -p`, nested $(...))."""
+    hits = []
+    todo = [(0, text)]
+    while todo:
+        base, chunk = todo.pop()
+        for words in split_commands(chunk, base):
+            raw = [w for _o, w in words]
+            # Quoted arguments of a shell / eval are programs: scan them too.
+            if any(os.path.basename(bare(w)) in SHELLS for w in raw):
+                for off, w in words:
+                    for fm in re.finditer(r"\"([^\"]*)\"|'([^']*)'", w):
+                        g = 1 if fm.group(1) is not None else 2
+                        if fm.group(g):
+                            todo.append((off + fm.start(g), fm.group(g)))
+            i = 0
+            while i < len(raw) and ASSIGN.match(raw[i]):
+                i += 1
+            if i < len(raw) and bare(raw[i]) in WRAPPERS:
+                i = next((j for j in range(i + 1, len(raw)) if is_git(raw[j])), len(raw))
+            if i >= len(raw) or not is_git(raw[i]):
+                continue
+            k = i + 1
+            while k < len(raw) and bare(raw[k]).startswith("-"):
+                k += 2 if bare(raw[k]) in GIT_VALUE_OPTS else 1
+            if k >= len(raw):
+                continue
+            sub, rest = bare(raw[k]), drop_redirects(raw[k + 1:])
+            if sub == "remote":
+                pos = [bare(w) for w in rest if not bare(w).startswith("-")]
+                if pos and pos[0] in REMOTE_MUT_SUBCMDS:
+                    hits.append(words[i][0])
+            elif sub == "config" and config_words_is_write(rest):
+                hits.append(words[i][0])
+    return hits
+
 # Every mutating invocation: (match start, GIT-prefix text).
 mutations = [(m.start(), m.group(0)) for m in REMOTE_MUT.finditer(cmd)]
 for m in CONFIG.finditer(cmd):
     if config_is_write(m.group(1)):
         mutations.append((m.start(), m.group(0)))
-# Fail closed on $(...) nesting deeper than WORD's regex can balance: a loose
-# `... remote <mutation>` match not covered by any strict match is still a
-# mutation (its prefix resolves unparseably, so the session cwd decides).
-DEEP_SUBST = re.compile(r"\$\([^()]*\([^()]*\([^()]*\(")
-if DEEP_SUBST.search(cmd):
-    for lm in re.finditer(r"\bgit\b[^\n]*?\bremote\s+(?:set-url|add|remove|rm|rename)\b", cmd):
-        if not any(ms <= lm.start() <= ms + len(mt) for ms, mt in mutations):
-            mutations.append((lm.start(), lm.group(0)))
+# FAIL-CLOSED backstop (#5026, QA round 3): the loose tokenizer runs
+# UNCONDITIONALLY. A loose remote mutation that no strict match covers is one
+# the strict parser could not resolve (a git spelling, wrapper, global flag or
+# nesting depth outside its grammar), so it is denied whatever the cwd.
+try:
+    loose = loose_mutations(cmd)
+except Exception:
+    loose = [lm.start() for lm in re.finditer(
+        r"\bgit\b[^\n]*?\b(?:remote\s+(?:" + "|".join(REMOTE_MUT_SUBCMDS)
+        + r")|config\b[^\n]*\bremote\.)", cmd)]
+if any(not any(ms <= off <= ms + len(mt) for ms, mt in mutations) for off in loose):
+    print("DENY\nunparseable")
+    raise SystemExit(0)
 hit = bool(mutations)
 
 if not hit:
@@ -298,7 +505,7 @@ def is_protected(pos, prefix):
     return bool(res)
 
 try:
-    print("DENY" if any(is_protected(p_, t_) for p_, t_ in mutations) else "ALLOW")
+    print("DENY\nprotected" if any(is_protected(p_, t_) for p_, t_ in mutations) else "ALLOW")
 except SystemExit:
     raise
 except Exception:
@@ -310,7 +517,11 @@ if [ "${VERDICT%%$'\n'*}" != "DENY" ]; then
   exit 0
 fi
 
-REASON="git-remote-fence: refusing this Bash command — it mutates a git remote (git remote set-url|add|remove|rm|rename, or git config remote.*) while the session cwd belongs to the orchestrator gitdir /home/gabe/hydra/.git, which every ~/hydra worktree shares (issue #4939: an empty \$TARGET_WS made 'cd \"\$TARGET_WS\" && git remote set-url origin <target>' rewrite ~/hydra's origin and prune origin/master). Never correct a remote. If 'git remote -v' / 'git fetch' shows the ORCHESTRATOR remote where the Target was expected, the seam var is empty: STOP and re-run the target-seam preamble in THIS Bash call. Reads (git remote -v, git remote get-url, git config --get remote.origin.url) are allowed."
+if [ "${VERDICT#*$'\n'}" = "unparseable" ]; then
+  REASON="git-remote-fence: unparseable remote mutation — denied fail-closed; run it by hand if intended. This Bash command mutates a git remote (git remote set-url|add|remove|rm|rename|set-head|set-branches|prune, or a git config write to remote.*) in a form the fence cannot resolve to a target repo (a git path/quoting/wrapper such as /usr/bin/git, \"git\", time/nohup/timeout/command -p, a global flag such as -p/-P/--no-pager, or deeply nested \$(...)), so it cannot prove the target is not the orchestrator gitdir /home/gabe/hydra/.git (issue #4939). Rewrite it as a plain 'git [-C <literal dir>] remote ...' if it is meant for another repo. Reads (git remote -v, git remote get-url, git config --get remote.origin.url) are allowed."
+else
+REASON="git-remote-fence: refusing this Bash command — it mutates a git remote (git remote set-url|add|remove|rm|rename|set-head|set-branches|prune, or git config remote.*) while the session cwd belongs to the orchestrator gitdir /home/gabe/hydra/.git, which every ~/hydra worktree shares (issue #4939: an empty \$TARGET_WS made 'cd \"\$TARGET_WS\" && git remote set-url origin <target>' rewrite ~/hydra's origin and prune origin/master). Never correct a remote. If 'git remote -v' / 'git fetch' shows the ORCHESTRATOR remote where the Target was expected, the seam var is empty: STOP and re-run the target-seam preamble in THIS Bash call. Reads (git remote -v, git remote get-url, git config --get remote.origin.url) are allowed."
+fi
 
 printf '%s\n' "$REASON" >&2
 python3 -c "import json,sys
