@@ -1334,6 +1334,29 @@ describe("pr-gate — QA-verdict recheck (#5052)", () => {
     assert.equal(o.notes.filter((n) => n.includes("#5052")).length, 4, "one note per omission plus the thrown call");
   });
 
+  test("bounded fan-out: at most 3 script runs in flight and 12 per turn; the overflow is skipped and noted", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const log: number[] = [];
+    const host: Runner = {
+      runQaVerdictEvent: async (pr: number, tier: number) => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        log.push(pr);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        return { type: "qa-verdict", pr_number: pr, tier, verdict: "PASS", verdict_sha: "abc1234", head_sha: "abc1234def" };
+      },
+    };
+    const prs = Array.from({ length: 15 }, (_, i) => candidatePr(100 + i));
+    const o = await run(prs, { host });
+    assert.ok(peak <= 3, `peak concurrency ${peak} exceeds 3`);
+    assert.equal(log.length, 12);
+    assert.equal(value(o)?.length, 12);
+    assert.deepEqual(log.slice().sort((a, b) => a - b), Array.from({ length: 12 }, (_, i) => 100 + i));
+    assert.ok(o.notes.some((n) => n.includes("capped at 12") && n.includes("skipped 3")));
+  });
+
   test("fail closed: a candidate with no host port yields [] plus a marker", async () => {
     const o = await run([candidatePr(7)], { host: null });
     assert.equal(o.value.qaVerdictRecheck.ok, false);

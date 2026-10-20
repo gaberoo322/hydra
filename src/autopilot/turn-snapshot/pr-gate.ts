@@ -939,6 +939,10 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
   };
 }
 
+/** Max `qa-verdict-event.sh` runs in flight at once, and per snapshot turn (#5052 QA round 1). */
+const QA_RECHECK_CONCURRENCY = 3;
+const QA_RECHECK_MAX_PER_TURN = 12;
+
 async function collectQaRecheck(
   prs: readonly unknown[],
   prListReadOk: boolean,
@@ -951,22 +955,35 @@ async function collectQaRecheck(
   const candidates = qaRecheckCandidates(prs, requiredContexts.value);
   if (candidates.length === 0) return { ok: true, value: [] };
   if (host === undefined) return { ok: false, reason: "host-unavailable" };
-  const results = await Promise.all(
-    candidates.map(async (c) => {
+  // Bounded: at most QA_RECHECK_MAX_PER_TURN scripts per turn (lowest PR numbers first),
+  // QA_RECHECK_CONCURRENCY at a time. Skipped PRs are omitted (fail closed) and noted.
+  const batch = candidates.slice(0, QA_RECHECK_MAX_PER_TURN);
+  if (candidates.length > batch.length) {
+    notes.push(
+      `orch qa-verdict recheck capped at ${QA_RECHECK_MAX_PER_TURN} PR(s) this turn; skipped ${candidates.length - batch.length} (issue #5052)`,
+    );
+  }
+  const results: (QaRecheckEntry | null)[] = new Array(batch.length).fill(null);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < batch.length) {
+      const i = next++;
+      const c = batch[i];
       try {
-        return parseQaRecheckEntry(await host.runQaVerdictEvent(c.pr, c.tier), c.pr, c.tier);
+        results[i] = parseQaRecheckEntry(await host.runQaVerdictEvent(c.pr, c.tier), c.pr, c.tier);
       } catch (err) {
         /* intentional: surfaced as a stderr note; the PR's entry is omitted (fail closed), never the turn */
         const msg = err instanceof Error ? err.message : String(err);
         notes.push(`orch qa-verdict recheck host call threw for PR ${c.pr} (${msg}) - omitting entry (issue #5052)`);
-        return null;
+        results[i] = null;
       }
-    }),
-  );
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(QA_RECHECK_CONCURRENCY, batch.length) }, () => worker()));
   const entries: QaRecheckEntry[] = [];
   results.forEach((entry, i) => {
     if (entry === null) {
-      notes.push(`orch qa-verdict recheck produced no usable event for PR ${candidates[i].pr} - omitting entry (issue #5052)`);
+      notes.push(`orch qa-verdict recheck produced no usable event for PR ${batch[i].pr} - omitting entry (issue #5052)`);
     } else {
       entries.push(entry);
     }
