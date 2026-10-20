@@ -68,6 +68,19 @@ const DirtySurfaceSchema = z.array(
     .strict(),
 );
 
+/** #5052: one PR to re-evaluate for merge - the `qa-verdict-event.sh` stdout, head-bound by decide.py. */
+const QaRecheckSchema = z.array(
+  z
+    .object({
+      pr: IssueNumber,
+      tier: z.number().int().min(1).max(4),
+      verdict: z.string().min(1),
+      verdict_sha: z.string(),
+      head_sha: z.string(),
+    })
+    .strict(),
+);
+
 const CandidateExclusionSchema = z
   .object({
     anchor: z.string(),
@@ -133,6 +146,8 @@ const SignalsSchema = z
     orch_dev_resume_nopr_anchor: IssueNumber.nullable(),
     orch_dirty_forward_fix: PinSchema.nullable(),
     orch_prs_dirty_surface: DirtySurfaceSchema,
+    // #5052: open PRs whose QA verdict may now be mergeable - re-evaluated every turn
+    orch_qa_verdict_recheck: QaRecheckSchema,
     // grill gate (#628 / #3711)
     orch_pending_grill_anchor: IssueNumber.nullable(),
     orch_dev_ready_anchor: IssueNumber.nullable(),
@@ -202,6 +217,7 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   orch_dev_resume_nopr_anchor: null,
   orch_dirty_forward_fix: null,
   orch_prs_dirty_surface: [],
+  orch_qa_verdict_recheck: [],
   orch_pending_grill_anchor: null,
   orch_dev_ready_anchor: null,
   wayfinder_orch_frontier: null,

@@ -84,7 +84,7 @@ import {
   runPassthroughCollectors,
   type PassthroughDeps,
 } from "../../src/autopilot/turn-snapshot/passthrough.ts";
-import { createTurnSnapshotHost } from "../../src/autopilot/turn-snapshot/host-port.ts";
+import { createQaVerdictRunner, createTurnSnapshotHost } from "../../src/autopilot/turn-snapshot/host-port.ts";
 import { getTargetGithubRepo, getTargetWorkspace } from "../../src/target-config.ts";
 import { isTargetCollector, runTargetCollectors, TARGET_COLLECTORS, type TargetCliDeps } from "../../src/autopilot/turn-snapshot/target-cli.ts";
 import { collectTargetFacts } from "../target/print-target-facts.ts";
@@ -508,6 +508,7 @@ export function productionDeps(): CliDeps {
   const hydra = createTurnSnapshotHydra();
   return {
     github: createTurnSnapshotGithub(),
+    host: createQaVerdictRunner(),
     hydra,
     now: () => Date.now(),
     sleep: (seconds) => new Promise((resolve) => setTimeout(resolve, Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0)),

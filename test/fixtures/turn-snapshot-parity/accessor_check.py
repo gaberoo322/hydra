@@ -46,6 +46,7 @@ def readings(state: dict) -> dict:
         out.setdefault(name, {})["ordered"] = ts.ordered_numbers(state, [], name)
         out[name]["prs"] = ts.pr_numbers(state, [], name)
     out.setdefault("orch_prs_dirty_surface", {})["pairs"] = ts.dirty_surface_pairs(state, [], "orch_prs_dirty_surface")
+    out.setdefault("orch_qa_verdict_recheck", {})["recheck"] = ts.qa_verdict_recheck(state, [], "orch_qa_verdict_recheck")
     for name in ("target_needs_qa_pr_ref", "target_needs_qa_pr_head"):
         out.setdefault(name, {})["text"] = ts.text(state, [], name)
     out["_blobs"] = {f: ts.blob(state, f) for f in (*ts.BLOB_FIELDS, "scout_spend_usd_today")}

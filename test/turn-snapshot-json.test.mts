@@ -97,6 +97,7 @@ function healthyValues(): TurnSnapshotValues {
       dirty: [4938, 4814, 4814],
       unchecked: [4950],
       behind: [4952, 4951, 4953],
+      qaVerdictRecheck: ok([]),
       ciTriggerStale: ok(false),
       redResume: ok([4890]),
       devResumePick: ok({ issue: 4718, pr: 4890, headRefName: "worktree-agent-a1b2" }),
@@ -329,6 +330,13 @@ describe("turn snapshot JSON: contract — golden documents through zod and the 
         } else if (Array.isArray(value) && key === "orch_prs_dirty_surface") {
           const pairs = (value as { pr: number; closing_issue: number | null }[]).map((e) => [e.pr, e.closing_issue]).sort((a, b) => (a[0] as number) - (b[0] as number));
           assert.deepEqual(rd[key].pairs, pairs, key);
+        } else if (Array.isArray(value) && key === "orch_qa_verdict_recheck") {
+          const entries = value as { pr: number; tier: number; verdict: string; verdict_sha: string; head_sha: string }[];
+          assert.deepEqual(
+            rd[key].recheck.map((e: Record<string, unknown>) => [e.pr_number, e.tier, e.verdict, e.verdict_sha, e.head_sha]),
+            [...entries].sort((a, b) => a.pr - b.pr).map((e) => [e.pr, e.tier, e.verdict, e.verdict_sha, e.head_sha]),
+            key,
+          );
         } else if (Array.isArray(value)) {
           assert.deepEqual(rd[key].ordered, value, key);
           assert.deepEqual(rd[key].prs, [...new Set(value as number[])].sort((a, b) => a - b), key);

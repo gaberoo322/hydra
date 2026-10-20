@@ -23,7 +23,7 @@ import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
 import { pyJsonLoads } from "./py-compat.ts";
 
 /** The `--json` field list of the ONE open-PR read the in-flight sets and the PR-gate classifier share. */
-export const PR_GATE_PR_FIELDS = "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels";
+export const PR_GATE_PR_FIELDS = "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels,autoMergeRequest";
 
 /** The `--json` field list of the ready-for-agent issue read the grill picks and Candidate Exclusions share (slice 3). */
 export const READY_FOR_AGENT_ISSUE_FIELDS = "number,updatedAt,body,labels,title";
