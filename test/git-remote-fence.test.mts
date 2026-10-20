@@ -11,7 +11,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -297,6 +297,86 @@ describe("git-remote-fence", () => {
       assert.equal(run(`git remote set-url origin ${url}`, otherRepo).status, 0);
       assert.equal(run(`git config remote.origin.url ${url}`, otherRepo).status, 0);
       assert.equal(run(`cd ${otherRepo} || exit 1; git remote set-url origin ${url}`, protectedRepo).status, 0);
+    });
+  });
+
+  describe("issue #5026 decision A: scoped deny-on-crash", () => {
+    const url = "https://x/y.git";
+
+    it("a command mentioning neither remote nor config passes without python", () => {
+      for (const py of ["/nonexistent/python3", "/bin/false"]) {
+        for (const cmd of ["ls -la", "git status && npm test", "git push origin HEAD:x"]) {
+          const r = run(cmd, protectedRepo, "Bash", { HYDRA_REMOTE_FENCE_PYTHON: py });
+          assert.equal(r.status, 0, `${py}: ${cmd}: ${r.stderr}`);
+        }
+      }
+    });
+
+    it("denies a remote/config command when python is unavailable or emits no verdict", () => {
+      for (const py of ["/nonexistent/python3", "/bin/true", "/bin/false"]) {
+        for (const cwd of [protectedRepo, otherRepo, tmp]) {
+          const r = run(`git remote set-url origin ${url}`, cwd, "Bash", { HYDRA_REMOTE_FENCE_PYTHON: py });
+          assert.equal(r.status, 2, `${py} @ ${cwd}: ${r.stderr}`);
+          assert.match(r.stderr, /analysis failed on a command mentioning remote\/config — denied fail-closed/);
+          // The deny payload is valid JSON even though python never ran.
+          const json = r.stderr.trim().split("\n").pop() ?? "";
+          const parsed = JSON.parse(json);
+          assert.equal(parsed.hookSpecificOutput.permissionDecision, "deny");
+          assert.equal(parsed.hookSpecificOutput.hookEventName, "PreToolUse");
+        }
+      }
+      // Quote/backslash-split spellings still reach the analysis (pre-filter
+      // drops quotes and backslashes before matching).
+      for (const cmd of [`git "re"mote set-url origin ${url}`, `git re\\mote add up ${url}`, `git con'fig' remote.o.url y`]) {
+        const r = run(cmd, protectedRepo, "Bash", { HYDRA_REMOTE_FENCE_PYTHON: "/nonexistent/python3" });
+        assert.equal(r.status, 2, cmd);
+      }
+    });
+
+    it("denies when the analysis itself crashes (git missing) on a config remote write", () => {
+      // A PATH with python3 but no git: subprocess.run(["git", ...]) raises
+      // inside is_protected, which must map to ERROR -> deny, never ALLOW.
+      const which = (b: string) =>
+        spawnSync("sh", ["-c", `command -v ${b}`], { encoding: "utf-8" }).stdout.trim();
+      const binDir = join(tmp, "py-only-bin");
+      mkdirSync(binDir, { recursive: true });
+      for (const b of ["python3", "cat"]) {
+        if (!existsSync(join(binDir, b))) symlinkSync(which(b), join(binDir, b));
+      }
+      assert.ok(!existsSync(join(binDir, "git")));
+      const res = spawnSync(which("bash"), [HOOK], {
+        input: JSON.stringify({
+          cwd: protectedRepo,
+          tool_name: "Bash",
+          tool_input: { command: "git config remote.x.url y" },
+        }),
+        encoding: "utf-8",
+        env: {
+          PATH: binDir,
+          HOME: process.env.HOME ?? "",
+          HYDRA_REMOTE_FENCE_PROTECTED_GITDIR: join(protectedRepo, ".git"),
+        },
+      });
+      assert.equal(res.status, 2, res.stderr);
+      assert.match(res.stderr, /analysis failed on a command mentioning remote\/config/);
+    });
+
+    it("denies malformed stdin that mentions remote/config; allows malformed stdin that does not", () => {
+      const bad = spawnSync("bash", [HOOK], { input: "{not json: git remote set-url origin x", encoding: "utf-8" });
+      assert.equal(bad.status, 2, bad.stderr);
+      assert.match(bad.stderr, /analysis failed/);
+      const benign = spawnSync("bash", [HOOK], { input: "{not json: ls", encoding: "utf-8" });
+      assert.equal(benign.status, 0);
+    });
+
+    it("denies a mutation with no session cwd; keeps the legitimate fail-open exits", () => {
+      assert.equal(run(`git remote set-url origin ${url}`, "").status, 2);
+      assert.equal(run("", protectedRepo).status, 0); // empty command
+      assert.equal(run(`git remote set-url origin ${url}`, protectedRepo, "Edit").status, 0); // non-Bash
+      assert.equal(run(`git remote set-url origin ${url}`, tmp).status, 0); // non-repo cwd, strict parse
+      assert.equal(run("git remote -v && git config --get remote.origin.url", protectedRepo).status, 0);
+      // Non-repo cwd does NOT open the loose fail-closed scan.
+      assert.equal(run(`time git remote set-url origin ${url}`, tmp).status, 2);
     });
   });
 

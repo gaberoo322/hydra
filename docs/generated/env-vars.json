@@ -113,15 +113,15 @@
         },
         {
           "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 377
+          "line": 439
         },
         {
           "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 398
+          "line": 460
         },
         {
           "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 403
+          "line": 465
         },
         {
           "path": "scripts/deploy-drift-check.ts",
@@ -2925,6 +2925,20 @@
       "source": {
         "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh",
         "line": 39
+      }
+    },
+    {
+      "name": "HYDRA_REMOTE_FENCE_PYTHON",
+      "readSites": [
+        {
+          "path": "scripts/claude-hooks/git-remote-fence.sh",
+          "line": 115
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/claude-hooks/git-remote-fence.sh",
+        "line": 115
       }
     },
     {

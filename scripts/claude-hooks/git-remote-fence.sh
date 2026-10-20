@@ -9,9 +9,25 @@
 # <claw-street-bets>` with an empty $TARGET_WS: `cd ""` is a silent no-op, so
 # the rewrite landed on the ORCHESTRATOR's origin. A pruning fetch then
 # deleted refs/remotes/origin/master and recent-merges failed open for ~80
-# minutes. Prose rules lower the odds; this hook is the deterministic fence
-# (defense in depth behind the `${VAR:?}` playbook guards and the watchdog's
-# run_origin_identity alarm).
+# minutes.
+#
+# THREAT MODEL (issue #5026). This hook is an ACCIDENT fence against agent
+# MISFIRES — the #4939 empty-`$TARGET_WS` class, where a well-meaning command
+# silently lands on the wrong repo. It is NOT a security boundary against a
+# hostile agent and does not try to be. Explicitly OUT OF SCOPE:
+#   - git reached through a variable or an alias (`$GIT remote add ...`,
+#     a shell alias/function, a git alias in a gitconfig);
+#   - direct writes to .git/config — sed / python / printf / tee on the file,
+#     or `git config --file <path> ...`;
+#   - non-git interpreters (python/node/perl git bindings, dulwich, ...).
+# The other layers of the defense:
+#   - the playbooks' `${VAR:?}` guards, which abort the empty-seam-var shape
+#     before any git runs;
+#   - the watchdog's run_origin_identity check (scripts/hydra-watchdog.sh),
+#     which alarms when ~/hydra's origin is not the orchestrator repo (an
+#     auto-repair follow-up is filed separately);
+#   - hook installation by deploy (filed separately) — today the hook is
+#     registered by scripts/setup-claude-hooks.sh and the GLM drainer settings.
 #
 # Two layers (issue #5026):
 #  1. STRICT parser (regex) — positively identifies a statement-start `git`
@@ -34,8 +50,8 @@
 # ALLOWS everything else — `git remote -v`, `git remote get-url`, `git remote
 # show`, `git config --get remote.origin.url` (with or without a redirect), and
 # any STRICTLY-parsed mutation whose effective repo is not the protected gitdir
-# (operator shells outside Claude Code are not hooked at all). Known limit: a
-# git reached through a variable (`$GIT remote add`) or an alias is not seen.
+# (operator shells outside Claude Code are not hooked at all). Known limit (see
+# THREAT MODEL): a git reached through a variable or an alias is not seen.
 #
 # The hook inspects the FULL command text, so a compound
 # `cd "$X" && git remote set-url ...` is caught (the observed shape). A
@@ -49,29 +65,68 @@
 # target that is not a repo falls back to the SESSION CWD (deny iff protected),
 # never to ALLOW. `cd` inside a group that closed before the git is ignored.
 #
-# Fail-open ONLY on tooling failure: malformed stdin, a non-Bash tool, an empty
-# command or cwd, a session cwd that is not a git repo, or any python/git
-# crash exits 0. Exit codes are 0 and 2.
+# Fail-open vs fail-closed (issue #5026, scoped deny-on-crash):
+#   - Pure-bash PRE-FILTER: if the raw stdin text contains neither `remote` nor
+#     `config`, exit 0 at once — python never starts. This is the fast path for
+#     nearly every Bash call; a false "maybe" just falls through to python.
+#   - Fail-OPEN (exit 0) only for legitimate early exits: a non-Bash tool, an
+#     empty command, no mutation found, and a strictly-parsed mutation whose
+#     effective repo (and fallback session cwd) is not the protected gitdir —
+#     which includes a session cwd that is not a git repo, provided the loose
+#     scan found nothing unresolved.
+#   - Fail-CLOSED (exit 2) once the input mentions remote/config: malformed
+#     stdin JSON, a mutation with no session cwd, a python crash or missing
+#     interpreter (no verdict), python's internal-error `ERROR` verdict, or any
+#     unexpected verdict — "analysis failed on a command mentioning
+#     remote/config — denied fail-closed; run it by hand if intended".
+# Exit codes are 0 and 2.
 #
 # Deny payload (claude-code hook contract, same as worktree-write-fence.sh):
 #   stderr: JSON hookSpecificOutput.permissionDecision="deny"
 #   exit:   2
 #
 # Testability: HYDRA_REMOTE_FENCE_PROTECTED_GITDIR overrides the protected
-# common-dir (default /home/gabe/hydra/.git).
+# common-dir (default /home/gabe/hydra/.git); HYDRA_REMOTE_FENCE_PYTHON
+# overrides the python interpreter (default python3) so a test can force the
+# analysis to fail.
 
 set -uo pipefail
 
 INPUT=$(cat)
-export GIT_REMOTE_FENCE_INPUT="$INPUT"
 
-VERDICT=$(python3 - <<'PY' 2>/dev/null
+# Pre-filter (pure bash, no python): a command that mentions neither `remote`
+# nor `config` cannot carry a remote mutation. The text scanned is the JSON
+# "command" string when a cheap regex can pull it out, else the RAW stdin (so
+# malformed JSON is still scanned). Quotes and backslashes are dropped first,
+# so `"re"mote` / `re\mote` still count. Deliberately loose: a false "maybe"
+# only costs a python run.
+SCAN="$INPUT"
+CMD_RE='"command"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)"'
+if [[ "$INPUT" =~ $CMD_RE ]]; then
+  SCAN="${BASH_REMATCH[1]}"
+fi
+SCAN="${SCAN//[\"\'\\]/}"
+case "$SCAN" in
+  *remote*|*config*) ;;
+  *) exit 0 ;;
+esac
+
+export GIT_REMOTE_FENCE_INPUT="$INPUT"
+PYTHON_BIN="${HYDRA_REMOTE_FENCE_PYTHON:-python3}"
+
+# Verdict protocol (stdout, first line): ALLOW | DENY + reason line | ERROR.
+# Anything other than ALLOW/DENY — ERROR, empty stdout from a crash or a
+# missing interpreter, garbage — is denied fail-closed below.
+VERDICT=$("$PYTHON_BIN" - <<'PY' 2>/dev/null
 import json, os, re, subprocess
 
 try:
     payload = json.loads(os.environ.get("GIT_REMOTE_FENCE_INPUT", ""))
+    if not isinstance(payload, dict):
+        raise ValueError("payload is not a JSON object")
 except Exception:
-    print("ALLOW")
+    # Malformed stdin that passed the remote/config pre-filter: fail closed.
+    print("ERROR")
     raise SystemExit(0)
 
 if payload.get("tool_name") != "Bash":
@@ -80,7 +135,10 @@ if payload.get("tool_name") != "Bash":
 
 cmd = (payload.get("tool_input") or {}).get("command", "") or ""
 cwd = payload.get("cwd", "") or ""
-if not cmd or not cwd:
+if not isinstance(cmd, str) or not isinstance(cwd, str):
+    print("ERROR")
+    raise SystemExit(0)
+if not cmd:
     print("ALLOW")
     raise SystemExit(0)
 
@@ -370,6 +428,10 @@ hit = bool(mutations)
 if not hit:
     print("ALLOW")
     raise SystemExit(0)
+if not cwd:
+    # A mutation with no session cwd to resolve against: cannot decide.
+    print("ERROR")
+    raise SystemExit(0)
 
 protected = os.environ.get("HYDRA_REMOTE_FENCE_PROTECTED_GITDIR", "/home/gabe/hydra/.git")
 protected_real = os.path.realpath(protected)
@@ -509,27 +571,29 @@ try:
 except SystemExit:
     raise
 except Exception:
-    print("ALLOW")
+    # Internal analysis error (git missing, timeout, a bug): fail closed.
+    print("ERROR")
 PY
 )
 
-if [ "${VERDICT%%$'\n'*}" != "DENY" ]; then
-  exit 0
-fi
+case "${VERDICT%%$'\n'*}" in
+  ALLOW) exit 0 ;;
+  DENY) KIND="${VERDICT#*$'\n'}" ;;
+  *) KIND="error" ;;  # ERROR, empty (python crashed / missing) or unexpected
+esac
 
-if [ "${VERDICT#*$'\n'}" = "unparseable" ]; then
+if [ "$KIND" = "error" ]; then
+  REASON="git-remote-fence: analysis failed on a command mentioning remote/config — denied fail-closed; run it by hand if intended. (The fence's python analysis crashed, was unavailable, or returned no usable verdict, so it cannot prove this command leaves the remotes of the orchestrator gitdir /home/gabe/hydra/.git alone — issues #4939/#5026.)"
+elif [ "$KIND" = "unparseable" ]; then
   REASON="git-remote-fence: unparseable remote mutation — denied fail-closed; run it by hand if intended. This Bash command mutates a git remote (git remote set-url|add|remove|rm|rename|set-head|set-branches|prune, or a git config write to remote.*) in a form the fence cannot resolve to a target repo (a git path/quoting/wrapper such as /usr/bin/git, \"git\", time/nohup/timeout/command -p, a global flag such as -p/-P/--no-pager, or deeply nested \$(...)), so it cannot prove the target is not the orchestrator gitdir /home/gabe/hydra/.git (issue #4939). Rewrite it as a plain 'git [-C <literal dir>] remote ...' if it is meant for another repo. Reads (git remote -v, git remote get-url, git config --get remote.origin.url) are allowed."
 else
 REASON="git-remote-fence: refusing this Bash command — it mutates a git remote (git remote set-url|add|remove|rm|rename|set-head|set-branches|prune, or git config remote.*) while the session cwd belongs to the orchestrator gitdir /home/gabe/hydra/.git, which every ~/hydra worktree shares (issue #4939: an empty \$TARGET_WS made 'cd \"\$TARGET_WS\" && git remote set-url origin <target>' rewrite ~/hydra's origin and prune origin/master). Never correct a remote. If 'git remote -v' / 'git fetch' shows the ORCHESTRATOR remote where the Target was expected, the seam var is empty: STOP and re-run the target-seam preamble in THIS Bash call. Reads (git remote -v, git remote get-url, git config --get remote.origin.url) are allowed."
 fi
 
 printf '%s\n' "$REASON" >&2
-python3 -c "import json,sys
-print(json.dumps({
-  'hookSpecificOutput': {
-    'hookEventName': 'PreToolUse',
-    'permissionDecision': 'deny',
-    'permissionDecisionReason': sys.argv[1]
-  }
-}))" "$REASON" >&2 || true
+# The deny JSON must not depend on python (it may be what just failed): escape
+# backslashes, then double quotes, in pure bash. REASON holds no control chars.
+ESC=${REASON//\\/\\\\}
+ESC=${ESC//\"/\\\"}
+printf '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "%s"}}\n' "$ESC" >&2
 exit 2
