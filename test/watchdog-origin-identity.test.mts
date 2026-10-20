@@ -150,6 +150,26 @@ describe("run_origin_identity (#4939)", () => {
     assert.doesNotMatch(entries[0], /ghp_ab|cd@|user:/);
   });
 
+  it("redacts userinfo up to the LAST @ even when the token contains `/` (QA round 4)", () => {
+    const r = tick({
+      HYDRA_WATCHDOG_ORIGIN_URL: "https://user:ghp_a/b+c@github.com/gaberoo322/claw-street-bets.git",
+      HYDRA_WATCHDOG_ORIGIN_MASTER_PRESENT: "1",
+    });
+    assert.match(r.out, /ALARM .*wrong-origin-url.*remote\.origin\.url=https:\/\/github\.com\/gaberoo322\/claw-street-bets/);
+    // Host is computed after the same last-@ strip, so no spurious host alarm.
+    assert.doesNotMatch(r.out, /wrong-origin-host/);
+    assert.doesNotMatch(r.out, /ghp_a|b\+c|user:/);
+    const entries = xadds();
+    assert.equal(entries.length, 1);
+    assert.doesNotMatch(entries[0], /ghp_a|b\+c|user:/);
+    // The expected repo with a slash-bearing token is still healthy (norm strips it too).
+    const ok = tick({
+      HYDRA_WATCHDOG_ORIGIN_URL: "https://x:t/o/k@github.com/gaberoo322/hydra.git",
+      HYDRA_WATCHDOG_ORIGIN_MASTER_PRESENT: "1",
+    });
+    assert.doesNotMatch(ok.out, /ALARM/);
+  });
+
   it("alarms wrong-origin-host when the host is not the expected one", () => {
     const r = tick({
       HYDRA_WATCHDOG_ORIGIN_URL: "https://evil.example/gaberoo322/hydra.git",

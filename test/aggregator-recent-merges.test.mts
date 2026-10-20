@@ -424,6 +424,14 @@ describe("listRecentMergeCommits — wrong origin remote stays fail-open and lou
       redactUrlUserinfo("https://user:ghp_ab@cd@github.com/a/b.git"),
       "https://github.com/a/b.git",
     );
+    // QA round 4: a token containing `/` before the `@` never leaks.
+    assert.equal(redactUrlUserinfo("https://user:ghp_a/b@github.com/a/b.git"), "https://github.com/a/b.git");
+    // RFC 3986 scheme chars (digits, `.`, `-`, `+`).
+    assert.equal(redactUrlUserinfo("git+ssh://u:t@host/a/b.git"), "git+ssh://host/a/b.git");
+    assert.equal(redactUrlUserinfo("s3.x-1://u:t@host/a"), "s3.x-1://host/a");
+    // No userinfo: unchanged. An `@` in the PATH is over-stripped (fail-safe for a log sink).
+    assert.equal(redactUrlUserinfo("https://github.com/a/b.git"), "https://github.com/a/b.git");
+    assert.equal(redactUrlUserinfo("https://github.com/a/b@v1"), "https://v1");
   });
 
   test("an unrelated fetch failure does not probe the remote URL", async () => {

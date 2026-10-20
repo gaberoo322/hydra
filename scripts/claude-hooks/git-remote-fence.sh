@@ -19,7 +19,11 @@
 #     a shell alias/function, a git alias in a gitconfig);
 #   - direct writes to .git/config — sed / python / printf / tee on the file,
 #     or `git config --file <path> ...`;
-#   - non-git interpreters (python/node/perl git bindings, dulwich, ...).
+#   - non-git interpreters (python/node/perl git bindings, dulwich, ...);
+#   - indirect remote rewrites that never touch remote.* (`git config
+#     url.<base>.insteadOf <x>`, `--global`/`--system` url.* rewrites);
+#   - `pushd`/`popd` directory changes (not modelled as a `cd`; the session
+#     cwd / the git's own -C decides).
 # The other layers of the defense:
 #   - the playbooks' `${VAR:?}` guards, which abort the empty-seam-var shape
 #     before any git runs;
@@ -29,7 +33,7 @@
 #   - hook installation by deploy (filed separately) — today the hook is
 #     registered by scripts/setup-claude-hooks.sh and the GLM drainer settings.
 #
-# Two layers (issue #5026):
+# Three layers (issue #5026):
 #  1. STRICT parser (regex) — positively identifies a statement-start `git`
 #     (optional VAR=/GIT_DIR= prefix, sudo/command/env/exec/xargs, -C/-c/--opt)
 #     and resolves its effective repo (cd scope, -C chain, --git-dir/GIT_DIR=).
@@ -41,12 +45,33 @@
 #     nohup / timeout N / command -p ... git, git -p/-P/--no-pager ...). Any
 #     loose hit the strict parser did not resolve is DENIED FAIL-CLOSED, from
 #     ANY cwd ("unparseable remote mutation — run it by hand if intended").
-# Mutations (both layers):
+#     Wrapper words (sudo/env/xargs/nice/timeout/...) are skipped WITH their
+#     options, so the command word is the first non-option word after them
+#     (`xargs -n1 echo git remote add` -> `echo`).
+#  3. TOKEN-PAIR BACKSTOP (QA round 4, operator-directed) — a coarse,
+#     grammar-free text scan. Strictly-parsed spans are blanked, `$'...'` is
+#     decoded and quotes/backslashes dropped; then, case-insensitively over the
+#     whole remaining text (heredoc bodies excluded), a `git` word followed
+#     later by `remote <set-url|add|rename|rm|remove|set-head|set-branches|
+#     prune>`, or by a `config` WRITE to a remote.* key, is DENIED FAIL-CLOSED
+#     from ANY cwd ("remote-mutation phrase in command text"). It closes every
+#     shape where git is not a command word without enumerating wrappers:
+#     `echo "git remote set-url o x" | sh`, `bash -s`, `<(...)` text,
+#     `find . -exec/-execdir/-ok git remote add ...`, `parallel`, `xargs`.
+#     FALSE-POSITIVE TRADE-OFF (accepted): a command whose text merely
+#     MENTIONS such a phrase outside a heredoc — a `--body "..."` / `-m "..."`
+#     string, an `echo`, a `grep` pattern — is denied too. Agents put such
+#     text in a file (`--body-file`, `git commit -F`) or a heredoc instead.
+# Only REAL-shell heredocs (sh/bash/zsh/dash/ksh as the consumer) are scanned
+# as programs; any other heredoc body is data and is dropped first.
+# Mutations (all layers):
 #   git remote set-url|add|remove|rm|rename|set-head|set-branches|prune ...
 #   git config ... remote.<name>.<key> ...   (a WRITE: a value follows the key,
 #                                             or --unset/--add/--edit/set/...;
 #                                             a bare key or a read flag is a
-#                                             READ — see config_is_write)
+#                                             READ — see config_is_write; the
+#                                             key match is case-insensitive and
+#                                             a quoted-empty "" is a value)
 # ALLOWS everything else — `git remote -v`, `git remote get-url`, `git remote
 # show`, `git config --get remote.origin.url` (with or without a redirect), and
 # any STRICTLY-parsed mutation whose effective repo is not the protected gitdir
@@ -61,9 +86,15 @@
 #
 # Path expansion (issue #5026): only HOME (`~`, $HOME, ${HOME}) is expanded;
 # any other $VAR / backtick / $(...) is UNRESOLVED (the hook cannot see the
-# Bash tool's shell env) and falls back to the enclosing directory. A literal
-# target that is not a repo falls back to the SESSION CWD (deny iff protected),
-# never to ALLOW. `cd` inside a group that closed before the git is ignored.
+# Bash tool's shell env) and falls back to the enclosing directory; an
+# unresolved target that is not a repo falls back to the SESSION CWD (deny iff
+# protected), never to ALLOW. A LITERAL target that is not (yet) a repo — e.g.
+# `git init /tmp/x && cd /tmp/x && git remote add ...` — is decided BY PATH:
+# protected iff it lies under the protected gitdir's worktree roots (its parent
+# plus `git worktree list`: ~/hydra, .claude/worktrees/*, /dev/shm/hydra-
+# worktrees/*). Exception: an UNGUARDED `cd <missing dir>; git ...` (no `&&` /
+# `|| exit`) runs git in the previous directory, so the session cwd is checked
+# too. `cd` inside a group that closed before the git is ignored.
 #
 # Fail-open vs fail-closed (issue #5026, scoped deny-on-crash):
 #   - Pure-bash PRE-FILTER: if the raw stdin text contains neither `remote` nor
@@ -73,12 +104,15 @@
 #     empty command, no mutation found, and a strictly-parsed mutation whose
 #     effective repo (and fallback session cwd) is not the protected gitdir —
 #     which includes a session cwd that is not a git repo, provided the loose
-#     scan found nothing unresolved.
+#     scan and the token-pair backstop found nothing unresolved.
 #   - Fail-CLOSED (exit 2) once the input mentions remote/config: malformed
 #     stdin JSON, a mutation with no session cwd, a python crash or missing
 #     interpreter (no verdict), python's internal-error `ERROR` verdict, or any
 #     unexpected verdict — "analysis failed on a command mentioning
 #     remote/config — denied fail-closed; run it by hand if intended".
+#   - No silent ALLOW after a positive identification (QA round 4): once a
+#     mutation is identified, any exception yields ERROR (deny), and every
+#     python except-path logs to stderr (python's stderr is not discarded).
 # Exit codes are 0 and 2.
 #
 # Deny payload (claude-code hook contract, same as worktree-write-fence.sh):
@@ -106,6 +140,8 @@ if [[ "$INPUT" =~ $CMD_RE ]]; then
   SCAN="${BASH_REMATCH[1]}"
 fi
 SCAN="${SCAN//[\"\'\\]/}"
+# Case-insensitive, like the python backstop and git's config section names.
+shopt -s nocasematch
 case "$SCAN" in
   *remote*|*config*) ;;
   *) exit 0 ;;
@@ -117,15 +153,20 @@ PYTHON_BIN="${HYDRA_REMOTE_FENCE_PYTHON:-python3}"
 # Verdict protocol (stdout, first line): ALLOW | DENY + reason line | ERROR.
 # Anything other than ALLOW/DENY — ERROR, empty stdout from a crash or a
 # missing interpreter, garbage — is denied fail-closed below.
-VERDICT=$("$PYTHON_BIN" - <<'PY' 2>/dev/null
+# python's stderr is NOT discarded: its internal-error paths log there (fail
+# loud, QA round 4); the normal ALLOW/DENY paths write nothing to stderr.
+VERDICT=$("$PYTHON_BIN" - <<'PY'
+
 import json, os, re, subprocess
 
 try:
     payload = json.loads(os.environ.get("GIT_REMOTE_FENCE_INPUT", ""))
     if not isinstance(payload, dict):
         raise ValueError("payload is not a JSON object")
-except Exception:
+except Exception as e:
     # Malformed stdin that passed the remote/config pre-filter: fail closed.
+    import sys
+    print(f"git-remote-fence: malformed hook stdin: {e}", file=sys.stderr)
     print("ERROR")
     raise SystemExit(0)
 
@@ -146,9 +187,10 @@ if not cmd:
 # not a shell: `bash <<'EOF' ... git remote set-url ... EOF` is a program, so
 # its body must still be scanned. Delimiters must be identifiers (so `1<<3`
 # arithmetic and `<<<` here-strings are not mistaken for heredocs).
-SHELLISH = re.compile(
-    r"\b(?:ba|z|da|k|c)?sh\b|\bsource\b|\beval\b|\bpython\d?\b|\bnode\b|\bperl\b|\bxargs\b|\bssh\b|\bsu\b|\bsudo\b"
-)
+# QA round 4: only REAL shells (sh, bash, zsh, dash, ksh — as a command word,
+# optionally path-qualified) make a heredoc body a program. A data heredoc fed
+# to python/node/perl/gh/... is ignored (non-git interpreters are out of scope).
+SHELLISH = re.compile(r"(?:^|[\s|;&(/])(?:ba|z|da|k)?sh(?=[\s;&|)]|$)")
 
 def _strip_heredoc(m):
     line_start = cmd_before_strip.rfind("\n", 0, m.start()) + 1
@@ -191,7 +233,8 @@ CONFIG_WRITE_FLAGS = {
 }
 CONFIG_READ_SUBCMDS = {"get", "list"}
 CONFIG_WRITE_SUBCMDS = {"set", "unset"}
-REMOTE_KEY_TOKEN = re.compile(r"remote\.\S+")
+# Git section names are case-insensitive: `REMOTE.origin.url` is remote.* too.
+REMOTE_KEY_TOKEN = re.compile(r"remote\.\S+", re.I)
 
 REDIRECT = re.compile(r"^\d*(?:>>?|<<?<?|>&|<&|&>>?|>\|)")
 
@@ -210,16 +253,32 @@ def drop_redirects(words):
         out.append(w)
     return out
 
+ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
+
+def decode_ansi_c(text):
+    """Decode bash ANSI-C quoting (`$'add'` -> add, `$'\\x61dd'` -> add) and
+    drop the `$` of locale quoting (`$"add"`), so a quoted subcommand cannot
+    hide from the scans (QA round 4). Undecodable escapes keep their text."""
+    def dec(m):
+        try:
+            return m.group(1).encode("latin-1", "backslashreplace").decode("unicode_escape")
+        except Exception:  # intentional: keep the raw body; it is still scanned as text
+            return m.group(1)
+    return re.sub(r"\$\"", '"', ANSI_C.sub(dec, text))
+
 def bare(w):
-    """A shell word with its quoting removed (`"git"`, 'git', \\git -> git)."""
-    return re.sub(r"[\"'\\]", "", w)
+    """A shell word with its quoting removed (`"git"`, 'git', \\git, $'git' -> git)."""
+    return re.sub(r"[\"'\\]", "", decode_ansi_c(w))
 
 def config_words_is_write(words):
     """Classify the argument words of a `git config` invocation (#5026 INV-6:
     config read/write). A substitution word is one opaque VALUE, so a flag
     inside `$(...)` never counts as a read flag but the word still counts as a
     value; redirects are dropped. True iff it names a remote.* key AND writes."""
-    toks = ["VALUE" if ("$(" in t or "`" in t) else bare(t) for t in drop_redirects(words)]
+    # A quoted-empty word (`""`, `''`, `$''`) is still a VALUE: `git config
+    # remote.origin.url ""` writes an empty url (QA round 4).
+    toks = ["VALUE" if ("$(" in t or "`" in t or (t and not bare(t))) else bare(t)
+            for t in drop_redirects(words)]
     toks = [t for t in toks if t]
     key_idx = None
     for i, t in enumerate(toks):
@@ -365,6 +424,48 @@ WRAPPERS = {
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "eval", "su"}
 GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
 
+# Wrapper options that consume the NEXT word as their value (QA round 4), so
+# `nice -n 5 git` / `sudo -u x git` / `xargs -n 1 echo` skip the value.
+WRAPPER_VALUE_OPTS = {
+    "-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-n", "-I", "-L", "-P", "-s",
+    "-d", "-E", "-a", "-k", "-c", "-S", "-o", "-e", "--user", "--group",
+    "--signal", "--kill-after", "--adjustment", "--max-args", "--max-procs",
+    "--replace", "--delimiter", "--arg-file", "--chdir", "--split-string",
+}
+# Wrappers whose single-letter flags above do NOT take a value.
+WRAPPER_FLAG_ONLY = {
+    "env": {"-i", "-0"}, "time": {"-p"}, "command": {"-p", "-v", "-V"},
+    "exec": {"-c", "-l"}, "setsid": {"-f", "-w"}, "stdbuf": set(),
+}
+NUMERIC_ARG = re.compile(r"^(?:\d+(?:\.\d+)?[smhd]?|0x[0-9a-fA-F]+|[\d,-]+)$")
+
+def command_word(raw):
+    """Index of the command word of a simple command (QA round 4): skip
+    leading VAR= assignments, then for each wrapper word skip its options
+    (and a value-taking option's value), its env assignments and numeric
+    positionals (`timeout 5`, `taskset 0x3`, `chrt 10`); the next word is the
+    command (`xargs -n1 echo git remote add` -> `echo`, not `git`)."""
+    i, n = 0, len(raw)
+    while i < n and ASSIGN.match(raw[i]):
+        i += 1
+    while i < n and bare(raw[i]) in WRAPPERS:
+        wrapper = bare(raw[i])
+        flag_only = WRAPPER_FLAG_ONLY.get(wrapper, set())
+        i += 1
+        while i < n:
+            w = bare(raw[i])
+            if w == "--":
+                i += 1
+                break
+            if w.startswith("-") and len(w) > 1:
+                takes_value = w in WRAPPER_VALUE_OPTS and w not in flag_only
+                i += 2 if takes_value else 1
+            elif ASSIGN.match(w) or NUMERIC_ARG.match(w):
+                i += 1
+            else:
+                break
+    return i
+
 def is_git(w):
     return os.path.basename(bare(w)) == "git"
 
@@ -384,11 +485,7 @@ def loose_mutations(text):
                         g = 1 if fm.group(1) is not None else 2
                         if fm.group(g):
                             todo.append((off + fm.start(g), fm.group(g)))
-            i = 0
-            while i < len(raw) and ASSIGN.match(raw[i]):
-                i += 1
-            if i < len(raw) and bare(raw[i]) in WRAPPERS:
-                i = next((j for j in range(i + 1, len(raw)) if is_git(raw[j])), len(raw))
+            i = command_word(raw)
             if i >= len(raw) or not is_git(raw[i]):
                 continue
             k = i + 1
@@ -416,12 +513,55 @@ for m in CONFIG.finditer(cmd):
 # nesting depth outside its grammar), so it is denied whatever the cwd.
 try:
     loose = loose_mutations(cmd)
-except Exception:
+except Exception as e:
+    import sys
+    print(f"git-remote-fence: loose tokenizer failed ({e!r}); using the regex fallback", file=sys.stderr)
     loose = [lm.start() for lm in re.finditer(
         r"\bgit\b[^\n]*?\b(?:remote\s+(?:" + "|".join(REMOTE_MUT_SUBCMDS)
         + r")|config\b[^\n]*\bremote\.)", cmd)]
 if any(not any(ms <= off <= ms + len(mt) for ms, mt in mutations) for off in loose):
     print("DENY\nunparseable")
+    raise SystemExit(0)
+
+# ---------------------------------------------------------------------------
+# TOKEN-PAIR BACKSTOP (#5026, QA round 4, operator-directed). A coarse text
+# scan that needs no grammar: blank out every span the STRICT parser resolved
+# (those are decided by is_protected below), decode $'...', drop quotes and
+# backslashes, then — case-insensitively, over the whole remaining text with
+# heredoc bodies already removed — look for
+#   (a) a `git` word followed later by `remote` + a mutation verb, or
+#   (b) a `git` word followed later by `config ... <remote.* key> ...` that
+#       config_words_is_write classifies as a write.
+# Any such phrase is denied fail-closed. This closes every "the git is not a
+# command word" shape at once — `echo "git remote set-url o x" | sh`,
+# `bash -s`, `<(...)`, `find . -exec/-execdir/-ok git remote add ...`,
+# `parallel git remote ...`, `xargs ... git remote ...` — without enumerating
+# wrappers. FALSE-POSITIVE TRADE-OFF (accepted): a command whose text merely
+# MENTIONS such a phrase outside a heredoc — a `--body "..."` / `-m "..."`
+# string, an `echo`, a `grep` pattern — is denied. Put such text in a file
+# (`--body-file`, `-F`) or a heredoc.
+# ---------------------------------------------------------------------------
+BACKSTOP_REMOTE = re.compile(
+    r"\bgit\b.*?\bremote\s+(?:-\S+\s+)*(?:" + "|".join(REMOTE_MUT_SUBCMDS) + r")(?![\w-])",
+    re.I | re.S,
+)
+BACKSTOP_CONFIG = re.compile(r"\bgit\b.*?\bconfig\b([^;&|\n]*)", re.I | re.S)
+
+def backstop_hit(text):
+    for m in BACKSTOP_CONFIG.finditer(text):
+        if config_words_is_write(m.group(1).split()):
+            return True
+    return bool(BACKSTOP_REMOTE.search(text))
+
+# Blank the strictly-parsed spans (a strict config match already spans its
+# whole argument segment; a strict remote match spans `git ... remote <verb>`).
+masked = list(cmd)
+for ms, mt in mutations:
+    for k_ in range(ms, min(ms + len(mt), len(masked))):
+        masked[k_] = " "
+backstop_text = re.sub(r"[\"'\\]", "", decode_ansi_c("".join(masked)))
+if backstop_hit(backstop_text):
+    print("DENY\nbackstop")
     raise SystemExit(0)
 hit = bool(mutations)
 
@@ -518,7 +658,10 @@ def paren_depths(text):
 DEPTHS = paren_depths(cmd)
 
 def effective_cd(pos):
-    """The last literal `cd` before pos whose group is still open at pos."""
+    """(target word, guarded) of the last `cd` before pos whose group is still
+    open at pos, or (None, False). `guarded` means a failing cd stops the git
+    (`cd X && git ...`, `cd X || exit 1; git ...`); an unguarded `cd X; git`
+    runs git in the PREVIOUS directory when X does not exist."""
     last = None
     for cm in CD.finditer(cmd[:pos]):
         d = DEPTHS[cm.end()]
@@ -528,8 +671,11 @@ def effective_cd(pos):
         if re.match(r"[ \t]*(?:\|(?!\|)|&(?!&))", cmd[cm.end():]):
             continue
         if min(DEPTHS[cm.end():pos + 1]) >= d:
-            last = cm.group(1)
-    return last
+            last = cm
+    if last is None:
+        return None, False
+    guarded = bool(re.match(r"[ \t]*(?:&&|\|\|[ \t]*(?:exit|return)\b)", cmd[last.end():]))
+    return last.group(1), guarded
 
 def resolves_protected(c, base):
     if c is None:
@@ -538,40 +684,85 @@ def resolves_protected(c, base):
         c = os.path.join(base, c)
     return os.path.realpath(c) == protected_real
 
+_roots = None
+
+def protected_roots():
+    """Real paths of the protected repo's worktree roots: the main worktree
+    (the gitdir's parent) plus every `git worktree list` entry of the
+    protected gitdir (~/hydra, its .claude/worktrees/*, /dev/shm/hydra-worktrees/*)."""
+    global _roots
+    if _roots is None:
+        roots = {os.path.dirname(protected_real)}
+        out = subprocess.run(
+            ["git", "--git-dir", protected_real, "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0:
+            for line in out.stdout.splitlines():
+                if line.startswith("worktree "):
+                    roots.add(os.path.realpath(line[len("worktree "):]))
+        _roots = roots
+    return _roots
+
+def under_protected(path):
+    """Path decision for a LITERAL target that is not (yet) a repo: is it the
+    protected gitdir or inside one of its worktree roots?"""
+    rp = os.path.realpath(path)
+    if rp == protected_real or rp.startswith(protected_real + os.sep):
+        return True
+    return any(rp == r or rp.startswith(r + os.sep) for r in protected_roots())
+
 def is_protected(pos, prefix):
     """Resolve the EFFECTIVE repo of one mutating git invocation: the last
     in-scope literal `cd <dir>`, then `git -C <dir>` chain, then --git-dir /
-    GIT_DIR=. An unresolvable value (`$VAR`, backtick, the empty-seam-var
-    incident shape) falls back to the previous directory, exactly as the shell
-    does for an empty value. If the effective repo cannot be resolved at all
-    (nonexistent dir, not a repo) the SESSION CWD is the effective repo
-    (INV-2): unresolvable never allows."""
+    GIT_DIR=. An UNRESOLVED value (`$VAR`, `$(...)`, backtick — the
+    empty-seam-var incident shape) falls back to the previous directory,
+    exactly as the shell does for an empty value, and an unresolved effective
+    repo that is not a repo falls back to the SESSION CWD (INV-2: unresolvable
+    never allows). A LITERAL target that is not (yet) a repo — `git init /tmp/x
+    && cd /tmp/x && git remote add ...` — is decided BY PATH: protected iff it
+    lies under the protected repo's worktree roots (QA round 4). Exception: an
+    UNGUARDED `cd <missing dir>; git ...` runs git in the previous directory,
+    so the session cwd is checked too."""
     eff = cwd
-    last_cd = effective_cd(pos)
+    literal_target = False
+    cd_may_fail_open = False
+    last_cd, guarded = effective_cd(pos)
     if last_cd and literal(last_cd):
         eff = os.path.join(eff, literal(last_cd))
+        literal_target = True
+        cd_may_fail_open = not guarded and not os.path.isdir(eff)
     for cm in OPT_C.finditer(prefix):
         v = literal(cm.group(1))
         if v:
             eff = os.path.join(eff, v)
+            literal_target = True
     gd = OPT_GITDIR.search(prefix) or ENV_GITDIR.search(prefix)
     gd_val = literal(gd.group(1)) if gd else None
-    res = None
     if gd_val:
-        gpath = os.path.join(eff, gd_val)
-        res = resolves_protected(common_dir(["--git-dir", gpath]), gpath)
+        target = os.path.join(eff, gd_val)
+        literal_target = True
+        res = resolves_protected(common_dir(["--git-dir", target]), target)
     else:
+        target = eff
         res = resolves_protected(common_dir(["-C", eff]), eff)
-    if res is None:
-        res = resolves_protected(common_dir(["-C", cwd]), cwd)
-    return bool(res)
+    if res is not None:
+        return res
+    cwd_res = bool(resolves_protected(common_dir(["-C", cwd]), cwd))
+    if not literal_target:
+        return cwd_res
+    return under_protected(target) or (cd_may_fail_open and cwd_res)
 
 try:
     print("DENY\nprotected" if any(is_protected(p_, t_) for p_, t_ in mutations) else "ALLOW")
 except SystemExit:
     raise
 except Exception:
-    # Internal analysis error (git missing, timeout, a bug): fail closed.
+    # Internal analysis error AFTER a mutation was positively identified (git
+    # missing, timeout, a bug): never ALLOW — fail closed AND fail loud.
+    import sys, traceback
+    print("git-remote-fence: internal error resolving a remote mutation:", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
     print("ERROR")
 PY
 )
@@ -584,6 +775,8 @@ esac
 
 if [ "$KIND" = "error" ]; then
   REASON="git-remote-fence: analysis failed on a command mentioning remote/config — denied fail-closed; run it by hand if intended. (The fence's python analysis crashed, was unavailable, or returned no usable verdict, so it cannot prove this command leaves the remotes of the orchestrator gitdir /home/gabe/hydra/.git alone — issues #4939/#5026.)"
+elif [ "$KIND" = "backstop" ]; then
+  REASON="git-remote-fence: remote-mutation phrase in command text — denied fail-closed; run it by hand if intended. Outside a heredoc, this Bash command's text contains a 'git ... remote set-url|add|remove|rm|rename|set-head|set-branches|prune' phrase or a 'git ... config' write to a remote.* key that the fence could not resolve to a plain 'git [-C <literal dir>] remote ...' invocation of a non-orchestrator repo (e.g. it is piped to a shell, run via find -exec / xargs / parallel / bash -s / <(...), or quoted inside another command), so it cannot prove the target is not the orchestrator gitdir /home/gabe/hydra/.git (issues #4939/#5026). If the phrase is only TEXT (a --body / -m string, an echo, a grep pattern), move it into a file (--body-file, -F) or a heredoc; if it is a real command for another repo, run it as a plain 'git -C <literal dir> remote ...'."
 elif [ "$KIND" = "unparseable" ]; then
   REASON="git-remote-fence: unparseable remote mutation — denied fail-closed; run it by hand if intended. This Bash command mutates a git remote (git remote set-url|add|remove|rm|rename|set-head|set-branches|prune, or a git config write to remote.*) in a form the fence cannot resolve to a target repo (a git path/quoting/wrapper such as /usr/bin/git, \"git\", time/nohup/timeout/command -p, a global flag such as -p/-P/--no-pager, or deeply nested \$(...)), so it cannot prove the target is not the orchestrator gitdir /home/gabe/hydra/.git (issue #4939). Rewrite it as a plain 'git [-C <literal dir>] remote ...' if it is meant for another repo. Reads (git remote -v, git remote get-url, git config --get remote.origin.url) are allowed."
 else

@@ -113,15 +113,15 @@
         },
         {
           "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 439
+          "line": 579
         },
         {
           "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 460
+          "line": 600
         },
         {
           "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 465
+          "line": 605
         },
         {
           "path": "scripts/deploy-drift-check.ts",
@@ -281,7 +281,7 @@
         },
         {
           "path": "src/aggregators/recent-merges.ts",
-          "line": 369
+          "line": 374
         },
         {
           "path": "src/aggregators/service-strip.ts",
@@ -2932,13 +2932,13 @@
       "readSites": [
         {
           "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 115
+          "line": 151
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/claude-hooks/git-remote-fence.sh",
-        "line": 115
+        "line": 151
       }
     },
     {
@@ -3104,7 +3104,7 @@
         },
         {
           "path": "src/aggregators/recent-merges.ts",
-          "line": 367
+          "line": 372
         },
         {
           "path": "src/aggregators/service-strip.ts",
@@ -3773,13 +3773,13 @@
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2061
+          "line": 2069
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh",
-        "line": 2061
+        "line": 2069
       }
     },
     {
