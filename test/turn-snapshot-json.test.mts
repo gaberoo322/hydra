@@ -97,6 +97,7 @@ function healthyValues(): TurnSnapshotValues {
       dirty: [4938, 4814, 4814],
       unchecked: [4950],
       behind: [4952, 4951, 4953],
+      qaVerdictRecheck: ok([]),
       ciTriggerStale: ok(false),
       glmRed: ok({ bucket: [4881], pick: { issue: 4876, pr: 4881, headRefName: "worktree-agent-glm-4876-1791218911" } }),
       devResumePick: ok({ issue: 4718, pr: 4890, headRefName: "worktree-agent-a1b2" }),

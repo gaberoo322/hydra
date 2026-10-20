@@ -22,19 +22,11 @@ export interface TurnSnapshotHost {
   failedServiceUnits(): Promise<FailedUnitsRead>;
   /** A file's bytes, or `null` when it is missing or unreadable (bash `[ -r "$f" ]` false). */
   readFile(path: string): Promise<Buffer | null>;
-  /**
-   * #5052: run `bash scripts/autopilot/qa-verdict-event.sh <pr> <tier>` and
-   * return its parsed stdout JSON, or `null` on a non-zero exit, a spawn
-   * failure, or unparseable output (the caller omits the entry - fail closed).
-   */
-  runQaVerdictEvent(pr: number, tier: number): Promise<unknown>;
 }
 
 const SYSTEMCTL_FAILED_UNITS_ARGS = ["--user", "list-units", "--type=service", "--state=failed", "--no-legend"];
 
 const SYSTEMCTL_TIMEOUT_MS = 15_000;
-const QA_VERDICT_EVENT_TIMEOUT_MS = 90_000;
-const QA_VERDICT_EVENT_SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../scripts/autopilot/qa-verdict-event.sh");
 
 /** The production host port: real systemctl + real filesystem. */
 export function createTurnSnapshotHost(): TurnSnapshotHost {
@@ -47,6 +39,36 @@ export function createTurnSnapshotHost(): TurnSnapshotHost {
         });
       });
     },
+    async readFile(path) {
+      try {
+        return await readFile(path);
+      } catch {
+        /* intentional: missing/unreadable is the `null` arm — bash's `[ -r ]` false (no drift / unavailable taxonomy) */
+        return null;
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// #5052 - the QA-verdict recheck's one host read, its own narrow port so the
+// passthrough collectors' fakes need not grow a method they never call.
+// ---------------------------------------------------------------------------
+
+export interface QaVerdictRunner {
+  /**
+   * Run `bash scripts/autopilot/qa-verdict-event.sh <pr> <tier>` and return
+   * its parsed stdout JSON, or `null` on a non-zero exit, a spawn failure, or
+   * unparseable output (the caller omits the entry - fail closed).
+   */
+  runQaVerdictEvent(pr: number, tier: number): Promise<unknown>;
+}
+
+const QA_VERDICT_EVENT_TIMEOUT_MS = 90_000;
+const QA_VERDICT_EVENT_SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../scripts/autopilot/qa-verdict-event.sh");
+
+export function createQaVerdictRunner(): QaVerdictRunner {
+  return {
     runQaVerdictEvent(pr, tier) {
       return new Promise((resolveRead) => {
         execFile("bash", [QA_VERDICT_EVENT_SCRIPT, String(pr), String(tier)], { timeout: QA_VERDICT_EVENT_TIMEOUT_MS }, (err, stdout, stderr) => {
@@ -63,14 +85,6 @@ export function createTurnSnapshotHost(): TurnSnapshotHost {
           }
         });
       });
-    },
-    async readFile(path) {
-      try {
-        return await readFile(path);
-      } catch {
-        /* intentional: missing/unreadable is the `null` arm — bash's `[ -r ]` false (no drift / unavailable taxonomy) */
-        return null;
-      }
     },
   };
 }

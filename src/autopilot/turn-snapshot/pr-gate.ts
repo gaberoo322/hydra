@@ -46,7 +46,7 @@ import { closedIssues, referencedIssues, type PrRefRow } from "../../github/pr-r
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
 import { DEFAULT_NOPR_RESUME_QUIESCENCE_SECONDS, pickDevResume, pickNoPrResume, type NoPrResumeRow } from "./dev-resume.ts";
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
-import type { TurnSnapshotHost } from "./host-port.ts";
+import type { QaVerdictRunner } from "./host-port.ts";
 import { pyEpochSeconds, pyFloatOr, pyJsonLoads, pyStr, pyTruthy } from "./py-compat.ts";
 
 export const PR_GATE_COLLECTOR = "pr-gate";
@@ -732,7 +732,7 @@ export interface PrGateDeps {
    * #5052 INV-2: runs `qa-verdict-event.sh` for each recheck candidate. Absent
    * -> the recheck fails closed (`[]` + a degraded marker) when a candidate exists.
    */
-  readonly host?: Pick<TurnSnapshotHost, "runQaVerdictEvent">;
+  readonly host?: QaVerdictRunner;
 }
 
 const DEFAULT_REPOLL_DELAY = "5";
