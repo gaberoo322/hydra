@@ -1,0 +1,1 @@
+- feat: replace the 4h digest, daily heartbeat and weekly summary with one 07:30 Morning Brief, and page on review pickup (#5047)

@@ -20,6 +20,8 @@ import assert from "node:assert/strict";
 
 import { runReviewPickupNotify } from "../src/scheduler/housekeeping.ts";
 import { formatMessage } from "../src/notify.ts";
+import { messageFromEvent, OperatorChannel } from "../src/operator-channel/index.ts";
+import { renderMessage } from "../src/operator-channel/render.ts";
 
 interface PublishedEvent {
   stream: string;
@@ -48,6 +50,16 @@ function makeArmedState(initial = false) {
       notified = false;
     },
     peek: () => notified,
+  };
+}
+
+/** Capturing stand-in for the Operator Channel's `resolve`. */
+function makeResolveChannel(resolved: Array<{ key: string; title?: string }>) {
+  return {
+    resolve: async (key: string, title?: string) => {
+      resolved.push({ key, title });
+      return { sent: false as const, reason: "not-bad" as const };
+    },
   };
 }
 
@@ -107,13 +119,17 @@ describe("runReviewPickupNotify — edge trigger", () => {
     const captured: PublishedEvent[] = [];
     const bus = makeFakeBus(captured);
     const armed = makeArmedState(true); // was non-empty, now draining
+    const resolved: Array<{ key: string; title?: string }> = [];
 
     const result = await runReviewPickupNotify(bus, {
       getPickupSet: async () => [],
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
       clearNotified: armed.clearNotified,
+      channel: makeResolveChannel(resolved),
     });
+    // The drain edge resolves the page so the next edge is a fresh page (#5047).
+    assert.deepEqual(resolved.map((r) => r.key), ["review:pickup_ready"]);
 
     assert.equal(result.fired, false);
     assert.equal(result.transitioned, true);
@@ -147,6 +163,7 @@ describe("runReviewPickupNotify — edge trigger", () => {
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
       clearNotified: armed.clearNotified,
+      channel: makeResolveChannel([]),
     };
 
     // 1. empty -> non-empty: fires
@@ -182,5 +199,37 @@ describe("formatMessage — review:pickup_ready rendering", () => {
     });
     assert.ok(msg.includes("1 item need"));
     assert.ok(!msg.includes("1 items"));
+  });
+});
+
+describe("review:pickup_ready as an Operator Channel Page (issue #5047)", () => {
+  test("the page carries Action: /hydra-review and a link to the first pickup item", async () => {
+    const msg = messageFromEvent({
+      type: "review:pickup_ready",
+      payload: { count: 2, firstTitle: "Decide tier for PR #710", firstUrl: "https://x/710", firstNumber: 710 },
+    });
+    assert.equal(msg.severity, "page");
+    assert.equal(msg.action?.name, "waiting-on-you:ready-for-human");
+    assert.equal(msg.links[0].url, "https://x/710");
+    const sent: string[] = [];
+    const channel = new OperatorChannel({
+      store: {
+        readDedup: async () => null,
+        writeDedup: async () => {},
+        incrSuppressed: async () => {},
+        delDedup: async () => {},
+        appendBrief: async () => {},
+        appendLog: async () => {},
+      },
+      transport: async (text) => {
+        sent.push(text);
+        return { ok: true, mode: "html" } as any;
+      },
+    });
+    await channel.page(msg);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /Action: <code>\/hydra-review<\/code>/);
+    assert.match(sent[0], /href="https:\/\/x\/710"/);
+    assert.equal(renderMessage(msg, { actionCommand: "/hydra-review" }).includes("Action:"), true);
   });
 });

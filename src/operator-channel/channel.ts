@@ -20,6 +20,7 @@ import { sendHtmlToTelegram, type TelegramTransportFn } from "../notify.ts";
 import { ALERT_TYPES, formatAlertMessage } from "../notification/alert-grammar.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../event-bus-vocabulary.ts";
 import { REGISTRY } from "../operator-actions/registry.ts";
+import type { Action } from "../schemas/operator-actions.ts";
 import {
   redisOperatorChannelStore,
   type DedupState,
@@ -121,7 +122,7 @@ export function messageFromEvent(event: ChannelEventInput): OperatorMessage {
   else if (kind === E.DLQ_ALERT) {
     dedupKey = `dlq:${String(payload.originalStream ?? "unknown")}:${String(payload.eventType ?? "unknown")}`;
   }
-  return {
+  const msg: OperatorMessage = {
     severity: isPageKind(kind) ? "page" : "brief",
     kind,
     title,
@@ -129,6 +130,33 @@ export function messageFromEvent(event: ChannelEventInput): OperatorMessage {
     links: [],
     dedupKey,
   };
+  if (kind === E.REVIEW_PICKUP_READY) enrichReviewPickup(msg, payload);
+  return msg;
+}
+
+/** The ADR-0034 §8 registry entry a review-pickup page points the operator at. */
+export const REVIEW_PICKUP_ACTION = "waiting-on-you:ready-for-human";
+
+/**
+ * Per-kind page enrichment for `review:pickup_ready` (issue #5047): a readable
+ * title, the `/hydra-review` Action line (resolved from the registry at render
+ * time) and a link to the first pickup item.
+ */
+function enrichReviewPickup(msg: OperatorMessage, payload: Record<string, unknown>): void {
+  const count = Number(payload.count);
+  msg.title = Number.isFinite(count) && count > 0 ? `${count} item(s) waiting for /hydra-review` : "Items waiting for /hydra-review";
+  msg.action = { name: REVIEW_PICKUP_ACTION };
+  if (typeof payload.firstUrl === "string" && payload.firstUrl) {
+    const first = typeof payload.firstTitle === "string" && payload.firstTitle ? payload.firstTitle : "first item";
+    msg.links = [{ label: first, url: payload.firstUrl }];
+  }
+}
+
+/** The one-line command text of an ADR-0034 §8 action (shared with the Morning Brief). */
+export function actionCommandText(a: Action): string {
+  if (a.kind === "terminal-skill") return a.command;
+  if (a.kind === "in-dashboard") return `${a.method} ${a.route}`;
+  return a.label;
 }
 
 /** Resolve an ADR-0034 §8 registry entry name to its recommended command. */
@@ -138,10 +166,7 @@ function resolveActionCommand(name: string): string | undefined {
     logger.error({ name }, "[OperatorChannel] unknown action name — omitting Action line");
     return undefined;
   }
-  const a = entry.recommended;
-  if (a.kind === "terminal-skill") return a.command;
-  if (a.kind === "in-dashboard") return `${a.method} ${a.route}`;
-  return a.label;
+  return actionCommandText(entry.recommended);
 }
 
 // ---------------------------------------------------------------------------

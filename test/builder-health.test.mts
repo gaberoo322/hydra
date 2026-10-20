@@ -8,8 +8,6 @@
  *   - `getBuilderHealthScorecard` — composition under Promise.allSettled with
  *     stubbed sub-sources; the never-throws / degrade-to-null contract.
  *   - `getScopeViolationsByDay` day-key math (`utcDateKey`).
- *   - `formatBuilderHealthLines` — the digest section's always-render + empty
- *     degradation contract.
  *
  * Every source is stubbed via `deps`, so no Redis and no `gh` are required.
  */
@@ -27,7 +25,6 @@ import {
   type GhPrView,
 } from "../src/aggregators/autonomy-classifier.ts";
 import { utcDateKey } from "../src/redis/scope-violations.ts";
-import { formatBuilderHealthLines } from "../src/digest.ts";
 import {
   computeStagnationPanel,
   type TrendRow,
@@ -433,54 +430,6 @@ describe("getBuilderHealthScorecard — composition", () => {
       labels.includes("builder-health/design-concept-count"),
       `expected builder-health/design-concept-count in ${JSON.stringify(labels)}`,
     );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// formatBuilderHealthLines — digest section
-// ---------------------------------------------------------------------------
-
-describe("formatBuilderHealthLines — digest section", () => {
-  test("null scorecard => always renders the header + 'no data' line", () => {
-    const lines = formatBuilderHealthLines(null);
-    assert.equal(lines[0], "*Builder health:*");
-    assert.match(lines[1], /No builder-health data yet/);
-  });
-
-  test("empty-but-present scorecard => 'no data' degradation", () => {
-    const lines = formatBuilderHealthLines({
-      generatedAt: "2026-06-20T00:00:00.000Z",
-      autonomyRate: { rate: 0, autonomous: 0, total: 0, window: 50, breakdown: [] },
-      timeToMerge: { medianMinutes: null, p90Minutes: null, samples: 0, window: 50 },
-      reworkRate: { regressionRate: 0, noOpMergeRate: 0, window: 0 },
-      selfImprovementShare: { share: 0, floor: 0.25, floorStatus: "unmeasured", floorMet: null, orchestratorCount: 0, window: 0 },
-      mutationKillRateTrend: null,
-      scopeViolations: { series: [], total: 0, windowDays: 7 },
-      learningThroughput: { promotionRate: [], metaFrictionOpened: 0, designConceptsProducedToday: 0, windowDays: 7 },
-      stagnation: null,
-    });
-    assert.match(lines.join("\n"), /No builder-health data yet/);
-  });
-
-  test("populated scorecard renders autonomy + share + rework lines", () => {
-    const lines = formatBuilderHealthLines({
-      generatedAt: "2026-06-20T00:00:00.000Z",
-      autonomyRate: { rate: 0.5, autonomous: 1, total: 2, window: 50, breakdown: [] },
-      timeToMerge: { medianMinutes: 60, p90Minutes: 84, samples: 2, window: 50 },
-      reworkRate: { regressionRate: 5, noOpMergeRate: 10, window: 20 },
-      selfImprovementShare: { share: 0.4, floor: 0.25, floorStatus: "met", floorMet: true, orchestratorCount: 4, window: 10 },
-      mutationKillRateTrend: null,
-      scopeViolations: { series: [], total: 1, windowDays: 7 },
-      learningThroughput: { promotionRate: [], metaFrictionOpened: 1, designConceptsProducedToday: 3, windowDays: 7 },
-      stagnation: null,
-    });
-    const text = lines.join("\n");
-    assert.match(text, /Autonomy: 50%/);
-    assert.match(text, /Time-to-merge: median 1\.0h/);
-    assert.match(text, /Self-improvement share: 40%/);
-    assert.match(text, /Rework: 5% regressions/);
-    assert.match(text, /Scope violations: 1 in last 7d/);
-    assert.match(text, /Learning: 1 meta-friction/);
   });
 });
 

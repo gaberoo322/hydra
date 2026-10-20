@@ -22,7 +22,7 @@ export const PAGE_KINDS = [
   // The notification consumer is dead
   E.CONSUMER_DEAD,
   // An Outcome Holdback revert failed
-  "holdback:revert_failed",
+  E.HOLDBACK_REVERT_FAILED,
   // Orchestrator, autopilot, tunnel or backup service failures
   "service:orchestrator_failed",
   "service:autopilot_failed",

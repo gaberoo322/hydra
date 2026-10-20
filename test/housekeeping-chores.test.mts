@@ -19,7 +19,6 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  runWeeklyDigest,
   runMemoryConsolidation,
   runDesignConceptSnapshot,
   pruneStaleRedisKeys,
@@ -89,40 +88,6 @@ describe("runDesignConceptSnapshot — isolated (issue #2067)", () => {
 // The runDoneLanePrune chore (and its isolated test) was retired with the Redis
 // backlog subsystem — ADR-0031 contract phase, issue #3439 (it pruned the Redis
 // `done` lane, which no longer exists).
-
-describe("runWeeklyDigest — isolated (issue #2067)", () => {
-  test("sends + stamps when a summary is produced", async () => {
-    let sent: string | null = null;
-    let stamped = false;
-    await runWeeklyDigest({
-      buildWeeklySummary: async () => "weekly!",
-      sendToTelegram: async (msg) => {
-        sent = msg;
-      },
-      setLastWeekly: async () => {
-        stamped = true;
-      },
-    });
-    assert.equal(sent, "weekly!", "the summary is sent to Telegram");
-    assert.equal(stamped, true, "the weekly guard key is stamped on send");
-  });
-
-  test("no summary → nothing sent, no stamp", async () => {
-    let sent = false;
-    let stamped = false;
-    await runWeeklyDigest({
-      buildWeeklySummary: async () => null,
-      sendToTelegram: async () => {
-        sent = true;
-      },
-      setLastWeekly: async () => {
-        stamped = true;
-      },
-    });
-    assert.equal(sent, false, "no send when the builder yields null");
-    assert.equal(stamped, false, "no stamp when nothing was sent");
-  });
-});
 
 describe("runMemoryConsolidation — isolated (issue #2067)", () => {
   test("consolidates then stamps the daily guard key", async () => {
@@ -263,12 +228,11 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
   }
 
   // A fresh timestamp for every cadence reader → every time-windowed guard
-  // blocks, so all four guarded chores must appear in `skipped` and NONE of
+  // blocks, so all three guarded chores must appear in `skipped` and NONE of
   // their `work` bodies run — proving the guard-windowing decision is fully
   // driven by the injected `deps` + `now`, with no Redis fixture in play.
   const freshTs = async () => String(now);
   const allGuardsBlockDeps = {
-    getDigestLastWeekly: freshTs,
     getUsageSnapshotLastWeekly: freshTs,
     getMemoryLastConsolidation: freshTs,
     getCleanupLastDaily: freshTs,
@@ -280,13 +244,12 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     publishTargetOutcomes: async () => {},
   };
   const guardedChores = [
-    "weekly-summary",
     "usage-weekly-snapshot",
     "memory-consolidation",
     "stale-key-prune",
   ];
 
-  test("fresh injected timestamps block all four time-windowed chores (→ skipped)", async () => {
+  test("fresh injected timestamps block all three time-windowed chores (→ skipped)", async () => {
     const summary = await runHousekeeping(makeBus() as any, allGuardsBlockDeps);
     for (const name of guardedChores) {
       assert.ok(
@@ -309,7 +272,6 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     // deps with no Redis fixture.
     const nullTs = async () => null;
     const summary = await runHousekeeping(makeBus() as any, {
-      getDigestLastWeekly: nullTs,
       getUsageSnapshotLastWeekly: nullTs,
       getMemoryLastConsolidation: nullTs,
       getCleanupLastDaily: nullTs,

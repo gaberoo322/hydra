@@ -25,12 +25,12 @@ describe("redis/operator-channel accessor", () => {
 
   beforeEach(async () => {
     for (const k of KEYS) await acc.delDedup(k);
-    await raw.del(acc.BRIEF_ITEMS_KEY, acc.DELIVERY_LOG_KEY);
+    await raw.del(acc.BRIEF_ITEMS_KEY, acc.DELIVERY_LOG_KEY, acc.BRIEF_LAST_SENT_KEY);
   });
 
   after(async () => {
     for (const k of KEYS) await acc.delDedup(k);
-    await raw.del(acc.BRIEF_ITEMS_KEY, acc.DELIVERY_LOG_KEY);
+    await raw.del(acc.BRIEF_ITEMS_KEY, acc.DELIVERY_LOG_KEY, acc.BRIEF_LAST_SENT_KEY);
     await raw.quit();
   });
 
@@ -72,7 +72,29 @@ describe("redis/operator-channel accessor", () => {
     assert.deepEqual(log.map((e) => e.kind), ["recovered", "page"]);
   });
 
+  test("brief last-sent round-trips epoch ms; absent or corrupt reads as null", async () => {
+    assert.equal(await acc.getBriefLastSent(), null);
+    await acc.setBriefLastSent(1_700_000_000_000);
+    assert.equal(await acc.getBriefLastSent(), 1_700_000_000_000);
+    await raw.set(acc.BRIEF_LAST_SENT_KEY, "not-a-number");
+    assert.equal(await acc.getBriefLastSent(), null);
+  });
+
+  test("listDedupStates returns bad keys with suppressed counts, oldest first", async () => {
+    await acc.writeDedup("sentinel:b", { state: "bad", firstAt: 200, lastSentAt: 200, suppressed: 3 });
+    await acc.writeDedup("sentinel:a", { state: "bad", firstAt: 100, lastSentAt: 100, suppressed: 0 });
+    const mine = (await acc.listDedupStates()).filter((e: any) => KEYS.includes(e.dedupKey));
+    assert.deepEqual(
+      mine.map((e: any) => [e.dedupKey, e.firstAt, e.suppressed]),
+      [
+        ["sentinel:a", 100, 0],
+        ["sentinel:b", 200, 3],
+      ],
+    );
+  });
+
   test("key names are the documented constants", () => {
+    assert.equal(acc.BRIEF_LAST_SENT_KEY, "hydra:operator-channel:brief:last-sent");
     assert.equal(acc.BRIEF_ITEMS_KEY, "hydra:operator-channel:brief:items");
     assert.equal(acc.DELIVERY_LOG_KEY, "hydra:operator-channel:delivery-log");
     assert.equal(acc.dedupKeyFor("x:y"), "hydra:operator-channel:dedup:x:y");

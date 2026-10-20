@@ -4,7 +4,7 @@ import { Sentry } from "./instrument.ts";
 import { EventBus } from "./event-bus.ts";
 import { createApi } from "./api.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/heartbeat.ts";
-import { startDigest, stopDigest } from "./digest.ts";
+import { startBriefScheduler, stopBriefScheduler } from "./operator-channel/brief-scheduler.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
 import { gitExec } from "./github/git.ts";
 import { isGhFailure, isGhOk } from "./github/exec.ts";
@@ -160,8 +160,10 @@ async function main() {
   // bridge was removed in #703 — it polled a dead Redis key.)
   await startObservabilityBridges(eventBus);
 
-  // Start digest notifications (4h summaries instead of per-event messages)
-  startDigest();
+  // Morning Brief (ADR-0045 Decision 7, issue #5047): one 07:30-local message,
+  // timed by a Redis last-sent key so restarts never reset it. Replaces the
+  // retired 4h digest and 24h heartbeat timers.
+  startBriefScheduler();
 
   // Agent streaming was wired through codex-runner's setAgentStreamCallback,
   // both removed in PR-3 (issue #383). Autopilot subagents own execution
@@ -223,7 +225,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = async (signal) => {
     console.log(`\n[Hydra] Received ${signal}, shutting down...`);
-    stopDigest();
+    stopBriefScheduler();
     // Issue #388: process shutdown is NOT operator-deliberate — systemd will
     // restart the service and autoStart() will resume the scheduler. Writing
     // a deliberate-stop marker here would defeat that.

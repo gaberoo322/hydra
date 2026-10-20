@@ -53,19 +53,28 @@ const EXPECTED_MEMBERS = [
   "INFRA_ORIGIN_IDENTITY_WRONG",
   // GLM drainer health signals (issue #3868)
   "GLM_DRAINER_STERILE",
+  // Morning Brief kinds with an in-repo producer (issue #5047)
+  "HOLDBACK_REVERTED",
+  "HOLDBACK_CAP_REACHED",
+  "HOLDBACK_REVERT_FAILED",
+  "MODEL_FALLBACK",
+  "AUTOPILOT_PAUSED",
+  "AUTOPILOT_RESUMED",
+  "BUILDER_HEALTH_STAGNATION",
 ] as const;
 
 const MEMBER_NAMES = Object.keys(NOTIFICATION_EVENT_TYPES);
 const WIRE_VALUES = Object.values(NOTIFICATION_EVENT_TYPES);
 
 describe("event-bus-vocabulary — NOTIFICATION_EVENT_TYPES enum completeness", () => {
-  test("exposes the 11 live event types (issue #5044)", () => {
+  test("exposes the 18 live event types (issues #5044, #5047)", () => {
     // Issue #5044 deleted the 28 codex-era members with no live producer; the
-    // live-producer audit below keeps every remaining member honest.
+    // live-producer audit below keeps every remaining member honest. Issue
+    // #5047 added the 7 Morning Brief kinds that bypassed the vocabulary.
     assert.equal(
       MEMBER_NAMES.length,
-      11,
-      `expected 11 event types, got ${MEMBER_NAMES.length}`,
+      18,
+      `expected 18 event types, got ${MEMBER_NAMES.length}`,
     );
   });
 
@@ -131,12 +140,25 @@ describe("event-bus-vocabulary — discriminator string shape", () => {
     );
   });
 
-  test("every value follows the `namespace:action` discriminator grammar", () => {
+  test("every value follows the `namespace:action` discriminator grammar (or is a pinned legacy spelling)", () => {
     // Each on-wire string is a single `namespace:action` pair — one colon,
     // lower_snake segments on each side. A stray colon or upper-case leak is a
-    // regression against the documented grammar.
+    // regression against the documented grammar. The seven Morning Brief kinds
+    // adopted in #5047 are live on-wire spellings that predate the grammar
+    // (dotted / hyphenated); they are pinned verbatim, not normalised, because
+    // renaming them would break their producers and stream consumers.
+    const LEGACY_ON_WIRE = new Set([
+      "holdback.reverted",
+      "holdback.cap-reached",
+      "holdback.revert_failed",
+      "model-fallback",
+      "autopilot-paused",
+      "autopilot-resumed",
+      "builder-health.stagnation",
+    ]);
     const shape = /^[a-z][a-z_]*:[a-z][a-z_]*$/;
     for (const value of WIRE_VALUES) {
+      if (LEGACY_ON_WIRE.has(value)) continue;
       assert.match(
         value,
         shape,
@@ -337,7 +359,14 @@ function producerLanes(lanes: Lanes, member: string, value: string): string[] {
   const srcRe = new RegExp(
     `\\btype:\\s*(?:(?:E|NOTIFICATION_EVENT_TYPES)\\.${member}\\b|"${v}")`,
   );
-  if (lanes.src.some((body) => srcRe.test(body))) found.push("src");
+  // Wrapper-call and const-alias construction shapes (issue #5047): holdback.ts
+  // publishes through `publishSafe(bus, "<value>", …)`, autopilot-control.ts
+  // through `publishPauseEvent("<value>", …)`, and stagnation-alerts.ts via a
+  // `const …_EVENT = "<value>"` it then passes as `type:`.
+  const wrapperRe = new RegExp(
+    `\\bpublishSafe\\(\\s*\\w+,\\s*"${v}"|\\bpublishPauseEvent\\(\\s*"${v}"|\\bconst\\s+[A-Z_]+_EVENT\\s*=\\s*"${v}"`,
+  );
+  if (lanes.src.some((body) => srcRe.test(body) || wrapperRe.test(body))) found.push("src");
   if (lanes.scriptLines.some((line) => line.includes(`"${value}"`) || line.includes(`'${value}'`))) {
     found.push("scripts");
   }

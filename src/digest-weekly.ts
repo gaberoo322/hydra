@@ -1,5 +1,6 @@
 /**
- * Weekly-summary async fan-out assembler (issue #3394).
+ * Weekly-summary async fan-out assembler (issue #3394; Morning Brief's Monday
+ * section since #5047 — returns plain structured lines, no on-wire Markdown).
  *
  * Extracted from `src/digest-fanout.ts` so the once-a-week weekly narrative
  * assembler lives in its own named leaf, independent of the hourly
@@ -43,19 +44,20 @@ export interface WeeklySummaryDeps {
   now?: () => number;
 }
 
+/** The weekly summary as plain text lines (no markup — the brief renderer escapes). */
+export interface WeeklySummary {
+  lines: string[];
+}
+
 /**
- * Build a weekly progress summary for the operator (issue #1412 — moved out of
- * `src/digest.ts` into the pure-core seam, then into `src/digest-fanout.ts` in
- * #2215, then into this focused weekly leaf in #3394).
+ * Build a weekly progress summary for the operator (issue #1412 → #2215 → #3394).
  *
- * Returns the assembled Telegram string, or `null` when no metrics were
- * recorded in the last 7 days. Readers are injectable via `deps` (defaulting
- * to the real imports) so the assembly grammar is testable without Redis or
- * GitHub — the production wrapper in `src/digest.ts` calls it with no args.
- *
- * The on-wire output is unchanged from the pre-extraction `digest.ts`.
+ * Returns plain structured lines, or `null` when no metrics were recorded in
+ * the last 7 days. Readers are injectable via `deps` so the grammar is
+ * testable without Redis or GitHub. Appended to the Morning Brief on Mondays
+ * (issue #5047).
  */
-export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<string | null> {
+export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<WeeklySummary | null> {
   const now = deps.now ?? (() => Date.now());
   const getMetricsTrend = deps.getMetricsTrend ?? defaultGetMetricsTrend;
   const getFixFeatureRatio = deps.getFixFeatureRatio ?? defaultGetFixFeatureRatio;
@@ -79,31 +81,27 @@ export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<
   const milestone = await getCurrentMilestoneProgress();
 
   const lines = [
-    `📈 *Hydra Weekly Summary*`,
-    ``,
-    `*Cycles:* ${thisWeek.length} run — ${merged} merged, ${failed} failed, ${rolledBack} rolled back, ${abandoned} abandoned`,
-    `*Fix:Feature ratio:* ${ratio.fixes}:${ratio.features} (${ratio.ratio}:1)`,
+    `Cycles: ${thisWeek.length} run — ${merged} merged, ${failed} failed, ${rolledBack} rolled back, ${abandoned} abandoned`,
+    `Fix:Feature ratio: ${ratio.fixes}:${ratio.features} (${ratio.ratio}:1)`,
   ];
 
   if (milestone) {
-    lines.push(`*Milestone:* ${milestone.name} — ${milestone.pctComplete}% (${milestone.done}/${milestone.total} epics)`);
+    lines.push(`Milestone: ${milestone.name} — ${milestone.pctComplete}% (${milestone.done}/${milestone.total} epics)`);
     if (milestone.remainingTitles.length > 0) {
-      lines.push(`*Remaining:* ${milestone.remainingTitles.slice(0, 3).join(", ")}${milestone.remainingTitles.length > 3 ? ` +${milestone.remainingTitles.length - 3} more` : ""}`);
+      lines.push(`Remaining: ${milestone.remainingTitles.slice(0, 3).join(", ")}${milestone.remainingTitles.length > 3 ? ` +${milestone.remainingTitles.length - 3} more` : ""}`);
     }
   }
 
-  lines.push("");
-
   // Warnings
   if (ratio.ratio > 2) {
-    lines.push(`⚠️ Fix ratio is ${ratio.ratio}:1 — most cycles are fixing previous work`);
+    lines.push(`Warning: fix ratio is ${ratio.ratio}:1 — most cycles are fixing previous work`);
   }
   if (rolledBack >= 3) {
-    lines.push(`⚠️ ${rolledBack} rollbacks this week — executor quality needs attention`);
+    lines.push(`Warning: ${rolledBack} rollbacks this week — executor quality needs attention`);
   }
   if (milestone && milestone.pctComplete === 100) {
-    lines.push(`🎉 Milestone "${milestone.name}" is 100% complete — ready for operator review`);
+    lines.push(`Milestone "${milestone.name}" is 100% complete — ready for operator review`);
   }
 
-  return lines.filter(Boolean).join("\n");
+  return { lines };
 }

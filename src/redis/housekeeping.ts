@@ -25,18 +25,8 @@ import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
 
 // ---------------------------------------------------------------------------
-// Weekly digest + memory consolidation timestamps
+// Memory consolidation timestamps
 // ---------------------------------------------------------------------------
-
-export async function getDigestLastWeekly(): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.get(redisKeys.digestLastWeekly());
-}
-
-export async function setDigestLastWeekly(value: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.set(redisKeys.digestLastWeekly(), value);
-}
 
 // Weekly usage-snapshot cadence stamp (issue #2404). Same shape as the
 // weekly-digest guard above — the chore persists the per-skill rollup at most

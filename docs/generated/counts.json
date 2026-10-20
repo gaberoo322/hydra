@@ -43,7 +43,7 @@
     {
       "family": "chores",
       "metric": "rows",
-      "value": 15
+      "value": 14
     },
     {
       "family": "ci-gates",
@@ -138,12 +138,12 @@
     {
       "family": "routes",
       "metric": "routes",
-      "value": 152
+      "value": 151
     },
     {
       "family": "routes",
       "metric": "rows",
-      "value": 152
+      "value": 151
     },
     {
       "family": "schemas",

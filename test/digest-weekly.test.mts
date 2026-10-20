@@ -6,7 +6,7 @@
  * `src/digest-weekly.ts`. It takes injectable `deps` (mirroring
  * `src/aggregators/builder-health.ts`), so every reader here is a stub: no
  * Redis, no GitHub, no timers, no Telegram. The production wrapper in
- * `src/digest.ts` calls it with no args.
+ * the Morning Brief (`operator-channel/brief-sources.ts`, issue #5047) calls it with no args and appends it on Mondays.
  *
  * This is its OWN top-level `describe` with its own lifecycle (no shared
  * Redis teardown to piggyback on — these are stub-only), per the repo authoring
@@ -56,11 +56,12 @@ describe("buildWeeklySummary", () => {
       }),
     });
     assert.ok(out !== null);
-    assert.match(out!, /📈 \*Hydra Weekly Summary\*/);
-    assert.match(out!, /\*Cycles:\* 2 run — 1 merged, 1 failed, 0 rolled back, 0 abandoned/);
-    assert.match(out!, /\*Fix:Feature ratio:\* 3:2 \(1\.5:1\)/);
-    assert.match(out!, /\*Milestone:\* Beta — 60% \(3\/5 epics\)/);
-    assert.match(out!, /\*Remaining:\* A, B, C \+1 more/);
+    const text = out!.lines.join("\n");
+    assert.doesNotMatch(text, /[*_`]/, "plain structured lines — no on-wire Markdown (issue #5047)");
+    assert.match(text, /Cycles: 2 run — 1 merged, 1 failed, 0 rolled back, 0 abandoned/);
+    assert.match(text, /Fix:Feature ratio: 3:2 \(1\.5:1\)/);
+    assert.match(text, /Milestone: Beta — 60% \(3\/5 epics\)/);
+    assert.match(text, /Remaining: A, B, C \+1 more/);
   });
 
   it("emits warnings for a high fix ratio, rollbacks, and a completed milestone", async () => {
@@ -81,8 +82,9 @@ describe("buildWeeklySummary", () => {
       }),
     });
     assert.ok(out !== null);
-    assert.match(out!, /⚠️ Fix ratio is 3:1 — most cycles are fixing previous work/);
-    assert.match(out!, /⚠️ 3 rollbacks this week — executor quality needs attention/);
-    assert.match(out!, /🎉 Milestone "Beta" is 100% complete — ready for operator review/);
+    const text = out!.lines.join("\n");
+    assert.match(text, /Warning: fix ratio is 3:1 — most cycles are fixing previous work/);
+    assert.match(text, /Warning: 3 rollbacks this week — executor quality needs attention/);
+    assert.match(text, /Milestone "Beta" is 100% complete — ready for operator review/);
   });
 });

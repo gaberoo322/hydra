@@ -14,7 +14,7 @@ import { createMetricsRouter } from "./api/metrics.ts";
 import { createMetricsCostRouter } from "./api/metrics-cost.ts";
 import { createMetricsTokensRouter } from "./api/metrics-tokens.ts";
 import { createTierRouter } from "./api/tier.ts";
-import { createDigestRouter } from "./api/digest.ts";
+import { createOperatorChannelRouter } from "./api/operator-channel.ts";
 import { createOperationalRouter } from "./api/operational.ts";
 import { createArchitectureRouter } from "./api/architecture.ts";
 import { createOutcomesRouter } from "./api/outcomes.ts";
@@ -213,11 +213,11 @@ function createApi(eventBus: EventBus) {
   api.use(createExplorePageRouter());
   // Domain homes for the last three orphan-operational routes that lived in
   // the retired src/api/misc.ts (issue #2183). Each owns one concern: tier
-  // classification next to src/tier-classifier.ts, digest triggers next to
-  // src/digest.ts, and the emergency-stop kill switch in its own minimal
-  // operational Module. The HTTP paths (/tier, /digest/*, /kill) are unchanged.
+  // classification next to src/tier-classifier.ts, the Morning Brief send-now trigger next to
+  // src/operator-channel/, and the emergency-stop kill switch in its own minimal
+  // operational Module. The /tier and /kill paths are unchanged;
   api.use(createTierRouter());
-  api.use(createDigestRouter());
+  api.use(createOperatorChannelRouter());
   api.use(createOperationalRouter());
   // /api/checklist sub-router retired in slice 6 of the dashboard
   // simplification (issue #621). Only the deleted Checklist page consumed it.

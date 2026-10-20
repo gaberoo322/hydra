@@ -19,11 +19,11 @@ export function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function clip(s: string, max: number): string {
+export function clip(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
-function renderLink(label: string, url: string): string {
+export function renderLink(label: string, url: string): string {
   let ok = false;
   try {
     const u = new URL(url);

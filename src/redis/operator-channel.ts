@@ -12,6 +12,7 @@ import { boundedJsonList } from "./bounded-list.ts";
 export const DEDUP_TTL_SECONDS = 7 * 24 * 60 * 60;
 export const BRIEF_ITEMS_KEY = "hydra:operator-channel:brief:items";
 export const DELIVERY_LOG_KEY = "hydra:operator-channel:delivery-log";
+export const BRIEF_LAST_SENT_KEY = "hydra:operator-channel:brief:last-sent";
 export const LIST_MAX = 500;
 export const dedupKeyFor = (dedupKey: string): string => `hydra:operator-channel:dedup:${dedupKey}`;
 
@@ -33,6 +34,12 @@ export interface DeliveryLogEntry {
   status?: number;
 }
 
+/** A currently-bad dedup key, as the Morning Brief reports it. */
+export interface DedupStateEntry extends DedupState {
+  dedupKey: string;
+}
+
+const DEDUP_KEY_PREFIX = "hydra:operator-channel:dedup:";
 const briefList = boundedJsonList<Record<string, unknown>>(BRIEF_ITEMS_KEY, LIST_MAX);
 const logList = boundedJsonList<DeliveryLogEntry>(DELIVERY_LOG_KEY, LIST_MAX);
 
@@ -70,6 +77,39 @@ export async function delDedup(dedupKey: string): Promise<void> {
   await getRedisConnection().del(dedupKeyFor(dedupKey));
 }
 
+/**
+ * SCAN every dedup hash and return the keys currently in state `bad` (the
+ * Morning Brief's "pages" section). Read-only; corrupt/expired hashes are
+ * skipped.
+ */
+export async function listDedupStates(): Promise<DedupStateEntry[]> {
+  const r = getRedisConnection();
+  const out: DedupStateEntry[] = [];
+  let cursor = "0";
+  do {
+    const [next, keys] = await r.scan(cursor, "MATCH", `${DEDUP_KEY_PREFIX}*`, "COUNT", "200");
+    cursor = next;
+    for (const key of keys) {
+      const dedupKey = key.slice(DEDUP_KEY_PREFIX.length);
+      const state = await readDedup(dedupKey);
+      if (state) out.push({ dedupKey, ...state });
+    }
+  } while (cursor !== "0");
+  return out.sort((a, b) => a.firstAt - b.firstAt);
+}
+
+/** Epoch ms of the last Morning Brief the transport accepted, or null. */
+export async function getBriefLastSent(): Promise<number | null> {
+  const raw = await getRedisConnection().get(BRIEF_LAST_SENT_KEY);
+  if (raw === null) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+export async function setBriefLastSent(at: number): Promise<void> {
+  await getRedisConnection().set(BRIEF_LAST_SENT_KEY, String(at));
+}
+
 export async function appendBrief(item: Record<string, unknown>): Promise<void> {
   await briefList.push(item);
 }
@@ -89,4 +129,7 @@ export const redisOperatorChannelStore = {
   delDedup,
   appendBrief,
   appendLog,
+  listDedupStates,
+  getBriefLastSent,
+  setBriefLastSent,
 };

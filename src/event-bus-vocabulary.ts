@@ -104,6 +104,19 @@ const NOTIFICATION_EVENT_TYPES = {
   // a sterile drainer silently starves the whole board (observed #3863).
   GLM_DRAINER_STERILE: "glm:drainer_sterile",
 
+  // --- Morning Brief kinds with an in-repo producer (issue #5047) ---
+  // These reached the notifications stream before but bypassed the vocabulary,
+  // so the Morning Brief's exhaustive line-renderer map (and its test) could
+  // not see them. The producers are src/holdback.ts (publishSafe),
+  // src/api/usage.ts (model-fallback), src/api/autopilot-control.ts
+  // (publishPauseEvent) and src/notification/stagnation-alerts.ts.
+  HOLDBACK_REVERTED: "holdback.reverted",
+  HOLDBACK_CAP_REACHED: "holdback.cap-reached",
+  HOLDBACK_REVERT_FAILED: "holdback.revert_failed",
+  MODEL_FALLBACK: "model-fallback",
+  AUTOPILOT_PAUSED: "autopilot-paused",
+  AUTOPILOT_RESUMED: "autopilot-resumed",
+  BUILDER_HEALTH_STAGNATION: "builder-health.stagnation",
 } as const;
 
 /**

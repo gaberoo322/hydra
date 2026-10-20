@@ -11,8 +11,10 @@
  * (`hydra:review:pickup-armed`) so the edge survives an orchestrator restart —
  * a bounce mid-non-empty must NOT re-fire.
  *
- * Reuses the existing notifications stream -> Telegram bridge (no new
- * transport; secrets via env per ADR-0005). Never throws — a failed fetch is
+ * Reuses the existing notifications stream -> Operator Channel bridge (no new
+ * transport; secrets via env per ADR-0005). `review:pickup_ready` is a Page
+ * (ADR-0045): the empty -> non-empty edge pages with an `Action: /hydra-review`
+ * line, and the drain edge resolves it (issue #5047). Never throws — a failed fetch is
  * treated as "couldn't sample", which leaves the armed-state untouched so the
  * next tick re-evaluates. Better a missed alert than a spurious one.
  */
@@ -25,6 +27,8 @@ import {
 import { getReviewPickupSet } from "../../review-pickup.ts";
 import type { PublishableBus } from "../../event-bus-seams.ts";
 import { logger } from "../../logger.ts";
+import { operatorChannel, type OperatorChannel } from "../../operator-channel/index.ts";
+import { NOTIFICATION_EVENT_TYPES as E } from "../../event-bus-vocabulary.ts";
 
 /**
  * External touchpoints of the review-pickup-notify chore. `deps` is injectable
@@ -36,6 +40,12 @@ export interface ReviewPickupNotifyDeps {
   getNotified?: typeof getReviewPickupNotified;
   setNotified?: typeof setReviewPickupNotified;
   clearNotified?: typeof clearReviewPickupNotified;
+  /**
+   * Operator Channel used to resolve the `review:pickup_ready` page when the set
+   * drains (issue #5047), so the next empty -> non-empty edge is a fresh page
+   * rather than a 6h-suppressed repeat or a "still failing" reminder.
+   */
+  channel?: Pick<OperatorChannel, "resolve">;
 }
 
 /**
@@ -53,6 +63,7 @@ export async function runReviewPickupNotify(
   const getNotified = deps.getNotified ?? getReviewPickupNotified;
   const setNotified = deps.setNotified ?? setReviewPickupNotified;
   const clearNotified = deps.clearNotified ?? clearReviewPickupNotified;
+  const channel = deps.channel ?? operatorChannel;
 
   const items = await getPickupSet();
   const count = items.length;
@@ -62,6 +73,11 @@ export async function runReviewPickupNotify(
     // Set is empty — re-arm if a prior notification is still suppressing.
     if (alreadyNotified) {
       await clearNotified();
+      // The page's dedup key stays "bad" for its 7-day TTL unless resolved; do it
+      // here so the next edge pages afresh. Best-effort — never fail the chore.
+      await channel
+        .resolve(E.REVIEW_PICKUP_READY, "Review pickup set drained")
+        .catch((err) => logger.error({ err }, "review-pickup-notify: channel.resolve failed (non-fatal)"));
       logger.info({}, "review-pickup-notify: set drained — re-armed notify hook");
       return { fired: false, count: 0, transitioned: true };
     }
@@ -78,7 +94,7 @@ export async function runReviewPickupNotify(
   const first = items[0];
   const { STREAMS } = await import("../../event-bus-stream-keys.ts");
   await eventBus.publish(STREAMS.NOTIFICATIONS, {
-    type: "review:pickup_ready",
+    type: E.REVIEW_PICKUP_READY,
     source: "scheduler",
     correlationId: `review-pickup-${first.number}`,
     payload: {

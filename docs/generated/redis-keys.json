@@ -725,10 +725,8 @@
       "builder": "digestLastWeekly",
       "pattern": "hydra:digest:last-weekly",
       "params": [],
-      "callSites": 2,
-      "accessors": [
-        "src/redis/housekeeping.ts"
-      ],
+      "callSites": 0,
+      "accessors": [],
       "servedBy": [],
       "home": null,
       "retired": false,
