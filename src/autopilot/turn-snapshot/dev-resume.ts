@@ -9,15 +9,16 @@
  * `collect_target_board` (#4739). Both now call {@link pickDevResume}; each
  * realm only supplies what genuinely differs:
  *
- *   - its OWN pre-qualification gates (orch: not GLM-provenance, not draft /
- *     ready-for-human, not DIRTY/UNKNOWN, quiescent; Target: not a REST
- *     `draft`), applied before the candidates reach this function;
+ *   - its OWN pre-qualification gates (orch: not draft / ready-for-human,
+ *     not DIRTY/UNKNOWN, quiescent — provenance-agnostic since #5058; Target:
+ *     not a REST `draft`), applied before the candidates reach this function;
  *   - its closing-issue reader (it owns the per-realm stderr note when the
  *     predicate fails) and, for the orch realm, a "required checks settled"
  *     gate;
  *   - its selection policy — kept per realm because the two wires already
  *     differ and the kv output must stay byte-identical (ADR-0043 D4):
- *       `lowest-pr`                 orch #4518: the lowest-numbered qualifying PR;
+ *       `lowest-pr`                 orch #4518: the lowest-numbered qualifying PR
+ *                                   (plus the orch red-CI arm, `alsoQualifies`, #5058);
  *       `lowest-unambiguous-issue`  Target #4739: the lowest-numbered resume
  *                                   issue with EXACTLY one qualifying PR (an
  *                                   issue with two is ambiguous — skipped).
@@ -47,6 +48,13 @@ export interface DevResumePickInputs<C extends DevResumeCandidate> {
   readonly closing: (candidate: C) => ReadonlySet<number> | null;
   /** Optional realm gate evaluated after the closing check (orch: required checks settled). */
   readonly settled?: (candidate: C) => boolean;
+  /**
+   * Optional second qualifier for the `lowest-pr` policy (orch #5058: a
+   * required check red at the head — the retired GLM-only #4460 arm, now
+   * provenance-agnostic). A candidate qualifies when its closing issue carries
+   * the resume label OR this returns true. Ignored by `lowest-unambiguous-issue`.
+   */
+  readonly alsoQualifies?: (candidate: C) => boolean;
   readonly policy: DevResumePolicy;
 }
 
@@ -71,7 +79,7 @@ export function pickDevResume<C extends DevResumeCandidate>(inputs: DevResumePic
   if (inputs.policy === "lowest-pr") {
     let pick: PrPick | null = null;
     for (const q of qualifying) {
-      if (!inputs.resumeIssues.has(q.issue)) continue;
+      if (!inputs.resumeIssues.has(q.issue) && !(inputs.alsoQualifies?.(q.candidate) ?? false)) continue;
       if (pick === null || q.candidate.pr < pick.pr) pick = { issue: q.issue, pr: q.candidate.pr, headRefName: q.head };
     }
     return pick;

@@ -43,19 +43,7 @@
   "orch_prs_unchecked": [],
   "orch_prs_behind": [],
   "orch_ci_trigger_stale": false,
-  "orch_prs_glm_red": [
-   4776,
-   4777,
-   4800,
-   4814,
-   4817,
-   4824
-  ],
-  "orch_glm_red_forward_fix": {
-   "issue": 4728,
-   "pr": 4776,
-   "branch": "worktree-agent-glm-4728-1790729985"
-  },
+  "orch_prs_red_resume": [],
   "orch_dev_resume_pick": {
    "issue": 4511,
    "pr": 4818,

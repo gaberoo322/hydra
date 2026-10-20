@@ -213,3 +213,76 @@ describe("hydra-review playbook — Stalled PRs bucket (issue #3963)", () => {
     );
   });
 });
+
+/**
+ * Issue #5058 — an operator resolution that hands an Orchestrator stalled PR
+ * back to an autonomous lane must clear the PR's OWN stranding labels. Both
+ * durable resume picks skip a `ready-for-human` PR and the #4807 conflict lane
+ * never re-attempts a `conflict-fix-attempted` one, so an issue-only relabel
+ * stranded PRs #4810 / #4818 for 8+ days after "fix forward" decisions.
+ */
+describe("hydra-review playbook — hand-back clears the PR's stranding labels (issue #5058)", () => {
+  function handBackRule(): string {
+    const section = stalledSection();
+    const start = section.indexOf("clears the PR's");
+    assert.ok(start > -1, "§0.9 must carry the #5058 PR-side stranding-label rule");
+    return section.slice(start);
+  }
+
+  test("the rule names every hand-back resolution: fix forward, slot-1 'Fix and push', needs-dev-resume / needs-qa", () => {
+    const rule = handBackRule();
+    assert.match(rule, /fix forward/i);
+    assert.match(rule, /Fix and push/);
+    assert.match(rule, /needs-dev-resume/);
+    assert.match(rule, /needs-qa/);
+  });
+
+  test("the recipe removes BOTH ready-for-human and conflict-fix-attempted from the PR itself", () => {
+    const rule = handBackRule();
+    const recipe = /```bash\n([\s\S]*?)```/.exec(rule);
+    assert.ok(recipe, "the rule must carry a concrete bash recipe block");
+    const body = recipe[1];
+    assert.match(body, /for L in ready-for-human conflict-fix-attempted/, "both stranding labels are cleared");
+    // Name-in-URL-path DELETE on the PR number — the `-f name=` form wipes ALL labels.
+    assert.match(body, /gh api -X DELETE "repos\/\$RREPO\/issues\/\$PR\/labels\/\$L"/);
+    assert.doesNotMatch(body, /gh pr edit/, "gh pr edit is broken for labels — never use it");
+    assert.doesNotMatch(body, /gh api[^\n]*-f name=/, "the -f name= DELETE form wipes every label");
+    // The linked issue is routed too.
+    assert.match(body, /gh issue edit "\$ISSUE" --repo "\$RREPO" --remove-label ready-for-human --add-label "\$LANE"/);
+  });
+
+  test("the label DELETE fails loud: only an HTTP 404 is tolerated, anything else aborts before the issue relabel (QA round 1)", () => {
+    const rule = handBackRule();
+    const recipe = /```bash\n([\s\S]*?)```/.exec(rule);
+    assert.ok(recipe, "the rule must carry a concrete bash recipe block");
+    const body = recipe[1];
+    // No silent swallow: discarding stderr behind an `||` fallback reports
+    // every failure (auth, rate limit, network) as a harmless 404.
+    assert.doesNotMatch(body, /2>\/dev\/null/, "the DELETE must not discard stderr");
+    assert.doesNotMatch(body, /--silent[^\n]*\|\|/, "the DELETE must not swallow failures with an || fallback");
+    // stderr is captured and only a 404 / "Label does not exist" is tolerated.
+    assert.match(body, /ERR=\$\(gh api -X DELETE [^\n]*2>&1\)/, "the DELETE's stderr must be captured");
+    assert.match(body, /grep -qE 'HTTP 404\|Label does not exist'/, "only a 404 is tolerated");
+    // Any other failure prints the error and exits non-zero.
+    assert.match(body, /could not remove[^\n]*>&2\n\s*exit 1/, "a non-404 failure must print and exit non-zero");
+    // The PR's labels are re-read; the issue relabel is refused while a
+    // stranding label is still present.
+    assert.match(body, /gh api "repos\/\$RREPO\/issues\/\$PR\/labels"/, "the PR's labels must be re-read");
+    assert.match(body, /still carries[^\n]*NOT relabelled/);
+    // Ordering: every abort sits BEFORE the issue relabel.
+    const relabel = body.indexOf('gh issue edit "$ISSUE"');
+    const lastExit = body.lastIndexOf("exit 1");
+    assert.ok(relabel > -1 && lastExit > -1 && lastExit < relabel, "every abort must precede the issue relabel");
+  });
+
+  test("a QA round-cap escalation (#4735) the operator keeps is explicitly NOT a hand-back", () => {
+    assert.match(handBackRule(), /#4735[\s\S]{0,120}NOT a hand-back/);
+  });
+
+  test("§4's #4739 Target fix-forward text cross-references the Orchestrator analogue", () => {
+    const start = src.indexOf("**Fix-forward resolution stamps `needs-dev-resume` (issue #4739).**");
+    assert.ok(start > -1, "the #4739 Target fix-forward paragraph must exist");
+    const end = src.indexOf("### 5. Wrap-up", start);
+    assert.match(src.slice(start, end), /#5058/);
+  });
+});

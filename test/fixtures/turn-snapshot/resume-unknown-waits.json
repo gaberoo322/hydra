@@ -123,12 +123,9 @@
           "ok": false,
           "reason": "runs-read-failed"
         },
-        "glmRed": {
+        "redResume": {
           "ok": true,
-          "value": {
-            "bucket": [],
-            "pick": null
-          }
+          "value": []
         },
         "devResumePick": {
           "ok": true,

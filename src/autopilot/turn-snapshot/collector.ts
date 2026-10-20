@@ -13,7 +13,7 @@
 
 /** One field a collector could not read or classify, and why. */
 export interface DegradedMarker {
-  /** The snapshot field (or input read) that degraded, e.g. `prList`, `glmRed`. */
+  /** The snapshot field (or input read) that degraded, e.g. `prList`, `redResume`. */
   readonly field: string;
   /** A short machine-greppable reason, e.g. `empty-payload`, `unparseable`. */
   readonly reason: string;

@@ -1,0 +1,1 @@
+- refactor: sync-skills.sh now applies the TypeScript core plan all-or-nothing and drops its Python heredocs (#4720)
