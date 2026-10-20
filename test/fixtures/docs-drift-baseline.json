@@ -132,7 +132,6 @@
   "docs/operator-playbooks/hydra-qa.md:path:src/foo.ts:12 (buildX)",
   "docs/operator-playbooks/hydra-qa.md:redis-key:hydra:autopilot:slot-events",
   "docs/operator-playbooks/hydra-qa.md:redis-key:hydra:memory:planner:patterns",
-  "docs/operator-playbooks/hydra-qa.md:redis-key:hydra:qa:results:*",
   "docs/operator-playbooks/hydra-qa.md:retired-term:Codex",
   "docs/operator-playbooks/hydra-research.md:env-var:BASELINE_TITLES",
   "docs/operator-playbooks/hydra-research.md:redis-key:hydra:autopilot:slot-events",
