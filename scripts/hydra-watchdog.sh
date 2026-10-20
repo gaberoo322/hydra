@@ -935,6 +935,188 @@ run_redis_backup_freshness() {
 }
 
 # =============================================================================
+# ## CLAUDE HOOKS
+# =============================================================================
+#
+# Issue #5064. scripts/setup-claude-hooks.sh owns the HOOKS array of Claude
+# Code PreToolUse hooks (worktree-write-fence.sh, git-remote-fence.sh, …). For
+# months nothing in the deploy path ran it, so git-remote-fence.sh (#4939,
+# merged in #4980) was never installed and never protected a session — and
+# nothing noticed. scripts/deploy.sh now runs the installer on every deploy;
+# this block is the backstop alarm for when the live install still lacks a
+# hook (a failed deploy step, a hand-edited settings.json, a wiped hooks dir).
+#
+# Fails (alarms) when ANY hook listed by `setup-claude-hooks.sh --list` (the
+# single source of truth — never a second copy of the list here) is
+#   (a) missing as a file under the installed hooks dir, OR
+#   (b) not registered in settings.json's hooks.PreToolUse (no hook command
+#       referencing <hooks dir>/<name>), OR the settings file is
+#       absent/unparseable (Claude Code would load no hooks from it either).
+#
+# STRICTLY READ-ONLY: never installs or repairs — `bash scripts/deploy.sh` (or
+# `bash scripts/setup-claude-hooks.sh`) is the fix, run from an operator shell.
+# One enveloped XADD onto hydra:notifications per episode (type
+# infra:claude_hooks_missing), dedup'd by a since marker that is created only
+# after the XADD succeeds and cleared (re-armed) once everything is present.
+#
+# Fail-safe: any tooling failure (installer script missing, --list failing,
+# python3 missing) logs WARN and returns 0.
+#
+# Testability hooks (off-by-default; pinned by
+# test/watchdog-claude-hooks.test.mts):
+#   HYDRA_WATCHDOG_CLAUDE_HOOKS_SETUP         Installer script read for the
+#                                             expected list (default
+#                                             $HYDRA_ROOT/scripts/setup-claude-hooks.sh).
+#   HYDRA_WATCHDOG_CLAUDE_HOOKS_DIR           Installed hooks dir (default
+#                                             $HOME/.claude/hooks/hydra).
+#   HYDRA_WATCHDOG_CLAUDE_SETTINGS            Settings file (default
+#                                             $HOME/.claude/settings.json).
+#   HYDRA_WATCHDOG_CLAUDE_HOOKS_STATE_DIR     Marker dir (default /tmp).
+#   HYDRA_WATCHDOG_CLAUDE_HOOKS_NOTIFY_STREAM Notification stream (default
+#                                             hydra:notifications).
+
+run_claude_hooks() {
+  local HYDRA_ROOT="${HYDRA_ROOT:-/home/gabe/hydra}"
+  local SETUP="${HYDRA_WATCHDOG_CLAUDE_HOOKS_SETUP:-${HYDRA_ROOT}/scripts/setup-claude-hooks.sh}"
+  local HOOKS_DIR="${HYDRA_WATCHDOG_CLAUDE_HOOKS_DIR:-$HOME/.claude/hooks/hydra}"
+  local SETTINGS="${HYDRA_WATCHDOG_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+  local STATE_DIR="${HYDRA_WATCHDOG_CLAUDE_HOOKS_STATE_DIR:-/tmp}"
+  local NOTIFY_STREAM="${HYDRA_WATCHDOG_CLAUDE_HOOKS_NOTIFY_STREAM:-hydra:notifications}"
+  local REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
+  local REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
+  local REDIS_DB="${HYDRA_REDIS_DB:-0}"
+  [[ "$REDIS_DB" =~ ^[0-9]+$ ]] || REDIS_DB=0
+  local SINCE_MARKER="${STATE_DIR}/hydra-claude-hooks-missing.since"
+
+  log() {
+    echo "hydra-claude-hooks-watchdog: $*"
+  }
+
+  # Output-returning call ("" on any failure) so the XADD result can gate the
+  # dedup marker.
+  ch_rc_read() {
+    if [[ "$REDIS_HOST" == "docker" ]]; then
+      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
+    else
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
+    fi
+  }
+
+  if [[ ! -f "$SETUP" ]]; then
+    log "WARN installer ${SETUP} not found — skipping claude hooks check"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    log "WARN python3 not found — skipping claude hooks check"
+    return 0
+  fi
+
+  # --- Expected hooks: the installer's own HOOKS array (single source) ---
+  local listing="" list_rc=0
+  listing="$(bash "$SETUP" --list 2>/dev/null)" || list_rc=$?
+  if (( list_rc != 0 )); then
+    log "WARN ${SETUP} --list failed (rc=${list_rc}) — skipping claude hooks check"
+    return 0
+  fi
+  local names=() entry
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    names+=("${entry%%|*}")
+  done <<< "$listing"
+  if (( ${#names[@]} == 0 )); then
+    log "WARN ${SETUP} --list returned no hooks — skipping claude hooks check"
+    return 0
+  fi
+
+  mkdir -p "$STATE_DIR" 2>/dev/null || {
+    log "WARN cannot create state dir ${STATE_DIR} — skipping claude hooks check"
+    return 0
+  }
+
+  local reasons=() name
+  # (a) installed hook files
+  for name in "${names[@]}"; do
+    [[ -f "${HOOKS_DIR}/${name}" ]] || reasons+=("file-missing:${name}")
+  done
+
+  # (b) settings.json PreToolUse registrations. Prints one line per hook that
+  # is NOT registered, or the single token SETTINGS_UNREADABLE.
+  local unregistered="" py_rc=0
+  unregistered="$(python3 - "$SETTINGS" "$HOOKS_DIR" "${names[@]}" <<'PY' 2>/dev/null
+import json, sys
+settings_path, hooks_dir, *names = sys.argv[1:]
+try:
+    with open(settings_path) as f:
+        data = json.load(f)
+    pre = data.get("hooks", {}).get("PreToolUse", [])
+    if not isinstance(pre, list):
+        pre = []
+except Exception:
+    print("SETTINGS_UNREADABLE")
+    sys.exit(0)
+commands = []
+for block in pre:
+    if not isinstance(block, dict):
+        continue
+    for h in block.get("hooks", []) or []:
+        if isinstance(h, dict):
+            commands.append(str(h.get("command", "")))
+for name in names:
+    needle = f"{hooks_dir.rstrip('/')}/{name}"
+    if not any(needle in c for c in commands):
+        print(name)
+PY
+)" || py_rc=$?
+  if (( py_rc != 0 )); then
+    log "WARN settings parser failed (rc=${py_rc}) — skipping claude hooks check"
+    return 0
+  fi
+  local u
+  while IFS= read -r u; do
+    [[ -n "$u" ]] || continue
+    if [[ "$u" == "SETTINGS_UNREADABLE" ]]; then
+      reasons+=("settings-unreadable")
+    else
+      reasons+=("unregistered:${u}")
+    fi
+  done <<< "$unregistered"
+
+  if (( ${#reasons[@]} == 0 )); then
+    if [[ -f "$SINCE_MARKER" ]]; then
+      log "claude hooks healthy again — dedup re-armed"
+    fi
+    rm -f "$SINCE_MARKER" 2>/dev/null || true
+    log "claude-hooks tick processed (${#names[@]} hook(s) installed and registered: ${names[*]})"
+    return 0
+  fi
+
+  local reason_str
+  reason_str="$(IFS=,; echo "${reasons[*]}")"
+  log "ALARM Claude Code PreToolUse hooks not fully installed: ${reason_str} (hooks dir ${HOOKS_DIR}, settings ${SETTINGS}; issue #5064 — run 'bash scripts/setup-claude-hooks.sh' or 'bash scripts/deploy.sh' from an operator shell)"
+
+  if [[ ! -f "$SINCE_MARKER" ]]; then
+    local iso_now payload reason_clean xadd_out
+    iso_now="$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || echo "")"
+    reason_clean="$(printf '%s' "$reason_str" | tr -dc 'a-zA-Z0-9_.:,-')"
+    payload="$(printf '{"signal":"claude-hooks","reason":"%s"}' "$reason_clean")"
+    xadd_out="$(ch_rc_read XADD "$NOTIFY_STREAM" '*' \
+      id "claude-hooks-$(date +%s 2>/dev/null || echo 0)-$$" \
+      type "infra:claude_hooks_missing" \
+      source "watchdog-claude-hooks" \
+      timestamp "$iso_now" \
+      correlationId "claude-hooks" \
+      payload "$payload")"
+    if [[ -n "$xadd_out" ]]; then
+      date +%s > "$SINCE_MARKER" 2>/dev/null || true
+      log "in-band delivery published type=infra:claude_hooks_missing -> ${NOTIFY_STREAM}"
+    else
+      log "WARN in-band delivery FAILED (XADD returned nothing) — will retry next tick"
+    fi
+  fi
+  return 0
+}
+
+# =============================================================================
 # ## SKILL MIRROR DRIFT
 # =============================================================================
 #
@@ -2119,6 +2301,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   run_deploy_drift
   run_redis_backup_freshness
   run_skill_mirror_drift
+  run_claude_hooks
   run_launch_flow
   run_node_modules_integrity
   run_origin_identity

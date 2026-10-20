@@ -3,7 +3,14 @@
 #
 # Mirrors scripts/setup-git-hooks.sh in spirit: an explicit operator step
 # that copies in-repo hook scripts to ~/.claude/hooks/hydra/ and patches
-# ~/.claude/settings.json to register them. Re-running is safe (idempotent).
+# ~/.claude/settings.json to register them. Re-running is safe (idempotent):
+# managed PreToolUse blocks are replaced, never duplicated; every other
+# settings key is preserved; the settings write is atomic and skipped when
+# nothing changed.
+#
+# scripts/deploy.sh runs this on EVERY deploy (issue #5064), so hook edits on
+# master reach the live copies. The watchdog's ## CLAUDE HOOKS block reads the
+# HOOKS array below via `--list`, so this file is the single source of truth.
 #
 # Currently installs:
 #   - worktree-write-fence.sh — issue #549 ghost-write fence for the
@@ -15,6 +22,8 @@
 # Usage:
 #   bash scripts/setup-claude-hooks.sh           # install / refresh
 #   bash scripts/setup-claude-hooks.sh --remove  # uninstall
+#   bash scripts/setup-claude-hooks.sh --list    # print managed HOOKS entries
+#                                                # (one "name|matcher" per line)
 
 set -euo pipefail
 
@@ -22,13 +31,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_DIR="$REPO_ROOT/scripts/claude-hooks"
 DST_DIR="${CLAUDE_HOOKS_DIR:-$HOME/.claude/hooks/hydra}"
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
-
-REMOVE=0
-if [ "${1:-}" = "--remove" ] || [ "${1:-}" = "-r" ]; then
-  REMOVE=1
-fi
-
-command -v python3 >/dev/null || { echo "setup-claude-hooks: python3 required" >&2; exit 127; }
 
 # The list of (hook-file, matcher) pairs we manage. Matcher is a regex per
 # Claude Code's PreToolUse matcher contract — multiple tool names piped.
@@ -43,6 +45,19 @@ HOOKS=(
   # rule — it would not reliably fire on a compound `cd … && git remote …`).
   "git-remote-fence.sh|Bash"
 )
+
+REMOVE=0
+case "${1:-}" in
+  --remove|-r) REMOVE=1 ;;
+  --list)
+    # Issue #5064: read-only listing for the watchdog's ## CLAUDE HOOKS block.
+    # Touches nothing on disk.
+    printf '%s\n' "${HOOKS[@]}"
+    exit 0
+    ;;
+esac
+
+command -v python3 >/dev/null || { echo "setup-claude-hooks: python3 required" >&2; exit 127; }
 
 install_hook() {
   local src="$1" dst="$2"
@@ -81,12 +96,13 @@ patch_settings() {
   fi
 
   python3 - "$mode" "$SETTINGS" "$DST_DIR" "$@" <<'PY'
-import json, sys, os
+import json, sys, os, shutil, tempfile
 
 mode, settings_path, dst_dir, *entries = sys.argv[1:]
 
 with open(settings_path, "r") as f:
-    data = json.load(f)
+    original = f.read()
+data = json.loads(original)
 
 hooks = data.setdefault("hooks", {})
 pre = hooks.setdefault("PreToolUse", [])
@@ -132,9 +148,27 @@ if not pre:
     hooks.pop("PreToolUse", None)
 
 # Pretty-print with stable key ordering — keep the diff small.
-with open(settings_path, "w") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
+rendered = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+if rendered == original:
+    print(f"  {settings_path} unchanged")
+    sys.exit(0)
+
+# Issue #5064: this now runs on every deploy while Claude Code sessions are
+# live and reading the file, so never truncate-in-place — write a sibling temp
+# file and rename it over the original (atomic on the same filesystem).
+settings_dir = os.path.dirname(os.path.abspath(settings_path))
+fd, tmp_path = tempfile.mkstemp(prefix=".settings.", suffix=".tmp", dir=settings_dir)
+try:
+    with os.fdopen(fd, "w") as f:
+        f.write(rendered)
+    shutil.copymode(settings_path, tmp_path)
+    os.replace(tmp_path, settings_path)
+except BaseException:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass  # intentional: temp already renamed or never created
+    raise
 PY
 }
 
