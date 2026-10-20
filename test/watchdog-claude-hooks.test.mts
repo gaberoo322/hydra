@@ -168,6 +168,32 @@ describe("deploy.sh installs the Claude hooks (#5064)", () => {
     assert.ok(restart > call, "the installer must run before the service restart");
     assert.match(src, /::error::Claude Code hook install failed/);
   });
+
+  it("EXECUTES the install block: a failing installer prints ::error:: and the deploy still reaches the restart", () => {
+    const src = readFileSync(DEPLOY, "utf-8");
+    const start = src.indexOf("HOOKS_RC=0\n");
+    const end = src.indexOf('echo "==> Restarting service..."');
+    assert.ok(start > 0 && end > start, "install block must precede the Restarting service echo");
+    // Block + a sentinel standing in for the restart; `set -e` mirrors deploy.sh.
+    const block = src.slice(start, end) + "echo RESTART_REACHED\n";
+    const dir = mkdtempSync(join(tmpdir(), "deploy-hooks-"));
+    try {
+      mkdirSync(join(dir, "scripts"));
+      writeFileSync(join(dir, "scripts", "setup-claude-hooks.sh"), "#!/bin/bash\nexit 7\n");
+      const r = spawnSync("bash", ["-e", "-c", block], { cwd: dir, encoding: "utf-8", timeout: 30_000 });
+      assert.equal(r.status, 0, `deploy block must not abort: ${r.stdout}${r.stderr}`);
+      assert.match(r.stdout, /::error::Claude Code hook install failed \(exit 7\)/);
+      assert.match(r.stdout, /RESTART_REACHED/);
+      // Success path: no ::error::.
+      writeFileSync(join(dir, "scripts", "setup-claude-hooks.sh"), "#!/bin/bash\nexit 0\n");
+      const ok = spawnSync("bash", ["-e", "-c", block], { cwd: dir, encoding: "utf-8", timeout: 30_000 });
+      assert.equal(ok.status, 0);
+      assert.doesNotMatch(ok.stdout, /::error::/);
+      assert.match(ok.stdout, /RESTART_REACHED/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("run_claude_hooks watchdog block (#5064)", () => {
