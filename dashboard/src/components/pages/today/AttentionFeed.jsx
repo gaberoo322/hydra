@@ -4,7 +4,7 @@ import { apiFetch } from "../../../hooks/useApi.js";
 import { relativeAge } from "../../../lib/page-item-format.ts";
 import { deriveFeedBuckets, recordDismissOutcome } from "../../../lib/attention-buckets.ts";
 import { Section } from "./Section.jsx";
-import { createInFlightTracker, triggerDisabled } from "../../../lib/delayed-commit.ts";
+import { triggerDisabled } from "../../../lib/delayed-commit.ts";
 import {
   ActionAffordance,
   UndoToastStack,
@@ -132,11 +132,14 @@ function dismissWindowId(item) {
  * reason button is DISABLED while THIS item's window holds a pending
  * dismiss — one commit per window, so a second click can never break the
  * first's Undo (INV-7/INV-14) — AND while its expired window's POST is still
- * in flight (`busy`, QA round 5), so a second click can never arm a second
- * dismiss for the same item; other items stay dismissable. */
-function DismissControl({ item, busy, onDismissStart }) {
+ * in flight (QA round 5/6: read from the HOST's shared in-flight set under
+ * the same window id, never a row-local flag, so a remounted row is still
+ * disabled), so a second click can never arm a second dismiss for the same
+ * item; other items stay dismissable. */
+function DismissControl({ item, onDismissStart }) {
   const undoHost = useContext(UndoWindowContext);
-  const disabled = triggerDisabled(busy, undoHost.windows, dismissWindowId(item));
+  const windowId = dismissWindowId(item);
+  const disabled = triggerDisabled(undoHost.inFlight.has(windowId), undoHost.windows, windowId);
   return (
     <div className="mt-1.5 flex flex-wrap items-baseline gap-x-1.5 text-[11px] text-zinc-600">
       <span>dismiss:</span>
@@ -161,7 +164,7 @@ function DismissControl({ item, busy, onDismissStart }) {
 
 /** One per-item row: the crossed line and its explanation on the left, the
  * action grammar on the right. */
-function FeedItem({ item, onFired, onResult, onDismissStart, dismissBusy }) {
+function FeedItem({ item, onFired, onResult, onDismissStart }) {
   return (
     <div className="grid gap-2 border-t border-zinc-700/50 py-2.5 md:grid-cols-[minmax(0,1fr)_minmax(280px,40%)]">
       <div className="min-w-0">
@@ -181,7 +184,7 @@ function FeedItem({ item, onFired, onResult, onDismissStart, dismissBusy }) {
         </div>
         <div className="mt-1 text-xs italic text-zinc-500">{item.action.rationale}</div>
         {item.detail && <div className="mt-0.5 text-[11px] text-zinc-500">{item.detail}</div>}
-        <DismissControl item={item} busy={dismissBusy} onDismissStart={onDismissStart} />
+        <DismissControl item={item} onDismissStart={onDismissStart} />
       </div>
       <ActionColumn entry={item.action} onFired={onFired} onResult={onResult} />
     </div>
@@ -195,7 +198,7 @@ function FeedItem({ item, onFired, onResult, onDismissStart, dismissBusy }) {
  * not collapse to the parent's. The two single-line aggregates (parked over
  * cap, archived Target) render the parent's action block directly.
  */
-function AggregateWell({ item, onFired, onResult, onDismissStart, dismissBusy }) {
+function AggregateWell({ item, onFired, onResult, onDismissStart }) {
   return (
     <div className="mt-2 grid gap-2.5 rounded-md border border-zinc-700/60 bg-zinc-900/60 p-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
@@ -203,7 +206,7 @@ function AggregateWell({ item, onFired, onResult, onDismissStart, dismissBusy })
           <div className="text-sm font-semibold text-zinc-100">{item.title}</div>
           {item.detail && <div className="mt-0.5 text-[11px] text-zinc-500">{item.detail}</div>}
         </div>
-        <DismissControl item={item} busy={dismissBusy} onDismissStart={onDismissStart} />
+        <DismissControl item={item} onDismissStart={onDismissStart} />
       </div>
       {(item.subLines?.length ?? 0) > 0
         ? item.subLines.map((sub) => (
@@ -226,7 +229,7 @@ function AggregateWell({ item, onFired, onResult, onDismissStart, dismissBusy })
 /** One bucket section: header (rank · name · count · why), then the trust
  * branch — UNKNOWN on an unproven bucket, a muted asserted zero, or the
  * items in the server's within-bucket order. */
-function BucketSection({ summary, items, onFired, onResult, onDismissStart, dismissInFlight }) {
+function BucketSection({ summary, items, onFired, onResult, onDismissStart }) {
   const unproved = !summary.wired || !summary.sourcesOk;
   return (
     <div>
@@ -264,7 +267,6 @@ function BucketSection({ summary, items, onFired, onResult, onDismissStart, dism
                 onFired={onFired}
                 onResult={onResult}
                 onDismissStart={onDismissStart}
-                dismissBusy={dismissInFlight.has(item.id)}
               />
             ) : (
               <FeedItem
@@ -273,7 +275,6 @@ function BucketSection({ summary, items, onFired, onResult, onDismissStart, dism
                 onFired={onFired}
                 onResult={onResult}
                 onDismissStart={onDismissStart}
-                dismissBusy={dismissInFlight.has(item.id)}
               />
             ),
           )}
@@ -334,23 +335,19 @@ export function AttentionFeed() {
   }, [refresh]);
   const undoHost = useUndoWindowHost();
 
-  // Item ids whose dismiss POST is in flight (QA round 5): the window drops
-  // out of the registry the moment it expires, BEFORE the POST settles, so
-  // the reason buttons read this as their `busy` input — they stay disabled
-  // until dismissItem's finally clears the id.
-  const [dismissInFlight, setDismissInFlight] = useState(() => new Set());
-  const inFlight = useRef(null);
-  if (inFlight.current === null) inFlight.current = createInFlightTracker(setDismissInFlight);
-
   // The typed dismiss (ADR-0034 §8.4): { reason, key } is the strict #4627
   // body — the legacy free-text { reason, signal } is a 400 there. Fires
   // through this component's own apiFetch (the confirmed-write fence),
   // then re-reads the feed; a failure (or a failed re-read) surfaces inline,
   // persistently, keyed to its item.
   const dismissItem = useCallback(
-    async (item, reason) => {
-      inFlight.current.begin(item.id);
-      try {
+    // The whole request runs through the undo host's shared in-flight
+    // tracker under the item's window id (QA round 5/6): the window drops
+    // out of the registry the moment it expires, BEFORE the POST settles,
+    // so the reason buttons read `inFlight.has(windowId)` as their busy input
+    // and stay disabled until runTracked's finally clears the id.
+    (item, reason) =>
+      undoHost.track(dismissWindowId(item), async () => {
         try {
           await apiFetch(`/attention/${encodeURIComponent(item.id)}/dismiss`, {
             method: "POST",
@@ -364,11 +361,8 @@ export function AttentionFeed() {
         }
         const reread = await refreshChecked();
         setDismissErrors((prev) => recordDismissOutcome(prev, item, { ok: true, reread }));
-      } finally {
-        inFlight.current.end(item.id);
-      }
-    },
-    [refreshChecked],
+      }),
+    [refreshChecked, undoHost.track],
   );
 
   // The dismiss row's entry point: arm the delayed-commit window with the
@@ -441,7 +435,6 @@ export function AttentionFeed() {
               onFired={refreshChecked}
               onResult={setActionResult}
               onDismissStart={onDismissStart}
-              dismissInFlight={dismissInFlight}
             />
           ))}
         </div>

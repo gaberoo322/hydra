@@ -4,7 +4,9 @@ import { views } from "virtual:hydra-docs";
 import { REPO_URL } from "../pages/docs/build-info.js";
 import {
   UNDO_WINDOW_MS,
+  createInFlightTracker,
   createUndoWindowRegistry,
+  runTracked,
   triggerDisabled,
   undoWindowSeconds,
 } from "../lib/delayed-commit.ts";
@@ -113,17 +115,36 @@ function docHref(doc) {
  * `start(id, label, fire)` captures the exact closure that was clicked, so
  * expiry can never fire a stale item/reason after a re-render; a second
  * start on an id already pending is refused (one commit per window).
+ *
+ * The host ALSO owns the one in-flight tracker (QA round 6): a window drops
+ * out of the registry the moment it expires, BEFORE its request settles, so
+ * every trigger reads `inFlight.has(windowId)` from the host — never a
+ * row-local flag — and `track(windowId, fn)` (lib `runTracked`) marks the id
+ * for the request's whole lifetime. Rows sharing a window id, and a row
+ * remounted mid-request, therefore stay disabled until the request settles.
  */
 export const UndoWindowContext = createContext(null);
 
 export function useUndoWindowHost(delayMs = UNDO_WINDOW_MS) {
   const [windows, setWindows] = useState([]);
+  const [inFlight, setInFlight] = useState(() => new Set());
   const registry = useRef(null);
   if (registry.current === null) registry.current = createUndoWindowRegistry(setWindows, delayMs);
+  const tracker = useRef(null);
+  if (tracker.current === null) {
+    const inFlightTracker = createInFlightTracker(setInFlight);
+    tracker.current = { track: (id, fn) => runTracked(inFlightTracker, id, fn) };
+  }
   useEffect(() => () => registry.current.flushAll(), []);
   return useMemo(
-    () => ({ windows, start: registry.current.start, undo: registry.current.undo }),
-    [windows],
+    () => ({
+      windows,
+      inFlight,
+      start: registry.current.start,
+      undo: registry.current.undo,
+      track: tracker.current.track,
+    }),
+    [windows, inFlight],
   );
 }
 
@@ -201,8 +222,11 @@ function InDashboardAffordance({ action, onFired, onResult }) {
 
   // Safe to run after this row has unmounted (the window lives at feed
   // level): the verified result is lifted through onResult, and row-local
-  // state is only touched while the row is still mounted.
-  const fire = useCallback(async () => {
+  // state is only touched while the row is still mounted. With a host, the
+  // request runs through the host's shared in-flight tracker under this
+  // window id (QA round 6), so EVERY row bound to the id — siblings and
+  // remounts alike — stays disabled until it settles.
+  const fireRequest = useCallback(async () => {
     if (mounted.current) setBusy(true);
     try {
       // The route is fired exactly as served — templates were resolved
@@ -241,6 +265,12 @@ function InDashboardAffordance({ action, onFired, onResult }) {
       }
     }
   }, [action.method, action.route, onFired, onResult, mounted]);
+  const track = undoHost?.track;
+  const fire = useCallback(
+    () => (track ? track(windowId, fireRequest) : fireRequest()),
+    [track, windowId, fireRequest],
+  );
+  const inFlight = undoHost !== null && undoHost.inFlight.has(windowId);
 
   // No defined body for this route — or an immediate-tier action rendered
   // outside an undo-window host: disabled + the reason — never a guess, and
@@ -301,10 +331,10 @@ function InDashboardAffordance({ action, onFired, onResult }) {
         <button
           type="button"
           onClick={() => undoHost.start(windowId, `Firing ${action.label} in ${undoWindowSeconds(UNDO_WINDOW_MS)}`, fire)}
-          disabled={triggerDisabled(busy, undoHost.windows, windowId)}
+          disabled={triggerDisabled(undoHost.inFlight.has(windowId), undoHost.windows, windowId)}
           className="rounded border border-emerald-500/45 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40"
         >
-          {busy ? "…" : action.label}
+          {inFlight ? "…" : action.label}
         </button>
       )}
       <span className="text-[10px] uppercase tracking-wider text-zinc-600">

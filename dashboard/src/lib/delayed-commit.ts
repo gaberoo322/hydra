@@ -160,10 +160,10 @@ export function triggerDisabled(busy: boolean, windows: PendingWindow[], id: str
 /**
  * In-flight request ids (QA round 5, PR #4976). A window's expiry drops it
  * from the registry BEFORE its closure's request settles, so the window alone
- * cannot keep a trigger disabled for the request's lifetime. The feed marks
- * an id in flight when the expired closure starts its request and clears it
- * in that closure's `finally`; the trigger reads `has(id)` as its `busy`
- * input to `triggerDisabled`. `onChange` receives a fresh Set on every
+ * cannot keep a trigger disabled for the request's lifetime. The feed-level
+ * undo host (useUndoWindowHost) owns one tracker for every window id; an
+ * expired closure runs its request through `runTracked`, and every trigger
+ * reads `has(windowId)` as its `busy` input to `triggerDisabled`. `onChange` receives a fresh Set on every
  * change so a React state setter re-renders.
  */
 export interface InFlightTracker {
@@ -191,6 +191,24 @@ export function createInFlightTracker(onChange: (ids: ReadonlySet<string>) => vo
       return ids.has(id);
     },
   };
+}
+
+/**
+ * Run `fn` with `id` marked in flight for its whole lifetime (QA round 6,
+ * PR #4976): `begin(id)` before the request starts, `end(id)` in `finally`
+ * on every settle path (resolve, reject, early return). The feed-level undo
+ * host owns ONE tracker shared by every trigger — the dismiss reasons AND
+ * the immediate-tier in-dashboard actions — keyed by the window id, so any
+ * row (a sibling sharing the id, or a row remounted mid-request) reads the
+ * same in-flight state and stays disabled until the request settles.
+ */
+export async function runTracked<T>(tracker: InFlightTracker, id: string, fn: () => Promise<T>): Promise<T> {
+  tracker.begin(id);
+  try {
+    return await fn();
+  } finally {
+    tracker.end(id);
+  }
 }
 
 /** The toast label's window length, derived from the actual delay so the

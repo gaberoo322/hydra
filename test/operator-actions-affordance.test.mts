@@ -51,6 +51,7 @@ import {
   createDelayedCommit,
   createInFlightTracker,
   createUndoWindowRegistry,
+  runTracked,
   triggerDisabled,
   undoWindowSeconds,
 } from "../dashboard/src/lib/delayed-commit.ts";
@@ -491,20 +492,21 @@ describe("dismiss trigger stays disabled while the expired window's POST is in f
     });
     const posts: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
     let settledCount = 0;
-    const dismissItem = async (itemId: string) => {
-      inFlight.begin(itemId);
-      try {
-        await new Promise<void>((resolve, reject) => posts.push({ resolve, reject }));
-      } catch {
-        /* intentional: the harness only models the finally-clear */
-      } finally {
-        inFlight.end(itemId);
-        settledCount += 1;
-      }
-    };
+    // dismissItem's shape: the request runs through the REAL runTracked
+    // under the item's window id (deleting begin/end in the lib reddens here).
+    const dismissItem = (itemId: string) =>
+      runTracked(inFlight, `dismiss:${itemId}`, async () => {
+        try {
+          await new Promise<void>((resolve, reject) => posts.push({ resolve, reject }));
+        } catch {
+          /* intentional: the harness only models the finally-clear */
+        } finally {
+          settledCount += 1;
+        }
+      });
     const start = (itemId: string) => reg.start(`dismiss:${itemId}`, "Dismissing · Later", () => dismissItem(itemId));
     const disabled = (itemId: string) =>
-      triggerDisabled(inFlightIds.has(itemId), windows, `dismiss:${itemId}`);
+      triggerDisabled(inFlightIds.has(`dismiss:${itemId}`), windows, `dismiss:${itemId}`);
     return { start, disabled, posts, settled: () => settledCount, inFlight: () => inFlightIds };
   }
 
@@ -558,6 +560,118 @@ describe("dismiss trigger stays disabled while the expired window's POST is in f
   });
 });
 
+describe("immediate-tier triggers share the HOST's in-flight state per window id (QA round 6)", () => {
+  /** useUndoWindowHost + InDashboardAffordance, framework-free: ONE registry
+   * and ONE in-flight tracker owned by the host; every row bound to a window
+   * id reads its disabled state from host state only (no row-local busy), and
+   * its fire runs through the REAL runTracked under that id. A "row" is just
+   * a reader of host state, so a remount is a fresh reader of the same host. */
+  function hostHarness() {
+    let windows: PendingWindow[] = [];
+    let inFlightIds: ReadonlySet<string> = new Set();
+    const reg = createUndoWindowRegistry((w) => {
+      windows = w;
+    });
+    const tracker = createInFlightTracker((ids) => {
+      inFlightIds = ids;
+    });
+    const requests: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
+    let settled = 0;
+    const fireRequest = () =>
+      new Promise<void>((resolve, reject) => requests.push({ resolve, reject })).then(
+        () => {
+          settled += 1;
+        },
+        () => {
+          /* intentional: the harness models the row's inline ✗ catch */
+          settled += 1;
+        },
+      );
+    const mountRow = (windowId: string) => ({
+      disabled: () => triggerDisabled(inFlightIds.has(windowId), windows, windowId),
+      click: () => reg.start(windowId, "Firing", () => runTracked(tracker, windowId, fireRequest)),
+    });
+    return { mountRow, requests, settled: () => settled, inFlight: () => inFlightIds };
+  }
+  const flush = async () => {
+    for (let i = 0; i < 4; i += 1) await Promise.resolve();
+  };
+  const WINDOW = "action:POST /scheduler/start";
+
+  test("two rows sharing a window id: after the window fires, BOTH stay disabled until the POST settles", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const h = hostHarness();
+    const rowA = h.mountRow(WINDOW);
+    const rowB = h.mountRow(WINDOW);
+    assert.equal(rowA.disabled(), false);
+    assert.equal(rowB.disabled(), false);
+    assert.equal(rowA.click(), true);
+    assert.equal(rowB.disabled(), true, "the sibling is disabled while the window is pending");
+    assert.equal(rowB.click(), false, "a sibling click on the pending window is refused");
+    t.mock.timers.tick(UNDO_WINDOW_MS);
+    assert.equal(h.requests.length, 1, "expiry fired exactly one POST");
+    assert.equal(rowA.disabled(), true, "window gone, POST in flight — firing row disabled");
+    assert.equal(rowB.disabled(), true, "window gone, POST in flight — sibling row disabled too");
+    assert.equal(h.mountRow("action:POST /autopilot/paused").disabled(), false, "another route stays enabled");
+    h.requests[0].resolve();
+    await flush();
+    assert.equal(h.settled(), 1);
+    assert.equal(rowA.disabled(), false, "re-enabled once the POST settles");
+    assert.equal(rowB.disabled(), false, "sibling re-enabled once the POST settles");
+    assert.equal(h.inFlight().size, 0);
+  });
+
+  test("a row remounted while the POST is in flight mounts disabled, and re-enables on settle", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const h = hostHarness();
+    h.mountRow(WINDOW).click();
+    t.mock.timers.tick(UNDO_WINDOW_MS);
+    // The original row unmounts on a poll refresh; a fresh row for the same
+    // route mounts mid-request with no row-local state of its own.
+    const remounted = h.mountRow(WINDOW);
+    assert.equal(remounted.disabled(), true, "the remount reads the host's in-flight id");
+    await flush();
+    assert.equal(remounted.disabled(), true, "still disabled while the POST is pending");
+    h.requests[0].resolve();
+    await flush();
+    assert.equal(remounted.disabled(), false, "re-enabled once the POST settles");
+  });
+
+  test("a rejected POST also clears the shared in-flight id", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const h = hostHarness();
+    const row = h.mountRow(WINDOW);
+    row.click();
+    t.mock.timers.tick(UNDO_WINDOW_MS);
+    assert.equal(row.disabled(), true);
+    h.requests[0].reject(new Error("500"));
+    await flush();
+    assert.equal(row.disabled(), false);
+  });
+
+  test("runTracked marks the id for the request's whole lifetime and clears it on throw", async () => {
+    let ids: ReadonlySet<string> = new Set();
+    const tr = createInFlightTracker((next) => {
+      ids = next;
+    });
+    let seenDuring = false;
+    const value = await runTracked(tr, "w", async () => {
+      seenDuring = ids.has("w");
+      return 42;
+    });
+    assert.equal(seenDuring, true, "begin() runs before the request starts");
+    assert.equal(value, 42, "the request's value passes through");
+    assert.equal(ids.has("w"), false, "end() runs on resolve");
+    await assert.rejects(
+      runTracked(tr, "w", async () => {
+        throw new Error("boom");
+      }),
+      /boom/,
+    );
+    assert.equal(ids.has("w"), false, "end() runs on reject");
+  });
+});
+
 describe("the dismiss + immediate triggers bind to the feed-level host", () => {
   test("the host wraps the tested registry and only the HOST flushes", async () => {
     const src = await readSource(AFFORDANCE);
@@ -572,12 +686,22 @@ describe("the dismiss + immediate triggers bind to the feed-level host", () => {
 
   test("every trigger derives its disabled state from triggerDisabled", async () => {
     const aff = await readSource(AFFORDANCE);
-    assert.ok(aff.includes("disabled={triggerDisabled(busy, undoHost.windows, windowId)}"), "immediate in-dashboard button");
+    assert.ok(
+      aff.includes("disabled={triggerDisabled(undoHost.inFlight.has(windowId), undoHost.windows, windowId)}"),
+      "immediate in-dashboard button reads the HOST's in-flight set (QA round 6)",
+    );
+    assert.ok(!aff.includes("triggerDisabled(busy,"), "no trigger reads a row-local busy flag (QA round 6)");
+    assert.ok(aff.includes("track(windowId, fireRequest)"), "the immediate fire runs through the host tracker");
+    assert.ok(aff.includes("runTracked(inFlightTracker, id, fn)"), "the host's track wraps the tested runTracked");
+    assert.ok(aff.includes("createInFlightTracker(setInFlight)"), "the host owns the one in-flight tracker");
     const feed = await readSource(FEED);
-    assert.ok(feed.includes("triggerDisabled(busy, undoHost.windows, dismissWindowId(item))"), "each dismiss reason button");
+    assert.ok(
+      feed.includes("triggerDisabled(undoHost.inFlight.has(windowId), undoHost.windows, windowId)"),
+      "each dismiss reason button reads the HOST's in-flight set",
+    );
     assert.ok(!feed.includes("triggerDisabled(false,"), "no trigger hardcodes busy=false (QA round 5)");
-    assert.ok(feed.includes("dismissBusy={dismissInFlight.has(item.id)}"), "rows read busy from the in-flight set");
-    assert.ok(feed.includes("inFlight.current.end(item.id)"), "dismissItem clears its in-flight id");
+    assert.ok(!feed.includes("createInFlightTracker("), "the feed hosts no second tracker — one per undo host");
+    assert.ok(feed.includes("undoHost.track(dismissWindowId(item)"), "dismissItem runs through the host tracker");
   });
 });
 

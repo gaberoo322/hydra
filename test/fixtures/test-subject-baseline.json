@@ -87,6 +87,7 @@
   "scripts/docs/inventories/adrs.ts": 1,
   "scripts/docs/inventories/context-map.ts": 1,
   "scripts/docs/inventories/corpus.ts": 1,
+  "scripts/docs/prose-drift.ts": 1,
   "scripts/glm-beachhead-report.sh": 1,
   "scripts/glm/drainer-loop.sh": 1,
   "scripts/hydra-watchdog.sh": 9,
