@@ -303,8 +303,8 @@ interface PrGateBuckets {
   unchecked: number[];
   behind: number[];
   ciTriggerStale: boolean;
-  glmRed: number[];
-  glmRedForwardFix: string;
+  /** `orch_prs_red_resume`: pick candidates qualifying ONLY via the red-CI arm (#5058). */
+  redResume: number[];
   devResumePick: string;
   /** The #4808 no-PR pick: the anchor, or null when absent OR degraded. */
   devResumeNoprAnchor: number | null;
@@ -359,15 +359,13 @@ async function runPrGate(prs: unknown[], overrides: PrGateOverrides = {}, repoll
   // the first payload holds an UNKNOWN — an added read trips every ported case.
   assert.equal(github.totalReads(), 5 + (hasUnknownMergeState(prs) ? 1 : 0));
   const v = outcome.value;
-  const glm = v.glmRed.ok ? v.glmRed.value : { bucket: [], pick: null };
   const dirtyFix = v.dirtyFix.ok ? v.dirtyFix.value : { pick: null, surface: [] };
   return {
     dirty: [...v.dirty],
     unchecked: [...v.unchecked],
     behind: [...v.behind],
     ciTriggerStale: v.ciTriggerStale.ok && v.ciTriggerStale.value,
-    glmRed: [...glm.bucket],
-    glmRedForwardFix: pinRef(glm.pick),
+    redResume: v.redResume.ok ? [...v.redResume.value] : [],
     devResumePick: pinRef(v.devResumePick.ok ? v.devResumePick.value : null),
     devResumeNoprAnchor: v.devResumeNoprPick.ok ? v.devResumeNoprPick.value : null,
     dirtyForwardFix: pinRef(dirtyFix.pick),
@@ -432,7 +430,7 @@ describe("pr-gate — BEHIND/draft classification (issue #4240)", () => {
   });
 });
 
-describe("pr-gate — GLM red-PR forward-fix predicate (issue #4460)", () => {
+describe("pr-gate — red-CI resume arm, provenance-agnostic (issues #4460, #5058)", () => {
   interface RollupEntry {
     __typename?: string;
     name?: string;
@@ -468,13 +466,13 @@ describe("pr-gate — GLM red-PR forward-fix predicate (issue #4460)", () => {
     });
   }
 
-  test("a qualifying GLM red PR (branch-prefix provenance, red required `test`) yields the forward-fix pick", async () => {
+  test("a qualifying red PR (red required `test`, no resume label) yields the resume pick and lands in the red-resume cap scope", async () => {
     const buckets = await runPrGate([baseGlmPr()]);
-    assert.deepEqual(buckets.glmRed, [4433]);
-    assert.equal(buckets.glmRedForwardFix, "issue-4240:4433:worktree-agent-glm-4240-1789");
+    assert.deepEqual(buckets.redResume, [4433]);
+    assert.equal(buckets.devResumePick, "issue-4240:4433:worktree-agent-glm-4240-1789");
   });
 
-  test("glm-authored LABEL provenance also qualifies (INV-3a OR-predicate, same as #4048)", async () => {
+  test("glm-authored LABEL provenance qualifies exactly like any other PR (provenance is display-only, #5058)", async () => {
     const pr = baseGlmPr({
       number: 4450,
       headRefName: "issue-4450-not-a-worktree-branch",
@@ -482,7 +480,7 @@ describe("pr-gate — GLM red-PR forward-fix predicate (issue #4460)", () => {
       body: "Closes #4450",
     });
     const buckets = await runPrGate([pr]);
-    assert.equal(buckets.glmRedForwardFix, "issue-4450:4450:issue-4450-not-a-worktree-branch");
+    assert.equal(buckets.devResumePick, "issue-4450:4450:issue-4450-not-a-worktree-branch");
   });
 
   test("an advisory (non-required) FAILURE never qualifies (INV-4)", async () => {
@@ -492,8 +490,8 @@ describe("pr-gate — GLM red-PR forward-fix predicate (issue #4460)", () => {
       ]),
     });
     const buckets = await runPrGate([pr]);
-    assert.deepEqual(buckets.glmRed, []);
-    assert.equal(buckets.glmRedForwardFix, "none");
+    assert.deepEqual(buckets.redResume, []);
+    assert.equal(buckets.devResumePick, "none");
   });
 
   test("CANCELLED on a required check is NOT red — dedupe keeps the LATEST entry (INV-4)", async () => {
@@ -503,23 +501,26 @@ describe("pr-gate — GLM red-PR forward-fix predicate (issue #4460)", () => {
       ]),
     });
     const buckets = await runPrGate([pr]);
-    assert.deepEqual(buckets.glmRed, [], "CANCELLED must never arm a dispatch");
+    assert.deepEqual(buckets.redResume, [], "CANCELLED must never arm a dispatch");
+    assert.equal(buckets.devResumePick, "none");
   });
 
   test("a still-PENDING required check disqualifies (INV-3e) — even with another check red", async () => {
     const buckets = await runPrGate([baseGlmPr({ statusCheckRollup: fullRequiredRollup("test").slice(0, -1) })]);
-    assert.deepEqual(buckets.glmRed, []);
+    assert.deepEqual(buckets.redResume, []);
+    assert.equal(buckets.devResumePick, "none");
   });
 
-  test("a non-GLM PR with an identical red required check never qualifies (INV-3a)", async () => {
-    const buckets = await runPrGate([baseGlmPr({ headRefName: "issue-4240-plain-branch", labels: [] })]);
-    assert.deepEqual(buckets.glmRed, []);
-    assert.equal(buckets.glmRedForwardFix, "none");
+  test("a non-GLM PR with an identical red required check qualifies too — the pick is provenance-agnostic (#5058)", async () => {
+    const buckets = await runPrGate([baseGlmPr({ headRefName: "worktree-agent-a5706403c05633ec3", labels: [] })]);
+    assert.deepEqual(buckets.redResume, [4433]);
+    assert.equal(buckets.devResumePick, "issue-4240:4433:worktree-agent-a5706403c05633ec3");
   });
 
   test("not-yet-quiescent (updatedAt inside the 1800s window) disqualifies (INV-3c)", async () => {
     const buckets = await runPrGate([baseGlmPr({ updatedAt: isoSecondsAgo(300) })]);
-    assert.deepEqual(buckets.glmRed, []);
+    assert.deepEqual(buckets.redResume, []);
+    assert.equal(buckets.devResumePick, "none");
   });
 
   test("draft / ready-for-human / DIRTY / UNKNOWN each disqualify (INV-3b)", async () => {
@@ -530,23 +531,31 @@ describe("pr-gate — GLM red-PR forward-fix predicate (issue #4460)", () => {
       ["UNKNOWN", { mergeStateStatus: "UNKNOWN" }],
     ] as const) {
       const buckets = await runPrGate([baseGlmPr(over as Partial<PrGateOpenPr>)]);
-      assert.deepEqual(buckets.glmRed, [], `${name} must disqualify`);
+      assert.deepEqual(buckets.redResume, [], `${name} must disqualify`);
+      assert.equal(buckets.devResumePick, "none", `${name} must disqualify`);
     }
   });
 
   test("exactly-one closing issue is required — two closing refs and zero both disqualify (INV-3d)", async () => {
     for (const body of ["Closes #4240\n\nCloses #9999", "Refs #4240"]) {
       const buckets = await runPrGate([baseGlmPr({ body })]);
-      assert.deepEqual(buckets.glmRed, [], `body "${body}" must disqualify`);
+      assert.deepEqual(buckets.redResume, [], `body "${body}" must disqualify`);
+      assert.equal(buckets.devResumePick, "none", `body "${body}" must disqualify`);
     }
   });
 
-  test("the needs-dev-resume arm qualifies an all-green GLM PR whose closed issue carries the label (INV-3f)", async () => {
+  test("the needs-dev-resume arm picks an all-green PR but leaves it OUT of the red-resume cap scope (label arm is uncapped)", async () => {
     const buckets = await runPrGate([baseGlmPr({ statusCheckRollup: fullRequiredRollup() })], {
       devResumeIssuesJson: JSON.stringify([{ number: 4240 }]),
     });
-    assert.deepEqual(buckets.glmRed, [4433]);
-    assert.equal(buckets.glmRedForwardFix, "issue-4240:4433:worktree-agent-glm-4240-1789");
+    assert.deepEqual(buckets.redResume, []);
+    assert.equal(buckets.devResumePick, "issue-4240:4433:worktree-agent-glm-4240-1789");
+  });
+
+  test("a red PR whose closing issue ALSO carries needs-dev-resume is the label arm — picked, not capped", async () => {
+    const buckets = await runPrGate([baseGlmPr()], { devResumeIssuesJson: JSON.stringify([{ number: 4240 }]) });
+    assert.deepEqual(buckets.redResume, []);
+    assert.equal(buckets.devResumePick, "issue-4240:4433:worktree-agent-glm-4240-1789");
   });
 
   test("a StatusContext FAILURE on a required context is red (deep-qa-gate commit status shape)", async () => {
@@ -556,22 +565,22 @@ describe("pr-gate — GLM red-PR forward-fix predicate (issue #4460)", () => {
         : e,
     );
     const buckets = await runPrGate([baseGlmPr({ statusCheckRollup: rollup })]);
-    assert.deepEqual(buckets.glmRed, [4433]);
+    assert.deepEqual(buckets.redResume, [4433]);
   });
 
-  test("the LOWEST-numbered qualifying PR wins the pick; the debug bucket is sorted (INV-2)", async () => {
+  test("the LOWEST-numbered qualifying PR wins the pick; the red-resume bucket is sorted (INV-2)", async () => {
     const later = baseGlmPr({ number: 4470, headRefName: "worktree-agent-glm-4266-1", body: "Closes #4266" });
     const earlier = baseGlmPr({ number: 4465, headRefName: "worktree-agent-glm-4300-1", body: "Closes #4300" });
     const buckets = await runPrGate([later, earlier]);
-    assert.deepEqual(buckets.glmRed, [4465, 4470]);
-    assert.equal(buckets.glmRedForwardFix, "issue-4300:4465:worktree-agent-glm-4300-1");
+    assert.deepEqual(buckets.redResume, [4465, 4470]);
+    assert.equal(buckets.devResumePick, "issue-4300:4465:worktree-agent-glm-4300-1");
   });
 
   test("a failed required-contexts read fails CLOSED: empty buckets + stderr note, never a dispatch pick (INV-5)", async () => {
     const r = await runPrGate([baseGlmPr()], { requiredContextsJson: "" });
-    assert.deepEqual(r.glmRed, []);
-    assert.equal(r.glmRedForwardFix, "none");
-    assert.match(r.stderr, /glm-red classifier fail-closed.*#4460 INV-5/, "INV-5 requires a stderr note naming WHY the signal is empty");
+    assert.deepEqual(r.redResume, []);
+    assert.equal(r.devResumePick, "none");
+    assert.match(r.stderr, /dev-resume classifier fail-closed.*#4460 INV-5/, "INV-5 requires a stderr note naming WHY the signal is empty");
     // The four #4240 buckets are unaffected — fail-closed toward NO dispatch, NOT board degradation.
     assert.deepEqual(r.behind, []);
   });
@@ -579,8 +588,8 @@ describe("pr-gate — GLM red-PR forward-fix predicate (issue #4460)", () => {
   test("legacy #4240 classification is unchanged by the #4460 additions (regression control)", async () => {
     const buckets = await runPrGate([basePrGate({ number: 4246, updatedAt: isoSecondsAgo(7200) })]);
     assert.deepEqual(buckets.behind, [4246]);
-    assert.deepEqual(buckets.glmRed, []);
-    assert.equal(buckets.glmRedForwardFix, "none");
+    assert.deepEqual(buckets.redResume, []);
+    assert.equal(buckets.devResumePick, "none");
   });
 });
 
@@ -614,7 +623,7 @@ describe("pr-gate — Claude-lane durable dev resume pick (issue #4518)", () => 
   test("a needs-dev-resume issue with an open non-draft Claude-lane PR yields the resume pick", async () => {
     const buckets = await runPrGate([claudeResumePr()], RESUME_4510);
     assert.equal(buckets.devResumePick, "issue-4510:4532:worktree-agent-a5706403c05633ec3");
-    assert.equal(buckets.glmRedForwardFix, "none", "no GLM provenance -> the #4460 arm stays dormant");
+    assert.deepEqual(buckets.redResume, [], "an all-green label-arm pick is outside the red-CI cap scope");
   });
 
   test("no needs-dev-resume label on the closing issue -> none", async () => {
@@ -629,14 +638,21 @@ describe("pr-gate — Claude-lane durable dev resume pick (issue #4518)", () => 
     );
   });
 
-  test("GLM-provenance PRs are left to the #4460 arm (disjoint picks; its cap stays the only owner)", async () => {
+  test("GLM-provenance PRs get the SAME resume pick — no provenance partition (#5058)", async () => {
     const byBranch = claudeResumePr({ headRefName: "worktree-agent-glm-4510-1" });
     const byLabel = claudeResumePr({ labels: [{ name: "glm-authored" }] });
     for (const pr of [byBranch, byLabel]) {
       const buckets = await runPrGate([pr], RESUME_4510);
-      assert.equal(buckets.devResumePick, "none");
-      assert.match(buckets.glmRedForwardFix, /^issue-4510:4532:/, "the GLM arm still owns it");
+      assert.match(buckets.devResumePick, /^issue-4510:4532:/, "the one provenance-agnostic pick owns it");
+      assert.deepEqual(buckets.redResume, []);
     }
+  });
+
+  test("a ready-for-human PR stays excluded even when its issue is needs-dev-resume — the operator hand-back clears the label (#5058)", async () => {
+    const stranded = claudeResumePr({ labels: [{ name: "ready-for-human" }, { name: "conflict-fix-attempted" }] });
+    assert.equal((await runPrGate([stranded], RESUME_4510)).devResumePick, "none");
+    const handedBack = claudeResumePr({ labels: [] });
+    assert.match((await runPrGate([handedBack], RESUME_4510)).devResumePick, /^issue-4510:4532:/);
   });
 
   test("DIRTY / UNKNOWN merge state, a non-quiescent PR, and a pending required check all wait a turn", async () => {
@@ -676,7 +692,7 @@ describe("pr-gate — Claude-lane durable dev resume pick (issue #4518)", () => 
     );
   });
 
-  test("the #4460 GLM pick is unchanged by the #4518 addition (regression control)", async () => {
+  test("GLM red PR and Claude needs-dev-resume PR compete in ONE pick — lowest PR wins (#5058)", async () => {
     const glm = claudeResumePr({
       number: 4433,
       body: "Closes #4240",
@@ -686,9 +702,8 @@ describe("pr-gate — Claude-lane durable dev resume pick (issue #4518)", () => 
     const buckets = await runPrGate([glm, claudeResumePr()], {
       devResumeIssuesJson: JSON.stringify([{ number: 4240 }, { number: 4510 }]),
     });
-    assert.deepEqual(buckets.glmRed, [4433]);
-    assert.equal(buckets.glmRedForwardFix, "issue-4240:4433:worktree-agent-glm-4240-1789");
-    assert.equal(buckets.devResumePick, "issue-4510:4532:worktree-agent-a5706403c05633ec3");
+    assert.deepEqual(buckets.redResume, []);
+    assert.equal(buckets.devResumePick, "issue-4240:4433:worktree-agent-glm-4240-1789");
   });
 });
 
@@ -858,7 +873,7 @@ describe("pr-gate — UNKNOWN mergeStateStatus re-poll (#4812)", () => {
       assert.equal(ghCalls, 2);
       const buckets = await runPrGate([resumePr(), behindPr()], RESUME_4510, second);
       assert.equal(buckets.devResumePick, "none");
-      assert.equal(buckets.glmRedForwardFix, "none");
+      assert.deepEqual(buckets.redResume, []);
       assert.deepEqual(buckets.behind, []);
       assert.deepEqual(buckets.dirty, []);
     });

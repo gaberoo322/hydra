@@ -37,8 +37,8 @@
   "expected": {
     "stderrNotes": [
       "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)",
-      "orch glm-red required-contexts read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix fail closed to none (issue #4460, INV-5)",
-      "orch glm-red classifier fail-closed (required-contexts / needs-dev-resume / pr-refs input unavailable) — issue #4460 INV-5"
+      "orch dev-resume required-contexts read FAILED (empty payload) — orch_prs_red_resume/orch_dev_resume_pick fail closed to none (issue #4460, INV-5)",
+      "orch dev-resume classifier fail-closed (required-contexts / needs-dev-resume / pr-refs input unavailable) — issue #4460 INV-5"
     ],
     "ghCalls": [
       [
@@ -105,7 +105,7 @@
           "ok": false,
           "reason": "runs-read-failed"
         },
-        "glmRed": {
+        "redResume": {
           "ok": false,
           "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
         },

@@ -15,8 +15,8 @@
  *     sanctioned second PR read, issued only when the first holds an UNKNOWN.
  *   - two `actions/runs` reads (newest push / pull_request run) feed the
  *     repo-wide `orch_ci_trigger_stale` discriminator — fail-OPEN (INV-E).
- *   - the required-contexts + needs-dev-resume reads feed the glm-red
- *     forward-fix and the dev-resume pick — fail-CLOSED (INV-5).
+ *   - the required-contexts + needs-dev-resume reads feed the unified
+ *     dev-resume pick — fail-CLOSED (INV-5).
  *
  * What it computes (semantics unchanged from the bash; the long-form history
  * of each rule lives in the issues named inline):
@@ -31,10 +31,13 @@
  *                    draft/surfaced, older than the grace window.
  *   orch_ci_trigger_stale  an unchecked PR is newer than the newest push AND
  *                    pull_request run (only when both timestamps parse).
- *   glm-red          GLM-provenance, quiescent, exactly one closing issue, no
- *                    required check pending, and a required check red OR the
- *                    issue labelled needs-dev-resume (#4460 INV-3).
- *   dev-resume pick  the same minus GLM provenance, gated on needs-dev-resume (#4518).
+ *   dev-resume pick  ANY provenance (#5058), not draft / ready-for-human /
+ *                    DIRTY / UNKNOWN, quiescent, exactly one closing issue, no
+ *                    required check pending, and the issue labelled
+ *                    needs-dev-resume (#4518) OR a required check red (the
+ *                    retired GLM-only #4460 arm, now provenance-agnostic).
+ *   red-resume       the pick candidates that qualified ONLY through the
+ *                    red-CI arm — decide.py's per-PR forward-fix cap scope.
  *   dirty fix-forward  pin / surface / wait split of the dirty bucket (#4807).
  *
  * Reference detection reuses src/github/pr-refs.ts (the TS port of
@@ -44,7 +47,13 @@
 
 import { closedIssues, referencedIssues, type PrRefRow } from "../../github/pr-refs.ts";
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
-import { DEFAULT_NOPR_RESUME_QUIESCENCE_SECONDS, pickDevResume, pickNoPrResume, type NoPrResumeRow } from "./dev-resume.ts";
+import {
+  DEFAULT_NOPR_RESUME_QUIESCENCE_SECONDS,
+  isResumableHead,
+  pickDevResume,
+  pickNoPrResume,
+  type NoPrResumeRow,
+} from "./dev-resume.ts";
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
 import type { QaVerdictRunner } from "./host-port.ts";
 import { pyEpochSeconds, pyFloatOr, pyJsonLoads, pyStr, pyTruthy } from "./py-compat.ts";
@@ -92,9 +101,18 @@ export interface PrGateSnapshot {
   readonly behind: readonly number[];
   /** Fail-open: degraded → rendered `false`. */
   readonly ciTriggerStale: Classified<boolean>;
-  /** Fail-closed: degraded → empty bucket + `none`. */
-  readonly glmRed: Classified<{ readonly bucket: readonly number[]; readonly pick: PrPick | null }>;
-  /** Fail-closed: degraded → `none`. */
+  /**
+   * The resume-pick candidates that qualified ONLY through the red-CI arm
+   * (a required check red at the head, closing issue NOT labelled
+   * `needs-dev-resume`), sorted ascending. decide.py caps forward-fix
+   * dispatches per PR on exactly this set (#5058, ex-#4460 INV-8).
+   * Fail-closed: degraded → empty.
+   */
+  readonly redResume: Classified<readonly number[]>;
+  /**
+   * The ONE provenance-agnostic durable resume pick (#4518 + the retired
+   * GLM-only #4460 arm, unified by #5058). Fail-closed: degraded → `none`.
+   */
   readonly devResumePick: Classified<PrPick | null>;
   /**
    * The no-PR durable resume pick (#4808): the lowest-numbered
@@ -178,6 +196,10 @@ function upper(v: unknown): string {
 
 const ascending = (a: number, b: number) => a - b;
 
+/**
+ * GLM provenance (label or worktree-branch prefix). Display / telemetry only
+ * since #5058 — no selector gates on provenance any more.
+ */
 export function isGlmProvenance(names: Set<unknown>, head: unknown): boolean {
   return names.has("glm-authored") || (typeof head === "string" && head.startsWith("worktree-agent-glm-"));
 }
@@ -285,6 +307,11 @@ export const BEHIND_QUIESCENCE_SECONDS = 5400;
 /** Attempted-and-quiescent dirty surface window (seconds, #4807). */
 export const DIRTY_ATTEMPTED_SURFACE_SECONDS = 5400;
 export const DEFAULT_UNCHECKED_GRACE_SECONDS = 600;
+/**
+ * The resume / dirty-fix quiescence window (seconds). The env knob keeps its
+ * historical `HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS` name (operator-facing);
+ * the window itself is provenance-agnostic.
+ */
 export const DEFAULT_GLM_RED_QUIESCENCE_SECONDS = 1800;
 
 export interface PrGateInputs {
@@ -315,6 +342,17 @@ export interface PrGateInputs {
    * (#4808 INV-4). `undefined` = unbounded (no saturation check).
    */
   readonly ghListLimit?: number;
+}
+
+/** One orch-pre-qualified resume candidate (its required-check verdict read once). */
+interface ResumeCandidate {
+  readonly pr: number;
+  readonly headRefName: string | null;
+  readonly row: Row;
+  /** A required check is red at the head (the red-CI arm). */
+  readonly red: boolean;
+  /** Every required check is present and none is pending. */
+  readonly settled: boolean;
 }
 
 const RED_CONCLUSIONS = new Set(["FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED"]);
@@ -475,78 +513,84 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
     ciTriggerStale = { ok: true, value: stale };
   }
 
-  // glm-red forward-fix (#4460) — fail closed on any unavailable input (INV-5).
+  // The unified durable dev-resume pick (#4518 + #4460, unified by #5058) —
+  // fail closed on any unavailable input (INV-5).
   const req = inputs.requiredContexts;
   const resume = inputs.devResumeIssues;
   const refs = inputs.prRefs;
-  let glmRed: PrGateSnapshot["glmRed"];
+  let redResume: PrGateSnapshot["redResume"];
   let devResumePick: PrGateSnapshot["devResumePick"];
   if (!req.ok || !resume.ok || !refs.ok) {
     const reason = "required-contexts / needs-dev-resume / pr-refs input unavailable";
-    notes.push(`orch glm-red classifier fail-closed (${reason}) — issue #4460 INV-5`);
-    glmRed = { ok: false, reason };
+    notes.push(`orch dev-resume classifier fail-closed (${reason}) — issue #4460 INV-5`);
+    redResume = { ok: false, reason };
     devResumePick = { ok: false, reason };
   } else {
-    const closingOf = (pr: Row, number: number, issueRef: string, failNote: string): ReadonlySet<number> | null => {
+    // Provenance-agnostic (#5058): a GLM, Claude or any future worker lane's
+    // PR qualifies alike. Only the orch pre-qualification gates live here; the
+    // selection is the ONE pick both realms share (dev-resume.ts, #4932).
+    // `ready-for-human` stays a hard exclusion: it is the operator's cue
+    // (QA round-cap #4735, conflict / cap-exhausted surface) and the
+    // surface-pr idempotency key — /hydra-review clears it when the operator
+    // hands the PR back to an autonomous lane.
+    const candidates: ResumeCandidate[] = [];
+    for (const pr of prs) {
+      const number = pr.number;
+      if (typeof number !== "number") continue;
+      const names = labelsOf(pr);
+      const head = orEmpty(pr.headRefName);
+      if (pyTruthy(pr.isDraft) || names.has("ready-for-human")) continue;
+      const state = orEmpty(pr.mergeStateStatus);
+      if (state === "DIRTY" || state === "UNKNOWN") continue;
+      const updated = pyEpochSeconds(pr.updatedAt);
+      if (updated === null || now - updated < quiet) continue;
+      const verdict = requiredVerdict(pr.statusCheckRollup, req.value);
+      candidates.push({
+        pr: number,
+        headRefName: pyTruthy(head) ? String(head) : null,
+        row: pr,
+        red: verdict?.red === true,
+        settled: verdict !== null,
+      });
+    }
+    // Memoised so the pick and the red-resume bucket read each PR's closing
+    // set (and emit its failure note) exactly once.
+    const closingMemo = new Map<number, ReadonlySet<number> | null>();
+    const closing = (c: ResumeCandidate): ReadonlySet<number> | null => {
+      const memo = closingMemo.get(c.pr);
+      if (memo !== undefined) return memo;
+      let closed: ReadonlySet<number> | null;
       try {
-        return refs.predicates.closing([refRow(pr)]);
+        closed = refs.predicates.closing([refRow(c.row)]);
       } catch (err) {
         /* intentional: surfaced as a stderr note on the outcome; the PR is skipped, never the turn */
         const msg = err instanceof Error ? err.message : String(err);
-        notes.push(`orch ${issueRef} closing_issues() failed for PR ${number} (${msg}) — ${failNote}`);
-        return null;
+        notes.push(`orch dev-resume closing_issues() failed for PR ${c.pr} (${msg}) — skipping PR (issue #4518)`);
+        closed = null;
       }
+      closingMemo.set(c.pr, closed);
+      return closed;
     };
-
+    devResumePick = {
+      ok: true,
+      value: pickDevResume({
+        candidates,
+        resumeIssues: resume.value,
+        closing,
+        settled: (c) => c.settled,
+        alsoQualifies: (c) => c.red,
+        policy: "lowest-pr",
+      }),
+    };
     const bucket: number[] = [];
-    let pick: PrPick | null = null;
-    for (const pr of prs) {
-      const number = pr.number;
-      if (typeof number !== "number") continue;
-      const names = labelsOf(pr);
-      const head = orEmpty(pr.headRefName);
-      if (!isGlmProvenance(names, head)) continue;
-      if (pyTruthy(pr.isDraft) || names.has("ready-for-human")) continue;
-      const state = orEmpty(pr.mergeStateStatus);
-      if (state === "DIRTY" || state === "UNKNOWN") continue;
-      const updated = pyEpochSeconds(pr.updatedAt);
-      if (updated === null || now - updated < quiet) continue;
-      const closed = closingOf(pr, number, "glm-red", "skipping PR (issue #4460)");
+    for (const c of candidates) {
+      if (!c.red || !c.settled || !isResumableHead(c.headRefName)) continue;
+      const closed = closing(c);
       if (closed === null || closed.size !== 1) continue;
-      const issue = [...closed][0];
-      const verdict = requiredVerdict(pr.statusCheckRollup, req.value);
-      if (verdict === null) continue;
-      if (!(verdict.red || resume.value.has(issue))) continue;
-      bucket.push(number);
-      if (pick === null || number < pick.pr) pick = { issue, pr: number, headRefName: String(head) };
+      if (resume.value.has([...closed][0])) continue;
+      bucket.push(c.pr);
     }
-    glmRed = { ok: true, value: { bucket: bucket.sort(ascending), pick } };
-
-    // Claude-lane durable dev resume pick (#4518): glm-red minus GLM provenance.
-    // The selection is the ONE pick both realms share (dev-resume.ts, #4932);
-    // only the orch pre-qualification gates live here.
-    const resumeCandidates: { pr: number; headRefName: string | null; row: Row }[] = [];
-    for (const pr of prs) {
-      const number = pr.number;
-      if (typeof number !== "number") continue;
-      const names = labelsOf(pr);
-      const head = orEmpty(pr.headRefName);
-      if (isGlmProvenance(names, head)) continue;
-      if (pyTruthy(pr.isDraft) || names.has("ready-for-human")) continue;
-      const state = orEmpty(pr.mergeStateStatus);
-      if (state === "DIRTY" || state === "UNKNOWN") continue;
-      const updated = pyEpochSeconds(pr.updatedAt);
-      if (updated === null || now - updated < quiet) continue;
-      resumeCandidates.push({ pr: number, headRefName: pyTruthy(head) ? String(head) : null, row: pr });
-    }
-    const resumePick = pickDevResume({
-      candidates: resumeCandidates,
-      resumeIssues: resume.value,
-      closing: (c) => closingOf(c.row, c.pr, "dev-resume", "skipping PR (issue #4518)"),
-      settled: (c) => requiredVerdict(c.row.statusCheckRollup, req.value) !== null,
-      policy: "lowest-pr",
-    });
-    devResumePick = { ok: true, value: resumePick };
+    redResume = { ok: true, value: bucket.sort(ascending) };
   }
 
   // Dirty-PR conflict fix-forward (#4807): pin / surface / wait. The dirty
@@ -634,7 +678,7 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
       unchecked: unchecked.sort(ascending),
       behind: behind.sort(ascending),
       ciTriggerStale,
-      glmRed,
+      redResume,
       devResumePick,
       devResumeNoprPick,
       dirtyFix,
@@ -805,17 +849,17 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
     notes.push("orch pr-gate PR-list read FAILED (empty payload) — emitting empty PR-gate buckets (issue #4240)");
   }
 
-  // 3. The glm-red / dev-resume inputs — fail CLOSED (INV-5).
+  // 3. The dev-resume inputs — fail CLOSED (INV-5).
   const requiredRead = await deps.github.requiredStatusContexts();
   if (requiredRead.kind === "empty") {
     notes.push(
-      "orch glm-red required-contexts read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix fail closed to none (issue #4460, INV-5)",
+      "orch dev-resume required-contexts read FAILED (empty payload) — orch_prs_red_resume/orch_dev_resume_pick fail closed to none (issue #4460, INV-5)",
     );
   }
   const resumeRead = await deps.github.listOpenIssueRowsByLabel("needs-dev-resume", limit);
   if (resumeRead.kind === "empty") {
     notes.push(
-      "orch glm-red needs-dev-resume issue read FAILED (empty payload) — orch_prs_glm_red/orch_glm_red_forward_fix fail closed to none (issue #4460, INV-5)",
+      "orch dev-resume needs-dev-resume issue read FAILED (empty payload) — orch_prs_red_resume/orch_dev_resume_pick fail closed to none (issue #4460, INV-5)",
     );
   }
 
@@ -832,7 +876,7 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
     );
   }
   if ("error" in prRefs) {
-    notes.push(`orch glm-red pr-refs.py import FAILED (${prRefs.error}) — fail closed (issue #4460)`);
+    notes.push(`orch dev-resume pr-refs.py import FAILED (${prRefs.error}) — fail closed (issue #4460)`);
     degraded.push({ field: "prRefs", reason: "predicate-unavailable" });
   }
   const quiet = pyFloatOr(
@@ -841,7 +885,7 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
   );
   if (quiet.error !== null) {
     notes.push(
-      `orch glm-red ORCH_GLM_RED_QUIESCENCE_SECONDS unparsable (${quiet.error}) — falling back to 1800s default (issue #4460)`,
+      `orch pr-gate ORCH_GLM_RED_QUIESCENCE_SECONDS unparsable (${quiet.error}) — falling back to 1800s default (issue #4460)`,
     );
   }
   const noprQuiet = pyFloatOr(
@@ -938,7 +982,7 @@ export function prGateFallbackSnapshot(reason: string): PrGateSnapshot {
     unchecked: [],
     behind: [],
     ciTriggerStale: { ok: false, reason },
-    glmRed: { ok: false, reason },
+    redResume: { ok: false, reason },
     devResumePick: { ok: false, reason },
     devResumeNoprPick: { ok: false, reason },
     dirtyFix: { ok: false, reason },

@@ -1,6 +1,6 @@
 {
-  "name": "glm-red-non-glm-never-qualifies",
-  "source": "test/collect-state-inflight-exclusion.test.mts › GLM red-PR forward-fix predicate (#4460)",
+  "name": "resume-glm-branch-same-pick",
+  "source": "test/collect-state-inflight-exclusion.test.mts › Claude-lane durable dev resume pick (#4518)",
   "capturedFrom": "scripts/autopilot/collect-state.sh @ 289ee94263de07be748ad23f9d071185a8014a1c (collect_orch_inflight_prs + collect_pr_gate_reachability)",
   "nowMs": 1791344407000,
   "env": {
@@ -9,7 +9,7 @@
   "prRefsUnavailable": false,
   "gh": {
     "first": {
-      "stdout": "[{\"number\":4433,\"mergeStateStatus\":\"BLOCKED\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"test\",\"status\":\"COMPLETED\",\"conclusion\":\"FAILURE\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"dashboard-build\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"tier-gate\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"mutation-test\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"scope-check\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"secret-scan\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"deep-qa-gate\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"design-concept-reconcile\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"}],\"createdAt\":\"2026-10-07T01:40:07Z\",\"updatedAt\":\"2026-10-07T01:40:07Z\",\"isDraft\":false,\"labels\":[],\"headRefName\":\"issue-4240-plain-branch\",\"body\":\"Closes #4240\"}]",
+      "stdout": "[{\"number\":4532,\"mergeStateStatus\":\"UNSTABLE\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"test\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"dashboard-build\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"tier-gate\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"mutation-test\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"scope-check\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"secret-scan\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"deep-qa-gate\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"},{\"__typename\":\"CheckRun\",\"name\":\"design-concept-reconcile\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-10-07T01:43:27Z\"}],\"createdAt\":\"2026-10-07T01:40:07Z\",\"updatedAt\":\"2026-10-07T01:40:07Z\",\"isDraft\":false,\"labels\":[],\"headRefName\":\"worktree-agent-glm-4510-1\",\"body\":\"Closes #4510\"}]",
       "stderr": "",
       "exitCode": 0
     },
@@ -29,7 +29,7 @@
       "exitCode": 0
     },
     "resume": {
-      "stdout": "[]",
+      "stdout": "[{\"number\":4510}]",
       "stderr": "",
       "exitCode": 0
     }
@@ -89,13 +89,11 @@
       "pr-gate": {
         "inflight": {
           "union": [
-            4240
+            4510
           ],
-          "branch": [
-            4240
-          ],
+          "branch": [],
           "body": [
-            4240
+            4510
           ]
         },
         "dirty": [],
@@ -105,16 +103,17 @@
           "ok": false,
           "reason": "runs-read-failed"
         },
-        "glmRed": {
+        "redResume": {
           "ok": true,
-          "value": {
-            "bucket": [],
-            "pick": null
-          }
+          "value": []
         },
         "devResumePick": {
           "ok": true,
-          "value": null
+          "value": {
+            "issue": 4510,
+            "pr": 4532,
+            "headRefName": "worktree-agent-glm-4510-1"
+          }
         },
         "devResumeNoprPick": {
           "ok": true,

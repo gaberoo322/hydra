@@ -1,5 +1,5 @@
 {
-  "name": "resume-glm-pick-unchanged",
+  "name": "resume-glm-and-claude-lowest-pr-wins",
   "source": "test/collect-state-inflight-exclusion.test.mts › Claude-lane durable dev resume pick (#4518)",
   "capturedFrom": "scripts/autopilot/collect-state.sh @ 289ee94263de07be748ad23f9d071185a8014a1c (collect_orch_inflight_prs + collect_pr_gate_reachability)",
   "nowMs": 1791344407000,
@@ -105,25 +105,16 @@
           "ok": false,
           "reason": "runs-read-failed"
         },
-        "glmRed": {
+        "redResume": {
           "ok": true,
-          "value": {
-            "bucket": [
-              4433
-            ],
-            "pick": {
-              "issue": 4240,
-              "pr": 4433,
-              "headRefName": "worktree-agent-glm-4240-1789"
-            }
-          }
+          "value": []
         },
         "devResumePick": {
           "ok": true,
           "value": {
-            "issue": 4510,
-            "pr": 4532,
-            "headRefName": "worktree-agent-a5706403c05633ec3"
+            "issue": 4240,
+            "pr": 4433,
+            "headRefName": "worktree-agent-glm-4240-1789"
           }
         },
         "devResumeNoprPick": {

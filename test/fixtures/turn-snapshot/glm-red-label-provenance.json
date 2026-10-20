@@ -105,22 +105,19 @@
           "ok": false,
           "reason": "runs-read-failed"
         },
-        "glmRed": {
+        "redResume": {
           "ok": true,
-          "value": {
-            "bucket": [
-              4450
-            ],
-            "pick": {
-              "issue": 4450,
-              "pr": 4450,
-              "headRefName": "issue-4450-not-a-worktree-branch"
-            }
-          }
+          "value": [
+            4450
+          ]
         },
         "devResumePick": {
           "ok": true,
-          "value": null
+          "value": {
+            "issue": 4450,
+            "pr": 4450,
+            "headRefName": "issue-4450-not-a-worktree-branch"
+          }
         },
         "devResumeNoprPick": {
           "ok": true,

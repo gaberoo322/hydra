@@ -99,12 +99,9 @@
           "ok": true,
           "value": false
         },
-        "glmRed": {
+        "redResume": {
           "ok": true,
-          "value": {
-            "bucket": [],
-            "pick": null
-          }
+          "value": []
         },
         "devResumePick": {
           "ok": true,
