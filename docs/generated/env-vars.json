@@ -109,7 +109,7 @@
         },
         {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
-          "line": 93
+          "line": 87
         },
         {
           "path": "scripts/claude-hooks/git-remote-fence.sh",
@@ -1779,13 +1779,13 @@
       "readSites": [
         {
           "path": "scripts/ci/check-skill-playbook-drift.sh",
-          "line": 92
+          "line": 86
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/ci/check-skill-playbook-drift.sh",
-        "line": 92
+        "line": 86
       }
     },
     {
