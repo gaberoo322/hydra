@@ -259,13 +259,13 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     assert.doesNotMatch(withBranch.prompt, /no branch was recorded in the resume pin/);
   });
 
-  test("dev_orch forward-fix carries the #4460 INV-10 contract with the PR and branch substituted", () => {
+  test("dev_orch forward-fix carries the #4460 INV-10 contract (provenance-agnostic since #5058) with the PR and branch substituted", () => {
     const out = render(
       "dev_orch",
       action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4728", resume: true, resume_branch: "worktree-agent-glm-4728", forward_fix_pr: 4776 } }),
     );
     for (const needle of [
-      "GLM red-PR forward-fix contract (issue #4460, INV-10) — PR #4776 on branch `worktree-agent-glm-4728` already exists",
+      "Red-PR forward-fix contract (issues #4460, #5058, INV-10) — PR #4776 on branch `worktree-agent-glm-4728` already exists",
       "1. **Stay on the harness branch.**",
       "git fetch origin worktree-agent-glm-4728 && git reset --hard FETCH_HEAD",
       "NEVER `gh pr create`",
@@ -285,8 +285,8 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
       "dev_orch",
       action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4728", resume: true, resume_branch: "worktree-agent-glm-4728", forward_fix_pr: 4776 } }),
     );
-    const secStart = PLAYBOOK.indexOf("**GLM red-PR forward-fix dispatch contract");
-    const secEnd = PLAYBOOK.indexOf("The cap: `state.glm_red_forward_fix_attempts`");
+    const secStart = PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract");
+    const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only): `state.red_forward_fix_attempts`");
     assert.ok(secStart >= 0 && secEnd > secStart, "playbook contract section markers present");
     const section = PLAYBOOK.slice(secStart, secEnd);
     const flat = (text: string) => text.replace(/\s+/g, " ");
@@ -310,10 +310,10 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
   test("the forward-fix contract's five steps are the playbook's five (same bold step titles, same order)", () => {
     const out = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-1", resume: true, resume_branch: "b", forward_fix_pr: 2 } }));
     const titles = (text: string) => [...text.matchAll(/^\d\. \*\*([^*]+)\*\*/gm)].map((m) => m[1]);
-    const section = PLAYBOOK.slice(PLAYBOOK.indexOf("**GLM red-PR forward-fix dispatch contract"), PLAYBOOK.indexOf("The cap: `state.glm_red_forward_fix_attempts`"));
+    const section = PLAYBOOK.slice(PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract"), PLAYBOOK.indexOf("The cap (red-CI arm only): `state.red_forward_fix_attempts`"));
     const want = titles(section);
     assert.equal(want.length, 5, "the playbook contract has five steps");
-    assert.deepEqual(titles(out.prompt.slice(out.prompt.indexOf("GLM red-PR forward-fix contract"))), want);
+    assert.deepEqual(titles(out.prompt.slice(out.prompt.indexOf("Red-PR forward-fix contract"))), want);
   });
 
   test("qa_orch names the needs-qa lane head and the rest of the lane, and the review rules", () => {

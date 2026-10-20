@@ -2,10 +2,9 @@
  * src/skills/playbook.ts — pure TypeScript core for operator-playbook -> Claude
  * SKILL.md rendering (ADR-0041 Decision 1; issue #4718, skills-epic 2/6).
  *
- * This lands BESIDE the `scripts/sync-skills.sh` Python heredoc (strangler
- * step 1): the heredoc stays the production path and is byte-unchanged. A live
- * parity test (`test/skills-playbook-parity.test.mts`) proves this core renders
- * the exact bytes the script writes, for every live playbook.
+ * This is the production render path: `scripts/sync-skills.sh` calls
+ * `src/skills/cli.ts` (via `planCorpus`) once per run and applies the plan
+ * (issue #4720); the former Python heredoc and its parity test are gone.
  *
  * PURITY: no filesystem reads/writes, no process spawns. The only node import
  * is `node:path` (posix path math). Fragments and vendored bases arrive as a

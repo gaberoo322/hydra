@@ -59,7 +59,7 @@ import {
   ALERT_TYPES,
   formatAlertMessage,
 } from "../src/notification/alert-grammar.ts";
-import { CRITICAL_EVENT_TYPES } from "../src/digest.ts";
+import { isPageKind } from "../src/operator-channel/page-list.ts";
 import {
   PACE_GATE_LAST_TICK_KEY,
   LAUNCH_FLOW_KEY_PREFIX,
@@ -368,9 +368,9 @@ describe("issue #3848 — TypeScript delivery grammar", () => {
     );
   });
 
-  test("all three are in CRITICAL_EVENT_TYPES (immediate digest-surfaced line)", () => {
+  test("all three are on the closed page list (immediate Page)", () => {
     for (const t of [E.LAUNCH_QUOTA_STRETCH, E.LAUNCH_LATENCY_BREACH, E.LAUNCH_PAUSE_FORGOTTEN]) {
-      assert.ok(CRITICAL_EVENT_TYPES.includes(t), `${t} must bypass the batched digest`);
+      assert.ok(isPageKind(t), `${t} must be a Page`);
     }
   });
 
@@ -805,8 +805,8 @@ describe("issue #3868 — glm-sterile structural / drift guards", () => {
     assert.equal(E.GLM_DRAINER_STERILE, "glm:drainer_sterile");
     assert.ok(ALERT_TYPES.has(E.GLM_DRAINER_STERILE), "a sterile drainer must raise a dashboard alert");
     assert.ok(
-      CRITICAL_EVENT_TYPES.includes(E.GLM_DRAINER_STERILE),
-      "a sterile drainer must bypass the batched digest (board starvation is per-hour damage)",
+      isPageKind(E.GLM_DRAINER_STERILE),
+      "a sterile drainer must be a Page (board starvation is per-hour damage)",
     );
     const msg = formatAlertMessage({
       type: E.GLM_DRAINER_STERILE,

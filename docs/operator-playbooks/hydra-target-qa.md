@@ -227,6 +227,12 @@ build opened. Collect the changed paths (repo-relative, Target repo):
 ```bash
 # In the Target worktree, or via the PR API.
 CHANGED=$(git diff --name-only origin/main...HEAD)
+# Issue #4796: capture the head BEFORE the reviewers run, so the verdict
+# trailer names the head that was reviewed, not the head at post time.
+PR_NUM="<the PR number from $pr_ref, or the resolved PR>"
+[ -n "$PR_NUM" ] && [ "$PR_NUM" -gt 0 ] 2>/dev/null || { echo "ABORT: PR_NUM unresolved; cannot capture the reviewed head" >&2; exit 1; }
+HEAD_SHA=$(gh api "repos/$TARGET_GH_REPO/pulls/$PR_NUM" --jq .head.sha)
+[ -n "$HEAD_SHA" ] || { echo "ABORT: could not read head.sha for PR $PR_NUM" >&2; exit 1; }
 ```
 
 ### 2. Classify the path
@@ -257,7 +263,7 @@ manifest-sourced `classifyRisk`.
 
 Pass the changed paths and the collected reviewer verdicts to
 `classifyTargetQaVerdict()`. It returns `{ verdict, path, moneyCritical,
-action, reason, matchedPaths }` (the `moneyCritical` field name is the layer's
+action, reason, blockers, matchedPaths }` (the `moneyCritical` field name is the layer's
 unchanged legacy label for the risk-critical result; ADR-0026). The fold is
 pure and total — a missing risk-critical-only verdict is treated as a FAIL
 (defensive: an absent reviewer must never let the heavier gate pass by
@@ -269,12 +275,46 @@ All routing is `gh` on the anchor issue (`$TARGET_GH_REPO`) — REST-first
 (`gh issue comment` / `gh issue edit`), never the retired Redis `hydra backlog` /
 `/backlog` API. `$ANCHOR_NUM` is the anchor issue number the build claimed.
 
+**Every verdict comment ends with a machine-readable trailer** (issue #4796) —
+the orchestrator's `QA-Verdict:` grammar, so the `qa_target` resolver in
+`src/autopilot/turn-snapshot/target-board.ts` can skip a PR already PASSed at its head:
+`QA-Verdict: <PASS|FAIL> pr=<N> round=<k> sha=<head12> blockers=<n> max_severity=<high|none>`.
+Build `QA_VERDICT_TRAILER` once with `buildTargetQaVerdictTrailer` (never hand-type
+it); prior bodies reach it through a temp FILE (the #4729 E2BIG lesson). The
+trailer is the LAST line of the comment, after a blank line:
+
+```bash
+# Assign from the step-4 classifier result — never leave these unset.
+FOLDED_VERDICT="<verdict from classifyTargetQaVerdict: PASS or FAIL>"
+FOLDED_BLOCKERS="<blockers from classifyTargetQaVerdict>"
+# PR_NUM was assigned and validated in step 1; re-assert it here.
+: "${PR_NUM:?PR_NUM unset - resolve it in step 1}"
+case "$FOLDED_VERDICT" in PASS|FAIL) ;; *) echo "ABORT: FOLDED_VERDICT must be exactly PASS or FAIL, got '$FOLDED_VERDICT'" >&2; exit 1;; esac
+PRIOR_FILE=$(mktemp)
+# --paginate emits one JSON array per page; jq -s flattens them so round= counts the whole thread.
+# pipefail so a gh failure is not masked by jq; on failure log a WARN and fall back to an empty history.
+if ! ( set -o pipefail; gh api --paginate "repos/$TARGET_GH_REPO/issues/$ANCHOR_NUM/comments" --jq '[.[].body]' | jq -s 'add // []' > "$PRIOR_FILE" ); then
+  echo "WARN: could not read prior verdict comments for issue $ANCHOR_NUM — round= will default to 1 (issue #4796)" >&2
+  echo '[]' > "$PRIOR_FILE"
+fi
+QA_VERDICT_TRAILER=$(cd "$HOME/hydra" && PRIOR_FILE="$PRIOR_FILE" QV="$FOLDED_VERDICT" PRN="$PR_NUM" HS="$HEAD_SHA" BL="$FOLDED_BLOCKERS" \
+  npx tsx -e 'import("./scripts/target/target-qa-verdict.ts").then(async (m) => { const fs = await import("node:fs"); const prior = JSON.parse(fs.readFileSync(process.env.PRIOR_FILE, "utf8")); console.log(m.buildTargetQaVerdictTrailer({ verdict: process.env.QV === "PASS" ? "PASS" : "FAIL", pr: Number(process.env.PRN), headSha: process.env.HS || "", blockers: Number(process.env.BL), priorBodies: prior })); }).catch((e) => { console.error(e); process.exit(1); });')
+rm -f "$PRIOR_FILE"
+# Fallback — a verdict is NEVER posted without a trailer line.
+if ! printf '%s\n' "$QA_VERDICT_TRAILER" | grep -Eq '^QA-Verdict: (PASS|FAIL) pr=[0-9]+ round=[0-9]+ sha=([0-9a-f]{7,12}|unknown) blockers=[0-9]+ max_severity=(high|none)$'; then
+  echo "WARN: buildTargetQaVerdictTrailer failed or returned a malformed trailer — using the hand-built fallback (issue #4796)" >&2
+  SHA12=$(printf '%s' "$HEAD_SHA" | tr 'A-F' 'a-f' | cut -c1-12); case "$SHA12" in *[!0-9a-f]*|"") SHA12=unknown;; esac
+  if [ "$FOLDED_VERDICT" = "PASS" ]; then B="0 max_severity=none"; else B="1 max_severity=high"; fi
+  QA_VERDICT_TRAILER="QA-Verdict: $FOLDED_VERDICT pr=$PR_NUM round=1 sha=$SHA12 blockers=$B"
+fi
+```
+
 - `action: "merge"` — post the PASS verdict as an issue comment, strip `needs-qa`,
   and let the Target merge-on-green path proceed:
   ```bash
   REPO="$TARGET_GH_REPO"
   gh issue comment "$ANCHOR_NUM" --repo "$REPO" \
-    --body "QA verdict: **PASS** ($PATH_TAKEN). $VERDICT_REASON"
+    --body "$(printf 'QA verdict: **PASS** (%s). %s\n\n%s' "$PATH_TAKEN" "$VERDICT_REASON" "$QA_VERDICT_TRAILER")"
   gh issue edit "$ANCHOR_NUM" --repo "$REPO" --remove-label needs-qa
   ```
 - `action: "bounce-to-reframe"` — post the FAIL verdict as an issue comment, then
@@ -283,7 +323,7 @@ All routing is `gh` on the anchor issue (`$TARGET_GH_REPO`) — REST-first
   ```bash
   REPO="$TARGET_GH_REPO"
   gh issue comment "$ANCHOR_NUM" --repo "$REPO" \
-    --body "QA verdict: **FAIL** ($PATH_TAKEN). Bounce-to-reframe: $VERDICT_REASON"
+    --body "$(printf 'QA verdict: **FAIL** (%s). Bounce-to-reframe: %s\n\n%s' "$PATH_TAKEN" "$VERDICT_REASON" "$QA_VERDICT_TRAILER")"
   gh issue edit "$ANCHOR_NUM" --repo "$REPO" \
     --remove-label needs-qa --add-label reframe --add-label ready-for-human
   ```

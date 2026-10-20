@@ -1,7 +1,7 @@
 /**
  * Pure-core digest formatter tests (issue #1181).
  *
- * Exercises `buildDigestMessage` and `formatCriticalAlert` directly — no
+ * Exercises `buildDigestMessage` directly — no
  * Telegram calls, no timers, no dynamic imports, no module state. The two async
  * fan-out assemblers (`buildDailyHeartbeat`, `buildWeeklySummary`) moved to
  * `src/digest-fanout.ts` in issue #2215 and are tested in
@@ -13,7 +13,6 @@ import assert from "node:assert/strict";
 
 import {
   buildDigestMessage,
-  formatCriticalAlert,
   formatBuilderHealthLines,
   formatStagnationPanelLines,
 } from "../src/digest-format.ts";
@@ -191,59 +190,6 @@ describe("buildDigestMessage", () => {
     const msg = buildDigestMessage(events);
     assert.ok(msg.length <= 4000, `expected <= 4000 chars, got ${msg.length}`);
     assert.match(msg, /_\(truncated\)_$/);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// formatCriticalAlert
-// ---------------------------------------------------------------------------
-describe("formatCriticalAlert", () => {
-  it("retired codex-era types (issue #5044) have no dedicated arm", () => {
-    for (const type of ["cycle:rollback_failed", "scheduler:stopped", "scheduler:paused_repetition", "scheduler:backlog_empty"]) {
-      const out = formatCriticalAlert({ type, payload: { reason: "r" } });
-      assert.equal(out, `⚠️ *Critical alert* \`${type}\`\n\`\`\`\n{"reason":"r"}\n\`\`\``);
-    }
-  });
-
-  it("renders the live critical types byte-identically (issue #5044)", () => {
-    assert.equal(
-      formatCriticalAlert({ type: "launch:quota_stretch", payload: { reason: "5h *cap*", streak_count: 3 } }),
-      '⚠️ *Critical alert* `launch:quota_stretch`\n```\n{"reason":"5h *cap*","streak_count":3}\n```',
-    );
-    assert.equal(
-      formatCriticalAlert({ type: "infra:node_modules_wiped", payload: { signal: "/home/x/node_modules", reason: "absent" } }),
-      '⚠️ *Critical alert* `infra:node_modules_wiped`\n```\n{"signal":"/home/x/node_modules","reason":"absent"}\n```',
-    );
-    assert.equal(
-      formatCriticalAlert({ type: "glm:drainer_sterile", payload: { detail: "a`b" } }),
-      '⚠️ *Critical alert* `glm:drainer_sterile`\n```\n{"detail":"a\'b"}\n```',
-    );
-  });
-
-  it("falls back to a generic alert for unknown types", () => {
-    const out = formatCriticalAlert({ type: "something:weird", payload: { a: 1 } });
-    assert.match(out, /⚠️ \*Critical alert\* `something:weird`/);
-    assert.match(out, /"a":1/);
-  });
-
-  // Issue #5040: the generic arm used to put the raw type + JSON payload into
-  // legacy Markdown, so `node_modules` left an unpaired `_` and Telegram
-  // rejected the alert with a 400. Outside code spans/blocks, every `*` and
-  // `_` must now pair up.
-  it("keeps Markdown entities balanced for underscore/asterisk-laden alerts", () => {
-    const cases = [
-      { type: "infra:node_modules_wiped", payload: { service: "hydra-orchestrator", path: "/home/x/node_modules" } },
-      { type: "launch:quota_stretch", payload: { note: "5h *cap* at 90%", streak_count: 3 } },
-      { type: "glm:drainer_sterile", payload: { detail: "a`b`c" } },
-    ];
-    for (const ev of cases) {
-      const out = formatCriticalAlert(ev);
-      const outsideCode = out.replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "");
-      assert.equal((outsideCode.match(/\*/g) ?? []).length % 2, 0, `unbalanced * in ${ev.type}: ${out}`);
-      assert.equal((outsideCode.match(/_/g) ?? []).length % 2, 0, `unbalanced _ in ${ev.type}: ${out}`);
-      assert.equal((out.match(/`/g) ?? []).length % 2, 0, `unbalanced backtick in ${ev.type}: ${out}`);
-      assert.ok(out.includes(ev.type), `type missing from ${out}`);
-    }
   });
 });
 

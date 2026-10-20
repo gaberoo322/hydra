@@ -144,18 +144,19 @@ cache, so the resume path no longer depends on it surviving. Four mechanisms:
    missing/unparseable prior file seeds `[]`).
 3. **The label + PR ledger are the source of truth.** The Turn Snapshot emits
    `orch_dev_resume_pick` (issue N, PR P, branch B) for the lowest-numbered open, non-draft,
-   non-GLM PR whose single closing issue carries `needs-dev-resume` (same
-   quiescence / no-pending-required rails as the GLM pick; fails closed to
-   `none`). The `dev_orch` selector pins it AFTER the in-state drain above and
-   BEFORE the #4460 GLM pin, regardless of `orch_work_available`, of whether
+   not-`ready-for-human` PR of ANY provenance (issue #5058 folded the GLM-only
+   #4460 arm in) whose single closing issue carries `needs-dev-resume` OR that
+   is red on a required check (quiescent, no required check pending; fails
+   closed to `none`). The `dev_orch` selector pins it AFTER the in-state drain
+   above, regardless of `orch_work_available`, of whether
    `dev_resume_pending` holds a record, or of which run queued it. The action
    carries `prompt_args.forward_fix_pr`, so the forward-fix dispatch contract
    below applies verbatim (continue the PR's head, push to the SAME branch,
-   NEVER `gh pr create`) — minus the `glm-authored` clause and the attempt
-   cap, which stay #4460-only. Reap's needs-qa promotion clears the label.
+   NEVER `gh pr create`). Only the red-CI arm (`orch_prs_red_resume`) is
+   capped (`RED_FORWARD_FIX_CAP`). Reap's needs-qa promotion clears the label.
 4. **The label alone covers the no-PR case (issue #4808).** A `needs-dev-resume`
    issue with NO open PR referencing it is invisible to mechanism 3 (which keys
-   off an open PR) and to the #4460 GLM pin (GLM provenance only). The Turn
+   off an open PR). The Turn
    Snapshot's `orch_dev_resume_nopr_anchor` (an anchor, not a pin — there is
    no PR, branch or head to name) is the lowest-numbered `needs-dev-resume`
    issue that NO open PR references (head-branch or body, drafts included),
@@ -165,7 +166,7 @@ cache, so the resume path no longer depends on it surviving. Four mechanisms:
    (widened to `--json number,labels,updatedAt` — zero added reads) and
    fail-closed to `none` on any unusable input. The `dev_orch` selector pins it
    immediately AFTER the in-state drain (mechanism 2) and BEFORE the
-   #4807/#4518/#4460 PR-keyed pins, with `prompt_args` exactly
+   #4807/#4518 PR-keyed pins, with `prompt_args` exactly
    `{"anchor": "issue-<N>", "resume": true}` — no branch to continue, so the
    dispatch prompt reads the issue's own comments for the last reap stall's
    `**Branch:**` line instead. There is NO state key: the durable cap is
