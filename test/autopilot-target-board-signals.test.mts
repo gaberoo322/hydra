@@ -14,13 +14,14 @@
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { resolve } from "node:path";
+import { readBrainSource } from "../scripts/ci/brain-source.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 
 describe("decide.py never gates on the Target board's advisory keys (#3973, #4528, #4823)", () => {
-  const decide = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+  // The whole brain corpus (#4511), not decide.py alone.
+  const decide = readBrainSource().joined;
 
   test("target_ready_blocker_excluded is advisory: nothing in decide.py reads or gates on it", () => {
     assert.doesNotMatch(decide, /target_ready_blocker_excluded/);

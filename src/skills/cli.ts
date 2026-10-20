@@ -34,8 +34,8 @@ function walk(root: string, dir: string, out: Map<string, string>): void {
   }
 }
 
-/** Production corpus reader — shared with the parity test. Throws on unreadable dir. */
-export function readCorpus(playbooksDir: string): CorpusInput {
+/** Production corpus reader. Throws on unreadable dir. */
+function readCorpus(playbooksDir: string): CorpusInput {
   const dir = resolve(playbooksDir);
   const playbooks: CorpusInput["playbooks"] = [];
   const sources = new Map<string, string>();

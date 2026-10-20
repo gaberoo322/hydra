@@ -119,13 +119,14 @@ const SignalsSchema = z
     design_qa_target_saturated: z.boolean(),
     retro_run_available: z.boolean(),
     retro_run_drillable: z.boolean(),
-    // PR gate (#4240) and the GLM / resume / conflict-fix picks
+    // PR gate (#4240) and the resume / conflict-fix picks
     orch_prs_dirty: NumberList,
     orch_prs_unchecked: NumberList,
     orch_prs_behind: NumberList,
     orch_ci_trigger_stale: z.boolean(),
-    orch_prs_glm_red: NumberList,
-    orch_glm_red_forward_fix: PinSchema.nullable(),
+    // #5058: the provenance-agnostic resume pick (ex-#4460 GLM arm folded in)
+    // and its red-CI-only subset — decide.py's per-PR forward-fix cap scope.
+    orch_prs_red_resume: NumberList,
     orch_dev_resume_pick: PinSchema.nullable(),
     // #4808: the no-PR durable resume pick — a needs-dev-resume issue NO open
     // PR references, so the PR-keyed pins above structurally can't name it.
@@ -196,8 +197,7 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   orch_prs_unchecked: [],
   orch_prs_behind: [],
   orch_ci_trigger_stale: false,
-  orch_prs_glm_red: [],
-  orch_glm_red_forward_fix: null,
+  orch_prs_red_resume: [],
   orch_dev_resume_pick: null,
   orch_dev_resume_nopr_anchor: null,
   orch_dirty_forward_fix: null,
