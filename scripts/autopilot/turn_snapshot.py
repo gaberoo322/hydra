@@ -378,14 +378,14 @@ def dirty_surface_pairs(state: dict, events: list[dict], name: str) -> list[tupl
     return sorted(pairs.items())
 
 
-def qa_verdict_recheck(state: dict, events: list[dict]) -> list[dict]:
+def qa_verdict_recheck(state: dict, events: list[dict], signal_name: str) -> list[dict]:
     """The durable QA-verdict recheck entries (#5052) as `qa-verdict` event dicts,
     ascending by PR, deduplicated by PR, for every PR NOT already named by a
     session `qa-verdict` event in `events` (the event wins). Each entry is the
     `qa-verdict-event.sh` shape {type, pr_number, tier, verdict, verdict_sha,
     head_sha}. Malformed entries are dropped (fail-closed: no entry, no merge);
     never raises. Snapshot-only: a `signal` event cannot inject a recheck."""
-    raw = _state_signal(state, _RECHECK_SIGNAL)
+    raw = _state_signal(state, signal_name)
     if not isinstance(raw, list):
         return []
     named = {

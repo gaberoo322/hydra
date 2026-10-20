@@ -3204,7 +3204,7 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
     # PR both name), then the Turn Snapshot's re-evaluation entries for PRs not
     # already named - same downstream holds, stale-verdict check, depth policy.
     sweep = [ev for ev in events if ev.get("type") == "qa-verdict"]
-    sweep += ts.qa_verdict_recheck(state, events)
+    sweep += ts.qa_verdict_recheck(state, events, "orch_qa_verdict_recheck")
     for ev in sweep:
         if ev.get("recheck"):
             out.reasons.append(f"qa-recheck:#{ev.get('pr_number')}")

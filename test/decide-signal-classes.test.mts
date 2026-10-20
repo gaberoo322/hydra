@@ -2272,14 +2272,14 @@ const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
  * values. `ts.blob` reads state blob fields, not signals, and is excluded.
  */
 /** The accessor's signal readers (`ts.blob` reads state blob fields, not signals). */
-const READERS = ["signal_present", "scalar", "anchor_ref", "text", "item_set", "ordered_numbers", "pin", "pr_numbers", "dirty_surface_pairs"];
+const READERS = ["signal_present", "scalar", "anchor_ref", "text", "item_set", "ordered_numbers", "pin", "pr_numbers", "dirty_surface_pairs", "qa_verdict_recheck"];
 
 function decideSignalReads(src: string): string[] {
   const names = new Set<string>();
   const add = (re: RegExp) => {
     for (const m of src.matchAll(re)) names.add(m[1] as string);
   };
-  add(/\bts\.(?:signal_present|scalar|anchor_ref|text|item_set|ordered_numbers|pin|pr_numbers|dirty_surface_pairs)\(\s*[^()"']*?"([^"]+)"\s*\)/g);
+  add(/\bts\.(?:signal_present|scalar|anchor_ref|text|item_set|ordered_numbers|pin|pr_numbers|dirty_surface_pairs|qa_verdict_recheck)\(\s*[^()"']*?"([^"]+)"\s*\)/g);
   add(/_signal_present\(\s*[^()"']*?\s*"([^"]+)"\s*\)/g);
   add(/_orch_anchor_signal\(\s*[^,()"']*?,\s*"([^"]+)"\s*\)/g);
   add(/(?:_triage_item_set|_pr_gate_numbers|_issue_pr_branch_signal|_raw_signal)\(\s*[^,()"']*?,\s*[^,()"']*?,\s*"([^"]+)"\s*\)/g);
