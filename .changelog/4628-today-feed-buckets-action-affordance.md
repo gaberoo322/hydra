@@ -1,0 +1,1 @@
+- feat: Today feed — six bucket sections (Variant B) + per-kind ActionAffordance replacing the flat signal list and the overnight decision queue (#4628)

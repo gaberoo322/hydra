@@ -2,7 +2,6 @@ import { useApi } from "../hooks/useApi.js";
 import { AttentionFeed } from "../components/pages/today/AttentionFeed.jsx";
 import { OvernightBanner } from "../components/pages/today/OvernightBanner.jsx";
 import { WeekModelMix } from "../components/pages/today/WeekModelMix.jsx";
-import { OperatorDecisionQueue } from "../components/pages/today/OperatorDecisionQueue.jsx";
 import { StuckItems } from "../components/pages/today/StuckItems.jsx";
 import { RecentMerges } from "../components/pages/today/RecentMerges.jsx";
 import { NewTargetFindings } from "../components/pages/today/NewTargetFindings.jsx";
@@ -12,20 +11,27 @@ import Versions from "../components/Versions.jsx";
 /**
  * Dashboard v2 — `/today` page (issues #616, #617, PRD #615).
  *
- * Slice 1 shipped the OvernightBanner. Slice 2 adds five more sections
+ * Slice 1 shipped the OvernightBanner. Slice 2 adds the further sections
  * in the order specified by the PRD:
  *
- *   1. AttentionFeed (issue #4007, ADR-0034 §4 — threshold-crossing feed;
+ *   1. AttentionFeed (issue #4007, ADR-0034 §4/§8 — threshold-crossing feed
+ *      in six bucket sections with per-kind action affordances, issue #4628;
  *      renders FIRST: the "what needs me" question owns the page)
  *   2. OvernightBanner (banner — fed by /today/summary)
- *   3. OperatorDecisionQueue
- *   4. StuckItems
- *   5. RecentMerges
- *   6. NewTargetFindings
- *   7. LessonsOvernight
- *   8. Versions (issue #3681 — the /api/versions panel; lives one level up in
+ *   3. StuckItems
+ *   4. RecentMerges
+ *   5. NewTargetFindings
+ *   6. LessonsOvernight
+ *   7. Versions (issue #3681 — the /api/versions panel; lives one level up in
  *      `components/` because the footer VersionBadge shares its formatting seam
  *      and renders on every route, not just Today)
+ *
+ * The overnight decision-queue panel (PRD #615 slice 2's third section) is
+ * REMOVED — ADR-0034 §8.1 superseded it with the bucketed attention feed;
+ * every waiting-on-you decision now drains through the feed's waiting-on-you
+ * bucket with its typed registry action (issue #4628). The backend
+ * /today/decision-queue route stays (out of scope here; orphan cleanup is a
+ * follow-up).
  *
  * Each section lives in `dashboard/src/components/pages/today/` and owns
  * its own poll cadence (30s for the operator-attention sections, 60s for
@@ -69,7 +75,6 @@ export default function Today() {
 
       {usage && <WeekModelMix usage={usage} />}
 
-      <OperatorDecisionQueue />
       <StuckItems />
       <RecentMerges />
       <NewTargetFindings />

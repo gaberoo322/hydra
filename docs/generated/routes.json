@@ -2571,10 +2571,8 @@
       "path": "/api/today/decision-queue",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [
-        "dashboard/src/components/pages/today/OperatorDecisionQueue.jsx"
-      ],
-      "home": "/",
+      "consumers": [],
+      "home": "/api/today/decision-queue",
       "areas": [
         "src/aggregators/",
         "src/schemas/"
