@@ -2085,6 +2085,13 @@ run_origin_identity() {
     printf '%s' "${1:-<unset>}" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://).*@#\1#'
   }
 
+  # Free-text variant for multi-line git stderr: strips userinfo anywhere in
+  # the line, greedy up to the last `@` of the whitespace/quote-free run (so a
+  # token containing `/` never survives), same rule as the greedy URL redact.
+  origin_identity_redact_text() {
+    sed -E "s#([A-Za-z][A-Za-z0-9+.-]*://)[^[:space:]'\"]*@#\\1#g"
+  }
+
   # --- Auto-repair configuration (#5065) ---
   local AUTOREPAIR="${HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR:-1}"
   local CANONICAL
@@ -2115,12 +2122,15 @@ run_origin_identity() {
   want_host="$(printf '%s' "${HYDRA_WATCHDOG_EXPECTED_ORIGIN_HOST:-github.com}" | tr 'A-Z' 'a-z')"
 
   local reasons=()
-  if [[ -z "$want" || ( "$norm" != "$want" && "$norm" != "$canon_norm" ) ]]; then
+  # canon_norm must be non-empty to count as an acceptable identity: a
+  # set-but-empty canonical URL with an unset origin URL would otherwise match
+  # (both normalise to "") and mask wrong-origin-url (QA round 2).
+  if [[ -z "$want" || ( "$norm" != "$want" && ( -z "$canon_norm" || "$norm" != "$canon_norm" ) ) ]]; then
     reasons+=("wrong-origin-url")
   fi
   # An operator-overridden canonical URL is by definition
   # acceptable, so an auto-repaired tree does not re-alarm on its host (#5065).
-  if [[ "$host" != "$want_host" && ( -z "${HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL:-}" || "$norm" != "$canon_norm" ) ]]; then
+  if [[ "$host" != "$want_host" && ( -z "${HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL:-}" || -z "$canon_norm" || "$norm" != "$canon_norm" ) ]]; then
     reasons+=("wrong-origin-host")
   fi
   if [[ "$master_present" != "1" ]]; then
@@ -2144,13 +2154,28 @@ run_origin_identity() {
   # --- Auto-repair (#5065): only $HYDRA_ROOT, only remote.origin.*, only fetch ---
   # outcome: alarm (repair not attempted) | repaired | failed
   local outcome="alarm" repair_note="" fetch_result="skipped" new_url="$url"
+  # Marker format: "<epoch-first-published> <outcome> <epoch-last-repair-attempt>".
+  # After a failed repair, skip re-attempting (config rewrite + a <=60s fetch)
+  # for a backoff window so a persistent failure does not refetch every tick.
+  local BACKOFF="${HYDRA_WATCHDOG_ORIGIN_REPAIR_BACKOFF_S:-600}"
+  [[ "$BACKOFF" =~ ^[0-9]+$ ]] || BACKOFF=600
+  local prev_outcome="" prev_first="" prev_attempt="" now_epoch attempted=0
+  now_epoch="$(date +%s 2>/dev/null || echo 0)"
+  if [[ -f "$SINCE_MARKER" ]]; then
+    read -r prev_first prev_outcome prev_attempt < "$SINCE_MARKER" || true
+    [[ -n "$prev_outcome" ]] || prev_outcome="alarm"
+  fi
   if [[ "$AUTOREPAIR" == "0" ]]; then
     repair_note="auto-repair disabled (HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR=0)"
   elif [[ -z "$want" || -z "$CANONICAL" ]]; then
     repair_note="auto-repair skipped (expected repo or canonical URL is empty)"
   elif [[ ! -e "${HYDRA_ROOT}/.git" ]]; then
     repair_note="auto-repair skipped (no gitdir under ${HYDRA_ROOT})"
+  elif [[ "$prev_outcome" == "failed" && "$prev_attempt" =~ ^[0-9]+$ ]] && (( now_epoch - prev_attempt < BACKOFF )); then
+    outcome="failed"
+    repair_note="auto-repair FAILED: backing off ${BACKOFF}s after a failed attempt"
   else
+    attempted=1
     outcome="repaired"
     if [[ " ${reasons[*]} " == *" wrong-origin-url "* || " ${reasons[*]} " == *" wrong-origin-host "* ]]; then
       if git -C "$HYDRA_ROOT" config remote.origin.url "$CANONICAL" >/dev/null 2>&1; then
@@ -2169,7 +2194,7 @@ run_origin_identity() {
     if [[ "$outcome" == "repaired" ]]; then
       local frc=0 fetch_err=""
       if command -v timeout >/dev/null 2>&1; then
-        fetch_err="$(GIT_TERMINAL_PROMPT=0 timeout "$FETCH_TIMEOUT" git -C "$HYDRA_ROOT" fetch --quiet origin 2>&1)" || frc=$?
+        fetch_err="$(GIT_TERMINAL_PROMPT=0 timeout -k 5 "$FETCH_TIMEOUT" git -C "$HYDRA_ROOT" fetch --quiet origin 2>&1)" || frc=$?
       else
         fetch_err="$(GIT_TERMINAL_PROMPT=0 git -C "$HYDRA_ROOT" fetch --quiet origin 2>&1)" || frc=$?
       fi
@@ -2183,7 +2208,7 @@ run_origin_identity() {
           repair_note="origin fetch timed out after ${FETCH_TIMEOUT}s"
         fi
         if [[ -n "$fetch_err" ]]; then
-          log "WARN fetch stderr: $(printf '%s' "$fetch_err" | head -n 3 | sed -E 's#([A-Za-z+]+://)[^/@ ]*@#\1#g' | tr '\n' ' ')"
+          log "WARN fetch stderr: $(printf '%s\n' "$fetch_err" | head -n 3 | origin_identity_redact_text | tr '\n' ' ')"
         fi
       fi
     fi
@@ -2192,7 +2217,7 @@ run_origin_identity() {
       local post_url post_norm
       post_url="$(git -C "$HYDRA_ROOT" config --get remote.origin.url 2>/dev/null || true)"
       post_norm="$(origin_identity_norm "$post_url")"
-      if [[ "$post_norm" != "$want" && "$post_norm" != "$canon_norm" ]]; then
+      if [[ "$post_norm" != "$want" && ( -z "$canon_norm" || "$post_norm" != "$canon_norm" ) ]]; then
         outcome="failed"; repair_note="origin URL still wrong after repair"
       elif ! git -C "$HYDRA_ROOT" rev-parse --verify -q refs/remotes/origin/master >/dev/null 2>&1; then
         outcome="failed"; repair_note="refs/remotes/origin/master still missing after fetch"
@@ -2217,12 +2242,9 @@ run_origin_identity() {
   # failure publishes once, but an outcome change (alarm -> repaired, or a
   # repair that later fails) is a new event. Legacy markers (bare epoch) read
   # as outcome "alarm".
-  local prev_outcome=""
-  if [[ -f "$SINCE_MARKER" ]]; then
-    prev_outcome="$(awk '{print $2}' "$SINCE_MARKER" 2>/dev/null || true)"
-    if [[ -z "$prev_outcome" ]]; then
-      prev_outcome="alarm"
-    fi
+  if [[ "$prev_outcome" == "$outcome" && "$attempted" == "1" && "$outcome" == "failed" ]]; then
+    # Same outcome, but a fresh repair attempt ran: stamp it for the backoff.
+    printf '%s %s %s\n' "${prev_first:-$now_epoch}" "$outcome" "$now_epoch" > "$SINCE_MARKER" 2>/dev/null || true
   fi
   if [[ "$prev_outcome" != "$outcome" ]]; then
     local iso_now payload url_clean new_clean note_clean xadd_out repair_field
@@ -2248,7 +2270,7 @@ run_origin_identity() {
       correlationId "origin-identity" \
       payload "$payload")"
     if [[ -n "$xadd_out" ]]; then
-      printf '%s %s\n' "$(date +%s 2>/dev/null || echo 0)" "$outcome" > "$SINCE_MARKER" 2>/dev/null || true
+      printf '%s %s %s\n' "$now_epoch" "$outcome" "$now_epoch" > "$SINCE_MARKER" 2>/dev/null || true
       log "in-band delivery published type=infra:origin_identity_wrong repair=${repair_field} -> ${NOTIFY_STREAM}"
     else
       log "WARN in-band delivery FAILED (XADD returned nothing) — will retry next tick"

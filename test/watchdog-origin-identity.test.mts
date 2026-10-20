@@ -403,6 +403,105 @@ describe("run_origin_identity auto-repair (#5065)", () => {
     assert.equal(xadds().length, 1, "a persistent repair failure must not re-publish");
   });
 
+  it("a set-but-empty canonical URL with an unset origin URL still raises wrong-origin-url", () => {
+    const r = tick({
+      HYDRA_WATCHDOG_ORIGIN_URL: "",
+      HYDRA_WATCHDOG_ORIGIN_MASTER_PRESENT: "1",
+      HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL: "",
+    });
+    assert.match(r.out, /ALARM .*wrong-origin-url/);
+    assert.match(xadds()[0] ?? "", /"reason":"wrong-origin-url/);
+  });
+
+  it("an alarm that later self-heals republishes once as 'repaired'", () => {
+    const bare = makeCanonicalBare();
+    makeRealRoot();
+    assert.equal(
+      git(fakeRoot, ["config", "remote.origin.url", "https://github.com/gaberoo322/claw-street-bets.git"]).status,
+      0,
+    );
+    const alarm = tick({ HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR: "0", HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL: bare });
+    assert.match(alarm.out, /ALARM/);
+    assert.equal(xadds().length, 1);
+    assert.match(xadds()[0], /"repair":"not-attempted"/);
+
+    const healed = tick({ HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR: "1", HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL: bare });
+    assert.match(healed.out, /REPAIRED/);
+    assert.equal(xadds().length, 2, "alarm -> repaired is a new event");
+    assert.match(xadds()[1], /"repair":"repaired"/);
+  });
+
+  it("skips repair when the expected repo is empty (EXPECTED-empty)", () => {
+    makeRealRoot();
+    assert.equal(
+      git(fakeRoot, ["config", "remote.origin.url", "https://github.com/gaberoo322/claw-street-bets.git"]).status,
+      0,
+    );
+    const before = readFileSync(join(fakeRoot, ".git", "config"), "utf-8");
+    const r = tick({ HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR: "1", HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO: "" });
+    assert.equal(r.rc, 0);
+    assert.match(r.out, /ALARM .*auto-repair skipped/);
+    assert.equal(readFileSync(join(fakeRoot, ".git", "config"), "utf-8"), before);
+  });
+
+  it("skips repair when there is no gitdir (observed URL injected)", () => {
+    rmSync(join(fakeRoot, ".git"), { recursive: true, force: true });
+    const r = tick({
+      HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR: "1",
+      HYDRA_WATCHDOG_ORIGIN_URL: "https://github.com/gaberoo322/claw-street-bets.git",
+      HYDRA_WATCHDOG_ORIGIN_MASTER_PRESENT: "1",
+    });
+    assert.equal(r.rc, 0);
+    assert.match(r.out, /ALARM .*auto-repair skipped \(no gitdir/);
+  });
+
+  it("reports a timed-out fetch (rc 124) and redacts credentials from fetch stderr", () => {
+    makeRealRoot();
+    assert.equal(
+      git(fakeRoot, ["config", "remote.origin.url", "https://github.com/gaberoo322/claw-street-bets.git"]).status,
+      0,
+    );
+    const fakeGit = join(binDir, "git");
+    const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf-8" }).stdout.trim();
+    writeFileSync(
+      fakeGit,
+      `#!/usr/bin/env bash\ncase "$*" in *" fetch "*) echo "fatal: unable to access 'https://user:to/ken@example.invalid/x.git/': boom" >&2; exit 1;; esac\nexec "${realGit}" "$@"\n`,
+    );
+    chmodSync(fakeGit, 0o755);
+    const fakeTimeout = join(binDir, "timeout");
+    writeFileSync(fakeTimeout, `#!/usr/bin/env bash\nshift 3\n"$@"\nrc=$?\n[ -n "$FAKE_TIMEOUT_124" ] && exit 124\nexit $rc\n`);
+    chmodSync(fakeTimeout, 0o755);
+    const bare = makeCanonicalBare();
+    const r = tick({
+      HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR: "1",
+      HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL: bare,
+      HYDRA_WATCHDOG_ORIGIN_FETCH_TIMEOUT_S: "7",
+      FAKE_TIMEOUT_124: "1",
+    });
+    assert.equal(r.rc, 0);
+    assert.match(r.out, /origin fetch timed out after 7s/);
+    assert.match(r.out, /WARN fetch stderr: .*https:\/\/example\.invalid/);
+    assert.doesNotMatch(r.out, /user:|to\/ken/);
+    assert.match(xadds()[0], /"fetch":"failed-rc-124"/);
+  });
+
+  it("backs off after a failed repair instead of refetching every tick", () => {
+    makeRealRoot();
+    assert.equal(
+      git(fakeRoot, ["config", "remote.origin.url", "https://github.com/gaberoo322/claw-street-bets.git"]).status,
+      0,
+    );
+    const missing = join(tmp, "does-not-exist", "hydra.git");
+    const env = { HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR: "1", HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL: missing };
+    const first = tick(env);
+    assert.match(first.out, /auto-repair FAILED: origin fetch failed/);
+    const second = tick(env);
+    assert.match(second.out, /auto-repair FAILED: backing off/);
+    assert.equal(xadds().length, 1);
+    const third = tick({ ...env, HYDRA_WATCHDOG_ORIGIN_REPAIR_BACKOFF_S: "0" });
+    assert.match(third.out, /auto-repair FAILED: origin fetch failed/);
+  });
+
   it("is wired into the main entry point; every git call targets $HYDRA_ROOT and mutations are fenced", () => {
     const src = readFileSync(WATCHDOG, "utf-8");
     assert.match(src, /\n  run_origin_identity\n  exit 0/);

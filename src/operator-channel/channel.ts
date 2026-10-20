@@ -27,7 +27,7 @@ import {
 } from "../redis/operator-channel.ts";
 import type { OperatorFact, OperatorMessage } from "./message.ts";
 import { loadTelegramCredentials } from "./credentials.ts";
-import { isPageKind } from "./page-list.ts";
+import { isPageKind, isPageEvent } from "./page-list.ts";
 import { renderMessage, type RenderVariant } from "./render.ts";
 
 export const REMINDER_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -122,7 +122,7 @@ export function messageFromEvent(event: ChannelEventInput): OperatorMessage {
     dedupKey = `dlq:${String(payload.originalStream ?? "unknown")}:${String(payload.eventType ?? "unknown")}`;
   }
   return {
-    severity: isPageKind(kind) ? "page" : "brief",
+    severity: isPageEvent(kind, payload) ? "page" : "brief",
     kind,
     title,
     facts,
@@ -310,7 +310,8 @@ export class OperatorChannel {
 
   /** Append a Morning Brief item. Throws only when handed a page kind. */
   async brief(item: OperatorMessage): Promise<{ appended: boolean }> {
-    if (isPageKind(item.kind)) {
+    const factPayload = Object.fromEntries((item.facts ?? []).map((f) => [f.label, f.value]));
+    if (isPageEvent(item.kind, factPayload)) {
       throw new InvalidArgumentError(`"${item.kind}" is a page kind — use page(), not brief()`);
     }
     const out = await this.bounded("appendBrief", () =>
