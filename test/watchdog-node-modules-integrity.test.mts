@@ -393,10 +393,15 @@ describe("run_node_modules_integrity — detection + delivery (issue #4175)", { 
 // =============================================================================
 
 describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through run_node_modules_integrity's rc_write/rc_read (issue #4183)", { skip: !DOCKER }, () => {
-  // A DB this describe owns for its own lifetime — distinct from db 0
-  // (production, the fallback-on-invalid/absent-input target) so a leak in
-  // either direction is unambiguous.
-  const SELECTED_DB = "9";
+  // The run-OWNED Redis DB the launcher assigned (redis-db-launch.mjs exports it
+  // as HYDRA_REDIS_DB via redisChildEnv), captured at definition time. Never a
+  // literal from the launcher's pool: a concurrent run owns every other index
+  // and FLUSHDBs it (issue #5062). Null => no owned DB (remote REDIS_URL or a
+  // bare `node --test`): the "lands in that DB" test skips with a reason.
+  const OWNED_RAW = process.env.HYDRA_REDIS_DB ?? "";
+  const OWNED_DB: string | null = /^\d+$/.test(OWNED_RAW) && OWNED_RAW !== "0" ? OWNED_RAW : null;
+  const SELECTED_DB = OWNED_DB ?? "0"; // "0" only feeds idempotent cleanup DELs when skipped
+  const OWNED_DB_SKIP = OWNED_DB === null ? "launcher assigned no owned HYDRA_REDIS_DB (remote REDIS_URL or bare node --test)" : false;
 
   // Fully separate key namespace from TEST_NM_PREFIX/SINCE/FIRED above — this
   // describe never touches those keys, on any DB.
@@ -502,7 +507,7 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through run_node_
     return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   }
 
-  test("a bash-side write with HYDRA_REDIS_DB set lands in that DB, never in db 0", () => {
+  test("a bash-side write with HYDRA_REDIS_DB set lands in that DB, never in db 0", { skip: OWNED_DB_SKIP }, () => {
     const sig = sigForRoot(wipedRoot);
     const r = runOwnBlock({ HYDRA_REDIS_DB: SELECTED_DB });
     assert.equal(r.status, 0, `block must never exit non-zero: ${r.stderr}`);

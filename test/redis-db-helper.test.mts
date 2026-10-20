@@ -847,3 +847,35 @@ describe("scripts/test/redis-db-launch.mjs — hermeticChildEnv (GLM off-switch 
     assert.equal(hermeticChildEnv({ HYDRA_GLM_DISABLED_FILE: "/x" }).HYDRA_GLM_DISABLED_FILE, "/x");
   });
 });
+
+// Issue #5062: no test may hand a live Redis selector one of the launcher's
+// pool indexes as a literal — a concurrent run owns that index and FLUSHDBs it.
+describe("no test file hardcodes a launcher-pool Redis DB index (issue #5062)", () => {
+  test("no test file passes a literal ALLOWED_DB_INDEXES index as a live Redis selector", async () => {
+    const { ALLOWED_DB_INDEXES } = await import("../scripts/test/redis-db-launch.mjs");
+    const { readdirSync, readFileSync: readFile } = await import("node:fs");
+    const alt = (ALLOWED_DB_INDEXES as number[]).join("|");
+    const patterns = [
+      new RegExp(`["']-n["']\\s*,\\s*["'](?:${alt})["']`),
+      new RegExp(`HYDRA_REDIS_DB:\\s*["'](?:${alt})["']`),
+    ];
+    const testDir = fileURLToPath(new URL(".", import.meta.url));
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.name === "node_modules") continue;
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith(".mts")) files.push(p);
+      }
+    };
+    walk(testDir);
+    const hits: string[] = [];
+    for (const f of files) {
+      readFile(f, "utf8").split("\n").forEach((line, i) => {
+        if (patterns.some((re) => re.test(line))) hits.push(`${f}:${i + 1}: ${line.trim()}`);
+      });
+    }
+    assert.deepEqual(hits, [], `pool-index literals used as live Redis selectors:\n${hits.join("\n")}`);
+  });
+});

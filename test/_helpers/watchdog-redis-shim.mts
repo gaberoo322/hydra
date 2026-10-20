@@ -168,6 +168,19 @@ function runCli(bin: string, cliArgs: string[]): CliResult {
  * the shim — so stateful commands (SET NX) see identical starting state.
  */
 function battery(key: (name: string) => string): string[][] {
+  // SELECT-path entries use the run-OWNED DB (HYDRA_REDIS_DB from the launcher),
+  // never a pool literal a concurrent run could FLUSHDB mid-battery (#5062);
+  // omitted when no owned DB exists.
+  const owned = process.env.HYDRA_REDIS_DB ?? "";
+  const hasOwned = /^\d+$/.test(owned) && owned !== "0";
+  const selectPath: string[][] = hasOwned
+    ? [
+        ["-n", owned, "SET", key("dbown"), "x"], // SELECT path
+        ["-n", owned, "GET", key("dbown")],
+        ["-n", "0", "GET", key("dbown")], // must be nil: the SET above went to the owned db
+        ["-n", owned, "DEL", key("dbown")],
+      ]
+    : [];
   return [
     ["-n", "0", "GET", key("str")], // nil bulk
     ["-n", "0", "EXISTS", key("str")], // integer 0
@@ -180,10 +193,7 @@ function battery(key: (name: string) => string): string[][] {
     ["-n", "0", "HGETALL", key("hash")], // multi-bulk incl. an empty + a multi-byte value
     ["-n", "0", "XADD", key("stream"), "1-1", "type", "launch:quota_stretch", "payload", '{"signal":"quota","durationMs":5000}'],
     ["-n", "0", "DEL", key("str"), key("hash"), key("stream")], // integer 3
-    ["-n", "9", "SET", key("db9"), "x"], // SELECT path
-    ["-n", "9", "GET", key("db9")],
-    ["-n", "0", "GET", key("db9")], // must be nil: the SET above went to db 9
-    ["-n", "9", "DEL", key("db9")],
+    ...selectPath,
     ["-n", "0", "INCR"], // top-level error reply
   ];
 }

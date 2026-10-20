@@ -921,10 +921,15 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
 // =============================================================================
 
 describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/rc_read (issue #4183)", { skip: !DOCKER }, () => {
-  // A DB this describe owns for its own lifetime — distinct from db 0
-  // (production, the fallback-on-invalid/absent-input target) so a leak in
-  // either direction is unambiguous.
-  const SELECTED_DB = "9";
+  // The run-OWNED Redis DB the launcher assigned (redis-db-launch.mjs exports it
+  // as HYDRA_REDIS_DB via redisChildEnv), captured at definition time. Never a
+  // literal from the launcher's pool: a concurrent run owns every other index
+  // and FLUSHDBs it (issue #5062). Null => no owned DB (remote REDIS_URL or a
+  // bare `node --test`): the "lands in that DB" test skips with a reason.
+  const OWNED_RAW = process.env.HYDRA_REDIS_DB ?? "";
+  const OWNED_DB: string | null = /^\d+$/.test(OWNED_RAW) && OWNED_RAW !== "0" ? OWNED_RAW : null;
+  const SELECTED_DB = OWNED_DB ?? "0"; // "0" only feeds idempotent cleanup DELs when skipped
+  const OWNED_DB_SKIP = OWNED_DB === null ? "launcher assigned no owned HYDRA_REDIS_DB (remote REDIS_URL or bare node --test)" : false;
 
   // Fully separate key namespace from RUN_NS/TEST_LAST_TICK_KEY/SINCE/FIRED
   // above — this describe never touches those keys, on any DB.
@@ -1028,9 +1033,9 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/
     return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   }
 
-  test("a bash-side write with HYDRA_REDIS_DB set lands in that DB, never in db 0", () => {
+  test("a bash-side write with HYDRA_REDIS_DB set lands in that DB, never in db 0", { skip: OWNED_DB_SKIP }, () => {
     // Seed the last-tick hash directly in the TARGET db — this is what
-    // HYDRA_REDIS_DB=9 makes rc_read visible to. db 0 is left empty, so a tick
+    // HYDRA_REDIS_DB=<owned> makes rc_read visible to. db 0 is left empty, so a tick
     // that mistakenly reads db 0 would see no record at all (a distinguishable
     // failure mode, not a false pass).
     hsetLastTickAt(SELECTED_DB, {
@@ -1050,7 +1055,7 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/
     assert.match(
       warnLines(r.stdout),
       /signal 'fail-safe' sustained 5000ms >= 2000ms/,
-      "precondition: this tick must fire against the DB-9 seed (proves rc_read honoured HYDRA_REDIS_DB)",
+      "precondition: this tick must fire against the owned-DB seed (proves rc_read honoured HYDRA_REDIS_DB)",
     );
 
     // The since-anchor + fired marker THIS tick just wrote via rc_write must
