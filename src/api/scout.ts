@@ -5,7 +5,6 @@ import {
   SCOUT_METRICS,
 } from "../scout/stats.ts";
 import { getScoutLastCalendarWalk } from "../redis/scout.ts";
-import { planAlertDispatches } from "../scout/alert-listener.ts";
 import { listDispatchAudits } from "../scout/dispatch-audit.ts";
 import {
   ScoutDispatchesQuerySchema,
@@ -94,15 +93,6 @@ export function createScoutRouter() {
       const entries = await listDispatchAudits(limit);
       return { limit, entries };
     }),
-  );
-
-  // GET /scout/alert-plan — Phase C (issue #486) read-only preview of what
-  // the alert listener WOULD dispatch right now. The autopilot consumes
-  // this via the Turn Snapshot; operators can hit it directly to debug
-  // why a known alert pattern didn't fire a scout. Doesn't advance the
-  // cursor or stamp any cooldown — purely diagnostic.
-  router.get("/scout/alert-plan", async (_req, res) =>
-    isolateAggregator(res, "api/scout/alert-plan", () => planAlertDispatches()),
   );
 
   return router;

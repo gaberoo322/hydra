@@ -18,7 +18,7 @@ Phase A (issue #484) ships the scaffolding only:
 4. The Redis seen-list (`src/scout/seen-list.ts`) — so re-runs don't re-propose `react-query` every time.
 5. Manual invocation only — `/hydra-tool-scout <category>`. **No autopilot wiring, no cron.** Phase B adds those, after the operator has confirmed the issue quality on at least one category.
 
-Phases B/C/D (alert subscriptions, calendar walk, gap-driven triggers) are deferred — see the parent epic #483 and the "Out of scope" section below.
+Phase D (gap-driven triggers) is deferred — see the parent epic #483 and the "Out of scope" section below.
 
 ## When NOT to run this
 
@@ -31,20 +31,19 @@ Phases B/C/D (alert subscriptions, calendar walk, gap-driven triggers) are defer
 | Input | Source | Notes |
 |---|---|---|
 | `category` (positional arg) | Operator | Must be one of the slugs in `docs/ai-leverage-categories.md`. Reject anything else — the rubric is calibrated per category and freeform input would dilute it. |
-| Trigger source | Implicit | Phase A: `"manual"`. Phase B adds `"calendar"`. Phase C (issue #486) adds `"alert"`. Phase D will add `"gap"`. Recorded on every seen-list entry. |
+| Trigger source | Implicit | Phase A: `"manual"`. Phase B adds `"calendar"`. Phase D will add `"gap"` (the Phase C `"alert"` trigger was retired in #5054). Recorded on every seen-list entry. |
 | Seen-list | `hydra:scout:tools-considered:*` | Read before discovery to skip anything in cooldown. |
 
 ## Process
 
 ### 0. Resolve category from trigger (Phase B/C)
 
-The skill is invoked in three modes:
+The skill is invoked in two modes:
 
 1. **Manual** (operator typed `/hydra-tool-scout typed-schemas`) — `category` arg is required.
-2. **Calendar** (`prompt_args: {"trigger": "calendar"}`) — no category arg; read `/api/scout/alert-plan` first (to honor failure pain before calendar cadence), and if empty, fall back to `planWalk()` from `src/scout/calendar-walk.ts` and iterate the eligible list. The walk surface is **categories only** — `planWalk()` no longer emits `dep:<name>` targets (issue #4556: no dependency-walk procedure existed, so they sat un-walked in the eligible set forever; dependency freshness/CVEs are covered by `npm run deps:check` + the OSV scan). After each per-category dispatch, record the outcome via `recordCalendarDispatch(category, outcome, counts, detail)` (in `src/scout/dispatch-audit.ts`) — that one call XADDs the `triggeredBy: "calendar"` audit entry, stamps the per-category cooldown (same key `stampCategoryWalk` writes), and increments the per-day stat counters from the per-candidate counts map (e.g. `{"candidates": 5, "filtered": 2, "filed": 1, "rejected": 3}`) so `/api/scout/stats` sees the activity. The outcome alone never moves a counter — pass the real per-candidate counts. Call `stampClassWalk()` once after the full sweep.
-3. **Alert** (`prompt_args: {"trigger": "alert"}`) — no category arg; read `/api/scout/alert-plan`, iterate `eligible[]` and dispatch one scout per `(pattern, category)` pair. After each dispatch, POST the outcome to the audit trail via `recordDispatch()` (in `src/scout/dispatch-audit.ts`), passing the same per-candidate counts as the trailing optional argument, so the per-pattern/per-category cooldown stamps land, `hydra:scout:dispatches` gets the audit XADD, and the per-day stat counters increment.
+2. **Calendar** (`prompt_args: {"trigger": "calendar"}`) — no category arg; call `planWalk()` from `src/scout/calendar-walk.ts` and iterate the eligible list. The walk surface is **categories only** — `planWalk()` no longer emits `dep:<name>` targets (issue #4556: no dependency-walk procedure existed, so they sat un-walked in the eligible set forever; dependency freshness/CVEs are covered by `npm run deps:check` + the OSV scan). After each per-category dispatch, record the outcome via `recordCalendarDispatch(category, outcome, counts, detail)` (in `src/scout/dispatch-audit.ts`) — that one call XADDs the `triggeredBy: "calendar"` audit entry, stamps the per-category cooldown (same key `stampCategoryWalk` writes), and increments the per-day stat counters from the per-candidate counts map (e.g. `{"candidates": 5, "filtered": 2, "filed": 1, "rejected": 3}`) so `/api/scout/stats` sees the activity. The outcome alone never moves a counter — pass the real per-candidate counts. Call `stampClassWalk()` once after the full sweep.
 
-When invoked in calendar or alert mode, the skill MUST record every dispatched target's outcome (filed/dropped/error) with its per-candidate counts. Skipping the bookkeeping leaves the dedup keys stale, the audit trail undercounts, and `/api/scout/stats` shows nothing (issue #4556 — calendar walks were invisible on that endpoint precisely because no path recorded them).
+When invoked in calendar mode, the skill MUST record every dispatched target's outcome (filed/dropped/error) with its per-candidate counts. Skipping the bookkeeping leaves the dedup keys stale, the audit trail undercounts, and `/api/scout/stats` shows nothing (issue #4556 — calendar walks were invisible on that endpoint precisely because no path recorded them).
 
 ### 1. Validate category
 
@@ -189,7 +188,7 @@ await seenList.recordDecision(slug, decision, reason, {
   category: "typed-schemas",
   issueNum: 567,            // present if decision === "filed"
   reEvalAt: null,           // optional override
-  trigger: "manual",        // Phase A; "calendar"/"alert"/"gap" later
+  trigger: "manual",        // Phase A; "calendar" (Phase B); "gap" later
 });
 ```
 
@@ -246,7 +245,7 @@ Expected:
 |---|---|
 | Autopilot `scout_orch` class + `decide.py` wiring | **Phase B (issue #485) — shipped** |
 | Calendar walk (one walk/week over categories + deps) | **Phase B (issue #485) — shipped** |
-| Alert-driven trigger (`hydra:alerts` subscription) | **Phase C (issue #486) — shipped** |
+| Alert-driven trigger | Retired in #5054 — the pattern:* alerts it consumed never had a producer (#5053) |
 | Gap-driven triggers (e.g. "the same lesson fired 3x → scout the related category") | Phase D |
 | Vibe-driven triggers (operator hunches surfaced via Redis hint) | Phase D |
 | Auto-PRs that actually integrate a tool | Never — that is dev_orch's job; the scout files an issue and stops. |
@@ -256,33 +255,8 @@ Expected:
 - `scout_orch` signal class (7d per-class cooldown in `decide.py:SIGNAL_COOLDOWNS`).
 - Walk planner: `src/scout/calendar-walk.ts:planWalk()` — builds the category target list with per-category cooldown (30d default). `dep:<name>` targets were removed from the surface in issue #4556 (no dependency-walk procedure; `npm run deps:check` + the OSV scan cover dependency freshness/CVEs).
 - Per-tool cooldown (90d) is honored inside the scout via the Phase A seen-list.
-- Stats: `/api/scout/stats?window=7` returns last-week activity per category. The per-day counters are written by the dispatch-audit boundary (`recordDispatch` / `recordCalendarDispatch` in `src/scout/dispatch-audit.ts`) on every recorded dispatch outcome — both trigger paths feed the same rollup (issue #4556).
+- Stats: `/api/scout/stats?window=7` returns last-week activity per category. The per-day counters are written by the dispatch-audit boundary (`recordCalendarDispatch` in `src/scout/dispatch-audit.ts`) on every recorded dispatch outcome (issue #4556).
 - Cost slice: `SCOUT_DAILY_COST_SHARE = 0.04` (~\$2/day on a \$50 cap); operators override via `state.limits.scout_cost_share`.
-
-### Phase C wiring summary (issue #486)
-
-Failure-driven trigger — when a recurring-pattern alert maps to a researchable category, dispatch the scout within hours instead of days.
-
-- **Alert listener:** `planAlertDispatches()` in `src/scout/alert-listener.ts`
-  - Polls the `hydra:alerts` Redis list (newest 100 entries by default).
-  - Filters via `PATTERN_CATEGORY_MAP` — the closed pattern→category map.
-  - Applies a 24h per-pattern dedup (`hydra:scout:pattern-last-fired:<pattern>`) AND a 24h per-category cooldown (same `hydra:scout:category-last-walked:<cat>` key the calendar walk uses, so the two triggers honor each other).
-  - Coalesces multiple patterns into one dispatch per category.
-- **Pattern → category starter map** (see `PATTERN_CATEGORY_MAP` in `alert-listener.ts`):
-  - `consecutive_failures` → `verification-tooling`
-  - `test_decline` → `testing-tooling`
-  - `recurring_regressions` → `testing-tooling`
-  - `anchor_stuck` → `refactoring-tooling`
-  - `low_merge_rate` → `verification-tooling`
-  - `high_abandonment` → `agent-tooling`
-  - `file_rework` → `refactoring-tooling` (forward-compat; pattern not yet in `ALERT_TYPES`)
-  - `rollback_cluster` → `verification-tooling` (forward-compat)
-- **Autopilot dispatch:** `decide.py` extends `scout_orch` to prefer alert-driven dispatches over calendar (`trigger: "alert"`). The 7d class cooldown remains the back-stop — even under sustained alert pressure, `scout_orch` fires at most once per 7 days.
-- **Audit trail:** `hydra:scout:dispatches` (Redis stream, MAXLEN ~ 1000). Read via `GET /api/scout/dispatches?limit=N`. Each entry: `triggeredBy: calendar | alert:<pattern>`, `category`, `dispatchedAt`, `cost`, `outcome`, `detail`.
-- **Diagnostic preview:** `GET /api/scout/alert-plan` returns the eligible/skipped list the listener would emit RIGHT NOW. Read-only — doesn't stamp anything.
-- **Cursor:** `hydra:scout:alert-cursor` — high-water-mark ISO timestamp over the alerts list. The skill advances it after a successful dispatch; a crash mid-tick re-processes the same alerts on the next tick.
-
-**Reflex-loop risk (research question #4):** none. The scout files GH issues, not pattern alerts; the map is the chokepoint — only the eight pattern names listed above can drive a dispatch. `cost-cap`, `consumer:dead`, `dlq:alert` are deliberately absent from the map so a runaway scout can't re-trigger itself.
 
 See parent epic #483 for the full roadmap.
 
@@ -295,13 +269,11 @@ See parent epic #483 for the full roadmap.
 - `src/scout/aliases.ts` — `canonicalizeSlug` + alias map for npm/repo-name collisions.
 - `src/scout/calendar-walk.ts` — Phase B weekly walk planner (categories + per-category cooldown; `dep:*` surface removed in #4556).
 - `src/scout/calendar-walk-surface.ts` — walk-surface enumeration (category slugs from `docs/ai-leverage-categories.md`).
-- `src/scout/dispatch-audit.ts` — the `hydra:scout:dispatches` audit-stream boundary: `recordDispatch` (alert), `recordCalendarDispatch` (calendar, #4556), `listDispatchAudits`, and the per-day stats-counter wiring.
+- `src/scout/dispatch-audit.ts` — the `hydra:scout:dispatches` audit-stream boundary: `recordCalendarDispatch` (calendar, #4556), `listDispatchAudits`, and the per-day stats-counter wiring.
 - `src/scout/stats.ts` — per-day per-category counters + the rollup behind `/api/scout/stats`.
-- `src/scout/alert-listener.ts` — Phase C alert-driven planner (`PATTERN_CATEGORY_MAP`, `planAlertDispatches`, audit trail).
-- `src/redis/keys.ts` — adds `scoutToolsConsidered(slug)` + Phase B/C keys (`scoutLastCalendarWalk`, `scoutCategoryLastWalked`, `scoutStatsDaily`, `scoutDispatches`, `scoutAlertCursor`, `scoutPatternLastFired`).
-- `src/api/scout.ts` — `/api/scout/stats`, `/api/scout/dispatches`, `/api/scout/alert-plan`.
+- `src/redis/keys.ts` — adds `scoutToolsConsidered(slug)` + Phase B keys (`scoutLastCalendarWalk`, `scoutCategoryLastWalked`, `scoutStatsDaily`, `scoutDispatches`).
+- `src/api/scout.ts` — `/api/scout/stats`, `/api/scout/dispatches`.
 - `test/scout-seen-list.test.mts` — regression tests for record + re-eval eligibility.
-- `test/scout-alert-listener.test.mts` — regression tests for Phase C pattern map, dedup, coalescing, audit trail.
 
 ## Tier
 

@@ -6,7 +6,7 @@
  * 1. GOLDEN (ADR-0043 Decision 4): every file under
  *    test/fixtures/turn-snapshot/passthrough/ was captured by running the OLD
  *    bash collectors (collect_health, collect_direction_drift,
- *    collect_scout_alerts, collect_realm_share, collect_usage_eligibility,
+ *    collect_realm_share, collect_usage_eligibility,
  *    collect_emergency_brake, collect_class_stats, collect_capacity,
  *    collect_scheduler, collect_recommendations, collect_slot_events) at the
  *    slice's base SHA through the real `hydra` CLI against a local HTTP server
@@ -314,7 +314,7 @@ describe("Turn Snapshot passthrough — CLI and fail-open runner", () => {
     const noReasons = (v: unknown): unknown =>
       JSON.parse(JSON.stringify(v), (k, x) => (k === "reason" && typeof x === "string" ? "<reason>" : x));
     const fb = (names: string[]) => noReasons(Object.fromEntries(names.map((n) => [n, PASSTHROUGH_COLLECTORS[n as keyof typeof PASSTHROUGH_COLLECTORS].fallbackValue])));
-    const tailNames = ["scout-alerts", "realm-share", "usage-eligibility", "emergency-brake", "class-stats", "capacity", "scheduler", "recommendations", "slot-events"];
+    const tailNames = ["realm-share", "usage-eligibility", "emergency-brake", "class-stats", "capacity", "scheduler", "recommendations", "slot-events"];
     assert.deepEqual(fb(["health", "direction-drift"]), noReasons(loadGolden("passthrough-group-head-all-failed.json").expected.values));
     assert.deepEqual(fb(tailNames), noReasons(loadGolden("passthrough-group-tail-all-failed.json").expected.values));
   });
@@ -366,8 +366,6 @@ describe("Turn Snapshot passthrough — a malformed payload degrades, never thro
     assert.deepEqual(await value("recommendations", "[]"), { ok: true, value: { count: 0, firstAction: null } });
     assert.deepEqual((await value("scheduler", '{"running": {}}')) as unknown, { codexRunning: { ok: true, value: false }, scheduler: { ok: true, value: { state: "?", nonMerges: 0 } } });
     assert.deepEqual((await value("scheduler", '{"running": [0]}')) as { codexRunning: unknown }, { codexRunning: { ok: true, value: true }, scheduler: { ok: true, value: { state: "?", nonMerges: 0 } } });
-    assert.deepEqual(await value("scout-alerts", '{"eligible": {"a": 1, "b": 2}}'), { eligible: { ok: true, value: 2 } });
-    assert.deepEqual(await value("scout-alerts", '{"eligible": "ab😀"}'), { eligible: { ok: true, value: 3 } }, "a string's size is its code points");
     const usage = '{"bySkillByModel": {"hydra-dev": {"m": {"total": 5}}}}';
     assert.deepEqual(await value("realm-share", usage, "[]"), { ok: false, reason: "zero-denominator" }, "an empty taxonomy list reads as an empty taxonomy");
     assert.deepEqual(await value("realm-share", usage, "[1]"), { ok: false, reason: "taxonomy-shape" });

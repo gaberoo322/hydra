@@ -2138,9 +2138,8 @@ def _normalise_events(raw: object) -> tuple[list[dict], list[str]]:
     Runs ONCE, as the first statement of `decide()`, ahead of EVERY consumer
     (`_orch_board_read_degraded`, `_rule_termination` -> `_signal_present`,
     `_rule_completion_reaps`, the qa-verdict auto-merge sweep, the
-    wait_or_reap ``completed_task_ids`` fold, the signal readers, the scout
-    ``alert_count`` read), so no downstream ``for ev in events`` loop needs
-    its own ``isinstance`` guard.
+    wait_or_reap ``completed_task_ids`` fold, the signal readers), so no
+    downstream ``for ev in events`` loop needs its own ``isinstance`` guard.
 
     Returns ``(events, reasons)``:
 

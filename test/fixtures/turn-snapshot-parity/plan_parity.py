@@ -229,13 +229,6 @@ def to_json_form(state: dict) -> dict:
                 except (TypeError, ValueError):
                     n = 0
                 signals[key] = max(n, 0)
-            elif key == "scout_alert_eligible_count":
-                # the selector reads int(value or 0) — a value that would raise there is not representable
-                try:
-                    n = int(raw or 0)
-                except (TypeError, ValueError):
-                    raise Unrepresentable(f"{key}={raw!r}")
-                signals[key] = max(n, 0)  # only `> 0` is read
             elif key == "hitl_grill_open":
                 try:
                     signals[key] = max(int(raw), 0)  # observability only; decide.py never reads it

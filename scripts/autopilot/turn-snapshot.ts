@@ -28,7 +28,7 @@
  *     picks                the grill / dev-ready picks, Candidate Exclusions,
  *                          merged-PR refusal and active_dev_orch; needs pr-gate
  *                          in the SAME run (it takes the in-flight sets in-process)
- *     <passthrough>        health, direction-drift, scout-alerts, realm-share,
+ *     <passthrough>        health, direction-drift, realm-share,
  *                          usage-eligibility, emergency-brake, class-stats,
  *                          capacity, scheduler, recommendations, slot-events;
  *                          a consecutive run of them reads concurrently
@@ -475,7 +475,7 @@ async function runJsonSnapshot(args: CliArgs, deps: CliDeps, io: CliIo): Promise
   degraded.push(...ts.degraded);
   // 8. the data-plane passthroughs
   const tail = await runPassthroughCollectors(
-    ["scout-alerts", "realm-share", "usage-eligibility", "emergency-brake", "class-stats", "capacity", "scheduler", "recommendations", "slot-events"],
+    ["realm-share", "usage-eligibility", "emergency-brake", "class-stats", "capacity", "scheduler", "recommendations", "slot-events"],
     passthroughDeps,
   );
   note(tail.notes);
@@ -500,7 +500,6 @@ async function runJsonSnapshot(args: CliArgs, deps: CliDeps, io: CliIo): Promise
     retro: rv.retro,
     wayfinder: rv["wayfinder-frontier"],
     tickets: rv.tickets,
-    scoutAlerts: pv["scout-alerts"],
     realmShare: pv["realm-share"],
     usageEligibility: pv["usage-eligibility"],
     emergencyBrake: pv["emergency-brake"],

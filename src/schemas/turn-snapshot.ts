@@ -118,7 +118,6 @@ const SignalsSchema = z
     health_fail: z.boolean(),
     scout_walk_due: z.boolean(),
     scout_board_saturated: z.boolean(),
-    scout_alert_eligible_count: z.number().int().nonnegative(),
     // backfill producers and their saturation caps
     orch_backfill_idle: z.boolean(),
     arch_board_saturated: z.boolean(),
@@ -199,7 +198,6 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   health_fail: true,
   scout_walk_due: false,
   scout_board_saturated: true,
-  scout_alert_eligible_count: 0,
   orch_backfill_idle: false,
   arch_board_saturated: true,
   hitl_grill_open: 0,

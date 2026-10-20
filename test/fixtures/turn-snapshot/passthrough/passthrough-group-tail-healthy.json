@@ -1,9 +1,8 @@
 {
   "name": "group-tail-healthy",
   "source": "synthetic fixture (ADR-0043 D4 — every read path incl. failures)",
-  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_scout_alerts + collect_realm_share + collect_usage_eligibility + collect_emergency_brake + collect_class_stats + collect_capacity + collect_scheduler + collect_recommendations + collect_slot_events)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_realm_share + collect_usage_eligibility + collect_emergency_brake + collect_class_stats + collect_capacity + collect_scheduler + collect_recommendations + collect_slot_events)",
   "collectors": [
-    "scout-alerts",
     "realm-share",
     "usage-eligibility",
     "emergency-brake",
@@ -15,10 +14,6 @@
   ],
   "env": {},
   "http": {
-    "/scout/alert-plan": {
-      "status": 200,
-      "body": "{\"eligible\":[1]}"
-    },
     "/usage": {
       "status": 200,
       "body": "{\"bySkillByModel\":{\"hydra-dev\":{\"opus\":{\"input\":1,\"total\":1},\"sonnet\":{\"total\":0}},\"hydra-target-build\":{\"opus\":{\"input\":1,\"total\":3},\"sonnet\":{\"total\":0}}}}"
@@ -65,7 +60,6 @@
   "expected": {
     "stderrNotes": [],
     "httpCalls": [
-      "/scout/alert-plan",
       "/usage",
       "/usage/eligibility",
       "/autopilot/emergency-brake",
@@ -77,12 +71,6 @@
       "/autopilot/slot-events?last_id=0&count=100"
     ],
     "values": {
-      "scout-alerts": {
-        "eligible": {
-          "ok": true,
-          "value": 1
-        }
-      },
       "realm-share": {
         "ok": true,
         "value": 0.25

@@ -301,7 +301,6 @@ export const MACHINE_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /api/reflections": "hydra-dev child flow + hydra-target-build playbooks (the live reflection injection path)",
   "GET /api/scout/stats": "hydra-tool-scout playbook + hydra-autopilot class wiring",
   "GET /api/scout/dispatches": "hydra-tool-scout playbook",
-  "GET /api/scout/alert-plan": "hydra-tool-scout playbook + decide_selectors/scout.py",
   "GET /api/tier": "hydra-dev / hydra-epic-sprint / hydra-architecture-scan playbooks",
   "GET /api/usage/by-issue": "scripts/autopilot/reap.py + scripts/glm-beachhead-report.sh",
 });
