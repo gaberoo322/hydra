@@ -1,0 +1,1 @@
+- feat: docs prose-drift guard — `npm run docs:drift` + required test pinning identifier existence, retired-term denylist, count claims and link resolution against a shrink-only baseline (#4597)

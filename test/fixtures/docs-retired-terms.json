@@ -1,0 +1,11 @@
+[
+  { "term": "Candidate Feed", "retiredBy": "#3455" },
+  { "term": "Autopilot Focus", "retiredBy": "#4538" },
+  { "term": "Research Floor", "retiredBy": "#710" },
+  { "term": "Feedback File", "retiredBy": "#2975" },
+  { "term": "Codex", "retiredBy": "ADR-0006" },
+  { "term": "OpenViking", "retiredBy": "ADR-0033" },
+  { "term": "src/gate.ts", "retiredBy": "ADR-0006" },
+  { "term": "in-process control loop", "retiredBy": "ADR-0006" },
+  { "term": "src/anchor-selection/", "retiredBy": "ADR-0036" }
+]
