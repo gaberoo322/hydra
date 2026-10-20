@@ -2303,7 +2303,6 @@ function snapshotSignalKeys(): Set<string> {
 /** Schema keys decide.py deliberately does not read — each a name→rationale pair, honesty-tested below. */
 const OBSERVABILITY_ONLY_SIGNALS = new Map<string, string>([
   ["hitl_grill_open", "the operator-admission inbox depth (#4391); decide.py gates on hitl_grill_saturated, the operator reads the depth"],
-  ["orch_prs_glm_red", "the #4460 debug bucket behind the orch_glm_red_forward_fix pick; the pick, not the bucket, drives the forward-fix"],
 ]);
 
 describe("decide.py ↔ Turn Snapshot schema read guard (#4934)", () => {

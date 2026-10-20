@@ -22,6 +22,11 @@ same facts fails here. Because the JSON state has no `signals` key and no
 blob fields, a decide.py read that bypassed scripts/autopilot/turn_snapshot.py
 would see nothing and the Plans would diverge.
 
+Re-recorded once for an intentional decide.py change (issue #5058): the
+GLM-only #4460 signals were folded into the provenance-agnostic resume pick
+(see `_fold_retired_glm_signals`), which changed only the red-forward-fix
+dispatch reason / surface-pr cause strings in the affected Plans.
+
   python3 plan_parity.py [--dump <path>] [corpus.jsonl.gz]
       compare against the golden Plans; `--dump` writes each converted
       snapshot as JSONL so the test can zod-check every converted value
@@ -63,7 +68,7 @@ os.environ["HYDRA_AUTOPILOT_RUN_END_POST"] = "off"
 import decide  # noqa: E402
 import turn_snapshot as ts  # noqa: E402
 
-PINS = ("orch_glm_red_forward_fix", "orch_dev_resume_pick", "orch_dirty_forward_fix", "target_dev_resume_pick")
+PINS = ("orch_dev_resume_pick", "orch_dirty_forward_fix", "target_dev_resume_pick")
 ANCHORS = ("orch_pending_grill_anchor", "orch_dev_ready_anchor", "wayfinder_orch_frontier", "tickets_orch_pending_spec")
 LISTS = (
     "needs_qa_numbers",
@@ -72,7 +77,7 @@ LISTS = (
     "orch_prs_dirty",
     "orch_prs_unchecked",
     "orch_prs_behind",
-    "orch_prs_glm_red",
+    "orch_prs_red_resume",
 )
 # The schema's scalar keys (src/schemas/turn-snapshot.ts) — converted to their typed shape too.
 FLAGS = (
@@ -125,11 +130,56 @@ def _anchor_to_json(key: str, raw):
     raise Unrepresentable(f"{key}={raw!r}")
 
 
+# Issue #5058 retired the GLM-only #4460 signals into the provenance-agnostic
+# resume pick. A corpus entry captured with the legacy GLM pick still carries
+# the SAME facts — that PR is now named by `orch_dev_resume_pick` and listed in
+# the red-CI cap scope `orch_prs_red_resume`, and its in-run tracker is
+# `red_forward_fix_attempts` — so fold them forward instead of dropping the
+# red-forward-fix path from the corpus. The legacy selector ran the non-GLM
+# resume pick FIRST, so an entry that also carries one keeps it.
+_RETIRED_GLM_PICK = "orch_glm_red_forward_fix"
+_RETIRED_GLM_BUCKET = "orch_prs_glm_red"
+_RETIRED_GLM_TRACKER = "glm_red_forward_fix_attempts"
+
+
+def _fold_retired_glm_signals(legacy: dict) -> dict:
+    if _RETIRED_GLM_PICK not in legacy and _RETIRED_GLM_BUCKET not in legacy:
+        return legacy
+    out = dict(legacy)
+    glm_pick = ts._parse_pin(out.pop(_RETIRED_GLM_PICK, None))
+    out.pop(_RETIRED_GLM_BUCKET, None)
+    if glm_pick is not None and ts._parse_pin(out.get("orch_dev_resume_pick")) is None:
+        out["orch_dev_resume_pick"] = f"issue-{glm_pick[0]}:{glm_pick[1]}:{glm_pick[2]}"
+        out["orch_prs_red_resume"] = str(glm_pick[1])
+    return out
+
+
+def _fold_retired_glm_events(events):
+    """The same fold for a signal EVENT carrying the retired GLM pick (events
+    take precedence over state, so the fold must reach them too)."""
+    if not isinstance(events, list):
+        return events
+    out = []
+    for ev in events:
+        if isinstance(ev, dict) and ev.get("type") == "signal" and ev.get("name") == _RETIRED_GLM_PICK:
+            pin = ts._parse_pin(ev.get("value"))
+            out.append({**ev, "name": "orch_dev_resume_pick"})
+            out.append({**ev, "name": "orch_prs_red_resume", "value": str(pin[1]) if pin else ""})
+        elif isinstance(ev, dict) and ev.get("type") == "signal" and ev.get("name") == _RETIRED_GLM_BUCKET:
+            continue
+        else:
+            out.append(ev)
+    return out
+
+
 def to_json_form(state: dict) -> dict:
     s = copy.deepcopy(state)
+    if _RETIRED_GLM_TRACKER in s:
+        s["red_forward_fix_attempts"] = s.pop(_RETIRED_GLM_TRACKER)
     legacy = s.pop("signals", None)
     signals: dict = {}
     if isinstance(legacy, dict):
+        legacy = _fold_retired_glm_signals(legacy)
         for key, raw in legacy.items():
             if key in PINS:
                 p = ts._parse_pin(raw)
@@ -204,7 +254,8 @@ def to_json_form(state: dict) -> dict:
 
 def run(entry: dict, state: dict) -> str:
     try:
-        plan = decide.decide(state, copy.deepcopy(entry["candidates"]), copy.deepcopy(entry["events"]), now=entry["now"])
+        events = _fold_retired_glm_events(copy.deepcopy(entry["events"]))
+        plan = decide.decide(state, copy.deepcopy(entry["candidates"]), events, now=entry["now"])
         return plan.to_json()
     except Exception as exc:  # a crash must crash identically in both forms
         return f"RAISED {type(exc).__name__}: {exc}"

@@ -98,7 +98,7 @@ function healthyValues(): TurnSnapshotValues {
       unchecked: [4950],
       behind: [4952, 4951, 4953],
       ciTriggerStale: ok(false),
-      glmRed: ok({ bucket: [4881], pick: { issue: 4876, pr: 4881, headRefName: "worktree-agent-glm-4876-1791218911" } }),
+      redResume: ok([4890]),
       devResumePick: ok({ issue: 4718, pr: 4890, headRefName: "worktree-agent-a1b2" }),
       devResumeNoprPick: ok(4806),
       dirtyFix: ok({ pick: { issue: 4810, pr: 4814, headRefName: "fix/4810" }, surface: [{ pr: 4938, closingIssue: 4934 }, { pr: 4818, closingIssue: null }] }),
@@ -191,7 +191,7 @@ function edgeValues(): TurnSnapshotValues {
     prGate: {
       ...h.prGate,
       ciTriggerStale: ok(true),
-      glmRed: ok({ bucket: [4881, 4882], pick: null }),
+      redResume: ok([4881, 4882]),
       devResumePick: FAILED,
       devResumeNoprPick: FAILED,
       dirtyFix: ok({ pick: null, surface: [] }),
@@ -389,8 +389,8 @@ describe("turn snapshot JSON: builder details (#4934)", () => {
 
   test("a pin the packed wire could not carry (a branch with ':') is no pin, as decide.py's parser read it", () => {
     const h = healthyValues();
-    const v = { ...h, prGate: { ...h.prGate, glmRed: ok({ bucket: [4881], pick: { issue: 4876, pr: 4881, headRefName: "bad:branch" } }) } };
-    assert.equal(buildTurnSnapshot(v, { nowMs: NOW_MS }).doc.signals.orch_glm_red_forward_fix, null);
+    const v = { ...h, prGate: { ...h.prGate, devResumePick: ok({ issue: 4876, pr: 4881, headRefName: "bad:branch" }) } };
+    assert.equal(buildTurnSnapshot(v, { nowMs: NOW_MS }).doc.signals.orch_dev_resume_pick, null);
   });
 
   test("blobs are spliced as the service's exact JSON text (85.0 stays a float lexeme)", () => {
@@ -643,7 +643,7 @@ describe("turn snapshot JSON: every failure mode still produces a Plan (#4934)",
     // valid fields survive untouched
     assert.deepEqual(r.readings.orch_prs_dirty.ordered, healthyDoc.signals.orch_prs_dirty);
     assert.equal(r.readings.target_needs_qa_pr_ref.text, healthyDoc.signals.target_needs_qa_pr_ref);
-    assert.deepEqual(r.readings.orch_glm_red_forward_fix.pin, [4876, 4881, "worktree-agent-glm-4876-1791218911"]);
+    assert.deepEqual(r.readings.orch_dirty_forward_fix.pin, [4810, 4814, "fix/4810"]);
     assert.deepEqual(r.readings._blobs.usage_eligibility, healthyDoc.blobs.usage_eligibility, "a valid blob survives");
     const markers = r.degraded.filter((d: { collector: string }) => d.collector === "turn-snapshot");
     const fields = markers.map((d: { field: string }) => d.field).sort();

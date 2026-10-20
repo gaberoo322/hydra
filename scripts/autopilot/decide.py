@@ -199,7 +199,7 @@ state.json {
   # equal feature/<token>). Overwritten wholesale by the next resume pin,
   # NEVER cleared or pruned — a stale record is inert by construction (tokens
   # are unique per run+turn). In-run state by design, like
-  # glm_red_forward_fix_attempts: persisted via _persist_state_writeback's
+  # red_forward_fix_attempts: persisted via _persist_state_writeback's
   # snapshot/compare pair; a new run starts without it and the hold fails
   # open (the #3709 dead-arm class).
   "dev_target_resume_inflight": {
@@ -322,14 +322,15 @@ if _SCRIPT_DIR not in sys.path:
 from decide_base import (
     BACKFILL_STARVATION_FLOOR_SEC,
     ESCALATION_POLICY,
-    GLM_RED_FORWARD_FIX_CAP,
+    RED_FORWARD_FIX_CAP,
     QA_STALL_MAX_ATTEMPTS,
     ZERO_YIELD_BACKOFF_LADDER,
-    _glm_red_attempt_count,
-    _glm_red_forward_fix_signal,
+    _dev_resume_pick_signal,
     _needs_qa_target_pr_ref,
     _normalize_target_risk_surface,
     _orch_board_read_degraded,
+    _red_forward_fix_attempt_count,
+    _red_resume_prs,
     _signal_present,
     _target_dev_resume_pick_signal,
     _zero_yield_entry,
@@ -1339,19 +1340,19 @@ def make_surface_pr(
     reason: str,
     closing_issue: int | None = None,
 ) -> dict:
-    """Construct a `surface-pr` action (issues #4240, #4460).
+    """Construct a `surface-pr` action (issues #4240, #4460, #5058).
 
     Routes ONE PR whose Pre-merge Gate state no PR-level action can fix —
     `cause: dirty` (a merge conflict `update-branch` cannot resolve),
     `cause: unchecked` (zero check-runs past the grace window on a healthy
-    trigger arm — CI never started), or `cause: glm-red-forward-fix-exhausted`
-    (#4460: a GLM-authored PR still red on a required check after the pinned
-    forward-fix dispatch cap) — to the operator: the tool binding
+    trigger arm — CI never started), or `cause: red-forward-fix-exhausted`
+    (#5058, ex-#4460: a PR of any provenance still red on a required check
+    after the pinned forward-fix dispatch cap) — to the operator: the tool binding
     applies `ready-for-human` via `gh api repos/.../issues/N/labels` (never
     `gh pr edit`, which is broken per operator memory) and posts ONE comment
     naming the cause. The label on the PR is the idempotency key —
     the Turn Snapshot excludes already-labelled PRs from the dirty/unchecked
-    buckets (and from the #4460 glm-red predicate, INV-3b) at read time, so
+    buckets (and from the #5058 resume predicate) at read time, so
     decide.py never re-surfaces one (it keeps no memory). Per-PR on purpose:
     `route-prs-to-review` is brake-only, carries no PR list, and labels
     EVERY open PR — the wrong blast radius for one conflicting branch.
@@ -3013,29 +3014,32 @@ def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
             ),
             reason=f"update-branch:#{pr}",
         )
-    # ISSUE #4460 (INV-8): the dev_orch selector pins at most
-    # GLM_RED_FORWARD_FIX_CAP forward-fix dispatches per stranded GLM PR.
-    # When the cap is exhausted and the Turn Snapshot STILL names that PR (the
-    # predicate — which already excludes the ready-for-human label this
-    # action applies — keeps qualifying it), no dispatch fires and this rule
-    # is the only actor: surface the PR so the operator owns it. The applied
-    # `ready-for-human` label is the TERMINAL exclusion — the next
-    # the Turn Snapshot pass drops the PR from the predicate (INV-3b), so this
-    # emission self-extinguishes after one turn rather than repeating
-    # forever. Exhaustion is surfaced, never silent.
-    glm_fix = _glm_red_forward_fix_signal(state, events)
-    if glm_fix is not None:
-        _glm_issue, glm_pr, _glm_branch = glm_fix
-        if _glm_red_attempt_count(state, glm_pr) >= GLM_RED_FORWARD_FIX_CAP:
+    # ISSUE #5058 (ex-#4460 INV-8): the dev_orch selector pins at most
+    # RED_FORWARD_FIX_CAP red-CI forward-fix dispatches per PR (any
+    # provenance). When the cap is exhausted and the Turn Snapshot STILL names
+    # that PR as the resume pick AND as red-CI-only (`orch_prs_red_resume`),
+    # no dispatch fires and this rule is the only actor: surface the PR so the
+    # operator owns it. The applied `ready-for-human` label is the TERMINAL
+    # exclusion — the next Turn Snapshot pass drops the PR from the resume
+    # predicate, so this emission self-extinguishes after one turn rather than
+    # repeating forever. Exhaustion is surfaced, never silent. The
+    # `needs-dev-resume` arm is never capped, so never surfaced here.
+    resume_pick = _dev_resume_pick_signal(state, events)
+    if resume_pick is not None:
+        _pick_issue, pick_pr, _pick_branch = resume_pick
+        if (
+            pick_pr in _red_resume_prs(state, events)
+            and _red_forward_fix_attempt_count(state, pick_pr) >= RED_FORWARD_FIX_CAP
+        ):
             out.emit(
                 make_surface_pr(
-                    glm_pr,
-                    "glm-red-forward-fix-exhausted",
-                    "GLM-authored PR still red on a required check after the "
-                    f"cap of {GLM_RED_FORWARD_FIX_CAP} pinned forward-fix dispatches — "
-                    "operator review required (issue #4460)",
+                    pick_pr,
+                    "red-forward-fix-exhausted",
+                    "PR still red on a required check after the "
+                    f"cap of {RED_FORWARD_FIX_CAP} pinned forward-fix dispatches — "
+                    "operator review required (issue #5058)",
                 ),
-                reason=f"surface-pr:#{glm_pr}:glm-red-forward-fix-exhausted",
+                reason=f"surface-pr:#{pick_pr}:red-forward-fix-exhausted",
             )
     return out
 
@@ -5474,16 +5478,16 @@ def main(argv: list[str]) -> int:
         quota_baseline_before = json.dumps(
             state.get("quota_baseline"), sort_keys=True,
         )
-        # Issue #4460: same change-detection for the glm-red forward-fix
+        # Issue #5058 (ex-#4460): same change-detection for the red-CI forward-fix
         # attempts tracker. The dev_orch selector bumps
-        # `state.glm_red_forward_fix_attempts[<pr>]` in place when it pins a
+        # `state.red_forward_fix_attempts[<pr>]` in place when it pins a
         # forward-fix dispatch. Snapshot-before/compare-after persists it via
         # the SAME `_persist_state_writeback` helper — no new persistence
         # mechanism, mirroring the blocks above. In-run state by design
         # (INV-8): a new run starts from an empty tracker, exactly like
         # `burned_classes` / slot history.
-        glm_red_attempts_before = json.dumps(
-            state.get("glm_red_forward_fix_attempts"), sort_keys=True,
+        red_attempts_before = json.dumps(
+            state.get("red_forward_fix_attempts"), sort_keys=True,
         )
         # Issue #4611: same change-detection for `signal_last_fired`.
         # `_rule_pipeline_dispatch` stamps `signal_last_fired.research_target`
@@ -5499,7 +5503,7 @@ def main(argv: list[str]) -> int:
         # so this writes exactly on a resume-dispatch turn — via the SAME
         # `_persist_state_writeback` helper, no new persistence mechanism
         # (invariant 3 of the issue-4795 design concept). In-run state by
-        # design, like `glm_red_forward_fix_attempts`: a new run starts
+        # design, like `red_forward_fix_attempts`: a new run starts
         # without it and the hold fails open (the same degradation #4653
         # accepts for a non-resolvable slot).
         dev_target_resume_before = json.dumps(
@@ -5565,12 +5569,12 @@ def main(argv: list[str]) -> int:
             _persist_state_writeback(
                 argv[2], state, what="quota_baseline capture/rebase (#3867)",
             )
-        glm_red_attempts_after = json.dumps(
-            state.get("glm_red_forward_fix_attempts"), sort_keys=True,
+        red_attempts_after = json.dumps(
+            state.get("red_forward_fix_attempts"), sort_keys=True,
         )
-        if glm_red_attempts_after != glm_red_attempts_before:
+        if red_attempts_after != red_attempts_before:
             _persist_state_writeback(
-                argv[2], state, what="glm_red_forward_fix_attempts bump (#4460)",
+                argv[2], state, what="red_forward_fix_attempts bump (#5058)",
             )
         signal_last_fired_after = json.dumps(
             state.get("signal_last_fired"), sort_keys=True,

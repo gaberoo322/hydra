@@ -9,11 +9,12 @@ Every definition here moved verbatim from decide.py.
 from __future__ import annotations
 
 from decide_base import (
-    GLM_RED_FORWARD_FIX_CAP,
-    _glm_red_attempt_count,
-    _glm_red_forward_fix_signal,
+    RED_FORWARD_FIX_CAP,
+    _dev_resume_pick_signal,
     _issue_pr_branch_signal,
     _orch_anchor_signal,
+    _red_forward_fix_attempt_count,
+    _red_resume_prs,
     _signal_present,
     _target_dev_resume_pick_signal,
     make_dispatch,
@@ -47,24 +48,6 @@ def research_recommended(candidates_payload: dict | None) -> bool:
     if not isinstance(candidates_payload.get("candidates"), list):
         return True
     return bool(candidates_payload.get("research_recommended"))
-
-
-def _dev_resume_pick_signal(
-    state: dict, events: list[dict]
-) -> tuple[int, int, str] | None:
-    """Parse the `orch_dev_resume_pick` signal (issue #4518, INV-2).
-
-    The Turn Snapshot carries it as an `{issue, pr, branch}` pin for the
-    lowest-numbered open, non-draft, NON-GLM PR whose single closing issue
-    carries `needs-dev-resume`, or no pin. The label + the
-    open-PR ledger are the source of truth; `state.dev_resume_pending` is
-    only a cache that a Pace Gate relaunch or a quota-capped run can lose.
-    Absent / `none` / malformed fails CLOSED to no pin (mirrors
-    `_glm_red_forward_fix_signal`'s INV-5 stance).
-
-    Pure: reads the passed-in dicts only, no I/O (ADR-0007).
-    """
-    return _issue_pr_branch_signal(state, events, "orch_dev_resume_pick")
 
 
 def _dirty_forward_fix_signal(
@@ -133,8 +116,7 @@ def _select_slot_dev_orch(
     # records the CURRENT state.json still holds; an issue bounced to
     # `needs-dev-resume` by a run that then restarted (or reaped by a session
     # whose state was rebuilt) has no in-state entry, the #4518 pin below keys
-    # off an OPEN PR (there is none — that is the point), and the #4460 pin
-    # owns only GLM-provenance PRs. The Turn Snapshot's
+    # off an OPEN PR (there is none — that is the point). The Turn Snapshot's
     # `orch_dev_resume_nopr_anchor` closes that gap from what the loop owns
     # durably: the `needs-dev-resume` label plus the open-PR ledger — the
     # LOWEST-numbered such issue that NO open PR references (head-branch or
@@ -147,8 +129,8 @@ def _select_slot_dev_orch(
     # record carries the stalled branch this label-derived pin structurally
     # cannot — no PR, no headRefName; and the drain returning first is what
     # keeps the two from dispatching twice in one turn), BEFORE the #4807 /
-    # #4518 / #4460 PR-keyed pins — an issue referenced by ANY open PR is
-    # excluded from the signal upstream, so the four picks are disjoint.
+    # #4518 PR-keyed pins — an issue referenced by ANY open PR is excluded
+    # from the signal upstream, so the three picks are disjoint.
     # Like those pins it ignores `orch_work_available` (the anchor is
     # `needs-dev-resume`, not `ready-for-agent`, so the board gate reads
     # false precisely when this pin matters) and the `orch_pending_grill_
@@ -199,114 +181,87 @@ def _select_slot_dev_orch(
             ),
         )
 
-    # ISSUE #4518 (INV-2): the DURABLE Claude-lane resume pick. The drain
-    # above only sees records the CURRENT state.json still holds — a record
-    # queued by a run that then hit its quota cap, or an anchor bounced to
-    # `needs-dev-resume` by QA, has no in-state entry at all, and the #4460
-    # arm below owns only GLM-provenance PRs. The Turn Snapshot's
-    # `orch_dev_resume_pick` derives the same pin from what the loop owns
-    # durably: the `needs-dev-resume` label + the open-PR ledger (the
-    # pr-refs.py predicate). This selector only parses a triple — no gh, no
-    # per-PR I/O (ADR-0007).
+    # ISSUES #4518 + #5058: the DURABLE, provenance-agnostic resume pick. The
+    # drain above only sees records the CURRENT state.json still holds — a
+    # record queued by a run that then hit its quota cap, or an anchor bounced
+    # to `needs-dev-resume` by QA, has no in-state entry at all. The Turn
+    # Snapshot's `orch_dev_resume_pick` derives the pin from what the loop
+    # owns durably: the `needs-dev-resume` label, the PR's required-check
+    # verdict, and the open-PR ledger (the pr-refs.py predicate). This
+    # selector only parses a triple — no gh, no per-PR I/O (ADR-0007).
+    #
+    # ONE pick, ANY provenance (#5058): the retired GLM-only #4460 forward-fix
+    # arm (a PR red on a required check) is folded in, so a GLM, Claude or
+    # future worker-lane PR stranded red OR bounced to needs-dev-resume is
+    # resumed the same way. The strand #4460 closed still holds for any lane:
+    # QA's #3815 admission gate short-circuits a red PR without a FAIL, and
+    # the lane below keys off `orch_work_available` — every actor sees
+    # "someone is on it"; nobody is.
     #
     # SEQUENCING: AFTER the in-state drain (which can carry a branch for a
-    # NO-PR stall this label-derived pick structurally cannot — no PR, no
-    # headRefName), BEFORE the #4460 GLM forward-fix pin and the
-    # `orch_work_available` gate. Placement IS the bypass, exactly as for
-    # #4460: the anchor is labelled `needs-dev-resume`, not
-    # `ready-for-agent`, so `orch_work_available` may be false; and its
-    # design-concept artifact already exists (a PR is open), so the grill
-    # yield does not apply.
+    # NO-PR stall this ledger-derived pick structurally cannot — no PR, no
+    # headRefName), BEFORE the `orch_work_available` gate. Placement IS the
+    # bypass: the anchor is labelled `needs-dev-resume` (or is a red PR's
+    # closing issue), not `ready-for-agent`, so `orch_work_available` may be
+    # false; and its design-concept artifact already exists (a PR is open),
+    # so the grill yield does not apply.
     #
-    # NO new state key and NO new cap: idempotency is the label itself —
-    # reap's needs-qa promotion (#4460 INV-9) relabels `needs-dev-resume`
-    # away once the closing PR is confirmed, and the Turn Snapshot's quiescence
-    # window keeps an actively-pushed PR from being re-pinned.
-    # `forward_fix_pr` reuses the playbook's forward-fix dispatch contract
-    # (continue the PR's head, push to the SAME branch, NEVER
-    # `gh pr create`). The #4460 tracker `glm_red_forward_fix_attempts` is
-    # deliberately NOT touched here.
+    # CAP — RED-CI ARM ONLY (#5058, ex-#4460 INV-8): when the pick's PR is in
+    # `orch_prs_red_resume` (it qualified ONLY because a required check is
+    # red), `state.red_forward_fix_attempts[<pr>]` counts pinned dispatches
+    # per PR, in-run state only. At RED_FORWARD_FIX_CAP the pin declines and
+    # falls through to the normal selector path below (a healthy board may
+    # still pin fresh work); `_rule_pr_gate` surfaces the PR the SAME turn.
+    # The tracker bump happens ONLY on an actual dispatch, so the surface-pr
+    # rule (which runs earlier in decide() and reads the pre-bump value) and
+    # this gate agree on the boundary: attempts==CAP-1 dispatches and bumps
+    # to CAP; attempts==CAP declines and surfaces. The `needs-dev-resume`
+    # arm is uncapped (#4518): idempotency is the label itself — reap's
+    # needs-qa promotion (#4460 INV-9) relabels it away once the closing PR
+    # is confirmed, and the quiescence window keeps an actively-pushed PR
+    # from being re-pinned. `forward_fix_pr` reuses the playbook's
+    # forward-fix dispatch contract (continue the PR's head, push to the
+    # SAME branch, NEVER `gh pr create`).
     resume_pick = _dev_resume_pick_signal(state, events)
     if resume_pick is not None:
         pick_issue, pick_pr, pick_branch = resume_pick
-        return make_dispatch(
-            cls,
-            "hydra-dev",
-            prompt_args={
-                "anchor": f"issue-{pick_issue}",
-                "resume": True,
-                "resume_branch": pick_branch,
-                "forward_fix_pr": pick_pr,
-            },
-            reason=(
-                f"durable dev resume: issue #{pick_issue} is needs-dev-resume "
-                f"with open PR {pick_pr} on {pick_branch} — label + PR ledger "
-                "pin, independent of state.dev_resume_pending (issue #4518)"
-            ),
-        )
-
-    # ISSUE #4460: pinned forward-fix for a stranded GLM-authored PR that
-    # is red on one required check. The strand: the drainer skips it
-    # (`issue_has_open_pr`, ADR-0032's dumb-drainer decisions are intact —
-    # INV-1), QA's #3815 admission gate short-circuits `skip-required-
-    # failed` without a FAIL, and the Claude lane below keys off
-    # `orch_work_available` — which the #3754 GLM partition keeps FALSE
-    # while the stranded anchor is glm-eligible. Every actor sees "someone
-    # is on it"; nobody is. The Turn Snapshot's `orch_glm_red_forward_fix`
-    # (INV-2/3) pre-resolves the LOWEST-numbered qualifying PR, so this
-    # selector only parses a triple — no gh, no per-PR I/O (ADR-0007).
-    #
-    # SEQUENCING (#4460 INV-6): AFTER the #3866 dev_resume_pending drain above
-    # (a resume of a stalled-NO-PR completion outranks a forward-fix — it
-    # is the same anchor's earlier lifecycle state), BEFORE the
-    # `orch_work_available` gate below. Placement IS the bypass: this one
-    # pin deliberately ignores `orch_work_available` (the GLM partition
-    # would otherwise veto the exact PR the signal names), the
-    # `orch_pending_grill_anchor` yield (the artifact already exists —
-    # the PR is open), and the pool-sizing that starves a one-PR board.
-    # Honouring the partition here would re-create the zero-owner strand
-    # this issue exists to close.
-    #
-    # CAP (#4460 INV-8): `state.glm_red_forward_fix_attempts[<pr>]` counts
-    # pinned dispatches per PR, in-run state only. At
-    # GLM_RED_FORWARD_FIX_CAP the pin declines (returns None below) and
-    # `_rule_pr_gate` surfaces the PR the SAME turn — the tracker bump
-    # below happens ONLY on an actual dispatch, so the surface-pr rule
-    # (which runs earlier in decide() but reads the pre-bump value) and
-    # this gate agree on the boundary: attempts==CAP-1 dispatches and
-    # bumps to CAP; attempts==CAP declines and surfaces.
-    glm_fix = _glm_red_forward_fix_signal(state, events)
-    if glm_fix is not None:
-        glm_issue, glm_pr, glm_branch = glm_fix
-        glm_attempts = _glm_red_attempt_count(state, glm_pr)
-        if glm_attempts >= GLM_RED_FORWARD_FIX_CAP:
-            # Cap exhausted — NO dispatch. Deliberately fall through to
-            # the normal selector path below (a healthy board may still
-            # pin fresh work); _rule_pr_gate's surface-pr owns the
-            # operator handoff for THIS PR.
-            pass
-        else:
-            tracker = state.get("glm_red_forward_fix_attempts")
-            if not isinstance(tracker, dict):
-                tracker = {}
-                state["glm_red_forward_fix_attempts"] = tracker
-            tracker[str(glm_pr)] = glm_attempts + 1
+        prompt_args = {
+            "anchor": f"issue-{pick_issue}",
+            "resume": True,
+            "resume_branch": pick_branch,
+            "forward_fix_pr": pick_pr,
+        }
+        if pick_pr not in _red_resume_prs(state, events):
             return make_dispatch(
                 cls,
                 "hydra-dev",
-                prompt_args={
-                    "anchor": f"issue-{glm_issue}",
-                    "resume": True,
-                    "resume_branch": glm_branch,
-                    "forward_fix_pr": glm_pr,
-                },
+                prompt_args=prompt_args,
                 reason=(
-                    f"glm red PR forward-fix: PR {glm_pr} "
-                    f"(issue #{glm_issue}) red on a required check, "
-                    f"attempt {glm_attempts + 1}/{GLM_RED_FORWARD_FIX_CAP} "
-                    "(issue #4460)"
+                    f"durable dev resume: issue #{pick_issue} is needs-dev-resume "
+                    f"with open PR {pick_pr} on {pick_branch} — label + PR ledger "
+                    "pin, independent of state.dev_resume_pending (issue #4518)"
                 ),
             )
+        red_attempts = _red_forward_fix_attempt_count(state, pick_pr)
+        if red_attempts < RED_FORWARD_FIX_CAP:
+            tracker = state.get("red_forward_fix_attempts")
+            if not isinstance(tracker, dict):
+                tracker = {}
+                state["red_forward_fix_attempts"] = tracker
+            tracker[str(pick_pr)] = red_attempts + 1
+            return make_dispatch(
+                cls,
+                "hydra-dev",
+                prompt_args=prompt_args,
+                reason=(
+                    f"red PR forward-fix: PR {pick_pr} "
+                    f"(issue #{pick_issue}) red on a required check, "
+                    f"attempt {red_attempts + 1}/{RED_FORWARD_FIX_CAP} "
+                    "(issue #5058)"
+                ),
+            )
+        # Cap exhausted — NO dispatch; _rule_pr_gate's surface-pr owns the
+        # operator handoff for THIS PR. Fall through.
 
     # ISSUE #458: dev_orch must consume the orchestrator GH `ready-for-agent`
     # board, NOT /api/anchor/candidates. The unified candidates feed is
