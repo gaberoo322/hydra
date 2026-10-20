@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch } from "../hooks/useApi.js";
 import { views } from "virtual:hydra-docs";
 import { REPO_URL } from "../pages/docs/build-info.js";
+import { UNDO_WINDOW_MS, createDelayedCommit } from "../lib/delayed-commit.ts";
 
 /**
  * ActionAffordance — ONE component, keyed by the registry Action's `kind`
@@ -38,9 +39,6 @@ import { REPO_URL } from "../pages/docs/build-info.js";
  * route line, never the consequence prose as an accomplished fact. Failure
  * renders ✗ inline and persistently.
  */
-
-/** The undo window for immediate-tier actions (and the feed's dismiss). */
-const UNDO_WINDOW_MS = 5000;
 
 /**
  * The closed request-body map for every in-dashboard route the registry can
@@ -95,63 +93,31 @@ function docHref(doc) {
 }
 
 /**
- * useDelayedCommit — the ~5 s cancel window behind every immediate-tier
- * action AND the feed's typed dismiss (INV-7/INV-14: no undo/inverse route
- * exists in the registry vocabulary, so "immediate, with undo" is a delayed
- * commit — Undo cancels before ANY request is sent; expiry fires it).
+ * useDelayedCommit — the React binding of the delayed-commit controller
+ * (lib/delayed-commit.ts), the ~5 s cancel window behind every
+ * immediate-tier action AND the feed's typed dismiss (INV-7/INV-14: no
+ * undo/inverse route exists in the registry vocabulary, so "immediate, with
+ * undo" is a delayed commit — Undo cancels before ANY request is sent;
+ * expiry fires it).
  *
  * `start(label, fire)` captures the exact closure that was clicked, so the
- * timer can never fire a stale item/reason after a re-render. Exported for
+ * timer can never fire a stale item/reason after a re-render. A `start()`
+ * while a commit is pending is refused (the controller's one-commit rule) —
+ * callers also disable their triggers while `pending` is set. Exported for
  * AttentionFeed's dismiss, which shares the window but not the renderer.
  */
 export function useDelayedCommit(delayMs = UNDO_WINDOW_MS) {
   const [pending, setPending] = useState(null);
-  const timer = useRef(null);
-  // The fire closure of the commit currently inside its window — kept so a
-  // replacement or an unmount can FLUSH it instead of silently dropping an
-  // operator action the toast promised (fail loud: never a lost commit).
-  const firePending = useRef(null);
+  const controller = useRef(null);
+  if (controller.current === null) controller.current = createDelayedCommit(setPending, delayMs);
 
-  const flush = useCallback(() => {
-    if (timer.current !== null) {
-      clearTimeout(timer.current);
-      timer.current = null;
-    }
-    const fire = firePending.current;
-    firePending.current = null;
-    if (fire) fire();
-  }, []);
-
-  const start = useCallback(
-    (label, fire) => {
-      // A second click inside the window commits the first immediately —
-      // only Undo cancels.
-      flush();
-      setPending({ label });
-      firePending.current = fire;
-      timer.current = setTimeout(() => {
-        timer.current = null;
-        firePending.current = null;
-        setPending(null);
-        fire();
-      }, delayMs);
-    },
-    [delayMs, flush],
-  );
-
-  const undo = useCallback(() => {
-    if (timer.current !== null) {
-      clearTimeout(timer.current);
-      timer.current = null;
-    }
-    firePending.current = null;
-    setPending(null);
-  }, []);
+  const start = useCallback((label, fire) => controller.current.start(label, fire), []);
+  const undo = useCallback(() => controller.current.undo(), []);
 
   // A pending window never silently outlives its component (a feed row
   // unmounts on refresh/poll or navigation): the unmount COMMITS the pending
   // action — the operator clicked it and only Undo may cancel it.
-  useEffect(() => flush, [flush]);
+  useEffect(() => () => controller.current.flush(), []);
 
   return { pending, start, undo };
 }

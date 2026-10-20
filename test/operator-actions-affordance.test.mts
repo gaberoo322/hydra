@@ -26,6 +26,13 @@
  *      gone.
  *   6. OperatorDecisionQueue.jsx is deleted and Today.jsx no longer
  *      references it (ADR-0034 §8.1 superseded the overnight queue).
+ *   7. the delayed-commit undo window (dashboard/src/lib/delayed-commit.ts)
+ *      driven BEHAVIOURALLY under node:test fake timers: expiry fires once,
+ *      Undo cancels, a second start() while pending is refused (the dismiss
+ *      double-fire guard), unmount flush commits.
+ *   8. the feed's bucket derivation (dashboard/src/lib/attention-buckets.ts)
+ *      driven with partial-buckets payloads: synthetic UNKNOWN sections,
+ *      proved-only count, orphaned items, malformed payloads.
  *
  * Lifecycle: top-level describes with no shared mutable state and no Redis
  * seam (per the CLAUDE.md shared-teardown authoring rule).
@@ -38,6 +45,10 @@ import { existsSync } from "node:fs";
 import type { OperatorActionEntry } from "../src/schemas/operator-actions.ts";
 import { ActionSchema, BUCKETS } from "../src/schemas/operator-actions.ts";
 import { REGISTRY } from "../src/operator-actions/registry.ts";
+import type { PendingCommit } from "../dashboard/src/lib/delayed-commit.ts";
+import { UNDO_WINDOW_MS, createDelayedCommit } from "../dashboard/src/lib/delayed-commit.ts";
+import type { BucketSummary } from "../dashboard/src/lib/attention-buckets.ts";
+import { deriveFeedBuckets } from "../dashboard/src/lib/attention-buckets.ts";
 
 const AFFORDANCE = "../dashboard/src/components/ActionAffordance.jsx";
 const FEED = "../dashboard/src/components/pages/today/AttentionFeed.jsx";
@@ -259,17 +270,189 @@ describe("OperatorDecisionQueue is removed (ADR-0034 §8.1)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 7 — QA round-1 forward-fix pins (#4628, PR #4976)
+// 7 — the delayed-commit window, driven behaviourally (QA rounds 1–3, PR #4976)
 // ---------------------------------------------------------------------------
 
-describe("delayed commit never silently drops an operator action", () => {
-  test("a replacing start() and an unmount FLUSH the pending commit", async () => {
-    const src = await readSource(AFFORDANCE);
-    assert.ok(src.includes("const firePending = useRef(null)"), "the pending fire closure is retained");
-    assert.match(src, /flush\(\);\s*\n\s*setPending\(\{ label \}\)/, "start() flushes the prior commit first");
-    assert.ok(src.includes("useEffect(() => flush, [flush])"), "unmount commits the pending action");
+/** A controller wired to a recording onPendingChange, plus a fire counter. */
+function harness(delayMs = UNDO_WINDOW_MS) {
+  const pendingLog: PendingCommit[] = [];
+  const ctl = createDelayedCommit((p) => pendingLog.push(p), delayMs);
+  const fired: string[] = [];
+  const fire = (name: string) => () => {
+    fired.push(name);
+  };
+  return { ctl, pendingLog, fired, fire };
+}
+
+describe("delayed commit — the undo window (INV-7 / INV-14)", () => {
+  test("expiry fires the captured closure exactly once, not before the window closes", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const { ctl, pendingLog, fired, fire } = harness();
+    assert.equal(ctl.start("Firing X in 5s", fire("x")), true);
+    assert.deepEqual(ctl.pending(), { label: "Firing X in 5s" });
+    t.mock.timers.tick(UNDO_WINDOW_MS - 1);
+    assert.deepEqual(fired, [], "nothing is sent inside the window");
+    t.mock.timers.tick(1);
+    assert.deepEqual(fired, ["x"]);
+    assert.equal(ctl.pending(), null);
+    assert.deepEqual(pendingLog, [{ label: "Firing X in 5s" }, null]);
+    t.mock.timers.tick(UNDO_WINDOW_MS * 2);
+    assert.deepEqual(fired, ["x"], "the commit never fires twice");
+  });
+
+  test("Undo cancels before anything is sent", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const { ctl, fired, fire } = harness();
+    ctl.start("Dismissing · Later", fire("dismiss"));
+    t.mock.timers.tick(UNDO_WINDOW_MS - 1);
+    ctl.undo();
+    t.mock.timers.tick(UNDO_WINDOW_MS * 2);
+    assert.deepEqual(fired, []);
+    assert.equal(ctl.pending(), null);
+  });
+
+  test("a second start() while pending is REFUSED — it neither flushes nor replaces, so Undo still cancels the first (dismiss double-fire)", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const { ctl, fired, fire } = harness();
+    assert.equal(ctl.start("Dismissing · Later", fire("first")), true);
+    assert.equal(ctl.start("Dismissing · Later", fire("second")), false, "the second click is refused");
+    assert.deepEqual(fired, [], "the first commit was NOT flushed by the second click");
+    assert.deepEqual(ctl.pending(), { label: "Dismissing · Later" });
+    ctl.undo();
+    t.mock.timers.tick(UNDO_WINDOW_MS * 2);
+    assert.deepEqual(fired, [], "Undo cancelled the first commit; the refused second never fires");
+  });
+
+  test("a refused second start() leaves the first commit on its original deadline", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const { ctl, fired, fire } = harness();
+    ctl.start("a", fire("first"));
+    t.mock.timers.tick(3_000);
+    ctl.start("b", fire("second"));
+    t.mock.timers.tick(UNDO_WINDOW_MS - 3_000);
+    assert.deepEqual(fired, ["first"]);
+    assert.equal(ctl.start("c", fire("third")), true, "the window re-opens once the commit settles");
+    t.mock.timers.tick(UNDO_WINDOW_MS);
+    assert.deepEqual(fired, ["first", "third"]);
+  });
+
+  test("flush (unmount) commits the pending action at once and cancels its timer", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const { ctl, pendingLog, fired, fire } = harness();
+    ctl.start("Firing X in 5s", fire("x"));
+    ctl.flush();
+    assert.deepEqual(fired, ["x"], "the operator's click is never silently dropped");
+    assert.equal(ctl.pending(), null);
+    t.mock.timers.tick(UNDO_WINDOW_MS * 2);
+    assert.deepEqual(fired, ["x"], "the cancelled timer does not fire it again");
+    assert.deepEqual(pendingLog, [{ label: "Firing X in 5s" }, null]);
+  });
+
+  test("flush and undo are no-ops when idle", () => {
+    const { ctl, pendingLog, fired } = harness();
+    ctl.flush();
+    ctl.undo();
+    assert.deepEqual(fired, []);
+    assert.deepEqual(pendingLog, [], "an idle window emits no pending change");
   });
 });
+
+describe("the dismiss + immediate triggers bind to the one-commit window", () => {
+  test("useDelayedCommit delegates to the tested controller", async () => {
+    const src = await readSource(AFFORDANCE);
+    assert.ok(src.includes("createDelayedCommit(setPending, delayMs)"), "the hook wraps lib/delayed-commit.ts");
+    assert.ok(src.includes("controller.current.flush()"), "unmount commits through the controller");
+  });
+
+  test("every trigger is disabled while its window holds a pending commit", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes("disabled={busy || Boolean(undoWindow.pending)}"), "immediate in-dashboard button");
+    const feed = await readSource(FEED);
+    assert.ok(feed.includes("disabled={dismissPending}"), "each dismiss reason button");
+    assert.ok(feed.includes("dismissPending={Boolean(undoWindow.pending)}"), "the feed threads its window state down");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8 — bucket derivation, driven behaviourally (ADR-0034 §5.2)
+// ---------------------------------------------------------------------------
+
+function summary(bucket: string, over: Partial<BucketSummary> = {}): BucketSummary {
+  return { bucket, rank: 1, count: 0, wired: true, sourcesOk: true, sourceErrors: [], ...over };
+}
+
+describe("deriveFeedBuckets — per-bucket trust", () => {
+  const known = [...BUCKETS];
+
+  test("a partial-buckets payload synthesises an UNKNOWN section for every missing bucket", () => {
+    const data = { buckets: [summary("machine-stopped"), summary("prs-not-landing", { count: 1 })] };
+    const { buckets, malformed } = deriveFeedBuckets(data, [], known);
+    assert.equal(malformed, false);
+    assert.deepEqual(
+      buckets.map((b) => b.bucket),
+      ["machine-stopped", "prs-not-landing", ...known.filter((k) => k !== "machine-stopped" && k !== "prs-not-landing")],
+      "reported buckets keep server order; missing ones follow",
+    );
+    const synthetic = buckets.slice(2);
+    assert.equal(synthetic.length, known.length - 2);
+    for (const b of synthetic) {
+      assert.equal(b.wired, false);
+      assert.equal(b.sourcesOk, false, "a missing bucket is never an all-clear");
+      assert.deepEqual(b.sourceErrors, ["no summary in payload"]);
+    }
+  });
+
+  test("only items in proved buckets are counted; items with no section are orphaned, not dropped", () => {
+    const data = {
+      buckets: [
+        summary("machine-stopped"),
+        summary("prs-not-landing", { sourcesOk: false, sourceErrors: ["gh: rate limited"] }),
+      ],
+    };
+    const items = [
+      { id: "a", bucket: "machine-stopped" },
+      { id: "b", bucket: "prs-not-landing" },
+      { id: "c", bucket: "waiting-on-you" },
+      { id: "d", bucket: "not-a-bucket" },
+      { id: "e", bucket: "not-a-bucket" },
+    ];
+    const { rendered, orphaned } = deriveFeedBuckets(data, items, known);
+    assert.deepEqual(rendered.map((i) => i.id), ["a"], "unproved + synthetic-UNKNOWN buckets hide their items from the count");
+    assert.deepEqual(orphaned.map((i) => i.id), ["d", "e"], "an unknown bucket's items are surfaced with their count");
+  });
+
+  test("a present payload with no bucket summaries is malformed; an absent payload synthesises nothing", () => {
+    const present = deriveFeedBuckets({ generatedAt: "2026-10-19T00:00:00Z" } as { buckets?: unknown }, [], known);
+    assert.equal(present.malformed, true);
+    assert.equal(present.buckets.length, known.length, "every bucket renders UNKNOWN");
+    assert.ok(present.buckets.every((b) => !b.sourcesOk));
+
+    const absent = deriveFeedBuckets(null, [], known);
+    assert.equal(absent.malformed, false, "a failed whole payload keeps the Section unknown path");
+    assert.deepEqual(absent.buckets, []);
+  });
+
+  test("a fully-proved payload synthesises nothing and counts every item", () => {
+    const data = { buckets: known.map((k) => summary(k)) };
+    const items = known.map((k, i) => ({ id: String(i), bucket: k }));
+    const { buckets, rendered, orphaned, malformed } = deriveFeedBuckets(data, items, known);
+    assert.equal(buckets.length, known.length);
+    assert.equal(rendered.length, known.length);
+    assert.deepEqual(orphaned, []);
+    assert.equal(malformed, false);
+  });
+
+  test("AttentionFeed derives its sections from deriveFeedBuckets over the BUCKET_WHY keys", async () => {
+    const src = await readSource(FEED);
+    assert.ok(src.includes("deriveFeedBuckets("), "the feed uses the tested helper");
+    assert.ok(src.includes("Object.keys(BUCKET_WHY)"), "the known buckets are the closed BUCKET_WHY keys");
+    assert.ok(src.includes('{unproved ? "?" : summary.count}'), "an unproved header prints ? not a count");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9 — re-read verdict, dismiss banner, scope fence
+// ---------------------------------------------------------------------------
 
 describe("the verified-result line does not overclaim a failed re-read", () => {
   test("onFired resolving false renders a re-read FAILED line, and the result is lifted", async () => {
@@ -279,42 +462,13 @@ describe("the verified-result line does not overclaim a failed re-read", () => {
     const feed = await readSource(FEED);
     assert.ok(feed.includes("const refreshChecked = useCallback"), "the feed verifies the re-read");
     assert.ok(feed.includes("onResult={setActionResult}"), "the result line is lifted above the rows");
+    assert.ok(!feed.includes('apiFetch("/attention/feed")'), "no separate probe read");
   });
 });
 
-describe("dismiss banner and malformed payload", () => {
+describe("dismiss banner", () => {
   test("dismissItem clears the stale failure banner on each attempt", async () => {
     const src = await readSource(FEED);
     assert.match(src, /async \(item, reason\) => \{\s*\n\s*setDismissError\(null\);/);
-  });
-
-  test("a present payload with no bucket summaries renders UNKNOWN, and only rendered items are counted", async () => {
-    const src = await readSource(FEED);
-    assert.ok(src.includes("const malformed = Boolean(data) && reported.length === 0"));
-    assert.ok(src.includes("|| malformed}"), "malformed feeds the Section unknown prop");
-    assert.ok(src.includes("count={rendered.length}"));
-  });
-});
-
-describe("QA round-2 forward-fix pins (#4628, PR #4976)", () => {
-  test("the in-dashboard immediate button is disabled while its commit is pending (no double-fire)", async () => {
-    const src = await readSource(AFFORDANCE);
-    assert.ok(src.includes("disabled={busy || Boolean(undoWindow.pending)}"));
-  });
-
-  test("a bucket with no summary is a synthetic UNKNOWN, orphaned items are surfaced, only proved buckets are counted", async () => {
-    const src = await readSource(FEED);
-    assert.ok(src.includes("Object.keys(BUCKET_WHY).filter"), "missing buckets are synthesised");
-    assert.ok(src.includes("b.wired && b.sourcesOk"), "the count covers only proved buckets");
-    assert.ok(src.includes("orphaned.length > 0"), "dropped items are surfaced");
-    assert.ok(src.includes('{unproved ? "?" : summary.count}'), "an unproved header prints ? not a count");
-  });
-
-  test("the re-read verdict derives from the actual refresh, not a probe GET", async () => {
-    const feed = await readSource(FEED);
-    assert.ok(feed.includes("const ok = await refresh();"));
-    assert.ok(!feed.includes('apiFetch("/attention/feed")'), "no separate probe read");
-    const api = await readSource("../dashboard/src/hooks/useApi.js");
-    assert.ok(api.includes("return false;"), "useApi.refresh resolves false on failure");
   });
 });

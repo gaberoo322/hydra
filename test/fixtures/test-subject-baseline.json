@@ -1,4 +1,5 @@
 {
+  "dashboard/src/lib/attention-buckets.ts": 1,
   "dashboard/src/lib/display-format.ts": 1,
   "dashboard/src/lib/page-item-format.ts": 1,
   "dashboard/src/lib/relative-time-format.ts": 1,
@@ -249,7 +250,7 @@
   "src/notification/cycle-completed-reactor.ts": 1,
   "src/notify-format.ts": 1,
   "src/notify.ts": 2,
-  "src/operator-actions/registry.ts": 2,
+  "src/operator-actions/registry.ts": 1,
   "src/outcome-attribution/estimator.ts": 1,
   "src/outcome-attribution/impact-ranking.ts": 1,
   "src/outcome-attribution/recorder.ts": 1,

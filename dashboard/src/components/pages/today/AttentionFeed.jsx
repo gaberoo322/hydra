@@ -1,7 +1,8 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { usePageItems } from "../../../hooks/usePageItems.js";
 import { apiFetch } from "../../../hooks/useApi.js";
 import { relativeAge } from "../../../lib/page-item-format.ts";
+import { deriveFeedBuckets } from "../../../lib/attention-buckets.ts";
 import { Section } from "./Section.jsx";
 import { ActionAffordance, DelayedCommitToast, useDelayedCommit } from "../../ActionAffordance.jsx";
 
@@ -112,8 +113,11 @@ function ActionColumn({ entry, onFired, onResult }) {
 }
 
 /** The typed-dismiss control: exactly the three schema reasons, each firing
- * through the page-level delayed-commit window (onDismissStart). */
-function DismissControl({ item, onDismissStart }) {
+ * through the page-level delayed-commit window (onDismissStart). Every
+ * reason button is DISABLED while that window holds a pending dismiss — one
+ * commit per window, so a second click can never break the first's Undo
+ * (INV-7/INV-14). */
+function DismissControl({ item, onDismissStart, dismissPending }) {
   return (
     <div className="mt-1.5 flex flex-wrap items-baseline gap-x-1.5 text-[11px] text-zinc-600">
       <span>dismiss:</span>
@@ -123,8 +127,9 @@ function DismissControl({ item, onDismissStart }) {
           <button
             type="button"
             onClick={() => onDismissStart(item, r)}
+            disabled={dismissPending}
             title={`30-day snooze · ${r.value}`}
-            className="text-zinc-500 underline hover:text-zinc-200"
+            className="text-zinc-500 underline hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {r.label}
           </button>
@@ -136,7 +141,7 @@ function DismissControl({ item, onDismissStart }) {
 
 /** One per-item row: the crossed line and its explanation on the left, the
  * action grammar on the right. */
-function FeedItem({ item, onFired, onResult, onDismissStart }) {
+function FeedItem({ item, onFired, onResult, onDismissStart, dismissPending }) {
   return (
     <div className="grid gap-2 border-t border-zinc-700/50 py-2.5 md:grid-cols-[minmax(0,1fr)_minmax(280px,40%)]">
       <div className="min-w-0">
@@ -156,7 +161,7 @@ function FeedItem({ item, onFired, onResult, onDismissStart }) {
         </div>
         <div className="mt-1 text-xs italic text-zinc-500">{item.action.rationale}</div>
         {item.detail && <div className="mt-0.5 text-[11px] text-zinc-500">{item.detail}</div>}
-        <DismissControl item={item} onDismissStart={onDismissStart} />
+        <DismissControl item={item} onDismissStart={onDismissStart} dismissPending={dismissPending} />
       </div>
       <ActionColumn entry={item.action} onFired={onFired} onResult={onResult} />
     </div>
@@ -170,7 +175,7 @@ function FeedItem({ item, onFired, onResult, onDismissStart }) {
  * not collapse to the parent's. The two single-line aggregates (parked over
  * cap, archived Target) render the parent's action block directly.
  */
-function AggregateWell({ item, onFired, onResult, onDismissStart }) {
+function AggregateWell({ item, onFired, onResult, onDismissStart, dismissPending }) {
   return (
     <div className="mt-2 grid gap-2.5 rounded-md border border-zinc-700/60 bg-zinc-900/60 p-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
@@ -178,7 +183,7 @@ function AggregateWell({ item, onFired, onResult, onDismissStart }) {
           <div className="text-sm font-semibold text-zinc-100">{item.title}</div>
           {item.detail && <div className="mt-0.5 text-[11px] text-zinc-500">{item.detail}</div>}
         </div>
-        <DismissControl item={item} onDismissStart={onDismissStart} />
+        <DismissControl item={item} onDismissStart={onDismissStart} dismissPending={dismissPending} />
       </div>
       {(item.subLines?.length ?? 0) > 0
         ? item.subLines.map((sub) => (
@@ -201,7 +206,7 @@ function AggregateWell({ item, onFired, onResult, onDismissStart }) {
 /** One bucket section: header (rank · name · count · why), then the trust
  * branch — UNKNOWN on an unproven bucket, a muted asserted zero, or the
  * items in the server's within-bucket order. */
-function BucketSection({ summary, items, onFired, onResult, onDismissStart }) {
+function BucketSection({ summary, items, onFired, onResult, onDismissStart, dismissPending }) {
   const unproved = !summary.wired || !summary.sourcesOk;
   return (
     <div>
@@ -233,9 +238,9 @@ function BucketSection({ summary, items, onFired, onResult, onDismissStart }) {
         <div>
           {items.map((item) =>
             isAggregate(item) ? (
-              <AggregateWell key={item.id} item={item} onFired={onFired} onResult={onResult} onDismissStart={onDismissStart} />
+              <AggregateWell key={item.id} item={item} onFired={onFired} onResult={onResult} onDismissStart={onDismissStart} dismissPending={dismissPending} />
             ) : (
-              <FeedItem key={item.id} item={item} onFired={onFired} onResult={onResult} onDismissStart={onDismissStart} />
+              <FeedItem key={item.id} item={item} onFired={onFired} onResult={onResult} onDismissStart={onDismissStart} dismissPending={dismissPending} />
             ),
           )}
         </div>
@@ -258,11 +263,22 @@ export function AttentionFeed() {
   // the row-local ✓/✗ line before the operator ever saw it (INV-10).
   const [actionResult, setActionResult] = useState(null);
 
-  // useApi's refresh() never rejects but resolves false when THIS read
-  // failed — the ✓ line is derived from that actual refresh, not a probe.
-  const refreshChecked = useCallback(async () => {
-    const ok = await refresh();
-    return ok !== false;
+  // The re-read verdict comes from the feed's OWN read settling, not a
+  // probe GET and not a widened useApi (INV-18 fences useApi.js): a waiter
+  // is queued before refresh() starts its read, and the effect below
+  // resolves it once a render shows the read settled (loading false) —
+  // true when that render carries no read error, false when it does.
+  const rereadWaiters = useRef([]);
+  useEffect(() => {
+    if (loading || rereadWaiters.current.length === 0) return;
+    const waiters = rereadWaiters.current;
+    rereadWaiters.current = [];
+    for (const resolve of waiters) resolve(error == null);
+  }, [loading, error, data]);
+  const refreshChecked = useCallback(() => {
+    const settled = new Promise((resolve) => rereadWaiters.current.push(resolve));
+    refresh();
+    return settled;
   }, [refresh]);
   const undoWindow = useDelayedCommit();
 
@@ -297,35 +313,20 @@ export function AttentionFeed() {
     [undoWindow.start, dismissItem],
   );
 
-  const reported = Array.isArray(data?.buckets) ? data.buckets : [];
-  // A bucket the server did not summarise is UNKNOWN, never a quiet omission
-  // (ADR-0034 §5): synthesise an unproved section per missing BUCKET_WHY key.
-  const missing = data
-    ? Object.keys(BUCKET_WHY).filter((k) => !reported.some((b) => b.bucket === k))
-    : [];
-  const buckets = [
-    ...reported,
-    ...missing.map((bucket) => ({
-      bucket,
-      rank: "?",
-      count: "?",
-      wired: false,
-      sourcesOk: false,
-      sourceErrors: ["no summary in payload"],
-    })),
-  ];
-  // Only items the page actually shows are counted: they must land in a
-  // proved (wired + sourcesOk) bucket.
-  const shown = new Set(buckets.filter((b) => b.wired && b.sourcesOk).map((b) => b.bucket));
-  const rendered = items.filter((item) => shown.has(item.bucket));
-  // Items whose bucket has no summary at all are surfaced, not dropped.
-  const orphaned = items.filter((item) => !buckets.some((b) => b.bucket === item.bucket));
-  if (orphaned.length > 0) {
-    console.error(`AttentionFeed: ${orphaned.length} item(s) in unknown bucket(s) not rendered`);
-  }
-  // A payload that is present but carries no bucket summaries is malformed:
-  // neither an all-clear nor a list — UNKNOWN (ADR-0034 §5).
-  const malformed = Boolean(data) && reported.length === 0;
+  // ADR-0034 §5 trust rules (lib/attention-buckets.ts, unit-tested): a
+  // bucket the server did not summarise is a synthetic UNKNOWN section, only
+  // items in proved buckets are counted, items with no section are surfaced
+  // (orphaned), and a payload with no summaries at all is malformed.
+  const { buckets, rendered, orphaned, malformed } = deriveFeedBuckets(
+    data,
+    items,
+    Object.keys(BUCKET_WHY),
+  );
+  useEffect(() => {
+    if (orphaned.length > 0) {
+      console.error(`AttentionFeed: ${orphaned.length} item(s) in unknown bucket(s) not rendered`);
+    }
+  }, [orphaned.length]);
 
   return (
     <Section
@@ -368,6 +369,7 @@ export function AttentionFeed() {
             onFired={refreshChecked}
             onResult={setActionResult}
             onDismissStart={onDismissStart}
+            dismissPending={Boolean(undoWindow.pending)}
           />
         ))}
       </div>
