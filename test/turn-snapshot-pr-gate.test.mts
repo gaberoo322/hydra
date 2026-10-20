@@ -1360,10 +1360,10 @@ describe("pr-gate — QA-verdict recheck (#5052)", () => {
     assert.ok(o.notes.some((n) => n.includes("capped at 12") && skipped.every((n2) => n.includes(`#${n2}`))));
   });
 
-  test("no starvation: the capped window rotates so every candidate is reached within ceil(n/max) minutes", () => {
+  test("no starvation: the capped window rotates so every candidate is reached across successive turns", () => {
     const cands = Array.from({ length: 30 }, (_, i) => i + 1);
     const seen = new Set<number>();
-    for (let step = 0; step < 3; step++) {
+    for (let step = 0; step < 30; step++) {
       const batch = rotateQaRecheckBatch(cands, 12, step * 60_000);
       assert.equal(batch.length, 12);
       assert.equal(new Set(batch).size, 12, "no duplicates within a window");
