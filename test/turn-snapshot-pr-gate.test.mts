@@ -43,6 +43,7 @@ import {
   prGateFallbackSnapshot,
   type PrGateEnv,
   type PrRefsAvailability,
+  rotateQaRecheckBatch,
 } from "../src/autopilot/turn-snapshot/pr-gate.ts";
 import {
   createTurnSnapshotGithub,
@@ -1353,8 +1354,23 @@ describe("pr-gate — QA-verdict recheck (#5052)", () => {
     assert.ok(peak <= 3, `peak concurrency ${peak} exceeds 3`);
     assert.equal(log.length, 12);
     assert.equal(value(o)?.length, 12);
-    assert.deepEqual(log.slice().sort((a, b) => a - b), Array.from({ length: 12 }, (_, i) => 100 + i));
-    assert.ok(o.notes.some((n) => n.includes("capped at 12") && n.includes("skipped 3")));
+    assert.equal(new Set(log).size, 12, "12 distinct PRs run");
+    const skipped = prs.map((p) => p.number).filter((n) => !log.includes(n));
+    assert.equal(skipped.length, 3);
+    assert.ok(o.notes.some((n) => n.includes("capped at 12") && skipped.every((n2) => n.includes(`#${n2}`))));
+  });
+
+  test("no starvation: the capped window rotates so every candidate is reached within ceil(n/max) minutes", () => {
+    const cands = Array.from({ length: 30 }, (_, i) => i + 1);
+    const seen = new Set<number>();
+    for (let step = 0; step < 3; step++) {
+      const batch = rotateQaRecheckBatch(cands, 12, step * 60_000);
+      assert.equal(batch.length, 12);
+      assert.equal(new Set(batch).size, 12, "no duplicates within a window");
+      batch.forEach((n) => seen.add(n));
+    }
+    assert.equal(seen.has(30), true, "the highest-numbered candidate is evaluated even when 12 lower ones never merge");
+    assert.deepEqual(rotateQaRecheckBatch([1, 2, 3], 12, 999_999), [1, 2, 3]);
   });
 
   test("fail closed: a candidate with no host port yields [] plus a marker", async () => {

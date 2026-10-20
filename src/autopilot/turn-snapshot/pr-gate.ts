@@ -928,7 +928,7 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
   }
 
   // 5. #5052: the durable QA-verdict recheck - fail CLOSED, never a synthesised PASS.
-  const qaVerdictRecheck = await collectQaRecheck(prs, payload.kind === "ok", requiredContexts, deps.host, notes);
+  const qaVerdictRecheck = await collectQaRecheck(prs, payload.kind === "ok", requiredContexts, deps.host, notes, deps.now());
   if ("reason" in qaVerdictRecheck) degraded.push({ field: "qaVerdictRecheck", reason: qaVerdictRecheck.reason });
 
   return {
@@ -940,8 +940,23 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
 }
 
 /** Max `qa-verdict-event.sh` runs in flight at once, and per snapshot turn (#5052 QA round 1). */
-const QA_RECHECK_CONCURRENCY = 3;
-const QA_RECHECK_MAX_PER_TURN = 12;
+const QA_RECHECK_CONCURRENCY = 3; // matches the gh secondary-rate-limit-safe parallelism used elsewhere in the snapshot
+const QA_RECHECK_MAX_PER_TURN = 12; // ~one minute of script work at concurrency 3 (90s per-script timeout worst case)
+/** The rotation advances once per minute so consecutive turns see different windows. */
+const QA_RECHECK_ROTATION_MS = 60_000;
+
+/**
+ * #5052 QA round 2: pick at most `max` candidates, starting at a time-derived
+ * offset and wrapping, so a persistent set of non-mergeable low-numbered PRs
+ * cannot starve higher-numbered PASS-pending-CI PRs. Stateless: every
+ * candidate is reached within ceil(n / max) rotation steps.
+ */
+export function rotateQaRecheckBatch<T>(candidates: readonly T[], max: number, nowMs: number): T[] {
+  if (candidates.length <= max) return [...candidates];
+  const step = Math.floor(nowMs / QA_RECHECK_ROTATION_MS);
+  const start = (step * max) % candidates.length;
+  return Array.from({ length: max }, (_, k) => candidates[(start + k) % candidates.length]);
+}
 
 async function collectQaRecheck(
   prs: readonly unknown[],
@@ -949,18 +964,21 @@ async function collectQaRecheck(
   requiredContexts: Classified<ReadonlySet<string>>,
   host: PrGateDeps["host"],
   notes: string[],
+  nowMs: number,
 ): Promise<Classified<readonly QaRecheckEntry[]>> {
   if (!prListReadOk) return { ok: false, reason: "pr-list-unreadable" };
   if (!requiredContexts.ok) return { ok: false, reason: "required-contexts-unreadable" };
   const candidates = qaRecheckCandidates(prs, requiredContexts.value);
   if (candidates.length === 0) return { ok: true, value: [] };
   if (host === undefined) return { ok: false, reason: "host-unavailable" };
-  // Bounded: at most QA_RECHECK_MAX_PER_TURN scripts per turn (lowest PR numbers first),
-  // QA_RECHECK_CONCURRENCY at a time. Skipped PRs are omitted (fail closed) and noted.
-  const batch = candidates.slice(0, QA_RECHECK_MAX_PER_TURN);
+  // Bounded: at most QA_RECHECK_MAX_PER_TURN scripts per turn in a ROTATING window
+  // (no starvation), QA_RECHECK_CONCURRENCY at a time. Skipped PRs are omitted (fail closed) and named.
+  const batch = rotateQaRecheckBatch(candidates, QA_RECHECK_MAX_PER_TURN, nowMs);
   if (candidates.length > batch.length) {
+    const picked = new Set(batch.map((c) => c.pr));
+    const skipped = candidates.filter((c) => !picked.has(c.pr)).map((c) => `#${c.pr}`);
     notes.push(
-      `orch qa-verdict recheck capped at ${QA_RECHECK_MAX_PER_TURN} PR(s) this turn; skipped ${candidates.length - batch.length} (issue #5052)`,
+      `orch qa-verdict recheck capped at ${QA_RECHECK_MAX_PER_TURN} PR(s) this turn; skipped ${skipped.join(", ")} (rotates next turn; issue #5052)`,
     );
   }
   const results: (QaRecheckEntry | null)[] = new Array(batch.length).fill(null);
