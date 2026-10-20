@@ -6,6 +6,9 @@ After=hydra-orchestrator.service hydra-autopilot.service
 [Service]
 Type=oneshot
 ExecStart=%h/.local/bin/hydra-watchdog.sh
+# Operator Channel CLI credentials (#5046). Dash-prefixed: the watchdog's other
+# blocks must keep running without .env (it carries no HYDRA_WATCHDOG_* keys).
+EnvironmentFile=-%h/hydra/.env
 Environment=HOME=%h
 StandardOutput=journal
 StandardError=journal

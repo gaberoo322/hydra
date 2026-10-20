@@ -34,8 +34,9 @@
  * `ci.yml`: `ci.yml` is exact-match Verifier Core (Tier-4); a sibling step keeps
  * this PR Tier-3 and auto-mergeable, mirroring the anthropic-seam precedent.
  *
- * It deliberately scans `src/**\/*.ts` only — matching the
- * anthropic/openviking/host-probe precedent's `src/**\/*.ts`-only scan.
+ * Widened by issue #5046 (ADR-0045 Decision 6) to also scan `scripts/` (TS and
+ * shell) and `scripts/systemd/*`, and from "a fetch() line" to "any non-comment
+ * mention of the Bot API host".
  *
  * Usage:
  *   npx tsx scripts/ci/telegram-seam-check.ts
@@ -50,48 +51,45 @@
  */
 
 import { join } from "node:path";
-import { REPO_ROOT, isCliEntrypoint, runAsCli } from "./seam-check-lib.ts";
+import { REPO_ROOT, isCliEntrypoint, runAsCli, stripComments } from "./seam-check-lib.ts";
 
 const BASELINE_PATH = join(REPO_ROOT, "scripts/ci/telegram-seam-baseline.json");
 
-/** The Telegram Notification Adapter Module itself — IS the seam (exempt). */
-const TELEGRAM_NOTIFY_MODULE = "src/notify.ts";
-
 /**
- * Unambiguous "this fetch targets the Telegram Bot API" signals. A `fetch(` whose
- * line contains any of these is a Telegram request. Kept narrow on purpose so
- * unrelated `fetch` calls (Anthropic, OpenViking, OAuth-usage, health probes) do
- * NOT trip the ratchet — they are not the Telegram Bot API boundary.
+ * Files exempt from the closure: the seam itself (its `fetch` IS the one owned
+ * call) and this check (its own signal literal).
  */
-const TELEGRAM_TARGET_SIGNALS = [
-  "api.telegram.org", // the Telegram Bot API host
-];
+const CARVE_OUTS = new Set(["src/notify.ts", "scripts/ci/telegram-seam-check.ts"]);
 
-/** Matches a `fetch(` call (whitespace-tolerant). */
-const FETCH_CALL = /\bfetch\s*\(/;
+/** The Telegram Bot API host — the unambiguous "talks to Telegram" signal. */
+const TELEGRAM_HOST = "api.telegram.org";
 
 /**
- * Pure predicate: does `body` (the file contents at repo-relative `relPath`)
- * contain a raw Telegram `fetch(...)` in violation of the Telegram Notification
- * Adapter Seam? Exported so the regression test can pin the grammar without
- * shelling out to git. `relPath` decides the carve-out; pass a `src/...` path.
- *
- * The adapter Module itself (`src/notify.ts`) is the Seam (exempt — its `fetch`
- * IS the one owned call). A file violates when it both calls `fetch(` AND carries
- * a Telegram target signal on the same line.
+ * Pure predicate: does `body` (the file at repo-relative `relPath`) reference
+ * the Telegram Bot API host on a non-comment line? Widened by issue #5046 from
+ * "a `fetch(` on a src/ line" to ANY non-comment mention across src/, scripts/
+ * and systemd units, so a bash `curl` or a unit `ExecStart=` cannot become a
+ * second sender: the Operator Channel (via `src/notify.ts`) is the only code
+ * that may talk to the Bot API. TS files are comment-stripped; `.sh` /
+ * `.service` / `.timer` lines whose first non-blank character is `#` are ignored.
  */
 export function fileViolatesTelegramSeam(relPath: string, body: string): boolean {
-  if (relPath === TELEGRAM_NOTIFY_MODULE) return false;
-  for (const line of body.split("\n")) {
-    if (!FETCH_CALL.test(line)) continue;
-    if (TELEGRAM_TARGET_SIGNALS.some((sig) => line.includes(sig))) return true;
-  }
-  return false;
+  if (CARVE_OUTS.has(relPath)) return false;
+  if (/\.m?ts$/.test(relPath)) return stripComments(body).includes(TELEGRAM_HOST);
+  return body.split("\n").some((line) => !/^\s*#/.test(line) && line.includes(TELEGRAM_HOST));
 }
 
 const CONFIG = {
   name: "telegram-seam-check",
-  globs: ["src/*.ts", "src/**/*.ts"],
+  globs: [
+    "src/*.ts",
+    "src/**/*.ts",
+    "scripts/*.ts",
+    "scripts/**/*.ts",
+    "scripts/*.sh",
+    "scripts/**/*.sh",
+    "scripts/systemd/*",
+  ],
   predicate: fileViolatesTelegramSeam,
   baselinePath: BASELINE_PATH,
   noteSuffix:
@@ -99,8 +97,9 @@ const CONFIG = {
   newViolationsHeadline:
     "NEW telegram-seam violations (Telegram Notification Adapter, issue #2201):",
   newViolationsHelp: [
-    "These files call fetch() against the Telegram Bot API outside the",
-    "Telegram Notification Adapter. Route the message through the seam:",
+    "These files reference the Telegram Bot API outside the Telegram",
+    "Notification Adapter. From bash/systemd use scripts/operator-notify.ts;",
+    "from src/ route the message through the seam:",
     "sendToTelegram / sendNotification (src/notify.ts), injecting the sender",
     "as a dep where the caller already takes one (e.g. DigestAccumulatorDeps.send).",
   ],

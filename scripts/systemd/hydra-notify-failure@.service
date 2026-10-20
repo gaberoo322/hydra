@@ -8,21 +8,14 @@ Type=oneshot
 # untracked file hydra-orchestrator.service already loads, and it already
 # holds TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID. Deliberately NOT dash-prefixed:
 # a missing .env must fail this notifier loudly in the journal instead of
-# silently POSTing to an empty bot URL.
+# silently sending nothing.
 EnvironmentFile=%h/hydra/.env
-# The $$MSG escape below is load-bearing (issue #4284): ExecStart= gets its
-# own systemd specifier/env substitution pass BEFORE bash ever runs, and MSG
-# is a bash-local variable, not a systemd-known one — so systemd blanks an
-# unescaped brace-wrapped reference to it to an empty string, and every page
-# this unit ever sends goes out with no message text. `$$` survives systemd's
-# substitution as a literal `$`, so bash sees the single-dollar form and
-# expands its own local variable. TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are
-# genuine systemd environment variables (from EnvironmentFile above), so they
-# keep the brace-wrapped form.
-ExecStart=/bin/bash -c '\
-  MSG="⚠️ Hydra service failed: %i — $(date)"; \
-  curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    -H "content-type: application/json" \
-    -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"$$MSG\",\"disable_web_page_preview\":true}" \
-    >/dev/null 2>&1 || true'
+# Operator Channel CLI (ADR-0045 Decision 6, issue #5046): same renderer,
+# dedup and credentials as in-process pages, applies the exit-code policy
+# (a clean SIGTERM never pages) and the unit -> page/brief map, and works
+# while the orchestrator is down. /usr/bin/node + strip-types only — a
+# unit's minimal PATH cannot see a global tsx. The CLI exits 0 for every
+# delivery outcome; TimeoutStartSec is the outer bound on a hung dependency.
+ExecStart=/usr/bin/node --experimental-strip-types %h/hydra/scripts/operator-notify.ts service-failed --unit %i
+TimeoutStartSec=30
 Environment=HOME=/home/gabe

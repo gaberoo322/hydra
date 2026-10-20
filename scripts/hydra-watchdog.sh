@@ -833,6 +833,22 @@ run_redis_backup_freshness() {
     fi
   }
 
+  # deliver_page KIND TITLE [--fact l=v ...] / deliver_resolve KIND — Operator
+  # Channel CLI (#5046): same renderer/dedup/credentials as in-process pages,
+  # works with the orchestrator down. dedupKey == kind. Always returns 0.
+  # HYDRA_WATCHDOG_OPERATOR_NOTIFY is the test override (an argv-recording stub).
+  deliver_page() {
+    local k="$1" t="$2"; shift 2
+    local opn="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-/home/gabe/hydra}/scripts/operator-notify.ts}"
+    timeout 25 $opn page --kind "$k" --dedup-key "$k" --title "$t" "$@" >/dev/null || log "WARN operator-notify page '$k' failed (best-effort)"
+    return 0
+  }
+  deliver_resolve() {
+    local opn="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-/home/gabe/hydra}/scripts/operator-notify.ts}"
+    timeout 25 $opn resolve --dedup-key "$1" --title "$2" >/dev/null || log "WARN operator-notify resolve '$1' failed (best-effort)"
+    return 0
+  }
+
   # deliver_signal REASON AGE_MS THR_MS — enveloped XADD onto the
   # notifications stream, the exact on-wire shape src/event-bus.ts's publish()
   # constructs (ADR-0017 Category A), mirroring run_node_modules_integrity's
@@ -852,6 +868,8 @@ run_redis_backup_freshness() {
       timestamp "$iso" \
       correlationId "redis-backup-freshness" \
       payload "$payload"
+    deliver_page "infra:redis_backup_stale" "Redis backup stale (${reason})" \
+      --fact "reason=${reason}" --fact "age_ms=${age_ms}" --fact "threshold_ms=${thr_ms}"
     log "in-band delivery published (best-effort) for stale redis backup (type=infra:redis_backup_stale -> ${NOTIFY_STREAM})"
     return 0
   }
@@ -926,6 +944,7 @@ run_redis_backup_freshness() {
   else
     if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" == "1" ]]; then
       log "redis backup fresh again — clearing the staleness episode (dedup re-armed)"
+      deliver_resolve "infra:redis_backup_stale" "Redis backup fresh again"
     fi
     rc_write DEL "$since_key" "$fired_key"
   fi
@@ -1263,6 +1282,22 @@ run_node_modules_integrity() {
     printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_' | tr -s '_'
   }
 
+  # deliver_page KIND TITLE [--fact l=v ...] / deliver_resolve KIND — Operator
+  # Channel CLI (#5046): same renderer/dedup/credentials as in-process pages,
+  # works with the orchestrator down. dedupKey == kind. Always returns 0.
+  # HYDRA_WATCHDOG_OPERATOR_NOTIFY is the test override (an argv-recording stub).
+  deliver_page() {
+    local k="$1" t="$2"; shift 2
+    local opn="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-/home/gabe/hydra}/scripts/operator-notify.ts}"
+    timeout 25 $opn page --kind "$k" --dedup-key "$k" --title "$t" "$@" >/dev/null || log "WARN operator-notify page '$k' failed (best-effort)"
+    return 0
+  }
+  deliver_resolve() {
+    local opn="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-/home/gabe/hydra}/scripts/operator-notify.ts}"
+    timeout 25 $opn resolve --dedup-key "$1" --title "$2" >/dev/null || log "WARN operator-notify resolve '$1' failed (best-effort)"
+    return 0
+  }
+
   # deliver_signal SIG ROOT REASON DUR_MS THR_MS — enveloped XADD onto the
   # notifications stream, the exact on-wire shape src/event-bus.ts's publish()
   # constructs (ADR-0017 Category A), mirroring run_launch_flow's
@@ -1284,6 +1319,8 @@ run_node_modules_integrity() {
       timestamp "$iso" \
       correlationId "node-modules-integrity-${sig}" \
       payload "$payload"
+    deliver_page "infra:node_modules_wiped" "node_modules wiped: ${root_clean}" \
+      --fact "reason=${reason_clean}" --fact "sustained_ms=${dur_ms}" --fact "threshold_ms=${thr_ms}"
     log "in-band delivery published (best-effort) for '$root' (type=infra:node_modules_wiped -> ${NOTIFY_STREAM})"
     return 0
   }
@@ -1312,6 +1349,9 @@ run_node_modules_integrity() {
         fi
       fi
     else
+      if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" == "1" ]]; then
+        deliver_resolve "infra:node_modules_wiped" "node_modules restored: ${root}"
+      fi
       rc_write DEL "$since_key" "$fired_key"
     fi
     return 0
@@ -1608,35 +1648,32 @@ run_launch_flow() {
   # of run_launch_flow. The caller's locals `reason` and `REDIS_*` are visible
   # via bash dynamic scoping.
 
-  # deliver_out_of_band SIGNAL DUR_MS THR_MS — direct bash curl to the Telegram
-  # Bot API (fail-safe / meter-dark; mirrors src/notify.ts's endpoint shape).
-  # Zero dependency on any Orchestrator HTTP endpoint or in-process module:
-  # both signals mean the Orchestrator may itself be unreachable, so an
-  # in-band event would be written and unreadable.
-  deliver_out_of_band() {
-    local sig="$1" dur_ms="$2" thr_ms="$3"
-    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-      local missing=""
-      [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]] && missing="TELEGRAM_BOT_TOKEN"
-      [[ -z "${TELEGRAM_CHAT_ID:-}" ]] && missing="${missing:+$missing }TELEGRAM_CHAT_ID"
-      log "WARN launch-flow out-of-band delivery for '$sig' SKIPPED — missing Telegram config: ${missing} (credential placement into the watchdog service env is an operator action, see #3848); the streak is still detected and logged"
-      return 0
-    fi
-    local text
-    text="$(printf 'HYDRA LAUNCH FLOW ALERT (out-of-band — Orchestrator may be down)\nsignal: %s\nsustained: %sms >= %sms threshold\nreason: %s\nhost: %s' \
-      "$sig" "$dur_ms" "$thr_ms" "${reason:-n/a}" "$(hostname 2>/dev/null || echo unknown)")"
-    # Best-effort by contract: bounded --max-time, output redirected, `|| log`
-    # (not `|| true`) so a failed Telegram send is distinguishable in the
-    # journal from a skipped one — but still never fails the block.
-    if curl -sS --max-time 10 -X POST \
-        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-        --data-urlencode "text=${text}" >/dev/null 2>&1; then
-      log "out-of-band Telegram delivery sent for '$sig'"
-    else
-      log "WARN launch-flow out-of-band Telegram send FAILED for '$sig' (curl non-zero, best-effort — will not retry this streak; recovery + a fresh streak re-alarm)"
-    fi
+  # deliver_page KIND TITLE [--fact l=v ...] / deliver_resolve KIND — Operator
+  # Channel CLI (#5046): same renderer/dedup/credentials as in-process pages,
+  # works with the orchestrator down. dedupKey == kind. Always returns 0.
+  # HYDRA_WATCHDOG_OPERATOR_NOTIFY is the test override (an argv-recording stub).
+  deliver_page() {
+    local k="$1" t="$2"; shift 2
+    local opn="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-/home/gabe/hydra}/scripts/operator-notify.ts}"
+    timeout 25 $opn page --kind "$k" --dedup-key "$k" --title "$t" "$@" >/dev/null || log "WARN operator-notify page '$k' failed (best-effort)"
     return 0
+  }
+  deliver_resolve() {
+    local opn="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-/home/gabe/hydra}/scripts/operator-notify.ts}"
+    timeout 25 $opn resolve --dedup-key "$1" --title "$2" >/dev/null || log "WARN operator-notify resolve '$1' failed (best-effort)"
+    return 0
+  }
+
+  # lf_page_kind SIGNAL — the closed-page-list kind for a launch-flow signal.
+  lf_page_kind() {
+    case "$1" in
+      fail-safe)   printf 'launch:fail_safe' ;;
+      meter-dark)  printf 'launch:meter_dark' ;;
+      quota)       printf 'launch:quota_stretch' ;;
+      latency)     printf 'launch:latency_breach' ;;
+      pause)       printf 'launch:pause_forgotten' ;;
+      glm-sterile) printf 'glm:drainer_sterile' ;;
+    esac
   }
 
   # deliver_in_band SIGNAL DUR_MS THR_MS — enveloped XADD directly onto the
@@ -1681,17 +1718,19 @@ run_launch_flow() {
     return 0
   }
 
-  # deliver_signal SIGNAL DUR_MS THR_MS — surface routing per the #3848
-  # taxonomy: fail-safe/meter-dark go OUT-OF-BAND (Orchestrator unproven);
-  # everything else goes IN-BAND (a successfully-read verdict proves the
-  # Orchestrator was up at detection time). Always returns 0.
+  # deliver_signal SIGNAL DUR_MS THR_MS — every signal is an Operator Channel
+  # Page via the CLI (#5046; works with the Orchestrator down). The in-band
+  # XADD (dashboard-alert path) is KEPT for quota/latency/pause/glm-sterile;
+  # fail-safe/meter-dark never had one. Always returns 0.
   deliver_signal() {
-    local sig="$1" dur_ms="$2" thr_ms="$3"
+    local sig="$1" dur_ms="$2" thr_ms="$3" pk
+    pk="$(lf_page_kind "$sig")"
+    [[ -n "$pk" ]] && deliver_page "$pk" "Launch flow: ${sig}" \
+      --fact "signal=${sig}" --fact "sustained_ms=${dur_ms}" --fact "threshold_ms=${thr_ms}" \
+      --fact "reason=${reason:-n/a}"
     case "$sig" in
-      fail-safe|meter-dark)
-        deliver_out_of_band "$sig" "$dur_ms" "$thr_ms" ;;
-      *)
-        deliver_in_band "$sig" "$dur_ms" "$thr_ms" ;;
+      fail-safe|meter-dark) ;;
+      *) deliver_in_band "$sig" "$dur_ms" "$thr_ms" ;;
     esac
     return 0
   }
@@ -1730,7 +1769,11 @@ run_launch_flow() {
         log "launch-flow signal '$sig' streak ${dur}ms (< ${thr_ms}ms threshold); not firing"
       fi
     else
-      # Membership false — stateless recovery: DEL both (idempotent).
+      # Membership false — stateless recovery: DEL both (idempotent). One
+      # "recovered" page only on the fired→absent edge (#5046).
+      if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" == "1" ]]; then
+        deliver_resolve "$(lf_page_kind "$sig")" "Launch flow recovered: ${sig}"
+      fi
       rc_write DEL "$since_key" "$fired_key"
     fi
     return 0
@@ -2062,9 +2105,26 @@ run_origin_identity() {
     reasons+=("origin-master-missing")
   fi
 
+  # deliver_page KIND TITLE [--fact l=v ...] / deliver_resolve KIND — Operator
+  # Channel CLI (#5046): same renderer/dedup/credentials as in-process pages,
+  # works with the orchestrator down. dedupKey == kind. Always returns 0.
+  # HYDRA_WATCHDOG_OPERATOR_NOTIFY is the test override (an argv-recording stub).
+  deliver_page() {
+    local k="$1" t="$2"; shift 2
+    local opn="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-/home/gabe/hydra}/scripts/operator-notify.ts}"
+    timeout 25 $opn page --kind "$k" --dedup-key "$k" --title "$t" "$@" >/dev/null || log "WARN operator-notify page '$k' failed (best-effort)"
+    return 0
+  }
+  deliver_resolve() {
+    local opn="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-/home/gabe/hydra}/scripts/operator-notify.ts}"
+    timeout 25 $opn resolve --dedup-key "$1" --title "$2" >/dev/null || log "WARN operator-notify resolve '$1' failed (best-effort)"
+    return 0
+  }
+
   if (( ${#reasons[@]} == 0 )); then
     if [[ -f "$SINCE_MARKER" ]]; then
       log "origin identity healthy again (origin=${norm}, origin/master resolves) — dedup re-armed"
+      deliver_resolve "infra:origin_identity_wrong" "~/hydra origin identity restored"
     fi
     rm -f "$SINCE_MARKER" 2>/dev/null || true
     log "origin-identity tick processed (origin=${norm}, origin_master=present)"
@@ -2080,6 +2140,8 @@ run_origin_identity() {
   log "ALARM ~/hydra origin identity broken: ${reason_str} — remote.origin.url=${shown_url} (expected ${EXPECTED}); refs/remotes/origin/master $([[ "$master_present" == "1" ]] && echo present || echo MISSING) (issue #4939; read-only watchdog, restore from an operator shell)"
 
   if [[ ! -f "$SINCE_MARKER" ]]; then
+    deliver_page "infra:origin_identity_wrong" "~/hydra origin identity broken" \
+      --fact "reason=${reason_str}" --fact "origin_url=${shown_url}"
     local iso_now payload url_clean xadd_out
     iso_now="$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || echo "")"
     url_clean="$(printf '%s' "$shown_url" | tr -dc 'a-zA-Z0-9_.:/@<>-')"

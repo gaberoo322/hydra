@@ -108,7 +108,7 @@
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 255
+      "value": 256
     },
     {
       "family": "pages",
@@ -168,7 +168,7 @@
     {
       "family": "units-scripts",
       "metric": "rows",
-      "value": 39
+      "value": 40
     }
   ]
 }

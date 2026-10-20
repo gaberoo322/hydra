@@ -15,6 +15,9 @@ export const PAGE_KINDS = [
   E.INFRA_NODE_MODULES_WIPED,
   E.INFRA_ORIGIN_IDENTITY_WRONG,
   "infra:redis_backup_stale",
+  // Launch-flow watchdog failures (emitted by the operator-notify CLI, #5046)
+  "launch:fail_safe",
+  "launch:meter_dark",
   E.LAUNCH_QUOTA_STRETCH,
   E.LAUNCH_LATENCY_BREACH,
   E.LAUNCH_PAUSE_FORGOTTEN,

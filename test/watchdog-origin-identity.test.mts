@@ -71,6 +71,8 @@ function tick(env: Record<string, string>): { out: string; rc: number } {
         HYDRA_REDIS_HOST: "127.0.0.1",
         HYDRA_WATCHDOG_ORIGIN_STATE_DIR: stateDir,
         HYDRA_WATCHDOG_ORIGIN_NOTIFY_STREAM: "test:notifications",
+        // Operator Channel CLI no-op (#5046): never reach real Telegram/Redis.
+        HYDRA_WATCHDOG_OPERATOR_NOTIFY: "true",
         ...env,
       },
     },

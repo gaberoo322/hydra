@@ -69,6 +69,8 @@ import {
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
+// Operator Channel CLI no-op (#5046): a block under test must never reach real Telegram or Redis.
+process.env.HYDRA_WATCHDOG_OPERATOR_NOTIFY ??= "true";
 const DEPLOY = join(REPO_ROOT, "scripts", "deploy.sh");
 const BACKUP_SCRIPT = join(REPO_ROOT, "scripts", "redis-backup.sh");
 const BACKUP_SERVICE = join(REPO_ROOT, "scripts", "systemd", "hydra-redis-backup.service");
@@ -244,8 +246,8 @@ describe("scripts/deploy.sh + units — Redis backup install (issue #4604)", () 
     assert.match(svc, /^Type=oneshot$/m, "service must be Type=oneshot");
     assert.match(svc, /^ExecStart=%h\/\.local\/bin\/hydra-redis-backup\.sh$/m, "ExecStart must be the %h script copy");
     assert.match(
-      svc, /^OnFailure=hydra-notify-failure@hydra-redis-backup\.service$/m,
-      "a failed backup must page via the tracked Telegram template (#4284)",
+      svc, /^OnFailure=hydra-notify-failure@%n$/m,
+      "a failed backup must page via the tracked notify template (#4284, normalised to %n by #5046)",
     );
     const timer = readFileSync(BACKUP_TIMER, "utf-8");
     assert.match(timer, /^OnCalendar=\*-\*-\* 03:15:00$/m, "daily 03:15 schedule (docs/reference.md)");

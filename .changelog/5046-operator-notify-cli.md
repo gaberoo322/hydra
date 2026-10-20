@@ -1,0 +1,1 @@
+- feat: route watchdog alarms and systemd failure notices through the Operator Channel CLI; a clean SIGTERM no longer pages (#5046)

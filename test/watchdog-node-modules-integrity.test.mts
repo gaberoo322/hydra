@@ -52,6 +52,8 @@ import {
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
+// Operator Channel CLI no-op (#5046): a block under test must never reach real Telegram or Redis.
+process.env.HYDRA_WATCHDOG_OPERATOR_NOTIFY ??= "true";
 
 const NM_KEY_PREFIX_LITERAL = "hydra:autopilot:node-modules-integrity";
 

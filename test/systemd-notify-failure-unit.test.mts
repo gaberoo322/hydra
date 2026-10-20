@@ -14,7 +14,7 @@
  */
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -30,56 +30,65 @@ const DEPLOY_SH_PATH = path.join(REPO_ROOT, "scripts/deploy.sh");
 const unitText = readFileSync(UNIT_PATH, "utf8");
 const deployText = readFileSync(DEPLOY_SH_PATH, "utf8");
 
-describe("scripts/systemd/hydra-notify-failure@.service (issue #4284)", () => {
-  test("escapes the bash-local message as $$MSG, never ${MSG} or bare $MSG", () => {
-    assert.match(unitText, /\$\$MSG/, "expected the literal $$MSG escape");
-    assert.doesNotMatch(
+/** Non-comment lines only: comments may legitimately mention curl / the host. */
+const unitCode = unitText
+  .split("\n")
+  .filter((l) => !/^\s*#/.test(l))
+  .join("\n");
+
+describe("scripts/systemd/hydra-notify-failure@.service (issues #4284, #5046)", () => {
+  test("ExecStart is the Operator Channel CLI under node strip-types", () => {
+    assert.match(
       unitText,
-      /\$\{MSG\}/,
-      "${MSG} is blanked to empty by systemd's own substitution pass before bash runs",
-    );
-    // A bare (non-brace) $MSG immediately preceded by systemd's own two
-    // dollar signs is fine ($$MSG IS a bare $MSG once systemd unescapes it);
-    // what must never appear is a THIRD, unescaped single-dollar occurrence.
-    assert.doesNotMatch(
-      unitText,
-      /[^$]\$MSG\b/,
-      "a lone $MSG (not preceded by the $$ escape) is also blanked by systemd",
+      /^ExecStart=\/usr\/bin\/node --experimental-strip-types %h\/hydra\/scripts\/operator-notify\.ts service-failed --unit %i$/m,
     );
   });
 
-  test("keeps the genuine systemd environment variables in ${...} form", () => {
-    assert.match(unitText, /\$\{TELEGRAM_BOT_TOKEN\}/);
-    assert.match(unitText, /\$\{TELEGRAM_CHAT_ID\}/);
+  test("no longer curls or talks to the Bot API directly", () => {
+    assert.doesNotMatch(unitCode, /curl/);
+    assert.doesNotMatch(unitCode, /api\.telegram\.org/);
+    assert.doesNotMatch(unitCode, /\$\$MSG|\$\{TELEGRAM_/);
   });
 
   test("sources credentials from a non-optional EnvironmentFile=%h/hydra/.env", () => {
-    assert.match(
-      unitText,
-      /^EnvironmentFile=%h\/hydra\/\.env$/m,
-      "expected a non-dash-prefixed EnvironmentFile=%h/hydra/.env line",
-    );
-    // Dash-prefixed (`EnvironmentFile=-%h/hydra/.env`) would silently swallow
-    // a missing .env instead of failing loud in the journal.
+    assert.match(unitText, /^EnvironmentFile=%h\/hydra\/\.env$/m);
     assert.doesNotMatch(unitText, /^EnvironmentFile=-/m);
   });
 
-  test("never inlines a literal TELEGRAM_* Environment= line", () => {
+  test("never inlines a literal TELEGRAM_* Environment= line or a token-shaped literal", () => {
     assert.doesNotMatch(unitText, /^Environment=TELEGRAM_/m);
-  });
-
-  test("carries no bot-token-shaped literal (digits:20+ token chars)", () => {
     assert.doesNotMatch(unitText, /\d+:[A-Za-z0-9_-]{20,}/);
   });
 
-  test("declares no OnFailure= (no self-recursion on a failed page)", () => {
+  test("declares no OnFailure= (no self-recursion) and bounds the run with TimeoutStartSec", () => {
     assert.doesNotMatch(unitText, /^OnFailure=/m);
+    assert.match(unitText, /^TimeoutStartSec=\d+$/m);
+    assert.match(unitText, /^Type=oneshot$/m);
+  });
+});
+
+describe("tracked units normalise OnFailure= to hydra-notify-failure@%n (issue #5046)", () => {
+  const dir = path.join(REPO_ROOT, "scripts/systemd");
+  const lines = readdirSync(dir).flatMap((f) =>
+    readFileSync(path.join(dir, f), "utf8")
+      .split("\n")
+      .filter((l) => /^OnFailure=/.test(l))
+      .map((l) => ({ f, l })),
+  );
+
+  test("at least the autopilot and redis-backup units declare OnFailure=", () => {
+    const files = new Set(lines.map((x) => x.f));
+    assert.ok(files.has("hydra-autopilot.service"));
+    assert.ok(files.has("hydra-redis-backup.service"));
   });
 
-  test("keeps the unit's existing shape: Type=oneshot, %i, curl swallowed with || true", () => {
-    assert.match(unitText, /^Type=oneshot$/m);
-    assert.match(unitText, /%i/);
-    assert.match(unitText, /\|\| true/);
+  test("every OnFailure= line is exactly OnFailure=hydra-notify-failure@%n", () => {
+    for (const { f, l } of lines) assert.equal(l, "OnFailure=hydra-notify-failure@%n", f);
+  });
+
+  test("the watchdog unit loads .env optionally (dash-prefixed) for the CLI credentials", () => {
+    const wd = readFileSync(path.join(dir, "hydra-watchdog.service"), "utf8");
+    assert.match(wd, /^EnvironmentFile=-%h\/hydra\/\.env$/m);
   });
 });
 

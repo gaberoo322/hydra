@@ -152,6 +152,19 @@
       "description": "hydra-watchdog.sh — consolidated Hydra watchdog (issue #705)"
     },
     {
+      "path": "scripts/operator-notify.ts",
+      "name": "operator-notify.ts",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/operator-notify.ts",
+        "line": 1
+      },
+      "kind": "ts",
+      "description": "operator-notify — CLI over the Operator Channel (ADR-0045 Decision 6,"
+    },
+    {
       "path": "scripts/osv-scan.sh",
       "name": "osv-scan.sh",
       "execStart": null,
@@ -362,7 +375,7 @@
     {
       "path": "scripts/systemd/hydra-notify-failure@.service",
       "name": "hydra-notify-failure@.service",
-      "execStart": "/bin/bash -c '\\",
+      "execStart": "/usr/bin/node --experimental-strip-types %h/hydra/scripts/operator-notify.ts service-failed --unit %i",
       "triggers": null,
       "schedule": null,
       "source": {

@@ -64,6 +64,50 @@ describe("telegram-seam-check: Telegram fetch grammar", () => {
   });
 });
 
+describe("telegram-seam-check: widened closure (issue #5046)", () => {
+  test("flags a bash curl to the Bot API in scripts/", () => {
+    assert.equal(
+      fileViolatesTelegramSeam(
+        "scripts/hydra-watchdog.sh",
+        `  curl -sS -X POST "https://api.telegram.org/bot$TOKEN/sendMessage"`,
+      ),
+      true,
+    );
+  });
+
+  test("flags a systemd unit ExecStart curl", () => {
+    assert.equal(
+      fileViolatesTelegramSeam(
+        "scripts/systemd/hydra-notify-failure@.service",
+        `ExecStart=/bin/bash -c 'curl https://api.telegram.org/bot1/sendMessage'`,
+      ),
+      true,
+    );
+  });
+
+  test("ignores the host in a commented shell line", () => {
+    assert.equal(
+      fileViolatesTelegramSeam(
+        "scripts/hydra-watchdog.sh",
+        "  # historically curl-ed https://api.telegram.org directly\necho ok",
+      ),
+      false,
+    );
+  });
+
+  test("ignores the host in a TS comment but flags it in code", () => {
+    assert.equal(fileViolatesTelegramSeam("scripts/x.ts", `// api.telegram.org`), false);
+    assert.equal(fileViolatesTelegramSeam("scripts/x.ts", `const u = "https://api.telegram.org/bot";`), true);
+  });
+
+  test("carves out the check's own signal literal", () => {
+    assert.equal(
+      fileViolatesTelegramSeam("scripts/ci/telegram-seam-check.ts", `const TELEGRAM_HOST = "api.telegram.org";`),
+      false,
+    );
+  });
+});
+
 describe("telegram-seam-check: carve-out", () => {
   test("exempts the Telegram Notification Adapter Module itself", () => {
     assert.equal(
