@@ -76,7 +76,6 @@
   "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md:redis-key:hydra:memory:executor:patterns",
   "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md:retired-term:Codex",
   "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md:env-var:GROUND_DOCS",
-  "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md:env-var:SCOPE_IN",
   "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md:path:config/feedback/to-executor.md",
   "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md:redis-key:hydra:memory:executor:patterns",
   "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md:retired-term:Codex",

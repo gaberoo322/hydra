@@ -389,7 +389,7 @@ export function lsTrackedAll(repoRoot: string): string[] {
   try {
     raw = execFileSync("git", ["ls-files", "-z"], { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   } catch (err) {
-    throw new Error(`[prose-drift] git ls-files failed in ${repoRoot}: ${(err as Error).message}`);
+    throw new ProseDriftInputError(`[prose-drift] git ls-files failed: ${(err as Error).message}`);
   }
   return raw
     .split("\0")
@@ -477,11 +477,27 @@ const LINK_TARGET_RE = /\]\(([^)\n]+)\)/g;
 // The scan
 // ---------------------------------------------------------------------------
 
+/**
+ * The one exception class the scan treats as "an input could not be read"
+ * (a missing/unparseable inventory or baseline, or a failed git listing).
+ * scanProseDrift converts ONLY this into the unreadable-input sentinel row;
+ * any other throw (a TypeError from a malformed inventory row, a scanner bug)
+ * is a programming error and propagates. Messages carry repo-relative paths
+ * only, so the sentinel token is host-independent.
+ */
+export class ProseDriftInputError extends Error {
+  readonly code = "prose-drift-unreadable-input";
+  constructor(message: string) {
+    super(message);
+    this.name = "ProseDriftInputError";
+  }
+}
+
 function readJson(repoRoot: string, rel: string): unknown {
   try {
     return JSON.parse(readFileSync(join(repoRoot, rel), "utf8"));
   } catch (err) {
-    throw new Error(`[prose-drift] could not read ${rel} from ${repoRoot}: ${(err as Error).message}`);
+    throw new ProseDriftInputError(`[prose-drift] could not read ${rel}: ${(err as Error).message}`);
   }
 }
 
@@ -504,12 +520,18 @@ const FIXES: Record<OffenderKind, string> = {
  * today's corpus.
  */
 export function scanProseDrift(repoRoot: string, opts: ProseScanOptions = {}): Offender[] {
-  // Verification never throws: an unreadable input becomes a structured
-  // offender row so callers report it instead of crashing.
+  // Verification never throws on an unreadable INPUT: that becomes a
+  // structured offender row so callers report it instead of crashing. Only
+  // the typed read error is caught — a programming error (e.g. a TypeError
+  // from a malformed inventory row) surfaces instead of masquerading as
+  // "could not be read".
   try {
     return scanProseDriftUnguarded(repoRoot, opts);
   } catch (err) {
-    const message = (err as Error).message;
+    if (!(err instanceof ProseDriftInputError)) throw err;
+    // Strip the absolute repo root (an fs/git error message can embed it) so
+    // the sentinel token never carries a host-specific path.
+    const message = err.message.split(repoRoot).join("<repo>");
     console.error(`[prose-drift] scan aborted: ${message}`);
     return [{ file: "(inputs)", line: 1, kind: "unreadable-input", token: message, fix: FIXES["unreadable-input"] }];
   }
@@ -742,45 +764,61 @@ export function renderReport(arm: "new" | "stale", rows: string[], byRow: Map<st
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-function readBaseline(): string[] | null {
+/**
+ * Read the committed baseline. Returns null (logged) when it is unreadable,
+ * unparseable, or valid JSON that is not an array of strings — so a malformed
+ * baseline fails the arm loudly instead of throwing inside compareBaseline.
+ */
+export function readBaseline(repoRoot: string): string[] | null {
+  let parsed: unknown;
   try {
-    return readJson(REPO_ROOT, BASELINE_FILE) as string[];
+    parsed = readJson(repoRoot, BASELINE_FILE);
   } catch (err) {
     console.error(`[prose-drift] ${(err as Error).message}`);
     return null;
   }
+  if (!Array.isArray(parsed) || !parsed.every((r) => typeof r === "string")) {
+    console.error(`[prose-drift] ${BASELINE_FILE} is not a JSON array of strings — ${FIX_COMMAND}`);
+    return null;
+  }
+  return parsed;
 }
 
-function main(): void {
-  const update = process.argv.includes("--update-baseline");
-  const offenders = scanProseDrift(REPO_ROOT);
+/**
+ * The CLI body, parameterised on repo root + argv so tests can drive it.
+ * Returns the exit code: 0 clean / baseline written, 1 drift or unreadable input.
+ */
+export function runProseDriftCli(repoRoot: string, argv: string[]): number {
+  const update = argv.includes("--update-baseline");
+  const offenders = scanProseDrift(repoRoot);
+  // An aborted scan yields only the unreadable-input sentinel. It must never
+  // reach the update branch (--allow-grow would overwrite the real baseline
+  // with the sentinel row) nor be reported as ordinary drift: fail loud here.
+  const unreadable = offenders.filter((o) => o.kind === "unreadable-input");
+  if (unreadable.length > 0) {
+    for (const o of unreadable) console.error(`[prose-drift] scan aborted, baseline untouched — ${o.token} — ${o.fix}`);
+    return 1;
+  }
   const { rows, byRow } = offenderRowsAndIndex(offenders);
   if (update) {
     // The baseline can only shrink unless the operator says otherwise: refuse
     // to absorb a NEW offender silently.
-    if (!process.argv.includes("--allow-grow")) {
-      const existing = readBaseline();
-      if (existing === null) {
-        process.exitCode = 1;
-        return;
-      }
+    if (!argv.includes("--allow-grow")) {
+      const existing = readBaseline(repoRoot);
+      if (existing === null) return 1;
       const { added: grown } = compareBaseline(rows, existing);
       if (grown.length > 0) {
         console.error(renderReport("new", grown, byRow));
         console.error("[prose-drift] refusing --update-baseline: it would ADD the row(s) above. Fix the prose, or pass --allow-grow deliberately.");
-        process.exitCode = 1;
-        return;
+        return 1;
       }
     }
-    writeFileSync(join(REPO_ROOT, BASELINE_FILE), `${JSON.stringify(rows, null, 2)}\n`);
+    writeFileSync(join(repoRoot, BASELINE_FILE), `${JSON.stringify(rows, null, 2)}\n`);
     console.log(`[prose-drift] baseline written: ${BASELINE_FILE} (${rows.length} rows)`);
-    return;
+    return 0;
   }
-  const baseline = readBaseline();
-  if (baseline === null) {
-    process.exitCode = 1;
-    return;
-  }
+  const baseline = readBaseline(repoRoot);
+  if (baseline === null) return 1;
   const { added, removed } = compareBaseline(rows, baseline);
   if (added.length > 0) {
     console.error(renderReport("new", added, byRow));
@@ -790,11 +828,11 @@ function main(): void {
   }
   if (added.length === 0 && removed.length === 0) {
     console.log(`[prose-drift] OK — ${rows.length} baseline rows all backed by live offenders, no new drift`);
-    return;
+    return 0;
   }
-  process.exitCode = 1;
+  return 1;
 }
 
 if (fileURLToPath(import.meta.url) === resolve(process.argv[1] ?? "")) {
-  main();
+  process.exitCode = runProseDriftCli(REPO_ROOT, process.argv.slice(2));
 }

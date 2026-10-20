@@ -10,7 +10,7 @@
  * TAP tail cannot hide the failing row.
  */
 
-import { deepStrictEqual, ok, strictEqual } from "node:assert";
+import { deepStrictEqual, ok, strictEqual, throws } from "node:assert";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -30,6 +30,8 @@ import {
   paragraphSpans,
   pathClaimResolves,
   placeholderSkipped,
+  readBaseline,
+  runProseDriftCli,
   redisKeyClaimResolves,
   renderReport,
   routeClaimResolves,
@@ -421,8 +423,57 @@ describe("prose-drift: verification never throws on unreadable inputs", () => {
       const offenders = scanProseDrift(root, { tracked: [] });
       strictEqual(offenders.length, 1);
       strictEqual(offenders[0].kind, "unreadable-input");
+      ok(!offenders[0].token.includes(root), `sentinel token must not embed the absolute repo root: ${offenders[0].token}`);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("a programming error (malformed inventory row) propagates instead of becoming unreadable-input", async () => {
+    // corpus.json parses fine but a row is null → `r.tier` is a TypeError,
+    // which is a scanner/inventory bug, not "could not be read".
+    await withFixture({ "docs/generated/corpus.json": JSON.stringify({ rows: [null] }) }, (root) => {
+      throws(
+        () =>
+          scanProseDrift(root, {
+            tracked: [],
+            retiredTerms: [],
+            routePaths: [],
+            redisKeyPatterns: [],
+            skillNames: [],
+            envVarNames: [],
+            counts: [],
+            sourceBlob: "",
+            fragmentFiles: [],
+          }),
+        TypeError,
+      );
+    });
+  });
+
+  // CLI: an aborted scan never rewrites the baseline.
+  const SEED = ["docs/a.md:path:src/gone.ts", "docs/b.md:route:/api/gone"];
+
+  for (const argv of [["--update-baseline", "--allow-grow"], ["--update-baseline"], []]) {
+    test(`argv=${JSON.stringify(argv)}: unreadable inputs exit 1 and leave the baseline byte-identical`, async () => {
+      const seeded = `${JSON.stringify(SEED, null, 2)}\n`;
+      // No git repo and no generated inventories → the scan aborts.
+      await withFixture({ [BASELINE_FILE]: seeded }, (root) => {
+        strictEqual(runProseDriftCli(root, argv), 1);
+        strictEqual(readFileSync(join(root, BASELINE_FILE), "utf8"), seeded);
+      });
+    });
+  }
+
+  test("readBaseline rejects valid JSON that is not an array of strings (null, not a throw)", async () => {
+    await withFixture({ [BASELINE_FILE]: JSON.stringify({ rows: [] }) }, (root) => {
+      strictEqual(readBaseline(root), null);
+    });
+    await withFixture({ [BASELINE_FILE]: JSON.stringify([1, 2]) }, (root) => {
+      strictEqual(readBaseline(root), null);
+    });
+    await withFixture({ [BASELINE_FILE]: JSON.stringify(["a:path:b"]) }, (root) => {
+      deepStrictEqual(readBaseline(root), ["a:path:b"]);
+    });
   });
 });
