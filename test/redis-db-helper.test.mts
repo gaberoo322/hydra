@@ -857,6 +857,11 @@ describe("no test file hardcodes a launcher-pool Redis DB index (issue #5062)", 
     return [
       new RegExp(`["']-n["']\\s*,\\s*["'](?:${alt})["']`),
       new RegExp(`HYDRA_REDIS_DB:\\s*["'](?:${alt})["']`),
+      // The original #5062 shape: a pool literal bound to a *DB* constant
+      // (`const SELECTED_DB = "9"`) and later passed as the selector.
+      new RegExp(`\\b\\w*DB\\w*\\s*=\\s*["'](?:${alt})["']`),
+      // Shell-string form: HYDRA_REDIS_DB=9
+      new RegExp(`HYDRA_REDIS_DB=(?:${alt})\\b`),
     ];
   }
 
@@ -872,6 +877,9 @@ describe("no test file hardcodes a launcher-pool Redis DB index (issue #5062)", 
     }
     assert.equal(patterns.some((re) => re.test(`HYDRA_REDIS_DB: "${9}",`)), true, "must flag a pool env literal");
     assert.equal(patterns.some((re) => re.test(`["-n", "${9}", "SET"]`)), true, "must flag a pool argv literal");
+    assert.equal(patterns.some((re) => re.test(`const SELECTED_DB = "${9}";`)), true, "must flag a pool literal bound to a *DB* constant");
+    assert.equal(patterns.some((re) => re.test(`HYDRA_REDIS_DB=${9} node x`)), true, "must flag a shell-string env pin");
+    assert.equal(patterns.some((re) => re.test('const SELECTED_DB = "0";')), false, "db 0 constant stays benign");
   });
 
   test("no test file passes a literal ALLOWED_DB_INDEXES index as a live Redis selector", async () => {
