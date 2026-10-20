@@ -218,15 +218,15 @@ export function startConsumers(
         { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
         "[DLQ] failed event",
       );
-      // Dead-letter is on the closed page list (ADR-0045): deduped per stream+type.
+      // Dead-letter is not on the closed page list (ADR-0045 Decision 3): a brief item.
       await channel
-        .page(
+        .brief(
           messageFromEvent({
             type: E.DLQ_ALERT,
             payload: { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
           }),
         )
-        .catch((err) => logger.error({ err }, "[DLQ] failed to page dead-letter item"));
+        .catch((err) => logger.error({ err }, "[DLQ] failed to append brief item"));
     }, { count: 1, blockMs: 10000 }),
     undefined,
     channel,

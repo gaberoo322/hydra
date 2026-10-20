@@ -193,7 +193,7 @@ describe("severity is decided by the page list, never the producer", () => {
       messageFromEvent({ type: "dlq:alert", payload: { originalStream: "s", eventType: "e" } }).dedupKey,
       "dlq:s:e",
     );
-    assert.equal(isPageKind("dlq:alert"), true);
+    assert.equal(isPageKind("dlq:alert"), false);
   });
 });
 
