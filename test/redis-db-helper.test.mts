@@ -858,9 +858,9 @@ describe("no test file hardcodes a launcher-pool Redis DB index (issue #5062)", 
       new RegExp(`["']-n["']\\s*,\\s*["'](?:${alt})["']`),
       new RegExp(`HYDRA_REDIS_DB:\\s*["'](?:${alt})["']`),
       // The original #5062 shape: a pool literal bound to a *DB* constant
-      // (`const SELECTED_DB = "9"`) and later passed as the selector.
+      // (a SELECTED_DB constant) and later passed as the selector.
       new RegExp(`\\b\\w*DB\\w*\\s*=\\s*["'](?:${alt})["']`),
-      // Shell-string form: HYDRA_REDIS_DB=9
+      // Shell-string env pin form.
       new RegExp(`HYDRA_REDIS_DB=(?:${alt})\\b`),
     ];
   }
