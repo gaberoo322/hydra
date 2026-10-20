@@ -508,6 +508,7 @@ export function productionDeps(): CliDeps {
   const hydra = createTurnSnapshotHydra();
   return {
     github: createTurnSnapshotGithub(),
+    host: createTurnSnapshotHost(),
     hydra,
     now: () => Date.now(),
     sleep: (seconds) => new Promise((resolve) => setTimeout(resolve, Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0)),

@@ -90,6 +90,7 @@ _LIST_SIGNALS = (
 _COUNT_SIGNALS = ("scout_alert_eligible_count", "hitl_grill_open", "wayfinder_orch_inflight_global")
 _TEXT_SIGNALS = ("target_needs_qa_pr_ref", "target_needs_qa_pr_head", "wayfinder_orch_ticket_type")
 _SURFACE_SIGNAL = "orch_prs_dirty_surface"
+_RECHECK_SIGNAL = "orch_qa_verdict_recheck"
 _SHARE_SIGNAL = "orch_realm_weekly_share"
 
 # The ALL-DEGRADED snapshot's signals: what decide.py reads when the turn's
@@ -147,6 +148,7 @@ ALL_DEGRADED_SIGNALS: dict[str, Any] = {
     "orch_dev_resume_nopr_anchor": None,
     "orch_dirty_forward_fix": None,
     "orch_prs_dirty_surface": [],
+    "orch_qa_verdict_recheck": [],
     "orch_pending_grill_anchor": None,
     "orch_dev_ready_anchor": None,
     "wayfinder_orch_frontier": None,
@@ -376,6 +378,37 @@ def dirty_surface_pairs(state: dict, events: list[dict], name: str) -> list[tupl
     return sorted(pairs.items())
 
 
+def qa_verdict_recheck(state: dict, events: list[dict]) -> list[dict]:
+    """The durable QA-verdict recheck entries (#5052) as `qa-verdict` event dicts,
+    ascending by PR, deduplicated by PR, for every PR NOT already named by a
+    session `qa-verdict` event in `events` (the event wins). Each entry is the
+    `qa-verdict-event.sh` shape {type, pr_number, tier, verdict, verdict_sha,
+    head_sha}. Malformed entries are dropped (fail-closed: no entry, no merge);
+    never raises. Snapshot-only: a `signal` event cannot inject a recheck."""
+    raw = _state_signal(state, _RECHECK_SIGNAL)
+    if not isinstance(raw, list):
+        return []
+    named = {
+        ev.get("pr_number")
+        for ev in events
+        if isinstance(ev, dict) and ev.get("type") == "qa-verdict" and ev.get("pr_number") is not None
+    }
+    out: dict[int, dict] = {}
+    for entry in raw:
+        if not _valid_recheck_entry(entry) or entry["pr"] in named:
+            continue
+        out[entry["pr"]] = {
+            "type": "qa-verdict",
+            "pr_number": entry["pr"],
+            "tier": entry["tier"],
+            "verdict": entry["verdict"],
+            "verdict_sha": entry["verdict_sha"],
+            "head_sha": entry["head_sha"],
+            "recheck": True,
+        }
+    return [out[k] for k in sorted(out)]
+
+
 def blob(state: dict, name: str) -> Any:
     """A data-plane blob decide.py normalises itself (usage eligibility, emergency
     brake, Target risk surface, class stats, candidate exclusions) and the
@@ -421,6 +454,18 @@ def _is_int(x: Any) -> bool:
     return isinstance(x, int) and not isinstance(x, bool)
 
 
+def _valid_recheck_entry(e: Any) -> bool:
+    return (
+        isinstance(e, dict)
+        and set(e) == {"pr", "tier", "verdict", "verdict_sha", "head_sha"}
+        and _is_int(e["pr"]) and e["pr"] > 0
+        and _is_int(e["tier"]) and 1 <= e["tier"] <= 4
+        and isinstance(e["verdict"], str) and e["verdict"] != ""
+        and isinstance(e["verdict_sha"], str)
+        and isinstance(e["head_sha"], str)
+    )
+
+
 def _valid_signal(name: str, value: Any) -> bool:
     """`value` has the type SignalsSchema gives `name`."""
     if name in _PIN_SIGNALS:
@@ -447,6 +492,8 @@ def _valid_signal(name: str, value: Any) -> bool:
             and (e["closing_issue"] is None or (_is_int(e["closing_issue"]) and e["closing_issue"] > 0))
             for e in value
         )
+    if name == _RECHECK_SIGNAL:
+        return isinstance(value, list) and all(_valid_recheck_entry(e) for e in value)
     if name == _SHARE_SIGNAL:
         return value is None or (
             isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and 0 <= value <= 1

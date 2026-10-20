@@ -8,6 +8,8 @@
 
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** `systemctl --user list-units --type=service --state=failed --no-legend` as the collector sees it. */
 interface FailedUnitsRead {
@@ -20,11 +22,19 @@ export interface TurnSnapshotHost {
   failedServiceUnits(): Promise<FailedUnitsRead>;
   /** A file's bytes, or `null` when it is missing or unreadable (bash `[ -r "$f" ]` false). */
   readFile(path: string): Promise<Buffer | null>;
+  /**
+   * #5052: run `bash scripts/autopilot/qa-verdict-event.sh <pr> <tier>` and
+   * return its parsed stdout JSON, or `null` on a non-zero exit, a spawn
+   * failure, or unparseable output (the caller omits the entry - fail closed).
+   */
+  runQaVerdictEvent(pr: number, tier: number): Promise<unknown>;
 }
 
 const SYSTEMCTL_FAILED_UNITS_ARGS = ["--user", "list-units", "--type=service", "--state=failed", "--no-legend"];
 
 const SYSTEMCTL_TIMEOUT_MS = 15_000;
+const QA_VERDICT_EVENT_TIMEOUT_MS = 90_000;
+const QA_VERDICT_EVENT_SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../scripts/autopilot/qa-verdict-event.sh");
 
 /** The production host port: real systemctl + real filesystem. */
 export function createTurnSnapshotHost(): TurnSnapshotHost {
@@ -34,6 +44,23 @@ export function createTurnSnapshotHost(): TurnSnapshotHost {
         execFile("systemctl", SYSTEMCTL_FAILED_UNITS_ARGS, { timeout: SYSTEMCTL_TIMEOUT_MS }, (err, stdout) => {
           /* intentional: a failed/missing systemctl is the read's `ok: false` arm, rendered as the legacy fallback */
           resolve({ ok: err === null, stdout: typeof stdout === "string" ? stdout : "" });
+        });
+      });
+    },
+    runQaVerdictEvent(pr, tier) {
+      return new Promise((resolveRead) => {
+        execFile("bash", [QA_VERDICT_EVENT_SCRIPT, String(pr), String(tier)], { timeout: QA_VERDICT_EVENT_TIMEOUT_MS }, (err, stdout, stderr) => {
+          if (err !== null) {
+            console.error(`[turn-snapshot] qa-verdict-event.sh failed for PR ${pr}:`, err.message, typeof stderr === "string" ? stderr.slice(0, 300) : "");
+            resolveRead(null);
+            return;
+          }
+          try {
+            resolveRead(JSON.parse(typeof stdout === "string" ? stdout : ""));
+          } catch (parseErr) {
+            console.error(`[turn-snapshot] qa-verdict-event.sh output for PR ${pr} was not JSON:`, parseErr);
+            resolveRead(null);
+          }
         });
       });
     },

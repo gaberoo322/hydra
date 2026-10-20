@@ -303,6 +303,10 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     orch_dev_resume_nopr_anchor: v.prGate.devResumeNoprPick.ok ? v.prGate.devResumeNoprPick.value : null,
     orch_dirty_forward_fix: pin(dirtyFix.pick),
     orch_prs_dirty_surface: dirtyFix.surface.map((e) => ({ pr: e.pr, closing_issue: e.closingIssue })),
+    // #5052: fail closed - a degraded recheck renders [] (the collector already marked it).
+    orch_qa_verdict_recheck: v.prGate.qaVerdictRecheck.ok
+      ? v.prGate.qaVerdictRecheck.value.map((e) => ({ pr: e.pr, tier: e.tier, verdict: e.verdict, verdict_sha: e.verdictSha, head_sha: e.headSha }))
+      : [],
 
     orch_pending_grill_anchor: anchor("picks", "orch_pending_grill_anchor", v.picks.grillPick),
     orch_dev_ready_anchor: anchor("picks", "orch_dev_ready_anchor", v.picks.devReadyPick),

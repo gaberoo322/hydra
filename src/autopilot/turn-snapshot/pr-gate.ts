@@ -46,6 +46,7 @@ import { closedIssues, referencedIssues, type PrRefRow } from "../../github/pr-r
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
 import { DEFAULT_NOPR_RESUME_QUIESCENCE_SECONDS, pickDevResume, pickNoPrResume, type NoPrResumeRow } from "./dev-resume.ts";
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
+import type { TurnSnapshotHost } from "./host-port.ts";
 import { pyEpochSeconds, pyFloatOr, pyJsonLoads, pyStr, pyTruthy } from "./py-compat.ts";
 
 export const PR_GATE_COLLECTOR = "pr-gate";
@@ -70,6 +71,20 @@ export interface InflightRefs {
   readonly body: readonly number[];
 }
 
+/**
+ * One `orch_qa_verdict_recheck` entry (#5052): the stdout of
+ * `qa-verdict-event.sh <PR> <TIER>` for a PR that could merge once its QA
+ * verdict binds to the current head - the durable twin of the session's
+ * in-memory `qa-verdict` event.
+ */
+export interface QaRecheckEntry {
+  readonly pr: number;
+  readonly tier: number;
+  readonly verdict: string;
+  readonly verdictSha: string;
+  readonly headSha: string;
+}
+
 export interface PrGateSnapshot {
   readonly inflight: InflightRefs;
   readonly dirty: readonly number[];
@@ -89,6 +104,11 @@ export interface PrGateSnapshot {
   readonly devResumeNoprPick: Classified<number | null>;
   /** Fail-closed: degraded → `none` + empty surface. */
   readonly dirtyFix: Classified<{ readonly pick: PrPick | null; readonly surface: readonly DirtySurfaceEntry[] }>;
+  /**
+   * #5052: PRs to re-evaluate for merge this turn. Fail-closed: degraded ->
+   * `[]`; no path synthesises a PASS.
+   */
+  readonly qaVerdictRecheck: Classified<readonly QaRecheckEntry[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +360,55 @@ function requiredVerdict(rollup: unknown, required: ReadonlySet<string>): { red:
   return { red: entries.some((v) => v.red) };
 }
 
+/**
+ * The `Tier: N` line of a PR body (N in 1-4), or `null` when absent/unparseable.
+ * Line-anchored so a mid-sentence mention never counts.
+ */
+export function parseTierLine(body: unknown): number | null {
+  if (typeof body !== "string") return null;
+  const m = /^[ \t>*_-]*Tier\s*:\s*[*_]*\s*([1-4])(?!\d)/im.exec(body);
+  return m === null ? null : Number(m[1]);
+}
+
+/**
+ * #5052 INV-6: the pure pre-filter over the ONE open-PR read. A candidate is
+ * open, non-draft, not `ready-for-human`, not already armed for auto-merge
+ * (`autoMergeRequest === null` - an absent field is NOT proof it is unarmed),
+ * mergeable-shaped (not DIRTY/UNKNOWN), carries a parseable `Tier: N` line,
+ * and has every required check settled and none red. No script run or read is
+ * spent on anything else.
+ */
+export function qaRecheckCandidates(
+  prs: readonly unknown[],
+  required: ReadonlySet<string>,
+): { readonly pr: number; readonly tier: number }[] {
+  const out: { pr: number; tier: number }[] = [];
+  for (const pr of rowsOf(prs)) {
+    const number = pr.number;
+    if (typeof number !== "number" || !Number.isInteger(number) || number <= 0) continue;
+    if (pyTruthy(pr.isDraft) || labelsOf(pr).has("ready-for-human")) continue;
+    if (pr.autoMergeRequest !== null) continue;
+    const state = orEmpty(pr.mergeStateStatus);
+    if (state === "DIRTY" || state === "UNKNOWN") continue;
+    const tier = parseTierLine(pr.body);
+    if (tier === null) continue;
+    const verdict = requiredVerdict(pr.statusCheckRollup, required);
+    if (verdict === null || verdict.red) continue;
+    out.push({ pr: number, tier });
+  }
+  return out.sort((a, b) => a.pr - b.pr);
+}
+
+/** A `qa-verdict-event.sh` stdout object as a typed entry, or `null` when it is not the expected shape. */
+export function parseQaRecheckEntry(raw: unknown, pr: number, tier: number): QaRecheckEntry | null {
+  const e = asRow(raw);
+  if (e === null) return null;
+  if (e.pr_number !== pr || e.tier !== tier) return null;
+  if (typeof e.verdict !== "string" || e.verdict === "") return null;
+  if (typeof e.verdict_sha !== "string" || typeof e.head_sha !== "string") return null;
+  return { pr, tier, verdict: e.verdict, verdictSha: e.verdict_sha, headSha: e.head_sha };
+}
+
 /** Classify every open PR. Returns the snapshot fields (minus in-flight) plus the classifier's stderr notes. */
 export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "inflight">; notes: string[] } {
   const notes: string[] = [];
@@ -569,6 +638,8 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
       devResumePick,
       devResumeNoprPick,
       dirtyFix,
+      // Filled by collectPrGate (it needs the host port); fail-closed until then.
+      qaVerdictRecheck: { ok: false, reason: "not-evaluated" },
     },
     notes,
   };
@@ -657,6 +728,11 @@ export interface PrGateDeps {
   readonly env?: PrGateEnv;
   /** Defaults to the src/github/pr-refs.ts predicates. */
   readonly prRefs?: PrRefsAvailability;
+  /**
+   * #5052 INV-2: runs `qa-verdict-event.sh` for each recheck candidate. Absent
+   * -> the recheck fails closed (`[]` + a degraded marker) when a candidate exists.
+   */
+  readonly host?: Pick<TurnSnapshotHost, "runQaVerdictEvent">;
 }
 
 const DEFAULT_REPOLL_DELAY = "5";
@@ -807,12 +883,51 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
     degraded.push({ field: "devResumeNoprPick", reason: noprOutcome.reason });
   }
 
+  // 5. #5052: the durable QA-verdict recheck - fail CLOSED, never a synthesised PASS.
+  const qaVerdictRecheck = await collectQaRecheck(prs, payload.kind === "ok", requiredContexts, deps.host, notes);
+  if ("reason" in qaVerdictRecheck) degraded.push({ field: "qaVerdictRecheck", reason: qaVerdictRecheck.reason });
+
   return {
     collector: PR_GATE_COLLECTOR,
-    value: { inflight, ...classified.value },
+    value: { inflight, ...classified.value, qaVerdictRecheck },
     degraded,
     notes,
   };
+}
+
+async function collectQaRecheck(
+  prs: readonly unknown[],
+  prListReadOk: boolean,
+  requiredContexts: Classified<ReadonlySet<string>>,
+  host: PrGateDeps["host"],
+  notes: string[],
+): Promise<Classified<readonly QaRecheckEntry[]>> {
+  if (!prListReadOk) return { ok: false, reason: "pr-list-unreadable" };
+  if (!requiredContexts.ok) return { ok: false, reason: "required-contexts-unreadable" };
+  const candidates = qaRecheckCandidates(prs, requiredContexts.value);
+  if (candidates.length === 0) return { ok: true, value: [] };
+  if (host === undefined) return { ok: false, reason: "host-unavailable" };
+  const results = await Promise.all(
+    candidates.map(async (c) => {
+      try {
+        return parseQaRecheckEntry(await host.runQaVerdictEvent(c.pr, c.tier), c.pr, c.tier);
+      } catch (err) {
+        /* intentional: surfaced as a stderr note; the PR's entry is omitted (fail closed), never the turn */
+        const msg = err instanceof Error ? err.message : String(err);
+        notes.push(`orch qa-verdict recheck host call threw for PR ${c.pr} (${msg}) - omitting entry (issue #5052)`);
+        return null;
+      }
+    }),
+  );
+  const entries: QaRecheckEntry[] = [];
+  results.forEach((entry, i) => {
+    if (entry === null) {
+      notes.push(`orch qa-verdict recheck produced no usable event for PR ${candidates[i].pr} - omitting entry (issue #5052)`);
+    } else {
+      entries.push(entry);
+    }
+  });
+  return { ok: true, value: entries };
 }
 
 /** The snapshot the CLI renders when the collector itself could not run (every field degraded). */
@@ -827,5 +942,6 @@ export function prGateFallbackSnapshot(reason: string): PrGateSnapshot {
     devResumePick: { ok: false, reason },
     devResumeNoprPick: { ok: false, reason },
     dirtyFix: { ok: false, reason },
+    qaVerdictRecheck: { ok: false, reason },
   };
 }
