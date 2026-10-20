@@ -184,7 +184,7 @@ export type RawRollupEntry = Record<string, unknown>;
  * required-ness field at all (verified live on PRs #4754/#4764) — only from
  * `requiredContexts`, read from
  * `gh api .../branches/<base>/protection/required_status_checks` (the same
- * source as the Turn Snapshot's glm-red classifier, #4460 INV-4).
+ * source as the Turn Snapshot's dev-resume classifier, #4460 INV-4).
  *
  * Rules:
  * - CheckRun rows fold to lowercase-canonical `status`/`conclusion` (issue
@@ -1837,7 +1837,7 @@ export const QA_ADMISSION_SKIP_MARKER = "Review skipped by the admission gate";
  * `ready-for-agent` (dev_orch, the GLM drainer via `glmLane`) or
  * `needs-dev-resume` (the pinned resume / GLM forward-fix), so both are
  * removed; `ready-for-human` on the PR also drops it from collect-state's
- * dev-resume and glm-red picks, which skip a `ready-for-human` PR.
+ * dev-resume pick, which skips a `ready-for-human` PR.
  */
 export const QA_ESCALATION_LABELS: {
   issueRemove: readonly string[];

@@ -40,7 +40,7 @@ Where the text comes from — nothing here is a second copy of a rule:
 
 The `## Task` skeleton carries the sentences the playbook makes MANDATORY for
 a prompt_args shape (pinned anchor #3711, resume + resume_branch #3866, the
-GLM forward-fix contract #4460, qa_target `pr_ref` #4576, wayfinder claim +
+red-PR forward-fix contract #4460/#5058, qa_target `pr_ref` #4576, wayfinder claim +
 resolution protocol #3354, `apply: true` for the scan classes) and the
 standing operator rules for each class. The dispatcher's `--notes` (lane
 heads, SHAs, warnings) are appended verbatim — that is the part only the
@@ -120,10 +120,10 @@ ISSUE_PRODUCING_CLASSES = {
     "cleanup_target", "wire_or_retire_target", "design_qa_target", "skill_prune", "tickets_orch",
 }
 
-# The GLM red-PR forward-fix contract (playbook § dev_orch dispatch, issue
-# #4460 INV-10) — "the dispatch prompt MUST carry this contract verbatim".
-FORWARD_FIX_CONTRACT = """GLM red-PR forward-fix contract (issue #4460, INV-10) — PR #{pr} on branch `{branch}` already exists; the work is to make its required checks pass AND resolve the blocking findings of its latest QA FAIL, NOT a fresh implementation:
-1. **Stay on the harness branch.** Work in the dispatched worktree, then `git fetch origin {branch} && git reset --hard FETCH_HEAD` — the forward-fix continues the PR's exact head, never a rebase or a new branch. NEVER `gh pr create`: the PR exists; a second PR duplicates the anchor. NEVER remove the `glm-authored` label — it is the provenance key the whole #4460 predicate (and #4048's lane) keys on.
+# The red-PR forward-fix contract (playbook § dev_orch dispatch, issues
+# #4460 INV-10, #5058) — "the dispatch prompt MUST carry this contract verbatim".
+FORWARD_FIX_CONTRACT = """Red-PR forward-fix contract (issues #4460, #5058, INV-10) — PR #{pr} on branch `{branch}` already exists; the work is to make its required checks pass AND resolve the blocking findings of its latest QA FAIL, NOT a fresh implementation:
+1. **Stay on the harness branch.** Work in the dispatched worktree, then `git fetch origin {branch} && git reset --hard FETCH_HEAD` — the forward-fix continues the PR's exact head, never a rebase or a new branch. NEVER `gh pr create`: the PR exists; a second PR duplicates the anchor. NEVER remove the `glm-authored` label (or any provenance label) — provenance is display / telemetry the retro surfaces read (no selector gates on it since #5058).
 2. **Read the failure before fixing it.** For a CI-required-check failure, `gh run view <run-id> --log-failed` for the failing run (find the run id via `gh pr checks {pr} --json` or the PR's checks UI). For a QA-FAIL bounce (`needs-dev-resume` applied by hydra-qa's INV-7 path), the finding list is the `### Findings` table in the latest hydra-qa comment on the PR containing `### Findings` whose own trailing `QA-Verdict` sha matches the `sha=` in the anchor issue's latest `QA-Verdict: FAIL pr={pr}` trailer (`gh issue view <anchor> --json comments`; the PR's comments via `gh pr view {pr} --json comments`) — hydra-qa posts FAILs as comments, never a review (#4746); a later non-Findings hydra-qa comment is not the finding list, and the trailer names the round. Green required checks do NOT complete a QA-FAIL forward-fix: push a commit resolving every blocking finding, or rebut a wrong finding by name in the step-5 comment — "no code change needed" is never the outcome while the latest verdict is FAIL (#4849). Fix the named defect, not a neighbouring one.
 3. **Push to the SAME branch:** `git push origin HEAD:{branch}`. The existing PR's CI re-runs on the push.
 4. **Design-concept-reconcile failure specifically:** the gate reads the PR body captured at push time (webhook snapshot). Correct the body FIRST via `gh pr edit {pr} --body-file <file>`, THEN push the fix commit — a push that lands before the body edit replays the stale body and re-fails the check (bit #4242 twice).

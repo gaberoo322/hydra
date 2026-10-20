@@ -239,8 +239,9 @@ FIXED_POINT=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.baseRefName')
 MERGE_STATE_STATUS=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.mergeStateStatus // ""')
 # GLM provenance (issue #4460 INV-7): headRefName and labels ride the SAME
 # step-3 call. The OR-predicate below is byte-identical to the Turn Snapshot's
-# #4460 classifier (INV-3a) and #4048's lane predicate — `glm-authored` label
-# OR a `worktree-agent-glm-` head-branch prefix. Since #4766 GLM_AUTHORED
+# isGlmProvenance (display-only since #5058 — no resume pick gates on it) and
+# #4048's lane predicate — `glm-authored` label OR a `worktree-agent-glm-`
+# head-branch prefix. Since #4766 GLM_AUTHORED
 # selects COMMENT WORDING only, never the bounce label (see qa_bounce_label
 # below): the GLM drainer skips open-PR anchors, so a GLM-authored PR's
 # bounce comment still explains why the resume lane owns the retry.
@@ -255,8 +256,8 @@ fi
 # the skip-required-failed short-circuit — and step-10 T4 1st deep-QA FAIL)
 # writes. Keys on whether the PR is STILL OPEN at bounce time, not on GLM
 # provenance: any open PR goes to `needs-dev-resume`, the label
-# the Turn Snapshot's orch_dev_resume_pick (#4518, non-GLM) and
-# orch_glm_red_forward_fix (#4460, GLM) both consume, because
+# the Turn Snapshot's provenance-agnostic orch_dev_resume_pick (#4518,
+# #5058 — the GLM-only #4460 pick was folded in) consumes, because
 # `ready-for-agent` on an open PR is a FRESH dev pick — it opens a duplicate
 # PR while the branch waits for its resume. `ready-for-agent` only when a
 # LIVE read confirms the PR is no longer open (CLOSED/MERGED); any failed or
@@ -415,7 +416,7 @@ fetch, which read the rollup's absent required-ness flag, always yielded `false`
 and every required-check gate downstream (`skip-required-failed`,
 `RED_REQUIRED_LIST`) saw zero required checks. Required-ness is sourced from
 **branch protection** instead — the same ONE `gh api
-.../required_status_checks` read the Turn Snapshot's glm-red classifier makes
+.../required_status_checks` read the Turn Snapshot's dev-resume classifier makes
 (#4460 INV-4) — and the whole rollup fold (normalisation, de-duplication by
 name keeping the latest, StatusContext folding, absent-required synthesis,
 required-marking) lives in the ONE pure helper `buildCheckStates`
@@ -590,8 +591,8 @@ RED_REQUIRED_LIST=$(printf '%s' "$RED_REQUIRED_JSON" | jq -r 'join(", ")' 2>/dev
   provenance; `ready-for-agent` only when the helper's live read confirms the
   PR is no longer open. Before #4518 `ready-for-agent` was the right lane for
   a non-GLM open PR; since #4518 the durable resume pin (the Turn Snapshot's
-  orch_dev_resume_pick → decide.py's pinned forward-fix, #4460 for the GLM
-  variant) owns ANY open PR, so `ready-for-agent` on an open PR just opens a
+  orch_dev_resume_pick → decide.py's pinned forward-fix, provenance-agnostic
+  since #5058) owns ANY open PR, so `ready-for-agent` on an open PR just opens a
   duplicate. A GLM-authored PR keeps its own comment wording
   (`$GLM_AUTHORED`) — the GLM drainer skips open-PR anchors — but the label
   is the same. Name the red required check(s) (`$RED_REQUIRED_LIST`) in the
@@ -1342,7 +1343,7 @@ ${QA_VERDICT_TRAILER}"
 # needs-dev-resume, NOT ready-for-agent — ready-for-agent on an open PR is a
 # FRESH dev pick, which opens a duplicate PR instead of resuming the branch;
 # the autopilot's durable resume pin (the Turn Snapshot orch_dev_resume_pick,
-# #4518 non-GLM / #4460 GLM variant) owns any open PR. GLM_AUTHORED selects
+# #4518, provenance-agnostic since #5058) owns any open PR. GLM_AUTHORED selects
 # only the comment wording below. This is the SAME relabel site step 6.6's
 # `skip-required-failed` routes into, so the short-circuit bounce is covered
 # too. Name the red required check(s) when CI is what failed.

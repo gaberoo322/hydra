@@ -4612,8 +4612,8 @@
           "line": 1632
         },
         {
-          "path": "src/notify.ts",
-          "line": 17
+          "path": "src/operator-channel/credentials.ts",
+          "line": 21
         }
       ],
       "inEnvExample": false,
@@ -4638,8 +4638,8 @@
           "line": 1633
         },
         {
-          "path": "src/notify.ts",
-          "line": 18
+          "path": "src/operator-channel/credentials.ts",
+          "line": 22
         }
       ],
       "inEnvExample": false,
