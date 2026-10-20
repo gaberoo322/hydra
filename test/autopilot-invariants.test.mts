@@ -30,6 +30,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { readBrainSource } from "../scripts/ci/brain-source.ts";
 import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -483,13 +484,18 @@ const ANCHOR_RE = /#\d{1,5}\b|issue[- ]\d+|design[- ]concept/i;
 
 describe("decide.py INV-label namespaces (issue #4520)", () => {
   test("anchoring: every ad-hoc INV citation in decide.py carries an issue anchor within 10 preceding lines", () => {
-    const lines = readFileSync(DECIDE, "utf-8").split(/\r?\n/);
+    // Issue #4511: "decide.py" here means the whole brain source corpus —
+    // decide.py, decide_base.py and every decide_selectors/*.py — each file
+    // scanned on its own, so an anchor never leaks across a file boundary.
     const unanchored: string[] = [];
-    for (let i = 0; i < lines.length; i++) {
-      if (!lines[i].match(ADHOC_INV_RE)) continue;
-      const window = lines.slice(Math.max(0, i - 9), i + 1);
-      if (!window.some((l) => ANCHOR_RE.test(l))) {
-        unanchored.push(`  decide.py:${i + 1} ${lines[i].trim()}`);
+    for (const file of readBrainSource().files) {
+      const lines = file.text.split(/\r?\n/);
+      for (let i = 0; i < lines.length; i++) {
+        if (!lines[i].match(ADHOC_INV_RE)) continue;
+        const window = lines.slice(Math.max(0, i - 9), i + 1);
+        if (!window.some((l) => ANCHOR_RE.test(l))) {
+          unanchored.push(`  ${file.path}:${i + 1} ${lines[i].trim()}`);
+        }
       }
     }
     assert.deepEqual(
@@ -507,12 +513,15 @@ describe("decide.py INV-label namespaces (issue #4520)", () => {
       defined.size >= 10,
       `expected assert_invariants.py to define the INV-001..INV-010 vocabulary, found only ${defined.size} IDs`,
     );
-    const lines = readFileSync(DECIDE, "utf-8").split(/\r?\n/);
+    // Issue #4511: scan the whole brain source corpus, not decide.py alone.
     const phantoms: string[] = [];
-    for (let i = 0; i < lines.length; i++) {
-      for (const m of lines[i].matchAll(FORMAL_INV_RE)) {
-        if (!defined.has(m[0])) {
-          phantoms.push(`  decide.py:${i + 1} ${m[0]} — ${lines[i].trim()}`);
+    for (const file of readBrainSource().files) {
+      const lines = file.text.split(/\r?\n/);
+      for (let i = 0; i < lines.length; i++) {
+        for (const m of lines[i].matchAll(FORMAL_INV_RE)) {
+          if (!defined.has(m[0])) {
+            phantoms.push(`  ${file.path}:${i + 1} ${m[0]} — ${lines[i].trim()}`);
+          }
         }
       }
     }
