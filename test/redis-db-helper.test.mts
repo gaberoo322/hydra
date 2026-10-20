@@ -851,14 +851,32 @@ describe("scripts/test/redis-db-launch.mjs — hermeticChildEnv (GLM off-switch 
 // Issue #5062: no test may hand a live Redis selector one of the launcher's
 // pool indexes as a literal — a concurrent run owns that index and FLUSHDBs it.
 describe("no test file hardcodes a launcher-pool Redis DB index (issue #5062)", () => {
-  test("no test file passes a literal ALLOWED_DB_INDEXES index as a live Redis selector", async () => {
+  async function selectorPatterns(): Promise<RegExp[]> {
     const { ALLOWED_DB_INDEXES } = await import("../scripts/test/redis-db-launch.mjs");
-    const { readdirSync, readFileSync: readFile } = await import("node:fs");
     const alt = (ALLOWED_DB_INDEXES as number[]).join("|");
-    const patterns = [
+    return [
       new RegExp(`["']-n["']\\s*,\\s*["'](?:${alt})["']`),
       new RegExp(`HYDRA_REDIS_DB:\\s*["'](?:${alt})["']`),
     ];
+  }
+
+  test("the pool-index guard never flags db 0 pins or pure URL string literals", async () => {
+    const patterns = await selectorPatterns();
+    const benign = [
+      'HYDRA_REDIS_DB: "0",',
+      'drc(["-n", "0", "GET", key])',
+      'parseOwnedDbIndex("redis://localhost:6379/9")',
+    ];
+    for (const line of benign) {
+      assert.equal(patterns.some((re) => re.test(line)), false, `must not flag: ${line}`);
+    }
+    assert.equal(patterns.some((re) => re.test('HYDRA_REDIS_DB: "9",')), true, "must flag a pool env literal");
+    assert.equal(patterns.some((re) => re.test('["-n", "9", "SET"]')), true, "must flag a pool argv literal");
+  });
+
+  test("no test file passes a literal ALLOWED_DB_INDEXES index as a live Redis selector", async () => {
+    const { readdirSync, readFileSync: readFile } = await import("node:fs");
+    const patterns = await selectorPatterns();
     const testDir = fileURLToPath(new URL(".", import.meta.url));
     const files: string[] = [];
     const walk = (dir: string): void => {
