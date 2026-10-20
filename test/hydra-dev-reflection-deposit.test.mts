@@ -69,52 +69,47 @@ const depositScript = readFileSync(
   "utf8",
 );
 
-// Resolve `@include _fragments/<name>.md` (issue #2552) AND `reference_files:`
-// frontmatter fragments (issue #2947) the same way scripts/sync-skills.sh does:
-// an @include line is replaced by the fragment's content; each reference_files
-// entry is appended (it ships as a sibling of SKILL.md). {{SKILL_NAME}} is
-// substituted by the skill name. This gives us the EFFECTIVE shipped surface
-// (SKILL.md body + fragments + reference files) that the deposit obligation
-// must live somewhere within.
-function resolveEffectiveSource(
-  playbookFile: string,
-  skillName: string,
-): string {
-  const raw = readFileSync(resolve(PLAYBOOK_DIR, playbookFile), "utf8");
-  const includeRe = /^[ \t]*@include[ \t]+(\S+)[ \t]*$/;
-  const inlined = raw
-    .split("\n")
-    .map((line) => {
-      const m = line.match(includeRe);
-      if (!m) return line;
-      let frag = readFileSync(resolve(PLAYBOOK_DIR, m[1]), "utf8");
-      if (frag.endsWith("\n")) frag = frag.slice(0, -1);
-      return frag.split("{{SKILL_NAME}}").join(skillName);
-    })
-    .join("\n");
+// The EFFECTIVE shipped surface (SKILL.md body + @included fragments +
+// reference_files siblings) comes from the skills core's plan (ADR-0041
+// Decision 5): run its CLI ONCE and take the `.md` writes under `<skill>/`.
+// Fail loud: a silent empty surface would vacuously pass the regex asserts.
+const planRun = spawnSync(
+  process.execPath,
+  [
+    "--experimental-strip-types",
+    resolve(__dirname, "..", "src", "skills", "cli.ts"),
+    "--playbooks-dir",
+    PLAYBOOK_DIR,
+  ],
+  { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+);
+if (planRun.status !== 0) {
+  throw new Error(
+    `skills core CLI failed (status ${planRun.status}): ${planRun.stderr}`,
+  );
+}
+let corePlan: { writes: { path: string; content: string }[] };
+try {
+  corePlan = JSON.parse(planRun.stdout);
+} catch (err) {
+  throw new Error(
+    `skills core CLI stdout is not JSON: ${String(err)}\n${planRun.stderr}`,
+  );
+}
 
-  // Append every reference_files fragment (sibling files sync-skills emits).
-  const refMatch = inlined.match(/^reference_files:\s*\[([^\]]*)\]/m);
-  let refText = "";
-  if (refMatch) {
-    const entries = refMatch[1]
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    for (const rel of entries) {
-      const frag = readFileSync(resolve(PLAYBOOK_DIR, rel), "utf8");
-      refText += "\n" + frag.split("{{SKILL_NAME}}").join(skillName);
-    }
+function resolveEffectiveSource(skillName: string): string {
+  const surface = corePlan.writes
+    .filter((w) => w.path.startsWith(`${skillName}/`) && w.path.endsWith(".md"))
+    .map((w) => w.content);
+  if (surface.length === 0) {
+    throw new Error(`skills core plan has no .md writes for ${skillName}`);
   }
-  return inlined + refText;
+  return surface.join("\n");
 }
 
 const playbooks: Record<string, string> = {
-  "hydra-dev.md": resolveEffectiveSource("hydra-dev.md", "hydra-dev"),
-  "hydra-target-build.md": resolveEffectiveSource(
-    "hydra-target-build.md",
-    "hydra-target-build",
-  ),
+  "hydra-dev.md": resolveEffectiveSource("hydra-dev"),
+  "hydra-target-build.md": resolveEffectiveSource("hydra-target-build"),
 };
 
 // ---------------------------------------------------------------------------

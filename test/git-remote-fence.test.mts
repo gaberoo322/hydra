@@ -11,7 +11,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -89,8 +89,6 @@ describe("git-remote-fence", () => {
     "git config --get remote.origin.url",
     "git config --list",
     "git fetch origin master",
-    "git commit -m 'document git remote set-url misuse'",
-    "echo \"never run git remote set-url\"",
     "cat <<'EOF'\ngit remote set-url origin x\nEOF",
   ];
   for (const cmd of ALLOW) {
@@ -147,6 +145,386 @@ describe("git-remote-fence", () => {
     assert.equal(run(`git --namespace ns --git-dir ${protectedRepo}/.git remote set-url origin ${url}`, otherRepo).status, 2);
     assert.equal(run(`git --work-tree ${tmp} remote set-url origin ${url}`, protectedRepo).status, 2);
     assert.equal(run(`git --git-dir ${otherRepo}/.git remote set-url origin ${url}`, protectedRepo).status, 0);
+  });
+
+  describe("issue #5026 bypass shapes", () => {
+    const url = "https://x/y.git";
+    const set = `git remote set-url origin ${url}`;
+
+    it("INV-1: a non-HOME $VAR in the hook env is unresolved, not expanded", () => {
+      assert.equal(run(`cd "$TARGET_WS" && ${set}`, protectedRepo, "Bash", { TARGET_WS: otherRepo }).status, 2);
+      assert.equal(run(`cd \${TARGET_WS} && ${set}`, protectedRepo, "Bash", { TARGET_WS: otherRepo }).status, 2);
+    });
+
+    it("INV-2: a literal but non-repo target falls back to the session cwd", () => {
+      // An UNGUARDED `cd <missing>; git ...` runs git in the previous dir, so
+      // the session cwd still decides (the #4939 shape with a literal typo).
+      assert.equal(run(`cd ${tmp}/nonexistent ; ${set}`, protectedRepo).status, 2);
+      assert.equal(run(`cd ${tmp}/nonexistent\n${set}`, protectedRepo).status, 2);
+      assert.equal(run(`cd ${tmp}/nonexistent ; ${set}`, otherRepo).status, 0);
+      assert.equal(run(`cd ${tmp}/nonexistent ; ${set}`, tmp).status, 0);
+      // QA round 4: `git -C <missing>` fails before touching any repo, so a
+      // LITERAL non-repo -C target is decided by path, not by the session cwd.
+      assert.equal(run(`git -C ${tmp}/nonexistent remote add up ${url}`, protectedRepo).status, 0);
+      // An UNRESOLVED target still falls back to the session cwd.
+      assert.equal(run(`git -C "$NOPE" remote add up ${url}`, protectedRepo).status, 2);
+    });
+
+    it("INV-3: cd scope follows shell scope", () => {
+      assert.equal(run(`(cd ${otherRepo}) ; ${set}`, protectedRepo).status, 2);
+      assert.equal(run(`x=$(cd ${otherRepo}); ${set}`, protectedRepo).status, 2);
+      assert.equal(run(`(cd ${otherRepo} && ${set})`, protectedRepo).status, 0);
+      assert.equal(run(`cd ${otherRepo} && (true) && ${set}`, protectedRepo).status, 0);
+      // backtick substitution, pipeline stage and background job are not the git shell
+      assert.equal(run(`x=\`cd ${otherRepo}\`; ${set}`, protectedRepo).status, 2);
+      assert.equal(run(`cd ${otherRepo} | ${set}`, protectedRepo).status, 2);
+      assert.equal(run(`cd ${otherRepo} & ${set}`, protectedRepo).status, 2);
+      assert.equal(run(`cd ${otherRepo} && true | ${set}`, protectedRepo).status, 0);
+      // guarded-cd idiom: `cd X || exit 1` still runs git in X
+      assert.equal(run(`cd ${protectedRepo} || exit 1; ${set}`, otherRepo).status, 2);
+      assert.equal(run(`cd ${otherRepo} || exit 1; ${set}`, protectedRepo).status, 0);
+    });
+
+    it("a $(...) / backtick value in -C is still a mutation (not an allow)", () => {
+      assert.equal(run(`git -C $(pwd) remote set-url origin ${url}`, protectedRepo).status, 2);
+      assert.equal(run(`git -C \`pwd\` remote set-url origin ${url}`, protectedRepo).status, 2);
+      // nesting deeper than the WORD regex balances fails closed
+      assert.equal(run(`git -C $(echo $(echo $(echo $(pwd)))) remote set-url origin ${url}`, protectedRepo).status, 2);
+      assert.equal(run(`git -C $(echo $(echo $(echo $(pwd)))) remote -v`, protectedRepo).status, 0);
+    });
+
+    it("INV-4: a word is all its adjacent fragments", () => {
+      const rel = basename(protectedRepo);
+      const homeEnv = { HOME: dirname(protectedRepo) };
+      assert.equal(run(`cd "$HOME"/${rel} && ${set}`, otherRepo, "Bash", homeEnv).status, 2);
+      assert.equal(run(`cd "$HOME"/${basename(otherRepo)} && ${set}`, protectedRepo, "Bash", homeEnv).status, 0);
+      assert.equal(run(`cd '${dirname(protectedRepo)}'/${rel} && ${set}`, otherRepo).status, 2);
+    });
+
+    it("INV-5: a GIT_DIR= prefix is resolved like --git-dir", () => {
+      assert.equal(run(`GIT_DIR=${protectedRepo}/.git ${set}`, otherRepo).status, 2);
+      assert.equal(run(`GIT_DIR=${otherRepo}/.git ${set}`, protectedRepo).status, 0);
+    });
+
+    it("INV-6: git config read/write classification", () => {
+      assert.equal(run("git config remote.origin.url $(git config --get remote.origin.url)", protectedRepo).status, 2);
+      assert.equal(run("git config remote.origin.url `git config --get remote.origin.url`", protectedRepo).status, 2);
+      assert.equal(run("git config remote.origin.url", protectedRepo).status, 0);
+      assert.equal(run("git config --local remote.origin.url", protectedRepo).status, 0);
+      assert.equal(run("git config --unset remote.origin.url", protectedRepo).status, 2);
+      assert.equal(run("git config --get remote.origin.url", protectedRepo).status, 0);
+      assert.equal(run("(git config remote.origin.url)", protectedRepo).status, 0);
+    });
+  });
+
+  describe("QA round 3: fail-closed loose scan (unparseable remote mutation)", () => {
+    const url = "https://x/y.git";
+    // `$(dirname $(dirname $(pwd)))` is depth 3; the extra $(echo ...) is depth 4.
+    const nest = (depth: number, inner: string) =>
+      "$(echo ".repeat(depth - 1) + `$(echo ${inner})` + ")".repeat(depth - 1);
+    const unparseable = (cwd: string, cmd: string) => {
+      const r = run(cmd, cwd);
+      assert.equal(r.status, 2, `${cmd}\n${r.stderr}`);
+      assert.match(r.stderr, /unparseable remote mutation — denied fail-closed/);
+    };
+
+    it("denies -C / -c / --git-dir values nested 3 and 4 deep", () => {
+      for (const depth of [3, 4]) {
+        for (const [cwd, target] of [[protectedRepo, protectedRepo], [otherRepo, protectedRepo]]) {
+          const v = nest(depth, target);
+          unparseable(cwd, `git -C ${v} remote set-url origin ${url}`);
+          unparseable(cwd, `git -c core.x=${v} remote set-url origin ${url}`);
+          unparseable(cwd, `git --git-dir=${nest(depth, `${target}/.git`)} remote add up ${url}`);
+        }
+      }
+      // the QA-reported literal shape
+      unparseable(protectedRepo, "git -C $(dirname $(dirname $(pwd))) remote set-url o x");
+    });
+
+    it("denies a config write at depth 3 (no strict match for config either)", () => {
+      unparseable(protectedRepo, `git -C ${nest(3, protectedRepo)} config remote.origin.url x`);
+      unparseable(otherRepo, `git -C ${nest(3, protectedRepo)} config remote.origin.url x`);
+      unparseable(protectedRepo, "git -C $(a $(b $(c))) config remote.origin.url x");
+    });
+
+    it("denies every git spelling / wrapper / global flag the strict parser does not model", () => {
+      const forms = [
+        `/usr/bin/git remote set-url origin ${url}`,
+        `time git remote set-url origin ${url}`,
+        `nohup git remote set-url origin ${url}`,
+        `timeout 5 git remote set-url origin ${url}`,
+        `command -p git remote set-url origin ${url}`,
+        `"git" remote set-url origin ${url}`,
+        `'git' remote set-url origin ${url}`,
+        `git -p remote set-url origin ${url}`,
+        `git -P remote set-url origin ${url}`,
+        `git -p --no-pager remote set-url origin ${url}`,
+        `env GIT_DIR=${protectedRepo}/.git git remote set-url origin ${url}`,
+        `nice -n 5 git config remote.origin.url ${url}`,
+      ];
+      for (const f of forms) {
+        unparseable(protectedRepo, f);
+        unparseable(otherRepo, f.replace(" remote ", ` -C ${protectedRepo} remote `));
+      }
+    });
+
+    it("still denies plain --no-pager (strict) from the protected repo and from a repo targeting it", () => {
+      assert.equal(run(`git --no-pager remote set-url origin ${url}`, protectedRepo).status, 2);
+      assert.equal(run(`git --no-pager -C ${protectedRepo} remote set-url origin ${url}`, otherRepo).status, 2);
+    });
+
+    it("strict-parses the new mutation subcommands (set-head / set-branches / prune)", () => {
+      for (const sub of ["set-head origin -a", "set-branches origin master", "prune origin"]) {
+        assert.equal(run(`git remote ${sub}`, protectedRepo).status, 2, sub);
+        assert.equal(run(`git remote ${sub}`, otherRepo).status, 0, sub);
+      }
+    });
+
+    it("allows read-only forms, including deep nesting and a bare read with a redirect", () => {
+      for (const cmd of [
+        "git remote -v",
+        "git remote get-url origin",
+        "git config --get remote.origin.url",
+        "git config remote.origin.url 2>/dev/null",
+        "git config remote.origin.url > /tmp/x 2>&1",
+        "time git remote -v",
+        "/usr/bin/git config --get remote.origin.url",
+        `git -C ${nest(3, protectedRepo)} remote -v`,
+        `git -C ${nest(4, protectedRepo)} config --get remote.origin.url`,
+      ]) {
+        assert.equal(run(cmd, protectedRepo).status, 0, cmd);
+      }
+    });
+
+    it("allows a strictly-resolved mutation of a clearly non-protected repo", () => {
+      assert.equal(run(`git -C ${otherRepo} remote add up ${url}`, protectedRepo).status, 0);
+      assert.equal(run(`git remote set-url origin ${url}`, otherRepo).status, 0);
+      assert.equal(run(`git config remote.origin.url ${url}`, otherRepo).status, 0);
+      assert.equal(run(`cd ${otherRepo} || exit 1; git remote set-url origin ${url}`, protectedRepo).status, 0);
+    });
+  });
+
+  describe("QA round 4: token-pair backstop + genuine-bug fixes", () => {
+    const url = "https://x/y.git";
+    const backstop = (cwd: string, cmd: string) => {
+      const r = run(cmd, cwd);
+      assert.equal(r.status, 2, `${cmd}\n${r.stderr}`);
+      assert.match(r.stderr, /remote-mutation phrase in command text — denied fail-closed/);
+    };
+
+    it("(1) backstop: denies a remote mutation phrase that is not a command word, from ANY cwd", () => {
+      for (const cwd of [protectedRepo, otherRepo, tmp]) {
+        backstop(cwd, `echo "git remote set-url origin ${url}" | sh`);
+        backstop(cwd, `printf 'git remote add o ${url}\\n' | bash -s`);
+        backstop(cwd, "find . -exec git remote add x y \\;");
+        backstop(cwd, "find . -execdir git remote rm origin \\;");
+        backstop(cwd, `find . -ok git remote set-url origin ${url} \\;`);
+        backstop(cwd, "parallel git remote add {} ::: a b");
+        backstop(cwd, `echo "git config remote.origin.url ${url}" | sh`);
+        backstop(cwd, `echo "GIT REMOTE SET-URL origin ${url}" | sh`);
+      }
+    });
+
+    it("(1) backstop: documented false-positive class — the phrase as mere TEXT outside a heredoc is denied", () => {
+      backstop(protectedRepo, "git commit -m 'document git remote set-url misuse'");
+      backstop(protectedRepo, 'echo "never run git remote set-url"');
+      backstop(protectedRepo, 'echo "time git remote set-url origin x"');
+      backstop(otherRepo, `gh pr create --title t --body "run git remote add o ${url} by hand"`);
+      backstop(otherRepo, 'grep -rn "git remote set-url" scripts/');
+      // ...but the same text in a heredoc (fed to a non-shell) or a read is fine.
+      assert.equal(run(`gh pr create --title t --body-file - <<'EOF'\nrun git remote add o ${url} by hand\nEOF`, protectedRepo).status, 0);
+      assert.equal(run('git log --grep "remote"', protectedRepo).status, 0);
+      assert.equal(run("git config --get remote.origin.url && echo remote", protectedRepo).status, 0);
+    });
+
+    it("(1) backstop: a strict mutation resolved to a non-protected repo is not re-denied", () => {
+      assert.equal(run(`git -C ${otherRepo} remote add up ${url}`, protectedRepo).status, 0);
+      assert.equal(run(`git remote add up ${url} && git remote set-url up ${url}`, otherRepo).status, 0);
+      assert.equal(run(`git config remote.up.url ${url}`, otherRepo).status, 0);
+      // process substitution is strictly parsed: decided by its cwd
+      assert.equal(run(`cat <(git remote add o ${url})`, otherRepo).status, 0);
+      assert.equal(run(`cat <(git remote add o ${url})`, protectedRepo).status, 2);
+    });
+
+    it("(2) a remote.* config key is matched case-insensitively", () => {
+      assert.equal(run(`git config REMOTE.origin.url ${url}`, protectedRepo).status, 2);
+      assert.equal(run(`git config Remote.origin.pushurl ${url}`, protectedRepo).status, 2);
+      assert.equal(run("git config --unset REMOTE.origin.url", protectedRepo).status, 2);
+      assert.equal(run("git config --get REMOTE.origin.url", protectedRepo).status, 0);
+      assert.equal(run(`git config REMOTE.origin.url ${url}`, otherRepo).status, 0);
+    });
+
+    it("(3) a quoted-empty value is a WRITE, not a read", () => {
+      for (const v of ['""', "''", "$''"]) {
+        assert.equal(run(`git config remote.origin.url ${v}`, protectedRepo).status, 2, v);
+        assert.equal(run(`git config remote.origin.url ${v}`, otherRepo).status, 0, v);
+      }
+      assert.equal(run("git config remote.origin.url", protectedRepo).status, 0);
+    });
+
+    it("(4) an analysis crash after a mutation is identified denies and logs to stderr", () => {
+      // PATH has python3 but no git: is_protected raises once the mutation is found.
+      const which = (b: string) =>
+        spawnSync("sh", ["-c", `command -v ${b}`], { encoding: "utf-8" }).stdout.trim();
+      const binDir = join(tmp, "py-only-bin-r4");
+      mkdirSync(binDir, { recursive: true });
+      for (const b of ["python3", "cat"]) {
+        if (!existsSync(join(binDir, b))) symlinkSync(which(b), join(binDir, b));
+      }
+      for (const command of [`git remote set-url origin ${url}`, 'git config REMOTE.o.url ""']) {
+        const res = spawnSync(which("bash"), [HOOK], {
+          input: JSON.stringify({ cwd: otherRepo, tool_name: "Bash", tool_input: { command } }),
+          encoding: "utf-8",
+          env: { PATH: binDir, HOME: process.env.HOME ?? "", HYDRA_REMOTE_FENCE_PROTECTED_GITDIR: join(protectedRepo, ".git") },
+        });
+        assert.equal(res.status, 2, res.stderr);
+        assert.match(res.stderr, /internal error resolving a remote mutation/);
+        assert.match(res.stderr, /Traceback/);
+        assert.match(res.stderr, /analysis failed on a command mentioning remote\/config/);
+      }
+    });
+
+    it("(5) a LITERAL target that does not exist yet is decided by path", () => {
+      const fresh = join(tmp, "fresh-r4");
+      assert.equal(run(`git init ${fresh} && cd ${fresh} && git remote add o ${url}`, protectedRepo).status, 0);
+      assert.equal(run(`git init ${fresh} && git -C ${fresh} remote add o ${url}`, protectedRepo).status, 0);
+      assert.equal(run(`mkdir -p ${fresh} && cd ${fresh} || exit 1; git remote add o ${url}`, protectedRepo).status, 0);
+      // a not-yet-existing path INSIDE the protected repo / its worktree is protected
+      assert.equal(run(`cd ${protectedRepo}/not-yet && git remote add o ${url}`, otherRepo).status, 2);
+      assert.equal(run(`git -C ${protectedWorktree}/not-yet remote add o ${url}`, otherRepo).status, 2);
+      // an unresolved target still falls back to the session cwd
+      assert.equal(run(`cd "$X" && git remote add o ${url}`, protectedRepo).status, 2);
+    });
+
+    it("(6) xargs: the command word is the first non-option word after the wrapper's options", () => {
+      // The loose tokenizer now takes `echo` as the command (no `unparseable`
+      // verdict), but the TOKEN-PAIR BACKSTOP still denies the text: the
+      // documented false-positive trade-off — run such a line by hand.
+      backstop(protectedRepo, "xargs -n1 echo git remote add");
+      backstop(otherRepo, "xargs -n 1 echo git remote add");
+      // a real git after wrapper options is still found by the loose tokenizer
+      for (const cmd of [
+        "xargs -I{} git remote rm {}",
+        "nice -n 5 git remote add o x",
+        "sudo -u x git remote add o x",
+        "env -i X=1 git remote add o x",
+        "timeout 5 git remote add o x",
+      ]) {
+        const r = run(cmd, otherRepo);
+        assert.equal(r.status, 2, cmd);
+        assert.match(r.stderr, /unparseable remote mutation/, cmd);
+      }
+      assert.equal(run("xargs -n1 echo hello", protectedRepo).status, 0);
+    });
+
+    it("(7) only real-shell heredocs are scanned; data heredocs fed to other programs are ignored", () => {
+      const body = `git remote set-url origin ${url}`;
+      for (const prog of ["python3 -", "node", "perl", "ssh host", "sudo tee /tmp/x", "./deploy.sh.txt-reader"]) {
+        assert.equal(run(`${prog} <<'EOF'\n${body}\nEOF`, protectedRepo).status, 0, prog);
+      }
+      for (const prog of ["sh", "bash", "zsh", "dash", "ksh", "/bin/bash -s", "sudo bash"]) {
+        assert.equal(run(`${prog} <<'EOF'\n${body}\nEOF`, protectedRepo).status, 2, prog);
+      }
+    });
+
+    it("(8) ANSI-C quoting cannot hide the subcommand", () => {
+      for (const cwd of [protectedRepo, otherRepo]) {
+        for (const cmd of [
+          "git remote $'add' o x",
+          "git $'remote' add o x",
+          "git remote $'set-url' origin x",
+          "git remote $'\\x61dd' o x",
+        ]) {
+          const r = run(cmd, cwd);
+          assert.equal(r.status, 2, `${cmd} @ ${cwd}\n${r.stderr}`);
+        }
+      }
+      // A $'...' config KEY is decoded, so the strict parser resolves it like a plain key.
+      assert.equal(run("git config $'remote.origin.url' x", protectedRepo).status, 2);
+      assert.equal(run("git config $'REMOTE.origin.url' x", protectedRepo).status, 2);
+      assert.equal(run("git config $'remote.origin.url' x", otherRepo).status, 0);
+      assert.equal(run("git remote $'-v'", protectedRepo).status, 0);
+    });
+  });
+
+  describe("issue #5026 decision A: scoped deny-on-crash", () => {
+    const url = "https://x/y.git";
+
+    it("a command mentioning neither remote nor config passes without python", () => {
+      for (const py of ["/nonexistent/python3", "/bin/false"]) {
+        for (const cmd of ["ls -la", "git status && npm test", "git push origin HEAD:x"]) {
+          const r = run(cmd, protectedRepo, "Bash", { HYDRA_REMOTE_FENCE_PYTHON: py });
+          assert.equal(r.status, 0, `${py}: ${cmd}: ${r.stderr}`);
+        }
+      }
+    });
+
+    it("denies a remote/config command when python is unavailable or emits no verdict", () => {
+      for (const py of ["/nonexistent/python3", "/bin/true", "/bin/false"]) {
+        for (const cwd of [protectedRepo, otherRepo, tmp]) {
+          const r = run(`git remote set-url origin ${url}`, cwd, "Bash", { HYDRA_REMOTE_FENCE_PYTHON: py });
+          assert.equal(r.status, 2, `${py} @ ${cwd}: ${r.stderr}`);
+          assert.match(r.stderr, /analysis failed on a command mentioning remote\/config — denied fail-closed/);
+          // The deny payload is valid JSON even though python never ran.
+          const json = r.stderr.trim().split("\n").pop() ?? "";
+          const parsed = JSON.parse(json);
+          assert.equal(parsed.hookSpecificOutput.permissionDecision, "deny");
+          assert.equal(parsed.hookSpecificOutput.hookEventName, "PreToolUse");
+        }
+      }
+      // Quote/backslash-split spellings still reach the analysis (pre-filter
+      // drops quotes and backslashes before matching).
+      for (const cmd of [`git "re"mote set-url origin ${url}`, `git re\\mote add up ${url}`, `git con'fig' remote.o.url y`]) {
+        const r = run(cmd, protectedRepo, "Bash", { HYDRA_REMOTE_FENCE_PYTHON: "/nonexistent/python3" });
+        assert.equal(r.status, 2, cmd);
+      }
+    });
+
+    it("denies when the analysis itself crashes (git missing) on a config remote write", () => {
+      // A PATH with python3 but no git: subprocess.run(["git", ...]) raises
+      // inside is_protected, which must map to ERROR -> deny, never ALLOW.
+      const which = (b: string) =>
+        spawnSync("sh", ["-c", `command -v ${b}`], { encoding: "utf-8" }).stdout.trim();
+      const binDir = join(tmp, "py-only-bin");
+      mkdirSync(binDir, { recursive: true });
+      for (const b of ["python3", "cat"]) {
+        if (!existsSync(join(binDir, b))) symlinkSync(which(b), join(binDir, b));
+      }
+      assert.ok(!existsSync(join(binDir, "git")));
+      const res = spawnSync(which("bash"), [HOOK], {
+        input: JSON.stringify({
+          cwd: protectedRepo,
+          tool_name: "Bash",
+          tool_input: { command: "git config remote.x.url y" },
+        }),
+        encoding: "utf-8",
+        env: {
+          PATH: binDir,
+          HOME: process.env.HOME ?? "",
+          HYDRA_REMOTE_FENCE_PROTECTED_GITDIR: join(protectedRepo, ".git"),
+        },
+      });
+      assert.equal(res.status, 2, res.stderr);
+      assert.match(res.stderr, /analysis failed on a command mentioning remote\/config/);
+    });
+
+    it("denies malformed stdin that mentions remote/config; allows malformed stdin that does not", () => {
+      const bad = spawnSync("bash", [HOOK], { input: "{not json: git remote set-url origin x", encoding: "utf-8" });
+      assert.equal(bad.status, 2, bad.stderr);
+      assert.match(bad.stderr, /analysis failed/);
+      const benign = spawnSync("bash", [HOOK], { input: "{not json: ls", encoding: "utf-8" });
+      assert.equal(benign.status, 0);
+    });
+
+    it("denies a mutation with no session cwd; keeps the legitimate fail-open exits", () => {
+      assert.equal(run(`git remote set-url origin ${url}`, "").status, 2);
+      assert.equal(run("", protectedRepo).status, 0); // empty command
+      assert.equal(run(`git remote set-url origin ${url}`, protectedRepo, "Edit").status, 0); // non-Bash
+      assert.equal(run(`git remote set-url origin ${url}`, tmp).status, 0); // non-repo cwd, strict parse
+      assert.equal(run("git remote -v && git config --get remote.origin.url", protectedRepo).status, 0);
+      // Non-repo cwd does NOT open the loose fail-closed scan.
+      assert.equal(run(`time git remote set-url origin ${url}`, tmp).status, 2);
+    });
   });
 
   it("is registered as a PreToolUse Bash hook by setup-claude-hooks.sh and in the GLM drainer settings", () => {
