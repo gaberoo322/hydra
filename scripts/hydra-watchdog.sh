@@ -1997,7 +1997,7 @@ run_launch_flow() {
 
 run_origin_identity() {
   local HYDRA_ROOT="${HYDRA_ROOT:-/home/gabe/hydra}"
-  local EXPECTED="${HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO:-gaberoo322/hydra}"
+  local EXPECTED="${HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO-gaberoo322/hydra}"  # unset-only default: an explicit empty value is honoured (repair then refuses to act)
   local STATE_DIR="${HYDRA_WATCHDOG_ORIGIN_STATE_DIR:-/tmp}"
   local NOTIFY_STREAM="${HYDRA_WATCHDOG_ORIGIN_NOTIFY_STREAM:-hydra:notifications}"
   local REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
