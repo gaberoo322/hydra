@@ -11,6 +11,7 @@
  */
 
 import { deepStrictEqual, ok, strictEqual, throws } from "node:assert";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -500,6 +501,61 @@ describe("prose-drift: verification never throws on unreadable inputs", () => {
       });
     });
   }
+
+  // CLI --update-baseline on a scannable throwaway tree: the refuse-to-grow
+  // branch and the successful write (sorted + deduped rows).
+  const LIVE_ROWS = ["docs/live.md:path:src/also-gone.ts", "docs/live.md:path:src/gone.ts"];
+  const scannableTree = (baseline: string): Record<string, string> => {
+    const empty = JSON.stringify({ rows: [] });
+    return {
+      // `src/gone.ts` is claimed twice → one deduped row; neither path is tracked.
+      "docs/live.md": "# Live\n\n`src/gone.ts` and `src/also-gone.ts` exist.\n\nAgain `src/gone.ts`.\n",
+      "docs/generated/corpus.json": JSON.stringify({ rows: [{ path: "docs/live.md", tier: "living" }] }),
+      "docs/generated/routes.json": empty,
+      "docs/generated/redis-keys.json": empty,
+      "docs/generated/streams.json": empty,
+      "docs/generated/skills.json": empty,
+      "docs/generated/env-vars.json": empty,
+      "docs/generated/counts.json": empty,
+      [RETIRED_TERMS_FILE]: "[]\n",
+      [BASELINE_FILE]: baseline,
+    };
+  };
+  /** The CLI's default scan lists tracked files via `git ls-files`. */
+  const gitTrack = (root: string): void => {
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    execFileSync("git", ["add", "-A"], { cwd: root });
+  };
+
+  test("--update-baseline without --allow-grow refuses to grow: exit 1, baseline byte-identical", async () => {
+    const seeded = `${JSON.stringify([LIVE_ROWS[1]], null, 2)}\n`;
+    await withFixture(scannableTree(seeded), (root) => {
+      gitTrack(root);
+      strictEqual(runProseDriftCli(root, ["--update-baseline"]), 1);
+      strictEqual(readFileSync(join(root, BASELINE_FILE), "utf8"), seeded);
+    });
+  });
+
+  test("--update-baseline that only shrinks writes the live rows sorted and deduped", async () => {
+    // Unsorted, duplicated, plus a stale row the scan no longer produces.
+    const seeded = `${JSON.stringify(["docs/live.md:path:src/fixed.ts", LIVE_ROWS[1], LIVE_ROWS[0], LIVE_ROWS[1]], null, 2)}\n`;
+    await withFixture(scannableTree(seeded), (root) => {
+      gitTrack(root);
+      strictEqual(runProseDriftCli(root, ["--update-baseline"]), 0);
+      strictEqual(readFileSync(join(root, BASELINE_FILE), "utf8"), `${JSON.stringify(LIVE_ROWS, null, 2)}\n`);
+      strictEqual(runProseDriftCli(root, []), 0, "the written baseline must satisfy the check arm");
+    });
+  });
+
+  test("--update-baseline --allow-grow grows the baseline, sorted and deduped", async () => {
+    await withFixture(scannableTree("[]\n"), (root) => {
+      gitTrack(root);
+      strictEqual(runProseDriftCli(root, ["--update-baseline", "--allow-grow"]), 0);
+      const written = JSON.parse(readFileSync(join(root, BASELINE_FILE), "utf8")) as string[];
+      deepStrictEqual(written, LIVE_ROWS);
+      deepStrictEqual(written, [...new Set(written)].sort());
+    });
+  });
 
   test("readBaseline rejects valid JSON that is not an array of strings (null, not a throw)", async () => {
     await withFixture({ [BASELINE_FILE]: JSON.stringify({ rows: [] }) }, (root) => {
