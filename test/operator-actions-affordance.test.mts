@@ -691,6 +691,9 @@ describe("the dismiss + immediate triggers bind to the feed-level host", () => {
       "immediate in-dashboard button reads the HOST's in-flight set (QA round 6)",
     );
     assert.ok(!aff.includes("triggerDisabled(busy,"), "no trigger reads a row-local busy flag (QA round 6)");
+    assert.ok(!aff.includes("disabled={busy}"), "no confirm-first button reads ONLY its row-local busy flag (QA round 7)");
+    assert.ok(aff.includes("disabled={busy || inFlight}"), "the confirm-first Confirm button reads the HOST's in-flight set (QA round 7)");
+    assert.ok(aff.includes("onClick={() => setArmed(true)}\n            disabled={inFlight}"), "the confirm-first arm button reads the HOST's in-flight set (QA round 7)");
     assert.ok(aff.includes("track(windowId, fireRequest)"), "the immediate fire runs through the host tracker");
     assert.ok(aff.includes("runTracked(inFlightTracker, id, fn)"), "the host's track wraps the tested runTracked");
     assert.ok(aff.includes("createInFlightTracker(setInFlight)"), "the host owns the one in-flight tracker");

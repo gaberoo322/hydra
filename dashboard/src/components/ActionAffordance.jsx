@@ -303,7 +303,7 @@ function InDashboardAffordance({ action, onFired, onResult }) {
             <button
               type="button"
               onClick={fire}
-              disabled={busy}
+              disabled={busy || inFlight}
               className="rounded border border-emerald-500/60 px-2.5 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40"
             >
               {busy ? "…" : `Confirm ${action.label}?`}
@@ -322,9 +322,10 @@ function InDashboardAffordance({ action, onFired, onResult }) {
           <button
             type="button"
             onClick={() => setArmed(true)}
-            className="rounded border border-emerald-500/45 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-500/10"
+            disabled={inFlight}
+            className="rounded border border-emerald-500/45 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40"
           >
-            {action.label}…
+            {inFlight ? "…" : `${action.label}…`}
           </button>
         )
       ) : (
