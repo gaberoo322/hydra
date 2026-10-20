@@ -39,6 +39,7 @@ import {
 import {
   operatorChannel,
   messageFromEvent,
+  checkOperatorChannelCredentials,
   type OperatorChannel,
 } from "./operator-channel/index.ts";
 import { recordEvent } from "./digest.ts";
@@ -188,6 +189,8 @@ export function startConsumers(
   eventBus: EventBus,
   channel: Pick<OperatorChannel, "page" | "brief" | "resolve"> = operatorChannel,
 ): void {
+  checkOperatorChannelCredentials();
+
   // A restart means the consumers are alive again: publish the one "recovered"
   // message for any consumer:dead page still open (no-op when none is).
   for (const consumerName of CONSUMER_NAMES) {
@@ -215,15 +218,15 @@ export function startConsumers(
         { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
         "[DLQ] failed event",
       );
-      // Dead-letter is not on the closed page list (ADR-0045): a brief item.
+      // Dead-letter is on the closed page list (ADR-0045): deduped per stream+type.
       await channel
-        .brief(
+        .page(
           messageFromEvent({
             type: E.DLQ_ALERT,
             payload: { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
           }),
         )
-        .catch((err) => logger.error({ err }, "[DLQ] failed to append brief item"));
+        .catch((err) => logger.error({ err }, "[DLQ] failed to page dead-letter item"));
     }, { count: 1, blockMs: 10000 }),
     undefined,
     channel,

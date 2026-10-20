@@ -193,7 +193,7 @@ describe("severity is decided by the page list, never the producer", () => {
       messageFromEvent({ type: "dlq:alert", payload: { originalStream: "s", eventType: "e" } }).dedupKey,
       "dlq:s:e",
     );
-    assert.equal(isPageKind("dlq:alert"), false);
+    assert.equal(isPageKind("dlq:alert"), true);
   });
 });
 
@@ -347,6 +347,28 @@ describe("OperatorChannel fails OPEN when Redis is unreachable", () => {
     assert.equal(sent.length, 1);
   });
 
+  test("concurrent pages for one dedupKey send exactly once (serialized per key)", async () => {
+    const { store } = memoryStore();
+    const { transport, sent } = fakeTransport();
+    const ch = new OperatorChannel({ store, transport, now: clock().now });
+    const results = await Promise.all([ch.page(pageMsg()), ch.page(pageMsg()), ch.page(pageMsg())]);
+    assert.equal(sent.length, 1);
+    assert.equal(results.filter((r) => r.sent).length, 1);
+  });
+
+  test("resolve clears the dedup key even when the recovered send fails", async () => {
+    const { store, dedup } = memoryStore();
+    const c = clock();
+    const ok = fakeTransport();
+    const chOk = new OperatorChannel({ store, transport: ok.transport, now: c.now });
+    await chOk.page(pageMsg());
+    assert.equal(dedup.has("infra:node_modules_wiped"), true);
+    const failing = fakeTransport({ ok: false, error: "boom", status: 500 } as TelegramTransportResult);
+    const chBad = new OperatorChannel({ store, transport: failing.transport, now: c.now });
+    assert.equal((await chBad.resolve("infra:node_modules_wiped")).sent, false);
+    assert.equal(dedup.has("infra:node_modules_wiped"), false);
+  });
+
   test("brief() and resolve() never throw when the store is down", async () => {
     const m = memoryStore("reject");
     const ch = new OperatorChannel({ store: m.store, transport: fakeTransport().transport });
@@ -385,5 +407,13 @@ describe("single credential loader", () => {
       assert.ok(!src.includes("TELEGRAM_CHAT_ID"), `${f} reads the chat id outside the loader`);
       assert.ok(!src.includes("TELEGRAM_BOT_TOKEN"), `${f} reads the bot token outside the loader`);
     }
+  });
+});
+
+describe("checkOperatorChannelCredentials (boot check)", () => {
+  test("reports false for an empty env and true when both vars are set", async () => {
+    const { checkOperatorChannelCredentials } = await import("../src/operator-channel/channel.ts");
+    assert.equal(checkOperatorChannelCredentials({}), false);
+    assert.equal(checkOperatorChannelCredentials({ TELEGRAM_BOT_TOKEN: "t", TELEGRAM_CHAT_ID: "1" }), true);
   });
 });

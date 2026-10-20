@@ -28,6 +28,9 @@ export const PAGE_KINDS = [
   "service:autopilot_failed",
   "service:tunnel_failed",
   "service:backup_failed",
+  // A dead-letter item — until the Morning Brief reader lands this is the only
+  // operator surface for DLQ failures (dedup is per stream+eventType)
+  E.DLQ_ALERT,
   // The /hydra-review pickup set going non-empty
   E.REVIEW_PICKUP_READY,
 ] as const;

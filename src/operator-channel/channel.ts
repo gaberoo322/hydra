@@ -26,6 +26,7 @@ import {
   type DeliveryLogEntry,
 } from "../redis/operator-channel.ts";
 import type { OperatorFact, OperatorMessage } from "./message.ts";
+import { loadTelegramCredentials } from "./credentials.ts";
 import { isPageKind } from "./page-list.ts";
 import { renderMessage, type RenderVariant } from "./render.ts";
 
@@ -171,6 +172,8 @@ export class OperatorChannel {
   private readonly timeoutMs: number;
   /** Last send per dedupKey in THIS process — bounds repeats while Redis is down. */
   private readonly localSent = new Map<string, number>();
+  /** Per-dedupKey serialization tail (see {@link serialize}). */
+  private readonly inFlight = new Map<string, Promise<void>>();
 
   constructor(deps: OperatorChannelDeps = {}) {
     this.store = deps.store ?? redisOperatorChannelStore;
@@ -226,11 +229,34 @@ export class OperatorChannel {
     return { sent: false, reason: view.reason === "no-credentials" ? "no-credentials" : "transport-failed" };
   }
 
+  /**
+   * Serialize page()/resolve() per dedupKey so the read-send-write dedup is
+   * effectively atomic within this process (concurrent pages for one key cannot
+   * both observe "absent" and both send).
+   */
+  private serialize<T>(dedupKey: string, run: () => Promise<T>): Promise<T> {
+    const prior = this.inFlight.get(dedupKey) ?? Promise.resolve();
+    const next = prior.then(run, run);
+    const tail = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.inFlight.set(dedupKey, tail);
+    void tail.then(() => {
+      if (this.inFlight.get(dedupKey) === tail) this.inFlight.delete(dedupKey);
+    });
+    return next;
+  }
+
   /** Send (or suppress) a Page. Throws only for a non-page kind. */
   async page(msg: OperatorMessage): Promise<ChannelResult> {
     if (!isPageKind(msg.kind)) {
       throw new InvalidArgumentError(`"${msg.kind}" is not on the closed page list (ADR-0045 Decision 3)`);
     }
+    return this.serialize(msg.dedupKey, () => this.pageUnlocked(msg));
+  }
+
+  private async pageUnlocked(msg: OperatorMessage): Promise<ChannelResult> {
     const now = this.now();
     const prev = await this.bounded("readDedup", () => this.store.readDedup(msg.dedupKey));
 
@@ -264,6 +290,10 @@ export class OperatorChannel {
 
   /** Publish one "recovered" message iff the key is bad, then clear it. */
   async resolve(dedupKey: string, title?: string): Promise<ChannelResult> {
+    return this.serialize(dedupKey, () => this.resolveUnlocked(dedupKey, title));
+  }
+
+  private async resolveUnlocked(dedupKey: string, title?: string): Promise<ChannelResult> {
     const prev = await this.bounded("readDedup", () => this.store.readDedup(dedupKey));
     const wasBad = prev === UNAVAILABLE ? this.localSent.has(dedupKey) : nextDedupState(prev, this.now(), "resolve").send === "recovered";
     if (!wasBad) return { sent: false, reason: "not-bad" };
@@ -271,10 +301,10 @@ export class OperatorChannel {
       { severity: "page", kind: "recovered", title: title ?? dedupKey, facts: [], links: [], dedupKey },
       "recovered",
     );
-    if (res.sent) {
-      this.localSent.delete(dedupKey);
-      await this.bounded("delDedup", () => this.store.delDedup(dedupKey));
-    }
+    // Always clear: a failed "recovered" send must not leave the key bad and
+    // suppress a genuine later page (the recovery message is best-effort).
+    this.localSent.delete(dedupKey);
+    await this.bounded("delDedup", () => this.store.delDedup(dedupKey));
     return res;
   }
 
@@ -288,6 +318,19 @@ export class OperatorChannel {
     );
     return { appended: out !== UNAVAILABLE };
   }
+}
+
+/**
+ * Boot-time credential check. Telegram credentials are env-only (the former
+ * hard-coded chat-id fallback is gone), so a missing var silently disables every
+ * send; surface that loudly once at startup. Returns whether both are present.
+ */
+export function checkOperatorChannelCredentials(env: Record<string, string | undefined> = process.env): boolean {
+  if (loadTelegramCredentials(env)) return true;
+  logger.error(
+    "[OperatorChannel] Telegram bot token or chat id missing from the service env — all operator pages/digests are DISABLED until set",
+  );
+  return false;
 }
 
 /** The process-wide channel the in-process producers share. */
