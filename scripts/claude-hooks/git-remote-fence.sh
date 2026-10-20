@@ -11,7 +11,9 @@
 # deleted refs/remotes/origin/master and recent-merges failed open for ~80
 # minutes. Prose rules lower the odds; this hook is the deterministic fence
 # (defense in depth behind the `${VAR:?}` playbook guards and the watchdog's
-# run_origin_identity alarm).
+# run_origin_identity alarm). Since #5065 the watchdog also auto-repairs a
+# wrong origin / missing origin/master; it runs from the watchdog's own shell,
+# which this hook (Claude Code Bash tool calls only) never sees.
 #
 # DENIES (statement-start `git`, optional -C/-c/--opt prefix) when the cwd's
 # `git rev-parse --git-common-dir` resolves to the protected gitdir:

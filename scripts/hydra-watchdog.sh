@@ -1955,15 +1955,35 @@ run_launch_flow() {
 #       ${HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO:-gaberoo322/hydra}, OR
 #   (b) refs/remotes/origin/master does not resolve.
 #
-# STRICTLY READ-ONLY: only `git config --get`, `git rev-parse --verify`, `stat`.
-# Never `git remote`, config writes, `git fetch` or any ref mutation — a wrong
-# URL is never auto-corrected (that mutation is the forbidden class and would
-# mask the writer). Each tick also records the .git/config mtime and logs one
-# INFO line when it moved, so the next rewrite is attributable from the journal.
-# One enveloped XADD onto hydra:notifications per episode, dedup'd by a since
-# marker under the state dir; cleared (re-armed) when both checks pass.
+# AUTO-REPAIR (issue #5065). Detection is read-only (`git config --get`,
+# `git rev-parse --verify`, `stat`). When it fails, the block self-heals from the
+# watchdog's OWN shell (the git-remote-fence hook governs only Claude Code Bash
+# tool calls, so this path is deliberately outside it):
+#   (a) wrong URL  -> `git -C $HYDRA_ROOT config remote.origin.url <canonical>`
+#                     (+ the default fetch refspec if absent), then fetch;
+#   (b) origin/master missing with a correct URL -> fetch only.
+# `git -C "$HYDRA_ROOT" fetch --quiet origin` runs under a timeout, then both
+# checks are re-run against real git. The notification still fires (now saying
+# "repaired", with old/new URL and the fetch result), and the .git/config mtime
+# breadcrumb still logs, so the writer stays attributable. A failed repair or
+# fetch alarms exactly as before, saying the repair failed. Every mutation is
+# `git -C "$HYDRA_ROOT"` — no other repo is ever touched; no `git remote`, push,
+# pull or prune. Never acts when EXPECTED or the canonical URL is empty.
+#
+# Each tick also records the .git/config mtime and logs one INFO line when it
+# moved, so the next rewrite is attributable from the journal. One enveloped
+# XADD onto hydra:notifications per episode-outcome (alarm / repaired /
+# repair-failed), dedup'd by a since marker under the state dir that records
+# the outcome; cleared (re-armed) when both checks pass on a later tick.
 #
 # Fail-safe (like ## DEPLOY DRIFT): any tooling failure logs WARN and returns 0.
+#
+# Knobs:
+#   HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR      0 = kill switch (alarm only). Default 1.
+#   HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL   URL written on repair. Default
+#                                         https://github.com/${EXPECTED}.git;
+#                                         set-but-empty disables the repair.
+#   HYDRA_WATCHDOG_ORIGIN_FETCH_TIMEOUT_S Fetch timeout in seconds (default 60).
 #
 # Testability hooks (off-by-default; pinned by
 # test/watchdog-origin-identity.test.mts):
@@ -2049,13 +2069,39 @@ run_origin_identity() {
   fi
 
   # --- Normalise: strip scheme, user@, host, trailing .git and slashes ---
-  local norm
-  norm="$(printf '%s' "$url" | sed -E 's#^[A-Za-z+]+://##; s#^[^@/]*@##; s#^[^/:]+[:/]##; s#/+$##; s#\.git$##' | tr 'A-Z' 'a-z')"
-  local want
+  origin_identity_norm() {
+    printf '%s' "$1" | sed -E 's#^[A-Za-z+]+://##; s#^[^@/]*@##; s#^[^/:]+[:/]##; s#/+$##; s#\.git$##' | tr 'A-Z' 'a-z'
+  }
+  # Strip any userinfo (https://user:TOKEN@host/...) BEFORE a URL reaches a
+  # log line, the notifications payload or the dashboard alert (#4939 QA).
+  origin_identity_redact() {
+    printf '%s' "${1:-<unset>}" | sed -E 's#^([A-Za-z+]+://)[^/@]*@#\1#'
+  }
+
+  # --- Auto-repair configuration (#5065) ---
+  local AUTOREPAIR="${HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR:-1}"
+  local CANONICAL
+  if [[ -n "${HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL+x}" ]]; then
+    CANONICAL="$HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL"
+  elif [[ -n "$EXPECTED" ]]; then
+    CANONICAL="https://github.com/${EXPECTED}.git"
+  else
+    CANONICAL=""
+  fi
+  local FETCH_TIMEOUT="${HYDRA_WATCHDOG_ORIGIN_FETCH_TIMEOUT_S:-60}"
+  [[ "$FETCH_TIMEOUT" =~ ^[0-9]+$ ]] || FETCH_TIMEOUT=60
+
+  local norm want canon_norm=""
+  norm="$(origin_identity_norm "$url")"
   want="$(printf '%s' "$EXPECTED" | tr 'A-Z' 'a-z')"
+  # An operator-overridden canonical URL (e.g. a mirror) is by definition an
+  # acceptable origin, so a repaired tree does not re-alarm on the next tick.
+  if [[ -n "$CANONICAL" ]]; then
+    canon_norm="$(origin_identity_norm "$CANONICAL")"
+  fi
 
   local reasons=()
-  if [[ "$norm" != "$want" ]]; then
+  if [[ -z "$want" || ( "$norm" != "$want" && "$norm" != "$canon_norm" ) ]]; then
     reasons+=("wrong-origin-url")
   fi
   if [[ "$master_present" != "1" ]]; then
@@ -2073,18 +2119,106 @@ run_origin_identity() {
 
   local reason_str
   reason_str="$(IFS=+; echo "${reasons[*]}")"
-  # Strip any userinfo (https://user:TOKEN@host/...) BEFORE the URL reaches the
-  # log line, the notifications payload or the dashboard alert (#4939 QA).
   local shown_url
-  shown_url="$(printf '%s' "${url:-<unset>}" | sed -E 's#^([A-Za-z+]+://)[^/@]*@#\1#')"
-  log "ALARM ~/hydra origin identity broken: ${reason_str} — remote.origin.url=${shown_url} (expected ${EXPECTED}); refs/remotes/origin/master $([[ "$master_present" == "1" ]] && echo present || echo MISSING) (issue #4939; read-only watchdog, restore from an operator shell)"
+  shown_url="$(origin_identity_redact "$url")"
 
-  if [[ ! -f "$SINCE_MARKER" ]]; then
-    local iso_now payload url_clean xadd_out
+  # --- Auto-repair (#5065): only $HYDRA_ROOT, only remote.origin.*, only fetch ---
+  # outcome: alarm (repair not attempted) | repaired | failed
+  local outcome="alarm" repair_note="" fetch_result="skipped" new_url="$url"
+  if [[ "$AUTOREPAIR" == "0" ]]; then
+    repair_note="auto-repair disabled (HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR=0)"
+  elif [[ -z "$want" || -z "$CANONICAL" ]]; then
+    repair_note="auto-repair skipped (expected repo or canonical URL is empty)"
+  elif [[ ! -e "${HYDRA_ROOT}/.git" ]]; then
+    repair_note="auto-repair skipped (no gitdir under ${HYDRA_ROOT})"
+  else
+    outcome="repaired"
+    if [[ " ${reasons[*]} " == *" wrong-origin-url "* ]]; then
+      if git -C "$HYDRA_ROOT" config remote.origin.url "$CANONICAL" >/dev/null 2>&1; then
+        new_url="$CANONICAL"
+        # A remote that was removed outright has no fetch refspec, and a bare
+        # `git fetch origin` would then never recreate refs/remotes/origin/*.
+        if ! git -C "$HYDRA_ROOT" config --get-all remote.origin.fetch >/dev/null 2>&1; then
+          git -C "$HYDRA_ROOT" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' >/dev/null 2>&1 || {
+            outcome="failed"; repair_note="could not set remote.origin.fetch"
+          }
+        fi
+      else
+        outcome="failed"; repair_note="could not rewrite remote.origin.url"
+      fi
+    fi
+    if [[ "$outcome" == "repaired" ]]; then
+      local frc=0 fetch_err=""
+      if command -v timeout >/dev/null 2>&1; then
+        fetch_err="$(GIT_TERMINAL_PROMPT=0 timeout "$FETCH_TIMEOUT" git -C "$HYDRA_ROOT" fetch --quiet origin 2>&1)" || frc=$?
+      else
+        fetch_err="$(GIT_TERMINAL_PROMPT=0 git -C "$HYDRA_ROOT" fetch --quiet origin 2>&1)" || frc=$?
+      fi
+      if (( frc == 0 )); then
+        fetch_result="ok"
+      else
+        fetch_result="failed-rc-${frc}"
+        outcome="failed"
+        repair_note="origin fetch failed (rc=${frc})"
+        if (( frc == 124 )); then
+          repair_note="origin fetch timed out after ${FETCH_TIMEOUT}s"
+        fi
+        if [[ -n "$fetch_err" ]]; then
+          log "WARN fetch stderr: $(printf '%s' "$fetch_err" | head -n 3 | sed -E 's#([A-Za-z+]+://)[^/@ ]*@#\1#g' | tr '\n' ' ')"
+        fi
+      fi
+    fi
+    if [[ "$outcome" == "repaired" ]]; then
+      # Re-verify against real git, never against the injected test hooks.
+      local post_url post_norm
+      post_url="$(git -C "$HYDRA_ROOT" config --get remote.origin.url 2>/dev/null || true)"
+      post_norm="$(origin_identity_norm "$post_url")"
+      if [[ "$post_norm" != "$want" && "$post_norm" != "$canon_norm" ]]; then
+        outcome="failed"; repair_note="origin URL still wrong after repair"
+      elif ! git -C "$HYDRA_ROOT" rev-parse --verify -q refs/remotes/origin/master >/dev/null 2>&1; then
+        outcome="failed"; repair_note="refs/remotes/origin/master still missing after fetch"
+      else
+        new_url="$post_url"
+      fi
+    fi
+    if [[ "$outcome" == "failed" ]]; then
+      repair_note="auto-repair FAILED: ${repair_note}"
+    fi
+  fi
+  local shown_new
+  shown_new="$(origin_identity_redact "$new_url")"
+
+  if [[ "$outcome" == "repaired" ]]; then
+    log "REPAIRED ~/hydra origin identity: ${reason_str} — remote.origin.url ${shown_url} -> ${shown_new}; fetch ${fetch_result}; refs/remotes/origin/master present (issue #5065 auto-repair; check the .git/config INFO breadcrumb for the writer)"
+  else
+    log "ALARM ~/hydra origin identity broken: ${reason_str} — remote.origin.url=${shown_url} (expected ${EXPECTED}); refs/remotes/origin/master $([[ "$master_present" == "1" ]] && echo present || echo MISSING); ${repair_note} (issues #4939/#5065; restore from an operator shell)"
+  fi
+
+  # Dedup: the since marker records the published outcome, so a persistent
+  # failure publishes once, but an outcome change (alarm -> repaired, or a
+  # repair that later fails) is a new event. Legacy markers (bare epoch) read
+  # as outcome "alarm".
+  local prev_outcome=""
+  if [[ -f "$SINCE_MARKER" ]]; then
+    prev_outcome="$(awk '{print $2}' "$SINCE_MARKER" 2>/dev/null || true)"
+    if [[ -z "$prev_outcome" ]]; then
+      prev_outcome="alarm"
+    fi
+  fi
+  if [[ "$prev_outcome" != "$outcome" ]]; then
+    local iso_now payload url_clean new_clean note_clean xadd_out repair_field
     iso_now="$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || echo "")"
     url_clean="$(printf '%s' "$shown_url" | tr -dc 'a-zA-Z0-9_.:/@<>-')"
-    payload="$(printf '{"signal":"origin-identity","reason":"%s","url":"%s"}' "$reason_str" "$url_clean")"
-    # The since-marker is created ONLY after the XADD succeeds (a stream id
+    new_clean="$(printf '%s' "$shown_new" | tr -dc 'a-zA-Z0-9_.:/@<>-')"
+    note_clean="$(printf '%s' "$repair_note" | tr -dc 'a-zA-Z0-9_.:/@<>()=, -')"
+    case "$outcome" in
+      repaired) repair_field="repaired" ;;
+      failed) repair_field="failed" ;;
+      *) repair_field="not-attempted" ;;
+    esac
+    payload="$(printf '{"signal":"origin-identity","reason":"%s","url":"%s","repair":"%s","newUrl":"%s","fetch":"%s","note":"%s"}' \
+      "$reason_str" "$url_clean" "$repair_field" "$new_clean" "$fetch_result" "$note_clean")"
+    # The since-marker is written ONLY after the XADD succeeds (a stream id
     # comes back), so a Redis blip on the first tick retries next tick instead
     # of suppressing the alert for the whole episode.
     xadd_out="$(rc_read XADD "$NOTIFY_STREAM" '*' \
@@ -2095,8 +2229,8 @@ run_origin_identity() {
       correlationId "origin-identity" \
       payload "$payload")"
     if [[ -n "$xadd_out" ]]; then
-      date +%s > "$SINCE_MARKER" 2>/dev/null || true
-      log "in-band delivery published type=infra:origin_identity_wrong -> ${NOTIFY_STREAM}"
+      printf '%s %s\n' "$(date +%s 2>/dev/null || echo 0)" "$outcome" > "$SINCE_MARKER" 2>/dev/null || true
+      log "in-band delivery published type=infra:origin_identity_wrong repair=${repair_field} -> ${NOTIFY_STREAM}"
     else
       log "WARN in-band delivery FAILED (XADD returned nothing) — will retry next tick"
     fi

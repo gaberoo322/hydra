@@ -97,7 +97,11 @@ export function formatAlertMessage(event: AlertGrammarEvent): string {
     case E.LAUNCH_QUOTA_STRETCH: return `Launch quota stretch: autopilot blocked (${p.reason || "unknown reason"}) for ${fmtStreakMs(p.durationMs)} — sustained past the ${fmtStreakMs(p.thresholdMs)} alarm threshold`;
     case E.LAUNCH_LATENCY_BREACH: return `Launch latency breach: eligibility probe took ${fmtStreakMs(p.durationMs)} — sustained past the ${fmtStreakMs(p.thresholdMs)} alarm threshold`;
     case E.INFRA_NODE_MODULES_WIPED: return `node_modules integrity: ${p.signal || "unknown root"} — ${p.reason || "broken"}`;
-    case E.INFRA_ORIGIN_IDENTITY_WRONG: return `~/hydra origin identity: ${p.reason || "wrong"} — observed origin ${p.url || "unknown"}; restore the orchestrator remote from an operator shell and fetch origin`;
+    case E.INFRA_ORIGIN_IDENTITY_WRONG:
+      // #5065: the watchdog self-heals; `repair` is absent on pre-#5065 payloads.
+      if (p.repair === "repaired") return `~/hydra origin identity auto-repaired: ${p.reason || "wrong"} — origin ${p.url || "unknown"} -> ${p.newUrl || "canonical"}, fetch ${p.fetch || "ok"}; find the writer via the .git/config change breadcrumb in the watchdog journal`;
+      if (p.repair === "failed") return `~/hydra origin identity: ${p.reason || "wrong"} — observed origin ${p.url || "unknown"}; ${p.note || "auto-repair FAILED"}; restore the orchestrator remote from an operator shell and fetch origin`;
+      return `~/hydra origin identity: ${p.reason || "wrong"} — observed origin ${p.url || "unknown"}; restore the orchestrator remote from an operator shell and fetch origin`;
     case E.GLM_DRAINER_STERILE: return `GLM drainer sterile: heartbeat live and eligible work queued, but zero drainer PRs — sustained ${fmtStreakMs(p.durationMs)} past the ${fmtStreakMs(p.thresholdMs)} threshold; the #3754 partition is hiding glm-eligible work from the Opus lane`;
     default: return `${event.type}: ${JSON.stringify(p).slice(0, 200)}`;
   }
