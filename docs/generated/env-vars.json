@@ -3096,27 +3096,23 @@
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2149
+          "line": 2151
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2150
+          "line": 2152
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2154
+          "line": 2156
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2158
+          "line": 2160
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2159
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2170
+          "line": 2161
         },
         {
           "path": "scripts/hydra-watchdog.sh",
@@ -3124,11 +3120,15 @@
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2191
+          "line": 2174
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2195
+          "line": 2193
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2197
         },
         {
           "path": "src/aggregators/architecture-graph.ts",
@@ -3760,6 +3760,10 @@
         {
           "path": "scripts/hydra-watchdog.sh",
           "line": 2092
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2123
         }
       ],
       "inEnvExample": false,
