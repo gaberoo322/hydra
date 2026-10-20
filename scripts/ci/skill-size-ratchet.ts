@@ -55,6 +55,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { frontmatterText, parseFrontmatter } from "../../src/skills/playbook.ts";
 import { loadJsonBaseline, writeJsonBaseline } from "./seam-check-lib.ts";
 
 const REPO_ROOT = resolve(fileURLToPath(import.meta.url), "../../..");
@@ -114,48 +115,27 @@ export interface CompareResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Split a playbook into frontmatter + body, mirroring sync-skills.sh's parse
- * (`^---\n(.*?)\n---\n(.*)$` DOTALL). Returns `frontmatter: null` for a
- * frontmatter-less file (sync-skills skips those — they are not skill sources).
- * Throws on MALFORMED frontmatter (opens with `---` but never closes): silently
- * exempting a truncated header would hide a real skill source from the ratchet.
+ * Measure one frontmattered playbook source using the shared ADR-0041 core
+ * grammar (`src/skills/playbook.ts`). Returns `null` for a frontmatter-less
+ * file (sync-skills skips those - not a skill source). Throws on MALFORMED
+ * frontmatter (opens with `---` but never closes): silently exempting a
+ * truncated header would hide a real skill source from the ratchet. That
+ * fail-loud policy lives here, not in the core (the core's null means "skip").
  */
-export function splitFrontmatter(text: string): {
-  frontmatter: string | null;
-  body: string;
-} {
-  const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text);
-  if (m) return { frontmatter: m[1], body: m[2] };
-  if (text.startsWith("---\n")) {
-    throw new Error(
-      "malformed frontmatter: file opens with `---` but has no closing `---` delimiter",
-    );
-  }
-  return { frontmatter: null, body: text };
-}
-
-/**
- * Extract the `description:` value from raw frontmatter, mirroring
- * sync-skills.sh's line-based `k: v` parse (strip one layer of quotes).
- * Returns "" when absent.
- */
-export function extractDescription(frontmatterRaw: string): string {
-  for (const rawLine of frontmatterRaw.split("\n")) {
-    const line = rawLine.trimEnd();
-    if (!line || line.startsWith("#") || !line.includes(":")) continue;
-    const idx = line.indexOf(":");
-    const key = line.slice(0, idx).trim();
-    if (key !== "description") continue;
-    let value = line.slice(idx + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
+export function measureSkillSource(text: string): MeasuredEntry | null {
+  const parsed = parseFrontmatter(text);
+  if (parsed === null) {
+    if (text.startsWith("---\n")) {
+      throw new Error(
+        "malformed frontmatter: file opens with `---` but has no closing `---` delimiter",
+      );
     }
-    return value;
+    return null;
   }
-  return "";
+  return {
+    body: countWords(parsed.body),
+    description: countWords(frontmatterText(parsed.fm, "description")),
+  };
 }
 
 /** Whitespace-token word count: split on /\s+/, drop empties. Pure. */
@@ -281,17 +261,14 @@ export async function measureSkillSources(): Promise<Record<string, MeasuredEntr
     const abs = join(PLAYBOOKS_DIR, name);
     const rel = relative(REPO_ROOT, abs);
     const text = await readFile(abs, "utf8");
-    let split;
+    let entry: MeasuredEntry | null;
     try {
-      split = splitFrontmatter(text);
+      entry = measureSkillSource(text);
     } catch (err) {
       throw new Error(`${rel}: ${(err as Error).message}`);
     }
-    if (split.frontmatter === null) continue; // not a skill source — exempt
-    measured[rel] = {
-      body: countWords(split.body),
-      description: countWords(extractDescription(split.frontmatter)),
-    };
+    if (entry === null) continue; // not a skill source - exempt
+    measured[rel] = entry;
   }
 
   for (const name of await listMarkdown(FRAGMENTS_DIR)) {
