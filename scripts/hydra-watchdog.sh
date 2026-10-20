@@ -2135,6 +2135,8 @@ run_launch_flow() {
 # the single alarm owner for that failure class. Fails (alarms) when
 #   (a) the normalised remote.origin.url is not
 #       ${HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO:-gaberoo322/hydra}, OR
+#   (a') the origin host is not ${HYDRA_WATCHDOG_EXPECTED_ORIGIN_HOST:-github.com}
+#       (reason wrong-origin-host, issue #5026), OR
 #   (b) refs/remotes/origin/master does not resolve.
 #
 # STRICTLY READ-ONLY: only `git config --get`, `git rev-parse --verify`, `stat`.
@@ -2232,13 +2234,28 @@ run_origin_identity() {
 
   # --- Normalise: strip scheme, user@, host, trailing .git and slashes ---
   local norm
-  norm="$(printf '%s' "$url" | sed -E 's#^[A-Za-z+]+://##; s#^[^@/]*@##; s#^[^/:]+[:/]##; s#/+$##; s#\.git$##' | tr 'A-Z' 'a-z')"
+  # Userinfo (INV-8, QA round 4): for a scheme URL strip through the LAST `@`
+  # of the whole remainder (greedy `.*@`), so a token containing `/` or `@`
+  # never survives; an `@` in the path is over-stripped, which is fail-safe.
+  # scp-style `user@host:path` has no scheme and keeps `^[^/]*@`.
+  local strip_ui='s#^[A-Za-z][A-Za-z0-9+.-]*://.*@##; s#^[A-Za-z][A-Za-z0-9+.-]*://##; s#^[^/]*@##'
+  norm="$(printf '%s' "$url" | sed -E "${strip_ui}"'; s#^[^/:]+[:/]##; s#/+$##; s#\.git$##' | tr 'A-Z' 'a-z')"
   local want
   want="$(printf '%s' "$EXPECTED" | tr 'A-Z' 'a-z')"
+  # Host (issue #5026, INV-9): scheme + userinfo stripped, then `^[^/:]+` (so
+  # an optional `:port` is dropped). An ssh Host alias from ~/.ssh/config (e.g.
+  # `git@gh-alias:o/r`) reads as that alias and alarms wrong-origin-host —
+  # set HYDRA_WATCHDOG_EXPECTED_ORIGIN_HOST to the alias if one is used.
+  local host want_host
+  host="$(printf '%s' "$url" | sed -E "${strip_ui}"'; s#^([^/:]+).*#\1#' | tr 'A-Z' 'a-z')"
+  want_host="$(printf '%s' "${HYDRA_WATCHDOG_EXPECTED_ORIGIN_HOST:-github.com}" | tr 'A-Z' 'a-z')"
 
   local reasons=()
   if [[ "$norm" != "$want" ]]; then
     reasons+=("wrong-origin-url")
+  fi
+  if [[ "$host" != "$want_host" ]]; then
+    reasons+=("wrong-origin-host")
   fi
   if [[ "$master_present" != "1" ]]; then
     reasons+=("origin-master-missing")
@@ -2258,7 +2275,9 @@ run_origin_identity() {
   # Strip any userinfo (https://user:TOKEN@host/...) BEFORE the URL reaches the
   # log line, the notifications payload or the dashboard alert (#4939 QA).
   local shown_url
-  shown_url="$(printf '%s' "${url:-<unset>}" | sed -E 's#^([A-Za-z+]+://)[^/@]*@#\1#')"
+  # Strip through the LAST `@` (greedy): a token containing `/` must not leak
+  # (QA round 4). Same rule as redactUrlUserinfo in src/aggregators/recent-merges.ts.
+  shown_url="$(printf '%s' "${url:-<unset>}" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://).*@#\1#')"
   log "ALARM ~/hydra origin identity broken: ${reason_str} — remote.origin.url=${shown_url} (expected ${EXPECTED}); refs/remotes/origin/master $([[ "$master_present" == "1" ]] && echo present || echo MISSING) (issue #4939; read-only watchdog, restore from an operator shell)"
 
   if [[ ! -f "$SINCE_MARKER" ]]; then

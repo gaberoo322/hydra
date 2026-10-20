@@ -140,16 +140,6 @@ Pure helpers backing the classifier live in `scripts/ci/qa-verdict.ts`. The regr
 
 **An incomplete reviewer fan-out is not a fifth verdict — it is a pre-verdict exit.** If step 7.5 finds a spawned reviewer missing (e.g. its worktree was reaped mid-review), the skill exits before reaching step 8/9 with none of the four verdicts above and `needs-qa` left in place for automatic retry — see step 7.5.
 
-## Measuring the QA catch rate (AC1, issue #3815)
-
-`npm run qa:catch-rate -- --repo gaberoo322/hydra --limit 60`
-(`scripts/ci/qa-catch-rate.ts`) measures the true catch rate: it classifies each
-PR as `caught` / `clean-pass` / `not-reviewed`, keying on the step-9.5
-`QA-Verdict:` trailer first (attributed only to the PR its `pr=` names) and
-falling back to review state, verdict comments, and the linked-issue bounce
-comment for trailer-less history. It is a read-only instrument — it changes no
-verdict logic. Re-run it after any fan-out change.
-
 ## Never end a turn on a pending wait (issue #3953)
 
 A backgrounded wait is **structurally unrecoverable**: end the turn while a
@@ -1657,21 +1647,6 @@ esac
   event bus; the skill only shells `curl`/`gh`/`git`. Window/cap/TTL are named,
   env-overridable config (defaults in `src/redis/holdback.ts`, documented in
   `config/direction/outcomes.yaml`), never magic literals.
-
-## Why a wrapper, not a re-implementation
-
-The upstream `code-review` skill (`~/.claude/skills/code-review/SKILL.md`) is the contract. We invoke its **process pattern** — pin fixed point, identify spec, spawn parallel Standards + Spec sub-agents (the Standards axis carrying the twelve-smell Fowler battery from v1.1), aggregate verbatim — and layer Hydra-specific concerns on top: the design-concept artifact as the canonical spec source, the verdict classifier from `scripts/ci/qa-verdict.ts`, and the autopilot-friendly single-pass exit.
-
-A change can pass one axis and fail the other:
-
-- Code that follows every standard but implements the wrong thing → **Standards pass, Spec fail.**
-- Code that does exactly what the artifact asked but breaks the project's conventions → **Spec pass, Standards fail.**
-
-Reporting them separately stops one axis from masking the other. The accept/reject decision is captured in the Redis `hydra:qa:results:*` keys for analytics; the aggregated PR comment is human-readable.
-
-## Skill files
-
-The canonical source for this skill is `docs/operator-playbooks/hydra-qa.md`. The deployed copy at `~/.claude/skills/hydra-qa/SKILL.md` is **machine-generated** by `scripts/sync-skills.sh` on every master deploy — never edit it by hand.
 
 ## Slot lifecycle events — PostToolUse hook (issue #671)
 
