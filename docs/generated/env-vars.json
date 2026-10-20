@@ -113,15 +113,15 @@
         },
         {
           "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 579
+          "line": 583
         },
         {
           "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 600
+          "line": 604
         },
         {
           "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 605
+          "line": 609
         },
         {
           "path": "scripts/deploy-drift-check.ts",
@@ -2834,7 +2834,7 @@
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 1985
+          "line": 2005
         }
       ],
       "inEnvExample": false,
@@ -2876,7 +2876,7 @@
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 1983
+          "line": 2003
         }
       ],
       "inEnvExample": false,
@@ -2918,7 +2918,7 @@
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 1984
+          "line": 2004
         }
       ],
       "inEnvExample": false,
@@ -2932,13 +2932,13 @@
       "readSites": [
         {
           "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 151
+          "line": 155
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/claude-hooks/git-remote-fence.sh",
-        "line": 151
+        "line": 155
       }
     },
     {
@@ -3072,27 +3072,63 @@
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 1979
+          "line": 1999
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2010
+          "line": 2030
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2028
+          "line": 2048
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2032
+          "line": 2052
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2038
+          "line": 2058
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2047
+          "line": 2067
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2172
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2173
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2181
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2185
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2186
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2197
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2199
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2218
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2222
         },
         {
           "path": "src/aggregators/architecture-graph.ts",
@@ -3715,6 +3751,28 @@
       }
     },
     {
+      "name": "HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2098
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2099
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2133
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.sh",
+        "line": 2098
+      }
+    },
+    {
       "name": "HYDRA_WATCHDOG_DRIFT_DEPLOYED_SHA",
       "readSites": [
         {
@@ -3773,13 +3831,13 @@
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2069
+          "line": 2122
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh",
-        "line": 2069
+        "line": 2122
       }
     },
     {
@@ -3787,13 +3845,13 @@
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 1980
+          "line": 2000
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh",
-        "line": 1980
+        "line": 2000
       }
     },
     {
@@ -4019,21 +4077,49 @@
       }
     },
     {
-      "name": "HYDRA_WATCHDOG_ORIGIN_MASTER_PRESENT",
+      "name": "HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR",
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2045
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2046
+          "line": 2096
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh",
-        "line": 2045
+        "line": 2096
+      }
+    },
+    {
+      "name": "HYDRA_WATCHDOG_ORIGIN_FETCH_TIMEOUT_S",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2105
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.sh",
+        "line": 2105
+      }
+    },
+    {
+      "name": "HYDRA_WATCHDOG_ORIGIN_MASTER_PRESENT",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2065
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2066
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.sh",
+        "line": 2065
       }
     },
     {
@@ -4041,13 +4127,27 @@
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 1982
+          "line": 2002
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh",
-        "line": 1982
+        "line": 2002
+      }
+    },
+    {
+      "name": "HYDRA_WATCHDOG_ORIGIN_REPAIR_BACKOFF_S",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2160
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.sh",
+        "line": 2160
       }
     },
     {
@@ -4055,13 +4155,13 @@
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 1981
+          "line": 2001
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh",
-        "line": 1981
+        "line": 2001
       }
     },
     {
@@ -4069,17 +4169,17 @@
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2026
+          "line": 2046
         },
         {
           "path": "scripts/hydra-watchdog.sh",
-          "line": 2027
+          "line": 2047
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh",
-        "line": 2026
+        "line": 2046
       }
     },
     {

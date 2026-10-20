@@ -40,6 +40,17 @@ export function isPageKind(kind: string): kind is PageKind {
   return PAGE_KIND_SET.has(kind);
 }
 
+/**
+ * Event-aware page decision (#5065 QA round 2): a self-healed origin identity
+ * (payload.repair === "repaired") needs no operator action, so it is a Morning
+ * Brief item, not a Page. Every other page-kind event stays a Page.
+ */
+export function isPageEvent(kind: string, payload?: Record<string, unknown> | null): boolean {
+  if (!isPageKind(kind)) return false;
+  if (kind === E.INFRA_ORIGIN_IDENTITY_WRONG && payload?.repair === "repaired") return false;
+  return true;
+}
+
 export function severityOf(kind: string): "page" | "brief" {
   return isPageKind(kind) ? "page" : "brief";
 }

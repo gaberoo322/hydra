@@ -48,7 +48,7 @@ import { buildDigestMessage, formatBuilderHealthLines } from "./digest-format.ts
 import {
   operatorChannel,
   messageFromEvent,
-  isPageKind,
+  isPageEvent,
   type OperatorChannel,
 } from "./operator-channel/index.ts";
 import { buildDailyHeartbeat } from "./digest-fanout.ts";
@@ -187,7 +187,7 @@ export class DigestAccumulator {
   recordEvent(event: DigestEvent): void {
     const type = event.type || "unknown";
 
-    if (isPageKind(type)) {
+    if (isPageEvent(type, event.payload)) {
       this.channel.page(messageFromEvent(event)).catch((err) =>
         logger.error({ err, type }, "[Digest] operator-channel page failed (non-fatal)"),
       );
