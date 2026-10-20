@@ -1953,6 +1953,8 @@ run_launch_flow() {
 # the single alarm owner for that failure class. Fails (alarms) when
 #   (a) the normalised remote.origin.url is not
 #       ${HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO:-gaberoo322/hydra}, OR
+#   (a') the origin host is not ${HYDRA_WATCHDOG_EXPECTED_ORIGIN_HOST:-github.com}
+#       (reason wrong-origin-host, issue #5026), OR
 #   (b) refs/remotes/origin/master does not resolve.
 #
 # AUTO-REPAIR (issue #5065). Detection is read-only (`git config --get`,
@@ -2069,13 +2071,18 @@ run_origin_identity() {
   fi
 
   # --- Normalise: strip scheme, user@, host, trailing .git and slashes ---
+  # Userinfo (INV-8, QA round 4): for a scheme URL strip through the LAST `@`
+  # of the whole remainder (greedy `.*@`), so a token containing `/` or `@`
+  # never survives; an `@` in the path is over-stripped, which is fail-safe.
+  # scp-style `user@host:path` has no scheme and keeps `^[^/]*@`.
+  local strip_ui='s#^[A-Za-z][A-Za-z0-9+.-]*://.*@##; s#^[A-Za-z][A-Za-z0-9+.-]*://##; s#^[^/]*@##'
   origin_identity_norm() {
-    printf '%s' "$1" | sed -E 's#^[A-Za-z+]+://##; s#^[^@/]*@##; s#^[^/:]+[:/]##; s#/+$##; s#\.git$##' | tr 'A-Z' 'a-z'
+    printf '%s' "$1" | sed -E "${strip_ui}"'; s#^[^/:]+[:/]##; s#/+$##; s#\.git$##' | tr 'A-Z' 'a-z'
   }
   # Strip any userinfo (https://user:TOKEN@host/...) BEFORE a URL reaches a
   # log line, the notifications payload or the dashboard alert (#4939 QA).
   origin_identity_redact() {
-    printf '%s' "${1:-<unset>}" | sed -E 's#^([A-Za-z+]+://)[^/@]*@#\1#'
+    printf '%s' "${1:-<unset>}" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://).*@#\1#'
   }
 
   # --- Auto-repair configuration (#5065) ---
@@ -2099,10 +2106,20 @@ run_origin_identity() {
   if [[ -n "$CANONICAL" ]]; then
     canon_norm="$(origin_identity_norm "$CANONICAL")"
   fi
+  # Host (issue #5026, INV-9): scheme + userinfo stripped, then `^[^/:]+` (so
+  # an optional `:port` is dropped). An ssh Host alias from ~/.ssh/config (e.g.
+  # `git@gh-alias:o/r`) reads as that alias and alarms wrong-origin-host —
+  # set HYDRA_WATCHDOG_EXPECTED_ORIGIN_HOST to the alias if one is used.
+  local host want_host
+  host="$(printf '%s' "$url" | sed -E "${strip_ui}"'; s#^([^/:]+).*#\1#' | tr 'A-Z' 'a-z')"
+  want_host="$(printf '%s' "${HYDRA_WATCHDOG_EXPECTED_ORIGIN_HOST:-github.com}" | tr 'A-Z' 'a-z')"
 
   local reasons=()
   if [[ -z "$want" || ( "$norm" != "$want" && "$norm" != "$canon_norm" ) ]]; then
     reasons+=("wrong-origin-url")
+  fi
+  if [[ "$host" != "$want_host" ]]; then
+    reasons+=("wrong-origin-host")
   fi
   if [[ "$master_present" != "1" ]]; then
     reasons+=("origin-master-missing")
