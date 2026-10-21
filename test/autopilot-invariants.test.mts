@@ -236,6 +236,20 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
     assert.equal(r.status, 0);
   });
 
+  // Issue #5144: a terminating decide.py turn now arms that turn's QA PASS
+  // before `terminate` — the mixed plan must satisfy INV-005 and INV-007.
+  test("INV-005/INV-007: a terminating plan with a preceding PASS auto-merge is allowed (#5144)", () => {
+    const plan = {
+      actions: [
+        { type: "auto-merge", pr_number: 4968, tier: 3, reason: "qa pass + required depth met" },
+        { type: "terminate", cause: "budget", merged_prs: 0 },
+      ],
+    };
+    const state = baseState({ cumulative_tokens: 2_500_000 });
+    const r = runAsserts(plan, state);
+    assert.equal(r.status, 0, r.stderr);
+  });
+
   test("INV-006: reap after dispatch in same plan is rejected", () => {
     const plan = {
       actions: [

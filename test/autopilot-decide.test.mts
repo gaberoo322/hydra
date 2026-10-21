@@ -5886,3 +5886,104 @@ describe("decide.py — durable QA-verdict recheck (#5052)", () => {
     assert.equal((plan.actions ?? []).filter((a: any) => a.type === "auto-merge").length, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Terminating turn keeps its QA PASS (issue #5144, refs #4839): a turn whose
+// termination rule trips still runs the auto-merge sweep, so a head-bound PASS
+// fed that turn (session qa-verdict event OR #5052 recheck entry) becomes an
+// `auto-merge` action in the SAME plan, with `terminate` LAST. Before the fix
+// the plan was a lone `terminate` and the unattended parent hand-ran
+// `gh pr merge --auto` after it (runs 23ad3521 / e8210e1a / 3c1beafe).
+// ---------------------------------------------------------------------------
+
+describe("decide.py — a terminating turn still arms its QA PASS (#5144)", () => {
+  const HEAD = "89abcdef0123456789abcdef0123456789abcdef";
+  const passEvent = (pr: number, extra: Record<string, unknown> = {}) => ({
+    type: "qa-verdict",
+    pr_number: pr,
+    tier: 3,
+    verdict: "PASS",
+    verdict_sha: HEAD.slice(0, 12),
+    head_sha: HEAD,
+    ...extra,
+  });
+  const merges = (plan: any) => (plan.actions ?? []).filter((a: any) => a.type === "auto-merge");
+  const lastIsTerminate = (plan: any, cause: string) => {
+    const actions = plan.actions ?? [];
+    assert.ok(actions.length > 0, "plan must carry actions");
+    const last = actions[actions.length - 1];
+    assert.equal(last.type, "terminate", `terminate must be the LAST action, got ${JSON.stringify(actions.map((a: any) => a.type))}`);
+    assert.equal(last.cause, cause);
+    assert.equal((actions as any[]).filter((a) => a.type === "terminate").length, 1, "exactly one terminate");
+  };
+  const noDispatchOrReap = (plan: any) => {
+    const kinds = (plan.actions ?? []).map((a: any) => a.type);
+    assert.ok(!kinds.includes("dispatch"), "a terminating turn must never dispatch");
+    assert.ok(!kinds.includes("reap"), "a terminating turn must never reap");
+  };
+  // Dispatchable work present on every case, so a regression that let the
+  // whole decision pipeline run on a terminating turn would show up as a
+  // dispatch, not pass silently.
+  const busyBoard = { orch_work_available: true };
+
+  test("budget trip + session PASS in the same turn -> auto-merge then terminate(budget)", () => {
+    const state = baseState({ cumulative_tokens: 2_000_001, signals: busyBoard });
+    const plan = runDecide(state, null, [passEvent(4968)]);
+    const m = merges(plan);
+    assert.equal(m.length, 1, "the turn's PASS must be armed in the terminating plan");
+    assert.equal(m[0].pr_number, 4968);
+    assert.equal(m[0].tier, 3);
+    lastIsTerminate(plan, "budget");
+    noDispatchOrReap(plan);
+    assert.ok((plan.reasons ?? []).includes("auto-merge:#4968"));
+    assert.ok((plan.reasons ?? []).includes("termination"));
+  });
+
+  test("context_compaction turn cap + session PASS in the same turn -> auto-merge then terminate (the e8210e1a / 3c1beafe shape)", () => {
+    const state = baseState({ context_compaction_turns: 8, signals: busyBoard });
+    (state as any).turn = 7; // CLI bump (#1769) -> 8, a multiple of the cadence.
+    const plan = runDecide(state, null, [passEvent(5066)]);
+    assert.deepEqual(merges(plan).map((a: any) => a.pr_number), [5066]);
+    lastIsTerminate(plan, "context_compaction");
+    noDispatchOrReap(plan);
+  });
+
+  test("a #5052 recheck entry on a terminating turn is armed too (durable carry is not dropped by terminate)", () => {
+    const state = baseState({
+      cumulative_tokens: 2_000_001,
+      signals: {
+        ...busyBoard,
+        orch_qa_verdict_recheck: [
+          { pr: 4881, tier: 3, verdict: "PASS", verdict_sha: HEAD.slice(0, 12), head_sha: HEAD },
+        ],
+      },
+    });
+    const plan = runDecide(state, null, []);
+    assert.deepEqual(merges(plan).map((a: any) => a.pr_number), [4881]);
+    assert.ok((plan.reasons ?? []).includes("qa-recheck:#4881"));
+    lastIsTerminate(plan, "budget");
+    noDispatchOrReap(plan);
+  });
+
+  test("holds still apply on a terminating turn: stale-SHA, FAIL and dirty PASS never arm; terminate stays the only action", () => {
+    const state = baseState({ cumulative_tokens: 2_000_001, signals: { ...busyBoard, orch_prs_dirty: [7003] } });
+    const plan = runDecide(state, null, [
+      passEvent(7001, { verdict_sha: "fedcba987654" }),
+      passEvent(7002, { verdict: "FAIL" }),
+      passEvent(7003),
+    ]);
+    assert.equal(merges(plan).length, 0);
+    assert.deepEqual(actionTypes(plan), ["terminate"]);
+    const reasons = plan.reasons ?? [];
+    assert.ok(reasons.includes("hold:#7001:stale-verdict"));
+    assert.ok(reasons.includes("hold:#7003:dirty"));
+  });
+
+  test("the emergency brake overrides on a terminating turn too (zero auto-merge, terminate last)", () => {
+    const state = baseState({ cumulative_tokens: 2_000_001, signals: busyBoard });
+    state.emergency_brake = { engaged: true };
+    const plan = runDecide(state, null, [passEvent(7004)]);
+    assert.equal(merges(plan).length, 0);
+    lastIsTerminate(plan, "budget");
+  });
+});
