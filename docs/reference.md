@@ -48,7 +48,6 @@ For module roles and file structure, explore `src/` directly — static inventor
 | `hydra:blocked:last-escalation` | Timestamp of last blocked-item escalation |
 | `hydra:deps:completed` | Completed dependency tracking |
 | `hydra:deps:index` | Dependency index |
-| `hydra:operator-channel:brief:last-sent` | Epoch ms of the last delivered Morning Brief (ADR-0045 Decision 7) |
 | `hydra:workspace:lock` | Workspace access lock |
 
 ## Event Bus
