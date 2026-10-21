@@ -39,7 +39,18 @@ export interface OwnedDbContext {
   skip: string | false;
 }
 
-/** {@link ownedRedisDb} + {@link ownedDbSkip} in one call: the watchdog #4183 describes and the shim battery share it. */
+/**
+ * {@link ownedRedisDb} + {@link ownedDbSkip} in one call: the watchdog #4183
+ * describes and the shim battery share it. This is the canonical owned-DB rule
+ * those call sites reference:
+ * - `db` is the run-OWNED DB the launcher exported as HYDRA_REDIS_DB (via
+ *   redisChildEnv). Never substitute a literal from the launcher's pool: a
+ *   concurrent run owns every other index and FLUSHDBs it (issue #5062).
+ * - `db === null` means no owned DB. A remote REDIS_URL or a bare `node --test`
+ *   skips with `skip`'s reason; a full-suite local run gets `skip === false` and
+ *   must fail loudly. Cleanup DELs against the owned DB are skipped, never
+ *   redirected to db 0.
+ */
 export function ownedDbContext(env: NodeJS.ProcessEnv = process.env): OwnedDbContext {
   const db = ownedRedisDb(env);
   return { db, skip: ownedDbSkip(db, env) };

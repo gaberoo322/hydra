@@ -923,12 +923,10 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
 // =============================================================================
 
 describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/rc_read (issue #4183)", { skip: !DOCKER }, () => {
-  // The run-OWNED Redis DB the launcher assigned (redis-db-launch.mjs exports it
-  // as HYDRA_REDIS_DB via redisChildEnv), captured at definition time. Never a
-  // literal from the launcher's pool: a concurrent run owns every other index
-  // and FLUSHDBs it (issue #5062). Null => no owned DB (remote REDIS_URL or a
-  // bare `node --test`): the "lands in that DB" test skips with a reason, and
-  // the cleanup DELs against the owned DB are skipped (never redirected to db 0).
+  // The run-OWNED Redis DB + its skip verdict, captured at definition time. The
+  // canonical rule (never a pool literal; null => skip or fail loud; owned-DB
+  // cleanup skipped, never redirected to db 0) is ownedDbContext's doc comment
+  // in test/_helpers/owned-redis-db.mts.
   const { db: OWNED_DB, skip: OWNED_DB_SKIP } = ownedDbContext();
 
   // Fully separate key namespace from RUN_NS/TEST_LAST_TICK_KEY/SINCE/FIRED
