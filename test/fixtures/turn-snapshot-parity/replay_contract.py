@@ -7,12 +7,14 @@ schema (src/schemas/turn-snapshot.ts) emits: no test reads decide.py's source.
 
   python3 replay_contract.py <corpus.jsonl> [--drop <document>:<signal>]... [--autopilot-dir <dir>]
 
-Each corpus line is `{"name": str, "snapshot": str, "entry": int | null}` — a
-Turn Snapshot document AS THE TS EMITTER PRINTED IT, plus the decide() input to
-plan it under: `entry` indexes the plan-parity corpus (decide-inputs.jsonl.gz:
-that entry's state as plan_parity.py converts it, its candidates, events and
-clock, with the document replacing the converted snapshot); null is the
-decide-golden idle-triage-sweep fixture accessor_check.py also plans over.
+Each corpus line is `{"name": str, "snapshot": str, "entry": int | null,
+"overlay"?: {...}}` — a Turn Snapshot document AS THE TS EMITTER PRINTED IT,
+plus the decide() input to plan it under: `entry` indexes the plan-parity
+corpus (decide-inputs.jsonl.gz: that entry's state as plan_parity.py converts
+it, its candidates, events and clock, with the document replacing the
+converted snapshot); null is the decide-golden idle-triage-sweep fixture
+accessor_check.py also plans over. `overlay` sets top-level state keys on that
+input (carried state a branch needs to run at all, e.g. a zero-yield streak).
 
 HYDRA_AUTOPILOT_SNAPSHOT_REPLAY must be set — the harness exits 2 without it,
 because a production-mode read of a signal the document lacks returns None and
@@ -125,7 +127,7 @@ def main() -> int:
             return 2
         mutant = json.loads(source["snapshot"])
         mutant["signals"].pop(signal, None)
-        corpus.append({"name": f"{document}-without-{signal}", "snapshot": json.dumps(mutant), "entry": source.get("entry")})
+        corpus.append({**source, "name": f"{document}-without-{signal}", "snapshot": json.dumps(mutant)})
 
     entries: list[dict] = []
     if any(c.get("entry") is not None for c in corpus):
@@ -139,6 +141,7 @@ def main() -> int:
         name = case["name"]
         doc = json.loads(case["snapshot"])
         decide_input = _base_input() if case.get("entry") is None else _entry_input(entries[case["entry"]])
+        decide_input[0].update(case.get("overlay") or {})
         _current[0] = name
         try:
             plan = _plan(doc, decide_input)
