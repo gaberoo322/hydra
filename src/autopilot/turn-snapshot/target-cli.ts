@@ -18,7 +18,7 @@
  */
 
 import { InvariantViolationError } from "../../errors.ts";
-import type { CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import type { TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import type { PrRefsAvailability } from "./pr-gate.ts";
@@ -99,7 +99,7 @@ async function guarded<T>(
   } catch (err) {
     /* intentional: fail-open — the crash is reported as a stderr note via io.stderr, a collector-crashed marker, and the fallback renders */
     io.stderr(`target turn-snapshot ${name} collector crashed (${errMsg(err)}) — emitting its fail-closed fallback (issue #4932)\n`);
-    sink.push({ collector: name, field: name, reason: "collector-crashed" });
+    sink.push({ collector: name, field: name, reason: DEGRADE.COLLECTOR_CRASHED });
     return fallback();
   }
 }
@@ -133,7 +133,7 @@ export async function runTargetCollectors(
           const d = getDeps();
           return collectTargetBoard({ github: d.github, hydra: d.hydra, now: d.now, ghListLimit: args.ghListLimit, prRefs: d.prRefs });
         },
-        () => targetBoardFallbackSnapshot("collector-crashed"),
+        () => targetBoardFallbackSnapshot(DEGRADE.COLLECTOR_CRASHED),
         degraded,
       );
       values.targetBoard = s;
@@ -152,7 +152,7 @@ export async function runTargetCollectors(
             adrPresent: d.adrPresent,
           });
         },
-        () => targetScanFallbackSnapshot("collector-crashed"),
+        () => targetScanFallbackSnapshot(DEGRADE.COLLECTOR_CRASHED),
         degraded,
       );
       values.targetScan = s;

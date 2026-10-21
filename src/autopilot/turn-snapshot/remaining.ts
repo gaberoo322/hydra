@@ -10,7 +10,7 @@
  * afterwards so the one-shot CLI can exit.
  */
 
-import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import type { TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import type { TurnSnapshotRedis } from "./redis-port.ts";
@@ -67,7 +67,7 @@ function entry<K extends RemainingName>(
   return { collect, fallback };
 }
 
-const FAILED: Classified<never> = { ok: false, reason: "all-reads-failed" };
+const FAILED: Classified<never> = { ok: false, reason: DEGRADE.ALL_READS_FAILED };
 /**
  * A crashed arch collector returns the #4130 suppressing defaults and flags the
  * lane degraded; its work-queue depth fails CLOSED at 1 so the
@@ -117,7 +117,7 @@ export async function runRemainingCollectors(names: readonly string[], deps: Rem
           return {
             name,
             value: e.fallback,
-            degraded: [{ field: name, reason: "collector-crashed" }],
+            degraded: [{ field: name, reason: DEGRADE.COLLECTOR_CRASHED }],
             note: `orch turn-snapshot ${name} collector crashed (${msg}) — emitting its fail-open fallback (issue #4933)`,
           };
         }

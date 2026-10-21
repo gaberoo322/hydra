@@ -31,7 +31,7 @@
  *     `tickets_orch_pending_spec=issue-<N>`; otherwise false / none.
  */
 
-import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import { labelNames, MALFORMED_PAYLOAD } from "./board-saturation.ts";
@@ -59,9 +59,9 @@ const outcome = <T>(collector: string, value: T, degraded: DegradedMarker[]): Co
  * `--jq` errored on) and the whole read degrades.
  */
 function foldRead<T>(read: GhJsonRead, fold: (data: unknown) => T | null): Classified<T> {
-  if (read.kind !== "ok") return fail(read.kind === "empty" ? "gh-read-failed" : "unparseable");
+  if (read.kind !== "ok") return fail(read.kind === "empty" ? DEGRADE.GH_READ_FAILED : DEGRADE.UNPARSEABLE);
   const value = fold(read.data);
-  return value === null ? fail(MALFORMED_PAYLOAD) : okv(value);
+  return value === null ? fail(DEGRADE.MALFORMED_PAYLOAD) : okv(value);
 }
 
 type Obj = Record<string, unknown>;
@@ -138,7 +138,7 @@ export interface RetroRuns {
 
 /** The two runs-index heredocs: any completed run? and the first completed run's id. */
 export function foldRetroRuns(body: string | null): Classified<RetroRuns> {
-  if (body === null) return fail("runs-read-failed");
+  if (body === null) return fail(DEGRADE.RUNS_READ_FAILED);
   const parsed = parseJsonRead(body);
   if (parsed.kind !== "ok") return fail("runs-unparseable");
   const d = parsed.data;

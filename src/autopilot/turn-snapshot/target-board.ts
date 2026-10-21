@@ -61,7 +61,7 @@ import { openNumbersFromRows } from "../../github/blockers.ts";
 import { parseIssueRows, type IssueRow } from "../../github/issues.ts";
 import type { PrRefRow } from "../../github/pr-refs.ts";
 import { TARGET_BOARD_LABELS } from "../../target-board-labels.ts";
-import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { pickDevResume } from "./dev-resume.ts";
 import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
@@ -446,7 +446,7 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
       const resolveOpen = async (refs: number[]): Promise<Set<number>> => {
         const search = await deps.github.searchOpenIssueNumbers(refs.join(" "), limit);
         if (search.kind !== "ok" || !Array.isArray(search.data)) {
-          degraded.push({ field: "openBlockers", reason: "fail-safe-all-open" });
+          degraded.push({ field: "openBlockers", reason: DEGRADE.FAIL_SAFE_ALL_OPEN });
           return new Set(refs);
         }
         return openNumbersFromRows(parseIssueRows(search.data, ""), refs);
@@ -458,8 +458,8 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
       fallbackReady = derived.readyNumbers;
     } else {
       laneDegraded = true;
-      counts = { ok: false, reason: "fallback-read-failed" };
-      degraded.push({ field: "counts", reason: "fallback-read-failed" });
+      counts = { ok: false, reason: DEGRADE.FALLBACK_READ_FAILED };
+      degraded.push({ field: "counts", reason: DEGRADE.FALLBACK_READ_FAILED });
     }
   }
 

@@ -46,7 +46,7 @@
  */
 
 import { closedIssues, referencedIssues, type PrRefRow } from "../../github/pr-refs.ts";
-import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import {
   DEFAULT_NOPR_RESUME_QUIESCENCE_SECONDS,
   isResumableHead,
@@ -255,7 +255,7 @@ export type RepollResult =
  */
 export function applyMergeStateRepoll(first: readonly unknown[], repoll: GhJsonRead): RepollResult {
   if (repoll.kind !== "ok" || !Array.isArray(repoll.data)) {
-    const reason = repoll.kind === "empty" ? "empty-payload" : repoll.kind === "unparseable" ? "unparseable" : "not a list";
+    const reason = repoll.kind === "empty" ? DEGRADE.EMPTY_PAYLOAD : repoll.kind === "unparseable" ? DEGRADE.UNPARSEABLE : DEGRADE.NOT_A_LIST;
     const unknown = first
       .map(asRow)
       .filter((p): p is Row => p !== null && p.mergeStateStatus === "UNKNOWN")
@@ -506,7 +506,7 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
   // ci_trigger_stale: only when BOTH run timestamps were read (INV-E fail-open).
   let ciTriggerStale: Classified<boolean>;
   if (inputs.runsPushCreatedAt === null || inputs.runsPullRequestCreatedAt === null) {
-    ciTriggerStale = { ok: false, reason: "runs-read-failed" };
+    ciTriggerStale = { ok: false, reason: DEGRADE.RUNS_READ_FAILED };
   } else {
     let stale = false;
     const push = ghTimestampSeconds(inputs.runsPushCreatedAt);
@@ -707,16 +707,16 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
 
 /** Branch protection `.contexts`: list → the set entries as strings; null/other JSON → healthy empty set. */
 export function parseRequiredContexts(read: GhJsonRead): Classified<ReadonlySet<string>> {
-  if (read.kind === "empty") return { ok: false, reason: "empty-payload" };
-  if (read.kind === "unparseable") return { ok: false, reason: "unparseable" };
+  if (read.kind === "empty") return { ok: false, reason: DEGRADE.EMPTY_PAYLOAD };
+  if (read.kind === "unparseable") return { ok: false, reason: DEGRADE.UNPARSEABLE };
   if (!Array.isArray(read.data)) return { ok: true, value: new Set() };
   return { ok: true, value: new Set(read.data.filter(isSet).map(jsonText)) };
 }
 
 /** `[{"number": N}, …]` → the issue numbers. A non-iterable JSON value is a failed read (Python's TypeError). */
 export function parseDevResumeIssues(read: GhJsonRead): Classified<ReadonlySet<number>> {
-  if (read.kind === "empty") return { ok: false, reason: "empty-payload" };
-  if (read.kind === "unparseable") return { ok: false, reason: "unparseable" };
+  if (read.kind === "empty") return { ok: false, reason: DEGRADE.EMPTY_PAYLOAD };
+  if (read.kind === "unparseable") return { ok: false, reason: DEGRADE.UNPARSEABLE };
   const data = read.data;
   if (typeof data === "string" || (data !== null && typeof data === "object" && !Array.isArray(data))) {
     return { ok: true, value: new Set() };
@@ -739,8 +739,8 @@ export function parseDevResumeIssues(read: GhJsonRead): Classified<ReadonlySet<n
  * discipline as {@link parseDevResumeIssues}.
  */
 export function parseNoPrResumeRows(read: GhJsonRead): Classified<readonly NoPrResumeRow[]> {
-  if (read.kind === "empty") return { ok: false, reason: "empty-payload" };
-  if (read.kind === "unparseable") return { ok: false, reason: "unparseable" };
+  if (read.kind === "empty") return { ok: false, reason: DEGRADE.EMPTY_PAYLOAD };
+  if (read.kind === "unparseable") return { ok: false, reason: DEGRADE.UNPARSEABLE };
   const data = read.data;
   if (typeof data === "string" || (data !== null && typeof data === "object" && !Array.isArray(data))) {
     return { ok: true, value: [] };
@@ -879,7 +879,7 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
     runsPush = null;
     runsPr = null;
     notes.push("orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)");
-    degraded.push({ field: "ciTriggerStale", reason: "runs-read-failed" });
+    degraded.push({ field: "ciTriggerStale", reason: DEGRADE.RUNS_READ_FAILED });
   }
   if (payload.kind === "empty") {
     notes.push("orch pr-gate PR-list read FAILED (empty payload) — emitting empty PR-gate buckets (issue #4240)");
@@ -901,7 +901,7 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
 
   // 4. Classification inputs (the old heredoc's own preamble notes).
   if (payload.kind !== "ok") {
-    const reason = payload.kind === "empty" ? "empty-payload" : "unparseable";
+    const reason = payload.kind === "empty" ? DEGRADE.EMPTY_PAYLOAD : DEGRADE.UNPARSEABLE;
     notes.push(`orch pr-gate PR-list JSON parse FAILED (${reason}) — falling back to empty PR list (issue #4240)`);
     degraded.push({ field: "prList", reason });
   }

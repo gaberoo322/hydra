@@ -35,7 +35,7 @@
  *     10, INCLUSIVE); a failed read saturates (fail closed) with open=0.
  */
 
-import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
 import { REDIS_UNREACHABLE, type AnchorQueueName, type TurnSnapshotRedis } from "./redis-port.ts";
 
@@ -70,7 +70,7 @@ const outcome = <T>(collector: string, value: T, degraded: DegradedMarker[]): Co
 /** A gh read's data, or why the read failed. */
 function ghData(read: GhJsonRead): Classified<unknown> {
   if (read.kind === "ok") return okv(read.data);
-  return fail(read.kind === "empty" ? "gh-read-failed" : "unparseable");
+  return fail(read.kind === "empty" ? DEGRADE.GH_READ_FAILED : DEGRADE.UNPARSEABLE);
 }
 
 /**
@@ -78,8 +78,6 @@ function ghData(read: GhJsonRead): Classified<unknown> {
  * row that is not an object, `labels: null`, …) — the shapes the bash's
  * `--jq` errored on, so the whole read degrades, never a guessed count (#5084).
  */
-export const MALFORMED_PAYLOAD = "malformed-payload";
-
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
 // ---------------------------------------------------------------------------
@@ -167,7 +165,7 @@ function foldLength(read: GhJsonRead): Classified<string> {
   if (typeof d === "number") return okv(String(Math.abs(d)));
   if (typeof d === "string") return okv(String(Array.from(d).length));
   if (typeof d === "object") return okv(String(Object.keys(d).length));
-  return fail(MALFORMED_PAYLOAD);
+  return fail(DEGRADE.MALFORMED_PAYLOAD);
 }
 
 /** UTC `date -u +%Y-%m-%d`. */
@@ -245,11 +243,11 @@ function countOpenBoard(read: GhJsonRead): Classified<BoardCounts> {
   if ("reason" in c) return fail(c.reason);
   const data = c.value;
   const rows = Array.isArray(data) ? data : isObj(data) ? Object.values(data) : null;
-  if (rows === null) return fail(MALFORMED_PAYLOAD);
+  if (rows === null) return fail(DEGRADE.MALFORMED_PAYLOAD);
   const boards: string[][] = [];
   for (const row of rows) {
     const names = labelNames(row);
-    if (names === null) return fail(MALFORMED_PAYLOAD);
+    if (names === null) return fail(DEGRADE.MALFORMED_PAYLOAD);
     boards.push(names);
   }
   const count = (pred: (n: string[]) => boolean) => boards.filter(pred).length;

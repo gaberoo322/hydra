@@ -29,7 +29,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { TARGET_BOARD_LABELS } from "../../target-board-labels.ts";
-import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import type { TurnSnapshotGithub } from "./github-port.ts";
 
 export const TARGET_SCAN_BOARDS_COLLECTOR = "target-scan-boards";
@@ -163,7 +163,7 @@ export async function collectTargetScanBoards(deps: TargetScanDeps): Promise<Col
     signalsDegraded = true;
     signals = { ok: false, reason: "board-read-failed" };
   } else if (read.kind === "unparseable") {
-    signals = { ok: false, reason: "unparseable" };
+    signals = { ok: false, reason: DEGRADE.UNPARSEABLE };
   } else {
     const rows = Array.isArray(read.data) ? read.data : [];
     signals = { ok: true, value: classifyTargetScan(rows, { limit: deps.ghListLimit, workQueue: deps.workQueue }) };

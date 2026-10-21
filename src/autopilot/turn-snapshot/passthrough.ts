@@ -47,7 +47,7 @@
  */
 
 import { join } from "node:path";
-import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { parseJsonRead } from "./github-port.ts";
 import type { TurnSnapshotHost } from "./host-port.ts";
 import type { HydraRead, TurnSnapshotHydra } from "./hydra-http.ts";
@@ -119,7 +119,7 @@ type Parsed = { ok: true; value: unknown } | { ok: false; reason: string };
 /** A body through the port's shared JSON parse; an empty or non-JSON body is `unparseable`. */
 function parseBody(body: string): Parsed {
   const parsed = parseJsonRead(body);
-  return parsed.kind === "ok" ? { ok: true, value: parsed.data } : { ok: false, reason: "unparseable" };
+  return parsed.kind === "ok" ? { ok: true, value: parsed.data } : { ok: false, reason: DEGRADE.UNPARSEABLE };
 }
 
 function parseRead(read: HydraRead): Parsed {
@@ -388,7 +388,7 @@ function entry<K extends PassthroughName>(
   return { collect, fallbackValue };
 }
 
-const FAILED: Classified<never> = { ok: false, reason: "all-reads-failed" };
+const FAILED: Classified<never> = { ok: false, reason: DEGRADE.ALL_READS_FAILED };
 
 /** Collector name → collect + fallback value, in no particular order (the caller's order is the output order). */
 export const PASSTHROUGH_COLLECTORS: { readonly [K in PassthroughName]: PassthroughEntry<K> } = {
@@ -429,7 +429,7 @@ export async function runPassthroughCollectors(
         return {
           name,
           value: e.fallbackValue,
-          degraded: [{ field: name, reason: "collector-crashed" }],
+          degraded: [{ field: name, reason: DEGRADE.COLLECTOR_CRASHED }],
           note: `orch turn-snapshot ${name} collector crashed (${msg}) — emitting its fail-open fallback (issue #4933)`,
         };
       }

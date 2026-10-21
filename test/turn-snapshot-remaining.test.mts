@@ -40,6 +40,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+import { DEGRADE } from "../src/autopilot/turn-snapshot/collector.ts";
 import { main, parseArgs, type CliDeps } from "../scripts/autopilot/turn-snapshot.ts";
 import { createTurnSnapshotGithub, type GhJsonRead, type GhTransport, type TurnSnapshotGithub, wayfinderFrontierQuery } from "../src/autopilot/turn-snapshot/github-port.ts";
 import { createTurnSnapshotHydra, type HydraTransport } from "../src/autopilot/turn-snapshot/hydra-http.ts";
@@ -54,7 +55,6 @@ import {
   collectScout,
   HITL_GRILL_INBOX_CAP,
   HITL_GRILL_LABEL,
-  MALFORMED_PAYLOAD,
   scoutSpendUsd,
 } from "../src/autopilot/turn-snapshot/board-saturation.ts";
 import {
@@ -839,7 +839,7 @@ describe("Turn Snapshot slice 5B — payload shapes and the gawk line (ported fr
     assert.deepEqual(await hitl(null), { ok: true, value: { open: 0, saturated: false } });
     assert.deepEqual(await hitl({ a: 1, b: 2 }), { ok: true, value: { open: 2, saturated: false } });
     assert.deepEqual(await hitl(-3), { ok: true, value: { open: 3, saturated: false } });
-    assert.deepEqual(await hitl(true), { ok: false, reason: MALFORMED_PAYLOAD });
+    assert.deepEqual(await hitl(true), { ok: false, reason: DEGRADE.MALFORMED_PAYLOAD });
   });
 
   test("map numbers walk null < false < true < numbers < strings < lists, stopping at the first non-integer", () => {
@@ -1035,7 +1035,7 @@ describe("Turn Snapshot slice 5B — a malformed payload degrades, never throws 
     });
     const o = await REMAINING_COLLECTORS["wayfinder-frontier"].collect(deps(github, "{}"));
     assert.deepEqual(o.value, { frontier: "70", ticketType: "task", inflightGlobal: 0 });
-    assert.deepEqual(o.degraded, [{ field: "wayfinderMap:10", reason: MALFORMED_PAYLOAD }]);
+    assert.deepEqual(o.degraded, [{ field: "wayfinderMap:10", reason: DEGRADE.MALFORMED_PAYLOAD }]);
   });
 
   test("a bundle's drill inputs read as empty when they are an EMPTY list, object or string", () => {

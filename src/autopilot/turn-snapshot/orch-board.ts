@@ -57,7 +57,7 @@
 import { deriveBoardState } from "../board-state.ts";
 import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
 import { parseIssueRows } from "../../github/issues.ts";
-import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { HydraRead, TurnSnapshotHydra } from "./hydra-http.ts";
 
@@ -124,7 +124,7 @@ function serviceJsonRead(read: HydraRead): GhJsonRead {
 /** Why a service read is unusable, for the degraded marker and the diagnostic line. */
 function serviceFailureReason(read: HydraRead, json: GhJsonRead): string {
   if (read.kind === "failed") return read.reason;
-  if (json.kind !== "ok") return "unparseable";
+  if (json.kind !== "ok") return DEGRADE.UNPARSEABLE;
   return "degraded-or-incomplete-body";
 }
 
@@ -153,13 +153,13 @@ function issueNumbers(read: GhJsonRead): number[] | null {
 /** `orch_needs_triage_items`: the open needs-triage numbers, ascending (decide.py parses them into a set). */
 export function needsTriageItems(read: GhJsonRead): Classified<readonly number[]> {
   const nums = issueNumbers(read);
-  return nums === null ? { ok: false, reason: "read-failed" } : { ok: true, value: [...nums].sort((a, b) => a - b) };
+  return nums === null ? { ok: false, reason: DEGRADE.READ_FAILED } : { ok: true, value: [...nums].sort((a, b) => a - b) };
 }
 
 /** `needs_qa_numbers`: the open needs-qa numbers in gh's default order — NEVER sorted (#3829 INV-4). */
 export function needsQaNumbers(read: GhJsonRead): Classified<readonly number[]> {
   const nums = issueNumbers(read);
-  return nums === null ? { ok: false, reason: "read-failed" } : { ok: true, value: nums };
+  return nums === null ? { ok: false, reason: DEGRADE.READ_FAILED } : { ok: true, value: nums };
 }
 
 /**
@@ -268,9 +268,9 @@ export async function collectOrchBoard(deps: OrchBoardDeps): Promise<CollectorOu
     if (rows.kind === "ok" && Array.isArray(rows.data)) {
       counts = { source: "derived", values: deriveBoardState(parseIssueRows(rows.data, ""), deps.now()) };
     } else {
-      counts = { source: "none", reason: "fallback-read-failed" };
+      counts = { source: "none", reason: DEGRADE.FALLBACK_READ_FAILED };
       orchBoardDegraded = true;
-      degraded.push({ field: "counts", reason: "fallback-read-failed" });
+      degraded.push({ field: "counts", reason: DEGRADE.FALLBACK_READ_FAILED });
       notes.push("orch board read FAILED (fallback board-list query empty) — counts withheld, board flagged degraded (issue #4130)");
     }
   }
@@ -294,11 +294,11 @@ export interface OrchLaneDeps {
 /** The untriaged-orphan backstop count; a failed read is degraded (rendered `0`). */
 export async function collectUntriagedOrphans(deps: OrchLaneDeps): Promise<CollectorOutcome<Classified<number>>> {
   const count = countUntriagedOrphans(await deps.github.listOpenIssueLabelRows(deps.ghListLimit));
-  const value: Classified<number> = count === null ? { ok: false, reason: "read-failed" } : { ok: true, value: count };
+  const value: Classified<number> = count === null ? { ok: false, reason: DEGRADE.READ_FAILED } : { ok: true, value: count };
   return {
     collector: UNTRIAGED_ORPHANS_COLLECTOR,
     value,
-    degraded: value.ok ? [] : [{ field: "untriagedOrphans", reason: "read-failed" }],
+    degraded: value.ok ? [] : [{ field: "untriagedOrphans", reason: DEGRADE.READ_FAILED }],
     notes: [],
   };
 }
