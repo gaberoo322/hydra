@@ -913,11 +913,11 @@ describe("test/_helpers/owned-redis-db decision matrix (issue #5062)", () => {
     assert.equal(ownedRedisDb({ HYDRA_REDIS_DB: "0" }), null, "db 0 is never owned");
     assert.equal(ownedRedisDb({ HYDRA_REDIS_DB: "abc" }), null, "non-numeric");
     assert.equal(ownedRedisDb({ HYDRA_REDIS_DB: "" }), null, "empty");
-    assert.equal(ownedRedisDb({ HYDRA_REDIS_DB: "12" }), "12", "launcher-exported index passes through");
+    assert.equal(ownedRedisDb({ HYDRA_REDIS_DB: "3" }), "3", "launcher-exported index passes through");
   });
 
   test("ownedDbSkip: owned DB never skips", () => {
-    assert.equal(ownedDbSkip("12", {}), false);
+    assert.equal(ownedDbSkip("3", {}), false);
   });
 
   test("ownedDbSkip: bare node --test (no FULL_SUITE) skips with a reason", () => {
