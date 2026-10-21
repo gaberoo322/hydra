@@ -2050,6 +2050,191 @@ run_launch_flow() {
 }
 
 # =============================================================================
+# ## MORNING BRIEF MISSING
+# =============================================================================
+#
+# Operator Channel delivery-health alarm (ADR-0045 Decision 8, issue #5048):
+# page the operator ONCE when no Morning Brief has been delivered for 26h, and
+# send the recovered message when one lands again.
+#
+# Why it lives here and not in the orchestrator
+# ---------------------------------------------
+# The brief (Decision 7) rides the scheduler heartbeat tick, so every way the
+# brief can go silent — the orchestrator down, the scheduler deliberately
+# stopped (`POST /scheduler/stop`), the transport failing for a day, the
+# credentials unset — is a way the orchestrator could never report it. This
+# block therefore reads the brief's ONLY timing state, the Redis key
+# `hydra:operator-channel:brief:last-sent` (epoch ms, stamped by
+# src/redis/operator-channel.ts ONLY after the transport reported a delivered
+# send), directly with redis-cli — never through the orchestrator's HTTP API
+# — and pages through the Operator Channel CLI, which imports the channel
+# directly (Decision 6). The alarm is deliberately INDEPENDENT of the
+# scheduler's running state: a stopped scheduler still earns a page after 26h,
+# because the operator asked for a brief every day, not for one whenever the
+# scheduler happens to run.
+#
+# Cold-start rule
+# ---------------
+# When the key has never been written (a fresh deploy, a restored Redis, or
+# the key deleted) the block anchors `hydra:autopilot:brief-missing:absent-
+# since` with SET NX at the FIRST tick that observes the absence and measures
+# the 26h from that anchor — so a brand-new install gets a full 26h grace and
+# then pages with reason `never-delivered`, instead of either paging on the
+# first tick or staying silent forever. The anchor is DELeted the moment the
+# key appears. (Rejected: anchoring on the orchestrator's first-start time,
+# which would need the orchestrator API — the dependency this block exists to
+# avoid.) A key holding an unparseable value is treated as absent.
+#
+# Reachability: an EXISTS that answers neither 0 nor 1 means Redis itself is
+# unreachable — the block logs a WARN and leaves every state untouched (no
+# page, no resolve, no anchor): the ## SERVICE LIVENESS block owns Redis-down,
+# and an unreachable store must never masquerade as a missing brief.
+#
+# Delivery is the same edge-triggered shape the other blocks use: a fired
+# marker SET on the first stale tick gates ONE `page` call per episode (the
+# channel's own dedup would suppress a 2-minute repeat anyway, but every such
+# call would inflate the suppressed counter the /health card shows), and the
+# recovery tick calls `resolve` only when that marker existed, then DELs it.
+#
+# Fail-safe (HARD): never throws, never returns non-zero; every redis-cli /
+# CLI call is best-effort.
+#
+# Testability hooks (off-by-default; pinned by
+# test/watchdog-operator-channel.test.mts):
+#   HYDRA_REDIS_HOST / HYDRA_REDIS_PORT / HYDRA_REDIS_DB  shared with the other
+#                                               blocks (see run_launch_flow).
+#   HYDRA_WATCHDOG_BRIEF_STALE_HOURS            threshold in hours (default 26).
+#   HYDRA_WATCHDOG_BRIEF_NOW_MS                 deterministic clock (epoch ms)
+#                                               so a test can age the key
+#                                               without sleeping.
+#   HYDRA_WATCHDOG_OPERATOR_NOTIFY              the CLI binary (tests: an
+#                                               argv-recording stub).
+
+run_brief_missing() {
+  local REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
+  local REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
+  local REDIS_DB="${HYDRA_REDIS_DB:-0}"
+  [[ "$REDIS_DB" =~ ^[0-9]+$ ]] || REDIS_DB=0
+  # The TS-owned key name (BRIEF_LAST_SENT_KEY in src/redis/operator-channel.ts;
+  # drift-guarded by the test). READ ONLY here — only the scheduler stamps it.
+  local LAST_SENT_KEY="hydra:operator-channel:brief:last-sent"
+  local BM_KEY_PREFIX="hydra:autopilot:brief-missing"
+  local STALE_HOURS="${HYDRA_WATCHDOG_BRIEF_STALE_HOURS:-26}"
+  [[ "$STALE_HOURS" =~ ^[0-9]+$ ]] || STALE_HOURS=26
+  local KIND="brief:missing"
+
+  log() {
+    echo "hydra-brief-missing-watchdog: $*"
+  }
+
+  # rc_write/rc_read — same best-effort contract as the sibling blocks
+  # (fire-and-forget mutation; "" on any read failure). A per-block copy, like
+  # theirs: the test harnesses extract each block by slicing.
+  rc_write() {
+    if [[ "$REDIS_HOST" == "docker" ]]; then
+      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
+    else
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
+    fi
+  }
+  rc_read() {
+    if [[ "$REDIS_HOST" == "docker" ]]; then
+      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
+    else
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
+    fi
+  }
+
+  # deliver_page SUBCOMMAND ARGS... — the Operator Channel CLI (ADR-0045 D2,
+  # issue #5046): the ONLY Telegram sender. It imports src/operator-channel/
+  # directly, so it works with the Orchestrator down. The binary resolves
+  # through HYDRA_WATCHDOG_OPERATOR_NOTIFY (tests: an argv-recording stub) and
+  # defaults to node --experimental-strip-types — never npx tsx: a unit's
+  # minimal PATH cannot see the global tsx. Best-effort by contract: timeout
+  # 25, `|| log WARN`, always returns 0. Credentials are the CLI's concern
+  # (one loader; the watchdog never reads TELEGRAM_*). Deliberately a per-block
+  # copy, like rc_write: the test harnesses extract each block by slicing.
+  deliver_page() {
+    local notify_bin="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-$HOME/hydra}/scripts/operator-notify.ts}"
+    local out err_file
+    err_file="$(mktemp 2>/dev/null || printf '/tmp/hydra-operator-notify-%s.err' "$$")"
+    # shellcheck disable=SC2086  # word-splitting binary+flags is intended
+    out="$(timeout 25 $notify_bin "$@" 2>"$err_file")" \
+      && log "operator-notify $1 ok for '${3:-}' (${out:-no output})" \
+      || log "WARN operator-notify $1 FAILED (rc=$?) for '${3:-}' (best-effort — detection state is unchanged): $({ grep -m1 -E 'Error|ERR_' "$err_file" || tail -n 1 "$err_file"; } 2>/dev/null | cut -c1-300)"
+    rm -f "$err_file" 2>/dev/null || true
+    return 0
+  }
+
+  local now_ms="${HYDRA_WATCHDOG_BRIEF_NOW_MS:-}"
+  if [[ ! "$now_ms" =~ ^[0-9]+$ ]]; then
+    now_ms="$(date +%s%3N 2>/dev/null || echo 0)"
+  fi
+  [[ "$now_ms" =~ ^[0-9]+$ ]] || now_ms=0
+  local thr_ms=$(( STALE_HOURS * 3600 * 1000 ))
+  local absent_key="${BM_KEY_PREFIX}:absent-since"
+  local fired_key="${BM_KEY_PREFIX}:fired"
+
+  # --- Reachability first: neither 0 nor 1 means Redis is unreachable, not
+  # that the brief is missing. Leave every state untouched. ---
+  local exists
+  exists="$(rc_read EXISTS "$LAST_SENT_KEY" | tr -dc '0-9')"
+  if [[ "$exists" != "0" && "$exists" != "1" ]]; then
+    log "WARN Redis unreachable (EXISTS ${LAST_SENT_KEY} answered '${exists:-nothing}') — cannot evaluate brief freshness this tick; alarm state unchanged (## SERVICE LIVENESS owns Redis-down)"
+    return 0
+  fi
+
+  # --- Reference instant: the delivered stamp, or the cold-start anchor. ---
+  local last_ms="" reference_ms reason
+  if [[ "$exists" == "1" ]]; then
+    last_ms="$(rc_read GET "$LAST_SENT_KEY" | tr -dc '0-9')"
+  fi
+  if [[ "$last_ms" =~ ^[0-9]+$ ]] && (( last_ms > 0 )); then
+    reference_ms="$last_ms"
+    reason="stale"
+    rc_write DEL "$absent_key"
+  else
+    rc_write SET "$absent_key" "$now_ms" NX
+    local absent_since
+    absent_since="$(rc_read GET "$absent_key" | tr -dc '0-9')"
+    [[ "$absent_since" =~ ^[0-9]+$ ]] || absent_since="$now_ms"
+    reference_ms="$absent_since"
+    reason="never-delivered"
+  fi
+  local age_ms=$(( now_ms - reference_ms ))
+  if (( age_ms < 0 )); then age_ms=0; fi
+  local age_h=$(( age_ms / 3600000 ))
+
+  # --- Edge-triggered delivery: ONE page per episode, one resolve on recovery. ---
+  if (( age_ms >= thr_ms )); then
+    log "WARNING MORNING BRIEF MISSING — ${reason}: no brief delivered for ${age_h}h (threshold ${STALE_HOURS}h; reference_ms=${reference_ms}, now_ms=${now_ms}) — issue #5048"
+    if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" != "1" ]]; then
+      rc_write SET "$fired_key" "$now_ms"
+      deliver_page page --kind "$KIND" --dedup-key "$KIND" \
+        --title "No Morning Brief delivered for ${age_h}h" \
+        --fact "reason=${reason}" --fact "age_h=${age_h}" --fact "threshold_h=${STALE_HOURS}" --fact "last_sent_key=${LAST_SENT_KEY}"
+    else
+      log "still missing — already paged this episode (the fired marker holds the dedup)"
+    fi
+  else
+    if [[ "$reason" == "stale" ]]; then
+      log "morning brief fresh: last delivered ${age_h}h ago (threshold ${STALE_HOURS}h)"
+    else
+      log "morning brief never delivered yet: cold-start grace ${age_h}h of ${STALE_HOURS}h used (absent-since anchor ${reference_ms})"
+    fi
+    if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" == "1" ]]; then
+      log "morning brief delivered again — clearing the episode (dedup re-armed)"
+      deliver_page resolve --dedup-key "$KIND" --title "Morning Brief delivered again"
+    fi
+    rc_write DEL "$fired_key"
+  fi
+
+  log "brief-missing tick processed (threshold=${STALE_HOURS}h, reason=${reason}, now_ms=${now_ms})"
+  return 0
+}
+
+
+# =============================================================================
 # ## ORIGIN IDENTITY
 # =============================================================================
 #
@@ -2423,191 +2608,6 @@ run_origin_identity() {
 
 
 # =============================================================================
-# ## MORNING BRIEF MISSING
-# =============================================================================
-#
-# Operator Channel delivery-health alarm (ADR-0045 Decision 8, issue #5048):
-# page the operator ONCE when no Morning Brief has been delivered for 26h, and
-# send the recovered message when one lands again.
-#
-# Why it lives here and not in the orchestrator
-# ---------------------------------------------
-# The brief (Decision 7) rides the scheduler heartbeat tick, so every way the
-# brief can go silent — the orchestrator down, the scheduler deliberately
-# stopped (`POST /scheduler/stop`), the transport failing for a day, the
-# credentials unset — is a way the orchestrator could never report it. This
-# block therefore reads the brief's ONLY timing state, the Redis key
-# `hydra:operator-channel:brief:last-sent` (epoch ms, stamped by
-# src/redis/operator-channel.ts ONLY after the transport reported a delivered
-# send), directly with redis-cli — never through the orchestrator's HTTP API
-# — and pages through the Operator Channel CLI, which imports the channel
-# directly (Decision 6). The alarm is deliberately INDEPENDENT of the
-# scheduler's running state: a stopped scheduler still earns a page after 26h,
-# because the operator asked for a brief every day, not for one whenever the
-# scheduler happens to run.
-#
-# Cold-start rule
-# ---------------
-# When the key has never been written (a fresh deploy, a restored Redis, or
-# the key deleted) the block anchors `hydra:autopilot:brief-missing:absent-
-# since` with SET NX at the FIRST tick that observes the absence and measures
-# the 26h from that anchor — so a brand-new install gets a full 26h grace and
-# then pages with reason `never-delivered`, instead of either paging on the
-# first tick or staying silent forever. The anchor is DELeted the moment the
-# key appears. (Rejected: anchoring on the orchestrator's first-start time,
-# which would need the orchestrator API — the dependency this block exists to
-# avoid.) A key holding an unparseable value is treated as absent.
-#
-# Reachability: an EXISTS that answers neither 0 nor 1 means Redis itself is
-# unreachable — the block logs a WARN and leaves every state untouched (no
-# page, no resolve, no anchor): the ## SERVICE LIVENESS block owns Redis-down,
-# and an unreachable store must never masquerade as a missing brief.
-#
-# Delivery is the same edge-triggered shape the other blocks use: a fired
-# marker SET on the first stale tick gates ONE `page` call per episode (the
-# channel's own dedup would suppress a 2-minute repeat anyway, but every such
-# call would inflate the suppressed counter the /health card shows), and the
-# recovery tick calls `resolve` only when that marker existed, then DELs it.
-#
-# Fail-safe (HARD): never throws, never returns non-zero; every redis-cli /
-# CLI call is best-effort.
-#
-# Testability hooks (off-by-default; pinned by
-# test/watchdog-operator-channel.test.mts):
-#   HYDRA_REDIS_HOST / HYDRA_REDIS_PORT / HYDRA_REDIS_DB  shared with the other
-#                                               blocks (see run_launch_flow).
-#   HYDRA_WATCHDOG_BRIEF_STALE_HOURS            threshold in hours (default 26).
-#   HYDRA_WATCHDOG_BRIEF_NOW_MS                 deterministic clock (epoch ms)
-#                                               so a test can age the key
-#                                               without sleeping.
-#   HYDRA_WATCHDOG_OPERATOR_NOTIFY              the CLI binary (tests: an
-#                                               argv-recording stub).
-
-run_brief_missing() {
-  local REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
-  local REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
-  local REDIS_DB="${HYDRA_REDIS_DB:-0}"
-  [[ "$REDIS_DB" =~ ^[0-9]+$ ]] || REDIS_DB=0
-  # The TS-owned key name (BRIEF_LAST_SENT_KEY in src/redis/operator-channel.ts;
-  # drift-guarded by the test). READ ONLY here — only the scheduler stamps it.
-  local LAST_SENT_KEY="hydra:operator-channel:brief:last-sent"
-  local BM_KEY_PREFIX="hydra:autopilot:brief-missing"
-  local STALE_HOURS="${HYDRA_WATCHDOG_BRIEF_STALE_HOURS:-26}"
-  [[ "$STALE_HOURS" =~ ^[0-9]+$ ]] || STALE_HOURS=26
-  local KIND="brief:missing"
-
-  log() {
-    echo "hydra-brief-missing-watchdog: $*"
-  }
-
-  # rc_write/rc_read — same best-effort contract as the sibling blocks
-  # (fire-and-forget mutation; "" on any read failure). A per-block copy, like
-  # theirs: the test harnesses extract each block by slicing.
-  rc_write() {
-    if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
-    else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
-    fi
-  }
-  rc_read() {
-    if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
-    else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
-    fi
-  }
-
-  # deliver_page SUBCOMMAND ARGS... — the Operator Channel CLI (ADR-0045 D2,
-  # issue #5046): the ONLY Telegram sender. It imports src/operator-channel/
-  # directly, so it works with the Orchestrator down. The binary resolves
-  # through HYDRA_WATCHDOG_OPERATOR_NOTIFY (tests: an argv-recording stub) and
-  # defaults to node --experimental-strip-types — never npx tsx: a unit's
-  # minimal PATH cannot see the global tsx. Best-effort by contract: timeout
-  # 25, `|| log WARN`, always returns 0. Credentials are the CLI's concern
-  # (one loader; the watchdog never reads TELEGRAM_*). Deliberately a per-block
-  # copy, like rc_write: the test harnesses extract each block by slicing.
-  deliver_page() {
-    local notify_bin="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-$HOME/hydra}/scripts/operator-notify.ts}"
-    local out err_file
-    err_file="$(mktemp 2>/dev/null || printf '/tmp/hydra-operator-notify-%s.err' "$$")"
-    # shellcheck disable=SC2086  # word-splitting binary+flags is intended
-    out="$(timeout 25 $notify_bin "$@" 2>"$err_file")" \
-      && log "operator-notify $1 ok for '${3:-}' (${out:-no output})" \
-      || log "WARN operator-notify $1 FAILED (rc=$?) for '${3:-}' (best-effort — detection state is unchanged): $({ grep -m1 -E 'Error|ERR_' "$err_file" || tail -n 1 "$err_file"; } 2>/dev/null | cut -c1-300)"
-    rm -f "$err_file" 2>/dev/null || true
-    return 0
-  }
-
-  local now_ms="${HYDRA_WATCHDOG_BRIEF_NOW_MS:-}"
-  if [[ ! "$now_ms" =~ ^[0-9]+$ ]]; then
-    now_ms="$(date +%s%3N 2>/dev/null || echo 0)"
-  fi
-  [[ "$now_ms" =~ ^[0-9]+$ ]] || now_ms=0
-  local thr_ms=$(( STALE_HOURS * 3600 * 1000 ))
-  local absent_key="${BM_KEY_PREFIX}:absent-since"
-  local fired_key="${BM_KEY_PREFIX}:fired"
-
-  # --- Reachability first: neither 0 nor 1 means Redis is unreachable, not
-  # that the brief is missing. Leave every state untouched. ---
-  local exists
-  exists="$(rc_read EXISTS "$LAST_SENT_KEY" | tr -dc '0-9')"
-  if [[ "$exists" != "0" && "$exists" != "1" ]]; then
-    log "WARN Redis unreachable (EXISTS ${LAST_SENT_KEY} answered '${exists:-nothing}') — cannot evaluate brief freshness this tick; alarm state unchanged (## SERVICE LIVENESS owns Redis-down)"
-    return 0
-  fi
-
-  # --- Reference instant: the delivered stamp, or the cold-start anchor. ---
-  local last_ms="" reference_ms reason
-  if [[ "$exists" == "1" ]]; then
-    last_ms="$(rc_read GET "$LAST_SENT_KEY" | tr -dc '0-9')"
-  fi
-  if [[ "$last_ms" =~ ^[0-9]+$ ]] && (( last_ms > 0 )); then
-    reference_ms="$last_ms"
-    reason="stale"
-    rc_write DEL "$absent_key"
-  else
-    rc_write SET "$absent_key" "$now_ms" NX
-    local absent_since
-    absent_since="$(rc_read GET "$absent_key" | tr -dc '0-9')"
-    [[ "$absent_since" =~ ^[0-9]+$ ]] || absent_since="$now_ms"
-    reference_ms="$absent_since"
-    reason="never-delivered"
-  fi
-  local age_ms=$(( now_ms - reference_ms ))
-  if (( age_ms < 0 )); then age_ms=0; fi
-  local age_h=$(( age_ms / 3600000 ))
-
-  # --- Edge-triggered delivery: ONE page per episode, one resolve on recovery. ---
-  if (( age_ms >= thr_ms )); then
-    log "WARNING MORNING BRIEF MISSING — ${reason}: no brief delivered for ${age_h}h (threshold ${STALE_HOURS}h; reference_ms=${reference_ms}, now_ms=${now_ms}) — issue #5048"
-    if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" != "1" ]]; then
-      rc_write SET "$fired_key" "$now_ms"
-      deliver_page page --kind "$KIND" --dedup-key "$KIND" \
-        --title "No Morning Brief delivered for ${age_h}h" \
-        --fact "reason=${reason}" --fact "age_h=${age_h}" --fact "threshold_h=${STALE_HOURS}" --fact "last_sent_key=${LAST_SENT_KEY}"
-    else
-      log "still missing — already paged this episode (the fired marker holds the dedup)"
-    fi
-  else
-    if [[ "$reason" == "stale" ]]; then
-      log "morning brief fresh: last delivered ${age_h}h ago (threshold ${STALE_HOURS}h)"
-    else
-      log "morning brief never delivered yet: cold-start grace ${age_h}h of ${STALE_HOURS}h used (absent-since anchor ${reference_ms})"
-    fi
-    if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" == "1" ]]; then
-      log "morning brief delivered again — clearing the episode (dedup re-armed)"
-      deliver_page resolve --dedup-key "$KIND" --title "Morning Brief delivered again"
-    fi
-    rc_write DEL "$fired_key"
-  fi
-
-  log "brief-missing tick processed (threshold=${STALE_HOURS}h, reason=${reason}, now_ms=${now_ms})"
-  return 0
-}
-
-
-# =============================================================================
 # Entry point — run all blocks on every tick ONLY when the script is executed
 # directly, not when it is sourced. test/watchdog-pending-work.test.mts sources
 # this file to exercise read_pending_work in isolation (without faking the
@@ -2623,7 +2623,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   run_skill_mirror_drift
   run_launch_flow
   run_node_modules_integrity
-  run_origin_identity
   run_brief_missing
+  run_origin_identity
   exit 0
 fi

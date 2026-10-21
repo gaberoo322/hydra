@@ -181,16 +181,21 @@ describe("run_brief_missing — structure (issue #5048, ADR-0045 Decision 8)", (
     assert.equal(syntax.status, 0, `bash -n failed: ${syntax.stderr}`);
   });
 
-  test("the block is wired into the entry point after run_origin_identity", () => {
+  test("the block is wired into the entry point, just before run_origin_identity", () => {
     const src = read("scripts/hydra-watchdog.sh");
     const defIdx = src.indexOf("run_brief_missing()");
+    const originIdx = src.indexOf("run_origin_identity() {");
     assert.ok(defIdx >= 0, "run_brief_missing() definition not found");
+    // The origin-identity suite slices from ITS definition to the entry point
+    // and pins `run_origin_identity` as the last call before `exit 0`, so this
+    // block is defined before it and dispatched before it.
+    assert.ok(originIdx > defIdx, "the block definition must precede run_origin_identity's (the origin-identity suite slices from there)");
     const guard = 'if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then';
     const guardIdx = src.lastIndexOf(guard);
     assert.ok(guardIdx > defIdx, "the sourcing-guarded entry point must follow the block definition");
     const entry = src.slice(guardIdx);
     assert.match(entry, /^\s*run_brief_missing$/m, "block must run on every real tick");
-    assert.match(entry, /run_origin_identity\n\s*run_brief_missing/, "block sits after run_origin_identity in the main sequence");
+    assert.match(entry, /run_brief_missing\n\s*run_origin_identity\n\s*exit 0/, "block sits just before run_origin_identity in the main sequence");
   });
 
   test("reads the TS-owned last-sent key name verbatim (drift guard) and never writes it", () => {

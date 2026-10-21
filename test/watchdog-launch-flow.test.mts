@@ -1294,8 +1294,8 @@ describe("scripts/hydra-watchdog.sh — Operator Channel CLI delivery (ADR-0045 
   test("every page-list block owns a deliver_page helper that resolves the CLI through HYDRA_WATCHDOG_OPERATOR_NOTIFY", () => {
     const code = scriptCode();
     const helpers = code.match(/^\s*deliver_page\(\) \{/gm) ?? [];
-    assert.equal(helpers.length, 4, "launch-flow, node-modules-integrity, redis-backup-freshness and origin-identity each keep their own helper (the rc_write duplication precedent)");
-    for (const block of ["run_launch_flow()", "run_node_modules_integrity()", "run_redis_backup_freshness()", "run_origin_identity()"]) {
+    assert.equal(helpers.length, 5, "launch-flow, node-modules-integrity, redis-backup-freshness, origin-identity and brief-missing (#5048) each keep their own helper (the rc_write duplication precedent)");
+    for (const block of ["run_launch_flow()", "run_node_modules_integrity()", "run_redis_backup_freshness()", "run_origin_identity()", "run_brief_missing()"]) {
       const start = code.indexOf(block);
       assert.ok(start >= 0, `${block} not found`);
       const body = code.slice(start, start + code.slice(start).search(/^}/m) + 1);
