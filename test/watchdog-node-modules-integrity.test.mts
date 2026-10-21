@@ -400,7 +400,7 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through run_node_
   // and FLUSHDBs it (issue #5062). Null => no owned DB (remote REDIS_URL or a
   // bare `node --test`): the "lands in that DB" test skips with a reason.
   const OWNED_DB: string | null = ownedRedisDb();
-  const SELECTED_DB = OWNED_DB ?? "0"; // "0" only feeds idempotent cleanup DELs when skipped
+  const SELECTED_DB: string | null = OWNED_DB; // null => cleanup DELs against the owned DB are skipped (never db 0 here)
   const OWNED_DB_SKIP = ownedDbSkip(OWNED_DB);
 
   // Fully separate key namespace from TEST_NM_PREFIX/SINCE/FIRED above — this
@@ -462,10 +462,10 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through run_node_
     const keys = sig ? [OWN_SINCE(sig), OWN_FIRED(sig)] : [];
     if (keys.length > 0) {
       drcAt("0", ["DEL", ...keys]);
-      drcAt(SELECTED_DB, ["DEL", ...keys]);
+      if (SELECTED_DB !== null) drcAt(SELECTED_DB, ["DEL", ...keys]);
     }
     drcAt("0", ["DEL", OWN_NOTIFY_STREAM]);
-    drcAt(SELECTED_DB, ["DEL", OWN_NOTIFY_STREAM]);
+    if (SELECTED_DB !== null) drcAt(SELECTED_DB, ["DEL", OWN_NOTIFY_STREAM]);
   }
 
   beforeEach(() => {
@@ -510,19 +510,19 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through run_node_
   test("a bash-side write with HYDRA_REDIS_DB set lands in that DB, never in db 0", { skip: OWNED_DB_SKIP }, () => {
     assert.ok(OWNED_DB !== null, "full-suite launcher run must export an owned HYDRA_REDIS_DB (#5062)");
     const sig = sigForRoot(wipedRoot);
-    const r = runOwnBlock({ HYDRA_REDIS_DB: SELECTED_DB });
+    const r = runOwnBlock({ HYDRA_REDIS_DB: OWNED_DB! });
     assert.equal(r.status, 0, `block must never exit non-zero: ${r.stderr}`);
     assert.match(nmLines(r.stdout), /WARNING NODE_MODULES INTEGRITY/, "must warn on the wiped tree");
 
     // The since-anchor + fired marker THIS tick just wrote via rc_write must
     // exist in the selected DB...
     assert.equal(
-      existsAt(SELECTED_DB, OWN_FIRED(sig)),
+      existsAt(OWNED_DB!, OWN_FIRED(sig)),
       true,
       "fired marker must land in the HYDRA_REDIS_DB-selected DB",
     );
     assert.equal(
-      existsAt(SELECTED_DB, OWN_SINCE(sig)),
+      existsAt(OWNED_DB!, OWN_SINCE(sig)),
       true,
       "since anchor must land in the HYDRA_REDIS_DB-selected DB",
     );

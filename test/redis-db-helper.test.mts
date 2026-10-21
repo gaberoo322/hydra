@@ -25,6 +25,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Redis from "ioredis";
 import { useCleanRedisDb, TEST_REDIS_URL } from "./_helpers/redis-db.mts";
+import { ownedRedisDb, ownedDbSkip } from "./_helpers/owned-redis-db.mts";
 
 // The strict ioredis `Redis` static type in this tsconfig omits the full
 // dynamic command surface (`exists`, etc.); the suite convention is to type the
@@ -903,5 +904,33 @@ describe("no test file hardcodes a launcher-pool Redis DB index (issue #5062)", 
       });
     }
     assert.deepEqual(hits, [], `pool-index literals used as live Redis selectors:\n${hits.join("\n")}`);
+  });
+});
+
+describe("test/_helpers/owned-redis-db decision matrix (issue #5062)", () => {
+  test("ownedRedisDb accepts only a non-zero integer string", () => {
+    assert.equal(ownedRedisDb({}), null, "unset");
+    assert.equal(ownedRedisDb({ HYDRA_REDIS_DB: "0" }), null, "db 0 is never owned");
+    assert.equal(ownedRedisDb({ HYDRA_REDIS_DB: "abc" }), null, "non-numeric");
+    assert.equal(ownedRedisDb({ HYDRA_REDIS_DB: "" }), null, "empty");
+    assert.equal(ownedRedisDb({ HYDRA_REDIS_DB: "12" }), "12", "launcher-exported index passes through");
+  });
+
+  test("ownedDbSkip: owned DB never skips", () => {
+    assert.equal(ownedDbSkip("12", {}), false);
+  });
+
+  test("ownedDbSkip: bare node --test (no FULL_SUITE) skips with a reason", () => {
+    assert.equal(typeof ownedDbSkip(null, {}), "string");
+  });
+
+  test("ownedDbSkip: remote REDIS_URL skips even on a full-suite run", () => {
+    const r = ownedDbSkip(null, { HYDRA_FULL_SUITE: "1", REDIS_URL: "redis://redis.example.com:6379" });
+    assert.equal(typeof r, "string");
+  });
+
+  test("ownedDbSkip: full-suite local run returns false so the test body fails loudly", () => {
+    assert.equal(ownedDbSkip(null, { HYDRA_FULL_SUITE: "1" }), false);
+    assert.equal(ownedDbSkip(null, { HYDRA_FULL_SUITE: "1", REDIS_URL: "redis://127.0.0.1:6379/0" }), false);
   });
 });
