@@ -35,7 +35,7 @@ import { join, resolve } from "node:path";
 
 import type { DedupState, DeliveryLogEntry } from "../src/redis/operator-channel.ts";
 import type { OperatorChannelStore } from "../src/operator-channel/channel.ts";
-import type { TelegramTransportFn } from "../src/notify.ts";
+import type { TelegramTransportFn } from "../src/operator-channel/transport.ts";
 import { isPageKind } from "../src/operator-channel/page-list.ts";
 import {
   runOperatorNotify,

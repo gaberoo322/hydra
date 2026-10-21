@@ -1525,7 +1525,8 @@ Relay the QA report to the user.
 Pre-merge QA (sections 1–11) is the **Pre-merge Gate**. This section is the
 **Post-merge Regression Check**: the *producer* of the Outcome Holdback events
 (`holdback.reverted` / `holdback.cap-reached` / `holdback.revert_failed`) that
-`src/digest.ts` has long consumed but nothing produced since the in-process
+the notification consumer (now the Operator Channel router, `src/operator-channel/route-event.ts`;
+formerly the deleted `src/digest.ts`) has long consumed but nothing produced since the in-process
 `src/holdback.ts` watcher was deleted in the ADR-0006 cut-over. Without this,
 no enrolled merge (T2/T3/T4 — see "carries up the ladder" below) is actually
 watched for Target-Outcome regression — the holdback is a no-op.
@@ -1639,7 +1640,9 @@ esac
 - **Fixed event names + payloads.** The producer emits exactly
   `holdback.reverted` (`payload.commitSha`, `payload.regressedOutcomes`),
   `holdback.cap-reached`, and `holdback.revert_failed` — the three names
-  `src/digest.ts` consumes. Renaming any leaves the consumer orphaned.
+  the Operator Channel router (`src/operator-channel/route-event.ts`) consumes:
+  `holdback.revert_failed` is a Page, the other two are Morning Brief items
+  (ADR-0045). Renaming any leaves the consumer orphaned.
 - **Per-day cap precedes any revert.** Once `HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY`
   (default 3) is reached, the producer emits `holdback.cap-reached` and
   suppresses further reverts for the UTC day.

@@ -22,7 +22,7 @@
  * process-wide scheduler bound to this send path.
  */
 
-import { sendHtmlToTelegram, type TelegramTransportFn } from "../notify.ts";
+import { sendHtmlToTelegram, type TelegramTransportFn } from "./transport.ts";
 import { appendLog as defaultAppendLog, type DeliveryLogEntry, type DeliveryOutcome } from "../redis/operator-channel.ts";
 import { logger } from "../logger.ts";
 import { renderBriefLine } from "./brief-lines.ts";

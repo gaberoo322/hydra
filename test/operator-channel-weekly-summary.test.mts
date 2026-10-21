@@ -3,7 +3,8 @@
  * contract since issue #5047).
  *
  * Exercises `buildWeeklySummary` directly — the once-a-week async fan-out
- * assembler in `src/digest-weekly.ts`. It takes injectable `deps` (mirroring
+ * assembler in `src/operator-channel/weekly-summary.ts` (moved there from
+ * `src/digest-weekly.ts` in issue #5049). It takes injectable `deps` (mirroring
  * `src/aggregators/builder-health.ts`), so every reader here is a stub: no
  * Redis, no GitHub, no timers, no Telegram. It returns PLAIN structured lines
  * (no Telegram markup) that the Morning Brief renders as HTML on Mondays.
@@ -16,7 +17,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildWeeklySummary } from "../src/digest-weekly.ts";
+import { buildWeeklySummary } from "../src/operator-channel/weekly-summary.ts";
 
 // ---------------------------------------------------------------------------
 // buildWeeklySummary — fully injectable, no Redis/GitHub/timers (issue #1412)

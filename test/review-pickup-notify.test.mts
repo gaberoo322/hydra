@@ -20,7 +20,6 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import { runReviewPickupNotify } from "../src/scheduler/housekeeping.ts";
-import { formatMessage } from "../src/notify.ts";
 
 interface PublishedEvent {
   stream: string;
@@ -202,27 +201,5 @@ describe("runReviewPickupNotify — edge trigger", () => {
       channel: idle.channel,
     });
     assert.deepEqual(idle.resolved, [], "no transition, no resolve");
-  });
-});
-
-describe("formatMessage — review:pickup_ready rendering", () => {
-  test("renders count, the run command, and the first item with link", () => {
-    const msg = formatMessage({
-      type: "review:pickup_ready",
-      payload: { count: 3, firstTitle: "Decide tier for PR #710", firstUrl: "https://x/710", firstNumber: 710 },
-    });
-    assert.ok(msg.includes("3 items"));
-    assert.ok(msg.includes("/hydra-review"));
-    assert.ok(msg.includes("Decide tier for PR #710"));
-    assert.ok(msg.includes("https://x/710"));
-  });
-
-  test("singular wording for a single item", () => {
-    const msg = formatMessage({
-      type: "review:pickup_ready",
-      payload: { count: 1, firstTitle: "Only one", firstUrl: "https://x/1", firstNumber: 1 },
-    });
-    assert.ok(msg.includes("1 item need"));
-    assert.ok(!msg.includes("1 items"));
   });
 });

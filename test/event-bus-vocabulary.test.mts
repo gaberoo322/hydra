@@ -24,7 +24,9 @@ import type {
   NotificationEventType,
   NotificationEventPayload,
 } from "../src/event-bus-vocabulary.ts";
-import { formatMessage } from "../src/notify-format.ts";
+import { messageFromEvent } from "../src/operator-channel/channel.ts";
+import { renderMessage } from "../src/operator-channel/render.ts";
+import { renderBriefLine } from "../src/operator-channel/brief-lines.ts";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname, extname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -270,20 +272,23 @@ describe("event-bus-vocabulary — NotificationEventPayload contract", () => {
 describe("event-bus-vocabulary — downstream formatter completeness", () => {
   // The strongest runtime completeness check the issue asks for: prove that no
   // consumer formatter has a MISSING event-type arm by feeding EVERY event type
-  // in the vocabulary through the real `notify-format.ts` formatter. Types with
-  // an explicit switch arm and types that legitimately fall to the generic
-  // `default` arm must ALL yield a non-empty message and none may throw.
+  // in the vocabulary through the real Operator Channel path (ADR-0045): the
+  // event becomes an OperatorMessage via `messageFromEvent`, and that message
+  // renders through the same renderer production uses for its severity — the
+  // Telegram-HTML page renderer for page kinds, the Morning Brief line renderer
+  // for brief kinds. (Issue #5049 retired the Markdown `formatMessage` grammar
+  // this describe used to feed.) Every type must yield a non-empty string and
+  // none may throw.
   for (const [name, value] of Object.entries(NOTIFICATION_EVENT_TYPES)) {
-    test(`formatMessage handles ${name} (${value}) without throwing`, () => {
-      let msg: string | undefined;
+    test(`the Operator Channel renders ${name} (${value}) without throwing`, () => {
+      let rendered: string | undefined;
       assert.doesNotThrow(() => {
-        msg = formatMessage({
-          type: value as NotificationEventType,
-          payload: {},
-        });
+        const msg = messageFromEvent({ type: value as NotificationEventType, payload: {} });
+        rendered =
+          msg.severity === "page" ? renderMessage(msg) : renderBriefLine({ ...msg, at: 0 });
       });
-      assert.equal(typeof msg, "string");
-      assert.ok((msg as string).length > 0, `${name} produced an empty message`);
+      assert.equal(typeof rendered, "string");
+      assert.ok((rendered as string).length > 0, `${name} produced an empty message`);
     });
   }
 });

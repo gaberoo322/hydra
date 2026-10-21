@@ -16,7 +16,7 @@
 
 import { InvalidArgumentError } from "../errors.ts";
 import { logger } from "../logger.ts";
-import { sendHtmlToTelegram, type TelegramTransportFn } from "../notify.ts";
+import { sendHtmlToTelegram, type TelegramTransportFn } from "./transport.ts";
 import { ALERT_TYPES, formatAlertMessage } from "../notification/alert-grammar.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../event-bus-vocabulary.ts";
 import { REGISTRY } from "../operator-actions/registry.ts";
