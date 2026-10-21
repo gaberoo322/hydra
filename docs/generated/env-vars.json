@@ -1382,7 +1382,7 @@
         },
         {
           "path": "scripts/claude-hooks/agent-dispatch-prompt-guard.sh",
-          "line": 57
+          "line": 78
         }
       ],
       "inEnvExample": false,

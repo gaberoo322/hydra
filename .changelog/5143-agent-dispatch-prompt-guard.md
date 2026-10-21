@@ -1,1 +1,1 @@
-- feat: a PreToolUse guard denies an unattended autopilot Agent dispatch whose prompt is not render-dispatch.py output (no `## Task`, or a placeholder / unexpanded `$(`) (#5143)
+- feat: a PreToolUse guard denies an unattended autopilot Agent dispatch whose prompt is not render-dispatch.py output (no exact `## Task` heading, an empty or placeholder-only `## Task` section, or a prompt that is / starts with a bare placeholder or unexpanded `$(`); a rendered prompt's embedded issue text and notes are never token-scanned (#5143)
