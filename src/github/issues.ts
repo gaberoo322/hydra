@@ -174,7 +174,8 @@ function issueUrlFallback(repo: string, number: number): string {
 /**
  * Parse a `gh issue list --json` payload (already JSON-parsed by `ghJson`) into
  * {@link IssueRow}s. Rows without a positive integer `number` are dropped.
- * `labels` is flattened from `[{name}]` to `string[]`. Never throws.
+ * `labels` is flattened from `[{name}]` to `string[]`; a non-list `labels`
+ * (string, number, boolean, object) reads as no labels. Never throws.
  */
 export function parseIssueRows(parsed: unknown, repo: string): IssueRow[] {
   if (!Array.isArray(parsed)) return [];
@@ -186,7 +187,7 @@ export function parseIssueRows(parsed: unknown, repo: string): IssueRow[] {
       title?: unknown;
       url?: unknown;
       createdAt?: unknown;
-      labels?: Array<{ name?: unknown }>;
+      labels?: unknown;
       body?: unknown;
       state?: unknown;
       updatedAt?: unknown;
@@ -198,7 +199,7 @@ export function parseIssueRows(parsed: unknown, repo: string): IssueRow[] {
       title: typeof c.title === "string" ? c.title : `Issue #${number}`,
       url: typeof c.url === "string" ? c.url : issueUrlFallback(repo, number),
       createdAt: typeof c.createdAt === "string" ? c.createdAt : "",
-      labels: (c.labels ?? [])
+      labels: (Array.isArray(c.labels) ? (c.labels as Array<{ name?: unknown } | null>) : [])
         .map((l) => l?.name)
         .filter((n): n is string => typeof n === "string"),
       body: typeof c.body === "string" ? c.body : "",

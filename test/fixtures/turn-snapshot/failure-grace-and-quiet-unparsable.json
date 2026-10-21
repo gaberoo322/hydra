@@ -39,8 +39,8 @@
   "expected": {
     "stderrNotes": [
       "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)",
-      "orch pr-gate ORCH_PR_UNCHECKED_GRACE_SECONDS unparsable (could not convert string to float: 'abc') — falling back to 600s default (issue #4240)",
-      "orch pr-gate ORCH_GLM_RED_QUIESCENCE_SECONDS unparsable (could not convert string to float: '1h') — falling back to 1800s default (issue #4460)"
+      "orch pr-gate ORCH_PR_UNCHECKED_GRACE_SECONDS unparsable (not-numeric: \"abc\") — falling back to 600s default (issue #4240)",
+      "orch pr-gate ORCH_GLM_RED_QUIESCENCE_SECONDS unparsable (not-numeric: \"1h\") — falling back to 1800s default (issue #4460)"
     ],
     "ghCalls": [
       [

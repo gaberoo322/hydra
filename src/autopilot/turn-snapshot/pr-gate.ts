@@ -42,7 +42,7 @@
  *
  * Reference detection reuses src/github/pr-refs.ts (the TS port of
  * pr-refs.py) — no third regex copy. Never throws: every read failure is a
- * `DegradedMarker` plus the verbatim stderr note the bash printed.
+ * `DegradedMarker` plus a stderr note naming the same reason code.
  */
 
 import { closedIssues, referencedIssues, type PrRefRow } from "../../github/pr-refs.ts";
@@ -54,9 +54,8 @@ import {
   pickNoPrResume,
   type NoPrResumeRow,
 } from "./dev-resume.ts";
-import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
+import { ghTimestampSeconds, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { QaVerdictRunner } from "./host-port.ts";
-import { pyEpochSeconds, pyFloatOr, pyJsonLoads, pyStr, pyTruthy } from "./py-compat.ts";
 
 export const PR_GATE_COLLECTOR = "pr-gate";
 
@@ -167,13 +166,31 @@ function rowsOf(list: readonly unknown[]): Row[] {
   return list.map(asRow).filter((r): r is Row => r !== null);
 }
 
-function labelsOf(pr: Row): Set<unknown> {
-  const out = new Set<unknown>();
+/**
+ * Whether a decoded JSON field carries a value — the classifier's `x or
+ * default` reading: `null`, `false`, `0`, `""` and an EMPTY list or object
+ * read as unset; a non-empty list or object does not.
+ */
+function isSet(v: unknown): boolean {
+  return v !== null && typeof v === "object" ? Object.keys(v).length > 0 : Boolean(v);
+}
+
+/** A decoded JSON value as note / set-key text: a string verbatim, anything else as JSON. */
+function jsonText(v: unknown): string {
+  return typeof v === "string" ? v : (JSON.stringify(v) ?? "null");
+}
+
+/**
+ * A PR's label names. Only non-empty STRING names are kept: every consumer
+ * tests membership of a literal label, which a non-string name can never be.
+ */
+function labelsOf(pr: Row): Set<string> {
+  const out = new Set<string>();
   const labels = pr.labels;
   if (!Array.isArray(labels)) return out;
   for (const l of labels) {
     const name = asRow(l)?.name;
-    if (pyTruthy(name)) out.add(name);
+    if (typeof name === "string" && name !== "") out.add(name);
   }
   return out;
 }
@@ -187,11 +204,11 @@ function refRow(pr: Row): PrRefRow {
 
 /** `pr.get(k) or ""` */
 function orEmpty(v: unknown): unknown {
-  return pyTruthy(v) ? v : "";
+  return isSet(v) ? v : "";
 }
 
 function upper(v: unknown): string {
-  return pyTruthy(v) ? String(v).toUpperCase() : "";
+  return isSet(v) ? String(v).toUpperCase() : "";
 }
 
 const ascending = (a: number, b: number) => a - b;
@@ -238,16 +255,11 @@ export type RepollResult =
  */
 export function applyMergeStateRepoll(first: readonly unknown[], repoll: GhJsonRead): RepollResult {
   if (repoll.kind !== "ok" || !Array.isArray(repoll.data)) {
-    const reason =
-      repoll.kind === "empty"
-        ? (pyJsonLoads("") as { error: string }).error
-        : repoll.kind === "unparseable"
-          ? repoll.error
-          : "not a list";
+    const reason = repoll.kind === "empty" ? "empty-payload" : repoll.kind === "unparseable" ? "unparseable" : "not a list";
     const unknown = first
       .map(asRow)
       .filter((p): p is Row => p !== null && p.mergeStateStatus === "UNKNOWN")
-      .map((p) => pyStr(p.number));
+      .map((p) => jsonText(p.number));
     return { kind: "failed", rows: first, reason, unknown };
   }
   const fresh = new Map<string, unknown>();
@@ -269,12 +281,12 @@ export function applyMergeStateRepoll(first: readonly unknown[], repoll: GhJsonR
     const key = pyKey(p.number);
     if (key === null) return { kind: "reducer-failed", rows: first };
     const next = fresh.get(key);
-    if (pyTruthy(next) && next !== "UNKNOWN") {
+    if (isSet(next) && next !== "UNKNOWN") {
       rows.push({ ...p, mergeStateStatus: next });
-      resolved.push(`${pyStr(p.number)}=${pyStr(next)}`);
+      resolved.push(`${jsonText(p.number)}=${jsonText(next)}`);
     } else {
       rows.push(raw);
-      still.push(pyStr(p.number));
+      still.push(jsonText(p.number));
     }
   }
   return { kind: "merged", rows, resolved, still };
@@ -367,8 +379,8 @@ export function rollupLatest(rollup: readonly unknown[]): Map<string, { pending:
   rollup.forEach((raw) => {
     const e = asRow(raw);
     if (e === null) return;
-    const name = pyTruthy(e.name) ? e.name : pyTruthy(e.context) ? e.context : "";
-    if (!pyTruthy(name)) return;
+    const name = isSet(e.name) ? e.name : isSet(e.context) ? e.context : "";
+    if (!isSet(name)) return;
     const key = typeof name === "string" ? name : `\u0000${JSON.stringify(name)}`;
     let pending: boolean;
     let red: boolean;
@@ -381,7 +393,7 @@ export function rollupLatest(rollup: readonly unknown[]): Map<string, { pending:
       pending = state === "" || state === "PENDING" || state === "EXPECTED";
       red = state === "FAILURE" || state === "ERROR";
     }
-    const started = pyEpochSeconds(e.startedAt) || 0;
+    const started = ghTimestampSeconds(e.startedAt) || 0;
     const prev = latest.get(key);
     if (prev === undefined || started >= prev.started) latest.set(key, { started, pending, red });
   });
@@ -424,7 +436,7 @@ export function qaRecheckCandidates(
   for (const pr of rowsOf(prs)) {
     const number = pr.number;
     if (typeof number !== "number" || !Number.isInteger(number) || number <= 0) continue;
-    if (pyTruthy(pr.isDraft) || labelsOf(pr).has("ready-for-human")) continue;
+    if (isSet(pr.isDraft) || labelsOf(pr).has("ready-for-human")) continue;
     if (pr.autoMergeRequest !== null) continue;
     const state = orEmpty(pr.mergeStateStatus);
     if (state === "DIRTY" || state === "UNKNOWN") continue;
@@ -462,9 +474,9 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
     if (typeof number !== "number") continue;
     const state = orEmpty(pr.mergeStateStatus);
     const names = labelsOf(pr);
-    const created = pyEpochSeconds(pr.createdAt);
-    const updated = pyEpochSeconds(pr.updatedAt);
-    const draft = pyTruthy(pr.isDraft);
+    const created = ghTimestampSeconds(pr.createdAt);
+    const updated = ghTimestampSeconds(pr.updatedAt);
+    const draft = isSet(pr.isDraft);
     // ready-for-human is the surfacing idempotency key (classifyPR parity).
     const surfaced = names.has("ready-for-human");
     if (state === "DIRTY" && !surfaced && !draft) {
@@ -497,13 +509,13 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
     ciTriggerStale = { ok: false, reason: "runs-read-failed" };
   } else {
     let stale = false;
-    const push = pyEpochSeconds(inputs.runsPushCreatedAt);
-    const prRun = pyEpochSeconds(inputs.runsPullRequestCreatedAt);
+    const push = ghTimestampSeconds(inputs.runsPushCreatedAt);
+    const prRun = ghTimestampSeconds(inputs.runsPullRequestCreatedAt);
     if (push !== null && prRun !== null && unchecked.length > 0) {
       const newest = Math.max(push, prRun);
       for (const n of unchecked) {
         const pr = prs.find((p) => p.number === n);
-        const created = pyEpochSeconds(pr?.createdAt);
+        const created = ghTimestampSeconds(pr?.createdAt);
         if (created !== null && created > newest) {
           stale = true;
           break;
@@ -539,15 +551,15 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
       if (typeof number !== "number") continue;
       const names = labelsOf(pr);
       const head = orEmpty(pr.headRefName);
-      if (pyTruthy(pr.isDraft) || names.has("ready-for-human")) continue;
+      if (isSet(pr.isDraft) || names.has("ready-for-human")) continue;
       const state = orEmpty(pr.mergeStateStatus);
       if (state === "DIRTY" || state === "UNKNOWN") continue;
-      const updated = pyEpochSeconds(pr.updatedAt);
+      const updated = ghTimestampSeconds(pr.updatedAt);
       if (updated === null || now - updated < quiet) continue;
       const verdict = requiredVerdict(pr.statusCheckRollup, req.value);
       candidates.push({
         pr: number,
-        headRefName: pyTruthy(head) ? String(head) : null,
+        headRefName: isSet(head) ? String(head) : null,
         row: pr,
         red: verdict?.red === true,
         settled: verdict !== null,
@@ -612,7 +624,7 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
       const pr = byNumber.get(number);
       if (pr === undefined) continue;
       const names = labelsOf(pr);
-      const updated = pyEpochSeconds(pr.updatedAt);
+      const updated = ghTimestampSeconds(pr.updatedAt);
       let closed: number[];
       try {
         closed = [...refs.predicates.closing([refRow(pr)])];
@@ -626,7 +638,7 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
       const age = updated !== null ? now - updated : null;
       if (!names.has("conflict-fix-attempted")) {
         const head = orEmpty(pr.headRefName);
-        if (single === null || !pyTruthy(head) || String(head).includes(":")) {
+        if (single === null || !isSet(head) || String(head).includes(":")) {
           surface.push({ pr: number, closingIssue: single });
           continue;
         }
@@ -693,12 +705,12 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
 // Input parsers (pure) — the JSON-vs-empty discipline of #4130
 // ---------------------------------------------------------------------------
 
-/** Branch protection `.contexts`: list → the truthy entries as strings; null/other JSON → healthy empty set. */
+/** Branch protection `.contexts`: list → the set entries as strings; null/other JSON → healthy empty set. */
 export function parseRequiredContexts(read: GhJsonRead): Classified<ReadonlySet<string>> {
   if (read.kind === "empty") return { ok: false, reason: "empty-payload" };
   if (read.kind === "unparseable") return { ok: false, reason: "unparseable" };
   if (!Array.isArray(read.data)) return { ok: true, value: new Set() };
-  return { ok: true, value: new Set(read.data.filter(pyTruthy).map(pyStr)) };
+  return { ok: true, value: new Set(read.data.filter(isSet).map(jsonText)) };
 }
 
 /** `[{"number": N}, …]` → the issue numbers. A non-iterable JSON value is a failed read (Python's TypeError). */
@@ -738,7 +750,7 @@ export function parseNoPrResumeRows(read: GhJsonRead): Classified<readonly NoPrR
   for (const row of rowsOf(data)) {
     const n = row.number;
     if (typeof n !== "number" || !Number.isInteger(n)) continue;
-    out.push({ number: n, labels: new Set([...labelsOf(row)].map(pyStr)), updatedAt: pyEpochSeconds(row.updatedAt) });
+    out.push({ number: n, labels: labelsOf(row), updatedAt: ghTimestampSeconds(row.updatedAt) });
   }
   return { ok: true, value: out };
 }
@@ -781,6 +793,30 @@ export interface PrGateDeps {
 
 const DEFAULT_REPOLL_DELAY = "5";
 
+/**
+ * The env windows' accepted grammar: a decimal float literal (optional sign,
+ * digits with single `_` separators, optional fraction and exponent), or
+ * `inf` / `infinity` / `nan` in any case — the forms the windows have always
+ * accepted (#4240, #4460, #4808).
+ */
+const WINDOW_SECONDS_RE = /^[+-]?(?:(?:\d(?:_?\d)*)?\.?\d(?:_?\d)*(?:[eE][+-]?\d(?:_?\d)*)?|\d(?:_?\d)*\.|inf(?:inity)?|nan)$/i;
+
+/**
+ * One `HYDRA_ORCH_*_SECONDS` window: unset/empty → `fallback` silently; a
+ * {@link WINDOW_SECONDS_RE} literal (surrounding whitespace ignored) → its
+ * value; anything else → `fallback` plus a `not-numeric` reason quoting the
+ * raw text for the stderr note.
+ */
+function windowSeconds(raw: string | undefined, fallback: number): { value: number; error: string | null } {
+  if (raw === undefined || raw === "") return { value: fallback, error: null };
+  const s = raw.trim();
+  if (!WINDOW_SECONDS_RE.test(s)) return { value: fallback, error: `not-numeric: ${JSON.stringify(raw)}` };
+  const lower = s.toLowerCase().replace(/^[+]/, "");
+  if (/^-?inf(inity)?$/.test(lower)) return { value: lower.startsWith("-") ? -Infinity : Infinity, error: null };
+  if (/^-?nan$/.test(lower)) return { value: Number.NaN, error: null };
+  return { value: Number(s.replace(/_/g, "")), error: null };
+}
+
 /** A non-negative decimal (`[0-9.]` with at most one dot) — the bash `case` guard on the re-poll delay. */
 function isValidDelay(raw: string): boolean {
   return raw !== "" && /^[0-9.]+$/.test(raw) && (raw.match(/\./g)?.length ?? 0) <= 1;
@@ -798,7 +834,7 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
   const first = await deps.github.listOpenPrs(limit);
   let payload: GhJsonRead = first;
   if (first.kind === "unparseable") {
-    notes.push(`orch pr-gate UNKNOWN probe could not parse first payload (${first.error}) — skipping re-poll (issue #4812)`);
+    notes.push("orch pr-gate UNKNOWN probe could not parse first payload (unparseable) — skipping re-poll (issue #4812)");
   } else if (first.kind === "ok" && Array.isArray(first.data) && hasUnknownMergeState(first.data)) {
     const rawDelay = env.unknownRepollDelaySeconds || DEFAULT_REPOLL_DELAY;
     let delay = rawDelay;
@@ -865,11 +901,11 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
 
   // 4. Classification inputs (the old heredoc's own preamble notes).
   if (payload.kind !== "ok") {
-    const error = payload.kind === "unparseable" ? payload.error : (pyJsonLoads("") as { error: string }).error;
-    notes.push(`orch pr-gate PR-list JSON parse FAILED (${error}) — falling back to empty PR list (issue #4240)`);
-    degraded.push({ field: "prList", reason: payload.kind === "empty" ? "empty-payload" : "unparseable" });
+    const reason = payload.kind === "empty" ? "empty-payload" : "unparseable";
+    notes.push(`orch pr-gate PR-list JSON parse FAILED (${reason}) — falling back to empty PR list (issue #4240)`);
+    degraded.push({ field: "prList", reason });
   }
-  const grace = pyFloatOr(env.uncheckedGraceSeconds || String(DEFAULT_UNCHECKED_GRACE_SECONDS), DEFAULT_UNCHECKED_GRACE_SECONDS);
+  const grace = windowSeconds(env.uncheckedGraceSeconds, DEFAULT_UNCHECKED_GRACE_SECONDS);
   if (grace.error !== null) {
     notes.push(
       `orch pr-gate ORCH_PR_UNCHECKED_GRACE_SECONDS unparsable (${grace.error}) — falling back to 600s default (issue #4240)`,
@@ -879,19 +915,13 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
     notes.push(`orch dev-resume pr-refs.py import FAILED (${prRefs.error}) — fail closed (issue #4460)`);
     degraded.push({ field: "prRefs", reason: "predicate-unavailable" });
   }
-  const quiet = pyFloatOr(
-    env.glmRedQuiescenceSeconds || String(DEFAULT_GLM_RED_QUIESCENCE_SECONDS),
-    DEFAULT_GLM_RED_QUIESCENCE_SECONDS,
-  );
+  const quiet = windowSeconds(env.glmRedQuiescenceSeconds, DEFAULT_GLM_RED_QUIESCENCE_SECONDS);
   if (quiet.error !== null) {
     notes.push(
       `orch pr-gate ORCH_GLM_RED_QUIESCENCE_SECONDS unparsable (${quiet.error}) — falling back to 1800s default (issue #4460)`,
     );
   }
-  const noprQuiet = pyFloatOr(
-    env.devResumeNoprQuiescenceSeconds || String(DEFAULT_NOPR_RESUME_QUIESCENCE_SECONDS),
-    DEFAULT_NOPR_RESUME_QUIESCENCE_SECONDS,
-  );
+  const noprQuiet = windowSeconds(env.devResumeNoprQuiescenceSeconds, DEFAULT_NOPR_RESUME_QUIESCENCE_SECONDS);
   if (noprQuiet.error !== null) {
     notes.push(
       `orch dev-resume no-PR pick HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS unparsable (${noprQuiet.error}) — falling back to 5400s default (issue #4808)`,

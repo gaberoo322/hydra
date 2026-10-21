@@ -45,7 +45,6 @@ import {
 import { createTurnSnapshotHydra, type HydraTransport, type TurnSnapshotHydra } from "../src/autopilot/turn-snapshot/hydra-http.ts";
 import type { TurnSnapshotHost } from "../src/autopilot/turn-snapshot/host-port.ts";
 import type { TurnSnapshotGithub } from "../src/autopilot/turn-snapshot/github-port.ts";
-import { pyFormatFixed, pyNumberRepr, pyReprValue } from "../src/autopilot/turn-snapshot/py-format.ts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot", "passthrough");
 const BASE = "http://golden.invalid";
@@ -244,30 +243,7 @@ describe("Turn Snapshot hydra HTTP client — `hydra raw GET` semantics", () => 
   });
 });
 
-describe("Turn Snapshot py-format — Python formatting parity", () => {
-  test("format(x, '.Nf') rounds the exact double half-to-even", () => {
-    assert.equal(pyFormatFixed(0.125, 2), "0.12");
-    assert.equal(pyFormatFixed(0.375, 2), "0.38");
-    assert.equal(pyFormatFixed(1 / 32, 4), "0.0312");
-    assert.equal(pyFormatFixed(0.675, 2), "0.68"); // 0.675 is 0.67500000000000004441 — not a tie
-    assert.equal(pyFormatFixed(1, 4), "1.0000");
-    assert.equal(pyFormatFixed(-0.001, 2), "-0.00");
-    assert.equal(pyFormatFixed(-0, 2), "-0.00");
-    assert.equal(pyFormatFixed(2.5, 0), "2");
-    assert.equal(pyFormatFixed(123456.789, 2), "123456.79");
-  });
-
-  test("repr of JSON numbers and containers", () => {
-    assert.equal(pyNumberRepr(20), "20");
-    assert.equal(pyNumberRepr(0.1), "0.1");
-    assert.equal(pyNumberRepr(1e-7), "1e-07");
-    assert.equal(pyNumberRepr(0.0001), "0.0001");
-    assert.equal(pyNumberRepr(1e21), "1e+21");
-    assert.equal(pyNumberRepr(1.5e300), "1.5e+300");
-    assert.equal(pyNumberRepr(-2.5), "-2.5");
-    assert.equal(pyReprValue({ a: [true, null, "it's", 2.5] }), `{'a': [True, None, "it's", 2.5]}`);
-  });
-
+describe("Turn Snapshot passthrough — path and band helpers", () => {
   test("jq @uri keeps only A-Za-z0-9-_.~", () => {
     assert.equal(jqUri("a b/c!*'()~-_.:é"), "a%20b%2Fc%21%2A%27%28%29~-_.%3A%C3%A9");
   });
@@ -341,5 +317,59 @@ describe("Turn Snapshot passthrough — CLI and fail-open runner", () => {
     const tailNames = ["scout-alerts", "realm-share", "usage-eligibility", "emergency-brake", "class-stats", "capacity", "scheduler", "recommendations", "slot-events"];
     assert.deepEqual(fb(["health", "direction-drift"]), noReasons(loadGolden("passthrough-group-head-all-failed.json").expected.values));
     assert.deepEqual(fb(tailNames), noReasons(loadGolden("passthrough-group-tail-all-failed.json").expected.values));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A malformed payload degrades, never throws (#5084, the #4934 per-field contract)
+// ---------------------------------------------------------------------------
+
+describe("Turn Snapshot passthrough — a malformed payload degrades, never throws (#5084)", () => {
+  /** Every route answers `body`; the taxonomy reads `taxonomy`. */
+  function garbageDeps(body: string, taxonomy: string | null = body): PassthroughDeps {
+    const hydra = createTurnSnapshotHydra({ baseUrl: BASE, transport: async () => ({ status: 200, body }) });
+    const host: TurnSnapshotHost = {
+      failedServiceUnits: async () => ({ ok: true, stdout: "" }),
+      readFile: async (p) => (p === "/tax.json" && taxonomy !== null ? Buffer.from(taxonomy) : null),
+    };
+    return { hydra, host, env: { HYDRA_TARGET_REPO: "/t", HYDRA_CONFIG_PATH: "/c" }, taxonomyPath: "/tax.json", targetWorkspace: () => "/t" };
+  }
+  const MALFORMED_BODIES = [
+    "not json",
+    "",
+    "null",
+    "true",
+    "7",
+    '"text"',
+    "[]",
+    "{}",
+    "[1, {}]",
+    '{"status": [], "redis": {}, "eligible": true, "bySkillByModel": [], "orchestrator": 5, "running": {"a": 1}, "consecutiveNonMerges": "x", "classes": 5}',
+    '{"bySkillByModel": {"hydra-dev": {"x": {"total": "1"}}, "hydra-tool-scout": 4}, "orchestrator": {"share": [], "window": null}, "state": {}}',
+  ];
+
+  for (const body of MALFORMED_BODIES) {
+    test(`every route answers ${JSON.stringify(body).slice(0, 40)} → every collector resolves`, async () => {
+      for (const [name, entry] of Object.entries(PASSTHROUGH_COLLECTORS)) {
+        const o = await entry.collect(garbageDeps(body));
+        assert.equal(o.collector, name);
+        assert.doesNotThrow(() => JSON.stringify(o.value), `${name} returns a serialisable value`);
+        for (const d of o.degraded) assert.equal(typeof d.reason, "string", `${name}: a degraded marker carries a reason code`);
+      }
+    });
+  }
+
+  test("an EMPTY list / object reads as unset, exactly as the folds always have", async () => {
+    const value = async (name: keyof typeof PASSTHROUGH_COLLECTORS, body: string, taxonomy?: string) =>
+      (await PASSTHROUGH_COLLECTORS[name].collect(garbageDeps(body, taxonomy))).value;
+    assert.deepEqual(await value("recommendations", "{}"), { ok: true, value: { count: 0, firstAction: null } }, "an empty object is no recommendations, not a non-list");
+    assert.deepEqual(await value("recommendations", "[]"), { ok: true, value: { count: 0, firstAction: null } });
+    assert.deepEqual((await value("scheduler", '{"running": {}}')) as unknown, { codexRunning: { ok: true, value: false }, scheduler: { ok: true, value: { state: "?", nonMerges: 0 } } });
+    assert.deepEqual((await value("scheduler", '{"running": [0]}')) as { codexRunning: unknown }, { codexRunning: { ok: true, value: true }, scheduler: { ok: true, value: { state: "?", nonMerges: 0 } } });
+    assert.deepEqual(await value("scout-alerts", '{"eligible": {"a": 1, "b": 2}}'), { eligible: { ok: true, value: 2 } });
+    assert.deepEqual(await value("scout-alerts", '{"eligible": "ab😀"}'), { eligible: { ok: true, value: 3 } }, "a string's size is its code points");
+    const usage = '{"bySkillByModel": {"hydra-dev": {"m": {"total": 5}}}}';
+    assert.deepEqual(await value("realm-share", usage, "[]"), { ok: false, reason: "zero-denominator" }, "an empty taxonomy list reads as an empty taxonomy");
+    assert.deepEqual(await value("realm-share", usage, "[1]"), { ok: false, reason: "taxonomy-shape" });
   });
 });

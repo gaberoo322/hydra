@@ -48,10 +48,9 @@
 
 import { join } from "node:path";
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { parseJsonRead } from "./github-port.ts";
 import type { TurnSnapshotHost } from "./host-port.ts";
 import type { HydraRead, TurnSnapshotHydra } from "./hydra-http.ts";
-import { pyJsonLoads, pyTruthy } from "./py-compat.ts";
-import { isPyDict, pyLen } from "./py-format.ts";
 
 /** The fail-open bodies a degraded usage-eligibility / emergency-brake / class-stats / slot-events read stands in with. */
 export const USAGE_ELIGIBILITY_FALLBACK = '{"allow":true,"shed":[],"reasons":{"calibrated":false}}';
@@ -117,10 +116,28 @@ export interface RecommendationsValue {
 
 type Parsed = { ok: true; value: unknown } | { ok: false; reason: string };
 
+/** A body through the port's shared JSON parse; an empty or non-JSON body is `unparseable`. */
+function parseBody(body: string): Parsed {
+  const parsed = parseJsonRead(body);
+  return parsed.kind === "ok" ? { ok: true, value: parsed.data } : { ok: false, reason: "unparseable" };
+}
+
 function parseRead(read: HydraRead): Parsed {
-  if (read.kind === "failed") return { ok: false, reason: read.reason };
-  const parsed = pyJsonLoads(read.body);
-  return parsed.ok ? { ok: true, value: parsed.value } : { ok: false, reason: "unparseable" };
+  return read.kind === "failed" ? { ok: false, reason: read.reason } : parseBody(read.body);
+}
+
+/** A JSON object (not a list, not null). */
+function isDict(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/**
+ * Whether a decoded JSON value carries anything — the folds' `x or default`
+ * reading: `null`, `false`, `0`, `""` and an EMPTY list or object read as
+ * unset; a non-empty list or object does not.
+ */
+function isSet(v: unknown): boolean {
+  return v !== null && typeof v === "object" ? Object.keys(v).length > 0 : Boolean(v);
 }
 
 const fail = <T>(reason: string): Classified<T> => ({ ok: false, reason });
@@ -130,7 +147,7 @@ const okv = <T>(value: T): Classified<T> => ({ ok: true, value });
 function foldHealth(p: Parsed): HealthValue["service"] {
   if ("reason" in p) return fail(p.reason);
   const d = p.value;
-  if (!isPyDict(d) || !("status" in d) || !("redis" in d)) return fail("shape");
+  if (!isDict(d) || !("status" in d) || !("redis" in d)) return fail("shape");
   return okv({ status: d.status, redis: d.redis });
 }
 
@@ -140,30 +157,30 @@ function foldFailedServices(read: { ok: boolean; stdout: string }): number {
   return lines.filter((l) => l.includes("hydra")).length;
 }
 
-/** `len(d.get('eligible', []))`. */
+/** The size of `eligible` (default `[]`): a list's items, an object's keys, a string's code points; anything else has none. */
 function foldScoutAlerts(p: Parsed): Classified<number> {
   if ("reason" in p) return fail(p.reason);
-  if (!isPyDict(p.value)) return fail("shape");
-  const n = pyLen("eligible" in p.value ? p.value.eligible : []);
-  return n === null ? fail("eligible-has-no-len") : okv(n);
+  if (!isDict(p.value)) return fail("shape");
+  const eligible = "eligible" in p.value ? p.value.eligible : [];
+  if (typeof eligible === "string") return okv(Array.from(eligible).length);
+  if (eligible !== null && typeof eligible === "object") return okv(Object.keys(eligible).length);
+  return fail("eligible-has-no-len");
 }
 
 /** The #4161 realm fold. `taxonomy` is the decoded classes.json, or a failure reason. */
 function foldRealmShare(p: Parsed, taxonomy: Parsed): Classified<number> {
   if ("reason" in p) return fail(p.reason);
-  const bsm = isPyDict(p.value) ? p.value.bySkillByModel : undefined;
-  if (!isPyDict(bsm)) return fail("no-bySkillByModel");
+  const bsm = isDict(p.value) ? p.value.bySkillByModel : undefined;
+  if (!isDict(bsm)) return fail("no-bySkillByModel");
   if ("reason" in taxonomy) return fail(`taxonomy-${taxonomy.reason}`);
-  const doc = pyTruthy(taxonomy.value) ? taxonomy.value : {};
-  if (!isPyDict(doc)) return fail("taxonomy-shape");
-  const classes = pyTruthy(doc.classes) ? doc.classes : [];
-  // Python iterates a list's items, a dict's keys, a str's chars — only list
-  // items can be dicts. (A truthy number would crash the python outside its
-  // try; it degrades here instead — see the PR's "Decisions taken".)
-  const rows: unknown[] = Array.isArray(classes) ? classes : [];
+  const doc = isSet(taxonomy.value) ? taxonomy.value : {};
+  if (!isDict(doc)) return fail("taxonomy-shape");
+  // Only a list's items can be class rows (an object's keys / a string's
+  // characters never are); any other `classes` value reads as no rows.
+  const rows: unknown[] = Array.isArray(doc.classes) ? doc.classes : [];
   const skillScope = new Map<string, string>();
   for (const row of rows) {
-    if (!isPyDict(row)) continue;
+    if (!isDict(row)) continue;
     const { skill, scope } = row;
     if (typeof skill === "string" && (scope === "orch" || scope === "target" || scope === "both")) skillScope.set(skill, scope);
   }
@@ -172,9 +189,9 @@ function foldRealmShare(p: Parsed, taxonomy: Parsed): Classified<number> {
   for (const [skill, entry] of Object.entries(bsm)) {
     const realm = skillScope.get(skill);
     if (realm !== "orch" && realm !== "target") continue;
-    if (!isPyDict(entry)) continue;
+    if (!isDict(entry)) continue;
     for (const fam of Object.values(entry)) {
-      if (!isPyDict(fam)) continue;
+      if (!isDict(fam)) continue;
       const raw = fam.total;
       if (typeof raw !== "number") continue;
       if (realm === "orch") orch += raw;
@@ -192,9 +209,9 @@ function foldRealmShare(p: Parsed, taxonomy: Parsed): Classified<number> {
 function foldCapacity(p: Parsed): Classified<CapacityValue> {
   if ("reason" in p) return fail(p.reason);
   const d = p.value;
-  if (!isPyDict(d) || !("orchestrator" in d)) return fail("no-orchestrator");
+  if (!isDict(d) || !("orchestrator" in d)) return fail("no-orchestrator");
   const o = d.orchestrator;
-  if (!isPyDict(o) || !("share" in o) || !("window" in o)) return fail("orchestrator-shape");
+  if (!isDict(o) || !("share" in o) || !("window" in o)) return fail("orchestrator-shape");
   const share = typeof o.share === "boolean" ? Number(o.share) : o.share;
   if (typeof share !== "number") return fail("share-not-numeric");
   return okv({ share, floorMet: d.floorMet, floorStatus: d.floorStatus, window: o.window });
@@ -203,15 +220,15 @@ function foldCapacity(p: Parsed): Classified<CapacityValue> {
 /** `'CODEX_ACTIVE' if d.get('running') else 'CODEX_IDLE'`. */
 function foldCycleRunning(p: Parsed): Classified<boolean> {
   if ("reason" in p) return fail(p.reason);
-  if (!isPyDict(p.value)) return fail("shape");
-  return okv(pyTruthy(p.value.running));
+  if (!isDict(p.value)) return fail("shape");
+  return okv(isSet(p.value.running));
 }
 
 /** `d.get('state','?')`, `d.get('consecutiveNonMerges',0)` — which must compare with an int. */
 function foldScheduler(p: Parsed): SchedulerValue["scheduler"] {
   if ("reason" in p) return fail(p.reason);
   const d = p.value;
-  if (!isPyDict(d)) return fail("shape");
+  if (!isDict(d)) return fail("shape");
   const nm = "consecutiveNonMerges" in d ? d.consecutiveNonMerges : 0;
   if (typeof nm !== "number" && typeof nm !== "boolean") return fail("nonmerges-not-numeric");
   return okv({ state: "state" in d ? d.state : "?", nonMerges: nm });
@@ -227,10 +244,10 @@ export function stallBand(nonMerges: number | boolean): "ok" | "alert" | "hard-s
 function foldRecommendations(p: Parsed): Classified<RecommendationsValue> {
   if ("reason" in p) return fail(p.reason);
   const items = p.value;
-  if (!pyTruthy(items)) return okv({ count: 0, firstAction: null });
+  if (!isSet(items)) return okv({ count: 0, firstAction: null });
   if (!Array.isArray(items)) return fail("not-a-list");
   const first = items[0];
-  if (!isPyDict(first)) return fail("first-not-a-dict");
+  if (!isDict(first)) return fail("first-not-a-dict");
   const action = "action" in first ? first.action : "?";
   if (typeof action === "string") return okv({ count: items.length, firstAction: Array.from(action).slice(0, 60).join("") });
   if (Array.isArray(action)) return okv({ count: items.length, firstAction: action.slice(0, 60) });
@@ -297,10 +314,7 @@ async function collectRealmShare(deps: PassthroughDeps): Promise<CollectorOutcom
   const [read, taxonomyBytes] = await Promise.all([deps.hydra.get("/usage"), deps.host.readFile(deps.taxonomyPath)]);
   let taxonomy: Parsed;
   if (taxonomyBytes === null) taxonomy = { ok: false, reason: "unreadable" };
-  else {
-    const parsed = pyJsonLoads(taxonomyBytes.toString("utf-8"));
-    taxonomy = parsed.ok ? { ok: true, value: parsed.value } : { ok: false, reason: "unparseable" };
-  }
+  else taxonomy = parseBody(taxonomyBytes.toString("utf-8"));
   const share = foldRealmShare(parseRead(read), taxonomy);
   return outcome("realm-share", share, marker("orchRealmWeeklyShare", share));
 }

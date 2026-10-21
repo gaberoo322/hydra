@@ -32,12 +32,9 @@
  */
 
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
-import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
+import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
-import { JqError, jqEquals, jqField, jqIter, jqIterable, jqLength, jqSort, jqText, jqCompare } from "./jq-compat.ts";
-import { pyJsonLoads, pyTruthy } from "./py-compat.ts";
-import { isPyDict, pyStrValue } from "./py-format.ts";
-import { labelNames } from "./board-saturation.ts";
+import { labelNames, MALFORMED_PAYLOAD } from "./board-saturation.ts";
 
 export interface AfkFrontierDeps {
   readonly github: TurnSnapshotGithub;
@@ -56,25 +53,80 @@ const fail = <T>(reason: string): Classified<T> => ({ ok: false, reason });
 const okv = <T>(value: T): Classified<T> => ({ ok: true, value });
 const outcome = <T>(collector: string, value: T, degraded: DegradedMarker[]): CollectorOutcome<T> => ({ collector, value, degraded, notes: [] });
 
-/** Run a jq-shaped fold over a gh read; a failed read or a jq runtime error is the bash's empty read. */
-function jqFold<T>(read: GhJsonRead, fold: (data: unknown) => T): Classified<T> {
+/**
+ * Fold a gh read: a failed / unparseable read keeps its reason; a fold that
+ * returns `null` met a {@link MALFORMED_PAYLOAD} shape (the shapes the bash's
+ * `--jq` errored on) and the whole read degrades.
+ */
+function foldRead<T>(read: GhJsonRead, fold: (data: unknown) => T | null): Classified<T> {
   if (read.kind !== "ok") return fail(read.kind === "empty" ? "gh-read-failed" : "unparseable");
-  try {
-    return okv(fold(read.data));
-  } catch (err) {
-    if (err instanceof JqError) return fail(`jq: ${err.message}`);
-    throw err;
+  const value = fold(read.data);
+  return value === null ? fail(MALFORMED_PAYLOAD) : okv(value);
+}
+
+type Obj = Record<string, unknown>;
+
+const isObj = (v: unknown): v is Obj => v !== null && typeof v === "object" && !Array.isArray(v);
+
+/** A list's items or an object's values; `null` for anything else (including the malformed `undefined`). */
+const members = (v: unknown): unknown[] | null => (Array.isArray(v) ? v : isObj(v) ? Object.values(v) : null);
+
+/**
+ * `v.key` over a decoded payload, null-propagating: `null` for a null value
+ * or a missing key; `undefined` — malformed — for a scalar or a list (and for
+ * an already-malformed `undefined`). A JSON value is never `undefined`, so the
+ * sentinel cannot collide with data.
+ */
+function at(v: unknown, key: string): unknown {
+  if (v === null) return null;
+  if (!isObj(v)) return undefined;
+  return Object.hasOwn(v, key) ? v[key] : null;
+}
+
+/** A field's text as it lands in a frontier line: a string verbatim, anything else as JSON. */
+const fieldText = (v: unknown): string => (typeof v === "string" ? v : JSON.stringify(v));
+
+/**
+ * Whether a decoded JSON value carries anything: `null`, `false`, `0`, `""`
+ * and an EMPTY list or object read as unset; a non-empty list or object does not.
+ */
+const isSet = (v: unknown): boolean => (v !== null && typeof v === "object" ? Object.keys(v).length > 0 : Boolean(v));
+
+const typeRank = (v: unknown): number =>
+  v === null ? 0 : v === false ? 1 : v === true ? 2 : typeof v === "number" ? 3 : typeof v === "string" ? 4 : Array.isArray(v) ? 5 : 6;
+
+/**
+ * The order the frontier walks issue `number` values in (the bash's jq
+ * `sort`): null < false < true < numbers (ascending) < strings (code-point
+ * order) < lists < objects. Two lists / two objects tie — every consumer stops
+ * at the first one, so their relative order is never observable.
+ */
+function numberOrder(a: unknown, b: unknown): number {
+  const d = typeRank(a) - typeRank(b);
+  if (d !== 0) return d;
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  if (typeof a === "string" && typeof b === "string") {
+    const ca = Array.from(a, (c) => c.codePointAt(0) as number);
+    const cb = Array.from(b, (c) => c.codePointAt(0) as number);
+    for (let i = 0; i < Math.min(ca.length, cb.length); i++) if (ca[i] !== cb[i]) return (ca[i] as number) - (cb[i] as number);
+    return ca.length - cb.length;
   }
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
 // Retro
 // ---------------------------------------------------------------------------
 
-/** `str(r.get('status','')).lower() not in ('', 'running')` over a runs-index entry. */
+/**
+ * A runs-index entry that has finished: an object whose `status`, lowercased,
+ * is neither `""` nor `"running"`. A missing status is unfinished; a
+ * non-string one (`null`, a number, …) counts as finished.
+ */
 function isCompletedRun(r: unknown): r is Record<string, unknown> {
-  if (!isPyDict(r)) return false;
-  const status = pyStrValue("status" in r ? r.status : "").toLowerCase();
+  if (!isObj(r) || !("status" in r)) return false;
+  if (typeof r.status !== "string") return true;
+  const status = r.status.toLowerCase();
   return status !== "" && status !== "running";
 }
 
@@ -87,29 +139,29 @@ export interface RetroRuns {
 /** The two runs-index heredocs: any completed run? and the first completed run's id. */
 export function foldRetroRuns(body: string | null): Classified<RetroRuns> {
   if (body === null) return fail("runs-read-failed");
-  const parsed = pyJsonLoads(body);
-  if (!parsed.ok) return fail("runs-unparseable");
-  const d = parsed.value;
-  const runs = isPyDict(d) && "runs" in d ? d.runs : [];
-  // Python iterates a dict's keys / a str's chars — never dicts; only list items can complete.
+  const parsed = parseJsonRead(body);
+  if (parsed.kind !== "ok") return fail("runs-unparseable");
+  const d = parsed.data;
+  const runs = isObj(d) && "runs" in d ? d.runs : [];
+  // Only a list's items can be run entries (an object's keys / a string's characters never are).
   const rows: unknown[] = Array.isArray(runs) ? runs : [];
   const first = rows.find(isCompletedRun);
   if (first === undefined) return okv({ available: false, candidate: null });
   const rid = first.run_id;
-  const candidate = pyTruthy(rid) ? pyStrValue(rid).replace(/\n+$/, "") : "";
+  const candidate = isSet(rid) ? fieldText(rid).replace(/\n+$/, "") : "";
   return okv({ available: true, candidate: candidate === "" ? null : candidate });
 }
 
 /** The bundle heredoc: true unless a parsed, run-found bundle carries nothing to drill. */
 export function foldRetroBundle(body: string): boolean {
-  const parsed = pyJsonLoads(body);
-  if (!parsed.ok) return true;
-  const b = parsed.value;
-  if (!isPyDict(b)) return true;
+  const parsed = parseJsonRead(body);
+  if (parsed.kind !== "ok") return true;
+  const b = parsed.data;
+  if (!isObj(b)) return true;
   if (b.runFound !== true) return true;
   const dispatches = "dispatches" in b ? b.dispatches : [];
-  const anyFlagged = Array.isArray(dispatches) ? dispatches.some((x) => isPyDict(x) && pyTruthy(x.flagged)) : false;
-  return anyFlagged || pyTruthy(b.reflections) || pyTruthy(b.stuckSignals) || pyTruthy(b.recommendations) || b.runFlagged === true;
+  const anyFlagged = Array.isArray(dispatches) ? dispatches.some((x) => isObj(x) && isSet(x.flagged)) : false;
+  return anyFlagged || isSet(b.reflections) || isSet(b.stuckSignals) || isSet(b.recommendations) || b.runFlagged === true;
 }
 
 export interface RetroValue {
@@ -150,15 +202,19 @@ function pyIntText(x: unknown): string | null {
   return null;
 }
 
-/** The approved map numbers, ascending — the maps `--jq` plus the int-printing heredoc. */
+/** The approved map numbers in {@link numberOrder}, as integer text; the walk stops at the first non-integer. */
 export function foldWayfinderMaps(read: GhJsonRead): Classified<string[]> {
-  const numbers = jqFold(read, (data) =>
-    jqSort(
-      jqIter(data)
-        .filter((issue) => !labelNames(issue).some((n) => jqEquals(n, WAYFINDER_DRAFT_LABEL)))
-        .map((issue) => jqField(issue, "number")),
-    ),
-  );
+  const numbers = foldRead(read, (data) => {
+    const issues = members(data);
+    if (issues === null) return null;
+    const out: unknown[] = [];
+    for (const issue of issues) {
+      const names = labelNames(issue);
+      if (names === null) return null;
+      if (!names.includes(WAYFINDER_DRAFT_LABEL)) out.push(at(issue, "number"));
+    }
+    return out.sort(numberOrder);
+  });
   if ("reason" in numbers) return fail(numbers.reason);
   const out: string[] = [];
   for (const n of numbers.value) {
@@ -169,34 +225,66 @@ export function foldWayfinderMaps(read: GhJsonRead): Classified<string[]> {
   return okv(out);
 }
 
-const jqGt0 = (v: unknown) => jqCompare(v, 0) > 0;
+/**
+ * A sub-issue's assignee `totalCount` reads as "someone is on it" when it is a
+ * positive number — or a string, list or object (they rank above every
+ * number, the bash's `> 0`); `null` and booleans do not.
+ */
+const assigned = (count: unknown): boolean => (typeof count === "number" ? count > 0 : count !== null && typeof count !== "boolean");
 
 /**
- * One map's GraphQL `--jq`: `<inflight>` or `<inflight> <pick-number> <pick-type>`
- * (a pick only when nothing is in flight), or failed on a jq runtime error.
+ * One map's sub-issue line: `<inflight>` or `<inflight> <pick-number> <pick-type>`
+ * (a pick only when nothing is in flight), or failed on a malformed payload.
+ * AFK-typed sub-issues (`wayfinder:research` / `wayfinder:task`) are the only
+ * ones read past their labels; an OPEN one with a positive assignee count is
+ * in flight, and the pick is the first OPEN, unassigned (count exactly 0) one
+ * with no OPEN blocker.
  */
 export function foldWayfinderMapLine(read: GhJsonRead): Classified<string> {
-  return jqFold(read, (data) => {
-    const nodes = jqField(jqField(jqField(jqField(jqField(data, "data"), "repository"), "issue"), "subIssues"), "nodes");
-    const typed = jqIter(nodes).map((node) => {
-      const types = jqIter(jqField(jqField(node, "labels"), "nodes"))
-        .map((l) => jqField(l, "name"))
-        .filter((n) => WAYFINDER_AFK_TYPES.some((t) => jqEquals(n, t)));
-      if (node !== null && node !== undefined && (typeof node !== "object" || Array.isArray(node))) throw new JqError("cannot add object to non-object");
-      return { node, type: types[0] ?? null };
-    });
-    const afk = typed.filter((t) => t.type !== null);
-    const open = (t: { node: unknown }) => jqEquals(jqField(t.node, "state"), "OPEN");
-    const assignees = (t: { node: unknown }) => jqField(jqField(t.node, "assignees"), "totalCount");
-    const inflight = afk.filter((t) => open(t) && jqGt0(assignees(t))).length;
-    const pick = afk.filter((t) => {
-      if (!(open(t) && jqEquals(assignees(t), 0))) return false;
-      const blockers = jqField(jqField(t.node, "blockedBy"), "nodes");
-      const openBlockers = (jqIterable(blockers) ? jqIter(blockers) : []).filter((b) => jqEquals(jqField(b, "state"), "OPEN"));
-      return jqEquals(jqLength(openBlockers), 0);
-    })[0];
+  return foldRead(read, (data) => {
+    const nodes = members(at(at(at(at(at(data, "data"), "repository"), "issue"), "subIssues"), "nodes"));
+    if (nodes === null) return null;
+    const afk: { node: unknown; type: string }[] = [];
+    for (const node of nodes) {
+      // A sub-issue must carry `labels.nodes` (a null or scalar node cannot).
+      const labels = members(at(at(node, "labels"), "nodes"));
+      if (labels === null) return null;
+      let type: string | null = null;
+      for (const l of labels) {
+        const name = at(l, "name");
+        if (name === undefined) return null;
+        if (type === null && WAYFINDER_AFK_TYPES.some((t) => t === name)) type = name as string;
+      }
+      if (type !== null) afk.push({ node, type });
+    }
+    const open = (node: unknown) => at(node, "state") === "OPEN";
+    const assigneeCount = (node: unknown) => at(at(node, "assignees"), "totalCount");
+    let inflight = 0;
+    for (const t of afk) {
+      if (!open(t.node)) continue;
+      const count = assigneeCount(t.node);
+      if (count === undefined) return null;
+      if (assigned(count)) inflight++;
+    }
+    // Every AFK sub-issue is read (a malformed later one still degrades the map); the first qualifying one is the pick.
+    let pick: { node: unknown; type: string } | undefined;
+    for (const t of afk) {
+      if (!open(t.node)) continue;
+      const count = assigneeCount(t.node);
+      if (count === undefined) return null;
+      if (count !== 0) continue;
+      const blockers = at(at(t.node, "blockedBy"), "nodes");
+      if (blockers === undefined) return null;
+      let openBlockers = 0;
+      for (const b of members(blockers) ?? []) {
+        const state = at(b, "state");
+        if (state === undefined) return null;
+        if (state === "OPEN") openBlockers++;
+      }
+      if (openBlockers === 0 && pick === undefined) pick = t;
+    }
     if (inflight > 0 || pick === undefined) return String(inflight);
-    return `${inflight} ${jqText(jqField(pick.node, "number"))} ${String(pick.type).replace("wayfinder:", "")}`;
+    return `${inflight} ${fieldText(at(pick.node, "number"))} ${pick.type.replace("wayfinder:", "")}`;
   });
 }
 
@@ -263,13 +351,23 @@ export async function collectWayfinderFrontier(deps: AfkFrontierDeps): Promise<C
 // Tickets
 // ---------------------------------------------------------------------------
 
-/** The oldest unassigned needs-tickets issue number (only a bare digit string is accepted), or null. */
+/**
+ * The oldest unassigned needs-tickets issue number (only a bare digit string
+ * is accepted), or null. Unassigned = an `assignees` of size 0: an empty list
+ * or object, `""`, `0` or a missing / null field; a boolean is malformed.
+ */
 function foldTicketsPick(read: GhJsonRead): Classified<string | null> {
-  const first = jqFold(read, (data) => {
-    const numbers = jqIter(data)
-      .filter((issue) => jqEquals(jqLength(jqField(issue, "assignees")), 0))
-      .map((issue) => jqField(issue, "number"));
-    return jqText(jqSort(numbers)[0] ?? null);
+  const first = foldRead(read, (data) => {
+    const issues = members(data);
+    if (issues === null) return null;
+    const numbers: unknown[] = [];
+    for (const issue of issues) {
+      const a = at(issue, "assignees");
+      if (a === undefined || typeof a === "boolean") return null;
+      const size = a === null ? 0 : typeof a === "number" ? Math.abs(a) : typeof a === "string" ? Array.from(a).length : Object.keys(a).length;
+      if (size === 0) numbers.push(at(issue, "number"));
+    }
+    return fieldText(numbers.sort(numberOrder)[0] ?? null);
   });
   if ("reason" in first) return fail(first.reason);
   return okv(/^[0-9]+$/.test(first.value) ? first.value : null);
