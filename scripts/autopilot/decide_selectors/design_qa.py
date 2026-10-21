@@ -61,8 +61,8 @@ def _select_signal_design_qa_target(
     # not silently zero) that is read by NOBODY here: decide.py deliberately
     # never reads it — the selector below reads exactly two signals,
     # `design_qa_target_saturated` FIRST, then `design_qa_target_due`
-    # (pinned by test/autopilot-target-board-signals.test.mts, which fails
-    # if this file so much as mentions the advisory key's literal name).
+    # (the advisory key is no schema signal, so the replay contract in
+    # test/turn-snapshot-json.test.mts fails any read of it, #5085).
     #
     # `design_qa_target_saturated` is the anti-flood cap, checked FIRST
     # (before the cooldown, exactly like cleanup_target /
