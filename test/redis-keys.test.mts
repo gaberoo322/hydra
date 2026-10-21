@@ -34,7 +34,6 @@ describe("redisKeys naming convention", () => {
     ["mergeLock", redisKeys.mergeLock],
     ["alerts", redisKeys.alerts],
     ["blockedLastEscalation", redisKeys.blockedLastEscalation],
-    ["digestLastWeekly", redisKeys.digestLastWeekly],
     ["regressionHuntLast", redisKeys.regressionHuntLast],
     ["streamNotifications", redisKeys.streamNotifications],
     ["streamDlq", redisKeys.streamDlq],
@@ -96,7 +95,6 @@ describe("redisKeys uniqueness", () => {
       ["mergeLock", redisKeys.mergeLock()],
       ["alerts", redisKeys.alerts()],
       ["blockedLastEscalation", redisKeys.blockedLastEscalation()],
-      ["digestLastWeekly", redisKeys.digestLastWeekly()],
       ["regressionHuntLast", redisKeys.regressionHuntLast()],
     ];
 

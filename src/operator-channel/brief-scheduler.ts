@@ -128,12 +128,14 @@ export class BriefScheduler {
    * it is idempotent per local day and serialised within the process.
    */
   async tick(): Promise<BriefTickResult> {
+    // The flag guards the whole read -> decide -> send section, so two
+    // overlapping ticks can never both observe "absent" and both send.
     if (this.sending) return "in-flight";
-    const lastSentAt = await this.readLastSent();
-    if (lastSentAt === undefined) return "store-unavailable";
-    if (!briefDue(localParts(this.now()), lastSentAt)) return "not-due";
     this.sending = true;
     try {
+      const lastSentAt = await this.readLastSent();
+      if (lastSentAt === undefined) return "store-unavailable";
+      if (!briefDue(localParts(this.now()), lastSentAt)) return "not-due";
       const out = await this.deliver(lastSentAt);
       return out.sent ? "sent" : "failed";
     } finally {
@@ -151,9 +153,9 @@ export class BriefScheduler {
     if (this.sending) {
       return { sent: false, outcome: "failed", at: this.now() };
     }
-    const lastSentAt = (await this.readLastSent()) ?? null;
     this.sending = true;
     try {
+      const lastSentAt = (await this.readLastSent()) ?? null;
       return await this.deliver(lastSentAt);
     } finally {
       this.sending = false;

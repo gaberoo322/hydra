@@ -332,3 +332,40 @@ describe("HeartbeatController — tick stagnation emit wiring (issue #3371)", ()
     await controller.stop({ reason: "shutdown" });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Tick fires the injected Morning Brief poll (ADR-0045 Decision 7, #5047).
+//
+// The brief has no timer of its own: the heartbeat tick calls an injected
+// `tickMorningBrief()` (production binds `BriefScheduler.tick()` through
+// `attachMorningBriefTick` in src/index.ts). A unit-constructed controller
+// keeps the no-op default, so nothing here reaches Redis or Telegram.
+// ---------------------------------------------------------------------------
+describe("HeartbeatController — tick Morning Brief poll wiring (issue #5047)", () => {
+  it("fires the injected brief poll on every tick and a rejection never escapes", async () => {
+    let calls = 0;
+    const controller = makeController({
+      tickMorningBrief: async () => {
+        calls++;
+        throw new Error("redis down");
+      },
+    });
+    const result = await controller.start(noopBus, { intervalMs: 60_000 });
+    await Promise.resolve();
+    assert.equal(result.started, true, "start() completed despite the poll rejecting");
+    assert.equal(calls, 1, "the first tick fired the poll once");
+    await controller.stop({ reason: "shutdown" });
+  });
+
+  it("setMorningBriefTick rebinds the poll; the default is a no-op", async () => {
+    const controller = makeController();
+    await controller.start(noopBus, { intervalMs: 60_000 });
+    await controller.stop({ reason: "shutdown" });
+    let calls = 0;
+    controller.setMorningBriefTick(async () => void calls++);
+    await controller.start(noopBus, { intervalMs: 60_000 });
+    await Promise.resolve();
+    assert.equal(calls, 1);
+    await controller.stop({ reason: "shutdown" });
+  });
+});
