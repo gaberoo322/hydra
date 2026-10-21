@@ -97,16 +97,8 @@ export function calibrationDayDates(now: Date = new Date()): string[] {
   );
 }
 
-/** The daily-hash field for one line's counter (e.g. `repetition:hits:surfaced`). */
-export function calibrationHashField(
-  key: string,
-  counter: CalibrationCounter,
-): string {
-  return `${key}:${counter}`;
-}
-
 /** The five per-line counters stored on a daily calibration hash. */
-export const CALIBRATION_COUNTERS = [
+const CALIBRATION_COUNTERS = [
   "surfaced",
   "resolved",
   "not-a-problem",
@@ -114,7 +106,7 @@ export const CALIBRATION_COUNTERS = [
   "later",
 ] as const;
 
-export type CalibrationCounter = (typeof CALIBRATION_COUNTERS)[number];
+type CalibrationCounter = (typeof CALIBRATION_COUNTERS)[number];
 
 const COUNTER_TO_TOTALS_KEY: Partial<
   Record<CalibrationCounter, "notAProblem" | "handledElsewhere" | "later">
