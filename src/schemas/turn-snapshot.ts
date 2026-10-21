@@ -10,13 +10,13 @@
  * {@link ALL_DEGRADED_SIGNALS} value, a blob / `scout_spend_usd_today` /
  * `observability` / `degraded` entry is dropped — with a `degraded` marker,
  * and the rest survives. Only a document still invalid after that (a
- * structural fault) is replaced by the all-degraded document.
- * `scripts/autopilot/turn_snapshot.py` is the ONE Python reader; it never
- * trusts a document whose `validation.ok` is not `true`, repairs per field
- * again on apply, and reads the all-degraded snapshot when there is no usable
- * one. No JSON Schema is generated from this file and none is committed
- * (ADR-0043 rejects that artifact) — the contract test
- * (test/turn-snapshot-json.test.mts) round-trips golden documents through
+ * structural fault) is replaced by the all-degraded document, which is also
+ * what `turn-snapshot.ts --all-degraded` prints when the collector run failed.
+ * This file is the ONLY validator: `scripts/autopilot/turn_snapshot.py`, the
+ * one Python reader, stores the emitted document as-is and holds no copy of
+ * these shapes or defaults (#5083). No JSON Schema is generated from this
+ * file and none is committed (ADR-0043 rejects that artifact) — the contract
+ * test (test/turn-snapshot-json.test.mts) round-trips golden documents through
  * both this schema and the Python accessor instead.
  *
  * Field shapes (the PR's "Decisions taken"):
@@ -169,8 +169,10 @@ const SignalsSchema = z
  * due, every producer cap is saturated (so no backfill / scan / scout
  * producer fires on facts nobody read), no pin or anchor is resolved, and
  * `health_fail` + `orch_board_signals_degraded` are raised so the doctor runs
- * and the degradation is visible. scripts/autopilot/turn_snapshot.py holds the
- * same table (drift-tested in test/turn-snapshot-json.test.mts).
+ * and the degradation is visible. A flag is raised here IFF its name ends
+ * `_fail`, `_degraded` or `_saturated` — the convention the Python accessor
+ * reads a document WITHOUT signals by (its marker, when node cannot run; #5083),
+ * pinned in test/turn-snapshot-json.test.mts. A new fault / cap flag follows it.
  */
 export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   orch_work_available: false,

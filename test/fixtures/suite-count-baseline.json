@@ -474,7 +474,7 @@
   "test/transcript-scan.test.mts": 4,
   "test/transcript-session-tokens.test.mts": 2,
   "test/transcript-store.test.mts": 8,
-  "test/turn-snapshot-json.test.mts": 9,
+  "test/turn-snapshot-json.test.mts": 11,
   "test/turn-snapshot-orch-board.test.mts": 15,
   "test/turn-snapshot-passthrough.test.mts": 6,
   "test/turn-snapshot-picks.test.mts": 14,
