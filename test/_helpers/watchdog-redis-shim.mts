@@ -40,6 +40,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
+import { ownedRedisDb } from "./owned-redis-db.mts";
 import { WATCHDOG_REDIS_TIMEOUT_MS } from "./watchdog-timeouts.mts";
 
 /** Where the container's redis is published on the host (`docker port hydra-redis-1`). */
@@ -171,8 +172,8 @@ function battery(key: (name: string) => string): string[][] {
   // SELECT-path entries use the run-OWNED DB (HYDRA_REDIS_DB from the launcher),
   // never a pool literal a concurrent run could FLUSHDB mid-battery (#5062);
   // omitted when no owned DB exists.
-  const owned = process.env.HYDRA_REDIS_DB ?? "";
-  const hasOwned = /^\d+$/.test(owned) && owned !== "0";
+  const owned = ownedRedisDb() ?? "";
+  const hasOwned = owned !== "";
   const selectPath: string[][] = hasOwned
     ? [
         ["-n", owned, "SET", key("dbown"), "x"], // SELECT path

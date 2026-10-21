@@ -48,6 +48,7 @@
 
 import test, { describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
+import { ownedRedisDb, ownedDbSkip } from "./_helpers/owned-redis-db.mts";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -926,10 +927,9 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/
   // literal from the launcher's pool: a concurrent run owns every other index
   // and FLUSHDBs it (issue #5062). Null => no owned DB (remote REDIS_URL or a
   // bare `node --test`): the "lands in that DB" test skips with a reason.
-  const OWNED_RAW = process.env.HYDRA_REDIS_DB ?? "";
-  const OWNED_DB: string | null = /^\d+$/.test(OWNED_RAW) && OWNED_RAW !== "0" ? OWNED_RAW : null;
+  const OWNED_DB: string | null = ownedRedisDb();
   const SELECTED_DB = OWNED_DB ?? "0"; // "0" only feeds idempotent cleanup DELs when skipped
-  const OWNED_DB_SKIP = OWNED_DB === null ? "launcher assigned no owned HYDRA_REDIS_DB (remote REDIS_URL or bare node --test)" : false;
+  const OWNED_DB_SKIP = ownedDbSkip(OWNED_DB);
 
   // Fully separate key namespace from RUN_NS/TEST_LAST_TICK_KEY/SINCE/FIRED
   // above — this describe never touches those keys, on any DB.
@@ -1034,6 +1034,7 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/
   }
 
   test("a bash-side write with HYDRA_REDIS_DB set lands in that DB, never in db 0", { skip: OWNED_DB_SKIP }, () => {
+    assert.ok(OWNED_DB !== null, "full-suite launcher run must export an owned HYDRA_REDIS_DB (#5062)");
     // Seed the last-tick hash directly in the TARGET db — this is what
     // HYDRA_REDIS_DB=<owned> makes rc_read visible to. db 0 is left empty, so a tick
     // that mistakenly reads db 0 would see no record at all (a distinguishable
