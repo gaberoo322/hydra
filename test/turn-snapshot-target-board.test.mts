@@ -1203,7 +1203,7 @@ describe("target-scan-boards — design_qa_target ADR-presence gate (issue #4528
     assert.equal((await runScan({ rows: rows(2, ["design-qa"]) })).out.design_qa_target_saturated, "false");
   });
 
-  test("the advisory adr_present key is emitted on every branch (decide.py never reads it — pinned in autopilot-target-board-signals)", async () => {
+  test("the advisory adr_present key is emitted on every branch (no schema signal, so decide.py cannot read it — the #5085 replay contract)", async () => {
     assert.equal((await runScan({ read: EMPTY, adr: true })).out.design_qa_target_adr_present, "true");
     assert.equal((await runScan({ read: { kind: "unparseable", error: "x" }, adr: true })).out.design_qa_target_adr_present, "true");
   });
