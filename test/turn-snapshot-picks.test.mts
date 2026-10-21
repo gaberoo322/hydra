@@ -1501,3 +1501,46 @@ describe("Turn Snapshot picks — a malformed payload degrades, never throws (#5
     }
   });
 });
+
+describe("Turn Snapshot picks — payload-shape semantics stay pinned after the py/jq helper rewrite (issue #5128)", () => {
+  const NO_BLOCKED: ReadonlySet<number> = new Set();
+
+  test("an EMPTY list/object body reads as unset text; a non-empty one is malformed (naive JS truthiness flips both)", () => {
+    const next = { number: 2, body: "Blocked by #9" };
+    assert.deepEqual(blockerRefUnion([{ number: 1, body: [] }, next]), [9]);
+    assert.deepEqual(blockerRefUnion([{ number: 1, body: {} }, next]), [9]);
+    assert.deepEqual(blockerRefUnion([{ number: 1, body: [0] }, next]), []);
+  });
+
+  test("one malformed row degrades the WHOLE candidate pool to [] (not just that row)", () => {
+    const pool = [{ number: 1, labels: [] }, { number: 2, labels: [5] }, { number: 3, labels: [] }];
+    assert.deepEqual(grillCandidates(pool, new Set(), NO_BLOCKED), []);
+  });
+
+  test("a non-integer number skips the row; an integer-valued float counts (5.0 is 5)", () => {
+    assert.deepEqual(grillCandidates([{ number: "9" }, { number: 5.5 }, { number: 5.0 }], new Set(), NO_BLOCKED), [5]);
+  });
+
+  test("a non-text body degrades the blocker union to [] only on an integer-numbered row", () => {
+    assert.deepEqual(blockerRefUnion([{ number: 1, body: ["x"] }]), []);
+    assert.deepEqual(blockerRefUnion([{ number: "no", body: ["x"] }, { number: 2, body: "Blocked by #9" }]), [9]);
+  });
+
+  test("a malformed row in the open-blocker read keeps EVERY requested ref open", () => {
+    assert.deepEqual(openBlockers(ok([{ number: 4 }, "junk"]), [4, 5]), [4, 5]);
+    assert.deepEqual(openBlockers(ok([{ number: 4 }]), [4, 5]), [4]);
+  });
+
+  test("active_dev_orch: a malformed PR anywhere in the read makes the whole count 0, with no throw", () => {
+    const fresh = iso(60);
+    const good = { headRefName: "issue-1", updatedAt: fresh, labels: [] };
+    assert.equal(countActiveDevOrch(ok([good, good]), NOW_MS / 1000), 2);
+    assert.equal(countActiveDevOrch(ok([good, { headRefName: 7, updatedAt: fresh, labels: [] }]), NOW_MS / 1000), 0);
+    assert.equal(countActiveDevOrch(ok([good, { headRefName: "issue-2", updatedAt: "not-a-date", labels: [] }]), NOW_MS / 1000), 0);
+    assert.equal(countActiveDevOrch(ok([good, "str"]), NOW_MS / 1000), 0);
+  });
+
+  test("merged refs: a non-text title degrades to the empty set", () => {
+    assert.deepEqual([...mergedRefIssues(ok([{ title: "x (#3)", body: "" }, { title: 5, body: "" }]))], []);
+  });
+});

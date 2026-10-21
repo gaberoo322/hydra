@@ -1,0 +1,1 @@
+- refactor: Turn Snapshot collectors drop their Python/jq-shaped helpers for plain TypeScript readers (#5128)
