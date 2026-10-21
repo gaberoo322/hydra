@@ -1631,7 +1631,7 @@
     },
     {
       "slug": "docs-operator-playbooks",
-      "name": "docs/operator-playbooks/ (skills are generated from the playbooks into the operator's skills directory by the sync-skills script)",
+      "name": "docs/operator-playbooks/",
       "table": "infra",
       "paths": [
         "docs/operator-playbooks/"

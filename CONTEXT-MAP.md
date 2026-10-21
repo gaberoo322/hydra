@@ -40,7 +40,7 @@ get their own rows:
 
 | Area | Relevant ADRs | Reference docs |
 |---|---|---|
-| `docs/operator-playbooks/` (skills are generated from the playbooks into the operator's skills directory by the sync-skills script) | ADR-0025, ADR-0029, ADR-0030, ADR-0031, ADR-0035, ADR-0044 | [Evals](docs/evals.md) |
+| `docs/operator-playbooks/` | ADR-0025, ADR-0029, ADR-0030, ADR-0031, ADR-0035, ADR-0044 | [Evals](docs/evals.md) |
 | `.github/workflows/` (Verifier Core) | ADR-0015, ADR-0019, ADR-0020 | [Quality gates](docs/quality-gates.md) |
 | `scripts/autopilot/` (`decide.py`, `classes.json`) | ADR-0007, ADR-0012, ADR-0029, ADR-0032, ADR-0043 | — |
 | `dashboard/` | ADR-0034 | [Deploy recipe](docs/reference.md#deploy-recipe) |
