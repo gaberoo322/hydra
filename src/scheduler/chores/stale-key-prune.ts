@@ -189,8 +189,8 @@ export async function pruneStaleRedisKeys(deps: PruneStaleRedisKeysDeps = {}): P
     logger.info({ totalPruned }, "stale-key-prune: total stale Redis keys pruned");
   }
   // Stamp the daily guard key so an immediate second housekeeping invocation
-  // skips this chore. Consistent with `runWeeklyDigest`, `runMemoryConsolidation`,
-  // and `runUsageWeeklySnapshot`, which all own their own stamp.
+  // skips this chore. Consistent with `runMemoryConsolidation` and
+  // `runUsageWeeklySnapshot`, which both own their own stamp.
   // Issue #2461: this stamp was previously applied in `housekeeping.ts` after
   // calling `pruneStaleRedisKeys()` — moved here so all guarded chores follow
   // the same pattern: the chore that does the work stamps its own guard key.

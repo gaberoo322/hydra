@@ -2,8 +2,9 @@
 Description=Hydra Redis daily backup — orchestrator state off the docker volume (issue #4604)
 Documentation=https://github.com/gaberoo322/hydra/issues/4604
 # Reuses the tracked Telegram-notify template (#4284): instance-parameterized
-# %i, zero edits per new unit. A failed backup pages instead of dying quietly.
-OnFailure=hydra-notify-failure@hydra-redis-backup.service
+# %n → %i, zero edits per new unit (OnFailure= naming normalised to @%n in
+# #5046). A failed backup pages instead of dying quietly.
+OnFailure=hydra-notify-failure@%n
 
 [Service]
 Type=oneshot

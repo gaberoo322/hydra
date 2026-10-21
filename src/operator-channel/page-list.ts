@@ -19,10 +19,16 @@ export const PAGE_KINDS = [
   E.LAUNCH_LATENCY_BREACH,
   E.LAUNCH_PAUSE_FORGOTTEN,
   E.GLM_DRAINER_STERILE,
+  // Launch-flow fail-safe / meter-dark (watchdog-only, out-of-band: the
+  // orchestrator may be down, so they never ride the bus — issue #5046).
+  "launch:fail_safe",
+  "launch:meter_dark",
   // The notification consumer is dead
   E.CONSUMER_DEAD,
-  // An Outcome Holdback revert failed
-  "holdback:revert_failed",
+  // An Outcome Holdback revert failed (the on-wire spelling src/holdback.ts
+  // publishes — issue #5047 replaced the mis-spelled `holdback:revert_failed`
+  // literal that no producer emitted)
+  E.HOLDBACK_REVERT_FAILED,
   // Orchestrator, autopilot, tunnel or backup service failures
   "service:orchestrator_failed",
   "service:autopilot_failed",
@@ -30,6 +36,10 @@ export const PAGE_KINDS = [
   "service:backup_failed",
   // The /hydra-review pickup set going non-empty
   E.REVIEW_PICKUP_READY,
+  // No Morning Brief delivered for 26h (ADR-0045 Decision 8, issue #5048):
+  // raised by the watchdog from the Redis last-sent key, independent of the
+  // scheduler's running state — a silent channel must itself be noticeable.
+  "brief:missing",
 ] as const;
 
 export type PageKind = (typeof PAGE_KINDS)[number];

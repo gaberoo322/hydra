@@ -43,7 +43,7 @@
     {
       "family": "chores",
       "metric": "rows",
-      "value": 15
+      "value": 14
     },
     {
       "family": "ci-gates",
@@ -108,7 +108,7 @@
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 261
+      "value": 264
     },
     {
       "family": "pages",
@@ -128,7 +128,7 @@
     {
       "family": "redis-keys",
       "metric": "rows",
-      "value": 77
+      "value": 76
     },
     {
       "family": "routes",
@@ -168,7 +168,7 @@
     {
       "family": "units-scripts",
       "metric": "rows",
-      "value": 39
+      "value": 40
     }
   ]
 }

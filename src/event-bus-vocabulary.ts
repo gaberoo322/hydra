@@ -12,8 +12,8 @@
 //
 // Why a separate file: this module has ZERO import-time side effects — it does
 // NOT import `./redis/connection.ts` (or anything that transitively calls
-// `getRedisConnection()`), so the pure formatter modules (notify-format,
-// digest-format, alert-grammar, cycle-completed-reactor) and their tests can
+// `getRedisConnection()`), so the pure formatter modules (alert-grammar,
+// the Operator Channel's brief-lines, cycle-completed-reactor) and their tests can
 // derive their event interfaces from this vocabulary WITHOUT pulling the Redis
 // connection into scope at parse/load time. `event-bus.ts` imports the symbols
 // BACK from here (a value + a type), keeping a single source of truth.
@@ -32,8 +32,8 @@
 //
 //   - `NotificationEventType` (below) is the closed union of its values.
 //   - Every formatter that switches on the event type
-//     (`notify.ts` formatMessage, `index.ts` formatAlertMessage + ALERT_TYPES,
-//     `digest.ts` critical list) references these named members instead of raw
+//     (`alert-grammar.ts` formatAlertMessage + ALERT_TYPES, the Operator
+//     Channel's `page-list.ts` and `brief-lines.ts`) references these named members instead of raw
 //     string literals. A typo on a member name is then a compile error, and
 //     adding a new event type is a one-line edit here that surfaces every
 //     affected formatter as a non-exhaustive switch / missing arm.
@@ -79,9 +79,9 @@ const NOTIFICATION_EVENT_TYPES = {
   // launch-flow signals above) the instant a watched node_modules install
   // root is found broken (absent, missing .bin/, below the entry floor, or
   // missing the referenced binary) — see scripts/hydra-watchdog.sh's
-  // "## NODE MODULES INTEGRITY" block. In both ALERT_TYPES and
-  // CRITICAL_EVENT_TYPES: a wiped install under a live money-critical service
-  // warrants both the dashboard alert and the immediate digest line.
+  // "## NODE MODULES INTEGRITY" block. In both ALERT_TYPES and the Operator
+  // Channel's PAGE_KINDS: a wiped install under a live money-critical service
+  // warrants both the dashboard alert and an immediate page.
   INFRA_NODE_MODULES_WIPED: "infra:node_modules_wiped",
 
   // Published by the watchdog's run_origin_identity block (same ADR-0017
@@ -89,7 +89,7 @@ const NOTIFICATION_EVENT_TYPES = {
   // remote.origin.url is not the orchestrator repo, or refs/remotes/origin/master
   // no longer resolves (issue #4939). Since #5065 the block self-heals first;
   // payload.repair says "repaired" | "failed" | "not-attempted" (absent on
-  // older events). In both ALERT_TYPES and CRITICAL_EVENT_TYPES.
+  // older events). In both ALERT_TYPES and PAGE_KINDS.
   INFRA_ORIGIN_IDENTITY_WRONG: "infra:origin_identity_wrong",
 
   // --- GLM dev-drainer zero-throughput watchdog signal (issue #3868) ---
@@ -100,10 +100,30 @@ const NOTIFICATION_EVENT_TYPES = {
   // (work to drain), and ZERO drainer PRs — the shared issue-#4048
   // OR-predicate (glm-authored label OR worktree-agent-glm-* head branch) —
   // created in the trailing window, sustained past the streak threshold.
-  // In both ALERT_TYPES and CRITICAL_EVENT_TYPES: while the heartbeat is
+  // In both ALERT_TYPES and PAGE_KINDS: while the heartbeat is
   // fresh the #3754 partition hides the queued work from the Opus lane, so
   // a sterile drainer silently starves the whole board (observed #3863).
   GLM_DRAINER_STERILE: "glm:drainer_sterile",
+
+  // --- Legacy on-wire spellings with a live in-process producer (issue #5047) ---
+  // These seven types reached the NOTIFICATIONS stream before the vocabulary
+  // existed and keep their original dotted / hyphenated spellings because the
+  // on-wire string is a consumer contract (dashboard alert ring, Morning Brief
+  // items). They join the map so the Morning Brief's exhaustive renderer map
+  // (`BRIEF_LINE_RENDERERS` in src/operator-channel/brief-lines.ts) and the
+  // #5044 live-producer audit both see them. Do NOT "normalise" them to the
+  // `namespace:action` grammar — that is a wire rename, not a cleanup.
+  // Producers: src/holdback.ts (the three holdback.* types), src/api/usage.ts
+  // (model-fallback), src/api/autopilot-control.ts (autopilot-paused /
+  // autopilot-resumed), src/notification/stagnation-alerts.ts
+  // (builder-health.stagnation).
+  HOLDBACK_REVERTED: "holdback.reverted",
+  HOLDBACK_CAP_REACHED: "holdback.cap-reached",
+  HOLDBACK_REVERT_FAILED: "holdback.revert_failed",
+  MODEL_FALLBACK: "model-fallback",
+  AUTOPILOT_PAUSED: "autopilot-paused",
+  AUTOPILOT_RESUMED: "autopilot-resumed",
+  BUILDER_HEALTH_STAGNATION: "builder-health.stagnation",
 
 } as const;
 
@@ -120,9 +140,10 @@ type NotificationEventType =
 // payload-field shapes that flow on the NOTIFICATIONS stream (issue #1915).
 //
 // `NOTIFICATION_EVENT_TYPES` above owns the event-type *strings*; this type
-// owns the *payload fields* those events carry. The three pure formatters
-// (`notify-format.ts` formatMessage, `digest-format.ts` buildDigestMessage,
-// `notification-consumer.ts` formatAlertMessage) each read an overlapping
+// owns the *payload fields* those events carry. The pure formatters (today
+// `alert-grammar.ts` formatAlertMessage; formerly also the retired
+// `notify-format.ts` formatMessage and `digest-format.ts` buildDigestMessage,
+// ADR-0045 / #5047 / #5049) each read an overlapping
 // subset of these fields. Issues #1857 / #1835 / #1889 each independently
 // declared a per-formatter typed interface to convert a runtime field-miss
 // into a compile error — the same fix applied three times to the same field
@@ -182,6 +203,20 @@ type NotificationEventPayload = Record<string, unknown> & {
   signal?: string;
   thresholdMs?: number;
   url?: string;
+  // --- Outcome Holdback (holdback.*) ---
+  prNumber?: number | string;
+  // --- Autopilot pause flag (autopilot-paused / autopilot-resumed) ---
+  paused?: boolean;
+  since?: number;
+  // --- Model fallback (model-fallback) ---
+  from?: string;
+  to?: string;
+  until?: string;
+  // --- Builder-health stagnation (builder-health.stagnation) ---
+  realm?: string;
+  current?: number | null;
+  baseline?: number | null;
+  sustainedCycles?: number;
 };
 
 export { NOTIFICATION_EVENT_TYPES };

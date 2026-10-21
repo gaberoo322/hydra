@@ -11,133 +11,124 @@
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts",
-        "line": 308
+        "line": 303
       }
     },
     {
       "order": 1,
-      "name": "weekly-summary",
-      "cadence": "weekly",
-      "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 315
-      }
-    },
-    {
-      "order": 2,
       "name": "usage-weekly-snapshot",
       "cadence": "weekly",
       "source": {
         "path": "src/scheduler/housekeeping.ts",
-        "line": 329
+        "line": 320
       }
     },
     {
-      "order": 3,
+      "order": 2,
       "name": "memory-consolidation",
       "cadence": "daily",
       "source": {
         "path": "src/scheduler/housekeeping.ts",
-        "line": 336
+        "line": 327
       }
     },
     {
-      "order": 4,
+      "order": 3,
       "name": "design-concept-snapshot",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts",
-        "line": 343
+        "line": 334
       }
     },
     {
-      "order": 5,
+      "order": 4,
       "name": "stale-key-prune",
       "cadence": "daily",
       "source": {
         "path": "src/scheduler/housekeeping.ts",
-        "line": 351
+        "line": 342
       }
     },
     {
-      "order": 6,
+      "order": 5,
       "name": "worktree-orphan-prune",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts",
-        "line": 368
+        "line": 359
       }
     },
     {
-      "order": 7,
+      "order": 6,
       "name": "glm-eligibility-sweep",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts",
-        "line": 390
+        "line": 381
       }
     },
     {
-      "order": 8,
+      "order": 7,
       "name": "target-outcomes-publish",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts",
-        "line": 405
+        "line": 396
       }
     },
     {
-      "order": 9,
+      "order": 8,
       "name": "wiring-liveness",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts",
-        "line": 417
+        "line": 408
       }
     },
     {
-      "order": 10,
+      "order": 9,
       "name": "attribution-record",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts",
-        "line": 445
+        "line": 436
       }
     },
     {
-      "order": 11,
+      "order": 10,
       "name": "holdback-merge-watch",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts",
-        "line": 462
+        "line": 453
       }
     },
     {
-      "order": 12,
+      "order": 11,
       "name": "cycle-merge-reconcile",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts",
-        "line": 483
+        "line": 474
       }
     },
     {
-      "order": 13,
+      "order": 12,
       "name": "holdback-merge-event-enrol",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts",
-        "line": 503
+        "line": 494
       }
     },
     {
-      "order": 14,
+      "order": 13,
       "name": "pattern-cue-demotion",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts",
-        "line": 520
+        "line": 511
       }
     }
   ]

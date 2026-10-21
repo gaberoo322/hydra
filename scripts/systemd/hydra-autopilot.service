@@ -5,7 +5,7 @@ After=network-online.target hydra-orchestrator.service
 Wants=network-online.target
 
 # Failure routing — reuse the existing notify-failure template.
-OnFailure=hydra-notify-failure@%n.service
+OnFailure=hydra-notify-failure@%n
 
 # Bounded auto-retry on failure. A transient Anthropic API 5xx killed the
 # 2026-05-16 morning run after 1h 47min and the `Restart=no` policy left the

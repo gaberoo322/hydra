@@ -4,8 +4,9 @@
 //
 // This Module concentrates the "what events become dashboard alerts, what each
 // alert says, and what severity it carries" knowledge in one place — the same
-// Seam pattern the sibling grammar extractions follow (notify-format.ts #1512
-// via notify.ts; digest-format.ts #1181 via digest.ts). Adding a new alert type
+// Seam pattern the sibling grammar extractions followed (notify-format.ts
+// #1512 and digest-format.ts #1181, both retired by ADR-0045 — the Operator
+// Channel's page-list.ts / brief-lines.ts are the successors). Adding a new alert type
 // is now a one-file edit here, with no consumer-lifecycle or registration-index
 // context in scope.
 //
@@ -41,8 +42,9 @@ export const ALERT_TYPES: ReadonlySet<string> = new Set<string>([
   // was up at detection time, so a dashboard alert is the right surface. The
   // forgotten-pause signal is deliberately NOT an alert type — a deliberate
   // overnight operator pause must never leave a lingering unread dashboard
-  // alert; pause surfaces as a digest line only (CRITICAL_EVENT_TYPES in
-  // digest.ts — this file contains no pause member at all, by design).
+  // alert; pause reaches the operator only as an Operator Channel page
+  // (PAGE_KINDS in src/operator-channel/page-list.ts — this file contains no
+  // pause member at all, by design).
   E.LAUNCH_QUOTA_STRETCH, E.LAUNCH_LATENCY_BREACH,
   // Issue #4175: a watched node_modules install root (e.g. a live Target
   // service's dependency tree) was found broken. Always reached via a
@@ -70,9 +72,9 @@ export const ALERT_TYPES: ReadonlySet<string> = new Set<string>([
  *
  * The `event` parameter is typed `AlertGrammarEvent` (issue #1889) so the
  * payload fields the switch reads are contract-checked too, not just the case
- * labels — mirroring `formatMessage(FormatMessageEvent)` in `notify-format.ts`
- * (#1857) and `buildDigestMessage(DigestGrammarEvent[])` in `digest-format.ts`
- * (#1835). A renamed read field is a compile error here, not a silent miss.
+ * labels — the pattern the retired `formatMessage(FormatMessageEvent)`
+ * (#1857) and `buildDigestMessage(DigestGrammarEvent[])` (#1835) formatters
+ * introduced. A renamed read field is a compile error here, not a silent miss.
  */
 /**
  * Render a launch-flow streak duration (issue #3848) for a dashboard-alert
@@ -118,9 +120,9 @@ export function formatAlertMessage(event: AlertGrammarEvent): string {
  * `consumer` → `name`, or `signal` → `root`) becomes a compile error at the
  * access site rather than a silent runtime miss in the dashboard-alert body.
  *
- * This mirrors `FormatMessageEvent` (`notify-format.ts`, issue #1857) and
- * `DigestGrammarEvent` (`digest-format.ts`, issue #1835) — the two sibling
- * formatters that fixed the same class of gap. All three now DERIVE their
+ * This mirrors `FormatMessageEvent` (issue #1857) and `DigestGrammarEvent`
+ * (issue #1835) — the two sibling formatters (since retired by ADR-0045) that
+ * fixed the same class of gap. All three DERIVED their
  * payload shape from the single shared `NotificationEventPayload` vocabulary in
  * `event-bus.ts` (issue #1915) via `Pick`, so the payload contract lives in one
  * place. The three formatters now share one structural pattern:
