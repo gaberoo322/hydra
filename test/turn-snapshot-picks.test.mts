@@ -1437,3 +1437,67 @@ describe("turn-snapshot CLI — picks collector contract (ADR-0043 D2, slice 3)"
     assert.deepEqual(urls, Array(3).fill("http://h/api/design-concepts/issue-7 3000"));
   });
 });
+
+// ---------------------------------------------------------------------------
+// A malformed payload degrades, never throws (#5084, the #4934 per-field contract)
+// ---------------------------------------------------------------------------
+
+/** A port whose every read returns `read`, except the `overrides` (the runs read is unread by picks). */
+function everyRead(read: GhJsonRead, overrides: Partial<TurnSnapshotGithub> = {}): TurnSnapshotGithub {
+  return new Proxy(overrides as TurnSnapshotGithub, {
+    get: (t, prop) =>
+      prop in t
+        ? t[prop as keyof TurnSnapshotGithub]
+        : async () => (prop === "listOpenPrMergeStates" ? { read, stderrHead: "" } : prop === "latestWorkflowRunCreatedAt" ? null : read),
+  });
+}
+
+describe("Turn Snapshot picks — a malformed payload degrades, never throws (#5084)", () => {
+  const MALFORMED_READS: readonly GhJsonRead[] = [
+    { kind: "unparseable" },
+    ok(null),
+    ok(true),
+    ok("text"),
+    ok({ a: 1 }),
+    ok([null, 7, "x", [], {}]),
+    ok([{ number: 5, labels: null, title: ["t"], body: { b: 1 } }, { number: 6, labels: [{ name: {} }], updatedAt: 9, headRefName: 3 }]),
+  ];
+  const MALFORMED_BODIES = ["not json", "null", "[]", '{"createdAt": []}', '{"createdAt": {"a": 1}}', '{"glm_withheld": {"a": 1}}'];
+
+  MALFORMED_READS.forEach((read, i) => {
+    test(`every read malformed (shape #${i}) → the collector resolves with no pick, typed exclusions and a count`, async () => {
+      for (const body of MALFORMED_BODIES) {
+        const o = await collectPicks({
+          github: everyRead(read),
+          hydra: fakeHydra({ designConceptBody: async () => body }),
+          now: () => NOW_MS,
+          ghListLimit: 100,
+          inflight: { union: [], branch: [], body: [] },
+          boardState: body,
+        });
+        assert.ok(o.value.grillPick === null || Number.isInteger(o.value.grillPick), `shape #${i}: a pick is an issue number`);
+        assert.ok(Array.isArray(o.value.candidateExclusions));
+        assert.ok(Number.isInteger(o.value.activeDevOrch) && o.value.activeDevOrch >= 0);
+        const listShaped = read.kind === "ok" && (Array.isArray(read.data) || (read.data !== null && typeof read.data === "object"));
+        if (!listShaped) assert.equal(o.value.boardDegraded, true, `shape #${i}: an unreadable grill list flags the board`);
+      }
+    });
+  });
+
+  test("a malformed merged-PR / open-PR read degrades ONLY its own field — the grill pick from a healthy list stands", async () => {
+    const github = everyRead({ kind: "unparseable" }, { listReadyForAgentIssues: async () => ok([{ number: 41, labels: [], title: "Real work", body: "", updatedAt: "2026-10-07T00:00:00Z" }]) });
+    const o = await collectPicks({ github, hydra: fakeHydra(), now: () => NOW_MS, ghListLimit: 100, inflight: { union: [], branch: [], body: [] }, boardState: null });
+    assert.equal(o.value.grillPick, 41);
+    assert.equal(o.value.boardDegraded, false);
+    assert.equal(o.value.activeDevOrch, 0);
+  });
+
+  test("a design-concept body's `createdAt` reads 0 when it is an EMPTY list or object (never a fresh artifact)", async () => {
+    for (const createdAt of [[], {}, 0, null]) {
+      const github = everyRead(ok([]), { listReadyForAgentIssues: async () => ok([{ number: 41, labels: [], title: "Real work", body: "" }]) });
+      const hydra = fakeHydra({ designConceptBody: async () => JSON.stringify({ createdAt }) });
+      const o = await collectPicks({ github, hydra, now: () => NOW_MS, ghListLimit: 100, inflight: { union: [], branch: [], body: [] }, boardState: null });
+      assert.deepEqual([o.value.grillPick, o.value.devReadyPick], [41, null], `${JSON.stringify(createdAt)} is no fresh artifact`);
+    }
+  });
+});

@@ -1351,3 +1351,65 @@ describe("turn-snapshot CLI — Target collectors (ADR-0043 slice 4)", () => {
     assert.equal(built, false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// A malformed payload degrades, never throws (#5084, the #4934 per-field contract)
+// ---------------------------------------------------------------------------
+
+describe("Target board family — a malformed payload degrades, never throws (#5084)", () => {
+  const MALFORMED_READS: readonly GhJsonRead[] = [
+    { kind: "unparseable" },
+    ok(null),
+    ok(true),
+    ok("text"),
+    ok({ a: 1 }),
+    ok([null, 7, "x", [], { number: true, labels: null, head: 5, body: {}, html_url: [], pull_request: {} }, { number: 3.5, head: { ref: {} }, draft: [] }]),
+  ];
+  const MALFORMED_BOARDS: readonly unknown[] = [null, [], 7, "x", { degraded: { a: 1 }, ready_for_agent: 1 }, { ready_for_agent: [], needs_qa: {}, glm_withheld: { a: 1 }, blocker_excluded: "x" }];
+
+  MALFORMED_READS.forEach((read, i) => {
+    test(`every read malformed (shape #${i}) → the board and scan collectors resolve, degrading only their own fields`, async () => {
+      for (const board of MALFORMED_BOARDS) {
+        const r = await runBoard({ board, issuesFallback: read, blockerSearch: read, pulls: read, rfa: read, inProgress: read, needsQa: read, needsDevResume: read, verdicts: read, scanIssues: read });
+        assert.ok(!r.value.counts.ok || r.value.counts.value.every(([k, v]) => typeof k === "string" && typeof v === "string"), `shape #${i}: count lines are text`);
+        assert.ok(!r.value.wip.ok || Number.isInteger(r.value.wip.value.live), `shape #${i}: the WIP count is an integer`);
+        assert.ok(r.value.devResumePick.ok === false || r.value.devResumePick.value === null, `shape #${i}: no pin from a malformed payload`);
+        assert.doesNotThrow(() => JSON.stringify(r.value));
+      }
+      const scan = await runScan({ read });
+      assert.equal(scan.value.signals.ok, read.kind === "ok", `shape #${i}: only an unreadable scan read degrades the scan signals`);
+    });
+  });
+
+  test("the board's `degraded` flag: an EMPTY list / object reads healthy, a non-empty one routes to the gh fallback", async () => {
+    const healthy = { ready_for_agent: 2, needs_qa: 0, needs_triage: 0, needs_research: 0 };
+    for (const unset of [[], {}, 0, null]) {
+      const r = await runBoard({ board: { ...healthy, degraded: unset } });
+      assert.ok(!r.calls.includes("issuesFallback"), `${JSON.stringify(unset)} is not a degraded flag`);
+    }
+    for (const set of [[1], { a: 1 }, true]) {
+      const r = await runBoard({ board: { ...healthy, degraded: set }, issuesFallback: ok([]) });
+      assert.ok(r.calls.includes("issuesFallback"), `${JSON.stringify(set)} is a degraded flag`);
+    }
+  });
+
+  test("a healthy count that is not a string prints as JSON text; only a decimal integer counts", () => {
+    assert.deepEqual(countsOf({ ready_for_agent: 3, needs_qa: "2", needs_triage: null, needs_research: [] }), {
+      target_ready_for_agent: "3",
+      target_needs_qa: "2",
+      target_needs_triage: "null",
+      target_needs_research: "[]",
+      target_ready_blocker_excluded: "0",
+    });
+    assert.equal(adjustedReadyForAgent({ base: " 1_2 ", ready: [true, 5], inflight: new Set([1, 5]), glmWithheld: [], blockerExcluded: [] }), 10, "a bool issue number reads 0/1");
+    assert.equal(adjustedReadyForAgent({ base: "null", ready: [], inflight: new Set(), glmWithheld: [], blockerExcluded: [] }), 0);
+  });
+
+  test("a throwing or malformed facts source fails the risk surface closed, never the turn", async () => {
+    for (const facts of [() => { throw new Error("boom"); }, () => null, () => ({ manifest: [] }), () => ({ manifest: "x" })]) {
+      const o = await collectTargetRiskSurface({ facts });
+      assert.equal(o.value.manifest.ok, false);
+      assert.equal(o.degraded.length, 1);
+    }
+  });
+});
