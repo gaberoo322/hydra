@@ -820,16 +820,16 @@ run_redis_backup_freshness() {
   # helper: hoisting would change those blocks' tested extraction boundaries.
   rc_write() {
     if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
+      timeout 5 docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
     else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
+      timeout 5 redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
     fi
   }
   rc_read() {
     if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
+      timeout 5 docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
     else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
+      timeout 5 redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
     fi
   }
 
@@ -1270,16 +1270,16 @@ run_node_modules_integrity() {
   # function verbatim by name).
   rc_write() {
     if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
+      timeout 5 docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
     else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
+      timeout 5 redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
     fi
   }
   rc_read() {
     if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
+      timeout 5 docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
     else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
+      timeout 5 redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
     fi
   }
 
@@ -1651,17 +1651,17 @@ run_launch_flow() {
   # rc_write — fire-and-forget redis mutation; never fails the block.
   rc_write() {
     if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
+      timeout 5 docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
     else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
+      timeout 5 redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
     fi
   }
   # rc_read — capture redis output ("" on any failure).
   rc_read() {
     if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
+      timeout 5 docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
     else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
+      timeout 5 redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
     fi
   }
 
@@ -2121,6 +2121,8 @@ run_brief_missing() {
   local BM_KEY_PREFIX="hydra:autopilot:brief-missing"
   local STALE_HOURS="${HYDRA_WATCHDOG_BRIEF_STALE_HOURS:-26}"
   [[ "$STALE_HOURS" =~ ^[0-9]+$ ]] || STALE_HOURS=26
+  # Force base 10: a zero-padded value (e.g. "08") must not parse as octal under set -e.
+  STALE_HOURS=$((10#$STALE_HOURS))
   local KIND="brief:missing"
 
   log() {
@@ -2132,16 +2134,16 @@ run_brief_missing() {
   # theirs: the test harnesses extract each block by slicing.
   rc_write() {
     if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
+      timeout 5 docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
     else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
+      timeout 5 redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
     fi
   }
   rc_read() {
     if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
+      timeout 5 docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
     else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
+      timeout 5 redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
     fi
   }
 
@@ -2192,7 +2194,10 @@ run_brief_missing() {
   if [[ "$last_ms" =~ ^[0-9]+$ ]] && (( last_ms > 0 )); then
     reference_ms="$last_ms"
     reason="stale"
-    rc_write DEL "$absent_key"
+    # Gate the DEL on EXISTS: a healthy tick must not write when nothing is there.
+    if [[ "$(rc_read EXISTS "$absent_key" | tr -dc '0-9')" == "1" ]]; then
+      rc_write DEL "$absent_key"
+    fi
   else
     rc_write SET "$absent_key" "$now_ms" NX
     local absent_since
@@ -2307,9 +2312,9 @@ run_origin_identity() {
   # dedup marker.
   rc_read() {
     if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
+      timeout 5 docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
     else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
+      timeout 5 redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
     fi
   }
 

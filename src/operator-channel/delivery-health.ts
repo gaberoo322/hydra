@@ -171,7 +171,7 @@ export async function readDeliveryHealth(deps: DeliveryHealthDeps = {}): Promise
     if (raced === "timeout") {
       logger.error({ timeoutMs }, "[OperatorChannel] delivery-health reads timed out — reporting unavailable");
       // The abandoned fan-out must never surface as an unhandled rejection.
-      fanOut.catch(() => undefined);
+      fanOut.catch(() => undefined /* intentional: late rejection of the abandoned fan-out; already reported as a timeout above */);
       return { available: false, generatedAt, reason: `redis-timeout-${timeoutMs}ms` };
     }
     const [log, dedupStates, lastBriefSentAt] = raced;
