@@ -67,7 +67,7 @@ export interface PrPick {
 }
 
 /** One dirty PR to surface to the operator this turn (`<pr>:<closingIssue|none>`). */
-export interface DirtySurfaceEntry {
+interface DirtySurfaceEntry {
   readonly pr: number;
   readonly closingIssue: number | null;
 }
@@ -296,10 +296,10 @@ export function applyMergeStateRepoll(first: readonly unknown[], repoll: GhJsonR
 // In-flight reference sets (pure)
 // ---------------------------------------------------------------------------
 
-export const EMPTY_INFLIGHT: InflightRefs = { union: [], branch: [], body: [] };
+const EMPTY_INFLIGHT: InflightRefs = { union: [], branch: [], body: [] };
 
 /** The three in-flight sets over the (re-polled) open-PR payload; unavailable predicates → empty. */
-export function inflightRefs(prs: readonly unknown[], prRefs: PrRefsAvailability): InflightRefs {
+function inflightRefs(prs: readonly unknown[], prRefs: PrRefsAvailability): InflightRefs {
   if (!prRefs.ok) return EMPTY_INFLIGHT;
   const rows = rowsOf(prs).map(refRow);
   const sorted = (s: ReadonlySet<number>) => [...s].sort(ascending);
@@ -315,18 +315,18 @@ export function inflightRefs(prs: readonly unknown[], prRefs: PrRefsAvailability
 // ---------------------------------------------------------------------------
 
 /** Behind-bucket + dirty-surface quiescence window (seconds). */
-export const BEHIND_QUIESCENCE_SECONDS = 5400;
+const BEHIND_QUIESCENCE_SECONDS = 5400;
 /** Attempted-and-quiescent dirty surface window (seconds, #4807). */
-export const DIRTY_ATTEMPTED_SURFACE_SECONDS = 5400;
-export const DEFAULT_UNCHECKED_GRACE_SECONDS = 600;
+const DIRTY_ATTEMPTED_SURFACE_SECONDS = 5400;
+const DEFAULT_UNCHECKED_GRACE_SECONDS = 600;
 /**
  * The resume / dirty-fix quiescence window (seconds). The env knob keeps its
  * historical `HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS` name (operator-facing);
  * the window itself is provenance-agnostic.
  */
-export const DEFAULT_GLM_RED_QUIESCENCE_SECONDS = 1800;
+const DEFAULT_GLM_RED_QUIESCENCE_SECONDS = 1800;
 
-export interface PrGateInputs {
+interface PrGateInputs {
   /** The (re-polled) open-PR rows; non-object rows are skipped. */
   readonly prs: readonly unknown[];
   readonly nowSeconds: number;
@@ -374,7 +374,7 @@ const RED_CONCLUSIONS = new Set(["FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACT
  * startedAt; ties → later list index). CheckRun rows key on `name`,
  * StatusContext rows on `context`. CANCELLED is never red (#4460 INV-4).
  */
-export function rollupLatest(rollup: readonly unknown[]): Map<string, { pending: boolean; red: boolean }> {
+function rollupLatest(rollup: readonly unknown[]): Map<string, { pending: boolean; red: boolean }> {
   const latest = new Map<string, { started: number; pending: boolean; red: boolean }>();
   rollup.forEach((raw) => {
     const e = asRow(raw);
@@ -460,7 +460,7 @@ export function parseQaRecheckEntry(raw: unknown, pr: number, tier: number): QaR
 }
 
 /** Classify every open PR. Returns the snapshot fields (minus in-flight) plus the classifier's stderr notes. */
-export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "inflight">; notes: string[] } {
+function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "inflight">; notes: string[] } {
   const notes: string[] = [];
   const now = inputs.nowSeconds;
   const quiet = inputs.glmRedQuiescenceSeconds;
@@ -706,7 +706,7 @@ export function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapsh
 // ---------------------------------------------------------------------------
 
 /** Branch protection `.contexts`: list → the set entries as strings; null/other JSON → healthy empty set. */
-export function parseRequiredContexts(read: GhJsonRead): Classified<ReadonlySet<string>> {
+function parseRequiredContexts(read: GhJsonRead): Classified<ReadonlySet<string>> {
   if (read.kind === "empty") return { ok: false, reason: "empty-payload" };
   if (read.kind === "unparseable") return { ok: false, reason: "unparseable" };
   if (!Array.isArray(read.data)) return { ok: true, value: new Set() };
@@ -714,7 +714,7 @@ export function parseRequiredContexts(read: GhJsonRead): Classified<ReadonlySet<
 }
 
 /** `[{"number": N}, …]` → the issue numbers. A non-iterable JSON value is a failed read (Python's TypeError). */
-export function parseDevResumeIssues(read: GhJsonRead): Classified<ReadonlySet<number>> {
+function parseDevResumeIssues(read: GhJsonRead): Classified<ReadonlySet<number>> {
   if (read.kind === "empty") return { ok: false, reason: "empty-payload" };
   if (read.kind === "unparseable") return { ok: false, reason: "unparseable" };
   const data = read.data;
@@ -738,7 +738,7 @@ export function parseDevResumeIssues(read: GhJsonRead): Classified<ReadonlySet<n
  * pick's rule), never a failed read; the same empty/unparseable/not-iterable
  * discipline as {@link parseDevResumeIssues}.
  */
-export function parseNoPrResumeRows(read: GhJsonRead): Classified<readonly NoPrResumeRow[]> {
+function parseNoPrResumeRows(read: GhJsonRead): Classified<readonly NoPrResumeRow[]> {
   if (read.kind === "empty") return { ok: false, reason: "empty-payload" };
   if (read.kind === "unparseable") return { ok: false, reason: "unparseable" };
   const data = read.data;
@@ -769,7 +769,7 @@ export interface PrGateEnv {
 }
 
 /** The port reads this collector issues (a narrow view, so a fake needs only these). */
-export type PrGateGithub = Pick<
+type PrGateGithub = Pick<
   TurnSnapshotGithub,
   "listOpenPrs" | "listOpenPrMergeStates" | "latestWorkflowRunCreatedAt" | "requiredStatusContexts" | "listOpenIssueRowsByLabel"
 >;
