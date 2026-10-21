@@ -213,7 +213,7 @@ export function parseQuotaBlockStdout(
 // ---------------------------------------------------------------------------
 
 /** The ladder's six actions — the issue's five outcomes plus `release-not-authored`. */
-export type FinishAction =
+type FinishAction =
   | "release-not-authored"
   | "release-nothing-produced"
   | "keep-partial-for-resume"
@@ -328,7 +328,7 @@ export interface FinishResult {
 }
 
 /** A minimal `{ok}`-shaped effect result so fakes stay trivial. */
-export interface EffectResult {
+interface EffectResult {
   ok: boolean;
   stderr?: string;
 }
