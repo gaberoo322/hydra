@@ -117,6 +117,28 @@ describe("telegram-seam-check: scripts/ and systemd units (ADR-0045 D2, issue #5
     );
   });
 
+  test("flags a Python script that posts to the Bot API, but not a Python comment", () => {
+    assert.equal(
+      fileViolatesTelegramSeam(
+        "scripts/autopilot/notify.py",
+        `import urllib.request\nurllib.request.urlopen("https://api.telegram.org/bot" + token + "/sendMessage", data=body)`,
+      ),
+      true,
+    );
+    assert.equal(
+      fileViolatesTelegramSeam(
+        "scripts/autopilot/decide.py",
+        `# pages go through scripts/operator-notify.ts, never api.telegram.org\nprint("ok")`,
+      ),
+      false,
+    );
+  });
+
+  test("flags an .mjs script naming the host, with JS comments stripped", () => {
+    assert.equal(fileViolatesTelegramSeam("scripts/test/x.mjs", `const u = "https://api.telegram.org/bot";`), true);
+    assert.equal(fileViolatesTelegramSeam("scripts/test/x.mjs", `// api.telegram.org\nconst u = 1;`), false);
+  });
+
   test("does NOT flag the host named only in a shell comment line", () => {
     assert.equal(
       fileViolatesTelegramSeam(
@@ -138,7 +160,7 @@ describe("telegram-seam-check: scripts/ and systemd units (ADR-0045 D2, issue #5
   });
 
   test("the scan covers src/, scripts/ (ts + sh) and the systemd units", () => {
-    for (const glob of ["src/*.ts", "src/**/*.ts", "scripts/*.ts", "scripts/**/*.ts", "scripts/*.sh", "scripts/**/*.sh", "scripts/systemd/*"]) {
+    for (const glob of ["src/*.ts", "src/**/*.ts", "scripts/*.ts", "scripts/**/*.ts", "scripts/*.sh", "scripts/**/*.sh", "scripts/*.py", "scripts/**/*.py", "scripts/*.mjs", "scripts/**/*.mjs", "scripts/systemd/*"]) {
       assert.ok(TELEGRAM_SEAM_GLOBS.includes(glob), `glob '${glob}' must be scanned`);
     }
   });

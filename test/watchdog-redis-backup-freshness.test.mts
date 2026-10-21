@@ -176,6 +176,11 @@ function runBlock(extra: Record<string, string>): { status: number; stdout: stri
       // `...process.env` would redirect the block to the launcher's per-run
       // DB while every assertion here kept reading db 0.
       HYDRA_REDIS_DB: "0",
+      // ADR-0045 D2 (#5046): the block now calls the Operator Channel CLI at its
+      // fired/recovery edges through HYDRA_WATCHDOG_OPERATOR_NOTIFY; this suite
+      // asserts nothing about that delivery (test/launch-flow-delivery does), so
+      // a no-op stub keeps it from booting the PRODUCTION checkout's CLI.
+      HYDRA_WATCHDOG_OPERATOR_NOTIFY: "/bin/true",
       HYDRA_WATCHDOG_BACKUP_NOTIFY_STREAM: TEST_NOTIFY_STREAM,
       HYDRA_WATCHDOG_BACKUP_DIR: "/nonexistent-rb-freshness-dir",
       HYDRA_WATCHDOG_BACKUP_TIMER_STATE: "enabled",

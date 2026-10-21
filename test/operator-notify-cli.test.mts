@@ -135,6 +135,16 @@ describe("operator-notify: exit-code policy (INV-4, ADR-0045 Decision 4)", () =>
     assert.equal(classifyUnitExit({}), "failed");
   });
 
+  test("classifyUnitExit: a unit-level failure Result wins over a clean-looking exit pair (start-limit-hit crash loop of 143s)", () => {
+    assert.equal(classifyUnitExit({ result: "start-limit-hit", execMainCode: "exited", execMainStatus: "143" }), "failed");
+    for (const result of ["watchdog", "oom-kill", "core-dump", "timeout", "resources", "protocol"]) {
+      assert.equal(classifyUnitExit({ result, execMainCode: "killed", execMainStatus: "15" }), "failed", `Result=${result} must page`);
+    }
+    // The clean cases still hold with a benign Result.
+    assert.equal(classifyUnitExit({ result: "exit-code", execMainCode: "exited", execMainStatus: "143" }), "clean");
+    assert.equal(classifyUnitExit({ result: "signal", execMainCode: "killed", execMainStatus: "15" }), "clean");
+  });
+
   test("parseSystemctlShow reads the four properties and ignores the rest", () => {
     const f = parseSystemctlShow("Result=exit-code\nExecMainCode=exited\nExecMainStatus=143\nNRestarts=2\nActiveState=failed\n");
     assert.deepEqual(f, { result: "exit-code", execMainCode: "exited", execMainStatus: "143", nRestarts: "2" });

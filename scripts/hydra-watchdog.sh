@@ -844,11 +844,16 @@ run_redis_backup_freshness() {
   # copy, like rc_write: the test harnesses extract each block by slicing.
   deliver_page() {
     local notify_bin="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-$HOME/hydra}/scripts/operator-notify.ts}"
-    local out
+    local out err_file
+    err_file="$(mktemp 2>/dev/null || printf '/tmp/hydra-operator-notify-%s.err' "$$")"
+    # stderr is kept so the WARN names WHY (a strip-types boot error, a
+    # transport error) instead of a bare rc; the first Error line wins, else
+    # the last line.
     # shellcheck disable=SC2086  # word-splitting binary+flags is intended
-    out="$(timeout 25 $notify_bin "$@" 2>/dev/null)" \
+    out="$(timeout 25 $notify_bin "$@" 2>"$err_file")" \
       && log "operator-notify $1 ok for '${3:-}' (${out:-no output})" \
-      || log "WARN operator-notify $1 FAILED (rc=$?) for '${3:-}' (best-effort — detection state is unchanged)"
+      || log "WARN operator-notify $1 FAILED (rc=$?) for '${3:-}' (best-effort — detection state is unchanged): $({ grep -m1 -E 'Error|ERR_' "$err_file" || tail -n 1 "$err_file"; } 2>/dev/null | cut -c1-300)"
+    rm -f "$err_file" 2>/dev/null || true
     return 0
   }
 
@@ -1298,11 +1303,16 @@ run_node_modules_integrity() {
   # copy, like rc_write: the test harnesses extract each block by slicing.
   deliver_page() {
     local notify_bin="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-$HOME/hydra}/scripts/operator-notify.ts}"
-    local out
+    local out err_file
+    err_file="$(mktemp 2>/dev/null || printf '/tmp/hydra-operator-notify-%s.err' "$$")"
+    # stderr is kept so the WARN names WHY (a strip-types boot error, a
+    # transport error) instead of a bare rc; the first Error line wins, else
+    # the last line.
     # shellcheck disable=SC2086  # word-splitting binary+flags is intended
-    out="$(timeout 25 $notify_bin "$@" 2>/dev/null)" \
+    out="$(timeout 25 $notify_bin "$@" 2>"$err_file")" \
       && log "operator-notify $1 ok for '${3:-}' (${out:-no output})" \
-      || log "WARN operator-notify $1 FAILED (rc=$?) for '${3:-}' (best-effort — detection state is unchanged)"
+      || log "WARN operator-notify $1 FAILED (rc=$?) for '${3:-}' (best-effort — detection state is unchanged): $({ grep -m1 -E 'Error|ERR_' "$err_file" || tail -n 1 "$err_file"; } 2>/dev/null | cut -c1-300)"
+    rm -f "$err_file" 2>/dev/null || true
     return 0
   }
 
@@ -1677,11 +1687,16 @@ run_launch_flow() {
   # copy, like rc_write: the test harnesses extract each block by slicing.
   deliver_page() {
     local notify_bin="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-$HOME/hydra}/scripts/operator-notify.ts}"
-    local out
+    local out err_file
+    err_file="$(mktemp 2>/dev/null || printf '/tmp/hydra-operator-notify-%s.err' "$$")"
+    # stderr is kept so the WARN names WHY (a strip-types boot error, a
+    # transport error) instead of a bare rc; the first Error line wins, else
+    # the last line.
     # shellcheck disable=SC2086  # word-splitting binary+flags is intended
-    out="$(timeout 25 $notify_bin "$@" 2>/dev/null)" \
+    out="$(timeout 25 $notify_bin "$@" 2>"$err_file")" \
       && log "operator-notify $1 ok for '${3:-}' (${out:-no output})" \
-      || log "WARN operator-notify $1 FAILED (rc=$?) for '${3:-}' (best-effort — detection state is unchanged)"
+      || log "WARN operator-notify $1 FAILED (rc=$?) for '${3:-}' (best-effort — detection state is unchanged): $({ grep -m1 -E 'Error|ERR_' "$err_file" || tail -n 1 "$err_file"; } 2>/dev/null | cut -c1-300)"
+    rm -f "$err_file" 2>/dev/null || true
     return 0
   }
 
@@ -2124,11 +2139,16 @@ run_origin_identity() {
   # copy, like rc_write: the test harnesses extract each block by slicing.
   deliver_page() {
     local notify_bin="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-$HOME/hydra}/scripts/operator-notify.ts}"
-    local out
+    local out err_file
+    err_file="$(mktemp 2>/dev/null || printf '/tmp/hydra-operator-notify-%s.err' "$$")"
+    # stderr is kept so the WARN names WHY (a strip-types boot error, a
+    # transport error) instead of a bare rc; the first Error line wins, else
+    # the last line.
     # shellcheck disable=SC2086  # word-splitting binary+flags is intended
-    out="$(timeout 25 $notify_bin "$@" 2>/dev/null)" \
+    out="$(timeout 25 $notify_bin "$@" 2>"$err_file")" \
       && log "operator-notify $1 ok for '${3:-}' (${out:-no output})" \
-      || log "WARN operator-notify $1 FAILED (rc=$?) for '${3:-}' (best-effort — detection state is unchanged)"
+      || log "WARN operator-notify $1 FAILED (rc=$?) for '${3:-}' (best-effort — detection state is unchanged): $({ grep -m1 -E 'Error|ERR_' "$err_file" || tail -n 1 "$err_file"; } 2>/dev/null | cut -c1-300)"
+    rm -f "$err_file" 2>/dev/null || true
     return 0
   }
 

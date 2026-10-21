@@ -120,7 +120,21 @@ export interface UnitExitFacts {
  * spellings accepted); `ExecMainStatus` is the exit code or the signal
  * (number or name). Anything else, including an unreadable answer, is `failed`.
  */
+/** systemd `Result=` values that are a failure whatever the main process's own exit looked like. */
+const FAILED_RESULTS: ReadonlySet<string> = new Set([
+  "start-limit-hit",
+  "watchdog",
+  "oom-kill",
+  "core-dump",
+  "timeout",
+  "resources",
+  "protocol",
+]);
+
 export function classifyUnitExit(facts: UnitExitFacts): "clean" | "failed" {
+  // A crash loop whose every exit is 143 still ends as Result=start-limit-hit
+  // with ExecMainStatus=143: the unit-level result wins over the exit pair.
+  if (FAILED_RESULTS.has((facts.result ?? "").trim().toLowerCase())) return "failed";
   const code = (facts.execMainCode ?? "").trim().toLowerCase();
   const status = (facts.execMainStatus ?? "").trim().toUpperCase();
   if ((code === "exited" || code === "1") && status === "143") return "clean";

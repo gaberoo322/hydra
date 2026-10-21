@@ -76,7 +76,7 @@ const TELEGRAM_TARGET_SIGNALS = [
   "api.telegram.org", // the Telegram Bot API host
 ];
 
-/** The scanned surface: src/, scripts/ (ts + sh) and the tracked systemd units. */
+/** The scanned surface: src/, scripts/ (ts, mjs, sh, py) and the tracked systemd units. */
 export const TELEGRAM_SEAM_GLOBS: readonly string[] = [
   "src/*.ts",
   "src/**/*.ts",
@@ -84,10 +84,14 @@ export const TELEGRAM_SEAM_GLOBS: readonly string[] = [
   "scripts/**/*.ts",
   "scripts/*.sh",
   "scripts/**/*.sh",
+  "scripts/*.py",
+  "scripts/**/*.py",
+  "scripts/*.mjs",
+  "scripts/**/*.mjs",
   "scripts/systemd/*",
 ];
 
-/** Non-comment lines of a shell script or systemd unit (leading-`#` lines dropped). */
+/** Non-comment lines of a shell / Python script or systemd unit (leading-`#` lines dropped). */
 function shellCodeLines(body: string): string[] {
   return body.split("\n").filter((line) => !/^\s*#/.test(line));
 }
@@ -97,11 +101,11 @@ function shellCodeLines(body: string): string[] {
  * name the Telegram Bot API host on a non-comment line, in violation of the
  * Telegram Notification Adapter Seam? Exported so the regression test can pin
  * the grammar without shelling out to git. `relPath` decides the carve-out and
- * the comment grammar (`.ts` → stripComments; anything else → leading-`#`).
+ * the comment grammar (`.ts` / `.mjs` → stripComments; anything else → leading-`#`).
  */
 export function fileViolatesTelegramSeam(relPath: string, body: string): boolean {
   if (relPath === TELEGRAM_NOTIFY_MODULE || relPath === TELEGRAM_SEAM_CHECK_SELF) return false;
-  const lines = relPath.endsWith(".ts") ? stripComments(body).split("\n") : shellCodeLines(body);
+  const lines = /\.(ts|mjs)$/.test(relPath) ? stripComments(body).split("\n") : shellCodeLines(body);
   for (const line of lines) {
     if (TELEGRAM_TARGET_SIGNALS.some((sig) => line.includes(sig))) return true;
   }
