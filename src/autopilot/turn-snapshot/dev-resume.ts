@@ -31,7 +31,7 @@
 
 import type { PrPick } from "./pr-gate.ts";
 
-export type DevResumePolicy = "lowest-pr" | "lowest-unambiguous-issue";
+type DevResumePolicy = "lowest-pr" | "lowest-unambiguous-issue";
 
 /** One realm-pre-qualified open PR, in payload order. */
 export interface DevResumeCandidate {
