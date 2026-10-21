@@ -576,3 +576,224 @@ describe("design-concept 883fd8c2 — new panel files import the shared trust se
     assert.ok(src.includes("derivePageStatus"), "must import the shared derivePageStatus seam");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Operator channel delivery health (issue #5048, ADR-0045 Decision 8) — the
+// ONE read-only route the /health page's Operator channel card reads, the
+// pure fold behind it, and the fail-open reader. Same client-half pinning
+// convention as the rest of this file (the dashboard ships no JSX runner).
+// ---------------------------------------------------------------------------
+
+import { createOperatorChannelRouter } from "../src/api/operator-channel.ts";
+import {
+  DELIVERY_HEALTH_WINDOW_HOURS,
+  readDeliveryHealth,
+  summarizeDeliveryHealth,
+} from "../src/operator-channel/delivery-health.ts";
+import type { DedupStateRow, DeliveryLogEntry } from "../src/redis/operator-channel.ts";
+
+const T_NOW = Date.UTC(2026, 9, 20, 12, 0, 0); // 2026-10-20T12:00:00Z
+const H = 3600 * 1000;
+
+const entry = (over: Partial<DeliveryLogEntry> & { at: number }): DeliveryLogEntry => ({
+  kind: "page",
+  dedupKey: "launch:fail_safe",
+  title: "fixture",
+  outcome: "sent-html",
+  ...over,
+});
+
+const dedup = (over: Partial<DedupStateRow> & { dedupKey: string }): DedupStateRow => ({
+  state: "bad",
+  firstAt: T_NOW - 2 * H,
+  lastSentAt: T_NOW - 2 * H,
+  suppressed: 0,
+  ...over,
+});
+
+describe("summarizeDeliveryHealth — the pure fold (issue #5048)", () => {
+  test("empty stores → nulls and zero counts, available:true", () => {
+    const s = summarizeDeliveryHealth({ log: [], dedupStates: [], lastBriefSentAt: null, now: T_NOW });
+    assert.equal(s.available, true);
+    assert.equal(s.generatedAt, new Date(T_NOW).toISOString());
+    assert.equal(s.lastPage, null);
+    assert.equal(s.lastBrief, null);
+    assert.equal(s.lastBriefDeliveredAt, null);
+    assert.deepEqual(s.window, { hours: DELIVERY_HEALTH_WINDOW_HOURS, failed: 0, suppressed: 0 });
+    assert.equal(DELIVERY_HEALTH_WINDOW_HOURS, 24);
+  });
+
+  test("lastPage is the NEWEST page/reminder/recovered entry regardless of row order; briefs never count as pages", () => {
+    const log = [
+      entry({ at: T_NOW - 5 * H, kind: "page", title: "old page" }),
+      entry({ at: T_NOW - 1 * H, kind: "brief", dedupKey: "brief", title: "brief", outcome: "sent-html" }),
+      entry({ at: T_NOW - 2 * H, kind: "recovered", title: "recovered one", dedupKey: "infra:redis_backup_stale" }),
+      entry({ at: T_NOW - 3 * H, kind: "reminder", title: "reminder" }),
+    ];
+    const s = summarizeDeliveryHealth({ log, dedupStates: [], lastBriefSentAt: null, now: T_NOW });
+    assert.deepEqual(s.lastPage, {
+      at: new Date(T_NOW - 2 * H).toISOString(),
+      kind: "recovered",
+      dedupKey: "infra:redis_backup_stale",
+      title: "recovered one",
+      outcome: "sent-html",
+    });
+  });
+
+  test("lastBrief is the newest brief entry (delivered or not, with status on a failure); lastBriefDeliveredAt comes from the stamp", () => {
+    const log = [
+      entry({ at: T_NOW - 30 * H, kind: "brief", dedupKey: "brief", outcome: "sent-html" }),
+      entry({ at: T_NOW - 4 * H, kind: "brief", dedupKey: "brief", outcome: "failed", status: 502 }),
+    ];
+    const s = summarizeDeliveryHealth({ log, dedupStates: [], lastBriefSentAt: T_NOW - 30 * H, now: T_NOW });
+    assert.deepEqual(s.lastBrief, { at: new Date(T_NOW - 4 * H).toISOString(), outcome: "failed", status: 502 });
+    assert.equal(s.lastBriefDeliveredAt, new Date(T_NOW - 30 * H).toISOString());
+  });
+
+  test("failed counts every kind's `failed` outcome inside 24h and nothing outside it", () => {
+    const log = [
+      entry({ at: T_NOW - 1 * H, outcome: "failed", status: 400 }),
+      entry({ at: T_NOW - 23 * H, kind: "brief", dedupKey: "brief", outcome: "failed" }),
+      entry({ at: T_NOW - 25 * H, outcome: "failed" }), // outside the window
+      entry({ at: T_NOW - 2 * H, outcome: "skipped-no-credentials" }), // not a failure
+      entry({ at: T_NOW - 3 * H, outcome: "sent-plain" }),
+    ];
+    const s = summarizeDeliveryHealth({ log, dedupStates: [], lastBriefSentAt: null, now: T_NOW });
+    assert.equal(s.window.failed, 2);
+  });
+
+  test("suppressed sums the counters of currently-bad dedup states whose last send is inside 24h", () => {
+    const dedupStates = [
+      dedup({ dedupKey: "launch:fail_safe", lastSentAt: T_NOW - 1 * H, suppressed: 7 }),
+      dedup({ dedupKey: "infra:redis_backup_stale", lastSentAt: T_NOW - 23 * H, suppressed: 3 }),
+      dedup({ dedupKey: "consumer:dead:x", lastSentAt: T_NOW - 48 * H, suppressed: 100 }), // last send outside the window
+    ];
+    const s = summarizeDeliveryHealth({ log: [], dedupStates, lastBriefSentAt: null, now: T_NOW });
+    assert.equal(s.window.suppressed, 10);
+  });
+});
+
+describe("readDeliveryHealth — best-effort, fails OPEN (issue #5048)", () => {
+  test("folds the three reads into the summary", async () => {
+    const s = await readDeliveryHealth({
+      now: () => T_NOW,
+      reads: {
+        readDeliveryLog: async () => [entry({ at: T_NOW - 1 * H, title: "live page" })],
+        listDedupStates: async () => [dedup({ dedupKey: "launch:fail_safe", suppressed: 2 })],
+        getBriefLastSent: async () => T_NOW - 5 * H,
+      },
+    });
+    assert.equal(s.available, true);
+    if (!s.available) return;
+    assert.equal(s.lastPage?.title, "live page");
+    assert.equal(s.window.suppressed, 2);
+    assert.equal(s.lastBriefDeliveredAt, new Date(T_NOW - 5 * H).toISOString());
+  });
+
+  test("a throwing read resolves {available:false, reason} — never rejects", async () => {
+    const s = await readDeliveryHealth({
+      now: () => T_NOW,
+      reads: {
+        readDeliveryLog: async () => {
+          throw new Error("ECONNREFUSED 127.0.0.1:6379");
+        },
+        listDedupStates: async () => [],
+        getBriefLastSent: async () => null,
+      },
+    });
+    assert.equal(s.available, false);
+    if (s.available) return;
+    assert.match(s.reason, /redis-read-failed: ECONNREFUSED/);
+    assert.equal(s.generatedAt, new Date(T_NOW).toISOString());
+  });
+
+  test("a hung read resolves {available:false, reason:redis-timeout-…} inside the timeout", async () => {
+    const s = await readDeliveryHealth({
+      now: () => T_NOW,
+      timeoutMs: 20,
+      reads: {
+        readDeliveryLog: () => new Promise(() => undefined), // never settles
+        listDedupStates: async () => [],
+        getBriefLastSent: async () => null,
+      },
+    });
+    assert.equal(s.available, false);
+    if (s.available) return;
+    assert.equal(s.reason, "redis-timeout-20ms");
+  });
+});
+
+describe("GET /operator-channel/delivery-health — the Decision 8 route (issue #5048)", () => {
+  const call = async (readDeliveryHealthDep: () => Promise<any>) => {
+    const router = createOperatorChannelRouter({ readDeliveryHealth: readDeliveryHealthDep });
+    const handler = findHandler(router, "GET", "/operator-channel/delivery-health");
+    assert.ok(handler, "route registered on the operator-channel router");
+    const res = mockRes();
+    await handler(mockReq({ url: "/operator-channel/delivery-health" }), res);
+    return res;
+  };
+
+  test("returns the injected summary verbatim with 200", async () => {
+    const summary = summarizeDeliveryHealth({
+      log: [entry({ at: T_NOW - 1 * H, title: "route page" })],
+      dedupStates: [],
+      lastBriefSentAt: T_NOW - 6 * H,
+      now: T_NOW,
+    });
+    const res = await call(async () => summary);
+    assert.equal(res._status, 200);
+    assert.deepEqual(res._body, summary);
+    assert.equal(res._body.lastPage.title, "route page");
+  });
+
+  test("Redis down → 200 with available:false and a reason, never a 500", async () => {
+    const res = await call(async () => ({ available: false, generatedAt: new Date(T_NOW).toISOString(), reason: "redis-timeout-1500ms" }));
+    assert.equal(res._status, 200);
+    assert.equal(res._body.available, false);
+    assert.equal(res._body.reason, "redis-timeout-1500ms");
+  });
+
+  test("the production binding reads the real accessors: an unreachable Redis is still a 200 (fail-open end to end)", async () => {
+    // readDeliveryHealth is the default dep; against the suite's live Redis it
+    // answers available:true, against a dead one available:false — either way
+    // the status is 200. Pinned so a future accessor change can never 500 the
+    // /health page.
+    const router = createOperatorChannelRouter();
+    const handler = findHandler(router, "GET", "/operator-channel/delivery-health");
+    const res = mockRes();
+    await handler!(mockReq({ url: "/operator-channel/delivery-health" }), res);
+    assert.equal(res._status, 200);
+    assert.equal(typeof res._body.available, "boolean");
+    assert.equal(typeof res._body.generatedAt, "string");
+  });
+});
+
+describe("Health.jsx — the Operator channel card (issue #5048, ADR-0034 no-new-page)", () => {
+  const src = readFileSync(join(REPO_ROOT, "dashboard/src/pages/Health.jsx"), "utf8");
+
+  test("Health.jsx owns the /operator-channel/delivery-health literal (no new dashboard page)", () => {
+    assert.ok(src.includes('"/operator-channel/delivery-health"'), "must fetch the literal route path");
+    const pages = readFileSync(join(REPO_ROOT, "dashboard/src/App.jsx"), "utf8");
+    assert.doesNotMatch(pages, /operator-channel/i, "no new route/page for delivery health (ADR-0034)");
+  });
+
+  test("renders the card with last page, last brief and the 24h failed/suppressed pair, degrading to UNKNOWN on available:false", () => {
+    // The UNKNOWN chip rides the shared Chip presenter (its `testId` prop
+    // becomes data-testid at render time).
+    assert.ok(src.includes('testId="operator-channel-chip"'), "card must render the operator-channel-chip UNKNOWN chip");
+    for (const id of [
+      "operator-channel-section",
+      "operator-channel-reason",
+      "operator-channel-last-page",
+      "operator-channel-last-brief",
+      "operator-channel-failed",
+      "operator-channel-suppressed",
+    ]) {
+      assert.ok(src.includes(`data-testid="${id}"`), `card must render ${id}`);
+    }
+    // available:false is routed through the shared trust seam as unverified
+    // (trusted:false → UNKNOWN), never rendered as a confident zero.
+    assert.ok(src.includes("channel.data.available !== false"), "available:false must mark the payload untrusted");
+    assert.ok(src.includes("derivePageStatus"), "status derives through the shared seam");
+  });
+});

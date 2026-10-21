@@ -27,5 +27,5 @@
   "test/, scripts/test/ (the suite itself)": 5978,
   "src/glm/, scripts/glm/": 39748,
   "scripts/sync-skills.sh, src/skills/ (skill generation)": 7008,
-  "src/notification/, src/notify.ts, src/digest.ts": 5762
+  "src/notification/, src/notify.ts, src/digest.ts": 5851
 }

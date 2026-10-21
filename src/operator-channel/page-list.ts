@@ -36,6 +36,10 @@ export const PAGE_KINDS = [
   "service:backup_failed",
   // The /hydra-review pickup set going non-empty
   E.REVIEW_PICKUP_READY,
+  // No Morning Brief delivered for 26h (ADR-0045 Decision 8, issue #5048):
+  // raised by the watchdog from the Redis last-sent key, independent of the
+  // scheduler's running state — a silent channel must itself be noticeable.
+  "brief:missing",
 ] as const;
 
 export type PageKind = (typeof PAGE_KINDS)[number];
