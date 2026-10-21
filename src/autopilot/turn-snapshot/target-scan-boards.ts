@@ -29,7 +29,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { TARGET_BOARD_LABELS } from "../../target-board-labels.ts";
-import { DEGRADE, type Classified, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import type { TurnSnapshotGithub } from "./github-port.ts";
 
 export const TARGET_SCAN_BOARDS_COLLECTOR = "target-scan-boards";
@@ -161,7 +161,7 @@ export async function collectTargetScanBoards(deps: TargetScanDeps): Promise<Col
   let signals: Classified<TargetScanSignals>;
   if (read.kind === "empty") {
     signalsDegraded = true;
-    signals = { ok: false, reason: "board-read-failed" };
+    signals = { ok: false, reason: DEGRADE.BOARD_READ_FAILED };
   } else if (read.kind === "unparseable") {
     signals = { ok: false, reason: DEGRADE.UNPARSEABLE };
   } else {
@@ -178,6 +178,6 @@ export async function collectTargetScanBoards(deps: TargetScanDeps): Promise<Col
 }
 
 /** The snapshot rendered when the collector could not run. */
-export function targetScanFallbackSnapshot(reason: string): TargetScanSnapshot {
+export function targetScanFallbackSnapshot(reason: DegradeReason): TargetScanSnapshot {
   return { signalsDegraded: true, signals: { ok: false, reason }, adrPresent: false };
 }

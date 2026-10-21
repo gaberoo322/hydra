@@ -40,7 +40,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import { DEGRADE } from "../src/autopilot/turn-snapshot/collector.ts";
+import { DEGRADE, degradeDetail } from "../src/autopilot/turn-snapshot/collector.ts";
 import { main, parseArgs, type CliDeps } from "../scripts/autopilot/turn-snapshot.ts";
 import { createTurnSnapshotGithub, type GhJsonRead, type GhTransport, type TurnSnapshotGithub, wayfinderFrontierQuery } from "../src/autopilot/turn-snapshot/github-port.ts";
 import { createTurnSnapshotHydra, type HydraTransport } from "../src/autopilot/turn-snapshot/hydra-http.ts";
@@ -127,7 +127,7 @@ const ANCHOR_KEYS = {
 
 /** A fake Redis port over the scenario keyspace (the keys the bash's redis-cli calls named). */
 function fakeRedis(world: RedisWorld, writes: string[][]): TurnSnapshotRedis {
-  const read = async <T,>(v: T) => (world.down ? { ok: false as const, reason: "redis-unreachable: down" } : { ok: true as const, value: v });
+  const read = async <T,>(v: T) => (world.down ? { ok: false as const, reason: degradeDetail("redis-unreachable: down") } : { ok: true as const, value: v });
   return {
     anchorQueueLength: (q) => read(world.lists?.[ANCHOR_KEYS[q]] ?? 0),
     scoutLastCalendarWalk: () => read(world.strings?.["hydra:scout:last-calendar-walk"] ?? null),
@@ -818,7 +818,7 @@ describe("Turn Snapshot Redis port — bounded, fail-open, closes", () => {
     const replyErr = Object.assign(new Error("WRONGTYPE"), { name: "ReplyError" });
     const down = createTurnSnapshotRedis({ ops: ops({ scoutTokens: async () => Promise.reject(new Error("ECONNREFUSED")) }, log) });
     const skipped = await collectScout({ ...base, redis: down });
-    assert.deepEqual(skipped.value.mirrored, { ok: false, reason: "skipped: redis unreachable" });
+    assert.deepEqual(skipped.value.mirrored, { ok: false, reason: "skipped-redis-unreachable" });
     assert.ok(!log.some((l) => l.startsWith("set")), "no SET when Redis is unreachable");
     const reachable = createTurnSnapshotRedis({ ops: ops({ scoutTokens: async () => Promise.reject(replyErr) }, log) });
     await collectScout({ ...base, redis: reachable });

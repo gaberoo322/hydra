@@ -31,7 +31,7 @@
  *     `tickets_orch_pending_spec=issue-<N>`; otherwise false / none.
  */
 
-import { DEGRADE, type Classified, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import { labelNames } from "./board-saturation.ts";
@@ -49,7 +49,7 @@ const WAYFINDER_DRAFT_LABEL = "wayfinder:destination-pending";
 const WAYFINDER_AFK_TYPES = ["wayfinder:research", "wayfinder:task"] as const;
 export const NEEDS_TICKETS_LABEL = "needs-tickets";
 
-const fail = <T>(reason: string): Classified<T> => ({ ok: false, reason });
+const fail = <T>(reason: DegradeReason): Classified<T> => ({ ok: false, reason });
 const okv = <T>(value: T): Classified<T> => ({ ok: true, value });
 const outcome = <T>(collector: string, value: T, degraded: DegradedMarker[]): CollectorOutcome<T> => ({ collector, value, degraded, notes: [] });
 
@@ -140,7 +140,7 @@ export interface RetroRuns {
 export function foldRetroRuns(body: string | null): Classified<RetroRuns> {
   if (body === null) return fail(DEGRADE.RUNS_READ_FAILED);
   const parsed = parseJsonRead(body);
-  if (parsed.kind !== "ok") return fail("runs-unparseable");
+  if (parsed.kind !== "ok") return fail(DEGRADE.RUNS_UNPARSEABLE);
   const d = parsed.data;
   const runs = isObj(d) && "runs" in d ? d.runs : [];
   // Only a list's items can be run entries (an object's keys / a string's characters never are).

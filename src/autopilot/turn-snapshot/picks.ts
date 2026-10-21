@@ -471,7 +471,7 @@ export async function collectPicks(deps: PicksDeps): Promise<CollectorOutcome<Pi
   const filtered = rfa.kind === "ok" ? dropTargetBacklog(rfa.data) : null;
   if (filtered === null) {
     notes.push(GRILL_LIST_FAILED_NOTE);
-    degraded.push({ field: "grillList", reason: rfa.kind === "ok" ? "jq-error" : rfa.kind === "empty" ? DEGRADE.EMPTY_PAYLOAD : DEGRADE.UNPARSEABLE });
+    degraded.push({ field: "grillList", reason: rfa.kind === "ok" ? DEGRADE.JQ_ERROR : rfa.kind === "empty" ? DEGRADE.EMPTY_PAYLOAD : DEGRADE.UNPARSEABLE });
   }
   const pool: unknown[] = filtered ?? [];
 

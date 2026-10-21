@@ -57,7 +57,7 @@
 import { deriveBoardState } from "../board-state.ts";
 import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
 import { parseIssueRows } from "../../github/issues.ts";
-import { DEGRADE, type Classified, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { HydraRead, TurnSnapshotHydra } from "./hydra-http.ts";
 
@@ -122,10 +122,10 @@ function serviceJsonRead(read: HydraRead): GhJsonRead {
 }
 
 /** Why a service read is unusable, for the degraded marker and the diagnostic line. */
-function serviceFailureReason(read: HydraRead, json: GhJsonRead): string {
+function serviceFailureReason(read: HydraRead, json: GhJsonRead): DegradeReason {
   if (read.kind === "failed") return read.reason;
   if (json.kind !== "ok") return DEGRADE.UNPARSEABLE;
-  return "degraded-or-incomplete-body";
+  return DEGRADE.DEGRADED_OR_INCOMPLETE_BODY;
 }
 
 export function healthyBoardState(read: GhJsonRead): Readonly<Record<string, unknown>> | null {
@@ -255,8 +255,8 @@ export async function collectOrchBoard(deps: OrchBoardDeps): Promise<CollectorOu
       counts = { source: "service", values };
     } else {
       // The bash's python KeyError'd here: no counts line, the accumulator untouched.
-      counts = { source: "none", reason: "service-response-missing-keys" };
-      degraded.push({ field: "counts", reason: "service-response-missing-keys" });
+      counts = { source: "none", reason: DEGRADE.SERVICE_RESPONSE_MISSING_KEYS };
+      degraded.push({ field: "counts", reason: DEGRADE.SERVICE_RESPONSE_MISSING_KEYS });
       notes.push(`turn-snapshot orch-board: board-state response lacks ${missing.join(", ")} — counts line withheld (issue #4930)`);
     }
   } else {
@@ -315,7 +315,7 @@ export async function collectNeedsQaNumbers(deps: OrchLaneDeps): Promise<Collect
 }
 
 /** The orch-board snapshot the CLI renders when the collector itself could not run (the all-reads-failed shape). */
-export function orchBoardFallbackSnapshot(reason: string): OrchBoardSnapshot {
+export function orchBoardFallbackSnapshot(reason: DegradeReason): OrchBoardSnapshot {
   return {
     counts: { source: "none", reason },
     boardState: null,

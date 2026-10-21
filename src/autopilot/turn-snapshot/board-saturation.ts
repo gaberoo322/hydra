@@ -35,7 +35,7 @@
  *     10, INCLUSIVE); a failed read saturates (fail closed) with open=0.
  */
 
-import { DEGRADE, type Classified, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
 import { REDIS_UNREACHABLE, type AnchorQueueName, type TurnSnapshotRedis } from "./redis-port.ts";
 
@@ -62,7 +62,7 @@ const SCOUT_ENHANCEMENT_LABEL = "enhancement";
 /** The scout spend mirror's TTL: 7 days (issue #532). */
 const SCOUT_SPEND_TTL_SECONDS = 604_800;
 
-const fail = <T>(reason: string): Classified<T> => ({ ok: false, reason });
+const fail = <T>(reason: DegradeReason): Classified<T> => ({ ok: false, reason });
 const okv = <T>(value: T): Classified<T> => ({ ok: true, value });
 const marker = (field: string, c: Classified<unknown>): DegradedMarker[] => ("reason" in c ? [{ field, reason: c.reason }] : []);
 const outcome = <T>(collector: string, value: T, degraded: DegradedMarker[]): CollectorOutcome<T> => ({ collector, value, degraded, notes: [] });
@@ -183,7 +183,7 @@ export async function collectScout(deps: BoardSaturationDeps): Promise<Collector
   // same way, so skip it rather than pay a second timeout this turn.
   const unreachable = "reason" in tokensRead && tokensRead.reason.startsWith(REDIS_UNREACHABLE);
   const mirrored: Classified<true> = unreachable
-    ? fail("skipped: redis unreachable")
+    ? fail(DEGRADE.SKIPPED_REDIS_UNREACHABLE)
     : await deps.redis.mirrorScoutSpend(date, tokensToday, SCOUT_SPEND_TTL_SECONDS);
   const openEnhancements = foldLength(enh);
   const value: ScoutValue = {
@@ -334,7 +334,7 @@ export interface HitlGrillValue {
 function foldHitlGrill(read: GhJsonRead): Classified<HitlGrillValue> {
   const len = foldLength(read);
   if ("reason" in len) return fail(len.reason);
-  if (!/^[0-9]+$/.test(len.value)) return fail("non-integer-count");
+  if (!/^[0-9]+$/.test(len.value)) return fail(DEGRADE.NON_INTEGER_COUNT);
   const open = Number(len.value);
   return okv({ open, saturated: open >= HITL_GRILL_INBOX_CAP });
 }

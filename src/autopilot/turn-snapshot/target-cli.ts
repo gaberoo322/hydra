@@ -161,7 +161,7 @@ export async function runTargetCollectors(
         collector,
         io,
         () => collectTargetRiskSurface({ facts: () => getDeps().facts() }),
-        () => ({ manifest: { ok: false, reason: "collector crashed" } }),
+        () => ({ manifest: { ok: false, reason: DEGRADE.COLLECTOR_CRASHED } }),
         degraded,
       );
       values.targetRiskSurface = s;

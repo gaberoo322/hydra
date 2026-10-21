@@ -29,6 +29,7 @@
  *    access" bash case used to pin.
  */
 
+import { degradeDetail } from "../src/autopilot/turn-snapshot/collector.ts";
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -1408,7 +1409,7 @@ describe("pr-gate — QA-verdict recheck (#5052)", () => {
   });
 
   test("prGateFallbackSnapshot carries the recheck degraded", () => {
-    assert.equal(prGateFallbackSnapshot("x").qaVerdictRecheck.ok, false);
+    assert.equal(prGateFallbackSnapshot(degradeDetail("x")).qaVerdictRecheck.ok, false);
   });
 });
 
@@ -1475,7 +1476,7 @@ describe("Turn Snapshot pr-gate — a malformed payload degrades, never throws (
     });
     assert.deepEqual(o.value.dirty, [12]);
     assert.equal(o.value.ciTriggerStale.ok, true);
-    assert.deepEqual(o.value.devResumePick, { ok: false, reason: "required-contexts / needs-dev-resume / pr-refs input unavailable" });
+    assert.deepEqual(o.value.devResumePick, { ok: false, reason: "dev-resume-input-unavailable" });
     assert.deepEqual(
       o.degraded.map((d) => d.field),
       ["requiredContexts", "qaVerdictRecheck"],
