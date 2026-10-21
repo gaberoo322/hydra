@@ -2,6 +2,7 @@
   "_comment": "Project-scoped Claude Code settings for the Hydra orchestrator repo (issue #692). The SessionStart hook captures every autopilot-/operator-dispatched subagent session into the subagent-dispatch registry (hydra:dispatches:subagent:*) by reading the hidden `<!-- hydra-dispatch v1 ... -->` sentinel from the session transcript's first user message and POSTing it to /api/dispatches/subagent. Sessions WITHOUT a sentinel (a human running `claude` directly) silently no-op, so registering this hook globally is safe. The hook path is absolute so the harness finds it regardless of the subagent's cwd. This is intentionally PROJECT-scoped (not ~/.claude/settings.json) per the issue contract.",
   "_comment_enabledPlugins": "ADR-0030 / epic #3988: the mattpocock-skills plugin is the source of truth for refreshing the vendored upstream bases under docs/operator-playbooks/_vendor/ — see that dir's README 'Refreshing a vendored base' and scripts/ci/vendor-drift-check.ts, which resolves the plugin's gitCommitSha from ~/.claude/plugins/installed_plugins.json to stamp provenance. Declared project-scoped so the dependency travels with the repo. NOTE: enabling a plugin here writes to this tracked file, which trips scripts/deploy.sh's dirty-tree guard on the deploy host — that is how this entry came to be committed (see the PR).",
   "_comment_labelGuard": "issue #4654: a PreToolUse hook that denies any Bash `gh api`/`curl` DELETE against the GitHub issue labels COLLECTION endpoint (`.../issues/<n>/labels` with no trailing `/<name>` segment) — that call silently removes EVERY label on the issue, which bit 3 times across dev_orch/qa_orch dispatches (routing labels like `glm-ab-control` / `design-concept-exempt` were wiped). The single-label PATH form (`.../issues/<n>/labels/<name>`) and `gh issue edit --remove-label` remain unaffected. Registered here (repo-tracked project scope, absolute path) rather than via scripts/setup-claude-hooks.sh's operator-run global install, so every dev_orch/qa_orch worktree session picks it up automatically — the same mechanism the SessionStart capture hook above already relies on.",
+  "_comment_agentDispatchPromptGuard": "issue #5143 (Refs #4839): a PreToolUse hook on the Agent tool that denies an unattended autopilot class dispatch whose prompt is not scripts/autopilot/render-dispatch.py output — no `## Task` heading, or a `PLACEHOLDER` / unexpanded `$(` token (25 such dispatches in the Sonnet-parent trial). In scope only when HYDRA_AUTOPILOT_TRIGGER is set (pace-gate's exec branch exports it) AND the payload has no agent_id (the parent's main thread, not a dispatched child), so interactive sessions and children's free-form Agent calls are never blocked. Fails open with a stderr warning on unparseable input. Project-scoped with an absolute path, same as the label guard above.",
   "hooks": {
     "SessionStart": [
       {
@@ -33,6 +34,15 @@
           {
             "type": "command",
             "command": "bash /home/gabe/hydra/scripts/claude-hooks/gh-label-delete-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/gabe/hydra/scripts/claude-hooks/agent-dispatch-prompt-guard.sh"
           }
         ]
       }
