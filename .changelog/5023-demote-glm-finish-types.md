@@ -1,0 +1,1 @@
+- refactor: demote two unused src/glm/finish.ts type exports (#5023)

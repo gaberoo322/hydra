@@ -20,10 +20,9 @@
 import { ghBin, runExec } from "../../github/exec.ts";
 import { resolveOrchestratorRepo } from "../../github/repo.ts";
 import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
-import { pyJsonLoads } from "./py-compat.ts";
 
 /** The `--json` field list of the ONE open-PR read the in-flight sets and the PR-gate classifier share. */
-export const PR_GATE_PR_FIELDS = "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels";
+export const PR_GATE_PR_FIELDS = "number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels,autoMergeRequest";
 
 /** The `--json` field list of the ready-for-agent issue read the grill picks and Candidate Exclusions share (slice 3). */
 export const READY_FOR_AGENT_ISSUE_FIELDS = "number,updatedAt,body,labels,title";
@@ -34,12 +33,14 @@ export const PROTECTED_BRANCH = "master";
 /**
  * A JSON read as the collector sees it: parsed data, an EMPTY read (the call
  * failed or printed nothing — distinguishable from a healthy `[]`, the #4130
- * discipline), or an unparseable payload carrying Python's decode error text.
+ * discipline), or an unparseable payload. The kind IS the degradation code a
+ * collector reports (`empty-payload` / `unparseable`) — no decoder error text
+ * rides along (#5084).
  */
 export type GhJsonRead =
   | { readonly kind: "ok"; readonly data: unknown }
   | { readonly kind: "empty" }
-  | { readonly kind: "unparseable"; readonly error: string };
+  | { readonly kind: "unparseable" };
 
 /** The #4812 re-poll read plus the first line of `gh`'s stderr (quoted in the FAILED note). */
 export interface MergeStateRepollRead {
@@ -166,10 +167,47 @@ function shellCapture(stdout: string): string {
   return stdout.replace(/\n+$/, "");
 }
 
-function jsonRead(stdout: string): GhJsonRead {
-  if (stdout === "") return { kind: "empty" };
-  const parsed = pyJsonLoads(stdout);
-  return "error" in parsed ? { kind: "unparseable", error: parsed.error } : { kind: "ok", data: parsed.value };
+/**
+ * The ONE JSON-payload parse every Turn Snapshot read shares (#5084): `""` is
+ * an EMPTY read, text that is not JSON is `unparseable`, anything else is the
+ * decoded data. The gh reads below and the collectors' hydra-body reads
+ * (board-state, runs index, design-concept, passthrough routes) all go through
+ * it, so "what counts as a readable payload" is decided in one place. Never
+ * throws.
+ */
+export function parseJsonRead(text: string): GhJsonRead {
+  if (text === "") return { kind: "empty" };
+  try {
+    return { kind: "ok", data: JSON.parse(text) };
+  } catch {
+    /* intentional: an unparseable payload IS the `unparseable` read — each caller degrades only its own fields */
+    return { kind: "unparseable" };
+  }
+}
+
+const GH_TIMESTAMP =
+  /^(\d{4})-(1[0-2]|0[1-9]|[1-9])-(3[01]|[12]\d|0[1-9]|[1-9]| [1-9])T(2[0-3]|[0-1]\d|\d):([0-5]\d|\d):(6[0-1]|[0-5]\d|\d)Z$/;
+
+/**
+ * A gh `createdAt` / `updatedAt` / `startedAt` / `created_at` timestamp
+ * (`%Y-%m-%dT%H:%M:%SZ`, UTC) as epoch seconds, or `null` when it is absent,
+ * not a string, or not that shape — fractional seconds and offsets are NOT
+ * accepted, a calendar-invalid date (Feb 30, a leap second) is `null`. The
+ * one- or two-digit field widths are the windows' historical parse (every
+ * PR-gate quiescence / grace window and `active_dev_orch` key on it), kept so
+ * no window shifts (#5084). Shared by pr-gate.ts and picks.ts.
+ */
+export function ghTimestampSeconds(ts: unknown): number | null {
+  if (typeof ts !== "string") return null;
+  const m = GH_TIMESTAMP.exec(ts);
+  if (!m) return null;
+  const [y, mo, d, h, mi, s] = m.slice(1).map((x) => Number(x.trim()));
+  if (y < 1 || s > 59) return null;
+  const at = new Date(0);
+  at.setUTCFullYear(y, mo - 1, d);
+  at.setUTCHours(h, mi, s, 0);
+  if (at.getUTCFullYear() !== y || at.getUTCMonth() !== mo - 1 || at.getUTCDate() !== d) return null;
+  return at.getTime() / 1000;
 }
 
 export interface TurnSnapshotGithubOptions {
@@ -191,14 +229,14 @@ export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): 
 
   return {
     async listOpenPrs(limit) {
-      return jsonRead(
+      return parseJsonRead(
         await read(["pr", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", PR_GATE_PR_FIELDS]),
       );
     },
     async listOpenPrMergeStates(limit) {
       const res = await run(["pr", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", "number,mergeStateStatus"]);
       const stderrHead = (res.stderr.split("\n")[0] ?? "").replace(/\r$/, "");
-      return { read: jsonRead(res.ok ? shellCapture(res.stdout) : ""), stderrHead };
+      return { read: parseJsonRead(res.ok ? shellCapture(res.stdout) : ""), stderrHead };
     },
     async latestWorkflowRunCreatedAt(event) {
       const out = await read([
@@ -210,56 +248,56 @@ export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): 
       return out === "" ? null : out;
     },
     async requiredStatusContexts() {
-      return jsonRead(
+      return parseJsonRead(
         await read(["api", `repos/${repo}/branches/${PROTECTED_BRANCH}/protection/required_status_checks`, "--jq", ".contexts"]),
       );
     },
     async openIssueNumbersByLabel(label, limit) {
-      return jsonRead(
+      return parseJsonRead(
         await read(["issue", "list", "--repo", repo, "--label", label, "--state", "open", "--limit", String(limit), "--json", "number", "--jq", "."]),
       );
     },
     async listOpenIssueRowsByLabel(label, limit) {
-      return jsonRead(
+      return parseJsonRead(
         await read(["issue", "list", "--repo", repo, "--label", label, "--state", "open", "--limit", String(limit), "--json", ORCH_BOARD_ROW_FIELDS]),
       );
     },
     async listOpenIssueBoardRows(limit) {
-      return jsonRead(
+      return parseJsonRead(
         await read(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", ORCH_BOARD_ROW_FIELDS]),
       );
     },
     async listOpenIssueLabelRows(limit) {
-      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", "number,labels"]));
+      return parseJsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", "number,labels"]));
     },
     async listReadyForAgentIssues(limit) {
-      return jsonRead(
+      return parseJsonRead(
         await read(["issue", "list", "--repo", repo, "--state", "open", "--label", ORCH_BOARD_LABELS.ready_for_agent, "--limit", String(limit), "--json", READY_FOR_AGENT_ISSUE_FIELDS]),
       );
     },
     async searchOpenIssueNumbers(search, limit) {
-      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--search", search, "--limit", String(limit), "--json", "number"]));
+      return parseJsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--search", search, "--limit", String(limit), "--json", "number"]));
     },
     async listMergedPrs(limit) {
-      return jsonRead(await read(["pr", "list", "--repo", repo, "--state", "merged", "--limit", String(limit), "--json", "number,title,body"]));
+      return parseJsonRead(await read(["pr", "list", "--repo", repo, "--state", "merged", "--limit", String(limit), "--json", "number,title,body"]));
     },
     async listOpenPrHeads() {
-      return jsonRead(await read(["pr", "list", "--repo", repo, "--state", "open", "--json", "updatedAt,headRefName,labels"]));
+      return parseJsonRead(await read(["pr", "list", "--repo", repo, "--state", "open", "--json", "updatedAt,headRefName,labels"]));
     },
     async openIssuesWithLabel(label, limit) {
-      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--label", label, "--limit", String(limit), "--json", "number"]));
+      return parseJsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--label", label, "--limit", String(limit), "--json", "number"]));
     },
     async openIssueLabelsWithLabel(label, limit) {
-      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--label", label, "--limit", String(limit), "--json", "number,labels"]));
+      return parseJsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--label", label, "--limit", String(limit), "--json", "number,labels"]));
     },
     async openIssueAssigneesWithLabel(label, limit) {
-      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--label", label, "--limit", String(limit), "--json", "number,assignees"]));
+      return parseJsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--label", label, "--limit", String(limit), "--json", "number,assignees"]));
     },
     async wayfinderMapSubIssues(mapNumber) {
-      return jsonRead(await read(["api", "graphql", "-F", `n=${mapNumber}`, "-f", `query=${wayfinderFrontierQuery(repo)}`]));
+      return parseJsonRead(await read(["api", "graphql", "-F", `n=${mapNumber}`, "-f", `query=${wayfinderFrontierQuery(repo)}`]));
     },
     async listOpenIssueLabelNames(limit) {
-      return jsonRead(
+      return parseJsonRead(
         await read([
           "issue",
           "list",
@@ -277,16 +315,16 @@ export function createTurnSnapshotGithub(opts: TurnSnapshotGithubOptions = {}): 
       );
     },
     async listOpenPullsRest(limit) {
-      return jsonRead(await read(["api", `repos/${repo}/pulls?state=open&per_page=${limit}`]));
+      return parseJsonRead(await read(["api", `repos/${repo}/pulls?state=open&per_page=${limit}`]));
     },
     async listOpenIssuesByLabelRest(label, limit) {
-      return jsonRead(await read(["api", `repos/${repo}/issues?labels=${label}&state=open&per_page=${limit}`]));
+      return parseJsonRead(await read(["api", `repos/${repo}/issues?labels=${label}&state=open&per_page=${limit}`]));
     },
     async listOpenIssueBlockerRows(limit) {
-      return jsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", TARGET_FALLBACK_ROW_FIELDS]));
+      return parseJsonRead(await read(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(limit), "--json", TARGET_FALLBACK_ROW_FIELDS]));
     },
     async listQaVerdictCommentsRest(limit) {
-      return jsonRead(
+      return parseJsonRead(
         await read([
           "api",
           `repos/${repo}/issues/comments?sort=created&direction=desc&per_page=${limit}`,

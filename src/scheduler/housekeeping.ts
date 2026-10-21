@@ -21,18 +21,24 @@
  * imports every chore runner, owns the `Chore` type + `runChore` (the uniform
  * guard → work → bookkeeping → error-log + Sentry-breadcrumb wrapper), and
  * sequences them in `runHousekeeping`. The `{ ran, skipped }` composition
- * contract is unchanged. The chore set is:
- *   - blocked-item re-escalation (+ its operator unblock-command builder),
- *   - the `/hydra-review` pickup-set edge-triggered phone-notify,
- *   - done-lane pruning,
- *   - the weekly Telegram digest,
- *   - daily memory consolidation,
- *   - the daily design-concept snapshot,
- *   - work-queue hygiene,
- *   - the merge→done reconciler,
- *   - the merge-event holdback enrolment for unregistered T2+ merges (#4632),
- *   - the stale-Redis-key sweep + stale-inProgress return (#1876),
- *   - the lane-index reconciler (#2056).
+ * contract is unchanged. The registered chore set (the `name:` fields below):
+ *   - review-pickup-notify (the `/hydra-review` pickup-set Page),
+ *   - usage-weekly-snapshot,
+ *   - memory-consolidation (daily),
+ *   - design-concept-snapshot (daily),
+ *   - stale-key-prune (the stale-Redis-key sweep + stale-inProgress return, #1876),
+ *   - worktree-orphan-prune,
+ *   - glm-eligibility-sweep,
+ *   - target-outcomes-publish,
+ *   - wiring-liveness,
+ *   - attribution-record,
+ *   - holdback-merge-watch,
+ *   - cycle-merge-reconcile (the merge-to-done reconciler),
+ *   - holdback-merge-event-enrol (unregistered T2+ merges, #4632),
+ *   - pattern-cue-demotion.
+ *
+ * Blocked-item re-escalation, done-lane pruning and work-queue hygiene were
+ * retired with the Redis backlog (ADR-0031, #3439).
  *
  * Each chore carries its own Redis time-guard (per-item / daily / weekly), so
  * an hourly invocation is idempotent — a chore whose window has not elapsed is
@@ -45,7 +51,6 @@
 import * as Sentry from "@sentry/node";
 import { logger } from "../logger.ts";
 import {
-  getDigestLastWeekly,
   getMemoryLastConsolidation,
   getCleanupLastDaily,
   getUsageSnapshotLastWeekly,
@@ -53,7 +58,6 @@ import {
 import type { PublishableBus } from "../event-bus-seams.ts";
 
 import { runReviewPickupNotify } from "./chores/review-pickup-notify.ts";
-import { runWeeklyDigest } from "./chores/weekly-digest.ts";
 import { runMemoryConsolidation } from "./chores/memory-consolidation.ts";
 import { runDesignConceptSnapshot } from "./chores/design-concept-snapshot.ts";
 import { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
@@ -78,7 +82,6 @@ import { runAttributionRecord } from "../outcome-attribution/index.ts";
 // `./chores/<name>.ts` source (stale re-exports removed, issue #2105).
 // ---------------------------------------------------------------------------
 export { runReviewPickupNotify } from "./chores/review-pickup-notify.ts";
-export { runWeeklyDigest } from "./chores/weekly-digest.ts";
 export { runMemoryConsolidation } from "./chores/memory-consolidation.ts";
 export { runDesignConceptSnapshot } from "./chores/design-concept-snapshot.ts";
 export { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
@@ -238,7 +241,7 @@ async function runHousekeeping(
   deps: {
     /**
      * Injectable cadence-guard Redis readers + clock (issue #3091). Each of the
-     * four time-windowed chores (`weekly-summary`, `usage-weekly-snapshot`,
+     * three time-windowed chores (`usage-weekly-snapshot`,
      * `memory-consolidation`, `stale-key-prune`) reads its last-run timestamp
      * through one of these getters, defaulting to the real
      * `src/redis/housekeeping.ts` accessor. Injecting a stub reader (return
@@ -250,7 +253,6 @@ async function runHousekeeping(
      * what the registry depends on externally (previously they were hidden
      * module-level imports).
      */
-    getDigestLastWeekly?: () => Promise<string | null>;
     getUsageSnapshotLastWeekly?: () => Promise<string | null>;
     getMemoryLastConsolidation?: () => Promise<string | null>;
     getCleanupLastDaily?: () => Promise<string | null>;
@@ -299,7 +301,7 @@ async function runHousekeeping(
   // `runHousekeeping` so the guards read a named cadence instead of inline math.
   //
   // Issue #3091: each cadence guard reads its Redis timestamp getter (and the
-  // clock) through `deps.<getter> ?? <import>` / `deps.now`, so the four
+  // clock) through `deps.<getter> ?? <import>` / `deps.now`, so the three
   // time-windowed chores are testable without Redis. The default preserves all
   // production behaviour — a caller that passes no cadence deps binds the real
   // `src/redis/housekeeping.ts` accessors and `Date.now` exactly as before.
@@ -311,20 +313,16 @@ async function runHousekeeping(
       },
     },
 
-    {
-      name: "weekly-summary",
-      guard: () =>
-        choreGuard(deps.getDigestLastWeekly ?? getDigestLastWeekly, WEEK_MS, deps.now),
-      work: () => runWeeklyDigest(),
-    },
+    // The `weekly-summary` chore (the standalone weekly Telegram digest) was
+    // retired in issue #5047: the Morning Brief appends the weekly summary on
+    // Mondays (ADR-0045 Decision 7), so no weekly cadence guard is needed.
 
     {
       // Issue #2404: persist this ISO week's per-skill usage rollup so the
       // week-over-week trend has a prior week to compare against. Weekly cadence
-      // guard (mirroring weekly-summary); the underlying write is idempotent on
-      // the ISO-week key.
+      // guard; the underlying write is idempotent on the ISO-week key.
       // Issue #2461: the success stamp is now applied inside
-      // `runUsageWeeklySnapshot` itself (consistent with `runWeeklyDigest` and
+      // `runUsageWeeklySnapshot` itself (consistent with
       // `runMemoryConsolidation`) — no stamp call at the registry level.
       name: "usage-weekly-snapshot",
       guard: () =>
@@ -346,7 +344,7 @@ async function runHousekeeping(
 
     {
       // Issue #2461: the success stamp is now applied inside
-      // `pruneStaleRedisKeys` itself (consistent with `runWeeklyDigest` and
+      // `pruneStaleRedisKeys` itself (consistent with
       // `runMemoryConsolidation`) — no stamp call at the registry level.
       name: "stale-key-prune",
       guard: () =>

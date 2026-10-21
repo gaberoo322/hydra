@@ -45,6 +45,13 @@
  *   --board-state-file PATH  picks run alone: the HEALTHY orch board-state body
  *                          (the glm_withheld source); omit it when that read degraded
  *   --gh-list-limit N      `gh … --limit` page size; default 100
+ *   --all-degraded --reason TEXT
+ *                          no collector runs: print the all-degraded Turn
+ *                          Snapshot (json-snapshot.ts allDegradedTurnSnapshot,
+ *                          validated on emit) with one `*` marker carrying
+ *                          TEXT — turn.sh's fallback when the `--format json`
+ *                          run failed, so even that turn plans on a
+ *                          TS-produced document (issue #5083)
  *
  * In `--format json` the cross-collector accumulators (the orch-board degraded
  * flag, the healthy board-state body, the Target lane flag, the work-queue
@@ -52,8 +59,8 @@
  *
  * FAIL-OPEN: the CLI never crashes the turn. A collector that throws is
  * reported as a stderr note and stands in as its fully-degraded fallback
- * value; exit 0. Only a usage error exits non-zero (2) — turn.sh then applies
- * the all-degraded snapshot.
+ * value; exit 0. Only a usage error exits non-zero (2) — turn.sh then runs
+ * `--all-degraded` instead.
  */
 
 import { readFileSync } from "node:fs";
@@ -84,7 +91,7 @@ import {
   runPassthroughCollectors,
   type PassthroughDeps,
 } from "../../src/autopilot/turn-snapshot/passthrough.ts";
-import { createTurnSnapshotHost } from "../../src/autopilot/turn-snapshot/host-port.ts";
+import { createQaVerdictRunner, createTurnSnapshotHost } from "../../src/autopilot/turn-snapshot/host-port.ts";
 import { getTargetGithubRepo, getTargetWorkspace } from "../../src/target-config.ts";
 import { isTargetCollector, runTargetCollectors, TARGET_COLLECTORS, type TargetCliDeps } from "../../src/autopilot/turn-snapshot/target-cli.ts";
 import { collectTargetFacts } from "../target/print-target-facts.ts";
@@ -93,6 +100,7 @@ import { createTurnSnapshotRedis, type TurnSnapshotRedis } from "../../src/autop
 import type { Classified, DegradedMarker } from "../../src/autopilot/turn-snapshot/collector.ts";
 import type { OrchBoardSnapshot } from "../../src/autopilot/turn-snapshot/orch-board.ts";
 import {
+  allDegradedTurnSnapshot,
   buildTurnSnapshot,
   serializeTurnSnapshot,
   type SnapshotDegraded,
@@ -115,6 +123,10 @@ export interface CliArgs {
   targetWorkQueue?: number;
   /** `--format json` only: the healthy board-state body handed from orch-board to picks in-process (null = degraded). */
   boardStateText?: string | null;
+  /** `--all-degraded`: print the all-degraded document instead of running any collector (#5083). */
+  allDegraded?: boolean;
+  /** `--all-degraded`'s `--reason`: why the collector run failed (the `*` marker's reason). */
+  reason?: string;
 }
 
 const KNOWN_COLLECTORS = new Set([
@@ -134,6 +146,10 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
   const args: CliArgs = { collectors: [], format: "json", ghListLimit: DEFAULT_GH_LIST_LIMIT, boardStateFile: null, orchBoardDegraded: "0" };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
+    if (flag === "--all-degraded") {
+      args.allDegraded = true;
+      continue;
+    }
     const value = argv[i + 1];
     if (value === undefined) return { error: `missing value for ${flag}` };
     i++;
@@ -150,8 +166,15 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
     } else if (flag === "--target-work-queue") {
       if (!/^\d+$/.test(value)) return { error: `--target-work-queue must be a non-negative integer, got '${value}'` };
       args.targetWorkQueue = Number(value);
-    }
+    } else if (flag === "--reason") args.reason = value;
     else return { error: `unknown flag ${flag}` };
+  }
+  if (args.allDegraded === true || args.reason !== undefined) {
+    // --all-degraded runs no collector: --reason is its only (required) flag.
+    if (args.allDegraded !== true) return { error: "--reason belongs to --all-degraded" };
+    if (args.reason === undefined || args.reason.trim() === "") return { error: "--all-degraded needs --reason <text> (why the collector run failed)" };
+    if (argv.length !== 3) return { error: "--all-degraded takes only --reason" };
+    return args;
   }
   if (args.format === "json") {
     // The JSON Turn Snapshot (ADR-0043 Decision 5) is EVERY collector, in one run.
@@ -308,6 +331,13 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
   if ("error" in args) {
     io.stderr(`turn-snapshot: ${args.error}\n`);
     return 2;
+  }
+  if (args.allDegraded === true) {
+    // turn.sh's fallback (#5083): the all-degraded document, validated on emit like every snapshot.
+    const out = serializeTurnSnapshot({ doc: allDegradedTurnSnapshot(new Date(deps.now()).toISOString(), args.reason as string), rawBlobs: {} });
+    if (out.note !== null) io.stderr(`${out.note}\n`);
+    io.stdout(out.text);
+    return 0;
   }
   const passthroughNames = args.collectors.filter(isPassthroughCollector);
   if (passthroughNames.length > 0 && deps.passthrough === undefined) {
@@ -508,6 +538,7 @@ export function productionDeps(): CliDeps {
   const hydra = createTurnSnapshotHydra();
   return {
     github: createTurnSnapshotGithub(),
+    host: createQaVerdictRunner(),
     hydra,
     now: () => Date.now(),
     sleep: (seconds) => new Promise((resolve) => setTimeout(resolve, Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0)),

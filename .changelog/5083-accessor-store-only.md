@@ -1,0 +1,1 @@
+- refactor: the Turn Snapshot accessor is store-only — the Python validation, repair and ALL_DEGRADED mirror are deleted, turn.sh falls back to turn-snapshot.ts --all-degraded, and replay mode fails loud on a signal the document lacks (#5083)

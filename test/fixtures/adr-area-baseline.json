@@ -3,7 +3,7 @@
   "src/redis/": 16615,
   "src/schemas/": 22085,
   "src/cost/": 20328,
-  "src/autopilot/": 49420,
+  "src/autopilot/": 49749,
   "src/taxonomy/": 33529,
   "src/scheduler/": 20409,
   "src/pattern-memory/": 0,
@@ -19,7 +19,7 @@
   "self-modification": 29769,
   ".claude/skills/ + docs/operator-playbooks/": 54412,
   ".github/workflows/ (Verifier Core)": 23639,
-  "scripts/autopilot/ (decide.py, classes.json)": 79715,
+  "scripts/autopilot/ (decide.py, classes.json)": 80044,
   "dashboard/": 33505,
   "config/direction/, config/orchestrator/": 4406,
   "docs/adr/ itself": 5249,
@@ -27,5 +27,5 @@
   "test/, scripts/test/ (the suite itself)": 5978,
   "src/glm/, scripts/glm/": 39748,
   "scripts/sync-skills.sh, src/skills/ (skill generation)": 7008,
-  "src/notification/, src/notify.ts, src/digest.ts": 5762
+  "src/notification/, src/operator-channel/": 5851
 }

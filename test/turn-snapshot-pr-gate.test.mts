@@ -39,17 +39,21 @@ import {
   applyMergeStateRepoll,
   collectPrGate,
   hasUnknownMergeState,
+  parseTierLine,
   prGateFallbackSnapshot,
   type PrGateEnv,
   type PrRefsAvailability,
+  rotateQaRecheckBatch,
 } from "../src/autopilot/turn-snapshot/pr-gate.ts";
 import {
   createTurnSnapshotGithub,
+  ghTimestampSeconds,
+  parseJsonRead,
+  PR_GATE_PR_FIELDS,
   type GhJsonRead,
   type GhTransport,
   type TurnSnapshotGithub,
 } from "../src/autopilot/turn-snapshot/github-port.ts";
-import { pyJsonLoads } from "../src/autopilot/turn-snapshot/py-compat.ts";
 import { pickNoPrResume } from "../src/autopilot/turn-snapshot/dev-resume.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
 
@@ -321,11 +325,8 @@ interface PrGateOverrides {
   prRefs?: PrRefsAvailability;
 }
 
-const jsonOrEmpty = (s: string): GhJsonRead => {
-  if (s === "") return EMPTY;
-  const p = pyJsonLoads(s);
-  return "error" in p ? { kind: "unparseable", error: p.error } : ok(p.value);
-};
+/** "" models a FAILED read; anything else goes through the port's own JSON parse. */
+const jsonOrEmpty = (s: string): GhJsonRead => parseJsonRead(s);
 
 /**
  * A pin in the Anchor-reference notation signal EVENTS carry
@@ -426,6 +427,17 @@ describe("pr-gate — BEHIND/draft classification (issue #4240)", () => {
     const buckets = await runPrGate([pr]);
     assert.deepEqual(buckets.unchecked, [4237]);
     assert.deepEqual(buckets.behind, []);
+  });
+
+  test("isDraft reads with Python truthiness: an EMPTY list / object is not a draft, so a DIRTY PR still lands in orch_prs_dirty (#5084)", async () => {
+    for (const isDraft of [[], {}]) {
+      const buckets = await runPrGate([{ ...basePrGate({ number: 4400, mergeStateStatus: "DIRTY" }), isDraft }]);
+      assert.deepEqual(buckets.dirty, [4400], `isDraft ${JSON.stringify(isDraft)} is Python-falsy`);
+    }
+    for (const isDraft of [[0], { a: 1 }, true]) {
+      const buckets = await runPrGate([{ ...basePrGate({ number: 4401, mergeStateStatus: "DIRTY" }), isDraft }]);
+      assert.deepEqual(buckets.dirty, [], `isDraft ${JSON.stringify(isDraft)} is Python-truthy`);
+    }
   });
 });
 
@@ -1189,10 +1201,10 @@ describe("pr-gate — no-PR durable resume pick (issue #4808)", () => {
     const healthy = { first: ok([]), resume: ok(JSON.parse(noprRowsJson)) };
     const cases: { name: string; opts: Partial<Parameters<typeof collectNoprOutcome>[0]> }[] = [
       { name: "open-PR list read empty", opts: { first: EMPTY } },
-      { name: "open-PR list read unparseable", opts: { first: { kind: "unparseable", error: "Expecting value" } } },
+      { name: "open-PR list read unparseable", opts: { first: { kind: "unparseable" } } },
       { name: "pr-refs predicates unavailable", opts: { prRefs: PR_REFS_UNAVAILABLE } },
       { name: "needs-dev-resume read empty", opts: { resume: EMPTY } },
-      { name: "needs-dev-resume read unparseable", opts: { resume: { kind: "unparseable", error: "Expecting value" } } },
+      { name: "needs-dev-resume read unparseable", opts: { resume: { kind: "unparseable" } } },
       { name: "open-PR page saturated (payload length >= ghListLimit)", opts: { ghListLimit: 1, first: ok([basePrGate({ number: 9001 })]) } },
     ];
     for (const c of cases) {
@@ -1239,3 +1251,254 @@ async function collectNoprOutcome(o: {
     ...(o.prRefs ? { prRefs: o.prRefs } : {}),
   });
 }
+
+// ---------------------------------------------------------------------------
+// #5052 - the durable QA-verdict recheck signal (orch_qa_verdict_recheck)
+// ---------------------------------------------------------------------------
+
+describe("pr-gate — QA-verdict recheck (#5052)", () => {
+  const REQUIRED = ["test", "typecheck"];
+  const greenRollup = REQUIRED.map((name) => ({ __typename: "CheckRun", name, status: "COMPLETED", conclusion: "SUCCESS", startedAt: isoSecondsAgo(900) }));
+  const redRollup = [{ ...greenRollup[0], conclusion: "FAILURE" }, greenRollup[1]];
+  const pendingRollup = [{ ...greenRollup[0], status: "IN_PROGRESS", conclusion: null }, greenRollup[1]];
+
+  const candidatePr = (n: number, extra: Record<string, unknown> = {}) =>
+    ({
+      ...basePrGate({ number: n, mergeStateStatus: "CLEAN", statusCheckRollup: greenRollup }),
+      body: "Tier: 3 (core)\n\nCloses #1",
+      autoMergeRequest: null,
+      ...extra,
+    }) as unknown;
+
+  type Runner = { runQaVerdictEvent(pr: number, tier: number): Promise<unknown> };
+  function run(prs: unknown[], opts: { required?: GhJsonRead; first?: GhJsonRead; host?: Runner | null } = {}) {
+    return collectPrGate({
+      github: fakeGithub({ first: opts.first ?? ok(prs), repoll: ok([]), required: opts.required ?? ok(REQUIRED), resume: ok([]) }),
+      now: () => NOW_MS,
+      sleep: async () => {},
+      ghListLimit: 100,
+      ...(opts.host === null ? {} : { host: opts.host ?? passHost() }),
+    });
+  }
+  const passHost = (log: number[] = []): Runner => ({
+    runQaVerdictEvent: async (pr: number, tier: number) => {
+      log.push(pr);
+      return { type: "qa-verdict", pr_number: pr, tier, verdict: "PASS", verdict_sha: "abc1234", head_sha: "abc1234def" };
+    },
+  });
+  const value = (o: Awaited<ReturnType<typeof run>>) => (o.value.qaVerdictRecheck.ok ? o.value.qaVerdictRecheck.value : null);
+
+  test("parseTierLine reads a line-anchored Tier N in 1-4 only", () => {
+    assert.equal(parseTierLine("Tier: 3 (core)"), 3);
+    assert.equal(parseTierLine("intro\n**Tier:** 2\n"), 2);
+    assert.equal(parseTierLine("Tier: 0 (docs)"), null);
+    assert.equal(parseTierLine("we think Tier: 3 is right"), null);
+    assert.equal(parseTierLine(undefined), null);
+  });
+
+  test("a green, unarmed, tiered PR becomes a recheck entry whose fields are the script's stdout", async () => {
+    const log: number[] = [];
+    const o = await run([candidatePr(7)], { host: passHost(log) });
+    assert.deepEqual(value(o), [{ pr: 7, tier: 3, verdict: "PASS", verdictSha: "abc1234", headSha: "abc1234def" }]);
+    assert.deepEqual(log, [7]);
+  });
+
+  test("exclusions spend no script run: draft, ready-for-human, armed, DIRTY, UNKNOWN, no tier, red, pending", async () => {
+    const log: number[] = [];
+    const prs = [
+      candidatePr(1, { isDraft: true }),
+      candidatePr(2, { labels: [{ name: "ready-for-human" }] }),
+      candidatePr(3, { autoMergeRequest: { enabledAt: "2026-10-01T00:00:00Z" } }),
+      candidatePr(4, { mergeStateStatus: "DIRTY" }),
+      candidatePr(5, { mergeStateStatus: "UNKNOWN" }),
+      candidatePr(6, { body: "no tier here" }),
+      candidatePr(8, { statusCheckRollup: redRollup }),
+      candidatePr(9, { statusCheckRollup: pendingRollup }),
+      candidatePr(10, { autoMergeRequest: undefined }),
+    ];
+    const o = await run(prs, { host: passHost(log) });
+    assert.deepEqual(value(o), []);
+    assert.deepEqual(log, [], "no excluded PR may cost a script run");
+  });
+
+  test("fail closed: unreadable PR list or required contexts yields [] plus a qaVerdictRecheck marker", async () => {
+    for (const opts of [{ first: EMPTY }, { required: EMPTY }]) {
+      const log: number[] = [];
+      const o = await run([candidatePr(7)], { ...opts, host: passHost(log) });
+      assert.equal(o.value.qaVerdictRecheck.ok, false);
+      assert.ok(o.degraded.some((d) => d.field === "qaVerdictRecheck"));
+      assert.deepEqual(log, []);
+    }
+  });
+
+  test("fail closed: a null / throwing / mis-shaped script run omits that PR only; no PASS is synthesised", async () => {
+    const host: Runner = {
+      runQaVerdictEvent: async (pr: number, tier: number): Promise<unknown> => {
+        if (pr === 11) return null;
+        if (pr === 12) throw new Error("spawn failed");
+        if (pr === 13) return { type: "qa-verdict", pr_number: 99, tier, verdict: "PASS", verdict_sha: "a", head_sha: "a" };
+        return { type: "qa-verdict", pr_number: pr, tier, verdict: "PENDING", verdict_sha: "unknown", head_sha: "" };
+      },
+    };
+    const o = await run([candidatePr(11), candidatePr(12), candidatePr(13), candidatePr(14)], { host });
+    assert.deepEqual(value(o), [{ pr: 14, tier: 3, verdict: "PENDING", verdictSha: "unknown", headSha: "" }]);
+    assert.equal(o.notes.filter((n) => n.includes("#5052")).length, 4, "one note per omission plus the thrown call");
+  });
+
+  test("bounded fan-out: at most 3 script runs in flight and 12 per turn; the overflow is skipped and noted", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const log: number[] = [];
+    const host: Runner = {
+      runQaVerdictEvent: async (pr: number, tier: number) => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        log.push(pr);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        return { type: "qa-verdict", pr_number: pr, tier, verdict: "PASS", verdict_sha: "abc1234", head_sha: "abc1234def" };
+      },
+    };
+    const prs = Array.from({ length: 15 }, (_, i) => candidatePr(100 + i));
+    const o = await run(prs, { host });
+    assert.ok(peak <= 3, `peak concurrency ${peak} exceeds 3`);
+    assert.equal(log.length, 12);
+    assert.equal(value(o)?.length, 12);
+    assert.equal(new Set(log).size, 12, "12 distinct PRs run");
+    const skipped = prs.map((p) => (p as { number: number }).number).filter((n) => !log.includes(n));
+    assert.equal(skipped.length, 3);
+    assert.ok(o.notes.some((n) => n.includes("capped at 12") && skipped.every((n2) => n.includes(`#${n2}`))));
+  });
+
+  test("no starvation: the capped window rotates so every candidate is reached across successive turns", () => {
+    const cands = Array.from({ length: 30 }, (_, i) => i + 1);
+    const seen = new Set<number>();
+    for (let step = 0; step < 30; step++) {
+      const batch = rotateQaRecheckBatch(cands, 12, step * 60_000);
+      assert.equal(batch.length, 12);
+      assert.equal(new Set(batch).size, 12, "no duplicates within a window");
+      batch.forEach((n) => seen.add(n));
+    }
+    assert.equal(seen.has(30), true, "the highest-numbered candidate is evaluated even when 12 lower ones never merge");
+    assert.deepEqual(rotateQaRecheckBatch([1, 2, 3], 12, 999_999), [1, 2, 3]);
+  });
+
+  test("rotation does not alias with a fixed 5-minute turn cadence (n = 15/20/30/60)", () => {
+    for (const n of [15, 20, 30, 60]) {
+      const cands = Array.from({ length: n }, (_, i) => i + 1);
+      const seen = new Set<number>();
+      for (let turn = 0; turn < 60; turn++) {
+        rotateQaRecheckBatch(cands, 12, 1_700_000_000_000 + turn * 300_000).forEach((c) => seen.add(c));
+      }
+      assert.equal(seen.size, n, `every candidate reached at n=${n}`);
+    }
+  });
+
+  test("fail closed: a candidate with no host port yields [] plus a marker", async () => {
+    const o = await run([candidatePr(7)], { host: null });
+    assert.equal(o.value.qaVerdictRecheck.ok, false);
+    assert.ok(o.degraded.some((d) => d.field === "qaVerdictRecheck"));
+  });
+
+  test("the five-read order is unchanged; only the open-PR read gains autoMergeRequest", async () => {
+    const github = fakeGithub({ first: ok([candidatePr(7)]), repoll: ok([]), required: ok(REQUIRED), resume: ok([]) });
+    await collectPrGate({ github, now: () => NOW_MS, sleep: async () => {}, ghListLimit: 100, host: passHost() });
+    assert.equal(github.totalReads(), 5);
+    assert.ok(PR_GATE_PR_FIELDS.endsWith(",autoMergeRequest"));
+  });
+
+  test("prGateFallbackSnapshot carries the recheck degraded", () => {
+    assert.equal(prGateFallbackSnapshot("x").qaVerdictRecheck.ok, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. A malformed payload degrades, never throws (#5084, the #4934 per-field contract)
+// ---------------------------------------------------------------------------
+
+/** Payloads no healthy `gh` read produces — every shape a typed fold must survive. */
+const MALFORMED_READS: readonly GhJsonRead[] = [
+  { kind: "unparseable" },
+  ok(null),
+  ok(true),
+  ok(7),
+  ok("text"),
+  ok({ a: 1 }),
+  ok([null, 7, "x", true, [], {}]),
+  ok([
+    {
+      number: [1],
+      labels: null,
+      headRefName: 5,
+      body: {},
+      isDraft: {},
+      mergeStateStatus: [],
+      statusCheckRollup: { a: 1 },
+      createdAt: 5,
+      updatedAt: [],
+    },
+    { number: 9, labels: [{ name: 3 }, null, "x"], mergeStateStatus: "DIRTY", isDraft: [], statusCheckRollup: [null, 4, { name: {} }], updatedAt: "2026-10-07T03:20:07.000Z" },
+  ]),
+];
+
+/** A port whose every read returns `read` (the runs reads get a non-timestamp string). */
+function everyRead(read: GhJsonRead): PrGateGithubAll {
+  return {
+    listOpenPrs: async () => read,
+    listOpenPrMergeStates: async () => ({ read, stderrHead: "" }),
+    latestWorkflowRunCreatedAt: async () => "not-a-timestamp",
+    requiredStatusContexts: async () => read,
+    listOpenIssueRowsByLabel: async () => read,
+  };
+}
+type PrGateGithubAll = Parameters<typeof collectPrGate>[0]["github"];
+
+describe("Turn Snapshot pr-gate — a malformed payload degrades, never throws (#5084)", () => {
+  MALFORMED_READS.forEach((read, i) => {
+    test(`every read malformed (shape #${i}) → the collector resolves with integer buckets`, async () => {
+      const o = await collectPrGate({ github: everyRead(read), now: () => NOW_MS, sleep: async () => {}, ghListLimit: 100 });
+      for (const bucket of [o.value.dirty, o.value.unchecked, o.value.behind, ...Object.values(o.value.inflight)]) {
+        assert.ok(bucket.every((n) => Number.isInteger(n)), `shape #${i}: a bucket holds only PR / issue numbers`);
+      }
+      assert.doesNotThrow(() => JSON.stringify(o.value));
+      if (read.kind !== "ok") assert.ok(o.degraded.some((d) => d.field === "prList" && d.reason === "unparseable"), `shape #${i}: the PR list is marked`);
+    });
+  });
+
+  test("one malformed read degrades ONLY its own fields — the PR buckets from a healthy list stand", async () => {
+    const dirty = { number: 12, mergeStateStatus: "DIRTY", isDraft: false, labels: [], statusCheckRollup: [], createdAt: isoSecondsAgo(9000), updatedAt: isoSecondsAgo(9000) };
+    const o = await collectPrGate({
+      github: fakeGithub({ first: ok([dirty]), required: { kind: "unparseable" }, runsPush: isoSecondsAgo(10), runsPullRequest: isoSecondsAgo(10) }),
+      now: () => NOW_MS,
+      sleep: async () => {},
+      ghListLimit: 100,
+    });
+    assert.deepEqual(o.value.dirty, [12]);
+    assert.equal(o.value.ciTriggerStale.ok, true);
+    assert.deepEqual(o.value.devResumePick, { ok: false, reason: "required-contexts / needs-dev-resume / pr-refs input unavailable" });
+    assert.deepEqual(
+      o.degraded.map((d) => d.field),
+      ["requiredContexts", "qaVerdictRecheck"],
+      "only the required-contexts read and the recheck that consumes it degrade",
+    );
+  });
+
+  test("a malformed env window falls back to its default with a not-numeric note; float literals are accepted", async () => {
+    const notesFor = async (env: PrGateEnv) =>
+      (await collectPrGate({ github: fakeGithub({}), now: () => NOW_MS, sleep: async () => {}, ghListLimit: 100, env })).notes.filter((n) => n.includes("unparsable"));
+    assert.deepEqual(await notesFor({ uncheckedGraceSeconds: "10m" }), [
+      'orch pr-gate ORCH_PR_UNCHECKED_GRACE_SECONDS unparsable (not-numeric: "10m") — falling back to 600s default (issue #4240)',
+    ]);
+    for (const accepted of [" 900 ", "1_800", "1e3", ".5", "5.", "inf", "-Infinity", "NaN"]) {
+      assert.deepEqual(await notesFor({ glmRedQuiescenceSeconds: accepted, uncheckedGraceSeconds: accepted }), [], `${JSON.stringify(accepted)} is a window literal`);
+    }
+  });
+
+  test("gh timestamps parse in the canonical second-resolution UTC shape only", () => {
+    assert.equal(ghTimestampSeconds("2026-10-07T03:20:07Z"), Date.UTC(2026, 9, 7, 3, 20, 7) / 1000);
+    assert.equal(ghTimestampSeconds("2026-1-7T3:2:7Z"), Date.UTC(2026, 0, 7, 3, 2, 7) / 1000, "one-digit fields, the windows' historical parse");
+    for (const bad of ["2026-10-07T03:20:07.000Z", "2026-10-07T03:20:07+00:00", "2026-02-30T00:00:00Z", "2026-10-07T03:20:60Z", "", null, 1791344407]) {
+      assert.equal(ghTimestampSeconds(bad), null, `${JSON.stringify(bad)} is not a gh timestamp`);
+    }
+  });
+});

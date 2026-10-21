@@ -1,0 +1,1 @@
+- refactor: demote unused GitActionTransport export in src/github/git.ts (#5024)

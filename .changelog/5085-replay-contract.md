@@ -1,0 +1,1 @@
+- test: the Turn Snapshot replay contract is the only guard between decide.py's reads and the schema — decide() replays every TS-emitted document through a recording accessor, replacing the source-text read guards (#5085)

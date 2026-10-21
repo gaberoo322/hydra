@@ -158,7 +158,7 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
   });
 
   // Issue #1876: the daily-guarded stale-key sweep must skip on the second
-  // immediate call, exactly like memory-consolidation / weekly-summary.
+  // immediate call, exactly like memory-consolidation / usage-weekly-snapshot.
   test("stale-key-prune skips on a second immediate call (daily guard)", async () => {
     // Issue #3756: stub the GLM eligibility sweep so exercising the router never
     // performs a live GitHub write (the sweep mutates an external service with no

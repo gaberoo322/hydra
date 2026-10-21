@@ -7,7 +7,8 @@
  * Invariants under test (the issue's acceptance criteria):
  *   - empty -> non-empty fires EXACTLY ONE notification
  *   - no repeat while the set stays non-empty
- *   - re-arms after the set drains to empty
+ *   - re-arms after the set drains to empty, and resolves the Operator
+ *     Channel page so the next edge is a fresh page (issue #5047)
  *   - payload carries count + first item title and link
  *
  * The armed-state is modelled by an in-memory flag (standing in for the Redis
@@ -19,7 +20,6 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import { runReviewPickupNotify } from "../src/scheduler/housekeeping.ts";
-import { formatMessage } from "../src/notify.ts";
 
 interface PublishedEvent {
   stream: string;
@@ -51,6 +51,20 @@ function makeArmedState(initial = false) {
   };
 }
 
+/** Capturing stand-in for the Operator Channel's resolve() (issue #5047). */
+function makeChannel() {
+  const resolved: string[] = [];
+  return {
+    resolved,
+    channel: {
+      resolve: async (dedupKey: string) => {
+        resolved.push(dedupKey);
+        return { sent: false as const, reason: "not-bad" as const };
+      },
+    },
+  };
+}
+
 function pickupItems(...numbers: number[]) {
   return numbers.map((n) => ({
     number: n,
@@ -72,6 +86,7 @@ describe("runReviewPickupNotify — edge trigger", () => {
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
       clearNotified: armed.clearNotified,
+      channel: makeChannel().channel,
     });
 
     assert.equal(result.fired, true);
@@ -96,6 +111,7 @@ describe("runReviewPickupNotify — edge trigger", () => {
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
       clearNotified: armed.clearNotified,
+      channel: makeChannel().channel,
     });
 
     assert.equal(result.fired, false);
@@ -113,6 +129,7 @@ describe("runReviewPickupNotify — edge trigger", () => {
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
       clearNotified: armed.clearNotified,
+      channel: makeChannel().channel,
     });
 
     assert.equal(result.fired, false);
@@ -132,6 +149,7 @@ describe("runReviewPickupNotify — edge trigger", () => {
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
       clearNotified: armed.clearNotified,
+      channel: makeChannel().channel,
     });
 
     assert.equal(result.fired, false);
@@ -143,10 +161,12 @@ describe("runReviewPickupNotify — edge trigger", () => {
     const captured: PublishedEvent[] = [];
     const bus = makeFakeBus(captured);
     const armed = makeArmedState(false);
+    const { channel, resolved } = makeChannel();
     const deps = {
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
       clearNotified: armed.clearNotified,
+      channel,
     };
 
     // 1. empty -> non-empty: fires
@@ -160,27 +180,26 @@ describe("runReviewPickupNotify — edge trigger", () => {
 
     assert.equal(captured.length, 2);
     assert.deepEqual(captured.map((e) => e.payload.firstNumber), [1, 3]);
-  });
-});
-
-describe("formatMessage — review:pickup_ready rendering", () => {
-  test("renders count, the run command, and the first item with link", () => {
-    const msg = formatMessage({
-      type: "review:pickup_ready",
-      payload: { count: 3, firstTitle: "Decide tier for PR #710", firstUrl: "https://x/710", firstNumber: 710 },
-    });
-    assert.ok(msg.includes("3 items"));
-    assert.ok(msg.includes("/hydra-review"));
-    assert.ok(msg.includes("Decide tier for PR #710"));
-    assert.ok(msg.includes("https://x/710"));
+    // The drain edge (step 3) resolved the page exactly once (issue #5047).
+    assert.deepEqual(resolved, ["review:pickup_ready"]);
   });
 
-  test("singular wording for a single item", () => {
-    const msg = formatMessage({
-      type: "review:pickup_ready",
-      payload: { count: 1, firstTitle: "Only one", firstUrl: "https://x/1", firstNumber: 1 },
+  test("the drain edge resolves the review:pickup_ready page; a no-op empty tick does not", async () => {
+    const bus = makeFakeBus([]);
+    const drained = makeChannel();
+    await runReviewPickupNotify(bus, {
+      getPickupSet: async () => [],
+      ...makeArmedState(true),
+      channel: drained.channel,
     });
-    assert.ok(msg.includes("1 item need"));
-    assert.ok(!msg.includes("1 items"));
+    assert.deepEqual(drained.resolved, ["review:pickup_ready"]);
+
+    const idle = makeChannel();
+    await runReviewPickupNotify(bus, {
+      getPickupSet: async () => [],
+      ...makeArmedState(false),
+      channel: idle.channel,
+    });
+    assert.deepEqual(idle.resolved, [], "no transition, no resolve");
   });
 });

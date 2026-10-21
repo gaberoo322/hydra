@@ -46,6 +46,23 @@ is_exception() {
 }
 
 # Detect playbooks with broken or missing frontmatter (excluding exceptions).
+# The grammar lives in the skills core (ADR-0041 Decision 5): run its CLI ONCE
+# and read each playbook's status from the plan's `skips` (reason is exactly
+# `no-frontmatter` | `missing-name-or-description`; absent means ok).
+command -v node >/dev/null 2>&1 || { echo "check-skill-playbook-drift: node required" >&2; exit 127; }
+command -v jq >/dev/null 2>&1 || { echo "check-skill-playbook-drift: jq required" >&2; exit 127; }
+PLAN_JSON="$(mktemp)"
+PLAN_ERR="$(mktemp)"
+trap 'rm -f "$PLAN_JSON" "$PLAN_ERR"' EXIT
+cli_rc=0
+node --experimental-strip-types "$REPO_ROOT/src/skills/cli.ts" \
+  --playbooks-dir "$PLAYBOOKS" >"$PLAN_JSON" 2>"$PLAN_ERR" || cli_rc=$?
+if [ "$cli_rc" -ne 0 ]; then
+  echo "drift: skills core could not plan the playbook corpus (exit $cli_rc):" >&2
+  sed 's/^/drift: /' "$PLAN_ERR" >&2
+  exit 1
+fi
+
 broken_playbooks=()
 shopt -s nullglob
 for pb in "$PLAYBOOKS"/hydra-*.md; do
@@ -53,32 +70,9 @@ for pb in "$PLAYBOOKS"/hydra-*.md; do
   if is_exception "$base"; then
     continue
   fi
-  # Use the same parser shape as sync-skills.sh so this gate fails for the same
-  # reasons sync-skills.sh would skip.
-  status=$(python3 - "$pb" <<'PY'
-import sys, re
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    text = f.read()
-m = re.match(r"^---\n(.*?)\n---\n.*$", text, re.DOTALL)
-if not m:
-    print("no-frontmatter")
-    sys.exit(0)
-fm_raw = m.group(1)
-fm = {}
-for line in fm_raw.splitlines():
-    line = line.rstrip()
-    if not line or line.startswith("#") or ":" not in line:
-        continue
-    k, _, v = line.partition(":")
-    fm[k.strip()] = v.strip()
-name = fm.get("name", "")
-desc = fm.get("description", "")
-if not name or not desc:
-    print("missing-name-or-description")
-    sys.exit(0)
-print("ok")
-PY
-)
+  status=$(jq -r --arg b "$base" \
+    '([.skips[] | select(.playbook == $b) | .reason] | first) // "ok"' \
+    "$PLAN_JSON")
   if [ "$status" != "ok" ]; then
     broken_playbooks+=("$base ($status)")
   fi

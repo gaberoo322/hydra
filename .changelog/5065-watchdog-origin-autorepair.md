@@ -1,0 +1,1 @@
+- fix: the watchdog's origin-identity check now self-heals — a wrong `~/hydra` origin URL is rewritten to the canonical one and fetched, a missing `origin/master` is fetched back, and the notification says repaired (kill switch `HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR=0`) (#5065)

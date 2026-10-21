@@ -26,12 +26,14 @@
 // tick re-evaluates the edge (better a re-attempt than a swallowed edge).
 //
 // This is a focused notification-domain leaf, sibling to `alert-grammar.ts`
-// and `cycle-completed-reactor.ts` — NOT the Telegram transport (`../notify.ts`).
+// and `cycle-completed-reactor.ts` — NOT the Telegram transport
+// (`../operator-channel/transport.ts`).
 // Import direction is one-way: this module imports the aggregators' scorecard
 // vocabulary; `src/scheduler/heartbeat.ts` (the only production caller) imports
 // `emitStagnationAlerts` / `createInMemoryStagnationStore` from here.
 
 import type { PublishableBus } from "../event-bus-seams.ts";
+import { NOTIFICATION_EVENT_TYPES as E } from "../event-bus-vocabulary.ts";
 import type { BuilderHealthScorecard } from "../aggregators/builder-health.ts";
 import type {
   StagnationSignalName,
@@ -40,7 +42,7 @@ import type {
 import type { StagnationResult } from "../aggregators/builder-health-stagnation.ts";
 
 /** The event-type string carried on the notifications stream for this alert. */
-export const BUILDER_HEALTH_STAGNATION_EVENT = "builder-health.stagnation";
+export const BUILDER_HEALTH_STAGNATION_EVENT = E.BUILDER_HEALTH_STAGNATION;
 
 /**
  * The per-(signal, realm) previous verdict the edge-trigger compares against.
@@ -178,7 +180,7 @@ async function publishStagnationAlert(
     `Current ${fmtNum(current)} vs baseline ${fmtNum(baseline)}. ${NOT_TIER_ADJUSTED_CAVEAT}`;
   try {
     await eventBus.publish(BUILDER_HEALTH_STAGNATION_EVENT_STREAM, {
-      type: BUILDER_HEALTH_STAGNATION_EVENT,
+      type: E.BUILDER_HEALTH_STAGNATION,
       source: "scheduler",
       correlationId: `builder-health-stagnation-${signal}-${realm}`,
       payload: {

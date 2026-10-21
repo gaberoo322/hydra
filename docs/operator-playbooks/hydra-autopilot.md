@@ -50,7 +50,7 @@ Each tick:
 
 1. **Wake** on TaskNotification, Monitor board-change, or a 15-min heartbeat.
 2. **Events** — write `events.json` (default `/tmp/hydra-autopilot-events.json`): a JSON **list** of typed events (`{"type": "completion" | "qa-verdict" | "signal", ...}`); `[]` — or no file at all — when there are none. Build every `qa-verdict` event with `bash scripts/autopilot/qa-verdict-event.sh <PR> <TIER>` (see "Building `qa-verdict` events" below). Raw `hydra:autopilot:slot-events` rows (`{"id", "fields": {"event": ...}}` — what the Turn Snapshot carries as its `slot_events` blob) belong on `state.slot_events`, not on the events lane; `turn.sh` puts them there.
-3. **Turn** — `bash scripts/autopilot/turn.sh events.json` (issue #4831) — Phases 1–4 as ONE command: the JSON Turn Snapshot (ADR-0043, #4934: `turn-snapshot.ts` runs every collector in one process and validates the document on emit, degrading an invalid field to its conservative value with a marker; cursor from `state.slot_events_last_id`) → `turn_snapshot.py apply` (stores it on `state.turn_snapshot` — the only form `decide.py` reads, through `scripts/autopilot/turn_snapshot.py` — and copies the verbatim blobs `usage_eligibility`, `emergency_brake`, `target_risk_surface`, `class_stats`, `candidate_exclusions`, `slot_events` + `slot_events_last_id` onto state; an emit that failed or is structurally unusable is applied as the **all-degraded snapshot** — nothing available, every producer cap saturated, `health_fail` raised — so the turn still plans, conservatively) → `term-check.py` (printed, informational) → `decide.py decide state.json candidates.json events.json` → `plan.json` (default `/tmp/hydra-autopilot-plan.json`) → `assert_invariants.py plan.json state.json`. It prints one plan summary line (`turn`, `actions` without the sentinel, `reasons`) and one usage line; read those, never re-run the pieces by hand. **Exit 0 = execute the plan. Any other exit = do NOT execute**: 1 means the invariants rejected the plan, 2 means a phase could not run (no state — bootstrap first; the snapshot could not be applied to state), anything else is `decide.py`'s own exit (its stderr tail is echoed). Never hand-edit `state.turn_snapshot`; a missing `candidates.json` is created as `{"candidates": []}` (ADR-0031). `decide.py`'s CLI bumps `state.turn` by one and persists it atomically BEFORE calling `decide()` — the bump is a `main()` side-effect; `decide()` itself stays pure. **Events-shape contract (issue #4213):** `decide()` normalises the events argument once, at its top, before any rule reads it — a bare list and the `{"events": [...], "last_id": ...}` wrapper are equivalent (the wrapper is unwrapped by the same helper the `state.slot_events` lane uses); non-dict entries are dropped with `events-entry-skipped:<n>`; raw stream rows that land on the events lane are re-homed onto `state.slot_events` (dedup by `id`, reason `events-stream-entries-rehomed:<n>`) so the one `subagent_stop` projection frees the slot either way; an unreadable or unparseable `events.json` logs one stderr line and yields a plan carrying `events-malformed-ignored` — never a traceback, never a lost plan. The turn is still consumed (the bump stays before `decide()`, per #1769). `state.json` / `candidates.json` keep failing hard.
+3. **Turn** — `bash scripts/autopilot/turn.sh events.json` (issue #4831) — Phases 1–4 as ONE command: the JSON Turn Snapshot (ADR-0043, #4934: `turn-snapshot.ts` runs every collector in one process and validates the document on emit, degrading an invalid field to its conservative value with a marker; cursor from `state.slot_events_last_id`) → `turn_snapshot.py apply` (stores it on `state.turn_snapshot` — the only form `decide.py` reads, through `scripts/autopilot/turn_snapshot.py` — and copies the verbatim blobs `usage_eligibility`, `emergency_brake`, `target_risk_surface`, `class_stats`, `candidate_exclusions`, `slot_events` + `slot_events_last_id` onto state; the document is stored as emitted — the TS emitter is its only validator (#5083); an emit that failed is replaced by `turn-snapshot.ts --all-degraded`, the **all-degraded snapshot** — nothing available, every producer cap saturated, `health_fail` raised — and when node cannot run even that, or the document is unreadable, by a marker document with no signals that reads the same way — so the turn still plans, conservatively) → `term-check.py` (printed, informational) → `decide.py decide state.json candidates.json events.json` → `plan.json` (default `/tmp/hydra-autopilot-plan.json`) → `assert_invariants.py plan.json state.json`. It prints one plan summary line (`turn`, `actions` without the sentinel, `reasons`) and one usage line; read those, never re-run the pieces by hand. **Exit 0 = execute the plan. Any other exit = do NOT execute**: 1 means the invariants rejected the plan, 2 means a phase could not run (no state — bootstrap first; the snapshot could not be applied to state), anything else is `decide.py`'s own exit (its stderr tail is echoed). Never hand-edit `state.turn_snapshot`; a missing `candidates.json` is created as `{"candidates": []}` (ADR-0031). `decide.py`'s CLI bumps `state.turn` by one and persists it atomically BEFORE calling `decide()` — the bump is a `main()` side-effect; `decide()` itself stays pure. **Events-shape contract (issue #4213):** `decide()` normalises the events argument once, at its top, before any rule reads it — a bare list and the `{"events": [...], "last_id": ...}` wrapper are equivalent (the wrapper is unwrapped by the same helper the `state.slot_events` lane uses); non-dict entries are dropped with `events-entry-skipped:<n>`; raw stream rows that land on the events lane are re-homed onto `state.slot_events` (dedup by `id`, reason `events-stream-entries-rehomed:<n>`) so the one `subagent_stop` projection frees the slot either way; an unreadable or unparseable `events.json` logs one stderr line and yields a plan carrying `events-malformed-ignored` — never a traceback, never a lost plan. The turn is still consumed (the bump stays before `decide()`, per #1769). `state.json` / `candidates.json` keep failing hard.
 4. **Read the summary.** The plan is at `plan.json`; the two summary lines are the whole of what step 5 needs (action `type`/`slot`/`skill`/`prompt_args`, plus `isolation`/`worktreeBranch` per dispatch). Open `plan.json` only for a field the summary does not carry (`dispatchSentinel`).
 5. **Execute** each action in the plan via the right tool (table below).
 5a. **`python3 scripts/autopilot/heartbeat.py --last-action=<type>`** — write the per-turn heartbeat line. `<type>` is the `type` of the LAST action executed in step 5 (or `wait` / `(none)` if the plan was a no-op). MUST run on every iteration, even when the plan only contained a `wait` — file mtime is the operator's liveness signal (issue #435).
@@ -72,8 +72,12 @@ Each tick:
 
 `bash scripts/autopilot/qa-verdict-event.sh <PR> <TIER>` prints one event
 (issue #4831); the session appends it to `events.json` in step 2, one per PR
-whose latest `QA-Verdict:` trailer it acts on: right after a `qa_orch` reap,
-and again on later ticks for a PR still waiting on CI. `<TIER>` is the PR
+whose latest `QA-Verdict:` trailer it acts on: right after a `qa_orch` reap.
+A PR still waiting on CI is NOT tracked in session memory: the Turn Snapshot's
+`orch_qa_verdict_recheck` signal (issue #5052) re-runs this same script on
+every turn for each open, non-draft, unarmed PR whose required checks are
+settled green, and `decide.py` feeds the entries through the same sweep. A
+session event for a PR wins over its recheck entry. `<TIER>` is the PR
 body's `Tier:` line. **Every field comes from the QA merge guard and the shared
 required-check helpers, never from memory or a hand-parsed comment** — the
 script is the recipe below, verbatim (its `ci-state` / `qa-verdict-event`
@@ -117,7 +121,8 @@ jq -nc --argjson pr "$PR" --argjson tier "$TIER" --argjson guard "$GUARD_JSON" -
 - **`verdict`:** a `PASS` or `PASS-pending-CI` trailer becomes `"PASS"` once
   every required check is green, `"PENDING"` while one is still pending, and
   `"FAIL"` if one went red. QA never re-runs to promote `PASS-pending-CI`, so
-  this re-evaluation on later ticks is what lands those PRs. A `FAIL*` trailer
+  the Turn Snapshot's per-turn recheck (`reasons`: `qa-recheck:#N`) is what
+  lands those PRs, even in a later run. A `FAIL*` trailer
   is always `"FAIL"`. An unreadable guard or CI read is `"PENDING"` (fail
   closed).
 - **`verdict_sha` / `head_sha`** are the guard's `verdictSha` / `headSha`.
@@ -187,8 +192,8 @@ and survives relaunches via bootstrap's file-only carry-forward
 Ns remaining`) plus a `plan.debug.<class>_backoff` payload. `discover_target`
 and `cleanup_target` (#5051; same idle signal and reset set, the 1h cooldown
 still ANDs with the ladder) are enrolled (`ZERO_YIELD_BACKOFF_CLASSES` —
-enrolling a sibling is a new table row + a literal read branch or membership
-in an existing one, per the #4934 schema read guard). `research_target` is
+enrolling a sibling is a new table row + a read branch or membership in an
+existing one). `research_target` is
 deliberately not enrolled: its own 6h re-fire is within budget. `decide.py` is authoritative.
 
 ## Action-to-tool table
@@ -507,8 +512,8 @@ Detail: `hydra-autopilot-dispatch-reference.md` § qa_target.
 ## Phases (one-line each — full prose lives in code)
 
 - **Phase 0** — `bootstrap.sh "$@"` initialises `/tmp/hydra-autopilot-state.json` (slash args via `args-parse.sh`), then the **schema-version handshake** (see below) runs before any other phase
-- **Phases 1 → 4 as one command** — `turn.sh events.json` (issue #4831): JSON Turn Snapshot → `turn_snapshot.py apply` (all-degraded snapshot when the emit is unusable) → `term-check.py` → `decide.py` → `assert_invariants.py`, then the plan + usage summary. The per-phase lines below say what it runs.
-- **Phase 1** — `turn-snapshot.ts` emits the typed Turn Snapshot (ADR-0043, #4934)
+- **Phases 1 → 4 as one command** — `turn.sh events.json` (issue #4831): JSON Turn Snapshot → `turn_snapshot.py apply` (stored as emitted; a failed emit is replaced by `turn-snapshot.ts --all-degraded`) → `term-check.py` → `decide.py` → `assert_invariants.py`, then the plan + usage summary. The per-phase lines below say what it runs.
+- **Phase 1** — `turn-snapshot.ts` emits the typed Turn Snapshot (ADR-0043, #4934), validated on emit by `src/schemas/turn-snapshot.ts` alone; the accessor `turn_snapshot.py` is store-only (#5083), and the replay contract in `test/turn-snapshot-json.test.mts` (#5085) is the only guard on the signals `decide.py` reads
 - **Phase 1.5** — `recover-stale.sh stale_in_progress <N...> stale_blocked <M...>`
 - **Phase 2** — `reap.py` hard-cap sweep (idempotent; #395)
 - **Phase 3** — `decide.py decide state.json cands.json events.json` returns the plan (`events.json` = typed-event list; the `{"events": [...]}` wrapper is tolerated; a malformed file yields a plan carrying `events-malformed-ignored`, never a crash — #4213)
@@ -758,13 +763,13 @@ Subagent slot accounting is event-driven: `SubagentStop` and `Notification` hook
 
 ### Adding a signal (ADR-0043, #4934)
 
-A signal is a typed field of the Turn Snapshot. Adding one touches exactly three places — there is no promotion table, no wiring fragment and no second wire to keep in step:
+A signal is a typed field of the Turn Snapshot. Adding one touches exactly three places — its collector, its zod key and its `decide.py` policy; there is no promotion table, no wiring fragment and no second wire to keep in step:
 
-1. **Its collector** — produce the value in the owning collector under `src/autopilot/turn-snapshot/` (or a new one, registered in `scripts/autopilot/turn-snapshot.ts`), add the key to `SignalsSchema` in `src/schemas/turn-snapshot.ts`, map it in `json-snapshot.ts`, and give it its **all-degraded value** in `ALL_DEGRADED_SIGNALS` — the conservative reading (`false`/`0`/`null`, or `true` for a `*_saturated` cap) — mirrored in `scripts/autopilot/turn_snapshot.py` (a drift test keeps the two tables identical).
-2. **Its collector test** — the collector's `test/turn-snapshot-*.test.mts` suite (fixture or behavioural case), plus regenerating the JSON goldens (`UPDATE_TURN_SNAPSHOT_JSON_GOLDEN=1`).
+1. **Its collector** — produce the value in the owning collector under `src/autopilot/turn-snapshot/` (or a new one, registered in `scripts/autopilot/turn-snapshot.ts`) and map it in `json-snapshot.ts`; pin it in the collector's `test/turn-snapshot-*.test.mts` suite and regenerate the JSON goldens (`UPDATE_TURN_SNAPSHOT_JSON_GOLDEN=1`).
+2. **Its zod key** — add it to `SignalsSchema` in `src/schemas/turn-snapshot.ts` with its **all-degraded value** in `ALL_DEGRADED_SIGNALS`: the conservative reading, `false`/`0`/`null`/`""`/`[]` (what an absent key reads as) or `true` for a fault / cap flag. A flag is `true` there IFF its name ends `_fail`, `_degraded` or `_saturated`: the accessor reads a signal-less marker document by that suffix (`test/turn-snapshot-json.test.mts` enforces it).
 3. **The `decide.py` policy** — read it through the accessor (`ts.signal_present` / `ts.scalar` / `ts.text` / …, `scripts/autopilot/turn_snapshot.py`) and pin the rule in the decide tests.
 
-`test/decide-signal-classes.test.mts`'s schema read guard fails if `decide.py` reads a name the schema does not carry, or if a schema key has no `decide.py` reader and no observability-only rationale. Values no rule gates on belong in the snapshot's `observability` section, not in `signals`.
+The replay contract in `test/turn-snapshot-json.test.mts` (#5085) is the only guard: `decide()` replays every TS-emitted document with `HYDRA_AUTOPILOT_SNAPSHOT_REPLAY` set, so a read the replay corpus reaches fails loud when it names a signal the schema does not emit, and a schema key no replay reads needs an observability-only rationale. Values no rule gates on belong in the snapshot's `observability` section, not in `signals`.
 
 > **CONTEXT POINTER:** troubleshooting quick-look (wrong dispatch, burned class, wedge, stale heartbeat), cross-run Redis mirror, termination baton-pass detail, slot lifecycle event schema + env overrides, and merge-rate stabilization history (2026-05 → 2026-06) live in `hydra-autopilot-ops-reference.md` (sibling of this SKILL.md).
 

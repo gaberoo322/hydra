@@ -49,10 +49,9 @@ import { glmGrillExemption, type GlmGrillExemption } from "../../glm/eligibility
 import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
 import { DESIGN_CONCEPT_MAX_AGE_MS } from "../../design-concept-gate.ts";
 import type { CollectorOutcome, DegradedMarker } from "./collector.ts";
-import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
+import { ghTimestampSeconds, parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import { isGlmProvenance, type InflightRefs } from "./pr-gate.ts";
-import { pyEpochSeconds, pyJsonLoads, pyStr, pyTruthy } from "./py-compat.ts";
 
 export const PICKS_COLLECTOR = "picks";
 
@@ -112,6 +111,15 @@ function isDict(v: unknown): v is Dict {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
+/**
+ * Whether a decoded JSON field carries a value — the pick blocks' `x or
+ * default` reading: `null`, `false`, `0`, `""` and an EMPTY list or object
+ * read as unset; a non-empty list or object does not.
+ */
+function isSet(v: unknown): boolean {
+  return v !== null && typeof v === "object" ? Object.keys(v).length > 0 : Boolean(v);
+}
+
 /** `isinstance(v, int)` for a JSON-decoded value (JS cannot tell `5.0` from `5`). */
 function isPyInt(v: unknown): v is number {
   return typeof v === "number" && Number.isInteger(v);
@@ -134,7 +142,7 @@ function pyGet(d: unknown, k: string, dflt: unknown = null): unknown {
 /** `d.get(k) or ''` used as a str. */
 function pyStrField(d: unknown, k: string): string {
   const v = pyGet(d, k);
-  if (!pyTruthy(v)) return "";
+  if (!isSet(v)) return "";
   if (typeof v !== "string") return crash(`${k} is not a str`);
   return v;
 }
@@ -143,7 +151,7 @@ function pyStrField(d: unknown, k: string): string {
 function pyLabelNames(it: unknown): Set<unknown> {
   const raw = pyGet(it, "labels");
   const out = new Set<unknown>();
-  for (const l of pyIter(pyTruthy(raw) ? raw : [])) {
+  for (const l of pyIter(isSet(raw) ? raw : [])) {
     const name = pyGet(l, "name", "");
     if (name !== null && typeof name === "object") crash("unhashable label name");
     out.add(name);
@@ -277,9 +285,9 @@ export function grillCandidates(items: unknown, inflight: ReadonlySet<number>, b
 export function parseGlmWithheld(boardState: string | null): ReadonlySet<number> {
   const out = new Set<number>();
   if (boardState === null) return out;
-  const parsed = pyJsonLoads(boardState);
-  if (!parsed.ok || !isDict(parsed.value)) return out;
-  const xs = parsed.value.glm_withheld;
+  const parsed = parseJsonRead(boardState);
+  if (parsed.kind !== "ok" || !isDict(parsed.data)) return out;
+  const xs = parsed.data.glm_withheld;
   if (!Array.isArray(xs)) return out;
   for (const x of xs) if (isPyInt(x) && x > 0) out.add(x);
   return out;
@@ -296,10 +304,10 @@ export function mergedRefIssues(read: GhJsonRead): ReadonlySet<number> {
     const rows: PrRefRow[] = [];
     for (const pr of read.data as unknown[]) {
       if (!isDict(pr)) continue;
-      const title = pyTruthy(pr.title) ? pr.title : "";
+      const title = isSet(pr.title) ? pr.title : "";
       if (typeof title !== "string") crash("title is not a str");
-      const body = pyTruthy(pr.body) ? pr.body : "";
-      rows.push({ title, body: typeof body === "string" ? body : pyStr(body) });
+      const body = isSet(pr.body) ? pr.body : "";
+      rows.push({ title, body: typeof body === "string" ? body : JSON.stringify(body) });
     }
     return mergedPrReferences(rows);
   }, new Set());
@@ -311,11 +319,10 @@ export function mergedRefIssues(read: GhJsonRead): ReadonlySet<number> {
  * Unparseable / non-object / unreadable `createdAt` → not fresh.
  */
 function isFreshArtifact(body: string, nowMs: number): boolean {
-  if (body === "") return false;
-  const parsed = pyJsonLoads(body);
-  if (!parsed.ok || !isDict(parsed.value)) return false;
-  const raw = "createdAt" in parsed.value ? parsed.value.createdAt : 0;
-  const created = pyIntOf(pyTruthy(raw) ? raw : 0);
+  const parsed = parseJsonRead(body);
+  if (parsed.kind !== "ok" || !isDict(parsed.data)) return false;
+  const raw = "createdAt" in parsed.data ? parsed.data.createdAt : 0;
+  const created = pyIntOf(isSet(raw) ? raw : 0);
   if (created === null) return false;
   return Math.floor(nowMs) - created <= DESIGN_CONCEPT_MAX_AGE_MS;
 }
@@ -415,7 +422,7 @@ export function countActiveDevOrch(read: GhJsonRead, nowSeconds: number): number
       if (!DEV_BRANCH_PREFIXES.some((p) => jqStartsWith(head, p))) continue;
       if (isGlmProvenance(new Set(jqLabelNames(pr, true)), head)) continue;
       const updated = jqField(pr, "updatedAt");
-      const t = pyEpochSeconds(updated);
+      const t = ghTimestampSeconds(updated);
       if (t === null) jqFail("fromdateiso8601: unparseable date");
       if (nowSeconds - t < ACTIVE_DEV_WINDOW_SECONDS) count++;
     }

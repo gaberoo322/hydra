@@ -37,8 +37,9 @@
  * `skill_prune_board_saturated`, `target_research_due`, `target_idle` —
  * each gained a producer or lost its reader), and since the Turn Snapshot
  * JSON contract (#4934) it is empty by construction: every decide.py read
- * must be a Turn Snapshot schema key (test/decide-signal-classes.test.mts's
- * schema read guard) and the validated snapshot always carries every key.
+ * must be a Turn Snapshot schema key (the replay contract in
+ * test/turn-snapshot-json.test.mts, #5085) and the validated snapshot always
+ * carries every key.
  * The size-0 ratchet is pinned in test/class-state.test.mts. The map
  * survives because the class-state dead derivation and its honesty tests
  * consume it.

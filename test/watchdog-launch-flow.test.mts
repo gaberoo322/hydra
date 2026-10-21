@@ -74,6 +74,7 @@ import {
   withRedisDockerShim,
 } from "./_helpers/watchdog-redis-shim.mts";
 import { STREAMS } from "../src/event-bus-stream-keys.ts";
+import { isPageKind as isPageKindClosed } from "../src/operator-channel/page-list.ts";
 import {
   WATCHDOG_SPAWN_TIMEOUT_MS,
   WATCHDOG_REDIS_TIMEOUT_MS,
@@ -213,7 +214,7 @@ function seedSince(signal: string, ms: number): void {
  * the segment between the fixed prefix and the first `-` after it.
  */
 function runNsPid(key: string): number | null {
-  const m = /^hydra:test:launch-flow-(\d+)-[0-9a-f]{8}(?::|$)/.exec(key);
+  const m = /^hydra:test:launch-flow-(?:delivery-)?(\d+)-[0-9a-f]{8}(?::|$)/.exec(key);
   if (m === null) return null;
   const pid = Number(m[1]);
   return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
@@ -1223,6 +1224,17 @@ describe("cross-run isolation: one run must not delete another's fixtures (issue
     assert.equal(isRunNamespaceLive(`hydra:test:launch-flow-${process.pid}-0badc0de:x`), true);
   });
 
+  test("a live launch-flow-delivery suite's namespace is never swept (#5114)", () => {
+    // The sibling suite namespaces as launch-flow-delivery-<pid>-<uuid8>; the
+    // sweep's SCAN glob matches it, so the pid parser must recognise it too.
+    // process.ppid is a live pid that is not this process.
+    const livePid = process.ppid;
+    assert.equal(existsSync(`/proc/${livePid}`), true, "precondition: parent pid must be live");
+    const key = `hydra:test:launch-flow-delivery-${livePid}-0badc0de:launch-flow:since:latency`;
+    assert.equal(runNsPid(key), livePid);
+    assert.equal(isRunNamespaceLive(key), true);
+  });
+
   test("a dead run's namespace is still collectable, and a non-namespace key is left alone", () => {
     // 2^22 is above the default pid_max (4194304 is the ceiling, and this is
     // not a pid any live process can hold on this host); if it somehow were,
@@ -1264,5 +1276,78 @@ describe("cross-run isolation: one run must not delete another's fixtures (issue
     assert.equal(await getLaunchFlowSince(OTHER), null);
     assert.equal(await getLaunchFlowSince("latency"), T0 + 1, "resetting one signal must not touch another");
     await resetSeamState("latency");
+  });
+});
+
+// =============================================================================
+// ADR-0045 Decision 2 (issue #5046) — the watchdog's Telegram delivery is the
+// Operator Channel CLI, and hydra-watchdog.service can actually reach it.
+// Structural only (no Redis): the behavioural contract lives in
+// test/launch-flow-delivery.test.mts.
+// =============================================================================
+
+describe("scripts/hydra-watchdog.sh — Operator Channel CLI delivery (ADR-0045 D2, issue #5046)", () => {
+  /** Code-only view of the whole script (comment lines stripped). */
+  function scriptCode(): string {
+    return readFileSync(WATCHDOG, "utf-8")
+      .split("\n")
+      .filter((l) => !/^\s*#/.test(l))
+      .join("\n");
+  }
+
+  test("no block names the Telegram Bot API host or curls it — the CLI is the only sender", () => {
+    const code = scriptCode();
+    assert.ok(!code.includes("api.telegram.org"), "scripts/hydra-watchdog.sh must not carry the Bot API host on a code line");
+    assert.equal((code.match(/\bcurl\s[^\n]*TELEGRAM/g) ?? []).length, 0, "no curl reads a Telegram credential");
+    assert.ok(!code.includes("TELEGRAM_BOT_TOKEN") && !code.includes("TELEGRAM_CHAT_ID"), "the watchdog never reads Telegram credentials itself (one loader, in the CLI)");
+  });
+
+  test("every page-list block owns a deliver_page helper that resolves the CLI through HYDRA_WATCHDOG_OPERATOR_NOTIFY", () => {
+    const code = scriptCode();
+    const helpers = code.match(/^\s*deliver_page\(\) \{/gm) ?? [];
+    assert.equal(helpers.length, 5, "launch-flow, node-modules-integrity, redis-backup-freshness, origin-identity and brief-missing (#5048) each keep their own helper (the rc_write duplication precedent)");
+    for (const block of ["run_launch_flow()", "run_node_modules_integrity()", "run_redis_backup_freshness()", "run_origin_identity()", "run_brief_missing()"]) {
+      const start = code.indexOf(block);
+      assert.ok(start >= 0, `${block} not found`);
+      const body = code.slice(start, start + code.slice(start).search(/^}/m) + 1);
+      const hStart = body.indexOf("deliver_page() {");
+      assert.ok(hStart >= 0, `${block} must define deliver_page`);
+      const helper = body.slice(hStart, hStart + body.slice(hStart).indexOf("\n  }\n") + 4);
+      assert.ok(helper.includes("HYDRA_WATCHDOG_OPERATOR_NOTIFY"), `${block}'s helper must honour the test override`);
+      assert.ok(helper.includes("scripts/operator-notify.ts"), `${block}'s helper must default to the repo CLI`);
+      assert.ok(helper.includes("--experimental-strip-types"), `${block}'s helper must run node --experimental-strip-types`);
+      assert.ok(!helper.includes("npx"), `${block}'s helper must never shell npx (a unit's PATH cannot see the global tsx)`);
+      assert.match(helper, /timeout 25/, `${block}'s helper is wrapped in timeout 25`);
+      assert.match(helper, /\|\| log "WARN/, `${block}'s helper degrades to a logged WARN`);
+      assert.match(body, /deliver_page page --kind/, `${block} must page at its fired transition`);
+      assert.match(body, /deliver_page resolve --dedup-key/, `${block} must resolve at its recovery edge`);
+    }
+  });
+
+  test("every watchdog page kind is on the closed page list, with dedupKey == kind", () => {
+    const code = scriptCode();
+    const kinds = new Set<string>();
+    for (const m of code.matchAll(/deliver_page page --kind "?([a-z_:]+)"? --dedup-key "?([a-z_:$]+)"?/g)) {
+      if (m[1].startsWith("$")) continue;
+      kinds.add(m[1]);
+      assert.equal(m[2], m[1], `page call for ${m[1]} must use dedupKey == kind (${m[2]})`);
+    }
+    for (const k of ["infra:node_modules_wiped", "infra:redis_backup_stale", "infra:origin_identity_wrong"]) {
+      assert.ok(kinds.has(k), `expected a literal page call for ${k}`);
+    }
+    // run_launch_flow pages through "$etype" (a case over the signal); its two
+    // out-of-band literals are the #5046 page-list additions.
+    const lf = code.slice(code.indexOf("run_launch_flow()"));
+    for (const k of ["launch:fail_safe", "launch:meter_dark"]) {
+      assert.ok(lf.includes(`etype="${k}"`), `run_launch_flow must map a signal onto ${k}`);
+      assert.ok(isPageKindClosed(k), `${k} must be on the closed page list`);
+    }
+  });
+
+  test("hydra-watchdog.service loads %h/hydra/.env dash-prefixed (INV-8: the other blocks must run without it)", () => {
+    const unit = readFileSync(join(REPO_ROOT, "scripts", "systemd", "hydra-watchdog.service"), "utf-8");
+    assert.match(unit, /^EnvironmentFile=-%h\/hydra\/\.env$/m, "expected EnvironmentFile=-%h/hydra/.env under [Service]");
+    assert.doesNotMatch(unit, /^EnvironmentFile=%h/m, "must stay optional (dash-prefixed): a missing .env never silences the other blocks");
+    assert.doesNotMatch(unit, /^Environment=TELEGRAM_/m, "never an inline credential");
   });
 });

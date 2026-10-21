@@ -35,8 +35,7 @@ import {
   type SchedulerValue,
   type ScoutAlertsValue,
 } from "./passthrough.ts";
-import { pyFormatFixed, pyStrValue } from "./py-format.ts";
-import { pyJsonDumps, pyJsonLoads } from "./py-compat.ts";
+import { parseJsonRead } from "./github-port.ts";
 import type { PrGateSnapshot, PrPick } from "./pr-gate.ts";
 import type { PicksSnapshot } from "./picks.ts";
 import type { OrchBoardSnapshot } from "./orch-board.ts";
@@ -184,8 +183,10 @@ function pin(p: PrPick | null): TurnSnapshotPin | null {
 function healthFail(h: HealthValue): boolean {
   if (h.failedServices > 0) return true;
   if (!h.service.ok) return true;
-  // The first LINE of `<status> redis=<redis>` (Python `str()` of each); an empty value reads as `ok`.
-  const line = `${pyStrValue(h.service.value.status)} redis=${pyStrValue(h.service.value.redis)}`.split("\n")[0] as string;
+  // The first LINE of `<status> redis=<redis>` (a string verbatim, anything else as JSON — whose text never
+  // reads `ok` and holds no raw newline); an empty value reads as `ok`.
+  const text = (x: unknown): string => (typeof x === "string" ? x : JSON.stringify(x));
+  const line = `${text(h.service.value.status)} redis=${text(h.service.value.redis)}`.split("\n")[0] as string;
   const first = line.trim().split(/\s+/)[0] || "ok";
   return first !== "ok";
 }
@@ -206,7 +207,7 @@ type OrchBoardCountKey = "needs_qa" | "ready_for_agent" | "needs_triage" | "need
 function orchBoardCount(s: OrchBoardSnapshot, key: OrchBoardCountKey): number {
   if (s.counts.source === "none") return 0;
   const v = (s.counts.values as Readonly<Record<string, unknown>>)[key];
-  return pyIntOr0(v === undefined ? undefined : pyJsonDumps(v));
+  return pyIntOr0(v === undefined ? undefined : JSON.stringify(v));
 }
 
 /** A Target count line's value (`<key>=<value>`, the last one wins), or `0` when not printed. */
@@ -248,7 +249,16 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
   const board = v.archBoards.board.ok ? v.archBoards.board.value : BOARD_SIGNALS_SUPPRESSED;
   const hitl = v.hitlGrill.ok ? v.hitlGrill.value : { open: 0, saturated: true };
   const ticketsPick = v.tickets.ok ? v.tickets.value : null;
-  const share = v.realmShare.ok ? Number(pyFormatFixed(v.realmShare.value, 4)) : null;
+  // `float(f"{share:.4f}")`: the double's exact value rounded to 4 places, an exact tie to EVEN. `toFixed`
+  // rounds a tie away from zero; a tie is exactly a share whose share·2^5 is an odd integer, and then an
+  // odd last digit steps down to its even neighbour (no borrow). A non-finite share reads NaN (repaired to null).
+  let share: number | null = null;
+  if (v.realmShare.ok) {
+    const x = v.realmShare.value;
+    const fixed = Number.isFinite(x) ? x.toFixed(4) : "NaN";
+    const tie = Number.isInteger(x * 2 ** 5) && Math.abs(x * 2 ** 5) % 2 === 1;
+    share = Number(tie && /[13579]$/.test(fixed) ? `${fixed.slice(0, -1)}${Number(fixed.slice(-1)) - 1}` : fixed);
+  }
   const lastWalk = v.scout.lastWalkIso.ok ? (v.scout.lastWalkIso.value ?? "").replaceAll('"', "") : "";
 
   const signals: TurnSnapshotSignals = {
@@ -301,6 +311,10 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     orch_dev_resume_nopr_anchor: v.prGate.devResumeNoprPick.ok ? v.prGate.devResumeNoprPick.value : null,
     orch_dirty_forward_fix: pin(dirtyFix.pick),
     orch_prs_dirty_surface: dirtyFix.surface.map((e) => ({ pr: e.pr, closing_issue: e.closingIssue })),
+    // #5052: fail closed - a degraded recheck renders [] (the collector already marked it).
+    orch_qa_verdict_recheck: v.prGate.qaVerdictRecheck.ok
+      ? v.prGate.qaVerdictRecheck.value.map((e) => ({ pr: e.pr, tier: e.tier, verdict: e.verdict, verdict_sha: e.verdictSha, head_sha: e.headSha }))
+      : [],
 
     orch_pending_grill_anchor: anchor("picks", "orch_pending_grill_anchor", v.picks.grillPick),
     orch_dev_ready_anchor: anchor("picks", "orch_dev_ready_anchor", v.picks.devReadyPick),
@@ -318,19 +332,30 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
   const rawBlobs: Record<string, string> = {};
   const blobs: TurnSnapshotDoc["blobs"] = {};
   const addBlob = (name: "usage_eligibility" | "emergency_brake" | "class_stats" | "slot_events" | "target_risk_surface", collector: string, text: string) => {
-    const parsed = pyJsonLoads(text);
-    if (!parsed.ok) {
+    const parsed = parseJsonRead(text);
+    if (parsed.kind !== "ok") {
       degraded.push({ collector, field: name, reason: "unparseable-body" });
       return;
     }
     rawBlobs[name] = text;
-    (blobs as Record<string, unknown>)[name] = parsed.value; // shape-checked by the per-field repair on emit
+    (blobs as Record<string, unknown>)[name] = parsed.data; // shape-checked by the per-field repair on emit
   };
   addBlob("usage_eligibility", "usage-eligibility", blobText(v.usageEligibility, USAGE_ELIGIBILITY_FALLBACK));
   addBlob("emergency_brake", "emergency-brake", blobText(v.emergencyBrake, EMERGENCY_BRAKE_FALLBACK));
   addBlob("class_stats", "class-stats", blobText(v.classStats, CLASS_STATS_FALLBACK));
   addBlob("slot_events", "slot-events", blobText(v.slotEvents, SLOT_EVENTS_FALLBACK));
-  addBlob("target_risk_surface", "target-risk-surface", pyJsonDumps(targetRiskSurfaceBlob(v.targetRiskSurface)));
+  // decide.py has always read this blob as Python `json.dumps` text — `", "` / `": "` separators and every
+  // character outside printable ASCII as a lowercase `\uXXXX` code unit. JSON.stringify's indented form
+  // puts raw newlines ONLY between tokens (a string's own are escaped), so collapsing them yields exactly
+  // those separators; an `undefined` value prints as null.
+  addBlob(
+    "target_risk_surface",
+    "target-risk-surface",
+    JSON.stringify(targetRiskSurfaceBlob(v.targetRiskSurface), (_k, x: unknown) => (x === undefined ? null : x), 1)
+      .replace(/,\n */g, ", ")
+      .replace(/\n */g, "")
+      .replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`),
+  );
   blobs.candidate_exclusions = v.picks.candidateExclusions.map((r) => ({ ...r }));
 
   const spend = pyFiniteFloat(v.scout.spendUsd);

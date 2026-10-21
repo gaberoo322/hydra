@@ -1,32 +1,36 @@
 #!/usr/bin/env -S npx tsx
 /**
- * Telegram-Seam check — Telegram Notification Adapter closure ratchet (issue #2201).
+ * Telegram-Seam check — Operator Channel transport closure ratchet (issue
+ * #2201; ADR-0045 Decision 2, issues #5046 / #5049).
  *
- * The **Telegram Notification Adapter** Seam (`src/notify.ts`) owns the Telegram
- * Bot API request boundary: the base URL (`https://api.telegram.org/bot<token>/`),
- * the `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env resolution, the Bot API error
- * modes (token absent, non-200 response, network failure), and the JSON wire shape
- * (`chat_id` / `text` / `parse_mode`) — all behind one `fetch` primitive that the
- * `sendToTelegram` / `sendNotification` Interface exposes. Its callers
- * (`notification-consumer.ts`, `digest.ts` via the `DigestAccumulatorDeps.send`
- * dep slot, the weekly-digest chore) inject or import that sender and know nothing
- * of the URL, the auth, or the wire shape. It is the SEVENTH boundary Seam, a
- * SIBLING to the **Anthropic Request Adapter** (`src/anthropic/request.ts`, issue
- * #1959) and the **OAuth Usage Adapter** (`src/cost/oauth-usage.ts`, issue
- * #1083) — all over `fetch()`. (The FOURTH Seam, the OpenViking Request
+ * The **Operator Channel** transport (`src/operator-channel/transport.ts`)
+ * owns the Telegram Bot API request boundary: the base URL
+ * (`https://api.telegram.org/bot<token>/`), the credential resolution (via the
+ * single loader in `src/operator-channel/credentials.ts`), the Bot API error
+ * modes (token absent, non-200 response, entity-parse 400 with the plain-text
+ * resend, network failure) and the JSON wire shape (`chat_id` / `text` /
+ * `parse_mode`) — all behind one `fetch` primitive exposed as
+ * `sendHtmlToTelegram` / `createTelegramTransport`. Its callers — the channel
+ * (`channel.ts`), the Morning Brief (`brief.ts`) and, through them, the
+ * notification consumer, the watchdog and the systemd `OnFailure` units via
+ * `scripts/operator-notify.ts` — inject or import that transport and know
+ * nothing of the URL, the auth, or the wire shape. It is the SEVENTH boundary
+ * Seam, a SIBLING to the **Anthropic Request Adapter** (`src/anthropic/request.ts`,
+ * issue #1959) and the **OAuth Usage Adapter** (`src/cost/oauth-usage.ts`,
+ * issue #1083) — all over `fetch()`. (The FOURTH Seam, the OpenViking Request
  * Adapter, was the fetch()-Seam precedent; retired with the knowledge plane,
  * ADR-0033. The ordinals are historical and are not renumbered.)
  *
  * This is the CI backstop that freezes the drift, exactly as
  * `anthropic-seam-check.ts` (issue #1959) / `openviking-seam-check.ts` (#954) /
  * `host-probe-seam-check.ts` (#939) / `github-seam-check.ts` (#899) /
- * `redis-seam-check.ts` (ADR-0009) do for their boundaries: it forbids a raw
- * Telegram `fetch(...)` from any file outside `src/notify.ts`, enforced via a
- * shrink-only baseline ratchet. With it in place, every Telegram Bot API request
- * in `src/` is owned by the one adapter primitive.
+ * `redis-seam-check.ts` (ADR-0009) do for their boundaries: it forbids the
+ * Telegram Bot API host on any non-comment line of any file outside the
+ * transport, enforced via a shrink-only baseline ratchet. With it in place,
+ * every Telegram Bot API request in the repo is owned by the one transport.
  *
- * A "Telegram fetch" is detected as a `fetch(...)` whose target text carries the
- * unambiguous Telegram signal — the Telegram Bot API host (`api.telegram.org`).
+ * A violation is detected as the unambiguous Telegram signal — the Bot API
+ * host (`api.telegram.org`) — on a NON-COMMENT line.
  *
  * This is a thin Adapter over the shared baseline-ratchet engine in
  * `seam-check-lib.ts` (issue #950) and runs as a sequential step in the
@@ -34,56 +38,87 @@
  * `ci.yml`: `ci.yml` is exact-match Verifier Core (Tier-4); a sibling step keeps
  * this PR Tier-3 and auto-mergeable, mirroring the anthropic-seam precedent.
  *
- * It deliberately scans `src/**\/*.ts` only — matching the
- * anthropic/openviking/host-probe precedent's `src/**\/*.ts`-only scan.
+ * ADR-0045 Decision 2 (issue #5046) widened the scan from `src/**\/*.ts` to
+ * `src/`, `scripts/` (TypeScript, shell, Python, mjs) and the tracked systemd
+ * units, and the predicate from "a `fetch(` naming the host" to "the host on
+ * any NON-COMMENT line": bash and systemd callers must go through the Operator
+ * Channel CLI (`scripts/operator-notify.ts`), so a `curl` to the Bot API is
+ * exactly as much a violation as a `fetch`. Comments never count (TypeScript
+ * is comment-stripped first; a `.sh` / `.py` / `.service` / `.timer` line
+ * whose first non-blank character is `#` is ignored).
+ *
+ * Issue #5049 shrank the exemption list to ONE entry — the transport. This
+ * check no longer exempts itself: it assembles the host signal from parts
+ * (`TELEGRAM_HOST` below) so its own source never carries the literal on a
+ * code line, and the retired `src/notify.ts` carve-out went with the file.
  *
  * Usage:
  *   npx tsx scripts/ci/telegram-seam-check.ts
  *   npm run telegram-seam-check
  *
- * Update flow when intentionally migrating a caller behind the adapter:
- *   1. Remove the raw Telegram `fetch(...)`; route it through src/notify.ts
- *      (sendToTelegram / sendNotification), injecting the sender as a dep where
- *      the caller already takes one (e.g. DigestAccumulatorDeps.send).
+ * Update flow when intentionally migrating a caller behind the transport:
+ *   1. Remove the raw Telegram call; TypeScript routes through the Operator
+ *      Channel (src/operator-channel/), bash and systemd through
+ *      scripts/operator-notify.ts.
  *   2. Run with `--write-baseline` to regenerate the baseline file.
  *   3. Commit the smaller baseline alongside the migration.
  */
 
 import { join } from "node:path";
-import { REPO_ROOT, isCliEntrypoint, runAsCli } from "./seam-check-lib.ts";
+import { REPO_ROOT, isCliEntrypoint, runAsCli, stripComments } from "./seam-check-lib.ts";
 
 const BASELINE_PATH = join(REPO_ROOT, "scripts/ci/telegram-seam-baseline.json");
 
-/** The Telegram Notification Adapter Module itself — IS the seam (exempt). */
-const TELEGRAM_NOTIFY_MODULE = "src/notify.ts";
+/**
+ * The ONLY file allowed to name the Telegram Bot API host on a code line:
+ * the Operator Channel's transport, which owns the one `fetch` (ADR-0045
+ * Decision 2). Kept as a single-element list so the exemption surface is
+ * visibly one path — widening it is a deliberate, reviewable edit.
+ */
+export const TELEGRAM_SEAM_EXEMPT: readonly string[] = ["src/operator-channel/transport.ts"];
 
 /**
- * Unambiguous "this fetch targets the Telegram Bot API" signals. A `fetch(` whose
- * line contains any of these is a Telegram request. Kept narrow on purpose so
- * unrelated `fetch` calls (Anthropic, OpenViking, OAuth-usage, health probes) do
+ * The Telegram Bot API host — the unambiguous "this targets the Bot API"
+ * signal. Assembled from parts so this file never carries the literal on a
+ * code line and therefore needs no self carve-out (issue #5049). Kept narrow
+ * on purpose so unrelated calls (Anthropic, OAuth-usage, health probes) do
  * NOT trip the ratchet — they are not the Telegram Bot API boundary.
  */
-const TELEGRAM_TARGET_SIGNALS = [
-  "api.telegram.org", // the Telegram Bot API host
+const TELEGRAM_HOST = ["api", "telegram", "org"].join(".");
+
+const TELEGRAM_TARGET_SIGNALS = [TELEGRAM_HOST];
+
+/** The scanned surface: src/, scripts/ (ts, mjs, sh, py) and the tracked systemd units. */
+export const TELEGRAM_SEAM_GLOBS: readonly string[] = [
+  "src/*.ts",
+  "src/**/*.ts",
+  "scripts/*.ts",
+  "scripts/**/*.ts",
+  "scripts/*.sh",
+  "scripts/**/*.sh",
+  "scripts/*.py",
+  "scripts/**/*.py",
+  "scripts/*.mjs",
+  "scripts/**/*.mjs",
+  "scripts/systemd/*",
 ];
 
-/** Matches a `fetch(` call (whitespace-tolerant). */
-const FETCH_CALL = /\bfetch\s*\(/;
+/** Non-comment lines of a shell / Python script or systemd unit (leading-`#` lines dropped). */
+function shellCodeLines(body: string): string[] {
+  return body.split("\n").filter((line) => !/^\s*#/.test(line));
+}
 
 /**
  * Pure predicate: does `body` (the file contents at repo-relative `relPath`)
- * contain a raw Telegram `fetch(...)` in violation of the Telegram Notification
- * Adapter Seam? Exported so the regression test can pin the grammar without
- * shelling out to git. `relPath` decides the carve-out; pass a `src/...` path.
- *
- * The adapter Module itself (`src/notify.ts`) is the Seam (exempt — its `fetch`
- * IS the one owned call). A file violates when it both calls `fetch(` AND carries
- * a Telegram target signal on the same line.
+ * name the Telegram Bot API host on a non-comment line, in violation of the
+ * Operator Channel transport Seam? Exported so the regression test can pin
+ * the grammar without shelling out to git. `relPath` decides the carve-out and
+ * the comment grammar (`.ts` / `.mjs` → stripComments; anything else → leading-`#`).
  */
 export function fileViolatesTelegramSeam(relPath: string, body: string): boolean {
-  if (relPath === TELEGRAM_NOTIFY_MODULE) return false;
-  for (const line of body.split("\n")) {
-    if (!FETCH_CALL.test(line)) continue;
+  if (TELEGRAM_SEAM_EXEMPT.includes(relPath)) return false;
+  const lines = /\.(ts|mjs)$/.test(relPath) ? stripComments(body).split("\n") : shellCodeLines(body);
+  for (const line of lines) {
     if (TELEGRAM_TARGET_SIGNALS.some((sig) => line.includes(sig))) return true;
   }
   return false;
@@ -91,18 +126,19 @@ export function fileViolatesTelegramSeam(relPath: string, body: string): boolean
 
 const CONFIG = {
   name: "telegram-seam-check",
-  globs: ["src/*.ts", "src/**/*.ts"],
+  globs: [...TELEGRAM_SEAM_GLOBS],
   predicate: fileViolatesTelegramSeam,
   baselinePath: BASELINE_PATH,
   noteSuffix:
-    "Telegram Notification Adapter closure ratchet (issue #2201): shrink only.",
+    "Operator Channel transport closure ratchet (issue #2201; widened to scripts/ + systemd units by ADR-0045 D2, issue #5046; single exemption src/operator-channel/transport.ts since issue #5049): shrink only.",
   newViolationsHeadline:
-    "NEW telegram-seam violations (Telegram Notification Adapter, issue #2201):",
+    "NEW telegram-seam violations (Operator Channel transport, ADR-0045 D2):",
   newViolationsHelp: [
-    "These files call fetch() against the Telegram Bot API outside the",
-    "Telegram Notification Adapter. Route the message through the seam:",
-    "sendToTelegram / sendNotification (src/notify.ts), injecting the sender",
-    "as a dep where the caller already takes one (e.g. DigestAccumulatorDeps.send).",
+    "These files name the Telegram Bot API host outside the Operator Channel.",
+    "TypeScript: import src/operator-channel/ (operatorChannel.page / brief) —",
+    "the transport in src/operator-channel/transport.ts owns the one fetch.",
+    "Bash and systemd units: call scripts/operator-notify.ts",
+    "(page / resolve / brief / service-failed).",
   ],
 };
 

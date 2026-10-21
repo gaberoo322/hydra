@@ -63,6 +63,9 @@ function pinnedEnv(): NodeJS.ProcessEnv {
   delete env.HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS;
   // Keep the CLI a pure JSON emitter: no Redis XADD of turn events...
   delete env.HYDRA_AUTOPILOT_EMIT_TURN_EVENTS;
+  // ...and production reads: an ambient replay switch would make the
+  // accessor raise on the fixtures' partial snapshots (#5083).
+  delete env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY;
   // ...and no run-end POST when a fixture's plan terminates (#1352).
   env.HYDRA_AUTOPILOT_RUN_END_POST = "off";
   // Guard against string-hash-order leaking into serialized output.

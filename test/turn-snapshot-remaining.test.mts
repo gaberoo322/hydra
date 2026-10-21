@@ -41,7 +41,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { main, parseArgs, type CliDeps } from "../scripts/autopilot/turn-snapshot.ts";
-import { createTurnSnapshotGithub, type GhTransport, wayfinderFrontierQuery } from "../src/autopilot/turn-snapshot/github-port.ts";
+import { createTurnSnapshotGithub, type GhJsonRead, type GhTransport, type TurnSnapshotGithub, wayfinderFrontierQuery } from "../src/autopilot/turn-snapshot/github-port.ts";
 import { createTurnSnapshotHydra, type HydraTransport } from "../src/autopilot/turn-snapshot/hydra-http.ts";
 import { createTurnSnapshotRedis, type TurnSnapshotRedis, type TurnSnapshotRedisOps } from "../src/autopilot/turn-snapshot/redis-port.ts";
 import { REMAINING_COLLECTORS, runRemainingCollectors } from "../src/autopilot/turn-snapshot/remaining.ts";
@@ -54,6 +54,7 @@ import {
   collectScout,
   HITL_GRILL_INBOX_CAP,
   HITL_GRILL_LABEL,
+  MALFORMED_PAYLOAD,
   scoutSpendUsd,
 } from "../src/autopilot/turn-snapshot/board-saturation.ts";
 import {
@@ -67,7 +68,6 @@ import {
   NEEDS_TICKETS_LABEL,
   WAYFINDER_GRAPHQL_CONCURRENCY,
 } from "../src/autopilot/turn-snapshot/afk-frontier.ts";
-import { jqCompare, jqLength, jqSort, jqText } from "../src/autopilot/turn-snapshot/jq-compat.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot", "remaining");
@@ -833,15 +833,37 @@ describe("Turn Snapshot Redis port — bounded, fail-open, closes", () => {
   });
 });
 
-describe("Turn Snapshot slice 5B — jq / gawk parity leaves", () => {
-  test("jq length, order and text", () => {
-    assert.equal(jqLength(null), 0);
-    assert.equal(jqLength({ a: 1, b: 2 }), 2);
-    assert.equal(jqLength(-3), 3);
-    assert.throws(() => jqLength(true));
-    assert.deepEqual(jqSort([3, "2", null, true, 1, [0], { a: 1 }, false]), [null, false, true, 1, 3, "2", [0], { a: 1 }]);
-    assert.ok(jqCompare("1", 0) > 0, "strings sort after numbers (so a string totalCount counts as > 0)");
-    assert.deepEqual([jqText("x"), jqText(12), jqText(null), jqText([1, "a"])], ["x", "12", "null", '[1,"a"]']);
+describe("Turn Snapshot slice 5B — payload shapes and the gawk line (ported from the jq parity leaf, #5084)", () => {
+  test("a payload's size: null 0, an object's keys, a number's magnitude — a boolean has none and degrades", async () => {
+    const hitl = async (json: unknown) => (await runWorld({ collectors: ["hitl-grill"], gh: { [`issue-list:${HITL_GRILL_LABEL}:number`]: { json } } })).values["hitl-grill"];
+    assert.deepEqual(await hitl(null), { ok: true, value: { open: 0, saturated: false } });
+    assert.deepEqual(await hitl({ a: 1, b: 2 }), { ok: true, value: { open: 2, saturated: false } });
+    assert.deepEqual(await hitl(-3), { ok: true, value: { open: 3, saturated: false } });
+    assert.deepEqual(await hitl(true), { ok: false, reason: MALFORMED_PAYLOAD });
+  });
+
+  test("map numbers walk null < false < true < numbers < strings < lists, stopping at the first non-integer", () => {
+    const maps = (numbers: unknown[]) => foldWayfinderMaps({ kind: "ok", data: numbers.map((number) => ({ number, labels: [{ name: "wayfinder:map" }] })) });
+    assert.deepEqual(maps([3, "2", true, 1, [0], { a: 1 }, false]), { ok: true, value: ["0", "1", "1", "3", "2"] });
+    assert.deepEqual(maps([3, null, 1]), { ok: true, value: [] }, "a null number sorts first and ends the walk");
+    assert.deepEqual(maps(["10", "9", "x"]), { ok: true, value: ["10", "9"] }, "strings walk in code-point order");
+  });
+
+  test("a string assignee count ranks above every number, so it counts as in flight", () => {
+    const node = (totalCount: unknown) => ({ number: 7, state: "OPEN", labels: { nodes: [{ name: "wayfinder:task" }] }, assignees: { totalCount }, blockedBy: { nodes: [] } });
+    const line = (totalCount: unknown) => foldWayfinderMapLine({ kind: "ok", data: { data: { repository: { issue: { subIssues: { nodes: [node(totalCount)] } } } } } });
+    assert.deepEqual(line("1"), { ok: true, value: "1" });
+    assert.deepEqual(line(0), { ok: true, value: "0 7 task" });
+    assert.deepEqual(line(null), { ok: true, value: "0" }, "a null count is neither in flight nor unassigned");
+  });
+
+  test("the pick's number text: a string verbatim, anything else as JSON (only a bare digit string promotes)", async () => {
+    const pick = async (number: unknown) =>
+      (await runWorld({ collectors: ["tickets"], gh: { [`issue-list:${NEEDS_TICKETS_LABEL}:number,assignees`]: { json: [{ number, assignees: [] }] } } })).values.tickets;
+    assert.deepEqual(await pick("12"), { ok: true, value: "12" });
+    assert.deepEqual(await pick(12), { ok: true, value: "12" });
+    assert.deepEqual(await pick(null), { ok: true, value: null });
+    assert.deepEqual(await pick([1, "a"]), { ok: true, value: null });
   });
 
   test("gawk numeric coercion and the scout USD line", () => {
@@ -953,5 +975,82 @@ describe("Turn Snapshot slice 5B — CLI and fail-open runner", () => {
     // A crashed arch collector fails its work-queue depth CLOSED (1), so target backfill cannot fire.
     assert.equal(REMAINING_COLLECTORS["arch-cleanup-boards"].fallback.workQueue, 1);
     assert.equal(REMAINING_COLLECTORS["arch-cleanup-boards"].fallback.orchBoardDegraded, "1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A malformed payload degrades, never throws (#5084, the #4934 per-field contract)
+// ---------------------------------------------------------------------------
+
+describe("Turn Snapshot slice 5B — a malformed payload degrades, never throws (#5084)", () => {
+  const ok = (data: unknown): GhJsonRead => ({ kind: "ok", data });
+  /** A port whose every read returns `read`, except the `overrides`. */
+  function everyRead(read: GhJsonRead, overrides: Partial<TurnSnapshotGithub> = {}): TurnSnapshotGithub {
+    return new Proxy(overrides as TurnSnapshotGithub, {
+      get: (t, prop) =>
+        prop in t
+          ? t[prop as keyof TurnSnapshotGithub]
+          : async () => (prop === "listOpenPrMergeStates" ? { read, stderrHead: "" } : prop === "latestWorkflowRunCreatedAt" ? null : read),
+    });
+  }
+  const deps = (github: TurnSnapshotGithub, body: string) => ({
+    github,
+    hydra: { get: async () => ({ kind: "ok" as const, body }) },
+    redis: fakeRedis({}, []),
+    now: () => Date.parse("2026-10-07T12:00:00Z"),
+    ghListLimit: 100,
+    orchBoardDegraded: "0",
+    env: {},
+  });
+  const MALFORMED_READS: readonly GhJsonRead[] = [
+    { kind: "unparseable" },
+    ok(null),
+    ok(true),
+    ok("text"),
+    ok({ a: 1 }),
+    ok([null, 7, "x", []]),
+    ok([{ number: 5, labels: null, assignees: true }, { number: [1], labels: [3] }]),
+    ok({ data: { repository: { issue: { subIssues: { nodes: [{ labels: { nodes: [{ name: "wayfinder:task" }] }, state: "OPEN", assignees: 4, blockedBy: 5 }] } } } } }),
+  ];
+  const MALFORMED_BODIES = ["not json", "null", "[]", '{"runs": {"a": 1}}', '{"runs": [{"status": "ended", "run_id": []}]}', '{"runs": [{"status": 5, "run_id": {"a": 1}}]}'];
+
+  MALFORMED_READS.forEach((read, i) => {
+    test(`every read malformed (shape #${i}) → every slice-5B collector resolves`, async () => {
+      for (const body of MALFORMED_BODIES) {
+        for (const [name, entry] of Object.entries(REMAINING_COLLECTORS)) {
+          const o = await entry.collect(deps(everyRead(read), body));
+          assert.equal(o.collector, name);
+          assert.doesNotThrow(() => JSON.stringify(o.value), `${name} returns a serialisable value`);
+        }
+      }
+    });
+  });
+
+  test("one malformed map payload degrades ONLY that map — the next map's pick stands", async () => {
+    const maps = ok([issue(10, "wayfinder:map"), issue(11, "wayfinder:map")]);
+    const healthy = ok({ data: { repository: { issue: { subIssues: { nodes: [wfNode(70, "wayfinder:task")] } } } } });
+    const github = everyRead(ok([]), {
+      openIssueLabelsWithLabel: async () => maps,
+      wayfinderMapSubIssues: async (n) => (n === "10" ? ok({ data: { repository: { issue: { subIssues: { nodes: null } } } } }) : healthy),
+    });
+    const o = await REMAINING_COLLECTORS["wayfinder-frontier"].collect(deps(github, "{}"));
+    assert.deepEqual(o.value, { frontier: "70", ticketType: "task", inflightGlobal: 0 });
+    assert.deepEqual(o.degraded, [{ field: "wayfinderMap:10", reason: MALFORMED_PAYLOAD }]);
+  });
+
+  test("a bundle's drill inputs read as empty when they are an EMPTY list, object or string", () => {
+    for (const empty of [[], {}, "", null, 0]) {
+      assert.equal(foldRetroBundle(JSON.stringify(emptyBundle({ reflections: empty, stuckSignals: empty, recommendations: empty }))), false, `${JSON.stringify(empty)} is nothing to drill`);
+    }
+    assert.equal(foldRetroBundle(JSON.stringify(emptyBundle({ reflections: { r: 1 } }))), true, "a non-empty object is something to drill");
+    assert.equal(foldRetroBundle(JSON.stringify(emptyBundle({ dispatches: [{ flagged: [] }, { flagged: {} }] }))), false, "an empty flag is not flagged");
+  });
+
+  test("the candidate run id: a numeric id is its text, an empty one is no candidate", () => {
+    const runs = (run: Record<string, unknown>) => foldRetroRuns(JSON.stringify({ runs: [run] }));
+    assert.deepEqual(runs({ status: "ended", run_id: 7 }), { ok: true, value: { available: true, candidate: "7" } });
+    assert.deepEqual(runs({ status: "ended", run_id: [] }), { ok: true, value: { available: true, candidate: null } });
+    assert.deepEqual(runs({ status: null, run_id: "r1" }), { ok: true, value: { available: true, candidate: "r1" } }, "a non-string status is finished");
+    assert.deepEqual(runs({ run_id: "r1" }), { ok: true, value: { available: false, candidate: null } }, "a missing status is unfinished");
   });
 });

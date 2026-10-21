@@ -40,9 +40,9 @@ import {
   operatorChannel,
   messageFromEvent,
   checkOperatorChannelCredentials,
+  routeNotificationEvent,
   type OperatorChannel,
 } from "./operator-channel/index.ts";
-import { recordEvent } from "./digest.ts";
 import { pushAlert } from "./redis/alerts.ts";
 import { reactToCycleCompleted } from "./notification/cycle-completed-reactor.ts";
 import { startSlotEventsBridge } from "./autopilot/slot-events-bridge.ts";
@@ -62,8 +62,8 @@ const CONSUMER_NAMES = ["notifications", "dlq", "slot-events-bridge", "recs-engi
 /**
  * A bus-published event as the notification consumers observe it. Loosely
  * typed because the NOTIFICATIONS stream carries the full event vocabulary
- * (`NOTIFICATION_EVENT_TYPES`) plus the cycle-lifecycle events the digest
- * listens for; the grammar below narrows on `type` at each switch arm.
+ * (`NOTIFICATION_EVENT_TYPES`) plus the cycle-lifecycle events the Operator
+ * Channel routes; the grammar below narrows on `type` at each switch arm.
  */
 export interface NotificationEvent {
   type: string;
@@ -146,19 +146,20 @@ export async function startConsumerWithRecovery(
 }
 
 /**
- * Handle a single event off the NOTIFICATIONS stream: record it for the
- * digest, stamp the capacity-floor side history on cycle:completed (best
+ * Handle a single event off the NOTIFICATIONS stream: route it to the
+ * Operator Channel (page or Morning Brief item), stamp the capacity-floor side
+ * history on cycle:completed (best
  * effort — issue #245 / #315 contract preserved), and persist alert-worthy
  * events as dashboard alerts.
  */
 async function handleNotificationEvent(event: NotificationEvent): Promise<void> {
-  recordEvent(event);
+  routeNotificationEvent(event);
 
   // React to a completed cycle (classify the merged files, stamp the
   // capacity-floor side history, publish the orchestrator-share metric). That
   // domain reaction lives in its own focused Seam (issue #1983); this router
   // just delegates. Best-effort — the reactor's writers swallow their own
-  // errors so digest/alerting can never break a cycle.
+  // errors so channel routing / alerting can never break a cycle.
   if (event.type === "cycle:completed") {
     await reactToCycleCompleted(event);
   }
@@ -201,7 +202,8 @@ export function startConsumers(
       );
   }
 
-  // Notification consumer — stores alerts in Redis for dashboard + digest
+  // Notification consumer — stores alerts in Redis for the dashboard and
+  // routes every event to the Operator Channel (page / Morning Brief item)
   startConsumerWithRecovery("notifications", () =>
     eventBus.consume(STREAMS.NOTIFICATIONS, "openclaw", `notify-${process.pid}`,
       (event) => handleNotificationEvent(event as NotificationEvent),
