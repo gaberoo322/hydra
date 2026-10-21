@@ -1246,21 +1246,21 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 97
-        },
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 98
-        },
-        {
-          "path": "scripts/autopilot/turn.sh",
           "line": 99
+        },
+        {
+          "path": "scripts/autopilot/turn.sh",
+          "line": 100
+        },
+        {
+          "path": "scripts/autopilot/turn.sh",
+          "line": 101
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn.sh",
-        "line": 97
+        "line": 99
       }
     },
     {
@@ -1909,13 +1909,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/turn.sh",
-          "line": 102
+          "line": 104
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/turn.sh",
-        "line": 102
+        "line": 104
       }
     },
     {

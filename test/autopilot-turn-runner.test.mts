@@ -638,7 +638,7 @@ describe("turn.sh — a failed LIVE emit plans on the TS all-degraded snapshot, 
     const r = runTurn(sb);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /emit failed \(exit=1\)/);
-    assert.match(r.stdout, /\[turn\] snapshot: form=json degraded=1/);
+    assert.match(r.stdout, /\[turn\] snapshot: form=all-degraded degraded=1/, "the summary line names the fallback");
     const doc = readJson(sb.state).turn_snapshot;
     const want = cliAllDegraded("turn-snapshot.ts exited 1");
     assert.deepEqual({ ...doc, generated_at: "-" }, { ...want, generated_at: "-" }, "the stored document is the CLI's --all-degraded output, as emitted");
@@ -650,12 +650,19 @@ describe("turn.sh — a failed LIVE emit plans on the TS all-degraded snapshot, 
     assert.ok(plan.actions.some((a: any) => a.type === "dispatch" && a.slot === ALL_DEGRADED_HEALTH.slot), JSON.stringify(plan.actions));
   });
 
-  const MARKER_SHIMS: Record<string, { script: string; stderr: RegExp }> = {
-    "node cannot run at all (both calls fail)": { script: "#!/usr/bin/env bash\necho 'node: cannot execute' >&2\nexit 126\n", stderr: /--all-degraded failed too \(node cannot run\) — applying the marker document/ },
-    "empty output": { script: "#!/usr/bin/env bash\nexit 0\n", stderr: /not a readable Turn Snapshot \(unreadable/ },
-    "garbage output": { script: "#!/usr/bin/env bash\necho 'not json {'\nexit 0\n", stderr: /not a readable Turn Snapshot \(unreadable/ },
+  const NO_NODE = /--all-degraded failed too \(node cannot run\) — applying the marker document/;
+  const MARKER_SHIMS: Record<string, { script: string; stderr: RegExp; reason: RegExp }> = {
+    "node cannot run at all (both calls fail)": { script: "#!/usr/bin/env bash\necho 'node: cannot execute' >&2\nexit 126\n", stderr: NO_NODE, reason: /^turn-snapshot\.ts exited 126; --all-degraded could not run$/ },
+    // A failed --all-degraded run's partial output is never trusted: the marker is stored instead.
+    "--all-degraded prints a document, then exits non-zero": {
+      script: `#!/usr/bin/env bash\nfor a in "$@"; do if [ "$a" = "--all-degraded" ]; then echo '{"schema_version": 1, "generated_at": "partial", "signals": {"orch_work_available": true}, "blobs": {}, "degraded": [], "validation": {"ok": true}}'; exit 3; fi; done\nexit 1\n`,
+      stderr: NO_NODE,
+      reason: /^turn-snapshot\.ts exited 1; --all-degraded could not run$/,
+    },
+    "empty output": { script: "#!/usr/bin/env bash\nexit 0\n", stderr: /not a readable Turn Snapshot \(unreadable/, reason: /^unreadable: / },
+    "garbage output": { script: "#!/usr/bin/env bash\necho 'not json {'\nexit 0\n", stderr: /not a readable Turn Snapshot \(unreadable/, reason: /^unreadable: / },
   };
-  for (const [mode, { script, stderr }] of Object.entries(MARKER_SHIMS)) {
+  for (const [mode, { script, stderr, reason }] of Object.entries(MARKER_SHIMS)) {
     test(`${mode}: the marker document replaces last turn's, the doctor runs, the plan is written, exit 0`, () => {
       const sb = shimSandbox(script);
       const r = runTurn(sb);
@@ -665,6 +672,7 @@ describe("turn.sh — a failed LIVE emit plans on the TS all-degraded snapshot, 
       const after = readJson(sb.state);
       assert.equal("signals" in after.turn_snapshot, false, "the stale snapshot must not outlive a failed emit");
       assert.deepEqual(after.turn_snapshot.degraded.map((d: { field: string }) => d.field), ["*"]);
+      assert.match(after.turn_snapshot.degraded[0].reason, reason, "the marker names why no document was read");
       const plan = readJson(sb.plan);
       assert.equal(plan.turn, 4);
       assert.ok(plan.actions.some((a: any) => a.type === "dispatch" && a.slot === ALL_DEGRADED_HEALTH.slot), JSON.stringify(plan.actions));

@@ -93,6 +93,8 @@ fi
 # The cursor lives on state (bootstrap seeds it; the snapshot apply advances
 # it) — pass it so the slot-events read resumes where the last turn ended.
 cursor=$(jq -r '.slot_events_last_id // 0' "$STATE" 2>/dev/null || echo 0)
+# Set when turn.sh fell back to `--all-degraded`: the summary line names it (#5083).
+snapshot_form=""
 
 if [ -n "${HYDRA_AUTOPILOT_SNAPSHOT_REPLAY:-}" ]; then
   echo "[turn] snapshot: replaying $HYDRA_AUTOPILOT_SNAPSHOT_REPLAY"
@@ -113,6 +115,7 @@ else
     if node --no-warnings --experimental-strip-types "$SCRIPT_DIR/turn-snapshot.ts" \
       --all-degraded --reason "turn-snapshot.ts exited $snapshot_rc" >"$SNAPSHOT" 2>>"$SNAPSHOT_ERR"; then
       apply_args=("$SNAPSHOT")
+      snapshot_form="all-degraded"
     else
       echo "[turn] turn-snapshot.ts --all-degraded failed too (node cannot run) — applying the marker document" >&2
       apply_args=(--degraded "turn-snapshot.ts exited $snapshot_rc; --all-degraded could not run")
@@ -123,7 +126,7 @@ if ! applied=$(python3 "$SCRIPT_DIR/turn_snapshot.py" apply "${apply_args[@]}" "
   echo "[turn] FATAL: turn_snapshot.py apply could not update $STATE" >&2
   exit 2
 fi
-echo "[turn] snapshot: $(jq -r '"form=\(.form) degraded=\(.degraded)"' <<<"$applied" 2>/dev/null || echo "$applied") cursor=$cursor"
+echo "[turn] snapshot: $(jq -r --arg fell_back "$snapshot_form" '"form=\(if $fell_back != "" then $fell_back else .form end) degraded=\(.degraded)"' <<<"$applied" 2>/dev/null || echo "$applied") cursor=$cursor"
 
 # --- Phase 3: term-check (informational) + decide ----------------------------
 HYDRA_AUTOPILOT_STATE="$STATE" python3 "$SCRIPT_DIR/term-check.py" 2>&1 | tail -1 | sed 's/^/[turn] term-check: /'

@@ -743,11 +743,14 @@ describe("turn snapshot JSON: the all-degraded snapshot (#4934)", () => {
   test("it is conservative by construction: nothing available or due, every producer cap saturated, the doctor raised", () => {
     // The naming convention the accessor's marker reading relies on (#5083): a
     // flag is raised in the all-degraded document IFF its name ends `_fail`,
-    // `_degraded` or `_saturated` — a new fault / cap flag must follow it.
+    // `_degraded` or `_saturated` — a new fault / cap flag must follow it. Every
+    // NON-boolean value must read exactly as an absent key does on a marker
+    // turn (the accessor returns None there), so it is null, 0, "" or [].
     const s = ALL_DEGRADED_SIGNALS as Record<string, unknown>;
     assert.ok(s.health_fail === true && s.orch_board_signals_degraded === true && s.arch_board_saturated === true);
     for (const [k, v] of Object.entries(s)) {
       if (typeof v === "boolean") assert.equal(v, /_(fail|degraded|saturated)$/.test(k), k);
+      else assert.ok(v === null || v === 0 || v === "" || (Array.isArray(v) && v.length === 0), `${k}=${JSON.stringify(v)} must be null, 0, "" or [] (what an absent key reads as)`);
     }
   });
 });
