@@ -11,17 +11,24 @@
  *      before the kv wire was retired.
  *   2. Contract: golden documents round-trip through the zod schema
  *      (src/schemas/turn-snapshot.ts) and the Python accessor
- *      (accessor_check.py). No generated JSON Schema is committed.
+ *      (accessor_check.py), which stores each one AS EMITTED (store-only,
+ *      #5083). No generated JSON Schema is committed.
  *   3. Validation on emit degrades PER FIELD: an invalid field takes its
  *      all-degraded value with a marker and the rest survives; only a
- *      structurally invalid document becomes the all-degraded document.
- *   4. Every failure mode still plans: a failed emit, non-JSON, a wrong
- *      schema_version, validation.ok=false, a non-object signals map and a
- *      per-field-invalid document each reach decide.py (all-degraded or
- *      repaired) and produce a Plan; the all-degraded Plan is conservative.
- *   5. The all-degraded signals are ONE table in two languages (drift test).
+ *      structurally invalid document becomes the all-degraded document. The
+ *      TS emitter is the ONLY validator (the Python repair was deleted, #5083).
+ *   4. Every failure mode still plans: a failed emit (the marker document),
+ *      non-JSON, a non-object document or signals map, and the TS
+ *      all-degraded document each reach decide.py and produce a Plan; the
+ *      marker plans exactly as the all-degraded document, conservatively.
+ *   5. The all-degraded signals are ONE table, in TS, conservative by a naming
+ *      convention the marker reading relies on.
  *   6. The CLI's `--format json` runs every collector in one process and never
- *      crashes, even with every adapter down.
+ *      crashes, even with every adapter down; `--all-degraded` prints the
+ *      all-degraded document (turn.sh's fallback, #5083).
+ *   7. Replay mode fails loud: with HYDRA_AUTOPILOT_SNAPSHOT_REPLAY set, a
+ *      signal decide.py reads that the document lacks raises; in production
+ *      the same read degrades (#5083).
  *
  * Regenerate the golden documents after an intentional shape change:
  *   UPDATE_TURN_SNAPSHOT_JSON_GOLDEN=1 npm run test:file -- test/turn-snapshot-json.test.mts
@@ -59,6 +66,14 @@ const UPDATE_GOLDEN = process.env.UPDATE_TURN_SNAPSHOT_JSON_GOLDEN === "1";
 const NOW_MS = Date.UTC(2026, 9, 7, 12, 0, 0);
 const FAILED = { ok: false, reason: "all-reads-failed" } as const;
 const ok = <T,>(value: T) => ({ ok: true as const, value });
+/** Every signal key the schema defines (the readings each accessor case reports). */
+const SIGNAL_KEYS = Object.keys((TurnSnapshotSchema.shape.signals as unknown as { shape: Record<string, unknown> }).shape).sort();
+/** The env with the replay switch removed (production reads) or set (fail-loud reads). */
+const productionEnv = (): NodeJS.ProcessEnv => {
+  const env = { ...process.env };
+  delete env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY;
+  return env;
+};
 
 // ---------------------------------------------------------------------------
 // Scenarios: typed collector values
@@ -247,8 +262,8 @@ function emit(name: string): string {
   return serializeTurnSnapshot(buildTurnSnapshot(SCENARIOS[name]!(), { nowMs: NOW_MS })).text;
 }
 
-function python(script: string, input?: string, args: string[] = []): any {
-  const res = spawnSync("python3", [join(PARITY_DIR, script), ...args], { input, encoding: "utf-8", maxBuffer: 64 * 1024 * 1024, timeout: 240_000 });
+function python(script: string, input?: string, args: string[] = [], env: NodeJS.ProcessEnv = process.env): any {
+  const res = spawnSync("python3", [join(PARITY_DIR, script), ...args], { input, encoding: "utf-8", maxBuffer: 64 * 1024 * 1024, timeout: 240_000, env });
   assert.equal(res.status, 0, `${script} exited ${res.status}: ${res.stderr}\n${res.stdout.slice(0, 2000)}`);
   return JSON.parse(res.stdout);
 }
@@ -264,7 +279,9 @@ describe("turn snapshot JSON: plan parity over every captured decide() input (#4
   after(() => rmSync(dumpDir, { recursive: true, force: true }));
 
   test("the JSON-only state yields the golden Plan (the 6a JSON path) for every corpus entry", () => {
-    const r = python("plan_parity.py", undefined, ["--dump", dump]);
+    const allDegraded = join(dumpDir, "all-degraded.json");
+    writeFileSync(allDegraded, serializeTurnSnapshot({ doc: allDegradedTurnSnapshot("plan-parity", "turn-snapshot.ts exited 1"), rawBlobs: {} }).text);
+    const r = python("plan_parity.py", undefined, ["--dump", dump, "--all-degraded", allDegraded], productionEnv());
     assert.ok(r.entries >= 600, `corpus shrank to ${r.entries} entries — regenerate it (capture/sitecustomize.py)`);
     assert.equal(r.golden, r.entries, "one golden Plan per corpus entry");
     assert.ok(r.with_signals >= 300, `only ${r.with_signals} entries carry signals — the corpus no longer exercises the accessor`);
@@ -272,6 +289,10 @@ describe("turn snapshot JSON: plan parity over every captured decide() input (#4
     assert.deepEqual(r.unrepresentable, []);
     assert.deepEqual(r.diverged, []);
     assert.equal(r.identical, r.entries);
+    // #5083: the marker document (node could not run) plans byte-identically to the TS all-degraded document
+    assert.equal(r.marker_checked, r.entries);
+    assert.deepEqual(r.marker_diverged, []);
+    assert.equal(r.marker_identical, r.entries);
   });
 
   test("every converted JSON-form value the parity run fed decide.py is schema-valid (zod, per field)", () => {
@@ -313,13 +334,14 @@ describe("turn snapshot JSON: contract — golden documents through zod and the 
   }
 
   const goldens = Object.keys(SCENARIOS).map((name) => ({ name, snapshot: readFileSync(join(PARITY_DIR, `golden-${name}.json`), "utf-8") }));
-  const readings: any[] = python("accessor_check.py", JSON.stringify(goldens)).cases;
+  const readings: any[] = python("accessor_check.py", JSON.stringify(goldens), [], productionEnv()).cases;
 
   for (const r of readings) {
     test(`${r.name}: every typed field reads back through turn_snapshot.py unchanged, and decide.py plans`, () => {
       const doc = JSON.parse(goldens.find((g) => g.name === r.name)!.snapshot);
       assert.equal(r.form, "json");
       assert.equal(r.plan_ok, true, r.error);
+      assert.equal(r.stored_identical, true, "apply stores the TS document as emitted, field for field (store-only, #5083)");
       assert.deepEqual(r.degraded, doc.degraded, "a valid document is stored as emitted (no repair markers)");
       const rd = r.readings;
       for (const [key, value] of Object.entries(doc.signals as Record<string, unknown>)) {
@@ -470,7 +492,7 @@ describe("turn snapshot JSON: the degraded orch board counts feed the signals by
   });
 
   test("a degraded board-state with non-zero fallback counts still plans work: decide.py dispatches dev_orch (#4949)", () => {
-    const r = python("accessor_check.py", JSON.stringify([{ name: "board-state-down", snapshot: emit("board-state-down") }])).cases[0];
+    const r = python("accessor_check.py", JSON.stringify([{ name: "board-state-down", snapshot: emit("board-state-down") }]), [], productionEnv()).cases[0];
     assert.equal(r.form, "json", r.error);
     assert.equal(r.readings.orch_work_available.scalar, true, "the Python accessor reads the signal the builder derived from the fallback counts");
     assert.ok(
@@ -567,6 +589,34 @@ describe("turn snapshot JSON: validation degrades PER FIELD on emit (#4934)", ()
     assert.match(doc.degraded[0].reason, /^schema-invalid: schema_version/);
   });
 
+  test("a missing signal, a non-boolean flag, a malformed pin and an unknown blob are repaired on emit (the cases the Python apply repaired until #5083)", () => {
+    const b = built();
+    const signals = { ...b.doc.signals, orch_work_available: "yes", orch_dev_resume_pick: { issue: 4718, pr: "x", branch: "b" } } as Record<string, unknown>;
+    delete signals.health_fail;
+    const out = serializeTurnSnapshot({ ...b, doc: { ...b.doc, signals: signals as never, blobs: { ...b.doc.blobs, unknown_blob: {} } as never } });
+    const doc = JSON.parse(out.text);
+    assert.equal(out.valid, true);
+    assert.equal(out.repaired, true);
+    assert.ok(TurnSnapshotSchema.safeParse(doc).success);
+    assert.equal(doc.signals.health_fail, ALL_DEGRADED_SIGNALS.health_fail, "a missing signal → its all-degraded value");
+    assert.equal(doc.signals.orch_work_available, ALL_DEGRADED_SIGNALS.orch_work_available, "a non-bool flag → its all-degraded value");
+    assert.equal(doc.signals.orch_dev_resume_pick, null, "a malformed pin → none");
+    assert.equal("unknown_blob" in doc.blobs, false, "an unknown blob is dropped");
+    assert.deepEqual(doc.signals.orch_dirty_forward_fix, { issue: 4810, pr: 4814, branch: "fix/4810" }, "valid fields survive untouched");
+    const fields = doc.degraded.filter((d: { collector: string }) => d.collector === "turn-snapshot").map((d: { field: string }) => d.field).sort();
+    assert.deepEqual(fields, ["blobs.unknown_blob", "signals.health_fail", "signals.orch_dev_resume_pick", "signals.orch_work_available"]);
+  });
+
+  test("a non-object signals map is structural: the all-degraded document replaces it", () => {
+    const b = built();
+    const out = serializeTurnSnapshot({ ...b, doc: { ...b.doc, signals: "x" as never } });
+    const doc = JSON.parse(out.text);
+    assert.equal(out.valid, false);
+    assert.ok(TurnSnapshotSchema.safeParse(doc).success);
+    assert.deepEqual(doc.signals, ALL_DEGRADED_SIGNALS);
+    assert.deepEqual(doc.blobs, {});
+  });
+
   test("a valid document is emitted untouched (no repair, no note)", () => {
     const out = serializeTurnSnapshot(built());
     assert.equal(out.valid, true);
@@ -587,38 +637,19 @@ describe("turn snapshot JSON: every failure mode still produces a Plan (#4934)",
     f(d);
     return JSON.stringify(d);
   };
-  const cases: { name: string; snapshot: string | null }[] = [
+  const allDegraded = serializeTurnSnapshot({ doc: allDegradedTurnSnapshot("t", "turn-snapshot.ts exited 1"), rawBlobs: {} }).text;
+  const cases: { name: string; snapshot: string | null; names: string[] }[] = [
     { name: "emit-failed", snapshot: null },
     { name: "empty", snapshot: "" },
     { name: "not-json", snapshot: "<html>502 Bad Gateway</html>" },
     { name: "truncated", snapshot: healthy.slice(0, healthy.length / 2) },
     { name: "not-an-object", snapshot: "[1, 2]" },
-    { name: "schema-version", snapshot: variant((d) => (d.schema_version = 2)) },
-    { name: "validation-false", snapshot: variant((d) => (d.validation = { ok: false, issues: [] })) },
     { name: "signals-not-object", snapshot: variant((d) => (d.signals = "x")) },
-    {
-      name: "per-field",
-      snapshot: variant((d) => {
-        d.signals.orch_work_available = "yes";
-        d.signals.orch_dev_resume_pick = { issue: 4718, pr: "x", branch: "b" };
-        delete d.signals.health_fail;
-        d.signals.made_up = 1;
-        d.blobs.candidate_exclusions = "nope";
-        d.blobs.unknown_blob = {};
-        d.scout_spend_usd_today = "free";
-        d.degraded.push({ collector: 3 });
-      }),
-    },
-    {
-      name: "dict-blobs",
-      snapshot: variant((d) => {
-        d.blobs.usage_eligibility = [1];
-        d.blobs.emergency_brake = "engaged";
-      }),
-    },
-  ];
-  const results: any[] = python("accessor_check.py", JSON.stringify(cases)).cases;
+    { name: "ts-all-degraded", snapshot: allDegraded },
+  ].map((c) => ({ ...c, names: SIGNAL_KEYS }));
+  const results: any[] = python("accessor_check.py", JSON.stringify(cases), [], productionEnv()).cases;
   const byName = (n: string) => results.find((r) => r.name === n);
+  const UNREADABLE = ["emit-failed", "empty", "not-json", "truncated", "not-an-object"];
 
   for (const c of cases) {
     test(`${c.name}: apply never fails and decide.py returns a Plan`, () => {
@@ -628,46 +659,46 @@ describe("turn snapshot JSON: every failure mode still produces a Plan (#4934)",
     });
   }
 
-  test("every structurally unusable document reads as the all-degraded snapshot", () => {
-    for (const n of ["emit-failed", "empty", "not-json", "truncated", "not-an-object", "schema-version", "validation-false", "signals-not-object"]) {
+  test("an unreadable document is stored as the marker document: no signals, one `*` marker", () => {
+    for (const n of UNREADABLE) {
       const r = byName(n);
-      assert.equal(r.form, "all-degraded", n);
+      assert.equal(r.form, "marker", n);
       assert.equal(r.degraded.length, 1, n);
       assert.equal(r.degraded[0].field, "*", n);
+    }
+  });
+
+  test("a document without signals reads every signal degraded: absent values, and only the fault / cap flags raised", () => {
+    for (const n of [...UNREADABLE, "signals-not-object"]) {
+      const rd = byName(n).readings;
       for (const [k, v] of Object.entries(ALL_DEGRADED_SIGNALS)) {
-        if (Array.isArray(v)) assert.deepEqual(r.readings[k].scalar, v, `${n}: ${k}`);
-        else assert.equal(r.readings[k].scalar, v, `${n}: ${k}`);
+        // Python truthiness of the all-degraded value: only a `true` flag is raised ([], "", 0 and null are not)
+        assert.equal(rd[k].present, v === true, `${n}: ${k}`);
+        assert.equal(rd[k].scalar, null, `${n}: ${k}`);
+        assert.equal(rd[k].pin, null, `${n}: ${k}`);
+        assert.equal(rd[k].anchor, null, `${n}: ${k}`);
+        assert.deepEqual(rd[k].prs, [], `${n}: ${k}`);
+        assert.deepEqual(rd[k].recheck, [], `${n}: ${k}`);
       }
     }
   });
 
-  test("a per-field-invalid document keeps every valid field and degrades only the bad ones, with markers", () => {
-    const r = byName("per-field");
+  test("the TS all-degraded document is stored as emitted and reads back its own values", () => {
+    const r = byName("ts-all-degraded");
     assert.equal(r.form, "json");
-    assert.equal(r.readings.orch_work_available.scalar, false, "a non-bool flag → its all-degraded value");
-    assert.equal(r.readings.orch_dev_resume_pick.pin, null, "a malformed pin → none");
-    assert.equal(r.readings.health_fail.scalar, true, "a missing signal → its all-degraded value");
-    assert.equal(r.readings.made_up, undefined, "an unknown signal is dropped");
-    // valid fields survive untouched
-    assert.deepEqual(r.readings.orch_prs_dirty.ordered, healthyDoc.signals.orch_prs_dirty);
-    assert.equal(r.readings.target_needs_qa_pr_ref.text, healthyDoc.signals.target_needs_qa_pr_ref);
-    assert.deepEqual(r.readings.orch_dirty_forward_fix.pin, [4810, 4814, "fix/4810"]);
-    assert.deepEqual(r.readings._blobs.usage_eligibility, healthyDoc.blobs.usage_eligibility, "a valid blob survives");
-    const markers = r.degraded.filter((d: { collector: string }) => d.collector === "turn-snapshot");
-    const fields = markers.map((d: { field: string }) => d.field).sort();
-    assert.deepEqual(fields, ["candidate_exclusions", "degraded", "health_fail", "made_up", "orch_dev_resume_pick", "orch_work_available", "scout_spend_usd_today", "unknown_blob"]);
+    assert.equal(r.stored_identical, true);
+    for (const [k, v] of Object.entries(ALL_DEGRADED_SIGNALS)) {
+      if (Array.isArray(v)) assert.deepEqual(r.readings[k].ordered, v, k);
+      else assert.equal(r.readings[k].scalar, v, k);
+    }
   });
 
-  test("a non-object usage_eligibility / emergency_brake blob is dropped with a marker; the previous state value is kept", () => {
-    const r = byName("dict-blobs");
-    assert.equal(r.form, "json");
-    assert.equal(r.readings._blobs.usage_eligibility, null, "dropped: the base state carries no previous value");
-    assert.equal(r.readings._blobs.emergency_brake, null);
-    const fields = r.degraded.filter((d: { collector: string }) => d.collector === "turn-snapshot").map((d: { field: string }) => d.field).sort();
-    assert.deepEqual(fields, ["emergency_brake", "usage_eligibility"]);
+  test("the marker document plans exactly as the TS all-degraded document (node could not run, #5083)", () => {
+    const want = byName("ts-all-degraded").actions;
+    for (const n of [...UNREADABLE, "signals-not-object"]) assert.deepEqual(byName(n).actions, want, n);
   });
 
-  test("the CLI: a pathologically nested document (RecursionError) applies the all-degraded snapshot and exits 0", () => {
+  test("the CLI: a pathologically nested document (RecursionError) stores the marker document and exits 0", () => {
     const dir = mkdtempSync(join(tmpdir(), "ts-deep-"));
     try {
       const statePath = join(dir, "state.json");
@@ -676,7 +707,7 @@ describe("turn snapshot JSON: every failure mode still produces a Plan (#4934)",
       writeFileSync(snapPath, healthy.replace('"blobs":{', `"blobs":{"class_stats":${"[".repeat(200_000)}${"]".repeat(200_000)},`));
       const r = spawnSync("python3", [join(REPO_ROOT, "scripts", "autopilot", "turn_snapshot.py"), "apply", snapPath, statePath], { encoding: "utf-8" });
       assert.equal(r.status, 0, r.stderr);
-      assert.equal(JSON.parse(r.stdout).form, "all-degraded");
+      assert.equal(JSON.parse(r.stdout).form, "marker");
       const st = JSON.parse(readFileSync(statePath, "utf-8"));
       assert.equal(st.turn_snapshot.degraded[0].field, "*");
       assert.match(st.turn_snapshot.degraded[0].reason, /RecursionError/);
@@ -686,7 +717,7 @@ describe("turn snapshot JSON: every failure mode still produces a Plan (#4934)",
   });
 
   test("the all-degraded Plan is conservative: the doctor runs, no snapshot-driven producer or worker dispatches", () => {
-    const r = byName("emit-failed");
+    const r = byName("ts-all-degraded");
     const dispatched = r.actions.filter((a: { type: string }) => a.type === "dispatch");
     assert.ok(dispatched.some((a: { slot: string; skill: string }) => a.slot === "health" && a.skill === "hydra-doctor"), JSON.stringify(r.actions));
     for (const a of dispatched) {
@@ -709,21 +740,14 @@ describe("turn snapshot JSON: the all-degraded snapshot (#4934)", () => {
     assert.ok(TurnSnapshotSchema.safeParse(allDegradedTurnSnapshot("t", "r")).success);
   });
 
-  test("turn_snapshot.py holds the SAME table (drift guard)", () => {
-    const res = spawnSync(
-      "python3",
-      ["-c", "import json,sys; sys.path.insert(0, sys.argv[1]); import turn_snapshot as ts; print(json.dumps(ts.ALL_DEGRADED_SIGNALS))", join(REPO_ROOT, "scripts", "autopilot")],
-      { encoding: "utf-8" },
-    );
-    assert.equal(res.status, 0, res.stderr);
-    assert.deepEqual(JSON.parse(res.stdout), ALL_DEGRADED_SIGNALS);
-  });
-
   test("it is conservative by construction: nothing available or due, every producer cap saturated, the doctor raised", () => {
+    // The naming convention the accessor's marker reading relies on (#5083): a
+    // flag is raised in the all-degraded document IFF its name ends `_fail`,
+    // `_degraded` or `_saturated` — a new fault / cap flag must follow it.
     const s = ALL_DEGRADED_SIGNALS as Record<string, unknown>;
+    assert.ok(s.health_fail === true && s.orch_board_signals_degraded === true && s.arch_board_saturated === true);
     for (const [k, v] of Object.entries(s)) {
-      if (k.endsWith("_saturated") || k === "health_fail" || k === "orch_board_signals_degraded") assert.equal(v, true, k);
-      else if (typeof v === "boolean") assert.equal(v, false, k);
+      if (typeof v === "boolean") assert.equal(v, /_(fail|degraded|saturated)$/.test(k), k);
     }
   });
 });
@@ -793,6 +817,63 @@ describe("turn snapshot JSON: the CLI's --format json (#4934)", () => {
       "the risk-surface collector's own (non-crash) marker is carried, not only crash markers",
     );
     assert.ok(err.join("").includes("crashed"), "the crashes are reported on stderr");
+  });
+});
+
+describe("turn snapshot JSON: the CLI's --all-degraded (turn.sh's fallback, #5083)", () => {
+  const deps = { github: {} as never, now: () => NOW_MS, sleep: async () => {} };
+  const run = async (argv: string[]) => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await main(argv, deps, { stdout: (t) => out.push(t), stderr: (t) => err.push(t) });
+    return { code, stdout: out.join(""), stderr: err.join("") };
+  };
+
+  test("prints the TS all-degraded document, valid against the schema, with the reason on its `*` marker; no collector runs", async () => {
+    const r = await run(["--all-degraded", "--reason", "turn-snapshot.ts exited 1"]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stderr, "");
+    const doc = JSON.parse(r.stdout);
+    assert.ok(TurnSnapshotSchema.safeParse(doc).success);
+    assert.deepEqual(doc, allDegradedTurnSnapshot(new Date(NOW_MS).toISOString(), "turn-snapshot.ts exited 1"));
+    assert.deepEqual(doc.degraded, [{ collector: "turn-snapshot", field: "*", reason: "turn-snapshot.ts exited 1" }]);
+  });
+
+  test("usage errors exit 2: no --reason, an empty reason, --reason alone, or another flag beside it", async () => {
+    for (const argv of [["--all-degraded"], ["--all-degraded", "--reason", " "], ["--reason", "x"], ["--all-degraded", "--reason", "x", "--format", "json"]]) {
+      const r = await run(argv);
+      assert.equal(r.code, 2, argv.join(" "));
+      assert.equal(r.stdout, "", argv.join(" "));
+    }
+  });
+});
+
+describe("turn snapshot JSON: replay mode fails loud on a signal the document lacks (#5083)", () => {
+  // A golden document minus one signal decide.py reads every turn (the #4130 board-degraded stamp).
+  const doc = JSON.parse(readFileSync(join(PARITY_DIR, "golden-healthy.json"), "utf-8"));
+  delete doc.signals.orch_board_signals_degraded;
+  const cases = [{ name: "missing-signal", snapshot: JSON.stringify(doc), names: ["orch_board_signals_degraded", "orch_work_available"] }];
+
+  test("production: the read degrades to absent and decide.py still plans", () => {
+    const r = python("accessor_check.py", JSON.stringify(cases), [], productionEnv()).cases[0];
+    assert.equal(r.form, "json");
+    assert.equal(r.readings.orch_board_signals_degraded.scalar, null);
+    assert.equal(r.readings.orch_board_signals_degraded.present, false);
+    assert.equal(r.plan_ok, true, r.error);
+  });
+
+  test("replay (HYDRA_AUTOPILOT_SNAPSHOT_REPLAY set): the same read raises and decide.py fails instead of planning", () => {
+    const r = python("accessor_check.py", JSON.stringify(cases), [], { ...productionEnv(), HYDRA_AUTOPILOT_SNAPSHOT_REPLAY: "golden" }).cases[0];
+    assert.match(r.readings.orch_board_signals_degraded.raised ?? "", /UnknownSignalError: .*'orch_board_signals_degraded'/);
+    assert.equal(r.readings.orch_work_available.scalar, true, "a signal the document carries still reads normally");
+    assert.equal(r.plan_ok, false);
+    assert.match(r.error ?? "", /UnknownSignalError: .*orch_board_signals_degraded/);
+  });
+
+  test("replay of a complete golden document plans normally (the fail-loud mode is not vacuous-red)", () => {
+    const whole = [{ name: "healthy", snapshot: readFileSync(join(PARITY_DIR, "golden-healthy.json"), "utf-8") }];
+    const r = python("accessor_check.py", JSON.stringify(whole), [], { ...productionEnv(), HYDRA_AUTOPILOT_SNAPSHOT_REPLAY: "golden" }).cases[0];
+    assert.equal(r.plan_ok, true, r.error);
   });
 });
 

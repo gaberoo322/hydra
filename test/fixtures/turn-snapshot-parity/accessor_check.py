@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 """
 The Python half of the Turn Snapshot contract test (ADR-0043 Decision 5,
-issue #4934; test/turn-snapshot-json.test.mts drives it).
+issue #4934; store-only accessor since #5083; test/turn-snapshot-json.test.mts
+drives it).
 
-stdin: `[{"name": str, "snapshot": str | null}]` — each `snapshot` is the raw
-text turn.sh would hand `turn_snapshot.py apply` (null = the emit failed:
-`apply --degraded`). For each case this applies it to a base autopilot state
-(the decide-golden idle-triage-sweep fixture, its own snapshot and blob
-fields removed) exactly as the CLI does — per-field repair for a usable
-document, the all-degraded snapshot for an unusable one — then
+stdin: `[{"name": str, "snapshot": str | null, "names"?: [str]}]` — each
+`snapshot` is the raw text turn.sh would hand `turn_snapshot.py apply` (null =
+no document: `apply --degraded`, the marker). For each case this applies it to
+a base autopilot state (the decide-golden idle-triage-sweep fixture, its own
+snapshot and blob fields removed) exactly as the CLI does — the document as
+emitted, or the marker document when it cannot be read as a JSON object — then
 
-  * reads every signal back through each accessor reader decide.py uses, and
+  * reads each signal back through EVERY accessor reader decide.py uses (the
+    caller picks the reader that fits the signal's schema type; `names`
+    defaults to the stored document's own signal keys), and
   * runs decide.decide() over the result — which must return a Plan, never raise.
 
-stdout: `{"cases": [{name, form, degraded, readings, plan_ok, actions, error}]}`.
+stdout: `{"cases": [{name, form, stored_identical, degraded, readings, plan_ok, actions, error}]}`.
+Run with HYDRA_AUTOPILOT_SNAPSHOT_REPLAY set, a read of a signal the document
+lacks is reported as `{"raised": ...}` and decide() fails (plan_ok false).
 """
 
 import copy
@@ -34,24 +39,31 @@ import turn_snapshot as ts  # noqa: E402
 BASE_DIR = os.path.join(REPO, "test", "fixtures", "decide-golden", "idle-triage-sweep")
 
 
-def readings(state: dict) -> dict:
+def readings(state: dict, names: list[str]) -> dict:
     out = {}
-    for name in ts.snapshot(state)["signals"]:
-        out[name] = {"present": ts.signal_present(state, [], name), "scalar": ts.scalar(state, name)}
-    for name in ts._PIN_SIGNALS:
-        out.setdefault(name, {})["pin"] = ts.pin(state, [], name)
-    for name in ts._ANCHOR_SIGNALS:
-        out.setdefault(name, {})["anchor"] = ts.anchor_ref(state, name)
-    for name in ts._LIST_SIGNALS:
-        out.setdefault(name, {})["ordered"] = ts.ordered_numbers(state, [], name)
-        out[name]["prs"] = ts.pr_numbers(state, [], name)
-    out.setdefault("orch_prs_dirty_surface", {})["pairs"] = ts.dirty_surface_pairs(state, [], "orch_prs_dirty_surface")
-    out.setdefault("orch_qa_verdict_recheck", {})["recheck"] = ts.qa_verdict_recheck(state, [], "orch_qa_verdict_recheck")
-    for name in ("target_needs_qa_pr_ref", "target_needs_qa_pr_head"):
-        out.setdefault(name, {})["text"] = ts.text(state, [], name)
+    for name in names:
+        try:
+            out[name] = {
+                "present": ts.signal_present(state, [], name),
+                "scalar": ts.scalar(state, name),
+                "pin": ts.pin(state, [], name),
+                "anchor": ts.anchor_ref(state, name),
+                "ordered": ts.ordered_numbers(state, [], name),
+                "prs": ts.pr_numbers(state, [], name),
+                "pairs": ts.dirty_surface_pairs(state, [], name),
+                "recheck": ts.qa_verdict_recheck(state, [], name),
+                "text": ts.text(state, [], name),
+            }
+        except ts.UnknownSignalError as exc:
+            # replay mode: the read failed loud — report it, the caller asserts on it
+            out[name] = {"raised": f"UnknownSignalError: {exc}"}
     out["_blobs"] = {f: ts.blob(state, f) for f in (*ts.BLOB_FIELDS, "scout_spend_usd_today")}
     out["_slot_events"] = {"events": state.get("slot_events"), "last_id": state.get("slot_events_last_id")}
     return out
+
+
+def _canon(value) -> str:
+    return json.dumps(value, sort_keys=True)
 
 
 def main() -> int:
@@ -75,14 +87,18 @@ def main() -> int:
                 snap = json.loads(text)
             except (ValueError, RecursionError) as exc:
                 reason = f"unreadable: {exc}"
-            if reason is None and not ts._usable(snap):
-                reason = ts._why_unusable(snap)
-        state = ts.apply(snap if reason is None else None, copy.deepcopy(base), reason)
+            if reason is None and not isinstance(snap, dict):
+                reason = f"not a JSON object ({type(snap).__name__})"
+        state = ts.apply(copy.deepcopy(snap) if reason is None else None, copy.deepcopy(base), reason)
+        stored = state["turn_snapshot"]
+        signals = stored.get("signals")
+        names = case.get("names") or (list(signals) if isinstance(signals, dict) else [])
         result = {
             "name": case["name"],
-            "form": "json" if reason is None else "all-degraded",
-            "degraded": state["turn_snapshot"]["degraded"],
-            "readings": readings(state),
+            "form": "json" if reason is None else "marker",
+            "stored_identical": reason is None and _canon(stored) == _canon(snap),
+            "degraded": stored.get("degraded"),
+            "readings": readings(state, names),
         }
         try:
             plan = json.loads(decide.decide(state, copy.deepcopy(candidates), [], now=now).to_json())

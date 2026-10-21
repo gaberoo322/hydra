@@ -12,14 +12,18 @@
 #                                   every collector in one process, with the
 #                                   slot-events cursor read from state,
 #                                   validated (and repaired per field) on emit
-#   2. turn_snapshot.py apply (Phase 1)  stores it on state.turn_snapshot — the
-#                                   ONE form decide.py, render-dispatch.py and
-#                                   term-check.py read, through
-#                                   scripts/autopilot/turn_snapshot.py. A failed
-#                                   emit or an unusable document stores the
-#                                   ALL-DEGRADED snapshot instead (conservative:
-#                                   nothing available, every producer cap
-#                                   saturated, health_fail) — the turn still plans.
+#   2. turn_snapshot.py apply (Phase 1)  stores it, as emitted, on
+#                                   state.turn_snapshot — the ONE form decide.py,
+#                                   render-dispatch.py and term-check.py read,
+#                                   through scripts/autopilot/turn_snapshot.py.
+#                                   A failed emit is replaced by
+#                                   `turn-snapshot.ts --all-degraded` (the
+#                                   ALL-DEGRADED snapshot: nothing available,
+#                                   every producer cap saturated, health_fail);
+#                                   when node cannot run even that, or a document
+#                                   is unreadable, the MARKER document (no
+#                                   signals: every signal reads degraded, the
+#                                   same plan) — the turn still plans (#5083).
 #   3. term-check.py     (Phase 3)   prints TERM:<cause> | OK — informational here;
 #                                   decide.py emits the `terminate` action itself
 #   4. decide.py decide  (Phase 3)   the plan, written to $HYDRA_AUTOPILOT_PLAN
@@ -47,13 +51,17 @@
 #   HYDRA_AUTOPILOT_SNAPSHOT_REPLAY  a recorded JSON snapshot to apply INSTEAD
 #                                  of running the collectors (the fixture
 #                                  suite, and an operator replaying a turn
-#                                  offline); unusable → all-degraded, as live
+#                                  offline); unreadable → the marker document.
+#                                  Also puts the accessor in fail-loud mode: a
+#                                  signal decide.py reads that the document
+#                                  does not carry raises (decide.py then exits
+#                                  non-zero) instead of reading as absent
 #
 # Exit codes: 0 — plan written and invariants hold; decide.py's own non-zero
 # code when it fails (its stderr tail is echoed); 1 when assert_invariants.py
 # rejects the plan; 2 when the state is missing or cannot be written. A failed
-# or unusable snapshot is NOT fatal: the all-degraded snapshot is applied and
-# the turn proceeds on it.
+# or unreadable snapshot is NOT fatal: the all-degraded snapshot (or, without
+# node, the marker document) is applied and the turn proceeds on it.
 #
 # Never writes state.turn (the decide.py CLI owns it, #1769) and never edits
 # state.json itself — turn_snapshot.py and decide.py are the only writers here.
@@ -72,7 +80,7 @@ SNAPSHOT="${HYDRA_AUTOPILOT_SNAPSHOT:-/tmp/hydra-autopilot-snapshot.json}"
 SNAPSHOT_ERR="${SNAPSHOT%.json}.err"
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-  sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,67p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 
@@ -98,10 +106,17 @@ else
     apply_args=("$SNAPSHOT")
   else
     # Never trust a partial document from a failed emit: the turn plans on
-    # the all-degraded snapshot instead.
+    # the TS-produced all-degraded snapshot instead (#5083) — or, when node
+    # cannot run even that, on the marker document (every signal degraded).
     echo "[turn] JSON Turn Snapshot emit failed (exit=$snapshot_rc) — applying the all-degraded snapshot for this turn" >&2
     tail -3 "$SNAPSHOT_ERR" >&2
-    apply_args=(--degraded "turn-snapshot.ts exited $snapshot_rc")
+    if node --no-warnings --experimental-strip-types "$SCRIPT_DIR/turn-snapshot.ts" \
+      --all-degraded --reason "turn-snapshot.ts exited $snapshot_rc" >"$SNAPSHOT" 2>>"$SNAPSHOT_ERR"; then
+      apply_args=("$SNAPSHOT")
+    else
+      echo "[turn] turn-snapshot.ts --all-degraded failed too (node cannot run) — applying the marker document" >&2
+      apply_args=(--degraded "turn-snapshot.ts exited $snapshot_rc; --all-degraded could not run")
+    fi
   fi
 fi
 if ! applied=$(python3 "$SCRIPT_DIR/turn_snapshot.py" apply "${apply_args[@]}" "$STATE"); then

@@ -34,6 +34,11 @@ dispatch reason / surface-pr cause strings in the affected Plans.
       record the golden Plans, planning with the decide.py / turn_snapshot.py
       in <dir> (default: this checkout's scripts/autopilot) — e.g. a
       worktree of the reference commit
+  python3 plan_parity.py --all-degraded <doc.json> [...]
+      also plan every entry twice more — over the TS all-degraded document in
+      <doc.json> (what `turn-snapshot.ts --all-degraded` prints) and over the
+      accessor's MARKER document (no signals: node could not run, #5083) — and
+      count the entries whose two Plans are byte-identical (`marker_identical`)
 
 Values the typed form cannot represent (a fixture-authored anchor that is not
 `issue-N`) would make the conversion lossy; they are counted and reported as
@@ -172,6 +177,19 @@ def _fold_retired_glm_events(events):
     return out
 
 
+def _emittable_blob(field: str, value) -> bool:
+    """Whether the TS emitter could carry this legacy blob value
+    (src/schemas/turn-snapshot.ts BlobsSchema: the two mapping blobs are
+    objects, candidate_exclusions a list of objects; the rest are presence +
+    JSON). Lifted from the retired accessor-side repair (#5083) so the
+    conversion stays the one the golden Plans were recorded over."""
+    if field == "candidate_exclusions":
+        return isinstance(value, list) and all(isinstance(r, dict) for r in value)
+    if field in ("usage_eligibility", "emergency_brake"):
+        return isinstance(value, dict)
+    return True
+
+
 def to_json_form(state: dict) -> dict:
     s = copy.deepcopy(state)
     if _RETIRED_GLM_TRACKER in s:
@@ -235,7 +253,7 @@ def to_json_form(state: dict) -> dict:
             # A value the schema rejects (a non-object usage_eligibility, say)
             # can never be emitted — the TS emitter drops it with a marker — so
             # it is converted to ABSENT, which is also how decide.py reads it.
-            if ts._valid_blob(field, value):
+            if _emittable_blob(field, value):
                 blobs[field] = value
     snap = {
         "schema_version": ts.SCHEMA_VERSION,
@@ -271,6 +289,12 @@ def main() -> int:
         i = args.index("--dump")
         dump = args[i + 1]
         del args[i : i + 2]
+    all_degraded = None
+    if "--all-degraded" in args:
+        i = args.index("--all-degraded")
+        with open(args[i + 1], encoding="utf-8") as fh:
+            all_degraded = json.load(fh)
+        del args[i : i + 2]
     path = args[0] if args else os.path.join(HERE, "decide-inputs.jsonl.gz")
     with gzip.open(path, "rt", encoding="utf-8") as fh:
         entries = [json.loads(line) for line in fh if line.strip()]
@@ -284,6 +308,9 @@ def main() -> int:
     unrepresentable: list[str] = []
     diverged: list[dict] = []
     plans: list[str] = []
+    marker_checked = 0
+    marker_identical = 0
+    marker_diverged: list[int] = []
     for i, entry in enumerate(entries):
         state = entry["state"]
         if isinstance(state, dict) and isinstance(state.get("signals"), dict) and state["signals"]:
@@ -298,6 +325,14 @@ def main() -> int:
             dumped.write(json.dumps(json_state["turn_snapshot"]) + "\n")
         plan = run(entry, json_state)
         plans.append(plan)
+        if all_degraded is not None and isinstance(json_state, dict):
+            bare = {k: v for k, v in json_state.items() if k != "turn_snapshot"}
+            marker_checked += 1
+            ts_plan = run(entry, ts.apply(copy.deepcopy(all_degraded), copy.deepcopy(bare)))
+            if ts_plan == run(entry, ts.apply(None, copy.deepcopy(bare), "node could not run")):
+                marker_identical += 1
+            else:
+                marker_diverged.append(i)
         if not write_golden:
             if i < len(golden) and golden[i] == plan:
                 identical += 1
@@ -323,6 +358,9 @@ def main() -> int:
                 "diverged": diverged[:5],
                 "diverged_count": len(diverged),
                 "autopilot_dir": os.path.relpath(AUTOPILOT_DIR, REPO) if AUTOPILOT_DIR.startswith(REPO + os.sep) else AUTOPILOT_DIR,
+                "marker_checked": marker_checked,
+                "marker_identical": marker_identical,
+                "marker_diverged": marker_diverged[:10],
             }
         )
     )
