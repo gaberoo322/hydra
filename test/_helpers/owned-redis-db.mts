@@ -5,7 +5,7 @@
  * HYDRA_REDIS_DB. Tests that need a non-zero DB must use that value, never a
  * literal from the launcher's pool: a concurrent run owns every other index
  * and FLUSHDBs it mid-assertion. One shared parse so the membership check
- * (ALLOWED_DB_INDEXES) cannot drift between call sites.
+ * (ALLOWED_DB_INDEXES) cannot drift between call sites (shared by watchdog tests + shim).
  */
 import { ALLOWED_DB_INDEXES } from "../../scripts/test/redis-db-launch.mjs";
 
