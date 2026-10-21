@@ -82,7 +82,7 @@
   "scripts/claude-hooks/git-remote-fence.sh": 1,
   "scripts/claude-hooks/worktree-write-fence.sh": 1,
   "scripts/cost/weighted-quota-report.ts": 1,
-  "scripts/deploy.sh": 3,
+  "scripts/deploy.sh": 4,
   "scripts/docs/generate-inventories.ts": 1,
   "scripts/docs/inventories/adrs.ts": 1,
   "scripts/docs/inventories/context-map.ts": 1,

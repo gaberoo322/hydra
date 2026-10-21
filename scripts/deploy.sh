@@ -216,6 +216,26 @@ install -D -m 0644 scripts/systemd/hydra-autopilot.service "$HOME/.config/system
 systemctl --user daemon-reload
 systemctl --user enable --now hydra-pace-gate.timer
 
+echo "==> Installing Claude Code PreToolUse hooks (issue #5064)..."
+# scripts/setup-claude-hooks.sh copies scripts/claude-hooks/<name> (from THIS
+# deployed checkout) into ~/.claude/hooks/hydra/ and registers each in
+# ~/.claude/settings.json's hooks.PreToolUse. It used to be a manual one-time
+# operator step, so git-remote-fence.sh (#4939, merged in #4980) was never
+# installed and hook edits on master never reached the live copies. The
+# installer is idempotent (managed blocks are replaced, never duplicated;
+# other settings keys untouched; atomic write, skipped when unchanged).
+#
+# NON-FATAL BY DESIGN: a hook-install failure must never block the service
+# restart below. Child-process `|| RC=$?` form (same rationale as the health
+# and stamp steps) keeps the installer's own `set -e` live. The watchdog's
+# ## CLAUDE HOOKS block (run_claude_hooks) alarms if hooks stay missing.
+HOOKS_RC=0
+bash scripts/setup-claude-hooks.sh || HOOKS_RC=$?
+if [ "$HOOKS_RC" -ne 0 ]; then
+  echo "::error::Claude Code hook install failed (exit ${HOOKS_RC}). The deploy continues, but PreToolUse fences (worktree-write-fence, git-remote-fence) may be missing or stale. Re-run: bash scripts/setup-claude-hooks.sh (issue #5064)."
+  echo "==> ERROR: Claude Code hook install failed (exit ${HOOKS_RC}) — continuing deploy; re-run bash scripts/setup-claude-hooks.sh."
+fi
+
 echo "==> Restarting service..."
 systemctl --user restart hydra-orchestrator.service
 
