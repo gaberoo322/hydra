@@ -43,9 +43,12 @@
  *   target_needs_qa_pr_*    the first needs-qa issue's closing PR (#4576)
  *   target_dev_resume_pick  the shared pick (dev-resume.ts, #4739 policy)
  *
- * Never throws on a read failure: each degrades to a typed field plus the
- * verbatim stderr note the bash printed. The `kv` renderer owns the fallback
- * lines.
+ * Never throws on a read failure: each degrades to a typed field (a
+ * `Classified` reason and/or a `DegradedMarker`), and the reads the bash
+ * reported keep their stderr note, which names the failure in plain words or
+ * a reason code (`unparseable`) — never parser exception text. The JSON
+ * builder (json-snapshot.ts) owns the fail-open values a degraded field
+ * projects to.
  */
 
 import {

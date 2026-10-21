@@ -1393,6 +1393,22 @@ describe("Target board family — a malformed payload degrades, never throws (#5
     }
   });
 
+  test("a numbered fallback / blocker-search row whose `labels` is a scalar or an object reads as unlabelled — the collector resolves, only boardState degrades", async () => {
+    const row = (n: number, labels: string[], body = "") => ({ number: n, labels: labels.map((name) => ({ name })), body });
+    for (const labels of ["x", 7, true, { a: {} }]) {
+      const what = `labels ${JSON.stringify(labels)}`;
+      const r = await runBoard({
+        issuesFallback: ok([{ number: 4, labels, body: "" }, row(5, ["needs-triage"]), row(100, ["ready-for-agent"], "Blocked by #900")]),
+        blockerSearch: ok([{ number: 900, labels }]),
+      });
+      assert.equal(r.value.counts.ok, true, what);
+      assert.equal(r.out.target_needs_triage, "1", `${what}: the well-formed row still counts`);
+      assert.equal(r.out.target_ready_blocker_excluded, "1", `${what}: the blocker-search row still reads as open`);
+      assert.equal(r.value.laneDegraded, false, what);
+      assert.deepEqual(r.degraded.map((d) => d.field), ["boardState"], `${what}: the board-endpoint marker is the only one`);
+    }
+  });
+
   test("a healthy count that is not a string prints as JSON text; only a decimal integer counts", () => {
     assert.deepEqual(countsOf({ ready_for_agent: 3, needs_qa: "2", needs_triage: null, needs_research: [] }), {
       target_ready_for_agent: "3",

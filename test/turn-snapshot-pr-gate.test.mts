@@ -428,6 +428,17 @@ describe("pr-gate — BEHIND/draft classification (issue #4240)", () => {
     assert.deepEqual(buckets.unchecked, [4237]);
     assert.deepEqual(buckets.behind, []);
   });
+
+  test("isDraft reads with Python truthiness: an EMPTY list / object is not a draft, so a DIRTY PR still lands in orch_prs_dirty (#5084)", async () => {
+    for (const isDraft of [[], {}]) {
+      const buckets = await runPrGate([{ ...basePrGate({ number: 4400, mergeStateStatus: "DIRTY" }), isDraft }]);
+      assert.deepEqual(buckets.dirty, [4400], `isDraft ${JSON.stringify(isDraft)} is Python-falsy`);
+    }
+    for (const isDraft of [[0], { a: 1 }, true]) {
+      const buckets = await runPrGate([{ ...basePrGate({ number: 4401, mergeStateStatus: "DIRTY" }), isDraft }]);
+      assert.deepEqual(buckets.dirty, [], `isDraft ${JSON.stringify(isDraft)} is Python-truthy`);
+    }
+  });
 });
 
 describe("pr-gate — red-CI resume arm, provenance-agnostic (issues #4460, #5058)", () => {

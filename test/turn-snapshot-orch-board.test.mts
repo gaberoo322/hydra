@@ -726,4 +726,17 @@ describe("orch board family — a malformed payload degrades, never throws (#508
     for (const unset of [[], {}, 0, null, "", false]) assert.notEqual(healthyBoardState(body(unset)), null, `${JSON.stringify(unset)} is not a degraded flag`);
     for (const set of [[0], { a: 1 }, 1, "yes", true]) assert.equal(healthyBoardState(body(set)), null, `${JSON.stringify(set)} is a degraded flag`);
   });
+
+  test("a numbered fallback row whose `labels` is a scalar or an object reads as unlabelled — the collector resolves, only boardState degrades", async () => {
+    for (const labels of ["x", 7, true, { a: {} }]) {
+      const rows = [{ number: 4, labels, updatedAt: iso(60) }, row(5, ["ready-for-agent"])];
+      const out = await collectOrchBoard({ github: fakeGithub(ok(rows)), hydra: serviceDown, now: () => NOW_MS, ghListLimit: 100 });
+      const what = `labels ${JSON.stringify(labels)}`;
+      assert.equal(out.value.counts.source, "derived", what);
+      assert.equal((out.value.counts as { values: Record<string, unknown> }).values.ready_for_agent, 1, `${what}: the well-formed row still counts`);
+      assert.equal(out.value.orchBoardDegraded, false, what);
+      assert.deepEqual(out.value.needsTriageItems, { ok: true, value: [] }, what);
+      assert.deepEqual(out.degraded.map((d) => d.field), ["boardState"], `${what}: the service-down marker is the only one`);
+    }
+  });
 });

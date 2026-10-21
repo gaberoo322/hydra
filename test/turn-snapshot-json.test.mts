@@ -428,7 +428,13 @@ describe("turn snapshot JSON: builder details (#4934)", () => {
       "the blob is spliced as Python json.dumps text",
     );
     assert.deepEqual(JSON.parse(text).blobs.target_risk_surface, manifest, "and it still parses back to the manifest");
-    const failed = serializeTurnSnapshot(buildTurnSnapshot({ ...healthyValues(), targetRiskSurface: { manifest: { ok: false, reason: "no manifest field" } } }, { nowMs: NOW_MS })).text;
+    const holes = { ok: true, u: undefined, v: [1, undefined], w: { x: undefined } };
+    const holeText = serializeTurnSnapshot(buildTurnSnapshot({ ...healthyValues(), targetRiskSurface: { manifest: ok(holes) } }, { nowMs: NOW_MS })).text;
+    assert.ok(
+      holeText.includes('"target_risk_surface":{"ok": true, "u": null, "v": [1, null], "w": {"x": null}}'),
+      "an undefined field prints as null (the deleted pyJsonDumps rule), never silently dropped",
+    );
+    const failed =serializeTurnSnapshot(buildTurnSnapshot({ ...healthyValues(), targetRiskSurface: { manifest: { ok: false, reason: "no manifest field" } } }, { nowMs: NOW_MS })).text;
     assert.ok(failed.includes('"target_risk_surface":{"ok": false, "errors": ["target_risk_surface_json: no manifest field"]}'));
   });
 
