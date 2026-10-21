@@ -2113,7 +2113,24 @@
       ],
       "source": {
         "path": "src/api/operator-channel.ts",
-        "line": 25
+        "line": 40
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/operator-channel/delivery-health",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/pages/Health.jsx"
+      ],
+      "home": "/health",
+      "areas": [
+        "src/operator-channel/"
+      ],
+      "source": {
+        "path": "src/api/operator-channel.ts",
+        "line": 51
       }
     },
     {

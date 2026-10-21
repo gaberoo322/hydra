@@ -27,6 +27,8 @@ import type { OperatorMessage } from "../src/operator-channel/message.ts";
 describe("PAGE_KINDS closed page list", () => {
   test("holds exactly the ADR-0045 Decision 3 list", () => {
     assert.deepEqual([...PAGE_KINDS].sort(), [
+      // The watchdog's no-brief-for-26h alarm (ADR-0045 Decision 8, #5048).
+      "brief:missing",
       "consumer:dead",
       "glm:drainer_sterile",
       // The on-wire spelling src/holdback.ts publishes (issue #5047 fixed the

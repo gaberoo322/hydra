@@ -146,6 +146,17 @@ export const redisBriefStore = {
   setLastSent: setBriefLastSent,
 };
 
+/**
+ * The read-only trio the delivery-health summary folds (ADR-0045 Decision 8,
+ * issue #5048): the whole bounded log, every currently-bad dedup hash and the
+ * brief last-sent stamp. Nothing here mutates.
+ */
+export const redisDeliveryHealthReads = {
+  readDeliveryLog: () => readDeliveryLog(),
+  listDedupStates,
+  getBriefLastSent,
+};
+
 /** The production store the channel binds by default. */
 export const redisOperatorChannelStore = {
   readDedup,

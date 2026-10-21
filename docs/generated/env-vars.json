@@ -268,6 +268,10 @@
           "line": 2141
         },
         {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2531
+        },
+        {
           "path": "scripts/setup-claude-hooks.sh",
           "line": 23
         },
@@ -2851,6 +2855,10 @@
         {
           "path": "scripts/hydra-watchdog.sh",
           "line": 2112
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2489
         }
       ],
       "inEnvExample": false,
@@ -2893,6 +2901,10 @@
         {
           "path": "scripts/hydra-watchdog.sh",
           "line": 2110
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2487
         }
       ],
       "inEnvExample": false,
@@ -2935,6 +2947,10 @@
         {
           "path": "scripts/hydra-watchdog.sh",
           "line": 2111
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2488
         }
       ],
       "inEnvExample": false,
@@ -3161,6 +3177,10 @@
         {
           "path": "scripts/hydra-watchdog.sh",
           "line": 2354
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2531
         },
         {
           "path": "src/aggregators/architecture-graph.ts",
@@ -3783,6 +3803,34 @@
       }
     },
     {
+      "name": "HYDRA_WATCHDOG_BRIEF_NOW_MS",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2542
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.sh",
+        "line": 2542
+      }
+    },
+    {
+      "name": "HYDRA_WATCHDOG_BRIEF_STALE_HOURS",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2495
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.sh",
+        "line": 2495
+      }
+    },
+    {
       "name": "HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL",
       "readSites": [
         {
@@ -4126,6 +4174,10 @@
         {
           "path": "scripts/hydra-watchdog.sh",
           "line": 2141
+        },
+        {
+          "path": "scripts/hydra-watchdog.sh",
+          "line": 2531
         }
       ],
       "inEnvExample": false,
