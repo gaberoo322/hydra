@@ -214,7 +214,7 @@ function seedSince(signal: string, ms: number): void {
  * the segment between the fixed prefix and the first `-` after it.
  */
 function runNsPid(key: string): number | null {
-  const m = /^hydra:test:launch-flow-(\d+)-[0-9a-f]{8}(?::|$)/.exec(key);
+  const m = /^hydra:test:launch-flow-(?:delivery-)?(\d+)-[0-9a-f]{8}(?::|$)/.exec(key);
   if (m === null) return null;
   const pid = Number(m[1]);
   return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
@@ -1222,6 +1222,17 @@ describe("cross-run isolation: one run must not delete another's fixtures (issue
     // live pid's must both be protected.
     assert.equal(isRunNamespaceLive(`${RUN_NS}:launch-flow:since:latency`), true);
     assert.equal(isRunNamespaceLive(`hydra:test:launch-flow-${process.pid}-0badc0de:x`), true);
+  });
+
+  test("a live launch-flow-delivery suite's namespace is never swept (#5114)", () => {
+    // The sibling suite namespaces as launch-flow-delivery-<pid>-<uuid8>; the
+    // sweep's SCAN glob matches it, so the pid parser must recognise it too.
+    // process.ppid is a live pid that is not this process.
+    const livePid = process.ppid;
+    assert.equal(existsSync(`/proc/${livePid}`), true, "precondition: parent pid must be live");
+    const key = `hydra:test:launch-flow-delivery-${livePid}-0badc0de:launch-flow:since:latency`;
+    assert.equal(runNsPid(key), livePid);
+    assert.equal(isRunNamespaceLive(key), true);
   });
 
   test("a dead run's namespace is still collectable, and a non-namespace key is left alone", () => {
