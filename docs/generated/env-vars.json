@@ -1434,7 +1434,7 @@
         },
         {
           "path": "src/scheduler/heartbeat.ts",
-          "line": 628
+          "line": 659
         }
       ],
       "inEnvExample": true,
@@ -2680,7 +2680,7 @@
         },
         {
           "path": "src/index.ts",
-          "line": 26
+          "line": 30
         }
       ],
       "inEnvExample": true,

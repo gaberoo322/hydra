@@ -1156,36 +1156,6 @@
     },
     {
       "method": "POST",
-      "path": "/api/digest/send",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/digest/send",
-      "areas": [
-        "src/digest.ts"
-      ],
-      "source": {
-        "path": "src/api/digest.ts",
-        "line": 17
-      }
-    },
-    {
-      "method": "POST",
-      "path": "/api/digest/heartbeat",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/digest/heartbeat",
-      "areas": [
-        "src/digest.ts"
-      ],
-      "source": {
-        "path": "src/api/digest.ts",
-        "line": 27
-      }
-    },
-    {
-      "method": "POST",
       "path": "/api/dispatches/subagent",
       "stability": "stable",
       "stabilityNote": null,
@@ -2129,6 +2099,21 @@
       "source": {
         "path": "src/api/operator-actions.ts",
         "line": 27
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/operator-channel/brief/send",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/operator-channel/brief/send",
+      "areas": [
+        "src/operator-channel/"
+      ],
+      "source": {
+        "path": "src/api/operator-channel.ts",
+        "line": 25
       }
     },
     {

@@ -7,7 +7,8 @@
  * Invariants under test (the issue's acceptance criteria):
  *   - empty -> non-empty fires EXACTLY ONE notification
  *   - no repeat while the set stays non-empty
- *   - re-arms after the set drains to empty
+ *   - re-arms after the set drains to empty, and resolves the Operator
+ *     Channel page so the next edge is a fresh page (issue #5047)
  *   - payload carries count + first item title and link
  *
  * The armed-state is modelled by an in-memory flag (standing in for the Redis
@@ -51,6 +52,20 @@ function makeArmedState(initial = false) {
   };
 }
 
+/** Capturing stand-in for the Operator Channel's resolve() (issue #5047). */
+function makeChannel() {
+  const resolved: string[] = [];
+  return {
+    resolved,
+    channel: {
+      resolve: async (dedupKey: string) => {
+        resolved.push(dedupKey);
+        return { sent: false as const, reason: "not-bad" as const };
+      },
+    },
+  };
+}
+
 function pickupItems(...numbers: number[]) {
   return numbers.map((n) => ({
     number: n,
@@ -72,6 +87,7 @@ describe("runReviewPickupNotify — edge trigger", () => {
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
       clearNotified: armed.clearNotified,
+      channel: makeChannel().channel,
     });
 
     assert.equal(result.fired, true);
@@ -96,6 +112,7 @@ describe("runReviewPickupNotify — edge trigger", () => {
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
       clearNotified: armed.clearNotified,
+      channel: makeChannel().channel,
     });
 
     assert.equal(result.fired, false);
@@ -113,6 +130,7 @@ describe("runReviewPickupNotify — edge trigger", () => {
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
       clearNotified: armed.clearNotified,
+      channel: makeChannel().channel,
     });
 
     assert.equal(result.fired, false);
@@ -132,6 +150,7 @@ describe("runReviewPickupNotify — edge trigger", () => {
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
       clearNotified: armed.clearNotified,
+      channel: makeChannel().channel,
     });
 
     assert.equal(result.fired, false);
@@ -143,10 +162,12 @@ describe("runReviewPickupNotify — edge trigger", () => {
     const captured: PublishedEvent[] = [];
     const bus = makeFakeBus(captured);
     const armed = makeArmedState(false);
+    const { channel, resolved } = makeChannel();
     const deps = {
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
       clearNotified: armed.clearNotified,
+      channel,
     };
 
     // 1. empty -> non-empty: fires
@@ -160,6 +181,27 @@ describe("runReviewPickupNotify — edge trigger", () => {
 
     assert.equal(captured.length, 2);
     assert.deepEqual(captured.map((e) => e.payload.firstNumber), [1, 3]);
+    // The drain edge (step 3) resolved the page exactly once (issue #5047).
+    assert.deepEqual(resolved, ["review:pickup_ready"]);
+  });
+
+  test("the drain edge resolves the review:pickup_ready page; a no-op empty tick does not", async () => {
+    const bus = makeFakeBus([]);
+    const drained = makeChannel();
+    await runReviewPickupNotify(bus, {
+      getPickupSet: async () => [],
+      ...makeArmedState(true),
+      channel: drained.channel,
+    });
+    assert.deepEqual(drained.resolved, ["review:pickup_ready"]);
+
+    const idle = makeChannel();
+    await runReviewPickupNotify(bus, {
+      getPickupSet: async () => [],
+      ...makeArmedState(false),
+      channel: idle.channel,
+    });
+    assert.deepEqual(idle.resolved, [], "no transition, no resolve");
   });
 });
 

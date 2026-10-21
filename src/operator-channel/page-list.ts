@@ -25,8 +25,10 @@ export const PAGE_KINDS = [
   "launch:meter_dark",
   // The notification consumer is dead
   E.CONSUMER_DEAD,
-  // An Outcome Holdback revert failed
-  "holdback:revert_failed",
+  // An Outcome Holdback revert failed (the on-wire spelling src/holdback.ts
+  // publishes — issue #5047 replaced the mis-spelled `holdback:revert_failed`
+  // literal that no producer emitted)
+  E.HOLDBACK_REVERT_FAILED,
   // Orchestrator, autopilot, tunnel or backup service failures
   "service:orchestrator_failed",
   "service:autopilot_failed",

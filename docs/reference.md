@@ -48,7 +48,6 @@ For module roles and file structure, explore `src/` directly — static inventor
 | `hydra:blocked:last-escalation` | Timestamp of last blocked-item escalation |
 | `hydra:deps:completed` | Completed dependency tracking |
 | `hydra:deps:index` | Dependency index |
-| `hydra:digest:last-weekly` | Timestamp of last weekly digest |
 | `hydra:workspace:lock` | Workspace access lock |
 
 ## Event Bus
@@ -59,7 +58,7 @@ Redis Streams-based event bus (`src/event-bus.ts`). Streams:
 |---|---|
 | `hydra:cycle` | Cycle start events |
 | `hydra:proposals` | Proposal lifecycle events |
-| `hydra:notifications` | All notifications (consumed by Telegram digest) |
+| `hydra:notifications` | All notifications (consumed by the notification consumer → Operator Channel pages / Morning Brief items) |
 | `hydra:dlq` | Dead letter queue (after 3 failed deliveries) |
 
 Consumer groups: meta, orchestrator, telegram, dlq-processor. WebSocket broadcast to connected dashboard clients.
@@ -78,7 +77,7 @@ Routes are split into domain sub-routers in `src/api/`. Each file exports a `cre
 **Metrics** (`api/metrics.ts`): GET /metrics, GET /summary, POST /metrics/record
 **Health** (`api/health.ts`): GET /health, GET /health/services, GET /health/deep, GET /recommendations
 **Tier** (`api/tier.ts`): GET /tier?files=a,b,c — modification-tier classification (wraps `classifyChange()` from `src/tier-classifier.ts`; query validated by `src/schemas/tier.ts`)
-**Digest** (`api/digest.ts`): POST /digest/send, POST /digest/heartbeat — on-demand triggers for the DigestAccumulator domain (`src/digest.ts`)
+**Operator Channel** (`api/operator-channel.ts`): POST /operator-channel/brief/send — send the Morning Brief now and stamp last-sent (ADR-0045 Decision 7; replaced POST /digest/send + /digest/heartbeat in #5047)
 **Operational** (`api/operational.ts`): POST /kill — emergency-stop; writes the `~/hydra/.kill` file that health.ts/service-strip.ts poll
 > The former `api/misc.ts` catch-all is retired (issue #2183) — its earlier residents were split to domain routers across #268 / #2181 / #2183.
 **Outcomes** (`api/outcomes.ts`): GET /outcomes — declared Target Outcomes + current readings (issue #241)
@@ -148,7 +147,7 @@ The orchestrator builds one Target Project per instance. The operator switches t
 |---|---|---|
 | `HYDRA_PROJECT_WORKSPACE` | `<homedir>/<HYDRA_TARGET_NAME>` (with one-time warn) | Absolute path to the target workspace. Drives where `hydra-target-build` subagents run, where context-builder reads, where worktrees are rooted, etc. |
 | `HYDRA_TARGET_NAME` | `hydra-betting` (with one-time warn) | Short slug used for the systemd unit name (`${name}-web.service`), the worktree directory prefix (`${name}-worktree`), and operator-instruction strings. |
-| `HYDRA_TARGET_GITHUB_REPO` | `gaberoo322/hydra-betting` (with one-time warn) | GitHub repo identifier in `owner/repo` form. Drives commit-link URLs emitted by `notify.ts` (Telegram cycle-complete messages) and `digest.ts` (periodic digests). Read via `getTargetGithubRepo()` / `getTargetCommitUrl(sha)`. |
+| `HYDRA_TARGET_GITHUB_REPO` | `gaberoo322/hydra-betting` (with one-time warn) | GitHub repo identifier in `owner/repo` form. Drives commit-link URLs emitted by `notify.ts` (Telegram cycle-complete messages). Read via `getTargetGithubRepo()` / `getTargetCommitUrl(sha)`. |
 | `HYDRA_WORKSPACE` | — | **Deprecated.** Legacy alias for `HYDRA_PROJECT_WORKSPACE` (`context-builder.ts` historically read this). `getTargetWorkspace()` falls back to it with a one-time deprecation warning. Removed once #259 migrates the last caller. |
 
 `src/target-config.ts` exposes six pure leaf-level helpers — `getTargetName()`, `getTargetWorkspace()`, `getTargetServiceName()`, `getTargetWorktreePrefix()`, `getTargetGithubRepo()`, `getTargetCommitUrl(sha)` — that memoize their warnings so each fires at most once per process. Per ADR-0002, the helpers return a single string each; no multi-target abstraction.

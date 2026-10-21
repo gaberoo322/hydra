@@ -274,6 +274,18 @@ export interface HeartbeatControllerDeps {
    * scorecard + notification-bus fixture chain (the coupling #3371 removed).
    */
   emitTickStagnationAlerts?: (eventBus: unknown) => Promise<void>;
+
+  // --- Morning Brief tick (ADR-0045 Decision 7, issue #5047) ---
+  /**
+   * Per-tick Morning Brief poll. The brief has NO timer of its own: its timing
+   * state is the Redis last-sent key, and this hook asks the pure `briefDue`
+   * predicate on every heartbeat tick (via `BriefScheduler.tick()`), so a
+   * restart can neither delay nor duplicate a brief. Defaults to a no-op so a
+   * unit-constructed controller never reaches Redis or Telegram; production
+   * binds the real scheduler through {@link attachMorningBriefTick} in
+   * `src/index.ts`. Fired fire-and-forget on the tick and never throws.
+   */
+  tickMorningBrief?: () => Promise<unknown>;
 }
 
 /**
@@ -302,6 +314,7 @@ export class HeartbeatController {
   private readonly getAutopilotPaused: () => Promise<{ paused: boolean; since?: number }>;
   private readonly getReconcilerHealth: () => Promise<import("../redis/reconciler.ts").ReconcilerHealthRecord | null>;
   private readonly emitTickStagnationAlerts: (eventBus: unknown) => Promise<void>;
+  private tickMorningBrief: () => Promise<unknown>;
 
   constructor(deps: HeartbeatControllerDeps = {}) {
     this.now = deps.now ?? (() => new Date());
@@ -323,6 +336,7 @@ export class HeartbeatController {
     this.getAutopilotPaused = deps.getAutopilotPaused ?? getAutopilotPaused;
     this.getReconcilerHealth = deps.getReconcilerHealth ?? getReconcilerHealth;
     this.emitTickStagnationAlerts = deps.emitTickStagnationAlerts ?? emitTickStagnationAlerts;
+    this.tickMorningBrief = deps.tickMorningBrief ?? (async () => undefined);
   }
 
   // -------------------------------------------------------------------------
@@ -428,6 +442,15 @@ export class HeartbeatController {
   // and did nothing in production. The research-force policy now lives in the
   // autopilot brain (`scripts/autopilot/decide.py` `_research_force_allowed`).
 
+  /**
+   * Bind the Morning Brief poll this controller fires on every tick (issue
+   * #5047). Called once from `src/index.ts`; a unit-constructed controller keeps
+   * the no-op default.
+   */
+  setMorningBriefTick(fn: () => Promise<unknown>): void {
+    this.tickMorningBrief = fn;
+  }
+
   async runScheduledCycle(eventBus): Promise<void> {
     const state = this.state;
     if (!state.running) return;
@@ -465,6 +488,14 @@ export class HeartbeatController {
     // `./tick-stagnation-alert.ts`; the heartbeat only fires the injected emit.
     this.emitTickStagnationAlerts(eventBus).catch((err: any) =>
       logger.error({ err }, "stagnation-alert emit failed"),
+    );
+
+    // Issue #5047 (ADR-0045 Decision 7): poll the Morning Brief. The scheduler
+    // reads the Redis last-sent key and sends iff `briefDue` — idempotent per
+    // local day, serialised in-process — so riding the heartbeat tick adds no
+    // timer state here. Fire-and-forget + never-throws, like the emit above.
+    this.tickMorningBrief().catch((err: any) =>
+      logger.error({ err }, "morning-brief tick failed"),
     );
 
     if (state.running) {
@@ -683,8 +714,14 @@ async function runScheduledCycle(eventBus) {
   return defaultController.runScheduledCycle(eventBus);
 }
 
+/** Bind the Morning Brief poll to the production controller (issue #5047). */
+function attachMorningBriefTick(fn: () => Promise<unknown>): void {
+  defaultController.setMorningBriefTick(fn);
+}
+
 export {
   start, stop, getStatus, autoStart,
   // Exported for test coverage (issue #381 / #383):
   runScheduledCycle,
+  attachMorningBriefTick,
 };

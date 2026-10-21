@@ -105,6 +105,26 @@ const NOTIFICATION_EVENT_TYPES = {
   // a sterile drainer silently starves the whole board (observed #3863).
   GLM_DRAINER_STERILE: "glm:drainer_sterile",
 
+  // --- Legacy on-wire spellings with a live in-process producer (issue #5047) ---
+  // These seven types reached the NOTIFICATIONS stream before the vocabulary
+  // existed and keep their original dotted / hyphenated spellings because the
+  // on-wire string is a consumer contract (dashboard alert ring, Morning Brief
+  // items). They join the map so the Morning Brief's exhaustive renderer map
+  // (`BRIEF_LINE_RENDERERS` in src/operator-channel/brief-lines.ts) and the
+  // #5044 live-producer audit both see them. Do NOT "normalise" them to the
+  // `namespace:action` grammar — that is a wire rename, not a cleanup.
+  // Producers: src/holdback.ts (the three holdback.* types), src/api/usage.ts
+  // (model-fallback), src/api/autopilot-control.ts (autopilot-paused /
+  // autopilot-resumed), src/notification/stagnation-alerts.ts
+  // (builder-health.stagnation).
+  HOLDBACK_REVERTED: "holdback.reverted",
+  HOLDBACK_CAP_REACHED: "holdback.cap-reached",
+  HOLDBACK_REVERT_FAILED: "holdback.revert_failed",
+  MODEL_FALLBACK: "model-fallback",
+  AUTOPILOT_PAUSED: "autopilot-paused",
+  AUTOPILOT_RESUMED: "autopilot-resumed",
+  BUILDER_HEALTH_STAGNATION: "builder-health.stagnation",
+
 } as const;
 
 /**
@@ -182,6 +202,20 @@ type NotificationEventPayload = Record<string, unknown> & {
   signal?: string;
   thresholdMs?: number;
   url?: string;
+  // --- Outcome Holdback (holdback.*) ---
+  prNumber?: number | string;
+  // --- Autopilot pause flag (autopilot-paused / autopilot-resumed) ---
+  paused?: boolean;
+  since?: number;
+  // --- Model fallback (model-fallback) ---
+  from?: string;
+  to?: string;
+  until?: string;
+  // --- Builder-health stagnation (builder-health.stagnation) ---
+  realm?: string;
+  current?: number | null;
+  baseline?: number | null;
+  sustainedCycles?: number;
 };
 
 export { NOTIFICATION_EVENT_TYPES };
