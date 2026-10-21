@@ -30,6 +30,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 import { readBrainSource } from "../scripts/ci/brain-source.ts";
+import { TurnSnapshotSchema } from "../src/schemas/turn-snapshot.ts";
 
 // ===========================================================================
 // Merged from test/decide-cleanup-target-class.test.mts (issue #4136) — every test verbatim.
@@ -2289,15 +2290,9 @@ function decideSignalReads(src: string): string[] {
   return [...names].sort();
 }
 
-/** The snapshot's signal keys, read from the accessor's all-degraded table (drift-tested against the zod schema in test/turn-snapshot-json.test.mts). */
+/** The snapshot's signal keys, read from the zod schema — the only signal table since the Python mirror was deleted (#5083). */
 function snapshotSignalKeys(): Set<string> {
-  const r = spawnSync(
-    "python3",
-    ["-c", "import json,sys; sys.path.insert(0, sys.argv[1]); import turn_snapshot as t; print(json.dumps(sorted(t.ALL_DEGRADED_SIGNALS)))", join(REPO_ROOT, "scripts", "autopilot")],
-    { encoding: "utf-8" },
-  );
-  assert.equal(r.status, 0, `turn_snapshot.py import failed: ${r.stderr}`);
-  return new Set(JSON.parse(r.stdout) as string[]);
+  return new Set(Object.keys((TurnSnapshotSchema.shape.signals as unknown as { shape: Record<string, unknown> }).shape));
 }
 
 /** Schema keys decide.py deliberately does not read — each a name→rationale pair, honesty-tested below. */
@@ -2366,7 +2361,7 @@ describe("decide.py ↔ Turn Snapshot schema read guard (#4934)", () => {
     assert.deepEqual(
       unknown,
       [],
-      "decide.py reads signals the Turn Snapshot schema does not carry — they would always read as absent. Fix: add the key to SignalsSchema + ALL_DEGRADED_SIGNALS (src/schemas/turn-snapshot.ts and scripts/autopilot/turn_snapshot.py) and produce it from a collector, or delete the reader",
+      "decide.py reads signals the Turn Snapshot schema does not carry — they would always read as absent. Fix: add the key to SignalsSchema + ALL_DEGRADED_SIGNALS (src/schemas/turn-snapshot.ts) and produce it from a collector, or delete the reader",
     );
   });
 
