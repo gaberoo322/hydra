@@ -1,0 +1,1 @@
+- fix: every deploy now installs the Claude Code PreToolUse hooks (`scripts/setup-claude-hooks.sh`), so `git-remote-fence.sh` goes live and hook edits reach the live copies; a new watchdog block alarms (`infra:claude_hooks_missing`) when a hook is missing from `~/.claude/hooks/hydra/` or from `~/.claude/settings.json` (#5064)

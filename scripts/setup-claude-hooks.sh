@@ -3,7 +3,14 @@
 #
 # Mirrors scripts/setup-git-hooks.sh in spirit: an explicit operator step
 # that copies in-repo hook scripts to ~/.claude/hooks/hydra/ and patches
-# ~/.claude/settings.json to register them. Re-running is safe (idempotent).
+# ~/.claude/settings.json to register them. Re-running is safe (idempotent):
+# managed PreToolUse blocks are replaced, never duplicated; every other
+# settings key is preserved; the settings write is atomic and skipped when
+# nothing changed.
+#
+# scripts/deploy.sh runs this on EVERY deploy (issue #5064), so hook edits on
+# master reach the live copies. The watchdog's ## CLAUDE HOOKS block reads the
+# HOOKS array below via `--list`, so this file is the single source of truth.
 #
 # Currently installs:
 #   - worktree-write-fence.sh — issue #549 ghost-write fence for the
@@ -15,6 +22,10 @@
 # Usage:
 #   bash scripts/setup-claude-hooks.sh           # install / refresh
 #   bash scripts/setup-claude-hooks.sh --remove  # uninstall
+#   bash scripts/setup-claude-hooks.sh --list    # print managed HOOKS entries
+#                                                # (one "name|matcher" per line)
+#   Any other argument prints usage and exits 2 (never a silent full install).
+#   If settings.json is a symlink, the link is kept and its target is updated.
 
 set -euo pipefail
 
@@ -22,13 +33,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_DIR="$REPO_ROOT/scripts/claude-hooks"
 DST_DIR="${CLAUDE_HOOKS_DIR:-$HOME/.claude/hooks/hydra}"
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
-
-REMOVE=0
-if [ "${1:-}" = "--remove" ] || [ "${1:-}" = "-r" ]; then
-  REMOVE=1
-fi
-
-command -v python3 >/dev/null || { echo "setup-claude-hooks: python3 required" >&2; exit 127; }
 
 # The list of (hook-file, matcher) pairs we manage. Matcher is a regex per
 # Claude Code's PreToolUse matcher contract — multiple tool names piped.
@@ -43,6 +47,34 @@ HOOKS=(
   # rule — it would not reliably fire on a compound `cd … && git remote …`).
   "git-remote-fence.sh|Bash"
 )
+
+usage() {
+  echo "usage: bash scripts/setup-claude-hooks.sh [--remove|-r | --list | --help|-h]"
+}
+
+REMOVE=0
+case "${1:-}" in
+  "") ;;
+  --remove|-r) REMOVE=1 ;;
+  --list)
+    # Issue #5064: read-only listing for the watchdog's ## CLAUDE HOOKS block.
+    # Touches nothing on disk.
+    printf '%s\n' "${HOOKS[@]}"
+    exit 0
+    ;;
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  *)
+    # An unknown flag must never fall through to a full install.
+    echo "setup-claude-hooks: unknown argument '$1'" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+command -v python3 >/dev/null || { echo "setup-claude-hooks: python3 required" >&2; exit 127; }
 
 install_hook() {
   local src="$1" dst="$2"
@@ -81,12 +113,19 @@ patch_settings() {
   fi
 
   python3 - "$mode" "$SETTINGS" "$DST_DIR" "$@" <<'PY'
-import json, sys, os
+import json, sys, os, shutil, tempfile
 
 mode, settings_path, dst_dir, *entries = sys.argv[1:]
 
-with open(settings_path, "r") as f:
-    data = json.load(f)
+# Operators commonly symlink ~/.claude/settings.json into a dotfiles repo.
+# Resolve the link ONCE and do every read/write against the real file, so the
+# atomic rename below replaces the TARGET and the symlink itself survives
+# (renaming over the link path would swap it for a regular file).
+real_path = os.path.realpath(settings_path)
+
+with open(real_path, "r", encoding="utf-8") as f:
+    original = f.read()
+data = json.loads(original)
 
 hooks = data.setdefault("hooks", {})
 pre = hooks.setdefault("PreToolUse", [])
@@ -132,9 +171,29 @@ if not pre:
     hooks.pop("PreToolUse", None)
 
 # Pretty-print with stable key ordering — keep the diff small.
-with open(settings_path, "w") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
+rendered = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+if rendered == original:
+    print(f"  {settings_path} unchanged")
+    sys.exit(0)
+
+# Issue #5064: this now runs on every deploy while Claude Code sessions are
+# live and reading the file, so never truncate-in-place — write a sibling temp
+# file and rename it over the original (atomic on the same filesystem). The temp
+# file lives in the REAL target's directory so the rename never crosses a
+# filesystem and lands on the symlink's target, not the link.
+settings_dir = os.path.dirname(real_path)
+fd, tmp_path = tempfile.mkstemp(prefix=".settings.", suffix=".tmp", dir=settings_dir)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(rendered)
+    shutil.copymode(real_path, tmp_path)
+    os.replace(tmp_path, real_path)
+except BaseException:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass  # intentional: temp already renamed or never created
+    raise
 PY
 }
 
