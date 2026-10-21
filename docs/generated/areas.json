@@ -897,12 +897,11 @@
     },
     {
       "slug": "src-notification",
-      "name": "src/notification/, src/notify.ts, src/digest.ts",
+      "name": "src/notification/, src/operator-channel/",
       "table": "domain",
       "paths": [
         "src/notification/",
-        "src/notify.ts",
-        "src/digest.ts"
+        "src/operator-channel/"
       ],
       "retired": false,
       "terms": [
@@ -925,8 +924,19 @@
       ],
       "adrsCited": [],
       "referenceDocs": [],
-      "slices": {},
-      "homes": [],
+      "slices": {
+        "routes": [
+          "POST /api/operator-channel/brief/send",
+          "GET /api/operator-channel/delivery-health"
+        ],
+        "env-vars": [
+          "TELEGRAM_BOT_TOKEN",
+          "TELEGRAM_CHAT_ID"
+        ]
+      },
+      "homes": [
+        "/health"
+      ],
       "route": "/docs/area/src-notification",
       "source": {
         "path": "CONTEXT-MAP.md",

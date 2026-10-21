@@ -40,7 +40,7 @@ import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
 import { createOperatorChannelRouter } from "../src/api/operator-channel.ts";
 import { runReviewPickupNotify } from "../src/scheduler/chores/review-pickup-notify.ts";
 import type { DedupState, DeliveryLogEntry } from "../src/redis/operator-channel.ts";
-import type { TelegramTransportFn, TelegramTransportResult } from "../src/notify.ts";
+import type { TelegramTransportFn, TelegramTransportResult } from "../src/operator-channel/transport.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers

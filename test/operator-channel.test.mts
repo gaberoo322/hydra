@@ -25,7 +25,7 @@ import {
   type OperatorMessage,
 } from "../src/operator-channel/index.ts";
 import type { DedupState, DeliveryLogEntry } from "../src/redis/operator-channel.ts";
-import type { TelegramTransportFn, TelegramTransportResult } from "../src/notify.ts";
+import type { TelegramTransportFn, TelegramTransportResult } from "../src/operator-channel/transport.ts";
 
 const HOUR = 60 * 60 * 1000;
 

@@ -29,7 +29,7 @@ import {
   listDedupStates as defaultListDedupStates,
   type DedupStateRow,
 } from "../redis/operator-channel.ts";
-import { buildWeeklySummary as defaultBuildWeeklySummary, type WeeklySummary } from "../digest-weekly.ts";
+import { buildWeeklySummary as defaultBuildWeeklySummary, type WeeklySummary } from "./weekly-summary.ts";
 import { logger } from "../logger.ts";
 import { briefItemFromStored, type BriefItem } from "./brief-lines.ts";
 

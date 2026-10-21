@@ -1,24 +1,52 @@
 /**
- * test/telegram-seam-check.test.mts — pin the Telegram Notification Adapter
+ * test/telegram-seam-check.test.mts — pin the Operator Channel transport
  * seam-check grammar at the predicate level (no git scan, no process.exit),
- * issue #2201; widened for ADR-0045 Decision 2 (issue #5046).
+ * issue #2201; widened for ADR-0045 Decision 2 (issue #5046); exemption list
+ * shrunk to the one transport by issue #5049.
  *
  * The CI gate at scripts/ci/telegram-seam-check.ts forbids the Telegram Bot
  * API host (`api.telegram.org`) on any NON-COMMENT line of any file outside
- * the Operator Channel's transport (`src/notify.ts`) — in `src/`, `scripts/`
- * (TypeScript and shell) and the tracked systemd units. The only other
- * carve-out is the check itself (it carries the literal as its own signal).
- * Comments never count: TypeScript is comment-stripped first, and a `.sh` /
- * `.service` / `.timer` line whose first non-blank character is `#` is
- * ignored.
+ * the Operator Channel's transport (`src/operator-channel/transport.ts`) — in
+ * `src/`, `scripts/` (TypeScript, shell, Python, mjs) and the tracked systemd
+ * units. There is no other carve-out: the check assembles its own signal from
+ * parts, so it needs no self-exemption. Comments never count: TypeScript is
+ * comment-stripped first, and a `.sh` / `.py` / `.service` / `.timer` line
+ * whose first non-blank character is `#` is ignored.
+ *
+ * The last describe is the live-tree half of the #5049 contract: no file in
+ * `src/` or `scripts/` outside `src/operator-channel/` imports the transport.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, resolve, dirname, relative } from "node:path";
+import { fileURLToPath } from "node:url";
+import { stripComments } from "../scripts/ci/seam-check-lib.ts";
 
-const { fileViolatesTelegramSeam, TELEGRAM_SEAM_GLOBS } = await import(
+const { fileViolatesTelegramSeam, TELEGRAM_SEAM_GLOBS, TELEGRAM_SEAM_EXEMPT } = await import(
   "../scripts/ci/telegram-seam-check.ts"
 );
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const TRANSPORT = "src/operator-channel/transport.ts";
+
+/** Every `.ts` / `.mjs` file under `dir` (recursive), repo-relative with `/` separators. */
+function sourceFiles(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (d: string) => {
+    for (const name of readdirSync(d)) {
+      const full = join(d, name);
+      if (statSync(full).isDirectory()) {
+        if (name !== "node_modules") walk(full);
+      } else if (/\.(ts|mjs)$/.test(name)) {
+        out.push(relative(REPO_ROOT, full).split("\\").join("/"));
+      }
+    }
+  };
+  walk(resolve(REPO_ROOT, dir));
+  return out;
+}
 
 describe("telegram-seam-check: Telegram host grammar (src/)", () => {
   test("flags a fetch to the Telegram Bot API host outside the adapter", () => {
@@ -69,7 +97,7 @@ describe("telegram-seam-check: Telegram host grammar (src/)", () => {
     assert.equal(
       fileViolatesTelegramSeam(
         "src/notification-consumer.ts",
-        `await sendNotification(event);`,
+        `routeNotificationEvent(event);`,
       ),
       false,
     );
@@ -79,7 +107,7 @@ describe("telegram-seam-check: Telegram host grammar (src/)", () => {
     assert.equal(
       fileViolatesTelegramSeam(
         "src/operator-channel/channel.ts",
-        `// every send goes through src/notify.ts, the one caller of api.telegram.org\n/* api.telegram.org */\nexport const x = 1;`,
+        `// every send goes through src/operator-channel/transport.ts, the one caller of api.telegram.org\n/* api.telegram.org */\nexport const x = 1;`,
       ),
       false,
     );
@@ -166,34 +194,84 @@ describe("telegram-seam-check: scripts/ and systemd units (ADR-0045 D2, issue #5
   });
 });
 
-describe("telegram-seam-check: carve-outs", () => {
-  test("exempts the Telegram Notification Adapter Module itself", () => {
+describe("telegram-seam-check: the single exemption (issue #5049)", () => {
+  test("the exemption list names exactly the Operator Channel transport", () => {
+    assert.deepEqual([...TELEGRAM_SEAM_EXEMPT], [TRANSPORT]);
+  });
+
+  test("exempts the transport module itself", () => {
+    assert.equal(
+      fileViolatesTelegramSeam(
+        TRANSPORT,
+        `const response = await fetch(\`https://api.telegram.org/bot\${deps.token}/sendMessage\`, { method: "POST" });`,
+      ),
+      false,
+    );
+  });
+
+  test("the retired src/notify.ts path is no longer exempt", () => {
     assert.equal(
       fileViolatesTelegramSeam(
         "src/notify.ts",
         `const response = await fetch(\`https://api.telegram.org/bot\${TELEGRAM_BOT_TOKEN}/sendMessage\`, { method: "POST" });`,
       ),
-      false,
+      true,
     );
   });
 
-  test("exempts the seam check itself (it carries the literal as its own signal)", () => {
+  test("the seam check is NOT exempt — its own source carries the host only in comments / assembled from parts", () => {
     assert.equal(
       fileViolatesTelegramSeam(
         "scripts/ci/telegram-seam-check.ts",
         `const TELEGRAM_TARGET_SIGNALS = ["api.telegram.org"];`,
       ),
-      false,
+      true,
+      "a literal on a code line in the check itself would now be a violation",
     );
+    const own = readFileSync(resolve(REPO_ROOT, "scripts/ci/telegram-seam-check.ts"), "utf8");
+    assert.equal(fileViolatesTelegramSeam("scripts/ci/telegram-seam-check.ts", own), false);
   });
 
-  test("exempts exactly those two paths — a look-alike path is still checked", () => {
+  test("a look-alike path next to the transport is still checked", () => {
     assert.equal(
       fileViolatesTelegramSeam(
-        "src/notify-format.ts",
+        "src/operator-channel/transport-format.ts",
         `const u = "https://api.telegram.org/bot";`,
       ),
       true,
     );
+  });
+
+  test("the transport module exists and is the only src/ or scripts/ file naming the host on a code line", () => {
+    const offenders: string[] = [];
+    for (const rel of [...sourceFiles("src"), ...sourceFiles("scripts")]) {
+      const body = readFileSync(resolve(REPO_ROOT, rel), "utf8");
+      if (rel === TRANSPORT) {
+        assert.match(stripComments(body), /api\.telegram\.org/, "the transport owns the one fetch");
+        continue;
+      }
+      if (fileViolatesTelegramSeam(rel, body)) offenders.push(rel);
+    }
+    assert.deepEqual(offenders, []);
+  });
+});
+
+describe("no file outside the Operator Channel imports a Telegram sender or formatter (issue #5049)", () => {
+  test("src/ and scripts/ import the transport only from inside src/operator-channel/", () => {
+    const offenders: string[] = [];
+    for (const rel of [...sourceFiles("src"), ...sourceFiles("scripts")]) {
+      if (rel.startsWith("src/operator-channel/")) continue;
+      const code = stripComments(readFileSync(resolve(REPO_ROOT, rel), "utf8"));
+      if (/from\s+["'][^"']*\/(transport|notify|notify-format|digest|digest-weekly)\.ts["']/.test(code)) {
+        offenders.push(rel);
+      }
+    }
+    assert.deepEqual(offenders, []);
+  });
+
+  test("the legacy sender / formatter modules are gone", () => {
+    for (const rel of ["src/notify.ts", "src/notify-format.ts", "src/digest.ts", "src/digest-weekly.ts"]) {
+      assert.throws(() => statSync(resolve(REPO_ROOT, rel)), `${rel} must not exist`);
+    }
   });
 });

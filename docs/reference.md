@@ -147,7 +147,7 @@ The orchestrator builds one Target Project per instance. The operator switches t
 |---|---|---|
 | `HYDRA_PROJECT_WORKSPACE` | `<homedir>/<HYDRA_TARGET_NAME>` (with one-time warn) | Absolute path to the target workspace. Drives where `hydra-target-build` subagents run, where context-builder reads, where worktrees are rooted, etc. |
 | `HYDRA_TARGET_NAME` | `hydra-betting` (with one-time warn) | Short slug used for the systemd unit name (`${name}-web.service`), the worktree directory prefix (`${name}-worktree`), and operator-instruction strings. |
-| `HYDRA_TARGET_GITHUB_REPO` | `gaberoo322/hydra-betting` (with one-time warn) | GitHub repo identifier in `owner/repo` form. Drives commit-link URLs emitted by `notify.ts` (Telegram cycle-complete messages). Read via `getTargetGithubRepo()` / `getTargetCommitUrl(sha)`. |
+| `HYDRA_TARGET_GITHUB_REPO` | `gaberoo322/hydra-betting` (with one-time warn) | GitHub repo identifier in `owner/repo` form. Read via `getTargetGithubRepo()` / `getTargetCommitUrl(sha)` wherever a Target commit link is rendered (the Telegram cycle-complete formatter that used it was retired with the legacy notifier in #5049). |
 | `HYDRA_WORKSPACE` | — | **Deprecated.** Legacy alias for `HYDRA_PROJECT_WORKSPACE` (`context-builder.ts` historically read this). `getTargetWorkspace()` falls back to it with a one-time deprecation warning. Removed once #259 migrates the last caller. |
 
 `src/target-config.ts` exposes six pure leaf-level helpers — `getTargetName()`, `getTargetWorkspace()`, `getTargetServiceName()`, `getTargetWorktreePrefix()`, `getTargetGithubRepo()`, `getTargetCommitUrl(sha)` — that memoize their warnings so each fires at most once per process. Per ADR-0002, the helpers return a single string each; no multi-target abstraction.
@@ -375,7 +375,7 @@ Implementation seam:
 - `src/redis/holdback.ts` — typed Redis accessor for the per-merge baseline + per-day revert counter (ADR-0009 seam).
 - `src/outcomes.ts` — `snapshotLeadingOutcomes` / `detectRegressions` helpers (leading-only, null = no-data).
 - `src/api/holdback.ts` — `POST /api/holdback/{enroll,check,revert-failed}`, the HTTP surface the playbook drives.
-- `src/digest.ts` — the (previously orphaned) consumer of the holdback.* events.
+- `src/operator-channel/route-event.ts` — the consumer of the holdback.* events: `holdback.revert_failed` is a Page, the others are Morning Brief items (ADR-0045).
 
 ### Redis state
 
@@ -386,7 +386,7 @@ Implementation seam:
 
 ### Events
 
-Published on `STREAMS.NOTIFICATIONS` (consumed by `src/digest.ts`):
+Published on `STREAMS.NOTIFICATIONS` (routed by `src/operator-channel/route-event.ts` to the Operator Channel):
 
 - `holdback.reverted` — a leading outcome regressed and the revert was warranted. Payload: `{commitSha, prNumber, regressedOutcomes}`.
 - `holdback.cap-reached` — per-day revert cap hit; the regression was surfaced but the revert suppressed. Payload: `{commitSha, prNumber, regressedOutcomes}`.
@@ -470,7 +470,7 @@ If the CLI changes this schema, the parser at the top of `src/cost/reconciliatio
 
 - Scheduler hook for once-per-UTC-day automatic runs (against `date - 1`)
 - `cost.reconciliation.divergence` event published when any pair diverges by `> DIVERGENCE_THRESHOLD` (10%)
-- Digest section surfacing divergence events from the digest window
+- Morning Brief section surfacing divergence events since the last brief
 - Dashboard panel with the three-number side-by-side and 30-day trend
 
 ## GitHub API rate-limit handling (issue #3137)

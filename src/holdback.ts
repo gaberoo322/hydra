@@ -2,7 +2,8 @@
  * Outcome Holdback producer (issue #786, ADR-0004 step 4).
  *
  * This is the *producer* half of the Outcome Holdback mechanism — the thing
- * that was a documented no-op until now. `src/digest.ts` has long consumed
+ * that was a documented no-op until now. The notification consumer (today the
+ * Operator Channel router, `src/operator-channel/route-event.ts`) has long consumed
  * `holdback.reverted` / `holdback.cap-reached` / `holdback.revert_failed`
  * events, but nothing produced them since the in-process `src/holdback.ts`
  * watcher was deleted in the ADR-0006 codex cut-over. This module rebuilds the
@@ -26,7 +27,8 @@
  *     hit it emits `holdback.cap-reached` and SUPPRESSES further reverts for
  *     the UTC day rather than reverting.
  *
- * Event payloads are fixed by the existing consumer (`src/digest.ts`):
+ * Event payloads are fixed by the existing consumer (the Operator Channel's
+ * `messageFromEvent` / brief line renderers):
  * `holdback.reverted` carries `payload.commitSha` (string) and
  * `payload.regressedOutcomes` (string[]); `holdback.cap-reached` and
  * `holdback.revert_failed` are also consumed. Emitting any other event name

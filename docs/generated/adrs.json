@@ -924,6 +924,7 @@
       "readWhen": "Any Target board or backlog work.",
       "citedBy": [
         "CONTEXT-MAP.md",
+        "CONTEXT.md",
         "docs/adr/0033-openviking-knowledge-plane-retired.md",
         "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
         "docs/operator-playbooks/hydra-architect.md",
@@ -1275,6 +1276,7 @@
       "citedBy": [
         "CONTEXT-MAP.md",
         "CONTEXT.md",
+        "docs/operator-playbooks/hydra-qa.md",
         "docs/reference.md"
       ],
       "source": {

@@ -1178,8 +1178,8 @@ run_skill_mirror_drift() {
 # for the duration of the outage, and recovery (DEL) re-arms a fresh streak.
 #
 # Surface: IN-BAND, in BOTH ALERT_TYPES (src/notification/alert-grammar.ts)
-# and CRITICAL_EVENT_TYPES (src/digest.ts) — six money-critical services down
-# warrants both the dashboard alert and the immediate Telegram digest line.
+# and PAGE_KINDS (src/operator-channel/page-list.ts) — six money-critical
+# services down warrants both the dashboard alert and an Operator Channel page.
 # Event type pinned in test/event-bus-vocabulary.test.mts's EXPECTED_MEMBERS
 # (that enum-completeness arm fails by design until a new member is
 # deliberately pinned).
@@ -1508,16 +1508,16 @@ run_node_modules_integrity() {
 #       was successfully READ, which proves the Orchestrator was up at
 #       detection time. The in-process notification-consumer (unmodified)
 #       picks the event up: it lands in ALERT_TYPES (dashboard alert via the
-#       compile-checked formatAlertMessage grammar) AND in CRITICAL_EVENT_TYPES
-#       (immediate digest-surfaced Telegram line via formatCriticalAlert's
-#       generic default arm) — no new digest-format.ts batched section.
+#       compile-checked formatAlertMessage grammar) AND in the Operator
+#       Channel's PAGE_KINDS (src/operator-channel/page-list.ts — an immediate
+#       page, ADR-0045).
 #
-#   pause → IN-BAND, DIGEST LINE ONLY: the same enveloped XADD, but
+#   pause → IN-BAND, PAGE ONLY: the same enveloped XADD, but
 #       launch:pause_forgotten is deliberately NOT in ALERT_TYPES — a
 #       deliberate overnight operator pause must never leave a lingering
 #       unread dashboard alert (the alarm-fatigue failure the taxonomy exists
-#       to prevent). It reaches the operator via CRITICAL_EVENT_TYPES' immediate
-#       digest bypass only.
+#       to prevent). It reaches the operator as an Operator Channel page only
+#       (launch:pause_forgotten is in PAGE_KINDS).
 #
 # Credential placement: the CLI's single loader reads TELEGRAM_BOT_TOKEN /
 # TELEGRAM_CHAT_ID from the process env — hydra-watchdog.service loads

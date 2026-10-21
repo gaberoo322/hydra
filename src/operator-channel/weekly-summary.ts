@@ -18,10 +18,10 @@
  * unit-testable without Redis or GitHub.
  */
 
-import { getMetricsTrend as defaultGetMetricsTrend } from "./metrics/trend.ts";
-import { countsAsMerge } from "./metrics/merge-predicate.ts";
-import { getFixFeatureRatio as defaultGetFixFeatureRatio } from "./metrics/aggregate.ts";
-import { getCurrentMilestoneProgress as defaultGetCurrentMilestoneProgress } from "./config/roadmap.ts";
+import { getMetricsTrend as defaultGetMetricsTrend } from "../metrics/trend.ts";
+import { countsAsMerge } from "../metrics/merge-predicate.ts";
+import { getFixFeatureRatio as defaultGetFixFeatureRatio } from "../metrics/aggregate.ts";
+import { getCurrentMilestoneProgress as defaultGetCurrentMilestoneProgress } from "../config/roadmap.ts";
 
 /**
  * Injectable readers for `buildWeeklySummary`. Each defaults to the real
