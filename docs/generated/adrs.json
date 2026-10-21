@@ -818,7 +818,8 @@
       "readWhen": "Adding any log line.",
       "citedBy": [
         "CLAUDE.md",
-        "CONTEXT-MAP.md"
+        "CONTEXT-MAP.md",
+        "README.md"
       ],
       "source": {
         "path": "docs/adr/0027-pino-structured-logger.md",
@@ -924,7 +925,6 @@
       "readWhen": "Any Target board or backlog work.",
       "citedBy": [
         "CONTEXT-MAP.md",
-        "CONTEXT.md",
         "docs/adr/0033-openviking-knowledge-plane-retired.md",
         "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
         "docs/operator-playbooks/hydra-architect.md",
@@ -1014,6 +1014,7 @@
       "citedBy": [
         "CLAUDE.md",
         "CONTEXT-MAP.md",
+        "README.md",
         "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
         "docs/adr/0045-operator-channel.md",
         "docs/agents/triage-labels.md",
@@ -1044,6 +1045,7 @@
       "citedBy": [
         "CLAUDE.md",
         "CONTEXT-MAP.md",
+        "CONTEXT.md",
         "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
         "docs/operator-playbooks/hydra-autopilot.md"
       ],
@@ -1228,6 +1230,7 @@
       "citedBy": [
         "CONTEXT-MAP.md",
         "CONTEXT.md",
+        "README.md",
         "docs/adr/0044-operator-attended-epic-sprint-lane.md",
         "docs/operator-playbooks/hydra-autopilot.md",
         "docs/operator-playbooks/hydra-target-build.md",
