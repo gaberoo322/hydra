@@ -25,8 +25,10 @@ answer the read before the document is consulted), and decide() plans twice:
      name, so a read of a signal the document lacks raises UnknownSignalError
      and every name read is reported;
   2. with the document's `signals` map hidden from everything but that
-     accessor: the Plan must be byte-identical, so decide() reads no signal
-     around scripts/autopilot/turn_snapshot.py.
+     accessor, and its `observability` section (the values no rule reads)
+     removed: the Plan must be byte-identical, so decide() reads no signal
+     around scripts/autopilot/turn_snapshot.py and gates on no
+     observability value.
 
 `--drop <document>:<signal>` adds a MUTANT: a copy of that document without
 that signal, named `<document>-without-<signal>` (the negative case — the
@@ -148,6 +150,7 @@ def main() -> int:
             continue
         hidden = copy.deepcopy(doc)
         signals = hidden.pop("signals")
+        hidden.pop("observability", None)
         ts._signals = lambda _state: signals
         try:
             hidden_plan = _plan(hidden, decide_input)

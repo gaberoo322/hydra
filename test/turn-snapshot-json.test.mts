@@ -33,9 +33,10 @@
  *      and the schema: decide() replays every TS-emitted document — the
  *      golden snapshots, the all-degraded document, every plan-parity input
  *      re-emitted — through a recording accessor (replay_contract.py). A read
- *      the schema does not emit raises, a read around the accessor changes
- *      the Plan, and the replay must reach every schema signal but the
- *      observability-only ones. No test reads decide.py's source.
+ *      the schema does not emit raises, a read around the accessor (or of
+ *      the observability section) changes the Plan, and the replay must reach
+ *      every schema signal but the observability-only ones. No test reads
+ *      decide.py's source.
  *
  * Regenerate the golden documents after an intentional shape change:
  *   UPDATE_TURN_SNAPSHOT_JSON_GOLDEN=1 npm run test:file -- test/turn-snapshot-json.test.mts
@@ -953,7 +954,7 @@ describe("turn snapshot JSON: the replay contract — decide() reads only the si
   const violations = (r: ReplayResult): string[] => [
     ...r.raised.map((x) => `${x.name}: ${x.error}`),
     ...r.crashed.map((x) => `${x.name}: crashed — ${x.error}`),
-    ...r.reach_around.map((n) => `${n}: plans differently with its signals map hidden from decide() — a read around scripts/autopilot/turn_snapshot.py`),
+    ...r.reach_around.map((n) => `${n}: plans differently with its signals map hidden from decide() and its observability removed — a read around scripts/autopilot/turn_snapshot.py, or a gate on an observability value`),
   ];
 
   test("every TS-emitted document replays clean: the golden snapshots, the all-degraded document and every plan-parity input", () => {
