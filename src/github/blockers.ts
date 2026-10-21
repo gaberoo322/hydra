@@ -130,7 +130,7 @@ export function extractDeclaredEpicRefs(
  * matched here; {@link declaresEpicChildren} additionally requires at least one
  * `#N` ref beneath it, before the next heading.
  */
-export const EPIC_CHILDREN_HEADING_SOURCE =
+const EPIC_CHILDREN_HEADING_SOURCE =
   "^[ \\t]*#{1,6}[ \\t]+sub-issues\\b[^\\n]*$";
 
 /**
@@ -366,7 +366,7 @@ export async function findClearedBlockedIssues(
 }
 
 /** True when a blocker-bearing body line carries a cross-repo `owner/repo#N` ref. */
-export function hasCrossRepoBlockerRef(body: string): boolean {
+function hasCrossRepoBlockerRef(body: string): boolean {
   const stripped = body.replace(/`[^`]*`/g, "");
   return stripped.split("\n").some(
     (line) =>
