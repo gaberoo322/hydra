@@ -94,7 +94,7 @@ export async function lsRemoteHeads(
  * while a test injects a fake that records the argv and returns a canned
  * result WITHOUT spawning a process (ADR-0040 Decision 2).
  */
-export type GitActionTransport = (
+type GitActionTransport = (
   args: string[],
   opts: GhExecOptions,
 ) => Promise<GhResult<{ stdout: string; stderr: string }>>;
