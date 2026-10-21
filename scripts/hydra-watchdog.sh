@@ -978,8 +978,11 @@ run_redis_backup_freshness() {
 # Fails (alarms) when ANY hook listed by `setup-claude-hooks.sh --list` (the
 # single source of truth — never a second copy of the list here) is
 #   (a) missing as a file under the installed hooks dir, OR
-#   (b) not registered in settings.json's hooks.PreToolUse (no hook command
-#       referencing <hooks dir>/<name>), OR the settings file is
+#   (b) not registered in settings.json's hooks.PreToolUse — registered means
+#       a block whose `matcher` EQUALS the --list entry's matcher and which
+#       holds a `{"type":"command","command":"bash <hooks dir>/<name>"}` hook
+#       (exactly what the installer writes; a substring match would accept a
+#       wrong matcher or a decorated command) — OR the settings file is
 #       absent/unparseable (Claude Code would load no hooks from it either).
 #
 # STRICTLY READ-ONLY: never installs or repairs — `bash scripts/deploy.sh` (or
@@ -987,6 +990,10 @@ run_redis_backup_freshness() {
 # One enveloped XADD onto hydra:notifications per episode (type
 # infra:claude_hooks_missing), dedup'd by a since marker that is created only
 # after the XADD succeeds and cleared (re-armed) once everything is present.
+# "Succeeds" means the reply is a stream id (^[0-9]+-[0-9]+$): `redis-cli
+# --raw` prints an error reply (ERR …, WRONGTYPE …) on stdout and still exits
+# 0, so a merely non-empty reply must NOT write the marker — that would
+# silence the alarm for the whole episode with nothing delivered.
 #
 # Fail-safe: any tooling failure (installer script missing, --list failing,
 # python3 missing) logs WARN and returns 0.
@@ -1017,7 +1024,7 @@ run_claude_hooks() {
   [[ "$REDIS_DB" =~ ^[0-9]+$ ]] || REDIS_DB=0
   local SINCE_MARKER="${STATE_DIR}/hydra-claude-hooks-missing.since"
 
-  log() {
+  ch_log() {
     echo "hydra-claude-hooks-watchdog: $*"
   }
 
@@ -1032,11 +1039,11 @@ run_claude_hooks() {
   }
 
   if [[ ! -f "$SETUP" ]]; then
-    log "WARN installer ${SETUP} not found — skipping claude hooks check"
+    ch_log "WARN installer ${SETUP} not found — skipping claude hooks check"
     return 0
   fi
   if ! command -v python3 >/dev/null 2>&1; then
-    log "WARN python3 not found — skipping claude hooks check"
+    ch_log "WARN python3 not found — skipping claude hooks check"
     return 0
   fi
 
@@ -1044,21 +1051,24 @@ run_claude_hooks() {
   local listing="" list_rc=0
   listing="$(bash "$SETUP" --list 2>/dev/null)" || list_rc=$?
   if (( list_rc != 0 )); then
-    log "WARN ${SETUP} --list failed (rc=${list_rc}) — skipping claude hooks check"
+    ch_log "WARN ${SETUP} --list failed (rc=${list_rc}) — skipping claude hooks check"
     return 0
   fi
-  local names=() entry
+  # entries keep the full "name|matcher" line for the registration check;
+  # names is just the hook filename for the installed-file check.
+  local entries=() names=() entry
   while IFS= read -r entry; do
     [[ -n "$entry" ]] || continue
+    entries+=("$entry")
     names+=("${entry%%|*}")
   done <<< "$listing"
   if (( ${#names[@]} == 0 )); then
-    log "WARN ${SETUP} --list returned no hooks — skipping claude hooks check"
+    ch_log "WARN ${SETUP} --list returned no hooks — skipping claude hooks check"
     return 0
   fi
 
   mkdir -p "$STATE_DIR" 2>/dev/null || {
-    log "WARN cannot create state dir ${STATE_DIR} — skipping claude hooks check"
+    ch_log "WARN cannot create state dir ${STATE_DIR} — skipping claude hooks check"
     return 0
   }
 
@@ -1071,11 +1081,11 @@ run_claude_hooks() {
   # (b) settings.json PreToolUse registrations. Prints one line per hook that
   # is NOT registered, or the single token SETTINGS_UNREADABLE.
   local unregistered="" py_rc=0
-  unregistered="$(python3 - "$SETTINGS" "$HOOKS_DIR" "${names[@]}" <<'PY' 2>/dev/null
+  unregistered="$(python3 - "$SETTINGS" "$HOOKS_DIR" "${entries[@]}" <<'PY' 2>/dev/null
 import json, sys
-settings_path, hooks_dir, *names = sys.argv[1:]
+settings_path, hooks_dir, *entries = sys.argv[1:]
 try:
-    with open(settings_path) as f:
+    with open(settings_path, encoding="utf-8") as f:
         data = json.load(f)
     pre = data.get("hooks", {}).get("PreToolUse", [])
     if not isinstance(pre, list):
@@ -1083,21 +1093,25 @@ try:
 except Exception:
     print("SETTINGS_UNREADABLE")
     sys.exit(0)
-commands = []
+# Exact (matcher, command) pairs of every command hook, mirroring the shape
+# setup-claude-hooks.sh writes: {"matcher": M, "hooks": [{"type": "command",
+# "command": "bash <dir>/<name>"}]}.
+registered = set()
 for block in pre:
     if not isinstance(block, dict):
         continue
+    matcher = block.get("matcher")
     for h in block.get("hooks", []) or []:
-        if isinstance(h, dict):
-            commands.append(str(h.get("command", "")))
-for name in names:
-    needle = f"{hooks_dir.rstrip('/')}/{name}"
-    if not any(needle in c for c in commands):
+        if isinstance(h, dict) and h.get("type") == "command":
+            registered.add((matcher, h.get("command")))
+for entry in entries:
+    name, _, matcher = entry.partition("|")
+    if (matcher, f"bash {hooks_dir.rstrip('/')}/{name}") not in registered:
         print(name)
 PY
 )" || py_rc=$?
   if (( py_rc != 0 )); then
-    log "WARN settings parser failed (rc=${py_rc}) — skipping claude hooks check"
+    ch_log "WARN settings parser failed (rc=${py_rc}) — skipping claude hooks check"
     return 0
   fi
   local u
@@ -1112,16 +1126,16 @@ PY
 
   if (( ${#reasons[@]} == 0 )); then
     if [[ -f "$SINCE_MARKER" ]]; then
-      log "claude hooks healthy again — dedup re-armed"
+      ch_log "claude hooks healthy again — dedup re-armed"
     fi
     rm -f "$SINCE_MARKER" 2>/dev/null || true
-    log "claude-hooks tick processed (${#names[@]} hook(s) installed and registered: ${names[*]})"
+    ch_log "claude-hooks tick processed (${#names[@]} hook(s) installed and registered: ${names[*]})"
     return 0
   fi
 
   local reason_str
   reason_str="$(IFS=,; echo "${reasons[*]}")"
-  log "ALARM Claude Code PreToolUse hooks not fully installed: ${reason_str} (hooks dir ${HOOKS_DIR}, settings ${SETTINGS}; issue #5064 — run 'bash scripts/setup-claude-hooks.sh' or 'bash scripts/deploy.sh' from an operator shell)"
+  ch_log "ALARM Claude Code PreToolUse hooks not fully installed: ${reason_str} (hooks dir ${HOOKS_DIR}, settings ${SETTINGS}; issue #5064 — run 'bash scripts/setup-claude-hooks.sh' or 'bash scripts/deploy.sh' from an operator shell)"
 
   if [[ ! -f "$SINCE_MARKER" ]]; then
     local iso_now payload reason_clean xadd_out
@@ -1135,11 +1149,17 @@ PY
       timestamp "$iso_now" \
       correlationId "claude-hooks" \
       payload "$payload")"
-    if [[ -n "$xadd_out" ]]; then
+    # Only a stream id proves the entry landed. An error reply (ERR …,
+    # WRONGTYPE …, NOAUTH …) is printed on stdout with exit 0 by `redis-cli
+    # --raw`; treating it as success would write the marker and silence the
+    # whole episode.
+    if [[ "$xadd_out" =~ ^[0-9]+-[0-9]+$ ]]; then
       date +%s > "$SINCE_MARKER" 2>/dev/null || true
-      log "in-band delivery published type=infra:claude_hooks_missing -> ${NOTIFY_STREAM}"
+      ch_log "in-band delivery published type=infra:claude_hooks_missing -> ${NOTIFY_STREAM} (id ${xadd_out})"
     else
-      log "WARN in-band delivery FAILED (XADD returned nothing) — will retry next tick"
+      local reply_snip
+      reply_snip="$(printf '%s' "$xadd_out" | tr '\n' ' ' | cut -c1-160)"
+      ch_log "WARN in-band delivery FAILED (XADD reply '${reply_snip}' is not a stream id) — will retry next tick"
     fi
   fi
   return 0

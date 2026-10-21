@@ -24,6 +24,8 @@
 #   bash scripts/setup-claude-hooks.sh --remove  # uninstall
 #   bash scripts/setup-claude-hooks.sh --list    # print managed HOOKS entries
 #                                                # (one "name|matcher" per line)
+#   Any other argument prints usage and exits 2 (never a silent full install).
+#   If settings.json is a symlink, the link is kept and its target is updated.
 
 set -euo pipefail
 
@@ -46,14 +48,29 @@ HOOKS=(
   "git-remote-fence.sh|Bash"
 )
 
+usage() {
+  echo "usage: bash scripts/setup-claude-hooks.sh [--remove|-r | --list | --help|-h]"
+}
+
 REMOVE=0
 case "${1:-}" in
+  "") ;;
   --remove|-r) REMOVE=1 ;;
   --list)
     # Issue #5064: read-only listing for the watchdog's ## CLAUDE HOOKS block.
     # Touches nothing on disk.
     printf '%s\n' "${HOOKS[@]}"
     exit 0
+    ;;
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  *)
+    # An unknown flag must never fall through to a full install.
+    echo "setup-claude-hooks: unknown argument '$1'" >&2
+    usage >&2
+    exit 2
     ;;
 esac
 
@@ -100,7 +117,13 @@ import json, sys, os, shutil, tempfile
 
 mode, settings_path, dst_dir, *entries = sys.argv[1:]
 
-with open(settings_path, "r") as f:
+# Operators commonly symlink ~/.claude/settings.json into a dotfiles repo.
+# Resolve the link ONCE and do every read/write against the real file, so the
+# atomic rename below replaces the TARGET and the symlink itself survives
+# (renaming over the link path would swap it for a regular file).
+real_path = os.path.realpath(settings_path)
+
+with open(real_path, "r", encoding="utf-8") as f:
     original = f.read()
 data = json.loads(original)
 
@@ -155,14 +178,16 @@ if rendered == original:
 
 # Issue #5064: this now runs on every deploy while Claude Code sessions are
 # live and reading the file, so never truncate-in-place — write a sibling temp
-# file and rename it over the original (atomic on the same filesystem).
-settings_dir = os.path.dirname(os.path.abspath(settings_path))
+# file and rename it over the original (atomic on the same filesystem). The temp
+# file lives in the REAL target's directory so the rename never crosses a
+# filesystem and lands on the symlink's target, not the link.
+settings_dir = os.path.dirname(real_path)
 fd, tmp_path = tempfile.mkstemp(prefix=".settings.", suffix=".tmp", dir=settings_dir)
 try:
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(rendered)
-    shutil.copymode(settings_path, tmp_path)
-    os.replace(tmp_path, settings_path)
+    shutil.copymode(real_path, tmp_path)
+    os.replace(tmp_path, real_path)
 except BaseException:
     try:
         os.unlink(tmp_path)
