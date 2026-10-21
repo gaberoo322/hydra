@@ -472,7 +472,7 @@ describe("run_origin_identity auto-repair (#5065)", () => {
     );
     chmodSync(fakeGit, 0o755);
     const fakeTimeout = join(binDir, "timeout");
-    writeFileSync(fakeTimeout, `#!/usr/bin/env bash\nshift 3\n"$@"\nrc=$?\n[ -n "$FAKE_TIMEOUT_124" ] && exit 124\nexit $rc\n`);
+    writeFileSync(fakeTimeout, `#!/usr/bin/env bash\nif [ "$1" = "-k" ]; then shift 3; else shift 1; [ -n "$FAKE_TIMEOUT_124" ] && exec "$@"; fi\n"$@"\nrc=$?\n[ -n "$FAKE_TIMEOUT_124" ] && exit 124\nexit $rc\n`);
     chmodSync(fakeTimeout, 0o755);
     const bare = makeCanonicalBare();
     const r = tick({

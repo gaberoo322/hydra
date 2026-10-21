@@ -397,3 +397,63 @@ describe("run_brief_missing — fail-safe without Redis (issue #5048)", () => {
     assert.equal(notifyCalls().length, 0, "no CLI call — nothing was measured");
   });
 });
+
+describe("run_brief_missing — redis timeout + DEL gating (issue #5115)", () => {
+  const STUB_DIR = join(SCRATCH, "redis-stub-bin");
+  const CALLS = join(SCRATCH, "redis-stub-calls.log");
+
+  function installStub(body: string): void {
+    mkdirSync(STUB_DIR, { recursive: true });
+    const stub = join(STUB_DIR, "redis-cli");
+    writeFileSync(stub, ["#!/usr/bin/env bash", body, ""].join("\n"));
+    chmodSync(stub, 0o755);
+    rmSync(CALLS, { force: true });
+  }
+
+  function healthyStub(): string {
+    return [
+      `echo "$*" >> '${CALLS}'`,
+      'case "$*" in',
+      `  *"EXISTS ${TEST_LAST_SENT_KEY}"*) echo 1 ;;`,
+      `  *"GET ${TEST_LAST_SENT_KEY}"*) echo ${T0} ;;`,
+      "  *EXISTS*) echo 0 ;;",
+      "esac",
+    ].join("\n");
+  }
+
+  function runWithStub(extra: Record<string, string>) {
+    return runBlock({
+      PATH: `${STUB_DIR}:${process.env.PATH ?? ""}`,
+      HYDRA_REDIS_HOST: "127.0.0.1",
+      HYDRA_REDIS_PORT: "6379",
+      ...extra,
+    });
+  }
+
+  after(() => rmSync(STUB_DIR, { recursive: true, force: true }));
+
+  test("a hung redis-cli is bounded by timeout 5 and logs the unreachable WARN", () => {
+    installStub("exec sleep 60");
+    const started = Date.now();
+    const r = runWithStub({});
+    const elapsedMs = Date.now() - started;
+    assert.equal(r.status, 0, `a hung Redis must not break the block: ${r.stderr}`);
+    assert.match(bmLines(r.stdout), /WARN Redis unreachable/);
+    assert.ok(elapsedMs < 20_000, `block must return near the 5s timeout, took ${elapsedMs}ms`);
+  });
+
+  test("a healthy tick issues no DEL when the absent-since key does not exist", () => {
+    installStub(healthyStub());
+    const r = runWithStub({});
+    assert.equal(r.status, 0, r.stderr);
+    const calls = existsSync(CALLS) ? readFileSync(CALLS, "utf-8") : "";
+    assert.match(calls, /EXISTS/, "the stub was exercised");
+    assert.doesNotMatch(calls, /DEL [^\n]*absent-since/, "no DEL of absent-since when nothing to delete");
+  });
+
+  test("a zero-padded stale-hours hook is read base-10, not octal", () => {
+    installStub(healthyStub());
+    const r = runWithStub({ HYDRA_WATCHDOG_BRIEF_STALE_HOURS: "08" });
+    assert.equal(r.status, 0, `"08" must not abort under set -e: ${r.stderr}`);
+  });
+});
