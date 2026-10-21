@@ -120,14 +120,14 @@ describe("telegram-seam-check: scripts/ and systemd units (ADR-0045 D2, issue #5
   test("flags a Python script that posts to the Bot API, but not a Python comment", () => {
     assert.equal(
       fileViolatesTelegramSeam(
-        "scripts/autopilot/notify.py",
+        "scripts/_seam_fixture_notify.py",
         `import urllib.request\nurllib.request.urlopen("https://api.telegram.org/bot" + token + "/sendMessage", data=body)`,
       ),
       true,
     );
     assert.equal(
       fileViolatesTelegramSeam(
-        "scripts/autopilot/decide.py",
+        "scripts/_seam_fixture.py",
         `# pages go through scripts/operator-notify.ts, never api.telegram.org\nprint("ok")`,
       ),
       false,
