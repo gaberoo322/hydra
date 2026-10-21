@@ -33,6 +33,7 @@ import {
   _clearViewPrCache,
   ViewPrCache,
 } from "../src/github/issues.ts";
+import { viewIssue } from "../src/github/issue-actions.ts";
 import { decodePrStateAndHeadRef } from "../src/github/view-pr.ts";
 import { fetchPrStateViaGh } from "../src/scheduler/chores/cycle-merge-reconcile.ts";
 import { fetchMergeStatusViaGh } from "../src/scheduler/chores/holdback-merge-watch.ts";
@@ -338,6 +339,7 @@ case "$SCENARIO" in
   issues) echo '[{"number":11,"title":"A","labels":[{"name":"dev_orch"}],"state":"open"}]'; exit 0 ;;
   prs)    echo '[{"number":22,"title":"P","statusCheckRollup":[{"conclusion":"FAILURE","name":"ci"}]}]'; exit 0 ;;
   one)    echo '{"number":33,"labels":[{"name":"qa"}]}'; exit 0 ;;
+  rawlabels) echo "{\\"number\\":33,\\"labels\\":\${FAKE_LABELS}}"; exit 0 ;;
   merged) echo '{"state":"MERGED","headRefName":"worktree-agent-abc-t1-dev_orch","mergeCommit":{"oid":"deadbeef1234"},"changedFiles":3,"createdAt":"2026-06-01T04:05:06Z"}'; exit 0 ;;
   empty)  exit 0 ;;
   fail)   echo "boom" >&2; exit 1 ;;
@@ -393,6 +395,21 @@ esac
     assert.match(line!, /--label blocked/);
     assert.match(line!, /--state open/);
     assert.match(line!, /--json number,title,url,createdAt,labels,body,state/);
+  });
+
+  test("viewIssue coerces a non-array labels value to [] instead of throwing a TypeError", async () => {
+    process.env.FAKE_SCENARIO = "rawlabels";
+    for (const raw of ['"qa"', "7", "true", '{"name":"qa"}', "null"]) {
+      process.env.FAKE_LABELS = raw;
+      const res = await viewIssue(33, { repo: "acme/widgets" });
+      assert.equal(res.ok, true, `labels=${raw}`);
+      if (res.ok) assert.deepEqual(res.row.labels, [], `labels=${raw}`);
+    }
+    process.env.FAKE_LABELS = '[{"name":"qa"},{"name":5}]';
+    const ok = await viewIssue(33, { repo: "acme/widgets" });
+    assert.equal(ok.ok, true);
+    if (ok.ok) assert.deepEqual(ok.row.labels, ["qa"]);
+    delete process.env.FAKE_LABELS;
   });
 
   test("listIssuesBySearch injects --search and optional --label", async () => {

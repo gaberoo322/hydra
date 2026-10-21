@@ -267,7 +267,7 @@ function parseSingleIssue(
     title?: unknown;
     url?: unknown;
     createdAt?: unknown;
-    labels?: Array<{ name?: unknown }>;
+    labels?: unknown;
     body?: unknown;
     state?: unknown;
     updatedAt?: unknown;
@@ -282,7 +282,9 @@ function parseSingleIssue(
     url:
       typeof c.url === "string" ? c.url : `https://github.com/${repo}/issues/${number}`,
     createdAt: typeof c.createdAt === "string" ? c.createdAt : "",
-    labels: (c.labels ?? [])
+    // A non-array `labels` (string/number/boolean/object) coerces to [] — the
+    // same normalisation parseIssueRows applies — rather than throwing.
+    labels: (Array.isArray(c.labels) ? (c.labels as Array<{ name?: unknown }>) : [])
       .map((l) => (typeof l?.name === "string" ? l.name : ""))
       .filter((name) => name.length > 0),
     body: typeof c.body === "string" ? c.body : "",
