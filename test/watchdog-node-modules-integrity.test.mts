@@ -272,6 +272,7 @@ describe("run_node_modules_integrity — detection + delivery (issue #4175)", { 
   let wiped: string;
   let missingBin: string;
   let healthy: string;
+  let absent: string;
 
   function makeHealthy(root: string, entries = 25): void {
     mkdirSync(join(root, ".bin"), { recursive: true });
@@ -285,6 +286,8 @@ describe("run_node_modules_integrity — detection + delivery (issue #4175)", { 
     wiped = join(SCRATCH, "wiped");
     missingBin = join(SCRATCH, "missing-bin");
     healthy = join(SCRATCH, "healthy");
+    // "absent": never created; the unreadable-root case writes since/fired state for it (#5137).
+    absent = join(SCRATCH, "does-not-exist");
     // "wiped": measured incident state — 24K, no .bin/, no packages.
     mkdirSync(wiped, { recursive: true });
     writeFileSync(join(wiped, "some-leftover-file"), "x");
@@ -296,6 +299,7 @@ describe("run_node_modules_integrity — detection + delivery (issue #4175)", { 
     cleanState(wiped);
     cleanState(missingBin);
     cleanState(healthy);
+    cleanState(absent);
     drc(["DEL", TEST_NOTIFY_STREAM]);
   });
 
@@ -304,6 +308,7 @@ describe("run_node_modules_integrity — detection + delivery (issue #4175)", { 
     cleanState(wiped);
     cleanState(missingBin);
     cleanState(healthy);
+    cleanState(absent);
     drc(["DEL", TEST_NOTIFY_STREAM]);
   });
 
@@ -377,7 +382,7 @@ describe("run_node_modules_integrity — detection + delivery (issue #4175)", { 
   });
 
   test("never exits non-zero even against an unreadable root", () => {
-    const r = runBlock({ HYDRA_WATCHDOG_NM_ROOTS: join(SCRATCH, "does-not-exist"), HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20" });
+    const r = runBlock({ HYDRA_WATCHDOG_NM_ROOTS: absent, HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20" });
     assert.equal(r.status, 0, `block must be fail-safe: ${r.stderr}`);
     assert.match(nmLines(r.stdout), /root-absent/, "an absent root must be reported distinguishably");
   });
