@@ -25,7 +25,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Redis from "ioredis";
 import { useCleanRedisDb, TEST_REDIS_URL } from "./_helpers/redis-db.mts";
-import { ownedRedisDb, ownedDbSkip } from "./_helpers/owned-redis-db.mts";
+import { ownedRedisDb, ownedDbSkip, ownedDbContext } from "./_helpers/owned-redis-db.mts";
+import { fidelityBattery } from "./_helpers/watchdog-redis-shim.mts";
 
 // The strict ioredis `Redis` static type in this tsconfig omits the full
 // dynamic command surface (`exists`, etc.); the suite convention is to type the
@@ -932,5 +933,38 @@ describe("test/_helpers/owned-redis-db decision matrix (issue #5062)", () => {
   test("ownedDbSkip: full-suite local run returns false so the test body fails loudly", () => {
     assert.equal(ownedDbSkip(null, { HYDRA_FULL_SUITE: "1" }), false);
     assert.equal(ownedDbSkip(null, { HYDRA_FULL_SUITE: "1", REDIS_URL: "redis://127.0.0.1:6379/0" }), false);
+  });
+
+  test("ownedDbContext pairs the owned DB with its skip verdict", () => {
+    assert.deepEqual(ownedDbContext({ HYDRA_REDIS_DB: "3" }), { db: "3", skip: false });
+    assert.deepEqual(ownedDbContext({ HYDRA_FULL_SUITE: "1" }), { db: null, skip: false });
+    assert.equal(typeof ownedDbContext({}).skip, "string");
+  });
+
+  // The shim's fidelity battery (test/_helpers/watchdog-redis-shim.mts) follows
+  // the same rule: its SELECT-path entries are omitted only where no owned DB is
+  // expected, and a full-suite local run with none fails loudly.
+  const key = (n: string): string => `k:${n}`;
+  const selectsNonZeroDb = (cases: string[][]): boolean => cases.some((c) => c[0] === "-n" && c[1] !== "0");
+
+  test("fidelityBattery: an owned DB adds the SELECT-path entries on that DB", () => {
+    const owned = fidelityBattery(key, { HYDRA_REDIS_DB: "3" }).filter((c) => c[1] === "3");
+    assert.deepEqual(owned.map((c) => c[2]), ["SET", "GET", "DEL"]);
+  });
+
+  test("fidelityBattery: bare node --test and remote REDIS_URL omit the SELECT-path entries", () => {
+    assert.equal(selectsNonZeroDb(fidelityBattery(key, {})), false, "bare node --test");
+    const remote = { HYDRA_FULL_SUITE: "1", REDIS_URL: "redis://redis.example.com:6379" };
+    assert.equal(selectsNonZeroDb(fidelityBattery(key, remote)), false, "remote REDIS_URL");
+  });
+
+  test("fidelityBattery: a full-suite local run with no owned DB throws instead of omitting them", () => {
+    for (const env of [{ HYDRA_FULL_SUITE: "1" }, { HYDRA_FULL_SUITE: "1", REDIS_URL: "redis://127.0.0.1:6379/0" }]) {
+      assert.throws(
+        () => fidelityBattery(key, env),
+        (err: unknown) => (err as { code?: string }).code === "invariant-violation" && /HYDRA_REDIS_DB/.test(String(err)),
+        `must throw for ${JSON.stringify(env)}`,
+      );
+    }
   });
 });

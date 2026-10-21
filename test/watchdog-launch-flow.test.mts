@@ -48,7 +48,6 @@
 
 import test, { describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
-import { ownedRedisDb, ownedDbSkip } from "./_helpers/owned-redis-db.mts";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -74,6 +73,7 @@ import {
   removeRedisDockerShim,
   withRedisDockerShim,
 } from "./_helpers/watchdog-redis-shim.mts";
+import { ownedDbContext } from "./_helpers/owned-redis-db.mts";
 import { STREAMS } from "../src/event-bus-stream-keys.ts";
 import { isPageKind as isPageKindClosed } from "../src/operator-channel/page-list.ts";
 import {
@@ -927,10 +927,9 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/
   // as HYDRA_REDIS_DB via redisChildEnv), captured at definition time. Never a
   // literal from the launcher's pool: a concurrent run owns every other index
   // and FLUSHDBs it (issue #5062). Null => no owned DB (remote REDIS_URL or a
-  // bare `node --test`): the "lands in that DB" test skips with a reason.
-  const OWNED_DB: string | null = ownedRedisDb();
-  const SELECTED_DB: string | null = OWNED_DB; // null => cleanup DELs against the owned DB are skipped (never db 0 here)
-  const OWNED_DB_SKIP = ownedDbSkip(OWNED_DB);
+  // bare `node --test`): the "lands in that DB" test skips with a reason, and
+  // the cleanup DELs against the owned DB are skipped (never redirected to db 0).
+  const { db: OWNED_DB, skip: OWNED_DB_SKIP } = ownedDbContext();
 
   // Fully separate key namespace from RUN_NS/TEST_LAST_TICK_KEY/SINCE/FIRED
   // above — this describe never touches those keys, on any DB.
@@ -997,7 +996,7 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/
   function cleanBothDbs(): void {
     const keys = [OWN_LAST_TICK_KEY, OWN_SINCE("fail-safe"), OWN_FIRED("fail-safe")];
     drcAt("0", ["DEL", ...keys]);
-    if (SELECTED_DB !== null) drcAt(SELECTED_DB, ["DEL", ...keys]);
+    if (OWNED_DB !== null) drcAt(OWNED_DB, ["DEL", ...keys]);
   }
 
   beforeEach(() => {
@@ -1040,16 +1039,16 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/
     // HYDRA_REDIS_DB=<owned> makes rc_read visible to. db 0 is left empty, so a tick
     // that mistakenly reads db 0 would see no record at all (a distinguishable
     // failure mode, not a false pass).
-    hsetLastTickAt(OWNED_DB!, {
+    hsetLastTickAt(OWNED_DB, {
       reason: "eligibility-unreachable",
       class: "fail-safe",
       at: String(T0),
       latency_ms: "",
     });
-    seedSinceAt(OWNED_DB!, "fail-safe", T0); // streak began at T0, in the target DB
+    seedSinceAt(OWNED_DB, "fail-safe", T0); // streak began at T0, in the target DB
 
     const r = runOwnBlock({
-      HYDRA_REDIS_DB: OWNED_DB!,
+      HYDRA_REDIS_DB: OWNED_DB,
       HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2",
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
     });
@@ -1063,12 +1062,12 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/
     // The since-anchor + fired marker THIS tick just wrote via rc_write must
     // exist in the selected DB...
     assert.equal(
-      existsAt(OWNED_DB!, OWN_FIRED("fail-safe")),
+      existsAt(OWNED_DB, OWN_FIRED("fail-safe")),
       true,
       "fired marker must land in the HYDRA_REDIS_DB-selected DB",
     );
     assert.equal(
-      existsAt(OWNED_DB!, OWN_SINCE("fail-safe")),
+      existsAt(OWNED_DB, OWN_SINCE("fail-safe")),
       true,
       "since anchor must land in the HYDRA_REDIS_DB-selected DB",
     );

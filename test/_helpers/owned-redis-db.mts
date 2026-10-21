@@ -30,3 +30,17 @@ export function ownedDbSkip(owned: string | null, env: NodeJS.ProcessEnv = proce
   if (env.HYDRA_FULL_SUITE === "1" && local) return false;
   return "launcher assigned no owned HYDRA_REDIS_DB (remote REDIS_URL or bare node --test)";
 }
+
+/** The run's owned DB and its skip decision, resolved together for every call site. */
+export interface OwnedDbContext {
+  /** The owned DB index ({@link ownedRedisDb}), or null when the launcher assigned none. */
+  db: string | null;
+  /** The {@link ownedDbSkip} verdict: a skip reason, or false (run, and fail loudly if `db` is null). */
+  skip: string | false;
+}
+
+/** {@link ownedRedisDb} + {@link ownedDbSkip} in one call: the watchdog #4183 describes and the shim battery share it. */
+export function ownedDbContext(env: NodeJS.ProcessEnv = process.env): OwnedDbContext {
+  const db = ownedRedisDb(env);
+  return { db, skip: ownedDbSkip(db, env) };
+}

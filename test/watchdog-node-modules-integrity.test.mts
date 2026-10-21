@@ -27,7 +27,6 @@
 
 import test, { describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
-import { ownedRedisDb, ownedDbSkip } from "./_helpers/owned-redis-db.mts";
 import { spawnSync } from "node:child_process";
 import {
   readFileSync,
@@ -50,6 +49,7 @@ import {
   WATCHDOG_REDIS_TIMEOUT_MS,
   throwIfTimedOut,
 } from "./_helpers/watchdog-timeouts.mts";
+import { ownedDbContext } from "./_helpers/owned-redis-db.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
@@ -403,10 +403,9 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through run_node_
   // as HYDRA_REDIS_DB via redisChildEnv), captured at definition time. Never a
   // literal from the launcher's pool: a concurrent run owns every other index
   // and FLUSHDBs it (issue #5062). Null => no owned DB (remote REDIS_URL or a
-  // bare `node --test`): the "lands in that DB" test skips with a reason.
-  const OWNED_DB: string | null = ownedRedisDb();
-  const SELECTED_DB: string | null = OWNED_DB; // null => cleanup DELs against the owned DB are skipped (never db 0 here)
-  const OWNED_DB_SKIP = ownedDbSkip(OWNED_DB);
+  // bare `node --test`): the "lands in that DB" test skips with a reason, and
+  // the cleanup DELs against the owned DB are skipped (never redirected to db 0).
+  const { db: OWNED_DB, skip: OWNED_DB_SKIP } = ownedDbContext();
 
   // Fully separate key namespace from TEST_NM_PREFIX/SINCE/FIRED above — this
   // describe never touches those keys, on any DB.
@@ -467,10 +466,10 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through run_node_
     const keys = sig ? [OWN_SINCE(sig), OWN_FIRED(sig)] : [];
     if (keys.length > 0) {
       drcAt("0", ["DEL", ...keys]);
-      if (SELECTED_DB !== null) drcAt(SELECTED_DB, ["DEL", ...keys]);
+      if (OWNED_DB !== null) drcAt(OWNED_DB, ["DEL", ...keys]);
     }
     drcAt("0", ["DEL", OWN_NOTIFY_STREAM]);
-    if (SELECTED_DB !== null) drcAt(SELECTED_DB, ["DEL", OWN_NOTIFY_STREAM]);
+    if (OWNED_DB !== null) drcAt(OWNED_DB, ["DEL", OWN_NOTIFY_STREAM]);
   }
 
   beforeEach(() => {
@@ -516,19 +515,19 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through run_node_
   test("a bash-side write with HYDRA_REDIS_DB set lands in that DB, never in db 0", { skip: OWNED_DB_SKIP }, () => {
     assert.ok(OWNED_DB !== null, "full-suite launcher run must export an owned HYDRA_REDIS_DB (#5062)");
     const sig = sigForRoot(wipedRoot);
-    const r = runOwnBlock({ HYDRA_REDIS_DB: OWNED_DB! });
+    const r = runOwnBlock({ HYDRA_REDIS_DB: OWNED_DB });
     assert.equal(r.status, 0, `block must never exit non-zero: ${r.stderr}`);
     assert.match(nmLines(r.stdout), /WARNING NODE_MODULES INTEGRITY/, "must warn on the wiped tree");
 
     // The since-anchor + fired marker THIS tick just wrote via rc_write must
     // exist in the selected DB...
     assert.equal(
-      existsAt(OWNED_DB!, OWN_FIRED(sig)),
+      existsAt(OWNED_DB, OWN_FIRED(sig)),
       true,
       "fired marker must land in the HYDRA_REDIS_DB-selected DB",
     );
     assert.equal(
-      existsAt(OWNED_DB!, OWN_SINCE(sig)),
+      existsAt(OWNED_DB, OWN_SINCE(sig)),
       true,
       "since anchor must land in the HYDRA_REDIS_DB-selected DB",
     );
