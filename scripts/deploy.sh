@@ -64,7 +64,7 @@ cd dashboard && npm ci && npm run build && cd ..
 
 echo "==> Installing failure-notification template (issue #4284)..."
 # hydra-notify-failure@.service is a template unit referenced via
-# OnFailure=hydra-notify-failure@%n.service by several sibling units
+# OnFailure=hydra-notify-failure@%n by several sibling units
 # (autopilot, watchdog, orchestrator). It was previously host-only and
 # untracked, which let a systemd ${VAR} substitution bug (bare ${MSG} always
 # resolving to empty) silently blank every failure page it ever sent. Install

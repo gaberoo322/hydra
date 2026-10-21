@@ -31,7 +31,6 @@ import { join } from "node:path";
 import { TARGET_BOARD_LABELS } from "../../target-board-labels.ts";
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
 import type { TurnSnapshotGithub } from "./github-port.ts";
-import { pyIntOf, pyIsInt } from "./py-compat.ts";
 
 export const TARGET_SCAN_BOARDS_COLLECTOR = "target-scan-boards";
 
@@ -129,7 +128,9 @@ export function classifyTargetScan(rows: readonly unknown[], opts: { limit: numb
     if (inTriage) {
       triage++;
       const num = (row as Record<string, unknown>).number;
-      if (pyIsInt(num)) triageNumbers.add(pyIntOf(num));
+      // An integer number (a boolean reads as 0/1, as it always has); anything else is skipped.
+      if (typeof num === "boolean") triageNumbers.add(Number(num));
+      else if (typeof num === "number" && Number.isInteger(num)) triageNumbers.add(num);
     }
     if (has(L.readyForAgent)) queued++;
     if (has(L.cleanupScan)) openScan++;

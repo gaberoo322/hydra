@@ -1525,7 +1525,8 @@ Relay the QA report to the user.
 Pre-merge QA (sections 1–11) is the **Pre-merge Gate**. This section is the
 **Post-merge Regression Check**: the *producer* of the Outcome Holdback events
 (`holdback.reverted` / `holdback.cap-reached` / `holdback.revert_failed`) that
-`src/digest.ts` has long consumed but nothing produced since the in-process
+the notification consumer (now the Operator Channel router, `src/operator-channel/route-event.ts`;
+formerly the deleted `src/digest.ts`) has long consumed but nothing produced since the in-process
 `src/holdback.ts` watcher was deleted in the ADR-0006 cut-over. Without this,
 no enrolled merge (T2/T3/T4 — see "carries up the ladder" below) is actually
 watched for Target-Outcome regression — the holdback is a no-op.
@@ -1592,7 +1593,8 @@ case "$DECISION" in
          --body "Outcome Holdback auto-revert (ADR-0004 step 4). Leading outcomes regressed past noise_epsilon vs the pre-merge baseline: ${REGRESSED}."; then
       : # revert PR opened; CI is still the merge gate for the revert itself
     else
-      # Revert/PR-open failed — surface to the digest so the operator sees a
+      # Revert/PR-open failed — surface through the Operator Channel (a
+      # holdback.revert_failed Page, ADR-0045) so the operator sees a
       # warranted revert did not land.
       curl -fsS -X POST http://localhost:4000/api/holdback/revert-failed \
         -H 'content-type: application/json' \
@@ -1602,7 +1604,7 @@ case "$DECISION" in
     ;;
   cap-reached)
     # Per-day revert cap hit — revert SUPPRESSED, holdback.cap-reached emitted.
-    # Do NOT revert; the digest surfaces the suppressed regression. A runaway
+    # Do NOT revert; the Morning Brief surfaces the suppressed regression. A runaway
     # revert loop is far more expensive than missing one revert.
     ;;
   passed)
@@ -1639,7 +1641,9 @@ esac
 - **Fixed event names + payloads.** The producer emits exactly
   `holdback.reverted` (`payload.commitSha`, `payload.regressedOutcomes`),
   `holdback.cap-reached`, and `holdback.revert_failed` — the three names
-  `src/digest.ts` consumes. Renaming any leaves the consumer orphaned.
+  the Operator Channel router (`src/operator-channel/route-event.ts`) consumes:
+  `holdback.revert_failed` is a Page, the other two are Morning Brief items
+  (ADR-0045). Renaming any leaves the consumer orphaned.
 - **Per-day cap precedes any revert.** Once `HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY`
   (default 3) is reached, the producer emits `holdback.cap-reached` and
   suppresses further reverts for the UTC day.

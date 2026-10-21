@@ -10,13 +10,13 @@
  * {@link ALL_DEGRADED_SIGNALS} value, a blob / `scout_spend_usd_today` /
  * `observability` / `degraded` entry is dropped — with a `degraded` marker,
  * and the rest survives. Only a document still invalid after that (a
- * structural fault) is replaced by the all-degraded document.
- * `scripts/autopilot/turn_snapshot.py` is the ONE Python reader; it never
- * trusts a document whose `validation.ok` is not `true`, repairs per field
- * again on apply, and reads the all-degraded snapshot when there is no usable
- * one. No JSON Schema is generated from this file and none is committed
- * (ADR-0043 rejects that artifact) — the contract test
- * (test/turn-snapshot-json.test.mts) round-trips golden documents through
+ * structural fault) is replaced by the all-degraded document, which is also
+ * what `turn-snapshot.ts --all-degraded` prints when the collector run failed.
+ * This file is the ONLY validator: `scripts/autopilot/turn_snapshot.py`, the
+ * one Python reader, stores the emitted document as-is and holds no copy of
+ * these shapes or defaults (#5083). No JSON Schema is generated from this
+ * file and none is committed (ADR-0043 rejects that artifact) — the contract
+ * test (test/turn-snapshot-json.test.mts) round-trips golden documents through
  * both this schema and the Python accessor instead.
  *
  * Field shapes (the PR's "Decisions taken"):
@@ -64,6 +64,19 @@ const DirtySurfaceSchema = z.array(
     .object({
       pr: IssueNumber,
       closing_issue: IssueNumber.nullable(),
+    })
+    .strict(),
+);
+
+/** #5052: one PR to re-evaluate for merge - the `qa-verdict-event.sh` stdout, head-bound by decide.py. */
+const QaRecheckSchema = z.array(
+  z
+    .object({
+      pr: IssueNumber,
+      tier: z.number().int().min(1).max(4),
+      verdict: z.string().min(1),
+      verdict_sha: z.string(),
+      head_sha: z.string(),
     })
     .strict(),
 );
@@ -133,6 +146,8 @@ const SignalsSchema = z
     orch_dev_resume_nopr_anchor: IssueNumber.nullable(),
     orch_dirty_forward_fix: PinSchema.nullable(),
     orch_prs_dirty_surface: DirtySurfaceSchema,
+    // #5052: open PRs whose QA verdict may now be mergeable - re-evaluated every turn
+    orch_qa_verdict_recheck: QaRecheckSchema,
     // grill gate (#628 / #3711)
     orch_pending_grill_anchor: IssueNumber.nullable(),
     orch_dev_ready_anchor: IssueNumber.nullable(),
@@ -154,8 +169,10 @@ const SignalsSchema = z
  * due, every producer cap is saturated (so no backfill / scan / scout
  * producer fires on facts nobody read), no pin or anchor is resolved, and
  * `health_fail` + `orch_board_signals_degraded` are raised so the doctor runs
- * and the degradation is visible. scripts/autopilot/turn_snapshot.py holds the
- * same table (drift-tested in test/turn-snapshot-json.test.mts).
+ * and the degradation is visible. A flag is raised here IFF its name ends
+ * `_fail`, `_degraded` or `_saturated` — the convention the Python accessor
+ * reads a document WITHOUT signals by (its marker, when node cannot run; #5083),
+ * pinned in test/turn-snapshot-json.test.mts. A new fault / cap flag follows it.
  */
 export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   orch_work_available: false,
@@ -202,6 +219,7 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   orch_dev_resume_nopr_anchor: null,
   orch_dirty_forward_fix: null,
   orch_prs_dirty_surface: [],
+  orch_qa_verdict_recheck: [],
   orch_pending_grill_anchor: null,
   orch_dev_ready_anchor: null,
   wayfinder_orch_frontier: null,

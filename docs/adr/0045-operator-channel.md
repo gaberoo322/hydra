@@ -25,7 +25,8 @@ The channel, not the producer, decides severity. A **Page** is an event on one c
 - the notification consumer is dead;
 - an Outcome Holdback revert failed;
 - orchestrator, autopilot, tunnel or backup service failures;
-- the `/hydra-review` pickup set going non-empty.
+- the `/hydra-review` pickup set going non-empty;
+- no Morning Brief delivered for 26h (the watchdog's delivery-health alarm, Decision 8).
 
 Every other event is a **Morning Brief** item. Target-project service failures and successful holdback reverts go to the brief. Adding a page type is an edit to the list in code plus this ADR's list; producers cannot self-promote.
 

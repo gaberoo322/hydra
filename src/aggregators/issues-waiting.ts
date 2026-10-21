@@ -57,7 +57,7 @@ import { hasScopeSection } from "../scope-section.ts";
 import { DEFAULT_THRESHOLDS, type StuckThresholds } from "./stuck-items.ts";
 import { logger } from "../logger.ts";
 
-export type WaitingLine =
+type WaitingLine =
   | "reframe"
   | "ready-for-human"
   | "stale-blocked"
@@ -153,7 +153,7 @@ function hasAny(labels: readonly string[], set: readonly string[]): boolean {
  * body declares `## Sub-issues` children, or that any row in hand declares as
  * its parent (`## Parent` / `Parent: #N` / `Child of #N`).
  */
-export function epicNumbers(
+function epicNumbers(
   byLabel: ReadonlyMap<string, readonly IssueRow[]>,
 ): Set<number> {
   const out = new Set<number>();

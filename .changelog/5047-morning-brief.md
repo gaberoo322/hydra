@@ -1,0 +1,1 @@
+- feat: Morning Brief at 07:30 local (Redis last-sent key, catch-up after downtime, Monday weekly section) replaces the 4h digest, 24h heartbeat and weekly digest chore; review-pickup is an actionable Page; POST /api/operator-channel/brief/send replaces the two digest routes (#5047)

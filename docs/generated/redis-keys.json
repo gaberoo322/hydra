@@ -164,7 +164,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 456
+        "line": 451
       }
     },
     {
@@ -184,7 +184,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 457
+        "line": 452
       }
     },
     {
@@ -206,7 +206,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 454
+        "line": 449
       }
     },
     {
@@ -228,7 +228,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 455
+        "line": 450
       }
     },
     {
@@ -722,22 +722,6 @@
       }
     },
     {
-      "builder": "digestLastWeekly",
-      "pattern": "hydra:digest:last-weekly",
-      "params": [],
-      "callSites": 2,
-      "accessors": [
-        "src/redis/housekeeping.ts"
-      ],
-      "servedBy": [],
-      "home": null,
-      "retired": false,
-      "source": {
-        "path": "src/redis/keys.ts",
-        "line": 401
-      }
-    },
-    {
       "builder": "emergencyBrake",
       "pattern": "hydra:autopilot:emergency-brake",
       "params": [],
@@ -971,7 +955,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 412
+        "line": 407
       }
     },
     {
@@ -1317,7 +1301,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 424
+        "line": 419
       }
     },
     {
@@ -1331,7 +1315,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 419
+        "line": 414
       }
     },
     {
@@ -1345,7 +1329,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 418
+        "line": 413
       }
     },
     {
@@ -1359,7 +1343,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 417
+        "line": 412
       }
     },
     {
@@ -1424,7 +1408,7 @@
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
-        "line": 407
+        "line": 402
       }
     }
   ]

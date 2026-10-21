@@ -58,9 +58,8 @@ import { deriveBoardState } from "../board-state.ts";
 import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
 import { parseIssueRows } from "../../github/issues.ts";
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
-import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
+import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { HydraRead, TurnSnapshotHydra } from "./hydra-http.ts";
-import { pyJsonLoads, pyTruthy } from "./py-compat.ts";
 
 export const ORCH_BOARD_COLLECTOR = "orch-board";
 export const UNTRIAGED_ORPHANS_COLLECTOR = "untriaged-orphans";
@@ -117,17 +116,15 @@ export interface OrchBoardDeps {
  * not `degraded` (Python truthiness — `null`/`0`/absent read as healthy), and
  * carrying `ready_for_agent`. Returns the body, or `null` when unusable.
  */
-/** A service read as the Python `json.load` the bash piped it through saw it. */
+/** A service read through the port's shared JSON parse (a failed read is an empty one). */
 function serviceJsonRead(read: HydraRead): GhJsonRead {
-  if (read.kind === "failed") return { kind: "empty" };
-  const parsed = pyJsonLoads(read.body);
-  return "error" in parsed ? { kind: "unparseable", error: parsed.error } : { kind: "ok", data: parsed.value };
+  return read.kind === "failed" ? { kind: "empty" } : parseJsonRead(read.body);
 }
 
 /** Why a service read is unusable, for the degraded marker and the diagnostic line. */
 function serviceFailureReason(read: HydraRead, json: GhJsonRead): string {
   if (read.kind === "failed") return read.reason;
-  if (json.kind === "unparseable") return `unparseable: ${json.error}`;
+  if (json.kind !== "ok") return "unparseable";
   return "degraded-or-incomplete-body";
 }
 
@@ -136,7 +133,9 @@ export function healthyBoardState(read: GhJsonRead): Readonly<Record<string, unk
   const d = read.data;
   if (d === null || typeof d !== "object" || Array.isArray(d)) return null;
   const body = d as Record<string, unknown>;
-  if (pyTruthy(body.degraded)) return null;
+  // `degraded` set: anything but null / false / 0 / "" / an empty list or object (#934).
+  const flag = body.degraded;
+  if (flag !== null && typeof flag === "object" ? Object.keys(flag).length > 0 : Boolean(flag)) return null;
   return Object.hasOwn(body, "ready_for_agent") ? body : null;
 }
 

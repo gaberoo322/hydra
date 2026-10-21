@@ -68,7 +68,8 @@
         "0015",
         "0020",
         "0033",
-        "0036"
+        "0036",
+        "0045"
       ],
       "referenceDocs": [
         {
@@ -204,7 +205,6 @@
           "depsCompleted",
           "depsHeld",
           "depsIndex",
-          "digestLastWeekly",
           "emergencyBrake",
           "frictionPatterns",
           "learningLastDemotionCount",
@@ -413,7 +413,6 @@
           "ActiveDispatchesResponseSchema",
           "AlertsNowQuerySchema",
           "AlertsNowResponseSchema",
-          "AttentionBucketSummarySchema",
           "AttentionFeedItemSchema",
           "AttentionFeedResponseSchema",
           "AttributionImpactQuerySchema",
@@ -460,7 +459,6 @@
           "HoldbackRevertFailedBodySchema",
           "LessonsExplorerQuerySchema",
           "LivenessManifestSchema",
-          "MachineStoppedSubLineSchema",
           "OperatorActionEntrySchema",
           "OperatorActionRegistrySchema",
           "OperatorActionsResponseSchema",
@@ -659,7 +657,8 @@
         "0015",
         "0020",
         "0033",
-        "0036"
+        "0036",
+        "0045"
       ],
       "referenceDocs": [
         {
@@ -866,20 +865,19 @@
         ],
         "chores": [
           "0 review-pickup-notify",
-          "1 weekly-summary",
-          "2 usage-weekly-snapshot",
-          "3 memory-consolidation",
-          "4 design-concept-snapshot",
-          "5 stale-key-prune",
-          "6 worktree-orphan-prune",
-          "7 glm-eligibility-sweep",
-          "8 target-outcomes-publish",
-          "9 wiring-liveness",
-          "10 attribution-record",
-          "11 holdback-merge-watch",
-          "12 cycle-merge-reconcile",
-          "13 holdback-merge-event-enrol",
-          "14 pattern-cue-demotion"
+          "1 usage-weekly-snapshot",
+          "2 memory-consolidation",
+          "3 design-concept-snapshot",
+          "4 stale-key-prune",
+          "5 worktree-orphan-prune",
+          "6 glm-eligibility-sweep",
+          "7 target-outcomes-publish",
+          "8 wiring-liveness",
+          "9 attribution-record",
+          "10 holdback-merge-watch",
+          "11 cycle-merge-reconcile",
+          "12 holdback-merge-event-enrol",
+          "13 pattern-cue-demotion"
         ],
         "env-vars": [
           "HYDRA_AUTO_CYCLE_INTERVAL_MS",
@@ -897,12 +895,11 @@
     },
     {
       "slug": "src-notification",
-      "name": "src/notification/, src/notify.ts, src/digest.ts",
+      "name": "src/notification/, src/operator-channel/",
       "table": "domain",
       "paths": [
         "src/notification/",
-        "src/notify.ts",
-        "src/digest.ts"
+        "src/operator-channel/"
       ],
       "retired": false,
       "terms": [
@@ -927,11 +924,17 @@
       "referenceDocs": [],
       "slices": {
         "routes": [
-          "POST /api/digest/send",
-          "POST /api/digest/heartbeat"
+          "POST /api/operator-channel/brief/send",
+          "GET /api/operator-channel/delivery-health"
+        ],
+        "env-vars": [
+          "TELEGRAM_BOT_TOKEN",
+          "TELEGRAM_CHAT_ID"
         ]
       },
-      "homes": [],
+      "homes": [
+        "/health"
+      ],
       "route": "/docs/area/src-notification",
       "source": {
         "path": "CONTEXT-MAP.md",
@@ -967,7 +970,8 @@
         "0015",
         "0020",
         "0033",
-        "0036"
+        "0036",
+        "0045"
       ],
       "referenceDocs": [
         {
@@ -1082,7 +1086,8 @@
         "0015",
         "0020",
         "0033",
-        "0036"
+        "0036",
+        "0045"
       ],
       "referenceDocs": [
         {
@@ -1191,7 +1196,8 @@
         "0015",
         "0020",
         "0033",
-        "0036"
+        "0036",
+        "0045"
       ],
       "referenceDocs": [
         {
@@ -1363,7 +1369,8 @@
         "0015",
         "0020",
         "0033",
-        "0036"
+        "0036",
+        "0045"
       ],
       "referenceDocs": [
         {
@@ -1547,7 +1554,8 @@
         "0029",
         "0033",
         "0034",
-        "0036"
+        "0036",
+        "0045"
       ],
       "referenceDocs": [
         {
@@ -1608,7 +1616,8 @@
         "0010",
         "0012",
         "0033",
-        "0036"
+        "0036",
+        "0045"
       ],
       "referenceDocs": [
         {
@@ -1960,7 +1969,8 @@
         "0015",
         "0020",
         "0033",
-        "0036"
+        "0036",
+        "0045"
       ],
       "referenceDocs": [
         {
@@ -2021,7 +2031,8 @@
         "0015",
         "0020",
         "0033",
-        "0036"
+        "0036",
+        "0045"
       ],
       "referenceDocs": [
         {

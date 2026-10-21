@@ -269,6 +269,13 @@ test("formatAlertMessage renders every live alert type byte-identically (issue #
       "node_modules integrity: /home/x/node_modules — absent"],
     [{ type: "infra:origin_identity_wrong", payload: { reason: "url mismatch", url: "https://evil" } },
       "~/hydra origin identity: url mismatch — observed origin https://evil; restore the orchestrator remote from an operator shell and fetch origin"],
+    // #5065: the watchdog self-heals; the repaired / failed arms say so.
+    [{ type: "infra:origin_identity_wrong", payload: { reason: "wrong-origin-url", url: "https://evil", repair: "repaired", newUrl: "https://github.com/gaberoo322/hydra.git", fetch: "ok" } },
+      "~/hydra origin identity auto-repaired: wrong-origin-url — origin https://evil -> https://github.com/gaberoo322/hydra.git, fetch ok; find the writer via the .git/config change breadcrumb in the watchdog journal"],
+    [{ type: "infra:origin_identity_wrong", payload: { reason: "origin-master-missing", url: "https://github.com/gaberoo322/hydra.git", repair: "failed", note: "auto-repair FAILED: origin fetch failed (rc=128)" } },
+      "~/hydra origin identity: origin-master-missing — observed origin https://github.com/gaberoo322/hydra.git; auto-repair FAILED: origin fetch failed (rc=128); restore the orchestrator remote from an operator shell and fetch origin"],
+    [{ type: "infra:origin_identity_wrong", payload: { reason: "wrong-origin-url", url: "https://evil", repair: "not-attempted" } },
+      "~/hydra origin identity: wrong-origin-url — observed origin https://evil; restore the orchestrator remote from an operator shell and fetch origin"],
     [{ type: "glm:drainer_sterile", payload: { durationMs: 7200000, thresholdMs: 3600000 } },
       "GLM drainer sterile: heartbeat live and eligible work queued, but zero drainer PRs — sustained 2h past the 1h threshold; the #3754 partition is hiding glm-eligible work from the Opus lane"],
     [{ type: "launch:pause_forgotten", payload: { a: 1 } },

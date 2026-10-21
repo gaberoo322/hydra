@@ -32,7 +32,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/turn-snapshot.ts",
-        "line": 160
+        "line": 177
       }
     },
     {
@@ -77,16 +77,6 @@
       "source": {
         "path": "src/schemas/now-page.ts",
         "line": 207
-      }
-    },
-    {
-      "name": "AttentionBucketSummarySchema",
-      "file": "src/schemas/attention.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/attention.ts",
-        "line": 142
       }
     },
     {
@@ -690,16 +680,6 @@
       }
     },
     {
-      "name": "MachineStoppedSubLineSchema",
-      "file": "src/schemas/attention.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/attention.ts",
-        "line": 81
-      }
-    },
-    {
       "name": "OperatorActionEntrySchema",
       "file": "src/schemas/operator-actions.ts",
       "importedBy": [
@@ -1160,7 +1140,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/turn-snapshot.ts",
-        "line": 248
+        "line": 266
       }
     },
     {

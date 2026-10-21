@@ -9,7 +9,11 @@
 # <claw-street-bets>` with an empty $TARGET_WS: `cd ""` is a silent no-op, so
 # the rewrite landed on the ORCHESTRATOR's origin. A pruning fetch then
 # deleted refs/remotes/origin/master and recent-merges failed open for ~80
-# minutes.
+# minutes. Prose rules lower the odds; this hook is the deterministic fence
+# (defense in depth behind the `${VAR:?}` playbook guards and the watchdog's
+# run_origin_identity alarm). Since #5065 the watchdog also auto-repairs a
+# wrong origin / missing origin/master; it runs from the watchdog's own shell,
+# which this hook (Claude Code Bash tool calls only) never sees.
 #
 # THREAT MODEL (issue #5026). This hook is an ACCIDENT fence against agent
 # MISFIRES — the #4939 empty-`$TARGET_WS` class, where a well-meaning command

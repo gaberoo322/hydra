@@ -48,7 +48,6 @@ For module roles and file structure, explore `src/` directly — static inventor
 | `hydra:blocked:last-escalation` | Timestamp of last blocked-item escalation |
 | `hydra:deps:completed` | Completed dependency tracking |
 | `hydra:deps:index` | Dependency index |
-| `hydra:digest:last-weekly` | Timestamp of last weekly digest |
 | `hydra:workspace:lock` | Workspace access lock |
 
 ## Event Bus
@@ -59,7 +58,7 @@ Redis Streams-based event bus (`src/event-bus.ts`). Streams:
 |---|---|
 | `hydra:cycle` | Cycle start events |
 | `hydra:proposals` | Proposal lifecycle events |
-| `hydra:notifications` | All notifications (consumed by Telegram digest) |
+| `hydra:notifications` | All notifications (consumed by the notification consumer → Operator Channel pages / Morning Brief items) |
 | `hydra:dlq` | Dead letter queue (after 3 failed deliveries) |
 
 Consumer groups: meta, orchestrator, telegram, dlq-processor. WebSocket broadcast to connected dashboard clients.
@@ -78,7 +77,7 @@ Routes are split into domain sub-routers in `src/api/`. Each file exports a `cre
 **Metrics** (`api/metrics.ts`): GET /metrics, GET /summary, POST /metrics/record
 **Health** (`api/health.ts`): GET /health, GET /health/services, GET /health/deep, GET /recommendations
 **Tier** (`api/tier.ts`): GET /tier?files=a,b,c — modification-tier classification (wraps `classifyChange()` from `src/tier-classifier.ts`; query validated by `src/schemas/tier.ts`)
-**Digest** (`api/digest.ts`): POST /digest/send, POST /digest/heartbeat — on-demand triggers for the DigestAccumulator domain (`src/digest.ts`)
+**Operator Channel** (`api/operator-channel.ts`): POST /operator-channel/brief/send — send the Morning Brief now and stamp last-sent (ADR-0045 Decision 7; replaced POST /digest/send + /digest/heartbeat in #5047); GET /operator-channel/delivery-health — last page, last brief, 24h failed/suppressed counts for the /health page's Operator channel card; 200 `{available:false, reason}` when Redis is down (ADR-0045 Decision 8, #5048)
 **Operational** (`api/operational.ts`): POST /kill — emergency-stop; writes the `~/hydra/.kill` file that health.ts/service-strip.ts poll
 > The former `api/misc.ts` catch-all is retired (issue #2183) — its earlier residents were split to domain routers across #268 / #2181 / #2183.
 **Outcomes** (`api/outcomes.ts`): GET /outcomes — declared Target Outcomes + current readings (issue #241)
@@ -148,7 +147,7 @@ The orchestrator builds one Target Project per instance. The operator switches t
 |---|---|---|
 | `HYDRA_PROJECT_WORKSPACE` | `<homedir>/<HYDRA_TARGET_NAME>` (with one-time warn) | Absolute path to the target workspace. Drives where `hydra-target-build` subagents run, where context-builder reads, where worktrees are rooted, etc. |
 | `HYDRA_TARGET_NAME` | `hydra-betting` (with one-time warn) | Short slug used for the systemd unit name (`${name}-web.service`), the worktree directory prefix (`${name}-worktree`), and operator-instruction strings. |
-| `HYDRA_TARGET_GITHUB_REPO` | `gaberoo322/hydra-betting` (with one-time warn) | GitHub repo identifier in `owner/repo` form. Drives commit-link URLs emitted by `notify.ts` (Telegram cycle-complete messages) and `digest.ts` (periodic digests). Read via `getTargetGithubRepo()` / `getTargetCommitUrl(sha)`. |
+| `HYDRA_TARGET_GITHUB_REPO` | `gaberoo322/hydra-betting` (with one-time warn) | GitHub repo identifier in `owner/repo` form. Read via `getTargetGithubRepo()` / `getTargetCommitUrl(sha)` wherever a Target commit link is rendered (the Telegram cycle-complete formatter that used it was retired with the legacy notifier in #5049). |
 | `HYDRA_WORKSPACE` | — | **Deprecated.** Legacy alias for `HYDRA_PROJECT_WORKSPACE` (`context-builder.ts` historically read this). `getTargetWorkspace()` falls back to it with a one-time deprecation warning. Removed once #259 migrates the last caller. |
 
 `src/target-config.ts` exposes six pure leaf-level helpers — `getTargetName()`, `getTargetWorkspace()`, `getTargetServiceName()`, `getTargetWorktreePrefix()`, `getTargetGithubRepo()`, `getTargetCommitUrl(sha)` — that memoize their warnings so each fires at most once per process. Per ADR-0002, the helpers return a single string each; no multi-target abstraction.
@@ -376,7 +375,7 @@ Implementation seam:
 - `src/redis/holdback.ts` — typed Redis accessor for the per-merge baseline + per-day revert counter (ADR-0009 seam).
 - `src/outcomes.ts` — `snapshotLeadingOutcomes` / `detectRegressions` helpers (leading-only, null = no-data).
 - `src/api/holdback.ts` — `POST /api/holdback/{enroll,check,revert-failed}`, the HTTP surface the playbook drives.
-- `src/digest.ts` — the (previously orphaned) consumer of the holdback.* events.
+- `src/operator-channel/route-event.ts` — the consumer of the holdback.* events: `holdback.revert_failed` is a Page, the others are Morning Brief items (ADR-0045).
 
 ### Redis state
 
@@ -387,7 +386,7 @@ Implementation seam:
 
 ### Events
 
-Published on `STREAMS.NOTIFICATIONS` (consumed by `src/digest.ts`):
+Published on `STREAMS.NOTIFICATIONS` (routed by `src/operator-channel/route-event.ts` to the Operator Channel):
 
 - `holdback.reverted` — a leading outcome regressed and the revert was warranted. Payload: `{commitSha, prNumber, regressedOutcomes}`.
 - `holdback.cap-reached` — per-day revert cap hit; the regression was surfaced but the revert suppressed. Payload: `{commitSha, prNumber, regressedOutcomes}`.
@@ -471,7 +470,7 @@ If the CLI changes this schema, the parser at the top of `src/cost/reconciliatio
 
 - Scheduler hook for once-per-UTC-day automatic runs (against `date - 1`)
 - `cost.reconciliation.divergence` event published when any pair diverges by `> DIVERGENCE_THRESHOLD` (10%)
-- Digest section surfacing divergence events from the digest window
+- Morning Brief section surfacing divergence events since the last brief
 - Dashboard panel with the three-number side-by-side and 30-day trend
 
 ## GitHub API rate-limit handling (issue #3137)
@@ -550,7 +549,7 @@ Two nightly systemd timers copy the stateful stores off their docker volumes ont
 | Postgres (hydra-betting) | `hydra-pg-backup.{timer,service}` | `scripts/redis-backup.sh`'s sibling (host-only) | `/mnt/hydra-ssd/backups/postgres/hydra-<ts>.sql.gz` | daily 03:00 |
 | Redis (orchestrator) | `hydra-redis-backup.{timer,service}` | `scripts/redis-backup.sh` | `/mnt/hydra-ssd/backups/redis/hydra-redis-<ts>.rdb.gz` | daily 03:15 |
 
-Both keep a 7-day retention window (`find -mtime +7 -delete`), fail loud on empty/errored output (rm-on-fail, exit 1, `[…] FAILED` on stderr), print a `[…] OK: <file> (<size>)` line on success, and route `OnFailure=hydra-notify-failure@<unit>.service` to the shared Telegram-notify template (instance-parameterized `%i`, zero edits per new unit).
+Both keep a 7-day retention window (`find -mtime +7 -delete`), fail loud on empty/errored output (rm-on-fail, exit 1, `[…] FAILED` on stderr), print a `[…] OK: <file> (<size>)` line on success, and route `OnFailure=hydra-notify-failure@%n` to the shared Operator Channel notify template (instance-parameterized `%i`, zero edits per new unit). Since ADR-0045 D2 (issue #5046) that template runs `scripts/operator-notify.ts` (subcommand `service-failed --unit %i`) under `/usr/bin/node --experimental-strip-types`: a SIGTERM / exit 143 stop never pages, only orchestrator / autopilot / tunnel / backup units page (every other unit lands in the Morning Brief), and the same CLI (`page` / `resolve` / `brief`) is what the watchdog's alarm blocks call — no bash or unit file talks to the Bot API directly (enforced by `scripts/ci/telegram-seam-check.ts`).
 
 **What is in-repo vs. host state.** The Redis backup is fully repo-tracked and deploy-installed (issue #4604): `scripts/redis-backup.sh` plus `scripts/systemd/hydra-redis-backup.{service,timer}` live in the repo, and `scripts/deploy.sh` installs the units (`install -D` into `~/.config/systemd/user/`), the script copy (`~/.local/bin/hydra-redis-backup.sh`), and `enable --now`s the timer — the same convergent shape as the watchdog / test-proc-reaper / GLM-drainer timers, idempotent on re-deploy. The Postgres sibling stays host-only (script at `~/.local/bin/hydra-pg-backup.sh`, units under `~/.config/systemd/user/`, installed by hand): one hand-installed timer is exactly how the Redis backup silently went uninstalled for months, so new timers ship tracked + deploy-installed. Deploy also seeds a first dump when no `hydra-redis-*.rdb.gz` newer than 36h exists (`systemctl --user start --no-block`): the seed never blocks or fails the deploy — a failed seed pages via the unit's `OnFailure=` template instead.
 

@@ -16,7 +16,7 @@
 
 import { InvalidArgumentError } from "../errors.ts";
 import { logger } from "../logger.ts";
-import { sendHtmlToTelegram, type TelegramTransportFn } from "../notify.ts";
+import { sendHtmlToTelegram, type TelegramTransportFn } from "./transport.ts";
 import { ALERT_TYPES, formatAlertMessage } from "../notification/alert-grammar.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../event-bus-vocabulary.ts";
 import { REGISTRY } from "../operator-actions/registry.ts";
@@ -27,7 +27,7 @@ import {
 } from "../redis/operator-channel.ts";
 import type { OperatorFact, OperatorMessage } from "./message.ts";
 import { loadTelegramCredentials } from "./credentials.ts";
-import { isPageKind } from "./page-list.ts";
+import { isPageKind, isPageEvent } from "./page-list.ts";
 import { renderMessage, type RenderVariant } from "./render.ts";
 
 export const REMINDER_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -108,7 +108,7 @@ export interface ChannelEventInput {
 export function messageFromEvent(event: ChannelEventInput): OperatorMessage {
   const kind = event.type || "unknown";
   const payload = event.payload || {};
-  const title = ALERT_TYPES.has(kind) ? formatAlertMessage({ type: kind, payload }) : kind;
+  let title = ALERT_TYPES.has(kind) ? formatAlertMessage({ type: kind, payload }) : kind;
   const facts: OperatorFact[] = [];
   for (const [label, value] of Object.entries(payload)) {
     if (facts.length >= 8) break;
@@ -116,20 +116,36 @@ export function messageFromEvent(event: ChannelEventInput): OperatorMessage {
       facts.push({ label, value: String(value) });
     }
   }
+  const links: OperatorMessage["links"] = [];
+  let action: OperatorMessage["action"];
   let dedupKey = kind;
   if (kind === E.CONSUMER_DEAD) dedupKey = `consumer:dead:${String(payload.consumer ?? "unknown")}`;
   else if (kind === E.DLQ_ALERT) {
     dedupKey = `dlq:${String(payload.originalStream ?? "unknown")}:${String(payload.eventType ?? "unknown")}`;
+  } else if (kind === E.REVIEW_PICKUP_READY) {
+    // Issue #5047: the /hydra-review pickup page carries the ADR-0034 §8
+    // recommended action for the `waiting-on-you:ready-for-human` line and a
+    // link to the first pickup item, so the phone message is actionable.
+    const count = Number(payload.count ?? 0);
+    title = `${count} item${count === 1 ? "" : "s"} need${count === 1 ? "s" : ""} your review`;
+    if (typeof payload.firstUrl === "string" && payload.firstUrl) {
+      links.push({ label: String(payload.firstTitle || payload.firstUrl), url: payload.firstUrl });
+    }
+    action = { name: REVIEW_PICKUP_ACTION };
   }
   return {
-    severity: isPageKind(kind) ? "page" : "brief",
+    severity: isPageEvent(kind, payload) ? "page" : "brief",
     kind,
     title,
     facts,
-    links: [],
+    links,
     dedupKey,
+    ...(action ? { action } : {}),
   };
 }
+
+/** The ADR-0034 §8 registry entry whose recommended command is `/hydra-review`. */
+export const REVIEW_PICKUP_ACTION = "waiting-on-you:ready-for-human";
 
 /** Resolve an ADR-0034 §8 registry entry name to its recommended command. */
 function resolveActionCommand(name: string): string | undefined {
@@ -310,7 +326,8 @@ export class OperatorChannel {
 
   /** Append a Morning Brief item. Throws only when handed a page kind. */
   async brief(item: OperatorMessage): Promise<{ appended: boolean }> {
-    if (isPageKind(item.kind)) {
+    const factPayload = Object.fromEntries((item.facts ?? []).map((f) => [f.label, f.value]));
+    if (isPageEvent(item.kind, factPayload)) {
       throw new InvalidArgumentError(`"${item.kind}" is a page kind — use page(), not brief()`);
     }
     const out = await this.bounded("appendBrief", () =>

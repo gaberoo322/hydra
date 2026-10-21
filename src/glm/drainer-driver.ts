@@ -272,7 +272,7 @@ export interface TickDeps {
 }
 
 /** The `tick` line: each phase's verdict; `pick`/`finish` null when not reached. */
-export interface TickResult {
+interface TickResult {
   gate: GateLine;
   pick: PickResult | null;
   finish: FinishResult | null;
@@ -281,7 +281,7 @@ export interface TickResult {
 const DEFAULT_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /** Production tick deps for `env` (names match what bash read). */
-export function buildDefaultTickDeps(env: NodeJS.ProcessEnv = process.env): TickDeps {
+function buildDefaultTickDeps(env: NodeJS.ProcessEnv = process.env): TickDeps {
   const config = loadDrainerConfig(env);
   return {
     config,

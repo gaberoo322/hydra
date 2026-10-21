@@ -15,6 +15,7 @@ import {
   REMINDER_INTERVAL_MS,
   escapeHtml,
   isPageKind,
+  isPageEvent,
   loadTelegramCredentials,
   messageFromEvent,
   nextDedupState,
@@ -24,7 +25,7 @@ import {
   type OperatorMessage,
 } from "../src/operator-channel/index.ts";
 import type { DedupState, DeliveryLogEntry } from "../src/redis/operator-channel.ts";
-import type { TelegramTransportFn, TelegramTransportResult } from "../src/notify.ts";
+import type { TelegramTransportFn, TelegramTransportResult } from "../src/operator-channel/transport.ts";
 
 const HOUR = 60 * 60 * 1000;
 
@@ -194,6 +195,18 @@ describe("severity is decided by the page list, never the producer", () => {
       "dlq:s:e",
     );
     assert.equal(isPageKind("dlq:alert"), false);
+  });
+
+  test("a self-healed origin identity (repair=repaired) is a brief item, a failed/unattempted one still pages", async () => {
+    const kind = "infra:origin_identity_wrong";
+    assert.equal(messageFromEvent({ type: kind, payload: { repair: "repaired" } }).severity, "brief");
+    assert.equal(messageFromEvent({ type: kind, payload: { repair: "failed" } }).severity, "page");
+    assert.equal(messageFromEvent({ type: kind, payload: { repair: "not-attempted" } }).severity, "page");
+    assert.equal(messageFromEvent({ type: kind, payload: {} }).severity, "page");
+    assert.equal(isPageEvent(kind, { repair: "repaired" }), false);
+    const ch = new OperatorChannel({ store: memoryStore().store, transport: fakeTransport().transport });
+    const res = await ch.brief(messageFromEvent({ type: kind, payload: { repair: "repaired" } }));
+    assert.equal(res.appended, true);
   });
 });
 

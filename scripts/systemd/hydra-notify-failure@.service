@@ -6,23 +6,23 @@ Type=oneshot
 # Credentials arrive only via EnvironmentFile — never inline Environment=
 # literals in this tracked file (issue #4284). %h/hydra/.env is the same
 # untracked file hydra-orchestrator.service already loads, and it already
-# holds TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID. Deliberately NOT dash-prefixed:
-# a missing .env must fail this notifier loudly in the journal instead of
-# silently POSTing to an empty bot URL.
+# holds TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID (and REDIS_URL for the dedup
+# state). Deliberately NOT dash-prefixed: a missing .env must fail this
+# notifier loudly in the journal instead of silently skipping every page.
 EnvironmentFile=%h/hydra/.env
-# The $$MSG escape below is load-bearing (issue #4284): ExecStart= gets its
-# own systemd specifier/env substitution pass BEFORE bash ever runs, and MSG
-# is a bash-local variable, not a systemd-known one — so systemd blanks an
-# unescaped brace-wrapped reference to it to an empty string, and every page
-# this unit ever sends goes out with no message text. `$$` survives systemd's
-# substitution as a literal `$`, so bash sees the single-dollar form and
-# expands its own local variable. TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are
-# genuine systemd environment variables (from EnvironmentFile above), so they
-# keep the brace-wrapped form.
-ExecStart=/bin/bash -c '\
-  MSG="⚠️ Hydra service failed: %i — $(date)"; \
-  curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    -H "content-type: application/json" \
-    -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"$$MSG\",\"disable_web_page_preview\":true}" \
-    >/dev/null 2>&1 || true'
+# ADR-0045 Decision 2 (issue #5046): the Operator Channel CLI is the one
+# Telegram sender. `service-failed` applies the exit-code policy (a SIGTERM /
+# exit 143 stop never pages — Decision 4, fixes #5035), maps the unit onto the
+# closed page list (orchestrator / autopilot / tunnel / backups page; every
+# other unit, e.g. claw-street-bets-*, lands in the Morning Brief) and dedups
+# per unit. %i is the failed unit's name; the CLI strips one trailing
+# `.service` so both `@%n` and the legacy `@%n.service` spellings resolve.
+#
+# /usr/bin/node --experimental-strip-types, never npx/tsx: a unit's minimal
+# PATH cannot see the global tsx and npx would try the network inside a
+# failure handler. The CLI exits 0 for every delivery outcome (the outcome is
+# its JSON line + the journal + the channel's delivery log) and force-exits
+# after 20s; TimeoutStartSec is the outer bound.
+TimeoutStartSec=30
+ExecStart=/usr/bin/node --experimental-strip-types %h/hydra/scripts/operator-notify.ts service-failed --unit %i
 Environment=HOME=/home/gabe

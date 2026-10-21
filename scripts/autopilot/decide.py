@@ -296,9 +296,10 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Callable, Iterable, Sequence
 
 # The Turn Snapshot accessor (ADR-0043 Decision 5, #4934): decide.py reads
-# every collector-produced fact through it — `state.turn_snapshot`, or the
-# all-degraded snapshot when there is none usable — and never parses a
-# packed wire string itself. A sibling module; the path insert lets an
+# every collector-produced fact through it — `state.turn_snapshot` as the TS
+# emitter wrote it (an all-degraded document when the collector run failed),
+# or, when no document could be read, a marker that reads every signal
+# degraded (#5083) — and never parses a packed wire string itself. A sibling module; the path insert lets an
 # importlib/spec load of this file resolve it too.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import turn_snapshot as ts  # noqa: E402
@@ -2887,9 +2888,14 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
         # depth verdict, so no qa-verdict event can produce an auto-merge.
         return out
     buckets = _pr_gate_buckets(state, events)
-    for ev in events:
-        if ev.get("type") != "qa-verdict":
-            continue
+    # #5052: the durable recheck. Session `qa-verdict` events first (they win a
+    # PR both name), then the Turn Snapshot's re-evaluation entries for PRs not
+    # already named - same downstream holds, stale-verdict check, depth policy.
+    sweep = [ev for ev in events if ev.get("type") == "qa-verdict"]
+    sweep += ts.qa_verdict_recheck(state, events, "orch_qa_verdict_recheck")
+    for ev in sweep:
+        if ev.get("recheck"):
+            out.reasons.append(f"qa-recheck:#{ev.get('pr_number')}")
         verdict = ev.get("verdict") or "PENDING"
         pr_number = ev.get("pr_number")
         tier = ev.get("tier")

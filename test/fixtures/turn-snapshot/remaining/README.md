@@ -34,5 +34,5 @@ Base SHA of the committed corpus: `46347d1714f563e41a579cebadc1d102e8efaf4c`.
 the C `jq` binary (1.7), while production `gh` embeds gojq. The two can format
 numbers differently in edge cases (e.g. `12.0` vs `12`, large/float values in
 `"\(x)"` interpolation or raw output). The committed scenarios avoid those
-inputs; where they would differ, the TS folds (`jq-compat.ts`) follow gojq,
+inputs; where they would differ, the TS folds (`board-saturation.ts`, `afk-frontier.ts`) follow gojq,
 i.e. production.

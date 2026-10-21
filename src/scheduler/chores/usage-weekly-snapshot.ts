@@ -11,7 +11,8 @@
  * This persisted history is what the week-over-week per-skill trend
  * (`UsageSnapshot.bySkillWoW`) reads back: a given week's snapshot is compared
  * against the immediately-prior stored week. The chore runs on a WEEKLY cadence
- * guard (read at the housekeeping composition level, mirroring `weekly-summary`),
+ * guard (read at the housekeeping composition level; the retired `weekly-summary`
+ * chore used the same shape until the Morning Brief absorbed it, #5047),
  * so an hourly housekeeping invocation snapshots at most once per ISO week. The
  * write is idempotent on the ISO-week key, so even a guard miss-fire is harmless.
  */
@@ -89,7 +90,7 @@ export async function runUsageWeeklySnapshot(
     bySkill,
   });
   // Stamp the weekly guard key AFTER a successful write. Consistent with
-  // `runWeeklyDigest` and `runMemoryConsolidation`, which own their own stamp
+  // `runMemoryConsolidation` and `pruneStaleRedisKeys`, which own their own stamp
   // rather than deferring to the composition level in `housekeeping.ts`.
   // Issue #2461: this stamp was previously applied in `housekeeping.ts` after
   // calling `runUsageWeeklySnapshot()` — moved here so all guarded chores follow

@@ -167,6 +167,35 @@ export default function Health() {
   const deepStatus_ = deep.data?.status;
   const svc = deep.data?.services;
 
+  // ---- Operator channel: delivery health (issue #5048, ADR-0045 D8) --------
+  // The ONE read-only delivery-health route; this file owns the literal. A
+  // Redis-down answer is 200 `{available:false, reason}` — `trusted:false`
+  // routes it through the shared seam as UNKNOWN, never a confident "all
+  // delivered". Minutes-tier budget like the rest of this page.
+  const channel = useApi("/operator-channel/delivery-health", { poll: 60_000 });
+  const channelStatus = payloadStatus({
+    data: channel.data,
+    error: channel.error,
+    loading: channel.loading,
+    freshnessMs: 5 * 60 * 1000,
+    trusted: channel.data ? channel.data.available !== false : undefined,
+  });
+  const channelUnknown = channelStatus === "loading" || channelStatus === "unknown";
+  const channelStale = channelStatus === "stale";
+  const lastPage = channel.data?.lastPage ?? null;
+  const lastBrief = channel.data?.lastBrief ?? null;
+  const lastBriefDeliveredAt = channel.data?.lastBriefDeliveredAt ?? null;
+  const channelWindow = channel.data?.window ?? null;
+  const channelFailed = Number(channelWindow?.failed ?? 0);
+  const channelSuppressed = Number(channelWindow?.suppressed ?? 0);
+  const OUTCOME_CLASS = {
+    "sent-html": "text-emerald-300",
+    "sent-plain": "text-emerald-300",
+    failed: "text-rose-300",
+    "skipped-no-credentials": "text-amber-300",
+  };
+  const outcomeClass = (o) => OUTCOME_CLASS[o] ?? "text-zinc-300";
+
   return (
     <div className="space-y-5 max-w-4xl" data-testid="health-page">
       <div>
@@ -357,6 +386,91 @@ export default function Health() {
           <p data-testid="brake-error" className="text-xs text-rose-400 break-words">
             {brakeError}
           </p>
+        )}
+      </section>
+
+      {/* ---- Operator channel: delivery health (issue #5048, ADR-0045 D8) --- */}
+      <section data-testid="operator-channel-section" className="space-y-2">
+        <div className="flex items-baseline justify-between gap-2 flex-wrap">
+          <h2 className="text-sm uppercase tracking-wide text-zinc-400">Operator channel</h2>
+          <AsOf generatedAt={channel.data?.generatedAt} stale={channelStale} />
+        </div>
+        {channelUnknown ? (
+          <div className="space-y-1">
+            {/* available:false (Redis down) or no payload yet — UNKNOWN, never a confident "all delivered". */}
+            <Chip
+              testId="operator-channel-chip"
+              className="bg-zinc-700/40 text-zinc-400 border border-zinc-600"
+              label="UNKNOWN"
+            />
+            {channel.data?.available === false && (
+              <p data-testid="operator-channel-reason" className="text-xs text-zinc-500 break-words">
+                delivery log unavailable: {String(channel.data.reason ?? "")}
+              </p>
+            )}
+          </div>
+        ) : (
+          <dl className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
+            <div data-testid="operator-channel-last-page" className="rounded-md border border-zinc-800 px-3 py-2">
+              <dt className="text-xs uppercase tracking-wide text-zinc-500">Last page</dt>
+              <dd className="text-zinc-200">
+                {lastPage ? (
+                  <>
+                    <span className="font-medium break-words">{lastPage.title}</span>
+                    <div className="text-xs text-zinc-400">
+                      {lastPage.kind} · <span className={outcomeClass(lastPage.outcome)}>{lastPage.outcome}</span> ·{" "}
+                      <LocalTimestamp ts={lastPage.at} />
+                    </div>
+                  </>
+                ) : (
+                  <span className="text-zinc-500">none logged</span>
+                )}
+              </dd>
+            </div>
+            <div data-testid="operator-channel-last-brief" className="rounded-md border border-zinc-800 px-3 py-2">
+              <dt className="text-xs uppercase tracking-wide text-zinc-500">Last brief</dt>
+              <dd className="text-zinc-200">
+                {lastBrief ? (
+                  <div className="text-xs text-zinc-400">
+                    <span className={outcomeClass(lastBrief.outcome)}>{lastBrief.outcome}</span> ·{" "}
+                    <LocalTimestamp ts={lastBrief.at} />
+                  </div>
+                ) : lastBriefDeliveredAt ? (
+                  // The bounded log rotated past the brief but the last-sent
+                  // stamp (the delivered one) survives.
+                  <div className="text-xs text-zinc-400">
+                    <span className="text-emerald-300">delivered</span> · <LocalTimestamp ts={lastBriefDeliveredAt} />
+                  </div>
+                ) : (
+                  <span className="text-zinc-500">never delivered</span>
+                )}
+                {lastBrief && lastBrief.outcome === "failed" && lastBriefDeliveredAt && (
+                  <div className="text-xs text-zinc-500">
+                    last delivered <LocalTimestamp ts={lastBriefDeliveredAt} />
+                  </div>
+                )}
+              </dd>
+            </div>
+            <div data-testid="operator-channel-window" className="flex flex-wrap items-center gap-2 sm:col-span-2">
+              <span className="text-xs text-zinc-500">last {channelWindow?.hours ?? 24}h</span>
+              <span
+                data-testid="operator-channel-failed"
+                className={`rounded-md border px-2 py-1 text-xs ${
+                  channelFailed > 0 ? "border-rose-500/40 text-rose-300" : "border-zinc-700 text-zinc-300"
+                }`}
+              >
+                failed {channelFailed}
+              </span>
+              <span
+                data-testid="operator-channel-suppressed"
+                className={`rounded-md border px-2 py-1 text-xs ${
+                  channelSuppressed > 0 ? "border-amber-500/40 text-amber-300" : "border-zinc-700 text-zinc-300"
+                }`}
+              >
+                suppressed {channelSuppressed}
+              </span>
+            </div>
+          </dl>
         )}
       </section>
 

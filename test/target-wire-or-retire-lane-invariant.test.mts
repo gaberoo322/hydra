@@ -27,9 +27,9 @@
  *   (b) the co-presence predicate's NEGATIVE case — a row carrying
  *       `wire-or-retire` WITHOUT `needs-triage` yields
  *       `wire_or_retire_target_available=false` (the positive case already
- *       has incidental coverage in test/autopilot-target-board-signals.test.mts
- *       as a #3710 truncation fixture, but the negative case — the exact
- *       contract this issue is about — had zero coverage);
+ *       has incidental coverage as a #3710 truncation fixture, now ported to
+ *       test/turn-snapshot-target-board.test.mts, but the negative case — the
+ *       exact contract this issue is about — had zero coverage);
  *   (c) the resolver PLAYBOOK's WIRE/RETIRE transitions remove BOTH labels,
  *       while its UNCLEAR transition removes only `needs-triage` (keeping
  *       `wire-or-retire` so the operator can see the decision class) — and
@@ -45,9 +45,9 @@
  *   - makes NO `gh api` call — a live label read would burn the `gh` quota a
  *     running autopilot shares and go ambiently red.
  *
- * New top-level `describe`s in their own file (not grafted onto
- * test/autopilot-target-board-signals.test.mts's existing suite, which owns
- * the co-presence POSITIVE case only incidentally as a #3710 truncation
+ * New top-level `describe`s in their own file (not grafted onto the
+ * target-board suite — now test/turn-snapshot-target-board.test.mts — which
+ * owns the co-presence POSITIVE case only incidentally as a #3710 truncation
  * fixture) per this repo's sibling-teardown / shared-state flake authoring
  * rule.
  */

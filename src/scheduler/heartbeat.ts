@@ -150,8 +150,10 @@ const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 // Issue #381 (codex cut-over PR-1) introduced HYDRA_CODEX_CYCLE_ENABLED as a
 // kill-switch that prevented the scheduler from invoking the in-process
 // control loop. Issue #383 (PR-3) deleted the control loop entirely — the
-// scheduler now ONLY runs housekeeping (stale-claim reaper, weekly digest,
-// memory consolidation, design-concept snapshot). There is no codex cycle to
+// scheduler now ONLY runs housekeeping (memory consolidation, design-concept
+// snapshot, review-pickup notify and the later chores in
+// src/scheduler/housekeeping.ts; the weekly digest retired into the Morning
+// Brief, ADR-0045). There is no codex cycle to
 // gate; the flag is gone. Reaching this comment in a debug session = grep for
 // "HYDRA_CODEX_CYCLE_ENABLED" in operator runbooks and tell them it is dead.
 
@@ -274,6 +276,18 @@ export interface HeartbeatControllerDeps {
    * scorecard + notification-bus fixture chain (the coupling #3371 removed).
    */
   emitTickStagnationAlerts?: (eventBus: unknown) => Promise<void>;
+
+  // --- Morning Brief tick (ADR-0045 Decision 7, issue #5047) ---
+  /**
+   * Per-tick Morning Brief poll. The brief has NO timer of its own: its timing
+   * state is the Redis last-sent key, and this hook asks the pure `briefDue`
+   * predicate on every heartbeat tick (via `BriefScheduler.tick()`), so a
+   * restart can neither delay nor duplicate a brief. Defaults to a no-op so a
+   * unit-constructed controller never reaches Redis or Telegram; production
+   * binds the real scheduler through {@link attachMorningBriefTick} in
+   * `src/index.ts`. Fired fire-and-forget on the tick and never throws.
+   */
+  tickMorningBrief?: () => Promise<unknown>;
 }
 
 /**
@@ -302,6 +316,7 @@ export class HeartbeatController {
   private readonly getAutopilotPaused: () => Promise<{ paused: boolean; since?: number }>;
   private readonly getReconcilerHealth: () => Promise<import("../redis/reconciler.ts").ReconcilerHealthRecord | null>;
   private readonly emitTickStagnationAlerts: (eventBus: unknown) => Promise<void>;
+  private tickMorningBrief: () => Promise<unknown>;
 
   constructor(deps: HeartbeatControllerDeps = {}) {
     this.now = deps.now ?? (() => new Date());
@@ -323,6 +338,7 @@ export class HeartbeatController {
     this.getAutopilotPaused = deps.getAutopilotPaused ?? getAutopilotPaused;
     this.getReconcilerHealth = deps.getReconcilerHealth ?? getReconcilerHealth;
     this.emitTickStagnationAlerts = deps.emitTickStagnationAlerts ?? emitTickStagnationAlerts;
+    this.tickMorningBrief = deps.tickMorningBrief ?? (async () => undefined);
   }
 
   // -------------------------------------------------------------------------
@@ -428,6 +444,15 @@ export class HeartbeatController {
   // and did nothing in production. The research-force policy now lives in the
   // autopilot brain (`scripts/autopilot/decide.py` `_research_force_allowed`).
 
+  /**
+   * Bind the Morning Brief poll this controller fires on every tick (issue
+   * #5047). Called once from `src/index.ts`; a unit-constructed controller keeps
+   * the no-op default.
+   */
+  setMorningBriefTick(fn: () => Promise<unknown>): void {
+    this.tickMorningBrief = fn;
+  }
+
   async runScheduledCycle(eventBus): Promise<void> {
     const state = this.state;
     if (!state.running) return;
@@ -435,9 +460,10 @@ export class HeartbeatController {
     // Issue #383 (codex cut-over PR-3): the in-process control loop is gone.
     // #706 (scheduler fold PR-1/4) additionally removed the research-decision
     // plane that used to run here. #723 (scheduler fold PR-3/4) moved the six
-    // time-boxed housekeeping chores (blocked re-escalation, done-lane pruning,
-    // weekly digest, memory consolidation, design-concept snapshot, review-pickup
-    // notify) out to an hourly `hydra-housekeeping.timer` that POSTs
+    // time-boxed housekeeping chores of the day (blocked re-escalation, done-lane
+    // pruning and the weekly digest — all since retired, the digest into the
+    // Morning Brief per ADR-0045 — plus memory consolidation, design-concept
+    // snapshot, review-pickup notify) out to an hourly `hydra-housekeeping.timer` that POSTs
     // `/api/maintenance/housekeeping` → `runHousekeeping(eventBus)`. #938 then
     // moved the chore CODE into `src/scheduler/housekeeping.ts` (a sibling
     // Module). `runScheduledCycle` now exists solely as a heartbeat +
@@ -465,6 +491,14 @@ export class HeartbeatController {
     // `./tick-stagnation-alert.ts`; the heartbeat only fires the injected emit.
     this.emitTickStagnationAlerts(eventBus).catch((err: any) =>
       logger.error({ err }, "stagnation-alert emit failed"),
+    );
+
+    // Issue #5047 (ADR-0045 Decision 7): poll the Morning Brief. The scheduler
+    // reads the Redis last-sent key and sends iff `briefDue` — idempotent per
+    // local day, serialised in-process — so riding the heartbeat tick adds no
+    // timer state here. Fire-and-forget + never-throws, like the emit above.
+    this.tickMorningBrief().catch((err: any) =>
+      logger.error({ err }, "morning-brief tick failed"),
     );
 
     if (state.running) {
@@ -683,8 +717,14 @@ async function runScheduledCycle(eventBus) {
   return defaultController.runScheduledCycle(eventBus);
 }
 
+/** Bind the Morning Brief poll to the production controller (issue #5047). */
+function attachMorningBriefTick(fn: () => Promise<unknown>): void {
+  defaultController.setMorningBriefTick(fn);
+}
+
 export {
   start, stop, getStatus, autoStart,
   // Exported for test coverage (issue #381 / #383):
   runScheduledCycle,
+  attachMorningBriefTick,
 };

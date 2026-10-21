@@ -125,6 +125,10 @@ script's `python3` heredoc count, and each slice lowers it. The ceiling starts a
   fenced shallow drainer.
 - Moving `gh` reads from GraphQL to REST is out of scope. Slices keep the same underlying calls so
   output stays byte-identical. Changing them is a separate, behavior-changing ticket.
+- Delivered (epic #5082): the TS emitter is the only validator, `turn_snapshot.py` is a store-only
+  accessor that fails loud in replay mode, the py/jq/py-format compat leaves are deleted, the replay
+  contract test replaces the two cross-language drift guards, and adding a signal is collector + zod
+  key + `decide.py` policy.
 
 ## Alternatives considered
 

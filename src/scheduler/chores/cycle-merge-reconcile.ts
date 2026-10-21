@@ -125,7 +125,7 @@ const DEFAULT_CONFIRM_LIMIT = 10;
  * under-crediting is the safe failure direction; a wrong credit corrupts
  * tasksMerged, the capacity ledger stamp and the pending-enroll self-arm.
  */
-export const ANCHOR_JOIN_WINDOW_MS = 72 * 60 * 60 * 1000;
+const ANCHOR_JOIN_WINDOW_MS = 72 * 60 * 60 * 1000;
 
 /** Raw `gh pr view <n> --json state,headRefName` shape. */
 interface RawPrState {

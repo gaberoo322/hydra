@@ -135,7 +135,7 @@ describe("merge readers route through countsAsMerge (issue #4747)", () => {
       "src/metrics/aggregate.ts",
       "src/api/metrics-cost.ts",
       "src/health/diagnostics.ts",
-      "src/digest-weekly.ts",
+      "src/operator-channel/weekly-summary.ts",
       "src/aggregators/builder-health-stagnation-panel.ts",
     ]) {
       assert.match(readFileSync(f, "utf8"), /import \{[^}]*countsAsMerge[^}]*\}/, f);

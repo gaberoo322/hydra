@@ -45,7 +45,7 @@ const AttentionSignalSchema = z.enum([
   "repetition",
 ]);
 
-export type AttentionSignal = z.infer<typeof AttentionSignalSchema>;
+type AttentionSignal = z.infer<typeof AttentionSignalSchema>;
 
 /**
  * One crossed threshold, as the feed renders it. The common shape every
@@ -78,7 +78,7 @@ const AdmissionLineKeySchema = z.string().refine(isAdmissionLineKey, {
  * ADR-0034 §8.1): `paused` / `session-blocked` / `scheduler-deliberate` /
  * `sha-drift`, each with its own resolved registry action.
  */
-export const MachineStoppedSubLineSchema = z
+const MachineStoppedSubLineSchema = z
   .object({
     key: AdmissionLineKeySchema,
     line: z.string().min(1),
@@ -139,7 +139,7 @@ export type AttentionFeedItem = z.infer<typeof AttentionFeedItemSchema>;
  * that failed to prove it). `wired:false` marks a bucket with no source yet —
  * never an asserted zero.
  */
-export const AttentionBucketSummarySchema = z
+const AttentionBucketSummarySchema = z
   .object({
     rank: z.number().int().min(0).max(BUCKETS.length - 1),
     bucket: BucketSchema,
@@ -206,7 +206,6 @@ const AttentionCalibrationLineSchema = z
   })
   .strict();
 
-export type AttentionCalibrationLine = z.infer<typeof AttentionCalibrationLineSchema>;
 
 /**
  * Response body for `GET /api/attention/counts` — the per-line falsifiable
