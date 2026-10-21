@@ -21,17 +21,24 @@
  * imports every chore runner, owns the `Chore` type + `runChore` (the uniform
  * guard → work → bookkeeping → error-log + Sentry-breadcrumb wrapper), and
  * sequences them in `runHousekeeping`. The `{ ran, skipped }` composition
- * contract is unchanged. The chore set is:
- *   - blocked-item re-escalation (+ its operator unblock-command builder),
- *   - the `/hydra-review` pickup-set edge-triggered phone-notify,
- *   - done-lane pruning,
- *   - daily memory consolidation,
- *   - the daily design-concept snapshot,
- *   - work-queue hygiene,
- *   - the merge→done reconciler,
- *   - the merge-event holdback enrolment for unregistered T2+ merges (#4632),
- *   - the stale-Redis-key sweep + stale-inProgress return (#1876),
- *   - the lane-index reconciler (#2056).
+ * contract is unchanged. The registered chore set (the `name:` fields below):
+ *   - review-pickup-notify (the `/hydra-review` pickup-set Page),
+ *   - usage-weekly-snapshot,
+ *   - memory-consolidation (daily),
+ *   - design-concept-snapshot (daily),
+ *   - stale-key-prune (the stale-Redis-key sweep + stale-inProgress return, #1876),
+ *   - worktree-orphan-prune,
+ *   - glm-eligibility-sweep,
+ *   - target-outcomes-publish,
+ *   - wiring-liveness,
+ *   - attribution-record,
+ *   - holdback-merge-watch,
+ *   - cycle-merge-reconcile (the merge-to-done reconciler),
+ *   - holdback-merge-event-enrol (unregistered T2+ merges, #4632),
+ *   - pattern-cue-demotion.
+ *
+ * Blocked-item re-escalation, done-lane pruning and work-queue hygiene were
+ * retired with the Redis backlog (ADR-0031, #3439).
  *
  * Each chore carries its own Redis time-guard (per-item / daily / weekly), so
  * an hourly invocation is idempotent — a chore whose window has not elapsed is
