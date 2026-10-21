@@ -29,6 +29,13 @@
  *   7. Replay mode fails loud: with HYDRA_AUTOPILOT_SNAPSHOT_REPLAY set, a
  *      signal decide.py reads that the document lacks raises; in production
  *      the same read degrades (#5083).
+ *   8. The replay contract (#5085), the ONLY guard between decide.py's reads
+ *      and the schema: decide() replays every TS-emitted document — the
+ *      golden snapshots, the all-degraded document, every plan-parity input
+ *      re-emitted — through a recording accessor (replay_contract.py). A read
+ *      the schema does not emit raises, a read around the accessor changes
+ *      the Plan, and the replay must reach every schema signal but the
+ *      observability-only ones. No test reads decide.py's source.
  *
  * Regenerate the golden documents after an intentional shape change:
  *   UPDATE_TURN_SNAPSHOT_JSON_GOLDEN=1 npm run test:file -- test/turn-snapshot-json.test.mts
@@ -877,6 +884,129 @@ describe("turn snapshot JSON: replay mode fails loud on a signal the document la
     const whole = [{ name: "healthy", snapshot: readFileSync(join(PARITY_DIR, "golden-healthy.json"), "utf-8") }];
     const r = python("accessor_check.py", JSON.stringify(whole), [], { ...productionEnv(), HYDRA_AUTOPILOT_SNAPSHOT_REPLAY: "golden" }).cases[0];
     assert.equal(r.plan_ok, true, r.error);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The replay contract (#5085): the one guard between decide.py's reads and the schema
+// ---------------------------------------------------------------------------
+
+/** Schema keys decide.py deliberately does not read — each a name→rationale pair, honesty-tested below. */
+const OBSERVABILITY_ONLY_SIGNALS = new Map<string, string>([
+  ["hitl_grill_open", "the operator-admission inbox depth (#4391); decide.py gates on hitl_grill_saturated, the operator reads the depth"],
+]);
+
+/** Target board counts that are advisory only, never a policy input (#3973, #4528, #4823). */
+const ADVISORY_TARGET_BOARD_KEYS = ["target_ready_blocker_excluded", "wire_or_retire_target_unlabelled", "design_qa_target_adr_present"];
+
+interface ReplayResult {
+  documents: number;
+  raised: { name: string; error: string }[];
+  crashed: { name: string; error: string }[];
+  reach_around: string[];
+  first_reader: Record<string, string>;
+}
+
+describe("turn snapshot JSON: the replay contract — decide() reads only the signals the schema emits (#5085)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "turn-snapshot-replay-contract-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const corpusPath = join(dir, "corpus.jsonl");
+  let corpusBuilt = false;
+
+  /**
+   * Every document the TS emitter prints for decide.py: the golden snapshots,
+   * the all-degraded document (`turn-snapshot.ts --all-degraded`), and one per
+   * plan-parity decide() input — its converted document RE-EMITTED through
+   * serializeTurnSnapshot, which repairs each signal the legacy capture never
+   * carried to its all-degraded value, exactly as on emit. So every document is
+   * full (all schema signals) and zod-valid, and the parity inputs drive
+   * decide() down the paths the golden snapshots alone never reach.
+   */
+  const corpus = (): string => {
+    if (corpusBuilt) return corpusPath;
+    const dump = join(dir, "converted.jsonl");
+    // Exit 1 = a Plan diverged from its golden; the plan-parity suite above reports that, and the dump is written either way.
+    const res = spawnSync("python3", [join(PARITY_DIR, "plan_parity.py"), "--dump", dump], { encoding: "utf-8", maxBuffer: 64 * 1024 * 1024, timeout: 240_000, env: productionEnv() });
+    assert.ok(res.status === 0 || res.status === 1, `plan_parity.py exited ${res.status}: ${res.stderr}`);
+    const summary = JSON.parse(res.stdout);
+    const converted = readFileSync(dump, "utf-8").split("\n").filter(Boolean);
+    assert.deepEqual(summary.unrepresentable, []);
+    assert.equal(converted.length, summary.entries, "one converted document per corpus entry (line i is entry i)");
+    const lines = [
+      ...Object.keys(SCENARIOS).map((name) => ({ name: `golden-${name}`, entry: null, snapshot: readFileSync(join(PARITY_DIR, `golden-${name}.json`), "utf-8") })),
+      { name: "all-degraded", entry: null, snapshot: serializeTurnSnapshot({ doc: allDegradedTurnSnapshot("replay-contract", "turn-snapshot.ts exited 1"), rawBlobs: {} }).text },
+      ...converted.map((line, i) => {
+        const out = serializeTurnSnapshot({ doc: JSON.parse(line), rawBlobs: {} });
+        assert.equal(out.valid, true, `parity entry ${i} did not re-emit as a valid document: ${out.note}`);
+        return { name: `parity-${i}`, entry: i, snapshot: out.text };
+      }),
+    ];
+    writeFileSync(corpusPath, `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+    corpusBuilt = true;
+    return corpusPath;
+  };
+  const replay = (drops: readonly string[] = []): ReplayResult =>
+    python("replay_contract.py", undefined, [corpus(), ...drops.flatMap((d) => ["--drop", d])], { ...productionEnv(), HYDRA_AUTOPILOT_SNAPSHOT_REPLAY: "contract" });
+  let clean: ReplayResult | undefined;
+  const cleanReplay = (): ReplayResult => (clean ??= replay());
+  /** The contract's verdict: empty iff decide() read only signals the documents carry, and only through the accessor. */
+  const violations = (r: ReplayResult): string[] => [
+    ...r.raised.map((x) => `${x.name}: ${x.error}`),
+    ...r.crashed.map((x) => `${x.name}: crashed — ${x.error}`),
+    ...r.reach_around.map((n) => `${n}: plans differently with its signals map hidden from decide() — a read around scripts/autopilot/turn_snapshot.py`),
+  ];
+
+  test("every TS-emitted document replays clean: the golden snapshots, the all-degraded document and every plan-parity input", () => {
+    const docs = readFileSync(corpus(), "utf-8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { name: string; snapshot: string });
+    assert.ok(docs.length >= 605, `the replay corpus shrank to ${docs.length} documents`);
+    for (const { name, snapshot } of docs) {
+      const doc = JSON.parse(snapshot);
+      assert.ok(TurnSnapshotSchema.safeParse(doc).success, `${name} is not zod-valid`);
+      assert.deepEqual(Object.keys(doc.signals).sort(), SIGNAL_KEYS, `${name} does not carry every schema signal`);
+    }
+    const r = cleanReplay();
+    assert.equal(r.documents, docs.length);
+    assert.deepEqual(
+      violations(r),
+      [],
+      "decide.py reads a signal the Turn Snapshot schema does not emit, or reads one around the accessor. Fix: add the key to SignalsSchema + ALL_DEGRADED_SIGNALS (src/schemas/turn-snapshot.ts) and produce it from a collector, or delete the reader; read signals only through the scripts/autopilot/turn_snapshot.py readers",
+    );
+  });
+
+  test("the replay reaches every schema signal but the observability-only ones, and those exemptions stay honest", () => {
+    const read = Object.keys(cleanReplay().first_reader).sort();
+    const unread = SIGNAL_KEYS.filter((k) => !read.includes(k) && !OBSERVABILITY_ONLY_SIGNALS.has(k));
+    assert.deepEqual(
+      unread,
+      [],
+      "no replayed decide() read these schema signals — wire the policy, drop the key, or add an OBSERVABILITY_ONLY_SIGNALS entry with its rationale; if decide.py does read one, add a golden scenario whose replay reaches the read",
+    );
+    const stale = [...OBSERVABILITY_ONLY_SIGNALS.keys()].filter((k) => !SIGNAL_KEYS.includes(k) || read.includes(k));
+    assert.deepEqual(stale, [], "these exemptions are stale (key gone from the schema, or decide.py now reads it) — delete the entry");
+  });
+
+  test("the advisory Target board counts are not schema signals, so a decide.py read of one fails the replay (#3973, #4528, #4823)", () => {
+    for (const k of ADVISORY_TARGET_BOARD_KEYS) assert.equal(SIGNAL_KEYS.includes(k), false, `${k} is advisory — keep it out of SignalsSchema`);
+  });
+
+  test("negative: a signal decide.py reads, removed from a document, fails the contract — here and for every signal read", () => {
+    // golden-healthy without one anchor it reads, plus every read signal removed from the first document that read it
+    const mutants = [...new Set(["golden-healthy:orch_pending_grill_anchor", ...Object.entries(cleanReplay().first_reader).map(([signal, doc]) => `${doc}:${signal}`)])];
+    assert.ok(mutants.length >= 50, `only ${mutants.length} mutants`);
+    const r = replay(mutants);
+    const v = violations(r);
+    assert.ok(
+      v.some((x) => x.startsWith("golden-healthy-without-orch_pending_grill_anchor: UnknownSignalError") && x.includes("'orch_pending_grill_anchor'")),
+      JSON.stringify(v.slice(0, 5)),
+    );
+    for (const m of mutants) {
+      const [doc, signal] = m.split(":") as [string, string];
+      assert.ok(
+        r.raised.some((x) => x.name === `${doc}-without-${signal}` && x.error.includes(`'${signal}'`)),
+        `${doc} without ${signal} replayed clean — the contract cannot see that read`,
+      );
+    }
+    assert.equal(v.length, mutants.length, "only the mutants break the contract; the unmutated corpus still replays clean");
   });
 });
 
