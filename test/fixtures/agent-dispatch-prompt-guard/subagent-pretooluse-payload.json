@@ -1,0 +1,16 @@
+{
+  "_provenance": "PreToolUse payload for an Agent call made INSIDE a dispatched child (#5145 QA round 1, finding 2). Every identity field is copied from a real autopilot qa_orch dispatch: the live registry row hydra:dispatches:subagent:af4747e1d5a62cae0 (written by scripts/autopilot/hooks/on-subagent-tool-call.sh from agent_id/session_id/cwd of a real child hook payload) records sessionId=af4747e1d5a62cae0 (the agent_id), parentSessionId=8d33438f-f2a1-422b-9c0c-721dda3d6c10 (payload session_id) and projectDir=/home/gabe/hydra/.claude/worktrees/agent-af4747e1d5a62cae0 (payload cwd); the child transcript sits at <transcript_path minus .jsonl>/subagents/agent-af4747e1d5a62cae0.jsonl, which is how that hook derives it. transcript_path is the PARENT's (#4965). The field set is the one on-subagent-tool-call.sh reads, plus tool_name/tool_input; no field is invented. The parent-thread twin is this payload minus agent_id.",
+  "payload": {
+    "session_id": "8d33438f-f2a1-422b-9c0c-721dda3d6c10",
+    "transcript_path": "/home/gabe/.claude/projects/-home-gabe-hydra/8d33438f-f2a1-422b-9c0c-721dda3d6c10.jsonl",
+    "cwd": "/home/gabe/hydra/.claude/worktrees/agent-af4747e1d5a62cae0",
+    "hook_event_name": "PreToolUse",
+    "agent_id": "af4747e1d5a62cae0",
+    "tool_name": "Agent",
+    "tool_input": {
+      "description": "Standards reviewer A",
+      "prompt": "You are reviewer-A-standards. Review the diff of PR #5145 against CLAUDE.md's coding conventions. Report findings as a table.",
+      "subagent_type": "general-purpose"
+    }
+  }
+}
