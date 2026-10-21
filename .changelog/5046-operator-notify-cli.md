@@ -1,0 +1,1 @@
+- feat: Operator Channel CLI (`scripts/operator-notify.ts`) — watchdog alarms and systemd OnFailure pages go through the channel with its dedup and credentials; a SIGTERM / exit 143 restart never pages (fixes #5035); Target/CSB unit failures land in the Morning Brief; the Telegram seam check now covers scripts/ and the systemd units (#5046)

@@ -171,6 +171,11 @@ function runBlock(env: Record<string, string>): { status: number; stdout: string
       ...process.env,
       HYDRA_REDIS_HOST: "docker",
       HYDRA_REDIS_DB: "0",
+      // ADR-0045 D2 (#5046): the block now calls the Operator Channel CLI at its
+      // fired/recovery edges through HYDRA_WATCHDOG_OPERATOR_NOTIFY; this suite
+      // asserts nothing about that delivery (test/launch-flow-delivery does), so
+      // a no-op stub keeps it from booting the PRODUCTION checkout's CLI.
+      HYDRA_WATCHDOG_OPERATOR_NOTIFY: "/bin/true",
       HYDRA_WATCHDOG_NM_NOTIFY_STREAM: TEST_NOTIFY_STREAM,
       ...env,
     },
@@ -490,6 +495,7 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through run_node_
       env: {
         ...baseEnv,
         HYDRA_REDIS_HOST: "docker",
+        HYDRA_WATCHDOG_OPERATOR_NOTIFY: "/bin/true", // no-op CLI stub (#5046), see runBlock()
         HYDRA_WATCHDOG_NM_NOTIFY_STREAM: OWN_NOTIFY_STREAM,
         HYDRA_WATCHDOG_NM_ROOTS: wipedRoot,
         HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20",

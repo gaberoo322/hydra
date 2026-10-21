@@ -19,6 +19,10 @@ export const PAGE_KINDS = [
   E.LAUNCH_LATENCY_BREACH,
   E.LAUNCH_PAUSE_FORGOTTEN,
   E.GLM_DRAINER_STERILE,
+  // Launch-flow fail-safe / meter-dark (watchdog-only, out-of-band: the
+  // orchestrator may be down, so they never ride the bus — issue #5046).
+  "launch:fail_safe",
+  "launch:meter_dark",
   // The notification consumer is dead
   E.CONSUMER_DEAD,
   // An Outcome Holdback revert failed (the on-wire spelling src/holdback.ts

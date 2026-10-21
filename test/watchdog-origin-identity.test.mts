@@ -83,6 +83,9 @@ function tick(env: Record<string, string>): { out: string; rc: number } {
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
         HOME: process.env.HOME ?? "/tmp",
         HYDRA_ROOT: fakeRoot,
+        // #5046: no-op Operator Channel CLI stub so a tick never boots the
+        // production CLI (delivery is asserted in test/launch-flow-delivery).
+        HYDRA_WATCHDOG_OPERATOR_NOTIFY: "/bin/true",
         HYDRA_REDIS_HOST: "127.0.0.1",
         HYDRA_WATCHDOG_ORIGIN_STATE_DIR: stateDir,
         HYDRA_WATCHDOG_ORIGIN_NOTIFY_STREAM: "test:notifications",

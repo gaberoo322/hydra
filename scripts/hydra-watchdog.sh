@@ -833,10 +833,35 @@ run_redis_backup_freshness() {
     fi
   }
 
+  # deliver_page SUBCOMMAND ARGS... — the Operator Channel CLI (ADR-0045 D2,
+  # issue #5046): the ONLY Telegram sender. It imports src/operator-channel/
+  # directly, so it works with the Orchestrator down. The binary resolves
+  # through HYDRA_WATCHDOG_OPERATOR_NOTIFY (tests: an argv-recording stub) and
+  # defaults to node --experimental-strip-types — never npx tsx: a unit's
+  # minimal PATH cannot see the global tsx. Best-effort by contract: timeout
+  # 25, `|| log WARN`, always returns 0. Credentials are the CLI's concern
+  # (one loader; the watchdog never reads TELEGRAM_*). Deliberately a per-block
+  # copy, like rc_write: the test harnesses extract each block by slicing.
+  deliver_page() {
+    local notify_bin="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-$HOME/hydra}/scripts/operator-notify.ts}"
+    local out err_file
+    err_file="$(mktemp 2>/dev/null || printf '/tmp/hydra-operator-notify-%s.err' "$$")"
+    # stderr is kept so the WARN names WHY (a strip-types boot error, a
+    # transport error) instead of a bare rc; the first Error line wins, else
+    # the last line.
+    # shellcheck disable=SC2086  # word-splitting binary+flags is intended
+    out="$(timeout 25 $notify_bin "$@" 2>"$err_file")" \
+      && log "operator-notify $1 ok for '${3:-}' (${out:-no output})" \
+      || log "WARN operator-notify $1 FAILED (rc=$?) for '${3:-}' (best-effort — detection state is unchanged): $({ grep -m1 -E 'Error|ERR_' "$err_file" || tail -n 1 "$err_file"; } 2>/dev/null | cut -c1-300)"
+    rm -f "$err_file" 2>/dev/null || true
+    return 0
+  }
+
   # deliver_signal REASON AGE_MS THR_MS — enveloped XADD onto the
   # notifications stream, the exact on-wire shape src/event-bus.ts's publish()
   # constructs (ADR-0017 Category A), mirroring run_node_modules_integrity's
-  # deliver_signal. Always returns 0 (best-effort).
+  # deliver_signal, PLUS one Operator Channel CLI page (#5046). Always
+  # returns 0 (best-effort).
   deliver_signal() {
     local reason="$1" age_ms="$2" thr_ms="$3"
     local reason_clean
@@ -853,6 +878,9 @@ run_redis_backup_freshness() {
       correlationId "redis-backup-freshness" \
       payload "$payload"
     log "in-band delivery published (best-effort) for stale redis backup (type=infra:redis_backup_stale -> ${NOTIFY_STREAM})"
+    deliver_page page --kind "infra:redis_backup_stale" --dedup-key "infra:redis_backup_stale" \
+      --title "Redis backup $reason_clean (threshold ${STALE_HOURS}h)" \
+      --fact "reason=$reason_clean" --fact "age_ms=$age_ms" --fact "threshold_ms=$thr_ms" --fact "backup_dir=$BACKUP_DIR"
     return 0
   }
 
@@ -926,6 +954,7 @@ run_redis_backup_freshness() {
   else
     if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" == "1" ]]; then
       log "redis backup fresh again — clearing the staleness episode (dedup re-armed)"
+      deliver_page resolve --dedup-key "infra:redis_backup_stale" --title "Redis backup fresh again"
     fi
     rc_write DEL "$since_key" "$fired_key"
   fi
@@ -1263,10 +1292,35 @@ run_node_modules_integrity() {
     printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_' | tr -s '_'
   }
 
+  # deliver_page SUBCOMMAND ARGS... — the Operator Channel CLI (ADR-0045 D2,
+  # issue #5046): the ONLY Telegram sender. It imports src/operator-channel/
+  # directly, so it works with the Orchestrator down. The binary resolves
+  # through HYDRA_WATCHDOG_OPERATOR_NOTIFY (tests: an argv-recording stub) and
+  # defaults to node --experimental-strip-types — never npx tsx: a unit's
+  # minimal PATH cannot see the global tsx. Best-effort by contract: timeout
+  # 25, `|| log WARN`, always returns 0. Credentials are the CLI's concern
+  # (one loader; the watchdog never reads TELEGRAM_*). Deliberately a per-block
+  # copy, like rc_write: the test harnesses extract each block by slicing.
+  deliver_page() {
+    local notify_bin="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-$HOME/hydra}/scripts/operator-notify.ts}"
+    local out err_file
+    err_file="$(mktemp 2>/dev/null || printf '/tmp/hydra-operator-notify-%s.err' "$$")"
+    # stderr is kept so the WARN names WHY (a strip-types boot error, a
+    # transport error) instead of a bare rc; the first Error line wins, else
+    # the last line.
+    # shellcheck disable=SC2086  # word-splitting binary+flags is intended
+    out="$(timeout 25 $notify_bin "$@" 2>"$err_file")" \
+      && log "operator-notify $1 ok for '${3:-}' (${out:-no output})" \
+      || log "WARN operator-notify $1 FAILED (rc=$?) for '${3:-}' (best-effort — detection state is unchanged): $({ grep -m1 -E 'Error|ERR_' "$err_file" || tail -n 1 "$err_file"; } 2>/dev/null | cut -c1-300)"
+    rm -f "$err_file" 2>/dev/null || true
+    return 0
+  }
+
   # deliver_signal SIG ROOT REASON DUR_MS THR_MS — enveloped XADD onto the
   # notifications stream, the exact on-wire shape src/event-bus.ts's publish()
   # constructs (ADR-0017 Category A), mirroring run_launch_flow's
-  # deliver_in_band. Always returns 0 (best-effort).
+  # deliver_in_band, PLUS one Operator Channel CLI page (#5046). Always
+  # returns 0 (best-effort).
   deliver_signal() {
     local sig="$1" root="$2" reason="$3" dur_ms="$4" thr_ms="$5"
     local reason_clean
@@ -1285,6 +1339,9 @@ run_node_modules_integrity() {
       correlationId "node-modules-integrity-${sig}" \
       payload "$payload"
     log "in-band delivery published (best-effort) for '$root' (type=infra:node_modules_wiped -> ${NOTIFY_STREAM})"
+    deliver_page page --kind "infra:node_modules_wiped" --dedup-key "infra:node_modules_wiped" \
+      --title "node_modules integrity: '$root_clean' $reason_clean" \
+      --fact "root=$root_clean" --fact "reason=$reason_clean" --fact "sustained_ms=$dur_ms" --fact "threshold_ms=$thr_ms"
     return 0
   }
 
@@ -1312,6 +1369,10 @@ run_node_modules_integrity() {
         fi
       fi
     else
+      # Recovery edge (#5046): CLI resolve only when the fired marker existed.
+      if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" == "1" ]]; then
+        deliver_page resolve --dedup-key "infra:node_modules_wiped" --title "node_modules integrity recovered: '$root'"
+      fi
       rc_write DEL "$since_key" "$fired_key"
     fi
     return 0
@@ -1431,13 +1492,14 @@ run_node_modules_integrity() {
 # surface derived per signal from whether the Orchestrator is provably up in
 # that signal's failure mode:
 #
-#   fail-safe, meter-dark → OUT-OF-BAND: a direct bash curl POST to the
-#       Telegram Bot API. Both mean "DEFECTIVE AND FULLY BLOCKING" — the
-#       Orchestrator process that would consume an in-band event may itself be
-#       unreachable, and a bash LPUSH an operator can only read through
-#       GET /api/alerts on port 4000 is the "written and unreadable" trap.
-#       This makes the watchdog the third Telegram consumer alongside
-#       DLQ_ALERT and CONSUMER_DEAD (same infrastructure-is-broken character).
+#   fail-safe, meter-dark → OUT-OF-BAND: one Operator Channel CLI `page`
+#       (scripts/operator-notify.ts, ADR-0045 D2 — it imports the channel
+#       module directly, so it works with the Orchestrator down; #5046
+#       replaced the former bash curl). Both mean "DEFECTIVE AND FULLY
+#       BLOCKING" — the Orchestrator process that would consume an in-band
+#       event may itself be unreachable, and a bash LPUSH an operator can
+#       only read through GET /api/alerts on port 4000 is the "written and
+#       unreadable" trap. Page kinds launch:fail_safe / launch:meter_dark.
 #
 #   quota, latency → IN-BAND: an enveloped event XADD'd directly onto the
 #       hydra:notifications stream (id/type/source/timestamp/correlationId/
@@ -1457,12 +1519,18 @@ run_node_modules_integrity() {
 #       to prevent). It reaches the operator via CRITICAL_EVENT_TYPES' immediate
 #       digest bypass only.
 #
-# Credential placement: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are read from
-# the watchdog's process env (the same vars src/notify.ts reads). Wiring them
-# into hydra-watchdog.service is an explicit OPERATOR action out of scope here
-# (issue #3848) — so when either is absent the out-of-band block logs a
-# distinguishable WARN naming the missing var and continues: an unconfigured
-# signal must be visible as unconfigured, never silent and never fatal.
+# Credential placement: the CLI's single loader reads TELEGRAM_BOT_TOKEN /
+# TELEGRAM_CHAT_ID from the process env — hydra-watchdog.service loads
+# %h/hydra/.env dash-prefixed (#5046) so the vars are present without making
+# any other block depend on the file. The watchdog itself never reads them;
+# an unconfigured credential is the CLI's `skipped-no-credentials` outcome in
+# its JSON line, the journal and the channel's delivery log — visible as
+# unconfigured, never silent and never fatal.
+#
+# Every page-list alarm (quota / latency / pause / glm-sterile too) ALSO calls
+# the CLI `page` at the fired absent→present transition, with dedupKey ==
+# kind, while the in-band XADD stays byte-for-byte (the dashboard-alert path).
+# At the fired→absent recovery edge the block calls CLI `resolve` once.
 #
 # Dedup/un-suppression need NO new machinery: delivery fires at the same
 # absent→present fired-marker transition the WARNING already detects (the
@@ -1474,7 +1542,7 @@ run_node_modules_integrity() {
 # Fail-safe (HARD): this block NEVER throws and NEVER returns non-zero (matches
 # the watchdog's per-block contract, set -euo pipefail notwithstanding). The
 # delivery calls follow the same best-effort discipline as rc_write/rc_read
-# (redirected output, || true, bounded --max-time) — a curl or XADD failure
+# (redirected output, || log, bounded `timeout`) — a CLI or XADD failure
 # degrades to a logged WARN and never propagates out of run_launch_flow. Any
 # redis-cli/docker failure or an empty/absent last-tick hash logs a
 # distinguishable WARN and returns WITHOUT mutating any anchor or fired marker
@@ -1608,34 +1676,62 @@ run_launch_flow() {
   # of run_launch_flow. The caller's locals `reason` and `REDIS_*` are visible
   # via bash dynamic scoping.
 
-  # deliver_out_of_band SIGNAL DUR_MS THR_MS — direct bash curl to the Telegram
-  # Bot API (fail-safe / meter-dark; mirrors src/notify.ts's endpoint shape).
-  # Zero dependency on any Orchestrator HTTP endpoint or in-process module:
-  # both signals mean the Orchestrator may itself be unreachable, so an
-  # in-band event would be written and unreadable.
+  # deliver_page SUBCOMMAND ARGS... — the Operator Channel CLI (ADR-0045 D2,
+  # issue #5046): the ONLY Telegram sender. It imports src/operator-channel/
+  # directly, so it works with the Orchestrator down. The binary resolves
+  # through HYDRA_WATCHDOG_OPERATOR_NOTIFY (tests: an argv-recording stub) and
+  # defaults to node --experimental-strip-types — never npx tsx: a unit's
+  # minimal PATH cannot see the global tsx. Best-effort by contract: timeout
+  # 25, `|| log WARN`, always returns 0. Credentials are the CLI's concern
+  # (one loader; the watchdog never reads TELEGRAM_*). Deliberately a per-block
+  # copy, like rc_write: the test harnesses extract each block by slicing.
+  deliver_page() {
+    local notify_bin="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-$HOME/hydra}/scripts/operator-notify.ts}"
+    local out err_file
+    err_file="$(mktemp 2>/dev/null || printf '/tmp/hydra-operator-notify-%s.err' "$$")"
+    # stderr is kept so the WARN names WHY (a strip-types boot error, a
+    # transport error) instead of a bare rc; the first Error line wins, else
+    # the last line.
+    # shellcheck disable=SC2086  # word-splitting binary+flags is intended
+    out="$(timeout 25 $notify_bin "$@" 2>"$err_file")" \
+      && log "operator-notify $1 ok for '${3:-}' (${out:-no output})" \
+      || log "WARN operator-notify $1 FAILED (rc=$?) for '${3:-}' (best-effort — detection state is unchanged): $({ grep -m1 -E 'Error|ERR_' "$err_file" || tail -n 1 "$err_file"; } 2>/dev/null | cut -c1-300)"
+    rm -f "$err_file" 2>/dev/null || true
+    return 0
+  }
+
+  # lf_kind_for_sig SIGNAL — the Operator Channel page kind for a signal (the
+  # same literals the in-band envelopes carry; fail-safe / meter-dark are the
+  # #5046 page-list literals that never ride the bus). dedupKey == kind, so an
+  # in-process page for the same event is suppressed by the shared Redis
+  # dedup state rather than delivered twice.
+  lf_kind_for_sig() {
+    case "$1" in
+      fail-safe)   printf 'launch:fail_safe' ;;
+      meter-dark)  printf 'launch:meter_dark' ;;
+      quota)       printf 'launch:quota_stretch' ;;
+      latency)     printf 'launch:latency_breach' ;;
+      pause)       printf 'launch:pause_forgotten' ;;
+      glm-sterile) printf 'glm:drainer_sterile' ;;
+      *)           printf '%s' "$1" ;;
+    esac
+  }
+
+  # deliver_out_of_band SIGNAL DUR_MS THR_MS — fail-safe / meter-dark: one
+  # Operator Channel CLI `page` (ADR-0045 D2). Zero dependency on any
+  # Orchestrator HTTP endpoint and no XADD: both signals mean the Orchestrator
+  # may itself be unreachable, so an in-band event would be written and
+  # unreadable. Credentials and dedup are the CLI's.
   deliver_out_of_band() {
-    local sig="$1" dur_ms="$2" thr_ms="$3"
-    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-      local missing=""
-      [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]] && missing="TELEGRAM_BOT_TOKEN"
-      [[ -z "${TELEGRAM_CHAT_ID:-}" ]] && missing="${missing:+$missing }TELEGRAM_CHAT_ID"
-      log "WARN launch-flow out-of-band delivery for '$sig' SKIPPED — missing Telegram config: ${missing} (credential placement into the watchdog service env is an operator action, see #3848); the streak is still detected and logged"
-      return 0
-    fi
-    local text
-    text="$(printf 'HYDRA LAUNCH FLOW ALERT (out-of-band — Orchestrator may be down)\nsignal: %s\nsustained: %sms >= %sms threshold\nreason: %s\nhost: %s' \
-      "$sig" "$dur_ms" "$thr_ms" "${reason:-n/a}" "$(hostname 2>/dev/null || echo unknown)")"
-    # Best-effort by contract: bounded --max-time, output redirected, `|| log`
-    # (not `|| true`) so a failed Telegram send is distinguishable in the
-    # journal from a skipped one — but still never fails the block.
-    if curl -sS --max-time 10 -X POST \
-        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-        --data-urlencode "text=${text}" >/dev/null 2>&1; then
-      log "out-of-band Telegram delivery sent for '$sig'"
-    else
-      log "WARN launch-flow out-of-band Telegram send FAILED for '$sig' (curl non-zero, best-effort — will not retry this streak; recovery + a fresh streak re-alarm)"
-    fi
+    local sig="$1" dur_ms="$2" thr_ms="$3" etype
+    case "$sig" in
+      fail-safe)  etype="launch:fail_safe" ;;
+      meter-dark) etype="launch:meter_dark" ;;
+      *) return 0 ;;
+    esac
+    deliver_page page --kind "$etype" --dedup-key "$etype" \
+      --title "Launch flow '$sig' sustained ${dur_ms}ms (>= ${thr_ms}ms) — Orchestrator may be down" \
+      --fact "signal=$sig" --fact "reason=${reason:-n/a}" --fact "sustained_ms=$dur_ms" --fact "threshold_ms=$thr_ms"
     return 0
   }
 
@@ -1678,6 +1774,12 @@ run_launch_flow() {
       correlationId "launch-flow-${sig}" \
       payload "$payload"
     log "in-band delivery published (best-effort) for '$sig' (type=${etype} -> ${NOTIFY_STREAM})"
+    # ADR-0045 D2 (#5046): the page itself goes through the Operator Channel
+    # CLI with dedupKey == kind, so the consumer's own page for the XADD above
+    # (messageFromEvent keys on the event type) dedups against it.
+    deliver_page page --kind "$etype" --dedup-key "$etype" \
+      --title "Launch flow '$sig' sustained ${dur_ms}ms (>= ${thr_ms}ms)" \
+      --fact "signal=$sig" --fact "reason=${reason_clean:-n/a}" --fact "sustained_ms=$dur_ms" --fact "threshold_ms=$thr_ms"
     return 0
   }
 
@@ -1730,7 +1832,12 @@ run_launch_flow() {
         log "launch-flow signal '$sig' streak ${dur}ms (< ${thr_ms}ms threshold); not firing"
       fi
     else
-      # Membership false — stateless recovery: DEL both (idempotent).
+      # Membership false — stateless recovery: DEL both (idempotent). The
+      # "recovered" message is ONE edge (#5046): CLI resolve only when the
+      # fired marker existed before the DEL, never once per healthy tick.
+      if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" == "1" ]]; then
+        deliver_page resolve --dedup-key "$(lf_kind_for_sig "$sig")" --title "Launch flow '$sig' recovered"
+      fi
       rc_write DEL "$since_key" "$fired_key"
     fi
     return 0
@@ -2021,6 +2128,30 @@ run_origin_identity() {
     fi
   }
 
+  # deliver_page SUBCOMMAND ARGS... — the Operator Channel CLI (ADR-0045 D2,
+  # issue #5046): the ONLY Telegram sender. It imports src/operator-channel/
+  # directly, so it works with the Orchestrator down. The binary resolves
+  # through HYDRA_WATCHDOG_OPERATOR_NOTIFY (tests: an argv-recording stub) and
+  # defaults to node --experimental-strip-types — never npx tsx: a unit's
+  # minimal PATH cannot see the global tsx. Best-effort by contract: timeout
+  # 25, `|| log WARN`, always returns 0. Credentials are the CLI's concern
+  # (one loader; the watchdog never reads TELEGRAM_*). Deliberately a per-block
+  # copy, like rc_write: the test harnesses extract each block by slicing.
+  deliver_page() {
+    local notify_bin="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-$HOME/hydra}/scripts/operator-notify.ts}"
+    local out err_file
+    err_file="$(mktemp 2>/dev/null || printf '/tmp/hydra-operator-notify-%s.err' "$$")"
+    # stderr is kept so the WARN names WHY (a strip-types boot error, a
+    # transport error) instead of a bare rc; the first Error line wins, else
+    # the last line.
+    # shellcheck disable=SC2086  # word-splitting binary+flags is intended
+    out="$(timeout 25 $notify_bin "$@" 2>"$err_file")" \
+      && log "operator-notify $1 ok for '${3:-}' (${out:-no output})" \
+      || log "WARN operator-notify $1 FAILED (rc=$?) for '${3:-}' (best-effort — detection state is unchanged): $({ grep -m1 -E 'Error|ERR_' "$err_file" || tail -n 1 "$err_file"; } 2>/dev/null | cut -c1-300)"
+    rm -f "$err_file" 2>/dev/null || true
+    return 0
+  }
+
   mkdir -p "$STATE_DIR" 2>/dev/null || {
     log "WARN cannot create state dir ${STATE_DIR} — skipping origin identity check"
     return 0
@@ -2140,6 +2271,7 @@ run_origin_identity() {
   if (( ${#reasons[@]} == 0 )); then
     if [[ -f "$SINCE_MARKER" ]]; then
       log "origin identity healthy again (origin=${norm}, origin/master resolves) — dedup re-armed"
+      deliver_page resolve --dedup-key "infra:origin_identity_wrong" --title "~/hydra origin identity healthy again"
     fi
     rm -f "$SINCE_MARKER" 2>/dev/null || true
     log "origin-identity tick processed (origin=${norm}, origin_master=present)"
@@ -2274,6 +2406,16 @@ run_origin_identity() {
       log "in-band delivery published type=infra:origin_identity_wrong repair=${repair_field} -> ${NOTIFY_STREAM}"
     else
       log "WARN in-band delivery FAILED (XADD returned nothing) — will retry next tick"
+    fi
+    # Operator Channel (#5046): a self-healed identity needs no operator
+    # action (#5065 QA round 2 — the consumer briefs it), so `repaired` is
+    # this block's recovery edge; alarm / failed page with dedupKey == kind.
+    if [[ "$outcome" == "repaired" ]]; then
+      deliver_page resolve --dedup-key "infra:origin_identity_wrong" --title "~/hydra origin identity repaired: ${reason_str}"
+    else
+      deliver_page page --kind "infra:origin_identity_wrong" --dedup-key "infra:origin_identity_wrong" \
+        --title "~/hydra origin identity broken: ${reason_str}" \
+        --fact "reason=${reason_str}" --fact "url=${url_clean}" --fact "repair=${repair_field}" --fact "note=${note_clean}"
     fi
   fi
   return 0
