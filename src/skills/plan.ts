@@ -24,7 +24,7 @@ import {
   type PlaybookErrorCode,
 } from "./playbook.ts";
 
-export type PlanErrorCode = PlaybookErrorCode | "reference-escape" | "reference-unresolved" | "duplicate-write-path";
+type PlanErrorCode = PlaybookErrorCode | "reference-escape" | "reference-unresolved" | "duplicate-write-path";
 
 export interface CorpusInput {
   /** Absolute playbooks dir; used ONLY for containment path math + messages. */
@@ -38,17 +38,17 @@ export interface CorpusInput {
   sources: ReadonlyMap<string, string>;
 }
 
-export interface PlanWrite {
+interface PlanWrite {
   path: string;
   content: string;
 }
 
-export interface PlanSkip {
+interface PlanSkip {
   playbook: string;
   reason: "no-frontmatter" | "missing-name-or-description";
 }
 
-export interface PlanError {
+interface PlanError {
   playbook: string;
   code: PlanErrorCode;
   message: string;

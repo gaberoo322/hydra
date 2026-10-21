@@ -1,0 +1,1 @@
+- refactor: viewIssue tolerates a non-array labels value; decide.py comments no longer cite the deleted read guard (#5131)
