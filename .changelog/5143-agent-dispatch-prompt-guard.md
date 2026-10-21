@@ -1,0 +1,1 @@
+- feat: a PreToolUse guard denies an unattended autopilot Agent dispatch whose prompt is not render-dispatch.py output (no `## Task`, or a placeholder / unexpanded `$(`) (#5143)

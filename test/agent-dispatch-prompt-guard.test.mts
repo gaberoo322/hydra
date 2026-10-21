@@ -23,9 +23,11 @@
  *   - malformed input fails OPEN (exit 0) with a stderr warning.
  *
  * The hook is shell + python3, so it is exercised as a subprocess fed stdin,
- * mirroring test/gh-label-delete-guard.test.mts. The renderer path is built
- * from segments so scripts/ci/test-subject-map.ts resolves this file's
- * primary subject to the hook alone.
+ * mirroring test/gh-label-delete-guard.test.mts. The renderer is only a
+ * fixture source here; its path is built from a named constant so
+ * scripts/ci/test-subject-map.ts resolves this file's primary subject to the
+ * hook alone (render-dispatch.py's own contract lives in
+ * test/autopilot-render-dispatch.test.mts).
  */
 
 import test, { describe, after } from "node:test";
@@ -37,9 +39,11 @@ import { join, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const HOOK = resolve(REPO_ROOT, "scripts/claude-hooks/agent-dispatch-prompt-guard.sh");
-const RENDERER = join(REPO_ROOT, "scripts", "autopilot", "render-dispatch.py");
+const AUTOPILOT_DIR = join(REPO_ROOT, "scripts", "autopilot");
+const RENDERER_NAME = "render-dispatch.py";
+const RENDERER = join(AUTOPILOT_DIR, RENDERER_NAME);
 const CLASSES: string[] = JSON.parse(
-  readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8"),
+  readFileSync(join(AUTOPILOT_DIR, "classes.json"), "utf-8"),
 ).classes.map((c: { name: string }) => c.name);
 
 const IN_SCOPE = { HYDRA_AUTOPILOT_TRIGGER: "pace-gate" };
