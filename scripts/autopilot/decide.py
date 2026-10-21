@@ -715,8 +715,9 @@ PIPELINE_REFIRE_SEC: dict[str, int] = {
 # plus one literal read branch in each of _zy_idle_signal_present /
 # _zy_positive_evidence_present, not a rewrite of the gate/reset logic. The
 # idle and reset signal names live ONLY in those two helpers as string
-# LITERALS (the #4934 schema read guard's textual extractor cannot see
-# computed names, so a table of names would be dead, drift-prone data).
+# LITERALS (one branch per class keeps each read greppable and mirrors the
+# ZERO_YIELD_BACKOFF_CLASSES row; the Turn Snapshot replay contract records
+# reads dynamically, so it does not depend on this shape).
 # Reset signals fail closed to false on a degraded board read
 # (ALL_DEGRADED_SIGNALS), which HOLDS the ladder instead of resetting it —
 # an outage must not silently restart the back-off clock.
@@ -4467,9 +4468,9 @@ def _zero_yield_gate(
 def _zy_idle_signal_present(state: dict, events: list[dict], cls: str) -> bool:
     """Idle-signal presence for an enrolled back-off class (issue #4999).
 
-    Per-class LITERAL read: the #4934 schema read guard requires string
-    literals at read sites, so each enrolled class names its idle signal in
-    ONE branch here, mirroring its ZERO_YIELD_BACKOFF_CLASSES row. An unknown
+    Per-class LITERAL read: each enrolled class names its idle signal in
+    ONE branch here (greppable; the replay contract test records reads
+    dynamically, so the shape is for readability, not a guard), mirroring its ZERO_YIELD_BACKOFF_CLASSES row. An unknown
     class reads as not-idle — the back-off gate fails open (INV-9)."""
     if cls in ("discover_target", "cleanup_target"):
         return _signal_present(state, events, "target_backfill_idle")
