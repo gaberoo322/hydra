@@ -150,8 +150,10 @@ const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 // Issue #381 (codex cut-over PR-1) introduced HYDRA_CODEX_CYCLE_ENABLED as a
 // kill-switch that prevented the scheduler from invoking the in-process
 // control loop. Issue #383 (PR-3) deleted the control loop entirely — the
-// scheduler now ONLY runs housekeeping (stale-claim reaper, weekly digest,
-// memory consolidation, design-concept snapshot). There is no codex cycle to
+// scheduler now ONLY runs housekeeping (memory consolidation, design-concept
+// snapshot, review-pickup notify and the later chores in
+// src/scheduler/housekeeping.ts; the weekly digest retired into the Morning
+// Brief, ADR-0045). There is no codex cycle to
 // gate; the flag is gone. Reaching this comment in a debug session = grep for
 // "HYDRA_CODEX_CYCLE_ENABLED" in operator runbooks and tell them it is dead.
 
@@ -458,9 +460,10 @@ export class HeartbeatController {
     // Issue #383 (codex cut-over PR-3): the in-process control loop is gone.
     // #706 (scheduler fold PR-1/4) additionally removed the research-decision
     // plane that used to run here. #723 (scheduler fold PR-3/4) moved the six
-    // time-boxed housekeeping chores (blocked re-escalation, done-lane pruning,
-    // weekly digest, memory consolidation, design-concept snapshot, review-pickup
-    // notify) out to an hourly `hydra-housekeeping.timer` that POSTs
+    // time-boxed housekeeping chores of the day (blocked re-escalation, done-lane
+    // pruning and the weekly digest — all since retired, the digest into the
+    // Morning Brief per ADR-0045 — plus memory consolidation, design-concept
+    // snapshot, review-pickup notify) out to an hourly `hydra-housekeeping.timer` that POSTs
     // `/api/maintenance/housekeeping` → `runHousekeeping(eventBus)`. #938 then
     // moved the chore CODE into `src/scheduler/housekeeping.ts` (a sibling
     // Module). `runScheduledCycle` now exists solely as a heartbeat +

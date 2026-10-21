@@ -1593,7 +1593,8 @@ case "$DECISION" in
          --body "Outcome Holdback auto-revert (ADR-0004 step 4). Leading outcomes regressed past noise_epsilon vs the pre-merge baseline: ${REGRESSED}."; then
       : # revert PR opened; CI is still the merge gate for the revert itself
     else
-      # Revert/PR-open failed — surface to the digest so the operator sees a
+      # Revert/PR-open failed — surface through the Operator Channel (a
+      # holdback.revert_failed Page, ADR-0045) so the operator sees a
       # warranted revert did not land.
       curl -fsS -X POST http://localhost:4000/api/holdback/revert-failed \
         -H 'content-type: application/json' \
@@ -1603,7 +1604,7 @@ case "$DECISION" in
     ;;
   cap-reached)
     # Per-day revert cap hit — revert SUPPRESSED, holdback.cap-reached emitted.
-    # Do NOT revert; the digest surfaces the suppressed regression. A runaway
+    # Do NOT revert; the Morning Brief surfaces the suppressed regression. A runaway
     # revert loop is far more expensive than missing one revert.
     ;;
   passed)

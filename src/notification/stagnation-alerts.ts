@@ -26,7 +26,8 @@
 // tick re-evaluates the edge (better a re-attempt than a swallowed edge).
 //
 // This is a focused notification-domain leaf, sibling to `alert-grammar.ts`
-// and `cycle-completed-reactor.ts` — NOT the Telegram transport (`../notify.ts`).
+// and `cycle-completed-reactor.ts` — NOT the Telegram transport
+// (`../operator-channel/transport.ts`).
 // Import direction is one-way: this module imports the aggregators' scorecard
 // vocabulary; `src/scheduler/heartbeat.ts` (the only production caller) imports
 // `emitStagnationAlerts` / `createInMemoryStagnationStore` from here.
