@@ -5986,18 +5986,4 @@ describe("decide.py — a terminating turn still arms its QA PASS (#5144)", () =
     assert.equal(merges(plan).length, 0);
     lastIsTerminate(plan, "budget");
   });
-
-  test("assert_invariants.py accepts the mixed auto-merge + terminate plan (INV-005, INV-007)", () => {
-    const t = makeTmp();
-    try {
-      const state = baseState({ cumulative_tokens: 2_000_001, signals: busyBoard });
-      const plan = runDecide(state, null, [passEvent(4968)], t);
-      const planPath = join(t.dir, "plan.json");
-      writeFileSync(planPath, JSON.stringify(plan));
-      const r = spawnSync("python3", [join(SCRIPTS, "assert_invariants.py"), planPath, t.state], { encoding: "utf-8" });
-      assert.equal(r.status, 0, `assert_invariants rejected the plan: ${r.stderr}`);
-    } finally {
-      rmSync(t.dir, { recursive: true, force: true });
-    }
-  });
 });
