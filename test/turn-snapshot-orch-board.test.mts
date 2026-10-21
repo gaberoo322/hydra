@@ -45,7 +45,6 @@ import {
   type TurnSnapshotGithub,
 } from "../src/autopilot/turn-snapshot/github-port.ts";
 import { createTurnSnapshotHydra, type HydraRead, type HydraTransport, type TurnSnapshotHydra } from "../src/autopilot/turn-snapshot/hydra-http.ts";
-import { pyJsonDumps } from "../src/autopilot/turn-snapshot/py-compat.ts";
 import { deriveBoardState } from "../src/autopilot/board-state.ts";
 import { STALE_BLOCKED_SECONDS, STALE_IN_PROGRESS_SECONDS } from "../src/board-labels.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
@@ -416,7 +415,7 @@ describe("untriaged_orphans excludes needs-dev-resume (#4220)", () => {
 describe("untriaged_orphans / needs_qa_numbers degrade (failed reads)", () => {
   test("a failed orphan read is null (rendered 0 — never a spurious sweep)", () => {
     assert.equal(countUntriagedOrphans(EMPTY), null);
-    assert.equal(countUntriagedOrphans({ kind: "unparseable", error: "x" }), null);
+    assert.equal(countUntriagedOrphans({ kind: "unparseable" }), null);
   });
 
   test("needs_qa_numbers keeps gh's order; a failed read is degraded (the snapshot then carries an empty list)", () => {
@@ -646,12 +645,6 @@ describe("degraded path — a null/absent updatedAt (review low, ADR-0043 D2)", 
     assert.deepEqual(line.stale_blocked, []);
     assert.equal(line.in_progress, 2);
     assert.equal(line.blocked, 1);
-  });
-});
-
-describe("pyJsonDumps — python json.dumps defaults", () => {
-  test("separators and ensure_ascii match python", () => {
-    assert.equal(pyJsonDumps({ a: "é\u007f", b: [1, 2], c: {}, d: [] }), '{"a": "\\u00e9\\u007f", "b": [1, 2], "c": {}, "d": []}');
   });
 });
 

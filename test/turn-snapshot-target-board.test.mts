@@ -481,7 +481,7 @@ describe("target-board — gh fallback derive (issues #3709, #4946)", () => {
   });
 
   test("an unparseable fallback payload fails the read (fallback-read-failed + lane flag, the slice-2 rule #4930)", async () => {
-    const r = await runBoard({ issuesFallback: { kind: "unparseable", error: "Expecting value: line 1 column 1 (char 0)" } });
+    const r = await runBoard({ issuesFallback: { kind: "unparseable" } });
     assert.equal(r.value.laneDegraded, true);
     assert.deepEqual(r.value.counts, { ok: false, reason: "fallback-read-failed" });
   });
@@ -969,7 +969,7 @@ describe("target-board — target_dev_resume_pick (issue #4739)", () => {
     const degraded = await resume(EMPTY, ok([PR_57]));
     assert.equal(degraded.pick, "none");
     assert.ok(degraded.notes.some((n) => n.includes("#4739")));
-    const garbage = await resume({ kind: "unparseable", error: "Expecting value: line 1 column 1 (char 0)" }, ok([PR_57]));
+    const garbage = await resume({ kind: "unparseable" }, ok([PR_57]));
     assert.equal(garbage.pick, "none");
     assert.ok(garbage.notes.some((n) => n.includes("#4739")));
     const noRefs = await resume(ok(issues(176)), ok([PR_57]), { ok: false, error: "predicate unavailable" });
@@ -1134,7 +1134,7 @@ describe("target-scan-boards — wire-or-retire unlabelled advisory count (issue
   });
 
   test("the key is emitted on every branch so decide.py never sees it missing", async () => {
-    for (const read of [ok([]), EMPTY, { kind: "unparseable", error: "x" } as GhJsonRead]) {
+    for (const read of [ok([]), EMPTY, { kind: "unparseable" } as GhJsonRead]) {
       assert.ok("wire_or_retire_target_unlabelled" in (await runScan({ read })).out);
     }
   });
@@ -1205,7 +1205,7 @@ describe("target-scan-boards — design_qa_target ADR-presence gate (issue #4528
 
   test("the advisory adr_present key is emitted on every branch (decide.py never reads it — pinned in autopilot-target-board-signals)", async () => {
     assert.equal((await runScan({ read: EMPTY, adr: true })).out.design_qa_target_adr_present, "true");
-    assert.equal((await runScan({ read: { kind: "unparseable", error: "x" }, adr: true })).out.design_qa_target_adr_present, "true");
+    assert.equal((await runScan({ read: { kind: "unparseable" }, adr: true })).out.design_qa_target_adr_present, "true");
   });
 
   test("the glob matches only design-language ADRs under the workspace", () => {

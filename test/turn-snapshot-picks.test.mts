@@ -1149,7 +1149,7 @@ describe("Turn Snapshot picks — blocked-dependency exclusion (issue #3965)", (
     // itself: a failed, empty or unparseable read is "every ref still open",
     // never a throw; a healthy read is intersected with the requested refs.
     assert.deepEqual(openBlockers(EMPTY, [500, 501]), [500, 501]);
-    assert.deepEqual(openBlockers({ kind: "unparseable", error: "x" }, [500]), [500]);
+    assert.deepEqual(openBlockers({ kind: "unparseable" }, [500]), [500]);
     assert.deepEqual(openBlockers(ok([{ number: 501 }, { number: 77 }]), [500, 501]), [501]);
     assert.deepEqual(openBlockers(ok([7]), [500]), [500], "a malformed row fails toward exclusion");
   });
@@ -1395,7 +1395,7 @@ describe("turn-snapshot CLI — picks collector contract (ADR-0043 D2, slice 3)"
   });
 
   test("mergedRefIssues fails open on an unparsable / non-list payload (was pr-refs.py --merged)", () => {
-    for (const read of [EMPTY, { kind: "unparseable", error: "x" } as GhJsonRead, ok({ not: "a list" })]) {
+    for (const read of [EMPTY, { kind: "unparseable" } as GhJsonRead, ok({ not: "a list" })]) {
       assert.deepEqual([...mergedRefIssues(read)], []);
     }
   });

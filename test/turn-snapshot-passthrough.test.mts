@@ -45,7 +45,6 @@ import {
 import { createTurnSnapshotHydra, type HydraTransport, type TurnSnapshotHydra } from "../src/autopilot/turn-snapshot/hydra-http.ts";
 import type { TurnSnapshotHost } from "../src/autopilot/turn-snapshot/host-port.ts";
 import type { TurnSnapshotGithub } from "../src/autopilot/turn-snapshot/github-port.ts";
-import { pyFormatFixed, pyNumberRepr, pyReprValue } from "../src/autopilot/turn-snapshot/py-format.ts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot", "passthrough");
 const BASE = "http://golden.invalid";
@@ -244,30 +243,7 @@ describe("Turn Snapshot hydra HTTP client — `hydra raw GET` semantics", () => 
   });
 });
 
-describe("Turn Snapshot py-format — Python formatting parity", () => {
-  test("format(x, '.Nf') rounds the exact double half-to-even", () => {
-    assert.equal(pyFormatFixed(0.125, 2), "0.12");
-    assert.equal(pyFormatFixed(0.375, 2), "0.38");
-    assert.equal(pyFormatFixed(1 / 32, 4), "0.0312");
-    assert.equal(pyFormatFixed(0.675, 2), "0.68"); // 0.675 is 0.67500000000000004441 — not a tie
-    assert.equal(pyFormatFixed(1, 4), "1.0000");
-    assert.equal(pyFormatFixed(-0.001, 2), "-0.00");
-    assert.equal(pyFormatFixed(-0, 2), "-0.00");
-    assert.equal(pyFormatFixed(2.5, 0), "2");
-    assert.equal(pyFormatFixed(123456.789, 2), "123456.79");
-  });
-
-  test("repr of JSON numbers and containers", () => {
-    assert.equal(pyNumberRepr(20), "20");
-    assert.equal(pyNumberRepr(0.1), "0.1");
-    assert.equal(pyNumberRepr(1e-7), "1e-07");
-    assert.equal(pyNumberRepr(0.0001), "0.0001");
-    assert.equal(pyNumberRepr(1e21), "1e+21");
-    assert.equal(pyNumberRepr(1.5e300), "1.5e+300");
-    assert.equal(pyNumberRepr(-2.5), "-2.5");
-    assert.equal(pyReprValue({ a: [true, null, "it's", 2.5] }), `{'a': [True, None, "it's", 2.5]}`);
-  });
-
+describe("Turn Snapshot passthrough — path and band helpers", () => {
   test("jq @uri keeps only A-Za-z0-9-_.~", () => {
     assert.equal(jqUri("a b/c!*'()~-_.:é"), "a%20b%2Fc%21%2A%27%28%29~-_.%3A%C3%A9");
   });

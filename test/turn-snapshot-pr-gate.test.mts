@@ -47,12 +47,12 @@ import {
 } from "../src/autopilot/turn-snapshot/pr-gate.ts";
 import {
   createTurnSnapshotGithub,
+  parseJsonRead,
   PR_GATE_PR_FIELDS,
   type GhJsonRead,
   type GhTransport,
   type TurnSnapshotGithub,
 } from "../src/autopilot/turn-snapshot/github-port.ts";
-import { pyJsonLoads } from "../src/autopilot/turn-snapshot/py-compat.ts";
 import { pickNoPrResume } from "../src/autopilot/turn-snapshot/dev-resume.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
 
@@ -324,11 +324,8 @@ interface PrGateOverrides {
   prRefs?: PrRefsAvailability;
 }
 
-const jsonOrEmpty = (s: string): GhJsonRead => {
-  if (s === "") return EMPTY;
-  const p = pyJsonLoads(s);
-  return "error" in p ? { kind: "unparseable", error: p.error } : ok(p.value);
-};
+/** "" models a FAILED read; anything else goes through the port's own JSON parse. */
+const jsonOrEmpty = (s: string): GhJsonRead => parseJsonRead(s);
 
 /**
  * A pin in the Anchor-reference notation signal EVENTS carry
@@ -1192,10 +1189,10 @@ describe("pr-gate — no-PR durable resume pick (issue #4808)", () => {
     const healthy = { first: ok([]), resume: ok(JSON.parse(noprRowsJson)) };
     const cases: { name: string; opts: Partial<Parameters<typeof collectNoprOutcome>[0]> }[] = [
       { name: "open-PR list read empty", opts: { first: EMPTY } },
-      { name: "open-PR list read unparseable", opts: { first: { kind: "unparseable", error: "Expecting value" } } },
+      { name: "open-PR list read unparseable", opts: { first: { kind: "unparseable" } } },
       { name: "pr-refs predicates unavailable", opts: { prRefs: PR_REFS_UNAVAILABLE } },
       { name: "needs-dev-resume read empty", opts: { resume: EMPTY } },
-      { name: "needs-dev-resume read unparseable", opts: { resume: { kind: "unparseable", error: "Expecting value" } } },
+      { name: "needs-dev-resume read unparseable", opts: { resume: { kind: "unparseable" } } },
       { name: "open-PR page saturated (payload length >= ghListLimit)", opts: { ghListLimit: 1, first: ok([basePrGate({ number: 9001 })]) } },
     ];
     for (const c of cases) {

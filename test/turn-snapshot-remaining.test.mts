@@ -54,6 +54,7 @@ import {
   collectScout,
   HITL_GRILL_INBOX_CAP,
   HITL_GRILL_LABEL,
+  MALFORMED_PAYLOAD,
   scoutSpendUsd,
 } from "../src/autopilot/turn-snapshot/board-saturation.ts";
 import {
@@ -67,7 +68,6 @@ import {
   NEEDS_TICKETS_LABEL,
   WAYFINDER_GRAPHQL_CONCURRENCY,
 } from "../src/autopilot/turn-snapshot/afk-frontier.ts";
-import { jqCompare, jqLength, jqSort, jqText } from "../src/autopilot/turn-snapshot/jq-compat.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot", "remaining");
@@ -833,15 +833,37 @@ describe("Turn Snapshot Redis port — bounded, fail-open, closes", () => {
   });
 });
 
-describe("Turn Snapshot slice 5B — jq / gawk parity leaves", () => {
-  test("jq length, order and text", () => {
-    assert.equal(jqLength(null), 0);
-    assert.equal(jqLength({ a: 1, b: 2 }), 2);
-    assert.equal(jqLength(-3), 3);
-    assert.throws(() => jqLength(true));
-    assert.deepEqual(jqSort([3, "2", null, true, 1, [0], { a: 1 }, false]), [null, false, true, 1, 3, "2", [0], { a: 1 }]);
-    assert.ok(jqCompare("1", 0) > 0, "strings sort after numbers (so a string totalCount counts as > 0)");
-    assert.deepEqual([jqText("x"), jqText(12), jqText(null), jqText([1, "a"])], ["x", "12", "null", '[1,"a"]']);
+describe("Turn Snapshot slice 5B — payload shapes and the gawk line (ported from the jq parity leaf, #5084)", () => {
+  test("a payload's size: null 0, an object's keys, a number's magnitude — a boolean has none and degrades", async () => {
+    const hitl = async (json: unknown) => (await runWorld({ collectors: ["hitl-grill"], gh: { [`issue-list:${HITL_GRILL_LABEL}:number`]: { json } } })).values["hitl-grill"];
+    assert.deepEqual(await hitl(null), { ok: true, value: { open: 0, saturated: false } });
+    assert.deepEqual(await hitl({ a: 1, b: 2 }), { ok: true, value: { open: 2, saturated: false } });
+    assert.deepEqual(await hitl(-3), { ok: true, value: { open: 3, saturated: false } });
+    assert.deepEqual(await hitl(true), { ok: false, reason: MALFORMED_PAYLOAD });
+  });
+
+  test("map numbers walk null < false < true < numbers < strings < lists, stopping at the first non-integer", () => {
+    const maps = (numbers: unknown[]) => foldWayfinderMaps({ kind: "ok", data: numbers.map((number) => ({ number, labels: [{ name: "wayfinder:map" }] })) });
+    assert.deepEqual(maps([3, "2", true, 1, [0], { a: 1 }, false]), { ok: true, value: ["0", "1", "1", "3", "2"] });
+    assert.deepEqual(maps([3, null, 1]), { ok: true, value: [] }, "a null number sorts first and ends the walk");
+    assert.deepEqual(maps(["10", "9", "x"]), { ok: true, value: ["10", "9"] }, "strings walk in code-point order");
+  });
+
+  test("a string assignee count ranks above every number, so it counts as in flight", () => {
+    const node = (totalCount: unknown) => ({ number: 7, state: "OPEN", labels: { nodes: [{ name: "wayfinder:task" }] }, assignees: { totalCount }, blockedBy: { nodes: [] } });
+    const line = (totalCount: unknown) => foldWayfinderMapLine({ kind: "ok", data: { data: { repository: { issue: { subIssues: { nodes: [node(totalCount)] } } } } } });
+    assert.deepEqual(line("1"), { ok: true, value: "1" });
+    assert.deepEqual(line(0), { ok: true, value: "0 7 task" });
+    assert.deepEqual(line(null), { ok: true, value: "0" }, "a null count is neither in flight nor unassigned");
+  });
+
+  test("the pick's number text: a string verbatim, anything else as JSON (only a bare digit string promotes)", async () => {
+    const pick = async (number: unknown) =>
+      (await runWorld({ collectors: ["tickets"], gh: { [`issue-list:${NEEDS_TICKETS_LABEL}:number,assignees`]: { json: [{ number, assignees: [] }] } } })).values.tickets;
+    assert.deepEqual(await pick("12"), { ok: true, value: "12" });
+    assert.deepEqual(await pick(12), { ok: true, value: "12" });
+    assert.deepEqual(await pick(null), { ok: true, value: null });
+    assert.deepEqual(await pick([1, "a"]), { ok: true, value: null });
   });
 
   test("gawk numeric coercion and the scout USD line", () => {
