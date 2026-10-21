@@ -80,16 +80,6 @@
       }
     },
     {
-      "name": "AttentionBucketSummarySchema",
-      "file": "src/schemas/attention.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/attention.ts",
-        "line": 142
-      }
-    },
-    {
       "name": "AttentionFeedItemSchema",
       "file": "src/schemas/attention.ts",
       "importedBy": [],
@@ -687,16 +677,6 @@
       "source": {
         "path": "src/schemas/liveness.ts",
         "line": 96
-      }
-    },
-    {
-      "name": "MachineStoppedSubLineSchema",
-      "file": "src/schemas/attention.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/attention.ts",
-        "line": 81
       }
     },
     {
