@@ -11,25 +11,31 @@
  * gate-approved design-concept artifact for issue-3848:
  *
  *   Surface routing (derived from whether the Orchestrator is provably up in
- *   that signal's failure mode — DEFECTIVE AND FULLY BLOCKING ⇒ out-of-band):
- *     fail-safe, meter-dark → OUT-OF-BAND: direct bash curl POST to the
- *         Telegram Bot API; depends on NO Orchestrator HTTP endpoint.
- *     quota, latency        → IN-BAND: enveloped XADD onto the notifications
- *         stream (the on-wire shape EventBus.publish constructs); surfaces as
- *         a dashboard alert (ALERT_TYPES) PLUS a digest line
- *         (CRITICAL_EVENT_TYPES immediate bypass).
- *     pause                 → IN-BAND, DIGEST LINE ONLY: same XADD, but its
- *         type is NEVER in ALERT_TYPES — a deliberate overnight pause must
- *         not leave a lingering unread dashboard alert.
+ *   that signal's failure mode — DEFECTIVE AND FULLY BLOCKING ⇒ out-of-band).
+ *   Since ADR-0045 Decision 2 (issue #5046) every Telegram message leaves the
+ *   watchdog through the Operator Channel CLI (`scripts/operator-notify.ts`),
+ *   never a bash curl:
+ *     fail-safe, meter-dark → OUT-OF-BAND: one CLI `page` call (kinds
+ *         launch:fail_safe / launch:meter_dark on the closed page list);
+ *         depends on NO Orchestrator HTTP endpoint and never XADDs.
+ *     quota, latency, glm-sterile → IN-BAND: the enveloped XADD onto the
+ *         notifications stream is KEPT byte-for-byte (the dashboard-alert
+ *         path) AND one CLI `page` call is made with dedupKey == kind, so the
+ *         in-process consumer's page for the same event is suppressed by the
+ *         shared Redis dedup state rather than delivered twice.
+ *     pause                 → IN-BAND, DIGEST LINE ONLY: same XADD (type never
+ *         in ALERT_TYPES) plus the CLI page call.
  *
  *   Delivery fires at the EXACT fired absent→present transition inside
  *   track_signal — reusing the #3847 fired/since keys as the sole dedup state
- *   (zero new Redis keys). Un-suppression is recurrence-after-recovery, never
- *   acknowledgement.
+ *   (zero new Redis keys). At the fired→absent recovery edge (only when the
+ *   fired key existed before the DEL) the block calls CLI `resolve` once, so
+ *   the "recovered" message is one edge, not one per healthy tick.
  *
- *   An absent TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID logs a distinguishable
- *   WARN naming the missing var and never fails the run. No delivery path can
- *   throw out of the block or change its exit code.
+ *   Telegram credentials are the CLI's concern: the block never gates on
+ *   TELEGRAM_* and invokes the CLI regardless. A failing CLI call logs a
+ *   distinguishable WARN and never fails the run. No delivery path can throw
+ *   out of the block or change its exit code.
  *
  * Behavioural cases are gated on the docker `hydra-redis-1` container (the
  * same contract as test/watchdog-launch-flow.test.mts). Two isolation
@@ -41,8 +47,8 @@
  *     own HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM hook, so a behavioural case can
  *     NEVER write a real event onto the PRODUCTION hydra:notifications stream
  *     (the live consumer would push a real dashboard alert + Telegram line).
- * The Telegram curl is intercepted with a PATH-shim `curl` stub that records
- * its arguments — no network, no token.
+ * The CLI is intercepted through the block's HYDRA_WATCHDOG_OPERATOR_NOTIFY
+ * hook with an argv-recording stub — no network, no Redis, no token.
  */
 
 import test, { describe, before, beforeEach, after } from "node:test";
@@ -271,41 +277,48 @@ after(() => {
 });
 
 // ---------------------------------------------------------------------------
-// curl PATH-shim — records its argv, never touches the network.
+// operator-notify PATH-shim — the Operator Channel CLI stand-in (ADR-0045 D2,
+// issue #5046). Records its argv, never touches the network, Redis or the real
+// CLI. The block resolves the binary through HYDRA_WATCHDOG_OPERATOR_NOTIFY.
 // ---------------------------------------------------------------------------
 
-const SHIM_DIR = join(tmpdir(), `hydra-launch-flow-curl-shim-${process.pid}`);
-const CURL_LOG = join(SHIM_DIR, "curl-calls.log");
-const CURL_SHIM = join(SHIM_DIR, "curl");
+const SHIM_DIR = join(tmpdir(), `hydra-launch-flow-notify-shim-${process.pid}`);
+const NOTIFY_LOG = join(SHIM_DIR, "operator-notify-calls.log");
+const NOTIFY_SHIM = join(SHIM_DIR, "operator-notify-stub");
 
-function writeCurlShim(exitCode: number): void {
+function writeNotifyShim(exitCode: number): void {
   mkdirSync(SHIM_DIR, { recursive: true });
-  // One invocation = one log line: the watchdog's --data-urlencode text= value
-  // is a MULTI-LINE message, so a naive `printf '%s\n' "$*"` would write ~5
-  // lines per single curl call and every call-count assertion would overcount.
-  writeFileSync(CURL_SHIM, [
+  // One invocation = one log line (a --title / --fact value may carry spaces;
+  // any newline is folded so call-count assertions never overcount).
+  writeFileSync(NOTIFY_SHIM, [
     "#!/usr/bin/env bash",
-    `printf '%s' "$*" | tr '\\n' '~' >> '${CURL_LOG}'`,
-    `printf '\\n' >> '${CURL_LOG}'`,
+    `printf '%s' "$*" | tr '\\n' '~' >> '${NOTIFY_LOG}'`,
+    `printf '\\n' >> '${NOTIFY_LOG}'`,
+    `echo '{"stub":true}'`,
     `exit ${exitCode}`,
     "",
   ].join("\n"));
-  spawnSync("chmod", ["+x", CURL_SHIM]);
+  spawnSync("chmod", ["+x", NOTIFY_SHIM]);
 }
 
-function curlCalls(): string[] {
+function notifyCalls(): string[] {
   try {
-    return readFileSync(CURL_LOG, "utf-8").split("\n").filter((l) => l !== "");
+    return readFileSync(NOTIFY_LOG, "utf-8").split("\n").filter((l) => l !== "");
   } catch {
     return [];
   }
 }
 
+/** The recorded CLI calls whose first argv word is `subcommand`. */
+function notifyCallsOf(subcommand: "page" | "resolve"): string[] {
+  return notifyCalls().filter((c) => c.startsWith(`${subcommand} `));
+}
+
 /** Source run_launch_flow under prod flags and call it once.
  *
  * NB: unlike test/watchdog-launch-flow.test.mts, PATH is NOT force-restored
- * after the env spread — every caller's env must be able to prepend the curl
- * shim dir to PATH (the out-of-band interception depends on it).
+ * after the env spread — every caller's env must be able to prepend the gh
+ * shim dir to PATH (the glm-sterile interception depends on it).
  */
 function runBlock(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
   const r = spawnSync("bash", ["-c", `set -euo pipefail; source '${BLOCK}'; run_launch_flow`], {
@@ -467,19 +480,22 @@ describe("scripts/hydra-watchdog.sh — delivery structure (issue #3848)", () =>
     assert.ok(!inBand.includes("fail-safe"), "out-of-band signals must NOT take the in-band path");
   });
 
-  test("out-of-band path is a direct Telegram curl and never XADDs", () => {
+  test("out-of-band path is a CLI page call (ADR-0045 D2) and never XADDs, curls or names the Bot API", () => {
     const block = blockSource();
     const oob = codeOnly(block.slice(
       block.indexOf("deliver_out_of_band() {"),
       block.indexOf("deliver_in_band() {"),
     ));
-    assert.match(oob, /api\.telegram\.org\/bot\$\{TELEGRAM_BOT_TOKEN\}\/sendMessage/, "direct Bot API POST");
-    assert.match(oob, /--data-urlencode "chat_id=\$\{TELEGRAM_CHAT_ID\}"/, "chat_id from TELEGRAM_CHAT_ID");
+    assert.match(oob, /deliver_page page --kind "\$etype" --dedup-key "\$etype"/, "one CLI page call, dedupKey == kind");
+    assert.ok(oob.includes("launch:fail_safe"), "fail-safe must page as launch:fail_safe");
+    assert.ok(oob.includes("launch:meter_dark"), "meter-dark must page as launch:meter_dark");
     assert.equal((oob.match(/XADD/g) ?? []).length, 0, "out-of-band must not write the notifications stream");
+    assert.equal((oob.match(/curl\s/g) ?? []).length, 0, "out-of-band must not curl");
+    assert.ok(!oob.includes("api.telegram.org"), "only the Operator Channel may name the Bot API host");
     assert.ok(!oob.includes("localhost"), "out-of-band must not depend on any Orchestrator HTTP endpoint");
   });
 
-  test("in-band path is an enveloped XADD and never curls", () => {
+  test("in-band path is an enveloped XADD (unchanged) PLUS one CLI page call, and never curls", () => {
     const block = blockSource();
     const inb = codeOnly(block.slice(
       block.indexOf("deliver_in_band() {"),
@@ -490,18 +506,43 @@ describe("scripts/hydra-watchdog.sh — delivery structure (issue #3848)", () =>
       assert.ok(new RegExp(`\\b${field}\\b `).test(inb), `envelope must carry the '${field}' field`);
     }
     assert.equal((inb.match(/curl\s/g) ?? []).length, 0, "in-band must not curl");
+    assert.equal(
+      (inb.match(/deliver_page page --kind "\$etype" --dedup-key "\$etype"/g) ?? []).length,
+      1,
+      "exactly one CLI page call after the XADD, dedupKey == kind (so the consumer's own page dedups against it)",
+    );
+    assert.ok(inb.indexOf("rc_write XADD") < inb.indexOf("deliver_page page"), "the XADD stays first; the page call follows");
   });
 
-  test("missing-credential handling names both env vars distinguishably", () => {
-    const block = blockSource();
-    const oob = block.slice(
-      block.indexOf("deliver_out_of_band()"),
-      block.indexOf("deliver_in_band()"),
-    );
-    for (const varName of ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]) {
-      assert.ok(oob.includes(varName), `the absent-credential WARN must name ${varName}`);
+  test("the block never gates on Telegram credentials and never names the Bot API (credentials are the CLI's concern)", () => {
+    const code = codeOnly(blockSource());
+    for (const forbidden of ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "api.telegram.org", "curl "]) {
+      assert.ok(!code.includes(forbidden), `run_launch_flow code must not contain '${forbidden}' (ADR-0045 D2: one Telegram sender)`);
     }
-    assert.match(oob, /WARN launch-flow out-of-band delivery for '\$sig' SKIPPED/, "distinguishable WARN prefix");
+    const helper = code.slice(code.indexOf("deliver_page() {"), code.indexOf("deliver_out_of_band() {"));
+    assert.ok(helper.includes("HYDRA_WATCHDOG_OPERATOR_NOTIFY"), "the CLI binary resolves through HYDRA_WATCHDOG_OPERATOR_NOTIFY");
+    assert.ok(helper.includes("scripts/operator-notify.ts"), "default binary is the repo CLI");
+    assert.ok(helper.includes("--experimental-strip-types"), "default runtime is node --experimental-strip-types (never npx tsx)");
+    assert.ok(!helper.includes("npx"), "a systemd unit's PATH cannot see the global tsx; npx would try the network");
+    assert.match(helper, /timeout 25/, "wrapped in timeout 25");
+    assert.match(helper, /\|\| log "WARN/, "a failed CLI call degrades to a logged WARN");
+  });
+
+  test("recovery edge: resolve is called only when the fired key existed before the DEL", () => {
+    // run_launch_flow only (blockSource() runs to the entry point, past the
+    // node-modules / origin-identity blocks, which own their own resolve).
+    const whole = codeOnly(blockSource());
+    const code = whole.slice(0, whole.search(/^}/m) + 1);
+    const ts = code.slice(code.indexOf("track_signal() {"));
+    const fireIdx = ts.indexOf('deliver_signal "$sig"');
+    const resolveIdx = ts.indexOf("deliver_page resolve --dedup-key");
+    const delIdx = ts.indexOf('rc_write DEL "$since_key" "$fired_key"');
+    assert.ok(fireIdx >= 0 && delIdx > fireIdx, "track_signal must keep its fire branch before its clear branch");
+    assert.ok(resolveIdx > fireIdx, "the membership-false branch must call CLI resolve");
+    assert.ok(resolveIdx < delIdx, "resolve must be decided BEFORE the DEL (the fired key is the edge detector)");
+    const clearBranch = ts.slice(fireIdx, delIdx);
+    assert.match(clearBranch, /if \[\[ "\$\(rc_read EXISTS "\$fired_key" \| tr -dc '0-9'\)" == "1" \]\]/, "resolve is gated on the fired key existing (one edge, not one per healthy tick)");
+    assert.equal((code.match(/deliver_page resolve --dedup-key/g) ?? []).length, 1, "exactly one resolve call site");
   });
 });
 
@@ -509,15 +550,15 @@ describe("scripts/hydra-watchdog.sh — delivery structure (issue #3848)", () =>
 // Behavioural cases — gated on the docker redis container (CI runners + dev).
 // =============================================================================
 
-describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { skip: !DOCKER }, () => {
+describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848; CLI delivery per #5046)", { skip: !DOCKER }, () => {
   beforeEach(() => {
     cleanState();
     try {
-      unlinkSync(CURL_LOG);
+      unlinkSync(NOTIFY_LOG);
     } catch {
       /* absent log is fine */
     }
-    writeCurlShim(0);
+    writeNotifyShim(0);
   });
 
   after(() => {
@@ -528,7 +569,8 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
     }
   });
 
-  /** Standard env: creds present, PATH-shimmed curl, namespaced notify stream. */
+  /** Standard env: creds present (the block ignores them — they are the
+   * CLI's concern), argv-recording operator-notify stub, namespaced stream. */
   const CREDS = {
     TELEGRAM_BOT_TOKEN: "test-token",
     TELEGRAM_CHAT_ID: "test-chat",
@@ -538,12 +580,13 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
     return {
       ...CREDS,
       HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM: TEST_NOTIFY_STREAM,
+      HYDRA_WATCHDOG_OPERATOR_NOTIFY: NOTIFY_SHIM,
       PATH: `${SHIM_DIR}:${process.env.PATH ?? ""}`,
       ...over,
     };
   }
 
-  test("fail-safe delivers out-of-band via a direct Telegram curl at the fire tick", () => {
+  test("fail-safe delivers out-of-band via one CLI page call at the fire tick (no XADD)", () => {
     hsetLastTick({ reason: "eligibility-unreachable", class: "fail-safe", at: String(T0), latency_ms: "" });
     seedSince("fail-safe", T0);
     const r = runBlock(envWith({
@@ -551,12 +594,14 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
     }));
     assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-    const calls = curlCalls();
-    assert.equal(calls.length, 1, `exactly one curl invocation, got ${calls.length}`);
-    assert.match(calls[0], /api\.telegram\.org\/bottest-token\/sendMessage/, "direct Bot API endpoint with the token");
-    assert.match(calls[0], /chat_id=test-chat/, "chat_id from TELEGRAM_CHAT_ID");
-    assert.match(calls[0], /signal: fail-safe/, "message names the signal");
-    assert.match(calls[0], /sustained: 5000ms >= 2000ms/, "message carries the streak maths");
+    const calls = notifyCalls();
+    assert.equal(calls.length, 1, `exactly one CLI invocation, got ${calls.length}: ${JSON.stringify(calls)}`);
+    assert.match(calls[0], /^page --kind launch:fail_safe --dedup-key launch:fail_safe /, "page subcommand, kind on the closed list, dedupKey == kind");
+    assert.match(calls[0], /--fact signal=fail-safe/, "facts name the signal");
+    assert.match(calls[0], /--fact sustained_ms=5000/, "facts carry the streak maths");
+    assert.match(calls[0], /--fact threshold_ms=2000/);
+    assert.match(calls[0], /--fact reason=eligibility-unreachable/, "facts carry the pace-gate reason");
+    assert.ok(!calls[0].includes("test-token"), "the block never passes credentials to the CLI (env-only, one loader)");
     // Out-of-band signals must NOT appear on the notify stream.
     assert.equal(notifyEntriesSimple().length, 0, "fail-safe must not write the notifications stream");
     // Second tick: no re-delivery within the same streak.
@@ -565,10 +610,10 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 6_000),
     }));
     assert.equal(r2.status, 0);
-    assert.equal(curlCalls().length, 1, "fired marker suppresses re-alarm for the streak's duration");
+    assert.equal(notifyCalls().length, 1, "fired marker suppresses re-alarm for the streak's duration");
   });
 
-  test("meter-dark also delivers out-of-band (infrastructure-is-broken character)", () => {
+  test("meter-dark also delivers out-of-band as launch:meter_dark (infrastructure-is-broken character)", () => {
     hsetLastTick({ reason: "meter-unavailable", class: "fail-safe", at: String(T0), latency_ms: "90" });
     seedSince("meter-dark", T0);
     const r = runBlock(envWith({
@@ -576,13 +621,14 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
     }));
     assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    const calls = curlCalls();
+    const calls = notifyCalls();
     assert.equal(calls.length, 1);
-    assert.match(calls[0], /signal: meter-dark/);
+    assert.match(calls[0], /^page --kind launch:meter_dark --dedup-key launch:meter_dark /);
+    assert.match(calls[0], /--fact signal=meter-dark/);
     assert.equal(notifyEntriesSimple().length, 0);
   });
 
-  test("missing TELEGRAM_BOT_TOKEN: distinguishable WARN naming it, run still succeeds", () => {
+  test("missing TELEGRAM_BOT_TOKEN: the CLI is still invoked (credentials are the CLI's concern), run still succeeds", () => {
     hsetLastTick({ reason: "curl-missing", class: "fail-safe", at: String(T0), latency_ms: "" });
     seedSince("fail-safe", T0);
     const r = runBlock(envWith({
@@ -591,31 +637,12 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
     }));
     assert.equal(r.status, 0, `the run must not fail on an unconfigured credential; stderr=${r.stderr}`);
-    assert.match(
-      lfLines(r.stdout),
-      /WARN launch-flow out-of-band delivery for 'fail-safe' SKIPPED — missing Telegram config: TELEGRAM_BOT_TOKEN/,
-      "the WARN must name the missing var",
-    );
-    assert.equal(curlCalls().length, 0, "no curl attempted without the token");
+    assert.equal(notifyCallsOf("page").length, 1, "the block does not gate on credentials — the CLI's single loader decides and logs skipped-no-credentials");
+    assert.doesNotMatch(lfLines(r.stdout), /SKIPPED — missing Telegram config/, "the old bash credential gate is gone");
     assert.equal(getFired("fail-safe"), true, "detection still fires — unconfigured ≠ undetected");
   });
 
-  test("missing TELEGRAM_CHAT_ID only: WARN names exactly TELEGRAM_CHAT_ID", () => {
-    hsetLastTick({ reason: "eligibility-unreachable", class: "fail-safe", at: String(T0), latency_ms: "" });
-    seedSince("fail-safe", T0);
-    const r = runBlock(envWith({
-      TELEGRAM_CHAT_ID: "",
-      HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2",
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
-    }));
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    const warn = lfLines(r.stdout);
-    assert.match(warn, /missing Telegram config: TELEGRAM_CHAT_ID/);
-    assert.doesNotMatch(warn, /TELEGRAM_BOT_TOKEN/, "a present credential must not be named as missing");
-    assert.equal(curlCalls().length, 0);
-  });
-
-  test("both credentials missing: WARN names both", () => {
+  test("both credentials missing: the CLI is still invoked exactly once", () => {
     hsetLastTick({ reason: "eligibility-unreachable", class: "fail-safe", at: String(T0), latency_ms: "" });
     seedSince("fail-safe", T0);
     const r = runBlock(envWith({
@@ -625,24 +652,24 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
     }));
     assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    assert.match(lfLines(r.stdout), /missing Telegram config: TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID/);
+    assert.equal(notifyCallsOf("page").length, 1);
   });
 
-  test("a failing Telegram send never fails the block; the fired marker still holds", () => {
-    writeCurlShim(1);
+  test("a failing CLI call never fails the block; the fired marker still holds; the WARN is distinguishable", () => {
+    writeNotifyShim(1);
     hsetLastTick({ reason: "eligibility-unreachable", class: "fail-safe", at: String(T0), latency_ms: "" });
     seedSince("fail-safe", T0);
     const r = runBlock(envWith({
       HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2",
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
     }));
-    assert.equal(r.status, 0, `a curl non-zero must not change the block's exit code; stderr=${r.stderr}`);
-    assert.match(lfLines(r.stdout), /WARN launch-flow out-of-band Telegram send FAILED for 'fail-safe'/,
-      "a failed send is distinguishable from a skipped one");
+    assert.equal(r.status, 0, `a CLI non-zero must not change the block's exit code; stderr=${r.stderr}`);
+    assert.match(lfLines(r.stdout), /WARN operator-notify page FAILED \(rc=1\) for 'launch:fail_safe'/,
+      "a failed CLI call is distinguishable in the journal");
     assert.equal(getFired("fail-safe"), true, "dedup state survives a failed delivery");
   });
 
-  test("quota delivers in-band: one enveloped entry with the TS-owned type", () => {
+  test("quota delivers in-band: one enveloped entry with the TS-owned type AND one CLI page call", () => {
     hsetLastTick({ reason: "session-blocked", class: "deliberate-skip", at: String(T0), latency_ms: "100" });
     seedSince("quota", T0);
     const r = runBlock(envWith({
@@ -650,9 +677,8 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
     }));
     assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    assert.equal(curlCalls().length, 0, "in-band signals must not take the Telegram curl path");
     const entries = notifyEntriesSimple();
-    assert.equal(entries.length, 1, "exactly one XADD per streak");
+    assert.equal(entries.length, 1, "exactly one XADD per streak (unchanged)");
     const f = entries[0].fields;
     assert.equal(f.type, E.LAUNCH_QUOTA_STRETCH);
     assert.equal(f.source, "watchdog-launch-flow");
@@ -664,9 +690,12 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
     assert.equal(payload.reason, "session-blocked");
     assert.equal(payload.durationMs, 5000);
     assert.equal(payload.thresholdMs, 2000);
+    const calls = notifyCalls();
+    assert.equal(calls.length, 1, "exactly one CLI page call alongside the XADD");
+    assert.match(calls[0], /^page --kind launch:quota_stretch --dedup-key launch:quota_stretch /, "dedupKey == kind: the consumer's own page for this XADD dedups against it");
   });
 
-  test("latency delivers in-band with launch:latency_breach", () => {
+  test("latency delivers in-band with launch:latency_breach plus one CLI page call", () => {
     hsetLastTick({ reason: "allow-false", class: "deliberate-skip", at: String(T0), latency_ms: "2500" });
     seedSince("latency", T0);
     const r = runBlock(envWith({
@@ -678,11 +707,12 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
     const entries = notifyEntriesSimple();
     assert.equal(entries.length, 1);
     assert.equal(entries[0].fields.type, E.LAUNCH_LATENCY_BREACH);
-    // In-band needs no Telegram credential: this run still had CREDS set, so
-    // the meaningful no-credential case is asserted for pause below.
+    const calls = notifyCalls();
+    assert.equal(calls.length, 1);
+    assert.match(calls[0], /^page --kind launch:latency_breach --dedup-key launch:latency_breach /);
   });
 
-  test("pause delivers in-band with launch:pause_forgotten and needs NO Telegram credential", () => {
+  test("pause delivers in-band with launch:pause_forgotten plus one CLI page call, with no credentials in the env", () => {
     hsetLastTick({ reason: "paused", class: "deliberate-skip", at: String(T0), latency_ms: "100" });
     seedSince("pause", T0);
     const r = runBlock(envWith({
@@ -695,10 +725,12 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
     const entries = notifyEntriesSimple();
     assert.equal(entries.length, 1);
     assert.equal(entries[0].fields.type, E.LAUNCH_PAUSE_FORGOTTEN);
-    assert.equal(curlCalls().length, 0, "pause never pushes (digest line only)");
+    const calls = notifyCalls();
+    assert.equal(calls.length, 1, "the CLI is invoked regardless of credentials (its loader decides)");
+    assert.match(calls[0], /^page --kind launch:pause_forgotten --dedup-key launch:pause_forgotten /);
   });
 
-  test("un-suppression is recurrence: recovery clears fired, a fresh streak re-delivers", () => {
+  test("un-suppression is recurrence: recovery clears fired and calls CLI resolve once; a fresh streak re-delivers", () => {
     // Streak 1: fire + deliver.
     hsetLastTick({ reason: "paused", class: "deliberate-skip", at: String(T0), latency_ms: "100" });
     seedSince("pause", T0);
@@ -708,13 +740,26 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
     }));
     assert.equal(getFired("pause"), true, "precondition: first streak fired");
     assert.equal(notifyEntriesSimple().length, 1);
+    assert.equal(notifyCallsOf("page").length, 1);
+    assert.equal(notifyCallsOf("resolve").length, 0, "no resolve while still bad");
 
-    // Recovery: a healthy tick DELs since+fired (stateless, never ack-gated).
+    // Recovery: a healthy tick DELs since+fired (stateless, never ack-gated)
+    // and calls CLI resolve exactly once — only for the signal that was fired.
     hsetLastTick({ reason: "eligible-launch", class: "launch", at: String(T0 + 6_000), latency_ms: "120" });
     runBlock(envWith({
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 6_000),
     }));
     assert.equal(getFired("pause"), false, "recovery clears the fired marker");
+    const resolves = notifyCallsOf("resolve");
+    assert.equal(resolves.length, 1, `exactly one resolve at the fired→absent edge, got ${JSON.stringify(resolves)}`);
+    assert.match(resolves[0], /^resolve --dedup-key launch:pause_forgotten /, "resolve carries the same dedupKey the page used");
+
+    // A second healthy tick: nothing was fired any more → no resolve (one edge, not one per healthy tick).
+    hsetLastTick({ reason: "eligible-launch", class: "launch", at: String(T0 + 6_500), latency_ms: "120" });
+    runBlock(envWith({
+      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 6_500),
+    }));
+    assert.equal(notifyCallsOf("resolve").length, 1, "a healthy tick with no fired key must not resolve again");
 
     // Streak 2: re-cross the threshold → delivers AGAIN.
     hsetLastTick({ reason: "paused", class: "deliberate-skip", at: String(T0 + 7_000), latency_ms: "100" });
@@ -728,6 +773,7 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
     const entries = notifyEntriesSimple();
     assert.equal(entries.length, 2, "recurrence after recovery delivers again");
     assert.equal(entries[1].fields.type, E.LAUNCH_PAUSE_FORGOTTEN);
+    assert.equal(notifyCallsOf("page").length, 2, "the CLI is paged again on the fresh streak");
   });
 
   test("no delivery before threshold or after a read failure", () => {
@@ -739,7 +785,7 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
     }));
     assert.equal(notifyEntriesSimple().length, 0, "under threshold → no delivery");
-    assert.equal(curlCalls().length, 0);
+    assert.equal(notifyCalls().length, 0);
 
     // Read failure (unreachable redis): no mutation, no delivery, exit 0.
     const r = spawnSync(
@@ -756,6 +802,7 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
           // trap the moment this case ever points at a live Redis.
           HYDRA_REDIS_DB: "0",
           HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
+          HYDRA_WATCHDOG_OPERATOR_NOTIFY: NOTIFY_SHIM,
           PATH: `${SHIM_DIR}:${process.env.PATH ?? ""}`,
           ...CREDS,
         },
@@ -765,7 +812,7 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
     );
     throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_launch_flow delivery block (unreachable-redis case)");
     assert.equal(r.status ?? -1, 0, `read failure must not abort (set -e); stderr=${r.stderr}`);
-    assert.equal(curlCalls().length, 0, "no out-of-band delivery on a read failure");
+    assert.equal(notifyCalls().length, 0, "no CLI call on a read failure");
   });
 });
 
@@ -1015,13 +1062,15 @@ describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }
     drc(["SET", TEST_GLM_LAST_PICK_KEY, JSON.stringify(v)]);
   }
 
-  /** Env: creds present, curl+gh PATH shims, namespaced stream, fresh-fire
-   * defaults (2s sustain threshold, now = T0+5s, healthy pace-gate tick). */
+  /** Env: creds present (ignored by the block), operator-notify + gh shims,
+   * namespaced stream, fresh-fire defaults (2s sustain threshold, now = T0+5s,
+   * healthy pace-gate tick). */
   function glmEnv(over: Record<string, string> = {}): Record<string, string> {
     return {
       TELEGRAM_BOT_TOKEN: "test-token",
       TELEGRAM_CHAT_ID: "test-chat",
       HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM: TEST_NOTIFY_STREAM,
+      HYDRA_WATCHDOG_OPERATOR_NOTIFY: NOTIFY_SHIM,
       PATH: `${SHIM_DIR}:${process.env.PATH ?? ""}`,
       HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_SECONDS: "2",
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
@@ -1031,14 +1080,14 @@ describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }
 
   beforeEach(() => {
     cleanState();
-    for (const f of [CURL_LOG, GH_LOG]) {
+    for (const f of [NOTIFY_LOG, GH_LOG]) {
       try {
         unlinkSync(f);
       } catch {
         /* absent log is fine */
       }
     }
-    writeCurlShim(0);
+    writeNotifyShim(0);
     writeGhShim();
     writeFileSync(PULLS_FIXTURE, PULLS_NONE_RECENT);
     // Healthy pace-gate tick so none of the five reason-derived signals fire —
@@ -1070,7 +1119,9 @@ describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }
     assert.equal(calls.length, 1, "exactly ONE gh call per tick — the pulls PR-window query; #4691 deleted the queue query");
     assert.match(calls[0]!, /\/pulls/, "the one gh call must be the PR-window pulls query");
     assert.ok(!calls[0]!.includes("/issues"), "no issue-queue gh call may run anymore (#4691)");
-    assert.equal(curlCalls().length, 0, "glm-sterile is in-band only — never the Telegram curl path");
+    const pages = notifyCallsOf("page");
+    assert.equal(pages.length, 1, "glm-sterile is in-band (XADD) AND one CLI page call");
+    assert.match(pages[0], /^page --kind glm:drainer_sterile --dedup-key glm:drainer_sterile /, "dedupKey == kind");
     const entries = notifyEntriesSimple();
     assert.equal(entries.length, 1, "exactly one XADD per streak");
     const f = entries[0].fields;
@@ -1085,6 +1136,7 @@ describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }
     const r2 = runBlock(glmEnv({ HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 6_000) }));
     assert.equal(r2.status, 0);
     assert.equal(notifyEntriesSimple().length, 1, "no re-delivery within the same streak");
+    assert.equal(notifyCallsOf("page").length, 1, "no second CLI page within the same streak");
   });
 
   test("quiet: a recent drainer PR by LABEL clears membership and the streak", () => {

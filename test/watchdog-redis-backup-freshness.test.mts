@@ -244,8 +244,8 @@ describe("scripts/deploy.sh + units — Redis backup install (issue #4604)", () 
     assert.match(svc, /^Type=oneshot$/m, "service must be Type=oneshot");
     assert.match(svc, /^ExecStart=%h\/\.local\/bin\/hydra-redis-backup\.sh$/m, "ExecStart must be the %h script copy");
     assert.match(
-      svc, /^OnFailure=hydra-notify-failure@hydra-redis-backup\.service$/m,
-      "a failed backup must page via the tracked Telegram template (#4284)",
+      svc, /^OnFailure=hydra-notify-failure@%n$/m,
+      "a failed backup must page via the tracked Operator Channel template, normalised to @%n (#4284, #5046)",
     );
     const timer = readFileSync(BACKUP_TIMER, "utf-8");
     assert.match(timer, /^OnCalendar=\*-\*-\* 03:15:00$/m, "daily 03:15 schedule (docs/reference.md)");

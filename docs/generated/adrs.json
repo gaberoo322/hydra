@@ -1274,7 +1274,8 @@
       "readWhen": "Touching any Hydra→operator notification, the digest/heartbeat/weekly chores, watchdog or systemd OnFailure alerts, or the Telegram seam check.",
       "citedBy": [
         "CONTEXT-MAP.md",
-        "CONTEXT.md"
+        "CONTEXT.md",
+        "docs/reference.md"
       ],
       "source": {
         "path": "docs/adr/0045-operator-channel.md",

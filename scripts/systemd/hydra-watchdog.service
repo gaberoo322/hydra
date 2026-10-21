@@ -5,6 +5,15 @@ After=hydra-orchestrator.service hydra-autopilot.service
 
 [Service]
 Type=oneshot
+# Operator Channel credentials for the page-list alarms (ADR-0045 D2, issue
+# #5046): the watchdog's deliver_page helpers call scripts/operator-notify.ts,
+# whose single loader reads TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID (and
+# REDIS_URL for the dedup state) from the process env. Dash-prefixed on
+# purpose: every other block must keep running without .env, so a missing
+# file never silences liveness / wedge / drift detection. .env carries no
+# HYDRA_WATCHDOG_* / HYDRA_REDIS_* keys, so loading it changes no block's
+# behaviour.
+EnvironmentFile=-%h/hydra/.env
 ExecStart=%h/.local/bin/hydra-watchdog.sh
 Environment=HOME=%h
 StandardOutput=journal

@@ -34,56 +34,75 @@
  * `ci.yml`: `ci.yml` is exact-match Verifier Core (Tier-4); a sibling step keeps
  * this PR Tier-3 and auto-mergeable, mirroring the anthropic-seam precedent.
  *
- * It deliberately scans `src/**\/*.ts` only — matching the
- * anthropic/openviking/host-probe precedent's `src/**\/*.ts`-only scan.
+ * ADR-0045 Decision 2 (issue #5046) widened the scan from `src/**\/*.ts` to
+ * `src/`, `scripts/` (TypeScript AND shell) and the tracked systemd units,
+ * and the predicate from "a `fetch(` naming the host" to "the host on any
+ * NON-COMMENT line": bash and systemd callers must go through the Operator
+ * Channel CLI (`scripts/operator-notify.ts`), so a `curl` to the Bot API is
+ * exactly as much a violation as a `fetch`. Comments never count (TypeScript
+ * is comment-stripped first; a `.sh` / `.service` / `.timer` line whose first
+ * non-blank character is `#` is ignored). Two carve-outs only: the transport
+ * (`src/notify.ts`) and this file (it carries the literal as its own signal).
  *
  * Usage:
  *   npx tsx scripts/ci/telegram-seam-check.ts
  *   npm run telegram-seam-check
  *
  * Update flow when intentionally migrating a caller behind the adapter:
- *   1. Remove the raw Telegram `fetch(...)`; route it through src/notify.ts
- *      (sendToTelegram / sendNotification), injecting the sender as a dep where
- *      the caller already takes one (e.g. DigestAccumulatorDeps.send).
+ *   1. Remove the raw Telegram call; TypeScript routes through the Operator
+ *      Channel (src/operator-channel/), bash and systemd through
+ *      scripts/operator-notify.ts.
  *   2. Run with `--write-baseline` to regenerate the baseline file.
  *   3. Commit the smaller baseline alongside the migration.
  */
 
 import { join } from "node:path";
-import { REPO_ROOT, isCliEntrypoint, runAsCli } from "./seam-check-lib.ts";
+import { REPO_ROOT, isCliEntrypoint, runAsCli, stripComments } from "./seam-check-lib.ts";
 
 const BASELINE_PATH = join(REPO_ROOT, "scripts/ci/telegram-seam-baseline.json");
 
 /** The Telegram Notification Adapter Module itself — IS the seam (exempt). */
 const TELEGRAM_NOTIFY_MODULE = "src/notify.ts";
 
+/** This check — carries the host literal as its own detection signal (exempt). */
+const TELEGRAM_SEAM_CHECK_SELF = "scripts/ci/telegram-seam-check.ts";
+
 /**
- * Unambiguous "this fetch targets the Telegram Bot API" signals. A `fetch(` whose
- * line contains any of these is a Telegram request. Kept narrow on purpose so
- * unrelated `fetch` calls (Anthropic, OpenViking, OAuth-usage, health probes) do
- * NOT trip the ratchet — they are not the Telegram Bot API boundary.
+ * Unambiguous "this targets the Telegram Bot API" signals. Kept narrow on
+ * purpose so unrelated calls (Anthropic, OpenViking, OAuth-usage, health
+ * probes) do NOT trip the ratchet — they are not the Telegram Bot API boundary.
  */
 const TELEGRAM_TARGET_SIGNALS = [
   "api.telegram.org", // the Telegram Bot API host
 ];
 
-/** Matches a `fetch(` call (whitespace-tolerant). */
-const FETCH_CALL = /\bfetch\s*\(/;
+/** The scanned surface: src/, scripts/ (ts + sh) and the tracked systemd units. */
+export const TELEGRAM_SEAM_GLOBS: readonly string[] = [
+  "src/*.ts",
+  "src/**/*.ts",
+  "scripts/*.ts",
+  "scripts/**/*.ts",
+  "scripts/*.sh",
+  "scripts/**/*.sh",
+  "scripts/systemd/*",
+];
+
+/** Non-comment lines of a shell script or systemd unit (leading-`#` lines dropped). */
+function shellCodeLines(body: string): string[] {
+  return body.split("\n").filter((line) => !/^\s*#/.test(line));
+}
 
 /**
  * Pure predicate: does `body` (the file contents at repo-relative `relPath`)
- * contain a raw Telegram `fetch(...)` in violation of the Telegram Notification
- * Adapter Seam? Exported so the regression test can pin the grammar without
- * shelling out to git. `relPath` decides the carve-out; pass a `src/...` path.
- *
- * The adapter Module itself (`src/notify.ts`) is the Seam (exempt — its `fetch`
- * IS the one owned call). A file violates when it both calls `fetch(` AND carries
- * a Telegram target signal on the same line.
+ * name the Telegram Bot API host on a non-comment line, in violation of the
+ * Telegram Notification Adapter Seam? Exported so the regression test can pin
+ * the grammar without shelling out to git. `relPath` decides the carve-out and
+ * the comment grammar (`.ts` → stripComments; anything else → leading-`#`).
  */
 export function fileViolatesTelegramSeam(relPath: string, body: string): boolean {
-  if (relPath === TELEGRAM_NOTIFY_MODULE) return false;
-  for (const line of body.split("\n")) {
-    if (!FETCH_CALL.test(line)) continue;
+  if (relPath === TELEGRAM_NOTIFY_MODULE || relPath === TELEGRAM_SEAM_CHECK_SELF) return false;
+  const lines = relPath.endsWith(".ts") ? stripComments(body).split("\n") : shellCodeLines(body);
+  for (const line of lines) {
     if (TELEGRAM_TARGET_SIGNALS.some((sig) => line.includes(sig))) return true;
   }
   return false;
@@ -91,18 +110,18 @@ export function fileViolatesTelegramSeam(relPath: string, body: string): boolean
 
 const CONFIG = {
   name: "telegram-seam-check",
-  globs: ["src/*.ts", "src/**/*.ts"],
+  globs: [...TELEGRAM_SEAM_GLOBS],
   predicate: fileViolatesTelegramSeam,
   baselinePath: BASELINE_PATH,
   noteSuffix:
-    "Telegram Notification Adapter closure ratchet (issue #2201): shrink only.",
+    "Telegram Notification Adapter closure ratchet (issue #2201; widened to scripts/ + systemd units by ADR-0045 D2, issue #5046): shrink only.",
   newViolationsHeadline:
-    "NEW telegram-seam violations (Telegram Notification Adapter, issue #2201):",
+    "NEW telegram-seam violations (Telegram Notification Adapter / Operator Channel, ADR-0045 D2):",
   newViolationsHelp: [
-    "These files call fetch() against the Telegram Bot API outside the",
-    "Telegram Notification Adapter. Route the message through the seam:",
-    "sendToTelegram / sendNotification (src/notify.ts), injecting the sender",
-    "as a dep where the caller already takes one (e.g. DigestAccumulatorDeps.send).",
+    "These files name the Telegram Bot API host outside the Operator Channel.",
+    "TypeScript: import src/operator-channel/ (operatorChannel.page / brief) —",
+    "the transport in src/notify.ts owns the one fetch. Bash and systemd units:",
+    "call scripts/operator-notify.ts (page / resolve / brief / service-failed).",
   ],
 };
 
