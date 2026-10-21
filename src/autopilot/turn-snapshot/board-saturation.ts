@@ -37,8 +37,6 @@
 
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
-import { JqError, jqEquals, jqField, jqIter, jqLength, jqText } from "./jq-compat.ts";
-import { pyFormatFixed } from "./py-format.ts";
 import { REDIS_UNREACHABLE, type AnchorQueueName, type TurnSnapshotRedis } from "./redis-port.ts";
 
 export interface BoardSaturationDeps {
@@ -69,22 +67,20 @@ const okv = <T>(value: T): Classified<T> => ({ ok: true, value });
 const marker = (field: string, c: Classified<unknown>): DegradedMarker[] => ("reason" in c ? [{ field, reason: c.reason }] : []);
 const outcome = <T>(collector: string, value: T, degraded: DegradedMarker[]): CollectorOutcome<T> => ({ collector, value, degraded, notes: [] });
 
-/** A gh read the bash's `--jq` would have run over: data, or why the read failed. */
+/** A gh read's data, or why the read failed. */
 function ghData(read: GhJsonRead): Classified<unknown> {
   if (read.kind === "ok") return okv(read.data);
   return fail(read.kind === "empty" ? "gh-read-failed" : "unparseable");
 }
 
-/** Run a jq-shaped fold; a jq runtime error is the bash's failed (empty) read. */
-function jqFold<T>(c: Classified<unknown>, fold: (data: unknown) => T): Classified<T> {
-  if ("reason" in c) return fail(c.reason);
-  try {
-    return okv(fold(c.value));
-  } catch (err) {
-    if (err instanceof JqError) return fail(`jq: ${err.message}`);
-    throw err;
-  }
-}
+/**
+ * The degradation code of a payload the fold cannot read (a non-list board, a
+ * row that is not an object, `labels: null`, …) — the shapes the bash's
+ * `--jq` errored on, so the whole read degrades, never a guessed count (#5084).
+ */
+export const MALFORMED_PAYLOAD = "malformed-payload";
+
+const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
 // ---------------------------------------------------------------------------
 // Redis queues
@@ -131,7 +127,14 @@ export function scoutSpendUsd(tokens: string, rate: string): string {
   const usd = (t / 1_000_000) * r;
   if (Number.isNaN(usd)) return /^\s*-/.test(rate) ? "-nan" : "+nan";
   if (!Number.isFinite(usd)) return "+inf";
-  return pyFormatFixed(usd, 6);
+  // printf's `%.6f`: the double's exact value, an exact tie rounded to EVEN.
+  // `toFixed` rounds a tie up, and a tie is exactly a usd whose usd·2^7 is an
+  // odd integer — then an odd last digit steps down (no borrow). Beyond 1e21
+  // `toFixed` switches to exponent form; the double is an integer there.
+  if (usd >= 1e21) return `${BigInt(usd)}.000000`;
+  const fixed = usd.toFixed(6);
+  const scaled = usd * 2 ** 7;
+  return Number.isInteger(scaled) && scaled % 2 === 1 && /[13579]$/.test(fixed) ? `${fixed.slice(0, -1)}${Number(fixed.slice(-1)) - 1}` : fixed;
 }
 
 /** `redis-cli GET … | tr -d '"'`: the value with every `"` removed (`""` when unset). */
@@ -152,9 +155,19 @@ export interface ScoutValue {
   readonly mirrored: Classified<true>;
 }
 
-/** `gh … --jq length`, as text, or failed. */
+/**
+ * The payload's size as text, or failed: a list's items, an object's keys, a
+ * string's code points, a number's magnitude, `null` as 0; a boolean has none.
+ */
 function foldLength(read: GhJsonRead): Classified<string> {
-  return jqFold(ghData(read), (d) => jqText(jqLength(d)));
+  const c = ghData(read);
+  if ("reason" in c) return fail(c.reason);
+  const d = c.value;
+  if (d === null) return okv("0");
+  if (typeof d === "number") return okv(String(Math.abs(d)));
+  if (typeof d === "string") return okv(String(Array.from(d).length));
+  if (typeof d === "object") return okv(String(Object.keys(d).length));
+  return fail(MALFORMED_PAYLOAD);
 }
 
 /** UTC `date -u +%Y-%m-%d`. */
@@ -204,27 +217,50 @@ interface BoardCounts {
   readonly enhancementSourced: number;
 }
 
-/** `.labels | map(.name)` of one issue. */
-export function labelNames(issue: unknown): unknown[] {
-  return jqIter(jqField(issue, "labels")).map((l) => jqField(l, "name"));
+/**
+ * The string label names of one open-board row, or `null` when the row is
+ * {@link MALFORMED_PAYLOAD}: it must be an object whose `labels` is a list (an
+ * object reads by its values) of label objects or nulls. A missing / `null` /
+ * scalar `labels`, a non-object row or a scalar label is malformed.
+ */
+export function labelNames(issue: unknown): string[] | null {
+  if (!isObj(issue)) return null;
+  const labels = issue.labels;
+  const list = Array.isArray(labels) ? labels : isObj(labels) ? Object.values(labels) : null;
+  if (list === null) return null;
+  const names: string[] = [];
+  for (const l of list) {
+    if (l === null) continue;
+    if (!isObj(l)) return null;
+    if (typeof l.name === "string") names.push(l.name);
+  }
+  return names;
 }
 
-const has = (names: readonly unknown[], label: string) => names.some((n) => jqEquals(n, label));
+const has = (names: readonly string[], label: string) => names.includes(label);
 
-/** The bash's single board `--jq` object, over the raw `number,labels` payload. */
+/** The single open-board count object, over the raw `number,labels` payload. */
 function countOpenBoard(read: GhJsonRead): Classified<BoardCounts> {
-  return jqFold(ghData(read), (data) => {
-    const boards = jqIter(data).map(labelNames);
-    const count = (pred: (n: unknown[]) => boolean) => boards.filter(pred).length;
-    return {
-      readyForAgent: count((n) => has(n, "ready-for-agent") && !has(n, "target-backlog")),
-      needsResearch: count((n) => has(n, "needs-research")),
-      needsTriage: count((n) => has(n, "needs-triage")),
-      archSourced: count((n) => has(n, ARCH_SCAN_LABEL)),
-      cleanupSourced: count((n) => has(n, CLEANUP_SCAN_LABEL)),
-      skillPruneSourced: count((n) => has(n, SKILL_PRUNE_LABEL)),
-      enhancementSourced: count((n) => has(n, "enhancement")),
-    };
+  const c = ghData(read);
+  if ("reason" in c) return fail(c.reason);
+  const data = c.value;
+  const rows = Array.isArray(data) ? data : isObj(data) ? Object.values(data) : null;
+  if (rows === null) return fail(MALFORMED_PAYLOAD);
+  const boards: string[][] = [];
+  for (const row of rows) {
+    const names = labelNames(row);
+    if (names === null) return fail(MALFORMED_PAYLOAD);
+    boards.push(names);
+  }
+  const count = (pred: (n: string[]) => boolean) => boards.filter(pred).length;
+  return okv({
+    readyForAgent: count((n) => has(n, "ready-for-agent") && !has(n, "target-backlog")),
+    needsResearch: count((n) => has(n, "needs-research")),
+    needsTriage: count((n) => has(n, "needs-triage")),
+    archSourced: count((n) => has(n, ARCH_SCAN_LABEL)),
+    cleanupSourced: count((n) => has(n, CLEANUP_SCAN_LABEL)),
+    skillPruneSourced: count((n) => has(n, SKILL_PRUNE_LABEL)),
+    enhancementSourced: count((n) => has(n, "enhancement")),
   });
 }
 

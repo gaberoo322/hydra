@@ -43,9 +43,12 @@
  *   target_needs_qa_pr_*    the first needs-qa issue's closing PR (#4576)
  *   target_dev_resume_pick  the shared pick (dev-resume.ts, #4739 policy)
  *
- * Never throws on a read failure: each degrades to a typed field plus the
- * verbatim stderr note the bash printed. The `kv` renderer owns the fallback
- * lines.
+ * Never throws on a read failure: each degrades to a typed field (a
+ * `Classified` reason and/or a `DegradedMarker`), and the reads the bash
+ * reported keep their stderr note, which names the failure in plain words or
+ * a reason code (`unparseable`) — never parser exception text. The JSON
+ * builder (json-snapshot.ts) owns the fail-open values a degraded field
+ * projects to.
  */
 
 import {
@@ -60,10 +63,9 @@ import type { PrRefRow } from "../../github/pr-refs.ts";
 import { TARGET_BOARD_LABELS } from "../../target-board-labels.ts";
 import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
 import { pickDevResume } from "./dev-resume.ts";
-import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
+import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import { DEFAULT_PR_REF_PREDICATES, type PrPick, type PrRefsAvailability } from "./pr-gate.ts";
-import { pyInt, pyIntOf, pyIsInt, pyJsonLoads, pyStrRepr, pyTruthy } from "./py-compat.ts";
 
 export const TARGET_BOARD_COLLECTOR = "target-board";
 
@@ -136,6 +138,12 @@ export interface TargetBoardDeps {
 type Row = Record<string, unknown>;
 
 const isObj = (v: unknown): v is Row => v !== null && typeof v === "object" && !Array.isArray(v);
+
+/** An integer JSON field (a boolean reads as 0/1, as the board fields always have); `null` for anything else. */
+const asInt = (v: unknown): number | null => (typeof v === "boolean" ? Number(v) : typeof v === "number" && Number.isInteger(v) ? v : null);
+
+/** The integer entries of a JSON list field, in order (see {@link asInt}). */
+const intEntries = (xs: readonly unknown[]): number[] => xs.map(asInt).filter((n): n is number => n !== null);
 
 /** `.[]` — an array's elements or an object's values; anything else errors. */
 function jqIterate(v: unknown): unknown[] | null {
@@ -224,16 +232,22 @@ export async function deriveFallbackBoard(
 
 /** The healthy board-state payload, or `null` when the endpoint read must fall back. */
 export function parseHealthyBoard(body: string): Row | null {
-  const parsed = pyJsonLoads(body);
-  if (!parsed.ok) return null;
-  const d = parsed.value;
-  if (!isObj(d) || pyTruthy(d.degraded) || !("ready_for_agent" in d)) return null;
+  const parsed = parseJsonRead(body);
+  if (parsed.kind !== "ok") return null;
+  const d = parsed.data;
+  if (!isObj(d) || !("ready_for_agent" in d)) return null;
+  // `degraded` set: anything but null / false / 0 / "" / an empty list or object.
+  const flag = d.degraded;
+  if (flag !== null && typeof flag === "object" ? Object.keys(flag).length > 0 : Boolean(flag)) return null;
   return d;
 }
 
-/** The healthy count lines (`str(d.get(k, 0))`, plus `len(blocker_excluded)`). */
+/**
+ * The healthy count lines (each field's text — a string verbatim, anything
+ * else as JSON — or `0` when absent, plus `len(blocker_excluded)`).
+ */
 export function healthyCounts(d: Row): TargetBoardCounts {
-  const get = (k: string) => (k in d ? pyStrRepr(d[k]) : "0");
+  const get = (k: string) => (!(k in d) ? "0" : typeof d[k] === "string" ? (d[k] as string) : JSON.stringify(d[k]));
   const be = d.blocker_excluded;
   return [
     ["target_ready_for_agent", get("ready_for_agent")],
@@ -248,7 +262,7 @@ export function healthyCounts(d: Row): TargetBoardCounts {
 export function boardIssueList(d: Row, key: string): number[] {
   const v = d[key];
   if (!Array.isArray(v)) return [];
-  return v.filter(pyIsInt).map(pyIntOf);
+  return intEntries(v);
 }
 
 /** `max(0, base − |(R ∩ P) − W − B|)` (#4474, #4823). `base` is the emitted count string. */
@@ -259,10 +273,12 @@ export function adjustedReadyForAgent(inputs: {
   readonly glmWithheld: readonly number[];
   readonly blockerExcluded: readonly number[];
 }): number {
-  const r = new Set((inputs.ready ?? []).filter(pyIsInt).map(pyIntOf));
+  const r = new Set(intEntries(inputs.ready ?? []));
   const w = new Set(inputs.glmWithheld);
   const b = new Set(inputs.blockerExcluded);
-  const base = inputs.base === "" ? 0 : (pyInt(inputs.base) ?? 0);
+  // A decimal integer count (surrounding whitespace, a sign and single `_` separators allowed), else 0.
+  const baseText = inputs.base.trim();
+  const base = /^[+-]?\d+(?:_\d+)*$/.test(baseText) ? Number(baseText.replace(/_/g, "")) : 0;
   let excluded = 0;
   for (const n of r) if (inputs.inflight.has(n) && !w.has(n) && !b.has(n)) excluded++;
   return Math.max(0, base - excluded);
@@ -282,7 +298,8 @@ function labelledIssueNumbers(list: readonly unknown[]): number[] {
   const out: number[] = [];
   for (const it of list) {
     if (!isObj(it) || (it.pull_request ?? null) !== null) continue;
-    if (pyIsInt(it.number)) out.push(pyIntOf(it.number));
+    const n = asInt(it.number);
+    if (n !== null) out.push(n);
   }
   return out;
 }
@@ -374,9 +391,10 @@ export function targetDevResumePick(issues: readonly unknown[], prs: readonly un
   const candidates: { pr: number; headRefName: string | null; row: Row }[] = [];
   for (const pr of prs) {
     if (!isObj(pr) || pr.draft === true) continue;
-    if (!pyIsInt(pr.number)) continue;
+    const n = asInt(pr.number);
+    if (n === null) continue;
     const head = isObj(pr.head) ? (pr.head as Row).ref : null;
-    candidates.push({ pr: pyIntOf(pr.number), headRefName: typeof head === "string" ? head : null, row: pr });
+    candidates.push({ pr: n, headRefName: typeof head === "string" ? head : null, row: pr });
   }
   return pickDevResume({
     candidates,
@@ -392,8 +410,6 @@ function slurpPair(a: GhJsonRead, b: GhJsonRead): { first: unknown; second: unkn
   const docs = [a, b].filter((r) => r.kind === "ok").map(readData);
   return { first: docs[0] ?? null, second: docs[1] ?? null };
 }
-
-const EMPTY_JSON_ERROR = (pyJsonLoads("") as { error: string }).error;
 
 // ---------------------------------------------------------------------------
 // The collector
@@ -507,7 +523,7 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
     } else {
       if ("error" in prRefs) notes.push(`target-qa pr-refs.py import FAILED (${prRefs.error}) — fail open (issue #4576)`);
       const pair = slurpPair(nqa, pulls);
-      if (pair === null) notes.push(`target-qa stdin JSON parse FAILED (${EMPTY_JSON_ERROR}) — fail open (issue #4576)`);
+      if (pair === null) notes.push("target-qa stdin JSON parse FAILED (unparseable) — fail open (issue #4576)");
       if (prRefs.ok && pair !== null) {
         const issues = Array.isArray(pair.first) ? pair.first : [];
         const prs = Array.isArray(pair.second) ? pair.second : [];
@@ -542,7 +558,7 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
     devResumePick = { ok: false, reason: "pr-refs unavailable" };
   } else {
     const pair = slurpPair(ndr, pulls);
-    if (pair === null) notes.push(`target-dev-resume stdin JSON parse FAILED (${EMPTY_JSON_ERROR}) — fail closed to none (issue #4739)`);
+    if (pair === null) notes.push("target-dev-resume stdin JSON parse FAILED (unparseable) — fail closed to none (issue #4739)");
     const issues = pair !== null && Array.isArray(pair.first) ? pair.first : null;
     const prs = pair !== null && Array.isArray(pair.second) ? pair.second : null;
     if (issues === null) notes.push("target-dev-resume issues payload is not a list — treated as empty (issue #4739)");

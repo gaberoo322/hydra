@@ -441,6 +441,52 @@ describe("turn snapshot JSON: builder details (#4934)", () => {
     assert.equal(JSON.parse(emit("healthy")).signals.orch_realm_weekly_share, 0.1235);
   });
 
+  test("realm share rounds an exact binary tie to EVEN, like format(x, '.4f') (#5084)", () => {
+    const share = (x: number) => buildTurnSnapshot({ ...healthyValues(), realmShare: ok(x) }, { nowMs: NOW_MS }).doc.signals.orch_realm_weekly_share;
+    assert.equal(share(1 / 32), 0.0312, "0.03125 is a tie: 2 is even (toFixed alone gives 0.0313)");
+    assert.equal(share(3 / 32), 0.0938, "0.09375 is a tie: 8 is even");
+    assert.equal(share(5 / 32), 0.1562, "0.15625 is a tie: 2 is even");
+    assert.equal(share(0.12345), 0.1235, "0.12345 is 0.123450000000000004174… — not a tie, rounds up");
+    assert.equal(share(1), 1);
+    assert.equal(share(0), 0);
+  });
+
+  test("the target_risk_surface blob keeps json.dumps' separators and ensure_ascii escapes (#5084)", () => {
+    const manifest = { ok: true, a: "é\u007f", b: [1, 2], c: {}, d: [], e: { f: "x, y: z\n" }, g: "😀", h: 1.5 };
+    const text = serializeTurnSnapshot(buildTurnSnapshot({ ...healthyValues(), targetRiskSurface: { manifest: ok(manifest) } }, { nowMs: NOW_MS })).text;
+    assert.ok(
+      text.includes('"target_risk_surface":{"ok": true, "a": "\\u00e9\\u007f", "b": [1, 2], "c": {}, "d": [], "e": {"f": "x, y: z\\n"}, "g": "\\ud83d\\ude00", "h": 1.5}'),
+      "the blob is spliced as Python json.dumps text",
+    );
+    assert.deepEqual(JSON.parse(text).blobs.target_risk_surface, manifest, "and it still parses back to the manifest");
+    const holes = { ok: true, u: undefined, v: [1, undefined], w: { x: undefined } };
+    const holeText = serializeTurnSnapshot(buildTurnSnapshot({ ...healthyValues(), targetRiskSurface: { manifest: ok(holes) } }, { nowMs: NOW_MS })).text;
+    assert.ok(
+      holeText.includes('"target_risk_surface":{"ok": true, "u": null, "v": [1, null], "w": {"x": null}}'),
+      "an undefined field prints as null (the deleted pyJsonDumps rule), never silently dropped",
+    );
+    const failed =serializeTurnSnapshot(buildTurnSnapshot({ ...healthyValues(), targetRiskSurface: { manifest: { ok: false, reason: "no manifest field" } } }, { nowMs: NOW_MS })).text;
+    assert.ok(failed.includes('"target_risk_surface":{"ok": false, "errors": ["target_risk_surface_json: no manifest field"]}'));
+  });
+
+  test("health: only a string status whose first token is `ok` is healthy; any other value fails (#5084)", () => {
+    const fail = (status: unknown, redis: unknown = true) =>
+      buildTurnSnapshot({ ...healthyValues(), health: { service: ok({ status, redis }), failedServices: 0 } }, { nowMs: NOW_MS }).doc.signals.health_fail;
+    assert.equal(fail("ok"), false);
+    assert.equal(fail("ok degraded-detail", { nested: "x" }), false);
+    for (const bad of ["degraded", "", "  ", null, true, 0, ["ok"], { ok: true }]) assert.equal(fail(bad), true, `${JSON.stringify(bad)} is not a healthy status`);
+  });
+
+  test("an orch board count reads only as a JSON integer — a string or float count is 0 (#5084)", () => {
+    const work = (ready_for_agent: unknown) => {
+      const h = healthyValues();
+      const counts = { source: "service" as const, values: { ...(h.orchBoard.counts as { values: Record<string, unknown> }).values, ready_for_agent } };
+      return buildTurnSnapshot({ ...h, orchBoard: { ...h.orchBoard, counts: counts as never } }, { nowMs: NOW_MS }).doc.signals.orch_work_available;
+    };
+    assert.equal(work(3), true);
+    for (const notInt of ["3", 2.5, [3], { n: 3 }, true]) assert.equal(work(notInt), false, `${JSON.stringify(notInt)} is not a count`);
+  });
+
   test("scout_board_saturated is pinned at > 20 open enhancements (a strict cap)", () => {
     const at = (open: string) => {
       const h = healthyValues();

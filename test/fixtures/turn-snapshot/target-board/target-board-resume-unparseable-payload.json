@@ -40,7 +40,7 @@
   },
   "expected": {
     "stderrNotes": [
-      "target-dev-resume stdin JSON parse FAILED (Expecting value: line 1 column 1 (char 0)) — fail closed to none (issue #4739)",
+      "target-dev-resume stdin JSON parse FAILED (unparseable) — fail closed to none (issue #4739)",
       "target-dev-resume issues payload is not a list — treated as empty (issue #4739)",
       "target-dev-resume prs payload is not a list — treated as empty (issue #4739)"
     ],

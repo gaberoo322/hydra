@@ -481,7 +481,7 @@ describe("target-board — gh fallback derive (issues #3709, #4946)", () => {
   });
 
   test("an unparseable fallback payload fails the read (fallback-read-failed + lane flag, the slice-2 rule #4930)", async () => {
-    const r = await runBoard({ issuesFallback: { kind: "unparseable", error: "Expecting value: line 1 column 1 (char 0)" } });
+    const r = await runBoard({ issuesFallback: { kind: "unparseable" } });
     assert.equal(r.value.laneDegraded, true);
     assert.deepEqual(r.value.counts, { ok: false, reason: "fallback-read-failed" });
   });
@@ -969,7 +969,7 @@ describe("target-board — target_dev_resume_pick (issue #4739)", () => {
     const degraded = await resume(EMPTY, ok([PR_57]));
     assert.equal(degraded.pick, "none");
     assert.ok(degraded.notes.some((n) => n.includes("#4739")));
-    const garbage = await resume({ kind: "unparseable", error: "Expecting value: line 1 column 1 (char 0)" }, ok([PR_57]));
+    const garbage = await resume({ kind: "unparseable" }, ok([PR_57]));
     assert.equal(garbage.pick, "none");
     assert.ok(garbage.notes.some((n) => n.includes("#4739")));
     const noRefs = await resume(ok(issues(176)), ok([PR_57]), { ok: false, error: "predicate unavailable" });
@@ -1134,7 +1134,7 @@ describe("target-scan-boards — wire-or-retire unlabelled advisory count (issue
   });
 
   test("the key is emitted on every branch so decide.py never sees it missing", async () => {
-    for (const read of [ok([]), EMPTY, { kind: "unparseable", error: "x" } as GhJsonRead]) {
+    for (const read of [ok([]), EMPTY, { kind: "unparseable" } as GhJsonRead]) {
       assert.ok("wire_or_retire_target_unlabelled" in (await runScan({ read })).out);
     }
   });
@@ -1205,7 +1205,7 @@ describe("target-scan-boards — design_qa_target ADR-presence gate (issue #4528
 
   test("the advisory adr_present key is emitted on every branch (no schema signal, so decide.py cannot read it — the #5085 replay contract)", async () => {
     assert.equal((await runScan({ read: EMPTY, adr: true })).out.design_qa_target_adr_present, "true");
-    assert.equal((await runScan({ read: { kind: "unparseable", error: "x" }, adr: true })).out.design_qa_target_adr_present, "true");
+    assert.equal((await runScan({ read: { kind: "unparseable" }, adr: true })).out.design_qa_target_adr_present, "true");
   });
 
   test("the glob matches only design-language ADRs under the workspace", () => {
@@ -1349,5 +1349,83 @@ describe("turn-snapshot CLI — Target collectors (ADR-0043 slice 4)", () => {
       },
     }, { stdout: () => {}, stderr: () => {} });
     assert.equal(built, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A malformed payload degrades, never throws (#5084, the #4934 per-field contract)
+// ---------------------------------------------------------------------------
+
+describe("Target board family — a malformed payload degrades, never throws (#5084)", () => {
+  const MALFORMED_READS: readonly GhJsonRead[] = [
+    { kind: "unparseable" },
+    ok(null),
+    ok(true),
+    ok("text"),
+    ok({ a: 1 }),
+    ok([null, 7, "x", [], { number: true, labels: null, head: 5, body: {}, html_url: [], pull_request: {} }, { number: 3.5, head: { ref: {} }, draft: [] }]),
+  ];
+  const MALFORMED_BOARDS: readonly unknown[] = [null, [], 7, "x", { degraded: { a: 1 }, ready_for_agent: 1 }, { ready_for_agent: [], needs_qa: {}, glm_withheld: { a: 1 }, blocker_excluded: "x" }];
+
+  MALFORMED_READS.forEach((read, i) => {
+    test(`every read malformed (shape #${i}) → the board and scan collectors resolve, degrading only their own fields`, async () => {
+      for (const board of MALFORMED_BOARDS) {
+        const r = await runBoard({ board, issuesFallback: read, blockerSearch: read, pulls: read, rfa: read, inProgress: read, needsQa: read, needsDevResume: read, verdicts: read, scanIssues: read });
+        assert.ok(!r.value.counts.ok || r.value.counts.value.every(([k, v]) => typeof k === "string" && typeof v === "string"), `shape #${i}: count lines are text`);
+        assert.ok(!r.value.wip.ok || Number.isInteger(r.value.wip.value.live), `shape #${i}: the WIP count is an integer`);
+        assert.ok(r.value.devResumePick.ok === false || r.value.devResumePick.value === null, `shape #${i}: no pin from a malformed payload`);
+        assert.doesNotThrow(() => JSON.stringify(r.value));
+      }
+      const scan = await runScan({ read });
+      assert.equal(scan.value.signals.ok, read.kind === "ok", `shape #${i}: only an unreadable scan read degrades the scan signals`);
+    });
+  });
+
+  test("the board's `degraded` flag: an EMPTY list / object reads healthy, a non-empty one routes to the gh fallback", async () => {
+    const healthy = { ready_for_agent: 2, needs_qa: 0, needs_triage: 0, needs_research: 0 };
+    for (const unset of [[], {}, 0, null]) {
+      const r = await runBoard({ board: { ...healthy, degraded: unset } });
+      assert.ok(!r.calls.includes("issuesFallback"), `${JSON.stringify(unset)} is not a degraded flag`);
+    }
+    for (const set of [[1], { a: 1 }, true]) {
+      const r = await runBoard({ board: { ...healthy, degraded: set }, issuesFallback: ok([]) });
+      assert.ok(r.calls.includes("issuesFallback"), `${JSON.stringify(set)} is a degraded flag`);
+    }
+  });
+
+  test("a numbered fallback / blocker-search row whose `labels` is a scalar or an object reads as unlabelled — the collector resolves, only boardState degrades", async () => {
+    const row = (n: number, labels: string[], body = "") => ({ number: n, labels: labels.map((name) => ({ name })), body });
+    for (const labels of ["x", 7, true, { a: {} }]) {
+      const what = `labels ${JSON.stringify(labels)}`;
+      const r = await runBoard({
+        issuesFallback: ok([{ number: 4, labels, body: "" }, row(5, ["needs-triage"]), row(100, ["ready-for-agent"], "Blocked by #900")]),
+        blockerSearch: ok([{ number: 900, labels }]),
+      });
+      assert.equal(r.value.counts.ok, true, what);
+      assert.equal(r.out.target_needs_triage, "1", `${what}: the well-formed row still counts`);
+      assert.equal(r.out.target_ready_blocker_excluded, "1", `${what}: the blocker-search row still reads as open`);
+      assert.equal(r.value.laneDegraded, false, what);
+      assert.deepEqual(r.degraded.map((d) => d.field), ["boardState"], `${what}: the board-endpoint marker is the only one`);
+    }
+  });
+
+  test("a healthy count that is not a string prints as JSON text; only a decimal integer counts", () => {
+    assert.deepEqual(countsOf({ ready_for_agent: 3, needs_qa: "2", needs_triage: null, needs_research: [] }), {
+      target_ready_for_agent: "3",
+      target_needs_qa: "2",
+      target_needs_triage: "null",
+      target_needs_research: "[]",
+      target_ready_blocker_excluded: "0",
+    });
+    assert.equal(adjustedReadyForAgent({ base: " 1_2 ", ready: [true, 5], inflight: new Set([1, 5]), glmWithheld: [], blockerExcluded: [] }), 10, "a bool issue number reads 0/1");
+    assert.equal(adjustedReadyForAgent({ base: "null", ready: [], inflight: new Set(), glmWithheld: [], blockerExcluded: [] }), 0);
+  });
+
+  test("a throwing or malformed facts source fails the risk surface closed, never the turn", async () => {
+    for (const facts of [() => { throw new Error("boom"); }, () => null, () => ({ manifest: [] }), () => ({ manifest: "x" })]) {
+      const o = await collectTargetRiskSurface({ facts });
+      assert.equal(o.value.manifest.ok, false);
+      assert.equal(o.degraded.length, 1);
+    }
   });
 });

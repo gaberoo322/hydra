@@ -31,7 +31,9 @@ import { join, resolve } from "node:path";
 
 import { main } from "../scripts/autopilot/turn-snapshot.ts";
 import {
+  collectNeedsQaNumbers,
   collectOrchBoard,
+  collectUntriagedOrphans,
   countUntriagedOrphans,
   healthyBoardState,
   needsQaNumbers,
@@ -45,7 +47,6 @@ import {
   type TurnSnapshotGithub,
 } from "../src/autopilot/turn-snapshot/github-port.ts";
 import { createTurnSnapshotHydra, type HydraRead, type HydraTransport, type TurnSnapshotHydra } from "../src/autopilot/turn-snapshot/hydra-http.ts";
-import { pyJsonDumps } from "../src/autopilot/turn-snapshot/py-compat.ts";
 import { deriveBoardState } from "../src/autopilot/board-state.ts";
 import { STALE_BLOCKED_SECONDS, STALE_IN_PROGRESS_SECONDS } from "../src/board-labels.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
@@ -416,7 +417,7 @@ describe("untriaged_orphans excludes needs-dev-resume (#4220)", () => {
 describe("untriaged_orphans / needs_qa_numbers degrade (failed reads)", () => {
   test("a failed orphan read is null (rendered 0 — never a spurious sweep)", () => {
     assert.equal(countUntriagedOrphans(EMPTY), null);
-    assert.equal(countUntriagedOrphans({ kind: "unparseable", error: "x" }), null);
+    assert.equal(countUntriagedOrphans({ kind: "unparseable" }), null);
   });
 
   test("needs_qa_numbers keeps gh's order; a failed read is degraded (the snapshot then carries an empty list)", () => {
@@ -649,12 +650,6 @@ describe("degraded path — a null/absent updatedAt (review low, ADR-0043 D2)", 
   });
 });
 
-describe("pyJsonDumps — python json.dumps defaults", () => {
-  test("separators and ensure_ascii match python", () => {
-    assert.equal(pyJsonDumps({ a: "é\u007f", b: [1, 2], c: {}, d: [] }), '{"a": "\\u00e9\\u007f", "b": [1, 2], "c": {}, "d": []}');
-  });
-});
-
 describe("turn-snapshot CLI — slice-2 collectors", () => {
   test("a crashing orch-board collector returns the all-reads-failed fallback and flags the lane", async () => {
     let stdout = "";
@@ -694,5 +689,54 @@ describe("turn-snapshot CLI — slice-2 collectors", () => {
       ["http://hydra.test/api/autopilot/board-state", 30_000],
       ["http://hydra.test/api/autopilot/board-state?scope=target", 30_000],
     ]);
+  });
+});
+
+describe("orch board family — a malformed payload degrades, never throws (#5084)", () => {
+  const MALFORMED_READS: readonly GhJsonRead[] = [
+    { kind: "unparseable" },
+    ok(null),
+    ok(true),
+    ok("text"),
+    ok({ a: 1 }),
+    ok([null, 7, "x", [], { number: "4", labels: null, updatedAt: 5 }, { number: 8, labels: [null, 3, { name: [] }] }]),
+  ];
+  const MALFORMED_BODIES = ["not json", "", "null", "[]", "7", '{"degraded": {"a": 1}, "ready_for_agent": 1}', '{"ready_for_agent": {}}'];
+
+  MALFORMED_READS.forEach((read, i) => {
+    test(`every read malformed (shape #${i}) → the three collectors resolve, each degrading only its own value`, async () => {
+      const github = { listOpenIssueBoardRows: async () => read, openIssueNumbersByLabel: async () => read, listOpenIssueLabelRows: async () => read };
+      for (const body of MALFORMED_BODIES) {
+        const board = await collectOrchBoard({ github, hydra: fakeHydra({ orchBoardState: async () => ({ kind: "ok", body }) }), now: () => NOW_MS, ghListLimit: 100 });
+        const listShaped = read.kind === "ok" && Array.isArray(read.data);
+        if (board.value.boardState === null) assert.equal(board.value.counts.source, listShaped ? "derived" : "none", `shape #${i} body ${JSON.stringify(body)}`);
+        assert.equal(board.value.needsTriageItems.ok, listShaped);
+      }
+      const orphans = await collectUntriagedOrphans({ github, ghListLimit: 100 });
+      const qa = await collectNeedsQaNumbers({ github, ghListLimit: 100 });
+      const listShaped = read.kind === "ok" && Array.isArray(read.data);
+      assert.equal(orphans.value.ok, listShaped);
+      assert.equal(qa.value.ok, listShaped);
+      assert.equal(orphans.degraded.length + qa.degraded.length, listShaped ? 0 : 2);
+    });
+  });
+
+  test("the service body's `degraded` flag: an EMPTY list / object / 0 / null reads healthy; a non-empty one falls back", () => {
+    const body = (degraded: unknown) => ({ kind: "ok" as const, data: { degraded, ready_for_agent: 1 } });
+    for (const unset of [[], {}, 0, null, "", false]) assert.notEqual(healthyBoardState(body(unset)), null, `${JSON.stringify(unset)} is not a degraded flag`);
+    for (const set of [[0], { a: 1 }, 1, "yes", true]) assert.equal(healthyBoardState(body(set)), null, `${JSON.stringify(set)} is a degraded flag`);
+  });
+
+  test("a numbered fallback row whose `labels` is a scalar or an object reads as unlabelled — the collector resolves, only boardState degrades", async () => {
+    for (const labels of ["x", 7, true, { a: {} }]) {
+      const rows = [{ number: 4, labels, updatedAt: iso(60) }, row(5, ["ready-for-agent"])];
+      const out = await collectOrchBoard({ github: fakeGithub(ok(rows)), hydra: serviceDown, now: () => NOW_MS, ghListLimit: 100 });
+      const what = `labels ${JSON.stringify(labels)}`;
+      assert.equal(out.value.counts.source, "derived", what);
+      assert.equal((out.value.counts as { values: Record<string, unknown> }).values.ready_for_agent, 1, `${what}: the well-formed row still counts`);
+      assert.equal(out.value.orchBoardDegraded, false, what);
+      assert.deepEqual(out.value.needsTriageItems, { ok: true, value: [] }, what);
+      assert.deepEqual(out.degraded.map((d) => d.field), ["boardState"], `${what}: the service-down marker is the only one`);
+    }
   });
 });

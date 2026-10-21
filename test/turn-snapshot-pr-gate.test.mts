@@ -47,12 +47,13 @@ import {
 } from "../src/autopilot/turn-snapshot/pr-gate.ts";
 import {
   createTurnSnapshotGithub,
+  ghTimestampSeconds,
+  parseJsonRead,
   PR_GATE_PR_FIELDS,
   type GhJsonRead,
   type GhTransport,
   type TurnSnapshotGithub,
 } from "../src/autopilot/turn-snapshot/github-port.ts";
-import { pyJsonLoads } from "../src/autopilot/turn-snapshot/py-compat.ts";
 import { pickNoPrResume } from "../src/autopilot/turn-snapshot/dev-resume.ts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
 
@@ -324,11 +325,8 @@ interface PrGateOverrides {
   prRefs?: PrRefsAvailability;
 }
 
-const jsonOrEmpty = (s: string): GhJsonRead => {
-  if (s === "") return EMPTY;
-  const p = pyJsonLoads(s);
-  return "error" in p ? { kind: "unparseable", error: p.error } : ok(p.value);
-};
+/** "" models a FAILED read; anything else goes through the port's own JSON parse. */
+const jsonOrEmpty = (s: string): GhJsonRead => parseJsonRead(s);
 
 /**
  * A pin in the Anchor-reference notation signal EVENTS carry
@@ -429,6 +427,17 @@ describe("pr-gate — BEHIND/draft classification (issue #4240)", () => {
     const buckets = await runPrGate([pr]);
     assert.deepEqual(buckets.unchecked, [4237]);
     assert.deepEqual(buckets.behind, []);
+  });
+
+  test("isDraft reads with Python truthiness: an EMPTY list / object is not a draft, so a DIRTY PR still lands in orch_prs_dirty (#5084)", async () => {
+    for (const isDraft of [[], {}]) {
+      const buckets = await runPrGate([{ ...basePrGate({ number: 4400, mergeStateStatus: "DIRTY" }), isDraft }]);
+      assert.deepEqual(buckets.dirty, [4400], `isDraft ${JSON.stringify(isDraft)} is Python-falsy`);
+    }
+    for (const isDraft of [[0], { a: 1 }, true]) {
+      const buckets = await runPrGate([{ ...basePrGate({ number: 4401, mergeStateStatus: "DIRTY" }), isDraft }]);
+      assert.deepEqual(buckets.dirty, [], `isDraft ${JSON.stringify(isDraft)} is Python-truthy`);
+    }
   });
 });
 
@@ -1192,10 +1201,10 @@ describe("pr-gate — no-PR durable resume pick (issue #4808)", () => {
     const healthy = { first: ok([]), resume: ok(JSON.parse(noprRowsJson)) };
     const cases: { name: string; opts: Partial<Parameters<typeof collectNoprOutcome>[0]> }[] = [
       { name: "open-PR list read empty", opts: { first: EMPTY } },
-      { name: "open-PR list read unparseable", opts: { first: { kind: "unparseable", error: "Expecting value" } } },
+      { name: "open-PR list read unparseable", opts: { first: { kind: "unparseable" } } },
       { name: "pr-refs predicates unavailable", opts: { prRefs: PR_REFS_UNAVAILABLE } },
       { name: "needs-dev-resume read empty", opts: { resume: EMPTY } },
-      { name: "needs-dev-resume read unparseable", opts: { resume: { kind: "unparseable", error: "Expecting value" } } },
+      { name: "needs-dev-resume read unparseable", opts: { resume: { kind: "unparseable" } } },
       { name: "open-PR page saturated (payload length >= ghListLimit)", opts: { ghListLimit: 1, first: ok([basePrGate({ number: 9001 })]) } },
     ];
     for (const c of cases) {
@@ -1400,5 +1409,96 @@ describe("pr-gate — QA-verdict recheck (#5052)", () => {
 
   test("prGateFallbackSnapshot carries the recheck degraded", () => {
     assert.equal(prGateFallbackSnapshot("x").qaVerdictRecheck.ok, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. A malformed payload degrades, never throws (#5084, the #4934 per-field contract)
+// ---------------------------------------------------------------------------
+
+/** Payloads no healthy `gh` read produces — every shape a typed fold must survive. */
+const MALFORMED_READS: readonly GhJsonRead[] = [
+  { kind: "unparseable" },
+  ok(null),
+  ok(true),
+  ok(7),
+  ok("text"),
+  ok({ a: 1 }),
+  ok([null, 7, "x", true, [], {}]),
+  ok([
+    {
+      number: [1],
+      labels: null,
+      headRefName: 5,
+      body: {},
+      isDraft: {},
+      mergeStateStatus: [],
+      statusCheckRollup: { a: 1 },
+      createdAt: 5,
+      updatedAt: [],
+    },
+    { number: 9, labels: [{ name: 3 }, null, "x"], mergeStateStatus: "DIRTY", isDraft: [], statusCheckRollup: [null, 4, { name: {} }], updatedAt: "2026-10-07T03:20:07.000Z" },
+  ]),
+];
+
+/** A port whose every read returns `read` (the runs reads get a non-timestamp string). */
+function everyRead(read: GhJsonRead): PrGateGithubAll {
+  return {
+    listOpenPrs: async () => read,
+    listOpenPrMergeStates: async () => ({ read, stderrHead: "" }),
+    latestWorkflowRunCreatedAt: async () => "not-a-timestamp",
+    requiredStatusContexts: async () => read,
+    listOpenIssueRowsByLabel: async () => read,
+  };
+}
+type PrGateGithubAll = Parameters<typeof collectPrGate>[0]["github"];
+
+describe("Turn Snapshot pr-gate — a malformed payload degrades, never throws (#5084)", () => {
+  MALFORMED_READS.forEach((read, i) => {
+    test(`every read malformed (shape #${i}) → the collector resolves with integer buckets`, async () => {
+      const o = await collectPrGate({ github: everyRead(read), now: () => NOW_MS, sleep: async () => {}, ghListLimit: 100 });
+      for (const bucket of [o.value.dirty, o.value.unchecked, o.value.behind, ...Object.values(o.value.inflight)]) {
+        assert.ok(bucket.every((n) => Number.isInteger(n)), `shape #${i}: a bucket holds only PR / issue numbers`);
+      }
+      assert.doesNotThrow(() => JSON.stringify(o.value));
+      if (read.kind !== "ok") assert.ok(o.degraded.some((d) => d.field === "prList" && d.reason === "unparseable"), `shape #${i}: the PR list is marked`);
+    });
+  });
+
+  test("one malformed read degrades ONLY its own fields — the PR buckets from a healthy list stand", async () => {
+    const dirty = { number: 12, mergeStateStatus: "DIRTY", isDraft: false, labels: [], statusCheckRollup: [], createdAt: isoSecondsAgo(9000), updatedAt: isoSecondsAgo(9000) };
+    const o = await collectPrGate({
+      github: fakeGithub({ first: ok([dirty]), required: { kind: "unparseable" }, runsPush: isoSecondsAgo(10), runsPullRequest: isoSecondsAgo(10) }),
+      now: () => NOW_MS,
+      sleep: async () => {},
+      ghListLimit: 100,
+    });
+    assert.deepEqual(o.value.dirty, [12]);
+    assert.equal(o.value.ciTriggerStale.ok, true);
+    assert.deepEqual(o.value.devResumePick, { ok: false, reason: "required-contexts / needs-dev-resume / pr-refs input unavailable" });
+    assert.deepEqual(
+      o.degraded.map((d) => d.field),
+      ["requiredContexts", "qaVerdictRecheck"],
+      "only the required-contexts read and the recheck that consumes it degrade",
+    );
+  });
+
+  test("a malformed env window falls back to its default with a not-numeric note; float literals are accepted", async () => {
+    const notesFor = async (env: PrGateEnv) =>
+      (await collectPrGate({ github: fakeGithub({}), now: () => NOW_MS, sleep: async () => {}, ghListLimit: 100, env })).notes.filter((n) => n.includes("unparsable"));
+    assert.deepEqual(await notesFor({ uncheckedGraceSeconds: "10m" }), [
+      'orch pr-gate ORCH_PR_UNCHECKED_GRACE_SECONDS unparsable (not-numeric: "10m") — falling back to 600s default (issue #4240)',
+    ]);
+    for (const accepted of [" 900 ", "1_800", "1e3", ".5", "5.", "inf", "-Infinity", "NaN"]) {
+      assert.deepEqual(await notesFor({ glmRedQuiescenceSeconds: accepted, uncheckedGraceSeconds: accepted }), [], `${JSON.stringify(accepted)} is a window literal`);
+    }
+  });
+
+  test("gh timestamps parse in the canonical second-resolution UTC shape only", () => {
+    assert.equal(ghTimestampSeconds("2026-10-07T03:20:07Z"), Date.UTC(2026, 9, 7, 3, 20, 7) / 1000);
+    assert.equal(ghTimestampSeconds("2026-1-7T3:2:7Z"), Date.UTC(2026, 0, 7, 3, 2, 7) / 1000, "one-digit fields, the windows' historical parse");
+    for (const bad of ["2026-10-07T03:20:07.000Z", "2026-10-07T03:20:07+00:00", "2026-02-30T00:00:00Z", "2026-10-07T03:20:60Z", "", null, 1791344407]) {
+      assert.equal(ghTimestampSeconds(bad), null, `${JSON.stringify(bad)} is not a gh timestamp`);
+    }
   });
 });
