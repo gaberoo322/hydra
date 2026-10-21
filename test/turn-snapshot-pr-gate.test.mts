@@ -804,7 +804,7 @@ describe("pr-gate — UNKNOWN mergeStateStatus re-poll (#4812)", () => {
     assert.equal(ghCalls, 2);
     assert.equal(degraded, "unset");
     assert.equal(out[0].mergeStateStatus, "UNKNOWN");
-    assert.match(stderr, /UNKNOWN re-poll FAILED \(not a list\).*stay skipped: 5 \(issue #4812\)/);
+    assert.match(stderr, /UNKNOWN re-poll FAILED \(not-a-list\).*stay skipped: 5 \(issue #4812\)/);
   });
 
   test("a PR absent from the re-poll ([]) keeps its first-read state and is named as still UNKNOWN", async () => {

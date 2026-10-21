@@ -217,7 +217,7 @@ interface BoardCounts {
 
 /**
  * The string label names of one open-board row, or `null` when the row is
- * {@link MALFORMED_PAYLOAD}: it must be an object whose `labels` is a list (an
+ * {@link DEGRADE.MALFORMED_PAYLOAD}: it must be an object whose `labels` is a list (an
  * object reads by its values) of label objects or nulls. A missing / `null` /
  * scalar `labels`, a non-object row or a scalar label is malformed.
  */

@@ -34,7 +34,7 @@
 import { DEGRADE, type Classified, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
-import { labelNames, MALFORMED_PAYLOAD } from "./board-saturation.ts";
+import { labelNames } from "./board-saturation.ts";
 
 export interface AfkFrontierDeps {
   readonly github: TurnSnapshotGithub;
@@ -55,7 +55,7 @@ const outcome = <T>(collector: string, value: T, degraded: DegradedMarker[]): Co
 
 /**
  * Fold a gh read: a failed / unparseable read keeps its reason; a fold that
- * returns `null` met a {@link MALFORMED_PAYLOAD} shape (the shapes the bash's
+ * returns `null` met a {@link DEGRADE.MALFORMED_PAYLOAD} shape (the shapes the bash's
  * `--jq` errored on) and the whole read degrades.
  */
 function foldRead<T>(read: GhJsonRead, fold: (data: unknown) => T | null): Classified<T> {
