@@ -3964,7 +3964,9 @@ def decide(
          never an action; runs unconditionally, even ahead of termination.
 
       1. Termination check (budget / wall-clock / idle / 5-failure backstop).
-         Emits exactly one `terminate` action and stops if tripped.
+         Emits exactly one `terminate` action and stops if tripped — after
+         running ONLY the auto-merge sweep (step 6 below), so that turn's
+         QA PASS is armed in the same plan and `terminate` is last (#5144).
 
       2. Completion reaps for any slot that received a completion event.
          `reap` actions always precede `dispatch` actions (INV-006).
@@ -4082,10 +4084,23 @@ def decide(
     fold(_rule_candidate_exclusions(state, now))
 
     # 1. Termination — a turn-ending decision; short-circuit when tripped.
+    #    Issue #5144 (refs #4839): the short-circuit still runs the auto-merge
+    #    sweep (step 3) FIRST, so a QA PASS fed on the terminating turn — a
+    #    session `qa-verdict` event or a #5052 recheck entry — becomes an
+    #    `auto-merge` action in THIS plan, with `terminate` LAST. Before, the
+    #    plan was a lone `terminate`, the PASS was dropped, and the unattended
+    #    parent improvised `gh pr merge --auto` after it (run 23ad3521, PR
+    #    #4881). The sweep is the only rule that runs: no reap, dispatch,
+    #    PR-gate or signal rule fires on a terminating turn, and every sweep
+    #    hold (dirty / unchecked / stale-SHA / depth / emergency brake) applies
+    #    unchanged, so INV-005 (terminate present) and INV-007 (PASS-only
+    #    auto-merge) both still hold.
     term_out = _rule_termination(state, now, events)
-    fold(term_out)
     if term_out.terminate is not None:
+        fold(_rule_auto_merge_sweep(state, events))
+        fold(term_out)
         return plan
+    fold(term_out)
 
     # 1.45. Stale slot-events filter (issue #4441) — drop any state.slot_events
     #      entry that predates this run (a fresh-bootstrap cursor-0 replay of

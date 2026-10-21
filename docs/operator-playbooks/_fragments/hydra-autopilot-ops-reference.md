@@ -69,7 +69,10 @@ reboot via AOF + the docker volume) and reads it back as a seed tier:
 
 ## Termination
 
-`decide.py` emits a single `terminate` action when any of these trip:
+`decide.py` emits a single `terminate` action — always the plan's LAST action,
+preceded only by any `auto-merge` actions the auto-merge sweep produces from
+that turn's QA PASS verdicts (session `qa-verdict` events and #5052 recheck
+entries, all holds unchanged; issue #5144) — when any of these trip:
 
 1. `cumulative_tokens >= limits.token_budget`
 2. `elapsed >= limits.wall_clock_max_sec`
