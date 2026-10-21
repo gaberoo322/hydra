@@ -4,7 +4,9 @@
  * clock), the exhaustive brief-line renderer map, the best-effort composer,
  * the HTML renderer, the send path, the send-now route, and the
  * review:pickup_ready Page with its `/hydra-review` action. No Redis, no
- * Telegram, no timers: every reader and the transport are injected.
+ * Telegram, no timers: every reader and the transport are injected. The
+ * credential short-circuit and the Monday catch-up weekly section (PR #5111
+ * review follow-ups) are covered in the sources / composition suite.
  */
 
 import { describe, test } from "node:test";
