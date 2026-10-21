@@ -673,7 +673,7 @@ describe("class-state drift pins (INV-10)", () => {
 
   test("PRODUCERLESS_SIGNALS is EMPTY — the #4607 regrow guard (moved here from the retired signal-parity legs, #4934)", () => {
     // Every decide.py signal read is a Turn Snapshot schema key (pinned by
-    // test/decide-signal-classes.test.mts's schema read guard) and the
+    // the replay contract in test/turn-snapshot-json.test.mts, #5085) and the
     // validated snapshot always carries every schema key, so no read can be
     // producerless. A new exemption is a deliberate act: add the entry AND
     // update this pin, with its issue reference, in the same PR.
