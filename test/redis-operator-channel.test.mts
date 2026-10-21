@@ -25,12 +25,12 @@ describe("redis/operator-channel accessor", () => {
 
   beforeEach(async () => {
     for (const k of KEYS) await acc.delDedup(k);
-    await raw.del(acc.BRIEF_ITEMS_KEY, acc.DELIVERY_LOG_KEY);
+    await raw.del(acc.BRIEF_ITEMS_KEY, acc.DELIVERY_LOG_KEY, acc.BRIEF_LAST_SENT_KEY);
   });
 
   after(async () => {
     for (const k of KEYS) await acc.delDedup(k);
-    await raw.del(acc.BRIEF_ITEMS_KEY, acc.DELIVERY_LOG_KEY);
+    await raw.del(acc.BRIEF_ITEMS_KEY, acc.DELIVERY_LOG_KEY, acc.BRIEF_LAST_SENT_KEY);
     await raw.quit();
   });
 
@@ -75,6 +75,36 @@ describe("redis/operator-channel accessor", () => {
   test("key names are the documented constants", () => {
     assert.equal(acc.BRIEF_ITEMS_KEY, "hydra:operator-channel:brief:items");
     assert.equal(acc.DELIVERY_LOG_KEY, "hydra:operator-channel:delivery-log");
+    assert.equal(acc.BRIEF_LAST_SENT_KEY, "hydra:operator-channel:brief:last-sent");
     assert.equal(acc.dedupKeyFor("x:y"), "hydra:operator-channel:dedup:x:y");
+  });
+
+  test("the brief last-sent key round-trips epoch ms and reads null when absent or corrupt", async () => {
+    assert.equal(await acc.getBriefLastSent(), null);
+    await acc.setBriefLastSent(1_792_500_000_000);
+    assert.equal(await acc.getBriefLastSent(), 1_792_500_000_000);
+    assert.equal(await raw.get(acc.BRIEF_LAST_SENT_KEY), "1792500000000", "stored as a plain epoch-ms string");
+    await raw.set(acc.BRIEF_LAST_SENT_KEY, "not-a-number");
+    assert.equal(await acc.getBriefLastSent(), null);
+    assert.deepEqual(Object.keys(acc.redisBriefStore).sort(), ["getLastSent", "setLastSent"]);
+  });
+
+  test("listDedupStates returns the bad keys with their suppressed counts and never mutates them", async () => {
+    await acc.writeDedup("sentinel:a", { state: "bad", firstAt: 10, lastSentAt: 20, suppressed: 3 });
+    await acc.writeDedup("sentinel:b", { state: "bad", firstAt: 30, lastSentAt: 30, suppressed: 0 });
+    const before = await Promise.all(KEYS.map((k) => raw.hgetall(acc.dedupKeyFor(k))));
+    const ttlBefore = await raw.ttl(acc.dedupKeyFor("sentinel:a"));
+
+    const rows = (await acc.listDedupStates()).filter((r) => r.dedupKey.startsWith("sentinel:"));
+    assert.deepEqual(rows, [
+      { dedupKey: "sentinel:a", state: "bad", firstAt: 10, lastSentAt: 20, suppressed: 3 },
+      { dedupKey: "sentinel:b", state: "bad", firstAt: 30, lastSentAt: 30, suppressed: 0 },
+    ]);
+
+    const after = await Promise.all(KEYS.map((k) => raw.hgetall(acc.dedupKeyFor(k))));
+    assert.deepEqual(after, before, "the SCAN is read-only");
+    assert.ok((await raw.ttl(acc.dedupKeyFor("sentinel:a"))) <= ttlBefore, "no TTL refresh");
+    await acc.delDedup("sentinel:a");
+    assert.deepEqual((await acc.listDedupStates()).filter((r) => r.dedupKey.startsWith("sentinel:")).map((r) => r.dedupKey), ["sentinel:b"]);
   });
 });

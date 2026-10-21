@@ -1,12 +1,12 @@
 /**
- * Weekly-summary async fan-out assembler tests (issue #3394).
+ * Weekly-summary async fan-out assembler tests (issue #3394; plain-lines
+ * contract since issue #5047).
  *
  * Exercises `buildWeeklySummary` directly — the once-a-week async fan-out
- * assembler extracted from `src/digest-fanout.ts` into its own focused leaf
- * `src/digest-weekly.ts`. It takes injectable `deps` (mirroring
+ * assembler in `src/digest-weekly.ts`. It takes injectable `deps` (mirroring
  * `src/aggregators/builder-health.ts`), so every reader here is a stub: no
- * Redis, no GitHub, no timers, no Telegram. The production wrapper in
- * `src/digest.ts` calls it with no args.
+ * Redis, no GitHub, no timers, no Telegram. It returns PLAIN structured lines
+ * (no Telegram markup) that the Morning Brief renders as HTML on Mondays.
  *
  * This is its OWN top-level `describe` with its own lifecycle (no shared
  * Redis teardown to piggyback on — these are stub-only), per the repo authoring
@@ -38,7 +38,7 @@ describe("buildWeeklySummary", () => {
     assert.equal(out, null);
   });
 
-  it("summarises cycles, fix:feature ratio, and milestone", async () => {
+  it("summarises cycles, fix:feature ratio, and milestone as plain lines", async () => {
     const out = await buildWeeklySummary({
       now: () => fixedNow,
       getMetricsTrend: async () => [
@@ -56,11 +56,12 @@ describe("buildWeeklySummary", () => {
       }),
     });
     assert.ok(out !== null);
-    assert.match(out!, /📈 \*Hydra Weekly Summary\*/);
-    assert.match(out!, /\*Cycles:\* 2 run — 1 merged, 1 failed, 0 rolled back, 0 abandoned/);
-    assert.match(out!, /\*Fix:Feature ratio:\* 3:2 \(1\.5:1\)/);
-    assert.match(out!, /\*Milestone:\* Beta — 60% \(3\/5 epics\)/);
-    assert.match(out!, /\*Remaining:\* A, B, C \+1 more/);
+    assert.deepEqual(out!.lines, [
+      "Cycles: 2 run — 1 merged, 1 failed, 0 rolled back, 0 abandoned",
+      "Fix:Feature ratio: 3:2 (1.5:1)",
+      "Milestone: Beta — 60% (3/5 epics)",
+      "Remaining: A, B, C +1 more",
+    ]);
   });
 
   it("emits warnings for a high fix ratio, rollbacks, and a completed milestone", async () => {
@@ -81,8 +82,26 @@ describe("buildWeeklySummary", () => {
       }),
     });
     assert.ok(out !== null);
-    assert.match(out!, /⚠️ Fix ratio is 3:1 — most cycles are fixing previous work/);
-    assert.match(out!, /⚠️ 3 rollbacks this week — executor quality needs attention/);
-    assert.match(out!, /🎉 Milestone "Beta" is 100% complete — ready for operator review/);
+    const text = out!.lines.join("\n");
+    assert.match(text, /⚠️ Fix ratio is 3:1 — most cycles are fixing previous work/);
+    assert.match(text, /⚠️ 3 rollbacks this week — executor quality needs attention/);
+    assert.match(text, /🎉 Milestone "Beta" is 100% complete — ready for operator review/);
+  });
+
+  it("carries no Telegram Markdown markup (no *…* / _…_ / header line) — the brief renders it as HTML", async () => {
+    const out = await buildWeeklySummary({
+      now: () => fixedNow,
+      getMetricsTrend: async () => [
+        { recordedAt: inWeek, tasksMerged: "1", status: "merged", tasksFailed: "0", tasksAbandoned: "0", rolledBack: false },
+      ],
+      getFixFeatureRatio: async () => ({ fixes: 1, features: 1, ratio: 1 }),
+      getCurrentMilestoneProgress: async () => ({ name: "Beta", pctComplete: 10, done: 1, total: 10, remainingTitles: [] }),
+    });
+    assert.ok(out !== null);
+    for (const line of out!.lines) {
+      assert.ok(!/\*|_/.test(line.replace(/[A-Za-z]+_[A-Za-z]+/g, "")), `markup in: ${line}`);
+      assert.ok(line.trim().length > 0, "no blank lines");
+    }
+    assert.ok(!out!.lines.some((l) => /Hydra Weekly Summary/.test(l)), "the brief owns the heading");
   });
 });

@@ -53,19 +53,45 @@ const EXPECTED_MEMBERS = [
   "INFRA_ORIGIN_IDENTITY_WRONG",
   // GLM drainer health signals (issue #3868)
   "GLM_DRAINER_STERILE",
+  // Legacy on-wire spellings with a live in-process producer (issue #5047)
+  "HOLDBACK_REVERTED",
+  "HOLDBACK_CAP_REACHED",
+  "HOLDBACK_REVERT_FAILED",
+  "MODEL_FALLBACK",
+  "AUTOPILOT_PAUSED",
+  "AUTOPILOT_RESUMED",
+  "BUILDER_HEALTH_STAGNATION",
 ] as const;
+
+/**
+ * The on-wire values that pre-date the `namespace:action` grammar and keep
+ * their dotted / hyphenated spelling because the string is a consumer contract
+ * (issue #5047). Pinned EXACTLY: a new member may not join this set — it must
+ * follow the grammar — and a member leaves it only when its producer and every
+ * consumer are renamed together.
+ */
+const LEGACY_WIRE_SPELLINGS = new Set<string>([
+  "holdback.reverted",
+  "holdback.cap-reached",
+  "holdback.revert_failed",
+  "model-fallback",
+  "autopilot-paused",
+  "autopilot-resumed",
+  "builder-health.stagnation",
+]);
 
 const MEMBER_NAMES = Object.keys(NOTIFICATION_EVENT_TYPES);
 const WIRE_VALUES = Object.values(NOTIFICATION_EVENT_TYPES);
 
 describe("event-bus-vocabulary — NOTIFICATION_EVENT_TYPES enum completeness", () => {
-  test("exposes the 11 live event types (issue #5044)", () => {
+  test("exposes the 18 live event types (issues #5044, #5047)", () => {
     // Issue #5044 deleted the 28 codex-era members with no live producer; the
-    // live-producer audit below keeps every remaining member honest.
+    // live-producer audit below keeps every remaining member honest. Issue
+    // #5047 added the 7 legacy-spelled types that already had a producer.
     assert.equal(
       MEMBER_NAMES.length,
-      11,
-      `expected 11 event types, got ${MEMBER_NAMES.length}`,
+      18,
+      `expected 18 event types, got ${MEMBER_NAMES.length}`,
     );
   });
 
@@ -131,18 +157,27 @@ describe("event-bus-vocabulary — discriminator string shape", () => {
     );
   });
 
-  test("every value follows the `namespace:action` discriminator grammar", () => {
+  test("every value follows the `namespace:action` discriminator grammar (legacy spellings pinned)", () => {
     // Each on-wire string is a single `namespace:action` pair — one colon,
     // lower_snake segments on each side. A stray colon or upper-case leak is a
-    // regression against the documented grammar.
+    // regression against the documented grammar. The seven pre-grammar
+    // spellings (issue #5047) are exempt by exact membership only.
     const shape = /^[a-z][a-z_]*:[a-z][a-z_]*$/;
     for (const value of WIRE_VALUES) {
+      if (LEGACY_WIRE_SPELLINGS.has(value)) continue;
       assert.match(
         value,
         shape,
         `on-wire value "${value}" is not a valid namespace:action discriminator`,
       );
     }
+  });
+
+  test("the legacy-spelling exemption is exactly the seven #5047 members (shrink-only)", () => {
+    const legacyInMap = WIRE_VALUES.filter((v) => !/^[a-z][a-z_]*:[a-z][a-z_]*$/.test(v)).sort();
+    assert.deepEqual(legacyInMap, [...LEGACY_WIRE_SPELLINGS].sort());
+    assert.equal(NOTIFICATION_EVENT_TYPES.HOLDBACK_REVERT_FAILED, "holdback.revert_failed");
+    assert.equal(NOTIFICATION_EVENT_TYPES.BUILDER_HEALTH_STAGNATION, "builder-health.stagnation");
   });
 
   test("known event types carry their exact byte-identical wire strings", () => {
@@ -261,10 +296,15 @@ describe("event-bus-vocabulary — downstream formatter completeness", () => {
 //
 //   (a) src/**/*.ts — a comment-stripped event CONSTRUCTION site: a `type:`
 //       object key whose value is `E.<MEMBER>` /
-//       `NOTIFICATION_EVENT_TYPES.<MEMBER>` or the quoted on-wire value.
-//       `case E.X:` and Set/array members (ALERT_TYPES, CRITICAL_EVENT_TYPES,
-//       the formatters) are CONSUMER positions and never count — otherwise the
-//       audit would be satisfied by the very formatters it audits.
+//       `NOTIFICATION_EVENT_TYPES.<MEMBER>` or the quoted on-wire value, OR
+//       (issue #5047) the quoted on-wire value as the first or second argument
+//       of a `publish*(…)` helper call (src/holdback.ts's `publishSafe(bus,
+//       "holdback.reverted", …)`, autopilot-control's `publishPauseEvent(
+//       "autopilot-paused", …)`), which is the same construction site spelled
+//       through a thin wrapper. `case E.X:`, Set/array members (ALERT_TYPES,
+//       the formatters) and `=== "x"` comparisons are CONSUMER positions and
+//       never count — otherwise the audit would be satisfied by the very
+//       formatters it audits.
 //   (b) scripts/**/*.{sh,py,ts,mjs} — a non-comment line containing the quoted
 //       on-wire value (the watchdog's enveloped redis-cli XADDs).
 //   (c) docs/operator-playbooks/**/*.md — a `"type":"<value>"` /
@@ -337,7 +377,9 @@ function producerLanes(lanes: Lanes, member: string, value: string): string[] {
   const srcRe = new RegExp(
     `\\btype:\\s*(?:(?:E|NOTIFICATION_EVENT_TYPES)\\.${member}\\b|"${v}")`,
   );
-  if (lanes.src.some((body) => srcRe.test(body))) found.push("src");
+  // Issue #5047: a publish helper taking the on-wire type as its 1st/2nd arg.
+  const srcPublishArgRe = new RegExp(`\\bpublish\\w*\\(\\s*(?:[^,()]+,\\s*)?"${v}"`);
+  if (lanes.src.some((body) => srcRe.test(body) || srcPublishArgRe.test(body))) found.push("src");
   if (lanes.scriptLines.some((line) => line.includes(`"${value}"`) || line.includes(`'${value}'`))) {
     found.push("scripts");
   }
@@ -417,6 +459,10 @@ describe("event-bus-vocabulary — live-producer audit (issue #5044)", () => {
     const one = (l: Partial<Lanes>): Lanes => ({ src: [], scriptLines: [], playbooks: [], ...l });
     assert.deepEqual(producerLanes(one({ src: ["publish({ type: E.FAKE_MEMBER, payload })"] }), "FAKE_MEMBER", "fake:member"), ["src"]);
     assert.deepEqual(producerLanes(one({ src: ['publish({ type: "fake:member" })'] }), "FAKE_MEMBER", "fake:member"), ["src"]);
+    // Issue #5047: the on-wire type passed through a thin publish helper.
+    assert.deepEqual(producerLanes(one({ src: ['await publishSafe(eventBus, "fake:member", { a: 1 })'] }), "FAKE_MEMBER", "fake:member"), ["src"]);
+    assert.deepEqual(producerLanes(one({ src: ['await publishPauseEvent("fake:member", payload)'] }), "FAKE_MEMBER", "fake:member"), ["src"]);
+    assert.deepEqual(producerLanes(one({ src: ['logger.info("fake:member")', 'formatMessage({ kind: "fake:member" })'] }), "FAKE_MEMBER", "fake:member"), [], "a non-publish call is not a producer");
     assert.deepEqual(producerLanes(one({ scriptLines: ['etype="fake:member"'] }), "FAKE_MEMBER", "fake:member"), ["scripts"]);
     assert.deepEqual(producerLanes(one({ playbooks: ['-d "{\\"type\\":\\"fake:member\\",\\"source\\":\\"x\\"}"'] }), "FAKE_MEMBER", "fake:member"), ["playbooks"]);
   });
