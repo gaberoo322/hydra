@@ -1,0 +1,1 @@
+- refactor: demote unused deriveDispatchKind/DispatchKind re-exports from transcript-scan (#5031)
