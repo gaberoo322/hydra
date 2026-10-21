@@ -1,0 +1,1 @@
+- refactor: delete the Turn Snapshot py-compat / jq-compat / py-format leaves — collectors read payloads in plain TS and degrade with reason codes, not Python exception text (#5084)
