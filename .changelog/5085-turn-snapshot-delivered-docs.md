@@ -1,0 +1,1 @@
+- docs: ADR-0043 records what epic #5082 delivered and the Turn Snapshot module map says the accessor is store-only and the replay contract is the only guard (#5085)
