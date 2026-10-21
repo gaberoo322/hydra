@@ -1,0 +1,1 @@
+- fix: a terminating autopilot turn still arms that turn's QA PASS as an `auto-merge` action before `terminate`, so the parent never hand-merges after terminate (#5144)
