@@ -47,7 +47,7 @@
         "workQueue": 0,
         "board": {
           "ok": false,
-          "reason": "jq: Cannot iterate over null"
+          "reason": "malformed-payload"
         },
         "orchBoardDegraded": "1"
       }
