@@ -952,9 +952,13 @@ describe("no test file hardcodes a launcher-pool Redis DB index (issue #5062)", 
     });
   }
 
-  test("the pool-index guard never flags pure URL string literals (INV-5)", async () => {
+  test("the pool-index guard never flags db 0 pins or pure URL string literals", async () => {
     const patterns = await selectorPatterns();
     for (const src of [
+      'HYDRA_REDIS_DB: "0",',
+      'drc(["-n", "0", "GET", key])',
+      "redis-cli -n 0 GET k",
+      'drcAt("0", ["DEL", k])',
       `parseOwnedDbIndex("redis://localhost:6379/${P}")`,
       `parseOwnedDbIndex("redis://127.0.0.1:6379/${P}")`,
       `launcherPrintUrl({ redisUrl: "redis://localhost:6379/${P}" })`,
