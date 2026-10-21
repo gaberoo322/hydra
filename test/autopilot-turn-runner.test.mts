@@ -15,9 +15,12 @@
  *   collector run and no network): state.turn_snapshot replaced, plan.turn ==
  *   state.turn, absent events → `[]`, absent candidates → the retired-substrate
  *   shape, the summary lines, exit 0; a missing state → exit 2; an
- *   invariant-rejecting plan → exit 1 with the plan left for inspection; an
- *   unusable snapshot or a failed live emit → the all-degraded snapshot, and
- *   the turn still plans (ADR-0043 slice 6b, #4934).
+ *   invariant-rejecting plan → exit 1 with the plan left for inspection; a
+ *   failed live emit → `turn-snapshot.ts --all-degraded`, and when node
+ *   cannot run even that (or a document is unreadable) → the marker document;
+ *   the turn still plans either way (ADR-0043 slice 6b, #4934; #5083). In
+ *   replay mode a document missing a signal decide.py reads fails the turn
+ *   loud (#5083).
  *
  *   stamp-slot.py — every field reap.py / decide.py read back is stamped from
  *   the plan action (skill, worktreeBranch → branch/dispatch_id, isolation,
@@ -36,7 +39,8 @@
  * test-subject sprawl ratchet (test/fixtures/test-subject-baseline.json) must
  * resolve it to one of the three new scripts, never move the decide.py /
  * dispatch.sh counts. The scripts are invoked through
- * paths built from a directory constant for the same reason.
+ * paths built from a directory constant for the same reason (the live-emit
+ * fallback test runs `turn-snapshot.ts --all-degraded` that way too, #5083).
  */
 import test, { describe, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -542,7 +546,7 @@ describe("the playbook Loop routes through the scripts (issue #4831)", () => {
   });
 });
 
-describe("turn.sh — an unusable snapshot still plans, on the all-degraded snapshot (ADR-0043 slice 6b, #4934)", () => {
+describe("turn.sh — an unreadable replay still plans, on the marker document (ADR-0043 slice 6b, #4934; #5083)", () => {
   function replaySandbox(snapshotText: string | null): Sandbox {
     const sb = sandbox();
     sandboxes.push(sb);
@@ -553,22 +557,19 @@ describe("turn.sh — an unusable snapshot still plans, on the all-degraded snap
   }
   const valid = () => readJson(FIXTURE);
 
-  const UNUSABLE: Record<string, string | null> = {
+  const UNREADABLE: Record<string, string | null> = {
     "a missing replay file": null,
     "a non-JSON document": "<html>502</html>",
-    "a wrong schema_version": JSON.stringify({ ...valid(), schema_version: 2 }),
-    "validation.ok=false": JSON.stringify({ ...valid(), validation: { ok: false, issues: [{ path: "signals", message: "x" }] } }),
   };
-  for (const [mode, text] of Object.entries(UNUSABLE)) {
-    test(`${mode}: exit 0, the all-degraded snapshot is applied and decide.py plans conservatively (the doctor runs)`, () => {
+  for (const [mode, text] of Object.entries(UNREADABLE)) {
+    test(`${mode}: exit 0, the marker document is applied and decide.py plans conservatively (the doctor runs)`, () => {
       const sb = replaySandbox(text);
       const r = runTurn(sb);
       assert.equal(r.status, 0, r.stderr);
-      assert.match(r.stderr, /not a usable v1 Turn Snapshot .* applying the all-degraded snapshot/);
-      assert.match(r.stdout, /\[turn\] snapshot: form=all-degraded degraded=1/);
+      assert.match(r.stderr, /not a readable Turn Snapshot .* storing the marker document/);
+      assert.match(r.stdout, /\[turn\] snapshot: form=marker degraded=1/);
       const state = readJson(sb.state);
-      assert.equal(state.turn_snapshot.signals.health_fail, true);
-      assert.equal(state.turn_snapshot.signals.orch_work_available, false, "last turn's snapshot never outlives an unusable one");
+      assert.equal("signals" in state.turn_snapshot, false, "the marker carries no signals: every signal reads degraded");
       assert.deepEqual(state.turn_snapshot.degraded.map((d: { field: string }) => d.field), ["*"]);
       const plan = readJson(sb.plan);
       assert.equal(plan.turn, 4);
@@ -580,18 +581,22 @@ describe("turn.sh — an unusable snapshot still plans, on the all-degraded snap
     });
   }
 
-  test("a per-field-invalid document is repaired, not discarded: the valid fields still drive the plan", () => {
-    const doc = valid();
-    doc.signals.hitl_grill_open = "many";
-    const sb = replaySandbox(JSON.stringify(doc));
+  test("a replayed document is stored as emitted — no Python repair, no markers added (store-only, #5083)", () => {
+    const sb = replaySandbox(readFileSync(FIXTURE, "utf-8"));
     const r = runTurn(sb);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /\[turn\] snapshot: form=json degraded=1/);
-    const state = readJson(sb.state);
-    assert.equal(state.turn_snapshot.signals.hitl_grill_open, 0, "the bad field takes its all-degraded value");
-    assert.equal(state.turn_snapshot.signals.orch_dev_ready_anchor, 4687, "the rest of the document survives");
-    assert.deepEqual(state.turn_snapshot.degraded, [{ collector: "turn-snapshot", field: "hitl_grill_open", reason: "schema-invalid" }]);
-    assert.ok(readJson(sb.plan).actions.length > 0);
+    assert.deepEqual(readJson(sb.state).turn_snapshot, valid());
+  });
+
+  test("replay fails LOUD on a document missing a signal decide.py reads: decide.py raises, turn.sh exits non-zero, no plan (#5083)", () => {
+    const doc = valid();
+    delete doc.signals.orch_board_signals_degraded;
+    const sb = replaySandbox(JSON.stringify(doc));
+    const r = runTurn(sb);
+    assert.notEqual(r.status, 0, "a signal the replayed document lacks must fail the turn, not read as absent");
+    assert.match(r.stderr, /\[turn\] FATAL: decide\.py exit=\d+/);
+    assert.match(r.stderr, /UnknownSignalError: .*orch_board_signals_degraded/);
+    assert.doesNotMatch(r.stdout, /\[turn\] OK/);
   });
 
   test("the usage summary reads the blob through the accessor (the previous value when this turn's is absent)", () => {
@@ -604,33 +609,74 @@ describe("turn.sh — an unusable snapshot still plans, on the all-degraded snap
   });
 });
 
-describe("turn.sh — a failed LIVE emit plans on the all-degraded snapshot (#4934)", () => {
-  /** A `node` shim on PATH standing in for `turn-snapshot.ts --format json`. */
-  const SHIMS: Record<string, { script: string; stderr: RegExp }> = {
-    "non-zero exit": { script: "#!/usr/bin/env bash\necho 'turn-snapshot: boom' >&2\nexit 1\n", stderr: /emit failed \(exit=1\)/ },
-    "empty output": { script: "#!/usr/bin/env bash\nexit 0\n", stderr: /not a usable v1 Turn Snapshot \(unreadable/ },
-    "garbage output": { script: "#!/usr/bin/env bash\necho 'not json {'\nexit 0\n", stderr: /not a usable v1 Turn Snapshot \(unreadable/ },
-  };
+describe("turn.sh — a failed LIVE emit plans on the TS all-degraded snapshot, or the marker without node (#4934, #5083)", () => {
+  /** The real CLI's --all-degraded output for `reason` (generated_at aside). */
+  function cliAllDegraded(reason: string): any {
+    const r = spawnSync(process.execPath, ["--no-warnings", "--experimental-strip-types", join(SCRIPTS, "turn-snapshot.ts"), "--all-degraded", "--reason", reason], { encoding: "utf-8" });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout);
+  }
 
-  for (const [mode, { script, stderr }] of Object.entries(SHIMS)) {
-    test(`${mode}: the all-degraded snapshot replaces last turn's, the plan is written, exit 0`, () => {
-      const state = { ...baseState(), turn_snapshot: readJson(FIXTURE) };
-      const sb = sandbox(state);
-      sandboxes.push(sb);
-      const shims = join(sb.dir, "shims");
-      mkdirSync(shims);
-      writeFileSync(join(shims, "node"), script);
-      chmodSync(join(shims, "node"), 0o755);
-      sb.env.PATH = `${shims}:${process.env.PATH}`;
-      delete sb.env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY;
+  /** A sandbox whose `node` on PATH is `script` (standing in for `turn-snapshot.ts`). */
+  function shimSandbox(script: string): Sandbox {
+    const sb = sandbox({ ...baseState(), turn_snapshot: readJson(FIXTURE) });
+    sandboxes.push(sb);
+    const shims = join(sb.dir, "shims");
+    mkdirSync(shims);
+    writeFileSync(join(shims, "node"), script);
+    chmodSync(join(shims, "node"), 0o755);
+    sb.env.PATH = `${shims}:${process.env.PATH}`;
+    delete sb.env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY;
+    return sb;
+  }
+
+  test("a non-zero collector run: turn.sh applies `turn-snapshot.ts --all-degraded` — a TS-produced document — and the doctor runs", () => {
+    // `--format json` fails; `--all-degraded` reaches the REAL node and CLI.
+    const sb = shimSandbox(
+      `#!/usr/bin/env bash\nfor a in "$@"; do [ "$a" = "--all-degraded" ] && exec ${JSON.stringify(process.execPath)} "$@"; done\necho 'turn-snapshot: boom' >&2\nexit 1\n`,
+    );
+    const r = runTurn(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /emit failed \(exit=1\)/);
+    assert.match(r.stdout, /\[turn\] snapshot: form=all-degraded degraded=1/, "the summary line names the fallback");
+    const doc = readJson(sb.state).turn_snapshot;
+    const want = cliAllDegraded("turn-snapshot.ts exited 1");
+    assert.deepEqual({ ...doc, generated_at: "-" }, { ...want, generated_at: "-" }, "the stored document is the CLI's --all-degraded output, as emitted");
+    assert.deepEqual(doc.degraded, [{ collector: "turn-snapshot", field: "*", reason: "turn-snapshot.ts exited 1" }]);
+    assert.equal(doc.signals.orch_dev_ready_anchor, null, "the stale snapshot must not outlive a failed emit");
+    assert.equal(doc.signals.health_fail, true);
+    const plan = readJson(sb.plan);
+    assert.equal(plan.turn, 4);
+    assert.ok(plan.actions.some((a: any) => a.type === "dispatch" && a.slot === ALL_DEGRADED_HEALTH.slot), JSON.stringify(plan.actions));
+  });
+
+  const NO_NODE = /--all-degraded failed too \(node cannot run\) — applying the marker document/;
+  const MARKER_SHIMS: Record<string, { script: string; stderr: RegExp; reason: RegExp }> = {
+    "node cannot run at all (both calls fail)": { script: "#!/usr/bin/env bash\necho 'node: cannot execute' >&2\nexit 126\n", stderr: NO_NODE, reason: /^turn-snapshot\.ts exited 126; --all-degraded could not run$/ },
+    // A failed --all-degraded run's partial output is never trusted: the marker is stored instead.
+    "--all-degraded prints a document, then exits non-zero": {
+      script: `#!/usr/bin/env bash\nfor a in "$@"; do if [ "$a" = "--all-degraded" ]; then echo '{"schema_version": 1, "generated_at": "partial", "signals": {"orch_work_available": true}, "blobs": {}, "degraded": [], "validation": {"ok": true}}'; exit 3; fi; done\nexit 1\n`,
+      stderr: NO_NODE,
+      reason: /^turn-snapshot\.ts exited 1; --all-degraded could not run$/,
+    },
+    "empty output": { script: "#!/usr/bin/env bash\nexit 0\n", stderr: /not a readable Turn Snapshot \(unreadable/, reason: /^unreadable: / },
+    "garbage output": { script: "#!/usr/bin/env bash\necho 'not json {'\nexit 0\n", stderr: /not a readable Turn Snapshot \(unreadable/, reason: /^unreadable: / },
+  };
+  for (const [mode, { script, stderr, reason }] of Object.entries(MARKER_SHIMS)) {
+    test(`${mode}: the marker document replaces last turn's, the doctor runs, the plan is written, exit 0`, () => {
+      const sb = shimSandbox(script);
       const r = runTurn(sb);
       assert.equal(r.status, 0, r.stderr);
       assert.match(r.stderr, stderr);
-      assert.match(r.stdout, /\[turn\] snapshot: form=all-degraded degraded=1/);
+      assert.match(r.stdout, /\[turn\] snapshot: form=marker degraded=1/);
       const after = readJson(sb.state);
-      assert.equal(after.turn_snapshot.signals.orch_dev_ready_anchor, null, "the stale snapshot must not outlive a failed emit");
-      assert.equal(after.turn_snapshot.signals.health_fail, true);
-      assert.equal(readJson(sb.plan).turn, 4);
+      assert.equal("signals" in after.turn_snapshot, false, "the stale snapshot must not outlive a failed emit");
+      assert.deepEqual(after.turn_snapshot.degraded.map((d: { field: string }) => d.field), ["*"]);
+      assert.match(after.turn_snapshot.degraded[0].reason, reason, "the marker names why no document was read");
+      const plan = readJson(sb.plan);
+      assert.equal(plan.turn, 4);
+      assert.ok(plan.actions.some((a: any) => a.type === "dispatch" && a.slot === ALL_DEGRADED_HEALTH.slot), JSON.stringify(plan.actions));
+      assert.ok(!plan.actions.some((a: any) => a.type === "dispatch" && ["dev_orch", "qa_orch", "dev_target", "qa_target"].includes(a.slot)), "no worker dispatches on facts nobody read");
     });
   }
 });

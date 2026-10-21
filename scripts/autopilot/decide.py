@@ -296,9 +296,10 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Callable, Iterable, Sequence
 
 # The Turn Snapshot accessor (ADR-0043 Decision 5, #4934): decide.py reads
-# every collector-produced fact through it — `state.turn_snapshot`, or the
-# all-degraded snapshot when there is none usable — and never parses a
-# packed wire string itself. A sibling module; the path insert lets an
+# every collector-produced fact through it — `state.turn_snapshot` as the TS
+# emitter wrote it (an all-degraded document when the collector run failed),
+# or, when no document could be read, a marker that reads every signal
+# degraded (#5083) — and never parses a packed wire string itself. A sibling module; the path insert lets an
 # importlib/spec load of this file resolve it too.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import turn_snapshot as ts  # noqa: E402
