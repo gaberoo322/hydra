@@ -35,7 +35,8 @@ import {
   type BriefSourcesDeps,
   type StagnationLike,
 } from "./brief-sources.ts";
-import { BriefScheduler, localParts } from "./brief-scheduler.ts";
+import { BriefScheduler, localParts, weeklyDue } from "./brief-scheduler.ts";
+import { loadTelegramCredentials } from "./credentials.ts";
 
 export const BRIEF_DEDUP_KEY = "morning-brief";
 /** Items window when no last-sent key exists yet (first brief ever). */
@@ -210,6 +211,13 @@ export interface SendBriefDeps {
   transport?: TelegramTransportFn;
   appendLog?: (entry: DeliveryLogEntry) => Promise<void>;
   sources?: BriefSourcesDeps;
+  /**
+   * Credential presence check run BEFORE the section fan-out, so a tick with no
+   * Telegram credentials never pays for the gh / Redis readers. Defaults to the
+   * single loader when `transport` is the default; an injected transport is
+   * assumed to bring its own credentials.
+   */
+  hasCredentials?: () => boolean;
 }
 
 export interface SendBriefResult {
@@ -221,7 +229,9 @@ export interface SendBriefResult {
 
 /**
  * Build, render and send the brief. `lastSentAt === null` reads a 24h window.
- * Monday (local weekday 1) appends the weekly summary. Every send is logged
+ * Monday (local weekday 1) appends the weekly summary — as does a catch-up
+ * brief whose last delivered send pre-dates this week's Monday
+ * ({@link weeklyDue}), so a failed Monday never loses the week. Every send is logged
  * with kind `brief` in the delivery log; the log write is best-effort.
  * Never throws for transport or Redis failure.
  */
@@ -230,16 +240,27 @@ export async function sendMorningBrief(opts: { lastSentAt: number | null; deps?:
   const now = d.now ?? (() => Date.now());
   const transport = d.transport ?? sendHtmlToTelegram;
   const appendLog = d.appendLog ?? defaultAppendLog;
+  const hasCredentials = d.hasCredentials ?? (d.transport ? () => true : () => loadTelegramCredentials() !== null);
   const at = now();
   const parts = localParts(at);
   const sinceMs = opts.lastSentAt ?? at - BRIEF_DEFAULT_WINDOW_MS;
 
-  const sources = await readBriefSources({ sinceMs, includeWeekly: parts.weekday === 1, deps: d.sources });
-  const text = renderBrief(composeBrief(sources, { now: at, lastSentAt: opts.lastSentAt }));
-
-  const result = await transport(text);
-  // (tsconfig is non-strict, so `ok` does not narrow the union: read via a view.)
-  const view = result as { ok: boolean; mode?: string; reason?: string; status?: number };
+  let text = "";
+  let view: { ok: boolean; mode?: string; reason?: string; status?: number };
+  if (!hasCredentials()) {
+    // Short-circuit BEFORE the fan-out: nothing can be delivered, so do not
+    // run the attention-feed / scorecard / merge readers on every tick.
+    view = { ok: false, reason: "no-credentials" };
+  } else {
+    const sources = await readBriefSources({
+      sinceMs,
+      includeWeekly: weeklyDue(at, opts.lastSentAt),
+      deps: d.sources,
+    });
+    text = renderBrief(composeBrief(sources, { now: at, lastSentAt: opts.lastSentAt }));
+    // (tsconfig is non-strict, so `ok` does not narrow the union: read via a view.)
+    view = (await transport(text)) as typeof view;
+  }
   let outcome: DeliveryOutcome;
   if (view.ok) outcome = view.mode === "plain" ? "sent-plain" : "sent-html";
   else if (view.reason === "no-credentials") outcome = "skipped-no-credentials";

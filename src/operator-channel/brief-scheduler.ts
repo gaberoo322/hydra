@@ -59,6 +59,26 @@ export function briefDue(now: LocalParts, lastSentAt: number | null): boolean {
   return localParts(lastSentAt).dateKey < now.dateKey;
 }
 
+/** The `YYYY-MM-DD` local date key of the Monday that starts `epochMs`'s week. */
+export function weekMondayDateKey(epochMs: number): string {
+  const d = new Date(epochMs);
+  const back = (d.getDay() + 6) % 7; // Mon=0 … Sun=6 days since Monday
+  return localParts(new Date(d.getFullYear(), d.getMonth(), d.getDate() - back).getTime()).dateKey;
+}
+
+/**
+ * True iff this brief should carry the weekly summary: it is Monday, OR the
+ * last delivered brief pre-dates this week's Monday (every Monday send failed,
+ * so the catch-up brief carries the week it would otherwise lose). Pure, same
+ * shape as {@link briefDue}; a never-sent brief (null) gets no weekly section
+ * outside Monday.
+ */
+export function weeklyDue(nowMs: number, lastSentAt: number | null): boolean {
+  if (localParts(nowMs).weekday === 1) return true;
+  if (lastSentAt === null) return false;
+  return localParts(lastSentAt).dateKey < weekMondayDateKey(nowMs);
+}
+
 /** The persistence the scheduler needs; production binds `redisBriefStore`. */
 export interface BriefStore {
   getLastSent(): Promise<number | null>;

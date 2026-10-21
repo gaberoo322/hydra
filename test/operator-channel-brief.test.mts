@@ -21,6 +21,8 @@ import {
   composeBrief,
   localParts,
   messageFromEvent,
+  weeklyDue,
+  weekMondayDateKey,
   readBriefSources,
   renderBrief,
   renderBriefLine,
@@ -487,6 +489,54 @@ describe("readBriefSources / composeBrief", () => {
     assert.ok(sent[0].includes("<b>Weekly summary</b>"));
     assert.ok(sent[0].includes("Cycles: 3 run — 2 merged"));
     assert.ok(!sent[1].includes("Weekly summary"));
+  });
+
+  test("a Tuesday catch-up brief carries the weekly section when the last send pre-dates this week's Monday", async () => {
+    const SUN = local(2026, 10, 18, 7, 30);
+    assert.equal(weekMondayDateKey(TUE(7, 30)), "2026-10-19");
+    assert.equal(weekMondayDateKey(MON(0, 1)), "2026-10-19");
+    assert.equal(weeklyDue(TUE(7, 30), SUN), true, "every Monday send failed → Tuesday carries the week");
+    assert.equal(weeklyDue(TUE(7, 30), MON(7, 30)), false, "Monday's brief already carried it");
+    assert.equal(weeklyDue(TUE(7, 30), null), false, "a first-ever brief gets no weekly section outside Monday");
+    assert.equal(weeklyDue(MON(7, 30), SUN), true);
+    assert.equal(weeklyDue(MON(7, 30), null), true, "Monday always");
+
+    const calls: number[] = [];
+    const sources = healthyDeps({
+      buildWeeklySummary: async () => {
+        calls.push(1);
+        return { lines: ["Cycles: 1 run — 1 merged"] };
+      },
+    });
+    const { transport, sent } = fakeTransport();
+    await sendMorningBrief({ lastSentAt: SUN, deps: { now: () => TUE(7, 30), transport, appendLog: async () => {}, sources } });
+    await sendMorningBrief({ lastSentAt: MON(7, 30), deps: { now: () => TUE(7, 30), transport, appendLog: async () => {}, sources } });
+    assert.equal(calls.length, 1);
+    assert.ok(sent[0].includes("<b>Weekly summary</b>"));
+    assert.ok(!sent[1].includes("Weekly summary"));
+  });
+
+  test("with no Telegram credentials the send short-circuits before any source reader runs and logs skipped-no-credentials", async () => {
+    let reads = 0;
+    const counting = Object.fromEntries(
+      Object.entries(healthyDeps()).map(([k, fn]) => [k, async (...a: unknown[]) => (reads++, (fn as any)(...a))]),
+    ) as BriefSourcesDeps;
+    const { transport, sent } = fakeTransport();
+    const log: DeliveryLogEntry[] = [];
+    const res = await sendMorningBrief({
+      lastSentAt: null,
+      deps: { now: () => TUE(7, 30), transport, appendLog: async (e) => void log.push(e), sources: counting, hasCredentials: () => false },
+    });
+    assert.deepEqual([res.ok, res.outcome], [false, "skipped-no-credentials"]);
+    assert.equal(reads, 0, "no reader ran");
+    assert.equal(sent.length, 0, "nothing hit the transport");
+    assert.deepEqual(log.map((e) => [e.kind, e.outcome]), [["brief", "skipped-no-credentials"]]);
+    // The scheduler therefore stamps nothing and retries next tick.
+    const { store, peek } = memoryBriefStore();
+    const s = new BriefScheduler({ store, now: () => TUE(7, 30), send: (o) => sendMorningBrief({ lastSentAt: o.lastSentAt, deps: { now: () => TUE(7, 30), transport, appendLog: async () => {}, sources: counting, hasCredentials: () => false } }) });
+    assert.equal(await s.tick(), "failed");
+    assert.equal(peek(), null);
+    assert.equal(reads, 0);
   });
 
   test("every send is logged with kind brief; a transport failure logs failed with its status and reports ok:false", async () => {
