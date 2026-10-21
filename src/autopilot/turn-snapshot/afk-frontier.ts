@@ -191,7 +191,7 @@ export async function collectRetro(deps: AfkFrontierDeps): Promise<CollectorOutc
  * Python's `int(x)` as `print(int(n))` printed it, or null where it raises
  * (the loop then stops: every later map is dropped, as in the heredoc).
  */
-function pyIntText(x: unknown): string | null {
+function integerText(x: unknown): string | null {
   if (typeof x === "boolean") return x ? "1" : "0";
   if (typeof x === "number") return Number.isFinite(x) ? BigInt(Math.trunc(x)).toString() : null;
   if (typeof x === "string") {
@@ -218,7 +218,7 @@ export function foldWayfinderMaps(read: GhJsonRead): Classified<string[]> {
   if ("reason" in numbers) return fail(numbers.reason);
   const out: string[] = [];
   for (const n of numbers.value) {
-    const text = pyIntText(n);
+    const text = integerText(n);
     if (text === null) break;
     out.push(text);
   }

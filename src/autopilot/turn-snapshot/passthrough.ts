@@ -255,7 +255,7 @@ function foldRecommendations(p: Parsed): Classified<RecommendationsValue> {
 }
 
 /** `jq -sRr @uri`: percent-encode every UTF-8 byte outside `A-Za-z0-9-_.~`. */
-export function jqUri(s: string): string {
+export function percentEncode(s: string): string {
   let out = "";
   for (const byte of new TextEncoder().encode(s)) {
     const ch = String.fromCharCode(byte);
@@ -268,7 +268,7 @@ export function jqUri(s: string): string {
 function slotEventsPath(env: PassthroughEnv): string {
   const lastId = env.HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID || "0";
   const count = env.HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT || "100";
-  return `/autopilot/slot-events?last_id=${jqUri(lastId)}&count=${count}`;
+  return `/autopilot/slot-events?last_id=${percentEncode(lastId)}&count=${count}`;
 }
 
 // ---------------------------------------------------------------------------

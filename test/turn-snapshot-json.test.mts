@@ -56,7 +56,7 @@ import {
   buildTurnSnapshot,
   serializeTurnSnapshot,
   staleDays,
-  pyFromIsoformatEpoch,
+  isoEpochSeconds,
   type TurnSnapshotValues,
 } from "../src/autopilot/turn-snapshot/json-snapshot.ts";
 import { ALL_DEGRADED_SIGNALS, TurnSnapshotSchema } from "../src/schemas/turn-snapshot.ts";
@@ -513,8 +513,8 @@ describe("turn snapshot JSON: builder details (#4934)", () => {
     assert.equal(staleDays("not-a-date", 7, NOW_MS), true);
     assert.equal(staleDays("2026-10-05T08:00:00Z", 7, NOW_MS), false);
     assert.equal(staleDays("2026-09-01T08:00:00+02:00", 7, NOW_MS), true);
-    assert.equal(pyFromIsoformatEpoch("2026-10-07T12:00:00+00:00"), NOW_MS / 1000);
-    assert.equal(pyFromIsoformatEpoch("2026-02-30"), null);
+    assert.equal(isoEpochSeconds("2026-10-07T12:00:00+00:00"), NOW_MS / 1000);
+    assert.equal(isoEpochSeconds("2026-02-30"), null);
   });
 
 });

@@ -84,26 +84,17 @@ export interface PicksSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// Python / jq crash semantics (the golden files pin them)
+// Payload-shape readers (the golden files pin the degrade-on-malformed rule)
 // ---------------------------------------------------------------------------
 
-/** A shape the strangled python/jq would have raised on — the whole block degrades. */
-class PayloadShapeError extends Error {}
-
-function crash(why: string): never {
-  throw new PayloadShapeError(why);
-}
-
-/** Run one strangled block; a {@link PayloadShapeError} yields its fallback, exactly as `except: pass` / `|| true` did. */
-function block<T>(fn: () => T, fallback: T): T {
-  try {
-    return fn();
-  } catch (err) {
-    /* intentional: the bash block swallowed this (`except: pass`, `2>/dev/null || true`); the fallback IS today's degraded output */
-    if (err instanceof PayloadShapeError) return fallback;
-    throw err;
-  }
-}
+/**
+ * Returned by a reader when the payload has a shape the strangled bash/python
+ * would have crashed on. A classifier that sees it degrades its whole block to
+ * the fallback — exactly as the old `except: pass` / `|| true` / a jq error
+ * did — by an explicit early return, never by a throw.
+ */
+const MALFORMED = Symbol("malformed-payload");
+type Malformed = typeof MALFORMED;
 
 type Dict = Record<string, unknown>;
 
@@ -114,80 +105,99 @@ function isDict(v: unknown): v is Dict {
 /**
  * Whether a decoded JSON field carries a value — the pick blocks' `x or
  * default` reading: `null`, `false`, `0`, `""` and an EMPTY list or object
- * read as unset; a non-empty list or object does not.
+ * read as unset; a non-empty list or object does not. (Python truthiness: a
+ * naive JS truthiness check would call `[]` and `{}` set.)
  */
 function isSet(v: unknown): boolean {
   return v !== null && typeof v === "object" ? Object.keys(v).length > 0 : Boolean(v);
 }
 
-/** `isinstance(v, int)` for a JSON-decoded value (JS cannot tell `5.0` from `5`). */
-function isPyInt(v: unknown): v is number {
+/** Is the value an integer? (JSON decoding cannot tell `5.0` from `5`.) */
+function isInteger(v: unknown): v is number {
   return typeof v === "number" && Number.isInteger(v);
 }
 
-/** `for x in v` over a JSON-decoded value. */
-function pyIter(v: unknown): unknown[] {
+/**
+ * The elements a loop over a decoded JSON value visits: a list's items, a
+ * string's characters, a dict's keys; anything else is not iterable.
+ */
+function elementsOf(v: unknown): unknown[] | Malformed {
   if (Array.isArray(v)) return v;
   if (typeof v === "string") return [...v];
   if (isDict(v)) return Object.keys(v);
-  return crash("not iterable");
+  return MALFORMED;
 }
 
-/** `d.get(k, dflt)` — `d` must be a dict. */
-function pyGet(d: unknown, k: string, dflt: unknown = null): unknown {
-  if (!isDict(d)) return crash("get on a non-dict");
-  return k in d ? d[k] : dflt;
+/** `row[key]`, or `dflt` when absent; a non-object row is malformed. */
+function fieldOf(row: unknown, key: string, dflt: unknown = null): unknown {
+  if (!isDict(row)) return MALFORMED;
+  return key in row ? row[key] : dflt;
 }
 
-/** `d.get(k) or ''` used as a str. */
-function pyStrField(d: unknown, k: string): string {
-  const v = pyGet(d, k);
+/** `row[key]` read as text, `""` when unset; a non-text value is malformed. */
+function textField(row: unknown, key: string): string | Malformed {
+  const v = fieldOf(row, key);
+  if (v === MALFORMED) return MALFORMED;
   if (!isSet(v)) return "";
-  if (typeof v !== "string") return crash(`${k} is not a str`);
+  if (typeof v !== "string") return MALFORMED;
   return v;
 }
 
-/** `{l.get('name', '') for l in (it.get('labels') or [])}`. */
-function pyLabelNames(it: unknown): Set<unknown> {
-  const raw = pyGet(it, "labels");
+/** The set of a row's label names (`""` for a nameless label); a non-hashable name is malformed. */
+function labelNamesOf(row: unknown): Set<unknown> | Malformed {
+  const raw = fieldOf(row, "labels");
+  if (raw === MALFORMED) return MALFORMED;
+  const labels = elementsOf(isSet(raw) ? raw : []);
+  if (labels === MALFORMED) return MALFORMED;
   const out = new Set<unknown>();
-  for (const l of pyIter(isSet(raw) ? raw : [])) {
-    const name = pyGet(l, "name", "");
-    if (name !== null && typeof name === "object") crash("unhashable label name");
+  for (const l of labels) {
+    const name = fieldOf(l, "name", "");
+    if (name === MALFORMED || (name !== null && typeof name === "object")) return MALFORMED;
     out.add(name);
   }
   return out;
 }
 
-/** A jq runtime error — the whole `gh … --jq` read fails. */
-class JqError extends Error {}
-
-function jqFail(why: string): never {
-  throw new JqError(why);
-}
-
-function jqIter(v: unknown): unknown[] {
+/** The values a `.[]` walk visits (list items, or an object's values); anything else is malformed. */
+function valuesOf(v: unknown): unknown[] | Malformed {
   if (Array.isArray(v)) return v;
   if (isDict(v)) return Object.values(v);
-  return jqFail("cannot iterate");
+  return MALFORMED;
 }
 
-function jqField(v: unknown, k: string): unknown {
-  if (v === null) return null;
-  if (!isDict(v)) return jqFail(`cannot index with ${k}`);
-  return k in v ? v[k] : null;
+/** `row[key]` where a null row yields null (a `.field` walk); any other non-object row is malformed. */
+function nullableField(row: unknown, key: string): unknown {
+  if (row === null) return null;
+  if (!isDict(row)) return MALFORMED;
+  return key in row ? row[key] : null;
 }
 
-function jqStartsWith(s: unknown, prefix: string): boolean {
-  if (typeof s !== "string") return jqFail("startswith() requires string inputs");
-  return s.startsWith(prefix);
-}
-
-/** `.labels | map(.name)` (`// []` when `orEmpty`). */
-function jqLabelNames(row: unknown, orEmpty: boolean): unknown[] {
-  let labels = jqField(row, "labels");
+/** `.labels | map(.name)` (`// []` when `orEmpty`); malformed when the walk cannot run. */
+function labelNameList(row: unknown, orEmpty: boolean): unknown[] | Malformed {
+  let labels = nullableField(row, "labels");
+  if (labels === MALFORMED) return MALFORMED;
   if (orEmpty && (labels === null || labels === false)) labels = [];
-  return jqIter(labels).map((l) => jqField(l, "name"));
+  const items = valuesOf(labels);
+  if (items === MALFORMED) return MALFORMED;
+  const names: unknown[] = [];
+  for (const l of items) {
+    const name = nullableField(l, "name");
+    if (name === MALFORMED) return MALFORMED;
+    names.push(name);
+  }
+  return names;
+}
+
+/**
+ * An integer from a decoded JSON value, or `null` where the conversion is
+ * undefined (non-finite number, non-numeric text, list, ...). Booleans are
+ * 0/1, floats truncate, text may carry a sign, spaces and `_` digit groups.
+ */
+function toInteger(v: unknown): number | null {
+  if (typeof v === "boolean") return v ? 1 : 0;
+  if (typeof v === "number") return Number.isFinite(v) ? Math.trunc(v) : null;
+  if (typeof v === "string" && /^\s*[+-]?\d(?:_?\d)*\s*$/.test(v)) return Number(v.trim().replace(/_/g, ""));
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -200,31 +210,41 @@ function jqLabelNames(row: unknown, orEmpty: boolean): unknown[] {
  * read FAILED, exactly as the bash saw it).
  */
 function dropTargetBacklog(data: unknown): unknown[] | null {
-  try {
-    return jqIter(data).filter((row) => !jqLabelNames(row, false).includes(ORCH_BOARD_LABELS.target_backlog));
-  } catch (err) {
-    /* intentional: a jq error made the bash read come back empty — `null` is that failed read, noted by the caller */
-    if (err instanceof JqError) return null;
-    throw err;
+  const rows = valuesOf(data);
+  if (rows === MALFORMED) return null;
+  const kept: unknown[] = [];
+  for (const row of rows) {
+    const names = labelNameList(row, false);
+    if (names === MALFORMED) return null;
+    if (!names.includes(ORCH_BOARD_LABELS.target_backlog)) kept.push(row);
   }
+  return kept;
 }
 
-/** Strict-blocker refs of one row (Epic refs subtracted, self-refs excluded) — src/github/blockers.ts. */
-function rowBlockerRefs(it: unknown, n: number): number[] {
-  return extractStrictBlockerRefs(pyStrField(it, "body")).filter((x) => x !== n);
+/**
+ * Strict-blocker refs of one row (Epic refs subtracted, self-refs excluded) —
+ * src/github/blockers.ts. {@link MALFORMED} when the row's body is not text.
+ */
+function rowBlockerRefs(it: unknown, n: number): number[] | Malformed {
+  const body = textField(it, "body");
+  if (body === MALFORMED) return MALFORMED;
+  return extractStrictBlockerRefs(body).filter((x) => x !== n);
 }
 
-/** Step 1 (#3965): the union of strict-blocker refs across the pool, ascending. */
+/** Step 1 (#3965): the union of strict-blocker refs across the pool, ascending. A malformed pool is `[]`. */
 export function blockerRefUnion(items: unknown): number[] {
-  return block(() => {
-    const refs = new Set<number>();
-    for (const it of pyIter(items)) {
-      const n = pyGet(it, "number");
-      if (!isPyInt(n)) continue;
-      for (const x of rowBlockerRefs(it, n)) refs.add(x);
-    }
-    return [...refs].sort((a, b) => a - b);
-  }, []);
+  const rows = elementsOf(items);
+  if (rows === MALFORMED) return [];
+  const refs = new Set<number>();
+  for (const it of rows) {
+    const n = fieldOf(it, "number");
+    if (n === MALFORMED) return [];
+    if (!isInteger(n)) continue;
+    const rowRefs = rowBlockerRefs(it, n);
+    if (rowRefs === MALFORMED) return [];
+    for (const x of rowRefs) refs.add(x);
+  }
+  return [...refs].sort((a, b) => a - b);
 }
 
 /**
@@ -234,47 +254,52 @@ export function blockerRefUnion(items: unknown): number[] {
  */
 export function openBlockers(read: GhJsonRead, requested: readonly number[]): number[] {
   if (read.kind !== "ok") return [...requested];
-  return block(() => {
-    const rows = Array.isArray(read.data) ? read.data : [];
-    const open = new Set<number>();
-    for (const r of rows) {
-      const n = pyGet(r, "number");
-      if (isPyInt(n)) open.add(n);
-    }
-    return requested.filter((x) => open.has(x));
-  }, [...requested]);
+  const rows = Array.isArray(read.data) ? read.data : [];
+  const open = new Set<number>();
+  for (const r of rows) {
+    const n = fieldOf(r, "number");
+    if (n === MALFORMED) return [...requested];
+    if (isInteger(n)) open.add(n);
+  }
+  return requested.filter((x) => open.has(x));
 }
 
-/** Step 3 (#3965): the pool members blocked by an OPEN strict blocker, ascending. */
+/** Step 3 (#3965): the pool members blocked by an OPEN strict blocker, ascending. A malformed pool is `[]`. */
 export function blockedDependencyIssues(items: unknown, open: ReadonlySet<number>): number[] {
-  return block(() => {
-    const blocked: number[] = [];
-    for (const it of pyIter(items)) {
-      const n = pyGet(it, "number");
-      if (!isPyInt(n)) continue;
-      if (rowBlockerRefs(it, n).some((x) => open.has(x))) blocked.push(n);
-    }
-    return blocked.sort((a, b) => a - b);
-  }, []);
+  const rows = elementsOf(items);
+  if (rows === MALFORMED) return [];
+  const blocked: number[] = [];
+  for (const it of rows) {
+    const n = fieldOf(it, "number");
+    if (n === MALFORMED) return [];
+    if (!isInteger(n)) continue;
+    const rowRefs = rowBlockerRefs(it, n);
+    if (rowRefs === MALFORMED) return [];
+    if (rowRefs.some((x) => open.has(x))) blocked.push(n);
+  }
+  return blocked.sort((a, b) => a - b);
 }
 
 /**
  * The candidate pool (#3711): issue number ASCENDING, capped at
  * {@link GRILL_CANDIDATE_CAP}, minus in-flight dev work, `in-progress`, and
- * the blocked-dependency set (a HARD skip at construction, #3965).
+ * the blocked-dependency set (a HARD skip at construction, #3965). A malformed
+ * pool is `[]`.
  */
 export function grillCandidates(items: unknown, inflight: ReadonlySet<number>, blockedDep: ReadonlySet<number>): number[] {
-  return block(() => {
-    const nums = new Set<number>();
-    for (const it of pyIter(items)) {
-      const n = pyGet(it, "number");
-      if (!isPyInt(n)) continue;
-      const labels = pyLabelNames(it);
-      if (inflight.has(n) || labels.has(ORCH_BOARD_LABELS.in_progress) || blockedDep.has(n)) continue;
-      nums.add(n);
-    }
-    return [...nums].sort((a, b) => a - b).slice(0, GRILL_CANDIDATE_CAP);
-  }, []);
+  const rows = elementsOf(items);
+  if (rows === MALFORMED) return [];
+  const nums = new Set<number>();
+  for (const it of rows) {
+    const n = fieldOf(it, "number");
+    if (n === MALFORMED) return [];
+    if (!isInteger(n)) continue;
+    const labels = labelNamesOf(it);
+    if (labels === MALFORMED) return [];
+    if (inflight.has(n) || labels.has(ORCH_BOARD_LABELS.in_progress) || blockedDep.has(n)) continue;
+    nums.add(n);
+  }
+  return [...nums].sort((a, b) => a - b).slice(0, GRILL_CANDIDATE_CAP);
 }
 
 /**
@@ -289,28 +314,27 @@ export function parseGlmWithheld(boardState: string | null): ReadonlySet<number>
   if (parsed.kind !== "ok" || !isDict(parsed.data)) return out;
   const xs = parsed.data.glm_withheld;
   if (!Array.isArray(xs)) return out;
-  for (const x of xs) if (isPyInt(x) && x > 0) out.add(x);
+  for (const x of xs) if (isInteger(x) && x > 0) out.add(x);
   return out;
 }
 
 /**
  * The shipped-work set (#4690): issues a MERGED PR references, by
  * src/github/pr-refs.ts `mergedPrReferences` (closing verb over title+body OR
- * a `(#N)` title anchor). An unparseable / non-list payload is the empty set.
+ * a `(#N)` title anchor). An unparseable / non-list / malformed payload is the
+ * empty set.
  */
 export function mergedRefIssues(read: GhJsonRead): ReadonlySet<number> {
   if (read.kind !== "ok" || !Array.isArray(read.data)) return new Set();
-  return block<ReadonlySet<number>>(() => {
-    const rows: PrRefRow[] = [];
-    for (const pr of read.data as unknown[]) {
-      if (!isDict(pr)) continue;
-      const title = isSet(pr.title) ? pr.title : "";
-      if (typeof title !== "string") crash("title is not a str");
-      const body = isSet(pr.body) ? pr.body : "";
-      rows.push({ title, body: typeof body === "string" ? body : JSON.stringify(body) });
-    }
-    return mergedPrReferences(rows);
-  }, new Set());
+  const rows: PrRefRow[] = [];
+  for (const pr of read.data as unknown[]) {
+    if (!isDict(pr)) continue;
+    const title = isSet(pr.title) ? pr.title : "";
+    if (typeof title !== "string") return new Set();
+    const body = isSet(pr.body) ? pr.body : "";
+    rows.push({ title, body: typeof body === "string" ? body : JSON.stringify(body) });
+  }
+  return mergedPrReferences(rows);
 }
 
 /**
@@ -322,17 +346,9 @@ function isFreshArtifact(body: string, nowMs: number): boolean {
   const parsed = parseJsonRead(body);
   if (parsed.kind !== "ok" || !isDict(parsed.data)) return false;
   const raw = "createdAt" in parsed.data ? parsed.data.createdAt : 0;
-  const created = pyIntOf(isSet(raw) ? raw : 0);
+  const created = toInteger(isSet(raw) ? raw : 0);
   if (created === null) return false;
   return Math.floor(nowMs) - created <= DESIGN_CONCEPT_MAX_AGE_MS;
-}
-
-/** `int(v)` for a JSON-decoded value, or `null` where Python raises. */
-function pyIntOf(v: unknown): number | null {
-  if (typeof v === "boolean") return v ? 1 : 0;
-  if (typeof v === "number") return Number.isFinite(v) ? Math.trunc(v) : null;
-  if (typeof v === "string" && /^\s*[+-]?\d(?:_?\d)*\s*$/.test(v)) return Number(v.trim().replace(/_/g, ""));
-  return null;
 }
 
 /**
@@ -341,19 +357,24 @@ function pyIntOf(v: unknown): number | null {
  * row cannot be found or read, the old fail-toward-grill default).
  */
 function candidateExemption(items: readonly unknown[], n: number): GlmGrillExemption | null {
-  return block<GlmGrillExemption | null>(() => {
-    const row = items.find((x) => {
-      const num = pyGet(x, "number", -1);
-      const asInt = pyIntOf(num);
-      if (asInt === null) crash("int(number) raised");
-      return asInt === n;
-    });
-    if (row === undefined || !isDict(row)) return null;
-    const names = [...pyLabelNames(row)].filter((x): x is string => typeof x === "string");
-    const title = typeof row.title === "string" ? row.title : null;
-    const body = typeof row.body === "string" ? row.body : null;
-    return glmGrillExemption({ number: n, labels: names, title, body });
-  }, null);
+  let row: unknown;
+  for (const x of items) {
+    const num = fieldOf(x, "number", -1);
+    if (num === MALFORMED) return null;
+    const asInt = toInteger(num);
+    if (asInt === null) return null;
+    if (asInt === n) {
+      row = x;
+      break;
+    }
+  }
+  if (row === undefined || !isDict(row)) return null;
+  const labels = labelNamesOf(row);
+  if (labels === MALFORMED) return null;
+  const names = [...labels].filter((x): x is string => typeof x === "string");
+  const title = typeof row.title === "string" ? row.title : null;
+  const body = typeof row.body === "string" ? row.body : null;
+  return glmGrillExemption({ number: n, labels: names, title, body });
 }
 
 /** The Candidate Exclusion records (#3964) over the RAW pool; a malformed payload is `[]`. */
@@ -363,75 +384,74 @@ function candidateExclusionRecords(
   bodyRefIssues: ReadonlySet<number>,
 ): CandidateExclusionRecord[] {
   const items = read.kind === "ok" && Array.isArray(read.data) ? read.data : [];
-  return block(() => {
-    const records: CandidateExclusionRecord[] = [];
-    const add = (anchor: string, member: CandidateExclusionRecord["member"], excluded: string | null) =>
-      records.push({ anchor, member, verdict: excluded === null ? "survived" : "excluded", evidence: excluded ?? "" });
-    for (const it of items) {
-      const n = pyGet(it, "number");
-      if (!isPyInt(n)) continue;
-      const anchor = `issue-${n}`;
-      const labels = pyLabelNames(it);
-      const title = pyStrField(it, "title").replace(/^\s+/, "");
-      add(anchor, "target-scope-exclusion", labels.has(ORCH_BOARD_LABELS.target_backlog) ? "target-backlog-label" : null);
-      add(
-        anchor,
-        "in-flight-dev-exclusion",
-        bodyRefIssues.has(n)
-          ? "pr-body-ref"
-          : branchIssues.has(n)
-            ? "pr-branch-name"
-            : labels.has(ORCH_BOARD_LABELS.in_progress)
-              ? "in-progress-label"
-              : null,
-      );
-      add(
-        anchor,
-        "mechanical-exclusion",
-        labels.has(ORCH_BOARD_LABELS.cleanup_scan)
-          ? "cleanup-scan-label"
-          : title.toLowerCase().startsWith("track:")
-            ? "track-title-prefix"
+  const records: CandidateExclusionRecord[] = [];
+  const add = (anchor: string, member: CandidateExclusionRecord["member"], excluded: string | null) =>
+    records.push({ anchor, member, verdict: excluded === null ? "survived" : "excluded", evidence: excluded ?? "" });
+  for (const it of items) {
+    const n = fieldOf(it, "number");
+    if (n === MALFORMED) return [];
+    if (!isInteger(n)) continue;
+    const anchor = `issue-${n}`;
+    const labels = labelNamesOf(it);
+    if (labels === MALFORMED) return [];
+    const rawTitle = textField(it, "title");
+    if (rawTitle === MALFORMED) return [];
+    const title = rawTitle.replace(/^\s+/, "");
+    add(anchor, "target-scope-exclusion", labels.has(ORCH_BOARD_LABELS.target_backlog) ? "target-backlog-label" : null);
+    add(
+      anchor,
+      "in-flight-dev-exclusion",
+      bodyRefIssues.has(n)
+        ? "pr-body-ref"
+        : branchIssues.has(n)
+          ? "pr-branch-name"
+          : labels.has(ORCH_BOARD_LABELS.in_progress)
+            ? "in-progress-label"
             : null,
-      );
-      add(
-        anchor,
-        "trivial-anchor-exclusion",
-        labels.has(ORCH_BOARD_LABELS.needs_design_concept)
-          ? null
-          : /Expected\s+tier:\s*T?1\b/i.test(pyStrField(it, "body"))
-            ? "expected-tier-t1"
-            : null,
-      );
+    );
+    add(
+      anchor,
+      "mechanical-exclusion",
+      labels.has(ORCH_BOARD_LABELS.cleanup_scan)
+        ? "cleanup-scan-label"
+        : title.toLowerCase().startsWith("track:")
+          ? "track-title-prefix"
+          : null,
+    );
+    let trivial: string | null = null;
+    if (!labels.has(ORCH_BOARD_LABELS.needs_design_concept)) {
+      const body = textField(it, "body");
+      if (body === MALFORMED) return [];
+      if (/Expected\s+tier:\s*T?1\b/i.test(body)) trivial = "expected-tier-t1";
     }
-    return records;
-  }, []);
+    add(anchor, "trivial-anchor-exclusion", trivial);
+  }
+  return records;
 }
 
 /**
  * `active_dev_orch` (#412): open PRs on a hydra-dev head branch, not GLM
  * drainer work (#3687 label OR #4048 branch prefix), updated within
- * {@link ACTIVE_DEV_WINDOW_SECONDS}. A failed read or a jq error is `0`.
+ * {@link ACTIVE_DEV_WINDOW_SECONDS}. A failed read or a malformed row (which
+ * failed the old `gh … --jq` read, printing `0` via `|| echo 0`) is `0`.
  */
 export function countActiveDevOrch(read: GhJsonRead, nowSeconds: number): number {
   if (read.kind !== "ok") return 0;
-  try {
-    let count = 0;
-    for (const pr of jqIter(read.data)) {
-      const head = jqField(pr, "headRefName");
-      if (!DEV_BRANCH_PREFIXES.some((p) => jqStartsWith(head, p))) continue;
-      if (isGlmProvenance(new Set(jqLabelNames(pr, true)), head)) continue;
-      const updated = jqField(pr, "updatedAt");
-      const t = ghTimestampSeconds(updated);
-      if (t === null) jqFail("fromdateiso8601: unparseable date");
-      if (nowSeconds - t < ACTIVE_DEV_WINDOW_SECONDS) count++;
-    }
-    return count;
-  } catch (err) {
-    /* intentional: a jq error failed the bash `gh … --jq` read, which printed `0` (`|| echo 0`) */
-    if (err instanceof JqError) return 0;
-    throw err;
+  const prs = valuesOf(read.data);
+  if (prs === MALFORMED) return 0;
+  let count = 0;
+  for (const pr of prs) {
+    const head = nullableField(pr, "headRefName");
+    if (head === MALFORMED || typeof head !== "string") return 0;
+    if (!DEV_BRANCH_PREFIXES.some((p) => head.startsWith(p))) continue;
+    const names = labelNameList(pr, true);
+    if (names === MALFORMED) return 0;
+    if (isGlmProvenance(new Set(names), head)) continue;
+    const t = ghTimestampSeconds(nullableField(pr, "updatedAt"));
+    if (t === null) return 0;
+    if (nowSeconds - t < ACTIVE_DEV_WINDOW_SECONDS) count++;
   }
+  return count;
 }
 
 // ---------------------------------------------------------------------------
