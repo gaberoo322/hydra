@@ -630,12 +630,11 @@ export {
   INTERACTIVE_SKILL,
   deriveSkill,
   DISPATCH_KINDS,
-  deriveDispatchKind,
   EMPTY_BREAKDOWN,
   emptyByModel,
   emptyByDispatchKind,
 };
-export type { SkillResolver, DispatchKind };
+export type { SkillResolver };
 // Pure transcript-content helpers -- canonical home is `./transcript-fold.ts`.
 export { firstUserMessageText, sumSessionTokens };
 
