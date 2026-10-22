@@ -174,9 +174,11 @@ describe("Health.jsx writes ride ActionAffordance (INV-2, #4629)", () => {
     );
     assert.match(src, /from "\.\.\/components\/ActionAffordance\.jsx"/, "Health.jsx renders the shared affordance");
     // Server-confirmed: every affordance refreshes the /health read via onFired
-    // before its result line renders.
+    // before its result line renders — a CHECKED re-read (PR #5155 review),
+    // so a failed re-read can render "health re-read FAILED".
     assert.match(src, /onFired=\{refreshHealth\}/);
-    assert.match(src, /const refreshHealth = useCallback\(\(\) => health\.refresh\(\)/);
+    assert.match(src, /const refreshHealth = useCheckedRefresh\(health\);/);
+    assert.equal((src.match(/rereadNoun="health"/g) ?? []).length, 4, "every /health control names its re-read");
   });
 
   test("the hand-rolled pending/error trios are deleted, not wrapped", async () => {

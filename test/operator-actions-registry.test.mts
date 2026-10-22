@@ -52,6 +52,11 @@ import {
 import { createOperatorActionsRouter } from "../src/api/operator-actions.ts";
 import { DISPATCH_CLASSES } from "../src/taxonomy/classes.ts";
 import { evaluatePromoteEligibility } from "../src/autopilot/work-projections.ts";
+import {
+  healthVerdicts,
+  reopenVerdicts,
+  rowVerdicts,
+} from "../dashboard/src/lib/control-verdicts.ts";
 import { readFile } from "node:fs/promises";
 
 // ---------------------------------------------------------------------------
@@ -715,11 +720,24 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
   });
 
   test("every check id a page's control entries use appears in that page's verdict table", async () => {
-    for (const rel of [BOARD_STATE_SRC, HEALTH_SRC]) {
+    // The tables live in the tested leaf lib/control-verdicts.ts (PR #5155
+    // review); each page imports its own and every check id its entries use
+    // must be a key the table actually produces.
+    const tables: Record<string, { imports: string[]; ids: Set<string> }> = {
+      [BOARD_STATE_SRC]: {
+        imports: ["rowVerdicts", "reopenVerdicts"],
+        ids: new Set([...Object.keys(rowVerdicts({}, undefined)), ...Object.keys(reopenVerdicts(""))]),
+      },
+      [HEALTH_SRC]: { imports: ["healthVerdicts"], ids: new Set(Object.keys(healthVerdicts(null, false))) },
+    };
+    for (const [rel, table] of Object.entries(tables)) {
       const src = await readPage(rel);
+      for (const fn of table.imports) {
+        assert.match(src, new RegExp(`import \\{[^}]*\\b${fn}\\b[^}]*\\} from "[./]+lib/control-verdicts\\.ts"`), `${rel} imports ${fn}`);
+      }
       for (const key of CONTROL_KEYS.filter((k) => src.includes(`"${k}"`))) {
         for (const check of checksOf(controlEntry(key))) {
-          assert.ok(src.includes(`"${check}":`), `${rel} renders ${key} but its verdict table lacks "${check}"`);
+          assert.ok(table.ids.has(check), `${rel} renders ${key} but its verdict table lacks "${check}"`);
         }
       }
     }

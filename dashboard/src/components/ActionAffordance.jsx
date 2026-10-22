@@ -11,6 +11,7 @@ import {
   undoWindowSeconds,
 } from "../lib/delayed-commit.ts";
 import { PRECONDITION_GLYPH, anyFailed, resolvePreconditions } from "../lib/preconditions.ts";
+import { createRereadWaiters } from "../lib/reread.ts";
 
 /**
  * ActionAffordance — ONE component, keyed by the registry Action's `kind`
@@ -67,6 +68,12 @@ import { PRECONDITION_GLYPH, anyFailed, resolvePreconditions } from "../lib/prec
  *   - `testId` — derives `<testId>-arm` / `-confirm-yes` / `-confirm-no`
  *     (confirm-first), `<testId>` (immediate), `<testId>-preconditions`,
  *     `<testId>-consequence` and `<testId>-result`.
+ *   - `rereadNoun` — names what `onFired` re-read in the result line
+ *     ("board", "health"); defaults to "feed", so the feed's lines are
+ *     unchanged. A page's `onFired` resolves a REAL verdict through
+ *     {@link useCheckedRefresh} — `false` renders "re-read FAILED".
+ *   - `onStart` — called as the request starts, so a page's lifted result
+ *     panel never shows the previous outcome while a new one is in flight.
  */
 
 /**
@@ -259,7 +266,7 @@ function useCopy(text) {
  * a re-read it did not get. The lifted object carries the response's
  * reason/detail/verified/issue so a page can keep its own result panel.
  */
-function resultFromResponse(action, res, reread, context) {
+function resultFromResponse(action, res, reread, context, rereadNoun = "feed") {
   const base = {
     label: action.label,
     issue: res?.issue ?? context?.number,
@@ -267,7 +274,8 @@ function resultFromResponse(action, res, reread, context) {
     detail: res?.detail,
     verified: res?.verified,
   };
-  const stale = reread === false ? " · feed re-read FAILED — list may be stale" : "";
+  const staleNote = rereadNoun === "feed" ? "list may be stale" : "shown state may be stale";
+  const stale = reread === false ? ` · ${rereadNoun} re-read FAILED — ${staleNote}` : "";
   if (res?.ok === false) {
     return {
       ...base,
@@ -287,16 +295,16 @@ function resultFromResponse(action, res, reread, context) {
     ? {
         ...base,
         ok: true,
-        text: `✓ ${action.method} ${action.route} accepted · feed re-read FAILED — list may be stale`,
+        text: `✓ ${action.method} ${action.route} accepted${stale}`,
       }
     : {
         ...base,
         ok: true,
-        text: `✓ ${action.method} ${action.route} accepted · feed re-read`,
+        text: `✓ ${action.method} ${action.route} accepted · ${rereadNoun} re-read`,
       };
 }
 
-function InDashboardAffordance({ action, onFired, onResult, verdicts, context, testId }) {
+function InDashboardAffordance({ action, onFired, onResult, onStart, verdicts, context, testId, rereadNoun }) {
   const body = bodyFor(action.method, action.route, context);
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -324,6 +332,7 @@ function InDashboardAffordance({ action, onFired, onResult, verdicts, context, t
   // remounts alike — stays disabled until it settles.
   const fireRequest = useCallback(async () => {
     if (mounted.current) setBusy(true);
+    onStart?.();
     try {
       // The route is fired exactly as served — templates were resolved
       // server-side by the composer; the body comes from the closed map,
@@ -337,7 +346,7 @@ function InDashboardAffordance({ action, onFired, onResult, verdicts, context, t
       // onFired resolves `false` when the feed re-read FAILED — then the ✓
       // must not claim a re-read it never got.
       const reread = await onFired?.();
-      const next = resultFromResponse(action, res, reread, context);
+      const next = resultFromResponse(action, res, reread, context, rereadNoun);
       if (mounted.current) setResult(next);
       onResult?.(next);
     } catch (err) {
@@ -360,7 +369,7 @@ function InDashboardAffordance({ action, onFired, onResult, verdicts, context, t
         setArmed(false);
       }
     }
-  }, [action, context, onFired, onResult, mounted]);
+  }, [action, context, onFired, onResult, onStart, rereadNoun, mounted]);
   const track = undoHost?.track;
   const fire = useCallback(
     () => (track ? track(windowId, fireRequest) : fireRequest()),
@@ -589,7 +598,7 @@ function EscalationAffordance({ action, doc }) {
 // the one export the feed renders — assertion (c)'s subject
 // ---------------------------------------------------------------------------
 
-export function ActionAffordance({ action, doc, onFired, onResult, verdicts, context, testId }) {
+export function ActionAffordance({ action, doc, onFired, onResult, onStart, verdicts, context, testId, rereadNoun }) {
   switch (action.kind) {
     case "in-dashboard":
       return (
@@ -597,9 +606,11 @@ export function ActionAffordance({ action, doc, onFired, onResult, verdicts, con
           action={action}
           onFired={onFired}
           onResult={onResult}
+          onStart={onStart}
           verdicts={verdicts}
           context={context}
           testId={testId}
+          rereadNoun={rereadNoun}
         />
       );
     case "terminal-skill":
@@ -650,14 +661,45 @@ export function useOperatorActions() {
 }
 
 /**
+ * A CHECKED refresh over one useApi-shaped read (`{loading, error, data,
+ * refresh}`): the returned function starts the read and resolves `true` once
+ * a render shows it settled without an error, `false` when it settled with
+ * one (or the page unmounted). Pass it (or a combination) as a page
+ * control's `onFired`, so the affordance's "re-read FAILED" line can fire —
+ * `useApi().refresh` alone resolves `undefined` either way, and useApi.js
+ * stays fenced (#4629 INV-15). The waiter core is lib/reread.ts, the same
+ * pattern as AttentionFeed's refreshChecked.
+ */
+export function useCheckedRefresh({ loading, error, data, refresh }) {
+  const waiters = useRef(null);
+  if (waiters.current === null) waiters.current = createRereadWaiters();
+  useEffect(() => {
+    waiters.current.open();
+    return () => waiters.current.close();
+  }, []);
+  useEffect(() => {
+    if (!loading) waiters.current.settle(error == null);
+  }, [loading, error, data]);
+  return useCallback(() => waiters.current.wait(refresh), [refresh]);
+}
+
+/**
  * One page control: the `controlKey` registry entry's RECOMMENDED action,
  * rendered through ActionAffordance with the page's live `verdicts`, the
  * body `context` and a `testId`. A registry that is not ready — or a key it
  * does not carry — renders the control DISABLED with
  * {@link REGISTRY_UNAVAILABLE} (fail loud): the page never hand-rolls a
  * label, precondition or consequence of its own.
+ *
+ * `key={controlKey}` (review follow-up, PR #5155): a page that swaps one
+ * control for another in the same slot (/health's Pause ⇄ Resume and
+ * Engage ⇄ Release, on a poll flip) must REMOUNT the affordance — reusing
+ * the instance would carry its `armed` / `result` / `busy` state across,
+ * leaving an armed "Confirm Release…" one click from firing with its arm
+ * step skipped. Per-row controls are already separate instances under their
+ * row's keyed list item.
  */
-export function ControlAffordance({ registry, controlKey, verdicts, context, testId, onFired, onResult }) {
+export function ControlAffordance({ registry, controlKey, verdicts, context, testId, onFired, onResult, onStart, rereadNoun }) {
   const entry = registry.ready ? registry.byKey.get(controlKey) : undefined;
   if (entry === undefined) {
     return (
@@ -674,6 +716,7 @@ export function ControlAffordance({ registry, controlKey, verdicts, context, tes
   }
   return (
     <ActionAffordance
+      key={controlKey}
       action={entry.recommended}
       doc={entry.doc}
       verdicts={verdicts ?? {}}
@@ -681,6 +724,8 @@ export function ControlAffordance({ registry, controlKey, verdicts, context, tes
       testId={testId}
       onFired={onFired}
       onResult={onResult}
+      onStart={onStart}
+      rereadNoun={rereadNoun}
     />
   );
 }

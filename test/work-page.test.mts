@@ -47,6 +47,8 @@ import { createAutopilotBoardRouter } from "../src/api/autopilot-board.ts";
 // scope (same shape as test/autopilot-board.test.mts's #3505 import).
 import {
   deriveWorkLane,
+  failClosedOnTruncatedSearch,
+  workQueueBlockerSearchLimit,
   toWorkQueueRow,
   compareWorkQueueRows,
   evaluatePromoteEligibility,
@@ -1323,9 +1325,10 @@ describe("structural pins — /work page wiring", () => {
     // INV-6: refusal reasons surface verbatim, success shows the verified state.
     assert.match(src, /actionResult\.reason/);
     assert.match(src, /actionResult\.verified/);
-    // Server-confirmed: the POST is followed by the follow-up reads.
-    assert.match(src, /board\.refresh\(\)/);
-    assert.match(src, /queue\.refresh\(\)/);
+    // Server-confirmed: the POST is followed by the follow-up reads — both
+    // CHECKED (#4629 review), so a failed re-read is reported, never a ✓.
+    assert.match(src, /useCheckedRefresh\(board\)/);
+    assert.match(src, /useCheckedRefresh\(queue\)/);
     // INV-1: no run history or failure detail.
     assert.equal(src.includes("/autopilot/runs"), false);
   });
@@ -1574,5 +1577,40 @@ describe("/work live preconditions — the row facts (issue #4629)", () => {
     await handler!(mockReq(), res);
     assert.equal(res._body.sourcesOk, false);
     assert.deepEqual(res._body.items, []);
+  });
+});
+
+describe("/work blocker lookup — scaled limit, truncation fails closed (#4629 review)", () => {
+  test("workQueueBlockerSearchLimit scales with the ref count between 100 and 1000", () => {
+    assert.equal(workQueueBlockerSearchLimit(0), 100);
+    assert.equal(workQueueBlockerSearchLimit(3), 100);
+    assert.equal(workQueueBlockerSearchLimit(25), 250);
+    assert.equal(workQueueBlockerSearchLimit(500), 1000);
+  });
+
+  test("the wrapped reader passes the limit through and returns an under-limit read unchanged", async () => {
+    const seen: any[] = [];
+    const rows = [issue({ number: 9 })];
+    const read = failClosedOnTruncatedSearch(async (search, opts) => {
+      seen.push({ search, opts });
+      return { ok: true, rows };
+    }, 3);
+    const res = await read("9 10", { state: "open" });
+    assert.deepEqual(res, { ok: true, rows });
+    assert.deepEqual(seen, [{ search: "9 10", opts: { state: "open", limit: 3 } }]);
+  });
+
+  test("a read that FILLS its limit is reported as a failure — the lookup's every-ref-open fail-safe", async () => {
+    const read = failClosedOnTruncatedSearch(
+      async () => ({ ok: true, rows: [issue({ number: 1 }), issue({ number: 2 })] }),
+      2,
+    );
+    const res = await read("1 2 3", {});
+    assert.equal(res.ok, false);
+  });
+
+  test("an upstream failure passes through untouched", async () => {
+    const read = failClosedOnTruncatedSearch(async () => ({ ok: false, code: "gh-timeout" }), 100);
+    assert.deepEqual(await read("1", {}), { ok: false, code: "gh-timeout" });
   });
 });

@@ -7,9 +7,11 @@ import {
   ControlAffordance,
   UndoToastStack,
   UndoWindowContext,
+  useCheckedRefresh,
   useOperatorActions,
   useUndoWindowHost,
 } from "../../ActionAffordance.jsx";
+import { RELABEL_TARGETS, reopenVerdicts, rowVerdicts } from "../../../lib/control-verdicts.ts";
 
 /**
  * BoardState — /work's "what is queued" panel (issue #4010, ADR-0034 §2):
@@ -28,7 +30,8 @@ import {
  * this file carries NO action label, precondition or consequence string of
  * its own. Each row joins the entry's typed `{text, check}` preconditions to
  * the page's verdict table ({@link rowVerdicts}), so the button shows a live
- * ✓/✗ checklist and is disabled while any line is ✗:
+ * ✓/✗ checklist and is disabled while any line is ✗ (the tables live in
+ * lib/control-verdicts.ts, unit-tested):
  *   - Promote is CONFIRM-FIRST (a promote is a dispatch trigger in disguise);
  *     its four checks are the promote gate's refusal table, fed by the row
  *     facts the server computes (`hasScopeSection`, `openBlockers`). The
@@ -47,9 +50,6 @@ import {
  * forensics.
  */
 
-/** The relabel targets the server schema accepts (RELABEL_TARGETS' mirror). */
-const RELABEL_TARGETS = ["needs-triage", "needs-info", "ready-for-human", "blocked"];
-
 const LANE_BADGES = {
   "ready-for-agent": "bg-emerald-500/10 text-emerald-300 border border-emerald-500/40",
   "needs-info": "bg-amber-500/10 text-amber-300 border border-amber-500/40",
@@ -66,30 +66,6 @@ const COUNTS = [
   ["in_progress", "in-progress"],
   ["blocked", "blocked"],
 ];
-
-/**
- * The /work verdict table (issue #4629 INV-4/INV-14): one boolean per
- * CONTROL_CHECKS id the row controls use, computed from the row facts the
- * server already projects (never a client-side body parse). A check missing
- * here would render ✗ and disable its button (fail closed).
- */
-function rowVerdicts(row, relabelTarget) {
-  return {
-    // Every queue row comes from the open-issues scan (GET /autopilot/work-queue
-    // reads open issues only) — closed issues never reach this table.
-    "issue-open": true,
-    "not-already-ready": row.lane !== "ready-for-agent",
-    "has-scope-section": row.hasScopeSection === true,
-    "no-open-blocker": Array.isArray(row.openBlockers) && row.openBlockers.length === 0,
-    "relabel-target-chosen": RELABEL_TARGETS.includes(relabelTarget),
-  };
-}
-
-/** The reopen-by-number verdict table — the number input is the only fact. */
-function reopenVerdicts(reopenNumber) {
-  const n = Number(reopenNumber);
-  return { "issue-number-entered": reopenNumber !== "" && Number.isInteger(n) && n >= 1 };
-}
 
 /** Trust status for the non-list board-state payload (Health.jsx idiom). */
 function payloadStatus({ data, error, loading, freshnessMs }) {
@@ -137,16 +113,17 @@ export function BoardState() {
   const [reopenNumber, setReopenNumber] = useState("");
 
   // SERVER-CONFIRMED: the affordance awaits these follow-up reads (onFired)
-  // before it renders or lifts any outcome.
-  const refreshBoard = useCallback(
-    async () => {
-      await Promise.all([board.refresh(), queue.refresh()]);
-    },
-    // board/queue object identity churns per render; only the stable
-    // refresh callbacks are read inside.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [board.refresh, queue.refresh],
-  );
+  // before it renders or lifts any outcome. Each read is CHECKED — it
+  // resolves false when the re-read settled with an error — so a failed
+  // re-read renders "board re-read FAILED", never a plain ✓.
+  const boardChecked = useCheckedRefresh(board);
+  const queueChecked = useCheckedRefresh(queue);
+  const refreshBoard = useCallback(async () => {
+    const [boardOk, queueOk] = await Promise.all([boardChecked(), queueChecked()]);
+    return boardOk && queueOk;
+  }, [boardChecked, queueChecked]);
+  // A new action clears the previous outcome as its request starts.
+  const clearResult = useCallback(() => setActionResult(null), []);
 
   const readyQueue = queue.items.filter((row) => row.lane === "ready-for-agent");
   const otherLanes = queue.items.filter((row) => row.lane !== "ready-for-agent");
@@ -285,6 +262,8 @@ export function BoardState() {
                             context={{ number: row.number }}
                             onFired={refreshBoard}
                             onResult={setActionResult}
+                            onStart={clearResult}
+                            rereadNoun="board"
                           />
                         )}
 
@@ -315,6 +294,8 @@ export function BoardState() {
                             context={{ number: row.number, label: relabelTargets[row.number] }}
                             onFired={refreshBoard}
                             onResult={setActionResult}
+                            onStart={clearResult}
+                            rereadNoun="board"
                           />
                         </div>
 
@@ -327,6 +308,8 @@ export function BoardState() {
                           context={{ number: row.number }}
                           onFired={refreshBoard}
                           onResult={setActionResult}
+                          onStart={clearResult}
+                          rereadNoun="board"
                         />
                       </div>
                     </li>
@@ -358,6 +341,8 @@ export function BoardState() {
             context={{ number: Number(reopenNumber) }}
             onFired={refreshBoard}
             onResult={setActionResult}
+            onStart={clearResult}
+            rereadNoun="board"
           />
         </div>
       </Section>

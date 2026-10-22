@@ -1,13 +1,14 @@
-import { useCallback } from "react";
 import { useApi } from "../hooks/useApi.js";
 import { derivePageStatus } from "../hooks/usePageItems.js";
 import {
   ControlAffordance,
   UndoToastStack,
   UndoWindowContext,
+  useCheckedRefresh,
   useOperatorActions,
   useUndoWindowHost,
 } from "../components/ActionAffordance.jsx";
+import { healthVerdicts } from "../lib/control-verdicts.ts";
 import LocalTimestamp from "../components/LocalTimestamp.jsx";
 import DeployAxes from "../components/pages/health/DeployAxes.jsx";
 import CostPanel from "../components/pages/health/CostPanel.jsx";
@@ -46,34 +47,15 @@ import AlertsPanel from "../components/pages/health/AlertsPanel.jsx";
  * its `control:health/<name>` registry entry (one read via
  * useOperatorActions): the label, the live ✓/✗ precondition checklist and
  * the consequence all come from the registry, and the button is disabled
- * while any line is ✗ ({@link healthVerdicts}). The affordance POSTs, awaits
- * health.refresh() via onFired, and renders only the verified state; the
- * RUNNING/PAUSED and ENGAGED/OFF chips keep deriving from the /health read.
+ * while any line is ✗ (healthVerdicts, lib/control-verdicts.ts). The
+ * affordance POSTs, awaits a CHECKED /health re-read via onFired (a failed
+ * re-read renders "health re-read FAILED"), and renders only the verified
+ * state; the RUNNING/PAUSED and ENGAGED/OFF chips keep deriving from the
+ * /health read.
  * Pause is immediate-with-undo (the ~5 s delayed commit hosted here); resume
  * and both brake controls confirm first (resume spends quota; the brake
  * halts or re-enables every auto-merge).
  */
-
-/**
- * The /health verdict table (issue #4629 INV-4/INV-14): one boolean per
- * CONTROL_CHECKS id this page's controls use, computed from the verified
- * /health read. A read that is loading, failed, or carries `ok:false`
- * verifies nothing — every state check is false (✗, fail closed).
- */
-function healthVerdicts(data, trusted) {
-  const pause = data?.autopilotPause;
-  const brake = data?.emergencyBrake;
-  const pauseVerified = trusted && pause !== undefined && pause !== null && pause.ok !== false;
-  const brakeVerified = trusted && brake !== undefined && brake !== null && brake.ok !== false;
-  return {
-    "pause-state-verified": pauseVerified,
-    "autopilot-running": pauseVerified && pause.paused !== true,
-    "autopilot-paused": pauseVerified && pause.paused === true,
-    "brake-state-verified": brakeVerified,
-    "brake-off": brakeVerified && brake.engaged !== true,
-    "brake-engaged": brakeVerified && brake.engaged === true,
-  };
-}
 
 const DEEP_CHIP = {
   healthy: "bg-emerald-500/10 text-emerald-300 border border-emerald-500/40",
@@ -169,11 +151,11 @@ export default function Health() {
   // ---- Write controls: registry entries + the undo-window host -------------
   // (issue #4629) One registry read, no poll; pause's immediate-with-undo
   // window is hosted at page level. Every affordance awaits refreshHealth
-  // (onFired) before rendering its result — server-confirmed.
+  // (onFired) before rendering its result — server-confirmed, and CHECKED:
+  // it resolves false when the /health re-read settled with an error.
   const registry = useOperatorActions();
   const undoHost = useUndoWindowHost();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const refreshHealth = useCallback(() => health.refresh(), [health.refresh]);
+  const refreshHealth = useCheckedRefresh(health);
   const verdicts = healthVerdicts(
     health.data,
     healthStatus !== "loading" && healthStatus !== "unknown",
@@ -333,6 +315,7 @@ export default function Health() {
               verdicts={verdicts}
               context={{ paused: false }}
               onFired={refreshHealth}
+              rereadNoun="health"
             />
           ) : (
             <ControlAffordance
@@ -342,6 +325,7 @@ export default function Health() {
               verdicts={verdicts}
               context={{ paused: true }}
               onFired={refreshHealth}
+              rereadNoun="health"
             />
           )}
         </div>
@@ -379,6 +363,7 @@ export default function Health() {
               verdicts={verdicts}
               context={{ engaged: false }}
               onFired={refreshHealth}
+              rereadNoun="health"
             />
           ) : (
             <ControlAffordance
@@ -388,6 +373,7 @@ export default function Health() {
               verdicts={verdicts}
               context={{ engaged: true }}
               onFired={refreshHealth}
+              rereadNoun="health"
             />
           )}
         </div>
