@@ -33,7 +33,7 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 > `SCOUT_DAILY_COST_SHARE = 0.04`) and `state.limits.daily_spend_cap_usd`
 > (default `$50.0`) — computes `cap_usd = share * daily_cap` — reads
 > `state.scout_spend_usd_today` (carried by the Turn Snapshot from the
-> `hydra:metrics:tokens:by-skill:daily:<DATE>[hydra-tool-scout]`
+> `hydra:metrics:tokens:by-skill:daily:<DATE>` (field `hydra-tool-scout`)
 > surrogate, USD via `HYDRA_TOKEN_USD_RATE`) — and suppresses dispatch
 > when `spend_usd >= cap_usd`. The check fires BEFORE the 7d class
 > cooldown (cap is the harder limit): if the cap is exceeded the

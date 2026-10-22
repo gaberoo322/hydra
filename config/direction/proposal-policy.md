@@ -85,7 +85,7 @@ When a cycle reaches passing verification but is not merged, do not collapse it 
 
 ## Low-Risk Codebase-Health Model Routing
 
-When the next task is anchored to `codebase-health`, marked low risk, and limited to documentation/comments/module headers or other test-neutral helper clarification, route planning through the cheaper codex path instead of frontier. Do not use this shortcut for research anchors, live-trading behavior, execution semantics, ambiguous product decisions, or any task expected to change runtime behavior.
+When the next task is anchored to `codebase-health`, marked low risk, and limited to documentation/comments/module headers or other test-neutral helper clarification, route planning through the cheaper model tier instead of frontier (the Codex path was retired by ADR-0006; the model per dispatch class is pinned in `scripts/autopilot/classes.json`). Do not use this shortcut for research anchors, live-trading behavior, execution semantics, ambiguous product decisions, or any task expected to change runtime behavior.
 
 ## Meta Telemetry Completeness
 

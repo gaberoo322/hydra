@@ -12,7 +12,7 @@ tags: [hydra, hydra/direction]
 - **Frontend:** Next.js, React, TypeScript, Tailwind CSS, shadcn/ui, TanStack Query
 - **Backend:** Node.js, TypeScript, PostgreSQL
 - **Infrastructure:** Docker, Redis Streams
-- **AI:** OpenAI Codex CLI (GPT-5.4 frontier, GPT-5.3-Codex, GPT-5.4-mini)
+- **AI:** Claude Code subagents dispatched by `hydra-autopilot` (the OpenAI Codex CLI was retired, ADR-0006)
 - **Quality:** Promptfoo for evals and red teaming
 
 ## Conventions
@@ -29,4 +29,4 @@ tags: [hydra, hydra/direction]
 
 ## High-Risk Executor Model Routing
 
-When a planned cycle is classified `risk:high`, prefer the frontier model for Executor instead of the default codex executor. This should be limited to rare high-risk implementation slices such as submit-packet derivation, recovery-flow mutation, or venue/economics state changes. Low-risk bounded slices should continue using the default codex executor to preserve current cost efficiency.
+(Historical routing rule: the Codex executor it names was retired by ADR-0006.) When a planned cycle is classified `risk:high`, prefer the frontier model for Executor instead of the default codex executor. This should be limited to rare high-risk implementation slices such as submit-packet derivation, recovery-flow mutation, or venue/economics state changes. Low-risk bounded slices should continue using the default codex executor to preserve current cost efficiency.

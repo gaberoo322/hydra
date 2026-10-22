@@ -83,7 +83,7 @@
     {
       "family": "corpus",
       "metric": "historical",
-      "value": 11
+      "value": 14
     },
     {
       "family": "corpus",
@@ -103,7 +103,7 @@
     {
       "family": "corpus",
       "metric": "rows",
-      "value": 119
+      "value": 122
     },
     {
       "family": "env-vars",
@@ -128,7 +128,7 @@
     {
       "family": "redis-keys",
       "metric": "rows",
-      "value": 76
+      "value": 89
     },
     {
       "family": "routes",

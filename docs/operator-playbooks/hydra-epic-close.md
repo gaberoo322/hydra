@@ -8,7 +8,7 @@ arguments: [apply]
 
 # Hydra Epic Close
 
-Find OPEN epic issues in `gaberoo322/hydra` whose body references sub-issues via `closes #N`, `blocked-by #N`, or markdown `- [x] #N` checklists, and close the epic when every referenced sub-issue is itself CLOSED. Designed to garbage-collect lingering epics after the last sub-issue merges — the codex-removal epic (#380) sat OPEN for hours after all four sub-issues closed because no automation was looking.
+Find OPEN epic issues in `gaberoo322/hydra` whose body references sub-issues via `closes #N`, `blocked-by #N`, or markdown `- [x] #N` checklists, and close the epic when every referenced sub-issue is itself CLOSED. Designed to garbage-collect lingering epics after the last sub-issue merges — the ADR-0006 CLI-removal epic (#380) sat OPEN for hours after all four sub-issues closed because no automation was looking.
 
 The skill is **dry-run by default**. To actually close epics, pass `--apply` (or `apply=true` as a Skill argument). Re-running on a freshly-closed epic is a no-op — the candidate scan filters to `state:open` *before* the classifier runs.
 

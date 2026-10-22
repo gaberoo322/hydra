@@ -118,9 +118,9 @@ PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 \
 EVAL_RC=$?
 ```
 
-- **Parity PASS** (`EVAL_RC` == 0): the prune preserved every load-bearing
+- **Parity PASS** (`$EVAL_RC` == 0): the prune preserved every load-bearing
   contract token. Proceed to Step 4 (open the PR under `--apply`).
-- **Parity FAIL** (`EVAL_RC` != 0) OR **evals cannot exercise the chosen skill**
+- **Parity FAIL** (`$EVAL_RC` != 0) OR **evals cannot exercise the chosen skill**
   (no eval config covers it, the harness errors before scoring, `before` and
   `after` came out identical, or `before` carried zero load-bearing contract
   tokens — see `evals/scorers/contract-token-parity.ts`): the run

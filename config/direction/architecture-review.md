@@ -186,8 +186,8 @@ selection under contention. *Why:* the control plane costs ~17% of weekly capaci
 any work happens, and quota is the binding constraint that just halted the system.
 *Evidence:* `hydra-autopilot` 1.61B Opus tokens/7d; Haiku 0.01% of all tokens;
 `dev_orch` verdict `"expensive"` at 405M weighted quota/merge. *Files:*
-`scripts/autopilot/collect-state.sh`, `scripts/autopilot/decide.py`,
-`config/autopilot/classes.json`. *Risk:* medium — needs an eval (promptfoo,
+`scripts/autopilot/turn_snapshot.py`, `scripts/autopilot/decide.py`,
+`scripts/autopilot/classes.json`. *Risk:* medium — needs an eval (promptfoo,
 `evals/`) against the decide.py golden suite to confirm no selection-quality drop.
 
 ### Strategic shifts (1–2 weeks, operator buy-in)

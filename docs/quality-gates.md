@@ -58,7 +58,7 @@ PR diff**, then fails when the kill rate is below the configured floor.
 the full source tree. The workflow computes the changed-file set as
 `git diff --name-only $(git merge-base origin/master HEAD)...HEAD`
 (falling back from `gh pr diff --name-only` when GH is unreachable).
-`scripts/ci/mutation-check.ts::filterMutationCandidates()` then:
+`filterMutationCandidates()` in `scripts/ci/mutation-check.ts` then:
 
 1. Keeps only paths that start with `src/` and end in `.ts` (positive
    allowlist — `dashboard/**`, `scripts/**`, `test/**`, `docs/**`,
@@ -177,7 +177,7 @@ not in `package.json`.
 
 **Diff scoping (issue #653 — same as the required gate).** Stryker mutates
 only the PR's diff-changed `src/**/*.ts` files, computed the same way
-`scripts/ci/mutation-check.ts::filterMutationCandidates()` does — the wrapper
+`filterMutationCandidates()` in `scripts/ci/mutation-check.ts` does — the wrapper
 REUSES that filter. A full-tree Stryker run is a regression against #653 and is
 not acceptable. Asset / doc / test-only PRs skip cleanly (the wrapper emits a
 `status: "skipped"` row with a reason).
@@ -234,7 +234,7 @@ now the single source of truth.
 ```
 
 The matcher accepts either backticked code spans or bullet text. Paths are
-substring/prefix matched, so a directory like `src/foo/` covers every file
+substring/prefix matched, so a directory like `src/<module>/` covers every file
 beneath it. If no `Files in scope` section is present anywhere, every changed
 file is treated as out-of-scope and the gate will fire as soon as the count
 threshold is reached.
@@ -286,5 +286,5 @@ or accepted as gone:
 | 6.8 jitTestGeneration | Removed with `src/control-loop.ts` (PR-3). Replacement: the 1200+ regression test suite and reviewer judgement. |
 | 6.9 scopeEnforcement | Re-homed to CI `scope-check` job. |
 
-See `docs/codex-removal-measurement.md` for the data-driven rollout plan
+See `docs/codex-removal-measurement.md` for the data-driven rollout plan (ADR-0006, Codex CLI removal)
 gating PR-3.

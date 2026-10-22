@@ -61,7 +61,7 @@ worktree-fence violations are safety failures.
 1. **NEVER run `git stash`/`checkout`/`reset`/`clean` on the main `~/hydra`
    working tree.** The operator may have uncommitted work.
 2. All implementation runs inside a worktree — Claude:
-   `Agent(isolation: "worktree")`; Codex: `codex exec` in a fresh
+   `Agent(isolation: "worktree")`; Codex (retired, ADR-0006): `codex exec` in a fresh
    `git worktree add`.
 3. Dirty main tree is fine — worktrees are independent.
 4. **No silent fallback.** If the dispatched BG agent finds itself in `~/hydra`

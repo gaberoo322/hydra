@@ -15,7 +15,7 @@ Runtime diagnostic discovery for `$TARGET_WS`. Complements `/hydra-discover` (or
 
 ## Context management
 
-On `/loop`, run `/compact` (Claude) / restart context (Codex) at start.
+On `/loop`, run `/compact` at start.
 
 ## Process
 
