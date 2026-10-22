@@ -219,14 +219,19 @@ describe("toWorkQueueRow — queue projection", () => {
     assert.deepEqual(row!.openBlockers, [9]); // #5 self-ref dropped, #12 not open
   });
 
-  test("non-ready lanes never surface blockers (only the ready population is resolved)", () => {
-    const row = toWorkQueueRow(
-      issue({ number: 5, labels: ["needs-triage"], body: "Blocked by #9" }),
-      new Set([9]),
-      { glmPartitionActive: true },
-    );
-    assert.ok(row);
-    assert.deepEqual(row!.openBlockers, []);
+  // Issue #4629 (design-concept 821e48ed INV-6/INV-13): this case pinned
+  // "non-ready lanes never surface blockers"; the live promote checklist
+  // needs every operator lane's blockers, so it flips to the new invariant.
+  test("every operator lane surfaces its open strict blockers", () => {
+    for (const lane of ["needs-triage", "needs-info", "ready-for-human", "blocked"]) {
+      const row = toWorkQueueRow(
+        issue({ number: 5, labels: [lane], body: "Blocked by #9\nblocks #5\ndepends on #12" }),
+        new Set([9]),
+        { glmPartitionActive: true },
+      );
+      assert.ok(row, `${lane} row projects`);
+      assert.deepEqual(row!.openBlockers, [9], `${lane}: open strict ref surfaces, self-ref + closed ref dropped`);
+    }
   });
 
   test("no operator lane → null (not in the queue)", () => {
@@ -1304,14 +1309,17 @@ describe("structural pins — /work page wiring", () => {
     // INV-2: the shared trust seam, not a re-spelled status ternary.
     assert.match(src, /usePageItems\(/);
     assert.match(src, /derivePageStatus/);
-    // INV-5: promote arms first, fires only on the explicit confirm click.
-    assert.match(src, /data-testid="work-promote-arm"/);
-    assert.match(src, /data-testid="work-promote-confirm-yes"/);
-    assert.match(src, /data-testid="work-promote-confirm-no"/);
-    // The immediate-tier controls exist.
+    // INV-5: promote arms first, fires only on the explicit confirm click —
+    // rendered by the shared ActionAffordance (issue #4629, design-concept
+    // 821e48ed INV-13), which derives work-promote-arm / -confirm-yes /
+    // -confirm-no from its testId prop.
+    assert.match(src, /import \{[^}]*\bActionAffordance\b[^}]*\} from "\.\.\/\.\.\/ActionAffordance\.jsx"/);
+    assert.match(src, /testId="work-promote"/);
+    // The immediate-tier controls exist (relabel picker + affordances).
     assert.match(src, /data-testid="work-relabel-select"/);
-    assert.match(src, /data-testid="work-close"/);
-    assert.match(src, /data-testid="work-reopen-button"/);
+    assert.match(src, /testId="work-relabel"/);
+    assert.match(src, /testId="work-close"/);
+    assert.match(src, /testId="work-reopen"/);
     // INV-6: refusal reasons surface verbatim, success shows the verified state.
     assert.match(src, /actionResult\.reason/);
     assert.match(src, /actionResult\.verified/);
