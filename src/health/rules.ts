@@ -28,18 +28,8 @@ import {
   assessAttributionLedger,
 } from "./assessors.ts";
 export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
-  (s) =>
-    s.health.status === "killed"
-      ? {
-          severity: "critical",
-          component: "orchestrator",
-          what: "Kill switch is active",
-          why: "A kill file blocks all cycles until removed.",
-          impact: "No cycles can run.",
-          action: "Investigate, then: rm ~/hydra/.kill",
-          autoRecovery: false,
-        }
-      : null,
+  // (The `killed` kill-switch rule was removed with POST /kill — ADR-0024 §3,
+  // issue #4638: the `.kill` file stopped nothing and nothing writes it now.)
   // Issue #744: operator-only emergency brake engaged. Surfaced as a
   // warning (not critical) — it's a deliberate operator action, not a fault,
   // but it suppresses ALL auto-merge so it must be visible until released.

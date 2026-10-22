@@ -11,8 +11,7 @@
  *
  * The route is exercised by invoking the mounted handler with a mock req/res
  * (the same harness as the sibling `test/metrics-session-tokens-api.test.mts`),
- * seeding the Redis metrics trend the same way `test/abandonment-metrics.test.mts`
- * does. The aggregator's own filter/rate math is covered by
+ * seeding the Redis metrics trend in the run-owned test DB. The aggregator's own filter/rate math is covered by
  * `test/unclassified-anchors-instrumentation-3403.test.mts`; this file's job is
  * the HTTP exposure — mount, payload passthrough, rate, and the `count` clamp.
  *
@@ -31,7 +30,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Set test DB before any adapter imports (mirrors abandonment-metrics.test.mts).
+// Set test DB before any adapter imports.
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const { recordCycleMetrics } = await import("../src/metrics/record.ts");

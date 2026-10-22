@@ -64,15 +64,15 @@ export default function DeployAxes({ data, status }) {
       : "UNKNOWN";
 
   // ---- HEALTH axis (orthogonal — service working, independent of drift) ----
+  // (The former "KILLED" state read the `.kill`-file status that went with
+  // POST /kill — ADR-0024 §3, issue #4638; any non-"ok" status is UNKNOWN.)
   const healthState = unknown
     ? "UNKNOWN"
-    : data?.status === "killed"
-      ? "KILLED"
-      : data?.redis === false
-        ? "DOWN"
-        : data?.status === "ok" && data?.redis === true
-          ? "HEALTHY"
-          : "UNKNOWN";
+    : data?.redis === false
+      ? "DOWN"
+      : data?.status === "ok" && data?.redis === true
+        ? "HEALTHY"
+        : "UNKNOWN";
 
   return (
     <section data-testid="deploy-axes" className="space-y-3">

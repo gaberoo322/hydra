@@ -108,9 +108,9 @@ export interface LoadReflectionsDeps {
  * the downstream `reflectionMatchSource` cycle metric reads `none`
  * (`deriveReflectionMatchSource("") === "none"`). This coordinator therefore
  * MUST NOT fabricate a non-empty block from an empty store; the
- * `GET /learning/reflection-health` surface (src/api/learning.ts) exists to
- * make that honest-none distinguishable from a genuinely-broken deposit at the
- * observability layer, rather than papering over it here.
+ * reflection-health verdict on `GET /api/health/deep` (src/metrics/reflection-health.ts)
+ * exists to make that honest-none distinguishable from a genuinely-broken
+ * deposit at the observability layer, rather than papering over it here.
  *
  * The `deps` bag is for testing only; production callers omit it.
  */

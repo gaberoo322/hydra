@@ -30,8 +30,6 @@
  * retired at the VLM cutover.)
  */
 
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 
 import { pingRedis } from "../redis/utility.ts";
 // Issue #2281: the probe-status DISPLAY vocabulary ("ok"|"degraded"|"down"), the
@@ -84,8 +82,9 @@ export interface ServiceStripDeps {
   pingRedis?: () => Promise<boolean>;
   /**
    * Orchestrator self-check: returns true when the host process is healthy.
-   * Defaults to checking for the absence of `~/hydra/.kill` (the operator
-   * kill switch — same surface `/health` consults).
+   * Defaults to `true` — this aggregator runs INSIDE the orchestrator process,
+   * so answering the request is the liveness proof. (The former `~/hydra/.kill`
+   * absence check went with POST /kill — ADR-0024 §3, issue #4638.)
    */
   checkOrchestrator?: () => Promise<boolean>;
 }
@@ -213,9 +212,8 @@ export function classifyProbe(input: {
 const defaultPingRedis = pingRedis;
 
 async function defaultOrchestratorOk(): Promise<boolean> {
-  // Same convention as src/api/health.ts: presence of `~/hydra/.kill`
-  // means the kill switch is active. No file → orchestrator is healthy.
-  const hydraRoot = process.env.HYDRA_ROOT || resolve(process.env.HOME ?? "", "hydra");
-  const killFile = resolve(hydraRoot, ".kill");
-  return !existsSync(killFile);
+  // This aggregator runs inside the orchestrator process: reaching this line
+  // means the process is serving requests. The `.kill`-file check it used to
+  // make was removed with POST /kill (ADR-0024 §3, issue #4638).
+  return true;
 }

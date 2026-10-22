@@ -108,7 +108,7 @@
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 269
+      "value": 268
     },
     {
       "family": "pages",
@@ -133,22 +133,22 @@
     {
       "family": "routes",
       "metric": "routers",
-      "value": 51
+      "value": 48
     },
     {
       "family": "routes",
       "metric": "routes",
-      "value": 153
+      "value": 140
     },
     {
       "family": "routes",
       "metric": "rows",
-      "value": 153
+      "value": 140
     },
     {
       "family": "schemas",
       "metric": "rows",
-      "value": 95
+      "value": 91
     },
     {
       "family": "skills",

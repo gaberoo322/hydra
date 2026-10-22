@@ -43,8 +43,14 @@ function lineOf(src: string, index: number): number {
 // Server side: route registrations, mounts, stability, areas
 // ---------------------------------------------------------------------------
 
-/** The registry recipe made newline-tolerant: the path literal may sit on the line after the `(`. */
-const VERB_RE = /\b(router|app|api)\.(get|post|put|patch|delete)\(/g;
+/**
+ * The registry recipe made newline-tolerant: the path literal may sit on the
+ * line after the `(`. An optional TS type-argument list (`router.get<{ id:
+ * string }>(`) is admitted (issue #4638): without it a generic-typed
+ * registration was silently absent from the inventory, so the ADR-0034 §9
+ * parity pins could not see it.
+ */
+const VERB_RE = /\b(router|app|api)\.(get|post|put|patch|delete)(?:<[^>()]*>)?\(/g;
 
 interface Registration {
   method: string;

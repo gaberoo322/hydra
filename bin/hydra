@@ -35,7 +35,6 @@
 #   hydra metrics [--count N]
 #   hydra alerts ls [--limit N]
 #   hydra recommendations
-#   hydra research start | force | history
 #   hydra raw GET <path>
 #   hydra raw POST <path> ['<body>' | --json '<body>']
 #   hydra raw PATCH <path> ('<body>' | --json '<body>')
@@ -220,24 +219,6 @@ cmd_recommendations() {
   _get "/recommendations"
 }
 
-cmd_research() {
-  case "${1:-}" in
-    start  ) _post "/research/start" ;;
-    force  ) _post "/research/force" ;;
-    history)
-      shift
-      local q=""
-      while [ "$#" -gt 0 ]; do
-        case "$1" in
-          --limit) q="?limit=$2"; shift 2 ;;
-          *) shift ;;
-        esac
-      done
-      _get "/research/history${q}" ;;
-    *      ) echo "hydra research: need start|force|history" >&2; exit 2 ;;
-  esac
-}
-
 cmd_raw() {
   local method="${1:-}"
   local path="${2:-}"
@@ -285,7 +266,6 @@ case "$1" in
   metrics)         shift; cmd_metrics "$@" ;;
   alerts)          shift; cmd_alerts "$@" ;;
   recommendations) shift; cmd_recommendations "$@" ;;
-  research)        shift; cmd_research "$@" ;;
   raw)             shift; cmd_raw "$@" ;;
   *)               echo "hydra: unknown command '$1'" >&2; usage ;;
 esac

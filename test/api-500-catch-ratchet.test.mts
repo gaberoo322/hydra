@@ -56,7 +56,7 @@ const ALLOWLIST: Record<string, number> = {
   // Kept-bespoke sites this PR (#4402) migrated everything ELSE away from —
   // each has an inline `Not an isolateAggregator route:` comment naming why.
   "alerts.ts": 1, // POST /alerts/:id/dismiss — success path writes a 404 inside the try.
-  "config.ts": 2, // GET /config/:section/:name (text/plain) + DELETE /env/:project/:key (404 inside try).
+  "config.ts": 1, // GET /config/:section/:name (text/plain). (DELETE /env/:project/:key retired, #4638.)
   "cycles.ts": 1, // GET /cycle/report/:cycleId — success path writes a 404 inside the try.
   "merge-lock.ts": 1, // POST /merge/lock — success path writes a 409 inside the try.
   "usage.ts": 2, // POST /usage/dispatch-cost — specialized { recorded: false, error } envelope (write-failure branch + catch).
@@ -69,12 +69,11 @@ const ALLOWLIST: Record<string, number> = {
   "autopilot-runs.ts": 1,
   "design-concepts.ts": 5,
   "dispatches.ts": 1,
-  "goals.ts": 2, // GET /goals (404 inside try) + GET /goals/summary (text/plain).
+  "goals.ts": 1, // GET /goals (404 inside try). (GET /goals/summary retired, #4638.)
   "holdback.ts": 3,
   "maintenance.ts": 1, // specialized { ok: false, error } envelope.
-  "metrics.ts": 1,
   "outcomes.ts": 2, // specialized { outcomes: [], errors } envelope (result-object branch + catch).
-  "pattern-memory.ts": 4,
+  "pattern-memory.ts": 3, // (GET /learning/rule-action-log retired, #4638.)
 };
 
 function countStatus500(source: string): number {

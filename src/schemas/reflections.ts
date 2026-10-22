@@ -14,11 +14,7 @@
  * the buffer subsystem — so an absent/blank `anchor` is a client error (400),
  * not a valid request. The `.trim()` runs before the min-length check so a
  * whitespace-only `anchor` rejects too. `files` stays optional.
- *
- * NOTE: the sibling `GET /calibration/outcomes` proxy builds
- * `new URLSearchParams(req.query)` to forward the WHOLE query string
- * downstream rather than reading named fields — that is an accepted ADR-0022
- * §3 exception (proxy pass-through) and is intentionally NOT migrated here.
+
  */
 import { z } from "zod";
 

@@ -106,7 +106,6 @@ export interface HealthDeepResponse {
       avgDurationMs: number;
       avgDurationHuman: string;
     };
-    killSwitch: boolean;
     emergencyBrake: HealthSnapshot["emergencyBrake"];
   };
   infrastructure: {
@@ -118,8 +117,8 @@ export interface HealthDeepResponse {
     patterns: HealthSnapshot["patterns"];
     reflections: number;
     // Issue #2492: the reflection-deposit-health verdict over the recent
-    // cycle-metrics window — the SAME projection GET /api/learning/reflection-health
-    // serves, now ALSO surfaced here so an operator checking /api/health/deep (the
+    // cycle-metrics window — the projection the (retired, #4638)
+    // GET /api/learning/reflection-health served, surfaced here so an operator checking /api/health/deep (the
     // surface the #1912→#2450→#2467→#2492 re-files kept landing on) reads the
     // honest verdict (`all-none-empty-store` = expected, not a bug) inline rather
     // than re-discovering a flat `none` column and re-filing. ALWAYS present (a
@@ -165,12 +164,13 @@ export function projectHealthDeepResponse(
       // OpenViking — the `svcProbes` map that fed them held only OV services.
     },
     activeCycle,
-    // Issue #744: emergency-brake state alongside the kill switch.
+    // Issue #744: emergency-brake state. (The `killSwitch` boolean went with
+    // POST /kill and the `.kill` file — ADR-0024 §3, issue #4638.)
     // Issue #3459: queueDepth + backlogCounts removed from pipeline wire shape.
     // recentMetrics projects only the rate fields the wire contract has
     // always carried — the new raw counts (mergedN/noTaskN/revertN) on the
     // snapshot's `recent` are for rule guards, not the HTTP envelope.
-    pipeline: { recentMetrics: { cycleCount: recent.cycleCount, mergeRate: recent.mergeRate, failedRate: recent.failedRate, noTaskRate: recent.noTaskRate, revertRate: recent.revertRate, avgDurationMs: recent.avgDurationMs, avgDurationHuman: recent.avgDurationHuman }, killSwitch: health.status === "killed", emergencyBrake },
+    pipeline: { recentMetrics: { cycleCount: recent.cycleCount, mergeRate: recent.mergeRate, failedRate: recent.failedRate, noTaskRate: recent.noTaskRate, revertRate: recent.revertRate, avgDurationMs: recent.avgDurationMs, avgDurationHuman: recent.avgDurationHuman }, emergencyBrake },
     infrastructure: { disk, memory: mem, systemd: { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } },
     // Issue #1440's three OV-quality fields (`ovSearch` live probe,
     // `ovSearchTrend` 24h rollup, `knowledgeContext` 7d availability) were

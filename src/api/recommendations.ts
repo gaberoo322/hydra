@@ -1,5 +1,4 @@
 import { Router } from "express";
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 
@@ -25,11 +24,10 @@ import { logger } from "../logger.ts";
 // health-diagnostics.ts.
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
-const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
 
 /**
- * The four narrow I/O readers the handler depends on. Each defaults to the real
+ * The narrow I/O readers the handler depends on. Each defaults to the real
  * impl; tests inject in-memory stubs to drive each action-item category with no
  * Redis and no live Express — mirroring the #674 RecommendationsReaderDeps
  * injection pattern.
@@ -38,16 +36,10 @@ export interface RecommendationsReaderDeps {
   getSchedulerStatus?: typeof getSchedulerStatus;
   /** Read+return the raw priorities.md text; rejects/throws if the file is absent. */
   readPriorities?: () => Promise<string>;
-  /** Whether the kill file is present. */
-  killFileExists?: () => boolean;
 }
 
 async function defaultReadPriorities(): Promise<string> {
   return readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8");
-}
-
-function defaultKillFileExists(): boolean {
-  return existsSync(KILL_FILE);
 }
 
 export function createRecommendationsRouter(deps: RecommendationsReaderDeps = {}) {
@@ -55,7 +47,6 @@ export function createRecommendationsRouter(deps: RecommendationsReaderDeps = {}
 
   const readSchedulerStatus = deps.getSchedulerStatus ?? getSchedulerStatus;
   const readPriorities = deps.readPriorities ?? defaultReadPriorities;
-  const killFileExists = deps.killFileExists ?? defaultKillFileExists;
 
   // GET /recommendations — Operator action items computed from system state.
   //
@@ -98,17 +89,9 @@ export function createRecommendationsRouter(deps: RecommendationsReaderDeps = {}
         }
       } catch { /* intentional: no priorities file present yet — degrade silently */ }
 
-      // 3. Kill file present
-      if (killFileExists()) {
-        recs.push({
-          type: "action",
-          priority: 1,
-          title: "Kill switch is active",
-          description: "All cycles are blocked. Remove the kill file to resume.",
-          action: "Investigate and remove ~/.hydra/.kill",
-          link: "/health",
-        });
-      }
+      // (The former "3. Kill file present" item was removed with POST /kill —
+      // ADR-0024 §3, issue #4638: the kill file stopped nothing; the emergency
+      // brake is the real stop and /health/deep surfaces it.)
 
       // Sort by priority (1=urgent first)
       recs.sort((a, b) => a.priority - b.priority);

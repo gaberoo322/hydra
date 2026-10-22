@@ -1,14 +1,16 @@
 /**
  * Dashboard v2 — Now page HTTP surface (issue #618, PRD #615).
  *
- * Five endpoints, each a thin adapter over a dedicated aggregator or
- * existing data source:
+ * Endpoints, each a thin adapter over a dedicated aggregator or existing
+ * data source:
  *
  *   GET /api/v2/now/service-strip      — health strip pinned to the top
  *   GET /api/v2/now/autopilot-tick     — current autopilot tick + run
  *   GET /api/v2/now/active-dispatches  — every live Claude Code session
  *   GET /api/v2/now/cost-burn          — token-denominated burn rate (USD interface honest-deleted in #1413)
- *   GET /api/v2/now/alerts             — recent alerts within a window
+ *
+ * `GET /now/alerts` (a thin wrapper over /api/alerts) was retired under
+ * ADR-0024 §3 (issue #4638): zero callers — /health reads /api/alerts.
  *
  * Each route follows the slice-1/slice-2 pattern: parse the query through
  * a zod schema (where queries exist), return `schema-validation-failed`
@@ -21,12 +23,10 @@ import { Router } from "express";
 import { aggregatorRoute, aggregatorRouteNoQuery } from "./route-helpers.ts";
 
 import {
-  AlertsNowQuerySchema,
   AutopilotHealthQuerySchema,
   type ServiceStripResponse,
   type ActiveDispatchesResponse,
   type CostBurnResponse,
-  type AlertsNowResponse,
   type AutopilotHealthResponse,
   type StuckSignal,
   type AutopilotCurrentRunSchema,
@@ -64,10 +64,9 @@ import {
   getAutopilotStatusSnapshot,
   type AutopilotStatusSnapshot,
 } from "../autopilot/status.ts";
-import { readRecentAlerts as defaultReadRecentAlerts } from "../redis/alerts.ts";
 
 // ---------------------------------------------------------------------------
-// Sub-source types for the thin wrappers (autopilot-tick, alerts)
+// Sub-source types for the autopilot-tick thin wrapper
 // ---------------------------------------------------------------------------
 
 type AutopilotCurrentRun = z.infer<typeof AutopilotCurrentRunSchema>;
@@ -82,10 +81,6 @@ interface CurrentAutopilotRunReader {
 
 interface AutopilotLifecycleReader {
   (): Promise<AutopilotLifecyclePayload>;
-}
-
-interface AlertsReader {
-  (limit: number): Promise<string[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,8 +124,6 @@ export interface NowPageRouterDeps {
    * exercise the shared-read projection path directly.
    */
   snapshot?: () => Promise<AutopilotStatusSnapshot>;
-  /** Reader for raw alert JSON strings, newest first. */
-  readRecentAlertsJson?: AlertsReader;
   /** Clock — defaults to `() => new Date()`. */
   now?: () => Date;
 }
@@ -150,7 +143,6 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
   const overrideCurrentRun = deps.readCurrentAutopilotRun;
   const overrideLifecycle = deps.readAutopilotLifecycle;
   const buildSnapshot = deps.snapshot ?? (() => getAutopilotStatusSnapshot());
-  const readAlertsJson = deps.readRecentAlertsJson ?? defaultReadAlertsJson;
   const clock = deps.now ?? (() => new Date());
 
   // -------------------------------------------------------------------------
@@ -255,74 +247,7 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
     ),
   );
 
-  // -------------------------------------------------------------------------
-  // GET /v2/now/alerts — thin wrapper over /api/alerts
-  // -------------------------------------------------------------------------
-  router.get(
-    "/now/alerts",
-    aggregatorRoute(
-      AlertsNowQuerySchema,
-      "v2/now/alerts",
-      async (data): Promise<AlertsNowResponse> => {
-        const raw = await readAlertsJson(data.limit);
-        const items = parseAlertsWindow({
-          raw,
-          sinceMinutes: data.sinceMinutes,
-          now: clock(),
-        });
-        // `items` is the projected `Record<string, unknown>[]` shape — the
-        // schema's `passthrough()` row type accepts the same data at runtime
-        // but TS doesn't see the required-field intersection until parse-time.
-        // The shape is enforced via the schema; the cast here is local.
-        return {
-          items: items as AlertsNowResponse["items"],
-          windowMinutes: data.sinceMinutes,
-          generatedAt: clock().toISOString(),
-        };
-      },
-    ),
-  );
-
   return router;
-}
-
-// ---------------------------------------------------------------------------
-// Pure helper — exported for tests
-// ---------------------------------------------------------------------------
-
-/**
- * Parse raw alert JSON strings into objects, filter by the time window,
- * and tolerate parse failures (an unparseable row is logged once and
- * dropped — it must not poison the whole response). Window-edge:
- * alerts are included when `timestamp >= now - sinceMinutes`.
- */
-export function parseAlertsWindow(input: {
-  raw: string[];
-  sinceMinutes: number;
-  now: Date;
-}): Record<string, unknown>[] {
-  const cutoffMs = input.now.getTime() - input.sinceMinutes * 60 * 1000;
-  const out: Record<string, unknown>[] = [];
-  for (const json of input.raw) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(json);
-    } catch {
-      // Best-effort: skip malformed rows; the alerts list shouldn't have any.
-      continue;
-    }
-    if (!parsed || typeof parsed !== "object") continue;
-    const obj = parsed as Record<string, unknown>;
-    const ts =
-      typeof obj.timestamp === "string" ? Date.parse(obj.timestamp) : NaN;
-    if (!Number.isFinite(ts)) continue;
-    if (ts < cutoffMs) continue;
-    if (typeof obj.id !== "string") continue;
-    if (typeof obj.message !== "string") continue;
-    if (typeof obj.severity !== "string") continue;
-    out.push(obj);
-  }
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +270,3 @@ export function parseAlertsWindow(input: {
 // in the route as the IO-wiring layer it already is.
 // ---------------------------------------------------------------------------
 
-async function defaultReadAlertsJson(limit: number): Promise<string[]> {
-  return defaultReadRecentAlerts(limit);
-}

@@ -1,0 +1,1 @@
+- feat(operator-actions): ADR-0034 §9 parity pins over docs/generated/routes.json (rungs 1, 3, 4) and retire 16 zero-caller routes under ADR-0024 §3 (#4638)

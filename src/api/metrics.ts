@@ -1,10 +1,7 @@
 import { Router } from "express";
 import { getMetricsTrend } from "../metrics/trend.ts";
-import { projectGroundingDuration } from "../metrics/grounding.ts";
-import { getAbandonmentBreakdown } from "../metrics/abandonment.ts";
 import {
   getAggregateStats,
-  getCumulativeAccomplishments,
   getUnclassifiedAnchors,
 } from "../metrics/aggregate.ts";
 import { projectAnchorDistribution } from "../metrics/stats-projection.ts";
@@ -41,32 +38,6 @@ const SessionTokensQuerySchema = z.object({
 
 export function createMetricsRouter() {
   const router = Router();
-
-  // GET /summary — Human-readable system summary.
-  //
-  // Not an isolateAggregator route: the success path is a text/plain send, not a
-  // JSON body, so the seam (which JSONs its produce result) does not fit. ADR-0027
-  // eighth sweep: the catch adopts the pino `err`-field seam instead.
-  router.get("/summary", async (_req, res) => {
-    try {
-      const stats = await getAggregateStats(20);
-      const acc = await getCumulativeAccomplishments(20);
-
-      const lines = [
-        `Hydra V2 — ${stats.cycles} cycles completed`,
-        `Merged: ${stats.mergedRate}% | Failed: ${stats.failedRate}% | Regressed: ${stats.regressionRate}%`,
-        `Avg cycle: ${stats.avgDurationHuman}`,
-        "",
-        "Accomplished:",
-        ...acc.map((a) => `  - ${a.title} (tests ${a.tests})`),
-      ];
-
-      res.type("text/plain").send(lines.join("\n"));
-    } catch (err: any) {
-      logger.error({ err }, "[api/metrics] /summary failed");
-      res.status(500).json({ error: err.message });
-    }
-  });
 
   // GET /metrics — Recent cycle metrics
   //
@@ -123,17 +94,6 @@ export function createMetricsRouter() {
           note: "escalated cascade re-dispatches (#3284) still record; count-based cycle stats cover recordedClasses only",
         },
       };
-    }),
-  );
-
-  // GET /metrics/abandonment — Aggregated abandonment causes from recent cycles (issue #195)
-  //
-  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
-  router.get(
-    "/metrics/abandonment",
-    aggregatorRouteNoQuery("api/metrics/abandonment", (req) => {
-      const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
-      return getAbandonmentBreakdown(count);
     }),
   );
 
@@ -242,32 +202,6 @@ export function createMetricsRouter() {
       // the /builder UnclassifiedResidue panel reads. Every pre-existing field
       // keeps its name and type (the discover playbook parses this route).
       return { ...(await getUnclassifiedAnchors(count)), generatedAt: new Date().toISOString() };
-    }),
-  );
-
-  // GET /metrics/grounding-duration — p50/p95 + incremental vs full bucket
-  //
-  // Issue #341: incremental grounding/verification can cut a 14-min cycle to
-  // ~10 min by running only tests whose transitive import closure intersects
-  // the changed files. This endpoint exposes the grounding/verification
-  // duration trend, bucketed by groundingMode ("incremental" | "full" | ""),
-  // so the rollout's effect can be measured per-cycle without scraping the
-  // raw metrics index.
-  //
-  // Until selectAffectedTests is wired into the verification path (env-gated:
-  // HYDRA_INCREMENTAL_GROUNDING=true), all cycles will report mode="full" or
-  // an empty mode field — bucket distribution makes that visible.
-  //
-  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
-  router.get(
-    "/metrics/grounding-duration",
-    aggregatorRouteNoQuery("api/metrics/grounding-duration", async (req) => {
-      const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
-      const trend = await getMetricsTrend(count);
-
-      // Percentile + bucketing math lives in src/metrics/grounding.ts; this
-      // route is a thin delegate (issue #2126; relocated out of trend.ts #2614).
-      return projectGroundingDuration(trend);
     }),
   );
 
