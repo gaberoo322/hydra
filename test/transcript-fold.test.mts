@@ -302,3 +302,40 @@ describe("foldFileContribution — shared per-file fold (issue #4792)", () => {
     assert.equal(acc.acc7d.total, 4, "window totals still count");
   });
 });
+
+describe("message.id de-duplication — one line per content block (issue #5141)", () => {
+  const CUTOFF_7D = Date.parse("2026-05-25T12:00:00Z") - 7 * 86_400_000;
+  const attribution = { skill: "hydra-dev", dispatchKind: "dev" as unknown as DispatchKind };
+  const TS = "2026-05-25T10:00:00Z";
+  function withId(line: string, id: string | undefined): string {
+    const obj = JSON.parse(line);
+    if (id !== undefined) obj.message.id = id;
+    return JSON.stringify(obj);
+  }
+
+  test("a message split across 3 lines folds to its usage once (sumSessionTokens)", () => {
+    const l = withId(assistantLine(TS, { in: 10, out: 5 }, "claude-opus-4-7"), "msg_1");
+    assert.equal(sumSessionTokens([l, l, l]), 15);
+  });
+
+  test("distinct message ids still sum; lines without an id count as before", () => {
+    const lines = [
+      withId(assistantLine(TS, { in: 10 }, "claude-opus-4-7"), "msg_1"),
+      withId(assistantLine(TS, { in: 10 }, "claude-opus-4-7"), "msg_1"),
+      withId(assistantLine(TS, { in: 7 }, "claude-opus-4-7"), "msg_2"),
+      withId(assistantLine(TS, { in: 3 }, "claude-opus-4-7"), undefined),
+      withId(assistantLine(TS, { in: 3 }, "claude-opus-4-7"), undefined),
+    ];
+    assert.equal(sumSessionTokens(lines), 10 + 7 + 3 + 3);
+  });
+
+  test("parseTranscriptFile emits one entry per message id", () => {
+    const l = withId(assistantLine(TS, { in: 10, out: 5 }, "claude-opus-4-7"), "msg_1");
+    const other = withId(assistantLine(TS, { in: 1 }, "claude-opus-4-7"), "msg_2");
+    const res = parseTranscriptFile([l, l, l, other].join("\n"), CUTOFF_7D, () => attribution);
+    assert.deepEqual(
+      res.entry.entries.map((e) => e.tokens.total),
+      [15, 1],
+    );
+  });
+});

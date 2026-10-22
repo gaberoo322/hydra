@@ -1,0 +1,1 @@
+- fix: count each assistant message once in transcript token totals, so cost-by-class and 24h token figures are no longer inflated by per-content-block lines (#5141)

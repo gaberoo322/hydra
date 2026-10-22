@@ -80,15 +80,22 @@ export function firstUserMessageText(lines: readonly string[]): string | null {
  * `parseUsageLine` (the same authoritative parser the windowed scan uses), so
  * the per-dispatch count is reconcilable with the per-skill/per-family
  * cross-tabs. Non-JSON lines, lines with no usage block, and zero-usage lines
- * all contribute nothing. Unlike the rolling-window scan this applies NO time
+ * all contribute nothing. Each assistant `message.id` counts once (issue
+ * #5141): Claude Code writes one line per content block, each repeating the
+ * message's full usage. Lines without a `message.id` count as before. Unlike the rolling-window scan this applies NO time
  * cutoff. Total: always returns a non-negative integer.
  */
 export function sumSessionTokens(lines: readonly string[]): number {
   let total = 0;
+  const seenIds = new Set<string>();
   for (const line of lines) {
     if (!line || line[0] !== "{") continue;
     const parsed = parseUsageLine(line);
     if (parsed === null || parsed === "skip") continue;
+    if (parsed.messageId !== null) {
+      if (seenIds.has(parsed.messageId)) continue;
+      seenIds.add(parsed.messageId);
+    }
     total += parsed.tokens.total;
   }
   return total;
@@ -138,6 +145,9 @@ export function parseTranscriptFile(
   let parseErrors = 0;
   let observedResetMs: number | null = null;
   let hadInWindow7d = false;
+  // One assistant message spans several JSONL lines (one per content block), each
+  // repeating the same usage -- count each `message.id` once (issue #5141).
+  const seenIds = new Set<string>();
 
   for (const line of lines) {
     if (!line || line[0] !== "{") continue;
@@ -155,6 +165,10 @@ export function parseTranscriptFile(
     }
     if (parsed === "skip") continue;
     linesWithUsage++;
+    if (parsed.messageId !== null) {
+      if (seenIds.has(parsed.messageId)) continue;
+      seenIds.add(parsed.messageId);
+    }
 
     const tsMs = parsed.tsMs;
     if (tsMs < cutoff7d) continue;
