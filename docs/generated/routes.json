@@ -232,7 +232,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 217
+        "line": 222
       }
     },
     {
@@ -254,7 +254,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 336
+        "line": 341
       }
     },
     {
@@ -276,7 +276,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 399
+        "line": 430
       }
     },
     {
@@ -296,7 +296,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 518
+        "line": 549
       }
     },
     {
@@ -316,7 +316,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 579
+        "line": 610
       }
     },
     {
@@ -336,7 +336,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 622
+        "line": 653
       }
     },
     {
@@ -356,7 +356,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 640
+        "line": 671
       }
     },
     {
@@ -2171,9 +2171,10 @@
       "stability": "stable",
       "stabilityNote": null,
       "consumers": [
+        "dashboard/src/components/ActionAffordance.jsx",
         "dashboard/src/components/pages/work/ClassStatePanel.jsx"
       ],
-      "home": "/work",
+      "home": "/",
       "areas": [
         "src/operator-actions/",
         "src/schemas/"

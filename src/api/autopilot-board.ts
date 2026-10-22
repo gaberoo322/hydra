@@ -60,6 +60,7 @@ import {
 import {
   listOpenIssues,
   listIssuesByLabel,
+  listIssuesBySearch,
   addIssueLabel,
   ISSUE_JSON_FIELDS,
   type IssueRow,
@@ -74,6 +75,7 @@ import {
   type IssueViewResult,
   type IssueActionWriteResult,
 } from "../github/issue-actions.ts";
+import { fetchOpenBlockerNumbers } from "../github/blockers.ts";
 import { getTargetGithubRepo } from "../target-config.ts";
 import {
   deriveBoardState,
@@ -82,6 +84,9 @@ import {
   resolveOpenBlockers,
 } from "../autopilot/board-state.ts";
 import {
+  deriveWorkLane,
+  failClosedOnTruncatedSearch,
+  workQueueBlockerSearchLimit,
   toWorkQueueRow,
   compareWorkQueueRows,
   evaluatePromoteEligibility,
@@ -358,14 +363,40 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
         );
         glmPartitionActive = false;
       }
+      // Blockers resolve against PROSPECTIVE rows (issue #4629,
+      // design-concept 821e48ed INV-6): every operator-lane row AS IT WOULD
+      // BE post-promote (`labels + ready-for-agent`, glm partition inactive)
+      // — exactly the promote gate's prospectiveRow construction below — so
+      // the resolver (which only resolves rows that can count toward
+      // ready_for_agent) covers every lane the /work promote checklist
+      // evaluates, still in ONE batched lookup with its fail-safe
+      // treat-as-open default. board-state's counts are untouched.
+      // The ONE batched search's --limit scales with the referenced blockers,
+      // and a read that fills it fails CLOSED (every ref treated as open) —
+      // review follow-up on PR #5155: a truncated page must never drop an
+      // open blocker and render a client ✓.
       const resolveBlockers =
         deps.resolveOpenBlockers ??
         ((rows: readonly IssueRow[]) =>
-          resolveOpenBlockers(rows, undefined, glmPartitionActive));
+          resolveOpenBlockers(rows, undefined, false, (numbers) =>
+            fetchOpenBlockerNumbers(numbers, {
+              listIssuesBySearch: failClosedOnTruncatedSearch(
+                listIssuesBySearch,
+                workQueueBlockerSearchLimit(numbers.length),
+              ),
+            }),
+          ));
+      const prospectiveRows: IssueRow[] = read.rows
+        .filter((row) => deriveWorkLane(row.labels) !== null)
+        .map((row) =>
+          row.labels.includes("ready-for-agent")
+            ? row
+            : { ...row, labels: [...row.labels, "ready-for-agent"] },
+        );
       // Same post-read belt-and-braces as board-state (#3059): a rejecting
       // injected resolver degrades the queue, never 500s.
       try {
-        const openBlockers = await resolveBlockers(read.rows);
+        const openBlockers = await resolveBlockers(prospectiveRows);
         items = read.rows
           .map((row) => toWorkQueueRow(row, openBlockers, { glmPartitionActive }))
           .filter((row): row is WorkQueueRow => row !== null)

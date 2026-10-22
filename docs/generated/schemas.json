@@ -20,7 +20,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 101
+        "line": 106
       }
     },
     {
@@ -42,7 +42,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 275
+        "line": 367
       }
     },
     {
@@ -228,7 +228,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 54
+        "line": 59
       }
     },
     {
@@ -240,7 +240,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 156
+        "line": 202
       }
     },
     {
@@ -252,7 +252,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 74
+        "line": 79
       }
     },
     {
@@ -280,7 +280,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 346
+        "line": 356
       }
     },
     {
@@ -294,7 +294,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 354
+        "line": 364
       }
     },
     {
@@ -308,7 +308,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 320
+        "line": 330
       }
     },
     {
@@ -322,7 +322,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 328
+        "line": 338
       }
     },
     {
@@ -334,7 +334,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 63
+        "line": 68
       }
     },
     {
@@ -352,6 +352,26 @@
       }
     },
     {
+      "name": "CONTROL_CHECKS",
+      "file": "src/schemas/operator-actions.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/operator-actions.ts",
+        "line": 273
+      }
+    },
+    {
+      "name": "CONTROL_KEYS",
+      "file": "src/schemas/operator-actions.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/operator-actions.ts",
+        "line": 137
+      }
+    },
+    {
       "name": "ContextTraceQuerySchema",
       "file": "src/schemas/learning.ts",
       "importedBy": [
@@ -363,6 +383,16 @@
       "source": {
         "path": "src/schemas/learning.ts",
         "line": 47
+      }
+    },
+    {
+      "name": "ControlCheckSchema",
+      "file": "src/schemas/operator-actions.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/operator-actions.ts",
+        "line": 291
       }
     },
     {
@@ -551,7 +581,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 257
+        "line": 267
       }
     },
     {
@@ -568,7 +598,7 @@
       ],
       "source": {
         "path": "src/schemas/autopilot-board.ts",
-        "line": 249
+        "line": 259
       }
     },
     {
@@ -688,7 +718,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 289
+        "line": 381
       }
     },
     {
@@ -700,7 +730,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 310
+        "line": 402
       }
     },
     {
@@ -710,7 +740,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 328
+        "line": 420
       }
     },
     {
@@ -784,7 +814,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 197
+        "line": 244
       }
     },
     {
