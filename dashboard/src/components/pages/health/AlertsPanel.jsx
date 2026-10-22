@@ -80,7 +80,7 @@ function AlertRow({ alert, entries, onFired }) {
           verdicts={alertVerdicts(alert)}
           resolveRoute={resolveRoute}
           onFired={onFired}
-          rereadNoun="health"
+          rereadNoun="/health"
         />
       </span>
     </li>
@@ -141,7 +141,7 @@ export default function AlertsPanel({ entries = NO_ENTRIES }) {
               testId="alerts-dismiss-all"
               verdicts={alertsVerdicts(undismissed.length)}
               onFired={refreshAlerts}
-              rereadNoun="health"
+              rereadNoun="/health"
             />
           </div>
           <ul data-testid="alerts-headline" className="divide-y divide-zinc-800">

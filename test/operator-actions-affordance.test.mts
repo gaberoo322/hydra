@@ -1285,7 +1285,7 @@ describe("the /health panels render controls from the page's ONE registry read (
       assert.ok(!src.includes('"/operator-actions"'), "no direct registry fetch");
       assert.ok(!src.includes("apiFetch("), "no hand-rolled write");
       assert.ok(src.includes("useCheckedRefresh("), "onFired is a CHECKED re-read of the panel's own read");
-      assert.ok(src.includes('rereadNoun="health"'));
+      assert.ok(src.includes('rereadNoun="/health"'));
     });
   }
 

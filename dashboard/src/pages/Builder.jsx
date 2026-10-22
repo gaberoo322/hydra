@@ -4,6 +4,7 @@ import { LessonsTrend } from "../components/pages/outcomes/LessonsTrend.jsx";
 import { LessonsTab } from "../components/pages/explore/LessonsTab.jsx";
 import { QualityGates } from "../components/pages/builder/QualityGates.jsx";
 import { TangledModules } from "../components/pages/builder/TangledModules.jsx";
+import { ClassYield } from "../components/pages/builder/ClassYield.jsx";
 
 /**
  * Dashboard v3 — `/builder` page (issue #4011, ADR-0034 §2; slice "zeta" of
@@ -42,6 +43,7 @@ export default function Builder() {
       <TangledModules />
       <LessonsTrend />
       <LessonsTab />
+      <ClassYield />
     </div>
   );
 }

@@ -157,7 +157,7 @@ export default function ServiceStrip({ entries = NO_ENTRIES }) {
               testId="scheduler-stop"
               verdicts={schedVerdicts}
               onFired={refreshScheduler}
-              rereadNoun="health"
+              rereadNoun="/health"
             />
           ) : (
             <ControlAffordance
@@ -166,7 +166,7 @@ export default function ServiceStrip({ entries = NO_ENTRIES }) {
               testId="scheduler-start"
               verdicts={schedVerdicts}
               onFired={refreshScheduler}
-              rereadNoun="health"
+              rereadNoun="/health"
             />
           )}
         </div>

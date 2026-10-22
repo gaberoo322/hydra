@@ -175,14 +175,14 @@ describe("Health.jsx writes ride ActionAffordance (INV-2, #4629)", () => {
     assert.match(src, /from "\.\.\/components\/ActionAffordance\.jsx"/, "Health.jsx renders the shared affordance");
     // Server-confirmed: every affordance refreshes the /health read via onFired
     // before its result line renders — a CHECKED re-read (PR #5155 review),
-    // so a failed re-read can render "health re-read FAILED".
+    // so a failed re-read can render "/health re-read FAILED".
     assert.match(src, /onFired=\{refreshHealth\}/);
     assert.match(src, /const refreshHealth = useCheckedRefresh\(health\);/);
     // One rereadNoun per ControlAffordance — a count tied to the controls the
     // page renders (four from #4629, plus #4631's housekeeping), not a literal.
     const controls = (src.match(/<ControlAffordance\b/g) ?? []).length;
     assert.ok(controls >= 4, "the four #4629 controls render through ControlAffordance");
-    assert.equal((src.match(/rereadNoun="health"/g) ?? []).length, controls, "every /health control names its re-read");
+    assert.equal((src.match(/rereadNoun="\/health"/g) ?? []).length, controls, "every /health control names its re-read");
   });
 
   test("the hand-rolled pending/error trios are deleted, not wrapped", async () => {
