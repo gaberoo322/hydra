@@ -1018,14 +1018,18 @@
       "consumers": [],
       "home": "/api/design-concepts/snapshots",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 108
+        "line": 217
       }
     },
     {
@@ -1036,14 +1040,18 @@
       "consumers": [],
       "home": "/api/design-concepts/exempt-log",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 126
+        "line": 235
       }
     },
     {
@@ -1054,14 +1062,18 @@
       "consumers": [],
       "home": "/api/design-concepts/exempt-log",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 158
+        "line": 267
       }
     },
     {
@@ -1072,14 +1084,42 @@
       "consumers": [],
       "home": "/api/design-concepts",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 205
+        "line": 314
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/design-concepts/:anchorRef/approve-preconditions",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/work/DesignConceptQueue.jsx"
+      ],
+      "home": "/work",
+      "areas": [
+        "src/attention.ts",
+        "src/design-concept-gate.ts",
+        "src/design-concept.ts",
+        "src/github/",
+        "src/logger.ts",
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/design-concepts.ts",
+        "line": 376
       }
     },
     {
@@ -1090,14 +1130,18 @@
       "consumers": [],
       "home": "/api/design-concepts/:anchorRef/resolve",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 249
+        "line": 517
       }
     },
     {
@@ -1105,17 +1149,23 @@
       "path": "/api/design-concepts/:anchorRef",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/design-concepts/:anchorRef",
+      "consumers": [
+        "dashboard/src/components/pages/work/DesignConceptQueue.jsx"
+      ],
+      "home": "/work",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 294
+        "line": 562
       }
     },
     {
@@ -1126,14 +1176,18 @@
       "consumers": [],
       "home": "/api/design-concepts",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 312
+        "line": 580
       }
     },
     {
@@ -1144,14 +1198,18 @@
       "consumers": [],
       "home": "/api/design-concepts/:anchorRef/approve",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 347
+        "line": 615
       }
     },
     {
@@ -1407,8 +1465,10 @@
       "path": "/api/holdback/enrolments",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/holdback/enrolments",
+      "consumers": [
+        "dashboard/src/components/pages/work/HoldbackEnrolState.jsx"
+      ],
+      "home": "/work",
       "areas": [
         "src/holdback-policy.ts",
         "src/holdback.ts",

@@ -63,6 +63,9 @@ import {
 } from "../src/scope-section.ts";
 import { extractScopeFromBody as extractScopeFromBodyViaCi } from "../scripts/ci/scope-check.ts";
 import { projectAnchorDistribution } from "../src/metrics/stats-projection.ts";
+// Issue #4633 — the design-concept approve control + holdback enrol state.
+import { createDesignConceptsRouter } from "../src/api/design-concepts.ts";
+import { REGISTRY } from "../src/operator-actions/registry.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1485,5 +1488,398 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     // ready row is Claude-owned even at full partition liveness — the badge
     // is the lane predicate's ruling, never a glm-eligible label read.
     assert.equal(row.glmEligible, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4633 — /work design-concept approve control + read-only holdback
+// enrol state (guidance-epic 14/19, design-concept a493aead). Top-level
+// describes with their own lifecycle; every HTTP test injects its readers
+// (no Redis, no gh).
+// ---------------------------------------------------------------------------
+
+const DC_HASH_A = "a".repeat(64);
+const DC_HASH_B = "b".repeat(64);
+
+/** One DesignConcept fixture (fictional anchors; no real repo paths). */
+function concept(overrides: any = {}): any {
+  return {
+    anchorRef: "issue-90001",
+    scope: "orch",
+    createdAt: Date.parse("2026-10-20T00:00:00Z"),
+    artifactHash: DC_HASH_A,
+    glossaryTerms: ["Fictional Term"],
+    glossaryGaps: [],
+    modulesTouched: [
+      { path: "src/fictional-module.ts", interfaceImpact: "extend", depthClassification: "deep" },
+    ],
+    invariants: ["INV-1 something holds", "INV-2 something else holds"],
+    rejectedAlternatives: [{ alt: "the other way", why: "worse" }],
+    qaTrace: [{ q: "why?", a: "because" }],
+    prototypes: [
+      { question: "q", branch: "logic", snippet: "x", answer: "y", workTreePath: "/tmp/fictional" },
+    ],
+    status: "draft",
+    approvedBy: "",
+    ...overrides,
+  };
+}
+
+function handoffComment(hash: string): any {
+  return {
+    body:
+      "## hydra-grill handoff\n\n- anchorRef: issue-90001\n" +
+      `- artifactHash: ${hash}\n- gate reasons:\n  - something\n\nNext step: …`,
+  };
+}
+
+/** The registry's grill-handoff approve action — the one text source. */
+function registryApprove(): any {
+  const entry: any = REGISTRY.find(
+    (e: any) => e.key === "waiting-on-you:ready-for-human" && e.variant === "grill-handoff",
+  );
+  assert.ok(entry, "grill-handoff variant must exist");
+  return entry.alternatives[1];
+}
+
+describe("GET /design-concepts — paginated list (#4633 INV-1/INV-2)", () => {
+  function listRouter(concepts: any[], extra: any = {}) {
+    const pruned: number[] = [];
+    const router = createDesignConceptsRouter({
+      listLiveConcepts: async () => concepts,
+      pruneIndex: async () => {
+        pruned.push(1);
+        return 0;
+      },
+      now: () => Date.parse("2026-10-21T00:00:00Z"),
+      ...extra,
+    });
+    return { handler: findHandler(router, "GET", "/design-concepts")!, pruned };
+  }
+
+  const seven = Array.from({ length: 7 }, (_, i) =>
+    concept({ anchorRef: `issue-9000${i}`, status: i % 2 === 0 ? "draft" : "approved" }),
+  );
+
+  test("no params → full artifacts + count exactly as before; new envelope fields are additive (INV-1)", async () => {
+    const { handler, pruned } = listRouter(seven);
+    const res = mockRes();
+    await handler(mockReq({ query: {} }), res);
+    assert.equal(res._status, 200);
+    // items are the artifacts VERBATIM (full shape, heavy arrays present).
+    assert.deepEqual(res._body.items, seven);
+    assert.equal(res._body.count, 7);
+    assert.equal(res._body.total, 7);
+    assert.equal(res._body.limit, 50);
+    assert.equal(res._body.offset, 0);
+    assert.equal(res._body.nextOffset, null);
+    assert.ok(Number.isFinite(Date.parse(res._body.generatedAt)));
+    // prune-then-list stays visible at the call site (#3605).
+    assert.equal(pruned.length, 1);
+  });
+
+  test("offset/limit arithmetic: total is exact, nextOffset advances then nulls", async () => {
+    const { handler } = listRouter(seven);
+    const page2 = mockRes();
+    await handler(mockReq({ query: { limit: "3", offset: "3" } }), page2);
+    assert.deepEqual(
+      page2._body.items.map((d: any) => d.anchorRef),
+      ["issue-90003", "issue-90004", "issue-90005"],
+    );
+    assert.equal(page2._body.total, 7);
+    assert.equal(page2._body.count, 3);
+    assert.equal(page2._body.nextOffset, 6);
+
+    const last = mockRes();
+    await handler(mockReq({ query: { limit: "3", offset: "6" } }), last);
+    assert.deepEqual(last._body.items.map((d: any) => d.anchorRef), ["issue-90006"]);
+    assert.equal(last._body.nextOffset, null);
+  });
+
+  test("status filter runs BEFORE the slice — total is the filtered count", async () => {
+    const { handler } = listRouter(seven);
+    const res = mockRes();
+    await handler(mockReq({ query: { status: "draft", limit: "2" } }), res);
+    assert.equal(res._body.total, 4); // drafts at i = 0, 2, 4, 6
+    assert.deepEqual(res._body.items.map((d: any) => d.anchorRef), ["issue-90000", "issue-90002"]);
+    assert.equal(res._body.nextOffset, 2);
+    assert.ok(res._body.items.every((d: any) => d.status === "draft"));
+  });
+
+  test("scope filter composes with status", async () => {
+    const mixed = [
+      concept({ anchorRef: "issue-90010", scope: "target" }),
+      concept({ anchorRef: "issue-90011", scope: "orch" }),
+      concept({ anchorRef: "issue-90012", scope: "orch", status: "stale" }),
+    ];
+    const { handler } = listRouter(mixed);
+    const res = mockRes();
+    await handler(mockReq({ query: { scope: "orch", status: "draft" } }), res);
+    assert.deepEqual(res._body.items.map((d: any) => d.anchorRef), ["issue-90011"]);
+    assert.equal(res._body.total, 1);
+  });
+
+  test("view=summary carries identity + verdicts + counts and NEVER the heavy arrays", async () => {
+    const { handler } = listRouter([concept()]);
+    const res = mockRes();
+    await handler(mockReq({ query: { view: "summary" } }), res);
+    const row = res._body.items[0];
+    for (const heavy of ["qaTrace", "prototypes", "invariants", "modulesTouched", "rejectedAlternatives", "glossaryTerms"]) {
+      assert.equal(heavy in row, false, `summary row must not carry ${heavy}`);
+    }
+    assert.equal(row.anchorRef, "issue-90001");
+    assert.equal(row.status, "draft");
+    assert.equal(row.artifactHash, DC_HASH_A);
+    assert.equal(typeof row.gate.ok, "boolean");
+    assert.ok(Array.isArray(row.gate.reasons));
+    assert.equal(typeof row.contentGate.ok, "boolean");
+    assert.deepEqual(row.counts, { invariants: 2, modulesTouched: 1, qaTrace: 1, glossaryGaps: 0 });
+  });
+
+  test("garbled params collapse to defaults — never a 400 on this read route", async () => {
+    const { handler } = listRouter(seven);
+    const res = mockRes();
+    await handler(
+      mockReq({ query: { offset: "-4", status: "pending", view: "everything", limit: "abc" } }),
+      res,
+    );
+    assert.equal(res._status, 200);
+    assert.equal(res._body.offset, 0);
+    assert.equal(res._body.limit, 50);
+    assert.equal(res._body.total, 7); // 'pending' is not a status → no filter
+    assert.ok("qaTrace" in res._body.items[0]); // bad view → full
+  });
+});
+
+describe("GET /design-concepts/:anchorRef/approve-preconditions (#4633 INV-3/INV-4)", () => {
+  const PATH = "/design-concepts/:anchorRef/approve-preconditions";
+
+  function preRouter(opts: { dc?: any; comments?: any; clock?: { t: number }; getConcept?: any }) {
+    const calls: any[][] = [];
+    const clock = opts.clock ?? { t: Date.parse("2026-10-21T00:00:00Z") };
+    const router = createDesignConceptsRouter({
+      getConcept: opts.getConcept ?? (async () => opts.dc ?? null),
+      readIssueComments: async (repo: string, number: number) => {
+        calls.push([repo, number]);
+        const c = opts.comments;
+        if (typeof c === "function") return c();
+        return c ?? { ok: true, comments: [] };
+      },
+      now: () => clock.t,
+    });
+    return { handler: findHandler(router, "GET", PATH)!, calls, clock };
+  }
+
+  async function call(handler: Function, anchorRef = "issue-90001") {
+    const res = mockRes();
+    await handler(mockReq({ params: { anchorRef } }), res);
+    return res;
+  }
+
+  test("registry: the approve action's preconditions are the three machine-evaluable lines, in order", () => {
+    const action = registryApprove();
+    assert.equal(action.kind, "in-dashboard");
+    assert.equal(action.confirmTier, "confirm-first");
+    assert.equal(action.label, "Approve draft as-is");
+    assert.deepEqual(action.preconditions, [
+      "the draft artifact exists in Redis (7-day TTL)",
+      "the artifact's status is 'draft' (not already approved, not stale)",
+      "the artifactHash matches the `## hydra-grill handoff` comment on the issue",
+    ]);
+  });
+
+  test("all three ✓ → allOk, labels are the registry's verbatim, action resolved from the registry", async () => {
+    const { handler, calls } = preRouter({
+      dc: concept(),
+      comments: { ok: true, comments: [{ body: "unrelated" }, handoffComment(DC_HASH_A)] },
+    });
+    const res = await call(handler);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.allOk, true);
+    assert.deepEqual(
+      res._body.preconditions.map((p: any) => p.label),
+      registryApprove().preconditions,
+    );
+    assert.ok(res._body.preconditions.every((p: any) => p.ok === true));
+    assert.equal(res._body.artifactHash, DC_HASH_A);
+    assert.equal(res._body.handoffHash, DC_HASH_A);
+    // The served action IS the registry's, with {number} resolved.
+    assert.equal(res._body.action.route, "/design-concepts/issue-90001/approve");
+    assert.equal(res._body.action.label, registryApprove().label);
+    assert.equal(res._body.action.consequence, registryApprove().consequence);
+    assert.ok(Number.isFinite(Date.parse(res._body.generatedAt)));
+    assert.deepEqual(calls, [["gaberoo322/hydra", 90001]]);
+  });
+
+  test("gh failure → that line ✗ with the reason, still 200, no throw", async () => {
+    const { handler } = preRouter({ dc: concept(), comments: { ok: false, error: "gh-failed" } });
+    const res = await call(handler);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.allOk, false);
+    assert.equal(res._body.preconditions[0].ok, true);
+    assert.equal(res._body.preconditions[1].ok, true);
+    assert.equal(res._body.preconditions[2].ok, false);
+    assert.match(res._body.preconditions[2].detail, /gh-failed/);
+  });
+
+  test("a comment reader that THROWS degrades the same way (never a 500)", async () => {
+    const { handler } = preRouter({
+      dc: concept(),
+      comments: () => {
+        throw new Error("spawn exploded");
+      },
+    });
+    const res = await call(handler);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.preconditions[2].ok, false);
+    assert.match(res._body.preconditions[2].detail, /spawn exploded/);
+  });
+
+  test("missing artifact → every line ✗, no gh read spent", async () => {
+    const { handler, calls } = preRouter({ dc: null });
+    const res = await call(handler);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.allOk, false);
+    assert.ok(res._body.preconditions.every((p: any) => p.ok === false));
+    assert.equal(res._body.artifactHash, null);
+    assert.equal(calls.length, 0);
+  });
+
+  test("an artifact read that throws → line 1 ✗ with the reason, still 200", async () => {
+    const { handler } = preRouter({
+      getConcept: async () => {
+        throw new Error("redis down");
+      },
+    });
+    const res = await call(handler);
+    assert.equal(res._status, 200);
+    assert.match(res._body.preconditions[0].detail, /redis down/);
+    assert.equal(res._body.allOk, false);
+  });
+
+  test("already approved → status line ✗ (not a draft)", async () => {
+    const { handler } = preRouter({
+      dc: concept({ status: "approved", approvedBy: "auto-gate" }),
+      comments: { ok: true, comments: [handoffComment(DC_HASH_A)] },
+    });
+    const res = await call(handler);
+    assert.equal(res._body.preconditions[1].ok, false);
+    assert.match(res._body.preconditions[1].detail, /approved/);
+    assert.equal(res._body.allOk, false);
+  });
+
+  test("the LAST handoff comment wins — an older matching hash does not satisfy a newer mismatch", async () => {
+    const { handler } = preRouter({
+      dc: concept(),
+      comments: { ok: true, comments: [handoffComment(DC_HASH_A), handoffComment(DC_HASH_B)] },
+    });
+    const res = await call(handler);
+    assert.equal(res._body.handoffHash, DC_HASH_B);
+    assert.equal(res._body.preconditions[2].ok, false);
+    assert.equal(res._body.allOk, false);
+  });
+
+  test("no handoff comment at all → hash line ✗", async () => {
+    const { handler } = preRouter({ dc: concept(), comments: { ok: true, comments: [{ body: "lgtm" }] } });
+    const res = await call(handler);
+    assert.equal(res._body.preconditions[2].ok, false);
+    assert.equal(res._body.handoffHash, null);
+  });
+
+  test("successful comment reads are memoised 60 s per issue; failures are not", async () => {
+    const clock = { t: Date.parse("2026-10-21T00:00:00Z") };
+    const ok = preRouter({
+      dc: concept(),
+      comments: { ok: true, comments: [handoffComment(DC_HASH_A)] },
+      clock,
+    });
+    await call(ok.handler);
+    clock.t += 30_000;
+    await call(ok.handler);
+    assert.equal(ok.calls.length, 1, "second read inside 60 s rides the memo");
+    clock.t += 31_000;
+    await call(ok.handler);
+    assert.equal(ok.calls.length, 2, "memo expires after 60 s");
+
+    const bad = preRouter({ dc: concept(), comments: { ok: false, error: "gh-failed" } });
+    await call(bad.handler);
+    await call(bad.handler);
+    assert.equal(bad.calls.length, 2, "a failed read is retried, never pinned");
+  });
+
+  test("a target-scope artifact reads its comments on the Target repo", async () => {
+    const prev = process.env.HYDRA_TARGET_GITHUB_REPO;
+    process.env.HYDRA_TARGET_GITHUB_REPO = "fictional-owner/fictional-target";
+    try {
+      const { handler, calls } = preRouter({ dc: concept({ scope: "target" }) });
+      await call(handler);
+      assert.deepEqual(calls, [["fictional-owner/fictional-target", 90001]]);
+    } finally {
+      if (prev === undefined) delete process.env.HYDRA_TARGET_GITHUB_REPO;
+      else process.env.HYDRA_TARGET_GITHUB_REPO = prev;
+    }
+  });
+
+  test("the sub-route is declared BEFORE the bare /:anchorRef route", () => {
+    const router: any = createDesignConceptsRouter();
+    const paths = router.stack.filter((l: any) => l.route).map((l: any) => l.route.path);
+    assert.ok(paths.indexOf(PATH) >= 0);
+    assert.ok(paths.indexOf(PATH) < paths.indexOf("/design-concepts/:anchorRef"));
+  });
+});
+
+describe("structural pins — #4633 design-concept queue + holdback enrol state", () => {
+  test("Work.jsx mounts both new panels", async () => {
+    const src = await readSource("../dashboard/src/pages/Work.jsx");
+    assert.match(src, /<DesignConceptQueue \/>/);
+    assert.match(src, /<HoldbackEnrolState \/>/);
+  });
+
+  test("DesignConceptQueue.jsx homes both reads and gates ActionAffordance on allOk (INV-5/INV-8/INV-11)", async () => {
+    const src = await readSource(
+      "../dashboard/src/components/pages/work/DesignConceptQueue.jsx",
+    );
+    assert.match(src, /import \{ ActionAffordance \} from "\.\.\/\.\.\/ActionAffordance\.jsx"/);
+    // The two §9.4 /work homes, as path literals.
+    assert.ok(src.includes("`/design-concepts?view=summary"), "paginated list literal");
+    assert.ok(src.includes("status=draft"), "draft is the default filter");
+    assert.ok(src.includes("`/design-concepts/${anchorRef}`"), "flat single-artifact literal");
+    assert.ok(src.includes("`/design-concepts/${anchorRef}/approve-preconditions`"));
+    // Approve mounts only on a fresh, all-✓ read; unproven never enables.
+    assert.match(src, /pre\.status === "ready"/);
+    assert.match(src, /pre\.data\?\.allOk === true/);
+    assert.match(src, /enabled \? \(\s*<ActionAffordance action=\{action\} onFired=\{onFired\} \/>/);
+    assert.match(src, /onFired=\{list\.refresh\}/);
+    assert.match(src, /row\.status === "draft" &&/);
+    // Trust seam + no direct fetch.
+    assert.match(src, /usePageItems\(/);
+    assert.match(src, /<Section/);
+    assert.equal(/\bfetch\(/.test(src), false);
+  });
+
+  test("ActionAffordance.jsx is not extended by this slice — the approve body stays the static map entry (INV-6)", async () => {
+    const src = await readSource("../dashboard/src/components/ActionAffordance.jsx");
+    assert.match(src, /"POST \/design-concepts\/:anchor\/approve": \{ by: "operator:dashboard" \}/);
+    assert.equal(src.includes("approve-preconditions"), false);
+    assert.equal(src.includes("holdback"), false);
+  });
+
+  test("HoldbackEnrolState.jsx: read-only rows, Enrol now only on failed, server-confirmed body (INV-9/INV-10)", async () => {
+    const src = await readSource(
+      "../dashboard/src/components/pages/work/HoldbackEnrolState.jsx",
+    );
+    assert.match(src, /usePageItems\("\/holdback\/enrolments\?limit=25"/);
+    assert.match(src, /itemsKey: "enrolments"/);
+    assert.match(src, /row\.state === "failed" &&/);
+    assert.match(src, /useServerConfirmedWrite\(enrolments\.refresh\)/);
+    assert.match(src, /"\/holdback\/enroll", \{\s*commitSha: row\.commitSha,\s*prNumber: row\.prNumber,\s*tier: row\.tier,\s*\}/);
+    // Confirm-first: arm, then the explicit confirm.
+    assert.match(src, /data-testid="holdback-enrol-arm"/);
+    assert.match(src, /data-testid="holdback-enrol-confirm-yes"/);
+    assert.match(src, /Confirm Enrol now\?/);
+    // Not a feed bucket, not the affordance (deferred to #4638).
+    assert.equal(/from "[^"]*attention/.test(src), false);
+    assert.equal(/from "[^"]*ActionAffordance/.test(src), false);
+    assert.equal(/\bfetch\(/.test(src), false);
   });
 });
