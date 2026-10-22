@@ -63,8 +63,9 @@ import { createRereadWaiters } from "../lib/reread.ts";
  *     unchecked list, so it passes none). Whether or not it is present, the
  *     trigger — arm, Confirm and immediate fire alike — is disabled while any
  *     line is ✗ (lib/preconditions.ts; prose lines never disable).
- *   - `context` — the closed `{number, label, paused, engaged}` the body
- *     builders read (a row's issue number, the relabel target, …).
+ *   - `context` — the closed `{number, label, paused, engaged, runId,
+ *     severity}` the body builders read (a row's issue number, the relabel
+ *     target, the /now panel's read run id, …).
  *   - `testId` — derives `<testId>-arm` / `-confirm-yes` / `-confirm-no`
  *     (confirm-first), `<testId>` (immediate), `<testId>-preconditions`,
  *     `<testId>-consequence` and `<testId>-result`.
@@ -87,7 +88,8 @@ import { createRereadWaiters } from "../lib/reread.ts";
  * test/operator-actions-affordance.test.mts.
  *
  * A value is a static body or a builder `(context) => body` over the closed
- * context `{number, label, paused, engaged}` (issue #4629 INV-7) — page
+ * context `{number, label, paused, engaged, runId, severity}` (issue #4629
+ * INV-7; `runId`/`severity` for the /now recommendation controls, #5152) — page
  * controls pass the row/page facts as `context`; the registry itself never
  * carries a body field. With no context the paused builder yields exactly
  * the feed's `{paused: false}`.
@@ -108,6 +110,11 @@ const IN_DASHBOARD_BODY = {
   "POST /alerts/dismiss-all": {},
   "POST /scheduler/stop": {},
   "POST /maintenance/housekeeping": {},
+  // /now recommendations (issue #5152) — both bodies carry the run_id the
+  // panel's own GET returned (context.runId, never the route's `current`
+  // alias); the rec id rides the resolved route.
+  "POST /now/recommendations/:id/dismiss": (context) => ({ run_id: context.runId }),
+  "POST /now/recommendations/mute-class": (context) => ({ run_id: context.runId, severity: context.severity }),
 };
 
 /** Resolve a map value: a builder is called with the (closed) context, a
