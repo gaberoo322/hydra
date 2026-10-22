@@ -6,7 +6,7 @@ import { API_BASE } from "../lib/autopilot-format.js";
 // served by GET /api/taxonomy/classes (issue #2524).
 //
 // Issue #4637 (ADR-0034 §5 trust contract): there is NO built-in fallback
-// alphabet any more. The old FALLBACK_* arrays had drifted (6 slots / 5
+// alphabet any more. The old built-in fallback arrays had drifted (6 slots / 5
 // signals against a live 7 / 15) and rendered a confident wrong grid whenever
 // the fetch had not landed or failed. Unverifiable now renders UNKNOWN: until
 // the route answers with a non-empty, non-degraded alphabet the hook reports
