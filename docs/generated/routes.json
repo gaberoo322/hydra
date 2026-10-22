@@ -158,8 +158,10 @@
       "path": "/api/attention/counts",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/attention/counts",
+      "consumers": [
+        "dashboard/src/components/pages/builder/FeedCalibration.jsx"
+      ],
+      "home": "/builder",
       "areas": [
         "src/attention-calibration.ts",
         "src/attention.ts",
@@ -196,8 +198,10 @@
       "path": "/api/attribution/impact",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/attribution/impact",
+      "consumers": [
+        "dashboard/src/components/pages/builder/ImpactRanking.jsx"
+      ],
+      "home": "/builder",
       "areas": [
         "src/outcome-attribution/",
         "src/outcomes.ts",
@@ -678,7 +682,9 @@
       "path": "/api/autopilot/runs/:runId/retro",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
+      "consumers": [
+        "dashboard/src/components/pages/runs/RunRetroBundle.jsx"
+      ],
       "home": "/api/autopilot/runs/:runId/retro",
       "areas": [
         "src/autopilot/",
@@ -1015,8 +1021,10 @@
       "path": "/api/design-concepts/snapshots",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/design-concepts/snapshots",
+      "consumers": [
+        "dashboard/src/components/pages/builder/DesignConceptGreenLight.jsx"
+      ],
+      "home": "/builder",
       "areas": [
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
@@ -1043,7 +1051,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 126
+        "line": 129
       }
     },
     {
@@ -1061,7 +1069,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 158
+        "line": 161
       }
     },
     {
@@ -1079,7 +1087,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 205
+        "line": 208
       }
     },
     {
@@ -1097,7 +1105,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 249
+        "line": 252
       }
     },
     {
@@ -1115,7 +1123,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 294
+        "line": 297
       }
     },
     {
@@ -1133,7 +1141,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 312
+        "line": 315
       }
     },
     {
@@ -1151,7 +1159,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 347
+        "line": 350
       }
     },
     {
@@ -1270,8 +1278,10 @@
       "path": "/api/explore/behavior",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/explore/behavior",
+      "consumers": [
+        "dashboard/src/components/pages/runs/BehaviorGallery.jsx"
+      ],
+      "home": "/runs",
       "areas": [
         "src/aggregators/",
         "src/schemas/"
@@ -1781,8 +1791,10 @@
       "path": "/api/metrics/unclassified",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/metrics/unclassified",
+      "consumers": [
+        "dashboard/src/components/pages/builder/UnclassifiedResidue.jsx"
+      ],
+      "home": "/builder",
       "areas": [
         "src/cost/",
         "src/logger.ts",
@@ -1813,7 +1825,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 258
+        "line": 262
       }
     },
     {
@@ -1833,7 +1845,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 290
+        "line": 294
       }
     },
     {
@@ -1853,7 +1865,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 309
+        "line": 313
       }
     },
     {
@@ -1873,7 +1885,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 328
+        "line": 332
       }
     },
     {
@@ -2000,8 +2012,10 @@
       "path": "/api/now/recommendations",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/now/recommendations",
+      "consumers": [
+        "dashboard/src/pages/now-console/RecommendationsPanel.jsx"
+      ],
+      "home": "/now",
       "areas": [
         "src/aggregators/",
         "src/autopilot/",
@@ -2017,8 +2031,10 @@
       "path": "/api/now/recommendations/:id/dismiss",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/now/recommendations/:id/dismiss",
+      "consumers": [
+        "dashboard/src/pages/now-console/RecommendationsPanel.jsx"
+      ],
+      "home": "/now",
       "areas": [
         "src/aggregators/",
         "src/autopilot/",
@@ -2192,8 +2208,10 @@
       "path": "/api/outcomes",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/outcomes",
+      "consumers": [
+        "dashboard/src/components/pages/builder/DeclaredOutcomes.jsx"
+      ],
+      "home": "/builder",
       "areas": [
         "src/logger.ts",
         "src/outcomes.ts"

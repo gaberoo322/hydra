@@ -1,0 +1,1 @@
+- feat(dashboard): home the /builder, /runs and /now dark reads (outcomes, impact ranking, unclassified residue, design-concept green light, feed calibration, behavior gallery, run retro bundle) and add /now recommendation dismiss (undo) + mute-class (confirm) controls; drop the dead /metrics?run= link (#4634)
