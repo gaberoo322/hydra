@@ -1110,7 +1110,15 @@ const RAW_ENTRIES = [
         method: "POST",
         confirmTier: "confirm-first",
         label: "Approve draft as-is",
-        preconditions: ["the unmet gate reasons in the handoff are acceptable to ship against"],
+        // Issue #4633 (INV-3/INV-4): the three MACHINE-EVALUABLE lines the
+        // /work approve control's server-evaluated checklist
+        // (GET /design-concepts/:anchorRef/approve-preconditions) labels
+        // verbatim, in this order — one text source for CLI and UI.
+        preconditions: [
+          "the draft artifact exists in Redis (7-day TTL)",
+          "the artifact's status is 'draft' (not already approved, not stale)",
+          "the artifactHash matches the `## hydra-grill handoff` comment on the issue",
+        ],
         consequence: "marks the draft artifact approved despite the unmet gate reasons, unblocking dev_orch dispatch against it",
       },
     ],
