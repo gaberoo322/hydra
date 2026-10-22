@@ -1,6 +1,7 @@
 import { useApi } from "../../../hooks/useApi.js";
 import { derivePageStatus } from "../../../hooks/usePageItems.js";
 import LocalTimestamp from "../../LocalTimestamp.jsx";
+import { retroCountTiles, retroPartialLine, topFrictionPatterns } from "../../../lib/retro-bundle-tiles.ts";
 
 /**
  * RunRetroBundle — the /runs/:runId retro bundle panel (issue #4634,
@@ -16,7 +17,9 @@ import LocalTimestamp from "../../LocalTimestamp.jsx";
  * cue. The assembler answers 200 with a PARTIAL bundle when a sub-source
  * fails, so a non-empty `errors[]` renders a persistent amber "partial
  * bundle" line naming each failed source — a partial bundle never reads as
- * complete. `crossRunTrend` is deliberately not rendered (a trend — /builder
+ * complete — AND each count tile / list whose source failed renders UNKNOWN,
+ * never the assembler's empty fallback as a confident 0 (the source → field
+ * mapping is the pure, tested lib/retro-bundle-tiles.ts). `crossRunTrend` is deliberately not rendered (a trend — /builder
  * owns trends).
  *
  * Trust (ADR-0034 §5): fetched ONCE, no poll (the run is terminal by the
@@ -27,8 +30,6 @@ import LocalTimestamp from "../../LocalTimestamp.jsx";
 
 const HOUR_MS = 60 * 60 * 1000;
 
-const len = (v) => (Array.isArray(v) ? v.length : 0);
-
 export default function RunRetroBundle({ runId }) {
   const { data, error, loading } = useApi(`/autopilot/runs/${encodeURIComponent(runId)}/retro`);
 
@@ -38,19 +39,11 @@ export default function RunRetroBundle({ runId }) {
   const status = derivePageStatus({ data, error, loading, itemsLen: 1, freshnessMs: HOUR_MS });
   const unknown = status === "loading" || status === "unknown" || data?.runFound === false;
   const stale = status === "stale";
-  const errors = Array.isArray(data?.errors) ? data.errors : [];
-  const topFriction = (Array.isArray(data?.frictionPatterns) ? data.frictionPatterns : [])
-    .slice()
-    .sort((a, b) => (Number(b?.hitCount) || 0) - (Number(a?.hitCount) || 0))
-    .slice(0, 3);
-
-  const counts = [
-    ["dispatches", len(data?.dispatches)],
-    ["dispatch outcomes", len(data?.dispatchOutcomes)],
-    ["reflections", len(data?.reflections)],
-    ["stuck signals", len(data?.stuckSignals)],
-    ["friction patterns", len(data?.frictionPatterns)],
-  ];
+  const partialLine = retroPartialLine(data?.errors);
+  // A failed source's tile / list is UNKNOWN (null / unknown), never its
+  // empty fallback rendered as 0.
+  const tiles = retroCountTiles(data);
+  const friction = topFrictionPatterns(data, 3);
 
   return (
     <section
@@ -78,13 +71,12 @@ export default function RunRetroBundle({ runId }) {
         </div>
       ) : (
         <>
-          {errors.length > 0 && (
+          {partialLine && (
             <div
               data-testid="run-retro-bundle-partial"
               className="border border-amber-500/30 bg-amber-500/10 rounded-md px-3 py-2 text-xs text-amber-300"
             >
-              partial bundle — {errors.length} source(s) failed:{" "}
-              {errors.map((e) => `${e?.source}: ${e?.detail}`).join(" · ")}
+              {partialLine}
             </div>
           )}
 
@@ -99,21 +91,29 @@ export default function RunRetroBundle({ runId }) {
           </p>
 
           <dl className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
-            {counts.map(([label, n]) => (
-              <div key={label}>
-                <dt className="uppercase tracking-wide text-zinc-500">{label}</dt>
-                <dd className="font-mono text-lg text-zinc-100">{n}</dd>
+            {tiles.map((t) => (
+              <div key={t.field}>
+                <dt className="uppercase tracking-wide text-zinc-500">{t.label}</dt>
+                {t.count === null ? (
+                  <dd className="font-mono text-sm font-bold text-zinc-500" title="this source failed to load">
+                    UNKNOWN
+                  </dd>
+                ) : (
+                  <dd className="font-mono text-lg text-zinc-100">{t.count}</dd>
+                )}
               </div>
             ))}
           </dl>
 
           <div>
             <h3 className="text-xs uppercase tracking-wide text-zinc-400 mb-1">Top friction patterns</h3>
-            {topFriction.length === 0 ? (
+            {friction.unknown ? (
+              <p className="text-xs font-bold text-zinc-500">UNKNOWN — the friction source failed to load.</p>
+            ) : friction.patterns.length === 0 ? (
               <p className="text-xs text-zinc-500 italic">No friction patterns in the bundle.</p>
             ) : (
               <ul className="divide-y divide-zinc-800/60">
-                {topFriction.map((p) => (
+                {friction.patterns.map((p) => (
                   <li key={p.category} className="py-1 flex items-center gap-2 text-xs">
                     <span className="font-mono text-zinc-400 shrink-0">{p.hitCount}x</span>
                     <span className="flex-1 min-w-0 text-zinc-200 truncate" title={p.category}>

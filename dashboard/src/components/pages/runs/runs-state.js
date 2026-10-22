@@ -158,3 +158,33 @@ export function formatRunDuration(seconds) {
   // precision, zero minutes always rendered ("1h 0m").
   return formatDuration(seconds, { precision: "minutes" });
 }
+
+/**
+ * The closed outcome set as a list, in filter-chip order — exactly
+ * AutopilotRunOutcome's members (src/schemas/explore-page.ts), "unknown"
+ * included: the server classifier returns it for any status it cannot place
+ * (e.g. today's `ended`), so a filter without it could never select those
+ * rows (issue #4634 review follow-up; pinned against the route schema in
+ * test/runs-page.test.mts).
+ *
+ * @type {ReadonlyArray<RunOutcome>}
+ */
+export const BEHAVIOR_OUTCOMES = Object.freeze(["success", "failure", "aborted", "in-progress", "unknown"]);
+
+/**
+ * What a /explore/behavior row's class chips may honestly say (issue #4634
+ * review follow-up, ADR-0034 §5.2 — zero is asserted, never inferred):
+ *
+ *   classes non-empty                    → { kind: "classes", classes }
+ *   classes empty AND 0 dispatches       → { kind: "none" }    (asserted: nothing dispatched)
+ *   classes empty BUT dispatches > 0 (or
+ *   the dispatch count is unrecorded)    → { kind: "unknown" } (the class read missed them)
+ *
+ * @param {{ classes?: unknown, dispatches?: unknown }} row
+ * @returns {{ kind: "classes", classes: string[] } | { kind: "none" } | { kind: "unknown" }}
+ */
+export function describeBehaviorClasses(row) {
+  const classes = Array.isArray(row?.classes) ? row.classes.filter((c) => typeof c === "string" && c) : [];
+  if (classes.length > 0) return { kind: "classes", classes };
+  return row?.dispatches === 0 ? { kind: "none" } : { kind: "unknown" };
+}

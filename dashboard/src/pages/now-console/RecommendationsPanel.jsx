@@ -126,6 +126,11 @@ export default function RecommendationsPanel() {
   // Per-rec outcome lines, keyed by rec id. A rec still in the list shows its
   // line on its row; a rec the re-read removed shows it in the panel header.
   const [dismissResults, setDismissResults] = useState({});
+  // Outcome lines belong to one run: when the read's run_id changes (a new
+  // run started) the previous run's lines are dead — drop them.
+  useEffect(() => {
+    setDismissResults({});
+  }, [readRunId]);
   const recordDismiss = useCallback((rec, result) => {
     if (!mounted.current) return;
     setDismissResults((prev) => ({ ...prev, [rec.id]: { ...result, label: recText(rec) } }));

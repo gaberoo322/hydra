@@ -440,7 +440,7 @@ describe("#4634 INV-2/6 — BehaviorGallery on /runs", () => {
     assert.match(src, /usePageItems\(\s*"\/explore\/behavior\?limit=50"/);
     assert.match(src, /\bfilter,/, "the outcome filter rides usePageItems' filter option");
     assert.ok(!src.includes("outcome="), "no server-side outcome query rewrite");
-    assert.match(src, /"success", "failure", "aborted", "in-progress"/, "the closed outcome set");
+    assert.ok(src.includes("BEHAVIOR_OUTCOMES"), "the closed outcome set (runs-state.js, pinned behaviourally below)");
   });
 
   test("links to /runs/${runId}, never the retired detailHref; empty classes are explicit", async () => {
@@ -486,10 +486,17 @@ describe("#4634 INV-2/4/7 — RunRetroBundle on /runs/:runId", () => {
 
   test("a partial bundle is visible, runFound=false is UNKNOWN, crossRunTrend is not rendered", async () => {
     const src = await readSource("../dashboard/src/components/pages/runs/RunRetroBundle.jsx");
-    assert.ok(src.includes("partial bundle —"), "errors[] renders the persistent partial-bundle line");
+    // The partial line and the per-source UNKNOWN tiles come from the pure
+    // helpers driven behaviourally below (review follow-up: a string pin let
+    // a mutated `errors.length > 0` gate stay green).
+    for (const helper of ["retroPartialLine(data?.errors)", "retroCountTiles(data)", "topFrictionPatterns(data, 3)"]) {
+      assert.ok(src.includes(helper), `the panel renders through ${helper}`);
+    }
+    assert.ok(src.includes("t.count === null"), "a failed source's tile renders UNKNOWN");
+    assert.ok(src.includes("friction.unknown"), "a failed friction source renders the list UNKNOWN");
     assert.ok(src.includes("data?.runFound === false"), "an unloaded run record renders UNKNOWN");
     assert.ok(!/\.crossRunTrend/.test(src), "the cross-run trend is /builder's, never read here");
-    for (const field of ["runFlagged", "runFlagReason", "dispatchOutcomes", "reflections", "stuckSignals", "frictionPatterns"]) {
+    for (const field of ["runFlagged", "runFlagReason"]) {
       assert.ok(src.includes(field), `the bundle panel renders ${field}`);
     }
   });
@@ -514,5 +521,138 @@ describe("#4634 INV-8 — the dead /metrics?run= link is gone", () => {
 
   test("no dashboard file links to /metrics?run=", () => {
     assert.deepEqual(dashboardFilesContaining("/metrics?run="), []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #4634 review follow-up — behavioural pins for the pure derivations the
+// RunRetroBundle and BehaviorGallery panels render through.
+// ---------------------------------------------------------------------------
+
+import {
+  retroCountTiles,
+  retroPartialLine,
+  topFrictionPatterns,
+  unverifiedRetroFields,
+} from "../dashboard/src/lib/retro-bundle-tiles.ts";
+import { BEHAVIOR_OUTCOMES, describeBehaviorClasses } from "../dashboard/src/components/pages/runs/runs-state.js";
+import { BehaviorGalleryQuerySchema } from "../src/schemas/explore-page.ts";
+
+const tileCount = (tiles: Array<{ field: string; count: number | null }>, field: string) =>
+  tiles.find((t) => t.field === field)?.count;
+
+describe("#4634 review — retro bundle: a failed source is UNKNOWN, never a confident zero", () => {
+  const clean = {
+    runFound: true,
+    dispatches: [{}, {}],
+    dispatchOutcomes: [{}],
+    reflections: [],
+    stuckSignals: [{}],
+    frictionPatterns: [
+      { category: "low", hitCount: 1 },
+      { category: "high", hitCount: 9 },
+      { category: "mid", hitCount: 4 },
+      { category: "tail", hitCount: 2 },
+    ],
+    errors: [],
+  };
+
+  test("a clean bundle renders observed counts — an asserted 0 stays 0", () => {
+    const tiles = retroCountTiles(clean);
+    assert.deepEqual(
+      tiles.map((t) => [t.field, t.count]),
+      [
+        ["dispatches", 2],
+        ["dispatchOutcomes", 1],
+        ["reflections", 0],
+        ["stuckSignals", 1],
+        ["frictionPatterns", 4],
+      ],
+    );
+    assert.equal(retroPartialLine(clean.errors), null, "no partial line on a clean assembly");
+  });
+
+  test("a failed friction source turns its tile AND its list UNKNOWN; other tiles keep their counts", () => {
+    const bundle = { ...clean, frictionPatterns: [], errors: [{ source: "friction", detail: "redis down" }] };
+    const tiles = retroCountTiles(bundle);
+    assert.equal(tileCount(tiles, "frictionPatterns"), null, "never the [] fallback rendered as 0");
+    assert.equal(tileCount(tiles, "dispatches"), 2);
+    assert.equal(tileCount(tiles, "stuckSignals"), 1);
+    assert.deepEqual(topFrictionPatterns(bundle), { unknown: true, patterns: [] });
+  });
+
+  test("each never-throw source maps to the field its empty fallback would falsely zero", () => {
+    assert.deepEqual([...unverifiedRetroFields([{ source: "stuck-signals" }])], ["stuckSignals"]);
+    assert.deepEqual([...unverifiedRetroFields([{ source: "reflections" }])], ["reflections"]);
+    assert.deepEqual([...unverifiedRetroFields([{ source: "dispatch-outcomes" }])], ["dispatchOutcomes"]);
+    assert.deepEqual([...unverifiedRetroFields([{ source: "friction" }])], ["frictionPatterns"]);
+    // Row enrichment / unrendered fields leave every count verified.
+    for (const source of ["cycle-metrics", "cycle-record", "recommendations", "cross-run-trend"]) {
+      assert.equal(unverifiedRetroFields([{ source }]).size, 0, `${source} feeds no count tile`);
+    }
+  });
+
+  test("an unrecognised failed source fails safe — every count turns UNKNOWN", () => {
+    const tiles = retroCountTiles({ ...clean, errors: [{ source: "some-new-source", detail: "x" }] });
+    assert.ok(tiles.every((t) => t.count === null), "UNKNOWN over a guessed zero");
+  });
+
+  test("any non-empty errors[] yields the persistent partial-bundle line naming each source", () => {
+    const line = retroPartialLine([
+      { source: "friction", detail: "redis down" },
+      { source: "cycle-record", detail: "timeout" },
+    ]);
+    assert.equal(line, "partial bundle — 2 source(s) failed: friction: redis down · cycle-record: timeout");
+    // Even an error that feeds no tile must still mark the bundle partial.
+    assert.ok(retroPartialLine([{ source: "cross-run-trend", detail: "x" }])?.startsWith("partial bundle — 1 source(s)"));
+  });
+
+  test("top friction patterns are the three highest by hitCount", () => {
+    const { unknown, patterns } = topFrictionPatterns(clean);
+    assert.equal(unknown, false);
+    assert.deepEqual(patterns.map((p) => p.category), ["high", "mid", "tail"]);
+  });
+});
+
+describe("#4634 review — BehaviorGallery class chips and outcome filter", () => {
+  test("empty classes with dispatches > 0 is classes UNKNOWN, never 'no classes recorded'", () => {
+    assert.deepEqual(describeBehaviorClasses({ classes: [], dispatches: 6 }), { kind: "unknown" });
+    assert.deepEqual(describeBehaviorClasses({ classes: [] }), { kind: "unknown" }, "an unrecorded count asserts nothing");
+  });
+
+  test("'no classes recorded' only when the run dispatched nothing", () => {
+    assert.deepEqual(describeBehaviorClasses({ classes: [], dispatches: 0 }), { kind: "none" });
+  });
+
+  test("recorded classes render as chips", () => {
+    assert.deepEqual(describeBehaviorClasses({ classes: ["dev_orch", "qa_orch"], dispatches: 3 }), {
+      kind: "classes",
+      classes: ["dev_orch", "qa_orch"],
+    });
+  });
+
+  test("BEHAVIOR_OUTCOMES is exactly the route's closed outcome enum, unknown included", () => {
+    assert.ok(BEHAVIOR_OUTCOMES.includes("unknown"), "unknown rows must be selectable");
+    for (const outcome of BEHAVIOR_OUTCOMES) {
+      assert.equal(BehaviorGalleryQuerySchema.safeParse({ outcome }).success, true, `${outcome} is in the enum`);
+    }
+    assert.equal(BehaviorGalleryQuerySchema.safeParse({ outcome: "bogus" }).success, false);
+    // Every value the classifier can emit has a filter chip.
+    for (const [status, exit, reason] of [
+      ["running", null, null],
+      ["aborted", null, null],
+      ["failed", 1, null],
+      ["completed", 0, null],
+      ["ended", 0, "handoff"],
+    ] as const) {
+      assert.ok(BEHAVIOR_OUTCOMES.includes(classifyRunOutcome(status, exit, reason)));
+    }
+  });
+
+  test("BehaviorGallery renders through the shared helpers", async () => {
+    const src = await readSource("../dashboard/src/components/pages/runs/BehaviorGallery.jsx");
+    assert.ok(src.includes("[null, ...BEHAVIOR_OUTCOMES]"), "filter chips come from the closed set");
+    assert.ok(src.includes("describeBehaviorClasses(row)"), "class chips come from the tested derivation");
+    assert.ok(src.includes("classes UNKNOWN"), "the unknown branch renders");
   });
 });

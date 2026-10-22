@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { usePageItems } from "../../../hooks/usePageItems.js";
 import LocalTimestamp from "../../LocalTimestamp.jsx";
 import { formatTokens } from "../../../lib/autopilot-format.js";
+import { BEHAVIOR_OUTCOMES, describeBehaviorClasses } from "./runs-state.js";
 
 /**
  * BehaviorGallery — the Explore › Behavior fold restored onto /runs (issue
@@ -13,8 +14,10 @@ import { formatTokens } from "../../../lib/autopilot-format.js";
  * Distinct from RunsList (the list level: status, duration, failure chip):
  * each row shows which dispatch CLASSES the run fired, beside the server's
  * closed `outcome`, its trigger, turns, dispatches (merged/failed) and
- * tokens. An empty `classes[]` renders the literal "no classes recorded",
- * never a blank.
+ * tokens. Class chips follow runs-state.js describeBehaviorClasses: an empty
+ * `classes[]` reads "no classes recorded" ONLY when the run dispatched
+ * nothing; with dispatches > 0 it reads "classes UNKNOWN" (the server's class
+ * read missed them — never a confident none).
  *
  * The run link is built from `runId` → `/runs/${runId}` (the canonical
  * detail route), NOT the server's `detailHref` — that is the retired
@@ -29,15 +32,37 @@ import { formatTokens } from "../../../lib/autopilot-format.js";
 
 const HOUR_MS = 60 * 60 * 1000;
 
-/** The server's closed AutopilotRunOutcome set (src/schemas/explore-page.ts). */
-const OUTCOMES = ["success", "failure", "aborted", "in-progress"];
 
 const OUTCOME_CHIP = {
   success: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
   failure: "bg-red-500/10 text-red-300 border-red-500/30",
   aborted: "bg-amber-500/10 text-amber-300 border-amber-500/30",
   "in-progress": "bg-sky-500/10 text-sky-300 border-sky-500/30",
+  unknown: "bg-zinc-700/40 text-zinc-400 border-zinc-600",
 };
+
+function BehaviorClasses({ row }) {
+  const view = describeBehaviorClasses(row);
+  if (view.kind === "unknown") {
+    return (
+      <span className="text-[11px] font-bold text-zinc-500" title="the run dispatched, but no class was recorded">
+        classes UNKNOWN
+      </span>
+    );
+  }
+  if (view.kind === "none") {
+    return <span className="text-[11px] italic text-zinc-500">no classes recorded</span>;
+  }
+  return (
+    <span className="flex flex-wrap gap-1 min-w-0">
+      {view.classes.map((c) => (
+        <span key={c} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300">
+          {c}
+        </span>
+      ))}
+    </span>
+  );
+}
 
 export default function BehaviorGallery() {
   const [outcome, setOutcome] = useState(null); // null = all outcomes
@@ -70,7 +95,7 @@ export default function BehaviorGallery() {
       </div>
 
       <div className="flex flex-wrap gap-1.5 text-[11px]" role="group" aria-label="Filter by outcome">
-        {[null, ...OUTCOMES].map((o) => (
+        {[null, ...BEHAVIOR_OUTCOMES].map((o) => (
           <button
             key={o ?? "all"}
             type="button"
@@ -115,20 +140,7 @@ export default function BehaviorGallery() {
                 {r.outcome}
               </span>
               <span className="text-xs text-zinc-400 shrink-0">{r.trigger || "—"}</span>
-              <span className="flex flex-wrap gap-1 min-w-0">
-                {Array.isArray(r.classes) && r.classes.length > 0 ? (
-                  r.classes.map((c) => (
-                    <span
-                      key={c}
-                      className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300"
-                    >
-                      {c}
-                    </span>
-                  ))
-                ) : (
-                  <span className="text-[11px] italic text-zinc-500">no classes recorded</span>
-                )}
-              </span>
+              <BehaviorClasses row={r} />
               <span className="flex-1" />
               <span className="text-xs font-mono text-zinc-400 shrink-0">{r.turns ?? "—"} turns</span>
               <span className="text-xs font-mono text-zinc-400 shrink-0">

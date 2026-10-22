@@ -38,7 +38,7 @@ export function DeclaredOutcomes() {
       unknown={unknown}
       stale={stale}
       empty={status === "empty"}
-      emptyMessage="The outcomes file declares no outcomes."
+      emptyMessage="No outcomes declared (outcomes file absent or empty)."
       generatedAt={data?.generatedAt}
     >
       <div className="overflow-x-auto" data-testid="declared-outcomes">
