@@ -4,6 +4,11 @@ import { LessonsTrend } from "../components/pages/outcomes/LessonsTrend.jsx";
 import { LessonsTab } from "../components/pages/explore/LessonsTab.jsx";
 import { QualityGates } from "../components/pages/builder/QualityGates.jsx";
 import { TangledModules } from "../components/pages/builder/TangledModules.jsx";
+import { DeclaredOutcomes } from "../components/pages/builder/DeclaredOutcomes.jsx";
+import { ImpactRanking } from "../components/pages/builder/ImpactRanking.jsx";
+import { UnclassifiedResidue } from "../components/pages/builder/UnclassifiedResidue.jsx";
+import { DesignConceptGreenLight } from "../components/pages/builder/DesignConceptGreenLight.jsx";
+import { FeedCalibration } from "../components/pages/builder/FeedCalibration.jsx";
 
 /**
  * Dashboard v3 — `/builder` page (issue #4011, ADR-0034 §2; slice "zeta" of
@@ -24,6 +29,13 @@ import { TangledModules } from "../components/pages/builder/TangledModules.jsx";
  * Explore lessons fold ADR-0034 §3 names explicitly. Only TangledModules
  * (the re-rendered architecture view) and QualityGates (the one endpoint
  * with no trust timestamp) are new, under components/pages/builder/.
+ *
+ * Issue #4634 (design-concept a7e7fedb, ADR-0034 §9.4) homes five dark reads
+ * here, one panel file per route — DeclaredOutcomes (/outcomes),
+ * ImpactRanking (/attribution/impact), UnclassifiedResidue
+ * (/metrics/unclassified), DesignConceptGreenLight (/design-concepts/snapshots)
+ * and FeedCalibration (/attention/counts). This shell only mounts them: it
+ * owns no route literal and no fetch, and every panel stays read-only.
  */
 export default function Builder() {
   return (
@@ -42,6 +54,11 @@ export default function Builder() {
       <TangledModules />
       <LessonsTrend />
       <LessonsTab />
+      <DeclaredOutcomes />
+      <ImpactRanking />
+      <UnclassifiedResidue />
+      <DesignConceptGreenLight />
+      <FeedCalibration />
     </div>
   );
 }
