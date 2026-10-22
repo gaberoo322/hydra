@@ -45,7 +45,8 @@
  * no variant has been detected.
  *
  * It also ships one DEFAULT `control:<page>/<name>` entry per action-bearing
- * control on /work and /health (issue #4629, ADR-0034 §8.3) — the label,
+ * control on /work, /health and /now (issue #4629, ADR-0034 §8.3; /now
+ * since issue #5152) — the label,
  * preconditions and consequence those pages render through ActionAffordance,
  * pinned to `CONTROL_KEYS` by {@link controlEntryCoverage}. Control entries
  * are the only ones whose preconditions may be typed `{text, check}` (a live
@@ -53,7 +54,8 @@
  *
  * Every `in-dashboard` `route` below names a write route that exists on
  * master TODAY (verified against `src/api/autopilot-control.ts`,
- * `src/api/scheduler.ts`, `src/api/alerts.ts` and `src/api/maintenance.ts`);
+ * `src/api/scheduler.ts`, `src/api/alerts.ts`, `src/api/maintenance.ts` and
+ * `src/api/now-recommendations.ts`);
  * every other admission line hands off to a terminal
  * skill (`/hydra-review`, `/hydra-hitl-grill`, `/hydra-retro`, or a plain `gh`
  * read) per the issue #4420 resolution: recommend the mechanical action where
@@ -528,7 +530,9 @@ const DASHBOARD_ADR_DOC = "docs/adr/0034-orchestrator-dashboard-page-inventory.m
  * consequence); the alternatives are the sibling controls a feed-style
  * rendering would list as `or:`. Routes carry no `{placeholder}` except the
  * one `{id}` BUCKET_CONTEXT.control admits (issue #4631: the alert id in
- * `/alerts/{id}/dismiss`, resolved by the page before firing) — the per-row
+ * `/alerts/{id}/dismiss`; issue #5152: the rec id in
+ * `/now/recommendations/{id}/dismiss` — each resolved by its page before
+ * firing) — the per-row
  * body (`{issue, …}`) is built by the dashboard's closed IN_DASHBOARD_BODY
  * builders from the page's context. The promote checklist
  * is exactly the promote gate's refusal table, in its order
@@ -997,6 +1001,82 @@ const CONTROL_ENTRIES = [
     rationale:
       "each chore is idempotent and keeps its own time-guard, so a run changes nothing a timer tick would not; the ~5 s undo window costs nothing and no third confirm tier is added (ADR-0034 §8.2).",
     doc: REFERENCE_DOC,
+  },
+  // --- /now recommendations (issue #5152) ----------------------------------
+  // The two routes ADR-0034 §9.1 files as registry in-dashboard
+  // "recommendations dismiss and mute-class", shipped page-local by #4634
+  // (design-concept a7e7fedb INV-9/10) and moved here verbatim: labels,
+  // checks and consequences no longer live in RecommendationsPanel.jsx.
+  // rec-dismiss is the second control route carrying `{id}` (the rec id,
+  // resolved per row by the panel). Both bodies carry the run_id the panel's
+  // own GET returned — never the route's `current` alias — built by
+  // IN_DASHBOARD_BODY from the panel's context.
+  {
+    key: "control:now/rec-dismiss",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/now/recommendations/{id}/dismiss",
+      method: "POST",
+      confirmTier: "immediate-undo",
+      label: "Dismiss",
+      preconditions: [{ text: "the panel's read names its run (run_id)", check: "rec-run-id-read" }],
+      consequence:
+        "this recommendation leaves the list for this run; there is no un-dismiss route — Undo within the window cancels before anything is sent",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "curl -s http://localhost:4000/api/now/recommendations",
+        label: "Read the recommendation list first",
+        preconditions: [],
+        consequence: "shows the current run's active recommendations without changing anything",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Review attention items instead",
+        preconditions: [],
+        consequence: "walks the operator cockpit while the recommendation stays listed",
+      },
+    ],
+    rationale:
+      "dismissing one recommendation only hides it for the current run, so ADR-0034 §7 makes it immediate with undo; no un-dismiss route exists, so the undo is the delayed commit — nothing is sent until the window closes.",
+    doc: DASHBOARD_ADR_DOC,
+  },
+  {
+    key: "control:now/rec-mute-class",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/now/recommendations/mute-class",
+      method: "POST",
+      confirmTier: "confirm-first",
+      label: "Mute severity",
+      preconditions: [
+        { text: "the panel's read names its run (run_id)", check: "rec-run-id-read" },
+        { text: "a severity is chosen (info, warn or critical)", check: "severity-chosen" },
+      ],
+      consequence:
+        "every recommendation of the chosen severity is hidden for the rest of this run (until the run record expires); there is no un-mute route",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "curl -s http://localhost:4000/api/now/recommendations",
+        label: "Read the recommendation list first",
+        preconditions: [],
+        consequence: "shows which recommendations of each severity a mute would hide, without changing anything",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Review attention items instead",
+        preconditions: [],
+        consequence: "walks the operator cockpit while every severity stays listed",
+      },
+    ],
+    rationale:
+      "a mute hides a whole severity class for the rest of the run and no un-mute route exists, so it confirms first — unlike a single dismiss, there is no window in which the operator sees which recommendations it will hide.",
+    doc: DASHBOARD_ADR_DOC,
   },
 ] satisfies readonly OperatorActionEntryInput[];
 

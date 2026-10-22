@@ -2095,10 +2095,8 @@
       "path": "/api/now/recommendations/:id/dismiss",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [
-        "dashboard/src/pages/now-console/RecommendationsPanel.jsx"
-      ],
-      "home": "/now",
+      "consumers": [],
+      "home": "/api/now/recommendations/:id/dismiss",
       "areas": [
         "src/aggregators/",
         "src/autopilot/",

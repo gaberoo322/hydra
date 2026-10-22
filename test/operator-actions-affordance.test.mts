@@ -980,7 +980,9 @@ describe("IN_DASHBOARD_BODY builders over the closed context (issue #4629 INV-7)
     assert.ok(map.includes('context.engaged ? { engaged: true, engagedBy: "health-page" } : { engaged: false },'));
     // The builders read only the closed context — no other field name.
     const fields = new Set(Array.from(map.matchAll(/context\.(\w+)/g), (m) => m[1]));
-    for (const f of fields) assert.ok(["number", "label", "paused", "engaged"].includes(f!), `context.${f} is outside the closed context`);
+    // #5152 extends the closed context with the /now panel's read `runId`
+    // and its picked `severity`.
+    for (const f of fields) assert.ok(["number", "label", "paused", "engaged", "runId", "severity"].includes(f!), `context.${f} is outside the closed context`);
   });
 });
 
@@ -1357,5 +1359,32 @@ describe("resolveControlAction — no control route carrying { ever reaches the 
     assert.ok(!wrapper.includes("resolveRoute(entry.recommended.route)"), "no inline resolution bypasses the guard");
     const refused = wrapper.slice(wrapper.indexOf("if (resolved.error !== undefined) {"), wrapper.indexOf("<ActionAffordance"));
     assert.ok(refused.includes("disabled") && refused.includes("✗ {resolved.error}"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /now recommendation controls (issue #5152)
+// ---------------------------------------------------------------------------
+
+describe("the /now recommendation routes ride the closed body map (issue #5152)", () => {
+  test("both bodies carry the panel's read run_id from context — never the `current` alias", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const map = aff.slice(aff.indexOf("const IN_DASHBOARD_BODY = {"), aff.indexOf("\n};", aff.indexOf("const IN_DASHBOARD_BODY = {")));
+    assert.ok(map.includes('"POST /now/recommendations/:id/dismiss": (context) => ({ run_id: context.runId }),'));
+    assert.ok(map.includes('"POST /now/recommendations/mute-class": (context) => ({ run_id: context.runId, severity: context.severity }),'));
+    assert.ok(!map.includes('"current"'), "no builder falls back to the current alias");
+  });
+
+  test("a resolved rec route matches the :id key, and two recs never share a window id", async () => {
+    const { resolveControlRoute } = await import("../dashboard/src/lib/health-verdicts.ts");
+    const a = resolveControlRoute("/now/recommendations/{id}/dismiss", { id: "run-A:1:0" });
+    const b = resolveControlRoute("/now/recommendations/{id}/dismiss", { id: "run-A:1:1" });
+    // Same encoding the page-local control used (encodeURIComponent(rec.id)).
+    assert.equal(a, `/now/recommendations/${encodeURIComponent("run-A:1:0")}/dismiss`);
+    assert.notEqual(`action:POST ${a}`, `action:POST ${b}`);
+    // The resolved route has the :id key's segment shape (5 segments), so
+    // bodyFor's pattern arm matches it and never the 4-segment mute-class key.
+    assert.equal(a.split("/").length, "/now/recommendations/:id/dismiss".split("/").length);
+    assert.notEqual(a.split("/").length, "/now/recommendations/mute-class".split("/").length);
   });
 });

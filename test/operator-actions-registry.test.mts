@@ -62,6 +62,7 @@ import {
   alertsVerdicts,
   schedulerVerdicts,
 } from "../dashboard/src/lib/health-verdicts.ts";
+import { recDismissVerdicts, recMuteVerdicts } from "../dashboard/src/lib/now-verdicts.ts";
 import { readFile } from "node:fs/promises";
 
 // ---------------------------------------------------------------------------
@@ -585,8 +586,10 @@ const HEALTH_SRC = "../dashboard/src/pages/Health.jsx";
 // (design-concept 5ae4b72c INV-7).
 const ALERTS_PANEL_SRC = "../dashboard/src/components/pages/health/AlertsPanel.jsx";
 const SERVICE_STRIP_SRC = "../dashboard/src/components/pages/health/ServiceStrip.jsx";
+// The /now panel that hosts #5152's recommendation controls beside its read.
+const RECS_PANEL_SRC = "../dashboard/src/pages/now-console/RecommendationsPanel.jsx";
 /** Every dashboard file that renders a control: key. */
-const CONTROL_PAGE_SRCS = [BOARD_STATE_SRC, HEALTH_SRC, ALERTS_PANEL_SRC, SERVICE_STRIP_SRC];
+const CONTROL_PAGE_SRCS = [BOARD_STATE_SRC, HEALTH_SRC, ALERTS_PANEL_SRC, SERVICE_STRIP_SRC, RECS_PANEL_SRC];
 
 async function readPage(rel: string): Promise<string> {
   return readFile(new URL(rel, import.meta.url), "utf8");
@@ -648,8 +651,8 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
   test("every control entry recommends an in-dashboard action whose route carries no placeholder", () => {
     // Relaxed by #4631 (design-concept 5ae4b72c INV-9): the ONE placeholder a
     // control route may carry is BUCKET_CONTEXT.control's `{id}`, and only
-    // control:health/alert-dismiss uses it; every other per-row value is
-    // body-built client-side (#4629 INV-7).
+    // control:health/alert-dismiss and (#5152) control:now/rec-dismiss use
+    // it; every other per-row value is body-built client-side (#4629 INV-7).
     const withPlaceholder: string[] = [];
     for (const key of CONTROL_KEYS) {
       const { recommended } = controlEntry(key);
@@ -660,7 +663,7 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
         if (stripped !== recommended.route) withPlaceholder.push(key);
       }
     }
-    assert.deepEqual(withPlaceholder, ["control:health/alert-dismiss"]);
+    assert.deepEqual(withPlaceholder, ["control:health/alert-dismiss", "control:now/rec-dismiss"]);
   });
 
   test("the promote checklist is exactly the promote gate's four rules, in order", () => {
@@ -767,6 +770,12 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
         lib: "health-verdicts",
         ids: new Set(Object.keys(schedulerVerdicts({ running: false, stopReason: null }, 0))),
       },
+      // #5152: the /now recommendation tables live in lib/now-verdicts.ts.
+      [RECS_PANEL_SRC]: {
+        imports: ["recDismissVerdicts", "recMuteVerdicts"],
+        lib: "now-verdicts",
+        ids: new Set([...Object.keys(recDismissVerdicts(null)), ...Object.keys(recMuteVerdicts(null, null))]),
+      },
     };
     for (const [rel, table] of Object.entries(tables)) {
       const src = await readPage(rel);
@@ -846,8 +855,10 @@ describe("control: namespace + typed preconditions — schema (issue #4629)", ()
     assert.deepEqual([...BUCKET_CONTEXT.control], ["id"]);
   });
 
-  test("EntryKeySchema admits control:(work|health)/<name> and rejects other shapes", () => {
-    for (const key of ["control:work/promote", "control:health/brake-release", "control:work/a-1"]) {
+  test("EntryKeySchema admits control:(work|health|now)/<name> and rejects other shapes", () => {
+    // #5152 appends `now` to the page alternation (the /now recommendation
+    // controls); any other page segment is still rejected.
+    for (const key of ["control:work/promote", "control:health/brake-release", "control:work/a-1", "control:now/rec-dismiss"]) {
       assert.equal(OperatorActionEntrySchema.safeParse(validEntry(key)).success, true, key);
     }
     for (const key of ["control:runs/rerun", "control:work/Promote", "control:work", "control:work/", "control:/x"]) {
@@ -1035,6 +1046,72 @@ describe("control:health alert/scheduler/housekeeping entries (issue #4631)", ()
     };
     for (const [key, rel] of Object.entries(owner)) {
       assert.ok((await readPage(rel)).includes(`controlKey="${key}"`), `${rel} renders ${key}`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. /now recommendation controls (issue #5152; ADR-0034 §7, §8.2, §9.1;
+//    the page-local behaviour of design-concept a7e7fedb INV-9/10)
+// ---------------------------------------------------------------------------
+
+const NOW_5152_KEYS = ["control:now/rec-dismiss", "control:now/rec-mute-class"] as const;
+
+describe("control:now recommendation entries (issue #5152)", () => {
+  test("the two keys join CONTROL_KEYS and the two checks join CONTROL_CHECKS", () => {
+    for (const key of NOW_5152_KEYS) assert.ok((CONTROL_KEYS as readonly string[]).includes(key), key);
+    for (const check of ["rec-run-id-read", "severity-chosen"]) {
+      assert.ok((CONTROL_CHECKS as readonly string[]).includes(check), check);
+    }
+  });
+
+  test("each recommends POST in-dashboard on the exact route ADR-0034 §9.1 files as a registry route", () => {
+    // #4638's rung-1 parity pin classifies exactly these two routes.
+    assert.equal(inDashboard("control:now/rec-dismiss").route, "/now/recommendations/{id}/dismiss");
+    assert.equal(inDashboard("control:now/rec-mute-class").route, "/now/recommendations/mute-class");
+    for (const key of NOW_5152_KEYS) {
+      assert.equal(inDashboard(key).method, "POST", key);
+      const entry = controlEntry(key);
+      for (const alt of [entry.alternatives[0], entry.alternatives[1]]) {
+        assert.equal(alt.kind, "terminal-skill", `${key}: alternatives are read-only hand-offs`);
+      }
+    }
+  });
+
+  test("confirm tiers: rec-dismiss is immediate-undo, rec-mute-class confirms first", () => {
+    assert.equal(inDashboard("control:now/rec-dismiss").confirmTier, "immediate-undo");
+    assert.equal(inDashboard("control:now/rec-mute-class").confirmTier, "confirm-first");
+  });
+
+  test("check bindings: dismiss needs the read's run id; mute also needs a chosen severity", () => {
+    assert.deepEqual(checksOf(controlEntry("control:now/rec-dismiss")), ["rec-run-id-read"]);
+    assert.deepEqual(checksOf(controlEntry("control:now/rec-mute-class")), ["rec-run-id-read", "severity-chosen"]);
+    for (const key of NOW_5152_KEYS) {
+      for (const p of controlEntry(key).recommended.preconditions) assert.equal(typeof p, "object", key);
+    }
+  });
+
+  test("the consequences are the page prose #4634 shipped (INV-10), moved into the registry", () => {
+    assert.equal(
+      controlEntry("control:now/rec-dismiss").recommended.consequence,
+      "this recommendation leaves the list for this run; there is no un-dismiss route — Undo within the window cancels before anything is sent",
+    );
+    // The page templated the severity in; the registry string is static, so
+    // it names "the chosen severity" — the picker shows which one.
+    assert.equal(
+      controlEntry("control:now/rec-mute-class").recommended.consequence,
+      "every recommendation of the chosen severity is hidden for the rest of this run (until the run record expires); there is no un-mute route",
+    );
+  });
+
+  test("placement: both controls render in RecommendationsPanel.jsx", async () => {
+    const src = await readPage(RECS_PANEL_SRC);
+    for (const key of NOW_5152_KEYS) assert.ok(src.includes(`controlKey="${key}"`), key);
+  });
+
+  test("an unknown page segment is still rejected after `now` joins the alternation", () => {
+    for (const key of ["control:runs/rerun", "control:nowx/a", "control:now"]) {
+      assert.equal(OperatorActionEntrySchema.safeParse(validEntry(key)).success, false, key);
     }
   });
 });
