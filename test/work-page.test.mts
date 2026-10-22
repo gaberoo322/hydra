@@ -47,6 +47,8 @@ import { createAutopilotBoardRouter } from "../src/api/autopilot-board.ts";
 // scope (same shape as test/autopilot-board.test.mts's #3505 import).
 import {
   deriveWorkLane,
+  failClosedOnTruncatedSearch,
+  workQueueBlockerSearchLimit,
   toWorkQueueRow,
   compareWorkQueueRows,
   evaluatePromoteEligibility,
@@ -219,14 +221,19 @@ describe("toWorkQueueRow — queue projection", () => {
     assert.deepEqual(row!.openBlockers, [9]); // #5 self-ref dropped, #12 not open
   });
 
-  test("non-ready lanes never surface blockers (only the ready population is resolved)", () => {
-    const row = toWorkQueueRow(
-      issue({ number: 5, labels: ["needs-triage"], body: "Blocked by #9" }),
-      new Set([9]),
-      { glmPartitionActive: true },
-    );
-    assert.ok(row);
-    assert.deepEqual(row!.openBlockers, []);
+  // Issue #4629 (design-concept 821e48ed INV-6/INV-13): this case pinned
+  // "non-ready lanes never surface blockers"; the live promote checklist
+  // needs every operator lane's blockers, so it flips to the new invariant.
+  test("every operator lane surfaces its open strict blockers", () => {
+    for (const lane of ["needs-triage", "needs-info", "ready-for-human", "blocked"]) {
+      const row = toWorkQueueRow(
+        issue({ number: 5, labels: [lane], body: "Blocked by #9\nblocks #5\ndepends on #12" }),
+        new Set([9]),
+        { glmPartitionActive: true },
+      );
+      assert.ok(row, `${lane} row projects`);
+      assert.deepEqual(row!.openBlockers, [9], `${lane}: open strict ref surfaces, self-ref + closed ref dropped`);
+    }
   });
 
   test("no operator lane → null (not in the queue)", () => {
@@ -1304,20 +1311,24 @@ describe("structural pins — /work page wiring", () => {
     // INV-2: the shared trust seam, not a re-spelled status ternary.
     assert.match(src, /usePageItems\(/);
     assert.match(src, /derivePageStatus/);
-    // INV-5: promote arms first, fires only on the explicit confirm click.
-    assert.match(src, /data-testid="work-promote-arm"/);
-    assert.match(src, /data-testid="work-promote-confirm-yes"/);
-    assert.match(src, /data-testid="work-promote-confirm-no"/);
-    // The immediate-tier controls exist.
+    // INV-5: promote arms first, fires only on the explicit confirm click —
+    // rendered by the shared ActionAffordance (issue #4629, design-concept
+    // 821e48ed INV-13), which derives work-promote-arm / -confirm-yes /
+    // -confirm-no from its testId prop.
+    assert.match(src, /import \{[^}]*\bControlAffordance\b[^}]*\} from "\.\.\/\.\.\/ActionAffordance\.jsx"/);
+    assert.match(src, /testId="work-promote"/);
+    // The immediate-tier controls exist (relabel picker + affordances).
     assert.match(src, /data-testid="work-relabel-select"/);
-    assert.match(src, /data-testid="work-close"/);
-    assert.match(src, /data-testid="work-reopen-button"/);
+    assert.match(src, /testId="work-relabel"/);
+    assert.match(src, /testId="work-close"/);
+    assert.match(src, /testId="work-reopen"/);
     // INV-6: refusal reasons surface verbatim, success shows the verified state.
     assert.match(src, /actionResult\.reason/);
     assert.match(src, /actionResult\.verified/);
-    // Server-confirmed: the POST is followed by the follow-up reads.
-    assert.match(src, /board\.refresh\(\)/);
-    assert.match(src, /queue\.refresh\(\)/);
+    // Server-confirmed: the POST is followed by the follow-up reads — both
+    // CHECKED (#4629 review), so a failed re-read is reported, never a ✓.
+    assert.match(src, /useCheckedRefresh\(board\)/);
+    assert.match(src, /useCheckedRefresh\(queue\)/);
     // INV-1: no run history or failure detail.
     assert.equal(src.includes("/autopilot/runs"), false);
   });
@@ -1485,6 +1496,122 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     // ready row is Claude-owned even at full partition liveness — the badge
     // is the lane predicate's ruling, never a glm-eligible label read.
     assert.equal(row.glmEligible, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4629 (design-concept 821e48ed INV-6) — row facts for the live
+// promote checklist: hasScopeSection via the ONE shared parser, and blockers
+// resolved for every operator lane against prospective (post-promote) rows.
+// ---------------------------------------------------------------------------
+
+describe("/work live preconditions — the row facts (issue #4629)", () => {
+  test("toWorkQueueRow carries hasScopeSection from the shared parser", () => {
+    const scoped = toWorkQueueRow(issue({ labels: ["needs-triage"] }), new Set(), {
+      glmPartitionActive: false,
+    });
+    const unscoped = toWorkQueueRow(
+      issue({ labels: ["needs-triage"], body: "No scope section here." }),
+      new Set(),
+      { glmPartitionActive: false },
+    );
+    assert.equal(scoped!.hasScopeSection, true);
+    assert.equal(unscoped!.hasScopeSection, false);
+    // The row fact and the promote gate's refusal agree — one parser.
+    assert.equal(scoped!.hasScopeSection, hasScopeSection(issue().body));
+  });
+
+  test("GET /autopilot/work-queue resolves blockers ONCE over prospective rows for every operator lane", async () => {
+    const calls: any[][] = [];
+    const router = createAutopilotBoardRouter({
+      readOpenIssues: async () => ({
+        ok: true,
+        rows: [
+          issue({ number: 1, labels: ["needs-triage"], body: "## Files in scope\n\n- `fixture/a.ts`\n\nBlocked by #90" }),
+          issue({ number: 2, labels: ["ready-for-agent"], body: "Depends on #91" }),
+          issue({ number: 3, labels: ["in-progress"], body: "Blocked by #92" }), // agent-owned: not resolved
+          issue({ number: 4, labels: ["blocked"], body: "Blocked by #93" }),
+        ],
+      }),
+      resolveOpenBlockers: async (rows: any) => {
+        calls.push(rows);
+        return new Set([90, 93]);
+      },
+      glmDrainerLiveness: async () => true,
+    });
+    const handler = findHandler(router, "GET", "/autopilot/work-queue");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+
+    assert.equal(calls.length, 1, "one batched lookup");
+    const resolved = calls[0]!;
+    assert.deepEqual(resolved.map((r: any) => r.number).sort(), [1, 2, 4], "operator-lane rows only");
+    for (const row of resolved) {
+      assert.ok(row.labels.includes("ready-for-agent"), `#${row.number} resolved as it would be post-promote`);
+      assert.equal(
+        row.labels.filter((l: string) => l === "ready-for-agent").length,
+        1,
+        "an already-ready row is not double-labelled",
+      );
+    }
+    const byNumber = new Map(res._body.items.map((r: any) => [r.number, r]));
+    assert.deepEqual((byNumber.get(1) as any).openBlockers, [90], "a needs-triage row surfaces its open blocker");
+    assert.deepEqual((byNumber.get(4) as any).openBlockers, [93], "a blocked row surfaces its open blocker");
+    assert.deepEqual((byNumber.get(2) as any).openBlockers, [], "a closed blocker never surfaces");
+    assert.equal((byNumber.get(1) as any).hasScopeSection, true);
+    assert.equal((byNumber.get(2) as any).hasScopeSection, false);
+    // The served labels are the REAL ones — the prospective label never leaks.
+    assert.deepEqual((byNumber.get(1) as any).labels, ["needs-triage"]);
+  });
+
+  test("a rejecting blocker resolver still degrades the queue (fail-safe unchanged)", async () => {
+    const router = createAutopilotBoardRouter({
+      readOpenIssues: async () => ({ ok: true, rows: [issue({ labels: ["needs-triage"] })] }),
+      resolveOpenBlockers: async () => {
+        throw new Error("gh down");
+      },
+      glmDrainerLiveness: async () => false,
+    });
+    const handler = findHandler(router, "GET", "/autopilot/work-queue");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+    assert.equal(res._body.sourcesOk, false);
+    assert.deepEqual(res._body.items, []);
+  });
+});
+
+describe("/work blocker lookup — scaled limit, truncation fails closed (#4629 review)", () => {
+  test("workQueueBlockerSearchLimit scales with the ref count between 100 and 1000", () => {
+    assert.equal(workQueueBlockerSearchLimit(0), 100);
+    assert.equal(workQueueBlockerSearchLimit(3), 100);
+    assert.equal(workQueueBlockerSearchLimit(25), 250);
+    assert.equal(workQueueBlockerSearchLimit(500), 1000);
+  });
+
+  test("the wrapped reader passes the limit through and returns an under-limit read unchanged", async () => {
+    const seen: any[] = [];
+    const rows = [issue({ number: 9 })];
+    const read = failClosedOnTruncatedSearch(async (search, opts) => {
+      seen.push({ search, opts });
+      return { ok: true, rows };
+    }, 3);
+    const res = await read("9 10", { state: "open" });
+    assert.deepEqual(res, { ok: true, rows });
+    assert.deepEqual(seen, [{ search: "9 10", opts: { state: "open", limit: 3 } }]);
+  });
+
+  test("a read that FILLS its limit is reported as a failure — the lookup's every-ref-open fail-safe", async () => {
+    const read = failClosedOnTruncatedSearch(
+      async () => ({ ok: true, rows: [issue({ number: 1 }), issue({ number: 2 })] }),
+      2,
+    );
+    const res = await read("1 2 3", {});
+    assert.equal(res.ok, false);
+  });
+
+  test("an upstream failure passes through untouched", async () => {
+    const read = failClosedOnTruncatedSearch(async () => ({ ok: false, code: "gh-timeout" }), 100);
+    assert.deepEqual(await read("1", {}), { ok: false, code: "gh-timeout" });
   });
 });
 

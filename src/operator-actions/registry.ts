@@ -44,6 +44,13 @@
  * applies (#4623) — until then, a line's default entry is what renders when
  * no variant has been detected.
  *
+ * It also ships one DEFAULT `control:<page>/<name>` entry per action-bearing
+ * control on /work and /health (issue #4629, ADR-0034 §8.3) — the label,
+ * preconditions and consequence those pages render through ActionAffordance,
+ * pinned to `CONTROL_KEYS` by {@link controlEntryCoverage}. Control entries
+ * are the only ones whose preconditions may be typed `{text, check}` (a live
+ * ✓/✗ line); feed and class entries stay prose-only.
+ *
  * Every `in-dashboard` `route` below names a write route that exists on
  * master TODAY (verified against `src/api/autopilot-control.ts` and
  * `src/api/scheduler.ts`); every other admission line hands off to a terminal
@@ -292,6 +299,39 @@ export function classEntryCoverage(
 }
 
 // ---------------------------------------------------------------------------
+// Control coverage (issue #4629, ADR-0034 §8.3) — the control:<page>/<name> pin
+// ---------------------------------------------------------------------------
+
+/**
+ * Coverage assertion for the `control:<page>/<name>` namespace (issue #4629,
+ * design-concept 821e48ed INV-14), mirroring {@link classEntryCoverage}: every
+ * key in `controlKeys` (the caller passes `CONTROL_KEYS`) must have a DEFAULT
+ * `control:` entry, and no `control:` entry (any variant) may name a key
+ * outside the list. Returns `missing` (keys with no default entry) and
+ * `extra` (registry `control:` keys not in the list), each in input order;
+ * `{missing: [], extra: []}` means page controls and registry agree. Pure and
+ * TEST-ONLY — drift reddens the required `test` job, never the service.
+ */
+export function controlEntryCoverage(
+  entries: readonly OperatorActionEntry[],
+  controlKeys: readonly string[],
+): { missing: string[]; extra: string[] } {
+  const known = new Set(controlKeys);
+  const defaultControlKeys = new Set(
+    entries
+      .filter((entry) => entry.variant === undefined && entry.key.startsWith("control:"))
+      .map((entry) => entry.key),
+  );
+  const missing = controlKeys.filter((key) => !defaultControlKeys.has(key));
+  const extra: string[] = [];
+  for (const entry of entries) {
+    if (!entry.key.startsWith("control:")) continue;
+    if (!known.has(entry.key) && !extra.includes(entry.key)) extra.push(entry.key);
+  }
+  return { missing, extra };
+}
+
+// ---------------------------------------------------------------------------
 // The shipped table — one default entry per admission line
 // ---------------------------------------------------------------------------
 
@@ -474,6 +514,321 @@ const CLASS_ENTRY_SPECS: readonly ClassEntrySpec[] = [
 ];
 
 const CLASS_ENTRIES: readonly OperatorActionEntryInput[] = CLASS_ENTRY_SPECS.map(classEntry);
+
+// ---------------------------------------------------------------------------
+// The control:<page>/<name> entries (issue #4629, ADR-0034 §8.3, context {})
+// ---------------------------------------------------------------------------
+
+const DASHBOARD_ADR_DOC = "docs/adr/0034-orchestrator-dashboard-page-inventory.md";
+
+/**
+ * One DEFAULT entry per `CONTROL_KEYS` member. Pages render only
+ * `recommended` (its label, its `{text, check}` checklist and its
+ * consequence); the alternatives are the sibling controls a feed-style
+ * rendering would list as `or:`. Routes carry no `{placeholder}` — the
+ * per-row body (`{issue, …}`) is built by the dashboard's closed
+ * IN_DASHBOARD_BODY builders from the page's context. The promote checklist
+ * is exactly the promote gate's refusal table, in its order
+ * (evaluatePromoteEligibility: closed, already-ready, missing-scope-section,
+ * blocked) — the server gate stays the authority. control:health/resume
+ * shares method, route and confirmTier with the feed's machine-stopped:paused
+ * recommended action, so one route never behaves two ways.
+ */
+const CONTROL_ENTRIES = [
+  // --- /work (BoardState.jsx) -----------------------------------------------
+  {
+    key: "control:work/promote",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/autopilot/board/promote",
+      method: "POST",
+      confirmTier: "confirm-first",
+      label: "Promote to ready-for-agent",
+      preconditions: [
+        { text: "issue is open", check: "issue-open" },
+        { text: "issue does not already carry ready-for-agent", check: "not-already-ready" },
+        {
+          text: "issue body has a ## Files in scope section — issue-label-validation reverts ready-for-agent without one",
+          check: "has-scope-section",
+        },
+        { text: "issue cites no open strict blocker", check: "no-open-blocker" },
+      ],
+      consequence: "adds ready-for-agent — the autopilot may dispatch a dev agent on it at its next turn",
+    },
+    alternatives: [
+      {
+        kind: "in-dashboard",
+        route: "/autopilot/board/relabel",
+        method: "POST",
+        confirmTier: "immediate-undo",
+        label: "Relabel to needs-info",
+        preconditions: [],
+        consequence: "parks the issue in needs-info until the missing scope or detail is written",
+      },
+      {
+        kind: "in-dashboard",
+        route: "/autopilot/board/close",
+        method: "POST",
+        confirmTier: "immediate-undo",
+        label: "Close the issue",
+        preconditions: [],
+        consequence: "closes the issue so it never reaches the dispatch queue",
+      },
+    ],
+    rationale:
+      "ready-for-agent is a dispatch trigger in disguise (ADR-0034 §7), so promote confirms first and shows the promote gate's four refusal rules live: a blocked issue must never be promoted, and issue-label-validation reverts the label on an issue with no ## Files in scope section.",
+    doc: DASHBOARD_ADR_DOC,
+  },
+  {
+    key: "control:work/relabel",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/autopilot/board/relabel",
+      method: "POST",
+      confirmTier: "immediate-undo",
+      label: "Relabel",
+      preconditions: [
+        { text: "a target lane is chosen", check: "relabel-target-chosen" },
+        { text: "issue is open", check: "issue-open" },
+      ],
+      consequence: "moves the issue to the chosen lane and drops every other operator lane label",
+    },
+    alternatives: [
+      {
+        kind: "in-dashboard",
+        route: "/autopilot/board/promote",
+        method: "POST",
+        confirmTier: "confirm-first",
+        label: "Promote to ready-for-agent",
+        preconditions: [],
+        consequence: "adds ready-for-agent — the autopilot may dispatch a dev agent on it",
+      },
+      {
+        kind: "in-dashboard",
+        route: "/autopilot/board/close",
+        method: "POST",
+        confirmTier: "immediate-undo",
+        label: "Close the issue",
+        preconditions: [],
+        consequence: "closes the issue instead of re-laning it",
+      },
+    ],
+    rationale:
+      "a lane move is reversible and starts no agent, so ADR-0034 §7 makes it immediate with undo; the closed target list mirrors the server's RELABEL_TARGETS.",
+    doc: DASHBOARD_ADR_DOC,
+  },
+  {
+    key: "control:work/close",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/autopilot/board/close",
+      method: "POST",
+      confirmTier: "immediate-undo",
+      label: "Close",
+      preconditions: [{ text: "issue is open", check: "issue-open" }],
+      consequence: "closes the issue on GitHub — reopen by number undoes it",
+    },
+    alternatives: [
+      {
+        kind: "in-dashboard",
+        route: "/autopilot/board/relabel",
+        method: "POST",
+        confirmTier: "immediate-undo",
+        label: "Relabel to needs-info",
+        preconditions: [],
+        consequence: "keeps the issue open but out of the dispatch queue",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Review it in the operator cockpit first",
+        preconditions: [],
+        consequence: "walks the issue through the /hydra-review option table before deciding",
+      },
+    ],
+    rationale:
+      "closing is reversible (reopen by number) and starts no agent, so ADR-0034 §7 makes it immediate with undo; the server verifies the CLOSED state before reporting success.",
+    doc: DASHBOARD_ADR_DOC,
+  },
+  {
+    key: "control:work/reopen",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/autopilot/board/reopen",
+      method: "POST",
+      confirmTier: "immediate-undo",
+      label: "Reopen",
+      preconditions: [
+        { text: "an issue number is entered", check: "issue-number-entered" },
+        "the issue is currently closed — the server re-reads its state on write",
+      ],
+      consequence: "reopens the issue; it rejoins the queue under whatever lane label it still carries",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "gh issue view <number> --repo gaberoo322/hydra",
+        label: "Inspect the issue first",
+        preconditions: [],
+        consequence: "shows the closed issue's state and labels without changing anything",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Review it in the operator cockpit",
+        preconditions: [],
+        consequence: "decides the issue's next lane before it re-enters the board",
+      },
+    ],
+    rationale:
+      "closed issues are not in the open-only queue, so reopen takes an explicit number; it is the undo for close and starts no agent, so ADR-0034 §7 makes it immediate with undo.",
+    doc: DASHBOARD_ADR_DOC,
+  },
+
+  // --- /health (Health.jsx) -------------------------------------------------
+  {
+    key: "control:health/pause",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/autopilot/paused",
+      method: "POST",
+      confirmTier: "immediate-undo",
+      label: "Pause autopilot",
+      preconditions: [
+        { text: "the pause state read is verified", check: "pause-state-verified" },
+        { text: "autopilot is running", check: "autopilot-running" },
+      ],
+      consequence: "sets reasons.paused — the Pace Gate stops dispatching; in-flight subagents drain",
+    },
+    alternatives: [
+      {
+        kind: "in-dashboard",
+        route: "/autopilot/emergency-brake",
+        method: "POST",
+        confirmTier: "confirm-first",
+        label: "Engage the emergency brake instead",
+        preconditions: [],
+        consequence: "halts auto-merge only — dispatch keeps running",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Review attention items first",
+        preconditions: [],
+        consequence: "walks pending decision items while autopilot keeps running",
+      },
+    ],
+    rationale:
+      "pausing stops spend rather than starting it and resume undoes it, so ADR-0034 §7 makes it immediate with undo; it is independent of the emergency brake (merge-only).",
+    doc: REFERENCE_DOC,
+  },
+  {
+    key: "control:health/resume",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/autopilot/paused",
+      method: "POST",
+      confirmTier: "confirm-first",
+      label: "Resume autopilot",
+      preconditions: [
+        { text: "the pause state read is verified", check: "pause-state-verified" },
+        { text: "autopilot is paused", check: "autopilot-paused" },
+        "confirm the reason autopilot was paused no longer applies",
+      ],
+      consequence: "clears reasons.paused so the Pace Gate dispatches again",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Review attention items first",
+        preconditions: [],
+        consequence: "walks pending decision items while autopilot stays paused",
+      },
+      {
+        kind: "terminal-skill",
+        command: "journalctl --user -u hydra-orchestrator.service -n 200 --no-pager",
+        label: "Inspect recent logs before resuming",
+        preconditions: [],
+        consequence: "shows what the service did right before the pause, without changing any state",
+      },
+    ],
+    rationale:
+      "resuming re-enables dispatch, i.e. spends quota, so it confirms first — the same method, route and confirmTier as the feed's machine-stopped:paused action, so the route never behaves two ways.",
+    doc: REFERENCE_DOC,
+  },
+  {
+    key: "control:health/brake-engage",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/autopilot/emergency-brake",
+      method: "POST",
+      confirmTier: "confirm-first",
+      label: "Engage emergency brake",
+      preconditions: [
+        { text: "the brake state read is verified", check: "brake-state-verified" },
+        { text: "the brake is off", check: "brake-off" },
+      ],
+      consequence: "halts ALL auto-merge until released — dispatch and the pause flag are unaffected",
+    },
+    alternatives: [
+      {
+        kind: "in-dashboard",
+        route: "/autopilot/paused",
+        method: "POST",
+        confirmTier: "immediate-undo",
+        label: "Pause autopilot instead",
+        preconditions: [],
+        consequence: "stops dispatch while merges of already-green PRs continue",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Review the stalled PRs first",
+        preconditions: [],
+        consequence: "walks the PRs that worried you before stopping every merge",
+      },
+    ],
+    rationale:
+      "the emergency brake halts every auto-merge repo-wide, so it keeps the mandatory second confirm step it shipped with (ADR-0034 §7 blast-radius tiering).",
+    doc: REFERENCE_DOC,
+  },
+  {
+    key: "control:health/brake-release",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/autopilot/emergency-brake",
+      method: "POST",
+      confirmTier: "confirm-first",
+      label: "Release emergency brake",
+      preconditions: [
+        { text: "the brake state read is verified", check: "brake-state-verified" },
+        { text: "the brake is engaged", check: "brake-engaged" },
+        "confirm whatever prompted the brake is resolved",
+      ],
+      consequence: "re-enables auto-merge for every PR whose required checks pass",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "gh pr list --repo gaberoo322/hydra --state open",
+        label: "List the open PRs before releasing",
+        preconditions: [],
+        consequence: "shows what would start merging the moment the brake is released",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Review the stalled PRs first",
+        preconditions: [],
+        consequence: "walks the attention items while every merge stays held",
+      },
+    ],
+    rationale:
+      "releasing the brake re-enables every auto-merge at once, so it confirms first — an added arm step over the old single click, in the safer direction.",
+    doc: REFERENCE_DOC,
+  },
+] satisfies readonly OperatorActionEntryInput[];
 
 const RAW_ENTRIES = [
   // --- machine-stopped (rank 0, aggregate, context {}) ----------------------
@@ -1198,6 +1553,9 @@ const RAW_ENTRIES = [
 
   // --- class:<name> (issue #4636, ADR-0034 §9.2, context {}) ---------------
   ...CLASS_ENTRIES,
+
+  // --- control:<page>/<name> (issue #4629, ADR-0034 §8.3, context {}) ------
+  ...CONTROL_ENTRIES,
 ] satisfies readonly OperatorActionEntryInput[];
 
 /**

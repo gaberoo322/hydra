@@ -1,0 +1,1 @@
+- feat(dashboard): live ✓/✗ precondition checklist on the /work and /health write controls, read from control:<page>/<name> registry entries (#4629)
