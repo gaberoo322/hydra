@@ -3,7 +3,11 @@
  *
  * Mounted by `src/api.ts`. Endpoints:
  *
- *   GET  /api/design-concepts                       — list (query: scope, limit)
+ *   GET  /api/design-concepts                       — list (query: scope, limit,
+ *                                                     offset, status, view — #4633)
+ *   GET  /api/design-concepts/:anchorRef/approve-preconditions
+ *                                                   — server-evaluated approve
+ *                                                     checklist (#4633)
  *   GET  /api/design-concepts/:anchorRef            — fetch one
  *   POST /api/design-concepts                       — create / overwrite (idempotent on anchorRef)
  *   POST /api/design-concepts/:anchorRef/approve    — mark approved, record approvedBy
@@ -32,7 +36,6 @@ import { Router } from "express";
 import {
   saveDesignConcept,
   getDesignConcept,
-  listDesignConcepts,
   pruneDesignConceptIndex,
   approveDesignConcept,
   resolveDesignConceptForQa,
@@ -47,6 +50,11 @@ import {
   readRecentExemptLogEntries,
   readDailySnapshots,
   getDesignConceptIndexSize,
+  // Issue #4633 — the paginated list + summary projection.
+  listLiveDesignConcepts,
+  pageConcepts,
+  toDesignConceptSummary,
+  type DesignConcept,
 } from "../design-concept.ts";
 import {
   gateCheck,
@@ -66,6 +74,15 @@ import {
 } from "../schemas/design-concept.ts";
 import { aggregatorRouteNoQuery } from "./route-helpers.ts";
 import { logger } from "../logger.ts";
+// Issue #4633 — the approve-preconditions read: the registry's grill-handoff
+// approve action is the ONE text source (resolveAction resolves its
+// `{number}` template), and the issue-comment read rides the GitHub CLI
+// Adapter seam (never a raw child_process).
+import { resolveAction } from "../attention.ts";
+import { REGISTRY } from "../operator-actions/registry.ts";
+import { ghJson } from "../github/gh.ts";
+import { resolveGithubRepo } from "../github/issues.ts";
+import { getTargetGithubRepo } from "../target-config.ts";
 
 // ---------------------------------------------------------------------------
 // Green-light criterion (issue #736)
@@ -78,8 +95,100 @@ import { logger } from "../logger.ts";
 // without HTTP overhead. The `GET /design-concepts/snapshots` handler below
 // imports `computeGreenLight` from there — the wire behaviour is unchanged.
 
-export function createDesignConceptsRouter() {
+// ---------------------------------------------------------------------------
+// Approve-preconditions (issue #4633, ADR-0034 §8.2/§9.4)
+// ---------------------------------------------------------------------------
+
+/** One issue comment as the approve-preconditions read consumes it. */
+export type IssueComment = { body: string; createdAt?: string };
+
+/** Injected issue-comment reader — a result object, never a throw. */
+export type ReadIssueComments = (
+  repo: string,
+  number: number,
+) => Promise<{ ok: true; comments: IssueComment[] } | { ok: false; error: string }>;
+
+/**
+ * Optional seams for {@link createDesignConceptsRouter}. Every field defaults
+ * to the production implementation, so `createDesignConceptsRouter()` (the
+ * `src/api.ts` mount) is unchanged; tests inject to stay off live gh/Redis.
+ */
+export type DesignConceptsRouterDeps = {
+  /** Issue-comment read for the handoff-hash precondition (default: gh). */
+  readIssueComments?: ReadIssueComments;
+  /** Every live artifact, newest-first (default: the Redis index). */
+  listLiveConcepts?: () => Promise<DesignConcept[]>;
+  /** Index prune run before a list read (default: `pruneDesignConceptIndex`). */
+  pruneIndex?: () => Promise<unknown>;
+  /** Single-artifact read (default: `getDesignConcept`). */
+  getConcept?: (anchorRef: string) => Promise<DesignConcept | null>;
+  /** Clock (default: `Date.now`). */
+  now?: () => number;
+};
+
+/** The registry slot whose `alternatives[1]` IS the in-dashboard approve. */
+const APPROVE_KEY = "waiting-on-you:ready-for-human";
+const APPROVE_VARIANT = "grill-handoff";
+
+/** Per-issue memo window for the gh comment read (bounds gh under a 60 s poll). */
+const COMMENTS_MEMO_MS = 60_000;
+
+/** Default comment reader — `gh issue view N --json comments` via the seam. */
+const defaultReadIssueComments: ReadIssueComments = async (repo, number) => {
+  const res = await ghJson<{ comments?: Array<{ body?: unknown; createdAt?: unknown }> }>([
+    "issue",
+    "view",
+    String(number),
+    "--repo",
+    repo,
+    "--json",
+    "comments",
+  ]);
+  if (res.ok === false) return { ok: false, error: res.code };
+  const raw = Array.isArray(res.data?.comments) ? res.data.comments : [];
+  return {
+    ok: true,
+    comments: raw.map((c) => ({
+      body: typeof c?.body === "string" ? c.body : "",
+      createdAt: typeof c?.createdAt === "string" ? c.createdAt : undefined,
+    })),
+  };
+};
+
+const HANDOFF_HEADING = /^##\s+hydra-grill handoff\s*$/m;
+const HANDOFF_HASH_LINE = /^\s*-\s*artifactHash:\s*`?([0-9a-fA-F]+)`?\s*$/m;
+
+/**
+ * The LAST `## hydra-grill handoff` comment's `- artifactHash:` value.
+ * `found:false` = no handoff comment at all; `hash:null` = a handoff comment
+ * without a parseable hash line. Comments arrive oldest-first from gh.
+ */
+function lastHandoffHash(comments: IssueComment[]): { found: boolean; hash: string | null } {
+  for (let i = comments.length - 1; i >= 0; i--) {
+    const body = comments[i].body ?? "";
+    if (!HANDOFF_HEADING.test(body)) continue;
+    const m = body.match(HANDOFF_HASH_LINE);
+    return { found: true, hash: m ? m[1].toLowerCase() : null };
+  }
+  return { found: false, hash: null };
+}
+
+/** `issue-736` / `736` / `#736` → 736; anything else → null. */
+function issueNumberOf(anchorRef: string): number | null {
+  const m = /^(?:issue-|#)?(\d+)$/.exec(anchorRef.trim());
+  return m ? Number(m[1]) : null;
+}
+
+export function createDesignConceptsRouter(deps: DesignConceptsRouterDeps = {}) {
   const router = Router();
+  const readIssueComments = deps.readIssueComments ?? defaultReadIssueComments;
+  const listLiveConcepts = deps.listLiveConcepts ?? listLiveDesignConcepts;
+  const pruneIndex = deps.pruneIndex ?? pruneDesignConceptIndex;
+  const getConcept = deps.getConcept ?? getDesignConcept;
+  const now = deps.now ?? Date.now;
+  // In-process, per-router memo of SUCCESSFUL comment reads (a failure is
+  // retried on the next poll rather than pinned for a minute).
+  const commentsMemo = new Map<string, { at: number; comments: IssueComment[] }>();
 
   // ---------------------------------------------------------------------------
   // Exempt-log endpoints (issue #464). Declared BEFORE the
@@ -210,17 +319,176 @@ export function createDesignConceptsRouter() {
       const parsedQuery = DesignConceptListQuerySchema.safeParse(req.query);
       const scope: DesignConceptScope | undefined = parsedQuery.data?.scope;
       const limit = parsedQuery.data?.limit ?? 50;
+      // Issue #4633 (INV-2): offset/status/view through the same schema; a
+      // no-param call parses to offset 0 / no status / view "full", so the
+      // `items` + `count` it returns are the pre-#4633 list (INV-1) and the
+      // new envelope fields are additive.
+      const offset = parsedQuery.data?.offset ?? 0;
+      const status = parsedQuery.data?.status;
+      const view = parsedQuery.data?.view ?? "full";
 
       // Keep the index consistent on the list route. The prune used to be an
       // implicit side-effect of `listDesignConcepts`; issue #3605 split it out
       // into the explicit `pruneDesignConceptIndex` write, so the read path is
       // now side-effect-free and the "prune-then-list" behavior lives here at
       // the call site where it is visible.
-      await pruneDesignConceptIndex();
-      const items = await listDesignConcepts({ scope, limit });
-      return { items, count: items.length };
+      await pruneIndex();
+      // Read every live artifact (TTL-bounded), filter, THEN slice — exact
+      // `total` / `nextOffset` (#4633 rejected an index-level offset).
+      const page = pageConcepts(await listLiveConcepts(), { scope, status, limit, offset });
+      const nowMs = now();
+      const items =
+        view === "summary"
+          ? page.items.map((dc) => toDesignConceptSummary(dc, nowMs))
+          : page.items;
+      return {
+        items,
+        count: items.length,
+        total: page.total,
+        limit: page.limit,
+        offset: page.offset,
+        nextOffset: page.nextOffset,
+        generatedAt: new Date(nowMs).toISOString(),
+      };
     }),
   );
+
+  /**
+   * GET /api/design-concepts/:anchorRef/approve-preconditions (issue #4633
+   * INV-4) — the server-evaluated checklist the /work approve control gates
+   * on. Always 200:
+   *
+   *   { anchorRef, preconditions:[{label, ok, detail}], allOk, artifactHash,
+   *     handoffHash, action, generatedAt }
+   *
+   * `preconditions[i].label` is the registry grill-handoff approve action's
+   * precondition i verbatim (ADR-0034 §8.2 — the CLI and the UI cannot
+   * drift); `action` is that action with `{number}` resolved (null when the
+   * anchor is not an issue anchor), so the page renders label + consequence
+   * from the registry, never page prose. (1) the artifact exists, (2) its
+   * status is 'draft', (3) the LAST `## hydra-grill handoff` comment on the
+   * issue carries `- artifactHash:` equal to the stored hash. A gh or Redis
+   * failure turns its line ✗ with the reason — never a 500. This is a UI
+   * gate only: POST .../approve stays unconditional (INV-7).
+   *
+   * Declared BEFORE the bare `/:anchorRef` route.
+   */
+  router.get("/design-concepts/:anchorRef/approve-preconditions", async (req, res) => {
+    const anchorRef = req.params.anchorRef;
+    const number = issueNumberOf(anchorRef);
+
+    // (1)+(2) — the stored artifact.
+    let dc: DesignConcept | null = null;
+    let readError: string | null = null;
+    try {
+      dc = await getConcept(anchorRef);
+    } catch (err: any) {
+      readError = err?.message ?? String(err);
+      logger.error({ anchorRef, err }, "[api/design-concepts] approve-preconditions: artifact read failed");
+    }
+
+    const repo = dc?.scope === "target" ? getTargetGithubRepo() : resolveGithubRepo();
+    const rawApprove = REGISTRY.find(
+      (e) => e.key === APPROVE_KEY && e.variant === APPROVE_VARIANT,
+    )?.alternatives[1];
+    const resolved =
+      number === null
+        ? null
+        : resolveAction(APPROVE_KEY, APPROVE_VARIANT, { repo, number, kind: "issue" });
+    const action = resolved?.alternatives[1] ?? null;
+    const labels = (action ?? rawApprove)?.preconditions ?? [];
+
+    // (3) — the handoff hash, read only when there is a stored hash to match.
+    let handoffHash: string | null = null;
+    let hashLine: { ok: boolean; detail: string };
+    if (!dc) {
+      hashLine = { ok: false, detail: "no stored artifact to compare a handoff hash against" };
+    } else if (number === null) {
+      hashLine = { ok: false, detail: `anchorRef "${anchorRef}" is not an issue anchor — no issue to read a handoff comment from` };
+    } else {
+      const memoKey = `${repo}#${number}`;
+      const memo = commentsMemo.get(memoKey);
+      let comments: IssueComment[] | null = null;
+      let ghError: string | null = null;
+      if (memo && now() - memo.at < COMMENTS_MEMO_MS) {
+        comments = memo.comments;
+      } else {
+        try {
+          const read = await readIssueComments(repo, number);
+          if (read.ok === true) {
+            comments = read.comments;
+            commentsMemo.set(memoKey, { at: now(), comments });
+          } else {
+            ghError = read.error;
+          }
+        } catch (err: any) {
+          ghError = err?.message ?? String(err);
+        }
+        if (ghError !== null) {
+          logger.error(
+            { anchorRef, repo, number, error: ghError },
+            "[api/design-concepts] approve-preconditions: issue comment read failed",
+          );
+        }
+      }
+      if (comments === null) {
+        hashLine = { ok: false, detail: `could not read issue #${number} comments: ${ghError}` };
+      } else {
+        const handoff = lastHandoffHash(comments);
+        handoffHash = handoff.hash;
+        const stored = dc.artifactHash.toLowerCase();
+        if (!handoff.found) {
+          hashLine = { ok: false, detail: `no \`## hydra-grill handoff\` comment on issue #${number}` };
+        } else if (handoff.hash === null) {
+          hashLine = { ok: false, detail: "the latest handoff comment carries no `- artifactHash:` line" };
+        } else if (handoff.hash !== stored) {
+          hashLine = {
+            ok: false,
+            detail: `handoff hash ${handoff.hash.slice(0, 8)} ≠ stored ${stored.slice(0, 8)}`,
+          };
+        } else {
+          hashLine = { ok: true, detail: `handoff hash ${stored.slice(0, 8)} matches the stored artifact` };
+        }
+      }
+    }
+
+    const lines: Array<{ ok: boolean; detail: string }> = [
+      dc
+        ? { ok: true, detail: `artifact ${dc.anchorRef} is in Redis` }
+        : {
+            ok: false,
+            detail:
+              readError !== null
+                ? `artifact read failed: ${readError}`
+                : `no artifact for ${anchorRef} — expired (7-day TTL) or never produced; re-run /hydra-grill`,
+          },
+      dc
+        ? dc.status === "draft"
+          ? { ok: true, detail: "status is 'draft'" }
+          : { ok: false, detail: `status is '${dc.status}'` }
+        : { ok: false, detail: "no artifact to read a status from" },
+      hashLine,
+    ];
+    const preconditions = labels.map((label, i) => ({
+      label,
+      ok: lines[i]?.ok ?? false,
+      detail: lines[i]?.detail ?? "no evaluator for this precondition",
+    }));
+    const allOk =
+      action !== null &&
+      preconditions.length === lines.length &&
+      preconditions.every((p) => p.ok);
+
+    res.json({
+      anchorRef,
+      preconditions,
+      allOk,
+      artifactHash: dc?.artifactHash ?? null,
+      handoffHash,
+      action,
+      generatedAt: new Date(now()).toISOString(),
+    });
+  });
 
   /**
    * GET /api/design-concepts/:anchorRef/resolve — QA-time retrievability probe

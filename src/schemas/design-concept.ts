@@ -223,7 +223,7 @@ export const ExemptLogQuerySchema = z.object({
 });
 
 /**
- * `GET /design-concepts?scope=&limit=N` — historic default 50 (no explicit
+ * `GET /design-concepts?scope=&limit=N&offset=&status=&view=` — historic default 50 (no explicit
  * cap previously; the factory's 1000 cap bounds an otherwise-unbounded slice).
  * `scope` is an optional `"orch" | "target"` enum; any other value (or absence)
  * collapses to `undefined`, exactly the legacy ternary.
@@ -231,4 +231,20 @@ export const ExemptLogQuerySchema = z.object({
 export const DesignConceptListQuerySchema = z.object({
   scope: z.enum(["orch", "target"]).optional().catch(undefined),
   limit: countQuerySchema(50).shape.count,
+  // Issue #4633 (INV-2) — server-side pagination + projection, all additive
+  // and lenient like the two fields above (a garbled value collapses to its
+  // default, never a 400): a no-param call parses to offset 0, no status
+  // filter, view "full" — exactly the pre-#4633 list (INV-1).
+  /** Page start into the filtered, newest-first list. Int >= 0, default 0. */
+  offset: z.coerce
+    .number()
+    .transform((n) => Math.trunc(n))
+    .pipe(z.number().int().min(0))
+    .catch(0)
+    .default(0),
+  /** Optional status filter (`draft` | `approved` | `stale`). */
+  status: DesignConceptStatusSchema.optional().catch(undefined),
+  /** `full` (default — the artifacts verbatim) or `summary` (no heavy arrays). */
+  view: z.enum(["full", "summary"]).catch("full").default("full"),
 });
+export type DesignConceptListQuery = z.infer<typeof DesignConceptListQuerySchema>;
