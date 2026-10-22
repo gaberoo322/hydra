@@ -961,7 +961,7 @@ describe("control:health alert/scheduler/housekeeping entries (issue #4631)", ()
     }
   });
 
-  test("check bindings: each entry carries exactly its INV-4 checks, in order; housekeeping has none", () => {
+  test("check bindings: each entry carries exactly its typed checks, in order; housekeeping has none", () => {
     assert.deepEqual(checksOf(controlEntry("control:health/alert-dismiss")), ["alert-open"]);
     assert.deepEqual(checksOf(controlEntry("control:health/alerts-dismiss-all")), ["alerts-any-open"]);
     assert.deepEqual(checksOf(controlEntry("control:health/scheduler-stop")), ["scheduler-running"]);
