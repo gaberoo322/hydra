@@ -1,10 +1,16 @@
 import { formatElapsed } from "../lib/autopilot-format.js";
 import { useTaxonomy } from "../hooks/useTaxonomy.js";
 
-// Slice 2 of epic #496 (issue #498) — pipeline snapshot (6 slots + signal
-// cooldowns). Extracted from dashboard/src/pages/Autopilot.jsx (issue #3589)
-// into its own focused module together with the PipelineSlot + SignalChip atoms
-// it owns. Behavior is identical to the inline originals.
+// Slice 2 of epic #496 (issue #498) — pipeline snapshot (the taxonomy's
+// pipeline slots + signal last-fired ages). Extracted from
+// dashboard/src/pages/Autopilot.jsx (issue #3589) into its own focused module
+// together with the PipelineSlot + SignalChip atoms it owns.
+//
+// Issue #4637: this is a HISTORICAL run view (/runs/:runId). It no longer
+// derives a live cooldown on the client (that was a re-derived value the view
+// could not decompose honestly — live cooldown is /work's class-state panel's
+// job), and it renders an UNKNOWN placeholder rather than a fabricated grid
+// until useTaxonomy reports the live alphabet `ready`.
 
 function PipelineSlot({ name, occupant, nowEpoch }) {
   const isEmpty = !occupant;
@@ -39,24 +45,20 @@ function PipelineSlot({ name, occupant, nowEpoch }) {
   );
 }
 
-function SignalChip({ cls, epoch, nowEpoch, cooldownSec }) {
+// Renders only the OBSERVED last-fired age from the turn's signals_snapshot
+// ("never" when 0/absent) — no cooldown derivation (issue #4637).
+function SignalChip({ cls, epoch, nowEpoch }) {
   const e = Number(epoch || 0);
-  const cooldown = Number(cooldownSec) || 0;
-  const onCooldown = e > 0 && cooldown > 0 && nowEpoch - e < cooldown;
-  // For health (cooldown=0) "active" only means fired within 60s.
-  const recentlyFired = e > 0 && (cooldown === 0 ? nowEpoch - e <= 60 : true);
-  const ageStr = e > 0 ? formatElapsed(Math.max(0, nowEpoch - e)) : "never";
-  const baseStyle = onCooldown
-    ? "border-amber-500/40 bg-amber-900/15 text-amber-300"
-    : recentlyFired
-      ? "border-emerald-500/30 bg-emerald-900/10 text-emerald-300"
-      : "border-zinc-700 bg-zinc-900/30 text-zinc-400";
+  const fired = e > 0;
+  const ageStr = fired ? formatElapsed(Math.max(0, nowEpoch - e)) : "never";
+  const baseStyle = fired
+    ? "border-emerald-500/30 bg-emerald-900/10 text-emerald-300"
+    : "border-zinc-700 bg-zinc-900/30 text-zinc-400";
   return (
     <div className={`border ${baseStyle} rounded-md px-2 py-1.5 text-xs flex items-center gap-2`}>
       <span className="font-mono">{cls}</span>
       <span className="text-[10px] text-zinc-500">·</span>
       <span className="text-[11px]">{ageStr}</span>
-      {onCooldown && <span className="text-[10px] uppercase tracking-widest">cooldown</span>}
     </div>
   );
 }
@@ -66,9 +68,25 @@ export default function PipelineSnapshot({ run, latestTurn }) {
   const slots = latestTurn?.slots_snapshot || {};
   const signals = latestTurn?.signals_snapshot || {};
   const nowEpoch = Math.floor(Date.now() / 1000);
-  // Live dispatch-class alphabet (issue #2524), with a built-in fallback so the
-  // snapshot renders even before the fetch lands or if the endpoint is down.
-  const { pipelineSlots, signalClasses, signalCooldowns } = useTaxonomy();
+  // Live dispatch-class alphabet (issue #2524). No fallback alphabet
+  // (issue #4637): until the hook reports `ready`, render the panel shell with
+  // an UNKNOWN placeholder — never a fabricated grid or "slots filled: 0/N".
+  const { taxonomy, status } = useTaxonomy();
+  if (status !== "ready" || !taxonomy) {
+    return (
+      <div className="border border-zinc-800 rounded-lg p-5 bg-zinc-900/40 space-y-4" data-testid="pipeline-snapshot-unknown">
+        <div className="flex items-baseline justify-between">
+          <h2 className="text-base font-semibold text-zinc-100">Pipeline snapshot</h2>
+        </div>
+        <div className="text-sm text-zinc-400">
+          {status === "loading"
+            ? "UNKNOWN — loading the dispatch-class alphabet…"
+            : "UNKNOWN — the dispatch-class alphabet (GET /api/taxonomy/classes) is unavailable, so the slot grid cannot be laid out."}
+        </div>
+      </div>
+    );
+  }
+  const { pipelineSlots, signalClasses } = taxonomy;
   return (
     <div className="border border-zinc-800 rounded-lg p-5 bg-zinc-900/40 space-y-4">
       <div className="flex items-baseline justify-between">
@@ -86,7 +104,7 @@ export default function PipelineSnapshot({ run, latestTurn }) {
         <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Signals</div>
         <div className="flex flex-wrap gap-2">
           {signalClasses.map((cls) => (
-            <SignalChip key={cls} cls={cls} epoch={signals[cls]} nowEpoch={nowEpoch} cooldownSec={signalCooldowns[cls]} />
+            <SignalChip key={cls} cls={cls} epoch={signals[cls]} nowEpoch={nowEpoch} />
           ))}
         </div>
       </div>
