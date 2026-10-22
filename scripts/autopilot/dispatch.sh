@@ -376,7 +376,7 @@ if escalation != '':
 print(json.dumps(body))
 " "$cycle_id" "$status" "$skill" "$pr_number" "$task_title" "$anchor_ref" "$duration_ms" "$anchor_type" "$tasks_merged" "$tasks_failed" "$tasks_abandoned" "$reflection_sources" "$files_changed" "$grounding_tests" "$tokens" "$worktree_branch" "$escalation")
     # Issue #2635: the rest of the autopilot ecosystem (reap.py, heartbeat.py,
-    # term-check.py, decide.py, bootstrap.sh, the hooks) resolves the API origin
+    # decide.py, bootstrap.sh, the hooks) resolves the API origin
     # from HYDRA_API_BASE, but the `hydra` CLI reads HYDRA_BASE_URL and the curl
     # fallback reads HYDRA_API — neither honours HYDRA_API_BASE. Tests (and any
     # isolated harness) set HYDRA_API_BASE=http://127.0.0.1:1 to sink writes into

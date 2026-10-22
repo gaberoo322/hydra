@@ -16,8 +16,6 @@
  *   recover-stale.sh   — gh-driven label fixes (NOT exercised here;
  *                        depends on gh + GitHub)
  *   reap.py            — hard-cap trip clears slot + marks burned
- *   term-check.py      — prints TERM:budget / TERM:wall_clock /
- *                        TERM:idle / OK based on state
  *   dispatch.sh log    — appends one line to the run log
  *   drain.sh           — prints the final summary line
  *
@@ -472,7 +470,6 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       assert.equal(s.limits.scope, "all");
       assert.deepEqual(s.burned_classes, []);
       assert.equal(s.cumulative_tokens, 0);
-      assert.equal(s.idle_turns, 0);
       // The 7 fixed pipeline slots: the 6 from the #426 decision-brain
       // rewrite plus `design_concept_orch` added in #466 (Phase B of
       // #437). Signal-driven classes (health / sweep_* / discover_*) no
@@ -1959,372 +1956,6 @@ describe("scripts/autopilot/bootstrap.sh — dev_resume_pending carry-forward (i
   });
 });
 
-describe("scripts/autopilot/term-check.py", () => {
-  function writeState(path: string, patch: Record<string, unknown>): void {
-    // Post-#426 schema: 6 pipeline slots + signal_last_fired map.
-    const base = {
-      started_epoch: Math.floor(Date.now() / 1000),
-      limits: {
-        token_budget: 2000000,
-        wall_clock_max_sec: 28800,
-        idle_drain_turns: 5,
-        scope: "all",
-        subagent_max_tokens: 400000,
-        subagent_hard_max_tokens: 800000,
-      },
-      cumulative_tokens: 0,
-      idle_turns: 0,
-      slots: {
-        dev_orch: null, qa_orch: null, research_orch: null,
-        dev_target: null, qa_target: null, research_target: null,
-      },
-      signal_last_fired: {
-        health: 0, sweep_orch: 0, sweep_target: 0,
-        discover_orch: 0, discover_target: 0,
-      },
-      failure_log: [],
-    };
-    writeFileSync(path, JSON.stringify({ ...base, ...patch }));
-  }
-
-  function runTermCheck(statePath: string): { status: number; stdout: string } {
-    const r = spawnSync(join(SCRIPTS, "term-check.py"), [], {
-      env: { ...process.env, HYDRA_AUTOPILOT_STATE: statePath },
-      encoding: "utf-8",
-    });
-    return { status: r.status ?? -1, stdout: (r.stdout ?? "").trim() };
-  }
-
-  test("prints OK when no termination condition met", () => {
-    const tmp = makeTempState();
-    try {
-      writeState(tmp.state, {});
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^OK /);
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("prints TERM:budget when cumulative tokens >= budget", () => {
-    const tmp = makeTempState();
-    try {
-      writeState(tmp.state, { cumulative_tokens: 2000001 });
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^TERM:budget /);
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  // Issue #2429 — `TERM:budget` is a LIVE gate, NOT dead code. It reads
-  // state.json's `cumulative_tokens` (the reap.py surrogate), not the Redis run
-  // hash, so a run-hash value of 0 (common on a 1-2-turn print-mode run) never
-  // disables it. These two cases pin the budget boundary so a future "the field
-  // is always 0, remove the dead branch" change has to contradict a named test:
-  // just-below-budget keeps iterating (OK), at-budget terminates (TERM:budget).
-  test("does NOT trip budget when cumulative tokens are just below budget (#2429)", () => {
-    const tmp = makeTempState();
-    try {
-      // base writeState() sets token_budget = 2_000_000.
-      writeState(tmp.state, { cumulative_tokens: 1_999_999 });
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^OK /,
-        "below the budget the live gate keeps iterating — proves the branch is reachable, not dead");
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("trips budget exactly AT the token_budget boundary (#2429)", () => {
-    const tmp = makeTempState();
-    try {
-      writeState(tmp.state, { cumulative_tokens: 2_000_000 });
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^TERM:budget /,
-        "the comparison is >=, so reaching the budget exactly terminates — the gate fires on real state.json spend");
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("prints TERM:wall_clock when elapsed >= wall_clock_max_sec", () => {
-    const tmp = makeTempState();
-    try {
-      // Started 100 seconds ago, cap = 60
-      writeState(tmp.state, {
-        started_epoch: Math.floor(Date.now() / 1000) - 100,
-        limits: {
-          token_budget: 2000000,
-          wall_clock_max_sec: 60,
-          idle_drain_turns: 5,
-          scope: "all",
-          subagent_max_tokens: 400000,
-          subagent_hard_max_tokens: 800000,
-        },
-      });
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^TERM:wall_clock /);
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("prints TERM:idle when idle_turns >= cap AND all slots empty", () => {
-    const tmp = makeTempState();
-    try {
-      writeState(tmp.state, { idle_turns: 5 });
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^TERM:idle /);
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("does NOT trip idle when a slot is occupied", () => {
-    const tmp = makeTempState();
-    try {
-      writeState(tmp.state, {
-        idle_turns: 5,
-        slots: {
-          dev_orch: { skill: "hydra-dev", started: "now", partial_tokens: 0 },
-          qa_orch: null, research_orch: null,
-          dev_target: null, qa_target: null, research_target: null,
-        },
-      });
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^OK /);
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("prints OK state-missing when state file does not exist", () => {
-    const tmp = makeTempState();
-    try {
-      // Don't write state file
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^OK state-missing$/);
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  // Issue #2030 — the idle-drain gate (`slots_occupied == 0`) must also count
-  // background/signal classes fired this run, or a background-only run trips
-  // TERM:idle prematurely (the same gap #2030 fixes in the reap baton-pass).
-  test("does NOT trip idle when a background class fired this run (#2030)", () => {
-    const tmp = makeTempState();
-    try {
-      const now = Math.floor(Date.now() / 1000);
-      writeState(tmp.state, {
-        idle_turns: 5,           // would trip idle if slots_occupied were 0
-        started_epoch: now - 10,
-        slots: {                 // all pipeline slots empty
-          dev_orch: null, qa_orch: null, research_orch: null,
-          dev_target: null, qa_target: null, research_target: null,
-        },
-        signal_last_fired: {     // but sweep_orch fired AFTER started_epoch
-          health: 0, sweep_orch: now - 2, sweep_target: 0,
-          discover_orch: 0, discover_target: 0,
-        },
-      });
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^OK /,
-        "a background class in flight this run keeps the run busy — no premature TERM:idle");
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("STILL trips idle when the only background fires are stale (prior run) (#2030)", () => {
-    const tmp = makeTempState();
-    try {
-      const now = Math.floor(Date.now() / 1000);
-      writeState(tmp.state, {
-        idle_turns: 5,
-        started_epoch: now - 10,
-        slots: {
-          dev_orch: null, qa_orch: null, research_orch: null,
-          dev_target: null, qa_target: null, research_target: null,
-        },
-        signal_last_fired: {     // fired BEFORE this run started → not in flight
-          health: 0, sweep_orch: now - 3600, sweep_target: 0,
-          discover_orch: 0, discover_target: 0,
-        },
-      });
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^TERM:idle /,
-        "stale background fires from a prior run must not keep the run alive");
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  // Issue #3787 — periodic session-restart cadence. Mirrors decide.py's
-  // `_check_termination` context_compaction branch (same default of 8,
-  // same `state.limits.context_compaction_turns` key, same "checked last /
-  // not gated on slots_occupied" semantics) — this is term-check.py's
-  // Phase-3 fast pre-check duplicate of that same comparison.
-  test("prints TERM:context_compaction when turn reaches the configured cadence", () => {
-    const tmp = makeTempState();
-    try {
-      writeState(tmp.state, {
-        turn: 8,
-        limits: {
-          token_budget: 2000000,
-          wall_clock_max_sec: 28800,
-          idle_drain_turns: 5,
-          context_compaction_turns: 8,
-          scope: "all",
-          subagent_max_tokens: 400000,
-          subagent_hard_max_tokens: 800000,
-        },
-      });
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^TERM:context_compaction turn=8 cadence=8/);
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("does NOT trip context_compaction before the cadence is reached", () => {
-    const tmp = makeTempState();
-    try {
-      writeState(tmp.state, {
-        turn: 7,
-        limits: {
-          token_budget: 2000000,
-          wall_clock_max_sec: 28800,
-          idle_drain_turns: 5,
-          context_compaction_turns: 8,
-          scope: "all",
-          subagent_max_tokens: 400000,
-          subagent_hard_max_tokens: 800000,
-        },
-      });
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^OK /);
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("defaults context_compaction_turns to 8 when the limits omit it", () => {
-    const tmp = makeTempState();
-    try {
-      writeState(tmp.state, { turn: 8 }); // base writeState() limits carry no override
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^TERM:context_compaction turn=8 cadence=8/);
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("fires context_compaction even when a slot is occupied (unlike idle)", () => {
-    const tmp = makeTempState();
-    try {
-      writeState(tmp.state, {
-        turn: 8,
-        slots: {
-          dev_orch: { skill: "hydra-dev", started: "now", partial_tokens: 0 },
-          qa_orch: null, research_orch: null,
-          dev_target: null, qa_target: null, research_target: null,
-        },
-      });
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^TERM:context_compaction /,
-        "context_compaction must fire regardless of occupied slots");
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("budget still outranks context_compaction on the same turn", () => {
-    const tmp = makeTempState();
-    try {
-      writeState(tmp.state, {
-        turn: 8,
-        cumulative_tokens: 2000001,
-      });
-      const r = runTermCheck(tmp.state);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /^TERM:budget /,
-        "budget must win over context_compaction — checked first in the if/elif chain");
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  // Parity: decide.py and term-check.py must agree on the SAME state.json —
-  // both read `turn` + `limits.context_compaction_turns` identically.
-  test("agrees with decide.py's context_compaction verdict on the same state (parity)", () => {
-    const tmp = makeTempState();
-    try {
-      writeState(tmp.state, {
-        turn: 8,
-        limits: {
-          token_budget: 2000000,
-          wall_clock_max_sec: 28800,
-          idle_drain_turns: 5,
-          context_compaction_turns: 8,
-          scope: "all",
-          subagent_max_tokens: 400000,
-          subagent_hard_max_tokens: 800000,
-        },
-      });
-      const termCheckResult = runTermCheck(tmp.state);
-      assert.match(termCheckResult.stdout, /^TERM:context_compaction /);
-
-      // decide.py's CLI bumps `turn` by 1 before deciding (#1769), so feed it
-      // turn=7 to land on the same turn=8 term-check.py just observed.
-      const decideState = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      decideState.turn = 7;
-      decideState.dispatches = 0;
-      decideState.idle_turns = 0;
-      decideState.burned_classes = [];
-      decideState.reaped_task_ids = [];
-      decideState.signals = {};
-      decideState.research_force_counter = {};
-      decideState.signal_last_fired = {
-        health: 0, sweep_orch: 0, sweep_target: 0,
-        discover_orch: 0, discover_target: 0, scout_orch: 0,
-      };
-      writeFileSync(tmp.state, JSON.stringify(decideState));
-      const cands = join(tmp.dir, "candidates.json");
-      const events = join(tmp.dir, "events.json");
-      writeFileSync(cands, JSON.stringify(null));
-      writeFileSync(events, JSON.stringify([]));
-      const decideResult = spawnSync(
-        "python3",
-        [join(SCRIPTS, "decide.py"), "decide", tmp.state, cands, events],
-        { encoding: "utf-8", env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" } },
-      );
-      assert.equal(decideResult.status, 0);
-      const plan = JSON.parse(decideResult.stdout);
-      const term = plan.actions.find((a: Record<string, unknown>) => a.type === "terminate");
-      assert.ok(term, "decide.py must also terminate on this state");
-      assert.equal(term.cause, "context_compaction");
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-});
-
 describe("scripts/autopilot/reap.py", () => {
   function writeStateWithSlot(path: string, slot: { partial_tokens: number; skill?: string }): void {
     writeFileSync(path, JSON.stringify({
@@ -2547,13 +2178,13 @@ describe("scripts/autopilot/drain.sh", () => {
           dev_target: null, qa_target: null, research_target: null,
         },
       }));
-      const r = spawnSync(join(SCRIPTS, "drain.sh"), ["7"], {
+      const r = spawnSync(join(SCRIPTS, "drain.sh"), [], {
         env: { ...process.env, HYDRA_AUTOPILOT_STATE: tmp.state, HYDRA_AUTOPILOT_LOG: tmp.log },
         encoding: "utf-8",
       });
       assert.equal(r.status, 0);
       const out = (r.stdout ?? "").trim();
-      assert.match(out, /^\[autopilot\] FINAL \| duration=03:30 \| dispatches=42 \| tokens=1234567\/2000000 \| merged_PRs=7 \| digest=/);
+      assert.match(out, /^\[autopilot\] FINAL \| duration=03:30 \| dispatches=42 \| tokens=1234567\/2000000 \| digest=/);
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
@@ -2562,7 +2193,7 @@ describe("scripts/autopilot/drain.sh", () => {
   test("graceful fallback when state.json is missing", () => {
     const tmp = makeTempState();
     try {
-      const r = spawnSync(join(SCRIPTS, "drain.sh"), ["0"], {
+      const r = spawnSync(join(SCRIPTS, "drain.sh"), [], {
         env: { ...process.env, HYDRA_AUTOPILOT_STATE: tmp.state, HYDRA_AUTOPILOT_LOG: tmp.log },
         encoding: "utf-8",
       });
@@ -2580,7 +2211,6 @@ describe("scripts/autopilot/* executable bit", () => {
       "bootstrap.sh",
       "recover-stale.sh",
       "reap.py",
-      "term-check.py",
       "dispatch.sh",
       "drain.sh",
     ];
@@ -2609,7 +2239,7 @@ describe("scripts/autopilot/* executable bit", () => {
 // logic and must not be merged into the canonical run_termination.py module.
 //
 // bootstrap.sh's __reap_derive_cause (a systemd EXIT_CODE/EXIT_STATUS ->
-// {interrupted, handoff, crash} mapping) and term-check.py/decide.py's cause
+// {interrupted, handoff, crash} mapping) and decide.py's cause
 // values (quota/budget/wall_clock/idle/context_compaction) are two DIFFERENT
 // concepts that only share a wire field name ("cause" in the run-end
 // payload). The #4305 extraction unified count_slots_occupied and
@@ -2678,7 +2308,7 @@ describe("scripts/autopilot/drain.sh run-tally tail (issue #4551)", () => {
         dispatches: 5,
       }));
       // Grab a just-freed ephemeral port so the tally POST is refused instantly.
-      const r = spawnSync(join(SCRIPTS, "drain.sh"), ["2"], {
+      const r = spawnSync(join(SCRIPTS, "drain.sh"), [], {
         env: {
           ...process.env,
           HYDRA_AUTOPILOT_STATE: tmp.state,
@@ -2691,7 +2321,7 @@ describe("scripts/autopilot/drain.sh run-tally tail (issue #4551)", () => {
       assert.equal(r.status, 0, "a failed tally must never change drain.sh's exit code");
       assert.match(
         (r.stdout ?? "").trim(),
-        /^\[autopilot\] FINAL \| duration=01:00 \| dispatches=5 \| tokens=953911\/2000000 \| merged_PRs=2 \| digest=/,
+        /^\[autopilot\] FINAL \| duration=01:00 \| dispatches=5 \| tokens=953911\/2000000 \| digest=/,
         "the FINAL line prints exactly as before",
       );
       assert.ok(
@@ -2716,7 +2346,7 @@ describe("scripts/autopilot/drain.sh run-tally tail (issue #4551)", () => {
         cumulative_tokens: 123,
         dispatches: 1,
       }));
-      const r = spawnSync(join(SCRIPTS, "drain.sh"), ["0"], {
+      const r = spawnSync(join(SCRIPTS, "drain.sh"), [], {
         env: {
           ...process.env,
           HYDRA_AUTOPILOT_STATE: tmp.state,

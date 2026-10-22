@@ -116,7 +116,7 @@ HEARTBEAT_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_HEARTBEAT", "/tmp/hydra-au
 # Issue #498 — slice 2 wires heartbeat.py into the per-turn POST so the
 # /autopilot dashboard sees actions/reasons/slots immediately, not just the
 # file mtime. Best-effort; POST failure NEVER aborts the turn (heartbeat is
-# observability, not correctness — same contract as slice 1's term-check.py).
+# observability, not correctness — same contract as the other autopilot scripts).
 PLAN_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_PLAN", "/tmp/hydra-autopilot-plan.json"))
 HYDRA_API_BASE = os.environ.get("HYDRA_API_BASE", "http://localhost:4000")
 TURN_POST_TIMEOUT_SEC = 3
@@ -328,7 +328,6 @@ def post_turn(state: dict, plan: dict, now: int) -> None:
         "slots_snapshot": state.get("slots") or {},
         "signals_snapshot": state.get("signal_last_fired") or {},
         "tokens_after": int(state.get("cumulative_tokens", 0) or 0),
-        "idle_turns": int(state.get("idle_turns", 0) or 0),
         # Issue #4635 (ADR-0034 §9.2): burned_classes comes from state
         # (decide.py's own view), so it is sent on EVERY turn regardless of
         # plan staleness.

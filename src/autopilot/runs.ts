@@ -153,9 +153,9 @@ import { setPostQuotaUntil, postQuotaBackoffSec } from "../redis/post-quota-hint
  * `term_reason` values the autopilot writers are allowed to emit. Anything
  * else is normalised to `"unknown"` so a writer typo can't break the read-back.
  *
- * `budget` / `wall_clock` / `idle` come from `term-check.py`'s in-loop stop
+ * `budget` / `wall_clock` / `idle` come from `decide.py`'s in-loop stop
  * decisions. `interrupted` is the reap-on-exit backstop's cause for a clean
- * process exit that did NOT route through a term-check stop (print-mode end,
+ * process exit that did NOT route through a decide.py terminate (print-mode end,
  * SIGTERM from `systemctl restart` / `RuntimeMaxSec`) — distinct from a genuine
  * `crash` (issue #898), which is an abnormal exit that also missed a run-end.
  *
@@ -165,7 +165,7 @@ import { setPostQuotaUntil, postQuotaBackoffSec } from "../redis/post-quota-hint
  * dispatch ledger (`hydra:dispatches:subagent:*`) that the NEXT pace-gate-
  * launched run re-seeds via #1352. It is an honest baton-pass, NOT the crash-
  * adjacent `interrupted` — which now stays reserved for a clean ZERO-slot exit
- * that bypassed term-check (a genuine print-mode end with nothing in flight).
+ * that bypassed decide.py's terminate (a genuine print-mode end with nothing in flight).
  *
  * `context_compaction` (issue #3787) is ALSO a clean, deliberate self-stop:
  * `decide.py._check_termination` fires it every N turns (default 100) to cut
@@ -445,7 +445,7 @@ export async function startRun(
       // per-turn token surrogate, advanced by `recordTurn` from each turn's
       // `tokens_after` POST (see the write below). It is NOT the autopilot's
       // budget gate: `TERM:budget` reads state.json directly in
-      // scripts/autopilot/term-check.py (+ decide.py `_check_termination`), so
+      // decide.py `_check_termination`, so
       // a 0 here never disables termination (issue #2429). It stays 0 only for
       // a run that never accumulates surrogate tokens — e.g. a 1-2-turn run
       // that exits under the print-mode session model (#1352/#1903) before the
