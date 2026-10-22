@@ -1,0 +1,1 @@
+- feat(dashboard): /health controls for alert dismiss (per alert + all), scheduler stop ⇄ start and run-housekeeping-now, from control:health/<name> registry entries with live checks (#4631)

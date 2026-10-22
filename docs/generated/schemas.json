@@ -42,7 +42,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 367
+        "line": 385
       }
     },
     {
@@ -240,7 +240,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 202
+        "line": 213
       }
     },
     {
@@ -358,7 +358,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 273
+        "line": 284
       }
     },
     {
@@ -392,7 +392,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 291
+        "line": 309
       }
     },
     {
@@ -718,7 +718,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 381
+        "line": 399
       }
     },
     {
@@ -730,7 +730,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 402
+        "line": 420
       }
     },
     {
@@ -740,7 +740,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 420
+        "line": 438
       }
     },
     {
@@ -814,7 +814,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 244
+        "line": 255
       }
     },
     {
