@@ -26,12 +26,15 @@ import { tmpdir } from "node:os";
 import { REGISTRY } from "../src/operator-actions/registry.ts";
 import {
   DOCS_ONLY,
+  FEED_GRAMMAR_WRITES,
   HOMED_READS,
+  HOMED_UNATTRIBUTED,
   MACHINE_READS,
   MACHINE_WRITES,
   PENDING_CONTROL_WRITES,
   RETIRED_READS,
   RETIRED_WRITES,
+  RETIREMENT_CANDIDATES,
   homedReadMisses,
   loadRouteInventory,
   partitionRoutes,
@@ -59,7 +62,21 @@ const PENDING_CEILING: readonly string[] = [
   "POST /api/now/recommendations/:id/dismiss", // #5152
   "POST /api/now/recommendations/mute-class", // #5152
   "POST /api/holdback/enroll", // #4633 INV-10 deferral
-  "POST /api/attention/:id/dismiss", // ADR-0034 §8.4 feed dismiss
+];
+
+/**
+ * The ceiling for RETIREMENT_CANDIDATES (follow-up #5160). Shrink-only: each
+ * key leaves when #5160 retires it (→ RETIRED_*) or names its caller
+ * (→ MACHINE_*). Never add one.
+ */
+const RETIREMENT_CEILING: readonly string[] = [
+  "GET /api/agents/stream",
+  "GET /api/config/:section",
+  "GET /api/cycle/report/:cycleId",
+  "GET /api/metrics/instrumentation",
+  "GET /api/observability/config",
+  "GET /api/today/decision-queue",
+  "PATCH /api/dispatches/subagent/:sessionId/current-step",
 ];
 
 function row(method: string, path: string, consumers: string[] = []): RouteInventoryRow {
@@ -127,7 +144,7 @@ describe("rung 1 — every write route is in exactly one set (§9.1)", () => {
   });
 
   test("every set entry carries a non-empty reason (PENDING also a ref)", () => {
-    for (const [key, reason] of Object.entries({ ...MACHINE_WRITES, ...RETIRED_WRITES })) {
+    for (const [key, reason] of Object.entries({ ...MACHINE_WRITES, ...FEED_GRAMMAR_WRITES, ...RETIRED_WRITES })) {
       assert.ok(reason.trim().length > 0, `${key} has no reason`);
     }
     for (const [key, entry] of Object.entries(PENDING_CONTROL_WRITES)) {
@@ -138,6 +155,31 @@ describe("rung 1 — every write route is in exactly one set (§9.1)", () => {
   test("PENDING_CONTROL_WRITES is shrink-only: every key is within the frozen ceiling", () => {
     const over = Object.keys(PENDING_CONTROL_WRITES).filter((k) => !PENDING_CEILING.includes(k));
     assert.deepEqual(over, [], "PENDING_CONTROL_WRITES may only shrink — register a control instead");
+  });
+
+  test("RETIREMENT_CANDIDATES is shrink-only and every entry cites follow-up #5160", () => {
+    const over = Object.keys(RETIREMENT_CANDIDATES).filter((k) => !RETIREMENT_CEILING.includes(k));
+    assert.deepEqual(over, [], "RETIREMENT_CANDIDATES may only shrink — classify a new route instead");
+    for (const [key, reason] of Object.entries(RETIREMENT_CANDIDATES)) {
+      assert.match(reason, /#5160/, `${key} must cite follow-up #5160`);
+    }
+  });
+
+  test("FEED_GRAMMAR_WRITES is frozen to the §8.4 typed feed dismiss", () => {
+    assert.deepEqual(Object.keys(FEED_GRAMMAR_WRITES), ["POST /api/attention/:id/dismiss"]);
+    assert.match(FEED_GRAMMAR_WRITES["POST /api/attention/:id/dismiss"], /§8\.4/);
+  });
+
+  test("a route in RETIREMENT_CANDIDATES and MACHINE_WRITES at once is reported as multiply classified", () => {
+    const report = writeParity([row("PATCH", "/api/p")], [], {
+      machine: { "PATCH /api/p": "m" },
+      feed: {},
+      pending: {},
+      candidates: { "PATCH /api/p": "#5160", "GET /api/ignored-by-rung-1": "#5160" },
+      retired: {},
+    });
+    assert.deepEqual(report.multiplyClassified, [{ key: "PATCH /api/p", sets: ["MACHINE_WRITES", "RETIREMENT_CANDIDATES"] }]);
+    assert.deepEqual(report.stale, [], "a GET candidate is rung 4's business, never stale in rung 1");
   });
 
   test("§9.1's five retired writes are the RETIRED_WRITES set", () => {
@@ -180,7 +222,9 @@ describe("rung 1 — every write route is in exactly one set (§9.1)", () => {
     ] as unknown as OperatorActionEntry[];
     const report = writeParity(rows, registry, {
       machine: { "POST /api/a": "m", "POST /api/gone": "m" },
+      feed: {},
       pending: {},
+      candidates: {},
       retired: { "POST /api/kill": "r" },
     });
     assert.deepEqual(report.multiplyClassified, [{ key: "POST /api/a", sets: ["registry", "MACHINE_WRITES"] }]);
@@ -211,8 +255,18 @@ describe("rung 4 — every GET is in exactly one set (§9.4)", () => {
     }
   });
 
-  test("every HOMED_READS owning file exists and contains the path literal", () => {
-    assert.deepEqual(homedReadMisses(HOMED_READS, readRepoFile), []);
+  test("every HOMED_READS owning file is an inventory consumer, exists and contains the path literal", () => {
+    assert.deepEqual(homedReadMisses(HOMED_READS, ROWS, readRepoFile), []);
+  });
+
+  test("every HOMED_UNATTRIBUTED waiver is a homed GET the inventory genuinely cannot attribute", () => {
+    for (const [key, reason] of Object.entries(HOMED_UNATTRIBUTED)) {
+      assert.ok(key in HOMED_READS, `${key} is waived but not homed`);
+      const inv = ROWS.find((r) => routeKey(r) === key);
+      assert.ok(inv, `${key} is not in the inventory`);
+      assert.ok(!inv.consumers.includes(HOMED_READS[key]), `${key}'s home is now attributed — delete the waiver`);
+      assert.ok(reason.trim().length > 10, `${key} needs a real reason`);
+    }
   });
 
   test("every GET with an inventory dashboard consumer is homed, not machine-facing", () => {
@@ -248,15 +302,34 @@ describe("rung 4 — every GET is in exactly one set (§9.4)", () => {
     assert.ok(!m.test('useApi("/metrics/cost")'), "a prefix must not match a longer path");
   });
 
-  test("homedReadMisses reports a missing file and a file without the literal", () => {
+  test("homedReadMisses reports a missing file, a non-consumer and a file without the literal", () => {
+    const rows = [row("GET", "/api/a", ["f1.jsx"]), row("GET", "/api/b", ["f2.jsx"]), row("GET", "/api/c", [])];
     const misses = homedReadMisses(
-      { "GET /api/a": "f1.jsx", "GET /api/b": "f2.jsx" },
-      (file) => (file === "f2.jsx" ? 'useApi("/c")' : null),
+      { "GET /api/a": "f1.jsx", "GET /api/b": "f2.jsx", "GET /api/c": "f3.jsx" },
+      rows,
+      (file) => (file === "f1.jsx" ? null : 'useApi("/zzz")'),
+      {},
     );
     assert.deepEqual(misses, [
       { key: "GET /api/a", file: "f1.jsx", why: "missing-file" },
       { key: "GET /api/b", file: "f2.jsx", why: "no-literal" },
+      { key: "GET /api/c", file: "f3.jsx", why: "not-a-consumer" },
     ]);
+  });
+
+  test("a path literal that survives only in a doc comment, with the consumer gone, reddens the HOMED pin", () => {
+    // The review mutation: AlertsPanel's call renamed to /alertz while its
+    // header comment still says `/alerts`. The literal check alone would pass;
+    // the inventory no longer lists the file as a consumer, so the pin fails.
+    const source = '/** Reads `/alerts` for the panel. */\nconst a = useApi("/alertz");';
+    assert.ok(routeLiteralPattern("/api/alerts").test(source), "the comment does satisfy the literal check alone");
+    const misses = homedReadMisses(
+      { "GET /api/alerts": "AlertsPanel.jsx" },
+      [row("GET", "/api/alerts", [])],
+      () => source,
+      {},
+    );
+    assert.deepEqual(misses, [{ key: "GET /api/alerts", file: "AlertsPanel.jsx", why: "not-a-consumer" }]);
   });
 });
 

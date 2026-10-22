@@ -8,14 +8,16 @@
  *
  *   - Rung 1 (§9.1): every WRITE route is in exactly one of — the registry's
  *     `in-dashboard` routes (derived from `REGISTRY`, never listed here),
- *     {@link MACHINE_WRITES}, {@link RETIRED_WRITES} — plus the small,
- *     shrink-only {@link PENDING_CONTROL_WRITES} allowance.
+ *     {@link MACHINE_WRITES}, {@link FEED_GRAMMAR_WRITES}, {@link RETIRED_WRITES}
+ *     — plus the two shrink-only allowances {@link PENDING_CONTROL_WRITES} and
+ *     {@link RETIREMENT_CANDIDATES}.
  *   - Rung 2 (§9.2) is pinned by `classEntryCoverage` in `registry.ts`.
  *   - Rung 3 (§9.3): every playbook is a `class:` entry, is referenced by a
  *     registry action, or is in {@link DOCS_ONLY} with a reason.
  *   - Rung 4 (§9.4): every GET is in exactly one of {@link HOMED_READS}
- *     (route → owning dashboard file, which must contain the path literal),
- *     {@link MACHINE_READS}, {@link RETIRED_READS}.
+ *     (route → owning dashboard file: the inventory must list it as a
+ *     consumer, and it must contain the path literal), {@link MACHINE_READS},
+ *     {@link RETIRED_READS} — plus the shrink-only {@link RETIREMENT_CANDIDATES}.
  *
  * # One enumeration, two annotators
  *
@@ -37,10 +39,10 @@
  *   - A route with zero callers is retired: deleted from `src/api/` under
  *     ADR-0024 §3, and kept in RETIRED_* so it can never quietly return.
  *
- * A handful of machine entries carry "no in-repo caller found" in their reason:
- * they had zero callers at classification time but sit outside the eleven
- * reads / five writes §9 ratified for retirement, so #4638 records them rather
- * than widening the deletion. Each is a retirement candidate for a follow-up.
+ * Routes with zero callers that sit outside the eleven reads / five writes §9
+ * ratified for retirement are NOT machine-facing (MACHINE means a live
+ * non-dashboard caller): they live in {@link RETIREMENT_CANDIDATES}, a
+ * shrink-only set whose follow-up is #5160.
  *
  * Pure data + pure helpers: no Express, no Redis. The only I/O is
  * {@link loadRouteInventory}'s read of the committed inventory file.
@@ -134,8 +136,6 @@ export const MACHINE_WRITES: Readonly<Record<string, string>> = Object.freeze({
   "POST /api/design-concepts/exempt-log": ".github/workflows/design-concept-comment.yml — CI gate record",
   "POST /api/design-concepts": "hydra-grill via scripts/autopilot/grill-artifact.sh — artifact write",
   "POST /api/dispatches/subagent": "SessionStart / SubagentTool hooks + decide.py — dispatch registration",
-  "PATCH /api/dispatches/subagent/:sessionId/current-step":
-    "dispatch-registry step stamp; no in-repo caller found at #4638 classification — retirement candidate (outside the five writes §9.1 retires)",
   "POST /api/events/publish": "hydra-digest + hydra-target-build playbooks — event-bus publish",
   "POST /api/holdback/check": "hydra-qa playbook — Outcome Holdback check",
   "POST /api/holdback/revert-failed": "hydra-qa playbook — Outcome Holdback revert",
@@ -162,6 +162,18 @@ export const RETIRED_WRITES: Readonly<Record<string, string>> = Object.freeze({
   "DELETE /api/env/:project/:key": "zero callers; 401 on every request on this host",
   "POST /api/research/start": "a disabled no-op responder since #342 — research is the /hydra-target-research skill",
   "POST /api/calibration/outcomes/sync": "zero callers — a pass-through proxy to the Target",
+});
+
+/**
+ * FROZEN: write routes the Today feed's own grammar fires — not registry
+ * Actions by design (ADR-0034 §8.3/§8.4). The typed one-click dismiss
+ * (*Not a problem* · *Handled elsewhere* · *Later*) is part of every feed row;
+ * it is calibration input (§8.4), not a recommended action, so it never gets a
+ * `control:<page>/<name>` entry. The parity test pins this set's exact keys.
+ */
+export const FEED_GRAMMAR_WRITES: Readonly<Record<string, string>> = Object.freeze({
+  "POST /api/attention/:id/dismiss":
+    "ADR-0034 §8.4 typed feed dismiss — dashboard/src/components/pages/today/AttentionFeed.jsx renders it on every feed row",
 });
 
 /** One human-shaped write whose dashboard control exists but is not yet registry-keyed. */
@@ -193,11 +205,6 @@ export const PENDING_CONTROL_WRITES: Readonly<Record<string, PendingControlWrite
     ref: "#4633 INV-10 deferral",
     reason:
       "failed-state 'Enrol now' control is page-local in dashboard/src/components/pages/work/HoldbackEnrolState.jsx; registering it needs a body-template mechanism in ActionAffordance first (also called by the hydra-qa playbook)",
-  },
-  "POST /api/attention/:id/dismiss": {
-    ref: "ADR-0034 §8.4 (no follow-up filed)",
-    reason:
-      "the typed one-click dismiss on every Today feed row (dashboard/src/components/pages/today/AttentionFeed.jsx) — feed grammar, not a registry Action; no control:<page>/<name> key exists for it yet",
   },
 });
 
@@ -235,6 +242,7 @@ export const HOMED_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /api/autopilot/class-state": "dashboard/src/components/pages/work/ClassStatePanel.jsx",
   "GET /api/autopilot/class-stats": "dashboard/src/components/pages/builder/ClassYield.jsx",
   "GET /api/design-concepts/snapshots": "dashboard/src/components/pages/builder/DesignConceptGreenLight.jsx",
+  // Consumer check waived via HOMED_UNATTRIBUTED (the inventory cannot attribute it).
   "GET /api/design-concepts": "dashboard/src/components/pages/work/DesignConceptQueue.jsx",
   "GET /api/design-concepts/:anchorRef": "dashboard/src/components/pages/work/DesignConceptQueue.jsx",
   "GET /api/design-concepts/:anchorRef/approve-preconditions": "dashboard/src/components/pages/work/DesignConceptQueue.jsx",
@@ -242,9 +250,7 @@ export const HOMED_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /api/dispatches/:dispatchId/transcript": "dashboard/src/pages/DispatchTranscript.jsx",
   "GET /api/explore/friction": "dashboard/src/components/pages/runs/FrictionPanel.jsx",
   "GET /api/explore/behavior": "dashboard/src/components/pages/runs/BehaviorGallery.jsx",
-  // The inventory records no consumer for this one: LessonsTab builds the
-  // path in a helper rather than as a call's literal first argument. The
-  // literal is still in the file, which is what this pin checks.
+  // Consumer check waived via HOMED_UNATTRIBUTED (the inventory cannot attribute it).
   "GET /api/explore/lessons": "dashboard/src/components/pages/explore/LessonsTab.jsx",
   "GET /api/health": "dashboard/src/pages/Health.jsx",
   "GET /api/health/deep": "dashboard/src/pages/Health.jsx",
@@ -283,17 +289,11 @@ export const HOMED_READS: Readonly<Record<string, string>> = Object.freeze({
 
 /** GETs with no dashboard consumer but a live non-dashboard caller. Value = the caller. */
 export const MACHINE_READS: Readonly<Record<string, string>> = Object.freeze({
-  "GET /api/agents/stream":
-    "no in-repo caller found at #4638 classification (decide.py only stamps the branch a stream view would scope by) — retirement candidate (outside the eleven reads §9.4 retires)",
   "GET /api/autopilot/emergency-brake": "scripts/autopilot/decide.py + bin/hydra — brake gate read",
   "GET /api/autopilot/slot-events": "hydra-autopilot ops reference — slot-event diagnostics",
-  "GET /api/config/:section":
-    "no in-repo caller found at #4638 classification (skills read single files via /config/:section/:name) — retirement candidate (outside the eleven reads §9.4 retires)",
   "GET /api/config/:section/:name": "agent skills (hydra-architect, hydra-discover, hydra-research, hydra-target-build)",
   "GET /api/cycle/status": "bin/hydra + scripts/hydra-watchdog.sh",
   "GET /api/cycle/history": "scripts/autopilot/dispatch.sh + reap.py + bin/hydra",
-  "GET /api/cycle/report/:cycleId":
-    "no in-repo caller found at #4638 classification — retirement candidate (outside the eleven reads §9.4 retires)",
   "GET /api/design-concepts/exempt-log": ".github/workflows/design-concept-comment.yml",
   "GET /api/design-concepts/:anchorRef/resolve": "hydra-qa playbook",
   "GET /api/events/:stream": "hydra-digest + hydra-target-build playbooks",
@@ -301,11 +301,7 @@ export const MACHINE_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /api/learning/context-trace": "hydra-dev child flow + hydra-target-build playbooks",
   "GET /api/metrics": "hydra-discover + hydra-autopilot phase-6 ops + hydra-target-build merge flow",
   "GET /api/metrics/cascade-routing": "scripts/autopilot/dispatch.sh + reap.py + reflection-deposit.sh",
-  "GET /api/metrics/instrumentation":
-    "no in-repo caller found at #4638 classification — retirement candidate (outside the eleven reads §9.4 retires)",
   "GET /api/metrics/session-tokens": "scripts/autopilot/reap.py",
-  "GET /api/observability/config":
-    "no in-repo caller found at #4638 classification — retirement candidate (outside the eleven reads §9.4 retires)",
   "GET /api/memory/:agent": "hydra-dev / hydra-qa / hydra-target-build playbooks",
   "GET /api/learning/ineffective-rules": "the architecture-review direction doc names it as the operator read for promoted-rule effectiveness",
   "GET /api/recommendations": "bin/hydra (documented public endpoint)",
@@ -314,8 +310,6 @@ export const MACHINE_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /api/scout/dispatches": "hydra-tool-scout playbook",
   "GET /api/scout/alert-plan": "hydra-tool-scout playbook + decide_selectors/scout.py",
   "GET /api/tier": "hydra-dev / hydra-epic-sprint / hydra-architecture-scan playbooks",
-  "GET /api/today/decision-queue":
-    "no in-repo caller found at #4638 classification (the overnight decision queue was retired by #4445) — retirement candidate (outside the eleven reads §9.4 retires)",
   "GET /api/usage/by-issue": "scripts/autopilot/reap.py + scripts/glm-beachhead-report.sh",
 });
 
@@ -336,6 +330,34 @@ export const RETIRED_READS: Readonly<Record<string, string>> = Object.freeze({
     "zero callers — route only; projectReflectionHealth stays for GET /api/health/deep",
   "GET /api/now/alerts": "zero callers — /health reads GET /api/alerts",
   "GET /api/metrics/abandonment": "zero callers",
+});
+
+/**
+ * SHRINK-ONLY: routes (read or write) with ZERO callers found at #4638
+ * classification that sit outside the eleven reads / five writes §9 ratified
+ * for retirement. Follow-up #5160 decides each: delete it (→ RETIRED_*) or
+ * name the caller (→ MACHINE_*). The parity test pins these keys to a ceiling.
+ */
+export const RETIREMENT_CANDIDATES: Readonly<Record<string, string>> = Object.freeze({
+  "GET /api/agents/stream": "#5160 — no caller; decide.py only stamps the branch a stream view would scope by",
+  "GET /api/config/:section": "#5160 — no caller; skills read single files via /config/:section/:name",
+  "GET /api/cycle/report/:cycleId": "#5160 — no caller",
+  "GET /api/metrics/instrumentation": "#5160 — no caller",
+  "GET /api/observability/config": "#5160 — no caller",
+  "GET /api/today/decision-queue": "#5160 — no caller; the overnight decision queue was retired by #4445",
+  "PATCH /api/dispatches/subagent/:sessionId/current-step": "#5160 — no caller",
+});
+
+/**
+ * HOMED_READS whose home the inventory cannot attribute as a consumer (the
+ * call's first argument is not a path literal), so the consumer check is
+ * waived and only the path-literal check applies. Value = why.
+ */
+export const HOMED_UNATTRIBUTED: Readonly<Record<string, string>> = Object.freeze({
+  "GET /api/explore/lessons":
+    "LessonsTab builds the path in a helper (a ternary over the query string), so the inventory's call-literal scan records no consumer",
+  "GET /api/design-concepts":
+    "DesignConceptQueue picks the paginated list path with a ternary (all vs status=draft) before the call, so the inventory's call-literal scan records no consumer",
 });
 
 // ---------------------------------------------------------------------------
@@ -464,13 +486,23 @@ export function partitionRoutes(
   return report;
 }
 
+/** RETIREMENT_CANDIDATES spans both rungs: each rung sees only its own methods. */
+function writeKeys(set: Readonly<Record<string, unknown>>): Set<string> {
+  return new Set(Object.keys(set).filter((key) => isWriteMethod(key.slice(0, key.indexOf(" ")))));
+}
+function readKeys(set: Readonly<Record<string, unknown>>): Set<string> {
+  return new Set(Object.keys(set).filter((key) => !isWriteMethod(key.slice(0, key.indexOf(" ")))));
+}
+
 /** Rung 1 over the shipped sets. */
 export function writeParity(
   rows: readonly RouteInventoryRow[],
   registry: readonly OperatorActionEntry[],
   sets: {
     machine?: Readonly<Record<string, unknown>>;
+    feed?: Readonly<Record<string, unknown>>;
     pending?: Readonly<Record<string, unknown>>;
+    candidates?: Readonly<Record<string, unknown>>;
     retired?: Readonly<Record<string, unknown>>;
   } = {},
 ): PartitionReport & { dangling: string[] } {
@@ -481,7 +513,9 @@ export function writeParity(
     {
       registry: keys,
       MACHINE_WRITES: new Set(Object.keys(sets.machine ?? MACHINE_WRITES)),
+      FEED_GRAMMAR_WRITES: new Set(Object.keys(sets.feed ?? FEED_GRAMMAR_WRITES)),
       PENDING_CONTROL_WRITES: new Set(Object.keys(sets.pending ?? PENDING_CONTROL_WRITES)),
+      RETIREMENT_CANDIDATES: writeKeys(sets.candidates ?? RETIREMENT_CANDIDATES),
     },
     new Set(Object.keys(sets.retired ?? RETIRED_WRITES)),
   );
@@ -494,6 +528,7 @@ export function readParity(
   sets: {
     homed?: Readonly<Record<string, unknown>>;
     machine?: Readonly<Record<string, unknown>>;
+    candidates?: Readonly<Record<string, unknown>>;
     retired?: Readonly<Record<string, unknown>>;
   } = {},
 ): PartitionReport {
@@ -503,6 +538,7 @@ export function readParity(
     {
       HOMED_READS: new Set(Object.keys(sets.homed ?? HOMED_READS)),
       MACHINE_READS: new Set(Object.keys(sets.machine ?? MACHINE_READS)),
+      RETIREMENT_CANDIDATES: readKeys(sets.candidates ?? RETIREMENT_CANDIDATES),
     },
     new Set(Object.keys(sets.retired ?? RETIRED_READS)),
   );
@@ -527,16 +563,33 @@ export function routeLiteralPattern(path: string): RegExp {
   return new RegExp(`["'\`](?:\\$\\{API_BASE\\})?(?:/api)?/${body}(?=["'\`?])`);
 }
 
-/** HOMED_READS entries whose owning file is missing or lacks the path literal. */
+/** Why a HOMED_READS entry fails its pin. */
+export type HomedMiss = "missing-file" | "not-a-consumer" | "no-literal";
+
+/**
+ * HOMED_READS entries that fail their pin. Two guards, in order:
+ *   1. the inventory row must list the home file in `consumers` (waived only
+ *      for an explicit {@link HOMED_UNATTRIBUTED} entry) — a path literal in a
+ *      doc comment can never satisfy this, because the inventory only counts
+ *      a call's literal first argument;
+ *   2. the file must exist and contain the path literal.
+ */
 export function homedReadMisses(
   homed: Readonly<Record<string, string>>,
+  rows: readonly RouteInventoryRow[],
   readSource: (file: string) => string | null,
-): { key: string; file: string; why: "missing-file" | "no-literal" }[] {
-  const out: { key: string; file: string; why: "missing-file" | "no-literal" }[] = [];
+  unattributed: Readonly<Record<string, string>> = HOMED_UNATTRIBUTED,
+): { key: string; file: string; why: HomedMiss }[] {
+  const consumersByKey = new Map(rows.map((row) => [routeKey(row), row.consumers]));
+  const out: { key: string; file: string; why: HomedMiss }[] = [];
   for (const [key, file] of Object.entries(homed)) {
     const source = readSource(file);
     if (source === null) {
       out.push({ key, file, why: "missing-file" });
+      continue;
+    }
+    if (!(key in unattributed) && !(consumersByKey.get(key) ?? []).includes(file)) {
+      out.push({ key, file, why: "not-a-consumer" });
       continue;
     }
     const path = key.slice(key.indexOf(" ") + 1);
