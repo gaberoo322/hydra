@@ -1495,3 +1495,84 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     assert.equal(row.glmEligible, false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #4629 (design-concept 821e48ed INV-6) — row facts for the live
+// promote checklist: hasScopeSection via the ONE shared parser, and blockers
+// resolved for every operator lane against prospective (post-promote) rows.
+// ---------------------------------------------------------------------------
+
+describe("/work live preconditions — the row facts (issue #4629)", () => {
+  test("toWorkQueueRow carries hasScopeSection from the shared parser", () => {
+    const scoped = toWorkQueueRow(issue({ labels: ["needs-triage"] }), new Set(), {
+      glmPartitionActive: false,
+    });
+    const unscoped = toWorkQueueRow(
+      issue({ labels: ["needs-triage"], body: "No scope section here." }),
+      new Set(),
+      { glmPartitionActive: false },
+    );
+    assert.equal(scoped!.hasScopeSection, true);
+    assert.equal(unscoped!.hasScopeSection, false);
+    // The row fact and the promote gate's refusal agree — one parser.
+    assert.equal(scoped!.hasScopeSection, hasScopeSection(issue().body));
+  });
+
+  test("GET /autopilot/work-queue resolves blockers ONCE over prospective rows for every operator lane", async () => {
+    const calls: any[][] = [];
+    const router = createAutopilotBoardRouter({
+      readOpenIssues: async () => ({
+        ok: true,
+        rows: [
+          issue({ number: 1, labels: ["needs-triage"], body: "## Files in scope\n\n- `fixture/a.ts`\n\nBlocked by #90" }),
+          issue({ number: 2, labels: ["ready-for-agent"], body: "Depends on #91" }),
+          issue({ number: 3, labels: ["in-progress"], body: "Blocked by #92" }), // agent-owned: not resolved
+          issue({ number: 4, labels: ["blocked"], body: "Blocked by #93" }),
+        ],
+      }),
+      resolveOpenBlockers: async (rows: any) => {
+        calls.push(rows);
+        return new Set([90, 93]);
+      },
+      glmDrainerLiveness: async () => true,
+    });
+    const handler = findHandler(router, "GET", "/autopilot/work-queue");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+
+    assert.equal(calls.length, 1, "one batched lookup");
+    const resolved = calls[0]!;
+    assert.deepEqual(resolved.map((r: any) => r.number).sort(), [1, 2, 4], "operator-lane rows only");
+    for (const row of resolved) {
+      assert.ok(row.labels.includes("ready-for-agent"), `#${row.number} resolved as it would be post-promote`);
+      assert.equal(
+        row.labels.filter((l: string) => l === "ready-for-agent").length,
+        1,
+        "an already-ready row is not double-labelled",
+      );
+    }
+    const byNumber = new Map(res._body.items.map((r: any) => [r.number, r]));
+    assert.deepEqual((byNumber.get(1) as any).openBlockers, [90], "a needs-triage row surfaces its open blocker");
+    assert.deepEqual((byNumber.get(4) as any).openBlockers, [93], "a blocked row surfaces its open blocker");
+    assert.deepEqual((byNumber.get(2) as any).openBlockers, [], "a closed blocker never surfaces");
+    assert.equal((byNumber.get(1) as any).hasScopeSection, true);
+    assert.equal((byNumber.get(2) as any).hasScopeSection, false);
+    // The served labels are the REAL ones — the prospective label never leaks.
+    assert.deepEqual((byNumber.get(1) as any).labels, ["needs-triage"]);
+  });
+
+  test("a rejecting blocker resolver still degrades the queue (fail-safe unchanged)", async () => {
+    const router = createAutopilotBoardRouter({
+      readOpenIssues: async () => ({ ok: true, rows: [issue({ labels: ["needs-triage"] })] }),
+      resolveOpenBlockers: async () => {
+        throw new Error("gh down");
+      },
+      glmDrainerLiveness: async () => false,
+    });
+    const handler = findHandler(router, "GET", "/autopilot/work-queue");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+    assert.equal(res._body.sourcesOk, false);
+    assert.deepEqual(res._body.items, []);
+  });
+});

@@ -57,6 +57,11 @@ import {
 } from "../dashboard/src/lib/delayed-commit.ts";
 import type { BucketSummary } from "../dashboard/src/lib/attention-buckets.ts";
 import { deriveFeedBuckets, recordDismissOutcome } from "../dashboard/src/lib/attention-buckets.ts";
+import {
+  PRECONDITION_GLYPH,
+  anyFailed,
+  resolvePreconditions,
+} from "../dashboard/src/lib/preconditions.ts";
 
 const AFFORDANCE = "../dashboard/src/components/ActionAffordance.jsx";
 const FEED = "../dashboard/src/components/pages/today/AttentionFeed.jsx";
@@ -686,14 +691,16 @@ describe("the dismiss + immediate triggers bind to the feed-level host", () => {
 
   test("every trigger derives its disabled state from triggerDisabled", async () => {
     const aff = await readSource(AFFORDANCE);
+    // Issue #4629 (INV-4): every trigger ALSO ORs in `blocked` (any ✗
+    // precondition line) — the in-flight reads below are unchanged.
     assert.ok(
-      aff.includes("disabled={triggerDisabled(undoHost.inFlight.has(windowId), undoHost.windows, windowId)}"),
+      aff.includes("disabled={blocked || triggerDisabled(undoHost.inFlight.has(windowId), undoHost.windows, windowId)}"),
       "immediate in-dashboard button reads the HOST's in-flight set (QA round 6)",
     );
     assert.ok(!aff.includes("triggerDisabled(busy,"), "no trigger reads a row-local busy flag (QA round 6)");
     assert.ok(!aff.includes("disabled={busy}"), "no confirm-first button reads ONLY its row-local busy flag (QA round 7)");
-    assert.ok(aff.includes("disabled={busy || inFlight}"), "the confirm-first Confirm button reads the HOST's in-flight set (QA round 7)");
-    assert.ok(aff.includes("onClick={() => setArmed(true)}\n            disabled={inFlight}"), "the confirm-first arm button reads the HOST's in-flight set (QA round 7)");
+    assert.ok(aff.includes("disabled={busy || inFlight || blocked}"), "the confirm-first Confirm button reads the HOST's in-flight set (QA round 7)");
+    assert.ok(aff.includes("onClick={() => setArmed(true)}\n            disabled={inFlight || blocked}"), "the confirm-first arm button reads the HOST's in-flight set (QA round 7)");
     assert.ok(aff.includes("track(windowId, fireRequest)"), "the immediate fire runs through the host tracker");
     assert.ok(aff.includes("runTracked(inFlightTracker, id, fn)"), "the host's track wraps the tested runTracked");
     assert.ok(aff.includes("createInFlightTracker(setInFlight)"), "the host owns the one in-flight tracker");
@@ -829,5 +836,203 @@ describe("dismiss banner — per-item outcomes (recordDismissOutcome)", () => {
     assert.ok(src.includes("const reread = await refreshChecked();"), "dismiss verifies its re-read");
     assert.ok(src.includes("recordDismissOutcome(prev, item,"), "outcomes fold through the tested helper");
     assert.ok(!src.includes("setDismissError(null)"), "no blanket clear on each attempt");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9 — the live precondition checklist (issue #4629, design-concept 821e48ed
+//     INV-4): lib/preconditions.ts driven behaviourally, plus the
+//     affordance / page wiring pins (INV-7, INV-9, INV-10, INV-12)
+// ---------------------------------------------------------------------------
+
+const BOARD_STATE = "../dashboard/src/components/pages/work/BoardState.jsx";
+const HEALTH = "../dashboard/src/pages/Health.jsx";
+
+describe("resolvePreconditions / anyFailed — the tri-state checklist rule (issue #4629)", () => {
+  test("a prose precondition renders unverified (☐) and never disables", () => {
+    const lines = resolvePreconditions(["confirm the reason no longer applies"], {});
+    assert.deepEqual(lines, [{ text: "confirm the reason no longer applies", state: "unverified" }]);
+    assert.equal(anyFailed(lines), false);
+    assert.equal(PRECONDITION_GLYPH[lines[0]!.state], "☐");
+  });
+
+  test("a {check} line is ok (✓) only when its verdict is literally true", () => {
+    const lines = resolvePreconditions([{ text: "issue is open", check: "issue-open" }], { "issue-open": true });
+    assert.deepEqual(lines, [{ text: "issue is open", check: "issue-open", state: "ok" }]);
+    assert.equal(anyFailed(lines), false);
+    assert.equal(PRECONDITION_GLYPH.ok, "✓");
+  });
+
+  test("a {check} line is fail (✗) when its verdict is false", () => {
+    const lines = resolvePreconditions([{ text: "no blocker", check: "no-open-blocker" }], { "no-open-blocker": false });
+    assert.equal(lines[0]!.state, "fail");
+    assert.equal(anyFailed(lines), true);
+    assert.equal(PRECONDITION_GLYPH.fail, "✗");
+  });
+
+  test("a {check} line with NO verdict fails closed — a forgotten evaluation can never enable the button", () => {
+    assert.equal(resolvePreconditions([{ text: "t", check: "brake-off" }], {})[0]!.state, "fail");
+    assert.equal(resolvePreconditions([{ text: "t", check: "brake-off" }], undefined)[0]!.state, "fail");
+    assert.equal(resolvePreconditions([{ text: "t", check: "brake-off" }], null)[0]!.state, "fail");
+  });
+
+  test("a truthy non-boolean verdict and a prototype-inherited key both fail closed", () => {
+    const loose: any = { "brake-off": 1 };
+    assert.equal(resolvePreconditions([{ text: "t", check: "brake-off" }], loose)[0]!.state, "fail");
+    assert.equal(resolvePreconditions([{ text: "t", check: "toString" }], {})[0]!.state, "fail");
+  });
+
+  test("a malformed line (object without a check) fails closed with its text, never dropped", () => {
+    const lines = resolvePreconditions([{ text: "half-typed" } as any], {});
+    assert.deepEqual(lines, [{ text: "half-typed", state: "fail" }]);
+  });
+
+  test("order is preserved and one ✗ among ✓/☐ lines disables the trigger", () => {
+    const lines = resolvePreconditions(
+      [
+        { text: "a", check: "issue-open" },
+        "prose",
+        { text: "b", check: "has-scope-section" },
+      ],
+      { "issue-open": true, "has-scope-section": false },
+    );
+    assert.deepEqual(lines.map((l) => l.state), ["ok", "unverified", "fail"]);
+    assert.equal(anyFailed(lines), true);
+  });
+
+  test("a verdict flipping to false on a refresh flips the same line to ✗ (an armed Confirm disables)", () => {
+    const pre = [{ text: "the brake is off", check: "brake-off" }];
+    assert.equal(anyFailed(resolvePreconditions(pre, { "brake-off": true })), false);
+    assert.equal(anyFailed(resolvePreconditions(pre, { "brake-off": false })), true);
+  });
+
+  test("no preconditions → no lines, nothing disabled; a non-array is treated as empty", () => {
+    assert.deepEqual(resolvePreconditions([], {}), []);
+    assert.deepEqual(resolvePreconditions(undefined, {}), []);
+    assert.equal(anyFailed([]), false);
+  });
+});
+
+describe("ActionAffordance resolves the checklist and disables on any ✗ (issue #4629)", () => {
+  test("the checklist is resolved through lib/preconditions.ts and gates every trigger", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes('from "../lib/preconditions.ts"'), "the rule lives in the tested leaf");
+    assert.ok(aff.includes("const lines = resolvePreconditions(action.preconditions, verdicts);"));
+    assert.ok(aff.includes("const blocked = anyFailed(lines);"));
+    // Arm, Confirm and the immediate fire each OR in `blocked`.
+    assert.equal((aff.match(/disabled=\{[^}]*\bblocked\b/g) ?? []).length, 3);
+  });
+
+  test("the live checklist + consequence render only for a page control (verdicts supplied)", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes("if (verdicts === undefined) return controls;"), "the feed keeps its own unchecked list");
+    assert.ok(aff.includes('data-testid={tid("-preconditions")}'));
+    assert.ok(aff.includes("data-state={line.state}"));
+    assert.ok(aff.includes("{PRECONDITION_GLYPH[line.state]} {line.text}"));
+    assert.ok(aff.includes('data-testid={tid("-consequence")}'));
+    const feed = await readSource(FEED);
+    assert.ok(!feed.includes("verdicts="), "the feed never hands the affordance a verdict table");
+  });
+
+  test("the affordance derives <testId>-arm / -confirm-yes / -confirm-no from its testId prop", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes("const tid = (suffix) => (testId ? `${testId}${suffix}` : undefined);"));
+    for (const suffix of ["-arm", "-confirm-yes", "-confirm-no", "-result"]) {
+      assert.ok(aff.includes(`data-testid={tid("${suffix}")}`), `derives ${suffix}`);
+    }
+    assert.ok(aff.includes('data-testid={tid("")}'), "the immediate button carries the bare testId");
+  });
+
+  test("a row's issue number joins the window id so two rows never share a window", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.match(aff, /const windowId = `action:\$\{action\.method\} \$\{action\.route\}\$\{\n?\s*context\?\.number/);
+  });
+});
+
+describe("IN_DASHBOARD_BODY builders over the closed context (issue #4629 INV-7)", () => {
+  test("values are static bodies or (context) => body builders, resolved by bodyFor(method, route, context)", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes("function bodyFor(method, route, context) {"));
+    assert.ok(aff.includes('return typeof body === "function" ? body(context ?? {}) : body;'));
+    const map = aff.slice(aff.indexOf("const IN_DASHBOARD_BODY = {"), aff.indexOf("\n};", aff.indexOf("const IN_DASHBOARD_BODY = {")));
+    assert.ok(map.includes('"POST /autopilot/paused": (context) => ({ paused: context.paused ?? false }),'), "no context → the feed's {paused:false}");
+    assert.ok(map.includes('"POST /autopilot/board/promote": (context) => ({ issue: context.number, confirm: true }),'));
+    assert.ok(map.includes('"POST /autopilot/board/relabel": (context) => ({ issue: context.number, label: context.label }),'));
+    assert.ok(map.includes('"POST /autopilot/board/close": (context) => ({ issue: context.number }),'));
+    assert.ok(map.includes('"POST /autopilot/board/reopen": (context) => ({ issue: context.number }),'));
+    assert.ok(map.includes('context.engaged ? { engaged: true, engagedBy: "health-page" } : { engaged: false },'));
+    // The builders read only the closed context — no other field name.
+    const fields = new Set(Array.from(map.matchAll(/context\.(\w+)/g), (m) => m[1]));
+    for (const f of fields) assert.ok(["number", "label", "paused", "engaged"].includes(f!), `context.${f} is outside the closed context`);
+  });
+});
+
+describe("result objects are honoured — a refusal never renders ✓ (issue #4629 INV-9)", () => {
+  test("ok === false renders ✗ <label> refused — <reason>: <detail>; verified renders the observed state", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const fn = aff.slice(aff.indexOf("function resultFromResponse("), aff.indexOf("function InDashboardAffordance("));
+    const refusedAt = fn.indexOf("if (res?.ok === false) {");
+    const verifiedAt = fn.indexOf("if (res?.verified) {");
+    assert.ok(refusedAt > 0 && verifiedAt > refusedAt, "the refusal check runs before any ✓ branch");
+    const refusal = fn.slice(refusedAt, verifiedAt);
+    assert.ok(refusal.includes("ok: false,"));
+    assert.ok(refusal.includes("refused — "));
+    assert.ok(!refusal.includes("✓"), "a refusal branch can never produce a ✓ line");
+    assert.ok(fn.includes("state ${res.verified.state}, labels: ${labels || \"none\"}"));
+    // The response is awaited, then the caller's re-read, then the result.
+    const fire = aff.slice(aff.indexOf("const fireRequest = useCallback("), aff.indexOf("const track = undoHost?.track;"));
+    const reqAt = fire.indexOf("const res = await apiFetch(");
+    const rereadAt = fire.indexOf("const reread = await onFired?.();");
+    const nextAt = fire.indexOf("resultFromResponse(action, res, reread, context)");
+    assert.ok(reqAt > 0 && rereadAt > reqAt && nextAt > rereadAt, "request → onFired re-read → result, in that order");
+    assert.ok(fire.includes("onResult?.(next);"), "every outcome is lifted");
+  });
+});
+
+describe("pages read the registry once and host their own undo windows (issue #4629 INV-8/INV-10/INV-12)", () => {
+  test("useOperatorActions is one useApi('/operator-actions') read with no poll", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes('const { data, error, loading } = useApi("/operator-actions");'));
+    assert.ok(!/useApi\("\/operator-actions",/.test(aff), "no poll option");
+  });
+
+  test("a not-ready registry or a missing key renders DISABLED with the literal reason, never a fallback label", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes('const REGISTRY_UNAVAILABLE = "operator-action registry unavailable";'));
+    const wrapper = aff.slice(aff.indexOf("export function ControlAffordance("));
+    assert.ok(wrapper.includes("const entry = registry.ready ? registry.byKey.get(controlKey) : undefined;"));
+    assert.ok(wrapper.includes("disabled"));
+    assert.ok(wrapper.includes("{REGISTRY_UNAVAILABLE}"));
+    assert.ok(wrapper.includes("action={entry.recommended}"), "pages render only the recommended action");
+  });
+
+  for (const page of [BOARD_STATE, HEALTH]) {
+    test(`${page} reads the registry once, hosts the undo windows, and renders ControlAffordance`, async () => {
+      const src = await readSource(page);
+      assert.equal((src.match(/useOperatorActions\(\)/g) ?? []).length, 1, "one registry read per page");
+      assert.ok(src.includes("const undoHost = useUndoWindowHost();"));
+      assert.ok(src.includes("<UndoWindowContext.Provider value={undoHost}>"));
+      assert.ok(src.includes("<UndoToastStack windows={undoHost.windows} onUndo={undoHost.undo} />"));
+      assert.ok(src.includes("<ControlAffordance"));
+      assert.ok(!src.includes("apiFetch("), "no page-level write fetch survives");
+    });
+  }
+
+  test("the relabel select is the picker only — it never fires on change; its value becomes context.label", async () => {
+    const src = await readSource(BOARD_STATE);
+    const select = src.slice(src.indexOf('data-testid="work-relabel-select"'), src.indexOf("</select>"));
+    assert.ok(select.includes("setRelabelTargets("), "choosing only records the target");
+    assert.ok(!select.includes("/autopilot/board/relabel"), "no write fires from the select");
+    assert.ok(src.includes("context={{ number: row.number, label: relabelTargets[row.number] }}"));
+    assert.ok(src.includes('"relabel-target-chosen": RELABEL_TARGETS.includes(relabelTarget),'));
+    assert.ok(src.includes('controlKey="control:work/reopen"'));
+    assert.ok(src.includes("verdicts={reopenVerdicts(reopenNumber)}"), "the reopen input feeds issue-number-entered");
+  });
+
+  test("the promote verdicts read the server-computed row facts, never a client-side body parse", async () => {
+    const src = await readSource(BOARD_STATE);
+    assert.ok(src.includes('"has-scope-section": row.hasScopeSection === true,'));
+    assert.ok(src.includes('"no-open-blocker": Array.isArray(row.openBlockers) && row.openBlockers.length === 0,'));
+    assert.ok(!src.includes("Files in scope"), "no second scope parser in the dashboard");
   });
 });
