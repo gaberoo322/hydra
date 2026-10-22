@@ -3,6 +3,7 @@ import { HitlGrillLane } from "../components/pages/work/HitlGrillLane.jsx";
 import { AnchorRationale } from "../components/pages/work/AnchorRationale.jsx";
 import { DesignConceptQueue } from "../components/pages/work/DesignConceptQueue.jsx";
 import { HoldbackEnrolState } from "../components/pages/work/HoldbackEnrolState.jsx";
+import { ClassStatePanel } from "../components/pages/work/ClassStatePanel.jsx";
 
 /**
  * Dashboard v3 — `/work` page (issue #4010, ADR-0034 §2; slice "epsilon" of
@@ -40,6 +41,7 @@ export default function Work() {
           Outcome Holdback enrol state (ADR-0034 §9.4 /work homes). */}
       <DesignConceptQueue />
       <HoldbackEnrolState />
+      <ClassStatePanel />
     </div>
   );
 }
