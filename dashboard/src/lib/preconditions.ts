@@ -77,3 +77,36 @@ export function resolvePreconditions(
 export function anyFailed(lines: readonly ResolvedPrecondition[]): boolean {
   return lines.some((line) => line.state === "fail");
 }
+
+/**
+ * Control-route resolution (issue #4631 review follow-up; ADR-0034 §7). A
+ * `control:` registry route may carry the one admitted placeholder (`{id}`,
+ * BUCKET_CONTEXT.control); the page resolves it through `resolveRoute` before
+ * the action reaches ActionAffordance, which never substitutes. This is the
+ * pure core of ControlAffordance's resolution, and it is the runtime guard
+ * that NO route still carrying `{` is ever handed to the affordance —
+ * whether or not a resolver was passed (a page that renders a templated
+ * control without one gets a disabled control, never a POST against a
+ * literal `{id}` segment). A resolver that throws, or returns a non-string,
+ * fails the same way. On failure, `error` is the reason the caller renders
+ * (disabled, ✗) and logs.
+ */
+export type ControlActionResolution<A> = { action: A; error?: undefined } | { action?: undefined; error: string };
+
+export function resolveControlAction<A extends { route?: unknown }>(
+  action: A,
+  resolveRoute?: (route: string) => string,
+): ControlActionResolution<A> {
+  let route: unknown = action.route;
+  if (resolveRoute !== undefined && typeof route === "string") {
+    try {
+      route = resolveRoute(route);
+    } catch (err) {
+      return { error: `route did not resolve: ${(err as Error)?.message ?? String(err)}` };
+    }
+  }
+  if (route === undefined) return { action };
+  if (typeof route !== "string") return { error: "route did not resolve: resolver returned a non-string" };
+  if (route.includes("{")) return { error: `route still carries a placeholder: ${route}` };
+  return { action: route === action.route ? action : { ...action, route } };
+}
