@@ -256,10 +256,10 @@
       "homes": [
         "/health",
         "/",
+        "/builder",
         "/runs",
         "/work",
-        "/now",
-        "/builder"
+        "/now"
       ],
       "route": "/docs/area/src-redis",
       "source": {
@@ -505,10 +505,10 @@
       "homes": [
         "/health",
         "/",
+        "/builder",
         "/runs",
         "/work",
-        "/now",
-        "/builder"
+        "/now"
       ],
       "route": "/docs/area/src-schemas",
       "source": {
@@ -1416,7 +1416,8 @@
         ]
       },
       "homes": [
-        "/work"
+        "/work",
+        "/builder"
       ],
       "route": "/docs/area/src-target-config-ts",
       "source": {
@@ -1517,6 +1518,7 @@
         ]
       },
       "homes": [
+        "/builder",
         "/work"
       ],
       "route": "/docs/area/src-design-concept-ts",

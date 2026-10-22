@@ -9,6 +9,7 @@ import StuckSignals from "./StuckSignals.jsx";
 import RunHistoryStrip from "./RunHistoryStrip.jsx";
 import RunDetailDrawer from "./RunDetailDrawer.jsx";
 import RetroPanel from "./RetroPanel.jsx";
+import RecommendationsPanel from "./RecommendationsPanel.jsx";
 import { formatRelativeTime } from "../../lib/relative-time-format.ts";
 import { summariseTurns } from "../now-pixel/oak-tab-state.ts";
 
@@ -21,7 +22,9 @@ import { summariseTurns } from "../now-pixel/oak-tab-state.ts";
  *   1. StatusVerdict hero (RUNNING / IDLE / STUCK / CRASHED) — slices 1+2+3.
  *   2. UsagePanel — 5h burn, weekly pace, attribution, cache-hit (no $0).
  *   3. Two columns: live turn journal (left) + ranked StuckSignals (right).
- *   4. RunHistoryStrip — recent runs trend.
+ *   4. RecommendationsPanel — active recs + dismiss / mute-class controls
+ *      (issue #4634; the panel owns its read, writes and undo host).
+ *   5. RunHistoryStrip — recent runs trend.
  *
  * The Console/Habitat mode toggle (and its ?view= deep-link + localStorage
  * plumbing) was retired with the Habitat in ADR-0034 §3 — /now renders this
@@ -135,6 +138,7 @@ export default function NowConsole() {
         <TurnJournal />
         <StuckSignals />
       </div>
+      <RecommendationsPanel />
       <RunHistoryStrip onSelect={setSelectedRunId} />
       <RetroPanel />
       <RunDetailDrawer runId={selectedRunId} onClose={() => setSelectedRunId(null)} />

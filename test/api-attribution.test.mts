@@ -289,7 +289,11 @@ describe("GET /api/attribution/impact — reverse-loop impact ranking (#3283)", 
   test("an empty ledger → rows:[] , metricCount:0 at 200 (no impact signal yet)", async () => {
     const res = await callImpact({ ok: true, observations: [] });
     assert.equal(res._status, 200);
-    assert.deepEqual(res._body, { rows: [], metricCount: 0 });
+    // #4634 (design-concept a7e7fedb INV-3): the body gains an additive
+    // top-level `generatedAt`; the pre-existing fields are unchanged.
+    const { generatedAt, ...rest } = res._body;
+    assert.deepEqual(rest, { rows: [], metricCount: 0 });
+    assert.ok(Number.isFinite(Date.parse(generatedAt)), "generatedAt must parse as ISO");
   });
 
   test("a getObservations() Redis-read failure returns 500 {error}", async () => {
