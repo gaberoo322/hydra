@@ -132,7 +132,7 @@ const REDIS_PORT = 6379;
  * (see header). Order matters only for hash → index stability; never reorder
  * without accepting that every worktree remaps.
  */
-const ALLOWED_DB_INDEXES = [8, 9, 10, 11, 12, 13, 14, 15];
+export const ALLOWED_DB_INDEXES = [8, 9, 10, 11, 12, 13, 14, 15];
 
 /**
  * Deterministic, collision-free slot assignment for the KNOWN self-hosted

@@ -18,7 +18,7 @@
  * {@link TurnSnapshotRedis.close} disconnects so the CLI exits.
  */
 
-import type { Classified } from "./collector.ts";
+import { degradeDetail, type Classified } from "./collector.ts";
 import { getSkillTokensRaw } from "../../redis/cost.ts";
 import { getScoutLastCalendarWalk, setScoutSpendDaily } from "../../redis/scout.ts";
 import {
@@ -110,7 +110,7 @@ export function createTurnSnapshotRedis(opts: TurnSnapshotRedisOptions = {}): Tu
       // An error REPLY (e.g. WRONGTYPE) means Redis answered; anything else
       // (refused, closed, timed out) means it is unreachable this turn.
       const reply = err instanceof Error && err.name === "ReplyError";
-      return { ok: false, reason: `${reply ? REDIS_REPLY_ERROR : REDIS_UNREACHABLE}: ${msg}` };
+      return { ok: false, reason: degradeDetail(`${reply ? REDIS_REPLY_ERROR : REDIS_UNREACHABLE}: ${msg}`) };
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }

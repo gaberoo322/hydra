@@ -12,14 +12,14 @@
  *
  * Issue #2492 context: this projection lived in `src/api/learning.ts` but is
  * metrics-domain logic — a tally over the same cycle-trend rows that carry the
- * `reflectionMatchSource` bucket. It moved to the metrics domain so BOTH the HTTP
- * route (GET /api/learning/reflection-health) and the pure deep-health
- * diagnostics seam (src/health/diagnostics.ts) can consume it without the health
- * seam importing an `src/api/` router module (a backwards inward edge). Issue
+ * `reflectionMatchSource` bucket. It moved to the metrics domain so the pure
+ * deep-health diagnostics seam (src/health/diagnostics.ts) can consume it
+ * without importing an `src/api/` router module (a backwards inward edge). Issue
  * #3038 then split it out of `trend.ts` into this sibling leaf so "how is
  * reflection health diagnosed?" and "how are cycle metrics read?" each have one
- * home. `trend.ts` re-exports these symbols for back-compat; `api/learning.ts`
- * re-exports them for its existing route + test callers.
+ * home. `trend.ts` re-exports these symbols for back-compat. (The HTTP route
+ * GET /api/learning/reflection-health was retired under ADR-0024 §3, issue
+ * #4638 — zero callers; the deep-health verdict is the live consumer.)
  *
  * The recurring #1912/#2450/#2467/#2492 false alarm is reading a flat
  * 100%-`none` `reflectionMatchSource` distribution as broken telemetry when it

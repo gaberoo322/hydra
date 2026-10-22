@@ -13,55 +13,16 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  AlertsNowQuerySchema,
   ServiceStripResponseSchema,
   AutopilotTickResponseSchema,
   ActiveDispatchesResponseSchema,
   CostBurnResponseSchema,
-  AlertsNowResponseSchema,
 } from "../src/schemas/now-page.ts";
-import { createNowPageRouter, parseAlertsWindow } from "../src/api/now-page.ts";
+import { createNowPageRouter } from "../src/api/now-page.ts";
 
 // ---------------------------------------------------------------------------
 // Schema tests
 // ---------------------------------------------------------------------------
-
-describe("AlertsNowQuerySchema — happy path", () => {
-  test("defaults limit=25 and sinceMinutes=60", () => {
-    const result = AlertsNowQuerySchema.safeParse({});
-    assert.equal(result.success, true);
-    if (result.success) {
-      assert.equal(result.data.limit, 25);
-      assert.equal(result.data.sinceMinutes, 60);
-    }
-  });
-
-  test("coerces stringified numbers (Express query shape)", () => {
-    const result = AlertsNowQuerySchema.safeParse({ limit: "50", sinceMinutes: "120" });
-    assert.equal(result.success, true);
-    if (result.success) {
-      assert.equal(result.data.limit, 50);
-      assert.equal(result.data.sinceMinutes, 120);
-    }
-  });
-});
-
-describe("AlertsNowQuerySchema — rejection cases", () => {
-  test("rejects limit out of band", () => {
-    assert.equal(AlertsNowQuerySchema.safeParse({ limit: 0 }).success, false);
-    assert.equal(AlertsNowQuerySchema.safeParse({ limit: 200 }).success, false);
-  });
-
-  test("rejects sinceMinutes out of band", () => {
-    assert.equal(AlertsNowQuerySchema.safeParse({ sinceMinutes: 0 }).success, false);
-    assert.equal(AlertsNowQuerySchema.safeParse({ sinceMinutes: 1441 }).success, false);
-  });
-
-  test("rejects unknown keys (strict mode)", () => {
-    const result = AlertsNowQuerySchema.safeParse({ limit: 10, foo: 1 });
-    assert.equal(result.success, false);
-  });
-});
 
 describe("Response schemas — aggregator shape pins", () => {
   test("ServiceStripResponseSchema accepts a typical payload", () => {
@@ -132,60 +93,6 @@ describe("Response schemas — aggregator shape pins", () => {
     assert.equal(result.success, false);
   });
 
-  test("AlertsNowResponseSchema tolerates extra alert fields (passthrough)", () => {
-    const result = AlertsNowResponseSchema.safeParse({
-      items: [
-        {
-          id: "a1",
-          timestamp: "ts",
-          message: "boom",
-          severity: "error",
-          extraField: "yes",
-        },
-      ],
-      windowMinutes: 60,
-      generatedAt: "ts",
-    });
-    assert.equal(result.success, true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// parseAlertsWindow — pure helper
-// ---------------------------------------------------------------------------
-
-describe("parseAlertsWindow — pure helper", () => {
-  const now = new Date("2026-05-26T12:00:00.000Z");
-
-  test("includes alerts inside the window, drops older ones", () => {
-    const raw = [
-      JSON.stringify({ id: "fresh", timestamp: "2026-05-26T11:30:00.000Z", message: "fresh", severity: "error" }),
-      JSON.stringify({ id: "stale", timestamp: "2026-05-26T10:00:00.000Z", message: "stale", severity: "error" }),
-    ];
-    const out = parseAlertsWindow({ raw, sinceMinutes: 60, now });
-    assert.equal(out.length, 1);
-    assert.equal(out[0].id, "fresh");
-  });
-
-  test("skips malformed JSON without throwing", () => {
-    const raw = [
-      "not-json",
-      JSON.stringify({ id: "ok", timestamp: "2026-05-26T11:30:00.000Z", message: "ok", severity: "info" }),
-    ];
-    const out = parseAlertsWindow({ raw, sinceMinutes: 60, now });
-    assert.equal(out.length, 1);
-    assert.equal(out[0].id, "ok");
-  });
-
-  test("requires id, timestamp, message, severity — drops rows missing any", () => {
-    const raw = [
-      JSON.stringify({ timestamp: "2026-05-26T11:30:00.000Z", message: "missing id", severity: "error" }),
-      JSON.stringify({ id: "ok", timestamp: "2026-05-26T11:30:00.000Z", message: "ok", severity: "info" }),
-    ];
-    const out = parseAlertsWindow({ raw, sinceMinutes: 60, now });
-    assert.equal(out.length, 1);
-    assert.equal(out[0].id, "ok");
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -342,46 +249,5 @@ describe("GET /now/cost-burn", () => {
     assert.equal(res._body.daySpent, undefined);
     assert.equal(res._body.headroomPct, undefined);
     assert.equal(res._body.generatedAt, "2026-05-26T12:00:00.000Z");
-  });
-});
-
-describe("GET /now/alerts", () => {
-  test("happy path — filters by sinceMinutes window", async () => {
-    const router = createNowPageRouter({
-      readRecentAlertsJson: async () => [
-        JSON.stringify({
-          id: "in-window",
-          timestamp: "2026-05-26T11:30:00.000Z",
-          message: "fresh",
-          severity: "error",
-        }),
-        JSON.stringify({
-          id: "stale",
-          timestamp: "2026-05-26T10:00:00.000Z",
-          message: "stale",
-          severity: "error",
-        }),
-      ],
-      now: () => new Date("2026-05-26T12:00:00.000Z"),
-    });
-    const handler = findHandler(router, "GET", "/now/alerts");
-    assert.ok(handler);
-    const res = mockRes();
-    await handler!(mockReq({ sinceMinutes: "60" }), res);
-    assert.equal(res._status, 200);
-    assert.equal(res._body.windowMinutes, 60);
-    assert.equal(res._body.items.length, 1);
-    assert.equal(res._body.items[0].id, "in-window");
-  });
-
-  test("bad sinceMinutes → 400 schema-validation-failed envelope", async () => {
-    const router = createNowPageRouter({});
-    const handler = findHandler(router, "GET", "/now/alerts");
-    assert.ok(handler);
-    const res = mockRes();
-    await handler!(mockReq({ sinceMinutes: "abc" }), res);
-    assert.equal(res._status, 400);
-    assert.equal(res._body.code, "schema-validation-failed");
-    assert.ok(Array.isArray(res._body.issues));
   });
 });

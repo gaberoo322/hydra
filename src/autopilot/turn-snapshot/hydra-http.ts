@@ -34,8 +34,10 @@
  * {@link HydraTransport}; no network, no service.
  */
 
+import { DEGRADE, degradeDetail, type DegradeReason } from "./collector.ts";
+
 /** One hydra HTTP read: the body on success, or why it failed. */
-export type HydraRead = { readonly kind: "ok"; readonly body: string } | { readonly kind: "failed"; readonly reason: string };
+export type HydraRead = { readonly kind: "ok"; readonly body: string } | { readonly kind: "failed"; readonly reason: DegradeReason };
 
 /** Per-read options for {@link TurnSnapshotHydra.get}. */
 interface HydraGetOptions {
@@ -113,9 +115,9 @@ export function createTurnSnapshotHydra(opts: TurnSnapshotHydraOptions = {}): Tu
 
   const get = async (path: string, getOpts: HydraGetOptions = {}): Promise<HydraRead> => {
     const res = await call(path, getOpts.timeoutMs ?? defaultTimeout);
-    if ("error" in res) return { kind: "failed", reason: res.error };
-    if (res.status < 200 || res.status > 299) return { kind: "failed", reason: `http-${res.status}` };
-    if (HTML_PREFIXES.some((p) => res.body.startsWith(p))) return { kind: "failed", reason: "html-body" };
+    if ("error" in res) return { kind: "failed", reason: degradeDetail(res.error) };
+    if (res.status < 200 || res.status > 299) return { kind: "failed", reason: degradeDetail(`http-${res.status}`) };
+    if (HTML_PREFIXES.some((p) => res.body.startsWith(p))) return { kind: "failed", reason: DEGRADE.HTML_BODY };
     return { kind: "ok", body: res.body };
   };
 
@@ -124,7 +126,7 @@ export function createTurnSnapshotHydra(opts: TurnSnapshotHydraOptions = {}): Tu
     const read = await get(path, getOpts);
     if (read.kind === "failed") return read;
     const body = stripTrailingNewlines(read.body);
-    return body === "" ? { kind: "failed", reason: "empty-body" } : { kind: "ok", body };
+    return body === "" ? { kind: "failed", reason: DEGRADE.EMPTY_BODY } : { kind: "ok", body };
   };
 
   return {

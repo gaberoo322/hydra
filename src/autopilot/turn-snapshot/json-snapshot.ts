@@ -22,7 +22,7 @@
  * returned, so Python sees the same int/float lexemes (`85.0` stays a float).
  */
 
-import type { Classified, DegradedMarker } from "./collector.ts";
+import { DEGRADE, degradeDetail, type Classified, type DegradedMarker } from "./collector.ts";
 import {
   CLASS_STATS_FALLBACK,
   EMERGENCY_BRAKE_FALLBACK,
@@ -239,7 +239,7 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     if (raw === null) return null;
     const s = String(raw).trim();
     if (issueRef.test(s)) return Number(s);
-    degraded.push({ collector, field, reason: "not-an-issue-number" });
+    degraded.push({ collector, field, reason: DEGRADE.NOT_AN_ISSUE_NUMBER });
     return null;
   };
 
@@ -334,7 +334,7 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
   const addBlob = (name: "usage_eligibility" | "emergency_brake" | "class_stats" | "slot_events" | "target_risk_surface", collector: string, text: string) => {
     const parsed = parseJsonRead(text);
     if (parsed.kind !== "ok") {
-      degraded.push({ collector, field: name, reason: "unparseable-body" });
+      degraded.push({ collector, field: name, reason: DEGRADE.UNPARSEABLE_BODY });
       return;
     }
     rawBlobs[name] = text;
@@ -359,7 +359,7 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
   blobs.candidate_exclusions = v.picks.candidateExclusions.map((r) => ({ ...r }));
 
   const spend = finiteDecimal(v.scout.spendUsd);
-  if (spend === null) degraded.push({ collector: "scout", field: "scout_spend_usd_today", reason: "not-numeric" });
+  if (spend === null) degraded.push({ collector: "scout", field: "scout_spend_usd_today", reason: DEGRADE.NOT_NUMERIC });
 
   const doc: TurnSnapshotDoc = {
     schema_version: TURN_SNAPSHOT_SCHEMA_VERSION,
@@ -436,7 +436,7 @@ function repairFields(doc: TurnSnapshotDoc, issues: readonly { path: readonly Pr
   const rawDropped = new Set<string>();
   let spend = doc.scout_spend_usd_today;
   let obs = doc.observability;
-  const mark = (field: string, message: string) => markers.push({ collector: "turn-snapshot", field, reason: `schema-invalid: ${message}` });
+  const mark = (field: string, message: string) => markers.push({ collector: "turn-snapshot", field, reason: degradeDetail(`schema-invalid: ${message}`) });
   for (const issue of issues) {
     const [head, key] = issue.path;
     if (head === "signals" && typeof signals === "object") {
@@ -480,7 +480,7 @@ function repairFields(doc: TurnSnapshotDoc, issues: readonly { path: readonly Pr
     }
     return null;
   }
-  if (dropDegraded.size > 0) markers.push({ collector: "turn-snapshot", field: "degraded", reason: "malformed-entry-dropped" });
+  if (dropDegraded.size > 0) markers.push({ collector: "turn-snapshot", field: "degraded", reason: DEGRADE.MALFORMED_ENTRY_DROPPED });
   const { scout_spend_usd_today: _s, observability: _o, ...rest } = doc;
   return {
     doc: {

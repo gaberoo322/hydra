@@ -18,12 +18,6 @@
       ],
       "servedBy": [
         "GET /api/alerts",
-        "GET /api/now/active-dispatches",
-        "GET /api/now/alerts",
-        "GET /api/now/autopilot-health",
-        "GET /api/now/autopilot-tick",
-        "GET /api/now/cost-burn",
-        "GET /api/now/service-strip",
         "POST /api/alerts/:id/dismiss",
         "POST /api/alerts/dismiss-all",
         "POST /api/webhooks/sentry"
@@ -160,7 +154,7 @@
         "GET /api/attention/feed",
         "POST /api/attention/:id/dismiss"
       ],
-      "home": "/api/attention/counts",
+      "home": "/builder",
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
@@ -180,7 +174,7 @@
         "GET /api/attention/feed",
         "POST /api/attention/:id/dismiss"
       ],
-      "home": "/api/attention/counts",
+      "home": "/builder",
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
@@ -202,7 +196,7 @@
         "GET /api/attention/feed",
         "POST /api/attention/:id/dismiss"
       ],
-      "home": "/api/attention/counts",
+      "home": "/builder",
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
@@ -224,7 +218,7 @@
         "GET /api/attention/feed",
         "POST /api/attention/:id/dismiss"
       ],
-      "home": "/api/attention/counts",
+      "home": "/builder",
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
@@ -664,7 +658,6 @@
       "servedBy": [
         "GET /api/learning/friction-patterns",
         "GET /api/learning/ineffective-rules",
-        "GET /api/learning/rule-action-log",
         "GET /api/memory/:agent",
         "POST /api/memory/:agent/pattern",
         "POST /api/memory/subagent-friction",
@@ -757,7 +750,6 @@
       "servedBy": [
         "GET /api/learning/friction-patterns",
         "GET /api/learning/ineffective-rules",
-        "GET /api/learning/rule-action-log",
         "GET /api/memory/:agent",
         "POST /api/memory/:agent/pattern",
         "POST /api/memory/subagent-friction",
@@ -781,7 +773,6 @@
       "servedBy": [
         "GET /api/learning/friction-patterns",
         "GET /api/learning/ineffective-rules",
-        "GET /api/learning/rule-action-log",
         "GET /api/memory/:agent",
         "POST /api/memory/:agent/pattern",
         "POST /api/memory/subagent-friction",
@@ -823,7 +814,6 @@
       "servedBy": [
         "GET /api/learning/friction-patterns",
         "GET /api/learning/ineffective-rules",
-        "GET /api/learning/rule-action-log",
         "GET /api/memory/:agent",
         "POST /api/memory/:agent/pattern",
         "POST /api/memory/subagent-friction",

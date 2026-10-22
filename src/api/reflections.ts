@@ -1,20 +1,18 @@
 import { Router } from "express";
 import { loadReflectionsForAnchor } from "../reflections/index.ts";
-import { getTargetName, getTargetWebUrl } from "../target-config.ts";
 import { ReflectionsQuerySchema } from "../schemas/reflections.ts";
 import { aggregatorRoute } from "./route-helpers.ts";
 
 /**
- * Reflections + calibration proxy routes.
+ * Reflections route.
  *
- * Extracted from api/misc.ts as part of issue #268. Calibration outcomes are
- * proxied from the configured target project; reflections are the
- * episodic learning surface (`hydra:reflections:{anchor}`).
+ * Extracted from api/misc.ts as part of issue #268. Reflections are the
+ * episodic learning surface (`hydra:reflections:{anchor}`). The calibration
+ * proxies (`GET /calibration/outcomes`, `POST /calibration/outcomes/sync`)
+ * were retired under ADR-0024 §3 (issue #4638): zero callers.
  */
 export function createReflectionsRouter() {
   const router = Router();
-
-  const targetWebUrl = getTargetWebUrl();
 
   // GET /reflections?anchor=&files= — per-anchor episodic reflections.
   //
@@ -82,29 +80,6 @@ export function createReflectionsRouter() {
       };
     }),
   );
-
-  // GET /calibration/outcomes — Proxy to target project's calibration API
-  router.get("/calibration/outcomes", async (req, res) => {
-    try {
-      const qs = new URLSearchParams(req.query as Record<string, string>).toString();
-      const url = `${targetWebUrl}/api/calibration/outcomes${qs ? `?${qs}` : ""}`;
-      const response = await fetch(url);
-      const data = await response.json();
-      res.status(response.status).json(data);
-    } catch (err: any) {
-      res.status(502).json({ error: `${getTargetName()} unavailable: ${err.message}` });
-    }
-  });
-
-  router.post("/calibration/outcomes/sync", async (req, res) => {
-    try {
-      const response = await fetch(`${targetWebUrl}/api/calibration/outcomes/sync`, { method: "POST" });
-      const data = await response.json();
-      res.status(response.status).json(data);
-    } catch (err: any) {
-      res.status(502).json({ error: `${getTargetName()} unavailable: ${err.message}` });
-    }
-  });
 
   return router;
 }

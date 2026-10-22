@@ -200,11 +200,21 @@ const WorkQueueRowSchema = z
     /** ISO last-updated timestamp (staleness rendering). */
     updatedAt: z.string(),
     /**
-     * OPEN strict-blocker numbers this row cites (resolved only for
-     * `ready-for-agent` rows — the same population `resolveOpenBlockers`
-     * resolves for the board counts). Empty array otherwise.
+     * OPEN strict-blocker numbers this row cites — resolved for EVERY
+     * operator-lane row (issue #4629, design-concept 821e48ed INV-6): the
+     * work-queue route resolves blockers against each row AS IT WOULD BE
+     * post-promote (`labels + ready-for-agent`), the same prospective-row
+     * construction the promote gate uses, so the /work promote checklist's
+     * `no-open-blocker` line mirrors the server refusal before the click.
      */
     openBlockers: z.array(z.number().int().positive()),
+    /**
+     * Whether the issue body carries a `## Files in scope` section, computed
+     * by the ONE shared parser (`hasScopeSection`, src/scope-section.ts) the
+     * promote gate and issue-label-validation refuse with (issue #4629,
+     * design-concept 821e48ed INV-6) — the dashboard never parses the body.
+     */
+    hasScopeSection: z.boolean(),
     /**
      * Carries the `glmLane` ruling — `true` iff
      * `glmLane(labels, partitionActive).lane === "glm"` (ADR-0040 Decision 4),

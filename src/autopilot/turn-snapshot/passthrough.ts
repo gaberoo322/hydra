@@ -47,7 +47,7 @@
  */
 
 import { join } from "node:path";
-import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, degradeDetail, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { parseJsonRead } from "./github-port.ts";
 import type { TurnSnapshotHost } from "./host-port.ts";
 import type { HydraRead, TurnSnapshotHydra } from "./hydra-http.ts";
@@ -114,12 +114,12 @@ export interface RecommendationsValue {
 // Pure folds (payload → classified value)
 // ---------------------------------------------------------------------------
 
-type Parsed = { ok: true; value: unknown } | { ok: false; reason: string };
+type Parsed = { ok: true; value: unknown } | { ok: false; reason: DegradeReason };
 
 /** A body through the port's shared JSON parse; an empty or non-JSON body is `unparseable`. */
 function parseBody(body: string): Parsed {
   const parsed = parseJsonRead(body);
-  return parsed.kind === "ok" ? { ok: true, value: parsed.data } : { ok: false, reason: "unparseable" };
+  return parsed.kind === "ok" ? { ok: true, value: parsed.data } : { ok: false, reason: DEGRADE.UNPARSEABLE };
 }
 
 function parseRead(read: HydraRead): Parsed {
@@ -140,14 +140,14 @@ function isSet(v: unknown): boolean {
   return v !== null && typeof v === "object" ? Object.keys(v).length > 0 : Boolean(v);
 }
 
-const fail = <T>(reason: string): Classified<T> => ({ ok: false, reason });
+const fail = <T>(reason: DegradeReason): Classified<T> => ({ ok: false, reason });
 const okv = <T>(value: T): Classified<T> => ({ ok: true, value });
 
 /** `health={d["status"]} redis={d["redis"]}` needs a dict carrying both keys. */
 function foldHealth(p: Parsed): HealthValue["service"] {
   if ("reason" in p) return fail(p.reason);
   const d = p.value;
-  if (!isDict(d) || !("status" in d) || !("redis" in d)) return fail("shape");
+  if (!isDict(d) || !("status" in d) || !("redis" in d)) return fail(DEGRADE.SHAPE);
   return okv({ status: d.status, redis: d.redis });
 }
 
@@ -160,21 +160,21 @@ function foldFailedServices(read: { ok: boolean; stdout: string }): number {
 /** The size of `eligible` (default `[]`): a list's items, an object's keys, a string's code points; anything else has none. */
 function foldScoutAlerts(p: Parsed): Classified<number> {
   if ("reason" in p) return fail(p.reason);
-  if (!isDict(p.value)) return fail("shape");
+  if (!isDict(p.value)) return fail(DEGRADE.SHAPE);
   const eligible = "eligible" in p.value ? p.value.eligible : [];
   if (typeof eligible === "string") return okv(Array.from(eligible).length);
   if (eligible !== null && typeof eligible === "object") return okv(Object.keys(eligible).length);
-  return fail("eligible-has-no-len");
+  return fail(DEGRADE.ELIGIBLE_HAS_NO_LEN);
 }
 
 /** The #4161 realm fold. `taxonomy` is the decoded classes.json, or a failure reason. */
 function foldRealmShare(p: Parsed, taxonomy: Parsed): Classified<number> {
   if ("reason" in p) return fail(p.reason);
   const bsm = isDict(p.value) ? p.value.bySkillByModel : undefined;
-  if (!isDict(bsm)) return fail("no-bySkillByModel");
-  if ("reason" in taxonomy) return fail(`taxonomy-${taxonomy.reason}`);
+  if (!isDict(bsm)) return fail(DEGRADE.NO_BY_SKILL_BY_MODEL);
+  if ("reason" in taxonomy) return fail(degradeDetail(`taxonomy-${taxonomy.reason}`));
   const doc = isSet(taxonomy.value) ? taxonomy.value : {};
-  if (!isDict(doc)) return fail("taxonomy-shape");
+  if (!isDict(doc)) return fail(DEGRADE.TAXONOMY_SHAPE);
   // Only a list's items can be class rows (an object's keys / a string's
   // characters never are); any other `classes` value reads as no rows.
   const rows: unknown[] = Array.isArray(doc.classes) ? doc.classes : [];
@@ -199,9 +199,9 @@ function foldRealmShare(p: Parsed, taxonomy: Parsed): Classified<number> {
     }
   }
   const denom = orch + target;
-  if (!Number.isFinite(denom) || denom <= 0) return fail("zero-denominator");
+  if (!Number.isFinite(denom) || denom <= 0) return fail(DEGRADE.ZERO_DENOMINATOR);
   const share = orch / denom;
-  if (!Number.isFinite(share) || share < 0 || share > 1) return fail("share-out-of-range");
+  if (!Number.isFinite(share) || share < 0 || share > 1) return fail(DEGRADE.SHARE_OUT_OF_RANGE);
   return okv(share);
 }
 
@@ -209,18 +209,18 @@ function foldRealmShare(p: Parsed, taxonomy: Parsed): Classified<number> {
 function foldCapacity(p: Parsed): Classified<CapacityValue> {
   if ("reason" in p) return fail(p.reason);
   const d = p.value;
-  if (!isDict(d) || !("orchestrator" in d)) return fail("no-orchestrator");
+  if (!isDict(d) || !("orchestrator" in d)) return fail(DEGRADE.NO_ORCHESTRATOR);
   const o = d.orchestrator;
-  if (!isDict(o) || !("share" in o) || !("window" in o)) return fail("orchestrator-shape");
+  if (!isDict(o) || !("share" in o) || !("window" in o)) return fail(DEGRADE.ORCHESTRATOR_SHAPE);
   const share = typeof o.share === "boolean" ? Number(o.share) : o.share;
-  if (typeof share !== "number") return fail("share-not-numeric");
+  if (typeof share !== "number") return fail(DEGRADE.SHARE_NOT_NUMERIC);
   return okv({ share, floorMet: d.floorMet, floorStatus: d.floorStatus, window: o.window });
 }
 
 /** `'CODEX_ACTIVE' if d.get('running') else 'CODEX_IDLE'`. */
 function foldCycleRunning(p: Parsed): Classified<boolean> {
   if ("reason" in p) return fail(p.reason);
-  if (!isDict(p.value)) return fail("shape");
+  if (!isDict(p.value)) return fail(DEGRADE.SHAPE);
   return okv(isSet(p.value.running));
 }
 
@@ -228,9 +228,9 @@ function foldCycleRunning(p: Parsed): Classified<boolean> {
 function foldScheduler(p: Parsed): SchedulerValue["scheduler"] {
   if ("reason" in p) return fail(p.reason);
   const d = p.value;
-  if (!isDict(d)) return fail("shape");
+  if (!isDict(d)) return fail(DEGRADE.SHAPE);
   const nm = "consecutiveNonMerges" in d ? d.consecutiveNonMerges : 0;
-  if (typeof nm !== "number" && typeof nm !== "boolean") return fail("nonmerges-not-numeric");
+  if (typeof nm !== "number" && typeof nm !== "boolean") return fail(DEGRADE.NONMERGES_NOT_NUMERIC);
   return okv({ state: "state" in d ? d.state : "?", nonMerges: nm });
 }
 
@@ -245,13 +245,13 @@ function foldRecommendations(p: Parsed): Classified<RecommendationsValue> {
   if ("reason" in p) return fail(p.reason);
   const items = p.value;
   if (!isSet(items)) return okv({ count: 0, firstAction: null });
-  if (!Array.isArray(items)) return fail("not-a-list");
+  if (!Array.isArray(items)) return fail(DEGRADE.NOT_A_LIST);
   const first = items[0];
-  if (!isDict(first)) return fail("first-not-a-dict");
+  if (!isDict(first)) return fail(DEGRADE.FIRST_NOT_A_DICT);
   const action = "action" in first ? first.action : "?";
   if (typeof action === "string") return okv({ count: items.length, firstAction: Array.from(action).slice(0, 60).join("") });
   if (Array.isArray(action)) return okv({ count: items.length, firstAction: action.slice(0, 60) });
-  return fail("action-not-sliceable");
+  return fail(DEGRADE.ACTION_NOT_SLICEABLE);
 }
 
 /** `jq -sRr @uri`: percent-encode every UTF-8 byte outside `A-Za-z0-9-_.~`. */
@@ -284,7 +284,7 @@ function outcome<T>(collector: string, value: T, degraded: DegradedMarker[]): Co
 async function collectHealth(deps: PassthroughDeps): Promise<CollectorOutcome<HealthValue>> {
   const [read, units] = await Promise.all([deps.hydra.get("/health"), deps.host.failedServiceUnits()]);
   const service = foldHealth(parseRead(read));
-  const degraded = [...marker("health", service), ...(units.ok ? [] : [{ field: "failedServices", reason: "systemctl-failed" }])];
+  const degraded = [...marker("health", service), ...(units.ok ? [] : [{ field: "failedServices", reason: DEGRADE.SYSTEMCTL_FAILED }])];
   return outcome("health", { service, failedServices: foldFailedServices(units) }, degraded);
 }
 
@@ -313,7 +313,7 @@ async function collectScoutAlerts(deps: PassthroughDeps): Promise<CollectorOutco
 async function collectRealmShare(deps: PassthroughDeps): Promise<CollectorOutcome<Classified<number>>> {
   const [read, taxonomyBytes] = await Promise.all([deps.hydra.get("/usage"), deps.host.readFile(deps.taxonomyPath)]);
   let taxonomy: Parsed;
-  if (taxonomyBytes === null) taxonomy = { ok: false, reason: "unreadable" };
+  if (taxonomyBytes === null) taxonomy = { ok: false, reason: DEGRADE.UNREADABLE };
   else taxonomy = parseBody(taxonomyBytes.toString("utf-8"));
   const share = foldRealmShare(parseRead(read), taxonomy);
   return outcome("realm-share", share, marker("orchRealmWeeklyShare", share));
@@ -350,7 +350,7 @@ export async function collectSlotEvents(deps: PassthroughDeps): Promise<Collecto
   const read = await deps.hydra.get(slotEventsPath(deps.env));
   // `$(hydra raw GET …)` strips trailing newlines; an empty capture is the fallback arm.
   const body = read.kind === "ok" ? read.body.replace(/\n+$/, "") : "";
-  const events: Classified<string> = body !== "" ? okv(body) : fail(read.kind === "failed" ? read.reason : "empty-body");
+  const events: Classified<string> = body !== "" ? okv(body) : fail(read.kind === "failed" ? read.reason : DEGRADE.EMPTY_BODY);
   return outcome("slot-events", events, marker("slotEvents", events));
 }
 
@@ -388,7 +388,7 @@ function entry<K extends PassthroughName>(
   return { collect, fallbackValue };
 }
 
-const FAILED: Classified<never> = { ok: false, reason: "all-reads-failed" };
+const FAILED: Classified<never> = { ok: false, reason: DEGRADE.ALL_READS_FAILED };
 
 /** Collector name → collect + fallback value, in no particular order (the caller's order is the output order). */
 export const PASSTHROUGH_COLLECTORS: { readonly [K in PassthroughName]: PassthroughEntry<K> } = {
@@ -429,7 +429,7 @@ export async function runPassthroughCollectors(
         return {
           name,
           value: e.fallbackValue,
-          degraded: [{ field: name, reason: "collector-crashed" }],
+          degraded: [{ field: name, reason: DEGRADE.COLLECTOR_CRASHED }],
           note: `orch turn-snapshot ${name} collector crashed (${msg}) — emitting its fail-open fallback (issue #4933)`,
         };
       }

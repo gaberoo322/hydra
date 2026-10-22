@@ -61,7 +61,7 @@ import { openNumbersFromRows } from "../../github/blockers.ts";
 import { parseIssueRows, type IssueRow } from "../../github/issues.ts";
 import type { PrRefRow } from "../../github/pr-refs.ts";
 import { TARGET_BOARD_LABELS } from "../../target-board-labels.ts";
-import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { pickDevResume } from "./dev-resume.ts";
 import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
@@ -436,7 +436,7 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
     glmWithheld = boardIssueList(board, "glm_withheld");
     blockerExcluded = boardIssueList(board, "blocker_excluded");
   } else {
-    degraded.push({ field: "boardState", reason: "endpoint-degraded" });
+    degraded.push({ field: "boardState", reason: DEGRADE.ENDPOINT_DEGRADED });
     const issues = await deps.github.listOpenIssueBlockerRows(limit);
     if (issues.kind === "ok" && Array.isArray(issues.data)) {
       // Openness rides the port (ADR-0043 D1): ONE batched --search over the
@@ -446,7 +446,7 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
       const resolveOpen = async (refs: number[]): Promise<Set<number>> => {
         const search = await deps.github.searchOpenIssueNumbers(refs.join(" "), limit);
         if (search.kind !== "ok" || !Array.isArray(search.data)) {
-          degraded.push({ field: "openBlockers", reason: "fail-safe-all-open" });
+          degraded.push({ field: "openBlockers", reason: DEGRADE.FAIL_SAFE_ALL_OPEN });
           return new Set(refs);
         }
         return openNumbersFromRows(parseIssueRows(search.data, ""), refs);
@@ -458,8 +458,8 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
       fallbackReady = derived.readyNumbers;
     } else {
       laneDegraded = true;
-      counts = { ok: false, reason: "fallback-read-failed" };
-      degraded.push({ field: "counts", reason: "fallback-read-failed" });
+      counts = { ok: false, reason: DEGRADE.FALLBACK_READ_FAILED };
+      degraded.push({ field: "counts", reason: DEGRADE.FALLBACK_READ_FAILED });
     }
   }
 
@@ -505,9 +505,9 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
   let wip: Classified<TargetWip>;
   if (inProgress === null || prRows === null) {
     notes.push("target WIP read FAILED (in-progress or open-PR payload unreadable) — target_wip_saturated fails OPEN to false (issue #4475)");
-    wip = { ok: false, reason: "wip-read-failed" };
+    wip = { ok: false, reason: DEGRADE.WIP_READ_FAILED };
   } else if (!prRefs.ok) {
-    wip = { ok: false, reason: "pr-refs unavailable" };
+    wip = { ok: false, reason: DEGRADE.PR_REFS_UNAVAILABLE };
   } else {
     wip = { ok: true, value: wipStatus(inProgress, prRows, prRefs.predicates.referenced) };
   }
@@ -551,11 +551,11 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
   let devResumePick: Classified<PrPick | null>;
   if (!resumeOk) {
     notes.push("target-dev-resume read degraded (failed REST read) — fail closed to none (issue #4739)");
-    devResumePick = { ok: false, reason: "resume-read-failed" };
+    devResumePick = { ok: false, reason: DEGRADE.RESUME_READ_FAILED };
   } else if ("error" in prRefs) {
     notes.push(`target-dev-resume pr-refs.py import FAILED (${prRefs.error}) — fail closed to none (issue #4739)`);
     notes.push("target-dev-resume pr-refs.py unavailable — fail closed to none (issue #4739)");
-    devResumePick = { ok: false, reason: "pr-refs unavailable" };
+    devResumePick = { ok: false, reason: DEGRADE.PR_REFS_UNAVAILABLE };
   } else {
     const pair = slurpPair(ndr, pulls);
     if (pair === null) notes.push("target-dev-resume stdin JSON parse FAILED (unparseable) — fail closed to none (issue #4739)");
@@ -576,7 +576,7 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
 }
 
 /** The snapshot the CLI renders when the collector itself could not run (every read failed). */
-export function targetBoardFallbackSnapshot(reason: string): TargetBoardSnapshot {
+export function targetBoardFallbackSnapshot(reason: DegradeReason): TargetBoardSnapshot {
   return {
     counts: { ok: false, reason },
     wip: { ok: false, reason },

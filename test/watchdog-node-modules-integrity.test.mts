@@ -49,6 +49,7 @@ import {
   WATCHDOG_REDIS_TIMEOUT_MS,
   throwIfTimedOut,
 } from "./_helpers/watchdog-timeouts.mts";
+import { ownedDbContext } from "./_helpers/owned-redis-db.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
@@ -272,6 +273,7 @@ describe("run_node_modules_integrity — detection + delivery (issue #4175)", { 
   let wiped: string;
   let missingBin: string;
   let healthy: string;
+  let absent: string;
 
   function makeHealthy(root: string, entries = 25): void {
     mkdirSync(join(root, ".bin"), { recursive: true });
@@ -285,6 +287,8 @@ describe("run_node_modules_integrity — detection + delivery (issue #4175)", { 
     wiped = join(SCRATCH, "wiped");
     missingBin = join(SCRATCH, "missing-bin");
     healthy = join(SCRATCH, "healthy");
+    // "absent": never created; the unreadable-root case writes since/fired state for it (#5137).
+    absent = join(SCRATCH, "does-not-exist");
     // "wiped": measured incident state — 24K, no .bin/, no packages.
     mkdirSync(wiped, { recursive: true });
     writeFileSync(join(wiped, "some-leftover-file"), "x");
@@ -296,6 +300,7 @@ describe("run_node_modules_integrity — detection + delivery (issue #4175)", { 
     cleanState(wiped);
     cleanState(missingBin);
     cleanState(healthy);
+    cleanState(absent);
     drc(["DEL", TEST_NOTIFY_STREAM]);
   });
 
@@ -304,6 +309,7 @@ describe("run_node_modules_integrity — detection + delivery (issue #4175)", { 
     cleanState(wiped);
     cleanState(missingBin);
     cleanState(healthy);
+    cleanState(absent);
     drc(["DEL", TEST_NOTIFY_STREAM]);
   });
 
@@ -377,7 +383,7 @@ describe("run_node_modules_integrity — detection + delivery (issue #4175)", { 
   });
 
   test("never exits non-zero even against an unreadable root", () => {
-    const r = runBlock({ HYDRA_WATCHDOG_NM_ROOTS: join(SCRATCH, "does-not-exist"), HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20" });
+    const r = runBlock({ HYDRA_WATCHDOG_NM_ROOTS: absent, HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20" });
     assert.equal(r.status, 0, `block must be fail-safe: ${r.stderr}`);
     assert.match(nmLines(r.stdout), /root-absent/, "an absent root must be reported distinguishably");
   });
@@ -398,10 +404,11 @@ describe("run_node_modules_integrity — detection + delivery (issue #4175)", { 
 // =============================================================================
 
 describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through run_node_modules_integrity's rc_write/rc_read (issue #4183)", { skip: !DOCKER }, () => {
-  // A DB this describe owns for its own lifetime — distinct from db 0
-  // (production, the fallback-on-invalid/absent-input target) so a leak in
-  // either direction is unambiguous.
-  const SELECTED_DB = "9";
+  // The run-OWNED Redis DB + its skip verdict, captured at definition time. The
+  // canonical rule (never a pool literal; null => skip or fail loud; owned-DB
+  // cleanup skipped, never redirected to db 0) is ownedDbContext's doc comment
+  // in test/_helpers/owned-redis-db.mts.
+  const { db: OWNED_DB, skip: OWNED_DB_SKIP } = ownedDbContext();
 
   // Fully separate key namespace from TEST_NM_PREFIX/SINCE/FIRED above — this
   // describe never touches those keys, on any DB.
@@ -462,10 +469,10 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through run_node_
     const keys = sig ? [OWN_SINCE(sig), OWN_FIRED(sig)] : [];
     if (keys.length > 0) {
       drcAt("0", ["DEL", ...keys]);
-      drcAt(SELECTED_DB, ["DEL", ...keys]);
+      if (OWNED_DB !== null) drcAt(OWNED_DB, ["DEL", ...keys]);
     }
     drcAt("0", ["DEL", OWN_NOTIFY_STREAM]);
-    drcAt(SELECTED_DB, ["DEL", OWN_NOTIFY_STREAM]);
+    if (OWNED_DB !== null) drcAt(OWNED_DB, ["DEL", OWN_NOTIFY_STREAM]);
   }
 
   beforeEach(() => {
@@ -508,21 +515,22 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through run_node_
     return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   }
 
-  test("a bash-side write with HYDRA_REDIS_DB set lands in that DB, never in db 0", () => {
+  test("a bash-side write with HYDRA_REDIS_DB set lands in that DB, never in db 0", { skip: OWNED_DB_SKIP }, () => {
+    assert.ok(OWNED_DB !== null, "full-suite launcher run must export an owned HYDRA_REDIS_DB (#5062)");
     const sig = sigForRoot(wipedRoot);
-    const r = runOwnBlock({ HYDRA_REDIS_DB: SELECTED_DB });
+    const r = runOwnBlock({ HYDRA_REDIS_DB: OWNED_DB });
     assert.equal(r.status, 0, `block must never exit non-zero: ${r.stderr}`);
     assert.match(nmLines(r.stdout), /WARNING NODE_MODULES INTEGRITY/, "must warn on the wiped tree");
 
     // The since-anchor + fired marker THIS tick just wrote via rc_write must
     // exist in the selected DB...
     assert.equal(
-      existsAt(SELECTED_DB, OWN_FIRED(sig)),
+      existsAt(OWNED_DB, OWN_FIRED(sig)),
       true,
       "fired marker must land in the HYDRA_REDIS_DB-selected DB",
     );
     assert.equal(
-      existsAt(SELECTED_DB, OWN_SINCE(sig)),
+      existsAt(OWNED_DB, OWN_SINCE(sig)),
       true,
       "since anchor must land in the HYDRA_REDIS_DB-selected DB",
     );

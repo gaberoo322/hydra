@@ -4,13 +4,13 @@
  *
  * Zero-I/O, deterministic folds over an already-fetched metrics-trend array —
  * the rolling merge/empty rates, tokens-per-merged-PR, cost-by-outcome, the
- * aggregate-stats shape, the cumulative-accomplishments list, and the
- * anchor-distribution rollup. All seven zero-I/O projections live here. Every
+ * aggregate-stats shape, and the anchor-distribution rollup. (The
+ * cumulative-accomplishments projection went with `GET /summary` — #4638.) Every
  * function is a pure projection: given a trend array it returns the same value
  * with no Redis access of its own.
  *
  * The async Redis-touching coordinators (`getAggregateStats`, `getCostByOutcome`,
- * `getCumulativeAccomplishments`, `getFixFeatureRatio`) stay in `aggregate.ts`
+ * `getFixFeatureRatio`) stay in `aggregate.ts`
  * and fetch `getMetricsTrend()` before delegating here. This split matches the
  * pure-leaf-vs-I/O-coordinator pattern of `snapshot-assembly.ts` (#2279),
  * `token-math.ts` (#1909), `rolling-rates.ts` (#2974), and `candidate-scoring.ts`
@@ -284,8 +284,8 @@ export function projectCostByOutcome(
  *
  * Extracted verbatim from the inline body of `getAggregateStats` (issue #2143)
  * so the rate arithmetic is unit-testable on a synthetic trend array without a
- * live Redis fetch — matching the discipline of `projectCostByClass`,
- * `projectAnchorDistribution`, and `projectGroundingDuration`. The empty-trend
+ * live Redis fetch — matching the discipline of `projectCostByClass` and
+ * `projectAnchorDistribution`. The empty-trend
  * guard (`return { cycles: 0 }`) moves here verbatim so no rate divides by
  * total=0. The async `getAggregateStats` wrapper keeps the `count` knob and the
  * Redis fetch; this function only does arithmetic.
@@ -347,24 +347,6 @@ export function projectAggregateStats(trend: Array<Record<string, any>>) {
     anchoredRate: 100,
     verifiedCompletionRate: merged > 0 ? 100 : 0,
   };
-}
-
-/**
- * Pure projection: filter + map an already-fetched metrics-trend array into the
- * cumulative-accomplishments list (merged cycles with a title). Extracted from
- * `getCumulativeAccomplishments` (issue #2143) so the merged-and-titled filter
- * is unit-testable on synthetic fixtures without a live Redis. An empty trend
- * yields `[]` (a `.filter().map()` over `[]`), so no guard is needed.
- */
-export function projectCumulativeAccomplishments(trend: Array<Record<string, any>>) {
-  return trend
-    .filter((m) => countsAsMerge(m) && m.taskTitle)
-    .map((m) => ({
-      cycle: m.cycleId,
-      title: m.taskTitle,
-      anchor: m.anchorType,
-      tests: `${m.testsBefore}→${m.testsAfter}`,
-    }));
 }
 
 // ---------------------------------------------------------------------------

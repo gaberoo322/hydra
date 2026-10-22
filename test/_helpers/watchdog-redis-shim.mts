@@ -40,6 +40,8 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
+import { InvariantViolationError } from "../../src/errors.ts";
+import { ownedDbContext } from "./owned-redis-db.mts";
 import { WATCHDOG_REDIS_TIMEOUT_MS } from "./watchdog-timeouts.mts";
 
 /** Where the container's redis is published on the host (`docker port hydra-redis-1`). */
@@ -166,8 +168,31 @@ function runCli(bin: string, cliArgs: string[]): CliResult {
  * The fidelity battery: every reply shape `run_launch_flow` consumes. Each
  * entry is run twice on DISJOINT keys — once through real docker, once through
  * the shim — so stateful commands (SET NX) see identical starting state.
+ *
+ * The SELECT-path entries use the run-OWNED DB (HYDRA_REDIS_DB from the
+ * launcher), never a pool literal a concurrent run could FLUSHDB mid-battery
+ * (#5062). They are omitted only where no owned DB is expected: a bare
+ * `node --test` or a remote REDIS_URL (`ownedDbSkip` returns a reason). On a
+ * full-suite local-launcher run a missing owned DB is a launcher regression,
+ * so this throws instead of silently shrinking the battery (operator ruling on
+ * #5062, same rule as the #4183 describes).
  */
-function battery(key: (name: string) => string): string[][] {
+export function fidelityBattery(key: (name: string) => string, env: NodeJS.ProcessEnv = process.env): string[][] {
+  const { db: owned, skip } = ownedDbContext(env);
+  if (owned === null && skip === false) {
+    throw new InvariantViolationError(
+      "[watchdog-redis-shim] full-suite local run (HYDRA_FULL_SUITE=1) has no owned HYDRA_REDIS_DB: " +
+        "the launcher exported none, so the fidelity battery cannot run its SELECT-path entries (#5062)",
+    );
+  }
+  const selectPath: string[][] = owned !== null
+    ? [
+        ["-n", owned, "SET", key("dbown"), "x"], // SELECT path
+        ["-n", owned, "GET", key("dbown")],
+        ["-n", "0", "GET", key("dbown")], // must be nil: the SET above went to the owned db
+        ["-n", owned, "DEL", key("dbown")],
+      ]
+    : [];
   return [
     ["-n", "0", "GET", key("str")], // nil bulk
     ["-n", "0", "EXISTS", key("str")], // integer 0
@@ -180,10 +205,7 @@ function battery(key: (name: string) => string): string[][] {
     ["-n", "0", "HGETALL", key("hash")], // multi-bulk incl. an empty + a multi-byte value
     ["-n", "0", "XADD", key("stream"), "1-1", "type", "launch:quota_stretch", "payload", '{"signal":"quota","durationMs":5000}'],
     ["-n", "0", "DEL", key("str"), key("hash"), key("stream")], // integer 3
-    ["-n", "9", "SET", key("db9"), "x"], // SELECT path
-    ["-n", "9", "GET", key("db9")],
-    ["-n", "0", "GET", key("db9")], // must be nil: the SET above went to db 9
-    ["-n", "9", "DEL", key("db9")],
+    ...selectPath,
     ["-n", "0", "INCR"], // top-level error reply
   ];
 }
@@ -193,25 +215,29 @@ function battery(key: (name: string) => string): string[][] {
  * transport. Returns the directory to PREPEND to a child's PATH, or `null` when
  * the shim cannot be proven equivalent here (callers then keep the real
  * `docker`). Callers remove the directory with {@link removeRedisDockerShim}.
+ * Throws when {@link fidelityBattery} does: a full-suite local run with no
+ * owned DB, which is a launcher regression rather than a shim mismatch.
  */
 export function installRedisDockerShim(label: string): string | null {
   const realDocker = resolveRealDocker(process.env.PATH);
   if (realDocker === null) return null;
+
+  // Built before the temp dir exists, so fidelityBattery's full-suite throw leaks nothing.
+  const ns = `hydra:test:redis-shim-fidelity-${process.pid}-${randomUUID().slice(0, 8)}`;
+  const realCases = fidelityBattery((n) => `${ns}:real:${n}`);
+  const shimCases = fidelityBattery((n) => `${ns}:shim:${n}`);
 
   const dir = join(tmpdir(), `hydra-watchdog-redis-shim-${label}-${process.pid}-${randomUUID().slice(0, 8)}`);
   mkdirSync(dir, { recursive: true });
   const shim = join(dir, "docker");
   writeFileSync(shim, redisDockerShimSource(realDocker), { mode: 0o755 });
 
-  const ns = `hydra:test:redis-shim-fidelity-${process.pid}-${randomUUID().slice(0, 8)}`;
   const reject = (why: string): null => {
     console.error(`[watchdog-redis-shim] falling back to real docker exec (slower, still correct): ${why}`);
     removeRedisDockerShim(dir);
     return null;
   };
 
-  const realCases = battery((n) => `${ns}:real:${n}`);
-  const shimCases = battery((n) => `${ns}:shim:${n}`);
   for (let i = 0; i < realCases.length; i++) {
     const real = runCli(realDocker, realCases[i]);
     const viaShim = runCli(shim, shimCases[i]);

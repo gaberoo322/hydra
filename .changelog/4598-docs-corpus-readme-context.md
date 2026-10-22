@@ -1,0 +1,1 @@
+- docs: fix README, CONTEXT.md and CONTEXT-MAP.md drift against the generated inventories and retire stale glossary terms (#4598)
