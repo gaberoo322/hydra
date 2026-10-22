@@ -38,8 +38,8 @@ import LocalTimestamp from "../../components/LocalTimestamp.jsx";
  *
  *   Dismiss (one per rec) — immediate-undo, realised as the ~5 s delayed
  *   commit: the panel hosts useUndoWindowHost + UndoToastStack and provides
- *   UndoWindowContext; the registry route `/now/recommendations/{id}/dismiss`
- *   is resolved per row (resolveControlRoute), so each rec gets its OWN undo
+ *   UndoWindowContext; the registry route's `{id}` segment is resolved per
+ *   row to the rec id (resolveControlRoute), so each rec gets its OWN undo
  *   window and in-flight flag (`action:POST <resolved route>`). Undo cancels
  *   before ANY request is sent; expiry fires the closure captured at the
  *   click — that rec and that read's run_id.
