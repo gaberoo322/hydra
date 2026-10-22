@@ -590,7 +590,8 @@
         }
       ],
       "composedFrom": [
-        "docs/operator-playbooks/_vendor/to-tickets.md"
+        "docs/operator-playbooks/_vendor/to-tickets.md",
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
       ],
       "route": "/docs/skill/hydra-tickets",
       "source": {
