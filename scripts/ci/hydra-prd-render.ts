@@ -252,11 +252,13 @@ export type RenderScope =
  * entry matches one file exactly. A leading `./` is ignored.
  */
 export function riskSurfaceMatches(files: readonly string[], riskSurface: readonly string[]): string[] {
+  const norm = (s: string) => (s || "").trim().replace(/^\.\//, "");
+  const entries = riskSurface.map(norm).filter((e) => e !== "");
   const out: string[] = [];
   for (const raw of files ?? []) {
-    const p = (raw || "").trim().replace(/^\.\//, "");
+    const p = norm(raw);
     if (!p || out.includes(p)) continue;
-    if (riskSurface.some((e) => (e.endsWith("/") ? p.startsWith(e) : p === e))) out.push(p);
+    if (entries.some((e) => (e.endsWith("/") ? p.startsWith(e) : p === e))) out.push(p);
   }
   return out;
 }
@@ -475,15 +477,18 @@ export function renderChildBody(
 /**
  * Render the labels the skill should apply to a child slice. Always includes
  * `ready-for-agent` plus the slice's kind (`enhancement` by default). In
- * Target scope (issue #5168) a slice on the risk surface also carries
- * `money-critical`, the label the Target's automerge fence reads.
+ * Target scope (issue #5168) a slice with a `dependsOn` edge gets `blocked`
+ * INSTEAD of `ready-for-agent` (the Target build's board pick reads no
+ * blockers, and `hydra-target-sweep` promotes it once its blocker closes), and a
+ * slice on the risk surface also carries `money-critical`, the label the
+ * Target's automerge fence reads.
  */
 export function childLabels(slice: PrdSlice, scope: RenderScope = { kind: "orch" }): string[] {
   const kind = slice.kind ?? "enhancement";
-  const labels = ["ready-for-agent", kind];
-  if (scope.kind === "target" && riskSurfaceMatches(slice.filesInScope, scope.riskSurface).length > 0) {
-    labels.push("money-critical");
-  }
+  if (scope.kind !== "target") return ["ready-for-agent", kind];
+  const lane = (slice.dependsOn ?? []).length > 0 ? "blocked" : "ready-for-agent";
+  const labels = [lane, kind];
+  if (riskSurfaceMatches(slice.filesInScope, scope.riskSurface).length > 0) labels.push("money-critical");
   return labels;
 }
 

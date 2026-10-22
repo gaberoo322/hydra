@@ -563,6 +563,16 @@ describe("Target render scope (issue #5168)", () => {
     assert.deepEqual(childLabels(input.slices[1]), ["ready-for-agent", "enhancement"], "orch scope is unchanged");
   });
 
+  test("childLabels files a dependent Target slice blocked, never ready-for-agent", () => {
+    const dependent = { ...input.slices[1], dependsOn: [1] };
+    assert.deepEqual(childLabels(dependent, target), ["blocked", "enhancement", "money-critical"]);
+    assert.deepEqual(childLabels(dependent), ["ready-for-agent", "enhancement"], "orch scope is unchanged");
+  });
+
+  test("riskSurfaceMatches normalises ./ on surface entries too", () => {
+    assert.deepEqual(riskSurfaceMatches(["src/risk/a.ts"], ["./src/risk/", " "]), ["src/risk/a.ts"]);
+  });
+
   test("orchestrator scope is byte-identical to the pre-#5168 default", () => {
     for (let i = 1; i <= input.slices.length; i++) {
       assert.equal(renderChildBody(input, i, 900, new Map(), 3, { kind: "orch" }), renderChildBody(input, i, 900, new Map(), 3));

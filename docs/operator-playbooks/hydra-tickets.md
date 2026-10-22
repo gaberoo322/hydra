@@ -1,6 +1,6 @@
 ---
 name: hydra-tickets
-description: AFK overlay on the upstream to-tickets base — turns a resolved plan into one parent epic plus N tracer-bullet child issues on gaberoo322/hydra, rendered deterministically through the hydra-prd renderer library. Zero AskUserQuestion.
+description: AFK overlay on the upstream to-tickets base — turns a resolved plan into one parent epic plus N tracer-bullet child issues on gaberoo322/hydra (or the Target board, `target` scope), rendered deterministically through the hydra-prd renderer library. Zero AskUserQuestion.
 when_to_use: "When a resolved plan or research finding needs to become tracked work, or the operator says 'ticket this'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 arguments: [scope]
@@ -89,16 +89,15 @@ on the **Target board** (issue #5168), and four things change:
    a `Money-critical: yes` line and the `money-critical` label, which the
    Target's automerge fence reads. **Skip step 5 above (`/api/tier`)**: the tier
    ladder is Orchestrator-only, and the Target derives its depth from the risk
-   surface instead. In `orch` scope, pass `{ kind: "orch", targetName: "$TARGET_NAME" }`,
-   so a Target path a finding names lands under `## Related (Target repo)`
-   rather than in scope.
+   surface instead. `orch` scope keeps the default scope argument.
 3. **Publish on `$TARGET_GH_REPO`.** Every `gh issue create` / `gh issue edit`
    carries `--repo "$TARGET_GH_REPO"`. The parent takes `enhancement` only, not
    `parentLabels()`. On the Target board `needs-triage` is
    `hydra-target-sweep`'s promote lane, so a triage label would queue the epic
    itself for a build.
-4. **Lane labels.** Unblocked slices get `ready-for-agent`. Every slice with a
-   `dependsOn` edge gets **`blocked`** instead (never bare). Its rendered
+4. **Lane labels.** Apply `childLabels(slice, scope)` as returned: in Target
+   scope it already gives a slice with a `dependsOn` edge **`blocked`** instead
+   of `ready-for-agent` (never bare). Its rendered
    `- Blocked by #N` lines are what `hydra-target-sweep` Step 3 reads to
    promote it to `ready-for-agent` once the blocker closes. The Target build
    picks the oldest `ready-for-agent` issue without reading blockers, so a
