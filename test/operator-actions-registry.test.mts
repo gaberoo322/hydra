@@ -29,10 +29,16 @@ import { InvariantViolationError } from "../src/errors.ts";
 import {
   ADMISSION_LINE_KEYS,
   ActionSchema,
+  BUCKET_CONTEXT,
+  CONTROL_CHECKS,
+  CONTROL_KEYS,
   OperatorActionEntrySchema,
   OperatorActionRegistrySchema,
   OperatorActionsResponseSchema,
   REVIEW_BUCKETS,
+  bucketOfKey,
+  type Action,
+  type OperatorActionEntry,
   type OperatorActionEntryInput,
 } from "../src/schemas/operator-actions.ts";
 import {
@@ -41,9 +47,17 @@ import {
   missingDefaultLines,
   outOfContextPlaceholders,
   classEntryCoverage,
+  controlEntryCoverage,
 } from "../src/operator-actions/registry.ts";
 import { createOperatorActionsRouter } from "../src/api/operator-actions.ts";
 import { DISPATCH_CLASSES } from "../src/taxonomy/classes.ts";
+import { evaluatePromoteEligibility } from "../src/autopilot/work-projections.ts";
+import {
+  healthVerdicts,
+  reopenVerdicts,
+  rowVerdicts,
+} from "../dashboard/src/lib/control-verdicts.ts";
+import { readFile } from "node:fs/promises";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -85,15 +99,16 @@ describe("REGISTRY — the shipped table (issue #4620)", () => {
     // `triage-origin` / `tracking-parent` / `dev-failure` (#4622, drift
     // assertion (b)) — pure data additions alongside their default.
     // Issue #4636 (ADR-0034 §9.2): plus one default `class:<name>` entry per
-    // DISPATCH_CLASSES row.
+    // DISPATCH_CLASSES row. Issue #4629 (ADR-0034 §8.3): plus one default
+    // `control:<page>/<name>` entry per CONTROL_KEYS member.
     const defaultEntries = REGISTRY.filter((e) => e.variant === undefined);
     assert.equal(
       defaultEntries.length,
-      ADMISSION_LINE_KEYS.length + DISPATCH_CLASSES.length,
+      ADMISSION_LINE_KEYS.length + DISPATCH_CLASSES.length + CONTROL_KEYS.length,
     );
     assert.equal(
       REGISTRY.length,
-      ADMISSION_LINE_KEYS.length + DISPATCH_CLASSES.length + 4,
+      ADMISSION_LINE_KEYS.length + DISPATCH_CLASSES.length + CONTROL_KEYS.length + 4,
     );
   });
 
@@ -551,5 +566,287 @@ describe("GET /operator-actions — route", () => {
     req.query = { unexpected: "1" };
     await handler!(req, res);
     assert.equal(res._status, 200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. control:<page>/<name> entries (issue #4629, ADR-0034 §8.3;
+//    design-concept 821e48ed INV-1/2/3/5/8/14)
+// ---------------------------------------------------------------------------
+
+const BOARD_STATE_SRC = "../dashboard/src/components/pages/work/BoardState.jsx";
+const HEALTH_SRC = "../dashboard/src/pages/Health.jsx";
+
+async function readPage(rel: string): Promise<string> {
+  return readFile(new URL(rel, import.meta.url), "utf8");
+}
+
+/** recommended + both alternatives, indexed (never spread — see the NOTE in
+ * registry.ts's outOfContextPlaceholders on tuple-spread widening). */
+function actionsOf(entry: OperatorActionEntry): Action[] {
+  return [entry.recommended, entry.alternatives[0], entry.alternatives[1]];
+}
+
+function controlEntry(key: string): OperatorActionEntry {
+  const entry = REGISTRY.find((e) => e.key === key && e.variant === undefined);
+  assert.ok(entry, `${key} has a default registry entry`);
+  return entry!;
+}
+
+/** The ordered check ids of an entry's recommended action. */
+function checksOf(entry: OperatorActionEntry): string[] {
+  return entry.recommended.preconditions.flatMap((p) => (typeof p === "string" ? [] : [p.check]));
+}
+
+describe("control:<page>/<name> registry entries (issue #4629)", () => {
+  test("controlEntryCoverage(REGISTRY, CONTROL_KEYS) is {missing: [], extra: []}", () => {
+    assert.deepEqual(controlEntryCoverage(REGISTRY, CONTROL_KEYS), { missing: [], extra: [] });
+  });
+
+  test("CONTROL_KEYS is the eight /work + /health controls the concept names", () => {
+    assert.deepEqual([...CONTROL_KEYS].sort(), [
+      "control:health/brake-engage",
+      "control:health/brake-release",
+      "control:health/pause",
+      "control:health/resume",
+      "control:work/close",
+      "control:work/promote",
+      "control:work/relabel",
+      "control:work/reopen",
+    ]);
+  });
+
+  test("{text, check} preconditions appear ONLY on control: entries — feed and class entries stay string-only", () => {
+    const offenders: string[] = [];
+    for (const entry of REGISTRY) {
+      if (bucketOfKey(entry.key) === "control") continue;
+      for (const action of actionsOf(entry)) {
+        for (const p of action.preconditions) {
+          if (typeof p !== "string") offenders.push(`${entry.key}${entry.variant ? `::${entry.variant}` : ""}`);
+        }
+      }
+    }
+    assert.deepEqual(offenders, [], "AttentionFeed.jsx renders precondition strings directly — no object may reach it");
+  });
+
+  test("every control entry recommends an in-dashboard action whose route carries no placeholder", () => {
+    for (const key of CONTROL_KEYS) {
+      const { recommended } = controlEntry(key);
+      assert.equal(recommended.kind, "in-dashboard", `${key} is a page write control`);
+      if (recommended.kind === "in-dashboard") {
+        assert.doesNotMatch(recommended.route, /[{}]/, `${key}: the per-row body is built client-side (INV-7)`);
+      }
+    }
+  });
+
+  test("the promote checklist is exactly the promote gate's four rules, in order", () => {
+    assert.deepEqual(checksOf(controlEntry("control:work/promote")), [
+      "issue-open",
+      "not-already-ready",
+      "has-scope-section",
+      "no-open-blocker",
+    ]);
+  });
+
+  test("the promote checklist order mirrors evaluatePromoteEligibility's precedence", () => {
+    // A row violating every rule refuses with the FIRST rule; clearing each in
+    // checklist order exposes the next — so the gate's precedence and the
+    // checklist order cannot drift apart silently.
+    const reasonOf: Record<string, string> = {
+      "issue-open": "closed",
+      "not-already-ready": "already-ready",
+      "has-scope-section": "missing-scope-section",
+      "no-open-blocker": "blocked",
+    };
+    const row: any = {
+      number: 40,
+      title: "fixture",
+      url: "https://example.invalid/40",
+      createdAt: "2026-08-01T00:00:00Z",
+      updatedAt: "2026-08-01T00:00:00Z",
+      state: "CLOSED",
+      labels: ["ready-for-agent"],
+      body: "Blocked by #41",
+    };
+    const open = new Set([41]);
+    const fixes: Record<string, () => void> = {
+      "issue-open": () => { row.state = "OPEN"; },
+      "not-already-ready": () => { row.labels = []; },
+      "has-scope-section": () => { row.body = "## Files in scope\n\n- `fixture/a.ts`\n\nBlocked by #41"; },
+      "no-open-blocker": () => { open.clear(); },
+    };
+    for (const check of checksOf(controlEntry("control:work/promote"))) {
+      const verdict = evaluatePromoteEligibility(row, open);
+      assert.equal(verdict.eligible, false, `${check} still refuses`);
+      assert.equal(verdict.eligible === false ? verdict.reason : null, reasonOf[check]);
+      fixes[check]!();
+    }
+    assert.deepEqual(evaluatePromoteEligibility(row, open), { eligible: true });
+  });
+
+  test("confirm tiers: promote, resume, brake-engage, brake-release confirm first; relabel, close, reopen, pause are immediate-undo", () => {
+    const tierOf = (key: string) => {
+      const { recommended } = controlEntry(key);
+      return recommended.kind === "in-dashboard" ? recommended.confirmTier : null;
+    };
+    for (const key of ["control:work/promote", "control:health/resume", "control:health/brake-engage", "control:health/brake-release"]) {
+      assert.equal(tierOf(key), "confirm-first", key);
+    }
+    for (const key of ["control:work/relabel", "control:work/close", "control:work/reopen", "control:health/pause"]) {
+      assert.equal(tierOf(key), "immediate-undo", key);
+    }
+  });
+
+  test("control:health/resume and the feed's machine-stopped:paused share method, route and confirmTier", () => {
+    const page = controlEntry("control:health/resume").recommended;
+    const feed = controlEntry("machine-stopped:paused").recommended;
+    assert.equal(page.kind, "in-dashboard");
+    assert.equal(feed.kind, "in-dashboard");
+    if (page.kind === "in-dashboard" && feed.kind === "in-dashboard") {
+      assert.deepEqual(
+        { method: page.method, route: page.route, confirmTier: page.confirmTier },
+        { method: feed.method, route: feed.route, confirmTier: feed.confirmTier },
+        "one route never behaves two ways",
+      );
+    }
+  });
+
+  test("every control: key is referenced by exactly one of BoardState.jsx / Health.jsx", async () => {
+    const pages = { [BOARD_STATE_SRC]: await readPage(BOARD_STATE_SRC), [HEALTH_SRC]: await readPage(HEALTH_SRC) };
+    for (const key of CONTROL_KEYS) {
+      const owners = Object.entries(pages).filter(([, src]) => src.includes(`"${key}"`)).map(([rel]) => rel);
+      assert.equal(owners.length, 1, `${key} must be rendered by exactly one page (got ${owners.join(", ") || "none"})`);
+    }
+  });
+
+  test("every check id a page's control entries use appears in that page's verdict table", async () => {
+    // The tables live in the tested leaf lib/control-verdicts.ts (PR #5155
+    // review); each page imports its own and every check id its entries use
+    // must be a key the table actually produces.
+    const tables: Record<string, { imports: string[]; ids: Set<string> }> = {
+      [BOARD_STATE_SRC]: {
+        imports: ["rowVerdicts", "reopenVerdicts"],
+        ids: new Set([...Object.keys(rowVerdicts({}, undefined)), ...Object.keys(reopenVerdicts(""))]),
+      },
+      [HEALTH_SRC]: { imports: ["healthVerdicts"], ids: new Set(Object.keys(healthVerdicts(null, false))) },
+    };
+    for (const [rel, table] of Object.entries(tables)) {
+      const src = await readPage(rel);
+      for (const fn of table.imports) {
+        assert.match(src, new RegExp(`import \\{[^}]*\\b${fn}\\b[^}]*\\} from "[./]+lib/control-verdicts\\.ts"`), `${rel} imports ${fn}`);
+      }
+      for (const key of CONTROL_KEYS.filter((k) => src.includes(`"${k}"`))) {
+        for (const check of checksOf(controlEntry(key))) {
+          assert.ok(table.ids.has(check), `${rel} renders ${key} but its verdict table lacks "${check}"`);
+        }
+      }
+    }
+  });
+
+  test("neither page carries a hand-written label, precondition or consequence string", async () => {
+    for (const rel of [BOARD_STATE_SRC, HEALTH_SRC]) {
+      const src = await readPage(rel);
+      for (const key of CONTROL_KEYS.filter((k) => src.includes(`"${k}"`))) {
+        const { recommended } = controlEntry(key);
+        const texts = [
+          recommended.consequence,
+          ...recommended.preconditions.map((p) => (typeof p === "string" ? p : p.text)),
+        ];
+        for (const text of texts) {
+          assert.ok(!src.includes(text), `${rel} re-spells registry text for ${key}: "${text}"`);
+        }
+        // Labels: the quoted literal or a JSX text node — never page copy.
+        assert.ok(!src.includes(`"${recommended.label}"`), `${rel} quotes ${key}'s label`);
+        assert.ok(!src.includes(`>${recommended.label}<`), `${rel} renders ${key}'s label as JSX text`);
+      }
+    }
+  });
+});
+
+describe("controlEntryCoverage — pure helper (issue #4629)", () => {
+  const keys = ["control:work/promote", "control:health/pause"];
+  test("{[], []} when every key has exactly one default control: entry (pass direction)", () => {
+    const entries = validateRegistry(keys.map((k) => validEntry(k)));
+    assert.deepEqual(controlEntryCoverage(entries, keys), { missing: [], extra: [] });
+  });
+
+  test("flags a listed key with no control: entry as missing (fail direction)", () => {
+    const entries = validateRegistry([validEntry("control:work/promote")]);
+    assert.deepEqual(controlEntryCoverage(entries, keys), { missing: ["control:health/pause"], extra: [] });
+  });
+
+  test("flags a control: entry outside the list as extra (fail direction)", () => {
+    const entries = validateRegistry([...keys.map((k) => validEntry(k)), validEntry("control:work/rogue")]);
+    assert.deepEqual(controlEntryCoverage(entries, keys), { missing: [], extra: ["control:work/rogue"] });
+  });
+
+  test("a key whose only entry carries a variant still counts as missing", () => {
+    const entries = validateRegistry([
+      validEntry("control:work/promote"),
+      validEntry("control:health/pause", { variant: "reframe" }),
+    ]);
+    assert.deepEqual(controlEntryCoverage(entries, keys).missing, ["control:health/pause"]);
+  });
+
+  test("ignores admission-line and class: entries entirely", () => {
+    const entries = validateRegistry([
+      ...keys.map((k) => validEntry(k)),
+      validEntry("machine-stopped:paused"),
+      validEntry("class:dev_orch"),
+    ]);
+    assert.deepEqual(controlEntryCoverage(entries, keys), { missing: [], extra: [] });
+  });
+});
+
+describe("control: namespace + typed preconditions — schema (issue #4629)", () => {
+  test("bucketOfKey returns the literal control, and BUCKET_CONTEXT.control is empty", () => {
+    assert.equal(bucketOfKey("control:work/promote"), "control");
+    assert.equal(bucketOfKey("control:health/brake-engage"), "control");
+    assert.deepEqual([...BUCKET_CONTEXT.control], []);
+  });
+
+  test("EntryKeySchema admits control:(work|health)/<name> and rejects other shapes", () => {
+    for (const key of ["control:work/promote", "control:health/brake-release", "control:work/a-1"]) {
+      assert.equal(OperatorActionEntrySchema.safeParse(validEntry(key)).success, true, key);
+    }
+    for (const key of ["control:runs/rerun", "control:work/Promote", "control:work", "control:work/", "control:/x"]) {
+      assert.equal(OperatorActionEntrySchema.safeParse(validEntry(key)).success, false, key);
+    }
+  });
+
+  test("a {text, check} precondition parses only with a CONTROL_CHECKS id and no extra field", () => {
+    const withPre = (pre: unknown) =>
+      ActionSchema.safeParse({ ...terminalAction("x"), preconditions: [pre] }).success;
+    for (const check of CONTROL_CHECKS) assert.equal(withPre({ text: "t", check }), true, check);
+    assert.equal(withPre({ text: "t", check: "issue-closed" }), false, "an unknown check id is a parse error");
+    assert.equal(withPre({ text: "t", check: "issue-open", extra: 1 }), false, "strict object");
+    assert.equal(withPre({ check: "issue-open" }), false, "text is required");
+    assert.equal(withPre("prose stays valid"), true);
+  });
+
+  test("CONTROL_CHECKS is the closed twelve-id vocabulary", () => {
+    assert.deepEqual([...CONTROL_CHECKS], [
+      "issue-open",
+      "not-already-ready",
+      "has-scope-section",
+      "no-open-blocker",
+      "relabel-target-chosen",
+      "issue-number-entered",
+      "pause-state-verified",
+      "autopilot-running",
+      "autopilot-paused",
+      "brake-state-verified",
+      "brake-off",
+      "brake-engaged",
+    ]);
+  });
+
+  test("missingDefaultLines and classEntryCoverage ignore control: entries", () => {
+    const entries = validateRegistry([
+      ...ADMISSION_LINE_KEYS.map((k) => validEntry(k)),
+      validEntry("control:work/promote"),
+    ]);
+    assert.deepEqual(missingDefaultLines(entries), []);
+    assert.deepEqual(classEntryCoverage(entries, []), { missing: [], extra: [] });
   });
 });

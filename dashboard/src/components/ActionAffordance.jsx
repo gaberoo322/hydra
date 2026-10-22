@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch } from "../hooks/useApi.js";
+import { apiFetch, useApi } from "../hooks/useApi.js";
 import { views } from "virtual:hydra-docs";
 import { REPO_URL } from "../pages/docs/build-info.js";
 import {
@@ -10,6 +10,8 @@ import {
   triggerDisabled,
   undoWindowSeconds,
 } from "../lib/delayed-commit.ts";
+import { PRECONDITION_GLYPH, anyFailed, resolvePreconditions } from "../lib/preconditions.ts";
+import { createRereadWaiters } from "../lib/reread.ts";
 
 /**
  * ActionAffordance — ONE component, keyed by the registry Action's `kind`
@@ -45,7 +47,33 @@ import {
  * BOTH the request and the caller's `onFired()` (feed refresh) before
  * rendering anything, and then renders only what was verified — the accepted
  * route line, never the consequence prose as an accomplished fact. Failure
- * renders ✗ inline and persistently.
+ * renders ✗ inline and persistently. A 200 result object is inspected
+ * (issue #4629 INV-9): `ok === false` renders ✗ `<label> refused — <reason>:
+ * <detail>` and never a ✓; a body carrying `verified` renders the OBSERVED
+ * post-write state; anything else keeps the accepted line.
+ *
+ * Page controls (issue #4629, ADR-0034 §8.3; design-concept 821e48ed): the
+ * /work and /health write controls render through {@link ControlAffordance},
+ * which reads the `control:<page>/<name>` registry entry via
+ * {@link useOperatorActions} and passes three optional props the feed never
+ * sets:
+ *   - `verdicts` — the page's `{ [check]: boolean }` table. When present the
+ *     affordance renders the LIVE ✓/✗/☐ precondition checklist beside the
+ *     button and the consequence under it (the feed renders its own
+ *     unchecked list, so it passes none). Whether or not it is present, the
+ *     trigger — arm, Confirm and immediate fire alike — is disabled while any
+ *     line is ✗ (lib/preconditions.ts; prose lines never disable).
+ *   - `context` — the closed `{number, label, paused, engaged}` the body
+ *     builders read (a row's issue number, the relabel target, …).
+ *   - `testId` — derives `<testId>-arm` / `-confirm-yes` / `-confirm-no`
+ *     (confirm-first), `<testId>` (immediate), `<testId>-preconditions`,
+ *     `<testId>-consequence` and `<testId>-result`.
+ *   - `rereadNoun` — names what `onFired` re-read in the result line
+ *     ("board", "/health"); defaults to "feed", so the feed's lines are
+ *     unchanged. A page's `onFired` resolves a REAL verdict through
+ *     {@link useCheckedRefresh} — `false` renders "re-read FAILED".
+ *   - `onStart` — called as the request starts, so a page's lifted result
+ *     panel never shows the previous outcome while a new one is in flight.
  */
 
 /**
@@ -57,19 +85,37 @@ import {
  * renders its affordance disabled with the reason, rather than firing a
  * guessed body. Kept in lockstep with the registry by
  * test/operator-actions-affordance.test.mts.
+ *
+ * A value is a static body or a builder `(context) => body` over the closed
+ * context `{number, label, paused, engaged}` (issue #4629 INV-7) — page
+ * controls pass the row/page facts as `context`; the registry itself never
+ * carries a body field. With no context the paused builder yields exactly
+ * the feed's `{paused: false}`.
  */
 const IN_DASHBOARD_BODY = {
-  "POST /autopilot/paused": { paused: false },
+  "POST /autopilot/paused": (context) => ({ paused: context.paused ?? false }),
   "POST /scheduler/start": {},
   "POST /design-concepts/:anchor/approve": { by: "operator:dashboard" },
+  "POST /autopilot/board/promote": (context) => ({ issue: context.number, confirm: true }),
+  "POST /autopilot/board/relabel": (context) => ({ issue: context.number, label: context.label }),
+  "POST /autopilot/board/close": (context) => ({ issue: context.number }),
+  "POST /autopilot/board/reopen": (context) => ({ issue: context.number }),
+  "POST /autopilot/emergency-brake": (context) =>
+    context.engaged ? { engaged: true, engagedBy: "health-page" } : { engaged: false },
 };
+
+/** Resolve a map value: a builder is called with the (closed) context, a
+ * static body is returned as-is. */
+function resolveBody(body, context) {
+  return typeof body === "function" ? body(context ?? {}) : body;
+}
 
 /** Exact key first; then `:param` segment patterns (`:x` matches one
  * non-empty resolved segment). Returns undefined when nothing matches —
  * the caller renders the disabled state. */
-function bodyFor(method, route) {
+function bodyFor(method, route, context) {
   const exact = IN_DASHBOARD_BODY[`${method} ${route}`];
-  if (exact !== undefined) return exact;
+  if (exact !== undefined) return resolveBody(exact, context);
   const segments = route.split("/");
   for (const [key, body] of Object.entries(IN_DASHBOARD_BODY)) {
     const space = key.indexOf(" ");
@@ -80,7 +126,7 @@ function bodyFor(method, route) {
     const matches = patternSegments.every(
       (p, i) => (p.startsWith(":") ? segments[i]?.length > 0 : p === segments[i]),
     );
-    if (matches) return body;
+    if (matches) return resolveBody(body, context);
   }
   return undefined;
 }
@@ -211,14 +257,72 @@ function useCopy(text) {
 // in-dashboard
 // ---------------------------------------------------------------------------
 
-function InDashboardAffordance({ action, onFired, onResult }) {
-  const body = bodyFor(action.method, action.route);
+/**
+ * The verified result line for one 2xx response (issue #4629 INV-9). The
+ * board routes answer 200 with a result object: `ok === false` is a refusal
+ * — rendered ✗ with its reason/detail, NEVER a ✓; a `verified` body renders
+ * the observed post-write state; any other 2xx keeps the accepted line.
+ * `reread === false` means the caller's re-read failed — the ✓ never claims
+ * a re-read it did not get. The lifted object carries the response's
+ * reason/detail/verified/issue so a page can keep its own result panel.
+ */
+function resultFromResponse(action, res, reread, context, rereadNoun = "feed") {
+  const base = {
+    label: action.label,
+    issue: res?.issue ?? context?.number,
+    reason: res?.reason,
+    detail: res?.detail,
+    verified: res?.verified,
+  };
+  const staleNote = rereadNoun === "feed" ? "list may be stale" : "shown state may be stale";
+  const stale = reread === false ? ` · ${rereadNoun} re-read FAILED — ${staleNote}` : "";
+  if (res?.ok === false) {
+    return {
+      ...base,
+      ok: false,
+      text: `✗ ${action.label} refused — ${res.reason ?? "refused"}${res.detail ? `: ${res.detail}` : ""}`,
+    };
+  }
+  if (res?.verified) {
+    const labels = Array.isArray(res.verified.labels) ? res.verified.labels.join(", ") : "";
+    return {
+      ...base,
+      ok: true,
+      text: `✓ ${action.label} verified — state ${res.verified.state}, labels: ${labels || "none"}${stale}`,
+    };
+  }
+  return reread === false
+    ? {
+        ...base,
+        ok: true,
+        text: `✓ ${action.method} ${action.route} accepted${stale}`,
+      }
+    : {
+        ...base,
+        ok: true,
+        text: `✓ ${action.method} ${action.route} accepted · ${rereadNoun} re-read`,
+      };
+}
+
+function InDashboardAffordance({ action, onFired, onResult, onStart, verdicts, context, testId, rereadNoun }) {
+  const body = bodyFor(action.method, action.route, context);
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const undoHost = useContext(UndoWindowContext);
   const mounted = useMounted();
-  const windowId = `action:${action.method} ${action.route}`;
+  // One window per (route, row): page controls repeat a route per row, so the
+  // row's issue number joins the id — two rows never share a window or an
+  // in-flight flag. The feed passes no context, so its ids are unchanged.
+  const windowId = `action:${action.method} ${action.route}${
+    context?.number !== undefined && context?.number !== null ? `#${context.number}` : ""
+  }`;
+  // The live checklist (issue #4629 INV-4): prose ☐ never disables; a
+  // {check} line is ✓ only on a literal-true verdict, ✗ otherwise (a missing
+  // verdict fails closed). Any ✗ disables every trigger below.
+  const lines = resolvePreconditions(action.preconditions, verdicts);
+  const blocked = anyFailed(lines);
+  const tid = (suffix) => (testId ? `${testId}${suffix}` : undefined);
 
   // Safe to run after this row has unmounted (the window lives at feed
   // level): the verified result is lifted through onResult, and row-local
@@ -228,34 +332,35 @@ function InDashboardAffordance({ action, onFired, onResult }) {
   // remounts alike — stays disabled until it settles.
   const fireRequest = useCallback(async () => {
     if (mounted.current) setBusy(true);
+    onStart?.();
     try {
       // The route is fired exactly as served — templates were resolved
-      // server-side by the composer; the body comes from the closed map.
-      await apiFetch(action.route, {
+      // server-side by the composer; the body comes from the closed map,
+      // built from the context captured with this exact closure.
+      const res = await apiFetch(action.route, {
         method: action.method,
-        body: JSON.stringify(bodyFor(action.method, action.route)),
+        body: JSON.stringify(bodyFor(action.method, action.route, context)),
       });
       // SERVER-CONFIRMED (ADR-0034 §7): the ✗/✓ line renders only after the
       // request AND the caller's feed refresh both settle.
       // onFired resolves `false` when the feed re-read FAILED — then the ✓
       // must not claim a re-read it never got.
       const reread = await onFired?.();
-      const next =
-        reread === false
-          ? {
-              ok: true,
-              text: `✓ ${action.method} ${action.route} accepted · feed re-read FAILED — list may be stale`,
-            }
-          : {
-              ok: true,
-              text: `✓ ${action.method} ${action.route} accepted · feed re-read`,
-            };
+      const next = resultFromResponse(action, res, reread, context, rereadNoun);
       if (mounted.current) setResult(next);
       onResult?.(next);
     } catch (err) {
       /* intentional: the persistent ✗ line below is the failure surface —
          surfaced inline, never a silent catch */
-      const next = { ok: false, text: `✗ ${err?.message ?? String(err)}` };
+      const message = err?.message ?? String(err);
+      const next = {
+        ok: false,
+        text: `✗ ${message}`,
+        label: action.label,
+        issue: context?.number,
+        reason: "request-failed",
+        detail: message,
+      };
       if (mounted.current) setResult(next);
       onResult?.(next);
     } finally {
@@ -264,7 +369,7 @@ function InDashboardAffordance({ action, onFired, onResult }) {
         setArmed(false);
       }
     }
-  }, [action.method, action.route, onFired, onResult, mounted]);
+  }, [action, context, onFired, onResult, onStart, rereadNoun, mounted]);
   const track = undoHost?.track;
   const fire = useCallback(
     () => (track ? track(windowId, fireRequest) : fireRequest()),
@@ -282,6 +387,7 @@ function InDashboardAffordance({ action, onFired, onResult }) {
         <button
           type="button"
           disabled
+          data-testid={tid("-disabled")}
           className="cursor-not-allowed rounded border border-zinc-700 px-2.5 py-1 text-xs text-zinc-500 opacity-40"
         >
           {action.label}
@@ -295,21 +401,23 @@ function InDashboardAffordance({ action, onFired, onResult }) {
     );
   }
 
-  return (
+  const controls = (
     <span className="inline-flex flex-wrap items-center gap-2">
       {action.confirmTier === "confirm-first" ? (
         armed ? (
           <>
             <button
               type="button"
+              data-testid={tid("-confirm-yes")}
               onClick={fire}
-              disabled={busy || inFlight}
+              disabled={busy || inFlight || blocked}
               className="rounded border border-emerald-500/60 px-2.5 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40"
             >
               {busy ? "…" : `Confirm ${action.label}?`}
             </button>
             <button
               type="button"
+              data-testid={tid("-confirm-no")}
               onClick={() => setArmed(false)}
               className="rounded border border-zinc-600 px-2.5 py-1 text-xs text-zinc-400 hover:text-zinc-100"
             >
@@ -321,8 +429,9 @@ function InDashboardAffordance({ action, onFired, onResult }) {
         ) : (
           <button
             type="button"
+            data-testid={tid("-arm")}
             onClick={() => setArmed(true)}
-            disabled={inFlight}
+            disabled={inFlight || blocked}
             className="rounded border border-emerald-500/45 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40"
           >
             {inFlight ? "…" : `${action.label}…`}
@@ -331,8 +440,9 @@ function InDashboardAffordance({ action, onFired, onResult }) {
       ) : (
         <button
           type="button"
+          data-testid={tid("")}
           onClick={() => undoHost.start(windowId, `Firing ${action.label} in ${undoWindowSeconds(UNDO_WINDOW_MS)}`, fire)}
-          disabled={triggerDisabled(undoHost.inFlight.has(windowId), undoHost.windows, windowId)}
+          disabled={blocked || triggerDisabled(undoHost.inFlight.has(windowId), undoHost.windows, windowId)}
           className="rounded border border-emerald-500/45 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40"
         >
           {inFlight ? "…" : action.label}
@@ -343,11 +453,44 @@ function InDashboardAffordance({ action, onFired, onResult }) {
       </span>
       {result && (
         <span
+          data-testid={tid("-result")}
           className={`break-all font-mono text-[11px] ${result.ok ? "text-emerald-300" : "text-red-300"}`}
         >
           {result.text}
         </span>
       )}
+    </span>
+  );
+
+  // The feed renders its own unchecked precondition list + consequence, so
+  // only a page control (verdicts supplied) gets the live checklist here.
+  if (verdicts === undefined) return controls;
+
+  return (
+    <span className="inline-flex flex-col gap-1">
+      {controls}
+      {lines.length > 0 && (
+        <ul data-testid={tid("-preconditions")} className="space-y-0.5 text-[11px]">
+          {lines.map((line) => (
+            <li
+              key={line.text}
+              data-state={line.state}
+              className={
+                line.state === "ok"
+                  ? "text-emerald-300"
+                  : line.state === "fail"
+                    ? "text-rose-300"
+                    : "text-zinc-500"
+              }
+            >
+              {PRECONDITION_GLYPH[line.state]} {line.text}
+            </li>
+          ))}
+        </ul>
+      )}
+      <span data-testid={tid("-consequence")} className="text-[11px] text-zinc-400">
+        → {action.consequence}
+      </span>
     </span>
   );
 }
@@ -455,10 +598,21 @@ function EscalationAffordance({ action, doc }) {
 // the one export the feed renders — assertion (c)'s subject
 // ---------------------------------------------------------------------------
 
-export function ActionAffordance({ action, doc, onFired, onResult }) {
+export function ActionAffordance({ action, doc, onFired, onResult, onStart, verdicts, context, testId, rereadNoun }) {
   switch (action.kind) {
     case "in-dashboard":
-      return <InDashboardAffordance action={action} onFired={onFired} onResult={onResult} />;
+      return (
+        <InDashboardAffordance
+          action={action}
+          onFired={onFired}
+          onResult={onResult}
+          onStart={onStart}
+          verdicts={verdicts}
+          context={context}
+          testId={testId}
+          rereadNoun={rereadNoun}
+        />
+      );
     case "terminal-skill":
       return <TerminalSkillAffordance action={action} />;
     case "config-env":
@@ -475,4 +629,103 @@ export function ActionAffordance({ action, doc, onFired, onResult }) {
         </span>
       );
   }
+}
+
+// ---------------------------------------------------------------------------
+// page controls — the registry read + the control:<page>/<name> wrapper
+// (issue #4629, design-concept 821e48ed INV-1/INV-10)
+// ---------------------------------------------------------------------------
+
+/** The literal a page control renders, disabled, while the registry read is
+ * loading or failed, or when its key has no entry — never a fallback label. */
+const REGISTRY_UNAVAILABLE = "operator-action registry unavailable";
+
+/**
+ * The one registry read a page makes: GET /operator-actions, once, no poll
+ * (the registry is a checked-in constant — it changes only on deploy),
+ * indexed by key over the DEFAULT entries (no variant). `ready` is false
+ * while loading, on a failed read, or on a payload without an entries list.
+ */
+export function useOperatorActions() {
+  const { data, error, loading } = useApi("/operator-actions");
+  return useMemo(() => {
+    if (loading || error || !Array.isArray(data?.entries)) {
+      return { ready: false, byKey: new Map() };
+    }
+    const byKey = new Map();
+    for (const entry of data.entries) {
+      if (entry?.variant === undefined && typeof entry?.key === "string") byKey.set(entry.key, entry);
+    }
+    return { ready: true, byKey };
+  }, [data, error, loading]);
+}
+
+/**
+ * A CHECKED refresh over one useApi-shaped read (`{loading, error, data,
+ * refresh}`): the returned function starts the read and resolves `true` once
+ * a render shows it settled without an error, `false` when it settled with
+ * one (or the page unmounted). Pass it (or a combination) as a page
+ * control's `onFired`, so the affordance's "re-read FAILED" line can fire —
+ * `useApi().refresh` alone resolves `undefined` either way, and useApi.js
+ * stays fenced (#4629 INV-15). The waiter core is lib/reread.ts, the same
+ * pattern as AttentionFeed's refreshChecked.
+ */
+export function useCheckedRefresh({ loading, error, data, refresh }) {
+  const waiters = useRef(null);
+  if (waiters.current === null) waiters.current = createRereadWaiters();
+  useEffect(() => {
+    waiters.current.open();
+    return () => waiters.current.close();
+  }, []);
+  useEffect(() => {
+    if (!loading) waiters.current.settle(error == null);
+  }, [loading, error, data]);
+  return useCallback(() => waiters.current.wait(refresh), [refresh]);
+}
+
+/**
+ * One page control: the `controlKey` registry entry's RECOMMENDED action,
+ * rendered through ActionAffordance with the page's live `verdicts`, the
+ * body `context` and a `testId`. A registry that is not ready — or a key it
+ * does not carry — renders the control DISABLED with
+ * {@link REGISTRY_UNAVAILABLE} (fail loud): the page never hand-rolls a
+ * label, precondition or consequence of its own.
+ *
+ * `key={controlKey}` (review follow-up, PR #5155): a page that swaps one
+ * control for another in the same slot (/health's Pause ⇄ Resume and
+ * Engage ⇄ Release, on a poll flip) must REMOUNT the affordance — reusing
+ * the instance would carry its `armed` / `result` / `busy` state across,
+ * leaving an armed "Confirm Release…" one click from firing with its arm
+ * step skipped. Per-row controls are already separate instances under their
+ * row's keyed list item.
+ */
+export function ControlAffordance({ registry, controlKey, verdicts, context, testId, onFired, onResult, onStart, rereadNoun }) {
+  const entry = registry.ready ? registry.byKey.get(controlKey) : undefined;
+  if (entry === undefined) {
+    return (
+      <button
+        type="button"
+        disabled
+        data-testid={testId ? `${testId}-unavailable` : undefined}
+        title={controlKey}
+        className="cursor-not-allowed rounded border border-zinc-700 px-2.5 py-1 text-xs text-zinc-500 opacity-60"
+      >
+        {REGISTRY_UNAVAILABLE}
+      </button>
+    );
+  }
+  return (
+    <ActionAffordance
+      key={controlKey}
+      action={entry.recommended}
+      doc={entry.doc}
+      verdicts={verdicts ?? {}}
+      context={context}
+      testId={testId}
+      onFired={onFired}
+      onResult={onResult}
+      onStart={onStart}
+      rereadNoun={rereadNoun}
+    />
+  );
 }
