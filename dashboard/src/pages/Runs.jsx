@@ -4,6 +4,7 @@ import { usePageItems } from "../hooks/usePageItems.js";
 import LocalTimestamp from "../components/LocalTimestamp.jsx";
 import RunsList from "../components/pages/runs/RunsList.jsx";
 import FrictionPanel from "../components/pages/runs/FrictionPanel.jsx";
+import BehaviorGallery from "../components/pages/runs/BehaviorGallery.jsx";
 import { describeDispatchTrigger } from "../components/pages/runs/runs-state.js";
 
 /**
@@ -30,6 +31,11 @@ import { describeDispatchTrigger } from "../components/pages/runs/runs-state.js"
  *   lowVariance / collinear / suspect) and its observation count — never a
  *   bare point estimate. The endpoint emits no generatedAt, so this panel
  *   claims no as-of; it is a decomposition, not an observed current value.
+ *
+ * Behavior (issue #4634, design-concept a7e7fedb INV-6) — BehaviorGallery
+ * restores the Explore › Behavior fold ADR-0034 §3 assigned here: the
+ * per-run dispatch-class mix from GET /explore/behavior, mounted between the
+ * dispatch events and the outcome attribution. The panel owns its fetch.
  *
  * Anti-scope (ADR-0034 §2): aggregate trends belong on /builder — this page
  * renders no trend of any kind.
@@ -195,6 +201,7 @@ export default function Runs() {
       </div>
       <RunsList />
       <DispatchEvents />
+      <BehaviorGallery />
       <OutcomeAttribution />
       <FrictionPanel />
     </div>

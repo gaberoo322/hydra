@@ -160,7 +160,7 @@
         "GET /api/attention/feed",
         "POST /api/attention/:id/dismiss"
       ],
-      "home": "/api/attention/counts",
+      "home": "/builder",
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
@@ -180,7 +180,7 @@
         "GET /api/attention/feed",
         "POST /api/attention/:id/dismiss"
       ],
-      "home": "/api/attention/counts",
+      "home": "/builder",
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
@@ -202,7 +202,7 @@
         "GET /api/attention/feed",
         "POST /api/attention/:id/dismiss"
       ],
-      "home": "/api/attention/counts",
+      "home": "/builder",
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",
@@ -224,7 +224,7 @@
         "GET /api/attention/feed",
         "POST /api/attention/:id/dismiss"
       ],
-      "home": "/api/attention/counts",
+      "home": "/builder",
       "retired": false,
       "source": {
         "path": "src/redis/keys.ts",

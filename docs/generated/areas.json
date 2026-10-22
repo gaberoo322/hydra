@@ -256,10 +256,10 @@
       "homes": [
         "/health",
         "/",
+        "/builder",
         "/runs",
         "/work",
-        "/now",
-        "/builder"
+        "/now"
       ],
       "route": "/docs/area/src-redis",
       "source": {
@@ -504,10 +504,10 @@
       "homes": [
         "/health",
         "/",
+        "/builder",
         "/runs",
         "/work",
-        "/now",
-        "/builder"
+        "/now"
       ],
       "route": "/docs/area/src-schemas",
       "source": {
@@ -1504,7 +1504,9 @@
           "POST /api/design-concepts/:anchorRef/approve"
         ]
       },
-      "homes": [],
+      "homes": [
+        "/builder"
+      ],
       "route": "/docs/area/src-design-concept-ts",
       "source": {
         "path": "CONTEXT-MAP.md",
