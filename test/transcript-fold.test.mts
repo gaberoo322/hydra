@@ -6,12 +6,16 @@ import { test, describe } from "node:test";
 import { strict as assert } from "node:assert";
 import {
   createScanAccumulator,
+  dedupeByMessageId,
   firstUserMessageText,
   foldFileContribution,
   parseTranscriptFile,
   sumSessionTokens,
+  TRANSCRIPT_PARSE_VERSION,
 } from "../src/cost/transcript-fold.ts";
 import type { ScanCutoffs } from "../src/cost/transcript-fold.ts";
+import { parseUsageLine } from "../src/cost/token-math.ts";
+import type { ParsedUsageLine } from "../src/cost/token-math.ts";
 import type { DispatchKind } from "../src/cost/token-breakdown.ts";
 import { assistantLine, userLine } from "./_helpers/cost-fixtures.mts";
 
@@ -337,5 +341,40 @@ describe("message.id de-duplication — one line per content block (issue #5141)
       res.entry.entries.map((e) => e.tokens.total),
       [15, 1],
     );
+    assert.equal(res.entry.linesWithUsage, 4, "every usage line is still counted as parsed");
+    assert.equal(res.entry.parseVersion, TRANSCRIPT_PARSE_VERSION);
+  });
+
+  // output_tokens grows as a message streams, so only the last (largest) line
+  // carries the complete count: keeping the first under-counts output.
+  test("keeps the LARGEST line of a message, not the first (sumSessionTokens)", () => {
+    const lines = [1, 1, 40].map((out) =>
+      withId(assistantLine(TS, { in: 10, out }, "claude-opus-4-7"), "msg_1"),
+    );
+    assert.equal(sumSessionTokens(lines), 50);
+  });
+
+  test("keeps the LARGEST line of a message, in first-seen order (parseTranscriptFile)", () => {
+    const content = [
+      withId(assistantLine(TS, { in: 10, out: 1 }, "claude-opus-4-7"), "msg_1"),
+      withId(assistantLine(TS, { in: 2 }, "claude-opus-4-7"), "msg_2"),
+      withId(assistantLine(TS, { in: 10, out: 40 }, "claude-opus-4-7"), "msg_1"),
+    ].join("\n");
+    const res = parseTranscriptFile(content, CUTOFF_7D, () => attribution);
+    assert.deepEqual(
+      res.entry.entries.map((e) => [e.tokens.output, e.tokens.total]),
+      [[40, 50], [0, 2]],
+    );
+  });
+
+  test("dedupeByMessageId passes id-less lines through and keeps the earlier line on a tie", () => {
+    const parse = (line: string) => parseUsageLine(line) as ParsedUsageLine;
+    const a = parse(withId(assistantLine(TS, { in: 5 }, "claude-opus-4-7"), "msg_1"));
+    const b = parse(withId(assistantLine("2026-05-25T10:00:01Z", { in: 5 }, "claude-opus-4-7"), "msg_1"));
+    const bare = parse(withId(assistantLine(TS, { in: 3 }, "claude-opus-4-7"), undefined));
+    const out = dedupeByMessageId([a, bare, b, bare]);
+    assert.equal(out.length, 3);
+    assert.equal(out[0], a, "a tie keeps the earlier line");
+    assert.deepEqual(out.slice(1), [bare, bare]);
   });
 });

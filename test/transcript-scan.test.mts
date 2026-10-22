@@ -58,6 +58,7 @@ import {
   countTranscriptParseMemoEntries,
 } from "../src/redis/transcript-parse-memo.ts";
 import type { FileParseMemoEntry } from "../src/redis/transcript-parse-memo.ts";
+import { TRANSCRIPT_PARSE_VERSION } from "../src/cost/transcript-fold.ts";
 import { getRedisConnection } from "../src/redis/connection.ts";
 import {
   assistantLine,
@@ -257,6 +258,7 @@ describe("src/redis/transcript-parse-memo.ts — seam round-trip", () => {
     const entry: FileParseMemoEntry = {
       size: 123,
       mtimeMs: 456,
+      parseVersion: TRANSCRIPT_PARSE_VERSION,
       entries: [
         { tsMs: 1000, tokens: breakdown({ total: 10 }), foreign: false, family: "opus" },
       ],
@@ -272,6 +274,23 @@ describe("src/redis/transcript-parse-memo.ts — seam round-trip", () => {
     assert.deepEqual(loaded.get("/tmp/fixture-a.jsonl"), entry);
   });
 
+  test("an entry persisted before the parse-version stamp loads as version 0 (issue #5141)", async () => {
+    const legacy = {
+      size: 1,
+      mtimeMs: 1,
+      entries: [],
+      skill: null,
+      dispatchKind: null,
+      observedResetMs: null,
+      linesParsed: 0,
+      linesWithUsage: 0,
+      parseErrors: 0,
+    };
+    await getRedisConnection().hset(MEMO_KEY, "/tmp/legacy.jsonl", JSON.stringify(legacy));
+    const loaded = await loadTranscriptParseMemo();
+    assert.equal(loaded.get("/tmp/legacy.jsonl")?.parseVersion, 0);
+  });
+
   test("a structurally-corrupt hash field is dropped, not thrown", async () => {
     await getRedisConnection().hset(MEMO_KEY, "/tmp/bad.jsonl", "{not json");
     const loaded = await loadTranscriptParseMemo();
@@ -283,6 +302,7 @@ describe("src/redis/transcript-parse-memo.ts — seam round-trip", () => {
     const entry: FileParseMemoEntry = {
       size: 1,
       mtimeMs: 1,
+      parseVersion: TRANSCRIPT_PARSE_VERSION,
       entries: [],
       skill: null,
       dispatchKind: null,
@@ -365,6 +385,7 @@ describe("degrade paths via transcriptScan() (injected memoIo)", () => {
       const badEntry: FileParseMemoEntry = {
         size: st.size,
         mtimeMs: st.mtimeMs,
+        parseVersion: TRANSCRIPT_PARSE_VERSION,
         entries: [
           {
             tsMs: new Date("2026-05-25T11:00:00Z").getTime(),
@@ -389,6 +410,52 @@ describe("degrade paths via transcriptScan() (injected memoIo)", () => {
       // poisoned cached total.
       assert.equal(scan.filesServedFromMemo, 0);
       assert.equal(scan.acc7d.total, 500);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a cached entry from an older parser version is re-parsed, not replayed (issue #5141)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "usage-memo-oldparser-"));
+    try {
+      const now = new Date("2026-05-25T12:00:00Z");
+      await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 500 })]);
+      const filePath = join(root, "p/s.jsonl");
+      const st = await stat(filePath);
+
+      // A pre-#5141 entry: same size/mtime, valid vocabulary, but its totals
+      // came from the parser that counted every content-block line.
+      const staleEntry: FileParseMemoEntry = {
+        size: st.size,
+        mtimeMs: st.mtimeMs,
+        parseVersion: 0,
+        entries: [
+          {
+            tsMs: new Date("2026-05-25T11:00:00Z").getTime(),
+            tokens: breakdown({ total: 1500 }), // the inflated pre-fix total
+            foreign: false,
+            family: "opus",
+          },
+        ],
+        skill: "hydra-dev",
+        dispatchKind: "autopilot-dispatched",
+        observedResetMs: null,
+        linesParsed: 1,
+        linesWithUsage: 1,
+        parseErrors: 0,
+      };
+
+      const writes: Map<string, FileParseMemoEntry>[] = [];
+      const scan = await transcriptScan(root, now, deriveSkill, stubReadOAuth, {
+        load: async () => new Map([[filePath, staleEntry]]),
+        write: async (upserts) => {
+          writes.push(new Map(upserts));
+        },
+      });
+      assert.equal(scan.filesServedFromMemo, 0);
+      assert.equal(scan.acc7d.total, 500);
+      // The re-parse overwrites the stale entry with a current-version one.
+      assert.equal(writes.at(-1)?.get(filePath)?.parseVersion, TRANSCRIPT_PARSE_VERSION);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -601,6 +668,7 @@ describe("transcriptScan walk-level characterization (issue #4790)", () => {
     const seeded: FileParseMemoEntry = {
       size: st.size,
       mtimeMs: st.mtimeMs,
+      parseVersion: TRANSCRIPT_PARSE_VERSION,
       entries: [
         {
           tsMs: Date.parse("2026-05-25T11:00:00Z"),
