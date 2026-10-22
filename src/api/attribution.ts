@@ -173,10 +173,17 @@ export function createAttributionRouter(
       // orientation is still a usable notice-vs-impact signal).
       const metricDirections = await loadMetricDirections();
 
-      return getTopImpactProducerClasses(loaded.observations, {
-        metricDirections,
-        topN,
-      });
+      // Issue #4634 (design-concept a7e7fedb INV-3): additive top-level
+      // `generatedAt` spread onto the ranking — the ADR-0034 §5 as-of the
+      // /builder ImpactRanking panel reads. `rows` / `metricCount` unchanged,
+      // so the discover reverse-loop keeps parsing as before.
+      return {
+        ...getTopImpactProducerClasses(loaded.observations, {
+          metricDirections,
+          topN,
+        }),
+        generatedAt: new Date().toISOString(),
+      };
     });
   });
 

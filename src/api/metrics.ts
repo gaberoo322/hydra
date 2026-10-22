@@ -235,9 +235,13 @@ export function createMetricsRouter() {
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
   router.get(
     "/metrics/unclassified",
-    aggregatorRouteNoQuery("api/metrics/unclassified", (req) => {
+    aggregatorRouteNoQuery("api/metrics/unclassified", async (req) => {
       const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
-      return getUnclassifiedAnchors(count);
+      // Issue #4634 (design-concept a7e7fedb INV-3): additive top-level
+      // `generatedAt` spread onto the aggregator body — the ADR-0034 §5 as-of
+      // the /builder UnclassifiedResidue panel reads. Every pre-existing field
+      // keeps its name and type (the discover playbook parses this route).
+      return { ...(await getUnclassifiedAnchors(count)), generatedAt: new Date().toISOString() };
     }),
   );
 
