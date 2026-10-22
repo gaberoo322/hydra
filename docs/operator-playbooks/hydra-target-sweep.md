@@ -63,6 +63,8 @@ For each open `needs-triage` issue:
 
 ### 3. Process blocked lane (`blocked` issues)
 
+**Also a trigger (#5167).** The autopilot also dispatches this sweep for open `blocked` items (`target_blocked_items`, each re-checked at most every 12h). `/hydra-tickets target` files dependent slices `blocked` with `Blocked by #N`; this step promotes them. Run it even when triage is empty.
+
 For each open `blocked` issue:
 1. Read the blocker reason from the issue body / `blocked-by #N` reference.
 2. Blocker issue now closed → unblock: `gh issue edit $NUM --repo $REPO --remove-label blocked --add-label ready-for-agent`
@@ -86,6 +88,8 @@ Each `reframe`-labelled issue carries the reframe context in its body (reason, p
 ### 5. Stall-detection (`in-progress` >90 min)
 
 Detect issues that claimed an `in-progress` slot but stopped making progress. Use the issue's `updated_at` (the closest board analogue of the retired `movedAt`) as the staleness clock; the `in-progress` label was stamped at claim time (Step 2 of `hydra-target-build`).
+
+**Also a trigger (#5167).** The autopilot also dispatches this sweep when `target_stale_in_progress_items` is non-empty (in-progress >90 min, no open PR referencing it), possibly with an empty triage lane. Always run this step.
 
 ```bash
 REPO="$TARGET_GH_REPO"
@@ -117,7 +121,7 @@ For each row printed (number, age, title):
      --jq '.[] | select((.body // "") | test("[Cc]loses #'"$NUM"'\\b"))
                 | "\(.number)\t\(.state)\t\(.merged_at // "-")"')
    ```
-2. **Branch three ways on `$LINKED`. Only the third may re-arm the issue:**
+2. **Branch five ways on `$LINKED`, in this order. Only the last may re-arm the issue:**
    - **A linked PR with a non-empty `merged_at` → SHIPPED: close it.** Recovering it would re-dispatch an anchor already satisfied. This is also what keeps Step 5 from undoing Step 7.
      ```bash
      gh issue close $NUM --repo $REPO --reason completed \
@@ -128,9 +132,44 @@ For each row printed (number, age, title):
      ```
      (DELETE-per-label is idempotent — a 404 on an absent label is swallowed — unlike `gh issue edit --remove-label`, which errors.)
    - **Else a linked PR still `open` → PROGRESSING: skip.**
-   - **Else no linked PR at all → genuinely stalled: recover.**
+   - **Else an open issue names this one its parent → PROGRESSING: skip (#5167).** A parent moves through its children's `Refs #NUM` PRs, so it looks stalled; re-queuing would build the whole parent.
+     ```bash
+     CHILDREN=$(gh api --paginate "repos/$REPO/issues?state=open&per_page=100" \
+       --jq '.[] | select(has("pull_request")|not)
+                  | select((.body // "") | test("([Ss]lice|[Cc]hild) of #'"$NUM"'\\b|## Parent\\s+#'"$NUM"'\\b"))
+                  | .number')
+     ```
+     Non-empty `$CHILDREN` → skip and log `parent-progressing` with the child numbers.
+   - **Else a pushed build branch carries the work but has no PR → open the PR (#5167).** A `dev_target` dispatch can push and die before `gh pr create`; re-queuing would rebuild from scratch and orphan the branch. Find a `feature/*-dev_target` branch ahead of the default branch with a `Closes #NUM` commit:
+     ```bash
+     DEFAULT=$(gh api "repos/$REPO" --jq .default_branch)
+     BRANCH=""
+     for B in $(gh api --paginate "repos/$REPO/branches?per_page=100" --jq '.[].name | select(endswith("-dev_target"))'); do
+       if gh api "repos/$REPO/compare/$DEFAULT...$B" \
+            --jq '[.ahead_by > 0, ([.commits[].commit.message | test("[Cc]loses #'"$NUM"'\\b")] | any)] | all' \
+            2>/dev/null | grep -qx true; then
+         BRANCH="$B"; break
+       fi
+     done
+     ```
+     If `$BRANCH` is set, open the PR via REST (`gh pr create` is GraphQL), titled and bodied from the newest closing commit plus a provenance line, then route the issue to QA. CI stays the gate; automerge's `money-critical` fence still holds.
+     ```bash
+     MSG=$(gh api "repos/$REPO/compare/$DEFAULT...$BRANCH" \
+       --jq '[.commits[].commit.message | select(test("[Cc]loses #'"$NUM"'\\b"))] | last')
+     BODY_FILE=$(mktemp)
+     {
+       printf '%s\n\n' "$MSG"
+       printf '## Provenance\n\nOpened by hydra-target-sweep stall recovery (#5167) from pushed branch `%s`; its dispatch died before opening a PR. Commit unchanged; CI is the gate.\n' "$BRANCH"
+     } > "$BODY_FILE"
+     gh api -X POST "repos/$REPO/pulls" -f title="$(printf '%s' "$MSG" | head -n1)" \
+       -f head="$BRANCH" -f base="$DEFAULT" -F body=@"$BODY_FILE" --jq .html_url
+     gh issue edit $NUM --repo $REPO --remove-label in-progress --add-label needs-qa
+     gh issue comment $NUM --repo $REPO --body "> *hydra-target-sweep:* Recovered: the build pushed \`$BRANCH\` but died before opening a PR. The PR is now open from that branch; in-progress → needs-qa (stall recovery, #5167)."
+     ```
+     Log it as `pushed-branch-pr-opened`. Never edit, rebase or force-push the recovered branch.
+   - **Else no linked PR, no open child, no pushed branch → genuinely stalled: recover.**
      `gh issue edit $NUM --repo $REPO --remove-label in-progress --add-label ready-for-agent`
-3. Log under "Stall recoveries" with number, age, and which branch fired (`shipped-closed` / `progressing-skipped` / `stalled-90min`).
+3. Log under "Stall recoveries" with number, age, and which branch fired (`shipped-closed` / `progressing-skipped` / `parent-progressing` / `pushed-branch-pr-opened` / `stalled-90min`).
 4. If the same issue shows up here on consecutive sweeps, flag it for operator attention — repeated stalls usually mean a structural blocker, not a transient agent crash.
 
 The 90-minute version gives operators a fast feedback signal when the WIP slots silently fill up. The primary close is performed by the target repo's own automerge.yml within seconds of the merge (ADR-0031 Decision 5); the merged branch above is the reconciler for whatever that path misses.
@@ -164,6 +203,8 @@ Scan all open board labels for issues whose title matches recent merged PR title
 
 ### Stall recoveries (>90 min in-progress)
 - Recovered: N (in-progress → ready-for-agent)
+- PRs opened from pushed branches: N (in-progress → needs-qa)
+- Parents left progressing: N
 - Repeat offenders: N (flagged for operator)
 
 ### Operator actions needed

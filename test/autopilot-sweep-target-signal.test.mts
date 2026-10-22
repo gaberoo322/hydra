@@ -66,6 +66,8 @@ interface StateOverrides {
   signal_last_fired?: Record<string, number>;
   signals?: Record<string, unknown>;
   target_triage_item_stamps?: Record<string, number>;
+  target_stale_item_stamps?: Record<string, number>;
+  target_blocked_item_stamps?: Record<string, number>;
 }
 
 function baseState(o: StateOverrides = {}): any {
@@ -105,6 +107,12 @@ function baseState(o: StateOverrides = {}): any {
     research_force_counter: {},
     ...(o.target_triage_item_stamps
       ? { target_triage_item_stamps: o.target_triage_item_stamps }
+      : {}),
+    ...(o.target_stale_item_stamps
+      ? { target_stale_item_stamps: o.target_stale_item_stamps }
+      : {}),
+    ...(o.target_blocked_item_stamps
+      ? { target_blocked_item_stamps: o.target_blocked_item_stamps }
       : {}),
   };
 }
@@ -314,5 +322,157 @@ describe("decide.py — sweep_target per-item verdict-stability guard (issue #37
       undefined,
       "orch-only scope must exclude the Target sweep class regardless of eligibility",
     );
+  });
+});
+
+describe("decide.py — sweep_target stranded in-progress arm (issue #5167)", () => {
+  test("an empty triage lane with a stale in-progress item → sweep_target dispatches", () => {
+    // The CSB #297/#298 shape: nothing in needs-triage, but an issue sat
+    // in-progress past 90 min with no open PR. Before #5167 this never fired.
+    const state = baseState({ signals: { target_stale_in_progress_items: "297 298" } });
+    const { plan, stateAfter } = runDecide(state, feedNoResearch);
+    const a = findSweep(plan);
+    assert.ok(a, "a stale in-progress item must arm sweep_target on its own");
+    assert.equal(a.skill, "hydra-target-sweep");
+    assert.match(a.reason, /stranded in-progress/);
+    assert.deepEqual(
+      stateAfter.target_stale_item_stamps,
+      { "297": NOW, "298": NOW },
+      "on fire, every current stale item is stamped to now",
+    );
+    assert.equal(stateAfter.target_triage_item_stamps, undefined, "the triage map is untouched");
+  });
+
+  test("every stale item inside its backoff window → no dispatch, map unchanged", () => {
+    // A parent the sweep rightly leaves alone (#66, progressing via slices)
+    // stays stale; the back-off stops it re-firing the class every cooldown.
+    const state = baseState({
+      signals: { target_stale_in_progress_items: "66" },
+      target_stale_item_stamps: { "66": NOW - 10 },
+    });
+    const { plan, stateAfter } = runDecide(state, feedNoResearch);
+    assert.equal(findSweep(plan), undefined, "a freshly-examined stale item must not re-fire the sweep");
+    assert.deepEqual(stateAfter.target_stale_item_stamps, { "66": NOW - 10 }, "a suppressed turn writes nothing");
+  });
+
+  test("a stale item past its backoff window is eligible again, and departed items are pruned", () => {
+    const state = baseState({
+      signals: { target_stale_in_progress_items: "66" },
+      target_stale_item_stamps: { "66": NOW - (BACKOFF_SEC + 60), "297": NOW - 10 },
+    });
+    const { plan, stateAfter } = runDecide(state, feedNoResearch);
+    assert.ok(findSweep(plan), "an aged-out stale item re-arms the sweep");
+    assert.deepEqual(stateAfter.target_stale_item_stamps, { "66": NOW }, "297 left the set and is pruned");
+  });
+
+  test("absent or empty stale set with no triage → no dispatch (no coarse boolean to fail open on)", () => {
+    for (const signals of [{}, { target_stale_in_progress_items: "" }]) {
+      const { plan } = runDecide(baseState({ signals }), feedNoResearch);
+      assert.equal(findSweep(plan), undefined, `no sweep for signals=${JSON.stringify(signals)}`);
+    }
+  });
+
+  test("triage suppressed by its backoff but a stale item eligible → dispatches and stamps both lanes", () => {
+    const state = baseState({
+      signals: {
+        needs_triage_target: true,
+        target_needs_triage_items: "626",
+        target_stale_in_progress_items: "298",
+      },
+      target_triage_item_stamps: { "626": NOW - 5 },
+    });
+    const { plan, stateAfter } = runDecide(state, feedNoResearch);
+    const a = findSweep(plan);
+    assert.ok(a, "the stale arm fires even while the triage arm is backed off");
+    assert.match(a.reason, /stranded in-progress/);
+    assert.deepEqual(stateAfter.target_triage_item_stamps, { "626": NOW }, "the sweep walks triage too");
+    assert.deepEqual(stateAfter.target_stale_item_stamps, { "298": NOW });
+  });
+
+  test("a triage-driven fire keeps its reason and stamps the stale set alongside", () => {
+    const state = baseState({
+      signals: {
+        needs_triage_target: true,
+        target_needs_triage_items: "626",
+        target_stale_in_progress_items: "298",
+      },
+    });
+    const { plan, stateAfter } = runDecide(state, feedNoResearch);
+    const a = findSweep(plan);
+    assert.ok(a);
+    assert.equal(a.reason, "target board hygiene due");
+    assert.deepEqual(stateAfter.target_stale_item_stamps, { "298": NOW });
+  });
+
+  test("the 900s class cooldown still gates the stale arm", () => {
+    const state = baseState({
+      signal_last_fired: { health: 0, sweep_orch: 0, sweep_target: NOW - 100, discover_orch: 0, discover_target: 0 },
+      signals: { target_stale_in_progress_items: "297" },
+    });
+    assert.equal(findSweep(runDecide(state, feedNoResearch).plan), undefined);
+  });
+
+  test("orch-only scope excludes the stale arm too", () => {
+    const state = baseState({ scope: "orch-only", signals: { target_stale_in_progress_items: "297" } });
+    assert.equal(findSweep(runDecide(state, feedNoResearch).plan), undefined);
+  });
+});
+
+describe("decide.py — sweep_target blocked arm (issue #5167)", () => {
+  // The blocked arm has its own (longer) back-off; the harness pins it short.
+  const BLOCKED_BACKOFF_SEC = 600;
+  function runBlocked(state: any) {
+    const t = makeTmp();
+    try {
+      writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
+      writeFileSync(t.cands, JSON.stringify(feedNoResearch));
+      writeFileSync(t.events, "[]");
+      const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events, `--now=${NOW}`], {
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          HYDRA_TARGET_TRIAGE_BACKOFF_SEC: String(BACKOFF_SEC),
+          HYDRA_TARGET_BLOCKED_BACKOFF_SEC: String(BLOCKED_BACKOFF_SEC),
+        },
+      });
+      if (r.status !== 0) throw new Error(`decide.py decide exited ${r.status}: ${r.stderr}`);
+      return { plan: JSON.parse(r.stdout), stateAfter: JSON.parse(readFileSync(t.state, "utf-8")) };
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  }
+
+  test("a blocked-only board arms sweep_target (Step 3 can promote a slice whose blocker closed)", () => {
+    const { plan, stateAfter } = runBlocked(baseState({ signals: { target_blocked_items: "187 305" } }));
+    const a = findSweep(plan);
+    assert.ok(a, "open blocked items must arm the sweep on an otherwise quiet board");
+    assert.match(a.reason, /blocked-lane re-check/);
+    assert.deepEqual(stateAfter.target_blocked_item_stamps, { "187": NOW, "305": NOW });
+  });
+
+  test("the blocked back-off is its own, longer window — not the triage window", () => {
+    // Stamped BACKOFF_SEC+60 ago: past the triage window, inside the blocked one.
+    const state = baseState({
+      signals: { target_blocked_items: "187" },
+      target_blocked_item_stamps: { "187": NOW - (BACKOFF_SEC + 60) },
+    });
+    const { plan, stateAfter } = runBlocked(state);
+    assert.equal(findSweep(plan), undefined, "an operator-gated item re-checks at the blocked cadence only");
+    assert.deepEqual(stateAfter.target_blocked_item_stamps, { "187": NOW - (BACKOFF_SEC + 60) });
+    const aged = runBlocked(baseState({
+      signals: { target_blocked_items: "187" },
+      target_blocked_item_stamps: { "187": NOW - (BLOCKED_BACKOFF_SEC + 60) },
+    }));
+    assert.ok(findSweep(aged.plan), "past the blocked window the item is eligible again");
+  });
+
+  test("a stale-driven fire also stamps the blocked set, and its reason wins over the blocked arm", () => {
+    const { plan, stateAfter } = runBlocked(baseState({
+      signals: { target_stale_in_progress_items: "297", target_blocked_items: "187" },
+    }));
+    const a = findSweep(plan);
+    assert.ok(a);
+    assert.match(a.reason, /stranded in-progress/);
+    assert.deepEqual(stateAfter.target_blocked_item_stamps, { "187": NOW });
   });
 });

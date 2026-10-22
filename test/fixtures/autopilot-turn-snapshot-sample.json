@@ -21,6 +21,8 @@
   "target_dev_resume_pick": null,
   "needs_triage_target": false,
   "target_needs_triage_items": [],
+  "target_stale_in_progress_items": [],
+  "target_blocked_items": [],
   "health_fail": false,
   "scout_walk_due": true,
   "scout_board_saturated": true,

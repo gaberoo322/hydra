@@ -76,6 +76,12 @@ export const TARGET_BOARD_COLLECTOR = "target-board";
  */
 export const TARGET_WIP_LIMIT = 3;
 
+/**
+ * The stall clock for a Target `in-progress` issue (#5167) — the same 90 min
+ * hydra-target-sweep's Step 5 applies to `updated_at`.
+ */
+export const TARGET_STALE_IN_PROGRESS_SECONDS = 90 * 60;
+
 /** The board-count lines, already in emit order (healthy and fallback orders differ). */
 export type TargetBoardCounts = readonly (readonly [key: string, value: string])[];
 
@@ -114,6 +120,14 @@ export interface TargetBoardSnapshot {
   readonly needsQaPr: TargetNeedsQaPr;
   /** Fail-closed: degraded → `none`. */
   readonly devResumePick: Classified<PrPick | null>;
+  /**
+   * #5167: the stranded in-progress issues sweep_target's Step 5 must examine
+   * (see {@link staleInProgressItems}). Set only when non-empty — like
+   * `needsQaPr.allSkipped`, an absent key keeps every pre-#5167 value
+   * byte-identical. Fail-closed: a failed read (already marked by the `wip`
+   * marker — same two inputs) leaves it absent, so it never fires a sweep.
+   */
+  readonly staleInProgress?: readonly number[];
   /** The lane-degraded accumulator (#4130) the scan-board collector reads. */
   readonly laneDegraded: boolean;
 }
@@ -291,6 +305,25 @@ export function wipStatus(inProgress: readonly unknown[], prs: readonly PrRefRow
   let live = 0;
   for (const n of ip) if (refs.has(n)) live++;
   return { limit: TARGET_WIP_LIMIT, inProgress: ip.size, live, saturated: live >= TARGET_WIP_LIMIT };
+}
+
+/**
+ * #5167: the in-progress Target issues a sweep must examine — a non-PR row,
+ * `updated_at` older than {@link TARGET_STALE_IN_PROGRESS_SECONDS}, referenced
+ * by no open PR (a referenced issue is progressing). Sorted ascending. A row
+ * whose `updated_at` does not parse has no clock, so it is never stale. Pure.
+ */
+export function staleInProgressItems(list: readonly unknown[], referenced: ReadonlySet<number>, nowMs: number): number[] {
+  const out = new Set<number>();
+  for (const it of list) {
+    if (!isObj(it) || (it.pull_request ?? null) !== null) continue;
+    const n = asInt(it.number);
+    if (n === null || referenced.has(n)) continue;
+    const updated = typeof it.updated_at === "string" ? Date.parse(it.updated_at) : Number.NaN;
+    if (Number.isNaN(updated)) continue;
+    if ((nowMs - updated) / 1000 > TARGET_STALE_IN_PROGRESS_SECONDS) out.add(n);
+  }
+  return [...out].sort((a, b) => a - b);
 }
 
 /** The open-issue numbers of a REST issues payload (dicts, `pull_request` null, int number). */
@@ -501,7 +534,8 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
   }
 
   // 5. WIP liveness (#4475) — fail OPEN.
-  const inProgress = nonPrIssueNumbers(await deps.github.listOpenIssuesByLabelRest(TARGET_BOARD_LABELS.in_progress, limit));
+  const inProgressRead = await deps.github.listOpenIssuesByLabelRest(TARGET_BOARD_LABELS.in_progress, limit);
+  const inProgress = nonPrIssueNumbers(inProgressRead);
   let wip: Classified<TargetWip>;
   if (inProgress === null || prRows === null) {
     notes.push("target WIP read FAILED (in-progress or open-PR payload unreadable) — target_wip_saturated fails OPEN to false (issue #4475)");
@@ -512,6 +546,13 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
     wip = { ok: true, value: wipStatus(inProgress, prRows, prRefs.predicates.referenced) };
   }
   if ("reason" in wip) degraded.push({ field: "wip", reason: wip.reason });
+
+  // 5b. Stranded in-progress (#5167) — fail CLOSED to absent. The same two
+  // reads as WIP, whose marker above already names a failure of either.
+  const stale =
+    wip.ok && inProgressRead.kind === "ok" && Array.isArray(inProgressRead.data) && prRows !== null && prRefs.ok
+      ? staleInProgressItems(inProgressRead.data, prRefs.predicates.referenced(prRows), deps.now())
+      : [];
 
   // 6. needs-qa PR pre-resolution (#4576/#4653) — fail OPEN, skipped on a zero count.
   const nqaCount = countLines?.find(([k]) => k === "target_needs_qa")?.[1] ?? "";
@@ -569,7 +610,7 @@ export async function collectTargetBoard(deps: TargetBoardDeps): Promise<Collect
 
   return {
     collector: TARGET_BOARD_COLLECTOR,
-    value: { counts, wip, needsQaPr, devResumePick, laneDegraded },
+    value: { counts, wip, needsQaPr, devResumePick, laneDegraded, ...(stale.length > 0 ? { staleInProgress: stale } : {}) },
     degraded,
     notes,
   };

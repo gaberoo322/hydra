@@ -112,6 +112,8 @@ const SignalsSchema = z
     target_dev_resume_pick: PinSchema.nullable(),
     needs_triage_target: z.boolean(),
     target_needs_triage_items: NumberList,
+    target_stale_in_progress_items: NumberList, // #5167
+    target_blocked_items: NumberList, // #5167
     // health / scout
     health_fail: z.boolean(),
     scout_walk_due: z.boolean(),
@@ -192,6 +194,8 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   target_dev_resume_pick: null,
   needs_triage_target: false,
   target_needs_triage_items: [],
+  target_stale_in_progress_items: [],
+  target_blocked_items: [],
   health_fail: true,
   scout_walk_due: false,
   scout_board_saturated: true,

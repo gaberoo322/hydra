@@ -61,6 +61,12 @@ export interface TargetScanSignals {
   readonly wireOrRetireUnlabelled: number;
   readonly designQaOpen: number;
   readonly designQaSaturated: boolean;
+  /**
+   * #5167: the open `blocked` issues, sorted — the input of sweep_target's
+   * blocked arm (the sweep's Step 3 resolves each blocker). Set only when
+   * non-empty, so every pre-#5167 value without a blocked row is unchanged.
+   */
+  readonly blockedItems?: readonly number[];
 }
 
 export interface TargetScanSnapshot {
@@ -119,19 +125,21 @@ export function classifyTargetScan(rows: readonly unknown[], opts: { limit: numb
   let openDesignQa = 0;
   let worTriage = 0;
   let worUnlabelled = 0;
+  const blockedNumbers = new Set<number>();
   for (const row of rows) {
     if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
     const labels = (row as Record<string, unknown>).labels;
     if (!Array.isArray(labels)) continue;
     const has = (l: string) => labels.includes(l);
+    const num = (row as Record<string, unknown>).number;
     const inTriage = has(L.needsTriage);
     if (inTriage) {
       triage++;
-      const num = (row as Record<string, unknown>).number;
       // An integer number (a boolean reads as 0/1, as it always has); anything else is skipped.
       if (typeof num === "boolean") triageNumbers.add(Number(num));
       else if (typeof num === "number" && Number.isInteger(num)) triageNumbers.add(num);
     }
+    if (has(L.blocked) && typeof num === "number" && Number.isInteger(num)) blockedNumbers.add(num);
     if (has(L.readyForAgent)) queued++;
     if (has(L.cleanupScan)) openScan++;
     if (has(L.designQa)) openDesignQa++;
@@ -149,6 +157,7 @@ export function classifyTargetScan(rows: readonly unknown[], opts: { limit: numb
     wireOrRetireUnlabelled: worUnlabelled,
     designQaOpen: openDesignQa,
     designQaSaturated: openDesignQa > TARGET_DESIGN_QA_BOARD_SATURATION_CAP,
+    ...(blockedNumbers.size > 0 ? { blockedItems: [...blockedNumbers].sort((a, b) => a - b) } : {}),
   };
 }
 

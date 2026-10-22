@@ -47,6 +47,8 @@ import {
   passAtHead,
   projectPrRefs,
   resolveNeedsQaPr,
+  staleInProgressItems,
+  TARGET_STALE_IN_PROGRESS_SECONDS,
   TARGET_WIP_LIMIT,
   type TargetBoardSnapshot,
 } from "../src/autopilot/turn-snapshot/target-board.ts";
@@ -798,6 +800,61 @@ describe("target-board — WIP liveness (issue #4475)", () => {
     const r = await runBoard({ inProgress: EMPTY });
     assert.equal(r.out.target_wip_saturated, "false");
     assert.ok(r.notes.some((n) => n.startsWith("target WIP read FAILED")));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #5167 — stranded in-progress items (sweep_target's second arm)
+// ---------------------------------------------------------------------------
+
+describe("target-board — stranded in-progress items (issue #5167)", () => {
+  const NOW_MS = Date.parse("2026-10-22T12:00:00Z");
+  const ago = (sec: number) => new Date(NOW_MS - sec * 1000).toISOString();
+  const STALE = ago(TARGET_STALE_IN_PROGRESS_SECONDS + 60);
+  const FRESH = ago(TARGET_STALE_IN_PROGRESS_SECONDS - 60);
+  const row = (number: number, updated_at: unknown, extra: Record<string, unknown> = {}) => ({ number, updated_at, ...extra });
+
+  test("stale = older than the 90 min clock AND referenced by no open PR, sorted", () => {
+    const rows = [row(298, STALE), row(297, STALE), row(5, FRESH), row(66, STALE)];
+    assert.deepEqual(staleInProgressItems(rows, new Set([66]), NOW_MS), [297, 298]);
+  });
+
+  test("a PR row, an unparseable clock, or a non-integer number is never stale", () => {
+    const rows = [row(1, STALE, { pull_request: { url: "x" } }), row(2, "not-a-date"), row(3, null), { number: "4", updated_at: STALE }, null];
+    assert.deepEqual(staleInProgressItems(rows, new Set(), NOW_MS), []);
+  });
+
+  test("the collector sets staleInProgress only when non-empty (absent keeps the value shape)", async () => {
+    const run = async (o: TargetFake) => {
+      const fake = fakeTarget(o);
+      return (await collectTargetBoard({ github: fake.github, hydra: fake.hydra, now: () => NOW_MS, ghListLimit: 100 })).value;
+    };
+    const stranded = await run({ inProgress: ok([row(297, STALE), row(298, STALE)]), pulls: ok([pr(12, "feature/x-dev_target", "Closes #298")]) });
+    assert.deepEqual(stranded.staleInProgress, [297], "the PR-referenced #298 is progressing, not stranded");
+    const none = await run({ inProgress: ok([row(5, FRESH)]) });
+    assert.equal("staleInProgress" in none, false, "nothing stale → the key is absent");
+  });
+
+  test("a failed in-progress or open-PR read fails closed (absent), never fires a sweep", async () => {
+    for (const o of [{ inProgress: EMPTY }, { inProgress: ok([row(297, STALE)]), pulls: EMPTY }] as TargetFake[]) {
+      const fake = fakeTarget(o);
+      const v = (await collectTargetBoard({ github: fake.github, hydra: fake.hydra, now: () => NOW_MS, ghListLimit: 100 })).value;
+      assert.equal(v.staleInProgress, undefined);
+    }
+  });
+});
+
+describe("target-scan-boards — blocked items (issue #5167)", () => {
+  test("blockedItems lists the open blocked issues, sorted, and is absent when there are none", () => {
+    const rows = [
+      { number: 305, labels: ["blocked", "enhancement"] },
+      { number: 187, labels: ["blocked"] },
+      { number: 9, labels: ["ready-for-agent"] },
+      { number: "12", labels: ["blocked"] },
+    ];
+    assert.deepEqual(classifyTargetScan(rows, { limit: 100, workQueue: 0 }).blockedItems, [187, 305]);
+    const none = classifyTargetScan([{ number: 9, labels: ["ready-for-agent"] }], { limit: 100, workQueue: 0 });
+    assert.equal("blockedItems" in none, false, "no blocked row → the key is absent (value shape unchanged)");
   });
 });
 
