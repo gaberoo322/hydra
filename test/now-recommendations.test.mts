@@ -437,6 +437,7 @@ describe("#4634 — RecommendationsPanel source pins (registry-driven since #515
 import {
   REC_SEVERITIES,
   chooseMute,
+  muteChoiceMatchesRead,
   readRunIdOf,
   recDismissContext,
   recDismissVerdicts,
@@ -474,12 +475,38 @@ describe("#5152 — now-verdicts leaf", () => {
 
   test("mute: the pick pins the run id read AT PICK TIME — a later read never re-binds it", () => {
     const choice = chooseMute("critical", "run-A");
-    // A new run rolled over after the pick: the write still targets run-A.
+    // The write carries the pick-time run id, never a later read's.
     assert.deepEqual(recMuteContext(choice), { runId: "run-A", severity: "critical" });
-    assert.equal(recMuteVerdicts(choice, "run-B")["rec-run-id-read"], true);
+    assert.equal(recMuteVerdicts(choice, "run-A")["rec-run-id-read"], true);
+    // PR #5158 review: after a rollover the captured run id no longer matches
+    // the panel's read — the line fails closed (✗ disables the trigger), so a
+    // stale choice can never POST {run_id: A} and render ✓ for a write that
+    // changed nothing on run B.
+    assert.equal(recMuteVerdicts(choice, "run-B")["rec-run-id-read"], false);
+    assert.equal(recMuteVerdicts(choice, null)["rec-run-id-read"], false);
     // A pick made while the read named no run can never enable the write.
     const blind = chooseMute("info", null);
     assert.deepEqual(recMuteVerdicts(blind, "run-B"), { "rec-run-id-read": false, "severity-chosen": true });
     assert.deepEqual(recMuteContext(null), { runId: null, severity: null });
+  });
+
+  test("muteChoiceMatchesRead: a choice survives only while the read still names its run (PR #5158 review)", () => {
+    assert.equal(muteChoiceMatchesRead(null, "run-A"), true, "no choice — nothing to clear");
+    assert.equal(muteChoiceMatchesRead(chooseMute("warn", "run-A"), "run-A"), true);
+    assert.equal(muteChoiceMatchesRead(chooseMute("warn", "run-A"), "run-B"), false, "rollover clears it");
+    assert.equal(muteChoiceMatchesRead(chooseMute("warn", "run-A"), null), false, "a read with no run clears it");
+    assert.equal(muteChoiceMatchesRead(chooseMute("warn", null), null), false, "a blind pick never matches");
+  });
+
+  test("the panel clears the choice on a run_id change and after a successful mute (PR #5158 review)", () => {
+    const src = readRepo4634(PANEL);
+    const panel = src.slice(src.indexOf("export default function RecommendationsPanel("));
+    assert.ok(
+      panel.includes("setMuteChoice((prev) => (muteChoiceMatchesRead(prev, readRunId) ? prev : null));\n    setMuteDone(null);\n  }, [readRunId]);"),
+      "a rollover drops the choice and the old run's ✓ line",
+    );
+    const onResult = panel.slice(panel.indexOf("const onMuteResult = useCallback("), panel.indexOf("const unknown ="));
+    assert.ok(onResult.includes("if (result?.ok) {\n      setMuteChoice(null);"), "success clears the choice — a second mute needs a fresh pick");
+    assert.ok(panel.includes("<ResultLine result={muteDone} />"), "the success line survives the control's remount");
   });
 });

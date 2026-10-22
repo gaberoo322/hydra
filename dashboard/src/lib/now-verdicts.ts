@@ -57,18 +57,38 @@ export function chooseMute(severity: unknown, readRunId: string | null | undefin
 }
 
 /**
+ * Whether a recorded choice still belongs to the panel's current read: its
+ * captured run id is real AND equals the read's. False after a run rollover
+ * (or once the read names no run) — the panel clears such a choice, and
+ * {@link recMuteVerdicts} fails it closed meanwhile. No choice → true
+ * (nothing to clear).
+ */
+export function muteChoiceMatchesRead(
+  choice: MuteChoice | null | undefined,
+  readRunId: string | null | undefined,
+): boolean {
+  if (choice === null || choice === undefined) return true;
+  return typeof choice.runId === "string" && choice.runId.length > 0 && choice.runId === readRunId;
+}
+
+/**
  * Mute severity: a severity is chosen (severity-chosen), and the run id the
- * write will carry — the choice's captured one — is real (rec-run-id-read).
- * With no choice yet, rec-run-id-read reflects the current read so the
- * checklist still says whether the panel knows its run.
+ * write will carry — the choice's captured one — is real AND still the run
+ * the panel's read names (rec-run-id-read; PR #5158 review). A choice pinned
+ * to a run the read has rolled past fails closed: POSTing the old run id
+ * would answer 200 and render ✓ for a write that hides nothing on the
+ * current run. With no choice yet, rec-run-id-read reflects the current read
+ * so the checklist still says whether the panel knows its run.
  */
 export function recMuteVerdicts(
   choice: MuteChoice | null | undefined,
   readRunId: string | null | undefined,
 ): Verdicts {
-  const runId = choice ? choice.runId : readRunId;
+  const runIdOk = choice
+    ? muteChoiceMatchesRead(choice, readRunId)
+    : typeof readRunId === "string" && readRunId.length > 0;
   return {
-    "rec-run-id-read": typeof runId === "string" && runId.length > 0,
+    "rec-run-id-read": runIdOk,
     "severity-chosen": choice !== null && choice !== undefined && (REC_SEVERITIES as readonly string[]).includes(choice.severity),
   };
 }

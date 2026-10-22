@@ -12,6 +12,7 @@ import { resolveControlRoute } from "../../lib/health-verdicts.ts";
 import {
   REC_SEVERITIES,
   chooseMute,
+  muteChoiceMatchesRead,
   readRunIdOf,
   recDismissContext,
   recDismissVerdicts,
@@ -184,11 +185,32 @@ export default function RecommendationsPanel() {
   // ---- Mute severity: the picker records the choice ------------------------
   const [muteChoice, setMuteChoice] = useState(null); // MuteChoice | null
   const [muteBusy, setMuteBusy] = useState(false);
+  // The lifted ✓ line of the last successful mute: the choice is cleared on
+  // success (below), which remounts the control and drops its inline line, so
+  // the panel keeps it. A failure keeps the choice, so its ✗ stays inline.
+  const [muteDone, setMuteDone] = useState(null);
+  // A choice belongs to the run it was picked on (PR #5158 review): when the
+  // read's run_id changes, the choice and the old run's ✓ line are dead —
+  // drop them, the same way dismissResults is dropped. recMuteVerdicts fails
+  // a mismatched choice closed for the render before this effect lands.
+  useEffect(() => {
+    setMuteChoice((prev) => (muteChoiceMatchesRead(prev, readRunId) ? prev : null));
+    setMuteDone(null);
+  }, [readRunId]);
   const onMuteStart = useCallback(() => {
-    if (mounted.current) setMuteBusy(true);
+    if (!mounted.current) return;
+    setMuteBusy(true);
+    setMuteDone(null);
   }, []);
-  const onMuteResult = useCallback(() => {
-    if (mounted.current) setMuteBusy(false);
+  const onMuteResult = useCallback((result) => {
+    if (!mounted.current) return;
+    setMuteBusy(false);
+    // Success clears the choice: a second mute needs a fresh pick, pinned to
+    // the then-current read.
+    if (result?.ok) {
+      setMuteChoice(null);
+      setMuteDone({ ok: true, text: result.text });
+    }
   }, []);
 
   const unknown = status === "loading" || status === "unknown";
@@ -228,7 +250,10 @@ export default function RecommendationsPanel() {
                     type="button"
                     data-testid={`rec-mute-pick-${severity}`}
                     aria-pressed={chosen}
-                    onClick={() => setMuteChoice(chooseMute(severity, readRunId))}
+                    onClick={() => {
+                      setMuteDone(null);
+                      setMuteChoice(chooseMute(severity, readRunId));
+                    }}
                     disabled={muteBusy || !readRunId}
                     className={`rounded border px-2 py-0.5 disabled:opacity-40 ${
                       chosen
@@ -254,6 +279,7 @@ export default function RecommendationsPanel() {
                 rereadNoun="/now"
               />
             </div>
+            <ResultLine result={muteDone} />
           </div>
         )}
 
