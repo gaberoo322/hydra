@@ -35,8 +35,6 @@
 // Adapter Seam (src/health/probe.ts): the fan-out is a domain concern consumed by
 // route code, importable by a non-route caller without coupling to src/api/.
 
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 import { getMetricsTrend } from "../metrics/trend.ts";
 import { getAggregateStats } from "../metrics/aggregate.ts";
 import { getStatus as getSchedulerStatus } from "../scheduler/heartbeat.ts";
@@ -78,8 +76,6 @@ import {
 import { readDisk, readMem, readServiceStatus, isProbeFailure } from "../host-probe/probe.ts";
 import { logger } from "../logger.ts";
 
-const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
-const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 
 // ---- Wake-on-LAN recovery lives OUTSIDE the fan-out (issue #3626) ------------
 //
@@ -203,12 +199,11 @@ type ProbeDescriptor =
 // so the full pipeline is testable without standing up Redis/OpenViking/the host
 // — the test surface that did not exist while the fan-out lived in the route
 // handler. The `pingRedis` dep folds the eventBus `publisher.ping()` to a boolean
-// the basic-health probe carries; `killFileExists` defaults to a real fs check.
+// the basic-health probe carries. (The `killFileExists` dep went with POST /kill
+// and the `.kill` file — ADR-0024 §3, issue #4638.)
 export interface CollectProbeDeps {
   /** Resolve the basic-health `redis` boolean (default: eventBus.publisher.ping). */
   pingRedis: () => Promise<boolean>;
-  /** Whether the `.kill` file exists (default: real fs check on $HYDRA_ROOT/.kill). */
-  killFileExists?: () => boolean;
   schedulerStatus?: typeof getSchedulerStatus;
   // Issue #3459: workQueueLen + backlogCounts removed (stubs always returned 0
   // after ADR-0031 retired the Redis backlog subsystem).
@@ -242,7 +237,6 @@ export interface CollectProbeDeps {
 export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeInputs> {
   const {
     pingRedis,
-    killFileExists = () => existsSync(KILL_FILE),
     schedulerStatus = getSchedulerStatus,
     // Issue #3459: workQueueLen + backlogCounts removed.
     metricsTrend = getMetricsTrend,
@@ -277,10 +271,9 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
       kind: "async",
       key: "basicHealth",
       run: async () => {
-        const killed = killFileExists();
         const redisOk = await pingRedis();
         // In-process cycle removed in PR-3 (issue #383); status is "idle" forever.
-        return { status: killed ? "killed" : "ok", redis: redisOk, cycle: "idle", uptime: process.uptime() };
+        return { status: "ok", redis: redisOk, cycle: "idle", uptime: process.uptime() };
       },
     },
     // The `serviceProbes` descriptor was removed with OpenViking: every service

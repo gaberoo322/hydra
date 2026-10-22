@@ -1,22 +1,9 @@
 import { Router } from "express";
-import {
-  ContextTraceQuerySchema,
-  ReflectionHealthQuerySchema,
-} from "../schemas/learning.ts";
-// Issue #2467: the reflection-deposit observability surface reads the recent
-// cycle-metrics window (each row already carries a derived `reflectionMatchSource`
-// from `deriveReflectionMatchSource(reflectionSources)`) and projects the bucket
-// distribution. This is a PURE READ over the existing metrics trend — it adds NO
-// second cycle-record writer (reap.py stays the sole writer; design-concept
-// invariant) and NEVER fabricates a non-none bucket from an empty store.
-// Issue #2492: `projectReflectionHealth` (and its types) relocated to the
-// metrics domain alongside `deriveReflectionMatchSource`; re-exported below for
-// this router's existing callers. Issue #3038: it was then extracted into a
-// focused `metrics/reflection-health.ts` leaf, so this route imports the
-// projection from there while still reading `getMetricsTrend()` (the Redis
-// read path) from `metrics/trend.ts` — a pure read, no second cycle-record writer.
-import { getMetricsTrend } from "../metrics/trend.ts";
-import { projectReflectionHealth } from "../metrics/reflection-health.ts";
+import { ContextTraceQuerySchema } from "../schemas/learning.ts";
+// Issue #4638 (ADR-0024 §3): `GET /learning/reflection-health` was retired —
+// zero callers. Its pure projection, `projectReflectionHealth`
+// (src/metrics/reflection-health.ts), stays: GET /api/health/deep's
+// reflection rule (src/health/diagnostics.ts) is its live consumer.
 // Issue #2497: the pure learning-composition domain (`getContext` and its
 // supporting types/helpers) relocated OUT of this route module into
 // src/learning/composition.ts — "how the orchestrator composes learning
@@ -33,7 +20,7 @@ import { projectReflectionHealth } from "../metrics/reflection-health.ts";
 // lives in src/learning/composition.ts (see that module's header for the full
 // #2225 → #2333 → #2497 lineage).
 import { getContext } from "../learning/composition.ts";
-import { aggregatorRouteNoQuery, isolateAggregator, schemaValidationError } from "./route-helpers.ts";
+import { isolateAggregator, schemaValidationError } from "./route-helpers.ts";
 
 // ===========================================================================
 // Learning diagnostics router (issue #3006 — focused after the split).
@@ -49,10 +36,9 @@ import { aggregatorRouteNoQuery, isolateAggregator, schemaValidationError } from
 //     with the knowledge plane (ADR-0033), along with `/openviking/search`,
 //     `/learning/coverage`, the #2717 retrieval ledger and the #1440
 //     `cyclesWithContext` metric. None of those routes exist today.
-// What remains here are the two routes that are genuinely about the LEARNING
-// COMPOSITION domain — `/context-trace` (a diagnostic view of `getContext()`'s
-// composition) and `/reflection-health` (a pure projection over the metrics
-// trend). All route paths are unchanged; only the file boundaries moved.
+// What remains here is the route genuinely about the LEARNING COMPOSITION
+// domain — `/context-trace` (a diagnostic view of `getContext()`'s
+// composition). Its sibling `/reflection-health` was retired in #4638.
 // ===========================================================================
 
 // Issue #2497: re-export the learning-composition domain for back-compat. The
@@ -68,45 +54,6 @@ export type {
   GetContextDeps,
 } from "../learning/composition.ts";
 export { getContext } from "../learning/composition.ts";
-
-// ===========================================================================
-// Reflection-deposit health (issue #2467; projection relocated to metrics #2492)
-//
-// The recurring #1912/#2450/#2467/#2492 confusion is that a 100%-`none`
-// `reflectionMatchSource` distribution LOOKS like broken telemetry but is the
-// HONEST steady state whenever the per-anchor reflection store is empty —
-// reflections are PRODUCED only on a non-merged failure (reap.py
-// `_fire_reflection_for_completion`), so a high-merge-rate run structurally
-// serves nothing and `none` is correct, NOT a regression
-// (`deriveReflectionMatchSource("") === "none"` is the contract,
-// src/metrics/trend.ts). The operator pain is that the metric alone cannot
-// distinguish that honest-none from a genuinely-broken deposit; the dashboard
-// just shows a flat `none` baseline.
-//
-// This surface makes the distinction READABLE without a second writer or a
-// fabricated bucket: it reports the bucket distribution over the recent
-// cycle-metrics window AND a `verdict` that is honest about ambiguity.
-//
-// Issue #2492: the PURE projection (`projectReflectionHealth` + its
-// `ReflectionHealthReport` / `ReflectionHealthSampleProjection` types) moved to
-// the metrics domain (src/metrics/trend.ts, alongside its sibling
-// `deriveReflectionMatchSource`) so the deep-health diagnostics seam can consume
-// it too — surfacing the verdict where operators actually look (GET
-// /api/health/deep) to stop the #1912→#2450→#2467→#2492 re-file loop — WITHOUT
-// the pure health seam importing this `src/api/` router (a backwards inward
-// edge). They are re-exported here so the route below and its test keep their
-// import site unchanged.
-// ===========================================================================
-
-export type {
-  ReflectionHealthSampleProjection,
-  ReflectionHealthReport,
-} from "../metrics/reflection-health.ts";
-// Value re-export: the pure projection lives in the metrics domain now (#2492),
-// extracted into the `metrics/reflection-health.ts` leaf (#3038), but
-// `GET /learning/reflection-health` and the existing test/learning-reflection-
-// health.test.mts import it FROM here — keep that import site stable.
-export { projectReflectionHealth } from "../metrics/reflection-health.ts";
 
 export function createLearningRouter() {
   const router = Router();
@@ -199,45 +146,6 @@ export function createLearningRouter() {
       };
     });
   });
-
-  /**
-   * GET /learning/reflection-health — operator-readable reflection-deposit
-   * observability surface (issue #2467).
-   *
-   * The `reflectionMatchSource` cycle metric reads a flat 100%-`none` whenever
-   * the per-anchor reflection store is empty — which is the HONEST steady state
-   * in a high-merge-rate run (reflections are produced only on a non-merged
-   * failure), NOT a regression. The bare metric cannot distinguish that honest
-   * empty-store `none` from a genuinely-broken deposit, so #1912/#2450/#2467
-   * keep re-filing the same false alarm. This surface makes the distinction
-   * readable: it returns the bucket distribution over the recent cycle-metrics
-   * window AND a `verdict` that is explicit about ambiguity (see
-   * `ReflectionHealthReport`), keyed on whether any cycle actually carried a
-   * present `reflectionSources` deposit.
-   *
-   * A pure read: it composes `getMetricsTrend()` (which already derives
-   * `reflectionMatchSource` per row) through the pure `projectReflectionHealth`
-   * tally. No second cycle-record writer, no fabricated bucket.
-   *
-   * Query param (optional): `count` — window size (default 20, clamped [1,200]).
-   *
-   * Response (200): a `ReflectionHealthReport`.
-   */
-  // Issue #909 / ADR-0027 eighth sweep: never-throw-500 isolation via the
-  // aggregatorRouteNoQuery seam (route-helpers.ts). `count` keeps its soft-parse
-  // (default-on-garbage 20, clamp [1,200], NO behaviour-changing 400) inside
-  // `produce`, per the common.ts guidance that lenient read routes own their
-  // `safeParse`.
-  router.get(
-    "/learning/reflection-health",
-    aggregatorRouteNoQuery("learning/reflection-health", async (req) => {
-      // ADR-0022: read `count` through the Schemas seam. The schema reuses
-      // countQuerySchema's coercion (default-on-garbage 20, clamp [1,200]).
-      const count = ReflectionHealthQuerySchema.safeParse(req.query).data?.count ?? 20;
-      const cycles = await getMetricsTrend(count);
-      return projectReflectionHealth(cycles);
-    }),
-  );
 
   return router;
 }

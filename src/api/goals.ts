@@ -1,11 +1,12 @@
 import { Router } from "express";
-import { loadProjectGoals, summarizeGoalsForPrompt } from "../project-goals.ts";
+import { loadProjectGoals } from "../project-goals.ts";
 import { logger } from "../logger.ts";
 
 /**
  * Project goals routes.
  *
- * Extracted from api/misc.ts as part of issue #268.
+ * Extracted from api/misc.ts as part of issue #268. `GET /goals/summary` was
+ * retired under ADR-0024 §3 (issue #4638): zero callers.
  */
 export function createGoalsRouter() {
   const router = Router();
@@ -25,21 +26,6 @@ export function createGoalsRouter() {
       }
     } catch (err: any) {
       logger.error({ routeLabel: "api/goals", err }, "[api/goals] read failed");
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // GET /goals/summary — Goals formatted for prompts
-  //
-  // Not an isolateAggregator route: the success path is a text/plain send,
-  // not JSON, which the seam's `res.json(produce())` can't express.
-  router.get("/goals/summary", async (req, res) => {
-    try {
-      const goals = await loadProjectGoals();
-      const summary = summarizeGoalsForPrompt(goals);
-      res.type("text/plain").send(summary);
-    } catch (err: any) {
-      logger.error({ routeLabel: "api/goals/summary", err }, "[api/goals] summary failed");
       res.status(500).json({ error: err.message });
     }
   });

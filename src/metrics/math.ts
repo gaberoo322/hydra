@@ -19,35 +19,14 @@
  * `/explore/anomalies` backend route lost its last consumer — a repo-wide grep
  * confirmed zero remaining callers.
  *
- * The variants differ along three axes, each pinned by an existing caller/test:
- *   - `p` domain: nearest-rank-fraction takes p in 0..1; the others take p in
- *     0..100.
- *   - empty-input result: nearest-rank variants return `null`; the interpolated
- *     variant returns `0` (its callers surface a numeric latency, not a gauge).
- *   - NaN handling: `percentileNearestRankFraction` trusts its (already
- *     pre-filtered) input; `percentileNearestRank` and the interpolated variant
- *     filter non-finite values first.
+ * The variants differ along two axes, each pinned by an existing caller/test
+ * (the 0..1-fraction nearest-rank variant was deleted with its only caller,
+ * `GET /metrics/grounding-duration` — ADR-0024 §3, issue #4638):
+ *   - empty-input result: the nearest-rank variant returns `null`; the
+ *     interpolated variant returns `0` (its callers surface a numeric latency,
+ *     not a gauge).
+ *   - both take p in 0..100 and filter non-finite values first.
  */
-
-/**
- * Nearest-rank percentile where `p` is a FRACTION in 0..1 (e.g. 0.5, 0.95).
- * Nearest-rank index `floor((n-1) * p)`, clamped to the last index. Returns
- * `null` for an empty array. Does NOT filter non-finite inputs — callers pass
- * an already-filtered array (grounding-duration buckets drop non-positive
- * samples upstream).
- *
- * Contract extracted verbatim from the pre-#2613 `metrics/trend.ts` helper
- * (originally #341, extracted to a function in #2126).
- */
-export function percentileNearestRankFraction(
-  arr: number[],
-  p: number,
-): number | null {
-  if (arr.length === 0) return null;
-  const sorted = [...arr].sort((a, b) => a - b);
-  const idx = Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p));
-  return sorted[idx];
-}
 
 /**
  * Nearest-rank percentile where `p` is a PERCENT in 0..100 (e.g. 50, 95).

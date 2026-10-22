@@ -305,8 +305,9 @@ free-form context
     // customSections is Record<string,string>.
     assert.equal(g.customSections["domain notes"], "free-form context");
 
-    // userPriorities is OPTIONAL and never written by the parser → undefined.
-    assert.equal(g.userPriorities, undefined);
+    // userPriorities was removed with its only reader, summarizeGoalsForPrompt
+    // (GET /goals/summary retired, #4638) — the parser never wrote it.
+    assert.ok(!("userPriorities" in g));
   });
 
   test("empty input still satisfies ProjectGoalsDoc with concrete defaults", () => {
@@ -318,6 +319,6 @@ free-form context
     assert.deepEqual(g.constraints, []);
     assert.deepEqual(g.painPoints, []);
     assert.deepEqual(g.customSections, {});
-    assert.equal(g.userPriorities, undefined);
+    assert.ok(!("userPriorities" in g));
   });
 });

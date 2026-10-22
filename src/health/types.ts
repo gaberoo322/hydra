@@ -93,8 +93,8 @@ export interface HealthSnapshot {
   // diagnoses. Honest-zero on a probe failure (the probe already returned 0).
   attributionLedgerCount: number;
   // Issue #2492: the reflection-deposit-health verdict over the recent
-  // cycle-metrics window — the SAME projection GET /api/learning/reflection-health
-  // serves, derived in parseProbes from the metrics-probe trend already collected
+  // cycle-metrics window — the projection the (retired, #4638)
+  // GET /api/learning/reflection-health served, derived in parseProbes from the metrics-probe trend already collected
   // (a pure tally; no new I/O, no second cycle-record writer). Carried on the
   // snapshot so the deep-health reflection rule (rules.ts) is pure over `s` like
   // every other rule, surfacing the verdict as a NON-ALARM info diagnostic where
