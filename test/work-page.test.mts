@@ -1313,7 +1313,7 @@ describe("structural pins — /work page wiring", () => {
     // rendered by the shared ActionAffordance (issue #4629, design-concept
     // 821e48ed INV-13), which derives work-promote-arm / -confirm-yes /
     // -confirm-no from its testId prop.
-    assert.match(src, /import \{[^}]*\bActionAffordance\b[^}]*\} from "\.\.\/\.\.\/ActionAffordance\.jsx"/);
+    assert.match(src, /import \{[^}]*\bControlAffordance\b[^}]*\} from "\.\.\/\.\.\/ActionAffordance\.jsx"/);
     assert.match(src, /testId="work-promote"/);
     // The immediate-tier controls exist (relabel picker + affordances).
     assert.match(src, /data-testid="work-relabel-select"/);

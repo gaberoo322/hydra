@@ -82,6 +82,7 @@ import {
   resolveOpenBlockers,
 } from "../autopilot/board-state.ts";
 import {
+  deriveWorkLane,
   toWorkQueueRow,
   compareWorkQueueRows,
   evaluatePromoteEligibility,
@@ -358,14 +359,28 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
         );
         glmPartitionActive = false;
       }
+      // Blockers resolve against PROSPECTIVE rows (issue #4629,
+      // design-concept 821e48ed INV-6): every operator-lane row AS IT WOULD
+      // BE post-promote (`labels + ready-for-agent`, glm partition inactive)
+      // — exactly the promote gate's prospectiveRow construction below — so
+      // the resolver (which only resolves rows that can count toward
+      // ready_for_agent) covers every lane the /work promote checklist
+      // evaluates, still in ONE batched lookup with its fail-safe
+      // treat-as-open default. board-state's counts are untouched.
       const resolveBlockers =
         deps.resolveOpenBlockers ??
-        ((rows: readonly IssueRow[]) =>
-          resolveOpenBlockers(rows, undefined, glmPartitionActive));
+        ((rows: readonly IssueRow[]) => resolveOpenBlockers(rows));
+      const prospectiveRows: IssueRow[] = read.rows
+        .filter((row) => deriveWorkLane(row.labels) !== null)
+        .map((row) =>
+          row.labels.includes("ready-for-agent")
+            ? row
+            : { ...row, labels: [...row.labels, "ready-for-agent"] },
+        );
       // Same post-read belt-and-braces as board-state (#3059): a rejecting
       // injected resolver degrades the queue, never 500s.
       try {
-        const openBlockers = await resolveBlockers(read.rows);
+        const openBlockers = await resolveBlockers(prospectiveRows);
         items = read.rows
           .map((row) => toWorkQueueRow(row, openBlockers, { glmPartitionActive }))
           .filter((row): row is WorkQueueRow => row !== null)

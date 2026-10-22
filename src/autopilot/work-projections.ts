@@ -86,9 +86,14 @@ interface ToWorkQueueRowOptions {
 /**
  * Project one open {@link IssueRow} into a {@link WorkQueueRow}, or null when
  * it carries no operator lane. `openBlockers` is the endpoint-resolved OPEN
- * strict-blocker set (only meaningful for `ready-for-agent` rows — the same
- * population `resolveOpenBlockers` resolves); per-row numbers are this row's
- * strict refs intersected with that set, self-references excluded.
+ * strict-blocker set — resolved for EVERY operator-lane row (issue #4629,
+ * design-concept 821e48ed INV-6: the route resolves each row as it would be
+ * post-promote, the promote gate's own prospective-row construction); per-row
+ * numbers are this row's strict refs intersected with that set,
+ * self-references excluded. `hasScopeSection` is the ONE shared parser's
+ * verdict on the body (src/scope-section.ts — the same function
+ * {@link evaluatePromoteEligibility} refuses with), so the /work promote
+ * checklist never re-parses the body client-side.
  * `opts.glmPartitionActive` is whether the GLM drainer partition is LIVE — the
  * SAME resolved liveness the route feeds `resolveOpenBlockers`, threaded here
  * so the GLM badge is the ONE lane predicate's ruling, not a second label read
@@ -105,7 +110,7 @@ export function toWorkQueueRow(
   const lane = deriveWorkLane(row.labels);
   if (lane === null) return null;
   const rowBlockers =
-    lane === "ready-for-agent" && openBlockers.size > 0
+    openBlockers.size > 0
       ? extractStrictBlockerRefs(row.body).filter(
           (n) => n !== row.number && openBlockers.has(n),
         )
@@ -118,6 +123,7 @@ export function toWorkQueueRow(
     lane,
     updatedAt: row.updatedAt ?? "",
     openBlockers: rowBlockers,
+    hasScopeSection: hasScopeSection(row.body),
     glmEligible: glmLane(row.labels, opts.glmPartitionActive).lane === "glm",
   };
 }

@@ -1,6 +1,13 @@
-import { useState } from "react";
-import { useApi, useServerConfirmedWrite } from "../hooks/useApi.js";
+import { useCallback } from "react";
+import { useApi } from "../hooks/useApi.js";
 import { derivePageStatus } from "../hooks/usePageItems.js";
+import {
+  ControlAffordance,
+  UndoToastStack,
+  UndoWindowContext,
+  useOperatorActions,
+  useUndoWindowHost,
+} from "../components/ActionAffordance.jsx";
 import LocalTimestamp from "../components/LocalTimestamp.jsx";
 import DeployAxes from "../components/pages/health/DeployAxes.jsx";
 import CostPanel from "../components/pages/health/CostPanel.jsx";
@@ -33,12 +40,40 @@ import AlertsPanel from "../components/pages/health/AlertsPanel.jsx";
  *
  * Actions are SERVER-CONFIRMED, never optimistic (design-concept 2880e735
  * INV-6): the control shows a pending state and only re-renders once the
- * follow-up GET confirms the write — both toggles ride the shared
- * useServerConfirmedWrite hook (useApi.js, issue #4335), extracted from the
- * /now Console pause pattern rather than hand-rolled per control. The
- * emergency brake additionally requires an explicit second confirm action
- * before its POST fires (INV-7); pause/resume stays single-click.
+ * follow-up GET confirms the write. Since issue #4629 (design-concept
+ * 821e48ed, ADR-0034 §8.3) every write control — pause, resume, brake
+ * engage, brake release — renders through the shared ActionAffordance from
+ * its `control:health/<name>` registry entry (one read via
+ * useOperatorActions): the label, the live ✓/✗ precondition checklist and
+ * the consequence all come from the registry, and the button is disabled
+ * while any line is ✗ ({@link healthVerdicts}). The affordance POSTs, awaits
+ * health.refresh() via onFired, and renders only the verified state; the
+ * RUNNING/PAUSED and ENGAGED/OFF chips keep deriving from the /health read.
+ * Pause is immediate-with-undo (the ~5 s delayed commit hosted here); resume
+ * and both brake controls confirm first (resume spends quota; the brake
+ * halts or re-enables every auto-merge).
  */
+
+/**
+ * The /health verdict table (issue #4629 INV-4/INV-14): one boolean per
+ * CONTROL_CHECKS id this page's controls use, computed from the verified
+ * /health read. A read that is loading, failed, or carries `ok:false`
+ * verifies nothing — every state check is false (✗, fail closed).
+ */
+function healthVerdicts(data, trusted) {
+  const pause = data?.autopilotPause;
+  const brake = data?.emergencyBrake;
+  const pauseVerified = trusted && pause !== undefined && pause !== null && pause.ok !== false;
+  const brakeVerified = trusted && brake !== undefined && brake !== null && brake.ok !== false;
+  return {
+    "pause-state-verified": pauseVerified,
+    "autopilot-running": pauseVerified && pause.paused !== true,
+    "autopilot-paused": pauseVerified && pause.paused === true,
+    "brake-state-verified": brakeVerified,
+    "brake-off": brakeVerified && brake.engaged !== true,
+    "brake-engaged": brakeVerified && brake.engaged === true,
+  };
+}
 
 const DEEP_CHIP = {
   healthy: "bg-emerald-500/10 text-emerald-300 border border-emerald-500/40",
@@ -131,36 +166,28 @@ export default function Health() {
     unmeasured: "bg-zinc-700/40 text-zinc-400 border border-zinc-600",
   };
 
+  // ---- Write controls: registry entries + the undo-window host -------------
+  // (issue #4629) One registry read, no poll; pause's immediate-with-undo
+  // window is hosted at page level. Every affordance awaits refreshHealth
+  // (onFired) before rendering its result — server-confirmed.
+  const registry = useOperatorActions();
+  const undoHost = useUndoWindowHost();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const refreshHealth = useCallback(() => health.refresh(), [health.refresh]);
+  const verdicts = healthVerdicts(
+    health.data,
+    healthStatus !== "loading" && healthStatus !== "unknown",
+  );
+
   // ---- Autopilot run state + pause/resume (server-confirmed, INV-6) --------
   // The pause flag rides the /health payload (paused + the verified `ok` flag
-  // + generatedAt) — one source of truth for chip, button, and as-of.
+  // + generatedAt) — one source of truth for chip, controls, and as-of.
   const pauseVerified = health.data?.autopilotPause?.ok !== false;
   const isPaused = pauseVerified && health.data?.autopilotPause?.paused === true;
 
-  const { pending: pausePending, error: pauseError, write: writePause } =
-    useServerConfirmedWrite(health.refresh);
-
-  // Single-click toggle (the brake below carries the confirm step): the
-  // shared write hook POSTs, re-GETs, and only the read flips the chip.
-  const handleTogglePause = (next) => writePause("/autopilot/paused", { paused: next });
-
-  // ---- Emergency brake (two-step confirm, INV-7) ---------------------------
+  // ---- Emergency brake (confirm-first, INV-7) ------------------------------
   const brakeVerified = health.data?.emergencyBrake?.ok !== false;
   const brakeEngaged = brakeVerified && health.data?.emergencyBrake?.engaged === true;
-  const [brakeArmed, setBrakeArmed] = useState(false); // the confirm step
-  const { pending: brakePending, error: brakeError, write: writeBrake } =
-    useServerConfirmedWrite(health.refresh);
-
-  const postBrake = async (engaged) => {
-    const res = await writeBrake(
-      "/autopilot/emergency-brake",
-      engaged ? { engaged: true, engagedBy: "health-page" } : { engaged: false },
-    );
-    // Disarm the two-step confirm only once the write landed — the hook's
-    // result says so after the follow-up read; a failed POST keeps the
-    // confirm visible for an immediate retry.
-    if (res.ok) setBrakeArmed(false);
-  };
 
   const deepUnknown = deepStatus === "loading" || deepStatus === "unknown";
   const deepStale = deepStatus === "stale";
@@ -197,6 +224,7 @@ export default function Health() {
   const outcomeClass = (o) => OUTCOME_CLASS[o] ?? "text-zinc-300";
 
   return (
+    <UndoWindowContext.Provider value={undoHost}>
     <div className="space-y-5 max-w-4xl" data-testid="health-page">
       <div>
         <h1 className="text-2xl font-bold">Health</h1>
@@ -294,23 +322,29 @@ export default function Health() {
               label="UNKNOWN"
             />
           )}
-          <button
-            type="button"
-            data-testid="pause-toggle"
-            data-paused={isPaused ? "true" : "false"}
-            disabled={pausePending || !pauseVerified}
-            aria-pressed={isPaused}
-            onClick={() => handleTogglePause(!isPaused)}
-            className="rounded-md border border-zinc-700 px-3 py-1.5 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {pausePending ? (isPaused ? "resuming…" : "pausing…") : isPaused ? "Resume" : "Pause"}
-          </button>
+          {/* Pause (immediate · undo) while running; Resume (confirms
+              first) while paused — the verified read picks which control
+              shows, and each one's live checklist re-checks that read. */}
+          {isPaused ? (
+            <ControlAffordance
+              registry={registry}
+              controlKey="control:health/resume"
+              testId="autopilot-resume"
+              verdicts={verdicts}
+              context={{ paused: false }}
+              onFired={refreshHealth}
+            />
+          ) : (
+            <ControlAffordance
+              registry={registry}
+              controlKey="control:health/pause"
+              testId="autopilot-pause"
+              verdicts={verdicts}
+              context={{ paused: true }}
+              onFired={refreshHealth}
+            />
+          )}
         </div>
-        {pauseError && (
-          <p data-testid="pause-error" className="text-xs text-rose-400 break-words">
-            {pauseError}
-          </p>
-        )}
       </section>
 
       {/* ---- Emergency brake (confirm-first, INV-7) ------------------------- */}
@@ -325,7 +359,6 @@ export default function Health() {
                 : "bg-emerald-500/10 text-emerald-300 border border-emerald-500/40"
             }
             label={brakeEngaged ? "ENGAGED" : "OFF"}
-            pending={brakePending}
           />
         ) : (
           // INV-5: the brake read failed — UNKNOWN, never a confident OFF.
@@ -336,57 +369,28 @@ export default function Health() {
           />
         )}
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          {!brakeEngaged && !brakeArmed && (
-            <button
-              type="button"
-              data-testid="brake-arm"
-              disabled={brakePending || !brakeVerified}
-              onClick={() => setBrakeArmed(true)}
-              className="rounded-md border border-rose-500/40 px-3 py-1.5 text-sm font-medium text-rose-300 transition-colors hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              Engage emergency brake…
-            </button>
-          )}
-          {brakeArmed && !brakeEngaged && (
-            <div data-testid="brake-confirm" className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs text-zinc-400">Halts ALL auto-merge. Sure?</span>
-              <button
-                type="button"
-                data-testid="brake-confirm-yes"
-                disabled={brakePending}
-                onClick={() => postBrake(true)}
-                className="rounded-md border border-rose-500/60 px-3 py-1.5 text-sm font-semibold text-rose-200 transition-colors hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {brakePending ? "engaging…" : "Confirm engage"}
-              </button>
-              <button
-                type="button"
-                data-testid="brake-confirm-no"
-                disabled={brakePending}
-                onClick={() => setBrakeArmed(false)}
-                className="rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"
-              >
-                Cancel
-              </button>
-            </div>
-          )}
-          {brakeEngaged && (
-            <button
-              type="button"
-              data-testid="brake-release"
-              disabled={brakePending}
-              onClick={() => postBrake(false)}
-              className="rounded-md border border-emerald-500/40 px-3 py-1.5 text-sm font-medium text-emerald-300 transition-colors hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {brakePending ? "releasing…" : "Release brake"}
-            </button>
+          {/* Both confirm first: arm, then Confirm/Cancel with the
+              consequence restated — the affordance's own arming. */}
+          {brakeEngaged ? (
+            <ControlAffordance
+              registry={registry}
+              controlKey="control:health/brake-release"
+              testId="brake-release"
+              verdicts={verdicts}
+              context={{ engaged: false }}
+              onFired={refreshHealth}
+            />
+          ) : (
+            <ControlAffordance
+              registry={registry}
+              controlKey="control:health/brake-engage"
+              testId="brake-engage"
+              verdicts={verdicts}
+              context={{ engaged: true }}
+              onFired={refreshHealth}
+            />
           )}
         </div>
-        {brakeError && (
-          <p data-testid="brake-error" className="text-xs text-rose-400 break-words">
-            {brakeError}
-          </p>
-        )}
       </section>
 
       {/* ---- Operator channel: delivery health (issue #5048, ADR-0045 D8) --- */}
@@ -478,5 +482,7 @@ export default function Health() {
 
       <CostPanel />
     </div>
+    <UndoToastStack windows={undoHost.windows} onUndo={undoHost.undo} />
+    </UndoWindowContext.Provider>
   );
 }

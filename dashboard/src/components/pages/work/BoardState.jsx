@@ -1,8 +1,15 @@
 import { useCallback, useState } from "react";
-import { useApi, apiFetch } from "../../../hooks/useApi.js";
+import { useApi } from "../../../hooks/useApi.js";
 import { usePageItems, derivePageStatus } from "../../../hooks/usePageItems.js";
 import { Section } from "../today/Section.jsx";
 import LocalTimestamp from "../../LocalTimestamp.jsx";
+import {
+  ControlAffordance,
+  UndoToastStack,
+  UndoWindowContext,
+  useOperatorActions,
+  useUndoWindowHost,
+} from "../../ActionAffordance.jsx";
 
 /**
  * BoardState — /work's "what is queued" panel (issue #4010, ADR-0034 §2):
@@ -15,15 +22,26 @@ import LocalTimestamp from "../../LocalTimestamp.jsx";
  *     its sourcesOk:false flows to UNKNOWN, never a confident all-zero board).
  *   - GET /autopilot/work-queue  — the operator-lane rows (usePageItems).
  *
- * Actions (ADR-0034 §7, tiered by blast radius):
- *   - Promote to ready-for-agent is CONFIRM-FIRST — a promote is a dispatch
- *     trigger in disguise, so it arms ("Promote…") and only fires the POST on
- *     an explicit second "Confirm promote" click.
- *   - Relabel / close / reopen are immediate-tier: one click, no confirm.
- *   - EVERY action is server-verified: the POST response carries the observed
- *     post-write state (`verified`), refusals carry their specific `reason` +
- *     `detail`, and the panels re-render only from the follow-up reads. No
- *     action renders success it has not verified.
+ * Actions (ADR-0034 §7/§8.3, issue #4629 — design-concept 821e48ed): every
+ * write control renders through the shared {@link ActionAffordance} from its
+ * `control:work/<name>` registry entry (read once via useOperatorActions) —
+ * this file carries NO action label, precondition or consequence string of
+ * its own. Each row joins the entry's typed `{text, check}` preconditions to
+ * the page's verdict table ({@link rowVerdicts}), so the button shows a live
+ * ✓/✗ checklist and is disabled while any line is ✗:
+ *   - Promote is CONFIRM-FIRST (a promote is a dispatch trigger in disguise);
+ *     its four checks are the promote gate's refusal table, fed by the row
+ *     facts the server computes (`hasScopeSection`, `openBlockers`). The
+ *     server gate stays the authority — a refusal renders verbatim.
+ *   - Relabel / close / reopen are immediate-with-undo: the ~5 s delayed
+ *     commit hosted here (useUndoWindowHost + UndoToastStack). The relabel
+ *     select is the closed picker only; the chosen target becomes the
+ *     affordance's `context.label`.
+ *   - EVERY action is server-verified: the affordance awaits the POST and the
+ *     follow-up reads (onFired) before rendering, then lifts the outcome —
+ *     observed `verified` state, or the refusal's `reason` + `detail` — into
+ *     the work-action-result panel. No action renders success it has not
+ *     verified.
  *
  * Anti-scope (ADR-0034 §2): no run history, no failure detail — /runs owns
  * forensics.
@@ -48,6 +66,30 @@ const COUNTS = [
   ["in_progress", "in-progress"],
   ["blocked", "blocked"],
 ];
+
+/**
+ * The /work verdict table (issue #4629 INV-4/INV-14): one boolean per
+ * CONTROL_CHECKS id the row controls use, computed from the row facts the
+ * server already projects (never a client-side body parse). A check missing
+ * here would render ✗ and disable its button (fail closed).
+ */
+function rowVerdicts(row, relabelTarget) {
+  return {
+    // Every queue row comes from the open-issues scan (GET /autopilot/work-queue
+    // reads open issues only) — closed issues never reach this table.
+    "issue-open": true,
+    "not-already-ready": row.lane !== "ready-for-agent",
+    "has-scope-section": row.hasScopeSection === true,
+    "no-open-blocker": Array.isArray(row.openBlockers) && row.openBlockers.length === 0,
+    "relabel-target-chosen": RELABEL_TARGETS.includes(relabelTarget),
+  };
+}
+
+/** The reopen-by-number verdict table — the number input is the only fact. */
+function reopenVerdicts(reopenNumber) {
+  const n = Number(reopenNumber);
+  return { "issue-number-entered": reopenNumber !== "" && Number.isInteger(n) && n >= 1 };
+}
 
 /** Trust status for the non-list board-state payload (Health.jsx idiom). */
 function payloadStatus({ data, error, loading, freshnessMs }) {
@@ -86,36 +128,19 @@ export function BoardState() {
   const boardUnknown = boardStatus === "loading" || boardStatus === "unknown";
 
   // ---- Action state ------------------------------------------------------
-  const [armedPromote, setArmedPromote] = useState(null); // issue number | null
-  const [actionPending, setActionPending] = useState(false);
-  const [actionResult, setActionResult] = useState(null); // BoardActionResponse + label
+  // Registry entries (one read, no poll) + the page-level undo-window host
+  // for the immediate-tier controls (ADR-0034 §7).
+  const registry = useOperatorActions();
+  const undoHost = useUndoWindowHost();
+  const [actionResult, setActionResult] = useState(null); // lifted affordance outcome
+  const [relabelTargets, setRelabelTargets] = useState({}); // issue number → chosen lane
   const [reopenNumber, setReopenNumber] = useState("");
 
-  const runAction = useCallback(
-    async (path, body, label) => {
-      setActionPending(true);
-      setActionResult(null);
-      try {
-        const res = await apiFetch(path, {
-          method: "POST",
-          body: JSON.stringify(body),
-        });
-        // The response IS the verified outcome (server re-read the post-write
-        // state) — surface ok + verified / reason + detail verbatim.
-        setActionResult({ label, ...res });
-        setArmedPromote(null);
-        // SERVER-CONFIRMED: panels re-render only from the follow-up reads.
-        await Promise.all([board.refresh(), queue.refresh()]);
-      } catch (err) {
-        setActionResult({
-          label,
-          ok: false,
-          reason: "request-failed",
-          detail: err?.message || String(err),
-        });
-      } finally {
-        setActionPending(false);
-      }
+  // SERVER-CONFIRMED: the affordance awaits these follow-up reads (onFired)
+  // before it renders or lifts any outcome.
+  const refreshBoard = useCallback(
+    async () => {
+      await Promise.all([board.refresh(), queue.refresh()]);
     },
     // board/queue object identity churns per render; only the stable
     // refresh callbacks are read inside.
@@ -127,6 +152,7 @@ export function BoardState() {
   const otherLanes = queue.items.filter((row) => row.lane !== "ready-for-agent");
 
   return (
+    <UndoWindowContext.Provider value={undoHost}>
     <div className="space-y-4">
       {/* ---- Board counts ------------------------------------------------- */}
       <Section
@@ -182,12 +208,14 @@ export function BoardState() {
                 : "border-amber-500/30 bg-amber-500/10 text-amber-200"
             }`}
           >
-            {actionResult.ok === true ? (
+            {actionResult.ok === true && actionResult.verified ? (
               <span>
                 {actionResult.label} #{actionResult.issue} verified — state{" "}
                 <strong>{actionResult.verified?.state}</strong>, labels:{" "}
                 <strong>{actionResult.verified?.labels?.join(", ") || "none"}</strong>
               </span>
+            ) : actionResult.ok === true ? (
+              <span>{actionResult.text}</span>
             ) : (
               <span>
                 {actionResult.label} #{actionResult.issue} refused —{" "}
@@ -244,86 +272,62 @@ export function BoardState() {
                         </div>
                       </div>
 
-                      <div className="flex shrink-0 flex-wrap items-center gap-2">
+                      <div className="flex shrink-0 flex-col gap-2 sm:items-end">
                         {/* Promote: confirm-first (ADR-0034 §7) — a promote is a
-                            dispatch trigger in disguise. */}
-                        {row.lane !== "ready-for-agent" &&
-                          (armedPromote === row.number ? (
-                            <span data-testid="work-promote-confirm" className="flex items-center gap-1">
-                              <button
-                                type="button"
-                                data-testid="work-promote-confirm-yes"
-                                disabled={actionPending}
-                                onClick={() =>
-                                  runAction(
-                                    "/autopilot/board/promote",
-                                    { issue: row.number, confirm: true },
-                                    "promote",
-                                  )
-                                }
-                                className="rounded-md border border-emerald-500/60 px-2 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50"
-                              >
-                                {actionPending ? "promoting…" : "Confirm promote"}
-                              </button>
-                              <button
-                                type="button"
-                                data-testid="work-promote-confirm-no"
-                                disabled={actionPending}
-                                onClick={() => setArmedPromote(null)}
-                                className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"
-                              >
-                                Cancel
-                              </button>
-                            </span>
-                          ) : (
-                            <button
-                              type="button"
-                              data-testid="work-promote-arm"
-                              disabled={actionPending}
-                              onClick={() => setArmedPromote(row.number)}
-                              className="rounded-md border border-emerald-500/40 px-2 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50"
-                            >
-                              Promote…
-                            </button>
-                          ))}
+                            dispatch trigger in disguise. Hidden on ready rows:
+                            there is nothing to promote. */}
+                        {row.lane !== "ready-for-agent" && (
+                          <ControlAffordance
+                            registry={registry}
+                            controlKey="control:work/promote"
+                            testId="work-promote"
+                            verdicts={rowVerdicts(row, relabelTargets[row.number])}
+                            context={{ number: row.number }}
+                            onFired={refreshBoard}
+                            onResult={setActionResult}
+                          />
+                        )}
 
-                        {/* Relabel: immediate-tier lane move. */}
-                        <select
-                          data-testid="work-relabel-select"
-                          value=""
-                          disabled={actionPending}
-                          onChange={(e) => {
-                            if (e.target.value) {
-                              runAction(
-                                "/autopilot/board/relabel",
-                                { issue: row.number, label: e.target.value },
-                                "relabel",
-                              );
+                        {/* Relabel: the closed picker chooses the target; the
+                            immediate-tier affordance fires it (never on change). */}
+                        <div className="flex flex-wrap items-start gap-2">
+                          <select
+                            data-testid="work-relabel-select"
+                            value={relabelTargets[row.number] ?? ""}
+                            onChange={(e) =>
+                              setRelabelTargets((prev) => ({ ...prev, [row.number]: e.target.value }))
                             }
-                          }}
-                          className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 disabled:opacity-50"
-                          aria-label={`Relabel issue #${row.number}`}
-                        >
-                          <option value="">Relabel…</option>
-                          {RELABEL_TARGETS.map((t) => (
-                            <option key={t} value={t}>
-                              {t}
-                            </option>
-                          ))}
-                        </select>
+                            className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300"
+                            aria-label={`Relabel target for issue #${row.number}`}
+                          >
+                            <option value="">lane…</option>
+                            {RELABEL_TARGETS.map((t) => (
+                              <option key={t} value={t}>
+                                {t}
+                              </option>
+                            ))}
+                          </select>
+                          <ControlAffordance
+                            registry={registry}
+                            controlKey="control:work/relabel"
+                            testId="work-relabel"
+                            verdicts={rowVerdicts(row, relabelTargets[row.number])}
+                            context={{ number: row.number, label: relabelTargets[row.number] }}
+                            onFired={refreshBoard}
+                            onResult={setActionResult}
+                          />
+                        </div>
 
                         {/* Close: immediate-tier. */}
-                        <button
-                          type="button"
-                          data-testid="work-close"
-                          disabled={actionPending}
-                          onClick={() =>
-                            runAction("/autopilot/board/close", { issue: row.number }, "close")
-                          }
-                          className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"
-                        >
-                          Close
-                        </button>
+                        <ControlAffordance
+                          registry={registry}
+                          controlKey="control:work/close"
+                          testId="work-close"
+                          verdicts={rowVerdicts(row, relabelTargets[row.number])}
+                          context={{ number: row.number }}
+                          onFired={refreshBoard}
+                          onResult={setActionResult}
+                        />
                       </div>
                     </li>
                   ))}
@@ -346,23 +350,19 @@ export function BoardState() {
             className="w-24 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm text-zinc-200"
             aria-label="Issue number to reopen"
           />
-          <button
-            type="button"
-            data-testid="work-reopen-button"
-            disabled={actionPending || !Number.isInteger(Number(reopenNumber)) || Number(reopenNumber) < 1}
-            onClick={() =>
-              runAction(
-                "/autopilot/board/reopen",
-                { issue: Number(reopenNumber) },
-                "reopen",
-              )
-            }
-            className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
-          >
-            Reopen
-          </button>
+          <ControlAffordance
+            registry={registry}
+            controlKey="control:work/reopen"
+            testId="work-reopen"
+            verdicts={reopenVerdicts(reopenNumber)}
+            context={{ number: Number(reopenNumber) }}
+            onFired={refreshBoard}
+            onResult={setActionResult}
+          />
         </div>
       </Section>
     </div>
+    <UndoToastStack windows={undoHost.windows} onUndo={undoHost.undo} />
+    </UndoWindowContext.Provider>
   );
 }
