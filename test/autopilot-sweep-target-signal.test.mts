@@ -466,6 +466,25 @@ describe("decide.py — sweep_target blocked arm (issue #5167)", () => {
     assert.ok(findSweep(aged.plan), "past the blocked window the item is eligible again");
   });
 
+  test("a blocked-arm fire prunes stamps for items that left the blocked lane", () => {
+    const { plan, stateAfter } = runBlocked(baseState({
+      signals: { target_blocked_items: "187" },
+      target_blocked_item_stamps: { "187": NOW - (BLOCKED_BACKOFF_SEC + 60), "305": NOW - 10 },
+    }));
+    assert.ok(findSweep(plan), "187 is past its window");
+    assert.deepEqual(stateAfter.target_blocked_item_stamps, { "187": NOW }, "305 left the lane, so its stamp is pruned");
+  });
+
+  test("a suppressed turn leaves the blocked stamp map untouched, departed items included", () => {
+    const stamps = { "187": NOW - 10, "305": NOW - 20 };
+    const { plan, stateAfter } = runBlocked(baseState({
+      signals: { target_blocked_items: "187" },
+      target_blocked_item_stamps: stamps,
+    }));
+    assert.equal(findSweep(plan), undefined);
+    assert.deepEqual(stateAfter.target_blocked_item_stamps, stamps);
+  });
+
   test("a stale-driven fire also stamps the blocked set, and its reason wins over the blocked arm", () => {
     const { plan, stateAfter } = runBlocked(baseState({
       signals: { target_stale_in_progress_items: "297", target_blocked_items: "187" },
