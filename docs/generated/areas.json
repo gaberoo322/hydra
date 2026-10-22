@@ -632,10 +632,6 @@
         {
           "name": "Autopilot Turn",
           "anchor": "term-autopilot-turn"
-        },
-        {
-          "name": "Autopilot Focus",
-          "anchor": "term-autopilot-focus"
         }
       ],
       "moduleMap": "src/autopilot/CONTEXT.md",
@@ -1527,10 +1523,6 @@
           "anchor": "term-epic"
         },
         {
-          "name": "Roadmap Milestone",
-          "anchor": "term-roadmap-milestone"
-        },
-        {
           "name": "Focus Label",
           "anchor": "term-focus-label"
         }
@@ -1638,11 +1630,10 @@
       }
     },
     {
-      "slug": "claude-skills",
-      "name": ".claude/skills/ + docs/operator-playbooks/",
+      "slug": "docs-operator-playbooks",
+      "name": "docs/operator-playbooks/",
       "table": "infra",
       "paths": [
-        ".claude/skills/",
         "docs/operator-playbooks/"
       ],
       "retired": false,
@@ -1667,9 +1658,6 @@
         }
       ],
       "slices": {
-        "tier-paths": [
-          "T2 prefix .claude/skills/"
-        ],
         "skills": [
           "hydra-architect [operator-interactive]",
           "hydra-architecture-scan [pre-plan-producer]",
@@ -1754,7 +1742,7 @@
         ]
       },
       "homes": [],
-      "route": "/docs/area/claude-skills",
+      "route": "/docs/area/docs-operator-playbooks",
       "source": {
         "path": "CONTEXT-MAP.md",
         "line": 43
