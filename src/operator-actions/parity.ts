@@ -49,7 +49,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { InvariantViolationError } from "../errors.ts";
-import type { OperatorActionEntry } from "../schemas/operator-actions.ts";
+import type { Action, OperatorActionEntry } from "../schemas/operator-actions.ts";
 
 // ---------------------------------------------------------------------------
 // The route inventory (docs/generated/routes.json)
@@ -427,7 +427,10 @@ export function registryWriteRoutes(
   const keys = new Set<string>();
   const dangling: string[] = [];
   for (const entry of registry) {
-    for (const action of [entry.recommended, ...entry.alternatives]) {
+    // Index the 2-tuple rather than spreading it: a spread widens to unknown[]
+    // (the same tsc quirk registry.ts's outOfContextPlaceholders notes).
+    const actions: Action[] = [entry.recommended, entry.alternatives[0], entry.alternatives[1]];
+    for (const action of actions) {
       if (action.kind !== "in-dashboard") continue;
       const key = resolveRegistryRoute(action.method, action.route, rows);
       if (key === null) dangling.push(`${entry.key}: ${action.method} ${action.route}`);
@@ -581,7 +584,10 @@ export function playbookCoverage(
       const skill = skillOfCommand(entry.recommended.command);
       if (skill) classSkills.add(skill);
     }
-    for (const action of [entry.recommended, ...entry.alternatives]) {
+    // Index the 2-tuple rather than spreading it: a spread widens to unknown[]
+    // (the same tsc quirk registry.ts's outOfContextPlaceholders notes).
+    const actions: Action[] = [entry.recommended, entry.alternatives[0], entry.alternatives[1]];
+    for (const action of actions) {
       if (action.kind !== "terminal-skill") continue;
       for (const m of action.command.matchAll(/(?:^|\s)\/([a-z0-9-]+)/g)) referenced.add(m[1]);
     }
