@@ -25,6 +25,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Redis from "ioredis";
 import { useCleanRedisDb, TEST_REDIS_URL } from "./_helpers/redis-db.mts";
+import { ownedRedisDb, ownedDbSkip, ownedDbContext } from "./_helpers/owned-redis-db.mts";
+import { fidelityBattery } from "./_helpers/watchdog-redis-shim.mts";
 
 // The strict ioredis `Redis` static type in this tsconfig omits the full
 // dynamic command surface (`exists`, etc.); the suite convention is to type the
@@ -845,5 +847,208 @@ describe("scripts/test/redis-db-launch.mjs — hermeticChildEnv (GLM off-switch 
   test("a caller-set HYDRA_GLM_DISABLED_FILE is kept verbatim", async () => {
     const { hermeticChildEnv } = await import("../scripts/test/redis-db-launch.mjs");
     assert.equal(hermeticChildEnv({ HYDRA_GLM_DISABLED_FILE: "/x" }).HYDRA_GLM_DISABLED_FILE, "/x");
+  });
+});
+
+// Issue #5062: no test may hand a live Redis selector one of the launcher's
+// pool indexes as a literal — a concurrent run owns that index and FLUSHDBs it.
+// The scan matches WHOLE-FILE text, not line by line, so an argv list or call
+// split across lines is still caught. Pure URL string literals
+// (redis://host:port/N) stay benign (design concept INV-5): nothing here
+// selects a DB from them.
+describe("no test file hardcodes a launcher-pool Redis DB index (issue #5062)", () => {
+  interface SelectorPattern {
+    shape: string;
+    re: RegExp;
+  }
+
+  async function selectorPatterns(): Promise<SelectorPattern[]> {
+    const { ALLOWED_DB_INDEXES } = await import("../scripts/test/redis-db-launch.mjs");
+    // A pool index as a whole number, never the prefix of a longer one (90, 9.5).
+    const idx = `(?:${(ALLOWED_DB_INDEXES as number[]).join("|")})(?![\\d.])`;
+    const q = "[\"'`]";
+    const val = `(?:${q}${idx}${q}|${idx})`; // quoted or bare numeric
+    // A DB-index-shaped name: its FINAL segment is DB (FOO_DB, REDIS_DB,
+    // SELECTED_DB, OWNED_DB, HYDRA_REDIS_DB), REDISDB, or camel *Db (redisDb).
+    // A leading DB segment (DB_PORT, DB_HOST) names something else, so never.
+    const dbName = "(?:\\b(?:[A-Z][A-Z0-9_]*_|[A-Z0-9_]*REDIS)?DB\\b|\\b[a-z][A-Za-z0-9]*Db\\b)";
+    return [
+      // argv list: ["-n", "<n>", …] or ["-n", <n>, …]; \s spans newlines.
+      { shape: "argv -n", re: new RegExp(`${q}-n${q}\\s*,\\s*${val}`) },
+      // Shell string: `redis-cli … -n <n> …`, the selector unquoted in the
+      // command text. Anchored on redis-cli so `nice -n <n>` / `head -n <n>` stay benign.
+      { shape: "redis-cli -n", re: new RegExp(`redis-cli\\b[^\\n;|&"'\`]*?\\s-n\\s+["']?${idx}`) },
+      // A DB-first drc* helper: drcAt("<n>", …) or drcAt(<n>, …).
+      { shape: "drc*(index)", re: new RegExp(`\\bdrc\\w*\\s*\\(\\s*${val}`) },
+      // Env/object property: { HYDRA_REDIS_DB: "<n>" }.
+      { shape: "DB property", re: new RegExp(`${dbName}\\s*:\\s*${val}`) },
+      // Constant, optionally typed, or a shell env pin: const SELECTED_DB = "<n>",
+      // const FOO_DB: string = "<n>", HYDRA_REDIS_DB=<n> node … (never ==/===/=>).
+      { shape: "DB constant", re: new RegExp(`${dbName}(?:\\s*:\\s*[^=;\\n]+?)?\\s*(?<![=!<>])=(?![=>])\\s*${val}`) },
+    ];
+  }
+
+  /** Every pattern hit in a whole file's text, as `line: shape`. */
+  function scanText(text: string, patterns: SelectorPattern[]): string[] {
+    const hits: string[] = [];
+    for (const { shape, re } of patterns) {
+      for (const m of text.matchAll(new RegExp(re.source, `${re.flags}g`))) {
+        hits.push(`${text.slice(0, m.index).split("\n").length}: ${shape}`);
+      }
+    }
+    return hits;
+  }
+
+  // Each fixture interpolates its pool index (`${P}`) so this file's own source
+  // never holds the literal shape the whole-file scan below hunts for.
+  const P = 9;
+  const fixtures: Array<{ shape: string; flagged: string[]; benign: string[] }> = [
+    {
+      shape: "argv -n",
+      flagged: [`["-n", "${P}", "SET"]`, `["-n", ${P}, "SET"]`, `spawnSync("redis-cli", [\n  "-n",\n  "${P}",\n  "GET", k])`],
+      benign: ['drc(["-n", "0", "GET", key])', '["-n", owned, "SET"]', 'spawnSync("bash", ["-n", WATCHDOG])'],
+    },
+    {
+      shape: "redis-cli -n",
+      flagged: [`redis-cli -n ${P} GET k`, `docker exec hydra-redis-1 redis-cli --raw -n ${P} DEL k`],
+      benign: ["redis-cli -n 0 GET k", `nice -n ${10} git status`, "redis-cli -n ${db} GET k"],
+    },
+    {
+      shape: "drc*(index)",
+      flagged: [`drcAt("${P}", ["GET", k])`, `drcAt(${P}, ["GET", k])`, `drcAt(\n  "${P}",\n  ["DEL", k])`],
+      benign: ['drcAt("0", ["DEL", ...keys])', "drcAt(OWNED_DB, args)", 'drc(["GET", key])'],
+    },
+    {
+      shape: "DB property",
+      flagged: [`HYDRA_REDIS_DB: "${P}",`, `{ REDIS_DB: ${P} }`],
+      benign: ['HYDRA_REDIS_DB: "0",', `{ DB_PORT: "${P}" }`, "{ HYDRA_REDIS_DB: owned }"],
+    },
+    {
+      shape: "DB constant",
+      flagged: [
+        `const SELECTED_DB = "${P}";`,
+        `const FOO_DB: string = "${P}";`,
+        `const OWNED_DB: string | null =\n  "${P}";`,
+        `let redisDb = ${P};`,
+        `HYDRA_REDIS_DB=${P} node x`,
+      ],
+      benign: [
+        'const SELECTED_DB = "0";',
+        `const DB_PORT = "${P}";`,
+        `const DB_PORT: string = "${P}";`,
+        `if (SELECTED_DB === "${P}") {}`,
+        `const REDIS_URL = "redis://localhost:6379/${P}";`,
+      ],
+    },
+  ];
+
+  for (const { shape, flagged, benign } of fixtures) {
+    test(`pool-index guard shape "${shape}": flags its positives, never its negatives`, async () => {
+      const patterns = await selectorPatterns();
+      const flaggedBy = (src: string): string[] => patterns.filter((p) => p.re.test(src)).map((p) => p.shape);
+      assert.ok(flagged.length > 0 && benign.length > 0, "every shape needs a positive and a negative case");
+      for (const src of flagged) assert.ok(flaggedBy(src).includes(shape), `"${shape}" must flag: ${src}`);
+      for (const src of benign) assert.deepEqual(flaggedBy(src), [], `must not flag: ${src}`);
+    });
+  }
+
+  test("the pool-index guard never flags db 0 pins or pure URL string literals", async () => {
+    const patterns = await selectorPatterns();
+    for (const src of [
+      'HYDRA_REDIS_DB: "0",',
+      'drc(["-n", "0", "GET", key])',
+      "redis-cli -n 0 GET k",
+      'drcAt("0", ["DEL", k])',
+      `parseOwnedDbIndex("redis://localhost:6379/${P}")`,
+      `parseOwnedDbIndex("redis://127.0.0.1:6379/${P}")`,
+      `launcherPrintUrl({ redisUrl: "redis://localhost:6379/${P}" })`,
+    ]) {
+      assert.deepEqual(scanText(src, patterns), [], `must not flag: ${src}`);
+    }
+  });
+
+  test("the scan matches whole-file text and reports the line a split argv starts on", async () => {
+    const patterns = await selectorPatterns();
+    const text = `const a = 1;\nredisCli([\n  "-n",\n  "${P}",\n  "GET", k]);\ndrcAt(\n  ${P}, args);\n`;
+    assert.deepEqual(scanText(text, patterns), ["3: argv -n", "6: drc*(index)"]);
+  });
+
+  test("no test file passes a literal ALLOWED_DB_INDEXES index as a live Redis selector", async () => {
+    const { readdirSync, readFileSync: readFile } = await import("node:fs");
+    const patterns = await selectorPatterns();
+    const testDir = fileURLToPath(new URL(".", import.meta.url));
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.name === "node_modules") continue;
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith(".mts")) files.push(p);
+      }
+    };
+    walk(testDir);
+    const hits = files.flatMap((f) => scanText(readFile(f, "utf8"), patterns).map((h) => `${f}:${h}`));
+    assert.deepEqual(hits, [], `pool-index literals used as live Redis selectors:\n${hits.join("\n")}`);
+  });
+});
+
+describe("test/_helpers/owned-redis-db decision matrix (issue #5062)", () => {
+  test("ownedRedisDb accepts only a non-zero integer string", () => {
+    assert.equal(ownedRedisDb({}), null, "unset");
+    assert.equal(ownedRedisDb({ HYDRA_REDIS_DB: "0" }), null, "db 0 is never owned");
+    assert.equal(ownedRedisDb({ HYDRA_REDIS_DB: "abc" }), null, "non-numeric");
+    assert.equal(ownedRedisDb({ HYDRA_REDIS_DB: "" }), null, "empty");
+    assert.equal(ownedRedisDb({ HYDRA_REDIS_DB: "3" }), "3", "launcher-exported index passes through");
+  });
+
+  test("ownedDbSkip: owned DB never skips", () => {
+    assert.equal(ownedDbSkip("3", {}), false);
+  });
+
+  test("ownedDbSkip: bare node --test (no FULL_SUITE) skips with a reason", () => {
+    assert.equal(typeof ownedDbSkip(null, {}), "string");
+  });
+
+  test("ownedDbSkip: remote REDIS_URL skips even on a full-suite run", () => {
+    const r = ownedDbSkip(null, { HYDRA_FULL_SUITE: "1", REDIS_URL: "redis://redis.example.com:6379" });
+    assert.equal(typeof r, "string");
+  });
+
+  test("ownedDbSkip: full-suite local run returns false so the test body fails loudly", () => {
+    assert.equal(ownedDbSkip(null, { HYDRA_FULL_SUITE: "1" }), false);
+    assert.equal(ownedDbSkip(null, { HYDRA_FULL_SUITE: "1", REDIS_URL: "redis://127.0.0.1:6379/0" }), false);
+  });
+
+  test("ownedDbContext pairs the owned DB with its skip verdict", () => {
+    assert.deepEqual(ownedDbContext({ HYDRA_REDIS_DB: "3" }), { db: "3", skip: false });
+    assert.deepEqual(ownedDbContext({ HYDRA_FULL_SUITE: "1" }), { db: null, skip: false });
+    assert.equal(typeof ownedDbContext({}).skip, "string");
+  });
+
+  // The shim's fidelity battery (test/_helpers/watchdog-redis-shim.mts) follows
+  // the same rule: its SELECT-path entries are omitted only where no owned DB is
+  // expected, and a full-suite local run with none fails loudly.
+  const key = (n: string): string => `k:${n}`;
+  const selectsNonZeroDb = (cases: string[][]): boolean => cases.some((c) => c[0] === "-n" && c[1] !== "0");
+
+  test("fidelityBattery: an owned DB adds the SELECT-path entries on that DB", () => {
+    const owned = fidelityBattery(key, { HYDRA_REDIS_DB: "3" }).filter((c) => c[1] === "3");
+    assert.deepEqual(owned.map((c) => c[2]), ["SET", "GET", "DEL"]);
+  });
+
+  test("fidelityBattery: bare node --test and remote REDIS_URL omit the SELECT-path entries", () => {
+    assert.equal(selectsNonZeroDb(fidelityBattery(key, {})), false, "bare node --test");
+    const remote = { HYDRA_FULL_SUITE: "1", REDIS_URL: "redis://redis.example.com:6379" };
+    assert.equal(selectsNonZeroDb(fidelityBattery(key, remote)), false, "remote REDIS_URL");
+  });
+
+  test("fidelityBattery: a full-suite local run with no owned DB throws instead of omitting them", () => {
+    for (const env of [{ HYDRA_FULL_SUITE: "1" }, { HYDRA_FULL_SUITE: "1", REDIS_URL: "redis://127.0.0.1:6379/0" }]) {
+      assert.throws(
+        () => fidelityBattery(key, env),
+        (err: unknown) => (err as { code?: string }).code === "invariant-violation" && /HYDRA_REDIS_DB/.test(String(err)),
+        `must throw for ${JSON.stringify(env)}`,
+      );
+    }
   });
 });

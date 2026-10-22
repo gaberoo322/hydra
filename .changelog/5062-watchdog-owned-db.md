@@ -1,0 +1,1 @@
+- fix: watchdog #4183 tests use the run-owned Redis DB instead of hardcoded DB 9, and a guard pins it (#5062)
