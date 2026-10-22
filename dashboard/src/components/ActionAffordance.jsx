@@ -10,7 +10,7 @@ import {
   triggerDisabled,
   undoWindowSeconds,
 } from "../lib/delayed-commit.ts";
-import { PRECONDITION_GLYPH, anyFailed, resolvePreconditions } from "../lib/preconditions.ts";
+import { PRECONDITION_GLYPH, anyFailed, resolveControlAction, resolvePreconditions } from "../lib/preconditions.ts";
 import { createRereadWaiters } from "../lib/reread.ts";
 
 /**
@@ -716,18 +716,19 @@ export function useCheckedRefresh({ loading, error, data, refresh }) {
  * route is resolved HERE, before the action reaches ActionAffordance (which
  * matches only resolved routes and never substitutes), so the window id —
  * `action:<method> <resolved route>` — differs per row. A resolver that
- * throws renders the control DISABLED with the reason: it never fires.
+ * throws — or ANY final route that still carries `{`, resolver or not —
+ * renders the control DISABLED with the reason: it never fires
+ * (lib/preconditions.ts `resolveControlAction`, the tested pure core).
  */
 export function ControlAffordance({ registry, controlKey, verdicts, context, testId, onFired, onResult, onStart, rereadNoun, resolveRoute }) {
   const entry = registry.ready ? registry.byKey.get(controlKey) : undefined;
   const resolved = useMemo(() => {
-    if (entry === undefined || resolveRoute === undefined) return { action: entry?.recommended };
-    try {
-      return { action: { ...entry.recommended, route: resolveRoute(entry.recommended.route) } };
-    } catch (err) {
-      console.error(`[ControlAffordance] ${controlKey}: route did not resolve — control disabled`, err);
-      return { error: err?.message ?? String(err) };
+    if (entry === undefined) return { action: undefined };
+    const out = resolveControlAction(entry.recommended, resolveRoute);
+    if (out.error !== undefined) {
+      console.error(`[ControlAffordance] ${controlKey}: ${out.error} — control disabled`);
     }
+    return out;
   }, [entry, resolveRoute, controlKey]);
   if (entry === undefined) {
     return (

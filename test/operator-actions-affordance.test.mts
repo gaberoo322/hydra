@@ -60,6 +60,7 @@ import { deriveFeedBuckets, recordDismissOutcome } from "../dashboard/src/lib/at
 import {
   PRECONDITION_GLYPH,
   anyFailed,
+  resolveControlAction,
   resolvePreconditions,
 } from "../dashboard/src/lib/preconditions.ts";
 import {
@@ -1021,8 +1022,7 @@ describe("pages read the registry once and host their own undo windows (issue #4
     assert.ok(wrapper.includes("{REGISTRY_UNAVAILABLE}"));
     // Pages render only the recommended action — with its route resolved
     // first when the control passes resolveRoute (#4631 INV-9).
-    assert.ok(wrapper.includes("return { action: entry?.recommended };"), "no resolver → the recommended action as served");
-    assert.ok(wrapper.includes("{ ...entry.recommended, route: resolveRoute(entry.recommended.route) }"));
+    assert.ok(wrapper.includes("const out = resolveControlAction(entry.recommended, resolveRoute);"), "the recommended action, resolved through the tested core");
     assert.ok(wrapper.includes("action={resolved.action}"));
   });
 
@@ -1262,7 +1262,7 @@ describe("ControlAffordance resolves an {id} route before the affordance sees it
     const unresolved = wrapper.slice(wrapper.indexOf("if (resolved.error !== undefined) {"), renderAt);
     assert.ok(unresolved.includes("disabled"), "an unresolved route renders a disabled button");
     assert.ok(!unresolved.includes("onClick"), "the unresolved state has no trigger at all");
-    assert.ok(wrapper.includes("console.error(`[ControlAffordance] ${controlKey}: route did not resolve"), "fail loud");
+    assert.ok(wrapper.includes("console.error(`[ControlAffordance] ${controlKey}: ${out.error} — control disabled`);"), "fail loud");
   });
 
   test("the window id embeds the resolved route, so two alerts' Dismiss windows never collide", async () => {
@@ -1320,5 +1320,42 @@ describe("the /health panels render controls from the page's ONE registry read (
     const allAt = panel.indexOf('controlKey="control:health/alerts-dismiss-all"');
     assert.ok(countAt > 0 && allAt > countAt, "Dismiss all renders beside the N active count");
     assert.ok(panel.includes("verdicts={alertsVerdicts(undismissed.length)}"));
+  });
+});
+
+describe("resolveControlAction — no control route carrying { ever reaches the affordance (PR #5157 review)", () => {
+  const action = (route: string) => ({ kind: "in-dashboard", method: "POST", route, label: "Dismiss" });
+
+  test("a templated route rendered WITHOUT a resolver is refused, never fired against a literal {id}", () => {
+    const out = resolveControlAction(action("/alerts/{id}/dismiss"));
+    assert.equal(out.action, undefined);
+    assert.match(out.error ?? "", /route still carries a placeholder: \/alerts\/\{id\}\/dismiss/);
+  });
+
+  test("a resolver that throws, returns a non-string, or leaves a { behind is refused", () => {
+    const thrown = resolveControlAction(action("/alerts/{id}/dismiss"), () => {
+      throw new Error("unresolved route placeholder {id}");
+    });
+    assert.match(thrown.error ?? "", /route did not resolve: unresolved route placeholder \{id\}/);
+    assert.ok(resolveControlAction(action("/alerts/{id}/dismiss"), () => 42 as any).error);
+    assert.match(resolveControlAction(action("/x/{a}/{b}"), (r) => r.replace("{a}", "1")).error ?? "", /still carries a placeholder/);
+  });
+
+  test("a resolved route passes with the route substituted; an untemplated route passes unchanged", () => {
+    const out = resolveControlAction(action("/alerts/{id}/dismiss"), (r) => r.replace("{id}", "alert-1"));
+    assert.equal(out.error, undefined);
+    assert.equal(out.action?.route, "/alerts/alert-1/dismiss");
+    const plain = action("/scheduler/stop");
+    assert.equal(resolveControlAction(plain).action, plain, "no resolver, no placeholder → the action as served");
+    assert.equal(resolveControlAction(plain, (r) => r).action, plain);
+  });
+
+  test("ControlAffordance renders the refusal DISABLED via the pure core", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const wrapper = aff.slice(aff.indexOf("export function ControlAffordance("));
+    assert.ok(wrapper.includes("resolveControlAction(entry.recommended, resolveRoute)"), "every control, resolver or not, goes through the guard");
+    assert.ok(!wrapper.includes("resolveRoute(entry.recommended.route)"), "no inline resolution bypasses the guard");
+    const refused = wrapper.slice(wrapper.indexOf("if (resolved.error !== undefined) {"), wrapper.indexOf("<ActionAffordance"));
+    assert.ok(refused.includes("disabled") && refused.includes("✗ {resolved.error}"));
   });
 });

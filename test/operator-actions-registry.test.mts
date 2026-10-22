@@ -614,7 +614,7 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
     assert.deepEqual(controlEntryCoverage(REGISTRY, CONTROL_KEYS), { missing: [], extra: [] });
   });
 
-  test("CONTROL_KEYS is the eight /work + /health controls the concept names", () => {
+  test("CONTROL_KEYS includes the eight #4629 /work + /health controls", () => {
     // A membership pin, not an exact list: #4631 (and any later slice)
     // appends keys; controlEntryCoverage above keeps the list closed against
     // the registry in both directions.
