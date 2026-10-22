@@ -646,16 +646,6 @@ export async function listLiveDesignConcepts(): Promise<DesignConcept[]> {
 }
 
 /**
- * Paginated, exactly-counted list (#4633 INV-2): `listLiveDesignConcepts`
- * then `pageConcepts`. Read-only — the caller prunes the index first.
- */
-export async function pageDesignConcepts(
-  opts: DesignConceptPageOptions = {},
-): Promise<DesignConceptPage> {
-  return pageConcepts(await listLiveDesignConcepts(), opts);
-}
-
-/**
  * Mark a design concept as `approved` and record the approver. The
  * approver must be either the literal string `"auto-gate"` or
  * `"operator:<name>"`.

@@ -242,8 +242,14 @@ export const DesignConceptListQuerySchema = z.object({
     .pipe(z.number().int().min(0))
     .catch(0)
     .default(0),
-  /** Optional status filter (`draft` | `approved` | `stale`). */
-  status: DesignConceptStatusSchema.optional().catch(undefined),
+  /**
+   * Optional status filter (`draft` | `approved` | `stale`). `pending` is
+   * accepted as an alias for `draft` (the #4633 issue's own term) rather than
+   * silently dropping the filter; any other value collapses to no filter.
+   */
+  status: z
+    .preprocess((v) => (v === "pending" ? "draft" : v), DesignConceptStatusSchema.optional())
+    .catch(undefined),
   /** `full` (default — the artifacts verbatim) or `summary` (no heavy arrays). */
   view: z.enum(["full", "summary"]).catch("full").default("full"),
 });

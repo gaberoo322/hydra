@@ -1640,14 +1640,23 @@ describe("GET /design-concepts — paginated list (#4633 INV-1/INV-2)", () => {
     const { handler } = listRouter(seven);
     const res = mockRes();
     await handler(
-      mockReq({ query: { offset: "-4", status: "pending", view: "everything", limit: "abc" } }),
+      mockReq({ query: { offset: "-4", status: "bogus", view: "everything", limit: "abc" } }),
       res,
     );
     assert.equal(res._status, 200);
     assert.equal(res._body.offset, 0);
     assert.equal(res._body.limit, 50);
-    assert.equal(res._body.total, 7); // 'pending' is not a status → no filter
+    assert.equal(res._body.total, 7); // an off-vocabulary status → no filter
     assert.ok("qaTrace" in res._body.items[0]); // bad view → full
+  });
+
+  test("status=pending (the issue's alias) filters as draft — never silently dropped", async () => {
+    const { handler } = listRouter(seven);
+    const res = mockRes();
+    await handler(mockReq({ query: { status: "pending" } }), res);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.total, 4); // drafts at i = 0, 2, 4, 6
+    assert.ok(res._body.items.every((d: any) => d.status === "draft"));
   });
 });
 
@@ -1846,6 +1855,9 @@ describe("structural pins — #4633 design-concept queue + holdback enrol state"
     assert.ok(src.includes("`/design-concepts/${anchorRef}`"), "flat single-artifact literal");
     assert.ok(src.includes("`/design-concepts/${anchorRef}/approve-preconditions`"));
     // Approve mounts only on a fresh, all-✓ read; unproven never enables.
+    // The checklist's freshness budget is two 60 s polls, and its as-of shows.
+    assert.match(src, /freshnessMs: 120_000,\s*itemsKey: "preconditions"/);
+    assert.match(src, /<LocalTimestamp ts=\{pre\.data\.generatedAt\}/);
     assert.match(src, /pre\.status === "ready"/);
     assert.match(src, /pre\.data\?\.allOk === true/);
     assert.match(src, /enabled \? \(\s*<ActionAffordance action=\{action\} onFired=\{onFired\} \/>/);

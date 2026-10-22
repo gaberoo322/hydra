@@ -47,10 +47,12 @@ function Mark({ ok, unknown }) {
  * behind approve-preconditions is bounded by the number of drafts.
  */
 function DraftApproveControl({ anchorRef, onFired }) {
-  // Minutes-tier read like the list (the server memoises the gh read 60 s).
+  // Polled every 60 s (the server memoises the gh read 60 s). The freshness
+  // budget is deliberately tight — two polls — so a hung poll can never let a
+  // ✓ older than ~2 min enable Approve (it demotes to stale → disabled).
   const pre = usePageItems(`/design-concepts/${anchorRef}/approve-preconditions`, {
     poll: 60_000,
-    freshnessMs: 5 * 60 * 1000,
+    freshnessMs: 120_000,
     itemsKey: "preconditions",
   });
   const action = pre.data?.action ?? null;
@@ -66,6 +68,12 @@ function DraftApproveControl({ anchorRef, onFired }) {
           UNKNOWN — approve preconditions unproven
           {pre.status === "stale" ? " (stale read)" : ""}
           {pre.status === "loading" ? " (checking…)" : ""}
+        </p>
+      )}
+      {pre.data?.generatedAt && (
+        <p data-testid="design-concept-approve-asof" className="text-[11px] text-zinc-500">
+          checklist as of{" "}
+          <LocalTimestamp ts={pre.data.generatedAt} stale={pre.status === "stale"} />
         </p>
       )}
       {pre.items.length > 0 && (
