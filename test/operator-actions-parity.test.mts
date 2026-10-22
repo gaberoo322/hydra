@@ -59,8 +59,6 @@ const ROWS = loadRouteInventory();
  * add one — a new human-shaped write gets a registry entry instead.
  */
 const PENDING_CEILING: readonly string[] = [
-  "POST /api/now/recommendations/:id/dismiss", // #5152
-  "POST /api/now/recommendations/mute-class", // #5152
   "POST /api/holdback/enroll", // #4633 INV-10 deferral
 ];
 

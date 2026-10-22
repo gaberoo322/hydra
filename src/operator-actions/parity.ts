@@ -193,14 +193,6 @@ export interface PendingControlWrite {
  * pins these keys to a fixed ceiling, so the allowance can never grow.
  */
 export const PENDING_CONTROL_WRITES: Readonly<Record<string, PendingControlWrite>> = Object.freeze({
-  "POST /api/now/recommendations/:id/dismiss": {
-    ref: "#5152",
-    reason: "page-local control in dashboard/src/pages/now-console/RecommendationsPanel.jsx; #5152 registers control:now/rec-dismiss",
-  },
-  "POST /api/now/recommendations/mute-class": {
-    ref: "#5152",
-    reason: "page-local control in dashboard/src/pages/now-console/RecommendationsPanel.jsx; #5152 registers control:now/rec-mute-class",
-  },
   "POST /api/holdback/enroll": {
     ref: "#4633 INV-10 deferral",
     reason:
