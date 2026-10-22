@@ -10,7 +10,7 @@ import {
   triggerDisabled,
   undoWindowSeconds,
 } from "../lib/delayed-commit.ts";
-import { PRECONDITION_GLYPH, anyFailed, resolvePreconditions } from "../lib/preconditions.ts";
+import { PRECONDITION_GLYPH, anyFailed, resolveControlAction, resolvePreconditions } from "../lib/preconditions.ts";
 import { createRereadWaiters } from "../lib/reread.ts";
 
 /**
@@ -102,6 +102,12 @@ const IN_DASHBOARD_BODY = {
   "POST /autopilot/board/reopen": (context) => ({ issue: context.number }),
   "POST /autopilot/emergency-brake": (context) =>
     context.engaged ? { engaged: true, engagedBy: "health-page" } : { engaged: false },
+  // /health alerts, scheduler, housekeeping (issue #4631 INV-10) — none of
+  // these routes reads a body; the alert id rides the resolved route.
+  "POST /alerts/:id/dismiss": {},
+  "POST /alerts/dismiss-all": {},
+  "POST /scheduler/stop": {},
+  "POST /maintenance/housekeeping": {},
 };
 
 /** Resolve a map value: a builder is called with the (closed) context, a
@@ -264,7 +270,9 @@ function useCopy(text) {
  * the observed post-write state; any other 2xx keeps the accepted line.
  * `reread === false` means the caller's re-read failed — the ✓ never claims
  * a re-read it did not get. The lifted object carries the response's
- * reason/detail/verified/issue so a page can keep its own result panel.
+ * reason/detail/verified/issue so a page can keep its own result panel, plus
+ * `body` — the parsed 2xx JSON itself (issue #4631 INV-11: /health renders
+ * housekeeping's `{ran, skipped}` from it); undefined on a failed request.
  */
 function resultFromResponse(action, res, reread, context, rereadNoun = "feed") {
   const base = {
@@ -273,6 +281,7 @@ function resultFromResponse(action, res, reread, context, rereadNoun = "feed") {
     reason: res?.reason,
     detail: res?.detail,
     verified: res?.verified,
+    body: res,
   };
   const staleNote = rereadNoun === "feed" ? "list may be stale" : "shown state may be stale";
   const stale = reread === false ? ` · ${rereadNoun} re-read FAILED — ${staleNote}` : "";
@@ -360,6 +369,7 @@ function InDashboardAffordance({ action, onFired, onResult, onStart, verdicts, c
         issue: context?.number,
         reason: "request-failed",
         detail: message,
+        body: undefined,
       };
       if (mounted.current) setResult(next);
       onResult?.(next);
@@ -698,9 +708,28 @@ export function useCheckedRefresh({ loading, error, data, refresh }) {
  * leaving an armed "Confirm Release…" one click from firing with its arm
  * step skipped. Per-row controls are already separate instances under their
  * row's keyed list item.
+ *
+ * `resolveRoute` (issue #4631, design-concept 5ae4b72c INV-9): a control
+ * whose registry route carries the one admitted placeholder (`{id}` —
+ * /health's per-alert Dismiss) passes `(route) => resolved`, built from the
+ * page's tested resolver (lib/health-verdicts.ts `resolveControlRoute`). The
+ * route is resolved HERE, before the action reaches ActionAffordance (which
+ * matches only resolved routes and never substitutes), so the window id —
+ * `action:<method> <resolved route>` — differs per row. A resolver that
+ * throws — or ANY final route that still carries `{`, resolver or not —
+ * renders the control DISABLED with the reason: it never fires
+ * (lib/preconditions.ts `resolveControlAction`, the tested pure core).
  */
-export function ControlAffordance({ registry, controlKey, verdicts, context, testId, onFired, onResult, onStart, rereadNoun }) {
+export function ControlAffordance({ registry, controlKey, verdicts, context, testId, onFired, onResult, onStart, rereadNoun, resolveRoute }) {
   const entry = registry.ready ? registry.byKey.get(controlKey) : undefined;
+  const resolved = useMemo(() => {
+    if (entry === undefined) return { action: undefined };
+    const out = resolveControlAction(entry.recommended, resolveRoute);
+    if (out.error !== undefined) {
+      console.error(`[ControlAffordance] ${controlKey}: ${out.error} — control disabled`);
+    }
+    return out;
+  }, [entry, resolveRoute, controlKey]);
   if (entry === undefined) {
     return (
       <button
@@ -714,10 +743,25 @@ export function ControlAffordance({ registry, controlKey, verdicts, context, tes
       </button>
     );
   }
+  if (resolved.error !== undefined) {
+    return (
+      <span className="inline-flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          disabled
+          data-testid={testId ? `${testId}-unresolved` : undefined}
+          className="cursor-not-allowed rounded border border-zinc-700 px-2.5 py-1 text-xs text-zinc-500 opacity-40"
+        >
+          {entry.recommended.label}
+        </button>
+        <span className="text-[11px] text-rose-300">✗ {resolved.error}</span>
+      </span>
+    );
+  }
   return (
     <ActionAffordance
       key={controlKey}
-      action={entry.recommended}
+      action={resolved.action}
       doc={entry.doc}
       verdicts={verdicts ?? {}}
       context={context}

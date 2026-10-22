@@ -57,6 +57,11 @@ import {
   reopenVerdicts,
   rowVerdicts,
 } from "../dashboard/src/lib/control-verdicts.ts";
+import {
+  alertVerdicts,
+  alertsVerdicts,
+  schedulerVerdicts,
+} from "../dashboard/src/lib/health-verdicts.ts";
 import { readFile } from "node:fs/promises";
 
 // ---------------------------------------------------------------------------
@@ -576,6 +581,12 @@ describe("GET /operator-actions — route", () => {
 
 const BOARD_STATE_SRC = "../dashboard/src/components/pages/work/BoardState.jsx";
 const HEALTH_SRC = "../dashboard/src/pages/Health.jsx";
+// The two /health panels that host #4631's controls beside the reads they own
+// (design-concept 5ae4b72c INV-7).
+const ALERTS_PANEL_SRC = "../dashboard/src/components/pages/health/AlertsPanel.jsx";
+const SERVICE_STRIP_SRC = "../dashboard/src/components/pages/health/ServiceStrip.jsx";
+/** Every dashboard file that renders a control: key. */
+const CONTROL_PAGE_SRCS = [BOARD_STATE_SRC, HEALTH_SRC, ALERTS_PANEL_SRC, SERVICE_STRIP_SRC];
 
 async function readPage(rel: string): Promise<string> {
   return readFile(new URL(rel, import.meta.url), "utf8");
@@ -603,8 +614,11 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
     assert.deepEqual(controlEntryCoverage(REGISTRY, CONTROL_KEYS), { missing: [], extra: [] });
   });
 
-  test("CONTROL_KEYS is the eight /work + /health controls the concept names", () => {
-    assert.deepEqual([...CONTROL_KEYS].sort(), [
+  test("CONTROL_KEYS includes the eight #4629 /work + /health controls", () => {
+    // A membership pin, not an exact list: #4631 (and any later slice)
+    // appends keys; controlEntryCoverage above keeps the list closed against
+    // the registry in both directions.
+    for (const key of [
       "control:health/brake-engage",
       "control:health/brake-release",
       "control:health/pause",
@@ -613,7 +627,9 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
       "control:work/promote",
       "control:work/relabel",
       "control:work/reopen",
-    ]);
+    ]) {
+      assert.ok((CONTROL_KEYS as readonly string[]).includes(key), key);
+    }
   });
 
   test("{text, check} preconditions appear ONLY on control: entries — feed and class entries stay string-only", () => {
@@ -630,13 +646,21 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
   });
 
   test("every control entry recommends an in-dashboard action whose route carries no placeholder", () => {
+    // Relaxed by #4631 (design-concept 5ae4b72c INV-9): the ONE placeholder a
+    // control route may carry is BUCKET_CONTEXT.control's `{id}`, and only
+    // control:health/alert-dismiss uses it; every other per-row value is
+    // body-built client-side (#4629 INV-7).
+    const withPlaceholder: string[] = [];
     for (const key of CONTROL_KEYS) {
       const { recommended } = controlEntry(key);
       assert.equal(recommended.kind, "in-dashboard", `${key} is a page write control`);
       if (recommended.kind === "in-dashboard") {
-        assert.doesNotMatch(recommended.route, /[{}]/, `${key}: the per-row body is built client-side (INV-7)`);
+        const stripped = recommended.route.replaceAll("{id}", "");
+        assert.doesNotMatch(stripped, /[{}]/, `${key}: only {id} may template a control route`);
+        if (stripped !== recommended.route) withPlaceholder.push(key);
       }
     }
+    assert.deepEqual(withPlaceholder, ["control:health/alert-dismiss"]);
   });
 
   test("the promote checklist is exactly the promote gate's four rules, in order", () => {
@@ -711,8 +735,9 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
     }
   });
 
-  test("every control: key is referenced by exactly one of BoardState.jsx / Health.jsx", async () => {
-    const pages = { [BOARD_STATE_SRC]: await readPage(BOARD_STATE_SRC), [HEALTH_SRC]: await readPage(HEALTH_SRC) };
+  test("every control: key is referenced by exactly one dashboard page file", async () => {
+    const pages: Record<string, string> = {};
+    for (const rel of CONTROL_PAGE_SRCS) pages[rel] = await readPage(rel);
     for (const key of CONTROL_KEYS) {
       const owners = Object.entries(pages).filter(([, src]) => src.includes(`"${key}"`)).map(([rel]) => rel);
       assert.equal(owners.length, 1, `${key} must be rendered by exactly one page (got ${owners.join(", ") || "none"})`);
@@ -723,17 +748,31 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
     // The tables live in the tested leaf lib/control-verdicts.ts (PR #5155
     // review); each page imports its own and every check id its entries use
     // must be a key the table actually produces.
-    const tables: Record<string, { imports: string[]; ids: Set<string> }> = {
+    const tables: Record<string, { imports: string[]; ids: Set<string>; lib?: string }> = {
       [BOARD_STATE_SRC]: {
         imports: ["rowVerdicts", "reopenVerdicts"],
         ids: new Set([...Object.keys(rowVerdicts({}, undefined)), ...Object.keys(reopenVerdicts(""))]),
       },
       [HEALTH_SRC]: { imports: ["healthVerdicts"], ids: new Set(Object.keys(healthVerdicts(null, false))) },
+      // #4631 (design-concept 5ae4b72c INV-4/5): the alert and scheduler
+      // tables live in the sibling leaf lib/health-verdicts.ts; the table is
+      // probed with inputs that make every check id present.
+      [ALERTS_PANEL_SRC]: {
+        imports: ["alertVerdicts", "alertsVerdicts"],
+        lib: "health-verdicts",
+        ids: new Set([...Object.keys(alertVerdicts({})), ...Object.keys(alertsVerdicts(0))]),
+      },
+      [SERVICE_STRIP_SRC]: {
+        imports: ["schedulerVerdicts"],
+        lib: "health-verdicts",
+        ids: new Set(Object.keys(schedulerVerdicts({ running: false, stopReason: null }, 0))),
+      },
     };
     for (const [rel, table] of Object.entries(tables)) {
       const src = await readPage(rel);
+      const lib = table.lib ?? "control-verdicts";
       for (const fn of table.imports) {
-        assert.match(src, new RegExp(`import \\{[^}]*\\b${fn}\\b[^}]*\\} from "[./]+lib/control-verdicts\\.ts"`), `${rel} imports ${fn}`);
+        assert.match(src, new RegExp(`import \\{[^}]*\\b${fn}\\b[^}]*\\} from "[./]+lib/${lib}\\.ts"`), `${rel} imports ${fn}`);
       }
       for (const key of CONTROL_KEYS.filter((k) => src.includes(`"${k}"`))) {
         for (const check of checksOf(controlEntry(key))) {
@@ -744,7 +783,7 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
   });
 
   test("neither page carries a hand-written label, precondition or consequence string", async () => {
-    for (const rel of [BOARD_STATE_SRC, HEALTH_SRC]) {
+    for (const rel of CONTROL_PAGE_SRCS) {
       const src = await readPage(rel);
       for (const key of CONTROL_KEYS.filter((k) => src.includes(`"${k}"`))) {
         const { recommended } = controlEntry(key);
@@ -799,10 +838,12 @@ describe("controlEntryCoverage — pure helper (issue #4629)", () => {
 });
 
 describe("control: namespace + typed preconditions — schema (issue #4629)", () => {
-  test("bucketOfKey returns the literal control, and BUCKET_CONTEXT.control is empty", () => {
+  test("bucketOfKey returns the literal control, and BUCKET_CONTEXT.control is exactly ['id']", () => {
     assert.equal(bucketOfKey("control:work/promote"), "control");
     assert.equal(bucketOfKey("control:health/brake-engage"), "control");
-    assert.deepEqual([...BUCKET_CONTEXT.control], []);
+    // #4631 (design-concept 5ae4b72c INV-9) amends #4629's empty list: the
+    // alert id is the only per-row route segment any control carries.
+    assert.deepEqual([...BUCKET_CONTEXT.control], ["id"]);
   });
 
   test("EntryKeySchema admits control:(work|health)/<name> and rejects other shapes", () => {
@@ -825,7 +866,9 @@ describe("control: namespace + typed preconditions — schema (issue #4629)", ()
   });
 
   test("CONTROL_CHECKS is the closed twelve-id vocabulary", () => {
-    assert.deepEqual([...CONTROL_CHECKS], [
+    // The #4629 twelve stay a contiguous, ordered prefix; later slices
+    // (#4631) append their ids after them.
+    assert.deepEqual([...CONTROL_CHECKS].slice(0, 12), [
       "issue-open",
       "not-already-ready",
       "has-scope-section",
@@ -848,5 +891,150 @@ describe("control: namespace + typed preconditions — schema (issue #4629)", ()
     ]);
     assert.deepEqual(missingDefaultLines(entries), []);
     assert.deepEqual(classEntryCoverage(entries, []), { missing: [], extra: [] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. /health alert, scheduler and housekeeping controls (issue #4631,
+//    design-concept 5ae4b72c INV-2/3/4/6/7/9/12)
+// ---------------------------------------------------------------------------
+
+const HEALTH_4631_KEYS = [
+  "control:health/alert-dismiss",
+  "control:health/alerts-dismiss-all",
+  "control:health/scheduler-stop",
+  "control:health/scheduler-start",
+  "control:health/housekeeping",
+] as const;
+
+function inDashboard(key: string) {
+  const { recommended } = controlEntry(key);
+  assert.equal(recommended.kind, "in-dashboard", `${key} recommends an in-dashboard action`);
+  if (recommended.kind !== "in-dashboard") throw new Error("unreachable");
+  return recommended;
+}
+
+describe("control:health alert/scheduler/housekeeping entries (issue #4631)", () => {
+  test("the five #4631 keys join CONTROL_KEYS and the five checks join CONTROL_CHECKS", () => {
+    for (const key of HEALTH_4631_KEYS) {
+      assert.ok((CONTROL_KEYS as readonly string[]).includes(key), key);
+    }
+    for (const check of ["alert-open", "alerts-any-open", "scheduler-running", "scheduler-not-running", "no-fresh-deliberate-stop"]) {
+      assert.ok((CONTROL_CHECKS as readonly string[]).includes(check), check);
+    }
+  });
+
+  test("each entry recommends POST in-dashboard on its real route, cites docs/reference.md, and offers two read-only hand-offs", () => {
+    const routes: Record<string, string> = {
+      "control:health/alert-dismiss": "/alerts/{id}/dismiss",
+      "control:health/alerts-dismiss-all": "/alerts/dismiss-all",
+      "control:health/scheduler-stop": "/scheduler/stop",
+      "control:health/scheduler-start": "/scheduler/start",
+      "control:health/housekeeping": "/maintenance/housekeeping",
+    };
+    const readOnly = new Set([
+      "curl -s http://localhost:4000/api/alerts",
+      "/hydra-review",
+      "curl -s http://localhost:4000/api/scheduler/status",
+      "journalctl --user -u hydra-orchestrator.service -n 200 --no-pager",
+      "systemctl --user status hydra-housekeeping.timer",
+    ]);
+    for (const key of HEALTH_4631_KEYS) {
+      const entry = controlEntry(key);
+      const recommended = inDashboard(key);
+      assert.equal(recommended.method, "POST", key);
+      assert.equal(recommended.route, routes[key], key);
+      assert.equal(entry.doc, "docs/reference.md", key);
+      for (const alt of [entry.alternatives[0], entry.alternatives[1]]) {
+        assert.equal(alt.kind, "terminal-skill", `${key}: alternatives are hand-offs`);
+        if (alt.kind === "terminal-skill") assert.ok(readOnly.has(alt.command), `${key}: ${alt.command} is a read-only hand-off`);
+      }
+    }
+  });
+
+  test("confirm tiers: alert-dismiss, scheduler-start, housekeeping are immediate-undo; dismiss-all and scheduler-stop confirm first", () => {
+    for (const key of ["control:health/alert-dismiss", "control:health/scheduler-start", "control:health/housekeeping"]) {
+      assert.equal(inDashboard(key).confirmTier, "immediate-undo", key);
+    }
+    for (const key of ["control:health/alerts-dismiss-all", "control:health/scheduler-stop"]) {
+      assert.equal(inDashboard(key).confirmTier, "confirm-first", key);
+    }
+  });
+
+  test("check bindings: each entry carries exactly its typed checks, in order; housekeeping has none", () => {
+    assert.deepEqual(checksOf(controlEntry("control:health/alert-dismiss")), ["alert-open"]);
+    assert.deepEqual(checksOf(controlEntry("control:health/alerts-dismiss-all")), ["alerts-any-open"]);
+    assert.deepEqual(checksOf(controlEntry("control:health/scheduler-stop")), ["scheduler-running"]);
+    assert.deepEqual(checksOf(controlEntry("control:health/scheduler-start")), ["scheduler-not-running", "no-fresh-deliberate-stop"]);
+    assert.deepEqual(controlEntry("control:health/housekeeping").recommended.preconditions, []);
+    // Every line is typed — none of these controls carries a prose ☐ line.
+    for (const key of HEALTH_4631_KEYS) {
+      for (const p of controlEntry(key).recommended.preconditions) assert.equal(typeof p, "object", key);
+    }
+  });
+
+  test("precondition and consequence strings are the #4424 table's, with the two glossary corrections", () => {
+    const textsOf = (key: string) => controlEntry(key).recommended.preconditions.map((p) => (typeof p === "string" ? p : p.text));
+    assert.deepEqual(textsOf("control:health/alert-dismiss"), ["alert is open"]);
+    assert.deepEqual(textsOf("control:health/alerts-dismiss-all"), ["≥ 1 open alert"]);
+    assert.deepEqual(textsOf("control:health/scheduler-stop"), ["scheduler running"]);
+    assert.deepEqual(textsOf("control:health/scheduler-start"), ["scheduler not running", "no deliberate-stop marker younger than 24 h"]);
+    const consequenceOf = (key: string) => controlEntry(key).recommended.consequence;
+    assert.equal(consequenceOf("control:health/alert-dismiss"), "the alert leaves the count and the list; Undo within the window cancels before anything is sent");
+    assert.equal(consequenceOf("control:health/alerts-dismiss-all"), "every open alert is dismissed; none can be restored");
+    assert.equal(consequenceOf("control:health/scheduler-stop"), "writes the deliberate-stop marker (24 h); the watchdog will NOT restart it");
+    assert.equal(consequenceOf("control:health/scheduler-start"), "clears the marker and the heartbeat resumes ticking at the stored interval");
+    assert.equal(consequenceOf("control:health/housekeeping"), "runs every due chore now and reports {ran, skipped}; chores inside their time-guard window are skipped");
+    // Glossary corrections: chores are timer-driven, never "on the next tick";
+    // there is no un-dismiss route, so nothing claims Undo "restores" it.
+    assert.doesNotMatch(consequenceOf("control:health/scheduler-start"), /next tick/);
+    assert.doesNotMatch(consequenceOf("control:health/alert-dismiss"), /restores/);
+  });
+
+  test("scheduler-start and the feed's machine-stopped:scheduler-deliberate share method and route, differ in tier, and the control carries no-fresh-deliberate-stop", () => {
+    const page = inDashboard("control:health/scheduler-start");
+    const feed = controlEntry("machine-stopped:scheduler-deliberate").recommended;
+    assert.equal(feed.kind, "in-dashboard");
+    if (feed.kind !== "in-dashboard") return;
+    assert.deepEqual({ method: page.method, route: page.route }, { method: feed.method, route: feed.route });
+    assert.notEqual(page.confirmTier, feed.confirmTier, "the two entries are enabled in disjoint states, so the tiers may differ");
+    // Disjointness: the feed row exists only while a deliberate stop is younger
+    // than 24 h — exactly when this line is ✗ and the control is disabled.
+    assert.ok(checksOf(controlEntry("control:health/scheduler-start")).includes("no-fresh-deliberate-stop"));
+    const fresh = schedulerVerdicts(
+      { running: false, stopReason: "deliberate", deliberateStoppedAt: new Date(1_000_000).toISOString() },
+      1_000_000 + 60_000,
+    );
+    assert.equal(fresh["no-fresh-deliberate-stop"], false, "a fresh deliberate stop disables the control");
+  });
+
+  test("assertion (d) admits {id} on a control route and still flags any other placeholder", () => {
+    assert.deepEqual(outOfContextPlaceholders(REGISTRY), []);
+    const route = (r: string) => ({
+      kind: "in-dashboard" as const,
+      route: r,
+      method: "POST" as const,
+      confirmTier: "immediate-undo" as const,
+      label: "x",
+      preconditions: [],
+      consequence: "y",
+    });
+    const ok = validateRegistry([validEntry("control:health/alert-dismiss", { recommended: route("/alerts/{id}/dismiss") })]);
+    assert.deepEqual(outOfContextPlaceholders(ok), []);
+    const bad = validateRegistry([validEntry("control:health/alert-dismiss", { recommended: route("/alerts/{number}/dismiss") })]);
+    assert.deepEqual(outOfContextPlaceholders(bad), [{ key: "control:health/alert-dismiss", placeholder: "number" }]);
+  });
+
+  test("placement follows read ownership: alert controls in AlertsPanel.jsx, scheduler in ServiceStrip.jsx, housekeeping in Health.jsx", async () => {
+    const owner: Record<string, string> = {
+      "control:health/alert-dismiss": ALERTS_PANEL_SRC,
+      "control:health/alerts-dismiss-all": ALERTS_PANEL_SRC,
+      "control:health/scheduler-stop": SERVICE_STRIP_SRC,
+      "control:health/scheduler-start": SERVICE_STRIP_SRC,
+      "control:health/housekeeping": HEALTH_SRC,
+    };
+    for (const [key, rel] of Object.entries(owner)) {
+      assert.ok((await readPage(rel)).includes(`controlKey="${key}"`), `${rel} renders ${key}`);
+    }
   });
 });

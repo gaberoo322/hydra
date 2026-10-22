@@ -797,3 +797,142 @@ describe("Health.jsx — the Operator channel card (issue #5048, ADR-0034 no-new
     assert.ok(src.includes("derivePageStatus"), "status derives through the shared seam");
   });
 });
+
+// ---------------------------------------------------------------------------
+// /health alert, scheduler and housekeeping controls (issue #4631,
+// design-concept 5ae4b72c INV-5/7/9/11). The verdict leaf is driven
+// behaviourally; the page wiring is pinned as source reads (same convention
+// as the rest of this file — the dashboard ships no JSX runner).
+// ---------------------------------------------------------------------------
+
+import {
+  DELIBERATE_STOP_TTL_MS,
+  alertVerdicts,
+  alertsVerdicts,
+  housekeepingSummary,
+  resolveControlRoute,
+  schedulerVerdicts,
+} from "../dashboard/src/lib/health-verdicts.ts";
+import { DELIBERATE_STOP_TTL_SECONDS } from "../src/scheduler/stop-marker.ts";
+
+describe("health-verdicts — the /health control verdict leaf (issue #4631)", () => {
+  const T = Date.UTC(2026, 9, 21, 12, 0, 0);
+  const iso = (ms: number) => new Date(ms).toISOString();
+
+  test("DELIBERATE_STOP_TTL_MS is pinned to the server's DELIBERATE_STOP_TTL_SECONDS", () => {
+    assert.equal(DELIBERATE_STOP_TTL_MS, DELIBERATE_STOP_TTL_SECONDS * 1000);
+  });
+
+  test("alertVerdicts: an undismissed alert is open, a dismissed one is not, no alert yields no verdict", () => {
+    assert.deepEqual(alertVerdicts({ id: "a", dismissed: false }), { "alert-open": true });
+    assert.deepEqual(alertVerdicts({ id: "a" }), { "alert-open": true });
+    assert.deepEqual(alertVerdicts({ id: "a", dismissed: true }), { "alert-open": false });
+    assert.deepEqual(alertVerdicts(null), {});
+    assert.deepEqual(alertVerdicts(undefined), {});
+  });
+
+  test("alertsVerdicts: >= 1 open alert passes, 0 fails, an unproven count yields no verdict", () => {
+    assert.deepEqual(alertsVerdicts(3), { "alerts-any-open": true });
+    assert.deepEqual(alertsVerdicts(1), { "alerts-any-open": true });
+    assert.deepEqual(alertsVerdicts(0), { "alerts-any-open": false });
+    for (const v of [undefined, null, NaN, -1, Infinity]) assert.deepEqual(alertsVerdicts(v as any), {}, String(v));
+  });
+
+  test("schedulerVerdicts: a running scheduler passes scheduler-running only", () => {
+    assert.deepEqual(schedulerVerdicts({ running: true, stopReason: null, deliberateStoppedAt: null }, T), {
+      "scheduler-running": true,
+      "scheduler-not-running": false,
+      "no-fresh-deliberate-stop": true,
+    });
+  });
+
+  test("schedulerVerdicts: a deliberate stop younger than 24 h fails no-fresh-deliberate-stop; at or past 24 h it passes", () => {
+    const at = (ageMs: number) =>
+      schedulerVerdicts({ running: false, stopReason: "deliberate", deliberateStoppedAt: iso(T - ageMs) }, T);
+    assert.equal(at(60_000)["no-fresh-deliberate-stop"], false);
+    assert.equal(at(DELIBERATE_STOP_TTL_MS - 1)["no-fresh-deliberate-stop"], false);
+    assert.equal(at(DELIBERATE_STOP_TTL_MS)["no-fresh-deliberate-stop"], true);
+    assert.equal(at(DELIBERATE_STOP_TTL_MS + 60_000)["no-fresh-deliberate-stop"], true);
+    assert.equal(at(60_000)["scheduler-not-running"], true);
+    assert.equal(at(60_000)["scheduler-running"], false);
+  });
+
+  test("schedulerVerdicts: a non-deliberate stop (circuit-breaker, error-cap) never blocks Start", () => {
+    for (const stopReason of ["circuit-breaker", "error-cap"]) {
+      const v = schedulerVerdicts({ running: false, stopReason, deliberateStoppedAt: null }, T);
+      assert.equal(v["no-fresh-deliberate-stop"], true, stopReason);
+      assert.equal(v["scheduler-not-running"], true, stopReason);
+    }
+  });
+
+  test("schedulerVerdicts: a missing payload or field yields NO verdict for that check (fail closed, never a guess)", () => {
+    assert.deepEqual(schedulerVerdicts(null, T), {});
+    assert.deepEqual(schedulerVerdicts(undefined, T), {});
+    const noRunning = schedulerVerdicts({ stopReason: null }, T);
+    assert.ok(!("scheduler-running" in noRunning) && !("scheduler-not-running" in noRunning));
+    assert.equal(noRunning["no-fresh-deliberate-stop"], true);
+    const noReason = schedulerVerdicts({ running: false }, T);
+    assert.ok(!("no-fresh-deliberate-stop" in noReason), "stopReason absent → no verdict");
+    for (const deliberateStoppedAt of [null, undefined, "not-a-date"]) {
+      const v = schedulerVerdicts({ running: false, stopReason: "deliberate", deliberateStoppedAt }, T);
+      assert.ok(!("no-fresh-deliberate-stop" in v), `deliberate with stoppedAt=${String(deliberateStoppedAt)} → no verdict`);
+    }
+    assert.ok(!("scheduler-running" in schedulerVerdicts({ running: "yes" }, T)), "a non-boolean running is not a verdict");
+  });
+
+  test("resolveControlRoute: substitutes and encodes {id}; the result carries no {", () => {
+    const r = resolveControlRoute("/alerts/{id}/dismiss", { id: "alert-1792000000000" });
+    assert.equal(r, "/alerts/alert-1792000000000/dismiss");
+    assert.ok(!r.includes("{"));
+    assert.equal(resolveControlRoute("/alerts/{id}/dismiss", { id: "a/b c" }), "/alerts/a%2Fb%20c/dismiss");
+    assert.equal(resolveControlRoute("/alerts/dismiss-all", {}), "/alerts/dismiss-all", "no placeholder → unchanged");
+  });
+
+  test("resolveControlRoute: an unresolvable placeholder throws rather than firing", () => {
+    for (const params of [{}, { id: "" }, { id: null }, { id: undefined }, { id: {} }, { other: "x" }]) {
+      assert.throws(() => resolveControlRoute("/alerts/{id}/dismiss", params as any), /unresolved route placeholder \{id\}/);
+    }
+    assert.throws(() => resolveControlRoute("/alerts/{id}/dismiss", Object.create({ id: "inherited" })), /\{id\}/, "own keys only");
+  });
+
+  test("housekeepingSummary: renders ran/skipped names and counts from the verified body", () => {
+    assert.equal(
+      housekeepingSummary({ ok: true, body: { ok: true, ran: ["a", "b"], skipped: ["c"] } }),
+      "ran (2): a, b · skipped (1): c",
+    );
+    assert.equal(housekeepingSummary({ ok: true, body: { ran: [], skipped: [] } }), "ran (0): none · skipped (0): none");
+  });
+
+  test("housekeepingSummary: a body missing ran/skipped says so; no result or a failed request renders nothing of its own", () => {
+    assert.equal(housekeepingSummary({ ok: true, body: { ok: true } }), "✓ accepted · summary missing");
+    assert.equal(housekeepingSummary({ ok: true, body: undefined }), "✓ accepted · summary missing");
+    assert.equal(housekeepingSummary({ ok: true, body: { ran: "a", skipped: [] } }), "✓ accepted · summary missing");
+    assert.equal(housekeepingSummary(null), null);
+    // ok:false (refused) and a thrown request: the affordance's persistent ✗
+    // line is the failure surface — the summary never renders a ✓ over it.
+    assert.equal(housekeepingSummary({ ok: false, body: { ran: ["a"], skipped: [] } }), null);
+    assert.equal(housekeepingSummary({ ok: false, body: undefined }), null);
+  });
+});
+
+describe("Health.jsx — the #4631 controls stay beside the reads their panels own", () => {
+  const read = (relPath: string) => readFileSync(join(REPO_ROOT, relPath), "utf8");
+
+  test("Health.jsx fetches neither /alerts nor /scheduler/status — each stays owned by its panel", () => {
+    const src = read("dashboard/src/pages/Health.jsx");
+    assert.ok(!src.includes('"/alerts"'), "Health.jsx must not fetch /alerts");
+    assert.ok(!src.includes('"/scheduler/status"'), "Health.jsx must not fetch /scheduler/status");
+    assert.equal((read("dashboard/src/components/pages/health/AlertsPanel.jsx").match(/"\/alerts"/g) ?? []).length, 1);
+    assert.equal((read("dashboard/src/components/pages/health/ServiceStrip.jsx").match(/"\/scheduler\/status"/g) ?? []).length, 1);
+  });
+
+  test("the housekeeping section renders the verified {ran, skipped} summary from the lifted result", () => {
+    const src = read("dashboard/src/pages/Health.jsx");
+    assert.ok(src.includes('data-testid="housekeeping-section"'));
+    assert.ok(src.includes('controlKey="control:health/housekeeping"'));
+    assert.ok(src.includes("onResult={setHousekeepingResult}"), "the result is lifted out of the affordance");
+    assert.ok(src.includes("onStart={clearHousekeepingResult}"), "a new run clears the previous summary as it starts");
+    assert.ok(src.includes("housekeepingSummary(housekeepingResult)"), "the summary derives from the settled result only");
+    assert.ok(src.includes('data-testid="housekeeping-summary"'));
+  });
+});

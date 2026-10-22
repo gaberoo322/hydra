@@ -199,22 +199,6 @@ export const PENDING_CONTROL_WRITES: Readonly<Record<string, PendingControlWrite
     reason:
       "the typed one-click dismiss on every Today feed row (dashboard/src/components/pages/today/AttentionFeed.jsx) — feed grammar, not a registry Action; no control:<page>/<name> key exists for it yet",
   },
-  "POST /api/alerts/:id/dismiss": {
-    ref: "#4631 (PR #5157)",
-    reason: "#4631 registers control:health/alert-dismiss and wires it on /health",
-  },
-  "POST /api/alerts/dismiss-all": {
-    ref: "#4631 (PR #5157)",
-    reason: "#4631 registers control:health/alerts-dismiss-all and wires it on /health (also called by bin/hydra)",
-  },
-  "POST /api/scheduler/stop": {
-    ref: "#4631 (PR #5157)",
-    reason: "#4631 registers control:health/scheduler-stop and wires it on /health (also called by bin/hydra + the watchdog)",
-  },
-  "POST /api/maintenance/housekeeping": {
-    ref: "#4631 (PR #5157)",
-    reason: "#4631 registers control:health/housekeeping and wires it on /health (also called by scripts/deploy.sh + housekeeping.sh)",
-  },
 });
 
 // ---------------------------------------------------------------------------
@@ -251,6 +235,10 @@ export const HOMED_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /api/autopilot/class-state": "dashboard/src/components/pages/work/ClassStatePanel.jsx",
   "GET /api/autopilot/class-stats": "dashboard/src/components/pages/builder/ClassYield.jsx",
   "GET /api/design-concepts/snapshots": "dashboard/src/components/pages/builder/DesignConceptGreenLight.jsx",
+  "GET /api/design-concepts": "dashboard/src/components/pages/work/DesignConceptQueue.jsx",
+  "GET /api/design-concepts/:anchorRef": "dashboard/src/components/pages/work/DesignConceptQueue.jsx",
+  "GET /api/design-concepts/:anchorRef/approve-preconditions": "dashboard/src/components/pages/work/DesignConceptQueue.jsx",
+  "GET /api/holdback/enrolments": "dashboard/src/components/pages/work/HoldbackEnrolState.jsx",
   "GET /api/dispatches/:dispatchId/transcript": "dashboard/src/pages/DispatchTranscript.jsx",
   "GET /api/explore/friction": "dashboard/src/components/pages/runs/FrictionPanel.jsx",
   "GET /api/explore/behavior": "dashboard/src/components/pages/runs/BehaviorGallery.jsx",
@@ -307,13 +295,9 @@ export const MACHINE_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /api/cycle/report/:cycleId":
     "no in-repo caller found at #4638 classification — retirement candidate (outside the eleven reads §9.4 retires)",
   "GET /api/design-concepts/exempt-log": ".github/workflows/design-concept-comment.yml",
-  "GET /api/design-concepts": "hydra-grill via scripts/autopilot/grill-artifact.sh",
   "GET /api/design-concepts/:anchorRef/resolve": "hydra-qa playbook",
-  "GET /api/design-concepts/:anchorRef":
-    "hydra-dev / hydra-grill / hydra-qa playbooks + .github/workflows/design-concept-comment.yml",
   "GET /api/events/:stream": "hydra-digest + hydra-target-build playbooks",
   "GET /api/goals": "hydra-architect + hydra-target-research playbooks",
-  "GET /api/holdback/enrolments": "holdback-merge-watch tooling (src/redis/holdback-merge-watch.ts documents the read)",
   "GET /api/learning/context-trace": "hydra-dev child flow + hydra-target-build playbooks",
   "GET /api/metrics": "hydra-discover + hydra-autopilot phase-6 ops + hydra-target-build merge flow",
   "GET /api/metrics/cascade-routing": "scripts/autopilot/dispatch.sh + reap.py + reflection-deposit.sh",

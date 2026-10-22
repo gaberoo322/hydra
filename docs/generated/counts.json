@@ -138,12 +138,12 @@
     {
       "family": "routes",
       "metric": "routes",
-      "value": 139
+      "value": 140
     },
     {
       "family": "routes",
       "metric": "rows",
-      "value": 139
+      "value": 140
     },
     {
       "family": "schemas",

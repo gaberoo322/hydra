@@ -320,6 +320,7 @@
           "GET /api/design-concepts/exempt-log",
           "POST /api/design-concepts/exempt-log",
           "GET /api/design-concepts",
+          "GET /api/design-concepts/:anchorRef/approve-preconditions",
           "GET /api/design-concepts/:anchorRef/resolve",
           "GET /api/design-concepts/:anchorRef",
           "POST /api/design-concepts",
@@ -1242,6 +1243,7 @@
           "GET /api/design-concepts/exempt-log",
           "POST /api/design-concepts/exempt-log",
           "GET /api/design-concepts",
+          "GET /api/design-concepts/:anchorRef/approve-preconditions",
           "GET /api/design-concepts/:anchorRef/resolve",
           "GET /api/design-concepts/:anchorRef",
           "POST /api/design-concepts",
@@ -1353,7 +1355,16 @@
           "POST /api/autopilot/board/promote",
           "POST /api/autopilot/board/relabel",
           "POST /api/autopilot/board/close",
-          "POST /api/autopilot/board/reopen"
+          "POST /api/autopilot/board/reopen",
+          "GET /api/design-concepts/snapshots",
+          "GET /api/design-concepts/exempt-log",
+          "POST /api/design-concepts/exempt-log",
+          "GET /api/design-concepts",
+          "GET /api/design-concepts/:anchorRef/approve-preconditions",
+          "GET /api/design-concepts/:anchorRef/resolve",
+          "GET /api/design-concepts/:anchorRef",
+          "POST /api/design-concepts",
+          "POST /api/design-concepts/:anchorRef/approve"
         ],
         "env-vars": [
           "HYDRA_BETTING_URL",
@@ -1365,7 +1376,8 @@
         ]
       },
       "homes": [
-        "/work"
+        "/work",
+        "/builder"
       ],
       "route": "/docs/area/src-target-config-ts",
       "source": {
@@ -1458,6 +1470,7 @@
           "GET /api/design-concepts/exempt-log",
           "POST /api/design-concepts/exempt-log",
           "GET /api/design-concepts",
+          "GET /api/design-concepts/:anchorRef/approve-preconditions",
           "GET /api/design-concepts/:anchorRef/resolve",
           "GET /api/design-concepts/:anchorRef",
           "POST /api/design-concepts",
@@ -1465,7 +1478,8 @@
         ]
       },
       "homes": [
-        "/builder"
+        "/builder",
+        "/work"
       ],
       "route": "/docs/area/src-design-concept-ts",
       "source": {

@@ -60,6 +60,7 @@ import { deriveFeedBuckets, recordDismissOutcome } from "../dashboard/src/lib/at
 import {
   PRECONDITION_GLYPH,
   anyFailed,
+  resolveControlAction,
   resolvePreconditions,
 } from "../dashboard/src/lib/preconditions.ts";
 import {
@@ -201,7 +202,12 @@ describe("IN_DASHBOARD_BODY covers every registry in-dashboard route", () => {
   });
 
   test("every in-dashboard route (recommended + both alternatives, every entry) has a body key", async () => {
-    const keys = objectLiteralKeys(await readSource(AFFORDANCE), "const IN_DASHBOARD_BODY = {");
+    // Keys spell a resolved segment `:<name>` (`:anchor`, `:id` — #4631);
+    // asPattern spells every placeholder `:anchor`, so the key side is
+    // normalised the same way — the param NAME never decides coverage.
+    const keys = objectLiteralKeys(await readSource(AFFORDANCE), "const IN_DASHBOARD_BODY = {").map((key) =>
+      key.replace(/\/:[A-Za-z_][A-Za-z0-9_]*/g, "/:anchor"),
+    );
     const missing = registryInDashboardRoutes().filter((route) => !keys.includes(route));
     assert.deepEqual(
       missing,
@@ -1014,7 +1020,10 @@ describe("pages read the registry once and host their own undo windows (issue #4
     assert.ok(wrapper.includes("const entry = registry.ready ? registry.byKey.get(controlKey) : undefined;"));
     assert.ok(wrapper.includes("disabled"));
     assert.ok(wrapper.includes("{REGISTRY_UNAVAILABLE}"));
-    assert.ok(wrapper.includes("action={entry.recommended}"), "pages render only the recommended action");
+    // Pages render only the recommended action — with its route resolved
+    // first when the control passes resolveRoute (#4631 INV-9).
+    assert.ok(wrapper.includes("const out = resolveControlAction(entry.recommended, resolveRoute);"), "the recommended action, resolved through the tested core");
+    assert.ok(wrapper.includes("action={resolved.action}"));
   });
 
   for (const page of [BOARD_STATE, HEALTH]) {
@@ -1212,5 +1221,141 @@ describe("page verdict tables — lib/control-verdicts.ts (PR #5155 review)", ()
     const brakeFailed = healthVerdicts({ ...good, emergencyBrake: { engaged: false, ok: false } }, true);
     assert.equal(brakeFailed["brake-off"], false, "never a confident OFF on a failed read");
     assert.equal(brakeFailed["pause-state-verified"], true, "the flags are verified independently");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11 — /health alert, scheduler and housekeeping controls (issue #4631,
+//      design-concept 5ae4b72c INV-7/8/9/10/11)
+// ---------------------------------------------------------------------------
+
+const ALERTS_PANEL = "../dashboard/src/components/pages/health/AlertsPanel.jsx";
+const SERVICE_STRIP = "../dashboard/src/components/pages/health/ServiceStrip.jsx";
+
+describe("the #4631 routes ride the closed body map, and the result lifts its body", () => {
+  test("IN_DASHBOARD_BODY carries a static {} for the four new routes; /scheduler/start keeps its {}", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const map = aff.slice(aff.indexOf("const IN_DASHBOARD_BODY = {"), aff.indexOf("\n};", aff.indexOf("const IN_DASHBOARD_BODY = {")));
+    for (const key of ["POST /alerts/:id/dismiss", "POST /alerts/dismiss-all", "POST /scheduler/stop", "POST /maintenance/housekeeping", "POST /scheduler/start"]) {
+      assert.ok(map.includes(`"${key}": {},`), `${key} → {}`);
+    }
+  });
+
+  test("the lifted result carries body — the parsed 2xx JSON — and undefined on a failed request", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const fn = aff.slice(aff.indexOf("function resultFromResponse("), aff.indexOf("function InDashboardAffordance("));
+    assert.ok(fn.includes("    body: res,\n"), "every 2xx result object carries the response body");
+    const fire = aff.slice(aff.indexOf("const fireRequest = useCallback("), aff.indexOf("const track = undoHost?.track;"));
+    const catchArm = fire.slice(fire.indexOf("} catch (err) {"));
+    assert.ok(catchArm.includes("body: undefined,"), "a thrown request lifts no body");
+  });
+});
+
+describe("ControlAffordance resolves an {id} route before the affordance sees it (issue #4631 INV-9)", () => {
+  test("a resolveRoute prop resolves the registry route; a throwing resolver renders DISABLED and never fires", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const wrapper = aff.slice(aff.indexOf("export function ControlAffordance("));
+    assert.ok(wrapper.includes("rereadNoun, resolveRoute }) {"), "resolveRoute is a ControlAffordance prop");
+    const resolvedAt = wrapper.indexOf("const resolved = useMemo(");
+    const renderAt = wrapper.indexOf("<ActionAffordance");
+    assert.ok(resolvedAt > 0 && renderAt > resolvedAt, "the route resolves BEFORE ActionAffordance renders");
+    const unresolved = wrapper.slice(wrapper.indexOf("if (resolved.error !== undefined) {"), renderAt);
+    assert.ok(unresolved.includes("disabled"), "an unresolved route renders a disabled button");
+    assert.ok(!unresolved.includes("onClick"), "the unresolved state has no trigger at all");
+    assert.ok(wrapper.includes("console.error(`[ControlAffordance] ${controlKey}: ${out.error} — control disabled`);"), "fail loud");
+  });
+
+  test("the window id embeds the resolved route, so two alerts' Dismiss windows never collide", async () => {
+    const { resolveControlRoute } = await import("../dashboard/src/lib/health-verdicts.ts");
+    const aff = await readSource(AFFORDANCE);
+    assert.match(aff, /const windowId = `action:\$\{action\.method\} \$\{action\.route\}/);
+    const a = resolveControlRoute("/alerts/{id}/dismiss", { id: "alert-1" });
+    const b = resolveControlRoute("/alerts/{id}/dismiss", { id: "alert-2" });
+    assert.notEqual(`action:POST ${a}`, `action:POST ${b}`);
+  });
+});
+
+describe("the /health panels render controls from the page's ONE registry read (issue #4631 INV-7/8)", () => {
+  for (const panel of [ALERTS_PANEL, SERVICE_STRIP]) {
+    test(`${panel} renders ControlAffordance from the entries prop and never reads the registry itself`, async () => {
+      const src = await readSource(panel);
+      assert.ok(src.includes("<ControlAffordance"));
+      assert.ok(src.includes("registry={entries}"), "the controls read the entries handed down");
+      assert.ok(!src.includes("useOperatorActions("), "no second registry read");
+      assert.ok(!src.includes('"/operator-actions"'), "no direct registry fetch");
+      assert.ok(!src.includes("apiFetch("), "no hand-rolled write");
+      assert.ok(src.includes("useCheckedRefresh("), "onFired is a CHECKED re-read of the panel's own read");
+      assert.ok(src.includes('rereadNoun="/health"'));
+    });
+  }
+
+  test("Health.jsx passes its one registry read down to both panels", async () => {
+    const src = await readSource(HEALTH);
+    assert.ok(src.includes("<ServiceStrip entries={registry} />"));
+    assert.ok(src.includes("<AlertsPanel entries={registry} />"));
+  });
+
+  test("the scheduler Stop ⇄ Start toggle swaps two ControlAffordance controls in one slot (remount per key)", async () => {
+    const src = await readSource(SERVICE_STRIP);
+    assert.match(
+      src,
+      /sched\.data\.running === true \? \(\s*<ControlAffordance[\s\S]*?controlKey="control:health\/scheduler-stop"[\s\S]*?\) : \(\s*<ControlAffordance[\s\S]*?controlKey="control:health\/scheduler-start"/,
+    );
+    // An UNKNOWN scheduler read renders no control at all (INV-13).
+    assert.ok(src.includes("{!schedUnknown && (\n        <div data-testid=\"scheduler-controls\">"));
+    assert.ok(src.includes("schedulerVerdicts(schedUnknown ? null : sched.data, Date.now())"), "an untrusted read yields no verdict");
+  });
+
+  test("every undismissed alert row carries its own Dismiss; Dismiss all sits beside the count", async () => {
+    const src = await readSource(ALERTS_PANEL);
+    const row = src.slice(src.indexOf("function AlertRow("), src.indexOf("export default function AlertsPanel("));
+    assert.ok(row.includes('controlKey="control:health/alert-dismiss"'));
+    assert.ok(row.includes("resolveControlRoute(route, { id: alertId })"), "the per-row route is resolved through the tested leaf");
+    assert.ok(row.includes("resolveRoute={resolveRoute}"));
+    assert.ok(row.includes("verdicts={alertVerdicts(alert)}"));
+    const panel = src.slice(src.indexOf("export default function AlertsPanel("));
+    // Headline AND disclosure rows both hand the row its controls.
+    assert.equal((panel.match(/<AlertRow[\s\S]*?entries=\{entries\}[\s\S]*?onFired=\{refreshAlerts\}/g) ?? []).length, 2);
+    const countAt = panel.indexOf('data-testid="alerts-count">\n              {undismissed.length} active');
+    const allAt = panel.indexOf('controlKey="control:health/alerts-dismiss-all"');
+    assert.ok(countAt > 0 && allAt > countAt, "Dismiss all renders beside the N active count");
+    assert.ok(panel.includes("verdicts={alertsVerdicts(undismissed.length)}"));
+  });
+});
+
+describe("resolveControlAction — no control route carrying { ever reaches the affordance (PR #5157 review)", () => {
+  const action = (route: string) => ({ kind: "in-dashboard", method: "POST", route, label: "Dismiss" });
+
+  test("a templated route rendered WITHOUT a resolver is refused, never fired against a literal {id}", () => {
+    const out = resolveControlAction(action("/alerts/{id}/dismiss"));
+    assert.equal(out.action, undefined);
+    assert.match(out.error ?? "", /route still carries a placeholder: \/alerts\/\{id\}\/dismiss/);
+  });
+
+  test("a resolver that throws, returns a non-string, or leaves a { behind is refused", () => {
+    const thrown = resolveControlAction(action("/alerts/{id}/dismiss"), () => {
+      throw new Error("unresolved route placeholder {id}");
+    });
+    assert.match(thrown.error ?? "", /route did not resolve: unresolved route placeholder \{id\}/);
+    assert.ok(resolveControlAction(action("/alerts/{id}/dismiss"), () => 42 as any).error);
+    assert.match(resolveControlAction(action("/x/{a}/{b}"), (r) => r.replace("{a}", "1")).error ?? "", /still carries a placeholder/);
+  });
+
+  test("a resolved route passes with the route substituted; an untemplated route passes unchanged", () => {
+    const out = resolveControlAction(action("/alerts/{id}/dismiss"), (r) => r.replace("{id}", "alert-1"));
+    assert.equal(out.error, undefined);
+    assert.equal(out.action?.route, "/alerts/alert-1/dismiss");
+    const plain = action("/scheduler/stop");
+    assert.equal(resolveControlAction(plain).action, plain, "no resolver, no placeholder → the action as served");
+    assert.equal(resolveControlAction(plain, (r) => r).action, plain);
+  });
+
+  test("ControlAffordance renders the refusal DISABLED via the pure core", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const wrapper = aff.slice(aff.indexOf("export function ControlAffordance("));
+    assert.ok(wrapper.includes("resolveControlAction(entry.recommended, resolveRoute)"), "every control, resolver or not, goes through the guard");
+    assert.ok(!wrapper.includes("resolveRoute(entry.recommended.route)"), "no inline resolution bypasses the guard");
+    const refused = wrapper.slice(wrapper.indexOf("if (resolved.error !== undefined) {"), wrapper.indexOf("<ActionAffordance"));
+    assert.ok(refused.includes("disabled") && refused.includes("✗ {resolved.error}"));
   });
 });

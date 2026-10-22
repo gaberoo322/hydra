@@ -60,10 +60,6 @@ const PENDING_CEILING: readonly string[] = [
   "POST /api/now/recommendations/mute-class", // #5152
   "POST /api/holdback/enroll", // #4633 INV-10 deferral
   "POST /api/attention/:id/dismiss", // ADR-0034 §8.4 feed dismiss
-  "POST /api/alerts/:id/dismiss", // #4631
-  "POST /api/alerts/dismiss-all", // #4631
-  "POST /api/scheduler/stop", // #4631
-  "POST /api/maintenance/housekeeping", // #4631
 ];
 
 function row(method: string, path: string, consumers: string[] = []): RouteInventoryRow {

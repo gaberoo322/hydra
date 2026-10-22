@@ -145,6 +145,13 @@ export const CONTROL_KEYS = [
   "control:health/resume",
   "control:health/brake-engage",
   "control:health/brake-release",
+  // /health — AlertsPanel.jsx, ServiceStrip.jsx and Health.jsx's housekeeping
+  // section (issue #4631, design-concept 5ae4b72c INV-2)
+  "control:health/alert-dismiss",
+  "control:health/alerts-dismiss-all",
+  "control:health/scheduler-stop",
+  "control:health/scheduler-start",
+  "control:health/housekeeping",
 ] as const;
 export type ControlKey = (typeof CONTROL_KEYS)[number];
 
@@ -194,10 +201,14 @@ const EntryKeySchema = z.string().refine(
  * each bucket. Per-item buckets carry the item's `{repo, number, kind}`;
  * aggregate buckets and `class:*` carry none — there is no single repo/number
  * to template against for a machine-stopped flag, a friction pattern, or the
- * parked-lane cap. The `control:*` namespace carries none either (issue
- * #4629, INV-2): a page control's route has no template placeholder — the
- * per-row request body is built client-side from the page's closed context
- * (`IN_DASHBOARD_BODY` in ActionAffordance.jsx).
+ * parked-lane cap. The `control:*` namespace carries exactly one, `{id}`
+ * (issue #4631, design-concept 5ae4b72c INV-9, amending #4629's empty list):
+ * the dashboard alert id is the only per-row ROUTE segment any control
+ * carries (`/alerts/{id}/dismiss`). The page resolves it client-side through
+ * `resolveControlRoute` (dashboard/src/lib/health-verdicts.ts) before the
+ * action reaches ActionAffordance; every other per-row value travels in the
+ * request body, built from the page's closed context (`IN_DASHBOARD_BODY` in
+ * ActionAffordance.jsx).
  */
 export const BUCKET_CONTEXT: Readonly<Record<Bucket | "class" | "control", readonly string[]>> =
   Object.freeze({
@@ -208,7 +219,7 @@ export const BUCKET_CONTEXT: Readonly<Record<Bucket | "class" | "control", reado
     repetition: Object.freeze([]),
     "parked-over-cap": Object.freeze([]),
     class: Object.freeze([]),
-    control: Object.freeze([]),
+    control: Object.freeze(["id"]),
   });
 
 // ---------------------------------------------------------------------------
@@ -287,6 +298,13 @@ export const CONTROL_CHECKS = [
   "brake-state-verified",
   "brake-off",
   "brake-engaged",
+  // /health — the alert, scheduler and deliberate-stop reads (issue #4631,
+  // design-concept 5ae4b72c INV-4), evaluated by dashboard/src/lib/health-verdicts.ts.
+  "alert-open",
+  "alerts-any-open",
+  "scheduler-running",
+  "scheduler-not-running",
+  "no-fresh-deliberate-stop",
 ] as const;
 export const ControlCheckSchema = z.enum(CONTROL_CHECKS);
 export type ControlCheck = z.infer<typeof ControlCheckSchema>;
