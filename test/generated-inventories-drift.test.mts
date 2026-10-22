@@ -402,6 +402,31 @@ describe("generated feature inventories", () => {
     );
   });
 
+  it("a generic-typed registration (router.get<…>(…)) is extracted, not silently dropped (#4638)", () => {
+    withFixture(
+      {
+        "src/api.ts": "api.use(createTypedRouter());",
+        "src/api/typed.ts": [
+          'import { Router } from "express";',
+          "export function createTypedRouter() {",
+          "  const router = Router();",
+          '  router.get<{ id: string }>("/typed/:id", async (req, res) => res.json({}));',
+          '  router.delete<{ id: string; key: string }>("/typed/:id/:key", async (req, res) => res.json({}));',
+          "  return router;",
+          "}",
+        ].join("\n"),
+        "dashboard/src/App.jsx": "export default function App() { return null; }",
+      },
+      (root) => {
+        const inv = extractRoutes(root);
+        deepStrictEqual(
+          inv.rows.map((r) => `${r.method} ${r.path}`),
+          ["GET /api/typed/:id", "DELETE /api/typed/:id/:key"],
+        );
+      },
+    );
+  });
+
   it("redis-keys rules: placeholder pattern, call-site count, retired only while code-referenced", () => {
     const builders = {
       plain: () => "hydra:plain",
