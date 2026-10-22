@@ -30,8 +30,8 @@ import LocalTimestamp from "../../components/LocalTimestamp.jsx";
  *   through useServerConfirmedWrite.
  *
  * Both POST bodies carry the `run_id` THIS panel's GET returned (captured at
- * click / arm time) — never the literal "current" — so a run that rolls over
- * between read and click cannot land the write on the new run.
+ * click / arm time) — never the schema's `current` alias — so a run that
+ * rolls over between read and click cannot land the write on the new run.
  *
  * Server-confirmed, never optimistic (INV-10, ADR-0034 §7): ✓ renders only
  * once the POST resolved AND the panel's re-read settled; a dismissed rec or

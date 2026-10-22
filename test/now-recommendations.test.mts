@@ -286,3 +286,126 @@ describe("aggregator: muteSeverityClassForRun", () => {
     assert.equal(result.kind, "run_missing");
   });
 });
+
+// ===========================================================================
+// Issue #4634 (design-concept a7e7fedb INV-2/4/9/10/11) — the /now
+// RecommendationsPanel: the route contract it relies on (HTTP, injected
+// deps) plus source pins for the JSX half (no JSX runner in this suite).
+// ===========================================================================
+
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { createNowRecommendationsRouter } from "../src/api/now-recommendations.ts";
+
+const REPO_ROOT_4634 = fileURLToPath(new URL("..", import.meta.url));
+const readRepo4634 = (rel: string) => readFileSync(join(REPO_ROOT_4634, rel), "utf8");
+const PANEL = "dashboard/src/pages/now-console/RecommendationsPanel.jsx";
+
+function routeHandler(router: any, method: string, path: string): Function {
+  for (const layer of router.stack) {
+    if (layer.route?.path === path && layer.route.methods[method.toLowerCase()]) {
+      const stack = layer.route.stack;
+      return stack[stack.length - 1].handle;
+    }
+  }
+  throw new Error(`no ${method} ${path} handler`);
+}
+
+function fakeRes(): any {
+  const res: any = {
+    _status: 200,
+    _body: null,
+    status(code: number) { res._status = code; return res; },
+    json(body: any) { res._body = body; return res; },
+  };
+  return res;
+}
+
+describe("#4634 — the recommendation routes the /now panel writes through", () => {
+  test("mute-class accepts exactly info | warn | critical — the panel's hard-coded vocabulary", async () => {
+    const { redis } = makeRecsFake();
+    const router = createNowRecommendationsRouter({ recsRedis: redis, readCurrentRunId: async () => "run-A" });
+    const mute = routeHandler(router, "POST", "/now/recommendations/mute-class");
+    for (const severity of ["info", "warn", "critical"]) {
+      const res = fakeRes();
+      await mute({ body: { run_id: "run-A", severity }, params: {}, query: {} }, res);
+      assert.equal(res._status, 200, `${severity} is accepted`);
+      assert.equal(res._body.muted, true);
+    }
+    const bad = fakeRes();
+    await mute({ body: { run_id: "run-A", severity: "error" }, params: {}, query: {} }, bad);
+    assert.equal(bad._status, 400, "a severity outside the closed enum is rejected");
+  });
+
+  test("a dismiss carrying the GET's run_id lands on THAT run even after 'current' rolls over", async () => {
+    const { redis, state } = makeRecsFake({ recs: { "run-A": [rec({ id: "run-A:1:0" })] } });
+    let current = "run-A";
+    const router = createNowRecommendationsRouter({ recsRedis: redis, readCurrentRunId: async () => current });
+    const read = fakeRes();
+    await routeHandler(router, "GET", "/now/recommendations")({ query: {}, params: {}, body: {} }, read);
+    assert.equal(read._body.run_id, "run-A", "the GET resolves and RETURNS the concrete run id");
+    current = "run-B"; // a new run starts between the read and the click
+    const res = fakeRes();
+    await routeHandler(router, "POST", "/now/recommendations/:id/dismiss")(
+      { params: { id: "run-A:1:0" }, body: { run_id: read._body.run_id }, query: {} },
+      res,
+    );
+    assert.equal(res._status, 200);
+    assert.equal(res._body.run_id, "run-A");
+    assert.ok(state.dismissed.get("run-A")?.has("run-A:1:0"), "the write targets the run the panel read");
+    assert.equal(state.dismissed.get("run-B"), undefined, "the new run is untouched");
+  });
+
+  test("a missing current run reads as run_id null — the panel's explicit no-run evidence", async () => {
+    const { redis } = makeRecsFake();
+    const router = createNowRecommendationsRouter({ recsRedis: redis, readCurrentRunId: async () => null });
+    const res = fakeRes();
+    await routeHandler(router, "GET", "/now/recommendations")({ query: {}, params: {}, body: {} }, res);
+    assert.equal(res._body.run_id, null);
+    assert.deepEqual(res._body.items, []);
+    assert.ok(Number.isFinite(Date.parse(res._body.generatedAt)));
+  });
+});
+
+describe("#4634 — RecommendationsPanel source pins", () => {
+  test("the panel is the single owner of the GET and both POST literals; NowConsole only mounts it", () => {
+    const src = readRepo4634(PANEL);
+    assert.match(src, /usePageItems\(\s*"\/now\/recommendations"/, "the GET rides usePageItems");
+    assert.ok(src.includes("apiFetch(`/now/recommendations/${encodeURIComponent(rec.id)}/dismiss`"), "dismiss POST literal");
+    assert.ok(src.includes('writeMute("/now/recommendations/mute-class"'), "mute-class POST literal");
+    const shell = readRepo4634("dashboard/src/pages/now-console/NowConsole.jsx");
+    assert.ok(!shell.includes("/now/recommendations"), "NowConsole.jsx owns no recommendation literal");
+    assert.ok(!shell.includes("apiFetch"), "NowConsole.jsx gains no apiFetch");
+    const stuck = shell.indexOf("<StuckSignals />");
+    const panel = shell.indexOf("<RecommendationsPanel />");
+    const strip = shell.indexOf("<RunHistoryStrip");
+    assert.ok(stuck >= 0 && panel > stuck && strip > panel, "mounted between StuckSignals and RunHistoryStrip");
+  });
+
+  test("dismiss is immediate-undo through the shared undo host; mute is confirm-first through the write hook", () => {
+    const src = readRepo4634(PANEL);
+    for (const seam of ["useUndoWindowHost", "UndoToastStack", "triggerDisabled", "useServerConfirmedWrite"]) {
+      assert.ok(src.includes(seam), `the panel composes ${seam}`);
+    }
+    assert.ok(src.includes("dismiss-rec:${rec.id}"), "one undo window per rec");
+    assert.ok(src.includes("Confirm mute ${muteArmed.severity}?"), "mute arms a confirm step");
+    assert.match(src, /const SEVERITIES = \["info", "warn", "critical"\];/, "exactly the route's closed enum");
+  });
+
+  test("both writes carry the run_id the panel read — never the literal 'current'", () => {
+    const src = readRepo4634(PANEL);
+    assert.ok(!src.includes('"current"'), "no 'current' run_id literal");
+    assert.ok(src.includes("body: JSON.stringify({ run_id: runId })"), "dismiss body pins the read run_id");
+    assert.ok(src.includes("{ run_id: runId, severity }"), "mute body pins the arm-time run_id");
+  });
+
+  test("results are server-confirmed: ✓ only after the re-read, and a failed re-read says so", () => {
+    const src = readRepo4634(PANEL);
+    assert.ok(src.includes("const reread = await refreshChecked();"), "dismiss awaits the panel's re-read");
+    assert.ok(src.includes("✓ accepted · re-read FAILED — list may be stale"), "the #4628 failed-re-read wording");
+    assert.ok(src.includes("no autopilot run — nothing to recommend"), "run_id null renders the explicit no-run row");
+    assert.ok(src.includes("there is no un-dismiss route"), "dismiss consequence stated at the control");
+    assert.ok(src.includes("there is no un-mute route"), "mute consequence stated at the control");
+  });
+});

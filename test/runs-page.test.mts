@@ -398,3 +398,121 @@ describe("/runs page source structure (INV-1/2/4/5/6/7/8 pins)", () => {
     assert.match(src, /"\/now\/active-dispatches"/, "dispatch events come from the registry endpoint");
   });
 });
+
+// ===========================================================================
+// Issue #4634 (design-concept a7e7fedb) — /runs Behavior fold restored,
+// /runs/:runId retro bundle, the dead /metrics?run= link deleted.
+// Source pins (no JSX runner — same rationale as the suite above).
+// ===========================================================================
+
+import { readdirSync, statSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+
+const REPO_ROOT_4634 = fileURLToPath(new URL("..", import.meta.url));
+
+/** Repo-relative dashboard/src files whose source contains `needle`. */
+function dashboardFilesContaining(needle: string): string[] {
+  const out: string[] = [];
+  const walk = (rel: string) => {
+    for (const name of readdirSync(join(REPO_ROOT_4634, rel))) {
+      if (name === "node_modules") continue;
+      const child = `${rel}/${name}`;
+      if (statSync(join(REPO_ROOT_4634, child)).isDirectory()) walk(child);
+      else if (/\.(jsx?|tsx?)$/.test(name) && readFileSync(join(REPO_ROOT_4634, child), "utf8").includes(needle)) {
+        out.push(child);
+      }
+    }
+  };
+  walk("dashboard/src");
+  return out;
+}
+
+describe("#4634 INV-2/6 — BehaviorGallery on /runs", () => {
+  test('"/explore/behavior?limit=50" lives in exactly one file: BehaviorGallery.jsx', () => {
+    assert.deepEqual(dashboardFilesContaining('"/explore/behavior?limit=50"'), [
+      "dashboard/src/components/pages/runs/BehaviorGallery.jsx",
+    ]);
+  });
+
+  test("rides usePageItems with a client-side outcome filter — one fetch, no query rewrite", async () => {
+    const src = await readSource("../dashboard/src/components/pages/runs/BehaviorGallery.jsx");
+    assert.match(src, /usePageItems\(\s*"\/explore\/behavior\?limit=50"/);
+    assert.match(src, /\bfilter,/, "the outcome filter rides usePageItems' filter option");
+    assert.ok(!src.includes("outcome="), "no server-side outcome query rewrite");
+    assert.match(src, /"success", "failure", "aborted", "in-progress"/, "the closed outcome set");
+  });
+
+  test("links to /runs/${runId}, never the retired detailHref; empty classes are explicit", async () => {
+    const src = await readSource("../dashboard/src/components/pages/runs/BehaviorGallery.jsx");
+    assert.ok(src.includes("to={`/runs/${encodeURIComponent(r.runId)}`}"), "canonical run link built from runId");
+    assert.ok(!src.includes("r.detailHref") && !src.includes("row.detailHref"), "never the server's detailHref");
+    assert.ok(src.includes("no classes recorded"), "an empty classes[] renders a literal, never a blank");
+    assert.ok(src.includes("Behavior — which classes each run dispatched"), "the section heading");
+  });
+
+  test("Runs.jsx mounts BehaviorGallery between DispatchEvents and OutcomeAttribution and owns no literal", async () => {
+    const src = await readSource("../dashboard/src/pages/Runs.jsx");
+    const d = src.indexOf("<DispatchEvents />");
+    const b = src.indexOf("<BehaviorGallery />");
+    const o = src.indexOf("<OutcomeAttribution />");
+    assert.ok(d >= 0 && b > d && o > b, "BehaviorGallery sits between DispatchEvents and OutcomeAttribution");
+    assert.ok(!src.includes('"/explore/behavior'), "Runs.jsx must not own the behavior route literal");
+  });
+
+  test("the new /runs panels render no trend or chart component (ADR-0034 §2 anti-scope)", async () => {
+    for (const rel of [
+      "../dashboard/src/components/pages/runs/BehaviorGallery.jsx",
+      "../dashboard/src/components/pages/runs/RunRetroBundle.jsx",
+    ]) {
+      const src = await readSource(rel);
+      assert.doesNotMatch(src, /Sparkline|Chart/, `${rel} must not render a chart component`);
+    }
+  });
+});
+
+describe("#4634 INV-2/4/7 — RunRetroBundle on /runs/:runId", () => {
+  test("the retro bundle path lives in exactly one file: RunRetroBundle.jsx", () => {
+    assert.deepEqual(dashboardFilesContaining("`/autopilot/runs/${encodeURIComponent(runId)}/retro`"), [
+      "dashboard/src/components/pages/runs/RunRetroBundle.jsx",
+    ]);
+  });
+
+  test("fetched once (no poll) through the shared derivePageStatus seam", async () => {
+    const src = await readSource("../dashboard/src/components/pages/runs/RunRetroBundle.jsx");
+    assert.ok(src.includes("derivePageStatus"), "must import the shared trust seam");
+    assert.match(src, /useApi\(`\/autopilot\/runs\/\$\{encodeURIComponent\(runId\)\}\/retro`\)/, "one-shot: no options, no poll");
+  });
+
+  test("a partial bundle is visible, runFound=false is UNKNOWN, crossRunTrend is not rendered", async () => {
+    const src = await readSource("../dashboard/src/components/pages/runs/RunRetroBundle.jsx");
+    assert.ok(src.includes("partial bundle —"), "errors[] renders the persistent partial-bundle line");
+    assert.ok(src.includes("data?.runFound === false"), "an unloaded run record renders UNKNOWN");
+    assert.ok(!/\.crossRunTrend/.test(src), "the cross-run trend is /builder's, never read here");
+    for (const field of ["runFlagged", "runFlagReason", "dispatchOutcomes", "reflections", "stuckSignals", "frictionPatterns"]) {
+      assert.ok(src.includes(field), `the bundle panel renders ${field}`);
+    }
+  });
+
+  test("AutopilotDetail mounts RunRetroBundle after RunView and FailureNextSteps; the shell owns no retro literal", async () => {
+    const src = await readSource("../dashboard/src/pages/Autopilot.jsx");
+    const view = src.indexOf('<RunView run={run} turns={turns} mode="detail"');
+    const steps = src.indexOf("{runFailed && <FailureNextSteps run={run} />}");
+    const retro = src.indexOf("<RunRetroBundle runId={runId} />");
+    assert.ok(view >= 0 && steps > view && retro > steps, "retro panel sits after RunView and next steps");
+    assert.ok(!src.includes("/retro`"), "Autopilot.jsx must not fetch the retro bundle itself");
+  });
+});
+
+describe("#4634 INV-8 — the dead /metrics?run= link is gone", () => {
+  test("HistoryTable.jsx carries neither the link nor its label; the row link stays", async () => {
+    const src = await readSource("../dashboard/src/components/HistoryTable.jsx");
+    assert.ok(!src.includes("/metrics?run="), "the dead /metrics?run= link must be deleted");
+    assert.ok(!src.includes("see cycles"), "the dead link's label must be deleted");
+    assert.ok(src.includes("to={`/autopilot/${encodeURIComponent(r.run_id)}`}"), "the run row link is unchanged");
+  });
+
+  test("no dashboard file links to /metrics?run=", () => {
+    assert.deepEqual(dashboardFilesContaining("/metrics?run="), []);
+  });
+});
