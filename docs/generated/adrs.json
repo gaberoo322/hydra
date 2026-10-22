@@ -747,7 +747,8 @@
       "citedBy": [
         "CLAUDE.md",
         "CONTEXT-MAP.md",
-        "docs/adr/0034-orchestrator-dashboard-page-inventory.md"
+        "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
+        "docs/reference.md"
       ],
       "source": {
         "path": "docs/adr/0024-api-versioning.md",
@@ -1020,7 +1021,8 @@
         "docs/agents/triage-labels.md",
         "docs/operator-playbooks/hydra-autopilot.md",
         "docs/operator-playbooks/hydra-grill.md",
-        "docs/operator-playbooks/hydra-review.md"
+        "docs/operator-playbooks/hydra-review.md",
+        "docs/reference.md"
       ],
       "source": {
         "path": "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
