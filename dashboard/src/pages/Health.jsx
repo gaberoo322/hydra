@@ -49,7 +49,7 @@ import AlertsPanel from "../components/pages/health/AlertsPanel.jsx";
  * the consequence all come from the registry, and the button is disabled
  * while any line is ✗ (healthVerdicts, lib/control-verdicts.ts). The
  * affordance POSTs, awaits a CHECKED /health re-read via onFired (a failed
- * re-read renders "health re-read FAILED"), and renders only the verified
+ * re-read renders "/health re-read FAILED"), and renders only the verified
  * state; the RUNNING/PAUSED and ENGAGED/OFF chips keep deriving from the
  * /health read.
  * Pause is immediate-with-undo (the ~5 s delayed commit hosted here); resume
@@ -315,7 +315,7 @@ export default function Health() {
               verdicts={verdicts}
               context={{ paused: false }}
               onFired={refreshHealth}
-              rereadNoun="health"
+              rereadNoun="/health"
             />
           ) : (
             <ControlAffordance
@@ -325,7 +325,7 @@ export default function Health() {
               verdicts={verdicts}
               context={{ paused: true }}
               onFired={refreshHealth}
-              rereadNoun="health"
+              rereadNoun="/health"
             />
           )}
         </div>
@@ -363,7 +363,7 @@ export default function Health() {
               verdicts={verdicts}
               context={{ engaged: false }}
               onFired={refreshHealth}
-              rereadNoun="health"
+              rereadNoun="/health"
             />
           ) : (
             <ControlAffordance
@@ -373,7 +373,7 @@ export default function Health() {
               verdicts={verdicts}
               context={{ engaged: true }}
               onFired={refreshHealth}
-              rereadNoun="health"
+              rereadNoun="/health"
             />
           )}
         </div>

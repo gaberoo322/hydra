@@ -69,7 +69,7 @@ import { createRereadWaiters } from "../lib/reread.ts";
  *     (confirm-first), `<testId>` (immediate), `<testId>-preconditions`,
  *     `<testId>-consequence` and `<testId>-result`.
  *   - `rereadNoun` — names what `onFired` re-read in the result line
- *     ("board", "health"); defaults to "feed", so the feed's lines are
+ *     ("board", "/health"); defaults to "feed", so the feed's lines are
  *     unchanged. A page's `onFired` resolves a REAL verdict through
  *     {@link useCheckedRefresh} — `false` renders "re-read FAILED".
  *   - `onStart` — called as the request starts, so a page's lifted result
