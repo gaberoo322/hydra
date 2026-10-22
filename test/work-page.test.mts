@@ -1487,3 +1487,111 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     assert.equal(row.glmEligible, false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #4637 — the live per-class panel (GET /api/autopilot/class-state) and
+// the deleted client-side class mirrors. Structural source pins (no JSX
+// runner); own top-level describe, no Redis, no shared lifecycle.
+// ---------------------------------------------------------------------------
+
+describe("structural pins — /work class-state panel + no class mirrors (issue #4637)", () => {
+  const PANEL = "../dashboard/src/components/pages/work/ClassStatePanel.jsx";
+
+  test("Work.jsx mounts ClassStatePanel and still fetches no run history (INV-7)", async () => {
+    const src = await readSource("../dashboard/src/pages/Work.jsx");
+    assert.match(src, /import \{ ClassStatePanel \} from "\.\.\/components\/pages\/work\/ClassStatePanel\.jsx"/);
+    assert.match(src, /<ClassStatePanel \/>/);
+    assert.equal(src.includes("/autopilot/runs"), false);
+    assert.equal(src.includes("/runs/"), false);
+  });
+
+  test("ClassStatePanel rides the trust seam on class-state, polled every 60 s (INV-4)", async () => {
+    const src = await readSource(PANEL);
+    assert.match(src, /usePageItems\("\/autopilot\/class-state"/);
+    assert.match(src, /itemsKey: "classes"/);
+    assert.match(src, /poll: 60_?000/);
+    // INV-2: server rows verbatim — no client-side filter option on the read.
+    assert.equal(/\bfilter:/.test(src), false, "no client-side row filter");
+    // INV-4: the as-of is the latest turn epoch, falling back to generatedAt.
+    assert.match(src, /header\?\.verdictAsOf/);
+    assert.match(src, /verdictFreshness === "stale"/);
+    assert.match(src, /no active run/);
+    // INV-7: no run history.
+    assert.equal(src.includes("/autopilot/runs"), false);
+    assert.equal(src.includes("/runs/"), false);
+  });
+
+  test("ClassStatePanel never re-derives cooldown / freshness / starved / dead (INV-2, INV-3)", async () => {
+    const src = await readSource(PANEL);
+    // The server's computed fields are read, never the raw inputs to re-derive them.
+    assert.match(src, /row\.cooldownRemainingSeconds/);
+    assert.match(src, /row\.verdictFreshness/);
+    assert.match(src, /row\.starved === true/);
+    assert.match(src, /row\.dead === true/);
+    assert.equal(/\bcooldownSeconds\b/.test(src), false, "no cooldown arithmetic from cooldownSeconds");
+    assert.equal(src.includes("Date.now"), false, "no client clock — no client-side freshness budget");
+    // INV-3: no active run → the literal UNKNOWN; not-evaluated has its own text.
+    assert.match(src, /UNKNOWN/);
+    assert.match(src, /not evaluated this turn/);
+  });
+
+  test("ClassStatePanel's only affordance is the class:<name> registry entry via ActionAffordance (INV-5)", async () => {
+    const src = await readSource(PANEL);
+    assert.match(src, /import \{ ActionAffordance \} from "\.\.\/\.\.\/ActionAffordance\.jsx"/);
+    assert.match(src, /useApi\("\/operator-actions"\)/);
+    assert.match(src, /`class:\$\{row\.name\}`/);
+    assert.match(src, /entry\.variant === undefined/, "default-variant entries only");
+    assert.match(src, /<ActionAffordance action=\{entry\.recommended\} doc=\{entry\.doc\} \/>/);
+    assert.match(src, /no class: entry/, "a missing entry renders a visible marker");
+    // ADR-0012: no dispatch, no run-now — no write call, no hand-rolled button.
+    assert.equal(src.includes("apiFetch"), false);
+    assert.equal(/method:\s*["']POST["']/.test(src), false);
+    assert.equal(src.includes("<button"), false);
+  });
+
+  test("ClassStatePanel renders the global gates once in the header (INV-6)", async () => {
+    const src = await readSource(PANEL);
+    for (const field of ["run", "scope", "usage", "burnedClasses", "quotaDeltaCap", "degraded"]) {
+      assert.match(src, new RegExp(`header\\?\\.${field}\\b`), `header renders ${field}`);
+    }
+  });
+
+  test("dashboard/src carries no FALLBACK_ identifier and no class-name literal (INV-1)", async () => {
+    const { readdir } = await import("node:fs/promises");
+    const root = new URL("../dashboard/src/", import.meta.url);
+    const taxonomy: Array<{ name: string }> = JSON.parse(
+      await readSource("../scripts/autopilot/classes.json"),
+    ).classes;
+    assert.ok(taxonomy.length > 0);
+    const entries = await readdir(root, { recursive: true });
+    const sources = entries.filter((p) => /\.(jsx?|tsx?)$/.test(String(p)));
+    assert.ok(sources.length > 0, "scanned some dashboard sources");
+    const offenders: string[] = [];
+    for (const rel of sources) {
+      const src = await readFile(new URL(String(rel), root), "utf8");
+      if (/\bFALLBACK_/.test(src)) offenders.push(`${rel}: FALLBACK_ identifier`);
+      for (const { name } of taxonomy) {
+        for (const q of ['"', "'", "`"]) {
+          if (src.includes(`${q}${name}${q}`)) offenders.push(`${rel}: ${q}${name}${q} literal`);
+        }
+      }
+    }
+    assert.deepEqual(offenders, [], "the class alphabet is fetched, never re-spelled");
+  });
+
+  test("useTaxonomy never fabricates an alphabet; PipelineSnapshot drops the cooldown derivation (INV-12, INV-13)", async () => {
+    const hook = await readSource("../dashboard/src/hooks/useTaxonomy.js");
+    assert.match(hook, /status: "loading"/);
+    assert.match(hook, /status: "ready"/);
+    assert.match(hook, /status: "unknown"/);
+    assert.match(hook, /body\.degraded/);
+    assert.equal(hook.includes("signalCooldowns"), false, "the hook no longer returns cooldowns");
+    const snap = await readSource("../dashboard/src/components/PipelineSnapshot.jsx");
+    assert.match(snap, /const \{ taxonomy, status \} = useTaxonomy\(\)/);
+    assert.match(snap, /status !== "ready"/);
+    assert.match(snap, /UNKNOWN/);
+    assert.equal(snap.includes("onCooldown"), false);
+    assert.equal(snap.includes("cooldownSec"), false);
+    assert.equal(snap.includes("signalCooldowns"), false);
+  });
+});

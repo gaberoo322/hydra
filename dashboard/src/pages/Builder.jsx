@@ -4,6 +4,7 @@ import { LessonsTrend } from "../components/pages/outcomes/LessonsTrend.jsx";
 import { LessonsTab } from "../components/pages/explore/LessonsTab.jsx";
 import { QualityGates } from "../components/pages/builder/QualityGates.jsx";
 import { TangledModules } from "../components/pages/builder/TangledModules.jsx";
+import { ClassYield } from "../components/pages/builder/ClassYield.jsx";
 import { DeclaredOutcomes } from "../components/pages/builder/DeclaredOutcomes.jsx";
 import { ImpactRanking } from "../components/pages/builder/ImpactRanking.jsx";
 import { UnclassifiedResidue } from "../components/pages/builder/UnclassifiedResidue.jsx";
@@ -54,6 +55,7 @@ export default function Builder() {
       <TangledModules />
       <LessonsTrend />
       <LessonsTab />
+      <ClassYield />
       <DeclaredOutcomes />
       <ImpactRanking />
       <UnclassifiedResidue />

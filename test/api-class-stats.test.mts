@@ -21,7 +21,10 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { createAutopilotClassStatsRouter } from "../src/api/class-stats.ts";
+import {
+  createAutopilotClassStatsRouter,
+  CLASS_STATS_MEMO_MS,
+} from "../src/api/class-stats.ts";
 import {
   computeClassScoreboard,
   type ClassScoreboard,
@@ -240,5 +243,121 @@ describe("GET /api/autopilot/class-stats (issue #2943)", () => {
     const qa = res._body.scoreboard.classes.find((c: any) => c.className === "qa_orch");
     assert.ok(qa);
     assert.equal(qa.weightedQuotaPerMerge, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4637 — the 10-minute in-process memo (closure-scoped, injected clock)
+// ---------------------------------------------------------------------------
+
+describe("GET /api/autopilot/class-stats — 10-minute memo (issue #4637)", () => {
+  /** One router instance (one memo) with a controllable clock + call counters. */
+  function memoHarness(opts: { fail?: () => boolean } = {}) {
+    let clock = NOW;
+    let builds = 0;
+    let persists = 0;
+    let releaseBuild: (() => void) | null = null;
+    let gate: Promise<void> | null = null;
+    const build = async () => {
+      builds += 1;
+      if (gate) await gate;
+      if (opts.fail?.()) throw new Error("fictional composer failure");
+      // Each build stamps a distinct computedAt so a recompute is observable.
+      return computeClassScoreboard([], { metrics: [] }, { now: NOW + builds * 1000 });
+    };
+    const persist = async () => {
+      persists += 1;
+    };
+    const router = createAutopilotClassStatsRouter(build, persist, () => clock);
+    const handler = findHandler(router, "GET", "/autopilot/class-stats");
+    assert.ok(handler, "GET /autopilot/class-stats handler must be registered");
+    return {
+      async get() {
+        const res = mockRes();
+        await handler!({ query: {}, params: {} }, res);
+        return res;
+      },
+      advance(ms: number) {
+        clock += ms;
+      },
+      holdBuilds() {
+        gate = new Promise<void>((r) => {
+          releaseBuild = r;
+        });
+      },
+      release() {
+        releaseBuild?.();
+        gate = null;
+      },
+      get builds() {
+        return builds;
+      },
+      get persists() {
+        return persists;
+      },
+    };
+  }
+
+  test("CLASS_STATS_MEMO_MS is 10 minutes", () => {
+    assert.equal(CLASS_STATS_MEMO_MS, 10 * 60 * 1000);
+  });
+
+  test("two requests inside the window build ONCE and return identical bodies (same generatedAt)", async () => {
+    const h = memoHarness();
+    const first = await h.get();
+    h.advance(CLASS_STATS_MEMO_MS - 1);
+    const second = await h.get();
+    assert.equal(h.builds, 1, "one build per window");
+    assert.equal(h.persists, 1, "persist runs once per recompute, never on a hit");
+    assert.equal(first._status, 200);
+    assert.equal(second._status, 200);
+    assert.deepEqual(second._body, first._body, "identical memoised body");
+    assert.equal(
+      second._body.generatedAt,
+      first._body.generatedAt,
+      "a cached body keeps its original generatedAt — never a fresh timestamp",
+    );
+    assert.equal(first._body.generatedAt, new Date(NOW + 1000).toISOString());
+  });
+
+  test("a request at the end of the window recomputes (new generatedAt, second persist)", async () => {
+    const h = memoHarness();
+    const first = await h.get();
+    h.advance(CLASS_STATS_MEMO_MS);
+    const second = await h.get();
+    assert.equal(h.builds, 2, "window elapsed → recompute");
+    assert.equal(h.persists, 2, "persist runs once per recompute");
+    assert.notEqual(second._body.generatedAt, first._body.generatedAt);
+    // The response shape is unchanged.
+    assert.deepEqual(Object.keys(second._body).sort(), ["generatedAt", "scoreboard", "shadow"]);
+  });
+
+  test("concurrent cold requests share ONE in-flight build", async () => {
+    const h = memoHarness();
+    h.holdBuilds();
+    const pending = [h.get(), h.get(), h.get()];
+    // Let the three handlers reach the shared in-flight promise.
+    await new Promise((r) => setImmediate(r));
+    h.release();
+    const results = await Promise.all(pending);
+    assert.equal(h.builds, 1, "one build for three concurrent cold requests");
+    assert.equal(h.persists, 1);
+    for (const res of results) {
+      assert.equal(res._status, 200);
+      assert.equal(res._body.generatedAt, results[0]._body.generatedAt);
+    }
+  });
+
+  test("a failed recompute is NOT memoised — 500 with a body, then the next request retries", async () => {
+    let failing = true;
+    const h = memoHarness({ fail: () => failing });
+    const first = await h.get();
+    assert.equal(first._status, 500);
+    assert.ok(first._body.error, "500 carries an error body");
+    failing = false;
+    const second = await h.get();
+    assert.equal(second._status, 200, "the failure was not cached");
+    assert.equal(h.builds, 2);
+    assert.equal(h.persists, 1, "persist only follows a successful build");
   });
 });

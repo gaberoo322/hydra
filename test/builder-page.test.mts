@@ -267,6 +267,54 @@ describe("GET /api/architecture — additive tangledModules + generatedAt (issue
   });
 });
 
+// ---------------------------------------------------------------------------
+// Issue #4637 — the /builder per-class yield view (GET /autopilot/class-stats).
+// Structural source pins for the JSX half (no JSX runner, no react in the
+// worktree); the route's memo is pinned at its HTTP boundary in
+// test/api-class-stats.test.mts. Own top-level describe, no shared lifecycle.
+// ---------------------------------------------------------------------------
+
+describe("structural pins — /builder class yield (issue #4637)", () => {
+  async function readDashboardSource(rel: string): Promise<string> {
+    const { readFile } = await import("node:fs/promises");
+    return readFile(new URL(`../dashboard/src/${rel}`, import.meta.url), "utf8");
+  }
+
+  test("Builder.jsx mounts ClassYield", async () => {
+    const src = await readDashboardSource("pages/Builder.jsx");
+    assert.match(src, /import \{ ClassYield \} from "\.\.\/components\/pages\/builder\/ClassYield\.jsx"/);
+    assert.match(src, /<ClassYield \/>/);
+  });
+
+  test("ClassYield reads class-stats on a 10-minute poll and derives a 1-day trust status (INV-9)", async () => {
+    const src = await readDashboardSource("components/pages/builder/ClassYield.jsx");
+    assert.match(src, /useApi\("\/autopilot\/class-stats", \{ poll: 600_?000 \}\)/);
+    assert.match(src, /derivePageStatus\(\{/);
+    assert.match(src, /itemsLen: classes\.length/);
+    assert.match(src, /freshnessMs: DAY_MS/);
+    assert.match(src, /const DAY_MS = 24 \* 60 \* 60 \* 1000;/);
+    assert.match(src, /generatedAt=\{data\?\.generatedAt\}/, "the as-of is the scoreboard's generatedAt");
+  });
+
+  test("every verdict cell decomposes into its inputs (ADR-0034 §5.3)", async () => {
+    const src = await readDashboardSource("components/pages/builder/ClassYield.jsx");
+    assert.match(src, /verdictInputs\(stat, scoreboard\)/);
+    assert.match(src, /scoreboard\.minSample/, "dispatches vs the min-sample floor");
+    assert.match(src, /stat\.mergeRate/, "merge rate (dev role)");
+    assert.match(src, /betaLabel\(stat\)/, "β (producer role)");
+    assert.match(src, /scoreboard\.windowMs/, "the window");
+    assert.match(src, /shadow\.verdicts/, "shadow multiplier joined by className");
+  });
+
+  test("ClassYield is read-only — no apiFetch, no POST, no controls (/builder anti-scope)", async () => {
+    const src = await readDashboardSource("components/pages/builder/ClassYield.jsx");
+    assert.equal(src.includes("apiFetch"), false);
+    assert.equal(/method:\s*["']POST["']/.test(src), false);
+    assert.equal(src.includes("<button"), false);
+    assert.equal(src.includes("ActionAffordance"), false);
+  });
+});
+
 // ===========================================================================
 // Issue #4634 (design-concept a7e7fedb) — /builder homes five dark reads.
 //

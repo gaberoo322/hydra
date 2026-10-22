@@ -1,0 +1,1 @@
+- feat(dashboard): /work class-state panel + /builder class-stats yield view (10-min memo); delete the stale class mirrors in useTaxonomy, PipelineSnapshot and heartbeat.py (#4637)
