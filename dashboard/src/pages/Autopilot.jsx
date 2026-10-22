@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { useApi } from "../hooks/useApi.js";
 import RunView from "../components/RunView.jsx";
 import HistoryTable from "../components/HistoryTable.jsx";
+import RunRetroBundle from "../components/pages/runs/RunRetroBundle.jsx";
 import { classifyRunOutcome } from "../components/pages/runs/runs-state.js";
 
 // Slice 1 of epic #496 — "Is it alive?" header strip.
@@ -239,6 +240,9 @@ function AutopilotDetail({ runId }) {
       </div>
       <RunView run={run} turns={turns} mode="detail" focusFailingTurn={runFailed} />
       {runFailed && <FailureNextSteps run={run} />}
+      {/* #4634 (design-concept a7e7fedb INV-7): the run's retro bundle,
+          fetched once by the panel itself, after RunView / next steps. */}
+      <RunRetroBundle runId={runId} />
     </div>
   );
 }

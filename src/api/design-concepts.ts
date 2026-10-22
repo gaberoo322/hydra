@@ -115,6 +115,9 @@ export function createDesignConceptsRouter() {
         snapshots,
         ...metrics,
         indexSizeNow,
+        // Issue #4634 (design-concept a7e7fedb INV-3): additive as-of for the
+        // /builder DesignConceptGreenLight panel's trust seam (ADR-0034 §5).
+        generatedAt: new Date().toISOString(),
       };
     }),
   );
