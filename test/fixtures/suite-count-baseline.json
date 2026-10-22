@@ -496,7 +496,7 @@
   "test/watchdog-launch-flow.test.mts": 7,
   "test/watchdog-node-modules-integrity-untouched.test.mts": 1,
   "test/watchdog-node-modules-integrity.test.mts": 4,
-  "test/watchdog-operator-channel.test.mts": 3,
+  "test/watchdog-operator-channel.test.mts": 4,
   "test/watchdog-origin-identity.test.mts": 2,
   "test/watchdog-pending-work.test.mts": 1,
   "test/watchdog-redis-backup-freshness.test.mts": 4,

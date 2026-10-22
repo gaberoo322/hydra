@@ -35,7 +35,7 @@
  *     10, INCLUSIVE); a failed read saturates (fail closed) with open=0.
  */
 
-import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
 import { REDIS_UNREACHABLE, type AnchorQueueName, type TurnSnapshotRedis } from "./redis-port.ts";
 
@@ -62,7 +62,7 @@ const SCOUT_ENHANCEMENT_LABEL = "enhancement";
 /** The scout spend mirror's TTL: 7 days (issue #532). */
 const SCOUT_SPEND_TTL_SECONDS = 604_800;
 
-const fail = <T>(reason: string): Classified<T> => ({ ok: false, reason });
+const fail = <T>(reason: DegradeReason): Classified<T> => ({ ok: false, reason });
 const okv = <T>(value: T): Classified<T> => ({ ok: true, value });
 const marker = (field: string, c: Classified<unknown>): DegradedMarker[] => ("reason" in c ? [{ field, reason: c.reason }] : []);
 const outcome = <T>(collector: string, value: T, degraded: DegradedMarker[]): CollectorOutcome<T> => ({ collector, value, degraded, notes: [] });
@@ -70,7 +70,7 @@ const outcome = <T>(collector: string, value: T, degraded: DegradedMarker[]): Co
 /** A gh read's data, or why the read failed. */
 function ghData(read: GhJsonRead): Classified<unknown> {
   if (read.kind === "ok") return okv(read.data);
-  return fail(read.kind === "empty" ? "gh-read-failed" : "unparseable");
+  return fail(read.kind === "empty" ? DEGRADE.GH_READ_FAILED : DEGRADE.UNPARSEABLE);
 }
 
 /**
@@ -78,8 +78,6 @@ function ghData(read: GhJsonRead): Classified<unknown> {
  * row that is not an object, `labels: null`, …) — the shapes the bash's
  * `--jq` errored on, so the whole read degrades, never a guessed count (#5084).
  */
-export const MALFORMED_PAYLOAD = "malformed-payload";
-
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
 // ---------------------------------------------------------------------------
@@ -167,7 +165,7 @@ function foldLength(read: GhJsonRead): Classified<string> {
   if (typeof d === "number") return okv(String(Math.abs(d)));
   if (typeof d === "string") return okv(String(Array.from(d).length));
   if (typeof d === "object") return okv(String(Object.keys(d).length));
-  return fail(MALFORMED_PAYLOAD);
+  return fail(DEGRADE.MALFORMED_PAYLOAD);
 }
 
 /** UTC `date -u +%Y-%m-%d`. */
@@ -185,7 +183,7 @@ export async function collectScout(deps: BoardSaturationDeps): Promise<Collector
   // same way, so skip it rather than pay a second timeout this turn.
   const unreachable = "reason" in tokensRead && tokensRead.reason.startsWith(REDIS_UNREACHABLE);
   const mirrored: Classified<true> = unreachable
-    ? fail("skipped: redis unreachable")
+    ? fail(DEGRADE.SKIPPED_REDIS_UNREACHABLE)
     : await deps.redis.mirrorScoutSpend(date, tokensToday, SCOUT_SPEND_TTL_SECONDS);
   const openEnhancements = foldLength(enh);
   const value: ScoutValue = {
@@ -219,7 +217,7 @@ interface BoardCounts {
 
 /**
  * The string label names of one open-board row, or `null` when the row is
- * {@link MALFORMED_PAYLOAD}: it must be an object whose `labels` is a list (an
+ * {@link DEGRADE.MALFORMED_PAYLOAD}: it must be an object whose `labels` is a list (an
  * object reads by its values) of label objects or nulls. A missing / `null` /
  * scalar `labels`, a non-object row or a scalar label is malformed.
  */
@@ -245,11 +243,11 @@ function countOpenBoard(read: GhJsonRead): Classified<BoardCounts> {
   if ("reason" in c) return fail(c.reason);
   const data = c.value;
   const rows = Array.isArray(data) ? data : isObj(data) ? Object.values(data) : null;
-  if (rows === null) return fail(MALFORMED_PAYLOAD);
+  if (rows === null) return fail(DEGRADE.MALFORMED_PAYLOAD);
   const boards: string[][] = [];
   for (const row of rows) {
     const names = labelNames(row);
-    if (names === null) return fail(MALFORMED_PAYLOAD);
+    if (names === null) return fail(DEGRADE.MALFORMED_PAYLOAD);
     boards.push(names);
   }
   const count = (pred: (n: string[]) => boolean) => boards.filter(pred).length;
@@ -336,7 +334,7 @@ export interface HitlGrillValue {
 function foldHitlGrill(read: GhJsonRead): Classified<HitlGrillValue> {
   const len = foldLength(read);
   if ("reason" in len) return fail(len.reason);
-  if (!/^[0-9]+$/.test(len.value)) return fail("non-integer-count");
+  if (!/^[0-9]+$/.test(len.value)) return fail(DEGRADE.NON_INTEGER_COUNT);
   const open = Number(len.value);
   return okv({ open, saturated: open >= HITL_GRILL_INBOX_CAP });
 }

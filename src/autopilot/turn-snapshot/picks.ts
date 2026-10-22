@@ -48,7 +48,7 @@ import { mergedPrReferences, type PrRefRow } from "../../github/pr-refs.ts";
 import { glmGrillExemption, type GlmGrillExemption } from "../../glm/eligibility.ts";
 import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
 import { DESIGN_CONCEPT_MAX_AGE_MS } from "../../design-concept-gate.ts";
-import type { CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { ghTimestampSeconds, parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import { isGlmProvenance, type InflightRefs } from "./pr-gate.ts";
@@ -471,7 +471,7 @@ export async function collectPicks(deps: PicksDeps): Promise<CollectorOutcome<Pi
   const filtered = rfa.kind === "ok" ? dropTargetBacklog(rfa.data) : null;
   if (filtered === null) {
     notes.push(GRILL_LIST_FAILED_NOTE);
-    degraded.push({ field: "grillList", reason: rfa.kind === "ok" ? "jq-error" : rfa.kind === "empty" ? "empty-payload" : "unparseable" });
+    degraded.push({ field: "grillList", reason: rfa.kind === "ok" ? DEGRADE.JQ_ERROR : rfa.kind === "empty" ? DEGRADE.EMPTY_PAYLOAD : DEGRADE.UNPARSEABLE });
   }
   const pool: unknown[] = filtered ?? [];
 
@@ -480,7 +480,7 @@ export async function collectPicks(deps: PicksDeps): Promise<CollectorOutcome<Pi
   let open: number[] = [];
   if (refs.length > 0) {
     const search = await deps.github.searchOpenIssueNumbers(refs.join(" "), limit);
-    if (search.kind !== "ok") degraded.push({ field: "openBlockers", reason: "fail-safe-all-open" });
+    if (search.kind !== "ok") degraded.push({ field: "openBlockers", reason: DEGRADE.FAIL_SAFE_ALL_OPEN });
     open = openBlockers(search, refs);
   }
   const blockedDep = new Set(blockedDependencyIssues(pool, new Set(open)));
@@ -493,7 +493,7 @@ export async function collectPicks(deps: PicksDeps): Promise<CollectorOutcome<Pi
     const read = await deps.github.listMergedPrs(MERGED_PR_LIMIT);
     if (read.kind === "empty") {
       notes.push(MERGED_READ_FAILED_NOTE);
-      degraded.push({ field: "mergedPrs", reason: "empty-payload" });
+      degraded.push({ field: "mergedPrs", reason: DEGRADE.EMPTY_PAYLOAD });
     }
     merged = mergedRefIssues(read);
   }

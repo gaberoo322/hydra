@@ -97,7 +97,7 @@ import { isTargetCollector, runTargetCollectors, TARGET_COLLECTORS, type TargetC
 import { collectTargetFacts } from "../target/print-target-facts.ts";
 import { isRemainingCollector, REMAINING_COLLECTORS, runRemainingCollectors } from "../../src/autopilot/turn-snapshot/remaining.ts";
 import { createTurnSnapshotRedis, type TurnSnapshotRedis } from "../../src/autopilot/turn-snapshot/redis-port.ts";
-import type { Classified, DegradedMarker } from "../../src/autopilot/turn-snapshot/collector.ts";
+import { DEGRADE, type Classified, type DegradedMarker } from "../../src/autopilot/turn-snapshot/collector.ts";
 import type { OrchBoardSnapshot } from "../../src/autopilot/turn-snapshot/orch-board.ts";
 import {
   allDegradedTurnSnapshot,
@@ -226,7 +226,7 @@ async function runPrGateAndPicks(
   const wantPicks = args.collectors.includes(PICKS_COLLECTOR);
 
   const degraded: SnapshotDegraded[] = [];
-  let prGate: PrGateSnapshot = prGateFallbackSnapshot("not-requested");
+  let prGate: PrGateSnapshot = prGateFallbackSnapshot(DEGRADE.NOT_REQUESTED);
   if (wantPrGate) {
     try {
       const outcome = await collectPrGate({ ...deps, ghListLimit: args.ghListLimit });
