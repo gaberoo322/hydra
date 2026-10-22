@@ -842,8 +842,10 @@
       "path": "/api/autopilot/class-state",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/autopilot/class-state",
+      "consumers": [
+        "dashboard/src/components/pages/work/ClassStatePanel.jsx"
+      ],
+      "home": "/work",
       "areas": [
         "src/autopilot/"
       ],
@@ -857,8 +859,10 @@
       "path": "/api/autopilot/class-stats",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/autopilot/class-stats",
+      "consumers": [
+        "dashboard/src/components/pages/builder/ClassYield.jsx"
+      ],
+      "home": "/builder",
       "areas": [
         "src/autopilot/",
         "src/logger.ts",
@@ -866,7 +870,7 @@
       ],
       "source": {
         "path": "src/api/class-stats.ts",
-        "line": 73
+        "line": 140
       }
     },
     {
@@ -2091,7 +2095,8 @@
       "stability": "stable",
       "stabilityNote": null,
       "consumers": [
-        "dashboard/src/components/ActionAffordance.jsx"
+        "dashboard/src/components/ActionAffordance.jsx",
+        "dashboard/src/components/pages/work/ClassStatePanel.jsx"
       ],
       "home": "/",
       "areas": [

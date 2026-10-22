@@ -1,6 +1,7 @@
 import { BoardState } from "../components/pages/work/BoardState.jsx";
 import { HitlGrillLane } from "../components/pages/work/HitlGrillLane.jsx";
 import { AnchorRationale } from "../components/pages/work/AnchorRationale.jsx";
+import { ClassStatePanel } from "../components/pages/work/ClassStatePanel.jsx";
 
 /**
  * Dashboard v3 — `/work` page (issue #4010, ADR-0034 §2; slice "epsilon" of
@@ -34,6 +35,7 @@ export default function Work() {
       <BoardState />
       <HitlGrillLane />
       <AnchorRationale />
+      <ClassStatePanel />
     </div>
   );
 }
