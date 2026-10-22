@@ -9,9 +9,10 @@ import { formatElapsed, formatTokens, relativeTime } from "../lib/autopilot-form
 // risking the turn timeline. Behavior is identical to the inline original.
 //
 // Last 14 runs from /api/autopilot/runs, polled every 60s. Row click
-// navigates to /autopilot/:runId for the detail page. "see cycles" link
-// scopes the /metrics view to cycles whose autopilotTurnId starts with
-// "<runId>:".
+// navigates to /autopilot/:runId for the detail page. (Issue #4634 removed
+// the former per-run cycles column: its only content was a link to a
+// /metrics page App.jsx never mounted, and the runs row carries no cycles
+// count to show in its place.)
 
 export default function HistoryTable() {
   const { data, error, loading } = useApi("/autopilot/runs", { poll: 60000 });
@@ -49,7 +50,6 @@ export default function HistoryTable() {
                 <th className="text-right py-2 pr-3 font-semibold">Turns</th>
                 <th className="text-right py-2 pr-3 font-semibold">Disp (M/F)</th>
                 <th className="text-right py-2 pr-3 font-semibold">Tokens</th>
-                <th className="text-right py-2 pr-1 font-semibold">Cycles</th>
               </tr>
             </thead>
             <tbody>
@@ -84,14 +84,6 @@ export default function HistoryTable() {
                   </td>
                   <td className="py-2 pr-3 text-right font-mono text-zinc-300">
                     {formatTokens(r.total_tokens)}
-                  </td>
-                  <td className="py-2 pr-1 text-right">
-                    <Link
-                      to={`/metrics?run=${encodeURIComponent(r.run_id)}`}
-                      className="text-[10px] text-blue-400 hover:underline"
-                    >
-                      see cycles
-                    </Link>
                   </td>
                 </tr>
               ))}

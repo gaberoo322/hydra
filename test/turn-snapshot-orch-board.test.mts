@@ -24,6 +24,7 @@
  *    degraded-flag cases (test/autopilot-arch-fallback-signals.test.mts #4130).
  */
 
+import { degradeDetail } from "../src/autopilot/turn-snapshot/collector.ts";
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
@@ -450,7 +451,7 @@ function fakeGithub(boardRows: GhJsonRead, triage: GhJsonRead = ok([])): Pick<Tu
 }
 /** A full client whose reads are all unscripted failures, overridden per test. */
 function fakeHydra(o: Partial<TurnSnapshotHydra> = {}): TurnSnapshotHydra {
-  const down: HydraRead = { kind: "failed", reason: "transport: ECONNREFUSED" };
+  const down: HydraRead = { kind: "failed", reason: degradeDetail("transport: ECONNREFUSED") };
   return { get: async () => down, orchBoardState: async () => down, targetBoardState: async () => down, designConceptBody: async () => "", ...o };
 }
 const serviceDown = fakeHydra();
@@ -590,7 +591,7 @@ describe("unified hydra HTTP client — `hydra raw GET` failure rules (slices 2/
     assert.deepEqual(await client({ status: 200, body: "\n" }).get("/x"), { kind: "ok", body: "\n" });
     assert.deepEqual(await client({ status: 200, body: "\n" }).orchBoardState(), { kind: "failed", reason: "empty-body" });
     assert.deepEqual(await client({ status: 200, body: "" }).targetBoardState(), { kind: "failed", reason: "empty-body" });
-    assert.deepEqual(await client(new Error("ECONNREFUSED")).get("/x"), { kind: "failed", reason: "transport: ECONNREFUSED" });
+    assert.deepEqual(await client(new Error("ECONNREFUSED")).get("/x"), { kind: "failed", reason: degradeDetail("transport: ECONNREFUSED") });
     assert.deepEqual(await client({ status: 200, body: "ok\n\n" }).get("/x"), { kind: "ok", body: "ok\n\n" });
     assert.deepEqual(await client({ status: 200, body: "ok\n\n" }).orchBoardState(), { kind: "ok", body: "ok" });
   });
@@ -623,7 +624,7 @@ describe("unified hydra HTTP client — `hydra raw GET` failure rules (slices 2/
   test("a failed board-state read carries its reason into the degraded marker and the diagnostic line", async () => {
     const out = await collectOrchBoard({
       github: fakeGithub(ok([])),
-      hydra: fakeHydra({ orchBoardState: async () => ({ kind: "failed", reason: "http-503" }) }),
+      hydra: fakeHydra({ orchBoardState: async () => ({ kind: "failed", reason: degradeDetail("http-503") }) }),
       now: () => NOW_MS,
       ghListLimit: 100,
     });

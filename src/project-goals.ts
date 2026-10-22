@@ -61,15 +61,6 @@ export interface ProjectGoalsDoc {
   painPoints: string[];
   /** All other `##` sections, keyed by lowercased heading, as raw text blocks. */
   customSections: Record<string, string>;
-  /**
-   * Operator's north star, externally/aspirationally populated.
-   *
-   * NOTE: `parseProjectGoals` NEVER writes this field — it is read by
-   * `summarizeGoalsForPrompt` (below) but only populated by an external caller.
-   * Kept OPTIONAL so the existing read type-checks. Removing the read is a
-   * separate follow-up, out of scope for this type-safety pass.
-   */
-  userPriorities?: string;
 }
 
 /**
@@ -188,59 +179,4 @@ export async function loadProjectGoals(): Promise<ProjectGoalsDoc | null> {
   }
 
   return parseProjectGoals(raw);
-}
-
-/**
- * Format goals for agent prompts — concise structured summary.
- */
-export function summarizeGoalsForPrompt(goals: ProjectGoalsDoc | null): string {
-  if (!goals) return "No project goals document found. Operating without strategic context.";
-
-  const parts = [];
-  parts.push(`## Project Goals: ${goals.name || "Unnamed Project"}`);
-
-  if (goals.metrics.length > 0) {
-    parts.push("\n### Success Metrics");
-    for (const m of goals.metrics) {
-      const source = m.source ? ` (source: ${m.source})` : "";
-      parts.push(`- **${m.metric}**: target ${m.target}, category: ${m.category}${source}`);
-    }
-  }
-
-  if (Object.keys(goals.weights).length > 0) {
-    parts.push("\n### Focus Weights (what matters most right now)");
-    const sorted = Object.entries(goals.weights).sort((a: any, b: any) => b[1] - a[1]);
-    for (const [cat, weight] of sorted) {
-      parts.push(`- ${cat}: ${weight}%`);
-    }
-  }
-
-  if (goals.constraints.length > 0) {
-    parts.push("\n### Constraints (must not violate)");
-    for (const c of goals.constraints) {
-      parts.push(`- ${c}`);
-    }
-  }
-
-  if (goals.painPoints.length > 0) {
-    parts.push("\n### Known Pain Points");
-    for (const p of goals.painPoints) {
-      parts.push(`- ${p}`);
-    }
-  }
-
-  for (const [key, content] of Object.entries(goals.customSections)) {
-    if ((content as string).trim()) {
-      parts.push(`\n### ${key}`);
-      parts.push(content);
-    }
-  }
-
-  // Include operator's north star if loaded (from user-priorities.md)
-  if (goals.userPriorities) {
-    parts.push("\n### Operator's North Star (from vision.md — this overrides other direction)");
-    parts.push(goals.userPriorities.slice(0, 2000));
-  }
-
-  return parts.join("\n");
 }

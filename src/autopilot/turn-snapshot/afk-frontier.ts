@@ -31,10 +31,10 @@
  *     `tickets_orch_pending_spec=issue-<N>`; otherwise false / none.
  */
 
-import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
-import { labelNames, MALFORMED_PAYLOAD } from "./board-saturation.ts";
+import { labelNames } from "./board-saturation.ts";
 
 export interface AfkFrontierDeps {
   readonly github: TurnSnapshotGithub;
@@ -49,19 +49,19 @@ const WAYFINDER_DRAFT_LABEL = "wayfinder:destination-pending";
 const WAYFINDER_AFK_TYPES = ["wayfinder:research", "wayfinder:task"] as const;
 export const NEEDS_TICKETS_LABEL = "needs-tickets";
 
-const fail = <T>(reason: string): Classified<T> => ({ ok: false, reason });
+const fail = <T>(reason: DegradeReason): Classified<T> => ({ ok: false, reason });
 const okv = <T>(value: T): Classified<T> => ({ ok: true, value });
 const outcome = <T>(collector: string, value: T, degraded: DegradedMarker[]): CollectorOutcome<T> => ({ collector, value, degraded, notes: [] });
 
 /**
  * Fold a gh read: a failed / unparseable read keeps its reason; a fold that
- * returns `null` met a {@link MALFORMED_PAYLOAD} shape (the shapes the bash's
+ * returns `null` met a {@link DEGRADE.MALFORMED_PAYLOAD} shape (the shapes the bash's
  * `--jq` errored on) and the whole read degrades.
  */
 function foldRead<T>(read: GhJsonRead, fold: (data: unknown) => T | null): Classified<T> {
-  if (read.kind !== "ok") return fail(read.kind === "empty" ? "gh-read-failed" : "unparseable");
+  if (read.kind !== "ok") return fail(read.kind === "empty" ? DEGRADE.GH_READ_FAILED : DEGRADE.UNPARSEABLE);
   const value = fold(read.data);
-  return value === null ? fail(MALFORMED_PAYLOAD) : okv(value);
+  return value === null ? fail(DEGRADE.MALFORMED_PAYLOAD) : okv(value);
 }
 
 type Obj = Record<string, unknown>;
@@ -138,9 +138,9 @@ export interface RetroRuns {
 
 /** The two runs-index heredocs: any completed run? and the first completed run's id. */
 export function foldRetroRuns(body: string | null): Classified<RetroRuns> {
-  if (body === null) return fail("runs-read-failed");
+  if (body === null) return fail(DEGRADE.RUNS_READ_FAILED);
   const parsed = parseJsonRead(body);
-  if (parsed.kind !== "ok") return fail("runs-unparseable");
+  if (parsed.kind !== "ok") return fail(DEGRADE.RUNS_UNPARSEABLE);
   const d = parsed.data;
   const runs = isObj(d) && "runs" in d ? d.runs : [];
   // Only a list's items can be run entries (an object's keys / a string's characters never are).

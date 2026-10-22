@@ -248,8 +248,9 @@ const defaultDispatchClassesDeps: DispatchClassesDeps = {
 /**
  * Resolve the distinct autopilot dispatch classes a run used — the canonical
  * query behind the Explore Behavior tab's `class` filter. Pulls the turn list
- * off Redis (newest-first, capped) and harvests `actions[].class` from each
- * turn's `type === "dispatch"` actions. Returns a deduped, alphabetically
+ * off Redis (newest-first, capped) and harvests each `type === "dispatch"`
+ * action's class — `actions[].slot` (what decide.py emits today) or the legacy
+ * `actions[].class`. Returns a deduped, alphabetically
  * sorted `string[]`.
  *
  * Tolerant parse: a malformed turn member (unparseable JSON, non-array
@@ -269,9 +270,17 @@ export async function getRunDispatchClasses(
       const turn = JSON.parse(member);
       const actions = Array.isArray(turn?.actions) ? turn.actions : [];
       for (const a of actions) {
-        if (a && a.type === "dispatch" && typeof a.class === "string") {
-          classes.add(a.class);
-        }
+        if (!a || a.type !== "dispatch") continue;
+        // decide.py's make_dispatch emits the class under `slot` (the class
+        // name — retro-projections resolves it via classByName(slot)); the
+        // legacy `class` field is honoured first for older turn rows (#4634).
+        const cls =
+          typeof a.class === "string" && a.class
+            ? a.class
+            : typeof a.slot === "string" && a.slot
+              ? a.slot
+              : null;
+        if (cls) classes.add(cls);
       }
     } catch { /* intentional: skip malformed turn rows — caller treats absent classes as "no signal" */ }
   }

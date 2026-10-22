@@ -63,15 +63,9 @@ describe("metrics router — ADR-0036 vacuous-read removal", () => {
     assert.equal(findHandler(router, "GET", "/metrics/capacity-floors"), null);
   });
 
-  test("/summary no longer reports a 'Prior failures' line", async () => {
+  test("/summary is gone (retired under ADR-0024 §3, #4638) — so it can report no 'Prior failures' line", () => {
     const router = createMetricsRouter();
-    const handler = findHandler(router, "GET", "/summary");
-    assert.ok(handler);
-    const res = mockRes();
-    await handler(mockReq(), res);
-    assert.equal(res._status, 200);
-    assert.equal(typeof res._body, "string");
-    assert.ok(!/Prior failures/.test(res._body), `/summary must not mention prior failures: ${res._body}`);
+    assert.equal(findHandler(router, "GET", "/summary"), null);
   });
 
   test("/metrics/anchor-distribution covers only the live lanes (no reframe/prior-failure rows)", async () => {

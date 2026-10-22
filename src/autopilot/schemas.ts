@@ -94,8 +94,9 @@ export const CycleRecordBodySchema = z
     //
     // NOTE (design-concept issue-3269): this is the PLUMBING half only. No
     // dispatch measures verification/planning/execution spans yet, and
-    // groundProject's groundingDurationMs is only produced by GET
-    // /api/grounding/latest (not inside a cycle), so reap has nothing to forward
+    // groundProject's groundingDurationMs is only produced outside a cycle (the
+    // GET /api/grounding/latest route that surfaced it was retired, #4638),
+    // so reap has nothing to forward
     // today — the measurement/deposit-side wiring is a deferred follow-up. The
     // schema+enrichment must land first (mirrors #2754's schema-before-writer
     // sequencing).

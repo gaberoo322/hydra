@@ -111,14 +111,15 @@ describe("GET /tier route (issue #2183 — moved out of misc.ts)", () => {
 // tier.ts), so it stands on its own top-level describe rather than being
 // folded into the tier-only suite above.
 // ---------------------------------------------------------------------------
+// (observability.ts left this list in #4638: its only 400 site was the retired
+// GET /observability/trace-url, so it no longer has a 400 body to build.)
 describe("issue #4563 — schemaValidationError() adoption across all six sibling 400 sites", () => {
-  test("tier.ts, autopilot-log.ts, agents.ts, observability.ts, learning.ts and taxonomy.ts each call schemaValidationError() for their 400 body", async () => {
+  test("tier.ts, autopilot-log.ts, agents.ts, learning.ts and taxonomy.ts each call schemaValidationError() for their 400 body", async () => {
     const fs = await import("node:fs/promises");
     const files = [
       "src/api/tier.ts",
       "src/api/autopilot-log.ts",
       "src/api/agents.ts",
-      "src/api/observability.ts",
       "src/api/learning.ts",
       "src/api/taxonomy.ts",
     ];

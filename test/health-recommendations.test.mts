@@ -68,7 +68,7 @@ function findHandler(router: any, method: string, path: string): Function | null
 
 // Build a router with fully-controlled deps, then return its /recommendations
 // handler. Defaults are the "nothing to flag" baseline: scheduler running, no
-// priorities.md, no kill file. (The triage / blocked / empty-pipeline action-item
+// priorities.md. (The triage / blocked / empty-pipeline action-item
 // categories that read the Redis backlog were retired with the Redis backlog
 // subsystem — ADR-0031 contract phase, issue #3439 — so `getBacklogCounts` is no
 // longer a dep of this router.)
@@ -78,7 +78,6 @@ function handlerWith(over: RecommendationsReaderDeps = {}): Function {
     readPriorities: async () => {
       throw new Error("ENOENT");
     },
-    killFileExists: () => false,
     ...over,
   };
   const router = createRecommendationsRouter(deps);
@@ -144,24 +143,21 @@ describe("GET /recommendations — operator action items (issue #1322)", () => {
     assert.ok(!res._body.some((r: any) => /blocked on operator action/.test(r.title)));
   });
 
-  test("kill switch active", async () => {
-    const res = await run({ killFileExists: () => true });
-    const rec = res._body.find((r: any) => r.title === "Kill switch is active");
-    assert.ok(rec);
-    assert.equal(rec.priority, 1);
-    assert.equal(rec.link, "/health");
+  test("no kill-switch item: the .kill file is not consulted (POST /kill retired, #4638)", async () => {
+    const res = await run({});
+    assert.ok(!res._body.some((r: any) => /kill switch/i.test(r.title)));
   });
 
   test("recs are sorted by priority ascending (1=urgent first)", async () => {
     const res = await run({
       getSchedulerStatus: async () => ({ running: false } as any),
-      killFileExists: () => true,
+      readPriorities: async () => "## 1) [BLOCKED] Wire the payout adapter\n  - Blocked on operator: provide the Stripe key\n",
     });
     const priorities = res._body.map((r: any) => r.priority);
     const sorted = [...priorities].sort((a, b) => a - b);
     assert.deepEqual(priorities, sorted, "priorities are non-decreasing");
     assert.equal(priorities[0], 1, "the most urgent rec is first");
-    assert.ok(priorities.length >= 2, "both scheduler-stopped and kill-switch recs are emitted");
+    assert.ok(priorities.length >= 2, "both scheduler-stopped and priorities-blocked recs are emitted");
   });
 
   test("error contract: a throwing scheduler read yields 200 with a partial array, NOT a 500", async () => {

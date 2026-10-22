@@ -102,7 +102,7 @@
         },
         "wip": {
           "ok": false,
-          "reason": "pr-refs unavailable"
+          "reason": "pr-refs-unavailable"
         },
         "needsQaPr": {
           "ref": "",
@@ -110,7 +110,7 @@
         },
         "devResumePick": {
           "ok": false,
-          "reason": "pr-refs unavailable"
+          "reason": "pr-refs-unavailable"
         },
         "laneDegraded": false
       }

@@ -38,7 +38,7 @@
     "stderrNotes": [
       "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)",
       "orch dev-resume needs-dev-resume issue read FAILED (empty payload) — orch_prs_red_resume/orch_dev_resume_pick fail closed to none (issue #4460, INV-5)",
-      "orch dev-resume classifier fail-closed (required-contexts / needs-dev-resume / pr-refs input unavailable) — issue #4460 INV-5",
+      "orch dev-resume classifier fail-closed (dev-resume-input-unavailable) — issue #4460 INV-5",
       "orch dev-resume no-PR pick fail-closed (needs-dev-resume read empty-payload) — issue #4808 INV-4"
     ],
     "ghCalls": [
@@ -108,11 +108,11 @@
         },
         "redResume": {
           "ok": false,
-          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+          "reason": "dev-resume-input-unavailable"
         },
         "devResumePick": {
           "ok": false,
-          "reason": "required-contexts / needs-dev-resume / pr-refs input unavailable"
+          "reason": "dev-resume-input-unavailable"
         },
         "devResumeNoprPick": {
           "ok": false,

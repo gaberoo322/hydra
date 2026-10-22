@@ -69,7 +69,7 @@ export function assessReflectionHealth(
         impact:
           "A reflection deposit landed yet did not register as applied context — a candidate false-none (distinct from the EXPECTED all-none of an empty store on a high-merge run, which is not surfaced here). Learning-context telemetry may under-count what reached a retry.",
         action:
-          "Inspect the deposit/read path: GET /api/learning/reflection-health for the full distribution; confirm reap.py reflection_sources forwarding and the per-anchor/by-file read seam (src/reflections/index.ts).",
+          "Inspect the deposit/read path: the intelligence.reflectionHealth block of GET /api/health/deep carries the full distribution; confirm reap.py reflection_sources forwarding and the per-anchor/by-file read seam (src/reflections/index.ts).",
         autoRecovery: true,
       }
     : null;

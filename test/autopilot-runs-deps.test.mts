@@ -917,6 +917,21 @@ describe("getRunDispatchClasses — injected listTurnsDesc, no Redis (#2640)", (
     assert.deepEqual(classes, ["cleanup_orch"]);
   });
 
+  test("reads the class from `slot` — the field decide.py's make_dispatch emits today (#4634)", async () => {
+    const members = [
+      turn([
+        { type: "dispatch", slot: "sweep_orch", skill: "hydra-sweep" },
+        { type: "wait_or_reap", slot: "research_target" }, // non-dispatch action skipped
+      ]),
+      turn([{ type: "dispatch", slot: "dev_orch", skill: "hydra-dev" }]),
+      turn([{ type: "dispatch", class: "qa_orch", slot: "ignored-when-class-present" }]),
+    ];
+    const classes = await getRunDispatchClasses("r-slot", {
+      listTurnsDesc: async () => members,
+    });
+    assert.deepEqual(classes, ["dev_orch", "qa_orch", "sweep_orch"]);
+  });
+
   test("passes the 200-turn scan cap through to listTurnsDesc", async () => {
     let seenLimit = -1;
     await getRunDispatchClasses("r-cap", {

@@ -67,6 +67,9 @@ import { InvalidArgumentError, NotFoundError } from "./errors.ts";
 import {
   DESIGN_CONCEPT_MAX_AGE_MS,
   computeArtifactHash,
+  contentGateCheck,
+  gateCheck,
+  type GateResult,
   type DesignConcept,
   type DesignConceptScope,
   type ModuleTouched,
@@ -528,6 +531,116 @@ export async function listDesignConcepts(opts: {
     if (!dc) continue;
     if (opts.scope && dc.scope !== opts.scope) continue;
     out.push(dc);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Paginated list + summary projection (issue #4633, ADR-0034 §9.4)
+// ---------------------------------------------------------------------------
+
+/** Upper bound on one page — the same clamp `listDesignConcepts` applies. */
+const DESIGN_CONCEPT_PAGE_MAX = 200;
+
+/**
+ * One `view=summary` row (#4633 INV-2): the identity + verdict fields a list
+ * needs, with the heavy arrays (`qaTrace`, `prototypes`, `invariants`,
+ * `modulesTouched`, `rejectedAlternatives`, glossary lists) reduced to
+ * counts. Shrinking the wire body is the point — the full artifact stays one
+ * `GET /design-concepts/:anchorRef` away.
+ */
+export type DesignConceptSummary = {
+  anchorRef: string;
+  scope: DesignConceptScope;
+  status: DesignConceptStatus;
+  approvedBy: DesignConcept["approvedBy"];
+  artifactHash: string;
+  createdAt: number;
+  gate: GateResult;
+  contentGate: GateResult;
+  counts: {
+    invariants: number;
+    modulesTouched: number;
+    qaTrace: number;
+    glossaryGaps: number;
+  };
+};
+
+/** Pure projection of one artifact into its summary row. */
+export function toDesignConceptSummary(
+  dc: DesignConcept,
+  now: number,
+): DesignConceptSummary {
+  return {
+    anchorRef: dc.anchorRef,
+    scope: dc.scope,
+    status: dc.status,
+    approvedBy: dc.approvedBy,
+    artifactHash: dc.artifactHash,
+    createdAt: dc.createdAt,
+    gate: gateCheck(dc, now),
+    contentGate: contentGateCheck(dc, now),
+    counts: {
+      invariants: dc.invariants.length,
+      modulesTouched: dc.modulesTouched.length,
+      qaTrace: dc.qaTrace.length,
+      glossaryGaps: dc.glossaryGaps.length,
+    },
+  };
+}
+
+export type DesignConceptPageOptions = {
+  scope?: DesignConceptScope;
+  status?: DesignConceptStatus;
+  limit?: number;
+  offset?: number;
+};
+
+export type DesignConceptPage = {
+  items: DesignConcept[];
+  /** Filtered count — exact, because the filter runs BEFORE the slice. */
+  total: number;
+  /** Effective page size after the `[1, 200]` clamp. */
+  limit: number;
+  offset: number;
+  /** `offset + limit` while more filtered rows remain, else `null`. */
+  nextOffset: number | null;
+};
+
+/**
+ * Pure paging over an already-ordered (newest-first) artifact list: filter by
+ * scope/status, then slice `[offset, offset + limit)`. Filtering before the
+ * slice is what keeps `total` / `nextOffset` exact (#4633 rejected
+ * alternative: an index-level offset makes a filtered page undercount).
+ */
+export function pageConcepts(
+  concepts: readonly DesignConcept[],
+  opts: DesignConceptPageOptions = {},
+): DesignConceptPage {
+  const limit = Math.min(Math.max(Math.trunc(opts.limit ?? 50), 1), DESIGN_CONCEPT_PAGE_MAX);
+  const offset = Math.max(Math.trunc(opts.offset ?? 0), 0);
+  const filtered = concepts.filter(
+    (dc) =>
+      (!opts.scope || dc.scope === opts.scope) &&
+      (!opts.status || dc.status === opts.status),
+  );
+  const items = filtered.slice(offset, offset + limit);
+  const nextOffset = offset + limit < filtered.length ? offset + limit : null;
+  return { items, total: filtered.length, limit, offset, nextOffset };
+}
+
+/**
+ * Read every live artifact in the index, newest-first. Read-only (like
+ * `listDesignConcepts`, #3605): the index is bounded by the 7-day TTL prune
+ * the list route runs first, so a full read is cheap. Members whose hash has
+ * expired are skipped.
+ */
+export async function listLiveDesignConcepts(): Promise<DesignConcept[]> {
+  const refs = await listAllDesignConceptRefs();
+  const out: DesignConcept[] = [];
+  for (const ref of refs) {
+    const dc = await getDesignConcept(ref);
+    if (dc) out.push(dc);
   }
   return out;
 }

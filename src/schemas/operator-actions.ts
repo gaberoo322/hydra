@@ -15,6 +15,11 @@
  *     `<bucket>:<line>` key space (`ADMISSION_LINE_KEYS`). A second key
  *     shape, `class:<name>`, is admitted by regex for a namespace slice 17
  *     populates — this slice ships ZERO `class:` entries.
+ *   - A third key shape, `control:<page>/<name>` (issue #4629, ADR-0034
+ *     §8.3 "action-bearing controls"), for the write controls on /work,
+ *     /health and /now (issue #5152). The closed list of shipped control
+ *     keys is `CONTROL_KEYS`; the schema admits the shape by regex and `controlEntryCoverage`
+ *     (registry.ts) pins the registry to the list in both directions.
  *   - The closed per-bucket **context** vocabulary (`BUCKET_CONTEXT`) a
  *     template placeholder may reference. Per-item buckets (`prs-not-landing`,
  *     `waiting-on-you`, `target-items`) get `{repo, number, kind}`; aggregate
@@ -110,6 +115,50 @@ export const ADMISSION_LINE_KEYS: readonly string[] = Object.freeze(
  */
 const CLASS_KEY_PATTERN = /^class:[a-z0-9_]+$/;
 
+/**
+ * `control:<page>/<name>` namespace (issue #4629, design-concept 821e48ed
+ * INV-2; ADR-0034 §8.3) — one registry entry per action-bearing control on a
+ * dashboard page, so a page button reads its label, preconditions and
+ * consequence from the registry instead of page prose. Kept separate from the
+ * §8.1 admission lines on purpose: a page control bound to a feed line would
+ * couple two surfaces (a feed authoring change would silently re-label a page
+ * button). Add a page by appending it to the alternation; add a control by
+ * appending one line to {@link CONTROL_KEYS}.
+ */
+const CONTROL_KEY_PATTERN = /^control:(work|health|now)\/[a-z0-9-]+$/;
+
+/**
+ * Every shipped `control:` key — one entry per line, grouped by page. The
+ * registry must carry exactly one DEFAULT entry per key and no `control:`
+ * entry outside this list (`controlEntryCoverage`, registry.ts), and each key
+ * is referenced by exactly one dashboard page (test/operator-actions-registry
+ * .test.mts).
+ */
+export const CONTROL_KEYS = [
+  // /work — BoardState.jsx
+  "control:work/promote",
+  "control:work/relabel",
+  "control:work/close",
+  "control:work/reopen",
+  // /health — Health.jsx
+  "control:health/pause",
+  "control:health/resume",
+  "control:health/brake-engage",
+  "control:health/brake-release",
+  // /health — AlertsPanel.jsx, ServiceStrip.jsx and Health.jsx's housekeeping
+  // section (issue #4631, design-concept 5ae4b72c INV-2)
+  "control:health/alert-dismiss",
+  "control:health/alerts-dismiss-all",
+  "control:health/scheduler-stop",
+  "control:health/scheduler-start",
+  "control:health/housekeeping",
+  // /now — RecommendationsPanel.jsx (issue #5152; the routes ADR-0034 §9.1
+  // files as registry in-dashboard "recommendations dismiss and mute-class")
+  "control:now/rec-dismiss",
+  "control:now/rec-mute-class",
+] as const;
+export type ControlKey = (typeof CONTROL_KEYS)[number];
+
 export function isAdmissionLineKey(key: string): boolean {
   return ADMISSION_LINE_KEYS.includes(key);
 }
@@ -118,12 +167,17 @@ function isClassKey(key: string): boolean {
   return CLASS_KEY_PATTERN.test(key);
 }
 
-/** Which bucket (or the `class` namespace) an entry key belongs to, or `null`
- * for a key that is neither a real admission line nor a `class:` key —
- * `EntryKeySchema` already rejects those, so callers past that boundary can
- * treat `null` as unreachable. */
-export function bucketOfKey(key: string): Bucket | "class" | null {
+export function isControlKey(key: string): boolean {
+  return CONTROL_KEY_PATTERN.test(key);
+}
+
+/** Which bucket (or the `class` / `control` namespace) an entry key belongs
+ * to, or `null` for a key that is none of a real admission line, a `class:`
+ * key or a `control:` key — `EntryKeySchema` already rejects those, so
+ * callers past that boundary can treat `null` as unreachable. */
+export function bucketOfKey(key: string): Bucket | "class" | "control" | null {
   if (isClassKey(key)) return "class";
+  if (isControlKey(key)) return "control";
   const idx = key.indexOf(":");
   if (idx === -1) return null;
   const candidate = key.slice(0, idx);
@@ -133,11 +187,11 @@ export function bucketOfKey(key: string): Bucket | "class" | null {
 }
 
 const EntryKeySchema = z.string().refine(
-  (key) => isAdmissionLineKey(key) || isClassKey(key),
+  (key) => isAdmissionLineKey(key) || isClassKey(key) || isControlKey(key),
   {
     message:
       'key must be a "<bucket>:<line>" admission line drawn from BUCKET_LINES, ' +
-      "or match /^class:[a-z0-9_]+$/",
+      "or match /^class:[a-z0-9_]+$/, or match /^control:(work|health|now)\\/[a-z0-9-]+$/",
   },
 );
 
@@ -151,9 +205,17 @@ const EntryKeySchema = z.string().refine(
  * each bucket. Per-item buckets carry the item's `{repo, number, kind}`;
  * aggregate buckets and `class:*` carry none — there is no single repo/number
  * to template against for a machine-stopped flag, a friction pattern, or the
- * parked-lane cap.
+ * parked-lane cap. The `control:*` namespace carries exactly one, `{id}`
+ * (issue #4631, design-concept 5ae4b72c INV-9, amending #4629's empty list):
+ * a per-row ROUTE segment is the only placeholder any control carries — the
+ * dashboard alert id (`/alerts/{id}/dismiss`) and, since issue #5152, the
+ * recommendation id (`/now/recommendations/{id}/dismiss`). The page resolves
+ * it client-side through `resolveControlRoute` (dashboard/src/lib/health-verdicts.ts) before the
+ * action reaches ActionAffordance; every other per-row value travels in the
+ * request body, built from the page's closed context (`IN_DASHBOARD_BODY` in
+ * ActionAffordance.jsx).
  */
-export const BUCKET_CONTEXT: Readonly<Record<Bucket | "class", readonly string[]>> =
+export const BUCKET_CONTEXT: Readonly<Record<Bucket | "class" | "control", readonly string[]>> =
   Object.freeze({
     "machine-stopped": Object.freeze([]),
     "prs-not-landing": Object.freeze(["repo", "number", "kind"]),
@@ -162,6 +224,7 @@ export const BUCKET_CONTEXT: Readonly<Record<Bucket | "class", readonly string[]
     repetition: Object.freeze([]),
     "parked-over-cap": Object.freeze([]),
     class: Object.freeze([]),
+    control: Object.freeze(["id"]),
   });
 
 // ---------------------------------------------------------------------------
@@ -213,10 +276,67 @@ const ReviewBucketSchema = z.enum(REVIEW_BUCKETS);
 
 const ConfirmTierSchema = z.enum(["immediate-undo", "confirm-first"]);
 
+/**
+ * The closed vocabulary of LIVE precondition checks (issue #4629,
+ * design-concept 821e48ed INV-3). A page evaluates the ids it owns from data
+ * it already reads into a verdict table; the affordance resolves each
+ * `{text, check}` line to ✓/✗ through `dashboard/src/lib/preconditions.ts`
+ * (a missing verdict fails closed to ✗). Binding by a closed id — never by
+ * the prose text or the array index — makes a misspelled or missing check a
+ * parse error rather than a silently unevaluated line. One id per line,
+ * grouped by the page that evaluates it; append new ids to their group.
+ */
+export const CONTROL_CHECKS = [
+  // /work rows — the promote refusal table's four rules, in its order
+  // (evaluatePromoteEligibility: closed, already-ready, missing-scope-section,
+  // blocked), then the relabel picker and the reopen-by-number input.
+  "issue-open",
+  "not-already-ready",
+  "has-scope-section",
+  "no-open-blocker",
+  "relabel-target-chosen",
+  "issue-number-entered",
+  // /health — the verified pause and brake reads.
+  "pause-state-verified",
+  "autopilot-running",
+  "autopilot-paused",
+  "brake-state-verified",
+  "brake-off",
+  "brake-engaged",
+  // /health — the alert, scheduler and deliberate-stop reads (issue #4631,
+  // design-concept 5ae4b72c INV-4), evaluated by dashboard/src/lib/health-verdicts.ts.
+  "alert-open",
+  "alerts-any-open",
+  "scheduler-running",
+  "scheduler-not-running",
+  "no-fresh-deliberate-stop",
+  // /now — the recommendation controls (issue #5152), evaluated by
+  // dashboard/src/lib/now-verdicts.ts from RecommendationsPanel's own read and
+  // its severity picker.
+  "rec-run-id-read",
+  "severity-chosen",
+] as const;
+export const ControlCheckSchema = z.enum(CONTROL_CHECKS);
+export type ControlCheck = z.infer<typeof ControlCheckSchema>;
+
+/**
+ * A precondition is either prose (rendered ☐, never disables — every feed
+ * line and class entry stays string-only) or a strict `{text, check}` pair
+ * whose `check` is a {@link CONTROL_CHECKS} id (rendered ✓/✗ live; ✗ disables
+ * the trigger). `{text, check}` appears ONLY on `control:` entries — pinned by
+ * test/operator-actions-registry.test.mts, so AttentionFeed.jsx (which renders
+ * precondition strings directly) is never handed an object.
+ */
+const PreconditionSchema = z.union([
+  z.string().min(1),
+  z.object({ text: z.string().min(1), check: ControlCheckSchema }).strict(),
+]);
+export type Precondition = z.infer<typeof PreconditionSchema>;
+
 /** Fields every Action carries regardless of `kind`. */
 const ActionCommonShape = {
   label: z.string().min(1),
-  preconditions: z.array(z.string().min(1)),
+  preconditions: z.array(PreconditionSchema),
   consequence: z.string().min(1),
 };
 

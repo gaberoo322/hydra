@@ -61,20 +61,6 @@
       }
     },
     {
-      "name": "CRON_SECRET",
-      "readSites": [
-        {
-          "path": "src/api/config.ts",
-          "line": 96
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "src/api/config.ts",
-        "line": 96
-      }
-    },
-    {
       "name": "GITHUB_STEP_SUMMARY",
       "readSites": [
         {
@@ -312,32 +298,16 @@
           "line": 374
         },
         {
-          "path": "src/aggregators/service-strip.ts",
-          "line": 218
-        },
-        {
           "path": "src/api.ts",
-          "line": 58
+          "line": 55
         },
         {
           "path": "src/api/config.ts",
-          "line": 39
-        },
-        {
-          "path": "src/api/config.ts",
-          "line": 92
-        },
-        {
-          "path": "src/api/health.ts",
-          "line": 56
-        },
-        {
-          "path": "src/api/operational.ts",
-          "line": 19
+          "line": 31
         },
         {
           "path": "src/api/recommendations.ts",
-          "line": 27
+          "line": 26
         },
         {
           "path": "src/config/roadmap.ts",
@@ -346,10 +316,6 @@
         {
           "path": "src/health/deployed-sha.ts",
           "line": 39
-        },
-        {
-          "path": "src/health/fan-out.ts",
-          "line": 81
         },
         {
           "path": "src/metrics/publish.ts",
@@ -1464,7 +1430,7 @@
       "readSites": [
         {
           "path": "bin/hydra",
-          "line": 52
+          "line": 51
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
@@ -1476,13 +1442,13 @@
         },
         {
           "path": "src/autopilot/turn-snapshot/hydra-http.ts",
-          "line": 99
+          "line": 101
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "bin/hydra",
-        "line": 52
+        "line": 51
       }
     },
     {
@@ -1596,11 +1562,11 @@
         },
         {
           "path": "src/api/config.ts",
-          "line": 40
+          "line": 32
         },
         {
           "path": "src/api/recommendations.ts",
-          "line": 29
+          "line": 27
         },
         {
           "path": "src/config/roadmap.ts",
@@ -1630,13 +1596,13 @@
       "readSites": [
         {
           "path": "src/api.ts",
-          "line": 92
+          "line": 89
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/api.ts",
-        "line": 92
+        "line": 89
       }
     },
     {
@@ -2540,13 +2506,13 @@
       "readSites": [
         {
           "path": "src/api/observability.ts",
-          "line": 40
+          "line": 22
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/api/observability.ts",
-        "line": 40
+        "line": 22
       }
     },
     {
@@ -3227,36 +3193,20 @@
           "line": 372
         },
         {
-          "path": "src/aggregators/service-strip.ts",
-          "line": 218
-        },
-        {
           "path": "src/api.ts",
-          "line": 58
+          "line": 55
         },
         {
           "path": "src/api/config.ts",
-          "line": 39
-        },
-        {
-          "path": "src/api/health.ts",
-          "line": 56
-        },
-        {
-          "path": "src/api/operational.ts",
-          "line": 19
+          "line": 31
         },
         {
           "path": "src/api/recommendations.ts",
-          "line": 27
+          "line": 26
         },
         {
           "path": "src/health/deployed-sha.ts",
           "line": 39
-        },
-        {
-          "path": "src/health/fan-out.ts",
-          "line": 81
         },
         {
           "path": "src/metrics/publish.ts",
@@ -3424,17 +3374,13 @@
       "readSites": [
         {
           "path": "src/api/observability.ts",
-          "line": 44
-        },
-        {
-          "path": "src/api/observability.ts",
-          "line": 60
+          "line": 30
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/api/observability.ts",
-        "line": 44
+        "line": 30
       }
     },
     {

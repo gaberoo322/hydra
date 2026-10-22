@@ -22,7 +22,6 @@ import { collectProbeInputs, type CollectProbeDeps } from "../src/health/fan-out
 function happyDeps(overrides: Partial<CollectProbeDeps> = {}): CollectProbeDeps {
   return {
     pingRedis: async () => true,
-    killFileExists: () => false,
     schedulerStatus: (async () => ({ running: true, consecutiveErrors: 2 })) as any,
     // Issue #3459: workQueueLen + backlogCounts removed (stubs retired with ADR-0031).
     metricsTrend: (async () => []) as any,
@@ -66,7 +65,7 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
   test("happy path: every probe maps to its named ProbeInputs field", async () => {
     const probes = await collectProbeInputs(happyDeps());
 
-    // index 0 — basic health: pingRedis() boolean + kill-file + idle cycle.
+    // index 0 — basic health: pingRedis() boolean + idle cycle.
     assert.equal(probes.basicHealth?.status, "ok");
     assert.equal(probes.basicHealth?.redis, true);
     assert.equal(probes.basicHealth?.cycle, "idle");
@@ -120,11 +119,6 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     const probes = await collectProbeInputs(happyDeps({ pingRedis: async () => false }));
     assert.equal(probes.basicHealth?.redis, false);
     assert.equal(probes.basicHealth?.status, "ok");
-  });
-
-  test("kill-file present sets basicHealth.status to killed", async () => {
-    const probes = await collectProbeInputs(happyDeps({ killFileExists: () => true }));
-    assert.equal(probes.basicHealth?.status, "killed");
   });
 
   test("host-probe failure coalesces disk/mem/sysd to the sentinel shape", async () => {

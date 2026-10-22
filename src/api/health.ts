@@ -1,6 +1,4 @@
 import { Router } from "express";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 
 import { getEmergencyBrake } from "../redis/emergency-brake.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
@@ -53,8 +51,6 @@ import type { ProbeInputs } from "../health/types.ts";
 import type { EmergencyBrakeState } from "../redis/emergency-brake.ts";
 import type { AutopilotPauseState } from "../redis/autopilot-pause.ts";
 
-const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
-const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 
 /**
  * Injectable dependencies for {@link createHealthRouter} (issue #4008) — the
@@ -100,7 +96,6 @@ export function createHealthRouter(eventBus: PingableBus, deps: HealthRouteDeps 
 
   // GET /health — Basic health check
   router.get("/health", async (req, res) => {
-    const killFileExists = existsSync(KILL_FILE);
     let redisOk = false;
     try {
       await eventBus.publisher.ping();
@@ -153,7 +148,11 @@ export function createHealthRouter(eventBus: PingableBus, deps: HealthRouteDeps 
     }
 
     res.json({
-      status: killFileExists ? "killed" : "ok",
+      // The `.kill`-file → "killed" status was removed with POST /kill
+      // (ADR-0024 §3, issue #4638): nothing writes the file any more, and the
+      // emergency brake (below) is the real stop. `status` stays on the wire
+      // for the watchdog / wait-for-health readers.
+      status: "ok",
       redis: redisOk,
       // In-process control loop removed in PR-3 (issue #383). Autopilot
       // subagents own execution now; "idle" is the only status this surface

@@ -67,7 +67,9 @@
         "0012",
         "0015",
         "0020",
+        "0024",
         "0033",
+        "0034",
         "0036",
         "0045"
       ],
@@ -131,22 +133,13 @@
           "POST /api/holdback/pending",
           "POST /api/merge/lock",
           "POST /api/merge/unlock",
-          "GET /api/summary",
           "GET /api/metrics",
-          "GET /api/metrics/abandonment",
           "GET /api/metrics/quality-gates",
           "GET /api/metrics/anchor-distribution",
           "GET /api/metrics/unclassified",
-          "GET /api/metrics/grounding-duration",
           "GET /api/metrics/cascade-routing",
           "GET /api/metrics/instrumentation",
           "GET /api/metrics/session-tokens",
-          "GET /api/now/service-strip",
-          "GET /api/now/autopilot-tick",
-          "GET /api/now/active-dispatches",
-          "GET /api/now/cost-burn",
-          "GET /api/now/autopilot-health",
-          "GET /api/now/alerts",
           "GET /api/now/recommendations",
           "POST /api/now/recommendations/:id/dismiss",
           "POST /api/now/recommendations/mute-class",
@@ -155,7 +148,6 @@
           "POST /api/memory/subagent-lesson",
           "POST /api/memory/subagent-friction",
           "GET /api/learning/ineffective-rules",
-          "GET /api/learning/rule-action-log",
           "GET /api/learning/friction-patterns",
           "GET /api/scout/stats",
           "GET /api/scout/dispatches",
@@ -256,10 +248,10 @@
       "homes": [
         "/health",
         "/",
+        "/builder",
         "/runs",
         "/work",
-        "/now",
-        "/builder"
+        "/now"
       ],
       "route": "/docs/area/src-redis",
       "source": {
@@ -319,9 +311,6 @@
           "POST /api/builder-health/dispatch-pr",
           "GET /api/capacity",
           "POST /api/capacity/orchestrator-merge",
-          "GET /api/config/:section",
-          "GET /api/config/:section/:name",
-          "PUT /api/config/:section/:name",
           "GET /api/cycle/status",
           "GET /api/cycle/history",
           "GET /api/cycle/report/:cycleId",
@@ -331,6 +320,7 @@
           "GET /api/design-concepts/exempt-log",
           "POST /api/design-concepts/exempt-log",
           "GET /api/design-concepts",
+          "GET /api/design-concepts/:anchorRef/approve-preconditions",
           "GET /api/design-concepts/:anchorRef/resolve",
           "GET /api/design-concepts/:anchorRef",
           "POST /api/design-concepts",
@@ -349,20 +339,16 @@
           "POST /api/holdback/revert-failed",
           "POST /api/holdback/pending",
           "GET /api/learning/context-trace",
-          "GET /api/learning/reflection-health",
           "GET /api/metrics/cost",
           "GET /api/metrics/cost-by-class",
           "GET /api/metrics/cost-per-merged-pr",
           "GET /api/metrics/cost-efficiency",
           "GET /api/metrics/cost-by-outcome",
           "POST /api/metrics/tokens",
-          "GET /api/summary",
           "GET /api/metrics",
-          "GET /api/metrics/abandonment",
           "GET /api/metrics/quality-gates",
           "GET /api/metrics/anchor-distribution",
           "GET /api/metrics/unclassified",
-          "GET /api/metrics/grounding-duration",
           "GET /api/metrics/cascade-routing",
           "GET /api/metrics/instrumentation",
           "GET /api/metrics/session-tokens",
@@ -371,7 +357,6 @@
           "GET /api/now/active-dispatches",
           "GET /api/now/cost-burn",
           "GET /api/now/autopilot-health",
-          "GET /api/now/alerts",
           "GET /api/operator-actions",
           "GET /api/outcomes/trends",
           "GET /api/outcomes/lessons",
@@ -381,11 +366,8 @@
           "POST /api/memory/subagent-lesson",
           "POST /api/memory/subagent-friction",
           "GET /api/learning/ineffective-rules",
-          "GET /api/learning/rule-action-log",
           "GET /api/learning/friction-patterns",
           "GET /api/reflections",
-          "GET /api/calibration/outcomes",
-          "POST /api/calibration/outcomes/sync",
           "POST /api/scheduler/start",
           "POST /api/scheduler/stop",
           "GET /api/scheduler/status",
@@ -411,8 +393,6 @@
           "ALL_DEGRADED_SIGNALS",
           "ActionSchema",
           "ActiveDispatchesResponseSchema",
-          "AlertsNowQuerySchema",
-          "AlertsNowResponseSchema",
           "AttentionFeedItemSchema",
           "AttentionFeedResponseSchema",
           "AttributionImpactQuerySchema",
@@ -435,7 +415,10 @@
           "BoardRelabelActionSchema",
           "BucketSchema",
           "BuilderHealthQuerySchema",
+          "CONTROL_CHECKS",
+          "CONTROL_KEYS",
           "ContextTraceQuerySchema",
+          "ControlCheckSchema",
           "CostBurnResponseSchema",
           "CycleCompleteBodySchema",
           "CycleRegisterBodySchema",
@@ -470,11 +453,9 @@
           "REVIEW_BUCKETS",
           "RecentMergesQuerySchema",
           "RecentRetrosQuerySchema",
-          "ReflectionHealthQuerySchema",
           "ReflectionsQuerySchema",
           "RetroArtifactSchema",
           "RetroBundleParamsSchema",
-          "RuleActionLogQuerySchema",
           "SchedulerStartBodySchema",
           "ScopeViolationBodySchema",
           "ScoutDispatchesQuerySchema",
@@ -504,10 +485,10 @@
       "homes": [
         "/health",
         "/",
+        "/builder",
         "/runs",
         "/work",
-        "/now",
-        "/builder"
+        "/now"
       ],
       "route": "/docs/area/src-schemas",
       "source": {
@@ -553,13 +534,10 @@
           "GET /api/metrics/cost-efficiency",
           "GET /api/metrics/cost-by-outcome",
           "POST /api/metrics/tokens",
-          "GET /api/summary",
           "GET /api/metrics",
-          "GET /api/metrics/abandonment",
           "GET /api/metrics/quality-gates",
           "GET /api/metrics/anchor-distribution",
           "GET /api/metrics/unclassified",
-          "GET /api/metrics/grounding-duration",
           "GET /api/metrics/cascade-routing",
           "GET /api/metrics/instrumentation",
           "GET /api/metrics/session-tokens",
@@ -632,10 +610,6 @@
         {
           "name": "Autopilot Turn",
           "anchor": "term-autopilot-turn"
-        },
-        {
-          "name": "Autopilot Focus",
-          "anchor": "term-autopilot-focus"
         }
       ],
       "moduleMap": "src/autopilot/CONTEXT.md",
@@ -656,7 +630,9 @@
         "0010",
         "0015",
         "0020",
+        "0024",
         "0033",
+        "0034",
         "0036",
         "0045"
       ],
@@ -710,7 +686,6 @@
           "GET /api/now/active-dispatches",
           "GET /api/now/cost-burn",
           "GET /api/now/autopilot-health",
-          "GET /api/now/alerts",
           "GET /api/now/recommendations",
           "POST /api/now/recommendations/:id/dismiss",
           "POST /api/now/recommendations/mute-class"
@@ -759,13 +734,10 @@
       "referenceDocs": [],
       "slices": {
         "routes": [
-          "GET /api/summary",
           "GET /api/metrics",
-          "GET /api/metrics/abandonment",
           "GET /api/metrics/quality-gates",
           "GET /api/metrics/anchor-distribution",
           "GET /api/metrics/unclassified",
-          "GET /api/metrics/grounding-duration",
           "GET /api/metrics/cascade-routing",
           "GET /api/metrics/instrumentation",
           "GET /api/metrics/session-tokens",
@@ -969,7 +941,9 @@
         "0012",
         "0015",
         "0020",
+        "0024",
         "0033",
+        "0034",
         "0036",
         "0045"
       ],
@@ -990,7 +964,6 @@
           "POST /api/memory/subagent-lesson",
           "POST /api/memory/subagent-friction",
           "GET /api/learning/ineffective-rules",
-          "GET /api/learning/rule-action-log",
           "GET /api/learning/friction-patterns"
         ],
         "env-vars": [
@@ -1036,9 +1009,7 @@
           "POST /api/autopilot/run-end",
           "POST /api/autopilot/run-tally",
           "POST /api/autopilot/turn",
-          "GET /api/reflections",
-          "GET /api/calibration/outcomes",
-          "POST /api/calibration/outcomes/sync"
+          "GET /api/reflections"
         ]
       },
       "homes": [],
@@ -1085,7 +1056,9 @@
         "0012",
         "0015",
         "0020",
+        "0024",
         "0033",
+        "0034",
         "0036",
         "0045"
       ],
@@ -1107,20 +1080,15 @@
           "GET /api/explore/friction",
           "GET /api/explore/behavior",
           "GET /api/explore/lessons",
-          "GET /api/learning/context-trace",
-          "GET /api/learning/reflection-health",
           "GET /api/metrics/cost",
           "GET /api/metrics/cost-by-class",
           "GET /api/metrics/cost-per-merged-pr",
           "GET /api/metrics/cost-efficiency",
           "GET /api/metrics/cost-by-outcome",
-          "GET /api/summary",
           "GET /api/metrics",
-          "GET /api/metrics/abandonment",
           "GET /api/metrics/quality-gates",
           "GET /api/metrics/anchor-distribution",
           "GET /api/metrics/unclassified",
-          "GET /api/metrics/grounding-duration",
           "GET /api/metrics/cascade-routing",
           "GET /api/metrics/instrumentation",
           "GET /api/metrics/session-tokens",
@@ -1129,7 +1097,6 @@
           "GET /api/now/active-dispatches",
           "GET /api/now/cost-burn",
           "GET /api/now/autopilot-health",
-          "GET /api/now/alerts",
           "GET /api/now/recommendations",
           "POST /api/now/recommendations/:id/dismiss",
           "POST /api/now/recommendations/mute-class",
@@ -1196,6 +1163,7 @@
         "0015",
         "0020",
         "0033",
+        "0034",
         "0036",
         "0045"
       ],
@@ -1207,7 +1175,6 @@
       ],
       "slices": {
         "env-vars": [
-          "CRON_SECRET",
           "HYDRA_CORS_ALLOWED_ORIGINS",
           "HYDRA_OTEL_ENABLED",
           "HYDRA_PACE_GATE_INTERVAL_SECONDS",
@@ -1276,6 +1243,7 @@
           "GET /api/design-concepts/exempt-log",
           "POST /api/design-concepts/exempt-log",
           "GET /api/design-concepts",
+          "GET /api/design-concepts/:anchorRef/approve-preconditions",
           "GET /api/design-concepts/:anchorRef/resolve",
           "GET /api/design-concepts/:anchorRef",
           "POST /api/design-concepts",
@@ -1284,7 +1252,6 @@
           "PATCH /api/dispatches/subagent/:sessionId/current-step",
           "GET /api/dispatches/:dispatchId/transcript",
           "GET /api/goals",
-          "GET /api/goals/summary",
           "POST /api/holdback/enroll",
           "GET /api/holdback/enrolments",
           "POST /api/holdback/check",
@@ -1293,13 +1260,10 @@
           "POST /api/maintenance/housekeeping",
           "POST /api/merge/lock",
           "POST /api/merge/unlock",
-          "GET /api/summary",
           "GET /api/metrics",
-          "GET /api/metrics/abandonment",
           "GET /api/metrics/quality-gates",
           "GET /api/metrics/anchor-distribution",
           "GET /api/metrics/unclassified",
-          "GET /api/metrics/grounding-duration",
           "GET /api/metrics/cascade-routing",
           "GET /api/metrics/instrumentation",
           "GET /api/metrics/session-tokens",
@@ -1309,7 +1273,6 @@
           "POST /api/memory/subagent-lesson",
           "POST /api/memory/subagent-friction",
           "GET /api/learning/ineffective-rules",
-          "GET /api/learning/rule-action-log",
           "GET /api/learning/friction-patterns",
           "GET /api/recommendations",
           "GET /api/taxonomy/classes",
@@ -1368,7 +1331,9 @@
         "0012",
         "0015",
         "0020",
+        "0024",
         "0033",
+        "0034",
         "0036",
         "0045"
       ],
@@ -1391,13 +1356,15 @@
           "POST /api/autopilot/board/relabel",
           "POST /api/autopilot/board/close",
           "POST /api/autopilot/board/reopen",
-          "GET /api/config/:section",
-          "GET /api/config/:section/:name",
-          "PUT /api/config/:section/:name",
-          "GET /api/grounding/latest",
-          "GET /api/reflections",
-          "GET /api/calibration/outcomes",
-          "POST /api/calibration/outcomes/sync"
+          "GET /api/design-concepts/snapshots",
+          "GET /api/design-concepts/exempt-log",
+          "POST /api/design-concepts/exempt-log",
+          "GET /api/design-concepts",
+          "GET /api/design-concepts/:anchorRef/approve-preconditions",
+          "GET /api/design-concepts/:anchorRef/resolve",
+          "GET /api/design-concepts/:anchorRef",
+          "POST /api/design-concepts",
+          "POST /api/design-concepts/:anchorRef/approve"
         ],
         "env-vars": [
           "HYDRA_BETTING_URL",
@@ -1409,7 +1376,8 @@
         ]
       },
       "homes": [
-        "/work"
+        "/work",
+        "/builder"
       ],
       "route": "/docs/area/src-target-config-ts",
       "source": {
@@ -1502,13 +1470,17 @@
           "GET /api/design-concepts/exempt-log",
           "POST /api/design-concepts/exempt-log",
           "GET /api/design-concepts",
+          "GET /api/design-concepts/:anchorRef/approve-preconditions",
           "GET /api/design-concepts/:anchorRef/resolve",
           "GET /api/design-concepts/:anchorRef",
           "POST /api/design-concepts",
           "POST /api/design-concepts/:anchorRef/approve"
         ]
       },
-      "homes": [],
+      "homes": [
+        "/builder",
+        "/work"
+      ],
       "route": "/docs/area/src-design-concept-ts",
       "source": {
         "path": "CONTEXT-MAP.md",
@@ -1525,10 +1497,6 @@
         {
           "name": "Epic",
           "anchor": "term-epic"
-        },
-        {
-          "name": "Roadmap Milestone",
-          "anchor": "term-roadmap-milestone"
         },
         {
           "name": "Focus Label",
@@ -1551,6 +1519,7 @@
         "0012",
         "0015",
         "0020",
+        "0024",
         "0029",
         "0033",
         "0034",
@@ -1615,7 +1584,9 @@
         "0009",
         "0010",
         "0012",
+        "0024",
         "0033",
+        "0034",
         "0036",
         "0045"
       ],
@@ -1638,11 +1609,10 @@
       }
     },
     {
-      "slug": "claude-skills",
-      "name": ".claude/skills/ + docs/operator-playbooks/",
+      "slug": "docs-operator-playbooks",
+      "name": "docs/operator-playbooks/",
       "table": "infra",
       "paths": [
-        ".claude/skills/",
         "docs/operator-playbooks/"
       ],
       "retired": false,
@@ -1667,9 +1637,6 @@
         }
       ],
       "slices": {
-        "tier-paths": [
-          "T2 prefix .claude/skills/"
-        ],
         "skills": [
           "hydra-architect [operator-interactive]",
           "hydra-architecture-scan [pre-plan-producer]",
@@ -1754,7 +1721,7 @@
         ]
       },
       "homes": [],
-      "route": "/docs/area/claude-skills",
+      "route": "/docs/area/docs-operator-playbooks",
       "source": {
         "path": "CONTEXT-MAP.md",
         "line": 43
@@ -1968,6 +1935,7 @@
         "0012",
         "0015",
         "0020",
+        "0024",
         "0033",
         "0036",
         "0045"
@@ -2030,7 +1998,9 @@
         "0012",
         "0015",
         "0020",
+        "0024",
         "0033",
+        "0034",
         "0036",
         "0045"
       ],

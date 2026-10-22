@@ -73,6 +73,7 @@ import {
   removeRedisDockerShim,
   withRedisDockerShim,
 } from "./_helpers/watchdog-redis-shim.mts";
+import { ownedDbContext } from "./_helpers/owned-redis-db.mts";
 import { STREAMS } from "../src/event-bus-stream-keys.ts";
 import { isPageKind as isPageKindClosed } from "../src/operator-channel/page-list.ts";
 import {
@@ -922,10 +923,11 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
 // =============================================================================
 
 describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/rc_read (issue #4183)", { skip: !DOCKER }, () => {
-  // A DB this describe owns for its own lifetime — distinct from db 0
-  // (production, the fallback-on-invalid/absent-input target) so a leak in
-  // either direction is unambiguous.
-  const SELECTED_DB = "9";
+  // The run-OWNED Redis DB + its skip verdict, captured at definition time. The
+  // canonical rule (never a pool literal; null => skip or fail loud; owned-DB
+  // cleanup skipped, never redirected to db 0) is ownedDbContext's doc comment
+  // in test/_helpers/owned-redis-db.mts.
+  const { db: OWNED_DB, skip: OWNED_DB_SKIP } = ownedDbContext();
 
   // Fully separate key namespace from RUN_NS/TEST_LAST_TICK_KEY/SINCE/FIRED
   // above — this describe never touches those keys, on any DB.
@@ -992,7 +994,7 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/
   function cleanBothDbs(): void {
     const keys = [OWN_LAST_TICK_KEY, OWN_SINCE("fail-safe"), OWN_FIRED("fail-safe")];
     drcAt("0", ["DEL", ...keys]);
-    drcAt(SELECTED_DB, ["DEL", ...keys]);
+    if (OWNED_DB !== null) drcAt(OWNED_DB, ["DEL", ...keys]);
   }
 
   beforeEach(() => {
@@ -1029,21 +1031,22 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/
     return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   }
 
-  test("a bash-side write with HYDRA_REDIS_DB set lands in that DB, never in db 0", () => {
+  test("a bash-side write with HYDRA_REDIS_DB set lands in that DB, never in db 0", { skip: OWNED_DB_SKIP }, () => {
+    assert.ok(OWNED_DB !== null, "full-suite launcher run must export an owned HYDRA_REDIS_DB (#5062)");
     // Seed the last-tick hash directly in the TARGET db — this is what
-    // HYDRA_REDIS_DB=9 makes rc_read visible to. db 0 is left empty, so a tick
+    // HYDRA_REDIS_DB=<owned> makes rc_read visible to. db 0 is left empty, so a tick
     // that mistakenly reads db 0 would see no record at all (a distinguishable
     // failure mode, not a false pass).
-    hsetLastTickAt(SELECTED_DB, {
+    hsetLastTickAt(OWNED_DB, {
       reason: "eligibility-unreachable",
       class: "fail-safe",
       at: String(T0),
       latency_ms: "",
     });
-    seedSinceAt(SELECTED_DB, "fail-safe", T0); // streak began at T0, in the target DB
+    seedSinceAt(OWNED_DB, "fail-safe", T0); // streak began at T0, in the target DB
 
     const r = runOwnBlock({
-      HYDRA_REDIS_DB: SELECTED_DB,
+      HYDRA_REDIS_DB: OWNED_DB,
       HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2",
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
     });
@@ -1051,18 +1054,18 @@ describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/
     assert.match(
       warnLines(r.stdout),
       /signal 'fail-safe' sustained 5000ms >= 2000ms/,
-      "precondition: this tick must fire against the DB-9 seed (proves rc_read honoured HYDRA_REDIS_DB)",
+      "precondition: this tick must fire against the owned-DB seed (proves rc_read honoured HYDRA_REDIS_DB)",
     );
 
     // The since-anchor + fired marker THIS tick just wrote via rc_write must
     // exist in the selected DB...
     assert.equal(
-      existsAt(SELECTED_DB, OWN_FIRED("fail-safe")),
+      existsAt(OWNED_DB, OWN_FIRED("fail-safe")),
       true,
       "fired marker must land in the HYDRA_REDIS_DB-selected DB",
     );
     assert.equal(
-      existsAt(SELECTED_DB, OWN_SINCE("fail-safe")),
+      existsAt(OWNED_DB, OWN_SINCE("fail-safe")),
       true,
       "since anchor must land in the HYDRA_REDIS_DB-selected DB",
     );

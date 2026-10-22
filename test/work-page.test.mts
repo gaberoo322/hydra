@@ -47,6 +47,8 @@ import { createAutopilotBoardRouter } from "../src/api/autopilot-board.ts";
 // scope (same shape as test/autopilot-board.test.mts's #3505 import).
 import {
   deriveWorkLane,
+  failClosedOnTruncatedSearch,
+  workQueueBlockerSearchLimit,
   toWorkQueueRow,
   compareWorkQueueRows,
   evaluatePromoteEligibility,
@@ -63,6 +65,9 @@ import {
 } from "../src/scope-section.ts";
 import { extractScopeFromBody as extractScopeFromBodyViaCi } from "../scripts/ci/scope-check.ts";
 import { projectAnchorDistribution } from "../src/metrics/stats-projection.ts";
+// Issue #4633 — the design-concept approve control + holdback enrol state.
+import { createDesignConceptsRouter } from "../src/api/design-concepts.ts";
+import { REGISTRY } from "../src/operator-actions/registry.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -219,14 +224,19 @@ describe("toWorkQueueRow — queue projection", () => {
     assert.deepEqual(row!.openBlockers, [9]); // #5 self-ref dropped, #12 not open
   });
 
-  test("non-ready lanes never surface blockers (only the ready population is resolved)", () => {
-    const row = toWorkQueueRow(
-      issue({ number: 5, labels: ["needs-triage"], body: "Blocked by #9" }),
-      new Set([9]),
-      { glmPartitionActive: true },
-    );
-    assert.ok(row);
-    assert.deepEqual(row!.openBlockers, []);
+  // Issue #4629 (design-concept 821e48ed INV-6/INV-13): this case pinned
+  // "non-ready lanes never surface blockers"; the live promote checklist
+  // needs every operator lane's blockers, so it flips to the new invariant.
+  test("every operator lane surfaces its open strict blockers", () => {
+    for (const lane of ["needs-triage", "needs-info", "ready-for-human", "blocked"]) {
+      const row = toWorkQueueRow(
+        issue({ number: 5, labels: [lane], body: "Blocked by #9\nblocks #5\ndepends on #12" }),
+        new Set([9]),
+        { glmPartitionActive: true },
+      );
+      assert.ok(row, `${lane} row projects`);
+      assert.deepEqual(row!.openBlockers, [9], `${lane}: open strict ref surfaces, self-ref + closed ref dropped`);
+    }
   });
 
   test("no operator lane → null (not in the queue)", () => {
@@ -1304,20 +1314,24 @@ describe("structural pins — /work page wiring", () => {
     // INV-2: the shared trust seam, not a re-spelled status ternary.
     assert.match(src, /usePageItems\(/);
     assert.match(src, /derivePageStatus/);
-    // INV-5: promote arms first, fires only on the explicit confirm click.
-    assert.match(src, /data-testid="work-promote-arm"/);
-    assert.match(src, /data-testid="work-promote-confirm-yes"/);
-    assert.match(src, /data-testid="work-promote-confirm-no"/);
-    // The immediate-tier controls exist.
+    // INV-5: promote arms first, fires only on the explicit confirm click —
+    // rendered by the shared ActionAffordance (issue #4629, design-concept
+    // 821e48ed INV-13), which derives work-promote-arm / -confirm-yes /
+    // -confirm-no from its testId prop.
+    assert.match(src, /import \{[^}]*\bControlAffordance\b[^}]*\} from "\.\.\/\.\.\/ActionAffordance\.jsx"/);
+    assert.match(src, /testId="work-promote"/);
+    // The immediate-tier controls exist (relabel picker + affordances).
     assert.match(src, /data-testid="work-relabel-select"/);
-    assert.match(src, /data-testid="work-close"/);
-    assert.match(src, /data-testid="work-reopen-button"/);
+    assert.match(src, /testId="work-relabel"/);
+    assert.match(src, /testId="work-close"/);
+    assert.match(src, /testId="work-reopen"/);
     // INV-6: refusal reasons surface verbatim, success shows the verified state.
     assert.match(src, /actionResult\.reason/);
     assert.match(src, /actionResult\.verified/);
-    // Server-confirmed: the POST is followed by the follow-up reads.
-    assert.match(src, /board\.refresh\(\)/);
-    assert.match(src, /queue\.refresh\(\)/);
+    // Server-confirmed: the POST is followed by the follow-up reads — both
+    // CHECKED (#4629 review), so a failed re-read is reported, never a ✓.
+    assert.match(src, /useCheckedRefresh\(board\)/);
+    assert.match(src, /useCheckedRefresh\(queue\)/);
     // INV-1: no run history or failure detail.
     assert.equal(src.includes("/autopilot/runs"), false);
   });
@@ -1485,5 +1499,634 @@ describe("toWorkQueueRow — the GLM badge consumes glmLane (issue #4692)", () =
     // ready row is Claude-owned even at full partition liveness — the badge
     // is the lane predicate's ruling, never a glm-eligible label read.
     assert.equal(row.glmEligible, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4633 — /work design-concept approve control + read-only holdback
+// enrol state (guidance-epic 14/19, design-concept a493aead). Top-level
+// describes with their own lifecycle; every HTTP test injects its readers
+// (no Redis, no gh).
+// ---------------------------------------------------------------------------
+
+const DC_HASH_A = "a".repeat(64);
+const DC_HASH_B = "b".repeat(64);
+
+/** One DesignConcept fixture (fictional anchors; no real repo paths). */
+function concept(overrides: any = {}): any {
+  return {
+    anchorRef: "issue-90001",
+    scope: "orch",
+    createdAt: Date.parse("2026-10-20T00:00:00Z"),
+    artifactHash: DC_HASH_A,
+    glossaryTerms: ["Fictional Term"],
+    glossaryGaps: [],
+    modulesTouched: [
+      { path: "src/fictional-module.ts", interfaceImpact: "extend", depthClassification: "deep" },
+    ],
+    invariants: ["INV-1 something holds", "INV-2 something else holds"],
+    rejectedAlternatives: [{ alt: "the other way", why: "worse" }],
+    qaTrace: [{ q: "why?", a: "because" }],
+    prototypes: [
+      { question: "q", branch: "logic", snippet: "x", answer: "y", workTreePath: "/tmp/fictional" },
+    ],
+    status: "draft",
+    approvedBy: "",
+    ...overrides,
+  };
+}
+
+function handoffComment(hash: string): any {
+  return {
+    body:
+      "## hydra-grill handoff\n\n- anchorRef: issue-90001\n" +
+      `- artifactHash: ${hash}\n- gate reasons:\n  - something\n\nNext step: …`,
+  };
+}
+
+/** The registry's grill-handoff approve action — the one text source. */
+function registryApprove(): any {
+  const entry: any = REGISTRY.find(
+    (e: any) => e.key === "waiting-on-you:ready-for-human" && e.variant === "grill-handoff",
+  );
+  assert.ok(entry, "grill-handoff variant must exist");
+  return entry.alternatives[1];
+}
+
+describe("GET /design-concepts — paginated list (#4633 INV-1/INV-2)", () => {
+  function listRouter(concepts: any[], extra: any = {}) {
+    const pruned: number[] = [];
+    const router = createDesignConceptsRouter({
+      listLiveConcepts: async () => concepts,
+      pruneIndex: async () => {
+        pruned.push(1);
+        return 0;
+      },
+      now: () => Date.parse("2026-10-21T00:00:00Z"),
+      ...extra,
+    });
+    return { handler: findHandler(router, "GET", "/design-concepts")!, pruned };
+  }
+
+  const seven = Array.from({ length: 7 }, (_, i) =>
+    concept({ anchorRef: `issue-9000${i}`, status: i % 2 === 0 ? "draft" : "approved" }),
+  );
+
+  test("no params → full artifacts + count exactly as before; new envelope fields are additive (INV-1)", async () => {
+    const { handler, pruned } = listRouter(seven);
+    const res = mockRes();
+    await handler(mockReq({ query: {} }), res);
+    assert.equal(res._status, 200);
+    // items are the artifacts VERBATIM (full shape, heavy arrays present).
+    assert.deepEqual(res._body.items, seven);
+    assert.equal(res._body.count, 7);
+    assert.equal(res._body.total, 7);
+    assert.equal(res._body.limit, 50);
+    assert.equal(res._body.offset, 0);
+    assert.equal(res._body.nextOffset, null);
+    assert.ok(Number.isFinite(Date.parse(res._body.generatedAt)));
+    // prune-then-list stays visible at the call site (#3605).
+    assert.equal(pruned.length, 1);
+  });
+
+  test("offset/limit arithmetic: total is exact, nextOffset advances then nulls", async () => {
+    const { handler } = listRouter(seven);
+    const page2 = mockRes();
+    await handler(mockReq({ query: { limit: "3", offset: "3" } }), page2);
+    assert.deepEqual(
+      page2._body.items.map((d: any) => d.anchorRef),
+      ["issue-90003", "issue-90004", "issue-90005"],
+    );
+    assert.equal(page2._body.total, 7);
+    assert.equal(page2._body.count, 3);
+    assert.equal(page2._body.nextOffset, 6);
+
+    const last = mockRes();
+    await handler(mockReq({ query: { limit: "3", offset: "6" } }), last);
+    assert.deepEqual(last._body.items.map((d: any) => d.anchorRef), ["issue-90006"]);
+    assert.equal(last._body.nextOffset, null);
+  });
+
+  test("status filter runs BEFORE the slice — total is the filtered count", async () => {
+    const { handler } = listRouter(seven);
+    const res = mockRes();
+    await handler(mockReq({ query: { status: "draft", limit: "2" } }), res);
+    assert.equal(res._body.total, 4); // drafts at i = 0, 2, 4, 6
+    assert.deepEqual(res._body.items.map((d: any) => d.anchorRef), ["issue-90000", "issue-90002"]);
+    assert.equal(res._body.nextOffset, 2);
+    assert.ok(res._body.items.every((d: any) => d.status === "draft"));
+  });
+
+  test("scope filter composes with status", async () => {
+    const mixed = [
+      concept({ anchorRef: "issue-90010", scope: "target" }),
+      concept({ anchorRef: "issue-90011", scope: "orch" }),
+      concept({ anchorRef: "issue-90012", scope: "orch", status: "stale" }),
+    ];
+    const { handler } = listRouter(mixed);
+    const res = mockRes();
+    await handler(mockReq({ query: { scope: "orch", status: "draft" } }), res);
+    assert.deepEqual(res._body.items.map((d: any) => d.anchorRef), ["issue-90011"]);
+    assert.equal(res._body.total, 1);
+  });
+
+  test("view=summary carries identity + verdicts + counts and NEVER the heavy arrays", async () => {
+    const { handler } = listRouter([concept()]);
+    const res = mockRes();
+    await handler(mockReq({ query: { view: "summary" } }), res);
+    const row = res._body.items[0];
+    for (const heavy of ["qaTrace", "prototypes", "invariants", "modulesTouched", "rejectedAlternatives", "glossaryTerms"]) {
+      assert.equal(heavy in row, false, `summary row must not carry ${heavy}`);
+    }
+    assert.equal(row.anchorRef, "issue-90001");
+    assert.equal(row.status, "draft");
+    assert.equal(row.artifactHash, DC_HASH_A);
+    assert.equal(typeof row.gate.ok, "boolean");
+    assert.ok(Array.isArray(row.gate.reasons));
+    assert.equal(typeof row.contentGate.ok, "boolean");
+    assert.deepEqual(row.counts, { invariants: 2, modulesTouched: 1, qaTrace: 1, glossaryGaps: 0 });
+  });
+
+  test("garbled params collapse to defaults — never a 400 on this read route", async () => {
+    const { handler } = listRouter(seven);
+    const res = mockRes();
+    await handler(
+      mockReq({ query: { offset: "-4", status: "bogus", view: "everything", limit: "abc" } }),
+      res,
+    );
+    assert.equal(res._status, 200);
+    assert.equal(res._body.offset, 0);
+    assert.equal(res._body.limit, 50);
+    assert.equal(res._body.total, 7); // an off-vocabulary status → no filter
+    assert.ok("qaTrace" in res._body.items[0]); // bad view → full
+  });
+
+  test("status=pending (the issue's alias) filters as draft — never silently dropped", async () => {
+    const { handler } = listRouter(seven);
+    const res = mockRes();
+    await handler(mockReq({ query: { status: "pending" } }), res);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.total, 4); // drafts at i = 0, 2, 4, 6
+    assert.ok(res._body.items.every((d: any) => d.status === "draft"));
+  });
+});
+
+describe("GET /design-concepts/:anchorRef/approve-preconditions (#4633 INV-3/INV-4)", () => {
+  const PATH = "/design-concepts/:anchorRef/approve-preconditions";
+
+  function preRouter(opts: { dc?: any; comments?: any; clock?: { t: number }; getConcept?: any }) {
+    const calls: any[][] = [];
+    const clock = opts.clock ?? { t: Date.parse("2026-10-21T00:00:00Z") };
+    const router = createDesignConceptsRouter({
+      getConcept: opts.getConcept ?? (async () => opts.dc ?? null),
+      readIssueComments: async (repo: string, number: number) => {
+        calls.push([repo, number]);
+        const c = opts.comments;
+        if (typeof c === "function") return c();
+        return c ?? { ok: true, comments: [] };
+      },
+      now: () => clock.t,
+    });
+    return { handler: findHandler(router, "GET", PATH)!, calls, clock };
+  }
+
+  async function call(handler: Function, anchorRef = "issue-90001") {
+    const res = mockRes();
+    await handler(mockReq({ params: { anchorRef } }), res);
+    return res;
+  }
+
+  test("registry: the approve action's preconditions are the three machine-evaluable lines, in order", () => {
+    const action = registryApprove();
+    assert.equal(action.kind, "in-dashboard");
+    assert.equal(action.confirmTier, "confirm-first");
+    assert.equal(action.label, "Approve draft as-is");
+    assert.deepEqual(action.preconditions, [
+      "the draft artifact exists in Redis (7-day TTL)",
+      "the artifact's status is 'draft' (not already approved, not stale)",
+      "the artifactHash matches the `## hydra-grill handoff` comment on the issue",
+    ]);
+  });
+
+  test("all three ✓ → allOk, labels are the registry's verbatim, action resolved from the registry", async () => {
+    const { handler, calls } = preRouter({
+      dc: concept(),
+      comments: { ok: true, comments: [{ body: "unrelated" }, handoffComment(DC_HASH_A)] },
+    });
+    const res = await call(handler);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.allOk, true);
+    assert.deepEqual(
+      res._body.preconditions.map((p: any) => p.label),
+      registryApprove().preconditions,
+    );
+    assert.ok(res._body.preconditions.every((p: any) => p.ok === true));
+    assert.equal(res._body.artifactHash, DC_HASH_A);
+    assert.equal(res._body.handoffHash, DC_HASH_A);
+    // The served action IS the registry's, with {number} resolved.
+    assert.equal(res._body.action.route, "/design-concepts/issue-90001/approve");
+    assert.equal(res._body.action.label, registryApprove().label);
+    assert.equal(res._body.action.consequence, registryApprove().consequence);
+    assert.ok(Number.isFinite(Date.parse(res._body.generatedAt)));
+    assert.deepEqual(calls, [["gaberoo322/hydra", 90001]]);
+  });
+
+  test("gh failure → that line ✗ with the reason, still 200, no throw", async () => {
+    const { handler } = preRouter({ dc: concept(), comments: { ok: false, error: "gh-failed" } });
+    const res = await call(handler);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.allOk, false);
+    assert.equal(res._body.preconditions[0].ok, true);
+    assert.equal(res._body.preconditions[1].ok, true);
+    assert.equal(res._body.preconditions[2].ok, false);
+    assert.match(res._body.preconditions[2].detail, /gh-failed/);
+  });
+
+  test("a comment reader that THROWS degrades the same way (never a 500)", async () => {
+    const { handler } = preRouter({
+      dc: concept(),
+      comments: () => {
+        throw new Error("spawn exploded");
+      },
+    });
+    const res = await call(handler);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.preconditions[2].ok, false);
+    assert.match(res._body.preconditions[2].detail, /spawn exploded/);
+  });
+
+  test("missing artifact → every line ✗, no gh read spent", async () => {
+    const { handler, calls } = preRouter({ dc: null });
+    const res = await call(handler);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.allOk, false);
+    assert.ok(res._body.preconditions.every((p: any) => p.ok === false));
+    assert.equal(res._body.artifactHash, null);
+    assert.equal(calls.length, 0);
+  });
+
+  test("an artifact read that throws → line 1 ✗ with the reason, still 200", async () => {
+    const { handler } = preRouter({
+      getConcept: async () => {
+        throw new Error("redis down");
+      },
+    });
+    const res = await call(handler);
+    assert.equal(res._status, 200);
+    assert.match(res._body.preconditions[0].detail, /redis down/);
+    assert.equal(res._body.allOk, false);
+  });
+
+  test("already approved → status line ✗ (not a draft)", async () => {
+    const { handler } = preRouter({
+      dc: concept({ status: "approved", approvedBy: "auto-gate" }),
+      comments: { ok: true, comments: [handoffComment(DC_HASH_A)] },
+    });
+    const res = await call(handler);
+    assert.equal(res._body.preconditions[1].ok, false);
+    assert.match(res._body.preconditions[1].detail, /approved/);
+    assert.equal(res._body.allOk, false);
+  });
+
+  test("the LAST handoff comment wins — an older matching hash does not satisfy a newer mismatch", async () => {
+    const { handler } = preRouter({
+      dc: concept(),
+      comments: { ok: true, comments: [handoffComment(DC_HASH_A), handoffComment(DC_HASH_B)] },
+    });
+    const res = await call(handler);
+    assert.equal(res._body.handoffHash, DC_HASH_B);
+    assert.equal(res._body.preconditions[2].ok, false);
+    assert.equal(res._body.allOk, false);
+  });
+
+  test("no handoff comment at all → hash line ✗", async () => {
+    const { handler } = preRouter({ dc: concept(), comments: { ok: true, comments: [{ body: "lgtm" }] } });
+    const res = await call(handler);
+    assert.equal(res._body.preconditions[2].ok, false);
+    assert.equal(res._body.handoffHash, null);
+  });
+
+  test("successful comment reads are memoised 60 s per issue; failures are not", async () => {
+    const clock = { t: Date.parse("2026-10-21T00:00:00Z") };
+    const ok = preRouter({
+      dc: concept(),
+      comments: { ok: true, comments: [handoffComment(DC_HASH_A)] },
+      clock,
+    });
+    await call(ok.handler);
+    clock.t += 30_000;
+    await call(ok.handler);
+    assert.equal(ok.calls.length, 1, "second read inside 60 s rides the memo");
+    clock.t += 31_000;
+    await call(ok.handler);
+    assert.equal(ok.calls.length, 2, "memo expires after 60 s");
+
+    const bad = preRouter({ dc: concept(), comments: { ok: false, error: "gh-failed" } });
+    await call(bad.handler);
+    await call(bad.handler);
+    assert.equal(bad.calls.length, 2, "a failed read is retried, never pinned");
+  });
+
+  test("a target-scope artifact reads its comments on the Target repo", async () => {
+    const prev = process.env.HYDRA_TARGET_GITHUB_REPO;
+    process.env.HYDRA_TARGET_GITHUB_REPO = "fictional-owner/fictional-target";
+    try {
+      const { handler, calls } = preRouter({ dc: concept({ scope: "target" }) });
+      await call(handler);
+      assert.deepEqual(calls, [["fictional-owner/fictional-target", 90001]]);
+    } finally {
+      if (prev === undefined) delete process.env.HYDRA_TARGET_GITHUB_REPO;
+      else process.env.HYDRA_TARGET_GITHUB_REPO = prev;
+    }
+  });
+
+  test("the sub-route is declared BEFORE the bare /:anchorRef route", () => {
+    const router: any = createDesignConceptsRouter();
+    const paths = router.stack.filter((l: any) => l.route).map((l: any) => l.route.path);
+    assert.ok(paths.indexOf(PATH) >= 0);
+    assert.ok(paths.indexOf(PATH) < paths.indexOf("/design-concepts/:anchorRef"));
+  });
+});
+
+describe("structural pins — #4633 design-concept queue + holdback enrol state", () => {
+  test("Work.jsx mounts both new panels", async () => {
+    const src = await readSource("../dashboard/src/pages/Work.jsx");
+    assert.match(src, /<DesignConceptQueue \/>/);
+    assert.match(src, /<HoldbackEnrolState \/>/);
+  });
+
+  test("DesignConceptQueue.jsx homes both reads and gates ActionAffordance on allOk (INV-5/INV-8/INV-11)", async () => {
+    const src = await readSource(
+      "../dashboard/src/components/pages/work/DesignConceptQueue.jsx",
+    );
+    assert.match(src, /import \{ ActionAffordance \} from "\.\.\/\.\.\/ActionAffordance\.jsx"/);
+    // The two §9.4 /work homes, as path literals.
+    assert.ok(src.includes("`/design-concepts?view=summary"), "paginated list literal");
+    assert.ok(src.includes("status=draft"), "draft is the default filter");
+    assert.ok(src.includes("`/design-concepts/${anchorRef}`"), "flat single-artifact literal");
+    assert.ok(src.includes("`/design-concepts/${anchorRef}/approve-preconditions`"));
+    // Approve mounts only on a fresh, all-✓ read; unproven never enables.
+    // The checklist's freshness budget is two 60 s polls, and its as-of shows.
+    assert.match(src, /freshnessMs: 120_000,\s*itemsKey: "preconditions"/);
+    assert.match(src, /<LocalTimestamp ts=\{pre\.data\.generatedAt\}/);
+    assert.match(src, /pre\.status === "ready"/);
+    assert.match(src, /pre\.data\?\.allOk === true/);
+    assert.match(src, /enabled \? \(\s*<ActionAffordance action=\{action\} onFired=\{onFired\} \/>/);
+    assert.match(src, /onFired=\{list\.refresh\}/);
+    assert.match(src, /row\.status === "draft" &&/);
+    // Trust seam + no direct fetch.
+    assert.match(src, /usePageItems\(/);
+    assert.match(src, /<Section/);
+    assert.equal(/\bfetch\(/.test(src), false);
+  });
+
+  test("ActionAffordance.jsx is not extended by this slice — the approve body stays the static map entry (INV-6)", async () => {
+    const src = await readSource("../dashboard/src/components/ActionAffordance.jsx");
+    assert.match(src, /"POST \/design-concepts\/:anchor\/approve": \{ by: "operator:dashboard" \}/);
+    assert.equal(src.includes("approve-preconditions"), false);
+    assert.equal(src.includes("holdback"), false);
+  });
+
+  test("HoldbackEnrolState.jsx: read-only rows, Enrol now only on failed, server-confirmed body (INV-9/INV-10)", async () => {
+    const src = await readSource(
+      "../dashboard/src/components/pages/work/HoldbackEnrolState.jsx",
+    );
+    assert.match(src, /usePageItems\("\/holdback\/enrolments\?limit=25"/);
+    assert.match(src, /itemsKey: "enrolments"/);
+    assert.match(src, /row\.state === "failed" &&/);
+    assert.match(src, /useServerConfirmedWrite\(enrolments\.refresh\)/);
+    assert.match(src, /"\/holdback\/enroll", \{\s*commitSha: row\.commitSha,\s*prNumber: row\.prNumber,\s*tier: row\.tier,\s*\}/);
+    // Confirm-first: arm, then the explicit confirm.
+    assert.match(src, /data-testid="holdback-enrol-arm"/);
+    assert.match(src, /data-testid="holdback-enrol-confirm-yes"/);
+    assert.match(src, /Confirm Enrol now\?/);
+    // Not a feed bucket, not the affordance (deferred to #4638).
+    assert.equal(/from "[^"]*attention/.test(src), false);
+    assert.equal(/from "[^"]*ActionAffordance/.test(src), false);
+    assert.equal(/\bfetch\(/.test(src), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4629 (design-concept 821e48ed INV-6) — row facts for the live
+// promote checklist: hasScopeSection via the ONE shared parser, and blockers
+// resolved for every operator lane against prospective (post-promote) rows.
+// ---------------------------------------------------------------------------
+
+describe("/work live preconditions — the row facts (issue #4629)", () => {
+  test("toWorkQueueRow carries hasScopeSection from the shared parser", () => {
+    const scoped = toWorkQueueRow(issue({ labels: ["needs-triage"] }), new Set(), {
+      glmPartitionActive: false,
+    });
+    const unscoped = toWorkQueueRow(
+      issue({ labels: ["needs-triage"], body: "No scope section here." }),
+      new Set(),
+      { glmPartitionActive: false },
+    );
+    assert.equal(scoped!.hasScopeSection, true);
+    assert.equal(unscoped!.hasScopeSection, false);
+    // The row fact and the promote gate's refusal agree — one parser.
+    assert.equal(scoped!.hasScopeSection, hasScopeSection(issue().body));
+  });
+
+  test("GET /autopilot/work-queue resolves blockers ONCE over prospective rows for every operator lane", async () => {
+    const calls: any[][] = [];
+    const router = createAutopilotBoardRouter({
+      readOpenIssues: async () => ({
+        ok: true,
+        rows: [
+          issue({ number: 1, labels: ["needs-triage"], body: "## Files in scope\n\n- `fixture/a.ts`\n\nBlocked by #90" }),
+          issue({ number: 2, labels: ["ready-for-agent"], body: "Depends on #91" }),
+          issue({ number: 3, labels: ["in-progress"], body: "Blocked by #92" }), // agent-owned: not resolved
+          issue({ number: 4, labels: ["blocked"], body: "Blocked by #93" }),
+        ],
+      }),
+      resolveOpenBlockers: async (rows: any) => {
+        calls.push(rows);
+        return new Set([90, 93]);
+      },
+      glmDrainerLiveness: async () => true,
+    });
+    const handler = findHandler(router, "GET", "/autopilot/work-queue");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+
+    assert.equal(calls.length, 1, "one batched lookup");
+    const resolved = calls[0]!;
+    assert.deepEqual(resolved.map((r: any) => r.number).sort(), [1, 2, 4], "operator-lane rows only");
+    for (const row of resolved) {
+      assert.ok(row.labels.includes("ready-for-agent"), `#${row.number} resolved as it would be post-promote`);
+      assert.equal(
+        row.labels.filter((l: string) => l === "ready-for-agent").length,
+        1,
+        "an already-ready row is not double-labelled",
+      );
+    }
+    const byNumber = new Map(res._body.items.map((r: any) => [r.number, r]));
+    assert.deepEqual((byNumber.get(1) as any).openBlockers, [90], "a needs-triage row surfaces its open blocker");
+    assert.deepEqual((byNumber.get(4) as any).openBlockers, [93], "a blocked row surfaces its open blocker");
+    assert.deepEqual((byNumber.get(2) as any).openBlockers, [], "a closed blocker never surfaces");
+    assert.equal((byNumber.get(1) as any).hasScopeSection, true);
+    assert.equal((byNumber.get(2) as any).hasScopeSection, false);
+    // The served labels are the REAL ones — the prospective label never leaks.
+    assert.deepEqual((byNumber.get(1) as any).labels, ["needs-triage"]);
+  });
+
+  test("a rejecting blocker resolver still degrades the queue (fail-safe unchanged)", async () => {
+    const router = createAutopilotBoardRouter({
+      readOpenIssues: async () => ({ ok: true, rows: [issue({ labels: ["needs-triage"] })] }),
+      resolveOpenBlockers: async () => {
+        throw new Error("gh down");
+      },
+      glmDrainerLiveness: async () => false,
+    });
+    const handler = findHandler(router, "GET", "/autopilot/work-queue");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+    assert.equal(res._body.sourcesOk, false);
+    assert.deepEqual(res._body.items, []);
+  });
+});
+
+describe("/work blocker lookup — scaled limit, truncation fails closed (#4629 review)", () => {
+  test("workQueueBlockerSearchLimit scales with the ref count between 100 and 1000", () => {
+    assert.equal(workQueueBlockerSearchLimit(0), 100);
+    assert.equal(workQueueBlockerSearchLimit(3), 100);
+    assert.equal(workQueueBlockerSearchLimit(25), 250);
+    assert.equal(workQueueBlockerSearchLimit(500), 1000);
+  });
+
+  test("the wrapped reader passes the limit through and returns an under-limit read unchanged", async () => {
+    const seen: any[] = [];
+    const rows = [issue({ number: 9 })];
+    const read = failClosedOnTruncatedSearch(async (search, opts) => {
+      seen.push({ search, opts });
+      return { ok: true, rows };
+    }, 3);
+    const res = await read("9 10", { state: "open" });
+    assert.deepEqual(res, { ok: true, rows });
+    assert.deepEqual(seen, [{ search: "9 10", opts: { state: "open", limit: 3 } }]);
+  });
+
+  test("a read that FILLS its limit is reported as a failure — the lookup's every-ref-open fail-safe", async () => {
+    const read = failClosedOnTruncatedSearch(
+      async () => ({ ok: true, rows: [issue({ number: 1 }), issue({ number: 2 })] }),
+      2,
+    );
+    const res = await read("1 2 3", {});
+    assert.equal(res.ok, false);
+  });
+
+  test("an upstream failure passes through untouched", async () => {
+    const read = failClosedOnTruncatedSearch(async () => ({ ok: false, code: "gh-timeout" }), 100);
+    assert.deepEqual(await read("1", {}), { ok: false, code: "gh-timeout" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4637 — the live per-class panel (GET /api/autopilot/class-state) and
+// the deleted client-side class mirrors. Structural source pins (no JSX
+// runner); own top-level describe, no Redis, no shared lifecycle.
+// ---------------------------------------------------------------------------
+
+describe("structural pins — /work class-state panel + no class mirrors (issue #4637)", () => {
+  const PANEL = "../dashboard/src/components/pages/work/ClassStatePanel.jsx";
+
+  test("Work.jsx mounts ClassStatePanel and still fetches no run history (INV-7)", async () => {
+    const src = await readSource("../dashboard/src/pages/Work.jsx");
+    assert.match(src, /import \{ ClassStatePanel \} from "\.\.\/components\/pages\/work\/ClassStatePanel\.jsx"/);
+    assert.match(src, /<ClassStatePanel \/>/);
+    assert.equal(src.includes("/autopilot/runs"), false);
+    assert.equal(src.includes("/runs/"), false);
+  });
+
+  test("ClassStatePanel rides the trust seam on class-state, polled every 60 s (INV-4)", async () => {
+    const src = await readSource(PANEL);
+    assert.match(src, /usePageItems\("\/autopilot\/class-state"/);
+    assert.match(src, /itemsKey: "classes"/);
+    assert.match(src, /poll: 60_?000/);
+    // INV-2: server rows verbatim — no client-side filter option on the read.
+    assert.equal(/\bfilter:/.test(src), false, "no client-side row filter");
+    // INV-4: the as-of is the latest turn epoch, falling back to generatedAt.
+    assert.match(src, /header\?\.verdictAsOf/);
+    assert.match(src, /verdictFreshness === "stale"/);
+    assert.match(src, /no active run/);
+    // INV-7: no run history.
+    assert.equal(src.includes("/autopilot/runs"), false);
+    assert.equal(src.includes("/runs/"), false);
+  });
+
+  test("ClassStatePanel never re-derives cooldown / freshness / starved / dead (INV-2, INV-3)", async () => {
+    const src = await readSource(PANEL);
+    // The server's computed fields are read, never the raw inputs to re-derive them.
+    assert.match(src, /row\.cooldownRemainingSeconds/);
+    assert.match(src, /row\.verdictFreshness/);
+    assert.match(src, /row\.starved === true/);
+    assert.match(src, /row\.dead === true/);
+    assert.equal(/\bcooldownSeconds\b/.test(src), false, "no cooldown arithmetic from cooldownSeconds");
+    assert.equal(src.includes("Date.now"), false, "no client clock — no client-side freshness budget");
+    // INV-3: no active run → the literal UNKNOWN; not-evaluated has its own text.
+    assert.match(src, /UNKNOWN/);
+    assert.match(src, /not evaluated this turn/);
+  });
+
+  test("ClassStatePanel's only affordance is the class:<name> registry entry via ActionAffordance (INV-5)", async () => {
+    const src = await readSource(PANEL);
+    assert.match(src, /import \{ ActionAffordance \} from "\.\.\/\.\.\/ActionAffordance\.jsx"/);
+    assert.match(src, /useApi\("\/operator-actions"\)/);
+    assert.match(src, /`class:\$\{row\.name\}`/);
+    assert.match(src, /entry\.variant === undefined/, "default-variant entries only");
+    assert.match(src, /<ActionAffordance action=\{entry\.recommended\} doc=\{entry\.doc\} \/>/);
+    assert.match(src, /no class: entry/, "a missing entry renders a visible marker");
+    // ADR-0012: no dispatch, no run-now — no write call, no hand-rolled button.
+    assert.equal(src.includes("apiFetch"), false);
+    assert.equal(/method:\s*["']POST["']/.test(src), false);
+    assert.equal(src.includes("<button"), false);
+  });
+
+  test("ClassStatePanel renders the global gates once in the header (INV-6)", async () => {
+    const src = await readSource(PANEL);
+    for (const field of ["run", "scope", "usage", "burnedClasses", "quotaDeltaCap", "degraded"]) {
+      assert.match(src, new RegExp(`header\\?\\.${field}\\b`), `header renders ${field}`);
+    }
+  });
+
+  test("dashboard/src carries no FALLBACK_ identifier and no class-name literal (INV-1)", async () => {
+    const { readdir } = await import("node:fs/promises");
+    const root = new URL("../dashboard/src/", import.meta.url);
+    const taxonomy: Array<{ name: string }> = JSON.parse(
+      await readSource("../scripts/autopilot/classes.json"),
+    ).classes;
+    assert.ok(taxonomy.length > 0);
+    const entries = await readdir(root, { recursive: true });
+    const sources = entries.filter((p) => /\.(jsx?|tsx?)$/.test(String(p)));
+    assert.ok(sources.length > 0, "scanned some dashboard sources");
+    const offenders: string[] = [];
+    for (const rel of sources) {
+      const src = await readFile(new URL(String(rel), root), "utf8");
+      if (/\bFALLBACK_/.test(src)) offenders.push(`${rel}: FALLBACK_ identifier`);
+      for (const { name } of taxonomy) {
+        for (const q of ['"', "'", "`"]) {
+          if (src.includes(`${q}${name}${q}`)) offenders.push(`${rel}: ${q}${name}${q} literal`);
+        }
+      }
+    }
+    assert.deepEqual(offenders, [], "the class alphabet is fetched, never re-spelled");
+  });
+
+  test("useTaxonomy never fabricates an alphabet; PipelineSnapshot drops the cooldown derivation (INV-12, INV-13)", async () => {
+    const hook = await readSource("../dashboard/src/hooks/useTaxonomy.js");
+    assert.match(hook, /status: "loading"/);
+    assert.match(hook, /status: "ready"/);
+    assert.match(hook, /status: "unknown"/);
+    assert.match(hook, /body\.degraded/);
+    assert.equal(hook.includes("signalCooldowns"), false, "the hook no longer returns cooldowns");
+    const snap = await readSource("../dashboard/src/components/PipelineSnapshot.jsx");
+    assert.match(snap, /const \{ taxonomy, status \} = useTaxonomy\(\)/);
+    assert.match(snap, /status !== "ready"/);
+    assert.match(snap, /UNKNOWN/);
+    assert.equal(snap.includes("onCooldown"), false);
+    assert.equal(snap.includes("cooldownSec"), false);
+    assert.equal(snap.includes("signalCooldowns"), false);
   });
 });

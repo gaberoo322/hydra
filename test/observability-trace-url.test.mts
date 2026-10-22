@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildTraceUrl, isOtelEnabled, createObservabilityRouter } from "../src/api/observability.ts";
+/**
+ * Observability surface (issue #207). `GET /observability/trace-url` and its
+ * `buildTraceUrl` helper were retired under ADR-0024 §3 (issue #4638): zero
+ * callers. What remains is `isOtelEnabled` and `GET /observability/config`.
+ */
+import { isOtelEnabled, createObservabilityRouter } from "../src/api/observability.ts";
 
 function mockReq(query: any = {}): any {
   return { method: "GET", url: "/", headers: {}, query, params: {}, body: {} };
@@ -50,82 +55,22 @@ test("isOtelEnabled honors HYDRA_OTEL_ENABLED env var", () => {
   }
 });
 
-test("buildTraceUrl returns null when template is unset", () => {
-  const original = process.env.HYDRA_TRACE_UI_URL;
-  try {
-    delete process.env.HYDRA_TRACE_UI_URL;
-    assert.equal(buildTraceUrl("cycle-abc"), null);
-    assert.equal(buildTraceUrl("cycle-abc", ""), null);
-    assert.equal(buildTraceUrl("cycle-abc", "   "), null);
-  } finally {
-    if (original === undefined) delete process.env.HYDRA_TRACE_UI_URL;
-    else process.env.HYDRA_TRACE_UI_URL = original;
-  }
-});
-
-test("buildTraceUrl returns null when cycleId is missing", () => {
-  assert.equal(buildTraceUrl(null, "http://example/{cycleId}"), null);
-  assert.equal(buildTraceUrl(undefined, "http://example/{cycleId}"), null);
-  assert.equal(buildTraceUrl("", "http://example/{cycleId}"), null);
-  assert.equal(buildTraceUrl("   ", "http://example/{cycleId}"), null);
-});
-
-test("buildTraceUrl substitutes {cycleId} placeholder with URL-encoded value", () => {
-  assert.equal(
-    buildTraceUrl("cycle-abc-123", "http://example/d/dash?var-cycle_id={cycleId}"),
-    "http://example/d/dash?var-cycle_id=cycle-abc-123",
-  );
-  assert.equal(
-    buildTraceUrl("weird id/with slash", "http://example/{cycleId}"),
-    "http://example/weird%20id%2Fwith%20slash",
-  );
-});
-
-test("buildTraceUrl substitutes every occurrence of the placeholder", () => {
-  assert.equal(
-    buildTraceUrl("c1", "http://example/{cycleId}/related/{cycleId}"),
-    "http://example/c1/related/c1",
-  );
-});
-
-test("buildTraceUrl appends hydra_cycle_id when no placeholder is present", () => {
-  assert.equal(
-    buildTraceUrl("cycle-x", "http://example/dashboards/hydra"),
-    "http://example/dashboards/hydra?hydra_cycle_id=cycle-x",
-  );
-  assert.equal(
-    buildTraceUrl("cycle-x", "http://example/dash?foo=bar"),
-    "http://example/dash?foo=bar&hydra_cycle_id=cycle-x",
-  );
-});
-
-test("buildTraceUrl reads HYDRA_TRACE_UI_URL when no explicit template", () => {
+test("GET /observability/config echoes the template and the {cycleId} placeholder", () => {
   const original = process.env.HYDRA_TRACE_UI_URL;
   try {
     process.env.HYDRA_TRACE_UI_URL = "http://example/d/x?var-cycle_id={cycleId}";
-    assert.equal(
-      buildTraceUrl("cycle-q"),
-      "http://example/d/x?var-cycle_id=cycle-q",
-    );
+    const handler = findHandler(createObservabilityRouter(), "GET", "/observability/config")!;
+    assert.ok(handler);
+    const res = mockRes();
+    handler(mockReq(), res);
+    assert.equal(res._body.traceUrlTemplate, "http://example/d/x?var-cycle_id={cycleId}");
+    assert.equal(res._body.placeholder, "{cycleId}");
   } finally {
     if (original === undefined) delete process.env.HYDRA_TRACE_UI_URL;
     else process.env.HYDRA_TRACE_UI_URL = original;
   }
 });
 
-// ---------------------------------------------------------------------------
-// GET /observability/trace-url?cycleId=<id> — 400 route-level coverage
-// (issue #4563: schemaValidationError() adoption at the missing-cycleId site).
-// ---------------------------------------------------------------------------
-
-test("GET /observability/trace-url 400s with schema-validation-failed when cycleId is missing", async () => {
-  const router = createObservabilityRouter();
-  const handler = findHandler(router, "GET", "/observability/trace-url")!;
-  const req = mockReq({});
-  const res = mockRes();
-  await handler(req, res);
-  assert.equal(res._status, 400);
-  assert.equal(res._body.error, "Missing query parameter 'cycleId'");
-  assert.equal(res._body.code, "schema-validation-failed");
-  assert.ok(Array.isArray(res._body.issues) && res._body.issues.length > 0);
+test("GET /observability/trace-url is no longer registered (retired, #4638)", () => {
+  assert.equal(findHandler(createObservabilityRouter(), "GET", "/observability/trace-url"), null);
 });

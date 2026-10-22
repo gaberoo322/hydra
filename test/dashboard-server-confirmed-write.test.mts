@@ -10,17 +10,22 @@
  *   1. useApi.js owns exactly one write-side hook, `useServerConfirmedWrite`
  *      (INV-1), whose `write(path, body)` POSTs a JSON body through the
  *      module's own apiFetch and resolves a result object — never throws.
- *   2. Health.jsx and NowConsole.jsx delegate to it and keep ZERO direct
- *      apiFetch calls (INV-2/INV-3); the hand-rolled pending/error trios
- *      are deleted, not wrapped.
+ *   2. NowConsole.jsx delegates to it and keeps ZERO direct apiFetch calls
+ *      (INV-3); the hand-rolled pending/error trios are deleted, not
+ *      wrapped. Health.jsx no longer rides the hook at all (issue #4629,
+ *      design-concept 821e48ed INV-11): its pause/resume and brake writes go
+ *      through ActionAffordance's server-confirmed path, so it carries zero
+ *      apiFetch( AND zero useServerConfirmedWrite( calls (INV-2 below).
  *   3. The hook owns only `pending` and `error` and awaits `refresh()`
  *      inside the try before resolving ok — server-confirmed, never
  *      optimistic (INV-4, a MUST-NEVER: discharged by this named subtest).
  *   4. The read side (apiFetch/useApi) keeps its exported signatures, and
  *      pending resets in a finally on both paths (INV-5/INV-8).
- *   5. The brake's two-step confirm arm stays local page state (INV-6).
- *   6. The differently-shaped write sites (BoardState, HitlGrillLane,
- *      AttentionFeed) stay unmigrated with their own apiFetch calls (INV-7).
+ *   5. The brake's two-step confirm arm is ActionAffordance's confirm-first
+ *      arming — no local brakeArmed state in Health.jsx (INV-6, #4629).
+ *   6. The differently-shaped write sites (HitlGrillLane, AttentionFeed)
+ *      stay unmigrated with their own apiFetch calls (INV-7); BoardState left
+ *      that fence in #4629 — its writes ride ActionAffordance.
  *
  * Lifecycle: top-level describes with no shared mutable state and no Redis
  * seam (per the CLAUDE.md shared-teardown authoring rule).
@@ -149,29 +154,49 @@ describe("useServerConfirmedWrite is server-confirmed, never optimistic (INV-4)"
 });
 
 // ---------------------------------------------------------------------------
-// INV-2 — Health.jsx delegates both writes to the hook
+// INV-2 — Health.jsx writes ride ActionAffordance (issue #4629, design-concept
+// 821e48ed INV-11/INV-13: this block pinned two useServerConfirmedWrite
+// instances; the brake + pause/resume moved onto the affordance)
 // ---------------------------------------------------------------------------
 
-describe("Health.jsx delegates both writes to the hook (INV-2)", () => {
+describe("Health.jsx writes ride ActionAffordance (INV-2, #4629)", () => {
   test("no direct apiFetch calls remain in Health.jsx", async () => {
     const src = await readSource(HEALTH);
-    assert.ok(!src.includes("apiFetch("), "the pause and brake POSTs must both ride the shared hook");
+    assert.ok(!src.includes("apiFetch("), "the pause and brake POSTs ride ActionAffordance, never a page fetch");
   });
 
-  test("pause and brake each ride their own useServerConfirmedWrite(health.refresh) instance", async () => {
+  test("Health.jsx carries zero useServerConfirmedWrite( calls — the affordance owns the write", async () => {
     const src = await readSource(HEALTH);
     assert.equal(
-      (src.match(/useServerConfirmedWrite\(health\.refresh\)/g) ?? []).length,
-      2,
-      "two instances — a shared one would cross-contaminate pending/error between the controls",
+      (src.match(/useServerConfirmedWrite\(/g) ?? []).length,
+      0,
+      "pause/resume and the brake go through ActionAffordance's server-confirmed path (INV-11)",
     );
+    assert.match(src, /from "\.\.\/components\/ActionAffordance\.jsx"/, "Health.jsx renders the shared affordance");
+    // Server-confirmed: every affordance refreshes the /health read via onFired
+    // before its result line renders — a CHECKED re-read (PR #5155 review),
+    // so a failed re-read can render "/health re-read FAILED".
+    assert.match(src, /onFired=\{refreshHealth\}/);
+    assert.match(src, /const refreshHealth = useCheckedRefresh\(health\);/);
+    // One rereadNoun per ControlAffordance — a count tied to the controls the
+    // page renders (four from #4629, plus #4631's housekeeping), not a literal.
+    const controls = (src.match(/<ControlAffordance\b/g) ?? []).length;
+    assert.ok(controls >= 4, "the four #4629 controls render through ControlAffordance");
+    assert.equal((src.match(/rereadNoun="\/health"/g) ?? []).length, controls, "every /health control names its re-read");
   });
 
   test("the hand-rolled pending/error trios are deleted, not wrapped", async () => {
     const src = await readSource(HEALTH);
     for (const gone of ["setPausePending", "setPauseError", "setBrakePending", "setBrakeError"]) {
-      assert.ok(!src.includes(gone), `Health.jsx must not re-declare ${gone} — the hook owns it`);
+      assert.ok(!src.includes(gone), `Health.jsx must not re-declare ${gone} — the affordance owns it`);
     }
+  });
+
+  test("useApi.js keeps exporting useServerConfirmedWrite for NowConsole", async () => {
+    const api = await readSource(USE_API);
+    assert.match(api, /^export function useServerConfirmedWrite\(/m);
+    const console_ = await readSource(NOW_CONSOLE);
+    assert.match(console_, /useServerConfirmedWrite\(paused\.refresh\)/);
   });
 });
 
@@ -232,20 +257,33 @@ describe("read side untouched; pending resets on both paths (INV-5/INV-8)", () =
 });
 
 // ---------------------------------------------------------------------------
-// INV-6 — the brake's two-step confirm arm stays local page state
+// INV-6 — the brake's two-step confirm arm is the affordance's confirm-first
+// (issue #4629, design-concept 821e48ed INV-8/INV-13: this block pinned a
+// local brakeArmed; the arm now lives in ActionAffordance)
 // ---------------------------------------------------------------------------
 
-describe("the brake's confirm arm stays in the page (INV-6)", () => {
-  test("brakeArmed remains local Health.jsx state, cleared only on an ok write", async () => {
+describe("the brake's confirm arm is ActionAffordance's confirm-first (INV-6, #4629)", () => {
+  test("Health.jsx holds no local brakeArmed state", async () => {
     const src = await readSource(HEALTH);
-    assert.ok(src.includes("brakeArmed"), "the hook knows nothing about arming — the arm is page state");
-    // `if (res.ok)` — the positive guard only; `\.ok` alone would equally
-    // match an inverted `if (!res.ok)` disarm.
-    assert.match(
-      src,
-      /if \(res\.ok\)[\s\S]{0,120}?setBrakeArmed\(false\)/,
-      "the arm may clear only once write resolves ok — a failed POST keeps the confirm visible for a retry",
-    );
+    assert.ok(!src.includes("brakeArmed"), "the arm is the affordance's confirm-first, not page state");
+    assert.ok(!src.includes("setBrakeArmed"), "no page-level arm setter survives");
+  });
+
+  test("both brake controls render from confirm-first control: entries", async () => {
+    const src = await readSource(HEALTH);
+    assert.ok(src.includes('"control:health/brake-engage"'));
+    assert.ok(src.includes('"control:health/brake-release"'));
+    const { REGISTRY } = await import("../src/operator-actions/registry.ts");
+    for (const key of ["control:health/brake-engage", "control:health/brake-release"]) {
+      const entry = REGISTRY.find((e) => e.key === key);
+      assert.ok(entry, `${key} has a registry entry`);
+      assert.equal(entry!.recommended.kind, "in-dashboard");
+      assert.equal(
+        entry!.recommended.kind === "in-dashboard" ? entry!.recommended.confirmTier : null,
+        "confirm-first",
+        `${key} arms before it fires`,
+      );
+    }
   });
 });
 
@@ -254,8 +292,10 @@ describe("the brake's confirm arm stays in the page (INV-6)", () => {
 // ---------------------------------------------------------------------------
 
 describe("scope fence — the differently-shaped write sites stay unmigrated (INV-7)", () => {
+  // BoardState.jsx left this fence in #4629 (design-concept 821e48ed INV-13):
+  // its promote/relabel/close/reopen writes ride ActionAffordance — pinned by
+  // the BoardState test at the end of this block.
   const fenced = [
-    "../dashboard/src/components/pages/work/BoardState.jsx",
     "../dashboard/src/components/pages/work/HitlGrillLane.jsx",
     "../dashboard/src/components/pages/today/AttentionFeed.jsx",
   ];
@@ -265,8 +305,14 @@ describe("scope fence — the differently-shaped write sites stay unmigrated (IN
       const src = await readSource(rel);
       assert.ok(
         src.includes("apiFetch("),
-        "these three keep a server result object / per-item pending map — their migration is a follow-up issue, not silent scope creep",
+        "these two keep a server result object / per-item pending map — their migration is a follow-up issue, not silent scope creep",
       );
     });
   }
+
+  test("BoardState.jsx has no apiFetch call — its writes ride ActionAffordance (#4629)", async () => {
+    const src = await readSource("../dashboard/src/components/pages/work/BoardState.jsx");
+    assert.ok(!src.includes("apiFetch("), "the four board writes fire through the affordance's in-dashboard path");
+    assert.match(src, /from "\.\.\/\.\.\/ActionAffordance\.jsx"/);
+  });
 });

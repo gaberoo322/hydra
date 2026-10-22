@@ -67,7 +67,10 @@ export function createOutcomesRouter(outcomesFile?: string) {
         outcomes.map(async (o) => rowFor(o, await getOutcomeValue(o))),
       );
 
-      res.json({ outcomes: rows });
+      // Issue #4634 (design-concept a7e7fedb INV-3): additive top-level
+      // `generatedAt` — the ADR-0034 §5 as-of the /builder DeclaredOutcomes
+      // panel's trust seam reads. No existing field renamed or re-typed.
+      res.json({ outcomes: rows, generatedAt: new Date().toISOString() });
     } catch (err: any) {
       // Defensive — loader/adapter both don't throw, but Express demands
       // a final guard so we never hand a 500 with no body to the dashboard.
