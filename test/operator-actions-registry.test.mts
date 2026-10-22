@@ -62,6 +62,7 @@ import {
   alertsVerdicts,
   schedulerVerdicts,
 } from "../dashboard/src/lib/health-verdicts.ts";
+import { recDismissVerdicts, recMuteVerdicts } from "../dashboard/src/lib/now-verdicts.ts";
 import { readFile } from "node:fs/promises";
 
 // ---------------------------------------------------------------------------
@@ -585,8 +586,10 @@ const HEALTH_SRC = "../dashboard/src/pages/Health.jsx";
 // (design-concept 5ae4b72c INV-7).
 const ALERTS_PANEL_SRC = "../dashboard/src/components/pages/health/AlertsPanel.jsx";
 const SERVICE_STRIP_SRC = "../dashboard/src/components/pages/health/ServiceStrip.jsx";
+// The /now panel that hosts #5152's recommendation controls beside its read.
+const RECS_PANEL_SRC = "../dashboard/src/pages/now-console/RecommendationsPanel.jsx";
 /** Every dashboard file that renders a control: key. */
-const CONTROL_PAGE_SRCS = [BOARD_STATE_SRC, HEALTH_SRC, ALERTS_PANEL_SRC, SERVICE_STRIP_SRC];
+const CONTROL_PAGE_SRCS = [BOARD_STATE_SRC, HEALTH_SRC, ALERTS_PANEL_SRC, SERVICE_STRIP_SRC, RECS_PANEL_SRC];
 
 async function readPage(rel: string): Promise<string> {
   return readFile(new URL(rel, import.meta.url), "utf8");
@@ -648,8 +651,8 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
   test("every control entry recommends an in-dashboard action whose route carries no placeholder", () => {
     // Relaxed by #4631 (design-concept 5ae4b72c INV-9): the ONE placeholder a
     // control route may carry is BUCKET_CONTEXT.control's `{id}`, and only
-    // control:health/alert-dismiss uses it; every other per-row value is
-    // body-built client-side (#4629 INV-7).
+    // control:health/alert-dismiss and (#5152) control:now/rec-dismiss use
+    // it; every other per-row value is body-built client-side (#4629 INV-7).
     const withPlaceholder: string[] = [];
     for (const key of CONTROL_KEYS) {
       const { recommended } = controlEntry(key);
@@ -660,7 +663,7 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
         if (stripped !== recommended.route) withPlaceholder.push(key);
       }
     }
-    assert.deepEqual(withPlaceholder, ["control:health/alert-dismiss"]);
+    assert.deepEqual(withPlaceholder, ["control:health/alert-dismiss", "control:now/rec-dismiss"]);
   });
 
   test("the promote checklist is exactly the promote gate's four rules, in order", () => {
@@ -767,6 +770,12 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
         lib: "health-verdicts",
         ids: new Set(Object.keys(schedulerVerdicts({ running: false, stopReason: null }, 0))),
       },
+      // #5152: the /now recommendation tables live in lib/now-verdicts.ts.
+      [RECS_PANEL_SRC]: {
+        imports: ["recDismissVerdicts", "recMuteVerdicts"],
+        lib: "now-verdicts",
+        ids: new Set([...Object.keys(recDismissVerdicts(null)), ...Object.keys(recMuteVerdicts(null, null))]),
+      },
     };
     for (const [rel, table] of Object.entries(tables)) {
       const src = await readPage(rel);
@@ -846,8 +855,10 @@ describe("control: namespace + typed preconditions — schema (issue #4629)", ()
     assert.deepEqual([...BUCKET_CONTEXT.control], ["id"]);
   });
 
-  test("EntryKeySchema admits control:(work|health)/<name> and rejects other shapes", () => {
-    for (const key of ["control:work/promote", "control:health/brake-release", "control:work/a-1"]) {
+  test("EntryKeySchema admits control:(work|health|now)/<name> and rejects other shapes", () => {
+    // #5152 appends `now` to the page alternation (the /now recommendation
+    // controls); any other page segment is still rejected.
+    for (const key of ["control:work/promote", "control:health/brake-release", "control:work/a-1", "control:now/rec-dismiss"]) {
       assert.equal(OperatorActionEntrySchema.safeParse(validEntry(key)).success, true, key);
     }
     for (const key of ["control:runs/rerun", "control:work/Promote", "control:work", "control:work/", "control:/x"]) {

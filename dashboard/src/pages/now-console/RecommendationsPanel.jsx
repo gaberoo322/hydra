@@ -1,45 +1,68 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiFetch, useServerConfirmedWrite } from "../../hooks/useApi.js";
 import { usePageItems } from "../../hooks/usePageItems.js";
-import { useUndoWindowHost, UndoToastStack } from "../../components/ActionAffordance.jsx";
-import { triggerDisabled, undoWindowSeconds } from "../../lib/delayed-commit.ts";
+import {
+  ControlAffordance,
+  UndoToastStack,
+  UndoWindowContext,
+  useCheckedRefresh,
+  useOperatorActions,
+  useUndoWindowHost,
+} from "../../components/ActionAffordance.jsx";
+import { resolveControlRoute } from "../../lib/health-verdicts.ts";
+import {
+  REC_SEVERITIES,
+  chooseMute,
+  readRunIdOf,
+  recDismissContext,
+  recDismissVerdicts,
+  recMuteContext,
+  recMuteVerdicts,
+} from "../../lib/now-verdicts.ts";
 import LocalTimestamp from "../../components/LocalTimestamp.jsx";
 
 /**
  * RecommendationsPanel — the /now recommendation engine's active recs with
  * their two operator controls (issue #4634, design-concept a7e7fedb
- * INV-2/4/9/10/11; ADR-0034 §7, §9.1, §9.4).
+ * INV-2/4/9/10/11; ADR-0034 §7, §8.3, §9.1).
  *
- * The ONE owner of GET /now/recommendations, both POST literals, the undo
- * host and the mute arm state — NowConsole.jsx only mounts it.
+ * The ONE owner of GET /now/recommendations, the undo host and the mute
+ * choice — NowConsole.jsx only mounts it.
  *
- * Controls, page-local by design (INV-9): the `control:` registry namespace
- * these two routes would be filed under exists only in #4629's approved
- * concept, so this slice uses the SAME grammar as the attention feed's typed
- * dismiss (#4628) and leaves the registry entry to a tracked follow-up.
+ * Controls (issue #5152): both render through ControlAffordance from the
+ * registry entries `control:now/rec-dismiss` and `control:now/rec-mute-class`
+ * (src/operator-actions/registry.ts) — label, live ✓/✗ checklist and
+ * consequence come from the registry; this file carries none of its own. The
+ * two POST routes live in the registry too, so no route literal is spelled
+ * here; the request bodies are IN_DASHBOARD_BODY's builders over the
+ * `{runId, severity}` context this panel passes.
  *
  *   Dismiss (one per rec) — immediate-undo, realised as the ~5 s delayed
- *   commit: the panel hosts useUndoWindowHost + UndoToastStack; Undo cancels
- *   before ANY request is sent; expiry fires the POST. The row's control is
- *   disabled while its window is pending or its request is in flight
- *   (triggerDisabled over the host's shared in-flight set).
+ *   commit: the panel hosts useUndoWindowHost + UndoToastStack and provides
+ *   UndoWindowContext; the registry route `/now/recommendations/{id}/dismiss`
+ *   is resolved per row (resolveControlRoute), so each rec gets its OWN undo
+ *   window and in-flight flag (`action:POST <resolved route>`). Undo cancels
+ *   before ANY request is sent; expiry fires the closure captured at the
+ *   click — that rec and that read's run_id.
  *
- *   Mute <severity> (panel header, closed enum info | warn | critical — the
- *   route schema's vocabulary, exactly these three) — confirm-first: arm →
- *   "Confirm mute <severity>?" / Cancel with the consequence restated, firing
- *   through useServerConfirmedWrite.
+ *   Mute severity (panel header) — confirm-first. The picker (the closed enum
+ *   info | warn | critical, the route schema's vocabulary — REC_SEVERITIES)
+ *   only RECORDS the choice together with the run_id the read carried at that
+ *   moment (chooseMute — the arm-time capture); the control's
+ *   `severity-chosen` line stays ✗ until a severity is picked. The control is
+ *   keyed by the choice, so changing it remounts the control — an armed
+ *   Confirm never silently swaps to another severity.
  *
- * Both POST bodies carry the `run_id` THIS panel's GET returned (captured at
- * click / arm time) — never the schema's `current` alias — so a run that
- * rolls over between read and click cannot land the write on the new run.
+ * Both POST bodies carry the `run_id` THIS panel's GET returned — never the
+ * schema's `current` alias — so a run that rolls over between read and click
+ * cannot land the write on the new run.
  *
- * Server-confirmed, never optimistic (INV-10, ADR-0034 §7): ✓ renders only
- * once the POST resolved AND the panel's re-read settled; a dismissed rec or
- * muted severity disappears ONLY through that re-read (the server's
- * filterActiveRecommendations policy). A failed POST renders a persistent ✗
- * line with the server message (on the row for dismiss, in the header for
- * mute); an accepted POST whose re-read failed renders
- * "✓ accepted · re-read FAILED — list may be stale".
+ * Server-confirmed, never optimistic (INV-10, ADR-0034 §7): the affordance
+ * renders ✓ only once the POST resolved AND this panel's CHECKED re-read
+ * (useCheckedRefresh over the usePageItems read) settled; a failed re-read
+ * renders "re-read FAILED". A dismissed rec or muted severity disappears ONLY
+ * through that re-read (the server's filterActiveRecommendations policy). A
+ * dismissed rec's row unmounts on the re-read, so its lifted result is shown
+ * in the panel header instead.
  *
  * Trust (ADR-0034 §5): usePageItems, minutes budget (5 min), polled every
  * 30 s. Zero is asserted on `run_id`: null is the explicit "no autopilot run"
@@ -48,26 +71,11 @@ import LocalTimestamp from "../../components/LocalTimestamp.jsx";
 
 const FIVE_MIN_MS = 5 * 60 * 1000;
 
-/** RecMuteClassBodySchema's closed severity enum — exactly these three. */
-const SEVERITIES = ["info", "warn", "critical"];
-
 const SEVERITY_CHIP = {
   info: "bg-sky-500/10 text-sky-300 border-sky-500/30",
   warn: "bg-amber-500/10 text-amber-300 border-amber-500/30",
   critical: "bg-red-500/10 text-red-300 border-red-500/30",
 };
-
-const DISMISS_CONSEQUENCE =
-  "this recommendation leaves the list for this run; there is no un-dismiss route — Undo within the window cancels before anything is sent";
-
-function muteConsequence(severity) {
-  return `every ${severity} recommendation is hidden for the rest of this run (until the run record expires); there is no un-mute route`;
-}
-
-/** The undo-window id a rec's dismiss is armed under (one per rec). */
-function dismissWindowId(rec) {
-  return `dismiss-rec:${rec.id}`;
-}
 
 function recText(rec) {
   return rec?.message ?? rec?.title ?? rec?.summary ?? String(rec?.id ?? "recommendation");
@@ -86,120 +94,102 @@ function ResultLine({ result }) {
   );
 }
 
+/** One rec row: its own route resolver, context and lifted-result callbacks,
+ * so two rows never share a window, an in-flight flag or a result. */
+function RecRow({ rec, registry, readRunId, onFired, onDismissStart, onDismissResult }) {
+  const recId = rec?.id;
+  const resolveRoute = useCallback((route) => resolveControlRoute(route, { id: recId }), [recId]);
+  const onStart = useCallback(() => onDismissStart(rec), [onDismissStart, rec]);
+  const onResult = useCallback((result) => onDismissResult(rec, result), [onDismissResult, rec]);
+  return (
+    <li data-testid="recommendation-row" className="py-2 space-y-1">
+      <div className="flex items-start gap-2">
+        <span
+          className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border shrink-0 ${
+            SEVERITY_CHIP[rec.severity] ?? "bg-zinc-700/40 text-zinc-400 border-zinc-600"
+          }`}
+        >
+          {rec.severity ?? "—"}
+        </span>
+        <span className="flex-1 min-w-0 text-sm text-zinc-200 break-words">{recText(rec)}</span>
+        <span className="text-[11px] text-zinc-500 shrink-0">
+          <LocalTimestamp ts={rec.created_at} />
+        </span>
+      </div>
+      <div className="pl-1">
+        <ControlAffordance
+          registry={registry}
+          controlKey="control:now/rec-dismiss"
+          testId={`rec-dismiss-${recId ?? "unknown"}`}
+          verdicts={recDismissVerdicts(readRunId)}
+          context={recDismissContext(readRunId)}
+          resolveRoute={resolveRoute}
+          onFired={onFired}
+          onStart={onStart}
+          onResult={onResult}
+          rereadNoun="/now"
+        />
+      </div>
+    </li>
+  );
+}
+
 export default function RecommendationsPanel() {
-  const { items, data, status, error, loading, refresh } = usePageItems("/now/recommendations", {
+  const read = usePageItems("/now/recommendations", {
     itemsKey: "items",
     freshnessMs: FIVE_MIN_MS,
     poll: 30_000,
   });
-  const readRunId = typeof data?.run_id === "string" && data.run_id ? data.run_id : null;
+  const { items, data, status, error } = read;
+  const readRunId = readRunIdOf(data);
 
-  // ---- Re-read verdict (the #4628 AttentionFeed pattern) -------------------
-  // A waiter is queued before refresh() starts; the effect resolves it once a
-  // render shows the read settled — true when that read carried no error.
-  const rereadWaiters = useRef([]);
+  // One registry read (no poll — the registry changes only on deploy), and a
+  // CHECKED re-read of this panel's own GET as every control's onFired.
+  const registry = useOperatorActions();
+  const refreshChecked = useCheckedRefresh(read);
+  const undoHost = useUndoWindowHost();
+
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      const waiters = rereadWaiters.current;
-      rereadWaiters.current = [];
-      for (const resolve of waiters) resolve(false);
     };
   }, []);
-  useEffect(() => {
-    if (loading || rereadWaiters.current.length === 0) return;
-    const waiters = rereadWaiters.current;
-    rereadWaiters.current = [];
-    for (const resolve of waiters) resolve(error == null);
-  }, [loading, error, data]);
-  const refreshChecked = useCallback(() => {
-    if (!mounted.current) return Promise.resolve(false);
-    const settled = new Promise((resolve) => rereadWaiters.current.push(resolve));
-    refresh();
-    return settled;
-  }, [refresh]);
 
-  // ---- Dismiss: immediate-undo via the delayed-commit window --------------
-  const undoHost = useUndoWindowHost();
-  // Per-rec outcome lines, keyed by rec id. A rec still in the list shows its
-  // line on its row; a rec the re-read removed shows it in the panel header.
+  // ---- Dismiss: lifted per-rec results -------------------------------------
+  // A listed rec shows its result on its own row (the affordance's line); a
+  // rec the re-read removed has no row left, so its lifted result renders in
+  // the panel header. Keyed by rec id.
   const [dismissResults, setDismissResults] = useState({});
   // Outcome lines belong to one run: when the read's run_id changes (a new
   // run started) the previous run's lines are dead — drop them.
   useEffect(() => {
     setDismissResults({});
   }, [readRunId]);
-  const recordDismiss = useCallback((rec, result) => {
+  const onDismissStart = useCallback((rec) => {
     if (!mounted.current) return;
-    setDismissResults((prev) => ({ ...prev, [rec.id]: { ...result, label: recText(rec) } }));
+    setDismissResults((prev) => {
+      if (!(rec.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[rec.id];
+      return next;
+    });
+  }, []);
+  const onDismissResult = useCallback((rec, result) => {
+    if (!mounted.current) return;
+    setDismissResults((prev) => ({ ...prev, [rec.id]: { ok: result.ok, text: result.text, label: recText(rec) } }));
   }, []);
 
-  const dismissRec = useCallback(
-    (rec, runId) =>
-      undoHost.track(dismissWindowId(rec), async () => {
-        try {
-          await apiFetch(`/now/recommendations/${encodeURIComponent(rec.id)}/dismiss`, {
-            method: "POST",
-            body: JSON.stringify({ run_id: runId }),
-          });
-        } catch (err) {
-          /* intentional: the persistent inline ✗ line on the rec's row is the
-             failure surface — visible until a later dismiss of it succeeds */
-          recordDismiss(rec, { ok: false, text: `✗ dismiss failed — ${err?.message || String(err)}` });
-          return;
-        }
-        const reread = await refreshChecked();
-        recordDismiss(
-          rec,
-          reread
-            ? { ok: true, text: "✓ dismissed — confirmed by re-read" }
-            : { ok: true, text: "✓ accepted · re-read FAILED — list may be stale" },
-        );
-      }),
-    [refreshChecked, recordDismiss, undoHost.track],
-  );
-
-  // Arm the window with the clicked rec AND the run_id this panel read
-  // captured in the closure — expiry can never fire a stale pair.
-  const onDismissStart = useCallback(
-    (rec) => {
-      if (!readRunId) return;
-      const runId = readRunId;
-      undoHost.start(
-        dismissWindowId(rec),
-        `Dismissing recommendation · ${undoWindowSeconds()} to undo`,
-        () => dismissRec(rec, runId),
-      );
-    },
-    [readRunId, undoHost.start, dismissRec],
-  );
-
-  // ---- Mute-class: confirm-first via the server-confirmed write hook ------
-  const muteRereadOk = useRef(null);
-  const refreshForMute = useCallback(async () => {
-    muteRereadOk.current = await refreshChecked();
-  }, [refreshChecked]);
-  const { pending: mutePending, write: writeMute } = useServerConfirmedWrite(refreshForMute);
-  const [muteArmed, setMuteArmed] = useState(null); // { severity, runId } | null
-  const [muteResult, setMuteResult] = useState(null);
-
-  const confirmMute = async () => {
-    if (!muteArmed) return;
-    const { severity, runId } = muteArmed;
-    muteRereadOk.current = null;
-    const res = await writeMute("/now/recommendations/mute-class", { run_id: runId, severity });
-    if (!mounted.current) return;
-    setMuteArmed(null);
-    if (!res.ok) {
-      setMuteResult({ ok: false, text: `✗ mute ${severity} failed — ${res.error}` });
-    } else if (muteRereadOk.current) {
-      setMuteResult({ ok: true, text: `✓ muted ${severity} — confirmed by re-read` });
-    } else {
-      setMuteResult({ ok: true, text: "✓ accepted · re-read FAILED — list may be stale" });
-    }
-  };
+  // ---- Mute severity: the picker records the choice ------------------------
+  const [muteChoice, setMuteChoice] = useState(null); // MuteChoice | null
+  const [muteBusy, setMuteBusy] = useState(false);
+  const onMuteStart = useCallback(() => {
+    if (mounted.current) setMuteBusy(true);
+  }, []);
+  const onMuteResult = useCallback(() => {
+    if (mounted.current) setMuteBusy(false);
+  }, []);
 
   const unknown = status === "loading" || status === "unknown";
   const stale = status === "stale";
@@ -208,134 +198,107 @@ export default function RecommendationsPanel() {
   const goneResults = Object.entries(dismissResults).filter(([id]) => !listed.has(id));
 
   return (
-    <section
-      data-testid="recommendations-panel"
-      className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 space-y-2"
-    >
-      <div className="flex items-baseline justify-between gap-2 flex-wrap">
-        <h2 className="text-sm font-semibold text-zinc-200">
-          Recommendations{" "}
-          {!unknown && !noRun && <span className="text-zinc-500 font-normal">({items.length})</span>}
-        </h2>
-        <div className="text-xs text-zinc-500">
-          {stale && <span className="text-amber-400">stale · </span>}
-          as of <LocalTimestamp ts={data?.generatedAt} stale={stale} />
+    <UndoWindowContext.Provider value={undoHost}>
+      <section
+        data-testid="recommendations-panel"
+        className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 space-y-2"
+      >
+        <div className="flex items-baseline justify-between gap-2 flex-wrap">
+          <h2 className="text-sm font-semibold text-zinc-200">
+            Recommendations{" "}
+            {!unknown && !noRun && <span className="text-zinc-500 font-normal">({items.length})</span>}
+          </h2>
+          <div className="text-xs text-zinc-500">
+            {stale && <span className="text-amber-400">stale · </span>}
+            as of <LocalTimestamp ts={data?.generatedAt} stale={stale} />
+          </div>
         </div>
-      </div>
 
-      {/* Mute-class controls — confirm-first, one per closed-enum severity. */}
-      {!unknown && !noRun && (
-        <div className="space-y-1">
-          {muteArmed ? (
-            <div className="flex flex-wrap items-baseline gap-2 text-xs" data-testid="mute-confirm">
-              <button
-                type="button"
-                onClick={confirmMute}
-                disabled={mutePending}
-                className="rounded border border-red-500/40 px-2 py-0.5 text-red-300 hover:bg-red-500/10 disabled:opacity-40"
-              >
-                {mutePending ? `Muting ${muteArmed.severity}…` : `Confirm mute ${muteArmed.severity}?`}
-              </button>
-              <button
-                type="button"
-                onClick={() => setMuteArmed(null)}
-                disabled={mutePending}
-                className="text-zinc-400 underline hover:text-zinc-200 disabled:opacity-40"
-              >
-                Cancel
-              </button>
-              <span className="text-[11px] text-zinc-500">{muteConsequence(muteArmed.severity)}</span>
-            </div>
-          ) : (
-            <div className="flex flex-wrap items-baseline gap-2 text-xs">
-              <span className="text-zinc-500">mute:</span>
-              {SEVERITIES.map((severity) => (
-                <button
-                  key={severity}
-                  type="button"
-                  onClick={() => {
-                    setMuteResult(null);
-                    setMuteArmed({ severity, runId: readRunId });
-                  }}
-                  disabled={mutePending || !readRunId}
-                  title={muteConsequence(severity)}
-                  className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-400 hover:text-zinc-200 disabled:opacity-40"
-                >
-                  Mute {severity}…
-                </button>
-              ))}
-            </div>
-          )}
-          <ResultLine result={muteResult} />
-        </div>
-      )}
-
-      {/* Outcomes for recs the re-read already removed (their row is gone). */}
-      {goneResults.map(([id, result]) => (
-        <div key={id} className="text-[11px]">
-          <span className="text-zinc-500 truncate">{result.label}: </span>
-          <ResultLine result={result} />
-        </div>
-      ))}
-
-      {unknown ? (
-        <div
-          data-testid="recommendations-unknown"
-          className="border border-zinc-700 rounded-md px-3 py-3 text-sm text-zinc-400 bg-zinc-900/40"
-        >
-          UNKNOWN — recommendations read unproven.
-          {error && <span className="block font-mono text-xs text-zinc-600 break-all">{error}</span>}
-        </div>
-      ) : noRun ? (
-        <p data-testid="recommendations-no-run" className="text-xs text-zinc-500 italic">
-          no autopilot run — nothing to recommend
-        </p>
-      ) : items.length === 0 ? (
-        <p data-testid="recommendations-empty" className="text-xs text-zinc-500 italic">
-          No active recommendations for run {readRunId}.
-        </p>
-      ) : (
-        <ul className="divide-y divide-zinc-900">
-          {items.map((rec) => {
-            const windowId = dismissWindowId(rec);
-            const disabled =
-              !readRunId || triggerDisabled(undoHost.inFlight.has(windowId), undoHost.windows, windowId);
-            return (
-              <li key={rec.id} data-testid="recommendation-row" className="py-2 space-y-1">
-                <div className="flex items-start gap-2">
-                  <span
-                    className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border shrink-0 ${
-                      SEVERITY_CHIP[rec.severity] ?? "bg-zinc-700/40 text-zinc-400 border-zinc-600"
+        {/* Mute severity — the picker records the choice; the registry control
+            fires it (confirm-first). Keyed by the choice: a new pick remounts it. */}
+        {!unknown && !noRun && (
+          <div className="space-y-1" data-testid="rec-mute">
+            <div className="flex flex-wrap items-baseline gap-2 text-xs" role="group" aria-label="severity to mute">
+              <span className="text-zinc-500">severity:</span>
+              {REC_SEVERITIES.map((severity) => {
+                const chosen = muteChoice?.severity === severity;
+                return (
+                  <button
+                    key={severity}
+                    type="button"
+                    data-testid={`rec-mute-pick-${severity}`}
+                    aria-pressed={chosen}
+                    onClick={() => setMuteChoice(chooseMute(severity, readRunId))}
+                    disabled={muteBusy || !readRunId}
+                    className={`rounded border px-2 py-0.5 disabled:opacity-40 ${
+                      chosen
+                        ? "border-zinc-400 bg-zinc-800 text-zinc-100"
+                        : "border-zinc-700 text-zinc-400 hover:text-zinc-200"
                     }`}
                   >
-                    {rec.severity ?? "—"}
-                  </span>
-                  <span className="flex-1 min-w-0 text-sm text-zinc-200 break-words">{recText(rec)}</span>
-                  <span className="text-[11px] text-zinc-500 shrink-0">
-                    <LocalTimestamp ts={rec.created_at} />
-                  </span>
-                </div>
-                <div className="flex flex-wrap items-baseline gap-2 pl-1 text-[11px]">
-                  <button
-                    type="button"
-                    onClick={() => onDismissStart(rec)}
-                    disabled={disabled}
-                    title={DISMISS_CONSEQUENCE}
-                    aria-label={`Dismiss recommendation "${recText(rec)}"`}
-                    className="text-zinc-400 underline hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    Dismiss
+                    {severity}
                   </button>
-                  <span className="text-zinc-600">{DISMISS_CONSEQUENCE}</span>
-                </div>
-                <ResultLine result={dismissResults[rec.id]} />
-              </li>
-            );
-          })}
-        </ul>
-      )}
+                );
+              })}
+            </div>
+            <div key={`rec-mute-${muteChoice?.severity ?? "none"}`}>
+              <ControlAffordance
+                registry={registry}
+                controlKey="control:now/rec-mute-class"
+                testId="rec-mute-class"
+                verdicts={recMuteVerdicts(muteChoice, readRunId)}
+                context={recMuteContext(muteChoice)}
+                onFired={refreshChecked}
+                onStart={onMuteStart}
+                onResult={onMuteResult}
+                rereadNoun="/now"
+              />
+            </div>
+          </div>
+        )}
 
-      <UndoToastStack windows={undoHost.windows} onUndo={undoHost.undo} />
-    </section>
+        {/* Outcomes for recs the re-read already removed (their row is gone). */}
+        {goneResults.map(([id, result]) => (
+          <div key={id} className="text-[11px]">
+            <span className="text-zinc-500 truncate">{result.label}: </span>
+            <ResultLine result={result} />
+          </div>
+        ))}
+
+        {unknown ? (
+          <div
+            data-testid="recommendations-unknown"
+            className="border border-zinc-700 rounded-md px-3 py-3 text-sm text-zinc-400 bg-zinc-900/40"
+          >
+            UNKNOWN — recommendations read unproven.
+            {error && <span className="block font-mono text-xs text-zinc-600 break-all">{error}</span>}
+          </div>
+        ) : noRun ? (
+          <p data-testid="recommendations-no-run" className="text-xs text-zinc-500 italic">
+            no autopilot run — nothing to recommend
+          </p>
+        ) : items.length === 0 ? (
+          <p data-testid="recommendations-empty" className="text-xs text-zinc-500 italic">
+            No active recommendations for run {readRunId}.
+          </p>
+        ) : (
+          <ul className="divide-y divide-zinc-900">
+            {items.map((rec) => (
+              <RecRow
+                key={rec.id}
+                rec={rec}
+                registry={registry}
+                readRunId={readRunId}
+                onFired={refreshChecked}
+                onDismissStart={onDismissStart}
+                onDismissResult={onDismissResult}
+              />
+            ))}
+          </ul>
+        )}
+
+        <UndoToastStack windows={undoHost.windows} onUndo={undoHost.undo} />
+      </section>
+    </UndoWindowContext.Provider>
   );
 }

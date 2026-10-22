@@ -16,9 +16,9 @@
  *     shape, `class:<name>`, is admitted by regex for a namespace slice 17
  *     populates — this slice ships ZERO `class:` entries.
  *   - A third key shape, `control:<page>/<name>` (issue #4629, ADR-0034
- *     §8.3 "action-bearing controls"), for the write controls on /work and
- *     /health. The closed list of shipped control keys is `CONTROL_KEYS`;
- *     the schema admits the shape by regex and `controlEntryCoverage`
+ *     §8.3 "action-bearing controls"), for the write controls on /work,
+ *     /health and /now (issue #5152). The closed list of shipped control
+ *     keys is `CONTROL_KEYS`; the schema admits the shape by regex and `controlEntryCoverage`
  *     (registry.ts) pins the registry to the list in both directions.
  *   - The closed per-bucket **context** vocabulary (`BUCKET_CONTEXT`) a
  *     template placeholder may reference. Per-item buckets (`prs-not-landing`,
@@ -125,7 +125,7 @@ const CLASS_KEY_PATTERN = /^class:[a-z0-9_]+$/;
  * button). Add a page by appending it to the alternation; add a control by
  * appending one line to {@link CONTROL_KEYS}.
  */
-const CONTROL_KEY_PATTERN = /^control:(work|health)\/[a-z0-9-]+$/;
+const CONTROL_KEY_PATTERN = /^control:(work|health|now)\/[a-z0-9-]+$/;
 
 /**
  * Every shipped `control:` key — one entry per line, grouped by page. The
@@ -152,6 +152,10 @@ export const CONTROL_KEYS = [
   "control:health/scheduler-stop",
   "control:health/scheduler-start",
   "control:health/housekeeping",
+  // /now — RecommendationsPanel.jsx (issue #5152; the routes ADR-0034 §9.1
+  // files as registry in-dashboard "recommendations dismiss and mute-class")
+  "control:now/rec-dismiss",
+  "control:now/rec-mute-class",
 ] as const;
 export type ControlKey = (typeof CONTROL_KEYS)[number];
 
@@ -187,7 +191,7 @@ const EntryKeySchema = z.string().refine(
   {
     message:
       'key must be a "<bucket>:<line>" admission line drawn from BUCKET_LINES, ' +
-      "or match /^class:[a-z0-9_]+$/, or match /^control:(work|health)\\/[a-z0-9-]+$/",
+      "or match /^class:[a-z0-9_]+$/, or match /^control:(work|health|now)\\/[a-z0-9-]+$/",
   },
 );
 
@@ -203,9 +207,10 @@ const EntryKeySchema = z.string().refine(
  * to template against for a machine-stopped flag, a friction pattern, or the
  * parked-lane cap. The `control:*` namespace carries exactly one, `{id}`
  * (issue #4631, design-concept 5ae4b72c INV-9, amending #4629's empty list):
- * the dashboard alert id is the only per-row ROUTE segment any control
- * carries (`/alerts/{id}/dismiss`). The page resolves it client-side through
- * `resolveControlRoute` (dashboard/src/lib/health-verdicts.ts) before the
+ * a per-row ROUTE segment is the only placeholder any control carries — the
+ * dashboard alert id (`/alerts/{id}/dismiss`) and, since issue #5152, the
+ * recommendation id (`/now/recommendations/{id}/dismiss`). The page resolves
+ * it client-side through `resolveControlRoute` (dashboard/src/lib/health-verdicts.ts) before the
  * action reaches ActionAffordance; every other per-row value travels in the
  * request body, built from the page's closed context (`IN_DASHBOARD_BODY` in
  * ActionAffordance.jsx).
@@ -305,6 +310,11 @@ export const CONTROL_CHECKS = [
   "scheduler-running",
   "scheduler-not-running",
   "no-fresh-deliberate-stop",
+  // /now — the recommendation controls (issue #5152), evaluated by
+  // dashboard/src/lib/now-verdicts.ts from RecommendationsPanel's own read and
+  // its severity picker.
+  "rec-run-id-read",
+  "severity-chosen",
 ] as const;
 export const ControlCheckSchema = z.enum(CONTROL_CHECKS);
 export type ControlCheck = z.infer<typeof ControlCheckSchema>;
