@@ -78,6 +78,7 @@
   "scripts/ci/vendor-drift-check.ts": 1,
   "scripts/ci/wait-for-health.sh": 1,
   "scripts/ci/wiring-caller-check.ts": 1,
+  "scripts/claude-hooks/agent-dispatch-prompt-guard.sh": 1,
   "scripts/claude-hooks/gh-label-delete-guard.sh": 1,
   "scripts/claude-hooks/git-remote-fence.sh": 1,
   "scripts/claude-hooks/worktree-write-fence.sh": 1,
