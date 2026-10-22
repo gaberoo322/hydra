@@ -95,6 +95,13 @@ export interface MemoLineEntry {
 export interface FileParseMemoEntry {
   size: number;
   mtimeMs: number;
+  /**
+   * The parser version that produced `entries` (issue #5141). The caller replays
+   * only entries stamped with its own version, so a parse-semantics change
+   * re-parses immutable transcripts instead of serving stale totals until they
+   * age out. An entry persisted before the stamp existed loads as 0.
+   */
+  parseVersion: number;
   entries: MemoLineEntry[];
   skill: string | null;
   dispatchKind: string | null;
@@ -143,6 +150,8 @@ function parseMemoEntry(raw: string): FileParseMemoEntry | null {
   }
   if (!isPlainRecord(v)) return null;
   if (typeof v.size !== "number" || typeof v.mtimeMs !== "number") return null;
+  if (v.parseVersion === undefined) v.parseVersion = 0;
+  else if (typeof v.parseVersion !== "number") return null;
   if (!Array.isArray(v.entries) || !v.entries.every(isValidMemoLineEntry)) return null;
   if (v.skill !== null && typeof v.skill !== "string") return null;
   if (v.dispatchKind !== null && typeof v.dispatchKind !== "string") return null;
