@@ -52,8 +52,9 @@
  * ✓/✗ line); feed and class entries stay prose-only.
  *
  * Every `in-dashboard` `route` below names a write route that exists on
- * master TODAY (verified against `src/api/autopilot-control.ts` and
- * `src/api/scheduler.ts`); every other admission line hands off to a terminal
+ * master TODAY (verified against `src/api/autopilot-control.ts`,
+ * `src/api/scheduler.ts`, `src/api/alerts.ts` and `src/api/maintenance.ts`);
+ * every other admission line hands off to a terminal
  * skill (`/hydra-review`, `/hydra-hitl-grill`, `/hydra-retro`, or a plain `gh`
  * read) per the issue #4420 resolution: recommend the mechanical action where
  * one exists today, otherwise recommend the operator-cockpit hand-off.
@@ -516,7 +517,7 @@ const CLASS_ENTRY_SPECS: readonly ClassEntrySpec[] = [
 const CLASS_ENTRIES: readonly OperatorActionEntryInput[] = CLASS_ENTRY_SPECS.map(classEntry);
 
 // ---------------------------------------------------------------------------
-// The control:<page>/<name> entries (issue #4629, ADR-0034 §8.3, context {})
+// The control:<page>/<name> entries (issue #4629, ADR-0034 §8.3; context {id}, #4631)
 // ---------------------------------------------------------------------------
 
 const DASHBOARD_ADR_DOC = "docs/adr/0034-orchestrator-dashboard-page-inventory.md";
@@ -525,9 +526,11 @@ const DASHBOARD_ADR_DOC = "docs/adr/0034-orchestrator-dashboard-page-inventory.m
  * One DEFAULT entry per `CONTROL_KEYS` member. Pages render only
  * `recommended` (its label, its `{text, check}` checklist and its
  * consequence); the alternatives are the sibling controls a feed-style
- * rendering would list as `or:`. Routes carry no `{placeholder}` — the
- * per-row body (`{issue, …}`) is built by the dashboard's closed
- * IN_DASHBOARD_BODY builders from the page's context. The promote checklist
+ * rendering would list as `or:`. Routes carry no `{placeholder}` except the
+ * one `{id}` BUCKET_CONTEXT.control admits (issue #4631: the alert id in
+ * `/alerts/{id}/dismiss`, resolved by the page before firing) — the per-row
+ * body (`{issue, …}`) is built by the dashboard's closed IN_DASHBOARD_BODY
+ * builders from the page's context. The promote checklist
  * is exactly the promote gate's refusal table, in its order
  * (evaluatePromoteEligibility: closed, already-ready, missing-scope-section,
  * blocked) — the server gate stays the authority. control:health/resume
@@ -826,6 +829,173 @@ const CONTROL_ENTRIES = [
     ],
     rationale:
       "releasing the brake re-enables every auto-merge at once, so it confirms first — an added arm step over the old single click, in the safer direction.",
+    doc: REFERENCE_DOC,
+  },
+
+  // --- /health alerts, scheduler, housekeeping (issue #4631) ----------------
+  // Design-concept 5ae4b72c INV-2/3/4/12: strings from the #4424 resolution
+  // table, corrected only where it contradicts the glossary; every
+  // alternative is a read-only hand-off. alert-dismiss is the one control
+  // route carrying a placeholder — `{id}`, the only name in
+  // BUCKET_CONTEXT.control — resolved by AlertsPanel per row (INV-9).
+  {
+    key: "control:health/alert-dismiss",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/alerts/{id}/dismiss",
+      method: "POST",
+      confirmTier: "immediate-undo",
+      label: "Dismiss",
+      preconditions: [{ text: "alert is open", check: "alert-open" }],
+      consequence:
+        "the alert leaves the count and the list; Undo within the window cancels before anything is sent",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "curl -s http://localhost:4000/api/alerts",
+        label: "Read the alert list first",
+        preconditions: [],
+        consequence: "shows every recent alert, dismissed or not, without changing anything",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Review attention items instead",
+        preconditions: [],
+        consequence: "walks the operator cockpit while the alert stays open",
+      },
+    ],
+    rationale:
+      "dismissing one alert only hides it from the open count, so ADR-0034 §7 makes it immediate with undo; no un-dismiss route exists, so the undo is the delayed commit — nothing is sent until the window closes.",
+    doc: REFERENCE_DOC,
+  },
+  {
+    key: "control:health/alerts-dismiss-all",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/alerts/dismiss-all",
+      method: "POST",
+      confirmTier: "confirm-first",
+      label: "Dismiss all",
+      preconditions: [{ text: "≥ 1 open alert", check: "alerts-any-open" }],
+      consequence: "every open alert is dismissed; none can be restored",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "curl -s http://localhost:4000/api/alerts",
+        label: "Read the alert list first",
+        preconditions: [],
+        consequence: "shows every recent alert before any of them is cleared",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Review attention items instead",
+        preconditions: [],
+        consequence: "walks the operator cockpit while every alert stays open",
+      },
+    ],
+    rationale:
+      "clearing the whole alert list cannot be undone, so ADR-0034 §7 makes it confirm first.",
+    doc: REFERENCE_DOC,
+  },
+  {
+    key: "control:health/scheduler-stop",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/scheduler/stop",
+      method: "POST",
+      confirmTier: "confirm-first",
+      label: "Stop scheduler",
+      preconditions: [{ text: "scheduler running", check: "scheduler-running" }],
+      consequence: "writes the deliberate-stop marker (24 h); the watchdog will NOT restart it",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "curl -s http://localhost:4000/api/scheduler/status",
+        label: "Read the scheduler status first",
+        preconditions: [],
+        consequence: "shows running, stopReason and the tick counters without changing anything",
+      },
+      {
+        kind: "terminal-skill",
+        command: "journalctl --user -u hydra-orchestrator.service -n 200 --no-pager",
+        label: "Inspect recent logs first",
+        preconditions: [],
+        consequence: "shows what the heartbeat logged recently, without changing any state",
+      },
+    ],
+    rationale:
+      "a deliberate stop silences the observability heartbeat for up to 24 h and the watchdog honours the marker, so ADR-0034 §7 makes it confirm first.",
+    doc: REFERENCE_DOC,
+  },
+  {
+    key: "control:health/scheduler-start",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/scheduler/start",
+      method: "POST",
+      confirmTier: "immediate-undo",
+      label: "Start scheduler",
+      preconditions: [
+        { text: "scheduler not running", check: "scheduler-not-running" },
+        { text: "no deliberate-stop marker younger than 24 h", check: "no-fresh-deliberate-stop" },
+      ],
+      consequence: "clears the marker and the heartbeat resumes ticking at the stored interval",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "curl -s http://localhost:4000/api/scheduler/status",
+        label: "Read the scheduler status first",
+        preconditions: [],
+        consequence: "shows stopReason and deliberateStoppedAt without changing anything",
+      },
+      {
+        kind: "terminal-skill",
+        command: "journalctl --user -u hydra-orchestrator.service -n 200 --no-pager",
+        label: "Inspect recent logs first",
+        preconditions: [],
+        consequence: "shows why the heartbeat stopped, without changing any state",
+      },
+    ],
+    rationale:
+      "starting the heartbeat dispatches nothing (ADR-0012), so ADR-0034 §7 makes it immediate with undo; it is enabled only when no deliberate-stop marker younger than 24 h exists — exactly the state in which the feed's machine-stopped:scheduler-deliberate confirm-first row does NOT exist, so the shared route never behaves two ways in one state.",
+    doc: REFERENCE_DOC,
+  },
+  {
+    key: "control:health/housekeeping",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/maintenance/housekeeping",
+      method: "POST",
+      confirmTier: "immediate-undo",
+      label: "Run housekeeping now",
+      preconditions: [],
+      consequence:
+        "runs every due chore now and reports {ran, skipped}; chores inside their time-guard window are skipped",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "systemctl --user status hydra-housekeeping.timer",
+        label: "Check the housekeeping timer first",
+        preconditions: [],
+        consequence: "shows when the hourly timer last fired and fires next, without changing anything",
+      },
+      {
+        kind: "terminal-skill",
+        command: "journalctl --user -u hydra-orchestrator.service -n 200 --no-pager",
+        label: "Inspect recent logs first",
+        preconditions: [],
+        consequence: "shows what the last housekeeping run logged, without changing any state",
+      },
+    ],
+    rationale:
+      "each chore is idempotent and keeps its own time-guard, so a run changes nothing a timer tick would not; the ~5 s undo window costs nothing and no third confirm tier is added (ADR-0034 §8.2).",
     doc: REFERENCE_DOC,
   },
 ] satisfies readonly OperatorActionEntryInput[];

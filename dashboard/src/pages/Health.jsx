@@ -1,3 +1,4 @@
+import { useCallback, useState } from "react";
 import { useApi } from "../hooks/useApi.js";
 import { derivePageStatus } from "../hooks/usePageItems.js";
 import {
@@ -9,6 +10,7 @@ import {
   useUndoWindowHost,
 } from "../components/ActionAffordance.jsx";
 import { healthVerdicts } from "../lib/control-verdicts.ts";
+import { housekeepingSummary } from "../lib/health-verdicts.ts";
 import LocalTimestamp from "../components/LocalTimestamp.jsx";
 import DeployAxes from "../components/pages/health/DeployAxes.jsx";
 import CostPanel from "../components/pages/health/CostPanel.jsx";
@@ -55,6 +57,14 @@ import AlertsPanel from "../components/pages/health/AlertsPanel.jsx";
  * Pause is immediate-with-undo (the ~5 s delayed commit hosted here); resume
  * and both brake controls confirm first (resume spends quota; the brake
  * halts or re-enables every auto-merge).
+ *
+ * Issue #4631 (design-concept 5ae4b72c INV-7/8/11): the same one registry
+ * read is passed DOWN as `entries` to AlertsPanel (per-alert Dismiss +
+ * Dismiss all) and ServiceStrip (scheduler Stop ⇄ Start), each placed beside
+ * the read it owns — this file fetches neither of their routes. The
+ * housekeeping section below hosts `control:health/housekeeping` and renders
+ * the verified `{ran, skipped}` summary from the lifted result's `body`, only
+ * after the request settled (housekeepingSummary, lib/health-verdicts.ts).
  */
 
 const DEEP_CHIP = {
@@ -161,6 +171,12 @@ export default function Health() {
     healthStatus !== "loading" && healthStatus !== "unknown",
   );
 
+  // ---- Housekeeping (issue #4631 INV-11) -----------------------------------
+  // The lifted result: cleared as a new run starts, set once it settled.
+  const [housekeepingResult, setHousekeepingResult] = useState(null);
+  const clearHousekeepingResult = useCallback(() => setHousekeepingResult(null), []);
+  const housekeepingLine = housekeepingSummary(housekeepingResult);
+
   // ---- Autopilot run state + pause/resume (server-confirmed, INV-6) --------
   // The pause flag rides the /health payload (paused + the verified `ok` flag
   // + generatedAt) — one source of truth for chip, controls, and as-of.
@@ -215,7 +231,7 @@ export default function Health() {
 
       <DeployAxes data={health.data} status={healthStatus} />
 
-      <ServiceStrip />
+      <ServiceStrip entries={registry} />
 
       {/* ---- Capacity: one chip (INV-7); floorStatus rendered verbatim ------ */}
       <section data-testid="capacity-section" className="space-y-1">
@@ -464,7 +480,27 @@ export default function Health() {
         )}
       </section>
 
-      <AlertsPanel />
+      <AlertsPanel entries={registry} />
+
+      {/* ---- Housekeeping: run the due chores now (issue #4631 INV-11) ----- */}
+      <section data-testid="housekeeping-section" className="space-y-2">
+        <h2 className="text-sm uppercase tracking-wide text-zinc-400">Housekeeping</h2>
+        <ControlAffordance
+          registry={registry}
+          controlKey="control:health/housekeeping"
+          testId="housekeeping-run"
+          verdicts={{}}
+          onFired={refreshHealth}
+          onStart={clearHousekeepingResult}
+          onResult={setHousekeepingResult}
+          rereadNoun="health"
+        />
+        {housekeepingLine && (
+          <p data-testid="housekeeping-summary" className="break-words font-mono text-xs text-zinc-300">
+            {housekeepingLine}
+          </p>
+        )}
+      </section>
 
       <CostPanel />
     </div>
