@@ -43,6 +43,7 @@ import {
   deriveSkill,
   makeReadOAuth,
   transcriptScan,
+  TRANSCRIPT_PARSE_VERSION,
 } from "../src/cost/transcript-scan.ts";
 // `stubReadOAuth` below types its return as `ScanResult["oauth"]`
 // (= CachedOAuthRead). Alias it here so the fixture names the shape the
@@ -58,7 +59,6 @@ import {
   countTranscriptParseMemoEntries,
 } from "../src/redis/transcript-parse-memo.ts";
 import type { FileParseMemoEntry } from "../src/redis/transcript-parse-memo.ts";
-import { TRANSCRIPT_PARSE_VERSION } from "../src/cost/transcript-fold.ts";
 import { getRedisConnection } from "../src/redis/connection.ts";
 import {
   assistantLine,

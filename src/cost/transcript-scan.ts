@@ -640,6 +640,8 @@ export {
 export type { SkillResolver };
 // Pure transcript-content helpers -- canonical home is `./transcript-fold.ts`.
 export { firstUserMessageText, sumSessionTokens };
+// The parse-memo version this scan's usability gate replays (issue #5141).
+export { TRANSCRIPT_PARSE_VERSION };
 
 // Re-export the OAuth backoff/cache seam surface from its new focused leaf
 // (issue #2923) at the SAME names this module used to own, so existing importers
