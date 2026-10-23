@@ -1,0 +1,1 @@
+- refactor: remove the inert scout cost-share and per-cycle dev_target USD gates and the scout USD-spend snapshot plumbing (#5175)

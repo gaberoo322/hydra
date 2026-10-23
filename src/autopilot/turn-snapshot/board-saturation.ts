@@ -18,9 +18,7 @@
  *     `hydra-tool-scout` tokens from the by-skill daily hash (a bare
  *     non-negative integer, else `0`), MIRRORED into
  *     `hydra:scout:spend:<DATE>` with a 7d TTL (best effort; skipped when the
- *     token read already found Redis unreachable — the SET could only fail); and
- *     `scout_spend_usd_today` = tokens/1e6 × HYDRA_TOKEN_USD_RATE as gawk
- *     printed it (`0.00` when either is <= 0; INERT here, #4161).
+ *     token read already found Redis unreachable — the SET could only fail).
  *   - arch/cleanup/skill-prune boards (#789, #959, #960, #4130, #4607, #4657):
  *     one open-board read counts ready-for-agent (minus target-backlog),
  *     needs-research, needs-triage, architecture-scan, cleanup-scan,
@@ -47,7 +45,6 @@ export interface BoardSaturationDeps {
   readonly ghListLimit: number;
   /** collect-state.sh's ORCH_BOARD_DEGRADED as it stood before this collector (`1` = degraded). */
   readonly orchBoardDegraded: string;
-  readonly env: { readonly HYDRA_TOKEN_USD_RATE?: string };
 }
 
 export const ARCH_SCAN_LABEL = "architecture-scan";
@@ -99,43 +96,6 @@ export async function collectRedisQueues(deps: BoardSaturationDeps): Promise<Col
 // Scout
 // ---------------------------------------------------------------------------
 
-/**
- * gawk's string→number coercion (`r+0`): the longest leading decimal-float
- * prefix after blanks, else 0; gawk also honours exactly `±inf` / `±nan`.
- */
-export function awkNumber(raw: string): number {
-  const s = raw.replace(/^[ \t\n\r\f\v]+/, "");
-  const special = /^([+-])(inf|nan)$/i.exec(s);
-  if (special) {
-    if (special[2]?.toLowerCase() === "nan") return special[1] === "-" ? -NaN : NaN;
-    return special[1] === "-" ? -Infinity : Infinity;
-  }
-  const m = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(s);
-  return m ? Number(m[0]) : 0;
-}
-
-/**
- * `scout_spend_usd_today`: gawk's
- * `if (r+0 <= 0 || t+0 <= 0) "0.00" else printf "%.6f", t/1e6*r`.
- * glibc prints non-finite values as `+inf` / `+nan` / `-nan` under gawk.
- */
-export function scoutSpendUsd(tokens: string, rate: string): string {
-  const t = awkNumber(tokens);
-  const r = awkNumber(rate);
-  if (r <= 0 || t <= 0) return "0.00";
-  const usd = (t / 1_000_000) * r;
-  if (Number.isNaN(usd)) return /^\s*-/.test(rate) ? "-nan" : "+nan";
-  if (!Number.isFinite(usd)) return "+inf";
-  // printf's `%.6f`: the double's exact value, an exact tie rounded to EVEN.
-  // `toFixed` rounds a tie up, and a tie is exactly a usd whose usd·2^7 is an
-  // odd integer — then an odd last digit steps down (no borrow). Beyond 1e21
-  // `toFixed` switches to exponent form; the double is an integer there.
-  if (usd >= 1e21) return `${BigInt(usd)}.000000`;
-  const fixed = usd.toFixed(6);
-  const scaled = usd * 2 ** 7;
-  return Number.isInteger(scaled) && scaled % 2 === 1 && /[13579]$/.test(fixed) ? `${fixed.slice(0, -1)}${Number(fixed.slice(-1)) - 1}` : fixed;
-}
-
 /** `redis-cli GET … | tr -d '"'`: the value with every `"` removed (`""` when unset). */
 const stripQuotes = (v: string | null): string => (v ?? "").replaceAll('"', "");
 
@@ -150,7 +110,6 @@ export interface ScoutValue {
   /** The `length` gh printed, or the failed-read `0`. */
   readonly openEnhancements: Classified<string>;
   readonly tokensToday: string;
-  readonly spendUsd: string;
   readonly mirrored: Classified<true>;
 }
 
@@ -191,7 +150,6 @@ export async function collectScout(deps: BoardSaturationDeps): Promise<Collector
     lastWalkIso,
     openEnhancements,
     tokensToday,
-    spendUsd: scoutSpendUsd(tokensToday, deps.env.HYDRA_TOKEN_USD_RATE || "0"),
     mirrored,
   };
   return outcome("scout", value, [
