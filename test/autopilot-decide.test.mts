@@ -953,25 +953,27 @@ describe("decide.py — termination paths", () => {
     assert.equal(t.cause, "wall_clock");
   });
 
-  test("idle drain with all slots empty -> terminate(cause=idle)", () => {
-    const state = baseState({ idle_turns: 5, idle_drain_turns: 5 });
-    const plan = runDecide(state, null);
-    const t = findAction(plan, (a) => a.type === "terminate");
-    assert.ok(t);
-    assert.equal(t.cause, "idle");
+  // Issue #2429 (ported from the deleted term-check.py twin, #5070): the budget
+  // gate is a live `>=` comparison on state.json's cumulative_tokens.
+  test("budget: just below the token_budget keeps iterating (#2429)", () => {
+    const plan = runDecide(baseState({ cumulative_tokens: 1_999_999 }), null);
+    assert.equal(findAction(plan, (a) => a.type === "terminate"), undefined);
   });
 
-  test("idle drain DOES NOT trip when a slot is occupied", () => {
-    const state = baseState({
-      idle_turns: 5,
-      slots: {
-        dev_orch: { skill: "hydra-dev", started: "t0", partial_tokens: 0 },
-        qa_orch: null, research_orch: null,
-        dev_target: null, qa_target: null, research_target: null,
-      },
-    });
-    const plan = runDecide(state, null);
-    assert.equal(findAction(plan, (a) => a.type === "terminate"), undefined);
+  test("budget: exactly AT the token_budget terminates (#2429)", () => {
+    const plan = runDecide(baseState({ cumulative_tokens: 2_000_000 }), null);
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t);
+    assert.equal(t.cause, "budget");
+  });
+
+  // Issue #5070: the `idle_turns` termination arm was deleted — nothing ever
+  // incremented the counter, so it could never fire. A stale value in state.json
+  // must NOT terminate; idle ends via the wait-only-turn rule (#1352).
+  test("a stale idle_turns counter at the drain threshold does not terminate (#5070)", () => {
+    const plan = runDecide(baseState({ idle_turns: 5, idle_drain_turns: 5 }), null);
+    const t = findAction(plan, (a) => a.type === "terminate" && a.cause === "idle" && /idle_turns=/.test(String(a.reason)));
+    assert.equal(t, undefined);
   });
 
   test("5 consecutive failures of same pattern -> failure_backstop terminate", () => {
@@ -2223,7 +2225,7 @@ describe("decide.py — idle fallback / heartbeat", () => {
     );
   });
 
-  test("idle-drain terminate carries merged_prs from state", () => {
+  test("idle-drain terminate carries no merged_prs field (#5070: nothing writes the counter)", () => {
     // discover_orch seeded as fired-just-now so the #4114 staleness floor
     // does not turn this into a dispatch-bearing turn.
     const state = baseState({
@@ -2233,7 +2235,7 @@ describe("decide.py — idle fallback / heartbeat", () => {
     const plan = runDecide(state, null);
     const t = findAction(plan, (a) => a.type === "terminate");
     assert.ok(t);
-    assert.equal(t.merged_prs, 3);
+    assert.equal("merged_prs" in t, false);
   });
 
   test("housekeeping-only turn (auto-merge, no dispatch, empty slots) keeps the heartbeat wait", () => {
@@ -2316,38 +2318,6 @@ describe("decide.py — degraded orch board read (issue #4130)", () => {
     const plan = runDecide(baseState({ signal_last_fired: COOLED }), null);
     const t = findAction(plan, (a) => a.type === "terminate");
     assert.ok(t, "a genuinely quiet board still drains");
-    assert.equal(t.cause, "idle");
-  });
-
-  test("idle_turns at the drain threshold + degraded → idle cause withheld (not just the fallback path)", () => {
-    // _check_termination's own idle-drain arm (idle_turns >= idle_drain_turns)
-    // is the SECOND terminate:idle producer; both must honor the flag. With
-    // the flag set the run keeps waiting — an outage must not be able to
-    // out-wait the drain counter into a clean exit either.
-    const state = baseState({
-      signals: { orch_board_signals_degraded: true },
-      idle_turns: 5,
-      signal_last_fired: COOLED,
-    });
-    const plan = runDecide(state, null);
-    assert.equal(
-      findAction(plan, (a) => a.type === "terminate"),
-      undefined,
-      "idle turns accumulated against a degraded read are blindness, not quiet",
-    );
-    assert.ok(
-      findAction(plan, (a) => a.type === "wait"),
-      "the degraded snapshot keeps the heartbeat wait alive instead",
-    );
-  });
-
-  test("contrast: idle_turns at the threshold WITHOUT the flag still terminates idle", () => {
-    const plan = runDecide(
-      baseState({ idle_turns: 5, signal_last_fired: COOLED }),
-      null,
-    );
-    const t = findAction(plan, (a) => a.type === "terminate");
-    assert.ok(t);
     assert.equal(t.cause, "idle");
   });
 
@@ -2548,15 +2518,6 @@ describe("decide.py — usage hard-stop withholds the idle conclusion (issue #46
     );
     assert.equal(findAction(plan, (a) => a.type === "terminate"), undefined);
     assert.ok(findAction(plan, (a) => a.type === "wait"));
-  });
-
-  test("idle_turns at the drain threshold + usage block → idle cause withheld", () => {
-    const plan = runDecide(withUsage(BLIND, { idle_turns: 5 }), null);
-    assert.equal(
-      findAction(plan, (a) => a.type === "terminate"),
-      undefined,
-      "a blocked meter must not out-wait the drain counter into a clean idle exit",
-    );
   });
 
   test("budget still terminates under its own cause while usage is blocked", () => {
@@ -4324,9 +4285,9 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
   });
 
   test("#4240 INV-A edge: the stamp survives a TERMINATING turn (every plan, not just busy ones)", () => {
-    // idle_turns at the drain threshold terminates the turn at step 1 — the
+    // A budget-exhausted state terminates the turn at step 1 — the
     // pr_gate stamp must already be on the plan by then.
-    const plan = runDecide(baseState({ idle_turns: 5 }), null);
+    const plan = runDecide(baseState({ cumulative_tokens: 2_000_001 }), null);
     assert.ok(findAction(plan, (a) => a.type === "terminate"), "sanity: this turn terminates");
     assert.ok(plan.debug?.pr_gate, "a terminating plan carries debug.pr_gate too");
   });

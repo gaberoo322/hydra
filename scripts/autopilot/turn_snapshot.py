@@ -3,7 +3,7 @@
 turn_snapshot.py — the ONE reader of the Turn Snapshot (ADR-0043 Decision 5,
 issue #4934; ADR-0007 keeps decide.py the pure brain; store-only since #5083).
 
-What decide.py, render-dispatch.py, term-check.py and turn.sh's summary see
+What decide.py, render-dispatch.py and turn.sh's summary see
 on a turn is ONE document: `state.turn_snapshot`, the typed JSON
 `scripts/autopilot/turn-snapshot.ts` emits. The TS emitter is its ONLY
 validator: src/schemas/turn-snapshot.ts is the single source of truth for its
@@ -365,7 +365,7 @@ def blob(state: dict, name: str) -> Any:
 
 def usage_eligibility(state: dict) -> dict:
     """The usage-eligibility body as a dict ({} when absent or not an object) —
-    render-dispatch.py / term-check.py / turn.sh's summary read it here."""
+    render-dispatch.py / turn.sh's summary read it here."""
     value = blob(state, "usage_eligibility")
     return value if isinstance(value, dict) else {}
 

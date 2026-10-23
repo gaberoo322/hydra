@@ -25,7 +25,7 @@ export const redisKeys = {
   // Autopilot runs (issue #497, parent #496) — dashboard observability layer.
   // One row per `/hydra-autopilot` invocation. Schema written at run-start by
   // scripts/autopilot/bootstrap.sh (Phase 0), mutated at run-end by
-  // scripts/autopilot/term-check.py, and read by GET /api/autopilot/runs/current.
+  // scripts/autopilot/decide.py (terminate), and read by GET /api/autopilot/runs/current.
   // 7d TTL on both the per-run hash and the index, matching the cycle-record
   // pattern.
   // ---------------------------------------------------------------------------
