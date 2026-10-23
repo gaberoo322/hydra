@@ -8,7 +8,7 @@ arguments: [focus]
 
 # Hydra Target Research Cycle (Parallel)
 
-Full research cycle for the Hydra autonomous orchestrator. Output drives what Hydra builds next. Replaces normal Codex-based research with higher-quality Claude-driven analysis.
+Full research cycle for the Hydra autonomous orchestrator. Output drives what Hydra builds next. Replaces normal Codex-based (retired, ADR-0006) research with higher-quality Claude-driven analysis.
 
 **Goal: keep backlog at 30+ items so build cycles never stall waiting for work.**
 
@@ -68,7 +68,6 @@ If `$focus` provided, pass it to ALL researcher agents.
 
 Spawn **5 researchers in parallel**:
 - **Claude:** ONE message with 5 `Agent` tool calls (parallel).
-- **Codex:** 5 `codex exec --skill target-researcher` subprocesses with different focus args.
 
 Each gets: full vision, current priorities, "What's been completed", recently merged titles, backlog gap, focus, and instruction to output JSON arrays. Each ALSO gets `$TARGET_WS/CONTEXT.md` and `$TARGET_WS/direction/vision.md` — the domain specifics (what market/product/protocol this target operates in, which vendor APIs it integrates, what "edge" or "quality" means for it) live there, not in this playbook (INV-8, issue #4411): a target-neutral research framework hardcoding one target's domain vocabulary is exactly the swap-readiness defect #4411 fixes.
 
@@ -249,7 +248,7 @@ docs (that orphans their tracked history / silently discards a cycle's output).
 
 ### 4. File items as GitHub issues (ADR-0031)
 
-Items are filed on the **GitHub-Issues board (`$TARGET_GH_REPO`)** via `gh issue create`, not the retired Redis work-queue / `/backlog` API. **Dedup before filing** with a lexical `gh issue list --search` (ADR-0031 Decision 5 — lexical, not OpenViking semantic dedup); skip a candidate whose significant words already match an open issue.
+Items are filed on the **GitHub-Issues board (`$TARGET_GH_REPO`)** via `gh issue create`, not the retired Redis work-queue / `/backlog` API. **Dedup before filing** with a lexical `gh issue list --search` (ADR-0031 Decision 5 — lexical, not semantic dedup (OpenViking retired by ADR-0033)); skip a candidate whose significant words already match an open issue.
 
 ```bash
 REPO="$TARGET_GH_REPO"

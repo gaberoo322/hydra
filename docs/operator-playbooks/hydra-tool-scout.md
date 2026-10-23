@@ -59,7 +59,7 @@ For the given category, sweep these sources (cheapest first, stop once you have 
 3. **npm registry search** (`npm search <keyword>`) — orchestrator and dashboard are Node/TS, so npm is the primary distribution channel. Skip for non-Node categories (e.g. LSP tooling, language-level work).
 4. **Web search** (broad terms, last 12 months) — last resort. Spends tokens; cheaper sources first.
 
-Each candidate is a `{ name, slug, homepage, repo, npmName?, oneLineDescription }` record. Canonicalize the slug via `src/scout/aliases.ts:canonicalizeSlug()` BEFORE adding to the working set — `@tanstack/query` and `tanstack-query` must collapse to one entry.
+Each candidate is a `{ name, slug, homepage, repo, npmName?, oneLineDescription }` record. Canonicalize the slug via `canonicalizeSlug()` in `src/scout/aliases.ts` BEFORE adding to the working set — `@tanstack/query` and `tanstack-query` must collapse to one entry.
 
 > **Discovery quota:** 5 candidates per category is enough. If the source pool is genuinely sparse, file what you have and note the gap in the issue body — don't pad with bad candidates.
 
@@ -263,7 +263,7 @@ Expected:
 
 Failure-driven trigger — when a recurring-pattern alert maps to a researchable category, dispatch the scout within hours instead of days.
 
-- **Alert listener:** `src/scout/alert-listener.ts:planAlertDispatches()`
+- **Alert listener:** `planAlertDispatches()` in `src/scout/alert-listener.ts`
   - Polls the `hydra:alerts` Redis list (newest 100 entries by default).
   - Filters via `PATTERN_CATEGORY_MAP` — the closed pattern→category map.
   - Applies a 24h per-pattern dedup (`hydra:scout:pattern-last-fired:<pattern>`) AND a 24h per-category cooldown (same `hydra:scout:category-last-walked:<cat>` key the calendar walk uses, so the two triggers honor each other).
@@ -298,7 +298,7 @@ See parent epic #483 for the full roadmap.
 - `src/scout/dispatch-audit.ts` — the `hydra:scout:dispatches` audit-stream boundary: `recordDispatch` (alert), `recordCalendarDispatch` (calendar, #4556), `listDispatchAudits`, and the per-day stats-counter wiring.
 - `src/scout/stats.ts` — per-day per-category counters + the rollup behind `/api/scout/stats`.
 - `src/scout/alert-listener.ts` — Phase C alert-driven planner (`PATTERN_CATEGORY_MAP`, `planAlertDispatches`, audit trail).
-- `src/redis-keys.ts` — adds `scoutToolsConsidered(slug)` + Phase B/C keys (`scoutLastCalendarWalk`, `scoutCategoryLastWalked`, `scoutStatsDaily`, `scoutDispatches`, `scoutAlertCursor`, `scoutPatternLastFired`).
+- `src/redis/keys.ts` — adds `scoutToolsConsidered(slug)` + Phase B/C keys (`scoutLastCalendarWalk`, `scoutCategoryLastWalked`, `scoutStatsDaily`, `scoutDispatches`, `scoutAlertCursor`, `scoutPatternLastFired`).
 - `src/api/scout.ts` — `/api/scout/stats`, `/api/scout/dispatches`, `/api/scout/alert-plan`.
 - `test/scout-seen-list.test.mts` — regression tests for record + re-eval eligibility.
 - `test/scout-alert-listener.test.mts` — regression tests for Phase C pattern map, dedup, coalescing, audit trail.

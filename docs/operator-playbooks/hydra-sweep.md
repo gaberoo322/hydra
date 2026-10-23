@@ -20,7 +20,7 @@ Fully autonomous board processor. Scans all open issues, groups by label, and ta
 
 When running on `/loop`, context accumulates. At the START of each sweep:
 
-1. Run `/compact` (Claude) or restart context (Codex) to shed previous iteration's tool results.
+1. Run `/compact` to shed previous iteration's tool results.
 2. Then proceed.
 
 Sweeps are stateless by design. State lives in GitHub issue labels and comments. Re-scan everything each time.
@@ -112,7 +112,7 @@ OPEN_PRS=$(gh pr list --repo gaberoo322/hydra --state open \
 #   no referencing OPEN PR  -> PROMOTE normally to ready-for-agent
 ```
 
-Gate strictly on `--state open`. A **closed-unmerged** PR means the prior attempt was abandoned, so the issue SHOULD become `ready-for-agent` again (exactly the #754→#770 handoff); a **merged** PR means the work is done. The sweep report MUST name every suppression and the referencing PR number (e.g. `suppressed: open PR #754 → needs-qa`). The decision is idempotent: re-running the sweep on the same board reaches the same outcome because state is read live from GitHub. This gate is independent of (and does not modify) the merge gate or the autopilot candidate feed — those remain separate defense layers.
+Gate strictly on `--state open`. A **closed-unmerged** PR means the prior attempt was abandoned, so the issue SHOULD become `ready-for-agent` again (exactly the #754→#770 handoff); a **merged** PR means the work is done. The sweep report MUST name every suppression and the referencing PR number (e.g. `suppressed: open PR #754 → needs-qa`). The decision is idempotent: re-running the sweep on the same board reaches the same outcome because state is read live from GitHub. This gate is independent of (and does not modify) the merge gate or the autopilot candidate selection — those remain separate defense layers.
 
 ### 2. Group and process
 
@@ -132,7 +132,7 @@ For each issue:
 Process all target-backlog before dev work.
 
 #### `needs-qa` — verify completed work
-Invoke `/hydra-qa $number` (Claude) or `codex exec --skill hydra-qa <<< $number` (Codex).
+Invoke `/hydra-qa $number`.
 Process all QA before new dev.
 
 #### `blocked` — check resolution
@@ -158,12 +158,12 @@ Skip tracking parents — but only route to `ready-for-human` when STUCK (run th
   Tracking parent with no autonomous path forward — STUCK: <reason, e.g. "all children closed but epic still open" / "no progressing child, no open PR, no clearing blocker">. Routing to operator.
   ```
 
-Pick by downstream impact (highest unblock count first; tie → oldest). Invoke `/hydra-dev $number` (or `codex exec --skill hydra-dev`). One at a time — worktree isolation.
+Pick by downstream impact (highest unblock count first; tie → oldest). Invoke `/hydra-dev $number`. One at a time — worktree isolation.
 
 After dev completes and issue is `needs-qa`, immediately run QA in the same sweep — do NOT defer.
 
 #### `needs-research`
-Invoke `/hydra-issue-research $number` (or `codex exec --skill hydra-issue-research`). Multiple in parallel OK (read-only).
+Invoke `/hydra-issue-research $number`. Multiple in parallel OK (read-only).
 
 #### `in-progress` — check for stale work
 1. PR exists? `gh pr list --search "closes #$number"`

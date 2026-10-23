@@ -196,8 +196,8 @@ Separate the two kinds of open question before you ask anything:
   ADRs, or the research report*. Resolve these yourself by exploring; **never**
   spend a Q&A turn asking the operator (or, in the autopilot path, asking
   yourself) a question you can answer from the sources in Step 2. Filling
-  `modulesTouched[].depthClassification` from `src/codebase-analyzer.ts`
-  heuristics is a fact, not a decision.
+  `modulesTouched[].depthClassification` from the Step 2 sources
+  is a fact, not a decision.
 - **Decisions** — anything that requires a *choice the sources don't settle*
   (which alternative to take, what invariant to commit to, whether to break an
   interface). These belong to the operator: present each with a recommended
@@ -219,10 +219,8 @@ facts get *explored*, decisions get *asked*.
 | What alternatives were considered and rejected? | `rejectedAlternatives` |
 | Are there terms in the issue not in `CONTEXT.md`? | `glossaryGaps` (see Step 5) |
 
-The "deep or shallow?" classification leans on the heuristics already
-encoded in [`src/codebase-analyzer.ts`](../../src/codebase-analyzer.ts) —
-the skill is not required to call the module, but the same vocabulary
-applies. A clearly shallow module (thin pass-through, no decisions of its
+The "deep or shallow?" classification uses the deep-module vocabulary
+(`mattpocock-skills:codebase-design`). A clearly shallow module (thin pass-through, no decisions of its
 own) should be flagged; a deep one (carries policy, has invariants) is the
 opposite signal.
 

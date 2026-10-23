@@ -102,7 +102,7 @@ gh issue edit $issue_number --remove-label ready-for-agent --add-label in-progre
 ### 5. Spawn worktree agent
 
 - **Claude:** `Agent(isolation: "worktree", prompt: <child-prompt>)`
-- **Codex:** Create worktree first, then `codex exec` inside it:
+- **Codex (retired, ADR-0006):** Create worktree first, then `codex exec` inside it:
   ```bash
   WT=/dev/shm/hydra-worktrees/issue-${issue_number}-$(date +%s)
   git -C ~/hydra worktree add -b "issue-${issue_number}-dev" "$WT" master
@@ -337,7 +337,7 @@ fi
 
 When the BG agent returns a **failure** with `verification-failure`, `no-diff`,
 or `rollback`, capture a learning hit (the only post-cycle writer to
-`hydra:memory:executor:patterns` for Claude runs). Skip on success and on
+`hydra:memory:{agent}:patterns` (agent = executor) for Claude runs). Skip on success and on
 infrastructure aborts.
 ```bash
 curl -fsS -X POST http://localhost:4000/api/memory/subagent-lesson \

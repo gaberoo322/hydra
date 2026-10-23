@@ -429,7 +429,7 @@ for per-merge **Outcome Holdback** (epic #1052): Target outcomes can lag the
 merge by hours or days and there is no per-merge outcome seam (#933), so instead
 of holding a merge back on an outcome signal, we let the merge land and then
 sample fast, merge-attributable operational signals the Target already exposes
-(e.g. a `/api/health/full` endpoint — overall status + per-service health
+(e.g. a Target-side health endpoint — overall status + per-service health
 signals). On a regression past a configurable noise floor it
 raises a `hydra-target-incident` alarm.
 
@@ -481,7 +481,7 @@ Fail-soft: if the Target API is truly unreachable (service still restarting,
 port not yet up, non-JSON body), the script logs and exits 0 — an unreachable
 Target is not a merge regression and must never look like a build failure.
 Note (issue #1699): a non-2xx response that still carries a health JSON body
-IS a valid sample — `/api/health/full` answers 503 with a full body when the
+IS a valid sample — the Target health endpoint answers 503 with a full body when the
 overall status is degraded/error — so a degraded baseline still yields signal.
 If the baseline file is missing (Step 7 snapshot skipped or Target was down
 pre-merge), the watcher falls back to the absolute thresholds.
@@ -570,7 +570,7 @@ if [ -n "${ANCHOR_NUM:-}" ]; then
 fi
 ```
 
-Record metrics (shared with Codex):
+Record metrics (shared with Codex, retired by ADR-0006):
 ```bash
 hydra raw POST /metrics/record "{
   \"cycleId\":\"$CYCLE_ID\",\"source\":\"claude\",
@@ -607,10 +607,10 @@ hydra raw POST /cycle/complete "{\"cycleId\":\"$CYCLE_ID\",\"source\":\"claude\"
 ```
 
 On failure — lesson capture for shared learning (issue #392).
-This is the only post-cycle writer to `hydra:memory:executor:patterns` for
-Claude-driven builds after #383 deletes codex-runner. The endpoint forwards
+This is the only post-cycle writer to `hydra:memory:{agent}:patterns` (agent = executor) for
+Claude-driven builds after #383 deletes codex-runner (ADR-0006). The endpoint forwards
 to `recordPattern()` so the existing 3-hit auto-promotion to
-`config/feedback/to-executor.md` keeps working.
+retired `config/feedback/to-executor.md` surface keeps working.
 ```bash
 # Pick the cue that matches the failure mode:
 #   verification-failure | no-diff | rollback

@@ -4,7 +4,7 @@
 
 ## What this is
 
-The procedure for pointing a **single** running Orchestrator instance at a **different Target** — e.g. switching from `hydra-betting` to a new gaming webapp — by flipping env vars and restarting, per [ADR-0002](./adr/0002-single-target-per-orchestrator-instance.md). This is **swap-mode**: one target at a time. The previous target pauses while the new one runs; they do **not** run concurrently.
+The procedure for pointing a **single** running Orchestrator instance at a **different Target** — e.g. switching from hydra-betting to a new gaming webapp — by flipping env vars and restarting, per [ADR-0002](./adr/0002-single-target-per-orchestrator-instance.md). This is **swap-mode**: one target at a time. The previous target pauses while the new one runs; they do **not** run concurrently.
 
 Use this to **smoke-test a swap** before investing in the unbuilt "fleet" (concurrent multi-instance) scaffolding. If you need both targets building at once, this runbook is not enough — see [Concurrent operation](#concurrent-operation-not-this-runbook).
 
@@ -64,7 +64,7 @@ Set these for the service (in the unit's `Environment=` / the `.env` that `bin/s
 
 | Var | Example | Notes |
 |---|---|---|
-| `HYDRA_TARGET_NAME` | `hydra-gaming` | drives worktree prefix + `${name}-web.service` |
+| `HYDRA_TARGET_NAME` | `"hydra-gaming"` | drives worktree prefix + `${name}-web.service` |
 | `HYDRA_PROJECT_WORKSPACE` | `/home/gabe/hydra-gaming` | absolute path to the checked-out target |
 | `HYDRA_TARGET_GITHUB_REPO` | `gaberoo322/hydra-gaming` | `owner/repo` |
 | `HYDRA_TARGET_WEB_URL` | `http://localhost:3334` | canonical (#3020); legacy `HYDRA_BETTING_URL` still resolves via `getTargetWebUrl()` but emits a one-time deprecation warning |

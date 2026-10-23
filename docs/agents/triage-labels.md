@@ -43,7 +43,7 @@ needs-triage → ready-for-agent → in-progress → needs-qa → (close)
 
 `target-backlog` issues describe findings about the target project (`~/hydra-betting`), not the orchestrator. `hydra-sweep` and `hydra-target-sweep` consume them differently:
 
-1. `hydra-sweep` reads `target-backlog`-labelled issues and POSTs them to `/api/queue` so the target-side build loop can pick them up.
+1. `hydra-sweep` reads `target-backlog`-labelled issues and queues them with `hydra queue add` (the `hydra` CLI) so the target-side build loop can pick them up.
 2. Once queued, the orchestrator-side issue is closed with a comment linking to the queue ID.
 
 The issue body should still describe the finding clearly, but the `Files in scope` precondition does not apply — the target work queue has its own scoping mechanism.
@@ -66,7 +66,7 @@ The Turn Snapshot (`src/autopilot/turn-snapshot/orch-board.ts`) excludes `hitl-g
 
 ### Two boundaries — do not conflate
 
-- **vs `ready-for-human`** — `ready-for-human` means an agent gave up and the operator must decide *now*; it is also an `INTERVENTION_LABEL` in `src/aggregators/autonomy-classifier.ts`, so parking an idea there would incorrectly degrade the autonomy metric. `hitl-grill` is not an escalation and must never be counted as an intervention.
+- **vs `ready-for-human`** — `ready-for-human` means an agent gave up and the operator must decide *now*; it is also an `INTERVENTION_LABELS` entry in `src/aggregators/autonomy-classifier.ts`, so parking an idea there would incorrectly degrade the autonomy metric. `hitl-grill` is not an escalation and must never be counted as an intervention.
 - **vs the attention feed (#4007)** — *Superseded by ADR-0034 §8.1 (map #4416, 2026-09-22).* Individual parked ideas are still not feed rows (a speculative idea crosses no threshold), but the **lane as a whole** is feed bucket 5, "Parked ideas over cap": a single aggregate row once the lane holds `≥ HITL_GRILL_CAP` (10) items, showing the three oldest titles and handing off to `/hydra-hitl-grill`. The drain surfaces below are unchanged.
 
 ### Exit contract

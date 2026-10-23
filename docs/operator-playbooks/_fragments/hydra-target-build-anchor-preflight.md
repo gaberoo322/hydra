@@ -353,7 +353,7 @@ fi
 - Banner not on the first non-blank line → not detected. The banner contract is
   first-non-blank-line placement; the doc-supersession slice (#2725-style
   generator) is responsible for stamping it there.
-- `GROUND_DOCS` empty/unset → the check is a silent no-op (the plan grounds on
+- `$GROUND_DOCS` empty/unset → the check is a silent no-op (the plan grounds on
   no docs). Populate it from the plan's rationale sources, mirroring the
   `SCOPE_IN` discipline in Step 3.1.
 

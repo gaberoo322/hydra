@@ -424,6 +424,18 @@
       "title": "Skeptic Guidance"
     },
     {
+      "path": "docs/historical/candidate-feed.md",
+      "tier": "historical",
+      "route": "/docs/history/candidate-feed",
+      "title": "Candidate Feed (ADR-0036)"
+    },
+    {
+      "path": "docs/historical/codex-otel.md",
+      "tier": "historical",
+      "route": "/docs/history/codex-otel",
+      "title": "Codex OpenTelemetry (issue #199)"
+    },
+    {
       "path": "docs/historical/hydra-betting/direction/goals.md",
       "tier": "historical",
       "route": "/docs/history/hydra-betting/direction/goals",
@@ -440,6 +452,12 @@
       "tier": "historical",
       "route": "/docs/history/hydra-betting/direction/roadmap",
       "title": "Roadmap"
+    },
+    {
+      "path": "docs/historical/merge-gate.md",
+      "tier": "historical",
+      "route": "/docs/history/merge-gate",
+      "title": "Merge Gate (issue #249, removed in PR-3 / #383)"
     },
     {
       "path": "docs/observability/README.md",

@@ -27,7 +27,7 @@ single-realm: `hydra-incident` never touches `$TARGET_WS`, and
 realm-scoped — so Target post-mortems file there with the `target-backlog`
 label. Phase-5 prevention rules route to the **Target** planner/executor
 feedback surface only (`config/feedback/to-planner.md`,
-`config/feedback/to-executor.md`); never write Orchestrator memory from here.
+`config/feedback/to-executor.md`, retired by ADR-0006); never write Orchestrator memory from here.
 
 > Target test-suite caveat (CLAUDE.md): some targets alias a bare
 > `npm test` to a count-gate + a handful of sentinels rather than the real
@@ -41,7 +41,7 @@ feedback surface only (`config/feedback/to-planner.md`,
 ## Trigger context
 
 1. From `hydra-target-build` Step 8.6 — the alarm-only post-merge health watcher
-   (`scripts/target/post-merge-health.ts --dispatch`) spawns this skill on a
+   (`scripts/target/post-merge-health.ts` with `--dispatch`) spawns this skill on a
    detected Target regression. That watcher is **alarm-only**: it never reverts
    and never blocks a merge; it hands off to this skill, which decides whether
    to investigate / fix / revert.
@@ -206,7 +206,7 @@ EOF
 
 If the cause reveals a recurring Target planner/executor pattern, append a
 prevention instruction to the **Target** feedback files the build loop already
-reads (`config/feedback/to-planner.md`, `config/feedback/to-executor.md`). Do
+reads (retired by ADR-0006: `config/feedback/to-planner.md`, `config/feedback/to-executor.md`). Do
 NOT write the Orchestrator's executor-pattern memory from here — that is a
 cross-realm write the single-realm contract forbids.
 

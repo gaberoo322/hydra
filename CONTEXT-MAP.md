@@ -44,7 +44,7 @@ get their own rows:
 | `.github/workflows/` (Verifier Core) | ADR-0015, ADR-0019, ADR-0020 | [Quality gates](docs/quality-gates.md) |
 | `scripts/autopilot/` (`decide.py`, `classes.json`) | ADR-0007, ADR-0012, ADR-0029, ADR-0032, ADR-0043 | — |
 | `dashboard/` | ADR-0034 | [Deploy recipe](docs/reference.md#deploy-recipe) |
-| `config/direction/`, `config/orchestrator/` | ADR-0003, ADR-0005 | [Config](docs/reference.md#config-hydraconfig--git-tracked), [Target Outcomes](docs/reference.md#target-outcomes-issue-241-adr-0003--adr-0004) |
+| `config/direction/`, `config/orchestrator/` | ADR-0003, ADR-0005 | [Config](docs/reference.md#config-hydraconfig--git-tracked), [Target Outcomes](docs/reference.md#target-outcomes-issue-241-adr-0003--adr-0015) |
 | `scripts/sync-skills.sh`, `src/skills/` (skill generation) | ADR-0041 | — |
 | `docs/adr/` itself | ADR-0037 | — |
 | `test/`, `scripts/test/` (the suite itself) | ADR-0038 | [Process cleanup](docs/operations/process-cleanup.md) |
