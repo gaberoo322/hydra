@@ -117,11 +117,13 @@ For each row printed (number, age, title):
 
 1. **Classify by linked PRs across ALL states — never `state=open` alone.** A merged PR is `state=closed`, so an open-only guard cannot see the PR that shipped the work and re-arms a finished issue instead of closing it (this wasted a `dev_target` dispatch on a prior Target — gaberoo322/hydra#3700). REST-only per ADR-0031 Decision 6:
    ```bash
+   LOOKUP_FAILED=""
    LINKED=$(gh api --paginate "repos/$REPO/pulls?state=all&per_page=100" \
      --jq '.[] | select((.body // "") | test("[Cc]loses #'"$NUM"'\\b"))
-                | "\(.number)\t\(.state)\t\(.merged_at // "-")"')
+                | "\(.number)\t\(.state)\t\(.merged_at // "-")"') || { LOOKUP_FAILED=linked; LINKED=""; }
    ```
-2. **Branch five ways on `$LINKED`, in this order. Only the last may re-arm the issue:**
+   **Every lookup in this step is guarded the same way (#5167).** A failed read (rate limit, network) must never look like an empty result, because an empty result is what lets the issue fall through to the re-queue. Each `X=$(gh api …)` below carries an `||` arm that sets `LOOKUP_FAILED=<which>` (directly, or via an emptiness check right after it). Whenever `$LOOKUP_FAILED` is set, stop: skip the issue this sweep and log `<which>-lookup-failed` (`linked-lookup-failed`, `child-lookup-failed`, `branch-lookup-failed`). **Never re-queue on a failed lookup.** If you add a lookup here, guard it too.
+2. **Branch five ways on `$LINKED`, in this order. Only the last may re-arm the issue, and only when `$LOOKUP_FAILED` is empty:**
    - **A linked PR with a non-empty `merged_at` → SHIPPED: close it.** Recovering it would re-dispatch an anchor already satisfied. This is also what keeps Step 5 from undoing Step 7.
      ```bash
      gh issue close $NUM --repo $REPO --reason completed \
@@ -137,46 +139,56 @@ For each row printed (number, age, title):
      CHILDREN=$(gh api --paginate "repos/$REPO/issues?state=open&per_page=100" \
        --jq '.[] | select(has("pull_request")|not)
                   | select((.body // "") | test("([Ss]lice|[Cc]hild) of #'"$NUM"'\\b|## Parent\\s+#'"$NUM"'\\b"))
-                  | .number')
+                  | .number') || { LOOKUP_FAILED=child; CHILDREN=""; }
      ```
-     Non-empty `$CHILDREN` → skip and log `parent-progressing` with the child numbers.
+     `$LOOKUP_FAILED` set → skip and log `child-lookup-failed`. Non-empty `$CHILDREN` → skip and log `parent-progressing` with the child numbers.
    - **Else a pushed build branch carries the work but has no PR → open the PR (#5167).** A `dev_target` dispatch can push and die before `gh pr create`; re-queuing would rebuild from scratch and orphan the branch. Find a `feature/*-dev_target` branch that never had a PR (open, closed or merged), is ahead of the default branch, and has a `Closes #NUM` commit:
      ```bash
-     DEFAULT=$(gh api "repos/$REPO" --jq .default_branch)
-     BRANCH=""; LOOKUP_FAILED=""
-     [ -n "$DEFAULT" ] || LOOKUP_FAILED=1
-     BRS=$(gh api --paginate "repos/$REPO/branches?per_page=100" --jq '.[].name | select(startswith("feature/") and endswith("-dev_target"))') || { LOOKUP_FAILED=1; BRS=""; }
-     for B in $BRS; do
+     DEFAULT=$(gh api "repos/$REPO" --jq .default_branch) || DEFAULT=""
+     BRANCH=""
+     [ -n "$DEFAULT" ] || LOOKUP_FAILED=branch
+     BRS=$(gh api --paginate "repos/$REPO/branches?per_page=100" --jq '.[].name | select(startswith("feature/") and endswith("-dev_target"))') || { LOOKUP_FAILED=branch; BRS=""; }
+     while IFS= read -r B; do   # not `for B in $BRS`: zsh does not word-split it
+       [ -n "$B" ] || continue
        [ -n "$DEFAULT" ] || break
-       PRS=$(gh api "repos/$REPO/pulls?state=all&head=${REPO%%/*}:$B" --jq 'length') || { LOOKUP_FAILED=1; continue; }
+       PRS=$(gh api "repos/$REPO/pulls?state=all&head=${REPO%%/*}:$B" --jq 'length') || { LOOKUP_FAILED=branch; continue; }
        [ "$PRS" = "0" ] || continue
        OK=$(gh api "repos/$REPO/compare/$DEFAULT...$B" \
-         --jq '[.ahead_by > 0, ([.commits[].commit.message | test("[Cc]loses #'"$NUM"'\\b")] | any)] | all') || { LOOKUP_FAILED=1; continue; }
+         --jq '[.ahead_by > 0, ([.commits[].commit.message | test("[Cc]loses #'"$NUM"'\\b")] | any)] | all') || { LOOKUP_FAILED=branch; continue; }
        if [ "$OK" = "true" ]; then BRANCH="$B"; break; fi
-     done
+     done <<< "$BRS"
      ```
      If `$BRANCH` is empty but `$LOOKUP_FAILED` is set, a read failed (rate limit, network), so the finished branch may just be unseen: skip the issue this sweep and log `branch-lookup-failed`. Never re-queue on a failed lookup.
      If `$BRANCH` is set, open the PR via REST (`gh pr create` is GraphQL), titled and bodied from the newest closing commit plus a provenance line, then route the issue to QA. CI stays the gate; automerge's `money-critical` fence still holds.
      ```bash
      MSG=$(gh api "repos/$REPO/compare/$DEFAULT...$BRANCH" \
-       --jq '[.commits[].commit.message | select(test("[Cc]loses #'"$NUM"'\\b"))] | last')
-     BODY_FILE=$(mktemp)
-     {
-       printf '%s\n\n' "$MSG"
-       printf '## Provenance\n\nOpened by hydra-target-sweep stall recovery (#5167) from pushed branch `%s`; its dispatch died before opening a PR. Commit unchanged; CI is the gate.\n' "$BRANCH"
-     } > "$BODY_FILE"
-     PR_URL=$(gh api -X POST "repos/$REPO/pulls" -f title="$(printf '%s' "$MSG" | head -n1)" \
-       -f head="$BRANCH" -f base="$DEFAULT" -F body=@"$BODY_FILE" --jq .html_url) || PR_URL=""
-     rm -f "$BODY_FILE"
+       --jq '[.commits[].commit.message | select(test("[Cc]loses #'"$NUM"'\\b"))] | last') || MSG=""
+     PR_URL=""
+     if [ -z "$MSG" ]; then
+       LOOKUP_FAILED=branch   # skip + log branch-lookup-failed; never POST an untitled PR
+     else
+       BODY_FILE=$(mktemp)
+       {
+         printf '%s\n\n' "$MSG"
+         printf '## Provenance\n\nOpened by hydra-target-sweep stall recovery (#5167) from pushed branch `%s`; its dispatch died before opening a PR. Commit unchanged; CI is the gate.\n' "$BRANCH"
+       } > "$BODY_FILE"
+       PR_URL=$(gh api -X POST "repos/$REPO/pulls" -f title="$(printf '%s' "$MSG" | head -n1)" \
+         -f head="$BRANCH" -f base="$DEFAULT" -F body=@"$BODY_FILE" --jq .html_url) || PR_URL=""
+       rm -f "$BODY_FILE"
+     fi
      if [ -n "$PR_URL" ]; then
-       gh issue edit $NUM --repo $REPO --remove-label in-progress --add-label needs-qa
-       gh issue comment $NUM --repo $REPO --body "> *hydra-target-sweep:* Recovered: the build pushed \`$BRANCH\` but died before opening a PR. Opened $PR_URL from that branch; in-progress → needs-qa (stall recovery, #5167)."
+       gh api -X POST "repos/$REPO/issues/$NUM/labels" -f 'labels[]=needs-qa' --silent \
+         && gh api -X DELETE "repos/$REPO/issues/$NUM/labels/in-progress" --silent \
+         || echo "pr-opened-relabel-failed: #$NUM ($PR_URL)" >&2
+       gh api -X POST "repos/$REPO/issues/$NUM/comments" \
+         -f body="> *hydra-target-sweep:* Recovered: the build pushed \`$BRANCH\` but died before opening a PR. Opened $PR_URL from that branch; in-progress → needs-qa (stall recovery, #5167)." --silent \
+         || echo "pr-opened-comment-failed: #$NUM ($PR_URL)" >&2
      fi
      ```
-     Log it as `pushed-branch-pr-opened`. If the POST failed (`$PR_URL` empty), leave the issue `in-progress` untouched and log `pr-create-failed`. Never edit, rebase or force-push the recovered branch.
-   - **Else no linked PR, no open child, no pushed branch → genuinely stalled: recover.**
+     Log it as `pushed-branch-pr-opened` (or `pr-opened-relabel-failed` if the relabel failed; the PR exists, so the next sweep classifies the issue as PROGRESSING and never rebuilds it). If the POST failed (`$PR_URL` empty), leave the issue `in-progress` untouched and log `pr-create-failed`. Never edit, rebase or force-push the recovered branch.
+   - **Else no linked PR, no open child, no pushed branch, and `$LOOKUP_FAILED` empty → genuinely stalled: recover.**
      `gh issue edit $NUM --repo $REPO --remove-label in-progress --add-label ready-for-agent`
-3. Log under "Stall recoveries" with number, age, and which branch fired (`shipped-closed` / `progressing-skipped` / `parent-progressing` / `pushed-branch-pr-opened` / `pr-create-failed` / `branch-lookup-failed` / `stalled-90min`).
+3. Log under "Stall recoveries" with number, age, and which branch fired (`shipped-closed` / `progressing-skipped` / `parent-progressing` / `pushed-branch-pr-opened` / `pr-opened-relabel-failed` / `pr-create-failed` / `linked-lookup-failed` / `child-lookup-failed` / `branch-lookup-failed` / `stalled-90min`).
 4. If the same issue shows up here on consecutive sweeps, flag it for operator attention — repeated stalls usually mean a structural blocker, not a transient agent crash.
 
 The 90-minute version gives operators a fast feedback signal when the WIP slots silently fill up. The primary close is performed by the target repo's own automerge.yml within seconds of the merge (ADR-0031 Decision 5); the merged branch above is the reconciler for whatever that path misses.
