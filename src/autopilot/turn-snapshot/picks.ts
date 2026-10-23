@@ -48,6 +48,7 @@ import { mergedPrReferences, type PrRefRow } from "../../github/pr-refs.ts";
 import { glmGrillExemption, type GlmGrillExemption } from "../../glm/eligibility.ts";
 import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
 import { DESIGN_CONCEPT_MAX_AGE_MS } from "../../design-concept-gate.ts";
+import { eachValue, toInteger } from "./json-values.ts";
 import { DEGRADE, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { ghTimestampSeconds, parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
@@ -160,9 +161,7 @@ function labelNamesOf(row: unknown): Set<unknown> | Malformed {
 
 /** The values a `.[]` walk visits (list items, or an object's values); anything else is malformed. */
 function valuesOf(v: unknown): unknown[] | Malformed {
-  if (Array.isArray(v)) return v;
-  if (isDict(v)) return Object.values(v);
-  return MALFORMED;
+  return eachValue(v) ?? MALFORMED;
 }
 
 /** `row[key]` where a null row yields null (a `.field` walk); any other non-object row is malformed. */
@@ -188,17 +187,6 @@ function labelNameList(row: unknown, orEmpty: boolean): unknown[] | Malformed {
   return names;
 }
 
-/**
- * An integer from a decoded JSON value, or `null` where the conversion is
- * undefined (non-finite number, non-numeric text, list, ...). Booleans are
- * 0/1, floats truncate, text may carry a sign, spaces and `_` digit groups.
- */
-function toInteger(v: unknown): number | null {
-  if (typeof v === "boolean") return v ? 1 : 0;
-  if (typeof v === "number") return Number.isFinite(v) ? Math.trunc(v) : null;
-  if (typeof v === "string" && /^\s*[+-]?\d(?:_?\d)*\s*$/.test(v)) return Number(v.trim().replace(/_/g, ""));
-  return null;
-}
 
 // ---------------------------------------------------------------------------
 // Pure classifiers

@@ -34,6 +34,7 @@
 import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
+import { integerText } from "./json-values.ts";
 import { labelNames } from "./board-saturation.ts";
 
 export interface AfkFrontierDeps {
@@ -186,21 +187,6 @@ export async function collectRetro(deps: AfkFrontierDeps): Promise<CollectorOutc
 // ---------------------------------------------------------------------------
 // Wayfinder frontier
 // ---------------------------------------------------------------------------
-
-/**
- * Python's `int(x)` as `print(int(n))` printed it, or null where it raises
- * (the loop then stops: every later map is dropped, as in the heredoc).
- */
-function integerText(x: unknown): string | null {
-  if (typeof x === "boolean") return x ? "1" : "0";
-  if (typeof x === "number") return Number.isFinite(x) ? BigInt(Math.trunc(x)).toString() : null;
-  if (typeof x === "string") {
-    const s = x.trim();
-    if (!/^[+-]?\d+(?:_\d+)*$/.test(s)) return null;
-    return BigInt(s.replaceAll("_", "")).toString();
-  }
-  return null;
-}
 
 /** The approved map numbers in {@link numberOrder}, as integer text; the walk stops at the first non-integer. */
 export function foldWayfinderMaps(read: GhJsonRead): Classified<string[]> {
