@@ -978,20 +978,6 @@
       }
     },
     {
-      "name": "SubagentDispatchStepPatchBodySchema",
-      "file": "src/schemas/dispatches.ts",
-      "importedBy": [
-        "src/api/dispatches.ts"
-      ],
-      "routes": [
-        "PATCH /api/dispatches/subagent/:sessionId/current-step"
-      ],
-      "source": {
-        "path": "src/schemas/dispatches.ts",
-        "line": 78
-      }
-    },
-    {
       "name": "SubagentFrictionBodySchema",
       "file": "src/schemas/pattern-memory.ts",
       "importedBy": [
@@ -1106,7 +1092,7 @@
       ],
       "source": {
         "path": "src/schemas/dispatches.ts",
-        "line": 100
+        "line": 86
       }
     },
     {

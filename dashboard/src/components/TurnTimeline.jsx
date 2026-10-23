@@ -19,8 +19,8 @@ function ActionRow({ action }) {
     // "Watch stream" cross-link to the legacy AgentStream page. That page
     // was retired in slice 6 of the v2 swap (issue #621); the branch is
     // still surfaced as plain text below so operators can correlate by
-    // grep. The `/api/agents/stream` resolver itself is retained pending a
-    // follow-up that re-homes the correlation feature.
+    // grep. The `/api/agents/stream` resolver was retired (#5160); a
+    // future correlation feature would need a new resolver.
     const branch =
       action.worktreeBranch || action.worktree_branch || action.branch ||
       outcome?.worktreeBranch || outcome?.worktree_branch || null;

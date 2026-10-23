@@ -162,6 +162,7 @@ export const RETIRED_WRITES: Readonly<Record<string, string>> = Object.freeze({
   "DELETE /api/env/:project/:key": "zero callers; 401 on every request on this host",
   "POST /api/research/start": "a disabled no-op responder since #342 — research is the /hydra-target-research skill",
   "POST /api/calibration/outcomes/sync": "zero callers — a pass-through proxy to the Target",
+  "PATCH /api/dispatches/subagent/:sessionId/current-step": "zero callers (#5160)",
 });
 
 /**
@@ -306,7 +307,7 @@ export const MACHINE_READS: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /**
- * GETs deleted under ADR-0024 §3 (ADR-0034 §9.4 — the eleven). Each must stay
+ * GETs deleted under ADR-0024 §3 (ADR-0034 §9.4 — the eleven, then the six parked candidates #5160 retired). Each must stay
  * ABSENT from the inventory.
  */
 export const RETIRED_READS: Readonly<Record<string, string>> = Object.freeze({
@@ -322,23 +323,20 @@ export const RETIRED_READS: Readonly<Record<string, string>> = Object.freeze({
     "zero callers — route only; projectReflectionHealth stays for GET /api/health/deep",
   "GET /api/now/alerts": "zero callers — /health reads GET /api/alerts",
   "GET /api/metrics/abandonment": "zero callers",
+  "GET /api/agents/stream": "zero callers (#5160) — decide.py still stamps worktreeBranch, but no view scopes by it",
+  "GET /api/config/:section": "zero callers (#5160) — skills read single files via GET /config/:section/:name",
+  "GET /api/cycle/report/:cycleId": "zero callers (#5160)",
+  "GET /api/metrics/instrumentation": "zero callers (#5160) — the src/metrics/instrumentation.ts timing module went with it",
+  "GET /api/observability/config": "zero callers (#5160)",
+  "GET /api/today/decision-queue": "zero callers (#5160) — the overnight decision queue was retired by #4445",
 });
 
 /**
- * SHRINK-ONLY: routes (read or write) with ZERO callers found at #4638
- * classification that sit outside the eleven reads / five writes §9 ratified
- * for retirement. Follow-up #5160 decides each: delete it (→ RETIRED_*) or
- * name the caller (→ MACHINE_*). The parity test pins these keys to a ceiling.
+ * SHRINK-ONLY, now EMPTY (ceiling 0): the seven zero-caller routes parked at
+ * #4638 classification were all retired by #5160 (→ RETIRED_*). Never add one:
+ * classify a new route instead.
  */
-export const RETIREMENT_CANDIDATES: Readonly<Record<string, string>> = Object.freeze({
-  "GET /api/agents/stream": "#5160 — no caller; decide.py only stamps the branch a stream view would scope by",
-  "GET /api/config/:section": "#5160 — no caller; skills read single files via /config/:section/:name",
-  "GET /api/cycle/report/:cycleId": "#5160 — no caller",
-  "GET /api/metrics/instrumentation": "#5160 — no caller",
-  "GET /api/observability/config": "#5160 — no caller",
-  "GET /api/today/decision-queue": "#5160 — no caller; the overnight decision queue was retired by #4445",
-  "PATCH /api/dispatches/subagent/:sessionId/current-step": "#5160 — no caller",
-});
+export const RETIREMENT_CANDIDATES: Readonly<Record<string, string>> = Object.freeze({});
 
 /**
  * HOMED_READS whose home the inventory cannot attribute as a consumer (the

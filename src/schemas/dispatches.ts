@@ -69,20 +69,6 @@ export const SubagentDispatchPostBodySchema = z
 
 
 /**
- * Body accepted by `PATCH /api/dispatches/subagent/:sessionId/current-step`.
- *
- * `currentStep` is required (the whole point of the PATCH) but may be an
- * empty string — a caller clearing the step is legitimate, so we do NOT apply
- * the `min(1)` trim chain here.
- */
-export const SubagentDispatchStepPatchBodySchema = z
-  .object({
-    currentStep: z.string({ message: "currentStep must be a string" }),
-  })
-  .strict();
-
-
-/**
  * Query params accepted by
  * `GET /api/dispatches/:dispatchId/transcript?offset=0&limit=200` (issue #695).
  *

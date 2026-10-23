@@ -299,11 +299,11 @@
         },
         {
           "path": "src/api.ts",
-          "line": 55
+          "line": 53
         },
         {
           "path": "src/api/config.ts",
-          "line": 31
+          "line": 30
         },
         {
           "path": "src/api/recommendations.ts",
@@ -1562,7 +1562,7 @@
         },
         {
           "path": "src/api/config.ts",
-          "line": 32
+          "line": 31
         },
         {
           "path": "src/api/recommendations.ts",
@@ -1596,13 +1596,13 @@
       "readSites": [
         {
           "path": "src/api.ts",
-          "line": 89
+          "line": 87
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/api.ts",
-        "line": 89
+        "line": 87
       }
     },
     {
@@ -2502,20 +2502,6 @@
       }
     },
     {
-      "name": "HYDRA_OTEL_ENABLED",
-      "readSites": [
-        {
-          "path": "src/api/observability.ts",
-          "line": 22
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "src/api/observability.ts",
-        "line": 22
-      }
-    },
-    {
       "name": "HYDRA_PACE_GATE_DRY_RUN",
       "readSites": [
         {
@@ -2623,20 +2609,6 @@
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
         "line": 538
-      }
-    },
-    {
-      "name": "HYDRA_PERF_INSTRUMENT",
-      "readSites": [
-        {
-          "path": "src/metrics/instrumentation.ts",
-          "line": 60
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "src/metrics/instrumentation.ts",
-        "line": 60
       }
     },
     {
@@ -3194,11 +3166,11 @@
         },
         {
           "path": "src/api.ts",
-          "line": 55
+          "line": 53
         },
         {
           "path": "src/api/config.ts",
-          "line": 31
+          "line": 30
         },
         {
           "path": "src/api/recommendations.ts",
@@ -3367,20 +3339,6 @@
       "source": {
         "path": "scripts/autopilot/turn-snapshot.ts",
         "line": 565
-      }
-    },
-    {
-      "name": "HYDRA_TRACE_UI_URL",
-      "readSites": [
-        {
-          "path": "src/api/observability.ts",
-          "line": 30
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "src/api/observability.ts",
-        "line": 30
       }
     },
     {

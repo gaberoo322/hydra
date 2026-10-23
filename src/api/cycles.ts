@@ -5,7 +5,6 @@ import {
   releaseCycleSource,
   initCycleHash,
   updateCycleHash,
-  getCycleHash,
 } from "../redis/cycle-tracking.ts";
 import { countQuerySchema } from "../schemas/common.ts";
 import {
@@ -13,7 +12,6 @@ import {
   CycleCompleteBodySchema,
 } from "../schemas/cycles.ts";
 import { aggregatorRouteNoQuery, isolateAggregator, schemaValidationError } from "./route-helpers.ts";
-import { logger } from "../logger.ts";
 
 export function createCyclesRouter() {
   const router = Router();
@@ -41,48 +39,6 @@ export function createCyclesRouter() {
       return getCycleHistory(limit);
     }),
   );
-
-  // GET /cycle/report/:cycleId — Structured report for a specific cycle.
-  //
-  // Reads the autopilot-written cycle hash (the blessed write path —
-  // redis/cycle-tracking.ts) rather than the retired in-process tracker's raw
-  // seam (issue #792 / ADR-0016). The hash carries real task counts; per-agent
-  // runs and per-cycle cost hashes were always-empty under the autopilot
-  // recorder, so they are no longer surfaced here.
-  // Not an isolateAggregator route: the success path returns a 404 for an
-  // unknown cycleId, which the seam (JSON-at-200 of produce's return) can't
-  // express.
-  router.get("/cycle/report/:cycleId", async (req, res) => {
-    try {
-      const hash = await getCycleHash(req.params.cycleId);
-      if (!hash || Object.keys(hash).length === 0) {
-        return res.status(404).json({ error: "Cycle not found" });
-      }
-      const total = parseInt(hash.total || "0");
-      const completed = parseInt(hash.completed || "0");
-      const failed = parseInt(hash.failed || "0");
-      const abandoned = parseInt(hash.abandoned || "0");
-      const timedOut = parseInt(hash.timedOut || "0");
-      res.json({
-        cycleId: req.params.cycleId,
-        status: hash.status,
-        startedAt: hash.startedAt,
-        completedAt: hash.completedAt,
-        source: hash.source,
-        tasks: {
-          total,
-          completed,
-          failed,
-          abandoned,
-          timedOut,
-          inProgress: Math.max(0, total - completed - failed - abandoned - timedOut),
-        },
-      });
-    } catch (err: any) {
-      logger.error({ routeLabel: "api/cycle/report", cycleId: req.params.cycleId, err }, "[api/cycles] report failed");
-      res.status(500).json({ error: err.message });
-    }
-  });
 
   // Register an external cycle (Claude Code)
   //

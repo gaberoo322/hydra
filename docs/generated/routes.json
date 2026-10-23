@@ -9,23 +9,6 @@
   "rows": [
     {
       "method": "GET",
-      "path": "/api/agents/stream",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/agents/stream",
-      "areas": [
-        "src/autopilot/",
-        "src/logger.ts",
-        "src/redis/"
-      ],
-      "source": {
-        "path": "src/api/agents.ts",
-        "line": 100
-      }
-    },
-    {
-      "method": "GET",
       "path": "/api/alerts",
       "stability": "stable",
       "stabilityNote": null,
@@ -881,21 +864,6 @@
     },
     {
       "method": "GET",
-      "path": "/api/config/:section",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/config/:section",
-      "areas": [
-        "src/logger.ts"
-      ],
-      "source": {
-        "path": "src/api/config.ts",
-        "line": 39
-      }
-    },
-    {
-      "method": "GET",
       "path": "/api/config/:section/:name",
       "stability": "stable",
       "stabilityNote": null,
@@ -906,7 +874,7 @@
       ],
       "source": {
         "path": "src/api/config.ts",
-        "line": 51
+        "line": 41
       }
     },
     {
@@ -921,7 +889,7 @@
       ],
       "source": {
         "path": "src/api/config.ts",
-        "line": 68
+        "line": 58
       }
     },
     {
@@ -933,13 +901,12 @@
       "home": "/api/cycle/status",
       "areas": [
         "src/cycle.ts",
-        "src/logger.ts",
         "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/cycles.ts",
-        "line": 26
+        "line": 24
       }
     },
     {
@@ -951,31 +918,12 @@
       "home": "/api/cycle/history",
       "areas": [
         "src/cycle.ts",
-        "src/logger.ts",
         "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/cycles.ts",
-        "line": 35
-      }
-    },
-    {
-      "method": "GET",
-      "path": "/api/cycle/report/:cycleId",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/cycle/report/:cycleId",
-      "areas": [
-        "src/cycle.ts",
-        "src/logger.ts",
-        "src/redis/",
-        "src/schemas/"
-      ],
-      "source": {
-        "path": "src/api/cycles.ts",
-        "line": 55
+        "line": 33
       }
     },
     {
@@ -987,13 +935,12 @@
       "home": "/api/cycle/register",
       "areas": [
         "src/cycle.ts",
-        "src/logger.ts",
         "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/cycles.ts",
-        "line": 92
+        "line": 48
       }
     },
     {
@@ -1005,13 +952,12 @@
       "home": "/api/cycle/complete",
       "areas": [
         "src/cycle.ts",
-        "src/logger.ts",
         "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/cycles.ts",
-        "line": 118
+        "line": 74
       }
     },
     {
@@ -1234,26 +1180,7 @@
       ],
       "source": {
         "path": "src/api/dispatches.ts",
-        "line": 82
-      }
-    },
-    {
-      "method": "PATCH",
-      "path": "/api/dispatches/subagent/:sessionId/current-step",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/dispatches/subagent/:sessionId/current-step",
-      "areas": [
-        "src/logger.ts",
-        "src/redis/",
-        "src/schemas/",
-        "src/transcript-projection.ts",
-        "src/transcript-store.ts"
-      ],
-      "source": {
-        "path": "src/api/dispatches.ts",
-        "line": 115
+        "line": 79
       }
     },
     {
@@ -1274,7 +1201,7 @@
       ],
       "source": {
         "path": "src/api/dispatches.ts",
-        "line": 154
+        "line": 121
       }
     },
     {
@@ -1707,7 +1634,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 47
+        "line": 46
       }
     },
     {
@@ -1729,7 +1656,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 101
+        "line": 100
       }
     },
     {
@@ -1751,7 +1678,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 147
+        "line": 146
       }
     },
     {
@@ -1773,7 +1700,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 196
+        "line": 195
       }
     },
     {
@@ -1793,27 +1720,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 228
-      }
-    },
-    {
-      "method": "GET",
-      "path": "/api/metrics/instrumentation",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/metrics/instrumentation",
-      "areas": [
-        "src/cost/",
-        "src/logger.ts",
-        "src/metrics/",
-        "src/redis/",
-        "src/schemas/",
-        "src/taxonomy/"
-      ],
-      "source": {
-        "path": "src/api/metrics.ts",
-        "line": 247
+        "line": 227
       }
     },
     {
@@ -1833,7 +1740,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 266
+        "line": 247
       }
     },
     {
@@ -1983,19 +1890,6 @@
       "source": {
         "path": "src/api/now-recommendations.ts",
         "line": 169
-      }
-    },
-    {
-      "method": "GET",
-      "path": "/api/observability/config",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/observability/config",
-      "areas": [],
-      "source": {
-        "path": "src/api/observability.ts",
-        "line": 29
       }
     },
     {
@@ -2417,23 +2311,7 @@
       ],
       "source": {
         "path": "src/api/today-page.ts",
-        "line": 103
-      }
-    },
-    {
-      "method": "GET",
-      "path": "/api/today/decision-queue",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/today/decision-queue",
-      "areas": [
-        "src/aggregators/",
-        "src/schemas/"
-      ],
-      "source": {
-        "path": "src/api/today-page.ts",
-        "line": 116
+        "line": 94
       }
     },
     {
@@ -2451,7 +2329,7 @@
       ],
       "source": {
         "path": "src/api/today-page.ts",
-        "line": 138
+        "line": 107
       }
     },
     {
@@ -2469,7 +2347,7 @@
       ],
       "source": {
         "path": "src/api/today-page.ts",
-        "line": 149
+        "line": 118
       }
     },
     {
@@ -2487,7 +2365,7 @@
       ],
       "source": {
         "path": "src/api/today-page.ts",
-        "line": 165
+        "line": 134
       }
     },
     {
@@ -2505,7 +2383,7 @@
       ],
       "source": {
         "path": "src/api/today-page.ts",
-        "line": 181
+        "line": 150
       }
     },
     {

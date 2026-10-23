@@ -22,7 +22,6 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import { DecisionQueueResponseSchema } from "../src/schemas/today-page.ts";
-import { createTodayPageRouter } from "../src/api/today-page.ts";
 import { getDecisionQueue } from "../src/aggregators/decision-queue.ts";
 import type { IssueRow } from "../src/github/issues.ts";
 
@@ -247,114 +246,5 @@ describe("getDecisionQueue — asserted-emptiness evidence", () => {
     assert.equal(result.items[0].number, 100);
     assert.equal(result.sourcesOk, true);
     assert.ok(result.scanned >= 1);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Route — forwards every trust field into the HTTP body
-// ---------------------------------------------------------------------------
-
-function mockReq(): any {
-  return {
-    method: "GET",
-    url: "/today/decision-queue",
-    headers: {},
-    query: {},
-    params: {},
-    body: {},
-  };
-}
-
-function mockRes(): any {
-  const res: any = {
-    _status: 200,
-    _body: null,
-    status(code: number) {
-      res._status = code;
-      return res;
-    },
-    json(body: any) {
-      res._body = body;
-      return res;
-    },
-    send(body: any) {
-      res._body = body;
-      return res;
-    },
-    setHeader() {
-      return res;
-    },
-    end() {
-      return res;
-    },
-  };
-  return res;
-}
-
-function findHandler(router: any, method: string, path: string): Function | null {
-  for (const layer of router.stack) {
-    if (layer.route && layer.route.path === path) {
-      if (layer.route.methods[method.toLowerCase()]) {
-        const stack = layer.route.stack;
-        return stack[stack.length - 1].handle;
-      }
-    }
-  }
-  return null;
-}
-
-describe("GET /today/decision-queue — route forwards trust evidence", () => {
-  test("forwards items + scanned + sourcesOk + generatedAt from the aggregator", async () => {
-    const router = createTodayPageRouter({
-      getDecisionQueue: async () => ({
-        items: [
-          {
-            number: 5,
-            title: "Decide X",
-            url: "https://x/5",
-            createdAt: "2026-05-26T01:00:00.000Z",
-            labels: ["ready-for-human"],
-            source: "ready-for-human" as const,
-            sources: ["ready-for-human"] as const,
-          },
-        ],
-        scanned: 1,
-        sourcesOk: true,
-      }),
-    });
-    const handler = findHandler(router, "GET", "/today/decision-queue");
-    assert.ok(handler);
-
-    const res = mockRes();
-    await handler(mockReq(), res);
-
-    assert.equal(res._status, 200);
-    assert.equal(res._body.items.length, 1);
-    assert.equal(res._body.scanned, 1);
-    assert.equal(res._body.sourcesOk, true);
-    // generatedAt is stamped at the route — must be a present ISO string.
-    assert.equal(typeof res._body.generatedAt, "string");
-    assert.ok(Number.isFinite(Date.parse(res._body.generatedAt)));
-    // The body round-trips through the schema (the strict contract holds).
-    const parsed = DecisionQueueResponseSchema.safeParse(res._body);
-    assert.equal(parsed.success, true);
-  });
-
-  test("forwards an unasserted empty (sourcesOk false) unchanged — never upgrades it to asserted", async () => {
-    // The route must forward the aggregator's verdict verbatim. It must NOT
-    // paper over a failed lookup into a confident-looking asserted zero —
-    // that is exactly the trust violation ADR-0034 §5.2 forbids.
-    const router = createTodayPageRouter({
-      getDecisionQueue: async () => ({ items: [], scanned: 0, sourcesOk: false }),
-    });
-    const handler = findHandler(router, "GET", "/today/decision-queue");
-    assert.ok(handler);
-
-    const res = mockRes();
-    await handler(mockReq(), res);
-
-    assert.equal(res._status, 200);
-    assert.equal(res._body.sourcesOk, false);
-    assert.equal(res._body.items.length, 0);
   });
 });
