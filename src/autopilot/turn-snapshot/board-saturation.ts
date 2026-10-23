@@ -37,6 +37,7 @@
 
 import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import type { GhJsonRead, TurnSnapshotGithub } from "./github-port.ts";
+import { eachValue } from "./json-values.ts";
 import { REDIS_UNREACHABLE, type AnchorQueueName, type TurnSnapshotRedis } from "./redis-port.ts";
 
 export interface BoardSaturationDeps {
@@ -224,7 +225,7 @@ interface BoardCounts {
 export function labelNames(issue: unknown): string[] | null {
   if (!isObj(issue)) return null;
   const labels = issue.labels;
-  const list = Array.isArray(labels) ? labels : isObj(labels) ? Object.values(labels) : null;
+  const list = eachValue(labels);
   if (list === null) return null;
   const names: string[] = [];
   for (const l of list) {
@@ -242,7 +243,7 @@ function countOpenBoard(read: GhJsonRead): Classified<BoardCounts> {
   const c = ghData(read);
   if ("reason" in c) return fail(c.reason);
   const data = c.value;
-  const rows = Array.isArray(data) ? data : isObj(data) ? Object.values(data) : null;
+  const rows = eachValue(data);
   if (rows === null) return fail(DEGRADE.MALFORMED_PAYLOAD);
   const boards: string[][] = [];
   for (const row of rows) {
