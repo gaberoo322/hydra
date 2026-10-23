@@ -177,6 +177,21 @@
     },
     {
       "kind": "file",
+      "path": "config/glm/providers.json",
+      "section": null,
+      "readBy": [
+        "scripts/glm/drainer-loop.sh",
+        "src/glm/drainer-config.ts",
+        "src/glm/providers.ts"
+      ],
+      "unread": false,
+      "source": {
+        "path": "config/glm/providers.json",
+        "line": 1
+      }
+    },
+    {
+      "kind": "file",
       "path": "config/market-researcher.md",
       "section": null,
       "readBy": [],

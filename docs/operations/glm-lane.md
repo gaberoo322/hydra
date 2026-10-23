@@ -55,8 +55,8 @@ The drainer authors on an ordered list of Anthropic-compatible worker providers,
    - `model` must be an explicit non-Claude name: a Claude alias or `claude-*` is rejected at load, because the CLI would resolve it locally and bill Anthropic (#3758).
    - `quotaReset` is `{"format": "zai-wallclock", "tzOffset": "+0800"}` when the provider's 429 carries a `reset at YYYY-MM-DD HH:MM:SS` clause, else `{"format": "fallback-only"}` (a 60-minute block).
    - `dailyCap` is optional; ids and models must be unique, `tokenEnv` can never be `ANTHROPIC_API_KEY`.
-3. **Verify:** a `HYDRA_GLM_DRAINER_DRY_RUN=1` run of the drainer, then the `hydra-glm-drainer` journal lines. A bad list shows `worker-provider list invalid (...)` and the lane does nothing, by design.
+3. **Verify:** a `HYDRA_GLM_DRAINER_DRY_RUN=1` run of the drainer, then the drainer's journal lines. A bad list shows `worker-provider list invalid (...)` and the lane does nothing, by design.
 
 Order matters: list the preferred provider first. Every drainer PR body ends with `worker-provider:` / `worker-model:` trailers; `scripts/glm-beachhead-report.sh` prints a per-provider PASS-rate and churn line from them, which is the input to the per-provider keep-or-kill call.
 
-Block files live in `$CAP_DIR` (default `/tmp`): `hydra-glm-drainer-quota-blocked-until` for `zai`, `hydra-glm-drainer-quota-blocked-until-<id>` for the others. To unblock a provider by hand, delete its file.
+Block files live in `$CAP_DIR` (default `/tmp`), one per provider: the `quota-blocked-until` file for `zai` (the legacy name), the same name with an `-<id>` suffix for the others. To unblock a provider by hand, delete its file.
