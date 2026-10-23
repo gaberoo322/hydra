@@ -16,6 +16,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { checkProviderModel, type WorkerProvider } from "../src/glm/providers.ts";
 import { readFileSync } from "node:fs";
 
 import {
@@ -696,3 +697,81 @@ describe("glm drainer settings.json — Bash surface (PR #3701 QA blocker)", () 
     assert.match(comment, /allow/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Worker-provider list (issue #4841): the model fence and env per provider
+// ---------------------------------------------------------------------------
+
+const ZAI_PROVIDER: WorkerProvider = {
+  id: "zai",
+  baseUrl: "https://api.z.ai/api/anthropic",
+  model: "glm-5.2",
+  tokenEnv: "ANTHROPIC_AUTH_TOKEN",
+  quotaReset: { format: "zai-wallclock", tzOffset: "+0800" },
+};
+const KIMI_PROVIDER: WorkerProvider = {
+  id: "kimi",
+  baseUrl: "https://api.kimi.example/anthropic",
+  model: "kimi-k2.5",
+  tokenEnv: "KIMI_API_KEY",
+  quotaReset: { format: "fallback-only" },
+};
+
+describe("model fence per provider (INV-3, issue #3758)", () => {
+  const providers = [ZAI_PROVIDER, KIMI_PROVIDER];
+  for (const p of providers) {
+    test(`${p.id}: its exact model launches; every Claude alias/claude-* is refused with no argv`, () => {
+      assert.equal(checkProviderModel(p.model, providers).ok, true);
+      for (const alias of ["sonnet", "opus", "haiku", "fable", "claude-sonnet-5"]) {
+        const built = buildDrainerArgs({ prompt: "p", model: alias, providers });
+        assert.equal(built.ok, false, alias);
+        if (built.ok === false) assert.equal(built.code, "glm-model-would-route-first-party");
+      }
+      const ok = buildDrainerArgs({ prompt: "p", model: p.model, providers });
+      assert.equal(ok.ok, true);
+      if (ok.ok === true) assert.equal(ok.args[ok.args.indexOf("--model") + 1], p.model);
+    });
+  }
+
+  test("a non-Claude model that no provider configures is glm-model-not-configured", () => {
+    const r = assertGlmModel("glm-4.7", providers);
+    assert.equal(r.ok, false);
+    if (r.ok === false) assert.equal(r.code, "glm-model-not-configured");
+    assert.equal(assertGlmModel("GPT-6", providers).ok, false);
+  });
+
+  test("the one-argument legacy form still accepts any glm-* name", () => {
+    assert.equal(assertGlmModel("glm-4.7").ok, true);
+  });
+});
+
+describe("buildGlmEnv — one token per child, never leaked (INV-9)", () => {
+  const base = { PATH: "/usr/bin", ANTHROPIC_AUTH_TOKEN: "zai-secret", KIMI_API_KEY: "kimi-secret" };
+
+  test("provider 2 gets its own base URL + token and the sibling's variable is stripped", () => {
+    const r = buildGlmEnv(base, KIMI_PROVIDER, [ZAI_PROVIDER, KIMI_PROVIDER]);
+    assert.equal(r.ok, true);
+    if (r.ok !== true) return;
+    assert.equal(r.env.ANTHROPIC_BASE_URL, KIMI_PROVIDER.baseUrl);
+    assert.equal(r.env.ANTHROPIC_AUTH_TOKEN, "kimi-secret");
+    assert.equal("KIMI_API_KEY" in r.env, false, "the selected provider's own variable is folded into ANTHROPIC_AUTH_TOKEN");
+  });
+
+  test("provider 1 child never holds provider 2's credential", () => {
+    const r = buildGlmEnv(base, ZAI_PROVIDER, [ZAI_PROVIDER, KIMI_PROVIDER]);
+    assert.equal(r.ok, true);
+    if (r.ok !== true) return;
+    assert.equal(r.env.ANTHROPIC_AUTH_TOKEN, "zai-secret");
+    assert.equal("KIMI_API_KEY" in r.env, false);
+  });
+
+  test("a missing token names the variable, never a value, and fails closed", () => {
+    const r = buildGlmEnv({ PATH: "/x" }, KIMI_PROVIDER, [ZAI_PROVIDER, KIMI_PROVIDER]);
+    assert.equal(r.ok, false);
+    if (r.ok === false) {
+      assert.equal(r.code, "glm-auth-token-missing");
+      assert.match(r.message, /KIMI_API_KEY/);
+    }
+  });
+});
+

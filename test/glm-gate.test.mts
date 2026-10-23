@@ -28,6 +28,7 @@ import {
   epochToIso,
   parseCapCount,
   parseQuotaBlock,
+  providerCapFilePath,
   quotaBlockFilePath,
   runGate,
   type GateDeps,
@@ -45,7 +46,7 @@ import {
   loadDrainerConfig,
 } from "../src/glm/drainer-config.ts";
 import { runDriverMode, type DriverDeps } from "../src/glm/drainer-driver.ts";
-import { DEFAULT_PROVIDERS_PATH } from "../src/glm/providers.ts";
+import { DEFAULT_PROVIDERS_PATH, parseWorkerProviders, type WorkerProvider } from "../src/glm/providers.ts";
 
 const NOW_MS = Date.parse("2026-09-30T12:00:00Z");
 const NOW_SEC = Math.floor(NOW_MS / 1000);
@@ -511,3 +512,109 @@ describe("gate — the disabled verdict", () => {
     assert.equal(h.heartbeats, 1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Worker-provider list (issue #4841)
+// ---------------------------------------------------------------------------
+
+const ZAI_P: WorkerProvider = {
+  id: "zai",
+  baseUrl: "https://api.z.ai/api/anthropic",
+  model: "glm-5.2",
+  tokenEnv: "ANTHROPIC_AUTH_TOKEN",
+  quotaReset: { format: "zai-wallclock", tzOffset: "+0800" },
+};
+const KIMI_P: WorkerProvider = {
+  id: "kimi",
+  baseUrl: "https://api.kimi.example/anthropic",
+  model: "kimi-k2.5",
+  tokenEnv: "KIMI_API_KEY",
+  quotaReset: { format: "fallback-only" },
+};
+function listTextP(providers: unknown[]): string {
+  return JSON.stringify({ providers });
+}
+
+function providerGateDeps(
+  providers: GateDeps["providers"],
+  files: Record<string, string> = {},
+): { deps: GateDeps; unlinked: string[]; heartbeats: () => number } {
+  const unlinked: string[] = [];
+  let hb = 0;
+  const deps: GateDeps = {
+    config: { ...loadDrainerConfig({}), capDir: CAP_DIR, dailyCap: 5 },
+    now: () => NOW_MS,
+    getAutopilotPaused: async () => ({ paused: false }),
+    readFileIfExists: (p) => (p in files ? files[p] : null),
+    unlink: (p) => {
+      unlinked.push(p);
+    },
+    setGlmDrainerHeartbeat: async () => {
+      hb += 1;
+      return { ok: true };
+    },
+    providers,
+  };
+  return { deps, unlinked, heartbeats: () => hb };
+}
+
+const TWO_P = parseWorkerProviders(listTextP([ZAI_P, KIMI_P]));
+
+describe("runGate — per-provider quota blocks (INV-4/5/6)", () => {
+  test("block file names: legacy for zai, suffixed for every other id (INV-5)", () => {
+    assert.equal(quotaBlockFilePath(CAP_DIR), "/cap/hydra-glm-drainer-quota-blocked-until");
+    assert.equal(quotaBlockFilePath(CAP_DIR, "zai"), "/cap/hydra-glm-drainer-quota-blocked-until");
+    assert.equal(quotaBlockFilePath(CAP_DIR, "kimi"), "/cap/hydra-glm-drainer-quota-blocked-until-kimi");
+    assert.match(providerCapFilePath(CAP_DIR, NOW_MS, "kimi"), /daily-cap-2026-09-30-kimi$/);
+  });
+
+  test("provider 1 quota-blocked: the gate passes with provider 2 and writes the heartbeat", async () => {
+    const h = providerGateDeps(TWO_P, { [quotaBlockFilePath(CAP_DIR, "zai")]: `${NOW_SEC + 3600}\n` });
+    const line = await runGate(h.deps);
+    assert.deepEqual(line, { able: true, heartbeat: "written", provider: "kimi" });
+    assert.equal(h.heartbeats(), 1);
+  });
+
+  test("every provider blocked: quota-blocked, detail lists each unblock instant", async () => {
+    const h = providerGateDeps(TWO_P, {
+      [quotaBlockFilePath(CAP_DIR, "zai")]: `${NOW_SEC + 3600}\n`,
+      [quotaBlockFilePath(CAP_DIR, "kimi")]: `${NOW_SEC + 7200}\n`,
+    });
+    const line = await runGate(h.deps);
+    assert.equal(line.able, false);
+    if (line.able === false) {
+      assert.equal(line.reason, "quota-blocked");
+      assert.match(line.detail ?? "", /zai: quota until 2026-09-30T13:00:00Z; kimi: quota until 2026-09-30T14:00:00Z/);
+    }
+    assert.equal(h.heartbeats(), 0, "a skip writes no heartbeat");
+  });
+
+  test("a stale block file is deleted per provider and does not block", async () => {
+    const h = providerGateDeps(TWO_P, { [quotaBlockFilePath(CAP_DIR, "kimi")]: `${NOW_SEC - 10}\n` });
+    const line = await runGate(h.deps);
+    assert.equal(line.able, true);
+    assert.deepEqual(h.unlinked, [quotaBlockFilePath(CAP_DIR, "kimi")]);
+  });
+
+  test("a provider's own dailyCap diverts to the next provider", async () => {
+    const capped = parseWorkerProviders(listTextP([{ ...ZAI_P, dailyCap: 2 }, KIMI_P]));
+    const h = providerGateDeps(capped, { [providerCapFilePath(CAP_DIR, NOW_MS, "zai")]: "2\n" });
+    const line = await runGate(h.deps);
+    assert.equal(line.able && line.provider, "kimi");
+  });
+
+  test("an invalid provider list fails closed: provider-config-invalid, no heartbeat, never a default (INV-4)", async () => {
+    const bad = parseWorkerProviders("{nope");
+    const h = providerGateDeps(bad);
+    const line = await runGate(h.deps);
+    assert.equal(line.able, false);
+    if (line.able === false) assert.equal(line.reason, "provider-config-invalid");
+    assert.equal(h.heartbeats(), 0);
+  });
+
+  test("hand-built deps without a list read as the committed single-z.ai default", async () => {
+    const h = providerGateDeps(undefined);
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written", provider: "zai" });
+  });
+});
+
