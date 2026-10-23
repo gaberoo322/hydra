@@ -102,6 +102,13 @@ import {
 } from "./drainer-runner.ts";
 import { defaultClaudeSpawn, type SpawnFn } from "../claude-cli/exec.ts";
 import { defaultGateDeps, runGate, type GateDeps, type GateLine } from "./gate.ts";
+import {
+  DEFAULT_PROVIDERS_PATH,
+  isProvidersFailure,
+  loadWorkerProvidersFromFile,
+  type WorkerProvider,
+  type WorkerProvidersResult,
+} from "./providers.ts";
 import { buildDefaultPickDeps, runPick, type PickDeps, type PickResult } from "./pick.ts";
 import {
   buildDefaultFinishDeps,
@@ -141,6 +148,12 @@ export interface DriverDeps {
   readFile: (path: string) => string;
   env: NodeJS.ProcessEnv;
   apiTimeoutMs: number;
+  /**
+   * The worker-provider list (issue #4841). Read once at the I/O edge; when
+   * absent it is loaded from `HYDRA_GLM_DRAINER_PROVIDERS_FILE` / the committed
+   * default (see {@link resolveProviders}).
+   */
+  providers?: WorkerProvidersResult;
   /** Gate-phase deps (issue #4682); built lazily from `env` when absent. */
   gateDeps?: GateDeps;
   /** Pick-phase deps (issue #4686); built lazily from `env` when absent. */
@@ -195,6 +208,29 @@ export function isDriverFailure(
 }
 
 // ---------------------------------------------------------------------------
+// Worker providers (issue #4841)
+// ---------------------------------------------------------------------------
+
+/** The provider list for this invocation: injected, the gate's, or read from the configured file. */
+function resolveProviders(deps: DriverDeps): WorkerProvidersResult {
+  if (deps.providers) return deps.providers;
+  if (deps.gateDeps?.providers) return deps.gateDeps.providers;
+  return loadWorkerProvidersFromFile(
+    loadDrainerConfig(deps.env).providersFile ?? DEFAULT_PROVIDERS_PATH,
+  );
+}
+
+/**
+ * The provider a standalone `author` / `finish` mode runs on:
+ * `HYDRA_GLM_DRAINER_PROVIDER` (an id) when set, else the first in the list.
+ * `tick` never calls this — it uses the gate's selection.
+ */
+function providerFromEnv(deps: DriverDeps, providers: readonly WorkerProvider[]): WorkerProvider | undefined {
+  const wanted = deps.env.HYDRA_GLM_DRAINER_PROVIDER;
+  return wanted ? providers.find((p) => p.id === wanted) : providers[0];
+}
+
+// ---------------------------------------------------------------------------
 // Shared author helper
 // ---------------------------------------------------------------------------
 
@@ -208,12 +244,33 @@ export function isDriverFailure(
  * rejection propagates: `author` mode lets it reach the `glm-driver-fault`
  * boundary, `tick` maps it to the driver-fault arm.
  */
-async function runAuthorSession(deps: DriverDeps, prompt: string, cwd: string): Promise<string> {
-  const envResult = deps.buildGlmEnv(deps.env);
+async function runAuthorSession(
+  deps: DriverDeps,
+  prompt: string,
+  cwd: string,
+  selected?: WorkerProvider,
+): Promise<string> {
+  const loaded = resolveProviders(deps);
+  if (isProvidersFailure(loaded)) {
+    return JSON.stringify({
+      ok: false,
+      code: loaded.code,
+      message: `worker-provider list invalid: ${loaded.issues.join("; ")}`,
+    });
+  }
+  const provider = selected ?? providerFromEnv(deps, loaded.providers);
+  if (!provider) {
+    return JSON.stringify({
+      ok: false,
+      code: "glm-provider-config-invalid",
+      message: `HYDRA_GLM_DRAINER_PROVIDER names no configured provider: ${deps.env.HYDRA_GLM_DRAINER_PROVIDER}`,
+    });
+  }
+  const envResult = deps.buildGlmEnv(deps.env, provider, loaded.providers);
   if (isEnvFailure(envResult)) {
     return JSON.stringify({ ok: false, code: envResult.code, message: envResult.message });
   }
-  const argsResult = deps.buildDrainerArgs({ prompt });
+  const argsResult = deps.buildDrainerArgs({ prompt, model: provider.model, providers: loaded.providers });
   if (isArgsFailure(argsResult)) {
     return JSON.stringify({ ok: false, code: argsResult.code, message: argsResult.message });
   }
@@ -333,6 +390,8 @@ function logGateLine(log: (msg: string) => void, line: GateLine): void {
       log(
         "operator paused — skip (no heartbeat; kill-switch honors ONLY operator paused, ignoring Anthropic reasons per ADR-0032 Decision 6)",
       );
+    } else if (line.reason === "provider-config-invalid") {
+      log(`worker-provider list invalid (${line.detail ?? ""}) — skip (no heartbeat, fail closed)`);
     } else if (line.reason === "cap-exhausted") {
       log(`daily PR cap reached (${line.detail}) — skip (no heartbeat)`);
     } else {
@@ -383,9 +442,15 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
   const dryRun = t.config.dryRun;
 
   // Gate: pause / cap / quota block; heartbeat on able.
-  const gate = await runGate(deps.gateDeps ?? defaultGateDeps(deps.env));
+  const gateDeps = deps.gateDeps ?? defaultGateDeps(deps.env);
+  const gate = await runGate(gateDeps);
   logGateLine(log, gate);
   if (gate.able === false) return { gate, pick: null, finish: null };
+  // The gate's selection (first unblocked provider) rides through to author + finish.
+  const providersResult = deps.providers ?? gateDeps.providers ?? resolveProviders(deps);
+  const provider = isProvidersFailure(providersResult)
+    ? undefined
+    : providersResult.providers.find((p) => p.id === gate.provider);
 
   // Pick: stale-claim recovery, candidate pick, resume detection.
   const pick = await runPick(deps.pick ?? buildDefaultPickDeps(deps.env));
@@ -478,7 +543,7 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
     authorRaw = JSON.stringify({ ok: true, code: 0, stdout: "", stderr: "" });
   } else {
     try {
-      authorRaw = await runAuthorSession(deps, prompt, worktree);
+      authorRaw = await runAuthorSession(deps, prompt, worktree, provider);
     } catch (err) {
       // A non-timeout rejection is the driver-fault ARM (empty outcome +
       // non-zero exit, per parseAuthorOutcome) — it still reaches runFinish,
@@ -496,6 +561,7 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
     branch,
     authorRaw,
     authorExitCode,
+    provider,
   });
   return { gate, pick, finish };
 }
@@ -631,6 +697,7 @@ export async function runDriverMode(
       // "finish-fault"), so any completed salvage — including the fault arm —
       // is exit 0 at the driver level. Non-zero is reserved for driver
       // faults, and bash treats ANY non-zero finish exit as ERROR + skip.
+      const loadedProviders = resolveProviders(deps);
       const r = await runFinish(
         deps.finish ?? buildDefaultFinishDeps(deps.env),
         {
@@ -639,6 +706,11 @@ export async function runDriverMode(
           branch,
           authorRaw,
           authorExitCode,
+          // Only an EXPLICIT provider (env) attributes a standalone finish.
+          provider:
+            deps.env.HYDRA_GLM_DRAINER_PROVIDER && !isProvidersFailure(loadedProviders)
+              ? providerFromEnv(deps, loadedProviders.providers)
+              : undefined,
         },
       );
       return { ok: true, line: JSON.stringify(r), exitCode: 0 };

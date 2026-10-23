@@ -716,12 +716,15 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
     assert.match(h.logs.join("\n"), /recorded z\.ai quota block until /);
   });
 
-  test("a 429 stdout on an arm that is NOT nothing-produced records no block (bash parity: evidence, only there)", async () => {
+  test("#4593: a 429 stdout on the keep-partial-for-resume arm records the block AFTER the claim release", async () => {
     const h = makeFinishDeps({ commitCount: 1, prBody: null });
     const r = await runFinish(h.deps, ranInput({ authorRaw: OUTCOME_TIMEOUT_429 }));
     assert.equal(r.action, "keep-partial-for-resume");
-    assert.equal(r.quotaBlockedUntil, null);
-    assert.equal(h.files.has(QUOTA_FILE), false);
+    const releaseIdx = h.calls.indexOf(`label:77:r=in-progress:a=ready-for-agent`);
+    const quotaIdx = h.calls.indexOf(`write:${QUOTA_FILE}`);
+    assert.ok(releaseIdx >= 0 && quotaIdx > releaseIdx, `the quota block must be recorded after the release:\n${h.calls.join("\n")}`);
+    assert.equal(r.quotaBlockedUntil, NOW_SEC + QUOTA_BLOCK_FALLBACK_SECONDS);
+    assert.equal(h.files.get(QUOTA_FILE), `${NOW_SEC + QUOTA_BLOCK_FALLBACK_SECONDS}\n`);
   });
 
   test("effect isolation: a REJECTING worktree removal WARNs and the release still happens", async () => {

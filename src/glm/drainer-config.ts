@@ -17,6 +17,7 @@
  */
 
 import { glmDisabledFilePath } from "./disabled.ts";
+import { DEFAULT_PROVIDERS_PATH } from "./providers.ts";
 
 /** Default daily PR cap (bash: `DAILY_CAP=${HYDRA_GLM_DRAINER_DAILY_CAP:-5}`). */
 export const DEFAULT_DAILY_CAP = 5;
@@ -43,8 +44,21 @@ export interface DrainerConfig {
   worktreeRoot: string;
   /** `HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET` (issue #4273). */
   quotaResetTzOffset: string;
+  /**
+   * `HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET` ONLY when explicitly set (issue
+   * #4841 INV-8): it overrides the offset of every `zai-wallclock` provider.
+   * Optional so a hand-built config reads as "no override".
+   */
+  quotaResetTzOverride?: string | null;
   /** `HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL`. */
   designConceptUrl: string;
+  /**
+   * `HYDRA_GLM_DRAINER_PROVIDERS_FILE` — the worker-provider list (issue
+   * #4841). Defaults to the committed `config/glm/providers.json`. Optional so
+   * a hand-built config reads as "the committed default". The file is READ at
+   * the I/O edge (defaultGateDeps / buildDefaultTickDeps), never here.
+   */
+  providersFile?: string;
   /**
    * The operator off-switch sentinel (`./disabled.ts`); `null` when there is
    * no `HOME` or override to locate it. Optional so a hand-built config
@@ -74,8 +88,10 @@ export function loadDrainerConfig(env: NodeJS.ProcessEnv = process.env): Drainer
     worktreeRoot:
       env.HYDRA_GLM_DRAINER_WORKTREE_ROOT || "/home/gabe/hydra/.claude/worktrees",
     quotaResetTzOffset: env.HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET || "+0800",
+    quotaResetTzOverride: env.HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET || null,
     designConceptUrl:
       env.HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL || "http://localhost:4000/api/design-concepts",
+    providersFile: env.HYDRA_GLM_DRAINER_PROVIDERS_FILE || DEFAULT_PROVIDERS_PATH,
     disabledFile: glmDisabledFilePath(env),
   };
 }

@@ -45,6 +45,7 @@ import {
   loadDrainerConfig,
 } from "../src/glm/drainer-config.ts";
 import { runDriverMode, type DriverDeps } from "../src/glm/drainer-driver.ts";
+import { DEFAULT_PROVIDERS_PATH } from "../src/glm/providers.ts";
 
 const NOW_MS = Date.parse("2026-09-30T12:00:00Z");
 const NOW_SEC = Math.floor(NOW_MS / 1000);
@@ -195,7 +196,7 @@ function makeGateDeps(opts: {
 describe("runGate — effect rules over fake deps (issue #4682)", () => {
   test("able: writes the heartbeat once and reports heartbeat=written", async () => {
     const h = makeGateDeps();
-    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written", provider: "zai" });
     assert.equal(h.heartbeats, 1);
   });
 
@@ -231,7 +232,7 @@ describe("runGate — effect rules over fake deps (issue #4682)", () => {
     // getAutopilotPaused() resolves {paused:false} for a corrupt blob.
     // Replaces the whole-script D1 "unparseable response" and jq `//` cases.
     const h = makeGateDeps({ paused: false });
-    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written", provider: "zai" });
   });
 
   test("only paused === true pauses (Anthropic-shaped fields are never consulted)", async () => {
@@ -239,7 +240,7 @@ describe("runGate — effect rules over fake deps (issue #4682)", () => {
     const h = makeGateDeps();
     h.deps.getAutopilotPaused = async () =>
       ({ paused: "yes", emergencyStop: true, weeklyEmergencyStop: true }) as unknown as { paused: boolean };
-    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written", provider: "zai" });
   });
 
   test("cap exhausted at exactly the cap: no heartbeat, detail N/M", async () => {
@@ -261,19 +262,19 @@ describe("runGate — effect rules over fake deps (issue #4682)", () => {
 
   test("stale quota file is deleted and the tick proceeds (able)", async () => {
     const h = makeGateDeps({ files: { [QUOTA_FILE]: String(NOW_SEC - 1000) } });
-    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written", provider: "zai" });
     assert.deepEqual(h.unlinked, [QUOTA_FILE]);
   });
 
   test("non-numeric quota file is deleted and reads as no block", async () => {
     const h = makeGateDeps({ files: { [QUOTA_FILE]: "garbage" } });
-    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written", provider: "zai" });
     assert.deepEqual(h.unlinked, [QUOTA_FILE]);
   });
 
   test("dry-run writes nothing and reports would-write", async () => {
     const h = makeGateDeps({ dryRun: true });
-    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "would-write" });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "would-write", provider: "zai" });
     assert.equal(h.heartbeats, 0);
   });
 
@@ -282,12 +283,14 @@ describe("runGate — effect rules over fake deps (issue #4682)", () => {
     assert.deepEqual(await runGate(failed.deps), {
       able: true,
       heartbeat: "write-failed",
+      provider: "zai",
       detail: "SET failed",
     });
     const threw = makeGateDeps({ heartbeat: "reject" });
     assert.deepEqual(await runGate(threw.deps), {
       able: true,
       heartbeat: "write-failed",
+      provider: "zai",
       detail: "redis down",
     });
   });
@@ -328,7 +331,7 @@ describe("defaultGateDeps — real file effects against a tmp $CAP_DIR", () => {
       const f = quotaBlockFilePath(dir);
       writeFileSync(f, String(Math.floor(Date.now() / 1000) - 1000));
       const line = await runGate({ ...real, getAutopilotPaused: async () => ({ paused: false }) });
-      assert.deepEqual(line, { able: true, heartbeat: "would-write" });
+      assert.deepEqual(line, { able: true, heartbeat: "would-write", provider: "zai" });
       assert.equal(existsSync(f), false, "an expired block file must be deleted on read");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -360,7 +363,7 @@ describe("runDriverMode('gate') — one JSON line, exit 0 on able and on skip", 
     const out = await runDriverMode(["gate"], { ...base, gateDeps: h.deps });
     assert.deepEqual(out, {
       ok: true,
-      line: JSON.stringify({ able: true, heartbeat: "written" }),
+      line: JSON.stringify({ able: true, heartbeat: "written", provider: "zai" }),
       exitCode: 0,
     });
   });
@@ -387,7 +390,9 @@ describe("loadDrainerConfig — same names and defaults as drainer-loop.sh", () 
       timeoutResumeCap: DEFAULT_TIMEOUT_RESUME_CAP,
       worktreeRoot: "/home/gabe/hydra/.claude/worktrees",
       quotaResetTzOffset: "+0800",
+      quotaResetTzOverride: null,
       designConceptUrl: "http://localhost:4000/api/design-concepts",
+      providersFile: DEFAULT_PROVIDERS_PATH,
       disabledFile: null,
     });
   });
@@ -405,6 +410,7 @@ describe("loadDrainerConfig — same names and defaults as drainer-loop.sh", () 
       HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET: "+0000",
       HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: "http://x",
       HYDRA_GLM_DISABLED_FILE: "/d",
+      HYDRA_GLM_DRAINER_PROVIDERS_FILE: "/p.json",
     });
     assert.deepEqual(c, {
       repoRoot: "/r",
@@ -416,7 +422,9 @@ describe("loadDrainerConfig — same names and defaults as drainer-loop.sh", () 
       timeoutResumeCap: 4,
       worktreeRoot: "/w",
       quotaResetTzOffset: "+0000",
+      quotaResetTzOverride: "+0000",
       designConceptUrl: "http://x",
+      providersFile: "/p.json",
       disabledFile: "/d",
     });
   });
@@ -499,7 +507,7 @@ describe("gate — the disabled verdict", () => {
   test("runGate: sentinel configured but absent → normal able path", async () => {
     const h = makeGateDeps();
     h.deps.config = { ...h.deps.config, disabledFile: "/sentinel" };
-    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written", provider: "zai" });
     assert.equal(h.heartbeats, 1);
   });
 });
