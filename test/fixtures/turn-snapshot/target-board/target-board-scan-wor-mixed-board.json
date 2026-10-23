@@ -2,7 +2,7 @@
   "name": "target-board-scan-wor-mixed-board",
   "collector": "target-scan-boards",
   "source": "autopilot-target-board-signals › a mixed board counts only lifecycle-less wor items",
-  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_scan_boards)",
+  "capturedFrom": "scripts/autopilot/collect-state.sh @ b8405e59da6ad2c41362a88a9b9b2065992a2b98 (collect_target_scan_boards) #5167: blockedItems added to the expected value (the open `blocked` rows of this golden's own scan payload).",
   "repo": "acme/target-app",
   "limit": 100,
   "laneDegraded": "0",
@@ -49,7 +49,10 @@
             "wireOrRetireTriage": 1,
             "wireOrRetireUnlabelled": 2,
             "designQaOpen": 0,
-            "designQaSaturated": false
+            "designQaSaturated": false,
+            "blockedItems": [
+              5
+            ]
           }
         },
         "adrPresent": false

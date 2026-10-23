@@ -61,7 +61,7 @@ QA depth ascends with the **Modification Tier** of the PR (`GET /api/tier`, the 
 
 - **T1 / T2** — exactly **one standard QA pass**: the single parallel Standards + Spec fan-out described below. Behaviour-preserving; nothing in this section changes the T1/T2 path.
 - **T3** (core `src/` + demoted infra) — an **adversarial depth gate**: run `hydra-qa` in **refutation framing** (reviewers are prompted to actively *find a reason this change is wrong / regresses something*, not to confirm it), fanned out to **2 independent reviewers**. The verdict comes from the **severity-gated fold** below: any medium-or-higher finding from **either** reviewer is a FAIL; a low finding is always a non-blocking follow-up, even when both reviewers raised it.
-- **T4** (Verifier Core — `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `.github/workflows/deep-qa-gate.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts`) — the **Deep-QA Remediation Loop**: T4 **inherits the full T3 adversarial depth** (the same 2-reviewer refutation fan-out, unchanged) and **adds** on top (a) a **Verifier-Core checklist** the reviewers must run, and (b) the **block-and-escalate teeth** no other tier has. It never weakens or replaces the T3 gate — it is strictly additive. See step 10's T4 branch.
+- **T4** (Verifier Core — `.github/workflows/ci.yml`, `.github/workflows/deploy.yml` [file removed; list entry persists], `.github/workflows/deep-qa-gate.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts`) — the **Deep-QA Remediation Loop**: T4 **inherits the full T3 adversarial depth** (the same 2-reviewer refutation fan-out, unchanged) and **adds** on top (a) a **Verifier-Core checklist** the reviewers must run, and (b) the **block-and-escalate teeth** no other tier has. It never weakens or replaces the T3 gate — it is strictly additive. See step 10's T4 branch.
 
 This is **additive verification depth, not a policy change**: the emitted verdict literal (`PASS` / `FAIL` / `PASS-pending-CI` / `FAIL-pending-CI`) is unchanged, and `decide.py`'s `should_auto_merge()` (and INV-007: `qa_verdict != PASS ⇒ hold`) are untouched. Only *how a review verdict is computed* changes — the severity-gated fold `foldReviewFindings()` in `scripts/ci/qa-verdict.ts` for T1–T3, and for T4 the unchanged any-blocker AND over two refutation reviewers (`aggregateAdversarialReview()`). T4's block-and-escalate is likewise **not** a new verdict literal — it routes through the existing `ready-for-human` pickup set (see below).
 
@@ -121,7 +121,7 @@ The design-concept gate is in **Phase A — shadow mode** (epic #437). The artif
 - **Phase A (default, `DESIGN_CONCEPT_MODE=warn`)** — missing artifact logs a warning, the Spec axis is skipped (reports "no artifact (Phase A shadow mode)"), and QA proceeds with the Standards axis only.
 - **Phase B/C (`DESIGN_CONCEPT_MODE=enforce`)** — missing artifact fails the PR with the message: `design-concept artifact required; run hydra-grill on the parent issue or attach 'design-concept-exempt' label (operator-only)`.
 
-The mode is read from the env var `DESIGN_CONCEPT_MODE` (default: `warn`). In both modes, an explicit `design-concept-exempt` label on the PR (operator-only) bypasses the Spec axis with an audit-log comment, regardless of whether the artifact exists.
+The mode is read from the shell variable `$DESIGN_CONCEPT_MODE` (default: `warn`). In both modes, an explicit `design-concept-exempt` label on the PR (operator-only) bypasses the Spec axis with an audit-log comment, regardless of whether the artifact exists.
 
 The Tier-1 auto-bypass (PR diff entirely prompt paths per `isPromptOnlyChange()` — step 6 — and no associated artifact) also remains in both modes — prompt-only changes never require the artifact.
 
@@ -273,7 +273,7 @@ DIFF_CMD="git diff ${FIXED_SHA}...HEAD"
 LOG_CMD="git log ${FIXED_SHA}..HEAD --oneline"
 ```
 
-Pass `FIXED_SHA`, `DIFF_CMD`, and `LOG_CMD` to both sub-agents verbatim.
+Pass `$FIXED_SHA`, `$DIFF_CMD`, and `$LOG_CMD` to both sub-agents verbatim.
 
 ### 4. Resolve the spec source — design-concept artifact
 
@@ -297,7 +297,7 @@ RESOLVE_JSON=$(curl -sS --max-time 5 \
 RESOLVE_FOUND=$(printf '%s' "$RESOLVE_JSON" | jq -r '.found // false' 2>/dev/null || echo false)
 ```
 
-**Resolve-envelope shape.** `RESOLVE_JSON` is the discriminated result —
+**Resolve-envelope shape.** `$RESOLVE_JSON` is the discriminated result —
 `.found` (bool) and `.handle` (`{anchorRef, redisKey, apiPath}`) are ALWAYS
 present. On a hit the artifact nests under `.concept`; on a miss `.reason`
 carries the loud, handle-named explanation.
@@ -307,7 +307,7 @@ once with `jq '.concept'` and hand THAT to the Spec sub-agent — it still reads
 `.anchorRef`, `.scope`, `.invariants`, `.qaTrace`, `.modulesTouched`, `.gate`,
 etc. at the top level (the `.concept` envelope is the resolve route's wrapper,
 not part of the artifact the sub-agent consumes — `.concept.invariants` is the
-WRAPPED path, `.invariants` is the path INSIDE `SPEC_INPUT_JSON`).
+WRAPPED path, `.invariants` is the path INSIDE `$SPEC_INPUT_JSON`).
 
 Decide what to do with the result:
 
@@ -438,7 +438,7 @@ Pass `CHECKS_JSON` to the verdict classifier at the end — not to the sub-agent
 
 ### 6. Tier-1 auto-bypass check
 
-Inspect the diff. If every changed file is a prompt path per `isPromptOnlyChange()` (the ONE prompt-path list in `scripts/ci/qa-verdict.ts`, shared with step 6.7's change shape — playbook/skill `.md`, `config/agents/`, `config/feedback/`) AND no artifact is present AND no `design-concept-exempt` label, the Spec axis is auto-bypassed (per issue #440 — prompt-only PRs never require the artifact). This is the **only** auto-bypass; Tier ≥ 2 PRs always run the Spec axis (or fail in `enforce` mode).
+Inspect the diff. If every changed file is a prompt path per `isPromptOnlyChange()` (the ONE prompt-path list in `scripts/ci/qa-verdict.ts`, shared with step 6.7's change shape — playbook/skill `.md`, plus the `config/agents/` and `config/feedback/` prefixes whose directories were removed) AND no artifact is present AND no `design-concept-exempt` label, the Spec axis is auto-bypassed (per issue #440 — prompt-only PRs never require the artifact). This is the **only** auto-bypass; Tier ≥ 2 PRs always run the Spec axis (or fail in `enforce` mode).
 
 ```bash
 CHANGED=$(git diff --no-renames --name-only "${FIXED_SHA}...HEAD")
@@ -492,7 +492,7 @@ make their output moot. It changes no verdict literal, no merge semantic, and
 it fail-closes to full depth on every unknown (INV-E).
 
 The gate reads only data already in hand — `CHECKS_JSON` (step 5), the tier
-(step 6.5), and `MERGE_STATE_STATUS` (the one field added to step 3's existing
+(step 6.5), and `$MERGE_STATE_STATUS` (the one field added to step 3's existing
 `gh pr view` call — no new Redis key, label, CI check, or API endpoint, INV-G) —
 and returns one of three actions:
 
@@ -633,8 +633,8 @@ RED_REQUIRED_LIST=$(printf '%s' "$RED_REQUIRED_JSON" | jq -r 'join(", ")' 2>/dev
   is moot because a required check already failed. Compute the FAIL verdict the
   fold already determines and follow the normal step-10 FAIL routing, spawning
   **zero** reviewers. Set a nominal review verdict (the classifier ignores it
-  when `requiredFailed > 0`) and compute `VERDICT` / `VERDICT_REASON` /
-  `CHECKS_BLOCK` here, then run step 9.5 (the trailer) and jump to step 10's
+  when `requiredFailed > 0`) and compute `VERDICT` / `$VERDICT_REASON` /
+  `$CHECKS_BLOCK` here, then run step 9.5 (the trailer) and jump to step 10's
   FAIL routing for T1/T2/T3 — skip step 7 (no spawn), 7.5, 8, and 9 entirely:
   ```bash
   REVIEW_VERDICT="PASS"   # nominal — classifyVerdict ignores it when requiredFailed > 0
@@ -929,7 +929,7 @@ Judgement calls that are not defects do not go in the findings list. On T1–T3 
 
 **Standards sub-agent prompt** — include:
 
-- `$REVIEW_PACKET` inline (the diff + full changed-file contents), per the shared packet discipline in step 7.0. `FIXED_SHA` is for reference only — the reviewer does NOT run `git diff` / `git show` or an exploratory tool loop.
+- `$REVIEW_PACKET` inline (the diff + full changed-file contents), per the shared packet discipline in step 7.0. `$FIXED_SHA` is for reference only — the reviewer does NOT run `git diff` / `git show` or an exploratory tool loop.
 - The standards-source files the reviewer MAY open by name (one, to cite a specific rule — not read end-to-end): `CLAUDE.md`, `CONTEXT.md`, `docs/adr/*.md`, `docs/agents/*.md`, `.editorconfig` (machine-enforced — note but don't re-check), `tsconfig.json`, any `STYLE.md` / `STANDARDS.md`.
 - Brief: *"The diff and changed-file contents are in the packet — judge off it, with no exploratory tool loop (step 7.0 packet discipline). Report every place the diff violates a documented standard as a row in the findings contract, citing the standard (file + the rule) inside the row's `finding`. Leave judgement calls out of the list. Skip anything tooling enforces (typecheck, lint — CI already runs these). Findings block plus one paragraph, under 400 words."*
 - **Attributing a failing test (issue #1076):** QA reads CI results via `statusCheckRollup` and must not `gh pr checkout`. If you do need to reproduce a test failure locally inside an isolated worktree, run `npm run test:debug` rather than `npm test` + a re-run-and-grep: it runs the identical flags (including `--test-force-exit`) but writes a TAP stream to `test-debug.tap`, so the per-test `not ok <n> - <name>` lines (which the default reporter drops under force-exit) and the `# pass/# fail` footer are both captured in a single run. The failing suite name is then greppable from the file without a second full-suite invocation.
@@ -949,13 +949,13 @@ Judgement calls that are not defects do not go in the findings list. On T1–T3 
 - Hydra-specific checks the sub-agent must apply:
   - **CONTEXT.md vocabulary** — new identifiers in the diff must either appear in the glossary or be local-scope (test fixtures, private helpers). Flag vocabulary drift.
   - **ADR conformance** — if the diff touches an area governed by an ADR, the change must not contradict it.
-  - **CLAUDE.md coding conventions** — `moveItemToLane` lane-mutation discipline (`src/backlog/lanes.ts`), `redis-adapter` / `src/redis/*` access pattern, `eventBus` passed as parameter (not module global), no silent `catch` (every catch logs `console.error` with context OR is annotated `/* intentional: reason */`).
+  - **CLAUDE.md coding conventions** — `src/redis/*` access pattern, `eventBus` passed as parameter (not module global), no silent `catch` (every catch logs `console.error` with context OR is annotated `/* intentional: reason */`).
   - **Tier alignment** — the PR body's `Tier: N` line (populated by `hydra-dev` from `/api/tier`) must agree with the artifact's `interfaceImpact` if an artifact is present. `breaking` ⇒ tier ≥ 2.
 
 **Spec sub-agent prompt** — include:
 
-- `$REVIEW_PACKET` inline (the diff + full changed-file contents), per the shared packet discipline in step 7.0. `FIXED_SHA` is for reference only — the reviewer does NOT run `git diff` / `git show` or an exploratory tool loop.
-- The artifact JSON (`SPEC_INPUT_JSON`) embedded verbatim, OR the skip reason (`SPEC_SKIPPED_REASON`) — if skipped, this sub-agent reports `"no spec available"` per the upstream `code-review` skill's contract and exits early.
+- `$REVIEW_PACKET` inline (the diff + full changed-file contents), per the shared packet discipline in step 7.0. `$FIXED_SHA` is for reference only — the reviewer does NOT run `git diff` / `git show` or an exploratory tool loop.
+- The artifact JSON (`$SPEC_INPUT_JSON`) embedded verbatim, OR the skip reason (`$SPEC_SKIPPED_REASON`) — if skipped, this sub-agent reports `"no spec available"` per the upstream `code-review` skill's contract and exits early.
 - The PR body (so requirements stated only in the PR description are still visible).
 - Brief: *"The artifact and the diff / changed-file contents are in the packet — judge off it, with no exploratory tool loop (step 7.0 packet discipline). Report: (a) requirements the artifact asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for — scope creep (diff touches modules not in `modulesTouched`); (c) invariants the artifact promised to preserve that the diff violates (no corresponding test, or test missing assertion); (d) `interfaceImpact: 'breaking'` claims that lack a corresponding interface-migration commit. Each is a row in the findings contract, quoting the artifact line in its `finding`. Findings block plus one paragraph, under 400 words."*
 - Hydra-specific checks the sub-agent must apply:
@@ -994,7 +994,7 @@ A "real result" is the reviewer's actual finding text — not a tool error, not 
 
 ### 8. Aggregate — the findings table (issue #4734)
 
-Transcribe every reviewer's `findings` rows into ONE JSON **object** in a file: keyed by the spawned reviewer name (from `$FANOUT_REVIEWERS`, e.g. `reviewer-A-standards`), each value that reviewer's rows as a JSON array. Step 9 passes the same `$FANOUT_REVIEWERS` list to the fold as `spawnedReviewers`, so the coverage of the map is **checked, not assumed** (issue #4758). Each row keeps `axis` (`standards` or `spec`); a row may omit `reviewer` — it inherits its map key. Copy rows as written: never drop, merge, or re-grade a reviewer's finding; rows under a key that is not a spawned reviewer are still counted, never dropped. **Fail closed on malformed output:** a spawned reviewer with NO entry in the map, or whose value is not a JSON array, becomes one high `reviewer-output-malformed` finding naming that reviewer — FAIL at every tier, T4 included, and for an unknown tier. An omitted reviewer is malformed, not clean: write a reviewer's value as `[]` only when that reviewer explicitly returned `[]`, and only an explicit `[]` from EVERY spawned reviewer is a clean PASS. An empty `$FANOUT_REVIEWERS` list, or a flat array where the fold expected the per-reviewer map, is itself malformed — never a silent PASS. The file must always be written: a missing, empty, or unparseable file is itself a FAIL, never an empty map; a non-object row becomes a high `reviewer-output-malformed` finding carrying the raw row text. The fold merges the same finding raised by two reviewers itself: rows whose locations reduce to the same canonical key match (`canonicalLocationKey()`). Accepted location formats, all folded to `path:N` (one pair of surrounding quotes/backticks and one trailing parenthetical — `src/foo.ts:12 (buildX)` — stripped first, then trimmed, lowercased, leading `./` dropped): `path:12`, `path:L12`, `path#L12`, `path L12`, `path:12-18` (range start), and `path:12:5` (column dropped). A bare `path` with no line keys as `path`; an extension-less file name such as `Dockerfile:12` is path-like only WITH a line number (`Makefile` alone stays a placeholder). Placeholders never merge on their own: the `NON_MERGEABLE_LOCATIONS` list (empty, `(no location)`, `PR body`, `n/a`, `-`, `none`, case-insensitive) and anything that isn't path-like — the whitespace test applies to the path part after the quote/backtick/parenthetical stripping, and a path with no `/` or `.` needs a `:N` line reference. If reviewer A and reviewer B describe the same defect at different lines, give both rows the same `"key"` string so the fold lists them as one merged row. Put each axis's summary paragraph in `STANDARDS_SUMMARY` / `SPEC_SUMMARY`. At T3/T4, join the two reviewers' paragraphs with `A:` / `B:` prefixes. When the Spec axis was skipped, set `SPEC_SUMMARY="_Skipped: ${SPEC_SKIPPED_REASON}_"`.
+Transcribe every reviewer's `findings` rows into ONE JSON **object** in a file: keyed by the spawned reviewer name (from `$FANOUT_REVIEWERS`, e.g. `reviewer-A-standards`), each value that reviewer's rows as a JSON array. Step 9 passes the same `$FANOUT_REVIEWERS` list to the fold as `spawnedReviewers`, so the coverage of the map is **checked, not assumed** (issue #4758). Each row keeps `axis` (`standards` or `spec`); a row may omit `reviewer` — it inherits its map key. Copy rows as written: never drop, merge, or re-grade a reviewer's finding; rows under a key that is not a spawned reviewer are still counted, never dropped. **Fail closed on malformed output:** a spawned reviewer with NO entry in the map, or whose value is not a JSON array, becomes one high `reviewer-output-malformed` finding naming that reviewer — FAIL at every tier, T4 included, and for an unknown tier. An omitted reviewer is malformed, not clean: write a reviewer's value as `[]` only when that reviewer explicitly returned `[]`, and only an explicit `[]` from EVERY spawned reviewer is a clean PASS. An empty `$FANOUT_REVIEWERS` list, or a flat array where the fold expected the per-reviewer map, is itself malformed — never a silent PASS. The file must always be written: a missing, empty, or unparseable file is itself a FAIL, never an empty map; a non-object row becomes a high `reviewer-output-malformed` finding carrying the raw row text. The fold merges the same finding raised by two reviewers itself: rows whose locations reduce to the same canonical key match (`canonicalLocationKey()`). Accepted location formats, all folded to `path:N` (one pair of surrounding quotes/backticks and one trailing parenthetical — `src/<module>.ts:12 (buildX)` — stripped first, then trimmed, lowercased, leading `./` dropped): `path:12`, `path:L12`, `path#L12`, `path L12`, `path:12-18` (range start), and `path:12:5` (column dropped). A bare `path` with no line keys as `path`; an extension-less file name such as `Dockerfile:12` is path-like only WITH a line number (`Makefile` alone stays a placeholder). Placeholders never merge on their own: the `NON_MERGEABLE_LOCATIONS` list (empty, `(no location)`, `PR body`, `n/a`, `-`, `none`, case-insensitive) and anything that isn't path-like — the whitespace test applies to the path part after the quote/backtick/parenthetical stripping, and a path with no `/` or `.` needs a `:N` line reference. If reviewer A and reviewer B describe the same defect at different lines, give both rows the same `"key"` string so the fold lists them as one merged row. Put each axis's summary paragraph in `STANDARDS_SUMMARY` / `SPEC_SUMMARY`. At T3/T4, join the two reviewers' paragraphs with `A:` / `B:` prefixes. When the Spec axis was skipped, set `SPEC_SUMMARY="_Skipped: ${SPEC_SKIPPED_REASON}_"`.
 
 ### 9. Classify the review verdict
 
@@ -1053,7 +1053,7 @@ fi
 # <<< severity-fold
 ```
 
-There is no separate T4 cross-check. The earlier `REVIEWER_A_VERDICT` / `REVIEWER_B_VERDICT` block was dead: nothing set those variables. `foldReviewFindings()` already derives each reviewer's verdict from its own rows and runs `aggregateAdversarialReview()` over them, and malformed reviewer output becomes a high finding before the fold runs, so a T4 PR can never PASS on it. Step 10's Deep-QA routing reads this `REVIEW_VERDICT`. The trailer's `blockers=` can never be `0` on a FAIL (`trailerBlockerCounts()` counts at least one).
+There is no separate T4 cross-check. The earlier `$REVIEWER_A_VERDICT` / `$REVIEWER_B_VERDICT` block was dead: nothing set those variables. `foldReviewFindings()` already derives each reviewer's verdict from its own rows and runs `aggregateAdversarialReview()` over them, and malformed reviewer output becomes a high finding before the fold runs, so a T4 PR can never PASS on it. Step 10's Deep-QA routing reads this `REVIEW_VERDICT`. The trailer's `blockers=` can never be `0` on a FAIL (`trailerBlockerCounts()` counts at least one).
 
 Then feed `REVIEW_VERDICT` into the one-pass CI classifier (unchanged). The CI state is rendered ONCE, by `renderCiSummary()`, and it lists only the **non-green required** checks. The review report never repeats the per-check table:
 
@@ -1469,8 +1469,8 @@ fi
 After a FAIL verdict — before returning — record a planner pattern so the
 agent-memory write path keeps producing durable rules in
 `config/feedback/to-planner.md`. This is the only post-cycle writer to
-`hydra:memory:planner:patterns` for Claude-driven QA after #383 deleted
-codex-runner.
+`hydra:memory:{agent}:patterns` (agent = planner) for Claude-driven QA after #383 deleted
+the Codex runner (ADR-0006).
 
 **Classify each failed criterion** before emitting the cue (issue #524):
 

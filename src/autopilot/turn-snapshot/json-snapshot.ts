@@ -101,7 +101,7 @@ export interface BuiltTurnSnapshot {
 // ---------------------------------------------------------------------------
 
 /** `int(str(raw).strip())`, else `0`. */
-export function pyIntOr0(raw: string | null | undefined): number {
+export function intOrZero(raw: string | null | undefined): number {
   if (raw === null || raw === undefined) return 0;
   const m = /^\s*([+-]?\d+(?:_\d+)*)\s*$/.exec(raw);
   return m ? Number((m[1] as string).replace(/_/g, "")) : 0;
@@ -115,7 +115,7 @@ const FROMISO =
  * extended/basic calendar forms (naive = local time), or `null` when Python
  * would raise. Week dates and other exotic forms read as unparseable.
  */
-export function pyFromIsoformatEpoch(raw: string): number | null {
+export function isoEpochSeconds(raw: string): number | null {
   const m = FROMISO.exec(raw);
   if (!m) return null;
   const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
@@ -151,17 +151,9 @@ export function pyFromIsoformatEpoch(raw: string): number | null {
 export function staleDays(raw: string, days: number, nowMs: number): boolean {
   const s = raw.trim();
   if (s === "") return true;
-  const then = pyFromIsoformatEpoch(s.replaceAll("Z", "+00:00"));
+  const then = isoEpochSeconds(s.replaceAll("Z", "+00:00"));
   if (then === null) return true;
   return nowMs / 1000 - then > days * 86400;
-}
-
-/** `float(raw)` for a finite decimal, else `null` (absent: the previous value is kept). */
-function pyFiniteFloat(raw: string): number | null {
-  const s = raw.trim();
-  if (!/^[+-]?(?:\d(?:_?\d)*(?:\.(?:\d(?:_?\d)*)?)?|\.\d(?:_?\d)*)(?:[eE][+-]?\d(?:_?\d)*)?$/.test(s)) return null;
-  const n = Number(s.replace(/_/g, ""));
-  return Number.isFinite(n) ? n : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +199,7 @@ type OrchBoardCountKey = "needs_qa" | "ready_for_agent" | "needs_triage" | "need
 function orchBoardCount(s: OrchBoardSnapshot, key: OrchBoardCountKey): number {
   if (s.counts.source === "none") return 0;
   const v = (s.counts.values as Readonly<Record<string, unknown>>)[key];
-  return pyIntOr0(v === undefined ? undefined : JSON.stringify(v));
+  return intOrZero(v === undefined ? undefined : JSON.stringify(v));
 }
 
 /** A Target count line's value (`<key>=<value>`, the last one wins), or `0` when not printed. */
@@ -215,7 +207,7 @@ function targetCount(s: TargetBoardSnapshot, key: string): number {
   if (!s.counts.ok) return 0;
   let raw: string | undefined;
   for (const [k, v] of s.counts.value) if (k === key) raw = v;
-  return pyIntOr0(raw);
+  return intOrZero(raw);
 }
 
 /**
@@ -280,10 +272,12 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     target_dev_resume_pick: pin(v.targetBoard.devResumePick.ok ? v.targetBoard.devResumePick.value : null),
     needs_triage_target: targetCount(v.targetBoard, "target_needs_triage") > 0,
     target_needs_triage_items: scan ? [...scan.needsTriageItems] : [],
+    target_stale_in_progress_items: [...(v.targetBoard.staleInProgress ?? [])], // #5167
+    target_blocked_items: [...(scan?.blockedItems ?? [])], // #5167
 
     health_fail: healthFail(v.health),
     scout_walk_due: staleDays(lastWalk, 7, opts.nowMs),
-    scout_board_saturated: pyIntOr0(v.scout.openEnhancements.ok ? v.scout.openEnhancements.value : "0") > 20,
+    scout_board_saturated: intOrZero(v.scout.openEnhancements.ok ? v.scout.openEnhancements.value : "0") > 20,
     scout_alert_eligible_count: v.scoutAlerts.eligible.ok ? v.scoutAlerts.eligible.value : 0,
 
     orch_backfill_idle: board.backfillIdle,
@@ -358,15 +352,11 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
   );
   blobs.candidate_exclusions = v.picks.candidateExclusions.map((r) => ({ ...r }));
 
-  const spend = pyFiniteFloat(v.scout.spendUsd);
-  if (spend === null) degraded.push({ collector: "scout", field: "scout_spend_usd_today", reason: DEGRADE.NOT_NUMERIC });
-
   const doc: TurnSnapshotDoc = {
     schema_version: TURN_SNAPSHOT_SCHEMA_VERSION,
     generated_at: new Date(opts.nowMs).toISOString(),
     signals,
     blobs,
-    ...(spend === null ? {} : { scout_spend_usd_today: spend }),
     degraded,
     validation: { ok: true },
     observability: observability(v),
@@ -422,7 +412,7 @@ export function allDegradedTurnSnapshot(generatedAt: string, reason: string): Tu
 /**
  * Repair `doc` from zod issues, field by field: an invalid or unknown signal
  * takes its all-degraded value (unknown keys are dropped); an invalid blob,
- * `scout_spend_usd_today`, `observability` or `degraded` entry is dropped.
+ * `observability` or `degraded` entry is dropped.
  * Returns null when an issue sits outside those fields (structural).
  */
 function repairFields(doc: TurnSnapshotDoc, issues: readonly { path: readonly PropertyKey[]; code: string; message: string; keys?: readonly string[] }[]): {
@@ -434,7 +424,6 @@ function repairFields(doc: TurnSnapshotDoc, issues: readonly { path: readonly Pr
   const dropDegraded = new Set<number>();
   const markers: SnapshotDegraded[] = [];
   const rawDropped = new Set<string>();
-  let spend = doc.scout_spend_usd_today;
   let obs = doc.observability;
   const mark = (field: string, message: string) => markers.push({ collector: "turn-snapshot", field, reason: degradeDetail(`schema-invalid: ${message}`) });
   for (const issue of issues) {
@@ -468,11 +457,6 @@ function repairFields(doc: TurnSnapshotDoc, issues: readonly { path: readonly Pr
       dropDegraded.add(key);
       continue;
     }
-    if (head === "scout_spend_usd_today") {
-      spend = undefined;
-      mark("scout_spend_usd_today", issue.message);
-      continue;
-    }
     if (head === "observability") {
       obs = undefined;
       mark("observability", issue.message);
@@ -481,13 +465,12 @@ function repairFields(doc: TurnSnapshotDoc, issues: readonly { path: readonly Pr
     return null;
   }
   if (dropDegraded.size > 0) markers.push({ collector: "turn-snapshot", field: "degraded", reason: DEGRADE.MALFORMED_ENTRY_DROPPED });
-  const { scout_spend_usd_today: _s, observability: _o, ...rest } = doc;
+  const { observability: _o, ...rest } = doc;
   return {
     doc: {
       ...rest,
       signals: signals as TurnSnapshotSignals,
       blobs: blobs as TurnSnapshotDoc["blobs"],
-      ...(spend === undefined ? {} : { scout_spend_usd_today: spend }),
       degraded: [...doc.degraded.filter((_, i) => !dropDegraded.has(i)), ...markers],
       validation: { ok: true },
       ...(obs === undefined ? {} : { observability: obs }),

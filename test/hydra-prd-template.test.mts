@@ -45,6 +45,7 @@ import {
   parseArgs,
   isTargetRepoPath,
   partitionScopeByRepo,
+  riskSurfaceMatches,
   type PrdInput,
   type PrdSlice,
 } from "../scripts/ci/hydra-prd-render.ts";
@@ -515,5 +516,81 @@ describe("end-to-end — parent + children round-trip with hydra-epic-close", ()
       assert.match(body, /## Parent\n\n#999/);
       siblings.set(n, childNumbers[i]);
     }
+  });
+});
+
+describe("Target render scope (issue #5168)", () => {
+  // The Target Manifest's riskCritical.surface shape ($TARGET_RISK_SURFACE_JSON):
+  // directory prefixes end in "/", anything else is one exact file.
+  const SURFACE = ["src/execution/", "src/risk/", "config/risk-template.json"];
+  const target = { kind: "target", riskSurface: SURFACE } as const;
+  const input = validInput({
+    slices: [
+      slice("dash", { filesInScope: ["src/app/strategies/page.tsx", "test/dash.test.ts"] }),
+      slice("intent", { filesInScope: ["./src/execution/order-intent.ts", "src/risk/risk-core.ts", "src/execution/order-intent.ts"] }),
+      slice("tmpl", { filesInScope: ["config/risk-template.json.bak", "config/risk-template.json"] }),
+    ],
+  });
+
+  test("riskSurfaceMatches: prefix entries match by prefix, file entries exactly; ./ ignored; deduped", () => {
+    assert.deepEqual(riskSurfaceMatches(input.slices[1].filesInScope, SURFACE), ["src/execution/order-intent.ts", "src/risk/risk-core.ts"]);
+    assert.deepEqual(riskSurfaceMatches(input.slices[2].filesInScope, SURFACE), ["config/risk-template.json"]);
+    assert.deepEqual(riskSurfaceMatches(input.slices[0].filesInScope, SURFACE), []);
+    assert.deepEqual(riskSurfaceMatches(["src/executionist.ts"], SURFACE), [], "a prefix entry needs its trailing slash boundary");
+  });
+
+  test("a risk-surface slice gets a Money-critical line and never an Expected tier", () => {
+    const body = renderChildBody(input, 2, 900, new Map(), 3, target);
+    assert.match(body, /^Money-critical: yes — touches the Target risk surface \(src\/execution\/order-intent\.ts, src\/risk\/risk-core\.ts\)$/m);
+    assert.doesNotMatch(body, /Expected tier/, "the tier ladder is Orchestrator-only");
+  });
+
+  test("a risk-free Target slice gets neither line", () => {
+    const body = renderChildBody(input, 1, 900, new Map(), 3, target);
+    assert.doesNotMatch(body, /Money-critical|Expected tier/);
+  });
+
+  test("Target scope keeps every declared path in scope (no repo partition)", () => {
+    const t = validInput({ slices: [slice("a", { filesInScope: ["claw-street-bets/src/x.ts", "src/y.ts"] }), slice("b"), slice("c")] });
+    const body = renderChildBody(t, 1, 900, new Map(), undefined, target);
+    assert.match(body, /- `claw-street-bets\/src\/x\.ts`/);
+    assert.doesNotMatch(body, /## Related \(Target repo\)/);
+  });
+
+  test("childLabels adds money-critical only for a Target slice on the surface", () => {
+    assert.deepEqual(childLabels(input.slices[1], target), ["ready-for-agent", "enhancement", "money-critical"]);
+    assert.deepEqual(childLabels(input.slices[0], target), ["ready-for-agent", "enhancement"]);
+    assert.deepEqual(childLabels(input.slices[1]), ["ready-for-agent", "enhancement"], "orch scope is unchanged");
+  });
+
+  test("childLabels files a dependent Target slice blocked, never ready-for-agent", () => {
+    const dependent = { ...input.slices[1], dependsOn: [1] };
+    assert.deepEqual(childLabels(dependent, target), ["blocked", "enhancement", "money-critical"]);
+    assert.deepEqual(childLabels(dependent), ["ready-for-agent", "enhancement"], "orch scope is unchanged");
+  });
+
+  test("riskSurfaceMatches normalises ./ on surface entries too", () => {
+    assert.deepEqual(riskSurfaceMatches(["src/risk/a.ts"], ["./src/risk/", " "]), ["src/risk/a.ts"]);
+  });
+
+  test("orchestrator scope is byte-identical to the pre-#5168 default", () => {
+    for (let i = 1; i <= input.slices.length; i++) {
+      assert.equal(renderChildBody(input, i, 900, new Map(), 3, { kind: "orch" }), renderChildBody(input, i, 900, new Map(), 3));
+    }
+  });
+
+  test("orch scope with the configured Target name partitions that Target's paths out", () => {
+    assert.equal(isTargetRepoPath("claw-street-bets/src/x.ts"), false, "without the name, only the legacy Target is recognised");
+    assert.equal(isTargetRepoPath("claw-street-bets/src/x.ts", "claw-street-bets"), true);
+    assert.equal(isTargetRepoPath("gaberoo322/claw-street-bets/src/x.ts", "claw-street-bets"), true);
+    assert.equal(isTargetRepoPath("src/claw-street-bets-adapter.ts", "claw-street-bets"), false, "segment-anchored");
+    assert.equal(isTargetRepoPath("hydra-betting/web/x.ts", "claw-street-bets"), true, "the legacy Target still counts");
+    const { thisRepo, targetRepo } = partitionScopeByRepo(["src/a.ts", "claw-street-bets/src/b.ts"], "claw-street-bets");
+    assert.deepEqual(thisRepo, ["src/a.ts"]);
+    assert.deepEqual(targetRepo, ["claw-street-bets/src/b.ts"]);
+    const o = validInput({ slices: [slice("a", { filesInScope: ["src/a.ts", "claw-street-bets/src/b.ts"] }), slice("b"), slice("c")] });
+    const body = renderChildBody(o, 1, 900, new Map(), 3, { kind: "orch", targetName: "claw-street-bets" });
+    assert.match(body, /## Related \(Target repo\)\n\nThese sibling paths live in the Target repo \(`claw-street-bets`\)/);
+    assert.match(body, /^Expected tier: 3$/m);
   });
 });

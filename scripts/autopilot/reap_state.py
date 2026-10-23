@@ -175,7 +175,7 @@ def mirror_cross_run_state_to_redis(s: dict) -> None:
 
     ONLY the reboot-survival subset is mirrored — `signal_last_fired` (the 10
     signal classes) and `research_force_counter`. Run-scoped fields
-    (pid/turn/dispatches/slots/idle_turns/burned_classes) are NEVER mirrored:
+    (pid/turn/dispatches/slots/burned_classes) are NEVER mirrored:
     they legitimately die with the run and the concurrent-run PID guard + #1352
     slot re-seeding DEPEND on them resetting (design-concept #2715 Invariant 4).
 

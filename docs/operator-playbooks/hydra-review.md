@@ -17,7 +17,7 @@ names the single action that unsticks it.
 covers both boards (ADR-0031 unified the Target onto a GitHub-Issues board, exactly
 like the Orchestrator's). Stalled PRs (§0.9) and the operator-attention tail
 (`ready-for-human`, `reframe`, stale-`blocked`) are walked for the Orchestrator
-**and** each Target board in one session (§0.9, §1.5). This retires the separate `/hydra-target-review` skill, which read a
+**and** each Target board in one session (§0.9, §1.5). This retires the separate target-review skill, which read a
 now-dead Redis backlog and was blind to the live Target GitHub board. The Target
 enumeration is a **loop** over `target-config.ts` (`getTargetGithubRepo()`), so it is
 N-ready; today Hydra is a single swappable Target (ADR-0013), so the loop has one

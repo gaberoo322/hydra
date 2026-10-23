@@ -20,7 +20,7 @@ state loss, or merge-rate anomaly.
 `/tmp/hydra-autopilot-state.json` is the run-local home of all autopilot
 state, but `/tmp` is boot-wiped by the host tmpfiles policy (`D /tmp …
 30d`). Most of state.json is **run-scoped** and legitimately dies with the
-run — `pid`, `turn`, `dispatches`, `slots`, `idle_turns`, `burned_classes`
+run — `pid`, `turn`, `dispatches`, `slots`, `burned_classes`
 (the concurrent-run PID guard and the #1352 slot re-seeding DEPEND on those
 resetting). Only the **cross-run durable subset** must survive:
 
@@ -45,7 +45,7 @@ reboot via AOF + the docker volume) and reads it back as a seed tier:
 
 - **Keys** (bare `redis-cli`, the docker-exec seam the autopilot scripts use):
   `hydra:autopilot:signal-last-fired` — a **Hash** (field = signal class, value
-  = last-fired epoch); `hydra:autopilot:research-force-counter` — a **String**
+  = last-fired epoch); `REDIS_RESEARCH_FORCE_KEY` (scripts/autopilot/bootstrap.sh) — a **String**
   holding the canonical-JSON date-keyed counter object.
 - **Seed order** (bootstrap.sh): prior state file → **Redis** → 0. The prior
   file stays FIRST (fast local path, survives relaunches); Redis is the
@@ -76,7 +76,7 @@ entries, all holds unchanged; issue #5144) — when any of these trip:
 
 1. `cumulative_tokens >= limits.token_budget`
 2. `elapsed >= limits.wall_clock_max_sec`
-3. `idle_turns >= limits.idle_drain_turns` AND all slots empty
+3. (retired, #5070: the `idle_turns` arm — nothing ever incremented the counter; idle ends via cause 5)
 4. 5 consecutive failures of the same pattern (failure backstop; see `self_heal.py`)
 5. The turn is wait-only with zero occupied slots (issue #1352): nothing
    dispatched, no other actions, no slots in flight → `terminate` with cause
@@ -92,8 +92,7 @@ entries, all holds unchanged; issue #5144) — when any of these trip:
    cause `context_compaction`. Checked LAST (a budget/wall-clock/idle/
    failure-backstop trip on the same turn still wins) and NOT gated on
    `slots_occupied == 0` (unlike cause 5) — a busy run is exactly what
-   accumulates the most cache-read growth. `term-check.py` mirrors the same
-   comparison (same lockstep duplication as causes 1-3).
+   accumulates the most cache-read growth.
 
    **Unit note:** the default is 8, not the issue's literal "80-120" — that
    figure was computed over the sampled transcript's 245 raw Anthropic API
@@ -124,7 +123,7 @@ entries, all holds unchanged; issue #5144) — when any of these trip:
 
 When the emitted plan carries a `terminate`, the decide CLI itself POSTs
 `/api/autopilot/run-end` with the plan's cause before printing the plan
-(issue #1352) — `term-check.py` only covers its own Phase-3 trips, and the
+(issue #1352) — the
 reap backstop would otherwise stamp `interrupted`. The POST is idempotent
 (first terminal cause wins) and skipped when state carries no `run_id` or
 `HYDRA_AUTOPILOT_RUN_END_POST=off`.
@@ -144,7 +143,7 @@ slots > 0 and no further dispatchable work (the `wait` action row above), and
 `handoff` whenever a CLEAN exit (code 0/143/130) shows `state.json` slots
 occupied > 0 — so a missed in-loop POST still classifies the baton-pass
 honestly. `interrupted` is now reserved for a clean ZERO-slot exit that bypassed
-term-check (a genuine print-mode end with nothing pending).
+decide.py's terminate (a genuine print-mode end with nothing pending).
 
 The clean-termination rate over recent runs is surfaced as
 `terminationHealth` (with a pre-derived `starved` alarm boolean) on
@@ -251,9 +250,8 @@ regression test `test/autopilot-hooks.test.mts` enforces this.
 | `HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT` | `100` | Max events per `XREAD` batch |
 | `HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN` | `1000` | `XADD MAXLEN ~` cap |
 | `HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS` | `3600` | Silent-wedge fallback cap (`decide.py` only) |
-| `HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD` | `50.0` | Total daily spend cap (issue #532; bootstrap writes into `state.limits.daily_spend_cap_usd`) |
-| `HYDRA_AUTOPILOT_SCOUT_COST_SHARE` | `0.04` | Scout slice of the daily cap (issue #532; `0` = kill-switch). Writes `state.limits.scout_cost_share` |
-| `HYDRA_PER_CYCLE_COST_CAP_USD` | `25.0` | Per-cycle `dev_target` cost-cap backstop (issue #1059; HIGH backstop not a throttle; `0` = disabled). Read by `decide.py` from `state.limits.per_cycle_cost_cap_usd` |
+| `HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD` | `50.0` | **No reader since #5175 (gate removed).** Total daily spend cap (issue #532; bootstrap writes into `state.limits.daily_spend_cap_usd`) |
+| `HYDRA_AUTOPILOT_SCOUT_COST_SHARE` | `0.04` | **No reader since #5175 (gate removed).** Scout slice of the daily cap (issue #532; `0` = kill-switch). Writes `state.limits.scout_cost_share` |
 | `HYDRA_USAGE_5H_THROTTLE_T1` | `0.60` | Graduated 5h-utilization throttle Tier-1 threshold (issue #1087), a fraction in (0,1). At/above this `percentLast5h` (authoritative OAuth meter only), `projectEligibility` sheds the lowest-value pipeline + backfill classes (`research_orch`/`research_target`/`architecture_orch`/`retro_orch`/`cleanup_orch`/`discover_orch`). Inert on the transcript estimate; set-but-invalid → default (fail-loud). Read by `src/cost/usage-tracker.ts` |
 | `HYDRA_USAGE_5H_THROTTLE_T2` | `0.75` | Tier-2 threshold (issue #1087). At/above this `percentLast5h` it ADDITIONALLY sheds `design_concept_orch` + `dev_orch` (the largest 5h consumer); `qa_*` + `dev_target` are never shed. Mis-set below T1 is clamped up so the T2 cut never inverts. Read by `src/cost/usage-tracker.ts` |
 | `HYDRA_EXTRA_USAGE_POLICY` | `block` | How the admission verdict treats an account with paid overage ("extra usage") armed (issue #4560; the signal is #4075's `reasons.extraUsageArmed`, read off the OAuth meter). `block`: armed → `allow=false` at ANY burn level until it is disabled in the Claude console. `allow`: armed is reported but not folded into `allow` (`reasons.extraUsageBlocking` stays `false`); the 5h/weekly hard-stops are the brake. For an account whose overage is plan-level (not the operator's to switch off) and capped at an insignificant amount. Set-but-invalid → default (fail-loud). Read by `src/cost/config.ts`; `pace-gate.sh` keys its skip arm off `extraUsageBlocking` |

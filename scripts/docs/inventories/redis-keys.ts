@@ -48,6 +48,30 @@ export const RETIRED_FAMILIES: readonly string[] = Object.freeze([
 ]);
 
 /**
+ * Live families whose key builder is INLINED in a code file rather than
+ * imported from src/redis/keys.ts (issue #4599, docs-epic 13/13). Declared,
+ * never discovered — mirroring RETIRED_FAMILIES: a row emits ONLY while
+ * `literal` is present in `file`'s comment-stripped code, so a rename drops
+ * the row instead of leaving a phantom. Declared so living docs that cite
+ * these keys resolve against the inventory without a runtime-key refactor.
+ */
+export const ADAPTER_INLINED_FAMILIES: ReadonlyArray<{ pattern: string; file: string; literal: string }> = Object.freeze([
+  { pattern: "hydra:autopilot:slot-events", file: "src/autopilot/slot-events-bridge.ts", literal: "hydra:autopilot:slot-events" },
+  { pattern: "hydra:autopilot:signal-last-fired", file: "src/redis/autopilot-signals.ts", literal: "hydra:autopilot:signal-last-fired" },
+  { pattern: "hydra:design-concept:{anchorRef}", file: "src/redis/design-concept.ts", literal: "hydra:design-concept:${anchorRef}" },
+  { pattern: "hydra:design-concept:index", file: "src/redis/design-concept.ts", literal: "hydra:design-concept:index" },
+  { pattern: "hydra:dispatches:subagent:{sessionId}", file: "src/redis/dispatches.ts", literal: "hydra:dispatches:subagent:${sessionId}" },
+  { pattern: "hydra:dispatches:subagent:index", file: "src/redis/dispatches.ts", literal: "hydra:dispatches:subagent:index" },
+  { pattern: "hydra:holdback:baseline:{commitSha}", file: "src/redis/holdback.ts", literal: "hydra:holdback:baseline:${commitSha}" },
+  { pattern: "hydra:holdback:reverts:{date}", file: "src/redis/holdback.ts", literal: "hydra:holdback:reverts:${date}" },
+  { pattern: "hydra:metrics:oauth-usage:backoff", file: "src/redis/oauth-backoff.ts", literal: "hydra:metrics:oauth-usage:backoff" },
+  { pattern: "hydra:metrics:github-api:rate-limit-backoff", file: "src/redis/oauth-backoff.ts", literal: "hydra:metrics:github-api:rate-limit-backoff" },
+  { pattern: "hydra:metrics:tokens:autopilot:daily:{date}", file: "src/redis/cost.ts", literal: "hydra:metrics:tokens:autopilot:daily:${date}" },
+  { pattern: "hydra:metrics:tokens:by-skill:daily:{date}", file: "src/redis/cost.ts", literal: "hydra:metrics:tokens:by-skill:daily:${date}" },
+  { pattern: "hydra:metrics:tokens:by-cycle:{cycleId}", file: "src/redis/cost.ts", literal: "hydra:metrics:tokens:by-cycle:${cycleId}" },
+]);
+
+/**
  * Parameter names of a builder from Function.prototype.toString. Handles
  * `() =>`, `(a, b) =>`, `a =>` and `function (a) {`; type annotations and
  * defaults (whatever survives transpilation) are dropped. Fails loud when a
@@ -181,13 +205,32 @@ export function buildRedisKeyRows(inputs: RedisKeyInputs): RedisKeyRow[] {
     });
   }
 
+  for (const fam of ADAPTER_INLINED_FAMILIES) {
+    const f = stripped.find((x) => x.path === fam.file);
+    if (!f) continue; // declared file gone → no row
+    const at = f.code.indexOf(fam.literal);
+    if (at === -1) continue; // literal gone from code (a comment mention never counts) → no row
+    const { servedBy, home } = serveJoin(inputs.routes, servingFor([f.path]));
+    rows.push({
+      builder: null,
+      pattern: fam.pattern,
+      params: [...fam.pattern.matchAll(/\{([^}]+)\}/g)].map((m) => m[1]),
+      callSites: 1,
+      accessors: ADAPTER_RE.test(f.path) ? [f.path] : [],
+      servedBy,
+      home,
+      retired: false,
+      source: { path: f.path, line: lineOf(f.code, at) },
+    });
+  }
+
   rows.sort((a, b) => byString(redisKeyRowLabel(a), redisKeyRowLabel(b)));
   return rows;
 }
 
 /** The listing/sort label of a redis-keys row: the builder, or `retired <pattern>`. */
 export function redisKeyRowLabel(row: RedisKeyRow): string {
-  return row.builder ?? `retired ${row.pattern}`;
+  return row.builder ?? (row.retired ? `retired ${row.pattern}` : `inlined ${row.pattern}`);
 }
 
 /** Every scanned file for the call-site tally: src/**\/*.ts + scripts/**\/*.ts. */

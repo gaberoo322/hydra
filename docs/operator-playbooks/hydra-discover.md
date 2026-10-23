@@ -14,7 +14,7 @@ Three-tier investigation depth — runtime diagnostics, behavioral analysis, cod
 On `/loop` each iteration:
 1. Read `/tmp/hydra-discover-iteration.txt` (default 0)
 2. Increment, write back
-3. `/compact` (Claude) / fresh context (Codex)
+3. `/compact`
 
 Stateless by design — all cross-iteration state in files (counter) and external systems (issues, architecture-review.md).
 
@@ -28,7 +28,7 @@ Counter controls tier:
 - Limit to 0–2 new issues per iteration
 - Tier 1+2 < 3 min; Tier 3 adds up to 5 min via subagents
 - Never create vague issues without quantitative evidence
-- Target project (`hydra-betting`) findings → `target-backlog` label (sweep queues to work queue, closes)
+- Target project (hydra-betting) findings → `target-backlog` label (sweep queues to work queue, closes)
 
 ## Tier 1: Runtime (every iteration, parallel)
 
@@ -214,15 +214,14 @@ Alerts: processing >0 when no cycle running (crash recovery), prior_failures >5,
 Only investigate areas Tier 1+2 flagged. Skip if nothing flagged.
 
 - **Claude:** `Agent(subagent_type: "Explore", ...)` parallel.
-- **Codex:** Multiple `codex exec --skill explore-area` subprocesses, each with a focus.
 
 ### 3a. Targeted source analysis
 
 Map findings to files:
-- High empty cycles → `src/anchor-selection.ts`, `src/planner-prompt.ts`
-- Recurring scope creep → `src/control-loop.ts` `runExecutorAgent()`
-- Verification failures cluster → `src/verifier.ts`, `src/preflight.ts`
-- High cost → `src/codex-runner.ts` (model routing, thread reuse, caching)
+- High empty cycles → `scripts/autopilot/decide.py` (anchor selection; the old `src/` selection and planner-prompt modules were deleted, ADR-0036)
+- Recurring scope creep → `scripts/ci/scope-check.ts`
+- Verification failures cluster → `scripts/ci/qa-verdict.ts`
+- High cost → `scripts/autopilot/classes.json` (per-class model routing)
 
 Look for: files >500 lines, functions >100 lines, stale TODOs, stale `// intentional:` comments, hardcoded values, silent error handling, missing tests.
 
@@ -287,7 +286,7 @@ node --experimental-strip-types scripts/ci/issue-dedup.ts \
 Jaccard overlap >50% — the historical "word overlap >50% → SKIP" rule, now a
 shared, testable function instead of an eyeball. `duplicate: true` → SKIP or
 COMMENT on the matched existing issue. After you decide to FILE a candidate,
-append its title to `BASELINE_TITLES` before checking the next so two findings
+append its title to `$BASELINE_TITLES` before checking the next so two findings
 within THIS run also dedup against each other. The
 **`hydra-discover` ↔ `hydra-architecture-scan` co-fire on `orch_backfill_idle`
 is the primary motivating collision** this baseline closes — see the

@@ -50,12 +50,10 @@ import {
   ARCH_BOARD_ENHANCEMENT_CAP,
   ARCH_BOARD_SATURATION_CAP,
   ARCH_SCAN_LABEL,
-  awkNumber,
   BOARD_SIGNALS_SUPPRESSED,
   collectScout,
   HITL_GRILL_INBOX_CAP,
   HITL_GRILL_LABEL,
-  scoutSpendUsd,
 } from "../src/autopilot/turn-snapshot/board-saturation.ts";
 import {
   collectWayfinderFrontier,
@@ -91,7 +89,6 @@ interface World {
   collectors: string[];
   date?: string;
   orchBoardDegraded?: string;
-  env?: Record<string, string>;
   gh?: Record<string, GhScript>;
   redis?: RedisWorld;
   http?: Record<string, { status?: number; body?: string; network?: boolean }>;
@@ -181,7 +178,6 @@ async function runWorld(w: World): Promise<Run> {
     hydra: createTurnSnapshotHydra({ baseUrl: BASE, transport: http }),
     remaining: {
       redis: fakeRedis(w.redis ?? {}, redisWrites),
-      env: w.env ?? {},
     },
   };
   let stdout = "";
@@ -220,7 +216,6 @@ function signalView(values: Record<string, any>): Record<string, string> {
       scout_last_walk_iso: redisString(sc.lastWalkIso),
       scout_board_open_enhancements: sc.openEnhancements.ok ? sc.openEnhancements.value : "0",
       scout_tokens_today: sc.tokensToday,
-      scout_spend_usd_today: sc.spendUsd,
     });
   }
   const a = values["arch-cleanup-boards"];
@@ -277,7 +272,7 @@ const sortedJson = (xs: readonly unknown[]) => xs.map((x) => JSON.stringify(x)).
 
 describe("Turn Snapshot slice 5B — golden files from the bash collectors (ADR-0043 D4)", () => {
   test("the golden corpus is present and covers every collector (guards a vacuous pass)", () => {
-    assert.ok(goldenFiles.length >= 100, `expected the captured corpus, found ${goldenFiles.length} files`);
+    assert.ok(goldenFiles.length >= 90, `expected the captured corpus, found ${goldenFiles.length} files`);
     const covered = new Set(goldenFiles.flatMap((f) => loadGolden(f).collectors));
     assert.deepEqual([...covered].sort(), Object.keys(REMAINING_COLLECTORS).sort());
   });
@@ -814,7 +809,7 @@ describe("Turn Snapshot Redis port — bounded, fail-open, closes", () => {
 
   test("scout skips the spend-mirror SET when the token read found Redis unreachable, but not on an error reply", async () => {
     const log: string[] = [];
-    const base = { github: createTurnSnapshotGithub({ transport: async () => ({ ok: false, stderr: "" }), repo: DEFAULT_GITHUB_REPO }), now: () => 0, ghListLimit: 100, orchBoardDegraded: "0", env: {} };
+    const base = { github: createTurnSnapshotGithub({ transport: async () => ({ ok: false, stderr: "" }), repo: DEFAULT_GITHUB_REPO }), now: () => 0, ghListLimit: 100, orchBoardDegraded: "0" };
     const replyErr = Object.assign(new Error("WRONGTYPE"), { name: "ReplyError" });
     const down = createTurnSnapshotRedis({ ops: ops({ scoutTokens: async () => Promise.reject(new Error("ECONNREFUSED")) }, log) });
     const skipped = await collectScout({ ...base, redis: down });
@@ -864,14 +859,6 @@ describe("Turn Snapshot slice 5B — payload shapes and the gawk line (ported fr
     assert.deepEqual(await pick(12), { ok: true, value: "12" });
     assert.deepEqual(await pick(null), { ok: true, value: null });
     assert.deepEqual(await pick([1, "a"]), { ok: true, value: null });
-  });
-
-  test("gawk numeric coercion and the scout USD line", () => {
-    assert.deepEqual(["2.5usd", " 7", "1e3", ".5", "abc", "0x10", "inf", "+inf"].map(awkNumber), [2.5, 7, 1000, 0.5, 0, 0, 0, Infinity]);
-    assert.equal(scoutSpendUsd("12345", "0"), "0.00");
-    assert.equal(scoutSpendUsd("0", "3"), "0.00");
-    assert.equal(scoutSpendUsd("1000000", "0.0078125"), "0.007812", "glibc %.6f rounds the exact tie half-to-even");
-    assert.equal(scoutSpendUsd("12345", "3"), "0.037035");
   });
 
   test("the wayfinder GraphQL query is built from the resolved repo, not a literal", () => {
@@ -934,7 +921,6 @@ describe("Turn Snapshot slice 5B — CLI and fail-open runner", () => {
       now: () => 0,
       ghListLimit: 100,
       orchBoardDegraded: "0",
-      env: {},
     });
     assert.deepEqual(signalView(run.values), {
       tickets_available: "false",

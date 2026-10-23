@@ -29,7 +29,7 @@ After PR #400 (issue #383) deleted the in-process planner and the deterministic 
 
 | Section | Effect |
 |---|---|
-| `## Files in scope` | Soft boundary. Files matching the listed entries (backticked code spans or bullet text; prefix match, so `src/foo/` covers everything beneath) are fair game. Files outside this list count toward the ratio-based scope gate (`>80% out-of-scope` blocks merge). |
+| `## Files in scope` | Soft boundary. Files matching the listed entries (backticked code spans or bullet text; prefix match, so `src/<module>/` covers everything beneath) are fair game. Files outside this list count toward the ratio-based scope gate (`>80% out-of-scope` blocks merge). |
 | `## Files out of scope` | Hard boundary. ANY changed file matching this list fails CI's `scope-check` job regardless of ratio — unless explicitly justified (see below). |
 | `scope-justification:` block in the PR body | Per-file escape hatch. Whitelists a specific out-of-scope file with a one-line rationale. Loud (logged in the CI step summary) but allowed. |
 

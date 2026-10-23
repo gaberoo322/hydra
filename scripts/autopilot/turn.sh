@@ -14,7 +14,7 @@
 #                                   validated (and repaired per field) on emit
 #   2. turn_snapshot.py apply (Phase 1)  stores it, as emitted, on
 #                                   state.turn_snapshot — the ONE form decide.py,
-#                                   render-dispatch.py and term-check.py read,
+#                                   and render-dispatch.py read,
 #                                   through scripts/autopilot/turn_snapshot.py.
 #                                   A failed emit is replaced by
 #                                   `turn-snapshot.ts --all-degraded` (the
@@ -24,10 +24,10 @@
 #                                   is unreadable, the MARKER document (no
 #                                   signals: every signal reads degraded, the
 #                                   same plan) — the turn still plans (#5083).
-#   3. term-check.py     (Phase 3)   prints TERM:<cause> | OK — informational here;
-#                                   decide.py emits the `terminate` action itself
-#   4. decide.py decide  (Phase 3)   the plan, written to $HYDRA_AUTOPILOT_PLAN
-#   5. assert_invariants.py (Phase 4)
+#   3. decide.py decide  (Phase 3)   the plan, written to $HYDRA_AUTOPILOT_PLAN
+#                                   (decide.py is the ONLY termination predicate:
+#                                   it emits the `terminate` action itself)
+#   4. assert_invariants.py (Phase 4)
 #
 # then prints a compact plan summary (turn, actions without the sentinel,
 # reasons) and the usage summary (`turn_snapshot.py summary`) so the session
@@ -128,9 +128,7 @@ if ! applied=$(python3 "$SCRIPT_DIR/turn_snapshot.py" apply "${apply_args[@]}" "
 fi
 echo "[turn] snapshot: $(jq -r --arg fell_back "$snapshot_form" '"form=\(if $fell_back != "" then $fell_back else .form end) degraded=\(.degraded)"' <<<"$applied" 2>/dev/null || echo "$applied") cursor=$cursor"
 
-# --- Phase 3: term-check (informational) + decide ----------------------------
-HYDRA_AUTOPILOT_STATE="$STATE" python3 "$SCRIPT_DIR/term-check.py" 2>&1 | tail -1 | sed 's/^/[turn] term-check: /'
-
+# --- Phase 3: decide ----------------------------------------------------------
 [ -s "$CANDIDATES" ] || printf '{"candidates": []}\n' >"$CANDIDATES"
 if [ ! -s "$EVENTS" ]; then
   printf '[]\n' >"$EVENTS"

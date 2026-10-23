@@ -64,13 +64,11 @@
         "0005",
         "0006",
         "0010",
-        "0012",
         "0015",
         "0020",
         "0024",
         "0033",
         "0034",
-        "0036",
         "0045"
       ],
       "referenceDocs": [
@@ -199,6 +197,18 @@
           "depsIndex",
           "emergencyBrake",
           "frictionPatterns",
+          "inlined hydra:autopilot:signal-last-fired",
+          "inlined hydra:design-concept:index",
+          "inlined hydra:design-concept:{anchorRef}",
+          "inlined hydra:dispatches:subagent:index",
+          "inlined hydra:dispatches:subagent:{sessionId}",
+          "inlined hydra:holdback:baseline:{commitSha}",
+          "inlined hydra:holdback:reverts:{date}",
+          "inlined hydra:metrics:github-api:rate-limit-backoff",
+          "inlined hydra:metrics:oauth-usage:backoff",
+          "inlined hydra:metrics:tokens:autopilot:daily:{date}",
+          "inlined hydra:metrics:tokens:by-cycle:{cycleId}",
+          "inlined hydra:metrics:tokens:by-skill:daily:{date}",
           "learningLastDemotionCount",
           "memoryLastConsolidation",
           "memoryPatterns",
@@ -633,7 +643,6 @@
         "0024",
         "0033",
         "0034",
-        "0036",
         "0045"
       ],
       "referenceDocs": [
@@ -689,6 +698,9 @@
           "GET /api/now/recommendations",
           "POST /api/now/recommendations/:id/dismiss",
           "POST /api/now/recommendations/mute-class"
+        ],
+        "redis-keys": [
+          "inlined hydra:autopilot:slot-events"
         ],
         "env-vars": [
           "HYDRA_AUTOPILOT_LOG_PREV",
@@ -817,6 +829,7 @@
       ],
       "adrsCited": [
         "0001",
+        "0006",
         "0010"
       ],
       "referenceDocs": [
@@ -940,13 +953,11 @@
         "0006",
         "0009",
         "0010",
-        "0012",
         "0015",
         "0020",
         "0024",
         "0033",
         "0034",
-        "0036",
         "0045"
       ],
       "referenceDocs": [
@@ -1055,13 +1066,11 @@
         "0006",
         "0009",
         "0010",
-        "0012",
         "0015",
         "0020",
         "0024",
         "0033",
         "0034",
-        "0036",
         "0045"
       ],
       "referenceDocs": [
@@ -1161,12 +1170,10 @@
         "0006",
         "0009",
         "0010",
-        "0012",
         "0015",
         "0020",
         "0033",
         "0034",
-        "0036",
         "0045"
       ],
       "referenceDocs": [
@@ -1330,13 +1337,11 @@
         "0006",
         "0009",
         "0010",
-        "0012",
         "0015",
         "0020",
         "0024",
         "0033",
         "0034",
-        "0036",
         "0045"
       ],
       "referenceDocs": [
@@ -1477,6 +1482,10 @@
           "GET /api/design-concepts/:anchorRef",
           "POST /api/design-concepts",
           "POST /api/design-concepts/:anchorRef/approve"
+        ],
+        "redis-keys": [
+          "inlined hydra:design-concept:index",
+          "inlined hydra:design-concept:{anchorRef}"
         ]
       },
       "homes": [
@@ -1518,14 +1527,12 @@
         "0006",
         "0009",
         "0010",
-        "0012",
         "0015",
         "0020",
         "0024",
         "0029",
         "0033",
         "0034",
-        "0036",
         "0045"
       ],
       "referenceDocs": [
@@ -1585,11 +1592,9 @@
         "0006",
         "0009",
         "0010",
-        "0012",
         "0024",
         "0033",
         "0034",
-        "0036",
         "0045"
       ],
       "referenceDocs": [
@@ -1877,7 +1882,6 @@
           "HYDRA_REDIS_HOST",
           "HYDRA_REDIS_PORT",
           "HYDRA_TARGET_REPO",
-          "HYDRA_TOKEN_USD_RATE",
           "REPO"
         ],
         "classes": [
@@ -1934,12 +1938,10 @@
         "0006",
         "0009",
         "0010",
-        "0012",
         "0015",
         "0020",
         "0024",
         "0033",
-        "0036",
         "0045"
       ],
       "referenceDocs": [
@@ -1997,13 +1999,11 @@
         "0006",
         "0009",
         "0010",
-        "0012",
         "0015",
         "0020",
         "0024",
         "0033",
         "0034",
-        "0036",
         "0045"
       ],
       "referenceDocs": [
@@ -2013,7 +2013,7 @@
         },
         {
           "path": "docs/reference.md",
-          "anchor": "target-outcomes-issue-241-adr-0003--adr-0004"
+          "anchor": "target-outcomes-issue-241-adr-0003--adr-0015"
         }
       ],
       "slices": {
@@ -2206,7 +2206,9 @@
       "adrs": [
         "0038"
       ],
-      "adrsCited": [],
+      "adrsCited": [
+        "0006"
+      ],
       "referenceDocs": [
         {
           "path": "docs/operations/process-cleanup.md",

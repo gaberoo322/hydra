@@ -34,6 +34,7 @@
 import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
+import { eachValue, integerText } from "./json-values.ts";
 import { labelNames } from "./board-saturation.ts";
 
 export interface AfkFrontierDeps {
@@ -67,9 +68,6 @@ function foldRead<T>(read: GhJsonRead, fold: (data: unknown) => T | null): Class
 type Obj = Record<string, unknown>;
 
 const isObj = (v: unknown): v is Obj => v !== null && typeof v === "object" && !Array.isArray(v);
-
-/** A list's items or an object's values; `null` for anything else (including the malformed `undefined`). */
-const members = (v: unknown): unknown[] | null => (Array.isArray(v) ? v : isObj(v) ? Object.values(v) : null);
 
 /**
  * `v.key` over a decoded payload, null-propagating: `null` for a null value
@@ -187,25 +185,10 @@ export async function collectRetro(deps: AfkFrontierDeps): Promise<CollectorOutc
 // Wayfinder frontier
 // ---------------------------------------------------------------------------
 
-/**
- * Python's `int(x)` as `print(int(n))` printed it, or null where it raises
- * (the loop then stops: every later map is dropped, as in the heredoc).
- */
-function pyIntText(x: unknown): string | null {
-  if (typeof x === "boolean") return x ? "1" : "0";
-  if (typeof x === "number") return Number.isFinite(x) ? BigInt(Math.trunc(x)).toString() : null;
-  if (typeof x === "string") {
-    const s = x.trim();
-    if (!/^[+-]?\d+(?:_\d+)*$/.test(s)) return null;
-    return BigInt(s.replaceAll("_", "")).toString();
-  }
-  return null;
-}
-
 /** The approved map numbers in {@link numberOrder}, as integer text; the walk stops at the first non-integer. */
 export function foldWayfinderMaps(read: GhJsonRead): Classified<string[]> {
   const numbers = foldRead(read, (data) => {
-    const issues = members(data);
+    const issues = eachValue(data);
     if (issues === null) return null;
     const out: unknown[] = [];
     for (const issue of issues) {
@@ -218,7 +201,7 @@ export function foldWayfinderMaps(read: GhJsonRead): Classified<string[]> {
   if ("reason" in numbers) return fail(numbers.reason);
   const out: string[] = [];
   for (const n of numbers.value) {
-    const text = pyIntText(n);
+    const text = integerText(n);
     if (text === null) break;
     out.push(text);
   }
@@ -242,12 +225,12 @@ const assigned = (count: unknown): boolean => (typeof count === "number" ? count
  */
 export function foldWayfinderMapLine(read: GhJsonRead): Classified<string> {
   return foldRead(read, (data) => {
-    const nodes = members(at(at(at(at(at(data, "data"), "repository"), "issue"), "subIssues"), "nodes"));
+    const nodes = eachValue(at(at(at(at(at(data, "data"), "repository"), "issue"), "subIssues"), "nodes"));
     if (nodes === null) return null;
     const afk: { node: unknown; type: string }[] = [];
     for (const node of nodes) {
       // A sub-issue must carry `labels.nodes` (a null or scalar node cannot).
-      const labels = members(at(at(node, "labels"), "nodes"));
+      const labels = eachValue(at(at(node, "labels"), "nodes"));
       if (labels === null) return null;
       let type: string | null = null;
       for (const l of labels) {
@@ -276,7 +259,7 @@ export function foldWayfinderMapLine(read: GhJsonRead): Classified<string> {
       const blockers = at(at(t.node, "blockedBy"), "nodes");
       if (blockers === undefined) return null;
       let openBlockers = 0;
-      for (const b of members(blockers) ?? []) {
+      for (const b of eachValue(blockers) ?? []) {
         const state = at(b, "state");
         if (state === undefined) return null;
         if (state === "OPEN") openBlockers++;
@@ -358,7 +341,7 @@ export async function collectWayfinderFrontier(deps: AfkFrontierDeps): Promise<C
  */
 function foldTicketsPick(read: GhJsonRead): Classified<string | null> {
   const first = foldRead(read, (data) => {
-    const issues = members(data);
+    const issues = eachValue(data);
     if (issues === null) return null;
     const numbers: unknown[] = [];
     for (const issue of issues) {

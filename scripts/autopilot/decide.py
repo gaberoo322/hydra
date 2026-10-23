@@ -36,7 +36,7 @@ order and dispatches each action through the appropriate tool:
   update-branch        Bash(gh pr update-branch)
   surface-pr           Bash(gh api .../issues/N/labels + gh pr comment)
   reap                 Bash(./scripts/autopilot/reap.py completion ...)
-  terminate            Bash(./scripts/autopilot/drain.sh <N>) + Phase 7
+  terminate            Bash(./scripts/autopilot/drain.sh) + Phase 7
   wait                 Sleep + re-enter loop (busy-wait nap while slots in
                        flight; a wait-only turn with zero occupied slots
                        terminates cleanly instead — issue #1352)
@@ -82,7 +82,6 @@ state.json {
   "limits": { ... }   # unchanged from #410 / #413
   "cumulative_tokens": int
   "dispatches":       int
-  "idle_turns":       int
   "burned_classes":   [str]    # soft-cap suppressions (issue #395)
   "reaped_task_ids":  [str]    # FIFO-bounded 1000 (issue #411)
 
@@ -128,6 +127,20 @@ state.json {
     "<target_issue_number>": unix-epoch
   }
 
+  # NEW IN #5167 — the same per-item stamps for sweep_target's second arm, the
+  # stranded in-progress set (`target_stale_in_progress_items`). Same back-off,
+  # same stamp-and-prune-on-fire rule, same _persist_state_writeback path.
+  "target_stale_item_stamps": {
+    "<target_issue_number>": unix-epoch
+  }
+
+  # NEW IN #5167 — the same per-item stamps for sweep_target's third arm, the
+  # open `blocked` set (`target_blocked_items`), on the longer 12h blocked
+  # back-off (TARGET_BLOCKED_BACKOFF_SEC). Same stamp-and-prune-on-fire rule.
+  "target_blocked_item_stamps": {
+    "<target_issue_number>": unix-epoch
+  }
+
   # NEW IN #3829 — per-issue attempt counter for the qa_orch busy-loop guard
   # (design-concept issue-3829). Keyed by the STRING orch issue number, valued
   # by the count of qa_orch dispatches that fired while that issue was the
@@ -169,8 +182,8 @@ state.json {
     "rebased_epoch": unix-epoch|null
   }
 
-  # NEW IN #4161 — orch-realm weekly-share guard (the one LIVE budget split;
-  # the USD gates are documented INERT). Two keys, both optional and absent on
+  # NEW IN #4161 — orch-realm weekly-share guard (the one LIVE budget split).
+  # Two keys, both optional and absent on
   # a default run, so default state stays byte-identical:
   #   limits.orch_realm_weekly_share_cap   (operator ceiling, fraction 0..1;
   #                                  absent/0/unparseable/>1 = guard DISABLED
@@ -227,7 +240,7 @@ Helpers `make_*` construct them so call sites stay typed.
   update-branch         { type, pr_number, reason }
   surface-pr            { type, pr_number, cause, reason }
   reap                  { type, slot, task_id, total_tokens, skill }
-  terminate             { type, cause, merged_prs, reason }
+  terminate             { type, cause, reason }
   wait                  { type, seconds, reason }
   wait-for-api          { type, url, retries, reason }
 
@@ -392,7 +405,7 @@ from decide_selectors.wire_or_retire import _select_signal_wire_or_retire_target
 # still exits non-zero with the message.
 #
 # The brain keeps all POLICY — selectors, cooldown enforcement, scope masks
-# (SCOPE_*_EXCLUDE), the BACKFILL_SIGNAL_CLASSES stagger set, cost-cap gates.
+# (SCOPE_*_EXCLUDE), the BACKFILL_SIGNAL_CLASSES stagger set.
 # The table is only the ALPHABET (ADR-0012). Row order is the file/declaration
 # order of the derived tuples and of the TS views (pinned by the parity tests)
 # — it is NOT dispatch priority: _rule_pipeline_dispatch iterates the hardcoded
@@ -682,7 +695,7 @@ SIGNAL_COOLDOWNS = {
 # per-class 1h cooldowns (the class that fired stamps its cooldown, so the
 # OTHER class is the only eligible one next idle turn) — NO persistent rotation
 # state needed, keeping decide.py a pure function of (state, events, now).
-# retro_orch (run-anchored, 24h) and scout_orch (7d walk + cost-cap) are
+# retro_orch (run-anchored, 24h) and scout_orch (7d walk) are
 # deliberately NOT in this set.
 BACKFILL_SIGNAL_CLASSES = ("discover_orch", "architecture_orch")
 
@@ -835,49 +848,6 @@ def _normalize_emergency_brake(raw) -> dict:
 # Daily research-force cap (grilled decision 6).
 RESEARCH_FORCE_DAILY_CAP = 4
 
-# Tool-scout cost-cap defaults (issue #532). Mirror the constants in
-# src/scout/calendar-walk.ts so the gate has sane fallbacks when state.json
-# lacks the limits keys (e.g. legacy state from a v1 schema).
-#
-# `SCOUT_DAILY_COST_SHARE_DEFAULT` matches `SCOUT_DAILY_COST_SHARE` in TS —
-# 4% of the daily budget. `DAILY_SPEND_CAP_USD_DEFAULT` matches the
-# operator-facing $50/day cap documented in the dashboard. Both can be
-# overridden via state.limits or the bootstrap env vars.
-#
-# INERT ON THIS DEPLOYMENT (issue #4161): the scout gate below compares a
-# USD spend counter that is structurally $0 — `HYDRA_TOKEN_USD_RATE` was
-# never set post-ADR-0006 (see src/scheduler/heartbeat.ts) and #704 removed
-# the dollar-conversion machinery (src/api/metrics-cost.ts: "structurally
-# $0; no live dollar cap") — so no cap value can ever make it fire. Kept
-# (its kill-switch semantics are pinned by tests); do NOT build a budget
-# split on it. The live budget-split signal is the orch-realm weekly-share
-# guard further down (`orch_realm_share_state`).
-SCOUT_DAILY_COST_SHARE_DEFAULT = 0.04
-DAILY_SPEND_CAP_USD_DEFAULT = 50.0
-
-# Per-cycle dev_target cost cap (issue #1059, leaf of epic #1052). Mirrors the
-# Orchestrator's retired per-cycle dollar circuit-breaker pattern (the
-# HYDRA_PER_CYCLE_COST_CAP_USD knob; src/cost/cap.ts was removed in #704 once
-# HYDRA_TOKEN_USD_RATE went structurally $0) and the live scout cost-share gate
-# above. This is a HIGH backstop, NOT a throttle: it only fires on a runaway
-# cycle that has already burned through a large dollar budget on Target builds.
-# Slices 3/5/6 (QA, mutation, retro) raise per-cycle Target spend on the single
-# self-hosted runner, so a backstop guards against an unbounded dispatch loop.
-#
-# The default is deliberately high ($25/cycle) so day-to-day cycles never touch
-# it. Operators tune it via `state.limits.per_cycle_cost_cap_usd` (or the
-# bootstrap env var of the same shape). A value of 0 disables the gate entirely
-# (no-op) — matching the scout gate's "rate not configured" degrade path, since
-# no live USD rate exists on this deployment yet (#704). Spend is read from
-# `state.dev_target_spend_usd_cycle` (default 0.0); absent that key the gate is
-# a clean no-op, so legacy state shapes keep today's behaviour.
-#
-# INERT ON THIS DEPLOYMENT (issue #4161): same root cause as the scout gate
-# above — the USD spend counter is structurally $0 (no live dollar rate post
-# ADR-0006/#704), so this backstop can never fire here. See the orch-realm
-# weekly-share guard (`orch_realm_share_state`) for the live budget split.
-PER_CYCLE_COST_CAP_USD_DEFAULT = 25.0
-
 # Periodic session-restart cadence (issue #3787, filed from research #3750):
 # `hydra-autopilot` runs as one long-lived Claude Code session per run, and
 # prompt caching re-reads the ENTIRE prior transcript on every turn — so
@@ -954,11 +924,8 @@ CONTEXT_COMPACTION_TURNS_DEFAULT = 8
 # weekly-CURVE-relative (ADR-0021 D2/D3) and answer a different question
 # ("ahead/behind the target ramp") than this cap's ("did THIS run burn N points").
 #
-# `term-check.py` mirrors the READ half of this logic verbatim (the same
-# literal-duplicate convention as CONTEXT_COMPACTION_TURNS_DEFAULT above, so
-# Phase 3 stays a cheap dependency-free pre-check). Only decide.py performs the
-# baseline CAPTURE — term-check.py is intentionally side-effect-free, so it skips
-# the cap entirely until decide.py has written `state.quota_baseline`.
+# decide.py is the ONLY termination predicate (the former term-check.py twin was
+# deleted, issue #5070): it both captures the baseline and evaluates the cap.
 QUOTA_CAP_DISABLED = 0.0
 
 
@@ -1085,7 +1052,7 @@ def _capture_quota_baseline(state: dict, now: int) -> None:
 def _quota_delta_exceeded(state: dict) -> tuple[str, str] | None:
     """PURE: has this run's utilization delta crossed its cap? `(window, detail)`.
 
-    Mirrored verbatim by `term-check.py`. Returns `None` — keep iterating — for
+    Returns `None` — keep iterating — for
     every fail-open condition: cap disabled, no baseline captured yet, no usable
     current reading. The 5h window is checked before the weekly one because it is
     the tighter, faster-moving bound (and the one the issue's acceptance criterion
@@ -1386,8 +1353,8 @@ def make_reap(slot: str, task_id: str, total_tokens: int, skill: str | None = No
     }
 
 
-def make_terminate(cause: str, merged_prs: int = 0, reason: str = "") -> dict:
-    return {"type": "terminate", "cause": cause, "merged_prs": merged_prs, "reason": reason}
+def make_terminate(cause: str, reason: str = "") -> dict:
+    return {"type": "terminate", "cause": cause, "reason": reason}
 
 
 def make_wait(seconds: int, reason: str = "") -> dict:
@@ -3158,8 +3125,8 @@ def _rule_pipeline_dispatch(
             out.skipped += 1
             continue
         # Orch-realm weekly-share guard (issue #4161) — checked BEFORE the
-        # selector, mirroring the cost-cap gates' "harder limit first"
-        # placement. Suppresses ORCH-scope classes only (CLASS_SCOPE "orch"):
+        # selector, as the "harder limit first" gate.
+        # Suppresses ORCH-scope classes only (CLASS_SCOPE "orch"):
         # target-scope and realm-agnostic ("both") classes fall through, so
         # the guard is one-directional by construction. Default-disabled —
         # armed only by an explicit orch_realm_weekly_share_cap AND a usable share
@@ -3174,26 +3141,6 @@ def _rule_pipeline_dispatch(
                 make_dispatch_decision_event(
                     state, now, cls=cls, outcome="budget",
                     reason="orch realm weekly share exceeded",
-                )
-            )
-            out.skipped += 1
-            continue
-        # Per-cycle cost-cap backstop (issue #1059) — checked BEFORE the
-        # selector so a runaway cycle halts further dev_target sub-dispatch
-        # regardless of available work. HIGH cap: this is a runaway backstop,
-        # not a throttle. Only `dev_target` carries this cap today; other
-        # pipeline classes fall through. Mirrors the scout cost-cap gate's
-        # "cap is the harder limit, checked first" placement (issue #532).
-        if cls == "dev_target" and dev_target_cost_cap_exceeded(state):
-            cap = dev_target_cost_cap_state(state)
-            out.debug.setdefault("dev_target_cost_cap_skipped", {
-                "cap_usd": cap["cap_usd"],
-                "spend_usd": cap["spend_usd"],
-            })
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="budget",
-                    reason="dev_target per-cycle cost-cap exceeded",
                 )
             )
             out.skipped += 1
@@ -3223,7 +3170,7 @@ def _rule_pipeline_dispatch(
             out.skipped += 1
             continue
         # Target WIP-saturation guard (issue #4475, CSB swap prep, ex-#4241) —
-        # checked BEFORE the selector, mirroring the cost-cap gate above, so it
+        # checked BEFORE the selector, mirroring the orch-realm guard above, so it
         # suppresses dev_target for EITHER trigger (legacy
         # target_work_available or target_board_work_available). The boolean
         # is pre-resolved by the Turn Snapshot via scripts/autopilot/target-wip.py
@@ -3401,8 +3348,7 @@ def _rule_signal_classes(
     `slots.get(cls) is not None` slot-busy guard.
 
     Each is independent. Signal classes also respect `burned_classes` (issue
-    #432). For `scout_orch` the cost-cap gate (issue #532) fires BEFORE the
-    cooldown read ("cap is the harder limit"). One `dispatch_decision` event is
+    #432). One `dispatch_decision` event is
     emitted per candidate signal class for observability.
 
     Board-idle backfill stagger (issue #959, epic #958): the two backfill-set
@@ -3443,7 +3389,7 @@ def _rule_signal_classes(
         # architecture_orch (issue #790) — idle-time fallback. Registered in
         # the dispatch iteration tuple so a real dispatch sets
         # dispatched_any=True, which yields idle=0 for the turn and stops
-        # idle_turns from accumulating while a fallback is eligible (the AC
+        # the wait-only idle drain from firing while a fallback is eligible (the AC
         # is met by being a real dispatch, NOT by editing the terminate path).
         "architecture_orch",
         # retro_orch (issue #920, parent #917) — daily per-run retrospective.
@@ -3588,27 +3534,8 @@ def _rule_signal_classes(
             )
             out.skipped += 1
             continue
-        # Cost-cap gate (issue #532) — checked BEFORE _select_for_signal so
-        # it fires before the cooldown read. Per AC: "cost-cap gate fires
-        # before cooldown gate (cap is the harder limit)". Only `scout_orch`
-        # has a cost-cap today; other signal classes fall through.
-        if sig == "scout_orch" and scout_cost_cap_exceeded(state):
-            cap = scout_cost_cap_state(state)
-            out.debug.setdefault("scout_cost_cap_skipped", {
-                "share": cap["share"],
-                "cap_usd": cap["cap_usd"],
-                "spend_usd": cap["spend_usd"],
-            })
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=sig, outcome="budget",
-                    reason="scout cost-cap exceeded",
-                )
-            )
-            out.skipped += 1
-            continue
         # Target risk-surface fail-closed gate (issue #4411) — checked BEFORE
-        # _select_for_signal, mirroring the scout cost-cap gate above, so an
+        # _select_for_signal, mirroring the gates above, so an
         # unresolved risk surface is reported distinctly rather than folded
         # into a generic "no triggering signal" / cooldown outcome. Invariant
         # 3 of the design concept: `wire_or_retire_target` must NEVER dispatch
@@ -3878,7 +3805,6 @@ def _rule_idle_fallback(
         out.emit(
             make_terminate(
                 "idle",
-                merged_prs=int(state.get("merged_prs", 0) or 0),
                 reason="wait-only turn, no slots in flight — print-mode session exits on wait; clean idle drain (issue #1352)",
             ),
             reason="idle-drain",
@@ -4658,144 +4584,14 @@ def _research_force_stamp(state: dict, slot: str, now: int) -> None:
     state["research_force_counter"] = {today: by_day}
 
 
-def scout_cost_cap_state(state: dict) -> dict:
-    """Resolve the tool-scout cost-cap inputs from state (issue #532).
-
-    Reads (with sane fallbacks for legacy state shapes):
-      - state.limits.scout_cost_share        (default SCOUT_DAILY_COST_SHARE_DEFAULT)
-      - state.limits.daily_spend_cap_usd     (default DAILY_SPEND_CAP_USD_DEFAULT)
-      - state.scout_spend_usd_today          (default 0.0)
-
-    Returns a dict with the resolved floats AND a boolean `enforced` flag.
-    `enforced` is False when the resolved daily cap is <= 0 (rate not
-    configured) — in that case the gate is a no-op and we treat any spend
-    value as below the (non-existent) cap. A `scout_cost_share` of exactly
-    zero is treated as the documented kill-switch: `enforced` is True and
-    `cap_usd` is 0.0, so the >= check suppresses every dispatch.
-
-    Pure: no side effects.
-    """
-    limits = state.get("limits") or {}
-
-    try:
-        share = float(limits.get("scout_cost_share", SCOUT_DAILY_COST_SHARE_DEFAULT))
-    except (TypeError, ValueError):
-        share = SCOUT_DAILY_COST_SHARE_DEFAULT
-    if not (share >= 0.0):  # NaN-safe
-        share = SCOUT_DAILY_COST_SHARE_DEFAULT
-
-    try:
-        cap_total = float(limits.get("daily_spend_cap_usd", DAILY_SPEND_CAP_USD_DEFAULT))
-    except (TypeError, ValueError):
-        cap_total = DAILY_SPEND_CAP_USD_DEFAULT
-    if not (cap_total >= 0.0):
-        cap_total = DAILY_SPEND_CAP_USD_DEFAULT
-
-    try:
-        spend = float(ts.blob(state, "scout_spend_usd_today") or 0.0)
-    except (TypeError, ValueError):
-        spend = 0.0
-    if not (spend >= 0.0):
-        spend = 0.0
-
-    cap_usd = cap_total * share
-
-    # `enforced=True` when the operator explicitly configured a kill-switch
-    # (share == 0.0) OR when there is a non-zero cap to compare against.
-    # When cap_total is 0 (no rate configured) AND share > 0, the gate is a
-    # no-op — `enforced=False` keeps Phase B's current behaviour intact for
-    # operators who haven't opted in to HYDRA_TOKEN_USD_RATE yet.
-    if share == 0.0:
-        enforced = True
-    else:
-        enforced = cap_total > 0.0
-
-    return {
-        "share": share,
-        "cap_total_usd": cap_total,
-        "cap_usd": cap_usd,
-        "spend_usd": spend,
-        "enforced": enforced,
-    }
-
-
-def scout_cost_cap_exceeded(state: dict) -> bool:
-    """True when the scout-orch cost-cap gate should suppress dispatch.
-
-    Pure wrapper over `scout_cost_cap_state` — separated so callers can
-    log either the bool decision or the full breakdown.
-    """
-    s = scout_cost_cap_state(state)
-    if not s["enforced"]:
-        return False
-    return s["spend_usd"] >= s["cap_usd"]
-
-
-def dev_target_cost_cap_state(state: dict) -> dict:
-    """Resolve the per-cycle dev_target cost-cap inputs from state (issue #1059).
-
-    Reads (with sane fallbacks for legacy state shapes):
-      - state.limits.per_cycle_cost_cap_usd   (default PER_CYCLE_COST_CAP_USD_DEFAULT)
-      - state.dev_target_spend_usd_cycle       (default 0.0)
-
-    Returns a dict with the resolved floats AND a boolean `enforced` flag.
-    `enforced` is False when the resolved cap is <= 0 — the documented
-    kill-for-the-gate value that disables the backstop entirely (a no-op,
-    matching the scout gate's "rate not configured" degrade). When the cap is
-    positive the gate compares cycle spend against it. Unlike the scout gate
-    there is no kill-SWITCH semantics for 0 here: this is a HIGH backstop, not a
-    throttle, so a 0 cap means "no backstop", never "suppress everything".
-
-    Pure: no side effects.
-    """
-    limits = state.get("limits") or {}
-
-    try:
-        cap_usd = float(limits.get("per_cycle_cost_cap_usd", PER_CYCLE_COST_CAP_USD_DEFAULT))
-    except (TypeError, ValueError):
-        cap_usd = PER_CYCLE_COST_CAP_USD_DEFAULT
-    if not (cap_usd >= 0.0):  # NaN-safe
-        cap_usd = PER_CYCLE_COST_CAP_USD_DEFAULT
-
-    try:
-        spend = float(state.get("dev_target_spend_usd_cycle", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        spend = 0.0
-    if not (spend >= 0.0):
-        spend = 0.0
-
-    return {
-        "cap_usd": cap_usd,
-        "spend_usd": spend,
-        "enforced": cap_usd > 0.0,
-    }
-
-
-def dev_target_cost_cap_exceeded(state: dict) -> bool:
-    """True when the per-cycle dev_target cost-cap backstop should halt dispatch.
-
-    Pure wrapper over `dev_target_cost_cap_state` — separated so callers can
-    log either the bool decision or the full breakdown.
-    """
-    s = dev_target_cost_cap_state(state)
-    if not s["enforced"]:
-        return False
-    return s["spend_usd"] >= s["cap_usd"]
-
-
 # ---------------------------------------------------------------------------
 # Orch-realm weekly-share guard (issue #4161)
 # ---------------------------------------------------------------------------
 #
-# Every USD-denominated cost gate above is structurally inert on this
-# deployment: `HYDRA_TOKEN_USD_RATE` was never set post-ADR-0006
-# (src/scheduler/heartbeat.ts documents the env var at its own line ~648) and
-# #704 stripped the dollar-conversion machinery outright
-# (src/api/metrics-cost.ts: "structurally $0; no live dollar cap"), so
-# `scout_spend_usd_today` / `dev_target_spend_usd_cycle` are permanently 0.0
-# and no cap value can ever make those gates fire. They are kept (their tests
-# pin the kill-switch semantics) but documented INERT — do NOT re-derive a
-# budget split from them.
+# The USD-denominated scout / per-cycle dev_target cost gates were removed
+# (issue #5175): `HYDRA_TOKEN_USD_RATE` was never set post-ADR-0006 and #704
+# stripped the dollar-conversion machinery, so their spend counters were
+# structurally $0 and no cap value could ever make them fire.
 #
 # The one live budget-split signal is the orch-vs-target REALM share of the
 # rolling weekly window. Signal-seam split (issue #4161 AC1/AC2, restored by
@@ -4853,7 +4649,7 @@ def _realm_share_finite(value) -> float | None:
 def orch_realm_share_state(state: dict) -> dict:
     """Resolve the orch-realm weekly-share guard inputs from state (issue #4161).
 
-    Reads (with the same fail-open fallbacks as the sibling cost-cap gates):
+    Reads (with fail-open fallbacks):
       - state.limits.orch_realm_weekly_share_cap   (default 0 = DISABLED)
       - the Turn Snapshot's orch_realm_weekly_share signal (null = unreadable)
 
@@ -4892,7 +4688,6 @@ def orch_realm_share_exceeded(state: dict) -> bool:
 
     Pure wrapper over `orch_realm_share_state` — separated so callers can
     log either the bool decision or the full breakdown. `>=` semantics,
-    mirroring `scout_cost_cap_exceeded`.
     """
     s = orch_realm_share_state(state)
     if not s["enforced"]:
@@ -4901,7 +4696,7 @@ def orch_realm_share_exceeded(state: dict) -> bool:
 
 
 def _check_termination(state: dict, now: int, events: list[dict] | None = None) -> dict | None:
-    """Mirror of term-check.py logic, expressed as an action.
+    """The single termination predicate, expressed as an action.
 
     NOT pure, by one narrow exception (issue #3867): `_capture_quota_baseline`
     mutates `state["quota_baseline"]` on the first calibrated turn of a
@@ -4916,11 +4711,6 @@ def _check_termination(state: dict, now: int, events: list[dict] | None = None) 
     budget = int(limits.get("token_budget", 10_000_000))
     elapsed = now - int(state.get("started_epoch", now))
     wall_max = int(limits.get("wall_clock_max_sec", 28_800))
-    idle = int(state.get("idle_turns", 0))
-    idle_max = int(limits.get("idle_drain_turns", 5))
-    slots = state.get("slots") or {}
-    occupied = sum(1 for v in slots.values() if v is not None)
-    merged_prs = int(state.get("merged_prs", 0))
 
     # Quota-percent budget (issue #3867) — capture/rebase the baseline, then check
     # the delta. Checked FIRST because it is the cap denominated in the currency
@@ -4933,28 +4723,12 @@ def _check_termination(state: dict, now: int, events: list[dict] | None = None) 
     quota_hit = _quota_delta_exceeded(state)
     if quota_hit is not None:
         _window, quota_detail = quota_hit
-        return make_terminate("quota", merged_prs=merged_prs, reason=quota_detail)
+        return make_terminate("quota", reason=quota_detail)
 
     if cumulative >= budget:
-        return make_terminate("budget", merged_prs=merged_prs, reason=f"tokens={cumulative}/{budget}")
+        return make_terminate("budget", reason=f"tokens={cumulative}/{budget}")
     if elapsed >= wall_max:
-        return make_terminate("wall_clock", merged_prs=merged_prs, reason=f"elapsed={elapsed}s")
-    # Issue #4130: idle turns accumulated against a DEGRADED orch board read
-    # are blindness, not quiet — a board whose reads all failed renders as
-    # zero/none and would drain the run to a clean `terminate:idle` while
-    # eligible work sits unseen (run 161d9642, 2026-08-17). The idle cause is
-    # withheld while the snapshot is flagged degraded; budget / wall_clock /
-    # quota are unaffected (they are measured independently of the board
-    # read, so a genuinely exhausted run still ends under its own cause).
-    # Issue #4699: idle turns accumulated under a usage hard-stop are
-    # starvation, not quiet — withheld the same way.
-    if (
-        idle >= idle_max
-        and occupied == 0
-        and not _orch_board_read_degraded(state, events)
-        and not _usage_dispatch_blocked(state)
-    ):
-        return make_terminate("idle", merged_prs=merged_prs, reason=f"idle_turns={idle}")
+        return make_terminate("wall_clock", reason=f"elapsed={elapsed}s")
 
     # 5-failure global backstop — looks at the most recent failure pattern.
     log = state.get("failure_log") or []
@@ -4963,13 +4737,12 @@ def _check_termination(state: dict, now: int, events: list[dict] | None = None) 
         if last_pattern and consecutive_failures_of(state, last_pattern) >= MAX_FAILURE_RETRIES:
             return make_terminate(
                 "failure_backstop",
-                merged_prs=merged_prs,
                 reason=f"5x consecutive {last_pattern}",
             )
 
     # Periodic session-restart (issue #3787) — checked LAST among the
     # terminate causes so a genuinely urgent condition above (budget /
-    # wall_clock / idle / failure_backstop) is always reported under its own,
+    # wall_clock / failure_backstop) is always reported under its own,
     # more diagnostic cause first; this is a soft, proactive cadence, not a
     # backstop. See CONTEXT_COMPACTION_TURNS_DEFAULT for the full rationale
     # (including the raw-API-call vs Autopilot-Turn unit correction). `turn`
@@ -4990,7 +4763,6 @@ def _check_termination(state: dict, now: int, events: list[dict] | None = None) 
     if compaction_turns > 0 and turn > 0 and turn % compaction_turns == 0:
         return make_terminate(
             "context_compaction",
-            merged_prs=merged_prs,
             reason=f"turn={turn} (cadence={compaction_turns})",
         )
 
@@ -5095,11 +4867,9 @@ def _post_run_end_for_terminate(actions: list, state: dict) -> None:
     """POST /api/autopilot/run-end when the plan carries a `terminate` action.
 
     Issue #1352: a decide-emitted `terminate` historically had NO clean
-    run-end writer — `term-check.py` only POSTs when its own Phase-3 check
-    trips (which runs BEFORE decide in the turn), and the playbook's
-    terminate arm goes to `drain.sh`, which prints a summary but never POSTs.
-    So every decide-side termination (the `_check_termination` mirror, the
-    failure backstop, and the new wait-only idle drain) fell through to the
+    run-end writer — the playbook's terminate arm goes to `drain.sh`, which
+    prints a summary but never POSTs. So every decide-side termination (the `_check_termination` predicate, the
+    failure backstop, and the wait-only idle drain) fell through to the
     ExecStopPost reap backstop and was stamped `interrupted` — starving the
     retro loop of clean terminal runs. This closes that gap: the cause the
     plan decided on is recorded BEFORE the print-mode session exits.
@@ -5109,7 +4879,7 @@ def _post_run_end_for_terminate(actions: list, state: dict) -> None:
     when state carries no `run_id` (test fixtures, isolated runs) or when
     `HYDRA_AUTOPILOT_RUN_END_POST` is an off-value (CLI-spawning tests set
     `off`; production needs no env change). The endpoint is idempotent — if
-    term-check already recorded an end this turn, the first cause wins, and
+    an end was already recorded this run, the first cause wins, and
     the later reap POST dedups to a no-op. Failure is loud but never fatal:
     the reap backstop still records a terminal status if this POST loses.
 
@@ -5459,13 +5229,15 @@ def main(argv: list[str]) -> int:
         # Issues #3729/#3939: change-detection for the per-item sweep stamp maps.
         # `_stamp_triage_items` rebuilds the stamp map in place (pruning absent
         # items) when a sweep fires with a present item set — for sweep_target
-        # (`target_triage_item_stamps`, #3729) and sweep_orch
-        # (`orch_triage_item_stamps`, #3939). snapshot-before/compare-after on BOTH
+        # (`target_triage_item_stamps`, #3729; `target_stale_item_stamps` / `target_blocked_item_stamps`, #5167)
+        # and sweep_orch (`orch_triage_item_stamps`, #3939). snapshot-before/compare-after on ALL
         # maps persists either via the SAME _persist_state_writeback helper, no new
         # persistence mechanism (INV-12).
         triage_stamps_before = json.dumps(
             {
                 "target": state.get("target_triage_item_stamps"),
+                "target_stale": state.get("target_stale_item_stamps"),
+                "target_blocked": state.get("target_blocked_item_stamps"),
                 "orch": state.get("orch_triage_item_stamps"),
             },
             sort_keys=True,
@@ -5562,6 +5334,8 @@ def main(argv: list[str]) -> int:
         triage_stamps_after = json.dumps(
             {
                 "target": state.get("target_triage_item_stamps"),
+                "target_stale": state.get("target_stale_item_stamps"),
+                "target_blocked": state.get("target_blocked_item_stamps"),
                 "orch": state.get("orch_triage_item_stamps"),
             },
             sort_keys=True,

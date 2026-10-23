@@ -7,7 +7,7 @@
  * validates it against {@link TurnSnapshotSchema} on emit, and prints it. A
  * validation failure never crashes the turn and never discards the whole
  * document: each invalid field is REPAIRED — a signal takes its
- * {@link ALL_DEGRADED_SIGNALS} value, a blob / `scout_spend_usd_today` /
+ * {@link ALL_DEGRADED_SIGNALS} value, a blob /
  * `observability` / `degraded` entry is dropped — with a `degraded` marker,
  * and the rest survives. Only a document still invalid after that (a
  * structural fault) is replaced by the all-degraded document, which is also
@@ -112,6 +112,8 @@ const SignalsSchema = z
     target_dev_resume_pick: PinSchema.nullable(),
     needs_triage_target: z.boolean(),
     target_needs_triage_items: NumberList,
+    target_stale_in_progress_items: NumberList, // #5167
+    target_blocked_items: NumberList, // #5167
     // health / scout
     health_fail: z.boolean(),
     scout_walk_due: z.boolean(),
@@ -192,6 +194,8 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   target_dev_resume_pick: null,
   needs_triage_target: false,
   target_needs_triage_items: [],
+  target_stale_in_progress_items: [],
+  target_blocked_items: [],
   health_fail: true,
   scout_walk_due: false,
   scout_board_saturated: true,
@@ -269,8 +273,6 @@ export const TurnSnapshotSchema = z
     generated_at: z.string().min(1),
     signals: SignalsSchema,
     blobs: BlobsSchema,
-    /** `scout_spend_usd_today` (scout daily cost cap); absent = not numeric this turn (previous value kept). */
-    scout_spend_usd_today: z.number().nonnegative().optional(),
     degraded: z.array(DegradedSchema),
     validation: ValidationSchema,
     /** Collector values with no decide.py reader (the operator's per-turn record). */

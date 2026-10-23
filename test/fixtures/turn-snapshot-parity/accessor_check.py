@@ -57,7 +57,7 @@ def readings(state: dict, names: list[str]) -> dict:
         except ts.UnknownSignalError as exc:
             # replay mode: the read failed loud — report it, the caller asserts on it
             out[name] = {"raised": f"UnknownSignalError: {exc}"}
-    out["_blobs"] = {f: ts.blob(state, f) for f in (*ts.BLOB_FIELDS, "scout_spend_usd_today")}
+    out["_blobs"] = {f: ts.blob(state, f) for f in ts.BLOB_FIELDS}
     out["_slot_events"] = {"events": state.get("slot_events"), "last_id": state.get("slot_events_last_id")}
     return out
 
@@ -74,7 +74,7 @@ def main() -> int:
         candidates = json.load(fh)
     with open(os.path.join(BASE_DIR, "meta.json"), encoding="utf-8") as fh:
         now = json.load(fh)["now"]
-    for f in (*ts.BLOB_FIELDS, "scout_spend_usd_today", "turn_snapshot", "slot_events", "slot_events_last_id"):
+    for f in (*ts.BLOB_FIELDS, "turn_snapshot", "slot_events", "slot_events_last_id"):
         base.pop(f, None)
     results = []
     for case in cases:

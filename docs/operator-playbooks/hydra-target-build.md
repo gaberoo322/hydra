@@ -9,11 +9,10 @@ reference_files: [_fragments/hydra-target-build-merge-flow.md, _fragments/hydra-
 
 # Hydra Build
 
-Run one complete Hydra development build operating as every agent (planner, skeptic, executor, reporter). You write the code yourself — do NOT call Codex or the Hydra scheduler.
+Run one complete Hydra development build operating as every agent (planner, skeptic, executor, reporter). You write the code yourself — do NOT call Codex (retired, ADR-0006) or the Hydra scheduler.
 
 To prevent context window saturation under `/loop`, delegate the build to a child **when a spawn capability exists**:
 - **Claude:** spawn an `Agent` with the build prompt below.
-- **Codex:** `codex exec --skill hydra-target-build` as a subprocess.
 
 Autopilot dispatch sessions carry NO Agent/Task spawn tool (issue #1782). In that environment the build runs under the **explicit inline-mode contract** in Step 2 — silently running the child prompt inline as an undeclared fallback is forbidden, and so is aborting just because the spawn tool is absent.
 
@@ -37,7 +36,7 @@ does not inherit these exports):
 
 Then run:
 
-**Concurrency check (Claude only — does NOT block on Codex cycles):**
+**Concurrency check (Claude only — does NOT block on retired Codex cycles, ADR-0006):**
 ```bash
 CLAUDE_LOCK=$(docker exec hydra-redis-1 redis-cli GET hydra:cycle:active:claude 2>/dev/null)
 if [ -n "$CLAUDE_LOCK" ]; then echo "BLOCKED: another Claude cycle running ($CLAUDE_LOCK)"; fi
@@ -299,7 +298,7 @@ Load context (parallel):
 
 ### 2. Anchor (select task) — GitHub-Issues board (ADR-0031)
 
-Target work is now tracked as **GitHub Issues on `$TARGET_GH_REPO`**, orch-style label-driven (ADR-0031 Decision 2/4) — NOT the Redis work-queue / `/backlog` API. Dispatch simplifies to the Orchestrator's own model: pick a `ready-for-agent`, **unblocked** issue, ordered by priority. There is no scored ranking, no OpenViking semantic dedup, and no Redis atomic claim — those Redis mechanisms are retired.
+Target work is now tracked as **GitHub Issues on `$TARGET_GH_REPO`**, orch-style label-driven (ADR-0031 Decision 2/4) — NOT the Redis work-queue / `/backlog` API. Dispatch simplifies to the Orchestrator's own model: pick a `ready-for-agent`, **unblocked** issue, ordered by priority. There is no scored ranking, no semantic dedup (OpenViking, retired by ADR-0033), and no Redis atomic claim — those Redis mechanisms are retired.
 
 > **Resume dispatches (Step 0.7, `prompt_args.resume`) SKIP this entire step** — the anchor is already pinned (`prompt_args.anchor` = `issue-<resume_issue>`) and the `in-progress` claim is not taken (the issue carries `needs-dev-resume`, whose ONLY writer is /hydra-review's fix-forward resolution, and whose ONLY consumer is the Step 0.7 resume arm).
 
@@ -348,7 +347,7 @@ The issue BODY is not the whole scope contract. An operator decision posted as a
 anchor back to `ready-for-agent` — **overrides the body's option list wherever
 they conflict**; the body stays authoritative for everything the decision does
 not address. CSB #119 / PR #193 QA-FAILed exactly this way: the operator's
-comment excluded moving two workers into `src/bin/`, the build read only the
+comment excluded moving two workers into the Target's `<target>/src/bin/`, the build read only the
 body's "wire vs retire" options, did the excluded move, and landed both workers
 on the risk surface. So for EVERY board-picked anchor (`ANCHOR_NUM` set) —
 safe-path builds included; this read is NOT gated on Step 4.5's risk-critical
@@ -408,11 +407,11 @@ header ALONE also appears on non-decision status reports; only the marker marks
 a decision. `selectOperatorDecision` picks the most recent marker comment by
 `created_at` and returns it verbatim.
 
-When `OPERATOR_DECISION_JSON` is non-empty, the decision is the **binding scope
+When `$OPERATOR_DECISION_JSON` is non-empty, the decision is the **binding scope
 statement**: the plan's `scopeBoundary.in`/`out` and the Step 4.5 scope line
 must not contradict it, and the issue body's option list yields wherever they
 conflict. Quote the decision verbatim in the plan handed to the executor role,
-and carry `$OPERATOR_DECISION_JSON` forward into Step 4.5's `DC_INPUT_JSON`.
+and carry `$OPERATOR_DECISION_JSON` forward into Step 4.5's `$DC_INPUT_JSON`.
 
 ### 3.5. Self-declare scope (issue #396)
 
@@ -566,13 +565,13 @@ else
 fi
 ```
 
-`DC_INPUT_JSON` is the planner-authored
+`$DC_INPUT_JSON` is the planner-authored
 `{anchorRef, scope, modulesTouched, invariants, rejectedAlternatives}` object
 (`rejectedAlternatives` is `[{alt, why}, ...]`), plus — when Step 3.3 found one
 — the optional `operatorDecision` `{url, createdAt, body}` carried VERBATIM
 from the operator's decision comment (issue #4693; `body` is the full comment
 body, never a paraphrase). The Target QA Spec axis
-(#1055) reads the same `hydra:target:design-concept:$ANCHOR_REF` key to diff
+(#1055) reads the same `$DC_KEY` key to diff
 the merged change against the captured intent — that is the artifact's only
 consumer; it never blocks a merge by itself.
 
@@ -598,8 +597,8 @@ Rules:
 - NEVER delete a path on the Target's declared risk surface (`$TARGET_RISK_SURFACE_JSON`, from the manifest's `riskCritical.surface`) unless the anchor explicitly asks for it.
 - NEVER "cleanup" / "remove unused" commits.
 - **Target-specific conventions come from the Target's own docs, never this skill** (ADR-0013): stack/framework versions, migration workflow, test-mocking idioms, protected directories. Read whichever of these exist — each is optional, so check with `[ -f … ]` and skip a missing one explicitly rather than treating it as an input: `$TARGET_WS/CONTEXT.md`, `$TARGET_WS/README.md`, `$TARGET_APP_DIR/AGENTS.md`, `$TARGET_APP_DIR/CLAUDE.md`.
-- **Stay in scope.** If you must touch a file outside the Step 3.5 in-scope list, append it to `SCOPE_JUSTIFICATIONS` with a one-line reason before continuing.
-- **Co-located glossary rule.** Treat any `CONTEXT.md` sibling of a file you're editing as required reading before the edit. Use that file's canonical vocabulary in identifiers, variable names, test names, and comments. The risk-critical design-concept artifact (if present at `hydra:target:design-concept:$ANCHOR_REF` from Step 4.5) already carries the scope and invariants forward — the co-located read is the residual case for files the artifact didn't anticipate.
+- **Stay in scope.** If you must touch a file outside the Step 3.5 in-scope list, append it to `$SCOPE_JUSTIFICATIONS` with a one-line reason before continuing.
+- **Co-located glossary rule.** Treat any `CONTEXT.md` sibling of a file you're editing as required reading before the edit. Use that file's canonical vocabulary in identifiers, variable names, test names, and comments. The risk-critical design-concept artifact (if present at `$DC_KEY` from Step 4.5) already carries the scope and invariants forward — the co-located read is the residual case for files the artifact didn't anticipate.
 
 ### 6. Verify (NOT an agent)
 

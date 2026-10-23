@@ -18,7 +18,7 @@ gets quoted back at the agent and ignored.
 
 ## How Hydra detects this
 
-`src/learning/agent-memory.ts` now records two extra fields on every pattern
+`src/pattern-memory/agent-memory.ts` now records two extra fields on every pattern
 at promotion time:
 
 - `promotedAt` — ISO date (YYYY-MM-DD)
@@ -34,7 +34,7 @@ Legacy patterns promoted before this instrumentation lack the new fields and
 are silently skipped. They'll be re-evaluated the next time they fire and
 the new fields get populated (or, if you want immediate visibility, run a
 one-off script that backfills `promotedAt` from the `<!-- auto-promoted ... -->`
-comment in the feedback file).
+comment in the retired (#2975) feedback file).
 
 ## How to check
 
@@ -86,9 +86,9 @@ Decide between two paths:
    (`redis-cli get hydra:memory:planner:patterns | jq`) and find the
    recurring shape: is it always "test file outside scope"? "shared module
    outside scope"? Open a hydra issue to add separate categories in
-   `recordPlannerLesson()` (`src/learning/agent-memory.ts`) so future
+   the pattern-memory recorder (`src/pattern-memory/agent-memory.ts`) so future
    instances fall into narrower buckets, then delete the catch-all
-   `scope-creep` rule from the feedback file.
+   `scope-creep` pattern (the Feedback File itself was retired, #2975).
 
 Either path can be done by a hydra-dev agent — file a `ready-for-agent` issue
 referencing the specific pattern and the rateRatio you saw. This dovetails
@@ -97,7 +97,7 @@ the kind of input the evolution loop should consume.
 
 ## Related
 
-- `src/learning/agent-memory.ts` — `evaluatePromotedPatternEffectiveness`,
+- `src/pattern-memory/agent-memory.ts` — `evaluatePromotedPatternEffectiveness`,
   `getIneffectivePromotedPatterns`, `MIN_DAYS_POST_PROMOTION`.
 - `src/api/learning.ts` — `/api/learning/ineffective-rules` handler.
 - `test/learning-ineffective-promoted-patterns.test.mts` — regression tests.

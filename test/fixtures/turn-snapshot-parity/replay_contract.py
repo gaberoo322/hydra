@@ -80,7 +80,7 @@ def _base_input() -> tuple[dict, object, list, object]:
         candidates = json.load(fh)
     with open(os.path.join(BASE_DIR, "meta.json"), encoding="utf-8") as fh:
         now = json.load(fh)["now"]
-    for f in (*ts.BLOB_FIELDS, "scout_spend_usd_today", "turn_snapshot", "slot_events", "slot_events_last_id"):
+    for f in (*ts.BLOB_FIELDS, "turn_snapshot", "slot_events", "slot_events_last_id"):
         state.pop(f, None)
     return state, candidates, [], now
 

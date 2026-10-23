@@ -79,6 +79,8 @@ LISTS = (
     "needs_qa_numbers",
     "orch_needs_triage_items",
     "target_needs_triage_items",
+    "target_stale_in_progress_items",
+    "target_blocked_items",
     "orch_prs_dirty",
     "orch_prs_unchecked",
     "orch_prs_behind",
@@ -263,8 +265,6 @@ def to_json_form(state: dict) -> dict:
         "degraded": [],
         "validation": {"ok": True},
     }
-    if "scout_spend_usd_today" in s:
-        snap["scout_spend_usd_today"] = s.pop("scout_spend_usd_today")
     s["turn_snapshot"] = snap
     assert "signals" not in s and not any(f in s for f in ts.BLOB_FIELDS)
     return s

@@ -57,7 +57,7 @@ import {
   buildTurnSnapshot,
   serializeTurnSnapshot,
   staleDays,
-  pyFromIsoformatEpoch,
+  isoEpochSeconds,
   type TurnSnapshotValues,
 } from "../src/autopilot/turn-snapshot/json-snapshot.ts";
 import { ALL_DEGRADED_SIGNALS, TurnSnapshotSchema } from "../src/schemas/turn-snapshot.ts";
@@ -137,7 +137,7 @@ function healthyValues(): TurnSnapshotValues {
       boardDegraded: false,
     },
     redisQueues: { "work-queue": ok(2), "reframe-queue": ok(0), "prior-failures": ok(0) },
-    scout: { lastWalkIso: ok('"2026-10-05T08:00:00Z"'), openEnhancements: ok("25"), tokensToday: "1200", spendUsd: "0.42", mirrored: ok(true) },
+    scout: { lastWalkIso: ok('"2026-10-05T08:00:00Z"'), openEnhancements: ok("25"), tokensToday: "1200", mirrored: ok(true) },
     archBoards: {
       lastRunIso: ok("2026-10-06T00:00:00Z"),
       workQueue: 2,
@@ -177,7 +177,7 @@ function fallbackValues(): TurnSnapshotValues {
     prGate: prGateFallbackSnapshot("collector-crashed"),
     picks: picksFallbackSnapshot(),
     redisQueues: { "work-queue": FAILED, "reframe-queue": FAILED, "prior-failures": FAILED },
-    scout: { lastWalkIso: FAILED, openEnhancements: FAILED, tokensToday: "0", spendUsd: "0.00", mirrored: FAILED },
+    scout: { lastWalkIso: FAILED, openEnhancements: FAILED, tokensToday: "0", mirrored: FAILED },
     archBoards: { lastRunIso: FAILED, workQueue: 1, board: FAILED, orchBoardDegraded: "1" },
     hitlGrill: FAILED,
     targetScan: targetScanFallbackSnapshot("collector-crashed"),
@@ -223,7 +223,7 @@ function edgeValues(): TurnSnapshotValues {
       dirtyFix: ok({ pick: null, surface: [] }),
     },
     picks: { ...h.picks, grillPick: null, devReadyPick: null, candidateExclusions: [], boardDegraded: true },
-    scout: { lastWalkIso: ok("2020-01-01T00:00:00"), openEnhancements: ok("3"), tokensToday: "0", spendUsd: "n/a", mirrored: FAILED },
+    scout: { lastWalkIso: ok("2020-01-01T00:00:00"), openEnhancements: ok("3"), tokensToday: "0", mirrored: FAILED },
     targetScan: { ...h.targetScan, adrPresent: false },
     retro: { runs: ok({ available: true, candidate: "abc" }), drillable: null },
     wayfinder: { frontier: null, ticketType: "", inflightGlobal: 2 },
@@ -389,16 +389,14 @@ describe("turn snapshot JSON: contract — golden documents through zod and the 
           if (ev.last_id) assert.equal(rd._slot_events.last_id, ev.last_id);
         } else assert.deepEqual(rd._blobs[field], value, field);
       }
-      if ("scout_spend_usd_today" in doc) assert.equal(rd._blobs.scout_spend_usd_today, doc.scout_spend_usd_today);
     });
   }
 
   test("the edge golden records the documented divergences as degraded markers", () => {
     const doc = JSON.parse(readFileSync(join(PARITY_DIR, "golden-edge.json"), "utf-8"));
     assert.equal("usage_eligibility" in doc.blobs, false, "an unparseable body is absent, never a fabricated default");
-    assert.equal("scout_spend_usd_today" in doc, false);
     const fields = doc.degraded.map((d: { field: string }) => d.field);
-    assert.ok(fields.includes("usage_eligibility") && fields.includes("scout_spend_usd_today"), JSON.stringify(doc.degraded));
+    assert.ok(fields.includes("usage_eligibility"), JSON.stringify(doc.degraded));
     assert.ok(fields.includes("class_stats"), "a body with trailing data is unparseable → absent + marker");
     assert.equal("class_stats" in doc.blobs, false);
     assert.equal(doc.signals.orch_work_available, true, "the derived counts feed the signals by field (#4949)");
@@ -514,8 +512,8 @@ describe("turn snapshot JSON: builder details (#4934)", () => {
     assert.equal(staleDays("not-a-date", 7, NOW_MS), true);
     assert.equal(staleDays("2026-10-05T08:00:00Z", 7, NOW_MS), false);
     assert.equal(staleDays("2026-09-01T08:00:00+02:00", 7, NOW_MS), true);
-    assert.equal(pyFromIsoformatEpoch("2026-10-07T12:00:00+00:00"), NOW_MS / 1000);
-    assert.equal(pyFromIsoformatEpoch("2026-02-30"), null);
+    assert.equal(isoEpochSeconds("2026-10-07T12:00:00+00:00"), NOW_MS / 1000);
+    assert.equal(isoEpochSeconds("2026-02-30"), null);
   });
 
 });
@@ -617,15 +615,14 @@ describe("turn snapshot JSON: validation degrades PER FIELD on emit (#4934)", ()
     assert.ok(fields.includes("blobs.usage_eligibility") && fields.includes("blobs.emergency_brake"), JSON.stringify(fields));
   });
 
-  test("an invalid scout spend / degraded entry / observability is dropped, the rest survives", () => {
+  test("an invalid degraded entry / observability is dropped, the rest survives", () => {
     const b = built();
     const out = serializeTurnSnapshot({
       ...b,
-      doc: { ...b.doc, scout_spend_usd_today: -1, degraded: [{ collector: "", field: "x", reason: "y" }], observability: "nope" as never },
+      doc: { ...b.doc, degraded: [{ collector: "", field: "x", reason: "y" }], observability: "nope" as never },
     });
     const doc = JSON.parse(out.text);
     assert.equal(out.valid, true);
-    assert.equal("scout_spend_usd_today" in doc, false);
     assert.equal("observability" in doc, false);
     assert.equal(doc.degraded.some((d: { collector: string }) => d.collector === ""), false);
     assert.ok(doc.degraded.some((d: { field: string; reason: string }) => d.field === "degraded" && d.reason === "malformed-entry-dropped"));
@@ -854,7 +851,7 @@ describe("turn snapshot JSON: the CLI's --format json (#4934)", () => {
         sleep: async () => {},
         env: {},
         passthrough: { host: down(), env: {}, taxonomyPath: "/nonexistent/classes.json", targetWorkspace: () => "/nonexistent" },
-        remaining: { redis: down(), env: {} },
+        remaining: { redis: down() },
         target: () => ({ github: down(), hydra: down(), workspace: () => "/nonexistent", facts: () => ({ ok: false, errors: ["down"] }), now: () => NOW_MS }),
       },
       { stdout: (t) => out.push(t), stderr: (t) => err.push(t) },

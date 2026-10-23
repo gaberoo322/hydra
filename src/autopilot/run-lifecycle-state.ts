@@ -192,7 +192,7 @@ export function deriveLifecycleState(
 
 /**
  * `term_reason` values that mark a CLEAN self-termination — the run's own
- * decision loop (`term-check.py` / `decide._check_termination`) reached a stop
+ * decision loop (`decide._check_termination`) reached a stop
  * rule and POSTed run-end, rather than the reap backstop catching a truncated
  * print-mode session. These are the numerator of the clean-termination rate.
  *
@@ -220,7 +220,7 @@ export function deriveLifecycleState(
  *
  * `quota` (issue #3867) is clean for exactly the reason `budget` is — it is the
  * same per-run spend cap denominated in account-utilization percent instead of
- * subagent-reported tokens, reached by the same `decide.py`/`term-check.py` stop
+ * subagent-reported tokens, reached by the same `decide.py` stop
  * rule. Omitting it would make every quota-capped run read as a truncation once
  * an operator enables `--quota-5h-max` / `--quota-week-max`.
  */

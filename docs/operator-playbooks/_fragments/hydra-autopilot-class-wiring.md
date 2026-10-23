@@ -27,61 +27,13 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 > `calendar-walk.ts`); operators override via
 > `state.limits.scout_cost_share`.
 >
-> **Cost-cap gate (issue #532).** The 4% share is now enforced at
-> dispatch time, NOT just documented. `decide.py:_select_for_signal`
-> for `scout_orch` reads `state.limits.scout_cost_share` (default
-> `SCOUT_DAILY_COST_SHARE = 0.04`) and `state.limits.daily_spend_cap_usd`
-> (default `$50.0`) — computes `cap_usd = share * daily_cap` — reads
-> `state.scout_spend_usd_today` (carried by the Turn Snapshot from the
-> `hydra:metrics:tokens:by-skill:daily:<DATE>[hydra-tool-scout]`
-> surrogate, USD via `HYDRA_TOKEN_USD_RATE`) — and suppresses dispatch
-> when `spend_usd >= cap_usd`. The check fires BEFORE the 7d class
-> cooldown (cap is the harder limit): if the cap is exceeded the
-> dispatch is suppressed even when the cooldown has elapsed.
->
-> Two operator escape hatches:
-> - **Tightening:** `state.limits.scout_cost_share = 0.0` is the
->   intentional kill-switch — `cap_usd` resolves to `0.0` and the
->   `>=` check suppresses every dispatch. Set this if a runaway scout
->   needs to be muted while keeping the walk infrastructure intact.
-> - **Loosening:** `state.limits.daily_spend_cap_usd = 0.0` (or an
->   unset `HYDRA_TOKEN_USD_RATE`, which produces \$0 surrogate spend) is
->   treated as "rate not configured" and the gate becomes a no-op.
->   This preserves Phase B's pre-#532 behaviour for operators who
->   haven't opted in to a per-token USD rate yet.
->
-> The daily mirror at `hydra:scout:spend:<YYYY-MM-DD>` (7d TTL) is
-> populated by the Turn Snapshot's `scout` collector each turn from the existing
-> `/api/metrics/tokens` accumulator (`hydra-tool-scout` skill) — no
-> separate writer is needed and the gate sees real usage.
-
-> **Per-cycle dev_target cost-cap backstop (issue #1059, leaf of epic
-> #1052).** `dev_target` dispatches respect a per-cycle USD backstop that
-> mirrors the Orchestrator's per-cycle cost-cap pattern (the
-> `HYDRA_PER_CYCLE_COST_CAP_USD` knob) and the scout cost-share gate above.
-> It is a HIGH backstop, NOT a throttle: it only fires on a runaway cycle
-> that has already burned a large dollar budget on Target builds. Slices
-> 3/5/6 of epic #1052 (Target QA, mutation, retro) raise per-cycle Target
-> spend on the single self-hosted runner, so the backstop guards against an
-> unbounded sub-dispatch loop.
->
-> `decide.py:_rule_pipeline_classes` reads
-> `state.limits.per_cycle_cost_cap_usd` (default
-> `PER_CYCLE_COST_CAP_USD_DEFAULT = $25.0`) and
-> `state.dev_target_spend_usd_cycle` (default `0.0`), then halts further
-> `dev_target` sub-dispatch this cycle when `spend_usd >= cap_usd`. The
-> check fires BEFORE the selector (cap is the harder limit), mirroring the
-> scout gate, and records a `dispatch_decision` `budget` skip plus a
-> `plan.debug.dev_target_cost_cap_skipped` breakdown for operator audit.
->
-> Two operator knobs:
-> - **Tune:** raise/lower `state.limits.per_cycle_cost_cap_usd` (or the
->   `HYDRA_PER_CYCLE_COST_CAP_USD` bootstrap env var) to move the backstop.
-> - **Disable:** a cap of `0` turns the backstop off entirely (no-op) —
->   this is NOT a kill-switch (the cap is a backstop, never a throttle), so
->   `0` means "no backstop", never "suppress everything". An absent
->   `dev_target_spend_usd_cycle` key likewise degrades to a clean no-op, so
->   legacy state shapes keep today's behaviour.
+> The former USD cost-cap gates (scout cost-share, issue #532, and the
+> per-cycle `dev_target` backstop, issue #1059) were removed in issue #5175:
+> their spend counters (`HYDRA_TOKEN_USD_RATE`-derived) were structurally
+> \$0, so they could never fire. The live budget split is the orch-realm
+> weekly-share guard (`orch_realm_share_state`). The daily token mirror at
+> `hydra:scout:spend:<YYYY-MM-DD>` (7d TTL) is still written by the Turn
+> Snapshot's `scout` collector.
 
 > **Architecture-scan wiring (issues #789/#790, parent #787):**
 > `architecture_orch` is the idle-time fallback signal class. When the

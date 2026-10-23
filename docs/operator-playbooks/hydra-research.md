@@ -61,17 +61,16 @@ If `$focus` provided, weight analysis toward that area.
 Spawn three researchers — Control Loop, Learning, Infrastructure. Each gets the full context and produces a JSON array of opportunities.
 
 - **Claude:** `Task(...)` ×3 in one message.
-- **Codex:** `codex exec --skill hydra-research-child` ×3 (each with focus=control_loop / learning / infrastructure).
 
 ### Agent 1: Control Loop & Efficiency
 Investigate: empty cycle reduction, scope creep patterns, verification pipeline (mutation/JIT kill rates), plan cache hit rate, model routing accuracy, cycle-time bottleneck, cost optimization (caching, thread reuse, context compression).
 
-Files: `control-loop.ts`, `pipeline-steps.ts`, `anchor-selection.ts`, `planner-prompt.ts`, `context-builder.ts`, `codex-runner.ts`, `verification.ts`, `plan-cache.ts`.
+Files: the autopilot decision and verification modules under `scripts/autopilot/` and `scripts/ci/` (the in-process control-loop modules were deleted, ADR-0006).
 
 Output: ≥5 opportunities as `[{"title","category":"efficiency","priority","description","acceptance_criteria":[...],"files":[...]}]`. When a finding naturally decomposes into multiple vertical slices, surface them as a `slices: [...]` array on the opportunity object (see **Epic vs. flat decision rule** below) so Phase 4 can route the finding through `hydra-prd`.
 
 ### Agent 2: Learning & Knowledge
-Investigate: agent memory recording / promotion / consolidation, episodic reflection injection, feedback file staleness, pattern detection accuracy, knowledge gaps.
+Investigate: agent memory recording / promotion / consolidation, episodic reflection injection, promoted-lesson staleness, pattern detection accuracy, knowledge gaps.
 
 Files: `learning.ts`, `redis-adapter.ts`, `context-builder.ts`, `pattern-detector.ts`, `prompt-evolution.ts`.
 
@@ -118,7 +117,7 @@ The helper (`isDuplicateIssue` / `partitionCandidates` in
 `scripts/ci/issue-dedup.ts`) keys on normalised word-set Jaccard overlap >50%
 — the historical prose rule, now deterministic so the board-filling skills
 can't disagree at the margin and double-file. After classifying a finding,
-append its **kept** title to `BASELINE_TITLES` before classifying the next so
+append its **kept** title to `$BASELINE_TITLES` before classifying the next so
 two findings within THIS run also dedup against each other.
 
 > **Note (issue #2554):** `hydra-research` is the board-filler and is
@@ -196,7 +195,7 @@ EOF
 )"
 ```
 
-Then append the map's title to `BASELINE_TITLES` so later findings in THIS run dedup against it (in-run dedup, mirroring 3a).
+Then append the map's title to `$BASELINE_TITLES` so later findings in THIS run dedup against it (in-run dedup, mirroring 3a).
 
 **Invariants (ADR-0029 Decision 1 + 3 + 5):**
 - The map carries BOTH labels `wayfinder:map` AND `wayfinder:destination-pending`, and its body is `## Destination` + `## Not yet specified` **ONLY** — **zero tickets**, no `## Sub-issues` block, no `## Decisions so far` content. Draft scope is destination-only: the gate sits between wayfinder's name-destination and map-the-frontier steps, so ticket-charting is the first working action AFTER the operator approves the destination (an amendment strands no tickets).

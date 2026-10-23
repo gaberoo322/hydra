@@ -20,7 +20,7 @@ what survives — **capped at ≤2 proposals/run, deduped** — into two lanes:
 
 - **`feedback`** (prompt-shaped) → an instruction appended directly to the
   Target planner/executor feedback files the build loop already reads
-  (`config/feedback/to-planner.md`, `config/feedback/to-executor.md`).
+  (`config/feedback/to-planner.md`, `config/feedback/to-executor.md`; both retired by ADR-0006).
 - **`backlog`** (code-needing) → a Redis Target-backlog item filed via the
   backlog module.
 
@@ -110,7 +110,7 @@ candidate observations. Each is one of two lanes (see
 
 - **`feedback`** — a recurring prompt-shaped gotcha the planner/executor keep
   tripping on (e.g. "executor keeps skipping the staking-bounds check"). Written
-  as an instruction into a feedback file.
+  as an instruction into a (retired, #2975) feedback file.
 - **`backlog`** — a code-needing finding (a real bug or brittle seam). Filed as
   a Redis Target-backlog item.
 
@@ -177,7 +177,7 @@ If `apply === false` (the default), PRINT the plan and STOP — no edits, no ite
 Under `--apply`:
 
 - For each `plan.feedback[]`: append a one-line dated instruction to the
-  appropriate Target feedback file (`config/feedback/to-planner.md` or
+  appropriate (retired, #2975) Target feedback file (`config/feedback/to-planner.md` or
   `config/feedback/to-executor.md`). Keep it terse and actionable — this is the
   surface the build loop reads next run. Then record the cue in the shared
   seen-list. The seam's `decision` field is the Orchestrator-retro
@@ -234,7 +234,7 @@ this is the sole output.
 - `scripts/ci/hydra-retro-emit.ts` — the Orchestrator retro this one is the Target analogue of
 - `src/redis/retro-seen.ts` — the seen-list seam (shared with the Orchestrator retro)
 - `src/redis/agent-memory.ts` — the friction-store read seam (`namespace="friction"`)
-- `src/backlog/items.ts` — the Target-backlog item writer (`addToBacklog`)
+- the Redis Target-backlog item writer (removed; Target work is GitHub Issues, ADR-0031)
 - `docs/operator-playbooks/hydra-target-build.md` — the build loop whose failures this retro learns from
 
 ## Slot lifecycle events — PostToolUse hook (issue #671)

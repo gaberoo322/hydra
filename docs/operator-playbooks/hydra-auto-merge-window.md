@@ -9,18 +9,18 @@ arguments: [action]
 # Hydra Auto-Merge Window
 
 > **DORMANT — campaign template, not a standing skill.** This skill is **idle by
-> default**: no batch campaign is in flight, and with no `HYDRA_BATCH_LABEL`
+> default**: no batch campaign is in flight, and with no `$HYDRA_BATCH_LABEL`
 > configured it has nothing eligible to act on. It is a reusable template for the
 > *next* bulk-PR wave (a refactor batch, a migration sweep, a dependency bump
 > campaign), not infrastructure that runs during normal operation. Its original
-> use — the codex-removal `refactor-batch-2026-05` wave — has passed; that label
-> is no longer hardcoded. **To reactivate:** set `HYDRA_BATCH_LABEL` to the live
+> use — the ADR-0006 CLI-removal `refactor-batch-2026-05` wave — has passed; that label
+> is no longer hardcoded. **To reactivate:** set `$HYDRA_BATCH_LABEL` to the live
 > campaign's GitHub label (see Configuration) and open a window. When no campaign
 > is running, leave it dormant.
 
 Operator-controlled batch auto-merger. Used to bulk-approve PRs against a labeled
 issue list — without per-PR clicking — for the duration of a campaign. The batch
-label is configurable (`HYDRA_BATCH_LABEL`), so the same template serves any
+label is configurable (`$HYDRA_BATCH_LABEL`), so the same template serves any
 future bulk-refactor or migration wave; it is not tied to a single dated batch.
 
 ## Safety model
@@ -28,9 +28,9 @@ future bulk-refactor or migration wave; it is not tied to a single dated batch.
 Three nested constraints — all must pass before any PR is touched:
 
 1. **Window is open**: `~/.config/hydra/auto-merge-until.txt` exists and contains an ISO8601 timestamp in the future.
-2. **PR is in the batch**: PR body references an issue carrying the configured batch label (`HYDRA_BATCH_LABEL`). There is **no default** — if `HYDRA_BATCH_LABEL` is unset, the `run` action is a no-op (the skill is dormant until a campaign is named).
+2. **PR is in the batch**: PR body references an issue carrying the configured batch label (`$HYDRA_BATCH_LABEL`). There is **no default** — if `$HYDRA_BATCH_LABEL` is unset, the `run` action is a no-op (the skill is dormant until a campaign is named).
 3. **CI is green**: branch protection still enforces tests + tier-gate. This skill never bypasses CI — it only does what the operator would do manually: apply `operator-approved` to Tier-0 PRs and click `gh pr merge --auto`.
-4. **The QA merge guard allows it** (issue #4738): `scripts/ci/qa-merge-guard.ts --pr N --repo R` must exit 0 (a QA PASS at the PR's current head, or an exempt docs/research-only change). A denied PR is skipped and the guard's `reason` logged. This skill **never overrides** a denial — a `QA-Override:` is an operator choice made in `/hydra-review`, never here.
+4. **The QA merge guard allows it** (issue #4738): `scripts/ci/qa-merge-guard.ts` (with `--pr N --repo R`) must exit 0 (a QA PASS at the PR's current head, or an exempt docs/research-only change). A denied PR is skipped and the guard's `reason` logged. This skill **never overrides** a denial — a `QA-Override:` is an operator choice made in `/hydra-review`, never here.
 
 Outside the window the skill is a no-op. Audit log at `~/.config/hydra/auto-merge-log.txt` records every action.
 
@@ -51,14 +51,14 @@ WINDOW_FILE=~/.config/hydra/auto-merge-until.txt
 LOG_FILE=~/.config/hydra/auto-merge-log.txt
 REPO=gaberoo322/hydra
 # Campaign label — set this to the live batch's GitHub label before running.
-# No default: the codex-removal `refactor-batch-2026-05` wave is over, so the
+# No default: the ADR-0006 CLI-removal `refactor-batch-2026-05` wave is over, so the
 # template ships dormant. Point it at the next campaign's label to reactivate.
 BATCH_LABEL="${HYDRA_BATCH_LABEL:-}"
 MAX_WINDOW_HOURS=24
 DEFAULT_WINDOW_HOURS=6
 ```
 
-If `BATCH_LABEL` is empty, the `run`/`status` passes treat the skill as
+If `$BATCH_LABEL` is empty, the `run`/`status` passes treat the skill as
 dormant and do nothing (a clean no-op + audit-log line) — they never scan or
 touch PRs. Set `HYDRA_BATCH_LABEL=<campaign-label>` to arm it, e.g.
 `HYDRA_BATCH_LABEL=migration-sweep-2026-Q3`.

@@ -7,7 +7,7 @@ directly — read this when debugging a missing record or metric.
 
 ### Phase 6 cycle-record contract (issue #430)
 
-After PR-3 (#383) deleted the in-process control loop, `src/cycle.ts`
+After PR-3 (#383) deleted the in-process control loop (ADR-0006), `src/cycle.ts`
 declared that autopilot subagents would write their own `hydra:cycle:*`
 records. That handoff is implemented by `POST /api/autopilot/cycle-record`
 (see `src/api/autopilot.ts`), invoked via `dispatch.sh cycle-record`.
@@ -44,10 +44,10 @@ The reap-time write covers three surfaces atomically server-side:
 
 - `hydra:cycle:<id>` hash + `hydra:cycle:index` ZSET → `/api/cycle/history`
 - `hydra:metrics:<id>` via `recordCycleMetrics(source: "claude")` →
-  `/api/metrics` and `/api/scheduler/status.mergeRateWindow` (carries the
+  `/api/metrics` and `mergeRateWindow` (from `GET /api/scheduler/status`) (carries the
   enriched `filesChanged` count once the watcher posts the merged enrichment)
-- `hydra:scheduler:cycles-{run,merged,failed,unaccounted}` lifetime counters →
-  `/api/scheduler/status.mergeRateLifetime`
+- `hydra:scheduler:cycles-run`, `hydra:scheduler:cycles-merged`, `hydra:scheduler:cycles-failed`, `hydra:scheduler:cycles-unaccounted` lifetime counters →
+  `mergeRateLifetime` (from `GET /api/scheduler/status`)
 
 `dispatch.sh cycle-record` is best-effort: a 5xx or unreachable API is logged
 to the nightly run log and the autopilot proceeds.
@@ -153,8 +153,8 @@ section B.
 
 ### Phase 6 token-surrogate write (issue #394)
 
-After PR-3 (#383) deleted `codex-runner.ts`, the legacy `recordSpend` writer
-that fed `hydra:scheduler:daily-spend` for code-writing work was removed.
+After PR-3 (#383) deleted `codex-runner.ts` (the Codex CLI, retired by ADR-0006), the legacy `recordSpend` writer
+that fed the retired daily-spend surrogate for code-writing work was removed.
 The autopilot now owns the daily-spend signal via a token surrogate. On
 each subagent reap that has authoritative `total_tokens`, the autopilot
 SHOULD fire:
@@ -185,9 +185,4 @@ and surfaces a clearly-labelled `source` so the operator never mistakes
 surrogate USD for real billed spend. Dollar conversion uses
 `HYDRA_TOKEN_USD_RATE` (USD per million tokens, default 0 — operators must
 opt in to a rate they trust).
-
-The per-cycle write keeps the per-cycle cost-cap in `src/cost/cap.ts`
-alive: `checkCostCap()` now sums the legacy `costMicrodollars` reader and
-the surrogate so a runaway subagent can still trip
-`HYDRA_PER_CYCLE_COST_CAP_USD` even though codex is gone.
 

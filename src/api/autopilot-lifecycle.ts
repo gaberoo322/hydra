@@ -5,7 +5,7 @@
  *   POST /metrics/record               — inline merge-time cycle-close write (#3220)
  *   POST /autopilot/reflection-record  — reap-side reflection writer (#1119)
  *   POST /autopilot/run-start          — bootstrap.sh end-of-Phase-0
- *   POST /autopilot/run-end            — term-check.py
+ *   POST /autopilot/run-end            — decide.py terminate / bootstrap.sh --reap
  *   POST /autopilot/run-tally          — drain.sh / run_termination.py (#4551)
  *   POST /autopilot/turn               — heartbeat.py
  *
@@ -200,7 +200,7 @@ export function createAutopilotLifecycleRouter() {
   });
 
   // -------------------------------------------------------------------------
-  // POST /autopilot/run-end — term-check.py.
+  // POST /autopilot/run-end — decide.py terminate / bootstrap.sh --reap.
   // -------------------------------------------------------------------------
   router.post("/autopilot/run-end", async (req, res) => {
     const parsed = RunEndBodySchema.safeParse(req.body ?? {});

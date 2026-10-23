@@ -15,6 +15,8 @@ Take a structured `PrdInput` and emit one **parent epic** issue plus **N tracer-
 - Parent body: a `## Sub-issues` markdown checklist (`- [ ] #N`) — the exact format `hydra-epic-close`'s `parseEpicReferences()` parses.
 - Each child body: a `## Parent` section pointing back at the parent's real GitHub number.
 
+**Target render scope (issue #5168).** `renderChildBody()` and `childLabels()` take an optional last argument, a `RenderScope`. The default `{ kind: "orch" }` renders exactly the Orchestrator output this playbook describes. `{ kind: "target", riskSurface }` renders for the Target board instead: every path stays in scope, there is no `Expected tier`, and slices on the risk surface get `Money-critical: yes` plus the `money-critical` label. The Target publish recipe is `/hydra-tickets target`. This playbook's own `--apply` path stays Orchestrator-only.
+
 Unlike the generic upstream `/to-spec` skill (renamed from `/to-prd` in Pocock v1.1 — it was always a spec, not a PRD) — which interviews the operator via `AskUserQuestion` — `hydra-prd` is **fully parameterised**: input is structured JSON, output is GitHub issues. There are zero `AskUserQuestion` calls in this playbook; if the input is malformed, the skill stops with a validation report rather than asking for clarification.
 
 The skill is **dry-run by default**. To actually create issues on `gaberoo322/hydra`, pass `--apply` (or `apply=true`). Dry-run prints the rendered parent and child bodies plus the validation report, so the operator can review before committing.

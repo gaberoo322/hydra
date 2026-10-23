@@ -431,7 +431,7 @@ Quick wins to apply automatically:
 - Start postgres if missing: `cd ~/hydra && docker compose up -d postgres`
 - Kill stale test containers: `docker ps --format '{{.Names}}' | grep test | xargs -r docker kill`
 - Converge a `drift` verdict (prod stale): run `scripts/deploy.sh` from the
-  `~/hydra` master checkout (rebuilds `dashboard/dist/` + restarts the
+  `~/hydra` master checkout (rebuilds the dashboard + restarts the
   service). If the drift check reported a dirty-tree probable-cause, first
   `git -C ~/hydra reset`/commit that tracked change so deploy.sh's dirty-tree
   guard doesn't re-abort — `docker/ov.conf` is a known spurious offender.

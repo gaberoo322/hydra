@@ -193,15 +193,24 @@ export function validatePrdInput(input: PrdInput): PrdValidationError[] {
  * marker as a path segment (boundary-anchored) avoids mis-flagging an
  * orchestrator file that merely mentions the Target in its name.
  */
-export function isTargetRepoPath(path: string): boolean {
+export function isTargetRepoPath(path: string, targetName?: string): boolean {
   const p = (path || "").trim();
   if (!p) return false;
-  // Boundary-anchored: `hydra-betting` must be a path segment, not a substring
+  // Boundary-anchored: the Target name must be a path segment, not a substring
   // of some other identifier (e.g. it must be `a/hydra-betting/b`, the start
   // `hydra-betting/…`, or the bare `hydra-betting`), so an orchestrator file
   // like `src/hydra-betting-adapter.ts` is NOT mis-classified as Target.
-  return /(^|\/)(gaberoo322\/)?hydra-betting(\/|$)/.test(p);
+  // `hydra-betting` (the retired Target) always counts; issue #5168 adds the
+  // configured Target's name when the caller passes it (the renderer is pure,
+  // so the playbook resolves it through the target seam).
+  const names = [LEGACY_TARGET_NAME, ...(targetName ? [targetName] : [])];
+  return names.some((n) => new RegExp(`(^|/)(gaberoo322/)?${escapeRegExp(n)}(/|$)`).test(p));
 }
+
+/** The retired Target the #2175 partition was written against; still a Target path. */
+const LEGACY_TARGET_NAME = "hydra-betting";
+
+const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * Issue #2175: partition a slice's declared in-scope files by repo. Returns
@@ -209,17 +218,49 @@ export function isTargetRepoPath(path: string): boolean {
  * `## Files in scope` and surface Target-repo siblings under a clearly-labelled
  * related-but-not-in-scope note. Order within each bucket is preserved.
  */
-export function partitionScopeByRepo(files: string[]): {
+export function partitionScopeByRepo(files: string[], targetName?: string): {
   thisRepo: string[];
   targetRepo: string[];
 } {
   const thisRepo: string[] = [];
   const targetRepo: string[] = [];
   for (const f of files ?? []) {
-    if (isTargetRepoPath(f)) targetRepo.push(f);
+    if (isTargetRepoPath(f, targetName)) targetRepo.push(f);
     else thisRepo.push(f);
   }
   return { thisRepo, targetRepo };
+}
+
+/**
+ * Issue #5168: which board the rendered issues are filed on.
+ *
+ * - `orch` (the default) renders exactly as before; `targetName` (the seam's
+ *   `$TARGET_NAME`) also partitions that Target's paths out of scope.
+ * - `target` renders for the Target board itself: every declared path is in
+ *   scope (they all live in the Target repo), and the Orchestrator-only
+ *   `Expected tier` stamp gives way to a `Money-critical` line derived from
+ *   the Target Manifest's `riskCritical.surface` (`$TARGET_RISK_SURFACE_JSON`).
+ */
+export type RenderScope =
+  | { readonly kind: "orch"; readonly targetName?: string }
+  | { readonly kind: "target"; readonly riskSurface: readonly string[] };
+
+/**
+ * Issue #5168: the slice paths on the Target risk surface, in input order,
+ * deduped. Same rule as the Target's own classifier (`risk-core.ts`
+ * `matchRiskSurface`): an entry ending in `/` is a directory prefix, any other
+ * entry matches one file exactly. A leading `./` is ignored.
+ */
+export function riskSurfaceMatches(files: readonly string[], riskSurface: readonly string[]): string[] {
+  const norm = (s: string) => (s || "").trim().replace(/^\.\//, "");
+  const entries = riskSurface.map(norm).filter((e) => e !== "");
+  const out: string[] = [];
+  for (const raw of files ?? []) {
+    const p = norm(raw);
+    if (!p || out.includes(p)) continue;
+    if (entries.some((e) => (e.endsWith("/") ? p.startsWith(e) : p === e))) out.push(p);
+  }
+  return out;
 }
 
 /**
@@ -305,7 +346,8 @@ export function renderParentBody(
  *   always have numbers by the time later siblings render.
  * - `expectedTier` is the integer tier returned by `GET /api/tier` for the
  *   slice's `filesInScope`. Stamped into the body as `Expected tier: N` so
- *   CI's tier-gate has a heads-up.
+ *   CI's tier-gate has a heads-up. Orchestrator scope only.
+ * - `scope` (issue #5168, default `{ kind: "orch" }`) — see {@link RenderScope}.
  */
 export function renderChildBody(
   input: PrdInput,
@@ -313,6 +355,7 @@ export function renderChildBody(
   parentNumber: number,
   siblingIssueNumbers: Map<number, number> = new Map(),
   expectedTier?: number,
+  scope: RenderScope = { kind: "orch" },
 ): string {
   const slice = input.slices[sliceIndex - 1];
   if (!slice) {
@@ -342,8 +385,11 @@ export function renderChildBody(
   // cannot exist in this repo. This-repo paths stay in `## Files in scope`;
   // Target-repo paths move to a clearly-labelled `## Related (Target repo)`
   // note below, which scope-check never reads.
+  // A Target-scope issue IS on the Target repo, so nothing is partitioned out.
   const { thisRepo: inScopeThisRepo, targetRepo: relatedTargetRepo } =
-    partitionScopeByRepo(slice.filesInScope);
+    scope.kind === "target"
+      ? { thisRepo: [...slice.filesInScope], targetRepo: [] }
+      : partitionScopeByRepo(slice.filesInScope, scope.targetName);
   lines.push("## Files in scope");
   lines.push("");
   if (inScopeThisRepo.length > 0) {
@@ -365,8 +411,9 @@ export function renderChildBody(
     // distinct heading keeps these Target paths out of the scope set entirely.
     lines.push("## Related (Target repo)");
     lines.push("");
+    const targetLabel = scope.kind === "orch" && scope.targetName ? scope.targetName : LEGACY_TARGET_NAME;
     lines.push(
-      "These sibling paths live in the Target repo (`hydra-betting`), not this repo. " +
+      `These sibling paths live in the Target repo (\`${targetLabel}\`), not this repo. ` +
         "They are listed for context only and are intentionally outside this issue's scope — " +
         "do not touch them in an orchestrator PR.",
     );
@@ -411,7 +458,16 @@ export function renderChildBody(
     lines.push("- _(none)_");
   }
   lines.push("");
-  if (typeof expectedTier === "number" && Number.isFinite(expectedTier)) {
+  if (scope.kind === "target") {
+    // The tier ladder is Orchestrator-only (ADR-0004); a Target slice's depth
+    // is set by the risk surface instead, which the Target's own CI re-derives
+    // on the PR and its automerge fence enforces.
+    const touched = riskSurfaceMatches(slice.filesInScope, scope.riskSurface);
+    if (touched.length > 0) {
+      lines.push(`Money-critical: yes — touches the Target risk surface (${touched.join(", ")})`);
+      lines.push("");
+    }
+  } else if (typeof expectedTier === "number" && Number.isFinite(expectedTier)) {
     lines.push(`Expected tier: ${expectedTier}`);
     lines.push("");
   }
@@ -420,11 +476,20 @@ export function renderChildBody(
 
 /**
  * Render the labels the skill should apply to a child slice. Always includes
- * `ready-for-agent` plus the slice's kind (`enhancement` by default).
+ * `ready-for-agent` plus the slice's kind (`enhancement` by default). In
+ * Target scope (issue #5168) a slice with a `dependsOn` edge gets `blocked`
+ * INSTEAD of `ready-for-agent` (the Target build's board pick reads no
+ * blockers, and `hydra-target-sweep` promotes it once its blocker closes), and a
+ * slice on the risk surface also carries `money-critical`, the label the
+ * Target's automerge fence reads.
  */
-export function childLabels(slice: PrdSlice): string[] {
+export function childLabels(slice: PrdSlice, scope: RenderScope = { kind: "orch" }): string[] {
   const kind = slice.kind ?? "enhancement";
-  return ["ready-for-agent", kind];
+  if (scope.kind !== "target") return ["ready-for-agent", kind];
+  const lane = (slice.dependsOn ?? []).length > 0 ? "blocked" : "ready-for-agent";
+  const labels = [lane, kind];
+  if (riskSurfaceMatches(slice.filesInScope, scope.riskSurface).length > 0) labels.push("money-critical");
+  return labels;
 }
 
 /**
