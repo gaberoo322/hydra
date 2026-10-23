@@ -63,7 +63,7 @@ echo
 
 echo "=== state (${STATE}) ==="
 if [ -f "$STATE" ] && command -v jq >/dev/null 2>&1; then
-  jq '{turn, dispatches, cumulative_tokens, slots, signal_last_fired, burned_classes, idle_turns}' "$STATE" 2>/dev/null \
+  jq '{turn, dispatches, cumulative_tokens, slots, signal_last_fired, burned_classes}' "$STATE" 2>/dev/null \
     || cat "$STATE"
 elif [ -f "$STATE" ]; then
   cat "$STATE"

@@ -77,7 +77,7 @@ function baseState(): Record<string, unknown> {
     failure_log: [],
     reaped_task_ids: [],
     dev_resume_pending: null,
-    // The live bootstrap.sh shape (keys term-check.py / decide.py read).
+    // The live bootstrap.sh shape (keys decide.py reads).
     limits: {
       token_budget: 10_000_000,
       wall_clock_max_sec: 28_800,
@@ -186,7 +186,7 @@ describe("turn.sh — Phases 1–4 as one command (issue #4831)", () => {
     assert.equal(run.status, 0, run.stderr);
     assert.match(run.stdout, /\[turn\] snapshot: replaying /);
     assert.match(run.stdout, /\[turn\] snapshot: form=json degraded=0 cursor=1790000000000-0/);
-    assert.match(run.stdout, /\[turn\] term-check: OK/);
+    assert.doesNotMatch(run.stdout, /term-check/, "turn.sh no longer runs a termination pre-check (#5070)");
     assert.match(run.stdout, /\[turn\] OK — plan at /);
   });
 
@@ -277,7 +277,6 @@ describe("turn.sh — Phases 1–4 as one command (issue #4831)", () => {
     sandboxes.push(sb2);
     const r = runTurn(sb2);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /\[turn\] term-check: TERM:/);
     const types = readJson(sb2.plan).actions.map((a: any) => a.type);
     assert.ok(types.includes("terminate"), `expected a terminate action, got ${types}`);
   });

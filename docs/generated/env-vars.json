@@ -392,11 +392,11 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1712
+          "line": 1711
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1739
+          "line": 1738
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
@@ -428,7 +428,7 @@
         },
         {
           "path": "scripts/autopilot/drain.sh",
-          "line": 67
+          "line": 63
         },
         {
           "path": "scripts/autopilot/grill-artifact.sh",
@@ -818,7 +818,7 @@
         },
         {
           "path": "scripts/autopilot/drain.sh",
-          "line": 29
+          "line": 27
         },
         {
           "path": "scripts/autopilot/status.sh",
@@ -1092,13 +1092,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/drain.sh",
-          "line": 69
+          "line": 65
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/drain.sh",
-        "line": 69
+        "line": 65
       }
     },
     {
@@ -1250,7 +1250,7 @@
         },
         {
           "path": "scripts/autopilot/drain.sh",
-          "line": 28
+          "line": 26
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
@@ -1344,7 +1344,7 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1710
+          "line": 1709
         },
         {
           "path": "scripts/claude-hooks/agent-dispatch-prompt-guard.sh",

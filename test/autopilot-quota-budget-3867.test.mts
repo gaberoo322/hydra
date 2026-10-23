@@ -17,8 +17,7 @@
  *
  *   INV-1  With the caps unset (the default) the new cause NEVER fires and every
  *          existing termination is bit-for-bit unchanged.
- *   INV-2  term-check.py and decide.py._check_termination stay mirror-consistent
- *          for TERM:quota — the same fixture drives BOTH and they must agree.
+ *   INV-2  (retired, #5070: the term-check.py mirror was deleted)
  *   INV-3  The baseline is captured EXACTLY ONCE per run, on the first turn that
  *          sees a calibrated payload, through the existing atomic write-back.
  *   INV-4  A mid-run 5h-window reset clamps to a zero delta and REBASES the
@@ -27,8 +26,8 @@
  *          never paceState / targetPercent (ADR-0021 D5 keeps this a per-run
  *          hygiene cap, subordinate to the Pace Gate).
  *
- * Both scripts are exercised through their real CLIs (`python3 decide.py decide`
- * / `term-check.py`) against temp state files, so nothing here can pass against
+ * decide.py is exercised through its real CLI (`python3 decide.py decide`)
+ * against temp state files, so nothing here can pass against
  * a stubbed re-implementation of the policy.
  */
 
@@ -43,7 +42,6 @@ import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
 const DECIDE = join(SCRIPTS, "decide.py");
-const TERM_CHECK = join(SCRIPTS, "term-check.py");
 const BOOTSTRAP = join(SCRIPTS, "bootstrap.sh");
 
 // ---------------------------------------------------------------------------
@@ -165,22 +163,6 @@ function baseline(percent5h: number | null, percentWeek: number | null): any {
 // CLI runners
 // ---------------------------------------------------------------------------
 
-function runTermCheck(state: any): { status: number; stdout: string } {
-  const t = makeTmp();
-  try {
-    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(state)));
-    const r = spawnSync(TERM_CHECK, [], {
-      // No run_id in the fixture => post_run_end() short-circuits, so this can
-      // never POST to a live orchestrator from the suite.
-      env: { ...process.env, HYDRA_AUTOPILOT_STATE: t.state },
-      encoding: "utf-8",
-    });
-    return { status: r.status ?? -1, stdout: (r.stdout ?? "").trim() };
-  } finally {
-    rmSync(t.dir, { recursive: true, force: true });
-  }
-}
-
 interface DecideResult { plan: any; persisted: any }
 
 function runDecide(state: any): DecideResult {
@@ -211,11 +193,26 @@ function terminateAction(plan: any): any | undefined {
   return (plan.actions ?? []).find((a: any) => a.type === "terminate");
 }
 
+/**
+ * The budget-family verdict of `decide._check_termination` rendered as the
+ * `TERM:<cause> <reason>` / `OK` line the (deleted, #5070) term-check.py twin
+ * used to print, so the quota scenarios below keep their original assertions.
+ * Only the quota / budget / wall_clock causes are reported — a wait-only idle
+ * drain on an empty candidate set is a different arm and reads as `OK` here.
+ */
+function runTermCheck(state: any): { status: number; stdout: string } {
+  const term = terminateAction(runDecide(state).plan);
+  if (term && ["quota", "budget", "wall_clock"].includes(term.cause)) {
+    return { status: 0, stdout: `TERM:${term.cause} ${term.reason}` };
+  }
+  return { status: 0, stdout: "OK " };
+}
+
 // ---------------------------------------------------------------------------
-// 1. term-check.py — the Phase 3 pre-check mirror
+// 1. The quota verdict via the single termination predicate (decide.py)
 // ---------------------------------------------------------------------------
 
-describe("term-check.py TERM:quota (issue #3867)", () => {
+describe("decide.py TERM:quota verdict (issue #3867)", () => {
   // THE issue's literal acceptance criterion: a run with --quota-5h-max=10
   // terminates once 5h utilization has risen 10 points over its run-start
   // baseline, EVEN THOUGH cumulative_tokens is far under token_budget.
@@ -274,9 +271,9 @@ describe("term-check.py TERM:quota (issue #3867)", () => {
     assert.match(r.stdout, /^OK /);
   });
 
-  // term-check.py is intentionally side-effect-free, so it NEVER captures the
-  // baseline — until decide.py has written one, the cap is simply skipped.
-  test("no baseline yet => OK (term-check never captures; decide.py owns that)", () => {
+  // With no baseline yet and a cap armed, the first turn CAPTURES the baseline
+  // (delta 0), so it can never terminate on that turn.
+  test("no baseline yet => OK (the first turn captures; it cannot terminate)", () => {
     const r = runTermCheck(baseState({
       quota_5h_max_pts: 1,
       usage_eligibility: usagePayload({ percentLast5h: 90, percentSinceReset: 95 }),
@@ -400,21 +397,6 @@ describe("decide.py quota-percent termination (issue #3867)", () => {
     assert.match(term.reason, /5h utilization \+28\.0pts >= cap 10\.0pts/);
   });
 
-  // INV-2 — mirror consistency. One fixture, both scripts, same verdict.
-  test("INV-2: term-check.py and decide.py agree on the same fixture", () => {
-    const fixture = {
-      quota_5h_max_pts: 10,
-      quota_baseline: baseline(2, 60),
-      usage_eligibility: usagePayload({ percentLast5h: 30, percentSinceReset: 62 }),
-    };
-    assert.match(runTermCheck(baseState(fixture)).stdout, /^TERM:quota /);
-    assert.equal(terminateAction(runDecide(baseState(fixture)).plan)?.cause, "quota");
-
-    const underFixture = { ...fixture, usage_eligibility: usagePayload({ percentLast5h: 5 }) };
-    assert.match(runTermCheck(baseState(underFixture)).stdout, /^OK /);
-    assert.equal(terminateAction(runDecide(baseState(underFixture)).plan), undefined);
-  });
-
   // INV-3 — lazy capture, exactly once, persisted atomically.
   test("INV-3: captures the baseline on the first calibrated turn and persists it", () => {
     const { plan, persisted } = runDecide(baseState({
@@ -496,7 +478,7 @@ describe("decide.py quota-percent termination (issue #3867)", () => {
   });
 
   // INV-1 — the other existing causes, with the cap ENABLED but not tripped.
-  test("INV-1: existing budget / wall_clock / idle terminations are unchanged", () => {
+  test("INV-1: existing budget / wall_clock terminations are unchanged", () => {
     const quotaArmedButUnder = {
       quota_5h_max_pts: 10,
       quota_baseline: baseline(2, 60),
@@ -514,9 +496,6 @@ describe("decide.py quota-percent termination (issue #3867)", () => {
       wall_clock_max_sec: 28_800,
     })).plan;
     assert.equal(terminateAction(wall)?.cause, "wall_clock");
-
-    const idle = runDecide(baseState({ ...quotaArmedButUnder, idle_turns: 9 })).plan;
-    assert.equal(terminateAction(idle)?.cause, "idle");
   });
 });
 
@@ -604,8 +583,8 @@ describe("--quota-5h-max / --quota-week-max plumbing (issue #3867)", () => {
 
   // INV-1 at the plumbing layer: the default invocation is DISABLED, and the
   // bootstrap-written state is immediately consumable by the cap (absent
-  // quota_baseline => term-check prints OK rather than crashing).
-  test("INV-1: no flag, no env => both caps 0, and term-check.py reads it cleanly", () => {
+  // quota_baseline => decide.py captures rather than crashing).
+  test("INV-1: no flag, no env => both caps 0, and decide.py reads it cleanly", () => {
     const r = runBootstrap({}, []);
     assert.equal(r.limits.quota_5h_max_pts, 0);
     assert.equal(r.limits.quota_week_max_pts, 0);
@@ -618,7 +597,7 @@ describe("--quota-5h-max / --quota-week-max plumbing (issue #3867)", () => {
     const armed = runBootstrap({}, ["--quota-5h-max=10"]);
     assert.equal("quota_baseline" in armed.state, false,
       "bootstrap must NOT seed a baseline — that is what re-arms capture per run");
-    assert.match(runTermCheck(armed.state).stdout, /^OK /);
+    assert.equal(terminateAction(runDecide(armed.state).plan)?.cause === "quota", false);
   });
 
   // The caps are interpolated UNQUOTED into the state.json heredoc (they are

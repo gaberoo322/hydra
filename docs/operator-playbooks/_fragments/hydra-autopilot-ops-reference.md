@@ -20,7 +20,7 @@ state loss, or merge-rate anomaly.
 `/tmp/hydra-autopilot-state.json` is the run-local home of all autopilot
 state, but `/tmp` is boot-wiped by the host tmpfiles policy (`D /tmp …
 30d`). Most of state.json is **run-scoped** and legitimately dies with the
-run — `pid`, `turn`, `dispatches`, `slots`, `idle_turns`, `burned_classes`
+run — `pid`, `turn`, `dispatches`, `slots`, `burned_classes`
 (the concurrent-run PID guard and the #1352 slot re-seeding DEPEND on those
 resetting). Only the **cross-run durable subset** must survive:
 
@@ -76,7 +76,7 @@ entries, all holds unchanged; issue #5144) — when any of these trip:
 
 1. `cumulative_tokens >= limits.token_budget`
 2. `elapsed >= limits.wall_clock_max_sec`
-3. `idle_turns >= limits.idle_drain_turns` AND all slots empty
+3. (retired, #5070: the `idle_turns` arm — nothing ever incremented the counter; idle ends via cause 5)
 4. 5 consecutive failures of the same pattern (failure backstop; see `self_heal.py`)
 5. The turn is wait-only with zero occupied slots (issue #1352): nothing
    dispatched, no other actions, no slots in flight → `terminate` with cause
@@ -92,8 +92,7 @@ entries, all holds unchanged; issue #5144) — when any of these trip:
    cause `context_compaction`. Checked LAST (a budget/wall-clock/idle/
    failure-backstop trip on the same turn still wins) and NOT gated on
    `slots_occupied == 0` (unlike cause 5) — a busy run is exactly what
-   accumulates the most cache-read growth. `term-check.py` mirrors the same
-   comparison (same lockstep duplication as causes 1-3).
+   accumulates the most cache-read growth.
 
    **Unit note:** the default is 8, not the issue's literal "80-120" — that
    figure was computed over the sampled transcript's 245 raw Anthropic API
@@ -124,7 +123,7 @@ entries, all holds unchanged; issue #5144) — when any of these trip:
 
 When the emitted plan carries a `terminate`, the decide CLI itself POSTs
 `/api/autopilot/run-end` with the plan's cause before printing the plan
-(issue #1352) — `term-check.py` only covers its own Phase-3 trips, and the
+(issue #1352) — the
 reap backstop would otherwise stamp `interrupted`. The POST is idempotent
 (first terminal cause wins) and skipped when state carries no `run_id` or
 `HYDRA_AUTOPILOT_RUN_END_POST=off`.
@@ -144,7 +143,7 @@ slots > 0 and no further dispatchable work (the `wait` action row above), and
 `handoff` whenever a CLEAN exit (code 0/143/130) shows `state.json` slots
 occupied > 0 — so a missed in-loop POST still classifies the baton-pass
 honestly. `interrupted` is now reserved for a clean ZERO-slot exit that bypassed
-term-check (a genuine print-mode end with nothing pending).
+decide.py's terminate (a genuine print-mode end with nothing pending).
 
 The clean-termination rate over recent runs is surfaced as
 `terminationHealth` (with a pre-derived `starved` alarm boolean) on

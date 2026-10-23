@@ -5,9 +5,9 @@ shared across the bash/Python boundary (issue #4305).
 Before this file, two operations were independently hand-mirrored:
 
   1. "is there still work in flight" (`count_slots_occupied`) — the idle-drain
-     gate reads this from both `term-check.py`'s Phase 3 pre-check (Python)
+     gate was read from both a Python Phase 3 pre-check (since deleted, #5070)
      and `bootstrap.sh`'s `--reap` ExecStopPost backstop (bash, via jq).
-     `term-check.py`'s old docstring literally said "mirrors
+     The old Python docstring literally said "mirrors
      bootstrap.sh:__reap_count_slots_occupied" — a hand-synced COMMENT
      standing in for a shared implementation, not an actual shared one.
 
@@ -21,7 +21,7 @@ This module is now the ONE implementation of both, following the precedent
 `reap.py` already set for `pr-refs.py` (issue #3852): a shared predicate that
 a caller loads/imports rather than re-deriving. `bootstrap.sh` shells out to
 this file's CLI the same way it already shells out to `heartbeat.py`
-(`python3 "$(dirname "$0")/heartbeat.py" ...`); `term-check.py` imports it
+(`python3 "$(dirname "$0")/heartbeat.py" ...`); Python callers import it
 directly — both files live in `scripts/autopilot/`, and Python puts the
 running script's own directory on `sys.path[0]`, so no `importlib` workaround
 is needed here (unlike `pr-refs.py`, this filename has no hyphen).
@@ -43,7 +43,7 @@ CLI (bootstrap.sh is the caller; never invoked with a leading `--`):
       Bounded-retry POST to <api-base>/api/autopilot/run-end, replicating
       bootstrap.sh's PRE-EXISTING curl -sf policy exactly (ANY non-2xx or
       connection failure is retryable; no 4xx-is-terminal shortcut — that
-      shortcut is term-check.py-specific, see `stop_on_4xx` below). Prints
+      shortcut is a Python-caller-specific policy, see `stop_on_4xx` below). Prints
       the exact log lines `__reap_post_run_end` already printed pre-#4305
       (pinned by test/autopilot-dedup-reap.test.mts). Exits 0 on success,
       1 on exhaustion — the SAME exit contract the bash function had
@@ -161,7 +161,7 @@ def post_run_end(
 
       "success"   — a 2xx response.
       "terminal"  — a 4xx response AND `stop_on_4xx` — the caller's policy
-                    for "this counts as done, stop retrying" (term-check.py's
+                    for "this counts as done, stop retrying" (the Python caller's
                     policy; NOT bootstrap.sh's, which retries on every
                     non-2xx to match its pre-existing curl -sf behaviour).
       "exhausted" — every attempt failed and none remain.
@@ -177,7 +177,7 @@ def post_run_end(
     endpoint (`/api/autopilot/run-tally`) — the retry/backoff control flow is
     endpoint-agnostic, and this module exists precisely so it is written
     once. The default keeps the original run-end contract bit-for-bit for
-    the existing importers (term-check.py) and callers (bootstrap.sh).
+    the existing importers and callers (bootstrap.sh).
     """
     attempts_total = retries + 1
     attempt = 0

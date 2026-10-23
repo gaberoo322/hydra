@@ -36,7 +36,7 @@ order and dispatches each action through the appropriate tool:
   update-branch        Bash(gh pr update-branch)
   surface-pr           Bash(gh api .../issues/N/labels + gh pr comment)
   reap                 Bash(./scripts/autopilot/reap.py completion ...)
-  terminate            Bash(./scripts/autopilot/drain.sh <N>) + Phase 7
+  terminate            Bash(./scripts/autopilot/drain.sh) + Phase 7
   wait                 Sleep + re-enter loop (busy-wait nap while slots in
                        flight; a wait-only turn with zero occupied slots
                        terminates cleanly instead — issue #1352)
@@ -82,7 +82,6 @@ state.json {
   "limits": { ... }   # unchanged from #410 / #413
   "cumulative_tokens": int
   "dispatches":       int
-  "idle_turns":       int
   "burned_classes":   [str]    # soft-cap suppressions (issue #395)
   "reaped_task_ids":  [str]    # FIFO-bounded 1000 (issue #411)
 
@@ -227,7 +226,7 @@ Helpers `make_*` construct them so call sites stay typed.
   update-branch         { type, pr_number, reason }
   surface-pr            { type, pr_number, cause, reason }
   reap                  { type, slot, task_id, total_tokens, skill }
-  terminate             { type, cause, merged_prs, reason }
+  terminate             { type, cause, reason }
   wait                  { type, seconds, reason }
   wait-for-api          { type, url, retries, reason }
 
@@ -954,11 +953,8 @@ CONTEXT_COMPACTION_TURNS_DEFAULT = 8
 # weekly-CURVE-relative (ADR-0021 D2/D3) and answer a different question
 # ("ahead/behind the target ramp") than this cap's ("did THIS run burn N points").
 #
-# `term-check.py` mirrors the READ half of this logic verbatim (the same
-# literal-duplicate convention as CONTEXT_COMPACTION_TURNS_DEFAULT above, so
-# Phase 3 stays a cheap dependency-free pre-check). Only decide.py performs the
-# baseline CAPTURE — term-check.py is intentionally side-effect-free, so it skips
-# the cap entirely until decide.py has written `state.quota_baseline`.
+# decide.py is the ONLY termination predicate (the former term-check.py twin was
+# deleted, issue #5070): it both captures the baseline and evaluates the cap.
 QUOTA_CAP_DISABLED = 0.0
 
 
@@ -1085,7 +1081,7 @@ def _capture_quota_baseline(state: dict, now: int) -> None:
 def _quota_delta_exceeded(state: dict) -> tuple[str, str] | None:
     """PURE: has this run's utilization delta crossed its cap? `(window, detail)`.
 
-    Mirrored verbatim by `term-check.py`. Returns `None` — keep iterating — for
+    Returns `None` — keep iterating — for
     every fail-open condition: cap disabled, no baseline captured yet, no usable
     current reading. The 5h window is checked before the weekly one because it is
     the tighter, faster-moving bound (and the one the issue's acceptance criterion
@@ -1386,8 +1382,8 @@ def make_reap(slot: str, task_id: str, total_tokens: int, skill: str | None = No
     }
 
 
-def make_terminate(cause: str, merged_prs: int = 0, reason: str = "") -> dict:
-    return {"type": "terminate", "cause": cause, "merged_prs": merged_prs, "reason": reason}
+def make_terminate(cause: str, reason: str = "") -> dict:
+    return {"type": "terminate", "cause": cause, "reason": reason}
 
 
 def make_wait(seconds: int, reason: str = "") -> dict:
@@ -3443,7 +3439,7 @@ def _rule_signal_classes(
         # architecture_orch (issue #790) — idle-time fallback. Registered in
         # the dispatch iteration tuple so a real dispatch sets
         # dispatched_any=True, which yields idle=0 for the turn and stops
-        # idle_turns from accumulating while a fallback is eligible (the AC
+        # the wait-only idle drain from firing while a fallback is eligible (the AC
         # is met by being a real dispatch, NOT by editing the terminate path).
         "architecture_orch",
         # retro_orch (issue #920, parent #917) — daily per-run retrospective.
@@ -3878,7 +3874,6 @@ def _rule_idle_fallback(
         out.emit(
             make_terminate(
                 "idle",
-                merged_prs=int(state.get("merged_prs", 0) or 0),
                 reason="wait-only turn, no slots in flight — print-mode session exits on wait; clean idle drain (issue #1352)",
             ),
             reason="idle-drain",
@@ -4901,7 +4896,7 @@ def orch_realm_share_exceeded(state: dict) -> bool:
 
 
 def _check_termination(state: dict, now: int, events: list[dict] | None = None) -> dict | None:
-    """Mirror of term-check.py logic, expressed as an action.
+    """The single termination predicate, expressed as an action.
 
     NOT pure, by one narrow exception (issue #3867): `_capture_quota_baseline`
     mutates `state["quota_baseline"]` on the first calibrated turn of a
@@ -4916,11 +4911,6 @@ def _check_termination(state: dict, now: int, events: list[dict] | None = None) 
     budget = int(limits.get("token_budget", 10_000_000))
     elapsed = now - int(state.get("started_epoch", now))
     wall_max = int(limits.get("wall_clock_max_sec", 28_800))
-    idle = int(state.get("idle_turns", 0))
-    idle_max = int(limits.get("idle_drain_turns", 5))
-    slots = state.get("slots") or {}
-    occupied = sum(1 for v in slots.values() if v is not None)
-    merged_prs = int(state.get("merged_prs", 0))
 
     # Quota-percent budget (issue #3867) — capture/rebase the baseline, then check
     # the delta. Checked FIRST because it is the cap denominated in the currency
@@ -4933,28 +4923,12 @@ def _check_termination(state: dict, now: int, events: list[dict] | None = None) 
     quota_hit = _quota_delta_exceeded(state)
     if quota_hit is not None:
         _window, quota_detail = quota_hit
-        return make_terminate("quota", merged_prs=merged_prs, reason=quota_detail)
+        return make_terminate("quota", reason=quota_detail)
 
     if cumulative >= budget:
-        return make_terminate("budget", merged_prs=merged_prs, reason=f"tokens={cumulative}/{budget}")
+        return make_terminate("budget", reason=f"tokens={cumulative}/{budget}")
     if elapsed >= wall_max:
-        return make_terminate("wall_clock", merged_prs=merged_prs, reason=f"elapsed={elapsed}s")
-    # Issue #4130: idle turns accumulated against a DEGRADED orch board read
-    # are blindness, not quiet — a board whose reads all failed renders as
-    # zero/none and would drain the run to a clean `terminate:idle` while
-    # eligible work sits unseen (run 161d9642, 2026-08-17). The idle cause is
-    # withheld while the snapshot is flagged degraded; budget / wall_clock /
-    # quota are unaffected (they are measured independently of the board
-    # read, so a genuinely exhausted run still ends under its own cause).
-    # Issue #4699: idle turns accumulated under a usage hard-stop are
-    # starvation, not quiet — withheld the same way.
-    if (
-        idle >= idle_max
-        and occupied == 0
-        and not _orch_board_read_degraded(state, events)
-        and not _usage_dispatch_blocked(state)
-    ):
-        return make_terminate("idle", merged_prs=merged_prs, reason=f"idle_turns={idle}")
+        return make_terminate("wall_clock", reason=f"elapsed={elapsed}s")
 
     # 5-failure global backstop — looks at the most recent failure pattern.
     log = state.get("failure_log") or []
@@ -4963,13 +4937,12 @@ def _check_termination(state: dict, now: int, events: list[dict] | None = None) 
         if last_pattern and consecutive_failures_of(state, last_pattern) >= MAX_FAILURE_RETRIES:
             return make_terminate(
                 "failure_backstop",
-                merged_prs=merged_prs,
                 reason=f"5x consecutive {last_pattern}",
             )
 
     # Periodic session-restart (issue #3787) — checked LAST among the
     # terminate causes so a genuinely urgent condition above (budget /
-    # wall_clock / idle / failure_backstop) is always reported under its own,
+    # wall_clock / failure_backstop) is always reported under its own,
     # more diagnostic cause first; this is a soft, proactive cadence, not a
     # backstop. See CONTEXT_COMPACTION_TURNS_DEFAULT for the full rationale
     # (including the raw-API-call vs Autopilot-Turn unit correction). `turn`
@@ -4990,7 +4963,6 @@ def _check_termination(state: dict, now: int, events: list[dict] | None = None) 
     if compaction_turns > 0 and turn > 0 and turn % compaction_turns == 0:
         return make_terminate(
             "context_compaction",
-            merged_prs=merged_prs,
             reason=f"turn={turn} (cadence={compaction_turns})",
         )
 
@@ -5095,11 +5067,9 @@ def _post_run_end_for_terminate(actions: list, state: dict) -> None:
     """POST /api/autopilot/run-end when the plan carries a `terminate` action.
 
     Issue #1352: a decide-emitted `terminate` historically had NO clean
-    run-end writer — `term-check.py` only POSTs when its own Phase-3 check
-    trips (which runs BEFORE decide in the turn), and the playbook's
-    terminate arm goes to `drain.sh`, which prints a summary but never POSTs.
-    So every decide-side termination (the `_check_termination` mirror, the
-    failure backstop, and the new wait-only idle drain) fell through to the
+    run-end writer — the playbook's terminate arm goes to `drain.sh`, which
+    prints a summary but never POSTs. So every decide-side termination (the `_check_termination` predicate, the
+    failure backstop, and the wait-only idle drain) fell through to the
     ExecStopPost reap backstop and was stamped `interrupted` — starving the
     retro loop of clean terminal runs. This closes that gap: the cause the
     plan decided on is recorded BEFORE the print-mode session exits.
@@ -5109,7 +5079,7 @@ def _post_run_end_for_terminate(actions: list, state: dict) -> None:
     when state carries no `run_id` (test fixtures, isolated runs) or when
     `HYDRA_AUTOPILOT_RUN_END_POST` is an off-value (CLI-spawning tests set
     `off`; production needs no env change). The endpoint is idempotent — if
-    term-check already recorded an end this turn, the first cause wins, and
+    an end was already recorded this run, the first cause wins, and
     the later reap POST dedups to a no-op. Failure is loud but never fatal:
     the reap backstop still records a terminal status if this POST loses.
 

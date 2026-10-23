@@ -1,0 +1,1 @@
+- refactor: delete the term-check.py twin of the autopilot termination predicate and the dead idle_turns / merged_prs arms (#5070)

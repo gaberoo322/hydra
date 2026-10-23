@@ -11,14 +11,12 @@
 # This script handles the deterministic tail:
 #   1. Read state.json for cumulative tokens / dispatch count / budget
 #   2. Compute duration HH:MM from started_epoch
-#   3. Accept merged_PRs as a positional arg (the playbook counts this
-#      during Phase 2 reaps; bash can't recover it from state alone)
-#   4. Print the final line
-#   5. POST the run-tally amendment (issue #4551) — best-effort, AFTER the
+#   3. Print the final line
+#   4. POST the run-tally amendment (issue #4551) — best-effort, AFTER the
 #      FINAL line so the operator-facing summary is never delayed or lost
 #
 # Usage:
-#   drain.sh <merged_prs>
+#   drain.sh
 #
 # Behavior-preserving extraction of the Phase 7 final-line heredoc
 # (issue #409); the run-tally tail was added by issue #4551.
@@ -28,16 +26,14 @@ set -uo pipefail
 STATE_PATH="${HYDRA_AUTOPILOT_STATE:-/tmp/hydra-autopilot-state.json}"
 LOG_PATH="${HYDRA_AUTOPILOT_LOG:-/tmp/hydra-autopilot-nightly.log}"
 
-merged_prs="${1:-0}"
-
 if [ ! -f "$STATE_PATH" ]; then
   echo "[autopilot] FINAL | state-missing | digest=$LOG_PATH"
   exit 0
 fi
 
-python3 - "$STATE_PATH" "$merged_prs" "$LOG_PATH" <<'PY'
+python3 - "$STATE_PATH" "$LOG_PATH" <<'PY'
 import json, sys, time
-state_path, merged_prs, log_path = sys.argv[1], sys.argv[2], sys.argv[3]
+state_path, log_path = sys.argv[1], sys.argv[2]
 s = json.load(open(state_path))
 elapsed = int(time.time()) - s["started_epoch"]
 hh, mm = elapsed // 3600, (elapsed % 3600) // 60
@@ -47,7 +43,7 @@ budget = s["limits"]["token_budget"]
 dispatches = s.get("dispatches", 0)
 print(
     f"[autopilot] FINAL | duration={duration} | dispatches={dispatches} | "
-    f"tokens={tokens}/{budget} | merged_PRs={merged_prs} | digest={log_path}"
+    f"tokens={tokens}/{budget} | digest={log_path}"
 )
 PY
 

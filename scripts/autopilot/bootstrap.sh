@@ -63,7 +63,7 @@ set -euo pipefail
 # `bootstrap.sh --reap` is the guaranteed terminal-status writer. It is
 # wired as the systemd unit's `ExecStopPost=` so it fires when the
 # long-running `claude -p /hydra-autopilot` process exits for ANY reason
-# that did not already route through a term-check stop decision:
+# that did not already route through a decide.py terminate decision:
 # print-mode session end, context/output exhaustion, SIGTERM from
 # `systemctl restart` / `RuntimeMaxSec`, a host event, or a genuine crash.
 #
@@ -82,8 +82,8 @@ set -euo pipefail
 #   - any other abnormal exit (non-zero status, SEGV/KILL/etc, missing code)
 #       → cause=crash, exit_code=<n>      → endRun records the crash honestly
 #
-# Idempotent: endRun dedups on a terminal status, so if term-check.py
-# already POSTed run-end this turn the reap POST is a harmless no-op (the
+# Idempotent: endRun dedups on a terminal status, so if decide.py
+# already POSTed run-end this run the reap POST is a harmless no-op (the
 # first end's term_reason wins). Isolated runs (non-default state path) are
 # skipped — they never POSTed run-start, so there is nothing to reap. The
 # reap NEVER aborts the unit stop: every failure path logs and exits 0.
@@ -126,7 +126,7 @@ __reap_derive_cause() {
     # the next pace-gate-launched run, #1352). This is the residual case
     # #1352 left: slots > 0, plan was wait, but print mode physically exits on
     # the final message. Reserve `interrupted` for a clean ZERO-slot bypass of
-    # term-check (a genuine print-mode end with nothing pending). `handoff` is
+    # decide.py's terminate (a genuine print-mode end with nothing pending). `handoff` is
     # in CLEAN_TERM_REASONS and retro-drillable; `interrupted` is not.
     if [ "${REAP_SLOTS_OCCUPIED}" -gt 0 ] 2>/dev/null; then
       REAP_CAUSE="handoff"
@@ -184,7 +184,7 @@ __reap_derive_cause() {
 # nothing-pending bypass.
 #
 # Issue #4305: this predicate used to be a standalone jq filter here, hand-
-# mirrored against `term-check.py`'s `count_slots_occupied` (a Python
+# mirrored against a Python `count_slots_occupied` twin (a
 # docstring literally saying "mirrors bootstrap.sh:..." stood in for a shared
 # implementation). It now shells out to `run_termination.py` — the ONE
 # implementation both callers use — the same way this script already shells
@@ -465,11 +465,11 @@ __reap_build_crash_detail() {
 # so the test pins exactly the live assembly.
 #
 # Issue #4305: the retry-with-backoff loop used to be reimplemented here in
-# bash (curl) AND separately in `term-check.py` (urllib) — two independent
+# bash (curl) AND separately in a Python twin (urllib) — two independent
 # copies of the same "try, backoff, retry, give up" shape, with different
 # retry counts and no shared code. It now shells out to
 # `run_termination.py post-run-end`, the ONE implementation of that loop
-# (`term-check.py` imports the same module's `post_run_end` directly). This
+# (the Python callers import the same module's `post_run_end` directly). This
 # function's OWN contract — exact log-line text, exit 0 on success / 1 on
 # exhaustion, the default "4 8 16" schedule, HYDRA_AUTOPILOT_REAP_POST_BACKOFFS
 # override — is unchanged and still pinned by
@@ -831,7 +831,7 @@ if [ "${1:-}" = "--reap" ]; then
     '{run_id: $run_id, cause: $cause, ended_epoch: $ended_epoch, exit_code: $exit_code}
       + (if $crash_detail == null then {} else {crash_detail: $crash_detail} end)')"
 
-  # endRun is idempotent: if term-check.py already POSTed run-end this turn,
+  # endRun is idempotent: if decide.py already POSTed run-end this run,
   # the row is already terminal and this POST is a no-op (deduped=true). A
   # failed POST is logged but never aborts the unit stop.
   #
@@ -903,7 +903,7 @@ fi
 . "$(dirname "$0")/args-parse.sh" "$@"
 
 # Resolve file paths from env (test-isolation knobs). Mirrors the
-# convention already established in heartbeat.py / term-check.py /
+# convention already established in heartbeat.py /
 # reap.py — the only outlier was bootstrap.sh.
 DEFAULT_STATE_PATH="/tmp/hydra-autopilot-state.json"
 DEFAULT_HEARTBEAT_PATH="/tmp/hydra-autopilot-heartbeat.txt"
@@ -1620,11 +1620,11 @@ fi
 #     lazily by decide.py on the first calibrated turn) is likewise absent here,
 #     so overwriting state.json each bootstrap is exactly what re-arms the
 #     baseline capture for the new run. Additive + tolerated-missing by all
-#     readers (term-check.py skips the cap when either is absent), so no
+#     readers (decide.py skips the cap when either is absent), so no
 #     schema_version bump.
 #   - `cumulative_tokens` seeds at 0 and is advanced ONLY by reap.py on each
 #     subagent completion (the per-turn token surrogate). This is the field the
-#     LIVE `TERM:budget` gate reads in term-check.py + decide.py — NOT dead code
+#     LIVE `TERM:budget` gate reads in decide.py — NOT dead code
 #     (issue #2429). The same value is mirrored onto the Redis run hash by
 #     heartbeat.py for the dashboard; the run-hash copy is 0 only for a run that
 #     exits before the surrogate accumulates (a 1-2-turn print-mode run).
@@ -1657,7 +1657,6 @@ cat > "${STATE_PATH}" <<EOF
   },
   "cumulative_tokens": 0,
   "dispatches": 0,
-  "idle_turns": 0,
   "turn": 0,
   "burned_classes": [],
   "reaped_task_ids": [],

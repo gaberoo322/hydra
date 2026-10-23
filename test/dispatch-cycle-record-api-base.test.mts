@@ -2,7 +2,7 @@
  * Regression test for issue #2635 —
  * `scripts/autopilot/dispatch.sh cycle-record` must honour HYDRA_API_BASE.
  *
- * The autopilot ecosystem (reap.py, heartbeat.py, term-check.py, decide.py,
+ * The autopilot ecosystem (reap.py, heartbeat.py, decide.py,
  * bootstrap.sh, the hooks) resolves the orchestrator origin from HYDRA_API_BASE,
  * and the reap/test harness sets it to a DEAD socket (http://127.0.0.1:1) to
  * isolate test cycle-record writes from the live orchestrator on :4000.
