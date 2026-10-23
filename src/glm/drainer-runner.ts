@@ -218,9 +218,8 @@ export function buildGlmEnv(
   }
   // One token per child (issue #4841 INV-9): every OTHER provider's credential
   // variable is stripped so a launched session never holds a sibling's token.
-  for (const other of all ?? []) {
-    if (other.tokenEnv !== selected.tokenEnv) delete env[other.tokenEnv];
-  }
+  for (const other of all ?? []) delete env[other.tokenEnv];
+  delete env[selected.tokenEnv]; // folded into ANTHROPIC_AUTH_TOKEN below
   env.ANTHROPIC_BASE_URL = selected.baseUrl;
   env.ANTHROPIC_AUTH_TOKEN = token;
   env.API_TIMEOUT_MS = String(GLM_API_TIMEOUT_MS);
