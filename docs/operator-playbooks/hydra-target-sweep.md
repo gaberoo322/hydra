@@ -144,7 +144,10 @@ For each row printed (number, age, title):
      ```bash
      DEFAULT=$(gh api "repos/$REPO" --jq .default_branch)
      BRANCH=""; LOOKUP_FAILED=""
-     for B in $(gh api --paginate "repos/$REPO/branches?per_page=100" --jq '.[].name | select(startswith("feature/") and endswith("-dev_target"))'); do
+     [ -n "$DEFAULT" ] || LOOKUP_FAILED=1
+     BRS=$(gh api --paginate "repos/$REPO/branches?per_page=100" --jq '.[].name | select(startswith("feature/") and endswith("-dev_target"))') || { LOOKUP_FAILED=1; BRS=""; }
+     for B in $BRS; do
+       [ -n "$DEFAULT" ] || break
        PRS=$(gh api "repos/$REPO/pulls?state=all&head=${REPO%%/*}:$B" --jq 'length') || { LOOKUP_FAILED=1; continue; }
        [ "$PRS" = "0" ] || continue
        OK=$(gh api "repos/$REPO/compare/$DEFAULT...$B" \
