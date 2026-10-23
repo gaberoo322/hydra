@@ -1055,28 +1055,8 @@
         "0028",
         "0039"
       ],
-      "adrsCited": [
-        "0001",
-        "0002",
-        "0003",
-        "0004",
-        "0005",
-        "0006",
-        "0009",
-        "0010",
-        "0015",
-        "0020",
-        "0024",
-        "0033",
-        "0034",
-        "0045"
-      ],
-      "referenceDocs": [
-        {
-          "path": "docs/reference.md",
-          "anchor": "cost-reconciliation-issue-296--historical"
-        }
-      ],
+      "adrsCited": [],
+      "referenceDocs": [],
       "slices": {
         "routes": [
           "GET /api/architecture",
