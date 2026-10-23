@@ -82,7 +82,6 @@ export const REMAINING_COLLECTORS: { readonly [K in RemainingName]: RemainingEnt
     lastWalkIso: FAILED,
     openEnhancements: FAILED,
     tokensToday: "0",
-    spendUsd: "0.00",
     mirrored: FAILED,
   }),
   "arch-cleanup-boards": entry<"arch-cleanup-boards">(collectArchCleanupBoards, ARCH_FALLBACK),

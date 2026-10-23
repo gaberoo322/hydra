@@ -78,8 +78,8 @@ REPLAY_ENV = "HYDRA_AUTOPILOT_SNAPSHOT_REPLAY"
 
 # The data-plane bodies decide.py normalises itself (state top-level fields).
 BLOB_FIELDS = ("usage_eligibility", "emergency_brake", "target_risk_surface", "class_stats", "candidate_exclusions")
-# Every blob name a reader may ask for (slot_events feeds state.slot_events; the spend is a top-level scalar).
-_KNOWN_BLOBS = BLOB_FIELDS + ("slot_events", "scout_spend_usd_today")
+# Every blob name a reader may ask for (slot_events feeds state.slot_events).
+_KNOWN_BLOBS = BLOB_FIELDS + ("slot_events",)
 # A document without signals raises the flags named by the all-degraded convention: faults and caps.
 _RAISED_WHEN_UNREAD = ("_fail", "_degraded", "_saturated")
 
@@ -349,8 +349,7 @@ def qa_verdict_recheck(state: dict, events: list[dict], signal_name: str) -> lis
 
 def blob(state: dict, name: str) -> Any:
     """A data-plane blob decide.py normalises itself (usage eligibility, emergency
-    brake, Target risk surface, class stats, candidate exclusions) and the
-    `scout_spend_usd_today` scalar. The snapshot's value; ABSENT there means it
+    brake, Target risk surface, class stats, candidate exclusions). The snapshot's value; ABSENT there means it
     did not parse this turn, so the previous value `apply` left on state is kept.
     A name outside {@link BLOB_FIELDS} raises in replay mode."""
     if not isinstance(state, dict):
@@ -359,10 +358,7 @@ def blob(state: dict, name: str) -> Any:
         raise UnknownSignalError(f"{REPLAY_ENV} is set and {name!r} is not a Turn Snapshot blob")
     snap = snapshot(state)
     blobs = snap.get("blobs") if isinstance(snap.get("blobs"), dict) else {}
-    if name == "scout_spend_usd_today":
-        if "scout_spend_usd_today" in snap:
-            return snap["scout_spend_usd_today"]
-    elif name in blobs:
+    if name in blobs:
         return blobs[name]
     return state.get(name)
 
@@ -419,7 +415,7 @@ def _valid_recheck_entry(e: Any) -> bool:
 def apply(snap: Any, state: dict, unreadable_reason: str | None = None) -> dict:
     """Store this turn's Turn Snapshot on `state` as emitted — or the marker
     document when `snap` is not a JSON object (nothing could be read) — and
-    hoist its blob fields, the scout spend and the slot events onto state.
+    hoist its blob fields and the slot events onto state.
     Mutates and returns `state`; never touches `turn`."""
     if isinstance(snap, dict):
         doc = snap
@@ -430,8 +426,6 @@ def apply(snap: Any, state: dict, unreadable_reason: str | None = None) -> dict:
     for field in BLOB_FIELDS:
         if field in blobs:
             state[field] = blobs[field]
-    if "scout_spend_usd_today" in doc:
-        state["scout_spend_usd_today"] = float(doc["scout_spend_usd_today"])
     events = blobs.get("slot_events")
     if isinstance(events, dict):
         rows = events.get("events")

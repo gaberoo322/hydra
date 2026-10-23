@@ -156,14 +156,6 @@ export function staleDays(raw: string, days: number, nowMs: number): boolean {
   return nowMs / 1000 - then > days * 86400;
 }
 
-/** `float(raw)` for a finite decimal, else `null` (absent: the previous value is kept). */
-function finiteDecimal(raw: string): number | null {
-  const s = raw.trim();
-  if (!/^[+-]?(?:\d(?:_?\d)*(?:\.(?:\d(?:_?\d)*)?)?|\.\d(?:_?\d)*)(?:[eE][+-]?\d(?:_?\d)*)?$/.test(s)) return null;
-  const n = Number(s.replace(/_/g, ""));
-  return Number.isFinite(n) ? n : null;
-}
-
 // ---------------------------------------------------------------------------
 // Builder
 // ---------------------------------------------------------------------------
@@ -358,15 +350,11 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
   );
   blobs.candidate_exclusions = v.picks.candidateExclusions.map((r) => ({ ...r }));
 
-  const spend = finiteDecimal(v.scout.spendUsd);
-  if (spend === null) degraded.push({ collector: "scout", field: "scout_spend_usd_today", reason: DEGRADE.NOT_NUMERIC });
-
   const doc: TurnSnapshotDoc = {
     schema_version: TURN_SNAPSHOT_SCHEMA_VERSION,
     generated_at: new Date(opts.nowMs).toISOString(),
     signals,
     blobs,
-    ...(spend === null ? {} : { scout_spend_usd_today: spend }),
     degraded,
     validation: { ok: true },
     observability: observability(v),
@@ -422,7 +410,7 @@ export function allDegradedTurnSnapshot(generatedAt: string, reason: string): Tu
 /**
  * Repair `doc` from zod issues, field by field: an invalid or unknown signal
  * takes its all-degraded value (unknown keys are dropped); an invalid blob,
- * `scout_spend_usd_today`, `observability` or `degraded` entry is dropped.
+ * `observability` or `degraded` entry is dropped.
  * Returns null when an issue sits outside those fields (structural).
  */
 function repairFields(doc: TurnSnapshotDoc, issues: readonly { path: readonly PropertyKey[]; code: string; message: string; keys?: readonly string[] }[]): {
@@ -434,7 +422,6 @@ function repairFields(doc: TurnSnapshotDoc, issues: readonly { path: readonly Pr
   const dropDegraded = new Set<number>();
   const markers: SnapshotDegraded[] = [];
   const rawDropped = new Set<string>();
-  let spend = doc.scout_spend_usd_today;
   let obs = doc.observability;
   const mark = (field: string, message: string) => markers.push({ collector: "turn-snapshot", field, reason: degradeDetail(`schema-invalid: ${message}`) });
   for (const issue of issues) {
@@ -468,11 +455,6 @@ function repairFields(doc: TurnSnapshotDoc, issues: readonly { path: readonly Pr
       dropDegraded.add(key);
       continue;
     }
-    if (head === "scout_spend_usd_today") {
-      spend = undefined;
-      mark("scout_spend_usd_today", issue.message);
-      continue;
-    }
     if (head === "observability") {
       obs = undefined;
       mark("observability", issue.message);
@@ -481,13 +463,12 @@ function repairFields(doc: TurnSnapshotDoc, issues: readonly { path: readonly Pr
     return null;
   }
   if (dropDegraded.size > 0) markers.push({ collector: "turn-snapshot", field: "degraded", reason: DEGRADE.MALFORMED_ENTRY_DROPPED });
-  const { scout_spend_usd_today: _s, observability: _o, ...rest } = doc;
+  const { observability: _o, ...rest } = doc;
   return {
     doc: {
       ...rest,
       signals: signals as TurnSnapshotSignals,
       blobs: blobs as TurnSnapshotDoc["blobs"],
-      ...(spend === undefined ? {} : { scout_spend_usd_today: spend }),
       degraded: [...doc.degraded.filter((_, i) => !dropDegraded.has(i)), ...markers],
       validation: { ok: true },
       ...(obs === undefined ? {} : { observability: obs }),

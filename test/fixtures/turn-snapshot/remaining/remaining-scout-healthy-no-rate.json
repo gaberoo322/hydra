@@ -85,7 +85,6 @@
           "value": "5"
         },
         "tokensToday": "12345",
-        "spendUsd": "0.00",
         "mirrored": {
           "ok": true,
           "value": true
