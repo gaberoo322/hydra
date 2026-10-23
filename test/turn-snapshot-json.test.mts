@@ -45,10 +45,11 @@
  * the reference commit's scripts/autopilot (see plan_parity.py --write-golden).
  */
 
+import { DEGRADE, degradeDetail } from "../src/autopilot/turn-snapshot/collector.ts";
 import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { appendFileSync, cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -180,7 +181,7 @@ function fallbackValues(): TurnSnapshotValues {
     archBoards: { lastRunIso: FAILED, workQueue: 1, board: FAILED, orchBoardDegraded: "1" },
     hitlGrill: FAILED,
     targetScan: targetScanFallbackSnapshot("collector-crashed"),
-    targetRiskSurface: { manifest: { ok: false, reason: "collector crashed" } },
+    targetRiskSurface: { manifest: { ok: false, reason: DEGRADE.COLLECTOR_CRASHED } },
     retro: { runs: FAILED, drillable: null },
     wayfinder: { frontier: null, ticketType: "", inflightGlobal: 0 },
     tickets: FAILED,
@@ -465,8 +466,8 @@ describe("turn snapshot JSON: builder details (#4934)", () => {
       holeText.includes('"target_risk_surface":{"ok": true, "u": null, "v": [1, null], "w": {"x": null}}'),
       "an undefined field prints as null (the deleted pyJsonDumps rule), never silently dropped",
     );
-    const failed =serializeTurnSnapshot(buildTurnSnapshot({ ...healthyValues(), targetRiskSurface: { manifest: { ok: false, reason: "no manifest field" } } }, { nowMs: NOW_MS })).text;
-    assert.ok(failed.includes('"target_risk_surface":{"ok": false, "errors": ["target_risk_surface_json: no manifest field"]}'));
+    const failed =serializeTurnSnapshot(buildTurnSnapshot({ ...healthyValues(), targetRiskSurface: { manifest: { ok: false, reason: DEGRADE.NO_MANIFEST_FIELD } } }, { nowMs: NOW_MS })).text;
+    assert.ok(failed.includes('"target_risk_surface":{"ok": false, "errors": ["target_risk_surface_json: no-manifest-field"]}'));
   });
 
   test("health: only a string status whose first token is `ok` is healthy; any other value fails (#5084)", () => {
@@ -829,7 +830,7 @@ describe("turn snapshot JSON: the CLI's --format json (#4934)", () => {
       () => ({ github: down(), hydra: down(), workspace: () => "/nonexistent", facts: () => ({}), now: () => NOW_MS }),
       { stderr: () => {} },
     );
-    assert.deepEqual(out.degraded, [{ collector: "target-risk-surface", field: "manifest", reason: "no manifest field" }]);
+    assert.deepEqual(out.degraded, [{ collector: "target-risk-surface", field: "manifest", reason: DEGRADE.NO_MANIFEST_FIELD }]);
     const crashed = await runTargetCollectors(["target-board"], { ghListLimit: 100 }, undefined, { stderr: () => {} });
     assert.deepEqual(crashed.degraded, [{ collector: "target-board", field: "target-board", reason: "collector-crashed" }]);
   });
@@ -871,7 +872,7 @@ describe("turn snapshot JSON: the CLI's --format json (#4934)", () => {
     const collectors = new Set(doc.degraded.map((d: { collector: string }) => d.collector));
     for (const c of ["target-board", "target-scan-boards", "target-risk-surface"]) assert.ok(collectors.has(c), `${c} missing from degraded: ${JSON.stringify(doc.degraded)}`);
     assert.ok(
-      doc.degraded.some((d: { collector: string; field: string; reason: string }) => d.collector === "target-risk-surface" && d.field === "manifest" && d.reason === "no manifest field"),
+      doc.degraded.some((d: { collector: string; field: string; reason: string }) => d.collector === "target-risk-surface" && d.field === "manifest" && d.reason === "no-manifest-field"),
       "the risk-surface collector's own (non-crash) marker is carried, not only crash markers",
     );
     assert.ok(err.join("").includes("crashed"), "the crashes are reported on stderr");
@@ -1123,5 +1124,31 @@ describe("turn snapshot JSON: needs_qa_target suppression (issue #4796)", () => 
   test("an all-skipped (already PASSed at head) board drops needs_qa_target; an ordinary empty pick keeps it", () => {
     assert.equal(signals({ ref: "", head: "", allSkipped: true }).needs_qa_target, false);
     assert.equal(signals({ ref: "", head: "" }).needs_qa_target, true);
+  });
+});
+
+describe("degradation reason codes are declared once in collector.ts (#5129)", () => {
+  const dir = resolve(import.meta.dirname, "../src/autopilot/turn-snapshot");
+  const files = readdirSync(dir).filter((f) => f.endsWith(".ts") && f !== "collector.ts");
+  // A reason position fed a bare string literal: `reason: "x"`, `fail("x")`, `noprFail("x")`.
+  const bare = /(?:reason:\s*|\b(?:fail|noprFail)\()"[^"]*"/;
+
+  test("no collector file spells a reason code as a bare literal", () => {
+    const hits: string[] = [];
+    for (const f of files) {
+      readFileSync(join(dir, f), "utf-8")
+        .split("\n")
+        .forEach((line, i) => {
+          if (/^\s*(\/\/|\*|\/\*)/.test(line)) return;
+          if (bare.test(line)) hits.push(`${f}:${i + 1}: ${line.trim()}`);
+        });
+    }
+    assert.deepEqual(hits, []);
+  });
+
+  test("every declared code is unique and kebab-case", () => {
+    const codes = Object.values(DEGRADE);
+    assert.equal(new Set(codes).size, codes.length);
+    for (const c of codes) assert.match(c, /^[a-z][a-zA-Z0-9]*(-[a-zA-Z0-9]+)*$/);
   });
 });

@@ -266,3 +266,276 @@ describe("GET /api/architecture — additive tangledModules + generatedAt (issue
     assert.equal(body.tangledModules[0].id, "a", "3-cycle member with the highest fanTotal ranks first");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #4637 — the /builder per-class yield view (GET /autopilot/class-stats).
+// Structural source pins for the JSX half (no JSX runner, no react in the
+// worktree); the route's memo is pinned at its HTTP boundary in
+// test/api-class-stats.test.mts. Own top-level describe, no shared lifecycle.
+// ---------------------------------------------------------------------------
+
+describe("structural pins — /builder class yield (issue #4637)", () => {
+  async function readDashboardSource(rel: string): Promise<string> {
+    const { readFile } = await import("node:fs/promises");
+    return readFile(new URL(`../dashboard/src/${rel}`, import.meta.url), "utf8");
+  }
+
+  test("Builder.jsx mounts ClassYield", async () => {
+    const src = await readDashboardSource("pages/Builder.jsx");
+    assert.match(src, /import \{ ClassYield \} from "\.\.\/components\/pages\/builder\/ClassYield\.jsx"/);
+    assert.match(src, /<ClassYield \/>/);
+  });
+
+  test("ClassYield reads class-stats on a 10-minute poll and derives a 1-day trust status (INV-9)", async () => {
+    const src = await readDashboardSource("components/pages/builder/ClassYield.jsx");
+    assert.match(src, /useApi\("\/autopilot\/class-stats", \{ poll: 600_?000 \}\)/);
+    assert.match(src, /derivePageStatus\(\{/);
+    assert.match(src, /itemsLen: classes\.length/);
+    assert.match(src, /freshnessMs: DAY_MS/);
+    assert.match(src, /const DAY_MS = 24 \* 60 \* 60 \* 1000;/);
+    assert.match(src, /generatedAt=\{data\?\.generatedAt\}/, "the as-of is the scoreboard's generatedAt");
+  });
+
+  test("every verdict cell decomposes into its inputs (ADR-0034 §5.3)", async () => {
+    const src = await readDashboardSource("components/pages/builder/ClassYield.jsx");
+    assert.match(src, /verdictInputs\(stat, scoreboard\)/);
+    assert.match(src, /scoreboard\.minSample/, "dispatches vs the min-sample floor");
+    assert.match(src, /stat\.mergeRate/, "merge rate (dev role)");
+    assert.match(src, /betaLabel\(stat\)/, "β (producer role)");
+    assert.match(src, /scoreboard\.windowMs/, "the window");
+    assert.match(src, /shadow\.verdicts/, "shadow multiplier joined by className");
+  });
+
+  test("ClassYield is read-only — no apiFetch, no POST, no controls (/builder anti-scope)", async () => {
+    const src = await readDashboardSource("components/pages/builder/ClassYield.jsx");
+    assert.equal(src.includes("apiFetch"), false);
+    assert.equal(/method:\s*["']POST["']/.test(src), false);
+    assert.equal(src.includes("<button"), false);
+    assert.equal(src.includes("ActionAffordance"), false);
+  });
+});
+
+// ===========================================================================
+// Issue #4634 (design-concept a7e7fedb) — /builder homes five dark reads.
+//
+// Two layers, same rationale as the file header (no JSX runner):
+//   1. INV-3 — the four routes that lacked an as-of gain an ADDITIVE
+//      top-level `generatedAt` (pinned at the HTTP boundary, pre-existing
+//      fields still present).
+//   2. INV-2/4/5 — route-to-file literal ownership, the shared trust seam,
+//      read-only panels and the derived-value decomposition (source pins).
+// ===========================================================================
+
+import { before as before4634, after as after4634 } from "node:test";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createOutcomesRouter } from "../src/api/outcomes.ts";
+import { createAttributionRouter } from "../src/api/attribution.ts";
+import { createMetricsRouter } from "../src/api/metrics.ts";
+import { createDesignConceptsRouter } from "../src/api/design-concepts.ts";
+import { closeRedisConnections } from "../src/redis/connection.ts";
+
+const REPO_ROOT_4634 = fileURLToPath(new URL("..", import.meta.url));
+
+function readRepo(rel: string): string {
+  return readFileSync(join(REPO_ROOT_4634, rel), "utf8");
+}
+
+/** Every dashboard/src file (repo-relative), recursively. */
+function dashboardFiles(): string[] {
+  const out: string[] = [];
+  const walk = (rel: string) => {
+    for (const name of readdirSync(join(REPO_ROOT_4634, rel))) {
+      if (name === "node_modules") continue;
+      const child = `${rel}/${name}`;
+      if (statSync(join(REPO_ROOT_4634, child)).isDirectory()) walk(child);
+      else if (/\.(jsx?|tsx?)$/.test(name)) out.push(child);
+    }
+  };
+  walk("dashboard/src");
+  return out;
+}
+
+/**
+ * Files holding an API call site (useApi / usePageItems / apiFetch / fetch /
+ * a write hook) whose FIRST argument is exactly `literal` (quotes included in
+ * the match, so "/outcomes" never false-matches a longer path or App.jsx's
+ * client-side `path="/outcomes"` redirect).
+ */
+function callSiteOwners(literal: string): string[] {
+  const escaped = literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`\\b(?:useApi|usePageItems|apiFetch|fetch|write\\w*)\\(\\s*${escaped}`);
+  return dashboardFiles().filter((f) => re.test(readRepo(f)));
+}
+
+async function invoke(router: any, path: string, query: Record<string, string> = {}): Promise<any> {
+  const handler = findHandler(router, "GET", path);
+  assert.ok(handler, `GET ${path} handler must exist`);
+  const res = mockRes();
+  await handler!({ ...mockReq(), url: path, query }, res);
+  return res;
+}
+
+function assertIsoGeneratedAt(body: any, route: string) {
+  assert.equal(typeof body.generatedAt, "string", `${route} must carry a top-level generatedAt`);
+  assert.ok(Number.isFinite(Date.parse(body.generatedAt)), `${route} generatedAt must parse as ISO`);
+}
+
+describe("#4634 INV-3 — additive generatedAt on GET /outcomes and /attribution/impact", () => {
+  let dir: string;
+  before4634(async () => {
+    dir = await mkdtemp(join(tmpdir(), "hydra-4634-outcomes-"));
+  });
+  after4634(async () => {
+    if (dir) await rm(dir, { recursive: true, force: true });
+  });
+
+  test("/outcomes keeps its outcomes rows and gains generatedAt", async () => {
+    const valFile = join(dir, "fictional-reading.txt");
+    await writeFile(valFile, "3\n");
+    const outcomesFile = join(dir, "fictional-outcomes.yaml");
+    await writeFile(
+      outcomesFile,
+      `
+outcomes:
+  - name: fictional-outcome
+    kind: leading
+    direction: up
+    source: file
+    query: ${valFile}
+    baseline: 0
+    target: 5
+`,
+    );
+    const res = await invoke(createOutcomesRouter(outcomesFile), "/outcomes");
+    assert.equal(res._status, 200);
+    assertIsoGeneratedAt(res._body, "/outcomes");
+    assert.equal(res._body.outcomes.length, 1);
+    const row = res._body.outcomes[0];
+    for (const field of ["name", "kind", "direction", "baseline", "target", "current", "ts", "holdback"]) {
+      assert.ok(field in row, `pre-existing row field ${field} survives`);
+    }
+    assert.equal(row.current, 3);
+  });
+
+  test("/attribution/impact keeps rows + metricCount and gains generatedAt", async () => {
+    const router = createAttributionRouter(
+      async () => ({ ok: true, observations: [] }) as any,
+      async () => ({}),
+    );
+    const res = await invoke(router, "/attribution/impact", { topN: "8" });
+    assert.equal(res._status, 200);
+    assertIsoGeneratedAt(res._body, "/attribution/impact");
+    assert.deepEqual(res._body.rows, []);
+    assert.equal(res._body.metricCount, 0);
+  });
+});
+
+describe("#4634 INV-3 — additive generatedAt on GET /metrics/unclassified and /design-concepts/snapshots", () => {
+  after4634(() => {
+    closeRedisConnections();
+  });
+
+  test("/metrics/unclassified keeps every aggregator field and gains generatedAt", async () => {
+    const res = await invoke(createMetricsRouter(), "/metrics/unclassified", { count: "50" });
+    assert.equal(res._status, 200);
+    assertIsoGeneratedAt(res._body, "/metrics/unclassified");
+    for (const field of ["windowCycles", "unclassified", "rate", "fixable", "noAttribution", "fixableRate", "noAttributionShapes"]) {
+      assert.ok(field in res._body, `pre-existing field ${field} survives`);
+    }
+    assert.ok(Array.isArray(res._body.unclassified));
+  });
+
+  test("/design-concepts/snapshots keeps the green-light fields and gains generatedAt", async () => {
+    const res = await invoke(createDesignConceptsRouter(), "/design-concepts/snapshots");
+    assert.equal(res._status, 200);
+    assertIsoGeneratedAt(res._body, "/design-concepts/snapshots");
+    for (const field of ["snapshots", "greenDaysInWindow", "windowDays", "requiredGreenDays", "greenLightReady", "indexSizeNow"]) {
+      assert.ok(field in res._body, `pre-existing field ${field} survives`);
+    }
+  });
+});
+
+describe("#4634 INV-2/4/5 — /builder panel source pins", () => {
+  const PANELS: Array<[string, string, string]> = [
+    ['"/outcomes"', "dashboard/src/components/pages/builder/DeclaredOutcomes.jsx", "outcomes"],
+    ['"/attribution/impact?topN=8"', "dashboard/src/components/pages/builder/ImpactRanking.jsx", "rows"],
+    ['"/metrics/unclassified?count=50"', "dashboard/src/components/pages/builder/UnclassifiedResidue.jsx", "unclassified"],
+    ['"/design-concepts/snapshots"', "dashboard/src/components/pages/builder/DesignConceptGreenLight.jsx", "snapshots"],
+    ['"/attention/counts"', "dashboard/src/components/pages/builder/FeedCalibration.jsx", "lines"],
+  ];
+
+  for (const [literal, file] of PANELS) {
+    test(`${literal} is fetched from exactly one dashboard file: ${file}`, () => {
+      assert.deepEqual(callSiteOwners(literal), [file]);
+    });
+  }
+
+  test("each panel rides usePageItems with its items key (never a hand-rolled ternary)", () => {
+    for (const [literal, file, itemsKey] of PANELS) {
+      const src = readRepo(file);
+      assert.ok(src.includes("usePageItems"), `${file} must import the usePageItems seam`);
+      assert.ok(src.includes(`usePageItems(${literal}`), `${file} must source ${literal} via usePageItems`);
+      assert.ok(src.includes(`itemsKey: "${itemsKey}"`), `${file} must read the ${itemsKey} array`);
+      assert.ok(!src.includes("useApi("), `${file} must not call useApi directly`);
+    }
+  });
+
+  test("Builder.jsx only mounts the panels — no route literal, no fetch", () => {
+    const src = readRepo("dashboard/src/pages/Builder.jsx");
+    for (const [literal] of PANELS) assert.ok(!src.includes(literal), `Builder.jsx must not own ${literal}`);
+    assert.ok(!/\b(?:useApi|usePageItems|apiFetch)\(/.test(src), "Builder.jsx must not fetch");
+    for (const name of ["DeclaredOutcomes", "ImpactRanking", "UnclassifiedResidue", "DesignConceptGreenLight", "FeedCalibration"]) {
+      assert.ok(src.includes(`<${name} />`), `Builder.jsx must mount ${name}`);
+    }
+  });
+
+  test("the five panels are read-only — no button, no apiFetch (ADR-0034 §2)", () => {
+    for (const [, file] of PANELS) {
+      const src = readRepo(file);
+      assert.ok(!src.includes("<button"), `${file} must carry no button`);
+      assert.ok(!src.includes("apiFetch"), `${file} must not write`);
+    }
+  });
+
+  test("FeedCalibration sorts miscalibrated first and cites `because` verbatim — never the server's constants", () => {
+    const src = readRepo("dashboard/src/components/pages/builder/FeedCalibration.jsx");
+    assert.match(src, /miscalibrated: 0, calibrated: 1, "insufficient-data": 2/);
+    assert.ok(src.includes("{line.because}"), "the verdict's decomposition is the server's because string");
+    // The ratio / minimum-episode constants live in src/attention-calibration.ts
+    // only: no constant import and no notAProblem ÷ surfaced recomputation.
+    assert.ok(!/CALIBRATION_|MISCALIBRATED_|notAProblem\s*\//.test(src), "the client must not recompute verdicts");
+  });
+
+  test("ImpactRanking renders impactPerCost beside its inputs and per-metric flags (§5.3)", () => {
+    const src = readRepo("dashboard/src/components/pages/builder/ImpactRanking.jsx");
+    for (const field of ["row.impactPerCost", "row.favorableImpact", "row.meanTier", "row.contributions", "c.beta", "c.directed", "belowNoiseFloor", "identifiabilitySuspect"]) {
+      assert.ok(src.includes(field), `ImpactRanking must render ${field}`);
+    }
+  });
+
+  test("DesignConceptGreenLight shows greenLightReady only beside its window inputs, reusing Sparkline", () => {
+    const src = readRepo("dashboard/src/components/pages/builder/DesignConceptGreenLight.jsx");
+    for (const field of ["greenLightReady", "greenDaysInWindow", "requiredGreenDays", "windowDays", "indexSizeNow"]) {
+      assert.ok(src.includes(field), `DesignConceptGreenLight must render ${field}`);
+    }
+    assert.ok(src.includes('from "../outcomes/Sparkline.jsx"'), "the shared Sparkline is reused, not rebuilt");
+  });
+
+  test("UnclassifiedResidue labels rate / fixableRate / noAttributionShapes over windowCycles; zero needs cycles", () => {
+    const src = readRepo("dashboard/src/components/pages/builder/UnclassifiedResidue.jsx");
+    for (const field of ["data?.rate", "data?.fixableRate", "noAttributionShapes", "windowCycles"]) {
+      assert.ok(src.includes(field), `UnclassifiedResidue must render ${field}`);
+    }
+    assert.match(src, /windowCycles === 0/, "an empty window must not assert a zero");
+  });
+
+  test("DeclaredOutcomes shows each row's own ts as-of and a missing reading as no reading", () => {
+    const src = readRepo("dashboard/src/components/pages/builder/DeclaredOutcomes.jsx");
+    assert.ok(src.includes("o.ts"), "each row carries its reading's own as-of");
+    assert.ok(src.includes("—, no reading"), "a null current renders as no reading, never a zero");
+  });
+});

@@ -4,7 +4,6 @@ import {
   loadAgentMemory,
   listFrictionPatterns,
   getIneffectivePromotedPatterns,
-  getRuleActionLog,
   captureSubagentLesson,
   captureSubagentFriction,
   isValidSkill,
@@ -15,7 +14,6 @@ import {
   SubagentLessonBodySchema,
   SubagentFrictionBodySchema,
 } from "../schemas/pattern-memory.ts";
-import { RuleActionLogQuerySchema } from "../schemas/learning.ts";
 import { getLastDemotionCount } from "../redis/agent-memory.ts";
 import { logger } from "../logger.ts";
 import { isolateAggregator } from "./route-helpers.ts";
@@ -35,7 +33,7 @@ const FRICTION_SKILLS = ["hydra-dev", "hydra-target-build", "hydra-qa"] as const
  *
  * Issue #3006: the READ-side pattern-memory diagnostics that previously lived in
  * `src/api/learning.ts` — `GET /learning/ineffective-rules`,
- * `GET /learning/rule-action-log`, `GET /learning/friction-patterns` — moved
+ * `GET /learning/friction-patterns` — moved
  * here so the pattern-memory write + read surface lives together in the file
  * named for the domain it serves. They read from `pattern-memory/*` (the same
  * domain the write routes touch), so a reader asking "how does pattern-memory
@@ -226,30 +224,6 @@ export function createPatternMemoryRouter() {
         totalIneffective: 0,
         errors: [err?.message || String(err)],
       });
-    }
-  });
-
-  /**
-   * GET /learning/rule-action-log — audit trail of auto-demote / alert
-   * actions taken by the daily effectiveness check (issue #365). Newest
-   * first; capped at RULE_ACTION_LOG_CAP entries.
-   *
-   * Query param `limit` (default 50, max 200).
-   */
-  router.get("/learning/rule-action-log", async (req, res) => {
-    try {
-      // ADR-0022: read `limit` through the Schemas seam (safeParse on the whole
-      // req.query). The schema reuses countQuerySchema's coercion, which
-      // collapses bad/absent/out-of-range input to the default (50) and clamps
-      // to [1, 200] — exactly the legacy `parseInt(...) || 50` + clamp.
-      const limit = RuleActionLogQuerySchema.safeParse(req.query).data?.limit ?? 50;
-      const entries = await getRuleActionLog(limit);
-      res.json({ entries, count: entries.length });
-    } catch (err: any) {
-      // Degraded, fully-shaped 500 body (empty `entries` + `errors`) — kept per
-      // the specialized-envelope rule; catch adopts the pino seam (ADR-0027 8th).
-      logger.error({ err }, "[pattern-memory-api] rule-action-log failed");
-      res.status(500).json({ entries: [], count: 0, errors: [err?.message || String(err)] });
     }
   });
 

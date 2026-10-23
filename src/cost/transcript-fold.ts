@@ -25,7 +25,7 @@ import {
   parseUsageLine,
   parseObservedResetMs,
 } from "./token-math.ts";
-import type { ModelFamily, TokenBreakdown } from "./token-math.ts";
+import type { ModelFamily, ParsedUsageLine, TokenBreakdown } from "./token-math.ts";
 import {
   DISPATCH_KINDS,
   EMPTY_BREAKDOWN,
@@ -80,18 +80,58 @@ export function firstUserMessageText(lines: readonly string[]): string | null {
  * `parseUsageLine` (the same authoritative parser the windowed scan uses), so
  * the per-dispatch count is reconcilable with the per-skill/per-family
  * cross-tabs. Non-JSON lines, lines with no usage block, and zero-usage lines
- * all contribute nothing. Unlike the rolling-window scan this applies NO time
- * cutoff. Total: always returns a non-negative integer.
+ * all contribute nothing. Each assistant `message.id` counts once, at its
+ * LARGEST line (issue #5141, {@link dedupeByMessageId}). Lines without a
+ * `message.id` count as before. Unlike the rolling-window scan this applies NO
+ * time cutoff. Total: always returns a non-negative integer.
  */
 export function sumSessionTokens(lines: readonly string[]): number {
-  let total = 0;
+  const parsed: ParsedUsageLine[] = [];
   for (const line of lines) {
     if (!line || line[0] !== "{") continue;
-    const parsed = parseUsageLine(line);
-    if (parsed === null || parsed === "skip") continue;
-    total += parsed.tokens.total;
+    const p = parseUsageLine(line);
+    if (p === null || p === "skip") continue;
+    parsed.push(p);
   }
+  let total = 0;
+  for (const p of dedupeByMessageId(parsed)) total += p.tokens.total;
   return total;
+}
+
+/**
+ * Bumped whenever {@link parseTranscriptFile}'s per-file output changes meaning,
+ * so a parse memo written by an older build is re-parsed instead of replayed
+ * (issue #5141: v2 = message.id de-duplication). Memo entries from before this
+ * stamp existed load as version 0.
+ */
+export const TRANSCRIPT_PARSE_VERSION = 2;
+
+/**
+ * Collapse the lines of one assistant message to one (issue #5141). Claude Code
+ * writes one JSONL line per content block, each repeating the message's usage;
+ * input and cache counts match across the repeats, but `output_tokens` grows as
+ * the message streams, so the LARGEST line is the complete one (the rule
+ * ccusage applies; keeping the first under-counts output). Ties keep the earlier
+ * line. Lines without a `message.id` all pass through. Output keeps first-seen
+ * order. Pure.
+ */
+export function dedupeByMessageId(parsed: readonly ParsedUsageLine[]): ParsedUsageLine[] {
+  const out: ParsedUsageLine[] = [];
+  const slotById = new Map<string, number>();
+  for (const p of parsed) {
+    if (p.messageId === null) {
+      out.push(p);
+      continue;
+    }
+    const slot = slotById.get(p.messageId);
+    if (slot === undefined) {
+      slotById.set(p.messageId, out.length);
+      out.push(p);
+    } else if (p.tokens.total > out[slot].tokens.total) {
+      out[slot] = p;
+    }
+  }
+  return out;
 }
 
 /** What the shell's `attribute` callback resolves for one contributing file. */
@@ -138,6 +178,7 @@ export function parseTranscriptFile(
   let parseErrors = 0;
   let observedResetMs: number | null = null;
   let hadInWindow7d = false;
+  const usageLines: ParsedUsageLine[] = [];
 
   for (const line of lines) {
     if (!line || line[0] !== "{") continue;
@@ -155,7 +196,12 @@ export function parseTranscriptFile(
     }
     if (parsed === "skip") continue;
     linesWithUsage++;
+    usageLines.push(parsed);
+  }
 
+  // One assistant message spans several JSONL lines (one per content block), each
+  // repeating its usage -- count each `message.id` once (issue #5141).
+  for (const parsed of dedupeByMessageId(usageLines)) {
     const tsMs = parsed.tsMs;
     if (tsMs < cutoff7d) continue;
 
@@ -183,6 +229,7 @@ export function parseTranscriptFile(
 
   return {
     entry: {
+      parseVersion: TRANSCRIPT_PARSE_VERSION,
       entries,
       skill,
       dispatchKind,
@@ -272,7 +319,7 @@ function isKnownDispatchKind(k: string): k is DispatchKind {
  */
 export function foldFileContribution(
   acc: ScanAccumulator,
-  entry: Omit<FileParseMemoEntry, "size" | "mtimeMs">,
+  entry: Omit<FileParseMemoEntry, "size" | "mtimeMs" | "parseVersion">,
   cutoffs: ScanCutoffs,
   anchorEnvMs: number | null,
 ): void {

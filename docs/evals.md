@@ -78,7 +78,7 @@ useful eval" — is a **follow-up**, gated on two operator actions:
 2. **Cost-cap it.** Each live `promptfoo eval` calls the configured providers;
    the live eval must be bounded by a `HYDRA_`-prefixed env cap and a
    `--sample` / max-concurrency flag (modelled on `HYDRA_RECS_DAILY_CAP_USD`,
-   `src/recommendation-engine.ts`) — never an uncapped fan-out.
+   `src/autopilot/recommendation-cap.ts`) — never an uncapped fan-out.
 
 Until both land, keep new evals on offline / recorded / `file://` providers or
 static assertions against fixtures.

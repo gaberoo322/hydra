@@ -15,7 +15,7 @@
  * decide.py withholds `wire_or_retire_target` on `ok:false`.
  */
 
-import type { Classified, CollectorOutcome } from "./collector.ts";
+import { DEGRADE, degradeDetail, type Classified, type CollectorOutcome } from "./collector.ts";
 
 export const TARGET_RISK_SURFACE_COLLECTOR = "target-risk-surface";
 
@@ -38,10 +38,10 @@ export async function collectTargetRiskSurface(deps: TargetRiskSurfaceDeps): Pro
     manifest =
       m !== null && typeof m === "object" && !Array.isArray(m)
         ? { ok: true, value: m as Record<string, unknown> }
-        : { ok: false, reason: "no manifest field" };
+        : { ok: false, reason: DEGRADE.NO_MANIFEST_FIELD };
   } catch (err) {
     /* intentional: fail closed — the reason renders into the emitted {"ok": false, "errors": [...]} line */
-    manifest = { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    manifest = { ok: false, reason: degradeDetail(err instanceof Error ? err.message : String(err)) };
   }
   return {
     collector: TARGET_RISK_SURFACE_COLLECTOR,

@@ -45,7 +45,7 @@ reboot via AOF + the docker volume) and reads it back as a seed tier:
 
 - **Keys** (bare `redis-cli`, the docker-exec seam the autopilot scripts use):
   `hydra:autopilot:signal-last-fired` — a **Hash** (field = signal class, value
-  = last-fired epoch); `hydra:autopilot:research-force-counter` — a **String**
+  = last-fired epoch); `REDIS_RESEARCH_FORCE_KEY` (scripts/autopilot/bootstrap.sh) — a **String**
   holding the canonical-JSON date-keyed counter object.
 - **Seed order** (bootstrap.sh): prior state file → **Redis** → 0. The prior
   file stays FIRST (fast local path, survives relaunches); Redis is the

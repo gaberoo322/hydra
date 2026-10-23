@@ -238,6 +238,8 @@
         "CLAUDE.md",
         "CONTEXT-MAP.md",
         "CONTEXT.md",
+        "config/direction/proposal-policy.md",
+        "config/direction/tech-preferences.md",
         "docs/adr/0003-terminal-goal-hierarchy.md",
         "docs/adr/0008-design-concept-gate.md",
         "docs/adr/0010-stuckness-detector-retired.md",
@@ -249,8 +251,22 @@
         "docs/adr/0036-anchor-selection-retired-candidate-feed.md",
         "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md",
         "docs/historical/README.md",
+        "docs/historical/candidate-feed.md",
+        "docs/historical/codex-otel.md",
+        "docs/historical/merge-gate.md",
+        "docs/observability/README.md",
+        "docs/operations/process-cleanup.md",
+        "docs/operator-playbooks/hydra-auto-merge-window.md",
         "docs/operator-playbooks/hydra-branch-prune.md",
+        "docs/operator-playbooks/hydra-dev.md",
+        "docs/operator-playbooks/hydra-digest.md",
+        "docs/operator-playbooks/hydra-epic-close.md",
         "docs/operator-playbooks/hydra-qa.md",
+        "docs/operator-playbooks/hydra-research.md",
+        "docs/operator-playbooks/hydra-target-build.md",
+        "docs/operator-playbooks/hydra-target-incident.md",
+        "docs/operator-playbooks/hydra-target-research.md",
+        "docs/operator-playbooks/hydra-target-retro.md",
         "docs/quality-gates.md",
         "docs/reference.md",
         "src/autopilot/CONTEXT.md"
@@ -434,7 +450,7 @@
         "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
         "docs/adr/0036-anchor-selection-retired-candidate-feed.md",
         "docs/historical/README.md",
-        "docs/reference.md",
+        "docs/historical/candidate-feed.md",
         "src/autopilot/CONTEXT.md"
       ],
       "source": {
@@ -747,7 +763,8 @@
       "citedBy": [
         "CLAUDE.md",
         "CONTEXT-MAP.md",
-        "docs/adr/0034-orchestrator-dashboard-page-inventory.md"
+        "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
+        "docs/reference.md"
       ],
       "source": {
         "path": "docs/adr/0024-api-versioning.md",
@@ -818,7 +835,8 @@
       "readWhen": "Adding any log line.",
       "citedBy": [
         "CLAUDE.md",
-        "CONTEXT-MAP.md"
+        "CONTEXT-MAP.md",
+        "README.md"
       ],
       "source": {
         "path": "docs/adr/0027-pino-structured-logger.md",
@@ -924,7 +942,6 @@
       "readWhen": "Any Target board or backlog work.",
       "citedBy": [
         "CONTEXT-MAP.md",
-        "CONTEXT.md",
         "docs/adr/0033-openviking-knowledge-plane-retired.md",
         "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
         "docs/operator-playbooks/hydra-architect.md",
@@ -937,6 +954,7 @@
         "docs/operator-playbooks/hydra-target-discover.md",
         "docs/operator-playbooks/hydra-target-qa.md",
         "docs/operator-playbooks/hydra-target-research.md",
+        "docs/operator-playbooks/hydra-target-retro.md",
         "docs/operator-playbooks/hydra-target-sweep.md",
         "docs/operator-playbooks/hydra-wire-or-retire.md"
       ],
@@ -990,6 +1008,9 @@
         "config/direction/architecture-review.md",
         "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
         "docs/agents/domain.md",
+        "docs/operator-playbooks/hydra-target-build.md",
+        "docs/operator-playbooks/hydra-target-cleanup.md",
+        "docs/operator-playbooks/hydra-target-research.md",
         "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
         "docs/reference.md"
       ],
@@ -1014,12 +1035,14 @@
       "citedBy": [
         "CLAUDE.md",
         "CONTEXT-MAP.md",
+        "README.md",
         "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
         "docs/adr/0045-operator-channel.md",
         "docs/agents/triage-labels.md",
         "docs/operator-playbooks/hydra-autopilot.md",
         "docs/operator-playbooks/hydra-grill.md",
-        "docs/operator-playbooks/hydra-review.md"
+        "docs/operator-playbooks/hydra-review.md",
+        "docs/reference.md"
       ],
       "source": {
         "path": "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
@@ -1044,6 +1067,7 @@
       "citedBy": [
         "CLAUDE.md",
         "CONTEXT-MAP.md",
+        "CONTEXT.md",
         "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
         "docs/operator-playbooks/hydra-autopilot.md"
       ],
@@ -1066,9 +1090,12 @@
       "decision": "Anchor selection is retired; the Candidate Feed is data the brain reads, not a decision the orchestrator makes. Establishes the **Locality** principle. Renumbered from a duplicate `0016` — see Numbering below.",
       "readWhen": "Touching candidate scoring, or tempted to resurrect the reframe queue.",
       "citedBy": [
+        "CLAUDE.md",
         "CONTEXT-MAP.md",
         "CONTEXT.md",
-        "docs/reference.md"
+        "docs/historical/README.md",
+        "docs/historical/candidate-feed.md",
+        "docs/operator-playbooks/hydra-discover.md"
       ],
       "source": {
         "path": "docs/adr/0036-anchor-selection-retired-candidate-feed.md",
@@ -1228,6 +1255,7 @@
       "citedBy": [
         "CONTEXT-MAP.md",
         "CONTEXT.md",
+        "README.md",
         "docs/adr/0044-operator-attended-epic-sprint-lane.md",
         "docs/operator-playbooks/hydra-autopilot.md",
         "docs/operator-playbooks/hydra-target-build.md",

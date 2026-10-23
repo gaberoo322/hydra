@@ -158,8 +158,10 @@
       "path": "/api/attention/counts",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/attention/counts",
+      "consumers": [
+        "dashboard/src/components/pages/builder/FeedCalibration.jsx"
+      ],
+      "home": "/builder",
       "areas": [
         "src/attention-calibration.ts",
         "src/attention.ts",
@@ -196,8 +198,10 @@
       "path": "/api/attribution/impact",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/attribution/impact",
+      "consumers": [
+        "dashboard/src/components/pages/builder/ImpactRanking.jsx"
+      ],
+      "home": "/builder",
       "areas": [
         "src/outcome-attribution/",
         "src/outcomes.ts",
@@ -228,7 +232,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 217
+        "line": 222
       }
     },
     {
@@ -250,7 +254,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 336
+        "line": 341
       }
     },
     {
@@ -272,7 +276,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 399
+        "line": 430
       }
     },
     {
@@ -292,7 +296,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 518
+        "line": 549
       }
     },
     {
@@ -312,7 +316,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 579
+        "line": 610
       }
     },
     {
@@ -332,7 +336,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 622
+        "line": 653
       }
     },
     {
@@ -352,7 +356,7 @@
       ],
       "source": {
         "path": "src/api/autopilot-board.ts",
-        "line": 640
+        "line": 671
       }
     },
     {
@@ -678,7 +682,9 @@
       "path": "/api/autopilot/runs/:runId/retro",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
+      "consumers": [
+        "dashboard/src/components/pages/runs/RunRetroBundle.jsx"
+      ],
       "home": "/api/autopilot/runs/:runId/retro",
       "areas": [
         "src/autopilot/",
@@ -842,8 +848,10 @@
       "path": "/api/autopilot/class-state",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/autopilot/class-state",
+      "consumers": [
+        "dashboard/src/components/pages/work/ClassStatePanel.jsx"
+      ],
+      "home": "/work",
       "areas": [
         "src/autopilot/"
       ],
@@ -857,8 +865,10 @@
       "path": "/api/autopilot/class-stats",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/autopilot/class-stats",
+      "consumers": [
+        "dashboard/src/components/pages/builder/ClassYield.jsx"
+      ],
+      "home": "/builder",
       "areas": [
         "src/autopilot/",
         "src/logger.ts",
@@ -866,7 +876,7 @@
       ],
       "source": {
         "path": "src/api/class-stats.ts",
-        "line": 73
+        "line": 140
       }
     },
     {
@@ -877,13 +887,11 @@
       "consumers": [],
       "home": "/api/config/:section",
       "areas": [
-        "src/logger.ts",
-        "src/schemas/",
-        "src/target-config.ts"
+        "src/logger.ts"
       ],
       "source": {
         "path": "src/api/config.ts",
-        "line": 47
+        "line": 39
       }
     },
     {
@@ -894,13 +902,11 @@
       "consumers": [],
       "home": "/api/config/:section/:name",
       "areas": [
-        "src/logger.ts",
-        "src/schemas/",
-        "src/target-config.ts"
+        "src/logger.ts"
       ],
       "source": {
         "path": "src/api/config.ts",
-        "line": 59
+        "line": 51
       }
     },
     {
@@ -911,13 +917,11 @@
       "consumers": [],
       "home": "/api/config/:section/:name",
       "areas": [
-        "src/logger.ts",
-        "src/schemas/",
-        "src/target-config.ts"
+        "src/logger.ts"
       ],
       "source": {
         "path": "src/api/config.ts",
-        "line": 76
+        "line": 68
       }
     },
     {
@@ -1015,17 +1019,23 @@
       "path": "/api/design-concepts/snapshots",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/design-concepts/snapshots",
+      "consumers": [
+        "dashboard/src/components/pages/builder/DesignConceptGreenLight.jsx"
+      ],
+      "home": "/builder",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 108
+        "line": 217
       }
     },
     {
@@ -1036,14 +1046,18 @@
       "consumers": [],
       "home": "/api/design-concepts/exempt-log",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 126
+        "line": 238
       }
     },
     {
@@ -1054,14 +1068,18 @@
       "consumers": [],
       "home": "/api/design-concepts/exempt-log",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 158
+        "line": 270
       }
     },
     {
@@ -1072,14 +1090,42 @@
       "consumers": [],
       "home": "/api/design-concepts",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 205
+        "line": 317
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/design-concepts/:anchorRef/approve-preconditions",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [
+        "dashboard/src/components/pages/work/DesignConceptQueue.jsx"
+      ],
+      "home": "/work",
+      "areas": [
+        "src/attention.ts",
+        "src/design-concept-gate.ts",
+        "src/design-concept.ts",
+        "src/github/",
+        "src/logger.ts",
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
+      ],
+      "source": {
+        "path": "src/api/design-concepts.ts",
+        "line": 379
       }
     },
     {
@@ -1090,14 +1136,18 @@
       "consumers": [],
       "home": "/api/design-concepts/:anchorRef/resolve",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 249
+        "line": 520
       }
     },
     {
@@ -1105,17 +1155,23 @@
       "path": "/api/design-concepts/:anchorRef",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/design-concepts/:anchorRef",
+      "consumers": [
+        "dashboard/src/components/pages/work/DesignConceptQueue.jsx"
+      ],
+      "home": "/work",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 294
+        "line": 565
       }
     },
     {
@@ -1126,14 +1182,18 @@
       "consumers": [],
       "home": "/api/design-concepts",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 312
+        "line": 583
       }
     },
     {
@@ -1144,14 +1204,18 @@
       "consumers": [],
       "home": "/api/design-concepts/:anchorRef/approve",
       "areas": [
+        "src/attention.ts",
         "src/design-concept-gate.ts",
         "src/design-concept.ts",
+        "src/github/",
         "src/logger.ts",
-        "src/schemas/"
+        "src/operator-actions/",
+        "src/schemas/",
+        "src/target-config.ts"
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 347
+        "line": 618
       }
     },
     {
@@ -1270,8 +1334,10 @@
       "path": "/api/explore/behavior",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/explore/behavior",
+      "consumers": [
+        "dashboard/src/components/pages/runs/BehaviorGallery.jsx"
+      ],
+      "home": "/runs",
       "areas": [
         "src/aggregators/",
         "src/schemas/"
@@ -1310,39 +1376,7 @@
       ],
       "source": {
         "path": "src/api/goals.ts",
-        "line": 18
-      }
-    },
-    {
-      "method": "GET",
-      "path": "/api/goals/summary",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/goals/summary",
-      "areas": [
-        "src/logger.ts",
-        "src/project-goals.ts"
-      ],
-      "source": {
-        "path": "src/api/goals.ts",
-        "line": 36
-      }
-    },
-    {
-      "method": "GET",
-      "path": "/api/grounding/latest",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/grounding/latest",
-      "areas": [
-        "src/grounding/",
-        "src/target-config.ts"
-      ],
-      "source": {
-        "path": "src/api/grounding.ts",
-        "line": 33
+        "line": 19
       }
     },
     {
@@ -1361,7 +1395,7 @@
       ],
       "source": {
         "path": "src/api/health.ts",
-        "line": 102
+        "line": 98
       }
     },
     {
@@ -1380,7 +1414,7 @@
       ],
       "source": {
         "path": "src/api/health.ts",
-        "line": 195
+        "line": 194
       }
     },
     {
@@ -1407,8 +1441,10 @@
       "path": "/api/holdback/enrolments",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/holdback/enrolments",
+      "consumers": [
+        "dashboard/src/components/pages/work/HoldbackEnrolState.jsx"
+      ],
+      "home": "/work",
       "areas": [
         "src/holdback-policy.ts",
         "src/holdback.ts",
@@ -1487,29 +1523,11 @@
       "home": "/api/learning/context-trace",
       "areas": [
         "src/learning/",
-        "src/metrics/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/learning.ts",
-        "line": 165
-      }
-    },
-    {
-      "method": "GET",
-      "path": "/api/learning/reflection-health",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/learning/reflection-health",
-      "areas": [
-        "src/learning/",
-        "src/metrics/",
-        "src/schemas/"
-      ],
-      "source": {
-        "path": "src/api/learning.ts",
-        "line": 231
+        "line": 112
       }
     },
     {
@@ -1674,26 +1692,6 @@
     },
     {
       "method": "GET",
-      "path": "/api/summary",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/summary",
-      "areas": [
-        "src/cost/",
-        "src/logger.ts",
-        "src/metrics/",
-        "src/redis/",
-        "src/schemas/",
-        "src/taxonomy/"
-      ],
-      "source": {
-        "path": "src/api/metrics.ts",
-        "line": 50
-      }
-    },
-    {
-      "method": "GET",
       "path": "/api/metrics",
       "stability": "stable",
       "stabilityNote": null,
@@ -1709,27 +1707,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 76
-      }
-    },
-    {
-      "method": "GET",
-      "path": "/api/metrics/abandonment",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/metrics/abandonment",
-      "areas": [
-        "src/cost/",
-        "src/logger.ts",
-        "src/metrics/",
-        "src/redis/",
-        "src/schemas/",
-        "src/taxonomy/"
-      ],
-      "source": {
-        "path": "src/api/metrics.ts",
-        "line": 132
+        "line": 47
       }
     },
     {
@@ -1751,7 +1729,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 141
+        "line": 101
       }
     },
     {
@@ -1773,7 +1751,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 187
+        "line": 147
       }
     },
     {
@@ -1781,8 +1759,10 @@
       "path": "/api/metrics/unclassified",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/metrics/unclassified",
+      "consumers": [
+        "dashboard/src/components/pages/builder/UnclassifiedResidue.jsx"
+      ],
+      "home": "/builder",
       "areas": [
         "src/cost/",
         "src/logger.ts",
@@ -1793,27 +1773,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 236
-      }
-    },
-    {
-      "method": "GET",
-      "path": "/api/metrics/grounding-duration",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/metrics/grounding-duration",
-      "areas": [
-        "src/cost/",
-        "src/logger.ts",
-        "src/metrics/",
-        "src/redis/",
-        "src/schemas/",
-        "src/taxonomy/"
-      ],
-      "source": {
-        "path": "src/api/metrics.ts",
-        "line": 258
+        "line": 196
       }
     },
     {
@@ -1833,7 +1793,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 290
+        "line": 228
       }
     },
     {
@@ -1853,7 +1813,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 309
+        "line": 247
       }
     },
     {
@@ -1873,7 +1833,7 @@
       ],
       "source": {
         "path": "src/api/metrics.ts",
-        "line": 328
+        "line": 266
       }
     },
     {
@@ -1888,12 +1848,11 @@
       "areas": [
         "src/aggregators/",
         "src/autopilot/",
-        "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/now-page.ts",
-        "line": 159
+        "line": 151
       }
     },
     {
@@ -1908,12 +1867,11 @@
       "areas": [
         "src/aggregators/",
         "src/autopilot/",
-        "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/now-page.ts",
-        "line": 182
+        "line": 174
       }
     },
     {
@@ -1928,12 +1886,11 @@
       "areas": [
         "src/aggregators/",
         "src/autopilot/",
-        "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/now-page.ts",
-        "line": 214
+        "line": 206
       }
     },
     {
@@ -1948,12 +1905,11 @@
       "areas": [
         "src/aggregators/",
         "src/autopilot/",
-        "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/now-page.ts",
-        "line": 228
+        "line": 220
       }
     },
     {
@@ -1969,30 +1925,11 @@
       "areas": [
         "src/aggregators/",
         "src/autopilot/",
-        "src/redis/",
         "src/schemas/"
       ],
       "source": {
         "path": "src/api/now-page.ts",
-        "line": 242
-      }
-    },
-    {
-      "method": "GET",
-      "path": "/api/now/alerts",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/now/alerts",
-      "areas": [
-        "src/aggregators/",
-        "src/autopilot/",
-        "src/redis/",
-        "src/schemas/"
-      ],
-      "source": {
-        "path": "src/api/now-page.ts",
-        "line": 261
+        "line": 234
       }
     },
     {
@@ -2000,8 +1937,10 @@
       "path": "/api/now/recommendations",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/now/recommendations",
+      "consumers": [
+        "dashboard/src/pages/now-console/RecommendationsPanel.jsx"
+      ],
+      "home": "/now",
       "areas": [
         "src/aggregators/",
         "src/autopilot/",
@@ -2056,33 +1995,7 @@
       "areas": [],
       "source": {
         "path": "src/api/observability.ts",
-        "line": 59
-      }
-    },
-    {
-      "method": "GET",
-      "path": "/api/observability/trace-url",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/observability/trace-url",
-      "areas": [],
-      "source": {
-        "path": "src/api/observability.ts",
-        "line": 71
-      }
-    },
-    {
-      "method": "POST",
-      "path": "/api/kill",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/kill",
-      "areas": [],
-      "source": {
-        "path": "src/api/operational.ts",
-        "line": 25
+        "line": 29
       }
     },
     {
@@ -2090,8 +2003,11 @@
       "path": "/api/operator-actions",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/operator-actions",
+      "consumers": [
+        "dashboard/src/components/ActionAffordance.jsx",
+        "dashboard/src/components/pages/work/ClassStatePanel.jsx"
+      ],
+      "home": "/",
       "areas": [
         "src/operator-actions/",
         "src/schemas/"
@@ -2192,8 +2108,10 @@
       "path": "/api/outcomes",
       "stability": "stable",
       "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/outcomes",
+      "consumers": [
+        "dashboard/src/components/pages/builder/DeclaredOutcomes.jsx"
+      ],
+      "home": "/builder",
       "areas": [
         "src/logger.ts",
         "src/outcomes.ts"
@@ -2218,7 +2136,7 @@
       ],
       "source": {
         "path": "src/api/pattern-memory.ts",
-        "line": 60
+        "line": 58
       }
     },
     {
@@ -2236,7 +2154,7 @@
       ],
       "source": {
         "path": "src/api/pattern-memory.ts",
-        "line": 87
+        "line": 85
       }
     },
     {
@@ -2254,7 +2172,7 @@
       ],
       "source": {
         "path": "src/api/pattern-memory.ts",
-        "line": 100
+        "line": 98
       }
     },
     {
@@ -2272,7 +2190,7 @@
       ],
       "source": {
         "path": "src/api/pattern-memory.ts",
-        "line": 141
+        "line": 139
       }
     },
     {
@@ -2290,25 +2208,7 @@
       ],
       "source": {
         "path": "src/api/pattern-memory.ts",
-        "line": 207
-      }
-    },
-    {
-      "method": "GET",
-      "path": "/api/learning/rule-action-log",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/learning/rule-action-log",
-      "areas": [
-        "src/logger.ts",
-        "src/pattern-memory/",
-        "src/redis/",
-        "src/schemas/"
-      ],
-      "source": {
-        "path": "src/api/pattern-memory.ts",
-        "line": 239
+        "line": 205
       }
     },
     {
@@ -2328,7 +2228,7 @@
       ],
       "source": {
         "path": "src/api/pattern-memory.ts",
-        "line": 262
+        "line": 236
       }
     },
     {
@@ -2344,7 +2244,7 @@
       ],
       "source": {
         "path": "src/api/recommendations.ts",
-        "line": 66
+        "line": 57
       }
     },
     {
@@ -2356,59 +2256,11 @@
       "home": "/api/reflections",
       "areas": [
         "src/reflections/",
-        "src/schemas/",
-        "src/target-config.ts"
+        "src/schemas/"
       ],
       "source": {
         "path": "src/api/reflections.ts",
-        "line": 57
-      }
-    },
-    {
-      "method": "GET",
-      "path": "/api/calibration/outcomes",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/calibration/outcomes",
-      "areas": [
-        "src/reflections/",
-        "src/schemas/",
-        "src/target-config.ts"
-      ],
-      "source": {
-        "path": "src/api/reflections.ts",
-        "line": 87
-      }
-    },
-    {
-      "method": "POST",
-      "path": "/api/calibration/outcomes/sync",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/calibration/outcomes/sync",
-      "areas": [
-        "src/reflections/",
-        "src/schemas/",
-        "src/target-config.ts"
-      ],
-      "source": {
-        "path": "src/api/reflections.ts",
-        "line": 99
-      }
-    },
-    {
-      "method": "POST",
-      "path": "/api/research/start",
-      "stability": "stable",
-      "stabilityNote": null,
-      "consumers": [],
-      "home": "/api/research/start",
-      "areas": [],
-      "source": {
-        "path": "src/api/research.ts",
-        "line": 13
+        "line": 55
       }
     },
     {

@@ -24,9 +24,15 @@ This script writes ONE line to the heartbeat file every decision turn,
 overwriting any previous content. The format is:
 
     <epoch> <pid> <run_id> turn=<N> dispatches=<M> tokens=<K>
-        pipeline_filled=<F>/6 signal_active=<S>/5 last_action=<type>
+        pipeline_filled=<F>/<P> signal_active=<S>/<Q> last_action=<type>
 
 (One line — newlines above are line-wrap for readability only.)
+
+The denominators `<P>` and `<Q>` are derived from the Dispatch-Class
+Taxonomy (scripts/autopilot/classes.json) via decide.py's PIPELINE_SLOTS and
+SIGNAL_CLASSES tuples — `len(PIPELINE_SLOTS)` / `len(SIGNAL_CLASSES)` — never
+hardcoded (issue #4637; the old literal 6 / 5 had drifted from the live
+alphabet).
 
 Field semantics:
   - `<epoch>`         — current unix epoch seconds (drives mtime; the
@@ -38,14 +44,17 @@ Field semantics:
   - `turn=<N>`        — state.turn (monotonic across the run)
   - `dispatches=<M>`  — state.dispatches (lifetime count)
   - `tokens=<K>`      — state.cumulative_tokens
-  - `pipeline_filled=<F>/6` — count of state.slots entries that are not
-                              null (so 0..6). We keep the operator-
+  - `pipeline_filled=<F>/<P>` — count of PIPELINE_SLOTS keys whose
+                              state.slots entry is not null (so 0..P;
+                              a stale non-taxonomy key never counts).
+                              We keep the operator-
                               readable label `pipeline_filled` even
                               though the JSON field is `slots` — the
                               two-name asymmetry was the issue-author's
                               call (see #435 body).
-  - `signal_active=<S>/5` — count of state.signal_last_fired entries
-                            whose epoch is non-zero AND within the
+  - `signal_active=<S>/<Q>` — count of SIGNAL_CLASSES whose
+                            state.signal_last_fired epoch is non-zero AND
+                            within the
                             class's cooldown window. "Active" means
                             "fired recently enough that it would still
                             be on cooldown if a new signal arrived".
@@ -74,12 +83,15 @@ Implementation notes
 --------------------
 - The script is pure (one read + one write); failures only ever degrade
   observability, never autopilot correctness. We catch and log every
-  failure path; we never propagate exceptions back to the model.
+  runtime failure path; we never propagate those back to the model. The ONE
+  deliberate exception is the import of decide.py's taxonomy tuples: it has
+  no fallback (issue #4637) — if decide.py cannot load classes.json there
+  was no decision turn to report, and a fallback alphabet would be exactly
+  the hardcoded class list the taxonomy exists to kill.
 - `HYDRA_AUTOPILOT_STATE` and `HYDRA_AUTOPILOT_HEARTBEAT` env vars
   override the default paths (used by the regression test).
-- Cooldown lookup mirrors `decide.py:SIGNAL_COOLDOWNS` exactly. If those
-  values drift here vs there, the signal_active count will lie — the
-  test pins the constant to decide.py's via import to avoid that.
+- Cooldown lookup IS `decide.py:SIGNAL_COOLDOWNS` (imported, not copied),
+  so it cannot drift from the taxonomy.
 """
 
 from __future__ import annotations
@@ -92,23 +104,19 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# Import SIGNAL_COOLDOWNS from decide.py so the cooldown definitions stay
-# in lockstep. Path manipulation is intentional — decide.py is a sibling.
+# Import the taxonomy-derived alphabet from decide.py (which loads
+# scripts/autopilot/classes.json fail-loud at import) so the denominators,
+# the counted keys and the cooldowns all come from the one table. Path
+# manipulation is intentional — decide.py is a sibling. NO try/except
+# fallback (issue #4637): an import failure propagates (fail loud) rather
+# than substituting a hardcoded class list that silently drifts.
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
-try:
-    from decide import SIGNAL_COOLDOWNS  # type: ignore[import-not-found]
-except Exception:  # pragma: no cover — fallback if decide.py is broken
-    # Conservative default: every signal class with a 15-min cooldown.
-    # If we can't import, observability degrades to "any non-zero
-    # signal_last_fired counts as active" — wrong but loud, not silent.
-    SIGNAL_COOLDOWNS = {
-        "health": 0,
-        "sweep_orch": 900,
-        "sweep_target": 900,
-        "discover_orch": 1800,
-        "discover_target": 1800,
-    }
+from decide import PIPELINE_SLOTS, SIGNAL_CLASSES, SIGNAL_COOLDOWNS  # type: ignore[import-not-found]  # noqa: E402
+
+# Heartbeat-line denominators, derived from the taxonomy (never literals).
+PIPELINE_DENOMINATOR = len(PIPELINE_SLOTS)
+SIGNAL_DENOMINATOR = len(SIGNAL_CLASSES)
 
 
 STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json"))
@@ -123,8 +131,12 @@ TURN_POST_TIMEOUT_SEC = 3
 
 
 def _count_pipeline_filled(state: dict) -> int:
+    """Count PIPELINE_SLOTS keys whose state.slots entry is non-null. Only
+    taxonomy keys count, so a stale/unknown key in state.json can never push
+    the numerator past PIPELINE_DENOMINATOR.
+    """
     slots = state.get("slots") or {}
-    return sum(1 for v in slots.values() if v is not None)
+    return sum(1 for name in PIPELINE_SLOTS if slots.get(name) is not None)
 
 
 def _count_signal_active(state: dict, now: int) -> int:
@@ -137,7 +149,11 @@ def _count_signal_active(state: dict, now: int) -> int:
     """
     last_fired = state.get("signal_last_fired") or {}
     active = 0
-    for cls, ts in last_fired.items():
+    # Iterate the taxonomy's SIGNAL_CLASSES, not last_fired.items(): a stale
+    # non-taxonomy key in state.json can never push the numerator past
+    # SIGNAL_DENOMINATOR (issue #4637).
+    for cls in SIGNAL_CLASSES:
+        ts = last_fired.get(cls)
         try:
             ts_i = int(ts or 0)
         except (TypeError, ValueError):
@@ -166,8 +182,8 @@ def _format_line(state: dict, last_action: str, now: int) -> str:
     return (
         f"{now} {pid} {run_id} "
         f"turn={turn} dispatches={dispatches} tokens={tokens} "
-        f"pipeline_filled={pipeline_filled}/6 "
-        f"signal_active={signal_active}/5 "
+        f"pipeline_filled={pipeline_filled}/{PIPELINE_DENOMINATOR} "
+        f"signal_active={signal_active}/{SIGNAL_DENOMINATOR} "
         f"last_action={last_action}"
     )
 
@@ -377,7 +393,7 @@ def write_heartbeat(last_action: str = "(none)", *, now: int | None = None) -> i
     except FileNotFoundError:
         # No state.json yet — bootstrap hasn't run or path is wrong.
         # Still write a minimal heartbeat so mtime advances.
-        line = f"{ts} {os.getpid()} unknown turn=0 dispatches=0 tokens=0 pipeline_filled=0/6 signal_active=0/5 last_action={last_action} note=no-state"
+        line = f"{ts} {os.getpid()} unknown turn=0 dispatches=0 tokens=0 pipeline_filled=0/{PIPELINE_DENOMINATOR} signal_active=0/{SIGNAL_DENOMINATOR} last_action={last_action} note=no-state"
         try:
             HEARTBEAT_PATH.write_text(line + "\n", encoding="utf-8")
         except OSError as exc:

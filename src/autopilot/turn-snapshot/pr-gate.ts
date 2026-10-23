@@ -46,7 +46,7 @@
  */
 
 import { closedIssues, referencedIssues, type PrRefRow } from "../../github/pr-refs.ts";
-import type { Classified, CollectorOutcome, DegradedMarker } from "./collector.ts";
+import { DEGRADE, degradeDetail, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import {
   DEFAULT_NOPR_RESUME_QUIESCENCE_SECONDS,
   isResumableHead,
@@ -243,7 +243,7 @@ export type RepollResult =
   /** Re-poll merged: only mergeStateStatus changed, only for first-payload PRs. */
   | { readonly kind: "merged"; readonly rows: readonly unknown[]; readonly resolved: readonly string[]; readonly still: readonly string[] }
   /** Re-poll unusable (empty / unparseable / non-list): first payload kept. */
-  | { readonly kind: "failed"; readonly rows: readonly unknown[]; readonly reason: string; readonly unknown: readonly string[] }
+  | { readonly kind: "failed"; readonly rows: readonly unknown[]; readonly reason: DegradeReason; readonly unknown: readonly string[] }
   /** Re-poll payload broke the merge (a non-scalar PR number): first payload kept (INV-5). */
   | { readonly kind: "reducer-failed"; readonly rows: readonly unknown[] };
 
@@ -255,7 +255,7 @@ export type RepollResult =
  */
 export function applyMergeStateRepoll(first: readonly unknown[], repoll: GhJsonRead): RepollResult {
   if (repoll.kind !== "ok" || !Array.isArray(repoll.data)) {
-    const reason = repoll.kind === "empty" ? "empty-payload" : repoll.kind === "unparseable" ? "unparseable" : "not a list";
+    const reason = repoll.kind === "empty" ? DEGRADE.EMPTY_PAYLOAD : repoll.kind === "unparseable" ? DEGRADE.UNPARSEABLE : DEGRADE.NOT_A_LIST;
     const unknown = first
       .map(asRow)
       .filter((p): p is Row => p !== null && p.mergeStateStatus === "UNKNOWN")
@@ -506,7 +506,7 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
   // ci_trigger_stale: only when BOTH run timestamps were read (INV-E fail-open).
   let ciTriggerStale: Classified<boolean>;
   if (inputs.runsPushCreatedAt === null || inputs.runsPullRequestCreatedAt === null) {
-    ciTriggerStale = { ok: false, reason: "runs-read-failed" };
+    ciTriggerStale = { ok: false, reason: DEGRADE.RUNS_READ_FAILED };
   } else {
     let stale = false;
     const push = ghTimestampSeconds(inputs.runsPushCreatedAt);
@@ -533,7 +533,7 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
   let redResume: PrGateSnapshot["redResume"];
   let devResumePick: PrGateSnapshot["devResumePick"];
   if (!req.ok || !resume.ok || !refs.ok) {
-    const reason = "required-contexts / needs-dev-resume / pr-refs input unavailable";
+    const reason = DEGRADE.DEV_RESUME_INPUT_UNAVAILABLE;
     notes.push(`orch dev-resume classifier fail-closed (${reason}) — issue #4460 INV-5`);
     redResume = { ok: false, reason };
     devResumePick = { ok: false, reason };
@@ -614,7 +614,7 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
         "orch dirty-fix classifier fail-closed (pr-refs.py unavailable) — orch_dirty_forward_fix=none, empty surface (issue #4807, INV-4)",
       );
     }
-    dirtyFix = { ok: false, reason: "pr-refs unavailable" };
+    dirtyFix = { ok: false, reason: DEGRADE.PR_REFS_UNAVAILABLE };
   } else {
     const byNumber = new Map<unknown, Row>();
     for (const p of prs) byNumber.set(p.number, p);
@@ -659,19 +659,19 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
   // hide the referencing PR. Independent of the required-contexts read by
   // design (the pick needs no CI verdict — there is no PR to judge).
   let devResumeNoprPick: PrGateSnapshot["devResumeNoprPick"];
-  const noprFail = (reason: string): PrGateSnapshot["devResumeNoprPick"] => {
+  const noprFail = (reason: DegradeReason): PrGateSnapshot["devResumeNoprPick"] => {
     notes.push(`orch dev-resume no-PR pick fail-closed (${reason}) — issue #4808 INV-4`);
     return { ok: false, reason };
   };
   const noprRows = inputs.devResumeRows;
   if (!inputs.prListReadOk) {
-    devResumeNoprPick = noprFail("pr-list read failed");
+    devResumeNoprPick = noprFail(DEGRADE.PR_LIST_READ_FAILED);
   } else if (!refs.ok) {
-    devResumeNoprPick = noprFail("pr-refs unavailable");
+    devResumeNoprPick = noprFail(DEGRADE.PR_REFS_UNAVAILABLE);
   } else if ("reason" in noprRows) {
-    devResumeNoprPick = noprFail(`needs-dev-resume read ${noprRows.reason}`);
+    devResumeNoprPick = noprFail(degradeDetail(`needs-dev-resume read ${noprRows.reason}`));
   } else if (inputs.ghListLimit !== undefined && inputs.prs.length >= inputs.ghListLimit) {
-    devResumeNoprPick = noprFail("open-PR page saturated");
+    devResumeNoprPick = noprFail(DEGRADE.PR_PAGE_SATURATED);
   } else {
     devResumeNoprPick = {
       ok: true,
@@ -695,7 +695,7 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
       devResumeNoprPick,
       dirtyFix,
       // Filled by collectPrGate (it needs the host port); fail-closed until then.
-      qaVerdictRecheck: { ok: false, reason: "not-evaluated" },
+      qaVerdictRecheck: { ok: false, reason: DEGRADE.NOT_EVALUATED },
     },
     notes,
   };
@@ -707,21 +707,21 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
 
 /** Branch protection `.contexts`: list → the set entries as strings; null/other JSON → healthy empty set. */
 function parseRequiredContexts(read: GhJsonRead): Classified<ReadonlySet<string>> {
-  if (read.kind === "empty") return { ok: false, reason: "empty-payload" };
-  if (read.kind === "unparseable") return { ok: false, reason: "unparseable" };
+  if (read.kind === "empty") return { ok: false, reason: DEGRADE.EMPTY_PAYLOAD };
+  if (read.kind === "unparseable") return { ok: false, reason: DEGRADE.UNPARSEABLE };
   if (!Array.isArray(read.data)) return { ok: true, value: new Set() };
   return { ok: true, value: new Set(read.data.filter(isSet).map(jsonText)) };
 }
 
 /** `[{"number": N}, …]` → the issue numbers. A non-iterable JSON value is a failed read (Python's TypeError). */
 function parseDevResumeIssues(read: GhJsonRead): Classified<ReadonlySet<number>> {
-  if (read.kind === "empty") return { ok: false, reason: "empty-payload" };
-  if (read.kind === "unparseable") return { ok: false, reason: "unparseable" };
+  if (read.kind === "empty") return { ok: false, reason: DEGRADE.EMPTY_PAYLOAD };
+  if (read.kind === "unparseable") return { ok: false, reason: DEGRADE.UNPARSEABLE };
   const data = read.data;
   if (typeof data === "string" || (data !== null && typeof data === "object" && !Array.isArray(data))) {
     return { ok: true, value: new Set() };
   }
-  if (!Array.isArray(data)) return { ok: false, reason: "not-iterable" };
+  if (!Array.isArray(data)) return { ok: false, reason: DEGRADE.NOT_ITERABLE };
   const out = new Set<number>();
   for (const row of rowsOf(data)) {
     const n = row.number;
@@ -739,13 +739,13 @@ function parseDevResumeIssues(read: GhJsonRead): Classified<ReadonlySet<number>>
  * discipline as {@link parseDevResumeIssues}.
  */
 function parseNoPrResumeRows(read: GhJsonRead): Classified<readonly NoPrResumeRow[]> {
-  if (read.kind === "empty") return { ok: false, reason: "empty-payload" };
-  if (read.kind === "unparseable") return { ok: false, reason: "unparseable" };
+  if (read.kind === "empty") return { ok: false, reason: DEGRADE.EMPTY_PAYLOAD };
+  if (read.kind === "unparseable") return { ok: false, reason: DEGRADE.UNPARSEABLE };
   const data = read.data;
   if (typeof data === "string" || (data !== null && typeof data === "object" && !Array.isArray(data))) {
     return { ok: true, value: [] };
   }
-  if (!Array.isArray(data)) return { ok: false, reason: "not-iterable" };
+  if (!Array.isArray(data)) return { ok: false, reason: DEGRADE.NOT_ITERABLE };
   const out: NoPrResumeRow[] = [];
   for (const row of rowsOf(data)) {
     const n = row.number;
@@ -857,7 +857,7 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
       notes.push(
         "orch UNKNOWN re-poll reducer failed or produced no output — keeping first payload; UNKNOWN PR(s) stay skipped (issue #4812)",
       );
-      degraded.push({ field: "repoll", reason: "reducer-failed" });
+      degraded.push({ field: "repoll", reason: DEGRADE.REDUCER_FAILED });
     } else {
       if (merged.resolved.length > 0) {
         notes.push(`orch pr-gate re-poll resolved mergeStateStatus for PR(s): ${merged.resolved.join(" ")} (issue #4812)`);
@@ -879,7 +879,7 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
     runsPush = null;
     runsPr = null;
     notes.push("orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)");
-    degraded.push({ field: "ciTriggerStale", reason: "runs-read-failed" });
+    degraded.push({ field: "ciTriggerStale", reason: DEGRADE.RUNS_READ_FAILED });
   }
   if (payload.kind === "empty") {
     notes.push("orch pr-gate PR-list read FAILED (empty payload) — emitting empty PR-gate buckets (issue #4240)");
@@ -901,7 +901,7 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
 
   // 4. Classification inputs (the old heredoc's own preamble notes).
   if (payload.kind !== "ok") {
-    const reason = payload.kind === "empty" ? "empty-payload" : "unparseable";
+    const reason = payload.kind === "empty" ? DEGRADE.EMPTY_PAYLOAD : DEGRADE.UNPARSEABLE;
     notes.push(`orch pr-gate PR-list JSON parse FAILED (${reason}) — falling back to empty PR list (issue #4240)`);
     degraded.push({ field: "prList", reason });
   }
@@ -913,7 +913,7 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
   }
   if ("error" in prRefs) {
     notes.push(`orch dev-resume pr-refs.py import FAILED (${prRefs.error}) — fail closed (issue #4460)`);
-    degraded.push({ field: "prRefs", reason: "predicate-unavailable" });
+    degraded.push({ field: "prRefs", reason: DEGRADE.PREDICATE_UNAVAILABLE });
   }
   const quiet = windowSeconds(env.glmRedQuiescenceSeconds, DEFAULT_GLM_RED_QUIESCENCE_SECONDS);
   if (quiet.error !== null) {
@@ -999,11 +999,11 @@ async function collectQaRecheck(
   notes: string[],
   nowMs: number,
 ): Promise<Classified<readonly QaRecheckEntry[]>> {
-  if (!prListReadOk) return { ok: false, reason: "pr-list-unreadable" };
-  if (!requiredContexts.ok) return { ok: false, reason: "required-contexts-unreadable" };
+  if (!prListReadOk) return { ok: false, reason: DEGRADE.PR_LIST_UNREADABLE };
+  if (!requiredContexts.ok) return { ok: false, reason: DEGRADE.REQUIRED_CONTEXTS_UNREADABLE };
   const candidates = qaRecheckCandidates(prs, requiredContexts.value);
   if (candidates.length === 0) return { ok: true, value: [] };
-  if (host === undefined) return { ok: false, reason: "host-unavailable" };
+  if (host === undefined) return { ok: false, reason: DEGRADE.HOST_UNAVAILABLE };
   // Bounded: at most QA_RECHECK_MAX_PER_TURN scripts per turn in a ROTATING window
   // (no starvation), QA_RECHECK_CONCURRENCY at a time. Skipped PRs are omitted (fail closed) and named.
   const batch = rotateQaRecheckBatch(candidates, QA_RECHECK_MAX_PER_TURN, nowMs);
@@ -1043,7 +1043,7 @@ async function collectQaRecheck(
 }
 
 /** The snapshot the CLI renders when the collector itself could not run (every field degraded). */
-export function prGateFallbackSnapshot(reason: string): PrGateSnapshot {
+export function prGateFallbackSnapshot(reason: DegradeReason): PrGateSnapshot {
   return {
     inflight: EMPTY_INFLIGHT,
     dirty: [],

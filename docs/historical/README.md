@@ -14,4 +14,12 @@ Subsystems and machinery that no longer exist in the codebase. Kept so the "why 
 | **Stuckness detector** | [ADR-0010](../adr/0010-stuckness-detector-retired.md) | Self-improvement floor is operator-curated |
 | **Dollar/cost machinery** (daily-spend cap, per-cycle circuit breaker, JSONL reconciliation) | B-series, #602, #720 | Subscription model has no per-call cost; see **Cost** / **Quota Weight** in `CONTEXT.md` |
 
-`docs/reference.md` also retains several `— historical` sections (Codex OpenTelemetry #199, the pre-#383 merge gate, cost reconciliation #296) for deeper archaeology.
+## Retired sections moved out of `docs/reference.md` (issue #4599)
+
+| File | What | Retired by |
+|---|---|---|
+| [`codex-otel.md`](./codex-otel.md) | Codex OpenTelemetry runbook (#199) and the Tempo wiring under `scripts/otel/` | ADR-0006 |
+| [`merge-gate.md`](./merge-gate.md) | The pre-#383 in-process merge gate | ADR-0006 / PR-3 (#383) |
+| [`candidate-feed.md`](./candidate-feed.md) | The Candidate Feed that replaced the `selectAnchor()` waterfall | ADR-0036 / #3455 |
+
+The cost-reconciliation section (#296) was deleted outright rather than moved: its module and route are gone and the **Dollar/cost machinery** row above is its record.

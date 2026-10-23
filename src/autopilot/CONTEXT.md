@@ -6,7 +6,7 @@
 [`CONTEXT-MAP.md`](../../CONTEXT-MAP.md) domain map points at for `src/autopilot/`.
 
 This file maps **modules** — which file owns which slice, and how a request traverses them. The
-terms **Autopilot Run**, **Autopilot Turn** and **Autopilot Focus** are defined once in the root
+terms **Autopilot Run** and **Autopilot Turn** are defined once in the root
 [`CONTEXT.md`](../../CONTEXT.md); read those entries for what the concepts *mean*, and this file
 for where they *live*. Duplicating the definitions here would create a second thing to drift.
 

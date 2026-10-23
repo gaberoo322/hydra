@@ -1,12 +1,12 @@
 /**
- * Cycle-metrics trend-rollup coordinators consumed by /metrics, /summary, and
- * planner-facing accomplishments — rolling merge-rate, aggregate stats,
- * cumulative accomplishments, anchor distribution, fix:feature ratio.
+ * Cycle-metrics trend-rollup coordinators consumed by /metrics — rolling
+ * merge-rate, aggregate stats, anchor distribution, fix:feature ratio. (The
+ * cumulative-accomplishments coordinator went with `GET /summary`, its only
+ * caller — ADR-0024 §3, issue #4638.)
  *
- * All seven zero-I/O pure projections (`computeRollingMergeRateFromTrend`,
+ * The zero-I/O pure projections (`computeRollingMergeRateFromTrend`,
  * `computeEmptyRateFromTrend`, `projectTokensPerMergedPR`, `projectAggregateStats`,
- * `projectCostByOutcome`, `projectCumulativeAccomplishments`,
- * `projectAnchorDistribution`, plus the `CycleOutcome` / `CostByOutcomeResult` /
+ * `projectCostByOutcome`, `projectAnchorDistribution`, plus the `CycleOutcome` / `CostByOutcomeResult` /
  * `CYCLE_OUTCOME_ORDER` cost-by-outcome surface and the `AnchorDistributionResult`
  * shape) were relocated to the `./stats-projection.ts` pure leaf (issue #3212) so
  * the arithmetic is testable without a Redis fixture and a caller that needs only
@@ -29,7 +29,6 @@ import { countsAsMerge } from "./merge-predicate.ts";
 import {
   projectAggregateStats,
   projectCostByOutcome,
-  projectCumulativeAccomplishments,
 } from "./stats-projection.ts";
 import {
   inferAnchorTypeFromCycleId,
@@ -58,18 +57,6 @@ export async function getCostByOutcome(count = 200) {
 export async function getAggregateStats(count = 20) {
   const trend = await getMetricsTrend(count);
   return projectAggregateStats(trend);
-}
-
-/**
- * Get a cumulative summary of what's been accomplished across recent cycles.
- * Used by the planner to avoid re-proposing completed work.
- *
- * Thin wrapper: fetch the trend (the `count` knob), then delegate to the pure
- * `projectCumulativeAccomplishments`.
- */
-export async function getCumulativeAccomplishments(count = 15) {
-  const trend = await getMetricsTrend(count);
-  return projectCumulativeAccomplishments(trend);
 }
 
 /**

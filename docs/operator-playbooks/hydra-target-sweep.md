@@ -28,7 +28,7 @@ Under ADR-0031 the Target board **is** the GitHub-Issues board on the Target rep
 
 ## Context management
 
-On `/loop`, run `/compact` (Claude) / restart context (Codex) at the START of each iteration.
+On `/loop`, run `/compact` at the START of each iteration.
 
 ## Process
 

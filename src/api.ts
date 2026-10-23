@@ -3,10 +3,8 @@ import * as Sentry from "@sentry/node";
 import { resolve } from "node:path";
 
 import { createCyclesRouter } from "./api/cycles.ts";
-import { createGroundingRouter } from "./api/grounding.ts";
 import { createHealthRouter } from "./api/health.ts";
 import { createRecommendationsRouter } from "./api/recommendations.ts";
-import { createResearchRouter } from "./api/research.ts";
 import { createDesignConceptsRouter } from "./api/design-concepts.ts";
 import { createSchedulerRouter } from "./api/scheduler.ts";
 import { createMaintenanceRouter } from "./api/maintenance.ts";
@@ -15,7 +13,6 @@ import { createMetricsCostRouter } from "./api/metrics-cost.ts";
 import { createMetricsTokensRouter } from "./api/metrics-tokens.ts";
 import { createTierRouter } from "./api/tier.ts";
 import { createOperatorChannelRouter } from "./api/operator-channel.ts";
-import { createOperationalRouter } from "./api/operational.ts";
 import { createArchitectureRouter } from "./api/architecture.ts";
 import { createOutcomesRouter } from "./api/outcomes.ts";
 import { createAttributionRouter } from "./api/attribution.ts";
@@ -107,17 +104,12 @@ function createApi(eventBus: EventBus) {
 
   // Mount domain sub-routers
   api.use(createCyclesRouter());
-  // Grounding read surface (issue #3190) — re-homed from the retired
-  // `api/tasks.ts` router; mounts prefix-less so /api/grounding/latest stays
-  // byte-identical. The old router's always-dead /agents/status +
-  // /agents/:id/pause routes were retired (empty under the autopilot recorder,
-  // ADR-0016).
-  api.use(createGroundingRouter());
+  // The grounding read surface (GET /grounding/latest, issue #3190) was
+  // retired under ADR-0024 §3 (issue #4638): zero callers.
   api.use(createHealthRouter(eventBus));
   // Operator-action-items surface (issue #1322) — extracted out of the health
   // router; mounts prefix-less so /api/recommendations stays byte-identical.
   api.use(createRecommendationsRouter());
-  api.use(createResearchRouter());
   api.use(createDesignConceptsRouter());
   api.use(createSchedulerRouter(eventBus));
   // Maintenance — hourly housekeeping endpoint (issue #723, scheduler fold PR-3/4).
@@ -211,15 +203,16 @@ function createApi(eventBus: EventBus) {
   api.use(createOutcomesPageRouter());
   // Explore tabbed hub — slice 5 (issue #620).
   api.use(createExplorePageRouter());
-  // Domain homes for the last three orphan-operational routes that lived in
-  // the retired src/api/misc.ts (issue #2183). Each owns one concern: tier
-  // classification next to src/tier-classifier.ts, and the emergency-stop kill
-  // switch in its own minimal operational Module. The former digest triggers
-  // (/digest/send, /digest/heartbeat) were replaced by the Operator Channel's
-  // single send-brief-now route (ADR-0045 Decision 7, issue #5047).
+  // Domain homes for the orphan-operational routes that lived in the retired
+  // src/api/misc.ts (issue #2183): tier classification next to
+  // src/tier-classifier.ts. The former digest triggers (/digest/send,
+  // /digest/heartbeat) were replaced by the Operator Channel's single
+  // send-brief-now route (ADR-0045 Decision 7, issue #5047). The emergency-stop
+  // `POST /kill` (src/api/operational.ts) and `POST /research/start`
+  // (src/api/research.ts) were retired under ADR-0024 §3 (issue #4638) — the
+  // kill file stopped nothing; the emergency brake is the real stop.
   api.use(createTierRouter());
   api.use(createOperatorChannelRouter());
-  api.use(createOperationalRouter());
   // /api/checklist sub-router retired in slice 6 of the dashboard
   // simplification (issue #621). Only the deleted Checklist page consumed it.
   api.use(createOutcomesRouter());

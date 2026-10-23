@@ -41,7 +41,7 @@
   },
   "expected": {
     "stderrNotes": [
-      "orch pr-gate UNKNOWN re-poll FAILED (not a list) — keeping first payload; UNKNOWN PR(s) stay skipped: 5 (issue #4812)",
+      "orch pr-gate UNKNOWN re-poll FAILED (not-a-list) — keeping first payload; UNKNOWN PR(s) stay skipped: 5 (issue #4812)",
       "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)"
     ],
     "ghCalls": [

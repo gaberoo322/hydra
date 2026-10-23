@@ -12,7 +12,7 @@
       "target-risk-surface": {
         "manifest": {
           "ok": false,
-          "reason": "no manifest field"
+          "reason": "no-manifest-field"
         }
       }
     }

@@ -76,8 +76,8 @@ describe("metrics-cost router — route registration (issue #3652)", () => {
       5,
       `expected exactly 5 cost routes; got ${JSON.stringify(routes)}`,
     );
-    // In particular the cycle-performance reads (/metrics itself, abandonment,
-    // grounding-duration) stay on createMetricsRouter, not here.
+    // In particular the cycle-performance read (/metrics itself) stays on
+    // createMetricsRouter, not here.
     assert.ok(
       !routes.some((r) => r === "GET /metrics"),
       "the base /metrics cycle-performance read must stay on the metrics router",

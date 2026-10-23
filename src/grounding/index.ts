@@ -97,8 +97,8 @@ interface GroundingTypecheckReport {
  * Structured evidence about the project produced by {@link groundProject}.
  *
  * A 1:1 transcription of the object the function returns — every field name
- * and runtime type is preserved so the `GET /grounding/latest` wire-format is
- * byte-identical.
+ * and runtime type is preserved. (The `GET /grounding/latest` route that
+ * served it was retired under ADR-0024 §3, issue #4638.)
  */
 export interface GroundingReport {
   branch: string;
@@ -122,8 +122,7 @@ export interface GroundingReport {
    * default is the betting count-gate trap this slice kills). The BUILD layer
    * aborts on a non-null `manifestError`; grounding itself never throws (it is
    * READ-ONLY by contract). Additive/back-compatible: every pre-existing field
-   * keeps its name and runtime type so `GET /grounding/latest` stays
-   * byte-compatible.
+   * keeps its name and runtime type.
    */
   manifestError: string[] | null;
   timestamp: number;

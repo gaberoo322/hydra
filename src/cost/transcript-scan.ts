@@ -69,6 +69,7 @@ import {
   createScanAccumulator,
   foldFileContribution,
   MODEL_FAMILIES,
+  TRANSCRIPT_PARSE_VERSION,
 } from "./transcript-fold.ts";
 import type { ScanCutoffs } from "./transcript-fold.ts";
 // The token-breakdown data-model primitives — the empty-breakdown constant, the
@@ -376,6 +377,8 @@ export async function transcriptScan(
    * file is re-parsed and the entry is overwritten, self-healing the memo.
    */
   const isMemoEntryUsable = (entry: FileParseMemoEntry): boolean => {
+    // An entry from an older parser (issue #5141) is re-parsed, never replayed.
+    if (entry.parseVersion !== TRANSCRIPT_PARSE_VERSION) return false;
     if (entry.dispatchKind !== null && !isKnownDispatchKind(entry.dispatchKind)) return false;
     for (const e of entry.entries) {
       if (!e.foreign && !isKnownFamily(e.family)) return false;
@@ -637,6 +640,8 @@ export {
 export type { SkillResolver };
 // Pure transcript-content helpers -- canonical home is `./transcript-fold.ts`.
 export { firstUserMessageText, sumSessionTokens };
+// The parse-memo version this scan's usability gate replays (issue #5141).
+export { TRANSCRIPT_PARSE_VERSION };
 
 // Re-export the OAuth backoff/cache seam surface from its new focused leaf
 // (issue #2923) at the SAME names this module used to own, so existing importers

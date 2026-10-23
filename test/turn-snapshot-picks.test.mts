@@ -29,6 +29,7 @@
  * 3. The CLI / port contract for the new collector.
  */
 
+import { degradeDetail } from "../src/autopilot/turn-snapshot/collector.ts";
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
@@ -56,7 +57,7 @@ import { createTurnSnapshotHydra, type TurnSnapshotHydra } from "../src/autopilo
 
 /** A full unified hydra client whose reads all fail, overridden per test (only designConceptBody matters to picks). */
 function fakeHydra(o: Partial<TurnSnapshotHydra> = {}): TurnSnapshotHydra {
-  const down = { kind: "failed", reason: "transport: ECONNREFUSED" } as const;
+  const down = { kind: "failed", reason: degradeDetail("transport: ECONNREFUSED") } as const;
   return { get: async () => down, orchBoardState: async () => down, targetBoardState: async () => down, designConceptBody: async () => "", ...o };
 }
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";

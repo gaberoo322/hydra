@@ -185,7 +185,7 @@ EOF
 
 **Query the frontier** (open wayfinder tickets whose native blockers are all
 closed) — the native sub-issue/blocked-by frontier query, per
-`docs/agents/issue-tracker.md § Wayfinding operations`:
+`docs/agents/issue-tracker.md` § Wayfinding operations:
 ```bash
 gh api graphql -F n=<MAP_N> -f query='query($n:Int!){
   repository(owner:"gaberoo322", name:"hydra"){ issue(number:$n){

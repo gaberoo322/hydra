@@ -127,11 +127,9 @@ describe("assessHealth — baseline", () => {
 // ---------------------------------------------------------------------------
 
 describe("assessHealth — per-rule firing", () => {
-  test("kill switch → critical orchestrator", () => {
-    const d = find(clone((s) => (s.health.status = "killed")), "orchestrator", "critical");
-    assert.ok(d);
-    assert.equal(d!.what, "Kill switch is active");
-    assert.equal(d!.autoRecovery, false);
+  test("no kill-switch rule: a non-ok health.status no longer trips one (POST /kill retired, #4638)", () => {
+    const r = assessHealth(clone((s) => (s.health.status = "killed")));
+    assert.ok(!r.diagnostics.some((d: any) => d.what === "Kill switch is active"));
   });
 
   test("emergency brake engaged → warning autopilot, with engagedBy in why", () => {
@@ -1092,7 +1090,7 @@ describe("projectHealthDeepResponse", () => {
     );
     assert.equal(r.services.orchestrator.status, "killed");
     assert.equal(r.services.redis.status, "failed");
-    assert.equal(r.pipeline.killSwitch, true);
+    assert.ok(!("killSwitch" in r.pipeline), "the killSwitch wire field went with POST /kill (#4638)");
   });
 
   test("scheduler.status is 'failed' at >=5 consecutiveErrors, else 'idle' when stopped", () => {

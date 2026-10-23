@@ -1,0 +1,1 @@
+- docs: shrink docs/reference.md to generated-inventory pointers, move retired sections to docs/historical/, fix dead playbook paths, burn the docs-drift baseline to [] (#4599)

@@ -26,19 +26,12 @@ The helper returns a result object instead of throwing, so callers see
 strict superset of the `{ stdout, stderr }` shape the legacy callers
 destructured.
 
-Migrated callers:
-
-- `src/verification.ts` `runStep` — the per-step runner inside
-  `runVerification` (npm test / typecheck / build invocations).
-- `src/jit.ts` (line ~250) — the `node --test <generatedTestFile>`
-  invocation that runs newly generated regression tests.
-
-Other `execFileAsync` call sites in `src/post-merge.ts`,
-`src/pipeline-steps.ts`, and `src/research-loop.ts` were intentionally
-left alone: they spawn short git/systemctl invocations whose grandchildren
-do not contain test runners or esbuild.
-
-### Verifying
+Callers: the original migrated callers (`src/verification.ts` `runStep`,
+`src/jit.ts`) and the short-lived `execFileAsync` sites in `src/post-merge.ts`,
+`src/pipeline-steps.ts` and `src/research-loop.ts` were all deleted with the
+in-process control loop (ADR-0006). The helper is now consumed by
+`src/mutation.ts`, `src/grounding/cmd.ts`, `src/claude-cli/exec.ts` and
+`src/glm/drainer-runner.ts`.
 
 A regression test (`test/exec-with-timeout.test.mts`) reproduces the
 exact failure pattern: a parent shell that backgrounds a long-running
@@ -49,7 +42,7 @@ this test ever fails, the fix has regressed.
 
 ## Layer 2 — system-level: `scripts/reap-stale-test-procs.sh`
 
-We do not control every spawn on this host — Codex CLI subagents and
+We do not control every spawn on this host — Codex CLI subagents (retired by ADR-0006, but historically a leak source) and
 operator shells can leak the same way in failure modes the orchestrator
 cannot fix in-process. The reaper script:
 
@@ -58,7 +51,7 @@ cannot fix in-process. The reaper script:
    `node --experimental-strip-types --test`.
 2. Filters to those older than `--max-age` minutes (default 30).
 3. Drops candidates whose ancestor tree still contains a live Hydra
-   orchestrator, Claude Code, Codex, or `hydra` CLI process — those are
+   orchestrator, Claude Code, `hydra` CLI (or, before ADR-0006, Codex) process — those are
    in-flight, not leaked.
 4. SIGKILLs the entire process group of each remaining candidate.
 

@@ -57,6 +57,19 @@ import {
 } from "../dashboard/src/lib/delayed-commit.ts";
 import type { BucketSummary } from "../dashboard/src/lib/attention-buckets.ts";
 import { deriveFeedBuckets, recordDismissOutcome } from "../dashboard/src/lib/attention-buckets.ts";
+import {
+  PRECONDITION_GLYPH,
+  anyFailed,
+  resolveControlAction,
+  resolvePreconditions,
+} from "../dashboard/src/lib/preconditions.ts";
+import {
+  RELABEL_TARGETS,
+  healthVerdicts,
+  reopenVerdicts,
+  rowVerdicts,
+} from "../dashboard/src/lib/control-verdicts.ts";
+import { createRereadWaiters } from "../dashboard/src/lib/reread.ts";
 
 const AFFORDANCE = "../dashboard/src/components/ActionAffordance.jsx";
 const FEED = "../dashboard/src/components/pages/today/AttentionFeed.jsx";
@@ -189,7 +202,12 @@ describe("IN_DASHBOARD_BODY covers every registry in-dashboard route", () => {
   });
 
   test("every in-dashboard route (recommended + both alternatives, every entry) has a body key", async () => {
-    const keys = objectLiteralKeys(await readSource(AFFORDANCE), "const IN_DASHBOARD_BODY = {");
+    // Keys spell a resolved segment `:<name>` (`:anchor`, `:id` — #4631);
+    // asPattern spells every placeholder `:anchor`, so the key side is
+    // normalised the same way — the param NAME never decides coverage.
+    const keys = objectLiteralKeys(await readSource(AFFORDANCE), "const IN_DASHBOARD_BODY = {").map((key) =>
+      key.replace(/\/:[A-Za-z_][A-Za-z0-9_]*/g, "/:anchor"),
+    );
     const missing = registryInDashboardRoutes().filter((route) => !keys.includes(route));
     assert.deepEqual(
       missing,
@@ -686,14 +704,16 @@ describe("the dismiss + immediate triggers bind to the feed-level host", () => {
 
   test("every trigger derives its disabled state from triggerDisabled", async () => {
     const aff = await readSource(AFFORDANCE);
+    // Issue #4629 (INV-4): every trigger ALSO ORs in `blocked` (any ✗
+    // precondition line) — the in-flight reads below are unchanged.
     assert.ok(
-      aff.includes("disabled={triggerDisabled(undoHost.inFlight.has(windowId), undoHost.windows, windowId)}"),
+      aff.includes("disabled={blocked || triggerDisabled(undoHost.inFlight.has(windowId), undoHost.windows, windowId)}"),
       "immediate in-dashboard button reads the HOST's in-flight set (QA round 6)",
     );
     assert.ok(!aff.includes("triggerDisabled(busy,"), "no trigger reads a row-local busy flag (QA round 6)");
     assert.ok(!aff.includes("disabled={busy}"), "no confirm-first button reads ONLY its row-local busy flag (QA round 7)");
-    assert.ok(aff.includes("disabled={busy || inFlight}"), "the confirm-first Confirm button reads the HOST's in-flight set (QA round 7)");
-    assert.ok(aff.includes("onClick={() => setArmed(true)}\n            disabled={inFlight}"), "the confirm-first arm button reads the HOST's in-flight set (QA round 7)");
+    assert.ok(aff.includes("disabled={busy || inFlight || blocked}"), "the confirm-first Confirm button reads the HOST's in-flight set (QA round 7)");
+    assert.ok(aff.includes("onClick={() => setArmed(true)}\n            disabled={inFlight || blocked}"), "the confirm-first arm button reads the HOST's in-flight set (QA round 7)");
     assert.ok(aff.includes("track(windowId, fireRequest)"), "the immediate fire runs through the host tracker");
     assert.ok(aff.includes("runTracked(inFlightTracker, id, fn)"), "the host's track wraps the tested runTracked");
     assert.ok(aff.includes("createInFlightTracker(setInFlight)"), "the host owns the one in-flight tracker");
@@ -793,7 +813,11 @@ describe("the verified-result line does not overclaim a failed re-read", () => {
   test("onFired resolving false renders a re-read FAILED line, and the result is lifted", async () => {
     const aff = await readSource(AFFORDANCE);
     assert.ok(aff.includes("reread === false"), "a false re-read must not render the plain ✓ line");
-    assert.ok(aff.includes("feed re-read FAILED"));
+    // The noun is a prop defaulting to "feed" (#4629 review), so the feed's
+    // line still reads "feed re-read FAILED — list may be stale".
+    assert.ok(aff.includes('function resultFromResponse(action, res, reread, context, rereadNoun = "feed") {'));
+    assert.ok(aff.includes('const staleNote = rereadNoun === "feed" ? "list may be stale" : "shown state may be stale";'));
+    assert.ok(aff.includes("` · ${rereadNoun} re-read FAILED — ${staleNote}`"));
     const feed = await readSource(FEED);
     assert.ok(feed.includes("const refreshChecked = useCallback"), "the feed verifies the re-read");
     assert.ok(feed.includes("onResult={setActionResult}"), "the result line is lifted above the rows");
@@ -829,5 +853,538 @@ describe("dismiss banner — per-item outcomes (recordDismissOutcome)", () => {
     assert.ok(src.includes("const reread = await refreshChecked();"), "dismiss verifies its re-read");
     assert.ok(src.includes("recordDismissOutcome(prev, item,"), "outcomes fold through the tested helper");
     assert.ok(!src.includes("setDismissError(null)"), "no blanket clear on each attempt");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9 — the live precondition checklist (issue #4629, design-concept 821e48ed
+//     INV-4): lib/preconditions.ts driven behaviourally, plus the
+//     affordance / page wiring pins (INV-7, INV-9, INV-10, INV-12)
+// ---------------------------------------------------------------------------
+
+const BOARD_STATE = "../dashboard/src/components/pages/work/BoardState.jsx";
+const HEALTH = "../dashboard/src/pages/Health.jsx";
+
+describe("resolvePreconditions / anyFailed — the tri-state checklist rule (issue #4629)", () => {
+  test("a prose precondition renders unverified (☐) and never disables", () => {
+    const lines = resolvePreconditions(["confirm the reason no longer applies"], {});
+    assert.deepEqual(lines, [{ text: "confirm the reason no longer applies", state: "unverified" }]);
+    assert.equal(anyFailed(lines), false);
+    assert.equal(PRECONDITION_GLYPH[lines[0]!.state], "☐");
+  });
+
+  test("a {check} line is ok (✓) only when its verdict is literally true", () => {
+    const lines = resolvePreconditions([{ text: "issue is open", check: "issue-open" }], { "issue-open": true });
+    assert.deepEqual(lines, [{ text: "issue is open", check: "issue-open", state: "ok" }]);
+    assert.equal(anyFailed(lines), false);
+    assert.equal(PRECONDITION_GLYPH.ok, "✓");
+  });
+
+  test("a {check} line is fail (✗) when its verdict is false", () => {
+    const lines = resolvePreconditions([{ text: "no blocker", check: "no-open-blocker" }], { "no-open-blocker": false });
+    assert.equal(lines[0]!.state, "fail");
+    assert.equal(anyFailed(lines), true);
+    assert.equal(PRECONDITION_GLYPH.fail, "✗");
+  });
+
+  test("a {check} line with NO verdict fails closed — a forgotten evaluation can never enable the button", () => {
+    assert.equal(resolvePreconditions([{ text: "t", check: "brake-off" }], {})[0]!.state, "fail");
+    assert.equal(resolvePreconditions([{ text: "t", check: "brake-off" }], undefined)[0]!.state, "fail");
+    assert.equal(resolvePreconditions([{ text: "t", check: "brake-off" }], null)[0]!.state, "fail");
+  });
+
+  test("a truthy non-boolean verdict and a prototype-inherited key both fail closed", () => {
+    const loose: any = { "brake-off": 1 };
+    assert.equal(resolvePreconditions([{ text: "t", check: "brake-off" }], loose)[0]!.state, "fail");
+    assert.equal(resolvePreconditions([{ text: "t", check: "toString" }], {})[0]!.state, "fail");
+  });
+
+  test("a malformed line (object without a check) fails closed with its text, never dropped", () => {
+    const lines = resolvePreconditions([{ text: "half-typed" } as any], {});
+    assert.deepEqual(lines, [{ text: "half-typed", state: "fail" }]);
+  });
+
+  test("order is preserved and one ✗ among ✓/☐ lines disables the trigger", () => {
+    const lines = resolvePreconditions(
+      [
+        { text: "a", check: "issue-open" },
+        "prose",
+        { text: "b", check: "has-scope-section" },
+      ],
+      { "issue-open": true, "has-scope-section": false },
+    );
+    assert.deepEqual(lines.map((l) => l.state), ["ok", "unverified", "fail"]);
+    assert.equal(anyFailed(lines), true);
+  });
+
+  test("a verdict flipping to false on a refresh flips the same line to ✗ (an armed Confirm disables)", () => {
+    const pre = [{ text: "the brake is off", check: "brake-off" }];
+    assert.equal(anyFailed(resolvePreconditions(pre, { "brake-off": true })), false);
+    assert.equal(anyFailed(resolvePreconditions(pre, { "brake-off": false })), true);
+  });
+
+  test("no preconditions → no lines, nothing disabled; a non-array is treated as empty", () => {
+    assert.deepEqual(resolvePreconditions([], {}), []);
+    assert.deepEqual(resolvePreconditions(undefined, {}), []);
+    assert.equal(anyFailed([]), false);
+  });
+});
+
+describe("ActionAffordance resolves the checklist and disables on any ✗ (issue #4629)", () => {
+  test("the checklist is resolved through lib/preconditions.ts and gates every trigger", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes('from "../lib/preconditions.ts"'), "the rule lives in the tested leaf");
+    assert.ok(aff.includes("const lines = resolvePreconditions(action.preconditions, verdicts);"));
+    assert.ok(aff.includes("const blocked = anyFailed(lines);"));
+    // Arm, Confirm and the immediate fire each OR in `blocked`.
+    assert.equal((aff.match(/disabled=\{[^}]*\bblocked\b/g) ?? []).length, 3);
+  });
+
+  test("the live checklist + consequence render only for a page control (verdicts supplied)", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes("if (verdicts === undefined) return controls;"), "the feed keeps its own unchecked list");
+    assert.ok(aff.includes('data-testid={tid("-preconditions")}'));
+    assert.ok(aff.includes("data-state={line.state}"));
+    assert.ok(aff.includes("{PRECONDITION_GLYPH[line.state]} {line.text}"));
+    assert.ok(aff.includes('data-testid={tid("-consequence")}'));
+    const feed = await readSource(FEED);
+    assert.ok(!feed.includes("verdicts="), "the feed never hands the affordance a verdict table");
+  });
+
+  test("the affordance derives <testId>-arm / -confirm-yes / -confirm-no from its testId prop", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes("const tid = (suffix) => (testId ? `${testId}${suffix}` : undefined);"));
+    for (const suffix of ["-arm", "-confirm-yes", "-confirm-no", "-result"]) {
+      assert.ok(aff.includes(`data-testid={tid("${suffix}")}`), `derives ${suffix}`);
+    }
+    assert.ok(aff.includes('data-testid={tid("")}'), "the immediate button carries the bare testId");
+  });
+
+  test("a row's issue number joins the window id so two rows never share a window", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.match(aff, /const windowId = `action:\$\{action\.method\} \$\{action\.route\}\$\{\n?\s*context\?\.number/);
+  });
+});
+
+describe("IN_DASHBOARD_BODY builders over the closed context (issue #4629 INV-7)", () => {
+  test("values are static bodies or (context) => body builders, resolved by bodyFor(method, route, context)", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes("function bodyFor(method, route, context) {"));
+    assert.ok(aff.includes('return typeof body === "function" ? body(context ?? {}) : body;'));
+    const map = aff.slice(aff.indexOf("const IN_DASHBOARD_BODY = {"), aff.indexOf("\n};", aff.indexOf("const IN_DASHBOARD_BODY = {")));
+    assert.ok(map.includes('"POST /autopilot/paused": (context) => ({ paused: context.paused ?? false }),'), "no context → the feed's {paused:false}");
+    assert.ok(map.includes('"POST /autopilot/board/promote": (context) => ({ issue: context.number, confirm: true }),'));
+    assert.ok(map.includes('"POST /autopilot/board/relabel": (context) => ({ issue: context.number, label: context.label }),'));
+    assert.ok(map.includes('"POST /autopilot/board/close": (context) => ({ issue: context.number }),'));
+    assert.ok(map.includes('"POST /autopilot/board/reopen": (context) => ({ issue: context.number }),'));
+    assert.ok(map.includes('context.engaged ? { engaged: true, engagedBy: "health-page" } : { engaged: false },'));
+    // The builders read only the closed context — no other field name.
+    const fields = new Set(Array.from(map.matchAll(/context\.(\w+)/g), (m) => m[1]));
+    // #5152 extends the closed context with the /now panel's read `runId`
+    // and its picked `severity`.
+    for (const f of fields) assert.ok(["number", "label", "paused", "engaged", "runId", "severity"].includes(f!), `context.${f} is outside the closed context`);
+  });
+});
+
+describe("result objects are honoured — a refusal never renders ✓ (issue #4629 INV-9)", () => {
+  test("ok === false renders ✗ <label> refused — <reason>: <detail>; verified renders the observed state", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const fn = aff.slice(aff.indexOf("function resultFromResponse("), aff.indexOf("function InDashboardAffordance("));
+    const refusedAt = fn.indexOf("if (res?.ok === false) {");
+    const verifiedAt = fn.indexOf("if (res?.verified) {");
+    assert.ok(refusedAt > 0 && verifiedAt > refusedAt, "the refusal check runs before any ✓ branch");
+    const refusal = fn.slice(refusedAt, verifiedAt);
+    assert.ok(refusal.includes("ok: false,"));
+    assert.ok(refusal.includes("refused — "));
+    assert.ok(!refusal.includes("✓"), "a refusal branch can never produce a ✓ line");
+    assert.ok(fn.includes("state ${res.verified.state}, labels: ${labels || \"none\"}"));
+    // The response is awaited, then the caller's re-read, then the result.
+    const fire = aff.slice(aff.indexOf("const fireRequest = useCallback("), aff.indexOf("const track = undoHost?.track;"));
+    const reqAt = fire.indexOf("const res = await apiFetch(");
+    const rereadAt = fire.indexOf("const reread = await onFired?.();");
+    const nextAt = fire.indexOf("resultFromResponse(action, res, reread, context, rereadNoun)");
+    assert.ok(reqAt > 0 && rereadAt > reqAt && nextAt > rereadAt, "request → onFired re-read → result, in that order");
+    assert.ok(fire.includes("onResult?.(next);"), "every outcome is lifted");
+  });
+});
+
+describe("pages read the registry once and host their own undo windows (issue #4629 INV-8/INV-10/INV-12)", () => {
+  test("useOperatorActions is one useApi('/operator-actions') read with no poll", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes('const { data, error, loading } = useApi("/operator-actions");'));
+    assert.ok(!/useApi\("\/operator-actions",/.test(aff), "no poll option");
+  });
+
+  test("a not-ready registry or a missing key renders DISABLED with the literal reason, never a fallback label", async () => {
+    const aff = await readSource(AFFORDANCE);
+    assert.ok(aff.includes('const REGISTRY_UNAVAILABLE = "operator-action registry unavailable";'));
+    const wrapper = aff.slice(aff.indexOf("export function ControlAffordance("));
+    assert.ok(wrapper.includes("const entry = registry.ready ? registry.byKey.get(controlKey) : undefined;"));
+    assert.ok(wrapper.includes("disabled"));
+    assert.ok(wrapper.includes("{REGISTRY_UNAVAILABLE}"));
+    // Pages render only the recommended action — with its route resolved
+    // first when the control passes resolveRoute (#4631 INV-9).
+    assert.ok(wrapper.includes("const out = resolveControlAction(entry.recommended, resolveRoute);"), "the recommended action, resolved through the tested core");
+    assert.ok(wrapper.includes("action={resolved.action}"));
+  });
+
+  for (const page of [BOARD_STATE, HEALTH]) {
+    test(`${page} reads the registry once, hosts the undo windows, and renders ControlAffordance`, async () => {
+      const src = await readSource(page);
+      assert.equal((src.match(/useOperatorActions\(\)/g) ?? []).length, 1, "one registry read per page");
+      assert.ok(src.includes("const undoHost = useUndoWindowHost();"));
+      assert.ok(src.includes("<UndoWindowContext.Provider value={undoHost}>"));
+      assert.ok(src.includes("<UndoToastStack windows={undoHost.windows} onUndo={undoHost.undo} />"));
+      assert.ok(src.includes("<ControlAffordance"));
+      assert.ok(!src.includes("apiFetch("), "no page-level write fetch survives");
+    });
+  }
+
+  test("the relabel select is the picker only — it never fires on change; its value becomes context.label", async () => {
+    const src = await readSource(BOARD_STATE);
+    const select = src.slice(src.indexOf('data-testid="work-relabel-select"'), src.indexOf("</select>"));
+    assert.ok(select.includes("setRelabelTargets("), "choosing only records the target");
+    assert.ok(!select.includes("/autopilot/board/relabel"), "no write fires from the select");
+    assert.ok(src.includes("context={{ number: row.number, label: relabelTargets[row.number] }}"));
+    assert.ok(src.includes("verdicts={rowVerdicts(row, relabelTargets[row.number])}"));
+    assert.ok(src.includes('controlKey="control:work/reopen"'));
+    assert.ok(src.includes("verdicts={reopenVerdicts(reopenNumber)}"), "the reopen input feeds issue-number-entered");
+    // relabel-target-chosen is ✗ until a closed target is picked (behaviour
+    // pinned on the leaf below).
+    assert.equal(rowVerdicts({}, undefined)["relabel-target-chosen"], false);
+    assert.equal(rowVerdicts({}, "")["relabel-target-chosen"], false);
+    assert.equal(rowVerdicts({}, "needs-info")["relabel-target-chosen"], true);
+  });
+
+  test("the promote verdicts read the server-computed row facts, never a client-side body parse", async () => {
+    const src = await readSource(BOARD_STATE);
+    assert.ok(!src.includes("Files in scope"), "no second scope parser in the dashboard");
+    const leaf = await readSource("../dashboard/src/lib/control-verdicts.ts");
+    assert.ok(!leaf.includes(".body") && !leaf.includes("Files in scope"), "the verdict leaf never reads an issue body");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10 — PR #5155 review follow-ups: per-control remount, checked re-reads,
+//      the page verdict tables driven behaviourally
+// ---------------------------------------------------------------------------
+
+describe("ControlAffordance remounts per control — no armed state survives a toggle (PR #5155 review)", () => {
+  test("ControlAffordance keys the affordance by controlKey", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const wrapper = aff.slice(aff.indexOf("export function ControlAffordance("));
+    assert.ok(wrapper.includes("<ActionAffordance\n      key={controlKey}"), "a swapped control in the same slot remounts (armed/result/busy reset)");
+  });
+
+  test("/health swaps Pause⇄Resume and Engage⇄Release in one slot — both through ControlAffordance", async () => {
+    const src = await readSource(HEALTH);
+    assert.match(src, /isPaused \? \(\s*<ControlAffordance[\s\S]*?controlKey="control:health\/resume"[\s\S]*?\) : \(\s*<ControlAffordance[\s\S]*?controlKey="control:health\/pause"/);
+    assert.match(src, /brakeEngaged \? \(\s*<ControlAffordance[\s\S]*?controlKey="control:health\/brake-release"[\s\S]*?\) : \(\s*<ControlAffordance[\s\S]*?controlKey="control:health\/brake-engage"/);
+  });
+});
+
+describe("re-read waiters — a checked refresh resolves a real verdict (PR #5155 review)", () => {
+  test("wait() queues BEFORE refresh() runs, and settle(true) resolves it true", async () => {
+    const w = createRereadWaiters();
+    let pendingAtRefresh = -1;
+    const p = w.wait(() => { pendingAtRefresh = w.pending(); });
+    assert.equal(pendingAtRefresh, 1, "the waiter exists before the read starts");
+    w.settle(true);
+    assert.equal(await p, true);
+    assert.equal(w.pending(), 0);
+  });
+
+  test("a read that settles with an error resolves false — the re-read FAILED branch", async () => {
+    const w = createRereadWaiters();
+    const p = w.wait(() => {});
+    w.settle(false);
+    assert.equal(await p, false);
+  });
+
+  test("settle resolves every queued waiter once; a settle with none queued is a no-op", async () => {
+    const w = createRereadWaiters();
+    w.settle(true);
+    const a = w.wait(() => {});
+    const b = w.wait(() => {});
+    w.settle(false);
+    assert.deepEqual(await Promise.all([a, b]), [false, false]);
+  });
+
+  test("close() (unmount) resolves pending waiters false and later waits resolve false without reading", async () => {
+    const w = createRereadWaiters();
+    const p = w.wait(() => {});
+    w.close();
+    assert.equal(await p, false);
+    let read = false;
+    assert.equal(await w.wait(() => { read = true; }), false);
+    assert.equal(read, false, "a closed host starts no read");
+    w.open();
+    const q = w.wait(() => {});
+    w.settle(true);
+    assert.equal(await q, true, "open() re-arms after a StrictMode remount");
+  });
+
+  test("a refresh that throws synchronously resolves false (fail loud, never a hang)", async (t) => {
+    t.mock.method(console, "error", () => {});
+    const w = createRereadWaiters();
+    assert.equal(await w.wait(() => { throw new Error("boom"); }), false);
+  });
+
+  test("the hook settles on a non-loading render and both pages pass it as onFired", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const hook = aff.slice(aff.indexOf("export function useCheckedRefresh("), aff.indexOf("export function ControlAffordance("));
+    assert.ok(hook.includes("if (!loading) waiters.current.settle(error == null);"));
+    assert.ok(hook.includes("return () => waiters.current.close();"));
+    assert.ok(hook.includes("waiters.current.wait(refresh)"));
+    const board = await readSource(BOARD_STATE);
+    assert.ok(board.includes("return boardOk && queueOk;"), "/work resolves false when either re-read failed");
+    assert.equal((board.match(/rereadNoun="board"/g) ?? []).length, 4);
+    const health = await readSource(HEALTH);
+    assert.ok(health.includes("const refreshHealth = useCheckedRefresh(health);"));
+    const useApi = await readSource("../dashboard/src/hooks/useApi.js");
+    assert.ok(!useApi.includes("useCheckedRefresh"), "useApi.js stays fenced (INV-15)");
+  });
+
+  test("a new board action clears the previous outcome as its request starts", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const fire = aff.slice(aff.indexOf("const fireRequest = useCallback("), aff.indexOf("const track = undoHost?.track;"));
+    assert.ok(fire.indexOf("onStart?.();") < fire.indexOf("const res = await apiFetch("), "onStart runs before the request");
+    const board = await readSource(BOARD_STATE);
+    assert.ok(board.includes("const clearResult = useCallback(() => setActionResult(null), []);"));
+    assert.equal((board.match(/onStart=\{clearResult\}/g) ?? []).length, 4);
+  });
+});
+
+describe("page verdict tables — lib/control-verdicts.ts (PR #5155 review)", () => {
+  const row = (over: any = {}) => ({ lane: "needs-triage", hasScopeSection: true, openBlockers: [], ...over });
+
+  test("a clean non-ready row passes every promote check", () => {
+    assert.deepEqual(rowVerdicts(row(), "blocked"), {
+      "issue-open": true,
+      "not-already-ready": true,
+      "has-scope-section": true,
+      "no-open-blocker": true,
+      "relabel-target-chosen": true,
+    });
+  });
+
+  test("a ready-for-agent row fails not-already-ready", () => {
+    assert.equal(rowVerdicts(row({ lane: "ready-for-agent" }), undefined)["not-already-ready"], false);
+  });
+
+  test("an unscoped row fails has-scope-section; a missing fact fails closed too", () => {
+    assert.equal(rowVerdicts(row({ hasScopeSection: false }), undefined)["has-scope-section"], false);
+    assert.equal(rowVerdicts(row({ hasScopeSection: undefined }), undefined)["has-scope-section"], false);
+  });
+
+  test("an open blocker fails no-open-blocker; a missing blocker list fails closed", () => {
+    assert.equal(rowVerdicts(row({ openBlockers: [9] }), undefined)["no-open-blocker"], false);
+    assert.equal(rowVerdicts(row({ openBlockers: undefined }), undefined)["no-open-blocker"], false);
+  });
+
+  test("relabel-target-chosen accepts only the closed RELABEL_TARGETS", () => {
+    for (const t of RELABEL_TARGETS) assert.equal(rowVerdicts(row(), t)["relabel-target-chosen"], true, t);
+    assert.equal(rowVerdicts(row(), "ready-for-agent")["relabel-target-chosen"], false);
+  });
+
+  test("reopenVerdicts: only a positive integer counts as entered", () => {
+    assert.equal(reopenVerdicts("12")["issue-number-entered"], true);
+    for (const v of ["", "0", "-3", "1.5", "abc"]) assert.equal(reopenVerdicts(v)["issue-number-entered"], false, v);
+  });
+
+  test("healthVerdicts: running + brake off, verified", () => {
+    const v = healthVerdicts({ autopilotPause: { paused: false, ok: true }, emergencyBrake: { engaged: false, ok: true } }, true);
+    assert.deepEqual(v, {
+      "pause-state-verified": true,
+      "autopilot-running": true,
+      "autopilot-paused": false,
+      "brake-state-verified": true,
+      "brake-off": true,
+      "brake-engaged": false,
+    });
+  });
+
+  test("healthVerdicts: paused + brake engaged flips the state checks", () => {
+    const v = healthVerdicts({ autopilotPause: { paused: true }, emergencyBrake: { engaged: true } }, true);
+    assert.equal(v["autopilot-running"], false);
+    assert.equal(v["autopilot-paused"], true);
+    assert.equal(v["brake-off"], false);
+    assert.equal(v["brake-engaged"], true);
+  });
+
+  test("healthVerdicts: an untrusted read, a missing flag or ok:false verifies nothing", () => {
+    const every = (v: Record<string, boolean>) => Object.values(v).every((x) => x === false);
+    const good = { autopilotPause: { paused: false, ok: true }, emergencyBrake: { engaged: false, ok: true } };
+    assert.ok(every(healthVerdicts(good, false)), "loading/UNKNOWN read");
+    assert.ok(every(healthVerdicts(null, true)), "no payload");
+    const pauseFailed = healthVerdicts({ ...good, autopilotPause: { paused: false, ok: false } }, true);
+    assert.equal(pauseFailed["pause-state-verified"], false);
+    assert.equal(pauseFailed["autopilot-running"], false, "never a confident RUNNING on a failed read");
+    const brakeFailed = healthVerdicts({ ...good, emergencyBrake: { engaged: false, ok: false } }, true);
+    assert.equal(brakeFailed["brake-off"], false, "never a confident OFF on a failed read");
+    assert.equal(brakeFailed["pause-state-verified"], true, "the flags are verified independently");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11 — /health alert, scheduler and housekeeping controls (issue #4631,
+//      design-concept 5ae4b72c INV-7/8/9/10/11)
+// ---------------------------------------------------------------------------
+
+const ALERTS_PANEL = "../dashboard/src/components/pages/health/AlertsPanel.jsx";
+const SERVICE_STRIP = "../dashboard/src/components/pages/health/ServiceStrip.jsx";
+
+describe("the #4631 routes ride the closed body map, and the result lifts its body", () => {
+  test("IN_DASHBOARD_BODY carries a static {} for the four new routes; /scheduler/start keeps its {}", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const map = aff.slice(aff.indexOf("const IN_DASHBOARD_BODY = {"), aff.indexOf("\n};", aff.indexOf("const IN_DASHBOARD_BODY = {")));
+    for (const key of ["POST /alerts/:id/dismiss", "POST /alerts/dismiss-all", "POST /scheduler/stop", "POST /maintenance/housekeeping", "POST /scheduler/start"]) {
+      assert.ok(map.includes(`"${key}": {},`), `${key} → {}`);
+    }
+  });
+
+  test("the lifted result carries body — the parsed 2xx JSON — and undefined on a failed request", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const fn = aff.slice(aff.indexOf("function resultFromResponse("), aff.indexOf("function InDashboardAffordance("));
+    assert.ok(fn.includes("    body: res,\n"), "every 2xx result object carries the response body");
+    const fire = aff.slice(aff.indexOf("const fireRequest = useCallback("), aff.indexOf("const track = undoHost?.track;"));
+    const catchArm = fire.slice(fire.indexOf("} catch (err) {"));
+    assert.ok(catchArm.includes("body: undefined,"), "a thrown request lifts no body");
+  });
+});
+
+describe("ControlAffordance resolves an {id} route before the affordance sees it (issue #4631 INV-9)", () => {
+  test("a resolveRoute prop resolves the registry route; a throwing resolver renders DISABLED and never fires", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const wrapper = aff.slice(aff.indexOf("export function ControlAffordance("));
+    assert.ok(wrapper.includes("rereadNoun, resolveRoute }) {"), "resolveRoute is a ControlAffordance prop");
+    const resolvedAt = wrapper.indexOf("const resolved = useMemo(");
+    const renderAt = wrapper.indexOf("<ActionAffordance");
+    assert.ok(resolvedAt > 0 && renderAt > resolvedAt, "the route resolves BEFORE ActionAffordance renders");
+    const unresolved = wrapper.slice(wrapper.indexOf("if (resolved.error !== undefined) {"), renderAt);
+    assert.ok(unresolved.includes("disabled"), "an unresolved route renders a disabled button");
+    assert.ok(!unresolved.includes("onClick"), "the unresolved state has no trigger at all");
+    assert.ok(wrapper.includes("console.error(`[ControlAffordance] ${controlKey}: ${out.error} — control disabled`);"), "fail loud");
+  });
+
+  test("the window id embeds the resolved route, so two alerts' Dismiss windows never collide", async () => {
+    const { resolveControlRoute } = await import("../dashboard/src/lib/health-verdicts.ts");
+    const aff = await readSource(AFFORDANCE);
+    assert.match(aff, /const windowId = `action:\$\{action\.method\} \$\{action\.route\}/);
+    const a = resolveControlRoute("/alerts/{id}/dismiss", { id: "alert-1" });
+    const b = resolveControlRoute("/alerts/{id}/dismiss", { id: "alert-2" });
+    assert.notEqual(`action:POST ${a}`, `action:POST ${b}`);
+  });
+});
+
+describe("the /health panels render controls from the page's ONE registry read (issue #4631 INV-7/8)", () => {
+  for (const panel of [ALERTS_PANEL, SERVICE_STRIP]) {
+    test(`${panel} renders ControlAffordance from the entries prop and never reads the registry itself`, async () => {
+      const src = await readSource(panel);
+      assert.ok(src.includes("<ControlAffordance"));
+      assert.ok(src.includes("registry={entries}"), "the controls read the entries handed down");
+      assert.ok(!src.includes("useOperatorActions("), "no second registry read");
+      assert.ok(!src.includes('"/operator-actions"'), "no direct registry fetch");
+      assert.ok(!src.includes("apiFetch("), "no hand-rolled write");
+      assert.ok(src.includes("useCheckedRefresh("), "onFired is a CHECKED re-read of the panel's own read");
+      assert.ok(src.includes('rereadNoun="/health"'));
+    });
+  }
+
+  test("Health.jsx passes its one registry read down to both panels", async () => {
+    const src = await readSource(HEALTH);
+    assert.ok(src.includes("<ServiceStrip entries={registry} />"));
+    assert.ok(src.includes("<AlertsPanel entries={registry} />"));
+  });
+
+  test("the scheduler Stop ⇄ Start toggle swaps two ControlAffordance controls in one slot (remount per key)", async () => {
+    const src = await readSource(SERVICE_STRIP);
+    assert.match(
+      src,
+      /sched\.data\.running === true \? \(\s*<ControlAffordance[\s\S]*?controlKey="control:health\/scheduler-stop"[\s\S]*?\) : \(\s*<ControlAffordance[\s\S]*?controlKey="control:health\/scheduler-start"/,
+    );
+    // An UNKNOWN scheduler read renders no control at all (INV-13).
+    assert.ok(src.includes("{!schedUnknown && (\n        <div data-testid=\"scheduler-controls\">"));
+    assert.ok(src.includes("schedulerVerdicts(schedUnknown ? null : sched.data, Date.now())"), "an untrusted read yields no verdict");
+  });
+
+  test("every undismissed alert row carries its own Dismiss; Dismiss all sits beside the count", async () => {
+    const src = await readSource(ALERTS_PANEL);
+    const row = src.slice(src.indexOf("function AlertRow("), src.indexOf("export default function AlertsPanel("));
+    assert.ok(row.includes('controlKey="control:health/alert-dismiss"'));
+    assert.ok(row.includes("resolveControlRoute(route, { id: alertId })"), "the per-row route is resolved through the tested leaf");
+    assert.ok(row.includes("resolveRoute={resolveRoute}"));
+    assert.ok(row.includes("verdicts={alertVerdicts(alert)}"));
+    const panel = src.slice(src.indexOf("export default function AlertsPanel("));
+    // Headline AND disclosure rows both hand the row its controls.
+    assert.equal((panel.match(/<AlertRow[\s\S]*?entries=\{entries\}[\s\S]*?onFired=\{refreshAlerts\}/g) ?? []).length, 2);
+    const countAt = panel.indexOf('data-testid="alerts-count">\n              {undismissed.length} active');
+    const allAt = panel.indexOf('controlKey="control:health/alerts-dismiss-all"');
+    assert.ok(countAt > 0 && allAt > countAt, "Dismiss all renders beside the N active count");
+    assert.ok(panel.includes("verdicts={alertsVerdicts(undismissed.length)}"));
+  });
+});
+
+describe("resolveControlAction — no control route carrying { ever reaches the affordance (PR #5157 review)", () => {
+  const action = (route: string) => ({ kind: "in-dashboard", method: "POST", route, label: "Dismiss" });
+
+  test("a templated route rendered WITHOUT a resolver is refused, never fired against a literal {id}", () => {
+    const out = resolveControlAction(action("/alerts/{id}/dismiss"));
+    assert.equal(out.action, undefined);
+    assert.match(out.error ?? "", /route still carries a placeholder: \/alerts\/\{id\}\/dismiss/);
+  });
+
+  test("a resolver that throws, returns a non-string, or leaves a { behind is refused", () => {
+    const thrown = resolveControlAction(action("/alerts/{id}/dismiss"), () => {
+      throw new Error("unresolved route placeholder {id}");
+    });
+    assert.match(thrown.error ?? "", /route did not resolve: unresolved route placeholder \{id\}/);
+    assert.ok(resolveControlAction(action("/alerts/{id}/dismiss"), () => 42 as any).error);
+    assert.match(resolveControlAction(action("/x/{a}/{b}"), (r) => r.replace("{a}", "1")).error ?? "", /still carries a placeholder/);
+  });
+
+  test("a resolved route passes with the route substituted; an untemplated route passes unchanged", () => {
+    const out = resolveControlAction(action("/alerts/{id}/dismiss"), (r) => r.replace("{id}", "alert-1"));
+    assert.equal(out.error, undefined);
+    assert.equal(out.action?.route, "/alerts/alert-1/dismiss");
+    const plain = action("/scheduler/stop");
+    assert.equal(resolveControlAction(plain).action, plain, "no resolver, no placeholder → the action as served");
+    assert.equal(resolveControlAction(plain, (r) => r).action, plain);
+  });
+
+  test("ControlAffordance renders the refusal DISABLED via the pure core", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const wrapper = aff.slice(aff.indexOf("export function ControlAffordance("));
+    assert.ok(wrapper.includes("resolveControlAction(entry.recommended, resolveRoute)"), "every control, resolver or not, goes through the guard");
+    assert.ok(!wrapper.includes("resolveRoute(entry.recommended.route)"), "no inline resolution bypasses the guard");
+    const refused = wrapper.slice(wrapper.indexOf("if (resolved.error !== undefined) {"), wrapper.indexOf("<ActionAffordance"));
+    assert.ok(refused.includes("disabled") && refused.includes("✗ {resolved.error}"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /now recommendation controls (issue #5152)
+// ---------------------------------------------------------------------------
+
+describe("the /now recommendation routes ride the closed body map (issue #5152)", () => {
+  test("both bodies carry the panel's read run_id from context — never the `current` alias", async () => {
+    const aff = await readSource(AFFORDANCE);
+    const map = aff.slice(aff.indexOf("const IN_DASHBOARD_BODY = {"), aff.indexOf("\n};", aff.indexOf("const IN_DASHBOARD_BODY = {")));
+    assert.ok(map.includes('"POST /now/recommendations/:id/dismiss": (context) => ({ run_id: context.runId }),'));
+    assert.ok(map.includes('"POST /now/recommendations/mute-class": (context) => ({ run_id: context.runId, severity: context.severity }),'));
+    assert.ok(!map.includes('"current"'), "no builder falls back to the current alias");
+  });
+
+  test("a resolved rec route matches the :id key, and two recs never share a window id", async () => {
+    const { resolveControlRoute } = await import("../dashboard/src/lib/health-verdicts.ts");
+    const a = resolveControlRoute("/now/recommendations/{id}/dismiss", { id: "run-A:1:0" });
+    const b = resolveControlRoute("/now/recommendations/{id}/dismiss", { id: "run-A:1:1" });
+    // Same encoding the page-local control used (encodeURIComponent(rec.id)).
+    assert.equal(a, `/now/recommendations/${encodeURIComponent("run-A:1:0")}/dismiss`);
+    assert.notEqual(`action:POST ${a}`, `action:POST ${b}`);
+    // The resolved route has the :id key's segment shape (5 segments), so
+    // bodyFor's pattern arm matches it and never the 4-segment mute-class key.
+    assert.equal(a.split("/").length, "/now/recommendations/:id/dismiss".split("/").length);
+    assert.notEqual(a.split("/").length, "/now/recommendations/mute-class".split("/").length);
   });
 });

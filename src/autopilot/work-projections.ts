@@ -42,7 +42,7 @@ import {
   type RelabelTarget,
   type HitlGrillRow,
 } from "../schemas/autopilot-board.ts";
-import type { IssueRow } from "../github/issues.ts";
+import type { IssueRow, IssueQueryOptions, IssueReadResult } from "../github/issues.ts";
 import { extractStrictBlockerRefs } from "../github/blockers.ts";
 import { hasScopeSection } from "../scope-section.ts";
 import { glmLane } from "../glm/eligibility.ts";
@@ -86,9 +86,14 @@ interface ToWorkQueueRowOptions {
 /**
  * Project one open {@link IssueRow} into a {@link WorkQueueRow}, or null when
  * it carries no operator lane. `openBlockers` is the endpoint-resolved OPEN
- * strict-blocker set (only meaningful for `ready-for-agent` rows — the same
- * population `resolveOpenBlockers` resolves); per-row numbers are this row's
- * strict refs intersected with that set, self-references excluded.
+ * strict-blocker set — resolved for EVERY operator-lane row (issue #4629,
+ * design-concept 821e48ed INV-6: the route resolves each row as it would be
+ * post-promote, the promote gate's own prospective-row construction); per-row
+ * numbers are this row's strict refs intersected with that set,
+ * self-references excluded. `hasScopeSection` is the ONE shared parser's
+ * verdict on the body (src/scope-section.ts — the same function
+ * {@link evaluatePromoteEligibility} refuses with), so the /work promote
+ * checklist never re-parses the body client-side.
  * `opts.glmPartitionActive` is whether the GLM drainer partition is LIVE — the
  * SAME resolved liveness the route feeds `resolveOpenBlockers`, threaded here
  * so the GLM badge is the ONE lane predicate's ruling, not a second label read
@@ -105,7 +110,7 @@ export function toWorkQueueRow(
   const lane = deriveWorkLane(row.labels);
   if (lane === null) return null;
   const rowBlockers =
-    lane === "ready-for-agent" && openBlockers.size > 0
+    openBlockers.size > 0
       ? extractStrictBlockerRefs(row.body).filter(
           (n) => n !== row.number && openBlockers.has(n),
         )
@@ -118,7 +123,59 @@ export function toWorkQueueRow(
     lane,
     updatedAt: row.updatedAt ?? "",
     openBlockers: rowBlockers,
+    hasScopeSection: hasScopeSection(row.body),
     glmEligible: glmLane(row.labels, opts.glmPartitionActive).lane === "glm",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The work-queue blocker lookup bound (issue #4629 review follow-up)
+// ---------------------------------------------------------------------------
+
+/** The search reader shape `fetchOpenBlockerNumbers` accepts as a dep. */
+type IssueSearchReader = (
+  search: string,
+  opts?: IssueQueryOptions & { label?: string },
+) => Promise<IssueReadResult<IssueRow>>;
+
+/** Floor and ceiling of the work-queue blocker search's `--limit`. */
+const BLOCKER_SEARCH_LIMIT_FLOOR = 100;
+const BLOCKER_SEARCH_LIMIT_CEILING = 1000;
+/** Search hits per referenced number the limit budgets for: the open-number
+ * search also matches issues that merely MENTION a number (epics, siblings). */
+const BLOCKER_SEARCH_HITS_PER_REF = 10;
+
+/**
+ * The `--limit` for the work-queue's ONE batched open-blocker search: it
+ * scales with the number of referenced blockers (since #4629 every operator
+ * lane's refs are resolved, not only ready-for-agent's), floored at the
+ * seam's default 100 and capped at 1000.
+ */
+export function workQueueBlockerSearchLimit(refCount: number): number {
+  const scaled = Math.max(0, Math.floor(refCount)) * BLOCKER_SEARCH_HITS_PER_REF;
+  return Math.min(BLOCKER_SEARCH_LIMIT_CEILING, Math.max(BLOCKER_SEARCH_LIMIT_FLOOR, scaled));
+}
+
+/**
+ * Wrap the search reader so a read that FILLS its `limit` is reported as a
+ * failure: a full page may have dropped an open blocker past the cut, and the
+ * lookup's failure arm is the "treat every referenced blocker as open"
+ * fail-safe (`fetchOpenBlockerNumbers`) — so truncation fails CLOSED (a ✗ on
+ * the /work promote checklist) instead of open (a ✓ on an open blocker).
+ */
+export function failClosedOnTruncatedSearch(
+  read: IssueSearchReader,
+  limit: number,
+): IssueSearchReader {
+  return async (search, opts = {}) => {
+    const res = await read(search, { ...opts, limit });
+    if (res.ok === true && res.rows.length >= limit) {
+      console.error(
+        `[work-queue] open-blocker search filled its --limit ${limit} — treating every referenced blocker as open (fail-safe)`,
+      );
+      return { ok: false, code: "gh-failed" };
+    }
+    return res;
   };
 }
 

@@ -1,0 +1,1 @@
+- feat(dashboard): register control:now/rec-dismiss + control:now/rec-mute-class and render the /now recommendation controls through ControlAffordance (#5152)

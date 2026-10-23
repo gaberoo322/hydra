@@ -16,7 +16,7 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | `src/redis/` | Redis Adapters | — | ADR-0009, ADR-0017 | [Redis Keys](docs/reference.md#redis-keys), [Event Bus](docs/reference.md#event-bus) |
 | `src/schemas/` | Schemas | — | ADR-0011, ADR-0022 | — |
 | `src/cost/` | Cost, Subscription Usage Tracker, Quota Weight | [`src/cost/CONTEXT.md`](./src/cost/CONTEXT.md) | ADR-0021, ADR-0042 | — |
-| `src/autopilot/` | Autopilot Run, Autopilot Turn, Autopilot Focus | [`src/autopilot/CONTEXT.md`](./src/autopilot/CONTEXT.md) | ADR-0006, ADR-0007, ADR-0012, ADR-0016, ADR-0043 | [Model Tiers](docs/reference.md#model-tiers), [Learning System](docs/reference.md#learning-system-operational) |
+| `src/autopilot/` | Autopilot Run, Autopilot Turn | [`src/autopilot/CONTEXT.md`](./src/autopilot/CONTEXT.md) | ADR-0006, ADR-0007, ADR-0012, ADR-0016, ADR-0043 | [Model Tiers](docs/reference.md#model-tiers), [Learning System](docs/reference.md#learning-system-operational) |
 | `src/taxonomy/` | Dispatch-Class Taxonomy | — | ADR-0012, ADR-0030 | — |
 | `src/glm/`, `scripts/glm/` | — | — | ADR-0032, ADR-0040 | [GLM lane on/off](./docs/operations/glm-lane.md) |
 | `src/scheduler/` | Orchestrator Scheduler (Observability Heartbeat), Housekeeping | — | ADR-0012 | [Observability](docs/observability/README.md), [Watchdog](docs/operations/watchdog.md) |
@@ -30,7 +30,7 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | ~~`src/knowledge-base/`~~ | ~~Knowledge Base, OpenViking Request Adapter~~ — **RETIRED**, directory deleted | n/a | ADR-0033 | — |
 | ~~`src/anchor-selection/`~~ | ~~Reframe Queue~~ — **RETIRED**, directory deleted; ~~Candidate Feed~~ retired with it (#3455) | n/a | ADR-0010, ADR-0036 | — |
 | `src/design-concept.ts`, `src/redis/design-concept.ts` | Design Concept | n/a | ADR-0008, ADR-0018 | — |
-| backlog / GitHub issues | Epic, Roadmap Milestone, Focus Label | n/a | ADR-0003, ADR-0031 | [Issue tracker](docs/agents/issue-tracker.md), [Triage labels](docs/agents/triage-labels.md), [Rate-limit handling](docs/reference.md#github-api-rate-limit-handling-issue-3137) |
+| backlog / GitHub issues | Epic, Focus Label | n/a | ADR-0003, ADR-0031 | [Issue tracker](docs/agents/issue-tracker.md), [Triage labels](docs/agents/triage-labels.md), [Rate-limit handling](docs/reference.md#github-api-rate-limit-handling-issue-3137) |
 | self-modification | Modification Tier, Verifier Core, Outcome Holdback | n/a | ADR-0001, ADR-0004, ADR-0005, ADR-0015, ADR-0019, ADR-0020 | [Modification Tiers](docs/reference.md#modification-tiers-issue-243-adr-0001--adr-0004--adr-0015), [Outcome Holdback](docs/reference.md#outcome-holdback--post-merge-regression-check-issue-786-adr-0004-step-4) |
 
 ### Non-`src/` areas
@@ -40,11 +40,11 @@ get their own rows:
 
 | Area | Relevant ADRs | Reference docs |
 |---|---|---|
-| `.claude/skills/` + `docs/operator-playbooks/` | ADR-0025, ADR-0029, ADR-0030, ADR-0031, ADR-0035, ADR-0044 | [Evals](docs/evals.md) |
+| `docs/operator-playbooks/` | ADR-0025, ADR-0029, ADR-0030, ADR-0031, ADR-0035, ADR-0044 | [Evals](docs/evals.md) |
 | `.github/workflows/` (Verifier Core) | ADR-0015, ADR-0019, ADR-0020 | [Quality gates](docs/quality-gates.md) |
 | `scripts/autopilot/` (`decide.py`, `classes.json`) | ADR-0007, ADR-0012, ADR-0029, ADR-0032, ADR-0043 | — |
 | `dashboard/` | ADR-0034 | [Deploy recipe](docs/reference.md#deploy-recipe) |
-| `config/direction/`, `config/orchestrator/` | ADR-0003, ADR-0005 | [Config](docs/reference.md#config-hydraconfig--git-tracked), [Target Outcomes](docs/reference.md#target-outcomes-issue-241-adr-0003--adr-0004) |
+| `config/direction/`, `config/orchestrator/` | ADR-0003, ADR-0005 | [Config](docs/reference.md#config-hydraconfig--git-tracked), [Target Outcomes](docs/reference.md#target-outcomes-issue-241-adr-0003--adr-0015) |
 | `scripts/sync-skills.sh`, `src/skills/` (skill generation) | ADR-0041 | — |
 | `docs/adr/` itself | ADR-0037 | — |
 | `test/`, `scripts/test/` (the suite itself) | ADR-0038 | [Process cleanup](docs/operations/process-cleanup.md) |
@@ -55,7 +55,7 @@ The deep-module discipline is the load-bearing simplicity strategy here: each Se
 ## ADRs (system-wide)
 
 [`docs/adr/README.md`](./docs/adr/README.md) is the **complete roster** — every ADR with its
-status, its decision in one sentence, and the trigger for reading it. It is ~6 KB; read it in
+status, its decision in one sentence, and the trigger for reading it. Read it in
 full, then open only what you need. The tables above are the code-area shortcut into it.
 
 Read the ones the map flags for your area; flag contradictions explicitly rather than silently

@@ -156,7 +156,7 @@ The extra signal this pass introduced:
 
 - **Don't trust `git branch --merged origin/master`.** Squash-merges produce a different commit hash than the source branch ever had, so the local branch's tip is never an ancestor of master and `--merged` misses it. The `[gone]`-upstream signal (which `git fetch --prune` refreshes) catches squash-merges correctly.
 - **Lock-file format**: `.git/worktrees/<name>/locked` contains text like `claude agent agent-XXX (pid <N>)`. Parse the `(pid <N>)` form — *not* the bare word `pid` — because operator notes and unrelated lock annotations contain that word in English prose. See `parseLockPid` for the regex.
-- **Worktree paths span two roots**: `~/hydra/.claude/worktrees/` (default for Claude Code) and `/dev/shm/hydra-worktrees/` (used by Codex; legacy). We iterate via `git worktree list --porcelain` (canonical) rather than scanning either directory, so adding a new root doesn't require code changes.
+- **Worktree paths span two roots**: `~/hydra/.claude/worktrees/` (default for Claude Code) and `/dev/shm/hydra-worktrees/` (legacy; used by the Codex CLI retired in ADR-0006). We iterate via `git worktree list --porcelain` (canonical) rather than scanning either directory, so adding a new root doesn't require code changes.
 - **Stuck worktrees**: occasionally `git worktree remove --force` fails (partial dir state). The driver logs these and continues; the skill *does not* auto-`rm -rf` the dir, because that's the kind of destructive thing the operator should approve. `git worktree prune` at the end cleans up metadata for dirs the operator manually deleted between runs.
 
 ## Process
@@ -267,7 +267,7 @@ scripts/branch-prune.sh --apply   # actually delete (this is what the timer uses
 
 A daily systemd timer runs the skill off-peak. Two files under `scripts/systemd/`:
 
-- `hydra-branch-prune.service` — oneshot that invokes `scripts/branch-prune.sh --apply`, output to journal.
+- `hydra-branch-prune.service` — oneshot that invokes `scripts/branch-prune.sh` with `--apply`, output to journal.
 - `hydra-branch-prune.timer` — `OnCalendar=*-*-* 04:00:00`, `RandomizedDelaySec=600`, persistent.
 
 Operator install:
@@ -291,7 +291,7 @@ If the operator later wants to bring this into the autopilot loop (e.g. to gate 
 
 ### Reap-time GC trigger (issue #911)
 
-The daily timer bounds the *steady-state* population, but a worktree leaked at 04:01 would otherwise linger ~24h until the next sweep. To shorten that lag, `scripts/autopilot/reap.py`'s completion path fires `scripts/branch-prune.sh --apply` as a **best-effort** post-step after a worktree-bearing dispatch (`hydra-dev`, `hydra-target-build`, `hydra-qa`) reaps. Notes:
+The daily timer bounds the *steady-state* population, but a worktree leaked at 04:01 would otherwise linger ~24h until the next sweep. To shorten that lag, `scripts/autopilot/reap.py`'s completion path fires `scripts/branch-prune.sh` with `--apply` as a **best-effort** post-step after a worktree-bearing dispatch (`hydra-dev`, `hydra-target-build`, `hydra-qa`) reaps. Notes:
 
 - reap.py never learns the worktree path (the Claude harness, not `dispatch.sh`, creates the worktree), so it cannot tear down by path — it delegates to the GC script, which reclaims orphans on its **own** safety rails (dead PID, age, open-PR head). This means it covers crash-leaks (#898) identically to clean reaps, with a single source of truth for the rails.
 - Fully non-fatal: a missing script, a non-zero exit, or a timeout is logged to the run log (`worktree_gc_ok` / `worktree_gc_nonzero` / `worktree_gc_skipped`) and swallowed — it can never block or fail the reap path.

@@ -1,6 +1,8 @@
 import { useApi } from "../../../hooks/useApi.js";
 import { derivePageStatus } from "../../../hooks/usePageItems.js";
 import LocalTimestamp from "../../LocalTimestamp.jsx";
+import { ControlAffordance, useCheckedRefresh } from "../../ActionAffordance.jsx";
+import { schedulerVerdicts } from "../../../lib/health-verdicts.ts";
 
 /**
  * ServiceStrip — the "is the machine running" compact row (issue #4630,
@@ -23,7 +25,23 @@ import LocalTimestamp from "../../LocalTimestamp.jsx";
  * status through the shared `derivePageStatus` machine with its OWN budget —
  * `/now/service-strip` polls 30s/budget 2m, `/scheduler/status` polls
  * 60s/budget 5m — and renders its own as-of, never blended into one row.
+ *
+ * Scheduler controls (issue #4631, design-concept 5ae4b72c INV-5/7/8): beside
+ * the running/stopReason fields, ONE slot toggles Stop
+ * (`control:health/scheduler-stop`, confirms first) while running and Start
+ * (`control:health/scheduler-start`, immediate · undo) while stopped — both
+ * through ControlAffordance, which remounts the affordance per control key so
+ * no armed state survives the toggle. Labels, checklists and consequences come
+ * from the registry entries Health.jsx passes down as `entries`; the live
+ * checks come from `schedulerVerdicts` (lib/health-verdicts.ts) over this
+ * file's own `/scheduler/status` read, and only while that read is trusted
+ * (UNKNOWN renders no control). Every write awaits a CHECKED re-read of that
+ * same read (onFired).
  */
+
+/** No registry handed down → every control renders the disabled
+ * "registry unavailable" state (fail closed, never a fallback label). */
+const NO_ENTRIES = Object.freeze({ ready: false, byKey: new Map() });
 
 function Dot({ ok, title }) {
   const color = ok === true ? "bg-emerald-400" : ok === false ? "bg-rose-400" : "bg-zinc-500";
@@ -44,7 +62,7 @@ function AsOf({ generatedAt, stale }) {
   );
 }
 
-export default function ServiceStrip() {
+export default function ServiceStrip({ entries = NO_ENTRIES }) {
   // Minutes-tier budgets (ADR-0034 §5 / design-concept 883fd8c2 INV-6).
   const strip = useApi("/now/service-strip", { poll: 30_000 });
   const sched = useApi("/scheduler/status", { poll: 60_000 });
@@ -67,6 +85,10 @@ export default function ServiceStrip() {
   const schedUnknown = schedStatus === "loading" || schedStatus === "unknown";
   const schedStale = schedStatus === "stale";
   const rows = Array.isArray(strip.data?.rows) ? strip.data.rows : [];
+
+  // The scheduler controls' onFired: a CHECKED re-read of /scheduler/status.
+  const refreshScheduler = useCheckedRefresh(sched);
+  const schedVerdicts = schedulerVerdicts(schedUnknown ? null : sched.data, Date.now());
 
   return (
     <section data-testid="service-strip" className="space-y-1">
@@ -126,6 +148,29 @@ export default function ServiceStrip() {
         )}
         <AsOf generatedAt={sched.data?.generatedAt} stale={schedStale} />
       </div>
+      {!schedUnknown && (
+        <div data-testid="scheduler-controls">
+          {sched.data.running === true ? (
+            <ControlAffordance
+              registry={entries}
+              controlKey="control:health/scheduler-stop"
+              testId="scheduler-stop"
+              verdicts={schedVerdicts}
+              onFired={refreshScheduler}
+              rereadNoun="/health"
+            />
+          ) : (
+            <ControlAffordance
+              registry={entries}
+              controlKey="control:health/scheduler-start"
+              testId="scheduler-start"
+              verdicts={schedVerdicts}
+              onFired={refreshScheduler}
+              rereadNoun="/health"
+            />
+          )}
+        </div>
+      )}
       {!schedUnknown && sched.data.lastError && (
         <p data-testid="scheduler-last-error" className="text-xs text-rose-400 break-words">
           {sched.data.lastError}

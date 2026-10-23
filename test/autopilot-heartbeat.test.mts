@@ -42,16 +42,36 @@ const BOOTSTRAP_SH = join(SCRIPTS, "bootstrap.sh");
 const STATUS_SH = join(SCRIPTS, "status.sh");
 
 /**
- * Documented heartbeat line format (issue #435):
+ * The Dispatch-Class Taxonomy — the single alphabet the heartbeat
+ * denominators derive from (issue #4637). Read straight from classes.json
+ * (not from decide.py) so the pin is independent of the code under test.
+ */
+const CLASSES_JSON = join(SCRIPTS, "classes.json");
+const TAXONOMY_ROWS: Array<{ name: string; kind: string }> = JSON.parse(
+  readFileSync(CLASSES_JSON, "utf-8"),
+).classes;
+const PIPELINE_COUNT = TAXONOMY_ROWS.filter((r) => r.kind === "pipeline").length;
+const SIGNAL_COUNT = TAXONOMY_ROWS.filter((r) => r.kind === "signal").length;
+
+/**
+ * Documented heartbeat line format (issue #435; denominators derived from
+ * classes.json since issue #4637):
  *
  *   <epoch> <pid> <run_id> turn=<N> dispatches=<M> tokens=<K>
- *       pipeline_filled=<F>/6 signal_active=<S>/5 last_action=<type>
+ *       pipeline_filled=<F>/<P> signal_active=<S>/<Q> last_action=<type>
+ *
+ * where P = count of `kind: "pipeline"` rows and Q = count of
+ * `kind: "signal"` rows in scripts/autopilot/classes.json. The regex embeds
+ * the DERIVED counts, so every line any test matches (including bootstrap's
+ * Phase 0 line) is pinned to the taxonomy, not to a literal.
  *
  * Anchored against the regex below so a field-order edit breaks the
  * playbook + status.sh awk grep at the same time.
  */
-const HEARTBEAT_LINE_RE =
-  /^(\d+) (\d+) (\S+) turn=(\d+) dispatches=(\d+) tokens=(\d+) pipeline_filled=(\d+)\/6 signal_active=(\d+)\/5 last_action=(\S+)/;
+const HEARTBEAT_LINE_RE = new RegExp(
+  `^(\\d+) (\\d+) (\\S+) turn=(\\d+) dispatches=(\\d+) tokens=(\\d+) ` +
+    `pipeline_filled=(\\d+)\\/${PIPELINE_COUNT} signal_active=(\\d+)\\/${SIGNAL_COUNT} last_action=(\\S+)`,
+);
 
 function makeTmp(): {
   dir: string;
@@ -170,16 +190,10 @@ describe("scripts/autopilot/heartbeat.py", () => {
     try {
       const now = Math.floor(Date.now() / 1000);
       // sweep_orch cooldown is 900s; fire it 60s ago — should count as active.
-      // discover_orch must be UNAMBIGUOUSLY cooled regardless of which
-      // SIGNAL_COOLDOWNS source is live. heartbeat.py imports the value from
-      // the sibling decide.py when it can (3600s since #959) and falls back to
-      // a hard-coded table (1800s) only when that import fails. Firing
-      // discover_orch 2000s ago made this test env-dependent: cooled under the
-      // 1800 fallback but STILL ACTIVE under the live 3600 value (2000 < 3600),
-      // which is exactly why subtest 3 flaked in agent worktrees (issue #1231,
-      // observed `3 !== 2`). Fire it 5000s ago instead — older than BOTH the
-      // 3600 live and the 1800 fallback cooldown, so it is cooled in every
-      // environment.
+      // discover_orch (3600s since #959) fired 5000s ago is cooled. heartbeat.py
+      // imports SIGNAL_COOLDOWNS from the sibling decide.py with NO fallback
+      // table since #4637, so there is one cooldown source; the 5000s margin
+      // (chosen under #1231 when a 1800s fallback table still existed) stays.
       // health cooldown is 0; fire it 10s ago — active (special-cased: within 60s).
       writeState(tmp.state, {
         signal_last_fired: {
@@ -1015,5 +1029,138 @@ describe("scripts/autopilot/status.sh", () => {
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Issue #4637 — heartbeat.py derives its denominators, counted keys and
+ * cooldowns from the Dispatch-Class Taxonomy (scripts/autopilot/classes.json,
+ * via decide.py's PIPELINE_SLOTS / SIGNAL_CLASSES / SIGNAL_COOLDOWNS) — no
+ * hardcoded `/6` `/5`, no fallback cooldown table, no try/except around the
+ * import. Own top-level describe; no shared Redis, no server.
+ */
+describe("scripts/autopilot/heartbeat.py — taxonomy-derived denominators (issue #4637)", () => {
+  const DENOMINATORS_RE = /pipeline_filled=(\d+)\/(\d+) signal_active=(\d+)\/(\d+) /;
+
+  test("the taxonomy has both kinds (the derivation has something to derive)", () => {
+    assert.ok(PIPELINE_COUNT > 0, "classes.json carries pipeline rows");
+    assert.ok(SIGNAL_COUNT > 0, "classes.json carries signal rows");
+  });
+
+  test("normal line: denominators equal the classes.json pipeline / signal row counts", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state);
+      const r = runHeartbeat({
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+      });
+      assert.equal(r.status, 0, `heartbeat.py exited non-zero: ${r.stderr}`);
+      const m = readFileSync(tmp.heartbeat, "utf-8").match(DENOMINATORS_RE);
+      assert.ok(m, "line carries both ratios");
+      assert.equal(Number(m![2]), PIPELINE_COUNT, "pipeline denominator = pipeline rows");
+      assert.equal(Number(m![4]), SIGNAL_COUNT, "signal denominator = signal rows");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-state line: carries the SAME derived denominators", () => {
+    const tmp = makeTmp();
+    try {
+      const r = runHeartbeat({
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+      });
+      assert.equal(r.status, 1, "missing state is the degraded exit");
+      const body = readFileSync(tmp.heartbeat, "utf-8");
+      assert.match(body, /note=no-state/);
+      const m = body.match(DENOMINATORS_RE);
+      assert.ok(m, "no-state line carries both ratios");
+      assert.equal(Number(m![1]), 0);
+      assert.equal(Number(m![2]), PIPELINE_COUNT);
+      assert.equal(Number(m![3]), 0);
+      assert.equal(Number(m![4]), SIGNAL_COUNT);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("stale non-taxonomy keys never count — numerators stay <= denominators", () => {
+    const tmp = makeTmp();
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      // Every taxonomy pipeline slot filled PLUS two stale keys.
+      const slots: Record<string, unknown> = {};
+      for (const r of TAXONOMY_ROWS) {
+        if (r.kind === "pipeline") slots[r.name] = { skill: "x", task_id: r.name };
+      }
+      slots.fictional_retired_slot_a = { skill: "x" };
+      slots.fictional_retired_slot_b = { skill: "y" };
+      // Only stale (non-taxonomy) signal keys fired recently.
+      const signal_last_fired: Record<string, number> = {
+        fictional_retired_signal_a: now - 5,
+        fictional_retired_signal_b: now - 5,
+      };
+      writeState(tmp.state, { slots, signal_last_fired });
+      const r = runHeartbeat({
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+      });
+      assert.equal(r.status, 0, `heartbeat.py exited non-zero: ${r.stderr}`);
+      const m = readFileSync(tmp.heartbeat, "utf-8").match(DENOMINATORS_RE);
+      assert.ok(m);
+      assert.equal(Number(m![1]), PIPELINE_COUNT, "exactly the taxonomy slots count, stale keys ignored");
+      assert.ok(Number(m![1]) <= Number(m![2]), "pipeline numerator <= denominator");
+      assert.equal(Number(m![3]), 0, "stale signal keys never count as active");
+      assert.ok(Number(m![3]) <= Number(m![4]), "signal numerator <= denominator");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an import failure of decide.py propagates (fail loud) — no fallback alphabet", () => {
+    const tmp = makeTmp();
+    try {
+      // A sibling decide.py whose import raises, next to a copy of heartbeat.py.
+      const hb = join(tmp.dir, "heartbeat.py");
+      writeFileSync(hb, readFileSync(HEARTBEAT_PY, "utf-8"));
+      writeFileSync(
+        join(tmp.dir, "decide.py"),
+        'raise RuntimeError("fictional taxonomy load failure")\n',
+      );
+      writeState(tmp.state);
+      const r = spawnSync("python3", [hb], {
+        env: {
+          ...process.env,
+          HYDRA_AUTOPILOT_STATE: tmp.state,
+          HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+          PATH: process.env.PATH ?? "",
+        },
+        encoding: "utf-8",
+      });
+      assert.notEqual(r.status, 0, "a broken decide.py must not be masked");
+      assert.match(r.stderr ?? "", /fictional taxonomy load failure/);
+      assert.equal(existsSync(tmp.heartbeat), false, "no line fabricated from a fallback alphabet");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("source pins: no literal /6 or /5, no class-name literal, no guarded import", () => {
+    const src = readFileSync(HEARTBEAT_PY, "utf-8");
+    assert.equal(/\/[56](?!\d)/.test(src), false, "no literal /6 or /5 denominator");
+    for (const r of TAXONOMY_ROWS) {
+      assert.equal(src.includes(`"${r.name}"`), false, `no "${r.name}" literal (fallback table)`);
+      assert.equal(src.includes(`'${r.name}'`), false, `no '${r.name}' literal (fallback table)`);
+    }
+    assert.match(
+      src,
+      /^from decide import PIPELINE_SLOTS, SIGNAL_CLASSES, SIGNAL_COOLDOWNS\b/m,
+      "top-level (unguarded) import of the three taxonomy tuples",
+    );
+    assert.equal(/try:\s*\n\s+from decide import/.test(src), false, "the import is not wrapped in try/except");
+    assert.match(src, /len\(PIPELINE_SLOTS\)/);
+    assert.match(src, /len\(SIGNAL_CLASSES\)/);
   });
 });

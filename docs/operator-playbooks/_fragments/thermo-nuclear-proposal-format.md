@@ -20,7 +20,7 @@ These four must appear in every proposal. Order them however the proposal reads 
 The central reframing in **one paragraph**, top of the document. The thing the skill was hired to find. Should be readable in 15 seconds and let the operator decide whether to keep reading.
 
 Bad: "We should consider refactoring the watchdog."
-Good: "Retire `scripts/hydra-orchestrator-watchdog.sh` and fold its three health checks into the autopilot's tick loop, which already pings `/api/health` every cycle. The systemd `watchdog.timer` becomes a backstop that only fires when the autopilot itself is unresponsive — flipping the semantic from 'detect a failure' to 'detect autopilot wedge'."
+Good: "Retire `scripts/<watchdog>.sh` and fold its three health checks into the autopilot's tick loop, which already pings `/api/health` every cycle. The systemd `watchdog.timer` becomes a backstop that only fires when the autopilot itself is unresponsive — flipping the semantic from 'detect a failure' to 'detect autopilot wedge'."
 
 ### 2. What gets deleted
 
@@ -64,7 +64,7 @@ Inline `Confident:` / `Judgement:` tags throughout the proposal:
 
 Example:
 
-> `Confident:` the watchdog and the autopilot heartbeat both read `/api/health` every cycle (`scripts/hydra-orchestrator-watchdog.sh:34`, `src/autopilot/tick.ts:97`). `Judgement:` the watchdog's "deliberate-stop" reconciliation could collapse into the autopilot's stop-flag check without losing recovery from genuine self-stops.
+> `Confident:` the watchdog and the autopilot heartbeat both read `/api/health` every cycle (`scripts/<watchdog>.sh:<line>`, `src/<module>.ts:<line>`). `Judgement:` the watchdog's "deliberate-stop" reconciliation could collapse into the autopilot's stop-flag check without losing recovery from genuine self-stops.
 
 This is the single most important content discipline. It lets the operator dismiss overconfident-but-wrong proposals less, and sharpens uncertain ones faster.
 
@@ -72,7 +72,7 @@ This is the single most important content discipline. It lets the operator dismi
 
 Every concrete claim cites `file:path:line` or the equivalent operational identifier:
 
-- Code: `src/autopilot/tick.ts:97`
+- Code: `src/<module>.ts:<line>`
 - Systemd: `~/.config/systemd/user/hydra-orchestrator-watchdog.timer`
 - CI: `.github/workflows/ci.yml:34`
 - Docker / container: container name + image tag

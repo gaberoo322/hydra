@@ -43,7 +43,7 @@ import { ADR_ROSTER_FILE, renderRosterReadme } from "../scripts/docs/inventories
 import { classifyAppRoutes, extractRoutes } from "../scripts/docs/inventories/routes.ts";
 import { buildChoreRows } from "../scripts/docs/inventories/chores.ts";
 import { buildEnvVarRows } from "../scripts/docs/inventories/env-vars.ts";
-import { buildRedisKeyRows, parseParams } from "../scripts/docs/inventories/redis-keys.ts";
+import { ADAPTER_INLINED_FAMILIES, buildRedisKeyRows, parseParams } from "../scripts/docs/inventories/redis-keys.ts";
 import { buildSchemaRows } from "../scripts/docs/inventories/schemas.ts";
 import { buildTierPathRows } from "../scripts/docs/inventories/tier-paths.ts";
 import { trackedFiles, walkFiles } from "../scripts/docs/inventories/scan.ts";
@@ -402,6 +402,31 @@ describe("generated feature inventories", () => {
     );
   });
 
+  it("a generic-typed registration (router.get<…>(…)) is extracted, not silently dropped (#4638)", () => {
+    withFixture(
+      {
+        "src/api.ts": "api.use(createTypedRouter());",
+        "src/api/typed.ts": [
+          'import { Router } from "express";',
+          "export function createTypedRouter() {",
+          "  const router = Router();",
+          '  router.get<{ id: string }>("/typed/:id", async (req, res) => res.json({}));',
+          '  router.delete<{ id: string; key: string }>("/typed/:id/:key", async (req, res) => res.json({}));',
+          "  return router;",
+          "}",
+        ].join("\n"),
+        "dashboard/src/App.jsx": "export default function App() { return null; }",
+      },
+      (root) => {
+        const inv = extractRoutes(root);
+        deepStrictEqual(
+          inv.rows.map((r) => `${r.method} ${r.path}`),
+          ["GET /api/typed/:id", "DELETE /api/typed/:id/:key"],
+        );
+      },
+    );
+  });
+
   it("redis-keys rules: placeholder pattern, call-site count, retired only while code-referenced", () => {
     const builders = {
       plain: () => "hydra:plain",
@@ -458,6 +483,28 @@ describe("generated feature inventories", () => {
     const retired = rows.filter((r) => r.retired).map((r) => r.pattern).sort();
     deepStrictEqual(retired, ["hydra:cycle:{id}:agents", "hydra:workspace:lock"]);
     ok(!rows.some((r) => r.pattern === "hydra:plans:cache"));
+  });
+
+  it("redis-keys rules: inlined adapter families emit only while the literal is in the named file's code", () => {
+    const fam = ADAPTER_INLINED_FAMILIES.find((f) => f.pattern === "hydra:holdback:reverts:{date}");
+    ok(fam, "the holdback reverts family must be declared");
+    const mk = (src: string) =>
+      buildRedisKeyRows({
+        builders: {},
+        keysSource: "",
+        files: [{ path: fam.file, src }],
+        routes: [],
+      }).filter((r) => r.pattern === fam.pattern);
+    const live = mk(`export const k = (date) => \`${fam.literal}\`;`);
+    deepStrictEqual(live.length, 1);
+    deepStrictEqual([live[0].builder, live[0].retired, live[0].accessors], [null, false, [fam.file]]);
+    deepStrictEqual(live[0].params, ["date"]);
+    // A whole-line comment mention never counts; neither does a missing file.
+    deepStrictEqual(mk(`// ${fam.literal}\nexport const x = 1;`), []);
+    deepStrictEqual(
+      buildRedisKeyRows({ builders: {}, keysSource: "", files: [], routes: [] }).filter((r) => r.pattern === fam.pattern),
+      [],
+    );
   });
 
   it("redis-keys rules: a builder returning a non-string fails loud", () => {

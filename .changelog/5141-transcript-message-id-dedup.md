@@ -1,0 +1,1 @@
+- fix: count each assistant message once in transcript token totals, at its largest (complete) line, so cost-by-class and 24h token figures are no longer inflated ~2x by per-content-block lines; parse-memo entries from the old parser are re-parsed instead of replayed (#5141)

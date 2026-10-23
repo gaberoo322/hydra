@@ -83,7 +83,7 @@
     {
       "family": "corpus",
       "metric": "historical",
-      "value": 11
+      "value": 14
     },
     {
       "family": "corpus",
@@ -103,12 +103,12 @@
     {
       "family": "corpus",
       "metric": "rows",
-      "value": 119
+      "value": 122
     },
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 269
+      "value": 268
     },
     {
       "family": "pages",
@@ -128,27 +128,27 @@
     {
       "family": "redis-keys",
       "metric": "rows",
-      "value": 76
+      "value": 89
     },
     {
       "family": "routes",
       "metric": "routers",
-      "value": 51
+      "value": 48
     },
     {
       "family": "routes",
       "metric": "routes",
-      "value": 152
+      "value": 140
     },
     {
       "family": "routes",
       "metric": "rows",
-      "value": 152
+      "value": 140
     },
     {
       "family": "schemas",
       "metric": "rows",
-      "value": 92
+      "value": 91
     },
     {
       "family": "skills",

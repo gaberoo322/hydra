@@ -196,7 +196,7 @@ DC_JSON=$(curl -sf --max-time 5 "http://localhost:4000/api/design-concepts/${ANC
 
 **Endpoint:** `GET /api/design-concepts/<anchor.reference>` — **plural** resource
 name, anchor ref as a **path param** (e.g. `/api/design-concepts/issue-1699`).
-There is no `/api/design-concept` route and no `?anchor=` query form. Response
+There is no singular design-concept route and no `?anchor=` query form. Response
 (200): the artifact fields at the **top level** plus a `gate` sub-object — there
 is NO `.concept` envelope, read `.invariants` directly. 404 → no artifact; do not
 retry alternate spellings.

@@ -128,7 +128,7 @@ Drop or re-route a candidate before it becomes an issue when ANY of:
   # → {"duplicate":false,...} → it survives the filter
   ```
 
-  `isDuplicateIssue` (`scripts/ci/issue-dedup.ts`) keys on normalised word-set Jaccard overlap >50% — the SAME deterministic helper `hydra-discover` uses, so the two co-firing classes reach the SAME duplicate verdict against the SAME baseline. After a candidate survives the filter AND is emitted as an issue (step 4), append its title to `BASELINE_TITLES` so later candidates in this run dedup against it too.
+  `isDuplicateIssue` (`scripts/ci/issue-dedup.ts`) keys on normalised word-set Jaccard overlap >50% — the SAME deterministic helper `hydra-discover` uses, so the two co-firing classes reach the SAME duplicate verdict against the SAME baseline. After a candidate survives the filter AND is emitted as an issue (step 4), append its title to `$BASELINE_TITLES` so later candidates in this run dedup against it too.
 - It fails the **deletion test as a pass-through** — deleting the module would just *move* complexity to its callers, not concentrate it. The module *has* live callers; it is genuinely earning its place in the call graph as a pass-through layer, so there is nothing to deepen. Drop it (note the friction in the report).
 
 > **Deletion-test failure is two different findings — split them before dropping.** A candidate that fails the deletion test is NOT always a pass-through. The old rule conflated two distinct outcomes and discarded both; only one of them is actually a drop:
@@ -160,7 +160,7 @@ The fog-gate wins over ALL of this **regardless of the candidate's Recommendatio
 
 When the AND holds, chart a map; otherwise fall through to the `≥3 → hydra-prd` / `1–2 → to-tickets` routing below (untouched).
 
-**Dedup BEFORE charting (acceptance criterion 3).** Reuse the SAME shared backfill dedup baseline `BASELINE_TITLES` built in step 3's filter — which is open across every backfill label set (INCLUDING open `wayfinder:map` issues) plus recently-closed — so an overlapping candidate that is already charted produces no second map:
+**Dedup BEFORE charting (acceptance criterion 3).** Reuse the SAME shared backfill dedup baseline `$BASELINE_TITLES` built in step 3's filter — which is open across every backfill label set (INCLUDING open `wayfinder:map` issues) plus recently-closed — so an overlapping candidate that is already charted produces no second map:
 
 ```bash
 # BASELINE_TITLES was built in step 3 (open across every backfill label set,
@@ -192,7 +192,7 @@ EOF
 )"
 ```
 
-Then append the map's title to `BASELINE_TITLES` so later candidates in THIS run dedup against it too (mirroring step 3's in-run append).
+Then append the map's title to `$BASELINE_TITLES` so later candidates in THIS run dedup against it too (mirroring step 3's in-run append).
 
 **Invariants (ADR-0029 Decision 1 + 3 + 5):**
 - The map carries BOTH labels `wayfinder:map` AND `wayfinder:destination-pending`, and its body is `## Destination` + `## Not yet specified` **ONLY** — **zero tickets**, no `## Sub-issues` block, no `## Decisions so far` content. Draft scope is destination-only: the gate sits between wayfinder's name-destination and map-the-frontier steps, so ticket-charting is the first working action AFTER the operator approves the destination (an amendment strands no tickets).
@@ -260,7 +260,7 @@ comma-separated list or prose; see the scope-format rule below>
 
 **Labelling rule (HARD):** every emitted issue carries `enhancement`, `needs-triage`, and `architecture-scan`. **NEVER `ready-for-agent`.** The architecture-scan fallback produces *candidate* work; the operator (or `/hydra-sweep` triage) is the accept point. Auto-routing a self-generated deepening straight to `ready-for-agent` would let the autopilot dispatch a refactor it invented against itself with no human checkpoint — exactly the loop the `needs-triage` gate exists to break.
 
-**Scope-format rule (HARD, issue #4571):** every emitted `## Files in scope` / `## Files out of scope` section is a plain bullet list — ONE repo-relative path per `- ` bullet, no backticked code-spans, no prose sentences, and NEVER a single comma-separated line. The section must parse to ≥1 entry through the scope-check parser (`extractScopeFromBody` in `src/scope-section.ts`): a heading over a comma-separated line or a prose paragraph parses to ZERO entries (`looksLikePath` rejects any token containing whitespace), which is the same unscoped shape as no section at all. `issue-label-validation` runs that exact parser and demotes a zero-entry section to `needs-info` before the issue can carry `ready-for-agent` — that guard caught nothing for #4563 because it only grepped for the heading, which is why the parser check and this template rule shipped together (#4571). Backticked code-spans are banned from these sections because the parser counts EVERY code-span in the section as an entry: a prose aside like "touch `src/foo.ts` last" silently becomes a scope entry (and, in an out-of-scope section, a phantom hard merge-block — the seam-target trap of #1515/#1870/#1871).
+**Scope-format rule (HARD, issue #4571):** every emitted `## Files in scope` / `## Files out of scope` section is a plain bullet list — ONE repo-relative path per `- ` bullet, no backticked code-spans, no prose sentences, and NEVER a single comma-separated line. The section must parse to ≥1 entry through the scope-check parser (`extractScopeFromBody` in `src/scope-section.ts`): a heading over a comma-separated line or a prose paragraph parses to ZERO entries (`looksLikePath` rejects any token containing whitespace), which is the same unscoped shape as no section at all. `issue-label-validation` runs that exact parser and demotes a zero-entry section to `needs-info` before the issue can carry `ready-for-agent` — that guard caught nothing for #4563 because it only grepped for the heading, which is why the parser check and this template rule shipped together (#4571). Backticked code-spans are banned from these sections because the parser counts EVERY code-span in the section as an entry: a prose aside like "touch `src/<module>.ts` last" silently becomes a scope entry (and, in an out-of-scope section, a phantom hard merge-block — the seam-target trap of #1515/#1870/#1871).
 
 ### 4b. Re-route genuinely-dead findings to deletion (cleanup convention)
 
@@ -298,7 +298,7 @@ gh issue list --repo gaberoo322/hydra --state open --label hitl-grill --json num
 
 At **10 or more open `hitl-grill` issues, park NOTHING for the rest of the run** and state the cap as the reason in the step-5 report — a full inbox is the signal the operator is not draining it, and the scan must not push past it. This cap gates **only the park action**: `Strong` candidates continue through 4.1 to `needs-triage` unaffected. It is independent of the board-saturation back-stop (which gates the whole run against `architecture-scan` saturation) — but note a parked issue carries the `architecture-scan` label and therefore COUNTS toward that back-stop: if the board is saturated, park nothing either (a park is still emission, same as a map).
 
-**Dedup — the same shared baseline.** Check each parked candidate's title against the SAME shared backfill dedup baseline `BASELINE_TITLES` built in step 3 (which the filter and the fog-gate already use):
+**Dedup — the same shared baseline.** Check each parked candidate's title against the SAME shared backfill dedup baseline `$BASELINE_TITLES` built in step 3 (which the filter and the fog-gate already use):
 
 ```bash
 # $CANDIDATE = the parked candidate's issue title.
@@ -308,7 +308,7 @@ node --experimental-strip-types scripts/ci/issue-dedup.ts \
 # → {"duplicate":false,...} → park it
 ```
 
-On success, **append the parked title to `BASELINE_TITLES`** so later candidates in THIS run dedup against it too — the same in-run append steps 3 and 4.0 use.
+On success, **append the parked title to `$BASELINE_TITLES`** so later candidates in THIS run dedup against it too — the same in-run append steps 3 and 4.0 use.
 
 **Labels (HARD):** a parked issue carries **exactly two labels — `hitl-grill` (the lane) and `architecture-scan` (the provenance)**. NEVER `needs-triage`, `enhancement`, or `ready-for-agent`: `hitl-grill` is a terminal park state no agent actions (`docs/agents/triage-labels.md`), and carrying a lifecycle label alongside it would put one issue in two live triage lanes at once.
 
@@ -379,7 +379,7 @@ In dry-run mode the header reads `(dry-run; no GitHub issues created)` and the e
 - **Deepening candidates land in `needs-triage`, never `ready-for-agent`.** The operator/triage is the accept point. No self-dispatch of self-invented refactors. Two exceptions, both deterministic in *disposal*: a **dead-code deletion candidate** (a deletion-test failure that is *genuinely unreferenced*, not a pass-through) re-routes to the `hydra-cleanup` convention (`cleanup-scan` + `ready-for-agent`) per step 4b, because its acceptance check is deterministic; and the **park tier** (step 4c, #4027) — `Worth exploring` and Untouchable-Core-primary candidates park as `hitl-grill`, which no agent ever actions.
 - **Deletion-test failure is a fork, not a discard.** A *pass-through* (live callers, complexity would move not concentrate) is dropped; a *genuinely-unreferenced* finding (no live callers at all, test-only consumers excluded) is re-routed to a deletion candidate, never thrown away (#961). When unsure, drop.
 - **Speculative is still dropped — even Untouchable-Core-primary.** The strength routing (step 4) evaluates the Speculative drop BEFORE the park rule fires; a park never rescues an idea the model itself rated not-worth-pursuing.
-- **Parked issues carry exactly `hitl-grill` + `architecture-scan`** — lane plus provenance, never a lifecycle label. They dedup against the shared `BASELINE_TITLES` baseline and their titles join it within the run, exactly like emitted ones.
+- **Parked issues carry exactly `hitl-grill` + `architecture-scan`** — lane plus provenance, never a lifecycle label. They dedup against the shared `$BASELINE_TITLES` baseline and their titles join it within the run, exactly like emitted ones.
 - **The hitl-grill cap gates parking only.** At ≥10 open `hitl-grill` issues the run parks nothing and says so in the report; `Strong` → `needs-triage` emission is unaffected. Independent of the board-saturation back-stop.
 - **The fog-gate still wins over the park tier.** A foggy + big candidate is charted as a wayfinder map regardless of its Recommendation strength — never parked.
 - **Orchestrator-scoped.** Always `~/hydra`. Not parameterised to the Target.

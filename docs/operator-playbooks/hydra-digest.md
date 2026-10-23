@@ -198,7 +198,7 @@ For each cycle in period:
 - test_delta = `testsAfter - testsBefore`
 - anchor_type, source
 
-Aggregate: total_cycles, merged_count, failed_count, empty_count, rollback_count, merge_rate, total_cost, cost_per_merge, test_growth, top_anchor_types. Split by source (Codex / Claude). Collect merged_titles for highlight reel.
+Aggregate: total_cycles, merged_count, failed_count, empty_count, rollback_count, merge_rate, total_cost, cost_per_merge, test_growth, top_anchor_types. Split by source (Codex rows predate its ADR-0006 retirement). Collect merged_titles for highlight reel.
 
 ### 3. Format
 

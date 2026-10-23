@@ -123,6 +123,12 @@ export interface ResetWindow {
 
 export interface ParsedUsageLine {
   tsMs: number;
+  /**
+   * `message.id` when present, else null. Claude Code writes one JSONL line per
+   * content block of an assistant message, each repeating the full `usage`
+   * block, so folds de-duplicate on this id (issue #5141).
+   */
+  messageId: string | null;
   tokens: TokenBreakdown;
   /**
    * Raw `message.model` string verbatim (or "" when absent). The scan loop
@@ -274,8 +280,12 @@ export function parseUsageLine(line: string): ParsedUsageLine | "skip" | null {
 
   const model = typeof obj?.message?.model === "string" ? obj.message.model : "";
 
+  const rawId = obj?.message?.id;
+  const messageId = typeof rawId === "string" && rawId !== "" ? rawId : null;
+
   return {
     tsMs,
+    messageId,
     tokens: { input, output, cacheRead, cacheCreation, total },
     model,
   };
