@@ -127,6 +127,20 @@ state.json {
     "<target_issue_number>": unix-epoch
   }
 
+  # NEW IN #5167 — the same per-item stamps for sweep_target's second arm, the
+  # stranded in-progress set (`target_stale_in_progress_items`). Same back-off,
+  # same stamp-and-prune-on-fire rule, same _persist_state_writeback path.
+  "target_stale_item_stamps": {
+    "<target_issue_number>": unix-epoch
+  }
+
+  # NEW IN #5167 — the same per-item stamps for sweep_target's third arm, the
+  # open `blocked` set (`target_blocked_items`), on the longer 12h blocked
+  # back-off (TARGET_BLOCKED_BACKOFF_SEC). Same stamp-and-prune-on-fire rule.
+  "target_blocked_item_stamps": {
+    "<target_issue_number>": unix-epoch
+  }
+
   # NEW IN #3829 — per-issue attempt counter for the qa_orch busy-loop guard
   # (design-concept issue-3829). Keyed by the STRING orch issue number, valued
   # by the count of qa_orch dispatches that fired while that issue was the
@@ -5429,13 +5443,15 @@ def main(argv: list[str]) -> int:
         # Issues #3729/#3939: change-detection for the per-item sweep stamp maps.
         # `_stamp_triage_items` rebuilds the stamp map in place (pruning absent
         # items) when a sweep fires with a present item set — for sweep_target
-        # (`target_triage_item_stamps`, #3729) and sweep_orch
-        # (`orch_triage_item_stamps`, #3939). snapshot-before/compare-after on BOTH
+        # (`target_triage_item_stamps`, #3729; `target_stale_item_stamps` / `target_blocked_item_stamps`, #5167)
+        # and sweep_orch (`orch_triage_item_stamps`, #3939). snapshot-before/compare-after on ALL
         # maps persists either via the SAME _persist_state_writeback helper, no new
         # persistence mechanism (INV-12).
         triage_stamps_before = json.dumps(
             {
                 "target": state.get("target_triage_item_stamps"),
+                "target_stale": state.get("target_stale_item_stamps"),
+                "target_blocked": state.get("target_blocked_item_stamps"),
                 "orch": state.get("orch_triage_item_stamps"),
             },
             sort_keys=True,
@@ -5532,6 +5548,8 @@ def main(argv: list[str]) -> int:
         triage_stamps_after = json.dumps(
             {
                 "target": state.get("target_triage_item_stamps"),
+                "target_stale": state.get("target_stale_item_stamps"),
+                "target_blocked": state.get("target_blocked_item_stamps"),
                 "orch": state.get("orch_triage_item_stamps"),
             },
             sort_keys=True,

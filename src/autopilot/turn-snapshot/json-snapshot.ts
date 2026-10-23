@@ -280,6 +280,8 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     target_dev_resume_pick: pin(v.targetBoard.devResumePick.ok ? v.targetBoard.devResumePick.value : null),
     needs_triage_target: targetCount(v.targetBoard, "target_needs_triage") > 0,
     target_needs_triage_items: scan ? [...scan.needsTriageItems] : [],
+    target_stale_in_progress_items: [...(v.targetBoard.staleInProgress ?? [])], // #5167
+    target_blocked_items: [...(scan?.blockedItems ?? [])], // #5167
 
     health_fail: healthFail(v.health),
     scout_walk_due: staleDays(lastWalk, 7, opts.nowMs),
