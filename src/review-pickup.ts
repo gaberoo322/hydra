@@ -13,8 +13,7 @@
  *      absent). These are the ones the operator needs to re-decide.
  *
  * A third bucket — the dated `Operator decision queue YYYY-MM-DD` digest
- * issue — was retired by ADR-0034 §8.1 / #4621 alongside the same bucket in
- * `decision-queue.ts`; `hydra-grill` now posts its gate-fail handoff directly
+ * issue — was retired by ADR-0034 §8.1 / #4621 (the former `decision-queue.ts` aggregator has since been deleted); `hydra-grill` now posts its gate-fail handoff directly
  * on the anchor issue instead of a dated queue issue.
  *
  * `hitl-grill` was a fourth bucket (#4026) until the park lane moved to its
@@ -22,11 +21,8 @@
  * operator-attention item: it does not block the AFK frontier, so neither
  * `/hydra-review` nor the phone-notify hook that mirrors it reads the lane.
  *
- * This is deliberately NOT the dashboard-v2 `getDecisionQueue()` aggregator:
- * that one unifies `ready-for-human` with `needs-info`, whereas the
- * `/hydra-review` pickup set's second bucket is *stale-blocked*. The phone-notify
- * hook (issue #745) must mirror what the operator will actually see when they
- * run `/hydra-review`, so it reads THIS aggregator, not `getDecisionQueue()`.
+ * The phone-notify hook (issue #745) must mirror what the operator will
+ * actually see when they run `/hydra-review`, so it reads this aggregator.
  *
  * # Design contract
  *

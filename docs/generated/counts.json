@@ -128,7 +128,7 @@
     {
       "family": "redis-keys",
       "metric": "rows",
-      "value": 89
+      "value": 87
     },
     {
       "family": "routes",
@@ -148,7 +148,7 @@
     {
       "family": "schemas",
       "metric": "rows",
-      "value": 90
+      "value": 89
     },
     {
       "family": "skills",
