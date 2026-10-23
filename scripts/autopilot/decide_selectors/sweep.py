@@ -42,6 +42,15 @@ TARGET_TRIAGE_BACKOFF_SEC = int(
     os.environ.get("HYDRA_TARGET_TRIAGE_BACKOFF_SEC") or (6 * 60 * 60)
 )
 
+# Issue #5167 — the per-item back-off for sweep_target's blocked arm. Longer
+# than the triage window because a `blocked` item legitimately waits on a
+# blocker for days (or on an operator gate indefinitely); 12h is the same
+# re-check cadence the Orchestrator's Phase 1.5 stale-blocked recovery uses
+# (recover-stale.sh, >12h). Env-overridable, resolved once at import.
+TARGET_BLOCKED_BACKOFF_SEC = int(
+    os.environ.get("HYDRA_TARGET_BLOCKED_BACKOFF_SEC") or (12 * 60 * 60)
+)
+
 # Issue #3939 — the orchestrator-side mirror of TARGET_TRIAGE_BACKOFF_SEC. Same
 # 6h default, same env-override shape, same rationale: long enough to suppress
 # the observed re-fire churn (sweep_orch re-fired every 900s against a
@@ -227,38 +236,86 @@ def _select_signal_sweep_target(
     events: list[dict],
     now: int,
 ) -> dict | None:
-    """`sweep_target` signal-class selector (provenance: #3709, #3729, #631, #626)."""
-    # Coarse presence gate (issue #3709): the Target board has needs-triage
-    # items at all. This boolean stays TRUE even when every item is inside
-    # its per-item backoff window below (INV-3) — the raw label count does
-    # not change, only the per-item eligibility does.
-    if not _signal_present(state, events, "needs_triage_target"):
-        return None
+    """`sweep_target` signal-class selector (provenance: #3709, #3729, #631, #626, #5167)."""
+    # Arm 1 — the triage lane. Coarse presence gate (issue #3709): the Target
+    # board has needs-triage items at all. This boolean stays TRUE even when
+    # every item is inside its per-item backoff window below (INV-3) — the raw
+    # label count does not change, only the per-item eligibility does.
+    triage_present = _signal_present(state, events, "needs_triage_target")
     # Per-item verdict-stability guard (issue #3729). Successive sweeps at
     # the 900s class cooldown reached mutually contradictory verdicts on the
     # same date-gated items (the evidence: #631 took 10 label events in 28h,
     # #626 took 12 in 36h). The class-level cooldown (checked above) stays a
     # necessary condition (INV-1); this is an ADDITIONAL, independent,
-    # AND-composed condition. sweep_target fires iff >=1 item in the current
+    # AND-composed condition. The arm is due iff >=1 item in the current
     # turn's needs-triage set is eligible (no stamp, or a stamp older than
-    # the per-item backoff window). On fire, every item in the CURRENT set is
-    # stamped so the whole lane's clock resets uniformly, and stamps for
-    # items no longer in the set are pruned (INV-4/INV-5).
-    items = _triage_item_set(state, events, "target_needs_triage_items")
-    if items:
+    # the per-item backoff window). Every current item inside its window →
+    # suppressed; needs_triage_target stays true (issue #3729 INV-3) and the
+    # lane re-opens as each item's window elapses.
+    triage_items = _triage_item_set(state, events, "target_needs_triage_items")
+    if not triage_present:
+        triage_due = False
+    elif triage_items:
         stamps = _triage_stamps(state, "target_triage_item_stamps")
-        if not any(
+        triage_due = any(
             _triage_item_eligible(stamps.get(n, 0), now, TARGET_TRIAGE_BACKOFF_SEC)
-            for n in items
-        ):
-            # Every current item was checked inside its backoff window →
-            # suppress this turn. needs_triage_target stays true (issue #3729 INV-3);
-            # the lane re-opens for re-examination as each item's window
-            # elapses.
-            return None
-        _stamp_triage_items(state, items, now, "target_triage_item_stamps")
-    # `items` absent/empty (no per-item fact this turn — a degraded board
-    # read or a pre-#3729 playbook) → fail OPEN on the coarse boolean alone,
-    # preserving the pre-#3729 behaviour so a transient wiring gap never
-    # dead-arms sweep_target (the #3709 defect class).
-    return make_dispatch(sig, "hydra-target-sweep", reason="target board hygiene due")
+            for n in triage_items
+        )
+    else:
+        # `items` absent/empty (no per-item fact this turn — a degraded board
+        # read or a pre-#3729 playbook) → fail OPEN on the coarse boolean
+        # alone, so a transient wiring gap never dead-arms sweep_target (the
+        # #3709 defect class).
+        triage_due = True
+    # Arm 2 — stranded in-progress issues (issue #5167). The sweep's Step 5
+    # stall recovery was reachable only through arm 1, so on an empty triage
+    # lane a dispatch that died before opening its PR stranded its issue
+    # in-progress indefinitely (CSB #297/#298, 8 days). The Turn Snapshot
+    # emits the stale set (in-progress > 90 min, no open PR referencing it);
+    # the same per-item backoff, on its own stamp map, stops an item the sweep
+    # rightly leaves alone (a parent progressing through slices) from
+    # re-firing the class every cooldown. Absent or empty → the arm is idle:
+    # there is no coarse boolean to fail open on.
+    stale_items = _triage_item_set(state, events, "target_stale_in_progress_items")
+    stale_due = bool(stale_items) and any(
+        _triage_item_eligible(
+            _triage_stamps(state, "target_stale_item_stamps").get(n, 0),
+            now,
+            TARGET_TRIAGE_BACKOFF_SEC,
+        )
+        for n in stale_items
+    )
+    # Arm 3 — blocked items (issue #5167). The sweep's Step 3 promotes a
+    # `blocked` issue once its blocker closes — the hand-off a ticketed
+    # epic's dependent slices wait on (issue #5168 files them `blocked`) —
+    # but, like Step 5, it was reachable only through arm 1. Same per-item
+    # stamp rule on its own map, with the longer blocked back-off: a
+    # permanently operator-gated item costs at most two sweeps a day.
+    blocked_items = _triage_item_set(state, events, "target_blocked_items")
+    blocked_due = bool(blocked_items) and any(
+        _triage_item_eligible(
+            _triage_stamps(state, "target_blocked_item_stamps").get(n, 0),
+            now,
+            TARGET_BLOCKED_BACKOFF_SEC,
+        )
+        for n in blocked_items
+    )
+    if not (triage_due or stale_due or blocked_due):
+        return None
+    # On fire the sweep walks the whole board, so every item in each CURRENT
+    # set is stamped (uniform clock reset) and stamps for items no longer in
+    # it are pruned (issue #3729 INV-4/INV-5). An absent set leaves its map untouched, and
+    # an empty one never conjures a map that was not there.
+    if triage_present and triage_items:
+        _stamp_triage_items(state, triage_items, now, "target_triage_item_stamps")
+    if stale_items or (stale_items is not None and "target_stale_item_stamps" in state):
+        _stamp_triage_items(state, stale_items, now, "target_stale_item_stamps")
+    if blocked_items or (blocked_items is not None and "target_blocked_item_stamps" in state):
+        _stamp_triage_items(state, blocked_items, now, "target_blocked_item_stamps")
+    if triage_due:
+        reason = "target board hygiene due"
+    elif stale_due:
+        reason = "target stranded in-progress recovery due (#5167)"
+    else:
+        reason = "target blocked-lane re-check due (#5167)"
+    return make_dispatch(sig, "hydra-target-sweep", reason=reason)

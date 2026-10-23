@@ -79,6 +79,8 @@ LISTS = (
     "needs_qa_numbers",
     "orch_needs_triage_items",
     "target_needs_triage_items",
+    "target_stale_in_progress_items",
+    "target_blocked_items",
     "orch_prs_dirty",
     "orch_prs_unchecked",
     "orch_prs_behind",

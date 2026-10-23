@@ -1,0 +1,1 @@
+- fix(autopilot): sweep_target fires on stranded Target in-progress issues even with an empty triage lane; its stall recovery opens the PR from a pushed dev_target branch and leaves a parent with open slices alone (#5167)
