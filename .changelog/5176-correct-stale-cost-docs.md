@@ -1,0 +1,1 @@
+- docs: correct stale cost docs (deleted reconciliation module, meter-only eligibility) (#5176)
