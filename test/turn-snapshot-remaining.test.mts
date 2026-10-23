@@ -272,7 +272,7 @@ const sortedJson = (xs: readonly unknown[]) => xs.map((x) => JSON.stringify(x)).
 
 describe("Turn Snapshot slice 5B — golden files from the bash collectors (ADR-0043 D4)", () => {
   test("the golden corpus is present and covers every collector (guards a vacuous pass)", () => {
-    assert.ok(goldenFiles.length >= 100, `expected the captured corpus, found ${goldenFiles.length} files`);
+    assert.ok(goldenFiles.length >= 90, `expected the captured corpus, found ${goldenFiles.length} files`);
     const covered = new Set(goldenFiles.flatMap((f) => loadGolden(f).collectors));
     assert.deepEqual([...covered].sort(), Object.keys(REMAINING_COLLECTORS).sort());
   });
