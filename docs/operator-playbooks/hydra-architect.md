@@ -76,20 +76,8 @@ if repeats: print(f'Repeated tasks: {repeats}')
 "
 ```
 
-### Research → Build Pipeline
+### Work tracking
 ```bash
-hydra research history | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-if isinstance(d,list):
-    total_opps=sum(r.get('opportunityCount',0) for r in d)
-    total_queued=sum(r.get('autoQueued',0) for r in d)
-    print(f'Research cycles: {len(d)} | Opportunities: {total_opps} | Auto-queued: {total_queued}')
-    print(f'Conversion: {100*total_queued//max(total_opps,1)}%')
-"
-echo -n "Work queue depth: "
-docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null
-
 # `hydra backlog ls` (Redis kanban lanes) was retired by ADR-0031 (#3439, PR
 # #3455) — `/api/backlog` 404s and `hydra backlog` is a retired stub
 # pointing at the replacement (issue #3745). Orchestrator work tracking is
