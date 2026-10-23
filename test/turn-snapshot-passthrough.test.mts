@@ -34,7 +34,7 @@ import { main, parseArgs, type CliDeps } from "../scripts/autopilot/turn-snapsho
 import {
   collectDirectionDrift,
   collectSlotEvents,
-  jqUri,
+  percentEncode,
   PASSTHROUGH_COLLECTORS,
   runPassthroughCollectors,
   SLOT_EVENTS_FALLBACK,
@@ -245,7 +245,7 @@ describe("Turn Snapshot hydra HTTP client — `hydra raw GET` semantics", () => 
 
 describe("Turn Snapshot passthrough — path and band helpers", () => {
   test("jq @uri keeps only A-Za-z0-9-_.~", () => {
-    assert.equal(jqUri("a b/c!*'()~-_.:é"), "a%20b%2Fc%21%2A%27%28%29~-_.%3A%C3%A9");
+    assert.equal(percentEncode("a b/c!*'()~-_.:é"), "a%20b%2Fc%21%2A%27%28%29~-_.%3A%C3%A9");
   });
 
   test("scheduler stall bands: <5 ok, 5–7 alert, >=8 hard-stop (booleans compare as ints)", () => {

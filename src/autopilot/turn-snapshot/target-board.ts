@@ -61,6 +61,7 @@ import { openNumbersFromRows } from "../../github/blockers.ts";
 import { parseIssueRows, type IssueRow } from "../../github/issues.ts";
 import type { PrRefRow } from "../../github/pr-refs.ts";
 import { TARGET_BOARD_LABELS } from "../../target-board-labels.ts";
+import { eachValue } from "./json-values.ts";
 import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { pickDevResume } from "./dev-resume.ts";
 import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
@@ -145,19 +146,12 @@ const asInt = (v: unknown): number | null => (typeof v === "boolean" ? Number(v)
 /** The integer entries of a JSON list field, in order (see {@link asInt}). */
 const intEntries = (xs: readonly unknown[]): number[] => xs.map(asInt).filter((n): n is number => n !== null);
 
-/** `.[]` — an array's elements or an object's values; anything else errors. */
-function jqIterate(v: unknown): unknown[] | null {
-  if (Array.isArray(v)) return v;
-  if (isObj(v)) return Object.values(v);
-  return null;
-}
-
 const readData = (r: GhJsonRead): unknown => (r.kind === "ok" ? r.data : undefined);
 
 /** `[.[] | select(.pull_request == null) | .number]` — open issue numbers, PRs filtered out. */
 export function nonPrIssueNumbers(read: GhJsonRead): unknown[] | null {
   if (read.kind !== "ok") return null;
-  const items = jqIterate(read.data);
+  const items = eachValue(read.data);
   if (items === null) return null;
   const out: unknown[] = [];
   for (const e of items) {
@@ -174,7 +168,7 @@ export function nonPrIssueNumbers(read: GhJsonRead): unknown[] | null {
 /** `[.[] | {headRefName: .head.ref, body: (.body // "")}]` — REST pulls to pr-refs rows. */
 export function projectPrRefs(read: GhJsonRead): PrRefRow[] | null {
   if (read.kind !== "ok") return null;
-  const items = jqIterate(read.data);
+  const items = eachValue(read.data);
   if (items === null) return null;
   const out: PrRefRow[] = [];
   for (const e of items) {

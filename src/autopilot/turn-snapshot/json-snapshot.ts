@@ -101,7 +101,7 @@ export interface BuiltTurnSnapshot {
 // ---------------------------------------------------------------------------
 
 /** `int(str(raw).strip())`, else `0`. */
-export function pyIntOr0(raw: string | null | undefined): number {
+export function intOrZero(raw: string | null | undefined): number {
   if (raw === null || raw === undefined) return 0;
   const m = /^\s*([+-]?\d+(?:_\d+)*)\s*$/.exec(raw);
   return m ? Number((m[1] as string).replace(/_/g, "")) : 0;
@@ -115,7 +115,7 @@ const FROMISO =
  * extended/basic calendar forms (naive = local time), or `null` when Python
  * would raise. Week dates and other exotic forms read as unparseable.
  */
-export function pyFromIsoformatEpoch(raw: string): number | null {
+export function isoEpochSeconds(raw: string): number | null {
   const m = FROMISO.exec(raw);
   if (!m) return null;
   const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
@@ -151,13 +151,13 @@ export function pyFromIsoformatEpoch(raw: string): number | null {
 export function staleDays(raw: string, days: number, nowMs: number): boolean {
   const s = raw.trim();
   if (s === "") return true;
-  const then = pyFromIsoformatEpoch(s.replaceAll("Z", "+00:00"));
+  const then = isoEpochSeconds(s.replaceAll("Z", "+00:00"));
   if (then === null) return true;
   return nowMs / 1000 - then > days * 86400;
 }
 
 /** `float(raw)` for a finite decimal, else `null` (absent: the previous value is kept). */
-function pyFiniteFloat(raw: string): number | null {
+function finiteDecimal(raw: string): number | null {
   const s = raw.trim();
   if (!/^[+-]?(?:\d(?:_?\d)*(?:\.(?:\d(?:_?\d)*)?)?|\.\d(?:_?\d)*)(?:[eE][+-]?\d(?:_?\d)*)?$/.test(s)) return null;
   const n = Number(s.replace(/_/g, ""));
@@ -207,7 +207,7 @@ type OrchBoardCountKey = "needs_qa" | "ready_for_agent" | "needs_triage" | "need
 function orchBoardCount(s: OrchBoardSnapshot, key: OrchBoardCountKey): number {
   if (s.counts.source === "none") return 0;
   const v = (s.counts.values as Readonly<Record<string, unknown>>)[key];
-  return pyIntOr0(v === undefined ? undefined : JSON.stringify(v));
+  return intOrZero(v === undefined ? undefined : JSON.stringify(v));
 }
 
 /** A Target count line's value (`<key>=<value>`, the last one wins), or `0` when not printed. */
@@ -215,7 +215,7 @@ function targetCount(s: TargetBoardSnapshot, key: string): number {
   if (!s.counts.ok) return 0;
   let raw: string | undefined;
   for (const [k, v] of s.counts.value) if (k === key) raw = v;
-  return pyIntOr0(raw);
+  return intOrZero(raw);
 }
 
 /**
@@ -283,7 +283,7 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
 
     health_fail: healthFail(v.health),
     scout_walk_due: staleDays(lastWalk, 7, opts.nowMs),
-    scout_board_saturated: pyIntOr0(v.scout.openEnhancements.ok ? v.scout.openEnhancements.value : "0") > 20,
+    scout_board_saturated: intOrZero(v.scout.openEnhancements.ok ? v.scout.openEnhancements.value : "0") > 20,
     scout_alert_eligible_count: v.scoutAlerts.eligible.ok ? v.scoutAlerts.eligible.value : 0,
 
     orch_backfill_idle: board.backfillIdle,
@@ -358,7 +358,7 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
   );
   blobs.candidate_exclusions = v.picks.candidateExclusions.map((r) => ({ ...r }));
 
-  const spend = pyFiniteFloat(v.scout.spendUsd);
+  const spend = finiteDecimal(v.scout.spendUsd);
   if (spend === null) degraded.push({ collector: "scout", field: "scout_spend_usd_today", reason: DEGRADE.NOT_NUMERIC });
 
   const doc: TurnSnapshotDoc = {

@@ -475,7 +475,7 @@
   "test/turn-snapshot-json.test.mts": 13,
   "test/turn-snapshot-orch-board.test.mts": 15,
   "test/turn-snapshot-passthrough.test.mts": 7,
-  "test/turn-snapshot-picks.test.mts": 15,
+  "test/turn-snapshot-picks.test.mts": 16,
   "test/turn-snapshot-pr-gate.test.mts": 11,
   "test/turn-snapshot-remaining.test.mts": 18,
   "test/turn-snapshot-target-board.test.mts": 15,

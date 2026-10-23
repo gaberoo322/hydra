@@ -231,7 +231,7 @@ export function hasUnknownMergeState(first: readonly unknown[]): boolean {
 }
 
 /** A Python dict key for a JSON value, or `null` when Python would raise `unhashable type`. */
-function pyKey(v: unknown): string | null {
+function rowKey(v: unknown): string | null {
   if (v === undefined || v === null) return "None";
   if (typeof v === "boolean") return `n:${v ? 1 : 0}`;
   if (typeof v === "number") return `n:${v}`;
@@ -265,7 +265,7 @@ export function applyMergeStateRepoll(first: readonly unknown[], repoll: GhJsonR
   const fresh = new Map<string, unknown>();
   for (const p of rowsOf(repoll.data)) {
     if (!("number" in p)) continue;
-    const key = pyKey(p.number);
+    const key = rowKey(p.number);
     if (key === null) return { kind: "reducer-failed", rows: first };
     fresh.set(key, p.mergeStateStatus);
   }
@@ -278,7 +278,7 @@ export function applyMergeStateRepoll(first: readonly unknown[], repoll: GhJsonR
       rows.push(raw);
       continue;
     }
-    const key = pyKey(p.number);
+    const key = rowKey(p.number);
     if (key === null) return { kind: "reducer-failed", rows: first };
     const next = fresh.get(key);
     if (isSet(next) && next !== "UNKNOWN") {
