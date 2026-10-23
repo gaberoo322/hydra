@@ -818,6 +818,46 @@
     },
     {
       "builder": null,
+      "pattern": "hydra:dispatches:subagent:index",
+      "params": [],
+      "callSites": 1,
+      "accessors": [
+        "src/redis/dispatches.ts"
+      ],
+      "servedBy": [
+        "GET /api/dispatches/:dispatchId/transcript",
+        "POST /api/dispatches/subagent"
+      ],
+      "home": "/api/dispatches/:dispatchId/transcript",
+      "retired": false,
+      "source": {
+        "path": "src/redis/dispatches.ts",
+        "line": 242
+      }
+    },
+    {
+      "builder": null,
+      "pattern": "hydra:dispatches:subagent:{sessionId}",
+      "params": [
+        "sessionId"
+      ],
+      "callSites": 1,
+      "accessors": [
+        "src/redis/dispatches.ts"
+      ],
+      "servedBy": [
+        "GET /api/dispatches/:dispatchId/transcript",
+        "POST /api/dispatches/subagent"
+      ],
+      "home": "/api/dispatches/:dispatchId/transcript",
+      "retired": false,
+      "source": {
+        "path": "src/redis/dispatches.ts",
+        "line": 238
+      }
+    },
+    {
+      "builder": null,
       "pattern": "hydra:holdback:baseline:{commitSha}",
       "params": [
         "commitSha"

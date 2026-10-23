@@ -196,6 +196,8 @@
           "inlined hydra:autopilot:signal-last-fired",
           "inlined hydra:design-concept:index",
           "inlined hydra:design-concept:{anchorRef}",
+          "inlined hydra:dispatches:subagent:index",
+          "inlined hydra:dispatches:subagent:{sessionId}",
           "inlined hydra:holdback:baseline:{commitSha}",
           "inlined hydra:holdback:reverts:{date}",
           "inlined hydra:metrics:github-api:rate-limit-backoff",
