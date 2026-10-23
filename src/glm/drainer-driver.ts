@@ -451,6 +451,12 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
   const provider = isProvidersFailure(providersResult)
     ? undefined
     : providersResult.providers.find((p) => p.id === gate.provider);
+  if (gate.provider !== undefined && provider === undefined) {
+    // INV-4 fail-closed: a gate selection that resolves to no configured provider
+    // is a driver fault, never a silent fall-through to the first provider.
+    log(`ERROR gate selected provider "${gate.provider}" which is not in the worker-provider list — skip tick`);
+    return { gate, pick: null, finish: null };
+  }
 
   // Pick: stale-claim recovery, candidate pick, resume detection.
   const pick = await runPick(deps.pick ?? buildDefaultPickDeps(deps.env));

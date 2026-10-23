@@ -953,7 +953,7 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
     stderr: "",
   });
 
-  function finishHarness(commits: number, prBody: string | null) {
+  function finishHarness(commits: number, prBody: string | null, o: { preflightOk?: boolean; prOk?: boolean } = {}) {
     const calls: string[] = [];
     const files = new Map<string, string>();
     if (prBody !== null) files.set(BODY, prBody);
@@ -967,7 +967,8 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
         return { ok: true };
       },
       viewIssueTitle: async () => "Fake title",
-      createPr: async () => ({ ok: true, url: "https://github.com/x/y/pull/9" }),
+      createPr: async () =>
+        o.prOk === false ? { ok: false, stderr: "boom" } : { ok: true, url: "https://github.com/x/y/pull/9" },
       listOpenPrs: async () => ({ ok: true, rows: [] }),
       runGit: async (args) => {
         if (args[0] === "rev-list") return { ok: true, stdout: String(commits), stderr: "" };
@@ -978,7 +979,10 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
       pushBranchUpstream: async () => ({ ok: true }),
       deleteRemoteBranch: async () => ({ ok: true }),
       remoteBranchExists: async () => true,
-      preflight: async (o) => ({ ok: true, checkedPaths: o.changedPaths.length }),
+      preflight: async (x) =>
+        o.preflightOk === false
+          ? { ok: false, code: "glm-preflight-blocked" as const, violations: [], message: "fake violation" }
+          : { ok: true, checkedPaths: x.changedPaths.length },
       readFileIfExists: (p) => files.get(p) ?? null,
       writeFile: (p, c) => {
         calls.push(`write:${p}`);
@@ -1048,6 +1052,37 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
     b.deps.config = { ...b.deps.config, quotaResetTzOverride: "+0000" };
     await runFinish(b.deps, input(ZAI_P, raw));
     assert.equal(b.files.get(quotaBlockFilePath(CAP_DIR, "zai")), `${Date.parse("2026-10-23T08:00:00Z") / 1000}\n`);
+  });
+
+  test("INV-7: a 429 is recorded on withhold-preflight-blocked, release-after-failed-pr and open-pr too", async () => {
+    const raw = JSON.stringify({ ok: true, code: 1, stdout: "Request rejected (429)", stderr: "" });
+    const want = `${NOW_SEC + 3600}\n`;
+    const cases: Array<[string, ReturnType<typeof finishHarness>]> = [
+      ["withhold-preflight-blocked", finishHarness(1, "b\n", { preflightOk: false })],
+      ["release-after-failed-pr", finishHarness(1, "b\n", { prOk: false })],
+      ["open-pr", finishHarness(1, "b\n")],
+    ];
+    for (const [action, h] of cases) {
+      const r = await runFinish(h.deps, input(KIMI_P, raw));
+      assert.equal(r.action, action);
+      assert.equal(r.quotaBlockedUntil, NOW_SEC + 3600, action);
+      assert.equal(h.files.get(quotaBlockFilePath(CAP_DIR, "kimi")), want, action);
+    }
+  });
+
+  test("a NON-z.ai 429 text (no 'Request rejected') still blocks the selected provider; a bare '429' number does not", async () => {
+    for (const text of [
+      "API Error: 429 Too Many Requests",
+      '{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}',
+      "HTTP 429: quota exceeded for this key",
+    ]) {
+      const h = finishHarness(0, null);
+      await runFinish(h.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 1, stdout: text, stderr: "" })));
+      assert.equal(h.files.get(quotaBlockFilePath(CAP_DIR, "kimi")), `${NOW_SEC + 3600}\n`, text);
+    }
+    const n = finishHarness(0, null);
+    await runFinish(n.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 1, stdout: "edited file-429.ts, 4290 lines", stderr: "" })));
+    assert.equal(n.files.has(quotaBlockFilePath(CAP_DIR, "kimi")), false);
   });
 
   test("fallback-only providers always take the 60-minute fallback", async () => {

@@ -168,13 +168,23 @@ export function parseAuthorOutcome(raw: string, exitCode: number): AuthorOutcome
 // Pure rules — the z.ai quota block (issue #4273, D16)
 // ---------------------------------------------------------------------------
 
+/** True for z.ai's literal 429 or a generic provider 429 / rate_limit_error (issue #4841 INV-7). */
+function is429Rejection(text: string): boolean {
+  if (text.includes("Request rejected (429)")) return true;
+  if (/rate_limit_error/i.test(text)) return true;
+  return (
+    /\b429\b[^\n]{0,120}(rate.?limit|quota|too many requests|exceeded)/i.test(text) ||
+    /(rate.?limit|quota|too many requests|exceeded)[^\n]{0,120}\b429\b/i.test(text)
+  );
+}
+
 /**
  * Parse z.ai's 429 payload into the block instant, or `null` when the text is
  * not a quota rejection. Pure: `nowSec` is injected, the wall clock is read in
  * `tzOffset` (a `[+-]HHMM` string, default `+0800` via
  * `config.quotaResetTzOffset`).
  *
- * Only a literal `Request rejected (429)` sets a block. On a 429 the FIRST
+ * Only a 429 rejection (z.ai literal `Request rejected (429)` or a generic rate-limit 429) sets a block. On a 429 the FIRST
  * `reset at YYYY-MM-DD HH:MM:SS` clause is read as a wall clock in
  * `tzOffset`; no clause, an out-of-range clause, an unparseable offset, or an
  * instant at or before `nowSec` gives `nowSec + 3600`. A future instant is
@@ -186,7 +196,7 @@ export function parseQuotaBlockStdout(
   nowSec: number,
   tzOffset: string,
 ): number | null {
-  if (typeof text !== "string" || !text.includes("Request rejected (429)")) return null;
+  if (typeof text !== "string" || !is429Rejection(text)) return null;
   const fallback = nowSec + QUOTA_BLOCK_FALLBACK_SECONDS;
   const m = /reset at (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/.exec(text);
   if (!m) return fallback;

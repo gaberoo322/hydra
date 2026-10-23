@@ -44,6 +44,19 @@ export function isFirstPartyModelName(model: string): boolean {
   return ANTHROPIC_SLOT_ALIASES.includes(n) || /^claude-/i.test(n);
 }
 
+/**
+ * Env names a provider's `tokenEnv` may never be: they are stripped from, or
+ * overwritten in, the launched child's env (`buildGlmEnv`), so naming one would
+ * strip the selected provider's own credential or alias another channel.
+ * (`ANTHROPIC_AUTH_TOKEN` is additionally allowed for the legacy `zai` id only.)
+ */
+const RESERVED_TOKEN_ENV_NAMES: readonly string[] = Object.freeze([
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN_FILE",
+  "ANTHROPIC_BASE_URL",
+  "API_TIMEOUT_MS",
+]);
+
 const quotaResetSchema = z.discriminatedUnion("format", [
   z.object({
     format: z.literal("zai-wallclock"),
@@ -111,12 +124,24 @@ export function parseWorkerProviders(text: string): WorkerProvidersResult {
   const issues: string[] = [];
   const ids = new Set<string>();
   const models = new Set<string>();
+  const tokenEnvs = new Set<string>();
   for (const p of providers) {
     if (ids.has(p.id)) issues.push(`duplicate provider id "${p.id}"`);
     ids.add(p.id);
     const m = p.model.trim().toLowerCase();
     if (models.has(m)) issues.push(`duplicate provider model "${p.model}"`);
     models.add(m);
+    if (tokenEnvs.has(p.tokenEnv)) {
+      issues.push(`duplicate provider tokenEnv "${p.tokenEnv}" (one credential per provider, INV-9)`);
+    }
+    tokenEnvs.add(p.tokenEnv);
+    if (RESERVED_TOKEN_ENV_NAMES.includes(p.tokenEnv)) {
+      issues.push(`provider "${p.id}": tokenEnv "${p.tokenEnv}" is a reserved/stripped env name`);
+    } else if (p.tokenEnv === "ANTHROPIC_AUTH_TOKEN" && p.id !== LEGACY_PROVIDER_ID) {
+      issues.push(
+        `provider "${p.id}": tokenEnv "ANTHROPIC_AUTH_TOKEN" is reserved for the "${LEGACY_PROVIDER_ID}" provider`,
+      );
+    }
   }
   if (issues.length > 0) return invalid(issues);
   return { ok: true, providers };
