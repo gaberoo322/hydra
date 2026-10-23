@@ -1854,7 +1854,6 @@
           "HYDRA_REDIS_HOST",
           "HYDRA_REDIS_PORT",
           "HYDRA_TARGET_REPO",
-          "HYDRA_TOKEN_USD_RATE",
           "REPO"
         ],
         "classes": [

@@ -7,7 +7,7 @@
  * validates it against {@link TurnSnapshotSchema} on emit, and prints it. A
  * validation failure never crashes the turn and never discards the whole
  * document: each invalid field is REPAIRED — a signal takes its
- * {@link ALL_DEGRADED_SIGNALS} value, a blob / `scout_spend_usd_today` /
+ * {@link ALL_DEGRADED_SIGNALS} value, a blob /
  * `observability` / `degraded` entry is dropped — with a `degraded` marker,
  * and the rest survives. Only a document still invalid after that (a
  * structural fault) is replaced by the all-degraded document, which is also
@@ -273,8 +273,6 @@ export const TurnSnapshotSchema = z
     generated_at: z.string().min(1),
     signals: SignalsSchema,
     blobs: BlobsSchema,
-    /** `scout_spend_usd_today` (scout daily cost cap); absent = not numeric this turn (previous value kept). */
-    scout_spend_usd_today: z.number().nonnegative().optional(),
     degraded: z.array(DegradedSchema),
     validation: ValidationSchema,
     /** Collector values with no decide.py reader (the operator's per-turn record). */

@@ -10,9 +10,7 @@
   ],
   "date": "2026-10-07",
   "orchBoardDegraded": "0",
-  "env": {
-    "HYDRA_TOKEN_USD_RATE": "3"
-  },
+  "env": {},
   "gh": {
     "issue-list:enhancement:number": {
       "json": [
@@ -186,7 +184,6 @@
           "value": "4"
         },
         "tokensToday": "12345",
-        "spendUsd": "0.037035",
         "mirrored": {
           "ok": true,
           "value": true

@@ -210,7 +210,6 @@ export type CliDeps = Omit<PrGateDeps, "ghListLimit" | "github"> & {
   /** The slice-5B collectors' non-gh/HTTP deps (#4933); absent → those collectors are a usage error. */
   readonly remaining?: {
     readonly redis: TurnSnapshotRedis;
-    readonly env: { readonly HYDRA_TOKEN_USD_RATE?: string };
   };
   /** The Target-board family's deps (slice 4), built lazily — only a Target collector resolves the Target realm. */
   readonly target?: () => TargetCliDeps;
@@ -373,8 +372,7 @@ export async function main(argv: readonly string[], deps: CliDeps, io: CliIo): P
         github: deps.github,
         hydra: deps.hydra ?? createTurnSnapshotHydra(),
         redis: remaining.redis,
-        env: remaining.env,
-        now: deps.now,
+          now: deps.now,
         ghListLimit: args.ghListLimit,
         orchBoardDegraded: args.orchBoardDegraded,
       });
@@ -458,7 +456,6 @@ async function runJsonSnapshot(args: CliArgs, deps: CliDeps, io: CliIo): Promise
       github: deps.github,
       hydra,
       redis: remaining.redis,
-      env: remaining.env,
       now: deps.now,
       ghListLimit: args.ghListLimit,
       orchBoardDegraded: orchBoardDegraded ? "1" : "0",
@@ -562,7 +559,6 @@ export function productionDeps(): CliDeps {
     },
     remaining: {
       redis: createTurnSnapshotRedis(),
-      env: { HYDRA_TOKEN_USD_RATE: process.env.HYDRA_TOKEN_USD_RATE },
     },
     target: () => productionTargetDeps({ hydra }),
   };
