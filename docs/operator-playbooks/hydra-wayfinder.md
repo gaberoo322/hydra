@@ -312,6 +312,15 @@ maps exist and points back here, so this skill owns the map lifecycle end to end
   children stamped `Expected tier: N` (the #3125 → ADR-0028 → epic #3285 pattern;
   ADR-0029 Decision 4 / survey F7). `/to-spec` → `/to-tickets` is **not** the epic
   route — reserve it for the spec-destination route below.
+- **Destination = Target work (an implementation epic on the Target board)** →
+  run **`/hydra-tickets target`** (issue #5168). The map stays on
+  `gaberoo322/hydra`, because the planning record belongs to the builder. The
+  epic and its tracer-bullet slices are filed on `$TARGET_GH_REPO`, resolved
+  through the target seam, with no tier stamp and `money-critical` wherever a
+  slice touches the Target risk surface. Its unblocked slices become
+  `ready-for-agent` for `dev_target`, and its dependent slices `blocked`.
+  This is also the route a `research_target` milestone-scoping escalation
+  points at.
 - **Destination = a spec** → run **`/to-spec`**, synthesising the map's
   Decisions-so-far into the spec, then **`/to-tickets`** to slice it into
   tracer-bullet build issues for `hydra-dev`.

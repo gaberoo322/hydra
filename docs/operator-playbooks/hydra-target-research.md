@@ -281,6 +281,60 @@ file_if_new "<title>" "<context>" needs-triage
 
 **Target: total active open board ≥30.**
 
+### 5. Escalate milestone scoping to the operator — never let it die in the report (issue #5168)
+
+This report is a dispatched subagent's final message, and **nobody reads it**:
+the parent run has usually exited by the time it lands. So when the cycle
+concludes that the next work **needs operator scoping** rather than a ticket,
+saying so here is not enough. Examples:
+
+- an unchartered milestone
+- a charter behind the money-critical or credential fences
+- an architectural or graduation decision
+- a "deliberately not filed" item that waits on the operator
+
+Record it once, durably, where `/hydra-review` §1.5 will walk it: ONE open
+`ready-for-human` issue on `$TARGET_GH_REPO` with the exact title
+**`Plan the next Target milestone`**. Do this whenever **0 `ready-for-agent`
+items remain open after Step 4** and at least one such candidate exists. A
+cycle that filed buildable work, or found no candidate, skips this step.
+
+```bash
+REPO="$TARGET_GH_REPO"
+TITLE="Plan the next Target milestone"
+# Exact-title dedup over the REST search pool (ADR-0031 Decision 6).
+EXISTING=$(gh api -X GET search/issues \
+  -f q="repo:$REPO is:issue is:open in:title \"$TITLE\"" \
+  --jq "[.items[] | select(.title == \"$TITLE\")] | first | .number // empty")
+BODY_FILE=$(mktemp)
+cat > "$BODY_FILE" <<'EOF'
+<fill in: the current milestone and what is left of it; then ONE bullet per
+candidate — what it is, why it needs the operator (which fence or decision),
+and the vision decision vector it serves>
+
+**Route.** Chart it with `/hydra-wayfinder` on gaberoo322/hydra. Once the
+map's Destination is clear, hand it off with `/hydra-tickets target`: that
+files the epic and its tracer-bullet slices here, unblocked slices
+`ready-for-agent`. For a single decision, answer it in a comment instead and
+relabel this issue.
+
+_Filed by hydra-target-research (issue #5168). Later cycles comment here instead of opening a new issue._
+EOF
+if [ -z "$EXISTING" ]; then
+  gh issue create --repo "$REPO" --title "$TITLE" --body-file "$BODY_FILE" --label ready-for-human
+else
+  # Refresh, don't duplicate. Skip if it was updated in the last 24h, so a
+  # 6-hourly cycle does not stack comments.
+  FRESH=$(gh api "repos/$REPO/issues/$EXISTING" --jq '((now - (.updated_at | fromdateiso8601)) < 86400)')
+  [ "$FRESH" = "true" ] || gh issue comment "$EXISTING" --repo "$REPO" --body-file "$BODY_FILE"
+fi
+```
+
+Fill the body from this cycle's own findings, not from the template prose. The
+operator resolving the issue (charting the map, or answering in a comment and
+closing it) is what turns the next research cycle's empty frontier into
+buildable tickets.
+
 ## Phase 5: Report
 
 ```
@@ -304,6 +358,7 @@ file_if_new "<title>" "<context>" needs-triage
 
 ### Operator actions needed
 - ...
+- Milestone scoping: <issue # opened / refreshed under Step 5, or "none needed">
 ```
 
 ## Slot lifecycle events — PostToolUse hook (issue #671)

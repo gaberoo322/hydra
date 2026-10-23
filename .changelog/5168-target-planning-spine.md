@@ -1,0 +1,1 @@
+- feat(planning): hydra-tickets gains a target scope that files an epic + tracer-bullet slices on the Target board (risk-surface money-critical stamping, blocked dependents); wayfinder hands Target maps off to it; research_target escalates milestone scoping as one ready-for-human issue (#5168)

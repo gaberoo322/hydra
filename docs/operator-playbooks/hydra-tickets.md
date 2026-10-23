@@ -1,8 +1,9 @@
 ---
 name: hydra-tickets
-description: AFK overlay on the upstream to-tickets base — turns a resolved plan into one parent epic plus N tracer-bullet child issues on gaberoo322/hydra, rendered deterministically through the hydra-prd renderer library. Zero AskUserQuestion.
+description: AFK overlay on the upstream to-tickets base — turns a resolved plan into one parent epic plus N tracer-bullet child issues on gaberoo322/hydra (or the Target board, `target` scope), rendered deterministically through the hydra-prd renderer library. Zero AskUserQuestion.
 when_to_use: "When a resolved plan or research finding needs to become tracked work, or the operator says 'ticket this'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
+arguments: [scope]
 compose_base: _vendor/to-tickets.md
 supersedes:
   - "### 4. Quiz the user"
@@ -70,6 +71,40 @@ deterministic and unit-tested (`test/hydra-prd-template.test.mts`).
 The parent body must stay parseable by `hydra-epic-close`, which sweeps an epic
 closed once every referenced child is CLOSED — keep the `## Sub-issues` checklist
 shape the renderer emits.
+
+## Scope: the Orchestrator board (default) or the Target board
+
+`scope` is `orch` (default) or `target`. Only a positional token that is exactly
+`target` selects the Target; anything else leaves `orch` in force. Everything
+above is the `orch` contract. In `target` scope the epic and its slices are filed
+on the **Target board** (issue #5168), and four things change:
+
+1. **Resolve the Target seam first.** Never write a Target repo literal.
+
+@include _fragments/target-seam-preamble.md
+
+2. **Render in Target scope.** Pass `{ kind: "target", riskSurface }` as the last
+   argument of `renderChildBody()` and `childLabels()`, where `riskSurface` is
+   `JSON.parse($TARGET_RISK_SURFACE_JSON)`. A slice on the risk surface then gets
+   a `Money-critical: yes` line and the `money-critical` label, which the
+   Target's automerge fence reads. **Skip step 5 above (`/api/tier`)**: the tier
+   ladder is Orchestrator-only, and the Target derives its depth from the risk
+   surface instead. `orch` scope keeps the default scope argument.
+3. **Publish on `$TARGET_GH_REPO`.** Every `gh issue create` / `gh issue edit`
+   carries `--repo "$TARGET_GH_REPO"`. The parent takes `enhancement` only, not
+   `parentLabels()`. On the Target board `needs-triage` is
+   `hydra-target-sweep`'s promote lane, so a triage label would queue the epic
+   itself for a build.
+4. **Lane labels.** Apply `childLabels(slice, scope)` as returned: in Target
+   scope it already gives a slice with a `dependsOn` edge **`blocked`** instead
+   of `ready-for-agent` (never bare). Its rendered
+   `- Blocked by #N` lines are what `hydra-target-sweep` Step 3 reads to
+   promote it to `ready-for-agent` once the blocker closes. The Target build
+   picks the oldest `ready-for-agent` issue without reading blockers, so a
+   blocked slice must never carry that label.
+
+`hydra-epic-close` sweeps only the Orchestrator board, so a Target epic stays
+open until the operator closes it.
 
 ## Carried forward from the excised base step 5
 

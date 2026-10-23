@@ -582,7 +582,7 @@
       "name": "hydra-tickets",
       "path": "docs/operator-playbooks/hydra-tickets.md",
       "stage": "tickets",
-      "description": "AFK overlay on the upstream to-tickets base — turns a resolved plan into one parent epic plus N tracer-bullet child issues on gaberoo322/hydra, rendered deterministically through the hydra-prd renderer library. Zero AskUserQuestion.",
+      "description": "AFK overlay on the upstream to-tickets base — turns a resolved plan into one parent epic plus N tracer-bullet child issues on gaberoo322/hydra (or the Target board, `target` scope), rendered deterministically through the hydra-prd renderer library. Zero AskUserQuestion.",
       "dispatchedBy": [
         {
           "class": "tickets_orch",
@@ -590,7 +590,8 @@
         }
       ],
       "composedFrom": [
-        "docs/operator-playbooks/_vendor/to-tickets.md"
+        "docs/operator-playbooks/_vendor/to-tickets.md",
+        "docs/operator-playbooks/_fragments/target-seam-preamble.md"
       ],
       "route": "/docs/skill/hydra-tickets",
       "source": {
