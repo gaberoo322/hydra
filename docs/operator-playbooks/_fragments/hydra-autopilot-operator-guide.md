@@ -146,8 +146,10 @@ Inspect: `systemctl --user list-timers | grep pace-gate`,
 Each launched run is still sized for up to 8h of work (the service's 9h
 `RuntimeMaxSec` + 8h internal budget); the "already running" skip in step 1
 prevents the ~15-min timer from ever stacking a second run on top of a live
-one. The autopilot self-terminates on `idle_drain_turns` when there's nothing
-to do. The L2 decision brain in `decide.py` benefits from a stable in-process
+one. When there is nothing to do the run no longer self-terminates on idle
+turns (that arm was removed with term-check, #5070); it ends on the budget,
+clock, quota or wait-only idle-drain causes in `decide.py`'s `_check_termination`.
+The L2 decision brain in `decide.py` benefits from a stable in-process
 view of pipeline state across many turns, so the Gate launches one long run
 and lets it run to budget/clock/idle rather than firing many short bursts.
 
