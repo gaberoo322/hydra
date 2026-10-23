@@ -64,7 +64,7 @@ beforeEach(() => {
   mkdirSync(join(fakeRoot, ".git"), { recursive: true });
   writeFileSync(join(fakeRoot, ".git", "config"), "[core]\n");
   const fake = join(binDir, "redis-cli");
-  writeFileSync(fake, `#!/usr/bin/env bash\necho "$@" >> "${xaddLog}"\n[ -n "$FAKE_XADD_FAIL" ] || echo "${FAKE_XADD_REPLY:-1-0}"\n`);
+  writeFileSync(fake, `#!/usr/bin/env bash\necho "$@" >> "${xaddLog}"\n[ -n "$FAKE_XADD_FAIL" ] || echo "\${FAKE_XADD_REPLY:-1-0}"\n`);
   chmodSync(fake, 0o755);
 });
 
