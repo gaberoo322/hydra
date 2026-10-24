@@ -11,7 +11,7 @@
  *  4. getStatsRollup — clamps window to [1, MAX_ROLLUP_WINDOW_DAYS].
  *  5. Unknown metric throws RangeError.
  *  6. toIsoDay is UTC.
- *  7. recordCalendarDispatch / recordDispatch per-candidate counts land in
+ *  7. recordCalendarDispatch per-candidate counts land in
  *     the rollup, stamp the right cooldown keys, and never auto-translate
  *     an outcome into a count (issue #4556).
  */
@@ -30,13 +30,11 @@ const {
 } = await import("../src/scout/stats.ts");
 const {
   recordCalendarDispatch,
-  recordDispatch,
   listDispatchAudits,
 } = await import("../src/scout/dispatch-audit.ts");
 const {
   getScoutCategoryLastWalked,
   getScoutLastCalendarWalk,
-  getScoutPatternLastFired,
 } = await import("../src/redis/scout.ts");
 
 let testRedis: any = null;
@@ -178,9 +176,9 @@ describe("scout-stats", () => {
 //
 // Root cause of the invisible calendar walks: the per-day stat hashes were
 // written by NOBODY (incrStat had zero production callers), so
-// GET /api/scout/stats read 0 for both trigger paths. recordCalendarDispatch
-// / recordDispatch now forward an explicit per-candidate counts map. These
-// tests pin: the audit XADD + cooldown-stamp semantics of both writers, that
+// GET /api/scout/stats read 0 for the calendar trigger path. recordCalendarDispatch
+// now forwards an explicit per-candidate counts map. These
+// tests pin: the audit XADD + cooldown-stamp semantics of the writer, that
 // ONLY explicit counts move the rollup, and the junk-count validation
 // posture (skip, never throw — the audit write has already landed).
 //
@@ -189,7 +187,7 @@ describe("scout-stats", () => {
 // under a parallel file run never contaminate these assertions.
 // ---------------------------------------------------------------------------
 
-describe("scout-stats: recordCalendarDispatch / recordDispatch counts wiring (issue #4556)", () => {
+describe("scout-stats: recordCalendarDispatch counts wiring (issue #4556)", () => {
   beforeEach(async () => {
     await cleanDispatchAuditKeys();
   });
@@ -198,11 +196,9 @@ describe("scout-stats: recordCalendarDispatch / recordDispatch counts wiring (is
   // hash key is deterministic and window math is exact.
   const NOW = new Date("2026-05-19T12:00:00Z");
 
-  test("recordCalendarDispatch (filed): one triggeredBy=calendar audit entry, category cooldown stamped, no class-walk or pattern stamp", async () => {
+  test("recordCalendarDispatch (filed): one triggeredBy=calendar audit entry, category cooldown stamped, no class-walk stamp", async () => {
     const cat = "calstat-a";
     const classWalkBefore = await getScoutLastCalendarWalk();
-    const r = getTestRedis();
-    const patternKeysBefore = new Set(await r.keys("hydra:scout:pattern-last-fired:*"));
 
     await recordCalendarDispatch(cat, "filed", { candidates: 5 }, "walk done", NOW, 0.01);
 
@@ -221,8 +217,6 @@ describe("scout-stats: recordCalendarDispatch / recordDispatch counts wiring (is
     // keys are shared with sibling test files, so assert unchanged state,
     // never a bare null/empty.
     assert.equal(await getScoutLastCalendarWalk(), classWalkBefore);
-    const patternKeysAfter = await r.keys("hydra:scout:pattern-last-fired:*");
-    assert.deepEqual(patternKeysAfter.filter((k: string) => !patternKeysBefore.has(k)), []);
   });
 
   test("recordCalendarDispatch counts move getStatsRollup: 5 evaluated candidates are visible as totals.candidates >= 5", async () => {
@@ -245,33 +239,6 @@ describe("scout-stats: recordCalendarDispatch / recordDispatch counts wiring (is
     // category never even appears in the rollup.
     const rollup = await getStatsRollup(7, NOW);
     assert.equal(rollup[cat], undefined);
-  });
-
-  test("recordDispatch trailing counts populate the rollup identically; audit + pattern/category stamps unchanged", async () => {
-    const cat = "calstat-d";
-    await recordDispatch(
-      { pattern: "calstat-pat", category: cat, alertId: "alert-calstat-1" },
-      "filed",
-      "1 issue filed",
-      NOW,
-      0.02,
-      { candidates: 3, filed: 1 },
-    );
-
-    const rollup = await getStatsRollup(7, NOW);
-    assert.equal(rollup[cat].candidates, 3);
-    assert.equal(rollup[cat].filed, 1);
-
-    // Audit entry carries the alert: prefix (existing behaviour).
-    const audits = (await listDispatchAudits(1000)).filter((e) => e.category === cat);
-    assert.equal(audits.length, 1);
-    assert.equal(audits[0].triggeredBy, "alert:calstat-pat");
-    assert.equal(audits[0].detail, "1 issue filed");
-
-    // Both existing stamps still land (per-pattern dedup + shared category
-    // cooldown) — interfaceImpact=extend, not change.
-    assert.equal(await getScoutPatternLastFired("calstat-pat"), NOW.toISOString());
-    assert.equal(await getScoutCategoryLastWalked(cat), NOW.toISOString());
   });
 
   test("recordCalendarDispatch validation: empty category throws TypeError; junk counts entries are skipped not thrown", async () => {

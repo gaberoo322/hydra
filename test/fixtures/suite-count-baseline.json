@@ -409,8 +409,6 @@
   "test/schema-seam-check.test.mts": 4,
   "test/schemas-common.test.mts": 7,
   "test/schemas-dispatches.test.mts": 3,
-  "test/scout-alert-classifier.test.mts": 4,
-  "test/scout-alert-listener.test.mts": 8,
   "test/scout-calendar-walk.test.mts": 4,
   "test/scout-constant-drift.test.mts": 1,
   "test/scout-dispatch-audit.test.mts": 1,

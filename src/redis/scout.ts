@@ -8,8 +8,6 @@
  *                               `hydra:scout:category-last-walked:<slug>`)
  *   - Spend mirror             (`hydra:scout:spend:<DATE>`)
  *   - Per-tool seen-list       (`hydra:scout:tools-considered:<slug>`)
- *   - Alert listener state     (`hydra:scout:alert-cursor`,
- *                               `hydra:scout:pattern-last-fired:<pattern>`)
  *   - Dispatch audit stream    (`hydra:scout:dispatches`)
  *
  * Callers (src/scout/*.ts, src/api/scout.ts) import these typed accessors
@@ -101,30 +99,6 @@ export async function getScoutToolsConsidered(slug: string): Promise<Record<stri
 
 export async function setScoutToolsConsidered(slug: string, ...flat: string[]): Promise<void> {
   await hashSet(redisKeys.scoutToolsConsidered(slug), ...flat);
-}
-
-// ---------------------------------------------------------------------------
-// Alert listener state
-// ---------------------------------------------------------------------------
-
-export async function getScoutAlertCursor(): Promise<string | null> {
-  return getString(redisKeys.scoutAlertCursor());
-}
-
-export async function setScoutAlertCursor(iso: string): Promise<void> {
-  await setString(redisKeys.scoutAlertCursor(), iso);
-}
-
-export async function getScoutPatternLastFired(pattern: string): Promise<string | null> {
-  return getString(redisKeys.scoutPatternLastFired(pattern));
-}
-
-export async function setScoutPatternLastFired(
-  pattern: string,
-  iso: string,
-  ttlSeconds: number,
-): Promise<void> {
-  await setString(redisKeys.scoutPatternLastFired(pattern), iso, ttlSeconds);
 }
 
 // ---------------------------------------------------------------------------

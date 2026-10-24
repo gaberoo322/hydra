@@ -26,7 +26,6 @@
   "health_fail": false,
   "scout_walk_due": true,
   "scout_board_saturated": true,
-  "scout_alert_eligible_count": 0,
   "orch_backfill_idle": false,
   "arch_board_saturated": true,
   "hitl_grill_open": 2,

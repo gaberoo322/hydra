@@ -1,18 +1,18 @@
 /**
  * ScoutDispatchAudit — the named boundary for the `hydra:scout:dispatches`
- * audit stream (issue #1972, extracted from `alert-listener.ts`).
+ * audit stream (issue #1972). The alert-driven trigger was retired in
+ * #5054; the calendar walk (`recordCalendarDispatch`, issue #4556) is the
+ * only writer of this stream.
  *
- * Both scout trigger paths — alert-driven via `recordDispatch` and
- * calendar-driven via `recordCalendarDispatch` (issue #4556) — record a
- * dispatch outcome to this stream. This module concentrates the audit
+ * This module concentrates the audit
  * concern — wire-field serialisation, the MAXLEN policy, the XREVRANGE
  * parse, and the at-most-once write helpers — behind one named interface
- * so callers don't have to reach into the alert-classification module to
+ * so callers don't have to reach into the scout internals to
  * read or write the audit trail.
  *
- * Both write helpers also accept an OPTIONAL per-candidate counts map that
+ * The write helper also accepts an OPTIONAL per-candidate counts map that
  * is forwarded to `stats.ts:incrStat`, so `GET /api/scout/stats` reflects
- * BOTH trigger paths (issue #4556 root cause: the per-day counters were
+ * the calendar trigger (issue #4556 root cause: the per-day counters were
  * written by nobody at all — totals read 0 after a calendar walk that
  * evaluated 5 candidates). The dispatch outcome itself is never
  * auto-translated into a count; only explicit counts move the rollup.
@@ -27,7 +27,6 @@
 
 import {
   setScoutCategoryLastWalked,
-  setScoutPatternLastFired,
   xaddScoutDispatch,
   xrevrangeScoutDispatches,
 } from "../redis/scout.ts";
@@ -36,14 +35,6 @@ import { incrStat, SCOUT_METRICS, type ScoutMetric } from "./stats.ts";
 // ---------------------------------------------------------------------------
 // Policy constants
 // ---------------------------------------------------------------------------
-
-/**
- * TTL on per-pattern dedup keys stamped by `recordDispatch` — twice the
- * alert-listener cooldown (24h) so forgotten patterns self-clean. This const
- * is used ONLY by `recordDispatch`, so it lives with `recordDispatch` here
- * (single source of truth — do NOT re-declare it in `alert-listener.ts`).
- */
-const ALERT_PATTERN_KEY_TTL_SECONDS = 2 * 24 * 60 * 60;
 
 /** Bound the audit stream — keep last 1000 dispatches. */
 export const SCOUT_DISPATCHES_MAXLEN = 1000;
@@ -54,88 +45,14 @@ export const SCOUT_DISPATCHES_MAXLEN = 1000;
 
 /** Audit-trail entry written to `hydra:scout:dispatches`. */
 export interface DispatchAuditEntry {
-  triggeredBy: "calendar" | `alert:${string}`;
+  triggeredBy: "calendar";
   category: string;
   dispatchedAt: string;
   /** Cost in fractional dollars; null if not measured by caller. */
   cost: number | null;
   outcome: "filed" | "dropped" | "error";
-  /** Optional free-form details — alert.id, error message, issueNum, etc. */
+  /** Optional free-form details — error message, issueNum, etc. */
   detail: string;
-}
-
-/**
- * Shape `recordDispatch` needs from the caller's dispatch target — the pattern
- * (for the `alert:${pattern}` triggeredBy + per-pattern dedup), the category
- * (for the audit entry + per-category cooldown), and the alertId (audit detail
- * fallback). A structural subset of `AlertDispatchTarget`, declared here so
- * this module does not depend back on `alert-listener.ts`.
- */
-export interface DispatchAuditTarget {
-  /** Bare pattern name (no `pattern:` prefix). */
-  pattern: string;
-  /** Category slug the dispatch researched. */
-  category: string;
-  /** Alert.id that triggered this target — audit-detail fallback. */
-  alertId: string;
-}
-
-// ---------------------------------------------------------------------------
-// Post-dispatch bookkeeping (the shared audit write path)
-// ---------------------------------------------------------------------------
-
-/**
- * After the caller successfully dispatches a scout for a dispatch target,
- * call this to:
- *
- *   1. XADD an audit entry to `hydra:scout:dispatches`.
- *   2. Stamp the per-pattern dedup key (24h debounce).
- *   3. Stamp the per-category cooldown (shares the calendar-walk key —
- *      one cooldown surface for both triggers).
- *   4. Increment the per-day stat counters for the category from the
- *      optional per-candidate `counts` map (issue #4556 — keeps
- *      /api/scout/stats in step with recorded outcomes; the outcome
- *      itself never implies a count).
- *
- * Idempotent w.r.t. stamping (Redis SET overwrites) — but XADD always
- * appends, so a re-call will leave two audit entries. Don't call twice
- * for the same dispatch.
- */
-export async function recordDispatch(
-  target: DispatchAuditTarget,
-  outcome: "filed" | "dropped" | "error",
-  detail: string,
-  now: Date = new Date(),
-  cost: number | null = null,
-  counts: Partial<Record<ScoutMetric, number>> = {},
-): Promise<void> {
-  const nowIso = now.toISOString();
-
-  // 1. Audit stream.
-  await xaddDispatchAudit({
-    triggeredBy: `alert:${target.pattern}`,
-    category: target.category,
-    dispatchedAt: nowIso,
-    cost,
-    outcome,
-    detail: detail || target.alertId,
-  });
-
-  // 4. Per-day stat counters (before the error early-return: candidates
-  // were evaluated even when the dispatch ultimately errored).
-  await applyCounts(target.category, counts, now);
-
-  // Only stamp dedup on filed/dropped — errors should be re-tried, not
-  // suppressed. The pattern is still "we tried", but the operator may
-  // want another shot after fixing the infra error.
-  if (outcome === "error") return;
-
-  // 2. Per-pattern dedup, 48h TTL (twice the cooldown — see ALERT_PATTERN_KEY_TTL_SECONDS).
-  await setScoutPatternLastFired(target.pattern, nowIso, ALERT_PATTERN_KEY_TTL_SECONDS);
-
-  // 3. Per-category cooldown — shares the calendar walk's key so both
-  // triggers honor each other.
-  await setScoutCategoryLastWalked(target.category, nowIso);
 }
 
 // ---------------------------------------------------------------------------
@@ -143,8 +60,7 @@ export async function recordDispatch(
 // ---------------------------------------------------------------------------
 
 /**
- * Calendar-walk twin of `recordDispatch`: after the caller dispatches a
- * scout for a calendar-walked category, call this to:
+ * After the caller dispatches a scout for a calendar-walked category, call this to:
  *
  *   1. XADD exactly one audit entry (`triggeredBy: "calendar"`) to
  *      `hydra:scout:dispatches`.
@@ -161,8 +77,8 @@ export async function recordDispatch(
  * The outcome is never auto-translated into a count — pass explicit counts
  * (e.g. `{candidates: 5, filtered: 2, filed: 1}`) to move the rollup.
  *
- * Error outcomes XADD the audit entry but stamp no cooldown (mirroring
- * `recordDispatch`: errors are retried, not suppressed; they stay visible
+ * Error outcomes XADD the audit entry but stamp no cooldown (errors are
+ * retried, not suppressed; they stay visible
  * via `/api/scout/dispatches`).
  */
 export async function recordCalendarDispatch(

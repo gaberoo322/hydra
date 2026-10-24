@@ -50,8 +50,6 @@ export const DEGRADE = {
   FAIL_SAFE_ALL_OPEN: "fail-safe-all-open",
   /** A decoded payload is not the object shape the fold needs. */
   SHAPE: "shape",
-  /** The scout-alert plan has no `eligible` list to count. */
-  ELIGIBLE_HAS_NO_LEN: "eligible-has-no-len",
   /** `/usage` carries no `bySkillByModel`. */
   NO_BY_SKILL_BY_MODEL: "no-bySkillByModel",
   /** The decoded class taxonomy is not an object. */

@@ -33,7 +33,6 @@ import {
   type HealthValue,
   type RecommendationsValue,
   type SchedulerValue,
-  type ScoutAlertsValue,
 } from "./passthrough.ts";
 import { parseJsonRead } from "./github-port.ts";
 import type { PrGateSnapshot, PrPick } from "./pr-gate.ts";
@@ -72,7 +71,6 @@ export interface TurnSnapshotValues {
   readonly retro: RetroValue;
   readonly wayfinder: WayfinderValue;
   readonly tickets: Classified<string | null>;
-  readonly scoutAlerts: ScoutAlertsValue;
   readonly realmShare: Classified<number>;
   readonly usageEligibility: Classified<string>;
   readonly emergencyBrake: Classified<string>;
@@ -278,7 +276,6 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     health_fail: healthFail(v.health),
     scout_walk_due: staleDays(lastWalk, 7, opts.nowMs),
     scout_board_saturated: intOrZero(v.scout.openEnhancements.ok ? v.scout.openEnhancements.value : "0") > 20,
-    scout_alert_eligible_count: v.scoutAlerts.eligible.ok ? v.scoutAlerts.eligible.value : 0,
 
     orch_backfill_idle: board.backfillIdle,
     arch_board_saturated: board.archSaturated,

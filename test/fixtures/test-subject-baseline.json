@@ -299,7 +299,6 @@
   "src/schemas/now-page.ts": 1,
   "src/schemas/tier.ts": 1,
   "src/schemas/webhooks.ts": 1,
-  "src/scout/alert-classifier.ts": 1,
   "src/settled-fold.ts": 1,
   "src/skills/plan.ts": 1,
   "src/skills/playbook.ts": 1,

@@ -18,8 +18,7 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 > "skip" but per-tool says "ready", the category-level skip wins
 > (operator preference: fewer issues). Each dispatched outcome is
 > recorded via `src/scout/dispatch-audit.ts`
-> (`recordCalendarDispatch` for calendar walks, `recordDispatch` for
-> alert-driven ones) — one call lands the `hydra:scout:dispatches`
+> (`recordCalendarDispatch` for calendar walks) — one call lands the `hydra:scout:dispatches`
 > audit entry, the per-category cooldown stamp, and the per-day stat
 > counter that `/api/scout/stats` rolls up (issue #4556: calendar walks
 > were previously invisible on that endpoint). Steady-state cost slice:

@@ -22,7 +22,6 @@
  *     workspace from src/target-config.ts) differs byte-wise from its readable
  *     committed copy under `${HYDRA_CONFIG_PATH:-$HOME/hydra/config}/direction`;
  *     a missing side never drifts. Read-only.
- *   - scout alerts: `len(eligible)` of `/scout/alert-plan` (0 when unreadable).
  *   - realm share (#4161): orch dispatch tokens over orch+target dispatch
  *     tokens from `/usage` `bySkillByModel`, folded through the taxonomy
  *     `scope` column of scripts/autopilot/classes.json ("both" and unknown
@@ -88,10 +87,6 @@ export interface HealthValue {
   readonly failedServices: number;
 }
 
-export interface ScoutAlertsValue {
-  readonly eligible: Classified<number>;
-}
-
 export interface CapacityValue {
   readonly share: number;
   readonly floorMet: unknown;
@@ -155,16 +150,6 @@ function foldHealth(p: Parsed): HealthValue["service"] {
 function foldFailedServices(read: { ok: boolean; stdout: string }): number {
   const lines = read.stdout === "" ? [] : read.stdout.replace(/\n$/, "").split("\n");
   return lines.filter((l) => l.includes("hydra")).length;
-}
-
-/** The size of `eligible` (default `[]`): a list's items, an object's keys, a string's code points; anything else has none. */
-function foldScoutAlerts(p: Parsed): Classified<number> {
-  if ("reason" in p) return fail(p.reason);
-  if (!isDict(p.value)) return fail(DEGRADE.SHAPE);
-  const eligible = "eligible" in p.value ? p.value.eligible : [];
-  if (typeof eligible === "string") return okv(Array.from(eligible).length);
-  if (eligible !== null && typeof eligible === "object") return okv(Object.keys(eligible).length);
-  return fail(DEGRADE.ELIGIBLE_HAS_NO_LEN);
 }
 
 /** The #4161 realm fold. `taxonomy` is the decoded classes.json, or a failure reason. */
@@ -304,12 +289,6 @@ export async function collectDirectionDrift(deps: PassthroughDeps): Promise<Coll
   return outcome("direction-drift", drift, []);
 }
 
-async function collectScoutAlerts(deps: PassthroughDeps): Promise<CollectorOutcome<ScoutAlertsValue>> {
-  const read = await deps.hydra.get("/scout/alert-plan");
-  const eligible = foldScoutAlerts(parseRead(read));
-  return outcome("scout-alerts", { eligible }, marker("eligible", eligible));
-}
-
 async function collectRealmShare(deps: PassthroughDeps): Promise<CollectorOutcome<Classified<number>>> {
   const [read, taxonomyBytes] = await Promise.all([deps.hydra.get("/usage"), deps.host.readFile(deps.taxonomyPath)]);
   let taxonomy: Parsed;
@@ -362,7 +341,6 @@ export async function collectSlotEvents(deps: PassthroughDeps): Promise<Collecto
 export interface PassthroughValueMap {
   health: HealthValue;
   "direction-drift": boolean;
-  "scout-alerts": ScoutAlertsValue;
   "realm-share": Classified<number>;
   "usage-eligibility": Classified<string>;
   "emergency-brake": Classified<string>;
@@ -394,7 +372,6 @@ const FAILED: Classified<never> = { ok: false, reason: DEGRADE.ALL_READS_FAILED 
 export const PASSTHROUGH_COLLECTORS: { readonly [K in PassthroughName]: PassthroughEntry<K> } = {
   health: entry<"health">(collectHealth, { service: FAILED, failedServices: 0 }),
   "direction-drift": entry<"direction-drift">(collectDirectionDrift, false),
-  "scout-alerts": entry<"scout-alerts">(collectScoutAlerts, { eligible: FAILED }),
   "realm-share": entry<"realm-share">(collectRealmShare, FAILED),
   "usage-eligibility": entry<"usage-eligibility">(collectUsageEligibility, FAILED),
   "emergency-brake": entry<"emergency-brake">(collectEmergencyBrake, FAILED),

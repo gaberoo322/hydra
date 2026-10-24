@@ -62,8 +62,8 @@ export function createAlertsRouter(deps: AlertsRouterDeps = {}) {
       // of the `.map` on the first bad element, and the `aggregatorRouteNoQuery`
       // seam converted that into a 500 for the entire list, blinding the
       // operator to every alert (51 invisible during the incident that surfaced
-      // this). This mirrors the reader guard added to the scout consumer of the
-      // same list in #3619 (src/scout/alert-listener.ts:planAlertDispatches):
+      // this). This mirrors the reader guard the other readers of the list
+      // (src/digest-fanout.ts, src/api/now-page.ts) use:
       // skip non-string / empty / whitespace-only elements, and log+skip — never
       // silently drop — anything `JSON.parse` rejects (fail-loud per CLAUDE.md).
       // The write-side root cause for the specific empty entry seen in the
