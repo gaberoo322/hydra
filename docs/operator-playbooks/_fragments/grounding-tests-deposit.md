@@ -6,6 +6,9 @@ runs `npm test`, parses the `# tests N` / `# pass N` footer, and deposits
 the SAME harness `task_id` reap reads (#2754). Best-effort and fully non-fatal:
 a missing footer, an underivable task_id, or any I/O error yields no deposit →
 reap omits the fields → truthful "unknown". Run it AFTER `npm test` passes.
+With `--from-log` it also deposits the deterministic phase spans (#5025:
+`verificationDurationMs` / `planningDurationMs` / `executionDurationMs`, from the
+TAP `# duration_ms` footer and file mtimes — never agent-typed).
 
 ```bash
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD")"

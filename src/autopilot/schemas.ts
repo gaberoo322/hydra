@@ -92,14 +92,12 @@ export const CycleRecordBodySchema = z
     // a later 0-carrying enrichment write can never clobber a stored non-zero span
     // and a non-zero write upgrades a stored 0/absent.
     //
-    // NOTE (design-concept issue-3269): this is the PLUMBING half only. No
-    // dispatch measures verification/planning/execution spans yet, and
-    // groundProject's groundingDurationMs is only produced outside a cycle (the
-    // GET /api/grounding/latest route that surfaced it was retired, #4638),
-    // so reap has nothing to forward
-    // today — the measurement/deposit-side wiring is a deferred follow-up. The
-    // schema+enrichment must land first (mirrors #2754's schema-before-writer
-    // sequencing).
+    // NOTE (design-concept issue-3269, #5025): the deposit side landed via #5025
+    // for THREE spans: hydra-dev step 8a (`reflection-deposit.sh grounding
+    // --from-log`) writes verification/planning/execution into the
+    // hydra-grounding-tests-<task_id> deposit, reap forwards them. groundingDurationMs
+    // has no in-cycle producer by design (it is groundProject's span; no dispatch
+    // runs groundProject), so it stays a truthful absence.
     groundingDurationMs: z.union([z.number(), z.string()]).optional(),
     verificationDurationMs: z.union([z.number(), z.string()]).optional(),
     planningDurationMs: z.union([z.number(), z.string()]).optional(),

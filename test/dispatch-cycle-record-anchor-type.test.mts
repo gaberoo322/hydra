@@ -101,14 +101,25 @@ describe("dispatch.sh cycle-record → anchorType is always explicit (issue #268
   // hits the mock. HYDRA_API points at the mock; HYDRA_API_BASE is deliberately
   // left unset so the legacy HYDRA_API path is taken (that path appends nothing
   // extra and reaches the mock).
-  function recordCycle(skill: string, cycleStatus = "completed"): Record<string, unknown> {
+  function recordCycle(
+    skill: string,
+    cycleStatus = "completed",
+    groundingJson?: string,
+  ): Record<string, unknown> {
     const realPath = process.env.PATH ?? "";
     const keptDirs = realPath.split(":").filter((d) => d && !existsSync(join(d, "hydra")));
     const trimmedPath = [binDir, ...keptDirs].join(":");
     const before = mockBodyCount();
     const r = spawnSync(
       "bash",
-      [SCRIPT, "cycle-record", `t-${skill}-${cycleStatus}`, cycleStatus, skill],
+      [
+        SCRIPT,
+        "cycle-record",
+        `t-${skill}-${cycleStatus}`,
+        cycleStatus,
+        skill,
+        ...(groundingJson === undefined ? [] : ["", "", "", "0", "", "", groundingJson]),
+      ],
       {
         env: (() => {
           const e = { ...process.env, PATH: trimmedPath } as Record<string, string>;
@@ -220,5 +231,30 @@ describe("dispatch.sh cycle-record → anchorType is always explicit (issue #268
         `skill=${skill} must record a non-empty anchorType, got ${JSON.stringify(at)}`,
       );
     }
+  });
+
+  test("grounding deposit carries the three phase spans as integers and drops float/negative ones (issue #5025)", () => {
+    const body = recordCycle(
+      "hydra-dev",
+      "completed",
+      JSON.stringify({
+        testsAfter: 10,
+        verificationDurationMs: 525748,
+        planningDurationMs: "24000",
+        executionDurationMs: -5,
+        groundingDurationMs: 99,
+      }),
+    );
+    assert.equal(body.verificationDurationMs, 525748);
+    assert.equal(body.planningDurationMs, 24000);
+    assert.equal(body.testsAfter, 10);
+    assert.equal("executionDurationMs" in body, false, "negative span must be dropped");
+    assert.equal("groundingDurationMs" in body, false, "groundingDurationMs is never forwarded by a dispatch");
+    const floaty = recordCycle(
+      "hydra-dev",
+      "completed",
+      JSON.stringify({ testsAfter: 1, verificationDurationMs: "525748.49" }),
+    );
+    assert.equal("verificationDurationMs" in floaty, false, "float string must be dropped");
   });
 });

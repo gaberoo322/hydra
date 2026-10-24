@@ -121,17 +121,20 @@ resolve_path() {
   esac
 }
 
-# Shared node:test TAP footer parser (#4753). Reads a log on stdin; echoes
-# "<tests> <pass>" from the LAST column-0 `# tests N` / `# pass N` lines (either
-# may be empty). A `# fail N` line is tolerated and ignored. Last-wins is
-# deliberate for BOTH the --from-log and the legacy `grounding` path (the final
-# footer is the suite total; the legacy path previously took the first match).
+# Shared node:test TAP footer parser (#4753, #5025). Reads a log on stdin;
+# echoes "<tests>|<pass>|<duration_ms>" from the LAST column-0 `# tests N` /
+# `# pass N` / `# duration_ms N` lines (any field may be empty; duration_ms is
+# rounded to an integer, node emits a float). A `# fail N` line is tolerated and
+# ignored. Last-wins is deliberate for BOTH the --from-log and the legacy
+# `grounding` path (the final footer is the suite total).
 parse_tap_footer() {
-  local body total pass
+  local body total pass dur
   body="$(cat)"
   total="$(printf '%s\n' "$body" | sed -n 's/^# tests \([0-9][0-9]*\).*/\1/p' | tail -1)"
   pass="$(printf '%s\n' "$body" | sed -n 's/^# pass \([0-9][0-9]*\).*/\1/p' | tail -1)"
-  printf '%s %s' "$total" "$pass"
+  dur="$(printf '%s\n' "$body" | sed -n 's/^# duration_ms \([0-9][0-9]*\(\.[0-9]*\)\{0,1\}\).*/\1/p' | tail -1)"
+  dur="$(awk -v d="$dur" 'BEGIN { if (d != "") printf "%d", d + 0.5 }')"
+  printf '%s|%s|%s' "$total" "$pass" "$dur"
 }
 
 deposit_dir() {
@@ -226,10 +229,9 @@ do_grounding() {
   task_id="$(derive_task_id)"
   dir="$(deposit_dir)"
 
-  local counts total pass
+  local counts total pass dur lpath=""
   if [ -n "$from_log" ]; then
     # --from-log (#4753): parse an existing TAP log; NEVER run `npm test`.
-    local lpath
     lpath="$(resolve_path "$from_log")"
     if [ ! -r "$lpath" ]; then
       printf '[%s] WARN grounding-tests-deposit-log-unreadable: cannot read %s — no deposit (cue: grounding-tests-deposit-log-unreadable)\n' \
@@ -240,8 +242,9 @@ do_grounding() {
   else
     counts="$(npm test 2>&1 | parse_tap_footer)"
   fi
-  total="${counts% *}"
-  pass="${counts#* }"
+  IFS='|' read -r total pass dur <<EOF_COUNTS
+${counts}
+EOF_COUNTS
   if [ -z "$total" ] && [ -z "$pass" ] && [ -n "$from_log" ]; then
     printf '[%s] WARN grounding-tests-deposit-no-footer: no "# tests N" footer in %s — no deposit (cue: grounding-tests-deposit-no-footer)\n' \
       "$skill" "$lpath" >&2
@@ -250,16 +253,34 @@ do_grounding() {
 
   if [ -n "$task_id" ] && { [ -n "$total" ] || [ -n "$pass" ]; }; then
     local json
+    # Phase spans (#5025): deterministic file mtimes + the TAP footer, never an
+    # agent-typed number; each key is omitted when its marker is missing.
+    #   verification = TAP `# duration_ms`
+    #   planning     = mtime(anchor deposit) - mtime($PWD/.git)  (dispatch start)
+    #   execution    = (mtime(log) - mtime(anchor deposit)) - verification, >= 0
     json="$(python3 -c '
-import json, sys
-total, passing = sys.argv[1], sys.argv[2]
+import json, os, sys
+total, passing, dur, anchor, gitptr, log = sys.argv[1:7]
 body = {}
 if total:
     body["testsAfter"] = int(total)
 if passing:
     body["testsPassingAfter"] = int(passing)
+def mt(p):
+    try:
+        return os.stat(p).st_mtime if p else None
+    except OSError:
+        return None
+a, g, l = mt(anchor), mt(gitptr), mt(log)
+ver = int(dur) if dur else None
+if ver is not None and ver >= 0:
+    body["verificationDurationMs"] = ver
+if a is not None and g is not None and a >= g:
+    body["planningDurationMs"] = int(round((a - g) * 1000))
+if ver is not None and a is not None and l is not None and l >= a:
+    body["executionDurationMs"] = max(int(round((l - a) * 1000)) - ver, 0)
 print(json.dumps(body))
-' "$total" "$pass" 2>/dev/null || printf '')"
+' "$total" "$pass" "$dur" "${dir}/hydra-refl-anchor-${task_id}" "$PWD/.git" "$lpath" 2>/dev/null || printf '')"
     if [ -n "$json" ]; then
       local path="${dir}/hydra-grounding-tests-${task_id}"
       if printf '%s' "$json" > "$path" 2>/dev/null; then
