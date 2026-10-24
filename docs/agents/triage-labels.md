@@ -43,7 +43,7 @@ needs-triage → ready-for-agent → in-progress → needs-qa → (close)
 
 `target-backlog` issues describe findings about the target project (`~/hydra-betting`), not the orchestrator. `hydra-sweep` and `hydra-target-sweep` consume them differently:
 
-1. `hydra-sweep` reads `target-backlog`-labelled issues and queues them with `hydra queue add` (the `hydra` CLI) so the target-side build loop can pick them up.
+1. `hydra-sweep` reads `target-backlog`-labelled issues and leaves them on the GitHub board (the `hydra queue` CLI was retired) so the target-side build loop can pick them up.
 2. Once queued, the orchestrator-side issue is closed with a comment linking to the queue ID.
 
 The issue body should still describe the finding clearly, but the `Files in scope` precondition does not apply — the target work queue has its own scoping mechanism.

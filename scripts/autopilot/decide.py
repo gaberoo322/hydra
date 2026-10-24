@@ -401,7 +401,7 @@ from decide_selectors.wire_or_retire import _select_signal_wire_or_retire_target
 #
 # TaxonomyError subclasses RuntimeError (NOT SystemExit). heartbeat.py imports
 # this module fail-loud (issue #4637: no try/except fallback), so a bad
-# classes.json surfaces there as an ImportError-time traceback, and any CLI
+# classes.json surfaces there as an uncaught TaxonomyError traceback at import, and any CLI
 # invocation of decide.py still exits non-zero with the message.
 #
 # The brain keeps all POLICY — selectors, cooldown enforcement, scope masks

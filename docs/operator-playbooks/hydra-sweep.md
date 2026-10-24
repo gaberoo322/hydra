@@ -119,7 +119,7 @@ Gate strictly on `--state open`. A **closed-unmerged** PR means the prior attemp
 #### `target-backlog` — queue to orchestrator
 For each issue:
 1. Read body, extract concise work description.
-2. Push to work queue: `hydra queue add "<short ref>" -d "From GitHub issue #N. <key details>"`
+2. Label the issue `target-backlog` (the `hydra queue` CLI subcommands were retired); the issue itself is the work-queue entry
 3. Comment on issue:
    ```
    > *Automated sweep*
