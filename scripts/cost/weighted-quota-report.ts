@@ -76,6 +76,7 @@ import {
   getWeeklyResetAnchorMs,
   getWeeklyQuotaTokens,
   firstUserMessageText,
+  parseTranscriptFile,
   sessionIdFromPath,
   readOAuthUsage,
 } from "../../src/cost/index.ts";
@@ -106,8 +107,6 @@ import {
 import type { DispatchKind } from "../../src/cost/token-breakdown.ts";
 // Transcript Store seam: the projects root + the JSONL file list (same walk the
 // live scan uses, so the report sees the same files).
-// L3 pure fold: the one per-file transcript parse shared with the live scan.
-import { parseTranscriptFile } from "../../src/cost/transcript-fold.ts";
 import { listTranscriptFiles, projectsRoot } from "../../src/transcript-store.ts";
 // OAuth meter: the authoritative `percentLast7d` for the validation comparison.
 // (readOAuthUsage comes from the barrel above; isOAuthUsageOk is an L1 leaf helper (oauth-meter-shape).)

@@ -151,6 +151,10 @@ export {
   tokensForSession,
   firstUserMessageText,
 } from "./transcript-scan.ts";
+// `parseTranscriptFile` is the pure per-file fold (message.id de-dup, foreign
+// split, family classification) shared with `scripts/cost/weighted-quota-report.ts`
+// so the report cannot drift from the live scan (issue #5172).
+export { parseTranscriptFile } from "./transcript-fold.ts";
 
 // ---------------------------------------------------------------------------
 // Subscription Usage Tracker — Anthropic-quota projection (PR A #606, B-series)
