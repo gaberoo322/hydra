@@ -249,6 +249,13 @@ describe("SubagentTokensBodySchema (issue #3074)", () => {
     assert.ok(result.success && result.data.cycleId === "worktree-agent-abc12345-t3-dev_orch");
   });
 
+  test("accepts an optional boolean cycleOnly flag and rejects a non-boolean (issue #5173)", () => {
+    const ok = SubagentTokensBodySchema.safeParse({ skill: "hydra-dev", tokens: 1, cycleId: "c", cycleOnly: true });
+    assert.ok(ok.success && ok.data.cycleOnly === true);
+    const bad = SubagentTokensBodySchema.safeParse({ skill: "hydra-dev", tokens: 1, cycleOnly: "yes" });
+    assert.equal(bad.success, false);
+  });
+
   test("rejects a blank skill", () => {
     const result = SubagentTokensBodySchema.safeParse({ skill: "   ", tokens: 1 });
     assert.equal(result.success, false);

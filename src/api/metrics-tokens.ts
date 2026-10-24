@@ -54,10 +54,11 @@ export function createMetricsTokensRouter() {
     if (!parsed.success) {
       return res.status(400).json(schemaValidationError(parsed.error));
     }
-    const { skill, tokens, date, cycleId } = parsed.data;
-    const opts: { date?: string; cycleId?: string } = {};
+    const { skill, tokens, date, cycleId, cycleOnly } = parsed.data;
+    const opts: { date?: string; cycleId?: string; cycleOnly?: boolean } = {};
     if (date) opts.date = date;
     if (cycleId) opts.cycleId = cycleId;
+    if (cycleOnly) opts.cycleOnly = true;
 
     return isolateAggregator(res, "api/metrics/tokens", async () => {
       const result = await recordSubagentTokens(skill, tokens, opts);

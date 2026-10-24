@@ -107,6 +107,10 @@ export interface RecordTokensResult {
  * @param skill   the dispatched skill name (e.g. "hydra-dev")
  * @param tokens  total tokens consumed by the subagent (must be >= 0)
  * @param opts.date    override date string (defaults to today UTC)
+ * @param opts.cycleOnly when true (with cycleId) write ONLY the per-cycle hash,
+ *                      leaving the per-day total and per-skill hash untouched —
+ *                      for the branch-keyed mirror of an already-counted dispatch
+ *                      (issue #5173).
  * @param opts.cycleId optional autopilot turn ID — when present, also
  *                     bumps the per-cycle hash so per-cycle token readers
  *                     can see post-cut spend.
@@ -118,7 +122,7 @@ export interface RecordTokensResult {
 export async function recordSubagentTokens(
   skill: string,
   tokens: number,
-  opts: { date?: string; cycleId?: string } = {},
+  opts: { date?: string; cycleId?: string; cycleOnly?: boolean } = {},
 ): Promise<RecordTokensResult> {
   const date = opts.date || todayDateString();
   const cleanTokens = Number.isFinite(tokens) && tokens > 0 ? Math.floor(tokens) : 0;
@@ -142,6 +146,7 @@ export async function recordSubagentTokens(
     skill: cleanSkill,
     tokens: cleanTokens,
     cycleId: opts.cycleId,
+    cycleOnly: opts.cycleOnly,
     dailyTtlSeconds: DAILY_KEY_TTL_SECONDS,
     cycleTtlSeconds: CYCLE_KEY_TTL_SECONDS,
   });
