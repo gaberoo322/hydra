@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useState } from "react";
 import { usePageItems } from "../../../hooks/usePageItems.js";
 import { apiFetch } from "../../../hooks/useApi.js";
 import { relativeAge } from "../../../lib/page-item-format.ts";
@@ -9,6 +9,7 @@ import {
   ActionAffordance,
   UndoToastStack,
   UndoWindowContext,
+  useCheckedRefresh,
   useUndoWindowHost,
 } from "../../ActionAffordance.jsx";
 
@@ -301,38 +302,12 @@ export function AttentionFeed() {
   // the row-local ✓/✗ line before the operator ever saw it (INV-10).
   const [actionResult, setActionResult] = useState(null);
 
-  // The re-read verdict comes from the feed's OWN read settling, not a
-  // probe GET and not a widened useApi (INV-18 fences useApi.js): a waiter
-  // is queued before refresh() starts its read, and the effect below
-  // resolves it once a render shows the read settled (loading false) —
-  // true when that render carries no read error, false when it does.
-  const rereadWaiters = useRef([]);
-  // QA round 5: if the feed unmounts (the host flush commits a pending
-  // dismiss), no render will ever settle a queued waiter — resolve every
-  // waiter `false` on unmount and skip the re-read once unmounted, so a
-  // dismiss always settles instead of hanging on a waiter nothing resolves.
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      const waiters = rereadWaiters.current;
-      rereadWaiters.current = [];
-      for (const resolve of waiters) resolve(false);
-    };
-  }, []);
-  useEffect(() => {
-    if (loading || rereadWaiters.current.length === 0) return;
-    const waiters = rereadWaiters.current;
-    rereadWaiters.current = [];
-    for (const resolve of waiters) resolve(error == null);
-  }, [loading, error, data]);
-  const refreshChecked = useCallback(() => {
-    if (!mounted.current) return Promise.resolve(false);
-    const settled = new Promise((resolve) => rereadWaiters.current.push(resolve));
-    refresh();
-    return settled;
-  }, [refresh]);
+  // The re-read verdict comes from the feed's OWN read settling, via the
+  // shared waiter core (lib/reread.ts through useCheckedRefresh): a write's
+  // waiter resolves only on a read that started after it was queued
+  // (#5162), true when that read carries no error, false when it does or the
+  // feed unmounted. INV-18 fences useApi.js.
+  const refreshChecked = useCheckedRefresh({ loading, error, data, refresh });
   const undoHost = useUndoWindowHost();
 
   // The typed dismiss (ADR-0034 §8.4): { reason, key } is the strict #4627

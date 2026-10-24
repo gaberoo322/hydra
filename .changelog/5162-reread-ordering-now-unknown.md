@@ -1,0 +1,1 @@
+- fix: a write confirms only on a re-read that started after it, and /now shows UNKNOWN (not "no run") when the run read fails (#5162)

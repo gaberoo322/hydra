@@ -819,7 +819,8 @@ describe("the verified-result line does not overclaim a failed re-read", () => {
     assert.ok(aff.includes('const staleNote = rereadNoun === "feed" ? "list may be stale" : "shown state may be stale";'));
     assert.ok(aff.includes("` · ${rereadNoun} re-read FAILED — ${staleNote}`"));
     const feed = await readSource(FEED);
-    assert.ok(feed.includes("const refreshChecked = useCallback"), "the feed verifies the re-read");
+    assert.ok(feed.includes("const refreshChecked = useCheckedRefresh({ loading, error, data, refresh });"), "the feed verifies the re-read through the shared core (#5162 INV-5)");
+    assert.ok(!feed.includes("rereadWaiters"), "no hand-rolled waiter copy in the feed");
     assert.ok(feed.includes("onResult={setActionResult}"), "the result line is lifted above the rows");
     assert.ok(!feed.includes('apiFetch("/attention/feed")'), "no separate probe read");
   });
@@ -1084,12 +1085,13 @@ describe("ControlAffordance remounts per control — no armed state survives a t
 });
 
 describe("re-read waiters — a checked refresh resolves a real verdict (PR #5155 review)", () => {
-  test("wait() queues BEFORE refresh() runs, and settle(true) resolves it true", async () => {
+  test("wait() queues BEFORE refresh() runs, and a settled read resolves it true", async () => {
     const w = createRereadWaiters();
     let pendingAtRefresh = -1;
     const p = w.wait(() => { pendingAtRefresh = w.pending(); });
     assert.equal(pendingAtRefresh, 1, "the waiter exists before the read starts");
-    w.settle(true);
+    w.observe(true, true);
+    w.observe(false, true);
     assert.equal(await p, true);
     assert.equal(w.pending(), 0);
   });
@@ -1097,30 +1099,65 @@ describe("re-read waiters — a checked refresh resolves a real verdict (PR #515
   test("a read that settles with an error resolves false — the re-read FAILED branch", async () => {
     const w = createRereadWaiters();
     const p = w.wait(() => {});
-    w.settle(false);
+    w.observe(true, true);
+    w.observe(false, false);
     assert.equal(await p, false);
   });
 
-  test("settle resolves every queued waiter once; a settle with none queued is a no-op", async () => {
+  test("a settle resolves every armed waiter once; a settle with none queued is a no-op", async () => {
     const w = createRereadWaiters();
-    w.settle(true);
+    w.observe(false, true);
     const a = w.wait(() => {});
     const b = w.wait(() => {});
-    w.settle(false);
+    w.observe(false, false);
     assert.deepEqual(await Promise.all([a, b]), [false, false]);
   });
 
-  test("close() (unmount) resolves pending waiters false and later waits resolve false without reading", async () => {
+  test("a waiter queued while a read is in flight does not resolve on that read, and resolves on the deferred one (#5162 INV-1/2)", async () => {
     const w = createRereadWaiters();
-    const p = w.wait(() => {});
+    let refreshes = 0;
+    w.observe(true, true); // a 30 s poll is already in flight
+    let resolved: boolean | undefined;
+    const p = w.wait(() => { refreshes++; }).then((v) => { resolved = v; });
+    assert.equal(refreshes, 0, "the refresh is DEFERRED while a read is in flight");
+    assert.equal(w.pending(), 1);
+    w.observe(false, true); // the OLD poll settles ok
+    await Promise.resolve();
+    assert.equal(refreshes, 1, "the deferred read starts once the old one settled");
+    assert.equal(resolved, undefined, "the pre-write read never settles the waiter");
+    w.observe(true, true); // the deferred read's rising edge
+    w.observe(false, false); // its own verdict: failed
+    await p;
+    assert.equal(resolved, false, "the post-write read's verdict wins, not the older poll's");
+  });
+
+  test("two waiters deferred behind one in-flight read share ONE deferred refresh", async () => {
+    const w = createRereadWaiters();
+    let refreshes = 0;
+    w.observe(true, true);
+    const a = w.wait(() => { refreshes++; });
+    const b = w.wait(() => { refreshes++; });
+    w.observe(false, true);
+    assert.equal(refreshes, 1);
+    w.observe(true, true);
+    w.observe(false, true);
+    assert.deepEqual(await Promise.all([a, b]), [true, true]);
+  });
+
+  test("close() (unmount) resolves armed AND deferred waiters false and later waits resolve false without reading (INV-4)", async () => {
+    const w = createRereadWaiters();
+    const armed = w.wait(() => {});
+    w.observe(true, true);
+    const deferredWait = w.wait(() => {});
     w.close();
-    assert.equal(await p, false);
+    assert.equal(await armed, false);
+    assert.equal(await deferredWait, false);
     let read = false;
     assert.equal(await w.wait(() => { read = true; }), false);
     assert.equal(read, false, "a closed host starts no read");
     w.open();
     const q = w.wait(() => {});
-    w.settle(true);
+    w.observe(false, true);
     assert.equal(await q, true, "open() re-arms after a StrictMode remount");
   });
 
@@ -1130,10 +1167,20 @@ describe("re-read waiters — a checked refresh resolves a real verdict (PR #515
     assert.equal(await w.wait(() => { throw new Error("boom"); }), false);
   });
 
-  test("the hook settles on a non-loading render and both pages pass it as onFired", async () => {
+  test("a DEFERRED refresh that throws resolves its waiters false, never a hang (INV-4)", async (t) => {
+    t.mock.method(console, "error", () => {});
+    const w = createRereadWaiters();
+    w.observe(true, true);
+    const p = w.wait(() => { throw new Error("boom"); });
+    w.observe(false, true);
+    assert.equal(await p, false);
+  });
+
+  test("the hook reports every render and both pages pass it as onFired", async () => {
     const aff = await readSource(AFFORDANCE);
     const hook = aff.slice(aff.indexOf("export function useCheckedRefresh("), aff.indexOf("export function ControlAffordance("));
-    assert.ok(hook.includes("if (!loading) waiters.current.settle(error == null);"));
+    assert.ok(hook.includes("waiters.current.observe(loading, error == null);"), "every render is reported, loading=true included (INV-3)");
+    assert.ok(!hook.includes("if (!loading)"));
     assert.ok(hook.includes("return () => waiters.current.close();"));
     assert.ok(hook.includes("waiters.current.wait(refresh)"));
     const board = await readSource(BOARD_STATE);
