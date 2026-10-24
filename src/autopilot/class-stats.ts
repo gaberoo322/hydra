@@ -179,7 +179,10 @@ export async function buildClassScoreboard(
     weightedQuota = resolveWeightedQuotaInputs(snapshot);
   } catch (err: any) {
     /* intentional: a usage-read failure degrades weightedQuota to null on every
-       class (empty breakdown), never throws — the yield axis is untouched. */
+       class (empty breakdown), never throws — the yield axis is untouched. It
+       still marks the board degraded (issue #5161): the expensive verdict is dead
+       without weightedQuota, so the board must not be memoised as healthy. */
+    degraded = true;
     logger.error(
       { err },
       "[class-stats] getUsage threw (weightedQuota degrades to null)",

@@ -921,6 +921,7 @@ describe("class-stats — weighted-quota cost axis: composer (issue #3548)", () 
     };
     const sb = await buildClassScoreboard({ now: NOW, deps });
     const dev = find(sb, "dev_orch");
+    assert.equal(sb.degraded, true, "a usage-read failure marks the board degraded (issue #5161)");
     // Yield axis untouched by the cost-read failure.
     assert.equal(dev.verdict, "healthy");
     // Cost axis degrades to null on every class (never throws, never fabricates).

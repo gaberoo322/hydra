@@ -368,6 +368,7 @@ describe("GET /api/autopilot/class-stats — 10-minute memo (issue #4637)", () =
     const first = await h.get();
     assert.equal(first._status, 200);
     assert.equal(first._body.scoreboard.degraded, true);
+    assert.equal(h.persists, 0, "a degraded board never overwrites the last good snapshot");
     degraded = false;
     const second = await h.get();
     assert.equal(h.builds, 2, "degraded board was not pinned");
