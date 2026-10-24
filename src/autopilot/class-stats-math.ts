@@ -334,8 +334,12 @@ export interface ClassScoreboard {
    */
   thresholds: ClassScoreboardThresholds;
   /**
-   * True when a Redis / estimator read FAILED while building this board, so its
-   * rows are not trustworthy (every class reads insufficient-sample). A degraded
+   * True when a Redis / estimator / usage read FAILED while building this board,
+   * so its rows are not trustworthy (a Redis/estimator failure leaves every class
+   * insufficient-sample; a usage failure nulls weightedQuota so the `expensive`
+   * verdict is dead). Coarse by design: a usage-only failure degrades the whole
+   * board rather than splitting a per-axis flag, so a persistent usage outage
+   * recomputes per request. A degraded
    * board is never memoised and a view renders UNKNOWN for it (ADR-0034 §5.1).
    * Absent / false on a healthy board. Set by the composer, never by the pure
    * math leaf.

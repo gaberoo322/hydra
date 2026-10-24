@@ -179,9 +179,11 @@ export async function buildClassScoreboard(
     weightedQuota = resolveWeightedQuotaInputs(snapshot);
   } catch (err: any) {
     /* intentional: a usage-read failure degrades weightedQuota to null on every
-       class (empty breakdown), never throws — the yield axis is untouched. It
-       still marks the board degraded (issue #5161): the expensive verdict is dead
-       without weightedQuota, so the board must not be memoised as healthy. */
+       class (empty breakdown), never throws. It deliberately marks the WHOLE
+       board degraded (issue #5161, coarse by design): the expensive verdict is
+       dead without weightedQuota, and a partially-trustworthy board is not worth
+       a second flag, so the board is not memoised and /builder renders UNKNOWN.
+       The cost is that a persistent usage outage recomputes per request. */
     degraded = true;
     logger.error(
       { err },
