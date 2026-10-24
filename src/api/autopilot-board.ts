@@ -147,7 +147,17 @@ interface OpenIssuesReader {
   (): Promise<IssueReadResult<IssueRow>>;
 }
 
+/** The batched issue-search reader the work-queue blocker lookup wraps. */
+type IssueSearchReader = typeof listIssuesBySearch;
+
 export interface AutopilotBoardRouterDeps {
+  /**
+   * Search reader consumed ONLY by the `/autopilot/work-queue` default blocker
+   * resolver, BELOW the `failClosedOnTruncatedSearch` wrap (#5162 INV-9) so a
+   * route test can drive the real truncation wiring. Defaults to the real
+   * {@link listIssuesBySearch}. Not used when `resolveOpenBlockers` is injected.
+   */
+  listIssuesBySearch?: IssueSearchReader;
   /**
    * Reader for the whole open board, through the GitHub-Read seam. Defaults to
    * `listOpenIssues` with the `updatedAt`-augmented field set. A failure arm
@@ -381,7 +391,7 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
           resolveOpenBlockers(rows, undefined, false, (numbers) =>
             fetchOpenBlockerNumbers(numbers, {
               listIssuesBySearch: failClosedOnTruncatedSearch(
-                listIssuesBySearch,
+                deps.listIssuesBySearch ?? listIssuesBySearch,
                 workQueueBlockerSearchLimit(numbers.length),
               ),
             }),

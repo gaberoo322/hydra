@@ -36,6 +36,7 @@ import {
   type NowRecommendationsDeps,
   type RecommendationsReaderDeps,
   type CurrentRunIdReader,
+  type CurrentRunIdResult,
 } from "../aggregators/now-recommendations.ts";
 
 // Re-export the aggregator's pure helpers + deps types from their historical
@@ -151,6 +152,10 @@ export function createNowRecommendationsRouter(
         recId,
         aggregatorDeps,
       );
+      if (result.kind === "run_read_failed") {
+        res.status(503);
+        return { error: "current run read failed", code: result.code };
+      }
       if (result.kind === "run_missing") {
         res.status(404);
         return { error: "no current run" };
@@ -177,6 +182,10 @@ export function createNowRecommendationsRouter(
         parsed.data.severity,
         aggregatorDeps,
       );
+      if (result.kind === "run_read_failed") {
+        res.status(503);
+        return { error: "current run read failed", code: result.code };
+      }
       if (result.kind === "run_missing") {
         res.status(404);
         return { error: "no current run" };
@@ -196,10 +205,15 @@ export function createNowRecommendationsRouter(
 // Default wiring
 // ---------------------------------------------------------------------------
 
-async function defaultReadCurrentRunId(): Promise<string | null> {
+async function defaultReadCurrentRunId(): Promise<CurrentRunIdResult> {
   const result = await defaultGetCurrentRun();
-  if (!result.ok) return null;
+  if (!result.ok) {
+    // Only the asserted "no run ever recorded" arm is a confident no-run;
+    // every other failure (Redis error) is UNKNOWN (#5162, ADR-0034 §5).
+    if (result.code === "not-found") return { ok: true, runId: null };
+    return { ok: false, code: result.code, detail: result.detail };
+  }
   const view = result.view as Record<string, unknown>;
   const id = typeof view.run_id === "string" ? view.run_id : "";
-  return id || null;
+  return { ok: true, runId: id || null };
 }

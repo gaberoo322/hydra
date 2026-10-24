@@ -56,8 +56,17 @@ export interface RecommendationsReaderDeps {
 }
 
 /** Reader returning the current run_id (most-recent run), for `?run_id=current`. */
+export type CurrentRunIdResult =
+  | { ok: true; runId: string | null }
+  | { ok: false; code: string; detail?: string };
+
+/**
+ * Three-valued (#5162): `{ok:true, runId:null}` ASSERTS "no run recorded";
+ * `{ok:false}` means the read itself failed (UNKNOWN). `null` is never the
+ * carrier for a failed read.
+ */
 export interface CurrentRunIdReader {
-  (): Promise<string | null>;
+  (): Promise<CurrentRunIdResult>;
 }
 
 /**
@@ -81,17 +90,21 @@ export interface NowRecommendationsDeps {
 export interface ActiveRecommendationsResult {
   run_id: string | null;
   items: Array<Record<string, unknown>>;
+  /** false when the current-run read failed — the dashboard renders UNKNOWN (ADR-0034 §5). */
+  sourcesOk: boolean;
   generatedAt: string;
 }
 
 /** Result of a dismissal. `run_missing` when `current` resolves to no run. */
 export type DismissResult =
   | { kind: "run_missing" }
+  | { kind: "run_read_failed"; code: string }
   | { kind: "ok"; run_id: string; rec_id: string; dismissed: true };
 
 /** Result of a severity-class mute. `run_missing` when `current` resolves to no run. */
 export type MuteResult =
   | { kind: "run_missing" }
+  | { kind: "run_read_failed"; code: string }
   | { kind: "ok"; run_id: string; severity: string; muted: true };
 
 // ---------------------------------------------------------------------------
@@ -107,9 +120,9 @@ export type MuteResult =
 export async function resolveRunId(
   rawRunId: string,
   readCurrentRunId: CurrentRunIdReader,
-): Promise<string | null> {
+): Promise<CurrentRunIdResult> {
   if (rawRunId === "current") return readCurrentRunId();
-  return rawRunId;
+  return { ok: true, runId: rawRunId };
 }
 
 /**
@@ -173,9 +186,14 @@ export async function getActiveRecommendations(
   rawRunId: string,
   deps: NowRecommendationsDeps,
 ): Promise<ActiveRecommendationsResult> {
-  const runId = await resolveRunId(rawRunId, deps.readCurrentRunId);
+  const resolved = await resolveRunId(rawRunId, deps.readCurrentRunId);
+  if (resolved.ok === false) {
+    console.error(`[now/recommendations] current-run read failed (${resolved.code}) — serving sourcesOk:false`);
+    return { run_id: null, items: [], sourcesOk: false, generatedAt: deps.now().toISOString() };
+  }
+  const runId = resolved.runId;
   if (!runId) {
-    return { run_id: null, items: [], generatedAt: deps.now().toISOString() };
+    return { run_id: null, items: [], sourcesOk: true, generatedAt: deps.now().toISOString() };
   }
 
   const [rawHash, dismissed, muted] = await Promise.all([
@@ -185,20 +203,22 @@ export async function getActiveRecommendations(
   ]);
 
   const items = filterActiveRecommendations({ rawHash, dismissed, muted });
-  return { run_id: runId, items, generatedAt: deps.now().toISOString() };
+  return { run_id: runId, items, sourcesOk: true, generatedAt: deps.now().toISOString() };
 }
 
 /**
  * Dismiss a single recommendation for a run. Resolves `rawRunId`, then records
  * the dismissal through the injected writer. Returns `run_missing` when
- * `"current"` resolves to no run (the route maps that to a 404).
+ * `"current"` resolves to no run (the route maps that to a 404; a FAILED read is `run_read_failed` → 503).
  */
 export async function dismissRecommendationForRun(
   rawRunId: string,
   recId: string,
   deps: NowRecommendationsDeps,
 ): Promise<DismissResult> {
-  const runId = await resolveRunId(rawRunId, deps.readCurrentRunId);
+  const resolved = await resolveRunId(rawRunId, deps.readCurrentRunId);
+  if (resolved.ok === false) return { kind: "run_read_failed", code: resolved.code };
+  const runId = resolved.runId;
   if (!runId) return { kind: "run_missing" };
   await deps.recsRedis.dismissRecommendation(runId, recId, deps.ttlSeconds);
   return { kind: "ok", run_id: runId, rec_id: recId, dismissed: true };
@@ -207,14 +227,16 @@ export async function dismissRecommendationForRun(
 /**
  * Mute a severity class for a run. Resolves `rawRunId`, then records the mute
  * through the injected writer. Returns `run_missing` when `"current"` resolves
- * to no run (the route maps that to a 404).
+ * to no run (the route maps that to a 404; a FAILED read is `run_read_failed` → 503).
  */
 export async function muteSeverityClassForRun(
   rawRunId: string,
   severity: string,
   deps: NowRecommendationsDeps,
 ): Promise<MuteResult> {
-  const runId = await resolveRunId(rawRunId, deps.readCurrentRunId);
+  const resolved = await resolveRunId(rawRunId, deps.readCurrentRunId);
+  if (resolved.ok === false) return { kind: "run_read_failed", code: resolved.code };
+  const runId = resolved.runId;
   if (!runId) return { kind: "run_missing" };
   await deps.recsRedis.muteSeverityClass(runId, severity, deps.ttlSeconds);
   return { kind: "ok", run_id: runId, severity, muted: true };

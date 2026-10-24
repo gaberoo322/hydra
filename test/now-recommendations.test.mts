@@ -143,9 +143,9 @@ describe("aggregator: filterActiveRecommendations", () => {
 
 describe("aggregator: resolveRunId", () => {
   test("'current' delegates to the reader; explicit is verbatim", async () => {
-    const reader: CurrentRunIdReader = async () => "run-LIVE";
-    assert.equal(await resolveRunId("current", reader), "run-LIVE");
-    assert.equal(await resolveRunId("run-X", reader), "run-X");
+    const reader: CurrentRunIdReader = async () => ({ ok: true, runId: "run-LIVE" });
+    assert.deepEqual(await resolveRunId("current", reader), { ok: true, runId: "run-LIVE" });
+    assert.deepEqual(await resolveRunId("run-X", reader), { ok: true, runId: "run-X" });
   });
 });
 
@@ -154,6 +154,25 @@ describe("aggregator: resolveRunId", () => {
 // ---------------------------------------------------------------------------
 
 describe("aggregator: getActiveRecommendations", () => {
+  test("a FAILED current-run read degrades to sourcesOk:false, never an asserted no-run (#5162 INV-7)", async () => {
+    const { redis } = makeRecsFake();
+    const out = await getActiveRecommendations(
+      "current",
+      makeDeps(redis, async () => ({ ok: false, code: "redis", detail: "boom" })),
+    );
+    assert.equal(out.run_id, null);
+    assert.deepEqual(out.items, []);
+    assert.equal(out.sourcesOk, false);
+  });
+
+  test("an asserted no-run and a healthy read both carry sourcesOk:true", async () => {
+    const { redis } = makeRecsFake();
+    const none = await getActiveRecommendations("current", makeDeps(redis, async () => ({ ok: true, runId: null })));
+    assert.equal(none.sourcesOk, true);
+    const live = await getActiveRecommendations("current", makeDeps(redis, async () => ({ ok: true, runId: "run-A" })));
+    assert.equal(live.sourcesOk, true);
+  });
+
   test("returns active recs newest-first with a resolved run_id and clock stamp", async () => {
     const { redis } = makeRecsFake({
       recs: {
@@ -165,7 +184,7 @@ describe("aggregator: getActiveRecommendations", () => {
     });
     const result = await getActiveRecommendations(
       "current",
-      makeDeps(redis, async () => "run-A"),
+      makeDeps(redis, async () => ({ ok: true, runId: "run-A" })),
     );
     assert.equal(result.run_id, "run-A");
     assert.equal(result.items.length, 2);
@@ -177,7 +196,7 @@ describe("aggregator: getActiveRecommendations", () => {
     const { redis } = makeRecsFake();
     const result = await getActiveRecommendations(
       "current",
-      makeDeps(redis, async () => null),
+      makeDeps(redis, async () => ({ ok: true, runId: null })),
     );
     assert.equal(result.run_id, null);
     assert.deepEqual(result.items, []);
@@ -197,7 +216,7 @@ describe("aggregator: getActiveRecommendations", () => {
     });
     const result = await getActiveRecommendations(
       "current",
-      makeDeps(redis, async () => "run-A"),
+      makeDeps(redis, async () => ({ ok: true, runId: "run-A" })),
     );
     assert.equal(result.items.length, 1);
     assert.equal(result.items[0].id, "b");
@@ -216,7 +235,7 @@ describe("aggregator: dismissRecommendationForRun", () => {
     const result = await dismissRecommendationForRun(
       "current",
       "a",
-      makeDeps(redis, async () => "run-A"),
+      makeDeps(redis, async () => ({ ok: true, runId: "run-A" })),
     );
     assert.equal(result.kind, "ok");
     if (result.kind === "ok") {
@@ -232,7 +251,7 @@ describe("aggregator: dismissRecommendationForRun", () => {
     const result = await dismissRecommendationForRun(
       "current",
       "a",
-      makeDeps(redis, async () => null),
+      makeDeps(redis, async () => ({ ok: true, runId: null })),
     );
     assert.equal(result.kind, "run_missing");
   });
@@ -248,7 +267,7 @@ describe("aggregator: muteSeverityClassForRun", () => {
     const result = await muteSeverityClassForRun(
       "current",
       "warn",
-      makeDeps(redis, async () => "run-A"),
+      makeDeps(redis, async () => ({ ok: true, runId: "run-A" })),
     );
     assert.equal(result.kind, "ok");
     if (result.kind === "ok") {
@@ -267,7 +286,7 @@ describe("aggregator: muteSeverityClassForRun", () => {
       "critical",
       makeDeps(redis, async () => {
         readerCalled = true;
-        return "should-not-resolve";
+        return { ok: true, runId: "should-not-resolve" };
       }),
     );
     assert.equal(result.kind, "ok");
@@ -281,7 +300,7 @@ describe("aggregator: muteSeverityClassForRun", () => {
     const result = await muteSeverityClassForRun(
       "current",
       "warn",
-      makeDeps(redis, async () => null),
+      makeDeps(redis, async () => ({ ok: true, runId: null })),
     );
     assert.equal(result.kind, "run_missing");
   });
@@ -325,7 +344,7 @@ function fakeRes(): any {
 describe("#4634 — the recommendation routes the /now panel writes through", () => {
   test("mute-class accepts exactly info | warn | critical — the panel's hard-coded vocabulary", async () => {
     const { redis } = makeRecsFake();
-    const router = createNowRecommendationsRouter({ recsRedis: redis, readCurrentRunId: async () => "run-A" });
+    const router = createNowRecommendationsRouter({ recsRedis: redis, readCurrentRunId: async () => ({ ok: true, runId: "run-A" }) });
     const mute = routeHandler(router, "POST", "/now/recommendations/mute-class");
     for (const severity of ["info", "warn", "critical"]) {
       const res = fakeRes();
@@ -341,7 +360,7 @@ describe("#4634 — the recommendation routes the /now panel writes through", ()
   test("a dismiss carrying the GET's run_id lands on THAT run even after 'current' rolls over", async () => {
     const { redis, state } = makeRecsFake({ recs: { "run-A": [rec({ id: "run-A:1:0" })] } });
     let current = "run-A";
-    const router = createNowRecommendationsRouter({ recsRedis: redis, readCurrentRunId: async () => current });
+    const router = createNowRecommendationsRouter({ recsRedis: redis, readCurrentRunId: async () => ({ ok: true, runId: current }) });
     const read = fakeRes();
     await routeHandler(router, "GET", "/now/recommendations")({ query: {}, params: {}, body: {} }, read);
     assert.equal(read._body.run_id, "run-A", "the GET resolves and RETURNS the concrete run id");
@@ -357,9 +376,28 @@ describe("#4634 — the recommendation routes the /now panel writes through", ()
     assert.equal(state.dismissed.get("run-B"), undefined, "the new run is untouched");
   });
 
+  test("a failed current-run read: GET is 200 sourcesOk:false; dismiss and mute are 503, never the asserted-no-run 404 (#5162 INV-8)", async () => {
+    const { redis } = makeRecsFake();
+    const router = createNowRecommendationsRouter({
+      recsRedis: redis,
+      readCurrentRunId: async () => ({ ok: false, code: "redis" }),
+    });
+    const read = fakeRes();
+    await routeHandler(router, "GET", "/now/recommendations")({ query: {}, params: {}, body: {} }, read);
+    assert.equal(read._body.sourcesOk, false);
+    assert.equal(read._body.run_id, null);
+    const dismiss = fakeRes();
+    await routeHandler(router, "POST", "/now/recommendations/:id/dismiss")({ params: { id: "x" }, body: {}, query: {} }, dismiss);
+    assert.equal(dismiss._status, 503);
+    assert.equal(dismiss._body.code, "redis");
+    const mute = fakeRes();
+    await routeHandler(router, "POST", "/now/recommendations/mute-class")({ params: {}, body: { severity: "warn" }, query: {} }, mute);
+    assert.equal(mute._status, 503);
+  });
+
   test("a missing current run reads as run_id null — the panel's explicit no-run evidence", async () => {
     const { redis } = makeRecsFake();
-    const router = createNowRecommendationsRouter({ recsRedis: redis, readCurrentRunId: async () => null });
+    const router = createNowRecommendationsRouter({ recsRedis: redis, readCurrentRunId: async () => ({ ok: true, runId: null }) });
     const res = fakeRes();
     await routeHandler(router, "GET", "/now/recommendations")({ query: {}, params: {}, body: {} }, res);
     assert.equal(res._body.run_id, null);
