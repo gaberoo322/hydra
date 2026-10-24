@@ -23,6 +23,7 @@ import {
   type CycleMergeReconcileDeps,
   type MergedPrRow,
 } from "../src/scheduler/chores/cycle-merge-reconcile.ts";
+import { recordCycle, type CycleCloseDeps } from "../src/autopilot/cycle-close.ts";
 import { logger } from "../src/logger.ts";
 import type { ReconcilerHealthRecord } from "../src/redis/reconciler.ts";
 
@@ -79,12 +80,21 @@ function makeDeps(fx: Fixture, over: Partial<CycleMergeReconcileDeps> = {}): Cyc
     // Issue #4762 (defect 1): the real metrics hash has NO `status` field — the
     // status lives only in the CYCLE hash. The fixture's `status` key models the
     // cycle hash, so strip it from what getMetrics returns (a regression that
-    // reads m.status now sees nothing) and serve it through getCycleStatus.
+    // reads m.status now sees nothing) and serve it through readCycleHash. The
+    // cycle hash also owns the immutable `startedAt` (issue #5028), so that key is
+    // stripped from the metrics view too.
     getMetrics: async (cycleId) => {
-      const { status: _cycleHashStatus, ...rest } = fx.metrics.get(cycleId) ?? {};
+      const { status: _cycleHashStatus, startedAt: _cycleHashStartedAt, ...rest } =
+        fx.metrics.get(cycleId) ?? {};
       return { ...rest };
     },
-    getCycleStatus: async (cycleId) => fx.metrics.get(cycleId)?.status,
+    readCycleHash: async (cycleId) => {
+      const row = fx.metrics.get(cycleId);
+      const out: Record<string, string> = {};
+      if (row?.status !== undefined) out.status = row.status;
+      if (row?.startedAt !== undefined) out.startedAt = row.startedAt;
+      return out;
+    },
     listMergedPrs: async () => (fx.mergedPrs === undefined ? [] : fx.mergedPrs),
     fetchPrState: async (prNumber) => {
       // A scripted `null` (or an unmapped PR) models a gh/API FETCH FAILURE — the
@@ -810,6 +820,9 @@ function devRow(issue: number, recordedAt: string, extra: Record<string, string>
     anchorType: "work-queue",
     anchorReference: `issue-${issue}`,
     recordedAt,
+    // Issue #5028: ownership is positioned on the immutable cycle-hash startedAt;
+    // default it to recordedAt (a never-enriched row), override via `extra`.
+    startedAt: recordedAt,
     tasksMerged: "1",
     ...extra,
   };
@@ -834,7 +847,7 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
     assert.equal(fx.capacityStamps?.[0]?.cycleId, "pr-900");
   });
 
-  test("with two dev rows for issue-N only the latest recorded <= mergedAt is credited", async () => {
+  test("with two dev rows for issue-N only the latest started <= mergedAt is credited", async () => {
     const fx: Fixture = {
       metrics: new Map([
         ["w-old-dev_orch", devRow(42, "2026-10-01T08:00:00Z")],
@@ -850,9 +863,11 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
     assert.equal(fx.metrics.get("w-old-dev_orch")!.status, "completed", "superseded attempt stays completed");
   });
 
-  test("a row recorded after mergedAt is not credited", async () => {
+  test("a row started after mergedAt is not credited even when its recordedAt predates the merge", async () => {
     const fx: Fixture = {
-      metrics: new Map([["w-late-dev_orch", devRow(42, "2026-10-01T13:00:00Z")]]),
+      metrics: new Map([
+        ["w-late-dev_orch", devRow(42, "2026-10-01T11:00:00Z", { startedAt: "2026-10-01T13:00:00Z" })],
+      ]),
       prState: new Map(),
       reposts: [],
       mergedPrs: [pr(902, "2026-10-01T12:00:00Z", "Closes #42")],
@@ -929,6 +944,67 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
     assert.equal(r.anchorJoined, 4);
   });
 
+  test("a row whose metrics recordedAt was bumped past mergedAt by a later enrichment write is still credited (startedAt owns, #5028)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        [
+          "w-e46df96b-t6-dev_orch",
+          devRow(5051, "2026-10-19T22:17:43Z", { startedAt: "2026-10-19T21:41:07Z" }),
+        ],
+      ]),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [pr(5055, "2026-10-19T22:16:51Z", "Closes #5051")],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.anchorJoined, 1);
+    assert.deepEqual(fx.reposts.map((x) => [x.cycleId, x.prNumber]), [["w-e46df96b-t6-dev_orch", 5055]]);
+  });
+
+  test("a legacy row with no cycle-hash startedAt falls back to the metrics recordedAt (#5028)", async () => {
+    const mk = (recordedAt: string): Fixture => {
+      const row = devRow(42, recordedAt);
+      delete row.startedAt;
+      return {
+        metrics: new Map([["w-legacy-dev_orch", row]]),
+        prState: new Map(),
+        reposts: [],
+        mergedPrs: [pr(970, "2026-10-01T12:00:00Z", "Closes #42")],
+      };
+    };
+    assert.equal((await runCycleMergeReconcile(makeDeps(mk("2026-10-01T10:00:00Z")))).anchorJoined, 1);
+    assert.equal((await runCycleMergeReconcile(makeDeps(mk("2026-10-01T13:00:00Z")))).anchorJoined, 0);
+  });
+
+  test("an unparseable startedAt falls back to recordedAt rather than crediting blindly (#5028)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([["w-bad-dev_orch", devRow(42, "2026-10-01T13:00:00Z", { startedAt: "not-a-date" })]]),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [pr(971, "2026-10-01T12:00:00Z", "Closes #42")],
+    };
+    assert.equal((await runCycleMergeReconcile(makeDeps(fx))).anchorJoined, 0);
+  });
+
+  test("the cycle hash is read once per candidate and supplies both status and startedAt (#5028)", async () => {
+    const reads: string[] = [];
+    const fx: Fixture = {
+      metrics: new Map([["w-once-dev_orch", devRow(42, "2026-10-01T10:00:00Z")]]),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [pr(972, "2026-10-01T12:00:00Z", "Closes #42")],
+    };
+    const deps = makeDeps(fx);
+    const inner = deps.readCycleHash!;
+    deps.readCycleHash = async (id) => {
+      reads.push(id);
+      return inner(id);
+    };
+    const r = await runCycleMergeReconcile(deps);
+    assert.equal(r.anchorJoined, 1);
+    assert.deepEqual(reads, ["w-once-dev_orch"]);
+  });
+
   test("the default status dep reads the cycle hash, not the metrics hash", async () => {
     const fx: Fixture = {
       metrics: new Map([["w-def-dev_orch", devRow(42, "2026-10-01T10:00:00Z")]]),
@@ -937,12 +1013,11 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
       mergedPrs: [pr(910, "2026-10-01T12:00:00Z", "Closes #42")],
     };
     const deps = makeDeps(fx);
-    delete deps.getCycleStatus;
     // The metrics hash (getMetrics) carries NO status; only the cycle hash does.
-    deps.readCycleHash = async () => ({ status: "completed" });
+    deps.readCycleHash = async () => ({ status: "completed", startedAt: "2026-10-01T10:00:00Z" });
     const r = await runCycleMergeReconcile(deps);
     assert.equal(r.anchorJoined, 1);
-    deps.readCycleHash = async () => ({ status: "merged" });
+    deps.readCycleHash = async () => ({ status: "merged", startedAt: "2026-10-01T10:00:00Z" });
     const r2 = await runCycleMergeReconcile(deps);
     assert.equal(r2.anchorJoined, 0, "a merged cycle-hash status is terminal");
   });
@@ -1086,24 +1161,26 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
     assert.equal(r.anchorJoined, 1, "PR 940 lands in merged sibling 3's interval and credits nothing");
   });
 
-  test("anchor-join window: a merge outside the window credits nothing; inside or widened credits (#4926)", async () => {
+  test("anchor-join window: a merge outside the 7-day window credits nothing; inside or widened credits (#4926, #5028)", async () => {
     const mk = (mergedAt: string): Fixture => ({
       metrics: new Map([["w-w-dev_orch", devRow(42, "2026-10-01T10:00:00Z")]]),
       prState: new Map(),
       reposts: [],
       mergedPrs: [pr(950, mergedAt, "Closes #42")],
     });
-    const late = mk("2026-10-04T10:00:01Z"); // 72h + 1s
+    const late = mk("2026-10-08T10:00:01Z"); // 7d + 1s
     const rLate = await runCycleMergeReconcile(makeDeps(late));
     assert.equal(rLate.anchorJoined, 0);
     assert.equal(late.metrics.get("w-w-dev_orch")!.status, "completed");
 
-    const edge = mk("2026-10-04T10:00:00Z"); // exactly 72h
+    const edge = mk("2026-10-08T10:00:00Z"); // exactly 7d
+    const mid = mk("2026-10-05T10:00:01Z"); // 96h: inside the 7d window (#5028)
+    assert.equal((await runCycleMergeReconcile(makeDeps(mid))).anchorJoined, 1);
     assert.equal((await runCycleMergeReconcile(makeDeps(edge))).anchorJoined, 1);
 
-    const widened = mk("2026-10-04T10:00:01Z");
+    const widened = mk("2026-10-08T10:00:01Z");
     const rWide = await runCycleMergeReconcile(
-      makeDeps(widened, { anchorJoinWindowMs: 73 * 60 * 60 * 1000 }),
+      makeDeps(widened, { anchorJoinWindowMs: 8 * 24 * 60 * 60 * 1000 }),
     );
     assert.equal(rWide.anchorJoined, 1);
   });
@@ -1116,7 +1193,7 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
       ]),
       prState: new Map(),
       reposts: [],
-      mergedPrs: [pr(960, "2026-10-05T10:00:00Z", "Closes #42")],
+      mergedPrs: [pr(960, "2026-10-09T10:00:00Z", "Closes #42")],
     };
     const r = await runCycleMergeReconcile(makeDeps(fx));
     assert.equal(r.anchorJoined, 0);
@@ -1135,8 +1212,8 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
       mergedPrs: [],
     };
     const deps = makeDeps(fx);
-    const inner = deps.getCycleStatus!;
-    deps.getCycleStatus = async (id) => {
+    const inner = deps.readCycleHash!;
+    deps.readCycleHash = async (id) => {
       reads.push(id);
       return inner(id);
     };
@@ -1200,5 +1277,94 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
   test("listMergedPrsViaRest returns null on a non-array first page", async () => {
     const out = await listMergedPrsViaRest((async () => ({ ok: true, data: { message: "nope" } })) as any);
     assert.equal(out, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wired end-to-end (issue #5028, INV-7): the chore bound to the REAL recordCycle
+// over an in-memory CycleCloseDeps — a merged dev cycle ends `status: merged`
+// with a non-null prNumber, and no lifetime counter re-fires on the upgrade.
+// ---------------------------------------------------------------------------
+
+describe("cycle-merge-reconcile — wired to the real recordCycle (#5028)", () => {
+  test("a completed PR-less dev row credited by a merged PR ends status merged with a prNumber and fires no counter", async () => {
+    const cycleHashes = new Map<string, Record<string, string>>();
+    const metricsHashes = new Map<string, Record<string, string>>();
+    const counters = { run: 0, merged: 0, failed: 0, unaccounted: 0 };
+    const closeDeps: CycleCloseDeps = {
+      cycle: {
+        getCycleHash: async (id) => ({ ...(cycleHashes.get(id) ?? {}) }),
+        initCycleHash: async (id, fields) => {
+          cycleHashes.set(id, { ...fields });
+        },
+        addCycleToIndex: async () => {},
+        updateCycleHash: async (id, fields) => {
+          cycleHashes.set(id, { ...(cycleHashes.get(id) ?? {}), ...fields });
+        },
+      },
+      scheduler: {
+        incrSchedulerCyclesRun: async () => ++counters.run,
+        incrSchedulerCyclesMerged: async () => ++counters.merged,
+        incrSchedulerCyclesFailed: async () => ++counters.failed,
+        incrSchedulerCyclesUnaccounted: async () => ++counters.unaccounted,
+      },
+      metrics: {
+        recordCycleMetrics: async (id, input) => {
+          const row = metricsHashes.get(id) ?? {};
+          for (const [k, v] of Object.entries(input)) {
+            if (v === undefined) continue;
+            row[k] = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
+          }
+          // Mirrors src/metrics/record.ts: recordedAt is rewritten on EVERY write.
+          row.recordedAt = new Date().toISOString();
+          metricsHashes.set(id, row);
+        },
+        getCycleMetrics: async (id) => ({ ...(metricsHashes.get(id) ?? {}) }),
+      },
+      dispatchOutcomes: {
+        put: async () => ({ ok: true as const }),
+        upgrade: async () => ({ ok: true as const }),
+        readCycleTokens: async () => null,
+      },
+      now: () => Date.parse("2026-10-01T10:00:00Z"),
+    };
+
+    const cycleId = "worktree-agent-e2e00001-t1-dev_orch";
+    const first = await recordCycle(
+      {
+        cycleId,
+        status: "completed",
+        tasksMerged: 1,
+        anchorType: "work-queue",
+        anchorReference: "issue-77",
+        startedAt: "2026-10-01T10:00:00.000Z",
+      } as any,
+      closeDeps,
+    );
+    assert.equal(first.ok, true);
+    const countersAfterFirstWrite = { ...counters };
+    assert.equal(metricsHashes.get(cycleId)!.prNumber, undefined, "reap-time row has no PR yet");
+
+    const fx: Fixture = {
+      metrics: new Map(),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [pr(7700, "2026-10-01T12:00:00Z", "Closes #77")],
+    };
+    const deps = makeDeps(fx, {
+      listRecent: async () => [cycleId],
+      getMetrics: async (id) => ({ ...(metricsHashes.get(id) ?? {}) }),
+      readCycleHash: async (id) => ({ ...(cycleHashes.get(id) ?? {}) }),
+      recordCycleRecord: (body) => recordCycle(body as any, closeDeps),
+    });
+    const r = await runCycleMergeReconcile(deps);
+
+    assert.equal(r.anchorJoined, 1);
+    const m = metricsHashes.get(cycleId)!;
+    assert.equal(m.status, "merged");
+    assert.equal(m.prNumber, "7700");
+    assert.equal(m.tasksMerged, "1");
+    assert.equal(cycleHashes.get(cycleId)!.status, "merged");
+    assert.deepEqual(counters, countersAfterFirstWrite, "the upgrade re-fires no lifetime counter");
   });
 });
