@@ -14,7 +14,7 @@
  */
 import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, copyFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -764,5 +764,43 @@ describe("suite-count-check scoped baseline regeneration (#5107)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("suite-count-check --update-baseline on an unreadable baseline (#5107)", () => {
+  function run(extra: string[]) {
+    const dir = mkdtempSync(join(tmpdir(), "suite-count-corrupt-"));
+    try {
+      mkdirSync(join(dir, "scripts", "test"), { recursive: true });
+      mkdirSync(join(dir, "test", "fixtures"), { recursive: true });
+      copyFileSync(
+        join(fileURLToPath(new URL("../scripts/test/suite-count-check.mjs", import.meta.url))),
+        join(dir, "scripts", "test", "suite-count-check.mjs"),
+      );
+      writeFileSync(join(dir, "test", "one.test.mts"), 'import { test } from "node:test";\ntest("a", () => {});\n');
+      writeFileSync(join(dir, "test", "fixtures", "suite-count-baseline.json"), "<<<<<<< HEAD\n{}\n=======\n");
+      const r = spawnSync("node", [join(dir, "scripts", "test", "suite-count-check.mjs"), "--update-baseline", ...extra], {
+        cwd: dir,
+        encoding: "utf8",
+      });
+      const out = readFileSync(join(dir, "test", "fixtures", "suite-count-baseline.json"), "utf8");
+      return { status: r.status, stderr: r.stderr, out };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("bare regen recovers: WARNs, exits 0, rewrites the baseline", () => {
+    const r = run([]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /existing baseline unreadable/);
+    assert.deepEqual(JSON.parse(r.out), { "test/one.test.mts": 1 });
+  });
+
+  test("--only fails loudly and leaves the baseline untouched", () => {
+    const r = run(["--only", "test/one.test.mts"]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /cannot read existing baseline for --only/);
+    assert.match(r.out, /<<<<<<< HEAD/);
   });
 });

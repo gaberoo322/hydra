@@ -567,9 +567,24 @@ if (isMain) {
   const args = process.argv.slice(2);
   if (args[0] === "--update-baseline") {
     const generated = generateBaseline();
-    const existing = loadBaseline();
-    let baseline = generated;
     const onlyIdx = args.indexOf("--only");
+    // A bare regen is the recovery path for a corrupt/conflicted baseline, so
+    // an unreadable existing file must not abort it; --only needs the old rows.
+    let existing = {};
+    let existingReadable = true;
+    try {
+      existing = loadBaseline();
+    } catch (err) {
+      if (onlyIdx !== -1) {
+        console.error(`[suite-count-check] cannot read existing baseline for --only: ${err instanceof Error ? err.message : err}`);
+        process.exit(1);
+      }
+      existingReadable = false;
+      console.error(
+        `[suite-count-check] WARN: existing baseline unreadable (${err instanceof Error ? err.message : err}); regenerating in full and skipping the drift check`,
+      );
+    }
+    let baseline = generated;
     if (onlyIdx !== -1) {
       const only = testFilesFromArgs(args.slice(onlyIdx + 1)).map((f) =>
         relative(REPO_ROOT, resolve(REPO_ROOT, f)).split("\\").join("/"),
@@ -586,7 +601,7 @@ if (isMain) {
         }
       }
       baseline = scopedBaseline({ existing, generated, only });
-    } else {
+    } else if (existingReadable) {
       const diff = branchChangedTestFiles();
       if (!diff.ok) {
         console.error(
