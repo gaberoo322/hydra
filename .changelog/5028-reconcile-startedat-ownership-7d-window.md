@@ -1,0 +1,1 @@
+- fix: credit merged dev cycles to the row's immutable start time with a 7-day join window so the rolling merge rate stops under-reporting (#5028)

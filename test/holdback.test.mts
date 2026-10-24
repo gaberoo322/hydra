@@ -1493,12 +1493,12 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     const reconcileDeps: CycleMergeReconcileDeps = {
       listRecent: async () => [cycleId],
       // #4762: status lives in the CYCLE hash, not the metrics hash — strip it
-      // from getMetrics and serve it through getCycleStatus.
+      // from getMetrics and serve it through readCycleHash.
       getMetrics: async (id: string) => {
         const { status: _s, ...rest } = metrics.get(id) ?? {};
         return { ...rest };
       },
-      getCycleStatus: async (id: string) => metrics.get(id)?.status,
+      readCycleHash: async (id: string) => ({ status: metrics.get(id)?.status ?? "" }),
       fetchPrState: async () => ({ state: prView.state, headRefName: prView.headRefName }),
       recordCycleRecord: async (body: any) => {
         // Simulate the completed→merged upgrade on the shared metrics store.
