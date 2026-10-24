@@ -329,6 +329,7 @@ export async function transcriptScan(
   const cutoff24h = nowMs - WINDOW_24H_MS;
   const cutoff5h = nowMs - WINDOW_5H_MS;
   const foreignPrefixes = loadForeignPrefixes();
+  const foreignKey = [...(foreignPrefixes ?? [])].sort().join(",");
   const loadMemo = memoIo.load ?? loadTranscriptParseMemo;
   const writeMemo = memoIo.write ?? writeTranscriptParseMemoBatch;
 
@@ -401,6 +402,9 @@ export async function transcriptScan(
   const isMemoEntryUsable = (entry: FileParseMemoEntry): boolean => {
     // An entry from an older parser (issue #5141) is re-parsed, never replayed.
     if (entry.parseVersion !== TRANSCRIPT_PARSE_VERSION) return false;
+    // Foreign flags depend on the configured prefix set (issue #4841): an entry
+    // parsed under a different set is re-parsed, never replayed.
+    if (entry.foreignKey !== foreignKey) return false;
     if (entry.dispatchKind !== null && !isKnownDispatchKind(entry.dispatchKind)) return false;
     for (const e of entry.entries) {
       if (!e.foreign && !isKnownFamily(e.family)) return false;
@@ -520,6 +524,7 @@ export async function transcriptScan(
       size: st.size,
       mtimeMs: st.mtimeMs,
       ...entry,
+      foreignKey,
     });
   }
 

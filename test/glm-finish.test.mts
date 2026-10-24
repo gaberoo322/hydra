@@ -1085,6 +1085,15 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
     assert.equal(n.files.has(quotaBlockFilePath(CAP_DIR, "kimi")), false);
   });
 
+  test("prose merely mentioning 429 + quota exceeded (even on a successful open-pr arm) never blocks the provider", async () => {
+    const prose = "I will handle HTTP 429 when the quota is exceeded, then retry; added a rate limit test for status 429.";
+    const h = finishHarness(1, "b\n");
+    const r = await runFinish(h.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 0, stdout: prose, stderr: "" })));
+    assert.equal(r.action, "open-pr");
+    assert.equal(r.quotaBlockedUntil, null);
+    assert.equal(h.files.has(quotaBlockFilePath(CAP_DIR, "kimi")), false);
+  });
+
   test("fallback-only providers always take the 60-minute fallback", async () => {
     const raw = JSON.stringify({ ok: true, code: 1, stdout: "Request rejected (429) reset at 2026-10-23 08:00:00", stderr: "" });
     const h = finishHarness(0, null);

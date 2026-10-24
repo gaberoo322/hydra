@@ -172,10 +172,10 @@ export function parseAuthorOutcome(raw: string, exitCode: number): AuthorOutcome
 function is429Rejection(text: string): boolean {
   if (text.includes("Request rejected (429)")) return true;
   if (/rate_limit_error/i.test(text)) return true;
-  return (
-    /\b429\b[^\n]{0,120}(rate.?limit|quota|too many requests|exceeded)/i.test(text) ||
-    /(rate.?limit|quota|too many requests|exceeded)[^\n]{0,120}\b429\b/i.test(text)
-  );
+  // Line-anchored provider error shapes only: free-form model prose that merely
+  // mentions "429" and "quota exceeded" must not block a healthy provider.
+  return /^\s*(?:API Error:?\s*)?(?:HTTP\s*)?429\b[^\n]{0,120}(rate.?limit|quota|too many requests|exceeded)/im.test(text) ||
+    /^\s*API Error:?\s*[^\n]{0,60}\b429\b/im.test(text);
 }
 
 /**
