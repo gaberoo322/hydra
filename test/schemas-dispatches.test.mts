@@ -19,7 +19,6 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   SubagentDispatchPostBodySchema,
-  SubagentDispatchStepPatchBodySchema,
 } from "../src/schemas/dispatches.ts";
 
 // ---------------------------------------------------------------------------
@@ -125,31 +124,6 @@ describe("SubagentDispatchPostBodySchema — rejection cases (the 400 surface)",
         assert.equal(typeof issue.message, "string");
       }
     }
-  });
-});
-
-describe("SubagentDispatchStepPatchBodySchema", () => {
-  test("accepts a non-empty currentStep", () => {
-    const result = SubagentDispatchStepPatchBodySchema.safeParse({ currentStep: "verifying" });
-    assert.equal(result.success, true);
-  });
-
-  test("accepts an empty currentStep (clearing the step is legitimate)", () => {
-    const result = SubagentDispatchStepPatchBodySchema.safeParse({ currentStep: "" });
-    assert.equal(result.success, true);
-  });
-
-  test("rejects a missing currentStep", () => {
-    const result = SubagentDispatchStepPatchBodySchema.safeParse({});
-    assert.equal(result.success, false);
-  });
-
-  test("rejects unknown fields (strict)", () => {
-    const result = SubagentDispatchStepPatchBodySchema.safeParse({
-      currentStep: "x",
-      extra: 1,
-    });
-    assert.equal(result.success, false);
   });
 });
 

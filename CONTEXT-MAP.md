@@ -23,7 +23,7 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | `src/notification/`, `src/operator-channel/` | Operator Channel, Page, Morning Brief | — | ADR-0045 | — |
 | `src/pattern-memory/` | Pattern Memory | — | — | [Ineffective promoted patterns](docs/operations/ineffective-promoted-patterns.md), [Learning System](docs/reference.md#learning-system-operational) |
 | `src/reflections/` | Reflections | — | ADR-0023 | — |
-| `src/metrics/`, `src/aggregators/` | Cost, Quota Weight | — | ADR-0016, ADR-0028, ADR-0039 | [Cost reconciliation](docs/reference.md#cost-reconciliation-issue-296--historical) |
+| `src/metrics/`, `src/aggregators/` | Cost, Quota Weight | — | ADR-0016, ADR-0028, ADR-0039 | — |
 | `src/api/`, `src/api.ts` | — (see `docs/generated/routes.json`) | n/a | ADR-0011, ADR-0022, ADR-0024 | [API Endpoints](docs/reference.md#api-endpoints-port-4000-all-under-api) |
 | `src/logger.ts` | — | n/a | ADR-0027 | — |
 | `src/target-config.ts` | Target Manifest | n/a | ADR-0002, ADR-0026 | [Target swap runbook](docs/target-swap-runbook.md), [ADR-0002 target swap](docs/reference.md#adr-0002-target-swap-issue-258--259) |

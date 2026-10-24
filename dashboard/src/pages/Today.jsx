@@ -30,8 +30,7 @@ import Versions from "../components/Versions.jsx";
  * REMOVED — ADR-0034 §8.1 superseded it with the bucketed attention feed;
  * every waiting-on-you decision now drains through the feed's waiting-on-you
  * bucket with its typed registry action (issue #4628). The backend
- * /today/decision-queue route stays (out of scope here; orphan cleanup is a
- * follow-up).
+ * /today/decision-queue route and its aggregator were deleted (#5160).
  *
  * Each section lives in `dashboard/src/components/pages/today/` and owns
  * its own poll cadence (30s for the operator-attention sections, 60s for

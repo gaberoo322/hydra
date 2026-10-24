@@ -292,26 +292,6 @@ export async function registerSubagentDispatch(
 }
 
 /**
- * Patch the `currentStep` of an in-flight subagent dispatch and refresh the
- * TTL. Idempotent on an unknown sessionId — the HSET simply creates the
- * field on a (possibly already-expired) hash; callers that care about
- * existence should `getSubagentDispatch` first. We intentionally do NOT
- * re-add to the index here: a step update on a row whose hash expired
- * shouldn't resurrect an index entry that `endSubagentDispatch` removed.
- */
-export async function setSubagentDispatchStep(
-  sessionId: string,
-  step: string,
-): Promise<void> {
-  const r = getRedisConnection();
-  const pipe = r.pipeline();
-  pipe.hset(subagentDispatchKey(sessionId), "currentStep", step);
-  pipe.expire(subagentDispatchKey(sessionId), TTL_SECONDS);
-  pipe.expire(subagentDispatchIndexKey(), TTL_SECONDS);
-  await pipe.exec();
-}
-
-/**
  * Mark a subagent dispatch ended — drops the hash AND removes it from the
  * index. Idempotent: calling on an unknown sessionId is a no-op.
  */

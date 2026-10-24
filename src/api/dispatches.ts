@@ -6,7 +6,6 @@
  * Agent-tool subagent session into the subagent-dispatch registry:
  *
  *   POST  /api/dispatches/subagent
- *   PATCH /api/dispatches/subagent/:sessionId/current-step
  *
  * Plus the operator-facing transcript read surface (issue #695, PRD #690):
  *
@@ -30,13 +29,11 @@ import { Router } from "express";
 import { promises as fs } from "node:fs";
 import {
   registerSubagentDispatch,
-  setSubagentDispatchStep,
   getSubagentDispatch,
   type SubagentDispatch,
 } from "../redis/dispatches.ts";
 import {
   SubagentDispatchPostBodySchema,
-  SubagentDispatchStepPatchBodySchema,
   TranscriptQuerySchema,
 } from "../schemas/dispatches.ts";
 import { resolveTranscriptPath, resolveSubagentTranscriptPath } from "../transcript-store.ts";
@@ -109,36 +106,6 @@ export function createDispatchesRouter() {
       await registerSubagentDispatch(dispatch);
       return { registered: true, dispatch };
     });
-  });
-
-  // PATCH /dispatches/subagent/:sessionId/current-step — update the step.
-  router.patch("/dispatches/subagent/:sessionId/current-step", async (req, res) => {
-    const sessionId = (req.params.sessionId || "").trim();
-    if (!sessionId) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: [{ path: ["sessionId"], message: "sessionId path param is required" }],
-      });
-    }
-    const parsed = SubagentDispatchStepPatchBodySchema.safeParse(req.body || {});
-    if (!parsed.success) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: parsed.error.issues,
-      });
-    }
-
-    // Issue #909 / ADR-0027 eighth sweep: the two validation 400s stay inline;
-    // the never-throw-500 isolation + pino `err`-field log come from the seam.
-    return isolateAggregator(
-      res,
-      "api/dispatches/subagent/current-step",
-      async () => {
-        await setSubagentDispatchStep(sessionId, parsed.data.currentStep);
-        const updated = await getSubagentDispatch(sessionId);
-        return { updated: true, dispatch: updated };
-      },
-    );
   });
 
   // GET /dispatches/:dispatchId/transcript — render a subagent session's

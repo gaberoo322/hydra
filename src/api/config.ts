@@ -2,7 +2,6 @@ import { Router } from "express";
 import { resolve } from "node:path";
 import {
   CONFIG_SECTIONS,
-  listConfigSection,
   readConfigFile,
   writeConfigFile,
 } from "./config-io.ts";
@@ -34,15 +33,6 @@ export function createConfigRouter() {
   // -----------------------------------------------------------------------
   // Config endpoints — read/write git-tracked config files
   // -----------------------------------------------------------------------
-
-  // GET /config/:section — List files in a config section
-  router.get("/config/:section", async (req, res) => {
-    const section = CONFIG_SECTIONS[req.params.section];
-    if (!section) return res.status(404).json({ error: `Unknown config section: ${req.params.section}` });
-    return isolateAggregator(res, "api/config/section", () =>
-      listConfigSection(CONFIG_PATH, section),
-    );
-  });
 
   // GET /config/:section/:name — Read a config file
   //

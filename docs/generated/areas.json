@@ -83,7 +83,6 @@
       ],
       "slices": {
         "routes": [
-          "GET /api/agents/stream",
           "GET /api/alerts",
           "POST /api/alerts/:id/dismiss",
           "POST /api/alerts/dismiss-all",
@@ -116,11 +115,9 @@
           "GET /api/autopilot/class-stats",
           "GET /api/cycle/status",
           "GET /api/cycle/history",
-          "GET /api/cycle/report/:cycleId",
           "POST /api/cycle/register",
           "POST /api/cycle/complete",
           "POST /api/dispatches/subagent",
-          "PATCH /api/dispatches/subagent/:sessionId/current-step",
           "GET /api/dispatches/:dispatchId/transcript",
           "GET /api/health",
           "GET /api/health/deep",
@@ -136,7 +133,6 @@
           "GET /api/metrics/anchor-distribution",
           "GET /api/metrics/unclassified",
           "GET /api/metrics/cascade-routing",
-          "GET /api/metrics/instrumentation",
           "GET /api/metrics/session-tokens",
           "GET /api/now/recommendations",
           "POST /api/now/recommendations/:id/dismiss",
@@ -323,7 +319,6 @@
           "POST /api/capacity/orchestrator-merge",
           "GET /api/cycle/status",
           "GET /api/cycle/history",
-          "GET /api/cycle/report/:cycleId",
           "POST /api/cycle/register",
           "POST /api/cycle/complete",
           "GET /api/design-concepts/snapshots",
@@ -336,7 +331,6 @@
           "POST /api/design-concepts",
           "POST /api/design-concepts/:anchorRef/approve",
           "POST /api/dispatches/subagent",
-          "PATCH /api/dispatches/subagent/:sessionId/current-step",
           "GET /api/dispatches/:dispatchId/transcript",
           "GET /api/events/:stream",
           "POST /api/events/publish",
@@ -360,7 +354,6 @@
           "GET /api/metrics/anchor-distribution",
           "GET /api/metrics/unclassified",
           "GET /api/metrics/cascade-routing",
-          "GET /api/metrics/instrumentation",
           "GET /api/metrics/session-tokens",
           "GET /api/now/service-strip",
           "GET /api/now/autopilot-tick",
@@ -387,7 +380,6 @@
           "GET /api/taxonomy/classes",
           "GET /api/tier",
           "GET /api/today/summary",
-          "GET /api/today/decision-queue",
           "GET /api/today/stuck",
           "GET /api/today/merges",
           "GET /api/today/findings",
@@ -432,7 +424,6 @@
           "CostBurnResponseSchema",
           "CycleCompleteBodySchema",
           "CycleRegisterBodySchema",
-          "DecisionQueueResponseSchema",
           "DesignConceptApproveBodySchema",
           "DesignConceptInputSchema",
           "DesignConceptListQuerySchema",
@@ -475,7 +466,6 @@
           "SlotEventsQuerySchema",
           "StuckSignalSchema",
           "SubagentDispatchPostBodySchema",
-          "SubagentDispatchStepPatchBodySchema",
           "SubagentFrictionBodySchema",
           "SubagentLessonBodySchema",
           "SubagentTokensBodySchema",
@@ -549,7 +539,6 @@
           "GET /api/metrics/anchor-distribution",
           "GET /api/metrics/unclassified",
           "GET /api/metrics/cascade-routing",
-          "GET /api/metrics/instrumentation",
           "GET /api/metrics/session-tokens",
           "GET /api/usage",
           "GET /api/usage/eligibility",
@@ -657,7 +646,6 @@
       ],
       "slices": {
         "routes": [
-          "GET /api/agents/stream",
           "GET /api/autopilot/board-state",
           "GET /api/autopilot/work-queue",
           "GET /api/autopilot/hitl-grill",
@@ -751,7 +739,6 @@
           "GET /api/metrics/anchor-distribution",
           "GET /api/metrics/unclassified",
           "GET /api/metrics/cascade-routing",
-          "GET /api/metrics/instrumentation",
           "GET /api/metrics/session-tokens",
           "GET /api/taxonomy/classes"
         ]
@@ -1057,28 +1044,8 @@
         "0028",
         "0039"
       ],
-      "adrsCited": [
-        "0001",
-        "0002",
-        "0003",
-        "0004",
-        "0005",
-        "0006",
-        "0009",
-        "0010",
-        "0015",
-        "0020",
-        "0024",
-        "0033",
-        "0034",
-        "0045"
-      ],
-      "referenceDocs": [
-        {
-          "path": "docs/reference.md",
-          "anchor": "cost-reconciliation-issue-296--historical"
-        }
-      ],
+      "adrsCited": [],
+      "referenceDocs": [],
       "slices": {
         "routes": [
           "GET /api/architecture",
@@ -1101,7 +1068,6 @@
           "GET /api/metrics/anchor-distribution",
           "GET /api/metrics/unclassified",
           "GET /api/metrics/cascade-routing",
-          "GET /api/metrics/instrumentation",
           "GET /api/metrics/session-tokens",
           "GET /api/now/service-strip",
           "GET /api/now/autopilot-tick",
@@ -1115,7 +1081,6 @@
           "GET /api/outcomes/lessons",
           "GET /api/outcomes/quota",
           "GET /api/today/summary",
-          "GET /api/today/decision-queue",
           "GET /api/today/stuck",
           "GET /api/today/merges",
           "GET /api/today/findings",
@@ -1127,7 +1092,6 @@
           "GET /api/usage/by-issue"
         ],
         "env-vars": [
-          "HYDRA_PERF_INSTRUMENT",
           "HYDRA_ROLLING_MERGE_RATE_WINDOW"
         ]
       },
@@ -1185,9 +1149,7 @@
       "slices": {
         "env-vars": [
           "HYDRA_CORS_ALLOWED_ORIGINS",
-          "HYDRA_OTEL_ENABLED",
-          "HYDRA_PACE_GATE_INTERVAL_SECONDS",
-          "HYDRA_TRACE_UI_URL"
+          "HYDRA_PACE_GATE_INTERVAL_SECONDS"
         ]
       },
       "homes": [],
@@ -1214,7 +1176,6 @@
       "referenceDocs": [],
       "slices": {
         "routes": [
-          "GET /api/agents/stream",
           "GET /api/alerts",
           "POST /api/alerts/:id/dismiss",
           "POST /api/alerts/dismiss-all",
@@ -1240,14 +1201,8 @@
           "GET /api/autopilot/runs/:runId/log",
           "GET /api/autopilot/runs/:runId/journal",
           "GET /api/autopilot/class-stats",
-          "GET /api/config/:section",
           "GET /api/config/:section/:name",
           "PUT /api/config/:section/:name",
-          "GET /api/cycle/status",
-          "GET /api/cycle/history",
-          "GET /api/cycle/report/:cycleId",
-          "POST /api/cycle/register",
-          "POST /api/cycle/complete",
           "GET /api/design-concepts/snapshots",
           "GET /api/design-concepts/exempt-log",
           "POST /api/design-concepts/exempt-log",
@@ -1258,7 +1213,6 @@
           "POST /api/design-concepts",
           "POST /api/design-concepts/:anchorRef/approve",
           "POST /api/dispatches/subagent",
-          "PATCH /api/dispatches/subagent/:sessionId/current-step",
           "GET /api/dispatches/:dispatchId/transcript",
           "GET /api/goals",
           "POST /api/holdback/enroll",
@@ -1274,7 +1228,6 @@
           "GET /api/metrics/anchor-distribution",
           "GET /api/metrics/unclassified",
           "GET /api/metrics/cascade-routing",
-          "GET /api/metrics/instrumentation",
           "GET /api/metrics/session-tokens",
           "GET /api/outcomes",
           "POST /api/memory/:agent/pattern",

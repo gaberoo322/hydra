@@ -144,10 +144,6 @@ Defaults live in `src/holdback-policy.ts` (windows), `src/redis/holdback.ts` (ca
 
 T1 (prompt-shaped) merges are never enrolled; T2, T3 and T4 always are, with the window deepening by tier (issue #741, building on the #786 T2 floor).
 
-## Cost reconciliation (issue #296) — historical
-
-Deleted. The JSONL cost-reconciliation module and its route went away with the Codex CLI runtime (ADR-0006), and the dollar-denominated machinery with them; the record is the **Dollar/cost machinery** row of [`docs/historical/README.md`](./historical/README.md). Current quota accounting is the **Cost** module and **Subscription Usage Tracker** (see `CONTEXT.md`).
-
 ## GitHub API rate-limit handling (issue #3137)
 
 All `gh`/`git` invocations funnel through the **GitHub CLI Adapter** (`src/github/exec.ts` + `gh.ts`). Rate-limit handling lives on that seam.

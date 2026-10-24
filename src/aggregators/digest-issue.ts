@@ -21,8 +21,7 @@
  *   - `mergeBySource`      — the dedup/merge skeleton both aggregators use
  *     to unify their (now two, not three) label-fed sources into one list.
  *
- * The `getDecisionQueue` / `mergeDecisionItems` / `mergePickupItems`
- * orchestration logic stays in its respective aggregator — only these
+ * The `mergePickupItems` orchestration logic stays in its aggregator — only these
  * shared primitives live here.
  */
 
@@ -30,7 +29,7 @@ import type { IssueRow } from "../github/issues.ts";
 
 /**
  * The raw, pre-merge shape a labeled row maps to. Both aggregators narrow
- * this down to their own item type (`DecisionItem` / `PickupItem`) after
+ * this down to their own item type (`PickupItem`) after
  * merge; the seam emits the wide shape so neither aggregator's merge step
  * loses a field it might need.
  */

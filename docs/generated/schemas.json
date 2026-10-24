@@ -410,16 +410,6 @@
       }
     },
     {
-      "name": "DecisionQueueResponseSchema",
-      "file": "src/schemas/today-page.ts",
-      "importedBy": [],
-      "routes": [],
-      "source": {
-        "path": "src/schemas/today-page.ts",
-        "line": 129
-      }
-    },
-    {
       "name": "DesignConceptApproveBodySchema",
       "file": "src/schemas/design-concept.ts",
       "importedBy": [
@@ -804,7 +794,7 @@
       ],
       "source": {
         "path": "src/schemas/today-page.ts",
-        "line": 203
+        "line": 140
       }
     },
     {
@@ -978,20 +968,6 @@
       }
     },
     {
-      "name": "SubagentDispatchStepPatchBodySchema",
-      "file": "src/schemas/dispatches.ts",
-      "importedBy": [
-        "src/api/dispatches.ts"
-      ],
-      "routes": [
-        "PATCH /api/dispatches/subagent/:sessionId/current-step"
-      ],
-      "source": {
-        "path": "src/schemas/dispatches.ts",
-        "line": 78
-      }
-    },
-    {
       "name": "SubagentFrictionBodySchema",
       "file": "src/schemas/pattern-memory.ts",
       "importedBy": [
@@ -1106,7 +1082,7 @@
       ],
       "source": {
         "path": "src/schemas/dispatches.ts",
-        "line": 100
+        "line": 86
       }
     },
     {
@@ -1175,7 +1151,7 @@
       ],
       "source": {
         "path": "src/schemas/today-page.ts",
-        "line": 241
+        "line": 178
       }
     }
   ]

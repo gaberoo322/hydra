@@ -18,17 +18,6 @@ The operator-facing runbook (how to enable / disable, key rotation, sampling, dr
 3. On the import screen, map the `tempo` datasource variable to your Tempo datasource (the example wiring in `scripts/otel/docker-compose.example.yml` calls it `Tempo`).
 4. Save. Both dashboards land at the `uid` declared in the JSON (`uid=hydra-otel-overview`, `uid=hydra-otel-cycle-drilldown`) — link to them from elsewhere using those UIDs.
 
-## Linking from the Hydra dashboard
-
-Set `HYDRA_TRACE_UI_URL` on the orchestrator to point at the cycle-drill-down dashboard with `{cycleId}` as a placeholder. The Cycles page renders a "traces ↗" link next to the active cycle and each history row when this is set.
-
-```bash
-# Example for the self-hosted Tempo wiring in scripts/otel/
-HYDRA_TRACE_UI_URL='http://localhost:3000/d/hydra-otel-cycle-drilldown/hydra-cycle-drill-down?var-cycle_id={cycleId}'
-```
-
-If `{cycleId}` is omitted from the template the orchestrator falls back to appending `?hydra_cycle_id=<id>` so the link still resolves to a useful page. Templates that already include a query string get `&hydra_cycle_id=<id>` instead.
-
 ## Backend-portability notes
 
 The Tempo TraceQL queries assume the Hydra resource attributes (`resource.hydra.cycle_id`, `resource.hydra.agent_role`, `resource.hydra.model_tier`, `resource.hydra.model`) are passed through unchanged by the otel-collector. The example collector config in `scripts/otel/otel-collector.example.yaml` does this.
@@ -40,4 +29,4 @@ For SigNoz / Jaeger / other backends: the underlying signals (resource attribute
 - **Default dashboard panels** — shipped as JSON in this folder. Operator-action required: import into their Grafana.
 - **Cycle drill-down** — same import path.
 - **Operator runbook** — `docs/historical/codex-otel.md` (Codex OpenTelemetry — Tier-3 operator runbook, issue #207; retired by ADR-0006).
-- **Dashboard URL link from Hydra cycle-detail** — done. Set `HYDRA_TRACE_UI_URL` to enable.
+- **Dashboard URL link from Hydra cycle-detail** — retired (#5160): the config route and its env var had no caller.

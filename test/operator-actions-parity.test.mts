@@ -67,15 +67,7 @@ const PENDING_CEILING: readonly string[] = [
  * key leaves when #5160 retires it (→ RETIRED_*) or names its caller
  * (→ MACHINE_*). Never add one.
  */
-const RETIREMENT_CEILING: readonly string[] = [
-  "GET /api/agents/stream",
-  "GET /api/config/:section",
-  "GET /api/cycle/report/:cycleId",
-  "GET /api/metrics/instrumentation",
-  "GET /api/observability/config",
-  "GET /api/today/decision-queue",
-  "PATCH /api/dispatches/subagent/:sessionId/current-step",
-];
+const RETIREMENT_CEILING: readonly string[] = [];
 
 function row(method: string, path: string, consumers: string[] = []): RouteInventoryRow {
   return { method, path, consumers };
@@ -180,9 +172,10 @@ describe("rung 1 — every write route is in exactly one set (§9.1)", () => {
     assert.deepEqual(report.stale, [], "a GET candidate is rung 4's business, never stale in rung 1");
   });
 
-  test("§9.1's five retired writes are the RETIRED_WRITES set", () => {
+  test("§9.1's five retired writes plus #5160's current-step PATCH are the RETIRED_WRITES set", () => {
     assert.deepEqual(Object.keys(RETIRED_WRITES).sort(), [
       "DELETE /api/env/:project/:key",
+      "PATCH /api/dispatches/subagent/:sessionId/current-step",
       "POST /api/calibration/outcomes/sync",
       "POST /api/kill",
       "POST /api/research/start",
@@ -246,8 +239,8 @@ describe("rung 4 — every GET is in exactly one set (§9.4)", () => {
     assert.deepEqual(report.retiredPresent, [], "a RETIRED_READS route is back in the inventory");
   });
 
-  test("§9.4's eleven retired reads are the RETIRED_READS set", () => {
-    assert.equal(Object.keys(RETIRED_READS).length, 11);
+  test("§9.4's eleven retired reads plus #5160's six are the RETIRED_READS set", () => {
+    assert.equal(Object.keys(RETIRED_READS).length, 17);
     for (const [key, reason] of Object.entries({ ...RETIRED_READS, ...MACHINE_READS })) {
       assert.ok(reason.trim().length > 0, `${key} has no reason`);
     }

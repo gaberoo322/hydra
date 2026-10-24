@@ -29,7 +29,6 @@ const {
   endSubagentDispatch,
   listActiveSubagentDispatches,
   getSubagentDispatch,
-  setSubagentDispatchStep,
   subagentDispatchKey,
   subagentDispatchIndexKey,
   projectSubagentRow,
@@ -151,20 +150,6 @@ describe("subagent dispatch register/get/list/step/end round-trip", () => {
     assert.equal(list.length, 2);
     assert.equal(list[0].sessionId, "sess-new");
     assert.equal(list[1].sessionId, "sess-old");
-  });
-
-  test("setSubagentDispatchStep patches currentStep without disturbing other fields", async () => {
-    await registerSubagentDispatch({
-      sessionId: "sess-step",
-      skill: "hydra-dev",
-      dispatchId: "wt-1",
-      startedAt: "2026-05-28T10:00:00.000Z",
-      currentStep: "initial",
-    });
-    await setSubagentDispatchStep("sess-step", "verifying");
-    const got = await getSubagentDispatch("sess-step");
-    assert.equal(got!.currentStep, "verifying");
-    assert.equal(got!.skill, "hydra-dev");
   });
 
   test("re-registering the same sessionId is an idempotent overwrite (hook idempotency)", async () => {
