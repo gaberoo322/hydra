@@ -84,11 +84,7 @@ import {
 // L1 leaf: importable directly per ADR-0042 Decision 4 (pure leaves are legal
 // direct imports; only L3+ goes through the barrel).
 import {
-  parseUsageLine,
-  parseObservedResetMs,
   projectResetWindow,
-  modelToFamily,
-  isForeignProviderModel,
   MODEL_FAMILIES,
   familyWeight,
 } from "../../src/cost/token-math.ts";
@@ -110,6 +106,8 @@ import {
 import type { DispatchKind } from "../../src/cost/token-breakdown.ts";
 // Transcript Store seam: the projects root + the JSONL file list (same walk the
 // live scan uses, so the report sees the same files).
+// L3 pure fold: the one per-file transcript parse shared with the live scan.
+import { parseTranscriptFile } from "../../src/cost/transcript-fold.ts";
 import { listTranscriptFiles, projectsRoot } from "../../src/transcript-store.ts";
 // OAuth meter: the authoritative `percentLast7d` for the validation comparison.
 // (readOAuthUsage comes from the barrel above; isOAuthUsageOk is an L1 leaf helper (oauth-meter-shape).)
@@ -585,15 +583,14 @@ interface SinceResetScan {
 /**
  * Walk the JSONL transcripts under `root` and buffer every in-window usage line
  * (with its resolved skill + dispatch-kind + family) for the since-reset window
- * starting at `envBoundaryMs`. Mirrors `transcriptScan` (same file walk, same
- * per-session skill/kind resolution via `firstUserMessageText`, same foreign-
- * provider exclusion) but buffers per-line entries instead of accumulating into
+ * starting at `envBoundaryMs`. Runs the SAME per-file fold as `transcriptScan`
+ * (`parseTranscriptFile`: message.id de-dup, foreign-provider exclusion, skill/kind attribution) but buffers per-line entries instead of accumulating into
  * fixed cross-tabs — the effective boundary can move FORWARD mid-scan (an
  * observed reset more recent than the env projection), so accumulation happens
  * post-walk in `main()` once the boundary is known. Best-effort: never throws
  * (per-file read failures log + skip).
  */
-async function scanSinceReset(root: string, envBoundaryMs: number): Promise<SinceResetScan> {
+export async function scanSinceReset(root: string, envBoundaryMs: number): Promise<SinceResetScan> {
   const entries: SinceResetEntry[] = [];
   const foreign: TokenBreakdown = { ...EMPTY_BREAKDOWN };
   let mostRecentObservedResetMs: number | null = null;
@@ -631,47 +628,43 @@ async function scanSinceReset(root: string, envBoundaryMs: number): Promise<Sinc
       continue;
     }
 
-    const lines = content.split("\n");
-    // Resolve skill + dispatch-kind ONCE per session (memoised by sessionId) —
-    // the same O(files) attribution the live scan uses.
+    // The shared per-file fold (the same `parseTranscriptFile` the live scan
+    // runs): message.id de-duplication, foreign-provider split, family
+    // classification and observed-reset probing all live there. Skill + dispatch-
+    // kind are resolved ONCE per session (memoised by sessionId) via the
+    // `attribute` callback, which the fold invokes at most once per file.
     const sessionId = sessionIdFromPath(file);
-    let skill = skillCache.get(sessionId);
-    let kind = kindCache.get(sessionId);
-    if (skill === undefined || kind === undefined) {
-      const firstText = firstUserMessageText(lines);
-      skill = deriveSkill(firstText);
-      kind = deriveDispatchKind(firstText);
-      skillCache.set(sessionId, skill);
-      kindCache.set(sessionId, kind);
+    const { entry } = parseTranscriptFile(content, envBoundaryMs, (lines) => {
+      let skill = skillCache.get(sessionId);
+      let kind = kindCache.get(sessionId);
+      if (skill === undefined || kind === undefined) {
+        const firstText = firstUserMessageText(lines);
+        skill = deriveSkill(firstText);
+        kind = deriveDispatchKind(firstText);
+        skillCache.set(sessionId, skill);
+        kindCache.set(sessionId, kind);
+      }
+      return { skill, dispatchKind: kind };
+    });
+
+    parseErrors += entry.parseErrors;
+    if (
+      entry.observedResetMs !== null &&
+      (mostRecentObservedResetMs === null || entry.observedResetMs > mostRecentObservedResetMs)
+    ) {
+      mostRecentObservedResetMs = entry.observedResetMs;
     }
-
-    for (const line of lines) {
-      if (!line || line[0] !== "{") continue;
-      // Observed rate-limit reset — probed on every JSON line (the boundary can
-      // move forward), exactly like the live scan.
-      const observed = parseObservedResetMs(line);
-      if (observed !== null && (mostRecentObservedResetMs === null || observed > mostRecentObservedResetMs)) {
-        mostRecentObservedResetMs = observed;
-      }
-
-      const parsed = parseUsageLine(line);
-      if (parsed === null) {
-        parseErrors++;
-        continue;
-      }
-      if (parsed === "skip") continue;
-      if (parsed.tsMs < envBoundaryMs) continue;
-
+    for (const e of entry.entries) {
       // Foreign-provider tokens (issue #3769) are on a SEPARATE quota — exclude
       // them from the Anthropic ranking, count them on their own axis.
-      if (isForeignProviderModel(parsed.model)) {
-        addBreakdown(foreign, parsed.tokens);
+      if (e.foreign) {
+        addBreakdown(foreign, e.tokens);
         continue;
       }
-
-      const family = modelToFamily(parsed.model);
-      if (family === "unknown") unknownFamilyTokens += parsed.tokens.total;
-      entries.push({ tsMs: parsed.tsMs, tokens: parsed.tokens, family, skill: skill!, kind: kind! });
+      const family = e.family as ModelFamily;
+      if (family === "unknown") unknownFamilyTokens += e.tokens.total;
+      // skill/dispatchKind are non-null whenever a non-foreign in-window entry exists.
+      entries.push({ tsMs: e.tsMs, tokens: e.tokens, family, skill: entry.skill!, kind: entry.dispatchKind as DispatchKind });
     }
   }
 

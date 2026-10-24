@@ -22,6 +22,9 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Import the pure helpers + the structured-report builders FROM the script. The
 // script's `if (import.meta.url === …)` guard means importing it does NOT run
@@ -33,6 +36,7 @@ import {
   decideTracking,
   buildReport,
   renderTextReport,
+  scanSinceReset,
 } from "../scripts/cost/weighted-quota-report.ts";
 import type { TokenBreakdown, ModelFamily, CategoryWeights } from "../src/cost/token-math.ts";
 import { emptyByModel, emptyByDispatchKind } from "../src/cost/token-breakdown.ts";
@@ -215,5 +219,35 @@ describe("buildReport + renderTextReport (issue #3825 AC1/AC4)", () => {
     assert.equal(report.bySkill.totalWeighted, 4600); // both partitions sum to the same mass
     // meterPercent null → the meter comparison is withheld, validation undecided.
     assert.equal(report.validation.tracks, null);
+  });
+});
+
+describe("scanSinceReset — shared transcript fold (#5172)", () => {
+  const T0 = Date.now() - 3_600_000;
+  const usage = (out: number) => ({ input_tokens: 10, output_tokens: out, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 });
+  const line = (id: string, out: number, model = "claude-opus-4-1") =>
+    JSON.stringify({
+      type: "assistant",
+      timestamp: new Date(T0).toISOString(),
+      message: { id, model, usage: usage(out), content: [{ type: "text", text: "x" }] },
+    });
+
+  test("a message split across several content-block lines is counted once, at its largest line", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wqr-"));
+    try {
+      await mkdir(join(root, "proj"), { recursive: true });
+      const user = JSON.stringify({ type: "user", message: { content: "hello" } });
+      await writeFile(
+        join(root, "proj", "sess-1.jsonl"),
+        [user, line("msg_a", 5), line("msg_a", 20), line("msg_a", 20), line("msg_b", 7)].join("\n") + "\n",
+      );
+      const scan = await scanSinceReset(root, T0 - 1000);
+      const total = scan.entries.reduce((n, e) => n + e.tokens.total, 0);
+      // msg_a once at its largest (10+20) + msg_b (10+7)
+      assert.equal(scan.entries.length, 2);
+      assert.equal(total, 30 + 17);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
