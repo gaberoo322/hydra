@@ -84,7 +84,7 @@ function makeDeps(fx: Fixture, over: Partial<CycleMergeReconcileDeps> = {}): Cyc
     // cycle hash also owns the immutable `startedAt` (issue #5028), so that key is
     // stripped from the metrics view too.
     getMetrics: async (cycleId) => {
-      const { status: _cycleHashStatus, startedAt: _cycleHashStartedAt, ...rest } =
+      const { status: _cycleHashStatus, startedAt: _cycleHashStartedAt, completedAt: _cycleHashCompletedAt, ...rest } =
         fx.metrics.get(cycleId) ?? {};
       return { ...rest };
     },
@@ -93,6 +93,7 @@ function makeDeps(fx: Fixture, over: Partial<CycleMergeReconcileDeps> = {}): Cyc
       const out: Record<string, string> = {};
       if (row?.status !== undefined) out.status = row.status;
       if (row?.startedAt !== undefined) out.startedAt = row.startedAt;
+      if (row?.completedAt !== undefined) out.completedAt = row.completedAt;
       return out;
     },
     listMergedPrs: async () => (fx.mergedPrs === undefined ? [] : fx.mergedPrs),
@@ -875,6 +876,51 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
     const r = await runCycleMergeReconcile(makeDeps(fx));
     assert.equal(r.anchorJoined, 0);
     assert.equal(fx.reposts.length, 0);
+  });
+
+  test("overlapping retry: an earlier attempt still running when the owner started makes the merge ambiguous (QA round 1, #5028)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        // A started 10:00 and only finished 11:20, after retry B started at 11:00.
+        ["w-a-dev_orch", devRow(42, "2026-10-01T10:00:00Z", { completedAt: "2026-10-01T11:20:00Z" })],
+        ["w-b-dev_orch", devRow(42, "2026-10-01T11:00:00Z", { completedAt: "2026-10-01T11:25:00Z" })],
+      ]),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [pr(910, "2026-10-01T11:30:00Z", "Closes #42")],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.anchorJoined, 0, "ambiguous ownership under-credits");
+    assert.equal(fx.reposts.length, 0);
+    assert.equal(fx.metrics.get("w-b-dev_orch")!.status, "completed");
+  });
+
+  test("sequential retry: an earlier attempt that finished before the owner started does not block the credit (#5028)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        ["w-a-dev_orch", devRow(42, "2026-10-01T10:00:00Z", { completedAt: "2026-10-01T10:30:00Z" })],
+        ["w-b-dev_orch", devRow(42, "2026-10-01T11:00:00Z", { completedAt: "2026-10-01T11:25:00Z" })],
+      ]),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [pr(911, "2026-10-01T11:30:00Z", "Closes #42")],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.anchorJoined, 1);
+    assert.deepEqual(fx.reposts.map((x) => x.cycleId), ["w-b-dev_orch"]);
+  });
+
+  test("window exposure: a lone PR-less row IS credited by a later Closes #N merge inside 7d, and not beyond it (#5028 accepted residual)", async () => {
+    const mk = (mergedAt: string, n: number): Fixture => ({
+      metrics: new Map([["w-lone-dev_orch", devRow(42, "2026-10-01T10:00:00Z")]]),
+      prState: new Map(),
+      reposts: [],
+      mergedPrs: [pr(n, mergedAt, "Closes #42")],
+    });
+    const inside = mk("2026-10-08T09:00:00Z", 912);
+    assert.equal((await runCycleMergeReconcile(makeDeps(inside))).anchorJoined, 1);
+    const outside = mk("2026-10-08T11:00:00Z", 913);
+    assert.equal((await runCycleMergeReconcile(makeDeps(outside))).anchorJoined, 0);
   });
 
   test("a _target row is never joined", async () => {
