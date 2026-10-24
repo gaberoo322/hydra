@@ -469,7 +469,7 @@ const CLASS_ENTRY_SPECS: readonly ClassEntrySpec[] = [
     name: "scout_orch",
     skill: "hydra-tool-scout",
     args: "<category>",
-    trigger: "eligible scout alerts or the weekly calendar walk",
+    trigger: "the weekly calendar walk",
   },
   {
     name: "architecture_orch",
