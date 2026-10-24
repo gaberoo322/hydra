@@ -42,6 +42,25 @@ function betaLabel(stat) {
   return typeof stat.beta === "number" ? `β ${stat.beta.toFixed(3)}` : "—";
 }
 
+/** The served threshold behind a dev/producer verdict, rendered beside it (§5.3). */
+function thresholdLabel(stat, thresholds) {
+  if (!thresholds) return null;
+  if (stat.role === "dev") {
+    const parts = [];
+    if (typeof thresholds.devWeakMergeRate === "number") {
+      parts.push(`underperforming ≤ ${pct(thresholds.devWeakMergeRate)} merge`);
+    }
+    if (typeof thresholds.devExpensiveWeightedQuotaPerMerge === "number") {
+      parts.push(`expensive > ${formatTokens(thresholds.devExpensiveWeightedQuotaPerMerge)} quota/merge`);
+    }
+    return parts.length > 0 ? parts.join(", ") : null;
+  }
+  if (stat.role === "producer" && typeof thresholds.producerWeakBeta === "number") {
+    return `underperforming ≤ β ${thresholds.producerWeakBeta}`;
+  }
+  return null;
+}
+
 /** The inputs that produced a verdict — rendered beside it (§5.3). */
 function verdictInputs(stat, scoreboard) {
   const parts = [`${stat.dispatches} dispatches vs min ${scoreboard.minSample}`];
@@ -57,6 +76,8 @@ function verdictInputs(stat, scoreboard) {
     parts.push("not a yield-scored role");
   }
   parts.push(windowLabel(scoreboard.windowMs));
+  const t = thresholdLabel(stat, scoreboard.thresholds);
+  if (t) parts.push(t);
   return parts.join(" · ");
 }
 
@@ -72,8 +93,11 @@ export function ClassYield() {
   const { data, error, loading } = useApi("/autopilot/class-stats", { poll: 600_000 });
   const scoreboard = data?.scoreboard ?? null;
   const classes = Array.isArray(scoreboard?.classes) ? scoreboard.classes : [];
+  // A degraded scoreboard (failed Redis/estimator read) renders UNKNOWN (§5.1):
+  // its all-insufficient-sample rows must never read as a fresh "ready" board.
+  const degraded = scoreboard?.degraded === true;
   const status = derivePageStatus({
-    data,
+    data: degraded ? { ...data, sourcesOk: false } : data,
     error,
     loading,
     itemsLen: classes.length,

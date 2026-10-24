@@ -412,6 +412,17 @@ describe("class-stats — composer degrades on Redis-read failure (never throws)
       assert.equal(c.verdict, "insufficient-sample", `${c.className} degrades to insufficient-sample`);
       assert.equal(c.dispatches, 0);
     }
+    assert.equal(sb.degraded, true, "a failed read marks the board degraded (issue #5161)");
+  });
+
+  test("a healthy read carries no degraded flag (issue #5161)", async () => {
+    const deps: ClassScoreboardDeps = {
+      listRecords: async () => ({ ok: true, records: [] }),
+      loadObservations: async () => ({ ok: true, observations: [] }),
+      loadUsage: async () => fakeUsage(),
+    };
+    const sb = await buildClassScoreboard({ now: NOW, deps });
+    assert.equal(sb.degraded, undefined);
   });
 
   test("composer folds injected records + observations into a scored board", async () => {

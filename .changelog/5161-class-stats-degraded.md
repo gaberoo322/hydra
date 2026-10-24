@@ -1,0 +1,1 @@
+- fix: class-yield scoreboard no longer memoises a degraded board and serves its verdict thresholds (#5161)
