@@ -159,7 +159,8 @@ docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null | 
 ```bash
 hydra alerts ls --limit 20 | python3 -c "
 import json,sys
-alerts=json.load(sys.stdin)
+d=json.load(sys.stdin)
+alerts=d.get('alerts',[]) if isinstance(d,dict) else d
 if not alerts: print('No alerts'); sys.exit()
 active=[a for a in alerts if not a.get('dismissed')]
 if not active: print('No active alerts'); sys.exit()
