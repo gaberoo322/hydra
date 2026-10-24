@@ -1075,6 +1075,12 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
       "API Error: 429 Too Many Requests",
       '{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}',
       "HTTP 429: quota exceeded for this key",
+      "Error: 429 Too Many Requests",
+      "Error: Request failed with status code 429",
+      "HTTP/1.1 429 Too Many Requests",
+      '{"error":{"code":429,"message":"slow"}}',
+      '{"error":{"type":"rate_limit_reached_error"}}',
+      '{"error":{"code":"insufficient_quota"}}',
     ]) {
       const h = finishHarness(0, null);
       await runFinish(h.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 1, stdout: text, stderr: "" })));
@@ -1086,7 +1092,7 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
   });
 
   test("prose merely mentioning 429 + quota exceeded (even on a successful open-pr arm) never blocks the provider", async () => {
-    const prose = "I will handle HTTP 429 when the quota is exceeded, then retry; added a rate limit test for status 429.";
+    const prose = "I will handle HTTP 429 when the quota is exceeded, then retry; added a rate limit test for status 429. The rate_limit_error token and insufficient_quota appear in the tests.";
     const h = finishHarness(1, "b\n");
     const r = await runFinish(h.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 0, stdout: prose, stderr: "" })));
     assert.equal(r.action, "open-pr");
