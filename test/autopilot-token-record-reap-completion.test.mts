@@ -265,6 +265,10 @@ describe("reap.py completion → per-cycle token-record live fire (issue #2952)"
         new RegExp(`token_record_skipped cycleId=${branch} skill=hydra-dev tokens=7777`),
         "a SECOND token POST fires keyed on the branch the trend join reads (issue #3187)",
       );
+      // Issue #5173: only the mirror is cycle-only, so the daily total and
+      // per-skill hash are bumped once.
+      assert.match(log, new RegExp(`cycleId=${branch} skill=hydra-dev tokens=7777 cycleOnly=1`));
+      assert.doesNotMatch(log, /cycleId=tBranch skill=hydra-dev tokens=7777 cycleOnly=1/);
       // Exactly two POSTs — the task_id write plus the branch mirror, never more.
       const posts = (log.match(/token_record_skipped cycleId=/g) || []).length;
       assert.equal(posts, 2, "exactly two token POSTs: task_id + branch mirror");

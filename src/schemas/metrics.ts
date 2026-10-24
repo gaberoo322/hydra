@@ -36,6 +36,9 @@ import { z } from "zod";
  *             when present so an empty string does not shadow the default.
  *   cycleId — OPTIONAL autopilot turn ID; when present the recorder also bumps
  *             the per-cycle token hash. Trimmed, non-empty when present.
+ *   cycleOnly — OPTIONAL boolean (issue #5173); with `cycleId`, write ONLY the
+ *             per-cycle hash and skip the per-day total + per-skill hash. Used
+ *             by reap's branch-keyed mirror so a dispatch is counted once.
  */
 export const SubagentTokensBodySchema = z.looseObject({
   skill: z
@@ -48,5 +51,6 @@ export const SubagentTokensBodySchema = z.looseObject({
     .nonnegative({ message: "Missing or invalid 'tokens' (non-negative number)" }),
   date: z.string().trim().min(1).optional(),
   cycleId: z.string().trim().min(1).optional(),
+  cycleOnly: z.boolean().optional(),
 });
 

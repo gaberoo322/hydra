@@ -73,6 +73,8 @@ export interface IncrTokensBatchInput {
   skill: string;
   tokens: number;
   cycleId?: string;
+  /** Write ONLY the per-cycle hash (skip the daily total + per-skill hash). Requires `cycleId`. */
+  cycleOnly?: boolean;
   dailyTtlSeconds: number;
   cycleTtlSeconds: number;
 }
@@ -90,15 +92,18 @@ export interface IncrTokensBatchResult {
  * outage yields zeros rather than throwing.
  */
 export async function incrTokensBatch(input: IncrTokensBatchInput): Promise<IncrTokensBatchResult> {
-  const { date, skill, tokens, cycleId, dailyTtlSeconds, cycleTtlSeconds } = input;
+  const { date, skill, tokens, cycleId, cycleOnly, dailyTtlSeconds, cycleTtlSeconds } = input;
+  const skipRollups = Boolean(cycleOnly && cycleId);
   const dailyKey = tokensAutopilotDailyKey(date);
   const bySkillKey = tokensBySkillDailyKey(date);
   const r = getRedisConnection();
   const pipe = r.pipeline();
-  pipe.incrby(dailyKey, tokens);
-  pipe.expire(dailyKey, dailyTtlSeconds);
-  pipe.hincrby(bySkillKey, skill, tokens);
-  pipe.expire(bySkillKey, dailyTtlSeconds);
+  if (!skipRollups) {
+    pipe.incrby(dailyKey, tokens);
+    pipe.expire(dailyKey, dailyTtlSeconds);
+    pipe.hincrby(bySkillKey, skill, tokens);
+    pipe.expire(bySkillKey, dailyTtlSeconds);
+  }
 
   let cycleHashKey: string | null = null;
   if (cycleId) {
@@ -113,7 +118,9 @@ export async function incrTokensBatch(input: IncrTokensBatchInput): Promise<Incr
   let skillTotal = 0;
   let cycleTotal: number | null = null;
   if (Array.isArray(results)) {
-    const [dailyRes, , skillRes, , cycleRes] = results;
+    const [dailyRes, , skillRes, , cycleRes] = skipRollups
+      ? [undefined, undefined, undefined, undefined, results[0]]
+      : results;
     if (Array.isArray(dailyRes) && dailyRes[0] == null && typeof dailyRes[1] === "number") {
       dailyTotal = dailyRes[1];
     }

@@ -1134,14 +1134,18 @@ def _dispatch_made_no_work(task_id: str, total_tokens: int = 0) -> bool | None:
     return True
 
 
-def _post_token_record(cycle_id: str, skill: str, total_tokens: int) -> None:
+def _post_token_record(cycle_id: str, skill: str, total_tokens: int, cycle_only: bool = False) -> None:
     """POST a single per-cycle token record for `cycle_id`. Best-effort; swallows all errors.
 
     Extracted from `_fire_token_record` so the same POST can fire under BOTH the
     task_id key and the branch-keyed id (issue #3187) without duplicating the
     request/error-handling boilerplate. Callers guard `skill`/`total_tokens`.
     """
-    payload = {"skill": skill, "tokens": int(total_tokens), "cycleId": cycle_id}
+    payload: dict = {"skill": skill, "tokens": int(total_tokens), "cycleId": cycle_id}
+    if cycle_only:
+        # Issue #5173: write only the per-cycle hash; the daily total and
+        # per-skill hash were already bumped by the task_id-keyed POST.
+        payload["cycleOnly"] = True
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"{HYDRA_API_BASE}/api/metrics/tokens",
@@ -1153,7 +1157,8 @@ def _post_token_record(cycle_id: str, skill: str, total_tokens: int) -> None:
         with urllib.request.urlopen(req, timeout=5) as resp:
             resp.read()
     except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
-        msg = f"token_record_skipped cycleId={cycle_id} skill={skill} tokens={total_tokens} err={exc}"
+        suffix = " cycleOnly=1" if cycle_only else ""
+        msg = f"token_record_skipped cycleId={cycle_id} skill={skill} tokens={total_tokens}{suffix} err={exc}"
         print(f"[autopilot] reap: {msg}", file=sys.stderr)
         _append_log(msg)
 
@@ -1196,8 +1201,10 @@ def _fire_token_record(
     pipeline classes did NOT (only 56% of cycles carried `tokenCost`). Fix: when
     a `worktree_branch` is known AND differs from `task_id`, ALSO post a token
     record keyed on the branch so the trend's branch-keyed lookup resolves. The
-    two writes hit DISTINCT keys (`by-cycle:<task_id>` vs `by-cycle:<branch>`),
-    so this never double-counts within a key — mirrors the additive cross-key
+    two writes hit DISTINCT per-cycle keys (`by-cycle:<task_id>` vs
+    `by-cycle:<branch>`); the mirror carries `cycleOnly` (issue #5173) so the
+    per-day total and per-skill hash are bumped by the task_id write alone —
+    mirrors the additive cross-key
     copy `recordCycleMetrics` does for the test counts.
 
     Posted ONLY when `total_tokens > 0` — mirrors `_fire_cycle_record`'s
@@ -1217,11 +1224,12 @@ def _fire_token_record(
         return
     _post_token_record(task_id, skill, total_tokens)
     # Issue #3187: mirror onto the branch-keyed id the trend reader joins on.
-    # Distinct key, so no double-count; only when the branch is known and is a
+    # Per-cycle hash is a distinct key, but the daily total + per-skill hash are
+    # NOT — so the mirror is cycle-only (issue #5173); only when the branch is known and is a
     # DIFFERENT id from task_id (a signal-class cycleId that equals task_id needs
     # no second write).
     if worktree_branch and worktree_branch != task_id:
-        _post_token_record(worktree_branch, skill, total_tokens)
+        _post_token_record(worktree_branch, skill, total_tokens, cycle_only=True)
 
 
 def _parse_anchor_issue_number(anchor_ref: str | None) -> int | None:

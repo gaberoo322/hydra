@@ -107,6 +107,17 @@ describe("recordSubagentTokens + read path", () => {
     assert.equal(cycleRaw, "15000");
   });
 
+  test("cycleOnly writes the per-cycle hash and leaves the daily total + per-skill hash untouched (issue #5173)", async () => {
+    const date = "2026-05-17";
+    await recordSubagentTokens("hydra-dev", 1000, { date, cycleId: "task-a" });
+    const r = await recordSubagentTokens("hydra-dev", 1000, { date, cycleId: "branch-a", cycleOnly: true });
+    assert.equal(r.cycleTotal, 1000);
+    assert.equal(await testRedis.get(tokensAutopilotDailyKey(date)), "1000");
+    assert.equal((await testRedis.hgetall(tokensBySkillDailyKey(date)))["hydra-dev"], "1000");
+    assert.equal(await testRedis.hget(tokensByCycleKey("branch-a"), "tokens"), "1000");
+    assert.equal(await testRedis.hget(tokensByCycleKey("task-a"), "tokens"), "1000");
+  });
+
   test("zero/negative tokens are a no-op write but return current totals", async () => {
     const date = "2026-05-16";
     await recordSubagentTokens("hydra-dev", 1000, { date });
