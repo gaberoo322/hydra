@@ -207,18 +207,18 @@ describe("filterActiveRecommendations", () => {
 
 describe("resolveRunId", () => {
   test("'current' delegates to the reader", async () => {
-    const reader: CurrentRunIdReader = async () => "run-LIVE";
-    assert.equal(await resolveRunId("current", reader), "run-LIVE");
+    const reader: CurrentRunIdReader = async () => ({ ok: true, runId: "run-LIVE" });
+    assert.deepEqual(await resolveRunId("current", reader), { ok: true, runId: "run-LIVE" });
   });
 
   test("any other string returns verbatim", async () => {
-    const reader: CurrentRunIdReader = async () => "should-not-be-used";
-    assert.equal(await resolveRunId("run-EXPLICIT", reader), "run-EXPLICIT");
+    const reader: CurrentRunIdReader = async () => ({ ok: true, runId: "should-not-be-used" });
+    assert.deepEqual(await resolveRunId("run-EXPLICIT", reader), { ok: true, runId: "run-EXPLICIT" });
   });
 
   test("'current' returns null when no run exists", async () => {
-    const reader: CurrentRunIdReader = async () => null;
-    assert.equal(await resolveRunId("current", reader), null);
+    const reader: CurrentRunIdReader = async () => ({ ok: true, runId: null });
+    assert.deepEqual(await resolveRunId("current", reader), { ok: true, runId: null });
   });
 });
 
@@ -238,7 +238,7 @@ describe("GET /now/recommendations", () => {
     });
     const router = createNowRecommendationsRouter({
       recsRedis: redis,
-      readCurrentRunId: async () => "run-A",
+      readCurrentRunId: async () => ({ ok: true, runId: "run-A" }),
       now: () => new Date("2026-05-28T00:00:30Z"),
     });
     const handler = findHandler(router, "GET", "/now/recommendations");
@@ -255,7 +255,7 @@ describe("GET /now/recommendations", () => {
     const { redis } = makeRecsFake();
     const router = createNowRecommendationsRouter({
       recsRedis: redis,
-      readCurrentRunId: async () => null,
+      readCurrentRunId: async () => ({ ok: true, runId: null }),
     });
     const handler = findHandler(router, "GET", "/now/recommendations");
     const res = mockRes();
@@ -279,7 +279,7 @@ describe("GET /now/recommendations", () => {
     });
     const router = createNowRecommendationsRouter({
       recsRedis: redis,
-      readCurrentRunId: async () => "run-A",
+      readCurrentRunId: async () => ({ ok: true, runId: "run-A" }),
     });
     const handler = findHandler(router, "GET", "/now/recommendations");
     const res = mockRes();
@@ -310,7 +310,7 @@ describe("POST /now/recommendations/:id/dismiss", () => {
     });
     const router = createNowRecommendationsRouter({
       recsRedis: redis,
-      readCurrentRunId: async () => "run-A",
+      readCurrentRunId: async () => ({ ok: true, runId: "run-A" }),
     });
     const handler = findHandler(router, "POST", "/now/recommendations/:id/dismiss");
     assert.ok(handler);
@@ -327,7 +327,7 @@ describe("POST /now/recommendations/:id/dismiss", () => {
     const { redis } = makeRecsFake();
     const router = createNowRecommendationsRouter({
       recsRedis: redis,
-      readCurrentRunId: async () => null,
+      readCurrentRunId: async () => ({ ok: true, runId: null }),
     });
     const handler = findHandler(router, "POST", "/now/recommendations/:id/dismiss");
     const res = mockRes();
@@ -355,7 +355,7 @@ describe("POST /now/recommendations/mute-class", () => {
     const { redis, state } = makeRecsFake();
     const router = createNowRecommendationsRouter({
       recsRedis: redis,
-      readCurrentRunId: async () => "run-A",
+      readCurrentRunId: async () => ({ ok: true, runId: "run-A" }),
     });
     const handler = findHandler(router, "POST", "/now/recommendations/mute-class");
     assert.ok(handler);
@@ -371,7 +371,7 @@ describe("POST /now/recommendations/mute-class", () => {
     const { redis } = makeRecsFake();
     const router = createNowRecommendationsRouter({
       recsRedis: redis,
-      readCurrentRunId: async () => "run-A",
+      readCurrentRunId: async () => ({ ok: true, runId: "run-A" }),
     });
     const handler = findHandler(router, "POST", "/now/recommendations/mute-class");
     const res = mockRes();
@@ -387,7 +387,7 @@ describe("POST /now/recommendations/mute-class", () => {
       recsRedis: redis,
       readCurrentRunId: async () => {
         readerCalled = true;
-        return "should-not-resolve";
+        return { ok: true, runId: "should-not-resolve" };
       },
     });
     const handler = findHandler(router, "POST", "/now/recommendations/mute-class");
