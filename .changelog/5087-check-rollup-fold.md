@@ -1,0 +1,1 @@
+- refactor: add pure check-rollup fold (four-way status, isRed, blocksMerge) in src/github (#5087)
