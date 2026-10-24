@@ -752,12 +752,12 @@ describe("suite-count-check scoped baseline regeneration (#5107)", () => {
       writeFileSync(join(dir, "test", "mine.test.mts"), "x");
       git("add", "-A");
       git("commit", "-q", "-m", "mine");
-      writeFileSync(join(dir, "test", "untracked.test.mts"), "x");
       git("checkout", "-q", "base");
       writeFileSync(join(dir, "test", "master-only.test.mts"), "x");
       git("add", "-A");
       git("commit", "-q", "-m", "master moves on");
       git("checkout", "-q", "feat");
+      writeFileSync(join(dir, "test", "untracked.test.mts"), "x");
       const res = branchChangedTestFiles(dir, "base");
       assert.equal(res.ok, true, res.error);
       assert.deepEqual(res.files.sort(), ["test/mine.test.mts", "test/untracked.test.mts"]);
