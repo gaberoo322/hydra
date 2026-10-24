@@ -91,6 +91,7 @@
 import { readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
 import { resolve, dirname, relative, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const TEST_DIR = resolve(REPO_ROOT, "test");
@@ -504,6 +505,38 @@ function generateBaseline() {
   return baseline;
 }
 
+/**
+ * Scoped regeneration (#5107). Start from the committed `existing` baseline and
+ * rewrite ONLY the rows named in `only` (repo-relative `test/*.test.mts`
+ * paths) from the `generated` full scan; a named file that no longer exists in
+ * `generated` has its row removed (delete/rename). Every other row is carried
+ * over untouched, so a behind-master worktree never captures ambient drift.
+ */
+export function scopedBaseline({ existing, generated, only }) {
+  const next = { ...existing };
+  for (const f of only) {
+    if (Object.prototype.hasOwnProperty.call(generated, f)) next[f] = generated[f];
+    else delete next[f];
+  }
+  return Object.fromEntries(Object.entries(next).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+}
+
+/**
+ * Rows a regeneration would add, remove, or change whose test file has no diff
+ * against origin/master (`changedFiles`) — i.e. ambient drift the PR does not
+ * own (#5107). Pure; the CLI feeds it the changed-vs-origin/master file list.
+ */
+export function unrelatedBaselineDrift({ existing, next, changedFiles }) {
+  const changed = new Set(changedFiles);
+  const keys = new Set([...Object.keys(existing), ...Object.keys(next)]);
+  const drift = [];
+  for (const f of [...keys].sort()) {
+    if (existing[f] === next[f] || changed.has(f)) continue;
+    drift.push({ file: f, from: existing[f], to: next[f] });
+  }
+  return drift;
+}
+
 // ---------------------------------------------------------------------------
 // CLI entrypoint — guarded so the exports above stay importable without
 // running the CLI (same pattern as scripts/test/redis-db-launch.mjs).
@@ -515,7 +548,39 @@ const isMain =
 if (isMain) {
   const args = process.argv.slice(2);
   if (args[0] === "--update-baseline") {
-    const baseline = generateBaseline();
+    const generated = generateBaseline();
+    const existing = loadBaseline();
+    let baseline = generated;
+    const onlyIdx = args.indexOf("--only");
+    if (onlyIdx !== -1) {
+      const only = testFilesFromArgs(args.slice(onlyIdx + 1)).map((f) =>
+        relative(REPO_ROOT, resolve(REPO_ROOT, f)).split("\\").join("/"),
+      );
+      if (only.length === 0) {
+        console.error("[suite-count-check] --only needs at least one test/<name>.test.mts path");
+        process.exit(1);
+      }
+      baseline = scopedBaseline({ existing, generated, only });
+    } else {
+      const diff = spawnSync("git", ["diff", "--name-only", "origin/master", "--", "test/"], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+      });
+      if (diff.status !== 0) {
+        console.error(
+          `[suite-count-check] WARN: could not diff against origin/master (${(diff.stderr || "").trim() || "git failed"}); skipping the unrelated-drift check`,
+        );
+      } else {
+        const changedFiles = diff.stdout.split("\n").filter(Boolean);
+        const drift = unrelatedBaselineDrift({ existing, next: generated, changedFiles });
+        if (drift.length > 0) {
+          console.error(
+            `[suite-count-check] WARN: ${drift.length} baseline row(s) change for test files with NO diff vs origin/master (ambient drift - merge origin/master first, or re-run scoped with --only <your test files>):`,
+          );
+          for (const d of drift) console.error(`  ${d.file}: ${d.from ?? "(absent)"} -> ${d.to ?? "(removed)"}`);
+        }
+      }
+    }
     writeFileSync(BASELINE_PATH, JSON.stringify(baseline, null, 2) + "\n");
     console.error(
       `[suite-count-check] wrote ${Object.keys(baseline).length} file entries to ${relative(REPO_ROOT, BASELINE_PATH)}`,
@@ -527,7 +592,7 @@ if (isMain) {
   const [capturePath, ...testFiles] = args;
   if (!capturePath) {
     console.error(
-      "[suite-count-check] usage: node scripts/test/suite-count-check.mjs --update-baseline\n" +
+      "[suite-count-check] usage: node scripts/test/suite-count-check.mjs --update-baseline [--only <test-file>...]\n" +
         "                     | node scripts/test/suite-count-check.mjs <capture.ndjson> <test-file...>",
     );
     process.exit(1);

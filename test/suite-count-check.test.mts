@@ -23,6 +23,8 @@ import {
   compareCapture,
   fileCoverageDiff,
   testFilesFromArgs,
+  scopedBaseline,
+  unrelatedBaselineDrift,
 } from "../scripts/test/suite-count-check.mjs";
 import {
   shortfallRetrySuffix,
@@ -696,5 +698,39 @@ describe("redis-db-launch — export surface freeze (#4292, design INV-9)", () =
       LAUNCHER_SOURCE,
       /\[redis-db-launch\] usage: node scripts\/test\/redis-db-launch\.mjs <command> \[args\.\.\.\] \| --print-url/,
     );
+  });
+});
+
+describe("suite-count-check scoped baseline regeneration (#5107)", () => {
+  const existing = { "test/a.test.mts": 1, "test/b.test.mts": 2, "test/c.test.mts": 3 };
+  const generated = { "test/a.test.mts": 2, "test/b.test.mts": 5, "test/d.test.mts": 1 };
+
+  test("scopedBaseline rewrites only the named rows and leaves ambient drift alone", () => {
+    const out = scopedBaseline({ existing, generated, only: ["test/a.test.mts", "test/d.test.mts"] });
+    assert.deepEqual(out, {
+      "test/a.test.mts": 2,
+      "test/b.test.mts": 2,
+      "test/c.test.mts": 3,
+      "test/d.test.mts": 1,
+    });
+  });
+
+  test("scopedBaseline drops the row of a named file that no longer exists", () => {
+    const out = scopedBaseline({ existing, generated, only: ["test/c.test.mts"] });
+    assert.equal("test/c.test.mts" in out, false);
+    assert.equal(out["test/b.test.mts"], 2);
+  });
+
+  test("unrelatedBaselineDrift reports only changed rows with no diff vs origin/master", () => {
+    const drift = unrelatedBaselineDrift({
+      existing,
+      next: generated,
+      changedFiles: ["test/a.test.mts"],
+    });
+    assert.deepEqual(drift, [
+      { file: "test/b.test.mts", from: 2, to: 5 },
+      { file: "test/c.test.mts", from: 3, to: undefined },
+      { file: "test/d.test.mts", from: undefined, to: 1 },
+    ]);
   });
 });
