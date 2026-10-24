@@ -389,7 +389,7 @@ checks pass AND resolve the blocking findings of its latest QA FAIL.
    `gh pr edit <pr> --body-file <file>`, THEN push the fix commit — a push
    that lands before the body edit replays the stale body and re-fails the
    check (bit #4242 twice).
-5. **Verify in the foreground** (`npm test`, `npm run typecheck` AND `npm run typecheck:test`, before the push that is meant to be final), commit, push — the same commit-before-verify discipline as any dev dispatch: commit and push first, verify, push again once green. When done, post exactly ONE comment on the PR naming what was fixed and which required check(s) or QA finding(s) the fix targets, naming both tests (the red-without-the-fix test and the sibling-shape pin) per finding, plus any finding you rebutted and why. Do not relabel the
+5. **Verify in the foreground** (`npm test`, `npm run typecheck` AND `npm run typecheck:test`, before the push that is meant to be final), commit, push — the same commit-before-verify discipline as any dev dispatch: commit and push first, verify, push again once green. When done, post exactly ONE comment on the PR naming what was fixed and which required check(s) or QA finding(s) the fix targets, plus any finding you rebutted and why, naming both tests (the red-without-the-fix test and the sibling-shape pin) per finding. Do not relabel the
    anchor issue by hand — reap's needs-qa promotion (INV-9) advances it when
    the closing PR is confirmed.
 

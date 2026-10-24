@@ -307,6 +307,24 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     assert.ok(out.prompt.includes("`QA-Verdict: FAIL pr=4776`"));
   });
 
+  test("a forward-fix resolves a code finding with a test and verifies with the full dev trio (#5036)", () => {
+    const out = render(
+      "dev_orch",
+      action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4720", resume: true, resume_branch: "b", forward_fix_pr: 5003 } }),
+    );
+    const secStart = PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract");
+    const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only): `state.red_forward_fix_attempts`");
+    const flat = (text: string) => text.replace(/\s+/g, " ");
+    for (const text of [out.prompt, flat(PLAYBOOK.slice(secStart, secEnd))]) {
+      assert.doesNotMatch(text, /as the change requires/);
+      assert.ok(text.includes("`npm test`, `npm run typecheck` AND `npm run typecheck:test`"));
+      assert.ok(text.includes("ALSO adds or extends a test that is red without the fix"));
+      assert.ok(text.includes("adds or cites a test pinning the nearest sibling shape that must keep its old verdict"));
+      assert.ok(text.includes("naming both tests"));
+      assert.ok(text.includes("needs no test"));
+    }
+  });
+
   test("the forward-fix contract's five steps are the playbook's five (same bold step titles, same order)", () => {
     const out = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-1", resume: true, resume_branch: "b", forward_fix_pr: 2 } }));
     const titles = (text: string) => [...text.matchAll(/^\d\. \*\*([^*]+)\*\*/gm)].map((m) => m[1]);
