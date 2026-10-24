@@ -88,69 +88,6 @@ export const OvernightSummaryResponseSchema = z
 
 export type OvernightSummaryResponse = z.infer<typeof OvernightSummaryResponseSchema>;
 
-// ---------------------------------------------------------------------------
-// Slice-2 schemas (issue #617)
-// ---------------------------------------------------------------------------
-
-/**
- * Source vocabulary for `DecisionItem.source`. The decision-queue aggregator
- * unifies two distinct sources into one list; the `source` discriminator
- * lets the dashboard render a small badge so the operator can see at a glance
- * whether an item came from the persistent `ready-for-human` label (which
- * includes a `hydra-grill` gate-fail handoff, ADR-0034 §8.1) or the
- * `needs-info` waiting lane. A third source, the dated overnight
- * decision-queue digest issue, was retired by ADR-0034 §8.1 / #4621.
- */
-const DecisionItemSourceSchema = z.enum([
-  "ready-for-human",
-  "needs-info",
-]);
-
-export type DecisionItemSource = z.infer<typeof DecisionItemSourceSchema>;
-
-/**
- * Response body for `GET /api/v2/today/decision-queue`. The aggregator
- * returns its raw decision items — the schema wraps them under `{ items }`
- * alongside the trust-contract evidence (ADR-0034 §5.2) so a client can tell
- * a genuine zero-item day apart from a silent total sub-fetch failure.
- */
-const DecisionItemSchema = z
-  .object({
-    number: z.number().int().positive(),
-    title: z.string(),
-    url: z.string(),
-    createdAt: z.string(),
-    labels: z.array(z.string()),
-    source: DecisionItemSourceSchema,
-    sources: z.array(DecisionItemSourceSchema),
-  })
-  .strict();
-
-export const DecisionQueueResponseSchema = z
-  .object({
-    items: z.array(DecisionItemSchema),
-    /**
-     * Pre-dedup raw row count from the fulfilled sub-fetches — proof the
-     * lookup actually ran. ADR-0034 §5.2: zero must be ASSERTED, not inferred.
-     * `scanned` plus `sourcesOk` let the client distinguish a genuine empty
-     * day (all sub-fetches fulfilled, scanned: 0) from a silent total
-     * sub-fetch failure (items: [] but sourcesOk: false) — the #3997
-     * `/cycle/history` failure mode this contract exists to close.
-     */
-    scanned: z.number().int().nonnegative(),
-    /**
-     * True iff every underlying GitHub sub-fetch settled fulfilled — the
-     * emptiness assertion. `false` demotes the client straight to UNKNOWN
-     * regardless of `items`, because a partially/fully failed lookup cannot
-     * prove the list is complete.
-     */
-    sourcesOk: z.boolean(),
-    generatedAt: z.string(),
-  })
-  .strict();
-
-export type DecisionQueueResponse = z.infer<typeof DecisionQueueResponseSchema>;
-
 /**
  * Response body for `GET /api/v2/today/stuck`. Three pre-classified
  * buckets plus the thresholds used so the dashboard can render labels

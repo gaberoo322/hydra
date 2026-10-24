@@ -24,14 +24,12 @@ import { createAlertsRouter } from "./api/alerts.ts";
 import { createReflectionsRouter } from "./api/reflections.ts";
 import { createMergeLockRouter } from "./api/merge-lock.ts";
 import { createCapacityRouter } from "./api/capacity.ts";
-import { createObservabilityRouter } from "./api/observability.ts";
 import { createLearningRouter } from "./api/learning.ts";
 import { createPatternMemoryRouter } from "./api/pattern-memory.ts";
 import { createAutopilotLifecycleRouter } from "./api/autopilot-lifecycle.ts";
 import { createAutopilotRunsRouter } from "./api/autopilot-runs.ts";
 import { createAutopilotLogRouter } from "./api/autopilot-log.ts";
 import { createAutopilotControlRouter } from "./api/autopilot-control.ts";
-import { createAgentsRouter } from "./api/agents.ts";
 import { createScoutRouter } from "./api/scout.ts";
 import { createUsageRouter } from "./api/usage.ts";
 import { createAutopilotIdleRouter } from "./api/autopilot-idle.ts";
@@ -133,7 +131,6 @@ function createApi(eventBus: EventBus) {
   api.use(createReflectionsRouter());
   api.use(createMergeLockRouter());
   api.use(createCapacityRouter());
-  api.use(createObservabilityRouter());
   api.use(createLearningRouter());
   // Issue #3006 split the learning router by concern: the read-side
   // pattern-memory diagnostics moved into createPatternMemoryRouter. The
@@ -149,7 +146,6 @@ function createApi(eventBus: EventBus) {
   api.use(createAutopilotRunsRouter());
   api.use(createAutopilotLogRouter());
   api.use(createAutopilotControlRouter(eventBus));
-  api.use(createAgentsRouter());
   api.use(createScoutRouter());
   api.use(createUsageRouter(eventBus));
   // Idle-diagnostics (issue #889, now-console-2) — *why* the Pace Gate isn't

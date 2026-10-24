@@ -57,13 +57,11 @@ const ALLOWLIST: Record<string, number> = {
   // each has an inline `Not an isolateAggregator route:` comment naming why.
   "alerts.ts": 1, // POST /alerts/:id/dismiss — success path writes a 404 inside the try.
   "config.ts": 1, // GET /config/:section/:name (text/plain). (DELETE /env/:project/:key retired, #4638.)
-  "cycles.ts": 1, // GET /cycle/report/:cycleId — success path writes a 404 inside the try.
   "merge-lock.ts": 1, // POST /merge/lock — success path writes a 409 inside the try.
   "usage.ts": 2, // POST /usage/dispatch-cost — specialized { recorded: false, error } envelope (write-failure branch + catch).
 
   // Pre-existing bespoke sites #4402 left untouched or only relogged through
   // `logger.error` in place (never migrated — see file-local comments).
-  "agents.ts": 1,
   "autopilot-lifecycle.ts": 1, // POST /metrics/record — dynamic 400/500 from a result-object code.
   "autopilot-log.ts": 3, // two text/plain streaming routes + a result-object journal-read failure.
   "autopilot-runs.ts": 1,

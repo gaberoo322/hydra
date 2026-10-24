@@ -13,14 +13,14 @@
  * Design contract:
  * - **Downward import edge**: `config.ts` imports from this leaf; this leaf
  *   never imports from `config.ts`.
- * - The filesystem primitives (`listConfigSection`, `readConfigFile`,
+ * - The filesystem primitives (`readConfigFile`,
  *   `writeConfigFile`) take **resolved absolute paths** as arguments and
  *   accept an injectable `fs` dependency (issue #3104). They never read
  *   `process.env` — config-root resolution stays in the route factory — so a
- *   test can inject in-memory `readFile`/`writeFile`/`readdir` stubs and drive
+ *   test can inject in-memory `readFile`/`writeFile` stubs and drive
  *   the read/write policy without touching disk.
  */
-import { readFile, writeFile, readdir } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -52,38 +52,14 @@ export const CONFIG_SECTIONS: Record<string, ConfigSection> = {
 
 /** Injectable filesystem seam for the config-section primitives (defaults to `node:fs/promises`). */
 export interface ConfigFsDeps {
-  readdir: (path: string) => Promise<string[]>;
   readFile: (path: string, encoding: "utf-8") => Promise<string>;
   writeFile: (path: string, data: string) => Promise<void>;
 }
 
 const DEFAULT_CONFIG_FS: ConfigFsDeps = {
-  readdir: (path) => readdir(path) as Promise<string[]>,
   readFile: (path, encoding) => readFile(path, encoding),
   writeFile: (path, data) => writeFile(path, data),
 };
-
-/**
- * List the config-file names (extension stripped) in a section directory.
- *
- * `configPath` is the resolved absolute config root; `section` is a
- * `{ dir, ext }` entry from `CONFIG_SECTIONS`. Filters to files matching the
- * section extension and strips it. A missing directory (`ENOENT`) yields `[]`
- * — matching the route's "empty section" contract; any other error propagates.
- */
-export async function listConfigSection(
-  configPath: string,
-  section: ConfigSection,
-  fs: ConfigFsDeps = DEFAULT_CONFIG_FS,
-): Promise<string[]> {
-  try {
-    const files = await fs.readdir(join(configPath, section.dir));
-    return files.filter(f => f.endsWith(section.ext)).map(f => f.replace(section.ext, ""));
-  } catch (err: any) {
-    if (err?.code === "ENOENT") return [];
-    throw err;
-  }
-}
 
 /**
  * Read a single config file's raw contents.
