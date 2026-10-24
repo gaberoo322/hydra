@@ -358,17 +358,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 401
+          "line": 402
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 542
+          "line": 543
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/dispatch.sh",
-        "line": 401
+        "line": 402
       }
     },
     {
@@ -404,11 +404,7 @@
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 390
-        },
-        {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 398
+          "line": 391
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
@@ -416,15 +412,19 @@
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 534
+          "line": 400
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 539
+          "line": 535
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
           "line": 540
+        },
+        {
+          "path": "scripts/autopilot/dispatch.sh",
+          "line": 541
         },
         {
           "path": "scripts/autopilot/drain.sh",
@@ -476,21 +476,21 @@
       "readSites": [
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 482
-        },
-        {
-          "path": "scripts/autopilot/dispatch.sh",
           "line": 483
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 486
+          "line": 484
+        },
+        {
+          "path": "scripts/autopilot/dispatch.sh",
+          "line": 487
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/dispatch.sh",
-        "line": 482
+        "line": 483
       }
     },
     {
@@ -1056,7 +1056,7 @@
         },
         {
           "path": "scripts/reflection-deposit.sh",
-          "line": 138
+          "line": 141
         }
       ],
       "inEnvExample": false,
@@ -1434,11 +1434,11 @@
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 390
+          "line": 391
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
-          "line": 534
+          "line": 535
         },
         {
           "path": "src/autopilot/turn-snapshot/hydra-http.ts",
