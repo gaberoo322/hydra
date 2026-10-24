@@ -14,7 +14,8 @@
  */
 import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, copyFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +24,9 @@ import {
   compareCapture,
   fileCoverageDiff,
   testFilesFromArgs,
+  scopedBaseline,
+  unrelatedBaselineDrift,
+  branchChangedTestFiles,
 } from "../scripts/test/suite-count-check.mjs";
 import {
   shortfallRetrySuffix,
@@ -696,5 +700,107 @@ describe("redis-db-launch — export surface freeze (#4292, design INV-9)", () =
       LAUNCHER_SOURCE,
       /\[redis-db-launch\] usage: node scripts\/test\/redis-db-launch\.mjs <command> \[args\.\.\.\] \| --print-url/,
     );
+  });
+});
+
+describe("suite-count-check scoped baseline regeneration (#5107)", () => {
+  const existing = { "test/a.test.mts": 1, "test/b.test.mts": 2, "test/c.test.mts": 3 };
+  const generated = { "test/a.test.mts": 2, "test/b.test.mts": 5, "test/d.test.mts": 1 };
+
+  test("scopedBaseline rewrites only the named rows and leaves ambient drift alone", () => {
+    const out = scopedBaseline({ existing, generated, only: ["test/a.test.mts", "test/d.test.mts"] });
+    assert.deepEqual(out, {
+      "test/a.test.mts": 2,
+      "test/b.test.mts": 2,
+      "test/c.test.mts": 3,
+      "test/d.test.mts": 1,
+    });
+  });
+
+  test("scopedBaseline drops the row of a named file that no longer exists", () => {
+    const out = scopedBaseline({ existing, generated, only: ["test/c.test.mts"] });
+    assert.equal("test/c.test.mts" in out, false);
+    assert.equal(out["test/b.test.mts"], 2);
+  });
+
+  test("unrelatedBaselineDrift reports only changed rows with no diff vs origin/master", () => {
+    const drift = unrelatedBaselineDrift({
+      existing,
+      next: generated,
+      changedFiles: ["test/a.test.mts"],
+    });
+    assert.deepEqual(drift, [
+      { file: "test/b.test.mts", from: 2, to: 5 },
+      { file: "test/c.test.mts", from: 3, to: undefined },
+      { file: "test/d.test.mts", from: undefined, to: 1 },
+    ]);
+  });
+
+  test("branchChangedTestFiles diffs against the merge-base: master-only changes excluded, untracked included", () => {
+    const dir = mkdtempSync(join(tmpdir(), "suite-count-mb-"));
+    try {
+      const git = (...a: string[]) => {
+        const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd: dir, encoding: "utf8" });
+        assert.equal(r.status, 0, `git ${a.join(" ")}: ${r.stderr}`);
+      };
+      git("init", "-q", "-b", "base");
+      mkdirSync(join(dir, "test"));
+      writeFileSync(join(dir, "test", "seed.test.mts"), "x");
+      git("add", "-A");
+      git("commit", "-q", "-m", "seed");
+      git("checkout", "-q", "-b", "feat");
+      writeFileSync(join(dir, "test", "mine.test.mts"), "x");
+      git("add", "-A");
+      git("commit", "-q", "-m", "mine");
+      git("checkout", "-q", "base");
+      writeFileSync(join(dir, "test", "master-only.test.mts"), "x");
+      git("add", "-A");
+      git("commit", "-q", "-m", "master moves on");
+      git("checkout", "-q", "feat");
+      writeFileSync(join(dir, "test", "untracked.test.mts"), "x");
+      const res = branchChangedTestFiles(dir, "base");
+      assert.equal(res.ok, true, res.error);
+      assert.deepEqual(res.files.sort(), ["test/mine.test.mts", "test/untracked.test.mts"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("suite-count-check --update-baseline on an unreadable baseline (#5107)", () => {
+  function run(extra: string[]) {
+    const dir = mkdtempSync(join(tmpdir(), "suite-count-corrupt-"));
+    try {
+      mkdirSync(join(dir, "scripts", "test"), { recursive: true });
+      mkdirSync(join(dir, "test", "fixtures"), { recursive: true });
+      copyFileSync(
+        join(fileURLToPath(new URL("../scripts/test/suite-count-check.mjs", import.meta.url))),
+        join(dir, "scripts", "test", "suite-count-check.mjs"),
+      );
+      writeFileSync(join(dir, "test", "one.test.mts"), 'import { test } from "node:test";\ntest("a", () => {});\n');
+      writeFileSync(join(dir, "test", "fixtures", "suite-count-baseline.json"), "<<<<<<< HEAD\n{}\n=======\n");
+      const r = spawnSync("node", [join(dir, "scripts", "test", "suite-count-check.mjs"), "--update-baseline", ...extra], {
+        cwd: dir,
+        encoding: "utf8",
+      });
+      const out = readFileSync(join(dir, "test", "fixtures", "suite-count-baseline.json"), "utf8");
+      return { status: r.status, stderr: r.stderr, out };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("bare regen recovers: WARNs, exits 0, rewrites the baseline", () => {
+    const r = run([]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /existing baseline unreadable/);
+    assert.deepEqual(JSON.parse(r.out), { "test/one.test.mts": 1 });
+  });
+
+  test("--only fails loudly and leaves the baseline untouched", () => {
+    const r = run(["--only", "test/one.test.mts"]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /cannot read existing baseline for --only/);
+    assert.match(r.out, /<<<<<<< HEAD/);
   });
 });
