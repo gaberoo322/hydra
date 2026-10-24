@@ -1,0 +1,1 @@
+- fix: raise design-concept-reconcile CI timeout to 15 minutes so npm ci survives runner contention (#5165)
