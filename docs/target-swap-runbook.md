@@ -131,7 +131,7 @@ On boot, `target-config.ts` logs the resolved target name/workspace/repo. Confir
 curl -sf http://localhost:4000/api/health | jq
 curl -sf http://localhost:4000/api/scheduler/status | jq '{target:.targetName, workspace:.workspace}'
 # Outcomes loaded from the new config dir?
-curl -sf http://localhost:4000/api/outcomes | jq '.[].name'
+curl -sf http://localhost:4000/api/outcomes | jq '.outcomes[].name'
 ```
 
 - [ ] Health OK, target name = gaming, workspace = gaming path.

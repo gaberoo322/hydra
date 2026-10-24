@@ -399,10 +399,10 @@ from decide_selectors.wire_or_retire import _select_signal_wire_or_retire_target
 # DELIBERATELY no fallback to embedded tuples — a silent fallback would
 # resurrect the four-file taxonomy drift this table exists to kill.
 #
-# TaxonomyError subclasses RuntimeError (NOT SystemExit) so heartbeat.py's
-# best-effort `from decide import SIGNAL_COOLDOWNS` keeps its documented
-# `except Exception` degrade path, while any CLI invocation of decide.py
-# still exits non-zero with the message.
+# TaxonomyError subclasses RuntimeError (NOT SystemExit). heartbeat.py imports
+# this module fail-loud (issue #4637: no try/except fallback), so a bad
+# classes.json surfaces there as an uncaught TaxonomyError traceback at import, and any CLI
+# invocation of decide.py still exits non-zero with the message.
 #
 # The brain keeps all POLICY — selectors, cooldown enforcement, scope masks
 # (SCOPE_*_EXCLUDE), the BACKFILL_SIGNAL_CLASSES stagger set.

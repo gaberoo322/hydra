@@ -116,18 +116,11 @@ Gate strictly on `--state open`. A **closed-unmerged** PR means the prior attemp
 
 ### 2. Group and process
 
-#### `target-backlog` — queue to orchestrator
+#### `target-backlog` — leave on the board for the Target loop
 For each issue:
-1. Read body, extract concise work description.
-2. Push to work queue: `hydra queue add "<short ref>" -d "From GitHub issue #N. <key details>"`
-3. Comment on issue:
-   ```
-   > *Automated sweep*
-
-   Queued to Hydra work queue. The orchestrator will pick this up as an anchor.
-   ```
-4. Close: `gh issue close $number`
-5. Log action: `target-queue`.
+1. Read body, confirm it describes a Target finding (the `hydra queue` CLI subcommands were retired; there is no handoff step).
+2. Leave the issue OPEN and labelled `target-backlog` — the issue itself is the work-queue entry the Target-side loop (`hydra-target-sweep`) consumes. Do NOT comment "Queued" and do NOT close it.
+3. Log action: `target-backlog-seen` (report-only).
 
 Process all target-backlog before dev work.
 
