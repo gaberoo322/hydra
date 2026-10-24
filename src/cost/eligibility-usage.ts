@@ -362,6 +362,8 @@ function buildMeterInput(
     weeklyResetAnchor,
     generatedAt,
     extraUsageArmed,
+    // Model-scoped weekly caps (issue #5174): surfaced, never gated on.
+    ...(data.scopedWeekly ? { scopedWeekly: data.scopedWeekly } : {}),
   };
 }
 

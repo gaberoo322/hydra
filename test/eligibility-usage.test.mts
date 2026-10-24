@@ -580,3 +580,68 @@ describe("getEligibilityUsage anchor follows the account via meter resets_at", (
     );
   });
 });
+
+// Issue #5174: meter `limits[]` model-scoped weekly caps are surfaced, never gated.
+describe("limits[] scoped weekly parsing (issue #5174)", () => {
+  const baseBody = {
+    five_hour: { utilization: 10, resets_at: "2026-10-24T20:00:00Z" },
+    seven_day: { utilization: 40, resets_at: "2026-10-28T10:00:00Z" },
+  };
+
+  test("a weekly_scoped model entry is exposed by display name", async () => {
+    const { parseOAuthUsageBody } = await import("../src/cost/oauth-meter-shape.ts");
+    const d = parseOAuthUsageBody({
+      ...baseBody,
+      limits: [
+        { kind: "session", utilization: 10 },
+        { kind: "weekly_all", utilization: 40 },
+        { kind: "weekly_scoped", scope: { display_name: "Fable" }, utilization: 87.5, resets_at: "2026-10-28T10:00:00Z" },
+      ],
+    });
+    assert.deepEqual(d?.scopedWeekly, {
+      Fable: { utilization: 87.5, resetsAt: "2026-10-28T10:00:00.000Z" },
+    });
+    assert.equal(d?.sevenDay.utilization, 40);
+  });
+
+  test("a body without limits[] keeps the legacy shape", async () => {
+    const { parseOAuthUsageBody } = await import("../src/cost/oauth-meter-shape.ts");
+    const d = parseOAuthUsageBody(baseBody);
+    assert.equal(d?.fiveHour.utilization, 10);
+    assert.equal("scopedWeekly" in (d ?? {}), false);
+  });
+
+  test("a malformed limits[] entry is ignored, not fatal", async () => {
+    const { parseOAuthUsageBody } = await import("../src/cost/oauth-meter-shape.ts");
+    const d = parseOAuthUsageBody({
+      ...baseBody,
+      limits: [
+        null,
+        "junk",
+        { kind: "weekly_scoped", scope: { display_name: "Fable" }, utilization: "lots" },
+        { kind: "weekly_scoped", utilization: 50 },
+        { kind: "weekly_scoped", scope: "Opus", utilization: 20 },
+      ],
+    });
+    assert.deepEqual(Object.keys(d?.scopedWeekly ?? {}), ["Opus"]);
+    assert.equal(d?.sevenDay.utilization, 40);
+    assert.equal(parseOAuthUsageBody({ ...baseBody, limits: "nope" })?.sevenDay.utilization, 40);
+  });
+
+  test("the eligibility input carries scopedWeekly and admission is unchanged", async () => {
+    const scopedWeekly = { Fable: { utilization: 99, resetsAt: null } };
+    const withScoped: OAuthUsageResult = {
+      ok: true,
+      data: { ...(OK_READ as any).data, scopedWeekly },
+    };
+    clearOAuthCache();
+    const a = await getEligibilityUsage({ readUsage: fixedReader(withScoped), now: () => Date.parse("2026-10-24T12:00:00Z") });
+    assert.deepEqual(a.input.scopedWeekly, scopedWeekly);
+    const e = projectEligibility(a.input);
+    assert.equal(e.allow, true, "a scoped cap is observability only, never a stop");
+    assert.deepEqual(e.usage.scopedWeekly, scopedWeekly);
+    clearOAuthCache();
+    const b = await getEligibilityUsage({ readUsage: fixedReader(OK_READ), now: () => Date.parse("2026-10-24T12:00:00Z") });
+    assert.equal("scopedWeekly" in b.input, false);
+  });
+});

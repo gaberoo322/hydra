@@ -448,6 +448,13 @@ export interface OAuthUsageData {
   fiveHour: OAuthUsageWindow;
   sevenDay: OAuthUsageWindow;
   extraUsage?: OAuthExtraUsage;
+  /**
+   * Model-scoped weekly caps from the meter's `limits[]` array (`weekly_scoped`
+   * entries, issue #5174), keyed by model display name (e.g. `"Fable"`).
+   * OBSERVABILITY ONLY — nothing gates on it yet. Absent when the body has no
+   * `limits[]` or no valid scoped entry.
+   */
+  scopedWeekly?: Record<string, OAuthUsageWindow>;
 }
 
 /**
@@ -641,6 +648,13 @@ export interface EligibilityUsageInput {
   calibrated: boolean;
   weeklyResetAnchor: string | null;
   generatedAt: string;
+  /**
+   * Model-scoped weekly caps (meter `limits[]` `weekly_scoped`, issue #5174),
+   * keyed by model display name: percent used + reset instant. Observability
+   * only — never folded into `allow`/`shed`. Absent on the snapshot path and
+   * when the meter carries none.
+   */
+  scopedWeekly?: Record<string, OAuthUsageWindow>;
   /**
    * True when the logged-in account has paid overage ("extra usage") armed —
    * see `UsageEligibility.reasons.extraUsageArmed`, which this feeds.
