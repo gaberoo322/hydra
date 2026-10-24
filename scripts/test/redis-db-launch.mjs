@@ -651,6 +651,52 @@ export function launcherInfraKillLine(signal, phase) {
 }
 
 /**
+ * Top-level pass/fail counts from the suite-count NDJSON capture (issue #5106,
+ * design INV-4). Counts ONLY the capture's `ok` field — the launcher never
+ * parses the child's stdout, so these are NOT the TAP footer's totals (the
+ * capture is top-level-only and may be truncated under --test-force-exit,
+ * #4137). Returns null when there is no readable capture.
+ */
+export function captureTopLevelCounts(capturePath) {
+  if (!existsSync(capturePath)) return null;
+  let raw;
+  try {
+    raw = readFileSync(capturePath, "utf8");
+  } catch (err) {
+    console.error(`[redis-db-launch] WARN: could not read capture for the VERDICT line: ${err.message}`);
+    return null;
+  }
+  let pass = 0;
+  let fail = 0;
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line);
+      if (entry.ok === true) pass += 1;
+      else if (entry.ok === false) fail += 1;
+    } catch {
+      /* intentional: a truncated final NDJSON line carries no usable data. */
+    }
+  }
+  return { pass, fail };
+}
+
+/**
+ * The terminal VERDICT line (issue #5106): the LAST stderr line the launcher
+ * writes after the child exits, so `npm test 2>&1 | tail -1` reports the truth
+ * even though the pipe swallows the exit code. Fixed greppable prefix; the
+ * field set may grow but existing fields and their order never change.
+ * `exit` is an integer or `signal:<SIG>`; counts are numbers or null (n/a).
+ */
+export function launcherVerdictLine({ exit, outcome, topLevelPass, topLevelFail, suitesGate }) {
+  const n = (v) => (typeof v === "number" ? String(v) : "n/a");
+  return (
+    `[redis-db-launch] VERDICT exit=${exit} outcome=${outcome} ` +
+    `top-level-pass=${n(topLevelPass)} top-level-fail=${n(topLevelFail)} suites-gate=${suitesGate}`
+  );
+}
+
+/**
  * Startup identity line (issue #4292, design INV-6): pid + pgid. `pgid` is
  * null on platforms without /proc (best-effort — the CI runners are Linux).
  */
@@ -806,13 +852,30 @@ child.on("error", (err) => {
   console.error(`[redis-db-launch] failed to spawn ${args[0]}: ${err.message}`);
   process.exit(1);
 });
+// Issue #5106: the single exit seam for every path after the child exited.
+function verdictFields() {
+  const counts = testFiles.length > 0 ? captureTopLevelCounts(capturePath) : null;
+  return { topLevelPass: counts?.pass ?? null, topLevelFail: counts?.fail ?? null };
+}
+function exitWithVerdict(code, suitesGate) {
+  console.error(
+    launcherVerdictLine({
+      exit: code,
+      outcome: code === 0 ? "PASS" : "FAIL",
+      ...verdictFields(),
+      suitesGate,
+    }),
+  );
+  process.exit(code);
+}
 child.on("exit", async (code, signal) => {
   launcherPhase = "suite-count-verdict";
+  let suitesGate = "ok";
   if (signal) {
     // Issue #4043: a signal-death here (observed as SIGKILL/137 mid-run and
     // SIGTERM/143 immediately after a clean TAP footer) is CATEGORICALLY an
     // infrastructural kill, never a genuine test failure — node:test's own
-    // failure path always exits via `code` (process.exit(1)), never via a
+    // failure path always exits via `code` (exit status 1), never via a
     // signal. ci.yml's "Run tests and verify count" step runs under the
     // Actions default `bash -e` PLUS an explicit `set -o pipefail`, so a
     // non-zero/signal exit from this launcher aborts that step immediately,
@@ -836,6 +899,14 @@ child.on("exit", async (code, signal) => {
     // default disposition restored, the kill terminates synchronously and the
     // parent observes the same termination signal, exactly as pre-#4292.
     console.error(launcherInfraKillLine(signal, launcherPhase));
+    console.error(
+      launcherVerdictLine({
+        exit: `signal:${signal}`,
+        outcome: "INFRA-KILL",
+        ...verdictFields(),
+        suitesGate: "skipped",
+      }),
+    );
     process.removeAllListeners(signal);
     process.kill(process.pid, signal);
     return;
@@ -873,7 +944,7 @@ child.on("exit", async (code, signal) => {
         // Never mask a red suite: a genuine test failure keeps its own exit
         // code, and this verdict only decides the outcome of an otherwise
         // green run.
-        process.exit(code === 0 ? 1 : (code ?? 1));
+        exitWithVerdict(code === 0 ? 1 : (code ?? 1), "blocking");
         return;
       }
     } catch (err) {
@@ -881,13 +952,14 @@ child.on("exit", async (code, signal) => {
       // Loud, but it does not get to redden a green suite on its own — the
       // same stance the capture-side gate takes below.
       console.error(`[redis-db-launch] WARN: file-coverage gate itself failed to run: ${err.message}`);
+      suitesGate = "error";
     }
   }
   if (testFiles.length === 0 || !existsSync(capturePath)) {
     // Not a suite-count-instrumented test invocation (no --test-reporter
     // pointed at suite-count-check.mjs, or a non-test command) — nothing to
     // gate on.
-    process.exit(code ?? 1);
+    exitWithVerdict(code ?? 1, "skipped");
     return;
   }
   try {
@@ -994,9 +1066,10 @@ child.on("exit", async (code, signal) => {
       // kept, because "observed 0" really is worth reading differently from a
       // partial shortfall; only the exit is withdrawn.
       if (isGateBlocking()) {
-        process.exit(1);
+        exitWithVerdict(1, "blocking");
         return;
       }
+      if (suitesGate === "ok") suitesGate = "advisory";
       console.error(
         "[redis-db-launch] SUITE-COUNT GATE is advisory-only — not failing this run. Per #4137 a " +
           "shortfall is the parent truncating the child's reporter stream, NOT tests being skipped: " +
@@ -1012,11 +1085,12 @@ child.on("exit", async (code, signal) => {
     // silently claim success), but the message must not be confused with an
     // actual suite-count shortfall.
     console.error(`[redis-db-launch] WARN: suite-count gate itself failed to run: ${err.message}`);
+    suitesGate = "error";
     if (isGateBlocking()) {
-      process.exit(1);
+      exitWithVerdict(1, "error");
       return;
     }
   }
-  process.exit(code ?? 1);
+  exitWithVerdict(code ?? 1, suitesGate);
 });
 }
