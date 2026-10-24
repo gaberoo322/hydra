@@ -14,7 +14,8 @@
  */
 import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +26,7 @@ import {
   testFilesFromArgs,
   scopedBaseline,
   unrelatedBaselineDrift,
+  branchChangedTestFiles,
 } from "../scripts/test/suite-count-check.mjs";
 import {
   shortfallRetrySuffix,
@@ -732,5 +734,35 @@ describe("suite-count-check scoped baseline regeneration (#5107)", () => {
       { file: "test/c.test.mts", from: 3, to: undefined },
       { file: "test/d.test.mts", from: undefined, to: 1 },
     ]);
+  });
+
+  test("branchChangedTestFiles diffs against the merge-base: master-only changes excluded, untracked included", () => {
+    const dir = mkdtempSync(join(tmpdir(), "suite-count-mb-"));
+    try {
+      const git = (...a: string[]) => {
+        const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd: dir, encoding: "utf8" });
+        assert.equal(r.status, 0, `git ${a.join(" ")}: ${r.stderr}`);
+      };
+      git("init", "-q", "-b", "base");
+      mkdirSync(join(dir, "test"));
+      writeFileSync(join(dir, "test", "seed.test.mts"), "x");
+      git("add", "-A");
+      git("commit", "-q", "-m", "seed");
+      git("checkout", "-q", "-b", "feat");
+      writeFileSync(join(dir, "test", "mine.test.mts"), "x");
+      git("add", "-A");
+      git("commit", "-q", "-m", "mine");
+      writeFileSync(join(dir, "test", "untracked.test.mts"), "x");
+      git("checkout", "-q", "base");
+      writeFileSync(join(dir, "test", "master-only.test.mts"), "x");
+      git("add", "-A");
+      git("commit", "-q", "-m", "master moves on");
+      git("checkout", "-q", "feat");
+      const res = branchChangedTestFiles(dir, "base");
+      assert.equal(res.ok, true, res.error);
+      assert.deepEqual(res.files.sort(), ["test/mine.test.mts", "test/untracked.test.mts"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

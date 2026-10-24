@@ -537,6 +537,24 @@ export function unrelatedBaselineDrift({ existing, next, changedFiles }) {
   return drift;
 }
 
+/**
+ * Test files THIS branch changed: diff against the merge-base with origin/master
+ * (a diff against the tip would count every file master changed since the
+ * branch point, hiding exactly the ambient drift the WARN flags), plus
+ * untracked new test files. Returns { ok, files, error }.
+ */
+export function branchChangedTestFiles(cwd = REPO_ROOT, base = "origin/master") {
+  const git = (a) => spawnSync("git", a, { cwd, encoding: "utf8" });
+  const mb = git(["merge-base", base, "HEAD"]);
+  if (mb.status !== 0) return { ok: false, files: [], error: (mb.stderr || "").trim() || "git merge-base failed" };
+  const diff = git(["diff", "--name-only", mb.stdout.trim(), "--", "test/"]);
+  if (diff.status !== 0) return { ok: false, files: [], error: (diff.stderr || "").trim() || "git diff failed" };
+  const untracked = git(["ls-files", "--others", "--exclude-standard", "--", "test/"]);
+  if (untracked.status !== 0) return { ok: false, files: [], error: (untracked.stderr || "").trim() || "git ls-files failed" };
+  const files = [...diff.stdout.split("\n"), ...untracked.stdout.split("\n")].filter(Boolean);
+  return { ok: true, files: [...new Set(files)], error: "" };
+}
+
 // ---------------------------------------------------------------------------
 // CLI entrypoint — guarded so the exports above stay importable without
 // running the CLI (same pattern as scripts/test/redis-db-launch.mjs).
@@ -560,18 +578,22 @@ if (isMain) {
         console.error("[suite-count-check] --only needs at least one test/<name>.test.mts path");
         process.exit(1);
       }
+      for (const f of only) {
+        if (!(f in existing) && !(f in generated)) {
+          console.error(
+            `[suite-count-check] WARN: --only path ${f} is in neither the baseline nor the generated set (typo? for a rename/delete pass the OLD path too)`,
+          );
+        }
+      }
       baseline = scopedBaseline({ existing, generated, only });
     } else {
-      const diff = spawnSync("git", ["diff", "--name-only", "origin/master", "--", "test/"], {
-        cwd: REPO_ROOT,
-        encoding: "utf8",
-      });
-      if (diff.status !== 0) {
+      const diff = branchChangedTestFiles();
+      if (!diff.ok) {
         console.error(
-          `[suite-count-check] WARN: could not diff against origin/master (${(diff.stderr || "").trim() || "git failed"}); skipping the unrelated-drift check`,
+          `[suite-count-check] WARN: could not diff against the origin/master merge-base (${diff.error}); skipping the unrelated-drift check`,
         );
       } else {
-        const changedFiles = diff.stdout.split("\n").filter(Boolean);
+        const changedFiles = diff.files;
         const drift = unrelatedBaselineDrift({ existing, next: generated, changedFiles });
         if (drift.length > 0) {
           console.error(
