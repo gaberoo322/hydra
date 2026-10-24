@@ -138,3 +138,25 @@ The CLI resolves an Anthropic slot alias locally to a first-party model id and c
 **Claim ordering preserved.** The block is recorded strictly *after* the existing release in the nothing-usable branch, so a quota-blocked drainer never holds an in-progress claim; the label state machine (`ready-for-agent` → `in-progress` → `ready-for-agent` on release) is unchanged, and `glm-withhold` is never added by a 429 — the work stays free-lane-eligible for when z.ai quota returns.
 
 **What did not change.** The watchdog's `glm-sterile` signal (`scripts/hydra-watchdog.sh`) is untouched: with the heartbeat correctly lapsed, it stays silent (the "down" arm — the work is now visible to `dev_orch`, so nothing is starved), and it remains the backstop for sterility that is *not* a parseable 429. Making the watchdog a second writer of the drainer's heartbeat key was considered and rejected — it would race the drainer's own refresh, the exact control-loop shape ADR-0012 / Decision 6 reject.
+
+## Amendment — the mechanism is an ordered list of Anthropic-compatible worker providers (2026-10-22, issue #4841)
+
+**What changed.** The "z.ai mechanism" generalises from one hard-coded backend to an **ordered list of worker providers**, each an Anthropic-Messages-compatible endpoint with an explicit non-Claude model name. The default list is exactly the single z.ai entry, so behaviour with one provider is unchanged. When the first provider is quota-blocked the drainer authors on the next one instead of idling until the reset. The 2026-10-01 audit measured 157 authoring sessions lost to one provider's weekly/monthly 429; the lane is otherwise the only quota-free relief for the binding Anthropic quota.
+
+**The list.** `config/glm/providers.json` (git-tracked; override path `HYDRA_GLM_DRAINER_PROVIDERS_FILE`), validated by a zod schema in `src/glm/providers.ts`. Entry: `{id, baseUrl, model, tokenEnv, quotaReset, dailyCap?}`. `tokenEnv` NAMES the variable in the off-git `EnvironmentFile` - a value never appears in config, argv, a log line or a PR body. An unreadable or invalid list fails closed (gate reason `provider-config-invalid`; no heartbeat, pick, claim or launch) - never a silent built-in default.
+
+**Preserved, per provider.**
+
+- **Invariant 4 (explicit model name as the routing fence).** A model is launchable only if it exactly equals a configured provider's model AND is neither an Anthropic slot alias (`sonnet`, `opus`, `haiku`, `fable`) nor `claude-*`. Checked at config load and again when the argv is built. The #3758 protection is pinned by a test per provider.
+- **Invariant 7 (fail-closed credentials).** One token per child: the selected provider's `tokenEnv` is required (absent = `glm-auth-token-missing`, naming the variable), and every other provider's credential variable is stripped from the child env.
+- **Invariant 10 (data exposure bounded by the secrets + risk-critical fence).** Each added provider sees only what the existing two-layer fence lets the drainer see; the fence is provider-independent.
+- **Decision 6 (keep-or-kill).** Now judged **per provider** by the operator from the beachhead report, which breaks first-pass PASS-rate and churn down by the `worker-provider:` trailer the supervisor appends to every drainer PR body (with `worker-model:`). The order of the list is operator-written; there is no automatic reordering on quality (the #3671 rejection stands).
+- **Adding a provider's account or credential is still an operator action (ADR-0005).** Adding it to the list is then a config-only change.
+
+**Quota blocks are per provider.** One block file per provider id: the legacy `hydra-glm-drainer-quota-blocked-until` for `zai` (a live block survives the cut-over tick), `...-until-<id>` for every other. The gate passes when at least one provider is selectable and hands the first unblocked one (and not above its own optional `dailyCap`) to the runner; the lane is `quota-blocked` only when every provider is blocked, and the detail names each unblock instant. The #4273 heartbeat rule therefore reads "not quota-blocked **on every provider**".
+
+**429 on every path.** The #4593 loop (157 wasted sessions) lived in the finish phase: the 429 was recorded only on the nothing-produced arm, so a resumed branch already ahead of master took the keep-partial arm and re-launched into the exhausted quota every tick. A 429 in the authoring stdout now records the selected provider's block on every `ran` arm, always after that arm's claim/label write.
+
+**Metering.** The foreign-model prefixes `tokensForeignLast7d` counts come from the configured providers' models (lowercased up to and including the first `-`), loaded once per scan at the I/O edge. For the default list that is `glm-`, unchanged.
+
+**Out of scope, unchanged.** Any third-party router or gateway (9router, LiteLLM) and any subscription-OAuth reuse remain rejected: a router puts an unvetted gateway holding every credential into the request path and can switch models silently, and OAuth pooling impersonates official CLIs. Renaming `glm` identifiers or the `glm-authored` label is deferred until a second provider has proven out.

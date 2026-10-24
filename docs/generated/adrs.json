@@ -206,6 +206,7 @@
         "docs/agents/triage-labels.md",
         "docs/evals.md",
         "docs/historical/hydra-betting/direction/roadmap.md",
+        "docs/operations/glm-lane.md",
         "docs/operator-playbooks/hydra-branch-prune.md",
         "docs/operator-playbooks/hydra-cleanup.md",
         "docs/operator-playbooks/hydra-qa.md",

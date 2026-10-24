@@ -168,6 +168,7 @@ export function parseTranscriptFile(
   content: string,
   cutoff7d: number,
   attribute: (lines: readonly string[]) => FileAttribution,
+  options: { foreignPrefixes?: readonly string[] } = {},
 ): ParsedTranscriptFile {
   const lines = content.split("\n");
   const entries: MemoLineEntry[] = [];
@@ -205,7 +206,7 @@ export function parseTranscriptFile(
     const tsMs = parsed.tsMs;
     if (tsMs < cutoff7d) continue;
 
-    if (isForeignProviderModel(parsed.model)) {
+    if (isForeignProviderModel(parsed.model, options.foreignPrefixes)) {
       if (!foreignModels.includes(parsed.model)) foreignModels.push(parsed.model);
       entries.push({ tsMs, tokens: parsed.tokens, foreign: true, family: "unknown" });
       continue;

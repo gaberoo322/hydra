@@ -184,16 +184,19 @@ export function modelToFamily(model: string | null | undefined): ModelFamily {
 }
 
 /**
- * Model-name prefixes served by a NON-Anthropic provider on a SEPARATE quota
- * (issue #3769). Today: `glm-*`, served by z.ai for the GLM dev-drainer worker
- * lane (ADR-0032).
+ * DEFAULT model-name prefixes served by a NON-Anthropic provider on a SEPARATE
+ * quota (issue #3769). Today: `glm-*`, served by z.ai for the GLM dev-drainer
+ * worker lane (ADR-0032). The transcript scan (the I/O shell) passes the
+ * prefixes DERIVED from the configured worker providers instead
+ * (`foreignPrefixesFor`, issue #4841); this default is what a caller that was
+ * handed no list sees, and equals the derived set for the committed config.
  *
  * Prefix-matched and lower-cased, mirroring {@link modelToFamily}. Add a prefix
  * here when a new provider lane is introduced — the cost of forgetting is not a
  * cosmetic miscount, it is the quota inversion described on
  * {@link isForeignProviderModel}.
  */
-const FOREIGN_PROVIDER_MODEL_PREFIXES: readonly string[] = Object.freeze(["glm-"]);
+const DEFAULT_FOREIGN_PROVIDER_MODEL_PREFIXES: readonly string[] = Object.freeze(["glm-"]);
 
 /**
  * Is this model billed to a provider OTHER than the Anthropic subscription?
@@ -216,9 +219,12 @@ const FOREIGN_PROVIDER_MODEL_PREFIXES: readonly string[] = Object.freeze(["glm-"
  *
  * Pure + total.
  */
-export function isForeignProviderModel(model: string | null | undefined): boolean {
+export function isForeignProviderModel(
+  model: string | null | undefined,
+  prefixes: readonly string[] = DEFAULT_FOREIGN_PROVIDER_MODEL_PREFIXES,
+): boolean {
   const l = String(model ?? "").toLowerCase();
-  return FOREIGN_PROVIDER_MODEL_PREFIXES.some((p) => l.startsWith(p));
+  return prefixes.some((p) => l.startsWith(p));
 }
 
 /**

@@ -50,7 +50,8 @@ import { logger } from "../logger.ts";
 import { ORCH_BOARD_LABELS } from "../board-labels.ts";
 import { isGhFailure } from "../github/exec.ts";
 import { isIssueReadFailure } from "../github/issues.ts";
-import { capFilePath, quotaBlockFilePath, parseCapCount, epochToIso } from "./gate.ts";
+import { capFilePath, providerCapFilePath, quotaBlockFilePath, parseCapCount, epochToIso } from "./gate.ts";
+import { LEGACY_PROVIDER_ID, type WorkerProvider } from "./providers.ts";
 import { loadDrainerConfig, type DrainerConfig } from "./drainer-config.ts";
 import {
   preflightBeforePr,
@@ -167,13 +168,25 @@ export function parseAuthorOutcome(raw: string, exitCode: number): AuthorOutcome
 // Pure rules — the z.ai quota block (issue #4273, D16)
 // ---------------------------------------------------------------------------
 
+/** True for z.ai's literal 429 or a generic provider 429 / rate_limit_error (issue #4841 INV-7). */
+function is429Rejection(text: string): boolean {
+  if (text.includes("Request rejected (429)")) return true;
+  // Provider error JSON shapes only (a quoted type/code key), never bare prose.
+  if (/"(?:type|code|status)"\s*:\s*"?(?:rate_limit\w*error|insufficient_quota|429)\b/i.test(text)) return true;
+  // Line-anchored provider error shapes only: free-form model prose that merely
+  // mentions "429" and "quota exceeded" must not block a healthy provider.
+  return /^\s*(?:API Error:?\s*|Error:?\s*|HTTP(?:\/\d(?:\.\d)?)?\s*)?429\b[^\n]{0,120}(rate.?limit|quota|too many requests|exceeded)/im.test(text) ||
+    /^\s*(?:API Error|Error):?\s*[^\n]{0,60}\b429\b/im.test(text) ||
+    /^\s*HTTP\/\d(?:\.\d)?\s+429\b/im.test(text);
+}
+
 /**
  * Parse z.ai's 429 payload into the block instant, or `null` when the text is
  * not a quota rejection. Pure: `nowSec` is injected, the wall clock is read in
  * `tzOffset` (a `[+-]HHMM` string, default `+0800` via
  * `config.quotaResetTzOffset`).
  *
- * Only a literal `Request rejected (429)` sets a block. On a 429 the FIRST
+ * Only a 429 rejection (z.ai literal `Request rejected (429)` or a generic rate-limit 429) sets a block. On a 429 the FIRST
  * `reset at YYYY-MM-DD HH:MM:SS` clause is read as a wall clock in
  * `tzOffset`; no clause, an out-of-range clause, an unparseable offset, or an
  * instant at or before `nowSec` gives `nowSec + 3600`. A future instant is
@@ -185,7 +198,7 @@ export function parseQuotaBlockStdout(
   nowSec: number,
   tzOffset: string,
 ): number | null {
-  if (typeof text !== "string" || !text.includes("Request rejected (429)")) return null;
+  if (typeof text !== "string" || !is429Rejection(text)) return null;
   const fallback = nowSec + QUOTA_BLOCK_FALLBACK_SECONDS;
   const m = /reset at (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/.exec(text);
   if (!m) return fallback;
@@ -312,6 +325,12 @@ export interface FinishInput {
   authorRaw: string;
   /** The author session driver's exit code (non-zero = driver FAULT). */
   authorExitCode: number;
+  /**
+   * The worker provider that wrote this attempt (issue #4841). Absent reads as
+   * the legacy single z.ai lane: the legacy block file, the config tz offset,
+   * and NO attribution trailers.
+   */
+  provider?: WorkerProvider;
 }
 
 /** The `finish` driver mode's stdout line (INV-10). */
@@ -597,23 +616,66 @@ function removeTimeoutCounter(deps: FinishDeps, issue: number): void {
   }
 }
 
-function incrementDailyCap(deps: FinishDeps, nowMs: number): void {
+function incrementDailyCap(deps: FinishDeps, nowMs: number, provider?: WorkerProvider): void {
   const path = capFilePath(deps.config.capDir, nowMs);
   const count = parseCapCount(deps.readFileIfExists(path));
   deps.writeFile(path, `${count + 1}\n`);
+  // A provider with its own dailyCap keeps its own counter (issue #4841 INV-6).
+  if (provider && provider.dailyCap !== undefined) {
+    const own = providerCapFilePath(deps.config.capDir, nowMs, provider.id);
+    deps.writeFile(own, `${parseCapCount(deps.readFileIfExists(own)) + 1}\n`);
+  }
 }
 
-/** Only from evidence, AFTER the claim is freed (issue #4273 INV-2/INV-6). */
+/**
+ * Only from evidence, AFTER the claim is freed (issue #4273 INV-2/INV-6). The
+ * SELECTED provider's block file is written (issue #4841 INV-5/INV-7); the
+ * reset offset comes from the provider's `quotaReset` (INV-8), with
+ * `HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET` still overriding a `zai-wallclock`
+ * provider's offset. No provider = the legacy z.ai lane.
+ */
 function recordQuotaBlockIf429(
   deps: FinishDeps,
   stdout: string,
   nowSec: number,
+  provider?: WorkerProvider,
 ): number | null {
-  const until = parseQuotaBlockStdout(stdout, nowSec, deps.config.quotaResetTzOffset);
+  let tzOffset = deps.config.quotaResetTzOffset;
+  if (provider) {
+    tzOffset =
+      provider.quotaReset.format === "zai-wallclock"
+        ? (deps.config.quotaResetTzOverride ?? provider.quotaReset.tzOffset)
+        : ""; // fallback-only: an unparseable offset always takes the 60-minute fallback
+  }
+  const until = parseQuotaBlockStdout(stdout, nowSec, tzOffset);
   if (until === null) return null;
-  deps.writeFile(quotaBlockFilePath(deps.config.capDir), `${until}\n`);
-  deps.log(`recorded z.ai quota block until ${epochToIso(until)}`);
+  const id = provider?.id ?? LEGACY_PROVIDER_ID;
+  deps.writeFile(quotaBlockFilePath(deps.config.capDir, id), `${until}\n`);
+  deps.log(
+    id === LEGACY_PROVIDER_ID
+      ? `recorded z.ai quota block until ${epochToIso(until)}`
+      : `recorded ${id} quota block until ${epochToIso(until)}`,
+  );
   return until;
+}
+
+/**
+ * Supervisor-written attribution (issue #4841 INV-10): trailer lines appended
+ * to the PR body file at the same seam as the timeout note, so a drainer PR
+ * records which provider/model wrote it. The model never reports its own.
+ */
+function appendProviderTrailers(deps: FinishDeps, bodyFile: string, provider: WorkerProvider): void {
+  try {
+    deps.appendToFile(
+      bodyFile,
+      `\n\nworker-provider: ${provider.id}\nworker-model: ${provider.model}\n`,
+    );
+  } catch (err) {
+    /* intentional: non-fatal by contract — logs with context through the injected deps.log seam */
+    deps.log(
+      `WARN failed to append worker-provider trailers to ${bodyFile} (non-fatal — proceeding with the unmodified body): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 // --- the dry-run would-walk (INV-12) ---------------------------------------
@@ -744,6 +806,9 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       // files, preflight.
       await defensivePush(deps, input);
       if (timedOut && input.worktree) appendTimeoutNote(deps, bodyFileAt(input.worktree));
+      if (input.provider && input.worktree) {
+        appendProviderTrailers(deps, bodyFileAt(input.worktree), input.provider);
+      }
       const changedPaths = await listChangedFiles(deps, input);
       const result = await safe(
         deps,
@@ -796,8 +861,9 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       await deleteRemoteBranchIfPushed(deps, input.branch);
       if (verdict.withhold) logCapReached(deps, issue, timeoutCount, config.timeoutResumeCap);
       await releaseClaim(deps, issue, verdict.withhold);
-      // D17: only from evidence, only on this arm, only AFTER the release.
-      const quotaBlockedUntil = recordQuotaBlockIf429(deps, authorStdout, nowSec);
+      // D17: only from evidence, only AFTER the release (issue #4841 INV-7:
+      // now on EVERY ran arm, not just this one).
+      const quotaBlockedUntil = recordQuotaBlockIf429(deps, authorStdout, nowSec, input.provider);
       return {
         action: "release-nothing-produced",
         issue,
@@ -817,12 +883,15 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       // pick phase picks up next tick (issue #4337 INV-4/5).
       if (verdict.withhold) logCapReached(deps, issue, timeoutCount, config.timeoutResumeCap);
       await releaseClaim(deps, issue, verdict.withhold);
+      // The #4593 loop fix: a 429 here must block the provider too, or every
+      // tick re-launches the resumed branch into the same exhausted quota.
+      const quotaBlockedUntil = recordQuotaBlockIf429(deps, authorStdout, nowSec, input.provider);
       return {
         action: "keep-partial-for-resume",
         issue,
         labels: verdict.withhold ? [LABEL_READY, LABEL_WITHHOLD] : [LABEL_READY],
         pr: null,
-        quotaBlockedUntil: null,
+        quotaBlockedUntil,
         dryRun: false,
       };
     }
@@ -831,12 +900,13 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       await deleteRemoteBranchIfPushed(deps, input.branch);
       await releaseClaim(deps, issue, true); // always withhold — the T2/T3 fence hit
       // The timeout counter is deliberately untouched (INV-4).
+      const quotaBlockedUntil = recordQuotaBlockIf429(deps, authorStdout, nowSec, input.provider);
       return {
         action: "withhold-preflight-blocked",
         issue,
         labels: [LABEL_READY, LABEL_WITHHOLD],
         pr: null,
-        quotaBlockedUntil: null,
+        quotaBlockedUntil,
         dryRun: false,
       };
     }
@@ -846,12 +916,13 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       );
       if (verdict.withhold) logCapReached(deps, issue, timeoutCount, config.timeoutResumeCap);
       await releaseClaim(deps, issue, verdict.withhold);
+      const quotaBlockedUntil = recordQuotaBlockIf429(deps, authorStdout, nowSec, input.provider);
       return {
         action: "release-after-failed-pr",
         issue,
         labels: verdict.withhold ? [LABEL_READY, LABEL_WITHHOLD] : [LABEL_READY],
         pr: null,
-        quotaBlockedUntil: null,
+        quotaBlockedUntil,
         dryRun: false,
       };
     }
@@ -859,17 +930,18 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       // The advance: counter reset, needs-qa relabel, daily cap, worktree.
       removeTimeoutCounter(deps, issue); // INV-6: a PR opened — the budget resets
       await advanceToNeedsQa(deps, issue);
-      await safe(deps, "daily-cap increment", async () => incrementDailyCap(deps, nowMs));
+      await safe(deps, "daily-cap increment", async () => incrementDailyCap(deps, nowMs, input.provider));
       deps.log(
         `issue #${issue}: PR opened (branch=${input.branch}), advanced to needs-qa, daily cap incremented`,
       );
       await removeWorktreeIfPassed(deps, input.worktree);
+      const quotaBlockedUntil = recordQuotaBlockIf429(deps, authorStdout, nowSec, input.provider);
       return {
         action: "open-pr",
         issue,
         labels: [LABEL_NEEDS_QA],
         pr,
-        quotaBlockedUntil: null,
+        quotaBlockedUntil,
         dryRun: false,
       };
     }

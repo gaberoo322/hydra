@@ -24,7 +24,8 @@ import {
 } from "../src/glm/drainer-driver.ts";
 import { ClaudeCliTimeoutError, type SpawnFn } from "../src/claude-cli/exec.ts";
 import { loadDrainerConfig } from "../src/glm/drainer-config.ts";
-import type { GateDeps } from "../src/glm/gate.ts";
+import { quotaBlockFilePath, type GateDeps } from "../src/glm/gate.ts";
+import type { WorkerProvidersResult } from "../src/glm/providers.ts";
 import type { PickDeps } from "../src/glm/pick.ts";
 import type { FinishDeps } from "../src/glm/finish.ts";
 import type { TickDeps } from "../src/glm/drainer-driver.ts";
@@ -283,6 +284,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     finishCalls: string[];
     claudeCwds: string[];
     prompts: string[];
+    provCalls: string[];
   }
 
   function rig(
@@ -295,6 +297,8 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
       bodyThrows?: boolean;
       localRefPresent?: boolean;
       runGlmClaude?: DriverDeps["runGlmClaude"];
+      providers?: WorkerProvidersResult;
+      files?: Map<string, string>;
     } = {},
   ): Rig {
     const calls: string[] = [];
@@ -302,14 +306,16 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     const finishCalls: string[] = [];
     const claudeCwds: string[] = [];
     const prompts: string[] = [];
+    const provCalls: string[] = [];
     const config = { ...loadDrainerConfig({}), capDir: "/cap", worktreeRoot: "/wt-root", dryRun: opts.dryRun ?? false };
     const gateDeps: GateDeps = {
       getAutopilotPaused: async () => ({ paused: opts.paused ?? false }),
       setGlmDrainerHeartbeat: async () => ({ ok: true }),
-      readFileIfExists: () => null,
+      readFileIfExists: (p: string) => opts.files?.get(p) ?? null,
       unlink: () => {},
       now: () => NOW_MS,
       config,
+      ...(opts.providers ? { providers: opts.providers } : {}),
     };
     const row = {
       number: 77,
@@ -357,7 +363,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
       remoteBranchExists: async () => false,
       preflight: async () => ({ ok: true, checkedPaths: 0 }),
       readFileIfExists: () => null,
-      writeFile: () => {},
+      writeFile: (p: string, c: string) => { opts.files?.set(p, c); },
       unlinkIfExists: () => {},
       appendToFile: () => {},
     } as unknown as FinishDeps;
@@ -381,8 +387,13 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
       pick,
       finish,
       tick,
-      buildDrainerArgs: ((o: { prompt: string }) => {
+      buildGlmEnv: ((_e: unknown, p?: { id: string }) => {
+        provCalls.push(`env:${p?.id ?? "none"}`);
+        return { ok: true, env: {} };
+      }) as DriverDeps["buildGlmEnv"],
+      buildDrainerArgs: ((o: { prompt: string; model?: string }) => {
         prompts.push(o.prompt);
+        provCalls.push(`args-model:${o.model ?? "none"}`);
         return { ok: true, args: [] };
       }) as DriverDeps["buildDrainerArgs"],
       runGlmClaude:
@@ -393,7 +404,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
           return { code: 0, stdout: "", stderr: "" };
         }) as unknown as DriverDeps["runGlmClaude"]),
     });
-    return { deps, calls, logs, finishCalls, claudeCwds, prompts };
+    return { deps, calls, logs, finishCalls, claudeCwds, prompts, provCalls };
   }
 
   async function tickOf(r: Rig): Promise<{ exitCode: number; line: any }> {
@@ -402,6 +413,45 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     if (isDriverFailure(outcome)) throw new Error("unreachable");
     return { exitCode: outcome.exitCode, line: JSON.parse(outcome.line) };
   }
+
+  const TWO: WorkerProvidersResult = {
+    ok: true,
+    providers: [
+      { id: "zai", baseUrl: "https://api.z.ai/api/anthropic", model: "glm-5.2", tokenEnv: "ANTHROPIC_AUTH_TOKEN", quotaReset: { format: "zai-wallclock", tzOffset: "+0800" } },
+      { id: "kimi", baseUrl: "https://k.example/anthropic", model: "kimi-k2.5", tokenEnv: "KIMI_API_KEY", quotaReset: { format: "fallback-only" } },
+    ],
+  };
+
+  test("#4841 INV-6: with provider 1 quota-blocked the tick authors on provider 2 and a 429 writes provider 2's block file", async () => {
+    const files = new Map<string, string>();
+    files.set(quotaBlockFilePath("/cap", "zai"), `${TS + 7200}\n`);
+    const r = rig({
+      providers: TWO,
+      files,
+      runGlmClaude: (async () => ({ code: 1, stdout: "Request rejected (429)", stderr: "" })) as unknown as DriverDeps["runGlmClaude"],
+    });
+    const { line } = await tickOf(r);
+    assert.equal(line.gate.provider, "kimi");
+    assert.ok(r.provCalls.includes("env:kimi"), r.calls.join("\n"));
+    assert.ok(r.provCalls.includes("args-model:kimi-k2.5"), r.calls.join("\n"));
+    assert.ok(!r.provCalls.includes("env:zai"));
+    assert.ok(files.has(quotaBlockFilePath("/cap", "kimi")), "provider 2's block file must be written");
+    assert.equal(files.get(quotaBlockFilePath("/cap", "zai")), `${TS + 7200}\n`, "provider 1's block file untouched");
+  });
+
+  test("#4841 INV-4: a gate selection that resolves to no configured provider fails the tick loudly (no silent providers[0])", async () => {
+    const files = new Map<string, string>();
+    files.set(quotaBlockFilePath("/cap", "kimi"), `${TS + 7200}\n`);
+    const r = rig({ providers: TWO, files });
+    // The driver's own list lacks the provider the gate selected.
+    r.deps.providers = { ok: true, providers: [TWO.providers[1]] };
+    const { line } = await tickOf(r);
+    assert.equal(line.gate.provider, "zai");
+    assert.equal(line.pick, null);
+    assert.equal(line.finish, null);
+    assert.ok(r.logs.some((l) => /^ERROR gate selected provider "zai"/.test(l)), r.logs.join("\n"));
+    assert.deepEqual(r.calls, []);
+  });
 
   test("a gate skip stops before pick: no claim, pick/finish null, exit 0, the operator-paused journal line is logged", async () => {
     const r = rig({ paused: true });

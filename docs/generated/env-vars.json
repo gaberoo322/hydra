@@ -211,11 +211,11 @@
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 1334
+          "line": 1375
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 90
+          "line": 91
         },
         {
           "path": "scripts/headroom-spike.sh",
@@ -2137,11 +2137,11 @@
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 1334
+          "line": 1375
         },
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 90
+          "line": 91
         }
       ],
       "inEnvExample": false,
@@ -2155,31 +2155,17 @@
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 86
+          "line": 87
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 86
+        "line": 87
       }
     },
     {
       "name": "HYDRA_GLM_DRAINER_DRY_RUN",
-      "readSites": [
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 82
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 82
-      }
-    },
-    {
-      "name": "HYDRA_GLM_DRAINER_LOCKFILE",
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
@@ -2193,17 +2179,31 @@
       }
     },
     {
-      "name": "HYDRA_GLM_DRAINER_REPO_ROOT",
+      "name": "HYDRA_GLM_DRAINER_LOCKFILE",
       "readSites": [
         {
           "path": "scripts/glm/drainer-loop.sh",
-          "line": 80
+          "line": 84
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/glm/drainer-loop.sh",
-        "line": 80
+        "line": 84
+      }
+    },
+    {
+      "name": "HYDRA_GLM_DRAINER_REPO_ROOT",
+      "readSites": [
+        {
+          "path": "scripts/glm/drainer-loop.sh",
+          "line": 81
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/glm/drainer-loop.sh",
+        "line": 81
       }
     },
     {
@@ -4729,19 +4729,19 @@
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 927
+          "line": 967
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 930
+          "line": 970
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 946
+          "line": 986
         },
         {
           "path": "scripts/glm-beachhead-report.sh",
-          "line": 956
+          "line": 996
         }
       ],
       "inEnvExample": false,
