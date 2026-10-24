@@ -1078,17 +1078,24 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
       "Error: 429 Too Many Requests",
       "Error: Request failed with status code 429",
       "HTTP/1.1 429 Too Many Requests",
-      '{"error":{"code":429,"message":"slow"}}',
       '{"error":{"type":"rate_limit_reached_error"}}',
-      '{"error":{"code":"insufficient_quota"}}',
+      '{"error":{"type":"insufficient_quota"}}',
     ]) {
       const h = finishHarness(0, null);
       await runFinish(h.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 1, stdout: text, stderr: "" })));
       assert.equal(h.files.get(quotaBlockFilePath(CAP_DIR, "kimi")), `${NOW_SEC + 3600}\n`, text);
     }
-    const n = finishHarness(0, null);
-    await runFinish(n.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 1, stdout: "edited file-429.ts, 4290 lines", stderr: "" })));
-    assert.equal(n.files.has(quotaBlockFilePath(CAP_DIR, "kimi")), false);
+    for (const neg of [
+      "edited file-429.ts, 4290 lines",
+      'the fixture is {"error":{"code":429,"message":"slow"}}',
+      'wrote a test with "status": 429 in it',
+      'I quoted {"type":"x"} then said "type": "rate_limit_error" mid-prose',
+      "Error handling now maps a retry that hit 429 later in the message to backoff",
+    ]) {
+      const n = finishHarness(0, null);
+      await runFinish(n.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 1, stdout: neg, stderr: "" })));
+      assert.equal(n.files.has(quotaBlockFilePath(CAP_DIR, "kimi")), false, neg);
+    }
   });
 
   test("prose merely mentioning 429 + quota exceeded (even on a successful open-pr arm) never blocks the provider", async () => {

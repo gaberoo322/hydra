@@ -171,12 +171,14 @@ export function parseAuthorOutcome(raw: string, exitCode: number): AuthorOutcome
 /** True for z.ai's literal 429 or a generic provider 429 / rate_limit_error (issue #4841 INV-7). */
 function is429Rejection(text: string): boolean {
   if (text.includes("Request rejected (429)")) return true;
-  // Provider error JSON shapes only (a quoted type/code key), never bare prose.
-  if (/"(?:type|code|status)"\s*:\s*"?(?:rate_limit\w*error|insufficient_quota|429)\b/i.test(text)) return true;
+  // Provider error envelope only: a line that STARTS with the JSON object (or an
+  // `API Error:` prefix) and carries a rate-limit/quota error type. A quoted
+  // key mid-prose, or a bare numeric code/status, is never evidence.
+  if (/^\s*(?:API Error:?\s*(?:\d{3}\s*)?)?\{[^\n]*"type"\s*:\s*"(?:rate_limit\w*error|insufficient_quota)"/im.test(text)) return true;
   // Line-anchored provider error shapes only: free-form model prose that merely
   // mentions "429" and "quota exceeded" must not block a healthy provider.
   return /^\s*(?:API Error:?\s*|Error:?\s*|HTTP(?:\/\d(?:\.\d)?)?\s*)?429\b[^\n]{0,120}(rate.?limit|quota|too many requests|exceeded)/im.test(text) ||
-    /^\s*(?:API Error|Error):?\s*[^\n]{0,60}\b429\b/im.test(text) ||
+    /^\s*(?:API Error|Error):?\s*(?:[^\n]{0,40}\bstatus code\s+)?429\b/im.test(text) ||
     /^\s*HTTP\/\d(?:\.\d)?\s+429\b/im.test(text);
 }
 
