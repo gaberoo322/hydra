@@ -234,6 +234,34 @@ describe("deposit key resolution — READ end (scripts/autopilot/reap.py, issue 
     }
   });
 
+  test("phase spans in the grounding deposit are forwarded and named in the resolved log line (issue #5025)", () => {
+    const tmp = makeTmp();
+    try {
+      const taskId = `worktree-agent-${HASH}`;
+      writeState(tmp.state, {
+        skill: "hydra-dev",
+        started_epoch: Math.floor(Date.now() / 1000),
+        task_id: taskId,
+        branch: taskId,
+      });
+      depositGrounding(tmp.dir, HASH, {
+        testsAfter: 6692,
+        verificationDurationMs: 525748,
+        planningDurationMs: 24000,
+        executionDurationMs: 74252,
+        groundingDurationMs: 7,
+      });
+      const r = runCompletion(tmp, taskId);
+      assert.equal(r.status, 0, `reap must exit 0; stderr=${r.stderr}`);
+      assert.match(
+        runLog(tmp),
+        /grounding_tests_resolved .*fields=executionDurationMs=74252,planningDurationMs=24000,testsAfter=6692,verificationDurationMs=525748(\s|$)/,
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
   test("an agent-<HASH> slot task_id (the older generation) also resolves it", () => {
     const tmp = makeTmp();
     try {

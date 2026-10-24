@@ -53,6 +53,7 @@ import {
   mkdirSync,
   writeFileSync,
   existsSync,
+  utimesSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -600,5 +601,56 @@ describe("reflection-deposit.sh grounding --from-log (issue #4753)", () => {
     });
     assert.equal(r.status, 0);
     assert.match(r.stderr, /grounding-tests-deposit-log-path-missing/);
+  });
+
+  test("deposits deterministic phase spans from the TAP footer and file mtimes (issue #5025)", () => {
+    const log = logWith(
+      "# tests 120\n# pass 118\n# fail 2\n# duration_ms 525748.49\n",
+    );
+    const root = mkdtempSync(join(tmpdir(), "refl-span-"));
+    const cwd = join(root, `agent-${HASH}`);
+    mkdirSync(cwd);
+    const deposits = join(root, "deposits");
+    mkdirSync(deposits);
+    const gitPtr = join(cwd, ".git");
+    const anchor = join(deposits, `hydra-refl-anchor-${HASH}`);
+    writeFileSync(gitPtr, "gitdir: /x\n");
+    writeFileSync(anchor, "issue-1");
+    // dispatch start T, anchor deposit T+24s, log T+24s+600s.
+    const T = 1_800_000_000;
+    utimesSync(gitPtr, T, T);
+    utimesSync(anchor, T + 24, T + 24);
+    utimesSync(log, T + 624, T + 624);
+    const r = spawnSync(
+      "bash",
+      [resolve(SCRIPTS_DIR, "reflection-deposit.sh"), "grounding", "hydra-dev", "--from-log", log],
+      {
+        cwd,
+        encoding: "utf8",
+        env: { PATH: process.env.PATH ?? "", HYDRA_AUTOPILOT_REFL_DIR: deposits },
+      },
+    );
+    assert.equal(r.status, 0);
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(deposits, `hydra-grounding-tests-${HASH}`), "utf8")),
+      {
+        testsAfter: 120,
+        testsPassingAfter: 118,
+        verificationDurationMs: 525748,
+        planningDurationMs: 24000,
+        // 600s - 525.748s, floored at 0 and an integer.
+        executionDurationMs: 74252,
+      },
+    );
+  });
+
+  test("a missing marker omits only its own span key, never a 0 (issue #5025)", () => {
+    // No anchor deposit and no .git pointer: only verification is derivable.
+    const log = logWith("# tests 5\n# pass 5\n# duration_ms 1234.5\n");
+    const { deposits } = runDeposit(["grounding", "hydra-dev", "--from-log", log]);
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(deposits, `hydra-grounding-tests-${HASH}`), "utf8")),
+      { testsAfter: 5, testsPassingAfter: 5, verificationDurationMs: 1235 },
+    );
   });
 });

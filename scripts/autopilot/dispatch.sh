@@ -320,7 +320,8 @@ if grounding_tests != '':
     try:
         gt = json.loads(grounding_tests)
         if isinstance(gt, dict):
-            for key in ('testsBefore', 'testsAfter', 'testsPassingBefore', 'testsPassingAfter'):
+            for key in ('testsBefore', 'testsAfter', 'testsPassingBefore', 'testsPassingAfter',
+                        'verificationDurationMs', 'planningDurationMs', 'executionDurationMs'):
                 val = gt.get(key)
                 if isinstance(val, bool):
                     continue  # bool is an int subclass — reject it explicitly

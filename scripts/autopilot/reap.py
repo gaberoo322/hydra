@@ -469,6 +469,11 @@ def _read_grounding_tests(task_id: str) -> dict[str, int]:
             "testsAfter",
             "testsPassingBefore",
             "testsPassingAfter",
+            # Issue #5025: dispatch-deposited phase spans (reflection-deposit.sh
+            # grounding). groundingDurationMs is deliberately NOT forwarded.
+            "verificationDurationMs",
+            "planningDurationMs",
+            "executionDurationMs",
         ):
             val = parsed.get(key)
             if isinstance(val, bool):
