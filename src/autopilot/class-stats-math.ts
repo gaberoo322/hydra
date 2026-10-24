@@ -103,7 +103,7 @@ const DAMPENER_REPROBE_HOURS = 24;
  * is a weak class. These are DELIBERATELY conservative — v1 never acts on them.
  */
 export const DEV_WEAK_MERGE_RATE = 0.1;
-const PRODUCER_WEAK_BETA = 0;
+export const PRODUCER_WEAK_BETA = 0;
 
 /**
  * The weighted-quota-per-merge ceiling above which a dev class — even one with a
@@ -327,6 +327,34 @@ export interface ClassScoreboard {
   minSample: number;
   /** One row per dispatch class, in taxonomy (dispatch) order. */
   classes: ClassStat[];
+  /**
+   * The verdict thresholds that produced the rows' `underperforming` /
+   * `expensive` verdicts, served so a view can render them beside each verdict
+   * (ADR-0034 §5.3 — derived values decompose; issue #5161).
+   */
+  thresholds: ClassScoreboardThresholds;
+  /**
+   * True when a Redis / estimator / usage read FAILED while building this board,
+   * so its rows are not trustworthy (a Redis/estimator failure leaves every class
+   * insufficient-sample; a usage failure nulls weightedQuota so the `expensive`
+   * verdict is dead). Coarse by design: a usage-only failure degrades the whole
+   * board rather than splitting a per-axis flag, so a persistent usage outage
+   * recomputes per request. A degraded
+   * board is never memoised and a view renders UNKNOWN for it (ADR-0034 §5.1).
+   * Absent / false on a healthy board. Set by the composer, never by the pure
+   * math leaf.
+   */
+  degraded?: boolean;
+}
+
+/** The three served verdict thresholds (issue #5161). */
+export interface ClassScoreboardThresholds {
+  /** Dev classes at or below this merge rate are `underperforming`. */
+  devWeakMergeRate: number;
+  /** Producer classes at or below this spine β are `underperforming`. */
+  producerWeakBeta: number;
+  /** Dev classes above this weighted-quota-per-merge are `expensive`. */
+  devExpensiveWeightedQuotaPerMerge: number;
 }
 
 /**
@@ -625,7 +653,17 @@ export function computeClassScoreboard(
     };
   });
 
-  return { windowMs, computedAt: now, minSample, classes };
+  return {
+    windowMs,
+    computedAt: now,
+    minSample,
+    classes,
+    thresholds: {
+      devWeakMergeRate: DEV_WEAK_MERGE_RATE,
+      producerWeakBeta: PRODUCER_WEAK_BETA,
+      devExpensiveWeightedQuotaPerMerge: DEV_EXPENSIVE_WEIGHTED_QUOTA_PER_MERGE,
+    },
+  };
 }
 
 /**

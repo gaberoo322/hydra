@@ -132,15 +132,18 @@ export async function buildClassScoreboard(
   const deps = opts.deps ?? defaultDeps;
 
   let records: DispatchOutcomeRecord[] = [];
+  let degraded = false;
   try {
     const listed = await deps.listRecords({ sinceMs: now - windowMs });
     if (listed.ok === true) records = listed.records;
     else {
+      degraded = true;
       logger.error({ error: listed.error }, "[class-stats] listDispatchOutcomes failed");
     }
   } catch (err: any) {
     /* intentional: a read failure degrades to an empty scoreboard (all
        insufficient-sample), never throws — the shadow path must not wedge. */
+    degraded = true;
     logger.error({ err }, "[class-stats] listDispatchOutcomes threw");
   }
 
@@ -149,11 +152,13 @@ export async function buildClassScoreboard(
     const loaded = await deps.loadObservations();
     if (loaded.ok === true) estimate = estimateMarginalEffects(loaded.observations);
     else {
+      degraded = true;
       logger.error({ error: loaded.error }, "[class-stats] getObservations failed");
     }
   } catch (err: any) {
     /* intentional: an estimator/read failure degrades to no β (producer classes
        fall to insufficient-sample), never throws. */
+    degraded = true;
     logger.error({ err }, "[class-stats] estimate threw");
   }
 
@@ -174,17 +179,25 @@ export async function buildClassScoreboard(
     weightedQuota = resolveWeightedQuotaInputs(snapshot);
   } catch (err: any) {
     /* intentional: a usage-read failure degrades weightedQuota to null on every
-       class (empty breakdown), never throws — the yield axis is untouched. */
+       class (empty breakdown), never throws. It deliberately marks the WHOLE
+       board degraded (issue #5161, coarse by design): the expensive verdict is
+       dead without weightedQuota, and a partially-trustworthy board is not worth
+       a second flag, so the board is not memoised and /builder renders UNKNOWN.
+       The cost is that a persistent usage outage recomputes per request. */
+    degraded = true;
     logger.error(
       { err },
       "[class-stats] getUsage threw (weightedQuota degrades to null)",
     );
   }
 
-  return computeClassScoreboard(records, estimate, {
+  const board = computeClassScoreboard(records, estimate, {
     now,
     minSample: opts.minSample,
     windowMs,
     weightedQuota,
   });
+  // Issue #5161: a failed Redis/estimator read marks the board degraded so the
+  // API memo skips it and /builder renders UNKNOWN. Healthy boards carry no flag.
+  return degraded ? { ...board, degraded: true } : board;
 }

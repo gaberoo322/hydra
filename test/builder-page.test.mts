@@ -306,6 +306,15 @@ describe("structural pins — /builder class yield (issue #4637)", () => {
     assert.match(src, /shadow\.verdicts/, "shadow multiplier joined by className");
   });
 
+  test("ClassYield renders UNKNOWN for a degraded board and shows the served thresholds (issue #5161)", async () => {
+    const src = await readDashboardSource("components/pages/builder/ClassYield.jsx");
+    assert.match(src, /scoreboard\?\.degraded === true/);
+    assert.match(src, /sourcesOk: false/, "degraded feeds derivePageStatus' unknown arm");
+    assert.match(src, /thresholds\.devWeakMergeRate/);
+    assert.match(src, /thresholds\.producerWeakBeta/);
+    assert.match(src, /thresholds\.devExpensiveWeightedQuotaPerMerge/);
+  });
+
   test("ClassYield is read-only — no apiFetch, no POST, no controls (/builder anti-scope)", async () => {
     const src = await readDashboardSource("components/pages/builder/ClassYield.jsx");
     assert.equal(src.includes("apiFetch"), false);

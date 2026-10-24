@@ -59,6 +59,10 @@
  *       - a recompute that THROWS is not memoised (the next request retries).
  *     The response shape `{ scoreboard, shadow, generatedAt }` is unchanged, so
  *     the Turn Snapshot passthrough collector reads the same body it always did.
+ *
+ *   - **A degraded board is never memoised (issue #5161).** When
+ *     `scoreboard.degraded === true` (a Redis / estimator read failed) the body is
+ *     served but not pinned; the next request recomputes.
  */
 
 import { Router } from "express";
@@ -106,6 +110,15 @@ export function createAutopilotClassStatsRouter(
   async function recompute(): Promise<ClassStatsBody> {
     const scoreboard = await buildScoreboard();
     const shadow = shadowDampener(scoreboard);
+    // A degraded board (failed read → all-insufficient-sample) must not overwrite
+    // the last good Redis snapshot (issue #5161): skip the persist.
+    if (scoreboard.degraded === true) {
+      return {
+        scoreboard,
+        shadow,
+        generatedAt: new Date(scoreboard.computedAt).toISOString(),
+      };
+    }
     // Best-effort cache write — a failure here must not fail the read.
     await persist(scoreboard).catch((err: any) => {
       logger.error(
@@ -127,7 +140,11 @@ export function createAutopilotClassStatsRouter(
     if (inflight === null) {
       inflight = recompute()
         .then((body) => {
-          memo = { body, computedAt: now() };
+          // A degraded board (failed Redis/estimator read) is never pinned for
+          // 10 minutes (issue #5161): the next request recomputes.
+          if (body.scoreboard.degraded !== true) {
+            memo = { body, computedAt: now() };
+          }
           return body;
         })
         .finally(() => {

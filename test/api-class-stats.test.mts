@@ -252,7 +252,7 @@ describe("GET /api/autopilot/class-stats (issue #2943)", () => {
 
 describe("GET /api/autopilot/class-stats — 10-minute memo (issue #4637)", () => {
   /** One router instance (one memo) with a controllable clock + call counters. */
-  function memoHarness(opts: { fail?: () => boolean } = {}) {
+  function memoHarness(opts: { fail?: () => boolean; degraded?: () => boolean } = {}) {
     let clock = NOW;
     let builds = 0;
     let persists = 0;
@@ -263,7 +263,8 @@ describe("GET /api/autopilot/class-stats — 10-minute memo (issue #4637)", () =
       if (gate) await gate;
       if (opts.fail?.()) throw new Error("fictional composer failure");
       // Each build stamps a distinct computedAt so a recompute is observable.
-      return computeClassScoreboard([], { metrics: [] }, { now: NOW + builds * 1000 });
+      const board = computeClassScoreboard([], { metrics: [] }, { now: NOW + builds * 1000 });
+      return opts.degraded?.() ? { ...board, degraded: true } : board;
     };
     const persist = async () => {
       persists += 1;
@@ -359,5 +360,30 @@ describe("GET /api/autopilot/class-stats — 10-minute memo (issue #4637)", () =
     assert.equal(second._status, 200, "the failure was not cached");
     assert.equal(h.builds, 2);
     assert.equal(h.persists, 1, "persist only follows a successful build");
+  });
+
+  test("a degraded board is served but NOT memoised — the next request recomputes (issue #5161)", async () => {
+    let degraded = true;
+    const h = memoHarness({ degraded: () => degraded });
+    const first = await h.get();
+    assert.equal(first._status, 200);
+    assert.equal(first._body.scoreboard.degraded, true);
+    assert.equal(h.persists, 0, "a degraded board never overwrites the last good snapshot");
+    degraded = false;
+    const second = await h.get();
+    assert.equal(h.builds, 2, "degraded board was not pinned");
+    assert.equal(second._body.scoreboard.degraded, undefined);
+    await h.get();
+    assert.equal(h.builds, 2, "a healthy board IS memoised");
+  });
+
+  test("the scoreboard serves its verdict thresholds (issue #5161)", async () => {
+    const h = memoHarness();
+    const res = await h.get();
+    assert.deepEqual(res._body.scoreboard.thresholds, {
+      devWeakMergeRate: 0.1,
+      producerWeakBeta: 0,
+      devExpensiveWeightedQuotaPerMerge: 5_000_000,
+    });
   });
 });

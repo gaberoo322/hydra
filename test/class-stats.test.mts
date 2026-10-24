@@ -412,6 +412,17 @@ describe("class-stats — composer degrades on Redis-read failure (never throws)
       assert.equal(c.verdict, "insufficient-sample", `${c.className} degrades to insufficient-sample`);
       assert.equal(c.dispatches, 0);
     }
+    assert.equal(sb.degraded, true, "a failed read marks the board degraded (issue #5161)");
+  });
+
+  test("a healthy read carries no degraded flag (issue #5161)", async () => {
+    const deps: ClassScoreboardDeps = {
+      listRecords: async () => ({ ok: true, records: [] }),
+      loadObservations: async () => ({ ok: true, observations: [] }),
+      loadUsage: async () => fakeUsage(),
+    };
+    const sb = await buildClassScoreboard({ now: NOW, deps });
+    assert.equal(sb.degraded, undefined);
   });
 
   test("composer folds injected records + observations into a scored board", async () => {
@@ -910,6 +921,7 @@ describe("class-stats — weighted-quota cost axis: composer (issue #3548)", () 
     };
     const sb = await buildClassScoreboard({ now: NOW, deps });
     const dev = find(sb, "dev_orch");
+    assert.equal(sb.degraded, true, "a usage-read failure marks the board degraded (issue #5161)");
     // Yield axis untouched by the cost-read failure.
     assert.equal(dev.verdict, "healthy");
     // Cost axis degrades to null on every class (never throws, never fabricates).
