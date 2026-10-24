@@ -49,7 +49,9 @@
  * this tick — it never falls back to an older sibling, so a row can only be
  * credited by a PR whose merge falls in [row.start, next sibling's start). The
  * owner must also be within `ANCHOR_JOIN_WINDOW_MS` (7 days, the metrics TTL) of
- * the merge. Ambiguity under-credits (row stays `completed`), never mis-credits.
+ * the merge. Ambiguity the
+ * structure can detect under-credits (row stays `completed`); the residuals it
+ * cannot detect are documented on `ANCHOR_JOIN_WINDOW_MS`.
  *
  * **Idempotent.** Once a record is upgraded to `status='merged'` it no longer
  * matches the `completed` selection filter, so a subsequent tick skips it. Even
@@ -132,8 +134,11 @@ const DEFAULT_CONFIRM_LIMIT = 10;
  * mis-credit guard (a 72h value rejected real merges at 72.4h / 86h, #5028).
  * Residual exposure, accepted: a lone pooled PR-less row whose own attempt made
  * no PR can be credited by a later `Closes #N` PR for the same issue within the
- * window (no branch/cycle signal links PR to row); the overlap rule below and
- * the single-owner rule are the only guards. A
+ * window (no branch/cycle signal links PR to row); the single-owner rule is the only guard. Overlapping retries are NOT guarded: production
+ * cycle rows stamp startedAt == completedAt (both the reap time), so attempt end times
+ * cannot prove two attempts overlapped, and no branch/cycle token links a PR to its row.
+ * An earlier attempt A whose PR merges after retry B was reaped is therefore credited
+ * to B (accepted residual, same class as the lone-row exposure). A
  * merge outside the window credits nothing (the row stays `completed`) —
  * under-crediting is the safe failure direction; a wrong credit corrupts
  * tasksMerged, the capacity ledger stamp and the pending-enroll self-arm.
@@ -480,8 +485,6 @@ export async function runCycleMergeReconcile(
     m: Record<string, string>;
     /** Ownership position: cycle-hash startedAt, else metrics recordedAt (#5028). */
     startMs: number;
-    /** Cycle-hash completedAt (NaN when absent); detects overlapping attempts (#5028). */
-    endMs: number;
     pooled: boolean;
   }
   const siblingsByIssue = new Map<number, Sibling[]>();
@@ -622,7 +625,6 @@ export async function runCycleMergeReconcile(
           cycleId,
           m,
           startMs,
-          endMs: Date.parse(cycleHash.completedAt || ""),
           pooled: cycleStatus === "completed" && !hasPr,
         });
         siblingsByIssue.set(issueNumber, list);
@@ -708,15 +710,6 @@ export async function runCycleMergeReconcile(
               }
             }
             if (owner === null || !owner.pooled) continue;
-            // Overlapping attempts (QA round 1, #5028): an earlier sibling still
-            // running when the owner started could have produced this PR (A
-            // started 10:00, retry B 11:00, A's PR merges 11:30). Ambiguity
-            // under-credits. An unknown end (legacy row) is treated as closed.
-            const o: Sibling = owner;
-            const overlapped = (siblingsByIssue.get(issue) ?? []).some(
-              (sib) => sib !== o && sib.startMs < o.startMs && Number.isFinite(sib.endMs) && sib.endMs > o.startMs,
-            );
-            if (overlapped) continue;
             if (creditedThisTick.has(owner.cycleId)) continue;
             if (pr.mergedAtMs - owner.startMs > anchorJoinWindowMs) continue;
             if (best === null || owner.startMs > best.startMs) best = owner;

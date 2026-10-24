@@ -878,28 +878,27 @@ describe("cycle-merge-reconcile — anchor-join for dev rows without prNumber (#
     assert.equal(fx.reposts.length, 0);
   });
 
-  test("overlapping retry: an earlier attempt still running when the owner started makes the merge ambiguous (QA round 1, #5028)", async () => {
+  test("overlapping retry residual: production-shaped rows (startedAt == completedAt) cannot prove overlap, so the latest pooled row is credited (#5028 accepted residual)", async () => {
     const fx: Fixture = {
       metrics: new Map([
-        // A started 10:00 and only finished 11:20, after retry B started at 11:00.
-        ["w-a-dev_orch", devRow(42, "2026-10-01T10:00:00Z", { completedAt: "2026-10-01T11:20:00Z" })],
-        ["w-b-dev_orch", devRow(42, "2026-10-01T11:00:00Z", { completedAt: "2026-10-01T11:25:00Z" })],
+        // recordCycle stamps startedAt == completedAt (reap time) for both rows.
+        ["w-a-dev_orch", devRow(42, "2026-10-01T10:00:00Z", { completedAt: "2026-10-01T10:00:00Z" })],
+        ["w-b-dev_orch", devRow(42, "2026-10-01T11:00:00Z", { completedAt: "2026-10-01T11:00:00Z" })],
       ]),
       prState: new Map(),
       reposts: [],
       mergedPrs: [pr(910, "2026-10-01T11:30:00Z", "Closes #42")],
     };
     const r = await runCycleMergeReconcile(makeDeps(fx));
-    assert.equal(r.anchorJoined, 0, "ambiguous ownership under-credits");
-    assert.equal(fx.reposts.length, 0);
-    assert.equal(fx.metrics.get("w-b-dev_orch")!.status, "completed");
+    assert.equal(r.anchorJoined, 1, "no signal distinguishes A's PR from B's; documented residual");
+    assert.deepEqual(fx.reposts.map((x) => x.cycleId), ["w-b-dev_orch"]);
   });
 
-  test("sequential retry: an earlier attempt that finished before the owner started does not block the credit (#5028)", async () => {
+  test("an earlier attempt already resolved to a merged PR does not block the credit (#5028)", async () => {
     const fx: Fixture = {
       metrics: new Map([
-        ["w-a-dev_orch", devRow(42, "2026-10-01T10:00:00Z", { completedAt: "2026-10-01T10:30:00Z" })],
-        ["w-b-dev_orch", devRow(42, "2026-10-01T11:00:00Z", { completedAt: "2026-10-01T11:25:00Z" })],
+        ["w-a-dev_orch", devRow(42, "2026-10-01T10:00:00Z", { status: "merged", prNumber: "909" })],
+        ["w-b-dev_orch", devRow(42, "2026-10-01T11:00:00Z")],
       ]),
       prState: new Map(),
       reposts: [],
