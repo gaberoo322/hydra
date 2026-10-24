@@ -2793,11 +2793,16 @@ run_origin_identity() {
       timestamp "$iso_now" \
       correlationId "origin-identity" \
       payload "$payload")"
-    if [[ -n "$xadd_out" ]]; then
+    # Only a stream id proves the entry landed: `redis-cli --raw` prints an
+    # error reply (ERR …, WRONGTYPE …, NOAUTH …) on stdout with exit 0, so a
+    # bare non-empty test would write the marker and silence the episode (#5140).
+    if [[ "$xadd_out" =~ ^[0-9]+-[0-9]+$ ]]; then
       printf '%s %s %s\n' "$now_epoch" "$outcome" "$now_epoch" > "$SINCE_MARKER" 2>/dev/null || true
       log "in-band delivery published type=infra:origin_identity_wrong repair=${repair_field} -> ${NOTIFY_STREAM}"
     else
-      log "WARN in-band delivery FAILED (XADD returned nothing) — will retry next tick"
+      local reply_snip
+      reply_snip="$(printf '%s' "$xadd_out" | tr '\n' ' ' | cut -c1-160)"
+      log "WARN in-band delivery FAILED (XADD reply '${reply_snip}' is not a stream id) — will retry next tick"
     fi
     # Operator Channel (#5046): a self-healed identity needs no operator
     # action (#5065 QA round 2 — the consumer briefs it), so `repaired` is

@@ -1,0 +1,1 @@
+- fix: watchdog origin-identity alarm no longer silenced by an XADD error reply (#5140)
