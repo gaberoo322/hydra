@@ -1070,7 +1070,12 @@ describe("scripts/test/redis-db-launch.mjs — terminal VERDICT line (#5106)", (
   ) {
     const dir = mkdtempSync(join(tmpdir(), "redis-db-verdict-"));
     scratch.push(dir);
-    const env: Record<string, string | undefined> = { ...process.env, ...extraEnv };
+    // `npm test` sets HYDRA_FULL_SUITE=1 for this very process; scrub the gate
+    // switches so each case controls them explicitly via extraEnv.
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.HYDRA_FULL_SUITE;
+    delete env.SUITE_COUNT_GATE_BLOCKING;
+    Object.assign(env, extraEnv);
     delete env.REDIS_URL;
     return spawnSync(process.execPath, [LAUNCHER, process.execPath, "-e", script, ...extraArgs], {
       cwd: dir,
