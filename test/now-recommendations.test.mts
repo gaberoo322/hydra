@@ -548,3 +548,32 @@ describe("#5152 — now-verdicts leaf", () => {
     assert.ok(panel.includes("<ResultLine result={muteDone} />"), "the success line survives the control's remount");
   });
 });
+
+// INV-6: default current-run reader mapping (#5162)
+import { mapCurrentRunResult } from "../src/api/now-recommendations.ts";
+
+describe("mapCurrentRunResult (INV-6)", () => {
+  test("not-found maps to a confident no-run", () => {
+    assert.deepEqual(
+      mapCurrentRunResult({ ok: false, code: "not-found", detail: "none" } as never),
+      { ok: true, runId: null },
+    );
+  });
+
+  test("a Redis error maps to a failed read, not no-run", () => {
+    const r = mapCurrentRunResult({ ok: false, code: "errRedis", detail: "boom" } as never);
+    assert.equal(r.ok, false);
+    assert.equal((r as { code: string }).code, "errRedis");
+  });
+
+  test("a present run_id is returned; a blank one is no-run", () => {
+    assert.deepEqual(
+      mapCurrentRunResult({ ok: true, view: { run_id: "r1" } } as never),
+      { ok: true, runId: "r1" },
+    );
+    assert.deepEqual(
+      mapCurrentRunResult({ ok: true, view: {} } as never),
+      { ok: true, runId: null },
+    );
+  });
+});

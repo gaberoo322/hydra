@@ -205,8 +205,13 @@ export function createNowRecommendationsRouter(
 // Default wiring
 // ---------------------------------------------------------------------------
 
-async function defaultReadCurrentRunId(): Promise<CurrentRunIdResult> {
-  const result = await defaultGetCurrentRun();
+/**
+ * Pure mapping from a `getCurrentRun` result to the aggregator's three-valued
+ * current-run read. Exported so the INV-6 arms are testable without Redis.
+ */
+export function mapCurrentRunResult(
+  result: Awaited<ReturnType<typeof defaultGetCurrentRun>>,
+): CurrentRunIdResult {
   if (!result.ok) {
     // Only the asserted "no run ever recorded" arm is a confident no-run;
     // every other failure (Redis error) is UNKNOWN (#5162, ADR-0034 §5).
@@ -216,4 +221,8 @@ async function defaultReadCurrentRunId(): Promise<CurrentRunIdResult> {
   const view = result.view as Record<string, unknown>;
   const id = typeof view.run_id === "string" ? view.run_id : "";
   return { ok: true, runId: id || null };
+}
+
+async function defaultReadCurrentRunId(): Promise<CurrentRunIdResult> {
+  return mapCurrentRunResult(await defaultGetCurrentRun());
 }
