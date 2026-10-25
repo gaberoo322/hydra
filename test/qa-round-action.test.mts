@@ -317,11 +317,24 @@ describe("decideRound — the composed round-action head (issue #5079, INV-3)", 
     );
   });
 
-  test("T4 hands routing to the deep-QA loop and carries the SHA-bound PASS marker", () => {
+  test("T4 FAIL hands routing to the deep-QA loop and carries NO PASS marker", () => {
     const r = decideRound({ tier: 4, verdict: "FAIL", reviewVerdict: "FAIL", pr: 7, headSha: SHA_C, priorBodies: [] });
     assert.equal(r.round.action, "deep-qa");
     assert.deepEqual(r.deepQa, decideDeepQaAction("FAIL", []));
-    assert.equal(r.passMarker, renderDeepQaPassMarker(SHA_C));
+    assert.equal(r.passMarker, null);
     assert.equal(r.escalationSummary, null);
+  });
+
+  test("T4 second FAIL (block-and-escalate) carries NO PASS marker", () => {
+    const r = decideRound({ tier: 4, verdict: "FAIL", reviewVerdict: "FAIL", pr: 7, headSha: SHA_C, priorBodies: [`c1 ${DEEP_QA_FAIL_MARKER}`] });
+    assert.equal(r.deepQa?.action, "block-and-escalate");
+    assert.equal(r.passMarker, null);
+  });
+
+  test("T4 PASS carries the SHA-bound PASS marker", () => {
+    const r = decideRound({ tier: 4, verdict: "PASS", reviewVerdict: "PASS", pr: 7, headSha: SHA_C, priorBodies: [] });
+    assert.equal(r.round.action, "deep-qa");
+    assert.equal(r.deepQa?.action, "proceed");
+    assert.equal(r.passMarker, renderDeepQaPassMarker(SHA_C));
   });
 });

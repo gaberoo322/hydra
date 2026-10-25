@@ -382,7 +382,7 @@ export interface DecideRoundResult {
   round: QaRoundDecision;
   /** Set exactly when `round.action === "deep-qa"` (T4). */
   deepQa: DeepQaDecision | null;
-  /** The T4 `Verifier-Core deep-QA: PASS @ <sha>` line; set with `deepQa`. */
+  /** The T4 `Verifier-Core deep-QA: PASS @ <sha>` line; set only when `deepQa.action === "proceed"`. */
   passMarker: string | null;
   /** The structured escalation comment; set exactly when `round.action === "escalate"`. */
   escalationSummary: string | null;
@@ -400,7 +400,9 @@ export function decideRound(input: DecideRoundInput): DecideRoundResult {
     round.action === "deep-qa"
       ? decideDeepQaAction(input.reviewVerdict, input.priorBodies.map((b) => String(b ?? "")))
       : null;
-  const passMarker = deepQa ? renderDeepQaPassMarker(input.headSha) : null;
+  // Only a T4 PASS carries the SHA-bound proof `hasFreshDeepQaPass` trusts;
+  // a bounce / block-and-escalate (FAIL) must never emit it.
+  const passMarker = deepQa?.action === "proceed" ? renderDeepQaPassMarker(input.headSha) : null;
   const escalationSummary =
     round.action === "escalate"
       ? renderQaEscalationSummary({

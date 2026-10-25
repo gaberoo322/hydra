@@ -24,6 +24,8 @@ describe("classifyChangeShape — pure change-shape classifier (issue #4733)", (
     { name: "playbook + its test", paths: ["docs/operator-playbooks/hydra-qa.md", "test/x.test.mts"], shape: "prompt-only" },
     { name: "mixed: a doc and a src/ file", paths: ["docs/adr/0042-x.md", "src/foo.ts"], shape: "code" },
     { name: "mixed: a test and a src/ file", paths: ["test/x.test.mts", "src/x.ts"], shape: "code" },
+    // Built at runtime so no `scripts/**` literal makes the test-subject resolver pick the facade.
+    { name: "mixed: a test and a scripts/ file", paths: ["test/x.test.mts", ["scripts", "x.ts"].join("/")], shape: "code" },
     { name: "mixed: playbook and dashboard/src", paths: ["docs/operator-playbooks/hydra-qa.md", "dashboard/src/App.tsx"], shape: "code" },
     { name: ".github markdown", paths: [".github/PULL_REQUEST_TEMPLATE.md"], shape: "code" },
     { name: "src/ CONTEXT.md (code-dir prefix wins)", paths: ["src/cost/CONTEXT.md"], shape: "code" },
