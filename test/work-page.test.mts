@@ -1989,6 +1989,54 @@ describe("/work live preconditions — the row facts (issue #4629)", () => {
 });
 
 describe("/work blocker lookup — scaled limit, truncation fails closed (#4629 review)", () => {
+  test("route wiring (#5162 INV-9): a search that FILLS the scaled limit marks every cited blocker open, sourcesOk stays true", async () => {
+    const seen: any[] = [];
+    const router = createAutopilotBoardRouter({
+      readOpenIssues: async () => ({
+        ok: true,
+        rows: [
+          issue({ number: 1, labels: ["needs-triage"], body: "Blocked by #90" }),
+          issue({ number: 4, labels: ["blocked"], body: "Blocked by #93" }),
+        ],
+      }),
+      listIssuesBySearch: async (search: string, opts: any) => {
+        seen.push({ search, opts });
+        // exactly `limit` rows: a full page, possibly truncated
+        return { ok: true, rows: Array.from({ length: opts.limit }, (_, i) => issue({ number: 5000 + i })) };
+      },
+      glmDrainerLiveness: async () => false,
+    } as any);
+    const handler = findHandler(router, "GET", "/autopilot/work-queue");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].opts.limit, workQueueBlockerSearchLimit(2));
+    assert.equal(res._body.sourcesOk, true, "fail-closed is the conservative verdict, not degradation");
+    const byNumber = new Map(res._body.items.map((r: any) => [r.number, r]));
+    assert.deepEqual((byNumber.get(1) as any).openBlockers, [90]);
+    assert.deepEqual((byNumber.get(4) as any).openBlockers, [93]);
+  });
+
+  test("route wiring (#5162 INV-9): an under-limit search lists only blockers it returned — a closed blocker is NOT marked open", async () => {
+    const router = createAutopilotBoardRouter({
+      readOpenIssues: async () => ({
+        ok: true,
+        rows: [
+          issue({ number: 1, labels: ["needs-triage"], body: "Blocked by #90" }),
+          issue({ number: 4, labels: ["blocked"], body: "Blocked by #93" }),
+        ],
+      }),
+      listIssuesBySearch: async () => ({ ok: true, rows: [issue({ number: 90 })] }),
+      glmDrainerLiveness: async () => false,
+    } as any);
+    const handler = findHandler(router, "GET", "/autopilot/work-queue");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+    const byNumber = new Map(res._body.items.map((r: any) => [r.number, r]));
+    assert.deepEqual((byNumber.get(1) as any).openBlockers, [90]);
+    assert.deepEqual((byNumber.get(4) as any).openBlockers, [], "#93 absent from the search = closed");
+  });
+
   test("workQueueBlockerSearchLimit scales with the ref count between 100 and 1000", () => {
     assert.equal(workQueueBlockerSearchLimit(0), 100);
     assert.equal(workQueueBlockerSearchLimit(3), 100);

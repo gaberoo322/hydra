@@ -680,12 +680,13 @@ export function useOperatorActions() {
 /**
  * A CHECKED refresh over one useApi-shaped read (`{loading, error, data,
  * refresh}`): the returned function starts the read and resolves `true` once
- * a render shows it settled without an error, `false` when it settled with
+ * a read that started AFTER the call settles without an error (a read already
+ * in flight is waited out first, never counted), `false` when it settled with
  * one (or the page unmounted). Pass it (or a combination) as a page
  * control's `onFired`, so the affordance's "re-read FAILED" line can fire —
  * `useApi().refresh` alone resolves `undefined` either way, and useApi.js
- * stays fenced (#4629 INV-15). The waiter core is lib/reread.ts, the same
- * pattern as AttentionFeed's refreshChecked.
+ * stays fenced (#4629 INV-15). The waiter core is lib/reread.ts, the one core
+ * AttentionFeed shares.
  */
 export function useCheckedRefresh({ loading, error, data, refresh }) {
   const waiters = useRef(null);
@@ -694,8 +695,11 @@ export function useCheckedRefresh({ loading, error, data, refresh }) {
     waiters.current.open();
     return () => waiters.current.close();
   }, []);
+  // Report EVERY render (loading=true included): the core needs the rising
+  // edge to know a read is in flight, so a write's waiter never settles on a
+  // read that started before it (#5162 INV-1..3).
   useEffect(() => {
-    if (!loading) waiters.current.settle(error == null);
+    waiters.current.observe(loading, error == null);
   }, [loading, error, data]);
   return useCallback(() => waiters.current.wait(refresh), [refresh]);
 }
