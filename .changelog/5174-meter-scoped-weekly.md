@@ -1,0 +1,1 @@
+- feat: surface model-scoped weekly usage caps (e.g. Fable) from the meter's limits[] on the eligibility payload (#5174)
