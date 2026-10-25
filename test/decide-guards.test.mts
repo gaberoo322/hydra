@@ -801,13 +801,14 @@ describe("decide.py — periodic session-restart terminate cause (issue #3787)",
     }
   });
 
-  test("an unparseable override degrades to the built-in default rather than crashing", () => {
-    const plan = runDecide(
-      baseState({ turn: 7, limitsOverride: { context_compaction_turns: "not-a-number" } }),
+  test("a garbage override fails loud at the Run Ledger load (declared-key type mismatch, #5074 INV-7)", () => {
+    assert.throws(
+      () =>
+        runDecide(
+          baseState({ turn: 7, limitsOverride: { context_compaction_turns: "not-a-number" } }),
+        ),
+      /type mismatch for limits\.context_compaction_turns: expected int, got str/,
     );
-    const term = terminateAction(plan);
-    assert.ok(term, "expected the default cadence to still apply on a garbage override");
-    assert.equal(term!.cause, "context_compaction");
   });
 
   test("a custom cadence fires repeatedly within a run", () => {

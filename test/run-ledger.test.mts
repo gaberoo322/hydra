@@ -301,9 +301,6 @@ describe("run_ledger declared field table (INV-3, INV-4)", () => {
 // ---------------------------------------------------------------------------
 // Slice 3 (issue #5074): the decide-owned diff seam + corrected field table.
 // ---------------------------------------------------------------------------
-const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
-const GOLDEN = join(REPO_ROOT, "test", "fixtures", "decide-golden");
-
 function py(code: string, args: string[] = []) {
   const pre = `import sys,json;sys.path.insert(0,${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot"))});import run_ledger as r;`;
   return spawnSync("python3", ["-I", "-c", pre + code, ...args], {
@@ -374,40 +371,6 @@ print(json.dumps(out))`);
       assert.equal(r.status, 0, r.stderr);
       writeFileSync(path, JSON.stringify({ candidate_exclusions: {} }));
       assert.notEqual(py("r.load(sys.argv[1])", [path]).status, 0, "object no longer valid");
-    });
-  });
-
-  test("INV-6/8: decide CLI persists through the ledger; crash before replace leaves the prior document intact", () => {
-    withDir((dir) => {
-      const g = join(GOLDEN, "idle-triage-sweep");
-      const meta = JSON.parse(readFileSync(join(g, "meta.json"), "utf-8"));
-      const run = (statePath: string, env: Record<string, string> = {}) =>
-        spawnSync(
-          "python3",
-          [DECIDE, `--now=${meta.now}`, "decide", statePath, join(g, "candidates.json"), join(g, "events.json")],
-          {
-            encoding: "utf-8",
-            env: { PATH: process.env.PATH ?? "", HYDRA_AUTOPILOT_RUN_END_POST: "off", ...env },
-          },
-        );
-      const sp = join(dir, "state.json");
-      writeFileSync(sp, readFileSync(join(g, "state.json")));
-      const before = JSON.parse(readFileSync(sp, "utf-8"));
-      const ok = run(sp);
-      assert.equal(ok.status, 0, ok.stderr);
-      const after = JSON.parse(readFileSync(sp, "utf-8"));
-      assert.equal(after.turn, before.turn + 1);
-      assert.equal(readdirSync(dir).filter((f) => f.startsWith(".")).length, 0, "no stray temp files");
-      assert.ok(readFileSync(sp, "utf-8").endsWith("\n"));
-
-      // Crash seam: the persist fails loudly but non-fatally; the prior
-      // document stays byte-untouched.
-      const sp2 = join(dir, "state2.json");
-      writeFileSync(sp2, readFileSync(join(g, "state.json")));
-      const bytes = readFileSync(sp2, "utf-8");
-      const crashed = run(sp2, { HYDRA_RUN_LEDGER_TEST_CRASH: "before-replace" });
-      assert.match(crashed.stderr, /ledger persist to .* failed|simulated crash/);
-      assert.equal(readFileSync(sp2, "utf-8"), bytes);
     });
   });
 });

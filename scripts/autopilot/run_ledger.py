@@ -51,6 +51,9 @@ _TYPES = {
     "object": lambda v: isinstance(v, dict),
     "array": lambda v: isinstance(v, list),
     # #4213 legacy container: slot_events is a bare array OR {events,last_id}.
+    # Collector-injected blobs decide() deliberately tolerates malformed
+    # (fail-safe/fail-open per signal), so the ledger must not reject them.
+    "any": lambda v: True,
     "array|object": lambda v: isinstance(v, (list, dict)),
 }
 
@@ -128,11 +131,11 @@ FIELDS = [
     _row("qa_orch_item_attempts", "object", {}, RESET, seeded=False, decide_owned=True),
     _row("red_forward_fix_attempts", "object", {}, RESET, seeded=False, decide_owned=True),
     _row("dev_target_spend_usd_cycle", "number", 0, RESET, seeded=False),
-    # turn_snapshot BLOB_FIELDS
-    _row("usage_eligibility", "object", {}, RESET, seeded=False),
-    _row("emergency_brake", "object", {}, RESET, seeded=False),
-    _row("target_risk_surface", "object", {}, RESET, seeded=False),
-    _row("class_stats", "object", {}, RESET, seeded=False),
+    # turn_snapshot BLOB_FIELDS (type "any": decide() fails safe on malformed blobs)
+    _row("usage_eligibility", "any", {}, RESET, seeded=False),
+    _row("emergency_brake", "any", {}, RESET, seeded=False),
+    _row("target_risk_surface", "any", {}, RESET, seeded=False),
+    _row("class_stats", "any", {}, RESET, seeded=False),
     _row("candidate_exclusions", "array", [], RESET, seeded=False),
 ]
 
