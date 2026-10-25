@@ -117,7 +117,7 @@ import type { RetroDispatch } from "./retro-projections.ts";
 import { enrichDispatchesWithCycleData } from "./retro-enrichment.ts";
 
 /** How many recent retro artifacts to scan for the newest one carrying `drilledStuckSignals` (#5029). */
-const PRIOR_RETRO_LOOKBACK = 20;
+const PRIOR_RETRO_LOOKBACK = 20; // #5029: scan window, not a limit-1 read
 
 // ---------------------------------------------------------------------------
 // Bundle shape
