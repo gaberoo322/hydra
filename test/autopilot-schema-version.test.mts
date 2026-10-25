@@ -425,3 +425,39 @@ describe("issue #434 — schema_version handshake", () => {
     });
   });
 });
+
+describe("bootstrap.sh drives the Run Ledger (issue #5072, INV-1, INV-7)", () => {
+  test("INV-1: a real bootstrap.sh run writes a document matching the heredoc golden's shape", () => {
+    const run = runBootstrap();
+    try {
+      assert.equal(run.status, 0, run.stdout + run.stderr);
+      const text = readFileSync(run.statePath, "utf-8");
+      const doc = JSON.parse(text);
+      const golden = JSON.parse(
+        readFileSync(join(REPO_ROOT, "test", "fixtures", "run-ledger", "heredoc-default.json"), "utf-8"),
+      );
+      assert.deepEqual(Object.keys(doc), Object.keys(golden), "top-level key order");
+      // Limit VALUES derive from the host env (quota/spend caps differ on CI); shape is fixed.
+      assert.deepEqual(Object.keys(doc.limits), Object.keys(golden.limits), "limits key order");
+      for (const k of Object.keys(golden.limits)) {
+        assert.equal(typeof doc.limits[k], typeof golden.limits[k], `limits.${k} JSON type`);
+      }
+      assert.equal(doc.limits.schema_version, CURRENT_SCHEMA_VERSION);
+      for (const k of ["cumulative_tokens", "dispatches", "turn"]) assert.equal(doc[k], 0);
+      for (const k of ["burned_classes", "reaped_task_ids", "failure_log"]) assert.deepEqual(doc[k], []);
+      assert.equal(text, JSON.stringify(doc, null, 2) + "\n", "indent=2 + trailing newline");
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  test("INV-7: an unwritable state dir exits 1 with the additive FATAL line", () => {
+    const run = runBootstrap({ HYDRA_AUTOPILOT_STATE: "/nonexistent-run-ledger-dir/state.json" });
+    try {
+      assert.equal(run.status, 1, run.stdout + run.stderr);
+      assert.match(run.stdout + run.stderr, /FATAL: run_ledger\.py seed failed/);
+    } finally {
+      run.cleanup();
+    }
+  });
+});
