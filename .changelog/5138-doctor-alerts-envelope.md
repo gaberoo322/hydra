@@ -1,0 +1,1 @@
+- fix: unwrap the {alerts} envelope in the hydra-doctor Phase 1 Alerts block (#5138)

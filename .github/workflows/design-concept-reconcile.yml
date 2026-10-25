@@ -49,7 +49,7 @@ permissions:
 jobs:
   design-concept-reconcile:
     runs-on: self-hosted
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 

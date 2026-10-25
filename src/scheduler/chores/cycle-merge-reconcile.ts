@@ -36,15 +36,22 @@
  * `mergedPrReferences([pr])` over ONE REST merged-PR listing per tick — one PR
  * credits at most one row, `_target` rows skipped.
  *
- * **Issue #4926 — interval ownership.** Path (b) attribution is bounded
+ * **Issues #4926, #5028 — interval ownership.** Path (b) attribution is bounded
  * structurally. For issue N the sibling set is every scanned joinable work-queue
- * row (`completed` or `merged`, with or without a prNumber). A merged PR P is
- * OWNED by the sibling with the greatest recordedAt <= P.mergedAt, and may credit
- * that row ONLY if it is a still-pooled PR-less row not yet credited this tick —
- * it never falls back to an older sibling, so a row can only be credited by a PR
- * whose merge falls in [row.recordedAt, next sibling's recordedAt). The owner must
- * also be within `ANCHOR_JOIN_WINDOW_MS` (72h) of the merge. Ambiguity
- * under-credits (row stays `completed`), never mis-credits.
+ * row (`completed` or `merged`, with or without a prNumber). Siblings are
+ * positioned on the CYCLE-hash `startedAt` (the immutable first-write timestamp
+ * `initCycleHash` stamps), falling back to the metrics `recordedAt` only for legacy
+ * rows with no parseable `startedAt` — never `recordedAt` otherwise, because
+ * `recordCycleMetrics` rewrites it on every additive HSET, so a later enrichment
+ * write would move a row past a merge that happened after its real birth. A
+ * merged PR P is OWNED by the sibling with the greatest start <= P.mergedAt, and
+ * may credit that row ONLY if it is a still-pooled PR-less row not yet credited
+ * this tick — it never falls back to an older sibling, so a row can only be
+ * credited by a PR whose merge falls in [row.start, next sibling's start). The
+ * owner must also be within `ANCHOR_JOIN_WINDOW_MS` (7 days, the metrics TTL) of
+ * the merge. Ambiguity the
+ * structure can detect under-credits (row stays `completed`); the residuals it
+ * cannot detect are documented on `ANCHOR_JOIN_WINDOW_MS`.
  *
  * **Idempotent.** Once a record is upgraded to `status='merged'` it no longer
  * matches the `completed` selection filter, so a subsequent tick skips it. Even
@@ -119,13 +126,24 @@ const DEFAULT_SCAN_LIMIT = 200;
 /** How many candidate PRs to confirm via `gh` per tick (bounds the API cost). */
 const DEFAULT_CONFIRM_LIMIT = 10;
 /**
- * Anchor-join window (issue #4926): a pooled PR-less row is creditable by a
- * merged PR only when `0 <= mergedAt - recordedAt <= ANCHOR_JOIN_WINDOW_MS`.
- * A merge outside the window credits nothing (the row stays `completed`) —
+ * Anchor-join window (issues #4926, #5028): a pooled PR-less row is creditable by
+ * a merged PR only when `0 <= mergedAt - startedAt <= ANCHOR_JOIN_WINDOW_MS`.
+ * 7 days equals the cycle-metrics TTL (`CYCLE_KEY_TTL` in metrics/record.ts,
+ * `CYCLE_TTL_SECONDS` in autopilot/cycle-close.ts), so the window only bounds the
+ * horizon to rows that can still exist; interval ownership, not the window, is the
+ * mis-credit guard (a 72h value rejected real merges at 72.4h / 86h, #5028).
+ * Residual exposure, accepted: a lone pooled PR-less row whose own attempt made
+ * no PR can be credited by a later `Closes #N` PR for the same issue within the
+ * window (no branch/cycle signal links PR to row); the single-owner rule is the only guard. Overlapping retries are NOT guarded: production
+ * cycle rows stamp startedAt == completedAt (both the reap time), so attempt end times
+ * cannot prove two attempts overlapped, and no branch/cycle token links a PR to its row.
+ * An earlier attempt A whose PR merges after retry B was reaped is therefore credited
+ * to B (accepted residual, same class as the lone-row exposure). A
+ * merge outside the window credits nothing (the row stays `completed`) —
  * under-crediting is the safe failure direction; a wrong credit corrupts
  * tasksMerged, the capacity ledger stamp and the pending-enroll self-arm.
  */
-const ANCHOR_JOIN_WINDOW_MS = 72 * 60 * 60 * 1000;
+const ANCHOR_JOIN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Raw `gh pr view <n> --json state,headRefName` shape. */
 interface RawPrState {
@@ -259,15 +277,10 @@ export interface CycleMergeReconcileDeps {
   /** Fetch a cycle's metrics hash. Defaults to `getCycleMetrics`. */
   getMetrics?: (cycleId: string) => Promise<Record<string, string>>;
   /**
-   * Read a cycle's status from the CYCLE hash (issue #4762, defect 1) — never
-   * from the metrics hash, which carries no `status`. Defaults to
-   * `getCycleHash(cycleId).status`.
-   */
-  getCycleStatus?: (cycleId: string) => Promise<string | null | undefined>;
-  /**
-   * Read a cycle's full hash. Defaults to `getCycleHash`; the default
-   * `getCycleStatus` is derived from it (issue #4762, INV-11), so a test can
-   * prove the default reads the CYCLE hash by injecting this seam alone.
+   * Read a cycle's full CYCLE hash. Defaults to `getCycleHash`. The single seam
+   * for both `status` (issue #4762, defect 1 — the metrics hash carries none)
+   * and the immutable `startedAt` that positions interval ownership (issue
+   * #5028): one read per candidate row, so the two fields can never disagree.
    */
   readCycleHash?: (cycleId: string) => Promise<Record<string, string>>;
   /**
@@ -391,8 +404,6 @@ export async function runCycleMergeReconcile(
   const fetchPrState = deps.fetchPrState ?? fetchPrStateViaGh;
   const recordCycleRecord = deps.recordCycleRecord ?? ((body) => recordCycle(body));
   const readCycleHash = deps.readCycleHash ?? getCycleHash;
-  const getCycleStatus =
-    deps.getCycleStatus ?? (async (id: string) => (await readCycleHash(id)).status);
   const listMergedPrs = deps.listMergedPrs ?? listMergedPrsViaRest;
   const scanLimit = deps.scanLimit ?? DEFAULT_SCAN_LIMIT;
   const confirmLimit = deps.confirmLimit ?? DEFAULT_CONFIRM_LIMIT;
@@ -461,7 +472,7 @@ export async function runCycleMergeReconcile(
     cycleId: string;
     m: Record<string, string>;
     issueNumber: number;
-    recordedAtMs: number;
+    startMs: number;
   }
   const pool: PoolRow[] = [];
   // prNumbers carried by ANY scanned work-queue row — path (a) owns those PRs.
@@ -472,7 +483,8 @@ export async function runCycleMergeReconcile(
   interface Sibling {
     cycleId: string;
     m: Record<string, string>;
-    recordedAtMs: number;
+    /** Ownership position: cycle-hash startedAt, else metrics recordedAt (#5028). */
+    startMs: number;
     pooled: boolean;
   }
   const siblingsByIssue = new Map<number, Sibling[]>();
@@ -590,15 +602,20 @@ export async function runCycleMergeReconcile(
       // work-queue row without a joinable issue ref + timestamp, can never be an
       // upgrade candidate or an interval-ownership sibling, so it costs no Redis read.
       const refMatch = /^issue-(\d+)$/.exec((m.anchorReference || "").trim());
-      const recordedAtMs = Date.parse(m.recordedAt || "");
-      const joinable = isWorkQueue && !!refMatch && Number.isFinite(recordedAtMs);
+      const joinableShape = isWorkQueue && !!refMatch;
       const issueNumber = refMatch ? Number(refMatch[1]) : NaN;
-      if (!hasPr && !joinable) continue;
+      if (!hasPr && !joinableShape) continue;
 
       // Issue #4762 (defect 1): status comes from the CYCLE hash — the metrics
       // hash has no `status` field. Only `completed` is an upgrade candidate;
       // `merged` is terminal (the idempotency marker).
-      const cycleStatus = ((await getCycleStatus(cycleId)) ?? "").trim().toLowerCase();
+      const cycleHash = (await readCycleHash(cycleId)) ?? {};
+      const cycleStatus = (cycleHash.status ?? "").trim().toLowerCase();
+      // Issue #5028: position on the immutable cycle-hash `startedAt`; fall back
+      // to the (mutable) metrics `recordedAt` only for a legacy row with none.
+      const startedAtMs = Date.parse(cycleHash.startedAt || "");
+      const startMs = Number.isFinite(startedAtMs) ? startedAtMs : Date.parse(m.recordedAt || "");
+      const joinable = joinableShape && Number.isFinite(startMs);
 
       // Interval ownership (issue #4926): register every completed/merged
       // joinable row as a sibling for its issue, whether or not it carries a PR.
@@ -607,7 +624,7 @@ export async function runCycleMergeReconcile(
         list.push({
           cycleId,
           m,
-          recordedAtMs,
+          startMs,
           pooled: cycleStatus === "completed" && !hasPr,
         });
         siblingsByIssue.set(issueNumber, list);
@@ -620,7 +637,7 @@ export async function runCycleMergeReconcile(
 
       if (!hasPr) {
         // Path (b) pool: work-queue rows only, keyed by anchorReference issue-<N>.
-        pool.push({ cycleId, m, issueNumber, recordedAtMs });
+        pool.push({ cycleId, m, issueNumber, startMs });
         continue;
       }
 
@@ -652,10 +669,10 @@ export async function runCycleMergeReconcile(
   // Path (b) (issues #4762, #4926): anchor join under interval ownership. ONE
   // merged-PR listing per tick; a null listing disables this path for the tick
   // only. A merged PR P is owned, per referenced issue, by the sibling with the
-  // greatest recordedAt <= P.mergedAt; P credits that owner only when it is a
+  // greatest start <= P.mergedAt; P credits that owner only when it is a
   // still-pooled PR-less row inside the anchor-join window — never an older
   // sibling. A PR credits at most one row across all its referenced issues (the
-  // owner with the greatest recordedAt). Oldest merge first keeps the tie-break
+  // owner with the greatest start). Oldest merge first keeps the tie-break
   // stable. These resolutions make no per-PR gh call so they do not count
   // against confirmLimit.
   if (pool.length > 0) {
@@ -679,23 +696,23 @@ export async function runCycleMergeReconcile(
           const refs = mergedPrReferences([pr]);
           let best: Sibling | null = null;
           for (const issue of refs) {
-            // The owner is the greatest recordedAt <= mergedAt. On a recordedAt
+            // The owner is the greatest start <= mergedAt. On a start
             // tie a non-pooled sibling wins (ambiguity under-credits).
             let owner: Sibling | null = null;
             for (const sib of siblingsByIssue.get(issue) ?? []) {
-              if (sib.recordedAtMs > pr.mergedAtMs) continue;
+              if (sib.startMs > pr.mergedAtMs) continue;
               if (
                 owner === null ||
-                sib.recordedAtMs > owner.recordedAtMs ||
-                (sib.recordedAtMs === owner.recordedAtMs && owner.pooled && !sib.pooled)
+                sib.startMs > owner.startMs ||
+                (sib.startMs === owner.startMs && owner.pooled && !sib.pooled)
               ) {
                 owner = sib;
               }
             }
             if (owner === null || !owner.pooled) continue;
             if (creditedThisTick.has(owner.cycleId)) continue;
-            if (pr.mergedAtMs - owner.recordedAtMs > anchorJoinWindowMs) continue;
-            if (best === null || owner.recordedAtMs > best.recordedAtMs) best = owner;
+            if (pr.mergedAtMs - owner.startMs > anchorJoinWindowMs) continue;
+            if (best === null || owner.startMs > best.startMs) best = owner;
           }
           if (best === null) continue;
           // A row is credited by at most one PR — mark it credited whether or

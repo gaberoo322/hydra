@@ -1,0 +1,1 @@
+- feat: print a terminal VERDICT line from the test launcher so `npm test | tail` shows the real outcome (#5106)
