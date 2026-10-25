@@ -132,6 +132,64 @@ describe("projectStuckIssues — differential vs getStuckItems", () => {
   });
 });
 
+describe("projectStuckIssues — differential on rows where classification can differ", () => {
+  const search = async () => ({ ok: true as const, rows: [row(100)] });
+  async function both(fixture: Record<string, IssueRow[]>, failLabel?: string) {
+    const l = lister(fixture);
+    const legacyList = async (label: string) => {
+      if (label === failLabel) return [];
+      return l.orEmpty(label);
+    };
+    const legacy = await getStuckItems({
+      now: NOW,
+      listIssuesByLabelOrEmpty: legacyList as never,
+      listOpenPrsOrEmpty: async () => [],
+      listRequiredStatusContextsOrNull: async () => null,
+    });
+    const read = await readWaitingIssues({
+      now: NOW,
+      listIssuesByLabel: (async (label: string) =>
+        label === failLabel ? { ok: false, code: "gh-failed" } : l.discriminated(label)) as never,
+      listIssuesBySearch: search,
+    });
+    return { legacy, next: projectStuckIssues(read) };
+  }
+
+  test("Epic-blocked, open-blocker and both-label rows: buckets, scanned, sourcesOk vs legacy", async () => {
+    const { legacy, next } = await both({
+      blocked: [
+        row(1, { createdAt: ago(5), labels: ["blocked"], body: "## Sub-issues\n- #2\n" }),
+        row(3, { createdAt: ago(5), labels: ["blocked"], body: "blocked by #100" }),
+        row(4, { createdAt: ago(5), labels: ["blocked", "needs-info"] }),
+      ],
+      "needs-info": [row(4, { createdAt: ago(5), labels: ["blocked", "needs-info"] })],
+    });
+    // Intended divergence: legacy filtered raw label rows; the projection
+    // filters CLASSIFIED rows, so the Epic (#1) is excluded while the
+    // open-blocker row (#3, blocked-live) stays stuck like legacy. Everything else matches legacy.
+    assert.deepEqual(legacy.blockedOver2d.map((i) => i.number).sort(), [1, 3, 4]);
+    assert.deepEqual(next.blockedOver2d.map((i) => i.number), [3, 4]);
+    assert.deepEqual(
+      next.needsInfoWaiting.map((i) => i.number),
+      legacy.needsInfoWaiting.map((i) => i.number),
+    );
+    assert.equal(next.scanned, legacy.scanned);
+    assert.equal(next.sourcesOk, legacy.sourcesOk);
+  });
+
+  test("failed label read: sourcesOk false and scanned match legacy", async () => {
+    const { legacy, next } = await both(
+      { blocked: [row(1, { createdAt: ago(5), labels: ["blocked"] })] },
+      "needs-info",
+    );
+    // Intended divergence: legacy's OrEmpty reader swallows the failure and
+    // reports sourcesOk true; the projection surfaces it.
+    assert.equal(legacy.sourcesOk, true);
+    assert.equal(next.sourcesOk, false);
+    assert.equal(next.scanned, legacy.scanned);
+  });
+});
+
 describe("projectDecisionQueue — presence semantics", () => {
   test("lists a young needs-info and an Epic, unions labels, sorts createdAt-ascending", async () => {
     const l = lister({
