@@ -72,7 +72,7 @@ const LAYER_RANK: Readonly<Record<Layer, number>> = {
 const COST_LAYERS: Readonly<Record<Layer, readonly string[]>> = {
   L1: ["token-math", "token-breakdown", "types", "oauth-meter-shape"],
   L2: ["config"],
-  L3: ["eligibility", "snapshot-assembly", "transcript-fold"],
+  L3: ["eligibility", "admission", "snapshot-assembly", "transcript-fold"],
   L4: ["oauth-usage", "oauth-read-cache", "transcript-scan", "surrogate", "usage-by-issue"],
   L5: ["usage-tracker", "eligibility-usage"],
   L6: ["cost-by-class", "cost-per-merged-pr", "class-cost-efficiency", "weighted-quota-estimate"],

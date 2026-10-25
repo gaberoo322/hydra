@@ -220,6 +220,22 @@ export type { EligibilityView } from "./eligibility.ts";
 export type { UsageEligibility } from "./eligibility.ts";
 
 // ---------------------------------------------------------------------------
+// Admission ladder — pace-gate.sh's arm order as a pure fold (issue #5101)
+// ---------------------------------------------------------------------------
+export {
+  decideAdmission,
+  isFutureInstant,
+  ADMISSION_REASONS,
+  ADMISSION_CLASS_OF,
+} from "./admission.ts";
+export type {
+  AdmissionContext,
+  AdmissionVerdict,
+  AdmissionReason,
+  AdmissionClass,
+} from "./admission.ts";
+
+// ---------------------------------------------------------------------------
 // OAuth Usage Adapter — authoritative server-side meter (issue #1083)
 // ---------------------------------------------------------------------------
 export { readOAuthUsage } from "./oauth-usage.ts";

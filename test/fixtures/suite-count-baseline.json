@@ -1,4 +1,5 @@
 {
+  "test/admission.test.mts": 4,
   "test/adr-roster.test.mts": 7,
   "test/agent-dispatch-prompt-guard.test.mts": 6,
   "test/aggregator-active-dispatches.test.mts": 8,
