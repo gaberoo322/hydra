@@ -22,8 +22,8 @@
  * (L4) and `snapshot-assembly.ts` (L3) now import them DOWNWARD.
  *
  * PURE (ADR-0042 Decision 2): no filesystem, no HTTP, no Redis, no
- * `process.env`, no `Date.now()` — the only imports are TYPE-only references to
- * the sibling vocabulary root `./types.ts` (`OAuthUsageData`,
+ * `process.env`, no `Date.now()` — the only imports are `zod` (pure schema validation) and
+ * TYPE-only references to the sibling vocabulary root `./types.ts` (`OAuthUsageData`,
  * `OAuthUsageResult`, and the two window shapes its parse targets), which are
  * fully compile-erased. `parseRetryAfterMs` takes `nowMs` as an argument for
  * exactly this reason.
@@ -129,24 +129,32 @@ function parseExtraUsage(raw: unknown): OAuthExtraUsage {
  */
 const ScopedLimitEntrySchema = z.object({
   kind: z.literal("weekly_scoped"),
-  scope: z
-    .union([
-      z.string(),
-      z.object({ display_name: z.string().optional(), name: z.string().optional() }),
-    ])
-    .optional(),
-  display_name: z.string().optional(),
-  model: z.string().optional(),
-  utilization: z.number().optional(),
-  percent: z.number().optional(),
-  resets_at: z.string().optional(),
+  // Every value field is z.unknown() (null-tolerant): the coerce* helpers, not
+  // the schema, decide per-field tolerance, so `resets_at: null` or a garbage
+  // `utilization` beside a valid `percent` never drops an otherwise-valid entry.
+  scope: z.unknown(),
+  display_name: z.unknown(),
+  model: z.unknown(),
+  utilization: z.unknown(),
+  percent: z.unknown(),
+  resets_at: z.unknown(),
 });
+
+/** First non-empty trimmed string among the candidates, else null. */
+function firstName(...candidates: unknown[]): string | null {
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim() !== "") return c.trim();
+  }
+  return null;
+}
 
 function scopeName(e: z.infer<typeof ScopedLimitEntrySchema>): string | null {
   const s = e.scope;
-  const raw = (typeof s === "string" ? s : (s?.display_name ?? s?.name)) ?? e.display_name ?? e.model;
-  const name = typeof raw === "string" ? raw.trim() : "";
-  return name === "" ? null : name;
+  const scoped =
+    s !== null && typeof s === "object"
+      ? firstName((s as any).display_name, (s as any).name)
+      : firstName(s);
+  return scoped ?? firstName(e.display_name, e.model);
 }
 
 /**
@@ -156,25 +164,37 @@ function scopeName(e: z.infer<typeof ScopedLimitEntrySchema>): string | null {
  * is IGNORED (never fails the read, never coerces to 0). Returns `undefined`
  * when nothing valid remains so the legacy five_hour/seven_day path is the
  * unchanged fallback.
+ *
+ * Keyed by untrusted display names, so the result is a null-prototype object
+ * (`__proto__` / `constructor` are ordinary own keys). On a duplicate name the
+ * HIGHER utilization wins — a later lower entry must not hide a cap. Only
+ * `weekly_scoped` entries are consumed (narrower than "all limits[] kinds").
  */
 function parseScopedWeekly(raw: unknown): Record<string, OAuthUsageWindow> | undefined {
   if (!Array.isArray(raw)) return undefined;
-  const out: Record<string, OAuthUsageWindow> = {};
+  const out: Record<string, OAuthUsageWindow> = Object.create(null);
+  let count = 0;
   for (const item of raw) {
     const parsed = ScopedLimitEntrySchema.safeParse(item);
+    // intentional: malformed / non-weekly_scoped entries are ignored, never fail the read
     if (!parsed.success) continue;
     const name = scopeName(parsed.data);
     const utilization = coerceUtilization(parsed.data.utilization ?? parsed.data.percent);
+    // intentional: unnamed scope or unparseable percent is dropped, never coerced to 0
     if (name === null || utilization === null) continue;
+    const prior = Object.hasOwn(out, name) ? out[name] : undefined;
+    if (prior && prior.utilization >= utilization) continue;
+    if (!prior) count++;
     out[name] = { utilization, resetsAt: coerceResetsAt(parsed.data.resets_at) };
   }
-  return Object.keys(out).length > 0 ? out : undefined;
+  return count > 0 ? out : undefined;
 }
 
 /**
  * Parse the full OAuth usage response body into {@link OAuthUsageData}, or
  * `null` when either gating window (five_hour / seven_day) is absent or
- * unparseable. The opus/sonnet sub-windows are ignored — the tracker gates only
+ * unparseable. Model-scoped `limits[]` weeklies surface as `scopedWeekly`
+ * (never gating); the opus/sonnet sub-windows are ignored — the tracker gates only
  * on the two rolling windows plus `extra_usage`. Maximally defensive: a
  * 200-with-garbage body parses to `null`, which the caller classifies as
  * `oauth-usage-parse` (=> fall back to estimate), never as 0% utilization.

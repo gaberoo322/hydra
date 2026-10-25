@@ -628,6 +628,67 @@ describe("limits[] scoped weekly parsing (issue #5174)", () => {
     assert.equal(parseOAuthUsageBody({ ...baseBody, limits: "nope" })?.sevenDay.utilization, 40);
   });
 
+  test("null resets_at / utilization keeps the entry (percent fallback)", async () => {
+    const { parseOAuthUsageBody } = await import("../src/cost/oauth-meter-shape.ts");
+    const d = parseOAuthUsageBody({
+      ...baseBody,
+      limits: [
+        { kind: "weekly_scoped", scope: "Fable", utilization: 60, resets_at: null },
+        { kind: "weekly_scoped", scope: "Opus", utilization: null, percent: 30 },
+        { kind: "weekly_scoped", scope: "", display_name: "Sonnet", utilization: 5, percent: 5 },
+      ],
+    });
+    assert.deepEqual(d?.scopedWeekly?.Fable, { utilization: 60, resetsAt: null });
+    assert.equal(d?.scopedWeekly?.Opus?.utilization, 30);
+    assert.equal(d?.scopedWeekly?.Sonnet?.utilization, 5, "empty scope falls through to display_name");
+  });
+
+  test("untrusted names: __proto__/constructor are plain keys, Object.prototype untouched", async () => {
+    const { parseOAuthUsageBody } = await import("../src/cost/oauth-meter-shape.ts");
+    const d = parseOAuthUsageBody({
+      ...baseBody,
+      limits: [
+        { kind: "weekly_scoped", scope: "__proto__", utilization: 11 },
+        { kind: "weekly_scoped", scope: "constructor", utilization: 22 },
+        { kind: "weekly_scoped", scope: "toString", utilization: 33 },
+      ],
+    });
+    const sw = d?.scopedWeekly as Record<string, any>;
+    assert.deepEqual(Object.keys(sw).sort(), ["__proto__", "constructor", "toString"]);
+    assert.equal(Object.getOwnPropertyDescriptor(sw, "__proto__")?.value.utilization, 11);
+    assert.equal(sw.constructor.utilization, 22);
+    assert.equal(sw.toString.utilization, 33);
+    assert.equal(({} as any).utilization, undefined);
+  });
+
+  test("duplicate scope names keep the max utilization regardless of order", async () => {
+    const { parseOAuthUsageBody } = await import("../src/cost/oauth-meter-shape.ts");
+    for (const order of [[90, 10], [10, 90]]) {
+      const d = parseOAuthUsageBody({
+        ...baseBody,
+        limits: order.map((u) => ({ kind: "weekly_scoped", scope: "Fable", utilization: u })),
+      });
+      assert.equal(d?.scopedWeekly?.Fable?.utilization, 90);
+    }
+  });
+
+  test("raw limits[] body flows through the reader to usage.scopedWeekly", async () => {
+    const { parseOAuthUsageBody } = await import("../src/cost/oauth-meter-shape.ts");
+    const data = parseOAuthUsageBody({
+      ...baseBody,
+      limits: [{ kind: "weekly_scoped", scope: { display_name: "Fable" }, utilization: 77, resets_at: null }],
+    });
+    assert.ok(data);
+    clearOAuthCache();
+    const a = await getEligibilityUsage({
+      readUsage: fixedReader({ ok: true, data } as OAuthUsageResult),
+      now: () => Date.parse("2026-10-24T12:00:00Z"),
+    });
+    const e = projectEligibility(a.input);
+    assert.equal(e.usage.scopedWeekly?.Fable?.utilization, 77);
+    clearOAuthCache();
+  });
+
   test("the eligibility input carries scopedWeekly and admission is unchanged", async () => {
     const scopedWeekly = { Fable: { utilization: 99, resetsAt: null } };
     const withScoped: OAuthUsageResult = {
