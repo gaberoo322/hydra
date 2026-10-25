@@ -510,6 +510,7 @@ describe("qa-verdict-event.sh — the playbook recipe as a script (issue #4831)"
         verdict: "PENDING",
         verdict_sha: "unknown",
         head_sha: "",
+        verdict_at_head: false,
       });
       assert.match(r.stderr, /WARN: checks-fetch failed/, "the fragment's own failure stays loud");
       assert.match(r.stderr, /\[qa-verdict-event\] pr=4830 tier=3 guard_rc=\d+ .*ci=null/);

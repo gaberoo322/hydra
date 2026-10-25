@@ -1284,7 +1284,7 @@ describe("pr-gate — QA-verdict recheck (#5052)", () => {
   const passHost = (log: number[] = []): Runner => ({
     runQaVerdictEvent: async (pr: number, tier: number) => {
       log.push(pr);
-      return { type: "qa-verdict", pr_number: pr, tier, verdict: "PASS", verdict_sha: "abc1234", head_sha: "abc1234def" };
+      return { type: "qa-verdict", pr_number: pr, tier, verdict: "PASS", verdict_sha: "abc1234", head_sha: "abc1234def", verdict_at_head: true };
     },
   });
   const value = (o: Awaited<ReturnType<typeof run>>) => (o.value.qaVerdictRecheck.ok ? o.value.qaVerdictRecheck.value : null);
@@ -1300,7 +1300,7 @@ describe("pr-gate — QA-verdict recheck (#5052)", () => {
   test("a green, unarmed, tiered PR becomes a recheck entry whose fields are the script's stdout", async () => {
     const log: number[] = [];
     const o = await run([candidatePr(7)], { host: passHost(log) });
-    assert.deepEqual(value(o), [{ pr: 7, tier: 3, verdict: "PASS", verdictSha: "abc1234", headSha: "abc1234def" }]);
+    assert.deepEqual(value(o), [{ pr: 7, tier: 3, verdict: "PASS", verdictSha: "abc1234", headSha: "abc1234def", verdictAtHead: true }]);
     assert.deepEqual(log, [7]);
   });
 
@@ -1337,13 +1337,23 @@ describe("pr-gate — QA-verdict recheck (#5052)", () => {
       runQaVerdictEvent: async (pr: number, tier: number): Promise<unknown> => {
         if (pr === 11) return null;
         if (pr === 12) throw new Error("spawn failed");
-        if (pr === 13) return { type: "qa-verdict", pr_number: 99, tier, verdict: "PASS", verdict_sha: "a", head_sha: "a" };
-        return { type: "qa-verdict", pr_number: pr, tier, verdict: "PENDING", verdict_sha: "unknown", head_sha: "" };
+        if (pr === 13) return { type: "qa-verdict", pr_number: 99, tier, verdict: "PASS", verdict_sha: "a", head_sha: "a", verdict_at_head: true };
+        return { type: "qa-verdict", pr_number: pr, tier, verdict: "PENDING", verdict_sha: "unknown", head_sha: "", verdict_at_head: false };
       },
     };
     const o = await run([candidatePr(11), candidatePr(12), candidatePr(13), candidatePr(14)], { host });
-    assert.deepEqual(value(o), [{ pr: 14, tier: 3, verdict: "PENDING", verdictSha: "unknown", headSha: "" }]);
+    assert.deepEqual(value(o), [{ pr: 14, tier: 3, verdict: "PENDING", verdictSha: "unknown", headSha: "", verdictAtHead: false }]);
     assert.equal(o.notes.filter((n) => n.includes("#5052")).length, 4, "one note per omission plus the thrown call");
+  });
+
+  test("#5078 INV-8: an event without a boolean verdict_at_head is dropped (no entry, no merge)", async () => {
+    const host: Runner = {
+      runQaVerdictEvent: async (pr: number, tier: number) => ({
+        type: "qa-verdict", pr_number: pr, tier, verdict: "PASS", verdict_sha: "abc1234", head_sha: "abc1234def",
+      }),
+    };
+    const o = await run([candidatePr(7)], { host });
+    assert.deepEqual(value(o), []);
   });
 
   test("bounded fan-out: at most 3 script runs in flight and 12 per turn; the overflow is skipped and noted", async () => {
@@ -1357,7 +1367,7 @@ describe("pr-gate — QA-verdict recheck (#5052)", () => {
         log.push(pr);
         await new Promise((r) => setTimeout(r, 5));
         inFlight--;
-        return { type: "qa-verdict", pr_number: pr, tier, verdict: "PASS", verdict_sha: "abc1234", head_sha: "abc1234def" };
+        return { type: "qa-verdict", pr_number: pr, tier, verdict: "PASS", verdict_sha: "abc1234", head_sha: "abc1234def", verdict_at_head: true };
       },
     };
     const prs = Array.from({ length: 15 }, (_, i) => candidatePr(100 + i));

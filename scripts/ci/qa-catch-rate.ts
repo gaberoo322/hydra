@@ -89,7 +89,8 @@ import {
   isFailVerdict,
   parseQaVerdictErrors,
   parseQaVerdictTrailers,
-} from "./qa-verdict.ts";
+} from "../../src/qa/verdict-trailer.ts";
+import { closedIssues } from "../../src/github/pr-refs.ts";
 
 /** One PR's raw QA-relevant signals, already fetched from GitHub. */
 export interface QaSignalSet {
@@ -444,7 +445,6 @@ if (isMain) {
       "number,body,reviews,comments,mergedAt",
     ]) ?? [];
 
-  const linkedIssueRe = /\b(?:closes|fixes)\s*#(\d+)/i;
   const issueCommentCache = new Map<number, Array<{ body: string }>>();
 
   const fetchIssueComments = (issueNum: number): Array<{ body: string }> => {
@@ -471,10 +471,9 @@ if (isMain) {
     overridden: boolean;
   }> = [];
   for (const pr of prs) {
-    const match = linkedIssueRe.exec(pr.body ?? "");
-    const issueComments = match
-      ? fetchIssueComments(Number.parseInt(match[1] as string, 10))
-      : [];
+    // First closing ref in body order (src/github/pr-refs.ts is the one predicate).
+    const linked = [...closedIssues([{ body: pr.body ?? null }])][0] ?? null;
+    const issueComments = linked !== null ? fetchIssueComments(linked) : [];
     const signals: QaSignalSet = {
       prNumber: pr.number,
       reviews: pr.reviews ?? [],

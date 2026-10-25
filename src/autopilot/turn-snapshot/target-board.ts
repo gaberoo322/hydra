@@ -60,6 +60,7 @@ import {
 import { openNumbersFromRows } from "../../github/blockers.ts";
 import { parseIssueRows, type IssueRow } from "../../github/issues.ts";
 import type { PrRefRow } from "../../github/pr-refs.ts";
+import { parseQaVerdictTrailers, qaVerdictShaMatches } from "../../qa/verdict-trailer.ts";
 import { TARGET_BOARD_LABELS } from "../../target-board-labels.ts";
 import { eachValue } from "./json-values.ts";
 import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
@@ -331,10 +332,6 @@ function labelledIssueNumbers(list: readonly unknown[]): number[] {
   return out;
 }
 
-/** The producer grammar (scripts/ci/qa-verdict.ts), line-anchored so a mid-line prose mention is never honoured. */
-const QA_TRAILER_RE =
-  /^QA-Verdict:[ \t]+(PASS-pending-CI|FAIL-pending-CI|PASS|FAIL)[ \t]+pr=(\d+)[ \t]+round=(\d+)[ \t]+sha=([0-9a-fA-F]{7,40}|unknown)[ \t]+blockers=(\d+)[ \t]+max_severity=(high|medium|low|none)[ \t]*\r?$/gm;
-
 export interface QaTrailer {
   readonly pr: number;
   readonly verdict: string;
@@ -357,7 +354,7 @@ export function parseQaTrailers(comments: unknown): QaTrailer[] {
   const sorted = ok.map((c, i) => ({ c, i })).sort((a, b) => (key(a.c) < key(b.c) ? -1 : key(a.c) > key(b.c) ? 1 : b.i - a.i));
   const out: QaTrailer[] = [];
   for (const { c } of sorted) {
-    for (const m of (c.body as string).matchAll(QA_TRAILER_RE)) out.push({ pr: Number(m[2]), verdict: m[1], sha: m[4].toLowerCase() });
+    for (const t of parseQaVerdictTrailers(c.body as string)) out.push({ pr: t.pr, verdict: t.verdict, sha: t.sha });
   }
   return out;
 }
@@ -370,7 +367,7 @@ export function passAtHead(pr: Row, trailers: readonly QaTrailer[]): boolean {
   let latest: QaTrailer | null = null;
   for (const t of trailers) if (t.pr === num) latest = t;
   if (latest === null || latest.verdict !== "PASS") return false;
-  return /^[0-9a-f]{7,40}$/.test(latest.sha) && head.toLowerCase().startsWith(latest.sha);
+  return qaVerdictShaMatches(latest, head);
 }
 
 const bodyRow = (pr: Row): PrRefRow => ({ body: typeof pr.body === "string" ? pr.body : null });

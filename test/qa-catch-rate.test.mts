@@ -28,6 +28,8 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { closedIssues } from "../src/github/pr-refs.ts";
 import {
   classifyPrQaOutcome,
   computeCatchRate,
@@ -537,5 +539,21 @@ describe("isOverriddenMerge + computeCatchRate.overridden (issue #4738)", () => 
 
   test("computeCatchRate without override flags reports overridden 0", () => {
     assert.equal(computeCatchRate(["caught"]).overridden, 0);
+  });
+});
+
+describe("qa-catch-rate linked-issue predicate is src/github/pr-refs.ts (issue #5078 INV-11)", () => {
+  const first = (body: string): number | null => [...closedIssues([{ body }])][0] ?? null;
+
+  test("first closing ref in body order; resolves links; negated and no-space forms do not", () => {
+    assert.equal(first("Closes #12 and fixes #9"), 12);
+    assert.equal(first("resolves #44"), 44);
+    assert.equal(first("This does not close #77"), null);
+    assert.equal(first("closes#88"), null);
+  });
+
+  test("the local closing-verb regex is gone from the CLI", () => {
+    const src = readFileSync(new URL("../scripts/ci/qa-catch-rate.ts", import.meta.url), "utf8");
+    assert.equal(src.includes("linkedIssueRe"), false);
   });
 });

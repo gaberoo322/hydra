@@ -114,7 +114,8 @@ jq -nc --argjson pr "$PR" --argjson tier "$TIER" --argjson guard "$GUARD_JSON" -
                   elif $ci.requiredPending > 0 then "PENDING"
                   else "PASS" end)
                else "PENDING" end),
-     verdict_sha: ($guard.verdictSha // "unknown"), head_sha: ($guard.headSha // "")}'
+     verdict_sha: ($guard.verdictSha // "unknown"), head_sha: ($guard.headSha // ""),
+     verdict_at_head: ($guard.verdictAtHead // false)}'
 # <<< qa-verdict-event
 ```
 
@@ -125,11 +126,15 @@ jq -nc --argjson pr "$PR" --argjson tier "$TIER" --argjson guard "$GUARD_JSON" -
   lands those PRs, even in a later run. A `FAIL*` trailer
   is always `"FAIL"`. An unreadable guard or CI read is `"PENDING"` (fail
   closed).
-- **`verdict_sha` / `head_sha`** are the guard's `verdictSha` / `headSha`.
-  `decide.py` arms only when they bind, which is the guard's own "allowed" test.
-  A stale PASS keeps its mismatched SHAs, so it holds visibly as
-  `hold:#N:stale-verdict`. An event WITHOUT the two fields gets only the legacy
-  INV-007 check, so never omit them.
+- **`verdict_sha` / `head_sha` / `verdict_at_head`** are the guard's
+  `verdictSha` / `headSha` / `verdictAtHead`. `verdict_at_head` is the ONE
+  computation of "the latest trailer's sha binds the head" (TS
+  `qaVerdictShaMatches`, `src/qa/verdict-trailer.ts`); `decide.py` reads it and
+  never re-derives the sha-prefix rule. A stale PASS keeps its mismatched SHAs
+  and `verdict_at_head: false`, so it holds visibly as `hold:#N:stale-verdict`.
+  An event WITHOUT the three fields gets only the legacy INV-007 check; an
+  event with the SHAs but no `verdict_at_head` is treated as stale (fail
+  closed), so never omit them.
 
 ## Class taxonomy (7 pipeline slots + 15 signal classes)
 
