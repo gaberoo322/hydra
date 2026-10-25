@@ -314,6 +314,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     );
     const secStart = PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract");
     const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only): `state.red_forward_fix_attempts`");
+    assert.ok(secStart >= 0 && secEnd > secStart, "playbook section markers must exist in order");
     const flat = (text: string) => text.replace(/\s+/g, " ");
     for (const text of [out.prompt, flat(PLAYBOOK.slice(secStart, secEnd))]) {
       assert.doesNotMatch(text, /as the change requires/);
@@ -322,6 +323,8 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
       assert.ok(text.includes("adds or cites a test pinning the nearest sibling shape that must keep its old verdict"));
       assert.ok(text.includes("naming both tests"));
       assert.ok(text.includes("needs no test"));
+      assert.ok(text.includes("judged by what changed: prompt or doc text needs no test, even when it lives under `scripts/`"));
+      assert.ok(text.includes("for each QA-FAIL finding fixed with a code change — none for a rebutted finding or a CI-only fix"));
     }
   });
 

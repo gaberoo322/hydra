@@ -381,7 +381,7 @@ checks pass AND resolve the blocking findings of its latest QA FAIL.
    finding list, and the trailer names the round. Green required checks do NOT complete a QA-FAIL
    forward-fix: push a commit resolving every blocking finding, or rebut a
    wrong finding by name in the step-5 comment — "no code change needed" is
-   never the outcome while the latest verdict is FAIL (#4849). Fix the named defect, not a neighbouring one. A blocking (medium/high) finding whose fix changes behaviour (any `src/`, `scripts/`, `dashboard/src/` or `.github/` path) is resolved ONLY by a commit that ALSO adds or extends a test that is red without the fix, AND adds or cites a test pinning the nearest sibling shape that must keep its old verdict; a rebutted finding, a PR-body finding, or a docs/prompt-only finding needs no test.
+   never the outcome while the latest verdict is FAIL (#4849). Fix the named defect, not a neighbouring one. A blocking (medium/high) finding whose fix changes behaviour (executable code under `src/`, `scripts/`, `dashboard/src/` or `.github/` — judged by what changed: prompt or doc text needs no test, even when it lives under `scripts/`) is resolved ONLY by a commit that ALSO adds or extends a test that is red without the fix, AND adds or cites a test pinning the nearest sibling shape that must keep its old verdict; a rebutted finding, a PR-body finding, or a docs/prompt-only finding needs no test.
 3. **Push to the SAME branch:** `git push origin HEAD:<resume_branch>`. The
    existing PR's CI re-runs on the push.
 4. **Design-concept-reconcile failure specifically:** the gate reads the PR
@@ -389,7 +389,7 @@ checks pass AND resolve the blocking findings of its latest QA FAIL.
    `gh pr edit <pr> --body-file <file>`, THEN push the fix commit — a push
    that lands before the body edit replays the stale body and re-fails the
    check (bit #4242 twice).
-5. **Verify in the foreground** (`npm test`, `npm run typecheck` AND `npm run typecheck:test`, before the push that is meant to be final), commit, push — the same commit-before-verify discipline as any dev dispatch: commit and push first, verify, push again once green. When done, post exactly ONE comment on the PR naming what was fixed and which required check(s) or QA finding(s) the fix targets, plus any finding you rebutted and why, naming both tests (the red-without-the-fix test and the sibling-shape pin) per finding. Do not relabel the
+5. **Verify in the foreground** (`npm test`, `npm run typecheck` AND `npm run typecheck:test`, before the push that is meant to be final), commit, push — the same commit-before-verify discipline as any dev dispatch: commit and push first, verify, push again once green. When done, post exactly ONE comment on the PR naming what was fixed and which required check(s) or QA finding(s) the fix targets, plus any finding you rebutted and why, naming both tests (the red-without-the-fix test and the sibling-shape pin) for each QA-FAIL finding fixed with a code change — none for a rebutted finding or a CI-only fix. Do not relabel the
    anchor issue by hand — reap's needs-qa promotion (INV-9) advances it when
    the closing PR is confirmed.
 
