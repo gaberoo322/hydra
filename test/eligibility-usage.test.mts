@@ -598,7 +598,7 @@ describe("limits[] scoped weekly parsing (issue #5174)", () => {
         { kind: "weekly_scoped", scope: { display_name: "Fable" }, utilization: 87.5, resets_at: "2026-10-28T10:00:00Z" },
       ],
     });
-    assert.deepEqual(d?.scopedWeekly, {
+    assert.deepEqual({ ...d?.scopedWeekly }, {
       Fable: { utilization: 87.5, resetsAt: "2026-10-28T10:00:00.000Z" },
     });
     assert.equal(d?.sevenDay.utilization, 40);
@@ -656,8 +656,8 @@ describe("limits[] scoped weekly parsing (issue #5174)", () => {
     const sw = d?.scopedWeekly as Record<string, any>;
     assert.deepEqual(Object.keys(sw).sort(), ["__proto__", "constructor", "toString"]);
     assert.equal(Object.getOwnPropertyDescriptor(sw, "__proto__")?.value.utilization, 11);
-    assert.equal(sw.constructor.utilization, 22);
-    assert.equal(sw.toString.utilization, 33);
+    assert.equal((sw["constructor"] as any).utilization, 22);
+    assert.equal((sw["toString"] as any).utilization, 33);
     assert.equal(({} as any).utilization, undefined);
   });
 
@@ -697,10 +697,10 @@ describe("limits[] scoped weekly parsing (issue #5174)", () => {
     };
     clearOAuthCache();
     const a = await getEligibilityUsage({ readUsage: fixedReader(withScoped), now: () => Date.parse("2026-10-24T12:00:00Z") });
-    assert.deepEqual(a.input.scopedWeekly, scopedWeekly);
+    assert.deepEqual({ ...a.input.scopedWeekly }, scopedWeekly);
     const e = projectEligibility(a.input);
     assert.equal(e.allow, true, "a scoped cap is observability only, never a stop");
-    assert.deepEqual(e.usage.scopedWeekly, scopedWeekly);
+    assert.deepEqual({ ...e.usage.scopedWeekly }, scopedWeekly);
     clearOAuthCache();
     const b = await getEligibilityUsage({ readUsage: fixedReader(OK_READ), now: () => Date.parse("2026-10-24T12:00:00Z") });
     assert.equal("scopedWeekly" in b.input, false);

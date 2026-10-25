@@ -132,12 +132,12 @@ const ScopedLimitEntrySchema = z.object({
   // Every value field is z.unknown() (null-tolerant): the coerce* helpers, not
   // the schema, decide per-field tolerance, so `resets_at: null` or a garbage
   // `utilization` beside a valid `percent` never drops an otherwise-valid entry.
-  scope: z.unknown(),
-  display_name: z.unknown(),
-  model: z.unknown(),
-  utilization: z.unknown(),
-  percent: z.unknown(),
-  resets_at: z.unknown(),
+  scope: z.unknown().optional(),
+  display_name: z.unknown().optional(),
+  model: z.unknown().optional(),
+  utilization: z.unknown().optional(),
+  percent: z.unknown().optional(),
+  resets_at: z.unknown().optional(),
 });
 
 /** First non-empty trimmed string among the candidates, else null. */
