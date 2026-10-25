@@ -1,0 +1,1 @@
+- fix: forward-fix dispatches must add a red-without-fix test and run the full verify trio (#5036)
