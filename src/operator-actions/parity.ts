@@ -136,6 +136,7 @@ export const MACHINE_WRITES: Readonly<Record<string, string>> = Object.freeze({
   "POST /api/design-concepts/exempt-log": ".github/workflows/design-concept-comment.yml — CI gate record",
   "POST /api/design-concepts": "hydra-grill via scripts/autopilot/grill-artifact.sh — artifact write",
   "POST /api/dispatches/subagent": "SessionStart / SubagentTool hooks + decide.py — dispatch registration",
+  "DELETE /api/dispatches/subagent/:sessionId": "scripts/autopilot/reap.py — dispatch ledger end-of-life (#5142)",
   "POST /api/events/publish": "hydra-digest + hydra-target-build playbooks — event-bus publish",
   "POST /api/holdback/check": "hydra-qa playbook — Outcome Holdback check",
   "POST /api/holdback/revert-failed": "hydra-qa playbook — Outcome Holdback revert",
