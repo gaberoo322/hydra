@@ -61,9 +61,11 @@ Run these numbered steps.
    `src/github/pr-refs.ts`) AND GitHub's own auto-close both key on the verb,
    and GitHub's auto-close IGNORES negation, so a companion carrying any
    closing verb would close the anchor early and re-wedge the QA lane.
-7. Run `npm test > npm-test.log 2>&1` (foreground; then read the `# tests` /
-   `# pass` / `# fail` footer from `npm-test.log`; the `*.log` ignore keeps it out
-   of commits), `npm run typecheck`, and `npm run build`.
+7. Run the full `npm test` per the canonical "Full `npm test` recipe" in
+   `hydra-dev.md` (background launch into `npm-test.log` with a sentinel,
+   foreground poll; the `*.log` ignore keeps it out of commits), then read the
+   `# tests` / `# pass` / `# fail` footer, `NPM_TEST_EXIT=` and the VERDICT line
+   from it. Also run `npm run typecheck` and `npm run build`.
 7a. **Fail-loud lint on changed files** (issue #4732) — run the ast-grep
    `fail-loud-catch` rule over the PR's changed `.ts`/`.mts` files and fix every
    hit before `gh pr create`. Recipe: "Fail-loud lint — changed files" below.
@@ -318,13 +320,15 @@ npx tsx scripts/ci/design-concept-reconcile-run.ts \
 
 ### Gate 3 — suite + test typecheck green, in the foreground
 
+npm test runs per the canonical recipe in `hydra-dev.md` (must end
+`NPM_TEST_EXIT=0`); then, in the foreground:
+
 ```bash
-npm test                  # must exit 0 — read the footer's `# fail` count
 npm run typecheck:test    # src-only `typecheck` misses test-file type errors
 ```
 
 Both must be green on the final commit — re-run after Gates 1–2 if they
-touched files. Never background either one, and never open the PR while
+touched files. Never end the turn waiting on either, and never open the PR while
 either is red (including the PR's own new test). A failure you believe is a
 pre-existing master flake: confirm it fails on `origin/master` too and name it
 in the PR body; do not open silently over it.
