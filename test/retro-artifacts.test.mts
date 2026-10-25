@@ -258,6 +258,12 @@ describe("schemas/retro — RetroArtifactSchema", () => {
     assert.equal(parsed.success, true);
   });
 
+  test("accepts drilledStuckSignals (#5029); rejects non-string entries and still rejects unknown keys", () => {
+    assert.equal(RetroArtifactSchema.safeParse(makeArtifact({ drilledStuckSignals: ["unproductive-loop:warn"] })).success, true);
+    assert.equal(RetroArtifactSchema.safeParse(makeArtifact({ drilledStuckSignals: [1] as any })).success, false);
+    assert.equal(RetroArtifactSchema.safeParse({ ...makeArtifact(), bogus: 1 }).success, false);
+  });
+
   test("rejects an empty run_id", () => {
     const parsed = RetroArtifactSchema.safeParse(makeArtifact({ run_id: "" }));
     assert.equal(parsed.success, false);

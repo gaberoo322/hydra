@@ -2575,6 +2575,47 @@ describe("stuck-signal novelty (issue #5029)", () => {
     assert.equal(bundle.priorRetro?.run_id, "run-0");
   });
 
+  test("bundle: newest artifact lacking the field is skipped; older artifact carrying it sets novelty", async () => {
+    const bundle = await assembleRetroBundle(
+      "run-1",
+      baseDeps({
+        readStuckSignals: async () => [loop("30 dispatches")],
+        readRecentRetroArtifacts: async () =>
+          [
+            { run_id: "run-audit", generatedAt: "2026-06-02T00:00:00.000Z" },
+            { run_id: "run-0", generatedAt: "2026-06-01T00:00:00.000Z", drilledStuckSignals: ["unproductive-loop:warn"] },
+          ] as any,
+      }),
+    );
+    assert.equal(bundle.priorRetro?.run_id, "run-0");
+    assert.deepEqual(bundle.novelStuckSignals, []);
+  });
+
+  test("bundle: no artifact carries the field -> priorRetro null, all novel", async () => {
+    const bundle = await assembleRetroBundle(
+      "run-1",
+      baseDeps({
+        readStuckSignals: async () => [loop("a")],
+        readRecentRetroArtifacts: async () => [{ run_id: "r", generatedAt: "2026-06-01T00:00:00.000Z" }] as any,
+      }),
+    );
+    assert.equal(bundle.priorRetro, null);
+    assert.equal(bundle.novelStuckSignals.length, 1);
+  });
+
+  test("bundle: stuckSignalKeys lists every signal key (not only novel ones)", async () => {
+    const bundle = await assembleRetroBundle(
+      "run-1",
+      baseDeps({
+        readStuckSignals: async () => [loop("a"), loop("b", "critical")],
+        readRecentRetroArtifacts: async () =>
+          [{ run_id: "run-0", generatedAt: "2026-06-01T00:00:00.000Z", drilledStuckSignals: ["unproductive-loop:warn"] }] as any,
+      }),
+    );
+    assert.deepEqual(bundle.stuckSignalKeys, ["unproductive-loop:warn", "unproductive-loop:critical"]);
+    assert.equal(bundle.novelStuckSignals.length, 1);
+  });
+
   test("bundle: no prior artifact -> priorRetro null and every signal novel", async () => {
     const bundle = await assembleRetroBundle("run-1", baseDeps({ readStuckSignals: async () => [loop("a")] }));
     assert.equal(bundle.priorRetro, null);

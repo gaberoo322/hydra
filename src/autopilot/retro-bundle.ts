@@ -105,6 +105,7 @@ import {
   drillReasonOf,
   flagRunForDrill,
   novelStuckSignals as foldNovelStuckSignals,
+  stuckSignalKey as foldStuckSignalKey,
 } from "./retro-projections.ts";
 import { listRecentRetroArtifacts } from "../redis/retro-artifacts.ts";
 import type { RetroDispatch } from "./retro-projections.ts";
@@ -114,6 +115,9 @@ import type { RetroDispatch } from "./retro-projections.ts";
 // canonical-cycleId dedup, and the crash-term-reason backfill — is a focused
 // leaf so the assembler stays a thin fan-out coordinator + composition.
 import { enrichDispatchesWithCycleData } from "./retro-enrichment.ts";
+
+/** How many recent retro artifacts to scan for the newest one carrying `drilledStuckSignals` (#5029). */
+const PRIOR_RETRO_LOOKBACK = 20;
 
 // ---------------------------------------------------------------------------
 // Bundle shape
@@ -179,6 +183,11 @@ export interface RetroBundle {
    * signals it drilled (`null` when none exists or the read failed).
    */
   priorRetro: { run_id: string; generatedAt: string; drilledStuckSignals: string[] } | null;
+  /**
+   * Issue #5029: `stuckSignalKey` of EVERY entry in `stuckSignals`, for the
+   * retro playbook to copy verbatim into the artifact's `drilledStuckSignals`.
+   */
+  stuckSignalKeys: string[];
   /**
    * Issue #5029: the subset of {@link RetroBundle.stuckSignals} the prior retro
    * had not already drilled (keyed by `stuckSignalKey`). Equals `stuckSignals`
@@ -430,14 +439,18 @@ export async function assembleRetroBundle(
     "prior-retro",
     errors,
     [] as Awaited<ReturnType<typeof listRecentRetroArtifacts>>,
-    () => readRecentRetroArtifacts(1),
+    () => readRecentRetroArtifacts(PRIOR_RETRO_LOOKBACK),
   );
-  const newest = Array.isArray(priorArtifacts) ? priorArtifacts[0] : undefined;
+  // Newest artifact that CARRIES the field: an audit/weekly/older artifact
+  // written without it must not reset novelty to all-novel.
+  const newest = Array.isArray(priorArtifacts)
+    ? priorArtifacts.find((a) => Array.isArray(a?.drilledStuckSignals))
+    : undefined;
   const priorRetro = newest
     ? {
         run_id: newest.run_id,
         generatedAt: newest.generatedAt,
-        drilledStuckSignals: Array.isArray(newest.drilledStuckSignals) ? newest.drilledStuckSignals : [],
+        drilledStuckSignals: newest.drilledStuckSignals as string[],
       }
     : null;
   const novelStuckSignals = foldNovelStuckSignals(stuckSignals, priorRetro);
@@ -522,6 +535,7 @@ export async function assembleRetroBundle(
     reflections,
     stuckSignals,
     priorRetro,
+    stuckSignalKeys: stuckSignals.map(foldStuckSignalKey),
     novelStuckSignals,
     recommendations,
     frictionPatterns,

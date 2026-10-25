@@ -246,7 +246,8 @@ sole output. The dashboard surface for the artifact is retro-4 (#921).
 
 Always set `drilledStuckSignals` on the persisted artifact (issue #5029): the
 `${type}:${severity}` key of EVERY entry in `bundle.stuckSignals` (not only the
-novel ones), computed with `stuckSignalKey` (`src/autopilot/retro-projections.ts`)
+novel ones): copy `bundle.stuckSignalKeys` verbatim (precomputed by the bundle
+via `stuckSignalKey`, `src/autopilot/retro-projections.ts` — do not hand-compute)
 — daily or weekly-override admitted, `--apply` or `--audit`. The next bundle
 compares against it: `bundle.novelStuckSignals` is the subset the prior retro
 had not already drilled, and `retro_run_drillable` reads that instead of
