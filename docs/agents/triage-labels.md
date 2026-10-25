@@ -14,7 +14,6 @@ Canonical label vocabulary for `gaberoo322/hydra` issues. The `/triage` skill, `
 | `blocked` | Depends on another open issue (linked in body) | Triage |
 | `ready-for-human` | Subagent gave up after retries; operator must decide | Subagent on terminal failure |
 | `wontfix` | Closed without implementation | Operator |
-| `target-backlog` | Finding about `~/hydra-betting`, not the orchestrator itself | Triage; `hydra-sweep` queues these to the target work queue |
 | `operator-approved` | Tier-0 PR approval marker (see ADR-0004) | Operator only |
 | `enhancement` / `bug` / `refactor` | Classification | Triage |
 | `hitl-grill` | Agent-proposed idea parked for operator grill-or-dismiss; agents never action this | Agent proposing the idea |
@@ -38,15 +37,6 @@ needs-triage → ready-for-agent → in-progress → needs-qa → (close)
                      ↓                              ↓
                 blocked / needs-info        ready-for-human
 ```
-
-## Transitions for `target-backlog`
-
-`target-backlog` issues describe findings about the target project (`~/hydra-betting`), not the orchestrator. `hydra-sweep` and `hydra-target-sweep` consume them differently:
-
-1. `hydra-sweep` reads `target-backlog`-labelled issues and leaves them on the GitHub board (the `hydra queue` CLI was retired) so the target-side build loop can pick them up.
-2. The issue stays open on the board; `hydra-sweep` neither comments nor closes it, and the Target-side sweep owns its lifecycle.
-
-The issue body should still describe the finding clearly, but the `Files in scope` precondition does not apply — the target work queue has its own scoping mechanism.
 
 ## Auto-promotion to `ready-for-human`
 

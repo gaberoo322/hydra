@@ -116,10 +116,6 @@ Gate strictly on `--state open`. A **closed-unmerged** PR means the prior attemp
 
 ### 2. Group and process
 
-#### `target-backlog` — report-only, sweep takes no action
-The sweep has no consumer for these issues: `hydra-target-sweep` scans `$TARGET_GH_REPO`, not `target-backlog` issues on this repo, and the `hydra queue` CLI was retired. Do NOT comment "Queued", do NOT close, do NOT relabel. Leave the issue OPEN and labelled `target-backlog`; the operator or a Target-board filing owns it.
-Log action: `target-backlog-seen` (report-only; list the issue numbers so they stay visible).
-
 #### `needs-qa` — verify completed work
 Invoke `/hydra-qa $number`.
 Process all QA before new dev.
