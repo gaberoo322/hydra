@@ -200,8 +200,8 @@ dispatch (plan-time stamp), resets only on POSITIVE non-idle evidence
 (`needs_triage_target` / `target_board_work_available` /
 `target_work_available` — a degraded board read HOLDS the ladder, and a pass
 that files something resets it on the next snapshot with no output parsing),
-and survives relaunches via bootstrap's file-only carry-forward
-(`ZERO_YIELD_BACKOFF_SEED`). Suppressed turns surface as their own
+and survives relaunches via the Run Ledger's file-only carry-forward
+(`run_ledger.carry_forward`). Suppressed turns surface as their own
 `dispatch_decision` cooldown reason (`zero-yield back-off (#4999): streak=N,
 Ns remaining`) plus a `plan.debug.<class>_backoff` payload. `discover_target`
 and `cleanup_target` (#5051; same idle signal and reset set, the 1h cooldown

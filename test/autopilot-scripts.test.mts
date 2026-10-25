@@ -2459,3 +2459,18 @@ describe("scripts/autopilot/bootstrap.sh — zero_yield_backoff carry-forward (i
       "decide.py must always read a present map — absent key on the prior file is not a missing field");
   });
 });
+
+// Issue #5073 (INV-1) — bootstrap.sh holds no carry logic; the Run Ledger's
+// carry_forward is the only implementation.
+describe("scripts/autopilot/bootstrap.sh — no carry-forward logic (issue #5073)", () => {
+  test("no jq between the SCHEMA_VERSION resolution and the run_ledger.py seed call; redis_cooldown_cli is gone", () => {
+    const src = readFileSync(join(SCRIPTS, "bootstrap.sh"), "utf-8");
+    const from = src.indexOf('SCHEMA_VERSION="$(python3 "${RUN_LEDGER}" schema-version)"');
+    const to = src.indexOf('python3 "${RUN_LEDGER}" seed');
+    assert.ok(from > 0 && to > from, "anchors found");
+    assert.doesNotMatch(src.slice(from, to), /\bjq\b/, "the carry-forward jq blocks are deleted, not wrapped");
+    assert.doesNotMatch(src, /^redis_cooldown_cli\(\)/m);
+    assert.doesNotMatch(src, /COOLDOWN_CARRY_CLASSES=/);
+    assert.match(src.slice(to, to + 400), /--carry-from/);
+  });
+});

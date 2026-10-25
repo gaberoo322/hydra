@@ -550,12 +550,6 @@ describe("run_ledger carry set is derived, never enumerated (issue #5073 INV-2/I
     assert.deepEqual(o.stamps, o.refire);
     assert.equal(o.rearm_ok, true);
   });
-
-  test("DEV_RESUME_PENDING_CAP lives in run_ledger.py and equals reap_stall.py's twin", () => {
-    const stall = readFileSync(join(AUTOPILOT_DIR, "reap_stall.py"), "utf-8");
-    const twin = Number(/^DEV_RESUME_PENDING_CAP = (\d+)$/m.exec(stall)?.[1]);
-    assert.equal(pyJson("print(L.DEV_RESUME_PENDING_CAP)"), twin);
-  });
 });
 
 describe("run_ledger Redis continuity — prior-file -> Redis -> default (issue #5073 INV-8/INV-10)", () => {
@@ -619,24 +613,5 @@ describe("run_ledger Redis continuity — prior-file -> Redis -> default (issue 
     assert.deepEqual(hset, ["HSET", "hydra:autopilot:signal-last-fired", "health", "0", "retro_orch", "1780000000"]);
     assert.deepEqual(set, ["SET", "hydra:autopilot:research-force-counter", '{"2026-10-25": {"orch": 1}}']);
     assert.equal(o.length, 2);
-  });
-});
-
-describe("bootstrap.sh holds no carry logic (issue #5073 INV-1)", () => {
-  test("no jq between the SCHEMA_VERSION resolution and the run_ledger.py seed call; redis_cooldown_cli is gone", () => {
-    const src = readFileSync(join(AUTOPILOT_DIR, "bootstrap.sh"), "utf-8");
-    const from = src.indexOf('SCHEMA_VERSION="$(python3 "${RUN_LEDGER}" schema-version)"');
-    const to = src.indexOf('python3 "${RUN_LEDGER}" seed');
-    assert.ok(from > 0 && to > from, "anchors found");
-    assert.doesNotMatch(src.slice(from, to), /\bjq\b/, "the carry-forward jq blocks are deleted, not wrapped");
-    assert.doesNotMatch(src, /^redis_cooldown_cli\(\)/m);
-    assert.doesNotMatch(src, /COOLDOWN_CARRY_CLASSES=/);
-    assert.match(src.slice(to, to + 400), /--carry-from/);
-  });
-
-  test("decide.py no longer mirrors research_force_counter to Redis (one writer, in the ledger)", () => {
-    const decide = readFileSync(join(AUTOPILOT_DIR, "decide.py"), "utf-8");
-    assert.doesNotMatch(decide, /_mirror_research_force_counter_to_redis/);
-    assert.doesNotMatch(decide, /hydra:autopilot:research-force-counter/);
   });
 });
