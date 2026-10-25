@@ -247,6 +247,34 @@ describe("run_ledger declared field table (INV-3, INV-4)", () => {
     assert.ok(o.names.includes("idle_turns"));
   });
 
+  test("INV-4: every top-level key a real autopilot script writes is declared in FIELDS", () => {
+    const dir = join(REPO_ROOT, "scripts", "autopilot");
+    const written = new Set<string>();
+    for (const f of readdirSync(dir).filter((n) => n.endsWith(".py") && n !== "run_ledger.py")) {
+      const src = readFileSync(join(dir, f), "utf-8");
+      for (const m of src.matchAll(/\b(?:state|s)\[["']([a-z_0-9]+)["']\]\s*=[^=]/g)) written.add(m[1]);
+      for (const m of src.matchAll(/\bstate\.setdefault\(["']([a-z_0-9]+)["']/g)) written.add(m[1]);
+    }
+    assert.ok(written.size >= 10, "scanner found the writers: " + [...written].join(","));
+    const r = py(
+      "import json,run_ledger as L\n" +
+        "w=" + JSON.stringify(JSON.stringify([...written])) + "\n" +
+        "print(json.dumps(sorted(set(json.loads(w)) - set(f['name'] for f in L.FIELDS))))",
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), [], "keys written by real scripts but missing from FIELDS");
+  });
+
+  test("INV-4 sibling: a genuinely undeclared key still triggers the load WARN and is preserved", () => {
+    withDir((d) => {
+      const path = join(d, "state.json");
+      writeFileSync(path, JSON.stringify({ turn: 1, brand_new_key: 7 }));
+      const r = ledger(["get", path, "brand_new_key"]);
+      assert.equal(r.stdout.trim(), "7");
+      assert.match(r.stderr, /WARN undeclared key brand_new_key/);
+    });
+  });
+
   test("INV-3: a missing unseeded defaulted key loads as its declared default", () => {
     withDir((dir) => {
       const golden = JSON.parse(readFileSync(join(FIXTURES, "heredoc-default.json"), "utf-8"));
