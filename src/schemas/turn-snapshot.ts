@@ -77,6 +77,7 @@ const QaRecheckSchema = z.array(
       verdict: z.string().min(1),
       verdict_sha: z.string(),
       head_sha: z.string(),
+      verdict_at_head: z.boolean(),
     })
     .strict(),
 );

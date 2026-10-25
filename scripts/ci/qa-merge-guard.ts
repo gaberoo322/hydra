@@ -38,7 +38,7 @@ import {
   qaVerdictShaMatches,
   type FinalVerdict,
   type QaVerdictTrailer,
-} from "./qa-verdict.ts";
+} from "../../src/qa/verdict-trailer.ts";
 
 /** Path prefixes whose changes are exempt from the QA requirement (#4736). */
 export const QA_EXEMPT_PATH_PREFIXES: readonly string[] = [
@@ -71,6 +71,12 @@ export interface QaMergeGuardResult {
   /** The PR's current head SHA as read ("" when unknown). */
   headSha: string;
   exempt: boolean;
+  /**
+   * True iff the latest verdict's `sha=` matches the head (`sha=unknown` and
+   * a blank head never do). Independent of `exempt`. The one computation of
+   * the sha-match the autopilot's decide.py reads (#5078).
+   */
+  verdictAtHead: boolean;
 }
 
 export interface QaMergeGuardInput {
@@ -125,6 +131,7 @@ export function evaluateQaMergeGuard(input: QaMergeGuardInput): QaMergeGuardResu
     verdictSha: latest?.sha ?? null,
     headSha,
     exempt,
+    verdictAtHead: latest !== null && qaVerdictShaMatches(latest, headSha),
   });
 
   if (latest !== null && isFailVerdict(latest.verdict)) {
@@ -173,6 +180,7 @@ export function runQaMergeGuard(
       verdictSha: null,
       headSha: "",
       exempt: false,
+      verdictAtHead: false,
     };
   }
   // Chronological order; entries without a timestamp sort first (oldest).

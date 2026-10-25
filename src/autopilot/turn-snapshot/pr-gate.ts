@@ -91,6 +91,8 @@ export interface QaRecheckEntry {
   readonly verdict: string;
   readonly verdictSha: string;
   readonly headSha: string;
+  /** The merge guard's sha-match (`qaVerdictShaMatches`), computed once at the producer (#5078). */
+  readonly verdictAtHead: boolean;
 }
 
 export interface PrGateSnapshot {
@@ -456,7 +458,8 @@ export function parseQaRecheckEntry(raw: unknown, pr: number, tier: number): QaR
   if (e.pr_number !== pr || e.tier !== tier) return null;
   if (typeof e.verdict !== "string" || e.verdict === "") return null;
   if (typeof e.verdict_sha !== "string" || typeof e.head_sha !== "string") return null;
-  return { pr, tier, verdict: e.verdict, verdictSha: e.verdict_sha, headSha: e.head_sha };
+  if (typeof e.verdict_at_head !== "boolean") return null;
+  return { pr, tier, verdict: e.verdict, verdictSha: e.verdict_sha, headSha: e.head_sha, verdictAtHead: e.verdict_at_head };
 }
 
 /** Classify every open PR. Returns the snapshot fields (minus in-flight) plus the classifier's stderr notes. */

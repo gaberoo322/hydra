@@ -72,5 +72,6 @@ jq -nc --argjson pr "$PR" --argjson tier "$TIER" --argjson guard "$GUARD_JSON" -
                   elif $ci.requiredPending > 0 then "PENDING"
                   else "PASS" end)
                else "PENDING" end),
-     verdict_sha: ($guard.verdictSha // "unknown"), head_sha: ($guard.headSha // "")}'
+     verdict_sha: ($guard.verdictSha // "unknown"), head_sha: ($guard.headSha // ""),
+     verdict_at_head: ($guard.verdictAtHead // false)}'
 # <<< qa-verdict-event

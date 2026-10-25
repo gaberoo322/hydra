@@ -84,7 +84,18 @@ describe("qa-merge-guard — evaluateQaMergeGuard table (#4737)", () => {
       verdictSha: OLD.slice(0, 12),
       headSha: HEAD,
       exempt: false,
+      verdictAtHead: false,
     });
+  });
+
+  test("#5078 INV-6: verdictAtHead is the sha-match, independent of exempt/allowed", () => {
+    assert.equal(evaluateQaMergeGuard(input({ bodies: [trailer("PASS", HEAD)] })).verdictAtHead, true);
+    assert.equal(evaluateQaMergeGuard(input({ bodies: [trailer("FAIL", HEAD)] })).verdictAtHead, true);
+    assert.equal(evaluateQaMergeGuard(input({ bodies: [trailer("PASS", OLD)] })).verdictAtHead, false);
+    assert.equal(evaluateQaMergeGuard(input({})).verdictAtHead, false);
+    const exemptStale = evaluateQaMergeGuard(input({ changedFiles: ["docs/adr/0042-x.md"], bodies: [trailer("PASS", OLD)] }));
+    assert.equal(exemptStale.allowed, true);
+    assert.equal(exemptStale.verdictAtHead, false);
   });
 
   test("a QA-Verdict-Error line (no sha=) is not a verdict -> not-reviewed", () => {

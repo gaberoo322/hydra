@@ -321,7 +321,7 @@ def qa_verdict_recheck(state: dict, events: list[dict], signal_name: str) -> lis
     ascending by PR, deduplicated by PR, for every PR NOT already named by a
     session `qa-verdict` event in `events` (the event wins). Each entry is the
     `qa-verdict-event.sh` shape {type, pr_number, tier, verdict, verdict_sha,
-    head_sha}. Malformed entries are dropped (fail-closed: no entry, no merge);
+    head_sha, verdict_at_head}. Malformed entries are dropped (fail-closed: no entry, no merge);
     never raises. Snapshot-only: a `signal` event cannot inject a recheck."""
     raw = _state_signal(state, signal_name)
     if not isinstance(raw, list):
@@ -342,6 +342,7 @@ def qa_verdict_recheck(state: dict, events: list[dict], signal_name: str) -> lis
             "verdict": entry["verdict"],
             "verdict_sha": entry["verdict_sha"],
             "head_sha": entry["head_sha"],
+            "verdict_at_head": entry["verdict_at_head"],
             "recheck": True,
         }
     return [out[k] for k in sorted(out)]
@@ -398,12 +399,13 @@ def _valid_recheck_entry(e: Any) -> bool:
     INV-3/INV-7: a malformed entry fails closed — no entry, no merge)."""
     return (
         isinstance(e, dict)
-        and set(e) == {"pr", "tier", "verdict", "verdict_sha", "head_sha"}
+        and set(e) == {"pr", "tier", "verdict", "verdict_sha", "head_sha", "verdict_at_head"}
         and _is_int(e["pr"]) and e["pr"] > 0
         and _is_int(e["tier"]) and 1 <= e["tier"] <= 4
         and isinstance(e["verdict"], str) and e["verdict"] != ""
         and isinstance(e["verdict_sha"], str)
         and isinstance(e["head_sha"], str)
+        and isinstance(e["verdict_at_head"], bool)
     )
 
 

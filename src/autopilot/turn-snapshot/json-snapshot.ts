@@ -304,7 +304,7 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     orch_prs_dirty_surface: dirtyFix.surface.map((e) => ({ pr: e.pr, closing_issue: e.closingIssue })),
     // #5052: fail closed - a degraded recheck renders [] (the collector already marked it).
     orch_qa_verdict_recheck: v.prGate.qaVerdictRecheck.ok
-      ? v.prGate.qaVerdictRecheck.value.map((e) => ({ pr: e.pr, tier: e.tier, verdict: e.verdict, verdict_sha: e.verdictSha, head_sha: e.headSha }))
+      ? v.prGate.qaVerdictRecheck.value.map((e) => ({ pr: e.pr, tier: e.tier, verdict: e.verdict, verdict_sha: e.verdictSha, head_sha: e.headSha, verdict_at_head: e.verdictAtHead }))
       : [],
 
     orch_pending_grill_anchor: anchor("picks", "orch_pending_grill_anchor", v.picks.grillPick),
