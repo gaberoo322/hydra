@@ -66,7 +66,7 @@
   "scripts/ci/pr-rebase.ts": 1,
   "scripts/ci/qa-catch-rate.ts": 1,
   "scripts/ci/qa-merge-guard.ts": 1,
-  "scripts/ci/qa-verdict.ts": 1,
+  "scripts/ci/qa-verdict.ts": 2,
   "scripts/ci/query-seam-check.ts": 1,
   "scripts/ci/redis-seam-check.ts": 2,
   "scripts/ci/schema-seam-check.ts": 1,

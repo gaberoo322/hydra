@@ -446,6 +446,8 @@
           "OvernightSummaryResponseSchema",
           "PatternBodySchema",
           "PublishEventBodySchema",
+          "QA_VERDICT_PHASES",
+          "QaVerdictCliSchemas",
           "RELABEL_TARGETS",
           "REVIEW_BUCKETS",
           "RecentMergesQuerySchema",

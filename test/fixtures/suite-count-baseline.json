@@ -373,6 +373,7 @@
   "test/qa-merge-guard.test.mts": 4,
   "test/qa-prior-round.test.mts": 2,
   "test/qa-round-action.test.mts": 5,
+  "test/qa-verdict-cli.test.mts": 2,
   "test/qa-verdict-trailer.test.mts": 3,
   "test/quality-gate-metrics.test.mts": 1,
   "test/query-seam-check.test.mts": 4,

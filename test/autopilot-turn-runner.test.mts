@@ -31,9 +31,9 @@
  *
  *   qa-verdict-event.sh — its `ci-state` and `qa-verdict-event` marker blocks
  *   equal the playbook recipe's byte-for-byte (the recipe stays the documented
- *   source; test/qa-merge-guard-callsites.test.mts executes it), it sources
- *   the shared checks-fetch fragment instead of copying it (#4757 INV-2), and
- *   with `gh`/`node` unreachable it emits a PENDING event and exits 0.
+ *   source; test/qa-merge-guard-callsites.test.mts executes it), it calls the
+ *   qa-verdict CLI's `checks` phase with no inline `node -e` import (#5080),
+ *   and with `gh`/`node` unreachable it emits a PENDING event and exits 0.
  *
  * This file references no other scripts/autopilot/ target on purpose — the
  * test-subject sprawl ratchet (test/fixtures/test-subject-baseline.json) must
@@ -473,8 +473,10 @@ describe("qa-verdict-event.sh — the playbook recipe as a script (issue #4831)"
     }
   });
 
-  test("it sources the shared checks-fetch fragment rather than copying it (#4757 INV-2)", () => {
-    assert.match(script, /^source "\$REPO_ROOT\/docs\/operator-playbooks\/_fragments\/checks-fetch\.md"/m);
+  test("it calls the qa-verdict CLI's checks phase and carries no inline node -e import (#5080)", () => {
+    assert.match(script, /scripts\/ci\/qa-verdict\.ts checks/);
+    assert.equal(/node[^\n]*\s-e\s/.test(script), false, "no inline `node -e` import");
+    assert.doesNotMatch(script, /^\s*source\s/m, "no longer sources the fetch fragment");
     assert.equal(script.includes("# >>> checks-fetch"), false, "no copied fetch body");
     assert.equal(script.includes("REQUIRED_CONTEXTS="), false, "no re-implemented required-contexts read");
     assert.equal(script.includes("isRequired"), false);
@@ -484,7 +486,7 @@ describe("qa-verdict-event.sh — the playbook recipe as a script (issue #4831)"
     const section = playbook.slice(playbook.indexOf("### Building `qa-verdict` events"));
     const body = section.slice(0, section.indexOf("\n## "));
     assert.match(body, /bash scripts\/autopilot\/qa-verdict-event\.sh/);
-    assert.match(body, /@include _fragments\/checks-fetch\.md/);
+    assert.match(body, /scripts\/ci\/qa-verdict\.ts checks/);
   });
 
   test("with gh and node unreachable it emits a PENDING event (fail-closed) and exits 0", () => {
@@ -512,7 +514,6 @@ describe("qa-verdict-event.sh — the playbook recipe as a script (issue #4831)"
         head_sha: "",
         verdict_at_head: false,
       });
-      assert.match(r.stderr, /WARN: checks-fetch failed/, "the fragment's own failure stays loud");
       assert.match(r.stderr, /\[qa-verdict-event\] pr=4830 tier=3 guard_rc=\d+ .*ci=null/);
     } finally {
       rmSync(dir, { recursive: true, force: true });

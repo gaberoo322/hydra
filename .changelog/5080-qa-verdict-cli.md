@@ -1,0 +1,1 @@
+- refactor: qa-verdict engine gets a per-phase JSON CLI; the autopilot qa-verdict-event builder and checks-fetch fragment call it (#5080)
