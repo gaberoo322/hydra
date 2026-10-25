@@ -1067,6 +1067,14 @@ describe("scripts/autopilot/bootstrap.sh", () => {
   // verbatim, re-arms the always-on classes to 0, and emits EXACTLY the
   // always-on ∪ carry key set — so the fifth omission fails here, in CI.
   test("carry-forward set is derived from the Dispatch-Class Taxonomy (issue #4909)", () => {
+    // Issue #5073: assert the CODE path — the set run_ledger.py derives
+    // (`carry-classes`) equals this test's own SIGNAL_CLASS_COOLDOWNS-derived set.
+    const derived = spawnSync("python3", [join(SCRIPTS, "run_ledger.py"), "carry-classes"], {
+      encoding: "utf-8",
+      env: { PATH: process.env.PATH ?? "" },
+    });
+    assert.equal(derived.status, 0, derived.stderr);
+    assert.deepEqual(derived.stdout.trim().split("\n").sort(), [...EXPECTED_CARRY_CLASSES].sort());
     const tmp = makeTempState();
     try {
       const prior: Record<string, number> = {};
@@ -1895,7 +1903,8 @@ describe("scripts/autopilot/bootstrap.sh — dev_resume_pending carry-forward (i
     const reapStall = readFileSync(join(SCRIPTS, "reap_stall.py"), "utf-8");
     const cap = Number(/^DEV_RESUME_PENDING_CAP = (\d+)$/m.exec(reapStall)?.[1]);
     assert.equal(cap, 20);
-    assert.match(readFileSync(join(SCRIPTS, "bootstrap.sh"), "utf-8"), /DEV_RESUME_PENDING_CAP=20\b/);
+    // Issue #5073: the constant's home moved from bootstrap.sh to run_ledger.py.
+    assert.match(readFileSync(join(SCRIPTS, "run_ledger.py"), "utf-8"), /^DEV_RESUME_PENDING_CAP = 20\b/m);
     const prior = Array.from({ length: 25 }, (_, i) => record(1000 + i));
     const s = bootstrapWithPrior(JSON.stringify({ pid: 0, dev_resume_pending: prior }));
     assert.equal(s.dev_resume_pending.length, cap);

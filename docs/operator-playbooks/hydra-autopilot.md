@@ -22,6 +22,14 @@ the policy lives in `scripts/autopilot/decide.py` (the **L2 decision brain**).
 > editing both this marker AND `SCHEMA_VERSION` (the `limits.schema_version`
 > default) in `scripts/autopilot/run_ledger.py` in the same commit, then running
 > `scripts/sync-skills.sh` so the installed skill mirror is refreshed.
+>
+> **Carry-forward (issue #5073).** `bootstrap.sh` seeds `state.json` via
+> `run_ledger.py seed --carry-from <prior state> --mirror`; the ledger's single
+> `carry_forward()` decides what survives a Pace Gate relaunch. The carried
+> `signal_last_fired` set is derived from `classes.json` (`cooldownSeconds` >
+> the 900s Pace Gate interval, minus the re-armed `discover_target`, plus the
+> `research_target` re-fire stamp) — adding a long-cooldown signal class needs no
+> bootstrap edit. Redis continuity (host reboot) is the ledger's second adapter.
 
 **Authoritative references — read these instead of this playbook when you
 need to know what the autopilot will do:**

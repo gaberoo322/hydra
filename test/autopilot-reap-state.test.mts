@@ -288,11 +288,14 @@ reap_state.mirror_cross_run_state_to_redis(state)
       assert.ok(existsSync(recordLog), "mirror must invoke redis_cli");
       const lines = readFileSync(recordLog, "utf-8").split("\n").filter((l) => l.length > 0);
       assert.equal(lines.length, 2, `expected exactly 2 redis-cli calls, got: ${lines.join(" | ")}`);
-      assert.match(lines[0], /^HSET hydra:autopilot:signal-last-fired /);
-      assert.doesNotMatch(lines[0], /\bbad\b/, "a non-int-coercible value must be skipped");
-      assert.match(lines[0], /\bhealth 0\b/);
-      assert.match(lines[0], /\bsweep_orch 1780000000\b/);
-      assert.match(lines[1], /^SET hydra:autopilot:research-force-counter /);
+      // Issue #5073: the write set is derived from the FIELDS rows in table
+      // order, so the two calls are asserted order-insensitively.
+      const hset = lines.find((l) => l.startsWith("HSET hydra:autopilot:signal-last-fired "));
+      assert.ok(hset, `expected an HSET call, got: ${lines.join(" | ")}`);
+      assert.doesNotMatch(hset!, /\bbad\b/, "a non-int-coercible value must be skipped");
+      assert.match(hset!, /\bhealth 0\b/);
+      assert.match(hset!, /\bsweep_orch 1780000000\b/);
+      assert.ok(lines.some((l) => l.startsWith("SET hydra:autopilot:research-force-counter ")));
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }

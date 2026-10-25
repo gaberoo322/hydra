@@ -401,7 +401,7 @@
   "test/review-pickup.test.mts": 5,
   "test/risk-critical.test.mts": 5,
   "test/run-health.test.mts": 1,
-  "test/run-ledger.test.mts": 4,
+  "test/run-ledger.test.mts": 10,
   "test/runs-page.test.mts": 11,
   "test/scheduler-atomicity.test.mts": 1,
   "test/scheduler-deliberate-stop.test.mts": 1,
