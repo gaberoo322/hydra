@@ -1,9 +1,9 @@
 /**
  * decideAdmission — pure mirror of pace-gate.sh's launcher ladder (issue #5101).
  *
- * Scenario mapping to test/pace-gate-allow.test.mts (that file is untouched):
- * ladder-reason scenarios are mirrored below as pure cases. Bash-owned until
- * slice 2/3 (NOT decideAdmission cases): record_tick HYDRA_REDIS_DB (x2),
+ * Scenario map vs test/pace-gate-allow.test.mts (left untouched): every
+ * ladder-reason scenario is mirrored below as a pure case. Bash-owned until slice 2/3
+ * (NOT decideAdmission cases): record_tick HYDRA_REDIS_DB (x2),
  * HYDRA_AUTOPILOT_TRIGGER export (x2), missing-.allow fail-safe, #4585 model
  * selection (x7), #4843 token-refresh nudge (x6).
  */
