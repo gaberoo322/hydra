@@ -140,18 +140,22 @@ wait, poll foreground with a bounded loop:
 # named `status` silently fails and the loop exits 1. `status` is the natural
 # spelling of this variable; that is exactly why the loop breaks. (Documented
 # CLAUDE.md pitfall.)
-deadline=$((SECONDS + 600))            # 10-min budget; size to your slowest check
-while [ "$SECONDS" -lt "$deadline" ]; do
-  run_state=$(gh pr view "$PR" --repo "$REPO" --json statusCheckRollup \
-    --jq 'if ([.statusCheckRollup[]?.status]
-           | any(IN("QUEUED","IN_PROGRESS","PENDING","WAITING")))
-          then "pending" else "settled" end' 2>/dev/null)
-  [ "$run_state" = "settled" ] && break
+#
+# Guard-compatible form (issue #3837 family): the worktree-isolation Bash guard
+# REFUSES `deadline=$((SECONDS + N)); while [ "$SECONDS" -lt "$deadline" ]`
+# ("evaluates SECONDS arithmetically inside a construct too complex to verify"),
+# and ALSO refuses the loop once a multi-line `--jq` program sits inside it — so
+# the budget is a fixed iteration count and the probe is `gh pr checks | grep -c`
+# (this exact form ran under the guard on 2026-10-25).
+for i in $(seq 1 40); do               # 40 x 15s = 10-min budget; size to your slowest check
+  pending=$(gh pr checks "$PR" --repo "$REPO" 2>/dev/null | grep -cE "pending|queued|in_progress")
+  if [ "$pending" = 0 ]; then break; fi
   sleep 15
 done
-# run_state == "settled"  => every check is terminal: read conclusions and act
-#                            (merge on success, fix on failure).
-# still "pending" past the deadline => budget expired: fall through to the
+gh pr checks "$PR" --repo "$REPO"      # read the terminal conclusions
+# pending == 0  => every check is terminal: read conclusions and act
+#                  (merge on success, fix on failure).
+# still "pending" after the last iteration => budget expired: fall through to the
 #                            partial-but-posted branch below — post what you can
 #                            stand behind now, with CI state as of the last poll.
 #                            NEVER re-arm the loop; one bounded budget per wait.
