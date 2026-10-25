@@ -1070,6 +1070,21 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
     }
   });
 
+  test("ruling 3: open-pr records a block only when the 429 is the session's final error", async () => {
+    const transient = "API Error: Request rejected (429) — retrying\nturn 2 ok\nedited files\nran tests\npushed branch\nPR body written";
+    const a = finishHarness(1, "b\n");
+    const ra = await runFinish(a.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 0, stdout: transient, stderr: "" })));
+    assert.equal(ra.action, "open-pr");
+    assert.equal(ra.quotaBlockedUntil, null, "a recovered mid-session 429 must not block the provider");
+    assert.equal(a.files.has(quotaBlockFilePath(CAP_DIR, "kimi")), false);
+
+    const final = "edited files\nran tests\nAPI Error: Request rejected (429) — rate limited";
+    const b = finishHarness(1, "b\n");
+    const rb = await runFinish(b.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 1, stdout: final, stderr: "" })));
+    assert.equal(rb.action, "open-pr");
+    assert.equal(rb.quotaBlockedUntil, NOW_SEC + 3600);
+  });
+
   test("a NON-z.ai 429 text (no 'Request rejected') still blocks the selected provider; a bare '429' number does not", async () => {
     for (const text of [
       "API Error: 429 Too Many Requests",
