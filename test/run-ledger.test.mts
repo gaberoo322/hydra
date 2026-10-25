@@ -222,3 +222,90 @@ describe("run_ledger path + schema-version", () => {
     assert.equal(ledger(["schema-version"]).stdout.trim(), "2");
   });
 });
+
+describe("run_ledger declared field table (INV-3, INV-4)", () => {
+  function py(code: string) {
+    const prelude = `import sys\nsys.path.insert(0, ${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot"))})\n`;
+    return spawnSync("python3", ["-I", "-c", prelude + code], {
+      encoding: "utf-8",
+      env: { PATH: process.env.PATH ?? "" },
+    });
+  }
+
+  test("INV-4: seeded document keys == declared seeded rows; every declared name is unique", () => {
+    const r = py(
+      "import json,run_ledger as L\n" +
+        "names=[f['name'] for f in L.FIELDS]\n" +
+        "d=L.seed_initial({'pid':1,'run_id':'r'},{f['name']:{'str':'all','bool':True}.get(f['type'],1) for f in L.LIMITS if f['name'] in L._LIMIT_SEED_KEYS},{k:([] if k=='dev_resume_pending' else {}) for k in L._CARRY_KEYS},1700000000)\n" +
+        "print(json.dumps({'names':names,'seeded':[f['name'] for f in L.FIELDS if f['seeded']],'doc':list(d.keys())}))",
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const o = JSON.parse(r.stdout);
+    assert.equal(new Set(o.names).size, o.names.length, "no duplicate declared names");
+    assert.deepEqual(o.doc, o.seeded, "seed writes exactly the declared seeded rows, in order");
+    assert.ok(o.names.includes("scout_spend_usd_today"));
+    assert.ok(o.names.includes("idle_turns"));
+  });
+
+  test("INV-3: a missing unseeded defaulted key loads as its declared default", () => {
+    withDir((dir) => {
+      const golden = JSON.parse(readFileSync(join(FIXTURES, "heredoc-default.json"), "utf-8"));
+      const path = join(dir, "state.json");
+      assert.equal(ledger(["seed", path, ...seedArgsFrom(golden)]).status, 0);
+      assert.equal(ledger(["get", path, "idle_turns"]).stdout.trim(), "0");
+      assert.equal(ledger(["get", path, "warnings"]).stdout.trim(), "[]");
+      assert.equal(ledger(["get", path, "turn_snapshot"]).stdout.trim(), "{}");
+      assert.equal(ledger(["get", path, "scout_spend_usd_today"]).stdout.trim(), "0");
+    });
+  });
+
+  test("INV-3 sibling: an undeclared key and a REQUIRED-but-absent key stay absent", () => {
+    withDir((dir) => {
+      const path = join(dir, "state.json");
+      writeFileSync(path, JSON.stringify({ turn: 3 }));
+      assert.equal(ledger(["get", path, "turn"]).stdout.trim(), "3");
+      assert.equal(ledger(["get", path, "run_id"]).status, 1, "REQUIRED rows get no default");
+      assert.equal(ledger(["get", path, "not_a_field"]).status, 1);
+    });
+  });
+});
+
+describe("bootstrap.sh drives the Run Ledger (INV-1, INV-7)", () => {
+  function bootstrap(statePath: string, dir: string) {
+    return spawnSync(join(REPO_ROOT, "scripts", "autopilot", "bootstrap.sh"), [], {
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        HYDRA_AUTOPILOT_STATE: statePath,
+        HYDRA_AUTOPILOT_HEARTBEAT: join(dir, "heartbeat.txt"),
+        HYDRA_AUTOPILOT_LOG: join(dir, "nightly.log"),
+        PATH: process.env.PATH ?? "",
+      },
+    });
+  }
+
+  test("INV-1: a real bootstrap.sh run writes a document matching the heredoc golden's shape", () => {
+    withDir((dir) => {
+      const statePath = join(dir, "state.json");
+      const r = bootstrap(statePath, dir);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      const text = readFileSync(statePath, "utf-8");
+      const doc = JSON.parse(text);
+      const golden = JSON.parse(readFileSync(join(FIXTURES, "heredoc-default.json"), "utf-8"));
+      assert.deepEqual(Object.keys(doc), Object.keys(golden), "top-level key order");
+      assert.deepEqual(doc.limits, golden.limits, "limits (default env) deep-equal incl. key order");
+      assert.deepEqual(Object.keys(doc.limits), Object.keys(golden.limits));
+      for (const k of ["cumulative_tokens", "dispatches", "turn"]) assert.equal(doc[k], 0);
+      for (const k of ["burned_classes", "reaped_task_ids", "failure_log"]) assert.deepEqual(doc[k], []);
+      assert.equal(text, JSON.stringify(doc, null, 2) + "\n", "indent=2 + trailing newline");
+    });
+  });
+
+  test("INV-7: an unwritable state dir exits 1 with the additive FATAL line", () => {
+    withDir((dir) => {
+      const r = bootstrap(join(dir, "no-such-dir", "state.json"), dir);
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.match(r.stdout + r.stderr, /FATAL: run_ledger\.py seed failed/);
+    });
+  });
+});

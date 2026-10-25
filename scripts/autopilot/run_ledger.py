@@ -193,7 +193,7 @@ def load(path):
         if key not in _FIELD_BY_NAME:
             sys.stderr.write("[run-ledger] WARN undeclared key %s preserved\n" % key)
     for f in FIELDS:
-        if f["seeded"] and f["name"] not in doc and f["default"] is not REQUIRED:
+        if f["name"] not in doc and f["default"] is not REQUIRED:
             doc[f["name"]] = json.loads(json.dumps(f["default"]))
     return doc
 
