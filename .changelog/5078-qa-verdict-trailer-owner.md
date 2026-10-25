@@ -1,0 +1,1 @@
+- refactor: one QA-Verdict trailer grammar owner in src/qa; the Turn Snapshot carries verdict_at_head so decide.py drops its Python sha-match twin (#5078)

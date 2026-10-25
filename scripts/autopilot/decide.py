@@ -2796,32 +2796,23 @@ def _pr_gate_number_in(pr_number: object, bucket: list[int]) -> bool:
         return False
 
 
-_QA_VERDICT_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
-
-
-def qa_verdict_sha_matches(verdict_sha: object, head_sha: object) -> bool:
-    """True iff `verdict_sha` (a `QA-Verdict:` trailer's `sha=`) was rendered
-    for `head_sha` — a 7–40 hex prefix of the full head SHA.
-
-    Python twin of `qaVerdictShaMatches()` (scripts/ci/qa-verdict.ts, #4746):
-    the `unknown` sentinel, a non-hex value, and a blank head NEVER match — an
-    unknown SHA must never satisfy a merge guard. Pure; never raises.
-    """
-    head = str(head_sha if head_sha is not None else "").strip().lower()
-    sha = str(verdict_sha if verdict_sha is not None else "").strip().lower()
-    if not head or not _QA_VERDICT_SHA_RE.match(sha):
-        return False
-    return head.startswith(sha)
-
-
 def _qa_verdict_is_stale(ev: dict) -> bool:
-    """Issue #4737: True when a `qa-verdict` event carries SHA evidence
-    (`verdict_sha` and/or `head_sha`) that does NOT bind the verdict to the
-    PR's current head. An event with neither field is not judged stale
-    (legacy producers; INV-007 alone applies)."""
+    """Issue #4737/#5078: True when a `qa-verdict` event does NOT bind its
+    verdict to the PR's current head. decide.py READS the producer's
+    `verdict_at_head` (computed once in TS by `qaVerdictShaMatches`, via the
+    QA merge guard) and never re-derives the sha-prefix rule.
+
+    - `verdict_at_head` present -> stale iff it is not `True`.
+    - none of verdict_at_head/verdict_sha/head_sha -> not stale (legacy
+      producers; INV-007 alone applies).
+    - SHA evidence but no `verdict_at_head` -> STALE (fail closed: a producer
+      that was not upgraded can never arm auto-merge on a sha it did not bind).
+    """
+    if "verdict_at_head" in ev:
+        return ev.get("verdict_at_head") is not True
     if "verdict_sha" not in ev and "head_sha" not in ev:
         return False
-    return not qa_verdict_sha_matches(ev.get("verdict_sha"), ev.get("head_sha"))
+    return True
 
 
 def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:

@@ -4765,7 +4765,7 @@ describe("decide.py — QA merge guard: stale-SHA PASS holds (issue #4737)", () 
 
   test("#4737: PASS whose verdict_sha is the current head -> auto-merge", () => {
     const plan = runDecide(baseState(), null, [
-      qaPass(4801, { verdict_sha: HEAD.slice(0, 12), head_sha: HEAD }),
+      qaPass(4801, { verdict_sha: HEAD.slice(0, 12), head_sha: HEAD, verdict_at_head: true }),
     ]);
     assert.ok(armed(plan, 4801), "a PASS bound to the current head must auto-merge");
     assert.ok(!(plan.reasons ?? []).includes("hold:#4801:stale-verdict"));
@@ -4773,7 +4773,7 @@ describe("decide.py — QA merge guard: stale-SHA PASS holds (issue #4737)", () 
 
   test("#4737: PASS reviewed at an older head -> NO auto-merge, reasons name hold:#N:stale-verdict", () => {
     const plan = runDecide(baseState(), null, [
-      qaPass(4802, { verdict_sha: "fedcba987654", head_sha: HEAD }),
+      qaPass(4802, { verdict_sha: "fedcba987654", head_sha: HEAD, verdict_at_head: false }),
     ]);
     assert.equal(armed(plan, 4802), undefined, "a stale-SHA PASS must never arm auto-merge");
     assert.ok((plan.reasons ?? []).includes("hold:#4802:stale-verdict"));
@@ -4781,7 +4781,7 @@ describe("decide.py — QA merge guard: stale-SHA PASS holds (issue #4737)", () 
 
   test("#4737: sha=unknown never counts as a match -> hold", () => {
     const plan = runDecide(baseState(), null, [
-      qaPass(4803, { verdict_sha: "unknown", head_sha: HEAD }),
+      qaPass(4803, { verdict_sha: "unknown", head_sha: HEAD, verdict_at_head: false }),
     ]);
     assert.equal(armed(plan, 4803), undefined);
     assert.ok((plan.reasons ?? []).includes("hold:#4803:stale-verdict"));
@@ -4789,8 +4789,8 @@ describe("decide.py — QA merge guard: stale-SHA PASS holds (issue #4737)", () 
 
   test("#4737: SHA evidence with a missing or blank head -> hold (fail closed)", () => {
     const plan = runDecide(baseState(), null, [
-      qaPass(4804, { verdict_sha: HEAD.slice(0, 12) }),
-      qaPass(4805, { verdict_sha: HEAD.slice(0, 12), head_sha: "" }),
+      qaPass(4804, { verdict_sha: HEAD.slice(0, 12), verdict_at_head: false }),
+      qaPass(4805, { verdict_sha: HEAD.slice(0, 12), head_sha: "", verdict_at_head: false }),
     ]);
     assert.equal(armed(plan, 4804), undefined);
     assert.equal(armed(plan, 4805), undefined);
@@ -4801,9 +4801,18 @@ describe("decide.py — QA merge guard: stale-SHA PASS holds (issue #4737)", () 
     assert.ok(armed(plan, 4806), "legacy producers without SHA fields still auto-merge on PASS");
   });
 
+  test("#5078 INV-7: SHA evidence without verdict_at_head is STALE (fail closed); decide.py never re-derives the sha rule", () => {
+    const plan = runDecide(baseState(), null, [
+      // Matching SHAs, but the producer did not bind them: must not arm.
+      qaPass(4808, { verdict_sha: HEAD.slice(0, 12), head_sha: HEAD }),
+    ]);
+    assert.equal(armed(plan, 4808), undefined);
+    assert.ok((plan.reasons ?? []).includes("hold:#4808:stale-verdict"));
+  });
+
   test("#4737: a FAIL is still held by INV-007 regardless of SHA fields", () => {
     const plan = runDecide(baseState(), null, [
-      qaPass(4807, { verdict: "FAIL", verdict_sha: HEAD.slice(0, 12), head_sha: HEAD }),
+      qaPass(4807, { verdict: "FAIL", verdict_sha: HEAD.slice(0, 12), head_sha: HEAD, verdict_at_head: true }),
     ]);
     assert.equal(armed(plan, 4807), undefined);
   });
@@ -5499,6 +5508,7 @@ describe("decide.py — durable QA-verdict recheck (#5052)", () => {
     verdict: "PASS",
     verdict_sha: HEAD.slice(0, 12),
     head_sha: HEAD,
+    verdict_at_head: true,
     ...extra,
   });
   const armed = (plan: any, pr: number) => findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === pr);
@@ -5513,13 +5523,13 @@ describe("decide.py — durable QA-verdict recheck (#5052)", () => {
   });
 
   test("#5052 INV-4: a stale-SHA recheck entry holds (hold:#N:stale-verdict), never merges", () => {
-    const plan = runDecide(withRecheck([entry(5002, { verdict_sha: "fedcba987654" })]), null, []);
+    const plan = runDecide(withRecheck([entry(5002, { verdict_sha: "fedcba987654", verdict_at_head: false })]), null, []);
     assert.equal(armed(plan, 5002), undefined);
     assert.ok((plan.reasons ?? []).includes("hold:#5002:stale-verdict"));
   });
 
   test("#5052 INV-4: an unknown verdict_sha (unreadable guard) never merges", () => {
-    const plan = runDecide(withRecheck([entry(5003, { verdict_sha: "unknown", verdict: "PENDING" })]), null, []);
+    const plan = runDecide(withRecheck([entry(5003, { verdict_sha: "unknown", verdict: "PENDING", verdict_at_head: false })]), null, []);
     assert.equal(armed(plan, 5003), undefined);
   });
 
@@ -5544,7 +5554,7 @@ describe("decide.py — durable QA-verdict recheck (#5052)", () => {
   });
 
   test("#5052 INV-5: a PR named by a session qa-verdict event is skipped by the recheck (event wins, one action)", () => {
-    const sessionEvent = { type: "qa-verdict", pr_number: 5008, tier: 3, verdict: "PASS", verdict_sha: HEAD.slice(0, 12), head_sha: HEAD };
+    const sessionEvent = { type: "qa-verdict", pr_number: 5008, tier: 3, verdict: "PASS", verdict_sha: HEAD.slice(0, 12), head_sha: HEAD, verdict_at_head: true };
     const plan = runDecide(withRecheck([entry(5008), entry(5009)]), null, [sessionEvent]);
     const merges = (plan.actions ?? []).filter((a: any) => a.type === "auto-merge" && a.pr_number === 5008);
     assert.equal(merges.length, 1);
@@ -5584,6 +5594,7 @@ describe("decide.py — a terminating turn still arms its QA PASS (#5144)", () =
     verdict: "PASS",
     verdict_sha: HEAD.slice(0, 12),
     head_sha: HEAD,
+    verdict_at_head: true,
     ...extra,
   });
   const merges = (plan: any) => (plan.actions ?? []).filter((a: any) => a.type === "auto-merge");
@@ -5633,7 +5644,7 @@ describe("decide.py — a terminating turn still arms its QA PASS (#5144)", () =
       signals: {
         ...busyBoard,
         orch_qa_verdict_recheck: [
-          { pr: 4881, tier: 3, verdict: "PASS", verdict_sha: HEAD.slice(0, 12), head_sha: HEAD },
+          { pr: 4881, tier: 3, verdict: "PASS", verdict_sha: HEAD.slice(0, 12), head_sha: HEAD, verdict_at_head: true },
         ],
       },
     });
@@ -5647,7 +5658,7 @@ describe("decide.py — a terminating turn still arms its QA PASS (#5144)", () =
   test("holds still apply on a terminating turn: stale-SHA, FAIL and dirty PASS never arm; terminate stays the only action", () => {
     const state = baseState({ cumulative_tokens: 2_000_001, signals: { ...busyBoard, orch_prs_dirty: [7003] } });
     const plan = runDecide(state, null, [
-      passEvent(7001, { verdict_sha: "fedcba987654" }),
+      passEvent(7001, { verdict_sha: "fedcba987654", verdict_at_head: false }),
       passEvent(7002, { verdict: "FAIL" }),
       passEvent(7003),
     ]);

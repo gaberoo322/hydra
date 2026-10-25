@@ -347,6 +347,7 @@ describe("autopilot qa-verdict events carry the guard's SHAs + required-check st
     verdictSha: "0123456789ab",
     headSha: HEAD,
     exempt: false,
+    verdictAtHead: true,
   });
   const green = { red: [], requiredPending: 0 };
 
@@ -385,6 +386,7 @@ describe("autopilot qa-verdict events carry the guard's SHAs + required-check st
       verdict: "PASS",
       verdict_sha: "0123456789ab",
       head_sha: HEAD,
+      verdict_at_head: true,
     });
     assert.equal(event(atHead("PASS"), green).verdict, "PASS");
   });
@@ -413,11 +415,12 @@ describe("autopilot qa-verdict events carry the guard's SHAs + required-check st
   });
 
   test("a stale PASS carries the mismatched SHAs so decide.py holds it as stale-verdict", () => {
-    const stale = { ...atHead("PASS"), allowed: false, reason: "stale-verdict", headSha: "ffffffffffff" + HEAD.slice(12) };
+    const stale = { ...atHead("PASS"), allowed: false, reason: "stale-verdict", verdictAtHead: false, headSha: "ffffffffffff" + HEAD.slice(12) };
     const ev = event(stale, green);
     assert.equal(ev.verdict, "PASS");
     assert.equal(ev.verdict_sha, "0123456789ab");
     assert.ok(!String(ev.head_sha).startsWith(String(ev.verdict_sha)), "SHAs must not bind");
+    assert.equal(ev.verdict_at_head, false, "a stale verdict's guard result carries verdictAtHead=false");
   });
 
   test("the auto-merge action re-checks the guard before arming", () => {

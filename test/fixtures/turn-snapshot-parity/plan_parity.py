@@ -27,6 +27,11 @@ GLM-only #4460 signals were folded into the provenance-agnostic resume pick
 (see `_fold_retired_glm_signals`), which changed only the red-forward-fix
 dispatch reason / surface-pr cause strings in the affected Plans.
 
+Re-recorded again for #5078 (INV-7(c)): a `qa-verdict` event carrying SHA
+evidence but no `verdict_at_head` is now STALE (fail closed), so exactly one
+captured entry (index 129, a legacy-shaped matching-SHA PASS) no longer
+auto-merges; every other Plan is byte-identical.
+
   python3 plan_parity.py [--dump <path>] [corpus.jsonl.gz]
       compare against the golden Plans; `--dump` writes each converted
       snapshot as JSONL so the test can zod-check every converted value
