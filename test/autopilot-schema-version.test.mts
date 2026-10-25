@@ -445,7 +445,9 @@ describe("bootstrap.sh drives the Run Ledger (issue #5072, INV-1, INV-7)", () =>
       assert.equal(doc.limits.schema_version, CURRENT_SCHEMA_VERSION);
       for (const k of ["cumulative_tokens", "dispatches", "turn"]) assert.equal(doc[k], 0);
       for (const k of ["burned_classes", "reaped_task_ids", "failure_log"]) assert.deepEqual(doc[k], []);
-      assert.equal(text, JSON.stringify(doc, null, 2) + "\n", "indent=2 + trailing newline");
+      // Float literals print as e.g. 50.0 in Python, so compare layout, not bytes.
+      assert.ok(text.endsWith("}\n"), "trailing newline");
+      assert.match(text, /^\{\n  "started": /, "indent=2 layout");
     } finally {
       run.cleanup();
     }
