@@ -128,8 +128,33 @@ Verification gates whether the PR merges, not whether the work survives.
 
 **Foreground bounded poll.** When you have pushed and are waiting on CI — or
 running any long verification — block in THIS turn; never background it and
-stop. A test run via the Bash tool already blocks, so just let it; for a CI
-wait, poll foreground with a bounded loop:
+stop. The full `npm test` is the exception to "just let it block": it now
+needs ~11 min, past the Bash tool's 600 s foreground cap, so the harness
+auto-backgrounds a plain call (#5180). Run it as below; for a CI wait, poll
+foreground with a bounded loop (second block).
+
+**Full `npm test` recipe (canonical — other docs point here).** Commit + push
+first. Launch ONE Bash call with `run_in_background: true` and an explicit
+`timeout: 1800000` (the background default is also 600 s and would kill the run
+mid-suite):
+
+```bash
+npm test > npm-test.log 2>&1; echo "NPM_TEST_EXIT=$?" >> npm-test.log
+```
+
+Then re-issue this FOREGROUND poll (each call under the cap) until the sentinel
+appears, within ONE total budget of 30 min. No bare `sleep N`, no `Monitor`, and
+never end the turn to wait for the harness notification:
+
+```bash
+deadline=$((SECONDS + 540))
+until grep -q '^NPM_TEST_EXIT=' npm-test.log || [ "$SECONDS" -ge "$deadline" ]; do sleep 15; done
+tail -n 25 npm-test.log
+```
+
+Verdict: `NPM_TEST_EXIT=0` AND the launcher's final
+`[redis-db-launch] VERDICT exit=<n> outcome=<...>` line agree. `# fail 0` alone
+is not sufficient (file-set suite-count verdicts redden a `# fail 0` run).
 
 ```bash
 # BOUNDED FOREGROUND POLL — block in THIS turn until CI on $PR settles. This is
