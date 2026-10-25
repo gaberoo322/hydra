@@ -9,6 +9,7 @@
   "test/aggregator-cost-burn.test.mts": 6,
   "test/aggregator-friction-patterns.test.mts": 5,
   "test/aggregator-friction-source.test.mts": 6,
+  "test/aggregator-issues-waiting-projections.test.mts": 4,
   "test/aggregator-issues-waiting.test.mts": 9,
   "test/aggregator-lessons-explorer.test.mts": 3,
   "test/aggregator-lessons-overnight.test.mts": 5,

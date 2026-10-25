@@ -35,8 +35,17 @@
  * open blocker is not already settled by its labels — and its failure is named
  * `open-pr-lookup`.
  *
- * Never throws; imports only `src/github/*`, and the two threshold exports of
- * stuck-items.ts (no Redis).
+ * # One reader, typed projections (issue #5091)
+ *
+ * {@link readWaitingIssues} is the ONE read (one `listIssuesByLabel` per label,
+ * one batched blocker lookup, one lazy open-PR read). The pure projections
+ * ({@link projectWaitingLines}, {@link projectStuckIssues},
+ * {@link projectDecisionQueue}, {@link projectPickupSet}) take only the
+ * resulting {@link WaitingIssuesRead} value and perform no read, so every
+ * consumer shares one blocker parser, one stale rule and one threshold.
+ *
+ * Never throws; imports only `src/github/*` (no Redis); stuck-items.ts is
+ * imported for types only.
  */
 
 import {
@@ -54,8 +63,26 @@ import {
 import { listOpenPrs } from "../github/prs.ts";
 import { closedIssues } from "../github/pr-refs.ts";
 import { hasScopeSection } from "../scope-section.ts";
-import { DEFAULT_THRESHOLDS, type StuckThresholds } from "./stuck-items.ts";
+import {
+  labeledItemsFromRows,
+  mergeBySource,
+  type RawDigestInput,
+} from "./digest-issue.ts";
+import type { StuckIssue } from "./stuck-items.ts";
 import { logger } from "../logger.ts";
+
+export interface StuckThresholds {
+  /** Minimum age (days) before a `blocked` issue counts as stuck. */
+  blockedDays: number;
+  /** Minimum age (days) before a `needs-info` issue counts as stuck. */
+  needsInfoDays: number;
+}
+
+/** The ONE stale threshold (issue #5091); stuck-items.ts re-exports it. */
+export const DEFAULT_THRESHOLDS: StuckThresholds = {
+  blockedDays: 2,
+  needsInfoDays: 1,
+};
 
 type WaitingLine =
   | "reframe"
@@ -166,9 +193,45 @@ function epicNumbers(
   return out;
 }
 
+/**
+ * The single read value every projection consumes (issue #5091). Raw rows
+ * (`byLabel`, bodies included) plus the classified rows (`items`).
+ */
+export interface WaitingIssuesRead {
+  now: Date;
+  thresholds: StuckThresholds;
+  /** Raw rows of each label read (a failed read maps to `[]`). */
+  byLabel: ReadonlyMap<string, readonly IssueRow[]>;
+  /** Admitted rows, one line each, oldest-first (the classifier's output). */
+  items: WaitingIssue[];
+  /** Raw rows returned by the fulfilled label reads. */
+  scanned: number;
+  /** Named failed sources: a label, `blocker-lookup` and/or `open-pr-lookup`. */
+  sourceErrors: string[];
+}
+
+/** Composed legacy entry: one read, then the line projection. */
 export async function getIssuesWaiting(
   deps: IssuesWaitingDeps = {},
 ): Promise<IssuesWaitingResult> {
+  return projectWaitingLines(await readWaitingIssues(deps));
+}
+
+/** Pure — the {@link IssuesWaitingResult} view of a read. */
+export function projectWaitingLines(read: WaitingIssuesRead): IssuesWaitingResult {
+  return {
+    items: read.items,
+    scanned: read.scanned,
+    sourcesOk: read.sourceErrors.length === 0,
+    sourceErrors: read.sourceErrors,
+    thresholds: read.thresholds,
+  };
+}
+
+/** The ONE read: fetch, resolve blockers once, classify. Never throws. */
+export async function readWaitingIssues(
+  deps: IssuesWaitingDeps = {},
+): Promise<WaitingIssuesRead> {
   const now = deps.now ?? new Date();
   const thresholds: StuckThresholds = { ...DEFAULT_THRESHOLDS, ...(deps.thresholds ?? {}) };
   const listByLabel = deps.listIssuesByLabel ?? listIssuesByLabel;
@@ -276,13 +339,153 @@ export async function getIssuesWaiting(
     prClosed,
     lookupOk,
   });
+  return { now, thresholds, byLabel, items, scanned, sourceErrors };
+}
+
+function hasValidDate(createdAt: string): boolean {
+  return Number.isFinite(Date.parse(createdAt));
+}
+
+/**
+ * Pure — the issue half of `StuckItems` (`/api/v2/today/stuck`). Admitted rows
+ * carrying `blocked` / `needs-info` that clear the shared threshold. The PR
+ * bucket (`prsWithFailedCi`) is a PR read and stays in stuck-items.ts.
+ */
+export function projectStuckIssues(read: WaitingIssuesRead): {
+  blockedOver2d: StuckIssue[];
+  needsInfoWaiting: StuckIssue[];
+  thresholds: StuckThresholds;
+  generatedAt: string;
+  scanned: number;
+  sourcesOk: boolean;
+} {
+  const pick = (label: string, minDays: number): StuckIssue[] =>
+    read.items
+      .filter(
+        (i) => i.labels.includes(label) && hasValidDate(i.createdAt) && i.ageDays >= minDays,
+      )
+      .map((i) => ({
+        number: i.number,
+        title: i.title,
+        url: i.url,
+        createdAt: i.createdAt,
+        ageDays: i.ageDays,
+        labels: [...i.labels],
+      }));
+  const rawCount = (label: string) => read.byLabel.get(label)?.length ?? 0;
+  return {
+    blockedOver2d: pick("blocked", read.thresholds.blockedDays),
+    needsInfoWaiting: pick("needs-info", read.thresholds.needsInfoDays),
+    thresholds: read.thresholds,
+    generatedAt: read.now.toISOString(),
+    scanned: rawCount("blocked") + rawCount("needs-info"),
+    sourcesOk:
+      !read.sourceErrors.includes("blocked") && !read.sourceErrors.includes("needs-info"),
+  };
+}
+
+export type DecisionItemSource = "ready-for-human" | "needs-info";
+
+export interface DecisionItem {
+  number: number;
+  title: string;
+  url: string;
+  createdAt: string;
+  labels: string[];
+  source: DecisionItemSource;
+  sources: DecisionItemSource[];
+}
+
+export interface DecisionQueueResult {
+  items: DecisionItem[];
+  scanned: number;
+  sourcesOk: boolean;
+}
+
+/**
+ * Pure — the decision-queue view: PRESENCE semantics over the raw
+ * `ready-for-human` then `needs-info` rows (no age gate, no Epic exclusion),
+ * label-union on duplicates, createdAt-ascending with number fallback.
+ */
+export function projectDecisionQueue(read: WaitingIssuesRead): DecisionQueueResult {
+  const order: DecisionItemSource[] = ["ready-for-human", "needs-info"];
+  const bySource: Partial<Record<DecisionItemSource, RawDigestInput[]>> = {};
+  let scanned = 0;
+  for (const source of order) {
+    const rows = read.byLabel.get(source) ?? [];
+    scanned += rows.length;
+    bySource[source] = labeledItemsFromRows(rows);
+  }
+  const items = mergeBySource(bySource, order, (existing, incoming) => {
+    for (const label of incoming.labels) {
+      if (!existing.row.labels.includes(label)) existing.row.labels.push(label);
+    }
+  })
+    .map(({ row, source, sources }): DecisionItem => ({
+      number: row.number,
+      title: row.title,
+      url: row.url,
+      createdAt: row.createdAt,
+      labels: row.labels,
+      source,
+      sources,
+    }))
+    .sort((a, b) => {
+      const aMs = Date.parse(a.createdAt);
+      const bMs = Date.parse(b.createdAt);
+      if (Number.isFinite(aMs) && Number.isFinite(bMs)) return aMs - bMs;
+      return a.number - b.number;
+    });
   return {
     items,
     scanned,
-    sourcesOk: sourceErrors.length === 0,
-    sourceErrors,
-    thresholds,
+    sourcesOk: order.every((l) => !read.sourceErrors.includes(l)),
   };
+}
+
+export type PickupSource = "ready-for-human" | "stale-blocked";
+
+export interface PickupItem {
+  number: number;
+  title: string;
+  url: string;
+  source: PickupSource;
+  sources: PickupSource[];
+}
+
+/**
+ * Pure — the review-pickup view. `ready-for-human` is the raw label rows
+ * (presence). `stale-blocked` is defined ONLY on classified rows: line
+ * `stale-blocked`, or `blocked-live` with no open blocker at all (no blocker
+ * ref, aged >= blockedDays). A blocked-live row with an open blocker is not
+ * stale; a failed blocker lookup counts every ref as open (fewer rows).
+ */
+export function projectPickupSet(read: WaitingIssuesRead): PickupItem[] {
+  const order: PickupSource[] = ["ready-for-human", "stale-blocked"];
+  const lean = (r: { number: number; title: string; url: string }): RawDigestInput => ({
+    number: r.number,
+    title: r.title,
+    url: r.url,
+    createdAt: "",
+    labels: [],
+  });
+  const ready = labeledItemsFromRows(read.byLabel.get("ready-for-human") ?? []).map(lean);
+  const stale = read.items
+    .filter(
+      (i) =>
+        i.line === "stale-blocked" ||
+        (i.line === "blocked-live" && i.openBlockerNumbers.length === 0),
+    )
+    .map(lean);
+  return mergeBySource({ "ready-for-human": ready, "stale-blocked": stale }, order)
+    .map(({ row, source, sources }): PickupItem => ({
+      number: row.number,
+      title: row.title,
+      url: row.url,
+      source,
+      sources,
+    }))
+    .sort((a, b) => a.number - b.number);
 }
 
 /**
