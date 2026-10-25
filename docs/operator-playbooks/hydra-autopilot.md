@@ -16,10 +16,11 @@ the policy lives in `scripts/autopilot/decide.py` (the **L2 decision brain**).
 
 > **Schema-version handshake (issue #434).** The grep-able marker above
 > (`HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA: 2`) must match the
-> `limits.schema_version` value written by `bootstrap.sh`. Phase 0 below
+> `limits.schema_version` value seeded by `bootstrap.sh` from the Run Ledger
+> (`scripts/autopilot/run_ledger.py`, issue #5072). Phase 0 below
 > verifies this and aborts on mismatch. Bumping the schema requires
-> editing both this marker AND the `SCHEMA_VERSION` constant in
-> `scripts/autopilot/bootstrap.sh` in the same commit, then running
+> editing both this marker AND `SCHEMA_VERSION` (the `limits.schema_version`
+> default) in `scripts/autopilot/run_ledger.py` in the same commit, then running
 > `scripts/sync-skills.sh` so the installed skill mirror is refreshed.
 
 **Authoritative references — read these instead of this playbook when you

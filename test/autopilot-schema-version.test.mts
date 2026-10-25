@@ -97,9 +97,13 @@ function readPlaybookSchema(): number | null {
 }
 
 function readBootstrapSchema(): number | null {
-  const body = readFileSync(BOOTSTRAP, "utf-8");
-  const m = body.match(/^SCHEMA_VERSION=(\d+)/m);
-  return m ? Number(m[1]) : null;
+  // The integer has one home: the Run Ledger (issue #5072, INV-5).
+  const r = spawnSync("python3", [join(SCRIPTS, "run_ledger.py"), "schema-version"], {
+    encoding: "utf-8",
+  });
+  if (r.status !== 0) return null;
+  const n = Number(r.stdout.trim());
+  return Number.isInteger(n) ? n : null;
 }
 
 /**
@@ -137,7 +141,7 @@ describe("issue #434 — schema_version handshake", () => {
   describe("source-of-truth constants", () => {
     test("bootstrap.sh declares SCHEMA_VERSION", () => {
       const v = readBootstrapSchema();
-      assert.notEqual(v, null, "bootstrap.sh must declare a SCHEMA_VERSION=<N> constant");
+      assert.notEqual(v, null, "the Run Ledger must declare a schema version");
       assert.equal(
         v,
         CURRENT_SCHEMA_VERSION,
@@ -419,5 +423,43 @@ describe("issue #434 — schema_version handshake", () => {
       assert.equal(regex.test("no marker here"), false);
       assert.equal(regex.test("HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA: 2"), true);
     });
+  });
+});
+
+describe("bootstrap.sh drives the Run Ledger (issue #5072, INV-1, INV-7)", () => {
+  test("INV-1: a real bootstrap.sh run writes a document matching the heredoc golden's shape", () => {
+    const run = runBootstrap();
+    try {
+      assert.equal(run.status, 0, run.stdout + run.stderr);
+      const text = readFileSync(run.statePath, "utf-8");
+      const doc = JSON.parse(text);
+      const golden = JSON.parse(
+        readFileSync(join(REPO_ROOT, "test", "fixtures", "run-ledger", "heredoc-default.json"), "utf-8"),
+      );
+      assert.deepEqual(Object.keys(doc), Object.keys(golden), "top-level key order");
+      // Limit VALUES derive from the host env (quota/spend caps differ on CI); shape is fixed.
+      assert.deepEqual(Object.keys(doc.limits), Object.keys(golden.limits), "limits key order");
+      for (const k of Object.keys(golden.limits)) {
+        assert.equal(typeof doc.limits[k], typeof golden.limits[k], `limits.${k} JSON type`);
+      }
+      assert.equal(doc.limits.schema_version, CURRENT_SCHEMA_VERSION);
+      for (const k of ["cumulative_tokens", "dispatches", "turn"]) assert.equal(doc[k], 0);
+      for (const k of ["burned_classes", "reaped_task_ids", "failure_log"]) assert.deepEqual(doc[k], []);
+      // Float literals print as e.g. 50.0 in Python, so compare layout, not bytes.
+      assert.ok(text.endsWith("}\n"), "trailing newline");
+      assert.match(text, /^\{\n  "started": /, "indent=2 layout");
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  test("INV-7: an unwritable state dir exits 1 with the additive FATAL line", () => {
+    const run = runBootstrap({ HYDRA_AUTOPILOT_STATE: "/nonexistent-run-ledger-dir/state.json" });
+    try {
+      assert.equal(run.status, 1, run.stdout + run.stderr);
+      assert.match(run.stdout + run.stderr, /FATAL: run_ledger\.py seed failed/);
+    } finally {
+      run.cleanup();
+    }
   });
 });

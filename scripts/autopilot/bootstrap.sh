@@ -905,10 +905,13 @@ fi
 # Resolve file paths from env (test-isolation knobs). Mirrors the
 # convention already established in heartbeat.py /
 # reap.py — the only outlier was bootstrap.sh.
-DEFAULT_STATE_PATH="/tmp/hydra-autopilot-state.json"
+#
+# The state-path resolution has ONE home: run_ledger.py (issue #5072).
+RUN_LEDGER="$(dirname "$0")/run_ledger.py"
+DEFAULT_STATE_PATH="$(python3 "${RUN_LEDGER}" path --default)"
 DEFAULT_HEARTBEAT_PATH="/tmp/hydra-autopilot-heartbeat.txt"
 DEFAULT_LOG_PATH="/tmp/hydra-autopilot-nightly.log"
-STATE_PATH="${HYDRA_AUTOPILOT_STATE:-$DEFAULT_STATE_PATH}"
+STATE_PATH="$(python3 "${RUN_LEDGER}" path)"
 HEARTBEAT_PATH="${HYDRA_AUTOPILOT_HEARTBEAT:-$DEFAULT_HEARTBEAT_PATH}"
 LOG_PATH="${HYDRA_AUTOPILOT_LOG:-$DEFAULT_LOG_PATH}"
 if [ "${STATE_PATH}" != "${DEFAULT_STATE_PATH}" ] \
@@ -1174,7 +1177,7 @@ STARTED_EPOCH="$(date -u +%s)"
 # `_filter_stale_slot_events` is the load-bearing backstop for the case where
 # the brain forgets to export it (a missed export just replays CURRENT-run
 # entries, which reap idempotence + the escalation attempt cap absorb).
-SLOT_EVENTS_LAST_ID_SEED="${STARTED_EPOCH}000-0"
+# (Issue #5072: run_ledger.py's seed_initial derives it from `now`=STARTED_EPOCH.)
 
 # Schema version handshake (issue #434).
 #
@@ -1199,7 +1202,9 @@ SLOT_EVENTS_LAST_ID_SEED="${STARTED_EPOCH}000-0"
 # list generated per #4909). A v1 state.json (no
 # schema_version field, ten-slot shape) is detected at Phase 0 as a
 # legacy run; bootstrap re-runs and writes v2 on the next tick.
-SCHEMA_VERSION=2
+#
+# The integer has ONE home: run_ledger.py (issue #5072, INV-5).
+SCHEMA_VERSION="$(python3 "${RUN_LEDGER}" schema-version)"
 
 # Issue #1666 — carry the forced-research daily cap across runs.
 #
@@ -1629,45 +1634,38 @@ fi
 #     heartbeat.py for the dashboard; the run-hash copy is 0 only for a run that
 #     exits before the surrogate accumulates (a 1-2-turn print-mode run).
 #
-# Backward compat: this heredoc OVERWRITES the existing file. A v1
+# Backward compat: the seed OVERWRITES the existing file. A v1
 # legacy state.json (or a v2 state.json with `slots: {}` empty) is
 # clobbered on each bootstrap, so no migration path is needed —
 # bootstrap is always run before the brain reads state.
-cat > "${STATE_PATH}" <<EOF
-{
-  "started": "${STARTED_AT}",
-  "started_epoch": ${STARTED_EPOCH},
-  "pid": ${PID},
-  "run_id": "${RUN_ID}",
-  "slot_events_last_id": "${SLOT_EVENTS_LAST_ID_SEED}",
-  "limits": {
-    "token_budget": ${TOKEN_BUDGET},
-    "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},
-    "idle_drain_turns": ${IDLE_DRAIN_TURNS},
-    "context_compaction_turns": ${CONTEXT_COMPACTION_TURNS},
-    "quota_5h_max_pts": ${QUOTA_5H_MAX},
-    "quota_week_max_pts": ${QUOTA_WEEK_MAX},
-    "scope": "${SCOPE}",
-    "subagent_max_tokens": ${SUBAGENT_MAX_TOKENS},
-    "subagent_hard_max_tokens": ${SUBAGENT_HARD_MAX_TOKENS},
-    "unattended": ${UNATTENDED},
-    "schema_version": ${SCHEMA_VERSION},
-    "daily_spend_cap_usd": ${DAILY_SPEND_CAP_USD},
-    "scout_cost_share": ${SCOUT_COST_SHARE}
-  },
-  "cumulative_tokens": 0,
-  "dispatches": 0,
-  "turn": 0,
-  "burned_classes": [],
-  "reaped_task_ids": [],
-  "failure_log": [],
-  "research_force_counter": ${RESEARCH_FORCE_SEED},
-  "dev_resume_pending": ${DEV_RESUME_PENDING_SEED},
-  "zero_yield_backoff": ${ZERO_YIELD_BACKOFF_SEED},
-  "slots": ${SLOTS_JSON},
-  "signal_last_fired": ${SIGNAL_LAST_FIRED_JSON}
-}
-EOF
+# Issue #5072 — the document is written by the Run Ledger (run_ledger.py seed),
+# the one atomic writer; every value below was computed above by the existing
+# bash/jq/Redis blocks and is passed verbatim as a JSON literal. An unknown or
+# missing key exits 2 before any write.
+if ! python3 "${RUN_LEDGER}" seed "${STATE_PATH}" \
+  "now=${STARTED_EPOCH}" \
+  "pid=${PID}" \
+  "run_id=\"${RUN_ID}\"" \
+  "token_budget=${TOKEN_BUDGET}" \
+  "wall_clock_max_sec=${WALL_CLOCK_MAX_SEC}" \
+  "idle_drain_turns=${IDLE_DRAIN_TURNS}" \
+  "context_compaction_turns=${CONTEXT_COMPACTION_TURNS}" \
+  "quota_5h_max_pts=${QUOTA_5H_MAX}" \
+  "quota_week_max_pts=${QUOTA_WEEK_MAX}" \
+  "scope=\"${SCOPE}\"" \
+  "subagent_max_tokens=${SUBAGENT_MAX_TOKENS}" \
+  "subagent_hard_max_tokens=${SUBAGENT_HARD_MAX_TOKENS}" \
+  "unattended=${UNATTENDED}" \
+  "daily_spend_cap_usd=${DAILY_SPEND_CAP_USD}" \
+  "scout_cost_share=${SCOUT_COST_SHARE}" \
+  "research_force_counter=${RESEARCH_FORCE_SEED}" \
+  "dev_resume_pending=${DEV_RESUME_PENDING_SEED}" \
+  "zero_yield_backoff=${ZERO_YIELD_BACKOFF_SEED}" \
+  "slots=${SLOTS_JSON}" \
+  "signal_last_fired=${SIGNAL_LAST_FIRED_JSON}"; then
+  echo "[autopilot] FATAL: run_ledger.py seed failed (state path ${STATE_PATH})"
+  exit 1
+fi
 
 # Echo resolved limits so the model captures them in conversation context
 echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} context_compaction_turns=${CONTEXT_COMPACTION_TURNS} quota_5h_max_pts=${QUOTA_5H_MAX} quota_week_max_pts=${QUOTA_WEEK_MAX} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED} schema_version=${SCHEMA_VERSION} daily_spend_cap_usd=${DAILY_SPEND_CAP_USD} scout_cost_share=${SCOUT_COST_SHARE}"
