@@ -93,5 +93,7 @@ export const RetroArtifactSchema = z
     findings: z.array(RetroFindingSchema),
     emitted: z.array(RetroEmittedRefSchema),
     summary: z.string().optional(),
+    /** `type:severity` keys of the stuck signals this retro drilled (#5029). */
+    drilledStuckSignals: z.array(z.string()).optional(),
   })
   .strict();

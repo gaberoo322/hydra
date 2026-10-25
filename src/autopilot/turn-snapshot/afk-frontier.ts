@@ -159,7 +159,7 @@ export function foldRetroBundle(body: string): boolean {
   if (b.runFound !== true) return true;
   const dispatches = "dispatches" in b ? b.dispatches : [];
   const anyFlagged = Array.isArray(dispatches) ? dispatches.some((x) => isObj(x) && isSet(x.flagged)) : false;
-  return anyFlagged || isSet(b.reflections) || isSet(b.stuckSignals) || isSet(b.recommendations) || b.runFlagged === true;
+  return anyFlagged || isSet(b.reflections) || isSet("novelStuckSignals" in b ? b.novelStuckSignals : b.stuckSignals) || isSet(b.recommendations) || b.runFlagged === true;
 }
 
 export interface RetroValue {

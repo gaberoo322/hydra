@@ -34,6 +34,8 @@ import {
   drillReasonOf,
   flagDispatchesForDrill,
   flagRunForDrill,
+  novelStuckSignals,
+  stuckSignalKey,
   projectDispatches,
   DEV_SHORT_CIRCUIT_MAX_MS,
   RUN_DRILL_TERM_REASONS,
@@ -121,6 +123,8 @@ function baseDeps(over: Partial<RetroBundleDeps> = {}): RetroBundleDeps {
     readAnchorReflections: async () => ({ content: "", count: 0 }),
     readFrictionPatterns: async () => [],
     readStuckSignals: async () => [],
+    // Issue #5029: default to "no prior retro artifact" so cases stay Redis-free.
+    readRecentRetroArtifacts: async () => [],
     // Issue #3972: default to an empty window so pre-existing cases stay
     // Redis-free and exercise the empty-trend path unchanged.
     readCrossRunTrend: async () => ({ ok: true as const, records: [] }),
@@ -2532,5 +2536,104 @@ describe("run 9cd3a485 — forward-fix drills + completed buckets (#4856)", () =
     assert.ok(dev);
     assert.equal(dev!.outcomes.merged, 1);
     assert.equal(dev!.tokensPerMerged, 150_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// issue #5029 — stuck-signal novelty vs the prior retro artifact
+// ---------------------------------------------------------------------------
+
+describe("stuck-signal novelty (issue #5029)", () => {
+  const loop = (summary: string, severity: "warn" | "critical" = "warn") =>
+    ({ type: "unproductive-loop", severity, summary, evidence: {} }) as any;
+
+  test("stuckSignalKey is type:severity and ignores summary/evidence", () => {
+    assert.equal(stuckSignalKey(loop("30 dispatches")), "unproductive-loop:warn");
+    assert.equal(stuckSignalKey(loop("31 dispatches")), stuckSignalKey(loop("30 dispatches")));
+    assert.notEqual(stuckSignalKey(loop("x", "critical")), stuckSignalKey(loop("x")));
+  });
+
+  test("novelStuckSignals: null prior or absent field -> all novel; seen key -> dropped; severity flip -> novel", () => {
+    const sigs = [loop("a")];
+    assert.deepEqual(novelStuckSignals(sigs, null), sigs);
+    assert.deepEqual(novelStuckSignals(sigs, {}), sigs);
+    assert.deepEqual(novelStuckSignals(sigs, { drilledStuckSignals: ["unproductive-loop:warn"] }), []);
+    assert.equal(novelStuckSignals([loop("a", "critical")], { drilledStuckSignals: ["unproductive-loop:warn"] }).length, 1);
+  });
+
+  test("bundle: prior artifact that drilled the signal -> novelStuckSignals empty, stuckSignals untouched", async () => {
+    const bundle = await assembleRetroBundle(
+      "run-1",
+      baseDeps({
+        readStuckSignals: async () => [loop("30 dispatches")],
+        readRecentRetroArtifacts: async () =>
+          [{ run_id: "run-0", generatedAt: "2026-06-01T00:00:00.000Z", drilledStuckSignals: ["unproductive-loop:warn"] }] as any,
+      }),
+    );
+    assert.equal(bundle.stuckSignals.length, 1);
+    assert.deepEqual(bundle.novelStuckSignals, []);
+    assert.equal(bundle.priorRetro?.run_id, "run-0");
+  });
+
+  test("bundle: newest artifact lacking the field is skipped; older artifact carrying it sets novelty", async () => {
+    const bundle = await assembleRetroBundle(
+      "run-1",
+      baseDeps({
+        readStuckSignals: async () => [loop("30 dispatches")],
+        readRecentRetroArtifacts: async () =>
+          [
+            { run_id: "run-audit", generatedAt: "2026-06-02T00:00:00.000Z" },
+            { run_id: "run-0", generatedAt: "2026-06-01T00:00:00.000Z", drilledStuckSignals: ["unproductive-loop:warn"] },
+          ] as any,
+      }),
+    );
+    assert.equal(bundle.priorRetro?.run_id, "run-0");
+    assert.deepEqual(bundle.novelStuckSignals, []);
+  });
+
+  test("bundle: no artifact carries the field -> priorRetro null, all novel", async () => {
+    const bundle = await assembleRetroBundle(
+      "run-1",
+      baseDeps({
+        readStuckSignals: async () => [loop("a")],
+        readRecentRetroArtifacts: async () => [{ run_id: "r", generatedAt: "2026-06-01T00:00:00.000Z" }] as any,
+      }),
+    );
+    assert.equal(bundle.priorRetro, null);
+    assert.equal(bundle.novelStuckSignals.length, 1);
+  });
+
+  test("bundle: stuckSignalKeys lists every signal key (not only novel ones)", async () => {
+    const bundle = await assembleRetroBundle(
+      "run-1",
+      baseDeps({
+        readStuckSignals: async () => [loop("a"), loop("b", "critical")],
+        readRecentRetroArtifacts: async () =>
+          [{ run_id: "run-0", generatedAt: "2026-06-01T00:00:00.000Z", drilledStuckSignals: ["unproductive-loop:warn"] }] as any,
+      }),
+    );
+    assert.deepEqual(bundle.stuckSignalKeys, ["unproductive-loop:warn", "unproductive-loop:critical"]);
+    assert.equal(bundle.novelStuckSignals.length, 1);
+  });
+
+  test("bundle: no prior artifact -> priorRetro null and every signal novel", async () => {
+    const bundle = await assembleRetroBundle("run-1", baseDeps({ readStuckSignals: async () => [loop("a")] }));
+    assert.equal(bundle.priorRetro, null);
+    assert.equal(bundle.novelStuckSignals.length, 1);
+  });
+
+  test("bundle: a throwing prior-retro read fails open and is recorded in errors[]", async () => {
+    const bundle = await assembleRetroBundle(
+      "run-1",
+      baseDeps({
+        readStuckSignals: async () => [loop("a")],
+        readRecentRetroArtifacts: async () => {
+          throw new Error("redis down");
+        },
+      }),
+    );
+    assert.equal(bundle.priorRetro, null);
+    assert.equal(bundle.novelStuckSignals.length, 1);
+    assert.ok(bundle.errors.some((e) => e.source === "prior-retro"));
   });
 });

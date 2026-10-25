@@ -128,6 +128,15 @@ describe("redis/retro-artifacts — persist + read", () => {
     assert.deepEqual(read, artifact);
   });
 
+  test("drilledStuckSignals (optional, #5029) round-trips; absent stays absent", async () => {
+    const { redis } = makeFakeRedis();
+    await persistRetroArtifact(makeArtifact({ drilledStuckSignals: ["unproductive-loop:warn"] }), redis);
+    assert.deepEqual((await getRetroArtifact("run-abc", redis))?.drilledStuckSignals, ["unproductive-loop:warn"]);
+    const fresh = makeFakeRedis();
+    await persistRetroArtifact(makeArtifact(), fresh.redis);
+    assert.equal((await getRetroArtifact("run-abc", fresh.redis))?.drilledStuckSignals, undefined);
+  });
+
   test("getRetroArtifact returns null for an absent run", async () => {
     const { redis } = makeFakeRedis();
     assert.equal(await getRetroArtifact("nope", redis), null);
@@ -247,6 +256,12 @@ describe("schemas/retro — RetroArtifactSchema", () => {
   test("accepts a well-formed artifact", () => {
     const parsed = RetroArtifactSchema.safeParse(makeArtifact());
     assert.equal(parsed.success, true);
+  });
+
+  test("accepts drilledStuckSignals (#5029); rejects non-string entries and still rejects unknown keys", () => {
+    assert.equal(RetroArtifactSchema.safeParse(makeArtifact({ drilledStuckSignals: ["unproductive-loop:warn"] })).success, true);
+    assert.equal(RetroArtifactSchema.safeParse(makeArtifact({ drilledStuckSignals: [1] as any })).success, false);
+    assert.equal(RetroArtifactSchema.safeParse({ ...makeArtifact(), bogus: 1 }).success, false);
   });
 
   test("rejects an empty run_id", () => {

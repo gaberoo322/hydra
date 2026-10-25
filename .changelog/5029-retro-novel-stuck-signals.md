@@ -1,0 +1,1 @@
+- fix: stop the daily retro re-firing on a stuck signal the previous retro already drilled (#5029)
