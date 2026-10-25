@@ -1788,7 +1788,7 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     );
   });
 
-  test("(c) a re-seeded dev_target slot (task_id only) still resolves the token and holds qa_target", () => {
+  test("(c) a re-seeded dev_target slot (hash task_id + worktreeBranch/dispatch_id) still resolves the token and holds qa_target", () => {
     const state = baseState({
       signals: {
         needs_qa_target: true,
@@ -1797,7 +1797,9 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
       },
     });
     state.slots.dev_target = {
-      task_id: "worktree-agent-abcdef01-t2-dev_target",
+      task_id: "abcdef0123456789",
+      worktreeBranch: "worktree-agent-abcdef01-t2-dev_target",
+      dispatch_id: "worktree-agent-abcdef01-t2-dev_target",
       skill: "hydra-target-build",
       started: new Date().toISOString(),
       started_epoch: Math.floor(Date.now() / 1000),
@@ -1807,7 +1809,7 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     assert.equal(
       findAction(plan, qaTarget),
       undefined,
-      "a deriveInflightSlotSeed-reseeded slot (task_id only) must still resolve via the task_id link",
+      "a deriveInflightSlotSeed-reseeded slot must still resolve via the worktreeBranch/dispatch_id link",
     );
   });
 

@@ -38,6 +38,13 @@ CLI (bootstrap.sh is the caller; never invoked with a leading `--`):
       missing/unreadable/malformed input — NEVER raises, matching the
       pre-existing bash/jq behaviour (an empty/failed jq read also became 0).
 
+  seed-filter <prior state.json path>
+      Issue #5142: reads bootstrap's merged slots seed JSON on stdin and
+      nulls every seeded slot whose task_id / worktreeBranch / dispatch_id
+      the PRIOR run already reaped (its `reaped_task_ids`). Un-reaped
+      (genuinely in-flight) slots are untouched. Fail-open: any error echoes
+      stdin unchanged.
+
   post-run-end --api-base URL --run-id ID --cause CAUSE --exit-code N
                --payload JSON [--backoffs "4 8 16"] [--state PATH]
       Bounded-retry POST to <api-base>/api/autopilot/run-end, replicating
@@ -378,6 +385,50 @@ def _cli_count_slots(argv: list) -> int:
     return 0
 
 
+def filter_reaped_seed(seed: dict, reaped_task_ids: list) -> dict:
+    """Null every seeded slot the prior run already reaped (issue #5142).
+
+    Pure. `seed` is bootstrap's merged slots object (`{cls: slot|null}`); a
+    `{"slots": {...}}` envelope is also accepted. A slot matches when its
+    task_id, worktreeBranch or dispatch_id is in `reaped_task_ids`. Nulling
+    (not deleting) keeps the 7-key all-slots schema bootstrap pins.
+    """
+    reaped = {t for t in reaped_task_ids if isinstance(t, str) and t}
+
+    def _clean(slots: dict) -> dict:
+        out = {}
+        for cls, slot in slots.items():
+            if isinstance(slot, dict) and any(
+                slot.get(k) in reaped for k in ("task_id", "worktreeBranch", "dispatch_id")
+            ):
+                out[cls] = None
+            else:
+                out[cls] = slot
+        return out
+
+    if isinstance(seed.get("slots"), dict):
+        return {**seed, "slots": _clean(seed["slots"])}
+    return _clean(seed)
+
+
+def _cli_seed_filter(argv: list) -> int:
+    raw = sys.stdin.read()
+    try:
+        seed = json.loads(raw)
+        if not isinstance(seed, dict):
+            raise ValueError("seed is not a JSON object")
+        reaped: list = []
+        if argv and Path(argv[0]).is_file():
+            prior = json.loads(Path(argv[0]).read_text())
+            if isinstance(prior, dict) and isinstance(prior.get("reaped_task_ids"), list):
+                reaped = prior["reaped_task_ids"]
+        sys.stdout.write(json.dumps(filter_reaped_seed(seed, reaped), separators=(",", ":")))
+    except Exception as exc:
+        print(f"[autopilot] seed_filter_skipped err={exc}", file=sys.stderr)
+        sys.stdout.write(raw)
+    return 0
+
+
 def _cli_post_run_end(argv: list) -> int:
     parser = argparse.ArgumentParser(prog="run_termination.py post-run-end")
     parser.add_argument("--api-base", required=True)
@@ -520,6 +571,8 @@ def main(argv: list) -> int:
     cmd, rest = argv[0], argv[1:]
     if cmd == "count-slots":
         return _cli_count_slots(rest)
+    if cmd == "seed-filter":
+        return _cli_seed_filter(rest)
     if cmd == "post-run-end":
         return _cli_post_run_end(rest)
     if cmd == "post-run-tally":

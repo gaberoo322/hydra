@@ -1554,6 +1554,16 @@ if [ "${ISOLATED_RUN}" != "1" ] && command -v jq >/dev/null 2>&1; then
     SLOTS_MERGED="$(printf '%s' "${SLOTS_SEED_RAW}" | jq -c --argjson base "${SLOTS_BASE}" '
       ($base) + (if ((.slots // {}) | type) == "object" then .slots else {} end)
     ' 2>/dev/null || echo "")"
+    # Issue #5142: drop any seeded slot the PRIOR run already reaped (its
+    # state.json reaped_task_ids) — read BEFORE the heredoc below clobbers the
+    # file. Fail-open: a filter failure keeps SLOTS_MERGED unchanged.
+    if [ -n "${SLOTS_MERGED}" ] && [ -f "${STATE_PATH}" ]; then
+      SLOTS_FILTERED="$(printf '%s' "${SLOTS_MERGED}" | python3 "$(dirname "$0")/run_termination.py" seed-filter "${STATE_PATH}" 2>/dev/null || echo "")"
+      case "${SLOTS_FILTERED}" in
+        "{"*) SLOTS_MERGED="${SLOTS_FILTERED}" ;;
+        *) ;;
+      esac
+    fi
     case "${SLOTS_MERGED}" in
       "{"*) SLOTS_JSON="${SLOTS_MERGED}" ;;
       *) SLOTS_JSON="${SLOTS_BASE}" ;;

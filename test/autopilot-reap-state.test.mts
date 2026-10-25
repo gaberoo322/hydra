@@ -430,3 +430,56 @@ reap_state._append_log("cycle_record_fired cycleId=fixture cycle=recorded")
     }
   });
 });
+
+describe("run_termination.py seed-filter — reaped slots are never re-seeded (issue #5142)", () => {
+  const RUN_TERMINATION = join(SCRIPTS, "run_termination.py");
+
+  function seedFilter(stdin: string, priorState: string | null) {
+    const tmp = makeTmp();
+    try {
+      const args = [RUN_TERMINATION, "seed-filter"];
+      if (priorState !== null) {
+        writeFileSync(tmp.state, priorState);
+        args.push(tmp.state);
+      } else {
+        args.push(join(tmp.dir, "absent.json"));
+      }
+      const r = spawnSync("python3", args, { input: stdin, encoding: "utf-8" });
+      return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  }
+
+  const SEED = JSON.stringify({
+    dev_orch: { task_id: "bbbb", worktreeBranch: "worktree-agent-bbbb-t1-dev_orch", skill: "hydra-dev" },
+    qa_orch: { task_id: "aaaa", worktreeBranch: "worktree-agent-aaaa-t1-qa_orch", skill: "hydra-qa" },
+    dev_target: null,
+  });
+
+  test("drops the reaped slot, keeps the genuinely in-flight one", () => {
+    const r = seedFilter(SEED, JSON.stringify({ reaped_task_ids: ["aaaa"] }));
+    assert.equal(r.status, 0);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.qa_orch, null, "reaped qa_orch slot is nulled");
+    assert.equal(out.dev_orch.task_id, "bbbb", "un-reaped dev_orch slot carried over");
+    assert.equal(out.dev_target, null);
+  });
+
+  test("a reaped worktree branch also matches", () => {
+    const r = seedFilter(SEED, JSON.stringify({ reaped_task_ids: ["worktree-agent-bbbb-t1-dev_orch"] }));
+    assert.equal(JSON.parse(r.stdout).dev_orch, null);
+  });
+
+  test("missing prior state file leaves the seed unchanged", () => {
+    const r = seedFilter(SEED, null);
+    assert.deepEqual(JSON.parse(r.stdout), JSON.parse(SEED));
+  });
+
+  test("malformed stdin is echoed back unchanged with exit 0 (fail-open)", () => {
+    const r = seedFilter("not json", JSON.stringify({ reaped_task_ids: ["aaaa"] }));
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout, "not json");
+    assert.match(r.stderr, /seed_filter_skipped/);
+  });
+});
