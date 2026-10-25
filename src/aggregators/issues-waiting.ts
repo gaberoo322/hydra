@@ -350,6 +350,11 @@ function hasValidDate(createdAt: string): boolean {
  * Pure — the issue half of `StuckItems` (`/api/v2/today/stuck`). Admitted rows
  * carrying `blocked` / `needs-info` that clear the shared threshold. The PR
  * bucket (`prsWithFailedCi`) is a PR read and stays in stuck-items.ts.
+ *
+ * DELIBERATE divergence from legacy `getStuckItems` (design-concept INV-5):
+ * this filters the CLASSIFIED rows, not raw label rows, so Epic-labelled
+ * issues and machine-owned-blocker suppressions drop out of the stuck
+ * buckets. Slice 2 switches consumers onto this narrowed set on purpose.
  */
 export function projectStuckIssues(read: WaitingIssuesRead): {
   blockedOver2d: StuckIssue[];
