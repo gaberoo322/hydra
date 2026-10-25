@@ -5,6 +5,7 @@ import {
   classifyRollupEntry,
   foldRollup,
   isRed,
+  isSettled,
 } from "../src/github/check-rollup.ts";
 
 const run = (name: string, conclusion: string, extra: Record<string, string> = {}) => ({
@@ -95,5 +96,30 @@ describe("predicates", () => {
     const f = foldRollup([run("a", "")]);
     assert.equal(isRed(f), false);
     assert.equal(blocksMerge(f), true);
+  });
+});
+
+describe("isSettled and started-only order (#5089)", () => {
+  it("isSettled: absent / pending required are unsettled; cancelled and green are settled", () => {
+    assert.equal(isSettled(foldRollup([run("a", "SUCCESS")], { required: ["a", "b"] })), false);
+    assert.equal(isSettled(foldRollup([run("a", "")], { required: ["a"] })), false);
+    assert.equal(isSettled(foldRollup([run("a", "CANCELLED")], { required: ["a"] })), true);
+    assert.equal(isSettled(foldRollup([run("a", "SUCCESS")], { required: ["a"] })), true);
+    assert.equal(isSettled(foldRollup([], { required: [] })), true);
+  });
+  it("red + pending: isRed true, isSettled false", () => {
+    const f = foldRollup([run("a", "FAILURE"), run("b", "")], { required: ["a", "b"] });
+    assert.equal(isRed(f), true);
+    assert.equal(isSettled(f), false);
+  });
+  it("started-only picks the later-startedAt CANCELLED over an earlier FAILURE", () => {
+    const f = foldRollup(
+      [
+        run("a", "CANCELLED", { startedAt: "2026-01-02T00:00:00Z", completedAt: "2026-01-02T00:00:01Z" }),
+        run("a", "FAILURE", { startedAt: "2026-01-01T00:00:00Z", completedAt: "2026-01-03T00:00:00Z" }),
+      ],
+      { required: ["a"], order: "started-only" },
+    );
+    assert.equal(isRed(f), false);
   });
 });

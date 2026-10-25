@@ -45,6 +45,8 @@
  * `DegradedMarker` plus a stderr note naming the same reason code.
  */
 
+import { foldRollup, isRed, isSettled } from "../../github/check-rollup.ts";
+import { parseRequiredStatusContexts, parseRollupEntries } from "../../github/prs.ts";
 import { closedIssues, referencedIssues, type PrRefRow } from "../../github/pr-refs.ts";
 import { DEGRADE, degradeDetail, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import {
@@ -367,47 +369,16 @@ interface ResumeCandidate {
   readonly settled: boolean;
 }
 
-const RED_CONCLUSIONS = new Set(["FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED"]);
-
 /**
- * De-duplicate rollup entries by check name KEEPING THE LATEST (greatest
- * startedAt; ties → later list index). CheckRun rows key on `name`,
- * StatusContext rows on `context`. CANCELLED is never red (#4460 INV-4).
+ * Required-check verdict for one PR over the shared fold (src/github/check-rollup.ts).
+ * `started-only` order is the brain's rule since #4460, pinned unconditionally
+ * (#5089 INV-2). `settled` = no required context pending (absent counts as
+ * pending); `red` is only meaningful when settled (a red+pending PR is not red).
  */
-function rollupLatest(rollup: readonly unknown[]): Map<string, { pending: boolean; red: boolean }> {
-  const latest = new Map<string, { started: number; pending: boolean; red: boolean }>();
-  rollup.forEach((raw) => {
-    const e = asRow(raw);
-    if (e === null) return;
-    const name = isSet(e.name) ? e.name : isSet(e.context) ? e.context : "";
-    if (!isSet(name)) return;
-    const key = typeof name === "string" ? name : `\u0000${JSON.stringify(name)}`;
-    let pending: boolean;
-    let red: boolean;
-    if ("conclusion" in e || e.__typename === "CheckRun") {
-      const status = upper(e.status);
-      pending = status !== "COMPLETED";
-      red = status === "COMPLETED" && RED_CONCLUSIONS.has(upper(e.conclusion));
-    } else {
-      const state = upper(e.state);
-      pending = state === "" || state === "PENDING" || state === "EXPECTED";
-      red = state === "FAILURE" || state === "ERROR";
-    }
-    const started = ghTimestampSeconds(e.startedAt) || 0;
-    const prev = latest.get(key);
-    if (prev === undefined || started >= prev.started) latest.set(key, { started, pending, red });
-  });
-  return new Map([...latest].map(([k, v]) => [k, { pending: v.pending, red: v.red }]));
-}
-
-/** Required-check verdict for one PR: `null` = some required context missing or pending. */
-function requiredVerdict(rollup: unknown, required: ReadonlySet<string>): { red: boolean } | null {
-  if (!Array.isArray(rollup)) return null;
-  const latest = rollupLatest(rollup);
-  const entries = [...latest].filter(([n]) => required.has(n)).map(([, v]) => v);
-  if (entries.length !== required.size) return null;
-  if (entries.some((v) => v.pending)) return null;
-  return { red: entries.some((v) => v.red) };
+function checkVerdictFor(rollup: unknown, required: ReadonlySet<string>): { settled: boolean; red: boolean } {
+  const fold = foldRollup(parseRollupEntries(rollup), { required: [...required], order: "started-only" });
+  const settled = isSettled(fold);
+  return { settled, red: settled && isRed(fold) };
 }
 
 /**
@@ -442,8 +413,8 @@ export function qaRecheckCandidates(
     if (state === "DIRTY" || state === "UNKNOWN") continue;
     const tier = parseTierLine(pr.body);
     if (tier === null) continue;
-    const verdict = requiredVerdict(pr.statusCheckRollup, required);
-    if (verdict === null || verdict.red) continue;
+    const verdict = checkVerdictFor(pr.statusCheckRollup, required);
+    if (!verdict.settled || verdict.red) continue;
     out.push({ pr: number, tier });
   }
   return out.sort((a, b) => a.pr - b.pr);
@@ -556,13 +527,13 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
       if (state === "DIRTY" || state === "UNKNOWN") continue;
       const updated = ghTimestampSeconds(pr.updatedAt);
       if (updated === null || now - updated < quiet) continue;
-      const verdict = requiredVerdict(pr.statusCheckRollup, req.value);
+      const verdict = checkVerdictFor(pr.statusCheckRollup, req.value);
       candidates.push({
         pr: number,
         headRefName: isSet(head) ? String(head) : null,
         row: pr,
-        red: verdict?.red === true,
-        settled: verdict !== null,
+        red: verdict.red,
+        settled: verdict.settled,
       });
     }
     // Memoised so the pick and the red-resume bucket read each PR's closing
@@ -705,12 +676,13 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
 // Input parsers (pure) — the JSON-vs-empty discipline of #4130
 // ---------------------------------------------------------------------------
 
-/** Branch protection `.contexts`: list → the set entries as strings; null/other JSON → healthy empty set. */
-function parseRequiredContexts(read: GhJsonRead): Classified<ReadonlySet<string>> {
+/** Branch protection `.contexts` (post-jq): the shared parser's list; null -> healthy empty set; other JSON -> malformed (fail closed). */
+function readRequiredContexts(read: GhJsonRead): Classified<ReadonlySet<string>> {
   if (read.kind === "empty") return { ok: false, reason: DEGRADE.EMPTY_PAYLOAD };
   if (read.kind === "unparseable") return { ok: false, reason: DEGRADE.UNPARSEABLE };
-  if (!Array.isArray(read.data)) return { ok: true, value: new Set() };
-  return { ok: true, value: new Set(read.data.filter(isSet).map(jsonText)) };
+  const contexts = parseRequiredStatusContexts({ contexts: read.data });
+  if (contexts === null) return { ok: false, reason: DEGRADE.MALFORMED_PAYLOAD };
+  return { ok: true, value: new Set(contexts) };
 }
 
 /** `[{"number": N}, …]` → the issue numbers. A non-iterable JSON value is a failed read (Python's TypeError). */
@@ -928,7 +900,7 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
     );
   }
 
-  const requiredContexts = parseRequiredContexts(requiredRead);
+  const requiredContexts = readRequiredContexts(requiredRead);
   const devResumeIssues = parseDevResumeIssues(resumeRead);
   const devResumeRows = parseNoPrResumeRows(resumeRead);
   if ("reason" in requiredContexts) degraded.push({ field: "requiredContexts", reason: requiredContexts.reason });
