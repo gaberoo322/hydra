@@ -566,15 +566,15 @@ describe("redis-db-launch — exit-code preservation (#4292, design INV-2)", () 
     const handlerStart = LAUNCHER_SOURCE.indexOf('child.on("exit"');
     assert.ok(handlerStart >= 0, "child exit handler not found");
     const handler = LAUNCHER_SOURCE.slice(handlerStart);
-    assert.match(handler, /process\.exit\(code \?\? 1\)/, "final exit must relay the child's code");
+    assert.match(handler, /exitWithVerdict\(code \?\? 1, suitesGate\)/, "final exit must relay the child's code");
     assert.match(
       handler,
-      /process\.exit\(code === 0 \? 1 : \(code \?\? 1\)\)/,
+      /exitWithVerdict\(code === 0 \? 1 : \(code \?\? 1\), "blocking"\)/,
       "the file-coverage verdict may only harden a green run to 1",
     );
     assert.doesNotMatch(
       handler,
-      /process\.exit\(0\)/,
+      /(?:process\.exit|exitWithVerdict)\(0[,)]/,
       "no path in the suite-count verdict may force a green exit",
     );
   });

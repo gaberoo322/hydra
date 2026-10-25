@@ -19,7 +19,7 @@ process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1050,5 +1050,139 @@ describe("test/_helpers/owned-redis-db decision matrix (issue #5062)", () => {
         `must throw for ${JSON.stringify(env)}`,
       );
     }
+  });
+});
+
+describe("scripts/test/redis-db-launch.mjs — terminal VERDICT line (#5106)", () => {
+  const LAUNCHER = fileURLToPath(
+    new URL("../scripts/test/redis-db-launch.mjs", import.meta.url),
+  );
+  const scratch: string[] = [];
+
+  after(() => {
+    for (const dir of scratch) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function runLauncher(
+    script: string,
+    extraArgs: string[] = [],
+    extraEnv: Record<string, string> = {},
+  ) {
+    const dir = mkdtempSync(join(tmpdir(), "redis-db-verdict-"));
+    scratch.push(dir);
+    // `npm test` sets HYDRA_FULL_SUITE=1 for this very process; scrub the gate
+    // switches so each case controls them explicitly via extraEnv.
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.HYDRA_FULL_SUITE;
+    delete env.SUITE_COUNT_GATE_BLOCKING;
+    Object.assign(env, extraEnv);
+    delete env.REDIS_URL;
+    return spawnSync(process.execPath, [LAUNCHER, process.execPath, "-e", script, ...extraArgs], {
+      cwd: dir,
+      env,
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+  }
+
+  function lastLine(stderr: string): string {
+    const lines = stderr.split("\n").filter((l) => l.trim() !== "");
+    return lines[lines.length - 1] ?? "";
+  }
+
+  test("VERDICT is the last stderr line on a clean exit", () => {
+    const run = runLauncher("process.exit(0)");
+    assert.equal(run.status, 0);
+    assert.match(
+      lastLine(run.stderr),
+      /^\[redis-db-launch\] VERDICT exit=0 outcome=PASS top-level-pass=n\/a top-level-fail=n\/a suites-gate=skipped$/,
+    );
+    assert.doesNotMatch(run.stdout, /VERDICT/, "stdout must stay untouched");
+  });
+
+  test("VERDICT exit= equals the launcher's real exit status on failure", () => {
+    const run = runLauncher("process.exit(3)");
+    const m = /VERDICT exit=(\d+) outcome=FAIL/.exec(lastLine(run.stderr));
+    assert.ok(m, `no FAIL verdict; stderr was: ${run.stderr}`);
+    assert.equal(run.status, Number(m[1]));
+    assert.equal(run.status, 3);
+  });
+
+  test("VERDICT follows the INFRA-KILL lines on a signal death", () => {
+    const run = runLauncher("process.kill(process.pid, 'SIGTERM')");
+    assert.equal(run.signal, "SIGTERM");
+    const last = lastLine(run.stderr);
+    assert.match(last, /VERDICT exit=signal:SIGTERM outcome=INFRA-KILL .* suites-gate=skipped$/);
+    assert.ok(run.stderr.indexOf("INFRA-KILL: test child") < run.stderr.indexOf("VERDICT"));
+  });
+
+  test("VERDICT reports capture-derived counts and suites-gate=advisory on a shortfall (spawn)", () => {
+    const baseline = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL("./fixtures/suite-count-baseline.json", import.meta.url)),
+        "utf8",
+      ),
+    ) as Record<string, number>;
+    const file = "test/redis-db-helper.test.mts";
+    assert.ok(baseline[file] > 2, "fixture premise: baseline expects more than the 2 captured entries");
+    // The child writes a 2-entry capture (1 ok, 1 not ok) into its cwd, the
+    // launcher's capture location: a partial shortfall against the baseline.
+    const script =
+      "const fs=require('fs');" +
+      `const e=(n,ok)=>JSON.stringify({file:'${file}',name:n,ok})+String.fromCharCode(10);` +
+      "fs.writeFileSync('.suite-count-capture.ndjson',e('a',true)+e('b',false));process.exit(0)";
+    const run = runLauncher(script, [file]);
+    assert.equal(run.status, 0, "advisory mode must not change the exit code");
+    assert.equal(
+      lastLine(run.stderr),
+      "[redis-db-launch] VERDICT exit=0 outcome=PASS top-level-pass=1 top-level-fail=1 suites-gate=advisory",
+    );
+  });
+
+  test("VERDICT exit= matches the real status on the blocking FILE-SET hard-fail (spawn)", () => {
+    const file = "test/zz-verdict-not-baselined.test.mts";
+    // Green child + unbaselined file under a full-suite run: launcher forces exit 1.
+    const green = runLauncher("process.exit(0)", [file], { HYDRA_FULL_SUITE: "1" });
+    assert.equal(green.status, 1);
+    assert.match(lastLine(green.stderr), /VERDICT exit=1 outcome=FAIL .* suites-gate=blocking$/);
+    // A genuine failure keeps its own exit code, and the verdict agrees.
+    const red = runLauncher("process.exit(3)", [file], { HYDRA_FULL_SUITE: "1" });
+    assert.equal(red.status, 3);
+    assert.match(lastLine(red.stderr), /VERDICT exit=3 outcome=FAIL .* suites-gate=blocking$/);
+  });
+
+  test("launcherVerdictLine formats n/a counts and every suites-gate value", async () => {
+    const { launcherVerdictLine } = await import("../scripts/test/redis-db-launch.mjs");
+    for (const g of ["ok", "advisory", "blocking", "skipped", "error"]) {
+      assert.equal(
+        launcherVerdictLine({ exit: 1, outcome: "FAIL", topLevelPass: 4, topLevelFail: 2, suitesGate: g }),
+        `[redis-db-launch] VERDICT exit=1 outcome=FAIL top-level-pass=4 top-level-fail=2 suites-gate=${g}`,
+      );
+    }
+    assert.match(
+      launcherVerdictLine({ exit: 0, outcome: "PASS", topLevelPass: null, topLevelFail: null, suitesGate: "ok" }),
+      /top-level-pass=n\/a top-level-fail=n\/a/,
+    );
+  });
+
+  test("captureTopLevelCounts counts only the ok field and tolerates a torn last line", async () => {
+    const { captureTopLevelCounts } = await import("../scripts/test/redis-db-launch.mjs");
+    const dir = mkdtempSync(join(tmpdir(), "redis-db-capture-"));
+    scratch.push(dir);
+    const p = join(dir, "cap.ndjson");
+    writeFileSync(
+      p,
+      '{"file":"a","name":"x","ok":true}\n{"file":"a","name":"y","ok":false}\n{"file":"b","name":"z","ok":true}\n{"file":',
+    );
+    assert.deepEqual(captureTopLevelCounts(p), { pass: 2, fail: 1 });
+    assert.equal(captureTopLevelCounts(join(dir, "missing")), null);
+  });
+
+  test("no bare process.exit remains in the child exit handler (single exit seam)", () => {
+    const src = readFileSync(LAUNCHER, "utf8");
+    const start = src.indexOf('child.on("exit"');
+    assert.ok(start > 0);
+    const body = src.slice(start);
+    assert.equal(body.includes("process.exit("), false);
   });
 });
