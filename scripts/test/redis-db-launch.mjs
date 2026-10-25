@@ -959,7 +959,7 @@ child.on("exit", async (code, signal) => {
     // Not a suite-count-instrumented test invocation (no --test-reporter
     // pointed at suite-count-check.mjs, or a non-test command) — nothing to
     // gate on.
-    exitWithVerdict(code ?? 1, "skipped");
+    exitWithVerdict(code ?? 1, suitesGate === "error" ? "error" : "skipped");
     return;
   }
   try {

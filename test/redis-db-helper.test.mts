@@ -1063,12 +1063,16 @@ describe("scripts/test/redis-db-launch.mjs — terminal VERDICT line (#5106)", (
     for (const dir of scratch) rmSync(dir, { recursive: true, force: true });
   });
 
-  function runLauncher(script: string) {
+  function runLauncher(
+    script: string,
+    extraArgs: string[] = [],
+    extraEnv: Record<string, string> = {},
+  ) {
     const dir = mkdtempSync(join(tmpdir(), "redis-db-verdict-"));
     scratch.push(dir);
-    const env: Record<string, string | undefined> = { ...process.env };
+    const env: Record<string, string | undefined> = { ...process.env, ...extraEnv };
     delete env.REDIS_URL;
-    return spawnSync(process.execPath, [LAUNCHER, process.execPath, "-e", script], {
+    return spawnSync(process.execPath, [LAUNCHER, process.execPath, "-e", script, ...extraArgs], {
       cwd: dir,
       env,
       encoding: "utf8",
@@ -1105,6 +1109,41 @@ describe("scripts/test/redis-db-launch.mjs — terminal VERDICT line (#5106)", (
     const last = lastLine(run.stderr);
     assert.match(last, /VERDICT exit=signal:SIGTERM outcome=INFRA-KILL .* suites-gate=skipped$/);
     assert.ok(run.stderr.indexOf("INFRA-KILL: test child") < run.stderr.indexOf("VERDICT"));
+  });
+
+  test("VERDICT reports capture-derived counts and suites-gate=advisory on a shortfall (spawn)", () => {
+    const baseline = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL("./fixtures/suite-count-baseline.json", import.meta.url)),
+        "utf8",
+      ),
+    ) as Record<string, number>;
+    const file = "test/redis-db-helper.test.mts";
+    assert.ok(baseline[file] > 2, "fixture premise: baseline expects more than the 2 captured entries");
+    // The child writes a 2-entry capture (1 ok, 1 not ok) into its cwd, the
+    // launcher's capture location: a partial shortfall against the baseline.
+    const script =
+      "const fs=require('fs');" +
+      `const e=(n,ok)=>JSON.stringify({file:'${file}',name:n,ok})+String.fromCharCode(10);` +
+      "fs.writeFileSync('.suite-count-capture.ndjson',e('a',true)+e('b',false));process.exit(0)";
+    const run = runLauncher(script, [file]);
+    assert.equal(run.status, 0, "advisory mode must not change the exit code");
+    assert.equal(
+      lastLine(run.stderr),
+      "[redis-db-launch] VERDICT exit=0 outcome=PASS top-level-pass=1 top-level-fail=1 suites-gate=advisory",
+    );
+  });
+
+  test("VERDICT exit= matches the real status on the blocking FILE-SET hard-fail (spawn)", () => {
+    const file = "test/zz-verdict-not-baselined.test.mts";
+    // Green child + unbaselined file under a full-suite run: launcher forces exit 1.
+    const green = runLauncher("process.exit(0)", [file], { HYDRA_FULL_SUITE: "1" });
+    assert.equal(green.status, 1);
+    assert.match(lastLine(green.stderr), /VERDICT exit=1 outcome=FAIL .* suites-gate=blocking$/);
+    // A genuine failure keeps its own exit code, and the verdict agrees.
+    const red = runLauncher("process.exit(3)", [file], { HYDRA_FULL_SUITE: "1" });
+    assert.equal(red.status, 3);
+    assert.match(lastLine(red.stderr), /VERDICT exit=3 outcome=FAIL .* suites-gate=blocking$/);
   });
 
   test("launcherVerdictLine formats n/a counts and every suites-gate value", async () => {
