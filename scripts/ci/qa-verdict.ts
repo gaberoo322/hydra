@@ -158,7 +158,8 @@ if (isMain) {
     let json: unknown;
     try {
       json = JSON.parse(raw);
-    } catch {
+    } catch (err) {
+      console.error("[qa-verdict] input is not valid JSON:", err);
       return usage([{ message: "input is not valid JSON" }]);
     }
     const key = phase as keyof typeof QaVerdictCliSchemas;
