@@ -59,8 +59,7 @@ function withDir<T>(fn: (dir: string) => T): T {
 }
 
 describe("run_ledger seed — golden vs the pre-change bootstrap heredoc", () => {
-  for (const name of ["heredoc-default.json", "heredoc-custom.json"]) {
-    test(`seed reproduces ${name}`, () => {
+  const goldenCase = (name: string) => () => {
       const golden = JSON.parse(readFileSync(join(FIXTURES, name), "utf-8"));
       withDir((dir) => {
         const path = join(dir, "state.json");
@@ -76,8 +75,9 @@ describe("run_ledger seed — golden vs the pre-change bootstrap heredoc", () =>
         assert.equal(typeof seeded.limits.unattended, "boolean");
         assert.equal(seeded.limits.schema_version, 2);
       });
-    });
-  }
+  };
+  test("seed reproduces heredoc-default.json", goldenCase("heredoc-default.json"));
+  test("seed reproduces heredoc-custom.json", goldenCase("heredoc-custom.json"));
 
   test("ints do not become floats and floats keep their value", () => {
     const golden = JSON.parse(readFileSync(join(FIXTURES, "heredoc-custom.json"), "utf-8"));
