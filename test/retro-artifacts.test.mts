@@ -128,6 +128,15 @@ describe("redis/retro-artifacts — persist + read", () => {
     assert.deepEqual(read, artifact);
   });
 
+  test("drilledStuckSignals (optional, #5029) round-trips; absent stays absent", async () => {
+    const { redis } = makeFakeRedis();
+    await persistRetroArtifact(makeArtifact({ drilledStuckSignals: ["unproductive-loop:warn"] }), redis);
+    assert.deepEqual((await getRetroArtifact("run-abc", redis))?.drilledStuckSignals, ["unproductive-loop:warn"]);
+    const fresh = makeFakeRedis();
+    await persistRetroArtifact(makeArtifact(), fresh.redis);
+    assert.equal((await getRetroArtifact("run-abc", fresh.redis))?.drilledStuckSignals, undefined);
+  });
+
   test("getRetroArtifact returns null for an absent run", async () => {
     const { redis } = makeFakeRedis();
     assert.equal(await getRetroArtifact("nope", redis), null);

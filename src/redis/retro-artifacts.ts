@@ -128,6 +128,13 @@ export interface RetroArtifact {
    * the run record (which may have expired before the artifact does).
    */
   summary?: string;
+  /**
+   * Issue #5029: `${type}:${severity}` keys (`stuckSignalKey`) of EVERY stuck
+   * signal the retro saw in its bundle. The next bundle compares against the
+   * newest artifact's list to compute `novelStuckSignals`. Optional: artifacts
+   * written before #5029 read as "saw no signals".
+   */
+  drilledStuckSignals?: string[];
 }
 
 // ---------------------------------------------------------------------------

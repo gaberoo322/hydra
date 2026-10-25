@@ -36,6 +36,7 @@
  */
 
 import { bucketDispatchOutcome } from "./cycle-status.ts";
+import type { StuckSignal } from "./run-health.ts";
 // Issue #4856: the taxonomy-derived PR-producing class set (a constant import —
 // no I/O function is pulled in beyond the taxonomy's one-time classes.json
 // load, same precedent as cross-run-trend.ts's CYCLE_RECORD_SKILLS complement
@@ -986,4 +987,34 @@ export function confirmDrillableCycleIds(
     }
   }
   return dispatches;
+}
+
+// ---------------------------------------------------------------------------
+// Stuck-signal novelty (issue #5029)
+// ---------------------------------------------------------------------------
+
+/**
+ * The fingerprint of a stuck signal for the "already seen by the last retro"
+ * compare: `${type}:${severity}`. `summary` and `evidence` are deliberately
+ * excluded — they embed rolling counts that drift between turns, so keying on
+ * them would make the compare inert. `severity` is included so a warn ->
+ * critical flip re-admits a retro. The ONE definition: the bundle's compare and
+ * the hydra-retro playbook's `drilledStuckSignals` write both use it.
+ */
+export function stuckSignalKey(s: Pick<StuckSignal, "type" | "severity">): string {
+  return `${s.type}:${s.severity}`;
+}
+
+/**
+ * The subset of `signals` whose {@link stuckSignalKey} is absent from the
+ * prior retro's `drilledStuckSignals`. A null prior (no artifact / failed read)
+ * or an artifact without the field (written before #5029) saw nothing, so
+ * every signal is novel.
+ */
+export function novelStuckSignals(
+  signals: StuckSignal[],
+  prior: { drilledStuckSignals?: string[] } | null,
+): StuckSignal[] {
+  const seen = new Set(prior?.drilledStuckSignals ?? []);
+  return signals.filter((s) => !seen.has(stuckSignalKey(s)));
 }
