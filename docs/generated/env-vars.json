@@ -388,15 +388,15 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1543
+          "line": 1548
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1711
+          "line": 1709
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1738
+          "line": 1736
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
@@ -610,13 +610,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1055
+          "line": 1058
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1055
+        "line": 1058
       }
     },
     {
@@ -666,13 +666,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1119
+          "line": 1122
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1119
+        "line": 1122
       }
     },
     {
@@ -720,7 +720,7 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 912
+          "line": 915
         },
         {
           "path": "scripts/autopilot/status.sh",
@@ -746,13 +746,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1049
+          "line": 1052
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1049
+        "line": 1052
       }
     },
     {
@@ -810,7 +810,7 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 913
+          "line": 916
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
@@ -854,13 +854,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1048
+          "line": 1051
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1048
+        "line": 1051
       }
     },
     {
@@ -904,13 +904,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1074
+          "line": 1077
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1074
+        "line": 1077
       }
     },
     {
@@ -918,13 +918,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1075
+          "line": 1078
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1075
+        "line": 1078
       }
     },
     {
@@ -1026,19 +1026,19 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 948
+          "line": 951
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 952
+          "line": 955
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1249
+          "line": 1254
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1474
+          "line": 1479
         }
       ],
       "inEnvExample": false,
@@ -1106,13 +1106,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1123
+          "line": 1126
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1123
+        "line": 1126
       }
     },
     {
@@ -1120,13 +1120,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1120
+          "line": 1123
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1120
+        "line": 1123
       }
     },
     {
@@ -1245,10 +1245,6 @@
           "line": 603
         },
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 911
-        },
-        {
           "path": "scripts/autopilot/drain.sh",
           "line": 26
         },
@@ -1284,13 +1280,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1104
+          "line": 1107
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1104
+        "line": 1107
       }
     },
     {
@@ -1298,13 +1294,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1103
+          "line": 1106
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1103
+        "line": 1106
       }
     },
     {
@@ -1326,13 +1322,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1047
+          "line": 1050
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1047
+        "line": 1050
       }
     },
     {
@@ -1344,7 +1340,7 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1709
+          "line": 1707
         },
         {
           "path": "scripts/claude-hooks/agent-dispatch-prompt-guard.sh",
@@ -1362,21 +1358,21 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1137
-        },
-        {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1138
+          "line": 1140
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
           "line": 1141
+        },
+        {
+          "path": "scripts/autopilot/bootstrap.sh",
+          "line": 1144
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1137
+        "line": 1140
       }
     },
     {

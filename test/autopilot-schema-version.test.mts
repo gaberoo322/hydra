@@ -97,9 +97,13 @@ function readPlaybookSchema(): number | null {
 }
 
 function readBootstrapSchema(): number | null {
-  const body = readFileSync(BOOTSTRAP, "utf-8");
-  const m = body.match(/^SCHEMA_VERSION=(\d+)/m);
-  return m ? Number(m[1]) : null;
+  // The integer has one home: the Run Ledger (issue #5072, INV-5).
+  const r = spawnSync("python3", [join(SCRIPTS, "run_ledger.py"), "schema-version"], {
+    encoding: "utf-8",
+  });
+  if (r.status !== 0) return null;
+  const n = Number(r.stdout.trim());
+  return Number.isInteger(n) ? n : null;
 }
 
 /**
@@ -137,7 +141,7 @@ describe("issue #434 — schema_version handshake", () => {
   describe("source-of-truth constants", () => {
     test("bootstrap.sh declares SCHEMA_VERSION", () => {
       const v = readBootstrapSchema();
-      assert.notEqual(v, null, "bootstrap.sh must declare a SCHEMA_VERSION=<N> constant");
+      assert.notEqual(v, null, "the Run Ledger must declare a schema version");
       assert.equal(
         v,
         CURRENT_SCHEMA_VERSION,
