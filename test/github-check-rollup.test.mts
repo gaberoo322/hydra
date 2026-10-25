@@ -73,6 +73,25 @@ describe("foldRollup", () => {
     assert.deepEqual(f.contexts.get("b"), { status: "pending", entry: undefined });
     assert.equal(isRed(f), false);
   });
+  it("an in-progress rerun (0001 completedAt, later startedAt) beats an older FAILURE, in either list order", () => {
+    const l = [
+      { name: "test", conclusion: "FAILURE", completedAt: "2026-09-29T08:00:00Z" },
+      { name: "test", status: "IN_PROGRESS", conclusion: "", startedAt: "2026-09-29T09:00:00Z", completedAt: "0001-01-01T00:00:00Z" },
+    ];
+    for (const list of [l, [...l].reverse()]) {
+      const c = foldRollup(list).contexts.get("test");
+      assert.equal(c?.entry?.status, "IN_PROGRESS");
+      assert.equal(c?.status, "pending");
+    }
+  });
+  it("CheckRun and StatusContext with the same name collapse to one context; the later StatusContext wins", () => {
+    const f = foldRollup([
+      { name: "deep-qa-gate", conclusion: "SUCCESS", completedAt: "2026-09-29T08:00:00Z" },
+      { context: "deep-qa-gate", state: "FAILURE", startedAt: "2026-09-29T09:00:00Z" },
+    ]);
+    assert.equal(f.contexts.size, 1);
+    assert.equal(f.contexts.get("deep-qa-gate")?.status, "red");
+  });
   it("tolerates a non-array rollup", () => {
     assert.equal(foldRollup(null).contexts.size, 0);
   });
