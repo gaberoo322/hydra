@@ -320,7 +320,7 @@ npx tsx scripts/ci/design-concept-reconcile-run.ts \
 
 ### Gate 3 — suite + test typecheck green, in the foreground
 
-`npm test` runs per the canonical recipe in `hydra-dev.md` (must end
+npm test runs per the canonical recipe in `hydra-dev.md` (must end
 `NPM_TEST_EXIT=0`); then, in the foreground:
 
 ```bash
