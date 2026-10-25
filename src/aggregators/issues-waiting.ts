@@ -417,9 +417,12 @@ export function projectDecisionQueue(read: WaitingIssuesRead): DecisionQueueResu
     bySource[source] = labeledItemsFromRows(rows);
   }
   const items = mergeBySource(bySource, order, (existing, incoming) => {
+    // Pure: replace the array rather than mutate the (possibly shared) one.
+    const labels = [...existing.row.labels];
     for (const label of incoming.labels) {
-      if (!existing.row.labels.includes(label)) existing.row.labels.push(label);
+      if (!labels.includes(label)) labels.push(label);
     }
+    existing.row = { ...existing.row, labels };
   })
     .map(({ row, source, sources }): DecisionItem => ({
       number: row.number,
@@ -433,7 +436,7 @@ export function projectDecisionQueue(read: WaitingIssuesRead): DecisionQueueResu
     .sort((a, b) => {
       const aMs = Date.parse(a.createdAt);
       const bMs = Date.parse(b.createdAt);
-      if (Number.isFinite(aMs) && Number.isFinite(bMs)) return aMs - bMs;
+      if (Number.isFinite(aMs) && Number.isFinite(bMs) && aMs !== bMs) return aMs - bMs;
       return a.number - b.number;
     });
   return {

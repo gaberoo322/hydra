@@ -158,6 +158,52 @@ describe("projectDecisionQueue — presence semantics", () => {
   });
 });
 
+describe("projectDecisionQueue — ties and purity", () => {
+  const search = async () => ({ ok: true as const, rows: [] });
+  test("equal createdAt ties break by issue number, not insertion order", async () => {
+    const same = ago(3);
+    const l = lister({
+      "ready-for-human": [row(30, { createdAt: same, labels: ["ready-for-human"] })],
+      "needs-info": [row(20, { createdAt: same, labels: ["needs-info"] })],
+    });
+    const read = await readWaitingIssues({
+      now: NOW,
+      listIssuesByLabel: l.discriminated as never,
+      listIssuesBySearch: search,
+    });
+    assert.deepEqual(projectDecisionQueue(read).items.map((i) => i.number), [20, 30]);
+  });
+
+  test("distinct createdAt still sorts ascending ahead of number (sibling shape)", async () => {
+    const l = lister({
+      "ready-for-human": [row(5, { createdAt: ago(1), labels: ["ready-for-human"] })],
+      "needs-info": [row(9, { createdAt: ago(4), labels: ["needs-info"] })],
+    });
+    const read = await readWaitingIssues({
+      now: NOW,
+      listIssuesByLabel: l.discriminated as never,
+      listIssuesBySearch: search,
+    });
+    assert.deepEqual(projectDecisionQueue(read).items.map((i) => i.number), [9, 5]);
+  });
+
+  test("the projection does not mutate read.byLabel rows", async () => {
+    const l = lister({
+      "ready-for-human": [row(10, { labels: ["ready-for-human"] })],
+      "needs-info": [row(10, { labels: ["needs-info"] })],
+    });
+    const read = await readWaitingIssues({
+      now: NOW,
+      listIssuesByLabel: l.discriminated as never,
+      listIssuesBySearch: search,
+    });
+    const before = JSON.stringify([...read.byLabel.entries()]);
+    const q = projectDecisionQueue(read);
+    assert.deepEqual(q.items[0]!.labels, ["ready-for-human", "needs-info"]);
+    assert.equal(JSON.stringify([...read.byLabel.entries()]), before);
+  });
+});
+
 describe("projectPickupSet — differential vs getReviewPickupSet", () => {
   const fixture = {
     "ready-for-human": [row(200, { createdAt: ago(1), title: "Decide tier" })],
