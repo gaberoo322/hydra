@@ -121,7 +121,7 @@ state.json {
   # the STRING Target issue number, valued by the unix epoch of the last
   # sweep_target dispatch that examined it. decide.py stamps every item in the
   # CURRENT needs-triage set on fire and prunes the rest, so this never grows
-  # unbounded. Persisted via _persist_state_writeback (same pattern as
+  # unbounded. Persisted via the run_ledger diff seam (same pattern as
   # research_force_counter); an absent/empty map means every item is fresh.
   "target_triage_item_stamps": {
     "<target_issue_number>": unix-epoch
@@ -129,7 +129,7 @@ state.json {
 
   # NEW IN #5167 — the same per-item stamps for sweep_target's second arm, the
   # stranded in-progress set (`target_stale_in_progress_items`). Same back-off,
-  # same stamp-and-prune-on-fire rule, same _persist_state_writeback path.
+  # same stamp-and-prune-on-fire rule, same run_ledger diff seam path.
   "target_stale_item_stamps": {
     "<target_issue_number>": unix-epoch
   }
@@ -156,7 +156,7 @@ state.json {
   # under the same number starts fresh at 0 (invariant 5). An issue whose
   # count reaches QA_STALL_MAX_ATTEMPTS is no longer eligible for qa_orch
   # dispatch while it remains head — the busy-loop backstop issue #3829
-  # diagnosed as missing. Persisted via _persist_state_writeback (invariant
+  # diagnosed as missing. Persisted via the run_ledger diff seam (invariant
   # 6, same pattern as research_force_counter / target_triage_item_stamps);
   # an absent/empty map means the current head is fresh (0 prior attempts).
   "qa_orch_item_attempts": {
@@ -172,7 +172,7 @@ state.json {
   # percentage below the baseline = headroom returned, never negative spend).
   # `_quota_delta_exceeded` compares the current percentages against it and emits
   # `TERM:quota` once the delta crosses the cap. Persisted via
-  # _persist_state_writeback (same pattern as research_force_counter);
+  # the run_ledger diff seam (same pattern as research_force_counter);
   # bootstrap.sh deliberately does NOT seed it from prior state, which is what
   # re-arms the capture for each new run.
   "quota_baseline": {
@@ -212,7 +212,7 @@ state.json {
   # equal feature/<token>). Overwritten wholesale by the next resume pin,
   # NEVER cleared or pruned — a stale record is inert by construction (tokens
   # are unique per run+turn). In-run state by design, like
-  # red_forward_fix_attempts: persisted via _persist_state_writeback's
+  # red_forward_fix_attempts: persisted via the run_ledger diff seam's
   # snapshot/compare pair; a new run starts without it and the hold fails
   # open (the #3709 dead-arm class).
   "dev_target_resume_inflight": {
@@ -316,6 +316,7 @@ from typing import Any, Callable, Iterable, Sequence
 # importlib/spec load of this file resolve it too.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import turn_snapshot as ts  # noqa: E402
+import run_ledger  # noqa: E402  (leaf module; main() is its only caller)
 
 # ---------------------------------------------------------------------------
 # Sibling brain modules (issue #4511) — imports point DOWN only
@@ -1008,7 +1009,7 @@ def _capture_quota_baseline(state: dict, now: int) -> None:
        value, so post-reset spend is measured fresh from the new window. A reset
        must never register as negative spend and must never itself terminate.
 
-    Persistence is main()'s job via the existing `_persist_state_writeback`
+    Persistence is main()'s job via the existing the run_ledger diff seam
     tmp-file + `os.replace` helper (the same mechanism proven for the
     force-research counter and the #1769 turn counter) — no new persistence
     machinery, and a crash mid-write can never tear state.json.
@@ -4693,7 +4694,7 @@ def _check_termination(state: dict, now: int, events: list[dict] | None = None) 
     quota-capped run, and rebases it on a mid-run window reset. That is the same
     sanctioned in-`decide()` mutation shape as `_research_force_stamp`'s counter
     bump — main() detects the change and persists it via the existing
-    `_persist_state_writeback`. When the quota cap is disabled (the default) the
+    the run_ledger diff seam. When the quota cap is disabled (the default) the
     call touches nothing, so `decide()` stays byte-for-byte pure on a default run.
     """
     limits = state.get("limits") or {}
@@ -4865,7 +4866,7 @@ def _post_run_end_for_terminate(actions: list, state: dict) -> None:
     plan decided on is recorded BEFORE the print-mode session exits.
 
     Deliberately a CLI-side effect (like `_xadd_observability_events` /
-    `_persist_state_writeback`) so `decide()` stays pure for tests. Skipped
+    the run_ledger diff seam) so `decide()` stays pure for tests. Skipped
     when state carries no `run_id` (test fixtures, isolated runs) or when
     `HYDRA_AUTOPILOT_RUN_END_POST` is an off-value (CLI-spawning tests set
     `off`; production needs no env change). The endpoint is idempotent — if
@@ -4941,7 +4942,7 @@ def _mirror_research_force_counter_to_redis(state: dict) -> None:
     time), so the Redis mirror needs a decide-side write too — otherwise a run
     that force-dispatches research but never reaps a matching completion would
     leave the counter only in the boot-wiped state file. This piggybacks on the
-    SAME force-counter-changed branch that calls `_persist_state_writeback`, so
+    SAME force-counter-changed branch that persists via the run_ledger diff seam, so
     it fires exactly once per stamping turn.
 
     ONLY research_force_counter is mirrored here (signal_last_fired is mirrored by
@@ -4983,51 +4984,25 @@ def _mirror_research_force_counter_to_redis(state: dict) -> None:
         )
 
 
-def _persist_state_writeback(
-    path: str, state: dict, what: str = "research_force_counter increment",
-) -> None:
-    """Atomically write the state dict back to the state file.
+def _persist_ledger(path: str, state: dict, what: str) -> bool:
+    """Persist the state document through the Run Ledger's one writer.
 
-    Issue #1666: the daily force-research counter is incremented in-memory by
-    `_research_force_stamp` at plan time, but the `decide` CLI historically
-    discarded the mutated dict after printing the plan — so the counter never
-    survived to the next turn's read and the 4/day cap was dead code. The
-    caller (main) invokes this ONLY when the counter actually changed this
-    turn, so decide stays a pure JSON emitter on every other turn (the same
-    conservatism as the env-gated XADD above).
-
-    Issue #1769: also reused for the pre-decide turn-counter bump (see
-    `main`), with `what` naming the mutation so the failure log stays
-    specific.
-
-    Write is tmp-file + os.replace in the state file's own directory so a
-    crash mid-write can never leave a torn state.json (bootstrap/reap.py
-    readers jq/json.load it). Failure is loud but non-fatal: losing one
-    increment degrades back to the pre-fix behaviour for this turn only,
-    which must never abort the autopilot's decision turn.
+    Owns NO file IO: `run_ledger.persist` does the atomic temp-file + replace.
+    This only maps a persist failure to one loud stderr line and returns False,
+    so a failed persist degrades to ONE unpersisted turn and never aborts the
+    autopilot's decision turn (issues #1666/#1769, #5074 INV-6). decide()
+    stays pure (ADR-0007); this is a sanctioned main() side-effect.
     """
-    import tempfile
-    dirname = os.path.dirname(os.path.abspath(path)) or "."
-    tmp_path = None
     try:
-        fd, tmp_path = tempfile.mkstemp(prefix=".decide-state-", dir=dirname)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(state, fh, indent=2)
-            fh.write("\n")
-        os.replace(tmp_path, path)
-        tmp_path = None
-    except OSError as exc:
+        run_ledger.persist(state, path)
+        return True
+    except (OSError, run_ledger.LedgerTypeError) as exc:
         print(
-            f"decide.py: state write-back to {path} failed ({exc}); "
+            f"decide.py: ledger persist to {path} failed ({exc}); "
             f"{what} NOT persisted this turn",
             file=sys.stderr,
         )
-    finally:
-        if tmp_path is not None:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass  # intentional: tmp file may never have been created
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -5177,7 +5152,7 @@ def main(argv: list[str]) -> int:
         if len(argv) < 3:
             print("decide.py decide: missing <state.json>", file=sys.stderr)
             return 2
-        state = _load_json(argv[2])
+        state = run_ledger.load(argv[2], fill_defaults=False)
         # Issue #1769 — single-writer turn counter. The CLI (not the model
         # session, not heartbeat.py) owns `state.turn`: one bump per decide
         # invocation, persisted atomically BEFORE decide() runs so the bumped
@@ -5190,9 +5165,9 @@ def main(argv: list[str]) -> int:
         # 2-9's action ledgers that way). A failed persist degrades to ONE
         # loud plan-stale-skipped turn record — never aborts the turn.
         # decide() itself stays pure (ADR-0007); the bump is a sanctioned
-        # main() side-effect like _persist_state_writeback (#1666).
+        # main() side-effect like the run_ledger diff seam (#1666).
         state["turn"] = int(state.get("turn", 0) or 0) + 1
-        _persist_state_writeback(argv[2], state, what="turn-counter bump (#1769)")
+        _persist_ledger(argv[2], state, what="turn-counter bump (#1769)")
         candidates = _load_json(argv[3]) if len(argv) > 3 else None
         # Issue #4213 (INV-7) — the OPTIONAL events positional is the ONLY
         # input whose parse failure is caught: a garbled events file is
@@ -5210,99 +5185,11 @@ def main(argv: list[str]) -> int:
                     file=sys.stderr,
                 )
                 events = _EventsLoadError(argv[4], str(exc))
-        # Issue #1666: snapshot the force-research counter so we can detect a
-        # plan-time stamp and persist it. Serialised compare (not identity) —
-        # _research_force_stamp replaces the nested dict in place.
-        force_counter_before = json.dumps(
-            state.get("research_force_counter"), sort_keys=True,
-        )
-        # Issues #3729/#3939: change-detection for the per-item sweep stamp maps.
-        # `_stamp_triage_items` rebuilds the stamp map in place (pruning absent
-        # items) when a sweep fires with a present item set — for sweep_target
-        # (`target_triage_item_stamps`, #3729; `target_stale_item_stamps` / `target_blocked_item_stamps`, #5167)
-        # and sweep_orch (`orch_triage_item_stamps`, #3939). snapshot-before/compare-after on ALL
-        # maps persists either via the SAME _persist_state_writeback helper, no new
-        # persistence mechanism (INV-12).
-        triage_stamps_before = json.dumps(
-            {
-                "target": state.get("target_triage_item_stamps"),
-                "target_stale": state.get("target_stale_item_stamps"),
-                "target_blocked": state.get("target_blocked_item_stamps"),
-                "orch": state.get("orch_triage_item_stamps"),
-            },
-            sort_keys=True,
-        )
-        # Issue #3866: same change-detection for state.dev_resume_pending.
-        # reap.py appends to this queue on a no-PR dev_orch stall; the
-        # dev_orch selector in `_select_for_slot` pops its head in place when
-        # it pins a resume dispatch. Snapshot-before/compare-after persists
-        # the pop via the SAME `_persist_state_writeback` helper — no new
-        # persistence mechanism, mirrors `triage_stamps_before` immediately
-        # above.
-        dev_resume_pending_before = json.dumps(
-            state.get("dev_resume_pending"), sort_keys=True,
-        )
-        # Issue #3829: same change-detection for the qa_orch per-issue stall
-        # tracker. `_bump_qa_orch_stall_tracker` rebuilds `qa_orch_item_
-        # attempts` to hold only the current needs-qa head's bumped count
-        # when qa_orch fires against a present needs-qa list; snapshot-before/
-        # compare-after persists it via the SAME _persist_state_writeback
-        # helper, no new persistence mechanism (design-concept invariant 6).
-        qa_attempts_before = json.dumps(
-            state.get("qa_orch_item_attempts"), sort_keys=True,
-        )
-        # Issue #3867: same change-detection for the quota-percent baseline.
-        # `_capture_quota_baseline` (called from `_check_termination`) writes it
-        # once on the first calibrated turn of a quota-capped run, and rebases it
-        # on a mid-run 5h/weekly window reset. Snapshot-before/compare-after
-        # persists it via the SAME `_persist_state_writeback` helper — no new
-        # persistence mechanism, mirroring the four blocks above. On a run with
-        # the cap disabled (the default) the key never appears, so this compare
-        # never fires a write.
-        quota_baseline_before = json.dumps(
-            state.get("quota_baseline"), sort_keys=True,
-        )
-        # Issue #5058 (ex-#4460): same change-detection for the red-CI forward-fix
-        # attempts tracker. The dev_orch selector bumps
-        # `state.red_forward_fix_attempts[<pr>]` in place when it pins a
-        # forward-fix dispatch. Snapshot-before/compare-after persists it via
-        # the SAME `_persist_state_writeback` helper — no new persistence
-        # mechanism, mirroring the blocks above. In-run state by design
-        # (INV-8): a new run starts from an empty tracker, exactly like
-        # `burned_classes` / slot history.
-        red_attempts_before = json.dumps(
-            state.get("red_forward_fix_attempts"), sort_keys=True,
-        )
-        # Issue #4611: same change-detection for `signal_last_fired`.
-        # `_rule_pipeline_dispatch` stamps `signal_last_fired.research_target`
-        # at plan time when it emits that dispatch (nothing else in decide()
-        # mutates the map), so this writes exactly on a research_target
-        # dispatch turn — via the SAME `_persist_state_writeback` helper.
-        signal_last_fired_before = json.dumps(
-            state.get("signal_last_fired"), sort_keys=True,
-        )
-        # Issue #4795: same change-detection for the dev_target resume record.
-        # `_rule_pipeline_dispatch` stamps `state.dev_target_resume_inflight`
-        # at plan time when it emits a #4739 resume-pin dev_target dispatch,
-        # so this writes exactly on a resume-dispatch turn — via the SAME
-        # `_persist_state_writeback` helper, no new persistence mechanism
-        # (invariant 3 of the issue-4795 design concept). In-run state by
-        # design, like `red_forward_fix_attempts`: a new run starts
-        # without it and the hold fails open (the same degradation #4653
-        # accepts for a non-resolvable slot).
-        dev_target_resume_before = json.dumps(
-            state.get("dev_target_resume_inflight"), sort_keys=True,
-        )
-        # Issue #4999 — same change-detection for the zero-yield back-off
-        # ladder state. The discover_target selector stamps
-        # `state.zero_yield_backoff.discover_target` at plan time on every
-        # idle-board fire (INV-4) and `_reset_zero_yield_streaks` zeroes the
-        # streak on positive board evidence (INV-5); this compare persists
-        # either mutation via the SAME `_persist_state_writeback` helper — no
-        # new persistence mechanism (INV-7).
-        zero_yield_backoff_before = json.dumps(
-            state.get("zero_yield_backoff"), sort_keys=True,
-        )
+        # Issue #5074: one change-detection seam. The Run Ledger snapshots the
+        # declared decide-owned keys before decide() and diffs them after, so
+        # no hand-listed snapshot/compare pair exists (adding a decide-owned
+        # key is one FIELDS row edit in run_ledger.py, never a main() edit).
+        ledger_baseline = run_ledger.snapshot(state)
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -5312,77 +5199,15 @@ def main(argv: list[str]) -> int:
         # Issue #1352: record a clean run-end for any decide-side terminate
         # BEFORE the print-mode session exits (reap would stamp `interrupted`).
         _post_run_end_for_terminate(plan.actions, state)
-        force_counter_after = json.dumps(
-            state.get("research_force_counter"), sort_keys=True,
-        )
-        if force_counter_after != force_counter_before:
-            _persist_state_writeback(argv[2], state)
+        changed = run_ledger.diff(ledger_baseline, state)
+        if changed:
+            _persist_ledger(
+                argv[2], state, what="decide-owned keys: " + ", ".join(changed),
+            )
+        if "research_force_counter" in changed:
             # Issue #2715: mirror the just-stamped counter to Redis so a host
-            # reboot (which wipes the /tmp state file) can reseed it. Same
-            # force-counter-changed gate → fires once per stamping turn.
+            # reboot (which wipes the /tmp state file) can reseed it.
             _mirror_research_force_counter_to_redis(state)
-        triage_stamps_after = json.dumps(
-            {
-                "target": state.get("target_triage_item_stamps"),
-                "target_stale": state.get("target_stale_item_stamps"),
-                "target_blocked": state.get("target_blocked_item_stamps"),
-                "orch": state.get("orch_triage_item_stamps"),
-            },
-            sort_keys=True,
-        )
-        if triage_stamps_after != triage_stamps_before:
-            _persist_state_writeback(
-                argv[2], state, what="triage_item_stamps stamp (#3729/#3939)",
-            )
-        dev_resume_pending_after = json.dumps(
-            state.get("dev_resume_pending"), sort_keys=True,
-        )
-        if dev_resume_pending_after != dev_resume_pending_before:
-            _persist_state_writeback(
-                argv[2], state, what="dev_resume_pending drain (#3866)",
-            )
-        qa_attempts_after = json.dumps(
-            state.get("qa_orch_item_attempts"), sort_keys=True,
-        )
-        if qa_attempts_after != qa_attempts_before:
-            _persist_state_writeback(
-                argv[2], state, what="qa_orch_item_attempts stamp (#3829)",
-            )
-        quota_baseline_after = json.dumps(
-            state.get("quota_baseline"), sort_keys=True,
-        )
-        if quota_baseline_after != quota_baseline_before:
-            _persist_state_writeback(
-                argv[2], state, what="quota_baseline capture/rebase (#3867)",
-            )
-        red_attempts_after = json.dumps(
-            state.get("red_forward_fix_attempts"), sort_keys=True,
-        )
-        if red_attempts_after != red_attempts_before:
-            _persist_state_writeback(
-                argv[2], state, what="red_forward_fix_attempts bump (#5058)",
-            )
-        signal_last_fired_after = json.dumps(
-            state.get("signal_last_fired"), sort_keys=True,
-        )
-        if signal_last_fired_after != signal_last_fired_before:
-            _persist_state_writeback(
-                argv[2], state, what="research_target re-fire stamp (#4611)",
-            )
-        dev_target_resume_after = json.dumps(
-            state.get("dev_target_resume_inflight"), sort_keys=True,
-        )
-        if dev_target_resume_after != dev_target_resume_before:
-            _persist_state_writeback(
-                argv[2], state, what="dev_target_resume_inflight stamp (#4795)",
-            )
-        zero_yield_backoff_after = json.dumps(
-            state.get("zero_yield_backoff"), sort_keys=True,
-        )
-        if zero_yield_backoff_after != zero_yield_backoff_before:
-            _persist_state_writeback(
-                argv[2], state, what="zero_yield_backoff stamp/reset (#4999)",
-            )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the
         # per-class cadence multiplier decide.py WOULD apply in a future live

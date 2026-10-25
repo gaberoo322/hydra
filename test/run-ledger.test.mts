@@ -297,3 +297,117 @@ describe("run_ledger declared field table (INV-3, INV-4)", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Slice 3 (issue #5074): the decide-owned diff seam + corrected field table.
+// ---------------------------------------------------------------------------
+const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
+const GOLDEN = join(REPO_ROOT, "test", "fixtures", "decide-golden");
+
+function py(code: string, args: string[] = []) {
+  const pre = `import sys,json;sys.path.insert(0,${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot"))});import run_ledger as r;`;
+  return spawnSync("python3", ["-I", "-c", pre + code, ...args], {
+    encoding: "utf-8",
+    env: { PATH: process.env.PATH ?? "" },
+  });
+}
+
+describe("run ledger decide-owned diff seam (#5074)", () => {
+  test("INV-3: DECIDE_OWNED_KEYS is exactly the twelve keys of the deleted persist pairs", () => {
+    const r = py("print(json.dumps(sorted(r.DECIDE_OWNED_KEYS)))");
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), [
+      "dev_resume_pending",
+      "dev_target_resume_inflight",
+      "orch_triage_item_stamps",
+      "qa_orch_item_attempts",
+      "quota_baseline",
+      "red_forward_fix_attempts",
+      "research_force_counter",
+      "signal_last_fired",
+      "target_blocked_item_stamps",
+      "target_stale_item_stamps",
+      "target_triage_item_stamps",
+      "zero_yield_backoff",
+    ]);
+  });
+
+  test("INV-1/4: untouched run diffs to [], mutation and first-creation of a key are diffs", () => {
+    const r = py(`
+s={"turn":1,"dev_resume_pending":[]}
+b=r.snapshot(s)
+out=[r.diff(b,s)]
+s["dev_resume_pending"].append({"n":1}); out.append(r.diff(b,s))
+s2={"turn":1}; b2=r.snapshot(s2); s2["quota_baseline"]={}; out.append(r.diff(b2,s2))
+s2["slot_events"]=[1]; out.append(r.diff(r.snapshot(s2),s2))
+print(json.dumps(out))`);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), [[], ["dev_resume_pending"], ["quota_baseline"], []]);
+  });
+
+  test("INV-4: load(fill_defaults=False) leaves absent keys absent; default load fills", () => {
+    withDir((dir) => {
+      const path = join(dir, "state.json");
+      writeFileSync(path, JSON.stringify({ turn: 3 }));
+      const r = py(
+        "a=r.load(sys.argv[1],fill_defaults=False);b=r.load(sys.argv[1]);print(json.dumps(['quota_baseline' in a,'quota_baseline' in b]))",
+        [path],
+      );
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(JSON.parse(r.stdout), [false, true]);
+    });
+  });
+
+  test("INV-5: corrected rows validate (slot_events dict container, candidate_exclusions array, #5167 stamp maps)", () => {
+    withDir((dir) => {
+      const path = join(dir, "state.json");
+      writeFileSync(
+        path,
+        JSON.stringify({
+          slot_events: { events: [], last_id: "0-0" },
+          candidate_exclusions: [{ anchor: "a", member: "m", verdict: "v", evidence: "e" }],
+          target_stale_item_stamps: {},
+          target_blocked_item_stamps: {},
+        }),
+      );
+      const r = py("r.load(sys.argv[1],fill_defaults=False)", [path]);
+      assert.equal(r.status, 0, r.stderr);
+      writeFileSync(path, JSON.stringify({ candidate_exclusions: {} }));
+      assert.notEqual(py("r.load(sys.argv[1])", [path]).status, 0, "object no longer valid");
+    });
+  });
+
+  test("INV-6/8: decide CLI persists through the ledger; crash before replace leaves the prior document intact", () => {
+    withDir((dir) => {
+      const g = join(GOLDEN, "idle-triage-sweep");
+      const meta = JSON.parse(readFileSync(join(g, "meta.json"), "utf-8"));
+      const run = (statePath: string, env: Record<string, string> = {}) =>
+        spawnSync(
+          "python3",
+          [DECIDE, `--now=${meta.now}`, "decide", statePath, join(g, "candidates.json"), join(g, "events.json")],
+          {
+            encoding: "utf-8",
+            env: { PATH: process.env.PATH ?? "", HYDRA_AUTOPILOT_RUN_END_POST: "off", ...env },
+          },
+        );
+      const sp = join(dir, "state.json");
+      writeFileSync(sp, readFileSync(join(g, "state.json")));
+      const before = JSON.parse(readFileSync(sp, "utf-8"));
+      const ok = run(sp);
+      assert.equal(ok.status, 0, ok.stderr);
+      const after = JSON.parse(readFileSync(sp, "utf-8"));
+      assert.equal(after.turn, before.turn + 1);
+      assert.equal(readdirSync(dir).filter((f) => f.startsWith(".")).length, 0, "no stray temp files");
+      assert.ok(readFileSync(sp, "utf-8").endsWith("\n"));
+
+      // Crash seam: the persist fails loudly but non-fatally; the prior
+      // document stays byte-untouched.
+      const sp2 = join(dir, "state2.json");
+      writeFileSync(sp2, readFileSync(join(g, "state.json")));
+      const bytes = readFileSync(sp2, "utf-8");
+      const crashed = run(sp2, { HYDRA_RUN_LEDGER_TEST_CRASH: "before-replace" });
+      assert.match(crashed.stderr, /ledger persist to .* failed|simulated crash/);
+      assert.equal(readFileSync(sp2, "utf-8"), bytes);
+    });
+  });
+});

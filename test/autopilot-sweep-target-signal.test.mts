@@ -16,7 +16,7 @@
  * the rejected class-level Option B): the Turn Snapshot emits the current
  * needs-triage item-number set as a fresh per-turn fact
  * (`target_needs_triage_items`), and decide.py keeps a per-item stamp map
- * (`state.target_triage_item_stamps`) persisted via `_persist_state_writeback`.
+ * (`state.target_triage_item_stamps`) persisted via the run_ledger diff seam.
  * `sweep_target` fires iff >=1 item in the current set has no stamp OR a stamp
  * older than a fixed backoff window; on fire, every item in the CURRENT set is
  * stamped (uniform clock reset) and stamps for items that left the set are

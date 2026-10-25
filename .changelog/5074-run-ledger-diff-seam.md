@@ -1,0 +1,1 @@
+- refactor: decide.py persists state through one Run Ledger diff seam instead of nine hand-listed pairs (#5074)

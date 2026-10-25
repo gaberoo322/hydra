@@ -62,7 +62,7 @@ import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
  * per-turn fact (`needs_qa_numbers`, order-preserving — no sort — to match
  * hydra-qa's own query), and decide.py keeps a persisted attempt counter for
  * the head only (`state.qa_orch_item_attempts`, at most one entry by
- * construction) via `_persist_state_writeback`. `qa_orch` fires iff the head
+ * construction) via the run_ledger diff seam. `qa_orch` fires iff the head
  * has attempted fewer than `QA_STALL_MAX_ATTEMPTS` (3) qa_orch dispatches; on
  * fire the tracker is rebuilt to hold only the head's bumped count — a
  * former head that is superseded or resolved is pruned (invariant 5).
