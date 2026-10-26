@@ -771,6 +771,25 @@ describe("retro_run_drillable bundle reducer (issue #3871; ported from autopilot
 // 3. Interface cases
 // ---------------------------------------------------------------------------
 
+describe("retro_run_drillable reads novelStuckSignals (#5029)", () => {
+  const sig = [{ type: "unproductive-loop", severity: "warn" }];
+  const base = { runFound: true, dispatches: [], reflections: [], recommendations: [] };
+
+  test("present-and-empty novelStuckSignals suppresses a non-empty stuckSignals", () => {
+    assert.equal(foldRetroBundle(JSON.stringify({ ...base, stuckSignals: sig, novelStuckSignals: [] })), false);
+  });
+
+  test("absent novelStuckSignals keeps today's stuckSignals clause", () => {
+    assert.equal(foldRetroBundle(JSON.stringify({ ...base, stuckSignals: sig })), true);
+  });
+
+  test("non-empty novelStuckSignals is drillable; other triggers still fire when novelty is empty", () => {
+    assert.equal(foldRetroBundle(JSON.stringify({ ...base, stuckSignals: sig, novelStuckSignals: sig })), true);
+    assert.equal(foldRetroBundle(JSON.stringify({ ...base, stuckSignals: sig, novelStuckSignals: [], runFlagged: true })), true);
+    assert.equal(foldRetroBundle(JSON.stringify({ ...base, stuckSignals: sig, novelStuckSignals: [], recommendations: [{}] })), true);
+  });
+});
+
 describe("Turn Snapshot Redis port — bounded, fail-open, closes", () => {
   function ops(over: Partial<TurnSnapshotRedisOps>, log: string[]): TurnSnapshotRedisOps {
     return {

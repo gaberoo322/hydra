@@ -30,6 +30,11 @@ import { listRequiredStatusContextsOrNull } from "../github/prs.ts";
 import { settledOrEmpty } from "../settled-fold.ts";
 import { foldRollup } from "../github/check-rollup.ts";
 import { isFailedRequiredStatus } from "./stalled-prs.ts";
+import { DEFAULT_THRESHOLDS, type StuckThresholds } from "./issues-waiting.ts";
+
+// The ONE stale threshold lives in issues-waiting.ts (issue #5091); re-exported
+// so existing import paths keep resolving.
+export { DEFAULT_THRESHOLDS, type StuckThresholds } from "./issues-waiting.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -68,18 +73,6 @@ export interface StuckItems {
   /** True iff all three sub-fetches settled fulfilled (the emptiness assertion). */
   sourcesOk: boolean;
 }
-
-export interface StuckThresholds {
-  /** Minimum age (days) before a `blocked` issue counts as stuck. */
-  blockedDays: number;
-  /** Minimum age (days) before a `needs-info` issue counts as stuck. */
-  needsInfoDays: number;
-}
-
-export const DEFAULT_THRESHOLDS: StuckThresholds = {
-  blockedDays: 2,
-  needsInfoDays: 1,
-};
 
 export interface StuckItemsDeps {
   /** Wall-clock anchor — defaults to `new Date()`. */

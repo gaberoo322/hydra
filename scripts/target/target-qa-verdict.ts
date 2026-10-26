@@ -42,7 +42,7 @@
 
 import { classifyRisk, type RiskSurface } from "../../src/target/risk-critical.ts";
 import { loadRiskSurface } from "./target-risk-surface.ts";
-import { buildQaVerdictTrailer } from "../ci/qa-verdict.ts";
+import { buildQaVerdictTrailer } from "../../src/qa/verdict-trailer.ts";
 
 /** A single reviewer's verdict — PASS unless it surfaced a real hard finding. */
 export type ReviewVerdict = "PASS" | "FAIL";

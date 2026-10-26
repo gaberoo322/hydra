@@ -1,0 +1,33 @@
+{
+  "started": "2026-10-25T07:05:53Z",
+  "started_epoch": 1792911953,
+  "pid": 151524,
+  "run_id": "ecf519cb-00ad-421e-985f-adc68bd25df7",
+  "slot_events_last_id": "1792911953000-0",
+  "limits": {
+    "token_budget": 10000000,
+    "wall_clock_max_sec": 28800,
+    "idle_drain_turns": 5,
+    "context_compaction_turns": 8,
+    "quota_5h_max_pts": 30,
+    "quota_week_max_pts": 5,
+    "scope": "all",
+    "subagent_max_tokens": 400000,
+    "subagent_hard_max_tokens": 800000,
+    "unattended": true,
+    "schema_version": 2,
+    "daily_spend_cap_usd": 0,
+    "scout_cost_share": 0.04
+  },
+  "cumulative_tokens": 0,
+  "dispatches": 0,
+  "turn": 0,
+  "burned_classes": [],
+  "reaped_task_ids": [],
+  "failure_log": [],
+  "research_force_counter": {},
+  "dev_resume_pending": [],
+  "zero_yield_backoff": {},
+  "slots": {"dev_orch":null,"qa_orch":null,"research_orch":null,"dev_target":null,"qa_target":null,"research_target":null,"design_concept_orch":null},
+  "signal_last_fired": {"health":0,"sweep_orch":0,"sweep_target":0,"discover_target":0,"retro_orch":0,"architecture_orch":0,"discover_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0,"design_qa_target":0,"skill_prune":0,"research_target":0,"cleanup_target":0,"wayfinder_orch":0,"tickets_orch":0}
+}

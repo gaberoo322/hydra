@@ -104,7 +104,10 @@ import {
   flagDispatchesForDrill,
   drillReasonOf,
   flagRunForDrill,
+  novelStuckSignals as foldNovelStuckSignals,
+  stuckSignalKey as foldStuckSignalKey,
 } from "./retro-projections.ts";
+import { listRecentRetroArtifacts } from "../redis/retro-artifacts.ts";
 import type { RetroDispatch } from "./retro-projections.ts";
 // Issue #3055: the per-cycle dispatch enrichment join — the three-source
 // terminal-record chain (durable outcome record → cycle-metrics sidecar →
@@ -112,6 +115,9 @@ import type { RetroDispatch } from "./retro-projections.ts";
 // canonical-cycleId dedup, and the crash-term-reason backfill — is a focused
 // leaf so the assembler stays a thin fan-out coordinator + composition.
 import { enrichDispatchesWithCycleData } from "./retro-enrichment.ts";
+
+/** How many recent retro artifacts to scan for the newest one carrying `drilledStuckSignals` (#5029). */
+const PRIOR_RETRO_LOOKBACK = 20; // #5029: scan window, not a limit-1 read
 
 // ---------------------------------------------------------------------------
 // Bundle shape
@@ -172,6 +178,23 @@ export interface RetroBundle {
   reflections: RetroReflection[];
   /** The #890 stuck-signals (ranked) at bundle-assembly time. */
   stuckSignals: StuckSignal[];
+  /**
+   * Issue #5029: the newest persisted retro artifact's identity + the stuck
+   * signals it drilled (`null` when none exists or the read failed).
+   */
+  priorRetro: { run_id: string; generatedAt: string; drilledStuckSignals: string[] } | null;
+  /**
+   * Issue #5029: `stuckSignalKey` of EVERY entry in `stuckSignals`, for the
+   * retro playbook to copy verbatim into the artifact's `drilledStuckSignals`.
+   */
+  stuckSignalKeys: string[];
+  /**
+   * Issue #5029: the subset of {@link RetroBundle.stuckSignals} the prior retro
+   * had not already drilled (keyed by `stuckSignalKey`). Equals `stuckSignals`
+   * when `priorRetro` is null. The Turn Snapshot's `retro_run_drillable`
+   * reads this instead of `stuckSignals`.
+   */
+  novelStuckSignals: StuckSignal[];
   /** Recommendation-engine recs emitted during the run (raw hash values). */
   recommendations: unknown[];
   /** Friction-pattern store snapshot across the known dispatch skills. */
@@ -207,6 +230,8 @@ export interface RetroBundleDeps {
   readAnchorReflections?: typeof loadAnchorReflections;
   readFrictionPatterns?: typeof listFrictionPatterns;
   readStuckSignals?: typeof getAutopilotHealth;
+  /** Issue #5029: newest persisted retro artifact(s), for the novelty compare. */
+  readRecentRetroArtifacts?: typeof listRecentRetroArtifacts;
   /**
    * Issue #3972: the cross-run rolling-window reader that feeds the
    * `crossRunTrend` fold. Defaults to `listDispatchOutcomes` (the cross-run
@@ -252,6 +277,7 @@ export async function assembleRetroBundle(
   const readAnchorReflections = deps.readAnchorReflections ?? loadAnchorReflections;
   const readFrictionPatterns = deps.readFrictionPatterns ?? listFrictionPatterns;
   const readStuckSignals = deps.readStuckSignals ?? getAutopilotHealth;
+  const readRecentRetroArtifacts = deps.readRecentRetroArtifacts ?? listRecentRetroArtifacts;
   const frictionSkills = deps.frictionSkills ?? DEFAULT_FRICTION_SKILLS;
   const generatedAt = (deps.now ?? new Date()).toISOString();
 
@@ -406,6 +432,29 @@ export async function assembleRetroBundle(
     () => readStuckSignals(),
   );
 
+  // 5b. Prior retro (issue #5029) — which stuck signals the newest persisted
+  //     retro already drilled. Fail-open: a failed read leaves priorRetro null
+  //     (every signal novel) and lands in errors[] via safeSource.
+  const priorArtifacts = await safeSource(
+    "prior-retro",
+    errors,
+    [] as Awaited<ReturnType<typeof listRecentRetroArtifacts>>,
+    () => readRecentRetroArtifacts(PRIOR_RETRO_LOOKBACK),
+  );
+  // Newest artifact that CARRIES the field: an audit/weekly/older artifact
+  // written without it must not reset novelty to all-novel.
+  const newest = Array.isArray(priorArtifacts)
+    ? priorArtifacts.find((a) => Array.isArray(a?.drilledStuckSignals))
+    : undefined;
+  const priorRetro = newest
+    ? {
+        run_id: newest.run_id,
+        generatedAt: newest.generatedAt,
+        drilledStuckSignals: newest.drilledStuckSignals as string[],
+      }
+    : null;
+  const novelStuckSignals = foldNovelStuckSignals(stuckSignals, priorRetro);
+
   // 6. Recommendation-engine recs emitted during the run.
   const recsHash = await safeSource(
     "recommendations",
@@ -485,6 +534,9 @@ export async function assembleRetroBundle(
     dispatchOutcomes,
     reflections,
     stuckSignals,
+    priorRetro,
+    stuckSignalKeys: stuckSignals.map(foldStuckSignalKey),
+    novelStuckSignals,
     recommendations,
     frictionPatterns,
     crossRunTrend,

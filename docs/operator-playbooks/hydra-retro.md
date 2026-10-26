@@ -106,7 +106,8 @@ BUNDLE=$(curl -sf "http://localhost:4000/api/autopilot/runs/${RUN_ID}/retro")
 The bundle already carries the **flagged dispatches** signal — `dispatches[]`
 plus the pure `flagDispatchesForDrill` selection (failed QA / stalled / churned
 / errored). The bundle's `reflections[]` are pre-bounded to the flagged subset.
-Use those, the `stuckSignals`, the `recommendations`, and the
+Use those, the `stuckSignals` (`novelStuckSignals` / `priorRetro` mark those
+the prior retro already recorded — context, not a fresh drill input), the `recommendations`, and the
 `frictionPatterns` as the structured inputs; do NOT re-derive them.
 
 If `bundle.errors[]` is non-empty, note the partial-ness in the artifact but
@@ -242,6 +243,16 @@ Caps mean at most 2 issues + 1 PR ever leave a single retro run.
 Write the persisted retro artifact (issues filed, PR opened, artifact-only
 notes, dropped findings + reasons, bundle errors). Under `--audit` this is the
 sole output. The dashboard surface for the artifact is retro-4 (#921).
+
+Always set `drilledStuckSignals` on the persisted artifact (issue #5029): the
+`${type}:${severity}` key of EVERY entry in `bundle.stuckSignals` (not only the
+novel ones): copy `bundle.stuckSignalKeys` verbatim (precomputed by the bundle
+via `stuckSignalKey`, `src/autopilot/retro-projections.ts` — do not hand-compute)
+— daily or weekly-override admitted, `--apply` or `--audit`. The next bundle
+compares against it: `bundle.novelStuckSignals` is the subset the prior retro
+had not already drilled, and `retro_run_drillable` reads that instead of
+`stuckSignals`, so a persistent unchanged signal stops re-admitting the daily
+retro (the weekly override still fires).
 
 ## Summary output
 
