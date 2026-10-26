@@ -341,6 +341,7 @@
   "test/operator-channel-weekly-summary.test.mts": 1,
   "test/operator-channel.test.mts": 8,
   "test/operator-notify-cli.test.mts": 4,
+  "test/otel-ingest.test.mts": 7,
   "test/outcome-attribution-estimator.test.mts": 9,
   "test/outcome-attribution-impact-ranking.test.mts": 1,
   "test/outcome-attribution-recorder.test.mts": 2,

@@ -137,6 +137,7 @@
           "GET /api/now/recommendations",
           "POST /api/now/recommendations/:id/dismiss",
           "POST /api/now/recommendations/mute-class",
+          "POST /api/otel/v1/traces",
           "POST /api/memory/:agent/pattern",
           "GET /api/memory/:agent",
           "POST /api/memory/subagent-lesson",
@@ -358,6 +359,7 @@
           "GET /api/now/cost-burn",
           "GET /api/now/autopilot-health",
           "GET /api/operator-actions",
+          "POST /api/otel/v1/traces",
           "GET /api/outcomes/trends",
           "GET /api/outcomes/lessons",
           "GET /api/outcomes/quota",
@@ -437,11 +439,13 @@
           "HoldbackEnrolmentsQuerySchema",
           "HoldbackPendingBodySchema",
           "HoldbackRevertFailedBodySchema",
+          "LLM_REQUEST_SPAN_NAME",
           "LessonsExplorerQuerySchema",
           "LivenessManifestSchema",
           "OperatorActionEntrySchema",
           "OperatorActionRegistrySchema",
           "OperatorActionsResponseSchema",
+          "OtlpTraceExportBodySchema",
           "OvernightSummaryQuerySchema",
           "OvernightSummaryResponseSchema",
           "PatternBodySchema",
@@ -1143,6 +1147,7 @@
       "slices": {
         "env-vars": [
           "HYDRA_CORS_ALLOWED_ORIGINS",
+          "HYDRA_OTEL_INGEST_KEY",
           "HYDRA_PACE_GATE_INTERVAL_SECONDS"
         ]
       },

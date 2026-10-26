@@ -650,6 +650,16 @@
       }
     },
     {
+      "name": "LLM_REQUEST_SPAN_NAME",
+      "file": "src/schemas/otel.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/otel.ts",
+        "line": 59
+      }
+    },
+    {
       "name": "LessonsExplorerQuerySchema",
       "file": "src/schemas/explore-page.ts",
       "importedBy": [
@@ -707,6 +717,20 @@
       "source": {
         "path": "src/schemas/operator-actions.ts",
         "line": 448
+      }
+    },
+    {
+      "name": "OtlpTraceExportBodySchema",
+      "file": "src/schemas/otel.ts",
+      "importedBy": [
+        "src/api/otel.ts"
+      ],
+      "routes": [
+        "POST /api/otel/v1/traces"
+      ],
+      "source": {
+        "path": "src/schemas/otel.ts",
+        "line": 52
       }
     },
     {
