@@ -23,7 +23,7 @@
     {
       "family": "adrs",
       "metric": "rows",
-      "value": 45
+      "value": 46
     },
     {
       "family": "areas",
@@ -78,7 +78,7 @@
     {
       "family": "corpus",
       "metric": "adr",
-      "value": 45
+      "value": 46
     },
     {
       "family": "corpus",
@@ -103,7 +103,7 @@
     {
       "family": "corpus",
       "metric": "rows",
-      "value": 122
+      "value": 123
     },
     {
       "family": "env-vars",
