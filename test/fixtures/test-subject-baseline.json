@@ -211,7 +211,7 @@
   "src/design-concept.ts": 2,
   "src/errors.ts": 1,
   "src/event-bus-mechanics.ts": 1,
-  "src/event-bus-stream-keys.ts": 1,
+  "src/event-bus-stream-keys.ts": 2,
   "src/event-bus.ts": 1,
   "src/github/blockers.ts": 2,
   "src/github/check-rollup.ts": 1,

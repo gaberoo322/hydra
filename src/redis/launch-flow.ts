@@ -65,6 +65,7 @@
  */
 
 import { getRedisConnection } from "./connection.ts";
+import type { AdmissionReason } from "../cost/index.ts";
 
 /**
  * The single source of truth for the pace-gate last-tick hash key.
@@ -131,7 +132,7 @@ export const WATCHDOG_LAUNCH_SIGNALS: readonly WatchdogLaunchSignal[] = [
  * not spuriously reset; `paused` earns its own (forgotten-pause) signal.
  */
 export const LAUNCH_FLOW_REASON_SIGNAL: Readonly<
-  Record<string, Exclude<WatchdogLaunchReasonSignal, "healthy">>
+  Partial<Record<AdmissionReason, Exclude<WatchdogLaunchReasonSignal, "healthy">>>
 > = {
   "curl-missing": "fail-safe",
   "jq-missing": "fail-safe",
@@ -160,7 +161,12 @@ export function classifyLaunchSignal(
   reason: string | null | undefined,
 ): WatchdogLaunchReasonSignal {
   if (!reason) return "healthy";
-  return LAUNCH_FLOW_REASON_SIGNAL[reason] ?? "healthy";
+  // Redis hands back arbitrary strings, so index through a string-keyed view;
+  // absence from the map is how "healthy" is defined.
+  const bySignal: Readonly<
+    Record<string, Exclude<WatchdogLaunchReasonSignal, "healthy"> | undefined>
+  > = LAUNCH_FLOW_REASON_SIGNAL;
+  return bySignal[reason] ?? "healthy";
 }
 
 /** Key-template prefix shared by {@link launchFlowSinceKey} and
