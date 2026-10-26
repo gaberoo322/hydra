@@ -74,13 +74,16 @@ export function createGhQaVerdictFetchers(repo: string): QaVerdictFetchers {
     },
 
     async changedFiles(pr) {
-      const res = await ghJson<unknown>(["api", `repos/${repo}/pulls/${pr}/files`, "--paginate"]);
+      const res = await ghJson<unknown>(["api", `repos/${repo}/pulls/${pr}/files`, "--paginate", "--slurp"]);
       if (isGhFailure(res)) {
         console.error(`[qa-verdict] changed-files read failed for PR #${pr} (${res.code})`);
         return null;
       }
       if (!Array.isArray(res.data)) return null;
-      return res.data
+      // `--slurp` wraps the per-page arrays in one outer array; flatten so a
+      // >30-file PR parses as a single JSON document (QA round-1 finding).
+      const flat = res.data.flatMap((page) => (Array.isArray(page) ? page : [page]));
+      return flat
         .map((f) => (isRecord(f) ? f.filename : undefined))
         .filter((n): n is string => typeof n === "string");
     },

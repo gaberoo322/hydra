@@ -473,6 +473,26 @@ describe("qa-verdict-event.sh — the playbook recipe as a script (issue #4831)"
     }
   });
 
+  test("ci-state block is self-contained: a crashing CLI (no pipefail) still yields CI_JSON=null", () => {
+    const dir = mkdtempSync(join(tmpdir(), "qa-verdict-ci-state-"));
+    try {
+      const shims = join(dir, "bin");
+      mkdirSync(shims);
+      writeFileSync(join(shims, "node"), "#!/bin/sh\nexit 1\n");
+      chmodSync(join(shims, "node"), 0o755);
+      const prog = `PR=1\n${markerBlock(playbook, "ci-state")}\nprintf '%s' "$CI_JSON"`;
+      const env = { ...process.env, PATH: `${shims}:${process.env.PATH}` };
+      const r = spawnSync("bash", ["-c", prog], { cwd: dir, env, encoding: "utf-8" });
+      assert.equal(r.stdout, "null", r.stderr);
+      // sibling: a healthy CLI result is projected unchanged.
+      writeFileSync(join(shims, "node"), `#!/bin/sh\necho '{"checks":[],"degraded":[],"red":["x"],"requiredPending":0}'\n`);
+      const ok = spawnSync("bash", ["-c", prog], { cwd: dir, env, encoding: "utf-8" });
+      assert.deepEqual(JSON.parse(ok.stdout), { red: ["x"], requiredPending: 0 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("it calls the qa-verdict CLI's checks phase and carries no inline node -e import (#5080)", () => {
     assert.match(script, /scripts\/ci\/qa-verdict\.ts checks/);
     assert.equal(/node[^\n]*\s-e\s/.test(script), false, "no inline `node -e` import");

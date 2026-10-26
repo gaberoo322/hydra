@@ -94,6 +94,13 @@ export async function runChecksPhase(pr: number, f: QaVerdictFetchers): Promise<
   };
 }
 
+/**
+ * Fallback when the changed-file list is unreadable: one code-shaped path, so
+ * fan-out sizing and admission take the MAXIMAL (code) depth rather than the
+ * lightest docs-only classification (fail-closed, not fail-open).
+ */
+export const UNREADABLE_CHANGED_PATHS: string[] = ["src/__changed-files-unreadable__.ts"];
+
 /** Use a supplied fact verbatim; otherwise fetch it, recording a miss in `degraded`. */
 async function resolveFact<T>(
   supplied: T | undefined,
@@ -134,14 +141,14 @@ export async function runQaVerdictPhase(
       const mergeStateStatus = await resolveFact(
         i.mergeStateStatus, () => f.mergeStateStatus(i.pr), "merge-state", "", degraded);
       const changedPaths = await resolveFact(
-        i.changedPaths, () => f.changedFiles(i.pr), "changed-paths", [] as string[], degraded);
+        i.changedPaths, () => f.changedFiles(i.pr), "changed-paths", UNREADABLE_CHANGED_PATHS, degraded);
       const result = decideAdmission({ checks, mergeStateStatus, tier: i.tier, changedPaths });
       return { ...result, degraded };
     }
     case "fanout": {
       const i = input as QaVerdictCliInput<"fanout">;
       const changedPaths = await resolveFact(
-        i.changedPaths, () => f.changedFiles(i.pr), "changed-paths", [] as string[], degraded);
+        i.changedPaths, () => f.changedFiles(i.pr), "changed-paths", UNREADABLE_CHANGED_PATHS, degraded);
       return { ...decideReviewerFanout(i.tier, changedPaths), degraded };
     }
     case "prior-context": {

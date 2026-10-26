@@ -97,8 +97,9 @@ GUARD_JSON=${GUARD_JSON:-null}
 # unreadable) yields CI_JSON=null, and the event's verdict holds PENDING
 # (fail-closed).
 # >>> ci-state
-CI_JSON=$(printf '{"pr":%s}' "$PR" | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts checks \
-  | jq -c 'if .checks == null or ((.degraded // []) | length) > 0 then null else {red, requiredPending} end') || CI_JSON=null
+_OUT=$(printf '{"pr":%s}' "$PR" | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts checks) || _OUT=""
+CI_JSON=$(printf '%s' "$_OUT" | jq -c 'if .checks == null or ((.degraded // []) | length) > 0 then null else {red, requiredPending} end' 2>/dev/null)
+[ -n "$CI_JSON" ] || CI_JSON=null
 # <<< ci-state
 # >>> qa-verdict-event
 jq -nc --argjson pr "$PR" --argjson tier "$TIER" --argjson guard "$GUARD_JSON" --argjson ci "$CI_JSON" '

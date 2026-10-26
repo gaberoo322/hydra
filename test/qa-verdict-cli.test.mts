@@ -114,6 +114,16 @@ describe("qa-verdict phases over the fixture fetcher", () => {
     assert.deepEqual(failed.degraded, ["changed-paths"]);
   });
 
+  test("fanout: unreadable changed files fall back to the MAXIMAL (code) depth, not the lightest", async () => {
+    const miss = (await runQaVerdictPhase("fanout", { pr: 1, tier: 2 }, fixtureFetchers({ changedFiles: async () => null }))) as any;
+    assert.equal(miss.shape, "code");
+    assert.equal(miss.mode, "standard");
+    assert.deepEqual(miss.degraded, ["changed-paths"]);
+    // sibling shape that keeps its verdict: a readable docs-only diff stays single.
+    const docs = (await runQaVerdictPhase("fanout", { pr: 1, tier: 2 }, fixtureFetchers({ changedFiles: async () => ["docs/x.md"] }))) as any;
+    assert.equal(docs.mode, "single");
+  });
+
   test("prior-context: prior bodies unreadable => [] with degraded prior-bodies", async () => {
     const out = (await runQaVerdictPhase("prior-context", { pr: 7, tier: 3 }, fixtureFetchers({ priorBodies: async () => null }))) as any;
     assert.deepEqual(out.history, []);
@@ -200,7 +210,8 @@ function writeFakeGh(dir: string): void {
       "  *comments,reviews*)",
       `    printf '%s' '{"comments":[{"body":"hello"}],"reviews":[]}' ;;`,
       "  *pulls/*/files*)",
-      `    printf '%s' '[{"filename":"src/a.ts"},{"filename":"docs/x.md"}]' ;;`,
+      // Real gh: --slurp wraps pages in one array; without it pages are concatenated documents.
+      `    case "$*" in *--slurp*) printf '%s' '[[{"filename":"docs/x.md"}],[{"filename":"src/a.ts"}]]' ;; *) printf '%s' '[{"filename":"docs/x.md"}][{"filename":"src/a.ts"}]' ;; esac ;;`,
       '  *) echo "fake-gh: unmatched call: $*" >&2; exit 1 ;;',
       "esac",
     ].join("\n"),
@@ -251,6 +262,22 @@ describe("qa-verdict CLI (spawned)", () => {
     const r = run(["fanout"], '{"pr":9,"tier":2}');
     assert.equal(r.status, 0, r.stderr);
     assert.equal(JSON.parse(r.stdout).shape, "code");
+  });
+
+  test("multi-page changed files parse (--paginate --slurp) with nothing degraded", () => {
+    const r = run(["fanout"], '{"pr":9,"tier":2}');
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.shape, "code");
+    assert.deepEqual(out.degraded, []);
+  });
+
+  test("a malformed fold payload exits 2 with schema-validation-failed", () => {
+    const r = run(["fold"], JSON.stringify({ tier: 3, findings: "nope", checks: [], standardsSummary: "s", specSummary: "p" }));
+    assert.equal(r.status, 2, r.stderr);
+    assert.equal(r.stdout, "");
+    const ok = run(["fold"], JSON.stringify({ tier: 3, findings: [], checks: [], standardsSummary: "s", specSummary: "p" }));
+    assert.equal(ok.status, 0, ok.stderr);
   });
 
   test("unreadable required contexts => exit 0, degraded + all-optional source (not an abort)", () => {

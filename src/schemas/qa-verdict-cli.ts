@@ -22,6 +22,17 @@ const checks = z.array(
     required: z.boolean(),
   }),
 );
+const reviewFinding = z.object({
+  severity: z.enum(["high", "medium", "low"]),
+  axis: z.enum(["standards", "spec"]),
+  reviewer: z.string(),
+  location: z.string(),
+  finding: z.string(),
+  fix: z.string(),
+  key: z.string().optional(),
+});
+// Flat array, or (with spawnedReviewers) a per-reviewer map of arrays.
+const reviewFindings = z.union([z.array(reviewFinding), z.record(z.string(), z.array(reviewFinding))]);
 const finalVerdict = z.enum(["PASS", "FAIL", "PASS-pending-CI", "FAIL-pending-CI"]);
 
 export const QA_VERDICT_PHASES = [
@@ -53,7 +64,7 @@ export const QaVerdictCliSchemas = {
   }),
   fold: z.object({
     tier,
-    findings: z.unknown(),
+    findings: reviewFindings,
     spawnedReviewers: z.array(z.string()).nullable().optional(),
     checks,
     standardsSummary: z.string(),

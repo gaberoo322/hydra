@@ -42,8 +42,9 @@ printf '%s' "$GUARD_JSON" | jq -e . >/dev/null 2>&1 || GUARD_JSON=null
 # unreadable) yields CI_JSON=null, and the event's verdict holds PENDING
 # (fail-closed).
 # >>> ci-state
-CI_JSON=$(printf '{"pr":%s}' "$PR" | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts checks \
-  | jq -c 'if .checks == null or ((.degraded // []) | length) > 0 then null else {red, requiredPending} end') || CI_JSON=null
+_OUT=$(printf '{"pr":%s}' "$PR" | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts checks) || _OUT=""
+CI_JSON=$(printf '%s' "$_OUT" | jq -c 'if .checks == null or ((.degraded // []) | length) > 0 then null else {red, requiredPending} end' 2>/dev/null)
+[ -n "$CI_JSON" ] || CI_JSON=null
 # <<< ci-state
 printf '%s' "$CI_JSON" | jq -e . >/dev/null 2>&1 || CI_JSON=null
 
