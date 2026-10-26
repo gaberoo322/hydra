@@ -16,6 +16,7 @@ Canonical label vocabulary for `gaberoo322/hydra` issues. The `/triage` skill, `
 | `wontfix` | Closed without implementation | Operator |
 | `operator-approved` | Tier-0 PR approval marker (see ADR-0004) | Operator only |
 | `enhancement` / `bug` / `refactor` | Classification | Triage |
+| `target-backlog` | Routing/exclusion marker for Target work (`src/board-labels.ts`); no sweep consumer — Target work is filed on the Target board | Agents routing Target work |
 | `hitl-grill` | Agent-proposed idea parked for operator grill-or-dismiss; agents never action this | Agent proposing the idea |
 
 ## `ready-for-agent` precondition (issue #396)
