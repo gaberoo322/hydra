@@ -10,8 +10,7 @@ import assert from "node:assert/strict";
 
 import {
   classifyStalledPrs,
-  classifyRollupEntry,
-  collapseRollupByContext,
+  isFailedRequiredStatus,
   getStalledPrs,
   STALLED_PR_FIELDS,
   type StalledPr,
@@ -154,16 +153,32 @@ describe("classifyStalledPrs — admission lines", () => {
   });
 });
 
-describe("rollup collapse + verdicts", () => {
-  test("a superseded CANCELLED/FAILURE run followed by a SUCCESS rerun is green", () => {
+describe("rollup fold wiring", () => {
+  test("a required context whose LATEST entry is CANCELLED still admits failed-required with failedChecks naming it", () => {
+    const out = classifyStalledPrs(
+      [
+        pr({
+          number: 32,
+          statusCheckRollup: [
+            { name: "test", conclusion: "SUCCESS", completedAt: "2026-09-29T08:00:00Z" },
+            { name: "test", conclusion: "CANCELLED", completedAt: "2026-09-29T09:00:00Z" },
+            allGreen[1],
+          ],
+        }),
+      ],
+      REQUIRED,
+    );
+    assert.equal(out.length, 1);
+    assert.equal(out[0].line, "failed-required");
+    assert.deepEqual(out[0].failedChecks, ["test"]);
+  });
+
+  test("a superseded CANCELLED/FAILURE run followed by a SUCCESS rerun does not admit", () => {
     const rollup = [
       { name: "test", conclusion: "CANCELLED", completedAt: "2026-09-29T08:00:00Z" },
       { name: "test", conclusion: "FAILURE", completedAt: "2026-09-29T08:30:00Z" },
       { name: "test", conclusion: "SUCCESS", completedAt: "2026-09-29T09:00:00Z" },
     ];
-    assert.equal(classifyRollupEntry(collapseRollupByContext(rollup).get("test")), "green");
-    // Order-independent: the latest timestamp wins even if listed first.
-    assert.equal(classifyRollupEntry(collapseRollupByContext([...rollup].reverse()).get("test")), "green");
     const out = classifyStalledPrs(
       [pr({ number: 30, autoMergeArmed: true, statusCheckRollup: [...rollup, allGreen[1]] })],
       REQUIRED,
@@ -171,49 +186,14 @@ describe("rollup collapse + verdicts", () => {
     assert.deepEqual(out, []);
   });
 
-  test("a zero-time completedAt (in-progress rerun) does not lose to an older FAILURE", () => {
-    const rollup = [
-      { name: "test", conclusion: "FAILURE", completedAt: "2026-09-29T08:00:00Z" },
-      { name: "test", status: "IN_PROGRESS", conclusion: "", startedAt: "2026-09-29T09:00:00Z", completedAt: "0001-01-01T00:00:00Z" },
-    ];
-    const winner = collapseRollupByContext(rollup).get("test");
-    assert.equal(winner?.status, "IN_PROGRESS");
-    assert.equal(classifyRollupEntry(winner), "pending");
-    assert.equal(classifyRollupEntry(collapseRollupByContext([...rollup].reverse()).get("test")), "pending");
+  test("isFailedRequiredStatus admits red and cancelled only", () => {
+    assert.equal(isFailedRequiredStatus("red"), true);
+    assert.equal(isFailedRequiredStatus("cancelled"), true);
+    assert.equal(isFailedRequiredStatus("pending"), false);
+    assert.equal(isFailedRequiredStatus("green"), false);
   });
 
-  test("CheckRun and StatusContext entries collapse under one context name", () => {
-    const rollup = [
-      { name: "deep-qa-gate", conclusion: "SUCCESS", completedAt: "2026-09-29T08:00:00Z" },
-      { context: "deep-qa-gate", state: "FAILURE", startedAt: "2026-09-29T09:00:00Z" },
-    ];
-    const collapsed = collapseRollupByContext(rollup);
-    assert.equal(collapsed.size, 1);
-    assert.equal(classifyRollupEntry(collapsed.get("deep-qa-gate")), "failing");
-  });
-
-  test("failing conclusions and states are exactly the documented sets", () => {
-    for (const c of ["FAILURE", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED"]) {
-      assert.equal(classifyRollupEntry({ name: "x", conclusion: c }), "failing", c);
-    }
-    for (const s of ["FAILURE", "ERROR"]) {
-      assert.equal(classifyRollupEntry({ context: "x", state: s }), "failing", s);
-    }
-    for (const c of ["SUCCESS", "NEUTRAL", "SKIPPED"]) {
-      assert.equal(classifyRollupEntry({ name: "x", conclusion: c }), "green", c);
-    }
-    assert.equal(classifyRollupEntry({ context: "x", state: "SUCCESS" }), "green");
-    for (const e of [
-      { name: "x", status: "QUEUED" },
-      { name: "x", status: "IN_PROGRESS", conclusion: "" },
-      { context: "x", state: "PENDING" },
-      undefined,
-    ]) {
-      assert.equal(classifyRollupEntry(e), "pending");
-    }
-  });
-
-  test("stuck-items selectPrsWithFailedCi delegates to the shared collapse", () => {
+  test("stuck-items selectPrsWithFailedCi delegates to the shared fold", () => {
     const rows = [
       pr({
         number: 31,

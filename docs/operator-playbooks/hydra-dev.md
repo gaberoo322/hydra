@@ -36,8 +36,8 @@ This skill runs in one of two roles. Decide which BEFORE any work:
   → **CONTEXT POINTER: read `hydra-dev-child-flow.md` (sibling of this SKILL.md)
   and run its numbered child execution contract.** Do NOT spawn another agent;
   do NOT re-select or re-label the issue. Its step 9b — the pre-PR mechanical
-  gate (reconcile dry-run, baseline regeneration, foreground `npm test` +
-  `npm run typecheck:test`) — is mandatory before `gh pr create` (#4731).
+  gate (reconcile dry-run, baseline regeneration, `npm test` per the
+  "Full `npm test` recipe" below + `npm run typecheck:test`) — is mandatory before `gh pr create` (#4731).
 - **You are the PARENT** if you have an `Agent`/`Task` spawn tool available (or
   are being run interactively by the operator to dispatch work).
   → **CONTEXT POINTER: read `hydra-dev-parent-flow.md` (sibling of this
@@ -89,7 +89,8 @@ worktree-fence violations are safety failures.
    verbatim to every `dev_orch` dispatch prompt, so you receive it at dispatch
    time regardless of this pointer. Restated here only as a cross-reference
    (not duplicated, to avoid drift): run verification **in the foreground**
-   (rule 5 above) and don't emit a final message until a PR is open or you are
+   (rule 5 above; the full `npm test` follows the "Full `npm test` recipe"
+   below: background launch, foreground poll) and don't emit a final message until a PR is open or you are
    reporting a hard blocker. The observed failure (#3726): dev_orch did ~9.5
    min of real implementation, backgrounded `npm test`, then stopped talking
    instead of finishing — no PR existed at reap time, and the tokens already
@@ -113,7 +114,8 @@ would have destroyed them.
 
 **The rule: a turn ends only when the result you were waiting for is in hand
 and acted on.** If a result is not ready, either (a) keep waiting in the
-FOREGROUND — let the Bash call block, or poll in a bounded `while` loop in THIS
+FOREGROUND — let the Bash call block (except the full `npm test`: use the
+"Full `npm test` recipe" below), or poll in a bounded `while` loop in THIS
 turn — or (b) post the partial result you can stand behind now. Do not pick a
 third option of "background it and stop". This generalises `hydra-qa`'s
 blocking-dispatch mandate (`run_in_background: false` on every spawn) to every
@@ -128,33 +130,68 @@ Verification gates whether the PR merges, not whether the work survives.
 
 **Foreground bounded poll.** When you have pushed and are waiting on CI — or
 running any long verification — block in THIS turn; never background it and
-stop. A test run via the Bash tool already blocks, so just let it; for a CI
-wait, poll foreground with a bounded loop:
+stop. The full `npm test` is the exception to "just let it block": it now
+needs ~11 min, past the Bash tool's 600 s foreground cap, so the harness
+auto-backgrounds a plain call (#5180). Run it as below; for a CI wait, poll
+foreground with the CI loop below.
+
+**Full `npm test` recipe (canonical — other docs point here).** Commit + push
+first. Launch ONE Bash call with `run_in_background: true` and an explicit
+`timeout: 1800000` (the background default is also 600 s and would kill the run
+mid-suite):
+
+```bash
+npm test > npm-test.log 2>&1; echo "NPM_TEST_EXIT=$?" >> npm-test.log
+```
+
+Then re-issue this FOREGROUND poll (each call under the cap) until the sentinel
+appears, within ONE total budget of 30 min. No bare `sleep N`, no `Monitor`, and
+never end the turn to wait for the harness notification:
+
+```bash
+deadline=$((SECONDS + 540))
+until grep -q '^NPM_TEST_EXIT=' npm-test.log || [ "$SECONDS" -ge "$deadline" ]; do sleep 15; done
+tail -n 25 npm-test.log
+```
+
+Verdict: `NPM_TEST_EXIT=0` AND the launcher's final
+`[redis-db-launch] VERDICT exit=<n> outcome=<...>` line agree. `# fail 0` alone
+is not sufficient (file-set suite-count verdicts redden a `# fail 0` run).
+If the 30 min budget expires with no sentinel, take the partial-but-posted
+branch below.
 
 ```bash
 # BOUNDED FOREGROUND POLL — block in THIS turn until CI on $PR settles. This is
 # the foreground alternative to backgrounding the wait and ending the turn.
 #
-# zsh $status pitfall: name the state variable `run_state` (or `st`), never
+# zsh $status pitfall: name a state variable `pending`, `run_state` or `st`, never
 # `status` — zsh aliases `$status` to `$?`, so assigning a value to a variable
 # named `status` silently fails and the loop exits 1. `status` is the natural
 # spelling of this variable; that is exactly why the loop breaks. (Documented
 # CLAUDE.md pitfall.)
-deadline=$((SECONDS + 600))            # 10-min budget; size to your slowest check
-while [ "$SECONDS" -lt "$deadline" ]; do
-  run_state=$(gh pr view "$PR" --repo "$REPO" --json statusCheckRollup \
-    --jq 'if ([.statusCheckRollup[]?.status]
-           | any(IN("QUEUED","IN_PROGRESS","PENDING","WAITING")))
-          then "pending" else "settled" end' 2>/dev/null)
-  [ "$run_state" = "settled" ] && break
+#
+# Guard-compatible form (issue #3837 family): the worktree-isolation Bash guard
+# REFUSES `deadline=$((SECONDS + N)); while [ "$SECONDS" -lt "$deadline" ]`
+# ("evaluates SECONDS arithmetically inside a construct too complex to verify"),
+# and ALSO refuses the loop once a multi-line `--jq` program sits inside it — so
+# the budget is a fixed iteration count and the probe is `gh pr checks | cut -f2 | grep -cx pending`
+# (this exact form ran under the guard on 2026-10-25).
+pending=unknown                        # stays "unknown" if gh never answers: never read as terminal
+for i in $(seq 1 40); do               # 40 x 15s = 10-min budget; size to your slowest check
+  checks=$(gh pr checks "$PR" --repo "$REPO" 2>/dev/null)
+  if [ -z "$checks" ]; then sleep 15; continue; fi   # gh error / rate limit / no checks yet: keep polling (fail closed)
+  pending=$(printf '%s\n' "$checks" | cut -f2 | grep -cx pending)   # state column only (pass|fail|pending|skipping|cancel)
+  if [ "$pending" = 0 ]; then break; fi
   sleep 15
 done
-# run_state == "settled"  => every check is terminal: read conclusions and act
-#                            (merge on success, fix on failure).
-# still "pending" past the deadline => budget expired: fall through to the
+gh pr checks "$PR" --repo "$REPO"      # read the terminal conclusions
+# pending == 0  => every check is terminal: read conclusions and act
+#                  (merge on success, fix on failure).
+# pending != 0 after the last iteration => budget expired: fall through to the
 #                            partial-but-posted branch below — post what you can
 #                            stand behind now, with CI state as of the last poll.
-#                            NEVER re-arm the loop; one bounded budget per wait.
+#                            NEVER re-arm the loop; one TOTAL budget per wait (the npm test poll
+#                            above is re-issued across <=540s calls).
 ```
 
 **Prefer a partial-but-posted result over a pending one.** If the budget

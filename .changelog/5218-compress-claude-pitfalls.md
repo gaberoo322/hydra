@@ -1,0 +1,1 @@
+- docs: condense CLAUDE.md Common Pitfalls to rule plus pointer, moving mechanisms to docs/reference.md (#5218)

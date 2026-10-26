@@ -22,6 +22,14 @@ the policy lives in `scripts/autopilot/decide.py` (the **L2 decision brain**).
 > editing both this marker AND `SCHEMA_VERSION` (the `limits.schema_version`
 > default) in `scripts/autopilot/run_ledger.py` in the same commit, then running
 > `scripts/sync-skills.sh` so the installed skill mirror is refreshed.
+>
+> **Carry-forward (issue #5073).** `bootstrap.sh` seeds `state.json` via
+> `run_ledger.py seed --carry-from <prior state> --mirror`; the ledger's single
+> `carry_forward()` decides what survives a Pace Gate relaunch. The carried
+> `signal_last_fired` set is derived from `classes.json` (`cooldownSeconds` >
+> the 900s Pace Gate interval, minus the re-armed `discover_target`, plus the
+> `research_target` re-fire stamp) — adding a long-cooldown signal class needs no
+> bootstrap edit. Redis continuity (host reboot) is the ledger's second adapter.
 
 **Authoritative references — read these instead of this playbook when you
 need to know what the autopilot will do:**
@@ -188,8 +196,8 @@ dispatch (plan-time stamp), resets only on POSITIVE non-idle evidence
 (`needs_triage_target` / `target_board_work_available` /
 `target_work_available` — a degraded board read HOLDS the ladder, and a pass
 that files something resets it on the next snapshot with no output parsing),
-and survives relaunches via bootstrap's file-only carry-forward
-(`ZERO_YIELD_BACKOFF_SEED`). Suppressed turns surface as their own
+and survives relaunches via the Run Ledger's file-only carry-forward
+(`run_ledger.carry_forward`). Suppressed turns surface as their own
 `dispatch_decision` cooldown reason (`zero-yield back-off (#4999): streak=N,
 Ns remaining`) plus a `plan.debug.<class>_backoff` payload. `discover_target`
 and `cleanup_target` (#5051; same idle signal and reset set, the 1h cooldown
