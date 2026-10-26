@@ -807,7 +807,7 @@ describe("decide.py — periodic session-restart terminate cause (issue #3787)",
         runDecide(
           baseState({ turn: 7, limitsOverride: { context_compaction_turns: "not-a-number" } }),
         ),
-      /type mismatch for limits\.context_compaction_turns: expected int, got str/,
+      /decide\.py decide exited 1: [\s\S]*LedgerTypeError: \[run-ledger\] type mismatch for limits\.context_compaction_turns: expected int, got str/,
     );
   });
 

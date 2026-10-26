@@ -1009,7 +1009,7 @@ def _capture_quota_baseline(state: dict, now: int) -> None:
        value, so post-reset spend is measured fresh from the new window. A reset
        must never register as negative spend and must never itself terminate.
 
-    Persistence is main()'s job via the existing the run_ledger diff seam
+    Persistence is main()'s job via the Run Ledger diff seam
     tmp-file + `os.replace` helper (the same mechanism proven for the
     force-research counter and the #1769 turn counter) — no new persistence
     machinery, and a crash mid-write can never tear state.json.
