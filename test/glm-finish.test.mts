@@ -1099,6 +1099,28 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
     assert.equal(rb.quotaBlockedUntil, NOW_SEC + 3600);
   });
 
+  test("ruling 3 on EVERY arm: a clean-exit session with a retried 429 never blocks; a failed session still does", async () => {
+    const cases: Array<[string, () => ReturnType<typeof finishHarness>]> = [
+      ["withhold-preflight-blocked", () => finishHarness(1, "b\n", { preflightOk: false })],
+      ["release-after-failed-pr", () => finishHarness(1, "b\n", { prOk: false })],
+      ["keep-partial-for-resume", () => finishHarness(1, null)],
+      ["release-nothing-produced", () => finishHarness(0, null)],
+    ];
+    for (const [action, mk] of cases) {
+      const h = mk();
+      const raw = JSON.stringify({ ok: true, code: 0, stdout: "Request rejected (429)\nretry ok\ndone", stderr: "" });
+      const r = await runFinish(h.deps, input(KIMI_P, raw));
+      assert.equal(r.action, action);
+      assert.equal(r.quotaBlockedUntil, null, `${action}: clean exit must not block`);
+      assert.equal(h.files.has(quotaBlockFilePath(CAP_DIR, "kimi")), false, action);
+      const hf = mk();
+      const rawF = JSON.stringify({ ok: true, code: 1, stdout: "Request rejected (429)", stderr: "" });
+      const rf = await runFinish(hf.deps, input(KIMI_P, rawF));
+      assert.equal(rf.action, action);
+      assert.equal(rf.quotaBlockedUntil, NOW_SEC + 3600, `${action}: failed session blocks`);
+    }
+  });
+
   test("a NON-z.ai 429 text (no 'Request rejected') still blocks the selected provider; a bare '429' number does not", async () => {
     for (const text of [
       "API Error: 429 Too Many Requests",

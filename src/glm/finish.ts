@@ -630,6 +630,23 @@ function incrementDailyCap(deps: FinishDeps, nowMs: number, provider?: WorkerPro
 }
 
 /**
+ * Session-outcome gate over recordQuotaBlockIf429, shared by EVERY arm (#4841
+ * INV-7): a clean-exit session that retried a transient 429 never blocks the
+ * provider; only a failed session (timed out, or exit code non-zero/unknown)
+ * with 429 evidence is exhaustion evidence.
+ */
+function recordQuotaBlockIfSessionFailed(
+  deps: FinishDeps,
+  outcome: AuthorOutcome,
+  authorStdout: string,
+  nowSec: number,
+  provider?: WorkerProvider,
+): ReturnType<typeof recordQuotaBlockIf429> {
+  const sessionFailed = outcome.kind === "ran" && (outcome.timedOut || outcome.code !== 0);
+  return sessionFailed ? recordQuotaBlockIf429(deps, authorStdout, nowSec, provider) : null;
+}
+
+/**
  * Only from evidence, AFTER the claim is freed (issue #4273 INV-2/INV-6). The
  * SELECTED provider's block file is written (issue #4841 INV-5/INV-7); the
  * reset offset comes from the provider's `quotaReset` (INV-8), with
@@ -865,7 +882,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       await releaseClaim(deps, issue, verdict.withhold);
       // D17: only from evidence, only AFTER the release (issue #4841 INV-7:
       // now on EVERY ran arm, not just this one).
-      const quotaBlockedUntil = recordQuotaBlockIf429(deps, authorStdout, nowSec, input.provider);
+      const quotaBlockedUntil = recordQuotaBlockIfSessionFailed(deps, outcome, authorStdout, nowSec, input.provider);
       return {
         action: "release-nothing-produced",
         issue,
@@ -887,7 +904,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       await releaseClaim(deps, issue, verdict.withhold);
       // The #4593 loop fix: a 429 here must block the provider too, or every
       // tick re-launches the resumed branch into the same exhausted quota.
-      const quotaBlockedUntil = recordQuotaBlockIf429(deps, authorStdout, nowSec, input.provider);
+      const quotaBlockedUntil = recordQuotaBlockIfSessionFailed(deps, outcome, authorStdout, nowSec, input.provider);
       return {
         action: "keep-partial-for-resume",
         issue,
@@ -902,7 +919,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       await deleteRemoteBranchIfPushed(deps, input.branch);
       await releaseClaim(deps, issue, true); // always withhold — the T2/T3 fence hit
       // The timeout counter is deliberately untouched (INV-4).
-      const quotaBlockedUntil = recordQuotaBlockIf429(deps, authorStdout, nowSec, input.provider);
+      const quotaBlockedUntil = recordQuotaBlockIfSessionFailed(deps, outcome, authorStdout, nowSec, input.provider);
       return {
         action: "withhold-preflight-blocked",
         issue,
@@ -918,7 +935,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
       );
       if (verdict.withhold) logCapReached(deps, issue, timeoutCount, config.timeoutResumeCap);
       await releaseClaim(deps, issue, verdict.withhold);
-      const quotaBlockedUntil = recordQuotaBlockIf429(deps, authorStdout, nowSec, input.provider);
+      const quotaBlockedUntil = recordQuotaBlockIfSessionFailed(deps, outcome, authorStdout, nowSec, input.provider);
       return {
         action: "release-after-failed-pr",
         issue,
@@ -937,12 +954,9 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
         `issue #${issue}: PR opened (branch=${input.branch}), advanced to needs-qa, daily cap incremented`,
       );
       await removeWorktreeIfPassed(deps, input.worktree);
-      // Operator ruling 3 (#4841): finality comes from the session OUTCOME, not
-      // position. A session that opened a PR and exited cleanly never blocks the
-      // provider, wherever a (retried) 429 sits in its output; only a failed
-      // session (timed out or non-zero exit) with a 429 is exhaustion evidence.
-      const sessionFailed = outcome.kind === "ran" && (outcome.timedOut || (outcome.code !== null && outcome.code !== 0));
-      const quotaBlockedUntil = sessionFailed ? recordQuotaBlockIf429(deps, authorStdout, nowSec, input.provider) : null;
+      // 429 finality is decided from the session OUTCOME on every arm
+      // (recordQuotaBlockIfSessionFailed), not from the 429's position in output.
+      const quotaBlockedUntil = recordQuotaBlockIfSessionFailed(deps, outcome, authorStdout, nowSec, input.provider);
       return {
         action: "open-pr",
         issue,
