@@ -1,0 +1,1 @@
+- refactor: autopilot carry-forward is one derived run_ledger carry_forward(); bootstrap jq blocks and the second Redis mirror writer removed (#5073)

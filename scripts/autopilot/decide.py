@@ -4935,55 +4935,6 @@ def _post_run_end_for_terminate(actions: list, state: dict) -> None:
     )
 
 
-def _mirror_research_force_counter_to_redis(state: dict) -> None:
-    """Mirror research_force_counter to Redis on a plan-time stamp (issue #2715).
-
-    decide.py stamps the daily forced-research counter at plan time (not at reap
-    time), so the Redis mirror needs a decide-side write too — otherwise a run
-    that force-dispatches research but never reaps a matching completion would
-    leave the counter only in the boot-wiped state file. This piggybacks on the
-    SAME force-counter-changed branch that persists via the run_ledger diff seam, so
-    it fires exactly once per stamping turn.
-
-    ONLY research_force_counter is mirrored here (signal_last_fired is mirrored by
-    reap.py's executor-side seam — decide.py's `stamp_signal` is not on the live
-    stamp path). The seam is `docker exec hydra-redis-1 redis-cli`, matching
-    reap.py / bootstrap.sh; `HYDRA_AUTOPILOT_REDIS_CLI` overrides the argv prefix
-    for tests. Best-effort / fail-open: any error logs to stderr and never aborts
-    the decision turn (design-concept #2715 Invariant 5). Gated OFF for CLI-
-    spawning tests via the same `HYDRA_AUTOPILOT_RUN_END_POST` off-switch decide
-    already honours, so isolated `decide` invocations stay pure emitters.
-    """
-    flag = os.environ.get("HYDRA_AUTOPILOT_RUN_END_POST", "").strip().lower()
-    if flag in ("0", "off", "no", "false"):
-        return
-    rfc = state.get("research_force_counter")
-    if not isinstance(rfc, dict):
-        return
-    override = os.environ.get("HYDRA_AUTOPILOT_REDIS_CLI", "").strip()
-    if override:
-        cmd = [*override.split(), "SET", "hydra:autopilot:research-force-counter",
-               json.dumps(rfc, sort_keys=True)]
-    else:
-        cmd = ["docker", "exec", "hydra-redis-1", "redis-cli", "SET",
-               "hydra:autopilot:research-force-counter", json.dumps(rfc, sort_keys=True)]
-    import subprocess
-    try:
-        subprocess.run(
-            cmd,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=3,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        print(
-            f"decide.py: research_force_counter redis mirror failed ({exc}); "
-            "state.json remains source of truth",
-            file=sys.stderr,
-        )
-
-
 def _persist_ledger(path: str, state: dict, what: str) -> bool:
     """Persist the state document through the Run Ledger's one writer.
 
@@ -5204,10 +5155,8 @@ def main(argv: list[str]) -> int:
             _persist_ledger(
                 argv[2], state, what="decide-owned keys: " + ", ".join(changed),
             )
-        if "research_force_counter" in changed:
-            # Issue #2715: mirror the just-stamped counter to Redis so a host
-            # reboot (which wipes the /tmp state file) can reseed it.
-            _mirror_research_force_counter_to_redis(state)
+        # Issue #5073 (INV-10): decide.py no longer mirrors to Redis; the stamped
+        # counter reaches Redis via the Run Ledger's single mirror writer on reap.
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the
         # per-class cadence multiplier decide.py WOULD apply in a future live

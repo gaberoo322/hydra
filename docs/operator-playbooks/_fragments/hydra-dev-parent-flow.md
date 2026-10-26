@@ -376,13 +376,16 @@ issue. Best-effort — a failed POST does not fail the build.
 ## Guard-compatible shell forms (issue #3837)
 
 The harness's worktree-isolation Bash guard refuses Bash commands it judges too
-complex to verify stay inside the worktree. Confirmed triggers (refused
-categorically -- one-line OR multi-line, and a bare loop is refused even with no
-substitution at all):
+complex to verify stay inside the worktree. Confirmed triggers (refused in
+one-line OR multi-line form; loops are judged by their shape -- a clock-budgeted
+loop is refused, a fixed-iteration `for` is accepted, see the last bullet):
 
 - **Process substitution** -- `comm -13 <(...) <(...)`, `mapfile -t X < <(...)`.
 - **Nested command substitution** -- `$( ... $(...) ... )`.
-- **`for` / `while` / `until` loops** -- refused regardless of formatting.
+- **Clock-budgeted loops** -- `deadline=$((SECONDS + N)); while [ "$SECONDS" -lt "$deadline" ]`
+  is refused ("evaluates SECONDS arithmetically"). A fixed-iteration
+  `for i in $(seq 1 N); do ...; if [ cond ]; then break; fi; sleep 15; done`
+  WAS accepted (verified in-dispatch 2026-10-25) -- budget by count, not clock.
 
 This is about our snippets meeting the guard halfway. Two workarounds:
 
@@ -392,11 +395,12 @@ This is about our snippets meeting the guard halfway. Two workarounds:
    rewrite: two `printf ... > file` lines, then `comm -13 fileA fileB`.
 2. **Poll CI with a foreground command sequence, not `Monitor`.** `Monitor`'s own
    documented CI-poll example uses `comm -13 <(...) <(...)`, so it is refused;
-   run separate sequential commands instead. If a loop seems unavoidable, note
-   `for`/`while`/`until` are refused categorically -- re-check the exact form
-   from inside the worktree dispatch first (guard behavior can differ by harness
-   config), and mind the zsh `$status` hazard in any loop variable (use
-   `st` / `run_state`).
+   run separate sequential commands instead, or the fixed-iteration
+   `for i in $(seq 1 N)` form from the "Foreground bounded poll" recipe -- keep
+   the loop body to plain `gh pr checks | grep -c` (a multi-line `--jq` program
+   inside the loop is refused too), re-check the exact form from inside the
+   worktree dispatch first (guard behavior can differ by harness config), and
+   mind the zsh `$status` hazard in any loop variable (use `st` / `run_state`).
 
 Do NOT disable or work around the guard itself -- it is the isolation fence
 (AC #4 of #3837). This issue rewrites only our own snippets to meet it halfway;

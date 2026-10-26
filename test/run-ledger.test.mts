@@ -37,15 +37,9 @@ function seedArgsFrom(doc: any): string[] {
     if (k === "schema_version") continue;
     out.push(`${k}=${JSON.stringify(v)}`);
   }
-  for (const k of [
-    "research_force_counter",
-    "dev_resume_pending",
-    "zero_yield_backoff",
-    "slots",
-    "signal_last_fired",
-  ]) {
-    out.push(`${k}=${JSON.stringify(doc[k])}`);
-  }
+  // Issue #5073: the five carry keys are no longer seed arguments — the ledger
+  // derives them (carry_forward / build_slots), so a default seed with no
+  // --carry-from reproduces the all-default golden.
   return out;
 }
 
@@ -372,5 +366,328 @@ print(json.dumps(out))`);
       writeFileSync(path, JSON.stringify({ candidate_exclusions: {} }));
       assert.notEqual(py("r.load(sys.argv[1])", [path]).status, 0, "object no longer valid");
     });
+  });
+});
+
+// Issue #5073 (epic #5071 slice 2) — carry_forward, the ONE reader of a prior
+// run's state. Driven in-process (python3 -I, same harness pattern as the
+// INV-3/INV-4 field-table tests) so each historical scenario is a regression
+// case at the ledger interface, not a bootstrap end-to-end run.
+// ---------------------------------------------------------------------------
+
+const AUTOPILOT_DIR = join(REPO_ROOT, "scripts", "autopilot");
+
+/** Run python (isolated) with run_ledger importable; stdout must be JSON. */
+function pyJson(code: string, env: Record<string, string> = {}): any {
+  const prelude =
+    `import sys, json\nsys.path.insert(0, ${JSON.stringify(AUTOPILOT_DIR)})\n` +
+    `import run_ledger as L\nCLASSES = L.load_classes()\n`;
+  const r = spawnSync("python3", ["-I", "-c", prelude + code], {
+    encoding: "utf-8",
+    env: { PATH: process.env.PATH ?? "", ...env },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout);
+}
+
+/** carry_forward(prev, CLASSES, now) with `prev` given as a JSON literal. */
+function carry(prevJson: string, now = 1792911953): any {
+  return pyJson(`print(json.dumps(L.carry_forward(json.loads(${JSON.stringify(prevJson)}), CLASSES, ${now})))`);
+}
+
+const HISTORICAL_SIGNAL_KEYS = [
+  "architecture_orch", "cleanup_orch", "cleanup_target", "design_qa_target",
+  "discover_orch", "discover_target", "health", "retro_orch", "research_target",
+  "scout_orch", "skill_prune", "sweep_orch", "sweep_target", "tickets_orch",
+  "wayfinder_orch", "wire_or_retire_target",
+];
+// 1792911953 = 2026-10-25T07:05:53Z
+const TODAY = "2026-10-25";
+
+describe("run_ledger golden key sets survive the derivation (issue #5073)", () => {
+  test("regenerated goldens carry exactly the historical 16 signal_last_fired keys (sorted-key semantic equality)", () => {
+    for (const name of ["heredoc-default.json", "heredoc-custom.json"]) {
+      const golden = JSON.parse(readFileSync(join(FIXTURES, name), "utf-8"));
+      assert.deepEqual(Object.keys(golden.signal_last_fired).sort(), [...HISTORICAL_SIGNAL_KEYS].sort());
+      assert.deepEqual(Object.keys(golden.slots), [
+        "dev_orch", "qa_orch", "research_orch", "dev_target", "qa_target", "research_target",
+        "design_concept_orch",
+      ]);
+    }
+  });
+});
+
+describe("run_ledger carry_forward — the five historical scenarios (issue #5073)", () => {
+  test("#1666 research_force_counter keeps only today's UTC key; a non-object degrades to {}", () => {
+    const c = carry(JSON.stringify({ research_force_counter: { [TODAY]: { orch: 2 }, "2026-10-24": { orch: 4 } } }));
+    assert.deepEqual(c.research_force_counter, { [TODAY]: { orch: 2 } });
+    assert.deepEqual(carry(JSON.stringify({ research_force_counter: [1, 2] })).research_force_counter, {});
+    assert.deepEqual(carry(JSON.stringify({ research_force_counter: { [TODAY]: 3 } })).research_force_counter, {});
+    assert.deepEqual(carry("{}").research_force_counter, {});
+  });
+
+  test("#2575/#4909 signal_last_fired carries a numeric prior stamp for carried classes, re-arms the rest to 0", () => {
+    const c = carry(
+      JSON.stringify({
+        signal_last_fired: {
+          retro_orch: 1780000000, research_target: 1780000400, cleanup_target: 1780000500,
+          health: 5, sweep_orch: 6, discover_target: 7, // re-armed each run
+          scout_orch: "yesterday", skill_prune: true, // non-numeric -> 0
+        },
+      }),
+    );
+    const s = c.signal_last_fired;
+    assert.equal(s.retro_orch, 1780000000);
+    assert.equal(s.research_target, 1780000400);
+    assert.equal(s.cleanup_target, 1780000500);
+    for (const k of ["health", "sweep_orch", "discover_target", "scout_orch", "skill_prune"]) {
+      assert.equal(s[k], 0, k);
+    }
+    assert.deepEqual(Object.keys(s).sort(), [...HISTORICAL_SIGNAL_KEYS].sort());
+  });
+
+  test("#4909 a NEW signal class with cooldownSeconds > 900 is carried with zero code change", () => {
+    const out = pyJson(
+      "classes = CLASSES + [{'name':'brand_new_orch','kind':'signal','cooldownSeconds':3600}," +
+        "{'name':'brand_new_fast','kind':'signal','cooldownSeconds':900}]\n" +
+        "c = L.carry_forward({'signal_last_fired':{'brand_new_orch':123,'brand_new_fast':456}}, classes, 1792911953)\n" +
+        "print(json.dumps(c['signal_last_fired']))",
+    );
+    assert.equal(out.brand_new_orch, 123, "cooldown 3600 > 900 is carried");
+    assert.equal(out.brand_new_fast, 0, "cooldown == relaunch interval is re-armed (not strictly greater)");
+  });
+
+  test("#4518 dev_resume_pending drops malformed, dedups by anchor keeping the LATEST in FIFO position, caps at 20; non-list -> []", () => {
+    const e = (anchor: string, n = 0) => ({ anchor, branch: `b${n}` });
+    const c = carry(
+      JSON.stringify({
+        dev_resume_pending: [e("a", 1), "junk", { anchor: "" }, { anchor: 5 }, e("b", 1), e("a", 2), e("c", 1)],
+      }),
+    );
+    assert.deepEqual(c.dev_resume_pending, [e("b", 1), e("a", 2), e("c", 1)]);
+    const many = Array.from({ length: 25 }, (_, i) => e(`x${i}`));
+    const capped = carry(JSON.stringify({ dev_resume_pending: many })).dev_resume_pending;
+    assert.equal(capped.length, 20);
+    assert.equal(capped[0].anchor, "x5", "FIFO: the oldest are dropped");
+    assert.deepEqual(carry(JSON.stringify({ dev_resume_pending: { anchor: "a" } })).dev_resume_pending, []);
+  });
+
+  test("#4999 zero_yield_backoff keeps integral streak+last_fired, floors integral floats, rejects bool/non-int/non-object", () => {
+    const c = carry(
+      JSON.stringify({
+        zero_yield_backoff: {
+          ok: { streak: 2, last_fired: 1780000000 },
+          floats: { streak: 3.0, last_fired: 1780000001.0 },
+          fractional: { streak: 1.5, last_fired: 1 },
+          boolean: { streak: true, last_fired: 1 },
+          missing: { streak: 1 },
+          notobj: 7,
+        },
+      }),
+    );
+    assert.deepEqual(c.zero_yield_backoff, {
+      ok: { streak: 2, last_fired: 1780000000 },
+      floats: { streak: 3, last_fired: 1780000001 },
+    });
+    assert.deepEqual(carry(JSON.stringify({ zero_yield_backoff: [] })).zero_yield_backoff, {});
+  });
+});
+
+describe("run_ledger carry_forward — policy is data, the prior document is untrusted (issue #5073)", () => {
+  test("a reset-per-run row is never carried even when present in the prior document; slots are never read from it", () => {
+    withDir((dir) => {
+      const path = join(dir, "state.json");
+      writeFileSync(
+        path,
+        JSON.stringify({
+          cumulative_tokens: 999, turn: 7, dispatches: 4, burned_classes: ["dev_orch"],
+          slots: { dev_orch: { skill: "hydra-dev" } },
+          dev_resume_pending: [{ anchor: "issue-1" }],
+        }),
+      );
+      const golden = JSON.parse(readFileSync(join(FIXTURES, "heredoc-default.json"), "utf-8"));
+      const r = ledger(["seed", path, "--carry-from", path, ...seedArgsFrom(golden)]);
+      assert.equal(r.status, 0, r.stderr);
+      const doc = JSON.parse(readFileSync(path, "utf-8"));
+      assert.equal(doc.cumulative_tokens, 0);
+      assert.equal(doc.turn, 0);
+      assert.equal(doc.dispatches, 0);
+      assert.deepEqual(doc.burned_classes, []);
+      assert.equal(doc.slots.dev_orch, null, "prior slots must not resurrect");
+      assert.deepEqual(doc.dev_resume_pending, [{ anchor: "issue-1" }], "carried rows do carry");
+      assert.match(r.stdout, /carried dev_resume_pending forward from prior state: \[\{"anchor":"issue-1"\}\] \(issue #4518\)/);
+    });
+  });
+
+  test("the policy table: only the declared rows carry, slots is seeded-from-orchestrator", () => {
+    const o = pyJson(
+      "print(json.dumps({f['name']: f['carry'] for f in L.FIELDS if f['name'] in " +
+        "('research_force_counter','dev_resume_pending','zero_yield_backoff','slots','signal_last_fired','turn')}))",
+    );
+    assert.deepEqual(o, {
+      research_force_counter: "mirrored-to-Redis",
+      dev_resume_pending: "carry-across-relaunch",
+      zero_yield_backoff: "carry-across-relaunch",
+      slots: "seeded-from-orchestrator",
+      signal_last_fired: "mirrored-to-Redis",
+      turn: "reset-per-run",
+    });
+  });
+
+  test("a missing, unparseable, or legacy/malformed prior file yields the all-default carry and seed exits 0", () => {
+    const golden = JSON.parse(readFileSync(join(FIXTURES, "heredoc-default.json"), "utf-8"));
+    const legacy = JSON.stringify({
+      signal_last_fired: "x", dev_resume_pending: 4, zero_yield_backoff: null, research_force_counter: 9,
+    });
+    for (const prior of [null, "{not json", "[1,2,3]", '"str"', legacy]) {
+      withDir((dir) => {
+        const path = join(dir, "state.json");
+        if (prior !== null) writeFileSync(path, prior);
+        const r = ledger(["seed", path, "--carry-from", path, ...seedArgsFrom(golden)]);
+        assert.equal(r.status, 0, `${prior}: ${r.stderr}`);
+        assert.deepEqual(JSON.parse(readFileSync(path, "utf-8")), golden, `${prior}`);
+      });
+    }
+  });
+
+  test("carry_forward never raises on garbage input", () => {
+    const garbage = [
+      "null", "[]", "7", '"s"',
+      '{"signal_last_fired":[1],"dev_resume_pending":[null,1,{"anchor":null}],"zero_yield_backoff":{"a":null}}',
+    ];
+    for (const prev of garbage) {
+      const c = carry(prev);
+      assert.deepEqual(c.dev_resume_pending, []);
+      assert.deepEqual(c.zero_yield_backoff, {});
+    }
+  });
+
+  test("seed no longer accepts the five carry keys as key=<json>: exits 2 before any write", () => {
+    const golden = JSON.parse(readFileSync(join(FIXTURES, "heredoc-default.json"), "utf-8"));
+    for (const k of ["research_force_counter", "dev_resume_pending", "zero_yield_backoff", "slots", "signal_last_fired"]) {
+      withDir((dir) => {
+        const path = join(dir, "state.json");
+        const r = ledger(["seed", path, ...seedArgsFrom(golden), `${k}={}`]);
+        assert.equal(r.status, 2, k);
+        assert.deepEqual(readdirSync(dir), []);
+      });
+    }
+  });
+
+  test("slots_overlay merges an orchestrator `.slots` object onto the 7-null base; a malformed payload degrades to the base", () => {
+    const golden = JSON.parse(readFileSync(join(FIXTURES, "heredoc-default.json"), "utf-8"));
+    const run = (overlay: string) =>
+      withDir((dir) => {
+        const path = join(dir, "state.json");
+        const r = ledger(["seed", path, ...seedArgsFrom(golden), `slots_overlay=${overlay}`]);
+        assert.equal(r.status, 0, r.stderr);
+        return JSON.parse(readFileSync(path, "utf-8")).slots;
+      });
+    const live = run(JSON.stringify({ slots: { dev_orch: { skill: "hydra-dev" } } }));
+    assert.deepEqual(live.dev_orch, { skill: "hydra-dev" });
+    assert.equal(live.qa_orch, null);
+    assert.deepEqual(run("not json at all"), golden.slots);
+    assert.deepEqual(run(JSON.stringify({ slots: "nope" })), golden.slots);
+    assert.deepEqual(run("[1]"), golden.slots);
+  });
+});
+
+describe("run_ledger carry set is derived, never enumerated (issue #5073 INV-2/INV-3/INV-4)", () => {
+  test("carry-classes prints {signal rows with cooldownSeconds > 900} - rearm_each_run + pipeline_refire_stamps", () => {
+    const r = ledger(["carry-classes"]);
+    assert.equal(r.status, 0, r.stderr);
+    const classes = JSON.parse(readFileSync(join(AUTOPILOT_DIR, "classes.json"), "utf-8")).classes;
+    const expected = [
+      ...classes
+        .filter((c: any) => c.kind === "signal" && c.cooldownSeconds > 900 && c.name !== "discover_target")
+        .map((c: any) => c.name),
+      "research_target",
+    ];
+    assert.deepEqual(r.stdout.trim().split("\n"), expected);
+    assert.equal(expected.length, 12);
+  });
+
+  test("PACE_GATE_RELAUNCH_SEC equals the systemd timer's OnUnitActiveSec (parsed, not retyped)", () => {
+    const timer = readFileSync(join(REPO_ROOT, "scripts", "systemd", "hydra-pace-gate.timer"), "utf-8");
+    const m = /^OnUnitActiveSec=(\d+)(min|s|h)?$/m.exec(timer);
+    assert.ok(m, "timer declares OnUnitActiveSec");
+    const sec = Number(m![1]) * ({ min: 60, s: 1, h: 3600 } as Record<string, number>)[m![2] ?? "s"];
+    assert.equal(pyJson("print(L.PACE_GATE_RELAUNCH_SEC)"), sec);
+  });
+
+  test("the exception tuples are pinned: stamps == decide.PIPELINE_REFIRE_SEC, rearm is a subset of signal rows", () => {
+    const o = pyJson(
+      "import decide\n" +
+        "row = [f for f in L.FIELDS if f['name']=='signal_last_fired'][0]\n" +
+        "sig = {c['name'] for c in CLASSES if c['kind']=='signal'}\n" +
+        "print(json.dumps({'stamps': sorted(row['pipeline_refire_stamps']), 'refire': sorted(decide.PIPELINE_REFIRE_SEC)," +
+        " 'rearm_ok': set(row['rearm_each_run']) <= sig}))",
+    );
+    assert.deepEqual(o.stamps, o.refire);
+    assert.equal(o.rearm_ok, true);
+  });
+});
+
+describe("run_ledger Redis continuity — prior-file -> Redis -> default (issue #5073 INV-8/INV-10)", () => {
+  const MEM_MIRROR =
+    "class Mem:\n" +
+    "    def __init__(self, h, g): self.h, self.g, self.calls = h, g, []\n" +
+    "    def hget(self, key, field):\n" +
+    "        self.calls.append(('HGET', field)); return self.h.get(field)\n" +
+    "    def get(self, key):\n" +
+    "        self.calls.append(('GET', key)); return self.g\n";
+
+  test("no prior file (host reboot): signal stamps and the force counter seed from the mirror through the ledger", () => {
+    const o = pyJson(
+      MEM_MIRROR +
+        "m = Mem({'retro_orch':'1780000000','scout_orch':'\"1780000300\"','cleanup_orch':'abc','skill_prune':''}," +
+        " json.dumps({'2026-10-25':{'orch':1},'2026-10-24':{'orch':9}}))\n" +
+        "c = L.carry_forward(None, CLASSES, 1792911953, m)\n" +
+        "print(json.dumps({'s': c['signal_last_fired'], 'r': c['research_force_counter']}))",
+    );
+    assert.equal(o.s.retro_orch, 1780000000);
+    assert.equal(o.s.scout_orch, 1780000300, "redis-cli quoting is stripped");
+    assert.equal(o.s.cleanup_orch, 0, "non-numeric Redis value keeps the default");
+    assert.equal(o.s.skill_prune, 0);
+    assert.equal(o.s.health, 0, "an always-on key never consults Redis");
+    assert.deepEqual(o.r, { [TODAY]: { orch: 1 } }, "yesterday's counter never resurrects");
+  });
+
+  test("prior-file wins: a class with a real prior stamp never touches Redis; a non-empty counter never GETs", () => {
+    const o = pyJson(
+      MEM_MIRROR +
+        "m = Mem({'retro_orch':'5'}, json.dumps({'2026-10-25':{'orch':8}}))\n" +
+        "prev = {'signal_last_fired': {'retro_orch': 1780000000}, 'research_force_counter': {'2026-10-25': {'orch': 2}}}\n" +
+        "c = L.carry_forward(prev, CLASSES, 1792911953, m)\n" +
+        "print(json.dumps({'retro': c['signal_last_fired']['retro_orch'], 'r': c['research_force_counter']," +
+        " 'hget_fields': [f for k, f in m.calls if k == 'HGET'], 'gets': [k for k, f in m.calls if k == 'GET']}))",
+    );
+    assert.equal(o.retro, 1780000000);
+    assert.deepEqual(o.r, { [TODAY]: { orch: 2 } });
+    assert.ok(!o.hget_fields.includes("retro_orch"), "prior-file value short-circuits the HGET");
+    assert.deepEqual(o.gets, [], "a non-empty pruned counter never consults Redis");
+  });
+
+  test("RedisMirror is fail-open: a missing binary and a failing command both yield None, never raise", () => {
+    const o = pyJson(
+      "a = L.RedisMirror(['/nonexistent/redis-cli-5073'])\n" +
+        "b = L.RedisMirror(['false'])\n" +
+        "print(json.dumps([a.hget('k','f'), a.get('k'), b.hget('k','f'), b.get('k')]))",
+    );
+    assert.deepEqual(o, [null, null, null, null]);
+  });
+
+  test("mirror_to_redis derives its writes from the mirrored rows: one HSET (int-coercible fields only) + one SET", () => {
+    const o = pyJson(
+      "calls = []\n" +
+        "L.mirror_to_redis({'signal_last_fired': {'health': 0, 'retro_orch': 1780000000, 'bad': 'x'}," +
+        " 'research_force_counter': {'2026-10-25': {'orch': 1}}, 'turn': 4, 'pid': 99}, lambda *a: calls.append(list(a)))\n" +
+        "print(json.dumps(calls))",
+    );
+    const hset = o.find((c: string[]) => c[0] === "HSET");
+    const set = o.find((c: string[]) => c[0] === "SET");
+    assert.deepEqual(hset, ["HSET", "hydra:autopilot:signal-last-fired", "health", "0", "retro_orch", "1780000000"]);
+    assert.deepEqual(set, ["SET", "hydra:autopilot:research-force-counter", '{"2026-10-25": {"orch": 1}}']);
+    assert.equal(o.length, 2);
   });
 });

@@ -26,6 +26,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+# run_ledger is a sibling leaf; guard the path so a test loading this module by
+# file path (sys.path[0] == '') still resolves it (same guard as reap.py).
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+import run_ledger  # noqa: E402
+
 STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json"))
 
 # Issue #4398: the run-log seam relocates here (from reap.py) alongside
@@ -76,8 +83,6 @@ REAPED_TASK_IDS_CAP = 1000
 # `HYDRA_AUTOPILOT_REDIS_CLI` overrides the argv prefix so tests inject a stub and
 # exercise the mirror hermetically. Every write is best-effort / fail-open: any
 # error logs to stderr and NEVER aborts the reap (design-concept #2715 Invariant 5).
-REDIS_SIGNAL_LAST_FIRED_KEY = "hydra:autopilot:signal-last-fired"
-REDIS_RESEARCH_FORCE_KEY = "hydra:autopilot:research-force-counter"
 
 
 def load_state() -> dict | None:
@@ -173,44 +178,17 @@ def redis_cli(*args: str, capture: bool = False) -> str | None:
 def mirror_cross_run_state_to_redis(s: dict) -> None:
     """Mirror the cross-run durable subset of state to Redis (issue #2715).
 
-    ONLY the reboot-survival subset is mirrored — `signal_last_fired` (the 10
-    signal classes) and `research_force_counter`. Run-scoped fields
-    (pid/turn/dispatches/slots/burned_classes) are NEVER mirrored:
-    they legitimately die with the run and the concurrent-run PID guard + #1352
-    slot re-seeding DEPEND on them resetting (design-concept #2715 Invariant 4).
-
-    Called after `save_state` in `run_completion`, so a Redis hiccup can never
-    lose the local write. Best-effort throughout — no exception escapes.
+    Thin delegation (issue #5073, INV-10) to the Run Ledger's single mirror
+    writer: `run_ledger.mirror_to_redis` derives the write set from the FIELDS
+    rows whose policy is mirrored-to-Redis (`signal_last_fired`,
+    `research_force_counter`). Run-scoped fields are NEVER mirrored — they die
+    with the run by design (design-concept #2715 Invariant 4). The name stays
+    because reap.py imports it. Called after `save_state` in `run_completion`, so
+    a Redis hiccup can never lose the local write; no exception escapes.
     """
     try:
-        slf = s.get("signal_last_fired")
-        if isinstance(slf, dict) and slf:
-            # HSET the hash field-by-field; each value is an epoch int (or 0).
-            # Skip non-int-coercible values rather than corrupting the field.
-            hset_args: list[str] = ["HSET", REDIS_SIGNAL_LAST_FIRED_KEY]
-            for cls, ts in slf.items():
-                try:
-                    hset_args.extend([str(cls), str(int(ts))])
-                except (TypeError, ValueError):
-                    continue
-            # Only issue the HSET when at least one field pair was collected.
-            if len(hset_args) > 2:
-                redis_cli(*hset_args)
-
-        rfc = s.get("research_force_counter")
-        if isinstance(rfc, dict):
-            # Store as one canonical-JSON string (a date-keyed nested object) so
-            # bootstrap can prune it to today's key on read, mirroring the
-            # prior-file path. An empty {} is still written — it faithfully
-            # records "no forced-research today" and never resurrects a stale day.
-            redis_cli(
-                "SET",
-                REDIS_RESEARCH_FORCE_KEY,
-                json.dumps(rfc, sort_keys=True),
-            )
+        run_ledger.mirror_to_redis(s, redis_cli)
     except Exception as exc:  # pragma: no cover - defensive belt-and-braces
-        # The subset mirror is a pure best-effort side-effect; never let it
-        # bubble up and abort a reap that already persisted state locally.
         print(
             f"[autopilot] reap: cross-run redis mirror failed ({exc}); "
             "state.json remains source of truth",
