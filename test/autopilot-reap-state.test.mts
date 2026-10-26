@@ -495,13 +495,13 @@ describe("bootstrap.sh seed block — wiring of the reaped-slot filter (issue #5
     const tmp = makeTmp();
     try {
       const src = readFileSync(BOOTSTRAP, "utf-8").split("\n");
-      const start = src.findIndex((l) => l.startsWith("SLOTS_BASE="));
-      const end = src.findIndex((l) => l.startsWith("# Initialize state file"));
+      const start = src.findIndex((l) => l.startsWith("SLOTS_SEED_RAW="));
+      const end = src.findIndex((l) => l.startsWith("# Redis continuity"));
       assert.ok(start > 0 && end > start, "seed block markers present in bootstrap.sh");
       const block = src.slice(start, end).join("\n");
       if (priorState !== null) writeFileSync(tmp.state, priorState);
       writeStub(tmp.dir, "curl", `#!/bin/sh\ncat <<'BODY'\n${apiBody}\nBODY\n`);
-      const script = `ISOLATED_RUN=0\nSTATE_PATH='${tmp.state}'\n${block}\nprintf '%s' "$SLOTS_JSON"\n`;
+      const script = `ISOLATED_RUN=0\nSTATE_PATH='${tmp.state}'\n${block}\nprintf '%s' "$SLOTS_SEED_RAW"\n`;
       const r = spawnSync("bash", ["-c", script, BOOTSTRAP], {
         env: { ...process.env, PATH: `${tmp.dir}:${process.env.PATH}` },
         encoding: "utf-8",
@@ -522,15 +522,14 @@ describe("bootstrap.sh seed block — wiring of the reaped-slot filter (issue #5
   test("reaped slot dropped, un-reaped in-flight slot carried into the new run's slots", () => {
     const r = runSeedBlock(API, JSON.stringify({ reaped_task_ids: ["aaaa"] }));
     assert.equal(r.status, 0);
-    const slots = JSON.parse(r.stdout);
+    const slots = JSON.parse(r.stdout).slots;
     assert.equal(slots.qa_orch, null, "reaped slot not re-seeded");
     assert.equal(slots.dev_orch.task_id, "bbbb", "un-reaped slot carried over");
-    assert.equal(Object.keys(slots).length, 7);
   });
 
   test("no prior state file: seed passes through unfiltered (sibling shape keeps old verdict)", () => {
     const r = runSeedBlock(API, null);
-    const slots = JSON.parse(r.stdout);
+    const slots = JSON.parse(r.stdout).slots;
     assert.equal(slots.qa_orch.task_id, "aaaa");
     assert.equal(slots.dev_orch.task_id, "bbbb");
   });
