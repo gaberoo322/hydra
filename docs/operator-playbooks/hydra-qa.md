@@ -172,15 +172,18 @@ confuse the two:
 # (SECONDS arithmetic is "too complex to verify") and ALSO refuses the loop once
 # a multi-line `--jq` program sits inside it; budget = fixed iterations, probe =
 # `gh pr checks | grep -c` (this exact form ran under the guard on 2026-10-25).
+pending=unknown                        # stays "unknown" if gh never answers: never read as terminal
 for i in $(seq 1 40); do               # 40 x 15s = 10-min budget; size to your slowest check
-  pending=$(gh pr checks "$PR" --repo "$REPO" 2>/dev/null | grep -cE "pending|queued|in_progress")
+  checks=$(gh pr checks "$PR" --repo "$REPO" 2>/dev/null)
+  if [ -z "$checks" ]; then sleep 15; continue; fi   # gh error / rate limit / no checks yet: keep polling (fail closed)
+  pending=$(printf '%s\n' "$checks" | cut -f2 | grep -cx pending)   # state column only (pass|fail|pending|skipping|cancel)
   if [ "$pending" = 0 ]; then break; fi
   sleep 15
 done
 gh pr checks "$PR" --repo "$REPO"      # read the terminal conclusions
 # pending == 0  => every check is terminal: read conclusions and post the
 #                  final verdict.
-# still "pending" after the last iteration => budget expired: fall through to the
+# pending != 0 after the last iteration => budget expired: fall through to the
 #                            partial-but-posted branch below — post the verdict
 #                            you can stand behind now, with state as of the last
 #                            poll. NEVER re-arm the loop; one bounded budget.

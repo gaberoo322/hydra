@@ -376,9 +376,9 @@ issue. Best-effort — a failed POST does not fail the build.
 ## Guard-compatible shell forms (issue #3837)
 
 The harness's worktree-isolation Bash guard refuses Bash commands it judges too
-complex to verify stay inside the worktree. Confirmed triggers (refused
-categorically -- one-line OR multi-line, and a bare loop is refused even with no
-substitution at all):
+complex to verify stay inside the worktree. Confirmed triggers (refused in
+one-line OR multi-line form; loops are judged by their shape -- a clock-budgeted
+loop is refused, a fixed-iteration `for` is accepted, see the last bullet):
 
 - **Process substitution** -- `comm -13 <(...) <(...)`, `mapfile -t X < <(...)`.
 - **Nested command substitution** -- `$( ... $(...) ... )`.
