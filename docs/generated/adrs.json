@@ -483,6 +483,7 @@
         "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
         "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
         "docs/operator-playbooks/hydra-doctor.md",
+        "docs/operator-playbooks/hydra-grill.md",
         "docs/operator-playbooks/hydra-review.md",
         "docs/operator-playbooks/hydra-target-build.md"
       ],
