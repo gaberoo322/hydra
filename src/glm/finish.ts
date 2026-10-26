@@ -629,16 +629,6 @@ function incrementDailyCap(deps: FinishDeps, nowMs: number, provider?: WorkerPro
   }
 }
 
-/** Number of trailing non-empty stdout lines that count as the session's "final error". */
-const FINAL_ERROR_TAIL_LINES = 3;
-
-/** The last few non-empty lines of a session's stdout (pure). */
-export function sessionTail(stdout: string): string {
-  if (typeof stdout !== "string") return "";
-  const lines = stdout.split("\n").filter((l) => l.trim() !== "");
-  return lines.slice(-FINAL_ERROR_TAIL_LINES).join("\n");
-}
-
 /**
  * Only from evidence, AFTER the claim is freed (issue #4273 INV-2/INV-6). The
  * SELECTED provider's block file is written (issue #4841 INV-5/INV-7); the
@@ -651,12 +641,7 @@ function recordQuotaBlockIf429(
   stdout: string,
   nowSec: number,
   provider?: WorkerProvider,
-  finalErrorOnly = false,
 ): number | null {
-  // Operator ruling 3 (#4841): when the session still produced a PR, a 429 that
-  // was retried past mid-session is not evidence the provider is exhausted —
-  // only a 429 in the session's final lines (nothing succeeded after it) blocks.
-  if (finalErrorOnly) stdout = sessionTail(stdout);
   let tzOffset = deps.config.quotaResetTzOffset;
   if (provider) {
     tzOffset =
@@ -952,7 +937,12 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
         `issue #${issue}: PR opened (branch=${input.branch}), advanced to needs-qa, daily cap incremented`,
       );
       await removeWorktreeIfPassed(deps, input.worktree);
-      const quotaBlockedUntil = recordQuotaBlockIf429(deps, authorStdout, nowSec, input.provider, true);
+      // Operator ruling 3 (#4841): finality comes from the session OUTCOME, not
+      // position. A session that opened a PR and exited cleanly never blocks the
+      // provider, wherever a (retried) 429 sits in its output; only a failed
+      // session (timed out or non-zero exit) with a 429 is exhaustion evidence.
+      const sessionFailed = outcome.kind === "ran" && (outcome.timedOut || (outcome.code !== null && outcome.code !== 0));
+      const quotaBlockedUntil = sessionFailed ? recordQuotaBlockIf429(deps, authorStdout, nowSec, input.provider) : null;
       return {
         action: "open-pr",
         issue,

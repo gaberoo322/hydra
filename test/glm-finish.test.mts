@@ -1070,13 +1070,27 @@ describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", (
     }
   });
 
-  test("ruling 3: open-pr records a block only when the 429 is the session's final error", async () => {
+  test("ruling 3: open-pr records a block only when the session FAILED, wherever the 429 sits", async () => {
     const transient = "API Error: Request rejected (429) — retrying\nturn 2 ok\nedited files\nran tests\npushed branch\nPR body written";
     const a = finishHarness(1, "b\n");
     const ra = await runFinish(a.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 0, stdout: transient, stderr: "" })));
     assert.equal(ra.action, "open-pr");
     assert.equal(ra.quotaBlockedUntil, null, "a recovered mid-session 429 must not block the provider");
     assert.equal(a.files.has(quotaBlockFilePath(CAP_DIR, "kimi")), false);
+
+    // Boundary: the 429 followed by exactly 2 success lines, clean exit, PR opens.
+    const short = "API Error: Request rejected (429)\nturn 2 ok\npushed branch";
+    const s2 = finishHarness(1, "b\n");
+    const rs = await runFinish(s2.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 0, stdout: short, stderr: "" })));
+    assert.equal(rs.action, "open-pr");
+    assert.equal(rs.quotaBlockedUntil, null, "a clean-exit session never blocks, even with a short tail after the 429");
+    assert.equal(s2.files.has(quotaBlockFilePath(CAP_DIR, "kimi")), false);
+
+    // Sibling: a failed session with the 429 followed by 4+ lines still blocks.
+    const failedLong = "API Error: Request rejected (429)\na\nb\nc\nd";
+    const f = finishHarness(1, "b\n");
+    const rf = await runFinish(f.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 1, stdout: failedLong, stderr: "" })));
+    assert.equal(rf.quotaBlockedUntil, NOW_SEC + 3600, "a failed session blocks regardless of tail length");
 
     const final = "edited files\nran tests\nAPI Error: Request rejected (429) — rate limited";
     const b = finishHarness(1, "b\n");
