@@ -42,7 +42,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 404
+        "line": 411
       }
     },
     {
@@ -216,7 +216,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 221
+        "line": 225
       }
     },
     {
@@ -334,7 +334,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 292
+        "line": 296
       }
     },
     {
@@ -368,7 +368,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 328
+        "line": 335
       }
     },
     {
@@ -476,7 +476,7 @@
       ],
       "source": {
         "path": "src/schemas/usage.ts",
-        "line": 33
+        "line": 34
       }
     },
     {
@@ -505,6 +505,20 @@
       "source": {
         "path": "src/schemas/design-concept.ts",
         "line": 214
+      }
+    },
+    {
+      "name": "EligibilityQuerySchema",
+      "file": "src/schemas/usage.ts",
+      "importedBy": [
+        "src/api/usage.ts"
+      ],
+      "routes": [
+        "GET /api/usage/eligibility"
+      ],
+      "source": {
+        "path": "src/schemas/usage.ts",
+        "line": 63
       }
     },
     {
@@ -684,7 +698,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 418
+        "line": 425
       }
     },
     {
@@ -696,7 +710,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 439
+        "line": 446
       }
     },
     {
@@ -706,7 +720,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 457
+        "line": 464
       }
     },
     {
@@ -780,7 +794,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 263
+        "line": 267
       }
     },
     {
@@ -1108,7 +1122,7 @@
       ],
       "source": {
         "path": "src/schemas/usage.ts",
-        "line": 50
+        "line": 51
       }
     },
     {

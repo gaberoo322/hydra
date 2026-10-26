@@ -58,9 +58,7 @@ const ROWS = loadRouteInventory();
  * the same PR that registers its control and deletes it from parity.ts. Never
  * add one — a new human-shaped write gets a registry entry instead.
  */
-const PENDING_CEILING: readonly string[] = [
-  "POST /api/holdback/enroll", // #4633 INV-10 deferral
-];
+const PENDING_CEILING: readonly string[] = [];
 
 /**
  * The ceiling for RETIREMENT_CANDIDATES (follow-up #5160). Shrink-only: each

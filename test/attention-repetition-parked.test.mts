@@ -90,7 +90,7 @@ function deps(over: Partial<AttentionFeedDeps> = {}): AttentionFeedDeps {
     reconcileLedgers: async () => {},
     readPaused: async () => ({ paused: false }),
     readSessionBlockedUntil: async () => null,
-    readSchedulerStopReason: async () => null,
+    readSchedulerStop: async () => ({ stopReason: null, deliberateStoppedAt: null }),
     readShaDrift: async () => ({
       deployedSha: "a",
       originMasterSha: "a",

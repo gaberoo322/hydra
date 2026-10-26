@@ -1,0 +1,1 @@
+- feat: serve the pace-gate admission verdict (decideAdmission) from GET /api/usage/eligibility (#5101)

@@ -55,6 +55,20 @@ export function reopenVerdicts(reopenNumber: string): Verdicts {
   return { "issue-number-entered": reopenNumber !== "" && Number.isInteger(n) && n >= 1 };
 }
 
+/** The enrol-state row fact /work's holdback panel reads (HoldbackEnrolState). */
+export interface EnrolRowFacts {
+  state?: string;
+}
+
+/**
+ * /work — one holdback enrol row's check (issue #5164): "Enrol now" is a
+ * re-attempt of a FAILED automation step, so it is enabled only on a literal
+ * `failed` row state.
+ */
+export function enrolVerdicts(row: EnrolRowFacts): Verdicts {
+  return { "holdback-enrol-failed": row.state === "failed" };
+}
+
 /** The two /health flags the controls check (the /health payload subset). */
 export interface HealthFacts {
   autopilotPause?: { paused?: boolean; ok?: boolean } | null;

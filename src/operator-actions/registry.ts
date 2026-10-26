@@ -692,6 +692,44 @@ const CONTROL_ENTRIES = [
     doc: DASHBOARD_ADR_DOC,
   },
 
+  // --- /work holdback enrol (issue #5164) -----------------------------------
+  // ADR-0034 §9.1 "holdback enrol (failed state only)": moved here from the
+  // page-local useServerConfirmedWrite control (#4633 INV-10 deferral). The
+  // per-row commitSha/prNumber/tier ride the body via an IN_DASHBOARD_BODY
+  // builder, never route placeholders (BUCKET_CONTEXT.control stays ['id']).
+  {
+    key: "control:work/holdback-enroll",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/holdback/enroll",
+      method: "POST",
+      confirmTier: "confirm-first",
+      label: "Enrol now",
+      preconditions: [{ text: "this enrolment failed", check: "holdback-enrol-failed" }],
+      consequence:
+        "re-attempts the failed Outcome Holdback enrolment for this merge; a successful enrolment arms the post-merge auto-revert watch window",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "curl -s http://localhost:4000/api/holdback/enrolments?limit=25",
+        label: "Read the enrol-state records first",
+        preconditions: [],
+        consequence: "shows each merge's recorded enrol state and attempt reason without changing anything",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-doctor",
+        label: "Diagnose the system first",
+        preconditions: [],
+        consequence: "checks the orchestrator and merge-watch health that enrolment depends on, applying fixes only on request",
+      },
+    ],
+    rationale:
+      "enrolling arms an auto-revert window on a merged change, so ADR-0034 §7 makes it confirm first; it renders only on a failed row (ADR-0034 §9.1) because enrolment is automation and only its failure surfaces.",
+    doc: DASHBOARD_ADR_DOC,
+  },
+
   // --- /health (Health.jsx) -------------------------------------------------
   {
     key: "control:health/pause",
@@ -1000,6 +1038,43 @@ const CONTROL_ENTRIES = [
     ],
     rationale:
       "each chore is idempotent and keeps its own time-guard, so a run changes nothing a timer tick would not; the ~5 s undo window costs nothing and no third confirm tier is added (ADR-0034 §8.2).",
+    doc: REFERENCE_DOC,
+  },
+  // --- /health operator channel (issue #5164) -------------------------------
+  // The route #5047 collapsed ADR-0034 §9.1's "digest send and heartbeat"
+  // rows into. Confirm-first: a delivered send is an outbound message that
+  // cannot be unsent and it stamps last-sent, suppressing today's scheduled
+  // brief; the ~5 s undo window would only cancel before the request is sent.
+  {
+    key: "control:health/brief-send",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/operator-channel/brief/send",
+      method: "POST",
+      confirmTier: "confirm-first",
+      label: "Send brief now",
+      preconditions: [],
+      consequence:
+        "sends the Morning Brief to the Operator Channel now and reports {sent, outcome, at}; a delivered send stamps last-sent, so today's 07:30 scheduled brief is skipped rather than duplicated",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "curl -s http://localhost:4000/api/operator-channel/delivery-health",
+        label: "Read the delivery health first",
+        preconditions: [],
+        consequence: "shows the last brief and page outcomes without sending anything",
+      },
+      {
+        kind: "terminal-skill",
+        command: "journalctl --user -u hydra-orchestrator.service -n 200 --no-pager",
+        label: "Inspect recent logs first",
+        preconditions: [],
+        consequence: "shows what the brief scheduler logged, without changing any state",
+      },
+    ],
+    rationale:
+      "an outbound Telegram message cannot be unsent and the send stamps the daily schedule, so ADR-0034 §7 makes it confirm first; ADR-0034 §9.1 lists the digest send among the registry in-dashboard routes.",
     doc: REFERENCE_DOC,
   },
   // --- /now recommendations (issue #5152) ----------------------------------

@@ -983,8 +983,14 @@ describe("IN_DASHBOARD_BODY builders over the closed context (issue #4629 INV-7)
     // The builders read only the closed context — no other field name.
     const fields = new Set(Array.from(map.matchAll(/context\.(\w+)/g), (m) => m[1]));
     // #5152 extends the closed context with the /now panel's read `runId`
-    // and its picked `severity`.
-    for (const f of fields) assert.ok(["number", "label", "paused", "engaged", "runId", "severity"].includes(f!), `context.${f} is outside the closed context`);
+    // and its picked `severity`; #5164 adds the holdback row's
+    // `commitSha`/`prNumber`/`tier`.
+    for (const f of fields) assert.ok(["number", "label", "paused", "engaged", "runId", "severity", "commitSha", "prNumber", "tier"].includes(f!), `context.${f} is outside the closed context`);
+    assert.ok(
+      /"POST \/holdback\/enroll": \(context\) => \(\{\s*commitSha: context\.commitSha,\s*prNumber: context\.prNumber,\s*tier: context\.tier,?\s*\}\),/.test(map),
+      "the holdback enrol body is built from the row context",
+    );
+    assert.ok(map.includes('"POST /operator-channel/brief/send": {},'));
   });
 });
 

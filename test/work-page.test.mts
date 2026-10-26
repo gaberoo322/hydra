@@ -1926,29 +1926,39 @@ describe("structural pins — #4633 design-concept queue + holdback enrol state"
     assert.equal(/\bfetch\(/.test(src), false);
   });
 
-  test("ActionAffordance.jsx is not extended by this slice — the approve body stays the static map entry (INV-6)", async () => {
+  test("ActionAffordance.jsx: the approve body stays the static map entry; holdback enrol is a context-built body (INV-6, #5164 INV-3)", async () => {
     const src = await readSource("../dashboard/src/components/ActionAffordance.jsx");
     assert.match(src, /"POST \/design-concepts\/:anchor\/approve": \{ by: "operator:dashboard" \}/);
     assert.equal(src.includes("approve-preconditions"), false);
-    assert.equal(src.includes("holdback"), false);
+    // #5164 supersedes the #4633 "no holdback in the affordance" pin: the
+    // per-row body rides the closed IN_DASHBOARD_BODY builder.
+    assert.match(src, /"POST \/holdback\/enroll": \(context\) => \(\{\s*commitSha: context\.commitSha,\s*prNumber: context\.prNumber,\s*tier: context\.tier,?\s*\}\)/);
   });
 
-  test("HoldbackEnrolState.jsx: read-only rows, Enrol now only on failed, server-confirmed body (INV-9/INV-10)", async () => {
+  test("HoldbackEnrolState.jsx: read-only rows, Enrol now only on failed, rendered through ControlAffordance (INV-9/INV-10, #5164 INV-4/INV-5)", async () => {
     const src = await readSource(
       "../dashboard/src/components/pages/work/HoldbackEnrolState.jsx",
     );
     assert.match(src, /usePageItems\("\/holdback\/enrolments\?limit=25"/);
     assert.match(src, /itemsKey: "enrolments"/);
     assert.match(src, /row\.state === "failed" &&/);
-    assert.match(src, /useServerConfirmedWrite\(enrolments\.refresh\)/);
-    assert.match(src, /"\/holdback\/enroll", \{\s*commitSha: row\.commitSha,\s*prNumber: row\.prNumber,\s*tier: row\.tier,\s*\}/);
-    // Confirm-first: arm, then the explicit confirm.
-    assert.match(src, /data-testid="holdback-enrol-arm"/);
-    assert.match(src, /data-testid="holdback-enrol-confirm-yes"/);
-    assert.match(src, /Confirm Enrol now\?/);
-    // Not a feed bucket, not the affordance (deferred to #4638).
+    // The registry control, inside the failed-row branch only.
+    assert.match(src, /import \{[^}]*\bControlAffordance\b[^}]*\} from "[./]+ActionAffordance\.jsx"/);
+    assert.match(src, /controlKey="control:work\/holdback-enroll"/);
+    assert.match(src, /testId="holdback-enrol"/);
+    assert.match(src, /context=\{\{ commitSha: row\.commitSha, prNumber: row\.prNumber, tier: row\.tier \}\}/);
+    assert.match(src, /verdicts=\{enrolVerdicts\(row\)\}/);
+    assert.match(src, /rereadNoun="enrolments"/);
+    const failedBranch = src.slice(src.indexOf('row.state === "failed" && ('));
+    assert.ok(failedBranch.includes("<ControlAffordance"), "the control sits inside the failed-row branch");
+    // The page-local confirm machinery is gone (the affordance owns arm/confirm).
+    assert.equal(src.includes("useServerConfirmedWrite"), false);
+    assert.equal(src.includes("holdback-enrol-confirm-yes"), false);
+    assert.equal(/setArmed|const \[armed/.test(src), false);
+    // A rejected enrol still re-reads (#5164 INV-5).
+    assert.match(src, /if \(!result\.ok\) enrolments\.refresh\(\)/);
+    // Not a feed bucket; no direct fetch.
     assert.equal(/from "[^"]*attention/.test(src), false);
-    assert.equal(/from "[^"]*ActionAffordance/.test(src), false);
     assert.equal(/\bfetch\(/.test(src), false);
   });
 });

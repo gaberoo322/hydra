@@ -54,6 +54,7 @@ import { DISPATCH_CLASSES } from "../src/taxonomy/classes.ts";
 import { evaluatePromoteEligibility } from "../src/autopilot/work-projections.ts";
 import {
   designConceptVerdicts,
+  enrolVerdicts,
   healthVerdicts,
   reopenVerdicts,
   rowVerdicts,
@@ -589,10 +590,12 @@ const ALERTS_PANEL_SRC = "../dashboard/src/components/pages/health/AlertsPanel.j
 const SERVICE_STRIP_SRC = "../dashboard/src/components/pages/health/ServiceStrip.jsx";
 // The /now panel that hosts #5152's recommendation controls beside its read.
 const RECS_PANEL_SRC = "../dashboard/src/pages/now-console/RecommendationsPanel.jsx";
+// The /work holdback panel that hosts #5164's enrol control beside its read.
+const HOLDBACK_ENROL_SRC = "../dashboard/src/components/pages/work/HoldbackEnrolState.jsx";
 /** Every dashboard file that renders a control: key. */
 // The /work design-concept queue that hosts #5163's approve control.
 const DC_QUEUE_SRC = "../dashboard/src/components/pages/work/DesignConceptQueue.jsx";
-const CONTROL_PAGE_SRCS = [BOARD_STATE_SRC, HEALTH_SRC, ALERTS_PANEL_SRC, SERVICE_STRIP_SRC, RECS_PANEL_SRC, DC_QUEUE_SRC];
+const CONTROL_PAGE_SRCS = [BOARD_STATE_SRC, HEALTH_SRC, ALERTS_PANEL_SRC, SERVICE_STRIP_SRC, RECS_PANEL_SRC, DC_QUEUE_SRC, HOLDBACK_ENROL_SRC];
 
 async function readPage(rel: string): Promise<string> {
   return readFile(new URL(rel, import.meta.url), "utf8");
@@ -788,6 +791,8 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
         imports: ["designConceptVerdicts"],
         ids: new Set(Object.keys(designConceptVerdicts(null, false))),
       },
+      // #5164: the holdback enrol table lives in lib/control-verdicts.ts.
+      [HOLDBACK_ENROL_SRC]: { imports: ["enrolVerdicts"], ids: new Set(Object.keys(enrolVerdicts({}))) },
     };
     for (const [rel, table] of Object.entries(tables)) {
       const src = await readPage(rel);
@@ -1153,5 +1158,45 @@ describe("control:now recommendation entries (issue #5152)", () => {
     for (const key of ["control:runs/rerun", "control:nowx/a", "control:now"]) {
       assert.equal(OperatorActionEntrySchema.safeParse(validEntry(key)).success, false, key);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. holdback enrol + brief send controls (issue #5164, design-concept d246d1e7
+//    INV-2/INV-7/INV-9)
+// ---------------------------------------------------------------------------
+
+describe("control:work/holdback-enroll and control:health/brief-send entries (issue #5164)", () => {
+  test("holdback-enroll: confirm-first POST /holdback/enroll with the single holdback-enrol-failed check", () => {
+    const rec = inDashboard("control:work/holdback-enroll");
+    assert.equal(rec.method, "POST");
+    assert.equal(rec.route, "/holdback/enroll");
+    assert.equal(rec.confirmTier, "confirm-first");
+    assert.equal(rec.label, "Enrol now");
+    assert.deepEqual(checksOf(controlEntry("control:work/holdback-enroll")), ["holdback-enrol-failed"]);
+    assert.ok((CONTROL_CHECKS as readonly string[]).includes("holdback-enrol-failed"));
+    assert.deepEqual(
+      actionsOf(controlEntry("control:work/holdback-enroll"))
+        .slice(1)
+        .map((alt) => (alt.kind === "terminal-skill" ? alt.command : null)),
+      ["curl -s http://localhost:4000/api/holdback/enrolments?limit=25", "/hydra-doctor"],
+    );
+  });
+
+  test("brief-send: confirm-first POST /operator-channel/brief/send with no preconditions", () => {
+    const rec = inDashboard("control:health/brief-send");
+    assert.equal(rec.method, "POST");
+    assert.equal(rec.route, "/operator-channel/brief/send");
+    assert.equal(rec.confirmTier, "confirm-first");
+    assert.equal(rec.label, "Send brief now");
+    assert.deepEqual(rec.preconditions, []);
+  });
+
+  test("placement: enrol renders in HoldbackEnrolState.jsx, brief-send in the operator-channel section of Health.jsx", async () => {
+    const holdback = await readPage(HOLDBACK_ENROL_SRC);
+    assert.ok(holdback.includes('controlKey="control:work/holdback-enroll"'));
+    const health = await readPage(HEALTH_SRC);
+    const section = health.slice(health.indexOf('data-testid="operator-channel-section"'), health.indexOf("<AlertsPanel"));
+    assert.ok(section.includes('controlKey="control:health/brief-send"'), "brief-send sits inside operator-channel-section");
   });
 });

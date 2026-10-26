@@ -32,6 +32,8 @@ import type {
 import { PROMOTION_THRESHOLD } from "../src/pattern-memory/index.ts";
 import type { StalledPrsResult } from "../src/aggregators/stalled-prs.ts";
 import { REGISTRY } from "../src/operator-actions/registry.ts";
+import { DELIBERATE_STOP_TTL_SECONDS } from "../src/scheduler/stop-marker.ts";
+import { schedulerVerdicts } from "../dashboard/src/lib/health-verdicts.ts";
 import {
   BUCKETS,
   OperatorActionEntrySchema,
@@ -132,7 +134,7 @@ function deps(over: Partial<AttentionFeedDeps> = {}): AttentionFeedDeps {
     readHitlGrillIssues: async () => ({ ok: true as const, rows: [] }),
     readPaused: async () => ({ paused: false }),
     readSessionBlockedUntil: async () => null,
-    readSchedulerStopReason: async () => null,
+    readSchedulerStop: async () => ({ stopReason: null, deliberateStoppedAt: null }),
     readShaDrift: async () => inSync(),
     ...over,
   };
@@ -313,7 +315,7 @@ describe("machine-stopped aggregate (INV-6, INV-3)", () => {
   const cases: { line: string; over: Partial<AttentionFeedDeps> }[] = [
     { line: "paused", over: { readPaused: async () => ({ paused: true, since: NOW.getTime() - 60_000 }) } },
     { line: "session-blocked", over: { readSessionBlockedUntil: async () => NOW.getTime() + 3_600_000 } },
-    { line: "scheduler-deliberate", over: { readSchedulerStopReason: async () => "deliberate" } },
+    { line: "scheduler-deliberate", over: { readSchedulerStop: async () => ({ stopReason: "deliberate", deliberateStoppedAt: null }) } },
     {
       line: "sha-drift",
       over: {
@@ -348,7 +350,7 @@ describe("machine-stopped aggregate (INV-6, INV-3)", () => {
   test("several lines -> ONE row; subLines in line order; id sorted; key = most upstream", async () => {
     const result = await getAttentionFeed(
       deps({
-        readSchedulerStopReason: async () => "deliberate",
+        readSchedulerStop: async () => ({ stopReason: "deliberate", deliberateStoppedAt: null }),
         readSessionBlockedUntil: async () => NOW.getTime() + 60_000,
       }),
     );
@@ -378,8 +380,58 @@ describe("machine-stopped aggregate (INV-6, INV-3)", () => {
   });
 
   test("a scheduler stopReason other than deliberate is not a stop line", async () => {
-    const result = await getAttentionFeed(deps({ readSchedulerStopReason: async () => "circuit-breaker" }));
+    const result = await getAttentionFeed(deps({ readSchedulerStop: async () => ({ stopReason: "circuit-breaker", deliberateStoppedAt: null }) }));
     assert.equal(result.items.length, 0);
+  });
+
+  describe("scheduler-deliberate age gate (issue #5164 INV-10/INV-11)", () => {
+    const TTL_MS = DELIBERATE_STOP_TTL_SECONDS * 1000;
+    const stoppedAgo = (ageMs: number) => ({
+      stopReason: "deliberate" as const,
+      deliberateStoppedAt: new Date(NOW.getTime() - ageMs).toISOString(),
+    });
+    const rowCount = async (stop: { stopReason: string | null; deliberateStoppedAt: string | null }) =>
+      (await getAttentionFeed(deps({ readSchedulerStop: async () => stop }))).items.length;
+
+    test("a deliberate stop TTL-1ms old is a row, crossedAt = the stop time", async () => {
+      const result = await getAttentionFeed(deps({ readSchedulerStop: async () => stoppedAgo(TTL_MS - 1) }));
+      assert.equal(result.items.length, 1);
+      assert.equal(result.items[0].key, "machine-stopped:scheduler-deliberate");
+      assert.equal(
+        result.items[0].crossedAt,
+        new Date(NOW.getTime() - (TTL_MS - 1)).toISOString(),
+      );
+    });
+
+    test("a deliberate stop exactly TTL old is no row", async () => {
+      assert.equal(await rowCount(stoppedAgo(TTL_MS)), 0);
+    });
+
+    test("a deliberate stop TTL + 1 min old is no row", async () => {
+      assert.equal(await rowCount(stoppedAgo(TTL_MS + 60_000)), 0);
+    });
+
+    test("a deliberate stop with a null or unparseable stamp is treated as fresh (the row stays loud)", async () => {
+      assert.equal(await rowCount({ stopReason: "deliberate", deliberateStoppedAt: null }), 1);
+      assert.equal(await rowCount({ stopReason: "deliberate", deliberateStoppedAt: "not-a-date" }), 1);
+    });
+
+    test("a non-deliberate stopReason is no row at any age", async () => {
+      assert.equal(await rowCount({ ...stoppedAgo(1), stopReason: "circuit-breaker" }), 0);
+    });
+
+    test("the feed row and /health's no-fresh-deliberate-stop verdict are disjoint at every marker age", async () => {
+      for (const ageMs of [0, TTL_MS - 1, TTL_MS, TTL_MS + 60_000]) {
+        const stop = stoppedAgo(ageMs);
+        const feedRow = (await rowCount(stop)) === 1;
+        const startEnabled =
+          schedulerVerdicts(
+            { running: false, stopReason: stop.stopReason, deliberateStoppedAt: stop.deliberateStoppedAt },
+            NOW.getTime(),
+          )["no-fresh-deliberate-stop"] === true;
+        assert.notEqual(feedRow, startEnabled, `age ${ageMs}ms: exactly one start path is live`);
+      }
+    });
   });
 
   test("drift below the grace window (active:false) is not a stop line", async () => {
@@ -401,7 +453,7 @@ describe("machine-stopped aggregate (INV-6, INV-3)", () => {
   const failures: { name: string; over: Partial<AttentionFeedDeps>; error: string }[] = [
     { name: "paused", over: { readPaused: down }, error: "paused" },
     { name: "session-block", over: { readSessionBlockedUntil: down }, error: "session-block" },
-    { name: "scheduler", over: { readSchedulerStopReason: down }, error: "scheduler" },
+    { name: "scheduler", over: { readSchedulerStop: down }, error: "scheduler" },
     { name: "sha-drift", over: { readShaDrift: down }, error: "sha-drift" },
     {
       name: "deployed-sha null",
@@ -436,7 +488,7 @@ describe("machine-stopped aggregate (INV-6, INV-3)", () => {
 
   test("one failed line does not hide another active line", async () => {
     const result = await getAttentionFeed(
-      deps({ readPaused: down, readSchedulerStopReason: async () => "deliberate" }),
+      deps({ readPaused: down, readSchedulerStop: async () => ({ stopReason: "deliberate", deliberateStoppedAt: null }) }),
     );
     assert.equal(result.items.length, 1);
     assert.equal(result.items[0].id, "machine-stopped:scheduler-deliberate");
@@ -524,7 +576,7 @@ describe("resolved registry actions (INV-9, INV-10)", () => {
     const result = await getAttentionFeed(
       busyDeps({
         readSessionBlockedUntil: async () => NOW.getTime() + 60_000,
-        readSchedulerStopReason: async () => "deliberate",
+        readSchedulerStop: async () => ({ stopReason: "deliberate", deliberateStoppedAt: null }),
         readShaDrift: async () => ({
           deployedSha: "a1",
           originMasterSha: "b2",
