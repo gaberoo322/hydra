@@ -205,6 +205,9 @@ export default function Health() {
     freshnessMs: 5 * 60 * 1000,
     trusted: channel.data ? channel.data.available !== false : undefined,
   });
+  // Send brief now (issue #5164): the verified result is the re-read "Last
+  // brief" cell — the CHECKED refresh of this one delivery-health read.
+  const refreshChannel = useCheckedRefresh(channel);
   const channelUnknown = channelStatus === "loading" || channelStatus === "unknown";
   const channelStale = channelStatus === "stale";
   const lastPage = channel.data?.lastPage ?? null;
@@ -401,6 +404,15 @@ export default function Health() {
           <h2 className="text-sm uppercase tracking-wide text-zinc-400">Operator channel</h2>
           <AsOf generatedAt={channel.data?.generatedAt} stale={channelStale} />
         </div>
+        {/* Renders in the UNKNOWN state too: the send does not need Redis. */}
+        <ControlAffordance
+          registry={registry}
+          controlKey="control:health/brief-send"
+          testId="brief-send"
+          verdicts={{}}
+          onFired={refreshChannel}
+          rereadNoun="/health"
+        />
         {channelUnknown ? (
           <div className="space-y-1">
             {/* available:false (Redis down) or no payload yet — UNKNOWN, never a confident "all delivered". */}

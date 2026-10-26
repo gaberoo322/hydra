@@ -64,7 +64,7 @@ import { createRereadWaiters } from "../lib/reread.ts";
  *     trigger — arm, Confirm and immediate fire alike — is disabled while any
  *     line is ✗ (lib/preconditions.ts; prose lines never disable).
  *   - `context` — the closed `{number, label, paused, engaged, runId,
- *     severity}` the body builders read (a row's issue number, the relabel
+ *     severity, commitSha, prNumber, tier}` the body builders read (a row's issue number, the relabel
  *     target, the /now panel's read run id, …).
  *   - `testId` — derives `<testId>-arm` / `-confirm-yes` / `-confirm-no`
  *     (confirm-first), `<testId>` (immediate), `<testId>-preconditions`,
@@ -88,8 +88,10 @@ import { createRereadWaiters } from "../lib/reread.ts";
  * test/operator-actions-affordance.test.mts.
  *
  * A value is a static body or a builder `(context) => body` over the closed
- * context `{number, label, paused, engaged, runId, severity}` (issue #4629
- * INV-7; `runId`/`severity` for the /now recommendation controls, #5152) — page
+ * context `{number, label, paused, engaged, runId, severity, commitSha,
+ * prNumber, tier}` (issue #4629 INV-7; `runId`/`severity` for the /now
+ * recommendation controls, #5152; `commitSha`/`prNumber`/`tier` for the /work
+ * holdback enrol row, #5164) — page
  * controls pass the row/page facts as `context`; the registry itself never
  * carries a body field. With no context the paused builder yields exactly
  * the feed's `{paused: false}`.
@@ -115,6 +117,16 @@ const IN_DASHBOARD_BODY = {
   // alias); the rec id rides the resolved route.
   "POST /now/recommendations/:id/dismiss": (context) => ({ run_id: context.runId }),
   "POST /now/recommendations/mute-class": (context) => ({ run_id: context.runId, severity: context.severity }),
+  // /work holdback enrol (issue #5164) — the per-row facts ride the body
+  // (HoldbackEnrollBodySchema, .strict(); prNumber/tier nullable), never the
+  // route.
+  "POST /holdback/enroll": (context) => ({
+    commitSha: context.commitSha,
+    prNumber: context.prNumber,
+    tier: context.tier,
+  }),
+  // /health operator channel (issue #5164) — the send reads no body.
+  "POST /operator-channel/brief/send": {},
 };
 
 /** Resolve a map value: a builder is called with the (closed) context, a

@@ -40,7 +40,12 @@ export function createOperatorChannelRouter(
   router.post("/operator-channel/brief/send", async (_req, res) =>
     isolateAggregator(res, "api/operator-channel/brief/send", async () => {
       const { sent, outcome, at } = await sendBriefNow();
-      return { sent, outcome, at };
+      // `ok: sent` (issue #5164 INV-8): a 200 with sent:false must render as a
+      // refusal through the dashboard affordance, never a generic "accepted".
+      // Existing fields keep their names and meanings.
+      return sent
+        ? { ok: true, sent, outcome, at }
+        : { ok: false, reason: "send-failed", detail: outcome, sent, outcome, at };
     }),
   );
 
