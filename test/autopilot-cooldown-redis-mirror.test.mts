@@ -220,8 +220,22 @@ describe("issue #2715 — reap.py mirrors the cross-run subset to Redis on compl
   });
 });
 
-describe("issue #2715 — decide.py mirrors research_force_counter when it stamps it", () => {
-  test("SETs research-force-counter on a plan turn that changes the counter", () => {
+describe("issue #5073 — decide.py no longer mirrors research_force_counter (one writer: the Run Ledger via reap)", () => {
+  test("a decide-stamped counter in the state file is SET by the NEXT reap of any class", () => {
+    const t = makeTmp();
+    try {
+      writeFileSync(t.state, JSON.stringify(baseState({ research_force_counter: { "2026-10-25": { orch: 3 } } })));
+      const r = runReap(t, ["completion", "dev_orch", "task-5073-a", "5000", "hydra-dev"]);
+      assert.equal(r.status, 0, `reap exited non-zero: ${r.stderr}`);
+      const set = readRecorder(t).find((c) => c.startsWith("SET hydra:autopilot:research-force-counter"));
+      assert.ok(set, "reap must mirror the stamped counter");
+      assert.match(set!, /"orch": 3/);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("decide.py issues NO redis-cli call on a plan turn", () => {
     // Build a state whose decide-time force-research stamp will change the
     // counter, then assert the recorder captured the SET. We drive decide.py's
     // CLI directly; the force-counter-changed branch is the only mirror gate.
@@ -246,15 +260,10 @@ describe("issue #2715 — decide.py mirrors research_force_counter when it stamp
         encoding: "utf-8",
       });
       assert.equal(r.status ?? -1, 0, `decide exited non-zero: ${r.stderr}`);
-      // Whatever decide chose this turn, every redis-cli call it issued must be a
-      // SET to the research-force-counter key — decide never mirrors anything else.
-      for (const c of readRecorder(t)) {
-        assert.match(
-          c,
-          /^SET hydra:autopilot:research-force-counter/,
-          `decide.py must only ever mirror the research-force-counter key; got: ${c}`,
-        );
-      }
+      // Issue #5073 (INV-10): decide.py has NO Redis mirror writer any more — the
+      // Run Ledger's single writer (reached via reap) is the only one.
+      assert.deepEqual(readRecorder(t), [],
+        "decide.py must issue no redis-cli call, whatever it chose this turn");
     } finally {
       rmSync(t.dir, { recursive: true, force: true });
     }

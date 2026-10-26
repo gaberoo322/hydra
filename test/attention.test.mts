@@ -196,7 +196,7 @@ const QUIET_RANK0 = {
   readHitlGrillIssues: async () => ({ ok: true as const, rows: [] }),
   readPaused: async () => ({ paused: false }),
   readSessionBlockedUntil: async () => null,
-  readSchedulerStopReason: async () => null,
+  readSchedulerStop: async () => ({ stopReason: null, deliberateStoppedAt: null }),
   readShaDrift: async () => ({
     deployedSha: "abc",
     originMasterSha: "abc",

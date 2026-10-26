@@ -20,16 +20,31 @@ Other scripts under scripts/autopilot keep their own reads/writes of the
 document until slices 3-4 migrate them. This module is a leaf: stdlib only,
 no network, and it must NOT import decide / decide_base.
 
+Slice 2 of epic #5071 (issue #5073) adds the carry-forward half:
+
+  * carry_forward(prev_doc, classes, now, mirror=None) -- the ONE function that
+    reads a prior run's document for the next run. Carry POLICY is data on the
+    FIELDS rows (`carry`, `normalize`, `mirror`); the carried signal_last_fired
+    set is DERIVED from classes.json (cooldownSeconds vs the Pace Gate relaunch
+    interval), never a hand-maintained list;
+  * read_prior(path) / RedisMirror -- the two continuity adapters (ADR-0012 D2):
+    the prior run's file, then the Redis hash/string mirror (host reboot);
+  * mirror_to_redis(doc, redis_cli) -- the single Redis mirror WRITER.
+
 CLI (bash callers never touch the file directly):
 
   run_ledger.py path [--default]
   run_ledger.py schema-version
-  run_ledger.py seed <path> key=<json-literal>...
+  run_ledger.py carry-classes
+  run_ledger.py seed <path> [--carry-from <prev_path>] [--mirror]
+                     key=<json-literal>... [slots_overlay=<json>]
   run_ledger.py get <path> <dotted.key>
 """
 import datetime
 import json
 import os
+import re
+import subprocess
 import sys
 import tempfile
 
@@ -40,7 +55,19 @@ CRASH_ENV = "HYDRA_RUN_LEDGER_TEST_CRASH"  # test-only seam: "before-replace"
 RESET = "reset-per-run"
 CARRY = "carry-across-relaunch"
 MIRRORED = "mirrored-to-Redis"
+SEEDED = "seeded-from-orchestrator"  # source is GET /api/autopilot/inflight-slots (#1352)
 REQUIRED = object()
+
+# The Pace Gate relaunch interval (hydra-pace-gate.timer OnUnitActiveSec=15min).
+# A signal class whose cooldown exceeds it must survive a relaunch, so it is
+# carried; shorter cooldowns are re-armed each run. ONE home; a test pins it
+# equal to the systemd timer's OnUnitActiveSec.
+PACE_GATE_RELAUNCH_SEC = 900
+DEV_RESUME_PENDING_CAP = 20  # reap_stall.py's DEV_RESUME_PENDING_CAP twin stays pinned equal
+REDIS_SIGNAL_LAST_FIRED_KEY = "hydra:autopilot:signal-last-fired"
+REDIS_RESEARCH_FORCE_KEY = "hydra:autopilot:research-force-counter"
+DEFAULT_REDIS_ARGV = ["docker", "exec", "hydra-redis-1", "redis-cli"]
+CLASSES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "classes.json")
 
 # JSON type names. "number" accepts int or float (but never bool).
 _TYPES = {
@@ -59,8 +86,106 @@ class LedgerTypeError(Exception):
     code = "ledger-type-mismatch"
 
 
-def _row(name, typ, default, carry, seeded=True):
-    return {"name": name, "type": typ, "default": default, "carry": carry, "seeded": seeded}
+def _row(name, typ, default, carry, seeded=True, **policy):
+    """One field-table row. `policy` holds the carry data of a carried row:
+    `normalize(value, ctx)`, an optional `mirror` descriptor, and the exception
+    tuples the row's normalizer reads."""
+    row = {"name": name, "type": typ, "default": default, "carry": carry, "seeded": seeded}
+    row.update(policy)
+    return row
+
+
+def _is_number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _utc_day(now):
+    return datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y-%m-%d")
+
+
+# --- per-key SHAPE rules (pure; referenced from the FIELDS rows) -------------
+# Each is normalize(value, ctx) -> carried value. `value` is the prior run's
+# raw value (None when absent); a shape problem degrades to the key's default.
+
+
+def _norm_research_force_counter(value, ctx):
+    """#1666: keep only TODAY's UTC key (decide.py's prune-on-write semantics)."""
+    today = _utc_day(ctx["now"])
+    if isinstance(value, dict) and isinstance(value.get(today), dict):
+        return {today: value[today]}
+    return {}
+
+
+def _norm_dev_resume_pending(value, ctx):
+    """#4518: objects with a non-empty string `anchor`, deduped by anchor keeping
+    the LATEST record in its FIFO position, FIFO-capped at DEV_RESUME_PENDING_CAP."""
+    if not isinstance(value, list):
+        return []
+    kept = []
+    for e in value:
+        if not isinstance(e, dict):
+            continue
+        a = e.get("anchor")
+        if not isinstance(a, str) or a == "":
+            continue
+        kept = [k for k in kept if k["anchor"] != a] + [e]
+    return kept[-DEV_RESUME_PENDING_CAP:]
+
+
+def _integral(v):
+    return _is_number(v) and float(v).is_integer()
+
+
+def _norm_zero_yield_backoff(value, ctx):
+    """#4999: keep entries that are objects with integral `streak` + `last_fired`
+    (bool rejected, integral floats floored to int); drop the rest."""
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for k, v in value.items():
+        if isinstance(v, dict) and _integral(v.get("streak")) and _integral(v.get("last_fired")):
+            out[k] = {"streak": int(v["streak"]), "last_fired": int(v["last_fired"])}
+    return out
+
+
+def _norm_signal_last_fired(value, ctx):
+    """#2575/#4909: every derived key present; a carried class keeps its prior
+    numeric stamp else 0, every other key re-arms to 0."""
+    prior = value if isinstance(value, dict) else {}
+    out = {}
+    for k in ctx["all_signal_keys"]:
+        v = prior.get(k) if k in ctx["carry_classes"] else None
+        out[k] = v if _is_number(v) else 0
+    return out
+
+
+# --- Redis tier of the seed order (prior-file -> Redis -> default) -----------
+
+
+def _seed_research_force_from_mirror(value, mirror, ctx):
+    """#2715: when the pruned prior is {}, try the Redis string mirror."""
+    if value:
+        return value
+    raw = mirror.get(REDIS_RESEARCH_FORCE_KEY)
+    if not raw:
+        return value
+    try:
+        return _norm_research_force_counter(json.loads(raw), ctx)
+    except ValueError as exc:
+        sys.stderr.write("[run-ledger] WARN redis research_force_counter unparseable: %s\n" % exc)
+        return value
+
+
+def _seed_signal_from_mirror(value, mirror, ctx):
+    """#2715: per carried class whose prior-file value is 0, HGET the Redis hash."""
+    for cls in ctx["carry_classes"]:
+        if value.get(cls) != 0:
+            continue
+        raw = mirror.hget(REDIS_SIGNAL_LAST_FIRED_KEY, cls)
+        raw = raw.replace('"', "") if raw else raw
+        if raw and re.fullmatch(r"[0-9]+", raw) and int(raw) > 0:
+            value[cls] = int(raw)
+    return value
 
 
 # Declared limits.* sub-table. REQUIRED = bootstrap resolves + validates the
@@ -98,11 +223,29 @@ FIELDS = [
     _row("burned_classes", "array", [], RESET),
     _row("reaped_task_ids", "array", [], RESET),
     _row("failure_log", "array", [], RESET),
-    _row("research_force_counter", "object", REQUIRED, MIRRORED),
-    _row("dev_resume_pending", "array", REQUIRED, CARRY),
-    _row("zero_yield_backoff", "object", REQUIRED, CARRY),
-    _row("slots", "object", REQUIRED, CARRY),
-    _row("signal_last_fired", "object", REQUIRED, MIRRORED),
+    _row(
+        "research_force_counter", "object", REQUIRED, MIRRORED,
+        normalize=_norm_research_force_counter,
+        mirror={"key": REDIS_RESEARCH_FORCE_KEY, "kind": "string",
+                "seed": _seed_research_force_from_mirror},
+    ),
+    _row("dev_resume_pending", "array", REQUIRED, CARRY, normalize=_norm_dev_resume_pending),
+    _row("zero_yield_backoff", "object", REQUIRED, CARRY, normalize=_norm_zero_yield_backoff),
+    # Source is the orchestrator's durable in-flight ledger (#1352), not the
+    # prior file: carry_forward never reads prior `slots`.
+    _row("slots", "object", REQUIRED, SEEDED),
+    _row(
+        "signal_last_fired", "object", REQUIRED, MIRRORED,
+        normalize=_norm_signal_last_fired,
+        mirror={"key": REDIS_SIGNAL_LAST_FIRED_KEY, "kind": "hash",
+                "seed": _seed_signal_from_mirror},
+        # The two exception tuples of the derived carry set (the ONLY literal
+        # class names in this module). rearm_each_run: cooldown > relaunch but
+        # re-armed by design. pipeline_refire_stamps: pipeline slots whose
+        # plan-time re-fire stamp lives here (== decide.PIPELINE_REFIRE_SEC).
+        rearm_each_run=("discover_target",),
+        pipeline_refire_stamps=("research_target",),
+    ),
     # Written by other autopilot scripts after seed (not seeded here).
     _row("idle_turns", "int", 0, RESET, seeded=False),
     _row("turn_snapshot", "object", {}, RESET, seeded=False),
@@ -278,14 +421,176 @@ def seed_initial(identity, limits, carry, now):
     return doc
 
 
-def _parse_pairs(args, allowed):
+# --- carry-forward (issue #5073) ---------------------------------------------
+
+
+def load_classes(path=None):
+    """The classes.json rows (the Dispatch-Class Taxonomy alphabet)."""
+    with open(path or CLASSES_PATH, encoding="utf-8") as fh:
+        return json.load(fh)["classes"]
+
+
+def _carry_ctx(classes, now):
+    """Everything the row normalizers need, DERIVED from classes.json and the
+    signal_last_fired row's exception tuples -- no hand-maintained class list."""
+    row = _FIELD_BY_NAME["signal_last_fired"]
+    rearm = set(row["rearm_each_run"])
+    stamps = list(row["pipeline_refire_stamps"])
+    signal_rows = [c for c in classes if c.get("kind") == "signal"]
+    carry = [
+        c["name"]
+        for c in signal_rows
+        if c.get("cooldownSeconds", 0) > PACE_GATE_RELAUNCH_SEC and c["name"] not in rearm
+    ]
+    carry += [s for s in stamps if s not in carry]
+    keys = [c["name"] for c in signal_rows]
+    keys += [s for s in stamps if s not in keys]
+    return {
+        "now": now,
+        "carry_classes": carry,
+        "all_signal_keys": keys,
+        "pipeline_slots": [c["name"] for c in classes if c.get("kind") == "pipeline"],
+    }
+
+
+def carry_classes(classes):
+    """The derived carried signal_last_fired set, in a stable order."""
+    return list(_carry_ctx(classes, 0)["carry_classes"])
+
+
+def read_prior(path):
+    """Prior-file adapter: lenient JSON read of the previous run's document.
+    None when the file is absent, unreadable or unparseable -- never raises.
+    The result is UNTRUSTED input (it may be any JSON value)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        sys.stderr.write("[run-ledger] WARN prior state %s unreadable: %s\n" % (path, exc))
+        return None
+
+
+class RedisMirror:
+    """Redis continuity adapter (ADR-0012 D2): reads the cross-run mirror.
+    Every call is fail-open -- any failure returns None and never raises."""
+
+    def __init__(self, argv_prefix):
+        self.argv_prefix = list(argv_prefix)
+
+    @classmethod
+    def from_env(cls, env=None):
+        env = os.environ if env is None else env
+        override = (env.get("HYDRA_AUTOPILOT_REDIS_CLI") or "").strip()
+        return cls(override.split() if override else DEFAULT_REDIS_ARGV)
+
+    def run(self, *args):
+        try:
+            r = subprocess.run(
+                [*self.argv_prefix, *args],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            sys.stderr.write("[run-ledger] WARN redis %s failed (%s); degrading\n" % (args[:1], exc))
+            return None
+        if r.returncode != 0:
+            return None
+        return r.stdout.decode("utf-8", errors="replace").strip()
+
+    def hget(self, key, field):
+        return self.run("HGET", key, field)
+
+    def get(self, key):
+        return self.run("GET", key)
+
+
+def _carry_one(row, raw, ctx, mirror):
+    """Normalize one carried row: prior-file tier, then the Redis tier."""
+    try:
+        value = row["normalize"](raw, ctx)
+    except Exception as exc:  # per-key degrade: the prior document is untrusted
+        sys.stderr.write("[run-ledger] WARN carry %s degraded to default: %s\n" % (row["name"], exc))
+        value = row["normalize"](None, ctx)
+    desc = row.get("mirror")
+    if mirror is not None and desc is not None:
+        try:
+            value = desc["seed"](value, mirror, ctx)
+        except Exception as exc:  # the mirror is best-effort by contract
+            sys.stderr.write("[run-ledger] WARN redis seed %s skipped: %s\n" % (row["name"], exc))
+    return value
+
+
+def carry_forward(prev_doc, classes, now, mirror=None):
+    """The ONE reader of a prior run's state for the next run (INV-1).
+
+    Returns the carried keys only. A single loop over FIELDS: rows whose policy
+    is reset-per-run (or seeded-from-orchestrator, i.e. `slots`) are NEVER
+    carried even when present in `prev_doc`. `prev_doc` is the raw parsed JSON
+    (or None) and each key degrades to its default on any shape problem; this
+    function never raises on a bad prior document and never touches the network
+    (only the injected `mirror` adapter may).
+    """
+    prev = prev_doc if isinstance(prev_doc, dict) else {}
+    ctx = _carry_ctx(classes, now)
+    out = {}
+    for row in FIELDS:
+        if row["carry"] not in (CARRY, MIRRORED):
+            continue
+        out[row["name"]] = _carry_one(row, prev.get(row["name"]), ctx, mirror)
+    return out
+
+
+def build_slots(classes, overlay):
+    """#1352: the pipeline-slot null base (classes.json row order) overlaid with
+    the orchestrator payload's `.slots` object when it is an object."""
+    base = {c["name"]: None for c in classes if c.get("kind") == "pipeline"}
+    if isinstance(overlay, dict) and isinstance(overlay.get("slots"), dict):
+        base.update(overlay["slots"])
+    return base
+
+
+def mirror_to_redis(doc, redis_cli):
+    """The single Redis mirror WRITER (INV-10). The write set is derived from
+    the FIELDS rows whose policy is mirrored-to-Redis: HSET field/value pairs
+    for a hash row, SET canonical sorted-key JSON for a string row.
+    `redis_cli(*args)` is best-effort and must not raise."""
+    for row in FIELDS:
+        desc = row.get("mirror")
+        if row["carry"] != MIRRORED or desc is None:
+            continue
+        value = doc.get(row["name"])
+        if desc["kind"] == "hash":
+            if not isinstance(value, dict) or not value:
+                continue
+            args = ["HSET", desc["key"]]
+            for field, ts in value.items():
+                try:
+                    args.extend([str(field), str(int(ts))])
+                except (TypeError, ValueError):
+                    continue  # intentional: skip a non-int field rather than corrupt the hash
+            if len(args) > 2:
+                redis_cli(*args)
+        elif isinstance(value, dict):
+            # An empty {} is still written: it records "none today" and never
+            # resurrects a stale day.
+            redis_cli("SET", desc["key"], json.dumps(value, sort_keys=True))
+
+
+def _parse_pairs(args, allowed, optional=()):
     out = {}
     for a in args:
         if "=" not in a:
             raise ValueError("expected key=<json>, got %r" % a)
         k, v = a.split("=", 1)
-        if k not in allowed:
+        if k not in allowed and k not in optional:
             raise ValueError("unknown seed key %s" % k)
+        if k in optional:
+            out[k] = v  # raw text; the caller degrades a bad literal itself
+            continue
         try:
             out[k] = json.loads(v)
         except ValueError as e:
@@ -294,6 +599,76 @@ def _parse_pairs(args, allowed):
     if missing:
         raise ValueError("missing seed keys: %s" % ", ".join(missing))
     return out
+
+
+def _compact(v):
+    return json.dumps(v, separators=(",", ":"), ensure_ascii=False)
+
+
+def _seed_cmd(rest):
+    if not rest:
+        sys.stderr.write("usage: run_ledger.py seed <path> [--carry-from <prev>] [--mirror] key=<json>...\n")
+        return 2
+    path = rest[0]
+    carry_from = None
+    use_mirror = False
+    pairs = []
+    i = 1
+    while i < len(rest):
+        if rest[i] == "--carry-from":
+            if i + 1 >= len(rest):
+                sys.stderr.write("[run-ledger] --carry-from needs a path\n")
+                return 2
+            carry_from = rest[i + 1]
+            i += 2
+        elif rest[i] == "--mirror":
+            use_mirror = True
+            i += 1
+        else:
+            pairs.append(rest[i])
+            i += 1
+    allowed = ("now",) + _IDENTITY_KEYS + _LIMIT_SEED_KEYS
+    try:
+        vals = _parse_pairs(pairs, allowed, optional=("slots_overlay",))
+    except ValueError as e:
+        sys.stderr.write("[run-ledger] %s\n" % e)
+        return 2
+    now = vals["now"]
+    if not _TYPES["int"](now):
+        sys.stderr.write("[run-ledger] seed key now must be an int\n")
+        return 2
+    overlay = None
+    if vals.get("slots_overlay"):
+        try:
+            overlay = json.loads(vals["slots_overlay"])
+        except ValueError as e:
+            sys.stderr.write("[run-ledger] WARN slots_overlay unparseable, using null base: %s\n" % e)
+    try:
+        classes = load_classes()
+        prev = read_prior(carry_from) if carry_from else None
+        mirror = RedisMirror.from_env() if use_mirror else None
+        carry = carry_forward(prev, classes, now, mirror)
+        carry["slots"] = build_slots(classes, overlay)
+        doc = seed_initial(
+            {k: vals[k] for k in _IDENTITY_KEYS},
+            {k: vals[k] for k in _LIMIT_SEED_KEYS},
+            carry,
+            now,
+        )
+        persist(doc, path)
+    except LedgerTypeError as e:
+        sys.stderr.write("%s\n" % e)
+        return 1
+    except (OSError, RuntimeError, ValueError, KeyError) as e:
+        sys.stderr.write("[run-ledger] seed failed: %s\n" % e)
+        return 1
+    if carry["dev_resume_pending"]:
+        print("[autopilot] carried dev_resume_pending forward from prior state: %s (issue #4518)"
+              % _compact(carry["dev_resume_pending"]))
+    if carry["zero_yield_backoff"]:
+        print("[autopilot] carried zero_yield_backoff forward from prior state: %s (issue #4999)"
+              % _compact(carry["zero_yield_backoff"]))
+    return 0
 
 
 def _main(argv):
@@ -307,36 +682,16 @@ def _main(argv):
     if cmd == "schema-version":
         print(SCHEMA_VERSION)
         return 0
-    if cmd == "seed":
-        if not rest:
-            sys.stderr.write("usage: run_ledger.py seed <path> key=<json>...\n")
-            return 2
-        path = rest[0]
-        allowed = ("now",) + _IDENTITY_KEYS + _LIMIT_SEED_KEYS + _CARRY_KEYS
+    if cmd == "carry-classes":
         try:
-            vals = _parse_pairs(rest[1:], allowed)
-        except ValueError as e:
-            sys.stderr.write("[run-ledger] %s\n" % e)
-            return 2
-        now = vals["now"]
-        if not _TYPES["int"](now):
-            sys.stderr.write("[run-ledger] seed key now must be an int\n")
-            return 2
-        try:
-            doc = seed_initial(
-                {k: vals[k] for k in _IDENTITY_KEYS},
-                {k: vals[k] for k in _LIMIT_SEED_KEYS},
-                {k: vals[k] for k in _CARRY_KEYS},
-                now,
-            )
-            persist(doc, path)
-        except LedgerTypeError as e:
-            sys.stderr.write("%s\n" % e)
+            names = carry_classes(load_classes())
+        except (OSError, ValueError, KeyError) as e:
+            sys.stderr.write("[run-ledger] carry-classes failed: %s\n" % e)
             return 1
-        except (OSError, RuntimeError) as e:
-            sys.stderr.write("[run-ledger] seed failed: %s\n" % e)
-            return 1
+        print("\n".join(names))
         return 0
+    if cmd == "seed":
+        return _seed_cmd(rest)
     if cmd == "get":
         if len(rest) != 2:
             sys.stderr.write("usage: run_ledger.py get <path> <dotted.key>\n")

@@ -164,23 +164,30 @@ branch below.
 # BOUNDED FOREGROUND POLL — block in THIS turn until CI on $PR settles. This is
 # the foreground alternative to backgrounding the wait and ending the turn.
 #
-# zsh $status pitfall: name the state variable `run_state` (or `st`), never
+# zsh $status pitfall: name a state variable `pending`, `run_state` or `st`, never
 # `status` — zsh aliases `$status` to `$?`, so assigning a value to a variable
 # named `status` silently fails and the loop exits 1. `status` is the natural
 # spelling of this variable; that is exactly why the loop breaks. (Documented
 # CLAUDE.md pitfall.)
-deadline=$((SECONDS + 600))            # 10-min budget; size to your slowest check
-while [ "$SECONDS" -lt "$deadline" ]; do
-  run_state=$(gh pr view "$PR" --repo "$REPO" --json statusCheckRollup \
-    --jq 'if ([.statusCheckRollup[]?.status]
-           | any(IN("QUEUED","IN_PROGRESS","PENDING","WAITING")))
-          then "pending" else "settled" end' 2>/dev/null)
-  [ "$run_state" = "settled" ] && break
+#
+# Guard-compatible form (issue #3837 family): the worktree-isolation Bash guard
+# REFUSES `deadline=$((SECONDS + N)); while [ "$SECONDS" -lt "$deadline" ]`
+# ("evaluates SECONDS arithmetically inside a construct too complex to verify"),
+# and ALSO refuses the loop once a multi-line `--jq` program sits inside it — so
+# the budget is a fixed iteration count and the probe is `gh pr checks | cut -f2 | grep -cx pending`
+# (this exact form ran under the guard on 2026-10-25).
+pending=unknown                        # stays "unknown" if gh never answers: never read as terminal
+for i in $(seq 1 40); do               # 40 x 15s = 10-min budget; size to your slowest check
+  checks=$(gh pr checks "$PR" --repo "$REPO" 2>/dev/null)
+  if [ -z "$checks" ]; then sleep 15; continue; fi   # gh error / rate limit / no checks yet: keep polling (fail closed)
+  pending=$(printf '%s\n' "$checks" | cut -f2 | grep -cx pending)   # state column only (pass|fail|pending|skipping|cancel)
+  if [ "$pending" = 0 ]; then break; fi
   sleep 15
 done
-# run_state == "settled"  => every check is terminal: read conclusions and act
-#                            (merge on success, fix on failure).
-# still "pending" past the deadline => budget expired: fall through to the
+gh pr checks "$PR" --repo "$REPO"      # read the terminal conclusions
+# pending == 0  => every check is terminal: read conclusions and act
+#                  (merge on success, fix on failure).
+# pending != 0 after the last iteration => budget expired: fall through to the
 #                            partial-but-posted branch below — post what you can
 #                            stand behind now, with CI state as of the last poll.
 #                            NEVER re-arm the loop; one TOTAL budget per wait (the npm test poll

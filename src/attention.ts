@@ -110,6 +110,7 @@ import {
 import { getAutopilotPaused, type AutopilotPauseState } from "./redis/autopilot-pause.ts";
 import { getSessionBlockedUntil } from "./redis/session-block.ts";
 import { getStatus as getSchedulerStatus } from "./scheduler/heartbeat.ts";
+import { DELIBERATE_STOP_TTL_SECONDS } from "./scheduler/stop-marker.ts";
 import {
   DEPLOY_DRIFT_GRACE_SECONDS,
   readDeployDrift,
@@ -184,8 +185,12 @@ export interface AttentionFeedDeps {
   readPaused?: () => Promise<AutopilotPauseState>;
   /** Rank-0 `session-blocked` line read (epoch ms, null = none). Default: src/redis/session-block.ts. */
   readSessionBlockedUntil?: () => Promise<number | null>;
-  /** Rank-0 `scheduler-deliberate` line read. Default: scheduler heartbeat getStatus().stopReason. */
-  readSchedulerStopReason?: () => Promise<string | null>;
+  /**
+   * Rank-0 `scheduler-deliberate` line read: ONE snapshot of `stopReason` +
+   * `deliberateStoppedAt` (never two reads — a torn pair could mix a new
+   * reason with a stale stamp). Default: scheduler heartbeat getStatus().
+   */
+  readSchedulerStop?: () => Promise<SchedulerStopRead>;
   /** Rank-0 `sha-drift` line read. Default: src/health/deployed-sha.ts readDeployDrift(). */
   readShaDrift?: () => Promise<DeployDriftReading>;
   /** Rank-5 hitl-grill lane read (issue #4626). Default: listIssuesByLabel(HITL_GRILL_LABEL, {repo}). */
@@ -839,6 +844,31 @@ function bucketOf(key: string): Bucket {
   return key.slice(0, key.indexOf(":")) as Bucket;
 }
 
+/** One scheduler-stop snapshot (see {@link AttentionFeedDeps.readSchedulerStop}). */
+export interface SchedulerStopRead {
+  stopReason: string | null;
+  deliberateStoppedAt: string | null;
+}
+
+/**
+ * Is a deliberate stop still inside its 24 h marker TTL? The SAME constant
+ * the heartbeat uses for the Redis marker, and the exact complement of
+ * /health's `no-fresh-deliberate-stop` verdict (dashboard/src/lib/
+ * health-verdicts.ts) — so the feed's confirm-first row and /health's
+ * Start control are never both live (issue #5164, ADR-0034 §8.1). A missing
+ * or unparseable stamp is treated as FRESH: the row stays loud, while /health
+ * yields no verdict for that input and keeps Start disabled (fail closed).
+ * Returns the parsed stop time (null when unknown) alongside the verdict.
+ */
+function deliberateStopFreshness(
+  stop: SchedulerStopRead,
+  nowMs: number,
+): { fresh: boolean; stoppedAtMs: number | null } {
+  const parsed = stop.deliberateStoppedAt !== null ? Date.parse(stop.deliberateStoppedAt) : NaN;
+  if (Number.isNaN(parsed)) return { fresh: true, stoppedAtMs: null };
+  return { fresh: nowMs - parsed < DELIBERATE_STOP_TTL_SECONDS * 1000, stoppedAtMs: parsed };
+}
+
 interface MachineStoppedRead {
   row: Draft | null;
   scanned: number;
@@ -857,7 +887,14 @@ async function readMachineStopped(
   const readPaused = deps.readPaused ?? getAutopilotPaused;
   const readBlock = deps.readSessionBlockedUntil ?? (() => getSessionBlockedUntil(nowDate.getTime()));
   const readStop =
-    deps.readSchedulerStopReason ?? (async () => (await getSchedulerStatus()).stopReason ?? null);
+    deps.readSchedulerStop ??
+    (async (): Promise<SchedulerStopRead> => {
+      const status = await getSchedulerStatus();
+      return {
+        stopReason: status.stopReason ?? null,
+        deliberateStoppedAt: status.deliberateStoppedAt ?? null,
+      };
+    });
   const readDrift = deps.readShaDrift ?? (() => readDeployDrift());
 
   const [pausedR, blockR, stopR, driftR] = await Promise.all([
@@ -900,11 +937,14 @@ async function readMachineStopped(
 
   if (stopR.status === "fulfilled") {
     scanned++;
-    if (stopR.value === "deliberate") {
-      active.set("scheduler-deliberate", {
-        detail: "scheduler stopped deliberately (stopReason=deliberate)",
-        sinceMs: null,
-      });
+    if (stopR.value.stopReason === "deliberate") {
+      const { fresh, stoppedAtMs } = deliberateStopFreshness(stopR.value, nowDate.getTime());
+      if (fresh) {
+        active.set("scheduler-deliberate", {
+          detail: "scheduler stopped deliberately (stopReason=deliberate)",
+          sinceMs: stoppedAtMs,
+        });
+      }
     }
   } else {
     logRank0Failure("scheduler", stopR.reason);

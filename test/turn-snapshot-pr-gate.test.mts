@@ -38,6 +38,7 @@ import { join, resolve } from "node:path";
 import { main, parseArgs } from "../scripts/autopilot/turn-snapshot.ts";
 import {
   applyMergeStateRepoll,
+  checkVerdictFor,
   collectPrGate,
   hasUnknownMergeState,
   parseTierLine,
@@ -1511,5 +1512,47 @@ describe("Turn Snapshot pr-gate — a malformed payload degrades, never throws (
     for (const bad of ["2026-10-07T03:20:07.000Z", "2026-10-07T03:20:07+00:00", "2026-02-30T00:00:00Z", "2026-10-07T03:20:60Z", "", null, 1791344407]) {
       assert.equal(ghTimestampSeconds(bad), null, `${JSON.stringify(bad)} is not a gh timestamp`);
     }
+  });
+});
+
+describe("pr-gate — rollup + required-contexts edge shapes (#5089 QA round 1)", () => {
+  test("checkVerdictFor: a missing / non-array rollup is unsettled even with required [] (INV-3 exactly)", () => {
+    for (const rollup of [undefined, null, {}, "x", 7]) {
+      assert.deepEqual(checkVerdictFor(rollup, new Set()), { settled: false, red: false });
+      assert.deepEqual(checkVerdictFor(rollup, new Set(["test"])), { settled: false, red: false });
+    }
+  });
+
+  test("checkVerdictFor sibling pin: an empty ARRAY rollup with required [] stays settled; with a required name it is unsettled", () => {
+    assert.deepEqual(checkVerdictFor([], new Set()), { settled: true, red: false });
+    assert.deepEqual(checkVerdictFor([], new Set(["test"])), { settled: false, red: false });
+  });
+
+  test("checkVerdictFor: an IN_PROGRESS CheckRun with no conclusion is unsettled", () => {
+    const rollup = [{ __typename: "CheckRun", name: "test", status: "IN_PROGRESS" }];
+    assert.equal(checkVerdictFor(rollup, new Set(["test"])).settled, false);
+  });
+
+  test("required-contexts read of a non-list JSON ({} or 7) degrades as malformed-payload", async () => {
+    for (const json of ["{}", "7"]) {
+      const o = await collectPrGate({
+        github: fakeGithub({ first: ok([]), required: parseJsonRead(json) }),
+        now: () => NOW_MS,
+        sleep: async () => {},
+        ghListLimit: 100,
+      });
+      const d = o.degraded.find((x) => x.field === "requiredContexts");
+      assert.ok(d, `${json}: requiredContexts is marked degraded`);
+      assert.equal(d.reason, "malformed-payload");
+    }
+  });
+
+  test("required-contexts sibling pin: JSON null is a healthy empty set; non-string / empty members are dropped, not degraded", async () => {
+    const collect = (json: string) =>
+      collectPrGate({ github: fakeGithub({ first: ok([]), required: parseJsonRead(json) }), now: () => NOW_MS, sleep: async () => {}, ghListLimit: 100 });
+    const empty = await collect("null");
+    assert.equal(empty.degraded.some((x) => x.field === "requiredContexts"), false);
+    const mixed = await collect('["test", 5, "", null]');
+    assert.equal(mixed.degraded.some((x) => x.field === "requiredContexts"), false, "non-string / empty members are dropped, not degraded");
   });
 });

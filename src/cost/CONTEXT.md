@@ -26,6 +26,7 @@ advisory-only. Edit the test's `COST_LAYERS` const and this table together.
 | | `oauth-meter-shape.ts` | Pure OAuth meter body parse + ok/failure guards + endpoint constants |
 | L2 config | `config.ts` | Every `HYDRA_USAGE_*` env reader and its `DEFAULT_*` |
 | L3 pure folds | `eligibility.ts` | Admission verdict: hard stops (`deriveHardStop`), pacing shed, 5h throttle, overlays |
+| | `admission.ts` | `decideAdmission`: pace-gate.sh's launcher ladder as a pure fold over the composed verdict; `ADMISSION_REASONS` is the one tick-reason vocabulary (#5101) |
 | | `snapshot-assembly.ts` | `assembleSnapshot`: folds a `ScanResult` + OAuth read into a `UsageSnapshot` |
 | | `transcript-fold.ts` | `parseTranscriptFile`: one transcript file's content to its memoizable per-file contribution (attribution injected); plus `firstUserMessageText`, `sumSessionTokens` |
 | ─ purity line ─ | | |

@@ -239,7 +239,7 @@ __reap_session_should_post() {
 # falls back to its safe default (never treats an unlabelled report as a
 # confirmed repeat), never blocking the reap itself.
 #
-# HYDRA_AUTOPILOT_REDIS_CLI is the SAME test-injection seam `redis_cooldown_cli`
+# HYDRA_AUTOPILOT_REDIS_CLI is the SAME test-injection seam run_ledger.py's RedisMirror
 # (below) uses — a whitespace-split command prefix a test can point at a stub
 # script instead of the real `docker exec hydra-redis-1 redis-cli`.
 __reap_read_launch_model() {
@@ -554,7 +554,7 @@ fi
 # Dry-run (QA re-review hard-blocker fix #2 on PR #4644, issue #4585): echo
 # `__reap_read_launch_model`'s HGET result directly. No state read, no POST —
 # purely the Redis read under test, via the SAME HYDRA_AUTOPILOT_REDIS_CLI
-# test-injection seam `redis_cooldown_cli` below uses. Output: the model
+# test-injection seam run_ledger.py's RedisMirror below uses. Output: the model
 # string on stdout, or nothing on a miss/failure.
 if [ "${1:-}" = "--reap-launch-model" ]; then
   __reap_read_launch_model
@@ -922,42 +922,6 @@ else
   ISOLATED_RUN=0
 fi
 
-# Issue #2715 — Redis-backed reboot-survival for the cross-run cooldown subset.
-#
-# /tmp is boot-wiped (tmpfiles `D /tmp … 30d`), so the #2575 prior-file
-# carry-forward survives pace-gate relaunches but NOT a host reboot: after a
-# reboot the prior state.json is gone and the long-cooldown classes reseed to
-# epoch 0, firing many times in the first post-boot run (a per-reboot recurrence
-# of the #2575 token churn). Redis survives reboot (AOF + docker volume), so the
-# durable fix mirrors the cross-run subset to Redis on write and reads it back as
-# a seed tier BEHIND the prior file (prior-file → Redis → 0).
-#
-# `redis_cooldown_cli` is the single bash→Redis seam. It follows the EXACT
-# docker-exec redis-cli pattern the Turn Snapshot already uses for every autopilot
-# cross-run Redis read/write — no new typed accessor, no HTTP route (bootstrap
-# runs in Phase 0 before the HTTP service is guaranteed up, so a curl seed would
-# be less robust; design-concept #2715 Invariant 6 + rejectedAlternatives).
-#
-# `HYDRA_AUTOPILOT_REDIS_CLI` overrides the command (tests inject a stub so the
-# seed logic is exercised hermetically without a live Redis). Every call is
-# best-effort / fail-open: any error (redis down, docker absent, timeout) yields
-# empty stdout and the caller falls back to the pre-#2715 behaviour — NEVER
-# aborts bootstrap (design-concept #2715 Invariant 5).
-REDIS_SIGNAL_LAST_FIRED_KEY="hydra:autopilot:signal-last-fired"
-REDIS_RESEARCH_FORCE_KEY="hydra:autopilot:research-force-counter"
-redis_cooldown_cli() {
-  # $@ = redis-cli argv (e.g. HGET <key> <field>). Emits stdout on success,
-  # nothing on any failure. Quotes are stripped by the caller as needed.
-  if [ -n "${HYDRA_AUTOPILOT_REDIS_CLI:-}" ]; then
-    # Test/override seam: a whitespace-split command prefix. Word-split is
-    # intentional here (the override is a trusted test fixture, not user input).
-    # shellcheck disable=SC2086
-    ${HYDRA_AUTOPILOT_REDIS_CLI} "$@" 2>/dev/null || true
-  else
-    docker exec hydra-redis-1 redis-cli "$@" 2>/dev/null || true
-  fi
-}
-
 # Heartbeat — Phase 0 marker.
 #
 # This is the FIRST write; subsequent decision turns must call
@@ -1206,322 +1170,6 @@ STARTED_EPOCH="$(date -u +%s)"
 # The integer has ONE home: run_ledger.py (issue #5072, INV-5).
 SCHEMA_VERSION="$(python3 "${RUN_LEDGER}" schema-version)"
 
-# Issue #1666 — carry the forced-research daily cap across runs.
-#
-# The heredoc below OVERWRITES state.json on every bootstrap, and the
-# pace-gate relaunches the autopilot roughly every 15 minutes — so any
-# counter that lives only in the state file resets per-RUN unless
-# bootstrap reseeds it. Without this seed the documented 4/day
-# forced-research cap (decide.py RESEARCH_FORCE_DAILY_CAP, grilled
-# decision 6) silently degraded to 4/run (QA finding on PR #1678;
-# design-concept artifact for #1666, Invariant 4).
-#
-# Seed = the prior state file's research_force_counter pruned to TODAY's
-# UTC key, matching decide.py's prune-on-write semantics. Missing prior
-# file, missing jq, unparseable JSON, or a non-object shape all degrade
-# to {} — the breaker fails open (at worst one extra day of forced
-# dispatches), and a seed failure must never block bootstrap. The read
-# happens BEFORE the heredoc clobbers the file; the prior-PID guard
-# above established this read-prior-state path.
-RESEARCH_FORCE_SEED="{}"
-if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
-  SEED_TODAY_UTC="$(date -u +%Y-%m-%d)"
-  RESEARCH_FORCE_SEED="$(jq -c --arg today "${SEED_TODAY_UTC}" '
-    (.research_force_counter // {}) as $c
-    | if ($c | type) == "object" and (($c[$today] // null) | type) == "object"
-      then { ($today): $c[$today] }
-      else {}
-      end
-  ' "${STATE_PATH}" 2>/dev/null || echo "{}")"
-  # Belt-and-braces: anything that does not look like a JSON object would
-  # corrupt the heredoc below into invalid JSON — degrade to {}.
-  case "${RESEARCH_FORCE_SEED}" in
-    "{"*) ;;
-    *) RESEARCH_FORCE_SEED="{}" ;;
-  esac
-fi
-
-# Issue #2715 — Redis fallback tier for research_force_counter.
-#
-# Fallback order is prior-file → Redis → {}. When the prior file was absent or
-# carried no counter for today (RESEARCH_FORCE_SEED is still the empty `{}`), try
-# the Redis mirror-write left by decide.py / reap.py — this is the reboot-survival
-# path (/tmp was wiped, so the prior file is gone, but Redis persists). The stored
-# value is the canonical-JSON research_force_counter (a date-keyed object); we
-# prune it to TODAY's UTC key exactly as the prior-file read does so a stale
-# yesterday counter can never leak forward. First install (Redis empty too) keeps
-# the `{}` default — first-install behaviour unchanged (design-concept #2715).
-if [ "${ISOLATED_RUN}" != "1" ] || [ -n "${HYDRA_AUTOPILOT_REDIS_CLI:-}" ]; then
-  if [ "${RESEARCH_FORCE_SEED}" = "{}" ] && command -v jq >/dev/null 2>&1; then
-    RFC_REDIS_RAW="$(redis_cooldown_cli GET "${REDIS_RESEARCH_FORCE_KEY}")"
-    if [ -n "${RFC_REDIS_RAW}" ]; then
-      SEED_TODAY_UTC="${SEED_TODAY_UTC:-$(date -u +%Y-%m-%d)}"
-      RFC_REDIS_SEED="$(printf '%s' "${RFC_REDIS_RAW}" | jq -c --arg today "${SEED_TODAY_UTC}" '
-        . as $c
-        | if ($c | type) == "object" and (($c[$today] // null) | type) == "object"
-          then { ($today): $c[$today] }
-          else {}
-          end
-      ' 2>/dev/null || echo "{}")"
-      case "${RFC_REDIS_SEED}" in
-        "{"*) RESEARCH_FORCE_SEED="${RFC_REDIS_SEED}" ;;
-        *) ;;  # keep {} on any parse failure
-      esac
-    fi
-  fi
-fi
-
-# Issue #4518 (INV-3) — carry state.dev_resume_pending across a Pace Gate
-# relaunch.
-#
-# reap.py's no-PR-stall backstop (#3866, reap_stall.py) queues a resume record
-# here so the NEXT turn's dev_orch pick continues the stalled branch instead of
-# re-implementing from zero. But the heredoc below rewrites state.json on EVERY
-# bootstrap and the pace-gate relaunches the autopilot every ~15 min, so a
-# record queued by a run that then ended (quota cap, handoff, crash) before any
-# turn drained it died with the file — observed 2026-09-17, run 4bbc46f5: the
-# record for #4510 was queued in-run, the run hit its 5h quota cap, and the next
-# bootstrap dropped it. Same read-prior-state-BEFORE-the-heredoc-clobbers-it
-# pattern as RESEARCH_FORCE_SEED (#1666) and COOLDOWN_SIGNAL_SEED (#2575).
-#
-# Seed = the prior file's list with malformed entries dropped (non-object, or a
-# missing/empty/non-string anchor — decide.py's drain would only pop-and-discard
-# them), DEDUPLICATED BY ANCHOR keeping the LATEST record in its FIFO position
-# (reap_stall.py's own append semantics), and FIFO-CAPPED at
-# DEV_RESUME_PENDING_CAP — the SAME 20 reap_stall.py enforces (pinned equal by
-# test/autopilot-scripts.test.mts). Missing prior file, missing
-# jq, unparseable JSON, or a non-list shape all degrade to [] — a seed failure
-# must NEVER block bootstrap. Losing the cache is survivable by construction:
-# the durable source of truth is the `needs-dev-resume` label + the open-PR
-# ledger (the Turn Snapshot's orch_dev_resume_pick); this carry-forward only
-# preserves what the label cannot — the branch of a stall that opened NO PR.
-# File-only (no Redis tier): /tmp loss on reboot falls back to that label pick.
-DEV_RESUME_PENDING_CAP=20
-DEV_RESUME_PENDING_SEED="[]"
-if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
-  DEV_RESUME_PENDING_SEED="$(jq -c --argjson cap "${DEV_RESUME_PENDING_CAP}" '
-    (.dev_resume_pending // []) as $p
-    | if ($p | type) == "array"
-      then
-        [ $p[]
-          | select(type == "object")
-          | select((.anchor | type) == "string" and .anchor != "") ]
-        | reduce .[] as $e ([]; map(select(.anchor != $e.anchor)) + [$e])
-        | .[-($cap):]
-      else []
-      end
-  ' "${STATE_PATH}" 2>/dev/null || echo "[]")"
-  # Belt-and-braces: anything that does not look like a JSON array would
-  # corrupt the heredoc below into invalid JSON — degrade to [].
-  case "${DEV_RESUME_PENDING_SEED}" in
-    "["*) ;;
-    *) DEV_RESUME_PENDING_SEED="[]" ;;
-  esac
-  if [ "${DEV_RESUME_PENDING_SEED}" != "[]" ]; then
-    echo "[autopilot] carried dev_resume_pending forward from prior state: ${DEV_RESUME_PENDING_SEED} (issue #4518)"
-  fi
-fi
-
-# Issue #4999 — carry the zero-yield back-off ladder state forward from the
-# prior state file, the same read-BEFORE-the-heredoc-clobbers pattern as
-# DEV_RESUME_PENDING_SEED above (#4518). decide.py stamps
-# `state.zero_yield_backoff.<cls> = {streak, last_fired}` at plan time to back
-# discover_target off an idle Target board (30m → 4h → 24h); the heredoc
-# clobbers it on EVERY bootstrap, and the pace gate relaunches every ~15 min —
-# so WITHOUT this carry the ladder resets to streak 0 on every relaunch and
-# the back-off is a no-op against exactly the refire loop it exists to stop
-# (discover_target is ALWAYS_ON_REARMED below, so its signal_last_fired re-arm
-# is by design and stays untouched; the back-off reads only its own stamp).
-# Malformed entries (a non-object map, a non-object entry, or a non-int
-# streak / last_fired — jq bools are type "boolean", not "number", so they
-# drop) are dropped per-entry; missing file, missing jq, or a parse failure
-# degrades to {} — a seed failure must NEVER block bootstrap. Deliberately
-# FILE-ONLY (no #2715 Redis tier): losing it on a reboot fails open, at worst
-# restarting one ladder (a few extra 30m-cadence fires), which is not worth a
-# second persistence tier.
-ZERO_YIELD_BACKOFF_SEED="{}"
-if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
-  ZERO_YIELD_BACKOFF_SEED="$(jq -c '
-    (.zero_yield_backoff // {}) as $z
-    | if ($z | type) == "object"
-      then
-        [ $z | to_entries[]
-          | select(.value | type == "object")
-          | select((.value.streak | type) == "number" and ((.value.streak | floor) == .value.streak))
-          | select((.value.last_fired | type) == "number" and ((.value.last_fired | floor) == .value.last_fired))
-          | {key: .key, value: {streak: (.value.streak | floor), last_fired: (.value.last_fired | floor)}}
-        ] | from_entries
-      else {}
-      end
-  ' "${STATE_PATH}" 2>/dev/null || echo "{}")"
-  # Belt-and-braces: anything that does not look like a JSON object would
-  # corrupt the heredoc below into invalid JSON — degrade to {}.
-  case "${ZERO_YIELD_BACKOFF_SEED}" in
-    "{"*) ;;
-    *) ZERO_YIELD_BACKOFF_SEED="{}" ;;
-  esac
-  if [ "${ZERO_YIELD_BACKOFF_SEED}" != "{}" ]; then
-    echo "[autopilot] carried zero_yield_backoff forward from prior state: ${ZERO_YIELD_BACKOFF_SEED} (issue #4999)"
-  fi
-fi
-
-# Issue #2575 — carry the cooled-class last-fired timestamps across runs.
-#
-# Same hazard as RESEARCH_FORCE_SEED above: the state-file heredoc clobbers
-# `signal_last_fired` on EVERY bootstrap, and the pace-gate relaunches the
-# autopilot roughly every 15 minutes. The original heredoc seeded only the 5
-# always-on signal classes (health / sweep_* / discover_*) at 0 and OMITTED the
-# long-cooldown classes `retro_orch` / `architecture_orch` / `cleanup_orch` /
-# `scout_orch`. decide.py's `signal_is_cooled()` defaults a missing key to
-# epoch 0 — permanently "cooled" — so the 24h retro cooldown never held across a
-# relaunch and retro fired 5–8×/day instead of the designed 1×/day (~8–10× token
-# overrun, all zero-emit clean runs).
-#
-# `wire_or_retire_target` (issue #2722, epic #2720) is the 5th long-cooldown
-# class — a 24h cooldown, exactly the retro-cooldown-bootstrap-bug class — so it
-# MUST be seeded here too, otherwise its 24h cadence would silently degrade to
-# fire-every-turn across the ~15-min pace-gate relaunch.
-#
-# `design_qa_target` (issue #2739, parent #2732) is the 6th long-cooldown class —
-# a 7d cooldown (the scout_orch-style calendar cadence) — so it MUST be seeded
-# here too, otherwise its weekly cadence would silently degrade to fire-every-
-# turn across the pace-gate relaunch (the same #2575 bug class).
-#
-# `skill_prune` (issue #2949, epic #2944) is the 7th long-cooldown class — a 7d
-# cooldown (the scout_orch-style calendar cadence) — so it MUST be seeded here
-# too, otherwise its weekly cadence would silently degrade to fire-every-turn
-# across the pace-gate relaunch (the same #2575 bug class).
-#
-# `discover_orch` (issue #3920) is the 8th long-cooldown class — a 3600s
-# cooldown, the SAME cadence as its round-robin BACKFILL_SIGNAL_CLASSES partner
-# `architecture_orch` (decide.py runs the two as a staggered one-per-turn
-# backfill set). It was historically seeded in the always-on-seeded-at-0 group
-# below — a classification that predates the 2026-06-03 change (#963) that raised
-# its cooldown from 30m to 3600s; the #2575 carry-forward group added for exactly
-# this failure mode omitted it. Left in the always-on group, every relaunch reset
-# it to 0, so `signal_is_cooled()` in decide.py always read last=0 and its 3600s
-# cooldown was a silent no-op (permanently eligible) — a tracking/observability
-# bug, not a dispatch-gap cause (#3916 confirms the selector is otherwise sound).
-#
-# `research_target` (issue #4611) is NOT a signal class — it is a pipeline slot —
-# but decide.py stamps `signal_last_fired.research_target` at plan time to
-# enforce its 6h minimum re-fire interval (RESEARCH_TARGET_REFIRE_SEC). That
-# stamp MUST be carried forward here too, otherwise the interval resets to 0 on
-# every pace-gate relaunch / context_compaction restart and the fix is a no-op
-# (the same #2575 bug class — the issue's own second re-fire happened right
-# after a compaction restart).
-#
-# `cleanup_target` (issue #4909) is the 4th recurrence of this omission: a
-# 3600s class added to classes.json without being added to the hand-maintained
-# carry list, so it dispatched on turn 1 of 14 consecutive runs (~2x its
-# designed ≤24/day cadence). `wayfinder_orch` + `tickets_orch` (both 3600s)
-# were in the same hole — wayfinder_orch's classes.json note deferred seeding
-# it to "a follow-on slice"; this is that slice, and tickets_orch is carried
-# too so the rule stays uniform (a carried 0 is harmless).
-#
-# Issue #4909 — the list is now ONE shell variable, COOLDOWN_CARRY_CLASSES,
-# and every enumeration below is GENERATED from it: the all-0 default seed,
-# the jq prior-file seed (class names injected as a JSON array — the jq
-# program names no class), the Redis-fallback HGET loop, and the static
-# all-0 SIGNAL_LAST_FIRED_JSON fallback. No second literal enumeration
-# remains in this file. test/autopilot-scripts.test.mts derives the SAME set
-# from scripts/autopilot/classes.json (via src/taxonomy/classes.ts
-# SIGNAL_CLASS_COOLDOWNS): every signal class whose cooldownSeconds exceeds
-# the pace-gate relaunch interval (900s — the timer's OnUnitActiveSec),
-# minus the 4 always-on re-armed classes, plus the research_target re-fire
-# stamp — so a 5th recurrence fails CI instead of shipping silently.
-COOLDOWN_CARRY_CLASSES="retro_orch architecture_orch discover_orch cleanup_orch scout_orch wire_or_retire_target design_qa_target skill_prune research_target cleanup_target wayfinder_orch tickets_orch"
-
-# All-0 seed for the carry classes, GENERATED from the one list (issue #4909):
-# the default when there is no prior file, no jq, or any parse failure. The
-# comma-joined pairs are reused to build the static SIGNAL_LAST_FIRED_JSON
-# fallback below, so the two can never drift.
-_cd_zero_pairs=""
-for _cd_c in ${COOLDOWN_CARRY_CLASSES}; do
-  _cd_zero_pairs="${_cd_zero_pairs:+${_cd_zero_pairs},}\"${_cd_c}\":0"
-done
-COOLDOWN_SIGNAL_SEED="{${_cd_zero_pairs}}"
-#
-# Seed = the prior state file's timestamp for each carry class (carried
-# forward so the cooldown survives the relaunch), defaulting to 0 only when
-# there is no prior value (first-ever run). Missing prior file, missing jq,
-# unparseable JSON, or a non-object shape all degrade to all-0 — fail-open (at
-# worst one extra fire), and a seed failure must never block bootstrap. Read
-# happens BEFORE the heredoc clobbers the file, mirroring RESEARCH_FORCE_SEED.
-if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
-  _cd_names_json="$(printf '%s\n' ${COOLDOWN_CARRY_CLASSES} | jq -R . | jq -sc .)"
-  COOLDOWN_SIGNAL_SEED="$(jq -c --argjson names "${_cd_names_json}" '
-    (.signal_last_fired // {}) as $s
-    | reduce $names[] as $n
-        ({}; .[$n] = (($s[$n] // 0) | if type == "number" then . else 0 end))
-  ' "${STATE_PATH}" 2>/dev/null || echo "${COOLDOWN_SIGNAL_SEED}")"
-  # Belt-and-braces: anything that does not look like a JSON object would
-  # corrupt the heredoc below into invalid JSON — degrade to all-0.
-  case "${COOLDOWN_SIGNAL_SEED}" in
-    "{"*) ;;
-    *) COOLDOWN_SIGNAL_SEED="{${_cd_zero_pairs}}" ;;
-  esac
-  unset _cd_names_json
-fi
-
-# Issue #2715 — Redis fallback tier for the long-cooldown signal classes.
-#
-# Fallback order is prior-file → Redis → 0, applied PER CLASS. For each of the
-# long-cooldown classes whose prior-file value came back as 0 (absent prior file
-# after a reboot, or a genuinely never-stamped class), read the class's field
-# from the Redis hash mirror. This is the reboot-survival path: /tmp was wiped so
-# the prior file is gone, but Redis persists the last-fired stamp reap.py wrote,
-# so the 24h/1h cooldowns hold across the reboot instead of resetting to epoch 0
-# and firing many times in the first post-boot run. First install (no prior file
-# AND no Redis key) keeps 0 — first-install behaviour unchanged. Best-effort: any
-# Redis error yields empty stdout, the class keeps its prior-file value (0), and
-# bootstrap never blocks (design-concept #2715 Invariants 2 + 5).
-if { [ "${ISOLATED_RUN}" != "1" ] || [ -n "${HYDRA_AUTOPILOT_REDIS_CLI:-}" ]; } \
-  && command -v jq >/dev/null 2>&1; then
-  for _cd_cls in ${COOLDOWN_CARRY_CLASSES}; do
-    # Only reach for Redis when the prior-file tier gave us 0 for this class.
-    _cd_prior="$(printf '%s' "${COOLDOWN_SIGNAL_SEED}" | jq -r --arg c "${_cd_cls}" '(.[$c] // 0)' 2>/dev/null || echo 0)"
-    case "${_cd_prior}" in
-      0|"") ;;               # prior-file value missing/zero → try Redis
-      *) continue ;;          # prior-file already has a real timestamp → keep it
-    esac
-    _cd_redis="$(redis_cooldown_cli HGET "${REDIS_SIGNAL_LAST_FIRED_KEY}" "${_cd_cls}" | tr -d '"')"
-    # Accept only a positive integer epoch; anything else (empty / non-numeric)
-    # leaves the class at its prior-file 0.
-    case "${_cd_redis}" in
-      ''|*[!0-9]*) continue ;;
-    esac
-    if [ "${_cd_redis}" -gt 0 ] 2>/dev/null; then
-      _cd_merged="$(printf '%s' "${COOLDOWN_SIGNAL_SEED}" \
-        | jq -c --arg c "${_cd_cls}" --argjson v "${_cd_redis}" '.[$c] = $v' 2>/dev/null || echo "")"
-      case "${_cd_merged}" in
-        "{"*) COOLDOWN_SIGNAL_SEED="${_cd_merged}" ;;
-        *) ;;  # keep the prior seed on any jq failure
-      esac
-    fi
-  done
-  unset _cd_cls _cd_prior _cd_redis _cd_merged
-fi
-
-# Compose the full signal_last_fired object: the 4 always-on classes seeded
-# at 0 (re-armed each run by design) plus the COOLDOWN_CARRY_CLASSES keys
-# carried forward from the prior state (COOLDOWN_SIGNAL_SEED). Prefer jq for
-# the merge; fall back to the static all-0 splice below if jq is unavailable
-# so bootstrap never blocks. The static fallback is GENERATED from the same
-# one list — the always-on 4-key prefix is the only literal left, and the
-# test pins it equal to bootstrap's re-arm set (#4909).
-SIGNAL_LAST_FIRED_JSON="{\"health\":0,\"sweep_orch\":0,\"sweep_target\":0,\"discover_target\":0,${_cd_zero_pairs}}"
-if command -v jq >/dev/null 2>&1; then
-  SIGNAL_LAST_FIRED_MERGED="$(jq -cn --argjson cooled "${COOLDOWN_SIGNAL_SEED}" '
-    {health:0, sweep_orch:0, sweep_target:0, discover_target:0} + $cooled
-  ' 2>/dev/null || echo "")"
-  case "${SIGNAL_LAST_FIRED_MERGED}" in
-    "{"*) SIGNAL_LAST_FIRED_JSON="${SIGNAL_LAST_FIRED_MERGED}" ;;
-    *) ;;  # keep the all-0 fallback above
-  esac
-fi
-unset _cd_c _cd_zero_pairs
-
 # Issue #1352 — seed in-flight pipeline slots across the pace-gate relaunch.
 #
 # The heredoc below clobbers state.json with all-null slots on EVERY bootstrap.
@@ -1539,36 +1187,38 @@ unset _cd_c _cd_zero_pairs
 # base so `occupied > 0` and the new session emits `wait` (busy-wait nap) until
 # the SubagentStop event frees the slot or the orphaned-slot age cap drains it.
 #
-# Best-effort and fail-open: orchestrator-down, a missing jq, a curl timeout, or
-# an unparseable body all degrade to the all-null base (the pre-#1352 behaviour),
+# Best-effort and fail-open: orchestrator-down, a curl timeout, or an
+# unparseable body all degrade to the all-null base (the pre-#1352 behaviour),
 # so this can never block a bootstrap. Isolated runs (tests) skip the fetch.
-SLOTS_BASE='{"dev_orch":null,"qa_orch":null,"research_orch":null,"dev_target":null,"qa_target":null,"research_target":null,"design_concept_orch":null}'
-SLOTS_JSON="${SLOTS_BASE}"
-if [ "${ISOLATED_RUN}" != "1" ] && command -v jq >/dev/null 2>&1; then
+#
+# Issue #5073 — the 7-null base and the overlay merge live in run_ledger.py
+# (build_slots); bash only fetches the raw payload (the ledger has no network)
+# and hands it over verbatim as slots_overlay. Every other cross-run carry key
+# (research_force_counter, dev_resume_pending, zero_yield_backoff,
+# signal_last_fired) is read from the prior state file by the ledger's
+# carry_forward() inside `run_ledger.py seed --carry-from`; bootstrap holds no
+# carry logic. The carried signal set is DERIVED from classes.json.
+SLOTS_SEED_RAW=""
+if [ "${ISOLATED_RUN}" != "1" ]; then
   SLOTS_API_BASE="${HYDRA_API_BASE:-http://localhost:4000}"
   SLOTS_SEED_RAW="$(curl -sf --max-time 5 "${SLOTS_API_BASE}/api/autopilot/inflight-slots" 2>/dev/null || echo "")"
-  if [ -n "${SLOTS_SEED_RAW}" ]; then
-    # Merge: 7-null base, overlaid with any seeded (non-null) slot objects. A
-    # malformed payload (.slots not an object) collapses the overlay to {} so the
-    # result is exactly the all-null base — never invalid JSON in the heredoc.
-    SLOTS_MERGED="$(printf '%s' "${SLOTS_SEED_RAW}" | jq -c --argjson base "${SLOTS_BASE}" '
-      ($base) + (if ((.slots // {}) | type) == "object" then .slots else {} end)
-    ' 2>/dev/null || echo "")"
-    # Issue #5142: drop any seeded slot the PRIOR run already reaped (its
-    # state.json reaped_task_ids) — read BEFORE the heredoc below clobbers the
-    # file. Fail-open: a filter failure keeps SLOTS_MERGED unchanged.
-    if [ -n "${SLOTS_MERGED}" ] && [ -f "${STATE_PATH}" ]; then
-      SLOTS_FILTERED="$(printf '%s' "${SLOTS_MERGED}" | python3 "$(dirname "$0")/run_termination.py" seed-filter "${STATE_PATH}" || echo "")"
-      case "${SLOTS_FILTERED}" in
-        "{"*) SLOTS_MERGED="${SLOTS_FILTERED}" ;;
-        *) ;;
-      esac
-    fi
-    case "${SLOTS_MERGED}" in
-      "{"*) SLOTS_JSON="${SLOTS_MERGED}" ;;
-      *) SLOTS_JSON="${SLOTS_BASE}" ;;
+  # Issue #5142: drop any seeded slot the PRIOR run already reaped (its
+  # state.json reaped_task_ids) — read BEFORE `run_ledger.py seed` clobbers the
+  # file. Fail-open: a filter failure keeps the raw payload unchanged.
+  if [ -n "${SLOTS_SEED_RAW}" ] && [ -f "${STATE_PATH}" ]; then
+    SLOTS_FILTERED="$(printf '%s' "${SLOTS_SEED_RAW}" | python3 "$(dirname "$0")/run_termination.py" seed-filter "${STATE_PATH}" || echo "")"
+    case "${SLOTS_FILTERED}" in
+      "{"*) SLOTS_SEED_RAW="${SLOTS_FILTERED}" ;;
+      *) ;;
     esac
   fi
+fi
+
+# Redis continuity (ADR-0012 D2, issue #2715) is consulted only under this gate:
+# a non-isolated run, or a test that injected a HYDRA_AUTOPILOT_REDIS_CLI stub.
+SEED_MIRROR_FLAG=()
+if [ "${ISOLATED_RUN}" != "1" ] || [ -n "${HYDRA_AUTOPILOT_REDIS_CLI:-}" ]; then
+  SEED_MIRROR_FLAG=(--mirror)
 fi
 
 # Initialize state file — limits are now first-class members.
@@ -1596,8 +1246,8 @@ fi
 #     tickets_orch; #2722/#2739/#2949 added the wire/design/skill entries,
 #     #3920 moved discover_orch here from the always-on group, and #4909
 #     added the three its derived-from-classes.json guard caught) which
-#     are SEEDED FROM THE PRIOR STATE FILE (issue #2575 — COOLDOWN_SIGNAL_SEED
-#     above, generated from COOLDOWN_CARRY_CLASSES per #4909) so their
+#     are SEEDED FROM THE PRIOR STATE FILE (issue #2575 — run_ledger.carry_forward
+#     derives the carried set from classes.json per #4909) so their
 #     1h/24h/7d cooldown survives the pace-gate's ~15-min relaunch
 #     cadence. The 12th carried key, `research_target` (issue #4611), is a
 #     pipeline slot's plan-time re-fire stamp (6h interval), carried
@@ -1610,19 +1260,19 @@ fi
 #   - `reaped_task_ids` (issue #411) and `burned_classes` (issue #395)
 #     are preserved unchanged.
 #   - `research_force_counter` (issue #1666) is seeded from the prior state
-#     file (see RESEARCH_FORCE_SEED above) — the 4/day forced-research cap
+#     file (carried by run_ledger.carry_forward) — the 4/day forced-research cap
 #     must survive the pace-gate's multi-run-per-day relaunch cadence.
 #     Additive + tolerated-missing by all readers, so no schema_version bump.
 #     The 7 long-cooldown `signal_last_fired` classes are seeded from prior
-#     state the same way (issue #2575 — COOLDOWN_SIGNAL_SEED above).
+#     state the same way (issue #2575 — run_ledger.carry_forward).
 #   - `dev_resume_pending` (issue #4518) is carried forward from the prior
-#     state file (see DEV_RESUME_PENDING_SEED above) — a queued no-PR-stall
+#     state file (carried by run_ledger.carry_forward) — a queued no-PR-stall
 #     resume record (#3866) must survive the relaunch that follows the run
 #     which queued it. Additive + tolerated-missing by all readers (decide.py
 #     and reap_stall.py both treat a non-list as empty), so no schema_version
 #     bump.
 #   - `zero_yield_backoff` (issue #4999) is carried forward from the prior
-#     state file (see ZERO_YIELD_BACKOFF_SEED above) — the discover_target
+#     state file (carried by run_ledger.carry_forward) — the discover_target
 #     idle-board back-off ladder ({class: {streak, last_fired}}) must survive
 #     the pace-gate relaunch or the back-off never climbs past rung 0.
 #     Additive + tolerated-missing by all readers (decide.py degrades a
@@ -1649,10 +1299,13 @@ fi
 # clobbered on each bootstrap, so no migration path is needed —
 # bootstrap is always run before the brain reads state.
 # Issue #5072 — the document is written by the Run Ledger (run_ledger.py seed),
-# the one atomic writer; every value below was computed above by the existing
-# bash/jq/Redis blocks and is passed verbatim as a JSON literal. An unknown or
-# missing key exits 2 before any write.
+# the one atomic writer. Issue #5073 — the five carry keys are no longer passed
+# in: `--carry-from` points the ledger at the prior run's file (read BEFORE the
+# atomic replace) and carry_forward() derives them. An unknown or missing key
+# exits 2 before any write, so a stale caller fails loud.
 if ! python3 "${RUN_LEDGER}" seed "${STATE_PATH}" \
+  --carry-from "${STATE_PATH}" \
+  ${SEED_MIRROR_FLAG[@]+"${SEED_MIRROR_FLAG[@]}"} \
   "now=${STARTED_EPOCH}" \
   "pid=${PID}" \
   "run_id=\"${RUN_ID}\"" \
@@ -1668,11 +1321,7 @@ if ! python3 "${RUN_LEDGER}" seed "${STATE_PATH}" \
   "unattended=${UNATTENDED}" \
   "daily_spend_cap_usd=${DAILY_SPEND_CAP_USD}" \
   "scout_cost_share=${SCOUT_COST_SHARE}" \
-  "research_force_counter=${RESEARCH_FORCE_SEED}" \
-  "dev_resume_pending=${DEV_RESUME_PENDING_SEED}" \
-  "zero_yield_backoff=${ZERO_YIELD_BACKOFF_SEED}" \
-  "slots=${SLOTS_JSON}" \
-  "signal_last_fired=${SIGNAL_LAST_FIRED_JSON}"; then
+  "slots_overlay=${SLOTS_SEED_RAW}"; then
   echo "[autopilot] FATAL: run_ledger.py seed failed (state path ${STATE_PATH})"
   exit 1
 fi

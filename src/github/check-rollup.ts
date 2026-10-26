@@ -132,6 +132,11 @@ export function isRed(fold: RollupFold): boolean {
   return someStatus(fold, (s) => s === "red");
 }
 
+/** True iff no context is pending (absent required contexts count as pending; CANCELLED is settled). */
+export function isSettled(fold: RollupFold): boolean {
+  return !someStatus(fold, (s) => s === "pending");
+}
+
 /** True iff some context is red, cancelled or pending. */
 export function blocksMerge(fold: RollupFold): boolean {
   return someStatus(fold, (s) => s === "red" || s === "cancelled" || s === "pending");

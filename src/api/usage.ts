@@ -23,6 +23,7 @@ import {
   getWeeklyResetAnchorMs,
   projectResetWindow,
   getEligibilityUsage,
+  decideAdmission,
 } from "../cost/index.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import {
@@ -47,6 +48,7 @@ import {
 import {
   DispatchCostJoinBodySchema,
   UsageByIssueQuerySchema,
+  EligibilityQuerySchema,
 } from "../schemas/usage.ts";
 import { isolateAggregator } from "./route-helpers.ts";
 import { logger } from "../logger.ts";
@@ -193,7 +195,7 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
    * genuine 500, not a degradable slice), builds the resolved deps bag from the
    * live Redis accessors, and formats the response.
    */
-  router.get("/usage/eligibility", async (_req, res) =>
+  router.get("/usage/eligibility", async (req, res) =>
     // METER-ONLY (2026-07-30). This handler deliberately does NOT call
     // getUsage(): that runs the transcript scan, which grew to ~1.7 GB of
     // in-window JSONL and stopped answering inside the Pace Gate's 10s probe
@@ -208,7 +210,10 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
     // that is exactly how a rate-limited meter gets hammered.
     isolateAggregator(res, "api/usage/eligibility", async () => {
       const meter = await getEligibilityUsage();
-      return getEligibilityView({
+      // #5101: launcher context for the admission verdict; lenient, never 400.
+      const admissionQuery = EligibilityQuerySchema.parse(req.query);
+      const nowMs = Date.now();
+      const view = await getEligibilityView({
         snapshot: meter.input,
         // BLOCK when quota cannot be measured (2026-07-30 operator decision,
         // replacing the #1124 fail-open; hardened by issue #4165). True only
@@ -237,8 +242,19 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
         // never flips `allow`), consumed by pace-gate's exec model choice and
         // the playbook's dispatch pre-resolution.
         readModelExhaustedUntil: () => getModelExhaustedUntil(),
-        now: () => Date.now(),
+        now: () => nowMs,
       });
+      // The verdict decide.py reads is unchanged; `admission` is one extra
+      // top-level key (a read-only fold over it).
+      return {
+        ...view,
+        admission: decideAdmission(view, {
+          nowMs,
+          mode: admissionQuery.mode,
+          serviceActive: admissionQuery.serviceActive,
+          pidAlive: admissionQuery.pidAlive,
+        }),
+      };
     }),
   );
 

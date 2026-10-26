@@ -388,15 +388,15 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1548
+          "line": 1203
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1719
+          "line": 1368
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1746
+          "line": 1395
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
@@ -610,13 +610,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1058
+          "line": 1022
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1058
+        "line": 1022
       }
     },
     {
@@ -666,13 +666,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1122
+          "line": 1086
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1122
+        "line": 1086
       }
     },
     {
@@ -702,7 +702,7 @@
         },
         {
           "path": "src/api/usage.ts",
-          "line": 81
+          "line": 83
         }
       ],
       "inEnvExample": false,
@@ -746,13 +746,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1052
+          "line": 1016
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1052
+        "line": 1016
       }
     },
     {
@@ -854,13 +854,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1051
+          "line": 1015
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1051
+        "line": 1015
       }
     },
     {
@@ -890,7 +890,7 @@
         },
         {
           "path": "src/api/usage.ts",
-          "line": 70
+          "line": 72
         }
       ],
       "inEnvExample": false,
@@ -904,13 +904,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1077
+          "line": 1041
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1077
+        "line": 1041
       }
     },
     {
@@ -918,13 +918,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1078
+          "line": 1042
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1078
+        "line": 1042
       }
     },
     {
@@ -1026,19 +1026,7 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 951
-        },
-        {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 955
-        },
-        {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1254
-        },
-        {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1479
+          "line": 1220
         }
       ],
       "inEnvExample": false,
@@ -1106,13 +1094,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1126
+          "line": 1090
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1126
+        "line": 1090
       }
     },
     {
@@ -1120,13 +1108,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1123
+          "line": 1087
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1123
+        "line": 1087
       }
     },
     {
@@ -1280,13 +1268,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1107
+          "line": 1071
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1107
+        "line": 1071
       }
     },
     {
@@ -1294,13 +1282,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1106
+          "line": 1070
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1106
+        "line": 1070
       }
     },
     {
@@ -1322,13 +1310,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1050
+          "line": 1014
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1050
+        "line": 1014
       }
     },
     {
@@ -1340,7 +1328,7 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1717
+          "line": 1366
         },
         {
           "path": "scripts/claude-hooks/agent-dispatch-prompt-guard.sh",
@@ -1358,21 +1346,21 @@
       "readSites": [
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1140
+          "line": 1104
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1141
+          "line": 1105
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1144
+          "line": 1108
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1140
+        "line": 1104
       }
     },
     {
