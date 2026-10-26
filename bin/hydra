@@ -25,13 +25,11 @@
 #     resumes ADR-0015 depth-gated merge; `status` reads the current state.
 #     This CLI is the ONLY write path — the autopilot can never set/clear it.
 #   hydra cycle status
-#   hydra cycle start
 #   hydra backlog
 #     RETIRED (issue #3745, ADR-0031 / PR #3455): the Redis backlog subsystem
 #     (`/api/backlog`) was replaced by GitHub Issues on gaberoo322/hydra.
 #     Prints a pointer to the replacement commands and exits 2 — it no
 #     longer calls the API (there is nothing left to 404 against).
-#   hydra queue ls | add <reference>
 #   hydra metrics [--count N]
 #   hydra alerts ls [--limit N]
 #   hydra recommendations
@@ -128,7 +126,6 @@ cmd_brake() {
 cmd_cycle() {
   case "${1:-}" in
     status ) _get "/cycle/status" ;;
-    start  ) _post "/cycle/start" ;;
     history)
       shift
       local q=""
@@ -139,7 +136,7 @@ cmd_cycle() {
         esac
       done
       _get "/cycle/history${q}" ;;
-    *      ) echo "hydra cycle: need status|start|history" >&2; exit 2 ;;
+    *      ) echo "hydra cycle: need status|history" >&2; exit 2 ;;
   esac
 }
 
@@ -160,31 +157,6 @@ backlog subsystem was replaced by GitHub Issues on gaberoo322/hydra. Use:
 There is no CLI/API replacement for `hydra backlog ls|counts|move`.
 EOF
   exit 2
-}
-
-cmd_queue() {
-  case "${1:-}" in
-    ls|"") _get "/queue" ;;
-    add )
-      shift
-      # Issue #1140: accept the reason via EITHER a `-d <reason>` flag (curl
-      # muscle-memory, the form every playbook already writes) OR the second
-      # positional argument. The first non-flag arg is the <reference>; a
-      # bare positional after it remains a valid reason (backward-compatible).
-      # Pre-fix, `hydra queue add "<title>" -d "<why>"` put `-d` into the
-      # reason literal and dropped the real reason.
-      local ref="" reason=""
-      while [ "$#" -gt 0 ]; do
-        case "$1" in
-          -d|--reason) reason="$2"; shift 2 ;;
-          *) if [ -z "$ref" ]; then ref="$1"; elif [ -z "$reason" ]; then reason="$1"; fi; shift ;;
-        esac
-      done
-      [ -n "$ref" ] || { echo "hydra queue add: need <reference>" >&2; exit 2; }
-      [ -n "$reason" ] || reason="Added by hydra CLI"
-      _post "/queue" "{\"reference\":$(printf '%s' "$ref" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"reason\":$(printf '%s' "$reason" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"source\":\"hydra-cli\"}" ;;
-    *   ) echo "hydra queue: need ls|add" >&2; exit 2 ;;
-  esac
 }
 
 cmd_metrics() {
@@ -262,7 +234,6 @@ case "$1" in
   brake)           shift; cmd_brake "$@" ;;
   cycle)           shift; cmd_cycle "$@" ;;
   backlog)         shift; cmd_backlog "$@" ;;
-  queue)           shift; cmd_queue "$@" ;;
   metrics)         shift; cmd_metrics "$@" ;;
   alerts)          shift; cmd_alerts "$@" ;;
   recommendations) shift; cmd_recommendations "$@" ;;
