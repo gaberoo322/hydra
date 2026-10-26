@@ -127,6 +127,7 @@ Shell state does not persist across Bash tool calls, so re-run this snippet in
 every Bash call that uses `$REPO` (Step 2.4 and Step 8):
 
 ```bash
+SCOPE="${SCOPE:?unset - set SCOPE to the scope argument (orch|target)}"
 if [ "$SCOPE" = "target" ]; then
   eval "$(cd ~/hydra && npx tsx scripts/target/print-target-facts.ts --sh)" \
     || { echo "hydra-grill: target seam unresolved — aborting" >&2; exit 1; }
@@ -478,7 +479,7 @@ ${GATE_REASONS}
 What was explored: <one-paragraph summary of the Q&A loop's coverage>.
 
 Next step: run \`/grill-with-docs #${ANCHOR_NUM}\` against the draft, or
-re-run \`/hydra-grill ${ANCHOR_NUM} orch\` once the open questions are
+re-run \`/hydra-grill ${ANCHOR_NUM} ${SCOPE}\` once the open questions are
 resolved.
 EOF
 )

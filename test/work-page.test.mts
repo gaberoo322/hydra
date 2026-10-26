@@ -1913,6 +1913,13 @@ describe("structural pins — #4633 design-concept queue + holdback enrol state"
     // #5163 INV-1: server-driven paging — offset state + nextOffset only.
     assert.ok(src.includes("&offset=${offset}"), "offset rides the list path");
     assert.match(src, /nextOffset/);
+    // #5163 INV-1 paging behaviours: Previous, toggle reset, clamp effect, range line.
+    assert.ok(src.includes('data-testid="design-concept-prev-page"'), "prev-page control");
+    assert.ok(src.includes("setOffset(Math.max(0, offset - PAGE_SIZE))"), "Previous steps back one page, clamped at 0");
+    assert.ok(src.includes("setOffset(list.data.nextOffset)"), "Next uses the envelope nextOffset");
+    assert.match(src, /setOffset\(0\);/, "status toggle resets the offset");
+    assert.match(src, /settledTotal <= offset\) setOffset\(0\)/, "out-of-range clamp effect");
+    assert.ok(src.includes("showing {offset + 1}"), "range line");
     // #5163 INV-3: the comment-read time is page-owned data.
     assert.match(src, /commentsReadAt/);
     // The checklist's freshness budget is two 60 s polls, and its as-of shows.
