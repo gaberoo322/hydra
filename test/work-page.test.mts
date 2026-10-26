@@ -1827,6 +1827,44 @@ describe("GET /design-concepts/:anchorRef/approve-preconditions (#4633 INV-3/INV
     assert.equal(bad.calls.length, 2, "a failed read is retried, never pinned");
   });
 
+  test("every line carries its check id in CONTROL_CHECKS order (#5163 INV-5)", async () => {
+    const { handler } = preRouter({
+      dc: concept(),
+      comments: { ok: true, comments: [handoffComment(DC_HASH_A)] },
+    });
+    const res = await call(handler);
+    assert.deepEqual(
+      res._body.preconditions.map((p: any) => p.check),
+      ["dc-artifact-stored", "dc-status-draft", "dc-handoff-hash-matches"],
+    );
+  });
+
+  test("commentsReadAt: memo hit keeps the first read's time; expiry moves it; no read → null (#5163 INV-2)", async () => {
+    const t0 = Date.parse("2026-10-21T00:00:00Z");
+    const clock = { t: t0 };
+    const ok = preRouter({
+      dc: concept(),
+      comments: { ok: true, comments: [handoffComment(DC_HASH_A)] },
+      clock,
+    });
+    const first = await call(ok.handler);
+    assert.equal(first._body.commentsReadAt, new Date(t0).toISOString());
+    clock.t = t0 + 30_000;
+    const hit = await call(ok.handler);
+    assert.equal(hit._body.commentsReadAt, new Date(t0).toISOString(), "memo hit reports the memo entry's time, not now");
+    assert.equal(hit._body.generatedAt, new Date(t0 + 30_000).toISOString());
+    clock.t = t0 + 61_000;
+    const fresh = await call(ok.handler);
+    assert.equal(fresh._body.commentsReadAt, new Date(t0 + 61_000).toISOString());
+
+    const bad = preRouter({ dc: concept(), comments: { ok: false, error: "gh-failed" } });
+    assert.equal((await call(bad.handler))._body.commentsReadAt, null, "gh failure → null");
+    const missing = preRouter({ dc: null });
+    assert.equal((await call(missing.handler))._body.commentsReadAt, null, "no artifact → null");
+    const nonIssue = preRouter({ dc: concept() });
+    assert.equal((await call(nonIssue.handler, "not-an-issue"))._body.commentsReadAt, null, "non-issue anchor → null");
+  });
+
   test("a target-scope artifact reads its comments on the Target repo", async () => {
     const prev = process.env.HYDRA_TARGET_GITHUB_REPO;
     process.env.HYDRA_TARGET_GITHUB_REPO = "fictional-owner/fictional-target";
@@ -1855,24 +1893,32 @@ describe("structural pins — #4633 design-concept queue + holdback enrol state"
     assert.match(src, /<HoldbackEnrolState \/>/);
   });
 
-  test("DesignConceptQueue.jsx homes both reads and gates ActionAffordance on allOk (INV-5/INV-8/INV-11)", async () => {
+  test("DesignConceptQueue.jsx homes both reads and renders the approve through ControlAffordance (INV-5/INV-8/INV-11; #5163 INV-1/3/7/10)", async () => {
     const src = await readSource(
       "../dashboard/src/components/pages/work/DesignConceptQueue.jsx",
     );
-    assert.match(src, /import \{ ActionAffordance \} from "\.\.\/\.\.\/ActionAffordance\.jsx"/);
+    // #5163 INV-7: the queue renders through the registry control, never the
+    // bare ActionAffordance.
+    assert.equal(/import \{ ActionAffordance \}/.test(src), false, "no bare ActionAffordance import");
+    assert.match(src, /ControlAffordance/);
+    assert.match(src, /useOperatorActions/);
+    assert.match(src, /useCheckedRefresh/);
+    assert.ok(src.includes('"control:work/design-concept-approve"'), "registry control key literal");
+    assert.match(src, /import \{[^}]*\bdesignConceptVerdicts\b[^}]*\} from "[./]+lib\/control-verdicts\.ts"/);
     // The two §9.4 /work homes, as path literals.
     assert.ok(src.includes("`/design-concepts?view=summary"), "paginated list literal");
     assert.ok(src.includes("status=draft"), "draft is the default filter");
     assert.ok(src.includes("`/design-concepts/${anchorRef}`"), "flat single-artifact literal");
     assert.ok(src.includes("`/design-concepts/${anchorRef}/approve-preconditions`"));
-    // Approve mounts only on a fresh, all-✓ read; unproven never enables.
+    // #5163 INV-1: server-driven paging — offset state + nextOffset only.
+    assert.ok(src.includes("&offset=${offset}"), "offset rides the list path");
+    assert.match(src, /nextOffset/);
+    // #5163 INV-3: the comment-read time is page-owned data.
+    assert.match(src, /commentsReadAt/);
     // The checklist's freshness budget is two 60 s polls, and its as-of shows.
     assert.match(src, /freshnessMs: 120_000,\s*itemsKey: "preconditions"/);
     assert.match(src, /<LocalTimestamp ts=\{pre\.data\.generatedAt\}/);
     assert.match(src, /pre\.status === "ready"/);
-    assert.match(src, /pre\.data\?\.allOk === true/);
-    assert.match(src, /enabled \? \(\s*<ActionAffordance action=\{action\} onFired=\{onFired\} \/>/);
-    assert.match(src, /onFired=\{list\.refresh\}/);
     assert.match(src, /row\.status === "draft" &&/);
     // Trust seam + no direct fetch.
     assert.match(src, /usePageItems\(/);

@@ -80,3 +80,38 @@ export function healthVerdicts(data: HealthFacts | null | undefined, trusted: bo
     "brake-engaged": brakeVerified && brake!.engaged === true,
   };
 }
+
+/** The CONTROL_CHECKS ids of the /work design-concept approve control, in
+ * registry order (issue #5163; src/schemas/operator-actions.ts). */
+export const DESIGN_CONCEPT_CHECKS: readonly string[] = Object.freeze([
+  "dc-artifact-stored",
+  "dc-status-draft",
+  "dc-handoff-hash-matches",
+]);
+
+/** The approve-preconditions payload subset the verdict table reads. */
+export interface DesignConceptPreFacts {
+  preconditions?: ReadonlyArray<{ check?: string | null; ok?: boolean }> | null;
+}
+
+/**
+ * /work — the design-concept approve control's checks (issue #5163). One
+ * boolean per `preconditions[i].check` the server-evaluated read returned,
+ * set to `ok === true`. FAIL-CLOSED: when `trusted` is false (the read is
+ * loading / unknown / stale) or the payload is absent, every `dc-*` id is
+ * present and false, so the affordance disables exactly like the old
+ * `enabled` guard. A line whose `check` is missing produces no key, which
+ * lib/preconditions.ts renders ✗.
+ */
+export function designConceptVerdicts(
+  pre: DesignConceptPreFacts | null | undefined,
+  trusted: boolean,
+): Verdicts {
+  const out: Verdicts = {};
+  for (const id of DESIGN_CONCEPT_CHECKS) out[id] = false;
+  if (trusted !== true || pre == null || !Array.isArray(pre.preconditions)) return out;
+  for (const line of pre.preconditions) {
+    if (typeof line?.check === "string" && line.check !== "") out[line.check] = line.ok === true;
+  }
+  return out;
+}

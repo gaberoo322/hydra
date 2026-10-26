@@ -53,6 +53,7 @@ import { createOperatorActionsRouter } from "../src/api/operator-actions.ts";
 import { DISPATCH_CLASSES } from "../src/taxonomy/classes.ts";
 import { evaluatePromoteEligibility } from "../src/autopilot/work-projections.ts";
 import {
+  designConceptVerdicts,
   healthVerdicts,
   reopenVerdicts,
   rowVerdicts,
@@ -589,7 +590,9 @@ const SERVICE_STRIP_SRC = "../dashboard/src/components/pages/health/ServiceStrip
 // The /now panel that hosts #5152's recommendation controls beside its read.
 const RECS_PANEL_SRC = "../dashboard/src/pages/now-console/RecommendationsPanel.jsx";
 /** Every dashboard file that renders a control: key. */
-const CONTROL_PAGE_SRCS = [BOARD_STATE_SRC, HEALTH_SRC, ALERTS_PANEL_SRC, SERVICE_STRIP_SRC, RECS_PANEL_SRC];
+// The /work design-concept queue that hosts #5163's approve control.
+const DC_QUEUE_SRC = "../dashboard/src/components/pages/work/DesignConceptQueue.jsx";
+const CONTROL_PAGE_SRCS = [BOARD_STATE_SRC, HEALTH_SRC, ALERTS_PANEL_SRC, SERVICE_STRIP_SRC, RECS_PANEL_SRC, DC_QUEUE_SRC];
 
 async function readPage(rel: string): Promise<string> {
   return readFile(new URL(rel, import.meta.url), "utf8");
@@ -663,7 +666,11 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
         if (stripped !== recommended.route) withPlaceholder.push(key);
       }
     }
-    assert.deepEqual(withPlaceholder, ["control:health/alert-dismiss", "control:now/rec-dismiss"]);
+    assert.deepEqual(withPlaceholder, [
+      "control:health/alert-dismiss",
+      "control:now/rec-dismiss",
+      "control:work/design-concept-approve",
+    ]);
   });
 
   test("the promote checklist is exactly the promote gate's four rules, in order", () => {
@@ -776,6 +783,11 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
         lib: "now-verdicts",
         ids: new Set([...Object.keys(recDismissVerdicts(null)), ...Object.keys(recMuteVerdicts(null, null))]),
       },
+      // #5163: the design-concept approve table lives in control-verdicts.ts.
+      [DC_QUEUE_SRC]: {
+        imports: ["designConceptVerdicts"],
+        ids: new Set(Object.keys(designConceptVerdicts(null, false))),
+      },
     };
     for (const [rel, table] of Object.entries(tables)) {
       const src = await readPage(rel);
@@ -789,6 +801,34 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
         }
       }
     }
+  });
+
+  test("control:work/design-concept-approve is pinned in lockstep to the feed's grill-handoff approve (#5163 INV-5)", () => {
+    const control = controlEntry("control:work/design-concept-approve").recommended;
+    const variant = REGISTRY.find(
+      (e) => e.key === "waiting-on-you:ready-for-human" && e.variant === "grill-handoff",
+    );
+    assert.ok(variant, "grill-handoff variant exists");
+    const feed = variant!.alternatives[1];
+    assert.equal(control.kind, "in-dashboard");
+    assert.equal(feed.kind, "in-dashboard");
+    if (control.kind !== "in-dashboard" || feed.kind !== "in-dashboard") return;
+    assert.equal(control.label, feed.label);
+    assert.equal(control.consequence, feed.consequence);
+    assert.equal(control.method, feed.method);
+    assert.equal(control.confirmTier, feed.confirmTier);
+    assert.equal(control.preconditions.length, feed.preconditions.length);
+    control.preconditions.forEach((p, i) => {
+      assert.equal(typeof p === "string" ? p : p.text, feed.preconditions[i], `precondition ${i} text`);
+    });
+    // The route shape: {id} in the control, the resolved {number} form in the feed.
+    assert.equal(control.route, "/design-concepts/{id}/approve");
+    assert.equal(feed.route, "/design-concepts/issue-{number}/approve");
+    assert.deepEqual(checksOf(controlEntry("control:work/design-concept-approve")), [
+      "dc-artifact-stored",
+      "dc-status-draft",
+      "dc-handoff-hash-matches",
+    ]);
   });
 
   test("neither page carries a hand-written label, precondition or consequence string", async () => {

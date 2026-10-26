@@ -1078,6 +1078,54 @@ const CONTROL_ENTRIES = [
       "a mute hides a whole severity class for the rest of the run and no un-mute route exists, so it confirms first — unlike a single dismiss, there is no window in which the operator sees which recommendations it will hide.",
     doc: DASHBOARD_ADR_DOC,
   },
+  // --- /work design-concept approve (issue #5163) ----------------------------
+  // The DesignConceptQueue approve control, moved off its hand-rolled
+  // checklist. ONE text source, TWO entries: the feed's grill-handoff
+  // alternatives[1] stays prose (the schema admits {text, check} only on
+  // control: entries); test/operator-actions-registry.test.mts pins this
+  // entry's label/preconditions/consequence/route to it in lockstep. The
+  // `{id}` is the anchor ref, resolved per row by DesignConceptQueue.
+  {
+    key: "control:work/design-concept-approve",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/design-concepts/{id}/approve",
+      method: "POST",
+      confirmTier: "confirm-first",
+      label: "Approve draft as-is",
+      preconditions: [
+        { text: "the draft artifact exists in Redis (7-day TTL)", check: "dc-artifact-stored" },
+        {
+          text: "the artifact's status is 'draft' (not already approved, not stale)",
+          check: "dc-status-draft",
+        },
+        {
+          text: "the artifactHash matches the `## hydra-grill handoff` comment on the issue",
+          check: "dc-handoff-hash-matches",
+        },
+      ],
+      consequence: "marks the draft artifact approved despite the unmet gate reasons, unblocking dev_orch dispatch against it",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "bash scripts/autopilot/grill-artifact.sh gate {id}",
+        label: "Re-run the artifact gate first",
+        preconditions: [],
+        consequence: "re-evaluates the stored artifact's gate and prints the reasons without changing anything",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Review attention items instead",
+        preconditions: [],
+        consequence: "walks the operator cockpit while the draft stays unapproved",
+      },
+    ],
+    rationale:
+      "approving a draft artifact is not undoable and unblocks dev_orch dispatch, so it confirms first (ADR-0034 §7); the checklist is a UI gate only — POST /design-concepts/:anchorRef/approve stays unconditional (#4633 INV-7).",
+    doc: HYDRA_GRILL_DOC,
+  },
 ] satisfies readonly OperatorActionEntryInput[];
 
 const RAW_ENTRIES = [
