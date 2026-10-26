@@ -313,4 +313,18 @@ describe("projectPickupSet — differential vs getReviewPickupSet", () => {
     });
     assert.deepEqual(projectPickupSet(read).map((i) => i.number), [500, 502]);
   });
+
+  test("dual-label ready-for-human + blocked: one item, sources [ready-for-human] (deliberate divergence from legacy)", async () => {
+    const dual = row(600, { createdAt: ago(3), body: "no refs", title: "dual" });
+    const l = lister({ "ready-for-human": [dual], blocked: [dual] });
+    const read = await readWaitingIssues({
+      now: NOW,
+      listIssuesByLabel: l.discriminated as never,
+      listIssuesBySearch: search,
+    });
+    const items = projectPickupSet(read);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].number, 600);
+    assert.deepEqual(items[0].sources, ["ready-for-human"]);
+  });
 });

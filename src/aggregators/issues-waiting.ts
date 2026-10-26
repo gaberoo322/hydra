@@ -467,6 +467,13 @@ export interface PickupItem {
  * `stale-blocked`, or `blocked-live` with no open blocker at all (no blocker
  * ref, aged >= blockedDays). A blocked-live row with an open blocker is not
  * stale; a failed blocker lookup counts every ref as open (fewer rows).
+ *
+ * Deliberate divergence from legacy `getReviewPickupSet` (artifact invariant:
+ * stale-blocked is defined only over classified rows): a row labelled BOTH
+ * `ready-for-human` and `blocked` classifies as `ready-for-human` (line
+ * precedence), so it yields ONE item with `sources: ["ready-for-human"]`, where
+ * legacy reported `["ready-for-human", "stale-blocked"]`. The issue-number set
+ * is unchanged; nothing consumes `sources` yet.
  */
 export function projectPickupSet(read: WaitingIssuesRead): PickupItem[] {
   const order: PickupSource[] = ["ready-for-human", "stale-blocked"];
