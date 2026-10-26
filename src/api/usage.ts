@@ -212,6 +212,7 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
       const meter = await getEligibilityUsage();
       // #5101: launcher context for the admission verdict; lenient, never 400.
       const admissionQuery = EligibilityQuerySchema.parse(req.query);
+      const nowMs = Date.now();
       const view = await getEligibilityView({
         snapshot: meter.input,
         // BLOCK when quota cannot be measured (2026-07-30 operator decision,
@@ -241,14 +242,14 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
         // never flips `allow`), consumed by pace-gate's exec model choice and
         // the playbook's dispatch pre-resolution.
         readModelExhaustedUntil: () => getModelExhaustedUntil(),
-        now: () => Date.now(),
+        now: () => nowMs,
       });
       // The verdict decide.py reads is unchanged; `admission` is one extra
       // top-level key (a read-only fold over it).
       return {
         ...view,
         admission: decideAdmission(view, {
-          nowMs: Date.now(),
+          nowMs,
           mode: admissionQuery.mode,
           serviceActive: admissionQuery.serviceActive,
           pidAlive: admissionQuery.pidAlive,

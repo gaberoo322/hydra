@@ -61,7 +61,10 @@ export const UsageByIssueQuerySchema = z.object({
  * param is simply not read on this route.
  */
 export const EligibilityQuerySchema = z.object({
-  mode: z.enum(["timer", "exec"]).catch("timer").default("timer"),
-  serviceActive: booleanFlag(),
-  pidAlive: booleanFlag(),
+  mode: z.enum(["timer", "exec"]).catch("timer"),
+  // `.catch(false)`: a repeated key (?pidAlive=1&pidAlive=1 -> array) fails
+  // booleanFlag's string|boolean union; without the catch parse() throws and
+  // the route 500s, contradicting the never-400 contract.
+  serviceActive: booleanFlag().catch(false),
+  pidAlive: booleanFlag().catch(false),
 });
