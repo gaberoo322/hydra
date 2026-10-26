@@ -123,3 +123,15 @@ describe("isSettled and started-only order (#5089)", () => {
     assert.equal(isRed(f), false);
   });
 });
+
+describe("parseRollupEntries (#5089 QA round 1)", () => {
+  it("non-array -> [], non-object entries dropped, non-string fields become undefined", async () => {
+    const { parseRollupEntries } = await import("../src/github/prs.ts");
+    for (const raw of [undefined, null, {}, "x", 3]) assert.deepEqual(parseRollupEntries(raw), []);
+    const out = parseRollupEntries([null, 4, "s", { name: "a", conclusion: 5, state: "SUCCESS" }]);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].name, "a");
+    assert.equal(out[0].conclusion, undefined);
+    assert.equal(out[0].state, "SUCCESS");
+  });
+});

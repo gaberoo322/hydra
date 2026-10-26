@@ -209,10 +209,6 @@ function orEmpty(v: unknown): unknown {
   return isSet(v) ? v : "";
 }
 
-function upper(v: unknown): string {
-  return isSet(v) ? String(v).toUpperCase() : "";
-}
-
 const ascending = (a: number, b: number) => a - b;
 
 /**
@@ -375,7 +371,9 @@ interface ResumeCandidate {
  * (#5089 INV-2). `settled` = no required context pending (absent counts as
  * pending); `red` is only meaningful when settled (a red+pending PR is not red).
  */
-function checkVerdictFor(rollup: unknown, required: ReadonlySet<string>): { settled: boolean; red: boolean } {
+export function checkVerdictFor(rollup: unknown, required: ReadonlySet<string>): { settled: boolean; red: boolean } {
+  // A missing / non-array rollup is unsettled for EVERY required set, including [] (INV-3 "exactly").
+  if (!Array.isArray(rollup)) return { settled: false, red: false };
   const fold = foldRollup(parseRollupEntries(rollup), { required: [...required], order: "started-only" });
   const settled = isSettled(fold);
   return { settled, red: settled && isRed(fold) };
