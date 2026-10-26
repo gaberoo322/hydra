@@ -669,7 +669,7 @@ describe("class-state drift pins (INV-10)", () => {
   // The whole brain corpus (#4511): the selector bodies that hold the trigger
   // reads live in decide_selectors/*.py, not decide.py.
   const decideSrc = readBrainSource().joined;
-  const reapSrc = readFileSync(new URL("../scripts/autopilot/reap_state.py", import.meta.url), "utf8");
+  const reapSrc = readFileSync(new URL("../scripts/autopilot/run_ledger.py", import.meta.url), "utf8");
 
   test("PRODUCERLESS_SIGNALS is EMPTY — the #4607 regrow guard (moved here from the retired signal-parity legs, #4934)", () => {
     // Every decide.py signal read is a Turn Snapshot schema key (pinned by
@@ -714,11 +714,11 @@ describe("class-state drift pins (INV-10)", () => {
     }
   });
 
-  test("the last-fired key literal matches reap_state.py's writer (INV-4)", () => {
+  test("the last-fired key literal matches the Run Ledger's writer (INV-4)", () => {
     assert.equal(AUTOPILOT_SIGNAL_LAST_FIRED_KEY, "hydra:autopilot:signal-last-fired");
     assert.ok(
       reapSrc.includes('REDIS_SIGNAL_LAST_FIRED_KEY = "hydra:autopilot:signal-last-fired"'),
-      "reap_state.py's REDIS_SIGNAL_LAST_FIRED_KEY literal drifted from src/redis/autopilot-signals.ts — the reader would read a hash nothing writes (issue #4635 INV-4)",
+      "run_ledger.py's REDIS_SIGNAL_LAST_FIRED_KEY literal drifted from src/redis/autopilot-signals.ts — the reader would read a hash nothing writes (issue #4635 INV-4)",
     );
   });
 });
