@@ -413,7 +413,7 @@ function feedDeps(over: Partial<AttentionFeedDeps> = {}): AttentionFeedDeps {
     readHitlGrillIssues: async () => ({ ok: true as const, rows: [] }),
     readPaused: async () => ({ paused: false }),
     readSessionBlockedUntil: async () => null,
-    readSchedulerStopReason: async () => null,
+    readSchedulerStop: async () => ({ stopReason: null, deliberateStoppedAt: null }),
     readShaDrift: async () => ({ deployedSha: "a", originMasterSha: "a", firstSeenMs: null, driftSeconds: null, active: false }),
     ...over,
   };

@@ -334,7 +334,7 @@
   "test/on-subagent-tool-call.test.mts": 1,
   "test/operator-actions-affordance.test.mts": 28,
   "test/operator-actions-parity.test.mts": 4,
-  "test/operator-actions-registry.test.mts": 15,
+  "test/operator-actions-registry.test.mts": 16,
   "test/operator-channel-brief.test.mts": 8,
   "test/operator-channel-route-event.test.mts": 3,
   "test/operator-channel-transport.test.mts": 3,
