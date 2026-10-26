@@ -52,6 +52,13 @@ import { fileURLToPath } from "node:url";
 import { execWithGroupCleanup } from "../exec-with-timeout.ts";
 import { classifyChange } from "../tier-classifier.ts";
 import { matchVerifierCore } from "../untouchable.ts";
+import {
+  ANTHROPIC_SLOT_ALIASES,
+  checkProviderModel,
+  isProvidersFailure,
+  loadCommittedDefaultProviders,
+  type WorkerProvider,
+} from "./providers.ts";
 
 /** Repo root, derived from this module's location (`src/glm/` → `../..`). */
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -89,17 +96,14 @@ export const GLM_API_TIMEOUT_MS = 3_000_000;
 export const GLM_MODEL = "glm-5.2";
 
 /**
- * Anthropic slot aliases. Passing one of these to a base-URL-overridden run is
- * the #3758 defect — it silently routes first-party instead of to z.ai.
- */
-const ANTHROPIC_SLOT_ALIASES: readonly string[] = Object.freeze([
-  "sonnet",
-  "opus",
-  "haiku",
-]);
-
-/**
- * Reject any model name that would route to Anthropic rather than z.ai.
+ * Reject any model name that would route to Anthropic rather than a worker
+ * provider (ADR-0032 invariant 4, generalised by issue #4841).
+ *
+ * With `providers` (production: always) the model must EXACTLY equal a
+ * configured provider's model and must never be a Claude alias / `claude-*`
+ * (`glm-model-would-route-first-party` / `glm-model-not-configured`). Without
+ * `providers` the legacy z.ai rule applies (an explicit `glm-*` name) — the
+ * one-argument form the characterisation suite pins.
  *
  * Returns a result rather than throwing, per the never-throw-from-verification
  * convention. Callers abort the run on `ok: false` — a misrouted run is worse
@@ -107,7 +111,15 @@ const ANTHROPIC_SLOT_ALIASES: readonly string[] = Object.freeze([
  */
 export function assertGlmModel(
   model: string,
-): { ok: true } | { ok: false; code: "glm-model-would-route-first-party"; message: string } {
+  providers?: readonly WorkerProvider[],
+):
+  | { ok: true }
+  | {
+      ok: false;
+      code: "glm-model-would-route-first-party" | "glm-model-not-configured";
+      message: string;
+    } {
+  if (providers !== undefined) return checkProviderModel(model, providers);
   const normalized = model.trim().toLowerCase();
   if (normalized.startsWith("glm-")) return { ok: true };
   const alias = ANTHROPIC_SLOT_ALIASES.includes(normalized)
@@ -155,7 +167,7 @@ export type { SpawnFn };
 
 export type GlmEnvResult =
   | { ok: true; env: NodeJS.ProcessEnv }
-  | { ok: false; code: "glm-auth-token-missing"; message: string };
+  | { ok: false; code: "glm-auth-token-missing" | "glm-provider-config-invalid"; message: string };
 
 /**
  * Build the fenced GLM environment from a base env (in production: the process
@@ -167,16 +179,35 @@ export type GlmEnvResult =
  *
  * The input object is never mutated; a shallow copy is returned.
  */
-export function buildGlmEnv(baseEnv: NodeJS.ProcessEnv = process.env): GlmEnvResult {
-  const rawToken = baseEnv.ANTHROPIC_AUTH_TOKEN;
+export function buildGlmEnv(
+  baseEnv: NodeJS.ProcessEnv = process.env,
+  provider?: WorkerProvider,
+  allProviders?: readonly WorkerProvider[],
+): GlmEnvResult {
+  let selected = provider;
+  let all = allProviders;
+  if (selected === undefined) {
+    // Legacy one-argument form: the committed default list's first entry.
+    const loaded = loadCommittedDefaultProviders();
+    if (isProvidersFailure(loaded)) {
+      return {
+        ok: false,
+        code: "glm-provider-config-invalid",
+        message: `the committed worker-provider list is invalid: ${loaded.issues.join("; ")}`,
+      };
+    }
+    selected = loaded.providers[0];
+    all = all ?? loaded.providers;
+  }
+  const rawToken = baseEnv[selected.tokenEnv];
   const token = typeof rawToken === "string" ? rawToken.trim() : "";
   if (!token) {
     return {
       ok: false,
       code: "glm-auth-token-missing",
       message:
-        "ANTHROPIC_AUTH_TOKEN is unset or blank — refusing to run the GLM drainer " +
-        "(fail-closed: an absent token must abort, never fall back to Anthropic quota). " +
+        `${selected.tokenEnv} is unset or blank — refusing to run the GLM drainer on provider ` +
+        `"${selected.id}" (fail-closed: an absent token must abort, never fall back to Anthropic quota). ` +
         "Supply it via the systemd EnvironmentFile, never .env.local.",
     };
   }
@@ -185,7 +216,11 @@ export function buildGlmEnv(baseEnv: NodeJS.ProcessEnv = process.env): GlmEnvRes
   for (const key of STRIPPED_ENV_KEYS) {
     delete env[key];
   }
-  env.ANTHROPIC_BASE_URL = GLM_ANTHROPIC_BASE_URL;
+  // One token per child (issue #4841 INV-9): every OTHER provider's credential
+  // variable is stripped so a launched session never holds a sibling's token.
+  for (const other of all ?? []) delete env[other.tokenEnv];
+  delete env[selected.tokenEnv]; // folded into ANTHROPIC_AUTH_TOKEN below
+  env.ANTHROPIC_BASE_URL = selected.baseUrl;
   env.ANTHROPIC_AUTH_TOKEN = token;
   env.API_TIMEOUT_MS = String(GLM_API_TIMEOUT_MS);
   return { ok: true, env };
@@ -201,13 +236,22 @@ export interface DrainerArgsSpec {
    * name — an Anthropic slot alias routes first-party and is rejected (#3758).
    */
   model?: string;
+  /**
+   * The configured provider list (issue #4841). When given, `model` must
+   * exactly match one of its entries (the generalised routing fence).
+   */
+  providers?: readonly WorkerProvider[];
   /** Extra argv appended verbatim (the drainer loop's own flags). */
   extraArgs?: readonly string[];
 }
 
 export type DrainerArgsResult =
   | { ok: true; args: string[] }
-  | { ok: false; code: "glm-model-would-route-first-party"; message: string };
+  | {
+      ok: false;
+      code: "glm-model-would-route-first-party" | "glm-model-not-configured";
+      message: string;
+    };
 
 /**
  * Build the `claude` argv for a drainer run.
@@ -224,7 +268,7 @@ export type DrainerArgsResult =
  */
 export function buildDrainerArgs(spec: DrainerArgsSpec): DrainerArgsResult {
   const model = spec.model ?? GLM_MODEL;
-  const modelCheck = assertGlmModel(model);
+  const modelCheck = assertGlmModel(model, spec.providers);
   if (modelCheck.ok !== true) {
     return { ok: false, code: modelCheck.code, message: modelCheck.message };
   }

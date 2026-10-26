@@ -12,7 +12,7 @@ needs-triage  →  needs-info       (asked for more detail; back to operator)
               →  blocked          (depends on another open issue)
               →  ready-for-human  (subagent gave up; operator decision)
               →  wontfix          (closed without implementation)
-              →  target-backlog   (about ~/hydra-betting, queued to target board)
+              →  target-backlog   (routing/exclusion marker for Target work; no sweep consumer)
 ```
 
 See `docs/agents/triage-labels.md` for the canonical label semantics.

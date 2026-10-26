@@ -20,10 +20,10 @@
  *
  * # Single classifier definition
  *
- * The failing / green conclusion sets and the per-context latest-wins collapse
- * live HERE as pure helpers (the sets stay module-private; the collapse /
- * classify entrypoints stay exported for delegation); stuck-items'
- * `selectPrsWithFailedCi` delegates to them rather than keeping a second copy.
+ * The per-context latest-wins collapse and the green / pending / red /
+ * cancelled classification live in `src/github/check-rollup.ts` (epic #5086).
+ * This module owns only the feed-lane policy {@link isFailedRequiredStatus};
+ * stuck-items' `selectPrsWithFailedCi` imports it rather than keeping a copy.
  *
  * # Design contract
  *
@@ -42,6 +42,7 @@ import {
   type PrRow,
 } from "../github/prs.ts";
 import { isIssueReadFailure } from "../github/issues.ts";
+import { foldRollup, type RollupStatus } from "../github/check-rollup.ts";
 import { settledOr } from "../settled-fold.ts";
 
 // ---------------------------------------------------------------------------
@@ -90,90 +91,18 @@ export interface StalledPrsDeps {
 export const STALLED_PR_FIELDS = `${PR_LIST_JSON_FIELDS},isDraft,mergeable,autoMergeRequest`;
 
 // ---------------------------------------------------------------------------
-// Pure classifier helpers — the single definition (stuck-items delegates)
+// Pure classifier helpers — feed-lane policy over the shared rollup fold
 // ---------------------------------------------------------------------------
 
-/** CheckRun conclusions that count as a failed check. */
-const FAILING_CHECK_CONCLUSIONS: ReadonlySet<string> = new Set([
-  "FAILURE",
-  "TIMED_OUT",
-  "CANCELLED",
-  "STARTUP_FAILURE",
-  "ACTION_REQUIRED",
-]);
-
-/** StatusContext states that count as a failed check. */
-const FAILING_STATUS_STATES: ReadonlySet<string> = new Set(["FAILURE", "ERROR"]);
-
-/** Conclusions / states that count as green. */
-const GREEN_CHECK_CONCLUSIONS: ReadonlySet<string> = new Set([
-  "SUCCESS",
-  "NEUTRAL",
-  "SKIPPED",
-]);
-
-export type RollupEntry = PrRow["statusCheckRollup"][number];
-export type CheckVerdict = "failing" | "green" | "pending";
-
-/** The context name a rollup entry reports under (CheckRun name, else StatusContext context). */
-function rollupEntryName(entry: RollupEntry): string {
-  if (typeof entry.name === "string" && entry.name.length > 0) return entry.name;
-  if (typeof entry.context === "string" && entry.context.length > 0) return entry.context;
-  return "check";
-}
-
-/** gh emits 0001-01-01T00:00:00Z for a not-yet-completed CheckRun; any pre-2000 stamp is "absent". */
-const MIN_PLAUSIBLE_TS = Date.parse("2000-01-01T00:00:00Z");
-
-function plausibleTs(raw: string | null | undefined): number {
-  const t = raw ? Date.parse(raw) : NaN;
-  return Number.isFinite(t) && t >= MIN_PLAUSIBLE_TS ? t : NaN;
-}
-
-function entryTimestamp(entry: RollupEntry): number {
-  const completed = plausibleTs(entry.completedAt);
-  if (Number.isFinite(completed)) return completed;
-  const started = plausibleTs(entry.startedAt);
-  if (Number.isFinite(started)) return started;
-  return Number.NEGATIVE_INFINITY;
-}
-
 /**
- * Collapse rollup entries by context name — across CheckRun and StatusContext
- * shapes — keeping the latest entry by `completedAt` (falling back to
- * `startedAt`). On a timestamp tie (or two untimestamped entries) the later
- * entry in rollup order wins. A superseded CANCELLED/FAILURE run followed by a
- * SUCCESS rerun therefore collapses to green.
+ * The feed lane's "failed" posture over the shared fold's four-way status:
+ * red OR cancelled. A cancelled required check still blocks the PR (and has
+ * always produced a `failed-required` row), so it admits here. `pending` —
+ * including a required context absent from the rollup — never admits.
+ * stuck-items imports this so the posture has exactly one definition.
  */
-export function collapseRollupByContext(
-  rollup: readonly RollupEntry[],
-): Map<string, RollupEntry> {
-  const out = new Map<string, RollupEntry>();
-  for (const entry of rollup) {
-    const name = rollupEntryName(entry);
-    const prev = out.get(name);
-    if (!prev || entryTimestamp(entry) >= entryTimestamp(prev)) out.set(name, entry);
-  }
-  return out;
-}
-
-/**
- * Classify one (winning) rollup entry. A CheckRun is judged by `conclusion`
- * (empty while QUEUED / IN_PROGRESS → pending); a StatusContext by `state`
- * (FAILURE / ERROR failing, SUCCESS green, PENDING / EXPECTED pending).
- */
-export function classifyRollupEntry(entry: RollupEntry | undefined): CheckVerdict {
-  if (!entry) return "pending";
-  const conclusion = typeof entry.conclusion === "string" ? entry.conclusion.toUpperCase() : "";
-  if (conclusion) {
-    if (FAILING_CHECK_CONCLUSIONS.has(conclusion)) return "failing";
-    if (GREEN_CHECK_CONCLUSIONS.has(conclusion)) return "green";
-    return "pending";
-  }
-  const state = typeof entry.state === "string" ? entry.state.toUpperCase() : "";
-  if (FAILING_STATUS_STATES.has(state)) return "failing";
-  if (GREEN_CHECK_CONCLUSIONS.has(state)) return "green";
-  return "pending";
+export function isFailedRequiredStatus(status: RollupStatus): boolean {
+  return status === "red" || status === "cancelled";
 }
 
 /**
@@ -210,13 +139,12 @@ export function classifyStalledPrs(
     }
     if (required === null || required.size === 0) continue;
 
-    const collapsed = collapseRollupByContext(pr.statusCheckRollup);
+    const fold = foldRollup(pr.statusCheckRollup, { required: [...required] });
     const failed: string[] = [];
     let green = 0;
-    for (const ctx of required) {
-      const verdict = classifyRollupEntry(collapsed.get(ctx));
-      if (verdict === "failing") failed.push(ctx);
-      else if (verdict === "green") green++;
+    for (const [ctx, { status }] of fold.contexts) {
+      if (isFailedRequiredStatus(status)) failed.push(ctx);
+      else if (status === "green") green++;
     }
 
     if (failed.length > 0) {

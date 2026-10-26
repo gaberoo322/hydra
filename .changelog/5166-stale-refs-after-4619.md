@@ -1,0 +1,1 @@
+- chore: remove dead hydra CLI subcommands, legacy openclaw-skill, and stale doc/comment references (#5166)

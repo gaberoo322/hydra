@@ -42,7 +42,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 395
+        "line": 402
       }
     },
     {
@@ -216,7 +216,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 218
+        "line": 222
       }
     },
     {
@@ -334,7 +334,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 289
+        "line": 293
       }
     },
     {
@@ -368,7 +368,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 319
+        "line": 326
       }
     },
     {
@@ -476,7 +476,7 @@
       ],
       "source": {
         "path": "src/schemas/usage.ts",
-        "line": 33
+        "line": 34
       }
     },
     {
@@ -505,6 +505,20 @@
       "source": {
         "path": "src/schemas/design-concept.ts",
         "line": 214
+      }
+    },
+    {
+      "name": "EligibilityQuerySchema",
+      "file": "src/schemas/usage.ts",
+      "importedBy": [
+        "src/api/usage.ts"
+      ],
+      "routes": [
+        "GET /api/usage/eligibility"
+      ],
+      "source": {
+        "path": "src/schemas/usage.ts",
+        "line": 63
       }
     },
     {
@@ -684,7 +698,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 409
+        "line": 416
       }
     },
     {
@@ -696,7 +710,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 430
+        "line": 437
       }
     },
     {
@@ -706,7 +720,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 448
+        "line": 455
       }
     },
     {
@@ -762,6 +776,26 @@
       }
     },
     {
+      "name": "QA_VERDICT_PHASES",
+      "file": "src/schemas/qa-verdict-cli.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/qa-verdict-cli.ts",
+        "line": 32
+      }
+    },
+    {
+      "name": "QaVerdictCliSchemas",
+      "file": "src/schemas/qa-verdict-cli.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/qa-verdict-cli.ts",
+        "line": 43
+      }
+    },
+    {
       "name": "RELABEL_TARGETS",
       "file": "src/schemas/autopilot-board.ts",
       "importedBy": [
@@ -780,7 +814,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/operator-actions.ts",
-        "line": 260
+        "line": 264
       }
     },
     {
@@ -1108,7 +1142,7 @@
       ],
       "source": {
         "path": "src/schemas/usage.ts",
-        "line": 50
+        "line": 51
       }
     },
     {

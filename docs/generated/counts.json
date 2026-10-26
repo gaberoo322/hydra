@@ -23,7 +23,7 @@
     {
       "family": "adrs",
       "metric": "rows",
-      "value": 45
+      "value": 46
     },
     {
       "family": "areas",
@@ -68,7 +68,7 @@
     {
       "family": "config",
       "metric": "rows",
-      "value": 32
+      "value": 33
     },
     {
       "family": "config",
@@ -78,7 +78,7 @@
     {
       "family": "corpus",
       "metric": "adr",
-      "value": 45
+      "value": 46
     },
     {
       "family": "corpus",
@@ -103,7 +103,7 @@
     {
       "family": "corpus",
       "metric": "rows",
-      "value": 122
+      "value": 123
     },
     {
       "family": "env-vars",
@@ -148,7 +148,7 @@
     {
       "family": "schemas",
       "metric": "rows",
-      "value": 89
+      "value": 92
     },
     {
       "family": "skills",

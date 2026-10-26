@@ -427,6 +427,7 @@
           "DispatchCostJoinBodySchema",
           "DispatchPrBodySchema",
           "EXEMPT_LOG_DEFAULT_LIMIT",
+          "EligibilityQuerySchema",
           "ExemptLogEntryInputSchema",
           "ExemptLogQuerySchema",
           "HITL_GRILL_CAP",
@@ -446,6 +447,8 @@
           "OvernightSummaryResponseSchema",
           "PatternBodySchema",
           "PublishEventBodySchema",
+          "QA_VERDICT_PHASES",
+          "QaVerdictCliSchemas",
           "RELABEL_TARGETS",
           "REVIEW_BUCKETS",
           "RecentMergesQuerySchema",
@@ -764,7 +767,9 @@
         "0032",
         "0040"
       ],
-      "adrsCited": [],
+      "adrsCited": [
+        "0005"
+      ],
       "referenceDocs": [
         {
           "path": "docs/operations/glm-lane.md",
@@ -2082,7 +2087,8 @@
           "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md [adr]",
           "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md [adr]",
           "docs/adr/0044-operator-attended-epic-sprint-lane.md [adr]",
-          "docs/adr/0045-operator-channel.md [adr]"
+          "docs/adr/0045-operator-channel.md [adr]",
+          "docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md [adr]"
         ],
         "adrs": [
           "ADR-0001 [superseded-in-part]",
@@ -2129,7 +2135,8 @@
           "ADR-0042 [accepted]",
           "ADR-0043 [accepted]",
           "ADR-0044 [accepted]",
-          "ADR-0045 [accepted]"
+          "ADR-0045 [accepted]",
+          "ADR-0046 [accepted]"
         ]
       },
       "homes": [],
@@ -2182,7 +2189,8 @@
         "0002",
         "0013",
         "0014",
-        "0024"
+        "0024",
+        "0046"
       ],
       "adrsCited": [
         "0009",

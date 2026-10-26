@@ -102,6 +102,13 @@ export interface FileParseMemoEntry {
    * age out. An entry persisted before the stamp existed loads as 0.
    */
   parseVersion: number;
+  /**
+   * The foreign-provider model-prefix set (sorted, joined) the entry was parsed
+   * under (issue #4841). Replayed only when it equals the current set, so
+   * adding a provider re-parses files whose `foreign` flags would be stale.
+   * Absent on entries persisted before the stamp existed (treated as mismatch).
+   */
+  foreignKey?: string;
   entries: MemoLineEntry[];
   skill: string | null;
   dispatchKind: string | null;
@@ -152,6 +159,7 @@ function parseMemoEntry(raw: string): FileParseMemoEntry | null {
   if (typeof v.size !== "number" || typeof v.mtimeMs !== "number") return null;
   if (v.parseVersion === undefined) v.parseVersion = 0;
   else if (typeof v.parseVersion !== "number") return null;
+  if (v.foreignKey !== undefined && typeof v.foreignKey !== "string") return null;
   if (!Array.isArray(v.entries) || !v.entries.every(isValidMemoLineEntry)) return null;
   if (v.skill !== null && typeof v.skill !== "string") return null;
   if (v.dispatchKind !== null && typeof v.dispatchKind !== "string") return null;

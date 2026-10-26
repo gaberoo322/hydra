@@ -45,7 +45,8 @@
 # requeue (run by the pick phase) covers it.
 #
 # The z.ai credential (`ANTHROPIC_AUTH_TOKEN`) arrives via a systemd
-# `EnvironmentFile` this script never reads — `buildGlmEnv` in
+# `EnvironmentFile` this script never reads (the variable NAME is per provider
+# in `config/glm/providers.json`, issue #4841) — `buildGlmEnv` in
 # `src/glm/drainer-runner.ts` is the ONE place that resolves it, fail-closed
 # (issue #3688 invariant 7): an absent/blank token aborts THAT authoring
 # attempt (`glm-auth-token-missing`) rather than falling back to Anthropic

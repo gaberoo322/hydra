@@ -1,0 +1,12 @@
+{
+  "_comment": "GLM dev-drainer worker providers (issue #4841, ADR-0032 as amended): an ORDERED list of Anthropic-compatible backends. The gate hands the drainer the FIRST provider that is neither quota-blocked nor at its own optional dailyCap. Each `model` is an explicit non-Claude name (the routing fence, issue #3758) and `tokenEnv` NAMES the variable holding the credential in the off-git EnvironmentFile (~/.config/hydra-glm/env) - never a token value. Adding a provider's account/credential is an operator action (ADR-0005); adding it to this list is a config-only change. Override the path with HYDRA_GLM_DRAINER_PROVIDERS_FILE.",
+  "providers": [
+    {
+      "id": "zai",
+      "baseUrl": "https://api.z.ai/api/anthropic",
+      "model": "glm-5.2",
+      "tokenEnv": "ANTHROPIC_AUTH_TOKEN",
+      "quotaReset": { "format": "zai-wallclock", "tzOffset": "+0800" }
+    }
+  ]
+}

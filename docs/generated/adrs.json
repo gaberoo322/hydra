@@ -206,6 +206,7 @@
         "docs/agents/triage-labels.md",
         "docs/evals.md",
         "docs/historical/hydra-betting/direction/roadmap.md",
+        "docs/operations/glm-lane.md",
         "docs/operator-playbooks/hydra-branch-prune.md",
         "docs/operator-playbooks/hydra-cleanup.md",
         "docs/operator-playbooks/hydra-qa.md",
@@ -551,6 +552,7 @@
         "docs/adr/0031-target-tracking-migrates-to-github-issues.md",
         "docs/adr/0032-glm-dev-drainer-worker-lane.md",
         "docs/adr/0044-operator-attended-epic-sprint-lane.md",
+        "docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md",
         "docs/evals.md",
         "docs/operator-playbooks/hydra-epic-sprint.md",
         "docs/operator-playbooks/hydra-qa.md",
@@ -1309,6 +1311,27 @@
       ],
       "source": {
         "path": "docs/adr/0045-operator-channel.md",
+        "line": 5
+      }
+    },
+    {
+      "number": "0046",
+      "file": "docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md",
+      "route": "/docs/adr/0046",
+      "title": "Two-pass code factory: implement makes it work, the reviewer makes it good",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Two-pass code factory: the implementer makes it work; the reviewer makes it good and commits only class A (docs/PR-body/baselines) and B (tests) fixes, verified by `qa-fix-proof`; standards live reviewer-only in `CODING_STANDARDS.md`; review depth is set by reversibility behind shadowed `off\\|shadow\\|on` switches; a review-findings retro feeds the standards ladder (check > standard > fence).",
+      "readWhen": "Touching hydra-qa depth/fan-out, reviewer commits, `CODING_STANDARDS.md`, the one-way-door detector, or the review-findings retro.",
+      "citedBy": [
+        "CONTEXT-MAP.md"
+      ],
+      "source": {
+        "path": "docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md",
         "line": 5
       }
     }

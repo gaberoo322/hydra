@@ -8,6 +8,7 @@
  */
 
 import { z } from "zod";
+import { booleanFlag } from "./common.ts";
 
 /**
  * Body schema for `POST /api/usage/dispatch-cost` — the reap-time writer.
@@ -49,4 +50,21 @@ export const DispatchCostJoinBodySchema = z.object({
  */
 export const UsageByIssueQuerySchema = z.object({
   issue: z.coerce.number().int().positive().optional(),
+});
+
+/**
+ * Query schema for `GET /api/usage/eligibility` (issue #5101, INV-9): the
+ * launcher context `decideAdmission` needs and only the bash gate knows.
+ * Lenient by ADR-0022 GET-read convention — absent or garbled values coerce
+ * to `{mode:"timer", serviceActive:false, pidAlive:false}` and NEVER 400 (a
+ * 400 here would fail-safe the Gate on a typo). The pre-existing `force`
+ * param is simply not read on this route.
+ */
+export const EligibilityQuerySchema = z.object({
+  mode: z.enum(["timer", "exec"]).catch("timer"),
+  // `.catch(false)`: a repeated key (?pidAlive=1&pidAlive=1 -> array) fails
+  // booleanFlag's string|boolean union; without the catch parse() throws and
+  // the route 500s, contradicting the never-400 contract.
+  serviceActive: booleanFlag().catch(false),
+  pidAlive: booleanFlag().catch(false),
 });

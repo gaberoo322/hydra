@@ -752,7 +752,24 @@ describe("POST /operator-channel/brief/send", () => {
     const res = mockRes();
     await handler!({ method: "POST", url: "/operator-channel/brief/send", headers: {}, query: {}, params: {}, body: {} }, res);
     assert.equal(res._status, 200);
-    assert.deepEqual(res._body, { sent: true, outcome: "sent-html", at: 123 });
+    assert.deepEqual(res._body, { ok: true, sent: true, outcome: "sent-html", at: 123 });
+  });
+
+  test("a 200 with sent:false carries ok:false + reason send-failed so the dashboard renders a refusal (issue #5164 INV-8)", async () => {
+    const router = createOperatorChannelRouter({
+      sendBriefNow: async () => ({ sent: false, outcome: "failed", at: 456 }),
+    });
+    const res = mockRes();
+    await findHandler(router, "POST", "/operator-channel/brief/send")!({ headers: {}, query: {}, params: {}, body: {} }, res);
+    assert.equal(res._status, 200);
+    assert.deepEqual(res._body, {
+      ok: false,
+      reason: "send-failed",
+      detail: "failed",
+      sent: false,
+      outcome: "failed",
+      at: 456,
+    });
   });
 
   test("a throwing send-now is isolated to a logged 500 (never-throw route contract)", async () => {

@@ -353,29 +353,8 @@ describe("autopilot qa-verdict events carry the guard's SHAs + required-check st
 
   test("the section builds events from the guard CLI and the shared required-check helpers", () => {
     assert.ok(build.includes(GUARD), "qa-verdict events must be built from the guard CLI");
-    assert.match(build, /redRequiredChecks\(checks\)/, "red required checks come from the shared helper");
-    assert.match(build, /classifyVerdict\('PASS', checks\)\.summary\.requiredPending/, "pending required count from classifyVerdict");
+    assert.match(build, /scripts\/ci\/qa-verdict\.ts checks/, "required-check state comes from the qa-verdict CLI's checks phase");
     assert.match(build, /stale-verdict/, "the section names the decide.py hold it feeds");
-  });
-
-  test("the ci-state snippet derives {red, requiredPending} from the shared helpers, and fails closed", () => {
-    const run = (checks: string) =>
-      spawnSync("bash", ["-c", `${markerBlock(build, "ci-state")}\nprintf '%s' "$CI_JSON"`], {
-        cwd: ROOT,
-        env: { ...process.env, CHECKS_JSON: checks },
-        encoding: "utf8",
-      });
-    const checks = JSON.stringify([
-      { name: "test", status: "completed", conclusion: "success", required: true },
-      { name: "scope-check", status: "in_progress", conclusion: null, required: true },
-      { name: "tier-gate", status: "completed", conclusion: "failure", required: true },
-      { name: "advisory-checks", status: "completed", conclusion: "failure", required: false },
-    ]);
-    const ok = run(checks);
-    assert.equal(ok.status, 0, ok.stderr);
-    assert.deepEqual(JSON.parse(ok.stdout), { red: ["tier-gate"], requiredPending: 1 });
-    const broken = run("");
-    assert.equal(broken.stdout, "null", "an unreadable check list yields CI_JSON=null (→ PENDING)");
   });
 
   test("PASS-pending-CI at head + every required check green → PASS (the stranded-PR fix)", () => {
@@ -574,36 +553,46 @@ describe("required-ness is joined from branch protection, not the rollup (issue 
     assert.match(stderr, /falling back to the legacy rollup-only mapping/, "the fallback must be loud");
   });
 
-  test("the autopilot builder includes the fragment; its failed read fails closed to CI_JSON=null", () => {
-    assert.match(apBuild(), /@include _fragments\/checks-fetch\.md/, "the builder must reach the shared fragment");
-    const { checks } = runFetch(fetchBlock, { GH_FAIL_CONTEXTS: "1" });
-    assert.equal(checks, "");
-    const r = spawnSync("bash", ["-c", `${markerBlock(apBuild(), "ci-state")}\nprintf '%s' "$CI_JSON"`], {
-      cwd: ROOT,
-      env: { ...process.env, CHECKS_JSON: checks },
-      encoding: "utf8",
-    });
-    assert.equal(r.status, 0, r.stderr);
-    assert.equal(r.stdout, "null", "an empty CHECKS_JSON must fail closed to CI_JSON=null (→ verdict PENDING)");
+  /** Run the autopilot builder's ci-state block under the fake gh (the CLI's production adapter). */
+  function runCiState(extra: Record<string, string> = {}): string {
+    const dir = mkdtempSync(join(tmpdir(), "ci-state-"));
+    try {
+      writeFakeGh(dir);
+      const r = spawnSync("bash", ["-c", `${markerBlock(apBuild(), "ci-state")}\nprintf '%s' "$CI_JSON"`], {
+        cwd: ROOT,
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, GH_FIXTURE: FIXTURE, PR: "4754", ...extra },
+        encoding: "utf8",
+      });
+      assert.equal(r.status, 0, r.stderr);
+      return r.stdout;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("the autopilot builder calls the checks CLI; an unreadable contexts or rollup read fails closed to CI_JSON=null", () => {
+    assert.match(apBuild(), /scripts\/ci\/qa-verdict\.ts checks/, "the builder must reach the CLI's checks phase");
+    assert.equal(runCiState({ GH_FAIL_CONTEXTS: "1" }), "null", "unreadable contexts → PENDING (not the all-optional mapping)");
+    assert.equal(runCiState({ GH_FAIL_ROLLUP: "1" }), "null", "unreadable rollup → PENDING");
   });
 
-  test("chained into the shared helpers: redRequiredChecks and classifyVerdict see the required checks", () => {
-    const { checks } = runFetch(fetchBlock);
-    const r = spawnSync("bash", ["-c", `${markerBlock(apBuild(), "ci-state")}\nprintf '%s' "$CI_JSON"`], {
-      cwd: ROOT,
-      env: { ...process.env, CHECKS_JSON: checks },
-      encoding: "utf8",
-    });
-    assert.equal(r.status, 0, r.stderr);
+  test("chained through the CLI: redRequiredChecks and classifyVerdict see the required checks", () => {
     // tier-gate folded red; mutation-test in-progress + dashboard-build
     // synthesized are pending required. Under the pre-#4757 fetch this was
     // {red: [], requiredPending: 0} — the exact production bug.
-    assert.deepEqual(JSON.parse(r.stdout), { red: ["tier-gate"], requiredPending: 2 });
+    assert.deepEqual(JSON.parse(runCiState()), { red: ["tier-gate"], requiredPending: 2 });
   });
 
-  test("one join, one place: both playbooks include the fragment and no fetch reads the rollup's absent required-ness flag", () => {
+  test("the fragment is one CLI call plus a jq projection and keeps its include contract (#5080 INV-9)", () => {
+    assert.match(fetchBlock, /scripts\/ci\/qa-verdict\.ts checks/, "the fragment must reach the CLI's checks phase");
+    assert.ok(!fetchBlock.includes("buildCheckStates"), "no inline fold left in the fragment");
+    assert.ok(!fetchBlock.includes(" -e "), "no inline node -e import left in the fragment");
+    assert.match(fetchBlock, /\[ -n "\$CHECKS_JSON" \]\s*$/, "the block returns non-zero when the fetch failed");
+    assert.ok(!/^\s*@include/m.test(read(FRAGMENT)), "the fragment pulls in no other fragment");
+  });
+
+  test("one join, one place: hydra-qa includes the fragment and no fetch reads the rollup's absent required-ness flag", () => {
     assert.match(read("hydra-qa.md"), /@include _fragments\/checks-fetch\.md/);
-    assert.match(read("hydra-autopilot.md"), /@include _fragments\/checks-fetch\.md/);
     for (const [name, text] of [
       ["fragment", read(FRAGMENT)],
       ["hydra-qa.md", read("hydra-qa.md")],
@@ -611,8 +600,6 @@ describe("required-ness is joined from branch protection, not the rollup (issue 
     ] as const) {
       assert.ok(!text.includes("isRequired"), `${name}: the rollup has no required-ness field — no token may remain`);
     }
-    assert.ok(fetchBlock.includes("required_status_checks"), "the fragment must read branch protection");
-    assert.ok(fetchBlock.includes("buildCheckStates"), "the fragment must fold through the ONE pure helper");
   });
 });
 

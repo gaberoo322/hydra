@@ -156,6 +156,27 @@ export interface PrRow {
 // ---------------------------------------------------------------------------
 
 /**
+ * Normalise a raw `statusCheckRollup` value into typed rollup entries:
+ * non-array -> `[]`, non-object entries dropped, every field string-or-undefined.
+ * The ONE rollup-entry normaliser (parsePrRows and the Turn Snapshot pr-gate
+ * both call it). Never throws.
+ */
+export function parseRollupEntries(raw: unknown): PrRow["statusCheckRollup"] {
+  const rollupRaw = Array.isArray(raw) ? raw : [];
+  return rollupRaw
+    .filter((r): r is Record<string, unknown> => !!r && typeof r === "object")
+    .map((r) => ({
+      conclusion: typeof r.conclusion === "string" ? r.conclusion : undefined,
+      name: typeof r.name === "string" ? r.name : undefined,
+      context: typeof r.context === "string" ? r.context : undefined,
+      state: typeof r.state === "string" ? r.state : undefined,
+      status: typeof r.status === "string" ? r.status : undefined,
+      completedAt: typeof r.completedAt === "string" ? r.completedAt : undefined,
+      startedAt: typeof r.startedAt === "string" ? r.startedAt : undefined,
+    }));
+}
+
+/**
  * Parse a `gh pr list --json` payload into {@link PrRow}s. Rows without a
  * positive integer `number` are dropped; `statusCheckRollup` is normalized to
  * an array of `{conclusion,name,context,state,status,completedAt,startedAt}`.
@@ -184,18 +205,7 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
     };
     const number = typeof c.number === "number" ? c.number : NaN;
     if (!Number.isFinite(number) || number <= 0) continue;
-    const rollupRaw = Array.isArray(c.statusCheckRollup) ? c.statusCheckRollup : [];
-    const statusCheckRollup = rollupRaw
-      .filter((r): r is Record<string, unknown> => !!r && typeof r === "object")
-      .map((r) => ({
-        conclusion: typeof r.conclusion === "string" ? r.conclusion : undefined,
-        name: typeof r.name === "string" ? r.name : undefined,
-        context: typeof r.context === "string" ? r.context : undefined,
-        state: typeof r.state === "string" ? r.state : undefined,
-        status: typeof r.status === "string" ? r.status : undefined,
-        completedAt: typeof r.completedAt === "string" ? r.completedAt : undefined,
-        startedAt: typeof r.startedAt === "string" ? r.startedAt : undefined,
-      }));
+    const statusCheckRollup = parseRollupEntries(c.statusCheckRollup);
     out.push({
       number,
       // State requested → upper-cased; absent → "" (the lifecycle bridge maps
