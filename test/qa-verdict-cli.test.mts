@@ -177,6 +177,29 @@ describe("qa-verdict phases over the fixture fetcher", () => {
     assert.deepEqual(unk.degraded, ["head-sha"]);
   });
 
+  test("trailer + round-action: unreadable prior bodies throw (no round-1 reset of the cap)", async () => {
+    const unreadable = { priorBodies: async () => null };
+    await assert.rejects(
+      runQaVerdictPhase("trailer", { pr: 7, verdict: "FAIL", blockers: 1, maxSeverity: "medium" }, fixtureFetchers(unreadable)),
+      (err: any) => err.code === "not-found" && /prior-bodies unreadable/.test(err.message),
+    );
+    await assert.rejects(
+      runQaVerdictPhase(
+        "round-action",
+        { pr: 7, tier: 3, verdict: "FAIL", reviewVerdict: "FAIL", headSha: HEAD },
+        fixtureFetchers(unreadable),
+      ),
+      (err: any) => err.code === "not-found" && /prior-bodies unreadable/.test(err.message),
+    );
+  });
+
+  test("sibling shape: prior-context keeps the degraded [] fallback (it counts nothing)", async () => {
+    const out = (await runQaVerdictPhase(
+      "prior-context", { pr: 7, tier: 3 }, fixtureFetchers({ priorBodies: async () => null }),
+    )) as any;
+    assert.deepEqual(out.degraded, ["prior-bodies"]);
+  });
+
   test("round-action: a T3 PASS proceeds; supplied priorBodies win", async () => {
     const f = fixtureFetchers();
     const out = (await runQaVerdictPhase(

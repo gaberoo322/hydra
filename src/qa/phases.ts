@@ -11,7 +11,10 @@
  *   - supplied facts win, absent facts are fetched through the
  *     {@link QaVerdictFetchers} port (INV-6);
  *   - a fetch failure never aborts a phase — it is named in `degraded` and
- *     the phase falls to its conservative value (INV-5).
+ *     the phase falls to its conservative value (INV-5) — EXCEPT the prior
+ *     bodies in `trailer` and `round-action`: they ARE the round count, and
+ *     an empty fallback would read as round 1 and reset the round cap, so
+ *     there an unreadable history throws (CLI exit 1, no result).
  *
  * This module performs no I/O itself: only the port touches gh/git.
  */
@@ -34,6 +37,7 @@ import {
   nextQaVerdictRound,
 } from "./verdict-trailer.ts";
 import type { QaVerdictCliInput, QaVerdictPhase } from "../schemas/qa-verdict-cli.ts";
+import { NotFoundError } from "../errors.ts";
 
 /** What a fetcher can learn about a prior verdict sha vs HEAD. null = unverifiable. */
 export interface QaAncestryFacts {
@@ -118,6 +122,26 @@ async function resolveFact<T>(
   return got;
 }
 
+/**
+ * Prior bodies for a phase that COUNTS rounds (trailer, round-action). There is
+ * no conservative fallback: `[]` means "round 1", which would silently reset the
+ * round cap, so an unreadable history throws instead of degrading.
+ */
+async function requirePriorBodies(
+  supplied: Array<string | null> | undefined,
+  f: QaVerdictFetchers,
+  pr: number,
+): Promise<Array<string | null>> {
+  if (supplied !== undefined) return supplied;
+  const got = await f.priorBodies(pr);
+  if (got === null) {
+    throw new NotFoundError(
+      `prior-bodies unreadable for PR #${pr}: refusing to count the round from an empty history (it would reset the round cap)`,
+    );
+  }
+  return got;
+}
+
 export async function runQaVerdictPhase(
   phase: QaVerdictPhase,
   input: unknown,
@@ -184,8 +208,7 @@ export async function runQaVerdictPhase(
     }
     case "trailer": {
       const i = input as QaVerdictCliInput<"trailer">;
-      const priorBodies = await resolveFact(
-        i.priorBodies, () => f.priorBodies(i.pr), "prior-bodies", [] as Array<string | null>, degraded);
+      const priorBodies = await requirePriorBodies(i.priorBodies, f, i.pr);
       const headSha = await resolveFact(
         i.headSha, () => f.headSha(i.pr), "head-sha", QA_VERDICT_UNKNOWN_SHA, degraded);
       const trailer = buildQaVerdictTrailer({
@@ -196,8 +219,7 @@ export async function runQaVerdictPhase(
     }
     case "round-action": {
       const i = input as QaVerdictCliInput<"round-action">;
-      const priorBodies = await resolveFact(
-        i.priorBodies, () => f.priorBodies(i.pr), "prior-bodies", [] as Array<string | null>, degraded);
+      const priorBodies = await requirePriorBodies(i.priorBodies, f, i.pr);
       const headSha = await resolveFact(i.headSha, () => f.headSha(i.pr), "head-sha", "", degraded);
       const result = decideRound({
         tier: i.tier, verdict: i.verdict, reviewVerdict: i.reviewVerdict, pr: i.pr,
