@@ -284,7 +284,7 @@
   "src/redis/transcript-parse-memo.ts": 1,
   "src/redis/usage-snapshots.ts": 1,
   "src/retro-inputs.ts": 1,
-  "src/review-pickup.ts": 1,
+  "src/review-pickup.ts": 2,
   "src/scheduler/chores/attribution-self-arm.ts": 1,
   "src/scheduler/chores/glm-eligibility-sweep.ts": 1,
   "src/scheduler/chores/review-pickup-notify.ts": 1,
