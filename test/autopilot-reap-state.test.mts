@@ -483,3 +483,52 @@ describe("run_termination.py seed-filter — reaped slots are never re-seeded (i
     assert.match(r.stderr, /seed_filter_skipped/);
   });
 });
+
+describe("bootstrap.sh seed block — wiring of the reaped-slot filter (issue #5142)", () => {
+  const BOOTSTRAP = join(SCRIPTS, "bootstrap.sh");
+
+  /** Run the real seed block (extracted verbatim from bootstrap.sh) against a stub curl. */
+  function runSeedBlock(apiBody: string, priorState: string | null) {
+    const tmp = makeTmp();
+    try {
+      const src = readFileSync(BOOTSTRAP, "utf-8").split("\n");
+      const start = src.findIndex((l) => l.startsWith("SLOTS_BASE="));
+      const end = src.findIndex((l) => l.startsWith("# Initialize state file"));
+      assert.ok(start > 0 && end > start, "seed block markers present in bootstrap.sh");
+      const block = src.slice(start, end).join("\n");
+      if (priorState !== null) writeFileSync(tmp.state, priorState);
+      writeStub(tmp.dir, "curl", `#!/bin/sh\ncat <<'BODY'\n${apiBody}\nBODY\n`);
+      const script = `ISOLATED_RUN=0\nSTATE_PATH='${tmp.state}'\n${block}\nprintf '%s' "$SLOTS_JSON"\n`;
+      const r = spawnSync("bash", ["-c", script, BOOTSTRAP], {
+        env: { ...process.env, PATH: `${tmp.dir}:${process.env.PATH}` },
+        encoding: "utf-8",
+      });
+      return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  }
+
+  const API = JSON.stringify({
+    slots: {
+      dev_orch: { task_id: "bbbb", worktreeBranch: "worktree-agent-bbbb-t1-dev_orch" },
+      qa_orch: { task_id: "aaaa", worktreeBranch: "worktree-agent-aaaa-t1-qa_orch" },
+    },
+  });
+
+  test("reaped slot dropped, un-reaped in-flight slot carried into the new run's slots", () => {
+    const r = runSeedBlock(API, JSON.stringify({ reaped_task_ids: ["aaaa"] }));
+    assert.equal(r.status, 0);
+    const slots = JSON.parse(r.stdout);
+    assert.equal(slots.qa_orch, null, "reaped slot not re-seeded");
+    assert.equal(slots.dev_orch.task_id, "bbbb", "un-reaped slot carried over");
+    assert.equal(Object.keys(slots).length, 7);
+  });
+
+  test("no prior state file: seed passes through unfiltered (sibling shape keeps old verdict)", () => {
+    const r = runSeedBlock(API, null);
+    const slots = JSON.parse(r.stdout);
+    assert.equal(slots.qa_orch.task_id, "aaaa");
+    assert.equal(slots.dev_orch.task_id, "bbbb");
+  });
+});

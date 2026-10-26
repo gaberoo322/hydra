@@ -1558,7 +1558,7 @@ if [ "${ISOLATED_RUN}" != "1" ] && command -v jq >/dev/null 2>&1; then
     # state.json reaped_task_ids) — read BEFORE the heredoc below clobbers the
     # file. Fail-open: a filter failure keeps SLOTS_MERGED unchanged.
     if [ -n "${SLOTS_MERGED}" ] && [ -f "${STATE_PATH}" ]; then
-      SLOTS_FILTERED="$(printf '%s' "${SLOTS_MERGED}" | python3 "$(dirname "$0")/run_termination.py" seed-filter "${STATE_PATH}" 2>/dev/null || echo "")"
+      SLOTS_FILTERED="$(printf '%s' "${SLOTS_MERGED}" | python3 "$(dirname "$0")/run_termination.py" seed-filter "${STATE_PATH}" || echo "")"
       case "${SLOTS_FILTERED}" in
         "{"*) SLOTS_MERGED="${SLOTS_FILTERED}" ;;
         *) ;;
