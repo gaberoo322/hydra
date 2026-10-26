@@ -33,7 +33,7 @@ The cluster is an acyclic layered DAG. Read it bottom-up; nothing below depends 
 |---|---|---|
 | Redis seams | `../redis/autopilot-runs.ts`, `../redis/dispatches.ts` | The only code that talks to Redis for run state (see **Redis Adapters** in the root glossary) |
 | Pure leaves | `run-result.ts` | The `Ok`/`Err` result spine plus `errRedis` / `numberOrDefault` / `filesChangedCount`. No I/O, no intra-cluster imports — the bottom of the graph |
-| | `run-lifecycle-state.ts` | `deriveLifecycleState`, `summarizeTerminationHealth`, `deriveInflightSlotSeed`, `WEDGE_AGE_THRESHOLD_S`. Pure derivation over an already-loaded row |
+| | `run-lifecycle-state.ts` | `deriveLifecycleState`, `summarizeTerminationHealth`, `deriveInflightSlotSeed`, `WEDGE_AGE_THRESHOLD_S` (declared in `stale-thresholds.ts`, the one home for the named stale/wedge thresholds, re-exported here). Pure derivation over an already-loaded row |
 | | `run-projections.ts` | `isPidAlive`, `fetchTurnsWithJoins`, `projectRunView`, `projectRunDigest` — turn joins and view projection |
 | | `board-state.ts` | `deriveBoardState`, `glmWithheldIssueNumbers` + the `resolveOpenBlockers` I/O companion — the board-count projection served by `../api/autopilot-board.ts` (extracted from that route file in #3505) |
 | | `work-projections.ts` | The eight pure /work + hitl-grill projections (`deriveWorkLane` … `compareHitlGrillRows`) served by the same route (extracted from it in #4408, mirroring #3505) |

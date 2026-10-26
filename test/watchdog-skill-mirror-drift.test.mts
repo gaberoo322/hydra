@@ -101,13 +101,13 @@ function regenerateInto(fixtureDir: string, claudeDir: string): void {
 
 function runWatchdog(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
   const r = spawnSync(WATCHDOG, [], {
-    // Force the autopilot-wedge block to early-exit so the test doesn't
-    // depend on the autopilot service / heartbeat state on the host. The
+    // Point the wedge CLI at a nonexistent state file so it "leaves alone"
+    // and can never signal a real autopilot PID on the host. The
     // service-liveness block may log whatever it likes; we only assert on
     // the `hydra-skill-mirror-drift-watchdog:` lines.
     env: {
       ...process.env,
-      HYDRA_AUTOPILOT_WATCHDOG_FORCE_SERVICE_INACTIVE: "1",
+      HYDRA_AUTOPILOT_STATE: join(tmpdir(), "hydra-5095-no-such-state.json"),
       ...env,
       PATH: process.env.PATH ?? "",
     },

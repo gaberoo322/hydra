@@ -1828,6 +1828,7 @@
           "HYDRA_REDIS_DB",
           "HYDRA_REDIS_HOST",
           "HYDRA_REDIS_PORT",
+          "HYDRA_ROOT",
           "HYDRA_TARGET_REPO",
           "REPO"
         ],

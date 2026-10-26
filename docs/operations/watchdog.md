@@ -16,7 +16,7 @@ Detects when `hydra-orchestrator.service` reports `active (running)` but has sil
 
 ## Block 2 — autopilot wedge (stale threshold: 25 min)
 
-PID-kill logic for a wedged autopilot session (with the `HYDRA_AUTOPILOT_WATCHDOG_*` test hooks). **Do not shorten the SIGKILL threshold.**
+PID-kill logic for a wedged autopilot session, now the TypeScript CLI `scripts/hydra-watchdog.ts wedge` (pure `decideWedge` + `runWedge` over typed ports in `src/watchdog/`; issue #5095). The timer's bash entry runs it from the deployed checkout and tolerates a broken runtime as a WARN. Thresholds live in `src/autopilot/stale-thresholds.ts` (`scripts/hydra-watchdog.ts thresholds` prints them as JSON). Tests use an in-memory fake of the ports, not env hooks. **Do not shorten the SIGKILL threshold.**
 
 ## Respecting deliberate operator stops (issue #388)
 

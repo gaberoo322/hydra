@@ -54,3 +54,26 @@ export function isLivePid(pid: number): boolean {
     return false;
   }
 }
+
+/**
+ * Send a signal to a process (issue #5095 — the watchdog wedge kill). The same
+ * syscall as {@link isLivePid}'s probe with a real signal, so it lives beside it
+ * rather than behind the Host-Probe spawn seam (process.kill is not a binary).
+ *
+ * Never throws. Returns `true` when the signal was delivered; `false` on any
+ * failure (ESRCH = already gone, EPERM, invalid pid), logging the cause so a
+ * failed kill is visible in the journal.
+ */
+export function signalPid(pid: number, signal: "SIGTERM" | "SIGKILL"): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) {
+    console.error(`[process-probe] signalPid refused invalid pid ${String(pid)}`);
+    return false;
+  }
+  try {
+    process.kill(pid, signal);
+    return true;
+  } catch (err: any) {
+    console.error(`[process-probe] signalPid(${pid}, ${signal}) failed: ${err?.code ?? err}`);
+    return false;
+  }
+}
