@@ -429,6 +429,7 @@
           "DispatchCostJoinBodySchema",
           "DispatchPrBodySchema",
           "EXEMPT_LOG_DEFAULT_LIMIT",
+          "EligibilityQuerySchema",
           "ExemptLogEntryInputSchema",
           "ExemptLogQuerySchema",
           "HITL_GRILL_CAP",

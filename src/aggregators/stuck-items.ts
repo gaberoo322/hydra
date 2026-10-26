@@ -28,7 +28,13 @@ import {
 } from "../github/issues.ts";
 import { listRequiredStatusContextsOrNull } from "../github/prs.ts";
 import { settledOrEmpty } from "../settled-fold.ts";
-import { classifyRollupEntry, collapseRollupByContext } from "./stalled-prs.ts";
+import { foldRollup } from "../github/check-rollup.ts";
+import { isFailedRequiredStatus } from "./stalled-prs.ts";
+import { DEFAULT_THRESHOLDS, type StuckThresholds } from "./issues-waiting.ts";
+
+// The ONE stale threshold lives in issues-waiting.ts (issue #5091); re-exported
+// so existing import paths keep resolving.
+export { DEFAULT_THRESHOLDS, type StuckThresholds } from "./issues-waiting.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -67,18 +73,6 @@ export interface StuckItems {
   /** True iff all three sub-fetches settled fulfilled (the emptiness assertion). */
   sourcesOk: boolean;
 }
-
-export interface StuckThresholds {
-  /** Minimum age (days) before a `blocked` issue counts as stuck. */
-  blockedDays: number;
-  /** Minimum age (days) before a `needs-info` issue counts as stuck. */
-  needsInfoDays: number;
-}
-
-export const DEFAULT_THRESHOLDS: StuckThresholds = {
-  blockedDays: 2,
-  needsInfoDays: 1,
-};
 
 export interface StuckItemsDeps {
   /** Wall-clock anchor — defaults to `new Date()`. */
@@ -208,9 +202,9 @@ async function fetchPrsWithFailedCi(
 /**
  * Pure helper — exported for tests. Keeps only the PRs (the seam's
  * {@link PrRow}) with at least one failing check, mapping each survivor to a
- * {@link StuckPr} with the failing check names. The failing-conclusion set and
- * the per-context latest-wins collapse are the single definition in
- * `stalled-prs.ts` (issue #4624): a superseded failure followed by a green
+ * {@link StuckPr} with the failing check names. The per-context latest-wins fold is
+ * the shared one in `src/github/check-rollup.ts` and the red-or-cancelled
+ * posture is `isFailedRequiredStatus` in `stalled-prs.ts` (issue #4624): a superseded failure followed by a green
  * rerun no longer counts, and StatusContext `state` FAILURE/ERROR does. When
  * `requiredContexts` is known, only failures of a required context count
  * (issue #4569); `null` means unknown and keeps this endpoint's legacy
@@ -225,8 +219,8 @@ export function selectPrsWithFailedCi(
   const out: StuckPr[] = [];
   for (const pr of rows) {
     const failed: string[] = [];
-    for (const [name, entry] of collapseRollupByContext(pr.statusCheckRollup)) {
-      if (classifyRollupEntry(entry) !== "failing") continue;
+    for (const [name, { status }] of foldRollup(pr.statusCheckRollup).contexts) {
+      if (!isFailedRequiredStatus(status)) continue;
       // Issue #4569: only a REQUIRED check is breakage. A non-required job
       // that is red on master itself (advisory-checks) otherwise flags every
       // open PR. An unknown required set (null) keeps every failure counting.

@@ -1,0 +1,1 @@
+- fix: bump zod and body-parser to clear high npm-audit advisories (#5212)

@@ -232,6 +232,16 @@ describe("selectPrsWithFailedCi — shared latest-wins collapse semantics (#4624
     assert.deepEqual(selectPrsWithFailedCi(rows)[0].failedChecks, ["deep-qa-gate", "legacy"]);
   });
 
+  test("a cancelled check still counts in failedChecks", () => {
+    const rows = [
+      prRow({
+        ...base,
+        statusCheckRollup: [{ conclusion: "CANCELLED", name: "test", completedAt: "2026-05-26T01:00:00Z" }],
+      }),
+    ];
+    assert.deepEqual(selectPrsWithFailedCi(rows)[0].failedChecks, ["test"]);
+  });
+
   test("an in-progress rerun with a zero-time completedAt supersedes an older FAILURE", () => {
     const rows = [
       prRow({

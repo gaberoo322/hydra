@@ -476,7 +476,7 @@
       ],
       "source": {
         "path": "src/schemas/usage.ts",
-        "line": 33
+        "line": 34
       }
     },
     {
@@ -505,6 +505,20 @@
       "source": {
         "path": "src/schemas/design-concept.ts",
         "line": 214
+      }
+    },
+    {
+      "name": "EligibilityQuerySchema",
+      "file": "src/schemas/usage.ts",
+      "importedBy": [
+        "src/api/usage.ts"
+      ],
+      "routes": [
+        "GET /api/usage/eligibility"
+      ],
+      "source": {
+        "path": "src/schemas/usage.ts",
+        "line": 63
       }
     },
     {
@@ -1132,7 +1146,7 @@
       ],
       "source": {
         "path": "src/schemas/usage.ts",
-        "line": 50
+        "line": 51
       }
     },
     {
