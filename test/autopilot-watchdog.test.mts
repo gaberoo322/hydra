@@ -198,6 +198,11 @@ describe("watchdog wedge check (decideWedge / runWedge over fake ports)", () => 
     assert.equal(signalPid(2_000_000_000, "SIGTERM"), false);
   });
 
+  test("os-heartbeat.ts declares no threshold and does not import stale-thresholds", () => {
+    const src = readFileSync(join(REPO_ROOT, "src", "autopilot", "os-heartbeat.ts"), "utf-8");
+    assert.doesNotMatch(src, /stale-thresholds/);
+  });
+
   test("threshold values are unchanged and the CLI `thresholds` subcommand prints the module", () => {
     assert.equal(WATCHDOG_WEDGE_KILL_THRESHOLD_S, 1500);
     assert.equal(WATCHDOG_KILL_GRACE_S, 30);
