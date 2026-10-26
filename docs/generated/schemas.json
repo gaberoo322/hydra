@@ -776,6 +776,26 @@
       }
     },
     {
+      "name": "QA_VERDICT_PHASES",
+      "file": "src/schemas/qa-verdict-cli.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/qa-verdict-cli.ts",
+        "line": 32
+      }
+    },
+    {
+      "name": "QaVerdictCliSchemas",
+      "file": "src/schemas/qa-verdict-cli.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/qa-verdict-cli.ts",
+        "line": 43
+      }
+    },
+    {
       "name": "RELABEL_TARGETS",
       "file": "src/schemas/autopilot-board.ts",
       "importedBy": [
