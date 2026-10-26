@@ -358,6 +358,14 @@ backstop below, which now catches this case at reap time — but the backstop
 exists to limit the blast radius of this failure mode, not to make it
 acceptable).
 
+**The full `npm test` is the one sanctioned background launch (issue #5180).**
+The suite needs ~11 min, past the Bash tool's 600 s foreground cap, so a plain
+call is auto-backgrounded anyway. The ban above forbids *ending the turn* on a
+pending wait, not the launch: run it per the canonical recipe in `hydra-dev.md`
+("Full `npm test` recipe" — `run_in_background: true`, `timeout: 1800000`,
+sentinel line, foreground bounded polls) and keep the turn alive until
+`NPM_TEST_EXIT=` appears.
+
 ### Why `dev_target` has its own variant
 
 **`dev_target` dispatches carry their OWN forbidden-ending preamble variant
