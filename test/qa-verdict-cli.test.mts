@@ -272,10 +272,23 @@ describe("qa-verdict CLI (spawned)", () => {
     assert.deepEqual(out.degraded, []);
   });
 
-  test("a malformed fold payload exits 2 with schema-validation-failed", () => {
-    const r = run(["fold"], JSON.stringify({ tier: 3, findings: "nope", checks: [], standardsSummary: "s", specSummary: "p" }));
-    assert.equal(r.status, 2, r.stderr);
-    assert.equal(r.stdout, "");
+  test("malformed fold findings fail closed: exit 0, FAIL with reviewer-output-malformed blocker", () => {
+    const base = { tier: 3, checks: [], standardsSummary: "s", specSummary: "p" };
+    for (const findings of ["nope", [{ severity: "High", finding: "x" }], ["bare string"], undefined]) {
+      const r = run(["fold"], JSON.stringify({ ...base, findings }));
+      assert.equal(r.status, 0, r.stderr);
+      const out = JSON.parse(r.stdout);
+      assert.match(JSON.stringify(out), /FAIL/);
+      if (typeof findings === "string" || findings === undefined) {
+        assert.match(JSON.stringify(out), /reviewer-output-malformed/);
+      }
+    }
+  });
+
+  test("sibling shape: an envelope-level schema error still exits 2 and clean findings still pass", () => {
+    const bad = run(["fold"], JSON.stringify({ tier: 3, findings: [], checks: "x", standardsSummary: "s", specSummary: "p" }));
+    assert.equal(bad.status, 2, bad.stderr);
+    assert.equal(bad.stdout, "");
     const ok = run(["fold"], JSON.stringify({ tier: 3, findings: [], checks: [], standardsSummary: "s", specSummary: "p" }));
     assert.equal(ok.status, 0, ok.stderr);
   });

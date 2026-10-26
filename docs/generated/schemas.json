@@ -782,7 +782,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/qa-verdict-cli.ts",
-        "line": 38
+        "line": 32
       }
     },
     {
@@ -792,7 +792,7 @@
       "routes": [],
       "source": {
         "path": "src/schemas/qa-verdict-cli.ts",
-        "line": 49
+        "line": 43
       }
     },
     {

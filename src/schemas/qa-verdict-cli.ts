@@ -22,17 +22,11 @@ const checks = z.array(
     required: z.boolean(),
   }),
 );
-const reviewFinding = z.object({
-  severity: z.enum(["high", "medium", "low"]),
-  axis: z.enum(["standards", "spec"]),
-  reviewer: z.string(),
-  location: z.string(),
-  finding: z.string(),
-  fix: z.string(),
-  key: z.string().optional(),
-});
-// Flat array, or (with spawnedReviewers) a per-reviewer map of arrays.
-const reviewFindings = z.union([z.array(reviewFinding), z.record(z.string(), z.array(reviewFinding))]);
+// Deliberately z.unknown() (QA round 2, PR #5244): foldReview owns validation
+// of reviewer output and FAILS CLOSED (a malformed payload becomes a blocking
+// high `reviewer-output-malformed` finding). A strict schema here would exit 2
+// with no verdict, bypassing that fail-closed path (INV-8).
+const reviewFindings = z.unknown().optional(); // absent => fold fails closed too
 const finalVerdict = z.enum(["PASS", "FAIL", "PASS-pending-CI", "FAIL-pending-CI"]);
 
 export const QA_VERDICT_PHASES = [
