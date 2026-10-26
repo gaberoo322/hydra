@@ -378,3 +378,19 @@ describe("message.id de-duplication — one line per content block (issue #5141)
     assert.deepEqual(out.slice(1), [bare, bare]);
   });
 });
+
+describe("parseTranscriptFile — configured foreign-provider prefixes (issue #4841 INV-11)", () => {
+  test("a configured provider's model counts as foreign only when its prefix is passed; the default stays glm-", () => {
+    const CUTOFF_7D = Date.parse("2026-05-25T12:00:00Z") - 7 * 86_400_000;
+    const attribution = { skill: "hydra-dev", dispatchKind: "dev" as unknown as DispatchKind };
+    const TS = "2026-05-25T10:00:00Z";
+    const content = assistantLine(TS, { in: 10, out: 5 }, "kimi-k2.5");
+    const without = parseTranscriptFile(content, CUTOFF_7D, () => attribution);
+    assert.deepEqual(without.foreignModels, []);
+    const withKimi = parseTranscriptFile(content, CUTOFF_7D, () => attribution, {
+      foreignPrefixes: ["glm-", "kimi-"],
+    });
+    assert.deepEqual(withKimi.foreignModels, ["kimi-k2.5"]);
+    assert.equal(withKimi.entry.entries[0].foreign, true);
+  });
+});

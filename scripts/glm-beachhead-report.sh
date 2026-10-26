@@ -700,7 +700,7 @@ fetch_glm_authored_prs() {
     return 1
   }
   labeled="$(gh pr list --repo "$REPO" --label "$GLM_LABEL_AUTHORED" --state all \
-    --json number,createdAt,additions,deletions,labels,headRefName --limit 100 \
+    --json number,createdAt,additions,deletions,labels,headRefName,body --limit 100 \
     2>"$err_file")" || { _glm_fetch_fail_loud "label fetch (gh pr list --label ${GLM_LABEL_AUTHORED})"; return 1; }
   # Branch scan over recent PRs of every state. The scan depth bounds how far
   # back the branch fallback can see: 500 recent PRs spans months at this
@@ -709,7 +709,7 @@ fetch_glm_authored_prs() {
   # already all-drainer.) A PR appearing in BOTH fetches dedupes onto its
   # label-fetch row below.
   branch_pool="$(gh pr list --repo "$REPO" --state all \
-    --json number,createdAt,additions,deletions,labels,headRefName --limit 500 \
+    --json number,createdAt,additions,deletions,labels,headRefName,body --limit 500 \
     2>"$err_file")" || { _glm_fetch_fail_loud "branch scan (gh pr list --state all --limit 500)"; return 1; }
   if [[ -z "$labeled" ]]; then
     log "ERROR label fetch exited 0 with EMPTY stdout (a successful --json query always prints at least []) -- treating that as a failed query, not an empty result set (issue #4128)"
@@ -799,6 +799,46 @@ first_pass_verdict_for_pr() { # <pr_number> -> pass|fail|unknown|no-verdict
     return 0
   fi
   classify_qa_verdict "$first_body"
+}
+
+# worker_provider_ids <rows_json> -> one provider id per line, first-seen order,
+# deduped. A row's provider is the `worker-provider: <id>` trailer the drainer's
+# finish phase appends to the PR body (issue #4841 INV-10); a row with no
+# trailer (every PR authored before the provider list existed) is `legacy`.
+worker_provider_ids() { # <rows_json>
+  jq -r '[.[] | ((.body // "") | (capture("(^|\\n)worker-provider: (?<p>[^\\s]+)")? // {p: "legacy"}) | .p)] | reduce .[] as $p ([]; if index($p) then . else . + [$p] end) | .[]' \
+    <<<"$1" 2>/dev/null
+}
+
+# rows_for_worker_provider <rows_json> <provider_id> -> the subset of rows
+# attributed to that provider (same trailer rule as worker_provider_ids).
+rows_for_worker_provider() { # <rows_json> <provider_id>
+  jq -c --arg p "$2" '[.[] | select(((.body // "") | (capture("(^|\\n)worker-provider: (?<p>[^\\s]+)")? // {p: "legacy"}) | .p) == $p)]' \
+    <<<"$1" 2>/dev/null
+}
+
+# provider_breakdown_line <rows_json> -> one "per-provider" line, or nothing.
+# Printed only once at least one PR carries a worker-provider trailer, so a
+# lane that has only ever run on the single legacy provider reads exactly as
+# before. Per provider: PR count, first-pass PASS-rate (the SAME
+# first_pass_pass_rate helper the headline uses) and churn avg (the SAME
+# churn_avg_from_rows). Keep-or-kill stays a human judgment (ADR-0032
+# Decision 6, per provider): this prints figures, never a verdict.
+provider_breakdown_line() { # <rows_json>
+  local rows="$1" ids id sub n pass_line rate pass_n fail_n denom churn parts=() any_trailer
+  any_trailer=$(jq -r '[.[] | select((.body // "") | test("(^|\\n)worker-provider: "))] | length' <<<"$rows" 2>/dev/null || echo 0)
+  [[ "${any_trailer:-0}" -gt 0 ]] || return 0
+  ids=$(worker_provider_ids "$rows")
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    sub=$(rows_for_worker_provider "$rows" "$id")
+    n=$(jq -r 'length' <<<"$sub" 2>/dev/null || echo 0)
+    pass_line=$(first_pass_pass_rate "$sub")
+    IFS='|' read -r rate pass_n fail_n denom <<<"$pass_line"
+    churn=$(churn_avg_from_rows "$sub")
+    parts+=("${id}: ${n} PRs, first-pass PASS-rate $(display "$rate") (${pass_n} pass, ${fail_n} fail), churn avg $(display "$churn")")
+  done <<<"$ids"
+  printf 'GLM beachhead per-provider (worker-provider trailer; legacy = no trailer): %s\n' "$(IFS=';'; echo "${parts[*]}" | sed 's/;/; /g')"
 }
 
 # first_pass_pass_rate <rows_json> -> "<rate_or_empty>|<pass>|<fail>|<denom>"
@@ -1116,6 +1156,7 @@ main() {
     "$(display "$baseline_percent")" "$baseline_days_disp" "$relief_text" \
     "$(display "$churn_current")" "$(display "$baseline_churn")" "$(display "$churn_ratio")" \
     "$rec"
+  provider_breakdown_line "$rows"
 }
 
 # ---------------------------------------------------------------------------

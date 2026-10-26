@@ -460,6 +460,40 @@ describe("degrade paths via transcriptScan() (injected memoIo)", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  test("a cached entry parsed under a different foreign-prefix set is re-parsed, not replayed (issue #4841)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "usage-memo-foreignkey-"));
+    try {
+      const now = new Date("2026-05-25T12:00:00Z");
+      await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 500 })]);
+      const filePath = join(root, "p/s.jsonl");
+
+      const captured = new Map<string, FileParseMemoEntry>();
+      await transcriptScan(root, now, deriveSkill, stubReadOAuth, {
+        load: async () => new Map(),
+        write: async (upserts) => {
+          for (const [k, v] of upserts) captured.set(k, v);
+        },
+      });
+      const entry = captured.get(filePath);
+      assert.ok(entry, "first pass persisted a memo entry");
+      assert.equal(typeof entry.foreignKey, "string");
+
+      // Same key replays; a different key (a provider was added) re-parses.
+      const same = await transcriptScan(root, now, deriveSkill, stubReadOAuth, {
+        load: async () => new Map([[filePath, entry]]),
+        write: async () => {},
+      });
+      assert.equal(same.filesServedFromMemo, 1);
+      const changed = await transcriptScan(root, now, deriveSkill, stubReadOAuth, {
+        load: async () => new Map([[filePath, { ...entry, foreignKey: "glm-,kimi-" }]]),
+        write: async () => {},
+      });
+      assert.equal(changed.filesServedFromMemo, 0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 // Walk-level characterization of transcriptScan (issue #4790, epic #4780).
@@ -665,10 +699,13 @@ describe("transcriptScan walk-level characterization (issue #4790)", () => {
     const filePath = join(root, "p/s.jsonl");
     const st = await stat(filePath);
     const X = Date.parse("2026-05-23T00:00:00Z");
+    const { captured: probe } = await freshScan(root);
+    const currentKey = probe.get(filePath)?.foreignKey;
     const seeded: FileParseMemoEntry = {
       size: st.size,
       mtimeMs: st.mtimeMs,
       parseVersion: TRANSCRIPT_PARSE_VERSION,
+      foreignKey: currentKey,
       entries: [
         {
           tsMs: Date.parse("2026-05-25T11:00:00Z"),

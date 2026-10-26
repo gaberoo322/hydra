@@ -68,7 +68,7 @@
     {
       "family": "config",
       "metric": "rows",
-      "value": 32
+      "value": 33
     },
     {
       "family": "config",

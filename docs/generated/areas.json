@@ -765,7 +765,9 @@
         "0032",
         "0040"
       ],
-      "adrsCited": [],
+      "adrsCited": [
+        "0005"
+      ],
       "referenceDocs": [
         {
           "path": "docs/operations/glm-lane.md",

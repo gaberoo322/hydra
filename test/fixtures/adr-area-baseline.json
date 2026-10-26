@@ -19,13 +19,13 @@
   "self-modification": 29769,
   "docs/operator-playbooks/": 54412,
   ".github/workflows/ (Verifier Core)": 23639,
-  "scripts/autopilot/ (decide.py, classes.json)": 80044,
+  "scripts/autopilot/ (decide.py, classes.json)": 84207,
   "dashboard/": 33505,
   "config/direction/, config/orchestrator/": 4406,
   "docs/adr/ itself": 5249,
   "process / policy (no code area)": 38154,
   "test/, scripts/test/ (the suite itself)": 5978,
-  "src/glm/, scripts/glm/": 39748,
+  "src/glm/, scripts/glm/": 43911,
   "scripts/sync-skills.sh, src/skills/ (skill generation)": 7008,
   "src/notification/, src/operator-channel/": 5851
 }
