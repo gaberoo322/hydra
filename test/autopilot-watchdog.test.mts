@@ -14,7 +14,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -22,7 +22,7 @@ import {
   throwIfTimedOut,
 } from "./_helpers/watchdog-timeouts.mts";
 import { decideWedge, runWedge, type WedgeConfig } from "../src/watchdog/wedge.ts";
-import { parseStatePid, type WedgeDeps, type WedgeState } from "../src/watchdog/ports.ts";
+import { createProductionWedgeDeps, parseStatePid, readHeartbeatMtimeEpoch, type WedgeDeps, type WedgeState } from "../src/watchdog/ports.ts";
 import {
   STALLED_DISPATCH_AGE_S,
   WATCHDOG_KILL_GRACE_S,
@@ -196,6 +196,31 @@ describe("watchdog wedge check (decideWedge / runWedge over fake ports)", () => 
     assert.equal(signalPid(0, "SIGTERM"), false);
     assert.equal(signalPid(Number.NaN, "SIGKILL"), false);
     assert.equal(signalPid(2_000_000_000, "SIGTERM"), false);
+  });
+
+  test("heartbeat age comes from file mtime, not an in-file epoch token (SIGKILL gate)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hydra-5095-hb-"));
+    try {
+      const hb = join(dir, "heartbeat.txt");
+      // Token claims a very old epoch; mtime is "now". The bash block read mtime.
+      writeFileSync(hb, "epoch=1000000000\n");
+      const mtimeS = 1_800_000_000;
+      utimesSync(hb, mtimeS, mtimeS);
+      assert.equal(readHeartbeatMtimeEpoch(hb), mtimeS);
+      const deps = createProductionWedgeDeps(() => {});
+      assert.equal(deps.files.heartbeatEpochS(hb), mtimeS);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("missing heartbeat file still reads as null (sibling shape: WARN, never kill)", () => {
+    assert.equal(readHeartbeatMtimeEpoch(join(tmpdir(), "hydra-5095-no-such-heartbeat.txt")), null);
+    const f = makeFake({ heartbeatAgeS: null });
+    return runWedge(f.deps, CONFIG).then((v) => {
+      assert.equal(v.kind, "heartbeat-missing");
+      assert.deepEqual(f.signals, []);
+    });
   });
 
   test("os-heartbeat.ts declares no threshold and does not import stale-thresholds", () => {

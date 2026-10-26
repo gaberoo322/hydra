@@ -8,10 +8,9 @@
  * signals through src/process-probe.ts (a syscall, not a binary).
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { readServiceStatus } from "../host-probe/probe.ts";
 import { isLivePid, signalPid } from "../process-probe.ts";
-import { readOsHeartbeatEpoch } from "../autopilot/os-heartbeat.ts";
 
 /** Parsed autopilot state.json: absent, present-without-pid, or the live-candidate pid + run id. */
 export type WedgeState = "missing" | "no-pid" | { pid: number; runId: string };
@@ -26,7 +25,7 @@ export interface WedgeHost {
 
 export interface WedgeFiles {
   readStatePid(path: string): WedgeState;
-  /** OS-heartbeat epoch seconds, or `null` when missing/unreadable. */
+  /** OS-heartbeat epoch seconds (file mtime, as the bash block read it), or `null` when missing/unreadable. */
   heartbeatEpochS(path: string): number | null;
 }
 
@@ -57,6 +56,23 @@ export function parseStatePid(raw: string): WedgeState {
   return { pid, runId };
 }
 
+/**
+ * Heartbeat epoch (seconds) from the file's mtime ONLY — the faithful port of
+ * the bash block's `stat -c %Y`. Deliberately NOT readOsHeartbeatEpoch (which
+ * prefers an in-file epoch token): this value gates the irreversible SIGKILL,
+ * so the age source stays exactly what the bash watchdog used. `null` when the
+ * file is missing/unreadable.
+ */
+export function readHeartbeatMtimeEpoch(path: string): number | null {
+  try {
+    const mtimeS = Math.floor(statSync(path).mtimeMs / 1000);
+    return Number.isFinite(mtimeS) && mtimeS > 0 ? mtimeS : null;
+  } catch {
+    /* intentional: missing heartbeat file -> age unknown -> decideWedge logs WARN, never kills */
+    return null;
+  }
+}
+
 export function createProductionWedgeDeps(log: (line: string) => void): WedgeDeps {
   return {
     host: {
@@ -79,7 +95,7 @@ export function createProductionWedgeDeps(log: (line: string) => void): WedgeDep
         }
         return parseStatePid(raw);
       },
-      heartbeatEpochS: (path) => readOsHeartbeatEpoch(path),
+      heartbeatEpochS: (path) => readHeartbeatMtimeEpoch(path),
     },
     clock: { nowEpochS: () => Math.floor(Date.now() / 1000) },
     log,

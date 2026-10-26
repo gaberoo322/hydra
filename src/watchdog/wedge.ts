@@ -7,6 +7,9 @@
  * Restart=on-failure recovers it; this check observes the OS heartbeat from
  * outside and SIGTERMs (grace, then SIGKILLs) the wedged PID.
  *
+ * Heartbeat age is measured from the heartbeat FILE'S MTIME (bash `stat -c %Y`),
+ * not the in-file epoch token, because it gates the irreversible SIGKILL.
+ *
  * `decideWedge` is pure (no I/O, no clock, no kill). `runWedge` is the only
  * impure function, over the {@link WedgeDeps} ports. The CLI wraps `runWedge`
  * in a fail-open catch.
