@@ -1,0 +1,1 @@
+- refactor: move the QA verdict helpers into per-phase engine modules under src/qa with one composed head per phase (#5079)

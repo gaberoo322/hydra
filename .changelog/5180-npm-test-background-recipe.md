@@ -1,0 +1,1 @@
+- docs: teach hydra-dev the full npm test exceeds the foreground cap; background launch with sentinel plus foreground poll (#5180)

@@ -654,3 +654,24 @@ describe("reflection-deposit.sh grounding --from-log (issue #4753)", () => {
     );
   });
 });
+
+describe("hydra-dev full npm test background recipe (issue #5180)", () => {
+  test("a trailing NPM_TEST_EXIT sentinel line does not break the grounding footer parse", () => {
+    const dir = mkdtempSync(join(tmpdir(), "refl-sentinel-"));
+    const log = join(dir, "npm-test.log");
+    writeFileSync(log, "# tests 7\n# pass 7\n# fail 0\nNPM_TEST_EXIT=0\n");
+    const { deposits, r } = runDeposit(["grounding", "hydra-dev", "--from-log", log]);
+    assert.equal(r.status, 0);
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(deposits, `hydra-grounding-tests-${HASH}`), "utf8")),
+      { testsAfter: 7, testsPassingAfter: 7 },
+    );
+  });
+
+  test("the recipe never advises a 600000 ms timeout and pins the 1800000 background timeout", () => {
+    const src = resolveEffectiveSource("hydra-dev");
+    assert.match(src, /timeout: 1800000/);
+    assert.match(src, /NPM_TEST_EXIT=/);
+    assert.doesNotMatch(src, /timeout: 600000/);
+  });
+});
