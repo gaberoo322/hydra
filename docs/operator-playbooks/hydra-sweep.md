@@ -43,7 +43,7 @@ Do NOT re-read issue labels at the end — labels change during processing.
 Clean stale workflow labels from closed issues:
 
 ```bash
-for label in needs-qa ready-for-agent in-progress needs-triage blocked needs-research target-backlog; do
+for label in needs-qa ready-for-agent in-progress needs-triage blocked needs-research; do
   gh issue list --repo gaberoo322/hydra --state closed --label "$label" --json number --jq '.[].number'
 done
 ```
