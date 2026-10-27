@@ -62,32 +62,55 @@ export interface OtelAgentTotals {
  * request key was already counted for this agent. Throws on a Redis failure —
  * the route's isolateAggregator logs and turns it into a 500.
  */
+// One atomic unit (Lua runs single-threaded): dedupe check, every write, and the
+// dedupe marker LAST. A failing command (WRONGTYPE) aborts before the marker is
+// added, so an exporter retry is counted instead of reported "deduped" while its
+// tokens were lost (QA round 1, #5251).
+const RECORD_LUA = `
+if redis.call('SISMEMBER', KEYS[3], ARGV[1]) == 1 then return 0 end
+local ttl = tonumber(ARGV[8])
+redis.call('HINCRBY', KEYS[1], 'input', ARGV[2])
+redis.call('HINCRBY', KEYS[1], 'output', ARGV[3])
+redis.call('HINCRBY', KEYS[1], 'cacheRead', ARGV[4])
+redis.call('HINCRBY', KEYS[1], 'cacheCreation', ARGV[5])
+redis.call('HINCRBY', KEYS[1], 'requests', 1)
+redis.call('HINCRBY', KEYS[1], 'labelledRequests', ARGV[6])
+redis.call('HSETNX', KEYS[1], 'firstSeenMs', ARGV[7])
+redis.call('HSET', KEYS[1], 'lastSeenMs', ARGV[7])
+if ARGV[10] ~= '' then redis.call('HSET', KEYS[1], 'parentAgentId', ARGV[10]) end
+redis.call('EXPIRE', KEYS[1], ttl)
+redis.call('ZADD', KEYS[2], ARGV[7], ARGV[11])
+redis.call('ZREMRANGEBYRANK', KEYS[2], 0, -(tonumber(ARGV[9]) + 1))
+redis.call('EXPIRE', KEYS[2], ttl)
+redis.call('SADD', KEYS[3], ARGV[1])
+redis.call('EXPIRE', KEYS[3], ttl)
+return 1
+`;
+
 export async function recordOtelRequest(
   sample: OtelRecordInput,
   nowMs: number = Date.now(),
 ): Promise<"accepted" | "deduped"> {
   const r = getRedisConnection();
-  const added = await r.sadd(otelAgentRequestsKey(sample.agentId), sample.requestKey);
-  if (added !== 1) return "deduped";
-
-  const key = otelAgentKey(sample.agentId);
-  const pipe = r.pipeline();
-  pipe.hincrby(key, "input", sample.input);
-  pipe.hincrby(key, "output", sample.output);
-  pipe.hincrby(key, "cacheRead", sample.cacheRead);
-  pipe.hincrby(key, "cacheCreation", sample.cacheCreation);
-  pipe.hincrby(key, "requests", 1);
-  pipe.hincrby(key, "labelledRequests", sample.labelled ? 1 : 0);
-  pipe.hsetnx(key, "firstSeenMs", String(nowMs));
-  pipe.hset(key, "lastSeenMs", String(nowMs));
-  if (sample.parentAgentId) pipe.hset(key, "parentAgentId", sample.parentAgentId);
-  pipe.expire(key, TTL_SECONDS);
-  pipe.expire(otelAgentRequestsKey(sample.agentId), TTL_SECONDS);
-  pipe.zadd(otelIndexKey(), nowMs, sample.agentId);
-  pipe.zremrangebyrank(otelIndexKey(), 0, -(INDEX_MAX + 1));
-  pipe.expire(otelIndexKey(), TTL_SECONDS);
-  await pipe.exec();
-  return "accepted";
+  const added = await r.eval(
+    RECORD_LUA,
+    3,
+    otelAgentKey(sample.agentId),
+    otelIndexKey(),
+    otelAgentRequestsKey(sample.agentId),
+    sample.requestKey,
+    String(sample.input),
+    String(sample.output),
+    String(sample.cacheRead),
+    String(sample.cacheCreation),
+    sample.labelled ? "1" : "0",
+    String(nowMs),
+    String(TTL_SECONDS),
+    String(INDEX_MAX),
+    sample.parentAgentId ?? "",
+    sample.agentId,
+  );
+  return Number(added) === 1 ? "accepted" : "deduped";
 }
 
 function int(v: string | undefined): number {

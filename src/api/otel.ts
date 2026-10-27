@@ -9,10 +9,10 @@
  *
  * Fail-closed access: the orchestrator API is public + unauthenticated via the
  * admin tunnel, so this write route requires `HYDRA_OTEL_INGEST_KEY` to be set
- * AND the `x-hydra-otel-key` header to match. Both checks run before the body
+ * AND the `x-hydra-otel-key` header to match. Both checks run in `otelKeyGuard`, before the body
  * is parsed and write nothing.
  */
-import { Router } from "express";
+import { Router, type NextFunction, type Request, type Response } from "express";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { OtlpTraceExportBodySchema, extractLlmRequests } from "../schemas/otel.ts";
 import { recordOtelRequest } from "../redis/otel-spans.ts";
@@ -27,20 +27,30 @@ export function keysMatch(provided: string, expected: string): boolean {
   return timingSafeEqual(sha256(provided), sha256(expected));
 }
 
+/**
+ * Key guard (503 unset / 401 mismatch). Mounted in `src/api.ts` AHEAD of the
+ * 4mb body parser so unauthenticated callers never get a body buffered/parsed.
+ */
+export function otelKeyGuard(req: Request, res: Response, next: NextFunction) {
+  const expected = process.env.HYDRA_OTEL_INGEST_KEY;
+  if (!expected) {
+    res.status(503).json({ code: "otel-ingest-disabled" });
+    return;
+  }
+  const header = req.headers["x-hydra-otel-key"];
+  const provided = typeof header === "string" ? header : "";
+  if (!provided || !keysMatch(provided, expected)) {
+    res.status(401).json({ code: "otel-ingest-unauthorized" });
+    return;
+  }
+  next();
+}
+
 export function createOtelRouter() {
   const router = Router();
 
   router.post("/otel/v1/traces", async (req, res) => {
-    const expected = process.env.HYDRA_OTEL_INGEST_KEY;
-    if (!expected) {
-      return res.status(503).json({ code: "otel-ingest-disabled" });
-    }
-    const header = req.headers["x-hydra-otel-key"];
-    const provided = typeof header === "string" ? header : "";
-    if (!provided || !keysMatch(provided, expected)) {
-      return res.status(401).json({ code: "otel-ingest-unauthorized" });
-    }
-
+    // Auth already enforced by otelKeyGuard (mounted ahead of the body parser).
     const parsed = OtlpTraceExportBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return res.status(400).json(schemaValidationError(parsed.error));

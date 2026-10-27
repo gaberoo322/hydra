@@ -48,7 +48,7 @@ import { createDispatchesRouter } from "./api/dispatches.ts";
 import { createBuilderHealthRouter } from "./api/builder-health.ts";
 import { createVersionsRouter } from "./api/versions.ts";
 import { createOperatorActionsRouter } from "./api/operator-actions.ts";
-import { createOtelRouter } from "./api/otel.ts";
+import { createOtelRouter, otelKeyGuard } from "./api/otel.ts";
 import type { EventBus } from "./event-bus.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
@@ -74,7 +74,8 @@ function createApi(eventBus: EventBus) {
   // OTLP trace export batches (up to 512 spans) exceed the 100kb default
   // (issue #5177). Path-scoped and mounted BEFORE the global parser:
   // body-parser skips an already-parsed body, so no other route's limit changes.
-  app.use("/api/otel", express.json({ limit: "4mb" }));
+  // The key guard runs first so unauthenticated callers never get a body parsed.
+  app.use("/api/otel", otelKeyGuard, express.json({ limit: "4mb" }));
   app.use(express.json());
 
   // CORS — exact-match allowlist (issue #4047, split from #4000). The

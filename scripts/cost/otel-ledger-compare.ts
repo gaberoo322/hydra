@@ -12,8 +12,8 @@
  * Footer counts report join misses (spans but no dispatch row) and transcript
  * misses (dispatch row but no JSONL).
  *
- * ZERO Redis writes. Exits 1 on any join failure it could not resolve (after
- * printing the partial table), never a stack trace.
+ * ZERO Redis writes. Exits 1 on any unresolved failure, join miss or transcript
+ * miss (after printing the table), never a stack trace.
  *
  * Usage:
  *   npx tsx scripts/cost/otel-ledger-compare.ts
@@ -104,6 +104,11 @@ export function renderTable(rows: readonly CompareRow[], footer: CompareFooter):
   return lines.join("\n");
 }
 
+/** Pure: exit 1 on any failure, join miss, or transcript miss (INV-9/10). */
+export function compareExitCode(footer: CompareFooter): number {
+  return footer.failures > 0 || footer.joinMisses > 0 || footer.transcriptMisses > 0 ? 1 : 0;
+}
+
 async function main(): Promise<number> {
   const json = process.argv.slice(2).includes("--json");
   const rows: CompareRow[] = [];
@@ -148,12 +153,15 @@ async function main(): Promise<number> {
   } else {
     process.stdout.write(renderTable(rows, footer) + "\n");
   }
-  return footer.failures > 0 ? 1 : 0;
+  return compareExitCode(footer);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main()
-    .then((code) => process.exit(code))
+    .then((code) => {
+      // Flush stdout before exiting so piped --json output is never truncated.
+      process.stdout.write("", () => process.exit(code));
+    })
     .catch((err) => {
       console.error("[otel-ledger-compare] fatal:", err);
       process.exit(1);

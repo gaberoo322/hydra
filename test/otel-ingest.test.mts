@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import Redis from "ioredis";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import type { AddressInfo } from "node:net";
 
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
@@ -23,7 +24,7 @@ const { recordOtelRequest, getOtelAgentTotals, listOtelAgentIds, otelAgentKey, o
   await import("../src/redis/otel-spans.ts");
 const { createApi } = await import("../src/api.ts");
 const { keysMatch } = await import("../src/api/otel.ts");
-const { buildRow, transcriptTotalFromContent } = await import("../scripts/cost/otel-ledger-compare.ts");
+const { buildRow, transcriptTotalFromContent, compareExitCode } = await import("../scripts/cost/otel-ledger-compare.ts");
 
 const AGENT = "a3f2c1b4d5e6f7a80";
 
@@ -152,6 +153,29 @@ describe("otel-spans accessor", () => {
     }
   });
 
+  test("a failing write leaves no dedupe marker, so the retry is counted (atomicity)", async () => {
+    await cleanOtelKeys();
+    await testRedis.set(otelAgentKey(AGENT), "not-a-hash"); // HINCRBY -> WRONGTYPE
+    await assert.rejects(recordOtelRequest({ ...base, requestKey: "r1" }));
+    assert.equal(await testRedis.sismember(otelAgentRequestsKey(AGENT), "r1"), 0);
+    await testRedis.del(otelAgentKey(AGENT));
+    assert.equal(await recordOtelRequest({ ...base, requestKey: "r1" }), "accepted");
+    assert.equal((await getOtelAgentTotals(AGENT))?.requests, 1);
+  });
+
+  test("sibling: a successful re-record of the same request stays deduped", async () => {
+    assert.equal(await recordOtelRequest({ ...base, requestKey: "r1" }), "accepted");
+    assert.equal(await recordOtelRequest({ ...base, requestKey: "r1" }), "deduped");
+    assert.equal((await getOtelAgentTotals(AGENT))?.requests, 1);
+  });
+
+  test("TTL refresh: re-recording pulls a shortened TTL back near 7 days", async () => {
+    await recordOtelRequest({ ...base, requestKey: "r1" });
+    await testRedis.expire(otelAgentKey(AGENT), 60);
+    await recordOtelRequest({ ...base, requestKey: "r2" });
+    assert.ok((await testRedis.ttl(otelAgentKey(AGENT))) > 7 * 24 * 3600 - 120);
+  });
+
   test("index is trimmed to the newest INDEX_MAX agents", async () => {
     const r = testRedis ?? new Redis(process.env.REDIS_URL as string);
     testRedis = r;
@@ -241,6 +265,40 @@ describe("POST /api/otel/v1/traces", () => {
     assert.equal(t.input + t.output + t.cacheRead + t.cacheCreation, 2 * (10 + 20 + 300 + 40));
   });
 
+  test("unauthenticated malformed body is rejected by the key guard before parsing", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/v1/traces`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not json",
+    });
+    assert.equal(res.status, 401); // body-parser would have answered 400
+    delete process.env.HYDRA_OTEL_INGEST_KEY;
+    const res2 = await fetch(`${baseUrl}/api/otel/v1/traces`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not json",
+    });
+    assert.equal(res2.status, 503);
+  });
+
+  test("a body over 4mb is 413'd; other routes keep the 100kb default", async () => {
+    const big = await post({ pad: "x".repeat(4 * 1024 * 1024 + 1024) });
+    assert.equal(big.status, 413);
+    const other = await fetch(`${baseUrl}/api/health`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pad: "x".repeat(150 * 1024) }),
+    });
+    assert.equal(other.status, 413);
+  });
+
+  test("a Redis failure in the ledger write surfaces as 500 (isolateAggregator)", async () => {
+    await testRedis.set(otelAgentKey(AGENT), "not-a-hash");
+    const res = await post(exportBody([llmSpan({ agent: AGENT, request: "r1" })]));
+    assert.equal(res.status, 500);
+    assert.equal(await testRedis.sismember(otelAgentRequestsKey(AGENT), "r1"), 0);
+  });
+
   test("a body over the 100kb default is not 413'd (path-scoped 4mb limit)", async () => {
     const spans = Array.from({ length: 400 }, (_, i) =>
       llmSpan({ agent: AGENT, request: `bulk-${i}`, spanId: `sp-${i}` }),
@@ -316,5 +374,50 @@ describe("otel-ledger-compare pure helpers", () => {
       });
     const total = transcriptTotalFromContent([line(3), line(9)].join("\n"));
     assert.equal(total, 5 + 9 + 10);
+  });
+});
+
+describe("otel-ledger-compare main()", () => {
+  beforeEach(async () => {
+    await cleanOtelKeys();
+  });
+  after(async () => {
+    await cleanOtelKeys();
+  });
+
+  function run() {
+    return spawnSync(
+      process.execPath,
+      ["--experimental-strip-types", "scripts/cost/otel-ledger-compare.ts", "--json"],
+      { cwd: resolve(import.meta.dirname, ".."), env: process.env, encoding: "utf8", timeout: 60_000 },
+    );
+  }
+
+  test("a span with no SubagentDispatch row counts a join miss and exits 1, writing nothing", async () => {
+    await recordOtelRequest({
+      agentId: AGENT, parentAgentId: null, labelled: false, requestKey: "r1",
+      input: 1, output: 2, cacheRead: 3, cacheCreation: 4,
+    });
+    const before = await testRedis.keys("hydra:otel:spans:*");
+    const out = run();
+    const j = JSON.parse(out.stdout);
+    assert.equal(j.footer.agents, 1);
+    assert.equal(j.footer.joinMisses, 1);
+    assert.equal(j.rows[0].spanTotal, 10);
+    assert.equal(out.status, 1);
+    assert.deepEqual((await testRedis.keys("hydra:otel:spans:*")).sort(), before.sort());
+  });
+
+  test("empty ledger exits 0 with zero counts", () => {
+    const out = run();
+    assert.equal(out.status, 0);
+    assert.equal(JSON.parse(out.stdout).footer.agents, 0);
+  });
+
+  test("compareExitCode: clean -> 0; failures, join or transcript misses -> 1", () => {
+    assert.equal(compareExitCode({ agents: 1, joinMisses: 0, transcriptMisses: 0, failures: 0 }), 0);
+    assert.equal(compareExitCode({ agents: 1, joinMisses: 1, transcriptMisses: 0, failures: 0 }), 1);
+    assert.equal(compareExitCode({ agents: 1, joinMisses: 0, transcriptMisses: 1, failures: 0 }), 1);
+    assert.equal(compareExitCode({ agents: 1, joinMisses: 0, transcriptMisses: 0, failures: 1 }), 1);
   });
 });
