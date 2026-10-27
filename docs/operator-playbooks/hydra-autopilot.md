@@ -91,7 +91,7 @@ body's `Tier:` line. **Every field comes from the QA merge guard and the shared
 required-check helpers, never from memory or a hand-parsed comment** — the
 script is the recipe below, verbatim (its `ci-state` / `qa-verdict-event`
 blocks are pinned to this fence by `test/autopilot-turn-runner.test.mts`, and
-it `source`s the shared `checks-fetch` fragment rather than copying it). The
+required-check state comes from the `qa-verdict` CLI's `checks` phase, #5080). The
 recipe stays here as the documented contract; do not re-type it by hand:
 
 ```bash
@@ -99,19 +99,15 @@ recipe stays here as the documented contract; do not re-type it by hand:
 # Guard exit: 0 allowed, 1 denied, 2 bad args. The JSON is on stdout for 0/1.
 GUARD_JSON=$(node --experimental-strip-types scripts/ci/qa-merge-guard.ts --pr "$PR" --repo gaberoo322/hydra)
 GUARD_JSON=${GUARD_JSON:-null}
-# Required-check state via the SAME shared fetch hydra-qa's verdict uses
-# (step 5) — one fragment, so the two call sites cannot drift (issue #4757
-# INV-2). A failed read leaves CHECKS_JSON empty, the ci-state block below
-# fails to CI_JSON=null, and the event's verdict holds PENDING (fail-closed).
-PR_NUMBER="$PR"
-@include _fragments/checks-fetch.md
+# Required-check state via the qa-verdict CLI's `checks` phase (issue #5080)
+# — the same fetch+fold hydra-qa's verdict uses (step 5), now one engine call.
+# A failed or degraded read (checks null, or required contexts / rollup
+# unreadable) yields CI_JSON=null, and the event's verdict holds PENDING
+# (fail-closed).
 # >>> ci-state
-CI_JSON=$(CHECKS_JSON="$CHECKS_JSON" node --no-warnings --experimental-strip-types -e "
-  import('./scripts/ci/qa-verdict.ts').then(({redRequiredChecks, classifyVerdict}) => {
-    const checks = JSON.parse(process.env.CHECKS_JSON);
-    process.stdout.write(JSON.stringify({red: redRequiredChecks(checks), requiredPending: classifyVerdict('PASS', checks).summary.requiredPending}));
-  }).catch((err) => { console.error('[autopilot] required-check read failed:', err); process.exit(1); });
-") || CI_JSON=null
+_OUT=$(printf '{"pr":%s}' "$PR" | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts checks) || _OUT=""
+CI_JSON=$(printf '%s' "$_OUT" | jq -c 'if .checks == null or ((.degraded // []) | length) > 0 then null else {red, requiredPending} end' 2>/dev/null)
+[ -n "$CI_JSON" ] || CI_JSON=null
 # <<< ci-state
 # >>> qa-verdict-event
 jq -nc --argjson pr "$PR" --argjson tier "$TIER" --argjson guard "$GUARD_JSON" --argjson ci "$CI_JSON" '

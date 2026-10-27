@@ -23,6 +23,8 @@
  *   on malformed input.
  */
 
+import { STALLED_DISPATCH_AGE_S } from "../stale-thresholds.ts";
+
 // ---------------------------------------------------------------------------
 // StuckSignal domain types (issue #2838 — relocated from schemas/now-page.ts;
 // #2866 — re-homed to this shared leaf, still re-exported through run-health.ts)
@@ -113,7 +115,7 @@ export interface AutopilotHealthThresholds {
 }
 
 export const DEFAULT_HEALTH_THRESHOLDS: AutopilotHealthThresholds = {
-  stalledDispatchAgeS: 900, // 15 min — well past a healthy turn cadence
+  stalledDispatchAgeS: STALLED_DISPATCH_AGE_S, // 15 min — well past a healthy turn cadence
   unproductiveMinDispatches: 3,
   unproductiveCriticalFailRatio: 0.75,
   idleStreakMin: 3,

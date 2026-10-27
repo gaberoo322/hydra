@@ -48,7 +48,7 @@ get their own rows:
 | `scripts/sync-skills.sh`, `src/skills/` (skill generation) | ADR-0041 | — |
 | `docs/adr/` itself | ADR-0037 | — |
 | `test/`, `scripts/test/` (the suite itself) | ADR-0038 | [Process cleanup](docs/operations/process-cleanup.md) |
-| **process / policy** (no code area) | ADR-0002, ADR-0013, ADR-0014, ADR-0024 | [Domain docs](docs/agents/domain.md) |
+| **process / policy** (no code area) | ADR-0002, ADR-0013, ADR-0014, ADR-0024, ADR-0046 | [Domain docs](docs/agents/domain.md) |
 
 The deep-module discipline is the load-bearing simplicity strategy here: each Seam (Redis Adapters, Schemas, Cost) hides its complexity behind a narrow typed interface so a subagent can use it correctly by reading only the glossary entry — not the implementation. Keep new subsystems to that shape.
 

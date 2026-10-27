@@ -50,19 +50,17 @@ import {
 } from "../redis/dispatches.ts";
 import { isLivePid, type LivePidCheck } from "../process-probe.ts";
 import { numberOrDefault } from "./run-result.ts";
+import { WEDGE_AGE_THRESHOLD_S } from "./stale-thresholds.ts";
+
+// Re-exported so run-projections.ts's import path is unchanged (issue #5095).
+export { WEDGE_AGE_THRESHOLD_S };
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/**
- * Wedge-detection threshold for the read-time projection. Older
- * autopilots that hang past 10 minutes between turns get
- * `wedge_likely: true` on the response. Read-only metadata; no Redis
- * write follows. Consumed by `projectRunView` in `run-projections.ts`
- * (imported DOWN from this leaf).
- */
-export const WEDGE_AGE_THRESHOLD_S = 600;
+// WEDGE_AGE_THRESHOLD_S (read-time `wedge_likely` flag) is declared in
+// ./stale-thresholds.ts — the one home for the autopilot stale thresholds.
 
 // ---------------------------------------------------------------------------
 // Lifecycle truth (issue #888) — pure derivation
@@ -367,13 +365,17 @@ export function summarizeTerminationHealth(
  * `_rule_idle_fallback`, and when `_rule_orphaned_slots` ages the slot against
  * the subagent wall-clock cap. We carry the real `started_epoch` so a genuinely
  * over-age in-flight subagent is correctly drained via `wait_or_reap` rather
- * than held forever; `task_id` is the subagent's dispatchId (best-effort — the
- * slot-event reap path frees the slot by class name, not by task_id match);
+ * than held forever; `task_id` is the bare agent hash (sessionId) — the id
+ * `reap.py completion` / `stamp-slot.py` key on, so a carried slot reaps cleanly
+ * (issue #5142) — while the dispatchId branch rides `worktreeBranch`/`dispatch_id`;
  * `_source` marks the row as a cross-run seed for debugging.
  */
 export interface InflightSlotSeed {
   skill: string;
   task_id: string;
+  /** Synthesised worktree branch (dispatchId) — decide.py's builder-token chain (#5142). */
+  worktreeBranch?: string;
+  dispatch_id?: string;
   started: string;
   started_epoch: number;
   _source: "inflight-seed";
@@ -417,7 +419,8 @@ export function deriveInflightSlotSeed(
     const startedEpoch = epochFromIsoOrNow(d.startedAt);
     slots[cls.name] = {
       skill: d.skill,
-      task_id: d.dispatchId || d.sessionId,
+      task_id: d.sessionId,
+      ...(d.dispatchId ? { worktreeBranch: d.dispatchId, dispatch_id: d.dispatchId } : {}),
       started: d.startedAt,
       started_epoch: startedEpoch,
       _source: "inflight-seed",

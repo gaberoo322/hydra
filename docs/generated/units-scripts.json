@@ -152,6 +152,19 @@
       "description": "hydra-watchdog.sh — consolidated Hydra watchdog (issue #705)"
     },
     {
+      "path": "scripts/hydra-watchdog.ts",
+      "name": "hydra-watchdog.ts",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/hydra-watchdog.ts",
+        "line": 1
+      },
+      "kind": "ts",
+      "description": "hydra-watchdog.ts — one-shot watchdog CLI (issue #5095, epic #5094)."
+    },
+    {
       "path": "scripts/operator-notify.ts",
       "name": "operator-notify.ts",
       "execStart": null,

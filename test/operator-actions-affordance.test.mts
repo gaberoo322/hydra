@@ -65,6 +65,7 @@ import {
 } from "../dashboard/src/lib/preconditions.ts";
 import {
   RELABEL_TARGETS,
+  designConceptVerdicts,
   healthVerdicts,
   reopenVerdicts,
   rowVerdicts,
@@ -982,8 +983,14 @@ describe("IN_DASHBOARD_BODY builders over the closed context (issue #4629 INV-7)
     // The builders read only the closed context — no other field name.
     const fields = new Set(Array.from(map.matchAll(/context\.(\w+)/g), (m) => m[1]));
     // #5152 extends the closed context with the /now panel's read `runId`
-    // and its picked `severity`.
-    for (const f of fields) assert.ok(["number", "label", "paused", "engaged", "runId", "severity"].includes(f!), `context.${f} is outside the closed context`);
+    // and its picked `severity`; #5164 adds the holdback row's
+    // `commitSha`/`prNumber`/`tier`.
+    for (const f of fields) assert.ok(["number", "label", "paused", "engaged", "runId", "severity", "commitSha", "prNumber", "tier"].includes(f!), `context.${f} is outside the closed context`);
+    assert.ok(
+      /"POST \/holdback\/enroll": \(context\) => \(\{\s*commitSha: context\.commitSha,\s*prNumber: context\.prNumber,\s*tier: context\.tier,?\s*\}\),/.test(map),
+      "the holdback enrol body is built from the row context",
+    );
+    assert.ok(map.includes('"POST /operator-channel/brief/send": {},'));
   });
 });
 
@@ -1270,6 +1277,57 @@ describe("page verdict tables — lib/control-verdicts.ts (PR #5155 review)", ()
     const brakeFailed = healthVerdicts({ ...good, emergencyBrake: { engaged: false, ok: false } }, true);
     assert.equal(brakeFailed["brake-off"], false, "never a confident OFF on a failed read");
     assert.equal(brakeFailed["pause-state-verified"], true, "the flags are verified independently");
+  });
+});
+
+describe("designConceptVerdicts — the /work design-concept approve table (issue #5163 INV-6)", () => {
+  const line = (check: string, ok: boolean) => ({ check, ok });
+  const pre = (oks: [boolean, boolean, boolean]) => ({
+    preconditions: [
+      line("dc-artifact-stored", oks[0]),
+      line("dc-status-draft", oks[1]),
+      line("dc-handoff-hash-matches", oks[2]),
+    ],
+  });
+
+  test("trusted + every line ✓ → all three ids true", () => {
+    assert.deepEqual(designConceptVerdicts(pre([true, true, true]), true), {
+      "dc-artifact-stored": true,
+      "dc-status-draft": true,
+      "dc-handoff-hash-matches": true,
+    });
+  });
+
+  test("trusted + one ✗ → only that id false", () => {
+    assert.deepEqual(designConceptVerdicts(pre([true, true, false]), true), {
+      "dc-artifact-stored": true,
+      "dc-status-draft": true,
+      "dc-handoff-hash-matches": false,
+    });
+  });
+
+  test("untrusted (loading / unknown / stale) → every id present and false, even with ✓ lines", () => {
+    assert.deepEqual(designConceptVerdicts(pre([true, true, true]), false), {
+      "dc-artifact-stored": false,
+      "dc-status-draft": false,
+      "dc-handoff-hash-matches": false,
+    });
+  });
+
+  test("a null / absent payload → all-false table (fail closed)", () => {
+    const allFalse = {
+      "dc-artifact-stored": false,
+      "dc-status-draft": false,
+      "dc-handoff-hash-matches": false,
+    };
+    assert.deepEqual(designConceptVerdicts(null, true), allFalse);
+    assert.deepEqual(designConceptVerdicts({}, true), allFalse);
+  });
+
+  test("a line with no check id produces no key — the affordance renders it ✗", () => {
+    const out = designConceptVerdicts({ preconditions: [{ ok: true }] } as any, true);
+    assert.equal(Object.keys(out).length, 3);
+    assert.ok(Object.values(out).every((v) => v === false));
   });
 });
 

@@ -40,6 +40,7 @@ import {
 } from "../src/glm/finish.ts";
 import { capFilePath, quotaBlockFilePath } from "../src/glm/gate.ts";
 import { loadDrainerConfig } from "../src/glm/drainer-config.ts";
+import type { WorkerProvider } from "../src/glm/providers.ts";
 import { runDriverMode, type DriverDeps } from "../src/glm/drainer-driver.ts";
 import type { PrRow } from "../src/github/prs.ts";
 
@@ -716,12 +717,15 @@ describe("runFinish — the post-author arms, in order (issue #4337 D13, issue #
     assert.match(h.logs.join("\n"), /recorded z\.ai quota block until /);
   });
 
-  test("a 429 stdout on an arm that is NOT nothing-produced records no block (bash parity: evidence, only there)", async () => {
+  test("#4593: a 429 stdout on the keep-partial-for-resume arm records the block AFTER the claim release", async () => {
     const h = makeFinishDeps({ commitCount: 1, prBody: null });
     const r = await runFinish(h.deps, ranInput({ authorRaw: OUTCOME_TIMEOUT_429 }));
     assert.equal(r.action, "keep-partial-for-resume");
-    assert.equal(r.quotaBlockedUntil, null);
-    assert.equal(h.files.has(QUOTA_FILE), false);
+    const releaseIdx = h.calls.indexOf(`label:77:r=in-progress:a=ready-for-agent`);
+    const quotaIdx = h.calls.indexOf(`write:${QUOTA_FILE}`);
+    assert.ok(releaseIdx >= 0 && quotaIdx > releaseIdx, `the quota block must be recorded after the release:\n${h.calls.join("\n")}`);
+    assert.equal(r.quotaBlockedUntil, NOW_SEC + QUOTA_BLOCK_FALLBACK_SECONDS);
+    assert.equal(h.files.get(QUOTA_FILE), `${NOW_SEC + QUOTA_BLOCK_FALLBACK_SECONDS}\n`);
   });
 
   test("effect isolation: a REJECTING worktree removal WARNs and the release still happens", async () => {
@@ -914,3 +918,251 @@ describe("runDriverMode('finish') — one FinishResult JSON line, exit 0 (issue 
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Worker-provider list (issue #4841)
+// ---------------------------------------------------------------------------
+
+const ZAI_P: WorkerProvider = {
+  id: "zai",
+  baseUrl: "https://api.z.ai/api/anthropic",
+  model: "glm-5.2",
+  tokenEnv: "ANTHROPIC_AUTH_TOKEN",
+  quotaReset: { format: "zai-wallclock", tzOffset: "+0800" },
+};
+const KIMI_P: WorkerProvider = {
+  id: "kimi",
+  baseUrl: "https://api.kimi.example/anthropic",
+  model: "kimi-k2.5",
+  tokenEnv: "KIMI_API_KEY",
+  quotaReset: { format: "fallback-only" },
+};
+function listTextP(providers: unknown[]): string {
+  return JSON.stringify({ providers });
+}
+
+describe("runFinish — provider attribution + per-provider 429 (INV-7/8/10)", () => {
+  const WT = "/repo/wts/agent-glm-77-1";
+  const BODY = `${WT}/.glm-drainer-pr-body.md`;
+  const BRANCH = "worktree-agent-glm-77-1790000000";
+  const OUT_429 = JSON.stringify({
+    ok: true,
+    code: null,
+    timedOut: true,
+    stdout: "API Error: Request rejected (429) — rate limited",
+    stderr: "",
+  });
+
+  function finishHarness(commits: number, prBody: string | null, o: { preflightOk?: boolean; prOk?: boolean } = {}) {
+    const calls: string[] = [];
+    const files = new Map<string, string>();
+    if (prBody !== null) files.set(BODY, prBody);
+    const deps: FinishDeps = {
+      config: { ...loadDrainerConfig({}), capDir: CAP_DIR },
+      repoRoot: "/repo",
+      now: () => NOW_MS,
+      log: () => {},
+      editIssueLabels: async (issue, labels) => {
+        calls.push(`label:${issue}:a=${(labels.add ?? []).join("+")}`);
+        return { ok: true };
+      },
+      viewIssueTitle: async () => "Fake title",
+      createPr: async () =>
+        o.prOk === false ? { ok: false, stderr: "boom" } : { ok: true, url: "https://github.com/x/y/pull/9" },
+      listOpenPrs: async () => ({ ok: true, rows: [] }),
+      runGit: async (args) => {
+        if (args[0] === "rev-list") return { ok: true, stdout: String(commits), stderr: "" };
+        if (args[0] === "diff") return { ok: true, stdout: "src/glm/finish.ts", stderr: "" };
+        return { ok: true, stdout: "", stderr: "" };
+      },
+      removeWorktree: async () => ({ ok: true }),
+      pushBranchUpstream: async () => ({ ok: true }),
+      deleteRemoteBranch: async () => ({ ok: true }),
+      remoteBranchExists: async () => true,
+      preflight: async (x) =>
+        o.preflightOk === false
+          ? { ok: false, code: "glm-preflight-blocked" as const, violations: [], message: "fake violation" }
+          : { ok: true, checkedPaths: x.changedPaths.length },
+      readFileIfExists: (p) => files.get(p) ?? null,
+      writeFile: (p, c) => {
+        calls.push(`write:${p}`);
+        files.set(p, c);
+      },
+      unlinkIfExists: (p) => {
+        files.delete(p);
+      },
+      appendToFile: (p, t) => {
+        calls.push(`append:${p}`);
+        files.set(p, (files.get(p) ?? "") + t);
+      },
+    };
+    return { deps, calls, files };
+  }
+
+  const input = (provider?: WorkerProvider, authorRaw = "{\"ok\":true,\"code\":0,\"stdout\":\"\",\"stderr\":\"\"}"): FinishInput => ({
+    issue: 77,
+    worktree: WT,
+    branch: BRANCH,
+    authorRaw,
+    authorExitCode: 0,
+    provider,
+  });
+
+  test("the PR body gets worker-provider / worker-model trailers before preflight", async () => {
+    const h = finishHarness(1, "body\n");
+    const r = await runFinish(h.deps, input(KIMI_P));
+    assert.equal(r.action, "open-pr");
+    const body = h.files.get(BODY) as string;
+    assert.match(body, /^worker-provider: kimi$/m);
+    assert.match(body, /^worker-model: kimi-k2\.5$/m);
+  });
+
+  test("no provider -> no trailers (legacy single-lane parity)", async () => {
+    const h = finishHarness(1, "body\n");
+    await runFinish(h.deps, input(undefined));
+    assert.equal(h.files.get(BODY), "body\n");
+  });
+
+  test("a 429 writes the SELECTED provider's block file, not the legacy one", async () => {
+    const h = finishHarness(0, null);
+    const r = await runFinish(h.deps, input(KIMI_P, OUT_429));
+    assert.equal(r.action, "release-nothing-produced");
+    assert.equal(h.files.get(quotaBlockFilePath(CAP_DIR, "kimi")), `${NOW_SEC + 3600}\n`);
+    assert.equal(h.files.has(quotaBlockFilePath(CAP_DIR, "zai")), false);
+  });
+
+  test("#4593 regression: a 429 on a resumed branch with commits ahead (keep-partial) records the block AFTER the release", async () => {
+    const h = finishHarness(2, null);
+    const r = await runFinish(h.deps, input(ZAI_P, OUT_429));
+    assert.equal(r.action, "keep-partial-for-resume");
+    const releaseIdx = h.calls.findIndex((c) => c.startsWith("label:77:"));
+    const writeIdx = h.calls.indexOf(`write:${quotaBlockFilePath(CAP_DIR, "zai")}`);
+    assert.ok(releaseIdx >= 0 && writeIdx > releaseIdx, h.calls.join("\n"));
+    assert.equal(r.quotaBlockedUntil, NOW_SEC + 3600);
+  });
+
+  test("zai-wallclock reads the reset clause in the provider's offset; the env override still wins (INV-8)", async () => {
+    const stdout = "Request rejected (429) reset at 2026-10-23 08:00:00";
+    const raw = JSON.stringify({ ok: true, code: 1, stdout, stderr: "" });
+    const a = finishHarness(0, null);
+    await runFinish(a.deps, input(ZAI_P, raw));
+    // 08:00 at +0800 == 2026-10-23T00:00:00Z
+    assert.equal(a.files.get(quotaBlockFilePath(CAP_DIR, "zai")), `${Date.parse("2026-10-23T00:00:00Z") / 1000}\n`);
+    const b = finishHarness(0, null);
+    b.deps.config = { ...b.deps.config, quotaResetTzOverride: "+0000" };
+    await runFinish(b.deps, input(ZAI_P, raw));
+    assert.equal(b.files.get(quotaBlockFilePath(CAP_DIR, "zai")), `${Date.parse("2026-10-23T08:00:00Z") / 1000}\n`);
+  });
+
+  test("INV-7: a 429 is recorded on withhold-preflight-blocked, release-after-failed-pr and open-pr too", async () => {
+    const raw = JSON.stringify({ ok: true, code: 1, stdout: "Request rejected (429)", stderr: "" });
+    const want = `${NOW_SEC + 3600}\n`;
+    const cases: Array<[string, ReturnType<typeof finishHarness>]> = [
+      ["withhold-preflight-blocked", finishHarness(1, "b\n", { preflightOk: false })],
+      ["release-after-failed-pr", finishHarness(1, "b\n", { prOk: false })],
+      ["open-pr", finishHarness(1, "b\n")],
+    ];
+    for (const [action, h] of cases) {
+      const r = await runFinish(h.deps, input(KIMI_P, raw));
+      assert.equal(r.action, action);
+      assert.equal(r.quotaBlockedUntil, NOW_SEC + 3600, action);
+      assert.equal(h.files.get(quotaBlockFilePath(CAP_DIR, "kimi")), want, action);
+    }
+  });
+
+  test("ruling 3: open-pr records a block only when the session FAILED, wherever the 429 sits", async () => {
+    const transient = "API Error: Request rejected (429) — retrying\nturn 2 ok\nedited files\nran tests\npushed branch\nPR body written";
+    const a = finishHarness(1, "b\n");
+    const ra = await runFinish(a.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 0, stdout: transient, stderr: "" })));
+    assert.equal(ra.action, "open-pr");
+    assert.equal(ra.quotaBlockedUntil, null, "a recovered mid-session 429 must not block the provider");
+    assert.equal(a.files.has(quotaBlockFilePath(CAP_DIR, "kimi")), false);
+
+    // Boundary: the 429 followed by exactly 2 success lines, clean exit, PR opens.
+    const short = "API Error: Request rejected (429)\nturn 2 ok\npushed branch";
+    const s2 = finishHarness(1, "b\n");
+    const rs = await runFinish(s2.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 0, stdout: short, stderr: "" })));
+    assert.equal(rs.action, "open-pr");
+    assert.equal(rs.quotaBlockedUntil, null, "a clean-exit session never blocks, even with a short tail after the 429");
+    assert.equal(s2.files.has(quotaBlockFilePath(CAP_DIR, "kimi")), false);
+
+    // Sibling: a failed session with the 429 followed by 4+ lines still blocks.
+    const failedLong = "API Error: Request rejected (429)\na\nb\nc\nd";
+    const f = finishHarness(1, "b\n");
+    const rf = await runFinish(f.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 1, stdout: failedLong, stderr: "" })));
+    assert.equal(rf.quotaBlockedUntil, NOW_SEC + 3600, "a failed session blocks regardless of tail length");
+
+    const final = "edited files\nran tests\nAPI Error: Request rejected (429) — rate limited";
+    const b = finishHarness(1, "b\n");
+    const rb = await runFinish(b.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 1, stdout: final, stderr: "" })));
+    assert.equal(rb.action, "open-pr");
+    assert.equal(rb.quotaBlockedUntil, NOW_SEC + 3600);
+  });
+
+  test("ruling 3 on EVERY arm: a clean-exit session with a retried 429 never blocks; a failed session still does", async () => {
+    const cases: Array<[string, () => ReturnType<typeof finishHarness>]> = [
+      ["withhold-preflight-blocked", () => finishHarness(1, "b\n", { preflightOk: false })],
+      ["release-after-failed-pr", () => finishHarness(1, "b\n", { prOk: false })],
+      ["keep-partial-for-resume", () => finishHarness(1, null)],
+      ["release-nothing-produced", () => finishHarness(0, null)],
+    ];
+    for (const [action, mk] of cases) {
+      const h = mk();
+      const raw = JSON.stringify({ ok: true, code: 0, stdout: "Request rejected (429)\nretry ok\ndone", stderr: "" });
+      const r = await runFinish(h.deps, input(KIMI_P, raw));
+      assert.equal(r.action, action);
+      assert.equal(r.quotaBlockedUntil, null, `${action}: clean exit must not block`);
+      assert.equal(h.files.has(quotaBlockFilePath(CAP_DIR, "kimi")), false, action);
+      const hf = mk();
+      const rawF = JSON.stringify({ ok: true, code: 1, stdout: "Request rejected (429)", stderr: "" });
+      const rf = await runFinish(hf.deps, input(KIMI_P, rawF));
+      assert.equal(rf.action, action);
+      assert.equal(rf.quotaBlockedUntil, NOW_SEC + 3600, `${action}: failed session blocks`);
+    }
+  });
+
+  test("a NON-z.ai 429 text (no 'Request rejected') still blocks the selected provider; a bare '429' number does not", async () => {
+    for (const text of [
+      "API Error: 429 Too Many Requests",
+      '{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}',
+      "HTTP 429: quota exceeded for this key",
+      "Error: 429 Too Many Requests",
+      "Error: Request failed with status code 429",
+      "HTTP/1.1 429 Too Many Requests",
+      '{"error":{"type":"rate_limit_reached_error"}}',
+      '{"error":{"type":"insufficient_quota"}}',
+    ]) {
+      const h = finishHarness(0, null);
+      await runFinish(h.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 1, stdout: text, stderr: "" })));
+      assert.equal(h.files.get(quotaBlockFilePath(CAP_DIR, "kimi")), `${NOW_SEC + 3600}\n`, text);
+    }
+    for (const neg of [
+      "edited file-429.ts, 4290 lines",
+      'the fixture is {"error":{"code":429,"message":"slow"}}',
+      'wrote a test with "status": 429 in it',
+      'I quoted {"type":"x"} then said "type": "rate_limit_error" mid-prose',
+      "Error handling now maps a retry that hit 429 later in the message to backoff",
+    ]) {
+      const n = finishHarness(0, null);
+      await runFinish(n.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 1, stdout: neg, stderr: "" })));
+      assert.equal(n.files.has(quotaBlockFilePath(CAP_DIR, "kimi")), false, neg);
+    }
+  });
+
+  test("prose merely mentioning 429 + quota exceeded (even on a successful open-pr arm) never blocks the provider", async () => {
+    const prose = "I will handle HTTP 429 when the quota is exceeded, then retry; added a rate limit test for status 429. The rate_limit_error token and insufficient_quota appear in the tests.";
+    const h = finishHarness(1, "b\n");
+    const r = await runFinish(h.deps, input(KIMI_P, JSON.stringify({ ok: true, code: 0, stdout: prose, stderr: "" })));
+    assert.equal(r.action, "open-pr");
+    assert.equal(r.quotaBlockedUntil, null);
+    assert.equal(h.files.has(quotaBlockFilePath(CAP_DIR, "kimi")), false);
+  });
+
+  test("fallback-only providers always take the 60-minute fallback", async () => {
+    const raw = JSON.stringify({ ok: true, code: 1, stdout: "Request rejected (429) reset at 2026-10-23 08:00:00", stderr: "" });
+    const h = finishHarness(0, null);
+    await runFinish(h.deps, input(KIMI_P, raw));
+    assert.equal(h.files.get(quotaBlockFilePath(CAP_DIR, "kimi")), `${NOW_SEC + 3600}\n`);
+  });
+});
+

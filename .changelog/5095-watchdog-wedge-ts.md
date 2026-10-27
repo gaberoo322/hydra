@@ -1,0 +1,1 @@
+- refactor: port the watchdog's autopilot-wedge check to a tested TypeScript CLI and give the stale thresholds one home (#5095)

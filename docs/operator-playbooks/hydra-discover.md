@@ -28,7 +28,7 @@ Counter controls tier:
 - Limit to 0–2 new issues per iteration
 - Tier 1+2 < 3 min; Tier 3 adds up to 5 min via subagents
 - Never create vague issues without quantitative evidence
-- Target project (hydra-betting) findings → `target-backlog` label (sweep queues to work queue, closes)
+- Target-project findings are out of scope here: log them in the summary and leave filing to `hydra-target-discover`, which files `needs-triage` issues on the Target board (the `target-backlog` sweep lane is deleted)
 
 ## Tier 1: Runtime (every iteration, parallel)
 
@@ -338,19 +338,6 @@ EOF
 $(hydra_issue_footer hydra-discover 'tier N')"
 ```
 
-**Target project finding:**
-```bash
-gh issue create --title "..." --label "target-backlog" --body "$(cat <<'EOF'
-## Problem
-## Evidence
-## Suggested fix
-## Context for orchestrator
----
-EOF
-)
-$(hydra_issue_footer hydra-discover 'tier N')"
-```
-
 ## Calibration
 
 Create issue only if ALL true:
@@ -358,7 +345,7 @@ Create issue only if ALL true:
 2. Pattern, not incident (multiple cycles or modules)
 3. Actionable (concrete next step, not "investigate further")
 4. Not already tracked (dedup passed)
-5. Correctly scoped (orchestrator → `needs-triage`; target → `target-backlog`)
+5. Correctly scoped (orchestrator → `needs-triage`; Target findings are not filed here — see Loop safety)
 
 Otherwise log in summary, don't create.
 

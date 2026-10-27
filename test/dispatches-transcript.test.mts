@@ -19,7 +19,7 @@
  * Seam and are tested in `test/transcript-projection.test.mts` (issue #987).
  */
 
-import { test, describe, beforeEach, after } from "node:test";
+import { test, describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 import express from "express";
@@ -42,7 +42,7 @@ const {
   createDispatchesRouter,
 } = await import("../src/api/dispatches.ts");
 
-const { registerSubagentDispatch } = await import("../src/redis/dispatches.ts");
+const { registerSubagentDispatch, getSubagentDispatch } = await import("../src/redis/dispatches.ts");
 
 const UUID = "11111111-2222-4333-8444-555555555555";
 
@@ -303,5 +303,75 @@ describe("GET /dispatches/:dispatchId/transcript — route contract", () => {
     assert.equal(res.status, 400);
     const body = await res.json();
     assert.equal(body.code, "schema-validation-failed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /dispatches/subagent/:sessionId — route contract (issue #5142)
+// ---------------------------------------------------------------------------
+
+describe("DELETE /dispatches/subagent/:sessionId — route contract (#5142)", () => {
+  let testRedis: any;
+  let server: any;
+  let baseUrl: string;
+
+  before(async () => {
+    testRedis = new Redis(process.env.REDIS_URL);
+    const app = express();
+    app.use(express.json());
+    app.use("/api", createDispatchesRouter());
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, () => resolve());
+    });
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  beforeEach(async () => {
+    const keys = await testRedis.keys("hydra:dispatches:subagent:*");
+    if (keys.length > 0) await testRedis.del(...keys);
+  });
+
+  after(async () => {
+    if (server) await new Promise<void>((r) => server.close(() => r()));
+    if (testRedis) await testRedis.quit();
+  });
+
+  const reg = (sessionId: string) =>
+    registerSubagentDispatch({
+      sessionId,
+      skill: "hydra-dev",
+      dispatchId: `wt-${sessionId}`,
+      startedAt: "2026-05-30T00:00:00Z",
+      projectDir: "/home/gabe/hydra",
+    });
+
+  test("existing row -> 200 and the row is gone", async () => {
+    await reg("sess-del-1");
+    const res = await fetch(`${baseUrl}/api/dispatches/subagent/sess-del-1`, { method: "DELETE" });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ended, true);
+    assert.equal(body.sessionId, "sess-del-1");
+    assert.equal(await getSubagentDispatch("sess-del-1"), null);
+  });
+
+  test("sibling shape: a different live row survives the delete", async () => {
+    await reg("sess-del-a");
+    await reg("sess-del-b");
+    await fetch(`${baseUrl}/api/dispatches/subagent/sess-del-a`, { method: "DELETE" });
+    assert.equal(await getSubagentDispatch("sess-del-a"), null);
+    assert.notEqual(await getSubagentDispatch("sess-del-b"), null);
+  });
+
+  test("missing row -> idempotent 200", async () => {
+    const res = await fetch(`${baseUrl}/api/dispatches/subagent/never-registered`, { method: "DELETE" });
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).ended, true);
+  });
+
+  test("malformed sessionId -> 400 schema-validation-failed", async () => {
+    const res = await fetch(`${baseUrl}/api/dispatches/subagent/bad%20id%21`, { method: "DELETE" });
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).code, "schema-validation-failed");
   });
 });

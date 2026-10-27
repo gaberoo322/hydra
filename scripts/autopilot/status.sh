@@ -14,7 +14,7 @@
 #
 # Wedge verdict: if the heartbeat mtime is more than $WEDGE_THRESHOLD_SEC
 # seconds in the past AND the recorded pid is still alive, we print a
-# bold WEDGE LIKELY line. The threshold defaults to 600s (10 min); the
+# bold WEDGE LIKELY line. The threshold defaults to the wedgeAgeS of `scripts/hydra-watchdog.ts thresholds` (600s); the
 # longest legitimate decision-turn duration in practice is the hydra-dev
 # slow path, which lands under that.
 #
@@ -22,7 +22,7 @@
 #   HYDRA_AUTOPILOT_HEARTBEAT  override heartbeat path
 #   HYDRA_AUTOPILOT_STATE      override state.json path
 #   HYDRA_AUTOPILOT_LOG        override nightly run-log path
-#   WEDGE_THRESHOLD_SEC        wedge mtime threshold (default 600)
+#   WEDGE_THRESHOLD_SEC        wedge mtime threshold (default: wedgeAgeS from the watchdog CLI)
 #
 # Exit code is always 0 — diagnostic only.
 
@@ -31,7 +31,15 @@ set -uo pipefail
 HEARTBEAT="${HYDRA_AUTOPILOT_HEARTBEAT:-/tmp/hydra-autopilot-heartbeat.txt}"
 STATE="${HYDRA_AUTOPILOT_STATE:-/tmp/hydra-autopilot-state.json}"
 LOG="${HYDRA_AUTOPILOT_LOG:-/tmp/hydra-autopilot-nightly.log}"
-THRESHOLD="${WEDGE_THRESHOLD_SEC:-600}"
+# The wedge-age threshold has ONE home (src/autopilot/stale-thresholds.ts); read
+# it through the watchdog CLI rather than keeping a second copy of the number.
+THRESHOLD="${WEDGE_THRESHOLD_SEC:-}"
+if [ -z "$THRESHOLD" ]; then
+  THRESHOLD="$(node --experimental-strip-types "${HYDRA_ROOT:-$HOME/hydra}/scripts/hydra-watchdog.ts" thresholds 2>/dev/null | jq -r '.wedgeAgeS' 2>/dev/null)"
+  case "$THRESHOLD" in
+    ''|*[!0-9]*) THRESHOLD="" ;;
+  esac
+fi
 
 now=$(date -u +%s)
 
@@ -51,7 +59,9 @@ if [ -f "$HEARTBEAT" ]; then
     *) pid=$(awk 'NR==1 { for (i=1;i<=NF;i++) if ($i ~ /^pid=/) { sub(/^pid=/,"",$i); print $i; exit } }' "$HEARTBEAT") ;;
   esac
 
-  if [ "$age" -gt "$THRESHOLD" ] && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+  if [ -z "$THRESHOLD" ]; then
+    echo "(wedge threshold unavailable — watchdog CLI failed; verdict skipped)"
+  elif [ "$age" -gt "$THRESHOLD" ] && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     echo
     echo "!!! WEDGE LIKELY: heartbeat is ${age}s old (> ${THRESHOLD}s) but pid ${pid} is still alive."
     echo "!!! See docs/operator-playbooks/hydra-autopilot.md 'Inspecting a run'."

@@ -1327,6 +1327,34 @@ def _post_dispatch_cost_join(anchor_ref: str | None, cls: str, total_tokens: int
         _append_log(msg)
 
 
+def _end_dispatch_ledger_row(task_id: str) -> None:
+    """End the subagent-dispatch ledger row for a retired task_id (issue #5142).
+
+    `hydra:dispatches:subagent:*` rows are registered at a child's first tool
+    call and previously never ended, so bootstrap's inflight-slots seed
+    re-loaded a REAPED dispatch into the next run's slots. The sole owner of
+    the end-of-life write is `DELETE /api/dispatches/subagent/:sessionId`
+    (src/redis/dispatches.ts::endSubagentDispatch); this is a thin caller.
+
+    Best-effort + total: never raises, never blocks a reap. A dead orchestrator
+    degrades to the pre-fix behaviour (row expires at its 24h TTL; bootstrap's
+    reaped_task_ids seed filter still blocks the re-seed).
+    """
+    if not task_id or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", task_id):
+        return
+    req = urllib.request.Request(
+        f"{HYDRA_API_BASE}/api/dispatches/subagent/{task_id}",
+        method="DELETE",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        msg = f"dispatch_ledger_end_skipped task_id={task_id} err={exc}"
+        print(f"[autopilot] reap: {msg}", file=sys.stderr)
+        _append_log(msg)
+
+
 def _classify_failure_pattern(cue: str) -> str:
     """Map a free-form failure cue to a stable self-heal pattern ID (issue #1820).
 
@@ -1549,6 +1577,8 @@ def run_hardcap() -> int:
         # task_id` keeps keying on task_id byte-for-byte with prior behaviour
         # (INV-4).
         _fire_cycle_record(task_id, skill, "failed", tokens, worktree_branch=branch or "")
+        # Issue #5142: the force-cleared slot's task_id is retired too.
+        _end_dispatch_ledger_row(task_id)
         # Issue #1820: a hard-cap trip is an unambiguous non-merged failure —
         # fire a reflection so the next attempt on this anchor reads why the
         # prior one was abandoned. Best-effort, keyed on the anchor captured
@@ -2064,6 +2094,10 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # orchestrator route can split the dispatch's raw tokens across model
     # families using THAT skill's 7-day mix.
     _post_dispatch_cost_join(snap.anchor_ref, cls, total_tokens, skill=skill)
+
+    # Issue #5142: retire the dispatch's ledger row so the next bootstrap's
+    # inflight-slots seed cannot re-load a slot this completion just reaped.
+    _end_dispatch_ledger_row(task_id)
 
     # Issue #3866 / #4045 / #4195 (INV-5, PR #4090; hoisted by #4248): the
     # soft-cap reflection gate, the stall check, and the needs-qa promotion

@@ -825,10 +825,11 @@
         "src/redis/dispatches.ts"
       ],
       "servedBy": [
+        "DELETE /api/dispatches/subagent/:sessionId",
         "GET /api/dispatches/:dispatchId/transcript",
         "POST /api/dispatches/subagent"
       ],
-      "home": "/api/dispatches/:dispatchId/transcript",
+      "home": "/api/dispatches/subagent/:sessionId",
       "retired": false,
       "source": {
         "path": "src/redis/dispatches.ts",
@@ -846,10 +847,11 @@
         "src/redis/dispatches.ts"
       ],
       "servedBy": [
+        "DELETE /api/dispatches/subagent/:sessionId",
         "GET /api/dispatches/:dispatchId/transcript",
         "POST /api/dispatches/subagent"
       ],
-      "home": "/api/dispatches/:dispatchId/transcript",
+      "home": "/api/dispatches/subagent/:sessionId",
       "retired": false,
       "source": {
         "path": "src/redis/dispatches.ts",

@@ -2853,3 +2853,12 @@ describe("transcript parse memo (issue #3805)", () => {
     });
   });
 });
+
+describe("isForeignProviderModel — injected prefixes (issue #4841 INV-11)", () => {
+  test("isForeignProviderModel takes injected prefixes; the default stays glm-", () => {
+    assert.equal(isForeignProviderModel("kimi-k2.5"), false);
+    assert.equal(isForeignProviderModel("kimi-k2.5", ["glm-", "kimi-"]), true);
+    assert.equal(isForeignProviderModel("glm-5.2"), true);
+    assert.equal(isForeignProviderModel("claude-opus-4-7", ["glm-", "kimi-"]), false);
+  });
+});

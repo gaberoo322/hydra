@@ -31,9 +31,9 @@
  *
  *   qa-verdict-event.sh — its `ci-state` and `qa-verdict-event` marker blocks
  *   equal the playbook recipe's byte-for-byte (the recipe stays the documented
- *   source; test/qa-merge-guard-callsites.test.mts executes it), it sources
- *   the shared checks-fetch fragment instead of copying it (#4757 INV-2), and
- *   with `gh`/`node` unreachable it emits a PENDING event and exits 0.
+ *   source; test/qa-merge-guard-callsites.test.mts executes it), it calls the
+ *   qa-verdict CLI's `checks` phase with no inline `node -e` import (#5080),
+ *   and with `gh`/`node` unreachable it emits a PENDING event and exits 0.
  *
  * This file references no other scripts/autopilot/ target on purpose — the
  * test-subject sprawl ratchet (test/fixtures/test-subject-baseline.json) must
@@ -72,11 +72,11 @@ function baseState(): Record<string, unknown> {
     dispatches: 5,
     cumulative_tokens: 656630,
     idle_turns: 0,
-    research_force_counter: 0,
+    research_force_counter: {},
     burned_classes: [],
     failure_log: [],
     reaped_task_ids: [],
-    dev_resume_pending: null,
+    dev_resume_pending: [],
     // The live bootstrap.sh shape (keys decide.py reads).
     limits: {
       token_budget: 10_000_000,
@@ -473,8 +473,30 @@ describe("qa-verdict-event.sh — the playbook recipe as a script (issue #4831)"
     }
   });
 
-  test("it sources the shared checks-fetch fragment rather than copying it (#4757 INV-2)", () => {
-    assert.match(script, /^source "\$REPO_ROOT\/docs\/operator-playbooks\/_fragments\/checks-fetch\.md"/m);
+  test("ci-state block is self-contained: a crashing CLI (no pipefail) still yields CI_JSON=null", () => {
+    const dir = mkdtempSync(join(tmpdir(), "qa-verdict-ci-state-"));
+    try {
+      const shims = join(dir, "bin");
+      mkdirSync(shims);
+      writeFileSync(join(shims, "node"), "#!/bin/sh\nexit 1\n");
+      chmodSync(join(shims, "node"), 0o755);
+      const prog = `PR=1\n${markerBlock(playbook, "ci-state")}\nprintf '%s' "$CI_JSON"`;
+      const env = { ...process.env, PATH: `${shims}:${process.env.PATH}` };
+      const r = spawnSync("bash", ["-c", prog], { cwd: dir, env, encoding: "utf-8" });
+      assert.equal(r.stdout, "null", r.stderr);
+      // sibling: a healthy CLI result is projected unchanged.
+      writeFileSync(join(shims, "node"), `#!/bin/sh\necho '{"checks":[],"degraded":[],"red":["x"],"requiredPending":0}'\n`);
+      const ok = spawnSync("bash", ["-c", prog], { cwd: dir, env, encoding: "utf-8" });
+      assert.deepEqual(JSON.parse(ok.stdout), { red: ["x"], requiredPending: 0 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("it calls the qa-verdict CLI's checks phase and carries no inline node -e import (#5080)", () => {
+    assert.match(script, /scripts\/ci\/qa-verdict\.ts checks/);
+    assert.equal(/node[^\n]*\s-e\s/.test(script), false, "no inline `node -e` import");
+    assert.doesNotMatch(script, /^\s*source\s/m, "no longer sources the fetch fragment");
     assert.equal(script.includes("# >>> checks-fetch"), false, "no copied fetch body");
     assert.equal(script.includes("REQUIRED_CONTEXTS="), false, "no re-implemented required-contexts read");
     assert.equal(script.includes("isRequired"), false);
@@ -484,7 +506,7 @@ describe("qa-verdict-event.sh — the playbook recipe as a script (issue #4831)"
     const section = playbook.slice(playbook.indexOf("### Building `qa-verdict` events"));
     const body = section.slice(0, section.indexOf("\n## "));
     assert.match(body, /bash scripts\/autopilot\/qa-verdict-event\.sh/);
-    assert.match(body, /@include _fragments\/checks-fetch\.md/);
+    assert.match(body, /scripts\/ci\/qa-verdict\.ts checks/);
   });
 
   test("with gh and node unreachable it emits a PENDING event (fail-closed) and exits 0", () => {
@@ -512,7 +534,6 @@ describe("qa-verdict-event.sh — the playbook recipe as a script (issue #4831)"
         head_sha: "",
         verdict_at_head: false,
       });
-      assert.match(r.stderr, /WARN: checks-fetch failed/, "the fragment's own failure stays loud");
       assert.match(r.stderr, /\[qa-verdict-event\] pr=4830 tier=3 guard_rc=\d+ .*ci=null/);
     } finally {
       rmSync(dir, { recursive: true, force: true });

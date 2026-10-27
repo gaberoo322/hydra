@@ -136,6 +136,7 @@ export const MACHINE_WRITES: Readonly<Record<string, string>> = Object.freeze({
   "POST /api/design-concepts/exempt-log": ".github/workflows/design-concept-comment.yml — CI gate record",
   "POST /api/design-concepts": "hydra-grill via scripts/autopilot/grill-artifact.sh — artifact write",
   "POST /api/dispatches/subagent": "SessionStart / SubagentTool hooks + decide.py — dispatch registration",
+  "DELETE /api/dispatches/subagent/:sessionId": "scripts/autopilot/reap.py — dispatch ledger end-of-life (#5142)",
   "POST /api/events/publish": "hydra-digest + hydra-target-build playbooks — event-bus publish",
   "POST /api/holdback/check": "hydra-qa playbook — Outcome Holdback check",
   "POST /api/holdback/revert-failed": "hydra-qa playbook — Outcome Holdback revert",
@@ -149,8 +150,6 @@ export const MACHINE_WRITES: Readonly<Record<string, string>> = Object.freeze({
   "POST /api/memory/subagent-friction": "hydra-dev / hydra-target-build — pattern-memory write",
   "POST /api/usage/session-block": "scripts/autopilot/bootstrap.sh + hydra-autopilot dispatch reference — usage gate",
   "POST /api/usage/dispatch-cost": "scripts/autopilot/reap.py — cost ingestion",
-  "POST /api/operator-channel/brief/send":
-    "send-the-Morning-Brief-now; the brief scheduler (src/operator-channel/brief-scheduler.ts) owns sends. #5047 replaced §9.1's digest send + heartbeat rows with this single route, which has no dashboard control and none is planned (issue #4638 decision)",
 });
 
 /**
@@ -194,13 +193,7 @@ export interface PendingControlWrite {
  * the entry here — emptied by deletion, never restructured. The parity test
  * pins these keys to a fixed ceiling, so the allowance can never grow.
  */
-export const PENDING_CONTROL_WRITES: Readonly<Record<string, PendingControlWrite>> = Object.freeze({
-  "POST /api/holdback/enroll": {
-    ref: "#4633 INV-10 deferral",
-    reason:
-      "failed-state 'Enrol now' control is page-local in dashboard/src/components/pages/work/HoldbackEnrolState.jsx; registering it needs a body-template mechanism in ActionAffordance first (also called by the hydra-qa playbook)",
-  },
-});
+export const PENDING_CONTROL_WRITES: Readonly<Record<string, PendingControlWrite>> = Object.freeze({});
 
 // ---------------------------------------------------------------------------
 // Rung 4 — read routes (ADR-0034 §9.4)

@@ -139,7 +139,7 @@ def _stamp_triage_items(state: dict, items: set[int], now: int, key: str) -> boo
     LONGER in the set is dropped, so the stamp map never grows unbounded across
     a long-running session. SHARED by both sweep lanes, parameterized by state
     key (INV-10). Returns True iff the map changed (so ``main()`` can persist it
-    via ``_persist_state_writeback``, the same change-detection pattern as
+    via the run_ledger diff seam, the same change-detection pattern as
     ``research_force_counter``, INV-12).
     """
     before = state.get(key)

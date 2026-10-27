@@ -186,6 +186,9 @@ interface FakePr {
   // (issue #4048). Optional as in the pre-#4048 fixtures — gh only returns
   // requested fields, and the script's jq guards with `// ""`.
   headRefName?: string;
+  // PR body, served so the per-provider breakdown can parse the drainer's
+  // `worker-provider:` trailer (issue #4841). Optional: legacy PRs have none.
+  body?: string;
 }
 
 interface FakeComment {
@@ -2416,6 +2419,83 @@ describe("glm-beachhead-report.sh — the operator off switch (src/glm/disabled.
         `GLM beachhead: lane DISABLED by operator (sentinel ${sentinel} present) — re-enable: rm ${sentinel} && systemctl --user enable --now hydra-glm-drainer.timer`,
       );
     } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-provider breakdown (issue #4841 INV-10)
+// ---------------------------------------------------------------------------
+
+describe("glm-beachhead-report.sh — per-provider breakdown keyed on the worker-provider trailer (issue #4841)", () => {
+  test("PRs group by their worker-provider trailer; a PR without one is `legacy`; first-pass PASS-rate and churn are per provider", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4841-"));
+    const usage = await usageServer(50);
+    try {
+      const mk = (number: number, body: string | undefined, additions: number) => ({
+        number,
+        createdAt: "2026-10-20T00:00:00Z",
+        additions,
+        deletions: 0,
+        labels: [{ name: "glm-authored" }],
+        headRefName: `worktree-agent-glm-48${number}-1`,
+        body,
+      });
+      const prs = [
+        mk(801, "work\n\nworker-provider: zai\nworker-model: glm-5.2\n", 10),
+        mk(802, "work\n\nworker-provider: kimi\nworker-model: kimi-k2.5\n", 30),
+        mk(803, undefined, 50),
+      ];
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: prs,
+        allPrsForBranchScan: prs,
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+      });
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /GLM beachhead per-provider/);
+      assert.match(r.stdout, /zai: 1 PRs, first-pass PASS-rate n\/a \(0 pass, 0 fail\), churn avg 10/);
+      assert.match(r.stdout, /kimi: 1 PRs, .*churn avg 30/);
+      assert.match(r.stdout, /legacy: 1 PRs, .*churn avg 50/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("no trailer anywhere -> no per-provider line (the single-lane readout is unchanged)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4841-"));
+    const usage = await usageServer(50);
+    try {
+      const pr = {
+        number: 810,
+        createdAt: "2026-10-20T00:00:00Z",
+        additions: 10,
+        deletions: 0,
+        labels: [{ name: "glm-authored" }],
+        headRefName: "worktree-agent-glm-4810-1",
+      };
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [pr],
+        allPrsForBranchScan: [pr],
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+      });
+      assert.equal(r.status, 0);
+      assert.doesNotMatch(r.stdout, /per-provider/);
+    } finally {
+      usage.close();
       rmSync(tmp, { recursive: true, force: true });
     }
   });

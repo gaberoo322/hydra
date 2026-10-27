@@ -352,6 +352,12 @@
       "title": "ADR-0045: The Operator Channel is one outbound-only Telegram module with a closed page list and a daily Morning Brief"
     },
     {
+      "path": "docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md",
+      "tier": "adr",
+      "route": "/docs/adr/0046",
+      "title": "ADR-0046: Two-pass code factory: implement makes it work, the reviewer makes it good"
+    },
+    {
       "path": "docs/agents/domain.md",
       "tier": "living",
       "route": "/docs/ref/agents/domain",

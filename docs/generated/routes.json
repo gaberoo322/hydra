@@ -981,7 +981,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 217
+        "line": 224
       }
     },
     {
@@ -1003,7 +1003,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 238
+        "line": 245
       }
     },
     {
@@ -1025,7 +1025,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 270
+        "line": 277
       }
     },
     {
@@ -1047,7 +1047,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 317
+        "line": 324
       }
     },
     {
@@ -1071,7 +1071,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 379
+        "line": 390
       }
     },
     {
@@ -1093,7 +1093,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 520
+        "line": 539
       }
     },
     {
@@ -1117,7 +1117,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 565
+        "line": 584
       }
     },
     {
@@ -1139,7 +1139,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 583
+        "line": 602
       }
     },
     {
@@ -1161,7 +1161,7 @@
       ],
       "source": {
         "path": "src/api/design-concepts.ts",
-        "line": 618
+        "line": 637
       }
     },
     {
@@ -1180,7 +1180,26 @@
       ],
       "source": {
         "path": "src/api/dispatches.ts",
-        "line": 79
+        "line": 81
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/dispatches/subagent/:sessionId",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/dispatches/subagent/:sessionId",
+      "areas": [
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/",
+        "src/transcript-projection.ts",
+        "src/transcript-store.ts"
+      ],
+      "source": {
+        "path": "src/api/dispatches.ts",
+        "line": 117
       }
     },
     {
@@ -1201,7 +1220,7 @@
       ],
       "source": {
         "path": "src/api/dispatches.ts",
-        "line": 121
+        "line": 141
       }
     },
     {
@@ -1940,7 +1959,7 @@
       ],
       "source": {
         "path": "src/api/operator-channel.ts",
-        "line": 51
+        "line": 56
       }
     },
     {

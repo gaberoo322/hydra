@@ -28,6 +28,7 @@ import {
   epochToIso,
   parseCapCount,
   parseQuotaBlock,
+  providerCapFilePath,
   quotaBlockFilePath,
   runGate,
   type GateDeps,
@@ -45,6 +46,7 @@ import {
   loadDrainerConfig,
 } from "../src/glm/drainer-config.ts";
 import { runDriverMode, type DriverDeps } from "../src/glm/drainer-driver.ts";
+import { DEFAULT_PROVIDERS_PATH, parseWorkerProviders, type WorkerProvider } from "../src/glm/providers.ts";
 
 const NOW_MS = Date.parse("2026-09-30T12:00:00Z");
 const NOW_SEC = Math.floor(NOW_MS / 1000);
@@ -195,7 +197,7 @@ function makeGateDeps(opts: {
 describe("runGate — effect rules over fake deps (issue #4682)", () => {
   test("able: writes the heartbeat once and reports heartbeat=written", async () => {
     const h = makeGateDeps();
-    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written", provider: "zai" });
     assert.equal(h.heartbeats, 1);
   });
 
@@ -231,7 +233,7 @@ describe("runGate — effect rules over fake deps (issue #4682)", () => {
     // getAutopilotPaused() resolves {paused:false} for a corrupt blob.
     // Replaces the whole-script D1 "unparseable response" and jq `//` cases.
     const h = makeGateDeps({ paused: false });
-    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written", provider: "zai" });
   });
 
   test("only paused === true pauses (Anthropic-shaped fields are never consulted)", async () => {
@@ -239,7 +241,7 @@ describe("runGate — effect rules over fake deps (issue #4682)", () => {
     const h = makeGateDeps();
     h.deps.getAutopilotPaused = async () =>
       ({ paused: "yes", emergencyStop: true, weeklyEmergencyStop: true }) as unknown as { paused: boolean };
-    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written", provider: "zai" });
   });
 
   test("cap exhausted at exactly the cap: no heartbeat, detail N/M", async () => {
@@ -261,19 +263,19 @@ describe("runGate — effect rules over fake deps (issue #4682)", () => {
 
   test("stale quota file is deleted and the tick proceeds (able)", async () => {
     const h = makeGateDeps({ files: { [QUOTA_FILE]: String(NOW_SEC - 1000) } });
-    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written", provider: "zai" });
     assert.deepEqual(h.unlinked, [QUOTA_FILE]);
   });
 
   test("non-numeric quota file is deleted and reads as no block", async () => {
     const h = makeGateDeps({ files: { [QUOTA_FILE]: "garbage" } });
-    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written", provider: "zai" });
     assert.deepEqual(h.unlinked, [QUOTA_FILE]);
   });
 
   test("dry-run writes nothing and reports would-write", async () => {
     const h = makeGateDeps({ dryRun: true });
-    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "would-write" });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "would-write", provider: "zai" });
     assert.equal(h.heartbeats, 0);
   });
 
@@ -282,12 +284,14 @@ describe("runGate — effect rules over fake deps (issue #4682)", () => {
     assert.deepEqual(await runGate(failed.deps), {
       able: true,
       heartbeat: "write-failed",
+      provider: "zai",
       detail: "SET failed",
     });
     const threw = makeGateDeps({ heartbeat: "reject" });
     assert.deepEqual(await runGate(threw.deps), {
       able: true,
       heartbeat: "write-failed",
+      provider: "zai",
       detail: "redis down",
     });
   });
@@ -328,7 +332,7 @@ describe("defaultGateDeps — real file effects against a tmp $CAP_DIR", () => {
       const f = quotaBlockFilePath(dir);
       writeFileSync(f, String(Math.floor(Date.now() / 1000) - 1000));
       const line = await runGate({ ...real, getAutopilotPaused: async () => ({ paused: false }) });
-      assert.deepEqual(line, { able: true, heartbeat: "would-write" });
+      assert.deepEqual(line, { able: true, heartbeat: "would-write", provider: "zai" });
       assert.equal(existsSync(f), false, "an expired block file must be deleted on read");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -360,7 +364,7 @@ describe("runDriverMode('gate') — one JSON line, exit 0 on able and on skip", 
     const out = await runDriverMode(["gate"], { ...base, gateDeps: h.deps });
     assert.deepEqual(out, {
       ok: true,
-      line: JSON.stringify({ able: true, heartbeat: "written" }),
+      line: JSON.stringify({ able: true, heartbeat: "written", provider: "zai" }),
       exitCode: 0,
     });
   });
@@ -387,7 +391,9 @@ describe("loadDrainerConfig — same names and defaults as drainer-loop.sh", () 
       timeoutResumeCap: DEFAULT_TIMEOUT_RESUME_CAP,
       worktreeRoot: "/home/gabe/hydra/.claude/worktrees",
       quotaResetTzOffset: "+0800",
+      quotaResetTzOverride: null,
       designConceptUrl: "http://localhost:4000/api/design-concepts",
+      providersFile: DEFAULT_PROVIDERS_PATH,
       disabledFile: null,
     });
   });
@@ -405,6 +411,7 @@ describe("loadDrainerConfig — same names and defaults as drainer-loop.sh", () 
       HYDRA_GLM_DRAINER_QUOTA_RESET_TZ_OFFSET: "+0000",
       HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: "http://x",
       HYDRA_GLM_DISABLED_FILE: "/d",
+      HYDRA_GLM_DRAINER_PROVIDERS_FILE: "/p.json",
     });
     assert.deepEqual(c, {
       repoRoot: "/r",
@@ -416,7 +423,9 @@ describe("loadDrainerConfig — same names and defaults as drainer-loop.sh", () 
       timeoutResumeCap: 4,
       worktreeRoot: "/w",
       quotaResetTzOffset: "+0000",
+      quotaResetTzOverride: "+0000",
       designConceptUrl: "http://x",
+      providersFile: "/p.json",
       disabledFile: "/d",
     });
   });
@@ -499,7 +508,113 @@ describe("gate — the disabled verdict", () => {
   test("runGate: sentinel configured but absent → normal able path", async () => {
     const h = makeGateDeps();
     h.deps.config = { ...h.deps.config, disabledFile: "/sentinel" };
-    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written" });
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written", provider: "zai" });
     assert.equal(h.heartbeats, 1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Worker-provider list (issue #4841)
+// ---------------------------------------------------------------------------
+
+const ZAI_P: WorkerProvider = {
+  id: "zai",
+  baseUrl: "https://api.z.ai/api/anthropic",
+  model: "glm-5.2",
+  tokenEnv: "ANTHROPIC_AUTH_TOKEN",
+  quotaReset: { format: "zai-wallclock", tzOffset: "+0800" },
+};
+const KIMI_P: WorkerProvider = {
+  id: "kimi",
+  baseUrl: "https://api.kimi.example/anthropic",
+  model: "kimi-k2.5",
+  tokenEnv: "KIMI_API_KEY",
+  quotaReset: { format: "fallback-only" },
+};
+function listTextP(providers: unknown[]): string {
+  return JSON.stringify({ providers });
+}
+
+function providerGateDeps(
+  providers: GateDeps["providers"],
+  files: Record<string, string> = {},
+): { deps: GateDeps; unlinked: string[]; heartbeats: () => number } {
+  const unlinked: string[] = [];
+  let hb = 0;
+  const deps: GateDeps = {
+    config: { ...loadDrainerConfig({}), capDir: CAP_DIR, dailyCap: 5 },
+    now: () => NOW_MS,
+    getAutopilotPaused: async () => ({ paused: false }),
+    readFileIfExists: (p) => (p in files ? files[p] : null),
+    unlink: (p) => {
+      unlinked.push(p);
+    },
+    setGlmDrainerHeartbeat: async () => {
+      hb += 1;
+      return { ok: true };
+    },
+    providers,
+  };
+  return { deps, unlinked, heartbeats: () => hb };
+}
+
+const TWO_P = parseWorkerProviders(listTextP([ZAI_P, KIMI_P]));
+
+describe("runGate — per-provider quota blocks (INV-4/5/6)", () => {
+  test("block file names: legacy for zai, suffixed for every other id (INV-5)", () => {
+    assert.equal(quotaBlockFilePath(CAP_DIR), "/cap/hydra-glm-drainer-quota-blocked-until");
+    assert.equal(quotaBlockFilePath(CAP_DIR, "zai"), "/cap/hydra-glm-drainer-quota-blocked-until");
+    assert.equal(quotaBlockFilePath(CAP_DIR, "kimi"), "/cap/hydra-glm-drainer-quota-blocked-until-kimi");
+    assert.match(providerCapFilePath(CAP_DIR, NOW_MS, "kimi"), /daily-cap-2026-09-30-kimi$/);
+  });
+
+  test("provider 1 quota-blocked: the gate passes with provider 2 and writes the heartbeat", async () => {
+    const h = providerGateDeps(TWO_P, { [quotaBlockFilePath(CAP_DIR, "zai")]: `${NOW_SEC + 3600}\n` });
+    const line = await runGate(h.deps);
+    assert.deepEqual(line, { able: true, heartbeat: "written", provider: "kimi" });
+    assert.equal(h.heartbeats(), 1);
+  });
+
+  test("every provider blocked: quota-blocked, detail lists each unblock instant", async () => {
+    const h = providerGateDeps(TWO_P, {
+      [quotaBlockFilePath(CAP_DIR, "zai")]: `${NOW_SEC + 3600}\n`,
+      [quotaBlockFilePath(CAP_DIR, "kimi")]: `${NOW_SEC + 7200}\n`,
+    });
+    const line = await runGate(h.deps);
+    assert.equal(line.able, false);
+    if (line.able === false) {
+      assert.equal(line.reason, "quota-blocked");
+      assert.match(line.detail ?? "", /zai: quota until 2026-09-30T13:00:00Z; kimi: quota until 2026-09-30T14:00:00Z/);
+    }
+    assert.equal(h.heartbeats(), 0, "a skip writes no heartbeat");
+  });
+
+  test("a stale block file is deleted per provider and does not block", async () => {
+    const h = providerGateDeps(TWO_P, { [quotaBlockFilePath(CAP_DIR, "kimi")]: `${NOW_SEC - 10}\n` });
+    const line = await runGate(h.deps);
+    assert.equal(line.able, true);
+    assert.deepEqual(h.unlinked, [quotaBlockFilePath(CAP_DIR, "kimi")]);
+  });
+
+  test("a provider's own dailyCap diverts to the next provider", async () => {
+    const capped = parseWorkerProviders(listTextP([{ ...ZAI_P, dailyCap: 2 }, KIMI_P]));
+    const h = providerGateDeps(capped, { [providerCapFilePath(CAP_DIR, NOW_MS, "zai")]: "2\n" });
+    const line = await runGate(h.deps);
+    assert.equal(line.able && line.provider, "kimi");
+  });
+
+  test("an invalid provider list fails closed: provider-config-invalid, no heartbeat, never a default (INV-4)", async () => {
+    const bad = parseWorkerProviders("{nope");
+    const h = providerGateDeps(bad);
+    const line = await runGate(h.deps);
+    assert.equal(line.able, false);
+    if (line.able === false) assert.equal(line.reason, "provider-config-invalid");
+    assert.equal(h.heartbeats(), 0);
+  });
+
+  test("hand-built deps without a list read as the committed single-z.ai default", async () => {
+    const h = providerGateDeps(undefined);
+    assert.deepEqual(await runGate(h.deps), { able: true, heartbeat: "written", provider: "zai" });
+  });
+});
+

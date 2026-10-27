@@ -41,6 +41,8 @@
  */
 
 import { readFile, stat } from "node:fs/promises";
+import { foreignPrefixesFor, isProvidersFailure, loadWorkerProvidersFromFile } from "../glm/providers.ts";
+import { loadDrainerConfig } from "../glm/drainer-config.ts";
 import type { Stats } from "node:fs";
 import {
   projectsRoot,
@@ -276,6 +278,25 @@ export interface TranscriptParseMemoIo {
 }
 
 /**
+ * The foreign-provider model prefixes, derived from the configured GLM worker
+ * providers (issue #4841 INV-11) — read once per scan at this I/O edge. An
+ * unreadable/invalid list degrades to `undefined` (the pure default `glm-`),
+ * logged loudly: metering must never throw over a drainer config fault.
+ */
+function loadForeignPrefixes(): readonly string[] | undefined {
+  const loaded = loadWorkerProvidersFromFile(
+    loadDrainerConfig(process.env).providersFile ?? "",
+  );
+  if (isProvidersFailure(loaded)) {
+    console.error(
+      `[transcript-scan] worker-provider list invalid — using the default foreign-model prefixes: ${loaded.issues.join("; ")}`,
+    );
+    return undefined;
+  }
+  return foreignPrefixesFor(loaded.providers);
+}
+
+/**
  * Walk the JSONL transcripts under `root`, fire the OAuth meter read
  * concurrently, and return the raw {@link ScanResult} accumulation — WITHOUT
  * computing any quota percentages (that pure math lives in `snapshot-assembly.ts`).
@@ -307,6 +328,8 @@ export async function transcriptScan(
   const cutoff7d = nowMs - WINDOW_7D_MS;
   const cutoff24h = nowMs - WINDOW_24H_MS;
   const cutoff5h = nowMs - WINDOW_5H_MS;
+  const foreignPrefixes = loadForeignPrefixes();
+  const foreignKey = [...(foreignPrefixes ?? [])].sort().join(",");
   const loadMemo = memoIo.load ?? loadTranscriptParseMemo;
   const writeMemo = memoIo.write ?? writeTranscriptParseMemoBatch;
 
@@ -379,6 +402,9 @@ export async function transcriptScan(
   const isMemoEntryUsable = (entry: FileParseMemoEntry): boolean => {
     // An entry from an older parser (issue #5141) is re-parsed, never replayed.
     if (entry.parseVersion !== TRANSCRIPT_PARSE_VERSION) return false;
+    // Foreign flags depend on the configured prefix set (issue #4841): an entry
+    // parsed under a different set is re-parsed, never replayed.
+    if (entry.foreignKey !== foreignKey) return false;
     if (entry.dispatchKind !== null && !isKnownDispatchKind(entry.dispatchKind)) return false;
     for (const e of entry.entries) {
       if (!e.foreign && !isKnownFamily(e.family)) return false;
@@ -486,6 +512,7 @@ export async function transcriptScan(
         }
         return { skill, dispatchKind: kind };
       },
+      { foreignPrefixes },
     );
     for (const m of foreignModels) foreignModelsSeen.add(m);
     for (const m of unknownModels) unknownModelsSeen.add(m);
@@ -497,6 +524,7 @@ export async function transcriptScan(
       size: st.size,
       mtimeMs: st.mtimeMs,
       ...entry,
+      foreignKey,
     });
   }
 

@@ -1403,3 +1403,104 @@ describe("run_termination.py run-tally writers (issue #4551)", () => {
     }
   });
 });
+
+describe("scripts/autopilot/reap.py completion — ends the dispatch ledger row (issue #5142)", () => {
+  /** Async reap run (the stub server lives in this process, so no spawnSync). */
+  function runReapAsync(
+    args: string[],
+    paths: { state: string; log: string },
+    apiBase: string,
+  ): Promise<{ status: number; stdout: string; stderr: string }> {
+    return new Promise((resolveRun) => {
+      const child = spawn(REAP, args, {
+        env: {
+          ...process.env,
+          HYDRA_API_BASE: apiBase,
+          HYDRA_BASE_URL: DEAD_API_BASE,
+          HYDRA_AUTOPILOT_STATE: paths.state,
+          HYDRA_AUTOPILOT_LOG: paths.log,
+          HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+          GH_TOKEN: "invalid-test-token",
+          HYDRA_REAP_WORKTREE_GC: "0",
+          HYDRA_AUTOPILOT_REDIS_CLI: "true",
+          HYDRA_AUTOPILOT_GH_CLI: "false",
+        },
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => (stdout += d));
+      child.stderr.on("data", (d) => (stderr += d));
+      child.on("close", (code) => resolveRun({ status: code ?? -1, stdout, stderr }));
+    });
+  }
+
+  function startStub(deletes: string[]): Promise<{ server: Server; base: string }> {
+    return new Promise((resolveStub) => {
+      const server = createServer((req, res) => {
+        if (req.method === "DELETE") deletes.push(req.url ?? "");
+        req.resume();
+        req.on("end", () => {
+          res.statusCode = 200;
+          res.setHeader("content-type", "application/json");
+          res.end("{}");
+        });
+      });
+      server.listen(0, "127.0.0.1", () => {
+        resolveStub({ server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` });
+      });
+    });
+  }
+
+  test("first reap issues exactly one DELETE; dup_skip issues none", async () => {
+    const tmp = makeTempState();
+    const deletes: string[] = [];
+    const { server, base } = await startStub(deletes);
+    try {
+      writeBaseState(tmp.state);
+      const first = await runReapAsync(["completion", "qa_orch", "hash5142a", "1000", "hydra-qa"], tmp, base);
+      assert.equal(first.status, 0, first.stderr);
+      assert.deepEqual(deletes, ["/api/dispatches/subagent/hash5142a"]);
+      const second = await runReapAsync(["completion", "qa_orch", "hash5142a", "1000", "hydra-qa"], tmp, base);
+      assert.equal(second.status, 0, second.stderr);
+      assert.equal(deletes.length, 1, "a dup_skip must not re-issue the DELETE");
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a #3895 task_id mismatch refusal issues no DELETE", async () => {
+    const tmp = makeTempState();
+    const deletes: string[] = [];
+    const { server, base } = await startStub(deletes);
+    try {
+      writeBaseState(tmp.state, {
+        slots: {
+          dev_orch: null, qa_orch: { skill: "hydra-qa", task_id: "real-occupant", started: "now", partial_tokens: 0 },
+          research_orch: null, dev_target: null, qa_target: null, research_target: null,
+        },
+      });
+      const r = await runReapAsync(["completion", "qa_orch", "stray-id", "1000", "hydra-qa"], tmp, base);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /task_id_mismatch_refused/);
+      assert.deepEqual(deletes, [], "a refused completion must not end the real occupant's row");
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("orchestrator unreachable: exit 0, state still mutated, dispatch_ledger_end_skipped logged", () => {
+    const tmp = makeTempState();
+    try {
+      writeBaseState(tmp.state);
+      const r = runReap(["completion", "qa_orch", "hash5142c", "1000", "hydra-qa"], tmp);
+      assert.equal(r.status, 0, r.stderr);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.deepEqual(s.reaped_task_ids, ["hash5142c"]);
+      assert.match(readFileSync(tmp.log, "utf-8"), /dispatch_ledger_end_skipped task_id=hash5142c/);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});

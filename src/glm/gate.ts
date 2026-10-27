@@ -52,11 +52,26 @@ import { logger } from "../logger.ts";
 import { setGlmDrainerHeartbeat } from "../redis/autopilot.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import { loadDrainerConfig, type DrainerConfig } from "./drainer-config.ts";
+import {
+  DEFAULT_PROVIDERS_PATH,
+  LEGACY_PROVIDER_ID,
+  loadCommittedDefaultProviders,
+  loadWorkerProvidersFromFile,
+  providerAtCap,
+  selectProvider,
+  type ProviderState,
+  type WorkerProvidersResult,
+} from "./providers.ts";
 
 /** A pause read that has not settled by then is treated as paused (curl `--max-time 10`). */
 export const PAUSE_READ_TIMEOUT_MS = 10_000;
 
-type GateReason = "disabled" | "paused" | "cap-exhausted" | "quota-blocked";
+type GateReason =
+  | "disabled"
+  | "paused"
+  | "provider-config-invalid"
+  | "cap-exhausted"
+  | "quota-blocked";
 
 export type GateVerdict = { able: true } | { able: false; reason: GateReason };
 
@@ -64,6 +79,8 @@ export interface GateInput {
   /** The off-switch sentinel exists. Optional: absent reads as lane on. */
   disabled?: boolean;
   paused: boolean;
+  /** The provider list failed to load/validate (issue #4841 INV-4). */
+  providerConfigInvalid?: boolean;
   capCount: number;
   dailyCap: number;
   /** Epoch seconds, or `null` when there is no active block. */
@@ -78,7 +95,13 @@ export interface GateInput {
  * the failure message for a failed heartbeat write or a failed pause read.
  */
 export type GateLine =
-  | { able: true; heartbeat: "written" | "would-write" | "write-failed"; detail?: string }
+  | {
+      able: true;
+      heartbeat: "written" | "would-write" | "write-failed";
+      /** The selected worker provider's id (issue #4841 INV-6). */
+      provider: string;
+      detail?: string;
+    }
   | { able: false; reason: GateReason; detail?: string };
 
 // ---------------------------------------------------------------------------
@@ -89,6 +112,9 @@ export type GateLine =
 export function decideGate(input: GateInput): GateVerdict {
   if (input.disabled === true) return { able: false, reason: "disabled" };
   if (input.paused) return { able: false, reason: "paused" };
+  if (input.providerConfigInvalid === true) {
+    return { able: false, reason: "provider-config-invalid" };
+  }
   if (input.capCount >= input.dailyCap) return { able: false, reason: "cap-exhausted" };
   if (input.quotaBlockedUntil !== null && input.quotaBlockedUntil > input.now) {
     return { able: false, reason: "quota-blocked" };
@@ -101,9 +127,19 @@ export function capFilePath(capDir: string, nowMs: number): string {
   return join(capDir, `hydra-glm-drainer-daily-cap-${new Date(nowMs).toISOString().slice(0, 10)}`);
 }
 
-/** `<capDir>/hydra-glm-drainer-quota-blocked-until`. */
-export function quotaBlockFilePath(capDir: string): string {
-  return join(capDir, "hydra-glm-drainer-quota-blocked-until");
+/**
+ * `<capDir>/hydra-glm-drainer-quota-blocked-until` for the legacy provider id
+ * `zai` (so a live z.ai block survives the cut-over tick, ADR-0040 Decision 3)
+ * and `<capDir>/hydra-glm-drainer-quota-blocked-until-<id>` for every other.
+ */
+export function quotaBlockFilePath(capDir: string, providerId: string = LEGACY_PROVIDER_ID): string {
+  const base = join(capDir, "hydra-glm-drainer-quota-blocked-until");
+  return providerId === LEGACY_PROVIDER_ID ? base : `${base}-${providerId}`;
+}
+
+/** `<capFilePath>-<id>` — a provider's own optional daily-cap counter. */
+export function providerCapFilePath(capDir: string, nowMs: number, providerId: string): string {
+  return `${capFilePath(capDir, nowMs)}-${providerId}`;
 }
 
 /** Cap-file content → count. Missing or non-numeric reads as 0 (bash `^[0-9]+$`). */
@@ -147,6 +183,11 @@ export interface GateDeps {
   /** Epoch milliseconds. */
   now: () => number;
   config: DrainerConfig;
+  /**
+   * The worker-provider list, read at the I/O edge by {@link defaultGateDeps}.
+   * Absent on hand-built deps, which read as the committed default list.
+   */
+  providers?: WorkerProvidersResult;
 }
 
 type PauseRead = { paused: boolean; failure?: string };
@@ -204,16 +245,31 @@ async function gateInner(deps: GateDeps): Promise<GateLine> {
   }
 
   const pause = await readPause(deps);
+  const providersResult = deps.providers ?? loadCommittedDefaultProviders();
   const capCount = parseCapCount(deps.readFileIfExists(capFilePath(config.capDir, nowMs)));
-  const quotaPath = quotaBlockFilePath(config.capDir);
-  const quota = parseQuotaBlock(deps.readFileIfExists(quotaPath), nowSec);
-  if (quota.stale) deps.unlink(quotaPath);
+
+  // Per-provider state: one block file each; a stale file is deleted exactly
+  // as the single z.ai file always was (issue #4841 INV-5).
+  const states: ProviderState[] = [];
+  if (providersResult.ok === true) {
+    for (const provider of providersResult.providers) {
+      const quotaPath = quotaBlockFilePath(config.capDir, provider.id);
+      const quota = parseQuotaBlock(deps.readFileIfExists(quotaPath), nowSec);
+      if (quota.stale) deps.unlink(quotaPath);
+      const providerCount =
+        provider.dailyCap === undefined
+          ? 0
+          : parseCapCount(deps.readFileIfExists(providerCapFilePath(config.capDir, nowMs, provider.id)));
+      states.push({ provider, blockedUntil: quota.until, capCount: providerCount });
+    }
+  }
 
   const verdict = decideGate({
     paused: pause.paused,
+    providerConfigInvalid: providersResult.ok !== true,
     capCount,
     dailyCap: config.dailyCap,
-    quotaBlockedUntil: quota.until,
+    quotaBlockedUntil: null,
     now: nowSec,
   });
 
@@ -223,30 +279,64 @@ async function gateInner(deps: GateDeps): Promise<GateLine> {
         ? { able: false, reason: "paused", detail: pause.failure }
         : { able: false, reason: "paused" };
     }
-    if (verdict.reason === "cap-exhausted") {
-      return { able: false, reason: "cap-exhausted", detail: `${capCount}/${config.dailyCap}` };
+    if (verdict.reason === "provider-config-invalid") {
+      const issues = providersResult.ok === true ? [] : providersResult.issues;
+      return { able: false, reason: "provider-config-invalid", detail: issues.join("; ") };
     }
-    return { able: false, reason: "quota-blocked", detail: epochToIso(quota.until as number) };
+    return { able: false, reason: "cap-exhausted", detail: `${capCount}/${config.dailyCap}` };
   }
+
+  const selection = selectProvider(states, nowSec);
+  if (selection.kind === "none") {
+    return {
+      able: false,
+      reason: selection.reason,
+      detail: describeUnselectable(selection.states, selection.reason, nowSec),
+    };
+  }
+  const provider = selection.provider.id;
 
   // Committed to running this tick: neither paused, cap-exhausted, nor
   // quota-blocked, so the drainer IS "able to author" — heartbeat now.
-  if (config.dryRun) return { able: true, heartbeat: "would-write" };
+  if (config.dryRun) return { able: true, heartbeat: "would-write", provider };
   try {
     const hb = await deps.setGlmDrainerHeartbeat();
-    if (hb?.ok === true) return { able: true, heartbeat: "written" };
+    if (hb?.ok === true) return { able: true, heartbeat: "written", provider };
     const message = hb?.message ?? JSON.stringify(hb);
     logger.warn({ result: hb }, "[glm-gate] heartbeat write failed (tick proceeds)");
-    return { able: true, heartbeat: "write-failed", detail: message };
+    return { able: true, heartbeat: "write-failed", provider, detail: message };
   } catch (err) {
     // A heartbeat failure never blocks authoring (bash write_heartbeat: `return 0`).
     logger.warn({ err }, "[glm-gate] heartbeat write threw (tick proceeds)");
     return {
       able: true,
       heartbeat: "write-failed",
+      provider,
       detail: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+/**
+ * The `detail` of a provider-exhausted skip. A lone quota-blocked provider
+ * keeps today's bare ISO instant (characterisation, INV-1); several providers
+ * list every one's state, e.g.
+ * `zai: quota until 2026-10-22T05:22:45Z; kimi: cap 3/3`.
+ */
+function describeUnselectable(
+  states: readonly ProviderState[],
+  reason: "quota-blocked" | "cap-exhausted",
+  nowSec: number,
+): string {
+  const active = (s: ProviderState) => s.blockedUntil !== null && s.blockedUntil > nowSec;
+  if (states.length === 1 && reason === "quota-blocked") return epochToIso(states[0].blockedUntil as number);
+  return states
+    .map((s) => {
+      if (active(s)) return `${s.provider.id}: quota until ${epochToIso(s.blockedUntil as number)}`;
+      if (providerAtCap(s)) return `${s.provider.id}: cap ${s.capCount}/${s.provider.dailyCap}`;
+      return `${s.provider.id}: available`;
+    })
+    .join("; ");
 }
 
 /**
@@ -268,6 +358,7 @@ function isSkip(v: GateVerdict): v is Extract<GateVerdict, { able: false }> {
  * at import time (INV-12's `loadDrainerConfig` purity).
  */
 export function defaultGateDeps(env: NodeJS.ProcessEnv = process.env): GateDeps {
+  const config = loadDrainerConfig(env);
   return {
     getAutopilotPaused: () => getAutopilotPaused(),
     setGlmDrainerHeartbeat: () => setGlmDrainerHeartbeat(),
@@ -289,6 +380,8 @@ export function defaultGateDeps(env: NodeJS.ProcessEnv = process.env): GateDeps 
       }
     },
     now: () => Date.now(),
-    config: loadDrainerConfig(env),
+    config,
+    // The provider list is read HERE, once, at the I/O edge (issue #4841 INV-2).
+    providers: loadWorkerProvidersFromFile(config.providersFile ?? DEFAULT_PROVIDERS_PATH),
   };
 }

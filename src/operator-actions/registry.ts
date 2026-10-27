@@ -692,6 +692,44 @@ const CONTROL_ENTRIES = [
     doc: DASHBOARD_ADR_DOC,
   },
 
+  // --- /work holdback enrol (issue #5164) -----------------------------------
+  // ADR-0034 §9.1 "holdback enrol (failed state only)": moved here from the
+  // page-local useServerConfirmedWrite control (#4633 INV-10 deferral). The
+  // per-row commitSha/prNumber/tier ride the body via an IN_DASHBOARD_BODY
+  // builder, never route placeholders (BUCKET_CONTEXT.control stays ['id']).
+  {
+    key: "control:work/holdback-enroll",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/holdback/enroll",
+      method: "POST",
+      confirmTier: "confirm-first",
+      label: "Enrol now",
+      preconditions: [{ text: "this enrolment failed", check: "holdback-enrol-failed" }],
+      consequence:
+        "re-attempts the failed Outcome Holdback enrolment for this merge; a successful enrolment arms the post-merge auto-revert watch window",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "curl -s http://localhost:4000/api/holdback/enrolments?limit=25",
+        label: "Read the enrol-state records first",
+        preconditions: [],
+        consequence: "shows each merge's recorded enrol state and attempt reason without changing anything",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-doctor",
+        label: "Diagnose the system first",
+        preconditions: [],
+        consequence: "checks the orchestrator and merge-watch health that enrolment depends on, applying fixes only on request",
+      },
+    ],
+    rationale:
+      "enrolling arms an auto-revert window on a merged change, so ADR-0034 §7 makes it confirm first; it renders only on a failed row (ADR-0034 §9.1) because enrolment is automation and only its failure surfaces.",
+    doc: DASHBOARD_ADR_DOC,
+  },
+
   // --- /health (Health.jsx) -------------------------------------------------
   {
     key: "control:health/pause",
@@ -1002,6 +1040,43 @@ const CONTROL_ENTRIES = [
       "each chore is idempotent and keeps its own time-guard, so a run changes nothing a timer tick would not; the ~5 s undo window costs nothing and no third confirm tier is added (ADR-0034 §8.2).",
     doc: REFERENCE_DOC,
   },
+  // --- /health operator channel (issue #5164) -------------------------------
+  // The route #5047 collapsed ADR-0034 §9.1's "digest send and heartbeat"
+  // rows into. Confirm-first: a delivered send is an outbound message that
+  // cannot be unsent and it stamps last-sent, suppressing today's scheduled
+  // brief; the ~5 s undo window would only cancel before the request is sent.
+  {
+    key: "control:health/brief-send",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/operator-channel/brief/send",
+      method: "POST",
+      confirmTier: "confirm-first",
+      label: "Send brief now",
+      preconditions: [],
+      consequence:
+        "sends the Morning Brief to the Operator Channel now and reports {sent, outcome, at}; a delivered send stamps last-sent, so today's 07:30 scheduled brief is skipped rather than duplicated",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "curl -s http://localhost:4000/api/operator-channel/delivery-health",
+        label: "Read the delivery health first",
+        preconditions: [],
+        consequence: "shows the last brief and page outcomes without sending anything",
+      },
+      {
+        kind: "terminal-skill",
+        command: "journalctl --user -u hydra-orchestrator.service -n 200 --no-pager",
+        label: "Inspect recent logs first",
+        preconditions: [],
+        consequence: "shows what the brief scheduler logged, without changing any state",
+      },
+    ],
+    rationale:
+      "an outbound Telegram message cannot be unsent and the send stamps the daily schedule, so ADR-0034 §7 makes it confirm first; ADR-0034 §9.1 lists the digest send among the registry in-dashboard routes.",
+    doc: REFERENCE_DOC,
+  },
   // --- /now recommendations (issue #5152) ----------------------------------
   // The two routes ADR-0034 §9.1 files as registry in-dashboard
   // "recommendations dismiss and mute-class", shipped page-local by #4634
@@ -1077,6 +1152,54 @@ const CONTROL_ENTRIES = [
     rationale:
       "a mute hides a whole severity class for the rest of the run and no un-mute route exists, so it confirms first — unlike a single dismiss, there is no window in which the operator sees which recommendations it will hide.",
     doc: DASHBOARD_ADR_DOC,
+  },
+  // --- /work design-concept approve (issue #5163) ----------------------------
+  // The DesignConceptQueue approve control, moved off its hand-rolled
+  // checklist. ONE text source, TWO entries: the feed's grill-handoff
+  // alternatives[1] stays prose (the schema admits {text, check} only on
+  // control: entries); test/operator-actions-registry.test.mts pins this
+  // entry's label/preconditions/consequence/route to it in lockstep. The
+  // `{id}` is the anchor ref, resolved per row by DesignConceptQueue.
+  {
+    key: "control:work/design-concept-approve",
+    recommended: {
+      kind: "in-dashboard",
+      route: "/design-concepts/{id}/approve",
+      method: "POST",
+      confirmTier: "confirm-first",
+      label: "Approve draft as-is",
+      preconditions: [
+        { text: "the draft artifact exists in Redis (7-day TTL)", check: "dc-artifact-stored" },
+        {
+          text: "the artifact's status is 'draft' (not already approved, not stale)",
+          check: "dc-status-draft",
+        },
+        {
+          text: "the artifactHash matches the `## hydra-grill handoff` comment on the issue",
+          check: "dc-handoff-hash-matches",
+        },
+      ],
+      consequence: "marks the draft artifact approved despite the unmet gate reasons, unblocking dev_orch dispatch against it",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "bash scripts/autopilot/grill-artifact.sh gate {id}",
+        label: "Re-run the artifact gate first",
+        preconditions: [],
+        consequence: "re-evaluates the stored artifact's gate and prints the reasons without changing anything",
+      },
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Review attention items instead",
+        preconditions: [],
+        consequence: "walks the operator cockpit while the draft stays unapproved",
+      },
+    ],
+    rationale:
+      "approving a draft artifact is not undoable and unblocks dev_orch dispatch, so it confirms first (ADR-0034 §7); the checklist is a UI gate only — POST /design-concepts/:anchorRef/approve stays unconditional (#4633 INV-7).",
+    doc: HYDRA_GRILL_DOC,
   },
 ] satisfies readonly OperatorActionEntryInput[];
 

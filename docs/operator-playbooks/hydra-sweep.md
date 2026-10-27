@@ -43,7 +43,7 @@ Do NOT re-read issue labels at the end — labels change during processing.
 Clean stale workflow labels from closed issues:
 
 ```bash
-for label in needs-qa ready-for-agent in-progress needs-triage blocked needs-research target-backlog; do
+for label in needs-qa ready-for-agent in-progress needs-triage blocked needs-research; do
   gh issue list --repo gaberoo322/hydra --state closed --label "$label" --json number --jq '.[].number'
 done
 ```
@@ -115,21 +115,6 @@ OPEN_PRS=$(gh pr list --repo gaberoo322/hydra --state open \
 Gate strictly on `--state open`. A **closed-unmerged** PR means the prior attempt was abandoned, so the issue SHOULD become `ready-for-agent` again (exactly the #754→#770 handoff); a **merged** PR means the work is done. The sweep report MUST name every suppression and the referencing PR number (e.g. `suppressed: open PR #754 → needs-qa`). The decision is idempotent: re-running the sweep on the same board reaches the same outcome because state is read live from GitHub. This gate is independent of (and does not modify) the merge gate or the autopilot candidate selection — those remain separate defense layers.
 
 ### 2. Group and process
-
-#### `target-backlog` — queue to orchestrator
-For each issue:
-1. Read body, extract concise work description.
-2. Push to work queue: `hydra queue add "<short ref>" -d "From GitHub issue #N. <key details>"`
-3. Comment on issue:
-   ```
-   > *Automated sweep*
-
-   Queued to Hydra work queue. The orchestrator will pick this up as an anchor.
-   ```
-4. Close: `gh issue close $number`
-5. Log action: `target-queue`.
-
-Process all target-backlog before dev work.
 
 #### `needs-qa` — verify completed work
 Invoke `/hydra-qa $number`.

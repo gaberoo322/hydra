@@ -1827,6 +1827,44 @@ describe("GET /design-concepts/:anchorRef/approve-preconditions (#4633 INV-3/INV
     assert.equal(bad.calls.length, 2, "a failed read is retried, never pinned");
   });
 
+  test("every line carries its check id in CONTROL_CHECKS order (#5163 INV-5)", async () => {
+    const { handler } = preRouter({
+      dc: concept(),
+      comments: { ok: true, comments: [handoffComment(DC_HASH_A)] },
+    });
+    const res = await call(handler);
+    assert.deepEqual(
+      res._body.preconditions.map((p: any) => p.check),
+      ["dc-artifact-stored", "dc-status-draft", "dc-handoff-hash-matches"],
+    );
+  });
+
+  test("commentsReadAt: memo hit keeps the first read's time; expiry moves it; no read → null (#5163 INV-2)", async () => {
+    const t0 = Date.parse("2026-10-21T00:00:00Z");
+    const clock = { t: t0 };
+    const ok = preRouter({
+      dc: concept(),
+      comments: { ok: true, comments: [handoffComment(DC_HASH_A)] },
+      clock,
+    });
+    const first = await call(ok.handler);
+    assert.equal(first._body.commentsReadAt, new Date(t0).toISOString());
+    clock.t = t0 + 30_000;
+    const hit = await call(ok.handler);
+    assert.equal(hit._body.commentsReadAt, new Date(t0).toISOString(), "memo hit reports the memo entry's time, not now");
+    assert.equal(hit._body.generatedAt, new Date(t0 + 30_000).toISOString());
+    clock.t = t0 + 61_000;
+    const fresh = await call(ok.handler);
+    assert.equal(fresh._body.commentsReadAt, new Date(t0 + 61_000).toISOString());
+
+    const bad = preRouter({ dc: concept(), comments: { ok: false, error: "gh-failed" } });
+    assert.equal((await call(bad.handler))._body.commentsReadAt, null, "gh failure → null");
+    const missing = preRouter({ dc: null });
+    assert.equal((await call(missing.handler))._body.commentsReadAt, null, "no artifact → null");
+    const nonIssue = preRouter({ dc: concept() });
+    assert.equal((await call(nonIssue.handler, "not-an-issue"))._body.commentsReadAt, null, "non-issue anchor → null");
+  });
+
   test("a target-scope artifact reads its comments on the Target repo", async () => {
     const prev = process.env.HYDRA_TARGET_GITHUB_REPO;
     process.env.HYDRA_TARGET_GITHUB_REPO = "fictional-owner/fictional-target";
@@ -1855,24 +1893,39 @@ describe("structural pins — #4633 design-concept queue + holdback enrol state"
     assert.match(src, /<HoldbackEnrolState \/>/);
   });
 
-  test("DesignConceptQueue.jsx homes both reads and gates ActionAffordance on allOk (INV-5/INV-8/INV-11)", async () => {
+  test("DesignConceptQueue.jsx homes both reads and renders the approve through ControlAffordance (INV-5/INV-8/INV-11; #5163 INV-1/3/7/10)", async () => {
     const src = await readSource(
       "../dashboard/src/components/pages/work/DesignConceptQueue.jsx",
     );
-    assert.match(src, /import \{ ActionAffordance \} from "\.\.\/\.\.\/ActionAffordance\.jsx"/);
+    // #5163 INV-7: the queue renders through the registry control, never the
+    // bare ActionAffordance.
+    assert.equal(/import \{ ActionAffordance \}/.test(src), false, "no bare ActionAffordance import");
+    assert.match(src, /ControlAffordance/);
+    assert.match(src, /useOperatorActions/);
+    assert.match(src, /useCheckedRefresh/);
+    assert.ok(src.includes('"control:work/design-concept-approve"'), "registry control key literal");
+    assert.match(src, /import \{[^}]*\bdesignConceptVerdicts\b[^}]*\} from "[./]+lib\/control-verdicts\.ts"/);
     // The two §9.4 /work homes, as path literals.
     assert.ok(src.includes("`/design-concepts?view=summary"), "paginated list literal");
     assert.ok(src.includes("status=draft"), "draft is the default filter");
     assert.ok(src.includes("`/design-concepts/${anchorRef}`"), "flat single-artifact literal");
     assert.ok(src.includes("`/design-concepts/${anchorRef}/approve-preconditions`"));
-    // Approve mounts only on a fresh, all-✓ read; unproven never enables.
+    // #5163 INV-1: server-driven paging — offset state + nextOffset only.
+    assert.ok(src.includes("&offset=${offset}"), "offset rides the list path");
+    assert.match(src, /nextOffset/);
+    // #5163 INV-1 paging behaviours: Previous, toggle reset, clamp effect, range line.
+    assert.ok(src.includes('data-testid="design-concept-prev-page"'), "prev-page control");
+    assert.ok(src.includes("setOffset(Math.max(0, offset - PAGE_SIZE))"), "Previous steps back one page, clamped at 0");
+    assert.ok(src.includes("setOffset(list.data.nextOffset)"), "Next uses the envelope nextOffset");
+    assert.match(src, /setOffset\(0\);/, "status toggle resets the offset");
+    assert.match(src, /settledTotal <= offset\) setOffset\(0\)/, "out-of-range clamp effect");
+    assert.ok(src.includes("showing {offset + 1}"), "range line");
+    // #5163 INV-3: the comment-read time is page-owned data.
+    assert.match(src, /commentsReadAt/);
     // The checklist's freshness budget is two 60 s polls, and its as-of shows.
     assert.match(src, /freshnessMs: 120_000,\s*itemsKey: "preconditions"/);
     assert.match(src, /<LocalTimestamp ts=\{pre\.data\.generatedAt\}/);
     assert.match(src, /pre\.status === "ready"/);
-    assert.match(src, /pre\.data\?\.allOk === true/);
-    assert.match(src, /enabled \? \(\s*<ActionAffordance action=\{action\} onFired=\{onFired\} \/>/);
-    assert.match(src, /onFired=\{list\.refresh\}/);
     assert.match(src, /row\.status === "draft" &&/);
     // Trust seam + no direct fetch.
     assert.match(src, /usePageItems\(/);
@@ -1880,29 +1933,39 @@ describe("structural pins — #4633 design-concept queue + holdback enrol state"
     assert.equal(/\bfetch\(/.test(src), false);
   });
 
-  test("ActionAffordance.jsx is not extended by this slice — the approve body stays the static map entry (INV-6)", async () => {
+  test("ActionAffordance.jsx: the approve body stays the static map entry; holdback enrol is a context-built body (INV-6, #5164 INV-3)", async () => {
     const src = await readSource("../dashboard/src/components/ActionAffordance.jsx");
     assert.match(src, /"POST \/design-concepts\/:anchor\/approve": \{ by: "operator:dashboard" \}/);
     assert.equal(src.includes("approve-preconditions"), false);
-    assert.equal(src.includes("holdback"), false);
+    // #5164 supersedes the #4633 "no holdback in the affordance" pin: the
+    // per-row body rides the closed IN_DASHBOARD_BODY builder.
+    assert.match(src, /"POST \/holdback\/enroll": \(context\) => \(\{\s*commitSha: context\.commitSha,\s*prNumber: context\.prNumber,\s*tier: context\.tier,?\s*\}\)/);
   });
 
-  test("HoldbackEnrolState.jsx: read-only rows, Enrol now only on failed, server-confirmed body (INV-9/INV-10)", async () => {
+  test("HoldbackEnrolState.jsx: read-only rows, Enrol now only on failed, rendered through ControlAffordance (INV-9/INV-10, #5164 INV-4/INV-5)", async () => {
     const src = await readSource(
       "../dashboard/src/components/pages/work/HoldbackEnrolState.jsx",
     );
     assert.match(src, /usePageItems\("\/holdback\/enrolments\?limit=25"/);
     assert.match(src, /itemsKey: "enrolments"/);
     assert.match(src, /row\.state === "failed" &&/);
-    assert.match(src, /useServerConfirmedWrite\(enrolments\.refresh\)/);
-    assert.match(src, /"\/holdback\/enroll", \{\s*commitSha: row\.commitSha,\s*prNumber: row\.prNumber,\s*tier: row\.tier,\s*\}/);
-    // Confirm-first: arm, then the explicit confirm.
-    assert.match(src, /data-testid="holdback-enrol-arm"/);
-    assert.match(src, /data-testid="holdback-enrol-confirm-yes"/);
-    assert.match(src, /Confirm Enrol now\?/);
-    // Not a feed bucket, not the affordance (deferred to #4638).
+    // The registry control, inside the failed-row branch only.
+    assert.match(src, /import \{[^}]*\bControlAffordance\b[^}]*\} from "[./]+ActionAffordance\.jsx"/);
+    assert.match(src, /controlKey="control:work\/holdback-enroll"/);
+    assert.match(src, /testId="holdback-enrol"/);
+    assert.match(src, /context=\{\{ commitSha: row\.commitSha, prNumber: row\.prNumber, tier: row\.tier \}\}/);
+    assert.match(src, /verdicts=\{enrolVerdicts\(row\)\}/);
+    assert.match(src, /rereadNoun="enrolments"/);
+    const failedBranch = src.slice(src.indexOf('row.state === "failed" && ('));
+    assert.ok(failedBranch.includes("<ControlAffordance"), "the control sits inside the failed-row branch");
+    // The page-local confirm machinery is gone (the affordance owns arm/confirm).
+    assert.equal(src.includes("useServerConfirmedWrite"), false);
+    assert.equal(src.includes("holdback-enrol-confirm-yes"), false);
+    assert.equal(/setArmed|const \[armed/.test(src), false);
+    // A rejected enrol still re-reads (#5164 INV-5).
+    assert.match(src, /if \(!result\.ok\) enrolments\.refresh\(\)/);
+    // Not a feed bucket; no direct fetch.
     assert.equal(/from "[^"]*attention/.test(src), false);
-    assert.equal(/from "[^"]*ActionAffordance/.test(src), false);
     assert.equal(/\bfetch\(/.test(src), false);
   });
 });

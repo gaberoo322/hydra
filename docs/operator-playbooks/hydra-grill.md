@@ -119,6 +119,24 @@ The READ scope depends on the `scope` argument (`orch` or `target`):
 - `scope=orch` → orchestrator vocabulary: `~/hydra/CONTEXT.md` + `~/hydra/docs/adr/`.
 - `scope=target` → target's multi-context vocabulary (see Step 2.target below). Do NOT read `~/hydra/CONTEXT.md` for target anchors — the orchestrator's glossary describes the orchestrator, not the target.
 
+**Resolve ONE `REPO` from the scope argument, before anything below.** The
+anchor issue number lives on the artifact's own repo — `orch` →
+`gaberoo322/hydra`; `target` → `TARGET_GH_REPO` from the same
+`target-config.ts` seam the server's `getTargetGithubRepo()` reads (ADR-0013).
+Shell state does not persist across Bash tool calls, so re-run this snippet in
+every Bash call that uses `$REPO` (Step 2.4 and Step 8):
+
+```bash
+SCOPE="${SCOPE:?unset - set SCOPE to the scope argument (orch|target)}"
+if [ "$SCOPE" = "target" ]; then
+  eval "$(cd ~/hydra && npx tsx scripts/target/print-target-facts.ts --sh)" \
+    || { echo "hydra-grill: target seam unresolved — aborting" >&2; exit 1; }
+  REPO="${TARGET_GH_REPO:?unset - target seam did not export TARGET_GH_REPO}"
+else
+  REPO="gaberoo322/hydra"
+fi
+```
+
 1. **`CONTEXT.md`** (scope=orch) / **target glossaries** (scope=target — Step 2.target).
    Extracts go into `glossaryTerms` only when the term is actually referenced
    by the issue body or comes up during the Q&A loop. Do not stuff the entire
@@ -139,7 +157,7 @@ The READ scope depends on the `scope` argument (`orch` or `target`):
 
 4. **Issue body**:
    ```bash
-   gh issue view "$ANCHOR" --repo gaberoo322/hydra --json title,body,labels
+   gh issue view "$ANCHOR" --repo "$REPO" --json title,body,labels
    ```
 
 5. **Prior-work search** — optional, only when the Q&A loop surfaces a
@@ -439,7 +457,14 @@ anchor issue — no dated queue issue is created (ADR-0034 §8.1, resolution on
 3. References the artifact's `anchorRef` and `artifactHash` so the
    operator can pull the draft from Redis to continue from.
 
-Concrete invocation (parent-context bash):
+**Post to the artifact's own repo (`$REPO`, resolved in Step 2).** `GET
+/design-concepts/:anchorRef/approve-preconditions` reads the handoff comment
+from the Target repo when `dc.scope === 'target'` (pinned in
+`test/work-page.test.mts`), so a handoff posted to the orchestrator repo can
+never turn the /work queue's hash line ✓ for a target-scope draft.
+
+Concrete invocation (parent-context bash; re-run the Step 2 `REPO` snippet in
+this Bash call first):
 
 ```bash
 ANCHOR_NUM="${ANCHOR#issue-}"
@@ -454,12 +479,12 @@ ${GATE_REASONS}
 What was explored: <one-paragraph summary of the Q&A loop's coverage>.
 
 Next step: run \`/grill-with-docs #${ANCHOR_NUM}\` against the draft, or
-re-run \`/hydra-grill ${ANCHOR_NUM} orch\` once the open questions are
+re-run \`/hydra-grill ${ANCHOR_NUM} ${SCOPE}\` once the open questions are
 resolved.
 EOF
 )
-gh issue comment "$ANCHOR_NUM" --repo gaberoo322/hydra --body "$HANDOFF_BODY"
-gh issue edit "$ANCHOR_NUM" --repo gaberoo322/hydra --add-label ready-for-human
+gh issue comment "$ANCHOR_NUM" --repo "$REPO" --body "$HANDOFF_BODY"
+gh issue edit "$ANCHOR_NUM" --repo "$REPO" --add-label ready-for-human
 ```
 
 Never write the handoff as freeform prose — always the `## hydra-grill
