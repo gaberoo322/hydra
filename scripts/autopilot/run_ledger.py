@@ -50,7 +50,8 @@ import tempfile
 
 SCHEMA_VERSION = 2  # the one home of the integer (ADR-0007 handshake)
 DEFAULT_STATE_PATH = "/tmp/hydra-autopilot-state.json"
-CRASH_ENV = "HYDRA_RUN_LEDGER_TEST_CRASH"  # test-only seam: "before-replace"
+CRASH_ENV = "HYDRA_RUN_LEDGER_TEST_CRASH"  # test-only seam: "before-replace" | "before-replace-2nd"
+_persist_calls = 0  # per-process persist counter (drives the "2nd" crash seam)
 
 RESET = "reset-per-run"
 CARRY = "carry-across-relaunch"
@@ -401,6 +402,8 @@ def _ordered(ledger):
 def persist(ledger, path):
     """The ONE state.json writer: temp file in the same directory, then
     os.replace. A crash before the rename leaves the prior file untouched."""
+    global _persist_calls
+    _persist_calls += 1
     _validate(ledger)
     directory = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(prefix=".run-ledger-", dir=directory)
@@ -408,7 +411,8 @@ def persist(ledger, path):
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(_ordered(ledger), fh, indent=2, ensure_ascii=False)
             fh.write("\n")
-        if os.environ.get(CRASH_ENV) == "before-replace":
+        crash_mode = os.environ.get(CRASH_ENV)
+        if crash_mode == "before-replace" or (crash_mode == "before-replace-2nd" and _persist_calls == 2):
             # Test seam: simulate a crash between write and rename. The temp
             # file is deliberately left behind (that is the crash state).
             raise RuntimeError("[run-ledger] simulated crash before replace")

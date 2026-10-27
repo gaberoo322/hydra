@@ -203,8 +203,9 @@ describe("decide CLI persists through the Run Ledger (#5074)", () => {
       assert.equal(readdirSync(dir).filter((f) => f.startsWith(".")).length, 0, "no stray temp files");
       assert.ok(readFileSync(sp, "utf-8").endsWith("\n"));
 
-      // Crash seam: the persist fails loudly but non-fatally; the prior
-      // document stays byte-untouched.
+      // Crash seam (fires on the FIRST persist, the pre-decide turn bump): a
+      // simulated crash is fatal (exit 1) and the prior document stays
+      // byte-identical.
       const sp2 = join(dir, "state2.json");
       writeFileSync(sp2, readFileSync(join(g, "state.json")));
       const bytes = readFileSync(sp2, "utf-8");
@@ -250,6 +251,29 @@ describe("decide CLI Run Ledger seam: persistence + load contract (#5074 INV-5/6
     assert.equal(r.status, 0, r.stderr);
     assert.notDeepEqual(after.red_forward_fix_attempts, before.red_forward_fix_attempts ?? {});
     assert.ok(Object.keys(after.red_forward_fix_attempts).length > 0);
+  });
+
+  test("INV-6: a crash on the post-decide persist leaves the bumped-turn document with none of decide()'s mutations", () => {
+    const dir = mkdtempSync(join(tmpdir(), "decide-seam-crash-"));
+    try {
+      const meta = JSON.parse(readFileSync(join(FORWARD_FIX, "meta.json"), "utf-8"));
+      const sp = join(dir, "state.json");
+      writeFileSync(sp, readFileSync(join(FORWARD_FIX, "state.json")));
+      const before = JSON.parse(readFileSync(sp, "utf-8"));
+      const r = spawnSync(
+        "python3",
+        [DECIDE, `--now=${meta.now}`, "decide", sp, join(FORWARD_FIX, "candidates.json"), join(FORWARD_FIX, "events.json")],
+        { encoding: "utf-8", env: { ...pinnedEnv(), HYDRA_RUN_LEDGER_TEST_CRASH: "before-replace-2nd" } },
+      );
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /RuntimeError: \[run-ledger\] simulated crash before replace/);
+      const after = JSON.parse(readFileSync(sp, "utf-8"));
+      // The first (turn-bump) persist landed; the second (decide-owned) did not.
+      assert.equal(after.turn, before.turn + 1);
+      assert.deepEqual(after.red_forward_fix_attempts ?? {}, before.red_forward_fix_attempts ?? {});
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("INV-5(b) sibling pin: an untouched run writes no decide-owned key beyond the turn bump", () => {
