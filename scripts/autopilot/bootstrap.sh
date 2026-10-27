@@ -1202,6 +1202,16 @@ SLOTS_SEED_RAW=""
 if [ "${ISOLATED_RUN}" != "1" ]; then
   SLOTS_API_BASE="${HYDRA_API_BASE:-http://localhost:4000}"
   SLOTS_SEED_RAW="$(curl -sf --max-time 5 "${SLOTS_API_BASE}/api/autopilot/inflight-slots" 2>/dev/null || echo "")"
+  # Issue #5142: drop any seeded slot the PRIOR run already reaped (its
+  # state.json reaped_task_ids) — read BEFORE `run_ledger.py seed` clobbers the
+  # file. Fail-open: a filter failure keeps the raw payload unchanged.
+  if [ -n "${SLOTS_SEED_RAW}" ] && [ -f "${STATE_PATH}" ]; then
+    SLOTS_FILTERED="$(printf '%s' "${SLOTS_SEED_RAW}" | python3 "$(dirname "$0")/run_termination.py" seed-filter "${STATE_PATH}" || echo "")"
+    case "${SLOTS_FILTERED}" in
+      "{"*) SLOTS_SEED_RAW="${SLOTS_FILTERED}" ;;
+      *) ;;
+    esac
+  fi
 fi
 
 # Redis continuity (ADR-0012 D2, issue #2715) is consulted only under this gate:

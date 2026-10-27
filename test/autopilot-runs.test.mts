@@ -1094,7 +1094,9 @@ describe("deriveInflightSlotSeed (issue #1352)", () => {
     ]);
     assert.deepEqual(Object.keys(seed), ["dev_orch"]);
     assert.equal(seed.dev_orch.skill, "hydra-dev");
-    assert.equal(seed.dev_orch.task_id, "d1", "task_id prefers dispatchId");
+    assert.equal(seed.dev_orch.task_id, "s1", "task_id is the bare agent hash (sessionId) reap keys on (#5142)");
+    assert.equal(seed.dev_orch.worktreeBranch, "d1", "the dispatch branch rides worktreeBranch");
+    assert.equal(seed.dev_orch.dispatch_id, "d1", "the dispatch branch rides dispatch_id");
     assert.equal(seed.dev_orch._source, "inflight-seed");
     assert.equal(
       seed.dev_orch.started_epoch,
@@ -1129,14 +1131,16 @@ describe("deriveInflightSlotSeed (issue #1352)", () => {
       sub({ sessionId: "old", skill: "hydra-dev", dispatchId: "older", startedAt: "2026-06-14T01:00:00.000Z" }),
     ]);
     assert.deepEqual(Object.keys(seed), ["dev_orch"]);
-    assert.equal(seed.dev_orch.task_id, "newest", "the first (newest) row per slot wins");
+    assert.equal(seed.dev_orch.task_id, "new", "the first (newest) row per slot wins");
+    assert.equal(seed.dev_orch.worktreeBranch, "newest");
   });
 
-  test("falls back to sessionId for task_id when dispatchId is empty", () => {
+  test("task_id is the sessionId even when dispatchId is empty (no branch fields)", () => {
     const seed = deriveInflightSlotSeed([
       sub({ sessionId: "sess-id", skill: "hydra-dev", dispatchId: "" }),
     ]);
     assert.equal(seed.dev_orch.task_id, "sess-id");
+    assert.equal(seed.dev_orch.worktreeBranch, undefined);
   });
 
   test("empty input → empty seed (no in-flight subagents)", () => {

@@ -509,7 +509,7 @@ describe("on-subagent-tool-call.sh — subagent-dispatch registration (#2406)", 
 // ===========================================================================
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
-const { registerSubagentDispatch, listActiveSubagentDispatches } = await import(
+const { registerSubagentDispatch, listActiveSubagentDispatches, endSubagentDispatch } = await import(
   "../src/redis/dispatches.ts"
 );
 const { deriveInflightSlotSeed } = await import("../src/autopilot/run-lifecycle-state.ts");
@@ -549,7 +549,27 @@ describe("populated registry → in-flight slot seed is non-empty (#2406 accepta
     const seed = deriveInflightSlotSeed(dispatches);
     assert.ok(seed.dev_orch, "dev_orch (the hydra-dev pipeline class) must be seeded");
     assert.equal(seed.dev_orch.skill, "hydra-dev");
-    assert.equal(seed.dev_orch.task_id, "worktree-agent-feed-t1-dev_orch");
+    assert.equal(seed.dev_orch.task_id, "sess-2406-consumer", "task_id is the bare agent hash (#5142)");
+    assert.equal(seed.dev_orch.worktreeBranch, "worktree-agent-feed-t1-dev_orch");
     assert.equal(seed.dev_orch._source, "inflight-seed");
+  });
+
+  test("an ended (reaped) dispatch is no longer listed or seeded; an un-ended one still is (#5142)", async () => {
+    await registerSubagentDispatch({
+      sessionId: "sess-5142-reaped",
+      skill: "hydra-qa",
+      dispatchId: "worktree-agent-5142-t1-qa_orch",
+      startedAt: "2026-06-23T10:00:00.000Z",
+    });
+    await registerSubagentDispatch({
+      sessionId: "sess-5142-live",
+      skill: "hydra-dev",
+      dispatchId: "worktree-agent-5142-t1-dev_orch",
+      startedAt: "2026-06-23T10:01:00.000Z",
+    });
+    await endSubagentDispatch("sess-5142-reaped");
+    const seed = deriveInflightSlotSeed(await listActiveSubagentDispatches());
+    assert.equal(seed.qa_orch, undefined, "the reaped qa_orch dispatch must not be re-seeded");
+    assert.equal(seed.dev_orch?.task_id, "sess-5142-live", "the in-flight dev_orch dispatch is still carried");
   });
 });

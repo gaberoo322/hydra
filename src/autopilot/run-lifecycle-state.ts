@@ -367,13 +367,17 @@ export function summarizeTerminationHealth(
  * `_rule_idle_fallback`, and when `_rule_orphaned_slots` ages the slot against
  * the subagent wall-clock cap. We carry the real `started_epoch` so a genuinely
  * over-age in-flight subagent is correctly drained via `wait_or_reap` rather
- * than held forever; `task_id` is the subagent's dispatchId (best-effort — the
- * slot-event reap path frees the slot by class name, not by task_id match);
+ * than held forever; `task_id` is the bare agent hash (sessionId) — the id
+ * `reap.py completion` / `stamp-slot.py` key on, so a carried slot reaps cleanly
+ * (issue #5142) — while the dispatchId branch rides `worktreeBranch`/`dispatch_id`;
  * `_source` marks the row as a cross-run seed for debugging.
  */
 export interface InflightSlotSeed {
   skill: string;
   task_id: string;
+  /** Synthesised worktree branch (dispatchId) — decide.py's builder-token chain (#5142). */
+  worktreeBranch?: string;
+  dispatch_id?: string;
   started: string;
   started_epoch: number;
   _source: "inflight-seed";
@@ -417,7 +421,8 @@ export function deriveInflightSlotSeed(
     const startedEpoch = epochFromIsoOrNow(d.startedAt);
     slots[cls.name] = {
       skill: d.skill,
-      task_id: d.dispatchId || d.sessionId,
+      task_id: d.sessionId,
+      ...(d.dispatchId ? { worktreeBranch: d.dispatchId, dispatch_id: d.dispatchId } : {}),
       started: d.startedAt,
       started_epoch: startedEpoch,
       _source: "inflight-seed",

@@ -392,11 +392,11 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1358
+          "line": 1368
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1385
+          "line": 1395
         },
         {
           "path": "scripts/autopilot/dispatch.sh",
@@ -1026,7 +1026,7 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1210
+          "line": 1220
         }
       ],
       "inEnvExample": false,
@@ -1328,7 +1328,7 @@
         },
         {
           "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1356
+          "line": 1366
         },
         {
           "path": "scripts/claude-hooks/agent-dispatch-prompt-guard.sh",

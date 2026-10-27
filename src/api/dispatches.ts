@@ -6,6 +6,7 @@
  * Agent-tool subagent session into the subagent-dispatch registry:
  *
  *   POST  /api/dispatches/subagent
+ *   DELETE /api/dispatches/subagent/:sessionId   (end-of-life, issue #5142)
  *
  * Plus the operator-facing transcript read surface (issue #695, PRD #690):
  *
@@ -29,6 +30,7 @@ import { Router } from "express";
 import { promises as fs } from "node:fs";
 import {
   registerSubagentDispatch,
+  endSubagentDispatch,
   getSubagentDispatch,
   type SubagentDispatch,
 } from "../redis/dispatches.ts";
@@ -105,6 +107,24 @@ export function createDispatchesRouter() {
 
       await registerSubagentDispatch(dispatch);
       return { registered: true, dispatch };
+    });
+  });
+
+  // DELETE /dispatches/subagent/:sessionId — end a subagent dispatch row
+  // (issue #5142). reap.py calls this on every completion so a reaped
+  // dispatch is never re-seeded into the next run's slots by bootstrap's
+  // inflight-slots read. Idempotent: 200 whether or not the row existed.
+  router.delete("/dispatches/subagent/:sessionId", async (req, res) => {
+    const sessionId = (req.params.sessionId || "").trim();
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(sessionId)) {
+      return res.status(400).json({
+        code: "schema-validation-failed",
+        issues: [{ path: ["sessionId"], message: "sessionId must match [A-Za-z0-9._-]{1,128}" }],
+      });
+    }
+    return isolateAggregator(res, "api/dispatches/subagent/end", async () => {
+      await endSubagentDispatch(sessionId);
+      return { ended: true, sessionId };
     });
   });
 

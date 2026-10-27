@@ -1180,7 +1180,26 @@
       ],
       "source": {
         "path": "src/api/dispatches.ts",
-        "line": 79
+        "line": 81
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/dispatches/subagent/:sessionId",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/dispatches/subagent/:sessionId",
+      "areas": [
+        "src/logger.ts",
+        "src/redis/",
+        "src/schemas/",
+        "src/transcript-projection.ts",
+        "src/transcript-store.ts"
+      ],
+      "source": {
+        "path": "src/api/dispatches.ts",
+        "line": 117
       }
     },
     {
@@ -1201,7 +1220,7 @@
       ],
       "source": {
         "path": "src/api/dispatches.ts",
-        "line": 121
+        "line": 141
       }
     },
     {
