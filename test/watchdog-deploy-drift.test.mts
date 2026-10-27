@@ -73,7 +73,7 @@ function runWatchdog(env: Record<string, string>): { status: number; stdout: str
     // and it keeps the env identical to what these cases always passed.
     env: {
       ...process.env,
-      HYDRA_AUTOPILOT_WATCHDOG_FORCE_SERVICE_INACTIVE: "1",
+      HYDRA_AUTOPILOT_STATE: join(tmpdir(), "hydra-5095-no-such-state.json"),
       ...env,
       PATH: process.env.PATH ?? "",
     },

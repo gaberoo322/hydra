@@ -1,268 +1,245 @@
 /**
- * Regression tests for the consolidated scripts/hydra-watchdog.sh:
+ * Regression tests for the consolidated watchdog:
  *
- *   1. the AUTOPILOT WEDGE block (issue #508) — top-level describe below.
+ *   1. the AUTOPILOT WEDGE check (issue #508, ported to TypeScript in #5095) —
+ *      pure decideWedge + runWedge over an in-memory fake of the typed ports
+ *      (src/watchdog/ports.ts). No PATH-shimmed binaries, no env test hooks, no
+ *      source-text slicing, and the fake's sleep resolves immediately so the
+ *      30 s SIGKILL grace is never waited.
  *   2. the SERVICE LIVENESS block's boot-window guards (issue #4415) — second
- *      top-level describe at the end of this file.
- *
- * History (issue #865): the wedge logic used to live in its own script,
- * scripts/hydra-autopilot-watchdog.sh, which this test pinned. The
- * watchdog consolidation (#705/#727/#728) merged that logic verbatim into
- * the AUTOPILOT WEDGE block of scripts/hydra-watchdog.sh and the standalone
- * script was retired. This test was re-pointed at the wedge block; the env
- * hooks and log-line assertions transfer verbatim because the block
- * preserves the source logic.
- *
- * The wedge is an external liveness checker for the autopilot Claude Code
- * session. It observes /tmp/hydra-autopilot-heartbeat.txt (refreshed every
- * decision turn by scripts/autopilot/heartbeat.py) and kills the autopilot
- * PID if the heartbeat goes stale past the threshold AND the recorded PID
- * is still alive AND the systemd unit is meant to be active. The four
- * scenarios pinned below are exactly the cases enumerated in the issue's
- * acceptance criteria.
- *
- * The block honours two off-by-default env vars solely for this test
- * (documented in the script header):
- *   HYDRA_AUTOPILOT_WATCHDOG_FORCE_SERVICE_INACTIVE=1
- *       Skip the real `systemctl is-active` call so we don't depend on
- *       systemd state on the test host.
- *   HYDRA_AUTOPILOT_WATCHDOG_DRY_RUN=1
- *       In the stale + alive-PID branch, log "would-SIGTERM ${PID}" and
- *       exit 0 instead of actually killing. Necessary because the live
- *       PID we feed the script in test 4 is the test process itself.
- *
- * All cases run with HYDRA_AUTOPILOT_STATE / HYDRA_AUTOPILOT_HEARTBEAT
- * pointed at fresh per-test tempfiles to avoid colliding with any live
- * autopilot on the dev machine.
- *
- * Isolation method (issue #865): the consolidated script's entry point runs
- * three blocks on every tick — run_service_liveness (which issues real
- * `systemctl --user restart`), run_autopilot_wedge, and run_deploy_drift
- * (which can exec deploy.sh). Running hydra-watchdog.sh bare in a test would
- * fire all three with dangerous side effects on a degraded host. Instead we
- * strip the three top-level dispatch lines AND the trailing `exit 0`, source
- * the remaining function definitions, and call run_autopilot_wedge directly —
- * exercising ONLY the wedge block.
+ *      top-level describe at the end of this file, still driving
+ *      scripts/hydra-watchdog.sh under PATH-shimmed stubs (slice 2 ports it).
  */
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   WATCHDOG_SPAWN_TIMEOUT_MS,
   throwIfTimedOut,
 } from "./_helpers/watchdog-timeouts.mts";
+import { decideWedge, runWedge, type WedgeConfig } from "../src/watchdog/wedge.ts";
+import { createProductionWedgeDeps, parseStatePid, readHeartbeatMtimeEpoch, type WedgeDeps, type WedgeState } from "../src/watchdog/ports.ts";
+import {
+  STALLED_DISPATCH_AGE_S,
+  WATCHDOG_KILL_GRACE_S,
+  WATCHDOG_WEDGE_KILL_THRESHOLD_S,
+  WEDGE_AGE_THRESHOLD_S,
+  staleThresholdsJson,
+} from "../src/autopilot/stale-thresholds.ts";
+import { signalPid } from "../src/process-probe.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
+const WATCHDOG_CLI = join(REPO_ROOT, "scripts", "hydra-watchdog.ts");
 
-function makeTemp(): { dir: string; state: string; heartbeat: string } {
-  const dir = mkdtempSync(join(tmpdir(), "autopilot-watchdog-test-"));
-  return {
-    dir,
-    state: join(dir, "state.json"),
-    heartbeat: join(dir, "heartbeat.txt"),
+interface FakeScript {
+  serviceActive?: boolean | null;
+  state?: WedgeState;
+  /** PID liveness per call: the Nth pidAlive() call returns aliveSeq[N] (last value repeats). */
+  aliveSeq?: boolean[];
+  heartbeatAgeS?: number | null;
+  /** What signal() reports (delivered?). */
+  signalOk?: boolean;
+}
+
+/** In-memory fake implementing the same ports as production; records every effect. */
+function makeFake(script: FakeScript) {
+  const NOW = 1_800_000_000;
+  const signals: Array<{ pid: number; sig: string }> = [];
+  const sleeps: number[] = [];
+  const lines: string[] = [];
+  let aliveCalls = 0;
+  const deps: WedgeDeps = {
+    host: {
+      serviceActive: async () => (script.serviceActive === undefined ? true : script.serviceActive),
+      pidAlive: () => {
+        const seq = script.aliveSeq ?? [true];
+        return seq[Math.min(aliveCalls++, seq.length - 1)];
+      },
+      signal: (pid, sig) => {
+        signals.push({ pid, sig });
+        return script.signalOk ?? true;
+      },
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    },
+    files: {
+      readStatePid: () => script.state ?? { pid: 4242, runId: "test-run" },
+      heartbeatEpochS: () => {
+        const age = script.heartbeatAgeS === undefined ? 10 : script.heartbeatAgeS;
+        return age === null ? null : NOW - age;
+      },
+    },
+    clock: { nowEpochS: () => NOW },
+    log: (l) => lines.push(l),
   };
+  return { deps, signals, sleeps, lines };
 }
 
-/**
- * Run ONLY the AUTOPILOT WEDGE block of the consolidated watchdog.
- *
- * We strip the three top-level dispatch invocations and the trailing
- * `exit 0` from scripts/hydra-watchdog.sh, source the remaining function
- * definitions, then call run_autopilot_wedge in isolation. This prevents
- * run_service_liveness (real `systemctl restart`) and run_deploy_drift
- * (can exec deploy.sh) from firing during the test.
- */
-// The wedge block itself does no network I/O in test mode, but this test
-// still spawns a real bash process on a shared host — under CI load (4
-// runners sharing one box with the orchestrator, Redis, and live autopilot
-// subagents) even a trivial spawn can stall well past a tight ceiling. Match
-// the generous, honest ceiling used by the other two watchdog test files
-// (issue #4044) rather than independently tuning a tighter one that keeps
-// getting blown by ambient host load.
+const CONFIG: WedgeConfig = {
+  unit: "hydra-autopilot.service",
+  statePath: "/unused/state.json",
+  heartbeatPath: "/unused/heartbeat.txt",
+  thresholdS: 1500,
+  graceS: 30,
+};
 
-function runWatchdog(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
-  const driver = [
-    "set -euo pipefail",
-    // Source only the function definitions: strip the three top-level
-    // dispatch lines and the final `exit 0` so sourcing defines functions
-    // without running any block.
-    `source <(sed -e '/^run_service_liveness$/d' -e '/^run_autopilot_wedge$/d' -e '/^run_deploy_drift$/d' -e '/^exit 0$/d' ${JSON.stringify(WATCHDOG)})`,
-    "run_autopilot_wedge",
-  ].join("\n");
-  const r = spawnSync("bash", ["-c", driver], {
-    env: { ...process.env, ...env, PATH: process.env.PATH ?? "" },
-    encoding: "utf-8",
-    timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
-  });
-  throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "watchdog wedge block");
-  return {
-    status: r.status ?? -1,
-    stdout: r.stdout ?? "",
-    stderr: r.stderr ?? "",
-  };
-}
-
-function writeState(path: string, pid: number, runId = "test-run"): void {
-  writeFileSync(path, JSON.stringify({ pid, run_id: runId, slots: {}, signal_last_fired: {} }));
-}
-
-function touchAgo(path: string, secondsAgo: number): void {
-  // Create the file (mtime = now), then backdate by utime call.
-  if (!existsSync(path)) {
-    writeFileSync(path, "test heartbeat\n");
-  }
-  const t = Math.floor(Date.now() / 1000) - secondsAgo;
-  utimesSync(path, t, t);
-}
-
-describe("scripts/hydra-watchdog.sh — AUTOPILOT WEDGE block", () => {
-  test("watchdog script exists, is executable, and defines run_autopilot_wedge", () => {
-    assert.ok(existsSync(WATCHDOG), "watchdog script missing");
-    const mode = spawnSync("stat", ["-c", "%a", WATCHDOG], { encoding: "utf-8" }).stdout.trim();
-    assert.match(mode, /^[7][0-9]{2}$/, `watchdog not executable (mode=${mode})`);
-    // The wedge logic must live in the consolidated script as a function so
-    // this test can source-and-isolate it without firing the other blocks.
-    const grep = spawnSync("grep", ["-q", "run_autopilot_wedge()", WATCHDOG]);
-    assert.equal(grep.status, 0, "run_autopilot_wedge() not found in hydra-watchdog.sh");
+describe("watchdog wedge check (decideWedge / runWedge over fake ports)", () => {
+  test("service inactive short-circuits FIRST: no signal even with stale heartbeat + live PID", async () => {
+    const f = makeFake({ serviceActive: false, heartbeatAgeS: 3600 });
+    const v = await runWedge(f.deps, CONFIG);
+    assert.equal(v.kind, "service-inactive");
+    assert.deepEqual(f.signals, []);
+    assert.match(f.lines.join("\n"), /hydra-autopilot-watchdog: service not active/);
   });
 
-  test("service inactive (hand-launched / deliberate stop): exits 0, takes no action", () => {
-    const tmp = makeTemp();
+  test("service probe failure (null) is fail-open: leave alone, never kill", async () => {
+    const f = makeFake({ serviceActive: null, heartbeatAgeS: 3600 });
+    const v = await runWedge(f.deps, CONFIG);
+    assert.equal(v.kind, "service-inactive");
+    assert.deepEqual(f.signals, []);
+    assert.match(f.lines.join("\n"), /WARN service state unknown/);
+  });
+
+  test("fresh heartbeat + live PID: healthy, no signal", async () => {
+    const f = makeFake({ heartbeatAgeS: 10 });
+    const v = await runWedge(f.deps, CONFIG);
+    assert.equal(v.kind, "healthy");
+    assert.deepEqual(f.signals, []);
+    assert.match(f.lines.join("\n"), /healthy \(heartbeat 10s ago, PID 4242, run_id=test-run, threshold=1500s\)/);
+  });
+
+  test("stale heartbeat + dead PID: leaves alone (bootstrap will recover)", async () => {
+    const f = makeFake({ aliveSeq: [false], heartbeatAgeS: 3600 });
+    const v = await runWedge(f.deps, CONFIG);
+    assert.equal(v.kind, "pid-dead");
+    assert.deepEqual(f.signals, []);
+    assert.match(f.lines.join("\n"), /state PID 4242 is dead/);
+  });
+
+  test("missing state file and pid-less state leave alone", async () => {
+    const missing = await runWedge(makeFake({ state: "missing" }).deps, CONFIG);
+    assert.equal(missing.kind, "no-state");
+    const noPid = await runWedge(makeFake({ state: "no-pid" }).deps, CONFIG);
+    assert.equal(noPid.kind, "no-pid");
+  });
+
+  test("heartbeat missing is a WARN, not a kill trigger", async () => {
+    const f = makeFake({ heartbeatAgeS: null });
+    const v = await runWedge(f.deps, CONFIG);
+    assert.equal(v.kind, "heartbeat-missing");
+    assert.deepEqual(f.signals, []);
+    assert.match(f.lines.join("\n"), /WARN heartbeat file missing/);
+  });
+
+  test("negative heartbeat age (clock skew) leaves alone", async () => {
+    const f = makeFake({ heartbeatAgeS: -5 });
+    const v = await runWedge(f.deps, CONFIG);
+    assert.equal(v.kind, "clock-skew");
+    assert.deepEqual(f.signals, []);
+    assert.match(f.lines.join("\n"), /negative heartbeat age/);
+  });
+
+  test("age exactly at the threshold is wedged (strict < for healthy)", () => {
+    const v = decideWedge({
+      serviceActive: true,
+      state: { pid: 1, runId: "r" },
+      pidAlive: true,
+      heartbeatAgeS: 1500,
+      thresholdS: 1500,
+    });
+    assert.equal(v.kind, "wedged");
+  });
+
+  test("stale + live PID + active service: SIGTERM, full grace, then SIGKILL when still alive", async () => {
+    // pidAlive calls: #1 gather (alive), #2 after-grace (still alive)
+    const f = makeFake({ aliveSeq: [true, true], heartbeatAgeS: 1800 });
+    const v = await runWedge(f.deps, CONFIG);
+    assert.equal(v.kind, "wedged");
+    assert.deepEqual(f.signals, [
+      { pid: 4242, sig: "SIGTERM" },
+      { pid: 4242, sig: "SIGKILL" },
+    ]);
+    assert.deepEqual(f.sleeps, [30_000]);
+    const out = f.lines.join("\n");
+    assert.match(out, /STALE — heartbeat 1800s ago \(> 1500s\), PID 4242 alive \(run_id=test-run\) — sending SIGTERM/);
+    assert.match(out, /grace expired \(30s\)/);
+  });
+
+  test("PID exited during grace: SIGTERM only, no SIGKILL", async () => {
+    const f = makeFake({ aliveSeq: [true, false], heartbeatAgeS: 1800 });
+    await runWedge(f.deps, CONFIG);
+    assert.deepEqual(f.signals, [{ pid: 4242, sig: "SIGTERM" }]);
+    assert.match(f.lines.join("\n"), /PID 4242 exited cleanly after SIGTERM/);
+  });
+
+  test("a failed SIGTERM is logged and the grace/escalation still proceeds", async () => {
+    const f = makeFake({ aliveSeq: [true, false], heartbeatAgeS: 1800, signalOk: false });
+    await runWedge(f.deps, CONFIG);
+    assert.match(f.lines.join("\n"), /kill -TERM 4242 failed/);
+  });
+
+  test("parseStatePid maps state.json shapes to WedgeState", () => {
+    assert.deepEqual(parseStatePid('{"pid": 77, "run_id": "abc"}'), { pid: 77, runId: "abc" });
+    assert.deepEqual(parseStatePid('{"pid": 77}'), { pid: 77, runId: "unknown" });
+    assert.equal(parseStatePid('{"pid": 0}'), "no-pid");
+    assert.equal(parseStatePid("{}"), "no-pid");
+    assert.equal(parseStatePid("not json"), "no-pid");
+  });
+
+  test("signalPid refuses invalid pids and reports ESRCH as false without throwing", () => {
+    assert.equal(signalPid(0, "SIGTERM"), false);
+    assert.equal(signalPid(Number.NaN, "SIGKILL"), false);
+    assert.equal(signalPid(2_000_000_000, "SIGTERM"), false);
+  });
+
+  test("heartbeat age comes from file mtime, not an in-file epoch token (SIGKILL gate)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hydra-5095-hb-"));
     try {
-      // Even with a stale heartbeat + live PID, the inactive-service gate
-      // must short-circuit before any other check.
-      writeState(tmp.state, process.pid);
-      touchAgo(tmp.heartbeat, 3600);
-
-      const r = runWatchdog({
-        HYDRA_AUTOPILOT_STATE: tmp.state,
-        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
-        HYDRA_AUTOPILOT_WATCHDOG_FORCE_SERVICE_INACTIVE: "1",
-      });
-
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-      assert.match(r.stdout, /service not active/, `expected "service not active" log line, got: ${r.stdout}`);
+      const hb = join(dir, "heartbeat.txt");
+      // Token claims a very old epoch; mtime is "now". The bash block read mtime.
+      writeFileSync(hb, "epoch=1000000000\n");
+      const mtimeS = 1_800_000_000;
+      utimesSync(hb, mtimeS, mtimeS);
+      assert.equal(readHeartbeatMtimeEpoch(hb), mtimeS);
+      const deps = createProductionWedgeDeps(() => {});
+      assert.equal(deps.files.heartbeatEpochS(hb), mtimeS);
     } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("fresh heartbeat + live PID: exits 0, logs healthy", () => {
-    const tmp = makeTemp();
-    try {
-      // Test process is guaranteed alive. Heartbeat freshly touched.
-      writeState(tmp.state, process.pid);
-      touchAgo(tmp.heartbeat, 10); // 10s ago, well under 1500s threshold
-
-      const r = runWatchdog({
-        HYDRA_AUTOPILOT_STATE: tmp.state,
-        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
-        // No FORCE_SERVICE_INACTIVE — we want to pretend the service is
-        // active. On the dev machine the real autopilot service may or may
-        // not be active. Either way, this branch (healthy heartbeat) is
-        // gated AFTER the service check, so we need the service to look
-        // active. Hack: force-inactive=0 explicitly (no-op default), but
-        // also set the threshold absurdly high so a real-host autopilot
-        // wouldn't accidentally satisfy "stale" either.
-        STALE_THRESHOLD_SECONDS: "1500",
-        // We can't reliably mock `systemctl is-active` without a wrapper.
-        // Instead, we set a second test-mode hook: if the service IS
-        // inactive on the test host, the watchdog exits 0 with "not
-        // active" and we'd never reach "healthy". Accept either log line
-        // as success for this test — both indicate "no kill issued."
-      });
-
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-      assert.match(
-        r.stdout,
-        /(healthy|service not active)/,
-        `expected "healthy" or "service not active" log line, got: ${r.stdout}`,
-      );
-      // Critical invariant: must NOT have decided to kill.
-      assert.doesNotMatch(r.stdout, /STALE|would-SIGTERM|SIGTERM|SIGKILL/, `must not signal kill, got: ${r.stdout}`);
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
+  test("missing heartbeat file still reads as null (sibling shape: WARN, never kill)", () => {
+    assert.equal(readHeartbeatMtimeEpoch(join(tmpdir(), "hydra-5095-no-such-heartbeat.txt")), null);
+    const f = makeFake({ heartbeatAgeS: null });
+    return runWedge(f.deps, CONFIG).then((v) => {
+      assert.equal(v.kind, "heartbeat-missing");
+      assert.deepEqual(f.signals, []);
+    });
   });
 
-  test("stale heartbeat + dead PID: exits 0, leaves alone (bootstrap will recover)", () => {
-    const tmp = makeTemp();
-    try {
-      // Use a PID guaranteed to not exist: PID 2_000_000_000 is far above
-      // the kernel's default pid_max on Linux.
-      const deadPid = 2_000_000_000;
-      writeState(tmp.state, deadPid);
-      touchAgo(tmp.heartbeat, 3600); // 1h stale — would trigger kill if PID were alive
-
-      const r = runWatchdog({
-        HYDRA_AUTOPILOT_STATE: tmp.state,
-        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
-        // Test-mode override is OFF here so we'd hit systemctl — but
-        // even if service is reported active, the dead-PID branch trips
-        // before kill. To keep the test deterministic across hosts
-        // (where the service may not be active), accept both log lines.
-      });
-
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-      assert.match(
-        r.stdout,
-        /(PID .* is dead|service not active|leaving alone)/,
-        `expected dead-PID or inactive log line, got: ${r.stdout}`,
-      );
-      // Critical invariant: must NOT have decided to kill.
-      assert.doesNotMatch(r.stdout, /STALE|would-SIGTERM|SIGTERM|SIGKILL/, `must not signal kill, got: ${r.stdout}`);
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
+  test("os-heartbeat.ts declares no threshold and does not import stale-thresholds", () => {
+    const src = readFileSync(join(REPO_ROOT, "src", "autopilot", "os-heartbeat.ts"), "utf-8");
+    assert.doesNotMatch(src, /stale-thresholds/);
   });
 
-  test("stale heartbeat + live PID + service active: would-SIGTERM (dry-run)", () => {
-    const tmp = makeTemp();
-    try {
-      // Live PID = the test process itself. Heartbeat 30 min stale.
-      writeState(tmp.state, process.pid);
-      touchAgo(tmp.heartbeat, 1800); // 30 min > 25 min threshold
-
-      const r = runWatchdog({
-        HYDRA_AUTOPILOT_STATE: tmp.state,
-        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
-        // DRY_RUN ensures we don't actually kill the test process.
-        // We can't directly force the service-active branch without
-        // root/systemd, but the script's logic only reaches the kill
-        // branch if `systemctl is-active --quiet` returns 0. On the dev
-        // host the autopilot service is typically active. If it is NOT
-        // active on this host, the test will skip with a clear message.
-        HYDRA_AUTOPILOT_WATCHDOG_DRY_RUN: "1",
-      });
-
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-
-      const serviceActiveCheck = spawnSync("systemctl", ["--user", "is-active", "--quiet", "hydra-autopilot.service"]);
-      if (serviceActiveCheck.status !== 0) {
-        // Service is inactive on this host — script took the early-exit
-        // path. That's a valid pass for tests 1-3 but we need the kill
-        // path for test 4. Document and pass.
-        assert.match(
-          r.stdout,
-          /service not active/,
-          `service inactive on this host; expected early-exit log, got: ${r.stdout}`,
-        );
-        return;
-      }
-
-      // Service is active — script must have reached the wedge branch.
-      assert.match(r.stdout, /STALE/, `expected STALE log line, got: ${r.stdout}`);
-      assert.match(r.stdout, /would-SIGTERM/, `expected would-SIGTERM dry-run log, got: ${r.stdout}`);
-      // Must NOT have actually issued a real kill (test process is still alive).
-      assert.ok(process.pid > 0, "test process should still be alive (DRY_RUN must not actually kill)");
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
+  test("threshold values are unchanged and the CLI `thresholds` subcommand prints the module", () => {
+    assert.equal(WATCHDOG_WEDGE_KILL_THRESHOLD_S, 1500);
+    assert.equal(WATCHDOG_KILL_GRACE_S, 30);
+    assert.equal(WEDGE_AGE_THRESHOLD_S, 600);
+    assert.equal(STALLED_DISPATCH_AGE_S, 900);
+    const r = spawnSync("node", ["--no-warnings", "--experimental-strip-types", WATCHDOG_CLI, "thresholds"], {
+      encoding: "utf-8",
+      timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
+    });
+    throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "watchdog CLI thresholds");
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), staleThresholdsJson());
   });
 });
 
@@ -586,6 +563,78 @@ describe("scripts/hydra-watchdog.sh — SERVICE LIVENESS boot-window guards (iss
       assert.equal(probe.status, 0, `deploy lock must be free after a watchdog tick, got exit ${probe.status}`);
     } finally {
       rmSync(h.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("scripts/hydra-watchdog.sh — run_wedge_cli resolves node without the unit PATH (issue #5095)", () => {
+  /** A PATH holding only the coreutils the resolver needs — deliberately NO node. */
+  function nodelessPathDir(root: string): string {
+    const bin = join(root, "bin");
+    mkdirSync(bin, { recursive: true });
+    for (const tool of ["bash", "timeout", "ls", "sort", "tail", "dirname", "env"]) {
+      const found = spawnSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf-8" }).stdout.trim();
+      if (found) symlinkSync(found, join(bin, tool));
+    }
+    return bin;
+  }
+
+  function runWedgeCli(env: Record<string, string>, path: string): { status: number; stdout: string } {
+    const r = spawnSync("bash", ["-c", 'set -euo pipefail; source "$1"; run_wedge_cli', "wedge-cli", WATCHDOG], {
+      env: { ...env, PATH: path },
+      encoding: "utf-8",
+      timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
+    });
+    throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "watchdog run_wedge_cli");
+    return { status: r.status ?? -1, stdout: r.stdout ?? "" };
+  }
+
+  function fakeNode(path: string): void {
+    mkdirSync(resolve(path, ".."), { recursive: true });
+    writeFileSync(path, '#!/bin/sh\necho "FAKE-NODE-RAN $*"\n');
+    chmodSync(path, 0o755);
+  }
+
+  test("node absent from PATH: falls back to the newest ~/.nvm node and actually runs the CLI", () => {
+    const root = mkdtempSync(join(tmpdir(), "wedge-cli-nvm-"));
+    try {
+      fakeNode(join(root, "home", ".nvm", "versions", "node", "v20.0.0", "bin", "node"));
+      fakeNode(join(root, "home", ".nvm", "versions", "node", "v22.23.1", "bin", "node"));
+      const r = runWedgeCli({ HOME: join(root, "home"), HYDRA_ROOT: REPO_ROOT }, nodelessPathDir(root));
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /FAKE-NODE-RAN --experimental-strip-types .*scripts\/hydra-watchdog\.ts wedge/);
+      assert.doesNotMatch(r.stdout, /WARN/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("HYDRA_WATCHDOG_NODE override wins over the nvm fallback", () => {
+    const root = mkdtempSync(join(tmpdir(), "wedge-cli-override-"));
+    try {
+      fakeNode(join(root, "home", ".nvm", "versions", "node", "v22.23.1", "bin", "node"));
+      const pinned = join(root, "pinned", "node");
+      fakeNode(pinned);
+      const r = runWedgeCli(
+        { HOME: join(root, "home"), HYDRA_ROOT: REPO_ROOT, HYDRA_WATCHDOG_NODE: pinned },
+        nodelessPathDir(root),
+      );
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /FAKE-NODE-RAN/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("sibling shape: no node anywhere is still a WARN and rc 0, never a failed tick", () => {
+    const root = mkdtempSync(join(tmpdir(), "wedge-cli-none-"));
+    try {
+      mkdirSync(join(root, "home"), { recursive: true });
+      const r = runWedgeCli({ HOME: join(root, "home"), HYDRA_ROOT: REPO_ROOT }, nodelessPathDir(root));
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /WARN node not found/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

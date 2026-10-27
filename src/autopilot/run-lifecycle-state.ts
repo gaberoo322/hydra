@@ -50,19 +50,17 @@ import {
 } from "../redis/dispatches.ts";
 import { isLivePid, type LivePidCheck } from "../process-probe.ts";
 import { numberOrDefault } from "./run-result.ts";
+import { WEDGE_AGE_THRESHOLD_S } from "./stale-thresholds.ts";
+
+// Re-exported so run-projections.ts's import path is unchanged (issue #5095).
+export { WEDGE_AGE_THRESHOLD_S };
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/**
- * Wedge-detection threshold for the read-time projection. Older
- * autopilots that hang past 10 minutes between turns get
- * `wedge_likely: true` on the response. Read-only metadata; no Redis
- * write follows. Consumed by `projectRunView` in `run-projections.ts`
- * (imported DOWN from this leaf).
- */
-export const WEDGE_AGE_THRESHOLD_S = 600;
+// WEDGE_AGE_THRESHOLD_S (read-time `wedge_likely` flag) is declared in
+// ./stale-thresholds.ts — the one home for the autopilot stale thresholds.
 
 // ---------------------------------------------------------------------------
 // Lifecycle truth (issue #888) — pure derivation
