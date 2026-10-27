@@ -199,7 +199,7 @@ def _bump_qa_orch_stall_tracker(state: dict, head: int) -> bool:
     re-open under the same number starts back at 0 rather than inheriting a
     stale count, and a non-head issue merely present in the set is never
     touched. Returns True iff the map changed (so `main()` can persist it via
-    `_persist_state_writeback`, the same change-detection pattern as
+    the run_ledger diff seam, the same change-detection pattern as
     `target_triage_item_stamps` / `research_force_counter` — invariant 6).
     """
     before = state.get("qa_orch_item_attempts")

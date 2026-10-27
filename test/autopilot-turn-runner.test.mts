@@ -72,11 +72,11 @@ function baseState(): Record<string, unknown> {
     dispatches: 5,
     cumulative_tokens: 656630,
     idle_turns: 0,
-    research_force_counter: 0,
+    research_force_counter: {},
     burned_classes: [],
     failure_log: [],
     reaped_task_ids: [],
-    dev_resume_pending: null,
+    dev_resume_pending: [],
     // The live bootstrap.sh shape (keys decide.py reads).
     limits: {
       token_budget: 10_000_000,

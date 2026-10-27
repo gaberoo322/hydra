@@ -40,6 +40,7 @@ import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   copyFileSync,
   mkdtempSync,
   readFileSync,
@@ -174,5 +175,175 @@ describe("decide.py — golden-plan regression suite (issue #2713)", () => {
     replayFixture(dir);
     const after = readFileSync(join(dir, "state.json"), "utf-8");
     assert.equal(after, before, "replayFixture leaked the CLI turn-bump write-back into the checked-in fixture");
+  });
+});
+
+describe("decide CLI persists through the Run Ledger (#5074)", () => {
+  test("INV-6/8: decide CLI persists through the ledger; crash before replace leaves the prior document intact", () => {
+    const dir = mkdtempSync(join(tmpdir(), "decide-ledger-"));
+    try {
+      const g = join(GOLDEN_ROOT, "idle-triage-sweep");
+      const meta = JSON.parse(readFileSync(join(g, "meta.json"), "utf-8"));
+      const run = (statePath: string, env: Record<string, string> = {}) =>
+        spawnSync(
+          "python3",
+          [DECIDE, `--now=${meta.now}`, "decide", statePath, join(g, "candidates.json"), join(g, "events.json")],
+          {
+            encoding: "utf-8",
+            env: { PATH: process.env.PATH ?? "", HYDRA_AUTOPILOT_RUN_END_POST: "off", ...env },
+          },
+        );
+      const sp = join(dir, "state.json");
+      writeFileSync(sp, readFileSync(join(g, "state.json")));
+      const before = JSON.parse(readFileSync(sp, "utf-8"));
+      const ok = run(sp);
+      assert.equal(ok.status, 0, ok.stderr);
+      const after = JSON.parse(readFileSync(sp, "utf-8"));
+      assert.equal(after.turn, before.turn + 1);
+      assert.equal(readdirSync(dir).filter((f) => f.startsWith(".")).length, 0, "no stray temp files");
+      assert.ok(readFileSync(sp, "utf-8").endsWith("\n"));
+
+      // Crash seam (fires on the FIRST persist, the pre-decide turn bump): a
+      // simulated crash is fatal (exit 1) and the prior document stays
+      // byte-identical.
+      const sp2 = join(dir, "state2.json");
+      writeFileSync(sp2, readFileSync(join(g, "state.json")));
+      const bytes = readFileSync(sp2, "utf-8");
+      const crashed = run(sp2, { HYDRA_RUN_LEDGER_TEST_CRASH: "before-replace" });
+      // The seam raises a RuntimeError (a true process crash, not an OSError),
+      // so the CLI exits non-zero with the simulated-crash traceback.
+      assert.equal(crashed.status, 1);
+      assert.match(crashed.stderr, /RuntimeError: \[run-ledger\] simulated crash before replace/);
+      assert.equal(readFileSync(sp2, "utf-8"), bytes);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("decide CLI Run Ledger seam: persistence + load contract (#5074 INV-5/6/7)", () => {
+  const FIXTURE = join(GOLDEN_ROOT, "idle-triage-sweep");
+  const FORWARD_FIX = join(GOLDEN_ROOT, "red-pr-forward-fix");
+
+  /** Run the decide CLI over a mutated copy of a golden state; return result + parsed state after. */
+  function runCli(fixtureDir: string, mutate: (s: Record<string, unknown>) => void = () => {}) {
+    const dir = mkdtempSync(join(tmpdir(), "decide-seam-"));
+    try {
+      const meta = JSON.parse(readFileSync(join(fixtureDir, "meta.json"), "utf-8"));
+      const before = JSON.parse(readFileSync(join(fixtureDir, "state.json"), "utf-8"));
+      mutate(before);
+      const sp = join(dir, "state.json");
+      writeFileSync(sp, JSON.stringify(before, null, 2));
+      const seeded = JSON.parse(readFileSync(sp, "utf-8"));
+      const r = spawnSync(
+        "python3",
+        [DECIDE, `--now=${meta.now}`, "decide", sp, join(fixtureDir, "candidates.json"), join(fixtureDir, "events.json")],
+        { encoding: "utf-8", env: pinnedEnv() },
+      );
+      return { r, before: seeded, after: JSON.parse(readFileSync(sp, "utf-8")) };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("INV-5(a): a selector mutation of a decide-owned key persists through the decide CLI", () => {
+    const { r, before, after } = runCli(FORWARD_FIX);
+    assert.equal(r.status, 0, r.stderr);
+    assert.notDeepEqual(after.red_forward_fix_attempts, before.red_forward_fix_attempts ?? {});
+    assert.ok(Object.keys(after.red_forward_fix_attempts).length > 0);
+  });
+
+  test("INV-6: a crash on the post-decide persist leaves the bumped-turn document with none of decide()'s mutations", () => {
+    const dir = mkdtempSync(join(tmpdir(), "decide-seam-crash-"));
+    try {
+      const meta = JSON.parse(readFileSync(join(FORWARD_FIX, "meta.json"), "utf-8"));
+      const sp = join(dir, "state.json");
+      writeFileSync(sp, readFileSync(join(FORWARD_FIX, "state.json")));
+      const before = JSON.parse(readFileSync(sp, "utf-8"));
+      const r = spawnSync(
+        "python3",
+        [DECIDE, `--now=${meta.now}`, "decide", sp, join(FORWARD_FIX, "candidates.json"), join(FORWARD_FIX, "events.json")],
+        { encoding: "utf-8", env: { ...pinnedEnv(), HYDRA_RUN_LEDGER_TEST_CRASH: "before-replace-2nd" } },
+      );
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /RuntimeError: \[run-ledger\] simulated crash before replace/);
+      const after = JSON.parse(readFileSync(sp, "utf-8"));
+      // The first (turn-bump) persist landed; the second (decide-owned) did not.
+      assert.equal(after.turn, before.turn + 1);
+      assert.deepEqual(after.red_forward_fix_attempts ?? {}, before.red_forward_fix_attempts ?? {});
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("INV-5(b) sibling pin: an untouched run writes no decide-owned key beyond the turn bump", () => {
+    const { r, before, after } = runCli(FIXTURE);
+    assert.equal(r.status, 0, r.stderr);
+    const changed = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(
+      (k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]),
+    );
+    assert.deepEqual(changed, ["turn"]);
+  });
+
+  test("INV-6: an OSError on persist degrades to ONE loud stderr line and the turn still emits a plan (exit 0)", (t) => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      t.skip("root ignores directory permissions");
+      return;
+    }
+    const dir = mkdtempSync(join(tmpdir(), "decide-ro-"));
+    try {
+      const meta = JSON.parse(readFileSync(join(FIXTURE, "meta.json"), "utf-8"));
+      const sp = join(dir, "state.json");
+      writeFileSync(sp, readFileSync(join(FIXTURE, "state.json")));
+      const bytes = readFileSync(sp, "utf-8");
+      chmodSync(dir, 0o500); // mkstemp in the state's directory now raises PermissionError
+      const r = spawnSync(
+        "python3",
+        [DECIDE, `--now=${meta.now}`, "decide", sp, join(FIXTURE, "candidates.json"), join(FIXTURE, "events.json")],
+        { encoding: "utf-8", env: pinnedEnv() },
+      );
+      chmodSync(dir, 0o700);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /ledger persist to .* failed .*turn-counter bump \(#1769\) NOT persisted this turn/);
+      assert.ok(JSON.parse(r.stdout).actions, "a plan is still emitted");
+      assert.equal(readFileSync(sp, "utf-8"), bytes, "the prior document is untouched");
+    } finally {
+      chmodSync(dir, 0o700);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("INV-7: previously tolerated legacy shapes now exit 1 naming key + expected + actual (no catch around load)", () => {
+    const cases: Array<[string, unknown, RegExp]> = [
+      ["research_force_counter", 0, /type mismatch for research_force_counter: expected object, got int/],
+      ["dev_resume_pending", null, /type mismatch for dev_resume_pending: expected array, got null/],
+      ["dev_target_resume_inflight", "781401d5-t3-dev_target", /type mismatch for dev_target_resume_inflight: expected object, got str/],
+    ];
+    for (const [key, value, pattern] of cases) {
+      const { r } = runCli(FIXTURE, (s) => {
+        s[key] = value;
+      });
+      assert.equal(r.status, 1, `${key}=${JSON.stringify(value)} must abort the turn loudly`);
+      assert.match(r.stderr, pattern);
+      assert.equal(r.stdout, "", "no plan is emitted when the ledger load fails");
+    }
+  });
+
+  test("INV-7 sibling pin: the four `any` blob rows are intentionally unvalidated (malformed blobs still load)", () => {
+    const { r } = runCli(FIXTURE, (s) => {
+      for (const k of ["usage_eligibility", "emergency_brake", "target_risk_surface", "class_stats"]) {
+        s[k] = "not-an-object";
+      }
+    });
+    assert.equal(r.status, 0, r.stderr);
+  });
+
+  test("INV-7 sibling pin: the well-typed shapes of the same keys load and exit 0", () => {
+    const { r } = runCli(FIXTURE, (s) => {
+      s.research_force_counter = {};
+      s.dev_resume_pending = [];
+      s.dev_target_resume_inflight = {};
+    });
+    assert.equal(r.status, 0, r.stderr);
   });
 });

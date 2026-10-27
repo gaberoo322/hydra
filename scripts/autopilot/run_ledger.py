@@ -50,7 +50,8 @@ import tempfile
 
 SCHEMA_VERSION = 2  # the one home of the integer (ADR-0007 handshake)
 DEFAULT_STATE_PATH = "/tmp/hydra-autopilot-state.json"
-CRASH_ENV = "HYDRA_RUN_LEDGER_TEST_CRASH"  # test-only seam: "before-replace"
+CRASH_ENV = "HYDRA_RUN_LEDGER_TEST_CRASH"  # test-only seam: "before-replace" | "before-replace-2nd"
+_persist_calls = 0  # per-process persist counter (drives the "2nd" crash seam)
 
 RESET = "reset-per-run"
 CARRY = "carry-across-relaunch"
@@ -77,6 +78,11 @@ _TYPES = {
     "bool": lambda v: isinstance(v, bool),
     "object": lambda v: isinstance(v, dict),
     "array": lambda v: isinstance(v, list),
+    # #4213 legacy container: slot_events is a bare array OR {events,last_id}.
+    # Collector-injected blobs decide() deliberately tolerates malformed
+    # (fail-safe/fail-open per signal), so the ledger must not reject them.
+    "any": lambda v: True,
+    "array|object": lambda v: isinstance(v, (list, dict)),
 }
 
 
@@ -86,11 +92,12 @@ class LedgerTypeError(Exception):
     code = "ledger-type-mismatch"
 
 
-def _row(name, typ, default, carry, seeded=True, **policy):
+def _row(name, typ, default, carry, seeded=True, decide_owned=False, **policy):
     """One field-table row. `policy` holds the carry data of a carried row:
     `normalize(value, ctx)`, an optional `mirror` descriptor, and the exception
     tuples the row's normalizer reads."""
-    row = {"name": name, "type": typ, "default": default, "carry": carry, "seeded": seeded}
+    row = {"name": name, "type": typ, "default": default, "carry": carry, "seeded": seeded,
+           "decide_owned": decide_owned}
     row.update(policy)
     return row
 
@@ -224,18 +231,18 @@ FIELDS = [
     _row("reaped_task_ids", "array", [], RESET),
     _row("failure_log", "array", [], RESET),
     _row(
-        "research_force_counter", "object", REQUIRED, MIRRORED,
+        "research_force_counter", "object", REQUIRED, MIRRORED, decide_owned=True,
         normalize=_norm_research_force_counter,
         mirror={"key": REDIS_RESEARCH_FORCE_KEY, "kind": "string",
                 "seed": _seed_research_force_from_mirror},
     ),
-    _row("dev_resume_pending", "array", REQUIRED, CARRY, normalize=_norm_dev_resume_pending),
-    _row("zero_yield_backoff", "object", REQUIRED, CARRY, normalize=_norm_zero_yield_backoff),
+    _row("dev_resume_pending", "array", REQUIRED, CARRY, decide_owned=True, normalize=_norm_dev_resume_pending),
+    _row("zero_yield_backoff", "object", REQUIRED, CARRY, decide_owned=True, normalize=_norm_zero_yield_backoff),
     # Source is the orchestrator's durable in-flight ledger (#1352), not the
     # prior file: carry_forward never reads prior `slots`.
     _row("slots", "object", REQUIRED, SEEDED),
     _row(
-        "signal_last_fired", "object", REQUIRED, MIRRORED,
+        "signal_last_fired", "object", REQUIRED, MIRRORED, decide_owned=True,
         normalize=_norm_signal_last_fired,
         mirror={"key": REDIS_SIGNAL_LAST_FIRED_KEY, "kind": "hash",
                 "seed": _seed_signal_from_mirror},
@@ -249,26 +256,34 @@ FIELDS = [
     # Written by other autopilot scripts after seed (not seeded here).
     _row("idle_turns", "int", 0, RESET, seeded=False),
     _row("turn_snapshot", "object", {}, RESET, seeded=False),
-    _row("slot_events", "array", [], RESET, seeded=False),
+    _row("slot_events", "array|object", [], RESET, seeded=False),
     _row("slot_history", "array", [], RESET, seeded=False),
-    _row("quota_baseline", "object", {}, RESET, seeded=False),
+    _row("quota_baseline", "object", {}, RESET, seeded=False, decide_owned=True),
     _row("warnings", "array", [], RESET, seeded=False),
     _row("scout_spend_usd_today", "number", 0, RESET, seeded=False),
-    _row("dev_target_resume_inflight", "object", {}, RESET, seeded=False),
-    _row("target_triage_item_stamps", "object", {}, RESET, seeded=False),
-    _row("orch_triage_item_stamps", "object", {}, RESET, seeded=False),
-    _row("qa_orch_item_attempts", "object", {}, RESET, seeded=False),
-    _row("red_forward_fix_attempts", "object", {}, RESET, seeded=False),
+    _row("dev_target_resume_inflight", "object", {}, RESET, seeded=False, decide_owned=True),
+    _row("target_triage_item_stamps", "object", {}, RESET, seeded=False, decide_owned=True),
+    _row("orch_triage_item_stamps", "object", {}, RESET, seeded=False, decide_owned=True),
+    _row("target_stale_item_stamps", "object", {}, RESET, seeded=False, decide_owned=True),
+    _row("target_blocked_item_stamps", "object", {}, RESET, seeded=False, decide_owned=True),
+    _row("qa_orch_item_attempts", "object", {}, RESET, seeded=False, decide_owned=True),
+    _row("red_forward_fix_attempts", "object", {}, RESET, seeded=False, decide_owned=True),
     _row("dev_target_spend_usd_cycle", "number", 0, RESET, seeded=False),
-    # turn_snapshot BLOB_FIELDS
-    _row("usage_eligibility", "object", {}, RESET, seeded=False),
-    _row("emergency_brake", "object", {}, RESET, seeded=False),
-    _row("target_risk_surface", "object", {}, RESET, seeded=False),
-    _row("class_stats", "object", {}, RESET, seeded=False),
-    _row("candidate_exclusions", "object", {}, RESET, seeded=False),
+    # turn_snapshot BLOB_FIELDS (type "any": decide() fails safe on malformed blobs)
+    _row("usage_eligibility", "any", {}, RESET, seeded=False),
+    _row("emergency_brake", "any", {}, RESET, seeded=False),
+    _row("target_risk_surface", "any", {}, RESET, seeded=False),
+    _row("class_stats", "any", {}, RESET, seeded=False),
+    _row("candidate_exclusions", "array", [], RESET, seeded=False),
 ]
 
 _FIELD_BY_NAME = {f["name"]: f for f in FIELDS}
+
+# Keys decide() may mutate in-memory that main() must persist post-decide
+# (the former nine hand-listed snapshot/compare pairs, #5074). slot_events /
+# slot_history / failure_log are deliberately absent (#4213 INV-8); `turn` is
+# written by the pre-decide bump.
+DECIDE_OWNED_KEYS = frozenset(f["name"] for f in FIELDS if f["decide_owned"])
 
 _IDENTITY_KEYS = ("pid", "run_id")
 _LIMIT_SEED_KEYS = tuple(f["name"] for f in LIMITS if f["default"] is REQUIRED)
@@ -321,9 +336,11 @@ def resolve_state_path(env=None):
     return env.get("HYDRA_AUTOPILOT_STATE") or DEFAULT_STATE_PATH
 
 
-def load(path):
+def load(path, fill_defaults=True):
     """Read the document. Raises LedgerTypeError on a declared-key type
-    mismatch; an undeclared top-level key is preserved and warned once."""
+    mismatch; an undeclared top-level key is preserved and warned once.
+    fill_defaults=False leaves absent keys absent (the decide read path: a
+    key a tracker never wrote must never appear in state.json, #5074)."""
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
     if not isinstance(doc, dict):
@@ -335,10 +352,30 @@ def load(path):
     for key in doc:
         if key not in _FIELD_BY_NAME:
             sys.stderr.write("[run-ledger] WARN undeclared key %s preserved\n" % key)
-    for f in FIELDS:
-        if f["name"] not in doc and f["default"] is not REQUIRED:
-            doc[f["name"]] = json.loads(json.dumps(f["default"]))
+    if fill_defaults:
+        for f in FIELDS:
+            if f["name"] not in doc and f["default"] is not REQUIRED:
+                doc[f["name"]] = json.loads(json.dumps(f["default"]))
     return doc
+
+
+_ABSENT = "\x00absent"  # sentinel string: an ABSENT key differs from {} / null
+
+
+def snapshot(ledger):
+    """Serialised view of the decide-owned keys. An absent key is encoded
+    distinctly from {} / null so a selector that first CREATES a key is a diff."""
+    return {
+        k: (json.dumps(ledger[k], sort_keys=True) if k in ledger else _ABSENT)
+        for k in sorted(DECIDE_OWNED_KEYS)
+    }
+
+
+def diff(baseline, ledger):
+    """Sorted list of decide-owned keys whose value changed since `baseline`
+    (a snapshot() taken before decide())."""
+    after = snapshot(ledger)
+    return [k for k in sorted(DECIDE_OWNED_KEYS) if baseline.get(k) != after[k]]
 
 
 def _ordered(ledger):
@@ -365,6 +402,8 @@ def _ordered(ledger):
 def persist(ledger, path):
     """The ONE state.json writer: temp file in the same directory, then
     os.replace. A crash before the rename leaves the prior file untouched."""
+    global _persist_calls
+    _persist_calls += 1
     _validate(ledger)
     directory = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(prefix=".run-ledger-", dir=directory)
@@ -372,7 +411,8 @@ def persist(ledger, path):
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(_ordered(ledger), fh, indent=2, ensure_ascii=False)
             fh.write("\n")
-        if os.environ.get(CRASH_ENV) == "before-replace":
+        crash_mode = os.environ.get(CRASH_ENV)
+        if crash_mode == "before-replace" or (crash_mode == "before-replace-2nd" and _persist_calls == 2):
             # Test seam: simulate a crash between write and rename. The temp
             # file is deliberately left behind (that is the crash state).
             raise RuntimeError("[run-ledger] simulated crash before replace")

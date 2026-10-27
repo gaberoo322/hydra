@@ -293,7 +293,7 @@ def check_inv010(actions: list[dict], state: dict) -> None:
     against BOTH halves of that bug class re-surfacing.
 
     Timing: Phase 4 runs after the `decide` CLI has already written the
-    plan-time stamp back to the state file (`_persist_state_writeback`),
+    plan-time stamp back to the state file (the run_ledger diff seam),
     so the counter read here INCLUDES this plan's own forced dispatches.
     Both arms are calibrated to that post-stamp view:
 

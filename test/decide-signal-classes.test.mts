@@ -2004,10 +2004,11 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     );
   });
 
-  test("(k) malformed records fail open and still dispatch", () => {
+  test("(k) malformed OBJECT records (missing/empty branch) fail open and still dispatch; non-object records fail loud at load (see decide-golden INV-7)", () => {
     const head = "feature/e27e7887-t1-dev_target";
     const malformed: unknown[] = [
-      "feature/e27e7887-t1-dev_target", // a string, not a dict
+      // A non-object record is rejected at the Run Ledger load (declared
+      // `object` key, #5074 INV-7), so it never reaches the selector.
       { token: "781401d5-t3-dev_target", pr: 99 }, // no branch
       { token: "781401d5-t3-dev_target", branch: "", pr: 99 }, // empty branch
     ];
