@@ -16,5 +16,10 @@ Type=oneshot
 EnvironmentFile=-%h/hydra/.env
 ExecStart=%h/.local/bin/hydra-watchdog.sh
 Environment=HOME=%h
+# Same PATH as hydra-pace-gate / hydra-glm-drainer. Without it the unit
+# inherits systemd's default PATH (no ~/.local/bin), so every `gh` call the
+# watchdog makes resolved to the stale apt /usr/bin/gh (2.46.0) instead of
+# the maintained ~/.local/bin/gh — the 2026-05-15 stale-gh incident class.
+Environment=PATH=%h/.npm-global/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 StandardOutput=journal
 StandardError=journal
