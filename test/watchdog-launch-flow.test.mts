@@ -1353,4 +1353,15 @@ describe("scripts/hydra-watchdog.sh — Operator Channel CLI delivery (ADR-0045 
     assert.doesNotMatch(unit, /^EnvironmentFile=%h/m, "must stay optional (dash-prefixed): a missing .env never silences the other blocks");
     assert.doesNotMatch(unit, /^Environment=TELEGRAM_/m, "never an inline credential");
   });
+
+  test("hydra-watchdog.service puts %h/.local/bin ahead of /usr/bin so `gh` resolves to the maintained binary, not apt's stale one", () => {
+    const unit = readFileSync(join(REPO_ROOT, "scripts", "systemd", "hydra-watchdog.service"), "utf-8");
+    const m = unit.match(/^Environment=PATH=(.+)$/m);
+    assert.ok(m, "expected an explicit Environment=PATH= (systemd's default PATH has no ~/.local/bin)");
+    const dirs = m[1].split(":");
+    const local = dirs.indexOf("%h/.local/bin");
+    const usr = dirs.indexOf("/usr/bin");
+    assert.ok(local >= 0, "PATH must include %h/.local/bin");
+    assert.ok(usr < 0 || local < usr, "%h/.local/bin must precede /usr/bin");
+  });
 });
