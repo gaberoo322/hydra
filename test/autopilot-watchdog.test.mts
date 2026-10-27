@@ -14,7 +14,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -563,6 +563,78 @@ describe("scripts/hydra-watchdog.sh — SERVICE LIVENESS boot-window guards (iss
       assert.equal(probe.status, 0, `deploy lock must be free after a watchdog tick, got exit ${probe.status}`);
     } finally {
       rmSync(h.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("scripts/hydra-watchdog.sh — run_wedge_cli resolves node without the unit PATH (issue #5095)", () => {
+  /** A PATH holding only the coreutils the resolver needs — deliberately NO node. */
+  function nodelessPathDir(root: string): string {
+    const bin = join(root, "bin");
+    mkdirSync(bin, { recursive: true });
+    for (const tool of ["bash", "timeout", "ls", "sort", "tail", "dirname", "env"]) {
+      const found = spawnSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf-8" }).stdout.trim();
+      if (found) symlinkSync(found, join(bin, tool));
+    }
+    return bin;
+  }
+
+  function runWedgeCli(env: Record<string, string>, path: string): { status: number; stdout: string } {
+    const r = spawnSync("bash", ["-c", 'set -euo pipefail; source "$1"; run_wedge_cli', "wedge-cli", WATCHDOG], {
+      env: { ...env, PATH: path },
+      encoding: "utf-8",
+      timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
+    });
+    throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "watchdog run_wedge_cli");
+    return { status: r.status ?? -1, stdout: r.stdout ?? "" };
+  }
+
+  function fakeNode(path: string): void {
+    mkdirSync(resolve(path, ".."), { recursive: true });
+    writeFileSync(path, '#!/bin/sh\necho "FAKE-NODE-RAN $*"\n');
+    chmodSync(path, 0o755);
+  }
+
+  test("node absent from PATH: falls back to the newest ~/.nvm node and actually runs the CLI", () => {
+    const root = mkdtempSync(join(tmpdir(), "wedge-cli-nvm-"));
+    try {
+      fakeNode(join(root, "home", ".nvm", "versions", "node", "v20.0.0", "bin", "node"));
+      fakeNode(join(root, "home", ".nvm", "versions", "node", "v22.23.1", "bin", "node"));
+      const r = runWedgeCli({ HOME: join(root, "home"), HYDRA_ROOT: REPO_ROOT }, nodelessPathDir(root));
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /FAKE-NODE-RAN --experimental-strip-types .*scripts\/hydra-watchdog\.ts wedge/);
+      assert.doesNotMatch(r.stdout, /WARN/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("HYDRA_WATCHDOG_NODE override wins over the nvm fallback", () => {
+    const root = mkdtempSync(join(tmpdir(), "wedge-cli-override-"));
+    try {
+      fakeNode(join(root, "home", ".nvm", "versions", "node", "v22.23.1", "bin", "node"));
+      const pinned = join(root, "pinned", "node");
+      fakeNode(pinned);
+      const r = runWedgeCli(
+        { HOME: join(root, "home"), HYDRA_ROOT: REPO_ROOT, HYDRA_WATCHDOG_NODE: pinned },
+        nodelessPathDir(root),
+      );
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /FAKE-NODE-RAN/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("sibling shape: no node anywhere is still a WARN and rc 0, never a failed tick", () => {
+    const root = mkdtempSync(join(tmpdir(), "wedge-cli-none-"));
+    try {
+      mkdirSync(join(root, "home"), { recursive: true });
+      const r = runWedgeCli({ HOME: join(root, "home"), HYDRA_ROOT: REPO_ROOT }, nodelessPathDir(root));
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /WARN node not found/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

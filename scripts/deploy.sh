@@ -101,6 +101,9 @@ systemctl --user enable --now hydra-watchdog.timer
 # node/strip-types runtime fails the deploy instead of silently disarming the
 # wedge check (issue #5095).
 node --experimental-strip-types "$HYDRA_ROOT/scripts/hydra-watchdog.ts" thresholds >/dev/null
+# The systemd unit sets no PATH, so also prove the watchdog's own node resolver
+# finds a node under the unit's minimal environment (QA round 2, issue #5095).
+env -i HOME="$HOME" PATH=/usr/local/bin:/usr/bin:/bin bash -c 'source "$1" && resolve_watchdog_node >/dev/null' _ "$HYDRA_ROOT/scripts/hydra-watchdog.sh"
 
 echo "==> Installing housekeeping timer (issue #723)..."
 # Scheduler fold PR-3/4 (issue #723): the five time-boxed housekeeping chores

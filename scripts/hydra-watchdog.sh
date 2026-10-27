@@ -403,9 +403,36 @@ run_service_liveness() {
 # operator-notify.ts; it always exits 0 itself, and this wrapper turns a missing
 # node / broken runtime into a WARN line so the other blocks still run.
 
+# Resolve a node binary WITHOUT relying on the caller's PATH: the systemd user
+# unit sets no PATH, and Node is nvm-pinned (.nvmrc), so a bare `node` can be
+# absent there while the deploy smoke (runner shell) passes — silently
+# disarming the SIGKILL gate. Order: HYDRA_WATCHDOG_NODE override, PATH, then
+# the newest nvm-installed node under $HOME. Prints the path; rc 1 if none.
+resolve_watchdog_node() {
+  local cand
+  if [ -n "${HYDRA_WATCHDOG_NODE:-}" ] && [ -x "$HYDRA_WATCHDOG_NODE" ]; then
+    printf '%s\n' "$HYDRA_WATCHDOG_NODE"; return 0
+  fi
+  if cand="$(command -v node 2>/dev/null)" && [ -n "$cand" ]; then
+    printf '%s\n' "$cand"; return 0
+  fi
+  cand="$(ls -d "$HOME"/.nvm/versions/node/*/bin/node 2>/dev/null | sort -V | tail -n 1)"
+  if [ -n "$cand" ] && [ -x "$cand" ]; then
+    printf '%s\n' "$cand"; return 0
+  fi
+  return 1
+}
+
 run_wedge_cli() {
-  timeout 90 node --experimental-strip-types "${HYDRA_ROOT:-$HOME/hydra}/scripts/hydra-watchdog.ts" wedge \
-    || echo "hydra-autopilot-watchdog: WARN wedge CLI FAILED (rc=$?) — wedge check skipped this tick"
+  local node_bin rc=0
+  if ! node_bin="$(resolve_watchdog_node)"; then
+    echo "hydra-autopilot-watchdog: WARN node not found (PATH, HYDRA_WATCHDOG_NODE, ~/.nvm) — wedge check skipped this tick"
+    return 0
+  fi
+  timeout 90 "$node_bin" --experimental-strip-types "${HYDRA_ROOT:-$HOME/hydra}/scripts/hydra-watchdog.ts" wedge || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "hydra-autopilot-watchdog: WARN wedge CLI FAILED (rc=$rc) — wedge check skipped this tick"
+  fi
   return 0
 }
 
