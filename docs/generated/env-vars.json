@@ -1580,13 +1580,13 @@
       "readSites": [
         {
           "path": "src/api.ts",
-          "line": 92
+          "line": 93
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/api.ts",
-        "line": 92
+        "line": 93
       }
     },
     {
@@ -2490,13 +2490,13 @@
       "readSites": [
         {
           "path": "src/api/otel.ts",
-          "line": 34
+          "line": 35
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/api/otel.ts",
-        "line": 34
+        "line": 35
       }
     },
     {
