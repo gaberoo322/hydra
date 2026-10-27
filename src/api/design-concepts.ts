@@ -129,6 +129,13 @@ export type DesignConceptsRouterDeps = {
 /** The registry slot whose `alternatives[1]` IS the in-dashboard approve. */
 const APPROVE_KEY = "waiting-on-you:ready-for-human";
 const APPROVE_VARIANT = "grill-handoff";
+/**
+ * The typed twin of that approve action (issue #5163): the /work control's
+ * registry entry. Its `{text, check}` preconditions are the ONE source of each
+ * line's `label` and `check` id on the wire; a registry lockstep test pins its
+ * texts to the feed variant's prose lines so the two cannot drift.
+ */
+const APPROVE_CONTROL_KEY = "control:work/design-concept-approve";
 
 /** Per-issue memo window for the gh comment read (bounds gh under a 60 s poll). */
 const COMMENTS_MEMO_MS = 60_000;
@@ -361,12 +368,16 @@ export function createDesignConceptsRouter(deps: DesignConceptsRouterDeps = {}) 
    * INV-4) — the server-evaluated checklist the /work approve control gates
    * on. Always 200:
    *
-   *   { anchorRef, preconditions:[{label, ok, detail}], allOk, artifactHash,
-   *     handoffHash, action, generatedAt }
+   *   { anchorRef, preconditions:[{label, check, ok, detail}], allOk,
+   *     artifactHash, handoffHash, action, commentsReadAt, generatedAt }
    *
-   * `preconditions[i].label` is the registry grill-handoff approve action's
-   * precondition i verbatim (ADR-0034 §8.2 — the CLI and the UI cannot
-   * drift); `action` is that action with `{number}` resolved (null when the
+   * `preconditions[i].label` and `.check` come from the typed preconditions
+   * of the registry's `control:work/design-concept-approve` entry (issue
+   * #5163), pinned in lockstep to the grill-handoff approve action's prose
+   * lines (ADR-0034 §8.2 — the CLI and the UI cannot drift).
+   * `commentsReadAt` is the ISO time of the gh comment read the hash line
+   * judged (the memo entry's time on a hit — up to 60 s older than
+   * `generatedAt`; null when no comments were read). `action` is that action with `{number}` resolved (null when the
    * anchor is not an issue anchor), so the page renders label + consequence
    * from the registry, never page prose. (1) the artifact exists, (2) its
    * status is 'draft', (3) the LAST `## hydra-grill handoff` comment on the
@@ -391,18 +402,21 @@ export function createDesignConceptsRouter(deps: DesignConceptsRouterDeps = {}) 
     }
 
     const repo = dc?.scope === "target" ? getTargetGithubRepo() : resolveGithubRepo();
-    const rawApprove = REGISTRY.find(
-      (e) => e.key === APPROVE_KEY && e.variant === APPROVE_VARIANT,
-    )?.alternatives[1];
+    const controlPreconditions =
+      REGISTRY.find((e) => e.key === APPROVE_CONTROL_KEY && e.variant === undefined)?.recommended
+        .preconditions ?? [];
     const resolved =
       number === null
         ? null
         : resolveAction(APPROVE_KEY, APPROVE_VARIANT, { repo, number, kind: "issue" });
     const action = resolved?.alternatives[1] ?? null;
-    const labels = (action ?? rawApprove)?.preconditions ?? [];
 
     // (3) — the handoff hash, read only when there is a stored hash to match.
     let handoffHash: string | null = null;
+    // The ISO time of the gh read the hash line judged (#5163 INV-2): the memo
+    // entry's `at` on a hit (NOT now), the fresh read's time otherwise, null
+    // whenever no comments were read.
+    let commentsReadAt: string | null = null;
     let hashLine: { ok: boolean; detail: string };
     if (!dc) {
       hashLine = { ok: false, detail: "no stored artifact to compare a handoff hash against" };
@@ -415,12 +429,15 @@ export function createDesignConceptsRouter(deps: DesignConceptsRouterDeps = {}) 
       let ghError: string | null = null;
       if (memo && now() - memo.at < COMMENTS_MEMO_MS) {
         comments = memo.comments;
+        commentsReadAt = new Date(memo.at).toISOString();
       } else {
         try {
           const read = await readIssueComments(repo, number);
           if (read.ok === true) {
             comments = read.comments;
-            commentsMemo.set(memoKey, { at: now(), comments });
+            const readAt = now();
+            commentsMemo.set(memoKey, { at: readAt, comments });
+            commentsReadAt = new Date(readAt).toISOString();
           } else {
             ghError = read.error;
           }
@@ -472,8 +489,9 @@ export function createDesignConceptsRouter(deps: DesignConceptsRouterDeps = {}) 
         : { ok: false, detail: "no artifact to read a status from" },
       hashLine,
     ];
-    const preconditions = labels.map((label, i) => ({
-      label,
+    const preconditions = controlPreconditions.map((p, i) => ({
+      label: typeof p === "string" ? p : p.text,
+      check: typeof p === "string" ? null : p.check,
       ok: lines[i]?.ok ?? false,
       detail: lines[i]?.detail ?? "no evaluator for this precondition",
     }));
@@ -489,6 +507,7 @@ export function createDesignConceptsRouter(deps: DesignConceptsRouterDeps = {}) 
       artifactHash: dc?.artifactHash ?? null,
       handoffHash,
       action,
+      commentsReadAt,
       generatedAt: new Date(now()).toISOString(),
     });
   });

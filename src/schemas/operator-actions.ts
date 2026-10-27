@@ -160,6 +160,9 @@ export const CONTROL_KEYS = [
   // files as registry in-dashboard "recommendations dismiss and mute-class")
   "control:now/rec-dismiss",
   "control:now/rec-mute-class",
+  // /work — DesignConceptQueue.jsx (issue #5163; the approve control moved
+  // off the hand-rolled checklist onto the registry)
+  "control:work/design-concept-approve",
 ] as const;
 export type ControlKey = (typeof CONTROL_KEYS)[number];
 
@@ -319,6 +322,12 @@ export const CONTROL_CHECKS = [
   // its severity picker.
   "rec-run-id-read",
   "severity-chosen",
+  // /work design-concept approve (issue #5163), evaluated by
+  // dashboard/src/lib/control-verdicts.ts `designConceptVerdicts` from the
+  // server-evaluated approve-preconditions read.
+  "dc-artifact-stored",
+  "dc-status-draft",
+  "dc-handoff-hash-matches",
   // /work — HoldbackEnrolState.jsx (issue #5164 INV-2), evaluated per row by
   // dashboard/src/lib/control-verdicts.ts.
   "holdback-enrol-failed",
