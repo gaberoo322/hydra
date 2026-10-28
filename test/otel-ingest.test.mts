@@ -163,6 +163,25 @@ describe("otel-spans accessor", () => {
     assert.equal((await getOtelAgentTotals(AGENT))?.requests, 1);
   });
 
+  test("a LATER command failing leaves no partial increments and no double-count on retry", async () => {
+    await cleanOtelKeys();
+    await testRedis.set(otelIndexKey(), "not-a-zset"); // ZADD is after the HINCRBYs
+    await assert.rejects(recordOtelRequest({ ...base, requestKey: "r1" }));
+    assert.equal(await getOtelAgentTotals(AGENT), null, "no partial HINCRBY writes");
+    assert.equal(await testRedis.sismember(otelAgentRequestsKey(AGENT), "r1"), 0);
+    await testRedis.del(otelIndexKey());
+    assert.equal(await recordOtelRequest({ ...base, requestKey: "r1" }), "accepted");
+    const t = await getOtelAgentTotals(AGENT);
+    assert.equal(t?.requests, 1);
+    assert.equal(t?.input, 1);
+  });
+
+  test("non-safe-integer token counts are rejected before any write", async () => {
+    await assert.rejects(recordOtelRequest({ ...base, input: 1e300, requestKey: "r1" }));
+    await assert.rejects(recordOtelRequest({ ...base, output: -1, requestKey: "r1" }));
+    assert.equal(await getOtelAgentTotals(AGENT), null);
+  });
+
   test("sibling: a successful re-record of the same request stays deduped", async () => {
     assert.equal(await recordOtelRequest({ ...base, requestKey: "r1" }), "accepted");
     assert.equal(await recordOtelRequest({ ...base, requestKey: "r1" }), "deduped");

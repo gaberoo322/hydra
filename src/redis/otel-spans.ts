@@ -17,6 +17,7 @@
  * No USD is ever read or stored (CONTEXT.md Quota Weight _Avoid_).
  */
 import { getRedisConnection } from "./connection.ts";
+import { InvalidArgumentError } from "../errors.ts";
 
 const TTL_SECONDS = 7 * 24 * 60 * 60;
 export const INDEX_MAX = 5000;
@@ -57,17 +58,22 @@ export interface OtelAgentTotals {
   parentAgentId: string | null;
 }
 
-/**
- * Record one request. Returns `"deduped"` (and writes nothing further) when the
- * request key was already counted for this agent. Throws on a Redis failure —
- * the route's isolateAggregator logs and turns it into a 500.
- */
-// One atomic unit (Lua runs single-threaded): dedupe check, every write, and the
-// dedupe marker LAST. A failing command (WRONGTYPE) aborts before the marker is
-// added, so an exporter retry is counted instead of reported "deduped" while its
-// tokens were lost (QA round 1, #5251).
+// Lua runs single-threaded (no interleaving) but Redis does NOT roll back writes
+// when a later command errors. So the guarantee is "cannot fail partway", built
+// from two parts: (1) TS validates every numeric ARGV as a non-negative safe
+// integer before the eval, and (2) the script checks the type of all three keys
+// BEFORE its first write. With both holding, no command after the first write
+// can raise, and the dedupe marker (SADD, LAST) is only absent when nothing was
+// written, so an exporter retry is counted exactly once (QA rounds 1-2, #5251).
 const RECORD_LUA = `
 if redis.call('SISMEMBER', KEYS[3], ARGV[1]) == 1 then return 0 end
+local function bad(k, want)
+  local t = redis.call('TYPE', k)['ok']
+  return t ~= 'none' and t ~= want
+end
+if bad(KEYS[1], 'hash') or bad(KEYS[2], 'zset') or bad(KEYS[3], 'set') then
+  return redis.error_reply('WRONGTYPE otel key holds the wrong kind of value')
+end
 local ttl = tonumber(ARGV[8])
 redis.call('HINCRBY', KEYS[1], 'input', ARGV[2])
 redis.call('HINCRBY', KEYS[1], 'output', ARGV[3])
@@ -87,10 +93,21 @@ redis.call('EXPIRE', KEYS[3], ttl)
 return 1
 `;
 
+/**
+ * Record one request. Returns `"deduped"` (and writes nothing further) when the
+ * request key was already counted for this agent. Throws on invalid token counts
+ * or a Redis failure (both before any write) — the route's isolateAggregator
+ * logs and turns it into a 500.
+ */
 export async function recordOtelRequest(
   sample: OtelRecordInput,
   nowMs: number = Date.now(),
 ): Promise<"accepted" | "deduped"> {
+  for (const n of [sample.input, sample.output, sample.cacheRead, sample.cacheCreation]) {
+    if (!Number.isSafeInteger(n) || n < 0) {
+      throw new InvalidArgumentError(`otel token count must be a non-negative safe integer, got ${n}`);
+    }
+  }
   const r = getRedisConnection();
   const added = await r.eval(
     RECORD_LUA,

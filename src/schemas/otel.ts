@@ -113,7 +113,8 @@ function attrCount(attrs: readonly Attr[], key: string): number {
   if (!a) return 0;
   const raw = a.value.intValue ?? a.value.doubleValue ?? a.value.stringValue;
   const n = typeof raw === "number" ? raw : raw === undefined ? 0 : Number(raw);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  const f = Math.floor(n);
+  return Number.isFinite(n) && f > 0 && Number.isSafeInteger(f) ? f : 0;
 }
 
 /** Walk a parsed export body and reduce it to recordable samples. Pure. */
