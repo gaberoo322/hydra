@@ -15,6 +15,8 @@
 // order. Thresholds stay inline in each rule — co-located = locality.
 
 import type { HealthSnapshot, HealthDiagnostic } from "./types.ts";
+import { isSchedulerTickStale, schedulerTickAgeS } from "./tick-liveness.ts";
+import { SCHEDULER_TICK_STALE_S } from "../autopilot/stale-thresholds.ts";
 // Issue #3634: the complex multi-policy rule bodies (reflection-health,
 // dark-leading-outcomes, attribution-ledger-empty) were extracted into named,
 // individually-testable assessor functions in the sibling assessors.ts. Each
@@ -194,13 +196,15 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
         }
       : null,
   (s) => {
-    if (s.sched.running && s.sched.lastCycleAt) {
-      const ss = (Date.now() - new Date(s.sched.lastCycleAt).getTime()) / 1000;
-      if (ss > 900 && s.health.cycle !== "running") {
+    // Issue #5096: keyed on lastTickAt through the SAME predicate the watchdog
+    // liveness CLI acts on (the old lastCycleAt is never populated).
+    if (s.sched.running) {
+      const age = schedulerTickAgeS(s.sched.lastTickAt, Date.now());
+      if (typeof age === "number" && isSchedulerTickStale(age, SCHEDULER_TICK_STALE_S) && s.health.cycle !== "running") {
         return {
           severity: "info",
           component: "scheduler",
-          what: `Idle ${Math.round(ss / 60)}m`,
+          what: `Idle ${Math.round(age / 60)}m`,
           why: "Scheduler active but no recent cycle. May be paused.",
           impact: "May resume.",
           action: "Check status",

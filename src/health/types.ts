@@ -77,7 +77,7 @@ export interface HealthSnapshot {
     mergeRate?: number;
     consecutiveErrors: number;
     lastError?: string | null;
-    lastCycleAt?: string | null;
+    lastTickAt?: string | null;
     intervalHuman?: string;
   };
   // Issue #3459: queueDepth and blCounts were Redis backlog fields retired with

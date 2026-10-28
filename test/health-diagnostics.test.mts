@@ -46,7 +46,7 @@ function healthySnapshot(): HealthSnapshot {
       mergeRate: 80,
       consecutiveErrors: 0,
       lastError: null,
-      lastCycleAt: new Date().toISOString(),
+      lastTickAt: new Date().toISOString(),
     },
     // Issue #3459: queueDepth + blCounts removed from HealthSnapshot.
     patterns: { planner: 4, executor: 6, skeptic: 2 },
@@ -350,13 +350,42 @@ describe("assessHealth — per-rule firing", () => {
     const d = find(
       clone((s) => {
         s.sched.running = true;
-        s.sched.lastCycleAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+        s.sched.lastTickAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
         s.health.cycle = "idle";
       }),
       "scheduler",
       "info",
     );
     assert.ok(d);
+    assert.match(d!.what, /Idle \d+m/);
+  });
+
+  test("scheduler idle does not fire at 10m", () => {
+    const d = find(
+      clone((s) => {
+        s.sched.running = true;
+        s.sched.lastTickAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+        s.health.cycle = "idle";
+      }),
+      "scheduler",
+      "info",
+    );
+    assert.equal(d, undefined);
+  });
+
+  test("scheduler idle fires for a snapshot parsed from a status projection with no lastCycleAt", () => {
+    // The dead twin (rule keyed on lastCycleAt) could never fire against the
+    // real projection, which has no lastCycleAt field (issue #5096).
+    const snap = parseProbes({
+      basicHealth: { status: "ok", redis: true, cycle: "idle", uptime: 1000 },
+      scheduler: {
+        running: true,
+        consecutiveErrors: 0,
+        lastTickAt: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+      },
+    } as any);
+    const d = assessHealth(snap).diagnostics.find((x) => x.component === "scheduler" && x.severity === "info");
+    assert.ok(d, "Idle diagnostic must fire on lastTickAt");
     assert.match(d!.what, /Idle \d+m/);
   });
 
@@ -776,7 +805,7 @@ describe("parseProbes", () => {
     // Issue #3459: queueDepth + backlogCounts removed from ProbeInputs.
     const snap = parseProbes({
       basicHealth: { status: "ok", redis: true, cycle: "idle", uptime: 1000 },
-      scheduler: { running: true, consecutiveErrors: 0, lastCycleAt: new Date().toISOString() },
+      scheduler: { running: true, consecutiveErrors: 0, lastTickAt: new Date().toISOString() },
       metrics: { trend: [], stats: {} },
       disk: { availableGb: 12, totalGb: 500, usedPercent: 90 }, // low (issue #939: already-parsed)
       mem: null,

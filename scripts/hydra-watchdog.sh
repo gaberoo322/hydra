@@ -8,9 +8,9 @@
 #
 #   ## SERVICE LIVENESS   — the former hydra-orchestrator-watchdog.sh logic
 #                           (HTTP / docker / scheduler-staleness / tunnel,
-#                           incl. the deliberate-stop reconciliation; the
-#                           mothballed-Target unit scan + venue-credential
-#                           probe were dropped in #4608). Stale threshold: 15 min.
+#                           incl. the deliberate-stop reconciliation), now the
+#                           TS CLI `hydra-watchdog.ts liveness` (issue #5096).
+#                           Stale threshold: 15 min.
 #   ## AUTOPILOT WEDGE     — the former hydra-autopilot-watchdog.sh PID-kill
 #                           logic (incl. the HYDRA_AUTOPILOT_WATCHDOG_* test
 #                           hooks). Stale threshold: 25 min. Do NOT shorten
@@ -30,366 +30,15 @@
 set -euo pipefail
 
 # =============================================================================
-# ## SERVICE LIVENESS
+# ## SERVICE LIVENESS — ported to TypeScript (issue #5096, epic #5094)
 # =============================================================================
 #
-# Detects when `hydra-orchestrator.service` is reporting "active (running)"
-# but has silently stopped making progress. Three failure modes handled:
-#
-#   1. HTTP endpoint unresponsive — /health doesn't return 200
-#   2. Scheduler stuck — running=true but lastTickAt is stale (>15 min old)
-#      AND no cycle is currently in progress
-#   3. Redis disconnected — /health returns redis:false
-#
-# Between Check 0 and Check 1, two boot-window guards (issue #4415) skip the
-# rest of the block for a tick that lands on a freshly-(re)started service or
-# while a deploy holds the deploy lock — see the guards' inline comment.
-#
-# Issue #397: liveness keys off `lastTickAt` (heartbeat of the scheduler's
-# housekeeping loop). The in-process control loop's `lastCycleAt` field was
-# removed in the scheduler-junk-drawer retirement (follow-up to ADR-0010);
-# `lastTickAt` advances on every housekeeping pass, which is what we
-# actually want for "is the scheduler still breathing".
-#
-# Ticks run every 5 minutes, so 15 minutes = ~3x safety margin. A
-# legitimate long-running operation that pauses the tick (e.g. a research
-# cycle holding the loop for 10+ minutes) is NOT restarted, because we
-# check /cycle/status and skip if status=running.
-#
-# Only restarts when the service is meant to be active (respects a deliberate
-# `systemctl --user stop`).
-
-# read_pending_work OUT_COUNT OUT_FAILED
-# -----------------------------------------------------------------------------
-# Issue #3794: the watchdog's "is there work waiting?" signal for the
-# scheduler-recovery decision. Reads REAL sources — the orchestrator GitHub
-# board (gaberoo322/hydra) plus the Redis anchor work-queue — replacing the
-# retired /api/backlog HTTP surface, which was deleted by #3439 / PR #3455
-# (ADR-0031) and now 404s. The previous `curl .../api/backlog || echo "0"`
-# guard degraded SILENTLY to 0 on that 404, so the signal was permanently 0
-# and the scheduler-recovery path stayed disarmed in exactly the state it
-# exists to recover from (a self-stopped scheduler with an empty work-queue).
-#
-# Board signal: open issues carrying an actionable label — ready-for-agent,
-# needs-research, needs-triage — mirroring the orch_backfill_idle signal in
-# src/autopilot/turn-snapshot/ (the lanes the scheduler actively drains;
-# ready_for_agent is the dev_orch dispatch source signal per its line ~99).
-# Read directly via REST `gh issue list` — never GraphQL (ADR-0031 Decision 6,
-# and the GraphQL rate-limit hazard, operator memory
-# reference_gh_graphql_vs_rest_ratelimit).
-#
-# HARD RULE (issue #3794 acceptance criterion 2): a monitoring script must
-# NEVER treat "I could not read it" as "there is none". On ANY read failure
-# (non-zero exit OR non-integer output from gh or redis-cli) this function
-# sets OUT_FAILED=1, logs a WARN naming the failed signal, and leaves
-# OUT_COUNT=0; the caller then forces the restart branch because "could not
-# prove there is no work" must not disarm recovery.
-#
-# Args (bash namerefs): OUT_COUNT receives the summed pending-work count (0 on
-# any failure); OUT_FAILED receives 1 if any signal read failed, else 0.
-#
-# Testability hooks (off-by-default; pinned by
-# test/watchdog-pending-work.test.mts), mirroring the HYDRA_*_BIN overrides in
-# test/host-probe.test.mts:
-#   HYDRA_GH_BIN      Override the `gh` binary used for the board read.
-#   HYDRA_DOCKER_BIN  Override the `docker` binary used for the work-queue read.
-# -----------------------------------------------------------------------------
-read_pending_work() {
-  local -n _rpw_count="$1"
-  local -n _rpw_failed="$2"
-  # All internal locals are _rpw_-prefixed so they can never share a name with
-  # a caller's nameref target (bash resolves a nameref to the nearest-scope
-  # variable of that name, so an unprefixed `local count` here would shadow the
-  # caller's `count` and the final assignment would never reach the caller).
-  local _rpw_gh_bin="${HYDRA_GH_BIN:-gh}"
-  local _rpw_docker_bin="${HYDRA_DOCKER_BIN:-docker}"
-  local _rpw_limit=100  # GitHub API max single page; mirrors the Turn Snapshot's default ghListLimit.
-  local _rpw_board_total=0 _rpw_work_queue=0
-  _rpw_failed=0
-  _rpw_count=0
-
-  # --- Board: sum actionable open issues across the three drain lanes. ---
-  local _rpw_label _rpw_n
-  for _rpw_label in ready-for-agent needs-research needs-triage; do
-    _rpw_n=$("$_rpw_gh_bin" issue list --repo gaberoo322/hydra --state open \
-      --label "$_rpw_label" --limit "$_rpw_limit" \
-      --json number --jq 'length' 2>/dev/null) || {
-      echo "hydra-orchestrator-watchdog: WARN board read FAILED for label '$_rpw_label' ($_rpw_gh_bin issue list exited non-zero) — cannot prove no work pending"
-      _rpw_failed=1
-      return 0
-    }
-    if ! [[ "$_rpw_n" =~ ^[0-9]+$ ]]; then
-      echo "hydra-orchestrator-watchdog: WARN board read for label '$_rpw_label' returned non-integer '$_rpw_n' — cannot prove no work pending"
-      _rpw_failed=1
-      return 0
-    fi
-    _rpw_board_total=$((_rpw_board_total + _rpw_n))
-  done
-
-  # --- Work-queue: hydra:anchors:work-queue length, via the same Redis
-  # container the script pings for the Check 0 liveness probe. ---
-  _rpw_work_queue=$("$_rpw_docker_bin" exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null) || {
-    echo "hydra-orchestrator-watchdog: WARN work-queue read FAILED ($_rpw_docker_bin exec redis-cli LLEN exited non-zero) — cannot prove no work pending"
-    _rpw_failed=1
-    return 0
-  }
-  if ! [[ "$_rpw_work_queue" =~ ^[0-9]+$ ]]; then
-    echo "hydra-orchestrator-watchdog: WARN work-queue read returned non-integer '$_rpw_work_queue' — cannot prove no work pending"
-    _rpw_failed=1
-    return 0
-  fi
-
-  _rpw_count=$((_rpw_board_total + _rpw_work_queue))
-}
-
-run_service_liveness() {
-  local STALE_THRESHOLD_SECONDS=900  # 15 minutes
-  local SERVICE="hydra-orchestrator.service"
-  local HEALTH_URL="http://localhost:4000/api/health"
-  local SCHEDULER_STATUS_URL="http://localhost:4000/api/scheduler/status"
-  local CYCLE_STATUS_URL="http://localhost:4000/api/cycle/status"
-
-  # Respect deliberate stops
-  if ! systemctl --user is-active --quiet "$SERVICE"; then
-    echo "hydra-orchestrator-watchdog: $SERVICE is not active; nothing to do"
-    return 0
-  fi
-
-  # --- Check 0: Docker container liveness (MUST run first) ---
-  # Without Redis, the orchestrator crash-loops and all other checks are meaningless.
-  local redis_ping
-  redis_ping=$(docker exec hydra-redis-1 redis-cli ping 2>/dev/null || echo "FAILED")
-  if [[ "$redis_ping" != "PONG" ]]; then
-    echo "hydra-orchestrator-watchdog: Redis container not responding (got: $redis_ping) — restarting hydra-docker.service"
-    systemctl --user restart hydra-docker.service
-    sleep 5
-    local redis_retry
-    redis_retry=$(docker exec hydra-redis-1 redis-cli ping 2>/dev/null || echo "FAILED")
-    if [[ "$redis_retry" == "PONG" ]]; then
-      echo "hydra-orchestrator-watchdog: Docker containers recovered — restarting orchestrator"
-      systemctl --user restart "$SERVICE"
-    else
-      echo "hydra-orchestrator-watchdog: Docker recovery FAILED — manual intervention needed"
-    fi
-    return 0
-  fi
-
-  # --- Boot-window guards (issue #4415) ---
-  # The 2-minute watchdog tick can land inside the orchestrator's boot window:
-  # systemd reports "Started" the moment ExecStartPre=npx tsc + the node process
-  # launch, ~1-4s (longer under load) BEFORE Express listens on :4000. Check 1
-  # below would then read an empty /health and restart the service a SECOND
-  # time mid-boot — and that second restart breaks deploy.sh's post-restart
-  # health gate, reddening an otherwise-good master deploy with no semver tag
-  # (the 50eda03b incident: red deploy job, prod verifiably healthy 4s later).
-  # Two belt-and-braces guards close the window, inserted HERE — after Check 0,
-  # immediately before Check 1 (the probe the race actually breaks). Check 0
-  # stays ahead of them on purpose: a Redis-container outage is a genuine
-  # incident that must not wait out a grace window, and a deploy never touches
-  # the Redis container:
-  #   (a) fresh-start grace — the unit's current activation is younger than
-  #       HYDRA_WATCHDOG_STARTUP_GRACE_SECONDS (default 60s; the
-  #       HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS naming precedent, not the
-  #       issue body's verbatim spelling)
-  #   (b) deploy lock held — scripts/deploy.sh holds flock on
-  #       HYDRA_DEPLOY_LOCK (default /tmp/hydra-deploy.lock — the SAME env
-  #       name deploy.sh reads, so there is one definition of "the deploy
-  #       lock") for the WHOLE deploy, covering a slow ExecStartPre tsc that
-  #       outlasts (a)
-  # Both log exactly one line naming the reason AND the measurement, and
-  # return 0 from THIS block only — run_wedge_cli and the other blocks
-  # still execute on the same tick. A genuinely crash-looping service is still
-  # caught: systemd's own Restart= policy bounces it, and the 60s default is
-  # strictly below the 2-minute timer cadence, so the next tick sits outside
-  # the grace window. Fail-open by design: if the activation age cannot be
-  # read (systemctl show fails, non-numeric output), the guards are skipped
-  # and the pre-#4415 behaviour runs — "could not read" is never treated as
-  # "in grace" (the #3794 hard rule). Tests drive
-  # HYDRA_WATCHDOG_STARTUP_GRACE_SECONDS and HYDRA_DEPLOY_LOCK directly and
-  # PATH-shim systemctl/curl/docker (test/autopilot-watchdog.test.mts).
-  # (PR #4458 forward-fix: only the reconciliation section of the PR body
-  # changed to reconcile against the live design-concept artifact — no
-  # behavioral change to the guards below.)
-  local STARTUP_GRACE_SECONDS="${HYDRA_WATCHDOG_STARTUP_GRACE_SECONDS:-60}"
-  [[ "$STARTUP_GRACE_SECONDS" =~ ^[0-9]+$ ]] || STARTUP_GRACE_SECONDS=60
-
-  # (a) Fresh-start grace. ActiveEnterTimestampMonotonic is systemd's monotonic
-  # clock in µs since boot; /proc/uptime is seconds since boot on the same
-  # origin (on a host that suspends, uptime can only run AHEAD of the monotonic
-  # clock, so the computed age can only be OVER-estimated — i.e. fail toward
-  # the pre-#4415 restart behaviour, the safe direction).
-  local active_enter_us active_now_us
-  active_enter_us=$(systemctl --user show -p ActiveEnterTimestampMonotonic --value "$SERVICE" 2>/dev/null || echo "")
-  active_now_us=$(awk '{printf "%d", $1 * 1000000}' /proc/uptime 2>/dev/null || echo "")
-  if [[ "$active_enter_us" =~ ^[0-9]+$ && "$active_now_us" =~ ^[0-9]+$ ]]; then
-    local active_age_s=$(( (active_now_us - active_enter_us) / 1000000 ))
-    (( active_age_s < 0 )) && active_age_s=0
-    if (( active_age_s < STARTUP_GRACE_SECONDS )); then
-      echo "hydra-orchestrator-watchdog: service started ${active_age_s}s ago (< ${STARTUP_GRACE_SECONDS}s grace) — skipping liveness restart this tick"
-      return 0
-    fi
-  else
-    echo "hydra-orchestrator-watchdog: WARN could not determine $SERVICE activation age (monotonic='${active_enter_us}', uptime='${active_now_us}') — proceeding with liveness checks"
-  fi
-
-  # (b) Deploy lock. Probe non-blockingly via a throwaway `true` child: the
-  # lock is released the instant that child exits, so the watchdog never
-  # HOLDS the deploy lock (ownership stays with deploy.sh; a held lock could
-  # delay a real deploy by a whole tick). The probe O_CREATs the lock file if
-  # absent — harmless, deploy.sh creates it on every deploy anyway.
-  local deploy_lock="${HYDRA_DEPLOY_LOCK:-/tmp/hydra-deploy.lock}"
-  if ! flock -n "$deploy_lock" true 2>/dev/null; then
-    echo "hydra-orchestrator-watchdog: deploy in progress (${deploy_lock} held) — skipping liveness restart this tick"
-    return 0
-  fi
-
-  # --- Check 1: /health responds and reports ok + redis connected ---
-  local health
-  health=$(curl -sS --max-time 5 "$HEALTH_URL" 2>&1 || echo "CURL_FAILED")
-  if [[ "$health" == "CURL_FAILED" || -z "$health" ]]; then
-    echo "hydra-orchestrator-watchdog: $HEALTH_URL unreachable — restarting $SERVICE"
-    systemctl --user restart "$SERVICE"
-    return 0
-  fi
-
-  local status redis_ok
-  status=$(echo "$health" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("status",""))' 2>/dev/null || echo "")
-  redis_ok=$(echo "$health" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("redis",False))' 2>/dev/null || echo "False")
-
-  if [[ "$status" != "ok" ]]; then
-    echo "hydra-orchestrator-watchdog: /health returned status='$status' (not 'ok') — restarting $SERVICE"
-    systemctl --user restart "$SERVICE"
-    return 0
-  fi
-
-  if [[ "$redis_ok" != "True" ]]; then
-    echo "hydra-orchestrator-watchdog: /health reports redis=$redis_ok — restarting $SERVICE"
-    systemctl --user restart "$SERVICE"
-    return 0
-  fi
-
-  # --- Check 2: scheduler lastCycleAt is not stale (if running) ---
-  local sched
-  sched=$(curl -sS --max-time 5 "$SCHEDULER_STATUS_URL" 2>&1 || echo "CURL_FAILED")
-  if [[ "$sched" == "CURL_FAILED" ]]; then
-    echo "hydra-orchestrator-watchdog: $SCHEDULER_STATUS_URL unreachable — restarting $SERVICE"
-    systemctl --user restart "$SERVICE"
-    return 0
-  fi
-
-  local running
-  running=$(echo "$sched" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("running",False))' 2>/dev/null || echo "False")
-  if [[ "$running" != "True" ]]; then
-    # Issue #388: respect deliberate stops. If the operator called
-    # POST /scheduler/stop, /api/scheduler/status reports stopReason="deliberate"
-    # and the scheduler writes a 24h Redis marker (hydra:scheduler:deliberate-stop)
-    # that survives a service bounce. We must NOT auto-restart in that case —
-    # the historical failure mode was the watchdog ticking the scheduler back on
-    # within ~2 minutes of every operator stop. Auto-pause reasons
-    # (circuit-breaker / error-cap) still warrant a restart attempt.
-    local stop_reason
-    stop_reason=$(echo "$sched" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("stopReason","") or "")' 2>/dev/null || echo "")
-    if [[ "$stop_reason" == "deliberate" ]]; then
-      echo "hydra-orchestrator-watchdog: scheduler stopped deliberately (stopReason=deliberate); leaving alone"
-      return 0
-    fi
-
-    # Scheduler stopped — check if it's a fresh startup or a circuit breaker.
-    # If uptime > 5 min and work exists, the scheduler self-stopped (zero-output
-    # breaker or error cap). Restart it via API instead of restarting the service.
-    local uptime_s
-    uptime_s=$(echo "$health" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(int(d.get("uptime",0)))' 2>/dev/null || echo "0")
-    if (( uptime_s > 300 )); then
-      # Check if there's work waiting (issue #3794). Real signals: the
-      # orchestrator GitHub board (gaberoo322/hydra) + hydra:anchors:work-queue.
-      # The old read hit /api/backlog, which 404s (deleted by #3455 / ADR-0031),
-      # and its `|| echo "0"` guard silently zeroed queue_depth — disarming this
-      # recovery path in exactly the state it exists to recover from. A read
-      # failure now logs loudly and forces a restart: a monitoring script must
-      # never treat "I could not read it" as "there is none". See
-      # read_pending_work for the per-signal failure handling.
-      local total_work work_read_failed
-      read_pending_work total_work work_read_failed
-
-      if (( work_read_failed == 0 && total_work == 0 )); then
-        echo "hydra-orchestrator-watchdog: scheduler stopped, no work pending (board+queue=0); leaving alone"
-      else
-        if (( work_read_failed )); then
-          echo "hydra-orchestrator-watchdog: scheduler stopped and a work-signal read FAILED — cannot prove no work pending (uptime ${uptime_s}s, stopReason=${stop_reason:-none}); restarting scheduler via API (fail-safe)"
-        else
-          echo "hydra-orchestrator-watchdog: scheduler stopped but ${total_work} items waiting (uptime ${uptime_s}s, stopReason=${stop_reason:-none}) — restarting scheduler via API"
-        fi
-        curl -sS --max-time 5 -X POST "http://localhost:4000/api/scheduler/start" \
-          -H "content-type: application/json" -d '{}' >/dev/null 2>&1 || true
-      fi
-    else
-      echo "hydra-orchestrator-watchdog: scheduler not yet running (startup window, uptime ${uptime_s}s); leaving alone"
-    fi
-    return 0
-  fi
-
-  local last_tick_at
-  last_tick_at=$(echo "$sched" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("lastTickAt","") or "")' 2>/dev/null || echo "")
-  if [[ -z "$last_tick_at" ]]; then
-    echo "hydra-orchestrator-watchdog: scheduler running but lastTickAt is null (fresh restart); leaving alone"
-    return 0
-  fi
-
-  # Before we judge staleness, check if a cycle is currently in progress.
-  # A legitimate research cycle can take 10+ minutes.
-  local cycle cycle_status
-  cycle=$(curl -sS --max-time 5 "$CYCLE_STATUS_URL" 2>&1 || echo "CURL_FAILED")
-  if [[ "$cycle" != "CURL_FAILED" ]]; then
-    cycle_status=$(echo "$cycle" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("status",""))' 2>/dev/null || echo "")
-    if [[ "$cycle_status" == "running" ]]; then
-      echo "hydra-orchestrator-watchdog: cycle in progress (status=$cycle_status); leaving alone"
-      return 0
-    fi
-  fi
-
-  # Parse lastTickAt and compute age
-  local last_tick_epoch
-  last_tick_epoch=$(date -d "$last_tick_at" +%s 2>/dev/null || echo "")
-  if [[ -z "$last_tick_epoch" ]]; then
-    echo "hydra-orchestrator-watchdog: could not parse lastTickAt='$last_tick_at'"
-    return 0
-  fi
-
-  local now_epoch age
-  now_epoch=$(date +%s)
-  age=$((now_epoch - last_tick_epoch))
-
-  if (( age < 0 )); then
-    echo "hydra-orchestrator-watchdog: negative age (${age}s); clock skew — ignoring"
-    return 0
-  fi
-
-  if (( age > STALE_THRESHOLD_SECONDS )); then
-    echo "hydra-orchestrator-watchdog: STALE — lastTickAt was ${age}s ago (> ${STALE_THRESHOLD_SECONDS}s) and no cycle in progress. Restarting $SERVICE"
-    systemctl --user restart "$SERVICE"
-    return 0
-  fi
-
-  # --- Check 3: Cloudflare tunnel reachability ---
-  if systemctl --user is-active --quiet hydra-tunnel.service; then
-    local tunnel_health
-    tunnel_health=$(curl -sS --max-time 5 "https://admin.clawstreetbets.xyz/api/health" 2>&1 || echo "TUNNEL_FAILED")
-    if [[ "$tunnel_health" == "TUNNEL_FAILED" || -z "$tunnel_health" ]]; then
-      echo "hydra-orchestrator-watchdog: tunnel unreachable externally but orchestrator healthy — restarting hydra-tunnel.service"
-      systemctl --user restart hydra-tunnel.service
-    fi
-  fi
-
-  # Checks 5 (Target runner failed-state scan) and 6 (venue credential probe)
-  # were removed in #4608: they targeted the mothballed Target's units and its
-  # retired :3333 credential endpoint (an hourly false WARNING after the CSB
-  # swap). Target unit failure is delivered by the units' own
-  # `OnFailure=hydra-notify-failure@%n` hook, and venue credentials are the
-  # Target's business (ADR-0013 Decision 4) — neither is re-ported here.
-
-  echo "hydra-orchestrator-watchdog: healthy (lastCycleAt ${age}s ago, cycle=idle, redis=ok)"
-  return 0
-}
+# The liveness check (Redis ping, boot-window guards, /api/health, scheduler
+# status + tick staleness, pending-work scheduler recovery, tunnel) now lives
+# in scripts/hydra-watchdog.ts `liveness` over src/watchdog/liveness.ts (four
+# pure predicates + a runLiveness over typed ports). See
+# docs/operations/watchdog.md. It runs FIRST on every tick (before the wedge
+# CLI), through run_watchdog_cli below.
 
 # =============================================================================
 # ## AUTOPILOT WEDGE — ported to TypeScript (issue #5095, epic #5094)
@@ -423,18 +72,25 @@ resolve_watchdog_node() {
   return 1
 }
 
-run_wedge_cli() {
-  local node_bin rc=0
+# run_watchdog_cli <subcommand> <log-prefix> <timeout-s>
+# Runs one scripts/hydra-watchdog.ts subcommand. The CLI always exits 0 itself;
+# a missing node or a non-zero exit (timeout, broken runtime) is ONE WARN line,
+# never an aborted tick — every other block still runs.
+run_watchdog_cli() {
+  local sub="$1" prefix="$2" timeout_s="$3" node_bin rc=0
   if ! node_bin="$(resolve_watchdog_node)"; then
-    echo "hydra-autopilot-watchdog: WARN node not found (PATH, HYDRA_WATCHDOG_NODE, ~/.nvm) — wedge check skipped this tick"
+    echo "$prefix WARN node not found (PATH, HYDRA_WATCHDOG_NODE, ~/.nvm) — $sub check skipped this tick"
     return 0
   fi
-  timeout 90 "$node_bin" --experimental-strip-types "${HYDRA_ROOT:-$HOME/hydra}/scripts/hydra-watchdog.ts" wedge || rc=$?
+  timeout "$timeout_s" "$node_bin" --experimental-strip-types "${HYDRA_ROOT:-$HOME/hydra}/scripts/hydra-watchdog.ts" "$sub" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    echo "hydra-autopilot-watchdog: WARN wedge CLI FAILED (rc=$rc) — wedge check skipped this tick"
+    echo "$prefix WARN $sub CLI FAILED (rc=$rc) — $sub check skipped this tick"
   fi
   return 0
 }
+
+run_liveness_cli() { run_watchdog_cli liveness "hydra-orchestrator-watchdog:" 120; }
+run_wedge_cli() { run_watchdog_cli wedge "hydra-autopilot-watchdog:" 90; }
 
 # =============================================================================
 # ## DEPLOY DRIFT
@@ -2710,14 +2366,13 @@ run_origin_identity() {
 
 # =============================================================================
 # Entry point — run all blocks on every tick ONLY when the script is executed
-# directly, not when it is sourced. test/watchdog-pending-work.test.mts sources
-# this file to exercise read_pending_work in isolation (without faking the
-# service-liveness block's docker/HTTP/systemd upstream checks); the guard keeps
-# that sourcing side-effect-free. Each block is independent and self-contained;
+# directly, not when it is sourced. test/autopilot-watchdog.test.mts sources
+# this file to exercise run_watchdog_cli in isolation; the guard keeps that
+# sourcing side-effect-free. Each block is independent and self-contained;
 # a short-circuit in one MUST NOT skip the others.
 # =============================================================================
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  run_service_liveness
+  run_liveness_cli
   run_wedge_cli
   run_deploy_drift
   run_redis_backup_freshness

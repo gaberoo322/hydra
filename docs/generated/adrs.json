@@ -389,7 +389,6 @@
         "docs/adr/0012-autopilot-is-the-single-brain.md",
         "docs/adr/0036-anchor-selection-retired-candidate-feed.md",
         "docs/historical/README.md",
-        "docs/operations/watchdog.md",
         "docs/operator-playbooks/hydra-qa.md",
         "docs/reference.md"
       ],
