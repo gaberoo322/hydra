@@ -1963,6 +1963,22 @@
       }
     },
     {
+      "method": "POST",
+      "path": "/api/otel/v1/traces",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/otel/v1/traces",
+      "areas": [
+        "src/redis/",
+        "src/schemas/"
+      ],
+      "source": {
+        "path": "src/api/otel.ts",
+        "line": 52
+      }
+    },
+    {
       "method": "GET",
       "path": "/api/outcomes/trends",
       "stability": "stable",

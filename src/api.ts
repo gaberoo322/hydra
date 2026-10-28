@@ -48,6 +48,7 @@ import { createDispatchesRouter } from "./api/dispatches.ts";
 import { createBuilderHealthRouter } from "./api/builder-health.ts";
 import { createVersionsRouter } from "./api/versions.ts";
 import { createOperatorActionsRouter } from "./api/operator-actions.ts";
+import { createOtelRouter, otelKeyGuard } from "./api/otel.ts";
 import type { EventBus } from "./event-bus.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
@@ -70,6 +71,11 @@ function parseAllowedOrigins(raw: string | undefined): string[] {
 
 function createApi(eventBus: EventBus) {
   const app = express();
+  // OTLP trace export batches (up to 512 spans) exceed the 100kb default
+  // (issue #5177). Path-scoped and mounted BEFORE the global parser:
+  // body-parser skips an already-parsed body, so no other route's limit changes.
+  // The key guard runs first so unauthenticated callers never get a body parsed.
+  app.use("/api/otel", otelKeyGuard, express.json({ limit: "4mb" }));
   app.use(express.json());
 
   // CORS — exact-match allowlist (issue #4047, split from #4000). The
@@ -229,6 +235,10 @@ function createApi(eventBus: EventBus) {
   // #4619 slice 1) — the typed recommended+alternatives per attention-feed
   // admission line. Pure read of the import-validated registry; no eventBus.
   api.use(createOperatorActionsRouter());
+  // OTLP trace ingest (issue #5177, epic #5171) — shadow per-agent token ledger
+  // from Claude Code's claude_code.llm_request spans. Fail-closed on
+  // HYDRA_OTEL_INGEST_KEY; no cost consumer reads the store.
+  api.use(createOtelRouter());
 
   // Sentry error handler — must be after all routes, before other error handlers
   Sentry.setupExpressErrorHandler(app);

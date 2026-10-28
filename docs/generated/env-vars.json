@@ -315,7 +315,7 @@
         },
         {
           "path": "src/api.ts",
-          "line": 53
+          "line": 54
         },
         {
           "path": "src/api/config.ts",
@@ -1568,13 +1568,13 @@
       "readSites": [
         {
           "path": "src/api.ts",
-          "line": 87
+          "line": 93
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "src/api.ts",
-        "line": 87
+        "line": 93
       }
     },
     {
@@ -2474,6 +2474,20 @@
       }
     },
     {
+      "name": "HYDRA_OTEL_INGEST_KEY",
+      "readSites": [
+        {
+          "path": "src/api/otel.ts",
+          "line": 35
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "src/api/otel.ts",
+        "line": 35
+      }
+    },
+    {
       "name": "HYDRA_PACE_GATE_DRY_RUN",
       "readSites": [
         {
@@ -3154,7 +3168,7 @@
         },
         {
           "path": "src/api.ts",
-          "line": 53
+          "line": 54
         },
         {
           "path": "src/api/config.ts",

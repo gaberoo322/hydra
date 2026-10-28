@@ -144,6 +144,7 @@ export const MACHINE_WRITES: Readonly<Record<string, string>> = Object.freeze({
   "POST /api/merge/lock": "hydra-incident + hydra-target-incident — the 60 s cycle merge lock (ADR-0034 §9.1)",
   "POST /api/merge/unlock": "hydra-incident + hydra-target-incident + bin/hydra — the 60 s cycle merge lock (ADR-0034 §9.1)",
   "POST /api/metrics/tokens": "scripts/autopilot/reap.py — token-metric ingestion",
+  "POST /api/otel/v1/traces": "Claude Code OTLP trace exporter (HYDRA_OTEL_INGEST_KEY-gated) — per-agent token span ledger (#5177)",
   "POST /api/memory/:agent/pattern": "hydra-incident playbook — pattern-memory write",
   "POST /api/memory/subagent-lesson": "hydra-dev / hydra-qa / hydra-target-build — pattern-memory write",
   "POST /api/memory/subagent-friction": "hydra-dev / hydra-target-build — pattern-memory write",
