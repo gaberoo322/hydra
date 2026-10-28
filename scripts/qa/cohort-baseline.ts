@@ -420,7 +420,7 @@ async function harvest(repo: string, since: string, until: string): Promise<Coho
 
   let tokens: CohortInputs["tokens"] = { qaOrchTokens: null, attributedPercent: null };
   try {
-    const base = process.env.HYDRA_API_URL ?? "http://localhost:4000";
+    const base = "http://localhost:4000";
     const resp = await fetch(`${base}/api/usage/by-issue`, {
       signal: AbortSignal.timeout(10_000),
     });
@@ -491,7 +491,9 @@ if (isMain) {
   if (has("--write-baseline") && fromInputs === null) {
     fs.writeFileSync(BASELINE_FIXTURE_PATH, stableStringify(doc));
     console.error(`[cohort-baseline] wrote ${BASELINE_FIXTURE_PATH}`);
+    process.exit(0);
   } else {
-    process.stdout.write(stableStringify(doc));
+    process.stdout.write(stableStringify(doc), () => process.exit(0));
+    // Exit only after stdout flushes; the gh adapter Redis side-channel keeps the loop alive.
   }
 }
