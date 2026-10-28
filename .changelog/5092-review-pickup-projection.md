@@ -1,0 +1,1 @@
+- refactor: review-pickup now projects the issues-waiting read; the loose blocker parser is deleted (#5092)

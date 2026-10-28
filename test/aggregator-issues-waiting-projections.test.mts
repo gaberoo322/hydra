@@ -4,7 +4,7 @@
  * `readWaitingIssues` is the ONE read; the stuck / decision-queue / pickup
  * projections are pure functions of its value. The goldens are differential at
  * the aggregator interface: the same fixture goes to the legacy entry point
- * (getStuckItems / getReviewPickupSet) and to read + projection, and the two
+ * (getStuckItems) and to read + projection, and the two
  * must deep-equal. (The legacy decision-queue aggregator was deleted in
  * ADR-0034 §8.1, so its golden is the pinned literal shape.)
  */
@@ -262,7 +262,7 @@ describe("projectDecisionQueue — ties and purity", () => {
   });
 });
 
-describe("projectPickupSet — differential vs getReviewPickupSet", () => {
+describe("projectPickupSet — golden + composition identity with getReviewPickupSet", () => {
   const fixture = {
     "ready-for-human": [row(200, { createdAt: ago(1), title: "Decide tier" })],
     blocked: [
@@ -275,17 +275,29 @@ describe("projectPickupSet — differential vs getReviewPickupSet", () => {
 
   test("same pickup set on the review-pickup integration fixture", async () => {
     const l = lister(fixture);
-    const legacy = await getReviewPickupSet({
-      listIssuesByLabelOrEmpty: (async (label: string) => l.orEmpty(label)) as never,
-      listIssuesBySearch: search,
-    });
-    const read = await readWaitingIssues({
+    const deps = {
       now: NOW,
       listIssuesByLabel: l.discriminated as never,
       listIssuesBySearch: search,
-    });
-    assert.deepEqual(projectPickupSet(read), legacy);
-    assert.deepEqual(legacy.map((i) => i.number), [200, 400]);
+    };
+    const items = await getReviewPickupSet(deps);
+    assert.deepEqual(items, [
+      {
+        number: 200,
+        title: "Decide tier",
+        url: "https://github.com/o/r/issues/200",
+        source: "ready-for-human",
+        sources: ["ready-for-human"],
+      },
+      {
+        number: 400,
+        title: "issue 400",
+        url: "https://github.com/o/r/issues/400",
+        source: "stale-blocked",
+        sources: ["stale-blocked"],
+      },
+    ]);
+    assert.deepEqual(items, projectPickupSet(await readWaitingIssues(deps)));
   });
 
   test("failed blocker lookup: every ref counts open, fewer pickup rows", async () => {

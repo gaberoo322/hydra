@@ -13,16 +13,15 @@
  *
  * What remains is the two aggregators' actual shared concern:
  *
- *   - `extractIssueRefs`   — pull `#N` references out of a markdown body
- *     (still used by `review-pickup.ts`'s stale-blocked classifier,
- *     `blockedIssuesFromRows`, to find an issue's claimed blockers).
  *   - `labeledItemsFromRows` — map the GitHub Issue Read seam's `IssueRow`
  *     rows to the wide `RawDigestInput` shape both aggregators merge on.
  *   - `mergeBySource`      — the dedup/merge skeleton both aggregators use
  *     to unify their (now two, not three) label-fed sources into one list.
  *
- * The `mergePickupItems` orchestration logic stays in its aggregator — only these
- * shared primitives live here.
+ * The pickup projection (`projectPickupSet`) lives in `issues-waiting.ts` — only
+ * these shared primitives live here. (the loose any-`#N` scanner was deleted
+ * by #5092; blocker refs come from the strict
+ * `extractClearanceBlockerRefs` inside `readWaitingIssues`.)
  */
 
 import type { IssueRow } from "../github/issues.ts";
@@ -39,33 +38,6 @@ export interface RawDigestInput {
   url: string;
   createdAt: string;
   labels: string[];
-}
-
-// ---------------------------------------------------------------------------
-// Issue-ref extraction
-// ---------------------------------------------------------------------------
-
-/**
- * Pull every `#N` reference out of a markdown body, deduped, in order of
- * first appearance. Skips inline code spans (anything inside backticks) so
- * URLs or commit hashes in code don't poison the queue.
- */
-export function extractIssueRefs(body: string): number[] {
-  if (!body) return [];
-  // Strip backtick code spans first — `#1234` inside `code` is not a ref.
-  const stripped = body.replace(/`[^`]*`/g, "");
-  const seen = new Set<number>();
-  const out: number[] = [];
-  const re = /(?<![\w/])#(\d+)\b/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(stripped)) !== null) {
-    const n = Number(m[1]);
-    if (!Number.isFinite(n) || n <= 0) continue;
-    if (seen.has(n)) continue;
-    seen.add(n);
-    out.push(n);
-  }
-  return out;
 }
 
 // ---------------------------------------------------------------------------
