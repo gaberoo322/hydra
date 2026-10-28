@@ -1,0 +1,4700 @@
+{
+  "inputs": {
+    "items": [
+      {
+        "createdAt": "2026-09-30T00:54:36Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4734,
+          4735,
+          4758
+        ],
+        "mergedAt": "2026-10-08T20:44:58Z",
+        "number": 4775,
+        "title": "fix(qa): omitted spawned reviewer is malformed FAIL; quoted location keys; decideReReviewContext rename (#4758)"
+      },
+      {
+        "createdAt": "2026-10-01T00:59:41Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          26,
+          63,
+          64,
+          4767,
+          4931
+        ],
+        "mergedAt": "2026-10-20T11:26:04Z",
+        "number": 4810,
+        "title": "fix(pr-refs): a negated closing verb is no longer a close (#4767)"
+      },
+      {
+        "createdAt": "2026-10-03T19:46:20Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4279
+        ],
+        "mergedAt": null,
+        "number": 4840,
+        "title": "fix(target-build): anchor preflight skips only on exact closing-ref + reopened guard (#4279)"
+      },
+      {
+        "createdAt": "2026-10-05T03:26:01Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4812
+        ],
+        "mergedAt": "2026-10-07T05:17:12Z",
+        "number": 4860,
+        "title": "fix(collect-state): re-poll UNKNOWN mergeStateStatus once before pr-gate/resume picks (#4812)"
+      },
+      {
+        "createdAt": "2026-10-05T15:53:15Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          221,
+          228,
+          229,
+          431,
+          3896,
+          4310,
+          4816
+        ],
+        "mergedAt": null,
+        "number": 4874,
+        "title": "fix(target-build): shipped-anchor preflight excludes commits attributed to another issue (#4816)"
+      },
+      {
+        "createdAt": "2026-10-05T16:18:08Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4836
+        ],
+        "mergedAt": "2026-10-11T01:33:41Z",
+        "number": 4875,
+        "title": "fix(pace-gate): refuse admission in the 5h throttle band and cool down after a quota exit (#4836)"
+      },
+      {
+        "createdAt": "2026-10-05T18:10:10Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4585,
+          4762
+        ],
+        "mergedAt": "2026-10-07T01:59:29Z",
+        "number": 4882,
+        "title": "fix(reconcile): upgrade dev rows via cycle-hash status + anchor join (#4762)"
+      },
+      {
+        "createdAt": "2026-10-06T14:47:02Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4585,
+          4910
+        ],
+        "mergedAt": "2026-10-07T02:01:31Z",
+        "number": 4911,
+        "title": "fix(deps): bump proxy-addr to 2.0.8 (GHSA-jqcg-44mw-7w3h) (#4910)"
+      },
+      {
+        "createdAt": "2026-10-06T21:14:17Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4842,
+          4844,
+          4869,
+          4870,
+          4916
+        ],
+        "mergedAt": "2026-10-06T21:25:53Z",
+        "number": 4917,
+        "title": "fix(qa): a low finding never blocks at T1–T3 — drop the dual-reviewer-low clause (#4916)"
+      },
+      {
+        "createdAt": "2026-10-08T13:19:22Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4130,
+          4141,
+          4928,
+          4934,
+          4949,
+          4950
+        ],
+        "mergedAt": "2026-10-08T15:10:02Z",
+        "number": 4957,
+        "title": "fix(turn-snapshot): the degraded orch board fallback counts feed the four signals by field (#4949)"
+      },
+      {
+        "createdAt": "2026-10-08T16:04:21Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          3059,
+          3709,
+          3754,
+          4020,
+          4130,
+          4137,
+          4823,
+          4880,
+          4928,
+          4930,
+          4932,
+          4946
+        ],
+        "mergedAt": "2026-10-11T04:28:30Z",
+        "number": 4958,
+        "title": "fix(turn-snapshot): Target degraded-board fallback derives through deriveBoardState (#4946)"
+      },
+      {
+        "createdAt": "2026-10-10T01:07:33Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          975,
+          1184,
+          1919,
+          2364,
+          3738,
+          4343,
+          4460,
+          4518,
+          4584,
+          4856
+        ],
+        "mergedAt": "2026-10-11T07:32:52Z",
+        "number": 4960,
+        "title": "fix(retro): read-side four-way dispatch bucketing + forward-fix/short-circuit drill clauses (#4856)"
+      },
+      {
+        "createdAt": "2026-10-10T12:10:48Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          2575,
+          2715,
+          3351,
+          3920,
+          4020,
+          4137,
+          4611,
+          4909
+        ],
+        "mergedAt": "2026-10-10T21:52:42Z",
+        "number": 4962,
+        "title": "fix(autopilot): carry cleanup_target cooldown across relaunches; derive carry set from one list (#4909)"
+      },
+      {
+        "createdAt": "2026-10-11T10:54:49Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4343,
+          4585,
+          4700
+        ],
+        "mergedAt": "2026-10-12T17:43:54Z",
+        "number": 4964,
+        "title": "fix(autopilot): count window-joined merge events in run merged_count (#4700)"
+      },
+      {
+        "createdAt": "2026-10-11T16:39:04Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4411,
+          4846
+        ],
+        "mergedAt": "2026-10-13T16:56:51Z",
+        "number": 4970,
+        "title": "fix(route-crawl): resolve Target identity via the seam, discover routes from the live checkout, never count unreachable as healthy (#4846)"
+      },
+      {
+        "createdAt": "2026-10-12T17:47:56Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          3828,
+          4585,
+          4608,
+          4939
+        ],
+        "mergedAt": "2026-10-14T16:06:42Z",
+        "number": 4980,
+        "title": "fix(origin-identity): guard ~/hydra origin against Target dispatch rewrites; watchdog alarm + remote fence (#4939)"
+      },
+      {
+        "createdAt": "2026-10-12T18:33:31Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4585,
+          4964,
+          4979
+        ],
+        "mergedAt": "2026-10-13T18:53:00Z",
+        "number": 4981,
+        "title": "fix(autopilot): merged_count coverage probe, pending durable merge retry, Redis eviction test (#4979)"
+      },
+      {
+        "createdAt": "2026-10-12T19:21:25Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4224,
+          4230,
+          4558,
+          4585,
+          4854
+        ],
+        "mergedAt": "2026-10-12T22:18:47Z",
+        "number": 4983,
+        "title": "fix(target-build): resume arm mirrors fence labels, never rewrites Closes to Refs (#4854)"
+      },
+      {
+        "createdAt": "2026-10-13T20:18:56Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4248,
+          4985
+        ],
+        "mergedAt": "2026-10-17T17:06:33Z",
+        "number": 5002,
+        "title": "fix(autopilot): record no-work dev_orch dispatches as empty cycles, not merged (#4985)"
+      },
+      {
+        "createdAt": "2026-10-13T21:37:53Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4965
+        ],
+        "mergedAt": "2026-10-18T15:40:05Z",
+        "number": 5005,
+        "title": "fix(dispatches): register PostToolUse hook in project settings, key children on agent_id (#4965)"
+      },
+      {
+        "createdAt": "2026-10-14T01:49:51Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          3729,
+          4302,
+          4518,
+          4520,
+          4611,
+          4999
+        ],
+        "mergedAt": "2026-10-17T17:57:14Z",
+        "number": 5017,
+        "title": "fix(autopilot): discover_target zero-yield back-off ladder (30m → 4h → 24h) (#4999)"
+      },
+      {
+        "createdAt": "2026-10-17T18:53:25Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4939,
+          4980,
+          5026
+        ],
+        "mergedAt": "2026-10-20T15:47:14Z",
+        "number": 5037,
+        "title": "fix(git-remote-fence): close remaining parser bypass shapes + watchdog host/redaction (#5026)"
+      },
+      {
+        "createdAt": "2026-10-18T15:07:55Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          5035,
+          5039,
+          5040,
+          5041
+        ],
+        "mergedAt": "2026-10-18T15:19:26Z",
+        "number": 5042,
+        "title": "fix(notify): critical Telegram alerts rejected with 400 can't parse entities (#5040)"
+      },
+      {
+        "createdAt": "2026-10-20T04:04:03Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4460,
+          4518,
+          4735,
+          4739,
+          4810,
+          4818,
+          5056,
+          5058
+        ],
+        "mergedAt": "2026-10-20T05:48:38Z",
+        "number": 5060,
+        "title": "fix(autopilot): provenance-agnostic PR resume + hydra-review clears PR stranding labels (#5058)"
+      },
+      {
+        "createdAt": "2026-10-20T13:49:02Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4939,
+          4980,
+          5037,
+          5064
+        ],
+        "mergedAt": "2026-10-21T21:24:25Z",
+        "number": 5067,
+        "title": "fix(deploy): install Claude Code PreToolUse hooks on every deploy + watchdog alarm (#5064)"
+      },
+      {
+        "createdAt": "2026-10-20T13:49:29Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4137,
+          4939,
+          4980,
+          5065
+        ],
+        "mergedAt": "2026-10-20T23:32:45Z",
+        "number": 5068,
+        "title": "fix(watchdog): run_origin_identity auto-repairs a wrong origin URL / missing origin/master (#5065)"
+      },
+      {
+        "createdAt": "2026-10-20T14:51:21Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4183,
+          5062
+        ],
+        "mergedAt": "2026-10-22T01:35:45Z",
+        "number": 5069,
+        "title": "fix(test): watchdog #4183 tests use run-owned Redis DB, not hardcoded DB 9 (#5062)"
+      },
+      {
+        "createdAt": "2026-10-21T08:41:00Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          5114
+        ],
+        "mergedAt": "2026-10-21T10:09:36Z",
+        "number": 5119,
+        "title": "fix(test): launch-flow orphan sweep recognises the delivery suite's live namespace (#5114)"
+      },
+      {
+        "createdAt": "2026-10-21T10:29:34Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          5112,
+          5115
+        ],
+        "mergedAt": "2026-10-21T16:55:20Z",
+        "number": 5121,
+        "title": "fix(watchdog): redis timeouts, gated brief-missing DEL, annotate late-rejection catch (#5115)"
+      },
+      {
+        "createdAt": "2026-10-21T18:12:02Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4934,
+          5082,
+          5131
+        ],
+        "mergedAt": "2026-10-21T21:05:42Z",
+        "number": 5133,
+        "title": "fix(github): viewIssue coerces non-array labels; drop stale read-guard comments (#5131)"
+      },
+      {
+        "createdAt": "2026-10-21T21:52:50Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4585,
+          5137
+        ],
+        "mergedAt": "2026-10-21T23:10:41Z",
+        "number": 5146,
+        "title": "fix(test): clean does-not-exist root Redis state in nm-integrity suite (#5137)"
+      },
+      {
+        "createdAt": "2026-10-21T22:03:25Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4134,
+          4839,
+          4881,
+          4968,
+          5052,
+          5059,
+          5066,
+          5144
+        ],
+        "mergedAt": "2026-10-21T22:40:46Z",
+        "number": 5147,
+        "title": "fix(autopilot): a terminating turn arms its QA PASS before terminate (#5144)"
+      },
+      {
+        "createdAt": "2026-10-22T01:41:44Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          5141
+        ],
+        "mergedAt": "2026-10-22T22:55:05Z",
+        "number": 5151,
+        "title": "fix(cost): de-duplicate transcript usage by message.id (#5141)"
+      },
+      {
+        "createdAt": "2026-10-23T23:18:35Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          5067,
+          5140
+        ],
+        "mergedAt": "2026-10-24T21:54:01Z",
+        "number": 5200,
+        "title": "fix(watchdog): gate origin-identity since-marker on a stream-id XADD reply (#5140)"
+      },
+      {
+        "createdAt": "2026-10-24T04:00:40Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          5138
+        ],
+        "mergedAt": "2026-10-24T21:56:19Z",
+        "number": 5203,
+        "title": "fix(doctor): unwrap {alerts} envelope in Phase 1 Alerts block (#5138)"
+      },
+      {
+        "createdAt": "2026-10-24T05:54:12Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4585,
+          5173
+        ],
+        "mergedAt": "2026-10-24T07:06:47Z",
+        "number": 5204,
+        "title": "fix(reap): branch-keyed token mirror writes only the per-cycle hash (#5173)"
+      },
+      {
+        "createdAt": "2026-10-24T06:17:11Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4637,
+          5161
+        ],
+        "mergedAt": "2026-10-24T09:38:50Z",
+        "number": 5205,
+        "title": "fix(class-stats): never memoise a degraded scoreboard; serve verdict thresholds (#5161)"
+      },
+      {
+        "createdAt": "2026-10-24T06:39:34Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          5069,
+          5107
+        ],
+        "mergedAt": "2026-10-24T09:52:44Z",
+        "number": 5206,
+        "title": "fix(test): scoped suite-count baseline regen + unrelated-drift warning (#5107)"
+      },
+      {
+        "createdAt": "2026-10-24T08:16:04Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          5165,
+          5180
+        ],
+        "mergedAt": "2026-10-24T19:01:42Z",
+        "number": 5208,
+        "title": "fix(ci): raise design-concept-reconcile timeout 5 -> 15 min (#5165)"
+      },
+      {
+        "createdAt": "2026-10-24T12:44:43Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4585,
+          4762,
+          4926,
+          4985,
+          5002,
+          5017,
+          5028,
+          5055
+        ],
+        "mergedAt": "2026-10-24T16:54:00Z",
+        "number": 5213,
+        "title": "fix(reconcile): startedAt ownership + 7-day join window for dev-row merge credit (#5028)"
+      },
+      {
+        "createdAt": "2026-10-24T17:05:59Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4585,
+          4619,
+          5162
+        ],
+        "mergedAt": "2026-10-25T03:33:11Z",
+        "number": 5215,
+        "title": "fix: re-read waiters settle only on post-write reads; /now UNKNOWN on failed run read (#5162)"
+      },
+      {
+        "createdAt": "2026-10-24T18:57:04Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          5036
+        ],
+        "mergedAt": "2026-10-25T04:01:33Z",
+        "number": 5221,
+        "title": "fix(autopilot): forward-fix contract requires a test with each code fix + full verify trio (#5036)"
+      },
+      {
+        "createdAt": "2026-10-25T06:51:59Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4585,
+          5029
+        ],
+        "mergedAt": "2026-10-25T12:28:20Z",
+        "number": 5234,
+        "title": "fix(retro): daily retro drillable keys stuck-signals on novelty vs prior retro (#5029)"
+      },
+      {
+        "createdAt": "2026-10-25T18:27:01Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          5212
+        ],
+        "mergedAt": "2026-10-26T07:35:47Z",
+        "number": 5241,
+        "title": "fix(deps): bump zod and body-parser to clear high npm-audit advisories (#5212)"
+      },
+      {
+        "createdAt": "2026-10-25T23:53:45Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          5142
+        ],
+        "mergedAt": "2026-10-27T17:24:51Z",
+        "number": 5246,
+        "title": "fix(autopilot): reaped dispatches are no longer re-seeded into the next run (#5142)"
+      },
+      {
+        "createdAt": "2026-10-27T02:56:02Z",
+        "isFix": true,
+        "isPostMortem": false,
+        "isRevert": false,
+        "kind": "pr",
+        "mentions": [
+          4137,
+          5277
+        ],
+        "mergedAt": "2026-10-27T17:24:54Z",
+        "number": 5276,
+        "title": "fix(watchdog): explicit PATH in hydra-watchdog.service so gh resolves to ~/.local/bin"
+      }
+    ],
+    "prs": [
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-08T20:44:58Z",
+        "number": 4775,
+        "title": "fix(qa): omitted spawned reviewer is malformed FAIL; quoted location keys; decideReReviewContext rename (#4758)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 4775,
+            "round": 1,
+            "sha": "499f13e5fec2",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "high",
+            "pr": 4775,
+            "round": 2,
+            "sha": "e6ae5791430a",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4775,
+            "round": 3,
+            "sha": "e4c0dc0b2ee7",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-20T11:26:04Z",
+        "number": 4810,
+        "title": "fix(pr-refs): a negated closing verb is no longer a close (#4767)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4810,
+            "round": 1,
+            "sha": "ef51cc8acac4",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4810,
+            "round": 2,
+            "sha": "a4c78a3ac28c",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4810,
+            "round": 3,
+            "sha": "3c5a490d133e",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-12T17:44:53Z",
+        "number": 4814,
+        "title": "feat(glm): finish phase in src/glm/finish.ts, finish driver mode (#4685)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 4814,
+            "round": 1,
+            "sha": "545d550e7501",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4814,
+            "round": 2,
+            "sha": "77ec90d2b4a6",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 4814,
+            "round": 3,
+            "sha": "9d53267ac19a",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 4814,
+            "round": 4,
+            "sha": "b8d5264f0680",
+            "verdict": "FAIL"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-20T03:38:19Z",
+        "number": 4818,
+        "title": "refactor(autopilot): split decide.py's 22 selector handlers into decide_selectors/ (#4511)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4818,
+            "round": 1,
+            "sha": "e0ced38116fa",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4818,
+            "round": 2,
+            "sha": "d5cd77522431",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 4818,
+            "round": 3,
+            "sha": "abfd3256fdfb",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "high",
+            "pr": 4818,
+            "round": 4,
+            "sha": "2b35466bb697",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 4818,
+            "round": 5,
+            "sha": "2780f0c28258",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4818,
+            "round": 6,
+            "sha": "bf7b75f2f5dc",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4818,
+            "round": 7,
+            "sha": "b4c9333525ed",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T05:17:12Z",
+        "number": 4860,
+        "title": "fix(collect-state): re-poll UNKNOWN mergeStateStatus once before pr-gate/resume picks (#4812)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 4860,
+            "round": 1,
+            "sha": "6ab43b2b7a9b",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "low",
+            "pr": 4860,
+            "round": 2,
+            "sha": "cf18d2de420c",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 5,
+            "maxSeverity": "medium",
+            "pr": 4860,
+            "round": 3,
+            "sha": "e5557cc262ba",
+            "verdict": "FAIL"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-20T09:26:50Z",
+        "number": 4871,
+        "title": "feat(target-qa): QA-Verdict trailer on Target verdicts + qa_target PASS-at-head skip (#4796)",
+        "trailers": [
+          {
+            "blockers": 5,
+            "maxSeverity": "medium",
+            "pr": 4871,
+            "round": 1,
+            "sha": "34f24411c0a5",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 4871,
+            "round": 2,
+            "sha": "969a28a9af9a",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4871,
+            "round": 3,
+            "sha": "f07bd190649e",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "high",
+            "pr": 4871,
+            "round": 4,
+            "sha": "295760a370d7",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4871,
+            "round": 5,
+            "sha": "07a689e338ee",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-11T01:33:41Z",
+        "number": 4875,
+        "title": "fix(pace-gate): refuse admission in the 5h throttle band and cool down after a quota exit (#4836)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4875,
+            "round": 1,
+            "sha": "522be87e35df",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4875,
+            "round": 2,
+            "sha": "273d8bf3bf24",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-11T04:38:09Z",
+        "number": 4881,
+        "title": "work-projections: document glmEligible-carries-glmLane, options object for toWorkQueueRow, INV-5 truth-table test (follow-up #4692)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4881,
+            "round": 1,
+            "sha": "8a415c587787",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4881,
+            "round": 2,
+            "sha": "c7340d82e093",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T01:59:29Z",
+        "number": 4882,
+        "title": "fix(reconcile): upgrade dev rows via cycle-hash status + anchor join (#4762)",
+        "trailers": [
+          {
+            "blockers": 5,
+            "maxSeverity": "medium",
+            "pr": 4882,
+            "round": 1,
+            "sha": "15dcb6158e48",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 4882,
+            "round": 2,
+            "sha": "bab2eb37c40f",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 5,
+            "maxSeverity": "medium",
+            "pr": 4882,
+            "round": 3,
+            "sha": "06ed24e720b8",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 5,
+            "maxSeverity": "medium",
+            "pr": 4882,
+            "round": 4,
+            "sha": "3463cc66d39c",
+            "verdict": "FAIL"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T02:09:09Z",
+        "number": 4889,
+        "title": "refactor(board-state): shared blocker-exclusion predicate, anchored child-of, behavioural tests (#4880)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4889,
+            "round": 1,
+            "sha": "19cf3da41821",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-11T18:07:05Z",
+        "number": 4890,
+        "title": "feat(skills): pure src/skills/playbook.ts core + live parity test (#4718)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4890,
+            "round": 1,
+            "sha": "6d4a84aa5049",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4890,
+            "round": 2,
+            "sha": "dcf3fd0864f4",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-06T23:14:41Z",
+        "number": 4891,
+        "title": "feat(autopilot): one conflict fix-forward for DIRTY PRs before surfacing (#4807)",
+        "trailers": [
+          {
+            "blockers": 5,
+            "maxSeverity": "medium",
+            "pr": 4891,
+            "round": 1,
+            "sha": "4607fb790cee",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4891,
+            "round": 2,
+            "sha": "8592e53e3b38",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T02:01:31Z",
+        "number": 4911,
+        "title": "fix(deps): bump proxy-addr to 2.0.8 (GHSA-jqcg-44mw-7w3h) (#4910)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-06T21:25:53Z",
+        "number": 4917,
+        "title": "fix(qa): a low finding never blocks at T1–T3 — drop the dual-reviewer-low clause (#4916)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4917,
+            "round": 1,
+            "sha": "ba734a47d430",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-06T22:12:42Z",
+        "number": 4918,
+        "title": "test(cost): src/cost layer drift guard + CONTEXT.md module map + dep-cruiser twin (#4783)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4918,
+            "round": 1,
+            "sha": "5d38f96de93a",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-06T23:53:10Z",
+        "number": 4924,
+        "title": "feat(spike): Headroom offline compression spike — script, golden eval, write-up (#4769)",
+        "trailers": [
+          {
+            "blockers": 6,
+            "maxSeverity": "medium",
+            "pr": 4924,
+            "round": 1,
+            "sha": "d6eed8a21189",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4924,
+            "round": 2,
+            "sha": "6110985428b8",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-06T23:49:39Z",
+        "number": 4925,
+        "title": "test(cost): move snapshot-assembly fold suites out of usage-tracker.test.mts (#4788)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4925,
+            "round": 1,
+            "sha": "1b667f9c720f",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-11T18:09:13Z",
+        "number": 4927,
+        "title": "feat(attention): wire rank-5 parked-over-cap bucket, pin rank 4 (#4626)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 4927,
+            "round": 1,
+            "sha": "0709b9a64705",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 4927,
+            "round": 2,
+            "sha": "3d535cad158e",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4927,
+            "round": 3,
+            "sha": "78ef59e49739",
+            "verdict": "FAIL"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-11T07:19:59Z",
+        "number": 4935,
+        "title": "docs-epic 6/13 — classes & skills: stage (incl. brain), model, skill_by_ticket_type in classes.json; generated cards; playbook tables → pointers",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 4935,
+            "round": 1,
+            "sha": "ae868e071f5e",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4935,
+            "round": 2,
+            "sha": "29597d774d09",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4935,
+            "round": 3,
+            "sha": "3369aa54af0f",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T03:37:58Z",
+        "number": 4936,
+        "title": "docs(adr): ADR-0043 — the Turn Snapshot is a typed TS module; collect-state.sh is strangled",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T04:47:21Z",
+        "number": 4937,
+        "title": "test(cost): move last pure-leaf suites out of usage-tracker.test.mts (#4789)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4937,
+            "round": 1,
+            "sha": "929df0164499",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T05:35:14Z",
+        "number": 4940,
+        "title": "refactor(turn-snapshot): inflight-PR + PR-gate collectors in TS — ADR-0043 slice 1 (#4929)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T14:24:29Z",
+        "number": 4942,
+        "title": "refactor(turn-snapshot): grill/dev-ready picks, candidate exclusions, merged-PR and active_dev_orch collectors in TS (#4931)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T16:04:46Z",
+        "number": 4943,
+        "title": "refactor(turn-snapshot): HTTP-passthrough collectors in TS — ADR-0043 slice 5 PR A (#4933)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T15:01:55Z",
+        "number": 4944,
+        "title": "refactor(turn-snapshot): orch board, untriaged-orphan and needs-qa collectors in TS (ADR-0043 slice 2, #4930)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T17:19:01Z",
+        "number": 4945,
+        "title": "refactor(turn-snapshot): Target board family collectors in TS — ADR-0043 slice 4 (#4932)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T16:43:43Z",
+        "number": 4947,
+        "title": "refactor(turn-snapshot): redis queues, scout, boards, hitl-grill, retro, wayfinder, tickets collectors in TS — ADR-0043 slice 5B (#4933)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T18:25:31Z",
+        "number": 4948,
+        "title": "feat(autopilot): JSON Turn Snapshot + turn_snapshot.py accessor, kv as fallback — ADR-0043 slice 6 expand (#4934)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T20:01:30Z",
+        "number": 4950,
+        "title": "refactor(autopilot): JSON Turn Snapshot is the only collect path — delete the kv wire; per-field degrade — ADR-0043 slice 6 contract (#4934)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T20:34:25Z",
+        "number": 4951,
+        "title": "test(turn-snapshot): strip dead kv fields from root and passthrough goldens",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T20:56:04Z",
+        "number": 4952,
+        "title": "test(turn-snapshot): strip dead kv fields from picks and remaining goldens",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-07T21:19:28Z",
+        "number": 4953,
+        "title": "test(turn-snapshot): strip dead kv fields from target-board goldens; retire the golden-values sidecar",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-08T02:02:29Z",
+        "number": 4955,
+        "title": "feat(skills): /hydra-epic-sprint + ADR-0044 operator-attended epic sprint lane",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-08T20:45:17Z",
+        "number": 4956,
+        "title": "test(turn-snapshot): port read-count guard + regenerable pr-gate goldens (#4941)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4956,
+            "round": 1,
+            "sha": "e67516dbb17d",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-08T15:10:02Z",
+        "number": 4957,
+        "title": "fix(turn-snapshot): the degraded orch board fallback counts feed the four signals by field (#4949)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4957,
+            "round": 1,
+            "sha": "abe40e7f9e3b",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-11T04:28:30Z",
+        "number": 4958,
+        "title": "fix(turn-snapshot): Target degraded-board fallback derives through deriveBoardState (#4946)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4958,
+            "round": 1,
+            "sha": "941ce8547a9a",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4958,
+            "round": 2,
+            "sha": "2e6627a7fd22",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-11T07:32:52Z",
+        "number": 4960,
+        "title": "fix(retro): read-side four-way dispatch bucketing + forward-fix/short-circuit drill clauses (#4856)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4960,
+            "round": 1,
+            "sha": "4f5bbebdced9",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4960,
+            "round": 2,
+            "sha": "470e54f95006",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-11T11:40:46Z",
+        "number": 4961,
+        "title": "hydra-target-cleanup-emit.ts still hardcodes hydra-betting (TARGET_ROOT, findings sink) after the CSB swap",
+        "trailers": [
+          {
+            "blockers": 5,
+            "maxSeverity": "medium",
+            "pr": 4961,
+            "round": 1,
+            "sha": "a1e63c6c4ef5",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4961,
+            "round": 2,
+            "sha": "f1bccb779154",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4961,
+            "round": 3,
+            "sha": "822f8fe4d4c2",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-10T21:52:42Z",
+        "number": 4962,
+        "title": "fix(autopilot): carry cleanup_target cooldown across relaunches; derive carry set from one list (#4909)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4962,
+            "round": 1,
+            "sha": "0055391d1638",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-11T17:06:53Z",
+        "number": 4963,
+        "title": "docs: Areas — CONTEXT-MAP Reference docs column, areas.json family, /docs area views + entry grid (#4596)",
+        "trailers": [
+          {
+            "blockers": 6,
+            "maxSeverity": "medium",
+            "pr": 4963,
+            "round": 1,
+            "sha": "ef6375a70935",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 4963,
+            "round": 2,
+            "sha": "97c36a33eb1d",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4963,
+            "round": 3,
+            "sha": "73d2772dd233",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-12T17:43:54Z",
+        "number": 4964,
+        "title": "fix(autopilot): count window-joined merge events in run merged_count (#4700)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 4964,
+            "round": 1,
+            "sha": "5eca065bbd94",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 4964,
+            "round": 2,
+            "sha": "ef1fd0877b6b",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4964,
+            "round": 3,
+            "sha": "ab040b342cb0",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 4,
+            "maxSeverity": "medium",
+            "pr": 4964,
+            "round": 4,
+            "sha": "72eef9bc4e95",
+            "verdict": "FAIL"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-11T14:24:51Z",
+        "number": 4967,
+        "title": "refactor(cost): extract pure transcript parse core into transcript-fold.ts (#4791)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4967,
+            "round": 1,
+            "sha": "6295442cb803",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4967,
+            "round": 2,
+            "sha": "84175a7e6154",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-11T12:16:01Z",
+        "number": 4968,
+        "title": "refactor(cost): gather assembleSnapshot calibration env reads into readSnapshotCalibration() (#4793)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4968,
+            "round": 1,
+            "sha": "d056c1150143",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-20T12:22:39Z",
+        "number": 4969,
+        "title": "docs-epic 11/13: prose-drift guard — identifier existence, retired terms, count claims, links (#4597)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "high",
+            "pr": 4969,
+            "round": 1,
+            "sha": "c0f9edc5a3c1",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 6,
+            "maxSeverity": "medium",
+            "pr": 4969,
+            "round": 2,
+            "sha": "98e950ad5fd4",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4969,
+            "round": 3,
+            "sha": "8a6cf97ba973",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 4969,
+            "round": 4,
+            "sha": "cc78eeabfdd0",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4969,
+            "round": 5,
+            "sha": "5832ae4c93dc",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 4,
+            "maxSeverity": "high",
+            "pr": 4969,
+            "round": 6,
+            "sha": "9eaf2501972f",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4969,
+            "round": 7,
+            "sha": "0f3d8614acf0",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-13T16:56:51Z",
+        "number": 4970,
+        "title": "fix(route-crawl): resolve Target identity via the seam, discover routes from the live checkout, never count unreachable as healthy (#4846)",
+        "trailers": [
+          {
+            "blockers": 4,
+            "maxSeverity": "medium",
+            "pr": 4970,
+            "round": 1,
+            "sha": "546cb60d864c",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 4970,
+            "round": 2,
+            "sha": "154af856e251",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4970,
+            "round": 3,
+            "sha": "56388fca8db6",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-13T14:59:10Z",
+        "number": 4971,
+        "title": "refactor(reconcile): interval-ownership anchor join + 72h window (#4926)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4971,
+            "round": 1,
+            "sha": "6eb961b28638",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-12T16:20:39Z",
+        "number": 4972,
+        "title": "needs-dev-resume with no open PR has no durable owner: add a label-derived no-PR resume pick (capped) to dev_orch",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "high",
+            "pr": 4972,
+            "round": 1,
+            "sha": "c03d4c0d06b4",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4972,
+            "round": 2,
+            "sha": "c0d17f25d720",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4972,
+            "round": 3,
+            "sha": "d5796bf39480",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-12T14:34:45Z",
+        "number": 4973,
+        "title": "feat(attention): per-line calibration ledger — episodes, typed dismiss, /attention/counts reshape (#4627)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "high",
+            "pr": 4973,
+            "round": 1,
+            "sha": "faa749c54942",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4973,
+            "round": 2,
+            "sha": "a64692d4de79",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-13T17:10:52Z",
+        "number": 4974,
+        "title": "refactor(cost): one shared ScanAccumulator + foldFileContribution (#4792)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4974,
+            "round": 1,
+            "sha": "87af733fae0d",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-13T02:20:53Z",
+        "number": 4975,
+        "title": "refactor(skills): whole-corpus playbook write plan + read-only plan CLI (#4719)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4975,
+            "round": 1,
+            "sha": "3a435ce6bbb4",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-20T18:36:27Z",
+        "number": 4976,
+        "title": "feat(today): six-bucket feed + per-kind ActionAffordance (assertion c) (#4628)",
+        "trailers": [
+          {
+            "blockers": 4,
+            "maxSeverity": "medium",
+            "pr": 4976,
+            "round": 1,
+            "sha": "1fc4606501e7",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 4,
+            "maxSeverity": "medium",
+            "pr": 4976,
+            "round": 2,
+            "sha": "3b5ef617c981",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 4,
+            "maxSeverity": "medium",
+            "pr": 4976,
+            "round": 3,
+            "sha": "cbcddd24719a",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4976,
+            "round": 4,
+            "sha": "3d4ccb56b589",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4976,
+            "round": 5,
+            "sha": "0091d5ba1aba",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 4976,
+            "round": 6,
+            "sha": "2d83714c4b3c",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4976,
+            "round": 7,
+            "sha": "f1fa2e4a0eaa",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4976,
+            "round": 8,
+            "sha": "e24f0e5da45c",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-13T17:41:32Z",
+        "number": 4977,
+        "title": "feat(attention): admit blocked issues only when the blocker waits on a human; drop Epics (#4805)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4977,
+            "round": 1,
+            "sha": "2e529ea2d4f0",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-14T16:06:42Z",
+        "number": 4980,
+        "title": "fix(origin-identity): guard ~/hydra origin against Target dispatch rewrites; watchdog alarm + remote fence (#4939)",
+        "trailers": [
+          {
+            "blockers": 14,
+            "maxSeverity": "medium",
+            "pr": 4980,
+            "round": 1,
+            "sha": "3b612d1a6191",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4980,
+            "round": 2,
+            "sha": "4edbf3a9f7c2",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 7,
+            "maxSeverity": "medium",
+            "pr": 4980,
+            "round": 3,
+            "sha": "b25913e9e09d",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4980,
+            "round": 4,
+            "sha": "432d95c320b5",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-13T18:53:00Z",
+        "number": 4981,
+        "title": "fix(autopilot): merged_count coverage probe, pending durable merge retry, Redis eviction test (#4979)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 4981,
+            "round": 1,
+            "sha": "d409686d19fd",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4981,
+            "round": 2,
+            "sha": "93b4d33eb104",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-12T20:39:43Z",
+        "number": 4982,
+        "title": "glm-authored: GLM finish follow-ups from PR #4814 (#4978)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 4982,
+            "round": 1,
+            "sha": "a6419729e699",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4982,
+            "round": 2,
+            "sha": "b63fead1d156",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-12T22:18:47Z",
+        "number": 4983,
+        "title": "fix(target-build): resume arm mirrors fence labels, never rewrites Closes to Refs (#4854)",
+        "trailers": [
+          {
+            "blockers": 4,
+            "maxSeverity": "high",
+            "pr": 4983,
+            "round": 1,
+            "sha": "7fd73e4df156",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 4983,
+            "round": 2,
+            "sha": "cec4e40a2509",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4983,
+            "round": 3,
+            "sha": "9ad5392430f3",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-13T17:30:50Z",
+        "number": 4984,
+        "title": "docs(skill-prune): prune sediment + duplication from the hydra-qa playbook",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 4984,
+            "round": 1,
+            "sha": "766777590640",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-13T19:23:15Z",
+        "number": 5000,
+        "title": "feat(glm): drainer tick mode — gate/pick/author/finish in-process; drainer-loop.sh collapses to flock + run_driver tick (#4688)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5000,
+            "round": 1,
+            "sha": "e1835071b8ca",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5000,
+            "round": 2,
+            "sha": "c77bcd10289b",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-13T20:35:15Z",
+        "number": 5001,
+        "title": "test(autopilot): pin default launch-model pair in pace-gate/bootstrap suites (#4966)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5001,
+            "round": 1,
+            "sha": "9783d2806715",
+            "verdict": "PASS-pending-CI"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5001,
+            "round": 2,
+            "sha": "9783d28067c0f7b2c0d4db6ec0515857c2914858",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-17T17:06:33Z",
+        "number": 5002,
+        "title": "fix(autopilot): record no-work dev_orch dispatches as empty cycles, not merged (#4985)",
+        "trailers": [
+          {
+            "blockers": 9,
+            "maxSeverity": "high",
+            "pr": 5002,
+            "round": 1,
+            "sha": "30bd4835118b196c8a41a3b506ed103e8260c620",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 4,
+            "maxSeverity": "medium",
+            "pr": 5002,
+            "round": 2,
+            "sha": "02b968f9a664",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5002,
+            "round": 3,
+            "sha": "2ccae75eeb6f",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5002,
+            "round": 4,
+            "sha": "9d35ad7d4774",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-20T11:26:09Z",
+        "number": 5003,
+        "title": "refactor(skills): cut sync-skills.sh over to the core plan; delete python heredocs + parity test (#4720)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5003,
+            "round": 1,
+            "sha": "338d61027e06",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5003,
+            "round": 2,
+            "sha": "b21c7268033e",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5003,
+            "round": 3,
+            "sha": "1320a3c5b075",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5003,
+            "round": 4,
+            "sha": "35fa191af9ec",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-13T21:09:17Z",
+        "number": 5004,
+        "title": "cleanup(src/autopilot): demote/remove 20 unused exports (3 files) [1/4]",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5004,
+            "round": 1,
+            "sha": "537c06879639",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-18T15:40:05Z",
+        "number": 5005,
+        "title": "fix(dispatches): register PostToolUse hook in project settings, key children on agent_id (#4965)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5005,
+            "round": 1,
+            "sha": "7115817ca8f6",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5005,
+            "round": 2,
+            "sha": "1ac12934383c",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5005,
+            "round": 3,
+            "sha": "423ff8d85565",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-14T01:17:22Z",
+        "number": 5006,
+        "title": "cleanup(src/autopilot): demote/remove 20 unused exports in turn-snapshot [2/4]",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5006,
+            "round": 1,
+            "sha": "5b392018f4b8",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5006,
+            "round": 2,
+            "sha": "10e320cf386d",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-17T17:15:30Z",
+        "number": 5007,
+        "title": "cleanup(src/schemas): demote/remove 18 unused exports (#4989)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5007,
+            "round": 1,
+            "sha": "d73406a5e71b",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-17T17:59:00Z",
+        "number": 5008,
+        "title": "cleanup(src/cli-args): demote unused CliValues export (#4997)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5008,
+            "round": 1,
+            "sha": "368f5fdefd30",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-13T23:38:59Z",
+        "number": 5009,
+        "title": "cleanup(src/autopilot): demote 20 unused exports (2 files) [3/4] (#4988)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5009,
+            "round": 1,
+            "sha": "40f7583c7070",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-17T18:01:03Z",
+        "number": 5010,
+        "title": "cleanup(src/scheduler): demote 2 unused exports (#4996)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5010,
+            "round": 1,
+            "sha": "75d343f7c929",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-14T00:15:15Z",
+        "number": 5011,
+        "title": "cleanup(src/redis): demote/remove 3 unused exports in post-quota-hint (#4994)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5011,
+            "round": 1,
+            "sha": "60f5997456a1",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-14T01:53:57Z",
+        "number": 5012,
+        "title": "cleanup(src/aggregators): demote 4 unused exports (1 file) (#4992)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5012,
+            "round": 1,
+            "sha": "8901240d6514",
+            "verdict": "PASS-pending-CI"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5012,
+            "round": 2,
+            "sha": "8901240d6514",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-14T01:00:55Z",
+        "number": 5013,
+        "title": "cleanup(src/glm): demote 2 unused type exports (#4995)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5013,
+            "round": 1,
+            "sha": "d505d667571a",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-14T01:13:04Z",
+        "number": 5014,
+        "title": "cleanup(dashboard/src): demote 11 unused exports, skip 2 knip false positives (#4991)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5014,
+            "round": 1,
+            "sha": "2e10421f61d5",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-14T03:20:26Z",
+        "number": 5015,
+        "title": "cleanup(src/autopilot): demote 14 unused exports in turn-snapshot (5 files) (#4990)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5015,
+            "round": 1,
+            "sha": "57bcc89a1164",
+            "verdict": "PASS-pending-CI"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5015,
+            "round": 2,
+            "sha": "57bcc89a1164",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-17T18:03:21Z",
+        "number": 5016,
+        "title": "cleanup(src/cost): demote/remove 4 unused exports (#4993)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5016,
+            "round": 1,
+            "sha": "2d350bb895e9",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-17T17:57:14Z",
+        "number": 5017,
+        "title": "fix(autopilot): discover_target zero-yield back-off ladder (30m → 4h → 24h) (#4999)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "high",
+            "pr": 5017,
+            "round": 1,
+            "sha": "54d6475d4267",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 5,
+            "maxSeverity": "medium",
+            "pr": 5017,
+            "round": 2,
+            "sha": "dc307864c510",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5017,
+            "round": 3,
+            "sha": "5431eda9e55b",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5017,
+            "round": 4,
+            "sha": "5431eda9e55b",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-15T06:48:28Z",
+        "number": 5027,
+        "title": "docs(src/cost): fix stale docblock claims + transcript-scan log prefix (#4794)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5027,
+            "round": 1,
+            "sha": "fedd3995d5c6",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-20T15:47:14Z",
+        "number": 5037,
+        "title": "fix(git-remote-fence): close remaining parser bypass shapes + watchdog host/redaction (#5026)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "high",
+            "pr": 5037,
+            "round": 1,
+            "sha": "e4a91e6bc137",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "high",
+            "pr": 5037,
+            "round": 2,
+            "sha": "3524965a4dcf",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "high",
+            "pr": 5037,
+            "round": 3,
+            "sha": "cd5aabfa2e1c",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 10,
+            "maxSeverity": "high",
+            "pr": 5037,
+            "round": 4,
+            "sha": "20ddefe951de",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 16,
+            "maxSeverity": "high",
+            "pr": 5037,
+            "round": 5,
+            "sha": "1d8fbf94d602",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5037,
+            "round": 6,
+            "sha": "acd86abd645e",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-17T19:43:50Z",
+        "number": 5039,
+        "title": "feat(glm): durable operator off switch — sentinel file stands the lane down without removing it (#5038)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5039,
+            "round": 1,
+            "sha": "66d4c97bea84",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-18T15:19:26Z",
+        "number": 5042,
+        "title": "fix(notify): critical Telegram alerts rejected with 400 can't parse entities (#5040)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5042,
+            "round": 1,
+            "sha": "c75a3a25c513",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-18T16:06:49Z",
+        "number": 5050,
+        "title": "docs(adr): ADR-0045 Operator Channel + glossary terms",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-18T16:18:43Z",
+        "number": 5053,
+        "title": "refactor(notify): live-producer audit; delete the 28 dead codex-era notification types (#5044)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-19T22:16:51Z",
+        "number": 5055,
+        "title": "autopilot: enrol cleanup_target in zero-yield back-off ladder (#5051)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5055,
+            "round": 1,
+            "sha": "4d77d181f92f",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-20T04:33:22Z",
+        "number": 5056,
+        "title": "feat(operator-channel): core module, HTML renderer, closed page list, deduped delivery (#5045)",
+        "trailers": [
+          {
+            "blockers": 7,
+            "maxSeverity": "medium",
+            "pr": 5056,
+            "round": 1,
+            "sha": "f4467e53c360",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 4,
+            "maxSeverity": "medium",
+            "pr": 5056,
+            "round": 2,
+            "sha": "e08eae2cb69e",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5056,
+            "round": 3,
+            "sha": "b5da4de28d1a",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-20T21:51:43Z",
+        "number": 5059,
+        "title": "feat(autopilot): durable per-turn QA-verdict recheck lands PASS-pending-CI PRs (#5052)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5059,
+            "round": 1,
+            "sha": "e69d3a596b15",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5059,
+            "round": 2,
+            "sha": "3fef48b4754f",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5059,
+            "round": 3,
+            "sha": "2e212daa8076",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5059,
+            "round": 4,
+            "sha": "7598f60aff33",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-20T05:48:38Z",
+        "number": 5060,
+        "title": "fix(autopilot): provenance-agnostic PR resume + hydra-review clears PR stranding labels (#5058)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5060,
+            "round": 1,
+            "sha": "e202c1bb54b7",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5060,
+            "round": 2,
+            "sha": "29965a800667",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-20T15:23:47Z",
+        "number": 5061,
+        "title": "docs(skill-prune): prune no-op/duplication sections from the hydra-qa playbook",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-20T15:50:42Z",
+        "number": 5063,
+        "title": "refactor(skills): ratchet + vendor-drift import the src/skills grammar (#4721)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5063,
+            "round": 1,
+            "sha": "ed09545b0763",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-20T16:10:44Z",
+        "number": 5066,
+        "title": "refactor(skills): reflection-deposit test + drift check use the skills core CLI (#4722)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "high",
+            "pr": 5066,
+            "round": 1,
+            "sha": "c66903785654",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5066,
+            "round": 2,
+            "sha": "589c6b8490b6",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T21:24:25Z",
+        "number": 5067,
+        "title": "fix(deploy): install Claude Code PreToolUse hooks on every deploy + watchdog alarm (#5064)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5067,
+            "round": 1,
+            "sha": "193beedfe6fc",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5067,
+            "round": 2,
+            "sha": "a967be6fb010",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5067,
+            "round": 3,
+            "sha": "c5f540536ac6",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 5,
+            "maxSeverity": "medium",
+            "pr": 5067,
+            "round": 4,
+            "sha": "83a8cffb395b",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5067,
+            "round": 5,
+            "sha": "05763ebd7a9b",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-20T23:32:45Z",
+        "number": 5068,
+        "title": "fix(watchdog): run_origin_identity auto-repairs a wrong origin URL / missing origin/master (#5065)",
+        "trailers": [
+          {
+            "blockers": 4,
+            "maxSeverity": "medium",
+            "pr": 5068,
+            "round": 1,
+            "sha": "17a51dc9267d",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 9,
+            "maxSeverity": "medium",
+            "pr": 5068,
+            "round": 2,
+            "sha": "992a6c84736c",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5068,
+            "round": 3,
+            "sha": "a7b459a0c0c0",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-22T01:35:45Z",
+        "number": 5069,
+        "title": "fix(test): watchdog #4183 tests use run-owned Redis DB, not hardcoded DB 9 (#5062)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5069,
+            "round": 1,
+            "sha": "0fac9b484760",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 4,
+            "maxSeverity": "medium",
+            "pr": 5069,
+            "round": 2,
+            "sha": "35e07fc18769",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 4,
+            "maxSeverity": "medium",
+            "pr": 5069,
+            "round": 3,
+            "sha": "6081380adb62",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5069,
+            "round": 4,
+            "sha": "763bd3eac092",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5069,
+            "round": 5,
+            "sha": "cc936d05cec7",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5069,
+            "round": 6,
+            "sha": "49dd318ef698",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T10:12:03Z",
+        "number": 5105,
+        "title": "refactor(cleanup): demote unused ANCHOR_JOIN_WINDOW_MS export (#5034)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5105,
+            "round": 1,
+            "sha": "3e5551736090",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T10:14:21Z",
+        "number": 5108,
+        "title": "refactor(glm): demote unused drainer-driver exports (#5033)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5108,
+            "round": 1,
+            "sha": "d8790efb70b7",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T08:08:54Z",
+        "number": 5109,
+        "title": "refactor(github): demote unused GitActionTransport export (#5024)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5109,
+            "round": 1,
+            "sha": "ee765f1bc520",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T03:38:52Z",
+        "number": 5110,
+        "title": "feat(operator-channel): operator-notify CLI routes watchdog and systemd OnFailure pages through the channel (#5046)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T03:14:54Z",
+        "number": 5111,
+        "title": "feat(operator-channel): Morning Brief replaces the 4h digest, heartbeat and weekly digest; review-pickup is a Page (#5047)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T04:16:20Z",
+        "number": 5112,
+        "title": "feat(operator-channel): delivery-health route, /health card and watchdog no-brief alarm (#5048)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T04:48:18Z",
+        "number": 5113,
+        "title": "refactor(operator-channel): retire the legacy notify/digest senders; the transport is the seam's single exemption (#5049)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T08:54:21Z",
+        "number": 5117,
+        "title": "docs(housekeeping): module header lists only the registered chores (#5116)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5117,
+            "round": 1,
+            "sha": "416c5d43d318",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T10:17:06Z",
+        "number": 5118,
+        "title": "refactor(github): demote two unused blockers.ts exports (#5032)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5118,
+            "round": 1,
+            "sha": "986f09756ad1",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T10:09:36Z",
+        "number": 5119,
+        "title": "fix(test): launch-flow orphan sweep recognises the delivery suite's live namespace (#5114)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5119,
+            "round": 1,
+            "sha": "53042b37e074",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T10:20:21Z",
+        "number": 5120,
+        "title": "refactor(cost): drop unused DispatchKind re-exports from transcript-scan (#5031)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5120,
+            "round": 1,
+            "sha": "6f33ab6002b6",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T16:55:20Z",
+        "number": 5121,
+        "title": "fix(watchdog): redis timeouts, gated brief-missing DEL, annotate late-rejection catch (#5115)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5121,
+            "round": 1,
+            "sha": "525dfa8db22e",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T11:35:36Z",
+        "number": 5122,
+        "title": "refactor(aggregators): demote unused issues-waiting exports (#5030)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5122,
+            "round": 1,
+            "sha": "cae013523db8",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T12:36:50Z",
+        "number": 5123,
+        "title": "refactor(glm): demote unused EffectResult/FinishAction exports (#5023)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5123,
+            "round": 1,
+            "sha": "53819f771cd1",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T16:57:24Z",
+        "number": 5124,
+        "title": "refactor(schemas): demote unused attention.ts exports (#5019)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5124,
+            "round": 1,
+            "sha": "2ba745c11815",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T13:39:48Z",
+        "number": 5125,
+        "title": "refactor(attention-calibration): demote unused exports, drop dead calibrationHashField (#5021)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5125,
+            "round": 1,
+            "sha": "ec8b6a20d195",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T15:00:37Z",
+        "number": 5126,
+        "title": "refactor(autopilot): the Turn Snapshot accessor is store-only; turn-snapshot.ts gains --all-degraded (#5083)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T15:49:27Z",
+        "number": 5127,
+        "title": "refactor(turn-snapshot): delete py-compat, jq-compat and py-format — collectors degrade with reason codes (#5084)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T16:18:47Z",
+        "number": 5130,
+        "title": "test(autopilot): the Turn Snapshot replay contract replaces the source-text read guards (#5085)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T16:37:17Z",
+        "number": 5132,
+        "title": "docs(adr-0043): record the delivered Turn Snapshot end state; the module map names the store-only accessor and the replay contract (#5085)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T21:05:42Z",
+        "number": 5133,
+        "title": "fix(github): viewIssue coerces non-array labels; drop stale read-guard comments (#5131)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-22T01:32:40Z",
+        "number": 5134,
+        "title": "refactor(turn-snapshot): declare collector degradation reason codes once (#5129)",
+        "trailers": [
+          {
+            "blockers": 5,
+            "maxSeverity": "medium",
+            "pr": 5134,
+            "round": 1,
+            "sha": "9fdd232ab395",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5134,
+            "round": 2,
+            "sha": "3f73876edf8f",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T20:18:17Z",
+        "number": 5135,
+        "title": "refactor(skills): demote unused plan.ts exports (#5020)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5135,
+            "round": 1,
+            "sha": "b6bed606b282",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T20:20:26Z",
+        "number": 5136,
+        "title": "refactor(turn-snapshot): demote unused pr-gate/dev-resume exports (#5018)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5136,
+            "round": 1,
+            "sha": "e2f4abf81671",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-22T01:38:40Z",
+        "number": 5139,
+        "title": "docs: corpus fix for README, CONTEXT.md, CONTEXT-MAP.md (#4598)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5139,
+            "round": 1,
+            "sha": "21256c87c450",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-22T00:29:42Z",
+        "number": 5145,
+        "title": "feat(autopilot): deny unrendered Agent class-dispatch prompts at dispatch (#5143)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5145,
+            "round": 1,
+            "sha": "ff8292cb309c",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5145,
+            "round": 2,
+            "sha": "7f5f2cc98d33",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T23:10:41Z",
+        "number": 5146,
+        "title": "fix(test): clean does-not-exist root Redis state in nm-integrity suite (#5137)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5146,
+            "round": 1,
+            "sha": "3432d83a323a",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-21T22:40:46Z",
+        "number": 5147,
+        "title": "fix(autopilot): a terminating turn arms its QA PASS before terminate (#5144)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5147,
+            "round": 1,
+            "sha": "98c6467f0fa3",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-23T15:09:50Z",
+        "number": 5148,
+        "title": "refactor(turn-snapshot): replace py*/jq* emulation helpers with plain TS readers (#5128)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5148,
+            "round": 1,
+            "sha": "3066e6d88eef",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5148,
+            "round": 2,
+            "sha": "bd79f79f8680",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5148,
+            "round": 3,
+            "sha": "ec346bd0bef9",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-23T16:56:21Z",
+        "number": 5150,
+        "title": "refactor(autopilot): delete term-check.py twin and dead idle_turns/merged_prs arms (#5070)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5150,
+            "round": 1,
+            "sha": "088ed8409e18",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5150,
+            "round": 2,
+            "sha": "d3fbbe565c76",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5150,
+            "round": 3,
+            "sha": "5694a69ea143",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-22T22:55:05Z",
+        "number": 5151,
+        "title": "fix(cost): de-duplicate transcript usage by message.id (#5141)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5151,
+            "round": 1,
+            "sha": "3da27da92969",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-22T04:24:53Z",
+        "number": 5153,
+        "title": "feat(dashboard): /work design-concept approve control + read-only holdback enrol state (#4633)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-22T03:51:15Z",
+        "number": 5154,
+        "title": "feat(dashboard): home /builder, /runs, /now dark reads + recommendation dismiss/mute (#4634)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-22T04:02:25Z",
+        "number": 5155,
+        "title": "feat(dashboard): live precondition checklist on /work and /health controls (#4629)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-22T03:27:03Z",
+        "number": 5156,
+        "title": "feat(dashboard): /work class-state panel + /builder class yield; delete stale class mirrors (#4637)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-22T04:25:14Z",
+        "number": 5157,
+        "title": "feat(dashboard): /health alert dismiss, scheduler stop/start and housekeeping controls (#4631)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-22T05:02:13Z",
+        "number": 5158,
+        "title": "feat(dashboard): register control:now rec-dismiss + rec-mute-class; RecommendationsPanel on ControlAffordance (#5152)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-22T05:36:54Z",
+        "number": 5159,
+        "title": "feat(operator-actions): ADR-0034 §9 parity pins over routes.json + retire 16 routes (#4638)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-23T18:33:05Z",
+        "number": 5169,
+        "title": "feat(autopilot): sweep_target recovers stranded in-progress and blocked Target items (#5167)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5169,
+            "round": 1,
+            "sha": "dcacb52ab0c8",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5169,
+            "round": 2,
+            "sha": "bf6c4bae5bf0",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5169,
+            "round": 3,
+            "sha": "42ce8a5563d7",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5169,
+            "round": 4,
+            "sha": "8c64d0b6ff82",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-23T15:22:39Z",
+        "number": 5170,
+        "title": "feat(tickets): Target render scope for the planning spine + durable research escalation (#5168)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5170,
+            "round": 1,
+            "sha": "5a44088a4e76",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5170,
+            "round": 2,
+            "sha": "2689ef54ab68",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-23T13:04:41Z",
+        "number": 5178,
+        "title": "docs: corpus fix - shrink reference.md, move historical sections, burn docs-drift baseline to [] (#4599)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5178,
+            "round": 1,
+            "sha": "d350bf0f337e",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T17:35:46Z",
+        "number": 5179,
+        "title": "feat(glm): ordered worker-provider list with quota fallback (#4841)",
+        "trailers": [
+          {
+            "blockers": 4,
+            "maxSeverity": "medium",
+            "pr": 5179,
+            "round": 1,
+            "sha": "a0052e63e069",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5179,
+            "round": 2,
+            "sha": "c5676f9e3639",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5179,
+            "round": 3,
+            "sha": "ef0fa260e4ef",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5179,
+            "round": 4,
+            "sha": "b9b720ad9dd9",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 6,
+            "maxSeverity": "high",
+            "pr": 5179,
+            "round": 5,
+            "sha": "2c8267f07b45",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5179,
+            "round": 6,
+            "sha": "c527a1a6cba1",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5179,
+            "round": 7,
+            "sha": "239f84cc652c",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5179,
+            "round": 8,
+            "sha": "77113b35ddd8",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-23T20:19:03Z",
+        "number": 5181,
+        "title": "refactor(autopilot): remove inert scout/dev_target USD gates and scout USD-spend plumbing (#5175)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5181,
+            "round": 1,
+            "sha": "e21097613ec4",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-23T23:08:04Z",
+        "number": 5195,
+        "title": "docs(research): which QA FAIL findings the reviewer could fix in place (#5183)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-23T23:17:57Z",
+        "number": 5196,
+        "title": "docs(cost): correct stale cost docs (#5176)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5196,
+            "round": 1,
+            "sha": "008beb65782c",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T00:34:48Z",
+        "number": 5197,
+        "title": "refactor(api): retire 7 zero-caller routes parked in RETIREMENT_CANDIDATES (#5160)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5197,
+            "round": 1,
+            "sha": "fa05c238f883",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5197,
+            "round": 2,
+            "sha": "a0db21151ad2",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T23:20:33Z",
+        "number": 5198,
+        "title": "chore: remove stale references after epic #4619 (#5166)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5198,
+            "round": 1,
+            "sha": "ce1172af51d7",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5198,
+            "round": 2,
+            "sha": "a01a42bf4c8c",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5198,
+            "round": 3,
+            "sha": "3b636b7aff45",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5198,
+            "round": 4,
+            "sha": "f13066bd0b1c",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5198,
+            "round": 5,
+            "sha": "49d042b7ee23",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5198,
+            "round": 6,
+            "sha": "a9a1d897365b",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T21:54:01Z",
+        "number": 5200,
+        "title": "fix(watchdog): gate origin-identity since-marker on a stream-id XADD reply (#5140)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5200,
+            "round": 1,
+            "sha": "5828219627ee",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T19:03:26Z",
+        "number": 5201,
+        "title": "docs(research): implementer-needed vs reviewer-only context classification (#5185)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T21:56:19Z",
+        "number": 5203,
+        "title": "fix(doctor): unwrap {alerts} envelope in Phase 1 Alerts block (#5138)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5203,
+            "round": 1,
+            "sha": "5e0c4ac054da",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T07:06:47Z",
+        "number": 5204,
+        "title": "fix(reap): branch-keyed token mirror writes only the per-cycle hash (#5173)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5204,
+            "round": 1,
+            "sha": "3113a44b11ce",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T09:38:50Z",
+        "number": 5205,
+        "title": "fix(class-stats): never memoise a degraded scoreboard; serve verdict thresholds (#5161)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5205,
+            "round": 1,
+            "sha": "5f5b7a401e33",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5205,
+            "round": 2,
+            "sha": "7130f7880abc",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5205,
+            "round": 3,
+            "sha": "2b39cf97708d",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T09:52:44Z",
+        "number": 5206,
+        "title": "fix(test): scoped suite-count baseline regen + unrelated-drift warning (#5107)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5206,
+            "round": 1,
+            "sha": "f3495403424f",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5206,
+            "round": 2,
+            "sha": "6ac0f890842c",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5206,
+            "round": 3,
+            "sha": "18ada3c9e1fd",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T22:01:35Z",
+        "number": 5207,
+        "title": "refactor(github): add pure check-rollup fold (#5087)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5207,
+            "round": 1,
+            "sha": "17aa2a3ba250",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T19:01:42Z",
+        "number": 5208,
+        "title": "fix(ci): raise design-concept-reconcile timeout 5 -> 15 min (#5165)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5208,
+            "round": 1,
+            "sha": "8b7b5c091c7a",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T21:48:01Z",
+        "number": 5209,
+        "title": "refactor(cost): weighted-quota report consumes the shared transcript fold (#5172)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5209,
+            "round": 1,
+            "sha": "3b50bcd08aa4",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T14:42:25Z",
+        "number": 5210,
+        "title": "refactor(scout): retire the alert-driven trigger end to end (#5054)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5210,
+            "round": 1,
+            "sha": "6869bdd0d3f8",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5210,
+            "round": 2,
+            "sha": "fa21c4bec2ea",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T12:07:43Z",
+        "number": 5211,
+        "title": "feat(metrics): deposit verification/planning/execution phase spans from dev_orch (#5025)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5211,
+            "round": 1,
+            "sha": "8251a369b0d5",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T16:54:00Z",
+        "number": 5213,
+        "title": "fix(reconcile): startedAt ownership + 7-day join window for dev-row merge credit (#5028)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5213,
+            "round": 1,
+            "sha": "ec06991e811e",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5213,
+            "round": 2,
+            "sha": "23732ef77263",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5213,
+            "round": 3,
+            "sha": "96602a39e3ff",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-25T03:03:17Z",
+        "number": 5214,
+        "title": "feat(test): launcher prints a terminal VERDICT line (#5106)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5214,
+            "round": 1,
+            "sha": "beb178bf04fd",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5214,
+            "round": 2,
+            "sha": "456b6143c606",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-25T03:33:11Z",
+        "number": 5215,
+        "title": "fix: re-read waiters settle only on post-write reads; /now UNKNOWN on failed run read (#5162)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5215,
+            "round": 1,
+            "sha": "a59a27786645",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5215,
+            "round": 2,
+            "sha": "b63b17f46a1c",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T19:05:08Z",
+        "number": 5217,
+        "title": "docs(research): hydra-qa playbook plumbing inventory (#5187)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-25T03:48:46Z",
+        "number": 5219,
+        "title": "feat(cost): surface meter limits[] scoped weekly caps (#5174)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5219,
+            "round": 1,
+            "sha": "efce68293627",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5219,
+            "round": 2,
+            "sha": "36d409b1882e",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T23:01:19Z",
+        "number": 5220,
+        "title": "docs(research): source-reading tests, tautology and the mutation gate (#5188)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-25T04:01:33Z",
+        "number": 5221,
+        "title": "fix(autopilot): forward-fix contract requires a test with each code fix + full verify trio (#5036)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5221,
+            "round": 1,
+            "sha": "d5e442bd7b89",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5221,
+            "round": 2,
+            "sha": "74464a9d3554",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-24T23:01:34Z",
+        "number": 5223,
+        "title": "docs(research): QA finding recurrence and deterministic catchability (#5192)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T03:16:13Z",
+        "number": 5224,
+        "title": "docs: compress CLAUDE.md Common Pitfalls (#5218)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5224,
+            "round": 1,
+            "sha": "574e18ed316a",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T10:24:26Z",
+        "number": 5231,
+        "title": "refactor(aggregators): stalled-prs and stuck-items use the shared check-rollup fold (#5088)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5231,
+            "round": 1,
+            "sha": "7ae257125dd6",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T03:22:42Z",
+        "number": 5232,
+        "title": "docs(research): CSB Stage Clock reset inventory (#5226)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T11:31:33Z",
+        "number": 5233,
+        "title": "refactor(pr-gate): Turn Snapshot pr-gate uses the shared check-rollup fold (#5089)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5233,
+            "round": 1,
+            "sha": "b7450271ea11",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5233,
+            "round": 2,
+            "sha": "52f4cf8987c3",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-25T12:28:20Z",
+        "number": 5234,
+        "title": "fix(retro): daily retro drillable keys stuck-signals on novelty vs prior retro (#5029)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "high",
+            "pr": 5234,
+            "round": 1,
+            "sha": "81c0ae7020ee",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5234,
+            "round": 2,
+            "sha": "5fff8f90f131",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-25T12:41:56Z",
+        "number": 5235,
+        "title": "feat(autopilot): Run Ledger module; bootstrap seeds state.json via run_ledger.py (#5072)",
+        "trailers": [
+          {
+            "blockers": 4,
+            "maxSeverity": "medium",
+            "pr": 5235,
+            "round": 1,
+            "sha": "446448a324cd",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5235,
+            "round": 2,
+            "sha": "9afd79c7ee94",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5235,
+            "round": 3,
+            "sha": "261697d4a28c",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-25T08:33:35Z",
+        "number": 5236,
+        "title": "refactor(qa): one QA-Verdict trailer grammar owner in src/qa; verdict_at_head replaces decide.py sha twin (#5078)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5236,
+            "round": 1,
+            "sha": "4029d7059e46",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T06:21:24Z",
+        "number": 5237,
+        "title": "feat(aggregators): issues-waiting is the one reader with stuck/decision-queue/pickup projections (#5091)",
+        "trailers": [
+          {
+            "blockers": 4,
+            "maxSeverity": "medium",
+            "pr": 5237,
+            "round": 1,
+            "sha": "ac754a433423",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5237,
+            "round": 2,
+            "sha": "ee84467129f7",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5237,
+            "round": 3,
+            "sha": "208f2d55ff1b",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5237,
+            "round": 4,
+            "sha": "1fadc23451fe",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-25T18:09:34Z",
+        "number": 5238,
+        "title": "refactor(qa): qa-verdict engine — per-phase modules in src/qa (#5079)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5238,
+            "round": 1,
+            "sha": "8422c78d008a",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5238,
+            "round": 2,
+            "sha": "fe77c1be8576",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T03:44:51Z",
+        "number": 5240,
+        "title": "docs(playbooks): guard-compatible bounded CI poll — fixed-iteration for/seq, not SECONDS-arithmetic while (retro 3ae7a980)",
+        "trailers": [
+          {
+            "blockers": 13,
+            "maxSeverity": "medium",
+            "pr": 5240,
+            "round": 1,
+            "sha": "1ce8f145c861",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5240,
+            "round": 2,
+            "sha": "b04c711a61ca",
+            "verdict": "PASS-pending-CI"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T07:35:47Z",
+        "number": 5241,
+        "title": "fix(deps): bump zod and body-parser to clear high npm-audit advisories (#5212)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5241,
+            "round": 1,
+            "sha": "4f901ecb3867",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5241,
+            "round": 2,
+            "sha": "875b96c0660f",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-25T22:36:47Z",
+        "number": 5242,
+        "title": "docs(hydra-dev): full npm test recipe past the 600s foreground cap (#5180)",
+        "trailers": [
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5242,
+            "round": 1,
+            "sha": "3dc3b60528f6",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5242,
+            "round": 2,
+            "sha": "5dcdc5c2f681",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T11:59:14Z",
+        "number": 5243,
+        "title": "feat(cost): decideAdmission — pace-gate admission ladder as a pure L3 fold (#5101)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5243,
+            "round": 1,
+            "sha": "7cab010b016e",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5243,
+            "round": 2,
+            "sha": "4488c094a458",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T23:27:03Z",
+        "number": 5244,
+        "title": "feat(qa): qa-verdict CLI with per-phase JSON subcommands (#5080)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5244,
+            "round": 1,
+            "sha": "a0d932be6ede",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5244,
+            "round": 2,
+            "sha": "9cca4c677aa3",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5244,
+            "round": 3,
+            "sha": "631e65662039",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5244,
+            "round": 4,
+            "sha": "4c0b7d6d1f91",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-27T17:23:14Z",
+        "number": 5245,
+        "title": "refactor(autopilot): decide.py persists via one run_ledger diff seam (#5074)",
+        "trailers": [
+          {
+            "blockers": 7,
+            "maxSeverity": "high",
+            "pr": 5245,
+            "round": 1,
+            "sha": "dbff4576e582",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5245,
+            "round": 2,
+            "sha": "e92738e72afb",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5245,
+            "round": 3,
+            "sha": "65ebc18e5fa3",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5245,
+            "round": 4,
+            "sha": "4b291c75f851",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-27T17:24:51Z",
+        "number": 5246,
+        "title": "fix(autopilot): reaped dispatches are no longer re-seeded into the next run (#5142)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5246,
+            "round": 1,
+            "sha": "f0ebe7cca22e",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5246,
+            "round": 2,
+            "sha": "acba07815020",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5246,
+            "round": 3,
+            "sha": "e86bc1189170",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5246,
+            "round": 4,
+            "sha": "9e129f4d7ba4",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5246,
+            "round": 5,
+            "sha": "9e129f4d7ba4",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T14:49:16Z",
+        "number": 5247,
+        "title": "feat(operator-actions): holdback enrol + brief-send registry controls; age-gate scheduler-deliberate row (#5164)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5247,
+            "round": 1,
+            "sha": "dd55a54312a5",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-27T06:26:10Z",
+        "number": 5248,
+        "title": "feat(work): design-concept queue paging, comment-read time, registry approve control (#5163)",
+        "trailers": [
+          {
+            "blockers": 2,
+            "maxSeverity": "medium",
+            "pr": 5248,
+            "round": 1,
+            "sha": "9f7fa3fb4b0d",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5248,
+            "round": 2,
+            "sha": "79787a81cf3c",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-27T17:42:04Z",
+        "number": 5249,
+        "title": "refactor(watchdog): port autopilot-wedge check to TS CLI over typed ports (#5095)",
+        "trailers": [
+          {
+            "blockers": 3,
+            "maxSeverity": "medium",
+            "pr": 5249,
+            "round": 1,
+            "sha": "a63cec7c311b",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 1,
+            "maxSeverity": "medium",
+            "pr": 5249,
+            "round": 2,
+            "sha": "2b66b225f86f",
+            "verdict": "FAIL"
+          },
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5249,
+            "round": 3,
+            "sha": "382b5eaee1bc",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T14:23:38Z",
+        "number": 5250,
+        "title": "docs(research): CSB paper worker pre-flight (#5227)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T08:43:01Z",
+        "number": 5252,
+        "title": "run-ledger 2/5 — carry_forward is one pure function derived from classes.json (#5073)",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5252,
+            "round": 1,
+            "sha": "308620e8bf40",
+            "verdict": "PASS"
+          }
+        ]
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-26T18:24:43Z",
+        "number": 5254,
+        "title": "docs(adr): ADR-0046 two-pass code factory (#5194)",
+        "trailers": []
+      },
+      {
+        "cohort": "baseline",
+        "mergedAt": "2026-10-27T17:24:54Z",
+        "number": 5276,
+        "title": "fix(watchdog): explicit PATH in hydra-watchdog.service so gh resolves to ~/.local/bin",
+        "trailers": [
+          {
+            "blockers": 0,
+            "maxSeverity": "none",
+            "pr": 5276,
+            "round": 1,
+            "sha": "f634fe46c70b",
+            "verdict": "PASS"
+          }
+        ]
+      }
+    ],
+    "tokens": {
+      "attributedPercent": 54.53,
+      "qaOrchTokens": 710210
+    },
+    "until": "2026-10-28T00:48:59.382Z"
+  },
+  "measuredAt": "2026-10-28T00:51:56.400Z",
+  "metrics": {
+    "cohorts": {
+      "baseline": {
+        "escaped": 3,
+        "highEscapes": 0,
+        "matured": 42,
+        "rate": 0.07142857142857142
+      },
+      "pair": {
+        "escaped": 0,
+        "highEscapes": 0,
+        "matured": 0,
+        "rate": null
+      }
+    },
+    "criteriaMet": false,
+    "escapes": [
+      {
+        "by": 5147,
+        "high": false,
+        "kind": "fix-pr",
+        "pr": 4881
+      },
+      {
+        "by": 4981,
+        "high": false,
+        "kind": "fix-pr",
+        "pr": 4964
+      },
+      {
+        "by": 5147,
+        "high": false,
+        "kind": "fix-pr",
+        "pr": 4968
+      }
+    ],
+    "firstFailRate": 0.5323741007194245,
+    "pending": [
+      4810,
+      4818,
+      4871,
+      4969,
+      4976,
+      4980,
+      5002,
+      5003,
+      5005,
+      5006,
+      5007,
+      5008,
+      5010,
+      5012,
+      5013,
+      5014,
+      5015,
+      5016,
+      5017,
+      5027,
+      5037,
+      5039,
+      5042,
+      5055,
+      5056,
+      5059,
+      5060,
+      5063,
+      5066,
+      5067,
+      5068,
+      5069,
+      5105,
+      5108,
+      5109,
+      5117,
+      5118,
+      5119,
+      5120,
+      5121,
+      5122,
+      5123,
+      5124,
+      5125,
+      5134,
+      5135,
+      5136,
+      5139,
+      5145,
+      5146,
+      5147,
+      5148,
+      5150,
+      5151,
+      5169,
+      5170,
+      5178,
+      5179,
+      5181,
+      5196,
+      5197,
+      5198,
+      5200,
+      5203,
+      5204,
+      5205,
+      5206,
+      5207,
+      5208,
+      5209,
+      5210,
+      5211,
+      5213,
+      5214,
+      5215,
+      5219,
+      5221,
+      5224,
+      5231,
+      5233,
+      5234,
+      5235,
+      5236,
+      5237,
+      5238,
+      5240,
+      5241,
+      5242,
+      5243,
+      5244,
+      5245,
+      5246,
+      5247,
+      5248,
+      5249,
+      5252,
+      5276
+    ],
+    "reviewed": 139,
+    "roundsPerPr": 2.1654676258992804,
+    "tokensPerReview": {
+      "attributedPercent": 54.53,
+      "source": "api/usage/by-issue",
+      "value": 5109
+    },
+    "tripped": false
+  },
+  "schemaVersion": 1,
+  "window": {
+    "repo": "gaberoo322/hydra",
+    "since": "2026-10-06T21:25:53Z",
+    "until": "2026-10-28T00:48:59.382Z"
+  }
+}
