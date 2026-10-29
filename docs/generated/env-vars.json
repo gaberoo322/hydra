@@ -83,11 +83,11 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 537
+          "line": 539
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 538
+          "line": 540
         },
         {
           "path": "scripts/autopilot/status.sh",
@@ -357,7 +357,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 537
+        "line": 539
       }
     },
     {
@@ -1498,7 +1498,7 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 537
+          "line": 539
         },
         {
           "path": "src/cost/oauth-usage.ts",
@@ -1508,7 +1508,7 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 537
+        "line": 539
       }
     },
     {
@@ -2492,17 +2492,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 706
+          "line": 708
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 738
+          "line": 740
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 706
+        "line": 708
       }
     },
     {
@@ -2524,17 +2524,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 718
+          "line": 720
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 725
+          "line": 727
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 718
+        "line": 720
       }
     },
     {
@@ -2570,17 +2570,17 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 558
+          "line": 560
         },
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 560
+          "line": 562
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 558
+        "line": 560
       }
     },
     {
@@ -2588,13 +2588,13 @@
       "readSites": [
         {
           "path": "scripts/autopilot/pace-gate.sh",
-          "line": 538
+          "line": 540
         }
       ],
       "inEnvExample": false,
       "source": {
         "path": "scripts/autopilot/pace-gate.sh",
-        "line": 538
+        "line": 540
       }
     },
     {

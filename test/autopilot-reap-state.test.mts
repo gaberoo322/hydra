@@ -3,7 +3,7 @@
  * first slice of the reap.py six-way split surfaced by an architecture-scan.
  *
  * reap_state.py is a pure move-and-import extraction: `load_state`,
- * `save_state`, `redis_cli`, `mirror_cross_run_state_to_redis`,
+ * `redis_cli`, `mirror_cross_run_state_to_redis`,
  * `ensure_reaped_list`, `bound_reaped` (formerly `_load_state` etc. inside
  * reap.py) plus their four owning constants. This file exercises the six
  * functions directly, in-process, via the same importlib.util.
@@ -73,7 +73,7 @@ sys.modules["reap_state_u"] = reap_state
 spec.loader.exec_module(reap_state)
 `;
 
-describe("scripts/autopilot/reap_state.py — load_state / save_state (issue #4366)", () => {
+describe("scripts/autopilot/reap_state.py — load_state / run_ledger.persist (issue #4366, #5075)", () => {
   test("load_state on a missing path returns None and logs the exact stderr line", () => {
     const tmp = makeTmp();
     try {
@@ -95,13 +95,13 @@ print(repr(reap_state.load_state()))
     }
   });
 
-  test("save_state then load_state round-trips honouring HYDRA_AUTOPILOT_STATE", () => {
+  test("run_ledger.persist then load_state round-trips honouring HYDRA_AUTOPILOT_STATE", () => {
     const tmp = makeTmp();
     try {
       const r = runPython(
         `${LOAD_PREAMBLE}
 import json
-reap_state.save_state({"cumulative_tokens": 42, "reaped_task_ids": ["a", "b"]})
+reap_state.run_ledger.persist({"cumulative_tokens": 42, "reaped_task_ids": ["a", "b"]}, reap_state.STATE_PATH)
 print(json.dumps(reap_state.load_state()))
 `,
         { HYDRA_AUTOPILOT_STATE: tmp.state },
