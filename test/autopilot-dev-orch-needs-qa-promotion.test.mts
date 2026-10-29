@@ -58,7 +58,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -553,6 +553,112 @@ describe("reap.py completion → dev_orch ready-for-agent/in-progress → needs-
       });
       assert.equal(r.status, 0);
       assert.deepEqual(ghCalls(tmp), [], "only dev_orch completions run the needs-qa promotion check");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * Issue #5149 — `reap.py reconcile-seeded`: a dev_orch the prior run
+ * dispatched but never collected is seeded into the successor's state.json as
+ * an `_source: "inflight-seed"` slot. bootstrap.sh runs this promotion-only
+ * pass once, so the anchor reaches needs-qa in the successor's first turn.
+ */
+describe("reap.py reconcile-seeded → promote an uncollected dev_orch anchor (issue #5149)", () => {
+  const HASH = "af8cbae3449b32075";
+
+  function seededState(tmp: Paths, slot: Record<string, unknown> | null): string {
+    writeState(tmp.state, { slots: { dev_orch: slot } });
+    return readFileSync(tmp.state, "utf-8");
+  }
+
+  function run(tmp: Paths, ghEnv: Record<string, string>, deposit: string | null) {
+    const reflDir = join(tmp.dir, "refl");
+    mkdirSync(reflDir, { recursive: true });
+    if (deposit) writeFileSync(join(reflDir, `hydra-refl-anchor-${HASH}`), deposit);
+    const r = spawnSync("python3", [REAP, "reconcile-seeded", tmp.state], {
+      env: {
+        ...process.env,
+        HYDRA_API_BASE: "http://127.0.0.1:1",
+        HYDRA_BASE_URL: "http://127.0.0.1:1",
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_LOG: tmp.log,
+        HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+        HYDRA_AUTOPILOT_GH_CLI: tmp.ghStub,
+        HYDRA_AUTOPILOT_REFL_DIR: reflDir,
+        HYDRA_AUTOPILOT_REDIS_CLI: "true",
+        ...ghEnv,
+      },
+      encoding: "utf-8",
+    });
+    return { status: r.status ?? -1, stderr: r.stderr ?? "" };
+  }
+
+  const seedSlot = { skill: "hydra-dev", task_id: HASH, _source: "inflight-seed", started_epoch: 1 };
+  const closesPr = JSON.stringify([{ headRefName: "x", body: "Closes #5149" }]);
+  const inProgress = JSON.stringify({ labels: [{ name: "in-progress" }] });
+  const editCalls = (tmp: Paths) => ghCalls(tmp).filter((c) => c.startsWith("issue edit"));
+
+  test("PROMOTE: seeded slot, deposit names the anchor, PR closes it → needs-qa; state.json untouched", () => {
+    const tmp = makeTmp();
+    try {
+      const before = seededState(tmp, seedSlot);
+      const r = run(tmp, { STUB_PR_LIST_JSON: closesPr, STUB_ISSUE_VIEW_JSON: inProgress }, "issue-5149");
+      assert.equal(r.status, 0);
+      const calls = ghCalls(tmp);
+      assert.equal(calls.filter((c) => c.startsWith("pr list")).length, 1);
+      assert.ok(
+        calls.some((c) => c.startsWith("issue edit 5149") && c.includes("--add-label needs-qa") && c.includes("--remove-label in-progress")),
+        calls.join("\n"),
+      );
+      assert.equal(readFileSync(tmp.state, "utf-8"), before, "state.json bytes unchanged");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-op: issue already needs-qa → no edit", () => {
+    const tmp = makeTmp();
+    try {
+      seededState(tmp, seedSlot);
+      run(tmp, { STUB_PR_LIST_JSON: closesPr, STUB_ISSUE_VIEW_JSON: JSON.stringify({ labels: [{ name: "needs-qa" }] }) }, "issue-5149");
+      assert.equal(editCalls(tmp).length, 0);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-op: PR only 'Refs #N' → no edit", () => {
+    const tmp = makeTmp();
+    try {
+      seededState(tmp, seedSlot);
+      run(tmp, { STUB_PR_LIST_JSON: JSON.stringify([{ headRefName: "x", body: "Refs #5149" }]), STUB_ISSUE_VIEW_JSON: inProgress }, "issue-5149");
+      assert.equal(editCalls(tmp).length, 0);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-op: slot is not an inflight-seed → no gh call", () => {
+    const tmp = makeTmp();
+    try {
+      seededState(tmp, { skill: "hydra-dev", task_id: HASH, started_epoch: 1 });
+      const r = run(tmp, { STUB_PR_LIST_JSON: closesPr }, "issue-5149");
+      assert.equal(r.status, 0);
+      assert.equal(ghCalls(tmp).length, 0);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-op: deposit absent → anchor unresolvable, no gh call, exit 0", () => {
+    const tmp = makeTmp();
+    try {
+      seededState(tmp, seedSlot);
+      const r = run(tmp, { STUB_PR_LIST_JSON: closesPr }, null);
+      assert.equal(r.status, 0);
+      assert.equal(ghCalls(tmp).length, 0);
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
