@@ -378,6 +378,7 @@
   "test/qa-fold.test.mts": 11,
   "test/qa-merge-guard-callsites.test.mts": 5,
   "test/qa-merge-guard.test.mts": 4,
+  "test/qa-one-way-door.test.mts": 3,
   "test/qa-prior-round.test.mts": 2,
   "test/qa-round-action.test.mts": 5,
   "test/qa-verdict-cli.test.mts": 2,
