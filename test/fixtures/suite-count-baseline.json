@@ -151,6 +151,7 @@
   "test/claude-cli-exec.test.mts": 3,
   "test/claude-cli-seam-check.test.mts": 3,
   "test/cli-args.test.mts": 1,
+  "test/coding-standards-integrity.test.mts": 4,
   "test/config-io.test.mts": 4,
   "test/config-yaml.test.mts": 4,
   "test/consumer-session.test.mts": 8,

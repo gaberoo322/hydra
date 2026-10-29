@@ -1,0 +1,1 @@
+- feat: add CODING_STANDARDS.md rule catalog, loader and integrity/word-ratchet test (#5260)
