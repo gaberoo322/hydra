@@ -1,6 +1,6 @@
 {
   "family": "chores",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "src/scheduler/housekeeping.ts"
   ],
@@ -10,8 +10,7 @@
       "name": "review-pickup-notify",
       "cadence": "every-run",
       "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 310
+        "path": "src/scheduler/housekeeping.ts"
       }
     },
     {
@@ -19,8 +18,7 @@
       "name": "usage-weekly-snapshot",
       "cadence": "weekly",
       "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 327
+        "path": "src/scheduler/housekeeping.ts"
       }
     },
     {
@@ -28,8 +26,7 @@
       "name": "memory-consolidation",
       "cadence": "daily",
       "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 334
+        "path": "src/scheduler/housekeeping.ts"
       }
     },
     {
@@ -37,8 +34,7 @@
       "name": "design-concept-snapshot",
       "cadence": "every-run",
       "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 341
+        "path": "src/scheduler/housekeeping.ts"
       }
     },
     {
@@ -46,8 +42,7 @@
       "name": "stale-key-prune",
       "cadence": "daily",
       "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 349
+        "path": "src/scheduler/housekeeping.ts"
       }
     },
     {
@@ -55,8 +50,7 @@
       "name": "worktree-orphan-prune",
       "cadence": "every-run",
       "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 366
+        "path": "src/scheduler/housekeeping.ts"
       }
     },
     {
@@ -64,8 +58,7 @@
       "name": "glm-eligibility-sweep",
       "cadence": "every-run",
       "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 388
+        "path": "src/scheduler/housekeeping.ts"
       }
     },
     {
@@ -73,8 +66,7 @@
       "name": "target-outcomes-publish",
       "cadence": "every-run",
       "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 403
+        "path": "src/scheduler/housekeeping.ts"
       }
     },
     {
@@ -82,8 +74,7 @@
       "name": "wiring-liveness",
       "cadence": "every-run",
       "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 415
+        "path": "src/scheduler/housekeeping.ts"
       }
     },
     {
@@ -91,8 +82,7 @@
       "name": "attribution-record",
       "cadence": "every-run",
       "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 443
+        "path": "src/scheduler/housekeeping.ts"
       }
     },
     {
@@ -100,8 +90,7 @@
       "name": "holdback-merge-watch",
       "cadence": "every-run",
       "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 460
+        "path": "src/scheduler/housekeeping.ts"
       }
     },
     {
@@ -109,8 +98,7 @@
       "name": "cycle-merge-reconcile",
       "cadence": "every-run",
       "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 481
+        "path": "src/scheduler/housekeeping.ts"
       }
     },
     {
@@ -118,8 +106,7 @@
       "name": "holdback-merge-event-enrol",
       "cadence": "every-run",
       "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 501
+        "path": "src/scheduler/housekeeping.ts"
       }
     },
     {
@@ -127,8 +114,7 @@
       "name": "pattern-cue-demotion",
       "cadence": "every-run",
       "source": {
-        "path": "src/scheduler/housekeeping.ts",
-        "line": 518
+        "path": "src/scheduler/housekeeping.ts"
       }
     }
   ]

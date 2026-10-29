@@ -132,5 +132,5 @@ export function extractUnitsScripts(repoRoot: string): UnitsScriptsInventory {
     ...filesIn(repoRoot, "bin", () => true),
   ].sort(byString);
   const rows = paths.map((p) => buildUnitScriptRow(p, readFileSync(join(repoRoot, p), "utf8")));
-  return { family: "units-scripts", schemaVersion: 1, generatedFrom: GENERATED_FROM, rows };
+  return { family: "units-scripts", schemaVersion: 2, generatedFrom: GENERATED_FROM, rows };
 }

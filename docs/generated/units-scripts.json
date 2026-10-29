@@ -1,6 +1,6 @@
 {
   "family": "units-scripts",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "scripts/systemd/*",
     "scripts/*.sh",
@@ -15,8 +15,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "bin/hydra",
-        "line": 1
+        "path": "bin/hydra"
       },
       "kind": "bin",
       "description": "hydra — thin CLI wrapper around the orchestrator's HTTP API."
@@ -28,8 +27,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "bin/start.sh",
-        "line": 1
+        "path": "bin/start.sh"
       },
       "kind": "bin",
       "description": "Hydra entrypoint — starts the orchestrator and OpenAI proxy together."
@@ -41,8 +39,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/ast-search.ts",
-        "line": 1
+        "path": "scripts/ast-search.ts"
       },
       "kind": "ts",
       "description": "ast-search — agent-callable structural code search over the Hydra source tree."
@@ -54,8 +51,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/branch-prune.sh",
-        "line": 1
+        "path": "scripts/branch-prune.sh"
       },
       "kind": "sh",
       "description": "branch-prune.sh — daily janitor for [gone] local branches + their worktrees"
@@ -67,8 +63,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/deploy-drift-check.ts",
-        "line": 1
+        "path": "scripts/deploy-drift-check.ts"
       },
       "kind": "ts",
       "description": "Deployed-build drift check driver (issue #2663)."
@@ -80,8 +75,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/deploy-drift-logic.ts",
-        "line": 1
+        "path": "scripts/deploy-drift-logic.ts"
       },
       "kind": "ts",
       "description": "Deployed-build drift check — pure logic (issue #2663)."
@@ -93,8 +87,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/deploy.sh",
-        "line": 1
+        "path": "scripts/deploy.sh"
       },
       "kind": "sh",
       "description": null
@@ -106,8 +99,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 1
+        "path": "scripts/glm-beachhead-report.sh"
       },
       "kind": "sh",
       "description": "glm-beachhead-report.sh — GLM dev-drainer beachhead measurement + informational"
@@ -119,8 +111,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/headroom-spike.sh",
-        "line": 1
+        "path": "scripts/headroom-spike.sh"
       },
       "kind": "sh",
       "description": null
@@ -132,8 +123,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/housekeeping.sh",
-        "line": 1
+        "path": "scripts/housekeeping.sh"
       },
       "kind": "sh",
       "description": "housekeeping.sh"
@@ -145,8 +135,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1
+        "path": "scripts/hydra-watchdog.sh"
       },
       "kind": "sh",
       "description": "hydra-watchdog.sh — consolidated Hydra watchdog (issue #705)"
@@ -158,8 +147,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/hydra-watchdog.ts",
-        "line": 1
+        "path": "scripts/hydra-watchdog.ts"
       },
       "kind": "ts",
       "description": "hydra-watchdog.ts — one-shot watchdog CLI (issue #5095, epic #5094)."
@@ -171,8 +159,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/operator-notify.ts",
-        "line": 1
+        "path": "scripts/operator-notify.ts"
       },
       "kind": "ts",
       "description": "operator-notify — the Operator Channel CLI for bash and systemd callers"
@@ -184,8 +171,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/osv-scan.sh",
-        "line": 1
+        "path": "scripts/osv-scan.sh"
       },
       "kind": "sh",
       "description": null
@@ -197,8 +183,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/probe-search.ts",
-        "line": 1
+        "path": "scripts/probe-search.ts"
       },
       "kind": "ts",
       "description": "probe-search — agent-callable semantic/structural code search over the Hydra"
@@ -210,8 +195,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/reap-stale-test-procs.sh",
-        "line": 1
+        "path": "scripts/reap-stale-test-procs.sh"
       },
       "kind": "sh",
       "description": "reap-stale-test-procs.sh — defense in depth for issue #226."
@@ -223,8 +207,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/redis-backup.sh",
-        "line": 1
+        "path": "scripts/redis-backup.sh"
       },
       "kind": "sh",
       "description": "Daily Redis backup for the Hydra orchestrator."
@@ -236,8 +219,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/reflection-deposit.sh",
-        "line": 1
+        "path": "scripts/reflection-deposit.sh"
       },
       "kind": "sh",
       "description": "reflection-deposit.sh — deterministic reflection/grounding telemetry deposit"
@@ -249,8 +231,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/setup-claude-hooks.sh",
-        "line": 1
+        "path": "scripts/setup-claude-hooks.sh"
       },
       "kind": "sh",
       "description": "setup-claude-hooks.sh — install opt-in Claude Code PreToolUse hooks."
@@ -262,8 +243,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/setup-git-hooks.sh",
-        "line": 1
+        "path": "scripts/setup-git-hooks.sh"
       },
       "kind": "sh",
       "description": "setup-git-hooks.sh — install opt-in git hooks for Hydra operators."
@@ -275,8 +255,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/sync-skills.sh",
-        "line": 1
+        "path": "scripts/sync-skills.sh"
       },
       "kind": "sh",
       "description": "sync-skills.sh — regenerate ~/.claude/skills/ from"
@@ -288,8 +267,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/sync-target-gate.sh",
-        "line": 1
+        "path": "scripts/sync-target-gate.sh"
       },
       "kind": "sh",
       "description": "sync-target-gate.sh — mirror the Target (hydra-betting) SDLC gate scripts and"
@@ -301,8 +279,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/systemd/hydra-autopilot.service",
-        "line": 2
+        "path": "scripts/systemd/hydra-autopilot.service"
       },
       "kind": "service",
       "description": "Hydra Autopilot — long-running autonomous decision loop"
@@ -314,8 +291,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/systemd/hydra-branch-prune.service",
-        "line": 2
+        "path": "scripts/systemd/hydra-branch-prune.service"
       },
       "kind": "service",
       "description": "Hydra stale-branch + worktree garbage collector (issue #443)"
@@ -327,8 +303,7 @@
       "triggers": "hydra-branch-prune.service",
       "schedule": "*-*-* 04:00:00",
       "source": {
-        "path": "scripts/systemd/hydra-branch-prune.timer",
-        "line": 2
+        "path": "scripts/systemd/hydra-branch-prune.timer"
       },
       "kind": "timer",
       "description": "Daily Hydra stale-branch + worktree garbage collector (issue #443)"
@@ -340,8 +315,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/systemd/hydra-glm-drainer.service",
-        "line": 2
+        "path": "scripts/systemd/hydra-glm-drainer.service"
       },
       "kind": "service",
       "description": "Hydra GLM dev-drainer — flock/kill-switch/daily-cap authoring loop on z.ai's independent quota (ADR-0032, issue #3689)"
@@ -353,8 +327,7 @@
       "triggers": "hydra-glm-drainer.service",
       "schedule": "5min, 15min",
       "source": {
-        "path": "scripts/systemd/hydra-glm-drainer.timer",
-        "line": 2
+        "path": "scripts/systemd/hydra-glm-drainer.timer"
       },
       "kind": "timer",
       "description": "Hydra GLM dev-drainer — periodic drain tick (~15 min, ADR-0032, issue #3689)"
@@ -366,8 +339,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/systemd/hydra-housekeeping.service",
-        "line": 2
+        "path": "scripts/systemd/hydra-housekeeping.service"
       },
       "kind": "service",
       "description": "Hydra orchestrator housekeeping chores (PR-3/4 scheduler fold)"
@@ -379,8 +351,7 @@
       "triggers": "hydra-housekeeping.service",
       "schedule": "hourly",
       "source": {
-        "path": "scripts/systemd/hydra-housekeeping.timer",
-        "line": 2
+        "path": "scripts/systemd/hydra-housekeeping.timer"
       },
       "kind": "timer",
       "description": "Hourly trigger for hydra orchestrator housekeeping chores"
@@ -392,8 +363,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/systemd/hydra-notify-failure@.service",
-        "line": 2
+        "path": "scripts/systemd/hydra-notify-failure@.service"
       },
       "kind": "service",
       "description": "Hydra failure notification for %i"
@@ -405,8 +375,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/systemd/hydra-pace-gate.service",
-        "line": 2
+        "path": "scripts/systemd/hydra-pace-gate.service"
       },
       "kind": "service",
       "description": "Hydra Pace Gate — usage-paced admission control for hydra-autopilot (ADR-0021)"
@@ -418,8 +387,7 @@
       "triggers": "hydra-pace-gate.service",
       "schedule": "5min, 15min",
       "source": {
-        "path": "scripts/systemd/hydra-pace-gate.timer",
-        "line": 2
+        "path": "scripts/systemd/hydra-pace-gate.timer"
       },
       "kind": "timer",
       "description": "Hydra Pace Gate — periodic admission check (~15 min) for hydra-autopilot (ADR-0021)"
@@ -431,8 +399,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/systemd/hydra-redis-backup.service",
-        "line": 2
+        "path": "scripts/systemd/hydra-redis-backup.service"
       },
       "kind": "service",
       "description": "Hydra Redis daily backup — orchestrator state off the docker volume (issue #4604)"
@@ -444,8 +411,7 @@
       "triggers": "hydra-redis-backup.service",
       "schedule": "*-*-* 03:15:00",
       "source": {
-        "path": "scripts/systemd/hydra-redis-backup.timer",
-        "line": 2
+        "path": "scripts/systemd/hydra-redis-backup.timer"
       },
       "kind": "timer",
       "description": "Daily Hydra Redis backup at 03:15 (issue #4604)"
@@ -457,8 +423,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/systemd/hydra-test-proc-reaper.service",
-        "line": 2
+        "path": "scripts/systemd/hydra-test-proc-reaper.service"
       },
       "kind": "service",
       "description": "Hydra stale tsx/esbuild process reaper (issue #226 defense in depth)"
@@ -470,8 +435,7 @@
       "triggers": "hydra-test-proc-reaper.service",
       "schedule": "hourly",
       "source": {
-        "path": "scripts/systemd/hydra-test-proc-reaper.timer",
-        "line": 2
+        "path": "scripts/systemd/hydra-test-proc-reaper.timer"
       },
       "kind": "timer",
       "description": "Hourly Hydra stale-process reaper (issue #226 defense in depth)"
@@ -483,8 +447,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/systemd/hydra-watchdog.service",
-        "line": 2
+        "path": "scripts/systemd/hydra-watchdog.service"
       },
       "kind": "service",
       "description": "Hydra consolidated watchdog (service liveness + autopilot wedge)"
@@ -496,8 +459,7 @@
       "triggers": "hydra-watchdog.service",
       "schedule": "2min, 2min",
       "source": {
-        "path": "scripts/systemd/hydra-watchdog.timer",
-        "line": 2
+        "path": "scripts/systemd/hydra-watchdog.timer"
       },
       "kind": "timer",
       "description": "Periodic consolidated watchdog check for Hydra"
@@ -509,8 +471,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/tier-classify.ts",
-        "line": 1
+        "path": "scripts/tier-classify.ts"
       },
       "kind": "ts",
       "description": "CLI wrapper for `classifyChange()` — used by the `tier-gate` CI job."
@@ -522,8 +483,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/tool-currency-check.ts",
-        "line": 1
+        "path": "scripts/tool-currency-check.ts"
       },
       "kind": "ts",
       "description": "Tool-currency check driver (issue #480)."
@@ -535,8 +495,7 @@
       "triggers": null,
       "schedule": null,
       "source": {
-        "path": "scripts/tool-currency-logic.ts",
-        "line": 1
+        "path": "scripts/tool-currency-logic.ts"
       },
       "kind": "ts",
       "description": "Tool-currency check — pure logic (issue #480)."

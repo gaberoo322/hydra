@@ -56,18 +56,18 @@ export default function RoutesCatalogue({ rows }) {
       </thead>
       <tbody>
         {rows.map((r) => (
-          <tr key={`${r.method} ${r.path} ${r.source?.path}:${r.source?.line}`} className="border-b border-zinc-900 align-top">
+          <tr key={`${r.method} ${r.path} ${r.source?.path}`} className="border-b border-zinc-900 align-top">
             <td className="py-1 pr-3 font-mono text-zinc-400">{r.method}</td>
             <td className="py-1 pr-3 font-mono text-zinc-200">{r.path}</td>
             <td className="py-1 pr-3">
               {r.source?.path ? (
                 <a
-                  href={sourceUrl(r.source.path, r.source.line)}
+                  href={sourceUrl(r.source.path)}
                   target="_blank"
                   rel="noreferrer"
                   className="font-mono text-[11px] text-zinc-500 hover:text-zinc-300"
                 >
-                  {r.source.path}:{r.source.line}
+                  {r.source.path}
                 </a>
               ) : (
                 <span className="text-zinc-600">—</span>

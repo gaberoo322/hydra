@@ -123,5 +123,5 @@ export function extractCiGates(repoRoot: string): CiGatesInventory {
   const rows: CiGateRow[] = [];
   for (const wf of workflows) rows.push(...buildCiGateRows(wf, readFileSync(join(dir, wf), "utf8")));
   rows.sort((a, b) => byString(ciGateRowLabel(a), ciGateRowLabel(b)));
-  return { family: "ci-gates", schemaVersion: 1, generatedFrom: GENERATED_FROM, rows };
+  return { family: "ci-gates", schemaVersion: 2, generatedFrom: GENERATED_FROM, rows };
 }

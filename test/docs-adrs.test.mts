@@ -293,7 +293,7 @@ describe("adrs.ts pure builders (#4593)", () => {
       ];
       const inv = extractAdrs(root, corpus);
       assert.equal(inv.family, "adrs");
-      assert.equal(inv.schemaVersion, 1);
+      assert.equal(inv.schemaVersion, 2);
       const one = inv.rows.find((r) => r.number === "0001")!;
       assert.deepEqual(one.citedBy, ["docs/adr/0002-a.md", "docs/ref/x.md"]);
       assert.deepEqual(inv.rows.map((r) => r.number), ["0001", "0002"], "rows sorted by number");

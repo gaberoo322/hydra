@@ -1,6 +1,6 @@
 {
   "family": "tier-paths",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "src/untouchable.ts",
     "src/tier-classifier.ts"
@@ -11,8 +11,7 @@
       "kind": "prefix",
       "path": "config/agents/",
       "source": {
-        "path": "src/tier-classifier.ts",
-        "line": 54
+        "path": "src/tier-classifier.ts"
       }
     },
     {
@@ -20,8 +19,7 @@
       "kind": "prefix",
       "path": "config/feedback/",
       "source": {
-        "path": "src/tier-classifier.ts",
-        "line": 55
+        "path": "src/tier-classifier.ts"
       }
     },
     {
@@ -29,8 +27,7 @@
       "kind": "prefix",
       "path": ".claude/skills/",
       "source": {
-        "path": "src/tier-classifier.ts",
-        "line": 67
+        "path": "src/tier-classifier.ts"
       }
     },
     {
@@ -38,8 +35,7 @@
       "kind": "prefix",
       "path": "dashboard/",
       "source": {
-        "path": "src/tier-classifier.ts",
-        "line": 68
+        "path": "src/tier-classifier.ts"
       }
     },
     {
@@ -47,8 +43,7 @@
       "kind": "file",
       "path": "src/anchor-selection.ts",
       "source": {
-        "path": "src/tier-classifier.ts",
-        "line": 73
+        "path": "src/tier-classifier.ts"
       }
     },
     {
@@ -56,8 +51,7 @@
       "kind": "default",
       "path": "*",
       "source": {
-        "path": "src/tier-classifier.ts",
-        "line": 77
+        "path": "src/tier-classifier.ts"
       }
     },
     {
@@ -65,8 +59,7 @@
       "kind": "file",
       "path": ".github/workflows/ci.yml",
       "source": {
-        "path": "src/untouchable.ts",
-        "line": 44
+        "path": "src/untouchable.ts"
       }
     },
     {
@@ -74,8 +67,7 @@
       "kind": "file",
       "path": ".github/workflows/deep-qa-gate.yml",
       "source": {
-        "path": "src/untouchable.ts",
-        "line": 53
+        "path": "src/untouchable.ts"
       }
     },
     {
@@ -83,8 +75,7 @@
       "kind": "file",
       "path": ".github/workflows/deploy.yml",
       "source": {
-        "path": "src/untouchable.ts",
-        "line": 45
+        "path": "src/untouchable.ts"
       }
     },
     {
@@ -92,8 +83,7 @@
       "kind": "file",
       "path": "scripts/tier-classify.ts",
       "source": {
-        "path": "src/untouchable.ts",
-        "line": 57
+        "path": "src/untouchable.ts"
       }
     },
     {
@@ -101,8 +91,7 @@
       "kind": "file",
       "path": "src/tier-classifier.ts",
       "source": {
-        "path": "src/untouchable.ts",
-        "line": 63
+        "path": "src/untouchable.ts"
       }
     },
     {
@@ -110,8 +99,7 @@
       "kind": "file",
       "path": "src/untouchable.ts",
       "source": {
-        "path": "src/untouchable.ts",
-        "line": 64
+        "path": "src/untouchable.ts"
       }
     }
   ]

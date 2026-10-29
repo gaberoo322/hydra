@@ -91,5 +91,5 @@ export function extractPages(repoRoot: string): PagesInventory {
     appSrc: readFileSync(join(repoRoot, APP_FILE), "utf8"),
     sidebarSrc: readFileSync(join(repoRoot, SIDEBAR_FILE), "utf8"),
   });
-  return { family: "pages", schemaVersion: 1, generatedFrom: GENERATED_FROM, rows };
+  return { family: "pages", schemaVersion: 2, generatedFrom: GENERATED_FROM, rows };
 }

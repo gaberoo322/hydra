@@ -1,6 +1,6 @@
 {
   "family": "ci-gates",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     ".github/workflows/*.yml"
   ],
@@ -16,8 +16,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/advisory-checks.yml",
-        "line": 64
+        "path": ".github/workflows/advisory-checks.yml"
       }
     },
     {
@@ -31,8 +30,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/allow-scripts.yml",
-        "line": 50
+        "path": ".github/workflows/allow-scripts.yml"
       }
     },
     {
@@ -46,8 +44,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/allow-scripts.yml",
-        "line": 74
+        "path": ".github/workflows/allow-scripts.yml"
       }
     },
     {
@@ -61,8 +58,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/audit-nightly.yml",
-        "line": 35
+        "path": ".github/workflows/audit-nightly.yml"
       }
     },
     {
@@ -75,8 +71,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/changelog-check.yml",
-        "line": 49
+        "path": ".github/workflows/changelog-check.yml"
       }
     },
     {
@@ -90,8 +85,7 @@
       "required": true,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/ci.yml",
-        "line": 117
+        "path": ".github/workflows/ci.yml"
       }
     },
     {
@@ -105,8 +99,7 @@
       "required": true,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/ci.yml",
-        "line": 381
+        "path": ".github/workflows/ci.yml"
       }
     },
     {
@@ -120,8 +113,7 @@
       "required": true,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/ci.yml",
-        "line": 232
+        "path": ".github/workflows/ci.yml"
       }
     },
     {
@@ -135,8 +127,7 @@
       "required": true,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/ci.yml",
-        "line": 319
+        "path": ".github/workflows/ci.yml"
       }
     },
     {
@@ -150,8 +141,7 @@
       "required": true,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/ci.yml",
-        "line": 43
+        "path": ".github/workflows/ci.yml"
       }
     },
     {
@@ -165,8 +155,7 @@
       "required": true,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/ci.yml",
-        "line": 151
+        "path": ".github/workflows/ci.yml"
       }
     },
     {
@@ -180,8 +169,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/deep-qa-gate.yml",
-        "line": 130
+        "path": ".github/workflows/deep-qa-gate.yml"
       }
     },
     {
@@ -196,8 +184,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/deps-check.yml",
-        "line": 34
+        "path": ".github/workflows/deps-check.yml"
       }
     },
     {
@@ -210,8 +197,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/design-concept-comment.yml",
-        "line": 46
+        "path": ".github/workflows/design-concept-comment.yml"
       }
     },
     {
@@ -224,8 +210,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/design-concept-comment.yml",
-        "line": 161
+        "path": ".github/workflows/design-concept-comment.yml"
       }
     },
     {
@@ -238,8 +223,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/design-concept-reconcile.yml",
-        "line": 50
+        "path": ".github/workflows/design-concept-reconcile.yml"
       }
     },
     {
@@ -253,8 +237,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/issue-label-validation.yml",
-        "line": 145
+        "path": ".github/workflows/issue-label-validation.yml"
       }
     },
     {
@@ -268,8 +251,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/issue-label-validation.yml",
-        "line": 54
+        "path": ".github/workflows/issue-label-validation.yml"
       }
     },
     {
@@ -284,8 +266,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/osv-scan.yml",
-        "line": 52
+        "path": ".github/workflows/osv-scan.yml"
       }
     },
     {
@@ -298,8 +279,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/protected-paths.yml",
-        "line": 33
+        "path": ".github/workflows/protected-paths.yml"
       }
     },
     {
@@ -313,8 +293,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/secret-scan.yml",
-        "line": 32
+        "path": ".github/workflows/secret-scan.yml"
       }
     },
     {
@@ -328,8 +307,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/stryker-check.yml",
-        "line": 61
+        "path": ".github/workflows/stryker-check.yml"
       }
     },
     {
@@ -343,8 +321,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/test-typecheck.yml",
-        "line": 36
+        "path": ".github/workflows/test-typecheck.yml"
       }
     },
     {
@@ -358,8 +335,7 @@
       "required": false,
       "requiredBy": "ci.yml convention",
       "source": {
-        "path": ".github/workflows/vendor-drift.yml",
-        "line": 49
+        "path": ".github/workflows/vendor-drift.yml"
       }
     }
   ]

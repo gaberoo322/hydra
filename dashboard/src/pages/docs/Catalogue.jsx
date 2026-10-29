@@ -23,12 +23,12 @@ function SourceLink({ source }) {
   if (!source?.path) return MUTED;
   return (
     <a
-      href={sourceUrl(source.path, source.line)}
+      href={sourceUrl(source.path)}
       target="_blank"
       rel="noreferrer"
       className="font-mono text-[11px] text-zinc-500 hover:text-zinc-300"
     >
-      {source.path}:{source.line}
+      {source.path}
     </a>
   );
 }
@@ -37,7 +37,7 @@ function SourceText({ source }) {
   if (!source?.path) return MUTED;
   return (
     <span className="font-mono text-[11px] text-zinc-500">
-      {source.path}:{source.line}
+      {source.path}
     </span>
   );
 }
@@ -110,7 +110,7 @@ const COLUMN_SPECS = {
   ],
   "env-vars": [
     ["name", (r) => mono(r.name)],
-    ["read sites", (r) => <List items={r.readSites.map((s) => `${s.path}:${s.line}`)} max={2} />],
+    ["read sites", (r) => <List items={r.readSites.map((s) => s.path)} max={2} />],
     ["in .env.example", (r) => <span className="text-zinc-500">{r.inEnvExample ? "yes" : "no"}</span>],
   ],
   // Scanned infra families (#4595): pages link to the page itself (a deep
@@ -227,7 +227,7 @@ export default function Catalogue({ family, rows }) {
       </thead>
       <tbody>
         {rows.map((r, i) => (
-          <tr key={`${r.source?.path}:${r.source?.line}:${i}`} className="border-b border-zinc-900 align-top">
+          <tr key={`${r.source?.path}:${i}`} className="border-b border-zinc-900 align-top">
             {columns.map(([header, cell]) => (
               <td key={header} className="py-1 pr-3">
                 {cell(r)}

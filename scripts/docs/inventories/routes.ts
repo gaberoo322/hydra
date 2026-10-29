@@ -478,7 +478,7 @@ export function extractRoutes(repoRoot: string): RoutesInventory {
     row.home = homeByPath.get(row.path) ?? row.path;
   }
 
-  return { family: "routes", schemaVersion: 1, generatedFrom: GENERATED_FROM, rows };
+  return { family: "routes", schemaVersion: 2, generatedFrom: GENERATED_FROM, rows };
 }
 
 /** Resolve a relative specifier against its importer's directory into a repo-relative path. */

@@ -206,7 +206,7 @@ export function extractCorpus(repoRoot: string): CorpusInventory {
   }
   return {
     family: "corpus",
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedFrom: CORPUS_SOURCES.map((s) => s.glob),
     rows,
   };
