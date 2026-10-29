@@ -91,5 +91,5 @@ export function extractStreams(repoRoot: string, routes?: RouteRow[]): StreamsIn
     routers,
     routes: routes ?? extractRoutes(repoRoot).rows,
   });
-  return { family: "streams", schemaVersion: 1, generatedFrom: GENERATED_FROM, rows };
+  return { family: "streams", schemaVersion: 2, generatedFrom: GENERATED_FROM, rows };
 }

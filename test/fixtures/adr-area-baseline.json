@@ -20,7 +20,7 @@
   "docs/operator-playbooks/": 54412,
   ".github/workflows/ (Verifier Core)": 23639,
   "scripts/autopilot/ (decide.py, classes.json)": 84207,
-  "dashboard/": 33505,
+  "dashboard/": 33714,
   "config/direction/, config/orchestrator/": 4406,
   "docs/adr/ itself": 5249,
   "process / policy (no code area)": 45702,

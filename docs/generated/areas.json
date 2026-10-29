@@ -1,6 +1,6 @@
 {
   "family": "areas",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "CONTEXT-MAP.md"
   ],
@@ -34,8 +34,7 @@
       "homes": [],
       "route": "/docs/area/src-host-probe",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 15
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -261,8 +260,7 @@
       ],
       "route": "/docs/area/src-redis",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 16
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -498,8 +496,7 @@
       ],
       "route": "/docs/area/src-schemas",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 17
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -595,8 +592,7 @@
       ],
       "route": "/docs/area/src-cost",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 18
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -713,8 +709,7 @@
       ],
       "route": "/docs/area/src-autopilot",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 19
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -755,8 +750,7 @@
       ],
       "route": "/docs/area/src-taxonomy",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 20
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -794,8 +788,7 @@
       "homes": [],
       "route": "/docs/area/src-glm",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 21
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -868,8 +861,7 @@
       ],
       "route": "/docs/area/src-scheduler",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 22
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -916,8 +908,7 @@
       ],
       "route": "/docs/area/src-notification",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 23
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -981,8 +972,7 @@
       ],
       "route": "/docs/area/src-pattern-memory",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 24
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -1020,8 +1010,7 @@
       "homes": [],
       "route": "/docs/area/src-reflections",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 25
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -1110,8 +1099,7 @@
       ],
       "route": "/docs/area/src-metrics",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 26
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -1161,8 +1149,7 @@
       "homes": [],
       "route": "/docs/area/src-api",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 27
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -1266,8 +1253,7 @@
       ],
       "route": "/docs/area/src-logger-ts",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 28
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -1348,8 +1334,7 @@
       ],
       "route": "/docs/area/src-target-config-ts",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 29
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -1376,8 +1361,7 @@
       "homes": [],
       "route": null,
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 30
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -1405,8 +1389,7 @@
       "homes": [],
       "route": null,
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 31
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -1454,8 +1437,7 @@
       ],
       "route": "/docs/area/src-design-concept-ts",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 32
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -1513,8 +1495,7 @@
       "homes": [],
       "route": "/docs/area/backlog-github-issues",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 33
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -1571,8 +1552,7 @@
       "homes": [],
       "route": "/docs/area/self-modification",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 34
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -1690,8 +1670,7 @@
       "homes": [],
       "route": "/docs/area/docs-operator-playbooks",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 43
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -1755,8 +1734,7 @@
       "homes": [],
       "route": "/docs/area/github-workflows",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 44
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -1873,8 +1851,7 @@
       "homes": [],
       "route": "/docs/area/scripts-autopilot",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 45
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -1934,8 +1911,7 @@
       "homes": [],
       "route": "/docs/area/dashboard",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 46
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -2001,8 +1977,7 @@
       "homes": [],
       "route": "/docs/area/config-direction",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 47
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -2032,8 +2007,7 @@
       "homes": [],
       "route": "/docs/area/scripts-sync-skills-sh",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 48
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -2152,8 +2126,7 @@
       "homes": [],
       "route": "/docs/area/docs-adr",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 49
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -2183,8 +2156,7 @@
       "homes": [],
       "route": "/docs/area/test",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 50
+        "path": "CONTEXT-MAP.md"
       }
     },
     {
@@ -2216,8 +2188,7 @@
       "homes": [],
       "route": "/docs/area/process-policy-no-code-area",
       "source": {
-        "path": "CONTEXT-MAP.md",
-        "line": 51
+        "path": "CONTEXT-MAP.md"
       }
     }
   ]

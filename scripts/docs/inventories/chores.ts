@@ -105,5 +105,5 @@ export function choreRowLabel(row: ChoreRow): string {
 
 export function extractChores(repoRoot: string): ChoresInventory {
   const rows = buildChoreRows(readFileSync(join(repoRoot, HOUSEKEEPING_FILE), "utf8"));
-  return { family: "chores", schemaVersion: 1, generatedFrom: GENERATED_FROM, rows };
+  return { family: "chores", schemaVersion: 2, generatedFrom: GENERATED_FROM, rows };
 }

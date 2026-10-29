@@ -1,6 +1,6 @@
 {
   "family": "classes",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "scripts/autopilot/classes.json"
   ],
@@ -22,8 +22,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 5
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -43,8 +42,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 18
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -64,8 +62,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 31
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -85,8 +82,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 44
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -106,8 +102,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 57
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -127,8 +122,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 70
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -148,8 +142,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 83
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -169,8 +162,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 96
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -190,8 +182,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 109
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -211,8 +202,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 122
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -232,8 +222,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 135
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -253,8 +242,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 148
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -274,8 +262,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 161
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -295,8 +282,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 174
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -316,8 +302,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 187
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -337,8 +322,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 200
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -358,8 +342,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 213
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -379,8 +362,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 226
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -400,8 +382,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 239
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -421,8 +402,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 252
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -445,8 +425,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 265
+        "path": "scripts/autopilot/classes.json"
       }
     },
     {
@@ -466,8 +445,7 @@
       "home": "/now",
       "secondaryHome": "/runs",
       "source": {
-        "path": "scripts/autopilot/classes.json",
-        "line": 282
+        "path": "scripts/autopilot/classes.json"
       }
     }
   ]

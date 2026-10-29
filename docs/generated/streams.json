@@ -1,6 +1,6 @@
 {
   "family": "streams",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "src/event-bus-stream-keys.ts",
     "src/api/*.ts",
@@ -15,8 +15,7 @@
       "servedBy": [],
       "home": null,
       "source": {
-        "path": "src/event-bus-stream-keys.ts",
-        "line": 65
+        "path": "src/event-bus-stream-keys.ts"
       }
     },
     {
@@ -29,8 +28,7 @@
       "servedBy": [],
       "home": null,
       "source": {
-        "path": "src/event-bus-stream-keys.ts",
-        "line": 47
+        "path": "src/event-bus-stream-keys.ts"
       }
     },
     {
@@ -55,8 +53,7 @@
       ],
       "home": "/api/autopilot/emergency-brake",
       "source": {
-        "path": "src/event-bus-stream-keys.ts",
-        "line": 46
+        "path": "src/event-bus-stream-keys.ts"
       }
     }
   ]

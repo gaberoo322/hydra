@@ -279,5 +279,5 @@ export function extractAreasFamily(repoRoot: string, ctx: FamilyContext): AreasI
     });
   }
 
-  return { family: "areas", schemaVersion: 1, generatedFrom: GENERATED_FROM, rows };
+  return { family: "areas", schemaVersion: 2, generatedFrom: GENERATED_FROM, rows };
 }

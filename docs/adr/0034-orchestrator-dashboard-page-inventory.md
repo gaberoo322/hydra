@@ -277,6 +277,8 @@ The cockpit's one non-journey surface. It renders the existing docs corpus (READ
 3. **Derived looks distinct from observed →** generated inventories are visibly distinct from narrative prose. A reader can always tell a table the build produced from a sentence a person wrote.
 4. **Zero must be asserted →** a missing or unparseable inventory artifact renders an explicit *inventory unavailable*, never an empty table.
 
+**Inventories record the source file path, never a line number (#5262, schemaVersion 2).** A line shifts on unrelated edits and churned the committed artifact; the emitted rows carry `source: { path }` only.
+
 **Freshness budgets do not apply** — nothing on the page is polled. The page's accuracy is carried upstream of it: inventories are generated from source and committed, and narrative prose is drift-tested in the `test/*-drift.test.mts` family; a hand-kept table with an as-of stamp (the `src/api/ENDPOINT-REGISTRY.md` model) is exactly what this surface retires.
 
 ## Consequences

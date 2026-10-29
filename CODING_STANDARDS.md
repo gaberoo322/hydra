@@ -64,7 +64,7 @@ enforced-by: reviewer
 
 Assert behaviour through the module's interface. A test may read repo text only as input to code it runs, or as a drift-guard (two sources of truth agree), an invariant-lint (a repo-wide rule over source), or a prompt-pin (the prose is the behaviour). A substring, regex, `indexOf`-order, line or call-count assertion over code that can run is forbidden. Scripts count as runnable (sandbox plus a fake `gh` or `redis-cli` on `PATH`). Dashboard JSX source pins are allowed (kind `dashboard-pin`) because there is no DOM harness. When a refactor reddens a grandfathered pin, convert it; do not re-pin it.
 
-enforced-by: reviewer
+enforced-by: reviewer, test/test-source-read-ratchet.test.mts
 
 ### STD-TEST-PIN-PHRASE
 

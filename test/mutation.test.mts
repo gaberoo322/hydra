@@ -20,7 +20,18 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { shouldSkipMutation, SKIP_PATTERNS } from "../src/mutation.ts";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import ts from "typescript";
+import {
+  shouldSkipMutation,
+  SKIP_PATTERNS,
+  generateMutations,
+  swapComparisonCandidates,
+  runMutationTests,
+} from "../src/mutation.ts";
+import { classifyNoSignal } from "../scripts/ci/mutation-check.ts";
 
 describe("mutation — shouldSkipMutation structural skip categories", () => {
   test("test / spec files are never mutated (any extension, any depth)", () => {
@@ -73,5 +84,53 @@ describe("mutation — SKIP_PATTERNS export shape", () => {
     assert.equal(shouldSkipMutation(skipped), true);
     assert.equal(SKIP_PATTERNS.some((p) => p.test(mutable)), false);
     assert.equal(shouldSkipMutation(mutable), false);
+  });
+});
+
+describe("mutation — generation-time mutant validity (issue #5262)", () => {
+  test("a generic-only comparison line yields no runnable mutant and one skipped unparseable result", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-5262-"));
+    try {
+      writeFileSync(join(dir, "package.json"), "{}");
+      const src = "const m = new Map<string, number>();\n";
+      writeFileSync(join(dir, "a.ts"), src);
+      const report = await runMutationTests(dir, ["a.ts"], { testCommand: "true" });
+      assert.equal(report.totalMutants, 1);
+      assert.equal(report.skipped, 1);
+      assert.equal(report.skippedUnparseable, 1);
+      assert.equal(report.survived, 0);
+      assert.equal(report.killed, 0);
+      assert.equal(readFileSync(join(dir, "a.ts"), "utf-8"), src, "source is never rewritten");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a line with both a generic and a real comparison yields a parseable swap on the comparison", () => {
+    const line = "const m = new Map<string, number>(); if (a > b) {}";
+    const { mutations, unparseable } = generateMutations("x.ts", line, ts);
+    assert.equal(unparseable.length, 0);
+    assert.equal(mutations.length, 1);
+    assert.equal(mutations[0].type, "swap-comparison");
+    assert.ok(mutations[0].mutated.includes("a < b"), mutations[0].mutated);
+    assert.ok(mutations[0].mutated.includes("Map<string, number>"));
+  });
+
+  test("swapComparisonCandidates prefers ===/!==, then > left-to-right, then <", () => {
+    assert.deepEqual(swapComparisonCandidates("a === b"), ["a !== b"]);
+    assert.deepEqual(swapComparisonCandidates("x => y"), []);
+    assert.deepEqual(swapComparisonCandidates("a >= b"), []);
+    assert.equal(swapComparisonCandidates("f<T>(a > b)")[0], "f<T<(a > b)");
+  });
+
+  test("a report with only unparseable mutants reaches the all-skipped no-signal branch", () => {
+    const report = {
+      totalMutants: 2, killed: 0, survived: 0, skipped: 2, timedOut: false, durationMs: 1,
+      survivors: [], candidatesGenerated: 2, inconclusive: 0, noCoverage: 0, skippedUnparseable: 2,
+    };
+    const verdict = classifyNoSignal(report, 3);
+    assert.ok(verdict);
+    assert.equal(verdict.status, "warn");
+    assert.match(verdict.reason, /all generated mutants were skipped/);
   });
 });

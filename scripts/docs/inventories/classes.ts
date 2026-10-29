@@ -75,7 +75,7 @@ export function extractClasses(repoRoot: string): ClassesInventory {
   }));
   return {
     family: "classes",
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedFrom: [TAXONOMY_SOURCE],
     rows,
   };

@@ -40,7 +40,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const emptyInventory = (family: string): Inventory<unknown> => ({
   family,
-  schemaVersion: 1,
+  schemaVersion: 2,
   generatedFrom: [],
   rows: [],
 });
@@ -154,7 +154,7 @@ describe("docs-areas (#4596)", () => {
     // the route below lives in a file under src/api/ but IS joined to src/redis/.
     const routesInv = {
       family: "routes",
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
       generatedFrom: [],
       rows: [
         { method: "GET", path: "/api/joined", areas: ["src/redis/"], source: { path: "src/api/router.ts" } },
@@ -168,7 +168,7 @@ describe("docs-areas (#4596)", () => {
     // Every other family joins through its one path field with the prefix rule.
     const corpusInv = {
       family: "corpus",
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
       generatedFrom: [],
       rows: [{ path: "src/cost/CONTEXT.md" }, { path: "src/redis/CONTEXT.md" }],
     };
