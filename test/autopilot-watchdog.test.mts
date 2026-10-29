@@ -613,7 +613,7 @@ describe("scripts/hydra-watchdog.sh — entry-point guard and CLI wiring (issue 
     const src = readFileSync(WATCHDOG, "utf-8");
     assert.ok(!/run_service_liveness|read_pending_work/.test(src.replace(/^\s*#.*$/gm, "")), "no bash liveness code remains");
     assert.ok(src.indexOf("  run_liveness_cli\n  run_wedge_cli") > 0, "liveness runs first, then wedge");
-    assert.match(src, /run_watchdog_cli liveness "hydra-orchestrator-watchdog:" 120/);
+    assert.match(src, /run_watchdog_cli liveness "hydra-orchestrator-watchdog:" 300/);
     assert.match(src, /run_watchdog_cli wedge "hydra-autopilot-watchdog:" 90/);
   });
 
