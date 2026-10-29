@@ -3,7 +3,7 @@
 by an architecture-scan).
 
 Owns:
-  - state.json load/save — the SHARED, unlocked /tmp file every autopilot
+  - state.json load — the SHARED, unlocked /tmp file every autopilot
     process reads/writes unless HYDRA_AUTOPILOT_STATE overrides it (see
     reap.py's module docstring, issue #3895)
   - the `reaped_task_ids` dedup ledger, FIFO-bounded to REAPED_TASK_IDS_CAP
@@ -89,11 +89,7 @@ def load_state() -> dict | None:
     if not STATE_PATH.exists():
         print(f"[autopilot] reap: state file missing at {STATE_PATH}; skipping", file=sys.stderr)
         return None
-    return json.loads(STATE_PATH.read_text())
-
-
-def save_state(s: dict) -> None:
-    STATE_PATH.write_text(json.dumps(s))
+    return run_ledger.load(STATE_PATH, fill_defaults=False)
 
 
 def _append_log(line: str) -> None:
@@ -183,7 +179,7 @@ def mirror_cross_run_state_to_redis(s: dict) -> None:
     rows whose policy is mirrored-to-Redis (`signal_last_fired`,
     `research_force_counter`). Run-scoped fields are NEVER mirrored — they die
     with the run by design (design-concept #2715 Invariant 4). The name stays
-    because reap.py imports it. Called after `save_state` in `run_completion`, so
+    because reap.py imports it. Called after `run_ledger.persist` in `run_completion`, so
     a Redis hiccup can never lose the local write; no exception escapes.
     """
     try:

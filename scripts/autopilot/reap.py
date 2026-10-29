@@ -16,25 +16,20 @@ provably silent-wedged — no `SubagentStop` event has arrived within
 `wait_or_reap` action for exactly that case; the harness translates
 that into a `reap.py completion ...` invocation here.
 
-The default-mode (no-subcommand) hard-cap sweep remains useful for
-runaway-token detection (`partial_tokens >= subagent_hard_max_tokens`)
-because hooks don't fire for in-flight token cap trips.
+A bare `reap.py` (no subcommand) prints the usage line and exits 0. The former
+in-flight hard-cap sweep over `partial_tokens` was deleted (issue #5075): no
+writer ever populated that key (the SubagentStop payload carries no token
+count), so the sweep could never trip. The soft-cap burn in `completion`
+(which reads a REAL total) is the runaway guard.
 
-Two modes:
-
-  (default)   — In-flight hard-cap enforcement (issue #395).
-                For each occupied class slot in state.json whose harness
-                exposed a `partial_tokens >= limits.subagent_hard_max_tokens`,
-                abandon the slot, mark the class burned, and file a
-                `needs-triage` runaway issue. Idempotent.
+Modes:
 
   completion  — Idempotent completion reap (issue #411).
                 Records the dispatched subagent's final token count once
                 per task ID. If the same TaskNotification fires twice
                 (observed: task `a153eb193e1b05209` fired 3 completion
                 notifications for hydra-qa on PR #402), only the FIRST
-                call mutates `cumulative_tokens` / `slots[<class>].tokens`
-                / `burned_classes`. Subsequent calls with the same
+                call mutates `cumulative_tokens` / `burned_classes`. Subsequent calls with the same
                 `task_id` emit `dup_skip task_id=<X>` to the run log and
                 exit 0 without any token accounting.
 
@@ -100,8 +95,9 @@ from reap_state import (
     load_state,
     mirror_cross_run_state_to_redis,
     redis_cli,
-    save_state,
 )
+import reap_state  # noqa: E402  (attribute access: STATE_PATH is the persist target)
+import run_ledger  # noqa: E402  (the ONE state-document writer, #5075)
 
 # Issue #4398: the `gh` subprocess seam, REPO/TARGET_REPO repo constants, and
 # the PR-reference/closing predicates all moved to the prerequisite leaf
@@ -1448,8 +1444,8 @@ def _fire_reflection_for_completion(
     failure_entry is None`): a decide.py `failure_log` row is a genuine
     subagent_stop failure signal that WINS over PR evidence (INV-3) — e.g.
     verification failed after push is a real failure narrative even with a PR
-    open. `run_hardcap` deliberately does NOT pass `pr_exists` (INV-6): a
-    hard-cap trip abandons the slot mid-flight and never reaches the PR state.
+    open. Only the soft-cap-only branch of `run_completion`
+    passes `pr_exists`.
 
     The pattern is classified from the failure cue (self_heal taxonomy); the
     soft-cap case has no decide.py cue, so it is tagged `ratelimit`-adjacent via
@@ -1507,92 +1503,6 @@ def _fire_reflection_for_completion(
         task_id=task_id,
         task_title=task_title,
     )
-
-
-def run_hardcap() -> int:
-    """Default mode: hard-cap enforcement against `partial_tokens`."""
-    s = load_state()
-    if s is None:
-        return 0
-    hard = s["limits"]["subagent_hard_max_tokens"]
-    soft = s["limits"]["subagent_max_tokens"]
-    # (class, skill, partial_tokens, task_id, anchor, branch) — capture task_id
-    # AND the anchor before we null the slot so the cycle-record post can dedup
-    # on the task_id (issue #430) and the failure reflection-record can key on
-    # the anchor (issue #1820). The anchor is the only per-cycle reference that
-    # survives to reap, and the slot is about to be cleared.
-    # Issue #3970 (INV-2): also capture the slot's synthesised worktree branch
-    # before nulling — extending run_completion's #3391 branch-capture-before-
-    # null pattern to this terminal-failure site. A hard-cap trip NEVER opens a
-    # PR, so it never reaches the merge-watch enrichment; keying its failed
-    # cycle-record on the branch (when the slot carried one) is therefore
-    # twin-safe (INV-3) and lands it on the same worktree-branch cycleId form
-    # the happy path uses, instead of unconditionally defaulting to the bare
-    # task_id.
-    runaways: list[tuple[str, str, int, str, str | None, str | None]] = []
-    for cls, slot in list(s["slots"].items()):
-        if slot is None:
-            continue
-        partial = slot.get("partial_tokens") or 0
-        if partial >= hard:
-            # Hard-cap trip: abandon slot, file diagnostic issue, mark class burned.
-            task_id = slot.get("task_id") or f"hardcap-{cls}-{partial}"
-            # Issue #2112: slots never carry an `anchor` field — recover it from
-            # the planning-time deposit (keyed on task_id) so the hard-cap
-            # reflection fire below is not a guaranteed no-op.
-            anchor_ref = slot.get("anchor") or _read_anchor_deposit(task_id)
-            branch = slot.get("branch")
-            runaways.append((cls, slot.get("skill", "?"), partial, task_id, anchor_ref, branch))
-            s["slots"][cls] = None
-            if cls not in s.get("burned_classes", []):
-                s.setdefault("burned_classes", []).append(cls)
-    save_state(s)
-    for cls, skill, tokens, task_id, anchor_ref, branch in runaways:
-        title = f"Subagent token-runaway: {skill} burned {tokens} tokens"
-        body = (
-            f"Autopilot abandoned a `{cls}` slot running `{skill}` at "
-            f"`{tokens}` tokens (hard cap: `{hard}`, soft cap: `{soft}`).\n\n"
-            f"Class `{cls}` is suppressed for the rest of this autopilot session.\n\n"
-            f"Run log: `/tmp/hydra-autopilot-nightly.log`\n\n"
-            f"---\nSource: hydra-autopilot Phase 2 hard-cap enforcement (issue #395)"
-        )
-        subprocess.run(
-            [
-                "gh", "issue", "create", "--repo", REPO,
-                "--title", title, "--body", body, "--label", "needs-triage",
-            ],
-            check=False,
-        )
-        print(f"[autopilot] HARD-CAP TRIP class={cls} skill={skill} tokens={tokens} -> issue filed, slot cleared")
-        # Issue #430: hard-cap is a definitive failure — record it so the
-        # cycles-failed counter advances and discover/digest see the signal.
-        # task_id was captured before the slot was cleared so dedup holds
-        # across re-runs of the hard-cap pass.
-        # Issue #3970: forward the captured slot branch so the failed
-        # cycle-record keys on the worktree-branch cycleId form when the slot
-        # carried one (the happy-path form), not the bare task_id. Empty (a
-        # branch-less slot, or one whose branch was never written at occupy
-        # time — the documented dominant gap, deferred to a fast-follow) →
-        # `_fire_cycle_record`'s `effective_cycle_id = worktree_branch or
-        # task_id` keeps keying on task_id byte-for-byte with prior behaviour
-        # (INV-4).
-        _fire_cycle_record(task_id, skill, "failed", tokens, worktree_branch=branch or "")
-        # Issue #5142: the force-cleared slot's task_id is retired too.
-        _end_dispatch_ledger_row(task_id)
-        # Issue #1820: a hard-cap trip is an unambiguous non-merged failure —
-        # fire a reflection so the next attempt on this anchor reads why the
-        # prior one was abandoned. Best-effort, keyed on the anchor captured
-        # before the slot was cleared; a no-op when no anchor was stamped.
-        if anchor_ref:
-            cue = f"token hard cap exceeded — {skill} burned {tokens} tokens, slot abandoned"
-            _fire_reflection_record(
-                anchor_ref,
-                _classify_failure_pattern(cue),
-                cue,
-                task_id=task_id,
-                task_title=skill,
-            )
-    return 0
 
 
 # Issue #4304: the snapshot-before-mutate boundary. Every slot-derived value
@@ -1707,7 +1617,6 @@ def _release_pipeline_slot(s: dict, cls: str, total_tokens: int) -> None:
     """
     slot = (s.get("slots") or {}).get(cls)
     if slot is not None:
-        slot["tokens"] = total_tokens
         s["slots"][cls] = None
 
 
@@ -1941,7 +1850,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     if snap.slot_occupied:
         _release_pipeline_slot(s, cls, total_tokens)
 
-    save_state(s)
+    run_ledger.persist(s, reap_state.STATE_PATH)
 
     # Issue #2715: mirror the cross-run durable subset (signal_last_fired +
     # research_force_counter) to Redis so a host reboot (which wipes /tmp) can
@@ -2202,7 +2111,7 @@ def run_grill_crash(task_id: str) -> int:
     The harness calls this when a `design_concept_orch` slot dispatches
     `hydra-grill` but the subagent exits without writing any artifact to
     Redis (case 3 of the retry policy — distinct from case 1 timeout
-    handled in `run_hardcap`, and case 2 warn-only handled in
+    handled upstream, and case 2 warn-only handled in
     saveDesignConcept). Increments the daily `grill_crash_count` and
     fires a `failed` cycle-record for parity with other failure paths.
 
@@ -2232,7 +2141,7 @@ def run_grill_crash(task_id: str) -> int:
             return 0
         reaped.append(task_id)
         s["reaped_task_ids"] = bound_reaped(reaped)
-        save_state(s)
+        run_ledger.persist(s, reap_state.STATE_PATH)
     _fire_cycle_record(task_id, "hydra-grill", "failed", 0, worktree_branch=branch or "")
     line = f"grill_crash task_id={task_id}"
     print(f"[autopilot] {line}")
@@ -2241,10 +2150,12 @@ def run_grill_crash(task_id: str) -> int:
 
 
 def main(argv: list[str]) -> int:
-    # Default (no subcommand): hard-cap enforcement, behavior-preserving
-    # for /hydra-autopilot Phase 2 step 1.
+    # Issue #5075: the bare-invocation hard-cap sweep is deleted (no writer
+    # ever populated `partial_tokens`); a bare call prints usage, exits 0.
     if len(argv) <= 1:
-        return run_hardcap()
+        print("usage: reap.py completion <class> <task_id> <total_tokens> [skill] "
+              "[last_segment_tokens] | grill-crash <task_id>", file=sys.stderr)
+        return 0
 
     sub = argv[1]
     if sub == "completion":

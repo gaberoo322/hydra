@@ -28,7 +28,7 @@ Greppable IDs (also asserted by `test/autopilot-invariants.test.mts`):
   INV-008  no dispatch for a scope-disallowed class (except `health`)
   INV-009  design_concept_orch precedes dev_orch on the same anchor in
            the same plan (issue #466 — Phase B warn-only: violations are
-           logged to state.warnings[] rather than raised)
+           printed as one stderr WARN line per anchor, never raised)
   INV-010  forced research dispatches are counted and under the daily
            cap (issue #1666 — defense-in-depth for the
            research_force_counter write half)
@@ -59,9 +59,13 @@ Or as a CLI for diagnostic use:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from typing import Iterable
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import run_ledger  # noqa: E402  (the ONE state-document parser, #5075)
 
 
 class InvariantError(AssertionError):
@@ -246,7 +250,7 @@ def check_inv009(actions: list[dict], state: dict) -> None:
     artifact is missing, design_concept_orch fires and dev_orch returns
     None for that turn). This check exists so a future bug that emits
     both a `dispatch:dev_orch` and a `dispatch:design_concept_orch` for
-    the SAME anchor in the SAME plan is surfaced via `state.warnings[]`
+    the SAME anchor in the SAME plan is surfaced as a stderr WARN line
     — Phase C will flip this to `raise InvariantError`.
 
     "Same anchor" means matching anchorRef in prompt_args. If either
@@ -269,18 +273,15 @@ def check_inv009(actions: list[dict], state: dict) -> None:
             grill_anchors.add(str(anchor))
     conflict = dev_orch_anchors & grill_anchors
     if conflict:
-        # Phase B warn-only: append to state.warnings (a list created
-        # lazily) so reap.py / digest can surface the signal. Do NOT
-        # raise — Phase C is the hard-block flip.
-        warnings = state.get("warnings")
-        if not isinstance(warnings, list):
-            warnings = []
-            state["warnings"] = warnings
+        # Phase B warn-only (issue #5075): ONE stderr line per conflicting
+        # anchor; no state mutation (nothing ever persisted or read the former
+        # `state.warnings`). Do NOT raise — Phase C is the hard-block flip.
         for anchor in sorted(conflict):
-            warnings.append({
-                "code": "INV-009",
-                "reason": f"dev_orch and design_concept_orch both dispatched for anchor {anchor!r}",
-            })
+            print(
+                f"[autopilot] WARN INV-009 dev_orch and design_concept_orch both "
+                f"dispatched for anchor {anchor!r}",
+                file=sys.stderr,
+            )
 
 
 def check_inv010(actions: list[dict], state: dict) -> None:
@@ -427,8 +428,11 @@ def main(argv: list[str]) -> int:
     else:
         with open(plan_arg, "r", encoding="utf-8") as fh:
             plan = json.load(fh)
-    with open(argv[2], "r", encoding="utf-8") as fh:
-        state = json.load(fh)
+    try:
+        state = run_ledger.load(argv[2], fill_defaults=False)
+    except (OSError, ValueError, run_ledger.LedgerTypeError) as exc:
+        print(f"[assert_invariants] cannot read state {argv[2]}: {exc}", file=sys.stderr)
+        return 2
     try:
         check_plan(plan, state)
     except InvariantError as exc:

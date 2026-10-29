@@ -31,16 +31,16 @@ if [ ! -f "$STATE_PATH" ]; then
   exit 0
 fi
 
-python3 - "$STATE_PATH" "$LOG_PATH" <<'PY'
+DRAIN_PROJ="$(python3 "$(dirname "$0")/run_ledger.py" project "$STATE_PATH" started_epoch cumulative_tokens limits.token_budget dispatches)"
+python3 - "$DRAIN_PROJ" "$LOG_PATH" <<'PY'
 import json, sys, time
-state_path, log_path = sys.argv[1], sys.argv[2]
-s = json.load(open(state_path))
+s, log_path = json.loads(sys.argv[1]), sys.argv[2]
 elapsed = int(time.time()) - s["started_epoch"]
 hh, mm = elapsed // 3600, (elapsed % 3600) // 60
 duration = f"{hh:02d}:{mm:02d}"
-tokens = s.get("cumulative_tokens", 0)
-budget = s["limits"]["token_budget"]
-dispatches = s.get("dispatches", 0)
+tokens = s["cumulative_tokens"] or 0
+budget = s["limits.token_budget"]
+dispatches = s["dispatches"] or 0
 print(
     f"[autopilot] FINAL | duration={duration} | dispatches={dispatches} | "
     f"tokens={tokens}/{budget} | digest={log_path}"

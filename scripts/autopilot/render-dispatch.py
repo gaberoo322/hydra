@@ -68,6 +68,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # by spec, so the path insert keeps the import resolvable from there too).
 sys.path.insert(0, SCRIPT_DIR)
 import turn_snapshot as ts  # noqa: E402
+import run_ledger  # noqa: E402  (the ONE state-document parser, #5075)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 PLAYBOOK_PATH = os.path.join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md")
@@ -689,9 +690,9 @@ def main(argv: list[str]) -> int:
         i += 1
 
     try:
-        state = _load_json(STATE_PATH)
+        state = run_ledger.load(STATE_PATH, fill_defaults=False)
         plan = _load_json(PLAN_PATH)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, run_ledger.LedgerTypeError) as exc:
         print(f"[render-dispatch] cannot read state/plan: {exc}", file=sys.stderr)
         return 2
     action = find_dispatch(plan, slot)

@@ -616,12 +616,12 @@ if [ "${1:-}" = "--reap" ]; then
     exit 0
   fi
 
-  if [ ! -f "${REAP_STATE_PATH}" ] || ! command -v jq >/dev/null 2>&1; then
-    echo "[autopilot] reap: no state file or jq unavailable — skipping"
+  if [ ! -f "${REAP_STATE_PATH}" ] || ! command -v python3 >/dev/null 2>&1; then
+    echo "[autopilot] reap: no state file or python3 unavailable — skipping"
     exit 0
   fi
 
-  REAP_RUN_ID="$(jq -r '.run_id // ""' "${REAP_STATE_PATH}" 2>/dev/null || echo "")"
+  REAP_RUN_ID="$(python3 "$(dirname "$0")/run_ledger.py" get "${REAP_STATE_PATH}" run_id --prior --default "" 2>/dev/null || echo "")"
   if [ -z "${REAP_RUN_ID}" ]; then
     echo "[autopilot] reap: no run_id in state — skipping"
     exit 0
@@ -716,7 +716,7 @@ if [ "${1:-}" = "--reap" ]; then
   # Read this run's start epoch once — both the exhaustion-line scan AND the
   # issue #2479 crash_detail journal fallback scope their journal reads to it
   # so a stale prior-run line cannot leak in.
-  REAP_STARTED_EPOCH="$(jq -r '.started_epoch // 0' "${REAP_STATE_PATH}" 2>/dev/null || echo 0)"
+  REAP_STARTED_EPOCH="$(python3 "$(dirname "$0")/run_ledger.py" get "${REAP_STATE_PATH}" started_epoch --prior --default 0 2>/dev/null || echo 0)"
   REAP_SESSION_LINE="${HYDRA_AUTOPILOT_REAP_SESSION_LINE:-}"
   if [ "${REAP_CAUSE}" = "crash" ]; then
     if [ -z "${REAP_SESSION_LINE}" ] && command -v journalctl >/dev/null 2>&1; then
@@ -970,12 +970,12 @@ PID="$(resolve_autopilot_pid)"
 # In-session re-bootstrap guard (issue #4825) — see
 # `__insession_rebootstrap_decision` above. Runs BEFORE the heartbeat write so
 # a refused call leaves the ended run's heartbeat and state.json untouched.
-if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
-  INSESSION_PRIOR_PID=$(jq -r '.pid // 0' "${STATE_PATH}" 2>/dev/null || echo 0)
-  INSESSION_PRIOR_TURN=$(jq -r '.turn // 0' "${STATE_PATH}" 2>/dev/null || echo 0)
+if [ -f "${STATE_PATH}" ] && command -v python3 >/dev/null 2>&1; then
+  INSESSION_PRIOR_PID=$(python3 "${RUN_LEDGER}" get "${STATE_PATH}" pid --prior --default 0 2>/dev/null || echo 0)
+  INSESSION_PRIOR_TURN=$(python3 "${RUN_LEDGER}" get "${STATE_PATH}" turn --prior --default 0 2>/dev/null || echo 0)
   case "$(__insession_rebootstrap_decision "${INSESSION_PRIOR_PID}" "${PID}" "${INSESSION_PRIOR_TURN}")" in
     decision=refuse*)
-      INSESSION_PRIOR_RUN=$(jq -r '.run_id // "unknown"' "${STATE_PATH}" 2>/dev/null || echo unknown)
+      INSESSION_PRIOR_RUN=$(python3 "${RUN_LEDGER}" get "${STATE_PATH}" run_id --prior --default unknown 2>/dev/null || echo unknown)
       echo "[autopilot] FATAL: in-session re-bootstrap refused (issue #4825): this unattended session (pid=${PID}) already ran run ${INSESSION_PRIOR_RUN} to turn ${INSESSION_PRIOR_TURN}."
       echo "[autopilot]   An unattended session gets ONE run. Do NOT start another one here."
       echo "[autopilot]   Reap each child still running as it completes, run drain.sh if you have not, then end the session."
@@ -994,8 +994,8 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start pid=${PID} run_id=${RUN_ID}" > "${HEA
 # 5xx, its state.json was left stamped with the dead PID, and the auto-retry
 # misread that as a live duplicate). Best-effort: a missing jq is treated
 # as "no prior state" rather than aborting bootstrap.
-if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
-  PRIOR_PID=$(jq -r '.pid // 0' "${STATE_PATH}" 2>/dev/null || echo 0)
+if [ -f "${STATE_PATH}" ] && command -v python3 >/dev/null 2>&1; then
+  PRIOR_PID=$(python3 "${RUN_LEDGER}" get "${STATE_PATH}" pid --prior --default 0 2>/dev/null || echo 0)
   if [ "${PRIOR_PID}" -gt 0 ] && [ "${PRIOR_PID}" != "${PID}" ]; then
     if kill -0 "${PRIOR_PID}" 2>/dev/null; then
       echo "[autopilot] FATAL: prior autopilot pid=${PRIOR_PID} is alive; refusing to overwrite ${STATE_PATH}"

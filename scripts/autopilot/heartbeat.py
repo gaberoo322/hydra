@@ -113,6 +113,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from decide import PIPELINE_SLOTS, SIGNAL_CLASSES, SIGNAL_COOLDOWNS  # type: ignore[import-not-found]  # noqa: E402
+import run_ledger  # noqa: E402  (the ONE state-document parser, #5075)
 
 # Heartbeat-line denominators, derived from the taxonomy (never literals).
 PIPELINE_DENOMINATOR = len(PIPELINE_SLOTS)
@@ -389,7 +390,7 @@ def write_heartbeat(last_action: str = "(none)", *, now: int | None = None) -> i
     """
     ts = int(time.time()) if now is None else int(now)
     try:
-        state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        state = run_ledger.load(STATE_PATH, fill_defaults=False)
     except FileNotFoundError:
         # No state.json yet — bootstrap hasn't run or path is wrong.
         # Still write a minimal heartbeat so mtime advances.
@@ -400,7 +401,7 @@ def write_heartbeat(last_action: str = "(none)", *, now: int | None = None) -> i
             print(f"[autopilot] heartbeat: write failed ({exc})", file=sys.stderr)
             return 2
         return 1
-    except (json.JSONDecodeError, OSError) as exc:
+    except (ValueError, OSError, run_ledger.LedgerTypeError) as exc:
         print(f"[autopilot] heartbeat: state read failed ({exc})", file=sys.stderr)
         return 2
 
