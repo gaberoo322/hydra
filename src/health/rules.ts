@@ -197,7 +197,7 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
       : null,
   (s) => {
     // Issue #5096: keyed on lastTickAt through the SAME predicate the watchdog
-    // liveness CLI acts on (the old lastCycleAt is never populated).
+    // liveness CLI acts on (the retired cycle timestamp is never populated).
     if (s.sched.running) {
       const age = schedulerTickAgeS(s.sched.lastTickAt, Date.now());
       if (typeof age === "number" && isSchedulerTickStale(age, SCHEDULER_TICK_STALE_S) && s.health.cycle !== "running") {

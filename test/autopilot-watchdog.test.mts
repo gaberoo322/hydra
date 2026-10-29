@@ -22,6 +22,7 @@ import {
   WATCHDOG_SPAWN_TIMEOUT_MS,
   throwIfTimedOut,
 } from "./_helpers/watchdog-timeouts.mts";
+import { RESTART_TIMEOUT_MS } from "../src/host-probe/probe.ts";
 import { decideWedge, runWedge, type WedgeConfig } from "../src/watchdog/wedge.ts";
 import {
   createProductionWedgeDeps,
@@ -765,5 +766,27 @@ describe("watchdog liveness production adapters (issue #5096 QA round 1)", () =>
       throw new Error("ECONNREFUSED");
     }) as unknown as typeof fetch;
     await assert.rejects(probeTunnel("http://x", f));
+  });
+});
+
+describe("liveness CLI wrapper budget nests the restart cap (#5096 QA round 2)", () => {
+  const sh = readFileSync(resolve(import.meta.dirname, "../scripts/hydra-watchdog.sh"), "utf8");
+  const wrapperS = (name: string): number => {
+    const m = sh.match(new RegExp(`run_${name}_cli\\(\\) \\{ run_watchdog_cli ${name} "[^"]+" (\\d+);`));
+    assert.ok(m, `run_${name}_cli not found`);
+    return Number(m[1]);
+  };
+
+  test("liveness wrapper exceeds two restarts + 5s settle (redis-down worst case)", () => {
+    assert.ok(wrapperS("liveness") * 1000 > 2 * RESTART_TIMEOUT_MS + 5_000 + 10_000);
+  });
+
+  test("sibling: wedge wrapper stays 90s", () => {
+    assert.equal(wrapperS("wedge"), 90);
+  });
+
+  test("no src/health file mentions the retired lastCycleAt identifier", () => {
+    const out = spawnSync("grep", ["-rn", "lastCycleAt", resolve(import.meta.dirname, "../src/health")], { encoding: "utf8" });
+    assert.equal(out.stdout.trim(), "");
   });
 });

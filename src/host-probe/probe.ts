@@ -307,7 +307,7 @@ export async function probeFileLockFree(
 }
 
 /** Restart timeout: `systemctl --user restart` blocks until the unit settles (the orchestrator runs tsc in ExecStartPre). */
-const RESTART_TIMEOUT_MS = 90_000;
+export const RESTART_TIMEOUT_MS = 90_000;
 
 /**
  * The seam's first WRITE accessor (issue #5096): `systemctl --user restart <unit>`.

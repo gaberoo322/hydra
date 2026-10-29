@@ -5,7 +5,7 @@
  * `/api/health/deep` "Idle Nm" Health Diagnostic (src/health/rules.ts), so the
  * thing the watchdog acts on is exactly what the deep-health route reports.
  * The Observability Heartbeat stamps `lastTickAt` every 5 minutes and leaves
- * `lastCycleAt` null on purpose (src/scheduler/heartbeat.ts), so `lastTickAt`
+ * the retired cycle timestamp null on purpose (src/scheduler/heartbeat.ts), so `lastTickAt`
  * is the only liveness signal.
  *
  * Pure, zero-dependency leaf. No I/O, no clock read (the caller passes `nowMs`).

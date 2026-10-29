@@ -89,7 +89,7 @@ run_watchdog_cli() {
   return 0
 }
 
-run_liveness_cli() { run_watchdog_cli liveness "hydra-orchestrator-watchdog:" 120; }
+run_liveness_cli() { run_watchdog_cli liveness "hydra-orchestrator-watchdog:" 300; }
 run_wedge_cli() { run_watchdog_cli wedge "hydra-autopilot-watchdog:" 90; }
 
 # =============================================================================
