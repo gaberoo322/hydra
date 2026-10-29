@@ -127,7 +127,7 @@
   "test/autopilot-turn-runner.test.mts": 6,
   "test/autopilot-turns.test.mts": 1,
   "test/autopilot-unattended.test.mts": 1,
-  "test/autopilot-watchdog.test.mts": 6,
+  "test/autopilot-watchdog.test.mts": 7,
   "test/biome-check.test.mts": 1,
   "test/blockers.test.mts": 7,
   "test/board-state.test.mts": 3,
