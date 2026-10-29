@@ -450,7 +450,7 @@ async function harvest(repo: string, since: string, until: string): Promise<Coho
         .flatMap((c) => parseQaVerdictTrailers(c.body))
         .filter((t) => t.pr === it.number);
       prs.push({ number: it.number, mergedAt, title: it.title, cohort: cohortOf(it), trailers });
-      const refs = trailers.length > 0 ? closedIssues([{ body: it.body }]) : [];
+      const refs = trailers.length > 0 ? [...closedIssues([{ body: it.body }])] : [];
       for (const n of refs) closing.add(n);
       coverage.push({ reviewed: trailers.length > 0, closingRefs: refs });
     }
