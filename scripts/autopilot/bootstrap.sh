@@ -1326,6 +1326,13 @@ if ! python3 "${RUN_LEDGER}" seed "${STATE_PATH}" \
   exit 1
 fi
 
+# Issue #5149: promote the anchor of any dev_orch the PRIOR run dispatched but
+# never collected (it is now an inflight-seed slot) to needs-qa when an open PR
+# closes it. Promotion-only (no slot mutation), best-effort, never blocks.
+if [ "${ISOLATED_RUN}" != "1" ]; then
+  python3 "$(dirname "$0")/reap.py" reconcile-seeded "${STATE_PATH}" || true
+fi
+
 # Echo resolved limits so the model captures them in conversation context
 echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} context_compaction_turns=${CONTEXT_COMPACTION_TURNS} quota_5h_max_pts=${QUOTA_5H_MAX} quota_week_max_pts=${QUOTA_WEEK_MAX} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED} schema_version=${SCHEMA_VERSION} daily_spend_cap_usd=${DAILY_SPEND_CAP_USD} scout_cost_share=${SCOUT_COST_SHARE}"
 echo "[autopilot] state schema_version=${SCHEMA_VERSION} (playbook must match HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA marker; see Phase 0 handshake)"
