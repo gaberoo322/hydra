@@ -1986,6 +1986,7 @@
           "file config/direction/proposal-policy.md",
           "file config/direction/tech-preferences.md",
           "file config/direction/vision.md",
+          "file config/orchestrator/qa-rollout.json",
           "file config/orchestrator/vision.md"
         ],
         "corpus": [

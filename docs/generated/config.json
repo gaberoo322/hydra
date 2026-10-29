@@ -214,6 +214,19 @@
     },
     {
       "kind": "file",
+      "path": "config/orchestrator/qa-rollout.json",
+      "section": null,
+      "readBy": [
+        "src/qa/rollout-switches.ts"
+      ],
+      "unread": false,
+      "source": {
+        "path": "config/orchestrator/qa-rollout.json",
+        "line": 1
+      }
+    },
+    {
+      "kind": "file",
       "path": "config/orchestrator/vision.md",
       "section": null,
       "readBy": [
