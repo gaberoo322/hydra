@@ -101,6 +101,7 @@ export async function loadRolloutSwitches(
 ): Promise<RolloutSwitches> {
   const read = deps.readFile ?? ((p: string) => fsReadFile(p, "utf8"));
   let readFailed = false;
+  let tripReadFailed = false;
 
   let raw: unknown = undefined;
   const cfgPath = join(repoRoot, QA_ROLLOUT_CONFIG_PATH);
@@ -124,10 +125,14 @@ export async function loadRolloutSwitches(
   try {
     trip = tripFromBaseline(await read(basePath));
   } catch (err) {
-    if (!isEnoent(err)) console.error(`[rollout-switches] failed to read ${basePath}:`, err);
+    if (!isEnoent(err)) {
+      console.error(`[rollout-switches] failed to read ${basePath}:`, err);
+      tripReadFailed = true;
+    }
   }
 
   const res = resolveRolloutSwitches(raw, trip);
+  if (tripReadFailed) res.reasons.push("trip-read-failed");
   if (readFailed) {
     res.reasons = res.reasons.filter((r) => r !== "config-missing").concat("config-read-failed");
   }

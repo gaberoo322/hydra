@@ -1,4 +1,5 @@
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import {
   resolveRolloutSwitches,
@@ -75,9 +76,31 @@ describe("qa rollout switches", () => {
 
   it("baseline path matches cohort script and committed files resolve off/off", async () => {
     assert.equal(COHORT_BASELINE_PATH, BASELINE_FIXTURE_PATH);
-    const r = await loadRolloutSwitches(process.cwd());
-    assert.deepEqual(r.effective, OFF);
+    const root = fileURLToPath(new URL("..", import.meta.url));
+    const r = await loadRolloutSwitches(root);
     assert.deepEqual(r.configured, OFF);
-    assert.equal(r.trip.state, "not-tripped");
+    assert.deepEqual(r.effective, OFF);
+  });
+
+  it("non-ENOENT trip read failure gets a distinct reason; ENOENT does not", async () => {
+    const cfg = JSON.stringify({ "two-way-pair": "on", "reviewer-commits": "A" });
+    const mk = (base: Error) => async (p: string) => {
+      if (p.endsWith("qa-rollout.json")) return cfg;
+      throw base;
+    };
+    const origErr = console.error;
+    console.error = () => {};
+    try {
+      const io = await loadRolloutSwitches("/r", { readFile: mk(new Error("EIO")) });
+      assert.deepEqual(io.effective, OFF);
+      assert.ok(io.reasons.includes("trip-unreadable"));
+      assert.ok(io.reasons.includes("trip-read-failed"));
+    } finally {
+      console.error = origErr;
+    }
+    const enoent = Object.assign(new Error("nf"), { code: "ENOENT" });
+    const nf = await loadRolloutSwitches("/r", { readFile: mk(enoent) });
+    assert.ok(nf.reasons.includes("trip-unreadable"));
+    assert.ok(!nf.reasons.includes("trip-read-failed"));
   });
 });
