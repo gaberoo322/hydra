@@ -68,7 +68,12 @@ export interface CohortInputs {
   items: ItemRow[];
   /** ISO instant; PRs merged within MATURITY_DAYS of it are `pending`. */
   until: string;
-  tokens: { qaOrchTokens: number | null; attributedPercent: number | null };
+  tokens: {
+    qaOrchTokens: number | null;
+    attributedPercent: number | null;
+    /** Reviewed PRs with no closing issue ref (their qa_orch tokens cannot be attributed). */
+    unattributedReviews?: number;
+  };
 }
 
 export interface EscapeEvidence {
@@ -93,6 +98,8 @@ export interface CohortMetrics {
     value: number | null;
     source: string;
     attributedPercent: number | null;
+    /** Reviewed PRs counted in the denominator whose tokens are absent from the numerator. */
+    unattributedReviews: number;
   };
   cohorts: { baseline: CohortStats; pair: CohortStats };
   pending: number[];
@@ -272,6 +279,15 @@ export function measureCohort(inputs: CohortInputs): CohortResult {
 
   const tok = inputs?.tokens ?? { qaOrchTokens: null, attributedPercent: null };
   const attributed = typeof tok.attributedPercent === "number" ? tok.attributedPercent : null;
+  const unattributedReviews =
+    typeof tok.unattributedReviews === "number" && tok.unattributedReviews > 0
+      ? tok.unattributedReviews
+      : 0;
+  if (unattributedReviews > 0) {
+    warnings.push(
+      `tokensPerReview understated: ${unattributedReviews} of ${reviewed} reviewed PR(s) have no closing issue ref, so their qa_orch tokens are not in the numerator`,
+    );
+  }
   let tokenValue: number | null = null;
   if (
     typeof tok.qaOrchTokens === "number" &&
@@ -298,7 +314,10 @@ export function measureCohort(inputs: CohortInputs): CohortResult {
       reviewed,
       roundsPerPr: ratio(roundSum, reviewed),
       firstFailRate: ratio(firstFails, reviewed),
-      tokensPerReview: { value: tokenValue, source: TOKENS_SOURCE, attributedPercent: attributed },
+      tokensPerReview: { value: tokenValue, source: TOKENS_SOURCE,
+        attributedPercent: attributed,
+        unattributedReviews,
+      },
       cohorts: { baseline: base, pair },
       pending,
       escapes,
@@ -347,7 +366,7 @@ interface RestIssue {
 }
 
 /** Failure codes worth retrying: transient rate-limit / network (src/github/gh.ts). */
-const RETRYABLE_CODES = new Set(["gh-rate-limited", "gh-network", "gh-timeout"]);
+const RETRYABLE_CODES = new Set(["gh-rate-limited", "gh-timeout"]);
 
 /**
  * Bounded retry with exponential backoff for a gh result-object call. Retries
@@ -464,7 +483,11 @@ async function harvest(repo: string, since: string, until: string): Promise<Coho
   prs.sort((a, b) => a.number - b.number);
   items.sort((a, b) => a.number - b.number);
 
-  let tokens: CohortInputs["tokens"] = { qaOrchTokens: null, attributedPercent: null };
+  let tokens: CohortInputs["tokens"] = {
+    qaOrchTokens: null,
+    attributedPercent: null,
+    unattributedReviews: unattributed,
+  };
   try {
     const base = "http://localhost:4000";
     const resp = await fetch(`${base}/api/usage/by-issue`, {
@@ -476,7 +499,11 @@ async function harvest(repo: string, since: string, until: string): Promise<Coho
       for (const row of j.byIssue ?? []) {
         if (closing.has(row.issue)) sum += Number(row.byClass?.qa_orch ?? 0);
       }
-      tokens = { qaOrchTokens: sum, attributedPercent: Number(j.attributedPercent ?? 0) };
+      tokens = {
+        qaOrchTokens: sum,
+        attributedPercent: Number(j.attributedPercent ?? 0),
+        unattributedReviews: unattributed,
+      };
     } else {
       console.error(
         `[cohort-baseline] usage API returned HTTP ${resp.status}; tokensPerReview will be null`,

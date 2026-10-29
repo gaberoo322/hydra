@@ -327,4 +327,19 @@ describe("qa-cohort-baseline QA round-1 fixes (#5278)", () => {
       1,
     );
   });
+
+  test("unattributed reviews are emitted in metrics and warnings", () => {
+    const r = measureCohort({
+      ...inputs([pr(1, [trailer(1, 1, "PASS")]), pr(2, [trailer(2, 1, "PASS")])]),
+      tokens: { qaOrchTokens: 500, attributedPercent: 40, unattributedReviews: 1 },
+    });
+    assert.equal(r.metrics.tokensPerReview.unattributedReviews, 1);
+    assert.ok(r.warnings.some((w) => w.includes("understated")));
+  });
+
+  test("fully attributed cohort reports 0 and no understated warning", () => {
+    const r = measureCohort({ ...inputs([pr(1, [trailer(1, 1, "PASS")]), pr(2, [trailer(2, 1, "PASS")])]), tokens: { qaOrchTokens: 500, attributedPercent: 40 } });
+    assert.equal(r.metrics.tokensPerReview.unattributedReviews, 0);
+    assert.ok(!r.warnings.some((w) => w.includes("understated")));
+  });
 });

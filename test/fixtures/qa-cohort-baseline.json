@@ -4541,7 +4541,8 @@
     ],
     "tokens": {
       "attributedPercent": 54.53,
-      "qaOrchTokens": 710210
+      "qaOrchTokens": 710210,
+      "unattributedReviews": 3
     },
     "until": "2026-10-28T00:48:59.382Z"
   },
@@ -4687,6 +4688,7 @@
     "tokensPerReview": {
       "attributedPercent": 54.53,
       "source": "api/usage/by-issue",
+      "unattributedReviews": 3,
       "value": 5109
     },
     "tripped": false
