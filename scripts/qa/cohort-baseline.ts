@@ -221,7 +221,10 @@ export function measureCohort(inputs: CohortInputs): CohortResult {
   const pending: number[] = [];
   const escapes: EscapeEvidence[] = [];
   for (const p of prs) {
-    if (ownTrailers(p).length === 0) continue; // cohorts are trailer-reviewed PRs only
+    // Ruling (QA round 1, #5278): cohort denominators AND `pending` cover
+    // trailer-reviewed PRs only. A merged PR with no own QA-Verdict trailer was
+    // never measured by QA, so it belongs to neither cohort (pinned by test).
+    if (ownTrailers(p).length === 0) continue;
     const mergedMs = parseMs(p.mergedAt);
     if (Number.isNaN(untilMs) || mergedMs + MATURITY_DAYS * DAY_MS > untilMs) {
       pending.push(p.number);
@@ -343,6 +346,40 @@ interface RestIssue {
   pull_request?: { merged_at: string | null };
 }
 
+/** Failure codes worth retrying: transient rate-limit / network (src/github/gh.ts). */
+const RETRYABLE_CODES = new Set(["gh-rate-limited", "gh-network", "gh-timeout"]);
+
+/**
+ * Bounded retry with exponential backoff for a gh result-object call. Retries
+ * only transient codes; returns the last result. `sleep` is injectable for tests.
+ */
+export async function withRetry<R extends { ok: boolean; code?: string }>(
+  fn: () => Promise<R>,
+  opts: { attempts?: number; baseMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<R> {
+  const attempts = opts.attempts ?? 4;
+  const baseMs = opts.baseMs ?? 2000;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let res = await fn();
+  for (let i = 1; i < attempts; i++) {
+    if (res.ok || !res.code || !RETRYABLE_CODES.has(res.code)) return res;
+    await sleep(baseMs * 2 ** (i - 1));
+    res = await fn();
+  }
+  return res;
+}
+
+/**
+ * tokensPerReview divides by every trailer-reviewed PR (INV-11 wording) while the
+ * numerator only counts issues named by Closes refs. This counts reviewed PRs with
+ * no closing ref so the harvester can report the coverage gap.
+ */
+export function countReviewedWithoutClosingRef(
+  rows: Array<{ reviewed: boolean; closingRefs: number[] }>,
+): number {
+  return rows.filter((r) => r.reviewed && r.closingRefs.length === 0).length;
+}
+
 export class HarvestError extends Error {
   code: string;
   constructor(code: string, message: string) {
@@ -358,7 +395,9 @@ async function harvest(repo: string, since: string, until: string): Promise<Coho
   const opts = { timeout: 300_000, maxBuffer: 256 * 1024 * 1024 };
 
   const get = async <T>(path: string): Promise<T[]> => {
-    const res = await ghJson<T[][]>(["api", path, "--paginate", "--slurp"], opts);
+    const res = await withRetry(() =>
+      ghJson<T[][]>(["api", path, "--paginate", "--slurp"], opts),
+    );
     if (res.ok === false) {
       throw new HarvestError(res.code, `gh api ${path} failed: ${res.code}`);
     }
@@ -373,6 +412,7 @@ async function harvest(repo: string, since: string, until: string): Promise<Coho
   const prs: PrRow[] = [];
   const items: ItemRow[] = [];
   const closing = new Set<number>();
+  const coverage: Array<{ reviewed: boolean; closingRefs: number[] }> = [];
   for (const it of all) {
     const mergedAt = it.pull_request?.merged_at ?? null;
     const mentions = extractMentions(`${it.title}\n${it.body ?? ""}`).filter(
@@ -410,10 +450,16 @@ async function harvest(repo: string, since: string, until: string): Promise<Coho
         .flatMap((c) => parseQaVerdictTrailers(c.body))
         .filter((t) => t.pr === it.number);
       prs.push({ number: it.number, mergedAt, title: it.title, cohort: cohortOf(it), trailers });
-      if (trailers.length > 0) {
-        for (const n of closedIssues([{ body: it.body }])) closing.add(n);
-      }
+      const refs = trailers.length > 0 ? closedIssues([{ body: it.body }]) : [];
+      for (const n of refs) closing.add(n);
+      coverage.push({ reviewed: trailers.length > 0, closingRefs: refs });
     }
+  }
+  const unattributed = countReviewedWithoutClosingRef(coverage);
+  if (unattributed > 0) {
+    console.error(
+      `[cohort-baseline] ${unattributed} reviewed PR(s) have no closing issue ref: tokensPerReview divides by all reviewed PRs but only sums qa_orch tokens for Closes-ref issues (understated)`,
+    );
   }
   prs.sort((a, b) => a.number - b.number);
   items.sort((a, b) => a.number - b.number);

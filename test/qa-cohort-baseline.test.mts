@@ -14,6 +14,8 @@ import {
   roundsOf,
   stableStringify,
   cohortOf,
+  withRetry,
+  countReviewedWithoutClosingRef,
   MIN_MATURED_PAIR,
   type CohortInputs,
   type ItemRow,
@@ -270,5 +272,59 @@ describe("qa-cohort-baseline committed fixture", () => {
   test("the only timestamp outside metrics is measuredAt at the top level", () => {
     assert.equal(typeof fixture.measuredAt, "string");
     assert.equal(JSON.stringify(fixture.metrics).includes("measuredAt"), false);
+  });
+});
+
+describe("qa-cohort-baseline QA round-1 fixes (#5278)", () => {
+  test("trailer-less merged PRs are excluded from cohort denominators and pending (documented ruling)", () => {
+    const r = measureCohort({
+      prs: [pr(1, [trailer(1, 1, "PASS")]), pr(2, []), pr(3, [], { mergedAt: "2026-11-29T00:00:00Z" })],
+      items: [],
+      until: UNTIL,
+      tokens: { qaOrchTokens: null, attributedPercent: null },
+    });
+    assert.equal(r.metrics.cohorts.baseline.matured, 1);
+    assert.deepEqual(r.metrics.pending, []);
+  });
+
+  test("withRetry retries a rate-limited call with backoff, then succeeds", async () => {
+    const sleeps: number[] = [];
+    let n = 0;
+    const res = await withRetry(
+      async () => (++n < 3 ? { ok: false as const, code: "gh-rate-limited" } : { ok: true as const }),
+      { baseMs: 10, sleep: async (ms) => void sleeps.push(ms) },
+    );
+    assert.equal(res.ok, true);
+    assert.equal(n, 3);
+    assert.deepEqual(sleeps, [10, 20]);
+  });
+
+  test("withRetry does not retry a non-transient failure", async () => {
+    let n = 0;
+    const res = await withRetry(async () => (n++, { ok: false as const, code: "gh-malformed-json" }), {
+      sleep: async () => {},
+    });
+    assert.equal(res.ok, false);
+    assert.equal(n, 1);
+  });
+
+  test("withRetry gives up after the attempt bound", async () => {
+    let n = 0;
+    await withRetry(async () => (n++, { ok: false as const, code: "gh-rate-limited" }), {
+      attempts: 3,
+      sleep: async () => {},
+    });
+    assert.equal(n, 3);
+  });
+
+  test("countReviewedWithoutClosingRef counts only reviewed rows lacking refs", () => {
+    assert.equal(
+      countReviewedWithoutClosingRef([
+        { reviewed: true, closingRefs: [] },
+        { reviewed: true, closingRefs: [5] },
+        { reviewed: false, closingRefs: [] },
+      ]),
+      1,
+    );
   });
 });
