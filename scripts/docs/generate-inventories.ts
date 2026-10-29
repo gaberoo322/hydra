@@ -202,7 +202,7 @@ export function buildCounts(inventories: Map<string, Inventory<unknown>>): Count
   }
   rows.sort((a, b) => (a.family === b.family ? (a.metric < b.metric ? -1 : 1) : a.family < b.family ? -1 : 1));
   const generatedFrom = [...inventories.keys()].map((f) => `docs/generated/${f}.json`).sort();
-  return { family: "counts", schemaVersion: 1, generatedFrom, rows };
+  return { family: "counts", schemaVersion: 2, generatedFrom, rows };
 }
 
 /** Multiset added/removed diff between committed and fresh row labels (sorted). */

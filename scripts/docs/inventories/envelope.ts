@@ -38,8 +38,8 @@ export interface RouteRow {
   home: string;
   /** First-party src/ modules the router file imports, collapsed (finding 1). */
   areas: string[];
-  /** Where the registration lives: file + line of the `router.<verb>(` token. */
-  source: { path: string; line: number };
+  /** Where the registration lives: the router file (path only, #5262). */
+  source: SourceRef;
 }
 
 /** One row of the counts family (docs/generated/counts.json). */
@@ -63,10 +63,20 @@ export interface CorpusRow {
   title: string;
 }
 
-/** Where a row's truth lives: repo-relative file + 1-based line. */
+/**
+ * Where a row's truth lives: the repo-relative file (#5262, schemaVersion 2).
+ *
+ * `line` is an INTERNAL aid only (route-registration ordering, the schemas
+ * nearest-preceding join, read-site dedup). It is never emitted:
+ * {@link serializeInventory} strips it, so no committed docs/generated file
+ * carries a line number. Line numbers shifted on unrelated edits and churned
+ * the committed artifact (32 of the last 200 master commits regenerated for
+ * line shifts alone).
+ */
 export interface SourceRef {
   path: string;
-  line: number;
+  /** Internal, 1-based; stripped on serialization. */
+  line?: number;
 }
 
 /** One row of the classes family (docs/generated/classes.json, #4592): one dispatch-class table row. */
@@ -264,7 +274,7 @@ export interface UnitScriptRow {
 /** The envelope every generated inventory file carries. */
 export interface Inventory<Row> {
   family: string;
-  schemaVersion: 1;
+  schemaVersion: 2;
   generatedFrom: string[];
   rows: Row[];
 }
@@ -380,7 +390,36 @@ export type SkillsInventory = Inventory<SkillRow>;
 export type AdrsInventory = Inventory<AdrRow>;
 export type AreasInventory = Inventory<AreaRow>;
 
-/** The committed byte form: two-space JSON + trailing newline. */
+/**
+ * The emitted form of a value: every `line` key on a path-bearing source
+ * object is dropped, and a `readSites` list that thereby collapses to
+ * repeated same-path entries keeps the first of each path (order preserved).
+ */
+function emit(value: unknown, key?: string): unknown {
+  if (Array.isArray(value)) {
+    const items = value.map((v) => emit(v));
+    if (key !== "readSites") return items;
+    const seen = new Set<string>();
+    return items.filter((it) => {
+      const p = (it as { path?: string }).path ?? "";
+      if (seen.has(p)) return false;
+      seen.add(p);
+      return true;
+    });
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    const isSourceRef = typeof (value as { path?: unknown }).path === "string";
+    for (const [k, v] of Object.entries(value)) {
+      if (k === "line" && isSourceRef) continue;
+      out[k] = emit(v, k);
+    }
+    return out;
+  }
+  return value;
+}
+
+/** The committed byte form: two-space JSON + trailing newline, internal line numbers stripped (#5262). */
 export function serializeInventory<Row>(inventory: Inventory<Row>): string {
-  return `${JSON.stringify(inventory, null, 2)}\n`;
+  return `${JSON.stringify(emit(inventory), null, 2)}\n`;
 }

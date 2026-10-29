@@ -131,7 +131,7 @@ describe("docs classes + skills families and surface (#4592)", () => {
       strictEqual(row.home, "/now", `${row.name} home rule`);
       strictEqual(row.secondaryHome, "/runs", `${row.name} secondary home rule`);
       strictEqual(row.source.path, "scripts/autopilot/classes.json", `${row.name} source path`);
-      ok(Number.isInteger(row.source.line) && row.source.line > 0, `${row.name} source line`);
+      ok(!("line" in row.source), `${row.name} source is path-only (#5262)`);
       const tax = TAXONOMY.classes.find((c) => c.name === row.name);
       strictEqual(row.skill, tax.skill, `${row.name} skill mirrors the taxonomy`);
       strictEqual(row.stage, tax.stage, `${row.name} stage mirrors the taxonomy`);

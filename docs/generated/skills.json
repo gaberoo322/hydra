@@ -1,6 +1,6 @@
 {
   "family": "skills",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "docs/operator-playbooks/*.md"
   ],
@@ -14,8 +14,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-architect",
       "source": {
-        "path": "docs/operator-playbooks/hydra-architect.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-architect.md"
       }
     },
     {
@@ -34,8 +33,7 @@
       ],
       "route": "/docs/skill/hydra-architecture-scan",
       "source": {
-        "path": "docs/operator-playbooks/hydra-architecture-scan.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-architecture-scan.md"
       }
     },
     {
@@ -47,8 +45,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-auto-merge-window",
       "source": {
-        "path": "docs/operator-playbooks/hydra-auto-merge-window.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-auto-merge-window.md"
       }
     },
     {
@@ -67,8 +64,7 @@
       ],
       "route": "/docs/skill/hydra-autopilot",
       "source": {
-        "path": "docs/operator-playbooks/hydra-autopilot.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-autopilot.md"
       }
     },
     {
@@ -80,8 +76,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-branch-prune",
       "source": {
-        "path": "docs/operator-playbooks/hydra-branch-prune.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-branch-prune.md"
       }
     },
     {
@@ -98,8 +93,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-cleanup",
       "source": {
-        "path": "docs/operator-playbooks/hydra-cleanup.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-cleanup.md"
       }
     },
     {
@@ -118,8 +112,7 @@
       ],
       "route": "/docs/skill/hydra-design-qa",
       "source": {
-        "path": "docs/operator-playbooks/hydra-design-qa.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-design-qa.md"
       }
     },
     {
@@ -144,8 +137,7 @@
       ],
       "route": "/docs/skill/hydra-dev",
       "source": {
-        "path": "docs/operator-playbooks/hydra-dev.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-dev.md"
       }
     },
     {
@@ -157,8 +149,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-digest",
       "source": {
-        "path": "docs/operator-playbooks/hydra-digest.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-digest.md"
       }
     },
     {
@@ -175,8 +166,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-discover",
       "source": {
-        "path": "docs/operator-playbooks/hydra-discover.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-discover.md"
       }
     },
     {
@@ -193,8 +183,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-doctor",
       "source": {
-        "path": "docs/operator-playbooks/hydra-doctor.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-doctor.md"
       }
     },
     {
@@ -206,8 +195,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-epic-close",
       "source": {
-        "path": "docs/operator-playbooks/hydra-epic-close.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-epic-close.md"
       }
     },
     {
@@ -219,8 +207,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-epic-sprint",
       "source": {
-        "path": "docs/operator-playbooks/hydra-epic-sprint.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-epic-sprint.md"
       }
     },
     {
@@ -237,8 +224,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-grill",
       "source": {
-        "path": "docs/operator-playbooks/hydra-grill.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-grill.md"
       }
     },
     {
@@ -250,8 +236,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-hitl-grill",
       "source": {
-        "path": "docs/operator-playbooks/hydra-hitl-grill.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-hitl-grill.md"
       }
     },
     {
@@ -263,8 +248,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-incident",
       "source": {
-        "path": "docs/operator-playbooks/hydra-incident.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-incident.md"
       }
     },
     {
@@ -289,8 +273,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-issue-research",
       "source": {
-        "path": "docs/operator-playbooks/hydra-issue-research.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-issue-research.md"
       }
     },
     {
@@ -302,8 +285,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-pr-rebase",
       "source": {
-        "path": "docs/operator-playbooks/hydra-pr-rebase.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-pr-rebase.md"
       }
     },
     {
@@ -315,8 +297,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-prd",
       "source": {
-        "path": "docs/operator-playbooks/hydra-prd.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-prd.md"
       }
     },
     {
@@ -336,8 +317,7 @@
       ],
       "route": "/docs/skill/hydra-qa",
       "source": {
-        "path": "docs/operator-playbooks/hydra-qa.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-qa.md"
       }
     },
     {
@@ -349,8 +329,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-research",
       "source": {
-        "path": "docs/operator-playbooks/hydra-research.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-research.md"
       }
     },
     {
@@ -367,8 +346,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-retro",
       "source": {
-        "path": "docs/operator-playbooks/hydra-retro.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-retro.md"
       }
     },
     {
@@ -382,8 +360,7 @@
       ],
       "route": "/docs/skill/hydra-review",
       "source": {
-        "path": "docs/operator-playbooks/hydra-review.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-review.md"
       }
     },
     {
@@ -400,8 +377,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-skill-prune",
       "source": {
-        "path": "docs/operator-playbooks/hydra-skill-prune.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-skill-prune.md"
       }
     },
     {
@@ -418,8 +394,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-sweep",
       "source": {
-        "path": "docs/operator-playbooks/hydra-sweep.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-sweep.md"
       }
     },
     {
@@ -443,8 +418,7 @@
       ],
       "route": "/docs/skill/hydra-target-build",
       "source": {
-        "path": "docs/operator-playbooks/hydra-target-build.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-target-build.md"
       }
     },
     {
@@ -463,8 +437,7 @@
       ],
       "route": "/docs/skill/hydra-target-cleanup",
       "source": {
-        "path": "docs/operator-playbooks/hydra-target-cleanup.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-target-cleanup.md"
       }
     },
     {
@@ -483,8 +456,7 @@
       ],
       "route": "/docs/skill/hydra-target-discover",
       "source": {
-        "path": "docs/operator-playbooks/hydra-target-discover.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-target-discover.md"
       }
     },
     {
@@ -498,8 +470,7 @@
       ],
       "route": "/docs/skill/hydra-target-incident",
       "source": {
-        "path": "docs/operator-playbooks/hydra-target-incident.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-target-incident.md"
       }
     },
     {
@@ -518,8 +489,7 @@
       ],
       "route": "/docs/skill/hydra-target-qa",
       "source": {
-        "path": "docs/operator-playbooks/hydra-target-qa.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-target-qa.md"
       }
     },
     {
@@ -538,8 +508,7 @@
       ],
       "route": "/docs/skill/hydra-target-research",
       "source": {
-        "path": "docs/operator-playbooks/hydra-target-research.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-target-research.md"
       }
     },
     {
@@ -553,8 +522,7 @@
       ],
       "route": "/docs/skill/hydra-target-retro",
       "source": {
-        "path": "docs/operator-playbooks/hydra-target-retro.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-target-retro.md"
       }
     },
     {
@@ -573,8 +541,7 @@
       ],
       "route": "/docs/skill/hydra-target-sweep",
       "source": {
-        "path": "docs/operator-playbooks/hydra-target-sweep.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-target-sweep.md"
       }
     },
     {
@@ -594,8 +561,7 @@
       ],
       "route": "/docs/skill/hydra-tickets",
       "source": {
-        "path": "docs/operator-playbooks/hydra-tickets.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-tickets.md"
       }
     },
     {
@@ -612,8 +578,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-tool-scout",
       "source": {
-        "path": "docs/operator-playbooks/hydra-tool-scout.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-tool-scout.md"
       }
     },
     {
@@ -625,8 +590,7 @@
       "composedFrom": [],
       "route": "/docs/skill/hydra-wayfinder",
       "source": {
-        "path": "docs/operator-playbooks/hydra-wayfinder.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-wayfinder.md"
       }
     },
     {
@@ -645,8 +609,7 @@
       ],
       "route": "/docs/skill/hydra-wire-or-retire",
       "source": {
-        "path": "docs/operator-playbooks/hydra-wire-or-retire.md",
-        "line": 2
+        "path": "docs/operator-playbooks/hydra-wire-or-retire.md"
       }
     },
     {
@@ -660,8 +623,7 @@
       ],
       "route": "/docs/skill/thermo-nuclear-code-quality-review",
       "source": {
-        "path": "docs/operator-playbooks/thermo-nuclear-code-quality-review.md",
-        "line": 2
+        "path": "docs/operator-playbooks/thermo-nuclear-code-quality-review.md"
       }
     },
     {
@@ -673,8 +635,7 @@
       "composedFrom": [],
       "route": "/docs/skill/zoom-out",
       "source": {
-        "path": "docs/operator-playbooks/zoom-out.md",
-        "line": 2
+        "path": "docs/operator-playbooks/zoom-out.md"
       }
     }
   ]

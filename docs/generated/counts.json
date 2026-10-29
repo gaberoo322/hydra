@@ -1,6 +1,6 @@
 {
   "family": "counts",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "docs/generated/adrs.json",
     "docs/generated/areas.json",

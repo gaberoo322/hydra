@@ -249,5 +249,5 @@ export function extractRedisKeys(repoRoot: string, routes?: RouteRow[]): RedisKe
     files: listCodeFiles(repoRoot),
     routes: routes ?? extractRoutes(repoRoot).rows,
   });
-  return { family: "redis-keys", schemaVersion: 1, generatedFrom: GENERATED_FROM, rows };
+  return { family: "redis-keys", schemaVersion: 2, generatedFrom: GENERATED_FROM, rows };
 }

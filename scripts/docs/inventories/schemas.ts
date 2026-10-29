@@ -105,5 +105,5 @@ export function extractSchemas(repoRoot: string, routes?: RouteRow[]): SchemasIn
   const schemaFiles = srcFiles.filter((f) => /^src\/schemas\/[^/]+\.ts$/.test(f.path));
   if (schemaFiles.length === 0) fail("src/schemas/*.ts: no schema files found");
   const rows = buildSchemaRows({ schemaFiles, srcFiles, routes: routes ?? extractRoutes(repoRoot).rows });
-  return { family: "schemas", schemaVersion: 1, generatedFrom: GENERATED_FROM, rows };
+  return { family: "schemas", schemaVersion: 2, generatedFrom: GENERATED_FROM, rows };
 }

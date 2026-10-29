@@ -37,6 +37,7 @@ import {
   diffLabelMultiset,
   FAMILIES,
 } from "../scripts/docs/generate-inventories.ts";
+import { serializeInventory } from "../scripts/docs/inventories/envelope.ts";
 import type { AdrsInventory, CorpusRow, RouteRow } from "../scripts/docs/inventories/envelope.ts";
 import { extractCorpus } from "../scripts/docs/inventories/corpus.ts";
 import { ADR_ROSTER_FILE, renderRosterReadme } from "../scripts/docs/inventories/adrs.ts";
@@ -113,7 +114,8 @@ function assertNoDrift(file: string, fresh: { rows: unknown[] }, labelOf: (row: 
   const committed = JSON.parse(readFileSync(abs, "utf8"));
   let same = true;
   try {
-    deepStrictEqual(committed, fresh);
+    // Compare the EMITTED form: in-memory rows keep internal line numbers (#5262).
+    deepStrictEqual(committed, JSON.parse(serializeInventory(fresh as never)));
   } catch (err) {
     /* intentional: deepStrictEqual's AssertionError is expected on drift — the failure detail
      * it carries is redundant with the added/removed row diff driftMessage() builds below, but
@@ -213,7 +215,7 @@ describe("generated feature inventories", () => {
       (root) => {
         const inv = extractCorpus(root);
         deepStrictEqual(inv.family, "corpus");
-        deepStrictEqual(inv.schemaVersion, 1);
+        deepStrictEqual(inv.schemaVersion, 2);
         deepStrictEqual(
           inv.rows.map((r) => `${r.path} [${r.tier}] ${r.route} :: ${r.title}`),
           [
@@ -935,5 +937,36 @@ describe("generated feature inventories", () => {
     deepStrictEqual(classifyAppRoutes(good).map((r) => r.path), ["/a"]);
     throws(() => classifyAppRoutes(`${good}\n<Route element={<B />} path="/b" />`), /<Route tokens/);
     throws(() => classifyAppRoutes(`${good}\n<Route index element={<B />} />`), /<Route tokens/);
+  });
+});
+
+describe("generated inventories carry no line numbers (#5262)", () => {
+  it("serializeInventory strips internal source lines and collapses same-path readSites", () => {
+    const out = serializeInventory({
+      family: "x",
+      schemaVersion: 2,
+      generatedFrom: [],
+      rows: [
+        {
+          line: 7, // not a source ref (no string path): untouched
+          source: { path: "src/a.ts", line: 3 },
+          readSites: [
+            { path: "src/a.ts", line: 3 },
+            { path: "src/a.ts", line: 9 },
+            { path: "src/b.ts", line: 1 },
+          ],
+        },
+      ],
+    });
+    deepStrictEqual(JSON.parse(out).rows, [
+      { line: 7, source: { path: "src/a.ts" }, readSites: [{ path: "src/a.ts" }, { path: "src/b.ts" }] },
+    ]);
+  });
+
+  it("no committed docs/generated file contains a line field", () => {
+    const dir = join(REPO_ROOT, "docs/generated");
+    for (const f of readdirSync(dir).filter((n) => n.endsWith(".json"))) {
+      ok(!/"line":/.test(readFileSync(join(dir, f), "utf8")), `${f} still carries a "line" field`);
+    }
   });
 });

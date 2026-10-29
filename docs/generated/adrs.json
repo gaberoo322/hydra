@@ -1,6 +1,6 @@
 {
   "family": "adrs",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "docs/adr/*.md",
     "README.md",
@@ -58,8 +58,7 @@
         "docs/reference.md"
       ],
       "source": {
-        "path": "docs/adr/0001-untouchable-core-and-gate-extraction.md",
-        "line": 5
+        "path": "docs/adr/0001-untouchable-core-and-gate-extraction.md"
       }
     },
     {
@@ -90,8 +89,7 @@
         "docs/target-swap-runbook.md"
       ],
       "source": {
-        "path": "docs/adr/0002-single-target-per-orchestrator-instance.md",
-        "line": 5
+        "path": "docs/adr/0002-single-target-per-orchestrator-instance.md"
       }
     },
     {
@@ -123,8 +121,7 @@
         "docs/reference.md"
       ],
       "source": {
-        "path": "docs/adr/0003-terminal-goal-hierarchy.md",
-        "line": 5
+        "path": "docs/adr/0003-terminal-goal-hierarchy.md"
       }
     },
     {
@@ -164,8 +161,7 @@
         "docs/reference.md"
       ],
       "source": {
-        "path": "docs/adr/0004-self-modification-tiers.md",
-        "line": 5
+        "path": "docs/adr/0004-self-modification-tiers.md"
       }
     },
     {
@@ -218,8 +214,7 @@
         "docs/reference.md"
       ],
       "source": {
-        "path": "docs/adr/0005-operator-escalation-is-narrow.md",
-        "line": 5
+        "path": "docs/adr/0005-operator-escalation-is-narrow.md"
       }
     },
     {
@@ -273,8 +268,7 @@
         "src/autopilot/CONTEXT.md"
       ],
       "source": {
-        "path": "docs/adr/0006-codex-cli-removed-autopilot-only.md",
-        "line": 1
+        "path": "docs/adr/0006-codex-cli-removed-autopilot-only.md"
       }
     },
     {
@@ -301,8 +295,7 @@
         "src/autopilot/CONTEXT.md"
       ],
       "source": {
-        "path": "docs/adr/0007-decision-brain-orchestration.md",
-        "line": 1
+        "path": "docs/adr/0007-decision-brain-orchestration.md"
       }
     },
     {
@@ -331,8 +324,7 @@
         "docs/operator-playbooks/hydra-qa.md"
       ],
       "source": {
-        "path": "docs/adr/0008-design-concept-gate.md",
-        "line": 1
+        "path": "docs/adr/0008-design-concept-gate.md"
       }
     },
     {
@@ -363,8 +355,7 @@
         "docs/reference.md"
       ],
       "source": {
-        "path": "docs/adr/0009-redis-seam-typed-accessors.md",
-        "line": 1
+        "path": "docs/adr/0009-redis-seam-typed-accessors.md"
       }
     },
     {
@@ -393,8 +384,7 @@
         "docs/reference.md"
       ],
       "source": {
-        "path": "docs/adr/0010-stuckness-detector-retired.md",
-        "line": 5
+        "path": "docs/adr/0010-stuckness-detector-retired.md"
       }
     },
     {
@@ -420,8 +410,7 @@
         "docs/adr/0024-api-versioning.md"
       ],
       "source": {
-        "path": "docs/adr/0011-schemas-seam-for-http-request-bodies.md",
-        "line": 1
+        "path": "docs/adr/0011-schemas-seam-for-http-request-bodies.md"
       }
     },
     {
@@ -454,8 +443,7 @@
         "src/autopilot/CONTEXT.md"
       ],
       "source": {
-        "path": "docs/adr/0012-autopilot-is-the-single-brain.md",
-        "line": 1
+        "path": "docs/adr/0012-autopilot-is-the-single-brain.md"
       }
     },
     {
@@ -488,8 +476,7 @@
         "docs/operator-playbooks/hydra-target-build.md"
       ],
       "source": {
-        "path": "docs/adr/0013-swappable-single-target-builder.md",
-        "line": 1
+        "path": "docs/adr/0013-swappable-single-target-builder.md"
       }
     },
     {
@@ -512,8 +499,7 @@
         "docs/adr/0025-target-operate-layer-single-realm-incident-skill.md"
       ],
       "source": {
-        "path": "docs/adr/0014-simplicity-discipline.md",
-        "line": 1
+        "path": "docs/adr/0014-simplicity-discipline.md"
       }
     },
     {
@@ -560,8 +546,7 @@
         "docs/reference.md"
       ],
       "source": {
-        "path": "docs/adr/0015-verification-depth-replaces-merge-authority.md",
-        "line": 5
+        "path": "docs/adr/0015-verification-depth-replaces-merge-authority.md"
       }
     },
     {
@@ -582,8 +567,7 @@
         "docs/adr/0017-redis-seam-sharpened-three-categories.md"
       ],
       "source": {
-        "path": "docs/adr/0016-cycle-task-tracking-is-autopilot-recorded.md",
-        "line": 5
+        "path": "docs/adr/0016-cycle-task-tracking-is-autopilot-recorded.md"
       }
     },
     {
@@ -605,8 +589,7 @@
         "docs/adr/0018-design-concept-canonical-ref-at-the-seam.md"
       ],
       "source": {
-        "path": "docs/adr/0017-redis-seam-sharpened-three-categories.md",
-        "line": 5
+        "path": "docs/adr/0017-redis-seam-sharpened-three-categories.md"
       }
     },
     {
@@ -626,8 +609,7 @@
         "CONTEXT-MAP.md"
       ],
       "source": {
-        "path": "docs/adr/0018-design-concept-canonical-ref-at-the-seam.md",
-        "line": 5
+        "path": "docs/adr/0018-design-concept-canonical-ref-at-the-seam.md"
       }
     },
     {
@@ -647,8 +629,7 @@
         "CONTEXT-MAP.md"
       ],
       "source": {
-        "path": "docs/adr/0019-tier-policy-predicates.md",
-        "line": 5
+        "path": "docs/adr/0019-tier-policy-predicates.md"
       }
     },
     {
@@ -674,8 +655,7 @@
         "docs/reference.md"
       ],
       "source": {
-        "path": "docs/adr/0020-deep-qa-pass-marker-gates-t4-auto-merge.md",
-        "line": 5
+        "path": "docs/adr/0020-deep-qa-pass-marker-gates-t4-auto-merge.md"
       }
     },
     {
@@ -698,8 +678,7 @@
         "src/cost/CONTEXT.md"
       ],
       "source": {
-        "path": "docs/adr/0021-usage-paced-autopilot-pace-gate.md",
-        "line": 1
+        "path": "docs/adr/0021-usage-paced-autopilot-pace-gate.md"
       }
     },
     {
@@ -723,8 +702,7 @@
         "docs/adr/0024-api-versioning.md"
       ],
       "source": {
-        "path": "docs/adr/0022-query-validation-schemas-seam-for-read-routes.md",
-        "line": 1
+        "path": "docs/adr/0022-query-validation-schemas-seam-for-read-routes.md"
       }
     },
     {
@@ -745,8 +723,7 @@
         "CONTEXT.md"
       ],
       "source": {
-        "path": "docs/adr/0023-global-reflection-buffer-retired.md",
-        "line": 1
+        "path": "docs/adr/0023-global-reflection-buffer-retired.md"
       }
     },
     {
@@ -769,8 +746,7 @@
         "docs/reference.md"
       ],
       "source": {
-        "path": "docs/adr/0024-api-versioning.md",
-        "line": 1
+        "path": "docs/adr/0024-api-versioning.md"
       }
     },
     {
@@ -791,8 +767,7 @@
         "docs/operator-playbooks/hydra-target-incident.md"
       ],
       "source": {
-        "path": "docs/adr/0025-target-operate-layer-single-realm-incident-skill.md",
-        "line": 1
+        "path": "docs/adr/0025-target-operate-layer-single-realm-incident-skill.md"
       }
     },
     {
@@ -818,8 +793,7 @@
         "docs/target-swap-runbook.md"
       ],
       "source": {
-        "path": "docs/adr/0026-target-manifest.md",
-        "line": 1
+        "path": "docs/adr/0026-target-manifest.md"
       }
     },
     {
@@ -841,8 +815,7 @@
         "README.md"
       ],
       "source": {
-        "path": "docs/adr/0027-pino-structured-logger.md",
-        "line": 1
+        "path": "docs/adr/0027-pino-structured-logger.md"
       }
     },
     {
@@ -864,8 +837,7 @@
         "docs/operator-playbooks/hydra-wayfinder.md"
       ],
       "source": {
-        "path": "docs/adr/0028-builder-health-measurement-subsystem.md",
-        "line": 1
+        "path": "docs/adr/0028-builder-health-measurement-subsystem.md"
       }
     },
     {
@@ -893,8 +865,7 @@
         "docs/operator-playbooks/hydra-wayfinder.md"
       ],
       "source": {
-        "path": "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md",
-        "line": 1
+        "path": "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md"
       }
     },
     {
@@ -925,8 +896,7 @@
         "docs/operator-playbooks/hydra-tickets.md"
       ],
       "source": {
-        "path": "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md",
-        "line": 1
+        "path": "docs/adr/0030-one-pocock-skill-lineage-replaces-forks.md"
       }
     },
     {
@@ -961,8 +931,7 @@
         "docs/operator-playbooks/hydra-wire-or-retire.md"
       ],
       "source": {
-        "path": "docs/adr/0031-target-tracking-migrates-to-github-issues.md",
-        "line": 1
+        "path": "docs/adr/0031-target-tracking-migrates-to-github-issues.md"
       }
     },
     {
@@ -986,8 +955,7 @@
         "docs/operator-playbooks/hydra-review.md"
       ],
       "source": {
-        "path": "docs/adr/0032-glm-dev-drainer-worker-lane.md",
-        "line": 1
+        "path": "docs/adr/0032-glm-dev-drainer-worker-lane.md"
       }
     },
     {
@@ -1017,8 +985,7 @@
         "docs/reference.md"
       ],
       "source": {
-        "path": "docs/adr/0033-openviking-knowledge-plane-retired.md",
-        "line": 1
+        "path": "docs/adr/0033-openviking-knowledge-plane-retired.md"
       }
     },
     {
@@ -1047,8 +1014,7 @@
         "docs/reference.md"
       ],
       "source": {
-        "path": "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
-        "line": 1
+        "path": "docs/adr/0034-orchestrator-dashboard-page-inventory.md"
       }
     },
     {
@@ -1074,8 +1040,7 @@
         "docs/operator-playbooks/hydra-autopilot.md"
       ],
       "source": {
-        "path": "docs/adr/0035-spec-stage-stays-hydra-owned.md",
-        "line": 5
+        "path": "docs/adr/0035-spec-stage-stays-hydra-owned.md"
       }
     },
     {
@@ -1100,8 +1065,7 @@
         "docs/operator-playbooks/hydra-discover.md"
       ],
       "source": {
-        "path": "docs/adr/0036-anchor-selection-retired-candidate-feed.md",
-        "line": 1
+        "path": "docs/adr/0036-anchor-selection-retired-candidate-feed.md"
       }
     },
     {
@@ -1127,8 +1091,7 @@
         "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md"
       ],
       "source": {
-        "path": "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
-        "line": 5
+        "path": "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md"
       }
     },
     {
@@ -1149,8 +1112,7 @@
         "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md"
       ],
       "source": {
-        "path": "docs/adr/0038-the-test-suite-is-not-padded.md",
-        "line": 5
+        "path": "docs/adr/0038-the-test-suite-is-not-padded.md"
       }
     },
     {
@@ -1170,8 +1132,7 @@
         "CONTEXT-MAP.md"
       ],
       "source": {
-        "path": "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
-        "line": 5
+        "path": "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md"
       }
     },
     {
@@ -1194,8 +1155,7 @@
         "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md"
       ],
       "source": {
-        "path": "docs/adr/0040-glm-drainer-typed-tick-and-shared-eligibility.md",
-        "line": 5
+        "path": "docs/adr/0040-glm-drainer-typed-tick-and-shared-eligibility.md"
       }
     },
     {
@@ -1215,8 +1175,7 @@
         "CONTEXT-MAP.md"
       ],
       "source": {
-        "path": "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md",
-        "line": 5
+        "path": "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md"
       }
     },
     {
@@ -1237,8 +1196,7 @@
         "src/cost/CONTEXT.md"
       ],
       "source": {
-        "path": "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md",
-        "line": 5
+        "path": "docs/adr/0042-src-cost-is-layered-by-purity-with-a-test-enforced-import-rule.md"
       }
     },
     {
@@ -1264,8 +1222,7 @@
         "src/autopilot/CONTEXT.md"
       ],
       "source": {
-        "path": "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",
-        "line": 5
+        "path": "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md"
       }
     },
     {
@@ -1286,8 +1243,7 @@
         "docs/operator-playbooks/hydra-epic-sprint.md"
       ],
       "source": {
-        "path": "docs/adr/0044-operator-attended-epic-sprint-lane.md",
-        "line": 5
+        "path": "docs/adr/0044-operator-attended-epic-sprint-lane.md"
       }
     },
     {
@@ -1310,8 +1266,7 @@
         "docs/reference.md"
       ],
       "source": {
-        "path": "docs/adr/0045-operator-channel.md",
-        "line": 5
+        "path": "docs/adr/0045-operator-channel.md"
       }
     },
     {
@@ -1331,8 +1286,7 @@
         "CONTEXT-MAP.md"
       ],
       "source": {
-        "path": "docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md",
-        "line": 5
+        "path": "docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md"
       }
     }
   ]
