@@ -350,8 +350,9 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
   });
 
   test("INV-009: dev_orch and design_concept_orch on same anchor is warn-only (does NOT raise)", () => {
-    // Phase B intentionally does not raise on this conflict — it logs
-    // to state.warnings[] instead. Phase C will flip to raise.
+    // Phase B intentionally does not raise on this conflict — it prints one
+    // stderr WARN line per conflicting anchor and writes nothing to state.
+    // Phase C will flip to raise.
     const plan = {
       actions: [
         { type: "dispatch", slot: "design_concept_orch", skill: "hydra-grill",
@@ -361,11 +362,11 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
       ],
     };
     const r = runAsserts(plan, baseState());
-    // Warn-only: status must be 0 (no raise) — the warnings are observed via
-    // state.warnings[] (decide.py / reap.py / digest read those), but
-    // assert_invariants.py exits OK.
+    // Warn-only: status must be 0 (no raise); exactly one stderr WARN for the
+    // conflicting anchor, and no `warnings` key is ever written to state.
     assert.equal(r.status, 0,
       `INV-009 must NOT raise in Phase B (warn-only); got stderr: ${r.stderr}`);
+    assert.equal((r.stderr.match(/WARN INV-009 .*issue-conflict/g) ?? []).length, 1);
   });
 
   test("INV-009: dev_orch and design_concept_orch on DIFFERENT anchors is allowed", () => {
@@ -379,6 +380,7 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
     };
     const r = runAsserts(plan, baseState());
     assert.equal(r.status, 0, "different anchors must not trip INV-009");
+    assert.doesNotMatch(r.stderr, /WARN INV-009/);
   });
 
   test("INV-008: dispatch dev_target under orch-only scope is rejected", () => {

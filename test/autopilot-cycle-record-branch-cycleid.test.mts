@@ -253,3 +253,18 @@ describe("reap.py terminal-failure write sites → cycle-record keyed on the wor
     }
   });
 });
+
+describe("reap.py exits 0 on a type-invalid state document (QA round 1, #5293)", () => {
+  test("grill-crash with a wrong-typed declared field logs, skips, and exits 0 (no traceback)", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, { dispatches: "not-an-int" });
+      const r = runGrillCrash("deadbeef", tmp);
+      assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+      assert.match(r.stderr, /failed type validation/);
+      assert.doesNotMatch(r.stderr, /Traceback/);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});

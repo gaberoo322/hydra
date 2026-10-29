@@ -92,7 +92,7 @@ fi
 # --- Phase 1: collect ------------------------------------------------------
 # The cursor lives on state (bootstrap seeds it; the snapshot apply advances
 # it) — pass it so the slot-events read resumes where the last turn ended.
-cursor=$(python3 "$SCRIPT_DIR/run_ledger.py" get "$STATE" slot_events_last_id --default 0 2>/dev/null || echo 0)
+cursor=$(python3 "$SCRIPT_DIR/run_ledger.py" get "$STATE" slot_events_last_id --prior --default 0 2>/dev/null || echo 0)
 # Set when turn.sh fell back to `--all-degraded`: the summary line names it (#5083).
 snapshot_form=""
 

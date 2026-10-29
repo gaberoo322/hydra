@@ -89,7 +89,14 @@ def load_state() -> dict | None:
     if not STATE_PATH.exists():
         print(f"[autopilot] reap: state file missing at {STATE_PATH}; skipping", file=sys.stderr)
         return None
-    return run_ledger.load(STATE_PATH, fill_defaults=False)
+    try:
+        return run_ledger.load(STATE_PATH, fill_defaults=False)
+    except run_ledger.LedgerTypeError as exc:
+        # Reap completion / grill-crash stay exit 0 (Keep list): a wrong-typed
+        # declared field is logged loudly and treated like a missing state
+        # file instead of dying with a traceback (QA round 1, #5293).
+        print(f"[autopilot] reap: state at {STATE_PATH} failed type validation ({exc}); skipping", file=sys.stderr)
+        return None
 
 
 def _append_log(line: str) -> None:

@@ -810,4 +810,14 @@ describe("run ledger slot record + CLI readers (#5075)", () => {
       assert.equal(ledger(["get", join(dir, "missing.json"), "pid", "--prior", "--default", "0"]).stdout.trim(), "0");
     });
   });
+
+  test("turn.sh slot-events cursor read is lenient (--prior): a mistyped sibling key keeps the cursor", () => {
+    const turn = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "turn.sh"), "utf-8");
+    assert.match(turn, /get "\$STATE" slot_events_last_id --prior --default 0/);
+    withDoc({ pid: "not-an-int", slot_events_last_id: "55-0" }, (path) => {
+      assert.equal(ledger(["get", path, "slot_events_last_id", "--prior", "--default", "0"]).stdout.trim(), "55-0");
+      // sibling shape: the strict read of the same doc still fails loud
+      assert.notEqual(ledger(["get", path, "slot_events_last_id"]).status, 0);
+    });
+  });
 });

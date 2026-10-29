@@ -73,7 +73,7 @@ REQUIRED = object()
 # carried; shorter cooldowns are re-armed each run. ONE home; a test pins it
 # equal to the systemd timer's OnUnitActiveSec.
 PACE_GATE_RELAUNCH_SEC = 900
-DEV_RESUME_PENDING_CAP = 20  # the ONE home (#5075); reap_stall.py imports it
+DEV_RESUME_PENDING_CAP = 20  # the ONE home (#5075); queue_dev_resume enforces it, reap_stall.py calls that
 REDIS_SIGNAL_LAST_FIRED_KEY = "hydra:autopilot:signal-last-fired"
 REDIS_RESEARCH_FORCE_KEY = "hydra:autopilot:research-force-counter"
 DEFAULT_REDIS_ARGV = ["docker", "exec", "hydra-redis-1", "redis-cli"]

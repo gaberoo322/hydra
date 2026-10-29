@@ -1855,7 +1855,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # Issue #2715: mirror the cross-run durable subset (signal_last_fired +
     # research_force_counter) to Redis so a host reboot (which wipes /tmp) can
     # reseed the long-cooldown timestamps instead of resetting them to epoch 0.
-    # AFTER save_state so the local write is never at risk from a Redis hiccup.
+    # AFTER run_ledger.persist so the local write is never at risk from a Redis hiccup.
     mirror_cross_run_state_to_redis(s)
 
     # Issue #1136 (Slice 2 of #1119): forward the planning-time reflection
@@ -2020,7 +2020,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # the same payload — zero extra `gh` calls. A fetch failure (None) fails
     # every consumer open — no suppression, no relabel, no promotion, never a
     # mutation from any — matching the old per-check fail-open behaviour. The
-    # #4090-era ordering guarantee is preserved in substance: save_state, the
+    # #4090-era ordering guarantee is preserved in substance: run_ledger.persist, the
     # cycle-record, the token-record and the cost-join have ALL completed
     # before the first `gh` call, so a `gh` hiccup (bounded by `_gh_run`'s
     # timeout) can delay only the reflection/stall/promotion steps, never the
