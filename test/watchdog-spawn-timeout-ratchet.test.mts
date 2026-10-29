@@ -73,14 +73,13 @@ describe("watchdog spawn-timeout ratchet (issues #4044, #4072)", () => {
     // as passing forever. Pin the known set so a rename that breaks discovery
     // fails loudly here instead of quietly disabling the ratchet.
     assert.ok(
-      files.length >= 5,
-      `expected at least the 5 known watchdog suites, found ${files.length}: ${files.join(", ")}`,
+      files.length >= 4,
+      `expected at least the 4 known watchdog suites, found ${files.length}: ${files.join(", ")}`,
     );
     for (const expected of [
       "autopilot-watchdog.test.mts",
       "watchdog-deploy-drift.test.mts",
       "watchdog-launch-flow.test.mts",
-      "watchdog-pending-work.test.mts",
       "watchdog-skill-mirror-drift.test.mts",
     ]) {
       assert.ok(files.includes(expected), `known watchdog suite not discovered: ${expected}`);

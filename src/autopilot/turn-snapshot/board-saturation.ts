@@ -197,7 +197,7 @@ export function labelNames(issue: unknown): string[] | null {
 const has = (names: readonly string[], label: string) => names.includes(label);
 
 /** The single open-board count object, over the raw `number,labels` payload. */
-function countOpenBoard(read: GhJsonRead): Classified<BoardCounts> {
+export function countOpenBoard(read: GhJsonRead): Classified<BoardCounts> {
   const c = ghData(read);
   if ("reason" in c) return fail(c.reason);
   const data = c.value;

@@ -89,7 +89,7 @@ export interface HealthDeepResponse {
       mergeRate: number;
       consecutiveErrors: number;
       lastError: string | null | undefined;
-      lastCycleAt: string | null | undefined;
+      lastTickAt: string | null | undefined;
     };
   };
   activeCycle: unknown;
@@ -159,7 +159,7 @@ export function projectHealthDeepResponse(
     services: {
       orchestrator: { status: health.status === "ok" ? "running" : health.status, uptime: health.uptime, uptimeHuman: fmtUp(health.uptime), cycle: health.cycle },
       redis: { status: health.redis ? "running" : "failed", memoryHuman: redisInfo?.memoryHuman || null, connectedClients: redisInfo?.connectedClients || null, uptimeSeconds: redisInfo?.uptimeSeconds || null },
-      scheduler: { status: sched.running ? "running" : (sched.consecutiveErrors >= 5 ? "failed" : "idle"), intervalHuman: sched.intervalHuman, cyclesRun: sched.cyclesRun, cyclesMerged: sched.cyclesMerged || 0, cyclesFailed: sched.cyclesFailed || 0, mergeRate: sched.mergeRate || 0, consecutiveErrors: sched.consecutiveErrors, lastError: sched.lastError, lastCycleAt: sched.lastCycleAt },
+      scheduler: { status: sched.running ? "running" : (sched.consecutiveErrors >= 5 ? "failed" : "idle"), intervalHuman: sched.intervalHuman, cyclesRun: sched.cyclesRun, cyclesMerged: sched.cyclesMerged || 0, cyclesFailed: sched.cyclesFailed || 0, mergeRate: sched.mergeRate || 0, consecutiveErrors: sched.consecutiveErrors, lastError: sched.lastError, lastTickAt: sched.lastTickAt },
       // The vikingdb / openviking / embed-backend wire fields were removed with
       // OpenViking — the `svcProbes` map that fed them held only OV services.
     },

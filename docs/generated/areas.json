@@ -26,6 +26,7 @@
       "slices": {
         "env-vars": [
           "HYDRA_DF_BIN",
+          "HYDRA_FLOCK_BIN",
           "HYDRA_FREE_BIN",
           "HYDRA_SYSTEMCTL_BIN"
         ]
@@ -821,8 +822,7 @@
       ],
       "adrsCited": [
         "0001",
-        "0006",
-        "0010"
+        "0006"
       ],
       "referenceDocs": [
         {
