@@ -2240,6 +2240,43 @@ def run_grill_crash(task_id: str) -> int:
     return 0
 
 
+def run_reconcile_seeded(state_path: str) -> int:
+    """Issue #5149: promotion-only pass over inflight-seeded dev_orch slots.
+
+    A run that ends (e.g. context_compaction restart) before collecting its
+    last dev_orch completion never runs the in-run needs-qa promotion. The
+    successor's bootstrap seeds that dispatch as an `_source == "inflight-seed"`
+    slot, so this pass (called once from bootstrap.sh, before turn 1) inspects
+    only those slots and runs the EXISTING `_handle_dev_orch_needs_qa_promotion`
+    on each. It never frees the slot, never records a cycle/token, never saves
+    state, and is idempotent (the promotion re-reads labels before editing).
+    Fail-open: always returns 0.
+    """
+    try:
+        with open(state_path, encoding="utf-8") as fh:
+            state = json.load(fh)
+        slots = state.get("slots") if isinstance(state, dict) else None
+        if not isinstance(slots, dict):
+            return 0
+        slot = slots.get("dev_orch")
+        if not isinstance(slot, dict) or slot.get("_source") != "inflight-seed":
+            return 0
+        task_id = str(slot.get("task_id") or "")
+        anchor_ref = _read_anchor_deposit(task_id) or slot.get("anchor")
+        if not anchor_ref:
+            line = f"reconcile-seeded task_id={task_id} anchor=none (skipped)"
+            print(f"[autopilot] reap: {line}", file=sys.stderr)
+            _append_log(f"reap: {line}")
+            return 0
+        pr_list_json = _fetch_dev_orch_pr_list_json(anchor_ref)
+        _handle_dev_orch_needs_qa_promotion("dev_orch", anchor_ref, pr_list_json)
+    except Exception as exc:  # noqa: BLE001 — fail-open, never block bootstrap
+        line = f"reconcile-seeded failed (non-fatal): {exc}"
+        print(f"[autopilot] reap: {line}", file=sys.stderr)
+        _append_log(f"reap: {line}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     # Default (no subcommand): hard-cap enforcement, behavior-preserving
     # for /hydra-autopilot Phase 2 step 1.
@@ -2303,6 +2340,13 @@ def main(argv: list[str]) -> int:
             )
             return 0
         return run_grill_crash(argv[2])
+
+    if sub == "reconcile-seeded":
+        # Usage: reap.py reconcile-seeded <state_path>   (issue #5149)
+        if len(argv) < 3:
+            print("[autopilot] reap reconcile-seeded usage: reconcile-seeded <state_path>", file=sys.stderr)
+            return 0
+        return run_reconcile_seeded(argv[2])
 
     print(f"[autopilot] reap: unknown subcommand {sub!r}", file=sys.stderr)
     return 0
