@@ -27,7 +27,7 @@ const GENERATED_FROM = ["src/schemas/*.ts", "src/**/*.ts", "docs/generated/route
 export interface SchemaJoinRoute {
   method: string;
   path: string;
-  source: { path: string; line: number };
+  source: { path: string; line?: number };
 }
 
 export interface SchemaInputs {
@@ -50,7 +50,7 @@ export function buildSchemaRows(inputs: SchemaInputs): SchemaRow[] {
     list.push(r);
     regsByFile.set(r.source.path, list);
   }
-  for (const list of regsByFile.values()) list.sort((a, b) => a.source.line - b.source.line);
+  for (const list of regsByFile.values()) list.sort((a, b) => (a.source.line ?? 0) - (b.source.line ?? 0));
 
   const rows: SchemaRow[] = [];
   const seen = new Set<string>();
@@ -75,7 +75,7 @@ export function buildSchemaRows(inputs: SchemaInputs): SchemaRow[] {
           const line = lineOf(imp.code, at);
           let owner: SchemaJoinRoute | null = null;
           for (const reg of regs) {
-            if (reg.source.line <= line) owner = reg;
+            if ((reg.source.line ?? 0) <= line) owner = reg;
             else break;
           }
           if (owner) routes.add(`${owner.method} ${owner.path}`);
