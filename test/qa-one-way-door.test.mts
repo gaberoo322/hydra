@@ -48,6 +48,22 @@ describe("detectOneWayDoor", () => {
     assert.deepEqual(r.signals, []);
   });
 
+  test("walker: a deleted file (+++ /dev/null) yields no added lines", () => {
+    const path = "src/redis/gone.ts";
+    const diff = [
+      `diff --git a/${path} b/${path}`,
+      "deleted file mode 100644",
+      `--- a/${path}`,
+      "+++ /dev/null",
+      "@@ -1,1 +0,0 @@",
+      "-await r.del(k);",
+      "",
+    ].join("\n");
+    const r = detectOneWayDoor({ paths: [path], diff });
+    assert.equal(r.door, "two-way");
+    assert.deepEqual(r.signals, []);
+  });
+
   test("external-side-effect: gh api DELETE", () => {
     const path = sp("cleanup.sh");
     const r = detectOneWayDoor({
