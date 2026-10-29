@@ -182,7 +182,7 @@ export function extractSkills(repoRoot: string, classRows: ClassRow[]): SkillsIn
   rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return {
     family: "skills",
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedFrom: [`${PLAYBOOKS_DIR}/*.md`],
     rows,
   };

@@ -16,7 +16,7 @@
 
 import { test, describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm, chmod } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, chmod, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -26,6 +26,10 @@ import {
   readDisk,
   readMem,
   readServiceStatus,
+  readServiceActiveEnterMonotonicUs,
+  parseMonotonicUs,
+  probeFileLockFree,
+  restartService,
   isProbeFailure,
   isProbeOk,
 } from "../src/host-probe/probe.ts";
@@ -230,5 +234,113 @@ describe("Host-Probe Adapter accessors (issue #939)", () => {
     const r = await readDisk({ timeout: 150 });
     assert.equal(isProbeFailure(r), true);
     if (isProbeFailure(r)) assert.equal(r.code, "host-probe-timeout");
+  });
+});
+
+describe("Host-Probe Adapter watchdog accessors (issue #5096)", () => {
+  let dir: string;
+  let fake: string;
+  let argvLog: string;
+  const saved: Record<string, string | undefined> = {};
+
+  before(async () => {
+    dir = await mkdtemp(join(tmpdir(), "hydra-host-probe-wd-"));
+    fake = join(dir, "fake-bin");
+    argvLog = join(dir, "argv.log");
+    // Records its argv, then behaves per FAKE_SCENARIO.
+    await writeFile(
+      fake,
+      `#!/usr/bin/env bash
+echo "$*" >> "${argvLog}"
+case "$FAKE_SCENARIO" in
+  mono-ok) echo 123456789 ;;
+  mono-bad) echo "n/a" ;;
+  exit1) exit 1 ;;
+  exit2) exit 2 ;;
+  *) exit 0 ;;
+esac
+`,
+      "utf-8",
+    );
+    await chmod(fake, 0o755);
+    for (const k of ["HYDRA_SYSTEMCTL_BIN", "HYDRA_FLOCK_BIN"]) saved[k] = process.env[k];
+    process.env.HYDRA_SYSTEMCTL_BIN = fake;
+    process.env.HYDRA_FLOCK_BIN = fake;
+  });
+
+  beforeEach(async () => {
+    delete process.env.FAKE_SCENARIO;
+    await writeFile(argvLog, "", "utf-8");
+  });
+
+  after(async () => {
+    for (const k of ["HYDRA_SYSTEMCTL_BIN", "HYDRA_FLOCK_BIN"]) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    delete process.env.FAKE_SCENARIO;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("parseMonotonicUs accepts digits only", () => {
+    assert.equal(parseMonotonicUs("123456789\n"), 123456789);
+    assert.equal(parseMonotonicUs("n/a"), null);
+    assert.equal(parseMonotonicUs(""), null);
+  });
+
+  test("readServiceActiveEnterMonotonicUs parses the value and uses the show argv", async () => {
+    process.env.FAKE_SCENARIO = "mono-ok";
+    const r = await readServiceActiveEnterMonotonicUs("hydra-orchestrator.service");
+    assert.equal(isProbeOk(r), true);
+    if (isProbeOk(r)) assert.equal(r.data, 123456789);
+    assert.equal(
+      (await readFile(argvLog, "utf-8")).trim(),
+      "--user show -p ActiveEnterTimestampMonotonic --value hydra-orchestrator.service",
+    );
+  });
+
+  test("readServiceActiveEnterMonotonicUs maps non-numeric output to host-probe-empty", async () => {
+    process.env.FAKE_SCENARIO = "mono-bad";
+    const r = await readServiceActiveEnterMonotonicUs("u.service");
+    assert.equal(isProbeFailure(r), true);
+    if (isProbeFailure(r)) assert.equal(r.code, "host-probe-empty");
+  });
+
+  test("probeFileLockFree maps exit codes: 0 -> free, 1 -> held, other -> failed; argv never holds the lock", async () => {
+    process.env.FAKE_SCENARIO = "ok";
+    const free = await probeFileLockFree("/tmp/x.lock");
+    assert.deepEqual(free, { ok: true, data: { held: false } });
+    process.env.FAKE_SCENARIO = "exit1";
+    const held = await probeFileLockFree("/tmp/x.lock");
+    assert.deepEqual(held, { ok: true, data: { held: true } });
+    process.env.FAKE_SCENARIO = "exit2";
+    const bad = await probeFileLockFree("/tmp/x.lock");
+    assert.equal(isProbeFailure(bad), true);
+    // `flock -n <path> true`: the lock is released the instant the throwaway child exits.
+    for (const line of (await readFile(argvLog, "utf-8")).trim().split("\n")) {
+      assert.equal(line, "-n /tmp/x.lock true");
+    }
+  });
+
+  test("probeFileLockFree on a missing binary fails with host-probe-not-installed (never throws)", async () => {
+    process.env.HYDRA_FLOCK_BIN = join(dir, "does-not-exist");
+    try {
+      const r = await probeFileLockFree("/tmp/x.lock");
+      assert.equal(isProbeFailure(r), true);
+      if (isProbeFailure(r)) assert.equal(r.code, "host-probe-not-installed");
+    } finally {
+      process.env.HYDRA_FLOCK_BIN = fake;
+    }
+  });
+
+  test("restartService runs `systemctl --user restart <unit>` and reports failure on non-zero exit", async () => {
+    process.env.FAKE_SCENARIO = "ok";
+    const ok = await restartService("hydra-docker.service");
+    assert.deepEqual(ok, { ok: true, data: true });
+    assert.equal((await readFile(argvLog, "utf-8")).trim(), "--user restart hydra-docker.service");
+    process.env.FAKE_SCENARIO = "exit1";
+    const bad = await restartService("hydra-docker.service");
+    assert.equal(isProbeFailure(bad), true);
+    if (isProbeFailure(bad)) assert.equal(bad.code, "host-probe-failed");
   });
 });

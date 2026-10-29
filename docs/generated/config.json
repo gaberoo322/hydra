@@ -1,6 +1,6 @@
 {
   "family": "config",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "config/**",
     "src/api/config-io.ts",
@@ -17,8 +17,7 @@
       "readBy": [],
       "unread": true,
       "source": {
-        "path": "config/architect.md",
-        "line": 1
+        "path": "config/architect.md"
       }
     },
     {
@@ -28,8 +27,7 @@
       "readBy": [],
       "unread": true,
       "source": {
-        "path": "config/builder.md",
-        "line": 1
+        "path": "config/builder.md"
       }
     },
     {
@@ -39,8 +37,7 @@
       "readBy": [],
       "unread": true,
       "source": {
-        "path": "config/devops.md",
-        "line": 1
+        "path": "config/devops.md"
       }
     },
     {
@@ -54,8 +51,7 @@
       ],
       "unread": false,
       "source": {
-        "path": "config/direction/architecture-review.md",
-        "line": 1
+        "path": "config/direction/architecture-review.md"
       }
     },
     {
@@ -70,8 +66,7 @@
       ],
       "unread": false,
       "source": {
-        "path": "config/direction/liveness.yaml",
-        "line": 1
+        "path": "config/direction/liveness.yaml"
       }
     },
     {
@@ -92,8 +87,7 @@
       ],
       "unread": false,
       "source": {
-        "path": "config/direction/outcomes.yaml",
-        "line": 1
+        "path": "config/direction/outcomes.yaml"
       }
     },
     {
@@ -108,8 +102,7 @@
       ],
       "unread": false,
       "source": {
-        "path": "config/direction/priorities.md",
-        "line": 1
+        "path": "config/direction/priorities.md"
       }
     },
     {
@@ -119,8 +112,7 @@
       "readBy": [],
       "unread": false,
       "source": {
-        "path": "config/direction/proposal-policy.md",
-        "line": 1
+        "path": "config/direction/proposal-policy.md"
       }
     },
     {
@@ -130,8 +122,7 @@
       "readBy": [],
       "unread": false,
       "source": {
-        "path": "config/direction/tech-preferences.md",
-        "line": 1
+        "path": "config/direction/tech-preferences.md"
       }
     },
     {
@@ -145,8 +136,7 @@
       ],
       "unread": false,
       "source": {
-        "path": "config/direction/vision.md",
-        "line": 1
+        "path": "config/direction/vision.md"
       }
     },
     {
@@ -156,8 +146,7 @@
       "readBy": [],
       "unread": true,
       "source": {
-        "path": "config/domain-researcher.md",
-        "line": 1
+        "path": "config/domain-researcher.md"
       }
     },
     {
@@ -171,8 +160,7 @@
       ],
       "unread": false,
       "source": {
-        "path": "config/glm/drainer-settings.json",
-        "line": 1
+        "path": "config/glm/drainer-settings.json"
       }
     },
     {
@@ -186,8 +174,7 @@
       ],
       "unread": false,
       "source": {
-        "path": "config/glm/providers.json",
-        "line": 1
+        "path": "config/glm/providers.json"
       }
     },
     {
@@ -197,8 +184,7 @@
       "readBy": [],
       "unread": true,
       "source": {
-        "path": "config/market-researcher.md",
-        "line": 1
+        "path": "config/market-researcher.md"
       }
     },
     {
@@ -208,8 +194,7 @@
       "readBy": [],
       "unread": true,
       "source": {
-        "path": "config/meta.md",
-        "line": 1
+        "path": "config/meta.md"
       }
     },
     {
@@ -222,8 +207,7 @@
       ],
       "unread": false,
       "source": {
-        "path": "config/orchestrator/vision.md",
-        "line": 1
+        "path": "config/orchestrator/vision.md"
       }
     },
     {
@@ -233,8 +217,7 @@
       "readBy": [],
       "unread": true,
       "source": {
-        "path": "config/research-architect.md",
-        "line": 1
+        "path": "config/research-architect.md"
       }
     },
     {
@@ -244,8 +227,7 @@
       "readBy": [],
       "unread": true,
       "source": {
-        "path": "config/research-strategist.md",
-        "line": 1
+        "path": "config/research-strategist.md"
       }
     },
     {
@@ -255,8 +237,7 @@
       "readBy": [],
       "unread": false,
       "source": {
-        "path": "config/research/director.md",
-        "line": 1
+        "path": "config/research/director.md"
       }
     },
     {
@@ -266,8 +247,7 @@
       "readBy": [],
       "unread": false,
       "source": {
-        "path": "config/research/domain-researcher.md",
-        "line": 1
+        "path": "config/research/domain-researcher.md"
       }
     },
     {
@@ -277,8 +257,7 @@
       "readBy": [],
       "unread": false,
       "source": {
-        "path": "config/research/market-researcher.md",
-        "line": 1
+        "path": "config/research/market-researcher.md"
       }
     },
     {
@@ -288,8 +267,7 @@
       "readBy": [],
       "unread": false,
       "source": {
-        "path": "config/research/prediction-market-research.md",
-        "line": 1
+        "path": "config/research/prediction-market-research.md"
       }
     },
     {
@@ -299,8 +277,7 @@
       "readBy": [],
       "unread": false,
       "source": {
-        "path": "config/research/research-strategist.md",
-        "line": 1
+        "path": "config/research/research-strategist.md"
       }
     },
     {
@@ -310,8 +287,7 @@
       "readBy": [],
       "unread": false,
       "source": {
-        "path": "config/research/technical-researcher.md",
-        "line": 1
+        "path": "config/research/technical-researcher.md"
       }
     },
     {
@@ -321,8 +297,7 @@
       "readBy": [],
       "unread": true,
       "source": {
-        "path": "config/researcher.md",
-        "line": 1
+        "path": "config/researcher.md"
       }
     },
     {
@@ -332,8 +307,7 @@
       "readBy": [],
       "unread": true,
       "source": {
-        "path": "config/reviewer.md",
-        "line": 1
+        "path": "config/reviewer.md"
       }
     },
     {
@@ -343,8 +317,7 @@
       "readBy": [],
       "unread": true,
       "source": {
-        "path": "config/strategist.md",
-        "line": 1
+        "path": "config/strategist.md"
       }
     },
     {
@@ -354,8 +327,7 @@
       "readBy": [],
       "unread": true,
       "source": {
-        "path": "config/technical-researcher.md",
-        "line": 1
+        "path": "config/technical-researcher.md"
       }
     },
     {
@@ -365,8 +337,7 @@
       "readBy": [],
       "unread": true,
       "source": {
-        "path": "config/tester.md",
-        "line": 1
+        "path": "config/tester.md"
       }
     },
     {
@@ -377,8 +348,7 @@
       "exists": false,
       "fileCount": 0,
       "source": {
-        "path": "src/api/config-io.ts",
-        "line": 47
+        "path": "src/api/config-io.ts"
       }
     },
     {
@@ -389,8 +359,7 @@
       "exists": true,
       "fileCount": 5,
       "source": {
-        "path": "src/api/config-io.ts",
-        "line": 49
+        "path": "src/api/config-io.ts"
       }
     },
     {
@@ -401,8 +370,7 @@
       "exists": false,
       "fileCount": 0,
       "source": {
-        "path": "src/api/config-io.ts",
-        "line": 48
+        "path": "src/api/config-io.ts"
       }
     },
     {
@@ -413,8 +381,7 @@
       "exists": true,
       "fileCount": 6,
       "source": {
-        "path": "src/api/config-io.ts",
-        "line": 50
+        "path": "src/api/config-io.ts"
       }
     }
   ]

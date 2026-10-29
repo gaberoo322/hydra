@@ -1,6 +1,6 @@
 {
   "family": "corpus",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "README.md",
     "CLAUDE.md",

@@ -1,0 +1,1 @@
+- fix: mutation gate drops unparseable mutants and generated inventories no longer carry line numbers; add a test-source-read ratchet (#5262)

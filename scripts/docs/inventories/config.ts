@@ -151,5 +151,5 @@ export function extractConfig(repoRoot: string): ConfigInventory {
     sectionsSource: existsSync(configIoAbs) ? readFileSync(configIoAbs, "utf8") : "",
     readerFiles: readAll(repoRoot, readerPaths),
   });
-  return { family: "config", schemaVersion: 1, generatedFrom: GENERATED_FROM, rows };
+  return { family: "config", schemaVersion: 2, generatedFrom: GENERATED_FROM, rows };
 }

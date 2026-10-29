@@ -33,7 +33,7 @@ function parseInventory(raw, family) {
     console.error(`[docs] docs/generated/${family}.json is unparseable`, err);
     return { ok: false, reason: "unparseable" };
   }
-  if (inv?.family !== family || inv.schemaVersion !== 1 || !Array.isArray(inv.rows)) {
+  if (inv?.family !== family || inv.schemaVersion !== 2 || !Array.isArray(inv.rows)) {
     console.error(`[docs] docs/generated/${family}.json has an unexpected envelope`);
     return { ok: false, reason: "envelope" };
   }

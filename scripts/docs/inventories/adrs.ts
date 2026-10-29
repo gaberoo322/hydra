@@ -423,7 +423,7 @@ export function extractAdrs(repoRoot: string, corpusRows: CorpusRow[]): AdrsInve
 
   return {
     family: "adrs",
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedFrom: ["docs/adr/*.md", ...CORPUS_SOURCES.map((s) => s.glob).filter((g) => g !== "docs/adr/*.md")],
     rows,
   };

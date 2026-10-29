@@ -117,5 +117,5 @@ export function extractEnvVars(repoRoot: string): EnvVarsInventory {
   const examplePath = join(repoRoot, ENV_EXAMPLE);
   const envExample = existsSync(examplePath) ? readFileSync(examplePath, "utf8") : null;
   const rows = buildEnvVarRows({ codeFiles, shellFiles, envExample });
-  return { family: "env-vars", schemaVersion: 1, generatedFrom: GENERATED_FROM, rows };
+  return { family: "env-vars", schemaVersion: 2, generatedFrom: GENERATED_FROM, rows };
 }

@@ -1,6 +1,6 @@
 {
   "family": "env-vars",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "src/**/*.ts",
     "scripts/**/*.{ts,mjs,js}",
@@ -13,42 +13,36 @@
       "name": "ADDED_FILES",
       "readSites": [
         {
-          "path": "scripts/ci/changelog-check.ts",
-          "line": 115
+          "path": "scripts/ci/changelog-check.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/changelog-check.ts",
-        "line": 115
+        "path": "scripts/ci/changelog-check.ts"
       }
     },
     {
       "name": "ANTHROPIC_API_KEY",
       "readSites": [
         {
-          "path": "src/anthropic/request.ts",
-          "line": 197
+          "path": "src/anthropic/request.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/anthropic/request.ts",
-        "line": 197
+        "path": "src/anthropic/request.ts"
       }
     },
     {
       "name": "CHANGED_FILES",
       "readSites": [
         {
-          "path": "src/mutation-gate-inputs.ts",
-          "line": 123
+          "path": "src/mutation-gate-inputs.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/mutation-gate-inputs.ts",
-        "line": 123
+        "path": "src/mutation-gate-inputs.ts"
       }
     },
     {
@@ -56,308 +50,109 @@
       "readSites": [],
       "inEnvExample": true,
       "source": {
-        "path": ".env.example",
-        "line": 21
+        "path": ".env.example"
       }
     },
     {
       "name": "GITHUB_STEP_SUMMARY",
       "readSites": [
         {
-          "path": "scripts/ci/biome-check.ts",
-          "line": 155
+          "path": "scripts/ci/biome-check.ts"
         },
         {
-          "path": "scripts/ci/dep-boundary-check.ts",
-          "line": 143
+          "path": "scripts/ci/dep-boundary-check.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/biome-check.ts",
-        "line": 155
+        "path": "scripts/ci/biome-check.ts"
       }
     },
     {
       "name": "HOME",
       "readSites": [
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 539
+          "path": "scripts/autopilot/pace-gate.sh"
         },
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 540
+          "path": "scripts/autopilot/status.sh"
         },
         {
-          "path": "scripts/autopilot/status.sh",
-          "line": 38
+          "path": "scripts/autopilot/turn-snapshot.ts"
         },
         {
-          "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 550
+          "path": "scripts/ci/check-skill-playbook-drift.sh"
         },
         {
-          "path": "scripts/ci/check-skill-playbook-drift.sh",
-          "line": 87
+          "path": "scripts/claude-hooks/git-remote-fence.sh"
         },
         {
-          "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 583
+          "path": "scripts/deploy-drift-check.ts"
         },
         {
-          "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 604
+          "path": "scripts/deploy.sh"
         },
         {
-          "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 609
+          "path": "scripts/glm-beachhead-report.sh"
         },
         {
-          "path": "scripts/deploy-drift-check.ts",
-          "line": 55
+          "path": "scripts/glm/drainer-loop.sh"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 73
+          "path": "scripts/headroom-spike.sh"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 84
+          "path": "scripts/hydra-watchdog.sh"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 92
+          "path": "scripts/setup-claude-hooks.sh"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 93
+          "path": "scripts/sync-skills.sh"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 95
+          "path": "src/aggregators/architecture-graph.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 96
+          "path": "src/aggregators/overnight-summary.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 106
+          "path": "src/aggregators/recent-merges.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 117
+          "path": "src/api.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 118
+          "path": "src/api/config.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 119
+          "path": "src/api/recommendations.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 130
+          "path": "src/config/roadmap.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 131
+          "path": "src/health/deployed-sha.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 153
+          "path": "src/metrics/publish.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 154
+          "path": "src/outcomes.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 156
+          "path": "src/project-goals.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 172
+          "path": "src/scheduler/chores/wiring-liveness-timer.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 173
-        },
-        {
-          "path": "scripts/deploy.sh",
-          "line": 174
-        },
-        {
-          "path": "scripts/deploy.sh",
-          "line": 201
-        },
-        {
-          "path": "scripts/deploy.sh",
-          "line": 207
-        },
-        {
-          "path": "scripts/deploy.sh",
-          "line": 208
-        },
-        {
-          "path": "scripts/deploy.sh",
-          "line": 210
-        },
-        {
-          "path": "scripts/deploy.sh",
-          "line": 211
-        },
-        {
-          "path": "scripts/deploy.sh",
-          "line": 222
-        },
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 227
-        },
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 1375
-        },
-        {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 91
-        },
-        {
-          "path": "scripts/headroom-spike.sh",
-          "line": 37
-        },
-        {
-          "path": "scripts/headroom-spike.sh",
-          "line": 41
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 419
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 432
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 735
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 906
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 907
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1101
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1340
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1343
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1396
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1780
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2251
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2422
-        },
-        {
-          "path": "scripts/setup-claude-hooks.sh",
-          "line": 34
-        },
-        {
-          "path": "scripts/setup-claude-hooks.sh",
-          "line": 35
-        },
-        {
-          "path": "scripts/sync-skills.sh",
-          "line": 47
-        },
-        {
-          "path": "scripts/sync-skills.sh",
-          "line": 279
-        },
-        {
-          "path": "scripts/sync-skills.sh",
-          "line": 280
-        },
-        {
-          "path": "src/aggregators/architecture-graph.ts",
-          "line": 289
-        },
-        {
-          "path": "src/aggregators/overnight-summary.ts",
-          "line": 303
-        },
-        {
-          "path": "src/aggregators/recent-merges.ts",
-          "line": 374
-        },
-        {
-          "path": "src/api.ts",
-          "line": 54
-        },
-        {
-          "path": "src/api/config.ts",
-          "line": 30
-        },
-        {
-          "path": "src/api/recommendations.ts",
-          "line": 26
-        },
-        {
-          "path": "src/config/roadmap.ts",
-          "line": 22
-        },
-        {
-          "path": "src/health/deployed-sha.ts",
-          "line": 39
-        },
-        {
-          "path": "src/metrics/publish.ts",
-          "line": 38
-        },
-        {
-          "path": "src/outcomes.ts",
-          "line": 40
-        },
-        {
-          "path": "src/project-goals.ts",
-          "line": 31
-        },
-        {
-          "path": "src/scheduler/chores/wiring-liveness-timer.ts",
-          "line": 40
-        },
-        {
-          "path": "src/scout/calendar-walk.ts",
-          "line": 278
+          "path": "src/scout/calendar-walk.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/pace-gate.sh",
-        "line": 539
+        "path": "scripts/autopilot/pace-gate.sh"
       }
     },
     {
@@ -365,108 +160,49 @@
       "readSites": [],
       "inEnvExample": true,
       "source": {
-        "path": ".env.example",
-        "line": 18
+        "path": ".env.example"
       }
     },
     {
       "name": "HYDRA_API",
       "readSites": [
         {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 402
-        },
-        {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 543
+          "path": "scripts/autopilot/dispatch.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/dispatch.sh",
-        "line": 402
+        "path": "scripts/autopilot/dispatch.sh"
       }
     },
     {
       "name": "HYDRA_API_BASE",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 586
+          "path": "scripts/autopilot/bootstrap.sh"
         },
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 590
+          "path": "scripts/autopilot/dispatch.sh"
         },
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 607
+          "path": "scripts/autopilot/drain.sh"
         },
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1203
+          "path": "scripts/autopilot/grill-artifact.sh"
         },
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1368
+          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh"
         },
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1395
+          "path": "scripts/ci/scope-check.ts"
         },
         {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 220
-        },
-        {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 391
-        },
-        {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 399
-        },
-        {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 400
-        },
-        {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 535
-        },
-        {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 540
-        },
-        {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 541
-        },
-        {
-          "path": "scripts/autopilot/drain.sh",
-          "line": 63
-        },
-        {
-          "path": "scripts/autopilot/grill-artifact.sh",
-          "line": 50
-        },
-        {
-          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh",
-          "line": 88
-        },
-        {
-          "path": "scripts/ci/scope-check.ts",
-          "line": 291
-        },
-        {
-          "path": "scripts/hooks/session-start-capture.sh",
-          "line": 48
+          "path": "scripts/hooks/session-start-capture.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 586
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
@@ -474,8 +210,7 @@
       "readSites": [],
       "inEnvExample": true,
       "source": {
-        "path": ".env.example",
-        "line": 15
+        "path": ".env.example"
       }
     },
     {
@@ -483,1098 +218,865 @@
       "readSites": [],
       "inEnvExample": true,
       "source": {
-        "path": ".env.example",
-        "line": 14
+        "path": ".env.example"
       }
     },
     {
       "name": "HYDRA_ARM_SKILL",
       "readSites": [
         {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 483
-        },
-        {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 484
-        },
-        {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 487
+          "path": "scripts/autopilot/dispatch.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/dispatch.sh",
-        "line": 483
+        "path": "scripts/autopilot/dispatch.sh"
       }
     },
     {
       "name": "HYDRA_ATTRIBUTION_COLLINEARITY_THRESHOLD",
       "readSites": [
         {
-          "path": "src/outcome-attribution/estimator.ts",
-          "line": 111
+          "path": "src/outcome-attribution/estimator.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/outcome-attribution/estimator.ts",
-        "line": 111
+        "path": "src/outcome-attribution/estimator.ts"
       }
     },
     {
       "name": "HYDRA_ATTRIBUTION_DEFAULT_WINDOW_MS",
       "readSites": [
         {
-          "path": "src/outcome-attribution/windows.ts",
-          "line": 69
+          "path": "src/outcome-attribution/windows.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/outcome-attribution/windows.ts",
-        "line": 69
+        "path": "src/outcome-attribution/windows.ts"
       }
     },
     {
       "name": "HYDRA_ATTRIBUTION_LEDGER_TTL_SECONDS",
       "readSites": [
         {
-          "path": "src/redis/attribution-constants.ts",
-          "line": 32
+          "path": "src/redis/attribution-constants.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/redis/attribution-constants.ts",
-        "line": 32
+        "path": "src/redis/attribution-constants.ts"
       }
     },
     {
       "name": "HYDRA_ATTRIBUTION_LOW_VARIANCE_EPS",
       "readSites": [
         {
-          "path": "src/outcome-attribution/estimator.ts",
-          "line": 101
+          "path": "src/outcome-attribution/estimator.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/outcome-attribution/estimator.ts",
-        "line": 101
+        "path": "src/outcome-attribution/estimator.ts"
       }
     },
     {
       "name": "HYDRA_ATTRIBUTION_NOISE_FLOOR_K",
       "readSites": [
         {
-          "path": "src/outcome-attribution/estimator.ts",
-          "line": 93
+          "path": "src/outcome-attribution/estimator.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/outcome-attribution/estimator.ts",
-        "line": 93
+        "path": "src/outcome-attribution/estimator.ts"
       }
     },
     {
       "name": "HYDRA_ATTRIBUTION_RIDGE_LAMBDA",
       "readSites": [
         {
-          "path": "src/outcome-attribution/estimator.ts",
-          "line": 86
+          "path": "src/outcome-attribution/estimator.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/outcome-attribution/estimator.ts",
-        "line": 86
+        "path": "src/outcome-attribution/estimator.ts"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_ALLOW_INSESSION_REBOOTSTRAP",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 885
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 885
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_CANDIDATES",
       "readSites": [
         {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 77
+          "path": "scripts/autopilot/turn.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/turn.sh",
-        "line": 77
+        "path": "scripts/autopilot/turn.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1022
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1022
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_CRASH_STREAK_BLOCK_MIN",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 795
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 795
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_CRASH_STREAK_N",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 329
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 329
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_CRASH_STREAK_WINDOW_MIN",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 328
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 328
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1086
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1086
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_EVENTS",
       "readSites": [
         {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 78
+          "path": "scripts/autopilot/turn.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/turn.sh",
-        "line": 78
+        "path": "scripts/autopilot/turn.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_FALLBACK_MODEL",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 276
+          "path": "scripts/autopilot/bootstrap.sh"
         },
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 208
+          "path": "scripts/autopilot/pace-gate.sh"
         },
         {
-          "path": "src/api/usage.ts",
-          "line": 83
+          "path": "src/api/usage.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 276
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_HEARTBEAT",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 605
+          "path": "scripts/autopilot/bootstrap.sh"
         },
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 915
+          "path": "scripts/autopilot/status.sh"
         },
         {
-          "path": "scripts/autopilot/status.sh",
-          "line": 31
+          "path": "scripts/hydra-watchdog.ts"
         },
         {
-          "path": "scripts/hydra-watchdog.ts",
-          "line": 47
-        },
-        {
-          "path": "src/autopilot/os-heartbeat.ts",
-          "line": 46
+          "path": "src/autopilot/os-heartbeat.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 605
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_IDLE_TURNS",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1016
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1016
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_JOURNAL_CMD",
       "readSites": [
         {
-          "path": "src/journal/exec.ts",
-          "line": 90
+          "path": "src/journal/exec.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/journal/exec.ts",
-        "line": 90
+        "path": "src/journal/exec.ts"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_JOURNAL_TIMEOUT_MS",
       "readSites": [
         {
-          "path": "src/journal/exec.ts",
-          "line": 99
+          "path": "src/journal/exec.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/journal/exec.ts",
-        "line": 99
+        "path": "src/journal/exec.ts"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_JOURNAL_UNIT",
       "readSites": [
         {
-          "path": "src/journal/exec.ts",
-          "line": 107
+          "path": "src/journal/exec.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/journal/exec.ts",
-        "line": 107
+        "path": "src/journal/exec.ts"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_LOG",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 501
+          "path": "scripts/autopilot/bootstrap.sh"
         },
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 606
+          "path": "scripts/autopilot/dispatch.sh"
         },
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 916
+          "path": "scripts/autopilot/drain.sh"
         },
         {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 31
+          "path": "scripts/autopilot/status.sh"
         },
         {
-          "path": "scripts/autopilot/drain.sh",
-          "line": 27
-        },
-        {
-          "path": "scripts/autopilot/status.sh",
-          "line": 33
-        },
-        {
-          "path": "src/autopilot/log.ts",
-          "line": 33
+          "path": "src/autopilot/log.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 501
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_LOG_PREV",
       "readSites": [
         {
-          "path": "src/autopilot/log.ts",
-          "line": 35
+          "path": "src/autopilot/log.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/autopilot/log.ts",
-        "line": 35
+        "path": "src/autopilot/log.ts"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_MAX_SEC",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1015
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1015
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_PLAN",
       "readSites": [
         {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 76
+          "path": "scripts/autopilot/turn.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/turn.sh",
-        "line": 76
+        "path": "scripts/autopilot/turn.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_PRIMARY_MODEL",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 275
+          "path": "scripts/autopilot/bootstrap.sh"
         },
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 207
+          "path": "scripts/autopilot/pace-gate.sh"
         },
         {
-          "path": "src/api/usage.ts",
-          "line": 72
+          "path": "src/api/usage.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 275
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_QUOTA_5H_MAX",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1041
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1041
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_QUOTA_WEEK_MAX",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1042
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1042
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_REAP_JOURNAL_TAIL",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 388
-        },
-        {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 392
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 388
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_REAP_POST_BACKOFFS",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 490
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 490
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_REAP_RECENT_CRASHES",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 335
-        },
-        {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 336
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 335
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_REAP_SESSION_LINE",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 533
-        },
-        {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 547
-        },
-        {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 720
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 533
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_REAP_STARTED_EPOCH",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 502
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 502
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_REDIS_CLI",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 246
-        },
-        {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 248
-        },
-        {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1220
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 246
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_REFL_DIR",
       "readSites": [
         {
-          "path": "scripts/autopilot/hooks/on-subagent-stop.sh",
-          "line": 228
+          "path": "scripts/autopilot/hooks/on-subagent-stop.sh"
         },
         {
-          "path": "scripts/reflection-deposit.sh",
-          "line": 141
+          "path": "scripts/reflection-deposit.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/hooks/on-subagent-stop.sh",
-        "line": 228
+        "path": "scripts/autopilot/hooks/on-subagent-stop.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_REPO",
       "readSites": [
         {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 218
+          "path": "scripts/autopilot/dispatch.sh"
         },
         {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 221
-        },
-        {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 21
+          "path": "scripts/autopilot/recover-stale.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/dispatch.sh",
-        "line": 218
+        "path": "scripts/autopilot/dispatch.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_RUN_TALLY_BACKOFFS",
       "readSites": [
         {
-          "path": "scripts/autopilot/drain.sh",
-          "line": 65
+          "path": "scripts/autopilot/drain.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/drain.sh",
-        "line": 65
+        "path": "scripts/autopilot/drain.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_SCOPE",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1090
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1090
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_SCOUT_COST_SHARE",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1087
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1087
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT",
       "readSites": [
         {
-          "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 554
+          "path": "scripts/autopilot/turn-snapshot.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 554
+        "path": "scripts/autopilot/turn-snapshot.ts"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID",
       "readSites": [
         {
-          "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 553
+          "path": "scripts/autopilot/turn-snapshot.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 553
+        "path": "scripts/autopilot/turn-snapshot.ts"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN",
       "readSites": [
         {
-          "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh",
-          "line": 40
+          "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh"
         },
         {
-          "path": "scripts/autopilot/hooks/on-subagent-stop.sh",
-          "line": 74
+          "path": "scripts/autopilot/hooks/on-subagent-stop.sh"
         },
         {
-          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh",
-          "line": 87
+          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh",
-        "line": 40
+        "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM",
       "readSites": [
         {
-          "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh",
-          "line": 37
+          "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh"
         },
         {
-          "path": "scripts/autopilot/hooks/on-subagent-stop.sh",
-          "line": 71
+          "path": "scripts/autopilot/hooks/on-subagent-stop.sh"
         },
         {
-          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh",
-          "line": 84
+          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh",
-        "line": 37
+        "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_SNAPSHOT",
       "readSites": [
         {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 79
+          "path": "scripts/autopilot/turn.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/turn.sh",
-        "line": 79
+        "path": "scripts/autopilot/turn.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_SNAPSHOT_REPLAY",
       "readSites": [
         {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 99
-        },
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 100
-        },
-        {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 101
+          "path": "scripts/autopilot/turn.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/turn.sh",
-        "line": 99
+        "path": "scripts/autopilot/turn.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_STATE",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 603
+          "path": "scripts/autopilot/bootstrap.sh"
         },
         {
-          "path": "scripts/autopilot/drain.sh",
-          "line": 26
+          "path": "scripts/autopilot/drain.sh"
         },
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 190
+          "path": "scripts/autopilot/pace-gate.sh"
         },
         {
-          "path": "scripts/autopilot/status.sh",
-          "line": 32
+          "path": "scripts/autopilot/status.sh"
         },
         {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 75
+          "path": "scripts/autopilot/turn.sh"
         },
         {
-          "path": "scripts/hydra-watchdog.ts",
-          "line": 46
+          "path": "scripts/hydra-watchdog.ts"
         },
         {
-          "path": "src/autopilot/log.ts",
-          "line": 37
+          "path": "src/autopilot/log.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 603
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1071
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1071
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1070
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1070
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_TASK_ID",
       "readSites": [
         {
-          "path": "scripts/reflection-deposit.sh",
-          "line": 112
+          "path": "scripts/reflection-deposit.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/reflection-deposit.sh",
-        "line": 112
+        "path": "scripts/reflection-deposit.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_TOKEN_BUDGET",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1014
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1014
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_TRIGGER",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 883
+          "path": "scripts/autopilot/bootstrap.sh"
         },
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1366
-        },
-        {
-          "path": "scripts/claude-hooks/agent-dispatch-prompt-guard.sh",
-          "line": 78
+          "path": "scripts/claude-hooks/agent-dispatch-prompt-guard.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 883
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTOPILOT_UNATTENDED",
       "readSites": [
         {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1104
-        },
-        {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1105
-        },
-        {
-          "path": "scripts/autopilot/bootstrap.sh",
-          "line": 1108
+          "path": "scripts/autopilot/bootstrap.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/bootstrap.sh",
-        "line": 1104
+        "path": "scripts/autopilot/bootstrap.sh"
       }
     },
     {
       "name": "HYDRA_AUTO_CYCLE_INTERVAL_MS",
       "readSites": [
         {
-          "path": "src/scheduler/heartbeat.ts",
-          "line": 204
-        },
-        {
-          "path": "src/scheduler/heartbeat.ts",
-          "line": 662
+          "path": "src/scheduler/heartbeat.ts"
         }
       ],
       "inEnvExample": true,
       "source": {
-        "path": "src/scheduler/heartbeat.ts",
-        "line": 204
+        "path": "src/scheduler/heartbeat.ts"
       }
     },
     {
       "name": "HYDRA_BASE_URL",
       "readSites": [
         {
-          "path": "bin/hydra",
-          "line": 49
+          "path": "bin/hydra"
         },
         {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 391
+          "path": "scripts/autopilot/dispatch.sh"
         },
         {
-          "path": "scripts/autopilot/dispatch.sh",
-          "line": 535
+          "path": "scripts/hydra-watchdog.ts"
         },
         {
-          "path": "src/autopilot/turn-snapshot/hydra-http.ts",
-          "line": 101
+          "path": "src/autopilot/turn-snapshot/hydra-http.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "bin/hydra",
-        "line": 49
+        "path": "bin/hydra"
       }
     },
     {
       "name": "HYDRA_BETTING_URL",
       "readSites": [
         {
-          "path": "src/target-config.ts",
-          "line": 166
+          "path": "src/target-config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/target-config.ts",
-        "line": 166
+        "path": "src/target-config.ts"
       }
     },
     {
       "name": "HYDRA_BRANCH_PRUNE_LOG",
       "readSites": [
         {
-          "path": "scripts/branch-prune.sh",
-          "line": 60
+          "path": "scripts/branch-prune.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/branch-prune.sh",
-        "line": 60
+        "path": "scripts/branch-prune.sh"
       }
     },
     {
       "name": "HYDRA_CANDIDATE_EXCLUSIONS_MAX",
       "readSites": [
         {
-          "path": "src/redis/candidate-exclusions.ts",
-          "line": 64
+          "path": "src/redis/candidate-exclusions.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/redis/candidate-exclusions.ts",
-        "line": 64
+        "path": "src/redis/candidate-exclusions.ts"
       }
     },
     {
       "name": "HYDRA_CASCADE_OUTCOME_WINDOW_MS",
       "readSites": [
         {
-          "path": "src/redis/cascade-telemetry.ts",
-          "line": 93
+          "path": "src/redis/cascade-telemetry.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/redis/cascade-telemetry.ts",
-        "line": 93
+        "path": "src/redis/cascade-telemetry.ts"
       }
     },
     {
       "name": "HYDRA_CASCADE_TELEMETRY_MAX",
       "readSites": [
         {
-          "path": "src/redis/cascade-telemetry.ts",
-          "line": 78
+          "path": "src/redis/cascade-telemetry.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/redis/cascade-telemetry.ts",
-        "line": 78
+        "path": "src/redis/cascade-telemetry.ts"
       }
     },
     {
       "name": "HYDRA_CLAUDE_CREDENTIALS_PATH",
       "readSites": [
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 539
+          "path": "scripts/autopilot/pace-gate.sh"
         },
         {
-          "path": "src/cost/oauth-usage.ts",
-          "line": 104
+          "path": "src/cost/oauth-usage.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/pace-gate.sh",
-        "line": 539
+        "path": "scripts/autopilot/pace-gate.sh"
       }
     },
     {
       "name": "HYDRA_CLAUDE_PROJECTS_ROOT",
       "readSites": [
         {
-          "path": "src/transcript-store.ts",
-          "line": 58
+          "path": "src/transcript-store.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/transcript-store.ts",
-        "line": 58
+        "path": "src/transcript-store.ts"
       }
     },
     {
       "name": "HYDRA_CONFIG_PATH",
       "readSites": [
         {
-          "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 551
+          "path": "scripts/autopilot/turn-snapshot.ts"
         },
         {
-          "path": "src/api/config.ts",
-          "line": 31
+          "path": "src/api/config.ts"
         },
         {
-          "path": "src/api/recommendations.ts",
-          "line": 27
+          "path": "src/api/recommendations.ts"
         },
         {
-          "path": "src/config/roadmap.ts",
-          "line": 22
+          "path": "src/config/roadmap.ts"
         },
         {
-          "path": "src/outcomes.ts",
-          "line": 41
+          "path": "src/outcomes.ts"
         },
         {
-          "path": "src/project-goals.ts",
-          "line": 31
+          "path": "src/project-goals.ts"
         },
         {
-          "path": "src/scheduler/chores/wiring-liveness-timer.ts",
-          "line": 41
+          "path": "src/scheduler/chores/wiring-liveness-timer.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 551
+        "path": "scripts/autopilot/turn-snapshot.ts"
       }
     },
     {
       "name": "HYDRA_CORS_ALLOWED_ORIGINS",
       "readSites": [
         {
-          "path": "src/api.ts",
-          "line": 93
+          "path": "src/api.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/api.ts",
-        "line": 93
+        "path": "src/api.ts"
       }
     },
     {
@@ -1582,830 +1084,679 @@
       "readSites": [],
       "inEnvExample": true,
       "source": {
-        "path": ".env.example",
-        "line": 9
+        "path": ".env.example"
       }
     },
     {
       "name": "HYDRA_DEPLOY_BACKUP_SEED_STALE_MINUTES",
       "readSites": [
         {
-          "path": "scripts/deploy.sh",
-          "line": 183
+          "path": "scripts/deploy.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/deploy.sh",
-        "line": 183
+        "path": "scripts/deploy.sh"
       }
     },
     {
       "name": "HYDRA_DEPLOY_DRIFT_GRACE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/deploy-drift-check.ts",
-          "line": 62
+          "path": "scripts/deploy-drift-check.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/deploy-drift-check.ts",
-        "line": 62
+        "path": "scripts/deploy-drift-check.ts"
       }
     },
     {
       "name": "HYDRA_DEPLOY_DRIFT_STATE_DIR",
       "readSites": [
         {
-          "path": "scripts/deploy-drift-check.ts",
-          "line": 66
+          "path": "scripts/deploy-drift-check.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/deploy-drift-check.ts",
-        "line": 66
+        "path": "scripts/deploy-drift-check.ts"
       }
     },
     {
       "name": "HYDRA_DEPLOY_HEALTH_INTERVAL_S",
       "readSites": [
         {
-          "path": "scripts/ci/wait-for-health.sh",
-          "line": 57
+          "path": "scripts/ci/wait-for-health.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/wait-for-health.sh",
-        "line": 57
+        "path": "scripts/ci/wait-for-health.sh"
       }
     },
     {
       "name": "HYDRA_DEPLOY_HEALTH_LEGACY_WINDOW_S",
       "readSites": [
         {
-          "path": "scripts/ci/wait-for-health.sh",
-          "line": 60
+          "path": "scripts/ci/wait-for-health.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/wait-for-health.sh",
-        "line": 60
+        "path": "scripts/ci/wait-for-health.sh"
       }
     },
     {
       "name": "HYDRA_DEPLOY_HEALTH_TIMEOUT_S",
       "readSites": [
         {
-          "path": "scripts/ci/wait-for-health.sh",
-          "line": 56
+          "path": "scripts/ci/wait-for-health.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/wait-for-health.sh",
-        "line": 56
+        "path": "scripts/ci/wait-for-health.sh"
       }
     },
     {
       "name": "HYDRA_DEPLOY_LOCK",
       "readSites": [
         {
-          "path": "scripts/deploy.sh",
-          "line": 20
+          "path": "scripts/deploy.sh"
         },
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 240
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/deploy.sh",
-        "line": 20
+        "path": "scripts/deploy.sh"
       }
     },
     {
       "name": "HYDRA_DF_BIN",
       "readSites": [
         {
-          "path": "src/host-probe/exec.ts",
-          "line": 102
+          "path": "src/host-probe/exec.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/host-probe/exec.ts",
-        "line": 102
+        "path": "src/host-probe/exec.ts"
       }
     },
     {
       "name": "HYDRA_DIR",
       "readSites": [
         {
-          "path": "bin/start.sh",
-          "line": 12
+          "path": "bin/start.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "bin/start.sh",
-        "line": 12
+        "path": "bin/start.sh"
       }
     },
     {
       "name": "HYDRA_DISPATCH_REGISTER_MARKER_DIR",
       "readSites": [
         {
-          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh",
-          "line": 89
+          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh",
-        "line": 89
-      }
-    },
-    {
-      "name": "HYDRA_DOCKER_BIN",
-      "readSites": [
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 105
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 105
+        "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh"
       }
     },
     {
       "name": "HYDRA_DRIFT_CHECK_INSTALLED",
       "readSites": [
         {
-          "path": "scripts/ci/check-skill-playbook-drift.sh",
-          "line": 86
+          "path": "scripts/ci/check-skill-playbook-drift.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/check-skill-playbook-drift.sh",
-        "line": 86
+        "path": "scripts/ci/check-skill-playbook-drift.sh"
       }
     },
     {
       "name": "HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 249
-        },
-        {
-          "path": "src/cost/config.ts",
-          "line": 255
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 249
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_ESCALATION_DISABLED",
       "readSites": [
         {
-          "path": "src/pattern-memory/escalation.ts",
-          "line": 123
+          "path": "src/pattern-memory/escalation.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/pattern-memory/escalation.ts",
-        "line": 123
+        "path": "src/pattern-memory/escalation.ts"
       }
     },
     {
       "name": "HYDRA_EXTRA_USAGE_POLICY",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 604
-        },
-        {
-          "path": "src/cost/config.ts",
-          "line": 608
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 604
+        "path": "src/cost/config.ts"
+      }
+    },
+    {
+      "name": "HYDRA_FLOCK_BIN",
+      "readSites": [
+        {
+          "path": "src/host-probe/exec.ts"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "src/host-probe/exec.ts"
       }
     },
     {
       "name": "HYDRA_FREE_BIN",
       "readSites": [
         {
-          "path": "src/host-probe/exec.ts",
-          "line": 110
+          "path": "src/host-probe/exec.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/host-probe/exec.ts",
-        "line": 110
+        "path": "src/host-probe/exec.ts"
       }
     },
     {
       "name": "HYDRA_GATE_DIR",
       "readSites": [
         {
-          "path": "scripts/sync-target-gate.sh",
-          "line": 230
+          "path": "scripts/sync-target-gate.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/sync-target-gate.sh",
-        "line": 230
+        "path": "scripts/sync-target-gate.sh"
       }
     },
     {
       "name": "HYDRA_GH_BIN",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 104
-        },
-        {
-          "path": "src/github/exec.ts",
-          "line": 109
+          "path": "src/github/exec.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 104
+        "path": "src/github/exec.ts"
       }
     },
     {
       "name": "HYDRA_GH_ISSUE_LIST_LIMIT",
       "readSites": [
         {
-          "path": "scripts/autopilot/turn.sh",
-          "line": 104
+          "path": "scripts/autopilot/turn.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/turn.sh",
-        "line": 104
+        "path": "scripts/autopilot/turn.sh"
       }
     },
     {
       "name": "HYDRA_GH_REPO",
       "readSites": [
         {
-          "path": "src/pattern-memory/demotion.ts",
-          "line": 69
+          "path": "src/pattern-memory/demotion.ts"
         },
         {
-          "path": "src/pattern-memory/escalation.ts",
-          "line": 74
+          "path": "src/pattern-memory/escalation.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/pattern-memory/demotion.ts",
-        "line": 69
+        "path": "src/pattern-memory/demotion.ts"
       }
     },
     {
       "name": "HYDRA_GITHUB_REPO",
       "readSites": [
         {
-          "path": "src/github/issues.ts",
-          "line": 102
+          "path": "src/github/issues.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/github/issues.ts",
-        "line": 102
+        "path": "src/github/issues.ts"
       }
     },
     {
       "name": "HYDRA_GIT_BIN",
       "readSites": [
         {
-          "path": "src/github/exec.ts",
-          "line": 117
+          "path": "src/github/exec.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/github/exec.ts",
-        "line": 117
+        "path": "src/github/exec.ts"
       }
     },
     {
       "name": "HYDRA_GLM_AB_ASSIGNMENT_FRACTION",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 504
-        },
-        {
-          "path": "src/cost/config.ts",
-          "line": 510
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 504
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_GLM_AB_COHORT_START",
       "readSites": [
         {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 242
+          "path": "scripts/glm-beachhead-report.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 242
+        "path": "scripts/glm-beachhead-report.sh"
       }
     },
     {
       "name": "HYDRA_GLM_AB_MIN_N",
       "readSites": [
         {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 243
+          "path": "scripts/glm-beachhead-report.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 243
+        "path": "scripts/glm-beachhead-report.sh"
       }
     },
     {
       "name": "HYDRA_GLM_AB_POOL_LIMIT",
       "readSites": [
         {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 244
+          "path": "scripts/glm-beachhead-report.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 244
+        "path": "scripts/glm-beachhead-report.sh"
       }
     },
     {
       "name": "HYDRA_GLM_AB_USAGE_BY_ISSUE_URL",
       "readSites": [
         {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 245
+          "path": "scripts/glm-beachhead-report.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 245
+        "path": "scripts/glm-beachhead-report.sh"
       }
     },
     {
       "name": "HYDRA_GLM_BEACHHEAD_BASELINE_FILE",
       "readSites": [
         {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 227
+          "path": "scripts/glm-beachhead-report.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 227
+        "path": "scripts/glm-beachhead-report.sh"
       }
     },
     {
       "name": "HYDRA_GLM_BEACHHEAD_BASELINE_SAMPLE",
       "readSites": [
         {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 230
+          "path": "scripts/glm-beachhead-report.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 230
+        "path": "scripts/glm-beachhead-report.sh"
       }
     },
     {
       "name": "HYDRA_GLM_BEACHHEAD_MIN_DAYS_INTO_WINDOW",
       "readSites": [
         {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 231
+          "path": "scripts/glm-beachhead-report.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 231
+        "path": "scripts/glm-beachhead-report.sh"
       }
     },
     {
       "name": "HYDRA_GLM_BEACHHEAD_NOW_EPOCH",
       "readSites": [
         {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 232
+          "path": "scripts/glm-beachhead-report.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 232
+        "path": "scripts/glm-beachhead-report.sh"
       }
     },
     {
       "name": "HYDRA_GLM_BEACHHEAD_REPO",
       "readSites": [
         {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 225
+          "path": "scripts/glm-beachhead-report.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 225
+        "path": "scripts/glm-beachhead-report.sh"
       }
     },
     {
       "name": "HYDRA_GLM_BEACHHEAD_USAGE_URL",
       "readSites": [
         {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 226
+          "path": "scripts/glm-beachhead-report.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 226
+        "path": "scripts/glm-beachhead-report.sh"
       }
     },
     {
       "name": "HYDRA_GLM_BEACHHEAD_WINDOW_DAYS",
       "readSites": [
         {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 228
+          "path": "scripts/glm-beachhead-report.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 228
+        "path": "scripts/glm-beachhead-report.sh"
       }
     },
     {
       "name": "HYDRA_GLM_BEACHHEAD_WINDOW_PRS",
       "readSites": [
         {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 229
+          "path": "scripts/glm-beachhead-report.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm-beachhead-report.sh",
-        "line": 229
+        "path": "scripts/glm-beachhead-report.sh"
       }
     },
     {
       "name": "HYDRA_GLM_DISABLED_FILE",
       "readSites": [
         {
-          "path": "scripts/deploy.sh",
-          "line": 156
+          "path": "scripts/deploy.sh"
         },
         {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 1375
+          "path": "scripts/glm-beachhead-report.sh"
         },
         {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 91
+          "path": "scripts/glm/drainer-loop.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/deploy.sh",
-        "line": 156
+        "path": "scripts/deploy.sh"
       }
     },
     {
       "name": "HYDRA_GLM_DRAINER_CAP_DIR",
       "readSites": [
         {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 87
+          "path": "scripts/glm/drainer-loop.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 87
+        "path": "scripts/glm/drainer-loop.sh"
       }
     },
     {
       "name": "HYDRA_GLM_DRAINER_DRY_RUN",
       "readSites": [
         {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 83
+          "path": "scripts/glm/drainer-loop.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 83
+        "path": "scripts/glm/drainer-loop.sh"
       }
     },
     {
       "name": "HYDRA_GLM_DRAINER_LOCKFILE",
       "readSites": [
         {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 84
+          "path": "scripts/glm/drainer-loop.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 84
+        "path": "scripts/glm/drainer-loop.sh"
       }
     },
     {
       "name": "HYDRA_GLM_DRAINER_REPO_ROOT",
       "readSites": [
         {
-          "path": "scripts/glm/drainer-loop.sh",
-          "line": 81
+          "path": "scripts/glm/drainer-loop.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/glm/drainer-loop.sh",
-        "line": 81
+        "path": "scripts/glm/drainer-loop.sh"
       }
     },
     {
       "name": "HYDRA_HEALTH_URL",
       "readSites": [
         {
-          "path": "scripts/deploy-drift-check.ts",
-          "line": 58
+          "path": "scripts/deploy-drift-check.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/deploy-drift-check.ts",
-        "line": 58
+        "path": "scripts/deploy-drift-check.ts"
       }
     },
     {
       "name": "HYDRA_HOLDBACK_BASELINE_TTL_SECONDS",
       "readSites": [
         {
-          "path": "src/redis/holdback.ts",
-          "line": 59
+          "path": "src/redis/holdback.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/redis/holdback.ts",
-        "line": 59
+        "path": "src/redis/holdback.ts"
       }
     },
     {
       "name": "HYDRA_HOLDBACK_CYCLE_MS",
       "readSites": [
         {
-          "path": "src/outcome-regression.ts",
-          "line": 293
+          "path": "src/outcome-regression.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/outcome-regression.ts",
-        "line": 293
+        "path": "src/outcome-regression.ts"
       }
     },
     {
       "name": "HYDRA_HOLDBACK_ENROL_MAX_ATTEMPTS",
       "readSites": [
         {
-          "path": "src/holdback-policy.ts",
-          "line": 137
+          "path": "src/holdback-policy.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/holdback-policy.ts",
-        "line": 137
+        "path": "src/holdback-policy.ts"
       }
     },
     {
       "name": "HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY",
       "readSites": [
         {
-          "path": "src/redis/holdback.ts",
-          "line": 50
+          "path": "src/redis/holdback.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/redis/holdback.ts",
-        "line": 50
+        "path": "src/redis/holdback.ts"
       }
     },
     {
       "name": "HYDRA_HOLDBACK_WINDOW_CYCLES",
       "readSites": [
         {
-          "path": "src/holdback-policy.ts",
-          "line": 39
+          "path": "src/holdback-policy.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/holdback-policy.ts",
-        "line": 39
+        "path": "src/holdback-policy.ts"
       }
     },
     {
       "name": "HYDRA_HOLDBACK_WINDOW_CYCLES_T3",
       "readSites": [
         {
-          "path": "src/holdback-policy.ts",
-          "line": 52
+          "path": "src/holdback-policy.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/holdback-policy.ts",
-        "line": 52
+        "path": "src/holdback-policy.ts"
       }
     },
     {
       "name": "HYDRA_HOLDBACK_WINDOW_CYCLES_T4",
       "readSites": [
         {
-          "path": "src/holdback-policy.ts",
-          "line": 53
+          "path": "src/holdback-policy.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/holdback-policy.ts",
-        "line": 53
+        "path": "src/holdback-policy.ts"
       }
     },
     {
       "name": "HYDRA_HOUSEKEEPING_ENDPOINT",
       "readSites": [
         {
-          "path": "scripts/housekeeping.sh",
-          "line": 22
+          "path": "scripts/housekeeping.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/housekeeping.sh",
-        "line": 22
+        "path": "scripts/housekeeping.sh"
       }
     },
     {
       "name": "HYDRA_LOG_DETERMINISTIC",
       "readSites": [
         {
-          "path": "src/logger.ts",
-          "line": 37
+          "path": "src/logger.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/logger.ts",
-        "line": 37
+        "path": "src/logger.ts"
       }
     },
     {
       "name": "HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 405
-        },
-        {
-          "path": "src/cost/config.ts",
-          "line": 411
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 405
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 278
-        },
-        {
-          "path": "src/cost/config.ts",
-          "line": 283
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 278
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 300
-        },
-        {
-          "path": "src/cost/config.ts",
-          "line": 305
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 300
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_OAUTH_USAGE_MAX_STALE_MS",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 221
-        },
-        {
-          "path": "src/cost/config.ts",
-          "line": 226
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 221
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_OAUTH_USAGE_TTL_MS",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 188
-        },
-        {
-          "path": "src/cost/config.ts",
-          "line": 193
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 188
+        "path": "src/cost/config.ts"
       }
     },
     {
@@ -2413,512 +1764,373 @@
       "readSites": [],
       "inEnvExample": true,
       "source": {
-        "path": ".env.example",
-        "line": 19
+        "path": ".env.example"
       }
     },
     {
       "name": "HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 545
+          "path": "scripts/autopilot/turn-snapshot.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 545
+        "path": "scripts/autopilot/turn-snapshot.ts"
       }
     },
     {
       "name": "HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 543
+          "path": "scripts/autopilot/turn-snapshot.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 543
+        "path": "scripts/autopilot/turn-snapshot.ts"
       }
     },
     {
       "name": "HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 542
+          "path": "scripts/autopilot/turn-snapshot.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 542
+        "path": "scripts/autopilot/turn-snapshot.ts"
       }
     },
     {
       "name": "HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS",
       "readSites": [
         {
-          "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 544
+          "path": "scripts/autopilot/turn-snapshot.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 544
+        "path": "scripts/autopilot/turn-snapshot.ts"
       }
     },
     {
       "name": "HYDRA_OTEL_INGEST_KEY",
       "readSites": [
         {
-          "path": "src/api/otel.ts",
-          "line": 35
+          "path": "src/api/otel.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/api/otel.ts",
-        "line": 35
+        "path": "src/api/otel.ts"
       }
     },
     {
       "name": "HYDRA_PACE_GATE_DRY_RUN",
       "readSites": [
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 708
-        },
-        {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 740
+          "path": "scripts/autopilot/pace-gate.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/pace-gate.sh",
-        "line": 708
+        "path": "scripts/autopilot/pace-gate.sh"
       }
     },
     {
       "name": "HYDRA_PACE_GATE_ELIGIBILITY_URL",
       "readSites": [
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 191
+          "path": "scripts/autopilot/pace-gate.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/pace-gate.sh",
-        "line": 191
+        "path": "scripts/autopilot/pace-gate.sh"
       }
     },
     {
       "name": "HYDRA_PACE_GATE_EXEC_CMD",
       "readSites": [
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 720
-        },
-        {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 727
+          "path": "scripts/autopilot/pace-gate.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/pace-gate.sh",
-        "line": 720
+        "path": "scripts/autopilot/pace-gate.sh"
       }
     },
     {
       "name": "HYDRA_PACE_GATE_FORCE_SERVICE_INACTIVE",
       "readSites": [
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 314
+          "path": "scripts/autopilot/pace-gate.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/pace-gate.sh",
-        "line": 314
+        "path": "scripts/autopilot/pace-gate.sh"
       }
     },
     {
       "name": "HYDRA_PACE_GATE_INTERVAL_SECONDS",
       "readSites": [
         {
-          "path": "src/api/autopilot-idle.ts",
-          "line": 135
+          "path": "src/api/autopilot-idle.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/api/autopilot-idle.ts",
-        "line": 135
+        "path": "src/api/autopilot-idle.ts"
       }
     },
     {
       "name": "HYDRA_PACE_GATE_NUDGE_CMD",
       "readSites": [
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 560
-        },
-        {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 562
+          "path": "scripts/autopilot/pace-gate.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/pace-gate.sh",
-        "line": 560
+        "path": "scripts/autopilot/pace-gate.sh"
       }
     },
     {
       "name": "HYDRA_PACE_GATE_NUDGE_STAMP",
       "readSites": [
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 540
+          "path": "scripts/autopilot/pace-gate.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/pace-gate.sh",
-        "line": 540
+        "path": "scripts/autopilot/pace-gate.sh"
       }
     },
     {
       "name": "HYDRA_PID",
       "readSites": [
         {
-          "path": "bin/start.sh",
-          "line": 25
+          "path": "bin/start.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "bin/start.sh",
-        "line": 25
+        "path": "bin/start.sh"
       }
     },
     {
       "name": "HYDRA_PORT",
       "readSites": [
         {
-          "path": "bin/start.sh",
-          "line": 39
+          "path": "bin/start.sh"
         },
         {
-          "path": "src/index.ts",
-          "line": 30
+          "path": "src/index.ts"
         }
       ],
       "inEnvExample": true,
       "source": {
-        "path": "bin/start.sh",
-        "line": 39
+        "path": "bin/start.sh"
       }
     },
     {
       "name": "HYDRA_PROJECT_WORKSPACE",
       "readSites": [
         {
-          "path": "src/target-config.ts",
-          "line": 73
+          "path": "src/target-config.ts"
         }
       ],
       "inEnvExample": true,
       "source": {
-        "path": "src/target-config.ts",
-        "line": 73
+        "path": "src/target-config.ts"
       }
     },
     {
       "name": "HYDRA_QUOTA_WEIGHT_HAIKU",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 431
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 431
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_QUOTA_WEIGHT_OPUS",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 423
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 423
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_QUOTA_WEIGHT_SONNET",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 427
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 427
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_REAP_KILL_SINK",
       "readSites": [
         {
-          "path": "scripts/reap-stale-test-procs.sh",
-          "line": 186
+          "path": "scripts/reap-stale-test-procs.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/reap-stale-test-procs.sh",
-        "line": 186
+        "path": "scripts/reap-stale-test-procs.sh"
       }
     },
     {
       "name": "HYDRA_REAP_PROC_ROOT",
       "readSites": [
         {
-          "path": "scripts/reap-stale-test-procs.sh",
-          "line": 183
+          "path": "scripts/reap-stale-test-procs.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/reap-stale-test-procs.sh",
-        "line": 183
+        "path": "scripts/reap-stale-test-procs.sh"
       }
     },
     {
       "name": "HYDRA_REAP_PS_SNAPSHOT",
       "readSites": [
         {
-          "path": "scripts/reap-stale-test-procs.sh",
-          "line": 184
+          "path": "scripts/reap-stale-test-procs.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/reap-stale-test-procs.sh",
-        "line": 184
+        "path": "scripts/reap-stale-test-procs.sh"
       }
     },
     {
       "name": "HYDRA_REAP_UNIT_MAINPID",
       "readSites": [
         {
-          "path": "scripts/reap-stale-test-procs.sh",
-          "line": 185
+          "path": "scripts/reap-stale-test-procs.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/reap-stale-test-procs.sh",
-        "line": 185
+        "path": "scripts/reap-stale-test-procs.sh"
       }
     },
     {
       "name": "HYDRA_REAP_VANISHED_PIDS",
       "readSites": [
         {
-          "path": "scripts/reap-stale-test-procs.sh",
-          "line": 187
+          "path": "scripts/reap-stale-test-procs.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/reap-stale-test-procs.sh",
-        "line": 187
+        "path": "scripts/reap-stale-test-procs.sh"
       }
     },
     {
       "name": "HYDRA_RECS_DAILY_CAP_USD",
       "readSites": [
         {
-          "path": "src/autopilot/recommendation-cap.ts",
-          "line": 71
+          "path": "src/autopilot/recommendation-cap.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/autopilot/recommendation-cap.ts",
-        "line": 71
+        "path": "src/autopilot/recommendation-cap.ts"
       }
     },
     {
       "name": "HYDRA_REDIS_DB",
       "readSites": [
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 197
+          "path": "scripts/autopilot/pace-gate.sh"
         },
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 693
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 912
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1317
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1697
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2207
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2393
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/pace-gate.sh",
-        "line": 197
+        "path": "scripts/autopilot/pace-gate.sh"
       }
     },
     {
       "name": "HYDRA_REDIS_HOST",
       "readSites": [
         {
-          "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh",
-          "line": 38
+          "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh"
         },
         {
-          "path": "scripts/autopilot/hooks/on-subagent-stop.sh",
-          "line": 72
+          "path": "scripts/autopilot/hooks/on-subagent-stop.sh"
         },
         {
-          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh",
-          "line": 85
+          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh"
         },
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 192
+          "path": "scripts/autopilot/pace-gate.sh"
         },
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 686
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 910
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1308
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1689
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2205
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2391
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh",
-        "line": 38
+        "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh"
       }
     },
     {
       "name": "HYDRA_REDIS_PORT",
       "readSites": [
         {
-          "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh",
-          "line": 39
+          "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh"
         },
         {
-          "path": "scripts/autopilot/hooks/on-subagent-stop.sh",
-          "line": 73
+          "path": "scripts/autopilot/hooks/on-subagent-stop.sh"
         },
         {
-          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh",
-          "line": 86
+          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh"
         },
         {
-          "path": "scripts/autopilot/pace-gate.sh",
-          "line": 193
+          "path": "scripts/autopilot/pace-gate.sh"
         },
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 687
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 911
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1309
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1690
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2206
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2392
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh",
-        "line": 39
+        "path": "scripts/autopilot/hooks/on-subagent-permission-wait.sh"
       }
     },
     {
       "name": "HYDRA_REMOTE_FENCE_PYTHON",
       "readSites": [
         {
-          "path": "scripts/claude-hooks/git-remote-fence.sh",
-          "line": 155
+          "path": "scripts/claude-hooks/git-remote-fence.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/claude-hooks/git-remote-fence.sh",
-        "line": 155
+        "path": "scripts/claude-hooks/git-remote-fence.sh"
       }
     },
     {
@@ -2926,8 +2138,7 @@
       "readSites": [],
       "inEnvExample": true,
       "source": {
-        "path": ".env.example",
-        "line": 13
+        "path": ".env.example"
       }
     },
     {
@@ -2935,660 +2146,406 @@
       "readSites": [],
       "inEnvExample": true,
       "source": {
-        "path": ".env.example",
-        "line": 12
+        "path": ".env.example"
       }
     },
     {
       "name": "HYDRA_ROLLING_EMPTY_RATE_WINDOW",
       "readSites": [
         {
-          "path": "src/scheduler/rolling-rates.ts",
-          "line": 31
+          "path": "src/scheduler/rolling-rates.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/scheduler/rolling-rates.ts",
-        "line": 31
+        "path": "src/scheduler/rolling-rates.ts"
       }
     },
     {
       "name": "HYDRA_ROLLING_MERGE_RATE_WINDOW",
       "readSites": [
         {
-          "path": "src/aggregators/builder-health.ts",
-          "line": 84
+          "path": "src/aggregators/builder-health.ts"
         },
         {
-          "path": "src/scheduler/rolling-rates.ts",
-          "line": 23
+          "path": "src/scheduler/rolling-rates.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/aggregators/builder-health.ts",
-        "line": 84
+        "path": "src/aggregators/builder-health.ts"
       }
     },
     {
       "name": "HYDRA_ROOT",
       "readSites": [
         {
-          "path": "scripts/autopilot/status.sh",
-          "line": 38
+          "path": "scripts/autopilot/status.sh"
         },
         {
-          "path": "scripts/deploy-drift-check.ts",
-          "line": 55
+          "path": "scripts/deploy-drift-check.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 25
+          "path": "scripts/deploy.sh"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 26
+          "path": "scripts/hydra-watchdog.sh"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 35
+          "path": "src/aggregators/architecture-graph.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 103
+          "path": "src/aggregators/overnight-summary.ts"
         },
         {
-          "path": "scripts/deploy.sh",
-          "line": 106
+          "path": "src/aggregators/recent-merges.ts"
         },
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 432
+          "path": "src/api.ts"
         },
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 513
+          "path": "src/api/config.ts"
         },
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 527
+          "path": "src/api/recommendations.ts"
         },
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 528
+          "path": "src/health/deployed-sha.ts"
         },
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 531
+          "path": "src/metrics/publish.ts"
         },
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 544
+          "path": "src/outcomes.ts"
         },
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 607
+          "path": "src/scheduler/chores/wiring-liveness-timer.ts"
         },
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 735
+          "path": "src/scout/calendar-walk.ts"
         },
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 904
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 905
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1100
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1110
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1111
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1125
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1127
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1152
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1168
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1195
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1202
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1396
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1780
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2251
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2387
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2422
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2442
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2460
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2464
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2470
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2479
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2585
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2586
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2594
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2598
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2599
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2610
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2612
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2631
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2635
-        },
-        {
-          "path": "src/aggregators/architecture-graph.ts",
-          "line": 289
-        },
-        {
-          "path": "src/aggregators/overnight-summary.ts",
-          "line": 301
-        },
-        {
-          "path": "src/aggregators/recent-merges.ts",
-          "line": 372
-        },
-        {
-          "path": "src/api.ts",
-          "line": 54
-        },
-        {
-          "path": "src/api/config.ts",
-          "line": 30
-        },
-        {
-          "path": "src/api/recommendations.ts",
-          "line": 26
-        },
-        {
-          "path": "src/health/deployed-sha.ts",
-          "line": 39
-        },
-        {
-          "path": "src/metrics/publish.ts",
-          "line": 38
-        },
-        {
-          "path": "src/outcomes.ts",
-          "line": 40
-        },
-        {
-          "path": "src/scheduler/chores/wiring-liveness-timer.ts",
-          "line": 40
-        },
-        {
-          "path": "src/scout/calendar-walk.ts",
-          "line": 278
-        },
-        {
-          "path": "src/versions/project-list.ts",
-          "line": 58
+          "path": "src/versions/project-list.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/status.sh",
-        "line": 38
+        "path": "scripts/autopilot/status.sh"
       }
     },
     {
       "name": "HYDRA_SALVAGE_GIT_EMAIL",
       "readSites": [
         {
-          "path": "scripts/branch-prune.sh",
-          "line": 126
+          "path": "scripts/branch-prune.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/branch-prune.sh",
-        "line": 126
+        "path": "scripts/branch-prune.sh"
       }
     },
     {
       "name": "HYDRA_SALVAGE_GIT_NAME",
       "readSites": [
         {
-          "path": "scripts/branch-prune.sh",
-          "line": 125
+          "path": "scripts/branch-prune.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/branch-prune.sh",
-        "line": 125
+        "path": "scripts/branch-prune.sh"
       }
     },
     {
       "name": "HYDRA_SYNC_SKILLS_FORCE",
       "readSites": [
         {
-          "path": "scripts/sync-skills.sh",
-          "line": 50
+          "path": "scripts/sync-skills.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/sync-skills.sh",
-        "line": 50
+        "path": "scripts/sync-skills.sh"
       }
     },
     {
       "name": "HYDRA_SYSTEMCTL_BIN",
       "readSites": [
         {
-          "path": "src/host-probe/exec.ts",
-          "line": 118
+          "path": "src/host-probe/exec.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/host-probe/exec.ts",
-        "line": 118
+        "path": "src/host-probe/exec.ts"
       }
     },
     {
       "name": "HYDRA_TARGET_GITHUB_REPO",
       "readSites": [
         {
-          "path": "src/target-config.ts",
-          "line": 123
+          "path": "src/target-config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/target-config.ts",
-        "line": 123
+        "path": "src/target-config.ts"
       }
     },
     {
       "name": "HYDRA_TARGET_NAME",
       "readSites": [
         {
-          "path": "src/target-config.ts",
-          "line": 51
+          "path": "src/target-config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/target-config.ts",
-        "line": 51
+        "path": "src/target-config.ts"
       }
     },
     {
       "name": "HYDRA_TARGET_REPO",
       "readSites": [
         {
-          "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 552
+          "path": "scripts/autopilot/turn-snapshot.ts"
         },
         {
-          "path": "scripts/autopilot/turn-snapshot.ts",
-          "line": 598
-        },
-        {
-          "path": "scripts/branch-prune.sh",
-          "line": 627
+          "path": "scripts/branch-prune.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/turn-snapshot.ts",
-        "line": 552
+        "path": "scripts/autopilot/turn-snapshot.ts"
       }
     },
     {
       "name": "HYDRA_TARGET_WEB_URL",
       "readSites": [
         {
-          "path": "src/target-config.ts",
-          "line": 163
+          "path": "src/target-config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/target-config.ts",
-        "line": 163
+        "path": "src/target-config.ts"
+      }
+    },
+    {
+      "name": "HYDRA_TUNNEL_URL",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.ts"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_5H_QUOTA_TOKENS",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 169
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 169
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_5H_THROTTLE_T1",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 559
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 559
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_5H_THROTTLE_T2",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 571
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 571
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_BURN_FAMILY_HAIKU",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 745
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 745
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_BURN_FAMILY_OPUS",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 735
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 735
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_BURN_FAMILY_SONNET",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 740
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 740
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_BURN_WEIGHT_CACHE_CREATION",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 715
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 715
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_BURN_WEIGHT_CACHE_READ",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 710
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 710
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_BURN_WEIGHT_INPUT",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 700
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 700
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_BURN_WEIGHT_OUTPUT",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 705
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 705
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_CACHE_READ_WEIGHT",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 344
-        },
-        {
-          "path": "src/cost/config.ts",
-          "line": 349
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 344
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_DRIFT_FACTOR",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 383
-        },
-        {
-          "path": "src/cost/config.ts",
-          "line": 388
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 383
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_DRIFT_REFERENCE_PERCENT",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 364
-        },
-        {
-          "path": "src/cost/config.ts",
-          "line": 369
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 364
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_EMERGENCY_STOP_PERCENT",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 631
-        },
-        {
-          "path": "src/cost/config.ts",
-          "line": 636
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 631
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_WEEKLY_PACE_CEILING",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 470
-        },
-        {
-          "path": "src/cost/config.ts",
-          "line": 475
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 470
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_WEEKLY_QUOTA_TOKENS",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 165
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 165
+        "path": "src/cost/config.ts"
       }
     },
     {
       "name": "HYDRA_USAGE_WEEKLY_RESET_ANCHOR",
       "readSites": [
         {
-          "path": "src/cost/config.ts",
-          "line": 322
-        },
-        {
-          "path": "src/cost/config.ts",
-          "line": 327
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/cost/config.ts",
-        "line": 322
+        "path": "src/cost/config.ts"
       }
     },
     {
@@ -3596,920 +2553,733 @@
       "readSites": [],
       "inEnvExample": true,
       "source": {
-        "path": ".env.example",
-        "line": 5
+        "path": ".env.example"
       }
     },
     {
       "name": "HYDRA_VERSION",
       "readSites": [
         {
-          "path": "src/instrument.ts",
-          "line": 22
+          "path": "src/instrument.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/instrument.ts",
-        "line": 22
+        "path": "src/instrument.ts"
       }
     },
     {
       "name": "HYDRA_VERSIONS_HISTORY_LIMIT",
       "readSites": [
         {
-          "path": "src/versions/read-versions.ts",
-          "line": 587
+          "path": "src/versions/read-versions.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/versions/read-versions.ts",
-        "line": 587
+        "path": "src/versions/read-versions.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_AUTODEPLOY",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 575
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 575
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_AUTODEPLOY_DRY_RUN",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 598
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 598
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 516
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 516
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_BACKUP_DIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 697
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 697
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_BACKUP_NOTIFY_STREAM",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 696
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 696
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_BACKUP_STALE_HOURS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 698
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 698
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_BACKUP_TIMER_STATE",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 700
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 700
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_BRIEF_NOW_MS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2262
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 2262
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_BRIEF_STALE_HOURS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2213
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 2213
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2510
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2511
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2545
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 2510
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_CLAUDE_HOOKS_DIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 906
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 906
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_CLAUDE_HOOKS_NOTIFY_STREAM",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 909
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 909
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_CLAUDE_HOOKS_SETUP",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 905
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 905
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_CLAUDE_HOOKS_STATE_DIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 908
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 908
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_CLAUDE_SETTINGS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 907
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 907
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_DRIFT_DEPLOYED_SHA",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 524
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 525
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 524
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_DRIFT_REMOTE_SHA",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 540
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 541
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 540
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_DRIFT_STATE_DIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 514
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1102
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 514
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_EXPECTED_ORIGIN_HOST",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2534
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 2534
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2388
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 2388
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1715
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1715
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1721
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1721
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_WINDOW_HOURS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1722
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1722
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1720
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1720
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_LATENCY_BUDGET_MS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1719
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1719
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_METER_DARK_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1716
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1716
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1710
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1710
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_NOW_MS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1953
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1954
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1953
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1718
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1718
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_QUOTA_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1717
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1717
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_NM_ENTRY_FLOOR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1321
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1321
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_NM_NOTIFY_STREAM",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1320
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1320
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_NM_NOW_MS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1473
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1474
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1473
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_NM_REQUIRED_BIN",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1322
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1322
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_NM_ROOTS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1330
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1331
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1330
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_NODE",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 413
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 414
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 413
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_OPERATOR_NOTIFY",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 735
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1396
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1780
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2251
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2422
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 735
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2508
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 2508
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_ORIGIN_FETCH_TIMEOUT_S",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2517
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 2517
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_ORIGIN_MASTER_PRESENT",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2477
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2478
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 2477
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_ORIGIN_NOTIFY_STREAM",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2390
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 2390
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_ORIGIN_REPAIR_BACKOFF_S",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2573
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 2573
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_ORIGIN_STATE_DIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2389
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 2389
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_ORIGIN_URL",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2458
-        },
-        {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 2459
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 2458
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_SKILL_MIRROR_AUTOFIX",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1170
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1170
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_SKILL_MIRROR_AUTOFIX_DRY_RUN",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1190
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1190
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_SKILL_MIRROR_AUTOFIX_GRACE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1104
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1104
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_SKILL_MIRROR_LIVE_DIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 1101
+          "path": "scripts/hydra-watchdog.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 1101
+        "path": "scripts/hydra-watchdog.sh"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_STARTUP_GRACE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 213
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 213
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WORKSPACE",
       "readSites": [
         {
-          "path": "src/target-config.ts",
-          "line": 76
+          "path": "src/target-config.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/target-config.ts",
-        "line": 76
+        "path": "src/target-config.ts"
       }
     },
     {
       "name": "HYDRA_WORKTREE_MIN_AGE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/branch-prune.sh",
-          "line": 430
+          "path": "scripts/branch-prune.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/branch-prune.sh",
-        "line": 430
+        "path": "scripts/branch-prune.sh"
       }
     },
     {
       "name": "ISSUE_BODY",
       "readSites": [
         {
-          "path": "scripts/ci/scope-check.ts",
-          "line": 365
-        },
-        {
-          "path": "scripts/ci/scope-check.ts",
-          "line": 378
+          "path": "scripts/ci/scope-check.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/scope-check.ts",
-        "line": 365
+        "path": "scripts/ci/scope-check.ts"
       }
     },
     {
       "name": "KILL_GRACE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.ts",
-          "line": 49
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.ts",
-        "line": 49
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "LOG_LEVEL",
       "readSites": [
         {
-          "path": "src/logger.ts",
-          "line": 47
+          "path": "src/logger.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/logger.ts",
-        "line": 47
+        "path": "src/logger.ts"
       }
     },
     {
       "name": "MUTATION_GATE_BLOCKING",
       "readSites": [
         {
-          "path": "scripts/ci/mutation-check.ts",
-          "line": 490
+          "path": "scripts/ci/mutation-check.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/mutation-check.ts",
-        "line": 490
+        "path": "scripts/ci/mutation-check.ts"
       }
     },
     {
       "name": "MUTATION_MAX_MUTANTS",
       "readSites": [
         {
-          "path": "scripts/ci/mutation-check.ts",
-          "line": 486
+          "path": "scripts/ci/mutation-check.ts"
         },
         {
-          "path": "scripts/target/mutation-check.ts",
-          "line": 358
+          "path": "scripts/target/mutation-check.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/mutation-check.ts",
-        "line": 486
+        "path": "scripts/ci/mutation-check.ts"
       }
     },
     {
       "name": "NODE_ENV",
       "readSites": [
         {
-          "path": "src/instrument.ts",
-          "line": 21
+          "path": "src/instrument.ts"
         },
         {
-          "path": "src/logger.ts",
-          "line": 37
+          "path": "src/logger.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/instrument.ts",
-        "line": 21
+        "path": "src/instrument.ts"
       }
     },
     {
       "name": "OPENAI_PROXY_PORT",
       "readSites": [
         {
-          "path": "bin/start.sh",
-          "line": 31
+          "path": "bin/start.sh"
         }
       ],
       "inEnvExample": true,
       "source": {
-        "path": "bin/start.sh",
-        "line": 31
+        "path": "bin/start.sh"
       }
     },
     {
@@ -4517,8 +3287,7 @@
       "readSites": [],
       "inEnvExample": true,
       "source": {
-        "path": ".env.example",
-        "line": 25
+        "path": ".env.example"
       }
     },
     {
@@ -4526,392 +3295,205 @@
       "readSites": [],
       "inEnvExample": true,
       "source": {
-        "path": ".env.example",
-        "line": 24
+        "path": ".env.example"
       }
     },
     {
       "name": "PREV_TAG",
       "readSites": [
         {
-          "path": "scripts/ci/derive-version-bump.ts",
-          "line": 189
+          "path": "scripts/ci/derive-version-bump.ts"
         },
         {
-          "path": "scripts/ci/stamp-version.sh",
-          "line": 64
-        },
-        {
-          "path": "scripts/ci/stamp-version.sh",
-          "line": 65
-        },
-        {
-          "path": "scripts/ci/stamp-version.sh",
-          "line": 66
-        },
-        {
-          "path": "scripts/ci/stamp-version.sh",
-          "line": 76
-        },
-        {
-          "path": "scripts/ci/stamp-version.sh",
-          "line": 79
+          "path": "scripts/ci/stamp-version.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/derive-version-bump.ts",
-        "line": 189
+        "path": "scripts/ci/derive-version-bump.ts"
       }
     },
     {
       "name": "PR_BODY",
       "readSites": [
         {
-          "path": "scripts/ci/mutation-check.ts",
-          "line": 432
+          "path": "scripts/ci/mutation-check.ts"
         },
         {
-          "path": "scripts/ci/scope-check.ts",
-          "line": 377
+          "path": "scripts/ci/scope-check.ts"
         },
         {
-          "path": "scripts/ci/target-risk-core-check.ts",
-          "line": 125
+          "path": "scripts/ci/target-risk-core-check.ts"
         },
         {
-          "path": "scripts/target/mutation-check.ts",
-          "line": 274
+          "path": "scripts/target/mutation-check.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/mutation-check.ts",
-        "line": 432
+        "path": "scripts/ci/mutation-check.ts"
       }
     },
     {
       "name": "PR_LABELS",
       "readSites": [
         {
-          "path": "scripts/ci/changelog-check.ts",
-          "line": 123
+          "path": "scripts/ci/changelog-check.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/changelog-check.ts",
-        "line": 123
+        "path": "scripts/ci/changelog-check.ts"
       }
     },
     {
       "name": "REDIS_URL",
       "readSites": [
         {
-          "path": "scripts/cleanup/reclassify-deferred-acs.sh",
-          "line": 54
+          "path": "scripts/cleanup/reclassify-deferred-acs.sh"
         },
         {
-          "path": "scripts/cleanup/reclassify-deferred-acs.sh",
-          "line": 93
+          "path": "scripts/cleanup/retire-reflection-buffer.sh"
         },
         {
-          "path": "scripts/cleanup/reclassify-deferred-acs.sh",
-          "line": 110
+          "path": "scripts/cleanup/retire-specs.sh"
         },
         {
-          "path": "scripts/cleanup/reclassify-deferred-acs.sh",
-          "line": 235
-        },
-        {
-          "path": "scripts/cleanup/retire-reflection-buffer.sh",
-          "line": 34
-        },
-        {
-          "path": "scripts/cleanup/retire-reflection-buffer.sh",
-          "line": 52
-        },
-        {
-          "path": "scripts/cleanup/retire-reflection-buffer.sh",
-          "line": 58
-        },
-        {
-          "path": "scripts/cleanup/retire-reflection-buffer.sh",
-          "line": 65
-        },
-        {
-          "path": "scripts/cleanup/retire-specs.sh",
-          "line": 18
-        },
-        {
-          "path": "scripts/cleanup/retire-specs.sh",
-          "line": 45
-        },
-        {
-          "path": "scripts/cleanup/retire-specs.sh",
-          "line": 75
-        },
-        {
-          "path": "src/redis/connection.ts",
-          "line": 162
-        },
-        {
-          "path": "src/redis/connection.ts",
-          "line": 175
+          "path": "src/redis/connection.ts"
         }
       ],
       "inEnvExample": true,
       "source": {
-        "path": "scripts/cleanup/reclassify-deferred-acs.sh",
-        "line": 54
+        "path": "scripts/cleanup/reclassify-deferred-acs.sh"
       }
     },
     {
       "name": "REPO",
       "readSites": [
         {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 141
+          "path": "scripts/autopilot/recover-stale.sh"
         },
         {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 164
+          "path": "scripts/branch-prune.sh"
         },
         {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 165
+          "path": "scripts/ci/post-commit-status.ts"
         },
         {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 171
-        },
-        {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 172
-        },
-        {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 192
-        },
-        {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 210
-        },
-        {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 227
-        },
-        {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 228
-        },
-        {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 233
-        },
-        {
-          "path": "scripts/autopilot/recover-stale.sh",
-          "line": 234
-        },
-        {
-          "path": "scripts/branch-prune.sh",
-          "line": 201
-        },
-        {
-          "path": "scripts/branch-prune.sh",
-          "line": 202
-        },
-        {
-          "path": "scripts/branch-prune.sh",
-          "line": 212
-        },
-        {
-          "path": "scripts/branch-prune.sh",
-          "line": 222
-        },
-        {
-          "path": "scripts/branch-prune.sh",
-          "line": 423
-        },
-        {
-          "path": "scripts/branch-prune.sh",
-          "line": 458
-        },
-        {
-          "path": "scripts/branch-prune.sh",
-          "line": 462
-        },
-        {
-          "path": "scripts/ci/post-commit-status.ts",
-          "line": 205
-        },
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 649
-        },
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 702
-        },
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 711
-        },
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 795
-        },
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 967
-        },
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 970
-        },
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 986
-        },
-        {
-          "path": "scripts/glm-beachhead-report.sh",
-          "line": 996
+          "path": "scripts/glm-beachhead-report.sh"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/recover-stale.sh",
-        "line": 141
+        "path": "scripts/autopilot/recover-stale.sh"
       }
     },
     {
       "name": "SCOPE_MIN_OUT_OF_SCOPE_COUNT",
       "readSites": [
         {
-          "path": "scripts/ci/scope-check.ts",
-          "line": 414
+          "path": "scripts/ci/scope-check.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/scope-check.ts",
-        "line": 414
+        "path": "scripts/ci/scope-check.ts"
       }
     },
     {
       "name": "SCOPE_OUT_OF_SCOPE_THRESHOLD",
       "readSites": [
         {
-          "path": "scripts/ci/scope-check.ts",
-          "line": 413
+          "path": "scripts/ci/scope-check.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/scope-check.ts",
-        "line": 413
+        "path": "scripts/ci/scope-check.ts"
       }
     },
     {
       "name": "SENTRY_DSN",
       "readSites": [
         {
-          "path": "src/instrument.ts",
-          "line": 16
+          "path": "src/instrument.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/instrument.ts",
-        "line": 16
+        "path": "src/instrument.ts"
       }
     },
     {
       "name": "STALE_THRESHOLD_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh",
-          "line": 368
-        },
-        {
-          "path": "scripts/hydra-watchdog.ts",
-          "line": 48
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh",
-        "line": 368
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "STRYKER_MAX_FILES",
       "readSites": [
         {
-          "path": "scripts/ci/stryker-scan.ts",
-          "line": 490
+          "path": "scripts/ci/stryker-scan.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/ci/stryker-scan.ts",
-        "line": 490
+        "path": "scripts/ci/stryker-scan.ts"
       }
     },
     {
       "name": "TARGET_MANIFEST_ROOT",
       "readSites": [
         {
-          "path": "scripts/target/target-risk-surface.ts",
-          "line": 66
+          "path": "scripts/target/target-risk-surface.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/target/target-risk-surface.ts",
-        "line": 66
+        "path": "scripts/target/target-risk-surface.ts"
       }
     },
     {
       "name": "TARGET_PROJECT_DIR",
       "readSites": [
         {
-          "path": "scripts/target/mutation-check.ts",
-          "line": 360
+          "path": "scripts/target/mutation-check.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/target/mutation-check.ts",
-        "line": 360
+        "path": "scripts/target/mutation-check.ts"
       }
     },
     {
       "name": "TELEGRAM_BOT_TOKEN",
       "readSites": [
         {
-          "path": "src/operator-channel/credentials.ts",
-          "line": 21
+          "path": "src/operator-channel/credentials.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/operator-channel/credentials.ts",
-        "line": 21
+        "path": "src/operator-channel/credentials.ts"
       }
     },
     {
       "name": "TELEGRAM_CHAT_ID",
       "readSites": [
         {
-          "path": "src/operator-channel/credentials.ts",
-          "line": 22
+          "path": "src/operator-channel/credentials.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "src/operator-channel/credentials.ts",
-        "line": 22
+        "path": "src/operator-channel/credentials.ts"
       }
     }
   ]

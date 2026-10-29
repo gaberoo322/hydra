@@ -34,17 +34,27 @@ export const WEDGE_AGE_THRESHOLD_S = 600;
 /** When is an open dispatch "stalled" for the autopilot-health warn signal? 15 minutes. */
 export const STALLED_DISPATCH_AGE_S = 900;
 
+/**
+ * How stale may the Observability Heartbeat's `lastTickAt` be before the
+ * watchdog restarts the orchestrator and `/api/health/deep` reports Idle?
+ * 15 minutes; ticks are 5 min so this is ~3x margin. Consumed by
+ * src/watchdog/liveness.ts AND src/health/rules.ts (one predicate, issue #5096).
+ */
+export const SCHEDULER_TICK_STALE_S = 900;
+
 /** The module as one JSON-serialisable object (the `thresholds` CLI subcommand, read by status.sh). */
 export function staleThresholdsJson(): {
   wedgeKillS: number;
   killGraceS: number;
   wedgeAgeS: number;
   stalledDispatchAgeS: number;
+  schedulerTickStaleS: number;
 } {
   return {
     wedgeKillS: WATCHDOG_WEDGE_KILL_THRESHOLD_S,
     killGraceS: WATCHDOG_KILL_GRACE_S,
     wedgeAgeS: WEDGE_AGE_THRESHOLD_S,
     stalledDispatchAgeS: STALLED_DISPATCH_AGE_S,
+    schedulerTickStaleS: SCHEDULER_TICK_STALE_S,
   };
 }

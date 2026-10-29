@@ -297,9 +297,12 @@ describe("issue #4608 — operator tooling resolves the Target through the seam,
   });
 
   test("watchdog liveness block emits no Target venue/credential probe and no Target-unit failed-state scan", () => {
-    const start = watchdog.indexOf("run_service_liveness()");
-    assert.ok(start >= 0, "run_service_liveness() not found");
-    const body = watchdog.slice(start, start + watchdog.slice(start).search(/^}/m));
+    // The liveness block moved to TypeScript (issue #5096): the bash block is
+    // gone, so the invariant now applies to the TS port's sources.
+    assert.ok(!watchdog.includes("run_service_liveness()"), "the bash liveness block is deleted");
+    const body = ["src/watchdog/liveness.ts", "src/watchdog/ports.ts", "scripts/hydra-watchdog.ts"]
+      .map((rel) => readRepoFile(rel))
+      .join("\n");
     assert.doesNotMatch(body, /kalshi/i, "no venue credential probe in the liveness block");
     assert.doesNotMatch(body, /hydra-cred-check/, "no hourly credential-check flag file");
     assert.doesNotMatch(body, /hydra-betting/, "no mothballed-Target unit scan in the liveness block");

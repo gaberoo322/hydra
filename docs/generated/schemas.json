@@ -1,6 +1,6 @@
 {
   "family": "schemas",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "src/schemas/*.ts",
     "src/**/*.ts",
@@ -19,8 +19,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 106
+        "path": "src/schemas/operator-actions.ts"
       }
     },
     {
@@ -31,8 +30,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/turn-snapshot.ts",
-        "line": 179
+        "path": "src/schemas/turn-snapshot.ts"
       }
     },
     {
@@ -41,8 +39,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 411
+        "path": "src/schemas/operator-actions.ts"
       }
     },
     {
@@ -51,8 +48,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/now-page.ts",
-        "line": 134
+        "path": "src/schemas/now-page.ts"
       }
     },
     {
@@ -61,8 +57,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/attention.ts",
-        "line": 92
+        "path": "src/schemas/attention.ts"
       }
     },
     {
@@ -71,8 +66,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/attention.ts",
-        "line": 156
+        "path": "src/schemas/attention.ts"
       }
     },
     {
@@ -85,8 +79,7 @@
         "GET /api/attribution/impact"
       ],
       "source": {
-        "path": "src/schemas/attribution.ts",
-        "line": 25
+        "path": "src/schemas/attribution.ts"
       }
     },
     {
@@ -99,8 +92,7 @@
         "GET /api/autopilot/board-state"
       ],
       "source": {
-        "path": "src/schemas/autopilot-board.ts",
-        "line": 67
+        "path": "src/schemas/autopilot-board.ts"
       }
     },
     {
@@ -109,8 +101,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/autopilot-board.ts",
-        "line": 87
+        "path": "src/schemas/autopilot-board.ts"
       }
     },
     {
@@ -122,8 +113,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/now-page.ts",
-        "line": 88
+        "path": "src/schemas/now-page.ts"
       }
     },
     {
@@ -136,8 +126,7 @@
         "GET /api/now/autopilot-health"
       ],
       "source": {
-        "path": "src/schemas/now-page.ts",
-        "line": 173
+        "path": "src/schemas/now-page.ts"
       }
     },
     {
@@ -146,8 +135,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/now-page.ts",
-        "line": 230
+        "path": "src/schemas/now-page.ts"
       }
     },
     {
@@ -160,8 +148,7 @@
         "GET /api/autopilot/idle-diagnostics"
       ],
       "source": {
-        "path": "src/schemas/autopilot-idle.ts",
-        "line": 49
+        "path": "src/schemas/autopilot-idle.ts"
       }
     },
     {
@@ -170,8 +157,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/autopilot-idle.ts",
-        "line": 109
+        "path": "src/schemas/autopilot-idle.ts"
       }
     },
     {
@@ -180,8 +166,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/now-page.ts",
-        "line": 100
+        "path": "src/schemas/now-page.ts"
       }
     },
     {
@@ -190,8 +175,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/autopilot-board.ts",
-        "line": 52
+        "path": "src/schemas/autopilot-board.ts"
       }
     },
     {
@@ -203,8 +187,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 59
+        "path": "src/schemas/operator-actions.ts"
       }
     },
     {
@@ -215,8 +198,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 225
+        "path": "src/schemas/operator-actions.ts"
       }
     },
     {
@@ -227,8 +209,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 79
+        "path": "src/schemas/operator-actions.ts"
       }
     },
     {
@@ -241,8 +222,7 @@
         "GET /api/explore/behavior"
       ],
       "source": {
-        "path": "src/schemas/explore-page.ts",
-        "line": 100
+        "path": "src/schemas/explore-page.ts"
       }
     },
     {
@@ -255,8 +235,7 @@
         "POST /api/autopilot/board/close"
       ],
       "source": {
-        "path": "src/schemas/autopilot-board.ts",
-        "line": 356
+        "path": "src/schemas/autopilot-board.ts"
       }
     },
     {
@@ -269,8 +248,7 @@
         "POST /api/autopilot/board/reopen"
       ],
       "source": {
-        "path": "src/schemas/autopilot-board.ts",
-        "line": 364
+        "path": "src/schemas/autopilot-board.ts"
       }
     },
     {
@@ -283,8 +261,7 @@
         "POST /api/autopilot/board/promote"
       ],
       "source": {
-        "path": "src/schemas/autopilot-board.ts",
-        "line": 330
+        "path": "src/schemas/autopilot-board.ts"
       }
     },
     {
@@ -297,8 +274,7 @@
         "POST /api/autopilot/board/relabel"
       ],
       "source": {
-        "path": "src/schemas/autopilot-board.ts",
-        "line": 338
+        "path": "src/schemas/autopilot-board.ts"
       }
     },
     {
@@ -309,8 +285,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 68
+        "path": "src/schemas/operator-actions.ts"
       }
     },
     {
@@ -323,8 +298,7 @@
         "GET /api/builder-health"
       ],
       "source": {
-        "path": "src/schemas/builder-health.ts",
-        "line": 23
+        "path": "src/schemas/builder-health.ts"
       }
     },
     {
@@ -333,8 +307,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 296
+        "path": "src/schemas/operator-actions.ts"
       }
     },
     {
@@ -343,8 +316,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 137
+        "path": "src/schemas/operator-actions.ts"
       }
     },
     {
@@ -357,8 +329,7 @@
         "GET /api/learning/context-trace"
       ],
       "source": {
-        "path": "src/schemas/learning.ts",
-        "line": 30
+        "path": "src/schemas/learning.ts"
       }
     },
     {
@@ -367,8 +338,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 335
+        "path": "src/schemas/operator-actions.ts"
       }
     },
     {
@@ -377,8 +347,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/now-page.ts",
-        "line": 147
+        "path": "src/schemas/now-page.ts"
       }
     },
     {
@@ -391,8 +360,7 @@
         "POST /api/cycle/complete"
       ],
       "source": {
-        "path": "src/schemas/cycles.ts",
-        "line": 43
+        "path": "src/schemas/cycles.ts"
       }
     },
     {
@@ -405,8 +373,7 @@
         "POST /api/cycle/register"
       ],
       "source": {
-        "path": "src/schemas/cycles.ts",
-        "line": 27
+        "path": "src/schemas/cycles.ts"
       }
     },
     {
@@ -419,8 +386,7 @@
         "POST /api/design-concepts/:anchorRef/approve"
       ],
       "source": {
-        "path": "src/schemas/design-concept.ts",
-        "line": 157
+        "path": "src/schemas/design-concept.ts"
       }
     },
     {
@@ -433,8 +399,7 @@
         "POST /api/design-concepts"
       ],
       "source": {
-        "path": "src/schemas/design-concept.ts",
-        "line": 124
+        "path": "src/schemas/design-concept.ts"
       }
     },
     {
@@ -447,8 +412,7 @@
         "GET /api/design-concepts"
       ],
       "source": {
-        "path": "src/schemas/design-concept.ts",
-        "line": 231
+        "path": "src/schemas/design-concept.ts"
       }
     },
     {
@@ -461,8 +425,7 @@
         "POST /api/attention/:id/dismiss"
       ],
       "source": {
-        "path": "src/schemas/attention.ts",
-        "line": 179
+        "path": "src/schemas/attention.ts"
       }
     },
     {
@@ -475,8 +438,7 @@
         "POST /api/usage/dispatch-cost"
       ],
       "source": {
-        "path": "src/schemas/usage.ts",
-        "line": 34
+        "path": "src/schemas/usage.ts"
       }
     },
     {
@@ -489,8 +451,7 @@
         "POST /api/builder-health/dispatch-pr"
       ],
       "source": {
-        "path": "src/schemas/builder-health.ts",
-        "line": 64
+        "path": "src/schemas/builder-health.ts"
       }
     },
     {
@@ -503,8 +464,7 @@
         "GET /api/design-concepts/exempt-log"
       ],
       "source": {
-        "path": "src/schemas/design-concept.ts",
-        "line": 214
+        "path": "src/schemas/design-concept.ts"
       }
     },
     {
@@ -517,8 +477,7 @@
         "GET /api/usage/eligibility"
       ],
       "source": {
-        "path": "src/schemas/usage.ts",
-        "line": 63
+        "path": "src/schemas/usage.ts"
       }
     },
     {
@@ -531,8 +490,7 @@
         "POST /api/design-concepts/exempt-log"
       ],
       "source": {
-        "path": "src/schemas/design-concept.ts",
-        "line": 184
+        "path": "src/schemas/design-concept.ts"
       }
     },
     {
@@ -545,8 +503,7 @@
         "GET /api/design-concepts/exempt-log"
       ],
       "source": {
-        "path": "src/schemas/design-concept.ts",
-        "line": 220
+        "path": "src/schemas/design-concept.ts"
       }
     },
     {
@@ -560,8 +517,7 @@
         "GET /api/autopilot/hitl-grill"
       ],
       "source": {
-        "path": "src/schemas/autopilot-board.ts",
-        "line": 267
+        "path": "src/schemas/autopilot-board.ts"
       }
     },
     {
@@ -577,8 +533,7 @@
         "POST /api/autopilot/board/reopen"
       ],
       "source": {
-        "path": "src/schemas/autopilot-board.ts",
-        "line": 259
+        "path": "src/schemas/autopilot-board.ts"
       }
     },
     {
@@ -591,8 +546,7 @@
         "POST /api/holdback/check"
       ],
       "source": {
-        "path": "src/schemas/holdback.ts",
-        "line": 36
+        "path": "src/schemas/holdback.ts"
       }
     },
     {
@@ -603,8 +557,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/holdback.ts",
-        "line": 120
+        "path": "src/schemas/holdback.ts"
       }
     },
     {
@@ -617,8 +570,7 @@
         "POST /api/holdback/enroll"
       ],
       "source": {
-        "path": "src/schemas/holdback.ts",
-        "line": 26
+        "path": "src/schemas/holdback.ts"
       }
     },
     {
@@ -631,8 +583,7 @@
         "GET /api/holdback/enrolments"
       ],
       "source": {
-        "path": "src/schemas/holdback.ts",
-        "line": 143
+        "path": "src/schemas/holdback.ts"
       }
     },
     {
@@ -645,8 +596,7 @@
         "POST /api/holdback/pending"
       ],
       "source": {
-        "path": "src/schemas/holdback.ts",
-        "line": 69
+        "path": "src/schemas/holdback.ts"
       }
     },
     {
@@ -659,8 +609,7 @@
         "POST /api/holdback/revert-failed"
       ],
       "source": {
-        "path": "src/schemas/holdback.ts",
-        "line": 43
+        "path": "src/schemas/holdback.ts"
       }
     },
     {
@@ -669,8 +618,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/otel.ts",
-        "line": 59
+        "path": "src/schemas/otel.ts"
       }
     },
     {
@@ -683,8 +631,7 @@
         "GET /api/explore/lessons"
       ],
       "source": {
-        "path": "src/schemas/explore-page.ts",
-        "line": 153
+        "path": "src/schemas/explore-page.ts"
       }
     },
     {
@@ -695,8 +642,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/liveness.ts",
-        "line": 96
+        "path": "src/schemas/liveness.ts"
       }
     },
     {
@@ -707,8 +653,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 425
+        "path": "src/schemas/operator-actions.ts"
       }
     },
     {
@@ -719,8 +664,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 446
+        "path": "src/schemas/operator-actions.ts"
       }
     },
     {
@@ -729,8 +673,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 464
+        "path": "src/schemas/operator-actions.ts"
       }
     },
     {
@@ -743,8 +686,7 @@
         "POST /api/otel/v1/traces"
       ],
       "source": {
-        "path": "src/schemas/otel.ts",
-        "line": 52
+        "path": "src/schemas/otel.ts"
       }
     },
     {
@@ -757,8 +699,7 @@
         "GET /api/today/summary"
       ],
       "source": {
-        "path": "src/schemas/today-page.ts",
-        "line": 28
+        "path": "src/schemas/today-page.ts"
       }
     },
     {
@@ -767,8 +708,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/today-page.ts",
-        "line": 64
+        "path": "src/schemas/today-page.ts"
       }
     },
     {
@@ -781,8 +721,7 @@
         "POST /api/memory/:agent/pattern"
       ],
       "source": {
-        "path": "src/schemas/pattern-memory.ts",
-        "line": 31
+        "path": "src/schemas/pattern-memory.ts"
       }
     },
     {
@@ -795,8 +734,7 @@
         "POST /api/events/publish"
       ],
       "source": {
-        "path": "src/schemas/events.ts",
-        "line": 28
+        "path": "src/schemas/events.ts"
       }
     },
     {
@@ -805,8 +743,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/qa-verdict-cli.ts",
-        "line": 32
+        "path": "src/schemas/qa-verdict-cli.ts"
       }
     },
     {
@@ -815,8 +752,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/qa-verdict-cli.ts",
-        "line": 43
+        "path": "src/schemas/qa-verdict-cli.ts"
       }
     },
     {
@@ -827,8 +763,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/autopilot-board.ts",
-        "line": 179
+        "path": "src/schemas/autopilot-board.ts"
       }
     },
     {
@@ -837,8 +772,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/operator-actions.ts",
-        "line": 267
+        "path": "src/schemas/operator-actions.ts"
       }
     },
     {
@@ -851,8 +785,7 @@
         "GET /api/today/merges"
       ],
       "source": {
-        "path": "src/schemas/today-page.ts",
-        "line": 140
+        "path": "src/schemas/today-page.ts"
       }
     },
     {
@@ -865,8 +798,7 @@
         "GET /api/autopilot/retros"
       ],
       "source": {
-        "path": "src/schemas/retro.ts",
-        "line": 51
+        "path": "src/schemas/retro.ts"
       }
     },
     {
@@ -879,8 +811,7 @@
         "GET /api/reflections"
       ],
       "source": {
-        "path": "src/schemas/reflections.ts",
-        "line": 22
+        "path": "src/schemas/reflections.ts"
       }
     },
     {
@@ -889,8 +820,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/retro.ts",
-        "line": 89
+        "path": "src/schemas/retro.ts"
       }
     },
     {
@@ -903,8 +833,7 @@
         "GET /api/autopilot/runs/:runId/retro"
       ],
       "source": {
-        "path": "src/schemas/retro.ts",
-        "line": 27
+        "path": "src/schemas/retro.ts"
       }
     },
     {
@@ -917,8 +846,7 @@
         "POST /api/scheduler/start"
       ],
       "source": {
-        "path": "src/schemas/scheduler.ts",
-        "line": 38
+        "path": "src/schemas/scheduler.ts"
       }
     },
     {
@@ -931,8 +859,7 @@
         "POST /api/builder-health/scope-violation"
       ],
       "source": {
-        "path": "src/schemas/builder-health.ts",
-        "line": 45
+        "path": "src/schemas/builder-health.ts"
       }
     },
     {
@@ -945,8 +872,7 @@
         "GET /api/scout/dispatches"
       ],
       "source": {
-        "path": "src/schemas/scout.ts",
-        "line": 37
+        "path": "src/schemas/scout.ts"
       }
     },
     {
@@ -959,8 +885,7 @@
         "GET /api/scout/stats"
       ],
       "source": {
-        "path": "src/schemas/scout.ts",
-        "line": 29
+        "path": "src/schemas/scout.ts"
       }
     },
     {
@@ -973,8 +898,7 @@
         "POST /api/webhooks/sentry"
       ],
       "source": {
-        "path": "src/schemas/webhooks.ts",
-        "line": 44
+        "path": "src/schemas/webhooks.ts"
       }
     },
     {
@@ -983,8 +907,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/now-page.ts",
-        "line": 40
+        "path": "src/schemas/now-page.ts"
       }
     },
     {
@@ -997,8 +920,7 @@
         "GET /api/autopilot/slot-events"
       ],
       "source": {
-        "path": "src/schemas/autopilot-slot-events.ts",
-        "line": 24
+        "path": "src/schemas/autopilot-slot-events.ts"
       }
     },
     {
@@ -1007,8 +929,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/now-page.ts",
-        "line": 221
+        "path": "src/schemas/now-page.ts"
       }
     },
     {
@@ -1021,8 +942,7 @@
         "POST /api/dispatches/subagent"
       ],
       "source": {
-        "path": "src/schemas/dispatches.ts",
-        "line": 52
+        "path": "src/schemas/dispatches.ts"
       }
     },
     {
@@ -1035,8 +955,7 @@
         "POST /api/memory/subagent-friction"
       ],
       "source": {
-        "path": "src/schemas/pattern-memory.ts",
-        "line": 69
+        "path": "src/schemas/pattern-memory.ts"
       }
     },
     {
@@ -1049,8 +968,7 @@
         "POST /api/memory/subagent-lesson"
       ],
       "source": {
-        "path": "src/schemas/pattern-memory.ts",
-        "line": 50
+        "path": "src/schemas/pattern-memory.ts"
       }
     },
     {
@@ -1063,8 +981,7 @@
         "POST /api/metrics/tokens"
       ],
       "source": {
-        "path": "src/schemas/metrics.ts",
-        "line": 43
+        "path": "src/schemas/metrics.ts"
       }
     },
     {
@@ -1075,8 +992,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/turn-snapshot.ts",
-        "line": 48
+        "path": "src/schemas/turn-snapshot.ts"
       }
     },
     {
@@ -1087,8 +1003,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/target-manifest.ts",
-        "line": 101
+        "path": "src/schemas/target-manifest.ts"
       }
     },
     {
@@ -1101,8 +1016,7 @@
         "GET /api/taxonomy/classes"
       ],
       "source": {
-        "path": "src/schemas/taxonomy.ts",
-        "line": 44
+        "path": "src/schemas/taxonomy.ts"
       }
     },
     {
@@ -1111,8 +1025,7 @@
       "importedBy": [],
       "routes": [],
       "source": {
-        "path": "src/schemas/taxonomy.ts",
-        "line": 89
+        "path": "src/schemas/taxonomy.ts"
       }
     },
     {
@@ -1125,8 +1038,7 @@
         "GET /api/tier"
       ],
       "source": {
-        "path": "src/schemas/tier.ts",
-        "line": 20
+        "path": "src/schemas/tier.ts"
       }
     },
     {
@@ -1139,8 +1051,7 @@
         "GET /api/dispatches/:dispatchId/transcript"
       ],
       "source": {
-        "path": "src/schemas/dispatches.ts",
-        "line": 86
+        "path": "src/schemas/dispatches.ts"
       }
     },
     {
@@ -1151,8 +1062,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/turn-snapshot.ts",
-        "line": 269
+        "path": "src/schemas/turn-snapshot.ts"
       }
     },
     {
@@ -1165,8 +1075,7 @@
         "GET /api/usage/by-issue"
       ],
       "source": {
-        "path": "src/schemas/usage.ts",
-        "line": 51
+        "path": "src/schemas/usage.ts"
       }
     },
     {
@@ -1177,8 +1086,7 @@
       ],
       "routes": [],
       "source": {
-        "path": "src/schemas/autopilot-board.ts",
-        "line": 164
+        "path": "src/schemas/autopilot-board.ts"
       }
     },
     {
@@ -1193,8 +1101,7 @@
         "GET /api/outcomes/trends"
       ],
       "source": {
-        "path": "src/schemas/outcomes-page.ts",
-        "line": 36
+        "path": "src/schemas/outcomes-page.ts"
       }
     },
     {
@@ -1208,8 +1115,7 @@
         "GET /api/today/lessons-overnight"
       ],
       "source": {
-        "path": "src/schemas/today-page.ts",
-        "line": 178
+        "path": "src/schemas/today-page.ts"
       }
     }
   ]

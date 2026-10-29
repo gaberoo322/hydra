@@ -106,5 +106,5 @@ export function extractTierPaths(repoRoot: string): TierPathsInventory {
     untouchableSource: readFileSync(join(repoRoot, UNTOUCHABLE_FILE), "utf8"),
     classify: classifyChange,
   });
-  return { family: "tier-paths", schemaVersion: 1, generatedFrom: GENERATED_FROM, rows };
+  return { family: "tier-paths", schemaVersion: 2, generatedFrom: GENERATED_FROM, rows };
 }

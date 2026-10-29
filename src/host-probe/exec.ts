@@ -119,6 +119,14 @@ export function systemctlBin(): string {
 }
 
 /**
+ * Resolve the `flock` binary, honoring the `HYDRA_FLOCK_BIN` test/override hook.
+ * Symmetric with {@link dfBin}; production falls back to `flock` on PATH.
+ */
+export function flockBin(): string {
+  return process.env.HYDRA_FLOCK_BIN || "flock";
+}
+
+/**
  * The private spawn primitive. NOT exported past the seam in spirit — only the
  * `probe.ts` accessors should call it. Never throws; surfaces everything via
  * {@link RawProbeResult}.

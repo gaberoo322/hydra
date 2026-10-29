@@ -6,14 +6,15 @@
  *      (src/watchdog/ports.ts). No PATH-shimmed binaries, no env test hooks, no
  *      source-text slicing, and the fake's sleep resolves immediately so the
  *      30 s SIGKILL grace is never waited.
- *   2. the SERVICE LIVENESS block's boot-window guards (issue #4415) — second
- *      top-level describe at the end of this file, still driving
- *      scripts/hydra-watchdog.sh under PATH-shimmed stubs (slice 2 ports it).
+ *   2. the SERVICE LIVENESS check (issue #5096, ported from bash; boot-window
+ *      guards #4415) — same shape: pure decide predicates + runLiveness over a
+ *      fake. The remaining bash describes only drive hydra-watchdog.sh's
+ *      entry-point guard and run_watchdog_cli.
  */
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -21,9 +22,32 @@ import {
   WATCHDOG_SPAWN_TIMEOUT_MS,
   throwIfTimedOut,
 } from "./_helpers/watchdog-timeouts.mts";
+import { RESTART_TIMEOUT_MS } from "../src/host-probe/probe.ts";
 import { decideWedge, runWedge, type WedgeConfig } from "../src/watchdog/wedge.ts";
-import { createProductionWedgeDeps, parseStatePid, readHeartbeatMtimeEpoch, type WedgeDeps, type WedgeState } from "../src/watchdog/ports.ts";
 import {
+  createProductionWedgeDeps,
+  parseStatePid,
+  probeTunnel,
+  readPendingWork,
+  readHeartbeatMtimeEpoch,
+  type LivenessDeps,
+  type WedgeDeps,
+  type WedgeState,
+} from "../src/watchdog/ports.ts";
+import {
+  WATCHDOG_STARTUP_GRACE_S,
+  decidePendingWork,
+  parseStartupGraceS,
+  runLiveness,
+  type DeliberateStopRead,
+  type HealthRead,
+  type LivenessConfig,
+  type PendingWorkRead,
+  type SchedulerRead,
+} from "../src/watchdog/liveness.ts";
+import { isSchedulerTickStale, schedulerTickAgeS } from "../src/health/tick-liveness.ts";
+import {
+  SCHEDULER_TICK_STALE_S,
   STALLED_DISPATCH_AGE_S,
   WATCHDOG_KILL_GRACE_S,
   WATCHDOG_WEDGE_KILL_THRESHOLD_S,
@@ -244,325 +268,374 @@ describe("watchdog wedge check (decideWedge / runWedge over fake ports)", () => 
 });
 
 // =============================================================================
-// SERVICE LIVENESS — boot-window guards (issue #4415)
+// SERVICE LIVENESS (issue #5096, ported from the bash block; boot-window
+// guards #4415, pending-work #3794, deliberate-stop #388) — pure predicates +
+// runLiveness over an in-memory fake of the typed ports. No bash slicing, no
+// PATH shims; the fake records every effect in order.
 // =============================================================================
-//
-// The 2-minute watchdog tick can land inside the orchestrator's boot window:
-// systemd reports "Started" before Express listens (~1-4s, longer under load
-// and behind the ExecStartPre tsc compile), so Check 1 reads an empty /health
-// and restarts the service a SECOND time mid-boot. That second restart breaks
-// deploy.sh's post-restart health gate — a red deploy job on a healthy prod,
-// no semver tag (the 50eda03b incident). The fix adds two guards to
-// run_service_liveness, and the cases below pin exactly the issue's
-// acceptance-criteria trio plus the fail-open/probe-release invariants:
-//
-//   (a) fresh start (activation age < grace)          -> NO restart, reason
-//       logged — even with /health unreachable
-//   (b) deploy lock held                              -> NO restart, reason
-//       logged — even with an old service + dead /health
-//   (c) old + unhealthy                               -> restart as today
-//   (d) WATCHDOG_STARTUP_GRACE_SECONDS=0              -> the grace guard is
-//       a knob, not an unconditional skip
-//   (e) unreadable ActiveEnterTimestampMonotonic      -> fail OPEN (checks
-//       proceed) — a recovery mechanism must not disarm itself on a read
-//       failure
-//   (f) old + healthy                                 -> the normal path is
-//       intact, and the deploy-lock probe does not LEAK the lock
-//
-// Isolation: unlike the wedge describe above (env hooks only), these cases
-// PATH-SHIM systemctl / curl / docker with stub binaries and call ONLY
-// run_service_liveness — sourced via the script's BASH_SOURCE guard, the
-// same idiom as test/watchdog-pending-work.test.mts. `flock`, `python3`,
-// `date`, and `awk` are the REAL binaries: the deploy-lock cases exercise
-// genuine flock contention on a per-test lock file, and HYDRA_DEPLOY_LOCK is
-// ALWAYS rebound so no case ever probes (or creates) the live
-// /tmp/hydra-deploy.lock while a real deploy holds it.
 
-/** systemctl stub — driven by STUB_LOG / STUB_ACTIVE_AGE_S / STUB_SHOW_RAW. */
-const SYSTEMCTL_STUB = `#!/usr/bin/env bash
-# Test stub for systemctl (issue #4415 boot-window guard tests).
-args="$*"
-if [[ "\$args" == *"is-active"* ]]; then
-  if [[ "\$args" == *"hydra-orchestrator.service"* ]]; then
-    exit 0   # the orchestrator unit is "active"
-  fi
-  exit 3     # every other unit (e.g. the tunnel) reports inactive
-fi
-if [[ "\$args" == *"is-failed"* ]]; then
-  exit 1     # no failed units
-fi
-if [[ "\$args" == *"show"* ]]; then
-  if [[ -n "\${STUB_SHOW_RAW+x}" ]]; then
-    printf '%s\\n' "\$STUB_SHOW_RAW"
-    exit 0
-  fi
-  # ActiveEnterTimestampMonotonic for a service that became active
-  # STUB_ACTIVE_AGE_S seconds ago (systemd monotonic clock, microseconds).
-  now_us="\$(awk '{printf "%d", \$1 * 1000000}' /proc/uptime)"
-  age="\${STUB_ACTIVE_AGE_S:-3600}"
-  echo "\$((now_us - age * 1000000))"
-  exit 0
-fi
-if [[ "\$args" == *"restart"* ]]; then
-  printf 'systemctl-restart: %s\\n' "\$args" >>"\${STUB_LOG:?STUB_LOG not set}"
-  exit 0
-fi
-exit 0
-`;
-
-/** docker stub — the Redis container always answers Check 0's ping (logged). */
-const DOCKER_STUB = `#!/usr/bin/env bash
-printf 'docker-ping: %s\\n' "\$*" >>"\${STUB_LOG:?STUB_LOG not set}"
-echo PONG
-`;
-
-/** curl stub — canned bodies per URL; /api/health driven by STUB_HEALTH_MODE. */
-const CURL_STUB = `#!/usr/bin/env bash
-args="\$*"
-case "\$args" in
-  *"/api/health"*)
-    case "\${STUB_HEALTH_MODE:-ok}" in
-      fail) exit 7 ;;   # connection refused
-      *) echo '{"status":"ok","redis":true,"uptime":1000}'; exit 0 ;;
-    esac
-    ;;
-  *"/api/scheduler/status"*)
-    printf '{"running":true,"lastTickAt":"%s"}\\n' "\$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-    exit 0
-    ;;
-  *"/api/cycle/status"*)
-    echo '{"status":"idle"}'
-    exit 0
-    ;;
-esac
-exit 0
-`;
-
-interface LivenessHarness {
-  dir: string;
-  bin: string;
-  log: string;
-  lockFile: string;
+interface LivenessScript {
+  serviceActive?: boolean | null;
+  tunnelActive?: boolean;
+  /** Ping per call: Nth ping() returns pingSeq[N] (last value repeats). */
+  pingSeq?: boolean[];
+  activationAgeS?: number | null;
+  deployLockHeld?: boolean | null;
+  health?: HealthRead;
+  scheduler?: SchedulerRead;
+  deliberateStop?: DeliberateStopRead;
+  pendingWork?: PendingWorkRead;
+  tunnelReachable?: boolean;
+  nowMs?: number;
 }
 
-/** Fresh per-test stub bin dir, invocation log, and (free) deploy lock file. */
-function makeLivenessHarness(): LivenessHarness {
-  const dir = mkdtempSync(join(tmpdir(), "watchdog-liveness-stub-"));
-  const bin = join(dir, "bin");
-  mkdirSync(bin, { recursive: true });
-  writeFileSync(join(bin, "systemctl"), SYSTEMCTL_STUB);
-  writeFileSync(join(bin, "docker"), DOCKER_STUB);
-  writeFileSync(join(bin, "curl"), CURL_STUB);
-  chmodSync(join(bin, "systemctl"), 0o755);
-  chmodSync(join(bin, "docker"), 0o755);
-  chmodSync(join(bin, "curl"), 0o755);
-  return { dir, bin, log: join(dir, "systemctl.log"), lockFile: join(dir, "deploy.lock") };
-}
+const L_NOW = Date.parse("2026-10-28T12:00:00.000Z");
+const HEALTH_OK: HealthRead = { ok: true, status: "ok", redis: true, uptimeS: 3600, cycleRunning: false };
+const tickAgo = (s: number): string => new Date(L_NOW - s * 1000).toISOString();
+const SCHED_FRESH: SchedulerRead = { ok: true, running: true, lastTickAt: tickAgo(60) };
 
-interface LivenessResult {
-  status: number;
-  stdout: string;
-  stderr: string;
-  /** Every `systemctl ... restart ...` the block issued, from the stub's log. */
-  restarts: string[];
-  /** Every Check-0 `docker exec ... ping` the block issued, from the stub's log. */
-  dockerPings: string[];
-}
-
-/**
- * Source the watchdog (the BASH_SOURCE guard keeps every block's dispatch
- * inert) and run ONLY run_service_liveness with the stub bin prepended to
- * PATH. The echo marker distinguishes a clean block return from a set -e
- * abort inside the sourced script.
- */
-function runServiceLiveness(h: LivenessHarness, env: Record<string, string>): LivenessResult {
-  const driver = [
-    `source ${JSON.stringify(WATCHDOG)}`,
-    "run_service_liveness",
-    'echo "BLOCK_RC=$?"',
-  ].join("\n");
-  const r = spawnSync("bash", ["-c", driver], {
-    env: {
-      ...process.env,
-      // ALWAYS rebind the deploy lock away from the live /tmp/hydra-deploy.lock
-      // — a concurrent real deploy on the shared host must not flip a case.
-      HYDRA_DEPLOY_LOCK: h.lockFile,
-      STUB_LOG: h.log,
-      ...env,
-      PATH: `${h.bin}:${process.env.PATH ?? ""}`,
+function makeLivenessFake(script: LivenessScript) {
+  const effects: string[] = [];
+  const lines: string[] = [];
+  const calls = { pendingWork: 0, deployLock: 0, tunnelProbe: 0, deliberateStop: 0 };
+  let pings = 0;
+  const deps: LivenessDeps = {
+    host: {
+      serviceActive: async (unit) =>
+        unit === "hydra-tunnel.service"
+          ? (script.tunnelActive ?? false)
+          : script.serviceActive === undefined
+            ? true
+            : script.serviceActive,
+      activationAgeS: async () => (script.activationAgeS === undefined ? 3600 : script.activationAgeS),
+      deployLockHeld: async () => {
+        calls.deployLock++;
+        return script.deployLockHeld === undefined ? false : script.deployLockHeld;
+      },
+      restartService: async (unit) => {
+        effects.push(`restart:${unit}`);
+        return true;
+      },
+      sleep: async () => {},
     },
-    encoding: "utf-8",
-    timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
-  });
-  throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "watchdog service-liveness block");
-  const logged = existsSync(h.log)
-    ? readFileSync(h.log, "utf-8").split("\n").filter((l) => l.trim().length > 0)
-    : [];
-  const restarts = logged.filter((l) => l.startsWith("systemctl-restart:"));
-  const dockerPings = logged.filter((l) => l.startsWith("docker-ping:"));
-  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", restarts, dockerPings };
+    http: {
+      health: async () => script.health ?? HEALTH_OK,
+      schedulerStatus: async () => script.scheduler ?? SCHED_FRESH,
+      startScheduler: async () => {
+        effects.push("start-scheduler");
+        return true;
+      },
+      tunnelReachable: async () => {
+        calls.tunnelProbe++;
+        return script.tunnelReachable ?? true;
+      },
+    },
+    redis: {
+      ping: async () => {
+        const seq = script.pingSeq ?? [true];
+        return seq[Math.min(pings++, seq.length - 1)];
+      },
+      deliberateStop: async () => {
+        calls.deliberateStop++;
+        return script.deliberateStop ?? "absent";
+      },
+      close: () => {},
+    },
+    work: {
+      pendingWork: async () => {
+        calls.pendingWork++;
+        return script.pendingWork ?? { ok: true, total: 0 };
+      },
+    },
+    clock: { nowMs: () => script.nowMs ?? L_NOW },
+    log: (l) => lines.push(l),
+  };
+  return { deps, effects, lines, calls };
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+const LIVENESS_CONFIG: LivenessConfig = {
+  unit: "hydra-orchestrator.service",
+  dockerUnit: "hydra-docker.service",
+  tunnelUnit: "hydra-tunnel.service",
+  startupGraceS: 60,
+  deployLockPath: "/tmp/hydra-deploy.lock",
+  tunnelUrl: "https://example.invalid/api/health",
+  tickStaleS: SCHEDULER_TICK_STALE_S,
+};
 
-/**
- * Hold the deploy lock from a background process (real flock) until killed.
- * Resolves only once a non-blocking probe provably FAILS — i.e. the holder
- * actually owns the lock — so the subsequent watchdog run cannot race the
- * acquisition.
- */
-async function holdDeployLock(lockFile: string): Promise<ChildProcess> {
-  const holder = spawn(
-    "bash",
-    ["-c", `exec 9>>${JSON.stringify(lockFile)}; flock 9; sleep 60`],
-    { stdio: "ignore" },
-  );
-  const deadline = Date.now() + 10_000;
-  for (;;) {
-    const probe = spawnSync("bash", ["-c", `flock -n ${JSON.stringify(lockFile)} true`], {
+async function liveness(script: LivenessScript, config: Partial<LivenessConfig> = {}) {
+  const fake = makeLivenessFake(script);
+  const verdict = await runLiveness(fake.deps, { ...LIVENESS_CONFIG, ...config });
+  return { verdict, ...fake };
+}
+
+describe("watchdog liveness boot-window guards (issue #4415) over fake ports", () => {
+  test("(a) fresh start within grace: NO restart even with /health unreachable, reason logged", async () => {
+    const r = await liveness({ activationAgeS: 10, health: { ok: false } });
+    assert.equal(r.verdict.kind, "boot-grace");
+    assert.deepEqual(r.effects, []);
+    assert.match(r.lines.join("\n"), /service started 10s ago \(< 60s grace\) — skipping liveness restart this tick/);
+    assert.match(r.lines[0], /^hydra-orchestrator-watchdog: /);
+  });
+
+  test("(b) deploy lock held: NO restart even for an old service with /health unreachable", async () => {
+    const r = await liveness({ deployLockHeld: true, health: { ok: false } });
+    assert.equal(r.verdict.kind, "deploy-lock");
+    assert.deepEqual(r.effects, []);
+    assert.match(r.lines.join("\n"), /deploy in progress \(.*held\) — skipping liveness restart this tick/);
+  });
+
+  test("(c) old + unhealthy: restart fires exactly once", async () => {
+    const r = await liveness({ health: { ok: false } });
+    assert.equal(r.verdict.kind, "health-unreachable");
+    assert.deepEqual(r.effects, ["restart:hydra-orchestrator.service"]);
+    assert.match(r.lines.join("\n"), /\/api\/health unreachable — restarting/);
+  });
+
+  test("grace=0 disarms the guard: a fresh-but-unhealthy service is restarted", async () => {
+    const r = await liveness({ activationAgeS: 0, health: { ok: false } }, { startupGraceS: 0 });
+    assert.deepEqual(r.effects, ["restart:hydra-orchestrator.service"]);
+  });
+
+  test("parseStartupGraceS: non-numeric falls back to 60, 0 is honoured", () => {
+    assert.equal(parseStartupGraceS(undefined), WATCHDOG_STARTUP_GRACE_S);
+    assert.equal(parseStartupGraceS("abc"), 60);
+    assert.equal(parseStartupGraceS("0"), 0);
+    assert.equal(parseStartupGraceS("15"), 15);
+  });
+
+  test("unreadable activation age fails OPEN: WARN logged, checks proceed, restart still fires", async () => {
+    const r = await liveness({ activationAgeS: null, health: { ok: false } });
+    assert.equal(r.verdict.kind, "health-unreachable");
+    assert.deepEqual(r.effects, ["restart:hydra-orchestrator.service"]);
+    assert.match(r.lines.join("\n"), /WARN could not determine .* activation age — proceeding with liveness checks/);
+  });
+
+  test("unreadable deploy-lock probe fails OPEN (treated as NOT held)", async () => {
+    const r = await liveness({ deployLockHeld: null, health: { ok: false } });
+    assert.equal(r.verdict.kind, "health-unreachable");
+  });
+
+  test("old + healthy: healthy line names lastTickAt, no restart", async () => {
+    const r = await liveness({});
+    assert.equal(r.verdict.kind, "healthy");
+    assert.deepEqual(r.effects, []);
+    assert.match(r.lines.join("\n"), /healthy \(lastTickAt 60s ago, cycle=idle, redis=ok\)/);
+    assert.doesNotMatch(r.lines.join("\n"), /lastCycleAt/);
+  });
+});
+
+describe("watchdog liveness verdicts (decideLiveness / runLiveness over fake ports)", () => {
+  test("service inactive: nothing to do, no effect", async () => {
+    const r = await liveness({ serviceActive: false });
+    assert.equal(r.verdict.kind, "service-inactive");
+    assert.deepEqual(r.effects, []);
+    assert.match(r.lines.join("\n"), /is not active; nothing to do/);
+  });
+
+  test("Redis down then recovered: docker restarted first, then the orchestrator", async () => {
+    const r = await liveness({ pingSeq: [false, true] });
+    assert.equal(r.verdict.kind, "redis-down");
+    assert.deepEqual(r.effects, ["restart:hydra-docker.service", "restart:hydra-orchestrator.service"]);
+    assert.match(r.lines.join("\n"), /Redis container not responding \(got: FAILED\) — restarting hydra-docker.service/);
+    assert.match(r.lines.join("\n"), /Docker containers recovered — restarting orchestrator/);
+  });
+
+  test("Redis down and NOT recovered: docker restart only, manual-intervention line", async () => {
+    const r = await liveness({ pingSeq: [false, false] });
+    assert.deepEqual(r.effects, ["restart:hydra-docker.service"]);
+    assert.match(r.lines.join("\n"), /Docker recovery FAILED — manual intervention needed/);
+  });
+
+  test("Redis check runs BEFORE the boot-window guards (a fresh start with Redis down still recovers)", async () => {
+    const r = await liveness({ pingSeq: [false, false], activationAgeS: 1 });
+    assert.equal(r.verdict.kind, "redis-down");
+  });
+
+  test("health not ok / redis=false each restart exactly once", async () => {
+    const a = await liveness({ health: { ok: true, status: "degraded", redis: true, uptimeS: 900, cycleRunning: false } });
+    assert.equal(a.verdict.kind, "health-not-ok");
+    assert.deepEqual(a.effects, ["restart:hydra-orchestrator.service"]);
+    assert.match(a.lines.join("\n"), /\/health returned status='degraded' \(not 'ok'\) — restarting/);
+    const b = await liveness({ health: { ok: true, status: "ok", redis: false, uptimeS: 900, cycleRunning: false } });
+    assert.equal(b.verdict.kind, "health-redis-false");
+    assert.deepEqual(b.effects, ["restart:hydra-orchestrator.service"]);
+  });
+
+  test("scheduler status unreachable restarts the service", async () => {
+    const r = await liveness({ scheduler: { ok: false } });
+    assert.equal(r.verdict.kind, "sched-unreachable");
+    assert.deepEqual(r.effects, ["restart:hydra-orchestrator.service"]);
+  });
+
+  test("deliberate stop (marker present): leave alone, work is never read", async () => {
+    const r = await liveness({ scheduler: { ok: true, running: false, lastTickAt: null }, deliberateStop: "present" });
+    assert.equal(r.verdict.kind, "sched-deliberate-stop");
+    assert.deepEqual(r.effects, []);
+    assert.equal(r.calls.pendingWork, 0);
+  });
+
+  test("deliberate stop 'unreadable' means leave alone (fail-open direction is NO restart)", async () => {
+    const r = await liveness({ scheduler: { ok: true, running: false, lastTickAt: null }, deliberateStop: "unreadable" });
+    assert.equal(r.verdict.kind, "sched-deliberate-stop");
+    assert.deepEqual(r.effects, []);
+    assert.equal(r.calls.pendingWork, 0);
+  });
+
+  test("stopped scheduler inside the startup window: leave alone, work not read", async () => {
+    const r = await liveness({
+      scheduler: { ok: true, running: false, lastTickAt: null },
+      health: { ok: true, status: "ok", redis: true, uptimeS: 120, cycleRunning: false },
+    });
+    assert.equal(r.verdict.kind, "sched-stopped-startup-window");
+    assert.deepEqual(r.effects, []);
+    assert.equal(r.calls.pendingWork, 0);
+    assert.match(r.lines.join("\n"), /scheduler not yet running \(startup window, uptime 120s\); leaving alone/);
+  });
+
+  test("pending work three-way: work>0 starts the scheduler, 0 leaves alone, read failed starts it (fail-safe)", async () => {
+    const stopped: LivenessScript = { scheduler: { ok: true, running: false, lastTickAt: null } };
+    const withWork = await liveness({ ...stopped, pendingWork: { ok: true, total: 4 } });
+    assert.deepEqual(withWork.effects, ["start-scheduler"]);
+    assert.match(withWork.lines.join("\n"), /scheduler stopped but 4 items waiting .* restarting scheduler via API/);
+    const none = await liveness({ ...stopped, pendingWork: { ok: true, total: 0 } });
+    assert.deepEqual(none.effects, []);
+    assert.match(none.lines.join("\n"), /scheduler stopped, no work pending \(board\+queue=0\); leaving alone/);
+    const failed = await liveness({ ...stopped, pendingWork: { ok: false } });
+    assert.deepEqual(failed.effects, ["start-scheduler"]);
+    assert.match(failed.lines.join("\n"), /work-signal read FAILED — cannot prove no work pending/);
+  });
+
+  test("decidePendingWork: a failed read is never 'no work' (issue #3794 hard rule)", () => {
+    assert.equal(decidePendingWork({ ok: false }).kind, "sched-stopped-restart");
+    assert.equal(decidePendingWork({ ok: true, total: 0 }).kind, "sched-stopped-no-work");
+    assert.equal(decidePendingWork({ ok: true, total: 1 }).kind, "sched-stopped-restart");
+  });
+
+  test("running scheduler with null lastTickAt: fresh restart, leave alone", async () => {
+    const r = await liveness({ scheduler: { ok: true, running: true, lastTickAt: null } });
+    assert.equal(r.verdict.kind, "tick-null");
+    assert.deepEqual(r.effects, []);
+  });
+
+  test("stale tick + cycle in progress: leave alone", async () => {
+    const r = await liveness({
+      scheduler: { ok: true, running: true, lastTickAt: tickAgo(2000) },
+      health: { ok: true, status: "ok", redis: true, uptimeS: 3600, cycleRunning: true },
+    });
+    assert.equal(r.verdict.kind, "cycle-running");
+    assert.deepEqual(r.effects, []);
+  });
+
+  test("unparseable lastTickAt and negative age are left alone", async () => {
+    const bad = await liveness({ scheduler: { ok: true, running: true, lastTickAt: "not-a-date" } });
+    assert.equal(bad.verdict.kind, "tick-unparseable");
+    assert.match(bad.lines.join("\n"), /could not parse lastTickAt='not-a-date'/);
+    const skew = await liveness({ scheduler: { ok: true, running: true, lastTickAt: tickAgo(-120) } });
+    assert.equal(skew.verdict.kind, "clock-skew");
+    assert.deepEqual([...bad.effects, ...skew.effects], []);
+  });
+
+  test("stale tick (> 900s) with no cycle: restarts the orchestrator once; exactly 900s is NOT stale", async () => {
+    const stale = await liveness({ scheduler: { ok: true, running: true, lastTickAt: tickAgo(901) } });
+    assert.equal(stale.verdict.kind, "stale");
+    assert.deepEqual(stale.effects, ["restart:hydra-orchestrator.service"]);
+    assert.match(stale.lines.join("\n"), /STALE — lastTickAt was 901s ago \(> 900s\) and no cycle in progress/);
+    const edge = await liveness({ scheduler: { ok: true, running: true, lastTickAt: tickAgo(900) } });
+    assert.equal(edge.verdict.kind, "healthy");
+  });
+
+  test("tunnel three-way runs ONLY on healthy: inactive / ok / unreachable -> restart", async () => {
+    const inactive = await liveness({ tunnelActive: false });
+    assert.deepEqual(inactive.effects, []);
+    assert.equal(inactive.calls.tunnelProbe, 0);
+    const ok = await liveness({ tunnelActive: true, tunnelReachable: true });
+    assert.deepEqual(ok.effects, []);
+    assert.equal(ok.calls.tunnelProbe, 1);
+    const down = await liveness({ tunnelActive: true, tunnelReachable: false });
+    assert.deepEqual(down.effects, ["restart:hydra-tunnel.service"]);
+    assert.match(down.lines.join("\n"), /tunnel unreachable externally but orchestrator healthy — restarting hydra-tunnel.service/);
+    const unhealthy = await liveness({ tunnelActive: true, tunnelReachable: false, health: { ok: false } });
+    assert.equal(unhealthy.calls.tunnelProbe, 0);
+  });
+
+  test("every leave-alone kind records no effect; every restart kind records exactly one", async () => {
+    const leave: LivenessScript[] = [
+      { serviceActive: false },
+      { activationAgeS: 5 },
+      { deployLockHeld: true },
+      { scheduler: { ok: true, running: true, lastTickAt: null } },
+    ];
+    for (const s of leave) assert.deepEqual((await liveness(s)).effects, []);
+    const restart: LivenessScript[] = [
+      { health: { ok: false } },
+      { scheduler: { ok: false } },
+      { scheduler: { ok: true, running: true, lastTickAt: tickAgo(5000) } },
+    ];
+    for (const s of restart) assert.equal((await liveness(s)).effects.length, 1);
+  });
+
+  test("the pending-work read has exactly one call site in src/watchdog (never on the hot tick); no child_process", () => {
+    const src = readFileSync(join(REPO_ROOT, "src", "watchdog", "liveness.ts"), "utf-8");
+    assert.equal((src.match(/work\.pendingWork\(\)/g) ?? []).length, 1);
+    assert.ok(!/node:child_process/.test(src), "liveness.ts must not import node:child_process");
+    const ports = readFileSync(join(REPO_ROOT, "src", "watchdog", "ports.ts"), "utf-8");
+    assert.ok(!/from "node:child_process"/.test(ports), "ports.ts must not import node:child_process");
+    const cli = readFileSync(WATCHDOG_CLI, "utf-8");
+    assert.ok(!/from "node:child_process"/.test(cli), "the CLI must not import node:child_process");
+  });
+
+  test("thresholds JSON carries schedulerTickStaleS and the tick predicate is strict >", () => {
+    assert.equal(SCHEDULER_TICK_STALE_S, 900);
+    assert.equal(staleThresholdsJson().schedulerTickStaleS, 900);
+    assert.equal(isSchedulerTickStale(900, 900), false);
+    assert.equal(isSchedulerTickStale(901, 900), true);
+    assert.equal(schedulerTickAgeS(null, L_NOW), null);
+    assert.equal(schedulerTickAgeS("", L_NOW), null);
+    assert.equal(schedulerTickAgeS("garbage", L_NOW), "unparseable");
+    assert.equal(schedulerTickAgeS(tickAgo(30), L_NOW), 30);
+    assert.equal(schedulerTickAgeS(tickAgo(-30), L_NOW), -30);
+  });
+});
+
+describe("scripts/hydra-watchdog.sh — entry-point guard and CLI wiring (issue #3794 / #5096)", () => {
+  test("sourcing the script does NOT run the tick blocks (entry-point guard)", () => {
+    const r = spawnSync("bash", ["-c", `source ${JSON.stringify(WATCHDOG)}`], {
       encoding: "utf-8",
       timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
     });
-    if (probe.status !== 0) return holder; // probe blocked -> holder owns it
-    if (holder.exitCode !== null) {
-      throw new Error(`deploy-lock holder exited early (code ${holder.exitCode})`);
-    }
-    if (Date.now() > deadline) {
-      holder.kill("SIGKILL");
-      throw new Error("deploy-lock holder never acquired the lock within 10s");
-    }
-    await sleep(50);
-  }
-}
-
-describe("scripts/hydra-watchdog.sh — SERVICE LIVENESS boot-window guards (issue #4415)", () => {
-  test("(a) fresh start within grace: NO restart even with /health unreachable, reason logged", () => {
-    const h = makeLivenessHarness();
-    try {
-      // Exactly the 50eda03b race shape: the tick fires seconds after
-      // "Started", while Express is not yet listening.
-      const r = runServiceLiveness(h, { STUB_ACTIVE_AGE_S: "5", STUB_HEALTH_MODE: "fail" });
-
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-      assert.match(r.stdout, /BLOCK_RC=0/, `block must return cleanly, got: ${r.stdout}`);
-      assert.deepEqual(r.restarts, [], `must NOT restart a fresh service, got: ${r.restarts.join("; ")}`);
-      assert.match(
-        r.stdout,
-        /service started 5s ago \(< 60s grace\)/,
-        `expected fresh-start grace log line, got: ${r.stdout}`,
-      );
-      assert.match(r.stdout, /skipping liveness restart this tick/, `expected skip-reason tail, got: ${r.stdout}`);
-      // The guard must short-circuit BEFORE Check 1 — no unreachable/restart
-      // diagnostics may appear for a booting service.
-      assert.doesNotMatch(r.stdout, /unreachable|restarting/, `boot window must not be judged unhealthy, got: ${r.stdout}`);
-      // ...but AFTER Check 0 (the artifact's placement invariant): a Redis
-      // outage is a genuine incident and must not wait out a grace window.
-      assert.ok(r.dockerPings.length > 0, "Check 0's docker ping must still run ahead of the boot-window guards");
-    } finally {
-      rmSync(h.dir, { recursive: true, force: true });
-    }
+    throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "sourcing hydra-watchdog.sh");
+    assert.equal(r.status, 0, `source should exit 0; stderr=${r.stderr}`);
+    assert.doesNotMatch(r.stdout, /hydra-(orchestrator|autopilot|deploy-drift)-watchdog:/);
   });
 
-  test("(b) deploy lock held: NO restart even for an old service with /health unreachable, reason logged", async () => {
-    const h = makeLivenessHarness();
-    let holder: ChildProcess | null = null;
-    try {
-      holder = await holdDeployLock(h.lockFile);
-      // Old service (3600s >> grace) whose /health is down — without the
-      // lock guard this is a textbook restart; the deploy makes it a skip.
-      const r = runServiceLiveness(h, { STUB_ACTIVE_AGE_S: "3600", STUB_HEALTH_MODE: "fail" });
-
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-      assert.match(r.stdout, /BLOCK_RC=0/, `block must return cleanly, got: ${r.stdout}`);
-      assert.deepEqual(r.restarts, [], `must NOT restart during a deploy, got: ${r.restarts.join("; ")}`);
-      assert.match(
-        r.stdout,
-        /deploy in progress \([^)]* held\) — skipping liveness restart this tick/,
-        `expected deploy-in-progress log line, got: ${r.stdout}`,
-      );
-      assert.doesNotMatch(r.stdout, /unreachable|restarting/, `deploy window must not be judged unhealthy, got: ${r.stdout}`);
-      // Check 0 still ran ahead of the guard (Redis outage != deploy).
-      assert.ok(r.dockerPings.length > 0, "Check 0's docker ping must still run ahead of the boot-window guards");
-    } finally {
-      holder?.kill("SIGKILL");
-      rmSync(h.dir, { recursive: true, force: true });
-    }
+  test("the bash liveness block is deleted; the entry point runs the liveness CLI before the wedge CLI", () => {
+    const src = readFileSync(WATCHDOG, "utf-8");
+    assert.ok(!/run_service_liveness|read_pending_work/.test(src.replace(/^\s*#.*$/gm, "")), "no bash liveness code remains");
+    assert.ok(src.indexOf("  run_liveness_cli\n  run_wedge_cli") > 0, "liveness runs first, then wedge");
+    assert.match(src, /run_watchdog_cli liveness "hydra-orchestrator-watchdog:" 300/);
+    assert.match(src, /run_watchdog_cli wedge "hydra-autopilot-watchdog:" 90/);
   });
 
-  test("(c) old + unhealthy: restart fires exactly once, as before #4415", () => {
-    const h = makeLivenessHarness();
+  test("a failing CLI is ONE WARN line and rc 0 (never an aborted tick)", () => {
+    const root = mkdtempSync(join(tmpdir(), "liveness-cli-fail-"));
     try {
-      const r = runServiceLiveness(h, { STUB_ACTIVE_AGE_S: "3600", STUB_HEALTH_MODE: "fail" });
-
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-      assert.match(r.stdout, /BLOCK_RC=0/, `block must return cleanly, got: ${r.stdout}`);
-      assert.equal(r.restarts.length, 1, `expected exactly one restart, got: ${r.restarts.join("; ")}`);
-      assert.match(r.restarts[0]!, /restart hydra-orchestrator\.service/, `restart must target the orchestrator, got: ${r.restarts[0]}`);
-      assert.match(r.stdout, /unreachable — restarting hydra-orchestrator\.service/, `expected Check-1 unreachable diagnostic, got: ${r.stdout}`);
-    } finally {
-      rmSync(h.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("HYDRA_WATCHDOG_STARTUP_GRACE_SECONDS=0 disarms the grace guard — a fresh-but-unhealthy service is restarted", () => {
-    const h = makeLivenessHarness();
-    try {
-      const r = runServiceLiveness(h, {
-        STUB_ACTIVE_AGE_S: "5",
-        STUB_HEALTH_MODE: "fail",
-        HYDRA_WATCHDOG_STARTUP_GRACE_SECONDS: "0",
-      });
-
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-      assert.equal(r.restarts.length, 1, `grace=0 must let the restart fire, got: ${r.restarts.join("; ")}`);
-      assert.doesNotMatch(r.stdout, /skipping liveness restart/, `grace=0 must not skip, got: ${r.stdout}`);
-    } finally {
-      rmSync(h.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("unreadable ActiveEnterTimestampMonotonic fails OPEN — checks proceed and the restart still fires", () => {
-    const h = makeLivenessHarness();
-    try {
-      const r = runServiceLiveness(h, {
-        STUB_ACTIVE_AGE_S: "3600",
-        STUB_HEALTH_MODE: "fail",
-        STUB_SHOW_RAW: "ActiveEnterTimestampMonotonic=(garbage)",
-      });
-
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-      assert.match(
-        r.stdout,
-        /WARN could not determine hydra-orchestrator\.service activation age/,
-        `expected the fail-open WARN, got: ${r.stdout}`,
-      );
-      assert.match(r.stdout, /proceeding with liveness checks/, `expected proceed-line, got: ${r.stdout}`);
-      assert.equal(r.restarts.length, 1, `a read failure must not disarm recovery, got: ${r.restarts.join("; ")}`);
-    } finally {
-      rmSync(h.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("old + healthy: normal path intact (healthy line, no restart) and the deploy-lock probe does not LEAK the lock", () => {
-    const h = makeLivenessHarness();
-    try {
-      const r = runServiceLiveness(h, { STUB_ACTIVE_AGE_S: "3600", STUB_HEALTH_MODE: "ok" });
-
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-      assert.deepEqual(r.restarts, [], `a healthy service must not be restarted, got: ${r.restarts.join("; ")}`);
-      assert.match(r.stdout, /healthy \(/, `expected the healthy summary line, got: ${r.stdout}`);
-
-      // The lock probe acquires-and-releases inside a subshell: the watchdog
-      // must never HOLD the deploy lock (a held lock would block the next
-      // real deploy for its whole tick). Prove the lock is free right after
-      // the block ran.
-      const probe = spawnSync("bash", ["-c", `flock -n ${JSON.stringify(h.lockFile)} true`], {
+      const failing = join(root, "node");
+      writeFileSync(failing, "#!/bin/sh\nexit 7\n");
+      chmodSync(failing, 0o755);
+      const r = spawnSync("bash", ["-c", 'set -euo pipefail; source "$1"; run_liveness_cli', "x", WATCHDOG], {
+        env: { ...process.env, HYDRA_WATCHDOG_NODE: failing, HYDRA_ROOT: REPO_ROOT },
         encoding: "utf-8",
         timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
       });
-      assert.equal(probe.status, 0, `deploy lock must be free after a watchdog tick, got exit ${probe.status}`);
+      throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_liveness_cli");
+      assert.equal(r.status, 0);
+      assert.equal(
+        r.stdout.trim(),
+        "hydra-orchestrator-watchdog: WARN liveness CLI FAILED (rc=7) — liveness check skipped this tick",
+      );
     } finally {
-      rmSync(h.dir, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
@@ -636,5 +709,84 @@ describe("scripts/hydra-watchdog.sh — run_wedge_cli resolves node without the 
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("watchdog liveness production adapters (issue #5096 QA round 1)", () => {
+  const rows = (labels: string[], n: number) =>
+    ({ kind: "ok", data: Array.from({ length: n }, (_, i) => ({ number: i + 1, labels: labels.map((name) => ({ name })) })) }) as const;
+  const fakeGithub = (byLabel: Record<string, unknown>) => ({
+    async openIssueLabelsWithLabel(label: string, limit: number) {
+      assert.equal(limit, 100);
+      return byLabel[label] as never;
+    },
+  });
+
+  test("pendingWork reads each label separately, so >100 unrelated open issues cannot hide actionable work", async () => {
+    const seen: string[] = [];
+    const gh = {
+      async openIssueLabelsWithLabel(label: string) {
+        seen.push(label);
+        return (label === "needs-triage" ? rows(["needs-triage"], 2) : { kind: "ok", data: [] }) as never;
+      },
+    };
+    const r = await readPendingWork({ github: gh, readQueue: async () => 1, log: () => {} });
+    assert.deepEqual(seen.sort(), ["needs-research", "needs-triage", "ready-for-agent"]);
+    assert.deepEqual(r, { ok: true, total: 3 });
+  });
+
+  test("pendingWork: a failed per-label read is ok:false, never zero work", async () => {
+    const r = await readPendingWork({
+      github: fakeGithub({ "ready-for-agent": { kind: "empty" }, "needs-research": { kind: "ok", data: [] }, "needs-triage": { kind: "ok", data: [] } }),
+      readQueue: async () => 0,
+      log: () => {},
+    });
+    assert.deepEqual(r, { ok: false });
+  });
+
+  test("pendingWork sibling: a healthy all-empty board is ok with total 0", async () => {
+    const empty = { kind: "ok", data: [] };
+    const r = await readPendingWork({
+      github: fakeGithub({ "ready-for-agent": empty, "needs-research": empty, "needs-triage": empty }),
+      readQueue: async () => 0,
+      log: () => {},
+    });
+    assert.deepEqual(r, { ok: true, total: 0 });
+  });
+
+  test("probeTunnel: any HTTP response (5xx, 403, 302) is reachable", async () => {
+    for (const status of [500, 403, 302, 200]) {
+      const f = (async () => new Response(null, { status })) as unknown as typeof fetch;
+      assert.equal(await probeTunnel("http://x", f), true, `status ${status}`);
+    }
+  });
+
+  test("probeTunnel: a transport error rejects (caller maps it to unreachable)", async () => {
+    const f = (async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+    await assert.rejects(probeTunnel("http://x", f));
+  });
+});
+
+describe("liveness CLI wrapper budget nests the restart cap (#5096 QA round 2)", () => {
+  const sh = readFileSync(resolve(import.meta.dirname, "../scripts/hydra-watchdog.sh"), "utf8");
+  const wrapperS = (name: string): number => {
+    const m = sh.match(new RegExp(`run_${name}_cli\\(\\) \\{ run_watchdog_cli ${name} "[^"]+" (\\d+);`));
+    assert.ok(m, `run_${name}_cli not found`);
+    return Number(m[1]);
+  };
+
+  test("liveness wrapper exceeds two restarts + 5s settle (redis-down worst case)", () => {
+    assert.ok(wrapperS("liveness") * 1000 > 2 * RESTART_TIMEOUT_MS + 5_000 + 10_000);
+  });
+
+  test("sibling: wedge wrapper stays 90s", () => {
+    assert.equal(wrapperS("wedge"), 90);
+  });
+
+  test("no src/health file mentions the retired lastCycleAt identifier", () => {
+    const out = spawnSync("grep", ["-rn", "lastCycleAt", resolve(import.meta.dirname, "../src/health")], { encoding: "utf8" });
+    assert.equal(out.stdout.trim(), "");
   });
 });

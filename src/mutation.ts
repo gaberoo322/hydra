@@ -113,6 +113,13 @@ export type MutationTestReport = {
   // Issue #4504: mutants never run because `testCommandForFile` returned null
   // (no related test). Always 0 when `testCommandForFile` is not supplied.
   noCoverage: number;
+  // Issue #5262: mutants dropped at GENERATION time because the mutated source
+  // does not parse (e.g. swap-comparison turning a generic `Map<string, X>` into
+  // `Map>string, X>`). They are recorded as skipped (so they are also counted
+  // in `skipped` and `totalMutants`) and never touch disk, never run tests and
+  // never consume a maxMutants slot or time budget. Optional so report literals
+  // that predate the counter stay valid; absent means 0.
+  skippedUnparseable?: number;
 };
 
 /**
@@ -133,6 +140,30 @@ export function conclusiveMutants(report: MutationTestReport): number {
 // ---------------------------------------------------------------------------
 
 /**
+ * Every swap-comparison candidate for a line, in preference order (issue
+ * #5262): `===` / `!==` first (first occurrence, as before), then each `>`
+ * left-to-right, then each `<`. Pure.
+ */
+export function swapComparisonCandidates(line: string): string[] {
+  const out: string[] = [];
+  if (line.includes("===")) out.push(line.replace("===", "!=="));
+  if (line.includes("!==")) out.push(line.replace("!==", "==="));
+  if (out.length > 0) return out;
+  for (const ch of [">", "<"]) {
+    const other = ch === ">" ? "<" : ">";
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] !== ch) continue;
+      const prev = i > 0 ? line[i - 1] : "";
+      const next = i + 1 < line.length ? line[i + 1] : "";
+      // Same exclusions as the legacy regex: not part of =>, >=, <=, <<, >>, !=...
+      if (prev === "" || "=<>!".includes(prev) || next === "" || next === "=") continue;
+      out.push(line.slice(0, i) + other + line.slice(i + 1));
+    }
+  }
+  return out;
+}
+
+/**
  * Mutators — each takes a line and returns a mutated version, or null if
  * the mutation doesn't apply.
  */
@@ -147,14 +178,10 @@ const MUTATORS: { type: string; apply: (line: string) => string | null }[] = [
   },
   {
     type: "swap-comparison",
-    apply: (line) => {
-      // Only swap the first occurrence to keep mutations atomic
-      if (line.includes("===")) return line.replace("===", "!==");
-      if (line.includes("!==")) return line.replace("!==", "===");
-      if (/[^=<>!]>[^=]/.test(line)) return line.replace(/([^=<>!])>([^=])/, "$1<$2");
-      if (/[^=<>!]<[^=]/.test(line)) return line.replace(/([^=<>!])<([^=])/, "$1>$2");
-      return null;
-    },
+    // Issue #5262: the first candidate is not always a real comparison (a
+    // generic `<`/`>` is syntactically identical). `apply` keeps the legacy
+    // single answer; the generator walks swapComparisonCandidates instead.
+    apply: (line) => swapComparisonCandidates(line)[0] ?? null,
   },
   {
     type: "negate-condition",
@@ -186,13 +213,60 @@ export function shouldSkipMutation(filePath: string): boolean {
   return SKIP_PATTERNS.some((pat) => pat.test(filePath));
 }
 
+/** The subset of the `typescript` module the validity check needs. */
+type TsLike = {
+  transpileModule: (
+    input: string,
+    opts: { reportDiagnostics: boolean; fileName: string },
+  ) => { diagnostics?: readonly { messageText: unknown }[] };
+};
+
+function firstDiagnosticText(d: { messageText: unknown } | undefined): string {
+  if (!d) return "syntax error";
+  const m = d.messageText as any;
+  return typeof m === "string" ? m : String(m?.messageText ?? "syntax error");
+}
+
 /**
- * Generate candidate mutations for a single file. Module-private — only
- * `runMutationTests` calls it, and exposing it never paid off.
+ * Syntactic diagnostics of `source` (issue #5262). `transpileModule` reports
+ * only syntactic errors, which is exactly "does this parse".
  */
-function generateMutations(filePath: string, content: string): Mutation[] {
+function syntacticDiagnostics(ts: TsLike, source: string, fileName: string) {
+  return ts.transpileModule(source, { reportDiagnostics: true, fileName }).diagnostics ?? [];
+}
+
+/**
+ * Generate candidate mutations for a single file (issue #5262: validity is
+ * decided here, at generation time). A candidate is unparseable iff the
+ * mutated file's syntactic diagnostic count exceeds the unmutated file's
+ * baseline; such a candidate is returned in `unparseable` as a skipped result
+ * and never as a runnable mutation. Never throws.
+ */
+export function generateMutations(
+  filePath: string,
+  content: string,
+  ts: TsLike | null = null,
+): { mutations: Mutation[]; unparseable: MutationResult[] } {
   const mutations: Mutation[] = [];
+  const unparseable: MutationResult[] = [];
   const lines = content.split("\n");
+  let baseline: number | null = null;
+
+  const parseCheck = (i: number, mutated: string): string | null => {
+    if (!ts) return null;
+    try {
+      if (baseline === null) baseline = syntacticDiagnostics(ts, content, filePath).length;
+      const copy = lines.slice();
+      copy[i] = mutated;
+      const diags = syntacticDiagnostics(ts, copy.join("\n"), filePath);
+      return diags.length > baseline ? firstDiagnosticText(diags[0]) : null;
+    } catch (err) {
+      // Fail open: if the checker itself blows up, keep the mutant runnable
+      // rather than silently dropping signal.
+      console.error("[mutation] parse check failed; keeping mutant:", err);
+      return null;
+    }
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -204,21 +278,34 @@ function generateMutations(filePath: string, content: string): Mutation[] {
     }
 
     for (const mutator of MUTATORS) {
-      const mutated = mutator.apply(line);
-      if (mutated && mutated !== line) {
-        mutations.push({
-          file: filePath,
-          line: i + 1,
-          original: line,
-          mutated,
-          type: mutator.type,
-        });
-        break; // one mutation per line max
+      const options = mutator.type === "swap-comparison"
+        ? swapComparisonCandidates(line)
+        : [mutator.apply(line)].filter((m): m is string => m !== null);
+      const candidates = options.filter((m) => m !== line);
+      if (candidates.length === 0) continue;
+
+      let firstError: string | null = null;
+      let chosen: string | null = null;
+      for (const mutated of candidates) {
+        const err = parseCheck(i, mutated);
+        if (err === null) { chosen = mutated; break; }
+        firstError ??= err;
       }
+      if (chosen !== null) {
+        mutations.push({ file: filePath, line: i + 1, original: line, mutated: chosen, type: mutator.type });
+      } else {
+        unparseable.push({
+          mutation: { file: filePath, line: i + 1, original: line, mutated: candidates[0], type: mutator.type },
+          survived: false,
+          skipped: true,
+          error: `unparseable mutant (${mutator.type}): ${firstError}`,
+        });
+      }
+      break; // one mutation per line max
     }
   }
 
-  return mutations;
+  return { mutations, unparseable };
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +360,18 @@ export async function runMutationTests(
 
   const results: MutationResult[] = [];
   const allMutations: Mutation[] = [];
+  const unparseableResults: MutationResult[] = [];
+
+  // Issue #5262: lazy dynamic import — src/mutation.ts is reachable from the
+  // running service (retro-inputs -> mutation-gate-inputs -> mutation), and the
+  // compiler must stay CI-only. typescript is a devDependency.
+  let ts: TsLike | null = null;
+  try {
+    const mod: any = await import("typescript");
+    ts = (mod.default ?? mod) as TsLike;
+  } catch (err) {
+    console.error("[mutation] typescript unavailable; mutant validity check disabled:", err);
+  }
 
   // Resolve app directory (same logic as verifier)
   let appDir = projectDir;
@@ -297,8 +396,9 @@ export async function runMutationTests(
     const fullPath = file.startsWith("/") ? file : `${projectDir}/${file}`;
     try {
       const content = await readFile(fullPath, "utf-8");
-      const mutations = generateMutations(fullPath, content);
-      allMutations.push(...mutations);
+      const generated = generateMutations(fullPath, content, ts);
+      allMutations.push(...generated.mutations);
+      unparseableResults.push(...generated.unparseable);
     } catch { /* intentional: file may have been deleted in diff — skip mutation generation */ }
   }
 
@@ -318,6 +418,10 @@ export async function runMutationTests(
   // "nothing to mutate" (legitimate no-mutants) from "we capped a larger pool"
   // (still useful signal, should classify as RAN).
   const candidatesGenerated = allMutations.length;
+
+  // Issue #5262: unparseable mutants are pre-seeded as skipped results; they
+  // consume no candidate slot and no time budget.
+  results.push(...unparseableResults);
 
   let timedOut = false;
 
@@ -446,5 +550,6 @@ export async function runMutationTests(
     candidatesGenerated,
     inconclusive,
     noCoverage,
+    skippedUnparseable: unparseableResults.length,
   };
 }

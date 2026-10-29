@@ -130,7 +130,7 @@ describe("inventory loading is build-time glob + runtime parse (INV-5)", () => {
     assert.match(src, /query: "\?raw"/);
     assert.match(src, /eager: true/);
     assert.match(src, /JSON\.parse\(raw\)/);
-    assert.match(src, /schemaVersion !== 1/);
+    assert.match(src, /schemaVersion !== 2/);
     for (const [rel, s] of await docsPageSources()) {
       assert.ok(!/import\s+\w+\s+from\s+["'][^"']*\.json["']/.test(s), `${rel} statically imports an inventory`);
     }

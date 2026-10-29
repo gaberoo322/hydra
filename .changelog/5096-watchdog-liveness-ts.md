@@ -1,0 +1,1 @@
+- refactor: port the watchdog service-liveness block to a typed TS CLI and revive the dead scheduler-idle health rule on lastTickAt (#5096)

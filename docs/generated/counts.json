@@ -1,6 +1,6 @@
 {
   "family": "counts",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "docs/generated/adrs.json",
     "docs/generated/areas.json",
@@ -108,7 +108,7 @@
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 266
+      "value": 267
     },
     {
       "family": "pages",

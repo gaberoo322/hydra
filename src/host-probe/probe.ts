@@ -18,6 +18,7 @@
 import {
   dfBin,
   freeBin,
+  flockBin,
   systemctlBin,
   runProbe,
   classifyProbeFailure,
@@ -251,4 +252,79 @@ export async function readUserTimers(
     return { ok: false, code: "host-probe-empty" };
   }
   return { ok: true, data: parsed };
+}
+
+/** Parse `systemctl show -p ActiveEnterTimestampMonotonic --value` output (µs since boot). `null` for non-numeric. */
+export function parseMonotonicUs(stdout: string): number | null {
+  const t = stdout.trim();
+  if (!/^[0-9]+$/.test(t)) return null;
+  return Number(t);
+}
+
+/**
+ * The unit's `ActiveEnterTimestampMonotonic` in µs since boot (issue #5096) —
+ * the watchdog's fresh-start grace input.
+ */
+export async function readServiceActiveEnterMonotonicUs(
+  unit: string,
+  opts: ProbeExecOptions = {},
+): Promise<ProbeResult<number>> {
+  const raw = await runProbe(
+    systemctlBin(),
+    ["--user", "show", "-p", "ActiveEnterTimestampMonotonic", "--value", unit],
+    opts,
+  );
+  if (raw.spawnErrorCode || raw.timedOut || raw.exitCode !== 0) {
+    const code = classifyProbeFailure(raw);
+    logger.error({ unit, code, exitCode: raw.exitCode }, "[host-probe] systemctl show ActiveEnterTimestampMonotonic failed");
+    return { ok: false, code };
+  }
+  const us = parseMonotonicUs(raw.stdout);
+  if (us === null) return { ok: false, code: "host-probe-empty" };
+  return { ok: true, data: us };
+}
+
+/**
+ * Is the flock at `path` currently HELD by someone else? Probes with
+ * `flock -n <path> true`: the lock is released the instant the throwaway child
+ * exits, so the caller never holds it (issue #5096). exit 0 -> `held:false`,
+ * exit 1 -> `held:true`; spawn/timeout/other exits are failures.
+ */
+export async function probeFileLockFree(
+  path: string,
+  opts: ProbeExecOptions = {},
+): Promise<ProbeResult<{ held: boolean }>> {
+  const raw = await runProbe(flockBin(), ["-n", path, "true"], opts);
+  if (raw.spawnErrorCode || raw.timedOut) {
+    const code = classifyProbeFailure(raw);
+    logger.error({ path, code }, "[host-probe] flock probe failed");
+    return { ok: false, code };
+  }
+  if (raw.exitCode === 0) return { ok: true, data: { held: false } };
+  if (raw.exitCode === 1) return { ok: true, data: { held: true } };
+  logger.error({ path, exitCode: raw.exitCode }, "[host-probe] flock probe exited unexpectedly");
+  return { ok: false, code: "host-probe-failed" };
+}
+
+/** Restart timeout: `systemctl --user restart` blocks until the unit settles (the orchestrator runs tsc in ExecStartPre). */
+export const RESTART_TIMEOUT_MS = 90_000;
+
+/**
+ * The seam's first WRITE accessor (issue #5096): `systemctl --user restart <unit>`.
+ * The only restart primitive the watchdog CLI uses.
+ */
+export async function restartService(
+  unit: string,
+  opts: ProbeExecOptions = {},
+): Promise<ProbeResult<true>> {
+  const raw = await runProbe(systemctlBin(), ["--user", "restart", unit], {
+    timeout: RESTART_TIMEOUT_MS,
+    ...opts,
+  });
+  if (raw.spawnErrorCode || raw.timedOut || raw.exitCode !== 0) {
+    const code = classifyProbeFailure(raw);
+    logger.error({ unit, code, exitCode: raw.exitCode }, "[host-probe] systemctl restart failed");
+    return { ok: false, code };
+  }
+  return { ok: true, data: true };
 }

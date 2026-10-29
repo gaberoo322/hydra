@@ -1,6 +1,6 @@
 {
   "family": "pages",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": [
     "dashboard/src/App.jsx",
     "dashboard/src/components/Sidebar.jsx"
@@ -15,8 +15,7 @@
       "inNav": true,
       "navGroup": "journey",
       "source": {
-        "path": "dashboard/src/App.jsx",
-        "line": 95
+        "path": "dashboard/src/App.jsx"
       }
     },
     {
@@ -28,8 +27,7 @@
       "inNav": true,
       "navGroup": "journey",
       "source": {
-        "path": "dashboard/src/App.jsx",
-        "line": 98
+        "path": "dashboard/src/App.jsx"
       }
     },
     {
@@ -41,8 +39,7 @@
       "inNav": true,
       "navGroup": "journey",
       "source": {
-        "path": "dashboard/src/App.jsx",
-        "line": 99
+        "path": "dashboard/src/App.jsx"
       }
     },
     {
@@ -54,8 +51,7 @@
       "inNav": true,
       "navGroup": "journey",
       "source": {
-        "path": "dashboard/src/App.jsx",
-        "line": 101
+        "path": "dashboard/src/App.jsx"
       }
     },
     {
@@ -67,8 +63,7 @@
       "inNav": true,
       "navGroup": "journey",
       "source": {
-        "path": "dashboard/src/App.jsx",
-        "line": 104
+        "path": "dashboard/src/App.jsx"
       }
     },
     {
@@ -80,8 +75,7 @@
       "inNav": false,
       "navGroup": null,
       "source": {
-        "path": "dashboard/src/App.jsx",
-        "line": 105
+        "path": "dashboard/src/App.jsx"
       }
     },
     {
@@ -93,8 +87,7 @@
       "inNav": true,
       "navGroup": "journey",
       "source": {
-        "path": "dashboard/src/App.jsx",
-        "line": 109
+        "path": "dashboard/src/App.jsx"
       }
     },
     {
@@ -106,8 +99,7 @@
       "inNav": false,
       "navGroup": null,
       "source": {
-        "path": "dashboard/src/App.jsx",
-        "line": 112
+        "path": "dashboard/src/App.jsx"
       }
     },
     {
@@ -119,8 +111,7 @@
       "inNav": false,
       "navGroup": null,
       "source": {
-        "path": "dashboard/src/App.jsx",
-        "line": 114
+        "path": "dashboard/src/App.jsx"
       }
     },
     {
@@ -132,8 +123,7 @@
       "inNav": true,
       "navGroup": "reference",
       "source": {
-        "path": "dashboard/src/App.jsx",
-        "line": 119
+        "path": "dashboard/src/App.jsx"
       }
     },
     {
@@ -145,8 +135,7 @@
       "inNav": false,
       "navGroup": null,
       "source": {
-        "path": "dashboard/src/App.jsx",
-        "line": 123
+        "path": "dashboard/src/App.jsx"
       }
     },
     {
@@ -158,8 +147,7 @@
       "inNav": false,
       "navGroup": null,
       "source": {
-        "path": "dashboard/src/App.jsx",
-        "line": 124
+        "path": "dashboard/src/App.jsx"
       }
     },
     {
@@ -171,8 +159,7 @@
       "inNav": false,
       "navGroup": null,
       "source": {
-        "path": "dashboard/src/App.jsx",
-        "line": 125
+        "path": "dashboard/src/App.jsx"
       }
     }
   ]
