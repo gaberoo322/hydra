@@ -26,6 +26,8 @@ import { decideWedge, runWedge, type WedgeConfig } from "../src/watchdog/wedge.t
 import {
   createProductionWedgeDeps,
   parseStatePid,
+  probeTunnel,
+  readPendingWork,
   readHeartbeatMtimeEpoch,
   type LivenessDeps,
   type WedgeDeps,
@@ -706,5 +708,62 @@ describe("scripts/hydra-watchdog.sh — run_wedge_cli resolves node without the 
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("watchdog liveness production adapters (issue #5096 QA round 1)", () => {
+  const rows = (labels: string[], n: number) =>
+    ({ kind: "ok", data: Array.from({ length: n }, (_, i) => ({ number: i + 1, labels: labels.map((name) => ({ name })) })) }) as const;
+  const fakeGithub = (byLabel: Record<string, unknown>) => ({
+    async openIssueLabelsWithLabel(label: string, limit: number) {
+      assert.equal(limit, 100);
+      return byLabel[label] as never;
+    },
+  });
+
+  test("pendingWork reads each label separately, so >100 unrelated open issues cannot hide actionable work", async () => {
+    const seen: string[] = [];
+    const gh = {
+      async openIssueLabelsWithLabel(label: string) {
+        seen.push(label);
+        return (label === "needs-triage" ? rows(["needs-triage"], 2) : { kind: "ok", data: [] }) as never;
+      },
+    };
+    const r = await readPendingWork({ github: gh, readQueue: async () => 1, log: () => {} });
+    assert.deepEqual(seen.sort(), ["needs-research", "needs-triage", "ready-for-agent"]);
+    assert.deepEqual(r, { ok: true, total: 3 });
+  });
+
+  test("pendingWork: a failed per-label read is ok:false, never zero work", async () => {
+    const r = await readPendingWork({
+      github: fakeGithub({ "ready-for-agent": { kind: "empty" }, "needs-research": { kind: "ok", data: [] }, "needs-triage": { kind: "ok", data: [] } }),
+      readQueue: async () => 0,
+      log: () => {},
+    });
+    assert.deepEqual(r, { ok: false });
+  });
+
+  test("pendingWork sibling: a healthy all-empty board is ok with total 0", async () => {
+    const empty = { kind: "ok", data: [] };
+    const r = await readPendingWork({
+      github: fakeGithub({ "ready-for-agent": empty, "needs-research": empty, "needs-triage": empty }),
+      readQueue: async () => 0,
+      log: () => {},
+    });
+    assert.deepEqual(r, { ok: true, total: 0 });
+  });
+
+  test("probeTunnel: any HTTP response (5xx, 403, 302) is reachable", async () => {
+    for (const status of [500, 403, 302, 200]) {
+      const f = (async () => new Response(null, { status })) as unknown as typeof fetch;
+      assert.equal(await probeTunnel("http://x", f), true, `status ${status}`);
+    }
+  });
+
+  test("probeTunnel: a transport error rejects (caller maps it to unreachable)", async () => {
+    const f = (async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+    await assert.rejects(probeTunnel("http://x", f));
   });
 });

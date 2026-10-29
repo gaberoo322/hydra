@@ -18,7 +18,7 @@ import {
 } from "../host-probe/probe.ts";
 import { isLivePid, signalPid } from "../process-probe.ts";
 import { countOpenBoard } from "../autopilot/turn-snapshot/board-saturation.ts";
-import { createTurnSnapshotGithub } from "../autopilot/turn-snapshot/github-port.ts";
+import { createTurnSnapshotGithub, type TurnSnapshotGithub } from "../autopilot/turn-snapshot/github-port.ts";
 import { pingRedis } from "../redis/utility.ts";
 import { closeTurnSnapshotRedis, getAnchorQueueLength, quietTurnSnapshotRedisErrors } from "../redis/turn-snapshot.ts";
 import { parseDeliberateStopMarker, readDeliberateStop } from "../scheduler/stop-marker.ts";
@@ -198,6 +198,56 @@ function readProcUptimeUs(): number | null {
   }
 }
 
+/**
+ * Tunnel reachability: ANY completed HTTP response (2xx, 3xx Access redirect,
+ * 4xx, 5xx) counts as reachable — the replaced bash `curl -sS` (no `-f`) did
+ * the same; only a transport error/timeout (fetch rejects) is unreachable.
+ */
+export async function probeTunnel(url: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  await fetchImpl(url, { signal: AbortSignal.timeout(HTTP_TIMEOUT_MS), redirect: "manual" });
+  return true;
+}
+
+/** `gh issue list --limit` for each per-label pending-work read (the bash limit). */
+export const PENDING_WORK_LIST_LIMIT = 100;
+
+export interface PendingWorkDeps {
+  github: Pick<TurnSnapshotGithub, "openIssueLabelsWithLabel">;
+  readQueue: () => Promise<number>;
+  log: (line: string) => void;
+}
+
+/**
+ * Pending-work signal: ready-for-agent / needs-research / needs-triage are each
+ * read with their OWN label-filtered listing (limit 100 each, as the bash did),
+ * so a board with >100 unrelated open issues cannot hide actionable ones. A
+ * failed read is `ok:false` — "could not read" is never "no work" (#3794).
+ */
+export async function readPendingWork(deps: PendingWorkDeps): Promise<PendingWorkRead> {
+  try {
+    const [rfa, research, triage, queue] = await Promise.all([
+      deps.github.openIssueLabelsWithLabel("ready-for-agent", PENDING_WORK_LIST_LIMIT),
+      deps.github.openIssueLabelsWithLabel("needs-research", PENDING_WORK_LIST_LIMIT),
+      deps.github.openIssueLabelsWithLabel("needs-triage", PENDING_WORK_LIST_LIMIT),
+      deps.readQueue(),
+    ]);
+    const a = countOpenBoard(rfa);
+    const b = countOpenBoard(research);
+    const c = countOpenBoard(triage);
+    for (const counts of [a, b, c]) {
+      if ("reason" in counts) {
+        deps.log(`WARN board read FAILED (${counts.reason}) — cannot prove no work pending`);
+        return { ok: false };
+      }
+    }
+    if ("reason" in a || "reason" in b || "reason" in c) return { ok: false };
+    return { ok: true, total: a.value.readyForAgent + b.value.needsResearch + c.value.needsTriage + queue };
+  } catch (err) {
+    deps.log(`WARN work-signal read FAILED: ${err instanceof Error ? err.message : String(err)} — cannot prove no work pending`);
+    return { ok: false };
+  }
+}
+
 export interface LivenessAdapterConfig {
   baseUrl: string;
 }
@@ -265,8 +315,7 @@ export function createProductionLivenessDeps(
       },
       async tunnelReachable(url) {
         try {
-          const res = await fetch(url, { signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
-          return res.ok;
+          return await probeTunnel(url);
         } catch {
           /* intentional: an unreachable tunnel is the verdict input, not an error */
           return false;
@@ -287,24 +336,12 @@ export function createProductionLivenessDeps(
       close: closeTurnSnapshotRedis,
     },
     work: {
-      async pendingWork() {
-        try {
-          const [board, queue] = await Promise.all([
-            github.listOpenIssueLabelRows(100),
-            withTimeout(getAnchorQueueLength("work-queue"), REDIS_TIMEOUT_MS, "work-queue read"),
-          ]);
-          const counts = countOpenBoard(board);
-          if ("reason" in counts) {
-            log(`${prefix} WARN board read FAILED (${counts.reason}) — cannot prove no work pending`);
-            return { ok: false };
-          }
-          const c = counts.value;
-          return { ok: true, total: c.readyForAgent + c.needsResearch + c.needsTriage + queue };
-        } catch (err) {
-          log(`${prefix} WARN work-signal read FAILED: ${err instanceof Error ? err.message : String(err)} — cannot prove no work pending`);
-          return { ok: false };
-        }
-      },
+      pendingWork: () =>
+        readPendingWork({
+          github,
+          readQueue: () => withTimeout(getAnchorQueueLength("work-queue"), REDIS_TIMEOUT_MS, "work-queue read"),
+          log: (line) => log(`${prefix} ${line}`),
+        }),
     },
     clock: { nowMs: () => Date.now() },
     log,
