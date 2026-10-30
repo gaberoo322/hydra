@@ -81,6 +81,7 @@
         "docs/adr/0026-target-manifest.md",
         "docs/adr/0031-target-tracking-migrates-to-github-issues.md",
         "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
+        "docs/adr/0047-work-item-lifecycle-is-data.md",
         "docs/historical/hydra-betting/direction/goals.md",
         "docs/historical/hydra-betting/direction/roadmap.md",
         "docs/operator-playbooks/hydra-doctor.md",
@@ -198,6 +199,7 @@
         "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
         "docs/adr/0041-skill-generation-is-a-typed-core-returning-a-write-plan.md",
         "docs/adr/0045-operator-channel.md",
+        "docs/adr/0047-work-item-lifecycle-is-data.md",
         "docs/agents/issue-tracker.md",
         "docs/agents/triage-labels.md",
         "docs/evals.md",
@@ -291,6 +293,7 @@
         "docs/adr/0012-autopilot-is-the-single-brain.md",
         "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md",
         "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",
+        "docs/adr/0047-work-item-lifecycle-is-data.md",
         "docs/operator-playbooks/hydra-autopilot.md",
         "src/autopilot/CONTEXT.md"
       ],
@@ -833,6 +836,7 @@
       "citedBy": [
         "CONTEXT-MAP.md",
         "docs/adr/0029-autopilot-charts-and-works-wayfinder-maps.md",
+        "docs/adr/0047-work-item-lifecycle-is-data.md",
         "docs/operator-playbooks/hydra-wayfinder.md"
       ],
       "source": {
@@ -915,6 +919,7 @@
         "CONTEXT-MAP.md",
         "docs/adr/0033-openviking-knowledge-plane-retired.md",
         "docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md",
+        "docs/adr/0047-work-item-lifecycle-is-data.md",
         "docs/operator-playbooks/hydra-architect.md",
         "docs/operator-playbooks/hydra-autopilot.md",
         "docs/operator-playbooks/hydra-digest.md",
@@ -1006,6 +1011,7 @@
         "README.md",
         "docs/adr/0039-dependency-graph-is-a-seam-hydra-owns.md",
         "docs/adr/0045-operator-channel.md",
+        "docs/adr/0047-work-item-lifecycle-is-data.md",
         "docs/agents/triage-labels.md",
         "docs/operator-playbooks/hydra-autopilot.md",
         "docs/operator-playbooks/hydra-grill.md",
@@ -1287,6 +1293,26 @@
       ],
       "source": {
         "path": "docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md"
+      }
+    },
+    {
+      "number": "0047",
+      "file": "docs/adr/0047-work-item-lifecycle-is-data.md",
+      "route": "/docs/adr/0047",
+      "title": "Work-item lifecycle is data: one writer seam, record-checked gates, a per-issue journal, durable caps that park",
+      "status": "accepted",
+      "statusLine": "accepted",
+      "statusDialect": "frontmatter",
+      "date": null,
+      "supersedes": [],
+      "supersededBy": [],
+      "decision": "Orchestrator issue lifecycle is data: labels are current state (Hydra keeps history only); a closed state set (+`qa-passed`, `parked`) with operator-only human-hold exits; one `src/lifecycle/` writer seam (CLI + board routes) with record-checked evidence-pointer gates; a per-issue Redis journal + `SET NX` dispatch claim; durable per-arm + total caps that park; shadow→enforce rollout; parent loop shrinks to typed exceptions.",
+      "readWhen": "Writing or routing any issue state label, dispatch claims, cycle caps/parking, `qa-passed`, or the parent-exception metric.",
+      "citedBy": [
+        "CONTEXT-MAP.md"
+      ],
+      "source": {
+        "path": "docs/adr/0047-work-item-lifecycle-is-data.md"
       }
     }
   ]
