@@ -7,6 +7,8 @@
  */
 
 import { classifyChangeShape, type ChangeShape } from "./change-shape.ts";
+import { requiresOneWayDepth, type OneWayDoorClass, type OneWayDoorResult } from "./one-way-door.ts";
+import type { TwoWayPairValue } from "./rollout-switches.ts";
 
 /**
  * The reviewer fan-out step 7 spawns:
@@ -26,6 +28,69 @@ export interface ReviewerFanoutDecision {
   reviewers: string[];
   /** One line for the verdict comment: which fan-out ran and why. */
   reason: string;
+  /** Present only when the caller supplied the reversibility argument (#5263). */
+  reversibility?: ReversibilityRecord;
+}
+
+type Door = OneWayDoorResult["door"];
+
+/** Optional third argument of {@link decideReviewerFanout} (ADR-0046 D5/D6, #5263). */
+export interface ReversibilityInput {
+  /** `null` = detector not run. */
+  door: Door | null;
+  classes?: readonly OneWayDoorClass[];
+  /** Effective rollout switch; defaults to `off`. */
+  twoWayPair?: TwoWayPairValue;
+}
+
+/** Shadow record P2 (#5264) keys on: `pairEligible && !reductionApplied`. */
+export interface ReversibilityRecord {
+  door: Door | null;
+  twoWayPair: TwoWayPairValue;
+  legacyMode: ReviewerFanoutMode;
+  selectedMode: ReviewerFanoutMode;
+  pairEligible: boolean;
+  reductionApplied: boolean;
+  escalated: boolean;
+}
+
+const MODE_ORDER: Record<ReviewerFanoutMode, number> = { single: 0, standard: 1, adversarial: 2 };
+
+/**
+ * Escalate-only fold of door verdicts (ADR-0046 D5): one-way > unknown > two-way > null.
+ * The single place max(detector, `Merge danger:` field, reviewer) lives.
+ */
+export function maxDoor(...doors: (Door | null | undefined)[]): Door | null {
+  if (doors.includes("one-way")) return "one-way";
+  if (doors.includes("unknown")) return "unknown";
+  if (doors.includes("two-way")) return "two-way";
+  return null;
+}
+
+function normalizeTier(tier: number | null): number | null {
+  return typeof tier === "number" && !Number.isNaN(tier) ? tier : null;
+}
+
+/**
+ * Reversibility-scored depth policy with switch=on semantics (ADR-0046 D5, #5263).
+ * Floor for code is the Standards+Spec pair; only an explicit `two-way` door lowers T3 code.
+ */
+export function selectReviewDepth(input: {
+  tier: number | null;
+  shape: ChangeShape;
+  door: Door | null;
+}): { mode: ReviewerFanoutMode; reason: string } {
+  const tier = normalizeTier(input.tier);
+  if (tier === null) return { mode: "adversarial", reason: "tier unknown, fail-closed" };
+  if (tier >= 4) return { mode: "adversarial", reason: "Verifier Core, door not consulted" };
+  const oneWay = input.door !== null && requiresOneWayDepth({ door: input.door });
+  if (input.shape === "code") {
+    if (oneWay) return { mode: "adversarial", reason: `door \`${input.door}\` is one-way depth` };
+    if (input.door === "two-way") return { mode: "standard", reason: "two-way door, pair floor" };
+    return { mode: tier >= 3 ? "adversarial" : "standard", reason: "no door evidence, tier path" };
+  }
+  if (oneWay) return { mode: "adversarial", reason: `non-code but door \`${input.door}\` is one-way depth` };
+  return { mode: "single", reason: "non-code, two-way or no door" };
 }
 
 const FANOUT_REVIEWERS: Record<ReviewerFanoutMode, readonly string[]> = {
@@ -56,9 +121,10 @@ const FANOUT_LABEL: Record<ReviewerFanoutMode, string> = {
 export function decideReviewerFanout(
   tier: number | null,
   paths: readonly string[],
+  reversibility?: ReversibilityInput,
 ): ReviewerFanoutDecision {
   const shape = classifyChangeShape(paths);
-  const knownTier = typeof tier === "number" && !Number.isNaN(tier) ? tier : null;
+  const knownTier = normalizeTier(tier);
 
   let mode: ReviewerFanoutMode;
   let why: string;
@@ -77,10 +143,39 @@ export function decideReviewerFanout(
   }
 
   const tierLabel = knownTier === null ? "tier unknown" : `T${knownTier}`;
+  if (!reversibility) {
+    return {
+      mode,
+      shape,
+      reviewers: [...FANOUT_REVIEWERS[mode]],
+      reason: `Review fan-out: ${FANOUT_LABEL[mode]} — ${tierLabel}, change shape \`${shape}\`: ${why} (issue #4733).`,
+    };
+  }
+
+  // Reversibility axis (#5263): escalation is ungated; only the reduction needs switch=on.
+  const legacyMode = mode;
+  const twoWayPair = reversibility.twoWayPair ?? "off";
+  const selected = selectReviewDepth({ tier: knownTier, shape, door: reversibility.door });
+  const escalated = MODE_ORDER[selected.mode] > MODE_ORDER[legacyMode];
+  const pairEligible = knownTier === 3 && shape === "code" && reversibility.door === "two-way";
+  const reductionApplied = pairEligible && twoWayPair === "on";
+  const live: ReviewerFanoutMode = escalated || twoWayPair === "on" ? selected.mode : legacyMode;
+  const doorLabel = reversibility.door ?? "not run";
+  const shadowNote =
+    pairEligible && !reductionApplied ? `: pair would run, ${legacyMode} still decides` : "";
   return {
-    mode,
+    mode: live,
     shape,
-    reviewers: [...FANOUT_REVIEWERS[mode]],
-    reason: `Review fan-out: ${FANOUT_LABEL[mode]} — ${tierLabel}, change shape \`${shape}\`: ${why} (issue #4733).`,
+    reviewers: [...FANOUT_REVIEWERS[live]],
+    reason: `Review fan-out: ${FANOUT_LABEL[live]} — ${tierLabel}, change shape \`${shape}\`: ${why}; door \`${doorLabel}\`, two-way-pair \`${twoWayPair}\`${shadowNote} (issue #4733, #5263).`,
+    reversibility: {
+      door: reversibility.door,
+      twoWayPair,
+      legacyMode,
+      selectedMode: selected.mode,
+      pairEligible,
+      reductionApplied,
+      escalated,
+    },
   };
 }
