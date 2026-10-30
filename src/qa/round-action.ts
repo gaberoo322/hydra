@@ -386,6 +386,10 @@ export interface DecideRoundResult {
   passMarker: string | null;
   /** The structured escalation comment; set exactly when `round.action === "escalate"`. */
   escalationSummary: string | null;
+  /** The escalation label sets, always present so the playbook spells no label name (issue #5081). */
+  labels: typeof QA_ESCALATION_LABELS;
+  /** `DEEP_QA_FAIL_MARKER` when the T4 action is bounce / block-and-escalate, else null (issue #5081). */
+  failMarker: string | null;
 }
 
 export function decideRound(input: DecideRoundInput): DecideRoundResult {
@@ -411,5 +415,7 @@ export function decideRound(input: DecideRoundInput): DecideRoundResult {
           currentTrailer: input.currentTrailer ?? "",
         })
       : null;
-  return { round, deepQa, passMarker, escalationSummary };
+  const failMarker =
+    deepQa?.action === "bounce" || deepQa?.action === "block-and-escalate" ? DEEP_QA_FAIL_MARKER : null;
+  return { round, deepQa, passMarker, escalationSummary, labels: QA_ESCALATION_LABELS, failMarker };
 }
