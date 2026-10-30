@@ -77,7 +77,12 @@ function eligibilityServer(
       );
       const body: Record<string, unknown> = { ...(payload as object) };
       if (opts.admission === undefined) {
-        body.admission = decideAdmission(payload as any, { nowMs: Date.now(), ...q });
+        body.admission = decideAdmission(payload as any, {
+          nowMs: Date.now(),
+          mode: q.mode ?? "timer",
+          serviceActive: q.serviceActive ?? false,
+          pidAlive: q.pidAlive ?? false,
+        });
       } else if (opts.admission !== null) {
         body.admission = opts.admission;
       }
