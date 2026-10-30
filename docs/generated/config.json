@@ -206,8 +206,7 @@
       ],
       "unread": false,
       "source": {
-        "path": "config/orchestrator/qa-rollout.json",
-        "line": 1
+        "path": "config/orchestrator/qa-rollout.json"
       }
     },
     {

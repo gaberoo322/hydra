@@ -31,11 +31,20 @@ describe("qa rollout switches", () => {
   });
 
   it("trip and unknown trip force off but keep configured", () => {
-    const cfg = { "two-way-pair": "on", "reviewer-commits": "A" };
-    for (const t of ["tripped", "unknown"] as const) {
-      const r = resolveRolloutSwitches(cfg, t);
-      assert.deepEqual(r.effective, OFF);
-      assert.deepEqual(r.configured, cfg);
+    const cases: Array<Record<string, string>> = [
+      { "two-way-pair": "on", "reviewer-commits": "A" },
+      { "two-way-pair": "shadow", "reviewer-commits": "A+B" },
+      { "two-way-pair": "shadow", "reviewer-commits": "A" },
+      { "two-way-pair": "on", "reviewer-commits": "A+B" },
+    ];
+    for (const cfg of cases) {
+      for (const t of ["tripped", "unknown"] as const) {
+        const r = resolveRolloutSwitches(cfg, t);
+        assert.deepEqual(r.effective, OFF);
+        assert.deepEqual(r.configured, cfg);
+      }
+      // sibling shape: not-tripped keeps the configured values effective
+      assert.deepEqual(resolveRolloutSwitches(cfg, "not-tripped").effective, cfg);
     }
   });
 
