@@ -2162,8 +2162,7 @@ def run_reconcile_seeded(state_path: str) -> int:
     Fail-open: always returns 0.
     """
     try:
-        with open(state_path, encoding="utf-8") as fh:
-            state = json.load(fh)
+        state = run_ledger.read_prior(state_path)
         slots = state.get("slots") if isinstance(state, dict) else None
         if not isinstance(slots, dict):
             return 0

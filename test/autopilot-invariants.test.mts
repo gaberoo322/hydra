@@ -567,3 +567,18 @@ describe("decide.py INV-label namespaces (issue #4520)", () => {
     );
   });
 });
+
+describe("AC1 guard: only run_ledger.py json-loads the state document (#5075, #5293)", () => {
+  test("reap.py run_reconcile_seeded reads state via run_ledger.read_prior, not raw json.load", () => {
+    const src = readFileSync(resolve("scripts/autopilot/reap.py"), "utf8");
+    const fn = src.slice(src.indexOf("def run_reconcile_seeded")).slice(0, 2500);
+    assert.doesNotMatch(fn, /json\.load\(fh\)/);
+    assert.match(fn, /run_ledger\.read_prior\(state_path\)/);
+  });
+  test("no reap module opens state_path/STATE_PATH for a raw json.load", () => {
+    for (const f of ["reap.py", "reap_state.py", "reap_stall.py", "reap_ghrefs.py"]) {
+      const src = readFileSync(resolve("scripts/autopilot", f), "utf8");
+      assert.doesNotMatch(src, /open\((state_path|STATE_PATH)[^)]*\)[\s\S]{0,80}json\.load/, f);
+    }
+  });
+});

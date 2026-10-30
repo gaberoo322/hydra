@@ -254,15 +254,31 @@ describe("reap.py terminal-failure write sites → cycle-record keyed on the wor
   });
 });
 
-describe("reap.py exits 0 on a type-invalid state document (QA round 1, #5293)", () => {
-  test("grill-crash with a wrong-typed declared field logs, skips, and exits 0 (no traceback)", () => {
+describe("reap.py exits 0 on a type-invalid state document (QA rounds 1-2, #5293)", () => {
+  test("grill-crash with a wrong-typed declared field still does the accounting and exits 0", () => {
     const tmp = makeTmp();
     try {
-      writeState(tmp.state, { dispatches: "not-an-int" });
-      const r = runGrillCrash("deadbeef", tmp);
+      const branch = "worktree-agent-5293bbbb-t2-design_concept_orch";
+      writeState(tmp.state, {
+        dispatches: "not-an-int",
+        slots: {
+          design_concept_orch: {
+            skill: "hydra-grill",
+            started_epoch: Math.floor(Date.now() / 1000),
+            task_id: "t5293gc",
+            branch,
+          },
+        },
+      });
+      const r = runGrillCrash("t5293gc", tmp);
       assert.equal(r.status, 0, `stderr: ${r.stderr}`);
       assert.match(r.stderr, /failed type validation/);
       assert.doesNotMatch(r.stderr, /Traceback/);
+      assert.match(
+        runLog(tmp),
+        new RegExp(`cycle_record_fired cycleId=${branch} task_id=t5293gc skill=hydra-grill status=failed`),
+        "accounting must still happen (not skipped) on a wrong-typed declared field",
+      );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
