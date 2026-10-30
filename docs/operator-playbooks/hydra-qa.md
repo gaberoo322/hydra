@@ -895,6 +895,46 @@ With re-review context, add this **re-review brief** to every reviewer prompt, a
 
 > *This is a re-review after a FAIL. You still review the FULL diff and changed files. First state fixed/not-fixed for each prior finding; for anything new, prefer medium+ and say why it wasn't visible before. Report every finding in the normal `findings` block and grade it honestly: the verdict comes from the normal findings fold, never from this brief.*
 
+#### 7.0b Merge danger check (issue #5258, ADR-0046 D5 — escalate-only)
+
+The dev declares `Merge danger: <one-way|two-way> — <reason>` in the PR body; the one-way-door detector (`detectOneWayDoor`, #5257) observes the diff. Compare them with the pure `compareMergeDanger()` and surface the result: an informational `Merge danger check` block in `$REVIEW_PACKET`, and — only when the comparison yields a row — one finding under the synthetic key `merge-danger-check` in the step-8 per-reviewer map. `under-declared` (declared `two-way`, detector `one-way`) is a **medium**; a `missing`/`malformed` line is a **low** (it never blocks; the required teeth are the dev-side pre-PR gate). `over-declared` yields no finding, only a `Merge-danger-gap:` line for the verdict comment. `foldReviewFindings()` alone turns the row into a verdict (it already folds map keys outside `spawnedReviewers`); do NOT add `merge-danger-check` to `$FANOUT_REVIEWERS`, and write the key only when `finding` is non-null.
+
+```bash
+MD_BODY_FILE=$(mktemp)
+MD_PATHS_FILE=$(mktemp)
+MD_DIFF_FILE=$(mktemp)
+MD_JSON=""
+if gh pr view "$pr_number" --repo gaberoo322/hydra --json body --jq .body > "$MD_BODY_FILE" \
+   && git diff --no-renames --name-only "${FIXED_SHA}...HEAD" > "$MD_PATHS_FILE" \
+   && printf '%s' "$DIFF_TEXT" > "$MD_DIFF_FILE"; then
+  MD_JSON=$(MD_BODY_FILE="$MD_BODY_FILE" MD_PATHS_FILE="$MD_PATHS_FILE" MD_DIFF_FILE="$MD_DIFF_FILE" PR="$pr_number" SHA="$FIXED_SHA" \
+    node --no-warnings --experimental-strip-types -e "
+    Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
+      const e = process.env;
+      const paths = fs.readFileSync(e.MD_PATHS_FILE, 'utf8').split('\n').filter(Boolean);
+      const det = q.detectOneWayDoor({ paths, diff: fs.readFileSync(e.MD_DIFF_FILE, 'utf8') });
+      const field = q.parseMergeDangerField(fs.readFileSync(e.MD_BODY_FILE, 'utf8'));
+      const check = q.compareMergeDanger(field, det, { pr: e.PR, sha: e.SHA });
+      process.stdout.write(JSON.stringify({ check, field, door: det.door, classes: det.classes }));
+    }).catch((err) => { console.error('[hydra-qa] merge danger check failed — skipped:', err); process.exit(1); });
+  ") || MD_JSON=""
+fi
+rm -f "$MD_BODY_FILE" "$MD_PATHS_FILE" "$MD_DIFF_FILE"
+MD_FINDING_JSON=""   # step 8: add this row under the key `merge-danger-check` when non-empty
+MD_GAP_LINE=""       # step 10: append this line to the verdict comment body when non-empty
+if [ -n "$MD_JSON" ]; then
+  MD_FINDING_JSON=$(printf '%s' "$MD_JSON" | jq -c '.check.finding // empty')
+  MD_GAP_LINE=$(printf '%s' "$MD_JSON" | jq -r '.check.gapLine // empty')
+  REVIEW_PACKET="${REVIEW_PACKET}
+
+Merge danger check (informational): declared=$(printf '%s' "$MD_JSON" | jq -r '.field.declared // "none"') detector=$(printf '%s' "$MD_JSON" | jq -r '.door') outcome=$(printf '%s' "$MD_JSON" | jq -r '.check.outcome') classes=$(printf '%s' "$MD_JSON" | jq -r '.classes | join(",")')"
+else
+  echo "[hydra-qa] WARN: merge danger check unavailable — skipped" >&2
+fi
+```
+
+The detector gap line (`Merge-danger-gap: pr=<N> sha=<head12> declared=one-way detector=two-way reason=<raw|->`) is appended as its own line to the step-10 verdict comment that carries the `QA-Verdict:` trailer, so the review-findings retro can grep it. No Redis key, no new trailer.
+
 #### 7a. T1/T2 — single standard pass (`FANOUT_MODE=standard`)
 
 Spawn exactly two parallel sub-agents — the **Standards** and **Spec** axes described below. This is the unchanged pre-#739 behaviour.

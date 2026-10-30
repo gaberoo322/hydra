@@ -48,8 +48,11 @@
  */
 
 export {
+  compareMergeDanger,
   isPromptOnlyChange,
+  parseMergeDangerField,
 } from "../../src/qa/change-shape.ts";
+export { detectOneWayDoor, requiresOneWayDepth } from "../../src/qa/one-way-door.ts";
 export {
   buildCheckStates,
   classifyVerdict,
