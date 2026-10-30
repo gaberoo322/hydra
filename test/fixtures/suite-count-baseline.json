@@ -412,6 +412,7 @@
   "test/retro-bundle.test.mts": 17,
   "test/retro-enrichment.test.mts": 6,
   "test/retro-seen.test.mts": 1,
+  "test/review-findings-extract.test.mts": 4,
   "test/review-pickup-notify.test.mts": 1,
   "test/review-pickup.test.mts": 1,
   "test/risk-critical.test.mts": 5,
