@@ -82,6 +82,17 @@ describe("decideReviewerFanout reversibility", () => {
   });
 });
 
+describe("fanout purity", () => {
+  it("selector is pure: repeated calls are deep-equal and inputs are not mutated", () => {
+    const paths = Object.freeze([...CODE]);
+    const rev = Object.freeze({ door: "two-way" as const, twoWayPair: "on" as const });
+    const a = decideReviewerFanout(3, paths, rev);
+    const b = decideReviewerFanout(3, paths, rev);
+    assert.deepEqual(a, b);
+    assert.deepEqual(rev, { door: "two-way", twoWayPair: "on" });
+  });
+});
+
 describe("maxDoor", () => {
   it("ranks one-way > unknown > two-way > null", () => {
     assert.equal(maxDoor("two-way", "one-way", null), "one-way");
