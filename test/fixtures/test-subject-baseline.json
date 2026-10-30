@@ -265,6 +265,7 @@
   "src/pattern-memory/index.ts": 5,
   "src/process-probe.ts": 1,
   "src/project-goals.ts": 1,
+  "src/qa/admission.ts": 2,
   "src/qa/change-shape.ts": 2,
   "src/qa/fanout.ts": 2,
   "src/qa/fold.ts": 1,

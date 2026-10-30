@@ -895,6 +895,46 @@ With re-review context, add this **re-review brief** to every reviewer prompt, a
 
 > *This is a re-review after a FAIL. You still review the FULL diff and changed files. First state fixed/not-fixed for each prior finding; for anything new, prefer medium+ and say why it wasn't visible before. Report every finding in the normal `findings` block and grade it honestly: the verdict comes from the normal findings fold, never from this brief.*
 
+#### 7.0b Merge danger check (issue #5258, ADR-0046 D5 — escalate-only)
+
+The dev declares `Merge danger: <one-way|two-way> — <reason>` in the PR body; the one-way-door detector (`detectOneWayDoor`, #5257) observes the diff. Compare them with the pure `compareMergeDanger()` and surface the result: an informational `Merge danger check` block in `$REVIEW_PACKET`, and — only when the comparison yields a row — one finding under the synthetic key `merge-danger-check` in the step-8 per-reviewer map. `under-declared` (declared `two-way`, detector `one-way`) is a **medium**; a `missing`/`malformed` line is a **low** (it never blocks; the required teeth are the dev-side pre-PR gate). `over-declared` yields no finding, only a `Merge-danger-gap:` line for the verdict comment. `foldReviewFindings()` alone turns the row into a verdict (it already folds map keys outside `spawnedReviewers`); do NOT add `merge-danger-check` to `$FANOUT_REVIEWERS`, and write the key only when `finding` is non-null.
+
+```bash
+MD_BODY_FILE=$(mktemp)
+MD_PATHS_FILE=$(mktemp)
+MD_DIFF_FILE=$(mktemp)
+MD_JSON=""
+if gh pr view "$pr_number" --repo gaberoo322/hydra --json body --jq .body > "$MD_BODY_FILE" \
+   && git diff --no-renames --name-only "${FIXED_SHA}...HEAD" > "$MD_PATHS_FILE" \
+   && printf '%s' "$DIFF_TEXT" > "$MD_DIFF_FILE"; then
+  MD_JSON=$(MD_BODY_FILE="$MD_BODY_FILE" MD_PATHS_FILE="$MD_PATHS_FILE" MD_DIFF_FILE="$MD_DIFF_FILE" PR="$pr_number" SHA="$(git rev-parse HEAD)" \
+    node --no-warnings --experimental-strip-types -e "
+    Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
+      const e = process.env;
+      const paths = fs.readFileSync(e.MD_PATHS_FILE, 'utf8').split('\n').filter(Boolean);
+      const det = q.detectOneWayDoor({ paths, diff: fs.readFileSync(e.MD_DIFF_FILE, 'utf8') });
+      const field = q.parseMergeDangerField(fs.readFileSync(e.MD_BODY_FILE, 'utf8'));
+      const check = q.compareMergeDanger(field, det, { pr: e.PR, sha: e.SHA });
+      process.stdout.write(JSON.stringify({ check, field, door: det.door, classes: det.classes }));
+    }).catch((err) => { console.error('[hydra-qa] merge danger check failed — skipped:', err); process.exit(1); });
+  ") || MD_JSON=""
+fi
+rm -f "$MD_BODY_FILE" "$MD_PATHS_FILE" "$MD_DIFF_FILE"
+MD_FINDING_JSON=""   # step 8 merges this row under the key `merge-danger-check` when non-empty
+MD_GAP_LINE=""       # step 9 appends this line to $REVIEW_REPORT (so every step-10 verdict comment carries it) when non-empty
+if [ -n "$MD_JSON" ]; then
+  MD_FINDING_JSON=$(printf '%s' "$MD_JSON" | jq -c '.check.finding // empty')
+  MD_GAP_LINE=$(printf '%s' "$MD_JSON" | jq -r '.check.gapLine // empty')
+  REVIEW_PACKET="${REVIEW_PACKET}
+
+Merge danger check (informational): declared=$(printf '%s' "$MD_JSON" | jq -r '.field.declared // "none"') detector=$(printf '%s' "$MD_JSON" | jq -r '.door') outcome=$(printf '%s' "$MD_JSON" | jq -r '.check.outcome') classes=$(printf '%s' "$MD_JSON" | jq -r '.classes | join(",")')"
+else
+  echo "[hydra-qa] WARN: merge danger check unavailable — skipped" >&2
+fi
+```
+
+The detector gap line (`Merge-danger-gap: pr=<N> sha=<head12> declared=one-way detector=two-way reason=<raw|->`) is appended as its own line to the step-10 verdict comment that carries the `QA-Verdict:` trailer, so the review-findings retro can grep it. No Redis key, no new trailer.
+
 #### 7a. T1/T2 — single standard pass (`FANOUT_MODE=standard`)
 
 Spawn exactly two parallel sub-agents — the **Standards** and **Spec** axes described below. This is the unchanged pre-#739 behaviour.
@@ -1001,6 +1041,8 @@ A "real result" is the reviewer's actual finding text — not a tool error, not 
 
 Transcribe every reviewer's `findings` rows into ONE JSON **object** in a file: keyed by the spawned reviewer name (from `$FANOUT_REVIEWERS`, e.g. `reviewer-A-standards`), each value that reviewer's rows as a JSON array. Step 9 passes the same `$FANOUT_REVIEWERS` list to the fold as `spawnedReviewers`, so the coverage of the map is **checked, not assumed** (issue #4758). Each row keeps `axis` (`standards` or `spec`); a row may omit `reviewer` — it inherits its map key. Copy rows as written: never drop, merge, or re-grade a reviewer's finding; rows under a key that is not a spawned reviewer are still counted, never dropped. **Fail closed on malformed output:** a spawned reviewer with NO entry in the map, or whose value is not a JSON array, becomes one high `reviewer-output-malformed` finding naming that reviewer — FAIL at every tier, T4 included, and for an unknown tier. An omitted reviewer is malformed, not clean: write a reviewer's value as `[]` only when that reviewer explicitly returned `[]`, and only an explicit `[]` from EVERY spawned reviewer is a clean PASS. An empty `$FANOUT_REVIEWERS` list, or a flat array where the fold expected the per-reviewer map, is itself malformed — never a silent PASS. The file must always be written: a missing, empty, or unparseable file is itself a FAIL, never an empty map; a non-object row becomes a high `reviewer-output-malformed` finding carrying the raw row text. The fold merges the same finding raised by two reviewers itself: rows whose locations reduce to the same canonical key match (`canonicalLocationKey()`). Accepted location formats, all folded to `path:N` (one pair of surrounding quotes/backticks and one trailing parenthetical — `src/<module>.ts:12 (buildX)` — stripped first, then trimmed, lowercased, leading `./` dropped): `path:12`, `path:L12`, `path#L12`, `path L12`, `path:12-18` (range start), and `path:12:5` (column dropped). A bare `path` with no line keys as `path`; an extension-less file name such as `Dockerfile:12` is path-like only WITH a line number (`Makefile` alone stays a placeholder). Placeholders never merge on their own: the `NON_MERGEABLE_LOCATIONS` list (empty, `(no location)`, `PR body`, `n/a`, `-`, `none`, case-insensitive) and anything that isn't path-like — the whitespace test applies to the path part after the quote/backtick/parenthetical stripping, and a path with no `/` or `.` needs a `:N` line reference. If reviewer A and reviewer B describe the same defect at different lines, give both rows the same `"key"` string so the fold lists them as one merged row. Put each axis's summary paragraph in `STANDARDS_SUMMARY` / `SPEC_SUMMARY`. At T3/T4, join the two reviewers' paragraphs with `A:` / `B:` prefixes. When the Spec axis was skipped, set `SPEC_SUMMARY="_Skipped: ${SPEC_SKIPPED_REASON}_"`.
 
+**Merge danger row (issue #5258):** when `$MD_FINDING_JSON` (step 7.0b) is non-empty, add it to the same map as a single-row array under the key `merge-danger-check`, e.g. `jq --argjson row "$MD_FINDING_JSON" '. + {"merge-danger-check": [$row]}'` over `$FINDINGS_FILE` after the reviewer rows are written. When it is empty, write no such key. Never add the key to `$FANOUT_REVIEWERS`.
+
 ### 9. Classify the review verdict
 
 The fold and the rendered comment both come from `foldReviewFindings()`, so the verdict, the table and the trailer counts cannot disagree:
@@ -1054,6 +1096,12 @@ if [ -z "$REVIEW_VERDICT" ]; then
   REVIEW_REPORT="### Findings
 
 _Findings fold failed; raw reviewer reports follow._"   # then append the raw reports
+fi
+# Merge danger gap line (issue #5258, over-declared only): carried in $REVIEW_REPORT so every step-10 verdict comment posts it.
+if [ -n "$MD_GAP_LINE" ]; then
+  REVIEW_REPORT="${REVIEW_REPORT}
+
+${MD_GAP_LINE}"
 fi
 # <<< severity-fold
 ```

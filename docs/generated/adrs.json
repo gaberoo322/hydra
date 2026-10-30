@@ -1283,7 +1283,8 @@
       "decision": "Two-pass code factory: the implementer makes it work; the reviewer makes it good and commits only class A (docs/PR-body/baselines) and B (tests) fixes, verified by `qa-fix-proof`; standards live reviewer-only in `CODING_STANDARDS.md`; review depth is set by reversibility behind shadowed `off\\|shadow\\|on` switches; a review-findings retro feeds the standards ladder (check > standard > fence).",
       "readWhen": "Touching hydra-qa depth/fan-out, reviewer commits, `CODING_STANDARDS.md`, the one-way-door detector, or the review-findings retro.",
       "citedBy": [
-        "CONTEXT-MAP.md"
+        "CONTEXT-MAP.md",
+        "docs/operator-playbooks/hydra-qa.md"
       ],
       "source": {
         "path": "docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md"

@@ -106,12 +106,21 @@ Run these numbered steps.
 9b. **MANDATORY — run the pre-PR mechanical gate BEFORE `gh pr create`**
    (issue #4731). Write the PR body to a file first, then run all three checks
    under "Pre-PR mechanical gate" below — reconcile dry-run against that body
-   file, baseline regeneration, foreground `npm test` + `npm run typecheck:test`.
+   file, baseline regeneration, foreground `npm test` + `npm run typecheck:test`,
+   and the `Merge danger:` field check (Gate 4).
    Do NOT open the PR while any of them is red; open it with
    `gh pr create --body-file <that same file>` so the checked body is the
    submitted body.
 9. Open a PR with `closes #$issue_number`, a `## Files in scope` mirror of the
-    issue's section, and a `Tier: <0|1|2|3>` line from the API. Acceptance
+    issue's section, a `Tier: <0|1|2|3>` line from the API, and a
+    `Merge danger: <one-way|two-way> — <reason>` line (issue #5258, ADR-0046
+    D5) as its own top-level line beside `Tier:` — never inside
+    `## Files in scope`. It declares whether `git revert` plus the automatic
+    redeploy restores the world. Self-check BEFORE looking at the detector:
+    does the PR (1) change persistent state or its schema, (2) cause an
+    external side effect, (3) break the way back (migration, deleted data,
+    dropped compat), (4) change an out-of-repo contract? Any yes means
+    `one-way` (name the class in the reason). Acceptance
     criteria MUST be checkboxes with a mechanical "verified by:" assertion —
     each names the exact command or observable output a reviewer can check:
     ```
@@ -332,6 +341,38 @@ touched files. Never end the turn waiting on either, and never open the PR while
 either is red (including the PR's own new test). A failure you believe is a
 pre-existing master flake: confirm it fails on `origin/master` too and name it
 in the PR body; do not open silently over it.
+
+### Gate 4 — `Merge danger:` field present and not under-declared (issue #5258)
+
+The QA reviewer compares your declaration with the one-way-door detector; an
+`under-declared` call (you wrote `two-way`, the detector fired `one-way`) is a
+medium finding that costs a review round. Catch it first, in the foreground,
+against the same body file as Gate 1 — both checks call the SAME exported
+functions through `scripts/ci/qa-verdict.ts`:
+
+```bash
+git fetch origin --quiet
+git diff --no-renames --name-only origin/master...HEAD > .md-paths.txt
+git diff origin/master...HEAD > .md-diff.txt
+MD_BODY_FILE="$PR_BODY_FILE" node --no-warnings --experimental-strip-types -e "
+Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
+  const paths = fs.readFileSync('.md-paths.txt', 'utf8').split(String.fromCharCode(10)).filter(Boolean);
+  const det = q.detectOneWayDoor({ paths, diff: fs.readFileSync('.md-diff.txt', 'utf8') });
+  const field = q.parseMergeDangerField(fs.readFileSync(process.env.MD_BODY_FILE, 'utf8'));
+  const check = q.compareMergeDanger(field, det);
+  console.log('[merge-danger] outcome=' + check.outcome + ' detector=' + det.door);
+  if (check.outcome === 'missing' || check.outcome === 'malformed' || check.outcome === 'under-declared') {
+    console.error(check.finding && check.finding.finding);
+    process.exit(1);
+  }
+}).catch((err) => { console.error('[merge-danger] gate crashed:', err); process.exit(1); });
+"
+rm -f .md-paths.txt .md-diff.txt
+```
+
+Exit `1` means do NOT open the PR: add the line (missing/malformed) or flip it
+to `one-way` (under-declared; note a suspected false positive in the reason).
+Over-declaring is always allowed.
 
 ## Tier classification — live API (issue #406)
 
