@@ -161,13 +161,15 @@ export function decideReviewerFanout(
   const reductionApplied = pairEligible && twoWayPair === "on";
   const live: ReviewerFanoutMode = escalated || twoWayPair === "on" ? selected.mode : legacyMode;
   const doorLabel = reversibility.door ?? "not run";
+  // When the reversibility axis changed the live mode, legacy `why` would contradict it.
+  const rationale = live === legacyMode ? why : selected.reason;
   const shadowNote =
     pairEligible && !reductionApplied ? `: pair would run, ${legacyMode} still decides` : "";
   return {
     mode: live,
     shape,
     reviewers: [...FANOUT_REVIEWERS[live]],
-    reason: `Review fan-out: ${FANOUT_LABEL[live]} — ${tierLabel}, change shape \`${shape}\`: ${why}; door \`${doorLabel}\`, two-way-pair \`${twoWayPair}\`${shadowNote} (issue #4733, #5263).`,
+    reason: `Review fan-out: ${FANOUT_LABEL[live]} — ${tierLabel}, change shape \`${shape}\`: ${rationale}; door \`${doorLabel}\`, two-way-pair \`${twoWayPair}\`${shadowNote} (issue #4733, #5263).`,
     reversibility: {
       door: reversibility.door,
       twoWayPair,

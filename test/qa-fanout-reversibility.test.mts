@@ -82,6 +82,26 @@ describe("decideReviewerFanout reversibility", () => {
   });
 });
 
+describe("decideReviewerFanout reason text", () => {
+  it("escalated non-code PR does not reuse the legacy single-reviewer rationale", () => {
+    const d = decideReviewerFanout(2, DOCS, { door: "one-way", twoWayPair: "off" });
+    assert.equal(d.mode, "adversarial");
+    assert.match(d.reason, /one-way depth/);
+    assert.doesNotMatch(d.reason, /one reviewer is sized/);
+  });
+  it("lowered T3 two-way pair names the two-way rationale, not the tier path", () => {
+    const d = decideReviewerFanout(3, CODE, { door: "two-way", twoWayPair: "on" });
+    assert.equal(d.mode, "standard");
+    assert.match(d.reason, /two-way door, pair floor/);
+  });
+  it("unchanged live mode keeps the legacy rationale (sibling shape)", () => {
+    const d = decideReviewerFanout(3, CODE, { door: "two-way", twoWayPair: "shadow" });
+    assert.match(d.reason, /the diff touches code, so the tier sets the depth/);
+    const n = decideReviewerFanout(2, DOCS, { door: "two-way", twoWayPair: "off" });
+    assert.match(n.reason, /one reviewer is sized/);
+  });
+});
+
 describe("fanout purity", () => {
   it("selector is pure: repeated calls are deep-equal and inputs are not mutated", () => {
     const paths = Object.freeze([...CODE]);
