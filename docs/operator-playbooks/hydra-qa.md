@@ -786,7 +786,29 @@ Full contents of every changed file at HEAD:
 ${CHANGED_FILES_PACKET}"
 # The resolved design-concept artifact ($SPEC_INPUT_JSON from step 4) rides in
 # the same packet for the Spec axis rather than being re-fetched per reviewer.
+
+# Standards-axis only (ADR-0046 Decision 3): the repo's rule catalog, built ONCE
+# via the loader, which owns the file name and ENOENT handling.
+STANDARDS_LOAD=$(node --no-warnings --experimental-strip-types -e "
+  import('./src/qa/standards-loader.ts').then(async (m) => {
+    const r = await m.loadCodingStandards(process.cwd());
+    console.log(JSON.stringify(r));
+  });
+")
+if [ "$(printf '%s' "$STANDARDS_LOAD" | jq -r '.ok')" != "true" ]; then
+  echo "[hydra-qa] standards catalog read failed: $(printf '%s' "$STANDARDS_LOAD" | jq -r '.message')" >&2
+  exit 1   # before any reviewer is spawned
+fi
+if [ "$(printf '%s' "$STANDARDS_LOAD" | jq -r '.found')" = "true" ]; then
+  STANDARDS_PACKET=$(printf '%s' "$STANDARDS_LOAD" | jq -r '.text')
+else
+  STANDARDS_PACKET="No CODING_STANDARDS.md at repo root — judge against the Fowler battery and the remaining Hydra checks only"
+fi
 ```
+
+`$STANDARDS_PACKET` goes ONLY into the Standards prompts (`standards`,
+`reviewer-{A,B}-standards`, `reviewer-single`'s `## Standards` half) — never
+into `$REVIEW_PACKET` or a Spec prompt.
 
 **Shared packet discipline (applies to EVERY reviewer sub-agent — both axes,
 both tiers, T1 through T4).** Embed `$REVIEW_PACKET` inline at the top of each
@@ -935,7 +957,8 @@ Judgement calls that are not defects do not go in the findings list. On T1–T3 
 **Standards sub-agent prompt** — include:
 
 - `$REVIEW_PACKET` inline (the diff + full changed-file contents), per the shared packet discipline in step 7.0. `$FIXED_SHA` is for reference only — the reviewer does NOT run `git diff` / `git show` or an exploratory tool loop.
-- The standards-source files the reviewer MAY open by name (one, to cite a specific rule — not read end-to-end): `CLAUDE.md`, `CONTEXT.md`, `docs/adr/*.md`, `docs/agents/*.md`, `.editorconfig` (machine-enforced — note but don't re-check), `tsconfig.json`, any `STYLE.md` / `STANDARDS.md`.
+- The standards-source files the reviewer MAY open by name (one, to cite a specific rule — not read end-to-end): `CLAUDE.md`, `CONTEXT.md`, `docs/adr/*.md`, `docs/agents/*.md`, `.editorconfig` (machine-enforced — note but don't re-check), `tsconfig.json`. `CODING_STANDARDS.md` is already inlined below as `$STANDARDS_PACKET`.
+- `$STANDARDS_PACKET` inline (step 7.0) — the Standards-only rule catalog. The Spec reviewer never receives it.
 - Brief: *"The diff and changed-file contents are in the packet — judge off it, with no exploratory tool loop (step 7.0 packet discipline). Report every place the diff violates a documented standard as a row in the findings contract, citing the standard (file + the rule) inside the row's `finding`. Leave judgement calls out of the list. Skip anything tooling enforces (typecheck, lint — CI already runs these). Findings block plus one paragraph, under 400 words."*
 - **Attributing a failing test (issue #1076):** QA reads CI results via `statusCheckRollup` and must not `gh pr checkout`. If you do need to reproduce a test failure locally inside an isolated worktree, run `npm run test:debug` rather than `npm test` + a re-run-and-grep: it runs the identical flags (including `--test-force-exit`) but writes a TAP stream to `test-debug.tap`, so the per-test `not ok <n> - <name>` lines (which the default reporter drops under force-exit) and the `# pass/# fail` footer are both captured in a single run. The failing suite name is then greppable from the file without a second full-suite invocation.
 - **Refactoring-smell battery (Martin Fowler, via upstream `code-review` v1.1).** In addition to the documented standards, scan the diff for these twelve smells and **name each one you find** so the finding is actionable — apply them universally **unless a repo-documented standard explicitly overrides**. Report a smell only where you can point at the specific hunk; do not invent speculative concerns.
@@ -954,12 +977,13 @@ Judgement calls that are not defects do not go in the findings list. On T1–T3 
 - Hydra-specific checks the sub-agent must apply:
   - **CONTEXT.md vocabulary** — new identifiers in the diff must either appear in the glossary or be local-scope (test fixtures, private helpers). Flag vocabulary drift.
   - **ADR conformance** — if the diff touches an area governed by an ADR, the change must not contradict it.
-  - **CLAUDE.md coding conventions** — `src/redis/*` access pattern, `eventBus` passed as parameter (not module global), no silent `catch` (every catch logs `console.error` with context OR is annotated `/* intentional: reason */`).
+  - **Coding standards catalog** — apply every rule in the inlined CODING_STANDARDS.md catalog; a finding's `finding` text begins with the rule ID token (`STD-<AREA>-<NAME>: ...`) or, for a smell, the exact Fowler smell name. Severity follows the rule's own text, defaulting to low when the rule is silent.
   - **Tier alignment** — the PR body's `Tier: N` line (populated by `hydra-dev` from `/api/tier`) must agree with the artifact's `interfaceImpact` if an artifact is present. `breaking` ⇒ tier ≥ 2.
 
 **Spec sub-agent prompt** — include:
 
 - `$REVIEW_PACKET` inline (the diff + full changed-file contents), per the shared packet discipline in step 7.0. `$FIXED_SHA` is for reference only — the reviewer does NOT run `git diff` / `git show` or an exploratory tool loop.
+- Do NOT include `$STANDARDS_PACKET` in this prompt — the Spec axis never sees the standards catalog.
 - The artifact JSON (`$SPEC_INPUT_JSON`) embedded verbatim, OR the skip reason (`$SPEC_SKIPPED_REASON`) — if skipped, this sub-agent reports `"no spec available"` per the upstream `code-review` skill's contract and exits early.
 - The PR body (so requirements stated only in the PR description are still visible).
 - Brief: *"The artifact and the diff / changed-file contents are in the packet — judge off it, with no exploratory tool loop (step 7.0 packet discipline). Report: (a) requirements the artifact asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for — scope creep (diff touches modules not in `modulesTouched`); (c) invariants the artifact promised to preserve that the diff violates (no corresponding test, or test missing assertion); (d) `interfaceImpact: 'breaking'` claims that lack a corresponding interface-migration commit. Each is a row in the findings contract, quoting the artifact line in its `finding`. Findings block plus one paragraph, under 400 words."*
