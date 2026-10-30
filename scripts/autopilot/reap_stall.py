@@ -23,7 +23,7 @@ Imported by reap.py via a guarded `sys.path` insert + name-binding import
 `reap._handle_dev_orch_stall = spy`-style monkeypatching (if any test ever
 does it) keeps working on the reap.py side. This module itself imports ONLY
 from the sibling leaves `reap_ghrefs` (the `gh` seam + PR/issue predicates)
-and `reap_state` (`_append_log`, `save_state`) — never from `reap` — which is
+and `reap_state` (`_append_log`, `STATE_PATH`) and `run_ledger` (`persist`) — never from `reap` — which is
 exactly what avoids the import cycle a naive "move only the three handlers"
 slice would hit: reap.py imports reap_stall at module top, so a `from reap
 import ...` here would re-enter reap.py's own module init a second time
@@ -61,13 +61,9 @@ from reap_ghrefs import (
     _dev_orch_pr_exists_for_anchor,
     _gh_run,
 )
-from reap_state import _append_log, save_state
-
-# Issue #3866: cap on state.dev_resume_pending so a run with many distinct
-# stalling anchors can't grow the list unboundedly across a long session —
-# mirrors REAPED_TASK_IDS_CAP's FIFO-bound rationale, just a much smaller
-# ceiling since this list drains via dispatch, not just accumulates.
-DEV_RESUME_PENDING_CAP = 20
+import reap_state
+import run_ledger
+from reap_state import _append_log
 
 # Issue #4808 INV-8: the DURABLE cap on no-PR resumes per issue — enforced
 # here at stall time (where the cycle restarts), not in decide.py, so it
@@ -212,7 +208,7 @@ def _handle_dev_orch_stall(
                     e for e in pend
                     if not (isinstance(e, dict) and e.get("anchor") == anchor_ref)
                 ]
-                save_state(s)
+                run_ledger.persist(s, reap_state.STATE_PATH)
             line = (
                 f"dev_stall_no_pr_capped anchor={anchor_ref} task_id={task_id} "
                 f"branch={worktree_branch or ''} prior_stalls={prior_stalls} "
@@ -264,20 +260,14 @@ def _handle_dev_orch_stall(
     # Append/replace the resume record — dedup by anchor so a repeated stall
     # on the SAME anchor keeps only its latest attempt, then FIFO-bound the
     # whole queue (issue #3866).
-    pending = s.get("dev_resume_pending")
-    if not isinstance(pending, list):
-        pending = []
-    pending = [e for e in pending if not (isinstance(e, dict) and e.get("anchor") == anchor_ref)]
-    pending.append({
+    # Issue #5075: the dedup + FIFO-cap rule lives once, in the Run Ledger.
+    s["dev_resume_pending"] = run_ledger.queue_dev_resume(s.get("dev_resume_pending"), {
         "anchor": anchor_ref,
         "task_id": task_id,
         "branch": worktree_branch or "",
         "stalled_epoch": int(time.time()),
     })
-    if len(pending) > DEV_RESUME_PENDING_CAP:
-        pending = pending[-DEV_RESUME_PENDING_CAP:]
-    s["dev_resume_pending"] = pending
-    save_state(s)
+    run_ledger.persist(s, reap_state.STATE_PATH)
 
     line = (
         f"dev_stall_no_pr anchor={anchor_ref} task_id={task_id} "

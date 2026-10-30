@@ -238,7 +238,9 @@ describe("run_ledger declared field table (INV-3, INV-4)", () => {
     assert.equal(new Set(o.names).size, o.names.length, "no duplicate declared names");
     assert.deepEqual(o.doc, o.seeded, "seed writes exactly the declared seeded rows, in order");
     assert.ok(o.names.includes("scout_spend_usd_today"));
-    assert.ok(o.names.includes("idle_turns"));
+    // #5075: the phantom rows are gone from the declared table.
+    assert.ok(!o.names.includes("idle_turns"));
+    assert.ok(!o.names.includes("warnings"));
   });
 
   test("INV-4: every top-level key a real autopilot script writes is declared in FIELDS", () => {
@@ -274,8 +276,7 @@ describe("run_ledger declared field table (INV-3, INV-4)", () => {
       const golden = JSON.parse(readFileSync(join(FIXTURES, "heredoc-default.json"), "utf-8"));
       const path = join(dir, "state.json");
       assert.equal(ledger(["seed", path, ...seedArgsFrom(golden)]).status, 0);
-      assert.equal(ledger(["get", path, "idle_turns"]).stdout.trim(), "0");
-      assert.equal(ledger(["get", path, "warnings"]).stdout.trim(), "[]");
+      assert.equal(ledger(["get", path, "slot_history"]).stdout.trim(), "[]");
       assert.equal(ledger(["get", path, "turn_snapshot"]).stdout.trim(), "{}");
       assert.equal(ledger(["get", path, "scout_spend_usd_today"]).stdout.trim(), "0");
     });
@@ -363,8 +364,11 @@ print(json.dumps(out))`);
       );
       const r = py("r.load(sys.argv[1],fill_defaults=False)", [path]);
       assert.equal(r.status, 0, r.stderr);
+      // candidate_exclusions is a BLOB row (type any, #5075 INV-8): decide() fails safe on its shape.
       writeFileSync(path, JSON.stringify({ candidate_exclusions: {} }));
-      assert.notEqual(py("r.load(sys.argv[1])", [path]).status, 0, "object no longer valid");
+      assert.equal(py("r.load(sys.argv[1])", [path]).status, 0, "blob rows accept any JSON shape");
+      writeFileSync(path, JSON.stringify({ slot_events: "x" }));
+      assert.notEqual(py("r.load(sys.argv[1])", [path]).status, 0, "a string is not a valid slot_events container");
     });
   });
 });
@@ -689,5 +693,131 @@ describe("run_ledger Redis continuity — prior-file -> Redis -> default (issue 
     assert.deepEqual(hset, ["HSET", "hydra:autopilot:signal-last-fired", "health", "0", "retro_orch", "1780000000"]);
     assert.deepEqual(set, ["SET", "hydra:autopilot:research-force-counter", '{"2026-10-25": {"orch": 1}}']);
     assert.equal(o.length, 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Slice 4 (issue #5075): one parser, one writer, one slot shape.
+// ---------------------------------------------------------------------------
+describe("run ledger slot record + CLI readers (#5075)", () => {
+  const SLOT = { skill: "hydra-dev", task_id: "t1", started: "2026-10-28T00:00:00Z", started_epoch: 1793000000 };
+
+  function withDoc<T>(doc: unknown, fn: (path: string) => T): T {
+    return withDir((dir) => {
+      const path = join(dir, "state.json");
+      writeFileSync(path, JSON.stringify(doc));
+      return fn(path);
+    });
+  }
+
+  test("INV-3: slot-fields prints the declared slot table (required core + optional provenance)", () => {
+    const r = ledger(["slot-fields"]);
+    assert.equal(r.status, 0, r.stderr);
+    const fields = JSON.parse(r.stdout) as { name: string; type: string; required: boolean }[];
+    assert.deepEqual(
+      fields.filter((f) => f.required).map((f) => f.name),
+      ["skill", "task_id", "started", "started_epoch"],
+    );
+    assert.deepEqual(
+      fields.filter((f) => !f.required).map((f) => f.name).sort(),
+      ["_source", "anchor", "attempt", "branch", "dispatch_id", "isolation", "model", "turn", "worktreeBranch"].sort(),
+    );
+  });
+
+  test("INV-3: the TS in-flight seed keys are a superset of the required core and a subset of the declared keys", async () => {
+    const { deriveInflightSlotSeed } = await import("../src/autopilot/run-lifecycle-state.ts");
+    const seed = deriveInflightSlotSeed([
+      { sessionId: "s1", skill: "hydra-dev", dispatchId: "d1", startedAt: "2026-06-14T00:00:00.000Z" },
+    ] as any);
+    const keys = Object.keys(seed.dev_orch);
+    const fields = JSON.parse(ledger(["slot-fields"]).stdout) as { name: string; required: boolean }[];
+    for (const f of fields.filter((x) => x.required)) assert.ok(keys.includes(f.name), `seed lacks required ${f.name}`);
+    const declared = new Set(fields.map((f) => f.name));
+    for (const k of keys) assert.ok(declared.has(k), `seed key ${k} is not a declared slot field`);
+  });
+
+  test("INV-3: a PRESENT slot key of the wrong type raises; an absent key is tolerated; an undeclared key warns once and is preserved", () => {
+    withDoc({ slots: { dev_orch: { ...SLOT, started_epoch: "soon" } } }, (path) => {
+      const r = py("r.load(sys.argv[1], fill_defaults=False)", [path]);
+      assert.notEqual(r.status, 0);
+      assert.match(r.stderr, /type mismatch for slots\.dev_orch\.started_epoch/);
+    });
+    withDoc({ slots: { dev_orch: { skill: "hydra-dev" }, qa_orch: null } }, (path) => {
+      assert.equal(py("r.load(sys.argv[1], fill_defaults=False)", [path]).status, 0, "absent keys are tolerated");
+    });
+    withDoc({ slots: { dev_orch: { ...SLOT, partial_tokens: 5 }, qa_orch: { ...SLOT, partial_tokens: 6 } } }, (path) => {
+      const r = py("d=r.load(sys.argv[1], fill_defaults=False); print(d['slots']['dev_orch']['partial_tokens'])", [path]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout.trim(), "5", "undeclared slot key is preserved");
+      assert.equal((r.stderr.match(/undeclared slot key partial_tokens/g) ?? []).length, 1, "warned once");
+    });
+  });
+
+  test("INV-5: queue_dev_resume dedups by anchor keeping the latest at the tail and FIFO-caps at 20", () => {
+    const r = py(
+      "q=[]\n" +
+        "for i in range(25): q=r.queue_dev_resume(q,{'anchor':'issue-%d'%i,'task_id':'t'})\n" +
+        "q=r.queue_dev_resume(q,{'anchor':'issue-10','task_id':'latest'})\n" +
+        "q2=r.queue_dev_resume(q,{'task_id':'no-anchor'})\n" +
+        "print(json.dumps([len(q),q[0]['anchor'],q[-1],r.DEV_RESUME_PENDING_CAP,q2==q]))",
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const [len, first, last, cap, unchanged] = JSON.parse(r.stdout);
+    assert.equal(len, 20);
+    assert.equal(cap, 20);
+    assert.equal(first, "issue-5");
+    assert.deepEqual(last, { anchor: "issue-10", task_id: "latest" });
+    assert.equal(unchanged, true, "a record without an anchor is dropped");
+  });
+
+  test("INV-2: persist leaves no temp file behind when serialisation raises RecursionError (only the crash seam keeps one)", () => {
+    withDir((dir) => {
+      const path = join(dir, "state.json");
+      const r = py(
+        "d={'turn':1,'usage_eligibility':{}}\n" +
+          "x=d['usage_eligibility']\n" +
+          "for _ in range(100000): x['n']={}; x=x['n']\n" +
+          "try:\n  r.persist(d, sys.argv[1])\nexcept RecursionError:\n  print('recursion')",
+        [path],
+      );
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /recursion/);
+      assert.deepEqual(readdirSync(dir), [], "the temp file was unlinked");
+    });
+  });
+
+  test("INV-7: get --default / project / --prior", () => {
+    withDoc({ pid: 7, limits: { token_budget: 5 }, slot_events_last_id: "1-0" }, (path) => {
+      assert.equal(ledger(["get", path, "pid", "--default", "0"]).stdout.trim(), "7");
+      assert.equal(ledger(["get", path, "run_id", "--default", "unknown"]).stdout.trim(), "unknown");
+      assert.equal(ledger(["get", path, "nope"]).status, 1, "absent without --default stays exit 1");
+      const proj = JSON.parse(ledger(["project", path, "pid", "limits.token_budget", "dispatches"]).stdout);
+      assert.deepEqual(proj, { pid: 7, "limits.token_budget": 5, dispatches: null });
+    });
+    withDoc({ turn: null }, (path) => {
+      assert.equal(ledger(["get", path, "turn", "--prior", "--default", "0"]).stdout.trim(), "0", "null -> default");
+    });
+    withDoc({ pid: "not-an-int" }, (path) => {
+      assert.notEqual(ledger(["get", path, "pid"]).status, 0, "strict read fails loud on a type mismatch");
+      assert.equal(ledger(["get", path, "pid", "--prior", "--default", "0"]).stdout.trim(), "not-an-int");
+    });
+    withDir((dir) => {
+      const path = join(dir, "corrupt.json");
+      writeFileSync(path, "{not json");
+      const r = ledger(["get", path, "pid", "--prior", "--default", "0"]);
+      assert.equal(r.status, 0, "a corrupt prior document degrades to the default");
+      assert.equal(r.stdout.trim(), "0");
+      assert.equal(ledger(["get", join(dir, "missing.json"), "pid", "--prior", "--default", "0"]).stdout.trim(), "0");
+    });
+  });
+
+  test("turn.sh slot-events cursor read is lenient (--prior): a mistyped sibling key keeps the cursor", () => {
+    const turn = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "turn.sh"), "utf-8");
+    assert.match(turn, /get "\$STATE" slot_events_last_id --prior --default 0/);
+    withDoc({ pid: "not-an-int", slot_events_last_id: "55-0" }, (path) => {
+      assert.equal(ledger(["get", path, "slot_events_last_id", "--prior", "--default", "0"]).stdout.trim(), "55-0");
+      // sibling shape: the strict read of the same doc still fails loud
+      assert.notEqual(ledger(["get", path, "slot_events_last_id"]).status, 0);
+    });
   });
 });

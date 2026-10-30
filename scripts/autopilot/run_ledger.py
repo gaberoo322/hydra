@@ -38,7 +38,16 @@ CLI (bash callers never touch the file directly):
   run_ledger.py carry-classes
   run_ledger.py seed <path> [--carry-from <prev_path>] [--mirror]
                      key=<json-literal>... [slots_overlay=<json>]
-  run_ledger.py get <path> <dotted.key>
+  run_ledger.py get <path> <dotted.key> [--prior] [--default <v>]
+  run_ledger.py project <path> [--prior] <key>...
+  run_ledger.py slot-fields
+
+`get --default <v>` prints <v> (exit 0) when the key is absent or null, the
+`jq -r '.key // <v>'` shape bash callers used to open-code.
+`get`/`project` read the LIVE run's document strictly (a declared-key type
+mismatch exits 1); `--prior` reads a possibly-dead run's document leniently
+(read_prior: never raises, a missing/corrupt file degrades to "key absent").
+`project` prints ONE JSON object of the requested dotted keys (absent -> null).
 """
 import datetime
 import json
@@ -64,7 +73,7 @@ REQUIRED = object()
 # carried; shorter cooldowns are re-armed each run. ONE home; a test pins it
 # equal to the systemd timer's OnUnitActiveSec.
 PACE_GATE_RELAUNCH_SEC = 900
-DEV_RESUME_PENDING_CAP = 20  # reap_stall.py's DEV_RESUME_PENDING_CAP twin stays pinned equal
+DEV_RESUME_PENDING_CAP = 20  # the ONE home (#5075); queue_dev_resume enforces it, reap_stall.py calls that
 REDIS_SIGNAL_LAST_FIRED_KEY = "hydra:autopilot:signal-last-fired"
 REDIS_RESEARCH_FORCE_KEY = "hydra:autopilot:research-force-counter"
 DEFAULT_REDIS_ARGV = ["docker", "exec", "hydra-redis-1", "redis-cli"]
@@ -90,6 +99,13 @@ class LedgerTypeError(Exception):
     """A declared key holds the wrong JSON type. `code` is machine-readable."""
 
     code = "ledger-type-mismatch"
+
+
+class SimulatedCrash(RuntimeError):
+    """The HYDRA_RUN_LEDGER_TEST_CRASH seam's dedicated exception (#5075): the
+    ONLY failure persist() re-raises WITHOUT unlinking its temp file, so any other
+    RuntimeError subclass (e.g. RecursionError on an unserialisable blob) still
+    reaches the cleanup arm."""
 
 
 def _row(name, typ, default, carry, seeded=True, decide_owned=False, **policy):
@@ -123,6 +139,18 @@ def _norm_research_force_counter(value, ctx):
     return {}
 
 
+def queue_dev_resume(pending, record):
+    """The ONE dev_resume_pending queue policy (#5075): append `record`, deduped
+    by its `anchor` keeping the LATEST record at the FIFO tail, then FIFO-capped
+    at DEV_RESUME_PENDING_CAP. Returns a new list; `pending` is not mutated.
+    A record without a non-empty string `anchor` is dropped."""
+    kept = [e for e in (pending if isinstance(pending, list) else []) if isinstance(e, dict)]
+    a = record.get("anchor") if isinstance(record, dict) else None
+    if isinstance(a, str) and a != "":
+        kept = [k for k in kept if k.get("anchor") != a] + [record]
+    return kept[-DEV_RESUME_PENDING_CAP:]
+
+
 def _norm_dev_resume_pending(value, ctx):
     """#4518: objects with a non-empty string `anchor`, deduped by anchor keeping
     the LATEST record in its FIFO position, FIFO-capped at DEV_RESUME_PENDING_CAP."""
@@ -130,13 +158,8 @@ def _norm_dev_resume_pending(value, ctx):
         return []
     kept = []
     for e in value:
-        if not isinstance(e, dict):
-            continue
-        a = e.get("anchor")
-        if not isinstance(a, str) or a == "":
-            continue
-        kept = [k for k in kept if k["anchor"] != a] + [e]
-    return kept[-DEV_RESUME_PENDING_CAP:]
+        kept = queue_dev_resume(kept, e)
+    return kept
 
 
 def _integral(v):
@@ -254,12 +277,10 @@ FIELDS = [
         pipeline_refire_stamps=("research_target",),
     ),
     # Written by other autopilot scripts after seed (not seeded here).
-    _row("idle_turns", "int", 0, RESET, seeded=False),
     _row("turn_snapshot", "object", {}, RESET, seeded=False),
     _row("slot_events", "array|object", [], RESET, seeded=False),
     _row("slot_history", "array", [], RESET, seeded=False),
     _row("quota_baseline", "object", {}, RESET, seeded=False, decide_owned=True),
-    _row("warnings", "array", [], RESET, seeded=False),
     _row("scout_spend_usd_today", "number", 0, RESET, seeded=False),
     _row("dev_target_resume_inflight", "object", {}, RESET, seeded=False, decide_owned=True),
     _row("target_triage_item_stamps", "object", {}, RESET, seeded=False, decide_owned=True),
@@ -274,10 +295,32 @@ FIELDS = [
     _row("emergency_brake", "any", {}, RESET, seeded=False),
     _row("target_risk_surface", "any", {}, RESET, seeded=False),
     _row("class_stats", "any", {}, RESET, seeded=False),
-    _row("candidate_exclusions", "array", [], RESET, seeded=False),
+    _row("candidate_exclusions", "any", [], RESET, seeded=False),
 ]
 
 _FIELD_BY_NAME = {f["name"]: f for f in FIELDS}
+
+# Declared slots.<class> record (#5075). A slot is built by stamp-slot.py
+# build_slot, read by decide.py / reap.py, and seeded by TS
+# (deriveInflightSlotSeed). Same policy as the top-level table: a PRESENT key of
+# the wrong type raises, an absent key is tolerated, an undeclared key warns once
+# and is preserved. `required` marks the core every real slot carries.
+SLOT_FIELDS = [
+    {"name": "skill", "type": "str", "required": True},
+    {"name": "task_id", "type": "str", "required": True},
+    {"name": "started", "type": "str", "required": True},
+    {"name": "started_epoch", "type": "int", "required": True},
+    {"name": "branch", "type": "str", "required": False},
+    {"name": "worktreeBranch", "type": "str", "required": False},
+    {"name": "dispatch_id", "type": "str", "required": False},
+    {"name": "model", "type": "str", "required": False},
+    {"name": "isolation", "type": "str", "required": False},
+    {"name": "anchor", "type": "str", "required": False},
+    {"name": "_source", "type": "str", "required": False},
+    {"name": "turn", "type": "int", "required": False},
+    {"name": "attempt", "type": "int", "required": False},
+]
+_SLOT_FIELD_BY_NAME = {f["name"]: f for f in SLOT_FIELDS}
 
 # Keys decide() may mutate in-memory that main() must persist post-decide
 # (the former nine hand-listed snapshot/compare pairs, #5074). slot_events /
@@ -329,6 +372,15 @@ def _validate(doc):
         for f in LIMITS:
             if f["name"] in limits:
                 _check("limits." + f["name"], limits[f["name"]], f["type"])
+    slots = doc.get("slots")
+    if isinstance(slots, dict):
+        for cls, slot in slots.items():
+            if not isinstance(slot, dict):
+                continue  # a released slot is null; a non-object is decide()'s to tolerate
+            for key, value in slot.items():
+                f = _SLOT_FIELD_BY_NAME.get(key)
+                if f is not None:
+                    _check("slots.%s.%s" % (cls, key), value, f["type"])
 
 
 def resolve_state_path(env=None):
@@ -352,6 +404,13 @@ def load(path, fill_defaults=True):
     for key in doc:
         if key not in _FIELD_BY_NAME:
             sys.stderr.write("[run-ledger] WARN undeclared key %s preserved\n" % key)
+    if isinstance(doc.get("slots"), dict):
+        warned = set()
+        for slot in doc["slots"].values():
+            for key in (slot if isinstance(slot, dict) else ()):
+                if key not in _SLOT_FIELD_BY_NAME and key not in warned:
+                    warned.add(key)
+                    sys.stderr.write("[run-ledger] WARN undeclared slot key %s preserved\n" % key)
     if fill_defaults:
         for f in FIELDS:
             if f["name"] not in doc and f["default"] is not REQUIRED:
@@ -399,12 +458,13 @@ def _ordered(ledger):
     return out
 
 
-def persist(ledger, path):
+def persist(ledger, path, validate=True):
     """The ONE state.json writer: temp file in the same directory, then
     os.replace. A crash before the rename leaves the prior file untouched."""
     global _persist_calls
     _persist_calls += 1
-    _validate(ledger)
+    if validate:
+        _validate(ledger)
     directory = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(prefix=".run-ledger-", dir=directory)
     try:
@@ -415,9 +475,9 @@ def persist(ledger, path):
         if crash_mode == "before-replace" or (crash_mode == "before-replace-2nd" and _persist_calls == 2):
             # Test seam: simulate a crash between write and rename. The temp
             # file is deliberately left behind (that is the crash state).
-            raise RuntimeError("[run-ledger] simulated crash before replace")
+            raise SimulatedCrash("[run-ledger] simulated crash before replace")
         os.replace(tmp, path)
-    except RuntimeError:
+    except SimulatedCrash:
         raise
     except BaseException:
         try:
@@ -711,6 +771,18 @@ def _seed_cmd(rest):
     return 0
 
 
+_MISSING = object()
+
+
+def _dig(doc, dotted, default=None):
+    cur = doc
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return default
+        cur = cur[part]
+    return cur
+
+
 def _main(argv):
     if not argv:
         sys.stderr.write(__doc__)
@@ -732,19 +804,42 @@ def _main(argv):
         return 0
     if cmd == "seed":
         return _seed_cmd(rest)
-    if cmd == "get":
-        if len(rest) != 2:
-            sys.stderr.write("usage: run_ledger.py get <path> <dotted.key>\n")
+    if cmd == "slot-fields":
+        print(json.dumps(SLOT_FIELDS))
+        return 0
+    if cmd in ("get", "project"):
+        prior = "--prior" in rest
+        rest = [a for a in rest if a != "--prior"]
+        default = None
+        if cmd == "get" and "--default" in rest:
+            i = rest.index("--default")
+            if i + 1 >= len(rest):
+                sys.stderr.write("[run-ledger] --default needs a value\n")
+                return 2
+            default = rest[i + 1]
+            rest = rest[:i] + rest[i + 2:]
+        if (cmd == "get" and len(rest) != 2) or (cmd == "project" and len(rest) < 2):
+            sys.stderr.write("usage: run_ledger.py get <path> <dotted.key> [--prior] | project <path> [--prior] <key>...\n")
             return 2
-        try:
-            cur = load(rest[0])
-        except (OSError, ValueError, LedgerTypeError) as e:
-            sys.stderr.write("[run-ledger] get failed: %s\n" % e)
-            return 1
-        for part in rest[1].split("."):
-            if not isinstance(cur, dict) or part not in cur:
+        if prior:
+            doc = read_prior(rest[0])
+            if not isinstance(doc, dict):
+                doc = {}
+        else:
+            try:
+                doc = load(rest[0], fill_defaults=(cmd == "get"))
+            except (OSError, ValueError, LedgerTypeError) as e:
+                sys.stderr.write("[run-ledger] %s failed: %s\n" % (cmd, e))
                 return 1
-            cur = cur[part]
+        if cmd == "project":
+            print(json.dumps({k: _dig(doc, k) for k in rest[1:]}, ensure_ascii=False))
+            return 0
+        cur = _dig(doc, rest[1], _MISSING)
+        if default is not None and (cur is _MISSING or cur is None):
+            print(default)
+            return 0
+        if cur is _MISSING:
+            return 1
         print(cur if isinstance(cur, str) else json.dumps(cur, ensure_ascii=False))
         return 0
     sys.stderr.write("[run-ledger] unknown subcommand %s\n" % cmd)

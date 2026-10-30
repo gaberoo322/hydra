@@ -3,7 +3,7 @@
 by an architecture-scan).
 
 Owns:
-  - state.json load/save — the SHARED, unlocked /tmp file every autopilot
+  - state.json load — the SHARED, unlocked /tmp file every autopilot
     process reads/writes unless HYDRA_AUTOPILOT_STATE overrides it (see
     reap.py's module docstring, issue #3895)
   - the `reaped_task_ids` dedup ledger, FIFO-bounded to REAPED_TASK_IDS_CAP
@@ -89,11 +89,40 @@ def load_state() -> dict | None:
     if not STATE_PATH.exists():
         print(f"[autopilot] reap: state file missing at {STATE_PATH}; skipping", file=sys.stderr)
         return None
-    return json.loads(STATE_PATH.read_text())
+    try:
+        return run_ledger.load(STATE_PATH, fill_defaults=False)
+    except run_ledger.LedgerTypeError as exc:
+        # Reap completion / grill-crash stay exit 0 (Keep list): a wrong-typed
+        # declared field is logged loudly and treated like a missing state
+        # file instead of dying with a traceback (QA round 1, #5293).
+        # Fall back to the lenient prior read so the completion's token
+        # accounting / burned_classes / dedup ledger are still recorded (QA
+        # round 2, #5293).
+        print(f"[autopilot] reap: state at {STATE_PATH} failed type validation ({exc}); reading leniently", file=sys.stderr)
+        prior = run_ledger.read_prior(STATE_PATH)
+        return prior if isinstance(prior, dict) else None
 
 
-def save_state(s: dict) -> None:
-    STATE_PATH.write_text(json.dumps(s))
+def persist_state(s: dict) -> bool:
+    """persist() that never dies on a type-invalid document (QA rounds 2-3, #5293).
+
+    Reap stays exit 0: when a declared field is wrong-typed, the strict write
+    is refused, so the document is written atomically WITHOUT validation so
+    the completion's token accounting / burned_classes / dedup ledger still
+    reach state.json (load_state already read it leniently). Returns True
+    when the file was written.
+    """
+    try:
+        run_ledger.persist(s, STATE_PATH)
+        return True
+    except run_ledger.LedgerTypeError as exc:
+        print(f"[autopilot] reap: state failed type validation ({exc}); writing leniently", file=sys.stderr)
+    try:
+        run_ledger.persist(s, STATE_PATH, validate=False)
+        return True
+    except OSError as exc:
+        print(f"[autopilot] reap: lenient state write failed ({exc})", file=sys.stderr)
+        return False
 
 
 def _append_log(line: str) -> None:
@@ -183,7 +212,7 @@ def mirror_cross_run_state_to_redis(s: dict) -> None:
     rows whose policy is mirrored-to-Redis (`signal_last_fired`,
     `research_force_counter`). Run-scoped fields are NEVER mirrored — they die
     with the run by design (design-concept #2715 Invariant 4). The name stays
-    because reap.py imports it. Called after `save_state` in `run_completion`, so
+    because reap.py imports it. Called after `run_ledger.persist` in `run_completion`, so
     a Redis hiccup can never lose the local write; no exception escapes.
     """
     try:

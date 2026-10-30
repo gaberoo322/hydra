@@ -350,8 +350,9 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
   });
 
   test("INV-009: dev_orch and design_concept_orch on same anchor is warn-only (does NOT raise)", () => {
-    // Phase B intentionally does not raise on this conflict — it logs
-    // to state.warnings[] instead. Phase C will flip to raise.
+    // Phase B intentionally does not raise on this conflict — it prints one
+    // stderr WARN line per conflicting anchor and writes nothing to state.
+    // Phase C will flip to raise.
     const plan = {
       actions: [
         { type: "dispatch", slot: "design_concept_orch", skill: "hydra-grill",
@@ -361,11 +362,11 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
       ],
     };
     const r = runAsserts(plan, baseState());
-    // Warn-only: status must be 0 (no raise) — the warnings are observed via
-    // state.warnings[] (decide.py / reap.py / digest read those), but
-    // assert_invariants.py exits OK.
+    // Warn-only: status must be 0 (no raise); exactly one stderr WARN for the
+    // conflicting anchor, and no `warnings` key is ever written to state.
     assert.equal(r.status, 0,
       `INV-009 must NOT raise in Phase B (warn-only); got stderr: ${r.stderr}`);
+    assert.equal((r.stderr.match(/WARN INV-009 .*issue-conflict/g) ?? []).length, 1);
   });
 
   test("INV-009: dev_orch and design_concept_orch on DIFFERENT anchors is allowed", () => {
@@ -379,6 +380,7 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
     };
     const r = runAsserts(plan, baseState());
     assert.equal(r.status, 0, "different anchors must not trip INV-009");
+    assert.doesNotMatch(r.stderr, /WARN INV-009/);
   });
 
   test("INV-008: dispatch dev_target under orch-only scope is rejected", () => {
@@ -563,5 +565,20 @@ describe("decide.py INV-label namespaces (issue #4520)", () => {
       [],
       `a subtest name citing an ad-hoc INV label must carry its originating issue number as a prefix (e.g. "#4460 INV-6 sequencing: ...") so the label resolves without cross-referencing; offending names:\n${bare.join("\n")}`,
     );
+  });
+});
+
+describe("AC1 guard: only run_ledger.py json-loads the state document (#5075, #5293)", () => {
+  test("reap.py run_reconcile_seeded reads state via run_ledger.read_prior, not raw json.load", () => {
+    const src = readFileSync(resolve("scripts/autopilot/reap.py"), "utf8");
+    const fn = src.slice(src.indexOf("def run_reconcile_seeded")).slice(0, 2500);
+    assert.doesNotMatch(fn, /json\.load\(fh\)/);
+    assert.match(fn, /run_ledger\.read_prior\(state_path\)/);
+  });
+  test("no reap module opens state_path/STATE_PATH for a raw json.load", () => {
+    for (const f of ["reap.py", "reap_state.py", "reap_stall.py", "reap_ghrefs.py"]) {
+      const src = readFileSync(resolve("scripts/autopilot", f), "utf8");
+      assert.doesNotMatch(src, /open\((state_path|STATE_PATH)[^)]*\)[\s\S]{0,80}json\.load/, f);
+    }
   });
 });

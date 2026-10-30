@@ -108,31 +108,6 @@ function runLog(paths: Paths): string {
   return existsSync(paths.log) ? readFileSync(paths.log, "utf-8") : "";
 }
 
-// Issue #3970: the default-mode hard-cap sweep files a REAL GitHub issue on a
-// runaway slot (`gh issue create`). Stub `gh` on PATH so the test never opens
-// one — the issue-filing is incidental to the cycle-record keying under test.
-function runHardcap(
-  paths: Paths,
-): { status: number; stdout: string; stderr: string } {
-  const binDir = join(paths.dir, "bin");
-  mkdirSync(binDir, { recursive: true });
-  writeFileSync(join(binDir, "gh"), "#!/usr/bin/env bash\nexit 0\n");
-  chmodSync(join(binDir, "gh"), 0o755);
-  const r = spawnSync("python3", [REAP], {
-    env: {
-      ...process.env,
-      PATH: `${binDir}:${process.env.PATH ?? ""}`,
-      HYDRA_API_BASE: DEAD_API_BASE,
-      HYDRA_BASE_URL: DEAD_API_BASE,
-      HYDRA_AUTOPILOT_STATE: paths.state,
-      HYDRA_AUTOPILOT_LOG: paths.log,
-      HYDRA_REAP_WORKTREE_GC: "0",
-    },
-    encoding: "utf-8",
-  });
-  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-}
-
 function runGrillCrash(
   taskId: string,
   paths: Paths,
@@ -235,82 +210,14 @@ describe("reap.py completion → cycle-record keyed on the worktree branch (issu
 });
 
 describe("reap.py terminal-failure write sites → cycle-record keyed on the worktree branch (issue #3970)", () => {
-  // The two terminal-failure reap paths — run_hardcap's runaway-abandon sweep
-  // and run_grill_crash — previously captured (task_id, skill, anchor) from the
-  // live slot but NEVER the branch, so their failed cycle-record unconditionally
-  // keyed on the bare task_id (an un-joinable record). #3970 extends
-  // run_completion's #3391 branch-capture-before-null pattern to both sites.
-  // They are twin-safe to fix (INV-3): a hard-cap trip and a grill crash never
-  // open a PR, so they never reach the merge-watch enrichment that would
-  // otherwise re-key on a different id.
-
-  test("a hard-cap trip on a slot WITH a branch fires the cycle-record under the BRANCH cycleId", () => {
-    const tmp = makeTmp();
-    try {
-      const branch = "worktree-agent-3970aaaa-t3-dev_orch";
-      writeState(tmp.state, {
-        slots: {
-          dev_orch: {
-            skill: "hydra-dev",
-            started_epoch: Math.floor(Date.now() / 1000),
-            task_id: "t3970hc",
-            anchor: "issue-3970",
-            branch,
-            // partial_tokens >= subagent_hard_max_tokens (800_000) trips the cap.
-            partial_tokens: 900_000,
-          },
-        },
-      });
-
-      const r = runHardcap(tmp);
-      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
-
-      const log = runLog(tmp);
-      assert.match(
-        log,
-        new RegExp(`cycle_record_fired cycleId=${branch} task_id=t3970hc skill=hydra-dev status=failed`),
-        "a hard-capped slot with a branch must key its failed cycle-record on the branch",
-      );
-      assert.doesNotMatch(
-        log,
-        /cycle_record_fired cycleId=t3970hc /,
-        "the hard-cap cycle-record must not key on the bare task_id when a branch was present",
-      );
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("a hard-cap trip on a branch-less slot still keys the cycle-record on the task_id (INV-4 fallback)", () => {
-    const tmp = makeTmp();
-    try {
-      writeState(tmp.state, {
-        slots: {
-          dev_orch: {
-            skill: "hydra-dev",
-            started_epoch: Math.floor(Date.now() / 1000),
-            task_id: "t3970nofb",
-            anchor: "issue-3970",
-            // No branch field — the documented dominant gap. The fallback must
-            // keep keying on the bare task_id byte-for-byte with prior behaviour.
-            partial_tokens: 900_000,
-          },
-        },
-      });
-
-      const r = runHardcap(tmp);
-      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
-
-      const log = runLog(tmp);
-      assert.match(
-        log,
-        /cycle_record_fired cycleId=t3970nofb task_id=t3970nofb skill=hydra-dev status=failed/,
-        "a branch-less hard-capped slot keys its cycle-record on the bare task_id",
-      );
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
+  // The terminal-failure reap path run_grill_crash previously captured
+  // (task_id, skill, anchor) from the live slot but NEVER the branch, so its
+  // failed cycle-record unconditionally keyed on the bare task_id (an
+  // un-joinable record). #3970 extends run_completion's #3391
+  // branch-capture-before-null pattern to it. Twin-safe (INV-3): a grill crash
+  // never opens a PR, so it never reaches the merge-watch enrichment that would
+  // otherwise re-key on a different id. (The hard-cap sweep that shared this
+  // contract was deleted in #5075.)
 
   test("a grill crash on a design_concept_orch slot WITH a branch fires the cycle-record under the BRANCH cycleId", () => {
     const tmp = makeTmp();
@@ -340,6 +247,37 @@ describe("reap.py terminal-failure write sites → cycle-record keyed on the wor
         log,
         /cycle_record_fired cycleId=t3970gc /,
         "the grill-crash cycle-record must not key on the bare task_id when a branch was present",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("reap.py exits 0 on a type-invalid state document (QA rounds 1-2, #5293)", () => {
+  test("grill-crash with a wrong-typed declared field still does the accounting and exits 0", () => {
+    const tmp = makeTmp();
+    try {
+      const branch = "worktree-agent-5293bbbb-t2-design_concept_orch";
+      writeState(tmp.state, {
+        dispatches: "not-an-int",
+        slots: {
+          design_concept_orch: {
+            skill: "hydra-grill",
+            started_epoch: Math.floor(Date.now() / 1000),
+            task_id: "t5293gc",
+            branch,
+          },
+        },
+      });
+      const r = runGrillCrash("t5293gc", tmp);
+      assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+      assert.match(r.stderr, /failed type validation/);
+      assert.doesNotMatch(r.stderr, /Traceback/);
+      assert.match(
+        runLog(tmp),
+        new RegExp(`cycle_record_fired cycleId=${branch} task_id=t5293gc skill=hydra-grill status=failed`),
+        "accounting must still happen (not skipped) on a wrong-typed declared field",
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });

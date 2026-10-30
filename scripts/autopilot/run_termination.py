@@ -96,6 +96,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import run_ledger  # noqa: E402  (the ONE state-document parser, #5075)
+
 
 def count_slots_occupied(state: dict) -> int:
     """THE canonical work-in-flight predicate (issue #2030, unified #4305).
@@ -251,14 +254,11 @@ def _load_state(path: str):
     """Read state.json as a dict, or None on any missing/unreadable/malformed
     input. NEVER raises — every tally caller degrades to "nothing to amend".
     """
-    p = Path(path)
-    if not p.is_file():
+    if not Path(path).is_file():
         return None
-    try:
-        state = json.loads(p.read_text())
-    except Exception:
-        # intentional: degrade to None — never blocks the caller's tail step.
-        return None
+    # read_prior (lenient, never raises): a possibly-dead run's document must
+    # never block a tally POST (#5075 INV-7).
+    state = run_ledger.read_prior(path)
     return state if isinstance(state, dict) else None
 
 
@@ -372,12 +372,10 @@ def _fire_tally_followup(
 def _cli_count_slots(argv: list) -> int:
     count = 0
     if argv:
-        path = Path(argv[0])
-        if path.is_file():
+        state = run_ledger.read_prior(argv[0])
+        if isinstance(state, dict):
             try:
-                state = json.loads(path.read_text())
-                if isinstance(state, dict):
-                    count = count_slots_occupied(state)
+                count = count_slots_occupied(state)
             except Exception:
                 # intentional: degrade to 0 — never blocks the reap/pre-check.
                 count = 0
@@ -418,8 +416,8 @@ def _cli_seed_filter(argv: list) -> int:
         if not isinstance(seed, dict):
             raise ValueError("seed is not a JSON object")
         reaped: list = []
-        if argv and Path(argv[0]).is_file():
-            prior = json.loads(Path(argv[0]).read_text())
+        if argv:
+            prior = run_ledger.read_prior(argv[0])
             if isinstance(prior, dict) and isinstance(prior.get("reaped_task_ids"), list):
                 reaped = prior["reaped_task_ids"]
         sys.stdout.write(json.dumps(filter_reaped_seed(seed, reaped), separators=(",", ":")))

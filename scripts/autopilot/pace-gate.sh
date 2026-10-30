@@ -285,8 +285,10 @@ if [[ "$MODE" != "exec" && "${HYDRA_PACE_GATE_FORCE_SERVICE_INACTIVE:-0}" != "1"
 fi
 
 PID_ALIVE=0
-if [[ -f "$STATE_PATH" ]] && command -v jq >/dev/null 2>&1; then
-  PID=$(jq -r '.pid // 0' "$STATE_PATH" 2>/dev/null || echo "0")
+if [[ -f "$STATE_PATH" ]] && command -v python3 >/dev/null 2>&1; then
+  # Lenient prior-run read (run_ledger --prior, #5075): a corrupt or older-schema
+  # document degrades to pid 0 and can never block the pace gate.
+  PID=$(python3 "$(dirname "${BASH_SOURCE[0]}")/run_ledger.py" get "$STATE_PATH" pid --prior --default 0 2>/dev/null || echo "0")
   if [[ -n "$PID" && "$PID" != "0" && "$PID" != "null" ]] && kill -0 "$PID" 2>/dev/null; then
     PID_ALIVE=1
   fi

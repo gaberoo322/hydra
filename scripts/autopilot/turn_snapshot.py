@@ -67,9 +67,15 @@ Pure readers + one atomic write; no network.
 from __future__ import annotations
 
 import json
+from typing import Any
+
 import os
 import sys
-from typing import Any
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+import run_ledger  # noqa: E402  (the ONE state-document parser/writer, #5075)
 
 SCHEMA_VERSION = 1
 DEFAULT_STATE_PATH = os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json")
@@ -444,15 +450,10 @@ def apply(snap: Any, state: dict, unreadable_reason: str | None = None) -> dict:
 
 def _read_state(state_path: str) -> dict | None:
     try:
-        with open(state_path, encoding="utf-8") as fh:
-            state = json.load(fh)
-    except (OSError, ValueError) as exc:
+        return run_ledger.load(state_path, fill_defaults=False)
+    except (OSError, ValueError, run_ledger.LedgerTypeError) as exc:
         print(f"[turn_snapshot] cannot read state {state_path}: {exc}", file=sys.stderr)
         return None
-    if not isinstance(state, dict):
-        print(f"[turn_snapshot] state {state_path} is not a JSON object", file=sys.stderr)
-        return None
-    return state
 
 
 def summary(state: dict) -> dict:
@@ -499,7 +500,7 @@ def _apply_cli(args: list[str]) -> int:
 
     try:
         apply(snap if reason is None else None, state, reason)
-        text_out = json.dumps(state, indent=1)
+        run_ledger.persist(state, state_path)
     except (RecursionError, ValueError, TypeError) as exc:
         # A parseable but pathologically nested value (a blob, typically) can
         # still overflow the serialiser: re-read the state and store the
@@ -510,14 +511,12 @@ def _apply_cli(args: list[str]) -> int:
         if state is None:
             return 1
         apply(None, state, reason)
-        text_out = json.dumps(state, indent=1)
-    tmp = f"{state_path}.turn-snapshot.tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(text_out)
-            fh.write("\n")
-        os.replace(tmp, state_path)
-    except OSError as exc:
+        try:
+            run_ledger.persist(state, state_path)
+        except (OSError, run_ledger.LedgerTypeError) as exc2:
+            print(f"[turn_snapshot] cannot write state {state_path}: {exc2}", file=sys.stderr)
+            return 1
+    except (OSError, run_ledger.LedgerTypeError) as exc:
         print(f"[turn_snapshot] cannot write state {state_path}: {exc}", file=sys.stderr)
         return 1
     doc = state["turn_snapshot"]

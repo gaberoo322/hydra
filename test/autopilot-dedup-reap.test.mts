@@ -25,7 +25,7 @@
  *    `reaped_task_ids` field) is tolerated — the script defaults the
  *    field to [] and proceeds normally.
  *
- * Network-dependent paths (gh issue create on hard-cap trip) are NOT
+ * Network-dependent paths (gh issue create) are NOT
  * exercised here — that's covered by autopilot-scripts.test.mts.
  */
 
@@ -579,15 +579,13 @@ describe("scripts/autopilot/reap.py completion — dedup by task_id (issue #411)
     }
   });
 
-  test("default invocation (no subcommand) still runs hard-cap enforcement", () => {
-    // Sanity check that adding the `completion` subcommand did not
-    // regress the pre-existing default-mode behaviour exercised by
-    // autopilot-scripts.test.mts.
+  test("default invocation (no subcommand) prints usage and exits 0 without touching state (#5075)", () => {
+    // The hard-cap sweep was deleted with the phantom `partial_tokens` key.
     const tmp = makeTempState();
     try {
       writeBaseState(tmp.state, {
         slots: {
-          dev_orch: { skill: "hydra-dev", started: "now", partial_tokens: 1_000_000 },
+          dev_orch: { skill: "hydra-dev", started: "now" },
           qa_orch: null,
           research_orch: null,
           dev_target: null,
@@ -595,11 +593,11 @@ describe("scripts/autopilot/reap.py completion — dedup by task_id (issue #411)
           research_target: null,
         },
       });
+      const before = readFileSync(tmp.state, "utf-8");
       const r = runReap([], tmp);
       assert.equal(r.status, 0);
-      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      assert.equal(s.slots.dev_orch, null, "hard-cap path must still clear the slot");
-      assert.ok(s.burned_classes.includes("dev_orch"));
+      assert.match(r.stderr, /usage: reap\.py completion/);
+      assert.equal(readFileSync(tmp.state, "utf-8"), before);
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }

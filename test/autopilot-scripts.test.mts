@@ -15,7 +15,7 @@
  *                        depends on a live hydra service)
  *   recover-stale.sh   — gh-driven label fixes (NOT exercised here;
  *                        depends on gh + GitHub)
- *   reap.py            — hard-cap trip clears slot + marks burned
+ *   reap.py            — bare invocation prints usage, exits 0, leaves state untouched
  *   dispatch.sh log    — appends one line to the run log
  *   drain.sh           — prints the final summary line
  *
@@ -1899,12 +1899,9 @@ describe("scripts/autopilot/bootstrap.sh — dev_resume_pending carry-forward (i
     );
   });
 
-  test("the carried list is FIFO-capped at DEV_RESUME_PENDING_CAP, the same 20 reap_stall.py enforces", () => {
-    const reapStall = readFileSync(join(SCRIPTS, "reap_stall.py"), "utf-8");
-    const cap = Number(/^DEV_RESUME_PENDING_CAP = (\d+)$/m.exec(reapStall)?.[1]);
-    assert.equal(cap, 20);
-    // Issue #5073: the constant's home moved from bootstrap.sh to run_ledger.py.
-    assert.match(readFileSync(join(SCRIPTS, "run_ledger.py"), "utf-8"), /^DEV_RESUME_PENDING_CAP = 20\b/m);
+  test("the carried list is FIFO-capped at DEV_RESUME_PENDING_CAP (20)", () => {
+    // Issue #5075: one definition (run_ledger.py); the behaviour is the pin.
+    const cap = 20;
     const prior = Array.from({ length: 25 }, (_, i) => record(1000 + i));
     const s = bootstrapWithPrior(JSON.stringify({ pid: 0, dev_resume_pending: prior }));
     assert.equal(s.dev_resume_pending.length, cap);
@@ -1978,7 +1975,6 @@ describe("scripts/autopilot/reap.py", () => {
         subagent_hard_max_tokens: 800000,
       },
       cumulative_tokens: 0,
-      idle_turns: 0,
       burned_classes: [],
       slots: {
         dev_orch: { skill: slot.skill ?? "hydra-dev", started: "now", partial_tokens: slot.partial_tokens },
@@ -2030,85 +2026,17 @@ describe("scripts/autopilot/reap.py", () => {
     };
   }
 
-  test("under hard cap: no-op (slot preserved)", () => {
+  test("bare invocation prints usage, exits 0 and leaves the state untouched (hard-cap sweep deleted, #5075)", () => {
     const tmp = makeTempState();
     try {
-      writeStateWithSlot(tmp.state, { partial_tokens: 100000 }); // < 800k
+      // A slot carrying the retired `partial_tokens` key is preserved untouched
+      // (undeclared slot key: warn-and-preserve policy) — nothing sweeps it.
+      writeStateWithSlot(tmp.state, { partial_tokens: 1_000_000 });
+      const before = readFileSync(tmp.state, "utf-8");
       const r = runReap(tmp.state, tmp.log);
       assert.equal(r.status, 0);
-      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      assert.notEqual(s.slots.dev_orch, null, "slot should still be occupied");
-      assert.deepEqual(s.burned_classes, [], "no class should be burned yet");
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("over hard cap: clears slot and marks class burned", () => {
-    const tmp = makeTempState();
-    try {
-      writeStateWithSlot(tmp.state, { partial_tokens: 1_000_000 }); // > 800k hard cap
-      const r = runReap(tmp.state, tmp.log);
-      assert.equal(r.status, 0);
-      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      assert.equal(s.slots.dev_orch, null, "slot should be cleared");
-      assert.ok(s.burned_classes.includes("dev_orch"), "dev_orch should be burned");
-      assert.match(r.stdout, /HARD-CAP TRIP class=dev_orch/);
-      // Issue #4676: the hard-cap trip fires a `failed` cycle-record, and
-      // this suite's runReap used to leave HYDRA_AUTOPILOT_LOG unset — so
-      // this exact line landed in the LIVE /tmp/hydra-autopilot-nightly.log
-      // on every `npm test` run (hydra-digest then read it as a real failed
-      // cycle). With the log pinned to the suite tmpdir, the line must land
-      // HERE, not in the live log.
-      assert.match(
-        readFileSync(tmp.log, "utf-8"),
-        /cycle_record_fired cycleId=hardcap-dev_orch-1000000 task_id=hardcap-dev_orch-1000000 skill=hydra-dev status=failed/,
-      );
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("issue #4676: fixture repo with HYDRA_AUTOPILOT_LOG unset — _append_log refuses the live-log append, non-fatally", () => {
-    // The log-sink twin of the #4358 dispatch.sh cycle-record guard. A future
-    // harness that spawns reap.py against a `hydra-test/*` fixture repo but
-    // forgets to pin HYDRA_AUTOPILOT_LOG must NOT be able to append fixture
-    // log lines to the LIVE /tmp/hydra-autopilot-nightly.log — reap_state's
-    // _append_log refuses the write (loud stderr diagnostic, non-fatal) the
-    // same way dispatch.sh refuses the fixture cycle-record POST.
-    const tmp = makeTempState();
-    try {
-      writeStateWithSlot(tmp.state, { partial_tokens: 1_000_000 }); // forces the hard-cap _append_log path
-      // Deliberately OMIT the overrides a fixture harness might forget:
-      // HYDRA_AUTOPILOT_LOG (the live-log pin) and HYDRA_API_BASE /
-      // HYDRA_BASE_URL (the dead-socket API pins). Strip them from the
-      // inherited env too, so an ambient value can never mask the omission.
-      const {
-        HYDRA_AUTOPILOT_LOG: _omitLog,
-        HYDRA_API_BASE: _omitApi,
-        HYDRA_BASE_URL: _omitBaseUrl,
-        ...envRest
-      } = process.env;
-      const r = spawnSync(join(SCRIPTS, "reap.py"), [], {
-        env: {
-          ...envRest,
-          HYDRA_AUTOPILOT_STATE: tmp.state,
-          HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
-          GH_TOKEN: "invalid-test-token",
-        },
-        encoding: "utf-8",
-      });
-      // The refusal is loud...
-      assert.match(
-        r.stderr ?? "",
-        /log append refused — HYDRA_AUTOPILOT_REPO='hydra-test\/nonexistent-fixture' looks like a test-fixture repo but HYDRA_AUTOPILOT_LOG is unset.*issue #4676/,
-      );
-      // ...and non-fatal: the reap itself still completed its state work.
-      assert.equal(r.status ?? -1, 0);
-      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      assert.equal(s.slots.dev_orch, null, "slot should still be cleared");
-      assert.ok(s.burned_classes.includes("dev_orch"), "dev_orch should still be burned");
-      assert.match(r.stdout ?? "", /HARD-CAP TRIP class=dev_orch/);
+      assert.match(r.stderr, /usage: reap\.py completion/);
+      assert.equal(readFileSync(tmp.state, "utf-8"), before, "a bare reap must not touch the document");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
