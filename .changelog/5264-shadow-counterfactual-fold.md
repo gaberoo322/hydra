@@ -1,0 +1,1 @@
+- feat: add the pure A-pair-only shadow counterfactual fold, one-way top-up decision and detector-gap log for QA review depth (#5264)
