@@ -1,25 +1,16 @@
 /**
- * Regression tests for the composed-verdict (.allow) admission check in
- * pace-gate.sh (issue #1790).
+ * Transport tests for pace-gate.sh (issues #1790, #5102).
  *
- * Observed live on 2026-06-12 (run d4a6af2a): /api/usage/eligibility returned
- * allow:false with reasons.weeklyEmergencyStop:true, but pace-gate.sh only
- * read paused / sessionBlockedUntil / emergencyStop / paceState — so every
- * ~15-min tick launched a full autopilot session that immediately hard-stopped
- * in decide.py, a relaunch churn loop lasting until the weekly reset.
+ * Since #5102 the script holds NO admission policy: it forwards the launcher
+ * facts (mode / serviceActive / pidAlive) to GET /api/usage/eligibility, reads
+ * the typed `.admission` verdict (decideAdmission, src/cost/admission.ts), and
+ * either records the reason verbatim and exits 0 or launches. The policy cases
+ * (every ladder arm and its ordering) live in test/admission.test.mts. This
+ * suite pins unreachable/unparseable/malformed fail-safes, the ctx echo, admit
+ * -> launch, and skip pass-through, against a fixture server that computes the
+ * real verdict with the real EligibilityQuerySchema + decideAdmission.
  *
- * This suite pins:
- *   - weeklyEmergencyStop:true => skip with a reason-specific log line;
- *   - allow:false with NO specific reason set => the catch-all arm skips and
- *     logs the raw .reasons JSON (future-reason drift protection);
- *   - allow:true + paceState:"behind" => the eligible path is unchanged;
- *   - a missing .allow => fail safe (no launch) — and in particular the fix
- *     must NOT use jq's `.allow // true`, which treats false as falsy and
- *     would silently invert the check;
- *   - exec mode (--exec-autopilot, the unit's ExecStart wrapper) honors
- *     allow:false with a CLEAN exit 0 so Restart=on-failure disarms.
- *
- * The composed-verdict suite above is a pure shell test: eligibilityServer
+ * The transport suites above are pure shell tests: eligibilityServer
  * fixture + spawn, no Redis needed. A second, Redis-gated suite below (issue
  * #4210) additionally pins that record_tick()'s HSET honors HYDRA_REDIS_DB.
  * Two more suites pin the exec-mode launch-model fallback (issue #4585): the
@@ -38,6 +29,8 @@ import { mkdtempSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 import { getRedisConnection } from "../src/redis/connection.ts";
+import { decideAdmission } from "../src/cost/index.ts";
+import { EligibilityQuerySchema } from "../src/schemas/usage.ts";
 import { WATCHDOG_REDIS_TIMEOUT_MS } from "./_helpers/watchdog-timeouts.mts";
 
 // Issue #4966: the spawn helpers below pass `...process.env` through to
@@ -62,18 +55,46 @@ const PACE_GATE = join(
   "pace-gate.sh",
 );
 
-/** Serve a fixed eligibility JSON on an ephemeral port; resolve with url+close. */
-function eligibilityServer(payload: unknown): Promise<{ url: string; close: () => void }> {
+/**
+ * Serve the eligibility route on an ephemeral port (#5102 INV-10). Mirrors the
+ * real route: every request's query is parsed through the real
+ * EligibilityQuerySchema and the body is `{ ...payload, admission:
+ * decideAdmission(payload, ctx) }`, so pace-gate.sh is tested against the
+ * production verdict, not a hand-written one. `opts.admission` overrides the
+ * field (an explicit object, or `null` to omit it). `lastUrl()` exposes the
+ * last request URL for assertions.
+ */
+function eligibilityServer(
+  payload: unknown,
+  opts: { admission?: unknown } = {},
+): Promise<{ url: string; close: () => void; lastUrl: () => string }> {
   return new Promise((resolve) => {
-    const server = http.createServer((_req, res) => {
+    let last = "";
+    const server = http.createServer((req, res) => {
+      last = req.url ?? "";
+      const q = EligibilityQuerySchema.parse(
+        Object.fromEntries(new URL(last, "http://x").searchParams),
+      );
+      const body: Record<string, unknown> = { ...(payload as object) };
+      if (opts.admission === undefined) {
+        body.admission = decideAdmission(payload as any, {
+          nowMs: Date.now(),
+          mode: q.mode ?? "timer",
+          serviceActive: q.serviceActive ?? false,
+          pidAlive: q.pidAlive ?? false,
+        });
+      } else if (opts.admission !== null) {
+        body.admission = opts.admission;
+      }
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify(payload));
+      res.end(JSON.stringify(body));
     });
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address() as any;
       resolve({
         url: `http://127.0.0.1:${addr.port}/api/usage/eligibility`,
         close: () => server.close(),
+        lastUrl: () => last,
       });
     });
   });
@@ -119,181 +140,150 @@ const baseReasons = {
   fableExhaustedUntil: null as string | null,
 };
 
+const eligiblePayload = (reasons: Record<string, unknown> = {}) => ({
+  allow: true,
+  shed: [],
+  reasons: { ...baseReasons, ...reasons },
+  paceState: "behind",
+});
+
 /**
- * Issue #4560: the paid-overage arm keys off `reasons.extraUsageBlocking`, not
- * the raw `extraUsageArmed` fact, so a route running under
- * `HYDRA_EXTRA_USAGE_POLICY=allow` (armed:true, blocking:false, allow:true)
- * launches, while the default policy (blocking:true, allow:false) still skips
- * with the operator-action message. A legacy route that folds armed into
- * `.allow` without the new field is caught by the #1790 catch-all.
+ * pace-gate.sh is transport + exec only (#5102): admission policy lives in
+ * decideAdmission (test/admission.test.mts). These cases pin the transport —
+ * fail-safes, the ctx echo, pass-through of the typed reason, and launch.
  */
-describe("pace-gate.sh paid-overage arm keys off extraUsageBlocking (issue #4560)", () => {
-  test("armed + blocking (policy=block) => reason-specific skip naming the policy, no launch", async () => {
-    const srv = await eligibilityServer({
-      allow: false,
-      shed: [],
-      reasons: { ...baseReasons, extraUsageArmed: true, extraUsageBlocking: true },
-      paceState: "behind",
-    });
+describe("pace-gate.sh transport: fail-safes (issue #5102)", () => {
+  test("unreachable endpoint => eligibility-unreachable, no launch", async () => {
+    const r = await runPaceGate("http://127.0.0.1:9/api/usage/eligibility");
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /eligibility endpoint unreachable/);
+    assert.doesNotMatch(r.stdout, /would-start/);
+  });
+
+  test("non-JSON body => eligibility-unparseable, no launch", async () => {
+    const server = http.createServer((_req, res) => res.end("<html>not json"));
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    try {
+      const url = `http://127.0.0.1:${(server.address() as any).port}/x`;
+      const r = await runPaceGate(url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /unparseable/);
+      assert.doesNotMatch(r.stdout, /would-start/);
+    } finally {
+      server.close();
+    }
+  });
+
+  test(".admission omitted => allow-invalid, no launch", async () => {
+    const srv = await eligibilityServer(eligiblePayload(), { admission: null });
     try {
       const r = await runPaceGate(srv.url);
       assert.equal(r.status, 0);
-      assert.match(r.stdout, /HYDRA_EXTRA_USAGE_POLICY=block/);
-      assert.match(r.stdout, /will NOT clear by itself/);
+      assert.match(r.stdout, /\.admission missing or malformed/);
       assert.doesNotMatch(r.stdout, /would-start/);
     } finally {
       srv.close();
     }
   });
 
-  test("armed + NOT blocking (policy=allow, allow:true) => informational line, then launch", async () => {
-    const srv = await eligibilityServer({
-      allow: true,
-      shed: [],
-      reasons: { ...baseReasons, extraUsageArmed: true, extraUsageBlocking: false },
-      paceState: "behind",
+  test("non-boolean admit => allow-invalid, no launch (guards a truthy-string launch)", async () => {
+    const srv = await eligibilityServer(eligiblePayload(), {
+      admission: { admit: "true", reason: "eligible-launch", class: "launch", note: null },
     });
     try {
       const r = await runPaceGate(srv.url);
       assert.equal(r.status, 0);
-      assert.match(r.stdout, /HYDRA_EXTRA_USAGE_POLICY=allow — proceeding/);
-      assert.match(r.stdout, /would-start/, "the armed fact alone must not veto the launch");
-      assert.doesNotMatch(r.stdout, /skip/);
-    } finally {
-      srv.close();
-    }
-  });
-
-  test("legacy route: armed folded into allow:false with NO extraUsageBlocking field => catch-all skip, never a launch", async () => {
-    const srv = await eligibilityServer({
-      allow: false,
-      shed: [],
-      reasons: { ...baseReasons, extraUsageArmed: true },
-      paceState: "behind",
-    });
-    try {
-      const r = await runPaceGate(srv.url);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /allow=false — skip/);
+      assert.match(r.stdout, /malformed/);
       assert.doesNotMatch(r.stdout, /would-start/);
-      assert.doesNotMatch(r.stdout, /proceeding/, "the informational line sits after the catch-all on purpose");
     } finally {
       srv.close();
     }
   });
 });
 
-describe("pace-gate.sh composed-verdict admission (issue #1790)", () => {
-  test("weeklyEmergencyStop:true (allow:false, paceState:behind) => skip with reason-specific log, no launch", async () => {
-    const srv = await eligibilityServer({
-      allow: false,
-      shed: [],
-      reasons: { ...baseReasons, weeklyEmergencyStop: true },
-      paceState: "behind",
-    });
+describe("pace-gate.sh transport: ctx echo (issue #5102)", () => {
+  test("--exec-autopilot sends mode=exec and serviceActive=0", async () => {
+    const srv = await eligibilityServer(eligiblePayload());
     try {
-      const r = await runPaceGate(srv.url);
+      const r = await runPaceGate(srv.url, ["--exec-autopilot"]);
       assert.equal(r.status, 0);
-      assert.match(r.stdout, /weekly emergencyStop/);
+      assert.match(srv.lastUrl(), /mode=exec&serviceActive=0&pidAlive=0/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("timer mode sends mode=timer", async () => {
+    const srv = await eligibilityServer(eligiblePayload());
+    try {
+      await runPaceGate(srv.url);
+      assert.match(srv.lastUrl(), /mode=timer&serviceActive=0&pidAlive=0/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("a state.json carrying a live PID sends pidAlive=1 and records already-running-pid", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pace-pid-"));
+    const state = join(dir, "state.json");
+    writeFileSync(state, JSON.stringify({ pid: process.pid }));
+    const srv = await eligibilityServer(eligiblePayload());
+    try {
+      const r = await runPaceGate(srv.url, [], { HYDRA_AUTOPILOT_STATE: state });
+      assert.equal(r.status, 0);
+      assert.match(srv.lastUrl(), /pidAlive=1/);
+      assert.match(r.stdout, /skip reason=already-running-pid class=already-running/);
       assert.doesNotMatch(r.stdout, /would-start/);
     } finally {
       srv.close();
     }
   });
 
-  test("allow:false with NO specific reason set => catch-all skip logging the raw reasons JSON", async () => {
-    // Simulates a FUTURE reason added to projectEligibility() that this
-    // script has never heard of — the drift mode that caused #1790.
-    const srv = await eligibilityServer({
-      allow: false,
-      shed: [],
-      reasons: { ...baseReasons, someFutureReason: true },
-      paceState: "behind",
-    });
+  test("an ELIGIBILITY_URL that already carries a query string is extended with &", async () => {
+    const srv = await eligibilityServer(eligiblePayload());
     try {
-      const r = await runPaceGate(srv.url);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /eligibility allow=false/);
-      assert.match(r.stdout, /someFutureReason/); // raw .reasons JSON in the log
-      assert.doesNotMatch(r.stdout, /would-start/);
+      await runPaceGate(`${srv.url}?force=1`);
+      assert.match(srv.lastUrl(), /\?force=1&mode=timer&serviceActive=0&pidAlive=0/);
     } finally {
       srv.close();
     }
   });
+});
 
-  test("allow:true + paceState:behind => eligible path unchanged (would-start)", async () => {
-    const srv = await eligibilityServer({
-      allow: true,
-      shed: [],
-      reasons: { ...baseReasons },
-      paceState: "behind",
-    });
+describe("pace-gate.sh transport: admit => launch (issue #5102)", () => {
+  test("timer mode admit => would-start", async () => {
+    const srv = await eligibilityServer(eligiblePayload());
     try {
       const r = await runPaceGate(srv.url);
       assert.equal(r.status, 0);
       assert.match(r.stdout, /would-start/);
+      assert.match(r.stdout, /reason=eligible-launch/);
     } finally {
       srv.close();
     }
   });
 
-  test("missing .allow => fail safe (no launch) — guards against the jq `// true` inversion", async () => {
-    // jq's `//` operator treats false as falsy: `.allow // true` would read
-    // allow:false as eligible. The script must use bare `.allow` with strict
-    // string matching, so a MISSING field ("null") fails safe, not eligible.
-    const srv = await eligibilityServer({
-      shed: [],
-      reasons: { ...baseReasons },
-      paceState: "behind",
-    });
+  test("exec mode admit => would-exec", async () => {
+    const srv = await eligibilityServer(eligiblePayload());
     try {
-      const r = await runPaceGate(srv.url);
+      const r = await runPaceGate(srv.url, ["--exec-autopilot"]);
       assert.equal(r.status, 0);
-      assert.match(r.stdout, /\.allow missing or non-boolean/);
-      assert.doesNotMatch(r.stdout, /would-start/);
-    } finally {
-      srv.close();
-    }
-  });
-
-  test("exec mode (--exec-autopilot) + allow:false => clean exit 0, does NOT exec", async () => {
-    const srv = await eligibilityServer({
-      allow: false,
-      shed: [],
-      reasons: { ...baseReasons, weeklyEmergencyStop: true },
-      paceState: "behind",
-    });
-    try {
-      const r = await runPaceGate(srv.url, ["--exec-autopilot"], {
-        HYDRA_PACE_GATE_EXEC_CMD: "echo exec-marker-should-not-appear",
-      });
-      assert.equal(r.status, 0); // CLEAN exit — Restart=on-failure must disarm
-      assert.match(r.stdout, /weekly emergencyStop/);
-      assert.doesNotMatch(r.stdout, /would-exec/);
-      assert.doesNotMatch(r.stdout, /exec-marker-should-not-appear/);
+      assert.match(r.stdout, /would-exec/);
     } finally {
       srv.close();
     }
   });
 
   test("exec mode eligible branch exports HYDRA_AUTOPILOT_TRIGGER=pace-gate to the exec'd command (issue #2955)", async () => {
-    const srv = await eligibilityServer({
-      allow: true,
-      shed: [],
-      reasons: { ...baseReasons },
-      paceState: "behind",
-    });
+    const srv = await eligibilityServer(eligiblePayload());
     try {
       const r = await runPaceGate(srv.url, ["--exec-autopilot"], {
-        // The runPaceGate fixture defaults DRY_RUN=1, whose early-exit
-        // precedes the EXEC_CMD hook — override to 0 so the hook execs.
+        // DRY_RUN=1's early exit precedes the EXEC_CMD hook - override to 0.
         HYDRA_PACE_GATE_DRY_RUN: "0",
-        // EXEC_CMD is intentionally word-split with NO quote re-parsing, so
-        // keep it to plain words (`sh -c '...'` would shatter). printenv
-        // observes exactly what the exec'd claude CLI would inherit.
+        // EXEC_CMD is word-split with NO quote re-parsing; printenv observes
+        // what the exec'd claude CLI would inherit.
         HYDRA_PACE_GATE_EXEC_CMD: "printenv HYDRA_AUTOPILOT_TRIGGER",
-        // Prove the SCRIPT stamps the value (not env inheritance): seed a
-        // decoy that the eligible branch's export must overwrite.
+        // Seed a decoy the eligible branch's export must overwrite.
         HYDRA_AUTOPILOT_TRIGGER: "decoy-not-from-gate",
       });
       assert.equal(r.status, 0);
@@ -304,165 +294,71 @@ describe("pace-gate.sh composed-verdict admission (issue #1790)", () => {
     }
   });
 
-  test("workless-board hint in the FUTURE => skip (no launch), NOT flipping allow (#2956)", async () => {
-    // allow stays TRUE (the workless hint is launcher-only advisory, never a
-    // hard stop) but the future worklessUntil must still skip the launch.
-    const future = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-    const srv = await eligibilityServer({
-      allow: true,
-      shed: [],
-      reasons: { ...baseReasons, worklessUntil: future },
-      paceState: "behind",
-    });
-    try {
-      const r = await runPaceGate(srv.url);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /workless-board backoff/);
-      assert.doesNotMatch(r.stdout, /would-start/);
-    } finally {
-      srv.close();
-    }
-  });
-
-  test("workless-board hint in the PAST => launch normally (self-heals) (#2956)", async () => {
-    // A stale hint (past instant) must fall through to launch — the belt-and-
-    // braces read-side guard that pairs with the Redis TTL self-clear.
-    const past = new Date(Date.now() - 60 * 1000).toISOString();
-    const srv = await eligibilityServer({
-      allow: true,
-      shed: [],
-      reasons: { ...baseReasons, worklessUntil: past },
-      paceState: "behind",
-    });
-    try {
-      const r = await runPaceGate(srv.url);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /would-start/);
-      assert.doesNotMatch(r.stdout, /workless-board backoff/);
-    } finally {
-      srv.close();
-    }
-  });
-
-  test("fiveHourThrottleShed:true + allow:true => skip five-hour-headroom, no launch (#4836)", async () => {
-    const srv = await eligibilityServer({
-      allow: true,
-      shed: [],
-      reasons: { ...baseReasons, fiveHourThrottleShed: true },
-      paceState: "behind",
-    });
-    try {
-      const r = await runPaceGate(srv.url);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /throttle band/);
-      assert.doesNotMatch(r.stdout, /would-start/);
-    } finally {
-      srv.close();
-    }
-  });
-
-  test("fiveHourThrottleShed:true in --exec-autopilot => exit 0, no would-exec (#4836)", async () => {
-    const srv = await eligibilityServer({
-      allow: true,
-      shed: [],
-      reasons: { ...baseReasons, fiveHourThrottleShed: true },
-      paceState: "behind",
-    });
-    try {
-      const r = await runPaceGate(srv.url, ["--exec-autopilot"]);
-      assert.equal(r.status, 0);
-      assert.doesNotMatch(r.stdout, /would-exec/);
-    } finally {
-      srv.close();
-    }
-  });
-
-  test("fiveHourThrottleShed:false => launch unchanged (#4836)", async () => {
-    const srv = await eligibilityServer({
-      allow: true,
-      shed: [],
-      reasons: { ...baseReasons, fiveHourThrottleShed: false },
-      paceState: "behind",
-    });
-    try {
-      const r = await runPaceGate(srv.url);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /would-start/);
-    } finally {
-      srv.close();
-    }
-  });
-
-  test("postQuotaUntil in the FUTURE => skip post-quota-cooldown, no launch (#4836)", async () => {
-    const future = new Date(Date.now() + 20 * 60 * 1000).toISOString();
-    const srv = await eligibilityServer({
-      allow: true,
-      shed: [],
-      reasons: { ...baseReasons, postQuotaUntil: future },
-      paceState: "behind",
-    });
-    try {
-      const r = await runPaceGate(srv.url);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /post-quota cooldown/);
-      assert.doesNotMatch(r.stdout, /would-start/);
-    } finally {
-      srv.close();
-    }
-  });
-
-  test("postQuotaUntil in the FUTURE in --exec-autopilot => exit 0, no would-exec (#4836)", async () => {
-    const future = new Date(Date.now() + 20 * 60 * 1000).toISOString();
-    const srv = await eligibilityServer({
-      allow: true,
-      shed: [],
-      reasons: { ...baseReasons, postQuotaUntil: future },
-      paceState: "behind",
-    });
-    try {
-      const r = await runPaceGate(srv.url, ["--exec-autopilot"]);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /post-quota cooldown/);
-      assert.doesNotMatch(r.stdout, /would-exec/);
-    } finally {
-      srv.close();
-    }
-  });
-
-  test("postQuotaUntil in the PAST => launch normally (self-heals) (#4836)", async () => {
-    const past = new Date(Date.now() - 60 * 1000).toISOString();
-    const srv = await eligibilityServer({
-      allow: true,
-      shed: [],
-      reasons: { ...baseReasons, postQuotaUntil: past },
-      paceState: "behind",
-    });
-    try {
-      const r = await runPaceGate(srv.url);
-      assert.equal(r.status, 0);
-      assert.match(r.stdout, /would-start/);
-      assert.doesNotMatch(r.stdout, /post-quota cooldown/);
-    } finally {
-      srv.close();
-    }
-  });
-
   test("exec mode ineligible exit does NOT reach the trigger export (issue #2955)", async () => {
-    const srv = await eligibilityServer({
-      allow: false,
-      shed: [],
-      reasons: { ...baseReasons, weeklyEmergencyStop: true },
-      paceState: "behind",
-    });
+    const srv = await eligibilityServer(eligiblePayload({ weeklyEmergencyStop: true }));
     try {
-      // DRY_RUN=0 + a printenv EXEC_CMD: if the ineligible path ever fell
-      // through to the export+exec, "pace-gate" would appear on stdout.
       const r = await runPaceGate(srv.url, ["--exec-autopilot"], {
         HYDRA_PACE_GATE_DRY_RUN: "0",
         HYDRA_PACE_GATE_EXEC_CMD: "printenv HYDRA_AUTOPILOT_TRIGGER",
       });
-      assert.equal(r.status, 0); // still the clean skip exit
+      assert.equal(r.status, 0); // clean skip exit - Restart=on-failure disarms
       assert.doesNotMatch(r.stdout, /^pace-gate$/m);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("armed + policy=allow => informational line driven by .admission.note, then launch", async () => {
+    const srv = await eligibilityServer(eligiblePayload({ extraUsageArmed: true }));
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /ARMED on the logged-in account but HYDRA_EXTRA_USAGE_POLICY=allow/);
+      assert.match(r.stdout, /would-start/);
+    } finally {
+      srv.close();
+    }
+  });
+});
+
+describe("pace-gate.sh transport: skip is a verbatim pass-through (issue #5102)", () => {
+  const future = () => new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  const payloads: Array<[string, Record<string, unknown>]> = [
+    ["paused", { paused: true }],
+    ["weeklyEmergencyStop", { weeklyEmergencyStop: true }],
+    ["fiveHourThrottleShed", { fiveHourThrottleShed: true }],
+    ["future postQuotaUntil", { postQuotaUntil: future() }],
+  ];
+  for (const [name, reasons] of payloads) {
+    test(`${name} => logged reason equals decideAdmission's, exit 0, no launch`, async () => {
+      const payload = eligiblePayload(reasons);
+      const expected = decideAdmission(payload as any, {
+        nowMs: Date.now(),
+        mode: "timer",
+        serviceActive: false,
+        pidAlive: false,
+      });
+      const srv = await eligibilityServer(payload);
+      try {
+        const r = await runPaceGate(srv.url);
+        assert.equal(r.status, 0);
+        assert.match(r.stdout, new RegExp(`skip reason=${expected.reason} class=${expected.class} `));
+        assert.doesNotMatch(r.stdout, /would-start/);
+      } finally {
+        srv.close();
+      }
+    });
+  }
+
+  test("a reason bash has never seen is recorded verbatim", async () => {
+    const srv = await eligibilityServer(eligiblePayload(), {
+      admission: { admit: false, reason: "future-reason", class: "deliberate-skip", note: null },
+    });
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /skip reason=future-reason class=deliberate-skip/);
+      assert.doesNotMatch(r.stdout, /would-start/);
     } finally {
       srv.close();
     }
@@ -553,6 +449,8 @@ describe("pace-gate.sh record_tick() honors HYDRA_REDIS_DB (issue #4210)", () =>
         "paused",
         "record_tick's HSET must land on the DB named by HYDRA_REDIS_DB, readable back through the same connection",
       );
+      // #5102 AC2: the tick hash shape is unchanged on a skip.
+      assert.deepEqual(Object.keys(fields).sort(), ["at", "class", "latency_ms", "reason"]);
     },
   );
 
