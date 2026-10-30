@@ -296,7 +296,7 @@ describe("hydra-qa step 9.5 trailer block — executed verbatim from the playboo
       "qa-verdict-trailer", { ...baseEnv, PRIOR_BODIES_FILE: priorFile(bigHistory) }, ["QA_VERDICT_TRAILER"], brokenNodeDir(),
     );
     assert.deepEqual(parseQaVerdictTrailer(QA_VERDICT_TRAILER), {
-      verdict: "FAIL", pr: 77, round: 3, sha: "0123456789ab", blockers: 2, maxSeverity: "medium",
+      verdict: "FAIL", pr: 77, round: 3, sha: "0123456789ab", blockers: 2, maxSeverity: "medium", qaFixes: [],
     });
   });
 

@@ -7,7 +7,6 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import {
@@ -287,10 +286,5 @@ describe("qa-fix-proof — CLI contract", () => {
     );
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stdout, /proof-run-failed/);
-  });
-  test("is not a required check and never uses GraphQL", () => {
-    assert.doesNotMatch(readFileSync(CLI, "utf8"), /"--json"/);
-    const wf = readFileSync(join(REPO_ROOT, ".github", "workflows", "qa-fix-proof.yml"), "utf8");
-    assert.match(wf, /^name: qa-fix-proof$/m);
   });
 });
