@@ -132,17 +132,30 @@ if (isMain) {
     if (!result.ok) emit({ ...result, stage }, 1);
 
     if (result.classBTestFiles.length > 0) {
-      // A class-B commit may delete a test file; only files present at head can be checked out.
-      const files = result.classBTestFiles.filter((f) => {
+      // A class-B commit may not delete/rename a test file: the removal would pass unproven.
+      const missing = result.classBTestFiles.filter((f) => {
         try {
           git(["cat-file", "-e", `${head}:${f}`]);
-          return true;
-        } catch {
-          /* intentional: path absent at head (deleted/renamed) — nothing to prove */
           return false;
+        } catch {
+          /* intentional: path absent at head (deleted/renamed) — reported as a violation below */
+          return true;
         }
       });
-      if (files.length > 0) {      const wt = join(mkdtempSync(join(tmpdir(), "qa-fix-proof-")), "wt");
+      if (missing.length > 0) {
+        emit(
+          {
+            ...result,
+            ok: false,
+            reason: "class-b-deletes-test",
+            stage,
+            violations: [...result.violations, ...missing.map((path) => ({ reason: "class-b-deletes-test", path }))],
+          },
+          1,
+        );
+      }
+      const files = result.classBTestFiles;
+      const wt = join(mkdtempSync(join(tmpdir(), "qa-fix-proof-")), "wt");
       let added = false;
       let outcome: { code: number; body: unknown } = { code: 1, body: { ok: false, reason: "proof-run-failed" } };
       try {
@@ -177,7 +190,6 @@ if (isMain) {
         }
       }
       emit(outcome.body, outcome.code);
-      }
     }
     emit({ ...result, stage }, 0);
   } catch (err) {

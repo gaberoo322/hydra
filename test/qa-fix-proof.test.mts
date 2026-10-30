@@ -297,13 +297,20 @@ describe("qa-fix-proof — CLI contract", () => {
   });
 });
 
+// The CLI's proof run spawns `node --test`; inside this test run NODE_TEST_CONTEXT would make it a silent subprocess reporter.
+const cleanEnv = (): NodeJS.ProcessEnv => {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  return env;
+};
+
 describe("qa-fix-proof — CLI against a real temp git repo (INV-9/INV-10/INV-11)", () => {
   const CLI = join(REPO_ROOT, "scripts", "ci", "qa-fix-proof.ts");
   const run = (cwd: string, base: string, head: string) =>
     spawnSync(
       process.execPath,
       ["--no-warnings", "--experimental-strip-types", CLI, "--base", base, "--head", head],
-      { encoding: "utf8", cwd },
+      { encoding: "utf8", cwd, env: cleanEnv() },
     );
   const git = (cwd: string, ...args: string[]) =>
     execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], {
@@ -356,10 +363,21 @@ describe("qa-fix-proof — CLI against a real temp git repo (INV-9/INV-10/INV-11
     }
   });
 
-  test("a class-B commit that deletes a test file does not wedge on checkout (skips the proof run)", () => {
+  const seedB = (dir: string) => {
+    put(dir, "config/orchestrator/qa-rollout.json", JSON.stringify({ "reviewer-commits": "A+B" }));
+    put(
+      dir,
+      "package.json",
+      JSON.stringify({ scripts: { "test:file": "node --experimental-strip-types --test --test-force-exit --test-reporter=tap" } }),
+    );
+    put(dir, "test/fixtures/qa-cohort-baseline.json", JSON.stringify({ metrics: { tripped: false } }));
+    put(dir, "src/mod.ts", "export const v = 1;\n");
+  };
+
+  test("a class-B commit that deletes a test file is a violation (class-b-deletes-test), not a silent pass", () => {
     const dir = mkRepo();
     try {
-      put(dir, "config/orchestrator/qa-rollout.json", JSON.stringify({ "reviewer-commits": "A+B" }));
+      seedB(dir);
       put(dir, "test/gone.test.mts", "export {};\n");
       git(dir, "add", "-A");
       git(dir, "commit", "-q", "-m", "seed");
@@ -367,7 +385,58 @@ describe("qa-fix-proof — CLI against a real temp git repo (INV-9/INV-10/INV-11
       git(dir, "rm", "-q", "test/gone.test.mts");
       git(dir, "commit", "-q", "-m", "test: drop\n\nQA-Fix: B");
       const r = run(dir, base, git(dir, "rev-parse", "HEAD"));
-      assert.notEqual(JSON.parse(r.stdout).reason, "proof-run-failed", r.stderr);
+      assert.equal(r.status, 1, r.stderr);
+      assert.equal(JSON.parse(r.stdout).reason, "class-b-deletes-test");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("INV-10: a class-B test that fails by ASSERTION at the merge-base is proven (exit 0)", () => {
+    const dir = mkRepo();
+    try {
+      seedB(dir);
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "seed");
+      const base = git(dir, "rev-parse", "HEAD");
+      put(dir, "src/mod.ts", "export const v = 2;\n");
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "fix: v");
+      put(
+        dir,
+        "test/new.test.mts",
+        'import test from "node:test";\nimport assert from "node:assert/strict";\nimport { v } from "../src/mod.ts";\ntest("v is 2", () => { assert.equal(v, 2); });\n',
+      );
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "test: pin v\n\nQA-Fix: B");
+      const r = run(dir, base, git(dir, "rev-parse", "HEAD"));
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.equal(JSON.parse(r.stdout).proof.ok, true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("INV-10 sibling: a class-B test that fails by import error at the merge-base is unproven (exit 1)", () => {
+    const dir = mkRepo();
+    try {
+      seedB(dir);
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "seed");
+      const base = git(dir, "rev-parse", "HEAD");
+      put(dir, "src/added.ts", "export const w = 1;\n");
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "feat: w");
+      put(
+        dir,
+        "test/new.test.mts",
+        'import test from "node:test";\nimport { w } from "../src/added.ts";\ntest("w", () => { if (!w) throw new Error("x"); });\n',
+      );
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "test: pin w\n\nQA-Fix: B");
+      const r = run(dir, base, git(dir, "rev-parse", "HEAD"));
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.equal(JSON.parse(r.stdout).reason, "unproven");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
