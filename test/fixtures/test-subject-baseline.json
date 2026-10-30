@@ -99,7 +99,7 @@
   "scripts/operator-notify.ts": 1,
   "scripts/parse-control-plane.mjs": 1,
   "scripts/probe-search.ts": 1,
-  "scripts/qa/cohort-baseline.ts": 1,
+  "scripts/qa/cohort-baseline.ts": 2,
   "scripts/reap-stale-test-procs.sh": 2,
   "scripts/reflection-deposit.sh": 1,
   "scripts/sync-target-gate.sh": 1,
