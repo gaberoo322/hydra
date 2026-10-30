@@ -22,10 +22,9 @@ import type {
   ReviewFindingSource,
   StoredReviewFindingRow,
 } from "../redis/review-findings.ts";
-import { canonicalLocationKey, QA_FINDINGS_HEADING, type FoldedFinding } from "./fold.ts";
+import { canonicalLocationKey, FOLLOW_UPS_HEADING, QA_FINDINGS_HEADING, type FoldedFinding } from "./fold.ts";
 import { parseQaVerdictTrailers } from "./verdict-trailer.ts";
 
-export const FOLLOW_UPS_HEADING = "### Follow-ups (non-blocking)";
 export const DEFAULT_WINDOW_DAYS = 30;
 export const RETENTION_DAYS = 90;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -62,11 +61,11 @@ export function reviewFindingRowId(row: ReviewFindingRow): string {
   if (row.kind === "finding") {
     location = canonicalLocationKey(row.location);
     rule = row.rule;
-    text = row.finding;
+    text = `${row.severity}:${row.axis}:${row.finding}`;
   } else if (row.kind === "pair-miss") {
-    text = `${row.severity}:${row.note ?? ""}`;
+    text = `${row.severity}:${row.key ?? ""}:${row.note ?? ""}`;
   } else {
-    text = `${row.gapClass}:${row.note ?? ""}`;
+    text = `${row.gapClass}:${row.key ?? ""}:${row.note ?? ""}`;
   }
   const digest = hash12(oneLine(text).toLowerCase());
   return `${row.kind}:${row.pr}:${row.round}:${location ?? "none"}:${rule ?? "none"}:${digest}`;

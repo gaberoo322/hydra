@@ -63,6 +63,8 @@ export interface PairMissRow extends ReviewFindingRowBase {
   kind: "pair-miss";
   severity: ReviewFindingSeverity;
   note?: string;
+  /** Feeder-supplied discriminator so distinct same-round misses keep separate ids. */
+  key?: string;
 }
 
 /** A one-way call the detector and the `Merge danger:` field did not flag. */
@@ -70,6 +72,8 @@ export interface DetectorGapRow extends ReviewFindingRowBase {
   kind: "detector-gap";
   gapClass: string;
   note?: string;
+  /** Feeder-supplied unique key so distinct same-round gaps keep separate ids. */
+  key?: string;
 }
 
 export type ReviewFindingRow = FindingRow | PairMissRow | DetectorGapRow;

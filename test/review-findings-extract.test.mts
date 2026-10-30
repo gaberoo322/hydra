@@ -166,6 +166,27 @@ describe("review-findings parser and id", () => {
   });
 });
 
+describe("review-findings row id discriminators (QA round 1)", () => {
+  test("same text at different severity or axis keeps separate ids", () => {
+    const hi = finding({ severity: "high", finding: "same text" });
+    const lo = finding({ severity: "low", finding: "same text" });
+    const sp = finding({ severity: "high", axis: "spec", finding: "same text" });
+    assert.notEqual(reviewFindingRowId(hi), reviewFindingRowId(lo));
+    assert.notEqual(reviewFindingRowId(hi), reviewFindingRowId(sp));
+    // sibling: identical severity+axis+text still collapses
+    assert.equal(reviewFindingRowId(hi), reviewFindingRowId(finding({ severity: "high", finding: "same text" })));
+  });
+
+  test("pair-miss and detector-gap rows with distinct keys keep separate ids", () => {
+    const pm = { kind: "pair-miss" as const, pr: 5, round: 1, sha: "abc1234", at: iso(1), source: "route" as const, severity: "medium" as const };
+    assert.notEqual(reviewFindingRowId({ ...pm, key: "a.ts:1" }), reviewFindingRowId({ ...pm, key: "b.ts:2" }));
+    assert.equal(reviewFindingRowId({ ...pm, key: "a.ts:1" }), reviewFindingRowId({ ...pm, key: "a.ts:1" }));
+    const dg = { kind: "detector-gap" as const, pr: 5, round: 1, sha: "abc1234", at: iso(1), source: "route" as const, gapClass: "schema" };
+    assert.notEqual(reviewFindingRowId({ ...dg, key: "x" }), reviewFindingRowId({ ...dg, key: "y" }));
+    assert.equal(reviewFindingRowId(dg), reviewFindingRowId({ ...dg }));
+  });
+});
+
 describe("review-findings reconcile merge", () => {
   const stored = (row: ReviewFindingRow): StoredReviewFindingRow => ({ id: reviewFindingRowId(row), row });
 
