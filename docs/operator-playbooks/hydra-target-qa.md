@@ -279,7 +279,7 @@ All routing is `gh` on the anchor issue (`$TARGET_GH_REPO`) — REST-first
 the orchestrator's `QA-Verdict:` grammar, so the `qa_target` resolver in
 `src/autopilot/turn-snapshot/target-board.ts` can skip a PR already PASSed at its head:
 `QA-Verdict: <PASS|FAIL> pr=<N> round=<k> sha=<head12> blockers=<n> max_severity=<high|none>`.
-Build `QA_VERDICT_TRAILER` once with `scripts/ci/qa-verdict.ts trailer` (never
+Build `QA_VERDICT_TRAILER` once with the `trailer` phase of `scripts/ci/qa-verdict.ts` (never
 hand-type it; the engine owns the fail-closed path, so there is no bash
 fallback). Every fact is supplied (anchor-issue comment bodies via a temp FILE,
 the #4729 E2BIG lesson), so the CLI makes no `gh` call. The trailer is the LAST
