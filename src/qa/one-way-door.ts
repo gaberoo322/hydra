@@ -191,47 +191,95 @@ interface ParsedDiff {
   lines: DiffLine[];
 }
 
+/** Decode a quoted C-style path body (octal escapes are UTF-8 bytes). */
+function unquoteCStyle(body: string): string {
+  const bytes: number[] = [];
+  const simple: Record<string, number> = { n: 10, t: 9, r: 13, a: 7, b: 8, f: 12, v: 11, "\\": 92, '"': 34 };
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch !== "\\") {
+      bytes.push(...Buffer.from(ch, "utf8"));
+      continue;
+    }
+    const oct = /^[0-7]{1,3}/.exec(body.slice(i + 1));
+    if (oct) {
+      bytes.push(parseInt(oct[0], 8));
+      i += oct[0].length;
+    } else if (body[i + 1] !== undefined && body[i + 1] in simple) {
+      bytes.push(simple[body[i + 1]]);
+      i += 1;
+    } else {
+      bytes.push(92);
+    }
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+
+/** Strip the a/ or b/ prefix from a header path, unquoting if quoted. */
+function headerPath(raw: string): string {
+  const t = raw.trim();
+  const q = /^"(.*)"$/.exec(t);
+  const body = q ? unquoteCStyle(q[1]) : t.replace(/\t.*$/, "");
+  return normalizePath(body.replace(/^[ab]\//, ""));
+}
+
 /** Minimal added/removed-line walker keyed on `diff --git` / `+++ b/` headers. */
 function walkDiff(diff: string): ParsedDiff {
   const files: string[] = [];
   const lines: DiffLine[] = [];
   let current: string | null = null;
-  let inHunk = false;
+  // Hunk extents come from the @@ counts so the next file's ---/+++ header is
+  // never consumed as content of the previous hunk (quoted paths, plain diff -u).
+  let oldLeft = 0;
+  let newLeft = 0;
   let newLine = 0;
   const addFile = (p: string) => {
-    if (p !== "/dev/null" && !files.includes(p)) files.push(p);
+    if (p !== "/dev/null" && p !== "" && !files.includes(p)) files.push(p);
   };
   for (const raw of diff.split("\n")) {
-    const header = /^diff --git a\/(.+?) b\/(.+)$/.exec(raw);
-    if (header) {
-      current = normalizePath(header[2]);
-      addFile(current);
-      inHunk = false;
-      continue;
+    // A line that cannot be hunk content (e.g. the next `diff --git`) ends a
+    // hunk whose @@ counts were inconsistent.
+    if (raw !== "" && !/^[-+ \\]/.test(raw)) {
+      oldLeft = 0;
+      newLeft = 0;
     }
-    if (!inHunk && raw.startsWith("+++ ")) {
-      const target = raw.slice(4).trim();
-      if (target !== "/dev/null") {
-        current = normalizePath(target.replace(/^b\//, ""));
+    const inHunk = oldLeft > 0 || newLeft > 0;
+    if (!inHunk) {
+      const header = /^diff --git (?:"a\/.*"|a\/\S+?) ("b\/.*"|b\/.+)$/.exec(raw);
+      if (header) {
+        current = headerPath(header[1]);
         addFile(current);
+        continue;
+      }
+      if (raw.startsWith("+++ ")) {
+        const target = raw.slice(4);
+        if (target.trim() !== "/dev/null") {
+          current = headerPath(target);
+          addFile(current);
+        }
+        continue;
+      }
+      if (raw.startsWith("--- ")) continue;
+      const hunk = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(raw);
+      if (hunk) {
+        oldLeft = hunk[1] === undefined ? 1 : Number(hunk[1]);
+        newLeft = hunk[3] === undefined ? 1 : Number(hunk[3]);
+        newLine = Number(hunk[2]);
       }
       continue;
     }
-    if (!inHunk && raw.startsWith("--- ")) continue;
-    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
-    if (hunk) {
-      inHunk = true;
-      newLine = Number(hunk[1]);
-      continue;
-    }
-    if (!inHunk || current === null) continue;
+    if (current === null) continue;
     if (raw.startsWith("+")) {
       lines.push({ path: current, kind: "added", line: newLine, text: raw.slice(1) });
       newLine += 1;
+      newLeft -= 1;
     } else if (raw.startsWith("-")) {
       lines.push({ path: current, kind: "removed", line: undefined, text: raw.slice(1) });
-    } else if (raw.startsWith(" ")) {
+      oldLeft -= 1;
+    } else if (raw.startsWith(" ") || raw === "") {
       newLine += 1;
+      oldLeft -= 1;
+      newLeft -= 1;
     }
   }
   return { files, lines };
@@ -302,7 +350,12 @@ export function detectOneWayDoor(input: OneWayDoorInput): OneWayDoorResult {
     const classSet = new Set(signals.map((s) => s.class));
     const classes = CLASS_ORDER.filter((c) => classSet.has(c));
     if (signals.length > 0) return { door: "one-way", classes, signals };
-    if (parsed.files.length > 0) return { door: "two-way", classes: [], signals: [] };
+    // Partial/truncated diff: a non-prose input path the diff never mentions
+    // was never scanned, so it cannot be called two-way.
+    const unscanned = input.paths
+      .map(normalizePath)
+      .some((p) => p !== "" && !isProseOnlyPath(p) && !parsed.files.includes(p));
+    if (parsed.files.length > 0 && !unscanned) return { door: "two-way", classes: [], signals: [] };
     return { door: "unknown", classes: [], signals: [] };
   } catch (err) {
     console.error("[one-way-door] detector failed; failing closed to unknown:", err);

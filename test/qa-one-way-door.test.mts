@@ -217,3 +217,76 @@ describe("ONE_WAY_DOOR_RULES ratchet", () => {
     for (const id of seed) assert.ok(ids.has(id), `missing rule ${id}`);
   });
 });
+
+describe("walker hunk attribution and coverage (QA round 1, #5257)", () => {
+  const redisDel = "await r.del(k);";
+
+  test("quoted-path header: next file's lines attribute to the real path", () => {
+    const diff = [
+      'diff --git "a/docs/a b.md" "b/docs/a b.md"',
+      '--- "a/docs/a b.md"',
+      '+++ "b/docs/a b.md"',
+      "@@ -1,1 +1,1 @@",
+      "-old",
+      "+new",
+      "diff --git a/src/redis/thing.ts b/src/redis/thing.ts",
+      "--- a/src/redis/thing.ts",
+      "+++ b/src/redis/thing.ts",
+      "@@ -1,1 +1,2 @@",
+      " keep",
+      `+${redisDel}`,
+      "",
+    ].join("\n");
+    const r = detectOneWayDoor({ paths: ["docs/a b.md", "src/redis/thing.ts"], diff });
+    assert.equal(r.door, "one-way");
+    assert.deepEqual(r.signals.map((s) => s.path), ["src/redis/thing.ts"]);
+  });
+
+  test("quoted non-ascii path is unquoted into the files list", () => {
+    const diff = [
+      'diff --git "a/src/redis/caf\\303\\251.ts" "b/src/redis/caf\\303\\251.ts"',
+      '+++ "b/src/redis/caf\\303\\251.ts"',
+      "@@ -0,0 +1,1 @@",
+      `+${redisDel}`,
+      "",
+    ].join("\n");
+    const r = detectOneWayDoor({ paths: [], diff });
+    assert.equal(r.signals[0]?.path, "src/redis/café.ts");
+  });
+
+  test("plain diff -u without a diff header: second file is not swallowed by the first hunk", () => {
+    const diff = [
+      "--- a/docs/x.md",
+      "+++ b/docs/x.md",
+      "@@ -1,1 +1,1 @@",
+      "-a",
+      "+b",
+      "--- a/src/redis/thing.ts",
+      "+++ b/src/redis/thing.ts",
+      "@@ -1,1 +1,2 @@",
+      " keep",
+      `+${redisDel}`,
+      "",
+    ].join("\n");
+    const r = detectOneWayDoor({ paths: [], diff });
+    assert.deepEqual(r.signals.map((s) => s.path), ["src/redis/thing.ts"]);
+  });
+
+  test("partial diff: an input path absent from the diff is unknown, not two-way", () => {
+    const a = "src/redis/a.ts";
+    const r = detectOneWayDoor({ paths: [a, "src/redis/b.ts"], diff: diffFor(a, ["x"]) });
+    assert.equal(r.door, "unknown");
+  });
+
+  test("sibling: every input path present in the diff stays two-way", () => {
+    const a = "src/redis/a.ts";
+    const r = detectOneWayDoor({ paths: [a], diff: diffFor(a, ["x"]) });
+    assert.equal(r.door, "two-way");
+  });
+
+  test("sibling: an absent prose-only path does not block two-way", () => {
+    const a = "src/redis/a.ts";
+    const r = detectOneWayDoor({ paths: [a, "docs/note.md"], diff: diffFor(a, ["x"]) });
+    assert.equal(r.door, "two-way");
+  });
+});
