@@ -279,9 +279,11 @@ All routing is `gh` on the anchor issue (`$TARGET_GH_REPO`) — REST-first
 the orchestrator's `QA-Verdict:` grammar, so the `qa_target` resolver in
 `src/autopilot/turn-snapshot/target-board.ts` can skip a PR already PASSed at its head:
 `QA-Verdict: <PASS|FAIL> pr=<N> round=<k> sha=<head12> blockers=<n> max_severity=<high|none>`.
-Build `QA_VERDICT_TRAILER` once with `buildTargetQaVerdictTrailer` (never hand-type
-it); prior bodies reach it through a temp FILE (the #4729 E2BIG lesson). The
-trailer is the LAST line of the comment, after a blank line:
+Build `QA_VERDICT_TRAILER` once with the `trailer` phase of `scripts/ci/qa-verdict.ts` (never
+hand-type it; the engine owns the fail-closed path, so there is no bash
+fallback). Every fact is supplied (anchor-issue comment bodies via a temp FILE,
+the #4729 E2BIG lesson), so the CLI makes no `gh` call. The trailer is the LAST
+line of the comment, after a blank line:
 
 ```bash
 # Assign from the step-4 classifier result — never leave these unset.
@@ -297,16 +299,17 @@ if ! ( set -o pipefail; gh api --paginate "repos/$TARGET_GH_REPO/issues/$ANCHOR_
   echo "WARN: could not read prior verdict comments for issue $ANCHOR_NUM — round= will default to 1 (issue #4796)" >&2
   echo '[]' > "$PRIOR_FILE"
 fi
-QA_VERDICT_TRAILER=$(cd "$HOME/hydra" && PRIOR_FILE="$PRIOR_FILE" QV="$FOLDED_VERDICT" PRN="$PR_NUM" HS="$HEAD_SHA" BL="$FOLDED_BLOCKERS" \
-  npx tsx -e 'import("./scripts/target/target-qa-verdict.ts").then(async (m) => { const fs = await import("node:fs"); const prior = JSON.parse(fs.readFileSync(process.env.PRIOR_FILE, "utf8")); console.log(m.buildTargetQaVerdictTrailer({ verdict: process.env.QV === "PASS" ? "PASS" : "FAIL", pr: Number(process.env.PRN), headSha: process.env.HS || "", blockers: Number(process.env.BL), priorBodies: prior })); }).catch((e) => { console.error(e); process.exit(1); });')
+QA_VERDICT_TRAILER=$(jq -n --argjson pr "$PR_NUM" --arg verdict "$FOLDED_VERDICT" --arg headSha "${HEAD_SHA:-}" \
+    --argjson blockers "${FOLDED_BLOCKERS:-0}" --slurpfile prior "$PRIOR_FILE" \
+    '{pr: $pr, headSha: $headSha, priorBodies: $prior[0],
+      verdict: (if $verdict == "PASS" then "PASS" else "FAIL" end),
+      blockers: (if $verdict == "PASS" then 0 else ([1, $blockers] | max) end),
+      maxSeverity: (if $verdict == "PASS" then "none" else "high" end)}' \
+  | (cd "$HOME/hydra" && node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts trailer) \
+  | jq -r '.trailer') \
+  || QA_VERDICT_TRAILER=""
 rm -f "$PRIOR_FILE"
-# Fallback — a verdict is NEVER posted without a trailer line.
-if ! printf '%s\n' "$QA_VERDICT_TRAILER" | grep -Eq '^QA-Verdict: (PASS|FAIL) pr=[0-9]+ round=[0-9]+ sha=([0-9a-f]{7,12}|unknown) blockers=[0-9]+ max_severity=(high|none)$'; then
-  echo "WARN: buildTargetQaVerdictTrailer failed or returned a malformed trailer — using the hand-built fallback (issue #4796)" >&2
-  SHA12=$(printf '%s' "$HEAD_SHA" | tr 'A-F' 'a-f' | cut -c1-12); case "$SHA12" in *[!0-9a-f]*|"") SHA12=unknown;; esac
-  if [ "$FOLDED_VERDICT" = "PASS" ]; then B="0 max_severity=none"; else B="1 max_severity=high"; fi
-  QA_VERDICT_TRAILER="QA-Verdict: $FOLDED_VERDICT pr=$PR_NUM round=1 sha=$SHA12 blockers=$B"
-fi
+[ -n "$QA_VERDICT_TRAILER" ] || { echo "ABORT: no trailer - a verdict is never posted without one" >&2; exit 1; }
 ```
 
 - `action: "merge"` — post the PASS verdict as an issue comment, strip `needs-qa`,

@@ -595,6 +595,8 @@ export interface AdmissionPhaseResult {
    * action is `skip-required-failed` (a FAIL with the CI table), else null.
    */
   skipVerdict: VerdictResult | null;
+  /** `renderCiSummary(skipVerdict)`; set exactly when `skipVerdict` is (issue #5081). */
+  skipCiSummary: string | null;
 }
 
 export function decideAdmission(input: AdmissionPhaseInput): AdmissionPhaseResult {
@@ -603,5 +605,6 @@ export function decideAdmission(input: AdmissionPhaseInput): AdmissionPhaseResul
   const redRequired = redRequiredChecks(input.checks);
   const skipVerdict =
     admission.action === "skip-required-failed" ? classifyVerdict("FAIL", input.checks) : null;
-  return { promptOnly, admission, redRequired, skipVerdict };
+  const skipCiSummary = skipVerdict === null ? null : renderCiSummary(skipVerdict);
+  return { promptOnly, admission, redRequired, skipVerdict, skipCiSummary };
 }

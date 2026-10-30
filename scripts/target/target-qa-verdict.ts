@@ -42,7 +42,6 @@
 
 import { classifyRisk, type RiskSurface } from "../../src/target/risk-critical.ts";
 import { loadRiskSurface } from "./target-risk-surface.ts";
-import { buildQaVerdictTrailer } from "../../src/qa/verdict-trailer.ts";
 
 /** A single reviewer's verdict — PASS unless it surfaced a real hard finding. */
 export type ReviewVerdict = "PASS" | "FAIL";
@@ -298,36 +297,4 @@ function fail(
     blockers,
     matchedPaths,
   };
-}
-
-/**
- * Render the machine-readable `QA-Verdict:` trailer that ends every Target QA
- * verdict comment (issue #4796). It IS the orchestrator's #4729 grammar —
- * delegated to `buildQaVerdictTrailer`, never a second format — so the
- * `qa_target` PR resolver (`resolveNeedsQaPr` / `passAtHead` in
- * `src/autopilot/turn-snapshot/target-board.ts`; ADR-0043 retired
- * `collect-state.sh`) can skip a PR already PASSed at its current head.
- *
- * Normalisation: PASS always renders `blockers=0 max_severity=none`; any other
- * verdict renders FAIL with `blockers=max(1, input)` and `max_severity=high`;
- * `round` is the count of prior trailers naming the same `pr` plus one; an
- * empty or non-hex `headSha` renders `sha=unknown`. Pure — no fs/network.
- */
-export function buildTargetQaVerdictTrailer(input: {
-  verdict: ReviewVerdict;
-  pr: number;
-  headSha: string;
-  blockers: number;
-  priorBodies: ReadonlyArray<string | null | undefined>;
-}): string {
-  const isPass = input.verdict === "PASS";
-  const given = Number.isFinite(input.blockers) ? Math.trunc(input.blockers) : 0;
-  return buildQaVerdictTrailer({
-    verdict: isPass ? "PASS" : "FAIL",
-    pr: input.pr,
-    headSha: input.headSha,
-    blockers: isPass ? 0 : Math.max(1, given),
-    maxSeverity: isPass ? "none" : "high",
-    priorBodies: input.priorBodies,
-  });
 }
