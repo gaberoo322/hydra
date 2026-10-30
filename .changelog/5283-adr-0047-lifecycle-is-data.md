@@ -1,0 +1,1 @@
+- docs: add ADR-0047, work-item lifecycle is data, the handoff from wayfinder map (#5283)
