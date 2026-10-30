@@ -115,6 +115,54 @@ print(json.dumps(reap_state.load_state()))
   });
 });
 
+describe("reap_state.persist_state — lenient write on a wrong-typed field (#5075 QA round 3)", () => {
+  test("wrong-typed declared field: accounting still lands in state.json and returns True", () => {
+    const tmp = makeTmp();
+    try {
+      const r = runPython(
+        `${LOAD_PREAMBLE}
+import json
+doc = {"cumulative_tokens": "oops", "burned_classes": ["qa_orch"], "reaped_task_ids": ["a"]}
+ok = reap_state.persist_state(doc)
+print(json.dumps({"ok": ok, "disk": json.load(open(reap_state.STATE_PATH))}))
+`,
+        { HYDRA_AUTOPILOT_STATE: tmp.state },
+      );
+      assert.equal(r.status, 0, `python probe failed: ${r.stderr}`);
+      const out = JSON.parse(r.stdout);
+      assert.equal(out.ok, true);
+      assert.deepEqual(out.disk.burned_classes, ["qa_orch"]);
+      assert.deepEqual(out.disk.reaped_task_ids, ["a"]);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("sibling shape: strict run_ledger.persist still refuses a wrong-typed field; valid doc persists strictly", () => {
+    const tmp = makeTmp();
+    try {
+      const r = runPython(
+        `${LOAD_PREAMBLE}
+import json, os
+try:
+    reap_state.run_ledger.persist({"cumulative_tokens": "oops"}, reap_state.STATE_PATH)
+    strict = "no-raise"
+except reap_state.run_ledger.LedgerTypeError:
+    strict = "raised"
+wrote = os.path.exists(reap_state.STATE_PATH)
+ok = reap_state.persist_state({"cumulative_tokens": 7})
+print(json.dumps({"strict": strict, "wrote": wrote, "ok": ok}))
+`,
+        { HYDRA_AUTOPILOT_STATE: tmp.state },
+      );
+      assert.equal(r.status, 0, `python probe failed: ${r.stderr}`);
+      assert.deepEqual(JSON.parse(r.stdout), { strict: "raised", wrote: false, ok: true });
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("scripts/autopilot/reap_state.py — reaped-list bookkeeping (issue #4366)", () => {
   test("ensure_reaped_list defaults to [] and installs the field on state lacking it", () => {
     const tmp = makeTmp();

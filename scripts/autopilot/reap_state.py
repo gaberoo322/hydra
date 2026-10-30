@@ -104,17 +104,24 @@ def load_state() -> dict | None:
 
 
 def persist_state(s: dict) -> bool:
-    """persist() that never dies on a type-invalid document (QA round 2, #5293).
+    """persist() that never dies on a type-invalid document (QA rounds 2-3, #5293).
 
-    Reap stays exit 0: a wrong-typed declared field is logged and the file
-    write is skipped, but the caller's remaining accounting (cycle-record,
-    Redis mirror) still runs. Returns True when the file was written.
+    Reap stays exit 0: when a declared field is wrong-typed, the strict write
+    is refused, so the document is written atomically WITHOUT validation so
+    the completion's token accounting / burned_classes / dedup ledger still
+    reach state.json (load_state already read it leniently). Returns True
+    when the file was written.
     """
     try:
         run_ledger.persist(s, STATE_PATH)
         return True
     except run_ledger.LedgerTypeError as exc:
-        print(f"[autopilot] reap: state write skipped, type validation failed ({exc})", file=sys.stderr)
+        print(f"[autopilot] reap: state failed type validation ({exc}); writing leniently", file=sys.stderr)
+    try:
+        run_ledger.persist(s, STATE_PATH, validate=False)
+        return True
+    except OSError as exc:
+        print(f"[autopilot] reap: lenient state write failed ({exc})", file=sys.stderr)
         return False
 
 

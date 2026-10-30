@@ -458,12 +458,13 @@ def _ordered(ledger):
     return out
 
 
-def persist(ledger, path):
+def persist(ledger, path, validate=True):
     """The ONE state.json writer: temp file in the same directory, then
     os.replace. A crash before the rename leaves the prior file untouched."""
     global _persist_calls
     _persist_calls += 1
-    _validate(ledger)
+    if validate:
+        _validate(ledger)
     directory = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(prefix=".run-ledger-", dir=directory)
     try:
