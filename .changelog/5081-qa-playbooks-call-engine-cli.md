@@ -1,0 +1,1 @@
+- refactor: hydra-qa and hydra-target-qa playbooks call the qa-verdict engine CLI instead of inline shims and bash trailer copies (#5081)

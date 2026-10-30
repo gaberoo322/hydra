@@ -445,19 +445,10 @@ Pass `CHECKS_JSON` to the verdict classifier at the end — not to the sub-agent
 
 Inspect the diff. If every changed file is a prompt path per `isPromptOnlyChange()` (the ONE prompt-path list in `scripts/ci/qa-verdict.ts`, shared with step 6.7's change shape — playbook/skill `.md`, plus the `config/agents/` and `config/feedback/` prefixes whose directories were removed) AND no artifact is present AND no `design-concept-exempt` label, the Spec axis is auto-bypassed (per issue #440 — prompt-only PRs never require the artifact). This is the **only** auto-bypass; Tier ≥ 2 PRs always run the Spec axis (or fail in `enforce` mode).
 
-```bash
-CHANGED=$(git diff --no-renames --name-only "${FIXED_SHA}...HEAD")
-# Fail-closed: a helper failure prints nothing, so TIER1_ONLY stays 0 (no bypass).
-TIER1_ONLY=$(CHANGED="$CHANGED" node --no-warnings --experimental-strip-types -e "
-  import('./scripts/ci/qa-verdict.ts').then(({isPromptOnlyChange}) => {
-    process.stdout.write(isPromptOnlyChange(process.env.CHANGED.split('\n')) ? '1' : '0');
-  }).catch((e) => { console.error('WARN: isPromptOnlyChange failed:', e); });
-")
-[ "$TIER1_ONLY" = "1" ] || TIER1_ONLY=0
+The prompt-only signal is `.promptOnly` of the step-6.6 admission call (one CLI phase answers steps 6, 6.6 and the red-required list), so the bypass below is *applied* right after that call. The changed-file list is read once here, with `--no-renames`, and travels as JSON:
 
-if [ "$TIER1_ONLY" = "1" ] && [ -z "$SPEC_INPUT_JSON" ] && [ -z "$SPEC_SKIPPED_REASON" ]; then
-  SPEC_SKIPPED_REASON="Tier-1 auto-bypass (diff is prompt-only and no artifact present)"
-fi
+```bash
+CHANGED_FILES_JSON=$(git diff --no-renames --name-only "${FIXED_SHA}...HEAD" | jq -R . | jq -sc 'map(select(length > 0))')
 ```
 
 ### 6.5 Resolve the PR's Modification Tier (issue #739)
@@ -514,56 +505,41 @@ and returns one of three actions:
 
 ```bash
 # PR_TIER is the string from step 6.5 ("" when the classifier was unreachable).
-# The predicate fail-closes to admit on a null tier / unknown mergeState (INV-E).
+# ONE admission call answers steps 6, 6.6 and the red-required list. Facts travel
+# as JSON on stdin (never env or argv). An unreadable CHECKS_JSON or an empty
+# MERGE_STATE_STATUS is simply omitted: the CLI fetches what is absent and
+# fail-closes to admit (INV-E).
 PR_TIER_NUM=$(printf '%s' "$PR_TIER" | jq -r 'tonumber? // empty' 2>/dev/null || true)
-GATE_JSON=$(CHECKS_JSON="$CHECKS_JSON" MERGE_STATE_STATUS="$MERGE_STATE_STATUS" \
-  PR_TIER_NUM="$PR_TIER_NUM" node --no-warnings --experimental-strip-types -e "
-  import('./scripts/ci/qa-verdict.ts').then(({decideReviewAdmission}) => {
-    const tier = process.env.PR_TIER_NUM === '' ? null : Number(process.env.PR_TIER_NUM);
-    const d = decideReviewAdmission({
-      checks: JSON.parse(process.env.CHECKS_JSON),
-      mergeStateStatus: process.env.MERGE_STATE_STATUS,
-      tier,
-    });
-    process.stdout.write(JSON.stringify(d));
-  }).catch((e) => {
-    // Fail-closed on the gate SCRIPT's own runtime error (malformed
-    // CHECKS_JSON with no upstream fallback, a throw inside
-    // decideReviewAdmission, a dynamic-import failure) — distinct from bad
-    // *inputs* to decideReviewAdmission, which the 13-case regression suite
-    // already covers as fail-closed-to-admit. Without this .catch(), Node's
-    // unhandled-rejection default crashes the process before GATE_JSON is
-    // ever written, leaving nothing for the bash fallback below to read
-    // (issue #3815, PR #3874 adversarial-QA FAIL finding).
-    process.stdout.write(JSON.stringify({ action: 'admit', reason: 'gate script runtime error, fail-closed to full review: ' + (e && e.message ? e.message : String(e)) }));
-  });
-" 2>/dev/null || echo "")
-GATE_ACTION=$(printf '%s' "$GATE_JSON" | jq -r '.action // empty' 2>/dev/null)
-GATE_REASON=$(printf '%s' "$GATE_JSON" | jq -r '.reason // empty' 2>/dev/null)
-# Belt-and-braces else-branch (previously undocumented — same FAIL finding):
-# an empty/malformed GATE_JSON (the node process itself failed to start, the
-# subshell failed, or jq couldn't parse the output) still fails closed to the
-# full fan-out, mirroring step 6.5's "unreachable classifier -> deeper path"
-# default (INV-E).
+ADMISSION_JSON=$(jq -n --argjson pr "$pr_number" --argjson tier "${PR_TIER_NUM:-null}" \
+  --argjson checks "${CHECKS_JSON:-null}" --arg mergeState "$MERGE_STATE_STATUS" \
+  --argjson paths "$CHANGED_FILES_JSON" '
+  {pr: $pr, tier: $tier, changedPaths: $paths}
+  + (if $checks == null then {} else {checks: $checks} end)
+  + (if $mergeState == "" then {} else {mergeStateStatus: $mergeState} end)' \
+  | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts admission) || ADMISSION_JSON=""
+GATE_ACTION=$(printf '%s' "$ADMISSION_JSON" | jq -r '.admission.action // empty' 2>/dev/null)
+GATE_REASON=$(printf '%s' "$ADMISSION_JSON" | jq -r '.admission.reason // empty' 2>/dev/null)
+# An empty/failed admission call still fails closed to the full fan-out, mirroring
+# step 6.5's "unreachable classifier -> deeper path" default (INV-E). This is a
+# depth default, not a verdict.
 if [ -z "$GATE_ACTION" ]; then
   echo "WARN: reviewer admission gate produced no action — fail-closed to admit (full fan-out)."
   GATE_ACTION="admit"
-  GATE_REASON="gate script produced no output; fail-closed to full review"
+  GATE_REASON="gate produced no output; fail-closed to full review"
 fi
 
-# Red REQUIRED checks (issue #4460 INV-7; one definition since #4746) —
-# `redRequiredChecks()` is the SAME helper classifyVerdict counts, so
-# RED_REQUIRED_LIST (quoted in bounce comments + the worst-finding summary)
-# and the skip path's BLOCKERS can never disagree with the verdict. Empty when
-# every required check is green/pending. No new fetch — step 5's CHECKS_JSON.
-# >>> red-required-checks
-RED_REQUIRED_JSON=$(CHECKS_JSON="$CHECKS_JSON" node --no-warnings --experimental-strip-types -e "
-  import('./scripts/ci/qa-verdict.ts').then(({redRequiredChecks}) => {
-    process.stdout.write(JSON.stringify(redRequiredChecks(JSON.parse(process.env.CHECKS_JSON || '[]'))));
-  }).catch((err) => { console.error('[hydra-qa] redRequiredChecks failed:', err); process.exit(1); });
-") || RED_REQUIRED_JSON=""
+# Red REQUIRED checks (one definition: the engine's red-required list, the same
+# one the classifier counts). RED_REQUIRED_LIST is quoted in bounce comments and
+# the worst-finding summary; the skip path's BLOCKERS derive from the same list.
+RED_REQUIRED_JSON=$(printf '%s' "$ADMISSION_JSON" | jq -c '.redRequired // []' 2>/dev/null || echo '[]')
 RED_REQUIRED_LIST=$(printf '%s' "$RED_REQUIRED_JSON" | jq -r 'join(", ")' 2>/dev/null || echo "")
-# <<< red-required-checks
+
+# Step 6's Tier-1 auto-bypass, applied from the same call. Fail-closed: an absent
+# answer is "not prompt-only" (no bypass).
+TIER1_ONLY=$(printf '%s' "$ADMISSION_JSON" | jq -r 'if .promptOnly == true then "1" else "0" end' 2>/dev/null || echo 0)
+if [ "$TIER1_ONLY" = "1" ] && [ -z "$SPEC_INPUT_JSON" ] && [ -z "$SPEC_SKIPPED_REASON" ]; then
+  SPEC_SKIPPED_REASON="Tier-1 auto-bypass (diff is prompt-only and no artifact present)"
+fi
 ```
 
 **Route on `GATE_ACTION`:**
@@ -644,26 +620,14 @@ RED_REQUIRED_LIST=$(printf '%s' "$RED_REQUIRED_JSON" | jq -r 'join(", ")' 2>/dev
   ```bash
   REVIEW_VERDICT="PASS"   # nominal — classifyVerdict ignores it when requiredFailed > 0
   REVIEW_REPORT="_Review skipped by the admission gate (issue #3815): a required CI check already failed, so the review verdict cannot change the FAIL \`classifyVerdict\` returns regardless of the reviewers' finding._"
-  node --no-warnings --experimental-strip-types -e "
-  import('./scripts/ci/qa-verdict.ts').then(({classifyVerdict, renderCiSummary}) => {
-    const r = classifyVerdict(process.env.REVIEW_VERDICT, JSON.parse(process.env.CHECKS_JSON));
-    process.stdout.write(JSON.stringify({verdict: r.verdict, reason: r.reason, checks: renderCiSummary(r)}));
-  }).catch((e) => {
-    // Same fail-closed rationale as step 6.6's decideReviewAdmission call
-    // above: this branch is only reached because GATE_ACTION already told us
-    // a required check failed, so the safe default on the script's OWN
-    // runtime error is the FAIL this path was always going to emit — never a
-    // crash, never a silent PASS (issue #3815, PR #3874 finding).
-    process.stdout.write(JSON.stringify({ verdict: 'FAIL', reason: 'gate re-derivation script runtime error, fail-closed to FAIL: ' + (e && e.message ? e.message : String(e)), checks: '_(checks block unavailable — gate script error)_' }));
-  });
-  " > /tmp/qa-verdict.json 2>/dev/null || echo '{"verdict":"FAIL","reason":"gate re-derivation script failed to run, fail-closed to FAIL","checks":"_(checks block unavailable — gate script error)_"}' > /tmp/qa-verdict.json
-  VERDICT=$(jq -r '.verdict' /tmp/qa-verdict.json)
-  VERDICT_REASON=$(jq -r '.reason' /tmp/qa-verdict.json)
-  CHECKS_BLOCK=$(jq -r '.checks' /tmp/qa-verdict.json)
-  # VERDICT is FAIL (by classifyVerdict on the happy path, or by the fail-closed
-  # fallback above on a script error). Each red required check is one high
-  # blocker for the QA-Verdict trailer (issue #4729). Run step 9.5, then skip
-  # to step 10's FAIL routing for T1/T2/T3 — do not spawn reviewers.
+  # The engine already computed the skip-path FAIL and its CI summary in the
+  # step-6.6 admission call (.skipVerdict / .skipCiSummary).
+  VERDICT=$(printf '%s' "$ADMISSION_JSON" | jq -r '.skipVerdict.verdict // "FAIL"')
+  VERDICT_REASON=$(printf '%s' "$ADMISSION_JSON" | jq -r '.skipVerdict.reason // "required CI check failed"')
+  CHECKS_BLOCK=$(printf '%s' "$ADMISSION_JSON" | jq -r '.skipCiSummary // "_(checks block unavailable)_"')
+  # VERDICT is FAIL. Each red required check is one high blocker for the
+  # QA-Verdict trailer (issue #4729). Run step 9.5, then skip to step 10's FAIL
+  # routing for T1/T2/T3 — do not spawn reviewers.
   BLOCKERS=$(printf '%s' "$RED_REQUIRED_JSON" | jq 'length' 2>/dev/null || echo 1)
   [ "${BLOCKERS:-0}" -ge 1 ] 2>/dev/null || BLOCKERS=1
   MAX_SEVERITY=high
@@ -706,20 +670,18 @@ PR #3881:
 
 ### 6.7 Size the reviewer fan-out by change shape (issue #4733)
 
-Only on `admit`. The tier classifier (Verifier Core) lands most PRs at T3, so a docs-only PR used to pay the 4-sub-agent T3 fan-out. `decideReviewerFanout()` sizes it from the tier plus the changed-file shape (`docs-only | tests-only | prompt-only | code`; any `src/`, `scripts/`, `dashboard/src/`, `.github/` or other non-doc/test/prompt path makes the diff `code`). The tier classifier is not touched.
+Only on `admit`. The tier classifier (Verifier Core) lands most PRs at T3, so a docs-only PR used to pay the 4-sub-agent T3 fan-out. The `fanout` phase of `scripts/ci/qa-verdict.ts` sizes it from the tier plus the changed-file shape (`docs-only | tests-only | prompt-only | code`; any `src/`, `scripts/`, `dashboard/src/`, `.github/` or other non-doc/test/prompt path makes the diff `code`). The tier classifier is not touched.
 
 ```bash
-FANOUT_JSON=$(PR_TIER_NUM="$PR_TIER_NUM" CHANGED="$CHANGED" node --no-warnings --experimental-strip-types -e "
-  import('./scripts/ci/qa-verdict.ts').then(({decideReviewerFanout}) => {
-    const tier = process.env.PR_TIER_NUM === '' ? null : Number(process.env.PR_TIER_NUM);
-    process.stdout.write(JSON.stringify(decideReviewerFanout(tier, process.env.CHANGED.split(','))));
-  }).catch((e) => { console.error('WARN: decideReviewerFanout failed:', e); });
-" || echo "")
+FANOUT_JSON=$(jq -n --argjson pr "$pr_number" --argjson tier "${PR_TIER_NUM:-null}" --argjson paths "$CHANGED_FILES_JSON" \
+  '{pr: $pr, tier: $tier, changedPaths: $paths}' \
+  | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts fanout) || FANOUT_JSON=""
 FANOUT_MODE=$(printf '%s' "$FANOUT_JSON" | jq -r '.mode // empty' 2>/dev/null)
 FANOUT_REVIEWERS=$(printf '%s' "$FANOUT_JSON" | jq -r '.reviewers | join(",")' 2>/dev/null)
 FANOUT_REASON=$(printf '%s' "$FANOUT_JSON" | jq -r '.reason // empty' 2>/dev/null)
 if [ -z "$FANOUT_MODE" ]; then
-  # Fail-closed: keep step 6.5's tier path, never shrink review on a helper failure.
+  # Fail-closed (a depth default, not a verdict): keep step 6.5's tier path, never
+  # shrink review on a failed call.
   echo "WARN: fan-out sizing failed — keeping the tier fan-out."
   if [ "$ADVERSARIAL" = "1" ]; then
     FANOUT_MODE=adversarial
@@ -811,65 +773,21 @@ judged against the packet instead of against a self-assembled view of the repo.
 
 #### 7.0a Re-review context after a FAIL (issue #4735)
 
-On a T1–T3 PR whose latest QA verdict was a FAIL with a findings table, give the reviewers the prior findings as extra context. This is prompt context only: reviewers still review the FULL diff and changed files, and `foldReviewFindings()` alone decides the verdict. Nothing is filtered or demoted. `decideReReviewContext()` (issue #4758) returns `{includeFindings, includeDiff, baseSha, reason}`: `includeFindings` is the exported `isReviewedFailRound()` predicate (a T1–T3 prior FAIL with a findings table), and the incremental diff since the prior verdict is added (`includeDiff`) only when, additionally, the prior `sha=` is a commit that is still an ancestor of HEAD with commits since and a changed-file list; otherwise the diff is simply left out. Every unreadable input (a failed `gh` read, a failed `node` call) means no context: a plain first-pass review.
+On a T1–T3 PR whose latest QA verdict was a FAIL with a findings table, give the reviewers the prior findings as extra context. This is prompt context only: reviewers still review the FULL diff and changed files, and `foldReviewFindings()` alone decides the verdict. Nothing is filtered or demoted. The `prior-context` phase (issue #4758) returns `.priorFindings` plus `.context = {includeFindings, includeDiff, baseSha, reason}`: `includeFindings` is the exported `isReviewedFailRound()` predicate (a T1–T3 prior FAIL with a findings table), and the incremental diff since the prior verdict is added (`includeDiff`) only when, additionally, the prior `sha=` is a commit that is still an ancestor of HEAD with commits since and a changed-file list; otherwise the diff is simply left out. Every unreadable input (a failed `gh` read, a failed `node` call) means no context: a plain first-pass review.
 
 ```bash
-PRIOR_QA_FILE=$(mktemp)
-# >>> rereview-context
 PRIOR_FINDINGS=""
 REREVIEW_DIFF_BASE=""
-PRIOR_QA_JSON=""
-if gh pr view "$pr_number" --repo gaberoo322/hydra --json comments,reviews \
-     --jq '[.comments[].body, .reviews[].body]' > "$PRIOR_QA_FILE"; then
-  PRIOR_QA_JSON=$(PRIOR_QA_FILE="$PRIOR_QA_FILE" PR="$pr_number" node --no-warnings --experimental-strip-types -e "
-    Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
-      const bodies = JSON.parse(fs.readFileSync(process.env.PRIOR_QA_FILE, 'utf8').trim() || '[]');
-      const pr = Number(process.env.PR);
-      const prior = q.qaVerdictHistory(bodies, pr).at(-1) ?? null;
-      process.stdout.write(JSON.stringify({ prior, findings: prior ? q.priorFindingsSection(bodies, pr, prior.round) : '' }));
-    }).catch((err) => { console.error('[hydra-qa] prior QA verdict read failed:', err); process.exit(1); });
-  ") || PRIOR_QA_JSON=""
-else
-  echo "[hydra-qa] WARN: prior QA verdicts unreadable — no re-review context" >&2
+# The CLI reads the PR thread and the git ancestry itself (it needs no prior
+# bodies from us); every failure means no context: a plain first-pass review.
+CONTEXT_JSON=$(jq -n --argjson pr "$pr_number" --argjson tier "${PR_TIER_NUM:-null}" '{pr: $pr, tier: $tier}' \
+  | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts prior-context) \
+  || { echo "[hydra-qa] WARN: prior-context call failed — no re-review context" >&2; CONTEXT_JSON=""; }
+if [ -n "$CONTEXT_JSON" ]; then
+  PRIOR_FINDINGS=$(printf '%s' "$CONTEXT_JSON" | jq -r 'if .context.includeFindings then .priorFindings else "" end') \
+    && REREVIEW_DIFF_BASE=$(printf '%s' "$CONTEXT_JSON" | jq -r 'if .context.includeDiff then (.context.baseSha // "") else "" end') \
+    || { echo "[hydra-qa] WARN: re-review context unparseable — none added" >&2; PRIOR_FINDINGS=""; REREVIEW_DIFF_BASE=""; }
 fi
-PREV_SHA=$(printf '%s' "$PRIOR_QA_JSON" | jq -r '.prior.sha // empty' 2>/dev/null)
-ANCESTOR=null
-CHANGED_SINCE_JSON=null
-if printf '%s' "$PREV_SHA" | grep -Eq '^[0-9a-f]{7,40}$' && git cat-file -e "${PREV_SHA}^{commit}" 2>/dev/null; then
-  if git merge-base --is-ancestor "$PREV_SHA" HEAD 2>/dev/null; then
-    ANCESTOR=true
-    CHANGED_SINCE_JSON=$(git diff --no-renames --name-only "$PREV_SHA" HEAD | jq -Rsc 'split("\n") | map(select(length > 0))') \
-      || CHANGED_SINCE_JSON=null
-  else
-    ANCESTOR=false
-  fi
-fi
-if [ -n "$PRIOR_QA_JSON" ]; then
-  CONTEXT_JSON=$(PRIOR_QA_JSON="$PRIOR_QA_JSON" HEAD_SHA="$(git rev-parse HEAD 2>/dev/null)" ANCESTOR="$ANCESTOR" \
-    CHANGED_SINCE_JSON="$CHANGED_SINCE_JSON" PR_TIER_NUM="$PR_TIER_NUM" node --no-warnings --experimental-strip-types -e "
-    import('./scripts/ci/qa-verdict.ts').then((q) => {
-      const e = process.env;
-      const p = JSON.parse(e.PRIOR_QA_JSON);
-      const tier = e.PR_TIER_NUM === '' || e.PR_TIER_NUM === undefined ? null : Number(e.PR_TIER_NUM);
-      // One definition of a reviewed FAIL round — the exported predicate,
-      // not an inline duplicate (issue #4758). includeDiff additionally
-      // requires the prior sha to be an ancestor of HEAD with commits since.
-      const ctx = q.decideReReviewContext({ tier, prior: p.prior, headSha: e.HEAD_SHA,
-        priorShaIsAncestor: JSON.parse(e.ANCESTOR), changedSince: JSON.parse(e.CHANGED_SINCE_JSON), priorFindings: p.findings });
-      process.stdout.write(JSON.stringify({
-        findings: ctx.includeFindings ? p.findings : '',
-        base: ctx.includeDiff ? ctx.baseSha : '',
-      }));
-    }).catch((err) => { console.error('[hydra-qa] re-review context failed — none added:', err); process.exit(1); });
-  ") || CONTEXT_JSON=""
-  if [ -n "$CONTEXT_JSON" ]; then
-    PRIOR_FINDINGS=$(printf '%s' "$CONTEXT_JSON" | jq -r '.findings // ""') \
-      && REREVIEW_DIFF_BASE=$(printf '%s' "$CONTEXT_JSON" | jq -r '.base // ""') \
-      || { echo "[hydra-qa] WARN: re-review context unparseable — none added" >&2; PRIOR_FINDINGS=""; REREVIEW_DIFF_BASE=""; }
-  fi
-fi
-# <<< rereview-context
-rm -f "$PRIOR_QA_FILE"
 ```
 
 When `PRIOR_FINDINGS` is non-empty, APPEND the context to the packet. The full diff and changed-file list stay first and are still what the reviewers review:
@@ -1012,67 +930,40 @@ The fold and the rendered comment both come from `foldReviewFindings()`, so the 
 ```bash
 FINDINGS_FILE=$(mktemp)   # the step-8 per-reviewer JSON map
 # ... write the transcribed per-reviewer findings map into "$FINDINGS_FILE" ...
-# >>> severity-fold
-FOLD_JSON=$(FINDINGS_FILE="$FINDINGS_FILE" PR_TIER_NUM="$PR_TIER_NUM" SPAWNED_REVIEWERS="$FANOUT_REVIEWERS" \
-  STANDARDS_SUMMARY="$STANDARDS_SUMMARY" SPEC_SUMMARY="$SPEC_SUMMARY" FANOUT_REASON="$FANOUT_REASON" \
-  RED_REQUIRED_JSON="$RED_REQUIRED_JSON" node --no-warnings --experimental-strip-types -e "
-  Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
-    const e = process.env;
-    const tier = e.PR_TIER_NUM === '' || e.PR_TIER_NUM === undefined ? null : Number(e.PR_TIER_NUM);
-    // No default: a missing, empty or unparseable file reaches the fold as
-    // undefined / the raw text, which it turns into a high malformed finding.
-    let findings;
-    try { findings = JSON.parse(fs.readFileSync(e.FINDINGS_FILE, 'utf8')); }
-    catch (err) {
-      console.error('[hydra-qa] findings file missing or unparseable — failing closed:', err.message);
-      try { findings = fs.readFileSync(e.FINDINGS_FILE, 'utf8'); } catch (readErr) { console.error('[hydra-qa] findings file unreadable:', readErr.message); findings = undefined; }
-    }
-    // The findings are the step-8 per-reviewer map (issue #4758). spawnedReviewers
-    // is ALWAYS passed, empty included: the fold fails closed on any spawned
-    // reviewer missing from the map, and an empty or unset FANOUT_REVIEWERS is
-    // itself malformed, never a fallback to a flat array that could PASS.
-    const spawned = String(e.SPAWNED_REVIEWERS || '').split(',').map((s) => s.trim()).filter(Boolean);
-    const fold = q.foldReviewFindings({ tier, findings, spawnedReviewers: spawned });
-    const counts = q.trailerBlockerCounts(fold, JSON.parse(e.RED_REQUIRED_JSON || '[]'));
-    const report = q.renderReviewReport({ fold, standardsSummary: e.STANDARDS_SUMMARY, specSummary: e.SPEC_SUMMARY, fanoutReason: e.FANOUT_REASON });
-    process.stdout.write(JSON.stringify({ reviewVerdict: fold.reviewVerdict, report, worst: fold.worstFinding, ...counts }));
-  }).catch((err) => { console.error('[hydra-qa] foldReviewFindings failed:', err); process.exit(1); });
-") || FOLD_JSON=""
+# A missing file is a malformed reviewer output, not a crash: touch it so the
+# raw (empty) text reaches the engine, which fails closed to the high
+# reviewer-output-malformed blocker.
+[ -f "$FINDINGS_FILE" ] || : > "$FINDINGS_FILE"
+# The findings file is bound with --rawfile and parsed with try/catch: a malformed
+# file reaches the engine as the RAW string and fails closed there — never a jq
+# parse abort, never a defaulted empty array. spawnedReviewers is ALWAYS passed
+# (an empty list is itself malformed). Unreadable CHECKS_JSON is null, which the
+# schema rejects (non-zero exit = pre-verdict exit, below).
+FOLD_JSON=$(jq -n --argjson tier "${PR_TIER_NUM:-null}" --argjson checks "${CHECKS_JSON:-null}" \
+  --rawfile raw "$FINDINGS_FILE" --arg spawned "$FANOUT_REVIEWERS" \
+  --arg standards "$STANDARDS_SUMMARY" --arg spec "$SPEC_SUMMARY" --arg fanout "$FANOUT_REASON" '
+  {tier: $tier, checks: $checks, findings: (try ($raw | fromjson) catch $raw),
+   spawnedReviewers: ($spawned | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))),
+   standardsSummary: $standards, specSummary: $spec, fanoutReason: $fanout}' \
+  | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts fold) || FOLD_JSON=""
 rm -f "$FINDINGS_FILE"
-REVIEW_VERDICT=$(printf '%s' "$FOLD_JSON" | jq -r '.reviewVerdict // empty' 2>/dev/null)
-REVIEW_REPORT=$(printf '%s' "$FOLD_JSON" | jq -r '.report // empty' 2>/dev/null)
-BLOCKERS=$(printf '%s' "$FOLD_JSON" | jq -r '.blockers // empty' 2>/dev/null)
-MAX_SEVERITY=$(printf '%s' "$FOLD_JSON" | jq -r '.maxSeverity // empty' 2>/dev/null)
-WORST_FINDING=$(printf '%s' "$FOLD_JSON" | jq -r '.worst // empty' 2>/dev/null)
-if [ -z "$REVIEW_VERDICT" ]; then
-  # Fail loud, never silently PASS: a fold failure is treated as a FAIL with one
-  # high blocker, and the reviewers' raw reports are posted instead of the table.
-  echo "[hydra-qa] ERROR: severity fold failed — failing closed to FAIL" >&2
-  REVIEW_VERDICT=FAIL; BLOCKERS=1; MAX_SEVERITY=high
-  WORST_FINDING="severity fold failed — see the raw reviewer reports"
-  # The ### Findings heading makes this round count toward the step-10 round cap.
-  REVIEW_REPORT="### Findings
-
-_Findings fold failed; raw reviewer reports follow._"   # then append the raw reports
-fi
-# <<< severity-fold
+# A non-zero exit from fold / trailer / round-action is a PRE-VERDICT exit
+# (exactly like step 7.5's incomplete fan-out): post nothing, leave needs-qa in
+# place, and let the next dispatch retry. There is no bash verdict fallback.
+[ -n "$FOLD_JSON" ] || { echo "[hydra-qa] ERROR: fold phase produced no result — pre-verdict exit, nothing posted" >&2; exit 1; }
+REVIEW_VERDICT=$(printf '%s' "$FOLD_JSON" | jq -r '.fold.reviewVerdict')
+REVIEW_REPORT=$(printf '%s' "$FOLD_JSON" | jq -r '.report')
+BLOCKERS=$(printf '%s' "$FOLD_JSON" | jq -r '.counts.blockers')
+MAX_SEVERITY=$(printf '%s' "$FOLD_JSON" | jq -r '.counts.maxSeverity')
+WORST_FINDING=$(printf '%s' "$FOLD_JSON" | jq -r '.fold.worstFinding // empty')
+VERDICT=$(printf '%s' "$FOLD_JSON" | jq -r '.verdict.verdict')
+VERDICT_REASON=$(printf '%s' "$FOLD_JSON" | jq -r '.verdict.reason')
+CHECKS_BLOCK=$(printf '%s' "$FOLD_JSON" | jq -r '.ciSummary')
 ```
 
 There is no separate T4 cross-check. The earlier `$REVIEWER_A_VERDICT` / `$REVIEWER_B_VERDICT` block was dead: nothing set those variables. `foldReviewFindings()` already derives each reviewer's verdict from its own rows and runs `aggregateAdversarialReview()` over them, and malformed reviewer output becomes a high finding before the fold runs, so a T4 PR can never PASS on it. Step 10's Deep-QA routing reads this `REVIEW_VERDICT`. The trailer's `blockers=` can never be `0` on a FAIL (`trailerBlockerCounts()` counts at least one).
 
-Then feed `REVIEW_VERDICT` into the one-pass CI classifier (unchanged). The CI state is rendered ONCE, by `renderCiSummary()`, and it lists only the **non-green required** checks. The review report never repeats the per-check table:
-
-```bash
-node --no-warnings --experimental-strip-types -e "
-  import('./scripts/ci/qa-verdict.ts').then(({classifyVerdict, renderCiSummary}) => {
-    const r = classifyVerdict(process.env.REVIEW_VERDICT, JSON.parse(process.env.CHECKS_JSON));
-    process.stdout.write(JSON.stringify({verdict: r.verdict, reason: r.reason, checks: renderCiSummary(r)}));
-  }).catch((err) => { console.error('[hydra-qa] classifyVerdict failed:', err); process.exit(1); });
-" > /tmp/qa-verdict.json
-VERDICT=$(jq -r '.verdict' /tmp/qa-verdict.json)
-VERDICT_REASON=$(jq -r '.reason' /tmp/qa-verdict.json)
-CHECKS_BLOCK=$(jq -r '.checks' /tmp/qa-verdict.json)
-```
+The same `fold` call also runs the one-pass CI classifier on the folded review verdict (unchanged rule): `.verdict` is the final verdict (`VERDICT` / `VERDICT_REASON`) and `.ciSummary` is the CI state rendered ONCE (`CHECKS_BLOCK`), listing only the **non-green required** checks. The review report never repeats the per-check table.
 
 The posted comment is therefore: the findings table (severity, axis, reviewer, file:line, finding, fix), the follow-ups table when there are any, one short paragraph per axis, the fold reason and the fan-out line (`$REVIEW_REPORT`), then the verdict line and the one CI line (`$CHECKS_BLOCK`), then the trailer.
 
@@ -1090,52 +981,39 @@ QA-Verdict: <PASS|FAIL|PASS-pending-CI|FAIL-pending-CI> pr=<N> round=<k> sha=<he
 
 `BLOCKERS`, `MAX_SEVERITY` and `WORST_FINDING` are already set by step 9's fold (the skip path sets them in step 6.6). Render:
 
-The prior comment/review bodies go through a **file**, never an env var — a PR with many long reviews would blow the 128 KiB per-variable exec limit (`E2BIG`). If the render fails, the block retries once with a minimal trailer built in plain shell from values already in hand; if even that does not parse, the verdict still posts, ending with an explicit `QA-Verdict-Error:` line (which `qa:catch-rate` counts) — never silently trailer-less. An empty/unknown head SHA renders the sentinel `sha=unknown`, which the parser accepts and `qaVerdictShaMatches()` never matches.
+The `trailer` phase reads the PR thread and the head SHA itself (the playbook supplies neither prior bodies nor `headSha`), counts the round, and owns the fail-closed path: an unreadable history renders an explicit `QA-Verdict-Error:` line (which `qa:catch-rate` counts, and which carries no `round=` so it is never counted as a round) — never silently trailer-less. An unknown head SHA renders the sentinel `sha=unknown`, which `qaVerdictShaMatches()` never matches.
 
 ```bash
-HEAD_SHA=$(gh pr view $pr_number --repo gaberoo322/hydra --json headRefOid --jq '.headRefOid')
-PRIOR_BODIES_FILE=$(mktemp)
-gh pr view $pr_number --repo gaberoo322/hydra --json comments,reviews \
-  --jq '[.comments[].body, .reviews[].body]' > "$PRIOR_BODIES_FILE" \
-  || echo "[hydra-qa] WARN: prior-bodies fetch failed — round may undercount" >&2
-# >>> qa-verdict-trailer
-QA_VERDICT_TRAILER=$(VERDICT="$VERDICT" PR="$pr_number" HEAD_SHA="$HEAD_SHA" \
-  BLOCKERS="${BLOCKERS:-0}" MAX_SEVERITY="${MAX_SEVERITY:-none}" PRIOR_BODIES_FILE="$PRIOR_BODIES_FILE" \
-  node --no-warnings --experimental-strip-types -e "
-  Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, {buildQaVerdictTrailer}]) => {
-    const e = process.env;
-    const prior = JSON.parse(fs.readFileSync(e.PRIOR_BODIES_FILE, 'utf8').trim() || '[]');
-    process.stdout.write(buildQaVerdictTrailer({ verdict: e.VERDICT, pr: Number(e.PR), headSha: e.HEAD_SHA,
-      blockers: Number(e.BLOCKERS), maxSeverity: e.MAX_SEVERITY, priorBodies: prior }));
-  }).catch((err) => { console.error('[hydra-qa] trailer render failed:', err); process.exit(1); });
-") || QA_VERDICT_TRAILER=""
-QA_TRAILER_RE='^QA-Verdict: (PASS|FAIL|PASS-pending-CI|FAIL-pending-CI) pr=[1-9][0-9]* round=[1-9][0-9]* sha=([0-9a-f]{7,40}|unknown) blockers=[0-9]+ max_severity=(high|medium|low|none)$'
-if ! printf '%s\n' "$QA_VERDICT_TRAILER" | grep -Eq "$QA_TRAILER_RE"; then
-  echo "[hydra-qa] WARN: trailer render failed — retrying with a minimal trailer" >&2
-  QA_SHA=$(printf '%s' "$HEAD_SHA" | tr 'A-F' 'a-f' | cut -c1-12)
-  printf '%s' "$QA_SHA" | grep -Eq '^[0-9a-f]{7,12}$' || QA_SHA=unknown
-  QA_PRIOR=$(grep -o "QA-Verdict: [A-Za-z-]* pr=${pr_number} round=" "$PRIOR_BODIES_FILE" 2>/dev/null | wc -l | tr -d ' ')
-  QA_ROUND=$((${QA_PRIOR:-0} + 1))
-  QA_BLOCKERS="${BLOCKERS:-0}"
-  printf '%s' "$QA_BLOCKERS" | grep -Eq '^[0-9]+$' || QA_BLOCKERS=1
-  case "${MAX_SEVERITY:-}" in high|medium|low) QA_SEV="$MAX_SEVERITY" ;; *) QA_SEV=high ;; esac
-  [ "$QA_BLOCKERS" = "0" ] && QA_SEV=none
-  QA_VERDICT_TRAILER=$(printf 'QA-Verdict: %s pr=%s round=%s sha=%s blockers=%s max_severity=%s' \
-    "$VERDICT" "$pr_number" "$QA_ROUND" "$QA_SHA" "$QA_BLOCKERS" "$QA_SEV")
-  if ! printf '%s\n' "$QA_VERDICT_TRAILER" | grep -Eq "$QA_TRAILER_RE"; then
-    echo "[hydra-qa] ERROR: minimal trailer also invalid — posting QA-Verdict-Error" >&2
-    QA_V=$(printf '%s' "$VERDICT" | tr -cd 'A-Za-z-'); QA_PR=$(printf '%s' "$pr_number" | tr -cd '0-9')
-    QA_VERDICT_TRAILER=$(printf 'QA-Verdict-Error: verdict=%s pr=%s reason=%s' \
-      "${QA_V:-unknown}" "${QA_PR:-unknown}" "trailer render failed (full and minimal)")
-  fi
-fi
-# <<< qa-verdict-trailer
-rm -f "$PRIOR_BODIES_FILE"
+QA_VERDICT_TRAILER=$(jq -n --argjson pr "$pr_number" --arg verdict "$VERDICT" \
+  --argjson blockers "${BLOCKERS:-0}" --arg severity "${MAX_SEVERITY:-none}" \
+  '{pr: $pr, verdict: $verdict, blockers: $blockers, maxSeverity: $severity}' \
+  | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts trailer | jq -r '.trailer') \
+  || { echo "[hydra-qa] ERROR: trailer phase failed — pre-verdict exit, nothing posted" >&2; exit 1; }
 # One-line blocker summary for the issue-side pointer (the full review stays on the PR).
 BLOCKER_SUMMARY="${BLOCKERS:-0} blocker(s), worst: ${MAX_SEVERITY:-none}${WORST_FINDING:+ — ${WORST_FINDING}}"
 ```
 
 `WORST_FINDING` is the fold's worst blocking row, `file:line — finding` (≤ 120 chars; empty on a PASS). **Post once:** the full `$REVIEW_REPORT` lives only on the PR; the issue gets a short pointer (verdict, PR link, `$BLOCKER_SUMMARY`, the trailer — ≤ ~800 chars) that keeps its bounce-marker header line so remediation routing and `qa:catch-rate` still see it.
+
+### 9.6 Decide the round action (one `round-action` call)
+
+After the trailer renders and BEFORE this round's comment is posted (so the prior bodies the engine reads never include the current verdict), make exactly ONE `round-action` call. It returns everything step 10 routes on: the T1–T3 round-cap decision (`.round.action` is `proceed | bounce | escalate | deep-qa`), the T4 Deep-QA action (`.deepQa.action`, `.deepQa.failNumber`), the SHA-bound PASS marker (`.passMarker`, T4 PASS only), the FAIL marker (`.failMarker`, T4 FAIL only), the escalation comment body (`.escalationSummary`) and the escalation label sets (`.labels.issueAdd`, `.labels.issueRemove`, `.labels.prAdd`). No label name is spelled in this playbook's escalation loop; it reads them from this JSON.
+
+A CI-only round (the step-6.6 `skip-required-failed` short-circuit) reviewed nothing and never counts toward the cap, so `currentReviewed` is set from the branch the playbook took (`GATE_ACTION`) — never by grepping the skip marker text out of `REVIEW_REPORT`.
+
+```bash
+CURRENT_REVIEWED=true
+[ "$GATE_ACTION" = "skip-required-failed" ] && CURRENT_REVIEWED=false
+ROUND_JSON=$(jq -n --argjson pr "$pr_number" --argjson tier "${PR_TIER_NUM:-null}" --arg verdict "$VERDICT" \
+  --arg reviewVerdict "$REVIEW_VERDICT" --argjson currentReviewed "$CURRENT_REVIEWED" \
+  --arg currentTrailer "$QA_VERDICT_TRAILER" \
+  '{pr: $pr, tier: $tier, verdict: $verdict, reviewVerdict: $reviewVerdict,
+    currentReviewed: $currentReviewed, currentTrailer: $currentTrailer}' \
+  | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts round-action) \
+  || { echo "[hydra-qa] ERROR: round-action phase failed — pre-verdict exit, nothing posted" >&2; exit 1; }
+```
+
+The phase degrades, never throws, when the PR thread is unreadable: `.degraded` names `prior-bodies`, `.round.action` is `bounce`, and no escalation or PASS marker is produced (the round cap cannot reset: a degraded round can never escalate).
 
 ### 10. Verdict routing
 
@@ -1174,19 +1052,22 @@ ${QA_VERDICT_TRAILER}"
 # the live head SHA at post time (NOT $FIXED_SHA, which is the base ref) and
 # render the exact marker line via `renderDeepQaPassMarker` so the literal is
 # the single source of truth shared with the gate.
+# The marker line comes from the round-action call (.passMarker, step 9.6): the
+# engine renders it with renderDeepQaPassMarker against the live head SHA, so the
+# literal stays the single source of truth shared with the gate. An empty
+# .passMarker (degraded history) posts no marker; the gate then holds the PR and
+# the next QA pass re-runs.
 if [ "$PR_TIER" = "4" ]; then
-  HEAD_SHA=$(gh pr view $pr_number --repo gaberoo322/hydra \
-    --json headRefOid --jq '.headRefOid')
-  DEEP_QA_PASS_LINE=$(HEAD_SHA="$HEAD_SHA" node --no-warnings --experimental-strip-types -e "
-    import('./scripts/ci/qa-verdict.ts').then(({renderDeepQaPassMarker}) => {
-      process.stdout.write(renderDeepQaPassMarker(process.env.HEAD_SHA));
-    });
-  ")
-  gh pr comment $pr_number --repo gaberoo322/hydra --body "> *T4 Verifier-Core deep-QA — PASS proof*
+  DEEP_QA_PASS_LINE=$(printf '%s' "$ROUND_JSON" | jq -r '.passMarker // empty')
+  if [ -n "$DEEP_QA_PASS_LINE" ]; then
+    gh pr comment $pr_number --repo gaberoo322/hydra --body "> *T4 Verifier-Core deep-QA — PASS proof*
 
 ${DEEP_QA_PASS_LINE}
 
 The Verifier-Core deep-QA branch passed against this exact head SHA. The \`deep-qa-gate\` required check verifies this marker before merge; new commits invalidate it and force re-QA."
+  else
+    echo "[hydra-qa] WARN: no deep-QA PASS marker from round-action (degraded) — none posted" >&2
+  fi
 fi
 
 # Enable auto-merge (squash) rather than a blocking immediate merge: the merge
@@ -1251,45 +1132,21 @@ For T1 / T2 / T3 (PR_TIER empty/1/2/3) — the universal remediation bounce, cap
 # Disarm any auto-merge a prior PASS armed (issue #4737) — before anything else.
 gh pr merge $pr_number --repo gaberoo322/hydra --disable-auto \
   || echo "[hydra-qa] WARN: --disable-auto on PR #${pr_number} failed (non-fatal — likely not armed)" >&2
-ROUND_PRIOR_FILE=$(mktemp)
-# >>> qa-round-cap
+# The round-cap decision was made by the step-9.6 round-action call (before this
+# round's comment, so its prior bodies never include the current verdict).
 ROUND_ACTION=bounce
 QA_ESCALATION_SUMMARY=""
 ESC_LABELS_OK=1
 ESC_LABEL_NOTE=""
-ROUND_JSON=""
 # The Skill loader substitutes the BARE issue-number token into this text; it
 # never sets a shell variable, so the braced form would render empty (PR #4759).
 ESC_ISSUE="$issue_number"
-# A CI-only round (the step-6.6 admission-gate skip) reviewed nothing and never
-# counts toward the cap.
-CURRENT_REVIEWED=true
-case "${REVIEW_REPORT:-}" in *"Review skipped by the admission gate"*) CURRENT_REVIEWED=false ;; esac
-if gh pr view "$pr_number" --repo gaberoo322/hydra --json comments,reviews \
-     --jq '[.comments[].body, .reviews[].body]' > "$ROUND_PRIOR_FILE"; then
-  ROUND_JSON=$(ROUND_PRIOR_FILE="$ROUND_PRIOR_FILE" PR="$pr_number" PR_TIER_NUM="$PR_TIER_NUM" VERDICT="$VERDICT" \
-    CURRENT_REVIEWED="$CURRENT_REVIEWED" QA_VERDICT_TRAILER="$QA_VERDICT_TRAILER" node --no-warnings --experimental-strip-types -e "
-    Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
-      const e = process.env;
-      const bodies = JSON.parse(fs.readFileSync(e.ROUND_PRIOR_FILE, 'utf8').trim() || '[]');
-      const pr = Number(e.PR);
-      const tier = e.PR_TIER_NUM === '' || e.PR_TIER_NUM === undefined ? null : Number(e.PR_TIER_NUM);
-      const d = q.decideQaRoundAction({ tier, verdict: e.VERDICT, pr, priorBodies: bodies, currentReviewed: e.CURRENT_REVIEWED !== 'false' });
-      const summary = d.action === 'escalate'
-        ? q.renderQaEscalationSummary({ pr, priorBodies: bodies, currentTrailer: e.QA_VERDICT_TRAILER }) : '';
-      process.stdout.write(JSON.stringify({ ...d, summary, labels: q.QA_ESCALATION_LABELS }));
-    }).catch((err) => { console.error('[hydra-qa] decideQaRoundAction failed:', err); process.exit(1); });
-  ") || ROUND_JSON=""
-else
-  echo "[hydra-qa] WARN: prior QA verdicts unreadable — round cap not applied" >&2
-fi
-case "$(printf '%s' "$ROUND_JSON" | jq -r '.action // empty' 2>/dev/null)" in
+case "$(printf '%s' "$ROUND_JSON" | jq -r '.round.action // empty' 2>/dev/null)" in
   escalate) ROUND_ACTION=escalate ;;
-  bounce) ;;
-  *) echo "[hydra-qa] WARN: round-cap decision unavailable — bouncing (pre-#4735 behaviour)" >&2 ;;
+  *) ;;
 esac
 if [ "$ROUND_ACTION" = "escalate" ]; then
-  QA_ESCALATION_SUMMARY=$(printf '%s' "$ROUND_JSON" | jq -r '.summary')
+  QA_ESCALATION_SUMMARY=$(printf '%s' "$ROUND_JSON" | jq -r '.escalationSummary')
   case "$ESC_ISSUE" in
     ''|*[!0-9]*)
       echo "[hydra-qa] ERROR: no issue number to escalate (got '$ESC_ISSUE') — issue labels NOT changed" >&2
@@ -1321,8 +1178,6 @@ if [ "$ROUND_ACTION" = "escalate" ]; then
     ESC_LABEL_NOTE="**Label routing FAILED** (see the QA log): add \`ready-for-human\` and remove \`needs-qa\`, \`ready-for-agent\`, \`needs-dev-resume\` and \`in-progress\` by hand, or QA will re-run on this issue."
   fi
 fi
-# <<< qa-round-cap
-rm -f "$ROUND_PRIOR_FILE"
 gh pr comment $pr_number --repo gaberoo322/hydra --body "> *Automated QA — two-axis review*
 
 $REVIEW_REPORT
@@ -1397,26 +1252,12 @@ For **T4** (`PR_TIER == 4`) — the **Deep-QA Remediation Loop** (issue #740). T
 gh pr merge $pr_number --repo gaberoo322/hydra --disable-auto \
   || echo "[hydra-qa] WARN: --disable-auto on PR #${pr_number} failed (non-fatal — likely not armed)" >&2
 
-# Collect the PR's prior comment bodies — the durable per-attempt ledger.
-# Via a file, not an env var (128 KiB exec limit — issue #4746); reviews are
-# included so pre-#4746 FAIL markers posted as request-changes reviews count.
-PRIOR_COMMENTS_FILE=$(mktemp)
-gh pr view $pr_number --repo gaberoo322/hydra \
-  --json comments,reviews --jq '[.comments[].body, .reviews[].body]' > "$PRIOR_COMMENTS_FILE"
-
-# Pure decision: 1st FAIL => bounce, 2nd+ consecutive FAIL => block-and-escalate.
-DEEP_QA_JSON=$(PRIOR_COMMENTS_FILE="$PRIOR_COMMENTS_FILE" REVIEW_VERDICT="$REVIEW_VERDICT" \
-  node --no-warnings --experimental-strip-types -e "
-  Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, {decideDeepQaAction, DEEP_QA_FAIL_MARKER}]) => {
-    const prior = JSON.parse(fs.readFileSync(process.env.PRIOR_COMMENTS_FILE, 'utf8').trim() || '[]');
-    const d = decideDeepQaAction(process.env.REVIEW_VERDICT, prior);
-    process.stdout.write(JSON.stringify({ ...d, marker: DEEP_QA_FAIL_MARKER }));
-  }).catch((err) => { console.error('[hydra-qa] decideDeepQaAction failed:', err); process.exit(1); });
-")
-rm -f "$PRIOR_COMMENTS_FILE"
-DEEP_QA_ACTION=$(printf '%s' "$DEEP_QA_JSON" | jq -r '.action')
-DEEP_QA_FAILNO=$(printf '%s' "$DEEP_QA_JSON" | jq -r '.failNumber')
-DEEP_QA_MARKER=$(printf '%s' "$DEEP_QA_JSON" | jq -r '.marker')
+# The action, fail number and marker come from the step-9.6 round-action call
+# (the PR is the per-attempt ledger; the engine counted the prior FAIL markers).
+# 1st FAIL => bounce, 2nd+ consecutive FAIL => block-and-escalate.
+DEEP_QA_ACTION=$(printf '%s' "$ROUND_JSON" | jq -r '.deepQa.action')
+DEEP_QA_FAILNO=$(printf '%s' "$ROUND_JSON" | jq -r '.deepQa.failNumber // 1')
+DEEP_QA_MARKER=$(printf '%s' "$ROUND_JSON" | jq -r '.failMarker // empty')
 
 # ALWAYS post the FAIL marker comment so the next pass can count this fail
 # (the marker line is the ledger entry). A comment, not a request-changes

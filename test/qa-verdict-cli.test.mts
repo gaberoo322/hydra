@@ -267,6 +267,74 @@ describe("qa-verdict phases over the fixture fetcher", () => {
     assert.notEqual(ciOnly.round.action, "escalate", "a CI-only round never counts toward the cap");
   });
 
+  // 1:1 homes for the executed playbook fold cases deleted with the shims (#5081 INV-8).
+  const foldIn = (tier: number | null, findings: unknown, extra: Record<string, unknown> = {}) => ({
+    tier, findings, spawnedReviewers: ["reviewer-A-standards"], checks: green, standardsSummary: "std", specSummary: "spec", ...extra,
+  });
+  const row = (over: Record<string, unknown> = {}) => ({
+    severity: "low", axis: "standards", location: "src/x.ts:10", finding: "nit", fix: "fix", ...over,
+  });
+
+  test("fold: T3 lone low => PASS with a follow-up, blockers 0", async () => {
+    const out = (await runQaVerdictPhase("fold", foldIn(3, { "reviewer-A-standards": [row()] }), fixtureFetchers())) as any;
+    assert.equal(out.fold.reviewVerdict, "PASS");
+    assert.equal(out.counts.blockers, 0);
+    assert.equal(out.counts.maxSeverity, "none");
+    assert.match(out.report, /### Follow-ups \(non-blocking\)/);
+  });
+
+  test("fold: T3 medium + a red required check => FAIL, blockers from the table plus CI", async () => {
+    const red = [{ name: "test", status: "completed", conclusion: "failure", required: true }];
+    const out = (await runQaVerdictPhase(
+      "fold", foldIn(3, { "reviewer-A-standards": [row({ severity: "medium" })] }, { checks: red }), fixtureFetchers(),
+    )) as any;
+    assert.equal(out.fold.reviewVerdict, "FAIL");
+    assert.equal(out.counts.blockers, 2);
+    assert.equal(out.counts.maxSeverity, "high");
+    assert.ok(String(out.fold.worstFinding).startsWith("src/x.ts:10 — "));
+  });
+
+  test("fold: T4 lone low still FAILs (unchanged any-blocker); an explicit [] is a PASS", async () => {
+    const low = (await runQaVerdictPhase("fold", foldIn(4, { "reviewer-A-standards": [row()] }), fixtureFetchers())) as any;
+    assert.equal(low.fold.reviewVerdict, "FAIL");
+    assert.equal(low.counts.maxSeverity, "low");
+    const empty = (await runQaVerdictPhase("fold", foldIn(4, { "reviewer-A-standards": [] }), fixtureFetchers())) as any;
+    assert.equal(empty.fold.reviewVerdict, "PASS");
+    assert.equal(empty.counts.blockers, 0);
+  });
+
+  test("fold: bad findings fail closed with a ### Findings heading (the round still counts toward the cap)", async () => {
+    const bad: unknown[] = ["", "looks fine to me", { findings: [{ severity: "high" }] }, ["high: gate bypassed"], { "reviewer-B-spec": [row()] }, [row()]];
+    for (const tier of [1, 3, 4]) {
+      for (const findings of bad) {
+        const out = (await runQaVerdictPhase("fold", foldIn(tier, findings), fixtureFetchers())) as any;
+        assert.equal(out.fold.reviewVerdict, "FAIL", `T${tier} ${JSON.stringify(findings)}`);
+        assert.ok(out.counts.blockers >= 1);
+        assert.ok(String(out.report).startsWith("### Findings"), String(out.report));
+      }
+    }
+    // an empty spawned list is itself malformed, never the flat-array PASS
+    const none = (await runQaVerdictPhase("fold", foldIn(3, [], { spawnedReviewers: [] }), fixtureFetchers())) as any;
+    assert.equal(none.fold.reviewVerdict, "FAIL");
+  });
+
+  test("trailer: Target-style supplied facts make zero fetches and render the Target grammar (#5081 INV-9)", async () => {
+    const f = fixtureFetchers();
+    const pass = (await runQaVerdictPhase(
+      "trailer",
+      { pr: 9, verdict: "PASS", headSha: HEAD.toUpperCase(), blockers: 0, maxSeverity: "none", priorBodies: [] },
+      f,
+    )) as any;
+    assert.deepEqual(f.calls, []);
+    assert.equal(pass.trailer, renderQaVerdictTrailer({ verdict: "PASS", pr: 9, round: 1, sha: HEAD.slice(0, 12), blockers: 0, maxSeverity: "none" }));
+    const fail = (await runQaVerdictPhase(
+      "trailer",
+      { pr: 9, verdict: "FAIL", headSha: "", blockers: 2, maxSeverity: "high", priorBodies: [pass.trailer, null] },
+      f,
+    )) as any;
+    assert.match(fail.trailer, /^QA-Verdict: FAIL pr=9 round=2 sha=unknown blockers=2 max_severity=high$/);
+  });
+
   test("sibling shape: prior-context keeps the degraded [] fallback (it counts nothing)", async () => {
     const out = (await runQaVerdictPhase(
       "prior-context", { pr: 7, tier: 3 }, fixtureFetchers({ priorBodies: async () => null }),
