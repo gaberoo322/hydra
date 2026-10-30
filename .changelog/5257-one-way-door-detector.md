@@ -1,0 +1,1 @@
+- feat: add pure one-way-door detector for PR diffs (shadow seam for reversibility-scored QA depth) (#5257)
