@@ -6,7 +6,9 @@
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import {
@@ -53,6 +55,12 @@ describe("qa-fix-proof — classifyQaFixPath table", () => {
     ["docs/reference.md", "A"],
     ["CLAUDE.md", "A"],
     ["CODING_STANDARDS.md", "deny"],
+    ["docs/operator-playbooks/hydra-autopilot.md", "deny"],
+    ["docs/adr/0046-x.md", "deny"],
+    ["config/orchestrator/vision.md", "deny"],
+    ["src/qa/CONTEXT.md", "deny"],
+    [".claude/skills/x/SKILL.md", "deny"],
+    ["README.md", "A"],
     [".changelog/5266-x.md", "A"],
     ["docs/generated/ci-gates.json", "A"],
     ["test/fixtures/coding-standards-baseline.json", "A"],
@@ -286,5 +294,82 @@ describe("qa-fix-proof — CLI contract", () => {
     );
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stdout, /proof-run-failed/);
+  });
+});
+
+describe("qa-fix-proof — CLI against a real temp git repo (INV-9/INV-10/INV-11)", () => {
+  const CLI = join(REPO_ROOT, "scripts", "ci", "qa-fix-proof.ts");
+  const run = (cwd: string, base: string, head: string) =>
+    spawnSync(
+      process.execPath,
+      ["--no-warnings", "--experimental-strip-types", CLI, "--base", base, "--head", head],
+      { encoding: "utf8", cwd },
+    );
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], {
+      cwd,
+      encoding: "utf8",
+    }).trim();
+  const put = (dir: string, rel: string, body: string) => {
+    mkdirSync(join(dir, rel, ".."), { recursive: true });
+    writeFileSync(join(dir, rel), body);
+  };
+  const mkRepo = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), "qa-fix-proof-test-"));
+    git(dir, "init", "-q", "-b", "master");
+    put(dir, "README.md", "base\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "base");
+    return dir;
+  };
+
+  test("no QA-Fix commit -> fast path exit 0 (no-qa-fix-commits)", () => {
+    const dir = mkRepo();
+    try {
+      const base = git(dir, "rev-parse", "HEAD");
+      put(dir, "src/x.ts", "export {};\n");
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "feat: x");
+      const r = run(dir, base, git(dir, "rev-parse", "HEAD"));
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(JSON.parse(r.stdout).reason, "no-qa-fix-commits");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a rollout config added only on the PR head does NOT enable the stage (read at BASE)", () => {
+    const dir = mkRepo();
+    try {
+      const base = git(dir, "rev-parse", "HEAD");
+      put(dir, "config/orchestrator/qa-rollout.json", JSON.stringify({ "reviewer-commits": "A+B" }));
+      put(dir, "docs/note.md", "hi\n");
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "docs: note\n\nQA-Fix: A");
+      const r = run(dir, base, git(dir, "rev-parse", "HEAD"));
+      assert.equal(r.status, 1, r.stderr);
+      const out = JSON.parse(r.stdout);
+      assert.equal(out.stage, "off");
+      assert.ok(out.violations.some((v: { reason: string }) => v.reason === "stage-off"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a class-B commit that deletes a test file does not wedge on checkout (skips the proof run)", () => {
+    const dir = mkRepo();
+    try {
+      put(dir, "config/orchestrator/qa-rollout.json", JSON.stringify({ "reviewer-commits": "A+B" }));
+      put(dir, "test/gone.test.mts", "export {};\n");
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "seed");
+      const base = git(dir, "rev-parse", "HEAD");
+      git(dir, "rm", "-q", "test/gone.test.mts");
+      git(dir, "commit", "-q", "-m", "test: drop\n\nQA-Fix: B");
+      const r = run(dir, base, git(dir, "rev-parse", "HEAD"));
+      assert.notEqual(JSON.parse(r.stdout).reason, "proof-run-failed", r.stderr);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

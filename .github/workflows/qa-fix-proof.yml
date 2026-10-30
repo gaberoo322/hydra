@@ -26,6 +26,7 @@ permissions:
 jobs:
   qa-fix-proof:
     runs-on: self-hosted
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,7 +37,8 @@ jobs:
         id: detect
         run: |
           set -euo pipefail
-          if git log --format=%B "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}" | grep -q '^QA-Fix:'; then
+          log=$(git log --no-merges --format=%B "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}")
+          if grep -q '^QA-Fix:' <<<"$log"; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
@@ -47,8 +49,22 @@ jobs:
         if: steps.detect.outputs.present == 'true'
         run: npm ci
 
+      # The checker itself runs from the BASE ref so a PR cannot edit its own
+      # judge; the PR tree is the data (cwd). Bootstrap: a base that predates
+      # the checker (this feature's own PR) falls back to the head copy.
+      - name: Checkout base-ref checker
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base-checker
+
       - name: Verify QA-Fix commits
         run: |
-          node --no-warnings --experimental-strip-types scripts/ci/qa-fix-proof.ts \
+          checker=scripts/ci/qa-fix-proof.ts
+          if [ -f base-checker/scripts/ci/qa-fix-proof.ts ]; then
+            checker="$PWD/base-checker/scripts/ci/qa-fix-proof.ts"
+            ln -sfn "$PWD/node_modules" base-checker/node_modules
+          fi
+          node --no-warnings --experimental-strip-types "$checker" \
             --base "${{ github.event.pull_request.base.sha }}" \
             --head "${{ github.event.pull_request.head.sha }}"

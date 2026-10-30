@@ -10,7 +10,7 @@
  * Exit: 0 = ok, 1 = violation / unproven / proof-run-failed (fail closed),
  * 2 = usage. stdout is one JSON result object.
  *
- *   node --experimental-strip-types scripts/ci/qa-fix-proof.ts --base <sha> --head <sha> [--base-ref-dir <dir>]
+ *   node --experimental-strip-types scripts/ci/qa-fix-proof.ts --base <sha> --head <sha>
  */
 
 import {
@@ -132,8 +132,17 @@ if (isMain) {
     if (!result.ok) emit({ ...result, stage }, 1);
 
     if (result.classBTestFiles.length > 0) {
-      const files = result.classBTestFiles;
-      const wt = join(mkdtempSync(join(tmpdir(), "qa-fix-proof-")), "wt");
+      // A class-B commit may delete a test file; only files present at head can be checked out.
+      const files = result.classBTestFiles.filter((f) => {
+        try {
+          git(["cat-file", "-e", `${head}:${f}`]);
+          return true;
+        } catch {
+          /* intentional: path absent at head (deleted/renamed) — nothing to prove */
+          return false;
+        }
+      });
+      if (files.length > 0) {      const wt = join(mkdtempSync(join(tmpdir(), "qa-fix-proof-")), "wt");
       let added = false;
       let outcome: { code: number; body: unknown } = { code: 1, body: { ok: false, reason: "proof-run-failed" } };
       try {
@@ -146,6 +155,7 @@ if (isMain) {
           cwd: wt,
           encoding: "utf8",
           maxBuffer: 1024 * 1024 * 128,
+          timeout: 15 * 60 * 1000,
         });
         if (run.error) throw run.error;
         const proof = parseTapAssertionProof(run.stdout, files);
@@ -167,6 +177,7 @@ if (isMain) {
         }
       }
       emit(outcome.body, outcome.code);
+      }
     }
     emit({ ...result, stage }, 0);
   } catch (err) {

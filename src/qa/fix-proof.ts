@@ -27,7 +27,12 @@ import type { ReviewerCommitsValue } from "./rollout-switches.ts";
 export type QaFixPathClass = "A" | "B" | "AB" | "deny";
 
 const CLASS_A_PREFIXES: readonly string[] = [".changelog/", "docs/generated/"];
-/** Shrink-only ratchet baselines both classes may regenerate. */
+/**
+ * Ratchet baselines both classes may regenerate. Direction (shrink vs grow) is
+ * NOT verified here: each is guarded by its own blocking ratchet check in CI
+ * (suite-count FILE-SET verdict, test-source-read ratchet), so this allowlist
+ * only decides WHO may touch them, not whether the change is monotone.
+ */
 const SHARED_BASELINES: readonly string[] = [
   "test/fixtures/suite-count-baseline.json",
   "test/fixtures/test-source-read-baseline.json",
@@ -38,6 +43,19 @@ const CLASS_A_BASELINES: readonly string[] = [
 ];
 /** Retro-owned (Decision 8): never reviewer-editable. */
 const RETRO_OWNED: readonly string[] = ["CODING_STANDARDS.md"];
+/** Named root docs a class-A commit may edit (explicit, not a `.md` suffix rule). */
+const CLASS_A_ROOT_DOCS: readonly string[] = [
+  "CLAUDE.md",
+  "README.md",
+  "CONTEXT.md",
+  "CONTEXT-MAP.md",
+];
+/**
+ * `docs/**` is class A EXCEPT these subtrees: operator playbooks generate the
+ * `hydra-*` skills (executable agent behaviour) and ADRs are normative specs.
+ * Any other `.md` (config/, src CONTEXT.md files, .claude/, .github/) is deny.
+ */
+const DOCS_DENY_PREFIXES: readonly string[] = ["docs/operator-playbooks/", "docs/adr/"];
 
 function normalize(path: string): string {
   return String(path ?? "").trim().replace(/^\.\//, "");
@@ -54,7 +72,10 @@ export function classifyQaFixPath(path: string): QaFixPathClass {
   if (SHARED_BASELINES.includes(p)) return "AB";
   if (CLASS_A_BASELINES.includes(p)) return "A";
   if (RETRO_OWNED.includes(p)) return "deny";
-  if (p.endsWith(".md")) return "A";
+  if (CLASS_A_ROOT_DOCS.includes(p)) return "A";
+  if (p.startsWith("docs/") && p.endsWith(".md")) {
+    return DOCS_DENY_PREFIXES.some((d) => p.startsWith(d)) ? "deny" : "A";
+  }
   if (CLASS_A_PREFIXES.some((prefix) => p.startsWith(prefix))) return "A";
   if (p.startsWith("test/") && !p.startsWith("test/helpers/") && p.endsWith(".test.mts")) {
     return "B";
@@ -115,7 +136,7 @@ export function evaluateQaFixProof(input: QaFixProofInput): QaFixProofResult {
   const commits = input.commits ?? [];
 
   const parsed = commits.map((c) => ({ c, t: parseQaFixCommitTrailer(c?.message) }));
-  const present = parsed.filter((x) => x.t.present);
+  const present = parsed.flatMap(({ c, t }) => (t.present ? [{ c, t }] : []));
   if (present.length === 0) {
     return { ok: true, reason: "no-qa-fix-commits", qaFixCommits: [], violations: [], classBTestFiles: [] };
   }
@@ -124,7 +145,6 @@ export function evaluateQaFixProof(input: QaFixProofInput): QaFixProofResult {
 
   for (const { c, t } of present) {
     qaFixCommits.push(c.sha);
-    if (!t.present) continue;
     if (coreInPr !== undefined) {
       violations.push({ sha: c.sha, reason: "verifier-core-pr", path: coreInPr });
     }
