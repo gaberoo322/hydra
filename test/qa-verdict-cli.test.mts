@@ -199,12 +199,43 @@ describe("qa-verdict phases over the fixture fetcher", () => {
     assert.equal(r.round.action, "bounce", "a degraded round can never escalate");
     assert.equal(r.round.round, null);
     assert.equal(r.round.failRound, null);
-    assert.equal(r.deepQa.action, "bounce", "decideDeepQaAction over [] is failNumber 1");
+    assert.equal(r.deepQa, null, "T1-T3 carry no deep-QA state, degraded or not");
     assert.equal(r.passMarker, null);
     assert.equal(r.escalationSummary, null);
-    assert.equal(r.failMarker, "Verifier-Core deep-QA: FAIL");
+    assert.equal(r.failMarker, null, "no FAIL marker is withheld-or-invented on a degraded T1-T3 round");
     assert.deepEqual(r.labels, QA_ESCALATION_LABELS);
     assert.deepEqual(r.degraded, ["prior-bodies"]);
+  });
+
+  test("round-action: a T4 round with unreadable history is a pre-verdict exit, never a fail-#1 reset", async () => {
+    await assert.rejects(
+      runQaVerdictPhase(
+        "round-action",
+        { pr: 7, tier: 4, verdict: "FAIL", reviewVerdict: "FAIL", headSha: HEAD },
+        fixtureFetchers({ priorBodies: async () => null }),
+      ),
+      /deep-QA fail count cannot be read/,
+    );
+  });
+
+  test("round-action: a T4 FAIL driven by CI alone (review PASS) still bounces and carries the FAIL marker", async () => {
+    const r = (await runQaVerdictPhase(
+      "round-action",
+      { pr: 7, tier: 4, verdict: "FAIL", reviewVerdict: "PASS", headSha: HEAD, priorBodies: [] },
+      fixtureFetchers(),
+    )) as any;
+    assert.equal(r.deepQa.action, "bounce");
+    assert.equal(r.failMarker, DEEP_QA_FAIL_MARKER);
+    assert.equal(r.passMarker, null, "a FAIL never carries the SHA-bound PASS marker");
+    // Sibling shape: a clean T4 PASS keeps proceeding with the PASS marker and no FAIL marker.
+    const ok = (await runQaVerdictPhase(
+      "round-action",
+      { pr: 7, tier: 4, verdict: "PASS", reviewVerdict: "PASS", headSha: HEAD, priorBodies: [] },
+      fixtureFetchers(),
+    )) as any;
+    assert.equal(ok.deepQa.action, "proceed");
+    assert.equal(ok.failMarker, null);
+    assert.equal(ok.passMarker, renderDeepQaPassMarker(HEAD));
   });
 
   test("admission: skipCiSummary is renderCiSummary(skipVerdict) on the skip path, null otherwise", async () => {

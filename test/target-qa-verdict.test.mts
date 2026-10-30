@@ -14,6 +14,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import {
   classifyTargetQaPath as classifyPathRaw,
@@ -227,5 +228,40 @@ describe("classifyTargetQaVerdict — invariants", () => {
         assert.ok(body.includes("QA_VERDICT_TRAILER"), "every verdict post must reference QA_VERDICT_TRAILER");
       }
     });
+  });
+});
+
+// QA round-1 finding on #5306: the removed buildTargetQaVerdictTrailer clamped
+// FAIL to blockers>=1 and PASS to 0; the playbook's jq projection must keep that.
+describe("hydra-target-qa.md trailer jq projection — verdict/blockers clamp", () => {
+  const md = readFileSync(
+    resolve(import.meta.dirname, "..", "docs", "operator-playbooks", "hydra-target-qa.md"),
+    "utf-8",
+  );
+  const start = md.indexOf("'{pr: $pr, headSha: $headSha");
+  const filter = md.slice(start + 1, md.indexOf("}'", start) + 1);
+  const project = (verdict: string, blockers: number) => {
+    const r = spawnSync(
+      "jq",
+      ["-n", "-c", "--argjson", "pr", "7", "--arg", "verdict", verdict, "--arg", "headSha", "abc1234",
+       "--argjson", "blockers", String(blockers), "--argjson", "prior", "[[]]", filter],
+      { encoding: "utf-8" },
+    );
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout);
+  };
+
+  test("FAIL with 0 blockers projects blockers=1 / high (red without the clamp)", () => {
+    const o = project("FAIL", 0);
+    assert.equal(o.verdict, "FAIL");
+    assert.equal(o.blockers, 1);
+    assert.equal(o.maxSeverity, "high");
+  });
+
+  test("sibling shapes: FAIL keeps its count, PASS forces 0/none, non-PASS coerces to FAIL", () => {
+    assert.equal(project("FAIL", 3).blockers, 3);
+    const pass = project("PASS", 5);
+    assert.deepEqual([pass.verdict, pass.blockers, pass.maxSeverity], ["PASS", 0, "none"]);
+    assert.equal(project("weird", 0).verdict, "FAIL");
   });
 });

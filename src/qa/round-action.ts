@@ -402,7 +402,13 @@ export function decideRound(input: DecideRoundInput): DecideRoundResult {
   });
   const deepQa =
     round.action === "deep-qa"
-      ? decideDeepQaAction(input.reviewVerdict, input.priorBodies.map((b) => String(b ?? "")))
+      ? decideDeepQaAction(
+          // A T4 FAIL driven by CI alone (review PASS, a required check red)
+          // is still a deep-QA FAIL: it must bounce and be counted, never
+          // "proceed" with a PASS marker (QA round-1 finding on #5306).
+          String(input.verdict).startsWith("FAIL") ? "FAIL" : input.reviewVerdict,
+          input.priorBodies.map((b) => String(b ?? "")),
+        )
       : null;
   // Only a T4 PASS carries the SHA-bound proof `hasFreshDeepQaPass` trusts;
   // a bounce / block-and-escalate (FAIL) must never emit it.

@@ -301,8 +301,10 @@ if ! ( set -o pipefail; gh api --paginate "repos/$TARGET_GH_REPO/issues/$ANCHOR_
 fi
 QA_VERDICT_TRAILER=$(jq -n --argjson pr "$PR_NUM" --arg verdict "$FOLDED_VERDICT" --arg headSha "${HEAD_SHA:-}" \
     --argjson blockers "${FOLDED_BLOCKERS:-0}" --slurpfile prior "$PRIOR_FILE" \
-    '{pr: $pr, verdict: $verdict, headSha: $headSha, blockers: $blockers,
-      maxSeverity: (if $verdict == "PASS" then "none" else "high" end), priorBodies: $prior[0]}' \
+    '{pr: $pr, headSha: $headSha, priorBodies: $prior[0],
+      verdict: (if $verdict == "PASS" then "PASS" else "FAIL" end),
+      blockers: (if $verdict == "PASS" then 0 else ([1, $blockers] | max) end),
+      maxSeverity: (if $verdict == "PASS" then "none" else "high" end)}' \
   | (cd "$HOME/hydra" && node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts trailer) \
   | jq -r '.trailer') \
   || QA_VERDICT_TRAILER=""

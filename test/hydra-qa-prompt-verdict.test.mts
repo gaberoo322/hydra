@@ -124,9 +124,22 @@ describe("hydra-qa playbook emits the QA-Verdict trailer on every verdict post (
     }
   });
 
+  test("fail-closed bash (#5306 QA round 1): trailer capture is not piped into jq; ROUND_JSON is asserted; fold fields use jq -e", () => {
+    const s95 = playbook.slice(playbook.indexOf("### 9.5 "), playbook.indexOf("### 9.6 "));
+    assert.doesNotMatch(s95, /trailer \| jq -r/, "a pipe into jq masks the node exit status");
+    assert.match(s95, /TRAILER_JSON=\$\(/);
+    assert.match(s95, /jq -er '\.trailer'/);
+    const s96 = playbook.slice(playbook.indexOf("### 9.6 "), playbook.indexOf("### 10. Verdict routing"));
+    assert.match(s96, /jq -e '\.round\.action'/, "an empty ROUND_JSON aborts before step 10");
+    const s9 = playbook.slice(playbook.indexOf("### 9. Classify"), playbook.indexOf("### 9.5 "));
+    assert.match(s9, /fold_field/);
+    assert.doesNotMatch(s9, /\$FOLD_JSON" \| jq -r '\.counts/, "no literal-null jq -r on required fold fields");
+    assert.match(s9, /QA-Verdict-Error: pr=\$pr_number/, "a failed fold leaves a visible error comment");
+  });
+
   test("the skip-required-failed path runs step 9.5 before step 10", () => {
     const skip = playbook.slice(playbook.indexOf("- **`skip-required-failed`** (T1/T2/T3 only"));
-    assert.match(skip.slice(0, 4000), /run step 9\.5/i);
+    assert.match(skip.slice(0, 4000), /run steps 9\.5 (?:\(the trailer\) )?and 9\.6/i);
     assert.match(skip.slice(0, 4000), /MAX_SEVERITY=high/);
   });
 });

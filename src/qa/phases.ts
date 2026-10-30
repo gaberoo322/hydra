@@ -30,7 +30,7 @@ import {
 import { decideReviewerFanout } from "./fanout.ts";
 import { foldReview } from "./fold.ts";
 import { priorRoundContext, qaVerdictHistory, type AncestryPort } from "./prior-round.ts";
-import { DEEP_QA_FAIL_MARKER, QA_ESCALATION_LABELS, decideDeepQaAction, decideRound } from "./round-action.ts";
+import { QA_ESCALATION_LABELS, decideRound } from "./round-action.ts";
 import {
   QA_VERDICT_UNKNOWN_SHA,
   buildQaVerdictTrailer,
@@ -227,7 +227,14 @@ export async function runQaVerdictPhase(
       const priorBodies = await priorBodiesOrNull(i.priorBodies, f, i.pr);
       if (priorBodies === null) {
         console.error(`[qa-verdict] round-action: prior bodies unreadable for PR #${i.pr}, degrading to a bounce`);
-        const deepQa = decideDeepQaAction(i.reviewVerdict, []);
+        // T4: a degraded decision would be `decideDeepQaAction(verdict, [])` =
+        // fail #1, resetting the 2-strike block-and-escalate count. There is no
+        // safe degraded T4 answer, so it is a pre-verdict exit (nothing posted,
+        // needs-qa stays, the next dispatch retries). T1-T3 carry no deep-QA
+        // state: deepQa / failMarker / passMarker are null as in the normal path.
+        if (i.tier === 4) {
+          throw new Error(`round-action: prior bodies unreadable for T4 PR #${i.pr}; deep-QA fail count cannot be read`);
+        }
         return {
           round: {
             action: "bounce",
@@ -235,12 +242,11 @@ export async function runQaVerdictPhase(
             failRound: null,
             reason: "prior bodies unreadable: round cannot be counted, so this round bounces and never escalates",
           },
-          deepQa,
+          deepQa: null,
           passMarker: null,
           escalationSummary: null,
           labels: QA_ESCALATION_LABELS,
-          failMarker:
-            deepQa.action === "bounce" || deepQa.action === "block-and-escalate" ? DEEP_QA_FAIL_MARKER : null,
+          failMarker: null,
           degraded: ["prior-bodies"],
         };
       }

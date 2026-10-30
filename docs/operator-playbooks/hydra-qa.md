@@ -615,8 +615,8 @@ fi
   fold already determines and follow the normal step-10 FAIL routing, spawning
   **zero** reviewers. Set a nominal review verdict (the classifier ignores it
   when `requiredFailed > 0`) and compute `VERDICT` / `$VERDICT_REASON` /
-  `$CHECKS_BLOCK` here, then run step 9.5 (the trailer) and jump to step 10's
-  FAIL routing for T1/T2/T3 — skip step 7 (no spawn), 7.5, 8, and 9 entirely:
+  `$CHECKS_BLOCK` here, then run steps 9.5 (the trailer) and 9.6 (the
+  round-action call that produces `ROUND_JSON`) and jump to step 10's FAIL routing for T1/T2/T3 — skip step 7 (no spawn), 7.5, 8, and 9 entirely:
   ```bash
   REVIEW_VERDICT="PASS"   # nominal — classifyVerdict ignores it when requiredFailed > 0
   REVIEW_REPORT="_Review skipped by the admission gate (issue #3815): a required CI check already failed, so the review verdict cannot change the FAIL \`classifyVerdict\` returns regardless of the reviewers' finding._"
@@ -626,7 +626,7 @@ fi
   VERDICT_REASON=$(printf '%s' "$ADMISSION_JSON" | jq -r '.skipVerdict.reason // "required CI check failed"')
   CHECKS_BLOCK=$(printf '%s' "$ADMISSION_JSON" | jq -r '.skipCiSummary // "_(checks block unavailable)_"')
   # VERDICT is FAIL. Each red required check is one high blocker for the
-  # QA-Verdict trailer (issue #4729). Run step 9.5, then skip to step 10's FAIL
+  # QA-Verdict trailer (issue #4729). Run steps 9.5 and 9.6, then step 10's FAIL
   # routing for T1/T2/T3 — do not spawn reviewers.
   BLOCKERS=$(printf '%s' "$RED_REQUIRED_JSON" | jq 'length' 2>/dev/null || echo 1)
   [ "${BLOCKERS:-0}" -ge 1 ] 2>/dev/null || BLOCKERS=1
@@ -950,15 +950,23 @@ rm -f "$FINDINGS_FILE"
 # A non-zero exit from fold / trailer / round-action is a PRE-VERDICT exit
 # (exactly like step 7.5's incomplete fan-out): post nothing, leave needs-qa in
 # place, and let the next dispatch retry. There is no bash verdict fallback.
-[ -n "$FOLD_JSON" ] || { echo "[hydra-qa] ERROR: fold phase produced no result — pre-verdict exit, nothing posted" >&2; exit 1; }
-REVIEW_VERDICT=$(printf '%s' "$FOLD_JSON" | jq -r '.fold.reviewVerdict')
-REVIEW_REPORT=$(printf '%s' "$FOLD_JSON" | jq -r '.report')
-BLOCKERS=$(printf '%s' "$FOLD_JSON" | jq -r '.counts.blockers')
-MAX_SEVERITY=$(printf '%s' "$FOLD_JSON" | jq -r '.counts.maxSeverity')
+# A persistent failure must not re-dispatch the whole fan-out forever in silence:
+# leave a visible QA-Verdict-Error comment (it carries no round=, so it is never
+# counted as a round) before exiting. Still no verdict and needs-qa stays.
+if [ -z "$FOLD_JSON" ]; then
+  gh pr comment $pr_number --repo gaberoo322/hydra --body "> *Automated QA — fold failed, no verdict emitted*
+
+QA-Verdict-Error: pr=$pr_number reason=fold-phase-failed" 2>/dev/null || true
+  echo "[hydra-qa] ERROR: fold phase produced no result — pre-verdict exit, no verdict posted" >&2; exit 1
+fi
+# `jq -er` fails on a missing/null field instead of yielding the literal "null".
+fold_field() { printf '%s' "$FOLD_JSON" | jq -er "$1"; }
+REVIEW_VERDICT=$(fold_field '.fold.reviewVerdict') && REVIEW_REPORT=$(fold_field '.report') \
+  && BLOCKERS=$(fold_field '.counts.blockers') && MAX_SEVERITY=$(fold_field '.counts.maxSeverity') \
+  && VERDICT=$(fold_field '.verdict.verdict') && VERDICT_REASON=$(fold_field '.verdict.reason') \
+  && CHECKS_BLOCK=$(fold_field '.ciSummary') \
+  || { echo "[hydra-qa] ERROR: fold result is missing a required field — pre-verdict exit, nothing posted" >&2; exit 1; }
 WORST_FINDING=$(printf '%s' "$FOLD_JSON" | jq -r '.fold.worstFinding // empty')
-VERDICT=$(printf '%s' "$FOLD_JSON" | jq -r '.verdict.verdict')
-VERDICT_REASON=$(printf '%s' "$FOLD_JSON" | jq -r '.verdict.reason')
-CHECKS_BLOCK=$(printf '%s' "$FOLD_JSON" | jq -r '.ciSummary')
 ```
 
 There is no separate T4 cross-check. The earlier `$REVIEWER_A_VERDICT` / `$REVIEWER_B_VERDICT` block was dead: nothing set those variables. `foldReviewFindings()` already derives each reviewer's verdict from its own rows and runs `aggregateAdversarialReview()` over them, and malformed reviewer output becomes a high finding before the fold runs, so a T4 PR can never PASS on it. Step 10's Deep-QA routing reads this `REVIEW_VERDICT`. The trailer's `blockers=` can never be `0` on a FAIL (`trailerBlockerCounts()` counts at least one).
@@ -984,11 +992,17 @@ QA-Verdict: <PASS|FAIL|PASS-pending-CI|FAIL-pending-CI> pr=<N> round=<k> sha=<he
 The `trailer` phase reads the PR thread and the head SHA itself (the playbook supplies neither prior bodies nor `headSha`), counts the round, and owns the fail-closed path: an unreadable history renders an explicit `QA-Verdict-Error:` line (which `qa:catch-rate` counts, and which carries no `round=` so it is never counted as a round) — never silently trailer-less. An unknown head SHA renders the sentinel `sha=unknown`, which `qaVerdictShaMatches()` never matches.
 
 ```bash
-QA_VERDICT_TRAILER=$(jq -n --argjson pr "$pr_number" --arg verdict "$VERDICT" \
+# Capture the engine output FIRST: in a pipe into `jq`, a non-zero node exit is
+# masked (jq reads empty stdin and exits 0), which would post a verdict with no
+# trailer. `jq -er` then fails on a missing/null `.trailer`.
+TRAILER_JSON=$(jq -n --argjson pr "$pr_number" --arg verdict "$VERDICT" \
   --argjson blockers "${BLOCKERS:-0}" --arg severity "${MAX_SEVERITY:-none}" \
   '{pr: $pr, verdict: $verdict, blockers: $blockers, maxSeverity: $severity}' \
-  | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts trailer | jq -r '.trailer') \
+  | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts trailer) \
   || { echo "[hydra-qa] ERROR: trailer phase failed — pre-verdict exit, nothing posted" >&2; exit 1; }
+QA_VERDICT_TRAILER=$(printf '%s' "$TRAILER_JSON" | jq -er '.trailer') \
+  || { echo "[hydra-qa] ERROR: trailer phase returned no trailer — pre-verdict exit, nothing posted" >&2; exit 1; }
+[ -n "$QA_VERDICT_TRAILER" ] || { echo "[hydra-qa] ERROR: empty trailer — pre-verdict exit, nothing posted" >&2; exit 1; }
 # One-line blocker summary for the issue-side pointer (the full review stays on the PR).
 BLOCKER_SUMMARY="${BLOCKERS:-0} blocker(s), worst: ${MAX_SEVERITY:-none}${WORST_FINDING:+ — ${WORST_FINDING}}"
 ```
@@ -1011,11 +1025,17 @@ ROUND_JSON=$(jq -n --argjson pr "$pr_number" --argjson tier "${PR_TIER_NUM:-null
     currentReviewed: $currentReviewed, currentTrailer: $currentTrailer}' \
   | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts round-action) \
   || { echo "[hydra-qa] ERROR: round-action phase failed — pre-verdict exit, nothing posted" >&2; exit 1; }
+# Step 10 routes on ROUND_JSON on EVERY path (including skip-required-failed):
+# an empty / action-less result is a pre-verdict exit, never a silent bounce.
+printf '%s' "$ROUND_JSON" | jq -e '.round.action' >/dev/null \
+  || { echo "[hydra-qa] ERROR: round-action returned no .round.action — pre-verdict exit, nothing posted" >&2; exit 1; }
 ```
 
-The phase degrades, never throws, when the PR thread is unreadable: `.degraded` names `prior-bodies`, `.round.action` is `bounce`, and no escalation or PASS marker is produced (the round cap cannot reset: a degraded round can never escalate).
+When the PR thread is unreadable the phase degrades at T1-T3 and exits non-zero at T4. T1-T3: `.degraded` names `prior-bodies`, `.round.action` is `bounce`, and no escalation, PASS marker, `.deepQa` or `.failMarker` is produced (the round cap cannot reset: a degraded round can never escalate). T4: the deep-QA fail count cannot be read, and guessing fail #1 would reset the 2-strike block-and-escalate count, so it is a pre-verdict exit (nothing posted, `needs-qa` stays). `.failMarker` is set at T4 on every FAIL, including a FAIL driven by CI alone; step 10 posts the marker line only when it is non-empty.
 
 ### 10. Verdict routing
+
+Step 10 routes on `$ROUND_JSON` from step 9.6 on every path, including the step-6.6 `skip-required-failed` path; step 9.6 aborts before here when it is empty.
 
 **Verdict `PASS`** (both axes pass + all required checks green):
 ```bash
