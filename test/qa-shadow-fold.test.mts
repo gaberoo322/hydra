@@ -113,6 +113,11 @@ describe("shadowFold counterfactual", () => {
     });
   }
 
+  it("not applicable: off", () => {
+    const cf = shadowFold(shadowInput(emptyMap(QUARTET), { reversibility: record({ twoWayPair: "off" }) })).counterfactual;
+    assert.deepEqual(cf, { applicable: false, reason: "two-way-pair-off" });
+  });
+
   it("not applicable: no A reviewer spawned", () => {
     const names = ["reviewer-B-standards", "reviewer-B-spec"];
     const cf = shadowFold(shadowInput(emptyMap(names), { spawnedReviewers: names })).counterfactual;

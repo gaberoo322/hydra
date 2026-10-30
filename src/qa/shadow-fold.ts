@@ -26,6 +26,10 @@ import type { OneWayDoorResult } from "./one-way-door.ts";
 type Door = OneWayDoorResult["door"];
 type Verdict = "PASS" | "FAIL";
 
+/** The wiring that is deliberately NOT in this module (P2 #5264, INV-9). */
+export const SHADOW_FOLD_FOLLOW_UP =
+  "NAMED FOLLOW-UP: wire shadowFold + renderQaShadowLine into the fold phase and ask pair reviewers for a door call";
+
 export const QA_SHADOW_PREFIX = "QA-Shadow:";
 export const QA_SHADOW_UNKNOWN_SHA = "unknown";
 
