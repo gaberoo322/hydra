@@ -103,6 +103,21 @@ def load_state() -> dict | None:
         return prior if isinstance(prior, dict) else None
 
 
+def persist_state(s: dict) -> bool:
+    """persist() that never dies on a type-invalid document (QA round 2, #5293).
+
+    Reap stays exit 0: a wrong-typed declared field is logged and the file
+    write is skipped, but the caller's remaining accounting (cycle-record,
+    Redis mirror) still runs. Returns True when the file was written.
+    """
+    try:
+        run_ledger.persist(s, STATE_PATH)
+        return True
+    except run_ledger.LedgerTypeError as exc:
+        print(f"[autopilot] reap: state write skipped, type validation failed ({exc})", file=sys.stderr)
+        return False
+
+
 def _append_log(line: str) -> None:
     """Append one line to the run log, best-effort. Never raises."""
     if LOG_SINK_REFUSED:

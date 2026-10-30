@@ -1850,7 +1850,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     if snap.slot_occupied:
         _release_pipeline_slot(s, cls, total_tokens)
 
-    run_ledger.persist(s, reap_state.STATE_PATH)
+    reap_state.persist_state(s)
 
     # Issue #2715: mirror the cross-run durable subset (signal_last_fired +
     # research_force_counter) to Redis so a host reboot (which wipes /tmp) can
@@ -2141,7 +2141,7 @@ def run_grill_crash(task_id: str) -> int:
             return 0
         reaped.append(task_id)
         s["reaped_task_ids"] = bound_reaped(reaped)
-        run_ledger.persist(s, reap_state.STATE_PATH)
+        reap_state.persist_state(s)
     _fire_cycle_record(task_id, "hydra-grill", "failed", 0, worktree_branch=branch or "")
     line = f"grill_crash task_id={task_id}"
     print(f"[autopilot] {line}")
