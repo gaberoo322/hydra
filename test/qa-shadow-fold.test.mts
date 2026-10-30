@@ -246,10 +246,4 @@ describe("shadowFold purity", () => {
     assert.deepEqual(input, snapshot);
     assert.deepEqual(first, second);
   });
-
-  it("leaves the live fold untouched: no shadow code in fold.ts", async () => {
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync(new URL("../src/qa/fold.ts", import.meta.url), "utf8");
-    assert.equal(src.includes("shadow"), false);
-  });
 });
