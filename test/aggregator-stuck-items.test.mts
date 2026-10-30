@@ -3,10 +3,10 @@
  *
  * After issue #915 the aggregator reads GitHub through the **GitHub Issue/PR
  * Read seam** (`src/github/issues.ts`) instead of a local argv + parser. Tests
- * stub the seam readers (`listIssuesByLabelOrEmpty` / `listOpenPrsOrEmpty`)
+ * stub the seam readers (`listIssuesByLabel` / `listOpenPrsOrEmpty`)
  * rather than crafting raw `gh` JSON strings — the canonical-row parse now lives
  * in (and is tested by) the seam's own suite (`github-issues.test.mts`). The
- * pure classifiers here (`classifyByAge`, `selectPrsWithFailedCi`) are tested
+ * pure classifier here (`selectPrsWithFailedCi`) is tested
  * directly against the seam's `IssueRow`/`PrRow` shapes.
  */
 
@@ -15,11 +15,11 @@ import assert from "node:assert/strict";
 
 import {
   getStuckItems,
-  classifyByAge,
   selectPrsWithFailedCi,
   DEFAULT_THRESHOLDS,
 } from "../src/aggregators/stuck-items.ts";
-import type { IssueRow, PrRow } from "../src/github/issues.ts";
+import type { IssueReadResult, IssueRow, PrRow } from "../src/github/issues.ts";
+import { readFileSync } from "node:fs";
 
 const NOW = new Date("2026-05-26T12:00:00.000Z");
 
@@ -49,57 +49,23 @@ function prRow(over: Partial<PrRow> & { number: number }): PrRow {
 }
 
 /**
- * Build a `listIssuesByLabelOrEmpty` stub from a label→rows map. Unknown labels
- * resolve to `[]`, mirroring the seam's degrade-to-empty contract.
+ * Build a `listIssuesByLabel` stub (the discriminated seam reader the waiting
+ * read consumes) from a label->rows map. Unknown labels resolve to `{ok, []}`.
+ * `failLabels` model a failed `gh` read for those labels.
  */
-function makeLabelReader(byLabel: Record<string, IssueRow[]>) {
-  return async (label: string) => byLabel[label] ?? [];
+function makeLabelReader(byLabel: Record<string, IssueRow[]>, failLabels: string[] = []) {
+  return (async (label: string): Promise<IssueReadResult<IssueRow>> =>
+    failLabels.includes(label)
+      ? ({ ok: false, code: "gh-failed" } as unknown as IssueReadResult<IssueRow>)
+      : ({ ok: true, rows: byLabel[label] ?? [] } as IssueReadResult<IssueRow>)) as never;
 }
+
+/** Blocker-lookup stub: no open blockers anywhere (the happy-path fixtures). */
+const noBlockers = (async () => ({ ok: true, rows: [] })) as never;
 
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
-
-describe("classifyByAge — pure helper", () => {
-  test("keeps issues older than the threshold; drops younger", () => {
-    const issues = [
-      issueRow({ number: 1, title: "old", url: "u1", createdAt: "2026-05-20T00:00:00Z" }), // 6d
-      issueRow({ number: 2, title: "young", url: "u2", createdAt: "2026-05-26T11:00:00Z" }), // 1h
-    ];
-    const out = classifyByAge(issues, NOW, 2);
-    assert.equal(out.length, 1);
-    assert.equal(out[0].number, 1);
-    assert.equal(out[0].ageDays, 6);
-  });
-
-  test("boundary: exactly at threshold counts as stuck", () => {
-    // 2-day age from NOW = 2026-05-24T12:00 UTC.
-    const issues = [
-      issueRow({ number: 1, title: "edge", url: "u1", createdAt: "2026-05-24T12:00:00Z" }),
-    ];
-    const out = classifyByAge(issues, NOW, 2);
-    assert.equal(out.length, 1);
-    assert.equal(out[0].ageDays, 2);
-  });
-
-  test("sorts oldest-first", () => {
-    const issues = [
-      issueRow({ number: 2, title: "less old", url: "u2", createdAt: "2026-05-23T00:00:00Z" }),
-      issueRow({ number: 1, title: "oldest", url: "u1", createdAt: "2026-05-20T00:00:00Z" }),
-    ];
-    const out = classifyByAge(issues, NOW, 1);
-    assert.deepEqual(out.map((i) => i.number), [1, 2]);
-  });
-
-  test("skips issues with unparseable / empty createdAt", () => {
-    const issues = [
-      issueRow({ number: 1, title: "junk", url: "u1", createdAt: "not-a-date" }),
-      issueRow({ number: 2, title: "no-date", url: "u2", createdAt: "" }),
-    ];
-    const out = classifyByAge(issues, NOW, 1);
-    assert.deepEqual(out, []);
-  });
-});
 
 describe("selectPrsWithFailedCi — pure helper", () => {
   test("returns [] on empty input", () => {
@@ -269,7 +235,8 @@ describe("getStuckItems — required-context wiring (#4569)", () => {
 
   test("reads the required set through the injected seam reader and drops advisory-only reds", async () => {
     const result = await getStuckItems({
-      listIssuesByLabelOrEmpty: async () => [],
+      listIssuesByLabel: makeLabelReader({}),
+      listIssuesBySearch: noBlockers,
       listOpenPrsOrEmpty: onlyAdvisoryRed,
       listRequiredStatusContextsOrNull: async () => ["test"],
     });
@@ -279,7 +246,8 @@ describe("getStuckItems — required-context wiring (#4569)", () => {
 
   test("an unreadable required set (null) keeps the PR surfaced rather than going silent", async () => {
     const result = await getStuckItems({
-      listIssuesByLabelOrEmpty: async () => [],
+      listIssuesByLabel: makeLabelReader({}),
+      listIssuesBySearch: noBlockers,
       listOpenPrsOrEmpty: onlyAdvisoryRed,
       listRequiredStatusContextsOrNull: async () => null,
     });
@@ -296,7 +264,8 @@ describe("getStuckItems — happy path", () => {
     const result = await getStuckItems({
       listRequiredStatusContextsOrNull: async () => null,
       now: NOW,
-      listIssuesByLabelOrEmpty: makeLabelReader({
+      listIssuesBySearch: noBlockers,
+      listIssuesByLabel: makeLabelReader({
         blocked: [
           issueRow({
             number: 1,
@@ -343,7 +312,8 @@ describe("getStuckItems — empty state", () => {
     const result = await getStuckItems({
       listRequiredStatusContextsOrNull: async () => null,
       now: NOW,
-      listIssuesByLabelOrEmpty: async () => [],
+      listIssuesByLabel: makeLabelReader({}),
+      listIssuesBySearch: noBlockers,
       listOpenPrsOrEmpty: async () => [],
     });
     assert.deepEqual(result.blockedOver2d, []);
@@ -360,7 +330,8 @@ describe("getStuckItems — custom thresholds", () => {
   test("overriding blockedDays reclassifies the bucket", async () => {
     const reader = {
       now: NOW,
-      listIssuesByLabelOrEmpty: makeLabelReader({
+      listIssuesBySearch: noBlockers,
+      listIssuesByLabel: makeLabelReader({
         blocked: [
           issueRow({
             number: 1,
@@ -394,7 +365,8 @@ describe("getStuckItems — sub-source failure isolation", () => {
     const result = await getStuckItems({
       listRequiredStatusContextsOrNull: async () => null,
       now: NOW,
-      listIssuesByLabelOrEmpty: makeLabelReader({
+      listIssuesBySearch: noBlockers,
+      listIssuesByLabel: makeLabelReader({
         blocked: [
           issueRow({
             number: 1,
@@ -414,5 +386,104 @@ describe("getStuckItems — sub-source failure isolation", () => {
     });
     assert.equal(result.blockedOver2d.length, 1);
     assert.deepEqual(result.prsWithFailedCi, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #5093: the issue half is the CLASSIFIED set from the one waiting read
+// ---------------------------------------------------------------------------
+
+describe("getStuckItems — issue half is the classified waiting read (#5093)", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const ago = (d: number) => new Date(NOW.getTime() - d * DAY).toISOString();
+  const base = {
+    now: NOW,
+    listOpenPrsOrEmpty: async () => [],
+    listRequiredStatusContextsOrNull: async () => null,
+  };
+
+  test("an Epic-labelled blocked row is excluded from blockedOver2d", async () => {
+    const result = await getStuckItems({
+      ...base,
+      listIssuesBySearch: noBlockers,
+      listIssuesByLabel: makeLabelReader({
+        blocked: [
+          issueRow({ number: 1, createdAt: ago(5), labels: ["blocked"], body: "## Sub-issues\n- #2\n" }),
+          issueRow({ number: 3, createdAt: ago(5), labels: ["blocked"] }),
+        ],
+      }),
+    });
+    assert.deepEqual(result.blockedOver2d.map((i) => i.number), [3]);
+  });
+
+  test("a blocked row whose every open blocker is machine-owned is excluded", async () => {
+    const result = await getStuckItems({
+      ...base,
+      listIssuesBySearch: (async () => ({
+        ok: true,
+        rows: [issueRow({ number: 100, labels: ["ready-for-agent"] })],
+      })) as never,
+      listIssuesByLabel: makeLabelReader({
+        blocked: [
+          issueRow({ number: 4, createdAt: ago(5), labels: ["blocked"], body: "blocked by #100" }),
+        ],
+      }),
+    });
+    assert.deepEqual(result.blockedOver2d, []);
+  });
+
+  test("a failed blocked/needs-info label read flips sourcesOk; unrelated labels do not", async () => {
+    const rows = { "needs-info": [issueRow({ number: 2, createdAt: ago(3), labels: ["needs-info"] })] };
+    const failed = await getStuckItems({
+      ...base,
+      listIssuesBySearch: noBlockers,
+      listIssuesByLabel: makeLabelReader(rows, ["blocked"]),
+    });
+    assert.equal(failed.sourcesOk, false);
+    const unrelated = await getStuckItems({
+      ...base,
+      listIssuesBySearch: noBlockers,
+      listIssuesByLabel: makeLabelReader(rows, ["ready-for-human"]),
+    });
+    assert.equal(unrelated.sourcesOk, true);
+  });
+
+  test("scanned sums raw blocked + needs-info rows and the failed-CI PR rows (legacy three-source sum)", async () => {
+    const result = await getStuckItems({
+      ...base,
+      listIssuesBySearch: noBlockers,
+      listIssuesByLabel: makeLabelReader({
+        blocked: [issueRow({ number: 1, labels: ["blocked"] })],
+        "needs-info": [issueRow({ number: 2, labels: ["needs-info"] })],
+      }),
+      listOpenPrsOrEmpty: async () => [
+        prRow({ number: 9, statusCheckRollup: [{ conclusion: "FAILURE", name: "test" }] }),
+        prRow({ number: 10, statusCheckRollup: [{ conclusion: "SUCCESS", name: "test" }] }),
+      ],
+    });
+    assert.equal(result.scanned, 3);
+    assert.equal(result.generatedAt, NOW.toISOString());
+  });
+
+  test("a rejected PR read degrades prsWithFailedCi to [] and flips sourcesOk", async () => {
+    const result = await getStuckItems({
+      ...base,
+      listIssuesBySearch: noBlockers,
+      listIssuesByLabel: makeLabelReader({}),
+      listOpenPrsOrEmpty: async () => {
+        throw new Error("gh pr broken");
+      },
+    });
+    assert.deepEqual(result.prsWithFailedCi, []);
+    assert.equal(result.sourcesOk, false);
+  });
+
+  test("stuck-items.ts imports no issue-label reader (one issue-label reader on the Today path)", () => {
+    const src = readFileSync(new URL("../src/aggregators/stuck-items.ts", import.meta.url), "utf8");
+    const imports = src.match(/^import[\s\S]*?from\s+"[^"]+";/gm) ?? [];
+    for (const imp of imports) {
+      assert.ok(!/listIssuesByLabel(OrEmpty)?\b/.test(imp), imp);
+    }
+    assert.ok(!src.includes("classifyByAge"), "classifyByAge must be deleted");
   });
 });

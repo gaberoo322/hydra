@@ -13,54 +13,24 @@
 # The Gate is a frequent (~15 min) timer that runs a small admission check
 # and decides whether to launch an Autopilot Run RIGHT NOW:
 #
-#   1. Already running?  An Autopilot Run is live if the service is active OR
-#      /tmp/hydra-autopilot-state.json carries a live owning PID (kill -0).
-#      → log "already running" and skip (exit 0). The Gate never stacks runs;
-#      bootstrap.sh's concurrent-run guard is the second layer of protection.
+#   The admission POLICY (already-running, pause, session-block, emergency /
+#   weekly stops, extra-usage, meter, pace-ahead, five-hour headroom,
+#   post-quota cooldown, workless backoff) is owned by src/cost/admission.ts
+#   decideAdmission (#5101) and served as the `.admission` object of
+#   GET /api/usage/eligibility. This script is TRANSPORT + EXEC only (#5102):
 #
-#   2. Consult the Pacing Curve via GET /api/usage/eligibility (#857):
-#        - .reasons.paused == true          → operator-only Autopilot pause
-#          (#988) is set. Skip launch entirely — no throwaway run spawned.
-#          Most authoritative skip; checked first.
-#        - .reasons.emergencyStop == true  → the 5-hour cap (>=90%) tripped.
-#          Pause fully; skip.
-#        - .reasons.weeklyEmergencyStop == true → the 7-day window is
-#          exhausted (#1790). Skip until the Weekly Reset Anchor passes —
-#          launching would only spawn runs that hard-stop in decide.py.
-#        - .reasons.extraUsageBlocking == true → paid overage ("extra usage")
-#          is armed on the logged-in account AND HYDRA_EXTRA_USAGE_POLICY is
-#          `block` (the default; #4075 / #4560). Skip — this one never clears
-#          by itself. Under policy=allow the route reports
-#          extraUsageArmed:true / extraUsageBlocking:false and does not fold
-#          it into .allow; the gate then logs one informational line and
-#          proceeds, leaving the 5h/weekly hard-stops as the brake.
-#        - .allow == false (catch-all, #1790) → the composed verdict from
-#          projectEligibility() is negative for a reason none of the arms
-#          above named (including reasons added after this script). Skip and
-#          log the raw .reasons JSON. The reason-specific arms above exist
-#          for log legibility; this arm is the authoritative backstop.
-#        - .paceState == "ahead"           → total burn is above the Pacing
-#          Curve for this instant in the week. Pause; skip. The sawtooth
-#          relaunches the moment burn falls back to/below the curve.
-#          (ADDITIVE to .allow — an ahead snapshot still has allow=true, so
-#          this arm is a separate check, not subsumed by the catch-all.)
-#        - .reasons.fiveHourThrottleShed == true (with allow=true) → the OAuth
-#          5h window is already inside the graduated throttle band (T1, 60%
-#          default; issue #4836). A wave costs ~30-41 pts, so admitting here
-#          cannot finish one before the hard limit. Skip, tick reason
-#          `five-hour-headroom`. Reads the SERVER-computed boolean — never
-#          re-derives the threshold in bash — so the oauth-only / null-reading
-#          guards carry over. LAUNCHER-ONLY: never flips allow/shed.
-#        - .reasons.postQuotaUntil in the FUTURE → the last run ended
-#          term_reason=quota; the lagging 5h meter may not yet reflect the wave
-#          it burned (issue #4836). Skip, tick reason `post-quota-cooldown`.
-#          A past instant launches (self-heals).
-#        - otherwise ("on" / "behind", allow=true, not emergency, not paused)
-#          → eligible. Launch: `systemctl --user start hydra-autopilot.service`.
+#   1. Compute the launcher-host facts: serviceActive (systemd unit active,
+#      timer mode only) and pidAlive (state.json owning PID alive), and send
+#      them with `mode=timer|exec` as query parameters.
+#   2. Read `.admission`: admit=false -> record the typed reason verbatim and
+#      exit 0; admit=true -> launch (`systemctl --user start` in timer mode).
+#   3. Endpoint unreachable / unparseable / malformed -> FAIL SAFE: do NOT
+#      launch. Pacing is the governor; when we're blind to usage we must not
+#      burn quota. The only reason literals left in bash are these fail-safes
+#      (curl-missing, jq-missing, eligibility-unreachable,
+#      eligibility-unparseable, allow-invalid) and token-refresh-nudge (#4843,
+#      moves into the verdict in #5103).
 #
-#   3. Eligibility endpoint unreachable → FAIL SAFE: do NOT launch. Pacing is
-#      the governor; when we're blind to usage we must not burn quota. Log a
-#      WARNING and skip (exit 0).
 #
 # Per ADR-0012 the Gate governs ADMISSION (should a run start now?), never
 # WHAT WORK to do — that stays with decide.py. The Gate reuses the existing
@@ -83,11 +53,10 @@
 # every start — timer-initiated `systemctl start` AND systemd-internal
 # Restart= — passes the same admission check:
 #
-#   - Step 1's `systemctl is-active` self-check is skipped (the unit IS
-#     active: it's us). The state.json live-PID check stays, guarding
-#     against stacking a unit run on a hand-launched session.
-#   - Steps 2–3 (eligibility consult + pause/session-block/emergencyStop/
-#     pacing checks) run identically. A blocked or fail-safe outcome exits
+#   - The `systemctl is-active` self-check is skipped (the unit IS active:
+#     it's us) and serviceActive=0 is sent. The state.json live-PID fact
+#     stays, guarding against stacking a unit run on a hand-launched session.
+#   - The eligibility consult runs identically (mode=exec; serviceActive=0). A blocked or fail-safe outcome exits
 #     0 — a CLEAN exit, so Restart=on-failure disarms instead of storming,
 #     and no start slot is burned. The ~15-min timer resumes admission once
 #     the block passes.
@@ -300,34 +269,30 @@ if [[ "$MODE" == "exec" ]]; then
   log "exec-autopilot mode (unit ExecStart wrapper, issue #1089)"
 fi
 
-# --- Step 1: skip if an Autopilot Run is already live ---
+# --- Step 1: gather the launcher-host FACTS the verdict needs (#5102) ---
 #
-# Two independent signals; either being true means "already running".
-# (a) the systemd unit is active, or (b) state.json carries a live owning
-# PID. We check both because an operator can hand-launch /hydra-autopilot
-# with the unit stopped, and we must not stack a second run on top.
-
-# In exec mode the unit is BY DEFINITION active — it's us — so the is-active
-# self-check is skipped (it would always trip and make every start a no-op).
-# systemd itself guarantees single-instance per unit; the state-PID check
-# below still guards against stacking onto a hand-launched session.
+# Whether an Autopilot Run is already live is an INPUT to the admission verdict
+# (src/cost/admission.ts decideAdmission), not an arm decided here. Two
+# independent signals: (a) the systemd unit is active, (b) state.json carries a
+# live owning PID. In exec mode the unit is BY DEFINITION active — it's us — so
+# the is-active self-check is skipped and 0 is sent (systemd guarantees
+# single-instance per unit; the PID fact still guards against stacking onto a
+# hand-launched session).
+SERVICE_ACTIVE=0
 if [[ "$MODE" != "exec" && "${HYDRA_PACE_GATE_FORCE_SERVICE_INACTIVE:-0}" != "1" ]] \
   && systemctl --user is-active --quiet "$SERVICE"; then
-  log "already running ($SERVICE active); skipping"
-  record_tick "already-running-service" "already-running" || true
-  exit 0
+  SERVICE_ACTIVE=1
 fi
 
+PID_ALIVE=0
 if [[ -f "$STATE_PATH" ]] && command -v jq >/dev/null 2>&1; then
   PID=$(jq -r '.pid // 0' "$STATE_PATH" 2>/dev/null || echo "0")
   if [[ -n "$PID" && "$PID" != "0" && "$PID" != "null" ]] && kill -0 "$PID" 2>/dev/null; then
-    log "already running (state PID $PID alive); skipping"
-    record_tick "already-running-pid" "already-running" || true
-    exit 0
+    PID_ALIVE=1
   fi
 fi
 
-# --- Step 2: consult the Pacing Curve via /api/usage/eligibility ---
+# --- Step 2: fetch the admission verdict from /api/usage/eligibility ---
 #
 # Fail safe: if the endpoint is unreachable we must NOT launch — pacing is
 # the governor and we will not burn quota while blind to usage.
@@ -352,7 +317,14 @@ fi
 LATENCY_MS=""
 CURL_BODY_FILE="$(mktemp)"
 ELIGIBILITY_JSON=""
-if ! PROBE_TIME_TOTAL=$(curl -fsS --max-time 10 -w '%{time_total}' -o "$CURL_BODY_FILE" "$ELIGIBILITY_URL" 2>/dev/null); then
+# #5102: the facts ride to the verdict as query parameters (validated by
+# EligibilityQuerySchema in src/schemas/usage.ts).
+SEP="?"
+if [[ "$ELIGIBILITY_URL" == *"?"* ]]; then
+  SEP="&"
+fi
+PROBE_URL="${ELIGIBILITY_URL}${SEP}mode=${MODE}&serviceActive=${SERVICE_ACTIVE}&pidAlive=${PID_ALIVE}"
+if ! PROBE_TIME_TOTAL=$(curl -fsS --max-time 10 -w '%{time_total}' -o "$CURL_BODY_FILE" "$PROBE_URL" 2>/dev/null); then
   rm -f "$CURL_BODY_FILE"
   log "WARN eligibility endpoint unreachable ($ELIGIBILITY_URL) — failing safe (not launching)"
   record_tick "eligibility-unreachable" "fail-safe" || true
@@ -366,168 +338,38 @@ rm -f "$CURL_BODY_FILE"
 # LATENCY_MS empty rather than recording garbage.
 LATENCY_MS="$(awk -v t="$PROBE_TIME_TOTAL" 'BEGIN { printf "%d", (t + 0) * 1000 }' 2>/dev/null || echo "")"
 
-EMERGENCY_STOP=$(jq -r '.reasons.emergencyStop // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
-PACE_STATE=$(jq -r '.paceState // "unknown"' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
-# Issue #988: operator-only autopilot pause. The /api/usage/eligibility route
-# overlays `.reasons.paused` from the Redis pause flag. When set, skip the
-# launch entirely (no throwaway run spawned) — the operator paused autopilot.
-PAUSED=$(jq -r '.reasons.paused // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
-# Issue #3845 (epic #3844, decided in #3809's resolution addendum): the route
-# overlays `.reasons.meterUnavailable` when the usage meter itself cannot be
-# read — since issue #4165 that means NO fresh OAuth read AND no last-good
-# reading inside `HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS` (default 60 min).
-# (It previously also required 3+ consecutive failed reads, which let a blind
-# meter report `false` alongside zeroed percentages and admitted a run at ~92%
-# real weekly usage on 2026-08-19.) Before this the script never parsed this
-# field, so a meter-dark block fell through to the generic `.allow == false`
-# backstop below and was recorded (in the pre-#3845 world, only as a log
-# line) as an indistinguishable "deliberate skip" — the exact
-# green-everything-no-alarm shape #3844 exists to close. Parsed as its own
-# field, sibling to PAUSED above, so it gets its own reason-specific arm
-# (and therefore its own distinct `reason` in the last-tick record) instead
-# of being folded into the generic `allow-false` reason.
-METER_UNAVAILABLE=$(jq -r '.reasons.meterUnavailable // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
-# Issue #1089: session-limit hard block. The route overlays
-# `.reasons.sessionBlockedUntil` (ISO-8601) when the autopilot last exited with
-# `You've hit your session limit · resets <t>` and that reset is still in the
-# future. The OAuth 5h emergencyStop undershoots the true session limit, so
-# without this the gate relaunches into an exhausted quota → repeat exit-1
-# deaths. `null`/absent => no block.
-SESSION_BLOCKED_UNTIL=$(jq -r '.reasons.sessionBlockedUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
-# Issue #1790: weekly window exhausted (percentLast7d >= the weekly cap). The
-# 7-day rolling window undershoots nothing — when it trips, every launched run
-# hard-stops in decide.py within seconds, so launching is pure churn until the
-# Weekly Reset Anchor passes.
-WEEKLY_EMERGENCY_STOP=$(jq -r '.reasons.weeklyEmergencyStop // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
-# Paid overage ("extra usage") armed on the logged-in account. The route folds
-# this into `.allow`, so the catch-all arm below would already skip the launch —
-# this reason-specific parse exists so the journal names the CAUSE, which here
-# is an operator ACTION ITEM (disable it in the Claude console) rather than a
-# wait-it-out quota state. Deliberately NOT `// false`-tolerant of a missing
-# field in a blocking direction: absent reads as false and defers to `.allow`.
-EXTRA_USAGE_ARMED=$(jq -r '.reasons.extraUsageArmed // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
-# Issue #4560: whether that armed state BLOCKS. `.reasons.extraUsageBlocking` is
-# armed AND HYDRA_EXTRA_USAGE_POLICY=block (the default). Under policy=allow the
-# route reports armed:true / blocking:false and does NOT fold it into `.allow` —
-# the 5h/weekly hard-stops are the brake. The reason-specific arm below keys off
-# THIS field, never off the armed fact. Absent (an older route) reads as false
-# and defers to `.allow`, exactly like the armed parse above.
-EXTRA_USAGE_BLOCKING=$(jq -r '.reasons.extraUsageBlocking // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
-# Issue #2956: workless-board backoff hint. The route overlays
-# `.reasons.worklessUntil` (ISO-8601) when the autopilot last exited cause=idle
-# having dispatched NOTHING — i.e. the board was fully workless (every class on
-# cooldown, no signals). UNLIKE session-block/paused it does NOT flip `.allow`
-# (decide.py must not drain an in-flight/operator session on it), so this
-# LAUNCHER-ONLY arm skips relaunch while the instant is future, sparing the
-# ~2-min zero-dispatch idle exits. `null`/absent => launch normally; the hint
-# self-clears by TTL so a stale value can never wedge the gate off.
-WORKLESS_UNTIL=$(jq -r '.reasons.worklessUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
-# Issue #4836: 5h-window headroom + post-quota cooldown. Both are LAUNCHER-ONLY
-# (neither flips `.allow`/shed; decide.py never reads them). Read with jq `//`
-# defaults so a server response that predates the fields reads as not-shed /
-# no-cooldown and launches exactly as before.
-FIVE_HOUR_THROTTLE_SHED=$(jq -r '.reasons.fiveHourThrottleShed // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
-POST_QUOTA_UNTIL=$(jq -r '.reasons.postQuotaUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
-# Issue #4585: model-scoped exhaustion (Fable out of weekly usage credits).
-# The route overlays `.reasons.fableExhaustedUntil` (ISO-8601) when the reap
-# classified an out-of-credits exit — a REDIRECT, not a stop: it never flips
-# `.allow` and never arms sessionBlockedUntil, so the run still launches,
-# just on the FALLBACK model (Step 4 below). Unlike the stop arms, this parse
-# feeds model selection only. `null`/absent => launch on the primary; a
-# stale/past/unparseable instant ALSO falls through to the primary (fail-safe
-# to primary — a corrupt flag must never wedge the loop on the fallback).
-FABLE_EXHAUSTED_UNTIL=$(jq -r '.reasons.fableExhaustedUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
-# Issue #1790: the composed verdict. projectEligibility() + the route's
-# overlays fold EVERY hard-stop reason (5h emergencyStop, weeklyEmergencyStop,
-# paused, future sessionBlockedUntil — and any future reason) into this single
-# boolean. The reason-specific arms below stay for operator log legibility;
-# the catch-all `.allow == false` arm guarantees the gate can never again
-# drift from the route's composition (the bug this issue fixes).
-#
-# CRITICAL: bare `.allow`, NOT `.allow // true` — jq's `//` operator treats
-# `false` itself as falsy, so `.allow // true` returns true when allow is
-# false and would silently invert the fix. Strict string matching below:
-# only the literal "true" proceeds; "false" skips; anything else (missing
-# field => "null", garbage, parse failure) fails safe.
-ALLOW=$(jq -r '.allow' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
-
-if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$METER_UNAVAILABLE" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" || "$WEEKLY_EMERGENCY_STOP" == "parse-error" || "$WORKLESS_UNTIL" == "parse-error" || "$FIVE_HOUR_THROTTLE_SHED" == "parse-error" || "$POST_QUOTA_UNTIL" == "parse-error" || "$FABLE_EXHAUSTED_UNTIL" == "parse-error" || "$EXTRA_USAGE_ARMED" == "parse-error" || "$EXTRA_USAGE_BLOCKING" == "parse-error" || "$ALLOW" == "parse-error" ]]; then
+# The route serves ONE admission object (src/cost/admission.ts decideAdmission):
+# {admit, reason, class, note?}. This script holds no admission policy — it
+# records the verdict's typed reason verbatim and launches or exits 0.
+if ! ADMISSION_JSON=$(jq -c '.admission' <<<"$ELIGIBILITY_JSON" 2>/dev/null); then
   log "WARN eligibility response unparseable — failing safe (not launching)"
   record_tick "eligibility-unparseable" "fail-safe" "$LATENCY_MS" || true
   exit 0
 fi
 
-# A missing or non-boolean .allow is treated as unparseable: the route has
-# served a boolean allow since its inception and shares a host with this gate,
-# so there is no version-skew window — extend the parse-error stance.
-if [[ "$ALLOW" != "true" && "$ALLOW" != "false" ]]; then
-  log "WARN eligibility .allow missing or non-boolean (got '$ALLOW') — failing safe (not launching)"
+# A missing or malformed admission object is treated as invalid: the route
+# serves it since #5101 and shares a host with this gate, so there is no
+# version-skew window.
+if ! jq -e 'type == "object" and (.admit | type == "boolean") and (.reason | type == "string" and length > 0) and (.class | type == "string" and length > 0)' \
+  <<<"$ADMISSION_JSON" >/dev/null 2>&1; then
+  log "WARN eligibility .admission missing or malformed — failing safe (not launching)"
   record_tick "allow-invalid" "fail-safe" "$LATENCY_MS" || true
   exit 0
 fi
 
-# --- Step 3: pause conditions ---
-# Issue #988: operator pause is the most authoritative skip — check it first.
-if [[ "$PAUSED" == "true" ]]; then
-  log "autopilot paused (operator) — skip"
-  record_tick "paused" "deliberate-skip" "$LATENCY_MS" || true
-  exit 0
-fi
+ADMISSION_ADMIT=$(jq -r '.admit' <<<"$ADMISSION_JSON")
+ADMISSION_REASON=$(jq -r '.reason' <<<"$ADMISSION_JSON")
+ADMISSION_CLASS=$(jq -r '.class' <<<"$ADMISSION_JSON")
+ADMISSION_NOTE=$(jq -r '.note // ""' <<<"$ADMISSION_JSON")
 
-# Issue #1089: session-limit hard block. The route only surfaces a FUTURE
-# instant (the overlay drops past ones), but we re-check against now defensively
-# so a clock-skewed/stale value can never wedge the gate off. A non-future or
-# unparseable value falls through to normal admission.
-if [[ -n "$SESSION_BLOCKED_UNTIL" ]]; then
-  BLOCK_EPOCH=$(date -d "$SESSION_BLOCKED_UNTIL" +%s 2>/dev/null || echo "")
-  NOW_EPOCH=$(date -u +%s)
-  if [[ -n "$BLOCK_EPOCH" && "$BLOCK_EPOCH" -gt "$NOW_EPOCH" ]]; then
-    log "session-limit block until $SESSION_BLOCKED_UNTIL — skip (exhausted session quota)"
-    record_tick "session-blocked" "deliberate-skip" "$LATENCY_MS" || true
-    exit 0
-  fi
-fi
-
-if [[ "$EMERGENCY_STOP" == "true" ]]; then
-  log "5h emergencyStop — pausing (skip)"
-  record_tick "emergency-stop" "deliberate-skip" "$LATENCY_MS" || true
-  exit 0
-fi
-
-# Issue #1790: weekly window exhausted. Reason-specific arm (log legibility)
-# in front of the authoritative catch-all below.
-if [[ "$WEEKLY_EMERGENCY_STOP" == "true" ]]; then
-  log "weekly emergencyStop (7-day window exhausted) — skip until weekly reset"
-  record_tick "weekly-emergency-stop" "deliberate-skip" "$LATENCY_MS" || true
-  exit 0
-fi
-
-# Paid overage armed AND policy=block (issue #4560; the signal is #4075).
-# Reason-specific arm in front of the catch-all, same as the stops above.
-# UNLIKE every other skip reason this one does NOT clear on its own — no reset
-# instant, no cooldown — so the message states the required operator action
-# instead of implying a wait. Keyed off extraUsageBlocking, NOT extraUsageArmed:
-# under HYDRA_EXTRA_USAGE_POLICY=allow the route leaves blocking=false (and
-# .allow untouched), and the armed fact is logged as information further down.
-if [[ "$EXTRA_USAGE_BLOCKING" == "true" ]]; then
-  log "extra usage (paid overage) ARMED on the logged-in account and HYDRA_EXTRA_USAGE_POLICY=block — skip; disable it in the Claude console, or set HYDRA_EXTRA_USAGE_POLICY=allow on the orchestrator service, to resume (this will NOT clear by itself)"
-  record_tick "extra-usage-armed" "deliberate-skip" "$LATENCY_MS" || true
-  exit 0
-fi
-
-# Issue #3845 (epic #3844): meter-dark block. Reason-specific arm — SAME
-# position in the ordering as the other reason-specific arms above (ahead of
-# the generic allow-false catch-all) so a meter-dark tick records its own
-# `meter-unavailable` reason instead of being swallowed by the catch-all's
-# generic `allow-false`. Classified `fail-safe` (not `deliberate-skip`): per
-# #3809's resolution addendum this signal's CHARACTER is "defective" like
-# the true fail-safe exits above — "I read the verdict and the brake is on
-# because it [the usage meter] cannot see" — even though the verdict itself
-# WAS readable (so it does not belong in the literal fail-safe exit list
-# either). The downstream detector (out of scope here; see #3844's other
-# child tickets) is the consumer that turns this reason into an alarm.
-if [[ "$METER_UNAVAILABLE" == "true" ]]; then
-  log "usage meter unavailable (reasons.meterUnavailable) — skip (brake cannot see; #3845)"
+# --- Step 3: skip on admit=false (pass-through; no policy here) ---
+if [[ "$ADMISSION_ADMIT" != "true" ]]; then
+  REASONS_JSON=$(jq -c '.reasons // {}' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "{}")
+  log "skip reason=$ADMISSION_REASON class=$ADMISSION_CLASS (reasons: $REASONS_JSON)"
+  # Issue #3845 (epic #3844): a meter-dark tick records the verdict's own
+  # `meter-unavailable` reason. The #4843 nudge below stays in bash until #5103.
+  if [[ "$ADMISSION_REASON" == "meter-unavailable" ]]; then
+    log "usage meter unavailable (reasons.meterUnavailable) — skip (brake cannot see; #3845)"
   # Issue #4843: an idle stretch longer than the OAuth token lifetime deadlocks
   # here (expired token -> meter blind -> no launch -> nothing rotates the
   # token). When the token has expired / expires within 10 min, run ONE minimal
@@ -551,7 +393,7 @@ if [[ "$METER_UNAVAILABLE" == "true" ]]; then
         # If the stamp cannot be written the 30-minute limit is lost — skip the nudge.
         if ! date +%s >"$NUDGE_STAMP" 2>/dev/null; then
           log "WARN: could not write nudge stamp $NUDGE_STAMP — skipping nudge (rate limit unenforceable)"
-          record_tick "meter-unavailable" "fail-safe" "$LATENCY_MS" || true
+          record_tick "$ADMISSION_REASON" "$ADMISSION_CLASS" "$LATENCY_MS" || true
           exit 0
         fi
         NUDGE_RC=0
@@ -570,87 +412,21 @@ if [[ "$METER_UNAVAILABLE" == "true" ]]; then
   else
     log "credentials expiresAt unreadable/non-numeric — no token-refresh nudge"
   fi
-  record_tick "meter-unavailable" "fail-safe" "$LATENCY_MS" || true
-  exit 0
-fi
-
-# Issue #1790 catch-all: the composed verdict is authoritative. Any reason —
-# including ones added to projectEligibility() after this script was written —
-# that folds allow=false blocks admission here, so the gate can never drift
-# from the route's composition again. Log the raw reasons so the operator can
-# see which (possibly future) reason produced the verdict.
-if [[ "$ALLOW" == "false" ]]; then
-  REASONS_JSON=$(jq -c '.reasons // {}' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "{}")
-  log "eligibility allow=false — skip (reasons: $REASONS_JSON)"
-  record_tick "allow-false" "deliberate-skip" "$LATENCY_MS" || true
-  exit 0
-fi
-
-# Pacing Curve verdict is ADDITIVE to .allow (src/cost/eligibility.ts): a
-# burn-ahead snapshot returns allow=true with paceState=ahead, so this arm
-# CANNOT be folded into the .allow check above.
-if [[ "$PACE_STATE" == "ahead" ]]; then
-  log "ahead of pacing curve — pausing (skip)"
-  record_tick "pace-ahead" "deliberate-skip" "$LATENCY_MS" || true
-  exit 0
-fi
-
-# Issue #4836: 5h-headroom arm. The meter already sits in the throttle band, so
-# a fresh run cannot finish a wave before the hard session limit. Placed after
-# pace-ahead (every earlier, more authoritative skip owns the tick reason) and
-# before workless-backoff. Exec mode: exit 0 so Restart=on-failure disarms.
-if [[ "$FIVE_HOUR_THROTTLE_SHED" == "true" ]]; then
-  log "5h window already in the throttle band (fiveHourThrottleShed) — skip (insufficient headroom for a wave, #4836)"
-  record_tick "five-hour-headroom" "deliberate-skip" "$LATENCY_MS" || true
-  exit 0
-fi
-
-# Issue #4836: post-quota cooldown. The last run ended term_reason=quota; the
-# 5h meter lags the wave it just burned, so wait for it to catch up. Re-check
-# against now defensively; a non-future / unparseable instant launches.
-if [[ -n "$POST_QUOTA_UNTIL" ]]; then
-  POST_QUOTA_EPOCH=$(date -d "$POST_QUOTA_UNTIL" +%s 2>/dev/null || echo "")
-  PQ_NOW_EPOCH=$(date -u +%s)
-  if [[ -n "$POST_QUOTA_EPOCH" && "$POST_QUOTA_EPOCH" -gt "$PQ_NOW_EPOCH" ]]; then
-    log "post-quota cooldown until $POST_QUOTA_UNTIL — skip (last run ended on quota; meter may lag, #4836)"
-    record_tick "post-quota-cooldown" "deliberate-skip" "$LATENCY_MS" || true
-    exit 0
   fi
+  record_tick "$ADMISSION_REASON" "$ADMISSION_CLASS" "$LATENCY_MS" || true
+  exit 0
 fi
 
-# Issue #2956: workless-board backoff. Placed LAST among the skip arms — every
-# hard-stop above (paused / session-block / emergencyStop / weekly / allow=false
-# / pace-ahead) takes precedence and is logged on its own terms. This is the
-# final soft gate before launch: if the last run ended cause=idle with zero
-# dispatches, the board is expected to stay workless until this instant, so
-# relaunching now would only spawn another ~2-min zero-dispatch idle exit. We
-# re-check against now defensively (mirrors the session-block arm) so a
-# clock-skewed/stale value can never wedge the gate off; a non-future or
-# unparseable value falls through to launch.
-if [[ -n "$WORKLESS_UNTIL" ]]; then
-  WORKLESS_EPOCH=$(date -d "$WORKLESS_UNTIL" +%s 2>/dev/null || echo "")
-  NOW_EPOCH=$(date -u +%s)
-  if [[ -n "$WORKLESS_EPOCH" && "$WORKLESS_EPOCH" -gt "$NOW_EPOCH" ]]; then
-    log "workless-board backoff until $WORKLESS_UNTIL — skip (last run idle with zero dispatches, #2956)"
-    record_tick "workless-backoff" "deliberate-skip" "$LATENCY_MS" || true
-    exit 0
-  fi
-fi
-
-# Issue #4560: paid overage armed but NOT blocking — the route runs under
-# HYDRA_EXTRA_USAGE_POLICY=allow, so `.allow` is true and every skip arm above
-# fell through. Placed AFTER the catch-all on purpose: an older route that still
-# folds armed into `.allow` never reaches this line (the catch-all skipped it),
-# so this message can only ever describe a verdict that really did admit the
-# launch. Informational only — the hard-stops are the brake.
-if [[ "$EXTRA_USAGE_ARMED" == "true" ]]; then
+# Issue #4560: paid overage armed but NOT blocking — the verdict admitted the
+# launch and carries the informational note. The hard-stops are the brake.
+if [[ "$ADMISSION_NOTE" == "extra-usage-armed-not-blocking" ]]; then
   log "extra usage (paid overage) ARMED on the logged-in account but HYDRA_EXTRA_USAGE_POLICY=allow — proceeding; the 5h/weekly hard-stops are the brake (issue #4560)"
 fi
 
-# --- Step 4: eligible (paceState on/behind, not emergency) — launch/exec ---
+# --- Step 4: admitted — launch/exec ---
 
 if [[ "$MODE" == "exec" ]]; then
-  log "eligible (paceState=$PACE_STATE, emergencyStop=$EMERGENCY_STOP) — exec'ing autopilot session"
+  log "eligible (reason=$ADMISSION_REASON) — exec'ing autopilot session"
 
   # Issue #2955 — stamp the launch mechanism for the run-start trigger field.
   # Every systemd-mediated start (pace-gate timer AND Restart= relaunch) routes
@@ -665,11 +441,12 @@ if [[ "$MODE" == "exec" ]]; then
   # flag (.reasons.fableExhaustedUntil) is FUTURE, launch on FALLBACK (opus);
   # absent, stale/past, or unparseable launches on PRIMARY (fable) —
   # fail-safe to the primary so a corrupt flag can never wedge the loop on
-  # the fallback. Re-checked against now defensively, mirroring the
-  # session-block arm above.
+  # the fallback.
+  FABLE_EXHAUSTED_UNTIL=$(jq -r '.reasons.fableExhaustedUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "")
   LAUNCH_MODEL="$PRIMARY_MODEL"
   MODEL_FALLBACK_REASON=""
   if [[ -n "$FABLE_EXHAUSTED_UNTIL" ]]; then
+    # moves into the verdict in #5103
     FABLE_EPOCH=$(date -d "$FABLE_EXHAUSTED_UNTIL" +%s 2>/dev/null || echo "")
     NOW_EPOCH=$(date -u +%s)
     if [[ -n "$FABLE_EPOCH" && "$FABLE_EPOCH" -gt "$NOW_EPOCH" ]]; then
@@ -677,7 +454,6 @@ if [[ "$MODE" == "exec" ]]; then
       MODEL_FALLBACK_REASON="out-of-credits"
     fi
   fi
-
   # INV-1 (#4585): the out-of-credits 429 is NOT handled by the CLI's own
   # --fallback-model (empirically falsified on CLI 2.1.280) — the gate
   # launches with an explicit --model. --fallback-model rides along
@@ -705,7 +481,7 @@ if [[ "$MODE" == "exec" ]]; then
 
   if [[ "${HYDRA_PACE_GATE_DRY_RUN:-0}" == "1" ]]; then
     log "would-exec autopilot session: claude ${EXEC_ARGS[*]} (DRY_RUN=1, test mode)"
-    record_tick "eligible-exec" "launch" "$LATENCY_MS" "$LAUNCH_MODEL" || true
+    record_tick "$ADMISSION_REASON" "$ADMISSION_CLASS" "$LATENCY_MS" "$LAUNCH_MODEL" || true
     exit 0
   fi
 
@@ -713,7 +489,7 @@ if [[ "$MODE" == "exec" ]]; then
   # image, so any statement after either exec call below would never run.
   # The tick carries the launch model (#4585) so the next tick's transition
   # log and any dashboard join can see it.
-  record_tick "eligible-exec" "launch" "$LATENCY_MS" "$LAUNCH_MODEL" || true
+  record_tick "$ADMISSION_REASON" "$ADMISSION_CLASS" "$LATENCY_MS" "$LAUNCH_MODEL" || true
 
   if [[ -n "${HYDRA_PACE_GATE_EXEC_CMD:-}" ]]; then
     # Test-only hook: intentional word-split so the test can pass a full
@@ -733,16 +509,16 @@ if [[ "$MODE" == "exec" ]]; then
   exec claude "${EXEC_ARGS[@]}"
 fi
 
-log "eligible (paceState=$PACE_STATE, emergencyStop=$EMERGENCY_STOP) — launching $SERVICE"
+log "eligible (reason=$ADMISSION_REASON) — launching $SERVICE"
 
 if [[ "${HYDRA_PACE_GATE_DRY_RUN:-0}" == "1" ]]; then
   log "would-start $SERVICE (DRY_RUN=1, test mode)"
-  record_tick "eligible-launch" "launch" "$LATENCY_MS" || true
+  record_tick "$ADMISSION_REASON" "$ADMISSION_CLASS" "$LATENCY_MS" || true
   exit 0
 fi
 
 systemctl --user start "$SERVICE"
 log "launched $SERVICE"
-record_tick "eligible-launch" "launch" "$LATENCY_MS" || true
+record_tick "$ADMISSION_REASON" "$ADMISSION_CLASS" "$LATENCY_MS" || true
 
 exit 0
