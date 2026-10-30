@@ -228,14 +228,48 @@ describe("decideAdmission arm ordering", () => {
 });
 
 describe("reason vocabulary", () => {
-  test("ADMISSION_REASONS equals the record_tick literals in pace-gate.sh", () => {
+  test("ADMISSION_REASONS covers the record_tick literals in pace-gate.sh (post-#5102)", () => {
     const script = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "autopilot", "pace-gate.sh"),
       "utf8",
     );
-    const literals = new Set([...script.matchAll(/record_tick "([^"]+)"/g)].map((m) => m[1]));
-    assert.deepEqual([...literals].sort(), [...ADMISSION_REASONS].sort());
+    // Literal first arguments only: `record_tick "$VAR"` pass-throughs do not match.
+    const literals = new Set(
+      [...script.matchAll(/record_tick "([a-z][^"]*)"/g)].map((m) => m[1]),
+    );
+    assert.deepEqual(
+      [...literals].sort(),
+      [
+        "allow-invalid",
+        "curl-missing",
+        "eligibility-unparseable",
+        "eligibility-unreachable",
+        "jq-missing",
+        "token-refresh-nudge",
+      ],
+    );
+    const known = new Set<string>(ADMISSION_REASONS);
+    for (const l of literals) assert.ok(known.has(l), l);
     assert.equal(ADMISSION_REASONS.length, 21);
+    assert.ok(script.includes('record_tick "$ADMISSION_REASON" "$ADMISSION_CLASS"'));
+    const owned = [
+      "already-running-service",
+      "already-running-pid",
+      "paused",
+      "session-blocked",
+      "emergency-stop",
+      "weekly-emergency-stop",
+      "extra-usage-armed",
+      "meter-unavailable",
+      "allow-false",
+      "pace-ahead",
+      "five-hour-headroom",
+      "post-quota-cooldown",
+      "workless-backoff",
+      "eligible-exec",
+      "eligible-launch",
+    ];
+    for (const r of owned) assert.ok(!literals.has(r), `${r} must not be a bash literal`);
   });
   test("every reason has a class", () => {
     for (const r of ADMISSION_REASONS) assert.ok(ADMISSION_CLASS_OF[r], r);

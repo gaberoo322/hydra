@@ -355,7 +355,7 @@
   "test/outcome-regression.test.mts": 6,
   "test/outcomes-yaml.test.mts": 1,
   "test/outcomes.test.mts": 4,
-  "test/pace-gate-allow.test.mts": 6,
+  "test/pace-gate-allow.test.mts": 8,
   "test/page-item-format.test.mts": 27,
   "test/pattern-memory-decision.test.mts": 3,
   "test/pattern-memory-prompt-format.test.mts": 5,
