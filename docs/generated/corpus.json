@@ -358,6 +358,12 @@
       "title": "ADR-0046: Two-pass code factory: implement makes it work, the reviewer makes it good"
     },
     {
+      "path": "docs/adr/0047-work-item-lifecycle-is-data.md",
+      "tier": "adr",
+      "route": "/docs/adr/0047",
+      "title": "ADR-0047: Work-item lifecycle is data: one writer seam, record-checked gates, a per-issue journal, durable caps that park"
+    },
+    {
       "path": "docs/agents/domain.md",
       "tier": "living",
       "route": "/docs/ref/agents/domain",

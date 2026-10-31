@@ -80,6 +80,8 @@ import {
   MODEL_EXHAUSTION_TTL_BUFFER_SEC,
 } from "../src/redis/model-exhaustion.ts";
 import { redisKeys } from "../src/redis/keys.ts";
+import { decideAdmission } from "../src/cost/index.ts";
+import { EligibilityQuerySchema } from "../src/schemas/usage.ts";
 import { createUsageRouter } from "../src/api/usage.ts";
 import { parseExhaustionBlock, CREDITS_EXHAUSTED_BLOCK_MS } from "../src/cost/token-math.ts";
 
@@ -174,9 +176,20 @@ function findHandler(router: any, method: string, path: string): Function | null
 /** Serve a fixed eligibility JSON on an ephemeral port; resolve with url+close. */
 function eligibilityServer(payload: unknown): Promise<{ url: string; close: () => void }> {
   return new Promise((resolve) => {
-    const server = http.createServer((_req, res) => {
+    // #5102: pace-gate.sh reads the typed `.admission` verdict, so serve the
+    // real one (real query schema + decideAdmission), as the route does.
+    const server = http.createServer((req, res) => {
+      const q = EligibilityQuerySchema.parse(
+        Object.fromEntries(new URL(req.url ?? "", "http://x").searchParams),
+      );
+      const admission = decideAdmission(payload as any, {
+        nowMs: Date.now(),
+        mode: q.mode ?? "timer",
+        serviceActive: q.serviceActive ?? false,
+        pidAlive: q.pidAlive ?? false,
+      });
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify(payload));
+      res.end(JSON.stringify({ ...(payload as object), admission }));
     });
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address() as any;
@@ -534,7 +547,7 @@ describe("pace-gate.sh launch-skip on session block (issue #1089)", () => {
     try {
       const r = await runPaceGate(srv.url);
       assert.equal(r.status, 0);
-      assert.match(r.stdout, /session-limit block until/);
+      assert.match(r.stdout, /skip reason=session-blocked class=deliberate-skip/);
       assert.doesNotMatch(r.stdout, /would-start/);
     } finally {
       srv.close();
@@ -559,7 +572,7 @@ describe("pace-gate.sh launch-skip on session block (issue #1089)", () => {
       const r = await runPaceGate(srv.url);
       assert.equal(r.status, 0);
       assert.match(r.stdout, /would-start/);
-      assert.doesNotMatch(r.stdout, /session-limit block/);
+      assert.doesNotMatch(r.stdout, /reason=session-blocked/);
     } finally {
       srv.close();
     }
@@ -640,7 +653,7 @@ describe("pace-gate.sh --exec-autopilot — systemd Restart= path (issue #1089 r
         HYDRA_PACE_GATE_EXEC_CMD: "echo exec-marker-should-not-appear",
       });
       assert.equal(r.status, 0); // CLEAN exit — Restart=on-failure must disarm
-      assert.match(r.stdout, /session-limit block until/);
+      assert.match(r.stdout, /skip reason=session-blocked class=deliberate-skip/);
       assert.doesNotMatch(r.stdout, /exec-marker-should-not-appear/);
     } finally {
       srv.close();
@@ -696,7 +709,7 @@ describe("pace-gate.sh --exec-autopilot — systemd Restart= path (issue #1089 r
         HYDRA_PACE_GATE_EXEC_CMD: "echo exec-marker-should-not-appear",
       });
       assert.equal(r.status, 0);
-      assert.match(r.stdout, /autopilot paused \(operator\)/);
+      assert.match(r.stdout, /skip reason=paused class=deliberate-skip/);
       assert.doesNotMatch(r.stdout, /exec-marker-should-not-appear/);
     } finally {
       srv.close();

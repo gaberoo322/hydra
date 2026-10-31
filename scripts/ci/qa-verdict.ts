@@ -26,8 +26,9 @@
  * workflow-facing facade: explicit named re-exports (never `export *`) of the
  * names the hydra-qa.md shims, scripts/autopilot/qa-verdict-event.sh, the
  * checks-fetch fragment and .github/workflows/deep-qa-gate.yml (via
- * hasFreshDeepQaPass) import from this path. Shrinks to hasFreshDeepQaPass
- * once #5081 rewires the playbook shims.
+ * hasFreshDeepQaPass) import from this path. The playbook shims are gone
+ * (#5081: hydra-qa.md and hydra-target-qa.md call the CLI below); trimming the
+ * re-export list toward hasFreshDeepQaPass is a caller-audit follow-up.
  *
  * Since issue #5080 (slice 3/4) this file is also the engine's CLI — one
  * subcommand per phase, JSON in / JSON out, run only under the main guard
@@ -79,9 +80,9 @@ export {
   renderQaEscalationSummary,
 } from "../../src/qa/round-action.ts";
 
-// temporary bridge — removed when #5081 rewires the playbook shims.
-// The trailer grammar now lives in src/qa/verdict-trailer.ts; the hydra-qa.md
-// shims still `import('./scripts/ci/qa-verdict.ts')` for these names.
+// temporary bridge — the re-export trim is a follow-up (#5081 shipped the
+// playbook rewire; scripts/ci/qa-catch-rate.ts and tests still import these).
+// The trailer grammar lives in src/qa/verdict-trailer.ts.
 export {
   QA_VERDICT_TRAILER_PREFIX,
   QA_VERDICT_UNKNOWN_SHA,
