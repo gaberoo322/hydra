@@ -1726,6 +1726,7 @@
           "issue-label-validation.yml/validate-ready-for-agent",
           "osv-scan.yml/osv-scan",
           "protected-paths.yml/protected-paths",
+          "qa-fix-proof.yml/qa-fix-proof",
           "secret-scan.yml/secret-scan",
           "stryker-check.yml/stryker-check",
           "test-typecheck.yml/test-typecheck",

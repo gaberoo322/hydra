@@ -64,7 +64,7 @@ describe("QA-Verdict trailer — render + parse (issue #4729)", () => {
     for (const verdict of ["PASS", "FAIL", "PASS-pending-CI", "FAIL-pending-CI"] as const) {
       const line = renderQaVerdictTrailer({ verdict, pr: 7, round: 3, sha: HEAD, blockers: 1, maxSeverity: "low" });
       assert.deepEqual(parseQaVerdictTrailer(`header\n\n${line}\n`), {
-        verdict, pr: 7, round: 3, sha: "abcdef012345", blockers: 1, maxSeverity: "low",
+        verdict, pr: 7, round: 3, sha: "abcdef012345", blockers: 1, maxSeverity: "low", qaFixes: [],
       });
     }
   });
@@ -131,6 +131,7 @@ describe("QA-Verdict trailer — every rendered line parses (issue #4746)", () =
             assert.deepEqual(parsed, {
               verdict, pr: 42, round: 2, sha: expectedSha, blockers: b,
               maxSeverity: b === 0 ? "none" : sev === "none" || sev === "bogus" ? "high" : sev,
+              qaFixes: [],
             });
             n += 1;
           }
@@ -219,5 +220,26 @@ describe("QA-Verdict grammar has exactly one owner (issue #5078 INV-1)", () => {
     assert.equal(qaVerdictShaMatches({ sha: "unknown" }, FULL_HEAD), false);
     assert.equal(qaVerdictShaMatches({ sha: FULL_HEAD.slice(0, 12) }, ""), false);
     assert.equal(qaVerdictShaMatches({ sha: FULL_HEAD.slice(0, 12) }, FULL_HEAD), true);
+  });
+});
+
+describe("QA-Verdict trailer — optional qa-fixes= field (#5266)", () => {
+  const BASE = "QA-Verdict: PASS pr=7 round=1 sha=abcdef012345 blockers=0 max_severity=none";
+
+  test("legacy lines parse with qaFixes [] and render byte-identically", () => {
+    const t = parseQaVerdictTrailer(BASE);
+    assert.deepEqual(t?.qaFixes, []);
+    assert.equal(renderQaVerdictTrailer(t!), BASE);
+  });
+  test("qa-fixes= parses as a list and round-trips (12-char prefixes)", () => {
+    const line = `${BASE} qa-fixes=0123456789ab,fedcba987654`;
+    const t = parseQaVerdictTrailer(line);
+    assert.deepEqual(t?.qaFixes, ["0123456789ab", "fedcba987654"]);
+    assert.equal(renderQaVerdictTrailer(t!), line);
+  });
+  test("a malformed qa-fixes= rejects the whole line", () => {
+    assert.equal(parseQaVerdictTrailer(`${BASE} qa-fixes=zzz`), null);
+    assert.equal(parseQaVerdictTrailer(`${BASE} qa-fixes=`), null);
+    assert.equal(parseQaVerdictTrailer(`${BASE} qa-fixes=abcdef0,`), null);
   });
 });

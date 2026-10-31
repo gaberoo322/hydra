@@ -283,6 +283,19 @@
       }
     },
     {
+      "workflow": "qa-fix-proof.yml",
+      "job": "qa-fix-proof",
+      "name": null,
+      "triggers": [
+        "pull_request"
+      ],
+      "required": false,
+      "requiredBy": "ci.yml convention",
+      "source": {
+        "path": ".github/workflows/qa-fix-proof.yml"
+      }
+    },
+    {
       "workflow": "secret-scan.yml",
       "job": "secret-scan",
       "name": null,

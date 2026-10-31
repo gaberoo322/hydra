@@ -377,6 +377,7 @@
   "test/qa-cohort-baseline.test.mts": 7,
   "test/qa-fanout-reversibility.test.mts": 5,
   "test/qa-fanout.test.mts": 1,
+  "test/qa-fix-proof.test.mts": 7,
   "test/qa-fold.test.mts": 11,
   "test/qa-merge-guard-callsites.test.mts": 5,
   "test/qa-merge-guard.test.mts": 4,
