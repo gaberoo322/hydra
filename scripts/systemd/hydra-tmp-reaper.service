@@ -1,0 +1,16 @@
+[Unit]
+Description=Hydra stale test temp-dir reaper for the shared /tmp (2026-10-31 inode exhaustion)
+Documentation=https://github.com/gaberoo322/hydra/issues/5326
+
+[Service]
+Type=oneshot
+Environment=HYDRA_ROOT=%h/hydra
+# Only temp-dir shapes whose whole subtree is untouched for 12h are removed; see the script header.
+ExecStart=/bin/bash -c '${HYDRA_ROOT}/scripts/reap-stale-tmp.sh --apply --max-age 720'
+# The script exits 0 even on a failed removal so the timer stays clean.
+# Operator inspects journalctl --user -u hydra-tmp-reaper for output.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
