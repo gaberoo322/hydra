@@ -508,6 +508,7 @@
   "test/wait-for-health.test.mts": 1,
   "test/watchdog-claude-hooks.test.mts": 3,
   "test/watchdog-deploy-drift.test.mts": 1,
+  "test/watchdog-disk.test.mts": 3,
   "test/watchdog-launch-flow.test.mts": 7,
   "test/watchdog-node-modules-integrity-untouched.test.mts": 1,
   "test/watchdog-node-modules-integrity.test.mts": 4,

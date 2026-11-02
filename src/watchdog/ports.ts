@@ -8,14 +8,17 @@
  * signals through src/process-probe.ts (a syscall, not a binary).
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, statfsSync } from "node:fs";
 import {
   isProbeFailure,
   probeFileLockFree,
   readServiceActiveEnterMonotonicUs,
   readServiceStatus,
+  readTopInodeConsumers,
   restartService,
 } from "../host-probe/probe.ts";
+import { OperatorChannel } from "../operator-channel/channel.ts";
+import type { DiskDeps, StatfsReading } from "./disk.ts";
 import { isLivePid, signalPid } from "../process-probe.ts";
 import { countOpenBoard } from "../autopilot/turn-snapshot/board-saturation.ts";
 import { createTurnSnapshotGithub, type TurnSnapshotGithub } from "../autopilot/turn-snapshot/github-port.ts";
@@ -344,6 +347,35 @@ export function createProductionLivenessDeps(
         }),
     },
     clock: { nowMs: () => Date.now() },
+    log,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// TMPFS EXHAUSTION ports (issue #5327)
+// ---------------------------------------------------------------------------
+
+/** `statfs(path)` via the stdlib syscall (no spawn), or `null` when unreadable. */
+export function readStatfs(path: string): StatfsReading | null {
+  try {
+    const s = statfsSync(path);
+    return { blocks: s.blocks, bfree: s.bfree, bavail: s.bavail, bsize: s.bsize, files: s.files, ffree: s.ffree };
+  } catch {
+    /* intentional: an unreadable mount is the verdict input — decideDisk logs WARN and holds the episode */
+    return null;
+  }
+}
+
+export function createProductionDiskDeps(log: (line: string) => void): DiskDeps {
+  const channel = new OperatorChannel();
+  return {
+    statfs: readStatfs,
+    async topInodeConsumers(path, limit) {
+      const r = await readTopInodeConsumers(path, limit);
+      return r.ok ? r.data.map((c) => `${c.path} ${c.inodes}`) : null;
+    },
+    page: (msg) => channel.page(msg),
+    resolve: (key, title) => channel.resolve(key, title),
     log,
   };
 }

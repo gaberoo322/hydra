@@ -17,6 +17,7 @@
 
 import {
   dfBin,
+  duBin,
   freeBin,
   flockBin,
   systemctlBin,
@@ -304,6 +305,82 @@ export async function probeFileLockFree(
   if (raw.exitCode === 1) return { ok: true, data: { held: true } };
   logger.error({ path, exitCode: raw.exitCode }, "[host-probe] flock probe exited unexpectedly");
   return { ok: false, code: "host-probe-failed" };
+}
+
+/** One name-prefix group's inode count under a root (e.g. `/tmp/hydra-*`). */
+export interface InodeConsumer {
+  path: string;
+  inodes: number;
+}
+
+/**
+ * The grouping key for one top-level entry: everything from the first digit on
+ * becomes `*`, so `hydra-pace-1730000000.json` and `hydra-pace-1730000120.json`
+ * both count toward `hydra-pace-*`. A leak is thousands of sibling temp files
+ * as often as one huge directory, and only the prefix names the leaker.
+ */
+export function inodePrefixKey(basename: string): string {
+  return basename.replace(/[0-9].*$/, "*");
+}
+
+/**
+ * Pure parse of `du --inodes -x -a -d1 <root>` stdout into the top `limit`
+ * consumers by inode count, descending, grouped by {@link inodePrefixKey}. The
+ * `<root>` total line itself is dropped; malformed lines are skipped (a
+ * maxBuffer-truncated last line included). Exported for unit tests.
+ */
+export function parseDuInodesOutput(stdout: string, root: string, limit: number): InodeConsumer[] {
+  const rootNorm = root.replace(/\/+$/, "") || "/";
+  const groups = new Map<string, number>();
+  for (const line of stdout.split("\n")) {
+    const m = /^(\d+)\s+(.+)$/.exec(line.trim());
+    if (!m) continue;
+    const path = m[2].replace(/\/+$/, "") || "/";
+    if (path === rootNorm) continue;
+    const base = path.slice(path.lastIndexOf("/") + 1);
+    const key = `${rootNorm === "/" ? "" : rootNorm}/${inodePrefixKey(base)}`;
+    groups.set(key, (groups.get(key) ?? 0) + Number(m[1]));
+  }
+  return [...groups]
+    .map(([path, inodes]) => ({ path, inodes }))
+    .sort((a, b) => b.inodes - a.inodes)
+    .slice(0, Math.max(0, limit));
+}
+
+/** Bound on the `du --inodes` walk: a 1M-inode tmpfs walks in a few seconds. */
+export const DU_INODES_TIMEOUT_MS = 20_000;
+/** One line per top-level entry; a 1M-inode flat /tmp is ~30MB of `du -a` output. */
+export const DU_INODES_MAX_BUFFER = 32 * 1024 * 1024;
+
+/**
+ * Top inode consumers directly under `root`, grouped by name prefix (issue
+ * #5327): `du --inodes -x -a -d1 <root>`, bounded by
+ * {@link DU_INODES_TIMEOUT_MS}. du exits 1 when a subtree is
+ * unreadable (another user's private dir) yet still prints every readable
+ * entry, so exit 1 with parseable rows is a success; a spawn failure, a
+ * timeout, or no parseable row is a failure. Never throws.
+ */
+export async function readTopInodeConsumers(
+  root: string,
+  limit: number,
+  opts: ProbeExecOptions = {},
+): Promise<ProbeResult<InodeConsumer[]>> {
+  const raw = await runProbe(duBin(), ["--inodes", "-x", "-a", "-d1", root], {
+    timeout: DU_INODES_TIMEOUT_MS,
+    maxBuffer: DU_INODES_MAX_BUFFER,
+    ...opts,
+  });
+  if (raw.spawnErrorCode || raw.timedOut || (raw.exitCode !== 0 && raw.exitCode !== 1)) {
+    const code = classifyProbeFailure(raw);
+    logger.error({ root, code, exitCode: raw.exitCode }, "[host-probe] du --inodes failed");
+    return { ok: false, code };
+  }
+  const parsed = parseDuInodesOutput(raw.stdout, root, limit);
+  if (parsed.length === 0 && raw.exitCode !== 0) {
+    logger.error({ root, exitCode: raw.exitCode }, "[host-probe] du --inodes produced no parseable row");
+    return { ok: false, code: "host-probe-empty" };
+  }
+  return { ok: true, data: parsed };
 }
 
 /** Restart timeout: `systemctl --user restart` blocks until the unit settles (the orchestrator runs tsc in ExecStartPre). */
