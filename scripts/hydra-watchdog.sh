@@ -94,8 +94,8 @@ run_wedge_cli() { run_watchdog_cli wedge "hydra-autopilot-watchdog:" 90; }
 # TMPFS EXHAUSTION (issue #5327): /tmp + /dev/shm inode and space use, graded
 # independently, paged through the Operator Channel once per episode — the
 # 2026-10-31 inode-full outage was silent. Lives in src/watchdog/disk.ts; the
-# 60s bound covers the 20s-capped `du --inodes` walk plus the channel calls.
-run_disk_cli() { run_watchdog_cli disk "hydra-disk-watchdog:" 60; }
+# 90s bound covers the 20s-capped `du --inodes` walk plus the channel calls.
+run_disk_cli() { run_watchdog_cli disk "hydra-disk-watchdog:" 90; }
 
 # =============================================================================
 # ## DEPLOY DRIFT

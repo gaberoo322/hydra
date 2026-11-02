@@ -91,13 +91,16 @@ async function main(argv: string[]): Promise<void> {
   }
   if (cmd === "disk") {
     try {
+      let warnPct = parsePct(process.env.HYDRA_WATCHDOG_DISK_WARN_PCT, DEFAULT_DISK_WARN_PCT);
+      let criticalPct = parsePct(process.env.HYDRA_WATCHDOG_DISK_CRITICAL_PCT, DEFAULT_DISK_CRITICAL_PCT);
+      if (warnPct >= criticalPct) {
+        console.log(`${DISK_LOG_PREFIX} WARN warn pct ${warnPct} >= critical pct ${criticalPct} — using defaults`);
+        warnPct = DEFAULT_DISK_WARN_PCT;
+        criticalPct = DEFAULT_DISK_CRITICAL_PCT;
+      }
       await runDisk(createProductionDiskDeps((line) => console.log(line)), {
         paths: parseDiskPaths(process.env.HYDRA_WATCHDOG_DISK_PATHS),
-        thresholds: {
-          warnPct: parsePct(process.env.HYDRA_WATCHDOG_DISK_WARN_PCT, DEFAULT_DISK_WARN_PCT),
-          criticalPct: parsePct(process.env.HYDRA_WATCHDOG_DISK_CRITICAL_PCT, DEFAULT_DISK_CRITICAL_PCT),
-          recoverMarginPct: DISK_RECOVER_MARGIN_PCT,
-        },
+        thresholds: { warnPct, criticalPct, recoverMarginPct: DISK_RECOVER_MARGIN_PCT },
       });
     } catch (err) {
       console.log(`${DISK_LOG_PREFIX} WARN ${err instanceof Error ? err.message : String(err)}`);

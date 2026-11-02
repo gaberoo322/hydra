@@ -20,7 +20,7 @@
  *
  * Severity: a `critical` mount pages its critical key and HOLDS its warn key
  * (one message per escalation, not two); dropping back into the warn band
- * resolves critical and pages warn if it was never paged.
+ * neither resolves critical nor re-pages warn (one episode; it resolves once, below warn - margin).
  *
  * `decideDisk` is pure (no I/O). `runDisk` is the only impure function, over the
  * {@link DiskDeps} ports; the page text names the top inode consumers by name
@@ -144,7 +144,10 @@ export function decideDisk(path: string, reading: StatfsReading | null, t: DiskT
   const level = RANK[inodeLevel] >= RANK[blockLevel] ? inodeLevel : blockLevel;
   const freeBytes = reading.bavail * reading.bsize;
 
-  const critical = actionFor(inodePct, blockPct, t.criticalPct, t.recoverMarginPct);
+  // The critical key is one episode: it is resolved only when the WHOLE episode
+  // ends (below warn - margin), never on a critical->warn drop (INV-3).
+  let critical = actionFor(inodePct, blockPct, t.criticalPct, t.recoverMarginPct);
+  if (critical === "resolve" && actionFor(inodePct, blockPct, t.warnPct, t.recoverMarginPct) !== "resolve") critical = "hold";
   let warn = actionFor(inodePct, blockPct, t.warnPct, t.recoverMarginPct);
   // One message per escalation: while critical, the warn episode is held.
   if (critical === "page") warn = "hold";
@@ -172,7 +175,7 @@ export function diskPageMessage(
   v: DiskVerdict,
   level: "warn" | "critical",
   t: DiskThresholds,
-  topConsumers: string[] | null,
+  topConsumers: string[] | null | undefined,
 ): OperatorMessage {
   const dims: string[] = [];
   const thr = level === "critical" ? t.criticalPct : t.warnPct;
@@ -185,7 +188,14 @@ export function diskPageMessage(
     { label: "threshold", value: `${level} >= ${thr}%` },
     {
       label: "top inode users",
-      value: topConsumers === null ? "unavailable (du failed or timed out)" : topConsumers.length ? topConsumers.join(", ") : "none",
+      value:
+        topConsumers === undefined
+          ? "not re-scanned (episode already open)"
+          : topConsumers === null
+            ? "unavailable (du failed or timed out)"
+            : topConsumers.length
+              ? topConsumers.join(", ")
+              : "none",
     },
   ];
   return {
@@ -203,6 +213,8 @@ export interface DiskDeps {
   statfs(path: string): StatfsReading | null;
   /** Top inode consumers under `path` as `"<path> <count>"` strings, or `null` when the walk failed. */
   topInodeConsumers(path: string, limit: number): Promise<string[] | null>;
+  /** Whether the dedupKey has an open episode; `null` = unknown (fail open). */
+  isOpen(dedupKey: string): Promise<boolean | null>;
   page(msg: OperatorMessage): Promise<unknown>;
   resolve(dedupKey: string, title: string): Promise<unknown>;
   log: (line: string) => void;
@@ -221,17 +233,29 @@ export async function runDisk(deps: DiskDeps, config: DiskConfig): Promise<DiskV
     const v = decideDisk(path, deps.statfs(path), config.thresholds);
     verdicts.push(v);
     say(v.log);
-    let consumers: string[] | null | undefined;
-    for (const level of ["critical", "warn"] as const) {
-      const action = v.actions[level];
-      const key = diskDedupKey(path, level);
-      if (action === "page") {
-        if (consumers === undefined) consumers = await deps.topInodeConsumers(path, DISK_TOP_CONSUMERS);
-        await deps.page(diskPageMessage(v, level, config.thresholds, consumers));
-        say(`${level} page submitted for ${path} (dedupKey=${key}; the channel suppresses repeats within the episode)`);
-      } else if (action === "resolve") {
-        await deps.resolve(key, `${path} ${level} cleared: inodes ${v.inodePct ?? "n/a"}%, space ${v.blockPct ?? "n/a"}%`);
+    // Per-mount isolation (INV-4): a channel/du failure on one mount must not skip the next.
+    try {
+      let consumers: string[] | null | undefined;
+      for (const level of ["critical", "warn"] as const) {
+        const action = v.actions[level];
+        const key = diskDedupKey(path, level);
+        if (action === "page") {
+          if (level === "warn") {
+            // critical->warn is the same episode: never re-page warn while critical is open (or unknown).
+            if ((await deps.isOpen(diskDedupKey(path, "critical"))) !== false) continue;
+          }
+          // du only when this key has no open episode (the first page of an episode); repeats are channel-suppressed.
+          if (consumers === undefined && (await deps.isOpen(key)) !== true) {
+            consumers = await deps.topInodeConsumers(path, DISK_TOP_CONSUMERS);
+          }
+          await deps.page(diskPageMessage(v, level, config.thresholds, consumers));
+          say(`${level} page submitted for ${path} (dedupKey=${key}; the channel suppresses repeats within the episode)`);
+        } else if (action === "resolve") {
+          await deps.resolve(key, `${path} ${level} cleared: inodes ${v.inodePct ?? "n/a"}%, space ${v.blockPct ?? "n/a"}%`);
+        }
       }
+    } catch (err) {
+      say(`WARN ${path}: channel/du step failed — continuing with the next mount: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return verdicts;

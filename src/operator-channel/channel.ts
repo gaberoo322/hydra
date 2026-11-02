@@ -304,6 +304,16 @@ export class OperatorChannel {
     return res;
   }
 
+  /**
+   * Whether `dedupKey` currently has an open (bad) episode: `true`/`false`, or
+   * `null` when the store is unreadable (callers fail open). Read-only.
+   */
+  async isOpen(dedupKey: string): Promise<boolean | null> {
+    const prev = await this.bounded("readDedup", () => this.store.readDedup(dedupKey));
+    if (prev === UNAVAILABLE) return this.localSent.has(dedupKey) ? true : null;
+    return prev !== null;
+  }
+
   /** Publish one "recovered" message iff the key is bad, then clear it. */
   async resolve(dedupKey: string, title?: string): Promise<ChannelResult> {
     return this.serialize(dedupKey, () => this.resolveUnlocked(dedupKey, title));
