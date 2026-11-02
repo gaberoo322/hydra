@@ -27,6 +27,9 @@ type Door = OneWayDoorResult["door"];
 type Verdict = FindingsFoldResult["reviewVerdict"];
 
 // NAMED FOLLOW-UP: wire shadowFold + renderQaShadowLine into the fold phase and ask pair reviewers for a door call (P2 #5264, INV-9).
+/** Machine-checkable (code-level) form of the follow-up marker above. */
+export const SHADOW_FOLD_WIRING_FOLLOW_UP =
+  "NAMED FOLLOW-UP: wire shadowFold + renderQaShadowLine into the fold phase (P2 #5264, INV-9)";
 export const QA_SHADOW_PREFIX = "QA-Shadow:";
 export const QA_SHADOW_UNKNOWN_SHA = "unknown";
 
