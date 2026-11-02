@@ -207,6 +207,52 @@ describe("qa-merge-guard — qa-fix-proof hold (#5266)", () => {
     });
   }
 
+  test("qa-fixes= naming a commit WITHOUT a QA-Fix trailer -> denied (red without cross-check)", () => {
+    const r = evaluateQaMergeGuard(
+      input({
+        bodies: [withFixes("PASS", HEAD)],
+        qaFixProof: "success",
+        prCommits: [{ sha: "abcdef0123456789", qaFix: false }],
+      }),
+    );
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, "qa-fix-proof-not-green");
+  });
+
+  test("sibling: qa-fixes= naming a trailered PR commit + proof success -> allowed", () => {
+    const r = evaluateQaMergeGuard(
+      input({
+        bodies: [withFixes("PASS", HEAD)],
+        qaFixProof: "success",
+        prCommits: [{ sha: "abcdef0123456789", qaFix: true }],
+      }),
+    );
+    assert.equal(r.allowed, true);
+  });
+
+  test("reviewer commits + PR edits the proof workflow -> denied even when proof success", () => {
+    const r = evaluateQaMergeGuard(
+      input({
+        bodies: [trailer("PASS", HEAD)],
+        qaFixCommitPresent: true,
+        qaFixProof: "success",
+        changedFiles: ["src/x.ts", ".github/workflows/qa-fix-proof.yml"],
+      }),
+    );
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, "qa-fix-proof-not-green");
+  });
+
+  test("sibling: PR editing the proof workflow with NO reviewer commits is unaffected", () => {
+    const r = evaluateQaMergeGuard(
+      input({
+        bodies: [trailer("PASS", HEAD)],
+        changedFiles: [".github/workflows/qa-fix-proof.yml"],
+      }),
+    );
+    assert.equal(r.allowed, true);
+  });
+
   test("result JSON carries qaFixProof and qaFixCommitPresent", () => {
     const r = evaluateQaMergeGuard(
       input({ bodies: [trailer("PASS", HEAD)], qaFixCommitPresent: true, qaFixProof: "success" }),

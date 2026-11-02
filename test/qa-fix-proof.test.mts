@@ -7,7 +7,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -437,6 +437,25 @@ describe("qa-fix-proof — CLI against a real temp git repo (INV-9/INV-10/INV-11
       const r = run(dir, base, git(dir, "rev-parse", "HEAD"));
       assert.equal(r.status, 1, r.stdout + r.stderr);
       assert.equal(JSON.parse(r.stdout).reason, "unproven");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("qa-fix-proof CLI entrypoint guard (#5266 round 3)", () => {
+  test("invoked via a symlinked path with a space still runs (usage exit 2, not silent 0)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "qfp link-"));
+    try {
+      const link = join(dir, "qa fix proof.ts");
+      symlinkSync(join(REPO_ROOT, "scripts/ci/qa-fix-proof.ts"), link);
+      const r = spawnSync(
+        process.execPath,
+        ["--no-warnings", "--experimental-strip-types", link],
+        { encoding: "utf8", cwd: REPO_ROOT },
+      );
+      assert.equal(r.status, 2, r.stderr);
+      assert.match(r.stderr, /usage/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

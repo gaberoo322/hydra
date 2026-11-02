@@ -13,6 +13,8 @@
  *   node --experimental-strip-types scripts/ci/qa-fix-proof.ts --base <sha> --head <sha>
  */
 
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   evaluateQaFixProof,
   parseTapAssertionProof,
@@ -42,15 +44,13 @@ export function parseGitLog(out: string): Array<{ sha: string; message: string }
 
 const isMain = (() => {
   try {
-    return (
-      typeof process !== "undefined" &&
-      Array.isArray(process.argv) &&
-      typeof import.meta.url === "string" &&
-      process.argv[1] !== undefined &&
-      import.meta.url === `file://${process.argv[1]}`
-    );
-  } catch {
-    /* intentional: import.meta may be unavailable under some loaders; treat as not-main */
+    if (typeof process === "undefined" || !Array.isArray(process.argv) || process.argv[1] === undefined) {
+      return false;
+    }
+    // realpath both sides: a symlinked or space-containing argv[1] must still match.
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+  } catch (err) {
+    console.error("[qa-fix-proof] could not resolve entrypoint; treating as not-main:", err);
     return false;
   }
 })();

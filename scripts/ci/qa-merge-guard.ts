@@ -106,7 +106,26 @@ export interface QaMergeGuardInput {
   qaFixProof?: QaFixProofState;
   /** Any PR commit carries a `QA-Fix:` trailer; default false. */
   qaFixCommitPresent?: boolean;
+  /**
+   * The PR's commits with whether each carries a parsed `QA-Fix:` trailer.
+   * When supplied, every `qa-fixes=<sha>` the PASS names must be a PR commit
+   * WITH the trailer (else an untrailered reviewer commit escapes the proof).
+   * Undefined = not supplied (legacy callers); the CLI fetcher always supplies it.
+   */
+  prCommits?: ReadonlyArray<{ sha: string; qaFix: boolean }>;
 }
+
+/**
+ * The proof machinery. A PR that edits any of these cannot lean on reviewer
+ * commits: a `pull_request` run uses the PR's own workflow copy, so the
+ * check-run would be self-attested.
+ */
+export const QA_FIX_PROOF_MACHINERY: readonly string[] = [
+  ".github/workflows/qa-fix-proof.yml",
+  "scripts/ci/qa-fix-proof.ts",
+  "src/qa/fix-proof.ts",
+  "src/qa/rollout-switches.ts",
+];
 
 /** True iff `path` lies under one of `QA_EXEMPT_PATH_PREFIXES`. */
 export function isQaExemptPath(path: string): boolean {
@@ -171,9 +190,21 @@ export function evaluateQaMergeGuard(input: QaMergeGuardInput): QaMergeGuardResu
   const decision = decideBase();
   // Final hold (#5266): reviewer commits need a green qa-fix-proof. Only ever
   // narrows an allow to a deny — every earlier denial keeps its own reason.
-  const proofNeeded = (latest?.qaFixes ?? []).length > 0 || qaFixCommitPresent;
-  if (decision.allowed && proofNeeded && qaFixProof !== "success") {
-    return result(false, "qa-fix-proof-not-green");
+  const named = latest?.qaFixes ?? [];
+  const proofNeeded = named.length > 0 || qaFixCommitPresent;
+  if (decision.allowed && proofNeeded) {
+    if (qaFixProof !== "success") return result(false, "qa-fix-proof-not-green");
+    // The proof machinery itself is under edit: its green is self-attested.
+    const tampered = (input.changedFiles ?? []).some((f) =>
+      QA_FIX_PROOF_MACHINERY.includes(String(f).trim().replace(/^\.\//, "")),
+    );
+    if (tampered) return result(false, "qa-fix-proof-not-green");
+    // Every qa-fixes=<sha> must be a PR commit that carries a parsed QA-Fix trailer.
+    if (input.prCommits !== undefined) {
+      const trailered = input.prCommits.filter((c) => c.qaFix).map((c) => c.sha.toLowerCase());
+      const unproven = named.some((n) => !trailered.some((sha) => sha.startsWith(n)));
+      if (unproven) return result(false, "qa-fix-proof-not-green");
+    }
   }
   return decision;
 }
@@ -188,6 +219,8 @@ export interface QaMergeGuardFetched {
   qaFixProof?: QaFixProofState;
   /** Any PR commit message carries a `QA-Fix:` trailer (#5266). */
   qaFixCommitPresent?: boolean;
+  /** PR commits + QA-Fix trailer presence (#5266). */
+  prCommits?: Array<{ sha: string; qaFix: boolean }>;
 }
 
 /** Fetcher seam — the CLI wires REST `gh api`; tests inject a fake. */
@@ -232,6 +265,7 @@ export function runQaMergeGuard(
     bodies: ordered.map((e) => e.body),
     qaFixProof: fetched.qaFixProof,
     qaFixCommitPresent: fetched.qaFixCommitPresent,
+    prCommits: fetched.prCommits,
   });
 }
 
@@ -304,20 +338,23 @@ if (isMain) {
       const headSha = String(head[0] ?? "");
       const proofRows = ghApiLines(
         `repos/${repo}/commits/${headSha}/check-runs?check_name=qa-fix-proof&per_page=100`,
-        '[.check_runs[]] | sort_by(.started_at) | if length == 0 then "absent" else (last | if .status != "completed" then "pending" elif .conclusion == "success" then "success" else "failure" end) end | tojson',
+        '[.check_runs[]] | sort_by(.started_at // .created_at // "") | if length == 0 then "absent" else (last | if .status != "completed" then "pending" elif .conclusion == "success" then "success" else "failure" end) end | tojson',
         false,
       );
       const commitMessages = ghApiLines(
         `repos/${repo}/pulls/${n}/commits?per_page=100`,
-        ".[] | .commit.message | tojson",
+        "(.[] | {sha, message: .commit.message}) | tojson",
         true,
       );
+      const prCommits = (commitMessages as Array<{ sha?: unknown; message?: unknown }>).map((c) => ({
+        sha: String(c.sha ?? ""),
+        qaFix: parseQaFixCommitTrailer(String(c.message ?? "")).present,
+      }));
       return {
         headSha,
         qaFixProof: String(proofRows[0] ?? "absent") as QaFixProofState,
-        qaFixCommitPresent: commitMessages.some(
-          (m) => parseQaFixCommitTrailer(String(m)).present,
-        ),
+        qaFixCommitPresent: prCommits.some((c) => c.qaFix),
+        prCommits,
         changedFiles: files.map((f) => String(f)),
         entries: [...comments, ...reviews] as QaMergeGuardFetched["entries"],
       };
