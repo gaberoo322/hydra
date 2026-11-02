@@ -7,7 +7,6 @@ import {
   type ShadowFoldInput,
 } from "../src/qa/shadow-fold.ts";
 import type { ReversibilityRecord } from "../src/qa/fanout.ts";
-import { readFileSync } from "node:fs";
 import { parseQaVerdictTrailers } from "../src/qa/verdict-trailer.ts";
 
 const QUARTET = ["reviewer-A-standards", "reviewer-A-spec", "reviewer-B-standards", "reviewer-B-spec"];
@@ -114,6 +113,11 @@ describe("shadowFold counterfactual", () => {
     });
   }
 
+  it("not applicable: off", () => {
+    const cf = shadowFold(shadowInput(emptyMap(QUARTET), { reversibility: record({ twoWayPair: "off" }) })).counterfactual;
+    assert.deepEqual(cf, { applicable: false, reason: "two-way-pair-off" });
+  });
+
   it("not applicable: no A reviewer spawned", () => {
     const names = ["reviewer-B-standards", "reviewer-B-spec"];
     const cf = shadowFold(shadowInput(emptyMap(names), { spawnedReviewers: names })).counterfactual;
@@ -178,11 +182,6 @@ describe("shadowFold top-up and detector gaps", () => {
     const r = shadowFold(pairInput({ spec: "one-way" }, record({ reductionApplied: false })));
     assert.equal(r.topUp.required, false);
     assert.equal(r.topUp.reason, "pair-not-reduced");
-  });
-
-  it("INV-2: fold.ts carries no shadow text", () => {
-    const src = readFileSync(new URL("../src/qa/fold.ts", import.meta.url), "utf8");
-    assert.equal(/shadow/i.test(src), false);
   });
 
   it("no reviewer call / absent doors / two-way call: no top-up", () => {

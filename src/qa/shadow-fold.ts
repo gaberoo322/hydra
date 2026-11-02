@@ -26,6 +26,7 @@ import type { OneWayDoorResult } from "./one-way-door.ts";
 type Door = OneWayDoorResult["door"];
 type Verdict = FindingsFoldResult["reviewVerdict"];
 
+// NAMED FOLLOW-UP: wire shadowFold + renderQaShadowLine into the fold phase and ask pair reviewers for a door call (P2 #5264, INV-9).
 export const QA_SHADOW_PREFIX = "QA-Shadow:";
 export const QA_SHADOW_UNKNOWN_SHA = "unknown";
 
