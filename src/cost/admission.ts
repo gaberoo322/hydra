@@ -22,14 +22,17 @@
 import type { UsageEligibility } from "./eligibility.ts";
 
 /**
- * Every `record_tick "<reason>"` literal pace-gate.sh writes, in ladder order.
- * `test/admission.test.mts` drift-guards this tuple against the script.
+ * The whole tick-reason vocabulary (21 reasons); decideAdmission owns ladder
+ * order for the ones it returns. `test/admission.test.mts` drift-guards this
+ * tuple against pace-gate.sh's literal `record_tick` calls.
  *
- * Bash-emitted only (decideAdmission never returns them): `curl-missing`,
- * `jq-missing`, `eligibility-unreachable`, `eligibility-unparseable`,
- * `allow-invalid` (fail-safe transport arms stay in bash — the one decision the
- * gate must make without the service) and `token-refresh-nudge` (moves in a
- * later slice).
+ * Bash-emitted literals (decideAdmission never returns them), the only
+ * `record_tick "<literal>"` calls left in pace-gate.sh after #5102:
+ * `curl-missing`, `jq-missing`, `eligibility-unreachable`,
+ * `eligibility-unparseable`, `allow-invalid` (the admission object the gate
+ * consumes is missing or malformed — post-#5102) and `token-refresh-nudge`
+ * (moves into the verdict in #5103). Every other reason reaches bash only as
+ * the typed `.admission.reason` and is recorded verbatim.
  */
 export const ADMISSION_REASONS = [
   "already-running-service",

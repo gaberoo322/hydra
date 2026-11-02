@@ -74,7 +74,7 @@ export function resolveRolloutSwitches(raw: unknown, trip: TripState): RolloutSw
   return { configured, effective, trip: { state: trip }, reasons };
 }
 
-function tripFromBaseline(text: string): TripState {
+export function tripFromBaseline(text: string): TripState {
   try {
     const doc = JSON.parse(text) as { metrics?: { tripped?: unknown } };
     const t = doc?.metrics?.tripped;

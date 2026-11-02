@@ -30,7 +30,7 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | ~~`src/knowledge-base/`~~ | ~~Knowledge Base, OpenViking Request Adapter~~ — **RETIRED**, directory deleted | n/a | ADR-0033 | — |
 | ~~`src/anchor-selection/`~~ | ~~Reframe Queue~~ — **RETIRED**, directory deleted; ~~Candidate Feed~~ retired with it (#3455) | n/a | ADR-0010, ADR-0036 | — |
 | `src/design-concept.ts`, `src/redis/design-concept.ts` | Design Concept | n/a | ADR-0008, ADR-0018 | — |
-| backlog / GitHub issues | Epic, Focus Label | n/a | ADR-0003, ADR-0031 | [Issue tracker](docs/agents/issue-tracker.md), [Triage labels](docs/agents/triage-labels.md), [Rate-limit handling](docs/reference.md#github-api-rate-limit-handling-issue-3137) |
+| backlog / GitHub issues | Epic, Focus Label | n/a | ADR-0003, ADR-0031, ADR-0047 | [Issue tracker](docs/agents/issue-tracker.md), [Triage labels](docs/agents/triage-labels.md), [Rate-limit handling](docs/reference.md#github-api-rate-limit-handling-issue-3137) |
 | self-modification | Modification Tier, Verifier Core, Outcome Holdback | n/a | ADR-0001, ADR-0004, ADR-0005, ADR-0015, ADR-0019, ADR-0020 | [Modification Tiers](docs/reference.md#modification-tiers-issue-243-adr-0001--adr-0004--adr-0015), [Outcome Holdback](docs/reference.md#outcome-holdback--post-merge-regression-check-issue-786-adr-0004-step-4) |
 
 ### Non-`src/` areas

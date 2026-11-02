@@ -14,9 +14,9 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import {
-  buildTargetQaVerdictTrailer,
   classifyTargetQaPath as classifyPathRaw,
   classifyTargetQaVerdict as classifyVerdictRaw,
   type TargetReviewVerdicts,
@@ -195,78 +195,6 @@ describe("classifyTargetQaVerdict — invariants", () => {
   });
 
   describe("QA-Verdict trailer (issue #4796)", () => {
-    const SHA = "0123456789abcdef0123456789abcdef01234567";
-    // Independent grammar check (the canonical #4729 line) — deliberately not
-    // importing the orchestrator parser so this file keeps a single subject.
-    const parseQaVerdictTrailer = (line: string) => {
-      const m = line.match(
-        /^QA-Verdict: (PASS|FAIL) pr=(\d+) round=(\d+) sha=([0-9a-f]{7,12}|unknown) blockers=(\d+) max_severity=(high|none)$/,
-      );
-      if (!m) return null;
-      return {
-        verdict: m[1],
-        pr: Number(m[2]),
-        round: Number(m[3]),
-        sha: m[4],
-        blockers: Number(m[5]),
-        maxSeverity: m[6],
-      };
-    };
-
-    test("builder output parses with parseQaVerdictTrailer to the expected fields", () => {
-      const line = buildTargetQaVerdictTrailer({
-        verdict: "FAIL",
-        pr: 42,
-        headSha: SHA.toUpperCase(),
-        blockers: 3,
-        priorBodies: [],
-      });
-      assert.deepEqual(parseQaVerdictTrailer(line), {
-        verdict: "FAIL",
-        pr: 42,
-        round: 1,
-        sha: "0123456789ab",
-        blockers: 3,
-        maxSeverity: "high",
-      });
-    });
-
-    test("PASS forces blockers=0 / none; FAIL floors blockers at 1 and renders high", () => {
-      const pass = parseQaVerdictTrailer(
-        buildTargetQaVerdictTrailer({ verdict: "PASS", pr: 7, headSha: SHA, blockers: 5, priorBodies: [] }),
-      );
-      assert.equal(pass?.verdict, "PASS");
-      assert.equal(pass?.blockers, 0);
-      assert.equal(pass?.maxSeverity, "none");
-      const fail = parseQaVerdictTrailer(
-        buildTargetQaVerdictTrailer({ verdict: "FAIL", pr: 7, headSha: SHA, blockers: 0, priorBodies: [] }),
-      );
-      assert.equal(fail?.blockers, 1);
-      assert.equal(fail?.maxSeverity, "high");
-    });
-
-    test("round counts only prior trailers naming the same PR", () => {
-      const mine = buildTargetQaVerdictTrailer({ verdict: "FAIL", pr: 9, headSha: SHA, blockers: 1, priorBodies: [] });
-      const other = buildTargetQaVerdictTrailer({ verdict: "FAIL", pr: 10, headSha: SHA, blockers: 1, priorBodies: [] });
-      const next = parseQaVerdictTrailer(
-        buildTargetQaVerdictTrailer({
-          verdict: "PASS",
-          pr: 9,
-          headSha: SHA,
-          blockers: 0,
-          priorBodies: [`human text\n\n${mine}`, other, null, undefined],
-        }),
-      );
-      assert.equal(next?.round, 2);
-    });
-
-    test("an empty or non-hex headSha renders sha=unknown", () => {
-      for (const headSha of ["", "not-a-sha"]) {
-        const line = buildTargetQaVerdictTrailer({ verdict: "PASS", pr: 1, headSha, blockers: 0, priorBodies: [] });
-        assert.match(line, / sha=unknown /);
-      }
-    });
-
     test("the fold exposes blockers: 0 on PASS, 1 on Standards FAIL, failing-axis count on risk-critical", () => {
       assert.equal(classifyTargetQaVerdict(["docs/x.md"], { standards: "PASS" }).blockers, 0);
       assert.equal(classifyTargetQaVerdict(["web/x.tsx"], { standards: "FAIL" }).blockers, 1);
@@ -284,7 +212,10 @@ describe("classifyTargetQaVerdict — invariants", () => {
         resolve(import.meta.dirname, "..", "docs", "operator-playbooks", "hydra-target-qa.md"),
         "utf-8",
       );
-      assert.ok(md.includes("buildTargetQaVerdictTrailer"));
+      assert.ok(md.includes("scripts/ci/qa-verdict.ts trailer"), "the Target playbook renders the trailer through the one engine CLI");
+      assert.ok(!md.includes("buildTargetQaVerdictTrailer"), "the Target-specific builder is gone");
+      assert.ok(!/QA-Verdict: \(PASS\|FAIL\)/.test(md), "no hand-copied QA-Verdict regex");
+      assert.ok(!md.includes("npx tsx -e"), "no inline tsx shim");
       assert.ok(
         md.includes(
           "QA-Verdict: <PASS|FAIL> pr=<N> round=<k> sha=<head12> blockers=<n> max_severity=<high|none>",
@@ -297,5 +228,40 @@ describe("classifyTargetQaVerdict — invariants", () => {
         assert.ok(body.includes("QA_VERDICT_TRAILER"), "every verdict post must reference QA_VERDICT_TRAILER");
       }
     });
+  });
+});
+
+// QA round-1 finding on #5306: the removed buildTargetQaVerdictTrailer clamped
+// FAIL to blockers>=1 and PASS to 0; the playbook's jq projection must keep that.
+describe("hydra-target-qa.md trailer jq projection — verdict/blockers clamp", () => {
+  const md = readFileSync(
+    resolve(import.meta.dirname, "..", "docs", "operator-playbooks", "hydra-target-qa.md"),
+    "utf-8",
+  );
+  const start = md.indexOf("'{pr: $pr, headSha: $headSha");
+  const filter = md.slice(start + 1, md.indexOf("}'", start) + 1);
+  const project = (verdict: string, blockers: number) => {
+    const r = spawnSync(
+      "jq",
+      ["-n", "-c", "--argjson", "pr", "7", "--arg", "verdict", verdict, "--arg", "headSha", "abc1234",
+       "--argjson", "blockers", String(blockers), "--argjson", "prior", "[[]]", filter],
+      { encoding: "utf-8" },
+    );
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout);
+  };
+
+  test("FAIL with 0 blockers projects blockers=1 / high (red without the clamp)", () => {
+    const o = project("FAIL", 0);
+    assert.equal(o.verdict, "FAIL");
+    assert.equal(o.blockers, 1);
+    assert.equal(o.maxSeverity, "high");
+  });
+
+  test("sibling shapes: FAIL keeps its count, PASS forces 0/none, non-PASS coerces to FAIL", () => {
+    assert.equal(project("FAIL", 3).blockers, 3);
+    const pass = project("PASS", 5);
+    assert.deepEqual([pass.verdict, pass.blockers, pass.maxSeverity], ["PASS", 0, "none"]);
+    assert.equal(project("weird", 0).verdict, "FAIL");
   });
 });

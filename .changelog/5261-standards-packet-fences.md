@@ -1,0 +1,1 @@
+- refactor: inline CODING_STANDARDS.md into the Standards QA packet and trim CLAUDE.md to rule-ID fences (#5261)
