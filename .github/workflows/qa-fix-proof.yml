@@ -1,0 +1,70 @@
+name: qa-fix-proof
+
+# Reviewer-commit proof (issue #5266, ADR-0046 Decision 2).
+#
+# Verifies every commit carrying a `QA-Fix: <A|B>` trailer: explicit path
+# allowlist per class, class permitted by the rollout stage read at the BASE
+# ref, and class-B tests fail BY ASSERTION at the merge-base. A PR with no
+# QA-Fix commit passes in seconds without `npm ci`.
+#
+# NOT a required check and NOT in ci.yml / deep-qa-gate.yml (both Verifier
+# Core). The only enforcement is the QA merge guard
+# (scripts/ci/qa-merge-guard.ts), which denies with `qa-fix-proof-not-green`
+# unless this check-run concluded `success` on the head SHA.
+
+on:
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: qa-fix-proof-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  qa-fix-proof:
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Detect QA-Fix commits
+        id: detect
+        run: |
+          set -euo pipefail
+          log=$(git log --no-merges --format=%B "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}")
+          if grep -q '^QA-Fix:' <<<"$log"; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Only the class-B merge-base test run needs node_modules.
+      - name: Install deps (QA-Fix commits present)
+        if: steps.detect.outputs.present == 'true'
+        run: npm ci
+
+      # The checker itself runs from the BASE ref so a PR cannot edit its own
+      # judge; the PR tree is the data (cwd). Bootstrap: a base that predates
+      # the checker (this feature's own PR) falls back to the head copy.
+      - name: Checkout base-ref checker
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base-checker
+
+      - name: Verify QA-Fix commits
+        run: |
+          checker=scripts/ci/qa-fix-proof.ts
+          if [ -f base-checker/scripts/ci/qa-fix-proof.ts ]; then
+            checker="$PWD/base-checker/scripts/ci/qa-fix-proof.ts"
+            ln -sfn "$PWD/node_modules" base-checker/node_modules
+          fi
+          node --no-warnings --experimental-strip-types "$checker" \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}"
