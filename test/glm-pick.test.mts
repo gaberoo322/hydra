@@ -34,6 +34,11 @@ import { parseLsRemoteHeads } from "../src/github/git.ts";
 import { parsePrRows } from "../src/github/prs.ts";
 import type { IssueReadResult, IssueRow } from "../src/github/issues.ts";
 import type { PrRow } from "../src/github/prs.ts";
+import { tmpDirTracker } from "./_helpers/tmp-dir.mts";
+
+// Every temp dir this file creates is removed when the file finishes, so
+// runs do not leak into the shared /tmp (#5326).
+const makeTmpDir = tmpDirTracker();
 
 // ---------------------------------------------------------------------------
 // Fake deps
@@ -636,11 +641,10 @@ describe("setGlmDrainerLastPick / getGlmDrainerLastPick (hydra:glm:drainer:last-
 
 describe("runRecoverStaleScript — child stdout never reaches driver stdout (INV-10)", () => {
   test("a recovery tick still emits exactly one parseable JSON line on stdout", async () => {
-    const { mkdtempSync, writeFileSync } = await import("node:fs");
-    const { tmpdir } = await import("node:os");
+    const { writeFileSync } = await import("node:fs");
     const { join } = await import("node:path");
     const { spawnSync } = await import("node:child_process");
-    const dir = mkdtempSync(join(tmpdir(), "glm-recover-"));
+    const dir = makeTmpDir("glm-recover-");
     const script = join(dir, "recover-stale.sh");
     writeFileSync(script, '#!/usr/bin/env bash\necho "[autopilot] recover-stale: requeued $2"\n');
     const runner = join(dir, "run.mts");
