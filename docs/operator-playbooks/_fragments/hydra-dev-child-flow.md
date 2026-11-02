@@ -352,12 +352,13 @@ functions through `scripts/ci/qa-verdict.ts`:
 
 ```bash
 git fetch origin --quiet
-git diff --no-renames --name-only origin/master...HEAD > .md-paths.txt
-git diff origin/master...HEAD > .md-diff.txt
-MD_BODY_FILE="$PR_BODY_FILE" node --no-warnings --experimental-strip-types -e "
+MD_TMP=$(mktemp -d)
+git diff --no-renames --name-only origin/master...HEAD > "$MD_TMP/paths.txt"
+git diff origin/master...HEAD > "$MD_TMP/diff.txt"
+MD_BODY_FILE="$PR_BODY_FILE" MD_TMP="$MD_TMP" node --no-warnings --experimental-strip-types -e "
 Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs, q]) => {
-  const paths = fs.readFileSync('.md-paths.txt', 'utf8').split(String.fromCharCode(10)).filter(Boolean);
-  const det = q.detectOneWayDoor({ paths, diff: fs.readFileSync('.md-diff.txt', 'utf8') });
+  const paths = fs.readFileSync(process.env.MD_TMP + '/paths.txt', 'utf8').split(String.fromCharCode(10)).filter(Boolean);
+  const det = q.detectOneWayDoor({ paths, diff: fs.readFileSync(process.env.MD_TMP + '/diff.txt', 'utf8') });
   const field = q.parseMergeDangerField(fs.readFileSync(process.env.MD_BODY_FILE, 'utf8'));
   const check = q.compareMergeDanger(field, det);
   console.log('[merge-danger] outcome=' + check.outcome + ' detector=' + det.door);
@@ -367,7 +368,9 @@ Promise.all([import('node:fs'), import('./scripts/ci/qa-verdict.ts')]).then(([fs
   }
 }).catch((err) => { console.error('[merge-danger] gate crashed:', err); process.exit(1); });
 "
-rm -f .md-paths.txt .md-diff.txt
+md_rc=$?   # capture node's exit BEFORE cleanup, or rm masks a red gate
+rm -rf "$MD_TMP"
+exit $md_rc
 ```
 
 Exit `1` means do NOT open the PR: add the line (missing/malformed) or flip it
