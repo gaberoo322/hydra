@@ -139,7 +139,14 @@ def main(argv: list[str]) -> int:
         return 2
     slot, task_id, model = argv[1], argv[2], argv[3]
     try:
-        state = run_ledger.load(STATE_PATH, fill_defaults=False)
+        try:
+            state = run_ledger.load(STATE_PATH, fill_defaults=False)
+        except run_ledger.LedgerTypeError as exc:
+            # A wrong-typed declared field must not stop a dispatch stamp: read leniently.
+            state = run_ledger.read_prior(STATE_PATH)
+            if not isinstance(state, dict):
+                raise
+            print(f"[stamp-slot] state failed type validation ({exc}); stamping leniently", file=sys.stderr)
         plan = _load_plan(PLAN_PATH)
     except (OSError, ValueError, run_ledger.LedgerTypeError) as exc:
         print(f"[stamp-slot] cannot read state/plan: {exc}", file=sys.stderr)
@@ -151,8 +158,11 @@ def main(argv: list[str]) -> int:
         return 1
 
     try:
-        run_ledger.persist(state, STATE_PATH)
-    except (OSError, run_ledger.LedgerTypeError) as exc:
+        try:
+            run_ledger.persist(state, STATE_PATH)
+        except run_ledger.LedgerTypeError:
+            run_ledger.persist(state, STATE_PATH, validate=False)
+    except OSError as exc:
         print(f"[stamp-slot] cannot write state: {exc}", file=sys.stderr)
         return 2
 

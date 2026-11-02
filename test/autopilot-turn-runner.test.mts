@@ -446,6 +446,25 @@ describe("stamp-slot.py — the dispatch stamp read off the plan (issue #4831)",
     assert.match(runStamp(sb, ["dev_orch", "x", "y"]).stderr, /not a JSON object/);
   });
 
+  test("a wrong-typed declared field still stamps the slot (exit 0), leniently (#5293 QA r5)", () => {
+    const sb = stampSandbox();
+    const st = readJson(sb.state);
+    st.failure_log = "x";
+    writeFileSync(sb.state, JSON.stringify(st) + "\n");
+    const r = runStamp(sb, ["dev_orch", "abcdef0123456789a", "sonnet"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readJson(sb.state).slots.dev_orch.task_id, "abcdef0123456789a");
+  });
+
+  test("sibling pin: a non-object state document is still refused (exit 2, unchanged)", () => {
+    const sb = stampSandbox();
+    writeFileSync(sb.state, "[1,2]\n");
+    const r = runStamp(sb, ["dev_orch", "abcdef0123456789a", "sonnet"]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /cannot read state\/plan/);
+    assert.equal(readFileSync(sb.state, "utf-8"), "[1,2]\n");
+  });
+
   test("no temp file is left behind", () => {
     const sb = stampSandbox();
     runStamp(sb, ["dev_orch", "abcdef0123456789a", "sonnet"]);
