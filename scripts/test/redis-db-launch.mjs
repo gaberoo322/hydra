@@ -668,17 +668,42 @@ export function captureTopLevelCounts(capturePath) {
   }
   let pass = 0;
   let fail = 0;
+  const failures = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
       const entry = JSON.parse(line);
       if (entry.ok === true) pass += 1;
-      else if (entry.ok === false) fail += 1;
+      else if (entry.ok === false && entry.todo !== true) {
+        // A failing top-level `todo` test legitimately exits 0 (issue #5335).
+        fail += 1;
+        failures.push({ file: entry.file ?? null, name: entry.name ?? null });
+      }
     } catch {
       /* intentional: a truncated final NDJSON line carries no usable data. */
     }
   }
-  return { pass, fail };
+  return { pass, fail, failures };
+}
+
+/**
+ * Pure verdict policy (issue #5335). A `describe` that throws while being
+ * defined is recorded as a top-level `ok:false` row, yet node:test exits 0 and
+ * prints `# fail 0` — a suite that never ran would pass the required gate.
+ * Promote a green exit to FAIL when the capture observed a not-ok row. A
+ * non-zero child code is never masked (keeps its own status); a null/absent
+ * count (no capture) is not a failure.
+ *
+ * Why this may BLOCK while the COUNT verdicts are advisory (#4062/#4137):
+ * `--test-force-exit` truncation can only DROP capture rows, never fabricate
+ * an `ok:false` one, so an observed not-ok row has no truncation false
+ * positive. It consults no baseline and ignores isGateBlocking().
+ */
+export function resolveVerdict({ code, topLevelFail }) {
+  if (code === 0 && typeof topLevelFail === "number" && topLevelFail > 0) {
+    return { code: 1, outcome: "FAIL" };
+  }
+  return { code, outcome: code === 0 ? "PASS" : "FAIL" };
 }
 
 /**
@@ -855,18 +880,31 @@ child.on("error", (err) => {
 // Issue #5106: the single exit seam for every path after the child exited.
 function verdictFields() {
   const counts = testFiles.length > 0 ? captureTopLevelCounts(capturePath) : null;
-  return { topLevelPass: counts?.pass ?? null, topLevelFail: counts?.fail ?? null };
+  return {
+    topLevelPass: counts?.pass ?? null,
+    topLevelFail: counts?.fail ?? null,
+    failures: counts?.failures ?? [],
+  };
 }
 function exitWithVerdict(code, suitesGate) {
+  const { failures, ...fields } = verdictFields();
+  const resolved = resolveVerdict({ code, topLevelFail: fields.topLevelFail });
+  if (resolved.code !== code) {
+    for (const f of failures) {
+      console.error(
+        `[redis-db-launch] TOP-LEVEL FAILURE — ${f.file}: ${f.name} reported not-ok while the runner exited 0 (issue #5335)`,
+      );
+    }
+  }
   console.error(
     launcherVerdictLine({
-      exit: code,
-      outcome: code === 0 ? "PASS" : "FAIL",
-      ...verdictFields(),
+      exit: resolved.code,
+      outcome: resolved.outcome,
+      ...fields,
       suitesGate,
     }),
   );
-  process.exit(code);
+  process.exit(resolved.code);
 }
 child.on("exit", async (code, signal) => {
   launcherPhase = "suite-count-verdict";
