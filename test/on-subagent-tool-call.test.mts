@@ -30,9 +30,13 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { statSync, readFileSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { statSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { tmpDirTracker } from "./_helpers/tmp-dir.mts";
+
+// Every temp dir this file creates is removed when the file finishes, so
+// runs do not leak into the shared /tmp (#5326).
+const makeTmpDir = tmpDirTracker();
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const HOOK = join(REPO_ROOT, "scripts", "autopilot", "hooks", "on-subagent-tool-call.sh");
@@ -83,7 +87,7 @@ function redisXrange(key: string): Array<{ id: string; fields: Record<string, st
  * carries the sentinel. Returns the agent id + child transcript path.
  */
 function sentinelChild(dispatchId = "worktree-agent-feedc0de1234"): { agentId: string; path: string } {
-  const dir = mkdtempSync(join(tmpdir(), "hydra-4965-child-"));
+  const dir = makeTmpDir("hydra-4965-child-");
   const path = join(dir, "agent-child.jsonl");
   const sentinel = `<!-- hydra-dispatch v1 skill=hydra-dev dispatchId=${dispatchId} runId=run-4965 -->`;
   writeFileSync(
@@ -95,7 +99,7 @@ function sentinelChild(dispatchId = "worktree-agent-feedc0de1234"): { agentId: s
 
 function runHook(payload: object, stream: string): { status: number | null; stderr: string } {
   const child = sentinelChild();
-  const markerDir = mkdtempSync(join(tmpdir(), "hydra-4965-marker-"));
+  const markerDir = makeTmpDir("hydra-4965-marker-");
   const full = {
     agent_id: child.agentId,
     agent_transcript_path: child.path,
@@ -467,7 +471,7 @@ describe("scripts/autopilot/hooks/on-subagent-tool-call.sh", () => {
           env: {
             ...process.env,
             HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM: stream,
-            HYDRA_DISPATCH_REGISTER_MARKER_DIR: mkdtempSync(join(tmpdir(), "hydra-4965-m-")),
+            HYDRA_DISPATCH_REGISTER_MARKER_DIR: makeTmpDir("hydra-4965-m-"),
             HYDRA_API_BASE: "http://127.0.0.1:1",
           },
           encoding: "utf-8",

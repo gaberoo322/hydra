@@ -49,16 +49,19 @@ import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   readFileSync,
-  mkdtempSync,
   mkdirSync,
   writeFileSync,
   existsSync,
   utimesSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, join } from "node:path";
+import { tmpDirTracker } from "./_helpers/tmp-dir.mts";
+
+// Every temp dir this file creates is removed when the file finishes, so
+// runs do not leak into the shared /tmp (#5326).
+const makeTmpDir = tmpDirTracker();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLAYBOOK_DIR = resolve(__dirname, "..", "docs", "operator-playbooks");
@@ -355,7 +358,7 @@ function runDeposit(
   args: string[],
   opts: { input?: string; env?: Record<string, string> } = {},
 ) {
-  const root = mkdtempSync(join(tmpdir(), "refl-dep-"));
+  const root = makeTmpDir("refl-dep-");
   const cwd = join(root, `agent-${HASH}`);
   mkdirSync(cwd);
   const deposits = join(root, "deposits");
@@ -435,7 +438,7 @@ describe("npm deposit aliases + guard-compatible recipe shape (issue #4753)", ()
 
 describe("reflection-deposit.sh --file (issue #4753)", () => {
   test("reads the body from a relative file resolved against INIT_CWD", () => {
-    const root = mkdtempSync(join(tmpdir(), "refl-init-"));
+    const root = makeTmpDir("refl-init-");
     const caller = join(root, "caller");
     mkdirSync(caller);
     writeFileSync(join(caller, "r.json"), REFL_BODY);
@@ -503,7 +506,7 @@ describe("reflection-deposit.sh --file (issue #4753)", () => {
 
 describe("reflection-deposit.sh grounding --from-log (issue #4753)", () => {
   function logWith(content: string) {
-    const dir = mkdtempSync(join(tmpdir(), "refl-log-"));
+    const dir = makeTmpDir("refl-log-");
     const p = join(dir, "npm-test.log");
     writeFileSync(p, content);
     return p;
@@ -575,8 +578,8 @@ describe("reflection-deposit.sh grounding --from-log (issue #4753)", () => {
   });
 
   test("--from-log with an empty path WARNs, never runs npm test, exits 0", () => {
-    const marker = join(mkdtempSync(join(tmpdir(), "refl-npm-")), "ran");
-    const bin = mkdtempSync(join(tmpdir(), "refl-bin-"));
+    const marker = join(makeTmpDir("refl-npm-"), "ran");
+    const bin = makeTmpDir("refl-bin-");
     writeFileSync(
       join(bin, "npm"),
       `#!/bin/sh\ntouch ${marker}\nprintf '# tests 1\\n# pass 1\\n'\n`,
@@ -607,7 +610,7 @@ describe("reflection-deposit.sh grounding --from-log (issue #4753)", () => {
     const log = logWith(
       "# tests 120\n# pass 118\n# fail 2\n# duration_ms 525748.49\n",
     );
-    const root = mkdtempSync(join(tmpdir(), "refl-span-"));
+    const root = makeTmpDir("refl-span-");
     const cwd = join(root, `agent-${HASH}`);
     mkdirSync(cwd);
     const deposits = join(root, "deposits");
@@ -657,7 +660,7 @@ describe("reflection-deposit.sh grounding --from-log (issue #4753)", () => {
 
 describe("hydra-dev full npm test background recipe (issue #5180)", () => {
   test("a trailing NPM_TEST_EXIT sentinel line does not break the grounding footer parse", () => {
-    const dir = mkdtempSync(join(tmpdir(), "refl-sentinel-"));
+    const dir = makeTmpDir("refl-sentinel-");
     const log = join(dir, "npm-test.log");
     writeFileSync(log, "# tests 7\n# pass 7\n# fail 0\nNPM_TEST_EXIT=0\n");
     const { deposits, r } = runDeposit(["grounding", "hydra-dev", "--from-log", log]);

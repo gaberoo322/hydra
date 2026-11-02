@@ -26,7 +26,7 @@
 import { test, describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -260,17 +260,19 @@ describe("GET /metrics/unclassified (issue #3443)", () => {
  */
 describe("GET /metrics — coverage.classesNotRecorded (issue #4392)", () => {
   const savedRoot = process.env.HYDRA_CLAUDE_PROJECTS_ROOT;
+  let fixtureRoot: string | undefined;
 
   // Own lifecycle, no shared-Redis teardown reuse (the sibling describe above
   // disconnects `testRedis` in its after; this suite writes nothing and reads
   // an empty trend off the DB the file-level REDIS_URL already selected).
   before(async () => {
-    process.env.HYDRA_CLAUDE_PROJECTS_ROOT = await mkdtemp(
-      join(tmpdir(), "metrics-coverage-root-"),
-    );
+    fixtureRoot = await mkdtemp(join(tmpdir(), "metrics-coverage-root-"));
+    process.env.HYDRA_CLAUDE_PROJECTS_ROOT = fixtureRoot;
   });
 
-  after(() => {
+  after(async () => {
+    // Remove the fixture root so runs do not leak into the shared /tmp (#5326).
+    if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true });
     if (savedRoot === undefined) delete process.env.HYDRA_CLAUDE_PROJECTS_ROOT;
     else process.env.HYDRA_CLAUDE_PROJECTS_ROOT = savedRoot;
   });

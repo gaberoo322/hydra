@@ -25,6 +25,11 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
+import { tmpDirTracker } from "./_helpers/tmp-dir.mts";
+
+// Every temp dir this file creates is removed when the file finishes, so
+// runs do not leak into the shared /tmp (#5326).
+const makeTmpDir = tmpDirTracker();
 
 // ===========================================================================
 // Merged from test/decide-qa-stall-cap.test.mts (issue #4136) — every test verbatim.
@@ -1363,8 +1368,8 @@ function runDecide(
 
 describe("decide.py — shadow-mode dampener (issue #2943)", () => {
   test("plan output is BYTE-IDENTICAL with class_stats present vs absent", () => {
-    const withLog = join(mkdtempSync(join(tmpdir(), "shadow-with-")), "log");
-    const withoutLog = join(mkdtempSync(join(tmpdir(), "shadow-without-")), "log");
+    const withLog = join(makeTmpDir("shadow-with-"), "log");
+    const withoutLog = join(makeTmpDir("shadow-without-"), "log");
 
     // NOTE: turn is bumped in-place by decide.py's CLI, but --now pins the clock
     // and the state is otherwise identical, so the emitted plan must match.
@@ -1382,7 +1387,7 @@ describe("decide.py — shadow-mode dampener (issue #2943)", () => {
   });
 
   test("the shadow log records ONLY the dampened class (multiplier != 1.0), actuating nothing", () => {
-    const logPath = join(mkdtempSync(join(tmpdir(), "shadow-log-")), "log");
+    const logPath = join(makeTmpDir("shadow-log-"), "log");
     const { shadowLines } = runDecide(
       baseState({ class_stats: classStatsInjection() }),
       logPath,
@@ -1397,13 +1402,13 @@ describe("decide.py — shadow-mode dampener (issue #2943)", () => {
   });
 
   test("no class_stats injection → no shadow log written (clean no-op)", () => {
-    const logPath = join(mkdtempSync(join(tmpdir(), "shadow-noop-")), "log");
+    const logPath = join(makeTmpDir("shadow-noop-"), "log");
     const { shadowLines } = runDecide(baseState(), logPath);
     assert.equal(shadowLines.length, 0, "absent class_stats writes nothing");
   });
 
   test("an all-1.0 shadow plan writes nothing (no class would be dampened)", () => {
-    const logPath = join(mkdtempSync(join(tmpdir(), "shadow-allhealthy-")), "log");
+    const logPath = join(makeTmpDir("shadow-allhealthy-"), "log");
     const healthy = {
       scoreboard: { classes: [] },
       shadow: {
