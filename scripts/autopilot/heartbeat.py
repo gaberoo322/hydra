@@ -401,7 +401,14 @@ def write_heartbeat(last_action: str = "(none)", *, now: int | None = None) -> i
             print(f"[autopilot] heartbeat: write failed ({exc})", file=sys.stderr)
             return 2
         return 1
-    except (ValueError, OSError, run_ledger.LedgerTypeError) as exc:
+    except run_ledger.LedgerTypeError as exc:
+        # A merely type-invalid state must not stale the liveness signal:
+        # fall back to the lenient prior read (QA round 4, #5293).
+        print(f"[autopilot] heartbeat: state failed type validation ({exc}); reading leniently", file=sys.stderr)
+        state = run_ledger.read_prior(STATE_PATH)
+        if not isinstance(state, dict):
+            return 2
+    except (ValueError, OSError) as exc:
         print(f"[autopilot] heartbeat: state read failed ({exc})", file=sys.stderr)
         return 2
 

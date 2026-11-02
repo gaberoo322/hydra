@@ -208,7 +208,7 @@ def _handle_dev_orch_stall(
                     e for e in pend
                     if not (isinstance(e, dict) and e.get("anchor") == anchor_ref)
                 ]
-                run_ledger.persist(s, reap_state.STATE_PATH)
+                reap_state.persist_state(s)
             line = (
                 f"dev_stall_no_pr_capped anchor={anchor_ref} task_id={task_id} "
                 f"branch={worktree_branch or ''} prior_stalls={prior_stalls} "
@@ -267,7 +267,7 @@ def _handle_dev_orch_stall(
         "branch": worktree_branch or "",
         "stalled_epoch": int(time.time()),
     })
-    run_ledger.persist(s, reap_state.STATE_PATH)
+    reap_state.persist_state(s)
 
     line = (
         f"dev_stall_no_pr anchor={anchor_ref} task_id={task_id} "
