@@ -40,9 +40,14 @@
 
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { tmpDirTracker } from "./_helpers/tmp-dir.mts";
+
+// Every temp dir this file creates is removed when the file finishes, so
+// runs do not leak into the shared /tmp (#5326).
+const makeTmpDir = tmpDirTracker();
 
 const { __resetForTests } = await import("../src/target-config.ts");
 
@@ -444,7 +449,7 @@ describe("post-merge-health: baseline-delta mode (issue #1699)", () => {
 
 describe("post-merge-health: baseline file round-trip (issue #1699)", () => {
   test("writeBaseline + readBaseline round-trips the snapshot", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pmh-baseline-"));
+    const dir = makeTmpDir("pmh-baseline-");
     const path = join(dir, "nested", "pmh-baseline.json"); // nested: exercises mkdir -p
     const snapshot = parseHealthSnapshot({
       status: "degraded",
@@ -466,7 +471,7 @@ describe("post-merge-health: baseline file round-trip (issue #1699)", () => {
   });
 
   test("a corrupt/shape-invalid baseline file returns ok:false", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pmh-baseline-corrupt-"));
+    const dir = makeTmpDir("pmh-baseline-corrupt-");
     const garbagePath = join(dir, "garbage.json");
     writeFileSync(garbagePath, "not json at all", "utf8");
     assert.equal(readBaseline(garbagePath).ok, false);
@@ -566,7 +571,7 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
   // degradation served as a 503 — must yield SIGNAL (a delta-mode sample),
   // not an "unreachable" no-op, and must not alarm when nothing changed.
   test("--snapshot-out then --baseline round-trip: 503-degraded ambient state => baseline written, then healthy delta verdict, no spawn", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pmh-e2e-"));
+    const dir = makeTmpDir("pmh-e2e-");
     const baselinePath = join(dir, "pmh-baseline.json");
     const ambientBody = {
       status: "degraded",
@@ -612,7 +617,7 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
   });
 
   test("--baseline + a NEW post-merge failure => alarm in delta mode with dispatch", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pmh-e2e-regress-"));
+    const dir = makeTmpDir("pmh-e2e-regress-");
     const baselinePath = join(dir, "pmh-baseline.json");
     const baseline = parseHealthSnapshot({
       status: "degraded",
@@ -736,7 +741,7 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
   });
 
   test("--snapshot-out with an unreachable Target => clean no-op, no baseline file", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pmh-snap-unreachable-"));
+    const dir = makeTmpDir("pmh-snap-unreachable-");
     const baselinePath = join(dir, "pmh-baseline.json");
     const result = await runWatch(
       baseConfig(),
@@ -968,7 +973,7 @@ describe("post-merge-health: runWatch end-to-end freshness-flap (issue #1817)", 
   // The full #1817 incident scenario, end-to-end through runWatch in delta mode:
   // scanner ok in the baseline, stale post-merge => NO alarm, NO dispatch.
   test("scanner ok->stale via baseline-delta => healthy, no dispatch", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pmh-1817-flap-"));
+    const dir = makeTmpDir("pmh-1817-flap-");
     const baselinePath = join(dir, "baseline.json");
     const baseline = parseHealthSnapshot({ status: "ok", services: { scanner: { status: "ok" } } });
     assert.equal(writeBaseline(baselinePath, baseline).ok, true);
@@ -994,7 +999,7 @@ describe("post-merge-health: runWatch end-to-end freshness-flap (issue #1817)", 
 
   // A REAL regression (scanner into error) still alarms + dispatches.
   test("scanner ok->error via baseline-delta => alarm + dispatch (real regression)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pmh-1817-real-"));
+    const dir = makeTmpDir("pmh-1817-real-");
     const baselinePath = join(dir, "baseline.json");
     const baseline = parseHealthSnapshot({ status: "ok", services: { scanner: { status: "ok" } } });
     assert.equal(writeBaseline(baselinePath, baseline).ok, true);
@@ -1215,7 +1220,7 @@ describe("post-merge-health: basic-shape delta regression (issue #4524)", () => 
 
 describe("post-merge-health: runWatch end-to-end on a basic-route-only Target (issue #4524)", () => {
   test("--snapshot-out then --baseline round-trip works when only /api/health exists (the smoke-build no-op fix)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pmh-csb-"));
+    const dir = makeTmpDir("pmh-csb-");
     const baselinePath = join(dir, "baseline.json");
 
     const pre = await runWatch(
@@ -1298,7 +1303,7 @@ describe("post-merge-health: unreachable is a loud, explicit failure (issue #452
   });
 
   test("snapshot-mode unreachable logs BASELINE FAILURE and warns Step 8.6 will run without a baseline", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pmh-unreach-snap-"));
+    const dir = makeTmpDir("pmh-unreach-snap-");
     const baselinePath = join(dir, "baseline.json");
     const lines = await captureError(() =>
       runWatch(

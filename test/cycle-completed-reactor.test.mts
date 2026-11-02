@@ -17,9 +17,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { tmpDirTracker } from "./_helpers/tmp-dir.mts";
+
+// Every temp dir this file creates is removed when the file finishes, so
+// runs do not leak into the shared /tmp (#5326).
+const makeTmpDir = tmpDirTracker();
 
 // ---------------------------------------------------------------------------
 // INV-4 (#4299): pin HYDRA_ROOT to a temp dir BEFORE importing the reactor.
@@ -30,7 +32,7 @@ import { join } from "node:path";
 // path. Same pattern as test/api.test.mts (which pins the same env var for
 // the same module-load-time reason).
 // ---------------------------------------------------------------------------
-const FAKE_ROOT = mkdtempSync(join(tmpdir(), "hydra-reactor-test-"));
+const FAKE_ROOT = makeTmpDir("hydra-reactor-test-");
 process.env.HYDRA_ROOT = FAKE_ROOT;
 
 const { reactToCycleCompleted } = await import("../src/notification/cycle-completed-reactor.ts");
