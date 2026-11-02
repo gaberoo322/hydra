@@ -2,6 +2,6 @@
   "note": "Word-count ratchet (whitespace-split, same semantics as skill-size-ratchet countWords). Growth fails; shrink ALSO fails until you set the printed number here, so the baseline only moves down (or by a deliberate same-PR bump) and never above CODING_STANDARDS_WORD_CEILING. S4 #5260.",
   "files": {
     "CODING_STANDARDS.md": { "words": 745 },
-    "CLAUDE.md": { "words": 3495 }
+    "CLAUDE.md": { "words": 3174 }
   }
 }

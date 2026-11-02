@@ -1,0 +1,1 @@
+- fix: read an absent five_hour usage window as no 5-hour cap instead of an unreadable meter, so the pace gate admits autopilot again (#5330)

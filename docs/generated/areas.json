@@ -1459,7 +1459,8 @@
       "moduleMap": null,
       "adrs": [
         "0003",
-        "0031"
+        "0031",
+        "0047"
       ],
       "adrsCited": [
         "0001",
@@ -2072,7 +2073,8 @@
           "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md [adr]",
           "docs/adr/0044-operator-attended-epic-sprint-lane.md [adr]",
           "docs/adr/0045-operator-channel.md [adr]",
-          "docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md [adr]"
+          "docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md [adr]",
+          "docs/adr/0047-work-item-lifecycle-is-data.md [adr]"
         ],
         "adrs": [
           "ADR-0001 [superseded-in-part]",
@@ -2120,7 +2122,8 @@
           "ADR-0043 [accepted]",
           "ADR-0044 [accepted]",
           "ADR-0045 [accepted]",
-          "ADR-0046 [accepted]"
+          "ADR-0046 [accepted]",
+          "ADR-0047 [accepted]"
         ]
       },
       "homes": [],

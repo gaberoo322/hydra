@@ -1,53 +1,47 @@
 /**
- * Stuck-items aggregator (issue #617, PRD #615).
+ * Stuck-items aggregator (issue #617, PRD #615; collapsed onto the waiting read
+ * by issue #5093).
  *
- * Returns three classified buckets of stalled work:
+ * Returns three buckets of stalled work:
  *
- *   - `blockedOver2d`     — issues labeled `blocked` whose age exceeds the
- *                            blocked threshold (default: 2 days).
- *   - `needsInfoWaiting`  — issues labeled `needs-info` whose age exceeds
- *                            the needs-info threshold (default: 1 day).
- *   - `prsWithFailedCi`   — open PRs whose checks are reporting a failure.
+ *   - `blockedOver2d`     — CLASSIFIED `blocked` issues older than the blocked
+ *                            threshold (default: 2 days).
+ *   - `needsInfoWaiting`  — CLASSIFIED `needs-info` issues older than the
+ *                            needs-info threshold (default: 1 day).
+ *   - `prsWithFailedCi`   — open PRs whose required checks are failing.
  *
  * # Design contract
  *
- * - **Pure classifier core.** Age thresholds and the classifier itself are
- *   pure functions exported separately so tests don't need stubs to pin
- *   the boundary behavior.
- * - **Never throws.** Each sub-fetch runs under `Promise.allSettled`; a
- *   failure degrades to `[]` for that bucket.
- * - **Clock + repo injectable.** Same `deps` shape as the slice-1
- *   aggregator. Production callers pass nothing.
+ * - **One issue-label reader.** The issue half is
+ *   `projectStuckIssues(readWaitingIssues(...))` — the age rule, Epic
+ *   exclusion and machine-owned-blocker suppression live in issues-waiting.ts
+ *   only. This module imports no issue-label reader. The PR bucket is a PR
+ *   read and stays here.
+ * - **Never throws.** The waiting read and the PR read run under one
+ *   `Promise.allSettled` pair; a rejected PR read degrades to `[]`.
+ * - **Clock + repo injectable.** Production callers pass nothing.
  */
 
-import {
-  listIssuesByLabelOrEmpty,
-  listOpenPrsOrEmpty,
-  type IssueRow,
-  type PrRow,
-} from "../github/issues.ts";
+import { listOpenPrsOrEmpty, type PrRow } from "../github/issues.ts";
 import { listRequiredStatusContextsOrNull } from "../github/prs.ts";
 import { settledOrEmpty } from "../settled-fold.ts";
 import { foldRollup } from "../github/check-rollup.ts";
 import { isFailedRequiredStatus } from "./stalled-prs.ts";
-import { DEFAULT_THRESHOLDS, type StuckThresholds } from "./issues-waiting.ts";
+import {
+  projectStuckIssues,
+  readWaitingIssues,
+  type IssuesWaitingDeps,
+  type StuckIssue,
+  type StuckThresholds,
+} from "./issues-waiting.ts";
 
-// The ONE stale threshold lives in issues-waiting.ts (issue #5091); re-exported
-// so existing import paths keep resolving.
-export { DEFAULT_THRESHOLDS, type StuckThresholds } from "./issues-waiting.ts";
+// The ONE stale threshold and the StuckIssue row live in issues-waiting.ts
+// (issues #5091, #5093); re-exported so existing import paths keep resolving.
+export { DEFAULT_THRESHOLDS, type StuckIssue, type StuckThresholds } from "./issues-waiting.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
-
-export interface StuckIssue {
-  number: number;
-  title: string;
-  url: string;
-  createdAt: string;
-  ageDays: number;
-  labels: string[];
-}
 
 export interface StuckPr {
   number: number;
@@ -61,16 +55,16 @@ export interface StuckItems {
   blockedOver2d: StuckIssue[];
   needsInfoWaiting: StuckIssue[];
   prsWithFailedCi: StuckPr[];
-  /** Echo of the thresholds used so the dashboard can render "stale ≥ Xd". */
+  /** Echo of the thresholds used so the dashboard can render "stale >= Xd". */
   thresholds: StuckThresholds;
   generatedAt: string;
   /**
-   * ADR-0034 §5.2 asserted-emptiness evidence (issue #4007) — same contract
-   * `DecisionQueueResult` shipped in #4006. Raw row count from the fulfilled
-   * sub-fetches, so an empty snapshot can prove the lookup actually ran.
+   * ADR-0034 §5.2 asserted-emptiness evidence (issue #4007). Raw `blocked` +
+   * `needs-info` rows plus the failed-CI PR rows from the fulfilled reads, so
+   * an empty snapshot can prove the lookup actually ran.
    */
   scanned: number;
-  /** True iff all three sub-fetches settled fulfilled (the emptiness assertion). */
+  /** True iff the `blocked` / `needs-info` reads and the PR read all succeeded. */
   sourcesOk: boolean;
 }
 
@@ -82,12 +76,13 @@ export interface StuckItemsDeps {
   /** Override default age thresholds. */
   thresholds?: Partial<StuckThresholds>;
   /**
-   * Override the GitHub Issue/PR Read seam readers (issue #908/#915). Tests
-   * inject these to avoid spawning `gh`; production uses the real seam readers.
-   * The aggregator consumes the seam's typed `IssueRow`/`PrRow` directly — no
-   * local argv or parser.
+   * The waiting-read overrides, under their issues-waiting names, so one test
+   * deps object can feed both `readWaitingIssues` and `getStuckItems`.
    */
-  listIssuesByLabelOrEmpty?: typeof listIssuesByLabelOrEmpty;
+  listIssuesByLabel?: IssuesWaitingDeps["listIssuesByLabel"];
+  listIssuesBySearch?: IssuesWaitingDeps["listIssuesBySearch"];
+  listOpenPrs?: IssuesWaitingDeps["listOpenPrs"];
+  /** PR-bucket reader (issue #908/#915). Tests inject it to avoid spawning `gh`. */
   listOpenPrsOrEmpty?: typeof listOpenPrsOrEmpty;
   /**
    * Override the branch-protection required-contexts reader (issue #4569).
@@ -103,84 +98,39 @@ export interface StuckItemsDeps {
 export async function getStuckItems(
   deps: StuckItemsDeps = {},
 ): Promise<StuckItems> {
-  const now = deps.now ?? new Date();
-  const thresholds: StuckThresholds = {
-    ...DEFAULT_THRESHOLDS,
-    ...(deps.thresholds ?? {}),
-  };
-
-  const listByLabel = deps.listIssuesByLabelOrEmpty ?? listIssuesByLabelOrEmpty;
   const listPrs = deps.listOpenPrsOrEmpty ?? listOpenPrsOrEmpty;
   const listRequired =
     deps.listRequiredStatusContextsOrNull ?? listRequiredStatusContextsOrNull;
   const opts = { repo: deps.githubRepo };
 
-  const [blockedResult, infoResult, prsResult] = await Promise.allSettled([
-    listByLabel("blocked", "stuck-items/blocked", opts),
-    listByLabel("needs-info", "stuck-items/needs-info", opts),
+  const [readResult, prsResult] = await Promise.allSettled([
+    readWaitingIssues({
+      now: deps.now,
+      githubRepo: deps.githubRepo,
+      thresholds: deps.thresholds,
+      listIssuesByLabel: deps.listIssuesByLabel,
+      listIssuesBySearch: deps.listIssuesBySearch,
+      listOpenPrs: deps.listOpenPrs,
+    }),
     fetchPrsWithFailedCi(listPrs, listRequired, opts),
   ]);
+  // readWaitingIssues never throws; a rejection here is a bug — fail loud.
+  if (readResult.status === "rejected") throw readResult.reason;
 
-  const blocked = settledOrEmpty(blockedResult, "stuck-items/blocked");
-  const info = settledOrEmpty(infoResult, "stuck-items/needs-info");
+  const issues = projectStuckIssues(readResult.value);
   const prs = settledOrEmpty(prsResult, "stuck-items/prs-failed-ci");
 
-  // ADR-0034 §5.2 (issue #4007): a genuine zero-item snapshot must never be
-  // bit-for-bit identical to a total sub-fetch failure. `scanned` counts the
-  // raw rows the fulfilled sub-fetches returned (rejected ones contribute []
-  // → 0 via settledOrEmpty); `sourcesOk` requires every sub-fetch to have
-  // settled fulfilled, mirroring the #4006 DecisionQueueResult contract.
-  const scanned = blocked.length + info.length + prs.length;
-  const sourcesOk =
-    blockedResult.status === "fulfilled" &&
-    infoResult.status === "fulfilled" &&
-    prsResult.status === "fulfilled";
-
   return {
-    blockedOver2d: classifyByAge(blocked, now, thresholds.blockedDays),
-    needsInfoWaiting: classifyByAge(info, now, thresholds.needsInfoDays),
+    blockedOver2d: issues.blockedOver2d,
+    needsInfoWaiting: issues.needsInfoWaiting,
     prsWithFailedCi: prs,
-    thresholds,
-    generatedAt: now.toISOString(),
-    scanned,
-    sourcesOk,
+    thresholds: issues.thresholds,
+    generatedAt: issues.generatedAt,
+    // ADR-0034 §5.2 (issue #4007): a genuine zero-item snapshot must never be
+    // bit-for-bit identical to a total sub-fetch failure.
+    scanned: issues.scanned + prs.length,
+    sourcesOk: issues.sourcesOk && prsResult.status === "fulfilled",
   };
-}
-
-// ---------------------------------------------------------------------------
-// Pure classifier — exported for tests
-// ---------------------------------------------------------------------------
-
-/**
- * Pure helper — exported for tests. Filters a list of issues (the seam's
- * {@link IssueRow}, of which only `number,title,url,createdAt,labels` are read)
- * down to those whose age (now - createdAt) is at least `minAgeDays`, attaching
- * the computed `ageDays` to each surviving item. Sorts oldest-first.
- */
-export function classifyByAge(
-  issues: readonly Pick<IssueRow, "number" | "title" | "url" | "createdAt" | "labels">[],
-  now: Date,
-  minAgeDays: number,
-): StuckIssue[] {
-  const nowMs = now.getTime();
-  const minAgeMs = minAgeDays * 24 * 60 * 60 * 1000;
-  const out: StuckIssue[] = [];
-  for (const issue of issues) {
-    const createdMs = Date.parse(issue.createdAt);
-    if (!Number.isFinite(createdMs)) continue;
-    const ageMs = nowMs - createdMs;
-    if (ageMs < minAgeMs) continue;
-    out.push({
-      number: issue.number,
-      title: issue.title,
-      url: issue.url,
-      createdAt: issue.createdAt,
-      ageDays: Math.floor(ageMs / (24 * 60 * 60 * 1000)),
-      labels: [...issue.labels],
-    });
-  }
-  out.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
-  return out;
 }
 
 // ---------------------------------------------------------------------------

@@ -40,12 +40,19 @@
  * {@link readWaitingIssues} is the ONE read (one `listIssuesByLabel` per label,
  * one batched blocker lookup, one lazy open-PR read). The pure projections
  * ({@link projectWaitingLines}, {@link projectStuckIssues},
- * {@link projectDecisionQueue}, {@link projectPickupSet}) take only the
- * resulting {@link WaitingIssuesRead} value and perform no read, so every
- * consumer shares one blocker parser, one stale rule and one threshold.
+ * {@link projectPickupSet}) take only the resulting {@link WaitingIssuesRead}
+ * value and perform no read, so every consumer shares one blocker parser, one
+ * stale rule and one threshold.
  *
- * Never throws; imports only `src/github/*` (no Redis); stuck-items.ts is
- * imported for types only.
+ * # Single-flight (issue #5093)
+ *
+ * Concurrent {@link readWaitingIssues} calls on the same reader identity and
+ * the same {repo, includeReframe, thresholds} coalesce onto ONE in-flight
+ * read, so the Today page's stuck panel and the attention feed polling
+ * together cost one `gh` fetch per label. There is NO time-based memo: a read
+ * that starts after the previous one settled always re-reads.
+ *
+ * Never throws; imports only `src/github/*` (no Redis).
  */
 
 import {
@@ -68,8 +75,17 @@ import {
   mergeBySource,
   type RawDigestInput,
 } from "./digest-issue.ts";
-import type { StuckIssue } from "./stuck-items.ts";
 import { logger } from "../logger.ts";
+
+/** One aged `blocked` / `needs-info` issue row of `/api/v2/today/stuck`. */
+export interface StuckIssue {
+  number: number;
+  title: string;
+  url: string;
+  createdAt: string;
+  ageDays: number;
+  labels: string[];
+}
 
 export interface StuckThresholds {
   /** Minimum age (days) before a `blocked` issue counts as stuck. */
@@ -228,9 +244,45 @@ export function projectWaitingLines(read: WaitingIssuesRead): IssuesWaitingResul
   };
 }
 
-/** The ONE read: fetch, resolve blockers once, classify. Never throws. */
-export async function readWaitingIssues(
+/**
+ * In-flight reads, scoped per `listIssuesByLabel` function identity (a test
+ * that injects a fresh stub closure never coalesces) and keyed on the read's
+ * shape. Entries live only while the read is pending (issue #5093).
+ */
+const inFlightReads = new WeakMap<object, Map<string, Promise<WaitingIssuesRead>>>();
+
+/**
+ * The ONE read: fetch, resolve blockers once, classify. Never throws.
+ * Concurrent calls with the same reader + repo + reframe flag + thresholds
+ * share one in-flight read (and its `now`); see the module header.
+ */
+export function readWaitingIssues(
   deps: IssuesWaitingDeps = {},
+): Promise<WaitingIssuesRead> {
+  const reader = deps.listIssuesByLabel ?? listIssuesByLabel;
+  const thresholds: StuckThresholds = { ...DEFAULT_THRESHOLDS, ...(deps.thresholds ?? {}) };
+  const key = JSON.stringify([
+    deps.githubRepo ?? null,
+    deps.includeReframe === true,
+    thresholds.blockedDays,
+    thresholds.needsInfoDays,
+  ]);
+  let flights = inFlightReads.get(reader);
+  if (flights === undefined) {
+    flights = new Map();
+    inFlightReads.set(reader, flights);
+  }
+  const pending = flights.get(key);
+  if (pending !== undefined) return pending;
+  const started = readWaitingIssuesUncoalesced(deps).finally(() => {
+    flights.delete(key);
+  });
+  flights.set(key, started);
+  return started;
+}
+
+async function readWaitingIssuesUncoalesced(
+  deps: IssuesWaitingDeps,
 ): Promise<WaitingIssuesRead> {
   const now = deps.now ?? new Date();
   const thresholds: StuckThresholds = { ...DEFAULT_THRESHOLDS, ...(deps.thresholds ?? {}) };
@@ -386,68 +438,6 @@ export function projectStuckIssues(read: WaitingIssuesRead): {
     scanned: rawCount("blocked") + rawCount("needs-info"),
     sourcesOk:
       !read.sourceErrors.includes("blocked") && !read.sourceErrors.includes("needs-info"),
-  };
-}
-
-export type DecisionItemSource = "ready-for-human" | "needs-info";
-
-export interface DecisionItem {
-  number: number;
-  title: string;
-  url: string;
-  createdAt: string;
-  labels: string[];
-  source: DecisionItemSource;
-  sources: DecisionItemSource[];
-}
-
-export interface DecisionQueueResult {
-  items: DecisionItem[];
-  scanned: number;
-  sourcesOk: boolean;
-}
-
-/**
- * Pure — the decision-queue view: PRESENCE semantics over the raw
- * `ready-for-human` then `needs-info` rows (no age gate, no Epic exclusion),
- * label-union on duplicates, createdAt-ascending with number fallback.
- */
-export function projectDecisionQueue(read: WaitingIssuesRead): DecisionQueueResult {
-  const order: DecisionItemSource[] = ["ready-for-human", "needs-info"];
-  const bySource: Partial<Record<DecisionItemSource, RawDigestInput[]>> = {};
-  let scanned = 0;
-  for (const source of order) {
-    const rows = read.byLabel.get(source) ?? [];
-    scanned += rows.length;
-    bySource[source] = labeledItemsFromRows(rows);
-  }
-  const items = mergeBySource(bySource, order, (existing, incoming) => {
-    // Pure: replace the array rather than mutate the (possibly shared) one.
-    const labels = [...existing.row.labels];
-    for (const label of incoming.labels) {
-      if (!labels.includes(label)) labels.push(label);
-    }
-    existing.row = { ...existing.row, labels };
-  })
-    .map(({ row, source, sources }): DecisionItem => ({
-      number: row.number,
-      title: row.title,
-      url: row.url,
-      createdAt: row.createdAt,
-      labels: row.labels,
-      source,
-      sources,
-    }))
-    .sort((a, b) => {
-      const aMs = Date.parse(a.createdAt);
-      const bMs = Date.parse(b.createdAt);
-      if (Number.isFinite(aMs) && Number.isFinite(bMs) && aMs !== bMs) return aMs - bMs;
-      return a.number - b.number;
-    });
-  return {
-    items,
-    scanned,
-    sourcesOk: order.every((l) => !read.sourceErrors.includes(l)),
   };
 }
 
