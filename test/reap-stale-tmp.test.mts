@@ -13,7 +13,7 @@
 import test, { after, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lutimesSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lutimesSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -187,18 +187,20 @@ describe("reap-stale-tmp.sh", () => {
   test("removal is bounded to the filesystem the quiet check examined (rm --one-file-system)", () => {
     const root = fixtureRoot();
     const leaked = makeDir(root, "pace-nudge-Zx98Cv");
-    // Stub `rm` on PATH that records its argv, then delegates to the real rm.
+    // Stub `rm` on PATH that refuses any call without --one-file-system and
+    // otherwise delegates to the real rm.
     const bin = fixtureRoot();
-    const argvLog = join(bin, "rm-argv.log");
     const realRm = spawnSync("bash", ["-c", "command -v rm"], { encoding: "utf8" }).stdout.trim();
-    writeFileSync(join(bin, "rm"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> '${argvLog}'\nexec '${realRm}' "$@"\n`);
+    writeFileSync(
+      join(bin, "rm"),
+      `#!/usr/bin/env bash\ncase " $* " in *" --one-file-system "*) exec '${realRm}' "$@" ;; esac\nexit 1\n`,
+    );
     chmodSync(join(bin, "rm"), 0o755);
 
     const r = runWithEnv(root, { PATH: `${bin}:${process.env.PATH ?? ""}` }, "--apply");
 
-    assert.equal(existsSync(leaked), false);
-    assert.match(r.summary, /removed=1/);
-    assert.match(readFileSync(argvLog, "utf8"), /--one-file-system/);
+    assert.equal(existsSync(leaked), false, "rm must be called with --one-file-system");
+    assert.match(r.summary, /removed=1 failed=0/);
   });
 
   test("--max-age below 60 minutes is refused", () => {
