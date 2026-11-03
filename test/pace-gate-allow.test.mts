@@ -64,13 +64,15 @@ const PACE_GATE = join(
  * real route: every request's query is parsed through the real
  * EligibilityQuerySchema and the body is `{ ...payload, admission:
  * decideAdmission(payload, ctx) }`, so pace-gate.sh is tested against the
- * production verdict, not a hand-written one. `opts.admission` overrides the
+ * production verdict, not a hand-written one. `opts.credentialsExpiresAtMs`
+ * stands in for the route's server-side credentials read (#5103).
+ * `opts.admission` overrides the
  * field (an explicit object, or `null` to omit it). `lastUrl()` exposes the
  * last request URL for assertions.
  */
 function eligibilityServer(
   payload: unknown,
-  opts: { admission?: unknown } = {},
+  opts: { admission?: unknown; credentialsExpiresAtMs?: number | null } = {},
 ): Promise<{ url: string; close: () => void; lastUrl: () => string }> {
   return new Promise((resolve) => {
     let last = "";
@@ -86,6 +88,12 @@ function eligibilityServer(
           mode: q.mode ?? "timer",
           serviceActive: q.serviceActive ?? false,
           pidAlive: q.pidAlive ?? false,
+          // #5103: the real route reads the credentials expiry server-side
+          // (injectable here) and echoes the launcher's pair / stamp.
+          credentialsExpiresAtMs: opts.credentialsExpiresAtMs ?? null,
+          nudgeLastAtS: q.nudgeLastAt ?? null,
+          primaryModel: q.primaryModel ?? "fable",
+          fallbackModel: q.fallbackModel ?? "opus",
         });
       } else if (opts.admission !== null) {
         body.admission = opts.admission;
@@ -211,7 +219,7 @@ describe("pace-gate.sh transport: ctx echo (issue #5102)", () => {
     try {
       const r = await runPaceGate(srv.url, ["--exec-autopilot"]);
       assert.equal(r.status, 0);
-      assert.match(srv.lastUrl(), /mode=exec&serviceActive=0&pidAlive=0/);
+      assert.match(srv.lastUrl(), /mode=exec&serviceActive=0&pidAlive=0&primaryModel=fable&fallbackModel=opus/);
     } finally {
       srv.close();
     }
@@ -221,7 +229,7 @@ describe("pace-gate.sh transport: ctx echo (issue #5102)", () => {
     const srv = await eligibilityServer(eligiblePayload());
     try {
       await runPaceGate(srv.url);
-      assert.match(srv.lastUrl(), /mode=timer&serviceActive=0&pidAlive=0/);
+      assert.match(srv.lastUrl(), /mode=timer&serviceActive=0&pidAlive=0&primaryModel=fable&fallbackModel=opus/);
     } finally {
       srv.close();
     }
@@ -243,11 +251,42 @@ describe("pace-gate.sh transport: ctx echo (issue #5102)", () => {
     }
   });
 
+  test("the launcher's own env model pair rides the query (#5103)", async () => {
+    const srv = await eligibilityServer(eligiblePayload());
+    try {
+      await runPaceGate(srv.url, [], {
+        HYDRA_AUTOPILOT_PRIMARY_MODEL: "sonnet",
+        HYDRA_AUTOPILOT_FALLBACK_MODEL: "haiku",
+      });
+      assert.match(srv.lastUrl(), /primaryModel=sonnet&fallbackModel=haiku/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("nudgeLastAt is sent only when the stamp file holds an integer (#5103)", async () => {
+    const dir = makeTmpDir("pace-stamp-");
+    const stamp = join(dir, "stamp");
+    const srv = await eligibilityServer(eligiblePayload());
+    try {
+      await runPaceGate(srv.url, [], { HYDRA_PACE_GATE_NUDGE_STAMP: stamp });
+      assert.doesNotMatch(srv.lastUrl(), /nudgeLastAt/);
+      writeFileSync(stamp, "garbage\n");
+      await runPaceGate(srv.url, [], { HYDRA_PACE_GATE_NUDGE_STAMP: stamp });
+      assert.doesNotMatch(srv.lastUrl(), /nudgeLastAt/);
+      writeFileSync(stamp, "1700000000\n");
+      await runPaceGate(srv.url, [], { HYDRA_PACE_GATE_NUDGE_STAMP: stamp });
+      assert.match(srv.lastUrl(), /nudgeLastAt=1700000000/);
+    } finally {
+      srv.close();
+    }
+  });
+
   test("an ELIGIBILITY_URL that already carries a query string is extended with &", async () => {
     const srv = await eligibilityServer(eligiblePayload());
     try {
       await runPaceGate(`${srv.url}?force=1`);
-      assert.match(srv.lastUrl(), /\?force=1&mode=timer&serviceActive=0&pidAlive=0/);
+      assert.match(srv.lastUrl(), /\?force=1&mode=timer&serviceActive=0&pidAlive=0&primaryModel=fable&fallbackModel=opus/);
     } finally {
       srv.close();
     }
@@ -341,6 +380,10 @@ describe("pace-gate.sh transport: skip is a verbatim pass-through (issue #5102)"
         mode: "timer",
         serviceActive: false,
         pidAlive: false,
+        credentialsExpiresAtMs: null,
+        nudgeLastAtS: null,
+        primaryModel: "fable",
+        fallbackModel: "opus",
       });
       const srv = await eligibilityServer(payload);
       try {
@@ -356,7 +399,14 @@ describe("pace-gate.sh transport: skip is a verbatim pass-through (issue #5102)"
 
   test("a reason bash has never seen is recorded verbatim", async () => {
     const srv = await eligibilityServer(eligiblePayload(), {
-      admission: { admit: false, reason: "future-reason", class: "deliberate-skip", note: null },
+      admission: {
+        admit: false,
+        reason: "future-reason",
+        class: "deliberate-skip",
+        note: null,
+        shouldNudgeOauth: false,
+        launchModel: "fable",
+      },
     });
     try {
       const r = await runPaceGate(srv.url);
@@ -731,6 +781,7 @@ describe("pace-gate.sh token-refresh nudge in the meter-unavailable arm (issue #
     writeFileSync(script, `#!/bin/bash\necho x >> "${marker}"\n`, { mode: 0o755 });
     return {
       marker,
+      expiresAt,
       env: {
         HYDRA_CLAUDE_CREDENTIALS_PATH: creds,
         HYDRA_PACE_GATE_NUDGE_STAMP: join(dir, "stamp"),
@@ -739,20 +790,25 @@ describe("pace-gate.sh token-refresh nudge in the meter-unavailable arm (issue #
     };
   }
 
-  const blind = () =>
-    eligibilityServer({
-      allow: false,
-      shed: [],
-      reasons: { ...baseReasons, meterUnavailable: true },
-      paceState: "behind",
-    });
+  // #5103: the credentials expiry is read server-side, so the fixture server
+  // takes it as the route's injected read.
+  const blind = (credentialsExpiresAtMs: number | null) =>
+    eligibilityServer(
+      {
+        allow: false,
+        shed: [],
+        reasons: { ...baseReasons, meterUnavailable: true },
+        paceState: "behind",
+      },
+      { credentialsExpiresAtMs },
+    );
 
   const runs = (marker: string) =>
     existsSync(marker) ? readFileSync(marker, "utf-8").trim().split("\n").length : 0;
 
   test("past expiresAt + meterUnavailable: nudge runs once, then is rate-limited by the stamp", async () => {
     const f = fixture(Date.now() - 60_000);
-    const srv = await blind();
+    const srv = await blind(f.expiresAt);
     try {
       const r1 = await runPaceGate(srv.url, [], f.env);
       assert.equal(r1.status, 0);
@@ -773,19 +829,21 @@ describe("pace-gate.sh token-refresh nudge in the meter-unavailable arm (issue #
     async () => {
       const conn = getRedisConnection();
       await conn.del(LAST_TICK_KEY);
-      const srv = await blind();
+      const f = fixture(Date.now() - 60_000);
+      const g = fixture(Date.now() + 3_600_000);
+      const srv = await blind(f.expiresAt);
+      const srvG = await blind(g.expiresAt);
       try {
-        const f = fixture(Date.now() - 60_000);
         const r1 = await runPaceGate(srv.url, [], { ...f.env, HYDRA_REDIS_DB: String(TEST_DB) });
         assert.equal(r1.status, 0);
         assert.equal((await conn.hgetall(LAST_TICK_KEY)).reason, "token-refresh-nudge");
         await conn.del(LAST_TICK_KEY);
-        const g = fixture(Date.now() + 3_600_000);
-        const r2 = await runPaceGate(srv.url, [], { ...g.env, HYDRA_REDIS_DB: String(TEST_DB) });
+        const r2 = await runPaceGate(srvG.url, [], { ...g.env, HYDRA_REDIS_DB: String(TEST_DB) });
         assert.equal(r2.status, 0);
         assert.equal((await conn.hgetall(LAST_TICK_KEY)).reason, "meter-unavailable");
       } finally {
         srv.close();
+        srvG.close();
         await conn.del(LAST_TICK_KEY);
       }
     },
@@ -793,7 +851,7 @@ describe("pace-gate.sh token-refresh nudge in the meter-unavailable arm (issue #
 
   test("an unwritable stamp path skips the nudge (rate limit unenforceable)", async () => {
     const f = fixture(Date.now() - 60_000);
-    const srv = await blind();
+    const srv = await blind(f.expiresAt);
     try {
       const r = await runPaceGate(srv.url, [], {
         ...f.env,
@@ -809,7 +867,7 @@ describe("pace-gate.sh token-refresh nudge in the meter-unavailable arm (issue #
 
   test("expiresAt more than 10 minutes out never nudges", async () => {
     const f = fixture(Date.now() + 3_600_000);
-    const srv = await blind();
+    const srv = await blind(f.expiresAt);
     try {
       const r = await runPaceGate(srv.url, [], f.env);
       assert.equal(r.status, 0);
@@ -822,7 +880,7 @@ describe("pace-gate.sh token-refresh nudge in the meter-unavailable arm (issue #
 
   test("a failing nudge command never aborts the tick under set -e", async () => {
     const f = fixture(Date.now() - 60_000);
-    const srv = await blind();
+    const srv = await blind(f.expiresAt);
     try {
       const r = await runPaceGate(srv.url, [], { ...f.env, HYDRA_PACE_GATE_NUDGE_CMD: "false" });
       assert.equal(r.status, 0);
@@ -834,7 +892,7 @@ describe("pace-gate.sh token-refresh nudge in the meter-unavailable arm (issue #
 
   test("no token value ever reaches stdout", async () => {
     const f = fixture(Date.now() - 60_000);
-    const srv = await blind();
+    const srv = await blind(f.expiresAt);
     try {
       const r = await runPaceGate(srv.url, [], f.env);
       assert.doesNotMatch(r.stdout, new RegExp(ACCESS));

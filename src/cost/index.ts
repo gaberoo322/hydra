@@ -105,6 +105,10 @@ export {
   // Consumed by `scripts/cost/weighted-quota-report.ts`.
   getBurnCategoryWeights,
   getBurnFamilyWeights,
+  // Launch-model pair (issues #4585, #5103): the env defaults the eligibility
+  // route applies when the launcher sends no pair of its own.
+  getPrimaryLaunchModel,
+  getFallbackLaunchModel,
 } from "./config.ts";
 
 // ---------------------------------------------------------------------------

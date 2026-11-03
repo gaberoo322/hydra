@@ -71,13 +71,13 @@
 # credits. Switch to another model...". The #4583 reap parses that line and
 # POSTs it to /api/usage/session-block, which arms the MODEL-SCOPED
 # exhaustion flag — never `.allow`, never `sessionBlockedUntil` (a REDIRECT,
-# not a stop) — surfaced as `.reasons.fableExhaustedUntil`. While that
-# instant is FUTURE, this gate's exec branch launches the parent session on
-# the FALLBACK model (default opus) instead of the PRIMARY (default fable);
-# when the flag expires (TTL = min(now+60min, next Weekly Reset Anchor
-# boundary)) the next tick launches on the primary again — a post-expiry
-# re-probe is ~free (0-token 429 in <0.5s), so under-blocking costs almost
-# nothing. INV-1: the out-of-credits 429 is NOT handled by the CLI's own
+# not a stop). While that flag is live, the verdict's `launchModel` is the
+# FALLBACK model (default opus) instead of the PRIMARY (default fable) —
+# the rule lives in src/cost/admission.ts (#5103), and this gate's exec
+# branch just launches on `.admission.launchModel`; when the flag expires
+# (TTL = min(now+60min, next Weekly Reset Anchor boundary)) the next tick
+# launches on the primary again — a post-expiry re-probe is ~free (0-token
+# 429 in <0.5s), so under-blocking costs almost nothing. INV-1: the out-of-credits 429 is NOT handled by the CLI's own
 # `--fallback-model` (empirically falsified on CLI 2.1.280) — the gate
 # launches with an explicit `--model`; `--fallback-model` rides along
 # belt-and-braces for overload/model-access errors only. Every switch logs a
@@ -106,14 +106,14 @@
 #       arbitrary command line (word-split). Lets the test pin that the
 #       eligible branch really execs without spawning a Claude session.
 #   HYDRA_PACE_GATE_NUDGE_CMD / HYDRA_PACE_GATE_NUDGE_STAMP (issue #4843)
-#       Meter-unavailable arm only: the token-refresh nudge command (default
+#       Only when the verdict says shouldNudgeOauth (decided in
+#       src/cost/admission.ts, #5103): the token-refresh nudge command (default
 #       `timeout 60 claude -p --model haiku 'reply ok'`, word-split; bounded
 #       to 60s so the synchronous nudge stays well inside a tick) and the
 #       rate-limit stamp file (default under the user-owned
 #       ${XDG_STATE_HOME:-$HOME/.local/state}/hydra/, never a shared /tmp).
-#       The nudge reads only `claudeAiOauth.expiresAt` from
-#       ${HYDRA_CLAUDE_CREDENTIALS_PATH:-$HOME/.claude/.credentials.json} and
-#       never echoes a token; its stdout/stderr go to /dev/null.
+#       The credentials expiry is read server-side (this script never opens the
+#       credentials file); the nudge's stdout/stderr go to /dev/null.
 #   HYDRA_PACE_GATE_ELIGIBILITY_URL
 #       Override the eligibility endpoint URL (default
 #       http://localhost:4000/api/usage/eligibility) so the test can point
@@ -170,11 +170,15 @@ REDIS_DB="${HYDRA_REDIS_DB:-0}"
 # test/launch-flow-key-contract.test.mts — keep the two in lockstep.
 LAST_TICK_KEY="hydra:autopilot:pace-gate:last-tick"
 # Issue #4585: the launch-model pair. PRIMARY is what the parent session
-# normally runs on; FALLBACK is what the exec branch switches to while the
-# model-scoped exhaustion flag (.reasons.fableExhaustedUntil) is future.
+# normally runs on; FALLBACK is what it switches to while the model-scoped
+# exhaustion flag is future. This unit's env pair is sent to the verdict as a
+# launcher fact (#5103) — the deciding rule lives in src/cost/admission.ts.
 # Env-overridable so tests can pin the --model spelling.
-PRIMARY_MODEL="${HYDRA_AUTOPILOT_PRIMARY_MODEL:-fable}"
-FALLBACK_MODEL="${HYDRA_AUTOPILOT_FALLBACK_MODEL:-opus}"
+SEND_PRIMARY_MODEL="${HYDRA_AUTOPILOT_PRIMARY_MODEL:-fable}"
+SEND_FALLBACK_MODEL="${HYDRA_AUTOPILOT_FALLBACK_MODEL:-opus}"
+# #4843 nudge stamp (the 30-minute rate-limit key); its content rides to the
+# verdict as `nudgeLastAt`, the verdict says whether a nudge is due.
+NUDGE_STAMP="${HYDRA_PACE_GATE_NUDGE_STAMP:-${XDG_STATE_HOME:-$HOME/.local/state}/hydra/pace-gate-token-nudge.stamp}"
 
 # Mode: "timer" (default — the ~15-min admission timer; launches the unit) or
 # "exec" (--exec-autopilot — the unit's ExecStart wrapper; execs the CLI).
@@ -323,7 +327,14 @@ SEP="?"
 if [[ "$ELIGIBILITY_URL" == *"?"* ]]; then
   SEP="&"
 fi
-PROBE_URL="${ELIGIBILITY_URL}${SEP}mode=${MODE}&serviceActive=${SERVICE_ACTIVE}&pidAlive=${PID_ALIVE}"
+NUDGE_LAST="$(cat "$NUDGE_STAMP" 2>/dev/null || true)"
+NUDGE_PARAM=""
+if [[ "$NUDGE_LAST" =~ ^[0-9]+$ ]]; then
+  NUDGE_PARAM="&nudgeLastAt=${NUDGE_LAST}"
+else
+  NUDGE_LAST=""
+fi
+PROBE_URL="${ELIGIBILITY_URL}${SEP}mode=${MODE}&serviceActive=${SERVICE_ACTIVE}&pidAlive=${PID_ALIVE}&primaryModel=${SEND_PRIMARY_MODEL}&fallbackModel=${SEND_FALLBACK_MODEL}${NUDGE_PARAM}"
 if ! PROBE_TIME_TOTAL=$(curl -fsS --max-time 10 -w '%{time_total}' -o "$CURL_BODY_FILE" "$PROBE_URL" 2>/dev/null); then
   rm -f "$CURL_BODY_FILE"
   log "WARN eligibility endpoint unreachable ($ELIGIBILITY_URL) — failing safe (not launching)"
@@ -350,7 +361,7 @@ fi
 # A missing or malformed admission object is treated as invalid: the route
 # serves it since #5101 and shares a host with this gate, so there is no
 # version-skew window.
-if ! jq -e 'type == "object" and (.admit | type == "boolean") and (.reason | type == "string" and length > 0) and (.class | type == "string" and length > 0)' \
+if ! jq -e 'type == "object" and (.admit | type == "boolean") and (.reason | type == "string" and length > 0) and (.class | type == "string" and length > 0) and (.launchModel | type == "string" and length > 0) and (.shouldNudgeOauth | type == "boolean")' \
   <<<"$ADMISSION_JSON" >/dev/null 2>&1; then
   log "WARN eligibility .admission missing or malformed — failing safe (not launching)"
   record_tick "allow-invalid" "fail-safe" "$LATENCY_MS" || true
@@ -361,57 +372,47 @@ ADMISSION_ADMIT=$(jq -r '.admit' <<<"$ADMISSION_JSON")
 ADMISSION_REASON=$(jq -r '.reason' <<<"$ADMISSION_JSON")
 ADMISSION_CLASS=$(jq -r '.class' <<<"$ADMISSION_JSON")
 ADMISSION_NOTE=$(jq -r '.note // ""' <<<"$ADMISSION_JSON")
+ADMISSION_SHOULD_NUDGE=$(jq -r '.shouldNudgeOauth' <<<"$ADMISSION_JSON")
+# #5103: the launch-model decision (fallback while the model-exhaustion flag is
+# future) is the verdict's, not recomputed here.
+LAUNCH_MODEL=$(jq -r '.launchModel' <<<"$ADMISSION_JSON")
+PRIMARY_MODEL=$(jq -r '.primaryModel // empty' <<<"$ADMISSION_JSON")
+FALLBACK_MODEL=$(jq -r '.fallbackModel // empty' <<<"$ADMISSION_JSON")
+MODEL_FALLBACK_REASON=$(jq -r '.modelFallbackReason // ""' <<<"$ADMISSION_JSON")
+PRIMARY_MODEL="${PRIMARY_MODEL:-$SEND_PRIMARY_MODEL}"
+FALLBACK_MODEL="${FALLBACK_MODEL:-$SEND_FALLBACK_MODEL}"
 
 # --- Step 3: skip on admit=false (pass-through; no policy here) ---
 if [[ "$ADMISSION_ADMIT" != "true" ]]; then
   REASONS_JSON=$(jq -c '.reasons // {}' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "{}")
   log "skip reason=$ADMISSION_REASON class=$ADMISSION_CLASS (reasons: $REASONS_JSON)"
-  # Issue #3845 (epic #3844): a meter-dark tick records the verdict's own
-  # `meter-unavailable` reason. The #4843 nudge below stays in bash until #5103.
-  if [[ "$ADMISSION_REASON" == "meter-unavailable" ]]; then
-    log "usage meter unavailable (reasons.meterUnavailable) — skip (brake cannot see; #3845)"
-  # Issue #4843: an idle stretch longer than the OAuth token lifetime deadlocks
-  # here (expired token -> meter blind -> no launch -> nothing rotates the
-  # token). When the token has expired / expires within 10 min, run ONE minimal
-  # Claude Code call (rate-limited by a stamp file) so the CLI rotates its own
-  # token; this tick still skips. Hydra never writes the credentials file or
-  # calls the refresh endpoint, and never reads/logs the tokens themselves.
-  NUDGE_CREDS="${HYDRA_CLAUDE_CREDENTIALS_PATH:-$HOME/.claude/.credentials.json}"
-  NUDGE_STAMP="${HYDRA_PACE_GATE_NUDGE_STAMP:-${XDG_STATE_HOME:-$HOME/.local/state}/hydra/pace-gate-token-nudge.stamp}"
-  mkdir -p "$(dirname "$NUDGE_STAMP")" 2>/dev/null || true
-  NUDGE_EXPIRES_MS=$(jq -r '.claudeAiOauth.expiresAt // empty' "$NUDGE_CREDS" 2>/dev/null || true)
-  if [[ "$NUDGE_EXPIRES_MS" =~ ^[0-9]+$ ]]; then
-    NUDGE_NOW_MS=$(( $(date +%s) * 1000 ))
-    if (( NUDGE_EXPIRES_MS <= NUDGE_NOW_MS + 600000 )); then
-      NUDGE_LAST=$(cat "$NUDGE_STAMP" 2>/dev/null || true)
-      NUDGE_AGE=-1
-      if [[ "$NUDGE_LAST" =~ ^[0-9]+$ ]]; then
-        NUDGE_AGE=$(( $(date +%s) - NUDGE_LAST ))
-      fi
-      if (( NUDGE_AGE < 0 || NUDGE_AGE >= 1800 )); then
-        # Stamp BEFORE the nudge so a hung/failed nudge still counts (no retry storm).
-        # If the stamp cannot be written the 30-minute limit is lost — skip the nudge.
-        if ! date +%s >"$NUDGE_STAMP" 2>/dev/null; then
-          log "WARN: could not write nudge stamp $NUDGE_STAMP — skipping nudge (rate limit unenforceable)"
-          record_tick "$ADMISSION_REASON" "$ADMISSION_CLASS" "$LATENCY_MS" || true
-          exit 0
-        fi
-        NUDGE_RC=0
-        if [[ -n "${HYDRA_PACE_GATE_NUDGE_CMD:-}" ]]; then
-          # shellcheck disable=SC2086
-          $HYDRA_PACE_GATE_NUDGE_CMD >/dev/null 2>&1 || NUDGE_RC=$?
-        else
-          timeout 60 claude -p --model haiku 'reply ok' >/dev/null 2>&1 || NUDGE_RC=$?
-        fi
-        log "token-refresh nudge ran (expiresAt=${NUDGE_EXPIRES_MS}ms, rc=${NUDGE_RC}, prior stamp age=${NUDGE_AGE}s; #4843) — skip this tick"
-        record_tick "token-refresh-nudge" "fail-safe" "$LATENCY_MS" || true
-        exit 0
-      fi
-      log "token expiring (expiresAt=${NUDGE_EXPIRES_MS}ms) but nudge ran ${NUDGE_AGE}s ago (<1800s) — no nudge"
+  # Issue #4843 (decided in the verdict since #5103): an idle stretch longer
+  # than the OAuth token lifetime deadlocks here (expired token -> meter blind
+  # -> no launch -> nothing rotates the token). When the verdict says
+  # shouldNudgeOauth, run ONE minimal Claude Code call so the CLI rotates its
+  # own token; this tick still skips. The 10-minute expiry window and the
+  # 30-minute rate limit live in src/cost/admission.ts; bash only performs the
+  # effect. Hydra never writes the credentials file or calls the refresh
+  # endpoint, and never reads/logs the tokens themselves.
+  if [[ "$ADMISSION_SHOULD_NUDGE" == "true" ]]; then
+    # Stamp BEFORE the nudge so a hung/failed nudge still counts (no retry storm).
+    # If the stamp cannot be written the 30-minute limit is lost — skip the nudge.
+    mkdir -p "$(dirname "$NUDGE_STAMP")" 2>/dev/null || true
+    if ! date +%s >"$NUDGE_STAMP" 2>/dev/null; then
+      log "WARN: could not write nudge stamp $NUDGE_STAMP — skipping nudge (rate limit unenforceable)"
+      record_tick "$ADMISSION_REASON" "$ADMISSION_CLASS" "$LATENCY_MS" || true
+      exit 0
     fi
-  else
-    log "credentials expiresAt unreadable/non-numeric — no token-refresh nudge"
-  fi
+    NUDGE_RC=0
+    if [[ -n "${HYDRA_PACE_GATE_NUDGE_CMD:-}" ]]; then
+      # shellcheck disable=SC2086
+      $HYDRA_PACE_GATE_NUDGE_CMD >/dev/null 2>&1 || NUDGE_RC=$?
+    else
+      timeout 60 claude -p --model haiku 'reply ok' >/dev/null 2>&1 || NUDGE_RC=$?
+    fi
+    log "token-refresh nudge ran (rc=${NUDGE_RC}, prior stamp=${NUDGE_LAST:-none}; #4843) — skip this tick"
+  elif [[ "$ADMISSION_REASON" == "meter-unavailable" ]]; then
+    log "usage meter unavailable (reasons.meterUnavailable) — skip (brake cannot see; #3845)"
   fi
   record_tick "$ADMISSION_REASON" "$ADMISSION_CLASS" "$LATENCY_MS" || true
   exit 0
@@ -437,23 +438,9 @@ if [[ "$MODE" == "exec" ]]; then
   # inherit it. Ineligible exits (Steps 1-3) never reach this export.
   export HYDRA_AUTOPILOT_TRIGGER="pace-gate"
 
-  # Issue #4585: pick the launch model. While the model-scoped exhaustion
-  # flag (.reasons.fableExhaustedUntil) is FUTURE, launch on FALLBACK (opus);
-  # absent, stale/past, or unparseable launches on PRIMARY (fable) —
-  # fail-safe to the primary so a corrupt flag can never wedge the loop on
-  # the fallback.
-  FABLE_EXHAUSTED_UNTIL=$(jq -r '.reasons.fableExhaustedUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "")
-  LAUNCH_MODEL="$PRIMARY_MODEL"
-  MODEL_FALLBACK_REASON=""
-  if [[ -n "$FABLE_EXHAUSTED_UNTIL" ]]; then
-    # moves into the verdict in #5103
-    FABLE_EPOCH=$(date -d "$FABLE_EXHAUSTED_UNTIL" +%s 2>/dev/null || echo "")
-    NOW_EPOCH=$(date -u +%s)
-    if [[ -n "$FABLE_EPOCH" && "$FABLE_EPOCH" -gt "$NOW_EPOCH" ]]; then
-      LAUNCH_MODEL="$FALLBACK_MODEL"
-      MODEL_FALLBACK_REASON="out-of-credits"
-    fi
-  fi
+  # Issue #4585: the launch model is the verdict's (#5103): FALLBACK while the
+  # model-scoped exhaustion flag is future, else PRIMARY (fail-safe to the
+  # primary so a corrupt flag can never wedge the loop on the fallback).
   # INV-1 (#4585): the out-of-credits 429 is NOT handled by the CLI's own
   # --fallback-model (empirically falsified on CLI 2.1.280) — the gate
   # launches with an explicit --model. --fallback-model rides along

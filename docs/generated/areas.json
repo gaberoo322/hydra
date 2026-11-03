@@ -551,6 +551,7 @@
           "GET /api/usage/by-issue"
         ],
         "env-vars": [
+          "HYDRA_CLAUDE_CREDENTIALS_PATH",
           "HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS",
           "HYDRA_EXTRA_USAGE_POLICY",
           "HYDRA_GLM_AB_ASSIGNMENT_FRACTION",
@@ -1803,7 +1804,6 @@
           "HYDRA_AUTOPILOT_TOKEN_BUDGET",
           "HYDRA_AUTOPILOT_TRIGGER",
           "HYDRA_AUTOPILOT_UNATTENDED",
-          "HYDRA_CLAUDE_CREDENTIALS_PATH",
           "HYDRA_CONFIG_PATH",
           "HYDRA_DISPATCH_REGISTER_MARKER_DIR",
           "HYDRA_GH_ISSUE_LIST_LIMIT",
