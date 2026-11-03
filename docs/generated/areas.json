@@ -26,6 +26,7 @@
       "slices": {
         "env-vars": [
           "HYDRA_DF_BIN",
+          "HYDRA_DU_BIN",
           "HYDRA_FLOCK_BIN",
           "HYDRA_FREE_BIN",
           "HYDRA_SYSTEMCTL_BIN"

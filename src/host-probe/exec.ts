@@ -119,6 +119,14 @@ export function systemctlBin(): string {
 }
 
 /**
+ * Resolve the `du` binary, honoring the `HYDRA_DU_BIN` test/override hook.
+ * Symmetric with {@link dfBin}; production falls back to `du` on PATH.
+ */
+export function duBin(): string {
+  return process.env.HYDRA_DU_BIN || "du";
+}
+
+/**
  * Resolve the `flock` binary, honoring the `HYDRA_FLOCK_BIN` test/override hook.
  * Symmetric with {@link dfBin}; production falls back to `flock` on PATH.
  */

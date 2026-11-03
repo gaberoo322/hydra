@@ -1125,18 +1125,45 @@ describe("scripts/test/redis-db-launch.mjs — terminal VERDICT line (#5106)", (
     ) as Record<string, number>;
     const file = "test/redis-db-helper.test.mts";
     assert.ok(baseline[file] > 2, "fixture premise: baseline expects more than the 2 captured entries");
-    // The child writes a 2-entry capture (1 ok, 1 not ok) into its cwd, the
-    // launcher's capture location: a partial shortfall against the baseline.
+    // The child writes a 2-entry all-ok capture into its cwd, the launcher's
+    // capture location: a partial shortfall against the baseline.
+    const script =
+      "const fs=require('fs');" +
+      `const e=(n,ok)=>JSON.stringify({file:'${file}',name:n,ok})+String.fromCharCode(10);` +
+      "fs.writeFileSync('.suite-count-capture.ndjson',e('a',true)+e('b',true));process.exit(0)";
+    const run = runLauncher(script, [file]);
+    assert.equal(run.status, 0, "advisory mode must not change the exit code");
+    assert.equal(
+      lastLine(run.stderr),
+      "[redis-db-launch] VERDICT exit=0 outcome=PASS top-level-pass=2 top-level-fail=0 suites-gate=advisory",
+    );
+  });
+
+  test("a not-ok top-level row promotes an exit-0 run to FAIL and names it (spawn)", () => {
+    const file = "test/redis-db-helper.test.mts";
     const script =
       "const fs=require('fs');" +
       `const e=(n,ok)=>JSON.stringify({file:'${file}',name:n,ok})+String.fromCharCode(10);` +
       "fs.writeFileSync('.suite-count-capture.ndjson',e('a',true)+e('b',false));process.exit(0)";
     const run = runLauncher(script, [file]);
-    assert.equal(run.status, 0, "advisory mode must not change the exit code");
+    assert.equal(run.status, 1);
+    assert.match(
+      run.stderr,
+      /\[redis-db-launch\] TOP-LEVEL FAILURE — test\/redis-db-helper\.test\.mts: b reported not-ok while the runner exited 0 \(issue #5335\)/,
+    );
     assert.equal(
       lastLine(run.stderr),
-      "[redis-db-launch] VERDICT exit=0 outcome=PASS top-level-pass=1 top-level-fail=1 suites-gate=advisory",
+      "[redis-db-launch] VERDICT exit=1 outcome=FAIL top-level-pass=1 top-level-fail=1 suites-gate=advisory",
     );
+  });
+
+  test("resolveVerdict promotes only a green exit with topLevelFail > 0", async () => {
+    const { resolveVerdict } = await import("../scripts/test/redis-db-launch.mjs");
+    assert.deepEqual(resolveVerdict({ code: 0, topLevelFail: 1 }), { code: 1, outcome: "FAIL" });
+    assert.deepEqual(resolveVerdict({ code: 0, topLevelFail: 0 }), { code: 0, outcome: "PASS" });
+    assert.deepEqual(resolveVerdict({ code: 0, topLevelFail: null }), { code: 0, outcome: "PASS" });
+    assert.deepEqual(resolveVerdict({ code: 3, topLevelFail: 2 }), { code: 3, outcome: "FAIL" });
+    assert.deepEqual(resolveVerdict({ code: 3, topLevelFail: null }), { code: 3, outcome: "FAIL" });
   });
 
   test("VERDICT exit= matches the real status on the blocking FILE-SET hard-fail (spawn)", () => {
@@ -1174,7 +1201,15 @@ describe("scripts/test/redis-db-launch.mjs — terminal VERDICT line (#5106)", (
       p,
       '{"file":"a","name":"x","ok":true}\n{"file":"a","name":"y","ok":false}\n{"file":"b","name":"z","ok":true}\n{"file":',
     );
-    assert.deepEqual(captureTopLevelCounts(p), { pass: 2, fail: 1 });
+    assert.deepEqual(captureTopLevelCounts(p), {
+      pass: 2,
+      fail: 1,
+      failures: [{ file: "a", name: "y" }],
+    });
+    // A failing top-level `todo` test exits 0 under node:test: not a failure.
+    const t = join(dir, "todo.ndjson");
+    writeFileSync(t, '{"file":"a","name":"x","ok":false,"todo":true}\n{"file":"a","name":"y","ok":true}\n');
+    assert.deepEqual(captureTopLevelCounts(t), { pass: 1, fail: 0, failures: [] });
     assert.equal(captureTopLevelCounts(join(dir, "missing")), null);
   });
 
