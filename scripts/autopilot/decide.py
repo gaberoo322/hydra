@@ -413,8 +413,14 @@ from decide_selectors.wire_or_retire import _select_signal_wire_or_retire_target
 # order, and _rule_signal_classes iterates a hardcoded signal tuple that today
 # merely coincides with row order — nothing couples them (issue #4468).
 # Dispatch priority is POLICY and stays here in the brain.
+#
+# HYDRA_CLASSES_JSON (issue #5202) is a TEST SEAM shared with render-dispatch.py:
+# when set (non-empty) it names the taxonomy file and decide.py loads ONLY that
+# file — a missing/invalid override raises TaxonomyError naming the override
+# path, never a fallback to the shipped classes.json. No production entrypoint
+# sets it; unset keeps the sibling classes.json.
 
-_TAXONOMY_PATH = os.path.join(
+_TAXONOMY_PATH = os.environ.get("HYDRA_CLASSES_JSON") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "classes.json"
 )
 
