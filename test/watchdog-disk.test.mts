@@ -11,6 +11,7 @@ import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  DISK_BRIEF_KIND,
   DISK_PAGE_KIND,
   DISK_RECOVER_MARGIN_PCT,
   decideDisk,
@@ -47,16 +48,16 @@ describe("decideDisk (pure)", () => {
     assert.match(v.log, /^ok \/tmp: inodes 22%/);
   });
 
-  test("warn on inodes: warn pages, critical held until the episode ends", () => {
+  test("warn on inodes: warn briefs (never pages), critical held until the episode ends", () => {
     const v = decideDisk("/tmp", fs(85, 5), T);
     assert.equal(v.level, "warn");
-    assert.deepEqual(v.actions, { warn: "page", critical: "hold" });
+    assert.deepEqual(v.actions, { warn: "brief", critical: "hold" });
   });
 
   test("warn on blocks alone (inodes fine) also warns — independent dimensions", () => {
     const v = decideDisk("/dev/shm", fs(1, 82), T);
     assert.equal(v.level, "warn");
-    assert.equal(v.actions.warn, "page");
+    assert.equal(v.actions.warn, "brief");
   });
 
   test("critical: pages critical and HOLDS warn (one message per escalation)", () => {
@@ -77,7 +78,7 @@ describe("decideDisk (pure)", () => {
 
   test("recovery uses hysteresis: inside (threshold - margin, threshold) the episode is held", () => {
     const band = decideDisk("/tmp", fs(92, 5), T); // below 95, above 90
-    assert.deepEqual(band.actions, { warn: "page", critical: "hold" });
+    assert.deepEqual(band.actions, { warn: "brief", critical: "hold" });
     const hover = decideDisk("/tmp", fs(77, 5), T); // below 80, above 75
     assert.deepEqual(hover.actions, { warn: "hold", critical: "hold" }, "critical holds until the whole episode ends");
     const clear = decideDisk("/tmp", fs(74, 5), T);
@@ -100,6 +101,7 @@ describe("decideDisk (pure)", () => {
 interface Recorded {
   pages: OperatorMessage[];
   resolves: string[];
+  briefs: OperatorMessage[];
   clears: string[];
   duCalls: string[];
   lines: string[];
@@ -111,8 +113,9 @@ function fakeDeps(
   open: Set<string> = new Set(),
   failPageFor: string | null = null,
   storeDown = false,
+  reminderDue = false,
 ): { deps: DiskDeps; rec: Recorded } {
-  const rec: Recorded = { pages: [], resolves: [], clears: [], duCalls: [], lines: [] };
+  const rec: Recorded = { pages: [], resolves: [], briefs: [], clears: [], duCalls: [], lines: [] };
   const deps: DiskDeps = {
     statfs: (p) => readings[p] ?? null,
     async topInodeConsumers(p) {
@@ -125,6 +128,14 @@ function fakeDeps(
     async page(msg) {
       if (failPageFor !== null && msg.dedupKey.includes(`:${failPageFor}:`)) throw new Error("channel down");
       rec.pages.push(msg);
+    },
+    async reminderDue() {
+      return reminderDue;
+    },
+    async briefOnce(msg) {
+      if (open.has(msg.dedupKey)) return; // once per episode, like the real channel
+      rec.briefs.push(msg);
+      open.add(msg.dedupKey);
     },
     async resolve(key) {
       rec.resolves.push(key);
@@ -143,12 +154,8 @@ describe("runDisk (fake ports)", () => {
     await runDisk(deps, { paths: ["/tmp", "/dev/shm"], thresholds: T });
     assert.equal(rec.pages.length, 0);
     assert.deepEqual(rec.duCalls, []);
-    assert.deepEqual(rec.resolves, [
-      diskDedupKey("/tmp", "critical"),
-      diskDedupKey("/tmp", "warn"),
-      diskDedupKey("/dev/shm", "critical"),
-      diskDedupKey("/dev/shm", "warn"),
-    ]);
+    assert.deepEqual(rec.resolves, [diskDedupKey("/tmp", "critical"), diskDedupKey("/dev/shm", "critical")]);
+    assert.deepEqual(rec.clears, [diskDedupKey("/tmp", "warn"), diskDedupKey("/dev/shm", "warn")], "warn closes silently");
     assert.ok(rec.lines.every((l) => l.startsWith("hydra-disk-watchdog: ")));
   });
 
@@ -165,30 +172,33 @@ describe("runDisk (fake ports)", () => {
     assert.equal(top?.value, "/tmp/vitest-leak 900000");
     assert.deepEqual(rec.duCalls, ["/tmp"], "du runs once per paging mount");
     assert.deepEqual(rec.resolves, [], "the warn key is held while critical");
+    assert.deepEqual(rec.briefs, [], "no pressure brief while critical");
   });
 
   test("a failed du walk still pages, saying the consumers are unavailable", async () => {
-    const { deps, rec } = fakeDeps({ "/tmp": fs(85, 5) }, null);
+    const { deps, rec } = fakeDeps({ "/tmp": fs(97, 5) }, null);
     await runDisk(deps, { paths: ["/tmp"], thresholds: T });
     assert.equal(rec.pages.length, 1);
-    assert.equal(rec.pages[0].dedupKey, diskDedupKey("/tmp", "warn"));
+    assert.equal(rec.pages[0].dedupKey, diskDedupKey("/tmp", "critical"));
     assert.match(rec.pages[0].facts.find((f) => f.label === "top inode users")!.value, /unavailable/);
   });
 
-  test("recovery: back under the margin resolves both keys and pages nothing", async () => {
+  test("recovery: back under the margin resolves critical, clears warn silently, pages nothing", async () => {
     const { deps, rec } = fakeDeps({ "/tmp": fs(46, 5) });
     await runDisk(deps, { paths: ["/tmp"], thresholds: T });
     assert.equal(rec.pages.length, 0);
-    assert.deepEqual(rec.resolves, [diskDedupKey("/tmp", "critical"), diskDedupKey("/tmp", "warn")]);
+    assert.deepEqual(rec.resolves, [diskDedupKey("/tmp", "critical")]);
+    assert.deepEqual(rec.clears, [diskDedupKey("/tmp", "warn")]);
   });
 });
 
-describe("runDisk episode semantics (QA round 1)", () => {
-  test("critical->warn drop with the critical episode open: no warn page, no critical resolve", async () => {
+describe("runDisk episode semantics", () => {
+  test("critical->warn drop with the critical episode open: no warn brief, no page, no critical resolve", async () => {
     const open = new Set([diskDedupKey("/tmp", "critical")]);
     const { deps, rec } = fakeDeps({ "/tmp": fs(85, 5) }, undefined, open);
     await runDisk(deps, { paths: ["/tmp"], thresholds: T });
     assert.deepEqual(rec.pages, []);
+    assert.deepEqual(rec.briefs, []);
     assert.deepEqual(rec.resolves, []);
     assert.deepEqual(rec.duCalls, []);
   });
@@ -224,32 +234,46 @@ describe("runDisk episode semantics (QA round 1)", () => {
     await runDisk(deps, { paths: ["/tmp"], thresholds: T });
     readings["/tmp"] = fs(5, 5);
     await runDisk(deps, { paths: ["/tmp"], thresholds: T });
-    assert.deepEqual(rec.pages.map((p) => p.dedupKey), [warnK, critK]);
+    assert.deepEqual(rec.briefs.map((p) => p.dedupKey), [warnK], "warn briefed once");
+    assert.deepEqual(rec.pages.map((p) => p.dedupKey), [critK], "only critical pages");
     assert.deepEqual(rec.resolves, [critK], "one recovered for the whole episode");
     assert.equal(open.size, 0, "both keys closed");
   });
 
-  test("store unreadable (isOpen null): a warn-only episode still pages (fails open)", async () => {
-    const { deps, rec } = fakeDeps({ "/tmp": fs(85, 5) }, undefined, new Set(), null, true);
-    await runDisk(deps, { paths: ["/tmp"], thresholds: T });
-    assert.equal(rec.pages.length, 1);
-    assert.equal(rec.pages[0].dedupKey, diskDedupKey("/tmp", "warn"));
-  });
-
-  test("sibling shape: a plain warn episode (no critical open) still pages warn", async () => {
+  test("warn never pages: it briefs infra:tmpfs_pressure once per episode, with no du walk", async () => {
     const { deps, rec } = fakeDeps({ "/tmp": fs(85, 5) });
     await runDisk(deps, { paths: ["/tmp"], thresholds: T });
-    assert.equal(rec.pages.length, 1);
-    assert.equal(rec.pages[0].dedupKey, diskDedupKey("/tmp", "warn"));
+    await runDisk(deps, { paths: ["/tmp"], thresholds: T }); // second bad tick: same episode
+    assert.deepEqual(rec.pages, []);
+    assert.equal(rec.briefs.length, 1);
+    assert.equal(rec.briefs[0].kind, DISK_BRIEF_KIND);
+    assert.equal(rec.briefs[0].severity, "brief");
+    assert.equal(rec.briefs[0].dedupKey, diskDedupKey("/tmp", "warn"));
+    assert.deepEqual(rec.duCalls, []);
   });
 
-  test("du walk only on the first page of an episode; a repeat tick re-pages (channel-suppressed) without du", async () => {
+  test("store unreadable (isOpen null): a critical episode still pages (fails open)", async () => {
+    const { deps, rec } = fakeDeps({ "/tmp": fs(97, 5) }, undefined, new Set(), null, true);
+    await runDisk(deps, { paths: ["/tmp"], thresholds: T });
+    assert.equal(rec.pages.length, 1);
+    assert.equal(rec.pages[0].dedupKey, diskDedupKey("/tmp", "critical"));
+  });
+
+  test("edge-only: an open critical episode is not re-paged on a bad tick (no page, no du)", async () => {
     const open = new Set([diskDedupKey("/tmp", "critical")]);
     const { deps, rec } = fakeDeps({ "/tmp": fs(100, 70) }, undefined, open);
     await runDisk(deps, { paths: ["/tmp"], thresholds: T });
+    assert.deepEqual(rec.pages, []);
+    assert.deepEqual(rec.duCalls, []);
+  });
+
+  test("documented exception: an open critical episode with the 6h reminder due re-pages without du", async () => {
+    const open = new Set([diskDedupKey("/tmp", "critical")]);
+    const { deps, rec } = fakeDeps({ "/tmp": fs(100, 70) }, undefined, open, null, false, true);
+    await runDisk(deps, { paths: ["/tmp"], thresholds: T });
     assert.deepEqual(rec.duCalls, []);
     assert.equal(rec.pages.length, 1);
-    assert.match(rec.pages[0].facts.find((f) => f.label === "top inode users")!.value, /not re-scanned/);
+    assert.match(rec.pages[0].facts.find((f) => f.label === "top inode users")!.value, /not scanned/);
   });
 
   test("a channel failure on /tmp does not skip /dev/shm", async () => {
@@ -262,6 +286,10 @@ describe("runDisk episode semantics (QA round 1)", () => {
 });
 
 describe("support", () => {
+  test("the brief kind is NOT a page kind (warn must never page)", () => {
+    assert.equal(isPageKind(DISK_BRIEF_KIND), false);
+  });
+
   test("the page kind is on the closed page list (ADR-0045 Decision 3)", () => {
     assert.ok(isPageKind(DISK_PAGE_KIND));
   });

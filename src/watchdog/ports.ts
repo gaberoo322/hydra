@@ -375,6 +375,8 @@ export function createProductionDiskDeps(log: (line: string) => void): DiskDeps 
       return r.ok ? r.data.map((c) => `${c.path} ${c.inodes}`) : null;
     },
     page: (msg) => channel.page(msg),
+    briefOnce: (msg) => channel.briefOnce(msg),
+    reminderDue: (key) => channel.reminderDue(key),
     resolve: (key, title) => channel.resolve(key, title),
     isOpen: (key) => channel.isOpen(key),
     clear: (key) => channel.clear(key),

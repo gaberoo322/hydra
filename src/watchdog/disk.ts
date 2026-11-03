@@ -10,17 +10,24 @@
  * space free is critical, not fine.
  *
  * Levels: `warn` at >= warnPct, `critical` at >= criticalPct (defaults 80 / 95,
- * the issue's thresholds). Each (mount, level) is its own Operator Channel
- * dedupKey, so the channel's edge-triggered dedup (ADR-0045 Decision 4: one
- * page when it turns bad, one reminder per 6h, one "recovered" on resolve) IS
- * the episode tracker — the watchdog keeps no marker of its own. A level is
- * resolved only once BOTH dimensions are below `threshold - recoverMarginPct`;
- * inside that band the episode is held (neither paged nor resolved), so a mount
- * hovering at the threshold cannot flap a page every 2-minute tick.
+ * the issue's thresholds). Only `critical` PAGES (`infra:tmpfs_exhausted`);
+ * `warn` is a Morning Brief item (`infra:tmpfs_pressure`), appended once per
+ * episode via `OperatorChannel.briefOnce` and closed silently (no "recovered").
+ * Each (mount, level) is its own Operator Channel dedupKey, so the channel's
+ * dedup IS the episode tracker — the watchdog keeps no marker of its own. A
+ * level is resolved only once BOTH dimensions are below
+ * `threshold - recoverMarginPct`; inside that band the episode is held, so a
+ * mount hovering at the threshold cannot flap every 2-minute tick.
  *
- * Severity: a `critical` mount pages its critical key and HOLDS its warn key
- * (one message per escalation, not two); dropping back into the warn band
- * neither resolves critical nor re-pages warn (one episode; it resolves once, below warn - margin).
+ * Paging is EDGE-ONLY: `runDisk` pages a critical key only when
+ * `isOpen(key) !== true` (the episode opens). DOCUMENTED EXCEPTION: while the
+ * episode stays open, the 6h reminder (ADR-0045 Decision 4) still fires —
+ * `runDisk` re-calls `page` only when `reminderDue(key)` says 6h elapsed.
+ *
+ * Severity: a `critical` mount pages its critical key and HOLDS its warn key;
+ * dropping back into the warn band neither resolves critical nor briefs warn
+ * again (one episode; critical resolves once, below warn - margin, and the
+ * warn marker is cleared silently, so warn->critical->ok = one recovered).
  *
  * `decideDisk` is pure (no I/O). `runDisk` is the only impure function, over the
  * {@link DiskDeps} ports; the page text names the top inode consumers by name
@@ -32,6 +39,8 @@ import type { OperatorFact, OperatorMessage } from "../operator-channel/message.
 
 export const DISK_LOG_PREFIX = "hydra-disk-watchdog:";
 export const DISK_PAGE_KIND = "infra:tmpfs_exhausted";
+/** The warn-level Morning Brief kind (never a page kind). */
+export const DISK_BRIEF_KIND = "infra:tmpfs_pressure";
 
 export const DEFAULT_DISK_PATHS = ["/tmp", "/dev/shm"] as const;
 export const DEFAULT_DISK_WARN_PCT = 80;
@@ -65,7 +74,7 @@ export interface DiskThresholds {
 
 export type DiskLevel = "ok" | "warn" | "critical";
 /** What to do with one (mount, level) dedupKey this tick. */
-export type DiskAction = "page" | "resolve" | "hold";
+export type DiskAction = "page" | "brief" | "resolve" | "hold";
 
 export interface DiskVerdict {
   path: string;
@@ -149,6 +158,8 @@ export function decideDisk(path: string, reading: StatfsReading | null, t: DiskT
   let critical = actionFor(inodePct, blockPct, t.criticalPct, t.recoverMarginPct);
   if (critical === "resolve" && actionFor(inodePct, blockPct, t.warnPct, t.recoverMarginPct) !== "resolve") critical = "hold";
   let warn = actionFor(inodePct, blockPct, t.warnPct, t.recoverMarginPct);
+  // Warn never pages: it is a brief item.
+  if (warn === "page") warn = "brief";
   // One message per escalation: while critical, the warn episode is held.
   if (critical === "page") warn = "hold";
 
@@ -165,12 +176,12 @@ export function decideDisk(path: string, reading: StatfsReading | null, t: DiskT
   };
 }
 
-/** The Operator Channel dedupKey for one (mount, level). */
+/** The Operator Channel dedupKey for one (mount, level): critical pages, warn briefs. */
 export function diskDedupKey(path: string, level: "warn" | "critical"): string {
-  return `${DISK_PAGE_KIND}:${path}:${level}`;
+  return `${level === "critical" ? DISK_PAGE_KIND : DISK_BRIEF_KIND}:${path}:${level}`;
 }
 
-/** The page for one (mount, level), naming the top inode consumers when known. */
+/** The message for one (mount, level): a page at critical, a Morning Brief item at warn. */
 export function diskPageMessage(
   v: DiskVerdict,
   level: "warn" | "critical",
@@ -186,22 +197,24 @@ export function diskPageMessage(
     { label: "space", value: v.blockPct === null ? "n/a" : `${v.blockPct}%` },
     { label: "free", value: v.freeBytes === null ? "n/a" : formatBytes(v.freeBytes) },
     { label: "threshold", value: `${level} >= ${thr}%` },
-    {
+  ];
+  if (level === "critical") {
+    facts.push({
       label: "top inode users",
       value:
         topConsumers === undefined
-          ? "not re-scanned (episode already open)"
+          ? "not scanned (reminder for an open episode)"
           : topConsumers === null
             ? "unavailable (du failed or timed out)"
             : topConsumers.length
               ? topConsumers.join(", ")
               : "none",
-    },
-  ];
+    });
+  }
   return {
-    severity: "page",
-    kind: DISK_PAGE_KIND,
-    title: `${v.path} ${level}: ${dims.join(", ") || "over threshold"} — temp-file writes fail with ENOSPC at 100%`,
+    severity: level === "critical" ? "page" : "brief",
+    kind: level === "critical" ? DISK_PAGE_KIND : DISK_BRIEF_KIND,
+    title: `${v.path} ${level}: ${dims.join(", ") || "over threshold"}${level === "critical" ? " — temp-file writes fail with ENOSPC at 100%" : ""}`,
     facts,
     links: [],
     dedupKey: diskDedupKey(v.path, level),
@@ -215,9 +228,13 @@ export interface DiskDeps {
   topInodeConsumers(path: string, limit: number): Promise<string[] | null>;
   /** Whether the dedupKey has an open episode; `null` = unknown (fail open). */
   isOpen(dedupKey: string): Promise<boolean | null>;
+  /** Whether the 6h reminder is due for an open key (the documented edge-only exception). */
+  reminderDue(dedupKey: string): Promise<boolean>;
   page(msg: OperatorMessage): Promise<unknown>;
+  /** Append a Morning Brief item once per episode (the warn level). */
+  briefOnce(msg: OperatorMessage): Promise<unknown>;
   resolve(dedupKey: string, title: string): Promise<unknown>;
-  /** Silently close a key (no "recovered" message): a warn key folded into a critical episode. */
+  /** Silently close a key (no "recovered" message): the warn episode marker. */
   clear(dedupKey: string): Promise<unknown>;
   log: (line: string) => void;
 }
@@ -237,26 +254,33 @@ export async function runDisk(deps: DiskDeps, config: DiskConfig): Promise<DiskV
     say(v.log);
     // Per-mount isolation (INV-4): a channel/du failure on one mount must not skip the next.
     try {
-      let consumers: string[] | null | undefined;
-      // A warn key still open when critical was open is part of the critical episode: one "recovered" (INV-3).
-      const criticalWasOpen =
-        v.actions.critical === "resolve" && (await deps.isOpen(diskDedupKey(path, "critical"))) === true;
+      const critKey = diskDedupKey(path, "critical");
+      let critOpen: boolean | null | undefined; // read at most once per mount per tick
+      const criticalOpen = async (): Promise<boolean | null> => {
+        if (critOpen === undefined) critOpen = await deps.isOpen(critKey);
+        return critOpen;
+      };
       for (const level of ["critical", "warn"] as const) {
         const action = v.actions[level];
         const key = diskDedupKey(path, level);
         if (action === "page") {
-          if (level === "warn") {
-            // critical->warn is the same episode: never re-page warn while critical is open (an unreadable store is not "open").
-            if ((await deps.isOpen(diskDedupKey(path, "critical"))) === true) continue;
+          // Edge-only: page when the episode opens (isOpen !== true; an unreadable store fails open).
+          if ((await criticalOpen()) !== true) {
+            const consumers = await deps.topInodeConsumers(path, DISK_TOP_CONSUMERS);
+            await deps.page(diskPageMessage(v, level, config.thresholds, consumers));
+            say(`${level} page submitted for ${path} (dedupKey=${key})`);
+          } else if (await deps.reminderDue(key)) {
+            // DOCUMENTED EXCEPTION to edge-only: the 6h reminder of an open episode (ADR-0045 Decision 4).
+            await deps.page(diskPageMessage(v, level, config.thresholds, undefined));
+            say(`${level} 6h reminder submitted for ${path} (dedupKey=${key})`);
           }
-          // du only when this key has no open episode (the first page of an episode); repeats are channel-suppressed.
-          if (consumers === undefined && (await deps.isOpen(key)) !== true) {
-            consumers = await deps.topInodeConsumers(path, DISK_TOP_CONSUMERS);
-          }
-          await deps.page(diskPageMessage(v, level, config.thresholds, consumers));
-          say(`${level} page submitted for ${path} (dedupKey=${key}; the channel suppresses repeats within the episode)`);
+        } else if (action === "brief") {
+          // critical->warn is the same episode: no pressure brief while critical is open.
+          if ((await criticalOpen()) === true) continue;
+          await deps.briefOnce(diskPageMessage(v, level, config.thresholds, undefined));
         } else if (action === "resolve") {
-          if (level === "warn" && criticalWasOpen) {
+          if (level === "warn") {
+            // Warn never paged, so it never "recovers" out loud: close the marker silently.
             await deps.clear(key);
             continue;
           }
