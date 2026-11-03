@@ -33,6 +33,12 @@
  * per-leaf test file).
  */
 
+import {
+  extractReviewFindingArms,
+  type ReviewFindingArm,
+  type ReviewFindingHotSpot,
+} from "./qa/review-findings-extract.ts";
+
 // ---------------------------------------------------------------------------
 // Cue grammar
 // ---------------------------------------------------------------------------
@@ -104,4 +110,108 @@ export function parseArgs(args: string | null | undefined): RetroArgs {
   // (a `runId: undefined` key would break a strict deepEqual against
   // `{ apply: false }`).
   return runId === undefined ? { apply } : { apply, runId };
+}
+
+// ---------------------------------------------------------------------------
+// Review-findings retro mode (issue #5271, R2; ADR-0046 Decision 8)
+// ---------------------------------------------------------------------------
+//
+// `review_retro_due` is derived from the Redis review-findings rows ONLY
+// (`src/redis/review-findings.ts` -> `readReviewFindingRows`), never from
+// GitHub or a transcript. The caller reads the rows and the prior-emit ledger
+// and hands them to {@link planReviewRetro}; this module stays pure.
+
+/** The escalation ladder, shallowest first: check, then standard, then fence. */
+export const REVIEW_RETRO_LADDER = ["check", "standard", "fence"] as const;
+export type ReviewRetroRung = (typeof REVIEW_RETRO_LADDER)[number];
+
+/** Review-mode emit caps: needs-triage check issues, and gated PRs. */
+export const REVIEW_RETRO_MAX_ISSUES = 2;
+export const REVIEW_RETRO_MAX_PRS = 1;
+
+/** One earlier review-retro emit for an arm, as recorded in the ledger. */
+export interface ReviewRetroPriorEmit {
+  armKey: string;
+  rung: ReviewRetroRung;
+  /** True while the emitted issue / PR is still open. */
+  open: boolean;
+}
+
+/** An arm that tripped, with the ladder rung this retro should emit at. */
+export interface ReviewRetroTrip {
+  armKey: string;
+  arm: ReviewFindingArm["arm"];
+  rung: ReviewRetroRung;
+}
+
+export interface ReviewRetroPlan {
+  /** True iff at least one arm tripped and may emit (the `review_retro_due` signal). */
+  due: boolean;
+  trips: ReviewRetroTrip[];
+  hotSpots: ReviewFindingHotSpot[];
+  warnings: string[];
+}
+
+/** Stable per-arm ledger key. The pair-miss arm is one global arm. */
+export function reviewArmKey(arm: ReviewFindingArm): string {
+  return arm.arm === "pair-miss" ? "pair-miss" : `${arm.arm}:${arm.key}`;
+}
+
+/**
+ * The rung an arm may emit at, or null when it must stay quiet. Re-trip only
+ * after the prior emit closes (any open emit blocks), and each re-trip climbs
+ * exactly one rung; an arm already emitted at `fence` is exhausted.
+ */
+export function nextReviewRung(
+  prior: readonly ReviewRetroPriorEmit[],
+  armKey: string,
+): ReviewRetroRung | null {
+  const mine = prior.filter((p) => p.armKey === armKey);
+  if (mine.length === 0) return "check";
+  if (mine.some((p) => p.open)) return null;
+  const highest = Math.max(...mine.map((p) => REVIEW_RETRO_LADDER.indexOf(p.rung)));
+  return REVIEW_RETRO_LADDER[highest + 1] ?? null;
+}
+
+/** Fold stored rows + the prior-emit ledger into this retro's trips. Pure. */
+export function planReviewRetro(
+  rows: readonly unknown[],
+  prior: readonly ReviewRetroPriorEmit[],
+  opts: { now: number },
+): ReviewRetroPlan {
+  const { arms, hotSpots, warnings } = extractReviewFindingArms(rows, { now: opts.now });
+  const trips: ReviewRetroTrip[] = [];
+  for (const arm of arms) {
+    const armKey = reviewArmKey(arm);
+    const rung = nextReviewRung(prior, armKey);
+    if (rung !== null) trips.push({ armKey, arm: arm.arm, rung });
+  }
+  return { due: trips.length > 0, trips, hotSpots, warnings };
+}
+
+/**
+ * Apply the emit caps: at most {@link REVIEW_RETRO_MAX_ISSUES} `check`-rung
+ * needs-triage issues and {@link REVIEW_RETRO_MAX_PRS} PR (the `standard` /
+ * `fence` rungs, limited to CODING_STANDARDS.md or prod-code fences). Trips
+ * over the cap are returned in `deferred` and re-trip next retro.
+ */
+export function capReviewRetroEmits(trips: readonly ReviewRetroTrip[]): {
+  issues: ReviewRetroTrip[];
+  pr: ReviewRetroTrip | null;
+  deferred: ReviewRetroTrip[];
+} {
+  const issues: ReviewRetroTrip[] = [];
+  let pr: ReviewRetroTrip | null = null;
+  const deferred: ReviewRetroTrip[] = [];
+  for (const t of trips) {
+    if (t.rung === "check") {
+      if (issues.length < REVIEW_RETRO_MAX_ISSUES) issues.push(t);
+      else deferred.push(t);
+    } else if (pr === null) {
+      pr = t;
+    } else {
+      deferred.push(t);
+    }
+  }
+  return { issues, pr, deferred };
 }

@@ -421,6 +421,7 @@
   "test/review-findings-extract.test.mts": 5,
   "test/review-pickup-notify.test.mts": 1,
   "test/review-pickup.test.mts": 1,
+  "test/review-retro-due.test.mts": 3,
   "test/risk-critical.test.mts": 5,
   "test/run-health.test.mts": 1,
   "test/run-ledger.test.mts": 10,

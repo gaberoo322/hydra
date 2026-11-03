@@ -4477,6 +4477,36 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
     return handler(sig, state, events, now)
 
 
+def _select_signal_retro_orch_review(
+    sig: str,
+    state: dict,
+    events: list[dict],
+    now: int,
+) -> dict | None:
+    """`retro_orch` with the review-findings mode layered on (issue #5271, R2).
+
+    No new dispatch class: the review mode rides the existing `retro_orch`
+    class and its cooldown. `review_retro_due` is a Redis-derived signal (the
+    review-findings rows, src/retro-inputs.ts planReviewRetro); decide.py only
+    reads it. When the daily/weekly retro would dispatch anyway, the review
+    pass is stamped onto the same dispatch (`review: true`); when only the
+    review signal is raised, a review-only retro dispatches
+    (`mode: "review"`). Both stay `apply: true` so the headless run emits.
+    """
+    base = _select_signal_retro_orch(sig, state, events, now)
+    if not _signal_present(state, events, "review_retro_due"):
+        return base
+    if base is not None:
+        base["prompt_args"] = {**(base.get("prompt_args") or {}), "review": True}
+        return base
+    return make_dispatch(
+        sig,
+        "hydra-retro",
+        prompt_args={"apply": True, "mode": "review"},
+        reason="review_retro_due (issue #5271): review-findings arms tripped — review-mode retro",
+    )
+
+
 # Per-class signal-class selector registry (issue #4265). A LOOKUP only — dispatch
 # ORDER stays the hardcoded tuple in the rule loop, never this dict. An
 # unregistered class idles (None). Completeness vs the taxonomy is a test
@@ -4489,7 +4519,7 @@ _SIGNAL_SELECTORS: dict[str, Callable[..., dict | None]] = {
     "discover_target": _select_signal_discover_target,
     "scout_orch": _select_signal_scout_orch,
     "architecture_orch": _select_signal_architecture_orch,
-    "retro_orch": _select_signal_retro_orch,
+    "retro_orch": _select_signal_retro_orch_review,
     "cleanup_orch": _select_signal_cleanup_orch,
     "cleanup_target": _select_signal_cleanup_target,
     "wire_or_retire_target": _select_signal_wire_or_retire_target,

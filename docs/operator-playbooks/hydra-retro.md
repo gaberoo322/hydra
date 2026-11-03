@@ -77,6 +77,27 @@ None of this changes what happens once `/hydra-retro` actually runs — steps 1
 through 9 below are unaffected. It only changes whether the autopilot
 dispatches it at all on a given day.
 
+## 0b. Review-findings mode (issue #5271, ADR-0046 Decision 8)
+
+`retro_orch` also carries a **review mode**, dispatched by the Redis-only
+`review_retro_due` signal (no new class in `classes.json`). The dispatch arrives
+with `mode: "review"` (review-only) or `review: true` (alongside the normal
+per-run retro); both run with `--apply`. The signal derives from the
+review-findings rows ONLY (`readReviewFindingRows`, never GitHub), via the pure
+`planReviewRetro(rows, priorEmits, { now })` in `src/retro-inputs.ts`.
+
+Review mode:
+
+- Emits the architecture_orch hot-spot feed (`plan.hotSpots`) and one issue per
+  cohort trip mechanically.
+- Emits at most **2** `needs-triage` check issues and **1** PR (the PR limited to
+  `CODING_STANDARDS.md` or production-code fences), via `capReviewRetroEmits`.
+- Uses namespaced `review:` cues (e.g. `review:rule-cross-pr-std-catch-fail-loud`)
+  and the **check, standard, fence** ladder: an arm first emits a check; it
+  re-trips only after the prior emit closes, one rung up (`nextReviewRung`).
+- NEVER edits QA prompts, the fold (`src/qa/fold.ts`), `qa-verdict.ts`, or
+  rollout config.
+
 ## 1. Resolve the run id
 
 `/hydra-retro [run_id]` — argument is optional. Parse via the pure helper so
