@@ -88,7 +88,11 @@ where total weekly burn sits relative to the **Pacing Curve**.
 | `hydra-pace-gate.timer` | every ~15 min | `scripts/systemd/hydra-pace-gate.timer` |
 | `hydra-pace-gate.service` | (oneshot, runs the gate) | `scripts/systemd/hydra-pace-gate.service` |
 
-On each tick `scripts/autopilot/pace-gate.sh`:
+On each tick `scripts/autopilot/pace-gate.sh` (transport only: the admission
+rules live in `decideAdmission`, `src/cost/admission.ts`, and arrive as the
+eligibility route's `.admission` object — the gate records `.admission.reason`
+verbatim and performs the effects it names; the list below describes that
+verdict's ladder):
 
 1. **Skip if a run is already live** — the service is active OR
    `/tmp/hydra-autopilot-state.json` carries a live owning PID (`kill -0`).

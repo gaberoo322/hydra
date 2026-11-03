@@ -15,7 +15,7 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | `src/host-probe/` | Host-Probe Adapter | — | — | — |
 | `src/redis/` | Redis Adapters | — | ADR-0009, ADR-0017 | [Redis Keys](docs/reference.md#redis-keys), [Event Bus](docs/reference.md#event-bus) |
 | `src/schemas/` | Schemas | — | ADR-0011, ADR-0022 | — |
-| `src/cost/` | Cost, Subscription Usage Tracker, Quota Weight | [`src/cost/CONTEXT.md`](./src/cost/CONTEXT.md) | ADR-0021, ADR-0042 | — |
+| `src/cost/` | Cost, Subscription Usage Tracker, Quota Weight, Pace Gate (admission verdict) | [`src/cost/CONTEXT.md`](./src/cost/CONTEXT.md) | ADR-0021, ADR-0042 | — |
 | `src/autopilot/` | Autopilot Run, Autopilot Turn | [`src/autopilot/CONTEXT.md`](./src/autopilot/CONTEXT.md) | ADR-0006, ADR-0007, ADR-0012, ADR-0016, ADR-0043 | [Model Tiers](docs/reference.md#model-tiers), [Learning System](docs/reference.md#learning-system-operational) |
 | `src/taxonomy/` | Dispatch-Class Taxonomy | — | ADR-0012, ADR-0030 | — |
 | `src/glm/`, `scripts/glm/` | — | — | ADR-0032, ADR-0040 | [GLM lane on/off](./docs/operations/glm-lane.md) |
