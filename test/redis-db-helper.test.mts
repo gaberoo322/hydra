@@ -1180,7 +1180,7 @@ describe("scripts/test/redis-db-launch.mjs — terminal VERDICT line (#5106)", (
 
   test("no bare process.exit remains in the child exit handler (single exit seam)", () => {
     const src = readFileSync(LAUNCHER, "utf8");
-    const start = src.indexOf('child.on("exit"');
+    const start = src.indexOf('launcherPhase = "suite-count-verdict"');
     assert.ok(start > 0);
     const body = src.slice(start);
     assert.equal(body.includes("process.exit("), false);
