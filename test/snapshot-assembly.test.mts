@@ -115,7 +115,6 @@ function makeScan(overrides: Partial<ScanResult> = {}): ScanResult {
 
 const QUOTA_ENV_KEYS = [
   "HYDRA_USAGE_WEEKLY_QUOTA_TOKENS",
-  "HYDRA_USAGE_5H_QUOTA_TOKENS",
   "HYDRA_USAGE_WEEKLY_RESET_ANCHOR",
   "HYDRA_USAGE_CACHE_READ_WEIGHT",
   "HYDRA_USAGE_DRIFT_REFERENCE_PERCENT",
@@ -149,7 +148,7 @@ describe("assembleSnapshot (direct, no-IO)", () => {
 
     // Uncalibrated (no quota env) => every percentage is 0, nothing calibrated.
     assert.equal(snap.calibrated, false);
-    assert.equal(snap.percentLast5h, 0);
+    assert.equal(snap.percentLast5h, null);
     assert.equal(snap.percentLast7d, 0);
     assert.equal(snap.projectedWeeklyPercent, 0);
     assert.equal(snap.pacingState, "under");
@@ -205,7 +204,6 @@ describe("assembleSnapshot (direct, no-IO)", () => {
     // 5h quota 1000, weekly quota 7000; opus 100 (5h) / 700 (7d) raw totals with
     // default cache-read weight 1.0 and no quota-weight calibration => the burn
     // numerator reduces to the raw .total. Estimate percents = total / quota * 100.
-    process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
     process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "7000";
 
     const snap = assembleSnapshot(makeScan(), NOW);
@@ -213,7 +211,9 @@ describe("assembleSnapshot (direct, no-IO)", () => {
     assert.equal(snap.calibrated, true);
     // Still the estimate source (OAuth failed) — the estimate is now non-zero.
     assert.equal(snap.usageSource, "estimate");
-    assert.equal(snap.percentLast5h, (100 / 1000) * 100); // 10
+    // No 5h estimate exists (INV-1): null, never a synthesized figure.
+    assert.equal(snap.percentLast5h, null);
+    assert.equal(snap.oauthFiveHourResetsAt, null);
     assert.equal(snap.percentLast7d, (700 / 7000) * 100); // 10
 
     // Hard stops STILL do not fire on the estimate path even when calibrated
@@ -222,7 +222,7 @@ describe("assembleSnapshot (direct, no-IO)", () => {
     assert.equal(snap.weeklyEmergencyStop, false);
 
     assert.equal(snap.weeklyQuotaTokens, 7000);
-    assert.equal(snap.fiveHourQuotaTokens, 1000);
+    // Calibration stands on the weekly quota alone (INV-2).
   });
 
   test("prior-week per-skill totals drive the week-over-week delta; null => 'new'", () => {
@@ -560,7 +560,7 @@ describe("rebaseOnOAuth (pure headline-rebase helper, issue #2188)", () => {
   });
 
   test("a FRESH OAuth read rebases the headline onto real utilization", () => {
-    const r = rebaseOnOAuth(freshOk(42, 71), 5, 6);
+    const r = rebaseOnOAuth(freshOk(42, 71), 6);
     assert.equal(r.percentLast5h, 42);
     assert.equal(r.percentLast7d, 71);
     assert.equal(r.usageSource, "oauth");
@@ -588,7 +588,7 @@ describe("rebaseOnOAuth (pure headline-rebase helper, issue #2188)", () => {
       },
       consecutiveFailures: 1,
     };
-    const r = rebaseOnOAuth(stale, 9, 9);
+    const r = rebaseOnOAuth(stale, 9);
     assert.equal(r.usageSource, "oauth"); // stale-but-real still backs the headline
     assert.equal(r.percentLast5h, 30);
     assert.equal(r.percentLast7d, 55);
@@ -605,9 +605,9 @@ describe("rebaseOnOAuth (pure headline-rebase helper, issue #2188)", () => {
       lastKnownOAuth: null,
       consecutiveFailures: 1,
     };
-    const r = rebaseOnOAuth(failed, 17, 23);
+    const r = rebaseOnOAuth(failed, 23);
     assert.equal(r.usageSource, "estimate");
-    assert.equal(r.percentLast5h, 17); // the estimate stands, NOT 0
+    assert.equal(r.percentLast5h, null); // no 5h estimate exists: null, NOT 0
     assert.equal(r.percentLast7d, 23);
     assert.equal(r.oauthError, "oauth-usage-token-expired");
     assert.equal(r.oauthStale, false);
@@ -616,10 +616,25 @@ describe("rebaseOnOAuth (pure headline-rebase helper, issue #2188)", () => {
     assert.equal(r.oauthSevenDayResetsAt, null);
   });
 
+  test("an OAuth body with NO five_hour window yields null 5h fields, never 0 (#5333 INV-1)", () => {
+    const noFiveHour: ScanResultOAuth = {
+      result: { ok: true, data: { fiveHour: null, sevenDay: { utilization: 12, resetsAt: null } } },
+      stale: false,
+      ageMs: 0,
+      lastKnownOAuth: { fiveHour: null, sevenDay: { utilization: 12, resetsAt: null } },
+      consecutiveFailures: 0,
+    };
+    const r = rebaseOnOAuth(noFiveHour, 99);
+    assert.equal(r.usageSource, "oauth");
+    assert.equal(r.percentLast5h, null);
+    assert.equal(r.oauthFiveHourResetsAt, null);
+    assert.equal(r.percentLast7d, 12);
+  });
+
   test("does not mutate its inputs (pure)", () => {
     const oauth = freshOk(10, 20);
     const frozen = JSON.stringify(oauth);
-    rebaseOnOAuth(oauth, 1, 2);
+    rebaseOnOAuth(oauth, 2);
     assert.equal(JSON.stringify(oauth), frozen);
   });
 });
@@ -787,11 +802,9 @@ describe("deriveWeightedBurns (pure burn-numerator triple, issue #2247)", () => 
 
   test("identity weights (w_cache=1, all families 1.0) reduce to raw .total sums", () => {
     // weightedTokens at w_cache=1 == input+output+cacheCreation+cacheRead == .total.
-    const m5 = byModelWith({ opus: bd({ total: 100, input: 100 }) });
     const m7 = byModelWith({ sonnet: bd({ total: 250, output: 250 }) });
     const m24 = byModelWith({ haiku: bd({ total: 40, input: 40 }) });
-    const r = deriveWeightedBurns(m5, m7, m24, 1, IDENTITY);
-    assert.equal(r.weightedBurn5h, 100);
+    const r = deriveWeightedBurns(m7, m24, 1, IDENTITY);
     assert.equal(r.weightedBurn7d, 250);
     assert.equal(r.weightedBurn24h, 40);
   });
@@ -802,9 +815,8 @@ describe("deriveWeightedBurns (pure burn-numerator triple, issue #2247)", () => 
       sonnet: bd({ total: 10, input: 10 }),
       haiku: bd({ total: 10, input: 10 }),
     });
-    const r = deriveWeightedBurns(m, m, m, 1, { opus: 5, sonnet: 2, haiku: 1 });
+    const r = deriveWeightedBurns(m, m, 1, { opus: 5, sonnet: 2, haiku: 1 });
     // 10*5 + 10*2 + 10*1 + unknown(0)*1 = 80 for every window.
-    assert.equal(r.weightedBurn5h, 80);
     assert.equal(r.weightedBurn7d, 80);
     assert.equal(r.weightedBurn24h, 80);
   });
@@ -812,31 +824,29 @@ describe("deriveWeightedBurns (pure burn-numerator triple, issue #2247)", () => 
   test("cache-read weight (Axis A) reshapes the mix INSIDE the family", () => {
     // 100 input + 100 cacheRead; at w_cache=0.1 the burn is 100 + 0.1*100 = 110.
     const m = byModelWith({ opus: bd({ input: 100, cacheRead: 100, total: 200 }) });
-    const r = deriveWeightedBurns(m, m, m, 0.1, IDENTITY);
-    assert.equal(r.weightedBurn5h, 110);
+    const r = deriveWeightedBurns(m, m, 0.1, IDENTITY);
+    assert.equal(r.weightedBurn24h, 110);
   });
 
   test("composes both axes (familyWeight * weightedTokens) without double-counting", () => {
     // opus: input 100 + cacheRead 100 -> weightedTokens(0.1)=110; *w_opus=5 => 550.
     const m = byModelWith({ opus: bd({ input: 100, cacheRead: 100, total: 200 }) });
-    const r = deriveWeightedBurns(m, m, m, 0.1, { opus: 5, sonnet: 2, haiku: 3 });
+    const r = deriveWeightedBurns(m, m, 0.1, { opus: 5, sonnet: 2, haiku: 3 });
     assert.equal(r.weightedBurn7d, 550);
   });
 });
 
 describe("deriveEstimatePercents (pure estimate %, issue #2247)", () => {
-  const burns = { weightedBurn5h: 50, weightedBurn7d: 200, weightedBurn24h: 100 };
+  const burns = { weightedBurn7d: 200, weightedBurn24h: 100 };
 
-  test("uncalibrated short-circuits all three to 0", () => {
-    const r = deriveEstimatePercents(burns, 1000, 500, false);
-    assert.equal(r.estimatePercentLast5h, 0);
+  test("uncalibrated short-circuits both to 0", () => {
+    const r = deriveEstimatePercents(burns, 1000, false);
     assert.equal(r.estimatePercentLast7d, 0);
     assert.equal(r.projectedWeeklyPercent, 0);
   });
 
-  test("calibrated: 5h and 7d divide by their quotas; projection extends 24h * 7", () => {
-    const r = deriveEstimatePercents(burns, 1000, 500, true);
-    assert.equal(r.estimatePercentLast5h, (50 / 500) * 100); // 10
+  test("calibrated: 7d divides by the weekly quota; projection extends 24h * 7", () => {
+    const r = deriveEstimatePercents(burns, 1000, true);
     assert.equal(r.estimatePercentLast7d, (200 / 1000) * 100); // 20
     assert.equal(r.projectedWeeklyPercent, ((100 * 7) / 1000) * 100); // 70
   });
@@ -844,9 +854,8 @@ describe("deriveEstimatePercents (pure estimate %, issue #2247)", () => {
   test("projectedWeeklyPercent crosses 100 when the 24h rate would overrun the week", () => {
     // 24h burn 200 -> *7 = 1400 over a 1000 quota -> 140%.
     const r = deriveEstimatePercents(
-      { weightedBurn5h: 0, weightedBurn7d: 0, weightedBurn24h: 200 },
+      { weightedBurn7d: 0, weightedBurn24h: 200 },
       1000,
-      500,
       true,
     );
     assert.ok(r.projectedWeeklyPercent > 100);
@@ -982,7 +991,6 @@ describe("assembleSnapshot calibration argument (issue #4793)", () => {
 
   const ZERO: SnapshotCalibration = {
     weeklyQuotaTokens: 0,
-    fiveHourQuotaTokens: 0,
     weeklyResetAnchorMs: null,
     cacheReadWeight: 1,
     driftReferencePercent: null,
@@ -997,19 +1005,17 @@ describe("assembleSnapshot calibration argument (issue #4793)", () => {
     const snap = assembleSnapshot(makeScan(), NOW, null, {
       ...ZERO,
       weeklyQuotaTokens: 7000,
-      fiveHourQuotaTokens: 1000,
     });
     assert.equal(snap.calibrated, true);
-    assert.equal(snap.percentLast5h, 10);
+    assert.equal(snap.percentLast5h, null);
     assert.equal(snap.percentLast7d, 10);
   });
 
   test("a zeroed record overrides a calibrated env", () => {
-    process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
     process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "7000";
     const snap = assembleSnapshot(makeScan(), NOW, null, ZERO);
     assert.equal(snap.calibrated, false);
-    assert.equal(snap.percentLast5h, 0);
+    assert.equal(snap.percentLast5h, null);
     assert.equal(snap.percentLast7d, 0);
   });
 });

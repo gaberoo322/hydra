@@ -9,7 +9,6 @@
     "wall_clock_max_sec": 28800,
     "idle_drain_turns": 5,
     "context_compaction_turns": 8,
-    "quota_5h_max_pts": 30,
     "quota_week_max_pts": 5,
     "scope": "all",
     "subagent_max_tokens": 400000,

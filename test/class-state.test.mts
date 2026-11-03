@@ -487,13 +487,13 @@ describe("class-state envelope + header (INV-11/INV-12)", () => {
     const res = composeClassState(
       baselineInputs({
         runRow: {
-          limits: JSON.stringify({ scope: "orch-only", quota_5h_max_pts: 15, quota_week_max_pts: 900 }),
+          limits: JSON.stringify({ scope: "orch-only", quota_week_max_pts: 900 }),
         },
       }),
       NOW_MS,
     );
     assert.equal(res.header.scope, "orch-only");
-    assert.deepEqual(res.header.quotaDeltaCap, { fiveHourMaxPts: 15, weekMaxPts: 900 });
+    assert.deepEqual(res.header.quotaDeltaCap, { weekMaxPts: 900 });
   });
 
   test("unparseable limits JSON degrades scope/quota to null and names 'run-row'", () => {

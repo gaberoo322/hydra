@@ -115,6 +115,15 @@ describe("getIdleDiagnostics — pure composition (issue #3116)", () => {
     assert.equal(r.percentLast5h, 93);
   });
 
+  test("a null percentLast5h (plan has no 5h window) passes through as null, never 0 (#5333)", async () => {
+    const r = await getIdleDiagnostics(
+      deps({ readEligibility: async () => ({ ...eligible, percentLast5h: null }) }),
+    );
+    assert.equal(r.percentLast5h, null);
+    assert.equal(r.blockedBy, null);
+    assert.equal(AutopilotIdleDiagnosticsResponseSchema.safeParse(r).success, true);
+  });
+
   test("pacing-ahead → blockedBy=pacing-ahead", async () => {
     const r = await getIdleDiagnostics(
       deps({
@@ -144,7 +153,7 @@ describe("getIdleDiagnostics — pure composition (issue #3116)", () => {
     assert.equal(r.blockedBy, "endpoint-error");
     assert.equal(r.calibrated, false);
     assert.equal(r.emergencyStop, false);
-    assert.equal(r.percentLast5h, 0);
+    assert.equal(r.percentLast5h, null);
     assert.equal(r.pace.state, "on");
     assert.equal(r.pace.targetPercent, 0);
     assert.equal(r.pace.sinceResetPercent, 0);

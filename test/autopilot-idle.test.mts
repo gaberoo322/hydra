@@ -267,7 +267,7 @@ describe("GET /autopilot/idle-diagnostics — never-throw + validation (issue #8
     assert.equal(res._body.blockedBy, "endpoint-error");
     assert.equal(res._body.calibrated, false);
     assert.equal(res._body.emergencyStop, false);
-    assert.equal(res._body.percentLast5h, 0);
+    assert.equal(res._body.percentLast5h, null);
     assert.equal(res._body.pace.state, "on");
     assert.equal(res._body.pace.targetPercent, 0);
     assert.equal(res._body.pace.anchor, null);

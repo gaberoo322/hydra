@@ -216,8 +216,7 @@ describe("OAuth single-flight + Retry-After honor (issue #2666)", () => {
   });
 
   test("getUsage surfaces the new code: a 429 with no last-good reads oauthError=oauth-usage-rate-limited", async () => {
-    process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-    process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+    process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
     const root = await mkdtemp(join(tmpdir(), "usage-2666-"));
     try {
       await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 300 })]);
@@ -239,7 +238,8 @@ describe("OAuth single-flight + Retry-After honor (issue #2666)", () => {
         "oauth-usage-rate-limited",
         "operator-diagnosable: rate-limited is distinct from endpoint-sick",
       );
-      assert.equal(snap.percentLast5h, 30, "estimate gauge stands — never silently 0");
+      assert.equal(snap.percentLast7d, 30, "estimate gauge stands — never silently 0");
+      assert.equal(snap.percentLast5h, null, "no 5h estimate exists (#5333)");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
