@@ -76,7 +76,12 @@ fi
 # leaked fixture dir is `<prefix><6 chars>` with a prefix ending in `-` or `.`
 # (`csb-outcomes-route-1d5vgA`, `pmh-e2e-Ab12Cd`). Matching the SHAPE instead
 # of a list of known prefixes is the point: a safety net has to catch the next
-# leaker nobody has found yet, not only the ones already filed.
+# leaker nobody has found yet, not only the ones already filed. The 6-char
+# suffix must also LOOK random (contain a digit or an uppercase letter, see
+# RANDOM_SUFFIX_RE): ordinary names like `build-output`, `my-backup`,
+# `hydra-deploy` or `old-config` fit the bare shape but are words, and are
+# spared. A genuinely random all-lowercase suffix ((26/62)^6, ~0.5%) is also
+# spared; the safety net accepts that miss rather than delete a named dir.
 #
 # Vitest's root tmp dir is a 21-char nanoid whose ONLY entry is `ssr/`; any
 # other nanoid-named dir is not ours to judge.
@@ -85,6 +90,7 @@ fi
 # is_quiet below), not just the dir's own mtime, so a temp dir a long-running
 # process is still writing into is never touched however old the dir itself is.
 MKDTEMP_RE='^[A-Za-z][A-Za-z0-9_.-]*[-.][A-Za-z0-9]{6}$'
+RANDOM_SUFFIX_RE='[0-9A-Z]'
 NANOID_RE='^[A-Za-z0-9_-]{21}$'
 # Top-level names this reaper must never remove even if they fit a shape:
 # per-user runtime dirs owned by long-lived tools.
@@ -102,15 +108,23 @@ classify() {
     fi
     return
   fi
-  if [[ "$name" =~ $MKDTEMP_RE ]]; then
+  if [[ "$name" =~ $MKDTEMP_RE ]] && [[ "${name: -6}" =~ $RANDOM_SUFFIX_RE ]]; then
     # Class label = the mkdtemp prefix, for the per-class journal counts.
     printf 'mkdtemp:%s\n' "${name:0:${#name}-6}"
   fi
 }
 
 # is_quiet <path> -> true when nothing in the subtree changed within the window.
+# Fails CLOSED: if find exits non-zero (an unreadable subdir, ENOMEM, ...) the
+# subtree was not fully examined, so the dir is treated as NOT quiet and spared.
+# find's stderr is left on the script's stderr so the cause reaches the journal.
 is_quiet() {
-  [ -z "$(find "$1" -xdev -mmin "-$MAX_AGE_MIN" -print -quit 2>/dev/null)" ]
+  local recent
+  if ! recent=$(find "$1" -xdev -mmin "-$MAX_AGE_MIN" -print -quit); then
+    echo "reap-stale-tmp: quiet check failed for '$1'; sparing it" >&2
+    return 1
+  fi
+  [ -z "$recent" ]
 }
 
 uid=$(id -u)
@@ -134,7 +148,9 @@ while IFS= read -r -d '' path; do
   matched=$((matched + 1))
   by_class[$class]=$(( ${by_class[$class]:-0} + 1 ))
   if [ "$APPLY" -eq 1 ]; then
-    if rm -rf -- "$path" 2>/dev/null; then
+    # --one-file-system keeps the delete on the filesystem is_quiet examined
+    # (find -xdev): a mount inside the dir is never descended into.
+    if rm -rf --one-file-system -- "$path" 2>/dev/null; then
       removed=$((removed + 1))
     else
       failed=$((failed + 1))

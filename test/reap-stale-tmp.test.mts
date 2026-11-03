@@ -13,7 +13,7 @@
 import test, { after, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lutimesSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -47,13 +47,24 @@ function makeDir(root: string, name: string, files: string[] = ["f"], ageMin = 2
   return dir;
 }
 
-function run(root: string, ...args: string[]): { status: number | null; stdout: string; summary: string } {
+function run(
+  root: string,
+  ...args: string[]
+): { status: number | null; stdout: string; stderr: string; summary: string } {
+  return runWithEnv(root, {}, ...args);
+}
+
+function runWithEnv(
+  root: string,
+  extraEnv: Record<string, string>,
+  ...args: string[]
+): { status: number | null; stdout: string; stderr: string; summary: string } {
   const res = spawnSync("bash", [SCRIPT_PATH, ...args], {
-    env: { ...process.env, HYDRA_TMP_REAP_ROOT: root },
+    env: { ...process.env, ...extraEnv, HYDRA_TMP_REAP_ROOT: root },
     encoding: "utf8",
   });
   const summary = res.stdout.split("\n").find((l) => l.startsWith("SUMMARY")) ?? "";
-  return { status: res.status, stdout: res.stdout, summary };
+  return { status: res.status, stdout: res.stdout, stderr: res.stderr, summary };
 }
 
 describe("reap-stale-tmp.sh", () => {
@@ -112,6 +123,12 @@ describe("reap-stale-tmp.sh", () => {
     const root = fixtureRoot();
     const spared = [
       makeDir(root, "dashboard-build"), // no 6-char mkdtemp suffix
+      // Ordinary words that happen to end in `-` plus 6 letters: an mkdtemp suffix
+      // is random, so it must carry a digit or an uppercase letter (#5328 QA).
+      makeDir(root, "build-output"),
+      makeDir(root, "my-backup"),
+      makeDir(root, "hydra-deploy"),
+      makeDir(root, "old-config"),
       makeDir(root, "tmp.AbCdEfGhIj"), // mktemp(1) default: 10-char suffix
       makeDir(root, "claude-1000Ab12Cd"), // deny-listed runtime prefix
       makeDir(root, "tsx-1000-Ab12Cd"),
@@ -129,14 +146,59 @@ describe("reap-stale-tmp.sh", () => {
 
   test("a symlink with a leaked name is never followed or removed, and its target survives", () => {
     const root = fixtureRoot();
-    const target = makeDir(root, "real-data");
+    // The target lives OUTSIDE the scanned root but is itself reapable (leaked
+    // shape, stale subtree), so following the link would delete it.
+    const target = makeDir(fixtureRoot(), "pmh-e2e-Xy12Zw");
     const link = join(root, "csb-outcomes-route-Ab12Cd");
     symlinkSync(target, link);
+    // Back-date the link itself too, so only "never follow symlinks" protects it.
+    const stamp = new Date(Date.now() - 2000 * 60_000);
+    lutimesSync(link, stamp, stamp);
 
-    run(root, "--apply");
+    const r = run(root, "--apply");
 
     assert.equal(existsSync(link), true);
     assert.equal(existsSync(join(target, "f")), true);
+    assert.match(r.summary, /matched=0 removed=0/);
+  });
+
+  test("a dir whose quiet check cannot be completed (find fails) is spared, and the error is surfaced", (t) => {
+    if (process.getuid?.() === 0) {
+      t.skip("root reads mode-000 dirs, so find cannot fail this way");
+      return;
+    }
+    const root = fixtureRoot();
+    const dir = makeDir(root, "refl-dep-Qw34Er", ["f", "locked/inner"]);
+    const locked = join(dir, "locked");
+    chmodSync(locked, 0o000);
+    const stamp = new Date(Date.now() - 2000 * 60_000);
+    utimesSync(dir, stamp, stamp);
+    try {
+      const r = run(root, "--apply");
+
+      assert.equal(existsSync(join(dir, "f")), true, "an unexaminable subtree must fail closed");
+      assert.match(r.summary, /matched=0 removed=0/);
+      assert.match(r.stderr, /Permission denied/, "find's error must not be discarded");
+    } finally {
+      chmodSync(locked, 0o755);
+    }
+  });
+
+  test("removal is bounded to the filesystem the quiet check examined (rm --one-file-system)", () => {
+    const root = fixtureRoot();
+    const leaked = makeDir(root, "pace-nudge-Zx98Cv");
+    // Stub `rm` on PATH that records its argv, then delegates to the real rm.
+    const bin = fixtureRoot();
+    const argvLog = join(bin, "rm-argv.log");
+    const realRm = spawnSync("bash", ["-c", "command -v rm"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(join(bin, "rm"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> '${argvLog}'\nexec '${realRm}' "$@"\n`);
+    chmodSync(join(bin, "rm"), 0o755);
+
+    const r = runWithEnv(root, { PATH: `${bin}:${process.env.PATH ?? ""}` }, "--apply");
+
+    assert.equal(existsSync(leaked), false);
+    assert.match(r.summary, /removed=1/);
+    assert.match(readFileSync(argvLog, "utf8"), /--one-file-system/);
   });
 
   test("--max-age below 60 minutes is refused", () => {
