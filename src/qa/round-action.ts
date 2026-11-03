@@ -6,7 +6,11 @@
  * scripts/ci/qa-verdict.ts re-exports the names its consumers import.
  */
 
+import { isVerifierCore } from "../untouchable.ts";
 import type { ReviewVerdict } from "./admission.ts";
+import { classifyQaFixPath } from "./fix-proof.ts";
+import { detectOneWayDoor, requiresOneWayDepth } from "./one-way-door.ts";
+import type { ReviewerCommitsValue } from "./rollout-switches.ts";
 import { priorFindingsSection, qaVerdictHistory } from "./prior-round.ts";
 import { isFailVerdict, nextQaVerdictRound, type FinalVerdict, type QaVerdictTrailer } from "./verdict-trailer.ts";
 
@@ -424,4 +428,165 @@ export function decideRound(input: DecideRoundInput): DecideRoundResult {
   const failMarker =
     deepQa?.action === "bounce" || deepQa?.action === "block-and-escalate" ? DEEP_QA_FAIL_MARKER : null;
   return { round, deepQa, passMarker, escalationSummary, labels: QA_ESCALATION_LABELS, failMarker };
+}
+
+// ---------------------------------------------------------------------------
+// Reviewer commit, class A (issue #5267, ADR-0046 Decision 2; epic #5255).
+//
+// When the `reviewer-commits` rollout stage is `A` or `A+B`, a round whose
+// EVERY blocking finding sits in a class-A location (the PR body, docs,
+// changelog, generated inventories, ratchet baselines) may be repaired by the
+// reviewer itself instead of bouncing to dev. The decision is pure and
+// all-or-nothing: one blocking finding anywhere else makes the whole round
+// `none` and the ordinary FAIL routing runs unchanged. It never edits, filters
+// or re-grades a finding (the fold owns the verdict). All I/O lives in
+// src/qa/phases.ts and the playbook's step 9.4.
+// ---------------------------------------------------------------------------
+
+export type ReviewerCommitReason =
+  | "stage-off"
+  | "tier-fence"
+  | "verifier-core"
+  | "one-way-door"
+  | "no-blocking"
+  | "ineligible-finding"
+  | "out-of-scope"
+  | "decision-error"
+  | "class-a-fixable";
+
+export interface ReviewerCommitDecision {
+  action: "none" | "commit-a";
+  reason: ReviewerCommitReason;
+  detail: string;
+  /** Class-A repo paths the reviewer commit may touch (empty unless commit-a). */
+  paths: string[];
+  /** True when a blocking finding is located at the PR body. */
+  bodyFix: boolean;
+}
+
+export interface ReviewerCommitInput {
+  /** The EFFECTIVE `reviewer-commits` switch (read from the QA session's master-based tree). */
+  stage: ReviewerCommitsValue;
+  tier: number | null;
+  /** The PR's full changed-file list. */
+  changedPaths: readonly string[];
+  /** Unified diff of the PR (empty/unparseable => door `unknown` => refuse). */
+  diff: string;
+  /** `fold.blocking[]` rows (the rows that set blockers>0). */
+  blocking: ReadonlyArray<{ location: string }>;
+  /** `fold.followUps[]` rows; lows at class-A locations may ride along. */
+  followUps?: ReadonlyArray<{ location: string }>;
+  /** Paths listed under the PR body's `## Files out of scope`; null = unreadable body (fail closed). */
+  outOfScope: readonly string[] | null;
+}
+
+const noReviewerCommit = (reason: ReviewerCommitReason, detail: string): ReviewerCommitDecision => ({
+  action: "none",
+  reason,
+  detail,
+  paths: [],
+  bodyFix: false,
+});
+
+/** The repo path a finding location names, or null for a placeholder / non-path. */
+export function reviewerCommitLocationPath(location: string): string | null {
+  let s = String(location ?? "").replace(/\s+/g, " ").trim();
+  s = s.replace(/^(["'`])(.*)\1$/, "$2").trim();
+  s = s.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  s = s.replace(/(?:[:#]\s*L?\d+(?:[-:]\d+)*|\s+L\d+)$/i, "").trim();
+  s = s.replace(/^\.\//, "");
+  if (!/^[A-Za-z0-9_.\-/]+$/.test(s)) return null;
+  return s.includes("/") || s.includes(".") ? s : null;
+}
+
+/** Paths listed under a PR body's `## Files out of scope` heading (backticked or bare bullets). */
+export function parseFilesOutOfScope(body: string): string[] {
+  const lines = String(body ?? "").split(/\r?\n/);
+  const out: string[] = [];
+  let inSection = false;
+  for (const line of lines) {
+    if (/^#{1,6}\s/.test(line)) {
+      inSection = /^#{1,6}\s+files out of scope\b/i.test(line);
+      continue;
+    }
+    if (!inSection) continue;
+    const ticks = [...line.matchAll(/`([^`]+)`/g)].map((m) => (m[1] as string).trim());
+    if (ticks.length > 0) {
+      out.push(...ticks);
+      continue;
+    }
+    const bullet = /^\s*[-*]\s+(\S+)/.exec(line);
+    if (bullet) out.push(bullet[1] as string);
+  }
+  return out.map((p) => p.replace(/^\.\//, "")).filter((p) => p !== "");
+}
+
+function isOutOfScope(path: string, outOfScope: readonly string[]): boolean {
+  return outOfScope.some((o) => (o.endsWith("/") ? path.startsWith(o) : path === o));
+}
+
+/**
+ * Decide whether the reviewer may repair this round itself with a class-A
+ * commit. Pure, total, never throws (STD-VERIFY-NEVER-THROW). Fences, in order:
+ * stage, tier (T4 / unknown), Verifier Core, one-way/unknown door; then
+ * all-or-nothing eligibility of every blocking finding.
+ */
+export function decideReviewerCommit(input: ReviewerCommitInput): ReviewerCommitDecision {
+  try {
+    if (input.stage !== "A" && input.stage !== "A+B") {
+      return noReviewerCommit("stage-off", "reviewer-commits rollout stage is off");
+    }
+    const tier = typeof input.tier === "number" && Number.isFinite(input.tier) && input.tier >= 1 ? input.tier : null;
+    if (tier === null || tier >= 4) {
+      return noReviewerCommit("tier-fence", "no reviewer commits on T4 or an unknown tier");
+    }
+    const changed = input.changedPaths.map((p) => String(p ?? "").trim()).filter((p) => p !== "");
+    if (changed.some((p) => isVerifierCore(p))) {
+      return noReviewerCommit("verifier-core", "the PR touches Verifier Core");
+    }
+    const door = detectOneWayDoor({ paths: changed, diff: input.diff });
+    if (requiresOneWayDepth(door)) {
+      return noReviewerCommit("one-way-door", `door is ${door.door}: one-way and unknown refuse`);
+    }
+    if (input.blocking.length === 0) {
+      return noReviewerCommit("no-blocking", "no blocking finding to repair");
+    }
+    const paths: string[] = [];
+    let bodyFix = false;
+    const consider = (location: string, blocking: boolean): ReviewerCommitDecision | null => {
+      if (/^\s*pr body\s*$/i.test(String(location ?? ""))) {
+        bodyFix = true;
+        return null;
+      }
+      const path = reviewerCommitLocationPath(location);
+      const cls = path === null ? "deny" : classifyQaFixPath(path);
+      if (path === null || (cls !== "A" && cls !== "AB")) {
+        return blocking
+          ? noReviewerCommit("ineligible-finding", `blocking finding at ${JSON.stringify(location)} is not class A`)
+          : null;
+      }
+      if (input.outOfScope === null || isOutOfScope(path, input.outOfScope)) {
+        return blocking
+          ? noReviewerCommit("out-of-scope", `${path} is listed under Files out of scope or the scope is unreadable`)
+          : null;
+      }
+      if (!paths.includes(path)) paths.push(path);
+      return null;
+    };
+    for (const f of input.blocking) {
+      const refusal = consider(f.location, true);
+      if (refusal) return refusal;
+    }
+    for (const f of input.followUps ?? []) consider(f.location, false);
+    return {
+      action: "commit-a",
+      reason: "class-a-fixable",
+      detail: `every blocking finding is class A (${paths.length} path(s)${bodyFix ? " + PR body" : ""})`,
+      paths,
+      bodyFix,
+    };
+  } catch (err) {
+    console.error("[round-action] decideReviewerCommit failed; refusing the commit path:", err);
+    return noReviewerCommit("decision-error", "decision threw; fail closed");
+  }
 }

@@ -1047,6 +1047,56 @@ The same `fold` call also runs the one-pass CI classifier on the folded review v
 
 The posted comment is therefore: the findings table (severity, axis, reviewer, file:line, finding, fix), the follow-ups table when there are any, one short paragraph per axis, the fold reason and the fan-out line (`$REVIEW_REPORT`), then the verdict line and the one CI line (`$CHECKS_BLOCK`), then the trailer.
 
+### 9.4 Reviewer commit (class A) (issue #5267, ADR-0046 Decision 2)
+
+Runs only when step 9 produced `REVIEW_VERDICT=FAIL`. It is gated by the `reviewer-commits` rollout switch, which ships `off` in `config/orchestrator/qa-rollout.json`: with the switch off the `reviewer-commit` phase answers `none` (`reason=stage-off`) and this step changes nothing. The switch is read from THIS session's own master-based tree (never the PR tree) by the phase itself.
+
+The `reviewer-commit` phase returns `commit-a` only when ALL of these hold: the stage is `A` or `A+B`; the tier is 1-3; no changed file is Verifier Core; the one-way-door detector says `two-way` (`one-way` and `unknown` both refuse); and EVERY blocking finding of the fold sits in a class-A location (the PR body, or a path `classifyQaFixPath` calls `A`/`AB` that is not listed under the PR body's `## Files out of scope`). One blocking finding anywhere else makes the whole round `none`: nothing is committed, nothing is pushed, and steps 9.5-10 run unchanged on the original FAIL. The phase never edits, filters or re-grades a finding.
+
+```bash
+QA_FIXES=""
+RC_JSON=$(printf '%s' "$FOLD_JSON" | jq --argjson pr "$pr_number" --argjson tier "${PR_TIER_NUM:-null}" \
+  '{pr: $pr, tier: $tier, blocking: .fold.blocking, followUps: .fold.followUps}' \
+  | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts reviewer-commit) || RC_JSON=""
+RC_ACTION=$(printf '%s' "$RC_JSON" | jq -r '.action // "none"')
+if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
+  REVIEWED_HEAD=$(gh pr view $pr_number --repo gaberoo322/hydra --json headRefOid --jq .headRefOid)
+  HEAD_REF=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.headRefName')
+  RC_OK=1
+  # Detached checkout of the EXACT reviewed head inside this session's isolation worktree.
+  git rev-parse --git-dir | grep -q '\.git/worktrees/' || RC_OK=0
+  [ "$RC_OK" = 1 ] && git fetch origin "$HEAD_REF" && git checkout --detach "$REVIEWED_HEAD" || RC_OK=0
+  # ... apply ONLY the class-A edits for .paths[] in the working tree (and the PR-body text in
+  # a private tempfile when .bodyFix is true), then run each touched file's own regenerator
+  # (npm run docs:inventories for docs/generated/, the ratchet's --update-baseline script for
+  # test/fixtures/*-baseline.json). Anything that needs a non-class-A edit aborts: RC_OK=0.
+  if [ "$RC_OK" = 1 ]; then
+    RC_BODY_FILE=$(mktemp)   # private tempfile; the corrected PR body (Closes-ref and reconciliation kept)
+    # ... write the corrected body into "$RC_BODY_FILE"; only ADD touched paths to "## Files in scope" ...
+    git add -A
+    git commit --allow-empty -q -m "fix(qa): reviewer class-A fixes for PR #$pr_number" -m "QA-Fix: A" || RC_OK=0
+  fi
+  # Local deterministic proof BEFORE any push; the reviewer never hand-judges it.
+  [ "$RC_OK" = 1 ] && { node --experimental-strip-types scripts/ci/qa-fix-proof.ts --base "$FIXED_SHA" --head HEAD || RC_OK=0; }
+  # Body BEFORE push, so the synchronize payload carries the corrected body.
+  [ "$RC_OK" = 1 ] && { gh pr edit $pr_number --repo gaberoo322/hydra --body-file "$RC_BODY_FILE" || RC_OK=0; }
+  # Plain fast-forward push only. A rejected push (the remote moved) aborts the commit path.
+  [ "$RC_OK" = 1 ] && { git push origin "HEAD:refs/heads/$HEAD_REF" || RC_OK=0; }
+  if [ "$RC_OK" = 1 ]; then
+    NEW_HEAD=$(git rev-parse HEAD)
+    QA_FIXES=${NEW_HEAD:0:12}
+    REVIEW_VERDICT=PASS; VERDICT=PASS-pending-CI; BLOCKERS=0; MAX_SEVERITY=none
+    REVIEW_REPORT="${REVIEW_REPORT}
+
+Reviewer-fixed in ${QA_FIXES} (QA-Fix: A): every blocking row above is fixed-by ${QA_FIXES}."
+  else
+    git checkout --detach "$REVIEWED_HEAD" 2>/dev/null || true   # nothing pushed; the original FAIL stands at the original head
+  fi
+fi
+```
+
+A reviewer-commit round is one `round=` like any other and never counts as a FAIL round; the round cap and the T4 2-strike rule are untouched. Bare `PASS` is unreachable on such a round: the verdict is `PASS-pending-CI` at the NEW head, and the autopilot's auto-merge goes through `qa-merge-guard`, which holds with `qa-fix-proof-not-green` until the `qa-fix-proof` workflow is green on that head. Step 9.5 passes `$QA_FIXES` and the new head SHA explicitly to the `trailer` phase.
+
 ### 9.5 Render the `QA-Verdict:` trailer (issue #4729 — every tier, every verdict)
 
 Every verdict comment step 10 posts — PR side and issue side, T1–T4, including the step-6.6 `skip-required-failed` path — ends with exactly ONE canonical line that `npm run qa:catch-rate` and later tooling parse (the human header above it is free to drift; this line is not):
@@ -1069,7 +1119,9 @@ The `trailer` phase reads the PR thread and the head SHA itself (the playbook su
 # trailer. `jq -er` then fails on a missing/null `.trailer`.
 TRAILER_JSON=$(jq -n --argjson pr "$pr_number" --arg verdict "$VERDICT" \
   --argjson blockers "${BLOCKERS:-0}" --arg severity "${MAX_SEVERITY:-none}" \
-  '{pr: $pr, verdict: $verdict, blockers: $blockers, maxSeverity: $severity}' \
+  --arg qafix "${QA_FIXES:-}" --arg newhead "${NEW_HEAD:-}" \
+  '{pr: $pr, verdict: $verdict, blockers: $blockers, maxSeverity: $severity}
+   + (if $qafix != "" then {headSha: $newhead, qaFixes: [$qafix]} else {} end)' \
   | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts trailer) \
   || { echo "[hydra-qa] ERROR: trailer phase failed — pre-verdict exit, nothing posted" >&2; exit 1; }
 QA_VERDICT_TRAILER=$(printf '%s' "$TRAILER_JSON" | jq -er '.trailer') \

@@ -1,0 +1,1 @@
+- feat: let the QA reviewer commit class-A fixes (docs, PR body, baselines) behind the off-by-default reviewer-commits switch (#5267)

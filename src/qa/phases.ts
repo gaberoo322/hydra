@@ -30,7 +30,13 @@ import {
 import { decideReviewerFanout } from "./fanout.ts";
 import { foldReview } from "./fold.ts";
 import { priorRoundContext, qaVerdictHistory, type AncestryPort } from "./prior-round.ts";
-import { QA_ESCALATION_LABELS, decideRound } from "./round-action.ts";
+import type { ReviewerCommitsValue } from "./rollout-switches.ts";
+import {
+  QA_ESCALATION_LABELS,
+  decideReviewerCommit,
+  decideRound,
+  parseFilesOutOfScope,
+} from "./round-action.ts";
 import {
   QA_VERDICT_UNKNOWN_SHA,
   buildQaVerdictTrailer,
@@ -60,6 +66,15 @@ export interface QaVerdictFetchers {
   /** Comment + review bodies of the PR. */
   priorBodies(pr: number): Promise<string[] | null>;
   ancestry(priorSha: string, headSha: string): Promise<QaAncestryFacts>;
+  /**
+   * Reviewer-commit facts (issue #5267). Optional so existing fixture adapters
+   * stay valid; an adapter without them degrades the phase to `none`.
+   * `rolloutStage` is the EFFECTIVE `reviewer-commits` switch read from the QA
+   * session's own master-based tree, never from the PR tree.
+   */
+  rolloutStage?(): Promise<ReviewerCommitsValue | null>;
+  prDiff?(pr: number): Promise<string | null>;
+  prBody?(pr: number): Promise<string | null>;
 }
 
 export type QaChecksSource = "branch-protection" | "rollup-only-all-optional";
@@ -218,9 +233,32 @@ export async function runQaVerdictPhase(
         i.headSha, () => f.headSha(i.pr), "head-sha", QA_VERDICT_UNKNOWN_SHA, degraded);
       const trailer = buildQaVerdictTrailer({
         verdict: i.verdict, pr: i.pr, headSha, blockers: i.blockers,
-        maxSeverity: i.maxSeverity, priorBodies,
+        maxSeverity: i.maxSeverity, priorBodies, qaFixes: i.qaFixes,
       });
       return { trailer, round: nextQaVerdictRound(priorBodies, i.pr), degraded };
+    }
+    case "reviewer-commit": {
+      const i = input as QaVerdictCliInput<"reviewer-commit">;
+      // Every missing fact degrades toward `none`: stage off, an empty diff
+      // (door unknown), an unreadable body (no out-of-scope list).
+      const readStage = f.rolloutStage ? await f.rolloutStage() : null;
+      if (readStage === null) degraded.push("rollout-stage");
+      const stage: ReviewerCommitsValue = readStage ?? "off";
+      const diff = await resolveFact(i.diff, async () => (f.prDiff ? f.prDiff(i.pr) : null), "diff", "", degraded);
+      const changedPaths = await resolveFact(
+        i.changedPaths, () => f.changedFiles(i.pr), "changed-paths", UNREADABLE_CHANGED_PATHS, degraded);
+      const body = await resolveFact<string | null>(
+        i.prBody, async () => (f.prBody ? f.prBody(i.pr) : null), "pr-body", null, degraded);
+      const decision = decideReviewerCommit({
+        stage,
+        tier: i.tier,
+        changedPaths,
+        diff,
+        blocking: i.blocking,
+        followUps: i.followUps,
+        outOfScope: body === null ? null : parseFilesOutOfScope(body),
+      });
+      return { ...decision, degraded };
     }
     case "round-action": {
       const i = input as QaVerdictCliInput<"round-action">;
