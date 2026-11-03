@@ -165,10 +165,6 @@ export function getWeeklyQuotaTokens(): number {
   return parseQuotaEnv(process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS);
 }
 
-export function getFiveHourQuotaTokens(): number {
-  return parseQuotaEnv(process.env.HYDRA_USAGE_5H_QUOTA_TOKENS);
-}
-
 function parseQuotaEnv(raw: string | undefined): number {
   if (raw === undefined || raw === "") return 0;
   const parsed = Number(raw);
@@ -432,7 +428,7 @@ export function getQuotaWeightHaiku(): number {
 }
 
 /**
- * Gather the ten calibration env reads `assembleSnapshot` needs into one typed
+ * Gather the nine calibration env reads `assembleSnapshot` needs into one typed
  * record (ADR-0042 Decision 7, issue #4793). Calls each existing getter exactly
  * once — no new parsing; the getters keep their own fail-loud fallbacks. It is
  * `assembleSnapshot`'s default fourth argument, so it is evaluated at CALL time
@@ -441,7 +437,6 @@ export function getQuotaWeightHaiku(): number {
 export function readSnapshotCalibration(): SnapshotCalibration {
   return {
     weeklyQuotaTokens: getWeeklyQuotaTokens(),
-    fiveHourQuotaTokens: getFiveHourQuotaTokens(),
     weeklyResetAnchorMs: getWeeklyResetAnchorMs(),
     cacheReadWeight: getCacheReadWeight(),
     driftReferencePercent: getDriftReferencePercent(),
@@ -758,4 +753,20 @@ export function getBurnFamilyWeights(): { opus: number; sonnet: number; haiku: n
     sonnet: getBurnFamilyWeightSonnet(),
     haiku: getBurnFamilyWeightHaiku(),
   };
+}
+
+/**
+ * The launch-model pair (issues #4585, #5103). PRIMARY is what the parent
+ * Autopilot session normally runs on (`HYDRA_AUTOPILOT_PRIMARY_MODEL`, default
+ * `fable`); FALLBACK is what it switches to while the model-scoped exhaustion
+ * flag is future (`HYDRA_AUTOPILOT_FALLBACK_MODEL`, default `opus`). The
+ * eligibility route uses these as the DEFAULT when the launcher sends no pair
+ * of its own. Pure + env-only.
+ */
+export function getPrimaryLaunchModel(): string {
+  return process.env.HYDRA_AUTOPILOT_PRIMARY_MODEL || "fable";
+}
+
+export function getFallbackLaunchModel(): string {
+  return process.env.HYDRA_AUTOPILOT_FALLBACK_MODEL || "opus";
 }

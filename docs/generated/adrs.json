@@ -1289,7 +1289,8 @@
       "readWhen": "Touching hydra-qa depth/fan-out, reviewer commits, `CODING_STANDARDS.md`, the one-way-door detector, or the review-findings retro.",
       "citedBy": [
         "CONTEXT-MAP.md",
-        "docs/operator-playbooks/hydra-qa.md"
+        "docs/operator-playbooks/hydra-qa.md",
+        "docs/operator-playbooks/hydra-retro.md"
       ],
       "source": {
         "path": "docs/adr/0046-two-pass-code-factory-implement-works-reviewer-makes-good.md"

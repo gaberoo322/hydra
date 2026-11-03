@@ -99,7 +99,7 @@ FLAGS = (
     "orch_backfill_idle", "arch_board_saturated", "hitl_grill_saturated", "orch_board_signals_degraded",
     "cleanup_board_saturated", "skill_prune_board_saturated", "target_backfill_idle",
     "target_cleanup_board_saturated", "wire_or_retire_target_available", "design_qa_target_due",
-    "design_qa_target_saturated", "retro_run_available", "retro_run_drillable", "orch_ci_trigger_stale",
+    "design_qa_target_saturated", "retro_run_available", "retro_run_drillable", "review_retro_due", "orch_ci_trigger_stale",
     "tickets_available",
 )
 TEXTS = ("target_needs_qa_pr_ref", "target_needs_qa_pr_head")

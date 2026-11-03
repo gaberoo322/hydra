@@ -24,6 +24,8 @@ import {
   projectResetWindow,
   getEligibilityUsage,
   decideAdmission,
+  getPrimaryLaunchModel,
+  getFallbackLaunchModel,
 } from "../cost/index.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import {
@@ -62,25 +64,12 @@ import { logger } from "../logger.ts";
 const ForceQuerySchema = z.object({ force: booleanFlag() });
 
 /**
- * The model the model-scoped exhaustion flag (#4585) redirects OFF of while
- * live. Read from the SAME env var pace-gate.sh resolves its PRIMARY_MODEL
- * from (`HYDRA_AUTOPILOT_PRIMARY_MODEL`, default `fable`), so an operator
- * override of the launch-model pair stays in sync with the repeat-detection
- * check below (QA re-review hard-blocker fix on PR #4644) — a report naming
- * this model is never treated as a confirmed fallback death.
+ * The launch-model pair (#4585, #5103) — read from `getPrimaryLaunchModel()` /
+ * `getFallbackLaunchModel()` (`src/cost/config.ts`), the one env-reader for
+ * `HYDRA_AUTOPILOT_PRIMARY_MODEL` (default `fable`) / `HYDRA_AUTOPILOT_FALLBACK_MODEL`
+ * (default `opus`). The session-block repeat-detection and the `model-fallback`
+ * bus event below name these models, never a literal.
  */
-const PRIMARY_MODEL_NAME = process.env.HYDRA_AUTOPILOT_PRIMARY_MODEL || "fable";
-
-/**
- * The model the flag redirects ONTO while live. Read from the SAME env var
- * pace-gate.sh resolves its FALLBACK_MODEL from (`HYDRA_AUTOPILOT_FALLBACK_MODEL`,
- * default `opus`) — QA (PR #4644, 2026-09-24T09:49Z) found the `model-fallback`
- * bus event hardcoded the literal `"opus"`/`"fable"` strings, so an operator
- * override of the launch-model pair produced a correct launch but a
- * misreporting event/log line. Both model names used in the event payload
- * below MUST come from these two consts, never a literal.
- */
-const FALLBACK_MODEL_NAME = process.env.HYDRA_AUTOPILOT_FALLBACK_MODEL || "opus";
 
 /**
  * Body schema for `POST /api/usage/session-block` (issue #1089, widened by
@@ -253,6 +242,13 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
           mode: admissionQuery.mode,
           serviceActive: admissionQuery.serviceActive,
           pidAlive: admissionQuery.pidAlive,
+          // #5103: credentials expiry is read server-side; the stamp and the
+          // model pair are launcher facts (the unit's own env), defaulting to
+          // the server's env when the launcher sends none.
+          credentialsExpiresAtMs: meter.credentialsExpiresAtMs,
+          nudgeLastAtS: admissionQuery.nudgeLastAt ?? null,
+          primaryModel: admissionQuery.primaryModel ?? getPrimaryLaunchModel(),
+          fallbackModel: admissionQuery.fallbackModel ?? getFallbackLaunchModel(),
         }),
       };
     }),
@@ -366,7 +362,7 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
       const repeatBlockedUntilMs = blockedUntilMs;
       const reportedModel = parsed.data.model;
       const confirmedFallbackDeath =
-        reportedModel !== undefined && reportedModel !== PRIMARY_MODEL_NAME;
+        reportedModel !== undefined && reportedModel !== getPrimaryLaunchModel();
       return isolateAggregator(res, "api/usage/session-block", async () => {
         const alreadyExhausted = await getModelExhaustedUntil(armNowMs);
         if (alreadyExhausted !== null && confirmedFallbackDeath) {
@@ -379,7 +375,7 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
           // Visibility (INV-7's spirit): this is a STOP, not a redirect, so
           // the event is best-effort exactly like the redirect case.
           await publishModelFallbackEvent({
-            from: FALLBACK_MODEL_NAME,
+            from: getFallbackLaunchModel(),
             to: "session-block",
             reason: "out-of-credits-repeat",
             until: blockedUntilIso,
@@ -402,13 +398,13 @@ export function createUsageRouter(eventBus?: PublishableBus | null) {
         const untilIso = new Date(stored).toISOString();
         logger.info(
           { routeLabel: "api/usage/session-block", kind: "out-of-credits", fableExhaustedUntil: untilIso },
-          `[usage] model-exhaustion flag armed: model-fallback ${PRIMARY_MODEL_NAME}->${FALLBACK_MODEL_NAME} reason=out-of-credits (#4585)`,
+          `[usage] model-exhaustion flag armed: model-fallback ${getPrimaryLaunchModel()}->${getFallbackLaunchModel()} reason=out-of-credits (#4585)`,
         );
         // INV-7: the arming switch is visible on the bus. Best-effort — see
         // publishModelFallbackEvent.
         await publishModelFallbackEvent({
-          from: PRIMARY_MODEL_NAME,
-          to: FALLBACK_MODEL_NAME,
+          from: getPrimaryLaunchModel(),
+          to: getFallbackLaunchModel(),
           reason: "out-of-credits",
           until: untilIso,
         });

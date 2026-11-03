@@ -291,6 +291,7 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     design_qa_target_saturated: scan?.designQaSaturated ?? true,
     retro_run_available: v.retro.runs.ok && v.retro.runs.value.available,
     retro_run_drillable: v.retro.drillable === true,
+    review_retro_due: v.retro.reviewDue === true,
 
     orch_prs_dirty: [...v.prGate.dirty],
     orch_prs_unchecked: [...v.prGate.unchecked],

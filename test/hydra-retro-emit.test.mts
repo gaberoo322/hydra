@@ -224,6 +224,12 @@ describe("validateFindings", () => {
     assert.deepEqual(validateFindings([code("good-cue"), prompt("another-cue")]), []);
   });
 
+  test("accepts review: rung cues and rejects an unknown rung", () => {
+    assert.deepEqual(validateFindings([code("review:check:rule-x")]), []);
+    const errs = validateFindings([code("review:bogus:x")]);
+    assert.ok(errs.some((e) => e.field === "cue"));
+  });
+
   test("rejects a non-kebab-case cue", () => {
     const errs = validateFindings([{ cue: "Not Kebab", kind: "code", title: "t", confidence: 0.5 }]);
     assert.ok(errs.some((e) => e.field === "cue"));

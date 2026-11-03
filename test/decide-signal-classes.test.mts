@@ -842,6 +842,37 @@ describe("decide.py — retro_orch signal class (issue #920)", () => {
     );
   });
 
+  test("review mode (#5271): drillable + due carries review:true; drillable alone stays {apply:true}", () => {
+    const dispatchArgs = (signals: Record<string, unknown>, signal_last_fired: Record<string, number> = {}) => {
+      const plan = runDecide(baseState({ signals, signal_last_fired }), null);
+      return findAction(plan, (x) => x.type === "dispatch" && x.slot === "retro_orch")?.prompt_args;
+    };
+    const now = Math.floor(Date.now() / 1000);
+    const fired = { retro_orch: now - 25 * 60 * 60 };
+    assert.deepEqual(dispatchArgs({ retro_run_available: true, retro_run_drillable: true, review_retro_due: true }, fired), { apply: true, review: true });
+    assert.deepEqual(dispatchArgs({ retro_run_available: true, retro_run_drillable: true }, fired), { apply: true });
+  });
+
+  test("review mode (#5271): due without a drillable run dispatches review-only, even with no run", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const fired = { retro_orch: now - 25 * 60 * 60 };
+    for (const signals of [{ review_retro_due: true }, { retro_run_available: true, review_retro_due: true }]) {
+      const plan = runDecide(baseState({ signals, signal_last_fired: fired as any }), null);
+      const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "retro_orch");
+      assert.ok(a, "a due review signal must dispatch retro_orch");
+      assert.deepEqual(a.prompt_args, { apply: true, review: true });
+    }
+  });
+
+  test("review mode (#5271): the weekly override always carries review:true; a non-due skip stamps nothing", () => {
+    const state = baseState({ signals: { retro_run_available: true } });
+    const a = findAction(runDecide(state, null), (x) => x.type === "dispatch" && x.slot === "retro_orch");
+    assert.deepEqual(a?.prompt_args, { apply: true, review: true });
+    const now = Math.floor(Date.now() / 1000);
+    const quiet = baseState({ signals: { retro_run_available: true }, signal_last_fired: { retro_orch: now - 25 * 60 * 60 } as any });
+    assert.equal(findAction(runDecide(quiet, null), (x) => x.type === "dispatch" && x.slot === "retro_orch"), undefined);
+  });
+
   test("retro_orch in burned_classes is NOT re-dispatched (mirrors #432)", () => {
     const state = baseState({
       burned_classes: ["retro_orch"],

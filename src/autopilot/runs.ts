@@ -176,9 +176,9 @@ import { setPostQuotaUntil, postQuotaBackoffSec } from "../redis/post-quota-hint
  * prior run.
  *
  * `quota` (issue #3867) is the sibling of `budget` denominated in the currency
- * the operator actually pays: the run's account-utilization delta (percentLast5h
- * / percentSinceReset measured against the run-start baseline) crossed its
- * opt-in `--quota-5h-max` / `--quota-week-max` cap. `budget` counts
+ * the operator actually pays: the run's account-utilization delta (percentSinceReset
+ * measured against the run-start baseline) crossed its
+ * opt-in `--quota-week-max` cap. `budget` counts
  * subagent-reported tokens, which under-measure real cache-weighted spend by
  * roughly two orders of magnitude (run 2bcba309: 801k of a 4M token budget while
  * the meter moved 2%→30%). Clean and deliberate for exactly the same reason

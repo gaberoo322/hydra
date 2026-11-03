@@ -5,8 +5,8 @@
  * tokens (`state.cumulative_tokens`, advanced by reap.py). What the operator
  * actually pays is cache-weighted ACCOUNT UTILIZATION. Measured on run 2bcba309
  * (2026-08-05): the run "spent" 801k of a 4,000,000 token budget — 20% — and
- * would have kept dispatching, while the OAuth meter moved the 5h utilization
- * window 2% -> 30% over the same period (~150M raw tokens). So a "conservative"
+ * would have kept dispatching, while the OAuth meter moved the (then rate-limited)
+ * utilization window 2% -> 30% over the same period (~150M raw tokens). So a "conservative"
  * token budget does not bound real spend at all.
  *
  * The fix adds a per-run cap denominated in utilization POINTS accrued over the
@@ -20,9 +20,9 @@
  *   INV-2  (retired, #5070: the term-check.py mirror was deleted)
  *   INV-3  The baseline is captured EXACTLY ONCE per run, on the first turn that
  *          sees a calibrated payload, through the existing atomic write-back.
- *   INV-4  A mid-run 5h-window reset clamps to a zero delta and REBASES the
+ *   INV-4  A mid-run weekly-window reset clamps to a zero delta and REBASES the
  *          baseline — never negative spend, never a termination of its own.
- *   INV-5  The cap reads `usage.percentLast5h` / `usage.percentSinceReset` only,
+ *   INV-5  The cap reads `usage.percentSinceReset` only (never percentLast5h),
  *          never paceState / targetPercent (ADR-0021 D5 keeps this a per-run
  *          hygiene cap, subordinate to the Pace Gate).
  *
@@ -95,7 +95,6 @@ function usagePayload(o: UsageOverrides = {}): any {
 interface StateOverrides {
   token_budget?: number;
   cumulative_tokens?: number;
-  quota_5h_max_pts?: number;
   quota_week_max_pts?: number;
   quota_baseline?: unknown;
   usage_eligibility?: unknown;
@@ -118,7 +117,6 @@ function baseState(o: StateOverrides = {}): any {
     subagent_max_tokens: 400_000,
     subagent_hard_max_tokens: 800_000,
   };
-  if (o.quota_5h_max_pts !== undefined) limits.quota_5h_max_pts = o.quota_5h_max_pts;
   if (o.quota_week_max_pts !== undefined) limits.quota_week_max_pts = o.quota_week_max_pts;
 
   const s: any = {
@@ -150,9 +148,8 @@ function baseState(o: StateOverrides = {}): any {
 }
 
 /** A captured baseline as `_capture_quota_baseline` writes it. */
-function baseline(percent5h: number | null, percentWeek: number | null): any {
+function baseline(percentWeek: number | null): any {
   return {
-    percent_5h: percent5h,
     percent_week: percentWeek,
     captured_epoch: 1_786_800_000,
     rebased_epoch: null,
@@ -213,29 +210,28 @@ function runTermCheck(state: any): { status: number; stdout: string } {
 // ---------------------------------------------------------------------------
 
 describe("decide.py TERM:quota verdict (issue #3867)", () => {
-  // THE issue's literal acceptance criterion: a run with --quota-5h-max=10
-  // terminates once 5h utilization has risen 10 points over its run-start
+  // THE issue's literal acceptance criterion: a run with --quota-week-max=10
+  // terminates once weekly utilization has risen 10 points over its run-start
   // baseline, EVEN THOUGH cumulative_tokens is far under token_budget.
-  test("fires once the 5h delta reaches the cap, with tokens far under budget", () => {
+  test("fires once the weekly delta reaches the cap, with tokens far under budget", () => {
     const r = runTermCheck(baseState({
-      quota_5h_max_pts: 10,
-      quota_baseline: baseline(2, 60),
-      // 2% -> 30% is the observed run's real movement: a 28-point delta.
-      usage_eligibility: usagePayload({ percentLast5h: 30, percentSinceReset: 62 }),
+      quota_week_max_pts: 10,
+      quota_baseline: baseline(60),
+      usage_eligibility: usagePayload({ percentSinceReset: 88 }),
       cumulative_tokens: 801_000,
       token_budget: 4_000_000,
     }));
     assert.equal(r.status, 0);
     assert.match(r.stdout, /^TERM:quota /);
-    assert.match(r.stdout, /5h utilization \+28\.0pts >= cap 10\.0pts/);
-    assert.match(r.stdout, /baseline=2\.0 current=30\.0/);
+    assert.match(r.stdout, /week utilization \+28\.0pts >= cap 10\.0pts/);
+    assert.match(r.stdout, /baseline=60\.0 current=88\.0/);
   });
 
   test("keeps iterating while the delta is below the cap", () => {
     const r = runTermCheck(baseState({
-      quota_5h_max_pts: 10,
-      quota_baseline: baseline(2, 60),
-      usage_eligibility: usagePayload({ percentLast5h: 11, percentSinceReset: 62 }),
+      quota_week_max_pts: 10,
+      quota_baseline: baseline(60),
+      usage_eligibility: usagePayload({ percentSinceReset: 69 }),
     }));
     assert.equal(r.status, 0);
     assert.match(r.stdout, /^OK /, "a 9-point delta must not trip a 10-point cap");
@@ -243,19 +239,19 @@ describe("decide.py TERM:quota verdict (issue #3867)", () => {
 
   test("the boundary is >= : exactly-at-cap terminates", () => {
     const r = runTermCheck(baseState({
-      quota_5h_max_pts: 10,
-      quota_baseline: baseline(2, 60),
-      usage_eligibility: usagePayload({ percentLast5h: 12, percentSinceReset: 60 }),
+      quota_week_max_pts: 10,
+      quota_baseline: baseline(60),
+      usage_eligibility: usagePayload({ percentSinceReset: 70 }),
     }));
     assert.match(r.stdout, /^TERM:quota /);
   });
 
   // INV-1 — the default. This is the single most important case in the file:
   // an unset cap must leave a run that has burned 30 points of quota running.
-  test("INV-1: with the caps ABSENT, a 28-point burn does NOT terminate", () => {
+  test("INV-1: with the cap ABSENT, a 35-point burn does NOT terminate", () => {
     const r = runTermCheck(baseState({
-      quota_baseline: baseline(2, 60),
-      usage_eligibility: usagePayload({ percentLast5h: 30, percentSinceReset: 95 }),
+      quota_baseline: baseline(60),
+      usage_eligibility: usagePayload({ percentSinceReset: 95 }),
     }));
     assert.equal(r.status, 0);
     assert.match(r.stdout, /^OK /, "the cap is opt-in — unset means never fires");
@@ -263,10 +259,9 @@ describe("decide.py TERM:quota verdict (issue #3867)", () => {
 
   test("INV-1: an explicit 0 cap is also disabled", () => {
     const r = runTermCheck(baseState({
-      quota_5h_max_pts: 0,
       quota_week_max_pts: 0,
-      quota_baseline: baseline(2, 60),
-      usage_eligibility: usagePayload({ percentLast5h: 30, percentSinceReset: 95 }),
+      quota_baseline: baseline(60),
+      usage_eligibility: usagePayload({ percentSinceReset: 95 }),
     }));
     assert.match(r.stdout, /^OK /);
   });
@@ -275,19 +270,19 @@ describe("decide.py TERM:quota verdict (issue #3867)", () => {
   // (delta 0), so it can never terminate on that turn.
   test("no baseline yet => OK (the first turn captures; it cannot terminate)", () => {
     const r = runTermCheck(baseState({
-      quota_5h_max_pts: 1,
-      usage_eligibility: usagePayload({ percentLast5h: 90, percentSinceReset: 95 }),
+      quota_week_max_pts: 1,
+      usage_eligibility: usagePayload({ percentSinceReset: 95 }),
     }));
     assert.match(r.stdout, /^OK /);
   });
 
-  // INV-4 — a mid-run 5h-window reset.
+  // INV-4 — a mid-run weekly-window reset.
   test("INV-4: a window reset (current < baseline) is NOT negative spend and never terminates", () => {
     const r = runTermCheck(baseState({
-      quota_5h_max_pts: 10,
-      quota_baseline: baseline(30, 66),
-      // The 5h window rolled over: 30% -> 3%. Headroom returned.
-      usage_eligibility: usagePayload({ percentLast5h: 3, percentSinceReset: 66 }),
+      quota_week_max_pts: 10,
+      quota_baseline: baseline(66),
+      // The weekly window rolled over: 66% -> 3%. Headroom returned.
+      usage_eligibility: usagePayload({ percentSinceReset: 3 }),
     }));
     assert.equal(r.status, 0);
     assert.match(r.stdout, /^OK /, "a reset is headroom returning, not a spend event");
@@ -295,40 +290,36 @@ describe("decide.py TERM:quota verdict (issue #3867)", () => {
 
   test("an UNCALIBRATED meter is never used to terminate", () => {
     const r = runTermCheck(baseState({
-      quota_5h_max_pts: 1,
-      quota_baseline: baseline(2, 60),
-      usage_eligibility: usagePayload({
-        percentLast5h: 90, percentSinceReset: 95, calibrated: false,
-      }),
+      quota_week_max_pts: 1,
+      quota_baseline: baseline(60),
+      usage_eligibility: usagePayload({ percentSinceReset: 95, calibrated: false }),
     }));
     assert.match(r.stdout, /^OK /, "terminating on a guessed spend figure is worse than not");
   });
 
   test("a missing usage_eligibility payload degrades to OK, never a crash", () => {
     const r = runTermCheck(baseState({
-      quota_5h_max_pts: 1,
-      quota_baseline: baseline(2, 60),
+      quota_week_max_pts: 1,
+      quota_baseline: baseline(60),
     }));
     assert.equal(r.status, 0);
     assert.match(r.stdout, /^OK /);
   });
 
-  test("the WEEKLY cap fires on the percentSinceReset delta", () => {
+  test("percentLast5h never gates: a huge 5h reading with a flat weekly delta stays OK", () => {
     const r = runTermCheck(baseState({
       quota_week_max_pts: 5,
-      quota_baseline: baseline(2, 60),
-      // 5h barely moved; the weekly window crossed its own cap.
-      usage_eligibility: usagePayload({ percentLast5h: 3, percentSinceReset: 66 }),
+      quota_baseline: baseline(60),
+      usage_eligibility: usagePayload({ percentLast5h: 99, percentSinceReset: 61 }),
     }));
-    assert.match(r.stdout, /^TERM:quota /);
-    assert.match(r.stdout, /week utilization \+6\.0pts >= cap 5\.0pts/);
+    assert.match(r.stdout, /^OK /);
   });
 
   test("quota outranks budget when BOTH trip on the same turn", () => {
     const r = runTermCheck(baseState({
-      quota_5h_max_pts: 10,
-      quota_baseline: baseline(2, 60),
-      usage_eligibility: usagePayload({ percentLast5h: 30, percentSinceReset: 62 }),
+      quota_week_max_pts: 10,
+      quota_baseline: baseline(60),
+      usage_eligibility: usagePayload({ percentSinceReset: 88 }),
       // Token budget ALSO exhausted.
       token_budget: 100,
       cumulative_tokens: 5_000,
@@ -341,8 +332,8 @@ describe("decide.py TERM:quota verdict (issue #3867)", () => {
     const r = runTermCheck(baseState({
       token_budget: 100,
       cumulative_tokens: 5_000,
-      quota_baseline: baseline(2, 60),
-      usage_eligibility: usagePayload({ percentLast5h: 30 }),
+      quota_baseline: baseline(60),
+      usage_eligibility: usagePayload({ percentSinceReset: 95 }),
     }));
     assert.match(r.stdout, /^TERM:budget /);
   });
@@ -352,10 +343,10 @@ describe("decide.py TERM:quota verdict (issue #3867)", () => {
   // only they move the verdict.
   test("INV-5: the verdict tracks raw percentages, not paceState/targetPercent", () => {
     const under = runTermCheck(baseState({
-      quota_5h_max_pts: 10,
-      quota_baseline: baseline(2, 60),
+      quota_week_max_pts: 10,
+      quota_baseline: baseline(60),
       usage_eligibility: {
-        ...usagePayload({ percentLast5h: 5 }),
+        ...usagePayload({ percentSinceReset: 65 }),
         // An "ahead" curve state would make the Pace Gate refuse to launch —
         // but it must not terminate a RUNNING run through this cap.
         paceState: "ahead",
@@ -365,10 +356,10 @@ describe("decide.py TERM:quota verdict (issue #3867)", () => {
     assert.match(under.stdout, /^OK /);
 
     const over = runTermCheck(baseState({
-      quota_5h_max_pts: 10,
-      quota_baseline: baseline(2, 60),
+      quota_week_max_pts: 10,
+      quota_baseline: baseline(60),
       usage_eligibility: {
-        ...usagePayload({ percentLast5h: 30 }),
+        ...usagePayload({ percentSinceReset: 90 }),
         // A "behind" curve would make the Gate eager to launch — irrelevant.
         paceState: "behind",
         targetPercent: 99,
@@ -385,44 +376,44 @@ describe("decide.py TERM:quota verdict (issue #3867)", () => {
 describe("decide.py quota-percent termination (issue #3867)", () => {
   test("emits terminate cause=quota with cumulative_tokens far under token_budget", () => {
     const { plan } = runDecide(baseState({
-      quota_5h_max_pts: 10,
-      quota_baseline: baseline(2, 60),
-      usage_eligibility: usagePayload({ percentLast5h: 30, percentSinceReset: 62 }),
+      quota_week_max_pts: 10,
+      quota_baseline: baseline(60),
+      usage_eligibility: usagePayload({ percentSinceReset: 88 }),
       cumulative_tokens: 801_000,
       token_budget: 4_000_000,
     }));
     const term = terminateAction(plan);
     assert.ok(term, "a quota-capped overspend must terminate");
     assert.equal(term.cause, "quota");
-    assert.match(term.reason, /5h utilization \+28\.0pts >= cap 10\.0pts/);
+    assert.match(term.reason, /week utilization \+28\.0pts >= cap 10\.0pts/);
   });
 
   // INV-3 — lazy capture, exactly once, persisted atomically.
   test("INV-3: captures the baseline on the first calibrated turn and persists it", () => {
     const { plan, persisted } = runDecide(baseState({
-      quota_5h_max_pts: 10,
+      quota_week_max_pts: 10,
       // No baseline in the input — this IS the first turn.
       usage_eligibility: usagePayload({ percentLast5h: 12, percentSinceReset: 66 }),
     }));
     assert.equal(terminateAction(plan), undefined,
       "the capture turn has a zero delta by construction — it must not terminate");
     assert.ok(persisted.quota_baseline, "the baseline must survive to the next turn");
-    assert.equal(persisted.quota_baseline.percent_5h, 12);
     assert.equal(persisted.quota_baseline.percent_week, 66);
+    assert.equal("percent_5h" in persisted.quota_baseline, false,
+      "the 5h window is no longer baselined (#5333)");
     assert.equal(typeof persisted.quota_baseline.captured_epoch, "number");
     assert.equal(persisted.quota_baseline.rebased_epoch, null);
   });
 
   test("INV-3: a SECOND turn does not re-capture (the baseline is per-run, not per-turn)", () => {
-    const captured = baseline(2, 60);
+    const captured = baseline(60);
     const { persisted } = runDecide(baseState({
-      quota_5h_max_pts: 100, // high enough that the delta never terminates
+      quota_week_max_pts: 100, // high enough that the delta never terminates
       quota_baseline: captured,
-      usage_eligibility: usagePayload({ percentLast5h: 30, percentSinceReset: 66 }),
+      usage_eligibility: usagePayload({ percentSinceReset: 66 }),
     }));
-    assert.equal(persisted.quota_baseline.percent_5h, 2,
+    assert.equal(persisted.quota_baseline.percent_week, 60,
       "re-capturing each turn would make the delta permanently ~0 and the cap dead");
-    assert.equal(persisted.quota_baseline.percent_week, 60);
     assert.equal(persisted.quota_baseline.captured_epoch, captured.captured_epoch);
   });
 
@@ -439,8 +430,8 @@ describe("decide.py quota-percent termination (issue #3867)", () => {
 
   test("an uncalibrated meter captures NOTHING (no baseline off a guess)", () => {
     const { plan, persisted } = runDecide(baseState({
-      quota_5h_max_pts: 10,
-      usage_eligibility: usagePayload({ percentLast5h: 12, calibrated: false }),
+      quota_week_max_pts: 10,
+      usage_eligibility: usagePayload({ percentSinceReset: 12, calibrated: false }),
     }));
     assert.equal(terminateAction(plan), undefined);
     assert.equal("quota_baseline" in persisted, false);
@@ -449,29 +440,28 @@ describe("decide.py quota-percent termination (issue #3867)", () => {
   // INV-4 — the reset rebase, observed through the persisted state.
   test("INV-4: a window reset REBASES the baseline down and does not terminate", () => {
     const { plan, persisted } = runDecide(baseState({
-      quota_5h_max_pts: 10,
-      quota_baseline: baseline(30, 66),
-      // 5h window rolled over: 30 -> 3. Weekly unchanged.
-      usage_eligibility: usagePayload({ percentLast5h: 3, percentSinceReset: 66 }),
+      quota_week_max_pts: 10,
+      quota_baseline: baseline(66),
+      // Weekly window rolled over: 66 -> 3.
+      usage_eligibility: usagePayload({ percentSinceReset: 3 }),
     }));
     assert.equal(terminateAction(plan), undefined, "a reset must never terminate");
-    assert.equal(persisted.quota_baseline.percent_5h, 3,
+    assert.equal(persisted.quota_baseline.percent_week, 3,
       "post-reset spend must be measured fresh from the new window");
-    assert.equal(persisted.quota_baseline.percent_week, 66, "the weekly baseline is untouched");
     assert.equal(typeof persisted.quota_baseline.rebased_epoch, "number");
   });
 
   test("INV-4: after a rebase, spend from the NEW window still trips the cap", () => {
-    // Turn N: reset rebases 30 -> 3.
+    // Turn N: reset rebases 66 -> 3.
     const afterReset = runDecide(baseState({
-      quota_5h_max_pts: 10,
-      quota_baseline: baseline(30, 66),
-      usage_eligibility: usagePayload({ percentLast5h: 3, percentSinceReset: 66 }),
+      quota_week_max_pts: 10,
+      quota_baseline: baseline(66),
+      usage_eligibility: usagePayload({ percentSinceReset: 3 }),
     })).persisted;
     // Turn N+1: the new window has since burned 15 points (3 -> 18).
     const { plan } = runDecide({
       ...afterReset,
-      usage_eligibility: usagePayload({ percentLast5h: 18, percentSinceReset: 66 }),
+      usage_eligibility: usagePayload({ percentSinceReset: 18 }),
     });
     assert.equal(terminateAction(plan)?.cause, "quota",
       "the rebase must not permanently disarm the cap");
@@ -480,9 +470,9 @@ describe("decide.py quota-percent termination (issue #3867)", () => {
   // INV-1 — the other existing causes, with the cap ENABLED but not tripped.
   test("INV-1: existing budget / wall_clock terminations are unchanged", () => {
     const quotaArmedButUnder = {
-      quota_5h_max_pts: 10,
-      quota_baseline: baseline(2, 60),
-      usage_eligibility: usagePayload({ percentLast5h: 5, percentSinceReset: 62 }),
+      quota_week_max_pts: 10,
+      quota_baseline: baseline(60),
+      usage_eligibility: usagePayload({ percentSinceReset: 62 }),
     };
 
     const budget = runDecide(baseState({
@@ -503,7 +493,7 @@ describe("decide.py quota-percent termination (issue #3867)", () => {
 // 3. bootstrap.sh / args-parse.sh — the operator-facing knobs
 // ---------------------------------------------------------------------------
 
-describe("--quota-5h-max / --quota-week-max plumbing (issue #3867)", () => {
+describe("--quota-week-max plumbing (issue #3867)", () => {
   interface BTmp { dir: string; state: string; heartbeat: string; log: string }
 
   function makeBootstrapTmp(): BTmp {
@@ -560,41 +550,37 @@ describe("--quota-5h-max / --quota-week-max plumbing (issue #3867)", () => {
   // Deliberately few cases with several assertions each: every case spawns a
   // real bootstrap.sh, and a spawn-heavy file is exactly what the
   // `--test-force-exit` truncation race bites (CLAUDE.md's suite-count note).
-  test("both flags stamp state.limits, in both arg and env form, args winning", () => {
-    const flags = runBootstrap({}, ["--quota-5h-max=10", "--quota-week-max=25"]);
-    assert.equal(flags.limits.quota_5h_max_pts, 10);
+  test("the flag stamps state.limits, in both arg and env form, args winning", () => {
+    const flags = runBootstrap({}, ["--quota-week-max=25"]);
     assert.equal(flags.limits.quota_week_max_pts, 25);
+    assert.equal("quota_5h_max_pts" in flags.limits, false,
+      "the 5h cap is retired (#5333) — bootstrap no longer stamps it");
 
-    const env = runBootstrap(
-      { HYDRA_AUTOPILOT_QUOTA_5H_MAX: "7", HYDRA_AUTOPILOT_QUOTA_WEEK_MAX: "12" },
-      [],
-    );
-    assert.equal(env.limits.quota_5h_max_pts, 7);
+    const env = runBootstrap({ HYDRA_AUTOPILOT_QUOTA_WEEK_MAX: "12" }, []);
     assert.equal(env.limits.quota_week_max_pts, 12);
 
     // Explicit > implicit, and fractional caps survive (the percentages the cap
     // compares against are floats server-side).
     const both = runBootstrap(
-      { HYDRA_AUTOPILOT_QUOTA_5H_MAX: "7" },
-      ["--quota-5h-max=2.5"],
+      { HYDRA_AUTOPILOT_QUOTA_WEEK_MAX: "7" },
+      ["--quota-week-max=2.5"],
     );
-    assert.equal(both.limits.quota_5h_max_pts, 2.5);
+    assert.equal(both.limits.quota_week_max_pts, 2.5);
   });
 
   // INV-1 at the plumbing layer: the default invocation is DISABLED, and the
   // bootstrap-written state is immediately consumable by the cap (absent
   // quota_baseline => decide.py captures rather than crashing).
-  test("INV-1: no flag, no env => both caps 0, and decide.py reads it cleanly", () => {
+  test("INV-1: no flag, no env => cap 0, and decide.py reads it cleanly", () => {
     const r = runBootstrap({}, []);
-    assert.equal(r.limits.quota_5h_max_pts, 0);
     assert.equal(r.limits.quota_week_max_pts, 0);
     assert.match(
       r.stdout,
-      /quota_5h_max_pts=0 quota_week_max_pts=0/,
-      "the resolved-limits line must surface the caps for the operator log",
+      /quota_week_max_pts=0/,
+      "the resolved-limits line must surface the cap for the operator log",
     );
 
-    const armed = runBootstrap({}, ["--quota-5h-max=10"]);
+    const armed = runBootstrap({}, ["--quota-week-max=10"]);
     assert.equal("quota_baseline" in armed.state, false,
       "bootstrap must NOT seed a baseline — that is what re-arms capture per run");
     assert.equal(terminateAction(runDecide(armed.state).plan)?.cause === "quota", false);
@@ -604,9 +590,9 @@ describe("--quota-5h-max / --quota-week-max plumbing (issue #3867)", () => {
   // JSON numbers). A typo must FATAL with a clear message rather than emit torn
   // JSON that breaks every downstream jq/json.load reader at Phase 0.
   test("a non-numeric cap FATALs loudly instead of writing torn JSON", () => {
-    const r = runBootstrap({}, ["--quota-5h-max=ten"], true);
+    const r = runBootstrap({}, ["--quota-week-max=ten"], true);
     assert.notEqual(r.status, 0, "a non-numeric cap must abort bootstrap");
-    assert.match(r.stdout + r.stderr, /FATAL: QUOTA_5H_MAX=ten invalid/);
+    assert.match(r.stdout + r.stderr, /FATAL: QUOTA_WEEK_MAX=ten invalid/);
   });
 
   // Issue #4129 — the original glob (`''|*[!0-9.]*|*.*.*|.`) had no arm for a
@@ -616,9 +602,9 @@ describe("--quota-5h-max / --quota-week-max plumbing (issue #3867)", () => {
   // — just via a narrower typo class than `ten`. The fix requires a digit on
   // each side of an optional decimal point.
   test("bare-decimal caps (.5 / 5.) FATAL too; well-formed values still pass (issue #4129)", () => {
-    const leading = runBootstrap({}, ["--quota-5h-max=.5"], true);
+    const leading = runBootstrap({}, ["--quota-week-max=.5"], true);
     assert.notEqual(leading.status, 0, "`.5` is not a JSON number — must abort");
-    assert.match(leading.stdout + leading.stderr, /FATAL: QUOTA_5H_MAX=\.5 invalid/);
+    assert.match(leading.stdout + leading.stderr, /FATAL: QUOTA_WEEK_MAX=\.5 invalid/);
 
     const trailing = runBootstrap({}, ["--quota-week-max=5."], true);
     assert.notEqual(trailing.status, 0, "`5.` is not a JSON number — must abort");
@@ -626,15 +612,14 @@ describe("--quota-5h-max / --quota-week-max plumbing (issue #3867)", () => {
 
     // The already-rejected classes stay rejected — pinned here so a future glob
     // rewrite cannot silently drop one while chasing the bare-decimal fix.
-    const multiDot = runBootstrap({}, ["--quota-5h-max=1.2.3"], true);
+    const multiDot = runBootstrap({}, ["--quota-week-max=1.2.3"], true);
     assert.notEqual(multiDot.status, 0, "two decimal points are never a number");
-    const bareDot = runBootstrap({}, ["--quota-5h-max=."], true);
+    const bareDot = runBootstrap({}, ["--quota-week-max=."], true);
     assert.notEqual(bareDot.status, 0, "a bare dot is never a number");
 
     // And every still-valid form keeps flowing through: fractional caps
     // (integers and the disabled default 0 are pinned by the cases above).
-    const ok = runBootstrap({}, ["--quota-5h-max=0.5", "--quota-week-max=90.5"]);
-    assert.equal(ok.limits.quota_5h_max_pts, 0.5);
+    const ok = runBootstrap({}, ["--quota-week-max=90.5"]);
     assert.equal(ok.limits.quota_week_max_pts, 90.5);
   });
 });

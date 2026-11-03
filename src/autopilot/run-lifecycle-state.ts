@@ -220,7 +220,7 @@ export function deriveLifecycleState(
  * same per-run spend cap denominated in account-utilization percent instead of
  * subagent-reported tokens, reached by the same `decide.py` stop
  * rule. Omitting it would make every quota-capped run read as a truncation once
- * an operator enables `--quota-5h-max` / `--quota-week-max`.
+ * an operator enables `--quota-week-max`.
  */
 const CLEAN_TERM_REASONS: ReadonlySet<string> = new Set([
   "idle",

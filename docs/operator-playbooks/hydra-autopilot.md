@@ -272,13 +272,16 @@ the class taxonomy.
 
 **Fable out-of-weekly-credits pre-resolution (issue #4585).** Before EVERY
 `Agent(...)` dispatch, check
-`state.usage_eligibility.reasons.fableExhaustedUntil` (the Turn Snapshot carries the
-whole eligibility verdict as its `usage_eligibility` blob). While that instant
-is in the FUTURE, resolve every `fable` the routing stack would pick — the
+`state.usage_eligibility.admission.modelFallbackReason` (the Turn Snapshot carries the
+whole eligibility verdict as its `usage_eligibility` blob; the admission verdict
+decides the launch model once, #5103 — `render-dispatch.py` reads
+`admission.launchModel` instead of date-comparing the raw
+`reasons.fableExhaustedUntil`). While that reason is set (the flag instant is in
+the FUTURE), resolve every `fable` the routing stack would pick — the
 class row's `model` column, a `prompt_args.escalate_model` hint, a
-`prompt_args.route_model` hint — to the **fallback model** (`opus`, or
-`HYDRA_AUTOPILOT_FALLBACK_MODEL` when the unit sets it — the same pair the
-pace-gate's exec branch uses for the PARENT session) BEFORE the `Agent` call,
+`prompt_args.route_model` hint — to the **fallback model** (`admission.launchModel`: `opus`, or
+`HYDRA_AUTOPILOT_FALLBACK_MODEL` when the server env sets it — the same rule the
+pace-gate's exec branch applies to the PARENT session from its own unit's pair) BEFORE the `Agent` call,
 and name the substituted model in the dispatch log
 (`model-fallback: fable->opus reason=out-of-credits` on the first substituted
 dispatch of the turn). The flag is a REDIRECT, never a stop: `.allow` stays

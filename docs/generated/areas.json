@@ -26,6 +26,7 @@
       "slices": {
         "env-vars": [
           "HYDRA_DF_BIN",
+          "HYDRA_DU_BIN",
           "HYDRA_FLOCK_BIN",
           "HYDRA_FREE_BIN",
           "HYDRA_SYSTEMCTL_BIN"
@@ -145,6 +146,7 @@
           "POST /api/memory/subagent-friction",
           "GET /api/learning/ineffective-rules",
           "GET /api/learning/friction-patterns",
+          "GET /api/qa/review-retro",
           "GET /api/scout/stats",
           "GET /api/scout/dispatches",
           "GET /api/usage",
@@ -550,6 +552,7 @@
           "GET /api/usage/by-issue"
         ],
         "env-vars": [
+          "HYDRA_CLAUDE_CREDENTIALS_PATH",
           "HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS",
           "HYDRA_EXTRA_USAGE_POLICY",
           "HYDRA_GLM_AB_ASSIGNMENT_FRACTION",
@@ -561,7 +564,6 @@
           "HYDRA_QUOTA_WEIGHT_HAIKU",
           "HYDRA_QUOTA_WEIGHT_OPUS",
           "HYDRA_QUOTA_WEIGHT_SONNET",
-          "HYDRA_USAGE_5H_QUOTA_TOKENS",
           "HYDRA_USAGE_5H_THROTTLE_T1",
           "HYDRA_USAGE_5H_THROTTLE_T2",
           "HYDRA_USAGE_BURN_FAMILY_HAIKU",
@@ -1779,7 +1781,6 @@
           "HYDRA_AUTOPILOT_MAX_SEC",
           "HYDRA_AUTOPILOT_PLAN",
           "HYDRA_AUTOPILOT_PRIMARY_MODEL",
-          "HYDRA_AUTOPILOT_QUOTA_5H_MAX",
           "HYDRA_AUTOPILOT_QUOTA_WEEK_MAX",
           "HYDRA_AUTOPILOT_REAP_JOURNAL_TAIL",
           "HYDRA_AUTOPILOT_REAP_POST_BACKOFFS",
@@ -1804,7 +1805,6 @@
           "HYDRA_AUTOPILOT_TOKEN_BUDGET",
           "HYDRA_AUTOPILOT_TRIGGER",
           "HYDRA_AUTOPILOT_UNATTENDED",
-          "HYDRA_CLAUDE_CREDENTIALS_PATH",
           "HYDRA_CONFIG_PATH",
           "HYDRA_DISPATCH_REGISTER_MARKER_DIR",
           "HYDRA_GH_ISSUE_LIST_LIMIT",

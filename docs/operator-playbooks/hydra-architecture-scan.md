@@ -80,6 +80,8 @@ npx tsx -e "import('/home/gabe/hydra/src/aggregators/repo-graph.ts').then(m => m
 
 This prints the top ≥10 modules by fan-in and the top-5 cross-group coupling pairs — the seam-hub / cross-group-tension signals worth deepening. Prioritise a high-fan-in hub or a heavy cross-group edge over anything surfaced purely by file size. (READ-ONLY over the existing `scanArchitecture()` import graph: no Redis/network connection, safe headless.)
 
+**Add the review hot-spot feed (issue #5271).** Read `curl -s http://localhost:4000/api/qa/review-retro | jq '.hotSpots'` (a stateless projection of the QA review-findings store; Redis-only, no key of its own). Each entry is a file with 3+ low design follow-ups in 30 days: treat it as a pre-ranked **Strong** candidate, citing its `rules`. An empty list or an unreachable route adds nothing.
+
 The base's `subagent_type=Explore` walk is scoped **here** to `~/hydra/src/`, `~/hydra/dashboard/src/`, and `~/hydra/scripts/`. Its friction prompts and its deletion test apply as written above — do not restate them, run them.
 
 > **Quota:** like the scout's 5-candidate discovery quota, aim for **3–6** strong candidates. If the codebase is genuinely clean in the area explored, file fewer (or none) and say so — do not pad with theoretical refactors.

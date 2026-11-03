@@ -98,7 +98,7 @@ function ClassStateHeader({ header }) {
       <div>
         <dt className="text-zinc-500 uppercase tracking-wide">Quota delta cap</dt>
         <dd className="text-zinc-200 font-mono">
-          {orUnknown(header?.quotaDeltaCap, (q) => `5h ${q.fiveHourMaxPts} pts · week ${q.weekMaxPts} pts`)}
+          {orUnknown(header?.quotaDeltaCap, (q) => `week ${q.weekMaxPts} pts`)}
         </dd>
       </div>
       {degraded.length > 0 && (

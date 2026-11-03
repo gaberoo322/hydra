@@ -46,7 +46,8 @@
       ]
     ],
     "httpCalls": [
-      "/autopilot/runs?limit=14"
+      "/autopilot/runs?limit=14",
+      "/qa/review-retro"
     ],
     "redisWrites": [],
     "values": {
@@ -55,7 +56,8 @@
           "ok": false,
           "reason": "runs-read-failed"
         },
-        "drillable": null
+        "drillable": null,
+        "reviewDue": false
       },
       "wayfinder-frontier": {
         "frontier": null,
