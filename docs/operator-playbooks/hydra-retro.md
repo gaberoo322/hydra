@@ -83,7 +83,7 @@ dispatches it at all on a given day.
 `--audit` / `--apply` are honoured and dry-run is the default:
 
 ```bash
-# parseArgs(args) → { apply, runId? }  (apply defaults to false)
+# parseArgs(args) → { apply, runId?, review? }  (apply defaults to false; `--review` adds the section-10 pass)
 ```
 
 If no `run_id` was given, default to the latest **completed** run:
@@ -253,6 +253,51 @@ compares against it: `bundle.novelStuckSignals` is the subset the prior retro
 had not already drilled, and `retro_run_drillable` reads that instead of
 `stuckSignals`, so a persistent unchanged signal stops re-admitting the daily
 retro (the weekly override still fires).
+
+## 10. Review-findings mode (`--review`, issue #5271, ADR-0046 Decision 8)
+
+Runs only when `parseArgs` returns `review: true` (the autopilot stamps
+`prompt_args.review` on `retro_orch`; no new dispatch class). It is a second
+pass over the QA review-findings store, independent of the run pass: when the
+candidate run is not drillable, skip steps 2 through 9 and run this alone.
+Without `--apply` print the plan and write the artifact only.
+
+0. **Reconcile first, under `--apply` only** (`--dry-run` otherwise):
+   `npx tsx scripts/qa/review-findings-reconcile.ts`. It is idempotent and
+   defaults to the last 7 days. The weekly override always stamps
+   `review: true`, so this runs at least weekly; it is the only feeder of the
+   store until the route-time call sites land.
+1. **Read** `curl -s http://localhost:4000/api/qa/review-retro` for
+   `{due, candidates, arms, hotSpots, warnings}`. Arms and hot-spots come ONLY
+   from `extractReviewFindingArms`; never restate its thresholds.
+2. **Plan** with `planReviewEmit(arms, seen, closedRefs)` from
+   `src/qa/review-retro.ts`. `closedRefs` is the set of seen-entry `ref`s you
+   find CLOSED with `gh` (issue closed, PR merged or closed). The ladder is
+   check, standard, fence; the rung is in the cue (`review:<rung>:<slug>`, the
+   `REVIEW_CUE` grammar). A slug re-trips only after its prior emit closes and
+   lands exactly one rung up; an open prior emit emits nothing; `fence` is
+   terminal. Caps are independent of the run pass: at most **2** check issues
+   (`needs-triage`, body names the arm, PRs, rounds and the proposed
+   deterministic check) and **1** PR (a standard or fence rung).
+3. **Cohort trip.** `loadRolloutSwitches(repoRoot)` reporting a trip yields one
+   mechanical issue via `planCohortTripIssue(baseline generatedAt, seen)`,
+   outside the 2-issue cap.
+4. **The PR.** A `standard` rung edits only `CODING_STANDARDS.md` (one new or
+   edited rule with an `enforced-by:` line, plus any prunes below); a `fence`
+   rung edits only a one-line fence in `CLAUDE.md`. Before `gh pr create`,
+   `isReviewPrDiffAllowed(git diff --name-only origin/master)` MUST be true;
+   otherwise open no PR and record the artifact note `review-pr-path-violation`.
+   Run `npm run typecheck:test` AND `npm test` first. Never edit the QA
+   playbook, `src/qa/fold.ts`, `src/qa/qa-verdict*.ts`,
+   `src/qa/verdict-trailer.ts`, `config/orchestrator/qa-rollout.json` or the
+   cohort baseline.
+5. **90-day prune** (standard-rung PR only): `pruneCandidates(reviewerRuleIds,
+   rows, now)` lists `enforced-by: reviewer` rules no stored finding cites in
+   the 90-day window. Drop any rule younger than 90 days by
+   `git log --diff-filter=A` on its heading; the rest may be removed in the
+   same PR. Never prune a rule with a check-path `enforced-by:`.
+6. **Hot-spots** emit nothing on GitHub; `hydra-architecture-scan` reads them.
+7. Record each emit with `recordRetroSeen` using the rung cue, as in step 8.
 
 ## Summary output
 

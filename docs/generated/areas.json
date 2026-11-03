@@ -146,6 +146,7 @@
           "POST /api/memory/subagent-friction",
           "GET /api/learning/ineffective-rules",
           "GET /api/learning/friction-patterns",
+          "GET /api/qa/review-retro",
           "GET /api/scout/stats",
           "GET /api/scout/dispatches",
           "GET /api/usage",

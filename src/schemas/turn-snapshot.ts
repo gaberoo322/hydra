@@ -134,6 +134,7 @@ const SignalsSchema = z
     design_qa_target_saturated: z.boolean(),
     retro_run_available: z.boolean(),
     retro_run_drillable: z.boolean(),
+    review_retro_due: z.boolean(),
     // PR gate (#4240) and the resume / conflict-fix picks
     orch_prs_dirty: NumberList,
     orch_prs_unchecked: NumberList,
@@ -213,6 +214,7 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   design_qa_target_saturated: true,
   retro_run_available: false,
   retro_run_drillable: false,
+  review_retro_due: false,
   orch_prs_dirty: [],
   orch_prs_unchecked: [],
   orch_prs_behind: [],

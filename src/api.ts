@@ -46,6 +46,7 @@ import { createOutcomesPageRouter } from "./api/outcomes-page.ts";
 import { createExplorePageRouter } from "./api/explore-page.ts";
 import { createDispatchesRouter } from "./api/dispatches.ts";
 import { createBuilderHealthRouter } from "./api/builder-health.ts";
+import { createReviewRetroRouter } from "./api/review-retro.ts";
 import { createVersionsRouter } from "./api/versions.ts";
 import { createOperatorActionsRouter } from "./api/operator-actions.ts";
 import { createOtelRouter, otelKeyGuard } from "./api/otel.ts";
@@ -189,6 +190,8 @@ function createApi(eventBus: EventBus) {
   // Builder-Health Scorecard (issue #732) — orchestrator self-improvement
   // made observable: the builder-side counterpart to the Outcomes surface.
   api.use(createBuilderHealthRouter());
+  // Review-findings retro signal (issue #5271) — Redis-only `review_retro_due`.
+  api.use(createReviewRetroRouter());
   // Dashboard pages (PRD #615). After the slice-6 atomic swap (#621) the
   // routes are mounted at their final names; the historical `/api/v2/*`
   // incremental-delivery prefix is gone.

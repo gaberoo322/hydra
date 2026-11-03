@@ -2077,6 +2077,21 @@
       }
     },
     {
+      "method": "GET",
+      "path": "/api/qa/review-retro",
+      "stability": "stable",
+      "stabilityNote": null,
+      "consumers": [],
+      "home": "/api/qa/review-retro",
+      "areas": [
+        "src/qa/",
+        "src/redis/"
+      ],
+      "source": {
+        "path": "src/api/review-retro.ts"
+      }
+    },
+    {
       "method": "POST",
       "path": "/api/scheduler/start",
       "stability": "stable",
