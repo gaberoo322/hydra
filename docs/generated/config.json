@@ -199,6 +199,18 @@
     },
     {
       "kind": "file",
+      "path": "config/orchestrator/lifecycle-rollout.json",
+      "section": null,
+      "readBy": [
+        "src/lifecycle/seam.ts"
+      ],
+      "unread": false,
+      "source": {
+        "path": "config/orchestrator/lifecycle-rollout.json"
+      }
+    },
+    {
+      "kind": "file",
       "path": "config/orchestrator/qa-rollout.json",
       "section": null,
       "readBy": [

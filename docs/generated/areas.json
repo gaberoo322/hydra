@@ -247,7 +247,8 @@
           "HYDRA_CASCADE_OUTCOME_WINDOW_MS",
           "HYDRA_CASCADE_TELEMETRY_MAX",
           "HYDRA_HOLDBACK_BASELINE_TTL_SECONDS",
-          "HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY"
+          "HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY",
+          "LIFECYCLE_JOURNAL_TTL_SECONDS"
         ]
       },
       "homes": [
@@ -1964,6 +1965,7 @@
           "file config/direction/proposal-policy.md",
           "file config/direction/tech-preferences.md",
           "file config/direction/vision.md",
+          "file config/orchestrator/lifecycle-rollout.json",
           "file config/orchestrator/qa-rollout.json",
           "file config/orchestrator/vision.md"
         ],
