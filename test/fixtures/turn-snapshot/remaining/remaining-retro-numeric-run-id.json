@@ -21,6 +21,7 @@
     "ghCalls": [],
     "httpCalls": [
       "/autopilot/runs?limit=14",
+      "/qa/review-retro",
       "/autopilot/runs/7/retro"
     ],
     "redisWrites": [],
@@ -33,7 +34,8 @@
             "candidate": "7"
           }
         },
-        "drillable": true
+        "drillable": true,
+        "reviewDue": false
       }
     }
   }

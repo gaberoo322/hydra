@@ -46,6 +46,15 @@
  */
 export const KEBAB_CUE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+/**
+ * The review-mode cue grammar (issue #5271, ADR-0046 Decision 8):
+ * `review:<rung>:<slug>` where the rung is a ladder rung (check, standard,
+ * fence) or `mechanical`, and the slug is kebab-case. A SEPARATE namespace so
+ * a colon never reaches the friction-store grammar: {@link KEBAB_CUE} is
+ * unchanged and run-mode cues never carry a colon.
+ */
+export const REVIEW_CUE = /^review:(check|standard|fence|mechanical):[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
 // ---------------------------------------------------------------------------
 // CLI args
 // ---------------------------------------------------------------------------
@@ -56,6 +65,11 @@ export interface RetroArgs {
   apply: boolean;
   /** The positional run id; omitted entirely when absent (⇒ latest run). */
   runId?: string;
+  /**
+   * Also run the review-findings pass (`--review`, issue #5271). Present only
+   * when set (mirrors `runId`'s omit-when-absent shape).
+   */
+  review?: true;
 }
 
 /**
@@ -64,6 +78,7 @@ export interface RetroArgs {
  *   <run_id>            → positional run id; omitted ⇒ latest completed run
  *   --audit | --dry-run → print the plan, do NOT emit anything
  *   --apply             → opt-in to actually emitting (the only mutating path)
+ *   --review            → also run the review-findings pass (#5271)
  *
  * `--audit` (dry-run) is the DEFAULT for safety: `parseArgs("")` returns
  * `{ apply: false }` — a missing/empty arg string can never opt a retro run
@@ -84,9 +99,14 @@ export function parseArgs(args: string | null | undefined): RetroArgs {
 
   let apply = false;
   let runId: string | undefined;
+  let review = false;
   for (const t of tokens) {
     if (t === "--apply") {
       apply = true;
+      continue;
+    }
+    if (t === "--review") {
+      review = true;
       continue;
     }
     if (t === "--audit" || t === "--dry-run") {
@@ -103,5 +123,7 @@ export function parseArgs(args: string | null | undefined): RetroArgs {
   // Omit `runId` entirely when absent so the shape matches `{ apply }` exactly
   // (a `runId: undefined` key would break a strict deepEqual against
   // `{ apply: false }`).
-  return runId === undefined ? { apply } : { apply, runId };
+  const out: RetroArgs = runId === undefined ? { apply } : { apply, runId };
+  if (review) out.review = true;
+  return out;
 }

@@ -556,6 +556,8 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
         )
         if pa.get("apply") is True:
             out.append("`apply: true` — this is a REAL run, not a dry run: file the issues / open the gated PR the skill's caps allow (a dry-run exit that files nothing is a no-op the brain will escalate).")
+        if pa.get("review") is True:
+            out.append("`review: true` — also run the review-findings pass (`--review`): reconcile first, then extract arms and emit within the review caps (2 check issues, 1 gated PR).")
         if slot in ("sweep_orch", "sweep_target"):
             out.append(
                 "Only advance items that can be progressed without operator input, per the skill. Before re-routing any issue "

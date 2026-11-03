@@ -45,6 +45,7 @@ export interface AfkFrontierDeps {
 }
 
 const RETRO_RUNS_PATH = "/autopilot/runs?limit=14";
+const REVIEW_RETRO_PATH = "/qa/review-retro";
 const WAYFINDER_MAP_LABEL = "wayfinder:map";
 const WAYFINDER_DRAFT_LABEL = "wayfinder:destination-pending";
 const WAYFINDER_AFK_TYPES = ["wayfinder:research", "wayfinder:task"] as const;
@@ -166,17 +167,34 @@ export interface RetroValue {
   readonly runs: Classified<RetroRuns>;
   /** null = no candidate run (drillable=false); else the bundle verdict. */
   readonly drillable: boolean | null;
+  /**
+   * `review_retro_due` (#5271): the Redis-only review-findings retro signal.
+   * Fail-CLOSED (false) on any read or parse failure - the opposite of
+   * `drillable` - because the weekly override carries the review pass anyway.
+   */
+  readonly reviewDue: boolean;
+}
+
+/** The review-retro route body: true only for a parsed object with `due === true`. */
+export function foldReviewRetroDue(body: string | null): boolean {
+  if (body === null) return false;
+  const parsed = parseJsonRead(body);
+  if (parsed.kind !== "ok") return false;
+  return isObj(parsed.data) && parsed.data.due === true;
 }
 
 export async function collectRetro(deps: AfkFrontierDeps): Promise<CollectorOutcome<RetroValue>> {
   const runsRead = await deps.hydra.get(RETRO_RUNS_PATH);
+  const reviewRead = await deps.hydra.get(REVIEW_RETRO_PATH);
+  const reviewDue = foldReviewRetroDue(reviewRead.kind === "ok" ? reviewRead.body : null);
   const runs = foldRetroRuns(runsRead.kind === "ok" ? runsRead.body : null);
   const candidate = runs.ok ? runs.value.candidate : null;
-  if (candidate === null) return outcome("retro", { runs, drillable: null }, "reason" in runs ? [{ field: "retroRuns", reason: runs.reason }] : []);
+  if (candidate === null) return outcome("retro", { runs, drillable: null, reviewDue }, "reason" in runs ? [{ field: "retroRuns", reason: runs.reason }] : []);
   const bundle = await deps.hydra.get(`/autopilot/runs/${candidate}/retro`);
   const value: RetroValue = {
     runs,
     drillable: bundle.kind === "ok" ? foldRetroBundle(bundle.body) : true,
+    reviewDue,
   };
   return outcome("retro", value, bundle.kind === "failed" ? [{ field: "retroBundle", reason: bundle.reason }] : []);
 }
