@@ -101,7 +101,7 @@ export const EMERGENCY_STOP_PERCENT: number = DEFAULT_EMERGENCY_STOP_PERCENT;
  * these stops DURING assembly, before a snapshot object exists.
  *
  * Behaviour is byte-for-byte the inline derivation it replaces:
- *   - `emergencyStop`       === (usageSource === "oauth" && percentLast5h ≥ 90)
+ *   - `emergencyStop`       === (usageSource === "oauth" && percentLast5h !== null && percentLast5h ≥ 90)
  *   - `weeklyEmergencyStop` === (usageSource === "oauth" && percentLast7d ≥ 90)
  *
  * The `usageSource === "oauth"` guard preserves the #1124 fail-open invariant:
@@ -109,14 +109,17 @@ export const EMERGENCY_STOP_PERCENT: number = DEFAULT_EMERGENCY_STOP_PERCENT;
  * prolonged OAuth outage cannot self-stop autopilot on a fabricated number.
  */
 export function deriveHardStop(input: {
-  percentLast5h: number;
+  percentLast5h: number | null;
   percentLast7d: number;
   usageSource: "oauth" | "estimate";
 }): { emergencyStop: boolean; weeklyEmergencyStop: boolean } {
   const onOAuth = input.usageSource === "oauth";
   const threshold = getEmergencyStopPercent();
   return {
-    emergencyStop: onOAuth && input.percentLast5h >= threshold,
+    // A null reading (the meter carries no `five_hour` window: the plan has no
+    // 5h cap) is a correct fail-OPEN — there is no cap to trip. Distinct from
+    // `meterUnavailable`, which still forces allow=false at the eligibility layer.
+    emergencyStop: onOAuth && input.percentLast5h !== null && input.percentLast5h >= threshold,
     weeklyEmergencyStop: onOAuth && input.percentLast7d >= threshold,
   };
 }
@@ -664,7 +667,7 @@ export interface EligibilityView {
   anchor: string | null;
   emergencyStop: boolean;
   calibrated: boolean;
-  percentLast5h: number;
+  percentLast5h: number | null;
 }
 
 /**
@@ -688,11 +691,9 @@ export function projectEligibilityView(snapshot: UsageSnapshot): EligibilityView
     anchor: e.anchor,
     emergencyStop: e.reasons.emergencyStop,
     calibrated: e.reasons.calibrated,
-    // Read from the SNAPSHOT, not `e.usage`: this narrowing is snapshot-only, and
-    // `UsageSnapshot` percentages are always numeric. The `EligibilityUsageInput`
-    // view of the same fields is `number | null` because the meter-only admission
-    // path can report an explicit unknown (issue #4165) — a state a snapshot
-    // cannot reach, so this view keeps its plain `number` contract.
+    // Read from the SNAPSHOT, not `e.usage`: this narrowing is snapshot-only.
+    // `percentLast5h` is null when the plan carries no 5h window; the 7d and
+    // since-reset percentages are always numeric on a snapshot.
     sinceResetPercent: snapshot.percentSinceReset,
     percentLast5h: snapshot.percentLast5h,
   };

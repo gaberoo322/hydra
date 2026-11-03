@@ -263,7 +263,8 @@ function buildMeterInput(
   envAnchor: string | null,
   nowMs: number,
 ): EligibilityUsageInput {
-  const percentLast5h = data.fiveHour.utilization;
+  // null when the meter body carries no `five_hour` window (no 5h cap).
+  const percentLast5h = data.fiveHour ? data.fiveHour.utilization : null;
   const percentLast7d = data.sevenDay.utilization;
 
   // ACCOUNT-FOLLOWING ANCHOR. The Weekly Reset Anchor is derived from
