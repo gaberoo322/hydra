@@ -36,7 +36,7 @@ import { briefItemFromStored, type BriefItem } from "./brief-lines.ts";
 /** The subset of the usage snapshot the brief reads. */
 export interface UsageLike {
   calibrated?: boolean;
-  percentLast5h?: number;
+  percentLast5h?: number | null;
   percentSinceReset?: number;
   emergencyStop?: boolean;
   weeklyEmergencyStop?: boolean;

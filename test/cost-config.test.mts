@@ -50,7 +50,6 @@ import {
   // Live-fold env readers exercised by the suites moved from
   // test/usage-tracker.test.mts (issue #4786):
   getWeeklyQuotaTokens,
-  getFiveHourQuotaTokens,
   getWeeklyPaceCeiling,
   DEFAULT_WEEKLY_PACE_CEILING,
   getGlmAbAssignmentFraction,
@@ -177,23 +176,17 @@ describe("quota env parsing", () => {
 
   test("returns 0 when unset", () => {
     delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
-    delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
     assert.equal(getWeeklyQuotaTokens(), 0);
-    assert.equal(getFiveHourQuotaTokens(), 0);
   });
 
   test("returns 0 on non-finite or non-positive values", () => {
     process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "abc";
-    process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "-5";
     assert.equal(getWeeklyQuotaTokens(), 0);
-    assert.equal(getFiveHourQuotaTokens(), 0);
   });
 
   test("returns positive parsed value when set", () => {
     process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-    process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "50000";
     assert.equal(getWeeklyQuotaTokens(), 1_000_000);
-    assert.equal(getFiveHourQuotaTokens(), 50_000);
   });
 });
 
@@ -471,12 +464,11 @@ describe("estimate/OAuth divergence env parsing (issue #2832 AC3)", () => {
   });
 });
 
-// readSnapshotCalibration (issue #4793, ADR-0042 Decision 7): the ten calibration
+// readSnapshotCalibration (issue #4793, ADR-0042 Decision 7): the nine calibration
 // getters gathered into one typed record. Own top-level describe + own env hooks.
 describe("readSnapshotCalibration (issue #4793)", () => {
   const KEYS = [
     "HYDRA_USAGE_WEEKLY_QUOTA_TOKENS",
-    "HYDRA_USAGE_5H_QUOTA_TOKENS",
     "HYDRA_USAGE_WEEKLY_RESET_ANCHOR",
     "HYDRA_USAGE_CACHE_READ_WEIGHT",
     "HYDRA_USAGE_DRIFT_REFERENCE_PERCENT",
@@ -504,7 +496,6 @@ describe("readSnapshotCalibration (issue #4793)", () => {
   test("defaults when every env var is unset", () => {
     assert.deepEqual(readSnapshotCalibration(), {
       weeklyQuotaTokens: 0,
-      fiveHourQuotaTokens: 0,
       weeklyResetAnchorMs: null,
       cacheReadWeight: DEFAULT_CACHE_READ_WEIGHT,
       driftReferencePercent: null,
@@ -516,9 +507,8 @@ describe("readSnapshotCalibration (issue #4793)", () => {
     });
   });
 
-  test("reflects all ten env vars, read at call time", () => {
+  test("reflects all nine env vars, read at call time", () => {
     process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "7000";
-    process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
     process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-01-05T00:00:00Z";
     process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.5";
     process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "40";
@@ -529,7 +519,6 @@ describe("readSnapshotCalibration (issue #4793)", () => {
     process.env.HYDRA_QUOTA_WEIGHT_HAIKU = "1";
     assert.deepEqual(readSnapshotCalibration(), {
       weeklyQuotaTokens: getWeeklyQuotaTokens(),
-      fiveHourQuotaTokens: getFiveHourQuotaTokens(),
       weeklyResetAnchorMs: getWeeklyResetAnchorMs(),
       cacheReadWeight: 0.5,
       driftReferencePercent: 40,
@@ -540,7 +529,6 @@ describe("readSnapshotCalibration (issue #4793)", () => {
       quotaWeightHaiku: 1,
     });
     assert.equal(readSnapshotCalibration().weeklyQuotaTokens, 7000);
-    assert.equal(readSnapshotCalibration().fiveHourQuotaTokens, 1000);
     assert.notEqual(readSnapshotCalibration().weeklyResetAnchorMs, null);
   });
 });

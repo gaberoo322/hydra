@@ -388,7 +388,7 @@
   "test/qa-round-action.test.mts": 5,
   "test/qa-shadow-fold.test.mts": 4,
   "test/qa-verdict-cli.test.mts": 2,
-  "test/qa-verdict-trailer.test.mts": 3,
+  "test/qa-verdict-trailer.test.mts": 4,
   "test/quality-gate-metrics.test.mts": 1,
   "test/query-seam-check.test.mts": 4,
   "test/reap-stale-test-procs.test.mts": 7,

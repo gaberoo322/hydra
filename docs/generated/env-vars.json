@@ -570,18 +570,6 @@
       }
     },
     {
-      "name": "HYDRA_AUTOPILOT_QUOTA_5H_MAX",
-      "readSites": [
-        {
-          "path": "scripts/autopilot/bootstrap.sh"
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/autopilot/bootstrap.sh"
-      }
-    },
-    {
       "name": "HYDRA_AUTOPILOT_QUOTA_WEEK_MAX",
       "readSites": [
         {
@@ -2357,18 +2345,6 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.ts"
-      }
-    },
-    {
-      "name": "HYDRA_USAGE_5H_QUOTA_TOKENS",
-      "readSites": [
-        {
-          "path": "src/cost/config.ts"
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "src/cost/config.ts"
       }
     },
     {

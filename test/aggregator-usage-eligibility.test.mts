@@ -102,7 +102,6 @@ function snapshotWith(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
     quotaWeightLast7d: 0,
     quotaWeightCalibrated: false,
     weeklyQuotaTokens: 0,
-    fiveHourQuotaTokens: 0,
     filesScanned: 0,
     filesSkippedByMtime: 0,
     linesParsed: 0,

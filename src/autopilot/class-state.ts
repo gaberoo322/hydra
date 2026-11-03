@@ -127,7 +127,7 @@ interface ClassStateHeader {
   scope: string | null;
   usage: { allow: boolean; shed: string[] } | null;
   burnedClasses: string[] | null;
-  quotaDeltaCap: { fiveHourMaxPts: number; weekMaxPts: number } | null;
+  quotaDeltaCap: { weekMaxPts: number } | null;
   verdictFreshness: "fresh" | "stale" | "unknown";
   verdictAsOf: string | null;
   degraded: string[];
@@ -240,7 +240,7 @@ export function composeClassState(
   // scope + quotaDeltaCap from the run hash's limits JSON (bootstrap.sh's
   // run-start POST; no new write — the design concept's glossary note).
   let scope: string | null = null;
-  let quotaDeltaCap: { fiveHourMaxPts: number; weekMaxPts: number } | null = null;
+  let quotaDeltaCap: { weekMaxPts: number } | null = null;
   if (inputs.runRow !== null) {
     const rawLimits = inputs.runRow.limits;
     if (typeof rawLimits === "string" && rawLimits.length > 0) {
@@ -249,10 +249,9 @@ export function composeClassState(
         if (limits && typeof limits === "object" && typeof limits.scope === "string") {
           scope = limits.scope;
         }
-        const q5 = (limits as Record<string, unknown>).quota_5h_max_pts;
         const qw = (limits as Record<string, unknown>).quota_week_max_pts;
-        if (typeof q5 === "number" && typeof qw === "number") {
-          quotaDeltaCap = { fiveHourMaxPts: q5, weekMaxPts: qw };
+        if (typeof qw === "number") {
+          quotaDeltaCap = { weekMaxPts: qw };
         }
       } catch (err: any) {
         // Present but unparseable — a run-row source failure. Named loud via
