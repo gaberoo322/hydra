@@ -45,7 +45,10 @@ import sys
 import time
 from datetime import datetime, timezone
 
-STATE_PATH = os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import run_ledger  # noqa: E402  (the ONE state-document parser/writer, #5075)
+
+STATE_PATH = run_ledger.resolve_state_path()
 PLAN_PATH = os.environ.get("HYDRA_AUTOPILOT_PLAN", "/tmp/hydra-autopilot-plan.json")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -66,7 +69,7 @@ def _load_effective_skill():
 effective_skill = _load_effective_skill()
 
 
-def _load(path: str) -> dict:
+def _load_plan(path: str) -> dict:
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
     if not isinstance(data, dict):
@@ -136,9 +139,16 @@ def main(argv: list[str]) -> int:
         return 2
     slot, task_id, model = argv[1], argv[2], argv[3]
     try:
-        state = _load(STATE_PATH)
-        plan = _load(PLAN_PATH)
-    except (OSError, ValueError) as exc:
+        try:
+            state = run_ledger.load(STATE_PATH, fill_defaults=False)
+        except run_ledger.LedgerTypeError as exc:
+            # A wrong-typed declared field must not stop a dispatch stamp: read leniently.
+            state = run_ledger.read_prior(STATE_PATH)
+            if not isinstance(state, dict):
+                raise
+            print(f"[stamp-slot] state failed type validation ({exc}); stamping leniently", file=sys.stderr)
+        plan = _load_plan(PLAN_PATH)
+    except (OSError, ValueError, run_ledger.LedgerTypeError) as exc:
         print(f"[stamp-slot] cannot read state/plan: {exc}", file=sys.stderr)
         return 2
     try:
@@ -147,11 +157,15 @@ def main(argv: list[str]) -> int:
         print(f"[stamp-slot] {exc} — nothing written", file=sys.stderr)
         return 1
 
-    tmp = f"{STATE_PATH}.stamp-slot.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(state, fh, indent=1)
-        fh.write("\n")
-    os.replace(tmp, STATE_PATH)
+    try:
+        try:
+            run_ledger.persist(state, STATE_PATH)
+        except run_ledger.LedgerTypeError as exc:
+            print(f"[stamp-slot] state failed type validation on write ({exc}); persisting unvalidated", file=sys.stderr)
+            run_ledger.persist(state, STATE_PATH, validate=False)
+    except OSError as exc:
+        print(f"[stamp-slot] cannot write state: {exc}", file=sys.stderr)
+        return 2
 
     skill = record.get("skill") or "?"
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

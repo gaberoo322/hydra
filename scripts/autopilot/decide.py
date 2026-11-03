@@ -87,7 +87,7 @@ state.json {
 
   # NEW IN #426 — 6 pipeline slots replace the previous 10-slot mix
   "slots": {
-    "dev_orch":        null | { skill, started, task_id, partial_tokens, ... }
+    "dev_orch":        null | { skill, started, task_id, ... }  # run_ledger.SLOT_FIELDS
     "qa_orch":         null | { ... }
     "research_orch":   null | { ... }
     "dev_target":      null | { ... }
@@ -2436,18 +2436,14 @@ def _rule_slot_events(state: dict, now: int) -> tuple[_RuleOutput, list[dict]]:
             # frees the slot. We DO require a task_id for the reap to be
             # useful — without it reap.py can't dedup.
             if task_id:
-                # Best-effort token recovery from slot, if the harness
-                # stamped partial_tokens. The hook itself doesn't carry
-                # tokens (the harness payload doesn't expose them
-                # reliably); we trust slot.partial_tokens as the floor.
+                # The hook payload carries no token count (issue #5075: the
+                # former `partial_tokens` recovery had no writer), so the
+                # synthesised completion reports 0; the real count arrives on
+                # the harness completion event.
                 slot_obj = (state.get("slots") or {}).get(slot)
                 tokens = 0
                 skill = None
                 if isinstance(slot_obj, dict):
-                    try:
-                        tokens = int(slot_obj.get("partial_tokens") or 0)
-                    except (TypeError, ValueError):
-                        tokens = 0
                     skill = slot_obj.get("skill")
                 synthesised_completions.append({
                     "type": "completion",
@@ -5084,6 +5080,10 @@ def main(argv: list[str]) -> int:
         if len(argv) < 3:
             print("decide.py decide: missing <state.json>", file=sys.stderr)
             return 2
+        # STRICT ON PURPOSE (#5293 QA r5): decide() indexes declared fields by their
+        # declared type (e.g. failure_log[-1].get), so a LedgerTypeError here would
+        # become an AttributeError mid-plan. Failing loud before planning is correct;
+        # a lenient read would only move the crash deeper.
         state = run_ledger.load(argv[2], fill_defaults=False)
         # Issue #1769 — single-writer turn counter. The CLI (not the model
         # session, not heartbeat.py) owns `state.turn`: one bump per decide

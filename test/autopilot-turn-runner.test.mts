@@ -445,6 +445,25 @@ describe("stamp-slot.py — the dispatch stamp read off the plan (issue #4831)",
     assert.match(runStamp(sb, ["dev_orch", "x", "y"]).stderr, /not a JSON object/);
   });
 
+  test("a wrong-typed declared field still stamps the slot (exit 0), leniently (#5293 QA r5)", () => {
+    const sb = stampSandbox();
+    const st = readJson(sb.state);
+    st.failure_log = "x";
+    writeFileSync(sb.state, JSON.stringify(st) + "\n");
+    const r = runStamp(sb, ["dev_orch", "abcdef0123456789a", "sonnet"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readJson(sb.state).slots.dev_orch.task_id, "abcdef0123456789a");
+  });
+
+  test("sibling pin: a non-object state document is still refused (exit 2, unchanged)", () => {
+    const sb = stampSandbox();
+    writeFileSync(sb.state, "[1,2]\n");
+    const r = runStamp(sb, ["dev_orch", "abcdef0123456789a", "sonnet"]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /cannot read state\/plan/);
+    assert.equal(readFileSync(sb.state, "utf-8"), "[1,2]\n");
+  });
+
   test("no temp file is left behind", () => {
     const sb = stampSandbox();
     runStamp(sb, ["dev_orch", "abcdef0123456789a", "sonnet"]);
@@ -699,4 +718,32 @@ describe("turn.sh — a failed LIVE emit plans on the TS all-degraded snapshot, 
       assert.ok(!plan.actions.some((a: any) => a.type === "dispatch" && ["dev_orch", "qa_orch", "dev_target", "qa_target"].includes(a.slot)), "no worker dispatches on facts nobody read");
     });
   }
+});
+
+describe("turn_snapshot.py apply — a type-invalid state document is stored leniently, not refused (#5293 QA r5, class fix)", () => {
+  const TURN_SNAPSHOT = join(SCRIPTS, "turn_snapshot.py");
+  function runApply(sb: Sandbox) {
+    const r = spawnSync("python3", [TURN_SNAPSHOT, "apply", FIXTURE, sb.state], { cwd: sb.dir, env: sb.env, encoding: "utf-8" });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  test("a wrong-typed declared field (failure_log:\"x\"): exit 0 and this turn's snapshot is stored", () => {
+    const st = baseState();
+    st.failure_log = "x";
+    const sb = sandbox(st);
+    sandboxes.push(sb);
+    const r = runApply(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /state failed type validation/);
+    assert.deepEqual(readJson(sb.state).turn_snapshot, readJson(FIXTURE));
+  });
+
+  test("sibling pin: a non-object state document is still refused (exit 1) and left untouched", () => {
+    const sb = sandbox(null);
+    sandboxes.push(sb);
+    writeFileSync(sb.state, "[1,2]\n");
+    const r = runApply(sb);
+    assert.equal(r.status, 1);
+    assert.equal(readFileSync(sb.state, "utf-8"), "[1,2]\n");
+  });
 });

@@ -392,6 +392,36 @@ describe("scripts/autopilot/heartbeat.py", () => {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
   });
+
+  test("type-invalid state still writes the heartbeat (lenient fallback, #5293 QA round 4)", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, { failure_log: "not-a-list", turn: 7 });
+      const r = runHeartbeat({
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+      });
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+      assert.match(readFileSync(tmp.heartbeat, "utf-8"), /turn=7 /);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("sibling: an unparseable state.json still returns 2 without a heartbeat", () => {
+    const tmp = makeTmp();
+    try {
+      writeFileSync(tmp.state, "{not json");
+      const r = runHeartbeat({
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+      });
+      assert.equal(r.status, 2);
+      assert.ok(!existsSync(tmp.heartbeat));
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
 });
 
 /**

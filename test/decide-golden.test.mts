@@ -213,7 +213,7 @@ describe("decide CLI persists through the Run Ledger (#5074)", () => {
       // The seam raises a RuntimeError (a true process crash, not an OSError),
       // so the CLI exits non-zero with the simulated-crash traceback.
       assert.equal(crashed.status, 1);
-      assert.match(crashed.stderr, /RuntimeError: \[run-ledger\] simulated crash before replace/);
+      assert.match(crashed.stderr, /SimulatedCrash: \[run-ledger\] simulated crash before replace/);
       assert.equal(readFileSync(sp2, "utf-8"), bytes);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -266,7 +266,7 @@ describe("decide CLI Run Ledger seam: persistence + load contract (#5074 INV-5/6
         { encoding: "utf-8", env: { ...pinnedEnv(), HYDRA_RUN_LEDGER_TEST_CRASH: "before-replace-2nd" } },
       );
       assert.equal(r.status, 1);
-      assert.match(r.stderr, /RuntimeError: \[run-ledger\] simulated crash before replace/);
+      assert.match(r.stderr, /SimulatedCrash: \[run-ledger\] simulated crash before replace/);
       const after = JSON.parse(readFileSync(sp, "utf-8"));
       // The first (turn-bump) persist landed; the second (decide-owned) did not.
       assert.equal(after.turn, before.turn + 1);
