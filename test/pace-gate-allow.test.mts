@@ -25,13 +25,17 @@ import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, writeFileSync, existsSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, existsSync, readFileSync } from "node:fs";
 
 import { getRedisConnection } from "../src/redis/connection.ts";
 import { decideAdmission } from "../src/cost/index.ts";
 import { EligibilityQuerySchema } from "../src/schemas/usage.ts";
 import { WATCHDOG_REDIS_TIMEOUT_MS } from "./_helpers/watchdog-timeouts.mts";
+import { tmpDirTracker } from "./_helpers/tmp-dir.mts";
+
+// Every temp dir this file creates is removed when the file finishes, so
+// runs do not leak into the shared /tmp (#5326).
+const makeTmpDir = tmpDirTracker();
 
 // Issue #4966: the spawn helpers below pass `...process.env` through to
 // pace-gate.sh, and the model-fallback suites pin the script's DEFAULT launch
@@ -224,7 +228,7 @@ describe("pace-gate.sh transport: ctx echo (issue #5102)", () => {
   });
 
   test("a state.json carrying a live PID sends pidAlive=1 and records already-running-pid", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pace-pid-"));
+    const dir = makeTmpDir("pace-pid-");
     const state = join(dir, "state.json");
     writeFileSync(state, JSON.stringify({ pid: process.pid }));
     const srv = await eligibilityServer(eligiblePayload());
@@ -715,7 +719,7 @@ describe("pace-gate.sh token-refresh nudge in the meter-unavailable arm (issue #
   const REFRESH = "SENTINEL-REFRESH-TOKEN-4843";
 
   function fixture(expiresAt: number) {
-    const dir = mkdtempSync(join(tmpdir(), "pace-nudge-"));
+    const dir = makeTmpDir("pace-nudge-");
     const creds = join(dir, "creds.json");
     writeFileSync(
       creds,
