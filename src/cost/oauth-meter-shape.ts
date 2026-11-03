@@ -84,9 +84,6 @@ function coerceResetsAt(value: unknown): string | null {
   return new Date(ms).toISOString();
 }
 
-/** The `five_hour` reading for a plan with no 5-hour limit: 0%, no reset. */
-const NO_FIVE_HOUR_CAP: OAuthUsageWindow = Object.freeze({ utilization: 0, resetsAt: null });
-
 /**
  * Parse a single window object (e.g. `five_hour`) into an {@link OAuthUsageWindow},
  * or `null` when the window is absent or its utilization is unparseable. A
@@ -196,8 +193,9 @@ function parseScopedWeekly(raw: unknown): Record<string, OAuthUsageWindow> | und
 /**
  * Parse the full OAuth usage response body into {@link OAuthUsageData}, or
  * `null` when `seven_day` is absent or unparseable, or when `five_hour` is
- * present but unparseable. An absent `five_hour` is the no-5h-cap reading
- * ({@link NO_FIVE_HOUR_CAP}). Model-scoped `limits[]` weeklies surface as `scopedWeekly`
+ * present but unparseable. An absent `five_hour` parses to `fiveHour: null`
+ * (the plan carries no 5-hour limit; absence is a type-level fact, never a
+ * synthesized 0%). Model-scoped `limits[]` weeklies surface as `scopedWeekly`
  * (never gating); the opus/sonnet sub-windows are ignored — the tracker gates only
  * on the two rolling windows plus `extra_usage`. Maximally defensive: a
  * 200-with-garbage body parses to `null`, which the caller classifies as
@@ -212,15 +210,13 @@ function parseScopedWeekly(raw: unknown): Record<string, OAuthUsageWindow> | und
 export function parseOAuthUsageBody(body: unknown): OAuthUsageData | null {
   if (body === null || typeof body !== "object") return null;
   // An ABSENT (or null) `five_hour` means the plan has no 5-hour limit (the
-  // account's plan dropped it on 2026-10-31), so 0% is the correct reading, not
-  // a coercion. A PRESENT window with garbage utilization still rejects the body.
+  // account's plan dropped it on 2026-10-31): `fiveHour` is `null`. A PRESENT
+  // window with garbage utilization still rejects the body.
   const rawFiveHour = (body as any).five_hour;
-  const fiveHour =
-    rawFiveHour === undefined || rawFiveHour === null
-      ? NO_FIVE_HOUR_CAP
-      : parseWindow(rawFiveHour);
+  const fiveHourAbsent = rawFiveHour === undefined || rawFiveHour === null;
+  const fiveHour = fiveHourAbsent ? null : parseWindow(rawFiveHour);
   const sevenDay = parseWindow((body as any).seven_day);
-  if (fiveHour === null || sevenDay === null) return null;
+  if ((!fiveHourAbsent && fiveHour === null) || sevenDay === null) return null;
   // `limits[]` scoped weeklies are surfaced (issue #5174) but never gate.
   const scopedWeekly = parseScopedWeekly((body as any).limits);
   return {

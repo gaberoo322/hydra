@@ -79,8 +79,8 @@ describe("run_ledger seed — golden vs the pre-change bootstrap heredoc", () =>
       const path = join(dir, "state.json");
       assert.equal(ledger(["seed", path, ...seedArgsFrom(golden)]).status, 0);
       const text = readFileSync(path, "utf-8");
-      assert.match(text, /"quota_week_max_pts": 30,/);
-      assert.match(text, /"quota_5h_max_pts": 12\.5,/);
+      assert.match(text, /"quota_week_max_pts": 12\.5,/);
+      assert.match(text, /"token_budget": 777,/);
     });
   });
 

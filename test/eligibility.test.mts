@@ -86,7 +86,6 @@ describe("projectEligibility", () => {
       quotaWeightLast7d: 0,
       quotaWeightCalibrated: false,
       weeklyQuotaTokens: 0,
-      fiveHourQuotaTokens: 0,
       filesScanned: 0,
       filesSkippedByMtime: 0,
       linesParsed: 0,
@@ -281,6 +280,22 @@ describe("projectEligibility", () => {
       const v = projectEligibility(oauthSnap(89));
       assert.deepEqual(new Set(v.shed), T1T2);
       assert.equal(v.reasons.fiveHourThrottleShed, true);
+      assert.equal(v.allow, true);
+    });
+
+    test("a null percentLast5h on the OAuth source sheds nothing and never throttles (#5333)", () => {
+      const snap = snapshotWith({
+        calibrated: true,
+        usageSource: "oauth",
+        percentLast5h: null,
+        pacingState: "under",
+        emergencyStop: false,
+        weeklyEmergencyStop: false,
+      });
+      assert.deepEqual([...fiveHourThrottleShed(snap, D1, D2)], []);
+      const v = projectEligibility(snap);
+      assert.deepEqual([...v.shed], []);
+      assert.equal(v.reasons.fiveHourThrottleShed, false);
       assert.equal(v.allow, true);
     });
 
@@ -683,6 +698,15 @@ describe("deriveHardStop (pure threshold predicate, issue #2041)", () => {
     });
     assert.equal(emergencyStop, true);
     assert.equal(weeklyEmergencyStop, false);
+  });
+
+  test("a null 5h reading (plan has no 5h window) never trips the 5h stop; the weekly stop is unaffected (#5333)", () => {
+    const quiet = deriveHardStop({ percentLast5h: null, percentLast7d: 10, usageSource: "oauth" });
+    assert.equal(quiet.emergencyStop, false);
+    assert.equal(quiet.weeklyEmergencyStop, false);
+    const weekly = deriveHardStop({ percentLast5h: null, percentLast7d: 95, usageSource: "oauth" });
+    assert.equal(weekly.emergencyStop, false);
+    assert.equal(weekly.weeklyEmergencyStop, true);
   });
 
   test("exactly at the 90% threshold both windows stop (>= boundary, OAuth)", () => {

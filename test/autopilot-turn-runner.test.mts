@@ -83,7 +83,6 @@ function baseState(): Record<string, unknown> {
       wall_clock_max_sec: 28_800,
       idle_drain_turns: 5,
       context_compaction_turns: 8,
-      quota_5h_max_pts: 0,
       quota_week_max_pts: 0,
       scope: "all",
       subagent_max_tokens: 400_000,

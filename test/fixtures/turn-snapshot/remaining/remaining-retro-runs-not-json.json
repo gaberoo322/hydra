@@ -20,7 +20,8 @@
     "stderrNotes": [],
     "ghCalls": [],
     "httpCalls": [
-      "/autopilot/runs?limit=14"
+      "/autopilot/runs?limit=14",
+      "/qa/review-retro"
     ],
     "redisWrites": [],
     "values": {
@@ -29,7 +30,8 @@
           "ok": false,
           "reason": "runs-unparseable"
         },
-        "drillable": null
+        "drillable": null,
+        "reviewDue": false
       }
     }
   }

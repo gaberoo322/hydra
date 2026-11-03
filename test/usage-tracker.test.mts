@@ -89,7 +89,6 @@ describe("usage-tracker", () => {
     beforeEach(async () => {
       restore = withEnvSnapshot();
       delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
-      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
       root = await mkdtemp(join(tmpdir(), "usage-cache-ratio-"));
       clearUsageCache();
     });
@@ -181,7 +180,6 @@ describe("usage-tracker", () => {
 
     test("uncalibrated snapshot reports raw tokens but zero percent + 'under' pacing + no emergencyStop", async () => {
       delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
-      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
 
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
       try {
@@ -192,7 +190,7 @@ describe("usage-tracker", () => {
 
         const snap = await getUsage({ now, projectsRoot: root, force: true });
         assert.equal(snap.calibrated, false);
-        assert.equal(snap.percentLast5h, 0);
+        assert.equal(snap.percentLast5h, null);
         assert.equal(snap.percentLast7d, 0);
         assert.equal(snap.projectedWeeklyPercent, 0);
         assert.equal(snap.pacingState, "under");
@@ -208,8 +206,7 @@ describe("usage-tracker", () => {
       // transcript estimate. Inject a 95% meter read so percentLast5h is the
       // authoritative OAuth headline that trips the stop. (The transcript
       // fixture is retained only to keep the raw token accounting populated.)
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
 
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
       try {
@@ -240,9 +237,8 @@ describe("usage-tracker", () => {
       }
     });
 
-    test("calibrated: emergencyStop does NOT fire when 5h consumption is well under 90%", async () => {
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000";
+    test("calibrated: emergencyStop does NOT fire on the estimate path (no 5h estimate exists)", async () => {
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "10000";
 
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
       try {
@@ -252,7 +248,8 @@ describe("usage-tracker", () => {
         ]);
 
         const snap = await getUsage({ now, projectsRoot: root, force: true });
-        assert.equal(snap.percentLast5h, 10);
+        assert.equal(snap.percentLast5h, null);
+        assert.equal(snap.percentLast7d, 10);
         assert.equal(snap.emergencyStop, false);
       } finally {
         await rm(root, { recursive: true, force: true });
@@ -266,7 +263,6 @@ describe("usage-tracker", () => {
       // 200% → "over" — preserving the status quo for un-Anchor'd accounts
       // rather than pinning a fixed state.
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "7000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
       delete process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR;
 
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
@@ -295,7 +291,6 @@ describe("usage-tracker", () => {
       // is 2000/7000 ≈ 28.6% consumed vs a 70% linear target → "under", NOT
       // the "over" the projection alone would read.
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "7000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
       process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = new Date(
         Date.parse("2026-05-25T12:00:00Z") - Math.round(0.7 * 7 * 86_400_000),
       ).toISOString();
@@ -328,7 +323,6 @@ describe("usage-tracker", () => {
       // 0.3*7d out ⇒ the window started 0.7*7d ago. The transcript fixture
       // keeps the burst (projected 200%) to prove the verdict ignores it.
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "7000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
 
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
       try {
@@ -370,7 +364,6 @@ describe("usage-tracker", () => {
       // Genuinely ahead of linear pace: paceRatio = 80 / 40 = 2.0 → "over",
       // even though the 24h burst projection here is far below 100%.
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "7000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
 
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
       try {
@@ -408,7 +401,6 @@ describe("usage-tracker", () => {
     test("calibrated: 40% consumed at 70% window-elapsed reads 'under'", async () => {
       // Comfortably behind linear pace: paceRatio = 40 / 70 ≈ 0.57 → "under".
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "7000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
 
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
       try {
@@ -1011,7 +1003,6 @@ describe("usage-tracker", () => {
     test("anchor UNSET: since-reset fields are neutral and do not throw", async () => {
       delete process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR;
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "50000";
       await writeFixture(root, "p/s.jsonl", [
         assistantLine(iso(nowMs - 2 * DAY), { in: 1000 }),
       ]);
@@ -1028,7 +1019,6 @@ describe("usage-tracker", () => {
       const anchorMs = nowMs - 3 * DAY;
       process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = iso(anchorMs);
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "10000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
       await writeFixture(root, "p/s.jsonl", [
         // BEFORE the boundary but within rolling 7d → rolling only.
         assistantLine(iso(anchorMs - 2 * DAY), { in: 3000 }),
@@ -1051,7 +1041,6 @@ describe("usage-tracker", () => {
       const boundaryMs = anchorMs + 5 * 7 * DAY; // = nowMs - 1*DAY
       process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = iso(anchorMs);
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "10000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
       // Sanity: the projected boundary really is one full day before now.
       assert.equal(projectResetWindow(anchorMs, nowMs).currentMs, boundaryMs);
       await writeFixture(root, "p/s.jsonl", [
@@ -1072,7 +1061,6 @@ describe("usage-tracker", () => {
       const observedMs = anchorMs + 12 * HOUR;
       process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = iso(anchorMs);
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "10000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
       await writeFixture(root, "p/s.jsonl", [
         // Between env boundary and observed reset → excluded by auto-correct.
         assistantLine(iso(anchorMs + 1 * HOUR), { in: 2000 }),
@@ -1095,7 +1083,6 @@ describe("usage-tracker", () => {
       const observedOldMs = anchorMs - 1 * DAY; // older than the env boundary
       process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = iso(anchorMs);
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "10000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
       await writeFixture(root, "p/s.jsonl", [
         JSON.stringify({
           timestamp: iso(observedOldMs),
@@ -1113,7 +1100,6 @@ describe("usage-tracker", () => {
       const anchorMs = nowMs - 2 * DAY;
       process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = iso(anchorMs);
       delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
-      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
       await writeFixture(root, "p/s.jsonl", [
         assistantLine(iso(anchorMs + 6 * HOUR), { in: 900 }),
       ]);
@@ -1169,7 +1155,6 @@ describe("usage-tracker", () => {
       // OAuth 7d = 30% seeded, then a sustained outage takes it past TTL+maxStale
       // so the headline falls to the 90% estimate — 3x the last-known 30% -> warn.
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000000";
       process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000"; // 1 min
       process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "60000"; // 1 min grace
       const root = await mkdtemp(join(tmpdir(), "usage-2832-"));
@@ -1213,7 +1198,6 @@ describe("usage-tracker", () => {
     test("does NOT fire when the estimate stays within 1.5x of the last-known OAuth value", async () => {
       // estimate 40% vs last-known 7d 35% = ~1.14x, inside 1.5x -> no warn.
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000000";
       process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000";
       process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "60000";
       const root = await mkdtemp(join(tmpdir(), "usage-2832-"));
@@ -1268,14 +1252,12 @@ describe("usage-tracker", () => {
     test("default w_cache (unset) is behaviour-neutral: percent uses raw total", async () => {
       delete process.env.HYDRA_USAGE_CACHE_READ_WEIGHT;
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
       const root = await cacheHeavyRoot();
       try {
         const now = new Date("2026-05-25T12:00:00Z");
         const snap = await getUsage({ now, projectsRoot: root, force: true });
         // raw total 10000 / 100000 = 10%
         assert.equal(snap.percentLast7d, 10);
-        assert.equal(snap.percentLast5h, 10);
         // raw .total fields untouched regardless
         assert.equal(snap.tokensLast7d.total, 10000);
         assert.equal(snap.tokensLast7d.cacheRead, 9700);
@@ -1287,14 +1269,12 @@ describe("usage-tracker", () => {
     test("w_cache = 0.1 down-weights the cache-heavy burn ~7x vs raw", async () => {
       process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.1";
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
       const root = await cacheHeavyRoot();
       try {
         const now = new Date("2026-05-25T12:00:00Z");
         const snap = await getUsage({ now, projectsRoot: root, force: true });
         // weighted = 100+100+100 + 0.1*9700 = 1270; /100000 = 1.27%
         assert.ok(Math.abs(snap.percentLast7d - 1.27) < 1e-9, `got ${snap.percentLast7d}`);
-        assert.ok(Math.abs(snap.percentLast5h - 1.27) < 1e-9);
         // raw .total is STILL the honest on-disk count
         assert.equal(snap.tokensLast7d.total, 10000);
         // cacheHitRatio (a diagnostic, not a burn figure) is untouched: it uses
@@ -1308,7 +1288,6 @@ describe("usage-tracker", () => {
     test("projectedWeeklyPercent uses the weighted 24h burn", async () => {
       process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.1";
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
       const root = await cacheHeavyRoot();
       try {
         const now = new Date("2026-05-25T12:00:00Z");
@@ -1323,7 +1302,6 @@ describe("usage-tracker", () => {
     test("percentSinceReset uses the weighted unit", async () => {
       process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.1";
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
       const anchor = "2026-05-25T00:00:00Z"; // boundary earlier the same day
       process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = anchor;
       const root = await cacheHeavyRoot();
@@ -1347,7 +1325,6 @@ describe("usage-tracker", () => {
       process.env.HYDRA_QUOTA_WEIGHT_SONNET = "1";
       process.env.HYDRA_QUOTA_WEIGHT_HAIKU = "1";
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
       const root = await mkdtemp(join(tmpdir(), "usage-w873c-"));
       try {
         const now = new Date("2026-05-25T12:00:00Z");
@@ -1373,7 +1350,6 @@ describe("usage-tracker", () => {
       delete process.env.HYDRA_QUOTA_WEIGHT_HAIKU;
       process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.1";
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
       const root = await mkdtemp(join(tmpdir(), "usage-w873r-"));
       try {
         const now = new Date("2026-05-25T12:00:00Z");
@@ -1421,7 +1397,6 @@ describe("usage-tracker", () => {
     test("inert when reference unset (no warning, no false alarm)", async () => {
       delete process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT;
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
       process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-05-25T00:00:00Z";
       const root = await rootWithBurn();
       try {
@@ -1436,7 +1411,6 @@ describe("usage-tracker", () => {
       // Reference 1%, tracker 10% -> 10x > default 2x factor -> warn.
       process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "1";
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
       process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-05-25T00:00:00Z";
       const root = await rootWithBurn();
       try {
@@ -1451,7 +1425,6 @@ describe("usage-tracker", () => {
       // Reference 8%, tracker 10% -> within 2x -> no warn.
       process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "8";
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
       process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-05-25T00:00:00Z";
       const root = await rootWithBurn();
       try {
@@ -1465,7 +1438,6 @@ describe("usage-tracker", () => {
     test("inert when the anchor is unset (no since-reset metric to compare)", async () => {
       process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "1";
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
       delete process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR;
       const root = await rootWithBurn();
       try {
@@ -1479,7 +1451,6 @@ describe("usage-tracker", () => {
     test("inert when uncalibrated (percentSinceReset is 0)", async () => {
       process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "1";
       delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
-      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
       process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-05-25T00:00:00Z";
       const root = await rootWithBurn();
       try {
@@ -1506,8 +1477,7 @@ describe("usage-tracker", () => {
     test("successful meter read REBASES percentLast5h/percentLast7d onto OAuth utilization", async () => {
       // Transcript estimate would compute very different numbers; the OAuth
       // headline must win and usageSource must be 'oauth'.
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
       try {
         const now = new Date("2026-05-25T12:00:00Z");
@@ -1537,7 +1507,6 @@ describe("usage-tracker", () => {
       // No quota env set => uncalibrated estimate, yet the OAuth meter alone
       // must be able to trip the 5h emergency stop.
       delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
-      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
       try {
         const now = new Date("2026-05-25T12:00:00Z");
@@ -1566,8 +1535,7 @@ describe("usage-tracker", () => {
       // headline staying 95 no longer implies a stop (see the dedicated #1124
       // "estimate never stops" test). emergencyStop is now false on the estimate
       // path; the gauge invariant is unchanged.
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
       try {
         const now = new Date("2026-05-25T12:00:00Z");
@@ -1582,7 +1550,8 @@ describe("usage-tracker", () => {
         });
         assert.equal(snap.usageSource, "estimate");
         assert.equal(snap.oauthError, "oauth-usage-token-expired");
-        assert.equal(snap.percentLast5h, 95); // estimate gauge stands — NOT 0
+        assert.equal(snap.percentLast7d, 95); // estimate gauge stands — NOT 0
+        assert.equal(snap.percentLast5h, null); // no 5h estimate (#5333)
         // #1124: the estimate gauge no longer drives the stop.
         assert.equal(snap.emergencyStop, false);
         assert.equal(projectEligibility(snap).allow, true);
@@ -1598,7 +1567,6 @@ describe("usage-tracker", () => {
       // The ADR-0021 since-reset machinery keys off the env anchor, NOT the
       // OAuth meter. A successful OAuth read must not move it.
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
       process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-05-25T00:00:00Z";
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
       try {
@@ -1629,7 +1597,6 @@ describe("usage-tracker", () => {
 
     test("a real OAuth 0% is honored on the meter path (distinct from a failed read)", async () => {
       delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
-      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
       try {
         const now = new Date("2026-05-25T12:00:00Z");
@@ -1667,11 +1634,10 @@ describe("usage-tracker", () => {
     const meterFail = (code: any) => async () => ({ ok: false as const, code });
 
     test("AC: usageSource=estimate @95% → emergencyStop=false AND projectEligibility().allow=true", async () => {
-      // Calibrated so the estimate computes a concrete 95% (>=90); a FAILED
+      // Calibrated so the weekly estimate computes a concrete 95% (>=90); a FAILED
       // OAuth read flips usageSource to 'estimate'. Pre-#1124 this stopped
       // autopilot on a guess; now the estimate never stops.
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
       const root = await mkdtemp(join(tmpdir(), "usage-1124-"));
       try {
         const now = new Date("2026-05-25T12:00:00Z");
@@ -1685,8 +1651,10 @@ describe("usage-tracker", () => {
           readUsage: meterFail("oauth-usage-token-expired"),
         });
         assert.equal(snap.usageSource, "estimate");
-        // Gauge preserved (#1090): the headline still reads the estimate, NOT 0.
-        assert.equal(snap.percentLast5h, 95);
+        // Gauge preserved (#1090): the weekly headline still reads the estimate,
+        // NOT 0. There is no 5h estimate (#5333): that reading is null.
+        assert.equal(snap.percentLast7d, 95);
+        assert.equal(snap.percentLast5h, null);
         // But the STOP decision is decoupled: the estimate never stops.
         assert.equal(snap.emergencyStop, false);
         assert.equal(snap.weeklyEmergencyStop, false);
@@ -1700,7 +1668,6 @@ describe("usage-tracker", () => {
       // Uncalibrated estimate (no quota env) — proves the OAuth meter ALONE
       // trips the stop independent of any transcript calibration.
       delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
-      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
       const root = await mkdtemp(join(tmpdir(), "usage-1124-"));
       try {
         const now = new Date("2026-05-25T12:00:00Z");
@@ -1728,7 +1695,6 @@ describe("usage-tracker", () => {
 
     test("AC: weekly hard-stop rides OAuth percentLast7d — fires @90%+ on the meter path", async () => {
       delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
-      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
       const root = await mkdtemp(join(tmpdir(), "usage-1124-"));
       try {
         const now = new Date("2026-05-25T12:00:00Z");
@@ -1760,7 +1726,6 @@ describe("usage-tracker", () => {
       // >=90, then FAIL the OAuth read so usageSource='estimate'. The weekly
       // stop must NOT fire on that guess.
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000000"; // 5h huge => no 5h stop
       process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-05-25T00:00:00Z";
       const root = await mkdtemp(join(tmpdir(), "usage-1124-"));
       try {
@@ -1968,8 +1933,7 @@ describe("usage-tracker", () => {
     test("AC2: a 429 serves the last-good value as STALE oauth (does NOT flip to estimate)", async () => {
       // Calibrate so the estimate would be a concrete number — proving we stay
       // on the OAuth last-good rather than degrading to it.
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
       process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000"; // 1 min
       process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "300000"; // 5 min grace
       const root = await mkdtemp(join(tmpdir(), "usage-1090-"));
@@ -2001,8 +1965,7 @@ describe("usage-tracker", () => {
     });
 
     test("AC3: after TTL + maxStale with no successful read, falls through to estimate", async () => {
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
       process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000"; // 1 min
       process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "60000"; // 1 min grace
       const root = await mkdtemp(join(tmpdir(), "usage-1090-"));
@@ -2023,7 +1986,8 @@ describe("usage-tracker", () => {
         assert.equal(snap.oauthError, "oauth-usage-non-2xx");
         assert.equal(snap.oauthStale, false);
         assert.equal(snap.oauthAgeMs, null);
-        assert.equal(snap.percentLast5h, 95, "estimate gauge stands — never silently 0");
+        assert.equal(snap.percentLast7d, 95, "estimate gauge stands — never silently 0");
+        assert.equal(snap.percentLast5h, null, "no 5h estimate exists (#5333)");
         // #1124: the estimate gauge no longer drives the stop.
         assert.equal(snap.emergencyStop, false, "estimate path never trips the hard-stop");
       } finally {
@@ -2039,8 +2003,7 @@ describe("usage-tracker", () => {
       // breached the OLD 10min cliff (TTL+TTL) and flipped to estimate — must
       // now STILL serve the stale-but-real OAuth value and keep enforcing the
       // ceiling, never degrading to the fail-open transcript estimate.
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
       process.env.HYDRA_OAUTH_USAGE_TTL_MS = "300000"; // 5min — production default
       delete process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS; // rely on the 30min decoupled default
       const root = await mkdtemp(join(tmpdir(), "usage-2574-"));
@@ -2078,8 +2041,7 @@ describe("usage-tracker", () => {
       // fall-through. A genuine multi-hour outage (age past TTL+30min) is still
       // too stale to trust, so the headline correctly degrades to the fail-open
       // estimate (#1124: the estimate never trips the hard stop).
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
       process.env.HYDRA_OAUTH_USAGE_TTL_MS = "300000"; // 5min
       delete process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS; // 30min default → ~35min cliff
       const root = await mkdtemp(join(tmpdir(), "usage-2574-"));
@@ -2097,7 +2059,8 @@ describe("usage-tracker", () => {
         assert.equal(snap.usageSource, "estimate", "a multi-hour outage past TTL+30min still falls to the estimate");
         assert.equal(snap.oauthStale, false);
         assert.equal(snap.oauthAgeMs, null);
-        assert.equal(snap.percentLast5h, 95, "estimate gauge stands — never silently 0 (#1083)");
+        assert.equal(snap.percentLast7d, 95, "estimate gauge stands — never silently 0 (#1083)");
+        assert.equal(snap.percentLast5h, null, "no 5h estimate exists (#5333)");
         assert.equal(snap.emergencyStop, false, "estimate path never trips the hard stop (#1124 fail-open)");
       } finally {
         await rm(root, { recursive: true, force: true });
@@ -2130,8 +2093,7 @@ describe("usage-tracker", () => {
     });
 
     test("a fresh failure with NO prior last-good falls straight to the estimate", async () => {
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
       const root = await mkdtemp(join(tmpdir(), "usage-1090-"));
       try {
         await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 300 })]);
@@ -2147,7 +2109,8 @@ describe("usage-tracker", () => {
         assert.equal(snap.oauthError, "oauth-usage-token-expired");
         assert.equal(snap.oauthStale, false);
         assert.equal(snap.oauthAgeMs, null);
-        assert.equal(snap.percentLast5h, 30); // (300/1000)*100
+        assert.equal(snap.percentLast7d, 30); // (300/1000)*100
+        assert.equal(snap.percentLast5h, null);
       } finally {
         await rm(root, { recursive: true, force: true });
       }
@@ -2311,8 +2274,7 @@ describe("usage-tracker", () => {
       // If the last-good has aged past TTL+maxStale during the backoff window,
       // the suppressed scan degrades to the estimate (never a silent 0) — and
       // still spends no GET.
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
       process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000"; // 1 min
       process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "60000"; // 1 min grace (short)
       process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "600000"; // 10 min backoff (long)
@@ -2336,7 +2298,8 @@ describe("usage-tracker", () => {
         assert.equal(snap.usageSource, "estimate", "too-stale-during-backoff falls to estimate");
         assert.equal(snap.oauthStale, false);
         assert.equal(snap.oauthAgeMs, null);
-        assert.equal(snap.percentLast5h, 30, "estimate gauge stands — never silently 0");
+        assert.equal(snap.percentLast7d, 30, "estimate gauge stands — never silently 0");
+        assert.equal(snap.percentLast5h, null);
       } finally {
         await rm(root, { recursive: true, force: true });
       }

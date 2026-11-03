@@ -111,13 +111,15 @@ export default async function* reporter(source) {
       const file = evt.data.file
         ? relative(REPO_ROOT, evt.data.file).split("\\").join("/")
         : null;
-      yield (
-        JSON.stringify({
-          file,
-          name: evt.data.name,
-          ok: evt.type === "test:pass",
-        }) + "\n"
-      );
+      const row = {
+        file,
+        name: evt.data.name,
+        ok: evt.type === "test:pass",
+      };
+      // A failing top-level `todo` exits 0 under node:test; mark it so the
+      // launcher does not treat it as a failure (issue #5335).
+      if (evt.data.todo) row.todo = true;
+      yield JSON.stringify(row) + "\n";
     }
   }
 }

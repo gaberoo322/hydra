@@ -1032,16 +1032,15 @@ CONTEXT_COMPACTION_TURNS="${HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS:-8}"
 # (already collected every turn by the Turn Snapshot, so zero new I/O) and emits
 # `TERM:quota` once the delta crosses the cap.
 #
-# BOTH DEFAULT TO 0 = DISABLED. There is no calibration data for a safe default
+# THE CAP DEFAULTS TO 0 = DISABLED. There is no calibration data for a safe default
 # yet, and the systemd unit's existing invocation must not silently change
 # behaviour on deploy — so an unset flag leaves the termination path byte-identical
 # to a pre-#3867 run (ADR-0021 D5: per-run limits are hygiene caps subordinate to
 # the Pace Gate, never a second governor switched on behind the operator's back).
 # Fractional values are accepted (the percentages are floats server-side).
-QUOTA_5H_MAX="${HYDRA_AUTOPILOT_QUOTA_5H_MAX:-0}"
 QUOTA_WEEK_MAX="${HYDRA_AUTOPILOT_QUOTA_WEEK_MAX:-0}"
-# Both values are interpolated UNQUOTED into the state.json heredoc below (they
-# are JSON numbers, like token_budget). So a typo — `--quota-5h-max=ten` — would
+# The value is interpolated UNQUOTED into the state.json heredoc below (it
+# is a JSON number, like token_budget). So a typo — `--quota-week-max=ten` — would
 # otherwise emit torn JSON and break every downstream jq/json.load reader at
 # Phase 0 with a baffling parse error instead of a clear message. Validate here
 # and FATAL loudly, matching the --scope validator's style.
@@ -1050,7 +1049,7 @@ QUOTA_WEEK_MAX="${HYDRA_AUTOPILOT_QUOTA_WEEK_MAX:-0}"
 # the glob without them let both slip through to the same torn-JSON fate. A
 # valid value needs at least one digit on each side of an optional decimal
 # point (the `*.*.*` arm already bounds it to at most one point).
-for _q_pair in "QUOTA_5H_MAX=${QUOTA_5H_MAX}" "QUOTA_WEEK_MAX=${QUOTA_WEEK_MAX}"; do
+for _q_pair in "QUOTA_WEEK_MAX=${QUOTA_WEEK_MAX}"; do
   _q_name="${_q_pair%%=*}"
   _q_val="${_q_pair#*=}"
   case "$_q_val" in
@@ -1278,7 +1277,7 @@ fi
 #     Additive + tolerated-missing by all readers (decide.py degrades a
 #     malformed entry to the streak-0 identity), so no schema_version bump.
 #   - `schema_version` (issue #434) participates in the Phase 0 handshake.
-#   - `limits.quota_5h_max_pts` / `limits.quota_week_max_pts` (issue #3867) are
+#   - `limits.quota_week_max_pts` (issue #3867) is
 #     the opt-in quota-percent budget, in utilization POINTS over this run's own
 #     baseline; 0 = disabled (the default). Deliberately NOT seeded from prior
 #     state: the cap is per-run, and the matching `quota_baseline` key (written
@@ -1313,7 +1312,6 @@ if ! python3 "${RUN_LEDGER}" seed "${STATE_PATH}" \
   "wall_clock_max_sec=${WALL_CLOCK_MAX_SEC}" \
   "idle_drain_turns=${IDLE_DRAIN_TURNS}" \
   "context_compaction_turns=${CONTEXT_COMPACTION_TURNS}" \
-  "quota_5h_max_pts=${QUOTA_5H_MAX}" \
   "quota_week_max_pts=${QUOTA_WEEK_MAX}" \
   "scope=\"${SCOPE}\"" \
   "subagent_max_tokens=${SUBAGENT_MAX_TOKENS}" \
@@ -1334,7 +1332,7 @@ if [ "${ISOLATED_RUN}" != "1" ]; then
 fi
 
 # Echo resolved limits so the model captures them in conversation context
-echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} context_compaction_turns=${CONTEXT_COMPACTION_TURNS} quota_5h_max_pts=${QUOTA_5H_MAX} quota_week_max_pts=${QUOTA_WEEK_MAX} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED} schema_version=${SCHEMA_VERSION} daily_spend_cap_usd=${DAILY_SPEND_CAP_USD} scout_cost_share=${SCOUT_COST_SHARE}"
+echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} context_compaction_turns=${CONTEXT_COMPACTION_TURNS} quota_week_max_pts=${QUOTA_WEEK_MAX} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED} schema_version=${SCHEMA_VERSION} daily_spend_cap_usd=${DAILY_SPEND_CAP_USD} scout_cost_share=${SCOUT_COST_SHARE}"
 echo "[autopilot] state schema_version=${SCHEMA_VERSION} (playbook must match HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA marker; see Phase 0 handshake)"
 
 # Issue #435 — overwrite the Phase 0 heartbeat with the structured
@@ -1385,7 +1383,6 @@ else
     "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},
     "idle_drain_turns": ${IDLE_DRAIN_TURNS},
     "context_compaction_turns": ${CONTEXT_COMPACTION_TURNS},
-    "quota_5h_max_pts": ${QUOTA_5H_MAX},
     "quota_week_max_pts": ${QUOTA_WEEK_MAX},
     "scope": "${SCOPE}",
     "subagent_max_tokens": ${SUBAGENT_MAX_TOKENS},

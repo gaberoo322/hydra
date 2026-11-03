@@ -1,0 +1,1 @@
+- fix: fail the test launcher when a top-level suite fails to load but the runner exits 0 (#5335)

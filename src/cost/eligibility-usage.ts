@@ -79,7 +79,7 @@
  */
 
 import { readOAuthCached } from "./oauth-read-cache.ts";
-import { readOAuthUsage } from "./oauth-usage.ts";
+import { readOAuthUsage, readCredentialsExpiresAt } from "./oauth-usage.ts";
 // Pure meter-shape leaf (ADR-0042 Decision 5, issue #4781): the result-arm type
 // guard moved DOWN out of `oauth-usage.ts`; imported from its canonical L1 home.
 import { isOAuthUsageOk } from "./oauth-meter-shape.ts";
@@ -132,6 +132,12 @@ export interface EligibilityUsageResult {
    * a REAL number instead of on an unmeasured `false`.
    */
   meterUnavailable: boolean;
+  /**
+   * Epoch-ms of the credentials file's `claudeAiOauth.expiresAt`, or null when
+   * unreadable (#5103). Read here so the OAuth refresh nudge (#4843) is decided
+   * in the admission verdict and bash never opens the credentials file.
+   */
+  credentialsExpiresAtMs: number | null;
 }
 
 /**
@@ -150,8 +156,20 @@ export async function getEligibilityUsage(
   deps: {
     readUsage?: () => Promise<OAuthUsageResult>;
     now?: () => number;
+    readExpiresAt?: () => Promise<number | null>;
   } = {},
 ): Promise<EligibilityUsageResult> {
+  const meter = await readMeterEligibility(deps);
+  // #5103: the credentials expiry rides with the meter read (same host, same
+  // reader #4843's rotation bypass uses). Never throws; null when unreadable.
+  const credentialsExpiresAtMs = await (deps.readExpiresAt ?? readCredentialsExpiresAt)();
+  return { ...meter, credentialsExpiresAtMs };
+}
+
+async function readMeterEligibility(deps: {
+  readUsage?: () => Promise<OAuthUsageResult>;
+  now?: () => number;
+}): Promise<Omit<EligibilityUsageResult, "credentialsExpiresAtMs">> {
   const nowMs = (deps.now ?? Date.now)();
   const generatedAt = new Date(nowMs).toISOString();
   const anchorEnvMs = getWeeklyResetAnchorMs();
@@ -263,7 +281,8 @@ function buildMeterInput(
   envAnchor: string | null,
   nowMs: number,
 ): EligibilityUsageInput {
-  const percentLast5h = data.fiveHour.utilization;
+  // null when the meter body carries no `five_hour` window (no 5h cap).
+  const percentLast5h = data.fiveHour ? data.fiveHour.utilization : null;
   const percentLast7d = data.sevenDay.utilization;
 
   // ACCOUNT-FOLLOWING ANCHOR. The Weekly Reset Anchor is derived from
@@ -386,7 +405,7 @@ function buildMeterInput(
 function unavailable(
   generatedAt: string,
   weeklyResetAnchor: string | null,
-): EligibilityUsageResult {
+): Omit<EligibilityUsageResult, "credentialsExpiresAtMs"> {
   return {
     input: {
       // Explicitly UNKNOWN, not zero. See the function docstring.

@@ -225,7 +225,6 @@ LIMITS = [
     _row("wall_clock_max_sec", "int", REQUIRED, RESET),
     _row("idle_drain_turns", "int", REQUIRED, RESET),
     _row("context_compaction_turns", "int", REQUIRED, RESET),
-    _row("quota_5h_max_pts", "number", REQUIRED, RESET),
     _row("quota_week_max_pts", "number", REQUIRED, RESET),
     _row("scope", "str", REQUIRED, RESET),
     _row("subagent_max_tokens", "int", REQUIRED, RESET),

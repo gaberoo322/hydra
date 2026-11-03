@@ -81,15 +81,33 @@ def _select_signal_retro_orch(
     # /hydra-retro only to find every drill input empty; that question is
     # answerable from the bundle JSON alone, which is what
     # `retro_run_drillable` precomputes.
-    if not _signal_present(state, events, "retro_run_available"):
-        return None
-    if _signal_present(state, events, "retro_run_drillable"):
+    #
+    # Issue #5271 (R2, ADR-0046 Decision 8): review mode rides this SAME class
+    # as `prompt_args.review` — no new class, one 24h cooldown. `review_retro_due`
+    # is the Redis-only signal the Turn Snapshot precomputes (read verbatim, never
+    # re-derived here). Three arms, every one through make_dispatch so it stamps
+    # the existing cooldown; a non-due, non-drillable skip still stamps nothing.
+    available = _signal_present(state, events, "retro_run_available")
+    review_due = _signal_present(state, events, "review_retro_due")
+    if available and _signal_present(state, events, "retro_run_drillable"):
+        # (a) run pass; the review pass piggybacks only when it is due.
         return make_dispatch(
             sig,
             "hydra-retro",
-            prompt_args={"apply": True},
+            prompt_args={"apply": True, "review": True} if review_due else {"apply": True},
             reason="completed run available and drillable — daily retrospective",
         )
+    if review_due:
+        # (b) review-only: the skill skips the run pass when the candidate run
+        # is not drillable (it reads zero transcripts).
+        return make_dispatch(
+            sig,
+            "hydra-retro",
+            prompt_args={"apply": True, "review": True},
+            reason="review-findings retro due (issue #5271) — review-only pass",
+        )
+    if not available:
+        return None
     # Correction (a): a clean-run SKIP must NOT stamp the cooldown.
     # `retro_run_available` tracks the MOST-RECENT completed run; if a
     # clean run's skip stamped `signal_last_fired.retro_orch`, a
@@ -113,7 +131,9 @@ def _select_signal_retro_orch(
         return make_dispatch(
             sig,
             "hydra-retro",
-            prompt_args={"apply": True},
+            # (c) the override ALWAYS carries review (issue #5271): it is the
+            # only feeder of the weekly reconcile and self-heals a dark signal.
+            prompt_args={"apply": True, "review": True},
             reason=(
                 "weekly full-retro override (issue #3871): drillability "
                 "predicate check — forces a real retro at least every "

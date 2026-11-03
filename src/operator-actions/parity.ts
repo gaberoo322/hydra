@@ -291,6 +291,7 @@ export const MACHINE_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /api/metrics/session-tokens": "scripts/autopilot/reap.py",
   "GET /api/memory/:agent": "hydra-dev / hydra-qa / hydra-target-build playbooks",
   "GET /api/learning/ineffective-rules": "the architecture-review direction doc names it as the operator read for promoted-rule effectiveness",
+  "GET /api/qa/review-retro": "Turn Snapshot collectRetro (review_retro_due) + hydra-retro / hydra-architecture-scan playbooks",
   "GET /api/recommendations": "bin/hydra (documented public endpoint)",
   "GET /api/reflections": "hydra-dev child flow + hydra-target-build playbooks (the live reflection injection path)",
   "GET /api/scout/stats": "hydra-tool-scout playbook + hydra-autopilot class wiring",
