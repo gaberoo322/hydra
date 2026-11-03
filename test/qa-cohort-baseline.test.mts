@@ -16,6 +16,8 @@ import {
   cohortOf,
   withRetry,
   countReviewedWithoutClosingRef,
+  requireConfigHistory,
+  HarvestError,
   MIN_MATURED_PAIR,
   type CohortInputs,
   type ItemRow,
@@ -249,8 +251,24 @@ describe("qa-cohort-baseline never throws", () => {
     assert.equal(r.metrics.tripped, false);
   });
 
-  test("cohortOf tags every PR baseline today (the single seam)", () => {
-    assert.equal(cohortOf({ number: 1 }), "baseline");
+  test("requireConfigHistory: null history aborts with HarvestError config-history-unreadable (QA round-3)", () => {
+    assert.throws(
+      () => requireConfigHistory(null),
+      (err: unknown) => err instanceof HarvestError && err.code === "config-history-unreadable",
+    );
+    const h = [{ at: "2026-10-01T00:00:00Z", twoWayPair: "on" }];
+    assert.equal(requireConfigHistory(h), h);
+    assert.deepEqual(requireConfigHistory([]), []);
+  });
+
+  test("cohortOf delegates to pairCohortOf (the single seam, P3 #5265)", () => {
+    const window = { onFlipAt: "2026-10-01T00:00:00Z", offFlipAt: null };
+    const row = { number: 1, mergedAt: "2026-10-10T00:00:00Z", trailers: [trailer(1, 1, "PASS")], shadowLines: [] };
+    assert.equal(cohortOf(row, null), "baseline");
+    assert.equal(cohortOf(row, window), "pair");
+    assert.equal(cohortOf({ ...row, mergedAt: "2026-09-01T00:00:00Z" }, window), "baseline");
+    const shadow = { pr: 1, sha: null, pairMiss: 0, counterfactual: "PASS" as const, live: "PASS" as const, topUp: 0 as const, detectorGaps: 0 };
+    assert.equal(cohortOf({ ...row, shadowLines: [shadow] }, window), "baseline");
   });
 });
 

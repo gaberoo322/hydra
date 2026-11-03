@@ -215,6 +215,7 @@
       "section": null,
       "readBy": [
         "docs/operator-playbooks/hydra-retro.md",
+        "scripts/qa/pair-graduation.ts",
         "src/qa/rollout-switches.ts"
       ],
       "unread": false,
