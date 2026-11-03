@@ -2848,120 +2848,108 @@
       "name": "HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_WINDOW_HOURS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_LATENCY_BUDGET_MS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_METER_DARK_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
-      }
-    },
-    {
-      "name": "HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM",
-      "readSites": [
-        {
-          "path": "scripts/hydra-watchdog.sh"
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_NOW_MS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_QUOTA_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {

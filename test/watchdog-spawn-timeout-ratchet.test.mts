@@ -79,7 +79,6 @@ describe("watchdog spawn-timeout ratchet (issues #4044, #4072)", () => {
     for (const expected of [
       "autopilot-watchdog.test.mts",
       "watchdog-deploy-drift.test.mts",
-      "watchdog-launch-flow.test.mts",
       "watchdog-skill-mirror-drift.test.mts",
     ]) {
       assert.ok(files.includes(expected), `known watchdog suite not discovered: ${expected}`);

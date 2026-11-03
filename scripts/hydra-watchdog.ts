@@ -14,6 +14,9 @@
  *   node --experimental-strip-types scripts/hydra-watchdog.ts disk
  *       the TMPFS EXHAUSTION check (issue #5327): /tmp + /dev/shm inode and space
  *       use over src/watchdog/disk.ts, paged through the Operator Channel
+ *   node --experimental-strip-types scripts/hydra-watchdog.ts launch-flow
+ *       the LAUNCH FLOW check (issue #5097): pace-gate last-tick streaks via the
+ *       shared episode tracker, delivered through the Operator Channel + EventBus
  *   node --experimental-strip-types scripts/hydra-watchdog.ts thresholds
  *       print src/autopilot/stale-thresholds.ts as JSON (status.sh, deploy smoke)
  *
@@ -25,6 +28,10 @@
  *   HYDRA_WATCHDOG_DISK_PATHS        comma-separated mounts (default /tmp,/dev/shm)
  *   HYDRA_WATCHDOG_DISK_WARN_PCT     warn threshold, inodes OR space (default 80)
  *   HYDRA_WATCHDOG_DISK_CRITICAL_PCT critical threshold, inodes OR space (default 95)
+ *   HYDRA_WATCHDOG_LAUNCH_{FAILSAFE,METER_DARK,QUOTA,PAUSE,LATENCY_BREACH,GLM_STERILE}_SECONDS
+ *       launch-flow sustain thresholds (defaults in src/watchdog/launch-flow.ts)
+ *   HYDRA_WATCHDOG_LAUNCH_LATENCY_BUDGET_MS, HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_WINDOW_HOURS,
+ *   HYDRA_WATCHDOG_LAUNCH_NOW_MS (injectable clock, epoch-ms)
  */
 
 import {
@@ -44,8 +51,29 @@ import {
   parsePct,
   runDisk,
 } from "../src/watchdog/disk.ts";
-import { createProductionDiskDeps, createProductionLivenessDeps, createProductionWedgeDeps } from "../src/watchdog/ports.ts";
+import { closeRedisConnections } from "../src/redis/connection.ts";
+import {
+  DEFAULT_LAUNCH_FAILSAFE_S,
+  DEFAULT_LAUNCH_GLM_STERILE_S,
+  DEFAULT_LAUNCH_GLM_STERILE_WINDOW_HOURS,
+  DEFAULT_LAUNCH_LATENCY_BREACH_S,
+  DEFAULT_LAUNCH_LATENCY_BUDGET_MS,
+  DEFAULT_LAUNCH_METER_DARK_S,
+  DEFAULT_LAUNCH_PAUSE_S,
+  DEFAULT_LAUNCH_QUOTA_S,
+  LAUNCH_FLOW_LOG_PREFIX,
+  runLaunchFlow,
+} from "../src/watchdog/launch-flow.ts";
+import {
+  createProductionDiskDeps,
+  createProductionLaunchFlowDeps,
+  createProductionLivenessDeps,
+  createProductionWedgeDeps,
+} from "../src/watchdog/ports.ts";
 import { runWedge, WEDGE_LOG_PREFIX } from "../src/watchdog/wedge.ts";
+
+/** Hard ceiling on a launch-flow tick (the Operator Channel CLI force-exit precedent). */
+const LAUNCH_FLOW_FORCE_EXIT_MS = 20_000;
 
 function envNumber(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -89,6 +117,30 @@ async function main(argv: string[]): Promise<void> {
     });
     return;
   }
+  if (cmd === "launch-flow") {
+    // The Operator Channel CLI force-exit precedent: the channel's dedup
+    // store and the bus hold connections, so an unref'd timer guarantees exit 0.
+    setTimeout(() => process.exit(0), LAUNCH_FLOW_FORCE_EXIT_MS).unref();
+    const rawNow = process.env.HYDRA_WATCHDOG_LAUNCH_NOW_MS;
+    try {
+      await runLaunchFlow(createProductionLaunchFlowDeps((line) => console.log(line)), {
+        failSafeS: envNumber("HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS", DEFAULT_LAUNCH_FAILSAFE_S),
+        meterDarkS: envNumber("HYDRA_WATCHDOG_LAUNCH_METER_DARK_SECONDS", DEFAULT_LAUNCH_METER_DARK_S),
+        quotaS: envNumber("HYDRA_WATCHDOG_LAUNCH_QUOTA_SECONDS", DEFAULT_LAUNCH_QUOTA_S),
+        pauseS: envNumber("HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS", DEFAULT_LAUNCH_PAUSE_S),
+        latencyBudgetMs: envNumber("HYDRA_WATCHDOG_LAUNCH_LATENCY_BUDGET_MS", DEFAULT_LAUNCH_LATENCY_BUDGET_MS),
+        latencyBreachS: envNumber("HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS", DEFAULT_LAUNCH_LATENCY_BREACH_S),
+        glmSterileS: envNumber("HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_SECONDS", DEFAULT_LAUNCH_GLM_STERILE_S),
+        glmSterileWindowHours: envNumber("HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_WINDOW_HOURS", DEFAULT_LAUNCH_GLM_STERILE_WINDOW_HOURS),
+        nowMs: rawNow === undefined ? null : envNumber("HYDRA_WATCHDOG_LAUNCH_NOW_MS", 0),
+      });
+    } catch (err) {
+      console.log(`${LAUNCH_FLOW_LOG_PREFIX} WARN ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      closeRedisConnections();
+      process.exit(0);
+    }
+  }
   if (cmd === "disk") {
     try {
       let warnPct = parsePct(process.env.HYDRA_WATCHDOG_DISK_WARN_PCT, DEFAULT_DISK_WARN_PCT);
@@ -106,11 +158,11 @@ async function main(argv: string[]): Promise<void> {
       console.log(`${DISK_LOG_PREFIX} WARN ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       // One-shot process: the channel's Redis dedup store holds a connection
-      // open, so exit explicitly (as operator-notify.ts does). Always 0.
+      // open, so exit explicitly (as the Operator Channel CLI does). Always 0.
       process.exit(0);
     }
   }
-  console.error(`hydra-watchdog.ts: unknown subcommand '${cmd ?? ""}' (expected: liveness | wedge | disk | thresholds)`);
+  console.error(`hydra-watchdog.ts: unknown subcommand '${cmd ?? ""}' (expected: liveness | wedge | disk | launch-flow | thresholds)`);
 }
 
 main(process.argv.slice(2)).catch((err) => {
