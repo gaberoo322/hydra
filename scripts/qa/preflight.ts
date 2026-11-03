@@ -296,7 +296,8 @@ if (isEntrypoint(import.meta.url)) {
   const repo = flagValue(argv, "--repo", DEFAULT_REPO) as string;
   const issue = intFlag(argv, "--issue");
   const pr = intFlag(argv, "--pr");
-  if (issue === undefined && pr === undefined && argv.includes("--issue")) {
+  // A valueless `--issue` (the loader left no number) means "pick the first needs-qa issue".
+  if (issue === undefined && flagValue(argv, "--issue") !== undefined) {
     usageExit([{ message: "--issue must be a positive integer" }]);
   } else {
     try {

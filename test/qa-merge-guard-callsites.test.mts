@@ -421,24 +421,6 @@ describe("required-ness is joined from branch protection, not the rollup (issue 
     section(read("hydra-autopilot.md"), /^### Building `qa-verdict` events/m, /^##/m);
 
   /**
-   * Resolve `@include _fragments/<name>.md` the way scripts/sync-skills.sh
-   * does (issue #2552), so a playbook fence can be executed as the generated
-   * skill would run it.
-   */
-  function resolveIncludes(text: string): string {
-    return text.replace(/^[ \t]*@include[ \t]+(_fragments\/\S+)[ \t]*$/gm, (_m, rel: string) =>
-      readFileSync(join(PLAYBOOKS, rel), "utf8").trimEnd(),
-    );
-  }
-
-  /** The first ```bash fence of a text block. */
-  function firstFence(text: string): string {
-    const m = text.match(/```bash\n([\s\S]*?)\n```/);
-    assert.ok(m, "fenced bash block not found");
-    return m[1];
-  }
-
-  /**
    * A fake `gh` reproducing the LIVE shapes. `pr view` serves the RECORDED
    * fixture payload (test/fixtures/pr-4754-status-check-rollup.json — no
    * required-ness key, CheckRun + StatusContext rows, a duplicated name),
@@ -541,16 +523,14 @@ describe("required-ness is joined from branch protection, not the rollup (issue 
     assert.match(stderr, /WARN: checks-fetch failed/);
   });
 
-  test("hydra-qa step 5 includes the fragment and falls back to the legacy all-optional mapping", () => {
-    const step5 = section(read("hydra-qa.md"), /^### 5\. Collect current CI state/m, /^### 6\./m);
-    assert.match(step5, /@include _fragments\/checks-fetch\.md/, "step 5 must reach the shared fragment");
-    const script = resolveIncludes(firstFence(step5));
-    assert.ok(script.includes("# >>> checks-fetch"), "the fragment body must be spliced in by the include");
-    const { checks, stderr } = runFetch(script, { GH_FAIL_CONTEXTS: "1" });
-    const states = JSON.parse(checks) as Array<Record<string, unknown>>;
-    assert.ok(states.length > 0, "the fallback must still produce a checks list");
-    assert.ok(states.every((c) => c.required === false), "the legacy fallback maps every check optional (INV-7)");
-    assert.match(stderr, /falling back to the legacy rollup-only mapping/, "the fallback must be loud");
+  test("hydra-qa reaches the shared checks phase through preflight, not an inline fetch (#5269 INV-10)", () => {
+    // The step-5 bash (and its @include of the fragment) moved into
+    // scripts/qa/preflight.ts, which calls the SAME engine `checks` phase; the
+    // INV-7 all-optional fallback now lives in runChecksPhase (src/qa/phases.ts)
+    // and is pinned by test/qa-plumbing-scripts.test.mts + test/qa-verdict-cli.test.mts.
+    assert.doesNotMatch(read("hydra-qa.md"), /@include _fragments\/checks-fetch\.md/, "the playbook no longer carries the inline fetch");
+    const preflight = readFileSync(join(ROOT, "scripts", "qa", "preflight.ts"), "utf8");
+    assert.match(preflight, /phase\("checks"/, "preflight must reach the engine's checks phase");
   });
 
   /** Run the autopilot builder's ci-state block under the fake gh (the CLI's production adapter). */
@@ -591,8 +571,8 @@ describe("required-ness is joined from branch protection, not the rollup (issue 
     assert.ok(!/^\s*@include/m.test(read(FRAGMENT)), "the fragment pulls in no other fragment");
   });
 
-  test("one join, one place: hydra-qa includes the fragment and no fetch reads the rollup's absent required-ness flag", () => {
-    assert.match(read("hydra-qa.md"), /@include _fragments\/checks-fetch\.md/);
+  test("one join, one place: no fetch reads the rollup's absent required-ness flag (hydra-qa via preflight since #5269)", () => {
+    assert.doesNotMatch(read("hydra-qa.md"), /@include _fragments\/checks-fetch\.md/);
     for (const [name, text] of [
       ["fragment", read(FRAGMENT)],
       ["hydra-qa.md", read("hydra-qa.md")],

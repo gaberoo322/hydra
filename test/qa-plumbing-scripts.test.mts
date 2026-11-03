@@ -308,7 +308,7 @@ async function route(s: Scenario = {}) {
   const appended: unknown[] = [];
   const deps: RouteDeps = {
     gh,
-    phase: enginePhase({ rollup: async () => s.rollup ?? GREEN_ROLLUP, priorBodies: async () => s.prior ?? [], ...s.fetchers }),
+    phase: enginePhase({ rollup: async () => (s.rollup ?? GREEN_ROLLUP) as never, priorBodies: async () => s.prior ?? [], ...s.fetchers }),
     appendRows: s.appendRows ?? (async (rows) => { appended.push(rows); return { written: 0 }; }),
     now: () => "2026-11-03T00:00:00.000Z",
   };

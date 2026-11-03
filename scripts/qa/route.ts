@@ -343,7 +343,7 @@ export async function runRoute(opts: RouteOptions, deps: RouteDeps): Promise<Rou
           console.error(`[hydra-qa] ERROR: could not add ${l} to issue #${issue}`);
         }
       }
-      // The label name goes in the URL path (a DELETE with -f name= wipes ALL labels); a 404 is success.
+      // The label name goes in the URL path (sent as a form field it would wipe ALL labels); a 404 is success.
       for (const l of strList(labels.issueRemove)) {
         const r = run("label-remove", `issue#${issue}:${l}`, [
           "api", "-X", "DELETE", `repos/${repo}/issues/${issue}/labels/${encodeURIComponent(l)}`,
