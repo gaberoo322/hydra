@@ -30,6 +30,7 @@ import {
 } from "../github/issue-actions.ts";
 import { resolveGithubRepo, viewPr } from "../github/issues.ts";
 import {
+  CLAIM_OWNER_MISMATCH,
   appendLifecycleEntry,
   closeDispatchClaim,
   expireJournalOnClose,
@@ -130,7 +131,7 @@ export interface SeamDeps {
     append: (repo: string, issue: number, entry: LifecycleJournalEntry) => Promise<JournalWriteResult>;
     expireOnClose: (repo: string, issue: number) => Promise<JournalWriteResult>;
     openClaim: (repo: string, issue: number, claim: DispatchClaim) => Promise<OpenClaimResult>;
-    closeClaim: (repo: string, issue: number) => Promise<CloseClaimResult>;
+    closeClaim: (repo: string, issue: number, expectedDispatchId?: string) => Promise<CloseClaimResult>;
   };
   now: () => number;
 }
@@ -229,12 +230,18 @@ async function journal(deps: SeamDeps, issue: number, e: LifecycleJournalEntry):
   if (res.ok === false) logger.error({ issue, error: res.error }, "[lifecycle] journal append failed");
 }
 
+/** `not-planned` (artifact / reasons spelling) and `not planned` (gh spelling) are one reason. */
+export function normaliseCloseReason(raw: string | undefined): string | undefined {
+  return raw === undefined ? undefined : raw.trim().toLowerCase().replace(/[-_]+/g, " ");
+}
+
 export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<AdvanceResult> {
   const issue = input.issue;
   if (!isLifecycleState(input.to)) {
     return { ok: false, issue, code: "unknown-target-state", mode: null, written: false };
   }
   const to: LifecycleState = input.to;
+  const closeReason = normaliseCloseReason(input.closeReason);
   const mode = await deps.mode();
 
   // 1. re-read
@@ -299,7 +306,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       evidence: input.evidence ?? {},
       reason: input.reason,
       rationale: input.rationale,
-      closeReason: to === "closed" ? (input.closeReason ?? "completed") : undefined,
+      closeReason: to === "closed" ? (closeReason ?? "completed") : undefined,
     };
     verdict = evaluateGate(transition.gate, gateInput, records);
   }
@@ -314,7 +321,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
   const removed = stateLabels.filter((s) => s !== to);
   const write =
     to === "closed"
-      ? await deps.close(issue, input.closeReason ?? "completed")
+      ? await deps.close(issue, closeReason ?? "completed")
       : await deps.edit(issue, { remove: [...removed], add: [to] });
   if (write.ok === false) {
     const code = `write-failed:${write.code}`;
@@ -423,9 +430,12 @@ export async function releaseClaim(
   issue: number,
   deps: SeamDeps,
   actor = "cli",
-): Promise<{ ok: true; prior: DispatchClaim | null } | { ok: false; code: "redis-failed" }> {
-  const res = await deps.journal.closeClaim(deps.repo, issue);
-  if (res.ok === false) return { ok: false, code: "redis-failed" };
+  dispatchId?: string,
+): Promise<{ ok: true; prior: DispatchClaim | null } | { ok: false; code: "redis-failed" | "claim-owner-mismatch" }> {
+  const res = await deps.journal.closeClaim(deps.repo, issue, dispatchId);
+  if (res.ok === false) {
+    return { ok: false, code: res.error === CLAIM_OWNER_MISMATCH ? "claim-owner-mismatch" : "redis-failed" };
+  }
   await journal(
     deps,
     issue,

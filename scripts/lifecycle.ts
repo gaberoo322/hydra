@@ -4,8 +4,8 @@
  *
  *   npx tsx scripts/lifecycle.ts advance <issue> <to> [--evidence k=v]...
  *       [--reason R] [--rationale T] [--close-reason completed|"not planned"] [--actor A]
- *   npx tsx scripts/lifecycle.ts claim <issue> --dispatch-id ID --class C --run R [--artifact-hash H]
- *   npx tsx scripts/lifecycle.ts release <issue>
+ *   npx tsx scripts/lifecycle.ts claim <issue> --dispatch ID --class C --run R [--artifact-hash H]
+ *   npx tsx scripts/lifecycle.ts release <issue> [--dispatch ID]
  *
  * Talks to GitHub (gh) and Redis directly: no :4000 dependency. Prints one JSON
  * line. Exit codes: 0 ok (including a shadow `wouldRefuse`), 1 refused / failed
@@ -53,6 +53,7 @@ function emit(obj: Record<string, unknown>): void {
 }
 
 function parseIssue(raw: string | undefined): number | null {
+  if (raw === undefined || !/^\d+$/.test(raw)) return null;
   const n = Number(raw);
   return Number.isInteger(n) && n > 0 ? n : null;
 }
@@ -94,9 +95,10 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
 
   if (verb === "claim") {
-    const { "dispatch-id": dispatchId, class: cls, run } = parsed.flags;
+    const { class: cls, run } = parsed.flags;
+    const dispatchId = parsed.flags.dispatch ?? parsed.flags["dispatch-id"];
     if (!dispatchId || !cls || !run) {
-      console.error("[lifecycle] claim requires --dispatch-id, --class and --run");
+      console.error("[lifecycle] claim requires --dispatch, --class and --run");
       return 2;
     }
     const res = await openClaim(
@@ -107,7 +109,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     return res.ok ? 0 : 1;
   }
 
-  const res = await releaseClaim(issue, deps, parsed.flags.actor);
+  const res = await releaseClaim(issue, deps, parsed.flags.actor, parsed.flags.dispatch ?? parsed.flags["dispatch-id"]);
   emit(res);
   return res.ok ? 0 : 1;
 }

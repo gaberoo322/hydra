@@ -115,4 +115,16 @@ describe("lifecycle-journal Redis seam (issue #5310)", () => {
     assert.ok(again.ok);
     assert.equal(again.prior, null);
   });
+
+  test("closeDispatchClaim with expectedDispatchId only deletes an owned claim (atomic)", async () => {
+    const claim = { dispatchId: "d1", class: "qa_orch", run: "r1", artifactHash: null, openedAt: 1 };
+    await openDispatchClaim(REPO, ISSUE, claim);
+    const wrong = await closeDispatchClaim(REPO, ISSUE, "d2");
+    assert.equal(wrong.ok, false);
+    assert.equal(await redis.exists(lifecycleClaimKey(REPO, ISSUE)), 1);
+    const right = await closeDispatchClaim(REPO, ISSUE, "d1");
+    assert.ok(right.ok);
+    assert.equal(right.prior?.dispatchId, "d1");
+    assert.equal(await redis.exists(lifecycleClaimKey(REPO, ISSUE)), 0);
+  });
 });

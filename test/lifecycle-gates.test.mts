@@ -324,3 +324,41 @@ describe("claim / release (INV-11)", () => {
     assert.deepEqual(h.journal[0].evidence, { dispatch: "d1" });
   });
 });
+
+describe("QA round-1 fixes (#5310)", () => {
+  test("close reason 'not-planned' (artifact spelling) is normalised and gated like 'not planned'", async () => {
+    const h = harness(["in-progress"], "enforce");
+    const refused = await advance({ issue: 10, to: "closed", closeReason: "not-planned" }, h.deps);
+    assert.equal("code" in refused ? refused.code : null, "evidence-required:superseded-by");
+    const ok = await advance({ issue: 10, to: "closed", closeReason: "not-planned", evidence: { "superseded-by": "#99" } }, h.deps);
+    assert.equal(ok.ok, true);
+    assert.deepEqual(h.closes, [{ issue: 10, reason: "not planned" }]);
+  });
+
+  test("sibling: an unknown close reason is still refused and 'completed' still needs a merged PR", async () => {
+    const h = harness(["in-progress"], "enforce");
+    const weird = await advance({ issue: 10, to: "closed", closeReason: "weird" }, h.deps);
+    assert.equal("code" in weird ? weird.code : null, "close-reason-not-allowed");
+    const noPr = await advance({ issue: 10, to: "closed", closeReason: "Completed" }, h.deps);
+    assert.equal("code" in noPr ? noPr.code : null, "evidence-required:pr");
+  });
+
+  test("release forwards --dispatch ownership and surfaces an owner mismatch", async () => {
+    const h = harness(["in-progress"], "shadow");
+    const seen: Array<string | undefined> = [];
+    const deps: SeamDeps = {
+      ...h.deps,
+      journal: {
+        ...h.deps.journal,
+        closeClaim: async (_r, _i, expected) => {
+          seen.push(expected);
+          return expected === "mine" ? { ok: true, prior: null } : { ok: false, error: "claim-owner-mismatch" };
+        },
+      },
+    };
+    assert.deepEqual(await releaseClaim(10, deps, "cli", "other"), { ok: false, code: "claim-owner-mismatch" });
+    assert.equal(h.journal.length, 0);
+    assert.equal((await releaseClaim(10, deps, "cli", "mine")).ok, true);
+    assert.deepEqual(seen, ["other", "mine"]);
+  });
+});
