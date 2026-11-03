@@ -113,14 +113,26 @@ export function decideLaunchFlow(input: {
   };
 }
 
+/**
+ * The bus event input per in-band signal. Written as `type: E.<MEMBER>` on
+ * purpose: that is the producer shape test/event-bus-vocabulary.test.mts's
+ * live-producer audit recognises, and a typo is a compile error.
+ */
+const IN_BAND_EVENT = {
+  quota: { type: E.LAUNCH_QUOTA_STRETCH },
+  latency: { type: E.LAUNCH_LATENCY_BREACH },
+  pause: { type: E.LAUNCH_PAUSE_FORGOTTEN },
+  "glm-sterile": { type: E.GLM_DRAINER_STERILE },
+} as const;
+
 /** The page kind (== dedupKey) for each signal. */
 export const LAUNCH_FLOW_PAGE_KIND: Readonly<Record<LaunchFlowEpisodeSignal, string>> = {
   "fail-safe": "launch:fail_safe",
   "meter-dark": "launch:meter_dark",
-  quota: E.LAUNCH_QUOTA_STRETCH,
-  latency: E.LAUNCH_LATENCY_BREACH,
-  pause: E.LAUNCH_PAUSE_FORGOTTEN,
-  "glm-sterile": E.GLM_DRAINER_STERILE,
+  quota: IN_BAND_EVENT.quota.type,
+  latency: IN_BAND_EVENT.latency.type,
+  pause: IN_BAND_EVENT.pause.type,
+  "glm-sterile": IN_BAND_EVENT["glm-sterile"].type,
 };
 
 export interface LaunchFlowDeps {
@@ -248,7 +260,7 @@ async function deliverSignal(
   const reasonClean = sanitizeReason(reason);
   try {
     await deps.bus.publish(STREAMS.NOTIFICATIONS, {
-      type: kind,
+      type: IN_BAND_EVENT[sig].type,
       source: "watchdog-launch-flow",
       correlationId: `launch-flow-${sig}`,
       payload: { signal: sig, reason: reasonClean, durationMs: durMs, thresholdMs: thrMs },
