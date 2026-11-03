@@ -1110,11 +1110,12 @@
       "date": null,
       "supersedes": [],
       "supersededBy": [],
-      "decision": "The test suite is not padded — consolidate it mechanically; do not delete, semantically rewrite, or parallelise it. The metric is operator Claude quota, not CI minutes.",
+      "decision": "The test suite is not padded — consolidate it mechanically; do not delete or semantically rewrite it; parallelise only the Redis-free pool (#5199 amendment). The metric is operator Claude quota, not CI minutes.",
       "readWhen": "Tempted to trim the test suite, hunt flaky tests, or parallelise the runner.",
       "citedBy": [
         "CONTEXT-MAP.md",
-        "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md"
+        "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",
+        "docs/agents/domain.md"
       ],
       "source": {
         "path": "docs/adr/0038-the-test-suite-is-not-padded.md"
