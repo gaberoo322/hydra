@@ -334,6 +334,14 @@ export class OperatorChannel {
     return res;
   }
 
+  /** Silently close a bad key (no "recovered" message) — for a sibling key folded into another key's episode. */
+  async clear(dedupKey: string): Promise<void> {
+    await this.serialize(dedupKey, async () => {
+      this.localSent.delete(dedupKey);
+      await this.bounded("delDedup", () => this.store.delDedup(dedupKey));
+    });
+  }
+
   /** Append a Morning Brief item. Throws only when handed a page kind. */
   async brief(item: OperatorMessage): Promise<{ appended: boolean }> {
     const factPayload = Object.fromEntries((item.facts ?? []).map((f) => [f.label, f.value]));

@@ -100,6 +100,7 @@ describe("decideDisk (pure)", () => {
 interface Recorded {
   pages: OperatorMessage[];
   resolves: string[];
+  clears: string[];
   duCalls: string[];
   lines: string[];
 }
@@ -109,8 +110,9 @@ function fakeDeps(
   du: string[] | null = ["/tmp/vitest-leak 900000"],
   open: Set<string> = new Set(),
   failPageFor: string | null = null,
+  storeDown = false,
 ): { deps: DiskDeps; rec: Recorded } {
-  const rec: Recorded = { pages: [], resolves: [], duCalls: [], lines: [] };
+  const rec: Recorded = { pages: [], resolves: [], clears: [], duCalls: [], lines: [] };
   const deps: DiskDeps = {
     statfs: (p) => readings[p] ?? null,
     async topInodeConsumers(p) {
@@ -118,7 +120,7 @@ function fakeDeps(
       return du;
     },
     async isOpen(key) {
-      return open.has(key);
+      return storeDown ? null : open.has(key);
     },
     async page(msg) {
       if (failPageFor !== null && msg.dedupKey.includes(`:${failPageFor}:`)) throw new Error("channel down");
@@ -126,6 +128,9 @@ function fakeDeps(
     },
     async resolve(key) {
       rec.resolves.push(key);
+    },
+    async clear(key) {
+      rec.clears.push(key);
     },
     log: (l) => rec.lines.push(l),
   };
@@ -188,11 +193,47 @@ describe("runDisk episode semantics (QA round 1)", () => {
     assert.deepEqual(rec.duCalls, []);
   });
 
-  test("whole episode over (below warn - margin): critical resolves once", async () => {
-    const open = new Set([diskDedupKey("/tmp", "critical")]);
+  test("whole episode over (below warn - margin): critical resolves once, the folded warn key is cleared silently", async () => {
+    const open = new Set([diskDedupKey("/tmp", "critical"), diskDedupKey("/tmp", "warn")]);
     const { deps, rec } = fakeDeps({ "/tmp": fs(60, 5) }, undefined, open);
     await runDisk(deps, { paths: ["/tmp"], thresholds: T });
-    assert.deepEqual(rec.resolves, [diskDedupKey("/tmp", "critical"), diskDedupKey("/tmp", "warn")]);
+    assert.deepEqual(rec.resolves, [diskDedupKey("/tmp", "critical")]);
+    assert.deepEqual(rec.clears, [diskDedupKey("/tmp", "warn")]);
+  });
+
+  test("warn -> critical -> ok over three ticks: exactly one recovered message", async () => {
+    const open = new Set<string>();
+    const warnK = diskDedupKey("/tmp", "warn");
+    const critK = diskDedupKey("/tmp", "critical");
+    const readings: Record<string, StatfsReading | null> = { "/tmp": fs(85, 5) };
+    const { deps, rec } = fakeDeps(readings, undefined, open);
+    const origPage = deps.page;
+    deps.page = async (m) => {
+      await origPage(m);
+      open.add(m.dedupKey);
+    };
+    deps.resolve = async (k) => {
+      if (open.delete(k)) rec.resolves.push(k);
+    };
+    deps.clear = async (k) => {
+      open.delete(k);
+      rec.clears.push(k);
+    };
+    await runDisk(deps, { paths: ["/tmp"], thresholds: T });
+    readings["/tmp"] = fs(100, 5);
+    await runDisk(deps, { paths: ["/tmp"], thresholds: T });
+    readings["/tmp"] = fs(5, 5);
+    await runDisk(deps, { paths: ["/tmp"], thresholds: T });
+    assert.deepEqual(rec.pages.map((p) => p.dedupKey), [warnK, critK]);
+    assert.deepEqual(rec.resolves, [critK], "one recovered for the whole episode");
+    assert.equal(open.size, 0, "both keys closed");
+  });
+
+  test("store unreadable (isOpen null): a warn-only episode still pages (fails open)", async () => {
+    const { deps, rec } = fakeDeps({ "/tmp": fs(85, 5) }, undefined, new Set(), null, true);
+    await runDisk(deps, { paths: ["/tmp"], thresholds: T });
+    assert.equal(rec.pages.length, 1);
+    assert.equal(rec.pages[0].dedupKey, diskDedupKey("/tmp", "warn"));
   });
 
   test("sibling shape: a plain warn episode (no critical open) still pages warn", async () => {

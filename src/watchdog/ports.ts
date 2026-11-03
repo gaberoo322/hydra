@@ -377,6 +377,7 @@ export function createProductionDiskDeps(log: (line: string) => void): DiskDeps 
     page: (msg) => channel.page(msg),
     resolve: (key, title) => channel.resolve(key, title),
     isOpen: (key) => channel.isOpen(key),
+    clear: (key) => channel.clear(key),
     log,
   };
 }

@@ -217,6 +217,8 @@ export interface DiskDeps {
   isOpen(dedupKey: string): Promise<boolean | null>;
   page(msg: OperatorMessage): Promise<unknown>;
   resolve(dedupKey: string, title: string): Promise<unknown>;
+  /** Silently close a key (no "recovered" message): a warn key folded into a critical episode. */
+  clear(dedupKey: string): Promise<unknown>;
   log: (line: string) => void;
 }
 
@@ -236,13 +238,16 @@ export async function runDisk(deps: DiskDeps, config: DiskConfig): Promise<DiskV
     // Per-mount isolation (INV-4): a channel/du failure on one mount must not skip the next.
     try {
       let consumers: string[] | null | undefined;
+      // A warn key still open when critical was open is part of the critical episode: one "recovered" (INV-3).
+      const criticalWasOpen =
+        v.actions.critical === "resolve" && (await deps.isOpen(diskDedupKey(path, "critical"))) === true;
       for (const level of ["critical", "warn"] as const) {
         const action = v.actions[level];
         const key = diskDedupKey(path, level);
         if (action === "page") {
           if (level === "warn") {
-            // critical->warn is the same episode: never re-page warn while critical is open (or unknown).
-            if ((await deps.isOpen(diskDedupKey(path, "critical"))) !== false) continue;
+            // critical->warn is the same episode: never re-page warn while critical is open (an unreadable store is not "open").
+            if ((await deps.isOpen(diskDedupKey(path, "critical"))) === true) continue;
           }
           // du only when this key has no open episode (the first page of an episode); repeats are channel-suppressed.
           if (consumers === undefined && (await deps.isOpen(key)) !== true) {
@@ -251,6 +256,10 @@ export async function runDisk(deps: DiskDeps, config: DiskConfig): Promise<DiskV
           await deps.page(diskPageMessage(v, level, config.thresholds, consumers));
           say(`${level} page submitted for ${path} (dedupKey=${key}; the channel suppresses repeats within the episode)`);
         } else if (action === "resolve") {
+          if (level === "warn" && criticalWasOpen) {
+            await deps.clear(key);
+            continue;
+          }
           await deps.resolve(key, `${path} ${level} cleared: inodes ${v.inodePct ?? "n/a"}%, space ${v.blockPct ?? "n/a"}%`);
         }
       }
