@@ -226,7 +226,7 @@ The fixed point for the diff is **the PR's base ref at the time QA runs** — ty
 
 ```bash
 PR_VIEW_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra \
-  --json baseRefName,mergeStateStatus,headRefName,labels)
+  --json baseRefName,mergeStateStatus,headRefName,headRefOid,labels)
 FIXED_POINT=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.baseRefName')
 # mergeStateStatus (DIRTY ⇒ defer) is read by the reviewer admission gate at
 # step 6.6 — fetched here in the SAME gh pr view call, so the gate adds no new
@@ -1060,26 +1060,58 @@ RC_JSON=$(printf '%s' "$FOLD_JSON" | jq --argjson pr "$pr_number" --argjson tier
   | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts reviewer-commit) || RC_JSON=""
 RC_ACTION=$(printf '%s' "$RC_JSON" | jq -r '.action // "none"')
 if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
-  REVIEWED_HEAD=$(gh pr view $pr_number --repo gaberoo322/hydra --json headRefOid --jq .headRefOid)
+  # The head the fold REVIEWED: captured by the step-3 call, never re-read for the checkout.
+  REVIEWED_HEAD=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.headRefOid // ""')
   HEAD_REF=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.headRefName')
   RC_OK=1
+  [ -n "$REVIEWED_HEAD" ] || RC_OK=0
+  # Abort if the PR moved while the review ran: never stack a commit on an unreviewed head.
+  [ "$RC_OK" = 1 ] && { [ "$(gh pr view $pr_number --repo gaberoo322/hydra --json headRefOid --jq .headRefOid)" = "$REVIEWED_HEAD" ] || RC_OK=0; }
   # Detached checkout of the EXACT reviewed head inside this session's isolation worktree.
   git rev-parse --git-dir | grep -q '\.git/worktrees/' || RC_OK=0
-  [ "$RC_OK" = 1 ] && git fetch origin "$HEAD_REF" && git checkout --detach "$REVIEWED_HEAD" || RC_OK=0
-  # ... apply ONLY the class-A edits for .paths[] in the working tree (and the PR-body text in
-  # a private tempfile when .bodyFix is true), then run each touched file's own regenerator
-  # (npm run docs:inventories for docs/generated/, the ratchet's --update-baseline script for
-  # test/fixtures/*-baseline.json). Anything that needs a non-class-A edit aborts: RC_OK=0.
+  [ "$RC_OK" = 1 ] && { git fetch origin "$HEAD_REF" && git checkout --detach "$REVIEWED_HEAD" || RC_OK=0; }
+  ORIG_BODY_FILE=$(mktemp); RC_BODY_FILE=$(mktemp)   # private tempfiles
+  BODY_FIX=$(printf '%s' "$RC_JSON" | jq -r '.bodyFix // false')
+  RC_PATHS=$(printf '%s' "$RC_JSON" | jq -r '.paths[]?')
+  # Save the ORIGINAL body so a failed push can restore it.
+  [ "$RC_OK" = 1 ] && { gh pr view $pr_number --repo gaberoo322/hydra --json body --jq .body > "$ORIG_BODY_FILE" || RC_OK=0; }
   if [ "$RC_OK" = 1 ]; then
-    RC_BODY_FILE=$(mktemp)   # private tempfile; the corrected PR body (Closes-ref and reconciliation kept)
-    # ... write the corrected body into "$RC_BODY_FILE"; only ADD touched paths to "## Files in scope" ...
-    git add -A
-    git commit --allow-empty -q -m "fix(qa): reviewer class-A fixes for PR #$pr_number" -m "QA-Fix: A" || RC_OK=0
+    # Edit step. For each blocking row, in order: open the file named in its File:line cell, apply
+    # exactly the change its Fix cell names (only paths in RC_PATHS), then run the file's own
+    # regenerator (npm run docs:inventories for docs/generated/, the ratchet's --update-baseline
+    # script for test/fixtures/*-baseline.json). When .bodyFix is true, seed "$RC_BODY_FILE" from
+    # "$ORIG_BODY_FILE" and change only the named section (only ADD touched paths to
+    # "## Files in scope"). A row you cannot resolve with a class-A edit aborts: RC_OK=0.
+    #
+    # Stage ONLY the approved class-A paths (never `git add -A`: it would take node_modules and strays).
+    [ -z "$RC_PATHS" ] || { printf '%s\n' "$RC_PATHS" | xargs git add -- || RC_OK=0; }
+    STAGED=$(git diff --cached --name-only)
+    # Every staged file must be an approved path.
+    [ -z "$STAGED" ] || { printf '%s\n' "$STAGED" | grep -qvxF -f <(printf '%s\n' "$RC_PATHS") && RC_OK=0; }
+    # Something must change. An empty commit or an unchanged body would flip FAIL to PASS with no fix.
+    if [ -z "$STAGED" ]; then
+      [ "$BODY_FIX" = true ] && ! cmp -s "$ORIG_BODY_FILE" "$RC_BODY_FILE" || RC_OK=0
+    fi
+    # A corrected body must be non-empty and keep its Closes-ref.
+    if [ "$BODY_FIX" = true ]; then
+      { [ -s "$RC_BODY_FILE" ] && grep -Eq 'Closes #[0-9]+' "$RC_BODY_FILE"; } || RC_OK=0
+    fi
+    # Re-verify each blocking finding against the NEW diff before the verdict may flip: re-read each
+    # row's File:line and confirm its Fix landed; any row still unresolved aborts: RC_OK=0.
+    # A body-only round has nothing to stage: the proof below runs on the unchanged head and the
+    # push is a no-op, so only the body edit lands (step below).
+    if [ "$RC_OK" = 1 ] && [ -n "$STAGED" ]; then
+      git commit -q -m "fix(qa): reviewer class-A fixes for PR #$pr_number" -m "QA-Fix: A" || RC_OK=0
+    fi
   fi
-  # Local deterministic proof BEFORE any push; the reviewer never hand-judges it.
-  [ "$RC_OK" = 1 ] && { node --experimental-strip-types scripts/ci/qa-fix-proof.ts --base "$FIXED_SHA" --head HEAD || RC_OK=0; }
-  # Body BEFORE push, so the synchronize payload carries the corrected body.
-  [ "$RC_OK" = 1 ] && { gh pr edit $pr_number --repo gaberoo322/hydra --body-file "$RC_BODY_FILE" || RC_OK=0; }
+  # Local deterministic proof BEFORE any push; the reviewer never hand-judges it. Base is the head
+  # the fold reviewed.
+  [ "$RC_OK" = 1 ] && { node --experimental-strip-types scripts/ci/qa-fix-proof.ts --base "$REVIEWED_HEAD" --head HEAD || RC_OK=0; }
+  # Body BEFORE push, so the synchronize payload carries the corrected body. Only when .bodyFix is true.
+  BODY_EDITED=0
+  if [ "$RC_OK" = 1 ] && [ "$BODY_FIX" = true ]; then
+    gh pr edit $pr_number --repo gaberoo322/hydra --body-file "$RC_BODY_FILE" && BODY_EDITED=1 || RC_OK=0
+  fi
   # Plain fast-forward push only. A rejected push (the remote moved) aborts the commit path.
   [ "$RC_OK" = 1 ] && { git push origin "HEAD:refs/heads/$HEAD_REF" || RC_OK=0; }
   if [ "$RC_OK" = 1 ]; then
@@ -1088,9 +1120,13 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
     REVIEW_VERDICT=PASS; VERDICT=PASS-pending-CI; BLOCKERS=0; MAX_SEVERITY=none
     REVIEW_REPORT="${REVIEW_REPORT}
 
-Reviewer-fixed in ${QA_FIXES} (QA-Fix: A): every blocking row above is fixed-by ${QA_FIXES}."
+Reviewer-fixed in ${QA_FIXES} (QA-Fix: A): each blocking row above is fixed-by ${QA_FIXES}."
+    # INV-4: annotate each blocking row of the findings table in $REVIEW_REPORT with
+    # "fixed-by ${QA_FIXES}" in its Fix cell; never delete, filter or re-grade a row.
   else
-    git checkout --detach "$REVIEWED_HEAD" 2>/dev/null || true   # nothing pushed; the original FAIL stands at the original head
+    # Nothing pushed: restore the original body if we changed it, and the original detached head.
+    [ "$BODY_EDITED" = 1 ] && { gh pr edit $pr_number --repo gaberoo322/hydra --body-file "$ORIG_BODY_FILE" || true; }
+    git checkout --detach "$REVIEWED_HEAD" 2>/dev/null || true   # the original FAIL stands at the original head
   fi
 fi
 ```
