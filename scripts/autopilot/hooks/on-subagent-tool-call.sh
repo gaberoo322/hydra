@@ -76,7 +76,9 @@
 #                        (default: 1000)
 #   HYDRA_API_BASE       (default: http://localhost:4000) — dispatch-registry POST target
 #   HYDRA_DISPATCH_REGISTER_MARKER_DIR
-#                        (default: $TMPDIR or /tmp) — once-per-session guard dir
+#                        (default: ${XDG_STATE_HOME:-$HOME/.local/state}/hydra/dispatch-markers;
+#                        ${TMPDIR:-/tmp} only if HOME is empty) — once-per-session guard dir.
+#                        Markers older than ~1 day are pruned on each marker write (#5336).
 #
 
 set -uo pipefail
@@ -86,7 +88,12 @@ REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
 REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
 MAXLEN_CAP="${HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN:-1000}"
 API_BASE="${HYDRA_API_BASE:-http://localhost:4000}"
-DISPATCH_REGISTER_MARKER_DIR="${HYDRA_DISPATCH_REGISTER_MARKER_DIR:-${TMPDIR:-/tmp}}"
+if [ -n "${HOME:-}" ]; then
+  DEFAULT_MARKER_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/hydra/dispatch-markers"
+else
+  DEFAULT_MARKER_DIR="${TMPDIR:-/tmp}"
+fi
+DISPATCH_REGISTER_MARKER_DIR="${HYDRA_DISPATCH_REGISTER_MARKER_DIR:-$DEFAULT_MARKER_DIR}"
 
 KNOWN_SLOTS=(
   dev_orch
@@ -226,6 +233,17 @@ task_id="$agent_id"
 d_skill=""; d_dispatch_id=""; d_run_id=""
 child_marker="${DISPATCH_REGISTER_MARKER_DIR%/}/hydra-dispatch-registered-${agent_id}"
 child_registered=0
+
+# Write the once-per-dispatch marker ($1 = content) and prune stale markers.
+# Called only on the WRITE path (once per dispatch), never per tool call.
+# Best-effort: every failure is swallowed (next tool call re-registers).
+write_child_marker() {
+  mkdir -p "${DISPATCH_REGISTER_MARKER_DIR%/}" 2>/dev/null || true
+  printf '%s\n' "$1" > "$child_marker" 2>/dev/null || true
+  find "${DISPATCH_REGISTER_MARKER_DIR%/}" -maxdepth 1 -type f \
+    -name 'hydra-dispatch-registered-*' -mtime +1 -delete 2>/dev/null || true
+}
+
 resolve_child_dispatch() {
   if [ -e "$child_marker" ]; then
     local first
@@ -248,7 +266,7 @@ resolve_child_dispatch() {
   [ -n "$first_user_text" ] || return 1
   sentinel_line="$(extract_sentinel_line "$first_user_text")"
   if [ -z "$sentinel_line" ]; then
-    printf 'none\n' > "$child_marker" 2>/dev/null || true
+    write_child_marker none
     return 1
   fi
   d_skill="$(extract_sentinel_field "$sentinel_line" skill)"
@@ -491,7 +509,7 @@ register_subagent_dispatch() {
   # Registered. Drop the once-per-session marker so subsequent tool calls in
   # this session skip the scrape+POST. Best-effort: a failure here just means
   # we re-register (idempotent) on the next tool call.
-  printf '%s\t%s\t%s\n' "$d_skill" "$d_dispatch_id" "$d_run_id" > "$child_marker" 2>/dev/null || true
+  write_child_marker "$(printf '%s\t%s\t%s' "$d_skill" "$d_dispatch_id" "$d_run_id")"
   return 0
 }
 
