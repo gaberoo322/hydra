@@ -55,7 +55,6 @@ export {
 // public surface is unchanged.
 export {
   getWeeklyQuotaTokens,
-  getFiveHourQuotaTokens,
   getOAuthUsageTtlMs,
   getOAuthUsageMaxStaleMs,
   getOAuthUsageBackoffBaseMs,

@@ -177,13 +177,12 @@ export function weightedQuotaBurn(
 
 /** The weighted-burn numerator triple over the three rolling windows (issue #2247). */
 export interface WeightedBurns {
-  weightedBurn5h: number;
   weightedBurn7d: number;
   weightedBurn24h: number;
 }
 
 /**
- * Weighted quota-burn numerators over the 5h / 7d / 24h windows (issue #873;
+ * Weighted quota-burn numerators over the 7d / 24h windows (issue #873;
  * extracted to a named pure helper in #2247). Composes the {@link weightedQuotaBurn}
  * two-axis fold (Axis A cache-read weight INSIDE each family, Axis B per-model-family
  * Quota Weight OUTSIDE) over each window's per-family accumulator. These are the
@@ -196,14 +195,12 @@ export interface WeightedBurns {
  * replaces. Exported for direct unit test, NOT added to the `index.ts` public barrel.
  */
 export function deriveWeightedBurns(
-  byModel5h: Record<ModelFamily, TokenBreakdown>,
   byModel7d: Record<ModelFamily, TokenBreakdown>,
   byModel24h: Record<ModelFamily, TokenBreakdown>,
   cacheReadWeight: number,
   burnWeights: { opus: number; sonnet: number; haiku: number },
 ): WeightedBurns {
   return {
-    weightedBurn5h: weightedQuotaBurn(byModel5h, cacheReadWeight, burnWeights),
     weightedBurn7d: weightedQuotaBurn(byModel7d, cacheReadWeight, burnWeights),
     weightedBurn24h: weightedQuotaBurn(byModel24h, cacheReadWeight, burnWeights),
   };
@@ -211,7 +208,6 @@ export function deriveWeightedBurns(
 
 /** The three transcript+calibration estimate percentages (issue #2247). */
 export interface EstimatePercents {
-  estimatePercentLast5h: number;
   estimatePercentLast7d: number;
   projectedWeeklyPercent: number;
 }
@@ -231,11 +227,9 @@ export interface EstimatePercents {
 export function deriveEstimatePercents(
   burns: WeightedBurns,
   weeklyQuota: number,
-  fiveHourQuota: number,
   calibrated: boolean,
 ): EstimatePercents {
   return {
-    estimatePercentLast5h: calibrated ? (burns.weightedBurn5h / fiveHourQuota) * 100 : 0,
     estimatePercentLast7d: calibrated ? (burns.weightedBurn7d / weeklyQuota) * 100 : 0,
     projectedWeeklyPercent: calibrated ? ((burns.weightedBurn24h * 7) / weeklyQuota) * 100 : 0,
   };
@@ -391,7 +385,7 @@ export function derivePacingState(
  * headline percentages plus the OAuth observability fields.
  */
 export interface OAuthRebase {
-  percentLast5h: number;
+  percentLast5h: number | null;
   percentLast7d: number;
   usageSource: "oauth" | "estimate";
   oauthError: string | null;
@@ -423,7 +417,6 @@ export interface OAuthRebase {
  */
 export function rebaseOnOAuth(
   cachedOAuth: ScanResult["oauth"],
-  estimatePercentLast5h: number,
   estimatePercentLast7d: number,
 ): OAuthRebase {
   const oauth = cachedOAuth.result;
@@ -432,7 +425,8 @@ export function rebaseOnOAuth(
   // narrow a discriminated union without strictNullChecks).
   if (isOAuthUsageOk(oauth)) {
     return {
-      percentLast5h: oauth.data.fiveHour.utilization,
+      // `null` when the meter body carries no `five_hour` window (no 5h cap).
+      percentLast5h: oauth.data.fiveHour ? oauth.data.fiveHour.utilization : null,
       percentLast7d: oauth.data.sevenDay.utilization,
       usageSource: "oauth",
       // A served-stale last-good still backs the headline with a stale sentinel
@@ -440,7 +434,7 @@ export function rebaseOnOAuth(
       oauthError: cachedOAuth.stale ? "oauth-usage-stale" : null,
       oauthStale: cachedOAuth.stale,
       oauthAgeMs: cachedOAuth.ageMs,
-      oauthFiveHourResetsAt: oauth.data.fiveHour.resetsAt,
+      oauthFiveHourResetsAt: oauth.data.fiveHour ? oauth.data.fiveHour.resetsAt : null,
       oauthSevenDayResetsAt: oauth.data.sevenDay.resetsAt,
     };
   }
@@ -454,7 +448,7 @@ export function rebaseOnOAuth(
     "[usage-tracker] OAuth usage meter unavailable; falling back to transcript estimate for percentLast5h/percentLast7d",
   );
   return {
-    percentLast5h: estimatePercentLast5h,
+    percentLast5h: null,
     percentLast7d: estimatePercentLast7d,
     usageSource: "estimate",
     oauthError: oauth.code,
@@ -782,8 +776,7 @@ export function assembleSnapshot(
   } = scan;
 
   const weeklyQuota = calibration.weeklyQuotaTokens;
-  const fiveHourQuota = calibration.fiveHourQuotaTokens;
-  const calibrated = weeklyQuota > 0 && fiveHourQuota > 0;
+  const calibrated = weeklyQuota > 0;
 
   const weights = {
     opus: calibration.quotaWeightOpus,
@@ -810,7 +803,6 @@ export function assembleSnapshot(
   // The weighted-burn NUMERATOR triple — composed pure fold extracted to
   // {@link deriveWeightedBurns} (issue #2247).
   const weightedBurns = deriveWeightedBurns(
-    byModel5h,
     byModel7d,
     byModel24h,
     cacheReadWeight,
@@ -821,8 +813,11 @@ export function assembleSnapshot(
   // Pure derivation extracted to {@link deriveEstimatePercents} (issue #2247).
   // `projectedWeeklyPercent` is retained VERBATIM (a forward-looking burst
   // projection) — #4121 decoupled `pacingState` from it, not its meaning.
-  const { estimatePercentLast5h, estimatePercentLast7d, projectedWeeklyPercent } =
-    deriveEstimatePercents(weightedBurns, weeklyQuota, fiveHourQuota, calibrated);
+  const { estimatePercentLast7d, projectedWeeklyPercent } = deriveEstimatePercents(
+    weightedBurns,
+    weeklyQuota,
+    calibrated,
+  );
 
   // OAuth rebase (issue #1083). When the authoritative meter read succeeds, the
   // headline `percentLast5h`/`percentLast7d` and the 5h `emergencyStop` are
@@ -850,7 +845,7 @@ export function assembleSnapshot(
     oauthAgeMs,
     oauthFiveHourResetsAt,
     oauthSevenDayResetsAt,
-  } = rebaseOnOAuth(scan.oauth, estimatePercentLast5h, estimatePercentLast7d);
+  } = rebaseOnOAuth(scan.oauth, estimatePercentLast7d);
 
   // Both hard-stops (the 5h `emergencyStop` and the weekly `weeklyEmergencyStop`)
   // are derived by the pure `deriveHardStop` threshold predicate (issue #2041),
@@ -1005,7 +1000,6 @@ export function assembleSnapshot(
     quotaWeightLast7d,
     quotaWeightCalibrated,
     weeklyQuotaTokens: weeklyQuota,
-    fiveHourQuotaTokens: fiveHourQuota,
     filesScanned,
     filesSkippedByMtime,
     linesParsed,

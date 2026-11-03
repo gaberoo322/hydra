@@ -116,8 +116,8 @@ export const AutopilotIdleDiagnosticsResponseSchema = z
     calibrated: z.boolean(),
     /** Whether the 5h emergency-stop cap (>=90%) is tripped. */
     emergencyStop: z.boolean(),
-    /** 5h rolling burn as a % of the calibrated 5h quota (0 when uncalibrated). */
-    percentLast5h: z.number(),
+    /** 5h meter utilization %, or `null` when the plan carries no 5h window. */
+    percentLast5h: z.number().nullable(),
     /** Pacing-curve numerics (state, target, sinceReset, anchor). */
     pace: IdlePaceSchema,
     /** Autopilot run liveness (dead-pid-swept lifecycle). */
