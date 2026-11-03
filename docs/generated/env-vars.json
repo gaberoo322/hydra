@@ -414,7 +414,7 @@
           "path": "scripts/autopilot/pace-gate.sh"
         },
         {
-          "path": "src/api/usage.ts"
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
@@ -561,7 +561,7 @@
           "path": "scripts/autopilot/pace-gate.sh"
         },
         {
-          "path": "src/api/usage.ts"
+          "path": "src/cost/config.ts"
         }
       ],
       "inEnvExample": false,
@@ -1005,15 +1005,12 @@
       "name": "HYDRA_CLAUDE_CREDENTIALS_PATH",
       "readSites": [
         {
-          "path": "scripts/autopilot/pace-gate.sh"
-        },
-        {
           "path": "src/cost/oauth-usage.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/pace-gate.sh"
+        "path": "src/cost/oauth-usage.ts"
       }
     },
     {

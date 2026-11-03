@@ -31,8 +31,8 @@ Where the text comes from — nothing here is a second copy of a rule:
     routing table became a pointer to that column; dispatch-time lookups read
     data, not prose), then `prompt_args.escalate_model` (#3274), then the
     Fable out-of-credits pre-resolution (#4585:
-    `state.usage_eligibility.reasons.fableExhaustedUntil` in the future →
-    $HYDRA_AUTOPILOT_FALLBACK_MODEL or `opus`).
+    `state.usage_eligibility.admission.modelFallbackReason` set →
+    `admission.launchModel`, the verdict's one launch-model rule, #5103).
   * The skill is the action's, except `wayfinder_orch`, whose
     `prompt_args.ticket_type` selects hydra-issue-research / hydra-dev at
     dispatch time (#3351). stamp-slot.py imports `effective_skill` from here
@@ -59,8 +59,6 @@ import json
 import os
 import re
 import sys
-import time
-from datetime import datetime, timezone
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # The Turn Snapshot accessor (ADR-0043, #4934) — the ONE reader of this
@@ -80,7 +78,6 @@ PLAN_PATH = os.environ.get("HYDRA_AUTOPILOT_PLAN", "/tmp/hydra-autopilot-plan.js
 
 ORCH_REPO = "gaberoo322/hydra"
 MODEL_ALIASES = ("fable", "sonnet", "haiku", "opus")
-DEFAULT_FALLBACK_MODEL = "opus"
 
 # The forbidden-ending block for every class that is NOT dev_orch / dev_target
 # / qa_orch (those three read their playbook fences). Short on purpose: these
@@ -270,31 +267,7 @@ def model_column(path: str = CLASSES_PATH) -> dict[str, str | None]:
     return table
 
 
-def _parse_instant(value) -> float | None:
-    """ISO-8601 (Z or offset) or epoch seconds/ms → epoch seconds; None if unreadable."""
-    if value is None or value == "":
-        return None
-    if isinstance(value, (int, float)):
-        v = float(value)
-        return v / 1000.0 if v > 1e11 else v
-    s = str(value).strip()
-    try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        try:
-            v = float(s)
-            return v / 1000.0 if v > 1e11 else v
-        except ValueError:
-            return None
-
-
-def fable_exhausted(state: dict, now: float | None = None) -> bool:
-    reasons = ts.usage_eligibility(state).get("reasons") or {}
-    until = _parse_instant(reasons.get("fableExhaustedUntil")) if isinstance(reasons, dict) else None
-    return until is not None and until > (time.time() if now is None else now)
-
-
-def resolve_model(slot: str, action: dict, table: dict[str, str | None], state: dict, now: float | None = None) -> tuple[str | None, str]:
+def resolve_model(slot: str, action: dict, table: dict[str, str | None], state: dict) -> tuple[str | None, str]:
     """(alias-or-None, source). Static row → escalate_model hint → Fable pre-resolution."""
     prompt_args = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
     hint = prompt_args.get("escalate_model")
@@ -304,9 +277,19 @@ def resolve_model(slot: str, action: dict, table: dict[str, str | None], state: 
         model, source = table[slot], "model-column" if table[slot] else "model-column:inherit"
     else:
         model, source = None, "unmapped-class:inherit"
-    if model == "fable" and fable_exhausted(state, now):
-        fallback = os.environ.get("HYDRA_AUTOPILOT_FALLBACK_MODEL", "").strip().lower() or DEFAULT_FALLBACK_MODEL
-        return fallback, f"{source}→fable-exhausted-fallback"
+    # #5103: the launch-model rule lives in the admission verdict
+    # (src/cost/admission.ts); this reads the same decision off the projection
+    # instead of keeping a second copy. A snapshot without `.admission`, or one
+    # with no fallback reason, resolves from the column (fail-safe).
+    adm = ts.usage_eligibility(state).get("admission")
+    if (
+        isinstance(adm, dict)
+        and adm.get("modelFallbackReason")
+        and model == adm.get("primaryModel")
+        and isinstance(adm.get("launchModel"), str)
+        and adm["launchModel"]
+    ):
+        return adm["launchModel"], f"{source}→fable-exhausted-fallback"
     return model, source
 
 
@@ -637,11 +620,11 @@ def describe(slot: str, action: dict, skill: str | None) -> str:
     return f"{slot}: {skill}{tail}"
 
 
-def render(slot: str, action: dict, state: dict, playbook: str, fragment: str, notes: str | None = None, now: float | None = None) -> dict:
+def render(slot: str, action: dict, state: dict, playbook: str, fragment: str, notes: str | None = None) -> dict:
     blocks = preamble_blocks(playbook, fragment)
     table = model_column()
     skill = effective_skill(action)
-    model, source = resolve_model(slot, action, table, state, now)
+    model, source = resolve_model(slot, action, table, state)
     isolation = action.get("isolation") or "worktree"
     return {
         "slot": slot,

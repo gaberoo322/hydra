@@ -754,3 +754,19 @@ export function getBurnFamilyWeights(): { opus: number; sonnet: number; haiku: n
     haiku: getBurnFamilyWeightHaiku(),
   };
 }
+
+/**
+ * The launch-model pair (issues #4585, #5103). PRIMARY is what the parent
+ * Autopilot session normally runs on (`HYDRA_AUTOPILOT_PRIMARY_MODEL`, default
+ * `fable`); FALLBACK is what it switches to while the model-scoped exhaustion
+ * flag is future (`HYDRA_AUTOPILOT_FALLBACK_MODEL`, default `opus`). The
+ * eligibility route uses these as the DEFAULT when the launcher sends no pair
+ * of its own. Pure + env-only.
+ */
+export function getPrimaryLaunchModel(): string {
+  return process.env.HYDRA_AUTOPILOT_PRIMARY_MODEL || "fable";
+}
+
+export function getFallbackLaunchModel(): string {
+  return process.env.HYDRA_AUTOPILOT_FALLBACK_MODEL || "opus";
+}

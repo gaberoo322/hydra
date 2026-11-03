@@ -67,4 +67,11 @@ export const EligibilityQuerySchema = z.object({
   // the route 500s, contradicting the never-400 contract.
   serviceActive: booleanFlag().catch(false),
   pidAlive: booleanFlag().catch(false),
+  // #5103: the launcher's own launch-model pair (the unit's env, which can
+  // differ from the server's) and the nudge stamp's epoch-seconds. Garbled
+  // values degrade to `undefined` -> the route applies the server default /
+  // "no stamp"; never a 400.
+  primaryModel: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().catch(undefined),
+  fallbackModel: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().catch(undefined),
+  nudgeLastAt: z.coerce.number().int().nonnegative().optional().catch(undefined),
 });
