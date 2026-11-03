@@ -331,6 +331,26 @@ describe("runLaunchFlow — glm-sterile (issues #3868, #4691; INV-9)", () => {
     assert.equal(sinceOf(h.store, "glm-sterile"), null);
   });
 
+  test("INV-4: an UNREADABLE heartbeat is a failed measurement — streak and fired marker untouched, no recovered page, zero gh calls", async () => {
+    h.state.heartbeatMs = "unreadable";
+    seedSince(h.store, "glm-sterile", T0 - 5 * HOUR);
+    seedFired(h.store, "glm-sterile");
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(sinceOf(h.store, "glm-sterile"), T0 - 5 * HOUR, "streak untouched");
+    assert.equal(firedOf(h.store, "glm-sterile"), true, "fired marker untouched");
+    assert.equal(h.resolves.length, 0, "no spurious recovered page");
+    assert.equal(h.ghCalls.length, 0);
+  });
+
+  test("sibling pin: an ABSENT heartbeat (drainer measurably down) still clears the streak and recovers", async () => {
+    h.state.heartbeatMs = null;
+    seedSince(h.store, "glm-sterile", T0 - 5 * HOUR);
+    seedFired(h.store, "glm-sterile");
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(sinceOf(h.store, "glm-sterile"), null);
+    assert.equal(h.resolves.length, 1);
+  });
+
   test("quiet: no last-pick record — fail-quiet like the heartbeat's own direction, zero gh calls", async () => {
     h.state.pick = null;
     seedSince(h.store, "glm-sterile", T0 - 5 * HOUR);

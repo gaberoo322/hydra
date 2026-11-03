@@ -97,7 +97,7 @@ run_wedge_cli() { run_watchdog_cli wedge "hydra-autopilot-watchdog:" 90; }
 # 90s bound covers the 20s-capped `du --inodes` walk plus the channel calls.
 run_disk_cli() { run_watchdog_cli disk "hydra-disk-watchdog:" 90; }
 # LAUNCH FLOW (issue #5097): pace-gate last-tick streaks + the GLM-sterile signal;
-# the 90s bound covers the 20s CLI force-exit plus one gh REST call.
+# the 90s bound covers the 60s CLI force-exit (LAUNCH_FLOW_FORCE_EXIT_MS).
 run_launch_flow_cli() { run_watchdog_cli launch-flow "hydra-launch-flow-watchdog:" 90; }
 
 # =============================================================================

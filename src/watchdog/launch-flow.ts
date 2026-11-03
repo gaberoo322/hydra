@@ -135,6 +135,14 @@ export const LAUNCH_FLOW_PAGE_KIND: Readonly<Record<LaunchFlowEpisodeSignal, str
   "glm-sterile": IN_BAND_EVENT["glm-sterile"].type,
 };
 
+/**
+ * Hard ceiling on a launch-flow tick (the Operator Channel CLI force-exit
+ * precedent). Must exceed GH_EXEC_TIMEOUT_MS plus one Operator Channel page so a
+ * slow call after the fired marker is SET cannot be cut off and lose its page;
+ * it stays under the bash wrapper's 90s `timeout`.
+ */
+export const LAUNCH_FLOW_FORCE_EXIT_MS = 60_000;
+
 export interface LaunchFlowDeps {
   /** One typed HGETALL; `null` = absent. THROWS on a Redis failure. */
   lastTick(): Promise<PaceGateLastTick | null>;
@@ -167,6 +175,8 @@ export async function readGlmSterile(
   windowHours: number,
 ): Promise<GlmSterileRead> {
   const hb = await deps.glm.liveness(nowMs);
+  // An unreadable heartbeat is a failed measurement, not a measured "drainer down" (INV-4).
+  if (hb.reason === "unreadable") return { known: false };
   if (!hb.live || hb.heartbeatMs === null || hb.heartbeatMs > nowMs) return { known: true, member: false };
 
   const pick = await deps.glm.lastPick();

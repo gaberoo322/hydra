@@ -79,7 +79,7 @@ export interface Harness {
   /** Mutable scenario state. */
   state: {
     tick: PaceGateLastTick | null | "throw";
-    heartbeatMs: number | null;
+    heartbeatMs: number | null | "unreadable";
     pick: GlmDrainerLastPick | null;
     drainerPrs: number | null | "throw";
     failPage: boolean;
@@ -110,6 +110,7 @@ export function makeHarness(): Harness {
     store,
     glm: {
       async liveness(nowMs: number): Promise<GlmDrainerLiveness> {
+        if (state.heartbeatMs === "unreadable") return { live: false, heartbeatMs: null, reason: "unreadable" };
         if (state.heartbeatMs === null) return { live: false, heartbeatMs: null, reason: "absent" };
         const age = nowMs - state.heartbeatMs;
         return age > GLM_DRAINER_HEARTBEAT_STALE_MS

@@ -61,6 +61,7 @@ import {
   DEFAULT_LAUNCH_METER_DARK_S,
   DEFAULT_LAUNCH_PAUSE_S,
   DEFAULT_LAUNCH_QUOTA_S,
+  LAUNCH_FLOW_FORCE_EXIT_MS,
   LAUNCH_FLOW_LOG_PREFIX,
   runLaunchFlow,
 } from "../src/watchdog/launch-flow.ts";
@@ -71,15 +72,6 @@ import {
   createProductionWedgeDeps,
 } from "../src/watchdog/ports.ts";
 import { runWedge, WEDGE_LOG_PREFIX } from "../src/watchdog/wedge.ts";
-
-/**
- * Hard ceiling on a launch-flow tick (the Operator Channel CLI force-exit
- * precedent). Must exceed the sum of the slowest legitimate steps (the 30s gh
- * query in src/watchdog/ports.ts plus the Operator Channel page) so a slow call
- * after the fired marker is SET cannot be cut off and lose its page; it stays
- * under the bash wrapper's 90s `timeout`.
- */
-const LAUNCH_FLOW_FORCE_EXIT_MS = 60_000;
 
 function envNumber(name: string, fallback: number): number {
   const raw = process.env[name];

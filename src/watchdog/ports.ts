@@ -437,13 +437,16 @@ export function countDrainerPrsInRows(rows: unknown, windowStartMs: number): num
 }
 
 /** Production adapter: `gh api repos/<repo>/pulls?...` over the exec seam (REST, never GraphQL). */
+/** Timeout for the one gh API call a launch-flow tick makes. */
+export const GH_EXEC_TIMEOUT_MS = 30_000;
+
 export function createProductionWatchdogGithub(): WatchdogGithub {
   return {
     async countDrainerPrsCreatedSince(windowStartMs) {
       const raw = await runExec(
         ghBin(),
         ["api", `repos/${resolveOrchestratorRepo()}/pulls?state=all&sort=created&direction=desc&per_page=100`],
-        { timeout: 30_000 },
+        { timeout: GH_EXEC_TIMEOUT_MS },
       );
       if (raw.exitCode !== 0 || raw.timedOut || raw.spawnErrorCode) return null;
       try {
