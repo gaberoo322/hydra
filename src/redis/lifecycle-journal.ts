@@ -67,7 +67,6 @@ export type JournalWriteResult = { ok: true } | { ok: false; error: string };
 
 function fail(op: string, err: unknown): { ok: false; error: string } {
   const message = err instanceof Error ? err.message : String(err);
-  logger.error({ err }, `[lifecycle-journal] ${op} failed`);
   return { ok: false, error: `[lifecycle-journal] ${op} failed: ${message}` };
 }
 
@@ -84,6 +83,7 @@ export async function appendLifecycleEntry(
     await r.ltrim(key, -LIFECYCLE_JOURNAL_MAX_ENTRIES, -1);
     return { ok: true };
   } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] appendLifecycleEntry failed");
     return fail("appendLifecycleEntry", err);
   }
 }
@@ -107,6 +107,7 @@ export async function readLifecycleJournal(repo: string, issue: number): Promise
     }
     return { ok: true, entries };
   } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] readLifecycleJournal failed");
     return fail("readLifecycleJournal", err);
   }
 }
@@ -117,6 +118,7 @@ export async function expireJournalOnClose(repo: string, issue: number): Promise
     await getRedisConnection().expire(lifecycleJournalKey(repo, issue), journalCloseTtlSeconds());
     return { ok: true };
   } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] expireJournalOnClose failed");
     return fail("expireJournalOnClose", err);
   }
 }
@@ -128,6 +130,7 @@ export async function persistJournal(repo: string, issue: number): Promise<Journ
     await getRedisConnection().eval("return redis.call('PERSIST', KEYS[1])", 1, lifecycleJournalKey(repo, issue));
     return { ok: true };
   } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] persistJournal failed");
     return fail("persistJournal", err);
   }
 }
@@ -151,6 +154,7 @@ export async function openDispatchClaim(
     const existingRaw = await r.get(key);
     return { ok: false, code: "claim-held", existing: parseClaim(existingRaw) };
   } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] openDispatchClaim failed");
     const f = fail("openDispatchClaim", err);
     return { ok: false, code: "redis-failed", error: f.error };
   }
@@ -169,6 +173,7 @@ export async function closeDispatchClaim(repo: string, issue: number): Promise<C
     await r.del(key);
     return { ok: true, prior };
   } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] closeDispatchClaim failed");
     return fail("closeDispatchClaim", err);
   }
 }
