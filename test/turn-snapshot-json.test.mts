@@ -938,6 +938,8 @@ describe("turn snapshot JSON: replay mode fails loud on a signal the document la
 /** Schema keys decide.py deliberately does not read — each a name→rationale pair, honesty-tested below. */
 const OBSERVABILITY_ONLY_SIGNALS = new Map<string, string>([
   ["hitl_grill_open", "the operator-admission inbox depth (#4391); decide.py gates on hitl_grill_saturated, the operator reads the depth"],
+  ["orch_stale_in_progress_items", "turn.sh's Phase 1.5 stale-recovery pass reads it through turn_snapshot.py stale-recovery (#5344), not decide.py"],
+  ["orch_stale_blocked_items", "turn.sh's Phase 1.5 stale-recovery pass reads it through turn_snapshot.py stale-recovery (#5344), not decide.py"],
 ]);
 
 /** Target board counts that are advisory only, never a policy input (#3973, #4528, #4823). */
