@@ -227,7 +227,7 @@ export async function runPreflight(args: PreflightArgs, deps: PreflightDeps): Pr
   if (mergeStateStatus !== "") admissionInput.mergeStateStatus = mergeStateStatus;
   const adm = await phase("admission", admissionInput);
   const admission = adm !== null && isRecord(adm.admission) ? adm.admission : null;
-  let gateAction: "admit" | "defer" | "skip-required-failed" = "admit";
+  let gateAction = "admit" as "admit" | "defer" | "skip-required-failed";
   let gateReason = "gate produced no output; fail-closed to full review";
   if (admission !== null && typeof admission.action === "string") {
     gateAction = admission.action as typeof gateAction;

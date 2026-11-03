@@ -70,7 +70,7 @@ export async function runPacket(pre: PreflightReady, deps: PacketDeps): Promise<
   // Standards-axis catalog FIRST: an unreadable catalog is a pre-spawn exit,
   // before a single packet file exists.
   const standards = await deps.loadStandards(deps.cwd);
-  if (!standards.ok) {
+  if (standards.ok === false) {
     console.error(`[hydra-qa] standards catalog read failed: ${standards.message}`);
     return { exitCode: 1, result: null, reason: `standards catalog read failed: ${standards.message}` };
   }
