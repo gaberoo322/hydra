@@ -92,6 +92,7 @@ export function aggregateAdversarialReview(
  * text verbatim; change it there in the same PR.
  */
 export const QA_FINDINGS_HEADING = "### Findings";
+export const FOLLOW_UPS_HEADING = "### Follow-ups (non-blocking)";
 
 // ---------------------------------------------------------------------------
 // Severity-gated findings fold (issue #4734)
@@ -593,7 +594,7 @@ export function renderReviewReport(input: {
   const parts: string[] = [QA_FINDINGS_HEADING, ""];
   parts.push(fold.blocking.length > 0 ? renderFindingsTable(fold.blocking) : "_No blocking findings._");
   if (fold.followUps.length > 0) {
-    parts.push("", "### Follow-ups (non-blocking)", "", renderFindingsTable(fold.followUps));
+    parts.push("", FOLLOW_UPS_HEADING, "", renderFindingsTable(fold.followUps));
   }
   parts.push(
     "",

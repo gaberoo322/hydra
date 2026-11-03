@@ -36,6 +36,8 @@ import {
   clearAutopilotPaused,
 } from "../src/redis/autopilot-pause.ts";
 import { redisKeys } from "../src/redis/keys.ts";
+import { decideAdmission } from "../src/cost/index.ts";
+import { EligibilityQuerySchema } from "../src/schemas/usage.ts";
 import { overlayPauseEligibility, projectEligibility } from "../src/cost/eligibility.ts";
 import { type UsageSnapshot } from "../src/cost/index.ts";
 import { AutopilotPauseBodySchema } from "../src/autopilot/control-schemas.ts";
@@ -52,9 +54,20 @@ const PACE_GATE = join(
 /** Serve a fixed eligibility JSON on an ephemeral port; resolve with url+close. */
 function eligibilityServer(payload: unknown): Promise<{ url: string; close: () => void }> {
   return new Promise((resolve) => {
-    const server = http.createServer((_req, res) => {
+    // #5102: pace-gate.sh reads the typed `.admission` verdict, so serve the
+    // real one (real query schema + decideAdmission), as the route does.
+    const server = http.createServer((req, res) => {
+      const q = EligibilityQuerySchema.parse(
+        Object.fromEntries(new URL(req.url ?? "", "http://x").searchParams),
+      );
+      const admission = decideAdmission(payload as any, {
+        nowMs: Date.now(),
+        mode: q.mode ?? "timer",
+        serviceActive: q.serviceActive ?? false,
+        pidAlive: q.pidAlive ?? false,
+      });
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify(payload));
+      res.end(JSON.stringify({ ...(payload as object), admission }));
     });
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address() as any;
@@ -336,7 +349,7 @@ describe("pace-gate.sh launch-skip on pause (issue #988, AC2)", () => {
     try {
       const r = await runPaceGate(srv.url);
       assert.equal(r.status, 0);
-      assert.match(r.stdout, /autopilot paused \(operator\) — skip/);
+      assert.match(r.stdout, /skip reason=paused class=deliberate-skip/);
       assert.doesNotMatch(r.stdout, /would-start/);
     } finally {
       srv.close();

@@ -29,8 +29,12 @@ import Versions from "../components/Versions.jsx";
  * The overnight decision-queue panel (PRD #615 slice 2's third section) is
  * REMOVED — ADR-0034 §8.1 superseded it with the bucketed attention feed;
  * every waiting-on-you decision now drains through the feed's waiting-on-you
- * bucket with its typed registry action (issue #4628). The backend
- * /today/decision-queue route and its aggregator were deleted (#5160).
+ * bucket with its typed registry action (issue #4628). The backend route,
+ * its aggregator and its projection are all deleted (#5160, #5093).
+ *
+ * StuckItems and AttentionFeed both poll at 30s on purpose: the server
+ * single-flights the issue-label read, so overlapping polls cost one `gh`
+ * fetch per label (issue #5093).
  *
  * Each section lives in `dashboard/src/components/pages/today/` and owns
  * its own poll cadence (30s for the operator-attention sections, 60s for
@@ -48,7 +52,7 @@ export default function Today() {
       <div>
         <h1 className="text-2xl font-bold">Today</h1>
         <p className="text-sm text-zinc-400">
-          Dashboard v2 — overnight banner, decision queue, stuck items, recent merges, target
+          Dashboard v2 — attention feed, overnight banner, stuck items, recent merges, target
           findings, and overnight lessons.
         </p>
       </div>

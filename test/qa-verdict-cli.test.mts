@@ -17,7 +17,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { runQaVerdictPhase, type QaVerdictFetchers } from "../src/qa/phases.ts";
-import { renderQaVerdictTrailer } from "../src/qa/verdict-trailer.ts";
+import { renderQaVerdictErrorLine, renderQaVerdictTrailer } from "../src/qa/verdict-trailer.ts";
+import { renderCiSummary } from "../src/qa/admission.ts";
+import { DEEP_QA_FAIL_MARKER, QA_ESCALATION_LABELS, renderDeepQaPassMarker } from "../src/qa/round-action.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const CLI = join(ROOT, "scripts", "ci", "qa-verdict.ts");
@@ -177,20 +179,191 @@ describe("qa-verdict phases over the fixture fetcher", () => {
     assert.deepEqual(unk.degraded, ["head-sha"]);
   });
 
-  test("trailer + round-action: unreadable prior bodies throw (no round-1 reset of the cap)", async () => {
+  test("trailer + round-action: unreadable prior bodies degrade (no round-1 reset of the cap)", async () => {
     const unreadable = { priorBodies: async () => null };
-    await assert.rejects(
-      runQaVerdictPhase("trailer", { pr: 7, verdict: "FAIL", blockers: 1, maxSeverity: "medium" }, fixtureFetchers(unreadable)),
-      (err: any) => err.code === "not-found" && /prior-bodies unreadable/.test(err.message),
-    );
+    const t = (await runQaVerdictPhase(
+      "trailer",
+      { pr: 7, verdict: "FAIL", blockers: 1, maxSeverity: "medium" },
+      fixtureFetchers(unreadable),
+    )) as any;
+    assert.equal(t.trailer, renderQaVerdictErrorLine({ verdict: "FAIL", pr: 7, reason: "prior bodies unreadable" }));
+    assert.equal(t.round, null);
+    assert.deepEqual(t.degraded, ["prior-bodies"]);
+    assert.doesNotMatch(t.trailer, /round=/, "an error line carries no round= so it is never counted");
+
+    const r = (await runQaVerdictPhase(
+      "round-action",
+      { pr: 7, tier: 3, verdict: "FAIL", reviewVerdict: "FAIL", headSha: HEAD },
+      fixtureFetchers(unreadable),
+    )) as any;
+    assert.equal(r.round.action, "bounce", "a degraded round can never escalate");
+    assert.equal(r.round.round, null);
+    assert.equal(r.round.failRound, null);
+    assert.equal(r.deepQa, null, "T1-T3 carry no deep-QA state, degraded or not");
+    assert.equal(r.passMarker, null);
+    assert.equal(r.escalationSummary, null);
+    assert.equal(r.failMarker, null, "no FAIL marker is withheld-or-invented on a degraded T1-T3 round");
+    assert.deepEqual(r.labels, QA_ESCALATION_LABELS);
+    assert.deepEqual(r.degraded, ["prior-bodies"]);
+  });
+
+  test("round-action: a T4 round with unreadable history is a pre-verdict exit, never a fail-#1 reset", async () => {
     await assert.rejects(
       runQaVerdictPhase(
         "round-action",
-        { pr: 7, tier: 3, verdict: "FAIL", reviewVerdict: "FAIL", headSha: HEAD },
-        fixtureFetchers(unreadable),
+        { pr: 7, tier: 4, verdict: "FAIL", reviewVerdict: "FAIL", headSha: HEAD },
+        fixtureFetchers({ priorBodies: async () => null }),
       ),
-      (err: any) => err.code === "not-found" && /prior-bodies unreadable/.test(err.message),
+      /deep-QA fail count cannot be read/,
     );
+  });
+
+  test("round-action: a T4 FAIL driven by CI alone (review PASS) still bounces and carries the FAIL marker", async () => {
+    const r = (await runQaVerdictPhase(
+      "round-action",
+      { pr: 7, tier: 4, verdict: "FAIL", reviewVerdict: "PASS", headSha: HEAD, priorBodies: [] },
+      fixtureFetchers(),
+    )) as any;
+    assert.equal(r.deepQa.action, "bounce");
+    assert.equal(r.failMarker, DEEP_QA_FAIL_MARKER);
+    assert.equal(r.passMarker, null, "a FAIL never carries the SHA-bound PASS marker");
+    // Sibling shape: a clean T4 PASS keeps proceeding with the PASS marker and no FAIL marker.
+    const ok = (await runQaVerdictPhase(
+      "round-action",
+      { pr: 7, tier: 4, verdict: "PASS", reviewVerdict: "PASS", headSha: HEAD, priorBodies: [] },
+      fixtureFetchers(),
+    )) as any;
+    assert.equal(ok.deepQa.action, "proceed");
+    assert.equal(ok.failMarker, null);
+    assert.equal(ok.passMarker, renderDeepQaPassMarker(HEAD));
+  });
+
+  test("admission: skipCiSummary is renderCiSummary(skipVerdict) on the skip path, null otherwise", async () => {
+    const red = [{ name: "test", status: "completed", conclusion: "failure", required: true }];
+    const skip = (await runQaVerdictPhase(
+      "admission", { pr: 1, tier: 3, checks: red, mergeStateStatus: "CLEAN", changedPaths: ["src/a.ts"] }, fixtureFetchers(),
+    )) as any;
+    assert.equal(skip.admission.action, "skip-required-failed");
+    assert.equal(skip.skipCiSummary, renderCiSummary(skip.skipVerdict));
+    const admit = (await runQaVerdictPhase(
+      "admission", { pr: 1, tier: 3, checks: green, mergeStateStatus: "CLEAN", changedPaths: ["src/a.ts"] }, fixtureFetchers(),
+    )) as any;
+    assert.equal(admit.skipVerdict, null);
+    assert.equal(admit.skipCiSummary, null);
+  });
+
+  test("round-action: labels always present; failMarker symmetric with passMarker on T4", async () => {
+    const t3 = (await runQaVerdictPhase(
+      "round-action",
+      { pr: 7, tier: 3, verdict: "PASS", reviewVerdict: "PASS", headSha: HEAD, priorBodies: [] },
+      fixtureFetchers(),
+    )) as any;
+    assert.deepEqual(t3.labels, QA_ESCALATION_LABELS);
+    assert.equal(t3.failMarker, null);
+    const t4fail = (await runQaVerdictPhase(
+      "round-action",
+      { pr: 7, tier: 4, verdict: "FAIL", reviewVerdict: "FAIL", headSha: HEAD, priorBodies: [] },
+      fixtureFetchers(),
+    )) as any;
+    assert.equal(t4fail.deepQa.action, "bounce");
+    assert.equal(t4fail.failMarker, DEEP_QA_FAIL_MARKER);
+    assert.equal(t4fail.passMarker, null);
+    const t4pass = (await runQaVerdictPhase(
+      "round-action",
+      { pr: 7, tier: 4, verdict: "PASS", reviewVerdict: "PASS", headSha: HEAD, priorBodies: [] },
+      fixtureFetchers(),
+    )) as any;
+    assert.equal(t4pass.failMarker, null);
+    assert.equal(t4pass.passMarker, renderDeepQaPassMarker(HEAD));
+  });
+
+  test("round-action: a reviewed T3 FAIL round escalates at the cap with labels and summary", async () => {
+    const prior = [1, 2].map((round) =>
+      `### Findings\n${renderQaVerdictTrailer({ verdict: "FAIL", pr: 7, round, sha: "aaaaaaaaaaaa", blockers: 1, maxSeverity: "high" })}`,
+    );
+    const currentTrailer = renderQaVerdictTrailer({ verdict: "FAIL", pr: 7, round: 3, sha: "bbbbbbbbbbbb", blockers: 1, maxSeverity: "high" });
+    const out = (await runQaVerdictPhase(
+      "round-action",
+      { pr: 7, tier: 3, verdict: "FAIL", reviewVerdict: "FAIL", headSha: HEAD, priorBodies: prior, currentReviewed: true, currentTrailer },
+      fixtureFetchers(),
+    )) as any;
+    assert.equal(out.round.action, "escalate");
+    assert.deepEqual(out.labels.issueAdd, ["ready-for-human"]);
+    assert.match(out.escalationSummary, /QA round cap/);
+    const ciOnly = (await runQaVerdictPhase(
+      "round-action",
+      { pr: 7, tier: 3, verdict: "FAIL", reviewVerdict: "FAIL", headSha: HEAD, priorBodies: prior, currentReviewed: false, currentTrailer },
+      fixtureFetchers(),
+    )) as any;
+    assert.notEqual(ciOnly.round.action, "escalate", "a CI-only round never counts toward the cap");
+  });
+
+  // 1:1 homes for the executed playbook fold cases deleted with the shims (#5081 INV-8).
+  const foldIn = (tier: number | null, findings: unknown, extra: Record<string, unknown> = {}) => ({
+    tier, findings, spawnedReviewers: ["reviewer-A-standards"], checks: green, standardsSummary: "std", specSummary: "spec", ...extra,
+  });
+  const row = (over: Record<string, unknown> = {}) => ({
+    severity: "low", axis: "standards", location: "src/x.ts:10", finding: "nit", fix: "fix", ...over,
+  });
+
+  test("fold: T3 lone low => PASS with a follow-up, blockers 0", async () => {
+    const out = (await runQaVerdictPhase("fold", foldIn(3, { "reviewer-A-standards": [row()] }), fixtureFetchers())) as any;
+    assert.equal(out.fold.reviewVerdict, "PASS");
+    assert.equal(out.counts.blockers, 0);
+    assert.equal(out.counts.maxSeverity, "none");
+    assert.match(out.report, /### Follow-ups \(non-blocking\)/);
+  });
+
+  test("fold: T3 medium + a red required check => FAIL, blockers from the table plus CI", async () => {
+    const red = [{ name: "test", status: "completed", conclusion: "failure", required: true }];
+    const out = (await runQaVerdictPhase(
+      "fold", foldIn(3, { "reviewer-A-standards": [row({ severity: "medium" })] }, { checks: red }), fixtureFetchers(),
+    )) as any;
+    assert.equal(out.fold.reviewVerdict, "FAIL");
+    assert.equal(out.counts.blockers, 2);
+    assert.equal(out.counts.maxSeverity, "high");
+    assert.ok(String(out.fold.worstFinding).startsWith("src/x.ts:10 — "));
+  });
+
+  test("fold: T4 lone low still FAILs (unchanged any-blocker); an explicit [] is a PASS", async () => {
+    const low = (await runQaVerdictPhase("fold", foldIn(4, { "reviewer-A-standards": [row()] }), fixtureFetchers())) as any;
+    assert.equal(low.fold.reviewVerdict, "FAIL");
+    assert.equal(low.counts.maxSeverity, "low");
+    const empty = (await runQaVerdictPhase("fold", foldIn(4, { "reviewer-A-standards": [] }), fixtureFetchers())) as any;
+    assert.equal(empty.fold.reviewVerdict, "PASS");
+    assert.equal(empty.counts.blockers, 0);
+  });
+
+  test("fold: bad findings fail closed with a ### Findings heading (the round still counts toward the cap)", async () => {
+    const bad: unknown[] = ["", "looks fine to me", { findings: [{ severity: "high" }] }, ["high: gate bypassed"], { "reviewer-B-spec": [row()] }, [row()]];
+    for (const tier of [1, 3, 4]) {
+      for (const findings of bad) {
+        const out = (await runQaVerdictPhase("fold", foldIn(tier, findings), fixtureFetchers())) as any;
+        assert.equal(out.fold.reviewVerdict, "FAIL", `T${tier} ${JSON.stringify(findings)}`);
+        assert.ok(out.counts.blockers >= 1);
+        assert.ok(String(out.report).startsWith("### Findings"), String(out.report));
+      }
+    }
+    // an empty spawned list is itself malformed, never the flat-array PASS
+    const none = (await runQaVerdictPhase("fold", foldIn(3, [], { spawnedReviewers: [] }), fixtureFetchers())) as any;
+    assert.equal(none.fold.reviewVerdict, "FAIL");
+  });
+
+  test("trailer: Target-style supplied facts make zero fetches and render the Target grammar (#5081 INV-9)", async () => {
+    const f = fixtureFetchers();
+    const pass = (await runQaVerdictPhase(
+      "trailer",
+      { pr: 9, verdict: "PASS", headSha: HEAD.toUpperCase(), blockers: 0, maxSeverity: "none", priorBodies: [] },
+      f,
+    )) as any;
+    assert.deepEqual(f.calls, []);
+    assert.equal(pass.trailer, renderQaVerdictTrailer({ verdict: "PASS", pr: 9, round: 1, sha: HEAD.slice(0, 12), blockers: 0, maxSeverity: "none" }));
+    const fail = (await runQaVerdictPhase(
+      "trailer",
+      { pr: 9, verdict: "FAIL", headSha: "", blockers: 2, maxSeverity: "high", priorBodies: [pass.trailer, null] },
+      f,
+    )) as any;
+    assert.match(fail.trailer, /^QA-Verdict: FAIL pr=9 round=2 sha=unknown blockers=2 max_severity=high$/);
   });
 
   test("sibling shape: prior-context keeps the degraded [] fallback (it counts nothing)", async () => {
@@ -343,6 +516,18 @@ describe("qa-verdict CLI (spawned)", () => {
       assert.equal(r.stdout, "");
       assert.equal(JSON.parse(r.stderr.trim().split("\n").pop() as string).code, "schema-validation-failed");
     }
+  });
+
+  test("golden: the spawned trailer phase over the PR-4754 fixture thread equals renderQaVerdictTrailer byte-for-byte", () => {
+    const r = run(["trailer"], JSON.stringify({ pr: 4754, verdict: "FAIL", blockers: 2, maxSeverity: "high" }));
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.equal(
+      out.trailer,
+      renderQaVerdictTrailer({ verdict: "FAIL", pr: 4754, round: 1, sha: HEAD, blockers: 2, maxSeverity: "high" }),
+    );
+    assert.equal(out.round, 1);
+    assert.deepEqual(out.degraded, []);
   });
 
   test("importing the facade has no side effects and keeps the frozen export set (INV-2)", async () => {

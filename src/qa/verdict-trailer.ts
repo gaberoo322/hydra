@@ -50,6 +50,12 @@ export interface QaVerdictTrailer {
   /** Count of hard findings (a red required check counts as one high blocker). */
   blockers: number;
   maxSeverity: QaSeverity;
+  /**
+   * Optional trailing `qa-fixes=<sha12>[,<sha12>...]` field (issue #5266):
+   * the reviewer's `QA-Fix:` commits. Absent on parse => `[]`; empty/absent
+   * renders nothing, so legacy trailers are byte-identical.
+   */
+  qaFixes?: readonly string[];
 }
 
 const QA_SEVERITIES: readonly QaSeverity[] = ["high", "medium", "low", "none"];
@@ -75,7 +81,7 @@ export const QA_VERDICT_UNKNOWN_SHA = "unknown";
  * so `PASS` can never shadow `PASS-pending-CI`.
  */
 const QA_VERDICT_TRAILER_RE =
-  /^QA-Verdict:[ \t]+(PASS-pending-CI|FAIL-pending-CI|PASS|FAIL)[ \t]+pr=(\d+)[ \t]+round=(\d+)[ \t]+sha=([0-9a-fA-F]{7,40}|unknown)[ \t]+blockers=(\d+)[ \t]+max_severity=(high|medium|low|none)[ \t]*\r?$/gm;
+  /^QA-Verdict:[ \t]+(PASS-pending-CI|FAIL-pending-CI|PASS|FAIL)[ \t]+pr=(\d+)[ \t]+round=(\d+)[ \t]+sha=([0-9a-fA-F]{7,40}|unknown)[ \t]+blockers=(\d+)[ \t]+max_severity=(high|medium|low|none)(?:[ \t]+qa-fixes=([0-9a-fA-F]{7,40}(?:,[0-9a-fA-F]{7,40})*))?[ \t]*\r?$/gm;
 
 /**
  * Parse EVERY well-formed `QA-Verdict:` line in a comment/review body, in
@@ -100,6 +106,8 @@ export function parseQaVerdictTrailers(
       sha: (m[4] as string).toLowerCase(),
       blockers: Number.parseInt(m[5] as string, 10),
       maxSeverity: m[6] as QaSeverity,
+      qaFixes:
+        m[7] === undefined ? [] : (m[7] as string).toLowerCase().split(","),
     });
   }
   return out;
@@ -252,10 +260,14 @@ export function renderQaVerdictTrailer(t: QaVerdictTrailer): string {
     : "FAIL";
   const cut = String(t.sha ?? "").trim().toLowerCase().slice(0, 12);
   const sha = /^[0-9a-f]{7,12}$/.test(cut) ? cut : QA_VERDICT_UNKNOWN_SHA;
+  const fixes = (t.qaFixes ?? [])
+    .map((f) => String(f ?? "").trim().toLowerCase().slice(0, 12))
+    .filter((f) => /^[0-9a-f]{7,12}$/.test(f));
   return (
     `${QA_VERDICT_TRAILER_PREFIX} ${verdict} pr=${int(t.pr, 1)} ` +
     `round=${int(t.round, 1)} sha=${sha} blockers=${blockers} ` +
-    `max_severity=${severity}`
+    `max_severity=${severity}` +
+    (fixes.length > 0 ? ` qa-fixes=${fixes.join(",")}` : "")
   );
 }
 
@@ -281,3 +293,43 @@ export function buildQaVerdictTrailer(input: {
   });
 }
 
+
+// ---------------------------------------------------------------------------
+// `QA-Fix:` commit trailer (issue #5266, ADR-0046 Decision 2)
+//
+// Every commit the reviewer pushes carries exactly one trailer line
+// `QA-Fix: A` or `QA-Fix: B` (one class per commit). Every agent pushes as the
+// same GitHub identity, so only this trailer attributes a commit to the
+// reviewer. Pure; never throws.
+// ---------------------------------------------------------------------------
+
+/** The literal prefix of the commit trailer. */
+export const QA_FIX_TRAILER_PREFIX = "QA-Fix:";
+
+/** Reviewer commit class: A = non-executable, B = tests. */
+export type QaFixClass = "A" | "B";
+
+/** Parse result for one commit message's `QA-Fix:` trailer. */
+export type QaFixCommitTrailer =
+  | { present: false }
+  | { present: true; cls: QaFixClass | null; raw: string };
+
+/**
+ * Find a line-anchored `QA-Fix:` trailer in a commit message. `present:false`
+ * when none; `present:true, cls:null` when the value is anything but exactly
+ * `A` or `B` (a violation the caller must surface, never ignore). The LAST
+ * such line wins (trailer position).
+ */
+export function parseQaFixCommitTrailer(
+  message: string | null | undefined,
+): QaFixCommitTrailer {
+  if (typeof message !== "string" || !message.includes(QA_FIX_TRAILER_PREFIX)) {
+    return { present: false };
+  }
+  let found: QaFixCommitTrailer = { present: false };
+  for (const m of message.matchAll(/^QA-Fix:([^\r\n]*)\r?$/gm)) {
+    const raw = (m[1] as string).trim();
+    found = { present: true, cls: raw === "A" || raw === "B" ? raw : null, raw };
+  }
+  return found;
+}
