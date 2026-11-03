@@ -92,7 +92,7 @@
   "test/autopilot-history.test.mts": 1,
   "test/autopilot-hooks.test.mts": 5,
   "test/autopilot-idle.test.mts": 4,
-  "test/autopilot-invariants.test.mts": 3,
+  "test/autopilot-invariants.test.mts": 4,
   "test/autopilot-lifecycle-compose.test.mts": 1,
   "test/autopilot-logs.test.mts": 1,
   "test/autopilot-os-heartbeat.test.mts": 4,

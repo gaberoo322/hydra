@@ -568,6 +568,23 @@ describe("decide.py INV-label namespaces (issue #4520)", () => {
   });
 });
 
+describe("assert_invariants.py loads the state document strictly (#5075)", () => {
+  test("a wrong-typed declared field exits 2 with a type-mismatch message", () => {
+    const state: any = baseState();
+    state.failure_log = "x";
+    const r = runAsserts({ actions: [] }, state);
+    assert.equal(r.status, 2, `stdout=${r.stdout} stderr=${r.stderr}`);
+    assert.match(r.stderr, /ledger-type-mismatch/);
+    assert.match(r.stderr, /failure_log/);
+    assert.doesNotMatch(r.stdout, /OK/);
+  });
+  test("a well-typed state document still runs the checks and exits 0", () => {
+    const r = runAsserts({ actions: [] }, baseState());
+    assert.equal(r.status, 0, `stdout=${r.stdout} stderr=${r.stderr}`);
+    assert.match(r.stdout, /OK/);
+  });
+});
+
 describe("AC1 guard: only run_ledger.py json-loads the state document (#5075, #5293)", () => {
   test("reap.py run_reconcile_seeded reads state via run_ledger.read_prior, not raw json.load", () => {
     const src = readFileSync(resolve("scripts/autopilot/reap.py"), "utf8");

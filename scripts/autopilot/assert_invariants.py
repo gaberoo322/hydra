@@ -428,12 +428,15 @@ def main(argv: list[str]) -> int:
     else:
         with open(plan_arg, "r", encoding="utf-8") as fh:
             plan = json.load(fh)
-    # Lenient on purpose: this is a read-only checker, so a type-invalid field
-    # in the state document must not stop the invariant checks from running.
+    # STRICT ON PURPOSE: this is a validator, and the invariant checks index
+    # declared fields by their declared type (the same reason decide.py's load is
+    # strict). A type-invalid state document is a broken ledger, so it fails loud
+    # with exit 2 instead of being checked against a lenient best-effort read.
     try:
         state = run_ledger.load(argv[2], fill_defaults=False)
-    except run_ledger.LedgerTypeError:
-        state = run_ledger.read_prior(argv[2])
+    except run_ledger.LedgerTypeError as exc:
+        print(f"[assert_invariants] invalid state {argv[2]} ({exc.code}): {exc}", file=sys.stderr)
+        return 2
     except (OSError, ValueError) as exc:
         print(f"[assert_invariants] cannot read state {argv[2]}: {exc}", file=sys.stderr)
         return 2
