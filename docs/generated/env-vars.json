@@ -72,6 +72,9 @@
       "name": "HOME",
       "readSites": [
         {
+          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh"
+        },
+        {
           "path": "scripts/autopilot/pace-gate.sh"
         },
         {
@@ -152,7 +155,7 @@
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/pace-gate.sh"
+        "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh"
       }
     },
     {
