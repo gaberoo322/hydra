@@ -521,6 +521,10 @@
         {
           "name": "Quota Weight",
           "anchor": "term-quota-weight"
+        },
+        {
+          "name": "Pace Gate",
+          "anchor": "term-pace-gate"
         }
       ],
       "moduleMap": "src/cost/CONTEXT.md",

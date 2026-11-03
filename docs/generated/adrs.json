@@ -1198,6 +1198,7 @@
       "readWhen": "Touching `src/cost/`, adding a file there, or importing from it outside the barrel.",
       "citedBy": [
         "CONTEXT-MAP.md",
+        "docs/adr/0021-usage-paced-autopilot-pace-gate.md",
         "src/cost/CONTEXT.md"
       ],
       "source": {
