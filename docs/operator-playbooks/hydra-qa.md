@@ -1064,11 +1064,14 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
   REVIEWED_HEAD=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.headRefOid // ""')
   HEAD_REF=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.headRefName')
   RC_OK=1
+  GUARD_OK=1
+  # Where THIS session's master-based tree stood; every exit path returns here so steps 9.5-10 never run PR-authored scripts.
+  ORIG_HEAD=$(git rev-parse HEAD)
   [ -n "$REVIEWED_HEAD" ] || RC_OK=0
   # Abort if the PR moved while the review ran: never stack a commit on an unreviewed head.
   [ "$RC_OK" = 1 ] && { [ "$(gh pr view $pr_number --repo gaberoo322/hydra --json headRefOid --jq .headRefOid)" = "$REVIEWED_HEAD" ] || RC_OK=0; }
   # Detached checkout of the EXACT reviewed head inside this session's isolation worktree.
-  git rev-parse --git-dir | grep -q '\.git/worktrees/' || RC_OK=0
+  git rev-parse --git-dir | grep -q '\.git/worktrees/' || { RC_OK=0; GUARD_OK=0; }
   [ "$RC_OK" = 1 ] && { git fetch origin "$HEAD_REF" && git checkout --detach "$REVIEWED_HEAD" || RC_OK=0; }
   ORIG_BODY_FILE=$(mktemp); RC_BODY_FILE=$(mktemp)   # private tempfiles
   BODY_FIX=$(printf '%s' "$RC_JSON" | jq -r '.bodyFix // false')
@@ -1084,24 +1087,26 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
     # "## Files in scope"). A row you cannot resolve with a class-A edit aborts: RC_OK=0.
     #
     # Stage ONLY the approved class-A paths (never `git add -A`: it would take node_modules and strays).
-    [ -z "$RC_PATHS" ] || { printf '%s\n' "$RC_PATHS" | xargs git add -- || RC_OK=0; }
+    [ "$RC_OK" = 1 ] && [ -n "$RC_PATHS" ] && { printf '%s\n' "$RC_PATHS" | xargs git add -- || RC_OK=0; }
     STAGED=$(git diff --cached --name-only)
     # Every staged file must be an approved path.
     [ -z "$STAGED" ] || { printf '%s\n' "$STAGED" | grep -qvxF -f <(printf '%s\n' "$RC_PATHS") && RC_OK=0; }
-    # Something must change. An empty commit or an unchanged body would flip FAIL to PASS with no fix.
-    if [ -z "$STAGED" ]; then
-      [ "$BODY_FIX" = true ] && ! cmp -s "$ORIG_BODY_FILE" "$RC_BODY_FILE" || RC_OK=0
-    fi
+    # Deterministic re-verify: EVERY approved path must be in the staged diff, so a partial edit cannot flip FAIL to PASS.
+    [ -z "$RC_PATHS" ] || { printf '%s\n' "$RC_PATHS" | grep -qvxF -f <(printf '%s\n' "$STAGED") && RC_OK=0; }
+    # Something must change. An unchanged body with nothing staged would flip FAIL to PASS with no fix.
+    BODY_CHANGED=0
+    [ "$BODY_FIX" = true ] && ! cmp -s "$ORIG_BODY_FILE" "$RC_BODY_FILE" && BODY_CHANGED=1
+    if [ -z "$STAGED" ] && [ "$BODY_CHANGED" != 1 ]; then RC_OK=0; fi
     # A corrected body must be non-empty and keep its Closes-ref.
     if [ "$BODY_FIX" = true ]; then
       { [ -s "$RC_BODY_FILE" ] && grep -Eq 'Closes #[0-9]+' "$RC_BODY_FILE"; } || RC_OK=0
     fi
     # Re-verify each blocking finding against the NEW diff before the verdict may flip: re-read each
     # row's File:line and confirm its Fix landed; any row still unresolved aborts: RC_OK=0.
-    # A body-only round has nothing to stage: the proof below runs on the unchanged head and the
-    # push is a no-op, so only the body edit lands (step below).
-    if [ "$RC_OK" = 1 ] && [ -n "$STAGED" ]; then
-      git commit -q -m "fix(qa): reviewer class-A fixes for PR #$pr_number" -m "QA-Fix: A" || RC_OK=0
+    # A body-only round stages nothing: it still makes an EMPTY `QA-Fix: A` commit (INV-6), so the push
+    # fires `synchronize` and body-reading gates see the corrected body. QA_FIXES is set only from a commit made here.
+    if [ "$RC_OK" = 1 ]; then
+      git commit -q --allow-empty -m "fix(qa): reviewer class-A fixes for PR #$pr_number" -m "QA-Fix: A" || RC_OK=0
     fi
   fi
   # Local deterministic proof BEFORE any push; the reviewer never hand-judges it. Base is the head
@@ -1116,7 +1121,9 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
   [ "$RC_OK" = 1 ] && { git push origin "HEAD:refs/heads/$HEAD_REF" || RC_OK=0; }
   if [ "$RC_OK" = 1 ]; then
     NEW_HEAD=$(git rev-parse HEAD)
-    QA_FIXES=${NEW_HEAD:0:12}
+    [ "$NEW_HEAD" != "$REVIEWED_HEAD" ] && QA_FIXES=${NEW_HEAD:0:12} || RC_OK=0
+  fi
+  if [ "$RC_OK" = 1 ]; then
     REVIEW_VERDICT=PASS; VERDICT=PASS-pending-CI; BLOCKERS=0; MAX_SEVERITY=none
     REVIEW_REPORT="${REVIEW_REPORT}
 
@@ -1124,9 +1131,14 @@ Reviewer-fixed in ${QA_FIXES} (QA-Fix: A): each blocking row above is fixed-by $
     # INV-4: annotate each blocking row of the findings table in $REVIEW_REPORT with
     # "fixed-by ${QA_FIXES}" in its Fix cell; never delete, filter or re-grade a row.
   else
-    # Nothing pushed: restore the original body if we changed it, and the original detached head.
-    [ "$BODY_EDITED" = 1 ] && { gh pr edit $pr_number --repo gaberoo322/hydra --body-file "$ORIG_BODY_FILE" || true; }
-    git checkout --detach "$REVIEWED_HEAD" 2>/dev/null || true   # the original FAIL stands at the original head
+    # Nothing pushed: restore the original body if we changed it. A failed restore is LOUD, never silent.
+    [ "$BODY_EDITED" = 1 ] && { gh pr edit $pr_number --repo gaberoo322/hydra --body-file "$ORIG_BODY_FILE" || echo "ERROR: QA body restore FAILED for PR #$pr_number; report it in the verdict comment" >&2; }
+    QA_FIXES=""   # the original FAIL stands at the original head
+  fi
+  # EVERY exit path: drop index/worktree residue and return to the master-based tree (only when we left it).
+  if [ "$GUARD_OK" = 1 ]; then
+    git reset -q --hard HEAD 2>/dev/null; git clean -fdq 2>/dev/null
+    git checkout --detach "$ORIG_HEAD" || echo "ERROR: could not return to $ORIG_HEAD" >&2
   fi
 fi
 ```
