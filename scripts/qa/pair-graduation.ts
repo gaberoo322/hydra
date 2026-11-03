@@ -65,6 +65,9 @@ export function findOnWindow(history: ConfigCommit[]): OnWindow | null {
   let onFlipAt: string | null = null;
   for (const c of Array.isArray(history) ? history : []) {
     if (!c || typeof c.at !== "string") continue;
+    // An unreadable commit (twoWayPair undefined) is unknown, not "off": skip it
+    // rather than closing or shifting the window on a read failure.
+    if (c.twoWayPair === undefined) continue;
     if (onFlipAt === null) {
       if (c.twoWayPair === "on") onFlipAt = c.at;
     } else if (c.twoWayPair !== "on") {
@@ -254,8 +257,8 @@ export function planFlipItem(report: GraduationReport, openIssues: OpenIssue[]):
 // CLI helpers (git / gh) — the pure folds above are the tested surface
 // ---------------------------------------------------------------------------
 
-/** Build the config-file history from git on the current checkout. Never throws; [] on failure. */
-export function readConfigHistory(repoRoot: string = process.cwd()): ConfigCommit[] {
+/** Build the config-file history from git on the current checkout. Returns null (not []) when git history is unreadable, so callers abort instead of tagging every PR baseline. */
+export function readConfigHistory(repoRoot: string = process.cwd()): ConfigCommit[] | null {
   const run = (args: string[]): string =>
     execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   try {
@@ -276,7 +279,7 @@ export function readConfigHistory(repoRoot: string = process.cwd()): ConfigCommi
     return out;
   } catch (err) {
     console.error("[pair-graduation] git history of the rollout config unreadable:", err);
-    return [];
+    return null;
   }
 }
 

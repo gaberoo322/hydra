@@ -1,5 +1,9 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   GRADUATION_MIN_SHADOW_PRS,
   TRIP_MIN_PAIR_PRS,
@@ -8,6 +12,7 @@ import {
   assessPairGraduation,
   planFlipItem,
   findOnWindow,
+  readConfigHistory,
   pairCohortOf,
   type GraduationInputs,
 } from "../scripts/qa/pair-graduation.ts";
@@ -203,5 +208,63 @@ describe("trip constant", () => {
   test("TRIP_MIN_PAIR_PRS equals cohort-baseline MIN_MATURED_PAIR", () => {
     assert.equal(TRIP_MIN_PAIR_PRS, MIN_MATURED_PAIR);
     assert.equal(TRIP_MIN_PAIR_PRS, 30);
+  });
+});
+
+describe("findOnWindow skips unreadable commits (QA round-2)", () => {
+  test("an unreadable commit inside the on window does not close it", () => {
+    const w = findOnWindow([
+      { at: "2026-10-02T00:00:00Z", twoWayPair: "on" },
+      { at: "2026-10-03T00:00:00Z", twoWayPair: undefined },
+      { at: "2026-10-04T00:00:00Z", twoWayPair: "on" },
+    ]);
+    assert.deepEqual(w, { onFlipAt: "2026-10-02T00:00:00Z", offFlipAt: null });
+  });
+  test("sibling: a parsed non-on value still closes the window", () => {
+    const w = findOnWindow([
+      { at: "2026-10-02T00:00:00Z", twoWayPair: "on" },
+      { at: "2026-10-03T00:00:00Z", twoWayPair: "off" },
+    ]);
+    assert.deepEqual(w, { onFlipAt: "2026-10-02T00:00:00Z", offFlipAt: "2026-10-03T00:00:00Z" });
+  });
+});
+
+describe("readConfigHistory (temp repo wiring)", () => {
+  const sh = (cwd: string, args: string[], when?: string) =>
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], {
+      cwd,
+      stdio: "pipe",
+      env: { ...process.env, ...(when ? { GIT_COMMITTER_DATE: when, GIT_AUTHOR_DATE: when } : {}) },
+    });
+  const commit = (dir: string, body: string, when: string) => {
+    mkdirSync(join(dir, "config/orchestrator"), { recursive: true });
+    writeFileSync(join(dir, "config/orchestrator/qa-rollout.json"), body);
+    sh(dir, ["add", "-A"]);
+    sh(dir, ["commit", "-qm", "c"], when);
+  };
+  test("derives the on window; an unparseable historical blob does not close it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pg-hist-"));
+    try {
+      sh(dir, ["init", "-q"]);
+      commit(dir, '{"two-way-pair":"shadow"}', "2026-10-01T00:00:00Z");
+      commit(dir, '{"two-way-pair":"on"}', "2026-10-02T00:00:00Z");
+      commit(dir, "{not json", "2026-10-03T00:00:00Z");
+      commit(dir, '{"two-way-pair":"on"}', "2026-10-04T00:00:00Z");
+      const h = readConfigHistory(dir);
+      assert.ok(h !== null && h.length === 4);
+      const w = findOnWindow(h);
+      assert.ok(w !== null && w.offFlipAt === null);
+      assert.equal(pairCohortOf({ number: 5, mergedAt: "2026-10-03T12:00:00Z", trailers: [trailer(5)] }, w), "pair");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  test("unreadable history returns null, never an empty (all-baseline) list", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pg-nogit-"));
+    try {
+      assert.equal(readConfigHistory(dir), null);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

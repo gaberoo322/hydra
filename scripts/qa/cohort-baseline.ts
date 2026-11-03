@@ -436,7 +436,14 @@ async function harvest(repo: string, since: string, until: string): Promise<Coho
   );
   const sinceMs = Date.parse(since);
   const untilMs = Date.parse(until);
-  const window = findOnWindow(readConfigHistory());
+  const history = readConfigHistory();
+  if (history === null) {
+    throw new HarvestError(
+      "config-history-unreadable",
+      "git history of the rollout config is unreadable; refusing to tag every PR baseline",
+    );
+  }
+  const window = findOnWindow(history);
   const prs: PrRow[] = [];
   const items: ItemRow[] = [];
   const closing = new Set<number>();
