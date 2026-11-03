@@ -28,6 +28,7 @@ import {
   unrelatedBaselineDrift,
   branchChangedTestFiles,
 } from "../scripts/test/suite-count-check.mjs";
+import reporter from "../scripts/test/suite-count-check.mjs";
 import {
   shortfallRetrySuffix,
   launcherInfraKillLine,
@@ -802,5 +803,36 @@ describe("suite-count-check --update-baseline on an unreadable baseline (#5107)"
     assert.equal(r.status, 1);
     assert.match(r.stderr, /cannot read existing baseline for --only/);
     assert.match(r.out, /<<<<<<< HEAD/);
+  });
+});
+
+describe("suite-count-check reporter — todo marker (#5335)", () => {
+  async function rows(events: unknown[]) {
+    async function* src() {
+      for (const e of events) yield e;
+    }
+    const out: Record<string, unknown>[] = [];
+    for await (const chunk of reporter(src())) out.push(JSON.parse(chunk as string));
+    return out;
+  }
+
+  test("a top-level test:fail with todo:true emits a row carrying todo: true", async () => {
+    const r = await rows([
+      { type: "test:fail", data: { nesting: 0, name: "t", file: "/x/test/a.test.mts", todo: true } },
+    ]);
+    assert.equal(r.length, 1);
+    assert.equal(r[0].ok, false);
+    assert.equal(r[0].todo, true);
+  });
+
+  test("non-todo rows keep their old shape (no todo key)", async () => {
+    const r = await rows([
+      { type: "test:fail", data: { nesting: 0, name: "f", file: "/x/test/a.test.mts" } },
+      { type: "test:pass", data: { nesting: 0, name: "p", file: "/x/test/a.test.mts", todo: false } },
+    ]);
+    assert.equal(r.length, 2);
+    for (const row of r) assert.equal("todo" in row, false);
+    assert.equal(r[0].ok, false);
+    assert.equal(r[1].ok, true);
   });
 });

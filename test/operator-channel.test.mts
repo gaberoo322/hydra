@@ -390,6 +390,85 @@ describe("OperatorChannel fails OPEN when Redis is unreachable", () => {
   });
 });
 
+describe("OperatorChannel episode probes: isOpen / clear / reminderDue / briefOnce", () => {
+  const KEY = "infra:node_modules_wiped";
+  const briefMsg = (): OperatorMessage => ({ ...pageMsg(), severity: "brief", kind: "infra:tmpfs_pressure", dedupKey: "infra:tmpfs_pressure:/tmp:warn" });
+
+  test("isOpen: false before a page, true after, false once resolved (and it never sends)", async () => {
+    const { store } = memoryStore();
+    const { transport, sent } = fakeTransport();
+    const ch = new OperatorChannel({ store, transport, now: clock().now });
+    assert.equal(await ch.isOpen(KEY), false);
+    await ch.page(pageMsg());
+    assert.equal(await ch.isOpen(KEY), true);
+    assert.equal(sent.length, 1, "isOpen is read-only");
+    await ch.resolve(KEY);
+    assert.equal(await ch.isOpen(KEY), false);
+  });
+
+  test("isOpen: null when the store is unreadable and nothing was sent; true from the process-local map once a page went out", async () => {
+    const m = memoryStore("reject");
+    const ch = new OperatorChannel({ store: m.store, transport: fakeTransport().transport, now: clock().now });
+    assert.equal(await ch.isOpen(KEY), null);
+    await ch.page(pageMsg());
+    assert.equal(await ch.isOpen(KEY), true);
+  });
+
+  test("clear: closes an open key silently (no recovered message) and is a no-op on a closed key", async () => {
+    const { store, dedup } = memoryStore();
+    const { transport, sent } = fakeTransport();
+    const ch = new OperatorChannel({ store, transport, now: clock().now });
+    await ch.page(pageMsg());
+    assert.equal(dedup.has(KEY), true);
+    await ch.clear(KEY);
+    assert.equal(dedup.has(KEY), false);
+    assert.equal(await ch.isOpen(KEY), false);
+    assert.equal(sent.length, 1, "clear sends nothing — unlike resolve");
+    await ch.clear(KEY); // idempotent
+    assert.equal(sent.length, 1);
+    assert.equal((await ch.page(pageMsg())).sent, true, "a cleared key pages again as a fresh episode");
+  });
+
+  test("clear: also drops the process-local fallback when the store is down", async () => {
+    const m = memoryStore("reject");
+    const ch = new OperatorChannel({ store: m.store, transport: fakeTransport().transport, now: clock().now });
+    await ch.page(pageMsg());
+    await ch.clear(KEY);
+    assert.equal(await ch.isOpen(KEY), null);
+  });
+
+  test("reminderDue: false for a closed key and inside 6h, true after 6h", async () => {
+    const { store } = memoryStore();
+    const c = clock();
+    const ch = new OperatorChannel({ store, transport: fakeTransport().transport, now: c.now });
+    assert.equal(await ch.reminderDue(KEY), false);
+    await ch.page(pageMsg());
+    c.advance(5 * HOUR);
+    assert.equal(await ch.reminderDue(KEY), false);
+    c.advance(HOUR);
+    assert.equal(await ch.reminderDue(KEY), true);
+  });
+
+  test("briefOnce: appends once per episode, sends no message, and re-arms after clear", async () => {
+    const { store, briefs } = memoryStore();
+    const { transport, sent } = fakeTransport();
+    const ch = new OperatorChannel({ store, transport, now: clock().now });
+    assert.deepEqual(await ch.briefOnce(briefMsg()), { appended: true });
+    assert.deepEqual(await ch.briefOnce(briefMsg()), { appended: false });
+    assert.equal(briefs.length, 1);
+    assert.equal(sent.length, 0, "a brief never goes to Telegram");
+    await ch.clear(briefMsg().dedupKey);
+    assert.deepEqual(await ch.briefOnce(briefMsg()), { appended: true });
+    assert.equal(briefs.length, 2);
+  });
+
+  test("briefOnce: refuses a page kind like brief()", async () => {
+    const { store } = memoryStore();
+    const ch = new OperatorChannel({ store, transport: fakeTransport().transport, now: clock().now });
+    await assert.rejects(() => ch.briefOnce({ ...pageMsg(), severity: "brief" }));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Credentials: one loader
 // ---------------------------------------------------------------------------
