@@ -202,6 +202,7 @@
       "path": "config/orchestrator/qa-rollout.json",
       "section": null,
       "readBy": [
+        "docs/operator-playbooks/hydra-qa.md",
         "docs/operator-playbooks/hydra-retro.md",
         "src/qa/rollout-switches.ts"
       ],
