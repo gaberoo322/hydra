@@ -428,10 +428,17 @@ def main(argv: list[str]) -> int:
     else:
         with open(plan_arg, "r", encoding="utf-8") as fh:
             plan = json.load(fh)
+    # Lenient on purpose: this is a read-only checker, so a type-invalid field
+    # in the state document must not stop the invariant checks from running.
     try:
         state = run_ledger.load(argv[2], fill_defaults=False)
-    except (OSError, ValueError, run_ledger.LedgerTypeError) as exc:
+    except run_ledger.LedgerTypeError:
+        state = run_ledger.read_prior(argv[2])
+    except (OSError, ValueError) as exc:
         print(f"[assert_invariants] cannot read state {argv[2]}: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(state, dict):
+        print(f"[assert_invariants] cannot read state {argv[2]}: not a JSON object", file=sys.stderr)
         return 2
     try:
         check_plan(plan, state)
