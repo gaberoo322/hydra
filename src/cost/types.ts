@@ -96,21 +96,20 @@ export interface UsageSnapshot {
    */
   tokensForeignLast7d: number;
   /**
-   * % of 5h quota consumed. SOURCE PRECEDENCE (issue #1083): the authoritative
-   * OAuth `/api/oauth/usage` five_hour utilization when the meter read
-   * succeeds; otherwise the transcript+calibration estimate (0 when
-   * uncalibrated). NEVER silently 0 on a failed meter read — a failed read
-   * degrades to the estimate so `emergencyStop` (>=90%) stays conservative
-   * rather than unblocking dispatch during an OAuth outage. Which source backs
-   * the value is reported in {@link usageSource}.
+   * % of 5h quota consumed, from the authoritative OAuth `/api/oauth/usage`
+   * five_hour utilization. `null` when the meter body carries no `five_hour`
+   * window (the plan has no 5-hour limit) AND always `null` on the `estimate`
+   * source (there is no 5h estimate). Absence is a type-level fact, never a
+   * synthesized 0%. Which source backs the value is reported in
+   * {@link usageSource}.
    */
-  percentLast5h: number;
+  percentLast5h: number | null;
   /**
    * % of weekly quota consumed. SOURCE PRECEDENCE (issue #1083): the
    * authoritative OAuth `/api/oauth/usage` seven_day utilization when the meter
    * read succeeds; otherwise the transcript+calibration estimate (0 when
-   * uncalibrated). See {@link percentLast5h} for the never-silently-0 invariant
-   * and {@link usageSource}. Distinct from `percentSinceReset`, which is Hydra's
+   * uncalibrated). NEVER silently 0 on a failed meter read — a failed read
+   * degrades to the estimate. See {@link usageSource}. Distinct from `percentSinceReset`, which is Hydra's
    * env-anchored fixed-window projection and is left UNCHANGED by this seam.
    */
   percentLast7d: number;
@@ -150,7 +149,8 @@ export interface UsageSnapshot {
   oauthAgeMs: number | null;
   /**
    * ISO-8601 of the real 5-hour window reset boundary from the OAuth meter, or
-   * `null` when the meter read failed OR the meter reported no boundary.
+   * `null` when the meter read failed, the plan has no 5h window, OR the meter
+   * reported no boundary.
    * Additive — distinct from the env-anchored `weeklyResetAnchor`; this is the
    * server's authoritative boundary. NOT yet wired into the ADR-0021 Pace Gate
    * (deliberately deferred — see issue #1083). (issue #1083)
@@ -208,7 +208,8 @@ export interface UsageSnapshot {
    */
   pacingState: "under" | "on" | "over";
   /**
-   * True only when calibrated AND percentLast5h >= 90. Wired to
+   * True only when the OAuth meter carries a 5h window AND percentLast5h >= 90
+   * (always false when `percentLast5h` is null). Wired to
    * `projectEligibility` (allow=false), so it skips the autopilot tick
    * entirely — every dispatch class is blocked while it holds.
    */
@@ -323,7 +324,6 @@ export interface UsageSnapshot {
   /** True only when all three HYDRA_QUOTA_WEIGHT_* env vars are positive. */
   quotaWeightCalibrated: boolean;
   weeklyQuotaTokens: number;
-  fiveHourQuotaTokens: number;
   filesScanned: number;
   filesSkippedByMtime: number;
   linesParsed: number;
@@ -436,7 +436,7 @@ export interface OAuthExtraUsage {
 
 /**
  * The parsed, gating-relevant slice of the OAuth meter. Two rolling windows —
- * the 5-hour (drives the 5h `emergencyStop`) and the 7-day (the weekly
+ * the 5-hour (null when the plan has none; drives the 5h `emergencyStop` when present) and the 7-day (the weekly
  * headline) — plus the account's paid-overage facility. The opus/sonnet
  * sub-windows the endpoint also returns are not part of this contract.
  *
@@ -445,7 +445,7 @@ export interface OAuthExtraUsage {
  * facility", never as "armed".
  */
 export interface OAuthUsageData {
-  fiveHour: OAuthUsageWindow;
+  fiveHour: OAuthUsageWindow | null;
   sevenDay: OAuthUsageWindow;
   extraUsage?: OAuthExtraUsage;
   /**
@@ -670,7 +670,7 @@ export interface EligibilityUsageInput {
 }
 
 /**
- * The calibration env, gathered (ADR-0042 Decision 7, issue #4793): the ten
+ * The calibration env, gathered (ADR-0042 Decision 7, issue #4793): the nine
  * env-derived scalars `assembleSnapshot` consumes, one field per `config.ts`
  * getter. Built by `readSnapshotCalibration()` (config.ts, L2) and passed as
  * `assembleSnapshot`'s defaulted fourth argument, so tests can inject a record
@@ -678,7 +678,6 @@ export interface EligibilityUsageInput {
  */
 export interface SnapshotCalibration {
   readonly weeklyQuotaTokens: number;
-  readonly fiveHourQuotaTokens: number;
   /** Weekly Reset Anchor epoch ms, or null when unset. */
   readonly weeklyResetAnchorMs: number | null;
   readonly cacheReadWeight: number;

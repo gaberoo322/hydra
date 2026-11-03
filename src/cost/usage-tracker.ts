@@ -20,8 +20,7 @@
  *
  * Calibration env:
  *   - HYDRA_USAGE_WEEKLY_QUOTA_TOKENS  — operator's eyeballed weekly cap
- *   - HYDRA_USAGE_5H_QUOTA_TOKENS      — operator's eyeballed 5-hour cap
- * When either is unset/zero, `calibrated` is false, percentages are 0,
+ * When it is unset/zero, `calibrated` is false, percentages are 0,
  * pacingState stays "under", and emergencyStop stays false. Raw token
  * counts are always reported.
  *

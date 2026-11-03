@@ -30,9 +30,13 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { statSync, readFileSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { statSync, readFileSync, existsSync, writeFileSync, mkdirSync, utimesSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { tmpDirTracker } from "./_helpers/tmp-dir.mts";
+
+// Every temp dir this file creates is removed when the file finishes, so
+// runs do not leak into the shared /tmp (#5326).
+const makeTmpDir = tmpDirTracker();
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const HOOK = join(REPO_ROOT, "scripts", "autopilot", "hooks", "on-subagent-tool-call.sh");
@@ -83,7 +87,7 @@ function redisXrange(key: string): Array<{ id: string; fields: Record<string, st
  * carries the sentinel. Returns the agent id + child transcript path.
  */
 function sentinelChild(dispatchId = "worktree-agent-feedc0de1234"): { agentId: string; path: string } {
-  const dir = mkdtempSync(join(tmpdir(), "hydra-4965-child-"));
+  const dir = makeTmpDir("hydra-4965-child-");
   const path = join(dir, "agent-child.jsonl");
   const sentinel = `<!-- hydra-dispatch v1 skill=hydra-dev dispatchId=${dispatchId} runId=run-4965 -->`;
   writeFileSync(
@@ -95,7 +99,7 @@ function sentinelChild(dispatchId = "worktree-agent-feedc0de1234"): { agentId: s
 
 function runHook(payload: object, stream: string): { status: number | null; stderr: string } {
   const child = sentinelChild();
-  const markerDir = mkdtempSync(join(tmpdir(), "hydra-4965-marker-"));
+  const markerDir = makeTmpDir("hydra-4965-marker-");
   const full = {
     agent_id: child.agentId,
     agent_transcript_path: child.path,
@@ -467,7 +471,7 @@ describe("scripts/autopilot/hooks/on-subagent-tool-call.sh", () => {
           env: {
             ...process.env,
             HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM: stream,
-            HYDRA_DISPATCH_REGISTER_MARKER_DIR: mkdtempSync(join(tmpdir(), "hydra-4965-m-")),
+            HYDRA_DISPATCH_REGISTER_MARKER_DIR: makeTmpDir("hydra-4965-m-"),
             HYDRA_API_BASE: "http://127.0.0.1:1",
           },
           encoding: "utf-8",
@@ -481,6 +485,49 @@ describe("scripts/autopilot/hooks/on-subagent-tool-call.sh", () => {
       }
     },
   );
+
+  test("default marker dir is under XDG_STATE_HOME, not /tmp, and stale markers are pruned (#5336)", () => {
+    // Sentinel-less child: the hook writes the negative "none" marker (the
+    // write path), which needs no reachable registry.
+    const cdir = makeTmpDir("hydra-5336-child-");
+    const child = { agentId: "5336c0de12345678", path: join(cdir, "agent-child.jsonl") };
+    writeFileSync(child.path, JSON.stringify({ type: "user", message: { role: "user", content: "plain work" } }) + "\n");
+    const state = makeTmpDir("hydra-5336-state-");
+    const dir = join(state, "hydra", "dispatch-markers");
+    mkdirSync(dir, { recursive: true });
+    const stale = join(dir, "hydra-dispatch-registered-stale0000");
+    const other = join(dir, "unrelated-file");
+    writeFileSync(stale, "none\n");
+    writeFileSync(other, "x");
+    const old = new Date(Date.now() - 3 * 86400_000);
+    utimesSync(stale, old, old);
+    utimesSync(other, old, old);
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      XDG_STATE_HOME: state,
+      HYDRA_API_BASE: "http://127.0.0.1:1",
+      HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM: uniqueStream("5336"),
+    };
+    delete env.HYDRA_DISPATCH_REGISTER_MARKER_DIR;
+    const r = spawnSync(HOOK, [], {
+      input: JSON.stringify({
+        tool_name: "Read",
+        agent_id: child.agentId,
+        agent_transcript_path: child.path,
+        session_id: "11111111-2222-3333-4444-555555555555",
+        tool_input: { file_path: "/tmp/x" },
+      }),
+      env,
+      encoding: "utf-8",
+    });
+    redisDel(env.HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM as string);
+    assert.equal(r.status, 0, r.stderr);
+    const names = readdirSync(dir);
+    assert.ok(names.includes(`hydra-dispatch-registered-${child.agentId}`), `fresh marker written: ${names}`);
+    assert.ok(!names.includes("hydra-dispatch-registered-stale0000"), "stale marker pruned");
+    assert.ok(names.includes("unrelated-file"), "non-marker files are never pruned");
+    assert.ok(!existsSync(join("/tmp", `hydra-dispatch-registered-${child.agentId}`)), "nothing written to /tmp");
+  });
 
   test("Hook script has executable bit + bash shebang", () => {
     assert.ok(existsSync(HOOK), "hook script missing");

@@ -21,7 +21,7 @@ Every Hydra→operator Telegram message goes through the **Operator Channel** mo
 ### Decision 3 — Severity is a closed page list in code
 
 The channel, not the producer, decides severity. A **Page** is an event on one closed list:
-- infra alarms (node_modules wiped, origin identity, redis-backup stale, launch-flow failure, GLM-sterile);
+- infra alarms (node_modules wiped, origin identity, redis-backup stale, `/tmp` or `/dev/shm` inode/space exhaustion, launch-flow failure, GLM-sterile);
 - the notification consumer is dead;
 - an Outcome Holdback revert failed;
 - orchestrator, autopilot, tunnel or backup service failures;

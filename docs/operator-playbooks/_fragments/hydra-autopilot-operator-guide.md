@@ -71,9 +71,8 @@ HYDRA_AUTOPILOT_SCOPE=orch-only claude --dangerously-skip-permissions -p "/hydra
 ```
 
 Slash-args (`--scope=`, `--tokens=`, `--max-sec=`, `--idle-turns=`,
-`--subagent-soft=`, `--subagent-hard=`, `--unattended=`, `--quota-5h-max=`,
-`--quota-week-max=`) parse via `args-parse.sh` and override env vars. The two
-`--quota-*` flags are the opt-in quota-percent budget (issue #3867 — see
+`--subagent-soft=`, `--subagent-hard=`, `--unattended=`, `--quota-week-max=`) parse via `args-parse.sh` and override env
+vars. The `--quota-week-max` flag is the opt-in quota-percent budget (issue #3867 — see
 **Termination**); unset means disabled.
 
 ### Scheduling — the Pace Gate (ADR-0021)
@@ -89,7 +88,11 @@ where total weekly burn sits relative to the **Pacing Curve**.
 | `hydra-pace-gate.timer` | every ~15 min | `scripts/systemd/hydra-pace-gate.timer` |
 | `hydra-pace-gate.service` | (oneshot, runs the gate) | `scripts/systemd/hydra-pace-gate.service` |
 
-On each tick `scripts/autopilot/pace-gate.sh`:
+On each tick `scripts/autopilot/pace-gate.sh` (transport only: the admission
+rules live in `decideAdmission`, `src/cost/admission.ts`, and arrive as the
+eligibility route's `.admission` object — the gate records `.admission.reason`
+verbatim and performs the effects it names; the list below describes that
+verdict's ladder):
 
 1. **Skip if a run is already live** — the service is active OR
    `/tmp/hydra-autopilot-state.json` carries a live owning PID (`kill -0`).
@@ -184,20 +187,19 @@ and detailed in `hydra-autopilot-ops-reference.md`.
 
 ### Quota-percent budget (issue #3867)
 
-`token_budget` is denominated in the **wrong currency**. It counts cumulative subagent-reported input/output tokens; what the operator pays is cache-weighted **account utilization**. Measured on run 2bcba309 (2026-08-05): the run "spent" 801k of a 4,000,000 token budget and would have kept dispatching, while the OAuth meter moved the 5h utilization window 2% → 30% over the same period (~150M raw tokens — one QA dispatch's 4-subagent fan-out moved ~15M, one dev dispatch ~40M). So a "conservative" token budget does not bound real spend.
+`token_budget` is denominated in the **wrong currency**. It counts cumulative subagent-reported input/output tokens; what the operator pays is cache-weighted **account utilization**. Measured on run 2bcba309 (2026-08-05): the run "spent" 801k of a 4,000,000 token budget and would have kept dispatching, while the OAuth meter moved the (then rate-limited) utilization window 2% → 30% over the same period (~150M raw tokens — one QA dispatch's 4-subagent fan-out moved ~15M, one dev dispatch ~40M). So a "conservative" token budget does not bound real spend.
 
 The quota-percent budget is a second per-run cap denominated in **utilization points accrued over this run's own run-start baseline**:
 
 | Knob | Env var | Meaning |
 |---|---|---|
-| `--quota-5h-max=<pts>` | `HYDRA_AUTOPILOT_QUOTA_5H_MAX` | terminate once `usage.percentLast5h` has risen this many points over the run-start baseline |
-| `--quota-week-max=<pts>` | `HYDRA_AUTOPILOT_QUOTA_WEEK_MAX` | same, against `usage.percentSinceReset` |
+| `--quota-week-max=<pts>` | `HYDRA_AUTOPILOT_QUOTA_WEEK_MAX` | terminate once `usage.percentSinceReset` has risen this many points over the run-start baseline |
 
-- **Opt-in, default disabled.** Both stamp `state.limits.quota_5h_max_pts` / `quota_week_max_pts`, defaulting to `0` = the cap never fires. An unset flag leaves every existing termination path byte-identical, so the standing systemd invocation is unchanged by this feature. The token budget stays as a **secondary** bound.
+- **Opt-in, default disabled.** It stamps `state.limits.quota_week_max_pts`, defaulting to `0` = the cap never fires. An unset flag leaves every existing termination path byte-identical, so the standing systemd invocation is unchanged by this feature. The token budget stays as a **secondary** bound.
 - **Zero new I/O.** The Turn Snapshot already fetches `/usage/eligibility` every turn; the cap reads the nested `usage` object out of `state.usage_eligibility`.
 - **Baseline capture.** `decide.py` writes `state.quota_baseline` **once**, lazily, on the first turn that sees a *calibrated* payload (persisted through the same tmp-file + `os.replace` write-back as the force-research and turn counters). `decide.py` is the only termination predicate, so it both captures and evaluates the baseline; the cap can first fire on the turn after the baseline is captured.
-- **Window resets are not spend.** If a current percentage drops below the baseline the 5h window (or the weekly reset anchor) rolled over: the delta clamps to zero **and** the baseline rebases down, so post-reset spend is measured fresh. A reset never reads as negative spend and never itself terminates.
-- **Subordinate to the Pace Gate.** Per ADR-0021 D5 this is a per-run *hygiene* cap, not a second governor: it reads raw `percentLast5h` / `percentSinceReset` only, never `paceState` / `targetPercent`, and touches no Pace Gate admission logic.
+- **Window resets are not spend.** If a current percentage drops below the baseline the weekly reset anchor rolled over: the delta clamps to zero **and** the baseline rebases down, so post-reset spend is measured fresh. A reset never reads as negative spend and never itself terminates.
+- **Subordinate to the Pace Gate.** Per ADR-0021 D5 this is a per-run *hygiene* cap, not a second governor: it reads raw `percentSinceReset` only, never `paceState` / `targetPercent`, and touches no Pace Gate admission logic.
 
 ### Workless-board backoff on a productive idle exit (issue #3867 slice 2)
 

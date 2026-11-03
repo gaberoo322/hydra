@@ -29,7 +29,7 @@
  * Mirrors the pure-helper shape of `scripts/ci/hydra-prd-render.ts`.
  */
 
-import { KEBAB_CUE } from "../../src/retro-inputs.ts";
+import { KEBAB_CUE, REVIEW_CUE } from "../../src/retro-inputs.ts";
 
 // ---------------------------------------------------------------------------
 // Caps + gate constants (epic #917 contract)
@@ -233,7 +233,7 @@ export function validateFindings(findings: RetroFinding[]): FindingValidationErr
       errors.push({ index, field: "finding", reason: "finding must be an object" });
       return;
     }
-    if (typeof f.cue !== "string" || !KEBAB_CUE.test(f.cue)) {
+    if (typeof f.cue !== "string" || !(KEBAB_CUE.test(f.cue) || REVIEW_CUE.test(f.cue))) {
       errors.push({
         index,
         field: "cue",

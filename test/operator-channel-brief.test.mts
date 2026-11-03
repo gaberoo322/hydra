@@ -817,4 +817,22 @@ describe("composeBrief model", () => {
     assert.deepEqual(model.sections[6].lines, ["no metrics recorded in the last 7 days"]);
     assert.equal(model.dateLabel, "Mon 2026-10-19");
   });
+
+  test("a null percentLast5h (plan has no 5h window) drops the 5h segment entirely (#5333)", () => {
+    const sources: BriefSources = {
+      sinceMs: 0,
+      merges: { ok: true, value: [] },
+      qa: { ok: true, value: {} },
+      waiting: { ok: true, value: [] },
+      autopilot: { ok: true, value: { paused: { paused: false }, latestRun: null } },
+      usage: { ok: true, value: { calibrated: true, percentLast5h: null, percentSinceReset: 40.2, emergencyStop: false, weeklyEmergencyStop: false } },
+      builderHealth: { ok: true, value: null },
+      items: { ok: true, value: [] },
+      pages: { ok: true, value: [] },
+      weekly: { ok: true, value: null },
+    };
+    const model = composeBrief(sources, { now: MON(7, 30), lastSentAt: MON(1, 0) });
+    const usage = model.sections.flatMap((s) => s.lines).find((l) => l.startsWith("Usage:"));
+    assert.equal(usage, "Usage: weekly 40% (caps at 90%)");
+  });
 });

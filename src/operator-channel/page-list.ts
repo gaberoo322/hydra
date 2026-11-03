@@ -15,6 +15,9 @@ export const PAGE_KINDS = [
   E.INFRA_NODE_MODULES_WIPED,
   E.INFRA_ORIGIN_IDENTITY_WRONG,
   "infra:redis_backup_stale",
+  // /tmp or /dev/shm inode/space use over the watchdog threshold (issue #5327;
+  // the 2026-10-31 inode-full outage was silent). Watchdog-only, out-of-band.
+  "infra:tmpfs_exhausted",
   E.LAUNCH_QUOTA_STRETCH,
   E.LAUNCH_LATENCY_BREACH,
   E.LAUNCH_PAUSE_FORGOTTEN,

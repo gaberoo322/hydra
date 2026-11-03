@@ -30,7 +30,7 @@
  *      THROUGH them once the trigger populates the registry.
  */
 
-import test, { describe, beforeEach, after } from "node:test";
+import test, { describe, beforeEach, afterEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, spawn, type ChildProcess } from "node:child_process";
 import {
@@ -217,8 +217,9 @@ describe("on-subagent-tool-call.sh — subagent-dispatch registration (#2406)", 
     markerDir = mkdtempSync(join(tmpdir(), "hydra-2406-marker-"));
   });
 
-  after(() => {
-    // Best-effort cleanup of the per-test temp roots created in beforeEach.
+  afterEach(() => {
+    // Remove THIS test's temp roots — beforeEach creates a fresh pair per
+    // test, so an `after()` would only reap the last test's pair (#5326).
     try {
       rmSync(workdir, { recursive: true, force: true });
       rmSync(markerDir, { recursive: true, force: true });

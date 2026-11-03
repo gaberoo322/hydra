@@ -6,6 +6,9 @@
  *   one reminder after 6h while still bad, suppressed repeats counted).
  * - {@link OperatorChannel.resolve}: one "recovered" message, then clears state.
  * - {@link OperatorChannel.brief}: appends a Morning Brief item (Redis list).
+ * - {@link OperatorChannel.briefOnce}: a brief item once per episode (dedup-keyed).
+ * - {@link OperatorChannel.isOpen} / {@link OperatorChannel.reminderDue}: read-only episode probes.
+ * - {@link OperatorChannel.clear}: silently close a key (no "recovered" message).
  *
  * Redis is best-effort and fails OPEN: every store call runs under a timeout,
  * and a failure is logged and treated as "no state" so the page is still sent.
@@ -304,6 +307,26 @@ export class OperatorChannel {
     return res;
   }
 
+  /**
+   * Whether `dedupKey` currently has an open (bad) episode: `true`/`false`, or
+   * `null` when the store is unreadable (callers fail open). Read-only.
+   */
+  async isOpen(dedupKey: string): Promise<boolean | null> {
+    const prev = await this.bounded("readDedup", () => this.store.readDedup(dedupKey));
+    if (prev === UNAVAILABLE) return this.localSent.has(dedupKey) ? true : null;
+    return prev !== null;
+  }
+
+  /** Whether an OPEN key's 6h reminder is due (false for a closed key; an unreadable store falls back to the per-process send time). */
+  async reminderDue(dedupKey: string): Promise<boolean> {
+    const prev = await this.bounded("readDedup", () => this.store.readDedup(dedupKey));
+    if (prev === UNAVAILABLE) {
+      const last = this.localSent.get(dedupKey);
+      return last !== undefined && this.now() - last >= REMINDER_INTERVAL_MS;
+    }
+    return prev !== null && this.now() - prev.lastSentAt >= REMINDER_INTERVAL_MS;
+  }
+
   /** Publish one "recovered" message iff the key is bad, then clear it. */
   async resolve(dedupKey: string, title?: string): Promise<ChannelResult> {
     return this.serialize(dedupKey, () => this.resolveUnlocked(dedupKey, title));
@@ -322,6 +345,36 @@ export class OperatorChannel {
     this.localSent.delete(dedupKey);
     await this.bounded("delDedup", () => this.store.delDedup(dedupKey));
     return res;
+  }
+
+  /** Silently close a bad key (no "recovered" message) — for a sibling key folded into another key's episode. */
+  async clear(dedupKey: string): Promise<void> {
+    await this.serialize(dedupKey, async () => {
+      this.localSent.delete(dedupKey);
+      await this.bounded("delDedup", () => this.store.delDedup(dedupKey));
+    });
+  }
+
+  /**
+   * Append a Morning Brief item once per episode: the first call for a dedupKey
+   * appends and opens the key (no message is sent); later calls are no-ops until
+   * `clear`/`resolve` closes it. An unreadable store appends at most once per
+   * process. Throws only when handed a page kind.
+   */
+  async briefOnce(item: OperatorMessage): Promise<{ appended: boolean }> {
+    return this.serialize(item.dedupKey, async () => {
+      const prev = await this.bounded("readDedup", () => this.store.readDedup(item.dedupKey));
+      if (prev === UNAVAILABLE ? this.localSent.has(item.dedupKey) : prev !== null) return { appended: false };
+      const res = await this.brief(item);
+      if (res.appended) {
+        const now = this.now();
+        this.localSent.set(item.dedupKey, now);
+        await this.bounded("writeDedup", () =>
+          this.store.writeDedup(item.dedupKey, { state: "bad", firstAt: now, lastSentAt: now, suppressed: 0 }),
+        );
+      }
+      return res;
+    });
   }
 
   /** Append a Morning Brief item. Throws only when handed a page kind. */

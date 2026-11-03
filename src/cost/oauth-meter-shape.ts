@@ -192,8 +192,10 @@ function parseScopedWeekly(raw: unknown): Record<string, OAuthUsageWindow> | und
 
 /**
  * Parse the full OAuth usage response body into {@link OAuthUsageData}, or
- * `null` when either gating window (five_hour / seven_day) is absent or
- * unparseable. Model-scoped `limits[]` weeklies surface as `scopedWeekly`
+ * `null` when `seven_day` is absent or unparseable, or when `five_hour` is
+ * present but unparseable. An absent `five_hour` parses to `fiveHour: null`
+ * (the plan carries no 5-hour limit; absence is a type-level fact, never a
+ * synthesized 0%). Model-scoped `limits[]` weeklies surface as `scopedWeekly`
  * (never gating); the opus/sonnet sub-windows are ignored — the tracker gates only
  * on the two rolling windows plus `extra_usage`. Maximally defensive: a
  * 200-with-garbage body parses to `null`, which the caller classifies as
@@ -207,9 +209,14 @@ function parseScopedWeekly(raw: unknown): Record<string, OAuthUsageWindow> | und
  */
 export function parseOAuthUsageBody(body: unknown): OAuthUsageData | null {
   if (body === null || typeof body !== "object") return null;
-  const fiveHour = parseWindow((body as any).five_hour);
+  // An ABSENT (or null) `five_hour` means the plan has no 5-hour limit (the
+  // account's plan dropped it on 2026-10-31): `fiveHour` is `null`. A PRESENT
+  // window with garbage utilization still rejects the body.
+  const rawFiveHour = (body as any).five_hour;
+  const fiveHourAbsent = rawFiveHour === undefined || rawFiveHour === null;
+  const fiveHour = fiveHourAbsent ? null : parseWindow(rawFiveHour);
   const sevenDay = parseWindow((body as any).seven_day);
-  if (fiveHour === null || sevenDay === null) return null;
+  if ((!fiveHourAbsent && fiveHour === null) || sevenDay === null) return null;
   // `limits[]` scoped weeklies are surfaced (issue #5174) but never gate.
   const scopedWeekly = parseScopedWeekly((body as any).limits);
   return {

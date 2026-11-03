@@ -62,7 +62,6 @@ function fakeSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
     quotaWeightLast7d: 0,
     quotaWeightCalibrated: false,
     weeklyQuotaTokens: 1000,
-    fiveHourQuotaTokens: 100,
     filesScanned: 1,
     filesSkippedByMtime: 0,
     linesParsed: 1,

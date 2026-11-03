@@ -53,7 +53,7 @@
     {
       "family": "ci-gates",
       "metric": "rows",
-      "value": 24
+      "value": 25
     },
     {
       "family": "classes",
@@ -108,7 +108,7 @@
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 268
+      "value": 270
     },
     {
       "family": "pages",
@@ -133,17 +133,17 @@
     {
       "family": "routes",
       "metric": "routers",
-      "value": 47
+      "value": 48
     },
     {
       "family": "routes",
       "metric": "routes",
-      "value": 134
+      "value": 135
     },
     {
       "family": "routes",
       "metric": "rows",
-      "value": 134
+      "value": 135
     },
     {
       "family": "schemas",

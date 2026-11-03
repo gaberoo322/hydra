@@ -85,6 +85,8 @@ describe("qa-merge-guard — evaluateQaMergeGuard table (#4737)", () => {
       headSha: HEAD,
       exempt: false,
       verdictAtHead: false,
+      qaFixProof: "absent",
+      qaFixCommitPresent: false,
     });
   });
 
@@ -176,5 +178,97 @@ describe("qa-merge-guard — CLI contract", () => {
     const src = readFileSync(CLI, "utf8");
     assert.match(src, /\["api", /);
     assert.doesNotMatch(src, /"--json"/);
+  });
+});
+
+describe("qa-merge-guard — qa-fix-proof hold (#5266)", () => {
+  const withFixes = (verdict: FinalVerdict, sha: string): string =>
+    `${trailer(verdict, sha)} qa-fixes=abcdef012345`;
+  const rows: Array<{
+    name: string;
+    in: QaMergeGuardInput;
+    allowed: boolean;
+    reason: string;
+  }> = [
+    { name: "qa-fixes= + proof success -> allowed", in: input({ bodies: [withFixes("PASS", HEAD)], qaFixProof: "success" }), allowed: true, reason: "verdict-at-head" },
+    { name: "qa-fixes= + proof failure -> denied", in: input({ bodies: [withFixes("PASS", HEAD)], qaFixProof: "failure" }), allowed: false, reason: "qa-fix-proof-not-green" },
+    { name: "qa-fixes= + proof pending -> denied", in: input({ bodies: [withFixes("PASS", HEAD)], qaFixProof: "pending" }), allowed: false, reason: "qa-fix-proof-not-green" },
+    { name: "qa-fixes= + proof absent -> denied", in: input({ bodies: [withFixes("PASS", HEAD)] }), allowed: false, reason: "qa-fix-proof-not-green" },
+    { name: "QA-Fix commit without qa-fixes= + proof absent -> denied", in: input({ bodies: [trailer("PASS", HEAD)], qaFixCommitPresent: true }), allowed: false, reason: "qa-fix-proof-not-green" },
+    { name: "QA-Fix commit + proof success -> allowed", in: input({ bodies: [trailer("PASS", HEAD)], qaFixCommitPresent: true, qaFixProof: "success" }), allowed: true, reason: "verdict-at-head" },
+    { name: "no reviewer commits + proof absent -> unchanged allow", in: input({ bodies: [trailer("PASS", HEAD)] }), allowed: true, reason: "verdict-at-head" },
+    { name: "earlier denial keeps its own reason", in: input({ bodies: [withFixes("PASS", OLD)], qaFixProof: "failure" }), allowed: false, reason: "stale-verdict" },
+  ];
+  for (const row of rows) {
+    test(row.name, () => {
+      const r = evaluateQaMergeGuard(row.in);
+      assert.equal(r.allowed, row.allowed);
+      assert.equal(r.reason, row.reason);
+    });
+  }
+
+  test("qa-fixes= naming a commit WITHOUT a QA-Fix trailer -> denied (red without cross-check)", () => {
+    const r = evaluateQaMergeGuard(
+      input({
+        bodies: [withFixes("PASS", HEAD)],
+        qaFixProof: "success",
+        prCommits: [{ sha: "abcdef0123456789", qaFix: false }],
+      }),
+    );
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, "qa-fix-proof-not-green");
+  });
+
+  test("sibling: qa-fixes= naming a trailered PR commit + proof success -> allowed", () => {
+    const r = evaluateQaMergeGuard(
+      input({
+        bodies: [withFixes("PASS", HEAD)],
+        qaFixProof: "success",
+        prCommits: [{ sha: "abcdef0123456789", qaFix: true }],
+      }),
+    );
+    assert.equal(r.allowed, true);
+  });
+
+  test("reviewer commits + PR edits the proof workflow -> denied even when proof success", () => {
+    const r = evaluateQaMergeGuard(
+      input({
+        bodies: [trailer("PASS", HEAD)],
+        qaFixCommitPresent: true,
+        qaFixProof: "success",
+        changedFiles: ["src/x.ts", ".github/workflows/qa-fix-proof.yml"],
+      }),
+    );
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, "qa-fix-proof-not-green");
+  });
+
+  test("sibling: PR editing the proof workflow with NO reviewer commits is unaffected", () => {
+    const r = evaluateQaMergeGuard(
+      input({
+        bodies: [trailer("PASS", HEAD)],
+        changedFiles: [".github/workflows/qa-fix-proof.yml"],
+      }),
+    );
+    assert.equal(r.allowed, true);
+  });
+
+  test("result JSON carries qaFixProof and qaFixCommitPresent", () => {
+    const r = evaluateQaMergeGuard(
+      input({ bodies: [trailer("PASS", HEAD)], qaFixCommitPresent: true, qaFixProof: "success" }),
+    );
+    assert.equal(r.qaFixProof, "success");
+    assert.equal(r.qaFixCommitPresent, true);
+  });
+
+  test("runQaMergeGuard threads fetched proof state through", () => {
+    const r = runQaMergeGuard(PR, () => ({
+      headSha: HEAD,
+      changedFiles: ["src/x.ts"],
+      entries: [{ body: trailer("PASS", HEAD), at: "2026-09-28T09:00:00Z" }],
+      qaFixCommitPresent: true,
+      qaFixProof: "failure",
+    }));
+    assert.equal(r.reason, "qa-fix-proof-not-green");
   });
 });
