@@ -212,6 +212,20 @@ describe("run_ledger path + schema-version", () => {
     );
   });
 
+  test("INV-1: no autopilot Python script but run_ledger.py reads HYDRA_AUTOPILOT_STATE from the environment", () => {
+    // Docstring/help-text mentions are documentation, not reads; every
+    // runtime resolution goes through run_ledger.resolve_state_path().
+    const dir = join(REPO_ROOT, "scripts", "autopilot");
+    const read = /\b(?:environ\.get|environ\.setdefault|getenv)\(\s*["']HYDRA_AUTOPILOT_STATE["']|\benviron\[\s*["']HYDRA_AUTOPILOT_STATE["']\s*\]/;
+    const offenders: string[] = [];
+    for (const f of readdirSync(dir).filter((n) => n.endsWith(".py") && n !== "run_ledger.py")) {
+      readFileSync(join(dir, f), "utf-8").split("\n").forEach((line, i) => {
+        if (read.test(line)) offenders.push(`${f}:${i + 1}`);
+      });
+    }
+    assert.deepEqual(offenders, [], "route these through run_ledger.resolve_state_path()");
+  });
+
   test("schema-version prints the integer 2", () => {
     assert.equal(ledger(["schema-version"]).stdout.trim(), "2");
   });
