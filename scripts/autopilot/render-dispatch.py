@@ -690,7 +690,14 @@ def main(argv: list[str]) -> int:
         i += 1
 
     try:
-        state = run_ledger.load(STATE_PATH, fill_defaults=False)
+        try:
+            state = run_ledger.load(STATE_PATH, fill_defaults=False)
+        except run_ledger.LedgerTypeError as exc:
+            # A wrong-typed declared field must not stop a dispatch render: read leniently.
+            state = run_ledger.read_prior(STATE_PATH)
+            if not isinstance(state, dict):
+                raise
+            print(f"[render-dispatch] state failed type validation ({exc}); rendering leniently", file=sys.stderr)
         plan = _load_json(PLAN_PATH)
     except (OSError, ValueError, run_ledger.LedgerTypeError) as exc:
         print(f"[render-dispatch] cannot read state/plan: {exc}", file=sys.stderr)

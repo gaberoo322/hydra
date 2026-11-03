@@ -448,9 +448,24 @@ def apply(snap: Any, state: dict, unreadable_reason: str | None = None) -> dict:
     return state
 
 
+def _persist_lenient(state: dict, state_path: str) -> None:
+    """Persist, falling back to an unvalidated write when a declared field is wrong-typed."""
+    try:
+        run_ledger.persist(state, state_path)
+    except run_ledger.LedgerTypeError:
+        run_ledger.persist(state, state_path, validate=False)
+
+
 def _read_state(state_path: str) -> dict | None:
     try:
-        return run_ledger.load(state_path, fill_defaults=False)
+        try:
+            return run_ledger.load(state_path, fill_defaults=False)
+        except run_ledger.LedgerTypeError as exc:
+            lenient = run_ledger.read_prior(state_path)
+            if not isinstance(lenient, dict):
+                raise
+            print(f"[turn_snapshot] state failed type validation ({exc}); reading leniently", file=sys.stderr)
+            return lenient
     except (OSError, ValueError, run_ledger.LedgerTypeError) as exc:
         print(f"[turn_snapshot] cannot read state {state_path}: {exc}", file=sys.stderr)
         return None
@@ -500,7 +515,7 @@ def _apply_cli(args: list[str]) -> int:
 
     try:
         apply(snap if reason is None else None, state, reason)
-        run_ledger.persist(state, state_path)
+        _persist_lenient(state, state_path)
     except (RecursionError, ValueError, TypeError) as exc:
         # A parseable but pathologically nested value (a blob, typically) can
         # still overflow the serialiser: re-read the state and store the
@@ -512,7 +527,7 @@ def _apply_cli(args: list[str]) -> int:
             return 1
         apply(None, state, reason)
         try:
-            run_ledger.persist(state, state_path)
+            _persist_lenient(state, state_path)
         except (OSError, run_ledger.LedgerTypeError) as exc2:
             print(f"[turn_snapshot] cannot write state {state_path}: {exc2}", file=sys.stderr)
             return 1
