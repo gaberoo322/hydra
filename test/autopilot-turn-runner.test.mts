@@ -701,3 +701,74 @@ describe("turn.sh — a failed LIVE emit plans on the TS all-degraded snapshot, 
     });
   }
 });
+
+// ---------------------------------------------------------------------------
+describe("turn.sh — Phase 1.5 stale-recovery pass (#5344)", () => {
+  /** A replay doc copy carrying the two orch stale lists. */
+  function staleSandbox(inProgress: number[], blocked: number[], slots: Record<string, unknown> = {}) {
+    const state = baseState();
+    state.slots = { ...(state.slots as object), ...slots };
+    const sb = sandbox(state);
+    sandboxes.push(sb);
+    const doc = readJson(FIXTURE);
+    doc.signals.orch_stale_in_progress_items = inProgress;
+    doc.signals.orch_stale_blocked_items = blocked;
+    const replay = join(sb.dir, "replay.json");
+    writeFileSync(replay, JSON.stringify(doc));
+    sb.env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY = replay;
+    return { sb, argvLog: join(sb.dir, "recover-argv.txt") };
+  }
+
+  function stub(sb: Sandbox, argvLog: string, body: string): string {
+    const path = join(sb.dir, "recover-stub.sh");
+    writeFileSync(path, `#!/usr/bin/env bash\necho "$*" >> "${argvLog}"\n${body}\n`);
+    chmodSync(path, 0o755);
+    return path;
+  }
+
+  test("runs recover-stale with the snapshot's lists, in-flight anchors excluded; no gh is invoked", () => {
+    const { sb, argvLog } = staleSandbox([101, 102], [201], { dev_orch: { anchor: "issue-102", task_id: "abc" } });
+    sb.env.HYDRA_AUTOPILOT_RECOVER_STALE = stub(sb, argvLog, "exit 0");
+    const run = runTurn(sb);
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(readFileSync(argvLog, "utf-8").trim(), "stale_in_progress 101 stale_blocked 201");
+    assert.match(run.stdout, /\[turn\] stale-recovery: ran in_progress=\[101\] blocked=\[201\] rc=0/);
+  });
+
+  test("a failing script, or one printing a JSON line, never changes the exit code, the plan or stdout JSON lines", () => {
+    for (const body of ["exit 3", `echo '{"x":1}'; exit 0`]) {
+      const { sb, argvLog } = staleSandbox([101], []);
+      sb.env.HYDRA_AUTOPILOT_RECOVER_STALE = stub(sb, argvLog, body);
+      const run = runTurn(sb);
+      assert.equal(run.status, 0, run.stderr);
+      assert.ok(existsSync(sb.plan));
+      assert.equal(readFileSync(argvLog, "utf-8").trim(), "stale_in_progress 101 stale_blocked");
+      assert.doesNotMatch(run.stdout, /^\{"x":1\}/m, "the script's output goes to stderr");
+      if (body === "exit 3") assert.match(run.stdout, /\[turn\] stale-recovery: FAILED .* rc=3/);
+    }
+  });
+
+  test("replay without the override does not run the script", () => {
+    const { sb } = staleSandbox([101], [201]);
+    const run = runTurn(sb);
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /\[turn\] stale-recovery: skipped \(replay\)/);
+  });
+
+  test("empty lists (or only in-flight anchors) do not spawn the script", () => {
+    const { sb, argvLog } = staleSandbox([102], [], { dev_orch: { anchor: "102" } });
+    sb.env.HYDRA_AUTOPILOT_RECOVER_STALE = stub(sb, argvLog, "exit 0");
+    const run = runTurn(sb);
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(existsSync(argvLog), false);
+    assert.match(run.stdout, /\[turn\] stale-recovery: nothing stale/);
+  });
+
+  test("a missing script is fail-open", () => {
+    const { sb } = staleSandbox([101], []);
+    sb.env.HYDRA_AUTOPILOT_RECOVER_STALE = join(sb.dir, "does-not-exist.sh");
+    const run = runTurn(sb);
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /\[turn\] stale-recovery: skipped \(script missing/);
+  });
+});

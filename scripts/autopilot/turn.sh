@@ -128,6 +128,37 @@ if ! applied=$(python3 "$SCRIPT_DIR/turn_snapshot.py" apply "${apply_args[@]}" "
 fi
 echo "[turn] snapshot: $(jq -r --arg fell_back "$snapshot_form" '"form=\(if $fell_back != "" then $fell_back else .form end) degraded=\(.degraded)"' <<<"$applied" 2>/dev/null || echo "$applied") cursor=$cursor"
 
+# --- Phase 1.5: stale recovery (#5344) ----------------------------------------
+# Re-queue orch issues stranded in-progress (>90 min) or blocked with every
+# blocker closed, via recover-stale.sh, from the stored snapshot's two lists
+# (in-flight slot anchors excluded by turn_snapshot.py). FAIL-OPEN: nothing here
+# changes the turn's exit code or plan. The script's stdout+stderr go to OUR
+# stderr, so stdout gains exactly one `[turn] stale-recovery:` line.
+RECOVER_STALE="${HYDRA_AUTOPILOT_RECOVER_STALE:-$SCRIPT_DIR/recover-stale.sh}"
+if [ -n "${HYDRA_AUTOPILOT_SNAPSHOT_REPLAY:-}" ] && [ -z "${HYDRA_AUTOPILOT_RECOVER_STALE:-}" ]; then
+  echo "[turn] stale-recovery: skipped (replay)"
+elif ! stale_json=$(python3 "$SCRIPT_DIR/turn_snapshot.py" stale-recovery "$STATE" 2>&1) || ! jq -e . >/dev/null 2>&1 <<<"$stale_json"; then
+  echo "[turn] stale-recovery: skipped (accessor failed) rc=1: $(printf '%s' "$stale_json" | tail -n 1 | cut -c1-200)"
+else
+  stale_ip=$(jq -r '.stale_in_progress | map(tostring) | join(" ")' <<<"$stale_json")
+  stale_bl=$(jq -r '.stale_blocked | map(tostring) | join(" ")' <<<"$stale_json")
+  if [ -z "$stale_ip" ] && [ -z "$stale_bl" ]; then
+    echo "[turn] stale-recovery: nothing stale"
+  elif [ ! -f "$RECOVER_STALE" ]; then
+    echo "[turn] stale-recovery: skipped (script missing: $RECOVER_STALE) rc=127"
+  else
+    # shellcheck disable=SC2086  # the lists are space-separated issue numbers
+    timeout "${HYDRA_AUTOPILOT_RECOVER_STALE_TIMEOUT:-120}" bash "$RECOVER_STALE" \
+      stale_in_progress $stale_ip stale_blocked $stale_bl >&2 2>&1
+    stale_rc=$?
+    if [ "$stale_rc" -eq 0 ]; then
+      echo "[turn] stale-recovery: ran in_progress=[${stale_ip}] blocked=[${stale_bl}] rc=0"
+    else
+      echo "[turn] stale-recovery: FAILED in_progress=[${stale_ip}] blocked=[${stale_bl}] rc=${stale_rc} (fail-open, turn continues)"
+    fi
+  fi
+fi
+
 # --- Phase 3: decide ----------------------------------------------------------
 [ -s "$CANDIDATES" ] || printf '{"candidates": []}\n' >"$CANDIDATES"
 if [ ! -s "$EVENTS" ]; then

@@ -51,6 +51,7 @@ CLI (turn.sh):
   python3 scripts/autopilot/turn_snapshot.py apply <snapshot.json | -> [state.json]
   python3 scripts/autopilot/turn_snapshot.py apply --degraded <reason> [state.json]
   python3 scripts/autopilot/turn_snapshot.py summary [state.json]
+  python3 scripts/autopilot/turn_snapshot.py stale-recovery [state.json]
 
 stores the document on `state.turn_snapshot` (replaced, never merged), writes
 the blob fields onto state (the previous value stays when a blob is absent),
@@ -58,6 +59,10 @@ seeds `state.slot_events` and advances `state.slot_events_last_id`. A file
 that cannot be read as a JSON object is stored as the marker document.
 `apply --degraded <reason>` stores the marker document without reading one.
 `summary` prints turn.sh's one-line usage summary, read through the accessor.
+`stale-recovery` prints ONE JSON line {"stale_in_progress":[...],"stale_blocked":[...],
+"skipped_inflight":[...]} for turn.sh's Phase 1.5 stale-recovery pass (#5344): the
+snapshot's orch stale lists minus any issue anchoring an occupied slot (in-flight
+anchors belong to the reap paths). Fail-safe: absent signal / marker document -> [].
 
 Exit 0 when a snapshot (the document or the marker) was stored / the summary
 printed; 1 when the state cannot be read or written; 2 on bad arguments.
@@ -471,6 +476,43 @@ def summary(state: dict) -> dict:
     }
 
 
+def _occupied_slot_issues(state: dict) -> set[int]:
+    """Issue numbers anchoring any occupied slot (`anchor` "issue-N" or "N")."""
+    slots = state.get("slots") if isinstance(state.get("slots"), dict) else {}
+    out: set[int] = set()
+    for slot in slots.values():
+        if not isinstance(slot, dict):
+            continue
+        anchor = str(slot.get("anchor") or "").strip()
+        if anchor.startswith("issue-"):
+            anchor = anchor[len("issue-"):]
+        if anchor.isdigit():
+            out.add(int(anchor))
+    return out
+
+
+def stale_recovery(state: dict) -> dict:
+    """The orch stale lists for turn.sh's recovery pass (#5344).
+
+    Reads the document directly, never through `_state_signal`: the replay-mode
+    UnknownSignalError loud-fail applies to decide.py's reads only, and no data
+    here must mean no relabel."""
+    signals = _signals(state) or {}
+    inflight = _occupied_slot_issues(state)
+
+    def listed(name: str) -> list[int]:
+        raw = signals.get(name)
+        return sorted(set(_int_tokens(raw))) if isinstance(raw, (list, tuple)) else []
+
+    in_progress, blocked = listed("orch_stale_in_progress_items"), listed("orch_stale_blocked_items")
+    skipped = sorted(inflight & (set(in_progress) | set(blocked)))
+    return {
+        "stale_in_progress": [n for n in in_progress if n not in inflight],
+        "stale_blocked": [n for n in blocked if n not in inflight],
+        "skipped_inflight": skipped,
+    }
+
+
 def _apply_cli(args: list[str]) -> int:
     if len(args) >= 2 and args[0] == "--degraded":
         snap_path, reason, rest = None, args[1] or "the Turn Snapshot emit failed", args[2:]
@@ -542,7 +584,8 @@ def _apply_cli(args: list[str]) -> int:
 USAGE = (
     "usage: turn_snapshot.py apply <snapshot.json | -> [state.json]\n"
     "       turn_snapshot.py apply --degraded <reason> [state.json]\n"
-    "       turn_snapshot.py summary [state.json]"
+    "       turn_snapshot.py summary [state.json]\n"
+    "       turn_snapshot.py stale-recovery [state.json]"
 )
 
 
@@ -555,6 +598,12 @@ def main(argv: list[str]) -> int:
         if state is None:
             return 1
         print(json.dumps(summary(state)))
+        code = 0
+    elif cmd == "stale-recovery" and len(args) <= 1:
+        state = _read_state(args[0] if args else DEFAULT_STATE_PATH)
+        if state is None:
+            return 1
+        print(json.dumps(stale_recovery(state)))
         code = 0
     else:
         code = -1

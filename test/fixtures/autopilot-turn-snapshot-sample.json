@@ -10,6 +10,8 @@
    4700
   ],
   "orch_needs_triage_items": [],
+  "orch_stale_in_progress_items": [],
+  "orch_stale_blocked_items": [],
   "untriaged_orphans_orch": false,
   "target_work_available": false,
   "target_board_work_available": true,

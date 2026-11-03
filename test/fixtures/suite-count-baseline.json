@@ -124,7 +124,7 @@
   "test/autopilot-token-cap.test.mts": 4,
   "test/autopilot-token-record-reap-completion.test.mts": 1,
   "test/autopilot-token-recover-reap-completion.test.mts": 1,
-  "test/autopilot-turn-runner.test.mts": 6,
+  "test/autopilot-turn-runner.test.mts": 7,
   "test/autopilot-turns.test.mts": 1,
   "test/autopilot-unattended.test.mts": 1,
   "test/autopilot-watchdog.test.mts": 7,

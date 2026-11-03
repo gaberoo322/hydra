@@ -1,0 +1,1 @@
+- fix: autopilot turn.sh now runs the stale-recovery pass (Phase 1.5) every turn (#5344)
