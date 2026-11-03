@@ -74,7 +74,7 @@ CLASSES_PATH = os.environ.get("HYDRA_CLASSES_JSON") or os.path.join(REPO_ROOT, "
 SELF_ISOLATION_FRAGMENT_PATH = os.path.join(
     REPO_ROOT, "docs", "operator-playbooks", "_fragments", "target-self-isolation-preamble.md"
 )
-STATE_PATH = os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json")
+STATE_PATH = run_ledger.resolve_state_path()
 PLAN_PATH = os.environ.get("HYDRA_AUTOPILOT_PLAN", "/tmp/hydra-autopilot-plan.json")
 
 ORCH_REPO = "gaberoo322/hydra"

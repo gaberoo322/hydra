@@ -120,7 +120,7 @@ PIPELINE_DENOMINATOR = len(PIPELINE_SLOTS)
 SIGNAL_DENOMINATOR = len(SIGNAL_CLASSES)
 
 
-STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json"))
+STATE_PATH = Path(run_ledger.resolve_state_path())
 HEARTBEAT_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_HEARTBEAT", "/tmp/hydra-autopilot-heartbeat.txt"))
 # Issue #498 — slice 2 wires heartbeat.py into the per-turn POST so the
 # /autopilot dashboard sees actions/reasons/slots immediately, not just the

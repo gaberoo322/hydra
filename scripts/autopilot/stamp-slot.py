@@ -48,7 +48,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import run_ledger  # noqa: E402  (the ONE state-document parser/writer, #5075)
 
-STATE_PATH = os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json")
+STATE_PATH = run_ledger.resolve_state_path()
 PLAN_PATH = os.environ.get("HYDRA_AUTOPILOT_PLAN", "/tmp/hydra-autopilot-plan.json")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -160,7 +160,8 @@ def main(argv: list[str]) -> int:
     try:
         try:
             run_ledger.persist(state, STATE_PATH)
-        except run_ledger.LedgerTypeError:
+        except run_ledger.LedgerTypeError as exc:
+            print(f"[stamp-slot] state failed type validation on write ({exc}); persisting unvalidated", file=sys.stderr)
             run_ledger.persist(state, STATE_PATH, validate=False)
     except OSError as exc:
         print(f"[stamp-slot] cannot write state: {exc}", file=sys.stderr)

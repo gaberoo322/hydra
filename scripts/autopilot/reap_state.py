@@ -33,7 +33,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 import run_ledger  # noqa: E402
 
-STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json"))
+STATE_PATH = Path(run_ledger.resolve_state_path())
 
 # Issue #4398: the run-log seam relocates here (from reap.py) alongside
 # STATE_PATH rather than into either new reap_stall.py/reap_ghrefs.py split

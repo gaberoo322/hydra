@@ -247,7 +247,7 @@ def _fmt_delay(delay: float) -> str:
 
 def _default_state_path() -> str:
     """The canonical state.json path — same default drain.sh/bootstrap.sh use."""
-    return os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json")
+    return run_ledger.resolve_state_path()
 
 
 def _load_state(path: str):

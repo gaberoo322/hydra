@@ -78,7 +78,7 @@ if _SCRIPT_DIR not in sys.path:
 import run_ledger  # noqa: E402  (the ONE state-document parser/writer, #5075)
 
 SCHEMA_VERSION = 1
-DEFAULT_STATE_PATH = os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json")
+DEFAULT_STATE_PATH = run_ledger.resolve_state_path()
 # Set → replay / golden mode: a read of a signal the document does not carry raises.
 REPLAY_ENV = "HYDRA_AUTOPILOT_SNAPSHOT_REPLAY"
 
@@ -452,7 +452,8 @@ def _persist_lenient(state: dict, state_path: str) -> None:
     """Persist, falling back to an unvalidated write when a declared field is wrong-typed."""
     try:
         run_ledger.persist(state, state_path)
-    except run_ledger.LedgerTypeError:
+    except run_ledger.LedgerTypeError as exc:
+        print(f"[turn_snapshot] state failed type validation on write ({exc}); persisting unvalidated", file=sys.stderr)
         run_ledger.persist(state, state_path, validate=False)
 
 
