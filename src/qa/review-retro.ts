@@ -147,6 +147,12 @@ export interface ReviewEmitPlan {
   /** The single standard- or fence-rung PR, or null. */
   pr: PlannedReviewEmit | null;
   skipped: Array<{ slug: string; reason: ReviewSkipReason }>;
+  /**
+   * Seen entries whose prior emit is still open: the skill re-records each
+   * with `at` = now so `deriveReviewRetroDue` stops re-firing daily and the
+   * slug is next checked REVIEW_RETRIP_MIN_DAYS later (INV-4 weekly bound).
+   */
+  recheck: Array<{ slug: string; entry: RetroSeenEntry }>;
 }
 
 /**
@@ -160,7 +166,7 @@ export function planReviewEmit(
   seen: Readonly<Record<string, RetroSeenEntry>>,
   closedRefs: ReadonlySet<string>,
 ): ReviewEmitPlan {
-  const plan: ReviewEmitPlan = { issues: [], pr: null, skipped: [] };
+  const plan: ReviewEmitPlan = { issues: [], pr: null, skipped: [], recheck: [] };
   const done = new Set<string>();
   for (const arm of arms) {
     const slug = armSlug(arm);
@@ -179,6 +185,7 @@ export function planReviewEmit(
       const ref = top.entry.ref;
       if (ref === null || !closedRefs.has(ref)) {
         plan.skipped.push({ slug, reason: "prior-emit-open" });
+        plan.recheck.push({ slug, entry: top.entry });
         continue;
       }
       rung = REVIEW_LADDER[idx + 1] as ReviewRung;

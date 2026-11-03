@@ -275,7 +275,9 @@ Without `--apply` print the plan and write the artifact only.
    find CLOSED with `gh` (issue closed, PR merged or closed). The ladder is
    check, standard, fence; the rung is in the cue (`review:<rung>:<slug>`, the
    `REVIEW_CUE` grammar). A slug re-trips only after its prior emit closes and
-   lands exactly one rung up; an open prior emit emits nothing; `fence` is
+   lands exactly one rung up; an open prior emit emits nothing, but each `plan.recheck` entry is re-recorded
+   with `recordRetroSeen({...entry, at: <now ISO>})` so the due signal does not
+   re-fire daily (next check in 7 days); `fence` is
    terminal. Caps are independent of the run pass: at most **2** check issues
    (`needs-triage`, body names the arm, PRs, rounds and the proposed
    deterministic check) and **1** PR (a standard or fence rung).

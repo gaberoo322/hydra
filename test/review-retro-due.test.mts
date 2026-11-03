@@ -112,6 +112,24 @@ describe("planReviewEmit ladder and caps", () => {
     assert.equal(p.issues.length + (p.pr ? 1 : 0), 0);
   });
 
+  test("an open prior emit is rechecked and, once re-stamped, is not due on consecutive days", () => {
+    const cue = reviewCue("check", "rule-cross-pr-std-a");
+    const arms = [ruleArm("STD-A")];
+    const old = entry(cue, "7", 10);
+    assert.equal(deriveReviewRetroDue(arms, seenOf(old), NOW).due, true);
+    const p = planReviewEmit(arms, seenOf(old), new Set());
+    assert.equal(p.recheck.length, 1);
+    const bumped = { ...p.recheck[0]!.entry, at: new Date(NOW).toISOString() };
+    assert.equal(deriveReviewRetroDue(arms, seenOf(bumped), NOW + DAY).due, false);
+    assert.equal(deriveReviewRetroDue(arms, seenOf(bumped), NOW + REVIEW_RETRIP_MIN_DAYS * DAY).due, true);
+  });
+
+  test("sibling: a closed prior emit and a first emit have no recheck", () => {
+    const cue = reviewCue("check", "rule-cross-pr-std-a");
+    assert.deepEqual(planReviewEmit([ruleArm("STD-A")], seenOf(entry(cue, "7", 30)), new Set(["7"])).recheck, []);
+    assert.deepEqual(planReviewEmit([ruleArm("STD-A")], {}, new Set()).recheck, []);
+  });
+
   test("a closed prior emit re-trips exactly one rung up", () => {
     const check = reviewCue("check", "rule-cross-pr-std-a");
     const p = planReviewEmit([ruleArm("STD-A")], seenOf(entry(check, "7", 30)), new Set(["7"]));
