@@ -83,6 +83,8 @@ ANCHORS = ("orch_pending_grill_anchor", "orch_dev_ready_anchor", "wayfinder_orch
 LISTS = (
     "needs_qa_numbers",
     "orch_needs_triage_items",
+    "orch_stale_in_progress_items",
+    "orch_stale_blocked_items",
     "target_needs_triage_items",
     "target_stale_in_progress_items",
     "target_blocked_items",

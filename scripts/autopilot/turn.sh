@@ -128,6 +128,40 @@ if ! applied=$(python3 "$SCRIPT_DIR/turn_snapshot.py" apply "${apply_args[@]}" "
 fi
 echo "[turn] snapshot: $(jq -r --arg fell_back "$snapshot_form" '"form=\(if $fell_back != "" then $fell_back else .form end) degraded=\(.degraded)"' <<<"$applied" 2>/dev/null || echo "$applied") cursor=$cursor"
 
+# --- Phase 1.5: stale recovery (#5344) ----------------------------------------
+# Re-queue / promote orphaned stale in-progress and stale blocked orch issues
+# from the stored snapshot's two lists (in-flight slot anchors excluded by the
+# accessor). FAIL-OPEN: nothing here changes the exit code or the plan. The
+# script's stdout+stderr go to OUR stderr; our stdout gains one `[turn]` line.
+RECOVER_STALE="${HYDRA_AUTOPILOT_RECOVER_STALE:-$SCRIPT_DIR/recover-stale.sh}"
+if [ -n "${HYDRA_AUTOPILOT_SNAPSHOT_REPLAY:-}" ] && [ -z "${HYDRA_AUTOPILOT_RECOVER_STALE:-}" ]; then
+  echo "[turn] stale-recovery: skipped (replay)"
+else
+  recovery_json=$(python3 "$SCRIPT_DIR/turn_snapshot.py" stale-recovery "$STATE" 2>/dev/null) || recovery_json=""
+  if [ -z "$recovery_json" ]; then
+    echo "[turn] stale-recovery: skipped (accessor failed) rc=1"
+  else
+    sip=$(jq -r '.stale_in_progress | map(tostring) | join(" ")' <<<"$recovery_json" 2>/dev/null) || sip=""
+    sb=$(jq -r '.stale_blocked | map(tostring) | join(" ")' <<<"$recovery_json" 2>/dev/null) || sb=""
+    skipped=$(jq -r '.skipped_inflight | length' <<<"$recovery_json" 2>/dev/null) || skipped=0
+    if [ -z "$sip" ] && [ -z "$sb" ]; then
+      echo "[turn] stale-recovery: nothing stale (skipped_inflight=$skipped)"
+    elif [ ! -f "$RECOVER_STALE" ]; then
+      echo "[turn] stale-recovery: script missing at $RECOVER_STALE rc=127"
+    else
+      # shellcheck disable=SC2086  # the lists are space-separated integers
+      timeout "${HYDRA_AUTOPILOT_RECOVER_STALE_TIMEOUT:-120}" bash "$RECOVER_STALE" \
+        stale_in_progress $sip stale_blocked $sb >&2 2>&2
+      rs_rc=$?
+      if [ "$rs_rc" -eq 0 ]; then
+        echo "[turn] stale-recovery: ran in_progress=[${sip}] blocked=[${sb}] skipped_inflight=$skipped"
+      else
+        echo "[turn] stale-recovery: recover-stale failed in_progress=[${sip}] blocked=[${sb}] rc=$rs_rc"
+      fi
+    fi
+  fi
+fi
+
 # --- Phase 3: decide ----------------------------------------------------------
 [ -s "$CANDIDATES" ] || printf '{"candidates": []}\n' >"$CANDIDATES"
 if [ ! -s "$EVENTS" ]; then

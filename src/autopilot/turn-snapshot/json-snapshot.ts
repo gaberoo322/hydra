@@ -200,6 +200,14 @@ function orchBoardCount(s: OrchBoardSnapshot, key: OrchBoardCountKey): number {
   return intOrZero(v === undefined ? undefined : JSON.stringify(v));
 }
 
+/** An orch board stale list (`stale_in_progress` / `stale_blocked`, #5344): ascending distinct positive ints; non-array or source 'none' → []. */
+function orchStaleList(s: OrchBoardSnapshot, key: "stale_in_progress" | "stale_blocked"): number[] {
+  if (s.counts.source === "none") return [];
+  const raw = (s.counts.values as Readonly<Record<string, unknown>>)[key];
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.filter((n): n is number => Number.isInteger(n) && n > 0))].sort((a, b) => a - b);
+}
+
 /** A Target count line's value (`<key>=<value>`, the last one wins), or `0` when not printed. */
 function targetCount(s: TargetBoardSnapshot, key: string): number {
   if (!s.counts.ok) return 0;
@@ -258,6 +266,8 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     needs_triage_orch: orchBoardCount(v.orchBoard, "needs_triage") > 0,
     needs_qa_numbers: v.needsQaNumbers.ok ? [...v.needsQaNumbers.value] : [],
     orch_needs_triage_items: v.orchBoard.needsTriageItems.ok ? [...v.orchBoard.needsTriageItems.value] : [],
+    orch_stale_in_progress_items: orchStaleList(v.orchBoard, "stale_in_progress"), // #5344
+    orch_stale_blocked_items: orchStaleList(v.orchBoard, "stale_blocked"), // #5344
     untriaged_orphans_orch: (v.untriagedOrphans.ok ? v.untriagedOrphans.value : 0) > 0,
 
     target_work_available: (v.redisQueues["work-queue"].ok ? v.redisQueues["work-queue"].value : 0) > 0,
