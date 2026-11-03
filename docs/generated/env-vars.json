@@ -72,6 +72,9 @@
       "name": "HOME",
       "readSites": [
         {
+          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh"
+        },
+        {
           "path": "scripts/autopilot/pace-gate.sh"
         },
         {
@@ -152,7 +155,7 @@
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/autopilot/pace-gate.sh"
+        "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh"
       }
     },
     {
@@ -1208,6 +1211,18 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/ci/check-skill-playbook-drift.sh"
+      }
+    },
+    {
+      "name": "HYDRA_DU_BIN",
+      "readSites": [
+        {
+          "path": "src/host-probe/exec.ts"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "src/host-probe/exec.ts"
       }
     },
     {
@@ -2734,6 +2749,42 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/hydra-watchdog.sh"
+      }
+    },
+    {
+      "name": "HYDRA_WATCHDOG_DISK_CRITICAL_PCT",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.ts"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.ts"
+      }
+    },
+    {
+      "name": "HYDRA_WATCHDOG_DISK_PATHS",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.ts"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.ts"
+      }
+    },
+    {
+      "name": "HYDRA_WATCHDOG_DISK_WARN_PCT",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.ts"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {

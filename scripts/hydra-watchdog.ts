@@ -11,6 +11,9 @@
  *       the SERVICE LIVENESS check (was run_service_liveness in hydra-watchdog.sh; issue #5096)
  *   node --experimental-strip-types scripts/hydra-watchdog.ts wedge
  *       the AUTOPILOT WEDGE check (was run_autopilot_wedge in hydra-watchdog.sh)
+ *   node --experimental-strip-types scripts/hydra-watchdog.ts disk
+ *       the TMPFS EXHAUSTION check (issue #5327): /tmp + /dev/shm inode and space
+ *       use over src/watchdog/disk.ts, paged through the Operator Channel
  *   node --experimental-strip-types scripts/hydra-watchdog.ts thresholds
  *       print src/autopilot/stale-thresholds.ts as JSON (status.sh, deploy smoke)
  *
@@ -19,6 +22,9 @@
  *   HYDRA_AUTOPILOT_HEARTBEAT  heartbeat path  (default /tmp/hydra-autopilot-heartbeat.txt)
  *   STALE_THRESHOLD_SECONDS    kill threshold  (default WATCHDOG_WEDGE_KILL_THRESHOLD_S)
  *   KILL_GRACE_SECONDS         SIGTERM->SIGKILL grace (default WATCHDOG_KILL_GRACE_S)
+ *   HYDRA_WATCHDOG_DISK_PATHS        comma-separated mounts (default /tmp,/dev/shm)
+ *   HYDRA_WATCHDOG_DISK_WARN_PCT     warn threshold, inodes OR space (default 80)
+ *   HYDRA_WATCHDOG_DISK_CRITICAL_PCT critical threshold, inodes OR space (default 95)
  */
 
 import {
@@ -29,7 +35,16 @@ import {
 import { SCHEDULER_TICK_STALE_S } from "../src/autopilot/stale-thresholds.ts";
 import { closeTurnSnapshotRedis } from "../src/redis/turn-snapshot.ts";
 import { LIVENESS_LOG_PREFIX, parseStartupGraceS, runLiveness } from "../src/watchdog/liveness.ts";
-import { createProductionLivenessDeps, createProductionWedgeDeps } from "../src/watchdog/ports.ts";
+import {
+  DEFAULT_DISK_CRITICAL_PCT,
+  DEFAULT_DISK_WARN_PCT,
+  DISK_LOG_PREFIX,
+  DISK_RECOVER_MARGIN_PCT,
+  parseDiskPaths,
+  parsePct,
+  runDisk,
+} from "../src/watchdog/disk.ts";
+import { createProductionDiskDeps, createProductionLivenessDeps, createProductionWedgeDeps } from "../src/watchdog/ports.ts";
 import { runWedge, WEDGE_LOG_PREFIX } from "../src/watchdog/wedge.ts";
 
 function envNumber(name: string, fallback: number): number {
@@ -74,7 +89,28 @@ async function main(argv: string[]): Promise<void> {
     });
     return;
   }
-  console.error(`hydra-watchdog.ts: unknown subcommand '${cmd ?? ""}' (expected: liveness | wedge | thresholds)`);
+  if (cmd === "disk") {
+    try {
+      let warnPct = parsePct(process.env.HYDRA_WATCHDOG_DISK_WARN_PCT, DEFAULT_DISK_WARN_PCT);
+      let criticalPct = parsePct(process.env.HYDRA_WATCHDOG_DISK_CRITICAL_PCT, DEFAULT_DISK_CRITICAL_PCT);
+      if (warnPct >= criticalPct) {
+        console.log(`${DISK_LOG_PREFIX} WARN warn pct ${warnPct} >= critical pct ${criticalPct} — using defaults`);
+        warnPct = DEFAULT_DISK_WARN_PCT;
+        criticalPct = DEFAULT_DISK_CRITICAL_PCT;
+      }
+      await runDisk(createProductionDiskDeps((line) => console.log(line)), {
+        paths: parseDiskPaths(process.env.HYDRA_WATCHDOG_DISK_PATHS),
+        thresholds: { warnPct, criticalPct, recoverMarginPct: DISK_RECOVER_MARGIN_PCT },
+      });
+    } catch (err) {
+      console.log(`${DISK_LOG_PREFIX} WARN ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      // One-shot process: the channel's Redis dedup store holds a connection
+      // open, so exit explicitly (as operator-notify.ts does). Always 0.
+      process.exit(0);
+    }
+  }
+  console.error(`hydra-watchdog.ts: unknown subcommand '${cmd ?? ""}' (expected: liveness | wedge | disk | thresholds)`);
 }
 
 main(process.argv.slice(2)).catch((err) => {
