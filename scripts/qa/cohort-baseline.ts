@@ -27,6 +27,15 @@ import {
   parseQaVerdictTrailers,
   type QaVerdictTrailer,
 } from "../../src/qa/verdict-trailer.ts";
+import { parseQaShadowLines } from "../../src/qa/shadow-fold.ts";
+import {
+  findOnWindow,
+  pairCohortOf,
+  readConfigHistory,
+  type CohortRow,
+  type ConfigCommit,
+  type OnWindow,
+} from "./pair-graduation.ts";
 
 export const SCHEMA_VERSION = 1;
 /** The #4917 merge — after it every verdict carries a canonical trailer. */
@@ -345,12 +354,12 @@ export function stableStringify(value: unknown): string {
 }
 
 /**
- * The single cohort-tagging seam (INV-12). The review pair has never reviewed
- * a PR, so every PR is `baseline` today; P2 (#5264) replaces this one
- * function's source when it defines how a pair-reviewed PR is marked.
+ * The single cohort-tagging seam (INV-12). Delegates to the one pair-cohort
+ * rule in scripts/qa/pair-graduation.ts (P3, #5265): `pair` iff merged inside
+ * the `on` window, trailer-reviewed and not a shadow PR; otherwise `baseline`.
  */
-export function cohortOf(_pr: { number: number }): Cohort {
-  return "baseline";
+export function cohortOf(row: CohortRow, window: OnWindow | null): Cohort {
+  return pairCohortOf(row, window);
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +416,21 @@ export class HarvestError extends Error {
   }
 }
 
+/**
+ * Pure. The harvest-time guard on the rollout-config history: a null history
+ * (unreadable git, shallow clone) aborts the harvest with a typed
+ * HarvestError rather than tagging every PR baseline (fail loud, not open).
+ */
+export function requireConfigHistory(history: ConfigCommit[] | null): ConfigCommit[] {
+  if (history === null) {
+    throw new HarvestError(
+      "config-history-unreadable",
+      "git history of the rollout config is unreadable; refusing to tag every PR baseline",
+    );
+  }
+  return history;
+}
+
 async function harvest(repo: string, since: string, until: string): Promise<CohortInputs> {
   // Dynamic import keeps the pure fold above free of Redis/logger side effects.
   const { ghJson } = await import("../../src/github/gh.ts");
@@ -428,6 +452,7 @@ async function harvest(repo: string, since: string, until: string): Promise<Coho
   );
   const sinceMs = Date.parse(since);
   const untilMs = Date.parse(until);
+  const window = findOnWindow(requireConfigHistory(readConfigHistory()));
   const prs: PrRow[] = [];
   const items: ItemRow[] = [];
   const closing = new Set<number>();
@@ -468,7 +493,16 @@ async function harvest(repo: string, since: string, until: string): Promise<Coho
       const trailers = [...comments, ...reviews]
         .flatMap((c) => parseQaVerdictTrailers(c.body))
         .filter((t) => t.pr === it.number);
-      prs.push({ number: it.number, mergedAt, title: it.title, cohort: cohortOf(it), trailers });
+      const shadowLines = [...comments, ...reviews]
+        .flatMap((c) => parseQaShadowLines(c.body))
+        .filter((l) => l.pr === it.number);
+      prs.push({
+        number: it.number,
+        mergedAt,
+        title: it.title,
+        cohort: cohortOf({ number: it.number, mergedAt, trailers, shadowLines }, window),
+        trailers,
+      });
       const refs = trailers.length > 0 ? [...closedIssues([{ body: it.body }])] : [];
       for (const n of refs) closing.add(n);
       coverage.push({ reviewed: trailers.length > 0, closingRefs: refs });
