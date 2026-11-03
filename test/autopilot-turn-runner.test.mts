@@ -720,3 +720,31 @@ describe("turn.sh — a failed LIVE emit plans on the TS all-degraded snapshot, 
     });
   }
 });
+
+describe("turn_snapshot.py apply — a type-invalid state document is stored leniently, not refused (#5293 QA r5, class fix)", () => {
+  const TURN_SNAPSHOT = join(SCRIPTS, "turn_snapshot.py");
+  function runApply(sb: Sandbox) {
+    const r = spawnSync("python3", [TURN_SNAPSHOT, "apply", FIXTURE, sb.state], { cwd: sb.dir, env: sb.env, encoding: "utf-8" });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  test("a wrong-typed declared field (failure_log:\"x\"): exit 0 and this turn's snapshot is stored", () => {
+    const st = baseState();
+    st.failure_log = "x";
+    const sb = sandbox(st);
+    sandboxes.push(sb);
+    const r = runApply(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /state failed type validation/);
+    assert.deepEqual(readJson(sb.state).turn_snapshot, readJson(FIXTURE));
+  });
+
+  test("sibling pin: a non-object state document is still refused (exit 1) and left untouched", () => {
+    const sb = sandbox(null);
+    sandboxes.push(sb);
+    writeFileSync(sb.state, "[1,2]\n");
+    const r = runApply(sb);
+    assert.equal(r.status, 1);
+    assert.equal(readFileSync(sb.state, "utf-8"), "[1,2]\n");
+  });
+});

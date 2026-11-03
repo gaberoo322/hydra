@@ -4941,11 +4941,7 @@ def _persist_ledger(path: str, state: dict, what: str) -> bool:
     stays pure (ADR-0007); this is a sanctioned main() side-effect.
     """
     try:
-        try:
-            run_ledger.persist(state, path)
-        except run_ledger.LedgerTypeError:
-            # A wrong-typed declared field must not stop the turn counter: write leniently.
-            run_ledger.persist(state, path, validate=False)
+        run_ledger.persist(state, path)
         return True
     except (OSError, run_ledger.LedgerTypeError) as exc:
         print(
@@ -5103,14 +5099,11 @@ def main(argv: list[str]) -> int:
         if len(argv) < 3:
             print("decide.py decide: missing <state.json>", file=sys.stderr)
             return 2
-        try:
-            state = run_ledger.load(argv[2], fill_defaults=False)
-        except run_ledger.LedgerTypeError as exc:
-            # A wrong-typed declared field must not abort the decision turn: read leniently.
-            state = run_ledger.read_prior(argv[2])
-            if not isinstance(state, dict):
-                raise
-            print(f"decide.py: state failed type validation ({exc}); deciding leniently", file=sys.stderr)
+        # STRICT ON PURPOSE (#5293 QA r5): decide() indexes declared fields by their
+        # declared type (e.g. failure_log[-1].get), so a LedgerTypeError here would
+        # become an AttributeError mid-plan. Failing loud before planning is correct;
+        # a lenient read would only move the crash deeper.
+        state = run_ledger.load(argv[2], fill_defaults=False)
         # Issue #1769 — single-writer turn counter. The CLI (not the model
         # session, not heartbeat.py) owns `state.turn`: one bump per decide
         # invocation, persisted atomically BEFORE decide() runs so the bumped
