@@ -168,34 +168,34 @@ export type CloseClaimResult =
 export const CLAIM_OWNER_MISMATCH = "claim-owner-mismatch";
 
 /**
- * Atomic compare-and-delete: GET + DEL in one script. With a non-empty ARGV[1]
- * the claim is deleted only when its `dispatchId` matches; otherwise `{0, raw}`.
+ * Atomic compare-and-delete: GET + DEL in one script. The claim is deleted only
+ * when its `dispatchId` equals ARGV[1]; otherwise `{0, raw}` (an empty ARGV[1]
+ * never matches, so there is no unowned delete).
  */
 const CLOSE_CLAIM_LUA = `
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {1, ''} end
-if ARGV[1] ~= '' then
-  local ok, claim = pcall(cjson.decode, raw)
-  if not ok or type(claim) ~= 'table' or claim['dispatchId'] ~= ARGV[1] then return {0, raw} end
-end
+local ok, claim = pcall(cjson.decode, raw)
+if ARGV[1] == '' or not ok or type(claim) ~= 'table' or claim['dispatchId'] ~= ARGV[1] then return {0, raw} end
 redis.call('DEL', KEYS[1])
 return {1, raw}
 `;
 
 /**
- * Atomically read and delete the claim. Returns the prior claim, or null when
- * none. With `expectedDispatchId`, a claim owned by another dispatch is left in
- * place and `{ ok:false, error: CLAIM_OWNER_MISMATCH }` is returned.
+ * Atomically read and delete the claim owned by `expectedDispatchId` (REQUIRED,
+ * INV-11). Returns the prior claim, or null when none. A claim owned by another
+ * dispatch is left in place and `{ ok:false, error: CLAIM_OWNER_MISMATCH }` is
+ * returned.
  */
 export async function closeDispatchClaim(
   repo: string,
   issue: number,
-  expectedDispatchId?: string,
+  expectedDispatchId: string,
 ): Promise<CloseClaimResult> {
   try {
     const r = getRedisConnection();
     const key = lifecycleClaimKey(repo, issue);
-    const res = (await r.eval(CLOSE_CLAIM_LUA, 1, key, expectedDispatchId ?? "")) as [number, string];
+    const res = (await r.eval(CLOSE_CLAIM_LUA, 1, key, expectedDispatchId)) as [number, string];
     if (res[0] === 0) return { ok: false, error: CLAIM_OWNER_MISMATCH };
     const prior = parseClaim(res[1] === "" ? null : res[1]);
     return { ok: true, prior };

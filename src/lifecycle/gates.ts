@@ -82,7 +82,7 @@ export function gateDispatch(input: GateInput, records: GateRecords): GateResult
   return pass();
 }
 
-function parsePrEvidence(evidence: Readonly<Record<string, string>>): number | null {
+export function parsePrEvidence(evidence: Readonly<Record<string, string>>): number | null {
   const raw = evidence.pr;
   if (raw === undefined) return null;
   const m = /^#?(\d+)$/.exec(raw.trim());

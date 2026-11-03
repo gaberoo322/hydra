@@ -5,7 +5,7 @@
  *   npx tsx scripts/lifecycle.ts advance <issue> <to> [--evidence k=v]...
  *       [--reason R] [--rationale T] [--close-reason completed|"not planned"] [--actor A]
  *   npx tsx scripts/lifecycle.ts claim <issue> --dispatch ID --class C --run R [--artifact-hash H]
- *   npx tsx scripts/lifecycle.ts release <issue> [--dispatch ID]
+ *   npx tsx scripts/lifecycle.ts release <issue> --dispatch ID
  *
  * Talks to GitHub (gh) and Redis directly: no :4000 dependency. Prints one JSON
  * line. Exit codes: 0 ok (including a shadow `wouldRefuse`), 1 refused / failed
@@ -67,7 +67,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   const [verb, issueRaw, to] = parsed.positional;
   const issue = parseIssue(issueRaw);
   if (issue === null || (verb !== "advance" && verb !== "claim" && verb !== "release")) {
-    console.error("[lifecycle] usage: advance <issue> <to> | claim <issue> | release <issue>");
+    console.error("[lifecycle] usage: advance <issue> <to> | claim <issue> --dispatch <id> ... | release <issue> --dispatch <id>");
     return 2;
   }
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -109,7 +109,13 @@ export async function main(argv: readonly string[]): Promise<number> {
     return res.ok ? 0 : 1;
   }
 
-  const res = await releaseClaim(issue, deps, parsed.flags.actor, parsed.flags.dispatch ?? parsed.flags["dispatch-id"]);
+  // INV-11: release is always ownership-checked; there is no unowned/force path.
+  const releaseDispatch = parsed.flags.dispatch ?? parsed.flags["dispatch-id"];
+  if (!releaseDispatch) {
+    console.error("[lifecycle] release requires --dispatch <id>");
+    return 2;
+  }
+  const res = await releaseClaim(issue, releaseDispatch, deps, parsed.flags.actor);
   emit(res);
   return res.ok ? 0 : 1;
 }

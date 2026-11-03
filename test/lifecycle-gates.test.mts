@@ -276,11 +276,11 @@ describe("seam spine (INV-3..6)", () => {
   test("two state labels are invalid: shadow writes and removes both, enforce refuses", async () => {
     const shadow = harness(["needs-qa", "in-progress"], "shadow");
     const s = await advance({ issue: 10, to: "needs-dev-resume" }, shadow.deps);
-    assert.equal(s.ok && s.wouldRefuse, "multiple-state-labels");
+    assert.equal(s.ok && s.wouldRefuse, "state-ambiguous");
     assert.deepEqual(shadow.edits[0].remove.sort(), ["in-progress", "needs-qa"]);
     const enforce = harness(["needs-qa", "in-progress"], "enforce");
     const e = await advance({ issue: 10, to: "needs-dev-resume" }, enforce.deps);
-    assert.equal("code" in e ? e.code : null, "multiple-state-labels");
+    assert.equal("code" in e ? e.code : null, "state-ambiguous");
   });
 
   test("a judgment transition needs reason + rationale in enforce", async () => {
@@ -318,7 +318,7 @@ describe("claim / release (INV-11)", () => {
         closeClaim: async () => ({ ok: true, prior: { dispatchId: "d1", class: "dev_orch", run: "r1", artifactHash: null, openedAt: 1 } }),
       },
     };
-    const res = await releaseClaim(10, deps);
+    const res = await releaseClaim(10, "d1", deps);
     assert.equal(res.ok, true);
     assert.equal(h.journal[0].kind, "claim-closed");
     assert.deepEqual(h.journal[0].evidence, { dispatch: "d1" });
@@ -345,7 +345,7 @@ describe("QA round-1 fixes (#5310)", () => {
 
   test("release forwards --dispatch ownership and surfaces an owner mismatch", async () => {
     const h = harness(["in-progress"], "shadow");
-    const seen: Array<string | undefined> = [];
+    const seen: string[] = [];
     const deps: SeamDeps = {
       ...h.deps,
       journal: {
@@ -356,9 +356,42 @@ describe("QA round-1 fixes (#5310)", () => {
         },
       },
     };
-    assert.deepEqual(await releaseClaim(10, deps, "cli", "other"), { ok: false, code: "claim-owner-mismatch" });
+    assert.deepEqual(await releaseClaim(10, "other", deps, "cli"), { ok: false, code: "claim-owner-mismatch" });
     assert.equal(h.journal.length, 0);
-    assert.equal((await releaseClaim(10, deps, "cli", "mine")).ok, true);
+    assert.equal((await releaseClaim(10, "mine", deps, "cli")).ok, true);
     assert.deepEqual(seen, ["other", "mine"]);
+  });
+});
+
+describe("operator ruling round 4 (#5310): label-less issues", () => {
+  test("enforce: a label-less issue moving to needs-triage passes the gate and writes", async () => {
+    const h = harness(["enhancement"], "enforce");
+    const res = await advance({ issue: 10, to: "needs-triage" }, h.deps);
+    assert.deepEqual(res, { ok: true, issue: 10, from: null, to: "needs-triage", mode: "enforce" });
+    assert.deepEqual(h.edits, [{ issue: 10, remove: [], add: ["needs-triage"] }]);
+    assert.equal(h.journal[0].kind, "transition");
+    assert.equal(h.journal[0].result, "ok");
+  });
+
+  test("enforce: a label-less issue moving anywhere else is refused state-missing with no write", async () => {
+    const h = harness(["enhancement"], "enforce");
+    const res = await advance({ issue: 10, to: "in-progress" }, h.deps);
+    assert.deepEqual(res, { ok: false, issue: 10, code: "state-missing", mode: "enforce", written: false });
+    assert.equal(h.edits.length, 0);
+    assert.equal(h.journal[0].result, "refused:state-missing");
+  });
+
+  test("enforce: more than one state label is refused state-ambiguous, even toward needs-triage", async () => {
+    const h = harness(["needs-qa", "in-progress"], "enforce");
+    const res = await advance({ issue: 10, to: "needs-triage" }, h.deps);
+    assert.deepEqual(res, { ok: false, issue: 10, code: "state-ambiguous", mode: "enforce", written: false });
+    assert.equal(h.edits.length, 0);
+  });
+
+  test("shadow: a label-less non-triage move writes through and reports wouldRefuse state-missing", async () => {
+    const h = harness([], "shadow");
+    const res = await advance({ issue: 10, to: "ready-for-agent" }, h.deps);
+    assert.equal(res.ok && res.wouldRefuse, "state-missing");
+    assert.equal(h.journal[0].result, "shadow-would-refuse:state-missing");
   });
 });

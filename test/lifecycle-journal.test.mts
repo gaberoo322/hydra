@@ -107,11 +107,11 @@ describe("lifecycle-journal Redis seam (issue #5310)", () => {
   test("closeDispatchClaim returns the prior claim and frees the key", async () => {
     const claim = { dispatchId: "d1", class: "qa_orch", run: "r1", artifactHash: "abc", openedAt: 1 };
     await openDispatchClaim(REPO, ISSUE, claim);
-    const closed = await closeDispatchClaim(REPO, ISSUE);
+    const closed = await closeDispatchClaim(REPO, ISSUE, "d1");
     assert.ok(closed.ok);
     assert.equal(closed.prior?.dispatchId, "d1");
     assert.equal(await redis.exists(lifecycleClaimKey(REPO, ISSUE)), 0);
-    const again = await closeDispatchClaim(REPO, ISSUE);
+    const again = await closeDispatchClaim(REPO, ISSUE, "d1");
     assert.ok(again.ok);
     assert.equal(again.prior, null);
   });
@@ -126,5 +126,35 @@ describe("lifecycle-journal Redis seam (issue #5310)", () => {
     assert.ok(right.ok);
     assert.equal(right.prior?.dispatchId, "d1");
     assert.equal(await redis.exists(lifecycleClaimKey(REPO, ISSUE)), 0);
+  });
+});
+
+describe("operator ruling round 4 (#5310): release requires --dispatch (INV-11)", () => {
+  let redis: any;
+  before(async () => { redis = new Redis(REDIS_URL); });
+  after(async () => { await redis.quit(); });
+
+  test("closeDispatchClaim with an empty dispatch id never deletes the claim", async () => {
+    await redis.del(lifecycleClaimKey(REPO, ISSUE));
+    await openDispatchClaim(REPO, ISSUE, { dispatchId: "d1", class: "dev_orch", run: "r1", artifactHash: null, openedAt: 1 });
+    const res = await closeDispatchClaim(REPO, ISSUE, "");
+    assert.equal(res.ok, false);
+    assert.equal(await redis.exists(lifecycleClaimKey(REPO, ISSUE)), 1);
+    await redis.del(lifecycleClaimKey(REPO, ISSUE));
+  });
+
+  test("CLI release without --dispatch exits 2 and the claim survives", async () => {
+    const { main } = await import("../scripts/lifecycle.ts");
+    const { resolveGithubRepo } = await import("../src/github/issues.ts");
+    const repo = resolveGithubRepo();
+    const issue = 987655;
+    await redis.del(lifecycleClaimKey(repo, issue));
+    await openDispatchClaim(repo, issue, { dispatchId: "d1", class: "dev_orch", run: "r1", artifactHash: null, openedAt: 1 });
+    try {
+      assert.equal(await main(["release", String(issue)]), 2);
+      assert.equal(await redis.exists(lifecycleClaimKey(repo, issue)), 1);
+    } finally {
+      await redis.del(lifecycleClaimKey(repo, issue));
+    }
   });
 });

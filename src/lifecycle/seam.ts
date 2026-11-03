@@ -44,6 +44,7 @@ import {
 import { getDesignConceptHash } from "../redis/design-concept.ts";
 import {
   evaluateGate,
+  parsePrEvidence,
   recordsNeeded,
   type DesignConceptRecord,
   type Fetched,
@@ -131,7 +132,7 @@ export interface SeamDeps {
     append: (repo: string, issue: number, entry: LifecycleJournalEntry) => Promise<JournalWriteResult>;
     expireOnClose: (repo: string, issue: number) => Promise<JournalWriteResult>;
     openClaim: (repo: string, issue: number, claim: DispatchClaim) => Promise<OpenClaimResult>;
-    closeClaim: (repo: string, issue: number, expectedDispatchId?: string) => Promise<CloseClaimResult>;
+    closeClaim: (repo: string, issue: number, expectedDispatchId: string) => Promise<CloseClaimResult>;
   };
   now: () => number;
 }
@@ -158,15 +159,20 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
         }
       },
       pr: async (prNumber) => {
-        const pr = await viewPr<{ number?: number; state?: string; body?: string }>(
-          prNumber,
-          "number,state,body",
-        );
-        if (pr === null || typeof pr.number !== "number") return { ok: false };
-        return {
-          ok: true,
-          value: { number: pr.number, state: String(pr.state ?? "").toUpperCase(), body: pr.body ?? "" },
-        };
+        try {
+          const pr = await viewPr<{ number?: number; state?: string; body?: string }>(
+            prNumber,
+            "number,state,body",
+          );
+          if (pr === null || typeof pr.number !== "number") return { ok: false };
+          return {
+            ok: true,
+            value: { number: pr.number, state: String(pr.state ?? "").toUpperCase(), body: pr.body ?? "" },
+          };
+        } catch (err) {
+          logger.error({ err, prNumber }, "[lifecycle] pr fetch failed");
+          return { ok: false };
+        }
       },
     },
     journal: {
@@ -276,27 +282,24 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
     return { ok: false, issue, code: "issue-closed", mode, written: false };
   }
 
-  // 4. legality
+  // 4. legality. `none` (zero state labels) may only enter needs-triage, gate-free;
+  //    every other move refuses `state-missing`. `many` refuses `state-ambiguous`.
   const transition = from === null ? undefined : findTransition(from as LifecycleState, to);
   let verdict: { ok: boolean; code: string };
-  if (transition === undefined) {
-    verdict = {
-      ok: false,
-      code:
-        stateLabels.length === 0
-          ? "no-state-label"
-          : stateLabels.length > 1
-            ? "multiple-state-labels"
-            : "illegal-transition",
-    };
+  if (stateLabels.length === 0) {
+    verdict = to === "needs-triage" ? { ok: true, code: "ok" } : { ok: false, code: "state-missing" };
+  } else if (stateLabels.length > 1) {
+    verdict = { ok: false, code: "state-ambiguous" };
+  } else if (transition === undefined) {
+    verdict = { ok: false, code: "illegal-transition" };
   } else {
     // 5. fetch records via injected fetchers, then the pure gate.
     const needs = recordsNeeded(transition.gate);
     const records: GateRecords = {};
     if (needs.designConcept) records.designConcept = await deps.fetch.designConcept(issue);
     if (needs.pr) {
-      const prNumber = Number(/^#?(\d+)$/.exec((input.evidence ?? {}).pr?.trim() ?? "")?.[1]);
-      records.pr = Number.isInteger(prNumber) && prNumber > 0 ? await deps.fetch.pr(prNumber) : undefined;
+      const prNumber = parsePrEvidence(input.evidence ?? {});
+      records.pr = prNumber !== null && prNumber > 0 ? await deps.fetch.pr(prNumber) : undefined;
     }
     const gateInput: GateInput = {
       issue,
@@ -426,11 +429,16 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
   return { ok: true, claim };
 }
 
+/**
+ * Release a dispatch claim. `dispatchId` is REQUIRED: every release goes through
+ * the atomic compare-and-delete ownership check (INV-11), so a release can never
+ * delete a claim another dispatch holds. There is deliberately no force path.
+ */
 export async function releaseClaim(
   issue: number,
+  dispatchId: string,
   deps: SeamDeps,
   actor = "cli",
-  dispatchId?: string,
 ): Promise<{ ok: true; prior: DispatchClaim | null } | { ok: false; code: "redis-failed" | "claim-owner-mismatch" }> {
   const res = await deps.journal.closeClaim(deps.repo, issue, dispatchId);
   if (res.ok === false) {
