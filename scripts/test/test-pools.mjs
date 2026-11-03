@@ -20,7 +20,9 @@
  *     only if listed in `parallel` and not in `serialPinned`; anything the
  *     manifest does not name (incl. every new test file) runs serial.
  */
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -36,6 +38,10 @@ export const REDIS_MARKERS =
 const HAZARDS = [
   [/git\s+worktree|["'`]worktree["'`]\s*,\s*["'`](add|remove|prune)/, "runs `git worktree` operations against a shared repo (index.lock contention)"],
   [/["'`]\/tmp\/[A-Za-z0-9_.-]+/, "uses a fixed /tmp path (clobbers under concurrency)"],
+  [/\/dev\/shm\//, "uses /dev/shm (shared between concurrent pools)"],
+  [/\b(pkill|pgrep|killall)\b/, "kills or matches processes by name (could reap the sibling pool)"],
+  [/\.listen\(\s*\d{2,5}\b|--port[= ]\d{2,5}\b|localhost:\d{4,5}|127\.0\.0\.1:\d{4,5}/, "binds or dials a fixed port"],
+  [/tmpdir\(\)\s*,\s*["'`][A-Za-z0-9_.-]+["'`]\s*\)/, "uses a constant-name path under tmpdir() (clobbers under concurrency)"],
 ];
 
 const SOURCE_EXTS = [".ts", ".mts", ".js", ".mjs", ".sh", ".py", ".json"];
@@ -118,28 +124,41 @@ export function scanPools(root = REPO_ROOT) {
           hit = true;
         }
       }
-      if (!hit && /\.(sh|py)$/.test(lit)) {
+      if (!hit) {
+        // Slashless (or unresolved-path) script literal: pull in every same-named
+        // script under scripts/ + src/ (any ext), so a spawn by bare name is seen.
         for (const c of byBase.get(lit.slice(lit.lastIndexOf("/") + 1)) ?? []) deps.add(c);
       }
     }
     return deps;
   };
-  const reachMemo = new Map();
-  const reachesRedis = (start) => {
+  // Closure scan: Redis markers AND shared-state HAZARDS are judged over the same
+  // transitive set (imports + spawned scripts), not only the test's own text. A
+  // spawnable script literal (.sh/.py/.mjs) the scan cannot resolve fails toward
+  // serial, the safe direction.
+  const classify = (start) => {
     const seen = new Set();
     const stack = [start];
+    let hazard = null;
     while (stack.length > 0) {
       const f = stack.pop();
       if (seen.has(f)) continue;
       seen.add(f);
-      if (reachMemo.get(f) === true || REDIS_MARKERS.test(read(f))) {
-        reachMemo.set(start, true);
-        return true;
+      const text = read(f);
+      if (REDIS_MARKERS.test(text)) return { redis: true, hazard: null };
+      hazard ??= HAZARDS.find(([re]) => re.test(text))?.[1] ?? null;
+      for (const m of text.matchAll(PATH_LITERAL_RE)) {
+        const lit = m[1];
+        if (!/\.(sh|py|mjs)$/.test(lit)) continue;
+        const known =
+          (byBase.get(lit.slice(lit.lastIndexOf("/") + 1)) ?? []).length > 0 ||
+          existsSync(resolve(dirname(f), lit)) ||
+          existsSync(resolve(root, lit));
+        if (!known) hazard ??= `names a script (${lit}) the scan cannot resolve - treated as unsafe`;
       }
       for (const d of depsOf(f)) stack.push(d);
     }
-    reachMemo.set(start, false);
-    return false;
+    return { redis: false, hazard };
   };
 
   const testDir = join(root, "test");
@@ -151,11 +170,10 @@ export function scanPools(root = REPO_ROOT) {
   for (const name of files) {
     const abs = join(testDir, name);
     const rel = `test/${name}`;
-    if (reachesRedis(abs)) continue;
-    const text = read(abs);
-    const hazard = HAZARDS.find(([re]) => re.test(text));
+    const { redis, hazard } = classify(abs);
+    if (redis) continue;
     if (hazard) {
-      serialPinned[rel] = hazard[1];
+      serialPinned[rel] = hazard;
       continue;
     }
     parallel.push(rel);
@@ -222,6 +240,183 @@ export function buildPoolInvocations(args, manifest, concurrency = DEFAULT_PARAL
   const serialInv = make("serial", serial, 1);
   const parallelInv = parallel.length > 0 ? make("parallel", parallel, concurrency) : null;
   return { serial: serialInv, parallel: parallelInv, merged };
+}
+
+// ---------------------------------------------------------------------------
+// TAP footer merge (QA round 2: reflection-deposit.sh takes the LAST footer as
+// the suite total, so two per-pool footers recorded only one pool's counts).
+// Per-pool footers are stripped; ONE summed footer is emitted last.
+// ---------------------------------------------------------------------------
+
+const FOOTER_KEYS = ["tests", "suites", "pass", "fail", "cancelled", "skipped", "todo", "duration_ms"];
+const FOOTER_RE = /^# (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) (\d+(?:\.\d+)?)\s*$/;
+
+/** Split TAP text into `{ body, footer }`; footer is `{key: number}` or null. */
+export function splitTapFooter(text) {
+  const footer = {};
+  let found = false;
+  const kept = [];
+  for (const line of text.split("\n")) {
+    const m = FOOTER_RE.exec(line);
+    if (m) {
+      footer[m[1]] = Number(m[2]);
+      found = true;
+    } else kept.push(line);
+  }
+  return { body: kept.join("\n"), footer: found ? footer : null };
+}
+
+/** Sum footers (duration_ms is the max — the pools overlap in time). */
+export function sumFooters(footers) {
+  const out = {};
+  for (const f of footers) {
+    for (const k of FOOTER_KEYS) {
+      if (f[k] === undefined) continue;
+      out[k] = k === "duration_ms" ? Math.max(out[k] ?? 0, f[k]) : (out[k] ?? 0) + f[k];
+    }
+  }
+  return out;
+}
+
+export function formatFooter(footer) {
+  return FOOTER_KEYS.filter((k) => footer[k] !== undefined)
+    .map((k) => `# ${k} ${footer[k]}\n`)
+    .join("");
+}
+
+/** Concatenate per-pool TAP texts into one body followed by one summed footer. */
+export function joinTap(parts) {
+  const footers = [];
+  let out = "";
+  for (const p of parts) {
+    const { body, footer } = splitTapFooter(p);
+    if (footer) footers.push(footer);
+    out += body.endsWith("\n") || body === "" ? body : body + "\n";
+  }
+  return out + (footers.length > 0 ? formatFooter(sumFooters(footers)) : "");
+}
+
+/**
+ * Run the pool invocations concurrently (issue #5199). Serial pool: stdout piped
+ * and forwarded live with its TAP footer withheld. Parallel pool: stdout buffered
+ * in a private mkdtemp dir, appended after both exit. One summed footer is
+ * written last. Exit is non-zero if either child is; a signal-death of either
+ * terminates the sibling's process group and is reported as `{ signal,
+ * killedPool }`. All temp state is removed on every path.
+ * `children` (optional Set) is filled with live child processes so a launcher
+ * signal handler can reap them.
+ */
+export function runPools({ invocations, env, cwd = process.cwd(), stdout = process.stdout, stderr = process.stderr, children = new Set() }) {
+  const pools = [invocations.serial, invocations.parallel].filter((p) => p !== null && p.files.length > 0);
+  if (pools.length === 0) pools.push(invocations.serial);
+  const killAll = (sig) => {
+    for (const c of children) {
+      try {
+        process.kill(-c.pid, sig);
+      } catch {
+        /* intentional: the child's group already exited (ESRCH) — nothing left to reap */
+      }
+    }
+  };
+  const tmp = mkdtempSync(join(tmpdir(), "hydra-test-pools-"));
+  return new Promise((resolveRun) => {
+    const results = new Map();
+    const footers = [];
+    let settled = false;
+    const cleanup = () => rmSync(tmp, { recursive: true, force: true });
+    const finish = () => {
+      if (settled || results.size < pools.length) return;
+      settled = true;
+      children.clear();
+      try {
+        for (const dest of invocations.merged) {
+          const out = resolve(cwd, dest);
+          const parts = pools.map((p) => `${out}.${p.pool}`).filter((x) => existsSync(x));
+          writeFileSync(out, joinTap(parts.map((x) => readFileSync(x, "utf8"))));
+          for (const x of parts) rmSync(x, { force: true });
+        }
+        for (const p of pools) {
+          const buffered = join(tmp, `${p.pool}.stdout`);
+          if (p.pool === "serial" || !existsSync(buffered)) continue;
+          const { body, footer } = splitTapFooter(readFileSync(buffered, "utf8"));
+          if (footer) footers.push(footer);
+          stdout.write(body);
+        }
+        if (footers.length > 0) stdout.write(formatFooter(sumFooters(footers)));
+      } catch (err) {
+        stderr.write(`[redis-db-launch] pool output merge failed: ${err.message}\n`);
+        results.set("merge", { code: 1, signal: null });
+      } finally {
+        cleanup();
+      }
+      const killed = [...results.entries()].find(([, r]) => r.signal);
+      if (killed) {
+        stderr.write(`[redis-db-launch] INFRA-KILL source: the ${killed[0]} pool child\n`);
+        resolveRun({ code: null, signal: killed[1].signal, killedPool: killed[0] });
+        return;
+      }
+      const failed = [...results.values()].find((r) => r.code !== 0);
+      resolveRun({ code: failed ? (failed.code ?? 1) : 0, signal: null, killedPool: null });
+    };
+    for (const p of pools) {
+      const isSerial = p.pool === "serial";
+      let fd = null;
+      let child;
+      try {
+        fd = isSerial ? null : openSync(join(tmp, `${p.pool}.stdout`), "w");
+        child = spawn(p.argv[0], p.argv.slice(1), {
+          stdio: ["inherit", isSerial ? "pipe" : fd, "inherit"],
+          env,
+          cwd,
+          detached: true,
+        });
+      } catch (err) {
+        stderr.write(`[redis-db-launch] failed to spawn ${p.argv[0]}: ${err.message}\n`);
+        killAll("SIGTERM");
+        cleanup();
+        settled = true;
+        resolveRun({ code: 1, signal: null, killedPool: null });
+        return;
+      } finally {
+        if (fd !== null) closeSync(fd);
+      }
+      children.add(child);
+      stderr.write(`[redis-db-launch] ${p.pool} pool: ${p.files.length} file(s), test child pid ${child.pid}\n`);
+      if (isSerial) {
+        let pending = "";
+        const forward = (line) => {
+          const m = FOOTER_RE.exec(line);
+          if (m) (footers[0] ??= {})[m[1]] = Number(m[2]);
+          else stdout.write(line + "\n");
+        };
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (chunk) => {
+          pending += chunk;
+          const lines = pending.split("\n");
+          pending = lines.pop() ?? "";
+          for (const l of lines) forward(l);
+        });
+        child.stdout.on("end", () => {
+          if (pending !== "") forward(pending);
+          pending = "";
+        });
+      }
+      child.on("error", (err) => {
+        if (settled) return;
+        stderr.write(`[redis-db-launch] failed to spawn ${p.argv[0]}: ${err.message}\n`);
+        killAll("SIGTERM");
+        cleanup();
+        settled = true;
+        resolveRun({ code: 1, signal: null, killedPool: null });
+      });
+      child.on("close", (code, signal) => {
+        children.delete(child);
+        results.set(p.pool, { code, signal });
+        if (signal) killAll("SIGTERM");
+        finish();
+      });
+    }
+  });
 }
 
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;

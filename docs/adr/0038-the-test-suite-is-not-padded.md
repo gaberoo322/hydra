@@ -135,8 +135,12 @@ What changes — **Decision 3 is superseded for the pure pool only:**
   `node scripts/test/test-pools.mjs --update` (a conservative transitive static scan) and
   drift-guarded in the required suite by `test/test-pools.test.mts`. **Default-serial:** a file is
   parallel only when listed and not in `serialPinned`; a new test file is serial until the manifest
-  names it, so a misclassification can only make the suite slower, never unsafe. Files that run
-  `git worktree` operations or use fixed `/tmp` paths are `serialPinned` with a reason.
+  names it, so a misclassification toward serial only makes the suite slower. The scan is
+  conservative only over the hazard classes it lists: Redis markers and shared-state hazards
+  (`git worktree` operations, fixed `/tmp` or `/dev/shm` paths, fixed ports, process-name kills) are
+  judged over the same transitive closure, and any file reaching one is `serialPinned` with a reason;
+  a hazard class outside that list is not detected. Both pools run concurrently, so a parallel-pool
+  file must be hazard-free, not merely Redis-free.
 - The parallel pool never reaches Redis, so no isolation changes.
 
 **Decision 4 stays fully in force:** one Redis DB per run, one `FLUSHDB` at start, every
@@ -144,4 +148,8 @@ Redis-touching file in the serial pool. No per-file or per-worker DB allocation 
 cannot be split further: the 4 runner slots plus the worktree hash slots already use the owned
 range). The gates are unchanged: the FILE-SET gate sees the union of both pools, reporter
 destinations are written per pool and concatenated before the comparator runs, and
-`--test-force-exit` stays on in both children.
+`--test-force-exit` stays on in both children. Each pool's TAP footer is withheld and one summed
+footer is emitted last, because consumers (`scripts/reflection-deposit.sh`) read the last footer as
+the suite total. Children run in their own process groups so a catchable signal (SIGTERM/SIGINT) or
+one child's death reaps the sibling's tree; a `SIGKILL`/OOM of the launcher itself still orphans
+both trees, exactly as it already orphaned the single child before this amendment.

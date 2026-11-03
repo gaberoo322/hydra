@@ -120,12 +120,10 @@ import { resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { connect } from "node:net";
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import process from "node:process";
 import { compareCapture, fileCoverageDiff, loadBaseline, testFilesFromArgs } from "./suite-count-check.mjs";
-import { buildPoolInvocations, loadManifest, parallelConcurrency } from "./test-pools.mjs";
+import { buildPoolInvocations, loadManifest, parallelConcurrency, runPools } from "./test-pools.mjs";
 
 const REDIS_HOST = "127.0.0.1";
 const REDIS_PORT = 6379;
@@ -917,72 +915,7 @@ function runTestCommand() {
     });
   }
   const invocations = buildPoolInvocations(args, loadManifest(), parallelConcurrency());
-  const pools = [invocations.serial, invocations.parallel].filter((p) => p !== null && p.files.length > 0);
-  if (pools.length === 0) pools.push(invocations.serial);
-  const tmp = join(tmpdir(), `hydra-test-pools-${process.pid}`);
-  return new Promise((resolveRun) => {
-    const results = new Map();
-    const finish = () => {
-      if (results.size < pools.length) return;
-      livePoolChildren.clear();
-      for (const dest of invocations.merged) {
-        const out = resolve(process.cwd(), dest);
-        writeFileSync(out, "");
-        for (const p of pools) {
-          const part = `${out}.${p.pool}`;
-          if (existsSync(part)) {
-            appendFileSync(out, readFileSync(part));
-            rmSync(part, { force: true });
-          }
-        }
-      }
-      for (const p of pools) {
-        if (p.pool === "serial") continue;
-        const buffered = `${tmp}-${p.pool}.stdout`;
-        if (existsSync(buffered)) {
-          process.stdout.write(readFileSync(buffered));
-          rmSync(buffered, { force: true });
-        }
-      }
-      const killed = [...results.entries()].find(([, r]) => r.signal);
-      if (killed) {
-        console.error(`[redis-db-launch] INFRA-KILL source: the ${killed[0]} pool child`);
-        resolveRun({ code: null, signal: killed[1].signal });
-        return;
-      }
-      const failed = [...results.values()].find((r) => r.code !== 0);
-      resolveRun({ code: failed ? (failed.code ?? 1) : 0, signal: null });
-    };
-    for (const p of pools) {
-      let out = "inherit";
-      let fd = null;
-      if (p.pool !== "serial") {
-        fd = openSync(`${tmp}-${p.pool}.stdout`, "w");
-        out = fd;
-      }
-      const child = spawn(p.argv[0], p.argv.slice(1), {
-        stdio: ["inherit", out, "inherit"],
-        env: spawnEnv,
-        detached: true,
-      });
-      if (fd !== null) closeSync(fd);
-      livePoolChildren.add(child);
-      console.error(
-        `[redis-db-launch] ${p.pool} pool: ${p.files.length} file(s), test child pid ${child.pid}`,
-      );
-      child.on("error", (err) => {
-        console.error(`[redis-db-launch] failed to spawn ${p.argv[0]}: ${err.message}`);
-        killPoolChildren("SIGTERM");
-        process.exit(1);
-      });
-      child.on("exit", (code, signal) => {
-        livePoolChildren.delete(child);
-        results.set(p.pool, { code, signal });
-        if (signal) killPoolChildren("SIGTERM");
-        finish();
-      });
-    }
-  });
+  return runPools({ invocations, env: spawnEnv, children: livePoolChildren });
 }
 // Issue #5106: the single exit seam for every path after the child exited.
 function verdictFields() {
