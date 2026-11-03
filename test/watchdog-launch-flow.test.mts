@@ -14,6 +14,7 @@
 
 import test, { describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   LAUNCH_FLOW_KEY_PREFIX,
@@ -458,5 +459,19 @@ describe("src/redis launch-flow + watchdog-episodes — typed seam (issue #3847,
       await r.del(PACE_GATE_LAST_TICK_KEY);
       if (Object.keys(saved).length > 0) await r.hset(PACE_GATE_LAST_TICK_KEY, saved);
     }
+  });
+});
+
+describe("launch-flow CLI force-exit ceiling (#5097 QA round 1)", () => {
+  const read = (rel: string): string => readFileSync(new URL(`../${rel}`, import.meta.url), "utf-8");
+
+  test("force-exit outlasts the gh exec timeout and stays under the bash wrapper bound, and WARNs when it fires", () => {
+    const cli = read("scripts/hydra-watchdog.ts");
+    const forceExit = Number(/LAUNCH_FLOW_FORCE_EXIT_MS = ([\d_]+)/.exec(cli)?.[1]?.replace(/_/g, ""));
+    const ghTimeout = Number(/timeout: ([\d_]+)/.exec(read("src/watchdog/ports.ts"))?.[1]?.replace(/_/g, ""));
+    const wrapper = Number(/run_launch_flow_cli\(\) \{[^}]*?(\d+); \}/.exec(read("scripts/hydra-watchdog.sh"))?.[1]) * 1000;
+    assert.ok(forceExit > ghTimeout + 25_000, `force-exit ${forceExit} must exceed gh ${ghTimeout} + 25s channel page`);
+    assert.ok(forceExit < wrapper, `force-exit ${forceExit} must stay under wrapper ${wrapper}`);
+    assert.match(cli, /WARN force-exit after/);
   });
 });

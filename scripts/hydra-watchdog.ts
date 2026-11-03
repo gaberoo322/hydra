@@ -72,8 +72,14 @@ import {
 } from "../src/watchdog/ports.ts";
 import { runWedge, WEDGE_LOG_PREFIX } from "../src/watchdog/wedge.ts";
 
-/** Hard ceiling on a launch-flow tick (the Operator Channel CLI force-exit precedent). */
-const LAUNCH_FLOW_FORCE_EXIT_MS = 20_000;
+/**
+ * Hard ceiling on a launch-flow tick (the Operator Channel CLI force-exit
+ * precedent). Must exceed the sum of the slowest legitimate steps (the 30s gh
+ * query in src/watchdog/ports.ts plus the Operator Channel page) so a slow call
+ * after the fired marker is SET cannot be cut off and lose its page; it stays
+ * under the bash wrapper's 90s `timeout`.
+ */
+const LAUNCH_FLOW_FORCE_EXIT_MS = 60_000;
 
 function envNumber(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -120,7 +126,12 @@ async function main(argv: string[]): Promise<void> {
   if (cmd === "launch-flow") {
     // The Operator Channel CLI force-exit precedent: the channel's dedup
     // store and the bus hold connections, so an unref'd timer guarantees exit 0.
-    setTimeout(() => process.exit(0), LAUNCH_FLOW_FORCE_EXIT_MS).unref();
+    setTimeout(() => {
+      console.log(
+        `hydra-launch-flow-watchdog: WARN force-exit after ${LAUNCH_FLOW_FORCE_EXIT_MS}ms (tick did not settle)`,
+      );
+      process.exit(0);
+    }, LAUNCH_FLOW_FORCE_EXIT_MS).unref();
     const rawNow = process.env.HYDRA_WATCHDOG_LAUNCH_NOW_MS;
     try {
       await runLaunchFlow(createProductionLaunchFlowDeps((line) => console.log(line)), {
