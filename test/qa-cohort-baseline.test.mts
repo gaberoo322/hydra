@@ -16,6 +16,8 @@ import {
   cohortOf,
   withRetry,
   countReviewedWithoutClosingRef,
+  requireConfigHistory,
+  HarvestError,
   MIN_MATURED_PAIR,
   type CohortInputs,
   type ItemRow,
@@ -247,6 +249,16 @@ describe("qa-cohort-baseline never throws", () => {
     const r = measureCohort({} as any);
     assert.equal(r.metrics.reviewed, 0);
     assert.equal(r.metrics.tripped, false);
+  });
+
+  test("requireConfigHistory: null history aborts with HarvestError config-history-unreadable (QA round-3)", () => {
+    assert.throws(
+      () => requireConfigHistory(null),
+      (err: unknown) => err instanceof HarvestError && err.code === "config-history-unreadable",
+    );
+    const h = [{ at: "2026-10-01T00:00:00Z", twoWayPair: "on" }];
+    assert.equal(requireConfigHistory(h), h);
+    assert.deepEqual(requireConfigHistory([]), []);
   });
 
   test("cohortOf delegates to pairCohortOf (the single seam, P3 #5265)", () => {

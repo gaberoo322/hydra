@@ -13,6 +13,8 @@ import {
   planFlipItem,
   findOnWindow,
   readConfigHistory,
+  twoWayPairOf,
+  UNREADABLE_CONFIG,
   pairCohortOf,
   type GraduationInputs,
 } from "../scripts/qa/pair-graduation.ts";
@@ -215,7 +217,7 @@ describe("findOnWindow skips unreadable commits (QA round-2)", () => {
   test("an unreadable commit inside the on window does not close it", () => {
     const w = findOnWindow([
       { at: "2026-10-02T00:00:00Z", twoWayPair: "on" },
-      { at: "2026-10-03T00:00:00Z", twoWayPair: undefined },
+      { at: "2026-10-03T00:00:00Z", twoWayPair: UNREADABLE_CONFIG },
       { at: "2026-10-04T00:00:00Z", twoWayPair: "on" },
     ]);
     assert.deepEqual(w, { onFlipAt: "2026-10-02T00:00:00Z", offFlipAt: null });
@@ -224,6 +226,24 @@ describe("findOnWindow skips unreadable commits (QA round-2)", () => {
     const w = findOnWindow([
       { at: "2026-10-02T00:00:00Z", twoWayPair: "on" },
       { at: "2026-10-03T00:00:00Z", twoWayPair: "off" },
+    ]);
+    assert.deepEqual(w, { onFlipAt: "2026-10-02T00:00:00Z", offFlipAt: "2026-10-03T00:00:00Z" });
+  });
+});
+
+describe("parsed-but-missing two-way-pair key is off (QA round-3)", () => {
+  test("twoWayPairOf defaults a missing key / non-object doc to off, like resolveRolloutSwitches", () => {
+    assert.equal(twoWayPairOf({}), "off");
+    assert.equal(twoWayPairOf({ "reviewer-commits": "A" }), "off");
+    assert.equal(twoWayPairOf([]), "off");
+    assert.equal(twoWayPairOf(null), "off");
+    assert.equal(twoWayPairOf({ "two-way-pair": "on" }), "on");
+  });
+  test("a missing-key commit closes the window (only the unreadable sentinel is skipped)", () => {
+    const w = findOnWindow([
+      { at: "2026-10-02T00:00:00Z", twoWayPair: "on" },
+      { at: "2026-10-03T00:00:00Z", twoWayPair: twoWayPairOf({ "reviewer-commits": "off" }) },
+      { at: "2026-10-04T00:00:00Z", twoWayPair: "on" },
     ]);
     assert.deepEqual(w, { onFlipAt: "2026-10-02T00:00:00Z", offFlipAt: "2026-10-03T00:00:00Z" });
   });
@@ -255,6 +275,49 @@ describe("readConfigHistory (temp repo wiring)", () => {
       const w = findOnWindow(h);
       assert.ok(w !== null && w.offFlipAt === null);
       assert.equal(pairCohortOf({ number: 5, mergedAt: "2026-10-03T12:00:00Z", trailers: [trailer(5)] }, w), "pair");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  test("a parsed blob lacking the two-way-pair key closes the window (QA round-3)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pg-hist-"));
+    try {
+      sh(dir, ["init", "-q"]);
+      commit(dir, '{"two-way-pair":"on"}', "2026-10-02T00:00:00Z");
+      commit(dir, '{"reviewer-commits":"off"}', "2026-10-03T00:00:00Z");
+      commit(dir, "{not json", "2026-10-04T00:00:00Z");
+      const h = readConfigHistory(dir);
+      assert.ok(h !== null && h.length === 3);
+      assert.equal(h[1]?.twoWayPair, "off");
+      assert.equal(h[2]?.twoWayPair, UNREADABLE_CONFIG);
+      assert.deepEqual(findOnWindow(h), { onFlipAt: "2026-10-02T00:00:00Z", offFlipAt: "2026-10-03T00:00:00Z" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  test("a shallow (--depth 1) clone returns null, never a truncated history (QA round-3)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pg-shallow-"));
+    const src = join(dir, "src");
+    const clone = join(dir, "clone");
+    try {
+      mkdirSync(src);
+      sh(src, ["init", "-q"]);
+      commit(src, '{"two-way-pair":"shadow"}', "2026-10-01T00:00:00Z");
+      commit(src, '{"two-way-pair":"on"}', "2026-10-02T00:00:00Z");
+      sh(dir, ["clone", "-q", "--depth", "1", `file://${src}`, clone]);
+      assert.equal(readConfigHistory(clone), null);
+      // Sibling: the full source repo still reads (the guard is shallow-specific).
+      assert.equal(readConfigHistory(src)?.length, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  test("a non-empty history with no readable commit returns null", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pg-hist-"));
+    try {
+      sh(dir, ["init", "-q"]);
+      commit(dir, "{not json", "2026-10-01T00:00:00Z");
+      assert.equal(readConfigHistory(dir), null);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

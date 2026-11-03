@@ -51,9 +51,28 @@ const COHORT_FIXTURE_PATH = "test/fixtures/qa-cohort-baseline.json";
 // The `on` window (from git history of the config file) and the pair cohort
 // ---------------------------------------------------------------------------
 
+/**
+ * Sentinel for a commit whose config blob could not be read (git show failed
+ * or the JSON did not parse). Distinct from a parsed config lacking the
+ * `two-way-pair` key, which is "off" (see `twoWayPairOf`).
+ */
+export const UNREADABLE_CONFIG: unique symbol = Symbol("unreadable-config");
+
 export interface ConfigCommit {
   at: string;
   twoWayPair: unknown;
+}
+
+/**
+ * Pure. The `two-way-pair` value of a PARSED config blob, defaulting to "off"
+ * when the key is missing or the document is not an object — the same default
+ * `resolveRolloutSwitches` (src/qa/rollout-switches.ts) applies on
+ * `key-missing` / `config-malformed`.
+ */
+export function twoWayPairOf(parsed: unknown): unknown {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return "off";
+  const obj = parsed as Record<string, unknown>;
+  return "two-way-pair" in obj ? obj["two-way-pair"] : "off";
 }
 export interface OnWindow {
   onFlipAt: string;
@@ -65,9 +84,11 @@ export function findOnWindow(history: ConfigCommit[]): OnWindow | null {
   let onFlipAt: string | null = null;
   for (const c of Array.isArray(history) ? history : []) {
     if (!c || typeof c.at !== "string") continue;
-    // An unreadable commit (twoWayPair undefined) is unknown, not "off": skip it
-    // rather than closing or shifting the window on a read failure.
-    if (c.twoWayPair === undefined) continue;
+    // An unreadable commit (the UNREADABLE_CONFIG sentinel) is unknown, not
+    // "off": skip it rather than closing or shifting the window on a read
+    // failure. Every other value — including a parsed-but-missing key, which
+    // readConfigHistory maps to "off" — is a real state and can close it.
+    if (c.twoWayPair === UNREADABLE_CONFIG) continue;
     if (onFlipAt === null) {
       if (c.twoWayPair === "on") onFlipAt = c.at;
     } else if (c.twoWayPair !== "on") {
@@ -257,24 +278,36 @@ export function planFlipItem(report: GraduationReport, openIssues: OpenIssue[]):
 // CLI helpers (git / gh) — the pure folds above are the tested surface
 // ---------------------------------------------------------------------------
 
-/** Build the config-file history from git on the current checkout. Returns null (not []) when git history is unreadable, so callers abort instead of tagging every PR baseline. */
+/**
+ * Build the config-file history from git on the current checkout. Returns null
+ * (not []) when git history is unreadable, so callers abort instead of tagging
+ * every PR baseline. "Unreadable" covers: not a git repo, a shallow clone
+ * (`git log` there sees only the grafted tip, so the window would be silently
+ * wrong), and a non-empty history in which no commit's blob could be read.
+ */
 export function readConfigHistory(repoRoot: string = process.cwd()): ConfigCommit[] | null {
   const run = (args: string[]): string =>
     execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   try {
+    if (run(["rev-parse", "--is-shallow-repository"]).trim() === "true") {
+      console.error("[pair-graduation] shallow clone: config history is truncated; refusing to derive the on window");
+      return null;
+    }
     const log = run(["log", "--reverse", "--format=%H%x09%cI", "--", ROLLOUT_CONFIG_PATH]);
     const out: ConfigCommit[] = [];
     for (const line of log.split("\n").filter(Boolean)) {
       const [sha, at] = line.split("\t");
-      let twoWayPair: unknown = undefined;
+      let twoWayPair: unknown = UNREADABLE_CONFIG;
       try {
-        twoWayPair = (JSON.parse(run(["show", `${sha}:${ROLLOUT_CONFIG_PATH}`])) as Record<string, unknown>)[
-          "two-way-pair"
-        ];
+        twoWayPair = twoWayPairOf(JSON.parse(run(["show", `${sha}:${ROLLOUT_CONFIG_PATH}`])));
       } catch (err) {
         console.error(`[pair-graduation] unreadable config at ${sha}:`, err);
       }
       out.push({ at: at as string, twoWayPair });
+    }
+    if (out.length > 0 && out.every((c) => c.twoWayPair === UNREADABLE_CONFIG)) {
+      console.error("[pair-graduation] no commit of the rollout config was readable");
+      return null;
     }
     return out;
   } catch (err) {

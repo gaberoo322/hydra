@@ -33,6 +33,7 @@ import {
   pairCohortOf,
   readConfigHistory,
   type CohortRow,
+  type ConfigCommit,
   type OnWindow,
 } from "./pair-graduation.ts";
 
@@ -415,6 +416,21 @@ export class HarvestError extends Error {
   }
 }
 
+/**
+ * Pure. The harvest-time guard on the rollout-config history: a null history
+ * (unreadable git, shallow clone) aborts the harvest with a typed
+ * HarvestError rather than tagging every PR baseline (fail loud, not open).
+ */
+export function requireConfigHistory(history: ConfigCommit[] | null): ConfigCommit[] {
+  if (history === null) {
+    throw new HarvestError(
+      "config-history-unreadable",
+      "git history of the rollout config is unreadable; refusing to tag every PR baseline",
+    );
+  }
+  return history;
+}
+
 async function harvest(repo: string, since: string, until: string): Promise<CohortInputs> {
   // Dynamic import keeps the pure fold above free of Redis/logger side effects.
   const { ghJson } = await import("../../src/github/gh.ts");
@@ -436,14 +452,7 @@ async function harvest(repo: string, since: string, until: string): Promise<Coho
   );
   const sinceMs = Date.parse(since);
   const untilMs = Date.parse(until);
-  const history = readConfigHistory();
-  if (history === null) {
-    throw new HarvestError(
-      "config-history-unreadable",
-      "git history of the rollout config is unreadable; refusing to tag every PR baseline",
-    );
-  }
-  const window = findOnWindow(history);
+  const window = findOnWindow(requireConfigHistory(readConfigHistory()));
   const prs: PrRow[] = [];
   const items: ItemRow[] = [];
   const closing = new Set<number>();
