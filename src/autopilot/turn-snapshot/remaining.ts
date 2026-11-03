@@ -86,7 +86,7 @@ export const REMAINING_COLLECTORS: { readonly [K in RemainingName]: RemainingEnt
   }),
   "arch-cleanup-boards": entry<"arch-cleanup-boards">(collectArchCleanupBoards, ARCH_FALLBACK),
   "hitl-grill": entry<"hitl-grill">(collectHitlGrill, FAILED),
-  retro: entry<"retro">(collectRetro, { runs: FAILED, drillable: null }),
+  retro: entry<"retro">(collectRetro, { runs: FAILED, drillable: null, reviewDue: false }),
   "wayfinder-frontier": entry<"wayfinder-frontier">(collectWayfinderFrontier, { frontier: null, ticketType: "", inflightGlobal: 0 }),
   tickets: entry<"tickets">(collectTickets, FAILED),
 };

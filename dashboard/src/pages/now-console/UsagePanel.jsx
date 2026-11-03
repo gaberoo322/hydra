@@ -79,7 +79,9 @@ export default function UsagePanel() {
   const { data, loading } = useApi("/usage/eligibility", { poll: 30_000 });
   const usage = data?.usage ?? {};
 
-  const percent5h = Number(usage.percentLast5h ?? 0);
+  // `percentLast5h` is null when the plan carries no 5h window: omit the gauge.
+  const has5h = typeof usage.percentLast5h === "number";
+  const percent5h = has5h ? usage.percentLast5h : 0;
   const percent7d = Number(usage.percentLast7d ?? 0);
   const reset5h = formatResetCountdown(usage.oauthFiveHourResetsAt);
   const reset7d = formatResetCountdown(usage.oauthSevenDayResetsAt);
@@ -146,14 +148,16 @@ export default function UsagePanel() {
               Claude Code status line shows, each with an inline reset
               countdown. Reuses the in-file Gauge (value=percent, max=100). */}
           <div className="space-y-3">
-            <div data-testid="rl5h" className="space-y-1">
-              <Gauge label="rl5h" value={percent5h} max={100} danger testid="rl5h-gauge" />
-              {reset5h && (
-                <p data-testid="rl5h-reset" className="text-[10px] text-zinc-500 font-mono text-right">
-                  {reset5h}
-                </p>
-              )}
-            </div>
+            {has5h && (
+              <div data-testid="rl5h" className="space-y-1">
+                <Gauge label="rl5h" value={percent5h} max={100} danger testid="rl5h-gauge" />
+                {reset5h && (
+                  <p data-testid="rl5h-reset" className="text-[10px] text-zinc-500 font-mono text-right">
+                    {reset5h}
+                  </p>
+                )}
+              </div>
+            )}
             <div data-testid="rl7d" className="space-y-1">
               <Gauge label="rl7d" value={percent7d} max={100} danger testid="rl7d-gauge" />
               {reset7d && (

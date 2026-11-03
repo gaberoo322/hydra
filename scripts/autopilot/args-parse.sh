@@ -18,10 +18,9 @@
 #   --subagent-soft=<N>                     → HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS
 #   --subagent-hard=<N>                     → HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS
 #   --unattended=<true|false>               → HYDRA_AUTOPILOT_UNATTENDED  (issue #413)
-#   --quota-5h-max=<pts>                    → HYDRA_AUTOPILOT_QUOTA_5H_MAX    (issue #3867)
 #   --quota-week-max=<pts>                  → HYDRA_AUTOPILOT_QUOTA_WEEK_MAX  (issue #3867)
 #
-# The two --quota-* flags are the quota-percent budget (issue #3867): a cap on
+# The --quota-week-max flag is the quota-percent budget (issue #3867): a cap on
 # how many POINTS of account utilization this run may add over its own run-start
 # baseline. They are OPT-IN — unset (or 0) disables the cap entirely, leaving
 # termination behaviour byte-identical to a pre-#3867 run. The existing
@@ -73,9 +72,6 @@ for _ap_arg in "$@"; do
       ;;
     --unattended=*)
       export HYDRA_AUTOPILOT_UNATTENDED="${_ap_arg#--unattended=}"
-      ;;
-    --quota-5h-max=*)
-      export HYDRA_AUTOPILOT_QUOTA_5H_MAX="${_ap_arg#--quota-5h-max=}"
       ;;
     --quota-week-max=*)
       export HYDRA_AUTOPILOT_QUOTA_WEEK_MAX="${_ap_arg#--quota-week-max=}"

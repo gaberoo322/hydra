@@ -192,7 +192,7 @@ export async function getIdleDiagnostics(
     blockedBy,
     calibrated: elig?.calibrated ?? false,
     emergencyStop,
-    percentLast5h: elig?.percentLast5h ?? 0,
+    percentLast5h: elig?.percentLast5h ?? null,
     pace,
     autopilot: liveness,
     nextPaceGateCheck: estimateNextPaceGateCheck(now(), paceGateIntervalSeconds),

@@ -1,5 +1,5 @@
 {
-  "test/admission.test.mts": 4,
+  "test/admission.test.mts": 6,
   "test/adr-roster.test.mts": 7,
   "test/agent-dispatch-prompt-guard.test.mts": 6,
   "test/aggregator-active-dispatches.test.mts": 8,
@@ -424,6 +424,7 @@
   "test/review-findings-extract.test.mts": 5,
   "test/review-pickup-notify.test.mts": 1,
   "test/review-pickup.test.mts": 1,
+  "test/review-retro-due.test.mts": 5,
   "test/risk-critical.test.mts": 5,
   "test/run-health.test.mts": 1,
   "test/run-ledger.test.mts": 10,

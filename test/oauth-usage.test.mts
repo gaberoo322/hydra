@@ -232,7 +232,7 @@ describe("oauth-usage: parseOAuthUsageBody — defensive parse (gate-safety)", (
     assert.equal(parseOAuthUsageBody("nope"), null);
   });
 
-  test("an ABSENT or null five_hour reads as a 0% no-cap window (plan has no 5h limit)", () => {
+  test("an ABSENT or null five_hour parses to fiveHour: null (plan has no 5h limit; never a synthesized 0%)", () => {
     // Since 2026-10-31 the account's plan has no 5-hour limit, so the meter
     // returns no five_hour window. Rejecting the body blinded the meter and the
     // pace gate skipped every tick for ~52h; only seven_day is required now.
@@ -242,7 +242,7 @@ describe("oauth-usage: parseOAuthUsageBody — defensive parse (gate-safety)", (
     ]) {
       const d = parseOAuthUsageBody(body);
       assert.ok(d !== null);
-      assert.deepEqual(d!.fiveHour, { utilization: 0, resetsAt: null });
+      assert.equal(d!.fiveHour, null);
       assert.equal(d!.sevenDay.utilization, 12);
     }
   });
@@ -252,7 +252,7 @@ describe("oauth-usage: parseOAuthUsageBody — defensive parse (gate-safety)", (
       five_hour: { utilization: 150, resets_at: null },
       seven_day: { utilization: -5, resets_at: null },
     });
-    assert.equal(d!.fiveHour.utilization, 100);
+    assert.equal(d!.fiveHour!.utilization, 100);
     assert.equal(d!.sevenDay.utilization, 0);
   });
 

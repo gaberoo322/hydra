@@ -65,6 +65,10 @@ function eligibilityServer(payload: unknown): Promise<{ url: string; close: () =
         mode: q.mode ?? "timer",
         serviceActive: q.serviceActive ?? false,
         pidAlive: q.pidAlive ?? false,
+        credentialsExpiresAtMs: null,
+        nudgeLastAtS: q.nudgeLastAt ?? null,
+        primaryModel: q.primaryModel ?? "fable",
+        fallbackModel: q.fallbackModel ?? "opus",
       });
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ ...(payload as object), admission }));

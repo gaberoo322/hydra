@@ -113,8 +113,12 @@ function autopilotSection(s: BriefSources, nowMs: number): BriefSection {
     else {
       const stop5h = u.emergencyStop ? " 🛑" : "";
       const stopWk = u.weeklyEmergencyStop ? " 🛑" : "";
+      // The 5h segment appears only when the meter carries a 5h window (data-driven
+      // dormancy: a plan with no 5-hour limit reports `percentLast5h: null`).
+      const seg5h =
+        typeof u.percentLast5h === "number" ? `5h ${u.percentLast5h.toFixed(0)}%${stop5h} · ` : "";
       lines.push(
-        `Usage: 5h ${(u.percentLast5h ?? 0).toFixed(0)}%${stop5h} · weekly ${(u.percentSinceReset ?? 0).toFixed(0)}%${stopWk} (caps at 90%)`,
+        `Usage: ${seg5h}weekly ${(u.percentSinceReset ?? 0).toFixed(0)}%${stopWk} (caps at 90%)`,
       );
     }
   }

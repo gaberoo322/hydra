@@ -164,11 +164,11 @@ state.json {
   }
 
   # NEW IN #3867 — quota-percent budget baseline. Present ONLY on a run whose
-  # `limits.quota_5h_max_pts` / `limits.quota_week_max_pts` is non-zero (the cap
+  # `limits.quota_week_max_pts` is non-zero (the cap
   # is opt-in; unset = the key never appears at all, and a default run's state is
   # byte-identical to pre-#3867). Written ONCE by `_capture_quota_baseline` on the
   # first turn that sees a CALIBRATED `state.usage_eligibility.usage` payload, and
-  # rebased DOWNWARD only on a mid-run 5h/weekly window reset (a current
+  # rebased DOWNWARD only on a mid-run weekly window reset (a current
   # percentage below the baseline = headroom returned, never negative spend).
   # `_quota_delta_exceeded` compares the current percentages against it and emits
   # `TERM:quota` once the delta crosses the cap. Persisted via
@@ -176,7 +176,6 @@ state.json {
   # bootstrap.sh deliberately does NOT seed it from prior state, which is what
   # re-arms the capture for each new run.
   "quota_baseline": {
-    "percent_5h": float|null,     # usage.percentLast5h at capture
     "percent_week": float|null,   # usage.percentSinceReset at capture
     "captured_epoch": unix-epoch,
     "rebased_epoch": unix-epoch|null
@@ -903,8 +902,8 @@ CONTEXT_COMPACTION_TURNS_DEFAULT = 8
 # advanced by reap.py on each completion), but what the operator actually pays is
 # cache-weighted ACCOUNT UTILIZATION. Measured on run 2bcba309 (2026-08-05): the
 # run "spent" 801k of a 4,000,000 token budget — 20% — and would have kept
-# dispatching, while the OAuth meter over the same window moved the 5h
-# utilization window 2% -> 30% (~150M raw tokens). One QA dispatch (4-subagent
+# dispatching, while the OAuth meter over the same window moved the (then
+# rate-limited) utilization window 2% -> 30% (~150M raw tokens). One QA dispatch (4-subagent
 # adversarial fan-out) moved ~15M raw tokens; one dev dispatch ~40M. A
 # "conservative" token budget therefore does not bound real spend at all.
 #
@@ -914,14 +913,14 @@ CONTEXT_COMPACTION_TURNS_DEFAULT = 8
 # /usage/eligibility` -> the nested `usage` object) — so the cap costs zero new
 # I/O. The token budget stays as a secondary bound; both remain hygiene caps.
 #
-# OPT-IN, DEFAULT DISABLED. `limits.quota_5h_max_pts` / `limits.quota_week_max_pts`
-# default to 0 in bootstrap.sh and 0 (or absent, or unparseable) means the cap
+# OPT-IN, DEFAULT DISABLED. `limits.quota_week_max_pts`
+# defaults to 0 in bootstrap.sh and 0 (or absent, or unparseable) means the cap
 # never fires, leaving every existing termination path byte-identical. There is no
 # calibration data for a safe default, and ADR-0021 D5 keeps per-run limits
 # "hygiene caps, subordinate to the [Pace] Gate, which is the real governor" — so
 # this must never become a second load-bearing governor the operator didn't ask
-# for. Accordingly this code reads raw `usage.percentLast5h` /
-# `usage.percentSinceReset` ONLY: never `paceState` / `targetPercent`, which are
+# for. Accordingly this code reads raw `usage.percentSinceReset` ONLY:
+# never `paceState` / `targetPercent`, which are
 # weekly-CURVE-relative (ADR-0021 D2/D3) and answer a different question
 # ("ahead/behind the target ramp") than this cap's ("did THIS run burn N points").
 #
@@ -947,41 +946,35 @@ def _quota_finite_pct(value) -> float | None:
     return f
 
 
-def _quota_caps(limits: dict) -> tuple[float, float]:
-    """Resolve `(cap_5h_pts, cap_week_pts)` from `state.limits`.
+def _quota_cap(limits: dict) -> float:
+    """Resolve `cap_week_pts` from `state.limits`.
 
-    `0.0` for either means DISABLED (the default). A negative / unparseable /
+    `0.0` means DISABLED (the default). A negative / unparseable /
     absent value also resolves to disabled — the fail-safe direction, because the
     alternative (a tiny accidental cap) would terminate healthy runs instantly.
     """
-    def _one(key: str) -> float:
-        try:
-            raw = limits.get(key, 0)
-            v = float(raw if raw is not None else 0)
-        except (TypeError, ValueError):
-            return QUOTA_CAP_DISABLED
-        if not math.isfinite(v) or v <= 0:
-            return QUOTA_CAP_DISABLED
-        return v
-
-    return _one("quota_5h_max_pts"), _one("quota_week_max_pts")
+    try:
+        raw = limits.get("quota_week_max_pts", 0)
+        v = float(raw if raw is not None else 0)
+    except (TypeError, ValueError):
+        return QUOTA_CAP_DISABLED
+    if not math.isfinite(v) or v <= 0:
+        return QUOTA_CAP_DISABLED
+    return v
 
 
-def _quota_current_percents(state: dict) -> tuple[float | None, float | None]:
-    """Current `(percentLast5h, percentSinceReset)` from `state.usage_eligibility`.
+def _quota_current_percent(state: dict) -> float | None:
+    """Current `percentSinceReset` from `state.usage_eligibility`.
 
-    Returns `(None, None)` when the meter is not usable this turn — an absent /
+    Returns `None` when the meter is not usable this turn — an absent /
     malformed payload, or `usage.calibrated` anything other than `True`. An
     uncalibrated meter is a guess, and terminating a run on a guessed spend
     figure is strictly worse than letting the wall-clock / token bounds catch it.
     """
     usage = _normalize_usage_eligibility(ts.blob(state, "usage_eligibility"))["usage"]
     if usage.get("calibrated") is not True:
-        return (None, None)
-    return (
-        _quota_finite_pct(usage.get("percentLast5h")),
-        _quota_finite_pct(usage.get("percentSinceReset")),
-    )
+        return None
+    return _quota_finite_pct(usage.get("percentSinceReset"))
 
 
 def _capture_quota_baseline(state: dict, now: int) -> None:
@@ -1002,7 +995,7 @@ def _capture_quota_baseline(state: dict, now: int) -> None:
        appears, so main()'s change-detection never fires a write-back either.
     2. **First calibrated turn** → write the baseline once. `captured_epoch`
        records when, for operator forensics.
-    3. **5h-window / weekly reset mid-run** → a CURRENT percentage BELOW the
+    3. **Weekly reset mid-run** → a CURRENT percentage BELOW the
        baseline means the window rolled over and headroom came back. That is good
        news, not a spend event: clamp the delta to zero (see
        `_quota_delta_exceeded`) AND rebase the baseline down to the new current
@@ -1015,17 +1008,16 @@ def _capture_quota_baseline(state: dict, now: int) -> None:
     machinery, and a crash mid-write can never tear state.json.
     """
     limits = state.get("limits") or {}
-    cap_5h, cap_week = _quota_caps(limits)
-    if cap_5h <= 0 and cap_week <= 0:
+    cap_week = _quota_cap(limits)
+    if cap_week <= 0:
         return
-    cur_5h, cur_week = _quota_current_percents(state)
-    if cur_5h is None and cur_week is None:
+    cur_week = _quota_current_percent(state)
+    if cur_week is None:
         return
 
     base = state.get("quota_baseline")
     if not isinstance(base, dict):
         state["quota_baseline"] = {
-            "percent_5h": cur_5h,
             "percent_week": cur_week,
             "captured_epoch": now,
             "rebased_epoch": None,
@@ -1033,18 +1025,14 @@ def _capture_quota_baseline(state: dict, now: int) -> None:
         return
 
     rebased = False
-    for key, cur in (("percent_5h", cur_5h), ("percent_week", cur_week)):
-        if cur is None:
-            continue
-        prev = _quota_finite_pct(base.get(key))
-        if prev is None:
-            # The baseline never got a usable reading for this window (the meter
-            # reported only one of the two on the capture turn) — fill it now.
-            base[key] = cur
-            rebased = True
-        elif cur < prev:
-            base[key] = cur
-            rebased = True
+    prev = _quota_finite_pct(base.get("percent_week"))
+    if prev is None:
+        # The baseline never got a usable reading — fill it now.
+        base["percent_week"] = cur_week
+        rebased = True
+    elif cur_week < prev:
+        base["percent_week"] = cur_week
+        rebased = True
     if rebased:
         base["rebased_epoch"] = now
         state["quota_baseline"] = base
@@ -1055,9 +1043,7 @@ def _quota_delta_exceeded(state: dict) -> tuple[str, str] | None:
 
     Returns `None` — keep iterating — for
     every fail-open condition: cap disabled, no baseline captured yet, no usable
-    current reading. The 5h window is checked before the weekly one because it is
-    the tighter, faster-moving bound (and the one the issue's acceptance criterion
-    names).
+    current reading.
 
     A NEGATIVE delta is clamped to zero rather than compared: a mid-run window
     reset must never read as spend, and must never itself force a termination
@@ -1065,32 +1051,27 @@ def _quota_delta_exceeded(state: dict) -> tuple[str, str] | None:
     turns).
     """
     limits = state.get("limits") or {}
-    cap_5h, cap_week = _quota_caps(limits)
-    if cap_5h <= 0 and cap_week <= 0:
+    cap_week = _quota_cap(limits)
+    if cap_week <= 0:
         return None
     base = state.get("quota_baseline")
     if not isinstance(base, dict):
         return None
-    cur_5h, cur_week = _quota_current_percents(state)
-
-    for window, cap, cur, base_key in (
-        ("5h", cap_5h, cur_5h, "percent_5h"),
-        ("week", cap_week, cur_week, "percent_week"),
-    ):
-        if cap <= 0 or cur is None:
-            continue
-        prev = _quota_finite_pct(base.get(base_key))
-        if prev is None:
-            continue
-        delta = cur - prev
-        if delta < 0:
-            delta = 0.0
-        if delta >= cap:
-            return (
-                window,
-                f"{window} utilization +{delta:.1f}pts >= cap {cap:.1f}pts "
-                f"(baseline={prev:.1f} current={cur:.1f})",
-            )
+    cur_week = _quota_current_percent(state)
+    if cur_week is None:
+        return None
+    prev = _quota_finite_pct(base.get("percent_week"))
+    if prev is None:
+        return None
+    delta = cur_week - prev
+    if delta < 0:
+        delta = 0.0
+    if delta >= cap_week:
+        return (
+            "week",
+            f"week utilization +{delta:.1f}pts >= cap {cap_week:.1f}pts "
+            f"(baseline={prev:.1f} current={cur_week:.1f})",
+        )
     return None
 
 

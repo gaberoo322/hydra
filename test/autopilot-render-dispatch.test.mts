@@ -477,19 +477,32 @@ describe("render-dispatch.py — model resolution (#1093, #3274, #4585)", () => 
     assert.equal(out.model_source, "escalate_model");
   });
 
-  test("Fable exhausted (reasons.fableExhaustedUntil in the future) → opus, or $HYDRA_AUTOPILOT_FALLBACK_MODEL", () => {
-    const exhausted = baseState({ usage_eligibility: { allow: true, reasons: { fableExhaustedUntil: "2099-01-01T00:00:00.000Z" } } });
+  test("Fable exhausted (admission.modelFallbackReason set) → admission.launchModel (#5103)", () => {
+    const admission = (over: Record<string, unknown> = {}) => ({
+      launchModel: "opus",
+      primaryModel: "fable",
+      fallbackModel: "opus",
+      modelFallbackReason: "out-of-credits",
+      ...over,
+    });
+    const withAdm = (adm: unknown) =>
+      baseState({ usage_eligibility: { allow: true, reasons: {}, admission: adm } });
+    const exhausted = withAdm(admission());
     const a = action("dev_target", "hydra-target-build", { isolation: "self" });
     const out = render("dev_target", a, exhausted);
     assert.equal(out.model, "opus");
     assert.equal(out.model_source, "model-column→fable-exhausted-fallback");
-    const env = render("dev_target", a, exhausted, { HYDRA_AUTOPILOT_FALLBACK_MODEL: "sonnet" });
-    assert.equal(env.model, "sonnet");
+    // The launch model is the projection's value, not a second env read.
+    assert.equal(render("dev_target", a, withAdm(admission({ launchModel: "sonnet" }))).model, "sonnet");
+    const env = render("dev_target", a, exhausted, { HYDRA_AUTOPILOT_FALLBACK_MODEL: "haiku" });
+    assert.equal(env.model, "opus", "the renderer no longer reads the fallback env itself");
+    const calm = withAdm(admission({ modelFallbackReason: null, launchModel: "fable" }));
+    assert.equal(render("dev_target", a, calm).model, "fable", "no fallback reason does nothing");
+    const legacy = baseState({ usage_eligibility: { allow: true, reasons: { fableExhaustedUntil: "2099-01-01T00:00:00.000Z" } } });
+    assert.equal(render("dev_target", a, legacy).model, "fable", "no .admission → column value (fail-safe)");
     const hint = render("cleanup_orch", action("cleanup_orch", "hydra-cleanup", { prompt_args: { escalate_model: "fable" } }), exhausted);
     assert.equal(hint.model, "opus", "the hint is pre-resolved too");
     assert.equal(hint.model_source, "escalate_model→fable-exhausted-fallback");
-    const expired = baseState({ usage_eligibility: { allow: true, reasons: { fableExhaustedUntil: "2020-01-01T00:00:00.000Z" } } });
-    assert.equal(render("dev_target", a, expired).model, "fable", "an expired flag does nothing");
     const sonnetClass = render("dev_orch", action("dev_orch", "hydra-dev"), exhausted);
     assert.equal(sonnetClass.model, "sonnet", "non-fable rows are untouched");
   });

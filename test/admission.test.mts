@@ -61,7 +61,17 @@ function verdict(
 }
 
 function ctx(over: Partial<AdmissionContext> = {}): AdmissionContext {
-  return { nowMs: NOW, mode: "timer", serviceActive: false, pidAlive: false, ...over };
+  return {
+    nowMs: NOW,
+    mode: "timer",
+    serviceActive: false,
+    pidAlive: false,
+    credentialsExpiresAtMs: null,
+    nudgeLastAtS: null,
+    primaryModel: "fable",
+    fallbackModel: "opus",
+    ...over,
+  };
 }
 
 function expectReason(v: UsageEligibility, c: AdmissionContext, reason: string, admit = false) {
@@ -227,8 +237,99 @@ describe("decideAdmission arm ordering", () => {
   });
 });
 
+describe("OAuth refresh nudge decision (#5103, #4843)", () => {
+  const blind = () => verdict({ allow: false, reasons: { meterUnavailable: true } });
+  const nowS = Math.floor(NOW / 1000);
+
+  test("window edge: expiresAt == now+10min is due, +1ms is not, null is not", () => {
+    const due = decideAdmission(blind(), ctx({ credentialsExpiresAtMs: NOW + 600_000 }));
+    assert.equal(due.reason, "token-refresh-nudge");
+    assert.equal(due.shouldNudgeOauth, true);
+    assert.equal(due.admit, false);
+    assert.equal(due.class, "fail-safe");
+    for (const exp of [NOW + 600_001, null]) {
+      const v = decideAdmission(blind(), ctx({ credentialsExpiresAtMs: exp }));
+      assert.equal(v.reason, "meter-unavailable");
+      assert.equal(v.shouldNudgeOauth, false);
+    }
+  });
+  test("an already-expired token is due", () => {
+    const v = decideAdmission(blind(), ctx({ credentialsExpiresAtMs: NOW - 60_000 }));
+    assert.equal(v.shouldNudgeOauth, true);
+  });
+  test("rate limit edge: stamp age 1799s not due, 1800s due, absent due, future stamp due", () => {
+    const at = (nudgeLastAtS: number | null) =>
+      decideAdmission(blind(), ctx({ credentialsExpiresAtMs: NOW - 1, nudgeLastAtS }));
+    assert.equal(at(nowS - 1799).shouldNudgeOauth, false);
+    assert.equal(at(nowS - 1799).reason, "meter-unavailable");
+    assert.equal(at(nowS - 1800).shouldNudgeOauth, true);
+    assert.equal(at(null).shouldNudgeOauth, true);
+    assert.equal(at(nowS + 100).shouldNudgeOauth, true);
+  });
+  test("non-finite expiry never nudges", () => {
+    const v = decideAdmission(blind(), ctx({ credentialsExpiresAtMs: Number.NaN }));
+    assert.equal(v.shouldNudgeOauth, false);
+  });
+  test("unreachable when an earlier arm wins (paused, pid, session-block, stops)", () => {
+    const c = ctx({ credentialsExpiresAtMs: NOW - 1 });
+    for (const reasons of [
+      { meterUnavailable: true, paused: true },
+      { meterUnavailable: true, sessionBlockedUntil: FUTURE },
+      { meterUnavailable: true, emergencyStop: true },
+      { meterUnavailable: true, weeklyEmergencyStop: true },
+      { meterUnavailable: true, extraUsageBlocking: true },
+    ]) {
+      const v = decideAdmission(verdict({ allow: false, reasons }), c);
+      assert.equal(v.shouldNudgeOauth, false);
+      assert.notEqual(v.reason, "token-refresh-nudge");
+    }
+    const pid = decideAdmission(blind(), ctx({ credentialsExpiresAtMs: NOW - 1, pidAlive: true }));
+    assert.equal(pid.reason, "already-running-pid");
+    assert.equal(pid.shouldNudgeOauth, false);
+  });
+  test("a healthy meter never nudges even with an expired token", () => {
+    const v = decideAdmission(verdict(), ctx({ credentialsExpiresAtMs: NOW - 1 }));
+    assert.equal(v.shouldNudgeOauth, false);
+    assert.equal(v.reason, "eligible-launch");
+  });
+});
+
+describe("launch model decision (#5103, #4585)", () => {
+  test("future exhaustion flag -> fallback, with out-of-credits reason", () => {
+    const v = decideAdmission(verdict({ reasons: { fableExhaustedUntil: FUTURE } }), ctx({ mode: "exec" }));
+    assert.equal(v.launchModel, "opus");
+    assert.equal(v.modelFallbackReason, "out-of-credits");
+    assert.equal(v.primaryModel, "fable");
+    assert.equal(v.fallbackModel, "opus");
+  });
+  test("absent, past or unparseable flag -> primary (fail-safe)", () => {
+    for (const flag of [null, PAST, "not-a-date"]) {
+      const v = decideAdmission(verdict({ reasons: { fableExhaustedUntil: flag } }), ctx({ mode: "exec" }));
+      assert.equal(v.launchModel, "fable");
+      assert.equal(v.modelFallbackReason, null);
+    }
+  });
+  test("the ctx pair overrides the defaults", () => {
+    const pair = { primaryModel: "sonnet", fallbackModel: "haiku" };
+    const live = decideAdmission(verdict({ reasons: { fableExhaustedUntil: FUTURE } }), ctx(pair));
+    assert.equal(live.launchModel, "haiku");
+    const calm = decideAdmission(verdict(), ctx(pair));
+    assert.equal(calm.launchModel, "sonnet");
+    assert.equal(calm.primaryModel, "sonnet");
+  });
+  test("the four model fields are present on skip verdicts too", () => {
+    const v = decideAdmission(
+      verdict({ allow: false, reasons: { paused: true, fableExhaustedUntil: FUTURE } }),
+      ctx(),
+    );
+    assert.equal(v.reason, "paused");
+    assert.equal(v.launchModel, "opus");
+    assert.equal(v.modelFallbackReason, "out-of-credits");
+  });
+});
+
 describe("reason vocabulary", () => {
-  test("ADMISSION_REASONS covers the record_tick literals in pace-gate.sh (post-#5102)", () => {
+  test("ADMISSION_REASONS covers the record_tick literals in pace-gate.sh (post-#5103)", () => {
     const script = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "autopilot", "pace-gate.sh"),
       "utf8",
@@ -245,7 +346,6 @@ describe("reason vocabulary", () => {
         "eligibility-unparseable",
         "eligibility-unreachable",
         "jq-missing",
-        "token-refresh-nudge",
       ],
     );
     const known = new Set<string>(ADMISSION_REASONS);
@@ -261,6 +361,7 @@ describe("reason vocabulary", () => {
       "weekly-emergency-stop",
       "extra-usage-armed",
       "meter-unavailable",
+      "token-refresh-nudge",
       "allow-false",
       "pace-ahead",
       "five-hour-headroom",

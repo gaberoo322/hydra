@@ -1,0 +1,1 @@
+- docs: record the admission verdict (decideAdmission) in ADR-0021, the Pace Gate glossary entry and the src/cost module map (#5104)
