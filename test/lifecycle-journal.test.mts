@@ -5,6 +5,7 @@
 import { test, describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
+import { readFileSync } from "node:fs";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
 process.env.REDIS_URL = REDIS_URL;
@@ -179,5 +180,15 @@ describe("operator ruling round 4 (#5310): release requires --dispatch (INV-11)"
     } finally {
       await redis.del(lifecycleClaimKey(repo, issue));
     }
+  });
+});
+
+describe("source is not a caller parameter (#5313 INV-2)", () => {
+  test("scripts/lifecycle.ts never imports the operator entry points or takes a source flag", () => {
+    const raw = readFileSync(new URL("../scripts/lifecycle.ts", import.meta.url), "utf8");
+    // Code only: the header comment legitimately says "no --operator flag".
+    const cli = raw.split("\n").filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l)).join("\n");
+    assert.equal(/operatorAdvance|operatorReopen/.test(cli), false);
+    assert.equal(/--operator|--source/.test(cli), false);
   });
 });

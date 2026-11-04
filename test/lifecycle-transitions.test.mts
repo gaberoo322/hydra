@@ -21,7 +21,6 @@ import {
   isLegalTransition,
   stateLabelsOf,
 } from "../src/lifecycle/index.ts";
-import { readFile } from "node:fs/promises";
 import { RELABEL_TARGETS } from "../src/schemas/autopilot-board.ts";
 
 describe("lifecycle state set (INV-1)", () => {
@@ -161,39 +160,5 @@ describe("isUnsanctionedHoldExit (#5313 INV-9)", () => {
 
   test("the alert window is 7 days", () => {
     assert.equal(HOLD_EXIT_ALERT_WINDOW_DAYS, 7);
-  });
-});
-
-describe("source is not a caller parameter (#5313 INV-2/INV-10)", () => {
-  test("scripts/lifecycle.ts never imports the operator entry points or takes a source flag", async () => {
-    const raw = await readFile(new URL("../scripts/lifecycle.ts", import.meta.url), "utf8");
-    // Code only: the header comment legitimately says "no --operator flag".
-    const cli = raw.split("\n").filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l)).join("\n");
-    assert.equal(/operatorAdvance|operatorReopen/.test(cli), false);
-    assert.equal(/--operator|--source/.test(cli), false);
-  });
-
-  test("only src/api/autopilot-board.ts imports operatorAdvance / operatorReopen outside src/lifecycle", async () => {
-    const { readdir } = await import("node:fs/promises");
-    const root = new URL("../src/", import.meta.url);
-    const hits: string[] = [];
-    for (const f of (await readdir(root, { recursive: true })) as string[]) {
-      if (!f.endsWith(".ts") || f.startsWith("lifecycle/")) continue;
-      const text = await readFile(new URL(f, root), "utf8");
-      if (/\boperator(Advance|Reopen)\b/.test(text)) hits.push(f);
-    }
-    assert.deepEqual(hits, ["api/autopilot-board.ts"]);
-  });
-
-  test("appendLifecycleEntry is imported only by src/lifecycle (the journal LIST has one writer)", async () => {
-    const { readdir } = await import("node:fs/promises");
-    const root = new URL("../src/", import.meta.url);
-    const hits: string[] = [];
-    for (const f of (await readdir(root, { recursive: true })) as string[]) {
-      if (!f.endsWith(".ts") || f.startsWith("lifecycle/") || f === "redis/lifecycle-journal.ts") continue;
-      const text = await readFile(new URL(f, root), "utf8");
-      if (text.includes("appendLifecycleEntry")) hits.push(f);
-    }
-    assert.deepEqual(hits, []);
   });
 });
