@@ -153,6 +153,18 @@
       "description": "hydra-watchdog.ts — one-shot watchdog CLI (issue #5095, epic #5094)."
     },
     {
+      "path": "scripts/lifecycle.ts",
+      "name": "lifecycle.ts",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/lifecycle.ts"
+      },
+      "kind": "ts",
+      "description": "scripts/lifecycle.ts — CLI adapter for the lifecycle writer seam"
+    },
+    {
       "path": "scripts/operator-notify.ts",
       "name": "operator-notify.ts",
       "execStart": null,

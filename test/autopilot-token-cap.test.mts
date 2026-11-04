@@ -34,7 +34,6 @@ type Limits = {
 type Slot = {
   skill: string;
   started: string;
-  partial_tokens: number;
 } | null;
 
 type State = {
@@ -73,29 +72,6 @@ function resolveSubagentCaps(env: Record<string, string | undefined>): Limits {
     );
   }
   return { subagent_max_tokens: soft, subagent_hard_max_tokens: hard };
-}
-
-/**
- * Mirrors the Phase 2 in-flight poll: for each occupied slot, if
- * partial_tokens >= hard cap, clear the slot, add class to burned_classes,
- * and report a runaway record for issue creation.
- */
-function applyHardCap(state: State): {
-  runaways: Array<{ class: string; skill: string; tokens: number }>;
-} {
-  const runaways: Array<{ class: string; skill: string; tokens: number }> = [];
-  const hard = state.limits.subagent_hard_max_tokens;
-  for (const [cls, slot] of Object.entries(state.slots)) {
-    if (slot === null) continue;
-    if (slot.partial_tokens >= hard) {
-      runaways.push({ class: cls, skill: slot.skill, tokens: slot.partial_tokens });
-      state.slots[cls] = null;
-      if (!state.burned_classes.includes(cls)) {
-        state.burned_classes.push(cls);
-      }
-    }
-  }
-  return { runaways };
 }
 
 /**
@@ -211,7 +187,7 @@ describe("autopilot soft-cap trip (issue #395, Phase 2 completion-reap)", () => 
     const state = makeState({
       slots: {
         ...makeState().slots,
-        dev_orch: { skill: "hydra-dev", started: "t0", partial_tokens: 0 },
+        dev_orch: { skill: "hydra-dev", started: "t0" },
       },
     });
     const { burned } = applySoftCapOnCompletion(state, "dev_orch", 400_000);
@@ -224,7 +200,7 @@ describe("autopilot soft-cap trip (issue #395, Phase 2 completion-reap)", () => 
     const state = makeState({
       slots: {
         ...makeState().slots,
-        dev_orch: { skill: "hydra-dev", started: "t0", partial_tokens: 0 },
+        dev_orch: { skill: "hydra-dev", started: "t0" },
       },
     });
     const { burned } = applySoftCapOnCompletion(state, "dev_orch", 399_999);
@@ -249,82 +225,9 @@ describe("autopilot soft-cap trip (issue #395, Phase 2 completion-reap)", () => 
     applySoftCapOnCompletion(state, "dev_orch", 500_000);
     // Simulate a second completion in the same class (hypothetical — Phase 4
     // would have suppressed it, but the state machine must still be sane).
-    state.slots.dev_orch = { skill: "hydra-dev", started: "t1", partial_tokens: 0 };
+    state.slots.dev_orch = { skill: "hydra-dev", started: "t1" };
     applySoftCapOnCompletion(state, "dev_orch", 450_000);
     assert.deepEqual(state.burned_classes, ["dev_orch"]);
-  });
-});
-
-describe("autopilot hard-cap trip (issue #395, Phase 2 in-flight poll)", () => {
-  test("running slot at hard cap is abandoned and class burned", () => {
-    const state = makeState({
-      slots: {
-        ...makeState().slots,
-        dev_orch: { skill: "hydra-dev", started: "t0", partial_tokens: 800_000 },
-      },
-    });
-    const { runaways } = applyHardCap(state);
-    assert.equal(runaways.length, 1);
-    assert.deepEqual(runaways[0], {
-      class: "dev_orch",
-      skill: "hydra-dev",
-      tokens: 800_000,
-    });
-    assert.equal(state.slots.dev_orch, null, "runaway slot must be cleared");
-    assert.deepEqual(state.burned_classes, ["dev_orch"]);
-  });
-
-  test("running slot under hard cap is left running", () => {
-    const state = makeState({
-      slots: {
-        ...makeState().slots,
-        dev_orch: { skill: "hydra-dev", started: "t0", partial_tokens: 799_999 },
-      },
-    });
-    const { runaways } = applyHardCap(state);
-    assert.equal(runaways.length, 0);
-    assert.notEqual(state.slots.dev_orch, null, "under-cap slot must NOT be cleared");
-    assert.deepEqual(state.burned_classes, []);
-  });
-
-  test("multiple runaways are caught in one poll", () => {
-    const state = makeState({
-      slots: {
-        ...makeState().slots,
-        dev_orch: { skill: "hydra-dev", started: "t0", partial_tokens: 1_200_000 },
-        dev_target: {
-          skill: "hydra-target-build",
-          started: "t0",
-          partial_tokens: 850_000,
-        },
-      },
-    });
-    const { runaways } = applyHardCap(state);
-    assert.equal(runaways.length, 2);
-    assert.deepEqual(
-      runaways.map((r) => r.class).sort(),
-      ["dev_orch", "dev_target"],
-    );
-    assert.deepEqual(state.burned_classes.sort(), ["dev_orch", "dev_target"]);
-  });
-
-  test("hard-cap action shape pins the issue-filing contract", () => {
-    // The playbook's Phase 2 in-flight poll snippet uses:
-    //   title = f"Subagent token-runaway: {skill} burned {tokens} tokens"
-    //   label = needs-triage
-    // If any of those names change without updating the playbook AND this
-    // test, the operator will lose the diagnostic channel.
-    const state = makeState({
-      slots: {
-        ...makeState().slots,
-        dev_orch: { skill: "hydra-dev", started: "t0", partial_tokens: 900_000 },
-      },
-    });
-    const { runaways } = applyHardCap(state);
-    const r = runaways[0];
-    assert.ok(r, "runaway must be reported");
-    const title = `Subagent token-runaway: ${r.skill} burned ${r.tokens} tokens`;
-    assert.equal(title, "Subagent token-runaway: hydra-dev burned 900000 tokens");
   });
 });
 
@@ -335,12 +238,7 @@ describe("autopilot no-regression: well-behaved subagents are unaffected (issue 
     state.slots.dev_orch = {
       skill: "hydra-dev",
       started: "t0",
-      partial_tokens: 0,
     };
-    // Poll mid-run at 75k — no trip.
-    state.slots.dev_orch.partial_tokens = 75_000;
-    const { runaways } = applyHardCap(state);
-    assert.equal(runaways.length, 0, "75k is well under hard cap");
     // Completion at 120k — no soft-cap trip.
     const { burned } = applySoftCapOnCompletion(state, "dev_orch", 120_000);
     assert.equal(burned, false);
@@ -355,21 +253,5 @@ describe("autopilot no-regression: well-behaved subagents are unaffected (issue 
     for (const cls of Object.keys(state.slots)) {
       assert.equal(isClassEligible(state, cls), true);
     }
-  });
-
-  test("partial_tokens=0 (no harness progress signal) never trips hard cap", () => {
-    // If the harness doesn't expose partial tokens, slot.partial_tokens
-    // stays 0 forever — the hard cap should still safely no-op. The soft
-    // cap catches it on completion (or the global wall_clock_max_sec).
-    const state = makeState({
-      slots: {
-        ...makeState().slots,
-        dev_orch: { skill: "hydra-dev", started: "t0", partial_tokens: 0 },
-      },
-    });
-    const { runaways } = applyHardCap(state);
-    assert.equal(runaways.length, 0);
-    assert.equal(state.burned_classes.length, 0);
-    assert.notEqual(state.slots.dev_orch, null, "slot must NOT be cleared without progress signal");
   });
 });

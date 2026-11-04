@@ -1,0 +1,63 @@
+/**
+ * `src/lifecycle/` public surface (ADR-0047, issue #5310). Callers import from
+ * here; no other module hand-lists lifecycle state names.
+ */
+export {
+  HUMAN_HOLD_STATES,
+  LIFECYCLE_STATES,
+  OPEN_STATES,
+  TRANSITIONS,
+  findTransition,
+  isHumanHold,
+  isLegalTransition,
+  isLifecycleState,
+  stateLabelsOf,
+  type FiredBy,
+  type GateId,
+  type HumanHoldState,
+  type LifecycleState,
+  type OpenState,
+  type Transition,
+} from "./transitions.ts";
+export {
+  ADR5_REASONS,
+  CAP_REASON_PREFIX,
+  TRIAGE_REASONS,
+  isAdr5Reason,
+  isAllowedReason,
+  type Adr5Reason,
+} from "./reasons.ts";
+export {
+  DESIGN_CONCEPT_FLAG,
+  bodyClosesIssue,
+  evaluateGate,
+  gateAdr5,
+  gateClose,
+  gateDispatch,
+  gateJudgment,
+  gatePrOpen,
+  recordsNeeded,
+  type DesignConceptRecord,
+  type Fetched,
+  type GateInput,
+  type GateRecords,
+  type GateResult,
+  type PrRecord,
+} from "./gates.ts";
+export {
+  LIFECYCLE_ROLLOUT_CONFIG_PATH,
+  advance,
+  defaultSeamDeps,
+  loadLifecycleMode,
+  openClaim,
+  releaseClaim,
+  resolveLifecycleMode,
+  type AdvanceInput,
+  type AdvanceResult,
+  type ClaimInput,
+  type ClaimResult,
+  type LifecycleMode,
+  type ModeReason,
+  type ResolvedMode,
+  type SeamDeps,
+} from "./seam.ts";

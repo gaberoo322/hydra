@@ -30,6 +30,12 @@ the policy lives in `scripts/autopilot/decide.py` (the **L2 decision brain**).
 > the 900s Pace Gate interval, minus the re-armed `discover_target`, plus the
 > `research_target` re-fire stamp) — adding a long-cooldown signal class needs no
 > bootstrap edit. Redis continuity (host reboot) is the ledger's second adapter.
+>
+> **One parser, one writer (issue #5075).** `run_ledger.py` is the only file under
+> `scripts/autopilot/` that parses or writes `state.json`: Python callers use
+> `load` / `read_prior` / `persist`, bash callers use `run_ledger.py get|project`
+> (`--prior` for a possibly-dead run's document). A slot record is the declared
+> `SLOT_FIELDS` shape (`run_ledger.py slot-fields`).
 
 **Authoritative references — read these instead of this playbook when you
 need to know what the autopilot will do:**
@@ -520,10 +526,9 @@ Detail: `hydra-autopilot-dispatch-reference.md` § qa_target.
 ## Phases (one-line each — full prose lives in code)
 
 - **Phase 0** — `bootstrap.sh "$@"` initialises `/tmp/hydra-autopilot-state.json` (slash args via `args-parse.sh`), then the **schema-version handshake** (see below) runs before any other phase
-- **Phases 1 → 4 as one command** — `turn.sh events.json` (issue #4831): JSON Turn Snapshot → `turn_snapshot.py apply` (stored as emitted; a failed emit is replaced by `turn-snapshot.ts --all-degraded`) → `decide.py` → `assert_invariants.py`, then the plan + usage summary. The per-phase lines below say what it runs.
+- **Phases 1 → 4 as one command** — `turn.sh events.json` (issue #4831): JSON Turn Snapshot → `turn_snapshot.py apply` (stored as emitted; a failed emit is replaced by `turn-snapshot.ts --all-degraded`) → the Phase 1.5 stale-recovery pass → `decide.py` → `assert_invariants.py`, then the plan + usage summary. The per-phase lines below say what it runs.
 - **Phase 1** — `turn-snapshot.ts` emits the typed Turn Snapshot (ADR-0043, #4934), validated on emit by `src/schemas/turn-snapshot.ts` alone; the accessor `turn_snapshot.py` is store-only (#5083), and the replay contract in `test/turn-snapshot-json.test.mts` (#5085) is the only guard on the signals `decide.py` reads
-- **Phase 1.5** — `recover-stale.sh stale_in_progress <N...> stale_blocked <M...>`
-- **Phase 2** — `reap.py` hard-cap sweep (idempotent; #395)
+- **Phase 1.5** — `turn.sh` runs `recover-stale.sh stale_in_progress <N...> stale_blocked <M...>` itself (#5344) once per turn, after the snapshot is stored and before `decide.py`, from the snapshot's `orch_stale_in_progress_items` / `orch_stale_blocked_items` read via `turn_snapshot.py stale-recovery` (anchors of occupied slots excluded — the reap paths own those). Fail-open (never changes the exit code or plan; script under `timeout`, output on stderr); skipped in replay mode unless `HYDRA_AUTOPILOT_RECOVER_STALE` overrides the path. Caveat: a `/hydra-epic-sprint` slice looks stranded, so it is reached only when the operator keeps the autopilot live during a sprint
 - **Phase 3** — `decide.py decide state.json cands.json events.json` returns the plan (`events.json` = typed-event list; the `{"events": [...]}` wrapper is tolerated; a malformed file yields a plan carrying `events-malformed-ignored`, never a crash — #4213)
 - **Phase 4** — `assert_invariants.py plan.json state.json`
 - **Phase 5** — model executes each action via the table above
