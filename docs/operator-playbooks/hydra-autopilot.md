@@ -500,12 +500,10 @@ typed **parent-exception** on the Run Ledger. `turn.sh` journals its own
 (`invariant-reject`, `script-error`); you journal the rest, ONLY through
 `python3 scripts/autopilot/run_ledger.py parent-exception "$STATE" <cause> --source parent --detail "<one line>"` (never by editing `state.json`):
 
-| cause | when |
-|---|---|
-| `notes-steer` | you passed a non-empty `--notes-file` to `render-dispatch.py` |
-| `defect-filed` | you filed a `hitl-grill` defect (detail `#<N>`) |
-| `script-error` | a Phase-5 script (`render-dispatch.py`, `stamp-slot.py`, `reap.py`, a binding's `gh` call) exited non-zero |
-| `unrouted-refusal` | a `scripts/lifecycle.ts` call exited refused with a reason no plan action routes (detail = the reason code) |
+- `notes-steer` - you passed a non-empty `--notes-file` to `render-dispatch.py`.
+- `defect-filed` - you filed a `hitl-grill` defect (detail `#<N>`).
+- `script-error` - a Phase-5 script (`render-dispatch.py`, `stamp-slot.py`, `reap.py`, a binding's `gh` call) exited non-zero.
+- `unrouted-refusal` - a `scripts/lifecycle.ts` call exited refused with a reason no plan action routes (detail = the reason code).
 
 The journal call is best-effort; its failure never changes what you do next.
 
