@@ -72,11 +72,10 @@ fi
 echo
 
 echo "=== state (${STATE}) ==="
-if [ -f "$STATE" ] && command -v jq >/dev/null 2>&1; then
-  jq '{turn, dispatches, cumulative_tokens, slots, signal_last_fired, burned_classes}' "$STATE" 2>/dev/null \
+if [ -f "$STATE" ]; then
+  python3 "$(dirname "$0")/run_ledger.py" project "$STATE" turn dispatches cumulative_tokens slots signal_last_fired burned_classes 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), indent=2))' 2>/dev/null \
     || cat "$STATE"
-elif [ -f "$STATE" ]; then
-  cat "$STATE"
 else
   echo "(missing)"
 fi

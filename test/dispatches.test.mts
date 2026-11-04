@@ -56,6 +56,12 @@ describe("subagentDispatchKey + subagentDispatchIndexKey", () => {
 });
 
 describe("projectSubagentRow — pure helper", () => {
+  test("reads anchor back only when the hash field is non-empty (#5350)", () => {
+    const base = { sessionId: "s", skill: "hydra-dev", dispatchId: "d", startedAt: "2026-11-03T00:00:00.000Z" };
+    assert.equal(projectSubagentRow({ ...base, anchor: "issue-5350" })?.anchor, "issue-5350");
+    assert.equal("anchor" in (projectSubagentRow({ ...base, anchor: "" }) as object), false);
+  });
+
   test("returns null on a row missing required identity fields", () => {
     assert.equal(projectSubagentRow(null), null);
     assert.equal(projectSubagentRow({}), null);
@@ -283,6 +289,19 @@ describe("decide.py make_dispatch_sentinel", () => {
         `print(make_dispatch_sentinel("hydra-grill", "wt-2", None))`,
     );
     assert.equal(out, "<!-- hydra-dispatch v1 skill=hydra-grill dispatchId=wt-2 -->");
+  });
+
+  test("emits anchor after runId only for a grammar-safe anchor (#5350)", () => {
+    const out = runPy(
+      `__file__=${JSON.stringify(DECIDE)}; ` +
+        `exec(open(${JSON.stringify(DECIDE)}).read().split("if __name__")[0]); ` +
+        `print(make_dispatch_sentinel("hydra-dev", "wt-1", "run-9", "issue-5350")); ` +
+        `print(make_dispatch_sentinel("hydra-dev", "wt-1", "run-9", "bad anchor>x")); ` +
+        `print(make_dispatch_sentinel("hydra-dev", "wt-1", "run-9", ""))`,
+    ).split("\n");
+    assert.equal(out[0], "<!-- hydra-dispatch v1 skill=hydra-dev dispatchId=wt-1 runId=run-9 anchor=issue-5350 -->");
+    assert.equal(out[1], "<!-- hydra-dispatch v1 skill=hydra-dev dispatchId=wt-1 runId=run-9 -->");
+    assert.equal(out[2], out[1]);
   });
 });
 

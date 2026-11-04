@@ -66,6 +66,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # by spec, so the path insert keeps the import resolvable from there too).
 sys.path.insert(0, SCRIPT_DIR)
 import turn_snapshot as ts  # noqa: E402
+import run_ledger  # noqa: E402  (the ONE state-document parser, #5075)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 PLAYBOOK_PATH = os.path.join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md")
@@ -73,7 +74,7 @@ CLASSES_PATH = os.environ.get("HYDRA_CLASSES_JSON") or os.path.join(REPO_ROOT, "
 SELF_ISOLATION_FRAGMENT_PATH = os.path.join(
     REPO_ROOT, "docs", "operator-playbooks", "_fragments", "target-self-isolation-preamble.md"
 )
-STATE_PATH = os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json")
+STATE_PATH = run_ledger.resolve_state_path()
 PLAN_PATH = os.environ.get("HYDRA_AUTOPILOT_PLAN", "/tmp/hydra-autopilot-plan.json")
 
 ORCH_REPO = "gaberoo322/hydra"
@@ -674,9 +675,16 @@ def main(argv: list[str]) -> int:
         i += 1
 
     try:
-        state = _load_json(STATE_PATH)
+        try:
+            state = run_ledger.load(STATE_PATH, fill_defaults=False)
+        except run_ledger.LedgerTypeError as exc:
+            # A wrong-typed declared field must not stop a dispatch render: read leniently.
+            state = run_ledger.read_prior(STATE_PATH)
+            if not isinstance(state, dict):
+                raise
+            print(f"[render-dispatch] state failed type validation ({exc}); rendering leniently", file=sys.stderr)
         plan = _load_json(PLAN_PATH)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, run_ledger.LedgerTypeError) as exc:
         print(f"[render-dispatch] cannot read state/plan: {exc}", file=sys.stderr)
         return 2
     action = find_dispatch(plan, slot)

@@ -87,7 +87,7 @@ state.json {
 
   # NEW IN #426 — 6 pipeline slots replace the previous 10-slot mix
   "slots": {
-    "dev_orch":        null | { skill, started, task_id, partial_tokens, ... }
+    "dev_orch":        null | { skill, started, task_id, ... }  # run_ledger.SLOT_FIELDS
     "qa_orch":         null | { ... }
     "research_orch":   null | { ... }
     "dev_target":      null | { ... }
@@ -413,8 +413,14 @@ from decide_selectors.wire_or_retire import _select_signal_wire_or_retire_target
 # order, and _rule_signal_classes iterates a hardcoded signal tuple that today
 # merely coincides with row order — nothing couples them (issue #4468).
 # Dispatch priority is POLICY and stays here in the brain.
+#
+# HYDRA_CLASSES_JSON (issue #5202) is a TEST SEAM shared with render-dispatch.py:
+# when set (non-empty) it names the taxonomy file and decide.py loads ONLY that
+# file — a missing/invalid override raises TaxonomyError naming the override
+# path, never a fallback to the shipped classes.json. No production entrypoint
+# sets it; unset keeps the sibling classes.json.
 
-_TAXONOMY_PATH = os.path.join(
+_TAXONOMY_PATH = os.environ.get("HYDRA_CLASSES_JSON") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "classes.json"
 )
 
@@ -1621,7 +1627,18 @@ def _synthesize_worktree_branch(state: dict, slot: str) -> str:
     return f"worktree-agent-{run_token}-t{turn_token}-{slot}"
 
 
-def make_dispatch_sentinel(skill: str, dispatch_id: str, run_id: str | None = None) -> str:
+# Anchor refs the sentinel may carry (issue #5350 INV-3): the sentinel field
+# grammar stops at whitespace or `>`, so anything outside this set is omitted
+# rather than truncated or escaped.
+_SENTINEL_ANCHOR_RE = re.compile(r"^[A-Za-z0-9._:#/-]+$")
+
+
+def make_dispatch_sentinel(
+    skill: str,
+    dispatch_id: str,
+    run_id: str | None = None,
+    anchor: str | None = None,
+) -> str:
     """Build the hidden dispatch sentinel comment (issue #692).
 
     The autopilot playbook prepends this single line to the FIRST user
@@ -1633,7 +1650,9 @@ def make_dispatch_sentinel(skill: str, dispatch_id: str, run_id: str | None = No
 
     Form (`runId` omitted when not in an autopilot run):
 
-        <!-- hydra-dispatch v1 skill={skill} dispatchId={id} runId={runId} -->
+        <!-- hydra-dispatch v1 skill={skill} dispatchId={id} runId={runId} anchor={ref} -->
+
+    (`anchor` is optional, emitted only for a pinned, grammar-safe anchor ref.)
 
     Field values are emitted verbatim; callers pass already-clean tokens
     (the skill name and the synthesised worktree branch). The hook's
@@ -1647,6 +1666,10 @@ def make_dispatch_sentinel(skill: str, dispatch_id: str, run_id: str | None = No
     ]
     if run_id:
         parts.append(f"runId={run_id}")
+    # Issue #5350: optional pinned anchor so the subagent dispatch registry (and
+    # thereby `deriveInflightSlotSeed`) knows the anchor. Omitted unless safe.
+    if isinstance(anchor, str) and anchor and _SENTINEL_ANCHOR_RE.match(anchor):
+        parts.append(f"anchor={anchor}")
     parts.append("-->")
     return " ".join(parts)
 
@@ -2436,18 +2459,14 @@ def _rule_slot_events(state: dict, now: int) -> tuple[_RuleOutput, list[dict]]:
             # frees the slot. We DO require a task_id for the reap to be
             # useful — without it reap.py can't dedup.
             if task_id:
-                # Best-effort token recovery from slot, if the harness
-                # stamped partial_tokens. The hook itself doesn't carry
-                # tokens (the harness payload doesn't expose them
-                # reliably); we trust slot.partial_tokens as the floor.
+                # The hook payload carries no token count (issue #5075: the
+                # former `partial_tokens` recovery had no writer), so the
+                # synthesised completion reports 0; the real count arrives on
+                # the harness completion event.
                 slot_obj = (state.get("slots") or {}).get(slot)
                 tokens = 0
                 skill = None
                 if isinstance(slot_obj, dict):
-                    try:
-                        tokens = int(slot_obj.get("partial_tokens") or 0)
-                    except (TypeError, ValueError):
-                        tokens = 0
                     skill = slot_obj.get("skill")
                 synthesised_completions.append({
                     "type": "completion",
@@ -3824,10 +3843,13 @@ def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
         action["isolation"] = class_isolation(slot)
         skill = action.get("skill")
         if isinstance(skill, str) and skill:
+            pa = action.get("prompt_args")
+            pinned_anchor = pa.get("anchor") if isinstance(pa, dict) else None
             action["dispatchSentinel"] = make_dispatch_sentinel(
                 skill,
                 action["worktreeBranch"],
                 run_token,
+                pinned_anchor if isinstance(pinned_anchor, str) else None,
             )
 
 
@@ -5084,6 +5106,10 @@ def main(argv: list[str]) -> int:
         if len(argv) < 3:
             print("decide.py decide: missing <state.json>", file=sys.stderr)
             return 2
+        # STRICT ON PURPOSE (#5293 QA r5): decide() indexes declared fields by their
+        # declared type (e.g. failure_log[-1].get), so a LedgerTypeError here would
+        # become an AttributeError mid-plan. Failing loud before planning is correct;
+        # a lenient read would only move the crash deeper.
         state = run_ledger.load(argv[2], fill_defaults=False)
         # Issue #1769 — single-writer turn counter. The CLI (not the model
         # session, not heartbeat.py) owns `state.turn`: one bump per decide

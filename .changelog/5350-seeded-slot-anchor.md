@@ -1,0 +1,1 @@
+- fix: seed the dispatch anchor from the subagent registry so reconcile-seeded promotes uncollected dev_orch anchors (#5350)

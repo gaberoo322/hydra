@@ -64,6 +64,8 @@ export const SubagentDispatchPostBodySchema = z
     currentStep: z.string().optional(),
     issueRef: z.string().trim().min(1).optional(),
     prRef: z.string().trim().min(1).optional(),
+    // Pinned anchor ref (`issue-N`) from the dispatch sentinel (#5350).
+    anchor: z.string().trim().min(1).optional(),
   })
   .strict();
 

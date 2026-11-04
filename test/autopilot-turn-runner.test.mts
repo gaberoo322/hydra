@@ -445,6 +445,25 @@ describe("stamp-slot.py — the dispatch stamp read off the plan (issue #4831)",
     assert.match(runStamp(sb, ["dev_orch", "x", "y"]).stderr, /not a JSON object/);
   });
 
+  test("a wrong-typed declared field still stamps the slot (exit 0), leniently (#5293 QA r5)", () => {
+    const sb = stampSandbox();
+    const st = readJson(sb.state);
+    st.failure_log = "x";
+    writeFileSync(sb.state, JSON.stringify(st) + "\n");
+    const r = runStamp(sb, ["dev_orch", "abcdef0123456789a", "sonnet"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readJson(sb.state).slots.dev_orch.task_id, "abcdef0123456789a");
+  });
+
+  test("sibling pin: a non-object state document is still refused (exit 2, unchanged)", () => {
+    const sb = stampSandbox();
+    writeFileSync(sb.state, "[1,2]\n");
+    const r = runStamp(sb, ["dev_orch", "abcdef0123456789a", "sonnet"]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /cannot read state\/plan/);
+    assert.equal(readFileSync(sb.state, "utf-8"), "[1,2]\n");
+  });
+
   test("no temp file is left behind", () => {
     const sb = stampSandbox();
     runStamp(sb, ["dev_orch", "abcdef0123456789a", "sonnet"]);
@@ -699,4 +718,110 @@ describe("turn.sh — a failed LIVE emit plans on the TS all-degraded snapshot, 
       assert.ok(!plan.actions.some((a: any) => a.type === "dispatch" && ["dev_orch", "qa_orch", "dev_target", "qa_target"].includes(a.slot)), "no worker dispatches on facts nobody read");
     });
   }
+});
+
+describe("turn_snapshot.py apply — a type-invalid state document is stored leniently, not refused (#5293 QA r5, class fix)", () => {
+  const TURN_SNAPSHOT = join(SCRIPTS, "turn_snapshot.py");
+  function runApply(sb: Sandbox) {
+    const r = spawnSync("python3", [TURN_SNAPSHOT, "apply", FIXTURE, sb.state], { cwd: sb.dir, env: sb.env, encoding: "utf-8" });
+    return { status: r.status, stderr: r.stderr ?? "" };
+  }
+
+  test("a wrong-typed declared field (failure_log:\"x\"): exit 0 and this turn's snapshot is stored", () => {
+    const st = baseState();
+    st.failure_log = "x";
+    const sb = sandbox(st);
+    sandboxes.push(sb);
+    const r = runApply(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /state failed type validation/);
+    assert.deepEqual(readJson(sb.state).turn_snapshot, readJson(FIXTURE));
+  });
+
+  test("sibling pin: a non-object state document is still refused (exit 1) and left untouched", () => {
+    const sb = sandbox(null);
+    sandboxes.push(sb);
+    writeFileSync(sb.state, "[1,2]\n");
+    const r = runApply(sb);
+    assert.equal(r.status, 1);
+    assert.equal(readFileSync(sb.state, "utf-8"), "[1,2]\n");
+  });
+});
+
+describe("turn.sh — Phase 1.5 stale-recovery pass (issue #5344)", () => {
+  /** A replay doc copy carrying the two orch stale lists, plus a stub recover script that records its argv. */
+  function recoverySandbox(opts: { inProgress?: number[]; blocked?: number[]; stub?: string; override?: boolean; occupied?: Record<string, unknown> } = {}) {
+    const st = baseState();
+    if (opts.occupied) Object.assign(st.slots as Record<string, unknown>, opts.occupied);
+    const sb = sandbox(st);
+    sandboxes.push(sb);
+    const doc = readJson(FIXTURE);
+    doc.signals.orch_stale_in_progress_items = opts.inProgress ?? [101, 102];
+    doc.signals.orch_stale_blocked_items = opts.blocked ?? [201];
+    const replay = join(sb.dir, "replay.json");
+    writeFileSync(replay, JSON.stringify(doc));
+    sb.env.HYDRA_AUTOPILOT_SNAPSHOT_REPLAY = replay;
+    const argvFile = join(sb.dir, "recover-argv.txt");
+    const stub = join(sb.dir, "recover-stub.sh");
+    writeFileSync(stub, opts.stub ?? `#!/usr/bin/env bash\necho "$*" > "${argvFile}"\nexit 0\n`);
+    chmodSync(stub, 0o755);
+    if (opts.override !== false) sb.env.HYDRA_AUTOPILOT_RECOVER_STALE = stub;
+    return { sb, argvFile };
+  }
+
+  test("runs the script once with the snapshot's lists, in-flight slot anchors excluded; the blocked arm is covered", () => {
+    const { sb, argvFile } = recoverySandbox({
+      occupied: { dev_orch: { skill: "hydra-dev", anchor: "issue-102", task_id: "deadbeefdeadbeef1", started_epoch: Math.floor(Date.now() / 1000) - 60, branch: "worktree-agent-4dfd1dc9-t2-dev_orch" } },
+    });
+    const r = runTurn(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(argvFile, "utf-8").trim(), "stale_in_progress 101 stale_blocked 201");
+    assert.match(r.stdout, /\[turn\] stale-recovery: ran in_progress=\[101\] blocked=\[201\] skipped_inflight=1/);
+  });
+
+  test("a non-zero script exit and a '{...}' stdout line never change the exit code, the plan or the JSON summary lines", () => {
+    const { sb } = recoverySandbox({ stub: `#!/usr/bin/env bash\necho '{"x":1}'\necho boom >&2\nexit 7\n` });
+    const r = runTurn(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /\[turn\] stale-recovery: recover-stale failed .* rc=7/);
+    assert.ok(!r.stdout.split("\n").some((l) => l.startsWith('{"x"')), "the script's stdout is isolated onto stderr");
+    assert.match(r.stderr, /boom/);
+    assert.ok(existsSync(sb.plan));
+    assert.ok(r.stdout.split("\n").some((l) => l.startsWith('{"turn"')), "plan summary line intact");
+  });
+
+  test("a missing script is fail-open: one line with context, exit 0", () => {
+    const { sb } = recoverySandbox();
+    sb.env.HYDRA_AUTOPILOT_RECOVER_STALE = join(sb.dir, "does-not-exist.sh");
+    const r = runTurn(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /\[turn\] stale-recovery: script missing .* rc=127/);
+  });
+
+  test("replay without the override skips the pass", () => {
+    const { sb, argvFile } = recoverySandbox({ override: false });
+    const r = runTurn(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /\[turn\] stale-recovery: skipped \(replay\)/);
+    assert.equal(existsSync(argvFile), false);
+  });
+
+  test("empty lists do not spawn the script", () => {
+    const { sb, argvFile } = recoverySandbox({ inProgress: [], blocked: [] });
+    const r = runTurn(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /\[turn\] stale-recovery: nothing stale/);
+    assert.equal(existsSync(argvFile), false);
+  });
+
+  test("the accessor reads a marker document fail-safe, never raising in replay mode", () => {
+    const TURN_SNAPSHOT = join(SCRIPTS, "turn_snapshot.py");
+    const st = baseState();
+    st.turn_snapshot = { schema_version: 1, degraded: [{ field: "*" }] };
+    const sb = sandbox(st);
+    sandboxes.push(sb);
+    const r = spawnSync("python3", [TURN_SNAPSHOT, "stale-recovery", sb.state], { cwd: sb.dir, env: sb.env, encoding: "utf-8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), { stale_in_progress: [], stale_blocked: [], skipped_inflight: [] });
+  });
 });

@@ -112,6 +112,7 @@ fi
 skill="$(extract_sentinel_field "$sentinel_line" skill)"
 dispatch_id="$(extract_sentinel_field "$sentinel_line" dispatchId)"
 run_id="$(extract_sentinel_field "$sentinel_line" runId)"
+anchor="$(extract_sentinel_field "$sentinel_line" anchor)"
 
 if [ -z "$skill" ] || [ -z "$dispatch_id" ]; then
   warn "malformed sentinel (skill='$skill' dispatchId='$dispatch_id') — skipping"
@@ -127,9 +128,11 @@ body="$(jq -nc \
   --arg dispatchId "$dispatch_id" \
   --arg startedAt "$started_at" \
   --arg runId "$run_id" \
+  --arg anchor "$anchor" \
   --arg projectDir "$project_dir" \
   '{sessionId: $sessionId, skill: $skill, dispatchId: $dispatchId, startedAt: $startedAt}
    + (if ($runId | length) > 0 then {runId: $runId} else {} end)
+   + (if ($anchor | length) > 0 then {anchor: $anchor} else {} end)
    + (if ($projectDir | length) > 0 then {projectDir: $projectDir} else {} end)' \
   2>/dev/null || printf '')"
 

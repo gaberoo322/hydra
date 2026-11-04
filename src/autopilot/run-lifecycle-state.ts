@@ -376,6 +376,8 @@ export interface InflightSlotSeed {
   /** Synthesised worktree branch (dispatchId) — decide.py's builder-token chain (#5142). */
   worktreeBranch?: string;
   dispatch_id?: string;
+  /** Pinned anchor ref from the dispatch registry (#5350) so reap/reconcile-seeded can promote. */
+  anchor?: string;
   started: string;
   started_epoch: number;
   _source: "inflight-seed";
@@ -421,6 +423,7 @@ export function deriveInflightSlotSeed(
       skill: d.skill,
       task_id: d.sessionId,
       ...(d.dispatchId ? { worktreeBranch: d.dispatchId, dispatch_id: d.dispatchId } : {}),
+      ...(typeof d.anchor === "string" && d.anchor ? { anchor: d.anchor } : {}),
       started: d.startedAt,
       started_epoch: startedEpoch,
       _source: "inflight-seed",

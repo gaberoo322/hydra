@@ -230,7 +230,7 @@ task_id="$agent_id"
 # d_dispatch_id, d_run_id and returns 0 when the child is sentinel-bearing;
 # returns 1 otherwise (sentinel-less children write a negative marker so their
 # later tool calls skip the transcript scrape).
-d_skill=""; d_dispatch_id=""; d_run_id=""
+d_skill=""; d_dispatch_id=""; d_run_id=""; d_anchor=""
 child_marker="${DISPATCH_REGISTER_MARKER_DIR%/}/hydra-dispatch-registered-${agent_id}"
 child_registered=0
 
@@ -272,6 +272,7 @@ resolve_child_dispatch() {
   d_skill="$(extract_sentinel_field "$sentinel_line" skill)"
   d_dispatch_id="$(extract_sentinel_field "$sentinel_line" dispatchId)"
   d_run_id="$(extract_sentinel_field "$sentinel_line" runId)"
+  d_anchor="$(extract_sentinel_field "$sentinel_line" anchor)"
   if [ -z "$d_skill" ] || [ -z "$d_dispatch_id" ]; then
     warn "malformed sentinel (skill='$d_skill' dispatchId='$d_dispatch_id')"
     return 1
@@ -489,10 +490,12 @@ register_subagent_dispatch() {
     --arg dispatchId "$d_dispatch_id" \
     --arg startedAt "$started_at" \
     --arg runId "$d_run_id" \
+    --arg anchor "$d_anchor" \
     --arg projectDir "$project_dir" \
     '{sessionId: $sessionId, skill: $skill, dispatchId: $dispatchId, startedAt: $startedAt}
      + (if ($parentSessionId | length) > 0 then {parentSessionId: $parentSessionId} else {} end)
      + (if ($runId | length) > 0 then {runId: $runId} else {} end)
+     + (if ($anchor | length) > 0 then {anchor: $anchor} else {} end)
      + (if ($projectDir | length) > 0 then {projectDir: $projectDir} else {} end)' \
     2>/dev/null || printf '')"
 

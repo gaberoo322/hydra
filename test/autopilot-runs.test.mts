@@ -1105,6 +1105,13 @@ describe("deriveInflightSlotSeed (issue #1352)", () => {
     );
   });
 
+  test("copies the registry anchor onto the seed only when present (#5350)", () => {
+    const withAnchor = deriveInflightSlotSeed([sub({ sessionId: "s1", anchor: "issue-5350" })]);
+    assert.equal(withAnchor.dev_orch.anchor, "issue-5350");
+    const without = deriveInflightSlotSeed([sub({ sessionId: "s1" })]);
+    assert.equal("anchor" in without.dev_orch, false, "anchorless row seeds byte-identical to before");
+  });
+
   test("maps every distinct pipeline skill to its own slot class", () => {
     const seed = deriveInflightSlotSeed([
       sub({ sessionId: "a", skill: "hydra-dev" }),

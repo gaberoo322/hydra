@@ -642,6 +642,30 @@
       }
     },
     {
+      "name": "HYDRA_AUTOPILOT_RECOVER_STALE",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/turn.sh"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/turn.sh"
+      }
+    },
+    {
+      "name": "HYDRA_AUTOPILOT_RECOVER_STALE_TIMEOUT",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/turn.sh"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/turn.sh"
+      }
+    },
+    {
       "name": "HYDRA_AUTOPILOT_REDIS_CLI",
       "readSites": [
         {

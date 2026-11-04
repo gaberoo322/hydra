@@ -67,12 +67,18 @@ Pure readers + one atomic write; no network.
 from __future__ import annotations
 
 import json
-import os
-import sys
 from typing import Any
 
+import os
+import sys
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+import run_ledger  # noqa: E402  (the ONE state-document parser/writer, #5075)
+
 SCHEMA_VERSION = 1
-DEFAULT_STATE_PATH = os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json")
+DEFAULT_STATE_PATH = run_ledger.resolve_state_path()
 # Set → replay / golden mode: a read of a signal the document does not carry raises.
 REPLAY_ENV = "HYDRA_AUTOPILOT_SNAPSHOT_REPLAY"
 
@@ -442,17 +448,28 @@ def apply(snap: Any, state: dict, unreadable_reason: str | None = None) -> dict:
     return state
 
 
+def _persist_lenient(state: dict, state_path: str) -> None:
+    """Persist, falling back to an unvalidated write when a declared field is wrong-typed."""
+    try:
+        run_ledger.persist(state, state_path)
+    except run_ledger.LedgerTypeError as exc:
+        print(f"[turn_snapshot] state failed type validation on write ({exc}); persisting unvalidated", file=sys.stderr)
+        run_ledger.persist(state, state_path, validate=False)
+
+
 def _read_state(state_path: str) -> dict | None:
     try:
-        with open(state_path, encoding="utf-8") as fh:
-            state = json.load(fh)
-    except (OSError, ValueError) as exc:
+        try:
+            return run_ledger.load(state_path, fill_defaults=False)
+        except run_ledger.LedgerTypeError as exc:
+            lenient = run_ledger.read_prior(state_path)
+            if not isinstance(lenient, dict):
+                raise
+            print(f"[turn_snapshot] state failed type validation ({exc}); reading leniently", file=sys.stderr)
+            return lenient
+    except (OSError, ValueError, run_ledger.LedgerTypeError) as exc:
         print(f"[turn_snapshot] cannot read state {state_path}: {exc}", file=sys.stderr)
         return None
-    if not isinstance(state, dict):
-        print(f"[turn_snapshot] state {state_path} is not a JSON object", file=sys.stderr)
-        return None
-    return state
 
 
 def summary(state: dict) -> dict:
@@ -468,6 +485,41 @@ def summary(state: dict) -> dict:
         "cumulative_tokens": state.get("cumulative_tokens"),
         "slots_occupied": [k for k, v in slots.items() if v is not None],
         "snapshot_degraded": len(snapshot(state).get("degraded") or []),
+    }
+
+
+def _anchor_issue_number(anchor: Any) -> int | None:
+    """An occupied slot's anchor ('issue-N' or 'N') as an issue number; None when it names none."""
+    token = str(anchor).strip()
+    if token.startswith("issue-"):
+        token = token[len("issue-") :]
+    return int(token) if token.isdigit() else None
+
+
+def stale_recovery(state: Any) -> dict:
+    """The stale-recovery pass's input (#5344): the stored snapshot's orch stale lists minus the
+    anchors of occupied slots (those belong to the reap paths). Fail-safe: an absent signal, a marker
+    document or an all-degraded snapshot reads as [] — no data means no relabel. Never raises (the
+    loud-fail replay contract applies to decide.py's reads only)."""
+    signals = _signals(state) or {}
+    slots = state.get("slots") if isinstance(state, dict) and isinstance(state.get("slots"), dict) else {}
+    inflight: set[int] = set()
+    for slot in slots.values():
+        if isinstance(slot, dict):
+            n = _anchor_issue_number(slot.get("anchor"))
+            if n is not None:
+                inflight.add(n)
+
+    def listed(name: str) -> list[int]:
+        raw = signals.get(name)
+        return sorted({n for n in _int_tokens(raw) if n > 0}) if isinstance(raw, list) else []
+
+    in_progress, blocked = listed("orch_stale_in_progress_items"), listed("orch_stale_blocked_items")
+    skipped = sorted(inflight & (set(in_progress) | set(blocked)))
+    return {
+        "stale_in_progress": [n for n in in_progress if n not in inflight],
+        "stale_blocked": [n for n in blocked if n not in inflight],
+        "skipped_inflight": skipped,
     }
 
 
@@ -499,7 +551,7 @@ def _apply_cli(args: list[str]) -> int:
 
     try:
         apply(snap if reason is None else None, state, reason)
-        text_out = json.dumps(state, indent=1)
+        _persist_lenient(state, state_path)
     except (RecursionError, ValueError, TypeError) as exc:
         # A parseable but pathologically nested value (a blob, typically) can
         # still overflow the serialiser: re-read the state and store the
@@ -510,14 +562,12 @@ def _apply_cli(args: list[str]) -> int:
         if state is None:
             return 1
         apply(None, state, reason)
-        text_out = json.dumps(state, indent=1)
-    tmp = f"{state_path}.turn-snapshot.tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(text_out)
-            fh.write("\n")
-        os.replace(tmp, state_path)
-    except OSError as exc:
+        try:
+            _persist_lenient(state, state_path)
+        except (OSError, run_ledger.LedgerTypeError) as exc2:
+            print(f"[turn_snapshot] cannot write state {state_path}: {exc2}", file=sys.stderr)
+            return 1
+    except (OSError, run_ledger.LedgerTypeError) as exc:
         print(f"[turn_snapshot] cannot write state {state_path}: {exc}", file=sys.stderr)
         return 1
     doc = state["turn_snapshot"]
@@ -542,7 +592,8 @@ def _apply_cli(args: list[str]) -> int:
 USAGE = (
     "usage: turn_snapshot.py apply <snapshot.json | -> [state.json]\n"
     "       turn_snapshot.py apply --degraded <reason> [state.json]\n"
-    "       turn_snapshot.py summary [state.json]"
+    "       turn_snapshot.py summary [state.json]\n"
+    "       turn_snapshot.py stale-recovery [state.json]"
 )
 
 
@@ -555,6 +606,12 @@ def main(argv: list[str]) -> int:
         if state is None:
             return 1
         print(json.dumps(summary(state)))
+        code = 0
+    elif cmd == "stale-recovery" and len(args) <= 1:
+        state = _read_state(args[0] if args else DEFAULT_STATE_PATH)
+        if state is None:
+            return 1
+        print(json.dumps(stale_recovery(state)))
         code = 0
     else:
         code = -1

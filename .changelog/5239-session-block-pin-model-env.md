@@ -1,0 +1,1 @@
+- test: pin the launch-model pair in session-block tests so they pass on the Sonnet-trial host (#5239)
