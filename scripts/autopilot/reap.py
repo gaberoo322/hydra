@@ -1620,6 +1620,35 @@ def _release_pipeline_slot(s: dict, cls: str, total_tokens: int) -> None:
         s["slots"][cls] = None
 
 
+def post_instant_death_notice(notice: str, model: str | None = None) -> bool:
+    """Report a Fable instant-death notice to the usage tracker (#5323 INV-7).
+
+    POSTs `{line[, model]}` to /api/usage/session-block (5s timeout). Classification
+    stays server-side - the route ignores an unrecognised line - so no notice regex
+    lives here. Best-effort: a failure is logged to the run log and never changes
+    reap's exit code or state mutation. Returns True iff the POST completed."""
+    if not notice or not notice.strip():
+        return False
+    payload: dict = {"line": notice.strip()}
+    if model:
+        payload["model"] = model
+    req = urllib.request.Request(
+        f"{HYDRA_API_BASE}/api/usage/session-block",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+        return True
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        msg = f"instant_death_notice_skipped err={exc}"
+        print(f"[autopilot] reap: {msg}", file=sys.stderr)
+        _append_log(msg)
+        return False
+
+
 def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None, last_segment_tokens: int | None = None) -> int:
     """`completion` mode: idempotent token accounting keyed by task_id.
 
@@ -2207,10 +2236,28 @@ def main(argv: list[str]) -> int:
         # Trailing after [skill], so every existing ≤5-arg invocation parses
         # and behaves identically (a pure additive extend — design-concept #3839).
         args = argv[2:]
+        # #5323: optional trailing `--notice TEXT [--dispatch-model ALIAS]` flags
+        # (the instant-death reap action's fields) are peeled off first so the
+        # positional grammar above stays byte-identical.
+        notice = ""
+        dispatch_model: str | None = None
+        positional: list[str] = []
+        i = 0
+        while i < len(args):
+            if args[i] in ("--notice", "--dispatch-model") and i + 1 < len(args):
+                if args[i] == "--notice":
+                    notice = args[i + 1]
+                else:
+                    dispatch_model = args[i + 1]
+                i += 2
+            else:
+                positional.append(args[i])
+                i += 1
+        args = positional
         if len(args) < 3:
             print(
                 "[autopilot] reap completion usage: completion <class> <task_id> "
-                "<total_tokens> [skill] [last_segment_tokens]",
+                "<total_tokens> [skill] [last_segment_tokens] [--notice TEXT] [--dispatch-model ALIAS]",
                 file=sys.stderr,
             )
             return 0
@@ -2236,7 +2283,10 @@ def main(argv: list[str]) -> int:
                     file=sys.stderr,
                 )
                 last_segment_tokens = None
-        return run_completion(cls, task_id, total_tokens, skill, last_segment_tokens=last_segment_tokens)
+        rc = run_completion(cls, task_id, total_tokens, skill, last_segment_tokens=last_segment_tokens)
+        if notice:
+            post_instant_death_notice(notice, dispatch_model)
+        return rc
 
     if sub == "grill-crash":
         # Usage: reap.py grill-crash <task_id>
