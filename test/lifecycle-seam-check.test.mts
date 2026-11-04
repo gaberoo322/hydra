@@ -170,10 +170,10 @@ describe("lifecycle-seam-check: detection grammar (synthetic)", () => {
 
 describe("lifecycle-seam-check: fails closed", () => {
   test("an unreadable scan root throws instead of being skipped", async () => {
-    // package.json is a file, so <root>/src is ENOTDIR, not a missing dir.
+    // package.json is a file, so <root>/docs/... is ENOTDIR, not a missing dir.
     await assert.rejects(
       () => scanLifecycleSeam(`${REPO_ROOT}/package.json`),
-      /cannot read dir src/,
+      /cannot read dir docs\/operator-playbooks/,
     );
   });
 
