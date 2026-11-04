@@ -1315,7 +1315,8 @@
       "citedBy": [
         "CONTEXT-MAP.md",
         "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
-        "docs/agents/triage-labels.md"
+        "docs/agents/triage-labels.md",
+        "docs/operator-playbooks/hydra-issue-research.md"
       ],
       "source": {
         "path": "docs/adr/0047-work-item-lifecycle-is-data.md"

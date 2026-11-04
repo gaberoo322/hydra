@@ -29,6 +29,8 @@ import {
   type IssueActionWriteResult,
   type IssueViewResult,
 } from "../github/issue-actions.ts";
+import { ghJson } from "../github/gh.ts";
+import { isGhFailure } from "../github/exec.ts";
 import { resolveGithubRepo, viewPr } from "../github/issues.ts";
 import {
   CLAIM_OWNER_MISMATCH,
@@ -48,13 +50,16 @@ import {
 import { getDesignConceptHash } from "../redis/design-concept.ts";
 import {
   evaluateGate,
+  parseCommentEvidence,
   parsePrEvidence,
   recordsNeeded,
+  type CommentRecord,
   type DesignConceptRecord,
   type Fetched,
   type GateInput,
   type GateRecords,
   type PrRecord,
+  type StateEntryRecord,
 } from "./gates.ts";
 import { isUnsanctionedHoldExit } from "./hold-exit.ts";
 import {
@@ -136,6 +141,9 @@ export interface SeamDeps {
   fetch: {
     designConcept: (issue: number) => Promise<Fetched<DesignConceptRecord>>;
     pr: (prNumber: number) => Promise<Fetched<PrRecord>>;
+    comment: (commentId: number) => Promise<Fetched<CommentRecord>>;
+    /** Latest `labeled` event time for `state` on the issue (the entry clock). */
+    stateEntry: (issue: number, state: string) => Promise<Fetched<StateEntryRecord>>;
   };
   journal: {
     append: (repo: string, issue: number, entry: LifecycleJournalEntry) => Promise<JournalWriteResult>;
@@ -148,6 +156,56 @@ export interface SeamDeps {
     recordHoldExit?: (repo: string, issue: number, entry: LifecycleJournalEntry) => Promise<JournalWriteResult>;
   };
   now: () => number;
+}
+
+/** One `gh api` read of an issue comment; binds repo + issue from `issue_url`. Never throws. */
+export async function fetchComment(repo: string, commentId: number): Promise<Fetched<CommentRecord>> {
+  try {
+    const res = await ghJson<{ id?: unknown; body?: unknown; created_at?: unknown; issue_url?: unknown }>([
+      "api",
+      `repos/${repo}/issues/comments/${commentId}`,
+    ]);
+    if (isGhFailure(res)) return { ok: false };
+    const d = res.data;
+    const url = /\/repos\/([^/]+\/[^/]+)\/issues\/(\d+)$/.exec(typeof d.issue_url === "string" ? d.issue_url : "");
+    const createdAtMs = typeof d.created_at === "string" ? Date.parse(d.created_at) : Number.NaN;
+    if (!url || typeof d.body !== "string" || Number.isNaN(createdAtMs)) {
+      logger.error({ commentId }, "[lifecycle] comment record malformed");
+      return { ok: false };
+    }
+    return { ok: true, value: { id: commentId, repo: url[1], issue: Number(url[2]), createdAtMs, body: d.body } };
+  } catch (err) {
+    logger.error({ err, commentId }, "[lifecycle] comment fetch failed");
+    return { ok: false };
+  }
+}
+
+/** Latest `labeled` event for `state` from the issue's paginated events. Never throws. */
+export async function fetchStateEntry(
+  repo: string,
+  issue: number,
+  state: string,
+): Promise<Fetched<StateEntryRecord>> {
+  try {
+    const res = await ghJson<unknown>(["api", `repos/${repo}/issues/${issue}/events`, "--paginate", "--slurp"]);
+    if (isGhFailure(res) || !Array.isArray(res.data)) return { ok: false };
+    const events = res.data.flatMap((page) => (Array.isArray(page) ? page : [page]));
+    let latest: number | null = null;
+    for (const ev of events) {
+      const e = ev as { event?: unknown; label?: { name?: unknown }; created_at?: unknown } | null;
+      if (!e || e.event !== "labeled" || e.label?.name !== state) continue;
+      const t = typeof e.created_at === "string" ? Date.parse(e.created_at) : Number.NaN;
+      if (Number.isNaN(t)) {
+        logger.error({ issue, state }, "[lifecycle] state-entry event has unparseable created_at");
+        return { ok: false };
+      }
+      if (latest === null || t > latest) latest = t;
+    }
+    return { ok: true, value: { enteredAtMs: latest } };
+  } catch (err) {
+    logger.error({ err, issue }, "[lifecycle] state-entry fetch failed");
+    return { ok: false };
+  }
 }
 
 /** Production deps: real gh, real Redis, mode read from the git-tracked config. */
@@ -188,6 +246,8 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
           return { ok: false };
         }
       },
+      comment: (commentId) => fetchComment(resolveGithubRepo(), commentId),
+      stateEntry: (issue, state) => fetchStateEntry(resolveGithubRepo(), issue, state),
     },
     journal: {
       append: appendLifecycleEntry,
@@ -333,8 +393,15 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       const prNumber = parsePrEvidence(input.evidence ?? {});
       records.pr = prNumber !== null && prNumber > 0 ? await deps.fetch.pr(prNumber) : undefined;
     }
+    if (needs.comment) {
+      const commentId = parseCommentEvidence(input.evidence ?? {});
+      records.comment = commentId !== null ? await deps.fetch.comment(commentId) : undefined;
+    }
+    if (needs.stateEntry) records.stateEntry = await deps.fetch.stateEntry(issue, transition.from);
     const gateInput: GateInput = {
       issue,
+      repo: deps.repo,
+      body: before.row.body,
       from: transition.from,
       to,
       flags,

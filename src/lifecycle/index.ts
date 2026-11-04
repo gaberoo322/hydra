@@ -35,6 +35,7 @@ export {
 } from "./reasons.ts";
 export {
   DESIGN_CONCEPT_FLAG,
+  RESEARCH_TRAILER_PREFIX,
   bodyClosesIssue,
   evaluateGate,
   gateAdr5,
@@ -42,13 +43,19 @@ export {
   gateDispatch,
   gateJudgment,
   gatePrOpen,
+  gateResearchExit,
+  parseCommentEvidence,
+  parseResearchTrailer,
   recordsNeeded,
+  type CommentRecord,
   type DesignConceptRecord,
   type Fetched,
   type GateInput,
   type GateRecords,
   type GateResult,
   type PrRecord,
+  type ResearchTrailer,
+  type StateEntryRecord,
 } from "./gates.ts";
 export {
   HOLD_EXIT_ALERT_WINDOW_DAYS,
