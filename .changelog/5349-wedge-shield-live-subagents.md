@@ -1,0 +1,1 @@
+- fix: stop the autopilot watchdog from SIGTERMing a session that is only waiting on live subagents (#5349)

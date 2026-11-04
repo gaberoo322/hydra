@@ -103,8 +103,6 @@ export const redisKeys = {
   anchorProcessing: () => "hydra:anchors:processing",
   anchorPriorFailures: () => "hydra:anchors:prior-failures",
   anchorReframeQueue: () => "hydra:anchors:reframe-queue",
-  anchorAbandonmentCount: (ref: string) => `hydra:anchors:abandonment-count:${ref}`,
-  anchorPermSkip: (ref: string) => `hydra:anchors:perm-skip:${ref}`,
 
   // Architecture-deepening backfill (issue #789): ISO-8601 stamp of the last
   // architecture_orch pass, written by the dispatched skill and read by the

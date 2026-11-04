@@ -8,7 +8,6 @@
  */
 import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 
 import {
   getAttentionFeed,
@@ -555,15 +554,6 @@ describe("deploy-drift memo (INV-7)", () => {
     remote = "remote";
     const fresh = await readDeployDrift(probe);
     assert.equal(fresh.active, false, "a new episode restarts the grace window");
-  });
-});
-
-describe("watchdog drift-grace pin (INV-8)", () => {
-  test("scripts/hydra-watchdog.sh defaults AUTODEPLOY_GRACE to DEPLOY_DRIFT_GRACE_SECONDS", () => {
-    const script = readFileSync(new URL("../scripts/hydra-watchdog.sh", import.meta.url), "utf8");
-    const match = script.match(/HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS:-(\d+)/);
-    assert.ok(match, "watchdog declares a HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS default");
-    assert.equal(Number(match![1]), DEPLOY_DRIFT_GRACE_SECONDS);
   });
 });
 

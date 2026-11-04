@@ -955,6 +955,7 @@
         "CONTEXT-MAP.md",
         "docs/adr/0040-glm-drainer-typed-tick-and-shared-eligibility.md",
         "docs/adr/0043-turn-snapshot-is-a-typed-ts-module-collect-state-is-strangled.md",
+        "docs/agents/triage-labels.md",
         "docs/operations/glm-lane.md",
         "docs/operator-playbooks/hydra-review.md"
       ],
@@ -1312,7 +1313,9 @@
       "decision": "Orchestrator issue lifecycle is data: labels are current state (Hydra keeps history only); a closed state set (+`qa-passed`, `parked`) with operator-only human-hold exits; one `src/lifecycle/` writer seam (CLI + board routes) with record-checked evidence-pointer gates; a per-issue Redis journal + `SET NX` dispatch claim; durable per-arm + total caps that park; shadow→enforce rollout; parent loop shrinks to typed exceptions.",
       "readWhen": "Writing or routing any issue state label, dispatch claims, cycle caps/parking, `qa-passed`, or the parent-exception metric.",
       "citedBy": [
-        "CONTEXT-MAP.md"
+        "CONTEXT-MAP.md",
+        "docs/agents/triage-labels.md",
+        "docs/operator-playbooks/hydra-issue-research.md"
       ],
       "source": {
         "path": "docs/adr/0047-work-item-lifecycle-is-data.md"

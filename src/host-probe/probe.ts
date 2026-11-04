@@ -20,6 +20,7 @@ import {
   duBin,
   freeBin,
   flockBin,
+  bashBin,
   systemctlBin,
   runProbe,
   classifyProbeFailure,
@@ -404,4 +405,71 @@ export async function restartService(
     return { ok: false, code };
   }
   return { ok: true, data: true };
+}
+
+/**
+ * `systemctl --user is-enabled <unit>` (issue #5098 — the redis-backup timer
+ * visibility line). The state word (`enabled`, `disabled`, `not-found`, ...) is
+ * the signal even on a non-zero exit, like {@link readServiceStatus}; only a
+ * spawn failure, timeout or an empty reply is the failure arm.
+ */
+export async function readUnitEnabledState(
+  unit: string,
+  opts: ProbeExecOptions = {},
+): Promise<ProbeResult<string>> {
+  const raw = await runProbe(systemctlBin(), ["--user", "is-enabled", unit], opts);
+  if (raw.spawnErrorCode || raw.timedOut) {
+    const code = classifyProbeFailure(raw);
+    logger.error({ unit, code }, "[host-probe] systemctl is-enabled failed");
+    return { ok: false, code };
+  }
+  const state = raw.stdout.trim();
+  if (state) return { ok: true, data: state };
+  return { ok: false, code: raw.exitCode !== 0 ? "host-probe-failed" : "host-probe-empty" };
+}
+
+/** Outcome of a repo-script run: exit code plus the last stderr line for the WARN. */
+export interface ScriptRun {
+  exitCode: number;
+  stderrTail: string;
+}
+
+/** Timeout for the deploy script the opt-in auto-deploy runs (the wrapper allows >= 1200s). */
+export const DEPLOY_SCRIPT_TIMEOUT_MS = 1_100_000;
+/** Timeout for one sync-skills.sh run (the wrapper allows >= 300s). */
+export const SYNC_SKILLS_TIMEOUT_MS = 140_000;
+
+async function runRepoScript(
+  script: string,
+  cwd: string,
+  timeout: number,
+  env: NodeJS.ProcessEnv | undefined,
+  label: string,
+): Promise<ProbeResult<ScriptRun>> {
+  const raw = await runProbe(bashBin(), [script], { timeout, cwd, env, maxBuffer: 8 * 1024 * 1024 });
+  if (raw.spawnErrorCode || raw.timedOut) {
+    const code = classifyProbeFailure(raw);
+    logger.error({ script: label, code }, "[host-probe] repo script did not run to completion");
+    return { ok: false, code };
+  }
+  const tail = raw.stderr.trim().split("\n").filter(Boolean).pop() ?? "";
+  return { ok: true, data: { exitCode: raw.exitCode, stderrTail: tail.slice(0, 300) } };
+}
+
+/** `bash <root>/scripts/deploy.sh` (the watchdog's opt-in auto-deploy). One typed method per effect. */
+export function runDeployScript(root: string, opts: { timeout?: number } = {}): Promise<ProbeResult<ScriptRun>> {
+  return runRepoScript(`${root}/scripts/deploy.sh`, root, opts.timeout ?? DEPLOY_SCRIPT_TIMEOUT_MS, undefined, "deploy.sh");
+}
+
+/**
+ * `bash <root>/scripts/sync-skills.sh`, optionally regenerating into a scratch
+ * `CLAUDE_SKILLS_DIR` (the skill-mirror detector) — without `skillsDir` it
+ * targets the live default mirror (the one caller allowed to reconcile it).
+ */
+export function runSyncSkillsScript(
+  root: string,
+  opts: { skillsDir?: string; timeout?: number } = {},
+): Promise<ProbeResult<ScriptRun>> {
+  const env = opts.skillsDir ? { CLAUDE_SKILLS_DIR: opts.skillsDir } : undefined;
+  return runRepoScript(`${root}/scripts/sync-skills.sh`, root, opts.timeout ?? SYNC_SKILLS_TIMEOUT_MS, env, "sync-skills.sh");
 }
