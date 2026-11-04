@@ -42,6 +42,17 @@ export const ORCH_BOARD_LABELS = {
   needs_research: "needs-research",
   in_progress: "in-progress",
   blocked: "blocked",
+  // The remaining lifecycle states (ADR-0047 Decision 2, issue #5312). Together
+  // with the keys above they cover `OPEN_STATES` from `src/lifecycle` exactly;
+  // `test/lifecycle-vocabulary-drift.test.mts` pins that. Non-counted keys: no
+  // board-state bucket reads these yet.
+  needs_info: "needs-info",
+  hitl_grill: "hitl-grill",
+  needs_tickets: "needs-tickets",
+  needs_dev_resume: "needs-dev-resume",
+  qa_passed: "qa-passed",
+  ready_for_human: "ready-for-human",
+  parked: "parked",
   // `target-backlog` is the routing label for Target work (code in
   // hydra-betting), NOT an orchestrator board state. It excludes an issue from
   // the orch `ready_for_agent` count so a Target-scope issue that also carries

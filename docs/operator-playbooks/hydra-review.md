@@ -62,8 +62,8 @@ always the operator's own decision, made by hand outside this script.
 
 ### 0.5. Open wayfinder maps — liveness probe only (issue #4179)
 
-`/hydra-review` no longer carries the wayfinder/spec drain procedure. Three of
-its four gating labels (`wayfinder:destination-pending`, `wayfinder:handoff-pending`,
+`/hydra-review` no longer carries the wayfinder/spec drain procedure. Two of
+its gating labels (`wayfinder:destination-pending`,
 `needs-tickets`) had never been applied to a single issue in the repo's history,
 and `needs-tickets` already has an autonomous consumer (the Turn Snapshot emits
 `tickets_available`; `decide.py` dispatches `tickets_orch` on it). Deleting a

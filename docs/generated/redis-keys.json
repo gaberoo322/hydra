@@ -29,36 +29,6 @@
       }
     },
     {
-      "builder": "anchorAbandonmentCount",
-      "pattern": "hydra:anchors:abandonment-count:{ref}",
-      "params": [
-        "ref"
-      ],
-      "callSites": 0,
-      "accessors": [],
-      "servedBy": [],
-      "home": null,
-      "retired": false,
-      "source": {
-        "path": "src/redis/keys.ts"
-      }
-    },
-    {
-      "builder": "anchorPermSkip",
-      "pattern": "hydra:anchors:perm-skip:{ref}",
-      "params": [
-        "ref"
-      ],
-      "callSites": 0,
-      "accessors": [],
-      "servedBy": [],
-      "home": null,
-      "retired": false,
-      "source": {
-        "path": "src/redis/keys.ts"
-      }
-    },
-    {
       "builder": "anchorPriorFailures",
       "pattern": "hydra:anchors:prior-failures",
       "params": [],
