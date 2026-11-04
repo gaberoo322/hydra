@@ -42,7 +42,7 @@ import {
   resolveTranscriptPath,
   resolveSubagentTranscriptPath,
   findSubagentTranscriptPathByAgentId,
-  isAgentIdShaped,
+  isHarnessAgentId,
 } from "../transcript-store.ts";
 import { parseTranscript, paginate } from "../transcript-projection.ts";
 import { logger } from "../logger.ts";
@@ -176,7 +176,7 @@ export function createDispatchesRouter() {
         // completed Agent-tool child is found by its unique hash on disk
         // (#5325). Only agent-hash ids; anything else stays a 404 so
         // top-level sessions are never exposed.
-        const found = isAgentIdShaped(dispatchId)
+        const found = isHarnessAgentId(dispatchId)
           ? await findSubagentTranscriptPathByAgentId(dispatchId)
           : null;
         if (!found) {

@@ -191,6 +191,17 @@ export function isAgentIdShaped(value: string): boolean {
 }
 
 /**
+ * Harness agent ids are exactly 17 lowercase hex chars. The registry-less disk
+ * fallback (#5325) is the only gate on transcript content for a public route,
+ * so it demands the real length (a 32-bit guess space is too weak).
+ */
+const HARNESS_AGENT_ID_RE = /^[0-9a-f]{17}$/;
+
+export function isHarnessAgentId(value: string): boolean {
+  return typeof value === "string" && HARNESS_AGENT_ID_RE.test(value);
+}
+
+/**
  * Resolve the on-disk JSONL for an Agent-tool child (#4965):
  * `<root>/<projectDir>/<parentSessionId>/subagents/agent-<agentId>.jsonl`.
  *
@@ -250,18 +261,37 @@ const AGENT_SCAN_CACHE_TTL_MS = 30_000;
 const AGENT_SCAN_MISS_TTL_MS = 5_000;
 const AGENT_SCAN_CACHE_MAX = 256;
 const AGENT_SCAN_MAX_CONCURRENT = 2;
+const AGENT_SCAN_WAITERS_MAX = 32;
+/** Positive (hit) entries. Misses live in their own map so a flood of misses can never evict hits. */
 const agentScanCache = new Map<string, { path: string | null; at: number; ttl: number }>();
+const agentScanMissCache = new Map<string, { path: string | null; at: number; ttl: number }>();
 /** Single-flight: concurrent probes for the same key share one scan. */
 const agentScanInflight = new Map<string, Promise<string | null>>();
 let agentScansRunning = 0;
 const agentScanWaiters: Array<() => void> = [];
 
-async function acquireAgentScanSlot(): Promise<void> {
+/** Returns false (load shed) when the waiter queue is full; never enqueues then. */
+async function acquireAgentScanSlot(): Promise<boolean> {
   if (agentScansRunning < AGENT_SCAN_MAX_CONCURRENT) {
     agentScansRunning++;
-    return;
+    return true;
   }
+  if (agentScanWaiters.length >= AGENT_SCAN_WAITERS_MAX) return false;
   await new Promise<void>((resolve) => agentScanWaiters.push(resolve));
+  return true;
+}
+
+function setBounded(
+  m: Map<string, { path: string | null; at: number; ttl: number }>,
+  key: string,
+  v: { path: string | null; at: number; ttl: number },
+): void {
+  m.delete(key); // re-set moves the key to the newest slot
+  if (m.size >= AGENT_SCAN_CACHE_MAX) {
+    const oldest = m.keys().next().value;
+    if (oldest !== undefined) m.delete(oldest);
+  }
+  m.set(key, v);
 }
 
 function releaseAgentScanSlot(): void {
@@ -273,6 +303,9 @@ function releaseAgentScanSlot(): void {
 /** Test seam: drop the agentId scan cache. */
 export function resetAgentScanCache(): void {
   agentScanCache.clear();
+  agentScanMissCache.clear();
+  agentScanWaiters.length = 0;
+  agentScansRunning = 0;
   agentScanInflight.clear();
 }
 
@@ -293,36 +326,39 @@ export async function findSubagentTranscriptPathByAgentId(
   agentId: string,
   deps: ResolveDeps = {},
 ): Promise<string | null> {
-  if (!isAgentIdShaped(agentId)) return null;
+  if (!isHarnessAgentId(agentId)) return null;
   const root = deps.root ?? projectsRoot();
   const cacheKey = `${root}\0${agentId}`;
   const nowMs = Date.now();
-  const hit = agentScanCache.get(cacheKey);
+  const hit = agentScanCache.get(cacheKey) ?? agentScanMissCache.get(cacheKey);
   if (hit && nowMs - hit.at < hit.ttl) return hit.path;
   const pending = agentScanInflight.get(cacheKey);
   if (pending) return pending;
   const run = (async () => {
-    await acquireAgentScanSlot();
+    let acquired = false;
     try {
+      acquired = await acquireAgentScanSlot();
+      if (!acquired) return null; // shed load, uncached
       const flags = { errored: false };
-      const result = await scanForAgentId(root, agentId, deps, flags);
-      // A miss caused by a listing error is NOT cached: a transient readdir
+      let result: string | null = null;
+      try {
+        result = await scanForAgentId(root, agentId, deps, flags);
+      } catch (err) {
+        logger.warn({ err }, "[transcript-store] agent scan threw");
+        flags.errored = true;
+      }
+      // A miss caused by a listing/stat error is NOT cached: a transient
       // failure must not turn a real transcript into a sticky 404.
       if (result === null && flags.errored) return null;
-      agentScanCache.delete(cacheKey); // re-set moves the key to the newest slot
-      if (agentScanCache.size >= AGENT_SCAN_CACHE_MAX) {
-        const oldest = agentScanCache.keys().next().value;
-        if (oldest !== undefined) agentScanCache.delete(oldest);
+      if (result === null) {
+        setBounded(agentScanMissCache, cacheKey, { path: null, at: Date.now(), ttl: AGENT_SCAN_MISS_TTL_MS });
+      } else {
+        setBounded(agentScanCache, cacheKey, { path: result, at: Date.now(), ttl: AGENT_SCAN_CACHE_TTL_MS });
       }
-      agentScanCache.set(cacheKey, {
-        path: result,
-        at: Date.now(),
-        ttl: result === null ? AGENT_SCAN_MISS_TTL_MS : AGENT_SCAN_CACHE_TTL_MS,
-      });
       return result;
     } finally {
-      releaseAgentScanSlot();
-      agentScanInflight.delete(cacheKey);
+      if (acquired) releaseAgentScanSlot();
+      if (agentScanInflight.get(cacheKey) === run) agentScanInflight.delete(cacheKey);
     }
   })();
   agentScanInflight.set(cacheKey, run);
@@ -335,7 +371,7 @@ async function scanForAgentId(
   deps: ResolveDeps,
   flags: { errored: boolean },
 ): Promise<string | null> {
-  const statExists =
+  const rawStat =
     deps.stat ??
     (async (p: string) => {
       try {
@@ -346,6 +382,15 @@ async function scanForAgentId(
         return false;
       }
     });
+  const statExists = async (p: string): Promise<boolean> => {
+    try {
+      return await rawStat(p);
+    } catch (err) {
+      logger.warn({ err, path: p }, "[transcript-store] stat threw");
+      flags.errored = true;
+      return false;
+    }
+  };
   const listDirs =
     deps.listProjectDirs ??
     (async (r: string) => {
