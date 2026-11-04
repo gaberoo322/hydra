@@ -22,11 +22,12 @@
     "scripts/ci/hydra-target-cleanup-emit.ts": 2,
     "scripts/ci/hydra-target-wire-or-retire-emit.ts": 2,
     "scripts/qa/pair-graduation.ts": 1,
-    "src/api/autopilot-board.ts": 2,
+    "src/api/autopilot-board.ts": 6,
     "src/glm/drainer-driver.ts": 2,
     "src/glm/finish.ts": 6,
     "src/operator-actions/registry.ts": 6,
     "src/pattern-memory/escalation.ts": 2,
+    "src/scheduler/chores/glm-eligibility-sweep.ts": 1,
     "src/scheduler/chores/wiring-liveness-dark-alarm.ts": 1
   }
 }

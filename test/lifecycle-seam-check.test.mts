@@ -14,6 +14,7 @@ const {
   LIFECYCLE_STATE_NAMES,
   REPO_ROOT,
   checkLifecycleRatchet,
+  isExemptPath,
   isSurface,
   loadLifecycleBaseline,
   parseLifecycleBaseline,
@@ -225,6 +226,117 @@ describe("lifecycle-seam-check: detection grammar (synthetic)", () => {
 
   test("block comments keep line numbers stable", () => {
     assert.deepEqual(ts('/* a\n b\n c */\naddIssueLabel(1, "needs-qa");'), [4]);
+  });
+});
+
+describe("lifecycle-seam-check: evasion forms (#5367)", () => {
+  const md = (text: string) => scanFileSites("docs/operator-playbooks/hydra-x.md", text);
+  const ts = (text: string) => scanFileSites("src/x.ts", text);
+
+  test("short -l on a create is a site (shell and argv forms)", () => {
+    assert.deepEqual(md("gh issue create --title t -l needs-triage"), [1]);
+    assert.deepEqual(md("gh issue create --title t -l=needs-triage"), [1]);
+    assert.deepEqual(ts('run("gh", ["issue", "create", "-l", "needs-triage"]);'), [1]);
+  });
+
+  test("short -l outside create context, with a flag literal, or as a lookalike token is not a site", () => {
+    assert.deepEqual(md("gh pr list -l needs-triage"), []);
+    assert.deepEqual(md("ls -l $dir"), []);
+    assert.deepEqual(md("gh issue create --title t -l glm-withhold"), []);
+    assert.deepEqual(md("gh issue create --title t -label needs-triage"), []);
+    assert.deepEqual(md("gh issue create --title t -lx needs-triage"), []);
+  });
+
+  test("python f-string placeholder operand is a site", () => {
+    assert.deepEqual(md('cmd = f"gh issue edit 5 --add-label {state}"'), [1]);
+    assert.deepEqual(md("gh issue edit 5 --add-label={x}"), [1]);
+  });
+
+  test("flag literal followed by + concatenation is a site", () => {
+    assert.deepEqual(ts('run("gh", ["issue", "edit", "5", "--add-label " + x]);'), [1]);
+  });
+
+  test("flag= literal followed by + concatenation is a site", () => {
+    assert.deepEqual(ts('run("gh", ["issue", "edit", "5", "--add-label=" + x]);'), [1]);
+  });
+
+  test("short -l literal followed by + concatenation is a site in create context only", () => {
+    assert.deepEqual(ts("run(\"gh issue create \" + '-l ' + x);"), [1]);
+    assert.deepEqual(ts("run(\"gh pr list \" + '-l ' + x);"), []);
+  });
+
+  test("trailing = with no operand is a site; a flag operand after = is not", () => {
+    assert.deepEqual(ts('run("gh", ["issue", "edit", "5", "--add-label=", x]);'), [1]);
+    assert.deepEqual(ts('run("gh", ["issue", "edit", "5", "--add-label=glm-withhold"]);'), []);
+    assert.deepEqual(md("gh issue edit 5 --add-label="), [1]);
+  });
+
+  test("TS: generic call is a site", () => {
+    assert.deepEqual(ts('await addIssueLabel<void>(1, "needs-qa");'), [1]);
+    assert.deepEqual(ts('await addIssueLabel<void>(1, "glm-withhold");'), []);
+  });
+
+  test("TS: optional call is a site", () => {
+    assert.deepEqual(ts('await addIssueLabel?.(1, "needs-qa");'), [1]);
+  });
+
+  test("TS: member optional call is a site", () => {
+    assert.deepEqual(ts("await deps.editIssueLabels?.(1, labels);"), [1]);
+  });
+
+  test("TS: import-as alias is a wrapper of the seam function", () => {
+    assert.deepEqual(ts('import { addIssueLabel as addLabel } from "./x";\naddLabel(1, "needs-qa");'), [2]);
+    assert.deepEqual(ts('import { addIssueLabel as addLabel } from "./x";\naddLabel(1, "glm-withhold");'), []);
+  });
+
+  test("TS: ??-fallback alias is a wrapper of the seam function", () => {
+    const src = 'const addLabel = deps.addIssueLabel ?? addIssueLabel;\naddLabel(5, "needs-qa");';
+    assert.deepEqual(ts(src), [2]);
+    assert.deepEqual(ts('const addLabel = deps.addIssueLabel ?? addIssueLabel;\naddLabel(5, "glm-withhold");'), []);
+  });
+
+  test("TS: arrow wrapper calls are sites and the pass-through definition counts", () => {
+    const src = "const w = (n: number, l: string) => addIssueLabel(n, l);\nw(1, \"needs-qa\");";
+    assert.deepEqual(ts(src), [1, 2]);
+  });
+
+  test("TS: a direct-call result binding is not a wrapper", () => {
+    assert.deepEqual(ts('const res = await addIssueLabel(1, "glm-withhold");\nres(1, "needs-qa");'), []);
+  });
+
+  test("isExemptPath: only the three transport files are exempt under src/github", () => {
+    for (const f of ["src/github/issues.ts", "src/github/issue-actions.ts", "src/github/prs.ts"]) {
+      assert.equal(isExemptPath(f), true, f);
+    }
+    for (const f of [
+      "src/github/labels.ts",
+      "src/github/gh.ts",
+      "scripts/claude-hooks/gh-label-delete-guard.sh",
+    ]) {
+      assert.equal(isExemptPath(f), false, f);
+    }
+  });
+
+  test("documented non-count: python %-formatting", () => {
+    assert.deepEqual(md('cmd = "gh issue edit 5 --add-label %s" % x'), []);
+  });
+
+  test("documented non-count: arity-changing wrapper calls (definition line still counts)", () => {
+    const src = 'const w = (l: string) => addIssueLabel(ISSUE, l);\nw("needs-qa");';
+    assert.deepEqual(ts(src), [1]);
+  });
+
+  test("documented non-count: two-hop aliases and re-exports", () => {
+    assert.deepEqual(ts('import { addIssueLabel as a } from "./x";\nconst b = a;\nb(1, "needs-qa");'), []);
+    assert.deepEqual(ts('export { addIssueLabel as x } from "./y";\nx(1, "needs-qa");'), []);
+  });
+
+  test("documented non-count: flag assembled from a separately-bound string", () => {
+    assert.deepEqual(ts('const FLAG = "--add-label";\nrun("gh", ["issue", "edit", "5", FLAG, "needs-qa"]);'), []);
+  });
+
+  test("documented non-count: .github/workflows is not a scan surface", () => {
+    assert.equal(isSurface(".github/workflows/x.yml"), false);
   });
 });
 
