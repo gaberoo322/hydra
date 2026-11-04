@@ -153,6 +153,38 @@ export function readHeartbeatMtimeEpoch(path: string): number | null {
   }
 }
 
+/**
+ * Bounded slot-events read (INV-4): resolves null (shield off) on timeout or
+ * reader failure, logging a WARN either way so a Redis hang is distinguishable
+ * from an empty stream. Reader and timeout are injectable for tests.
+ */
+export function createSlotEventsReader<T>(
+  read: () => Promise<T>,
+  timeoutMs: number,
+  log: (line: string) => void,
+): () => Promise<T | null> {
+  return async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    try {
+      const timeout = new Promise<null>((resolve) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          resolve(null);
+        }, timeoutMs);
+      });
+      const r = await Promise.race([read(), timeout]);
+      if (timedOut) log(`hydra-autopilot-watchdog: WARN slot-events read timed out after ${timeoutMs}ms; activity unknown, shield off`);
+      return r;
+    } catch (err) {
+      log(`hydra-autopilot-watchdog: WARN slot-events read failed (${err instanceof Error ? err.message : String(err)}); activity unknown, shield off`);
+      return null;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+}
+
 export function createProductionWedgeDeps(log: (line: string) => void): WedgeDeps {
   return {
     host: {
@@ -185,22 +217,7 @@ export function createProductionWedgeDeps(log: (line: string) => void): WedgeDep
         }
       },
     },
-    slotEvents: {
-      async readRecent() {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          const timeout = new Promise<null>((resolve) => {
-            timer = setTimeout(() => resolve(null), SLOT_EVENTS_READ_TIMEOUT_MS);
-          });
-          return await Promise.race([readRecentSlotEvents(), timeout]);
-        } catch (err) {
-          log(`hydra-autopilot-watchdog: WARN slot-events read failed (${err instanceof Error ? err.message : String(err)}); activity unknown, shield off`);
-          return null;
-        } finally {
-          if (timer !== undefined) clearTimeout(timer);
-        }
-      },
-    },
+    slotEvents: { readRecent: createSlotEventsReader(readRecentSlotEvents, SLOT_EVENTS_READ_TIMEOUT_MS, log) },
     clock: { nowEpochS: () => Math.floor(Date.now() / 1000) },
     log,
   };

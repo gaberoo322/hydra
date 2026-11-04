@@ -58,6 +58,7 @@ export function staleThresholdsJson(): {
   wedgeAgeS: number;
   stalledDispatchAgeS: number;
   schedulerTickStaleS: number;
+  subagentShieldCeilingS: number;
 } {
   return {
     wedgeKillS: WATCHDOG_WEDGE_KILL_THRESHOLD_S,
@@ -65,5 +66,6 @@ export function staleThresholdsJson(): {
     wedgeAgeS: WEDGE_AGE_THRESHOLD_S,
     stalledDispatchAgeS: STALLED_DISPATCH_AGE_S,
     schedulerTickStaleS: SCHEDULER_TICK_STALE_S,
+    subagentShieldCeilingS: WATCHDOG_SUBAGENT_SHIELD_CEILING_S,
   };
 }

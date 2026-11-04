@@ -34,6 +34,7 @@ import {
   type LivenessDeps,
   type WedgeDeps,
   type WedgeState,
+  createSlotEventsReader,
 } from "../src/watchdog/ports.ts";
 import {
   WATCHDOG_STARTUP_GRACE_S,
@@ -51,6 +52,7 @@ import {
   SCHEDULER_TICK_STALE_S,
   STALLED_DISPATCH_AGE_S,
   WATCHDOG_KILL_GRACE_S,
+  WATCHDOG_SUBAGENT_SHIELD_CEILING_S,
   WATCHDOG_WEDGE_KILL_THRESHOLD_S,
   WEDGE_AGE_THRESHOLD_S,
   staleThresholdsJson,
@@ -685,6 +687,24 @@ describe("watchdog liveness verdicts (decideLiveness / runLiveness over fake por
     assert.ok(!/from "node:child_process"/.test(ports), "ports.ts must not import node:child_process");
     const cli = readFileSync(WATCHDOG_CLI, "utf-8");
     assert.ok(!/from "node:child_process"/.test(cli), "the CLI must not import node:child_process");
+  });
+
+  test("thresholds JSON exposes subagentShieldCeilingS and keeps the kill threshold/grace unchanged", () => {
+    const t = staleThresholdsJson();
+    assert.equal(t.subagentShieldCeilingS, WATCHDOG_SUBAGENT_SHIELD_CEILING_S);
+    assert.equal(t.wedgeKillS, 1500);
+    assert.equal(t.killGraceS, 30);
+  });
+
+  test("createSlotEventsReader: reader failure and timeout both yield null with a WARN; success passes through", async () => {
+    const logs: string[] = [];
+    const log = (l: string) => logs.push(l);
+    assert.equal(await createSlotEventsReader(async () => 7, 50, log)(), 7);
+    assert.deepEqual(logs, []);
+    assert.equal(await createSlotEventsReader(async () => { throw new Error("redis down"); }, 50, log)(), null);
+    assert.match(logs[0], /WARN slot-events read failed \(redis down\)/);
+    assert.equal(await createSlotEventsReader(() => new Promise<number>(() => {}), 20, log)(), null);
+    assert.match(logs[1], /WARN slot-events read timed out after 20ms/);
   });
 
   test("thresholds JSON carries schedulerTickStaleS and the tick predicate is strict >", () => {
