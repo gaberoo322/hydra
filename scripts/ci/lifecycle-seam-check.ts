@@ -83,22 +83,34 @@ function operandIsSite(operand: string, identifierIsVariable: boolean): boolean 
   return STATE_TOKEN_RE.test(operand);
 }
 
+/** `gh api` as a shell command or an argv list (`"gh", ["api", ...]`). */
+const GH_API_RE = /\bgh\b["'\s,[]*\bapi\b|["']api["']\s*,/;
 const FLAG_RE =
   /--(?:add-|remove-)?label(?:(["']?\s*,\s*)|[ =]+)(?:"([^"]*)"|'([^']*)'|([^\s"')\]]+))/g;
 /** Bare `--label` only writes state on create commands (elsewhere it is a list filter). */
-const CREATE_CMD_RE = /\bgh\s+(?:issue|pr)\s+create\b/;
+const CREATE_CMD_RE = /\bcreate\b/;
+/** A bare `--label` is a create-time write when `create` appears within 300 chars before it (same or earlier line). */
+function inCreateContext(text: string, idx: number): boolean {
+  return CREATE_CMD_RE.test(text.slice(Math.max(0, idx - 300), idx));
+}
 
 /** Join backslash-continued physical lines; each logical line keeps its first physical line number. */
-function logicalLines(text: string): Array<{ line: number; text: string }> {
+function logicalLines(text: string): Array<{ line: number; text: string; offset: number }> {
   const phys = text.split(/\r?\n/);
-  const out: Array<{ line: number; text: string }> = [];
+  const out: Array<{ line: number; text: string; offset: number }> = [];
+  let acc = 0;
+  const physOffsets = phys.map((p) => {
+    const o = acc;
+    acc += p.length + 1;
+    return o;
+  });
   for (let i = 0; i < phys.length; i++) {
     const start = i;
     let cur = phys[i]!;
     while (/\\\s*$/.test(cur) && i + 1 < phys.length) {
       cur = cur.replace(/\\\s*$/, " ") + phys[++i]!.trimStart();
     }
-    out.push({ line: start + 1, text: cur });
+    out.push({ line: start + 1, text: cur, offset: physOffsets[start]! });
   }
   return out;
 }
@@ -106,10 +118,10 @@ function logicalLines(text: string): Array<{ line: number; text: string }> {
 /** Line grammar for markdown / shell / python / mjs. Returns 1-based site line numbers. */
 export function scanTextSites(text: string): number[] {
   const sites: number[] = [];
-  for (const { line: lineNo, text: line } of logicalLines(text)) {
+  for (const { line: lineNo, text: line, offset } of logicalLines(text)) {
     let hit = false;
     for (const m of line.matchAll(FLAG_RE)) {
-      if (m[0].startsWith("--label") && !CREATE_CMD_RE.test(line)) continue;
+      if (m[0].startsWith("--label") && !inCreateContext(text, offset + (m.index ?? 0))) continue;
       const argList = m[1] !== undefined; // `"--add-label", x` list form
       const quoted = m[2] ?? m[3];
       const operand = quoted ?? m[4] ?? "";
@@ -122,15 +134,17 @@ export function scanTextSites(text: string): number[] {
         if (part && operandIsSite(part, bareIdentifier)) hit = true;
       }
     }
-    if (!hit && /\bgh\s+api\b/.test(line) && (/\/labels\b/.test(line) || /labels\[\]=/.test(line))) {
+    if (!hit && GH_API_RE.test(line) && (/\/labels\b/.test(line) || /labels\[\]=/.test(line))) {
       const isWrite =
-        /(?:-X|--method)[ =]+(?:POST|PUT|PATCH|DELETE)\b/i.test(line) || /-[fF]\s*["']?labels\[\]=/.test(line);
+        /(?:-X|--method)["',= ]+(?:POST|PUT|PATCH|DELETE)\b/i.test(line) ||
+        /(?:-[fF]|--field|--raw-field)["',= ]*["']?labels\[\]=/.test(line) ||
+        /--input\b/.test(line);
       if (isWrite) {
         const operands: string[] = [];
-        const tail = /\/labels\/?([^\s"']*)/.exec(line);
+        const tail = /\/labels\/?([^\s"',]*)/.exec(line);
         if (tail && tail[1]) operands.push(tail[1]);
-        for (const f of line.matchAll(/labels\[\]=([^\s"']+)/g)) operands.push(f[1]!);
-        if (operands.some((o) => operandIsSite(o, false))) hit = true;
+        for (const f of line.matchAll(/labels\[\]=([^\s"',]+)/g)) operands.push(f[1]!);
+        if (/--input\b/.test(line) || operands.some((o) => operandIsSite(o, false))) hit = true;
       }
     }
     if (hit) sites.push(lineNo);
@@ -139,7 +153,7 @@ export function scanTextSites(text: string): number[] {
   const seen = new Set(sites);
   for (const m of text.matchAll(FLAG_RE)) {
     if (m[1] === undefined || !m[0].includes("\n")) continue; // single-line matches handled above
-    if (m[0].startsWith("--label") && !/\bcreate\b/.test(text.slice(Math.max(0, m.index! - 300), m.index!))) continue;
+    if (m[0].startsWith("--label") && !inCreateContext(text, m.index!)) continue;
     const quoted = m[2] ?? m[3];
     const operand = quoted ?? m[4] ?? "";
     const isSite =
@@ -219,7 +233,8 @@ function isShadowedBinding(src: string, name: string): boolean {
   const n = name.replace(/\$/g, "\\$");
   const destructure = new RegExp(`\\b(?:const|let|var)\\s*[{\\[][^=;]*(?<![\\w$])${n}(?![\\w$])[^=;]*[}\\]]\\s*=`);
   if (destructure.test(src)) return true;
-  const params = new RegExp(`\\(([^()]*(?<![\\w$.])${n}(?![\\w$])[^()]*)\\)\\s*(?::[^{=;]+)?(?:=>|\\{)`, "g");
+  if (new RegExp(`(?<![\\w$.])${n}\\s*=>`).test(src)) return true; // bare single-parameter arrow
+  const params = new RegExp(`\\(((?:[^()]|\\([^()]*\\))*(?<![\\w$.])${n}(?![\\w$])(?:[^()]|\\([^()]*\\))*)\\)\\s*(?::[^{=;]+)?(?:=>|\\{)`, "g");
   for (const m of src.matchAll(params)) {
     const before = src.slice(Math.max(0, m.index! - 8), m.index!);
     if (/\b(?:if|while|for|switch|catch|with)\s*$/.test(before)) continue; // control flow, not params
@@ -276,7 +291,8 @@ export function scanTsSites(source: string): number[] {
     for (const prop of splitTop(second.replace(/^\{/, "").replace(/\}\s*$/, ""))) {
       const kv = /^\s*(add|remove)\s*:\s*([\s\S]*)$/.exec(prop);
       if (!kv) {
-        if (/^\s*(add|remove)\s*$/.test(prop)) sites.push(line); // shorthand
+        // shorthand, spread, computed key or any other shape: unresolvable, fail closed
+        if (prop.trim()) sites.push(line);
         continue;
       }
       const val = kv[2]!.trim();
@@ -293,7 +309,7 @@ export function scanTsSites(source: string): number[] {
 /** Sites in one file (exempt paths and non-surfaces yield none). */
 export function scanFileSites(relPath: string, text: string): number[] {
   if (isExemptPath(relPath)) return [];
-  if (relPath.endsWith(".ts")) {
+  if (TS_LIKE_RE.test(relPath)) {
     // Call grammar plus the text grammar over comment-stripped source (argv-style `gh` shell-outs).
     // The call grammar counts per site; text-grammar lines it already covers are not double-counted.
     const calls = scanTsSites(text);
@@ -322,12 +338,14 @@ export interface LifecycleBaseline {
 
 const SKIP_DIRS = new Set(["node_modules", ".git", ".worktrees", "dist"]);
 
-function isSurface(rel: string): boolean {
+const TS_LIKE_RE = /\.(?:ts|mts|cts|tsx|js|cjs|mjs)$/;
+
+export function isSurface(rel: string): boolean {
   if (rel.startsWith("docs/operator-playbooks/") || rel.startsWith("docs/agents/")) {
     return rel.endsWith(".md");
   }
-  if (rel.startsWith("src/")) return rel.endsWith(".ts");
-  if (rel.startsWith("scripts/")) return /\.(?:ts|mjs|sh|py)$/.test(rel);
+  if (rel.startsWith("src/")) return TS_LIKE_RE.test(rel);
+  if (rel.startsWith("scripts/")) return TS_LIKE_RE.test(rel) || /\.(?:sh|py)$/.test(rel);
   return false;
 }
 

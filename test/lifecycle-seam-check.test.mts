@@ -14,6 +14,7 @@ const {
   LIFECYCLE_STATE_NAMES,
   REPO_ROOT,
   checkLifecycleRatchet,
+  isSurface,
   loadLifecycleBaseline,
   parseLifecycleBaseline,
   scanFileSites,
@@ -179,6 +180,47 @@ describe("lifecycle-seam-check: detection grammar (synthetic)", () => {
     assert.deepEqual(ts(destructured), [4]);
     // sibling: an `if (label) {` control-flow paren is not a binding, so the flag const still resolves
     assert.deepEqual(ts('const label = "glm-withhold";\nif (label) {\n  addIssueLabel(1, label);\n}'), []);
+  });
+
+  test("TS: gh api argv and --field/--raw-field/--input forms are sites; a GET or flag label is not", () => {
+    assert.deepEqual(ts('run("gh", ["api", "-X", "POST", "repos/x/issues/5/labels", "-f", "labels[]=needs-qa"]);'), [1]);
+    assert.deepEqual(ts('run("gh", ["api", "repos/x/issues/5/labels", "--field", "labels[]=needs-qa"]);'), [1]);
+    assert.deepEqual(ts('run("gh", ["api", "repos/x/issues/5/labels", "--input", "body.json"]);'), [1]);
+    assert.deepEqual(md("gh api repos/x/issues/5/labels --raw-field labels[]=needs-qa"), [1]);
+    assert.deepEqual(ts('run("gh", ["api", "-X", "POST", "repos/x/issues/5/labels", "-f", "labels[]=glm-withhold"]);'), []);
+    assert.deepEqual(ts('run("gh", ["api", "repos/x/issues/5/labels"]);'), []);
+  });
+
+  test("TS: a bare single-parameter arrow shadows a module const", () => {
+    const arrow = 'const label = "glm-withhold";\nxs.map(label => addIssueLabel(1, label));';
+    assert.deepEqual(ts(arrow), [2]);
+    assert.deepEqual(ts('const label = "glm-withhold";\nxs.map(async label => addIssueLabel(1, label));'), [2]);
+    const dflt = 'const label = "glm-withhold";\nconst f = (a = g(1), label) => addIssueLabel(1, label);';
+    assert.deepEqual(ts(dflt), [2]);
+    // sibling: an unrelated arrow does not shadow
+    assert.deepEqual(ts('const label = "glm-withhold";\nxs.map(x => x);\naddIssueLabel(1, label);'), []);
+  });
+
+  test("scan surface covers .mts/.cts/.tsx/.js/.cjs/.mjs under src/ and scripts/; sites are found in them", () => {
+    for (const f of ["src/a.mts", "src/a.tsx", "src/a.js", "src/a.cjs", "scripts/a.mts", "scripts/a.cjs", "scripts/a.js"]) {
+      assert.equal(isSurface(f), true, f);
+      assert.deepEqual(scanFileSites(f, 'addIssueLabel(1, "needs-qa");'), [1], f);
+    }
+    assert.equal(isSurface("src/a.json"), false);
+    assert.equal(isSurface("test/a.mts"), false);
+  });
+
+  test("single-line argv --label on a create is a site; --label on a list is not", () => {
+    assert.deepEqual(ts('run("gh", ["issue", "create", "--label", "needs-triage"]);'), [1]);
+    assert.deepEqual(ts('run("gh", ["issue", "create", "--label=needs-triage"]);'), [1]);
+    assert.deepEqual(ts('run("gh", ["issue", "list", "--label", "needs-triage"]);'), []);
+    assert.deepEqual(ts('run("gh", ["issue", "create", "--label", "glm-withhold"]);'), []);
+  });
+
+  test("TS: editIssueLabels spread or computed property fails closed; add/remove arrays of flags do not", () => {
+    assert.deepEqual(ts("editIssueLabels(1, { ...opts });"), [1]);
+    assert.deepEqual(ts("editIssueLabels(1, { [k]: [v] });"), [1]);
+    assert.deepEqual(ts('editIssueLabels(1, { add: ["glm-withhold"] });'), []);
   });
 
   test("block comments keep line numbers stable", () => {
