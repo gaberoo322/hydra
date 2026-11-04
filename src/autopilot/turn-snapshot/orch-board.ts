@@ -189,8 +189,8 @@ export function needsQaNumbers(read: GhJsonRead): Classified<readonly number[]> 
  * backstop; with `ready-for-agent` it stays excluded via that entry), and
  * `meta-friction` (the backstop's motivating example). Producer/category
  * tags (`design-qa`, `cleanup-scan`, `architecture-scan`, `tool-scout`),
- * PR-only labels (`operator-approved`, `glm-authored`, `merge-ready`,
- * `ready-for-merge`, `no-rebase`) and modifier tags (`keep-open`,
+ * PR-only labels (`operator-approved`, `glm-authored`,
+ * `no-rebase`) and modifier tags (`keep-open`,
  * `design-concept-exempt`, `glm-eligible`, `glm-withhold`, …) always ride
  * alongside a lifecycle label, so they are audited out, not added.
  */

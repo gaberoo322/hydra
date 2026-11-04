@@ -157,8 +157,6 @@
         ],
         "redis-keys": [
           "alerts",
-          "anchorAbandonmentCount",
-          "anchorPermSkip",
           "anchorPriorFailures",
           "anchorProcessing",
           "anchorReframeQueue",
@@ -1481,6 +1479,7 @@
         "0020",
         "0024",
         "0029",
+        "0032",
         "0033",
         "0034",
         "0045"

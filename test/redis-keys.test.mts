@@ -55,8 +55,6 @@ describe("redisKeys naming convention", () => {
     ["task", redisKeys.task("task-1")],
     ["taskEvidence", redisKeys.taskEvidence("task-1", "merged")],
     ["depsHeld", redisKeys.depsHeld("dep-1")],
-    ["anchorAbandonmentCount", redisKeys.anchorAbandonmentCount("ref-1")],
-    ["anchorPermSkip", redisKeys.anchorPermSkip("ref-1")],
     ["metrics", redisKeys.metrics("cycle-1")],
     ["summaryReport", redisKeys.summaryReport("manual-planner-abc")],
     ["memoryPatterns", redisKeys.memoryPatterns("planner")],
@@ -151,8 +149,6 @@ describe("redisKeys snapshot", () => {
     assert.equal(redisKeys.memoryPatterns("planner"), "hydra:memory:planner:patterns");
     assert.equal(redisKeys.reflection("test-ref"), "hydra:reflections:test-ref");
     assert.equal(redisKeys.backlogLane("queued"), "hydra:backlog:lane:queued");
-    assert.equal(redisKeys.anchorAbandonmentCount("ref"), "hydra:anchors:abandonment-count:ref");
-    assert.equal(redisKeys.anchorPermSkip("ref"), "hydra:anchors:perm-skip:ref");
     assert.equal(redisKeys.stream("notifications"), "hydra:notifications");
   });
 });
