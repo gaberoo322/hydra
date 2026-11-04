@@ -1,0 +1,1 @@
+- test: add blocking shrink-only lifecycle seam ratchet against direct state-label writes (#5311)
