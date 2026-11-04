@@ -127,7 +127,8 @@
         "qaVerdictRecheck": {
           "ok": false,
           "reason": "required-contexts-unreadable"
-        }
+        },
+        "dirtyFixFailPr": null
       }
     }
   }

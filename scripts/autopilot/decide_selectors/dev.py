@@ -11,6 +11,7 @@ from __future__ import annotations
 from decide_base import (
     RED_FORWARD_FIX_CAP,
     _dev_resume_pick_signal,
+    _dirty_fix_fail_pr,
     _issue_pr_branch_signal,
     _orch_anchor_signal,
     _red_forward_fix_attempt_count,
@@ -169,7 +170,7 @@ def _select_slot_dev_orch(
         # the merged head). The Turn Snapshot's collector owns the predicate
         # (pure here, ADR-0007); the field must name THIS pin's PR, so a signal
         # event that overrode the pin without the field falls to conflict-only.
-        two_phase = ts.pr_number(state, events, "orch_dirty_forward_fix_fail_pr") == fix_pr
+        two_phase = _dirty_fix_fail_pr(state, events) == fix_pr
         if two_phase:
             return make_dispatch(
                 cls,

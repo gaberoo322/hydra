@@ -310,6 +310,14 @@ def _dev_resume_pick_signal(
     return _issue_pr_branch_signal(state, events, "orch_dev_resume_pick")
 
 
+def _dirty_fix_fail_pr(state: dict, events: list[dict]) -> int | None:
+    """The `orch_dirty_forward_fix_fail_pr` signal (issue #5253): the dirty
+    pick's PR number iff a QA FAIL is pending at its pre-merge head (the
+    two-phase arm), else None. Absent / malformed -> None (conflict-only).
+    Pure (ADR-0007)."""
+    return ts.pr_number(state, events, "orch_dirty_forward_fix_fail_pr")
+
+
 def _red_resume_prs(state: dict, events: list[dict]) -> set[int]:
     """The `orch_prs_red_resume` set (issue #5058): resume-pick candidates that
     qualified ONLY through the red-CI arm — the scope of RED_FORWARD_FIX_CAP.

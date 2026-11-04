@@ -36,7 +36,8 @@
   },
   "expected": {
     "stderrNotes": [
-      "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)"
+      "orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)",
+      "orch dirty-fix QA-FAIL-at-head read unavailable (no host port) for PR 4775 - conflict-only arm (issue #5253, INV-2)"
     ],
     "ghCalls": [
       [
@@ -131,7 +132,8 @@
         "qaVerdictRecheck": {
           "ok": true,
           "value": []
-        }
+        },
+        "dirtyFixFailPr": null
       }
     }
   }
