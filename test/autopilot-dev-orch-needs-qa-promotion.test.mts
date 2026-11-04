@@ -652,6 +652,53 @@ describe("reap.py reconcile-seeded → promote an uncollected dev_orch anchor (i
     }
   });
 
+  // Issue #5350: build the slot with the REAL deriveInflightSlotSeed from a
+  // registry row that carries the sentinel anchor — no deposit file, no
+  // hand-written `anchor` key — and assert both lifecycle states promote.
+  function realSeed(anchor: string | undefined): Record<string, unknown> {
+    const row = {
+      sessionId: HASH,
+      skill: "hydra-dev",
+      dispatchId: "worktree-agent-x-t1-dev_orch",
+      startedAt: "2026-11-03T00:00:00.000Z",
+      ...(anchor ? { anchor } : {}),
+    };
+    const code =
+      `import("./src/autopilot/run-lifecycle-state.ts").then((m) => {` +
+      `process.stdout.write(JSON.stringify(m.deriveInflightSlotSeed([${JSON.stringify(row)}]).dev_orch));});`;
+    const r = spawnSync(process.execPath, ["--no-warnings", "--experimental-strip-types", "-e", code], {
+      encoding: "utf-8",
+      cwd: join(import.meta.dirname, ".."),
+    });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout);
+  }
+
+  for (const labelName of ["needs-dev-resume", "in-progress"]) {
+    test(`PROMOTE (#5350): ledger-seeded slot carries anchor, NO deposit, ${labelName} → needs-qa`, () => {
+      const tmp = makeTmp();
+      try {
+        seededState(tmp, realSeed("issue-5149"));
+        const r = run(
+          tmp,
+          { STUB_PR_LIST_JSON: closesPr, STUB_ISSUE_VIEW_JSON: JSON.stringify({ labels: [{ name: labelName }] }) },
+          null,
+        );
+        assert.equal(r.status, 0);
+        assert.ok(
+          editCalls(tmp).some((c) => c.startsWith("issue edit 5149") && c.includes("--add-label needs-qa")),
+          ghCalls(tmp).join("\n"),
+        );
+      } finally {
+        rmSync(tmp.dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("seed without a registry anchor stays anchorless (#5350 back-compat)", () => {
+    assert.equal("anchor" in realSeed(undefined), false);
+  });
+
   test("no-op: deposit absent → anchor unresolvable, no gh call, exit 0", () => {
     const tmp = makeTmp();
     try {

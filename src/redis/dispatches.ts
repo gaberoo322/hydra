@@ -254,6 +254,8 @@ export interface SubagentDispatch {
   currentStep?: string;
   issueRef?: string;
   prRef?: string;
+  /** Pinned anchor ref (`issue-N`) carried by the dispatch sentinel (#5350); NOT `issueRef`. */
+  anchor?: string;
 }
 
 /**
@@ -280,6 +282,7 @@ export async function registerSubagentDispatch(
   if (dispatch.currentStep !== undefined) fields.currentStep = dispatch.currentStep;
   if (dispatch.issueRef !== undefined) fields.issueRef = dispatch.issueRef;
   if (dispatch.prRef !== undefined) fields.prRef = dispatch.prRef;
+  if (dispatch.anchor !== undefined) fields.anchor = dispatch.anchor;
 
   const startedEpoch = epochFromIsoOrNow(dispatch.startedAt);
 
@@ -357,5 +360,6 @@ export function projectSubagentRow(
   if (row.currentStep) dispatch.currentStep = row.currentStep;
   if (row.issueRef) dispatch.issueRef = row.issueRef;
   if (row.prRef) dispatch.prRef = row.prRef;
+  if (row.anchor) dispatch.anchor = row.anchor;
   return dispatch;
 }
