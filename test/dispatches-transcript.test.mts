@@ -148,7 +148,7 @@ describe("findSubagentTranscriptPathByAgentId (#5325)", () => {
   test("finds the child under any project/session dir", async () => {
     assert.equal(await findSubagentTranscriptPathByAgentId("abcdef0123456789a", deps), hit);
   });
-  test("malformed, traversal and wrong-length ids return null before any scan (INV-8)", async () => {
+  test("malformed or traversal ids return null before any scan", async () => {
     resetAgentScanCache();
     let calls = 0;
     const counting = {
@@ -538,7 +538,7 @@ describe("GET /dispatches/:dispatchId/transcript — route contract", () => {
     assert.equal(body.code, "dispatch-not-found");
   });
 
-  test("UUID-shaped unregistered id never takes the disk fallback (planted subagent file)", async () => {
+  test("UUID-shaped unregistered id never takes the disk fallback", async () => {
     const other = "99999999-2222-4333-8444-555555555555";
     resetAgentScanCache();
     const subDir = join(tmpRoot, ".claude", "projects", "-home-gabe-hydra", UUID, "subagents");
