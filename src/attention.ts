@@ -101,6 +101,8 @@ import {
   type IssueRow,
 } from "./github/issues.ts";
 import { projectHitlGrillLane } from "./autopilot/work-projections.ts";
+import { HOLD_EXIT_ALERT_WINDOW_DAYS } from "./lifecycle/index.ts";
+import { listHoldExits, type ListHoldExitsResult } from "./redis/lifecycle-journal.ts";
 import { settledOr } from "./settled-fold.ts";
 import {
   loadDismissed as loadDismissedLedger,
@@ -195,6 +197,12 @@ export interface AttentionFeedDeps {
   readShaDrift?: () => Promise<DeployDriftReading>;
   /** Rank-5 hitl-grill lane read (issue #4626). Default: listIssuesByLabel(HITL_GRILL_LABEL, {repo}). */
   readHitlGrillIssues?: () => Promise<IssueReadResult<IssueRow>>;
+  /**
+   * Rank-2 `hold-exit` line read (ADR-0047 Decision 3, #5313): unsanctioned
+   * human-hold exits journaled at or after `sinceMs`. Default:
+   * src/redis/lifecycle-journal.ts listHoldExits.
+   */
+  readHoldExits?: (repo: string, sinceMs: number) => Promise<ListHoldExitsResult>;
   /** Override the operator-action registry (tests only). */
   registry?: readonly OperatorActionEntry[];
 }
@@ -230,14 +238,24 @@ export async function getAttentionFeed(
   // Never throws — every source degrades independently.
   const readLane =
     deps.readHitlGrillIssues ?? (() => listIssuesByLabel(HITL_GRILL_LABEL, { repo }));
-  const [waitingResult, targetRead, stalledResult, frictionResult, machineStopped, laneResult] =
-    await Promise.all([
+  const readHoldExits = deps.readHoldExits ?? listHoldExits;
+  const holdSinceMs = nowDate.getTime() - HOLD_EXIT_ALERT_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const [
+    waitingResult,
+    targetRead,
+    stalledResult,
+    frictionResult,
+    machineStopped,
+    laneResult,
+    holdExitResult,
+  ] = await Promise.all([
       settle(() => waitingFn({ ...aggregatorDeps, now: nowDate })),
       readTargetItems(deps, nowDate),
       settle(() => stalledFn({ githubRepo: repo })),
       settle(() => frictionFn(aggregatorDeps)),
       readMachineStopped(deps, nowDate),
       settle(readLane),
+      settle(() => readHoldExits(repo, holdSinceMs)),
     ]);
 
   const emptyWaiting = (): IssuesWaitingResult => ({
@@ -298,6 +316,12 @@ export async function getAttentionFeed(
     note("waiting-on-you", "issues-waiting");
   }
 
+  // Rank 2 `hold-exit` (#5313): a failed read names `hold-exits` (bucket
+  // UNKNOWN), never an asserted zero.
+  const holdExits = readHoldExitDrafts(holdExitResult, repo);
+  evidence.get("waiting-on-you")!.scanned += holdExits.scanned;
+  if (holdExits.failed) note("waiting-on-you", "hold-exits");
+
   // Rank 3: the configured Target (or the archived aggregate row).
   evidence.get("target-items")!.scanned = targetRead.scanned;
   for (const err of targetRead.sourceErrors) note("target-items", err);
@@ -324,6 +348,7 @@ export async function getAttentionFeed(
     ...waiting.items.map((issue) =>
       waitingDraft(issue, "waiting-on-you", repo, waiting.thresholds, undefined),
     ),
+    ...holdExits.drafts,
     ...targetRead.drafts,
     ...repetitionItems(friction).map((item): Draft => ({
       key: "repetition:hits",
@@ -635,6 +660,56 @@ function waitingDraft(
     context: { repo, number: issue.number, kind: "issue" },
     base,
   };
+}
+
+interface HoldExitRead {
+  drafts: Draft[];
+  scanned: number;
+  failed: boolean;
+}
+
+/**
+ * Rank 2 `hold-exit` (ADR-0047 Decision 3, #5313): ONE draft per issue — its
+ * latest unsanctioned human-hold exit. The id carries the exit timestamp so a
+ * later exit is a new episode a prior dismissal cannot hide. No gh call: the
+ * url is built from repo + number.
+ */
+function readHoldExitDrafts(
+  result: PromiseSettledResult<ListHoldExitsResult>,
+  repo: string,
+): HoldExitRead {
+  if (result.status === "rejected") {
+    logger.error({ err: result.reason }, "[attention] hold-exit read threw");
+    return { drafts: [], scanned: 0, failed: true };
+  }
+  const read = result.value;
+  if (read.ok !== true) {
+    logger.error({ error: read.error }, "[attention] hold-exit read failed");
+    return { drafts: [], scanned: 0, failed: true };
+  }
+  const latest = new Map<number, (typeof read.exits)[number]>();
+  for (const exit of read.exits) {
+    const prior = latest.get(exit.issue);
+    if (prior === undefined || exit.ts >= prior.ts) latest.set(exit.issue, exit);
+  }
+  const drafts = [...latest.values()]
+    .sort((a, b) => a.ts - b.ts)
+    .map((exit): Draft => ({
+      key: "waiting-on-you:hold-exit",
+      context: { repo, number: exit.issue, kind: "issue" },
+      base: {
+        id: `hold-exit-issue-${exit.issue}-${exit.ts}`,
+        signal: "blocked-on-human",
+        title: `#${exit.issue} left ${exit.from ?? "(unknown)"} via ${exit.source}`,
+        url: `https://github.com/${repo}/issues/${exit.issue}`,
+        dismissed: false,
+        observedValue: 1,
+        threshold: 1,
+        thresholdLabel: "human-hold exit outside operator-route",
+        crossedAt: new Date(exit.ts).toISOString(),
+      },
+    }));
+  return { drafts, scanned: read.exits.length, failed: false };
 }
 
 interface ParkedLane {

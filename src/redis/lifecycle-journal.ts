@@ -88,6 +88,77 @@ export async function appendLifecycleEntry(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Hold-exit index (ADR-0047 Decision 3, issue #5313)
+// ---------------------------------------------------------------------------
+
+export const HOLD_EXIT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function holdExitIndexKey(repo: string): string {
+  return `hydra:lifecycle:hold-exits:${repo}`;
+}
+
+export interface HoldExitRecord {
+  issue: number;
+  ts: number;
+  from: string | null;
+  to: string | null;
+  source: JournalSource;
+  actor: string;
+}
+
+/**
+ * Index one unsanctioned human-hold exit: `ZADD` (score = entry ts) and drop
+ * members older than 30d. The journal LIST itself stays RPUSH+LTRIM only.
+ */
+export async function recordHoldExit(
+  repo: string,
+  issue: number,
+  entry: LifecycleJournalEntry,
+): Promise<JournalWriteResult> {
+  try {
+    const r = getRedisConnection();
+    const key = holdExitIndexKey(repo);
+    const member: HoldExitRecord = {
+      issue,
+      ts: entry.ts,
+      from: entry.from,
+      to: entry.to,
+      source: entry.source,
+      actor: entry.actor,
+    };
+    await r.zadd(key, entry.ts, JSON.stringify(member));
+    await r.zremrangebyscore(key, "-inf", entry.ts - HOLD_EXIT_RETENTION_MS);
+    return { ok: true };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] recordHoldExit failed");
+    return fail("recordHoldExit", err);
+  }
+}
+
+export type ListHoldExitsResult =
+  | { ok: true; exits: HoldExitRecord[] }
+  | { ok: false; error: string };
+
+/** Hold exits with `ts >= sinceMs`, oldest first; malformed members are skipped (logged). */
+export async function listHoldExits(repo: string, sinceMs: number): Promise<ListHoldExitsResult> {
+  try {
+    const raw: string[] = await getRedisConnection().zrangebyscore(holdExitIndexKey(repo), sinceMs, "+inf");
+    const exits: HoldExitRecord[] = [];
+    for (const row of raw) {
+      try {
+        exits.push(JSON.parse(row) as HoldExitRecord);
+      } catch (parseErr) {
+        logger.error({ err: parseErr }, "[lifecycle-journal] skipping malformed hold-exit member");
+      }
+    }
+    return { ok: true, exits };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] listHoldExits failed");
+    return fail("listHoldExits", err);
+  }
+}
+
 export type ReadJournalResult =
   | { ok: true; entries: LifecycleJournalEntry[] }
   | { ok: false; error: string };

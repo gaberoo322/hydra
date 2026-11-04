@@ -1658,6 +1658,35 @@ const RAW_ENTRIES = [
     doc: HYDRA_REVIEW_DOC,
   },
   {
+    key: "waiting-on-you:hold-exit",
+    recommended: {
+      kind: "terminal-skill",
+      command: "gh issue view {number} --repo {repo} --comments",
+      label: "Check who moved it",
+      preconditions: [],
+      consequence: "reads the issue and its comments to see who took it out of a human-hold state and why",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Hand off to the review loop",
+        preconditions: [],
+        consequence: "walks it alongside other operator-attention issues",
+      },
+      {
+        kind: "terminal-skill",
+        command: "gh api repos/{repo}/issues/{number}/timeline",
+        label: "Read the label timeline",
+        preconditions: [],
+        consequence: "shows exactly which actor removed the human-hold label and when",
+      },
+    ],
+    rationale:
+      "a human-hold state (ready-for-human / parked / hitl-grill / needs-info) was exited outside the operator-route board path (ADR-0047 D3) — the operator is the only sanctioned exit, so an agent or external move needs a look.",
+    doc: HYDRA_REVIEW_DOC,
+  },
+  {
     key: "waiting-on-you:blocked-live",
     recommended: {
       kind: "terminal-skill",

@@ -8,7 +8,7 @@
  *
  * The eight functions here (`deriveWorkLane`, `toWorkQueueRow`,
  * `compareWorkQueueRows`, `evaluatePromoteEligibility`,
- * `computeRelabelTransitions`, `parseParkReason`, `toHitlGrillRow`,
+ * `parseParkReason`, `toHitlGrillRow`,
  * `compareHitlGrillRows`) plus the `PromoteEligibility` type are the
  * side-effect-free projections behind the /work page's three reads and four
  * board actions (issues #4010, #4028): operator-lane resolution, queue row
@@ -34,12 +34,10 @@
 
 import {
   WORK_QUEUE_LANES,
-  RELABEL_TARGETS,
   HITL_GRILL_LABEL,
   type WorkQueueLane,
   type WorkQueueRow,
   type BoardActionReason,
-  type RelabelTarget,
   type HitlGrillRow,
 } from "../schemas/autopilot-board.ts";
 import type { IssueRow, IssueQueryOptions, IssueReadResult } from "../github/issues.ts";
@@ -252,17 +250,6 @@ export function evaluatePromoteEligibility(
     };
   }
   return { eligible: true };
-}
-
-/** The label transitions a relabel performs: lanes to drop + whether to add. */
-export function computeRelabelTransitions(
-  currentLabels: readonly string[],
-  target: RelabelTarget,
-): { remove: string[]; add: boolean } {
-  const remove = RELABEL_TARGETS.filter(
-    (lane) => lane !== target && currentLabels.includes(lane),
-  );
-  return { remove, add: !currentLabels.includes(target) };
 }
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,8 @@
  * deliberately deferred follow-on, since adding them would fork this function).
  */
 
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Router } from "express";
 
 import {
@@ -61,20 +63,17 @@ import {
   listOpenIssues,
   listIssuesByLabel,
   listIssuesBySearch,
-  addIssueLabel,
   ISSUE_JSON_FIELDS,
   type IssueRow,
   type IssueReadResult,
-  type IssueLabelWriteResult,
 } from "../github/issues.ts";
 import {
-  removeIssueLabel,
-  closeIssue,
-  reopenIssue,
-  viewIssue,
-  type IssueViewResult,
-  type IssueActionWriteResult,
-} from "../github/issue-actions.ts";
+  defaultSeamDeps,
+  operatorAdvance,
+  operatorReopen,
+  type AdvanceResult,
+  type SeamDeps,
+} from "../lifecycle/index.ts";
 import { fetchOpenBlockerNumbers } from "../github/blockers.ts";
 import { getTargetGithubRepo } from "../target-config.ts";
 import {
@@ -90,7 +89,6 @@ import {
   toWorkQueueRow,
   compareWorkQueueRows,
   evaluatePromoteEligibility,
-  computeRelabelTransitions,
   projectHitlGrillLane,
 } from "../autopilot/work-projections.ts";
 import { getGlmDrainerLiveness } from "../redis/autopilot.ts";
@@ -114,6 +112,8 @@ import { logger } from "../logger.ts";
 // The orchestrator board label vocabulary lives in the pure `src/board-labels.ts`
 // leaf (issue #3484); the projection leaf is the sole consumer of it now.
 // ---------------------------------------------------------------------------
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /** `--json` field set this projection needs — the canonical set plus `updatedAt`. */
 const BOARD_ISSUE_FIELDS = `${ISSUE_JSON_FIELDS},updatedAt`;
@@ -197,32 +197,13 @@ export interface AutopilotBoardRouterDeps {
    * Injected so the lane read is testable without a live `gh`.
    */
   readHitlGrillIssues?: () => Promise<IssueReadResult<IssueRow>>;
-  // ---- Issue-lifecycle action seams (issue #4010, ADR-0034 §7) ------------
-  // Every default is the real GitHub seam; injectable so tests drive the
-  // refusal / verification matrix without a live `gh`.
-  /** Single-issue re-read — the verify-after-write read (default `viewIssue`). */
-  view?: (issueNumber: number) => Promise<IssueViewResult>;
-  /** Add-one-label write (default `addIssueLabel` — issues.ts's ONE surface). */
-  addLabel?: (
-    issueNumber: number,
-    label: string,
-  ) => Promise<IssueLabelWriteResult>;
-  /** Remove-one-label write (default the issue-actions leaf). */
-  removeLabel?: (
-    issueNumber: number,
-    label: string,
-  ) => Promise<IssueActionWriteResult>;
+  // ---- Issue-lifecycle action seam (issue #4010, ADR-0034 §7; #5313) ------
   /**
-   * Close write (default the issue-actions leaf). The optional `reason` rides
-   * `gh issue close --reason` (issue #4028: Dismiss closes `"not planned"`);
-   * `undefined` preserves the plain close.
+   * The lifecycle writer seam the four board write routes ride (ADR-0047
+   * Decision 3). Defaults to the real gh + Redis + git-tracked-mode seam;
+   * injectable so tests drive the refusal / verification matrix offline.
    */
-  close?: (
-    issueNumber: number,
-    reason?: string,
-  ) => Promise<IssueActionWriteResult>;
-  /** Reopen write (default the issue-actions leaf). */
-  reopen?: (issueNumber: number) => Promise<IssueActionWriteResult>;
+  seam?: SeamDeps;
 }
 
 export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) {
@@ -461,24 +442,17 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
     });
   });
 
-  // ---- The issue-lifecycle actions (issue #4010, ADR-0034 §7) -------------
+  // ---- The issue-lifecycle actions (issue #4010, ADR-0034 §7; #5313) ------
   //
-  // Shared write spine: ONE pre-read → action-specific gate → writes →
-  // RE-READ → report the OBSERVED post-state. A write whose verification read
-  // fails, or whose observed state does not match, reports `write-unverified`
-  // — never success. Every content outcome (refusal included) is a 200 result
-  // object (never-throw); only a malformed body is a 400
-  // schema-validation-failed.
-  const view = deps.view ?? ((n: number) => viewIssue(n));
-  const addLabel =
-    deps.addLabel ?? ((n: number, label: string) => addIssueLabel(n, label));
-  const removeLabel =
-    deps.removeLabel ??
-    ((n: number, label: string) => removeIssueLabel(n, label));
-  const closeWrite =
-    deps.close ??
-    ((n: number, reason?: string) => closeIssue(n, reason));
-  const reopenWrite = deps.reopen ?? ((n: number) => reopenIssue(n));
+  // Every write rides the lifecycle seam's operator entry points
+  // (`operatorAdvance` / `operatorReopen`, journal source `operator-route`):
+  // re-read -> operator-table legality -> ONE write -> re-read verify ->
+  // journal. A write whose verification read fails, or whose observed state
+  // does not match, reports `write-unverified` — never success. Every content
+  // outcome (refusal included) is a 200 result object (never-throw); only a
+  // malformed body is a 400 schema-validation-failed.
+  let seamDeps: SeamDeps | undefined = deps.seam;
+  const getSeam = (): SeamDeps => (seamDeps ??= defaultSeamDeps(REPO_ROOT));
 
   function actionResponse(
     action: BoardActionResponse["action"],
@@ -494,63 +468,44 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
     } as BoardActionResponse;
   }
 
-  /** A gate outcome: a full refusal response, or the writes to perform. */
-  type ActionGate =
-    | { refuse: BoardActionResponse }
-    | { writes: Array<() => Promise<{ ok: boolean; code?: string; stderr?: string }>> };
-
-  /**
-   * Run one action through the verify spine. `gate` receives the freshly read
-   * pre-state row and either refuses (returning the full response — its
-   * reason/detail surface verbatim) or returns the write thunks to perform.
-   */
-  async function runVerifiedAction(opts: {
-    action: BoardActionResponse["action"];
-    issue: number;
-    gate: (row: IssueRow) => Promise<ActionGate>;
-    verify: (post: IssueRow) => boolean;
-    verifyMissDetail: (post: IssueRow) => string;
-  }): Promise<BoardActionResponse> {
-    const viewed = await view(opts.issue);
-    if (viewed.ok === false) {
-      return actionResponse(opts.action, opts.issue, {
+  /** Map a seam result onto the (unchanged) BoardActionResponse contract. */
+  function toActionResponse(
+    action: BoardActionResponse["action"],
+    issue: number,
+    res: AdvanceResult,
+  ): BoardActionResponse {
+    if (res.ok === true) {
+      return actionResponse(action, issue, { ok: true, verified: res.observed });
+    }
+    const code = res.code;
+    if (code === "fetch-failed") {
+      return actionResponse(action, issue, {
         reason: "read-failed",
-        detail: `pre-write re-read failed (${viewed.code}) — no write attempted`,
+        detail: "pre-write re-read failed — no write attempted",
       });
     }
-    const gate = await opts.gate(viewed.row);
-    if ("refuse" in gate) return gate.refuse;
-    for (const write of gate.writes) {
-      const writeRes = await write();
-      if (writeRes.ok === false) {
-        logger.error(
-          { action: opts.action, issue: opts.issue, code: writeRes.code },
-          "[autopilot/board-action] write failed",
-        );
-        return actionResponse(opts.action, opts.issue, {
-          reason: "write-failed",
-          detail: `gh write failed (${writeRes.code ?? "gh-failed"}${writeRes.stderr ? `: ${writeRes.stderr.slice(0, 200)}` : ""})`,
-        });
-      }
+    if (code.startsWith("write-failed:")) {
+      logger.error({ action, issue, code }, "[autopilot/board-action] write failed");
+      return actionResponse(action, issue, {
+        reason: "write-failed",
+        detail: `gh write failed (${code.slice("write-failed:".length) || "gh-failed"})`,
+      });
     }
-    // ADR-0034 §7: no action renders success it has not verified — the
-    // follow-up re-read is mandatory, and its observed state is the result.
-    const post = await view(opts.issue);
-    if (post.ok === false) {
-      return actionResponse(opts.action, opts.issue, {
+    if (code === "write-unverified") {
+      return actionResponse(action, issue, {
         reason: "write-unverified",
-        detail: `write accepted but post-write re-read failed (${post.code}) — state unconfirmed`,
+        detail: "post-write re-read does not show the expected state — state unconfirmed",
       });
     }
-    if (!opts.verify(post.row)) {
-      return actionResponse(opts.action, opts.issue, {
-        reason: "write-unverified",
-        detail: opts.verifyMissDetail(post.row),
+    if (code === "issue-closed") {
+      return actionResponse(action, issue, {
+        reason: "closed",
+        detail: "issue is closed — reopen it before changing its lifecycle state",
       });
     }
-    return actionResponse(opts.action, opts.issue, {
-      ok: true,
-      verified: { state: post.row.state, labels: post.row.labels },
+    return actionResponse(action, issue, {
+      reason: "lifecycle-refused",
+      detail: code,
     });
   }
 
@@ -562,97 +517,64 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
       return res.status(400).json(schemaValidationError(parsed.error));
     }
     const { issue } = parsed.data;
+    const seam = getSeam();
 
-    const result = await runVerifiedAction({
-      action: "promote",
-      issue,
-      gate: async (row) => {
-        // Resolve the issue's OPEN strict blockers via the existing
-        // resolveOpenBlockers, applied to the row AS IT WOULD BE post-promote
-        // (the resolver only resolves rows that can count toward
-        // ready_for_agent — the promoted row is exactly that row). glm
-        // partition stays inactive here: resolve liberally, never skip.
-        const resolveBlockers =
-          deps.resolveOpenBlockers ??
-          ((rows: readonly IssueRow[]) => resolveOpenBlockers(rows));
-        const prospectiveRow: IssueRow = {
-          ...row,
-          labels: [...row.labels, "ready-for-agent"],
-        };
-        const openBlockers = await resolveBlockers([prospectiveRow]);
-        const eligibility = evaluatePromoteEligibility(row, openBlockers);
-        // `=== false`, not `!eligible`: tsconfig runs strict:false, where a
-        // truthiness check does not narrow the discriminated union (same
-        // reason issues.ts carries isIssueLabelWriteFailure).
-        if (eligibility.eligible === false) {
-          return {
-            refuse: actionResponse("promote", issue, {
-              reason: eligibility.reason,
-              detail: eligibility.detail,
-            }),
-          };
-        }
-        // The add side rides issues.ts's ONE proven write surface. When the
-        // pre-write view shows the hitl-grill park label, the grill verdict
-        // strips it in the SAME write set (issue #4028): one write-then-verify
-        // round trip, never a second network call that could half-succeed and
-        // leave the park label lingering alongside ready-for-agent. Queued
-        // only when present, so a plain promote's writes stay byte-identical.
-        const writes: Array<
-          () => Promise<IssueLabelWriteResult | IssueActionWriteResult>
-        > = [() => addLabel(issue, "ready-for-agent")];
-        if (row.labels.includes(HITL_GRILL_LABEL)) {
-          writes.push(() => removeLabel(issue, HITL_GRILL_LABEL));
-        }
-        return { writes };
-      },
-      verify: (post) =>
-        post.labels.includes("ready-for-agent") &&
-        !post.labels.includes(HITL_GRILL_LABEL),
-      verifyMissDetail: (post) =>
-        `post-write state does not show ready-for-agent free of hitl-grill (labels: ${post.labels.join(", ") || "none"})`,
-    });
-    return res.json(result);
+    // Route-level eligibility gate (scope section, open blockers, already
+    // ready) runs BEFORE the seam write; the seam owns the state change
+    // (it also strips hitl-grill / every other state label in the same edit).
+    const viewed = await seam.view(issue);
+    if (viewed.ok === false) {
+      return res.json(
+        actionResponse("promote", issue, {
+          reason: "read-failed",
+          detail: `pre-write re-read failed (${viewed.code}) — no write attempted`,
+        }),
+      );
+    }
+    const row = viewed.row;
+    // Resolve the issue's OPEN strict blockers via the existing
+    // resolveOpenBlockers, applied to the row AS IT WOULD BE post-promote
+    // (the resolver only resolves rows that can count toward ready_for_agent).
+    // glm partition stays inactive here: resolve liberally, never skip.
+    const resolveBlockers =
+      deps.resolveOpenBlockers ??
+      ((rows: readonly IssueRow[]) => resolveOpenBlockers(rows));
+    const prospectiveRow: IssueRow = {
+      ...row,
+      labels: [...row.labels, "ready-for-agent"],
+    };
+    const openBlockers = await resolveBlockers([prospectiveRow]);
+    const eligibility = evaluatePromoteEligibility(row, openBlockers);
+    // `=== false`, not `!eligible`: tsconfig runs strict:false, where a
+    // truthiness check does not narrow the discriminated union.
+    if (eligibility.eligible === false) {
+      return res.json(
+        actionResponse("promote", issue, {
+          reason: eligibility.reason,
+          detail: eligibility.detail,
+        }),
+      );
+    }
+    const result = await operatorAdvance(
+      { issue, to: "ready-for-agent", actor: "board:promote" },
+      seam,
+    );
+    return res.json(toActionResponse("promote", issue, result));
   });
 
   // POST /autopilot/board/relabel — immediate-tier (no confirm, ADR-0034 §7).
-  // Lane move: drop the other relabel-lane labels, add the target.
+  // Lane move: the seam strips EVERY other state label and adds the target.
   router.post("/autopilot/board/relabel", async (req, res) => {
     const parsed = BoardRelabelActionSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return res.status(400).json(schemaValidationError(parsed.error));
     }
     const { issue, label } = parsed.data;
-
-    const result = await runVerifiedAction({
-      action: "relabel",
-      issue,
-      gate: async (row) => {
-        if (row.state === "CLOSED") {
-          return {
-            refuse: actionResponse("relabel", issue, {
-              reason: "closed",
-              detail: "issue is closed — reopen it before relabelling",
-            }),
-          };
-        }
-        const transitions = computeRelabelTransitions(row.labels, label);
-        return {
-          writes: [
-            ...transitions.remove.map(
-              (lane) => () => removeLabel(issue, lane),
-            ),
-            ...(transitions.add ? [() => addLabel(issue, label)] : []),
-          ],
-        };
-      },
-      verify: (post) =>
-        post.labels.includes(label) &&
-        computeRelabelTransitions(post.labels, label).remove.length === 0,
-      verifyMissDetail: (post) =>
-        `post-write labels do not resolve to lane "${label}" (labels: ${post.labels.join(", ") || "none"})`,
-    });
-    return res.json(result);
+    const result = await operatorAdvance(
+      { issue, to: label, actor: "board:relabel" },
+      getSeam(),
+    );
+    return res.json(toActionResponse("relabel", issue, result));
   });
 
   // POST /autopilot/board/close — immediate-tier. The optional `reason` (issue
@@ -666,15 +588,11 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
       return res.status(400).json(schemaValidationError(parsed.error));
     }
     const { issue, reason } = parsed.data;
-    const result = await runVerifiedAction({
-      action: "close",
-      issue,
-      gate: async () => ({ writes: [() => closeWrite(issue, reason)] }),
-      verify: (post) => post.state === "CLOSED",
-      verifyMissDetail: (post) =>
-        `post-write state is ${post.state || "(unset)"} — close unconfirmed`,
-    });
-    return res.json(result);
+    const result = await operatorAdvance(
+      { issue, to: "closed", closeReason: reason, actor: "board:close" },
+      getSeam(),
+    );
+    return res.json(toActionResponse("close", issue, result));
   });
 
   // POST /autopilot/board/reopen — immediate-tier.
@@ -684,15 +602,8 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
       return res.status(400).json(schemaValidationError(parsed.error));
     }
     const { issue } = parsed.data;
-    const result = await runVerifiedAction({
-      action: "reopen",
-      issue,
-      gate: async () => ({ writes: [() => reopenWrite(issue)] }),
-      verify: (post) => post.state === "OPEN",
-      verifyMissDetail: (post) =>
-        `post-write state is ${post.state || "(unset)"} — reopen unconfirmed`,
-    });
-    return res.json(result);
+    const result = await operatorReopen({ issue, actor: "board:reopen" }, getSeam());
+    return res.json(toActionResponse("reopen", issue, result));
   });
 
   return router;

@@ -89,6 +89,7 @@ export const BUCKET_LINES: Readonly<Record<Bucket, readonly string[]>> = Object.
     "stale-blocked",
     "needs-info",
     "blocked-live",
+    "hold-exit",
   ]),
   "target-items": Object.freeze([
     "ready-for-human",
