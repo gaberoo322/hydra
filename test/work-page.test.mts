@@ -777,14 +777,13 @@ describe("POST /autopilot/board/close + /reopen — immediate-tier state writes"
     assert.equal(res._body.reason, "write-unverified");
   });
 
-  test("close of an already-closed issue → refused as closed, no write", async () => {
+  test("close of an already-closed issue → idempotent ok, no write", async () => {
     const s = seamWith([issue({ number: 5, state: "CLOSED" })]);
     const router = createAutopilotBoardRouter({ seam: s.deps });
     const handler = findHandler(router, "POST", "/autopilot/board/close");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 5 } }), res);
-    assert.equal(res._body.ok, false);
-    assert.equal(res._body.reason, "closed");
+    assert.equal(res._body.ok, true);
     assert.equal(s.close.calls.length, 0);
   });
 

@@ -516,7 +516,12 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
 
   const before = await deps.view(issue);
   if (before.ok === false) return refuse("fetch-failed", mode, null);
-  if (before.row.state === "CLOSED") return refuse("issue-closed", mode, "closed");
+  if (before.row.state === "CLOSED") {
+    // Closing an already-closed issue stays idempotent (the pre-seam spine
+    // accepted it): ok with the observed state, no write, no journal.
+    if (to === "closed") return { ok: true, issue, from: "closed", to, mode, observed: observedOf(before) };
+    return refuse("issue-closed", mode, "closed");
+  }
 
   const stateLabels = stateLabelsOf(before.row.labels);
   const from = stateLabels.length > 0 ? stateLabels.join(",") : null;
@@ -583,6 +588,7 @@ export async function operatorReopen(
 
   const before = await deps.view(issue);
   if (before.ok === false) return fail("fetch-failed", null, false);
+  if (before.row.state !== "CLOSED") return fail("issue-not-closed", null, false);
   if (!deps.reopen) return fail("write-failed:no-reopen", "closed", false);
   const write = await deps.reopen(issue);
   if (write.ok === false) return fail(`write-failed:${write.code}`, "closed", false);

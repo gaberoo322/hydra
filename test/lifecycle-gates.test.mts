@@ -488,6 +488,15 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
     assert.deepEqual(many.h.state.labels.sort(), ["blocked", "bug"]);
   });
 
+  test("closing an already-closed issue is idempotent ok: no write, no journal, no expire", async () => {
+    const o = operatorHarness(["hitl-grill"], "enforce", { state: "CLOSED" });
+    const res = await operatorAdvance({ issue: 10, to: "closed", actor: "board:close" }, o.h.deps);
+    assert.equal(res.ok, true);
+    assert.equal(o.h.closes.length, 0);
+    assert.equal(o.h.journal.length, 0);
+    assert.deepEqual(o.h.expired, []);
+  });
+
   test("close performs no label write and retains labels; a closed issue is refused", async () => {
     const o = operatorHarness(["hitl-grill"], "enforce");
     const res = await operatorAdvance({ issue: 10, to: "closed", closeReason: "not-planned", actor: "board:close" }, o.h.deps);
@@ -519,6 +528,15 @@ describe("operatorReopen (#5313 INV-8)", () => {
     assert.equal(o.h.journal[0].from, "closed");
     assert.equal(o.h.journal[0].to, "needs-triage");
     assert.equal(o.h.journal[0].source, "operator-route");
+  });
+
+  test("reopening an already-OPEN issue is refused issue-not-closed with no write, persist or transition journal", async () => {
+    const o = operatorHarness(["needs-triage"], "enforce");
+    const res = await operatorReopen({ issue: 10, actor: "board:reopen" }, o.h.deps);
+    assert.equal((res as any).code, "issue-not-closed");
+    assert.deepEqual(o.reopens, []);
+    assert.deepEqual(o.persisted, []);
+    assert.equal(o.h.journal.some((e) => e.kind === "transition"), false);
   });
 
   test("a reopen the re-read does not confirm is write-unverified", async () => {
