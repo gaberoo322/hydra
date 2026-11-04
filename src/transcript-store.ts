@@ -317,7 +317,7 @@ export function resetAgentScanCache(): void {
  * resolved through {@link resolveSubagentTranscriptPath}. The agent hash is
  * unique, so scan two levels — `<root>/<projectDir>/<sessionDir>/subagents/
  * agent-<agentId>.jsonl` — and return the first hit. Bounded by directory
- * count, not file count. Only Agent-tool-child shaped (lowercase hex) ids are
+ * count, not file count. Only exactly-17-lowercase-hex ids (isHarnessAgentId) are
  * accepted: a UUID would expose top-level operator sessions.
  *
  * READ-ONLY, never throws; an unreadable directory at either level is skipped.
