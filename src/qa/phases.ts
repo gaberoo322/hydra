@@ -244,6 +244,16 @@ export async function runQaVerdictPhase(
       const readStage = f.rolloutStage ? await f.rolloutStage() : null;
       if (readStage === null) degraded.push("rollout-stage");
       const stage: ReviewerCommitsValue = readStage ?? "off";
+      // Stage off (the shipped default) answers BEFORE any diff / path / body
+      // read: the switched-off path adds no gh call to any verdict.
+      if (stage !== "A" && stage !== "A+B") {
+        return {
+          ...decideReviewerCommit({
+            stage, tier: i.tier, changedPaths: [], diff: "", blocking: i.blocking, outOfScope: null,
+          }),
+          degraded,
+        };
+      }
       const diff = await resolveFact(i.diff, async () => (f.prDiff ? f.prDiff(i.pr) : null), "diff", "", degraded);
       const changedPaths = await resolveFact(
         i.changedPaths, () => f.changedFiles(i.pr), "changed-paths", UNREADABLE_CHANGED_PATHS, degraded);

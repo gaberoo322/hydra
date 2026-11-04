@@ -458,8 +458,10 @@ export interface ReviewerCommitDecision {
   action: "none" | "commit-a";
   reason: ReviewerCommitReason;
   detail: string;
-  /** Class-A repo paths the reviewer commit may touch (empty unless commit-a). */
-  paths: string[];
+  /** Class-A paths named by BLOCKING findings: every one must end up staged (empty unless commit-a). */
+  blockingPaths: string[];
+  /** Class-A paths named only by low follow-ups: an optional subset may ride along, none is required. */
+  followUpPaths: string[];
   /** True when a blocking finding is located at the PR body. */
   bodyFix: boolean;
 }
@@ -484,7 +486,8 @@ const noReviewerCommit = (reason: ReviewerCommitReason, detail: string): Reviewe
   action: "none",
   reason,
   detail,
-  paths: [],
+  blockingPaths: [],
+  followUpPaths: [],
   bodyFix: false,
 });
 
@@ -522,7 +525,7 @@ export function parseFilesOutOfScope(body: string): string[] {
 }
 
 function isOutOfScope(path: string, outOfScope: readonly string[]): boolean {
-  return outOfScope.some((o) => (o.endsWith("/") ? path.startsWith(o) : path === o));
+  return outOfScope.some((o) => (o.endsWith("/") ? path.startsWith(o) : path === o || path.startsWith(`${o}/`)));
 }
 
 /**
@@ -551,7 +554,8 @@ export function decideReviewerCommit(input: ReviewerCommitInput): ReviewerCommit
     if (input.blocking.length === 0) {
       return noReviewerCommit("no-blocking", "no blocking finding to repair");
     }
-    const paths: string[] = [];
+    const blockingPaths: string[] = [];
+    const followUpPaths: string[] = [];
     let bodyFix = false;
     const consider = (location: string, blocking: boolean): ReviewerCommitDecision | null => {
       if (/^\s*pr body\s*$/i.test(String(location ?? ""))) {
@@ -570,7 +574,8 @@ export function decideReviewerCommit(input: ReviewerCommitInput): ReviewerCommit
           ? noReviewerCommit("out-of-scope", `${path} is listed under Files out of scope or the scope is unreadable`)
           : null;
       }
-      if (!paths.includes(path)) paths.push(path);
+      const into = blocking ? blockingPaths : followUpPaths;
+      if (!into.includes(path)) into.push(path);
       return null;
     };
     for (const f of input.blocking) {
@@ -578,15 +583,91 @@ export function decideReviewerCommit(input: ReviewerCommitInput): ReviewerCommit
       if (refusal) return refusal;
     }
     for (const f of input.followUps ?? []) consider(f.location, false);
+    // A path that is also blocking is required, never merely optional.
+    const optionalPaths = followUpPaths.filter((p) => !blockingPaths.includes(p));
     return {
       action: "commit-a",
       reason: "class-a-fixable",
-      detail: `every blocking finding is class A (${paths.length} path(s)${bodyFix ? " + PR body" : ""})`,
-      paths,
+      detail: `every blocking finding is class A (${blockingPaths.length} path(s)${bodyFix ? " + PR body" : ""})`,
+      blockingPaths,
+      followUpPaths: optionalPaths,
       bodyFix,
     };
   } catch (err) {
     console.error("[round-action] decideReviewerCommit failed; refusing the commit path:", err);
     return noReviewerCommit("decision-error", "decision threw; fail closed");
   }
+}
+
+
+// ---------------------------------------------------------------------------
+// Deterministic re-verify helpers for playbook step 9.4 (issue #5267, round-3
+// fix-forward). Pure; scripts/ci/qa-commit-checks.ts is their only caller.
+// ---------------------------------------------------------------------------
+
+const SECTION_HEADING = /^#{1,6}\s/;
+const FILES_IN_SCOPE_HEADING = /^#{1,6}\s+files in scope\b/i;
+
+function splitBodySections(body: string): Array<{ heading: string; lines: string[] }> {
+  const lines = String(body ?? "").replace(/\r\n/g, "\n").replace(/\s+$/, "").split("\n");
+  const sections: Array<{ heading: string; lines: string[] }> = [{ heading: "", lines: [] }];
+  for (const line of lines) {
+    if (SECTION_HEADING.test(line)) sections.push({ heading: line.trim(), lines: [] });
+    else (sections[sections.length - 1] as { lines: string[] }).lines.push(line);
+  }
+  return sections;
+}
+
+/**
+ * INV-6: a reviewer body fix may only ADD bullets under `## Files in scope`.
+ * Every other section (Files out of scope, reconciliation, Closes-ref...) must
+ * be byte-identical, the heading sequence unchanged, and the original lines of
+ * Files in scope must survive in order. Never throws.
+ */
+export function checkBodyScopeEdit(orig: string, next: string): { ok: boolean; reason: string } {
+  try {
+    const a = splitBodySections(orig);
+    const b = splitBodySections(next);
+    if (a.length !== b.length || a.some((s, i) => s.heading !== (b[i] as { heading: string }).heading)) {
+      return { ok: false, reason: "section headings changed" };
+    }
+    for (let i = 0; i < a.length; i++) {
+      const x = a[i] as { heading: string; lines: string[] };
+      const y = b[i] as { heading: string; lines: string[] };
+      if (!FILES_IN_SCOPE_HEADING.test(x.heading)) {
+        if (x.lines.join("\n") !== y.lines.join("\n")) {
+          return { ok: false, reason: `section ${JSON.stringify(x.heading || "(preamble)")} was edited` };
+        }
+        continue;
+      }
+      let j = 0;
+      for (const line of y.lines) {
+        if (j < x.lines.length && line === x.lines[j]) j++;
+        else if (!/^\s*$/.test(line) && !/^\s*[-*]\s+\S/.test(line)) {
+          return { ok: false, reason: `Files in scope gained a non-bullet line ${JSON.stringify(line)}` };
+        }
+      }
+      if (j !== x.lines.length) return { ok: false, reason: "an original Files in scope line was removed or edited" };
+    }
+    return { ok: true, reason: "only Files in scope bullets were added" };
+  } catch (err) {
+    console.error("[round-action] checkBodyScopeEdit failed; refusing:", err);
+    return { ok: false, reason: "check threw; fail closed" };
+  }
+}
+
+/**
+ * True when a unified `-U0` diff of ONE file has a hunk touching or adjacent
+ * to `line` (old or new side). A non-positive / non-integer line is false.
+ */
+export function diffHasHunkNearLine(diffU0: string, line: number): boolean {
+  if (!Number.isInteger(line) || line < 1) return false;
+  for (const m of String(diffU0 ?? "").matchAll(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm)) {
+    const oa = Number(m[1]);
+    const ol = m[2] === undefined ? 1 : Number(m[2]);
+    const na = Number(m[3]);
+    const nl = m[4] === undefined ? 1 : Number(m[4]);
+    if ((line >= oa - 1 && line <= oa + ol) || (line >= na - 1 && line <= na + nl)) return true;
+  }
+  return false;
 }

@@ -9,6 +9,8 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import {
+  checkBodyScopeEdit,
+  diffHasHunkNearLine,
   decideReviewerCommit,
   parseFilesOutOfScope,
   reviewerCommitLocationPath,
@@ -50,11 +52,9 @@ function input(over: Partial<ReviewerCommitInput> = {}): ReviewerCommitInput {
 
 describe("decideReviewerCommit: gating and fences", () => {
   test("stage off returns none with reason stage-off", () => {
-    for (const stage of ["off"] as const) {
-      const d = decideReviewerCommit(input({ stage }));
-      assert.equal(d.action, "none");
-      assert.equal(d.reason, "stage-off");
-    }
+    const d = decideReviewerCommit(input({ stage: "off" }));
+    assert.equal(d.action, "none");
+    assert.equal(d.reason, "stage-off");
   });
 
   test("stage A and A+B both permit the commit path", () => {
@@ -101,14 +101,15 @@ describe("decideReviewerCommit: all-or-nothing eligibility", () => {
     );
     assert.equal(d.action, "commit-a");
     assert.equal(d.bodyFix, true);
-    assert.deepEqual(d.paths, ["docs/guide.md", ".changelog/5267-x.md"]);
+    assert.deepEqual(d.blockingPaths, ["docs/guide.md", ".changelog/5267-x.md"]);
   });
 
   test("one blocking finding in src/ makes the whole round none", () => {
     const d = decideReviewerCommit(input({ blocking: [{ location: "docs/guide.md:3" }, { location: "src/widget.ts:1" }] }));
     assert.equal(d.action, "none");
     assert.equal(d.reason, "ineligible-finding");
-    assert.deepEqual(d.paths, []);
+    assert.deepEqual(d.blockingPaths, []);
+    assert.deepEqual(d.followUpPaths, []);
   });
 
   test("playbooks, ADRs, CODING_STANDARDS.md and class-B test files are not class A", () => {
@@ -132,19 +133,27 @@ describe("decideReviewerCommit: all-or-nothing eligibility", () => {
   test("a PR-body-only fix does not need a readable scope", () => {
     const d = decideReviewerCommit(input({ blocking: [{ location: "PR body" }], outOfScope: null }));
     assert.equal(d.action, "commit-a");
-    assert.deepEqual(d.paths, []);
+    assert.deepEqual(d.blockingPaths, []);
   });
 
   test("no blocking findings returns none", () => {
     assert.equal(decideReviewerCommit(input({ blocking: [] })).reason, "no-blocking");
   });
 
-  test("low follow-ups at class-A locations ride along; others never affect eligibility", () => {
+  test("low follow-ups at class-A locations are returned SEPARATELY from blocking paths; others never affect eligibility", () => {
     const d = decideReviewerCommit(
-      input({ followUps: [{ location: "docs/other.md:1" }, { location: "src/widget.ts:9" }] }),
+      input({ followUps: [{ location: "docs/other.md:1" }, { location: "src/widget.ts:9" }, { location: "docs/guide.md:8" }] }),
     );
     assert.equal(d.action, "commit-a");
-    assert.deepEqual(d.paths, ["docs/guide.md", "docs/other.md"]);
+    assert.deepEqual(d.blockingPaths, ["docs/guide.md"]);
+    // docs/guide.md is already required; src/widget.ts is not class A.
+    assert.deepEqual(d.followUpPaths, ["docs/other.md"]);
+  });
+
+  test("a directory out-of-scope entry without a trailing slash covers its children", () => {
+    assert.equal(decideReviewerCommit(input({ outOfScope: ["docs"] })).reason, "out-of-scope");
+    // sibling shape: a different path sharing the prefix is still in scope
+    assert.equal(decideReviewerCommit(input({ outOfScope: ["doc"] })).action, "commit-a");
   });
 
   test("never throws on hostile input", () => {
@@ -165,6 +174,37 @@ describe("location and scope parsing", () => {
   test("parseFilesOutOfScope reads the section only", () => {
     const body = "## Files in scope\n\n- `a.ts`\n\n## Files out of scope\n\n- `docs/x.md`\n- src/y.ts\n\n## Other\n\n- `z.ts`\n";
     assert.deepEqual(parseFilesOutOfScope(body), ["docs/x.md", "src/y.ts"]);
+  });
+});
+
+describe("step 9.4 deterministic re-verify helpers", () => {
+  const BODY = "Intro\n\n## Files in scope\n\n- `a.ts`\n\n## Files out of scope\n\n- `b.ts`\n\nCloses #5\n";
+
+  test("checkBodyScopeEdit accepts only added Files in scope bullets", () => {
+    const ok = BODY.replace("- `a.ts`\n", "- `a.ts`\n- `docs/x.md`\n");
+    assert.equal(checkBodyScopeEdit(BODY, ok).ok, true);
+    assert.equal(checkBodyScopeEdit(BODY, BODY).ok, true);
+  });
+
+  test("checkBodyScopeEdit refuses edits to out-of-scope, preamble, or removed/non-bullet lines", () => {
+    assert.equal(checkBodyScopeEdit(BODY, BODY.replace("- `b.ts`", "- `b.ts`\n- `c.ts`")).ok, false);
+    assert.equal(checkBodyScopeEdit(BODY, BODY.replace("Closes #5", "Closes #6")).ok, false);
+    assert.equal(checkBodyScopeEdit(BODY, BODY.replace("Intro", "Intro2")).ok, false);
+    assert.equal(checkBodyScopeEdit(BODY, BODY.replace("- `a.ts`\n", "")).ok, false);
+    assert.equal(checkBodyScopeEdit(BODY, BODY.replace("- `a.ts`\n", "- `a.ts`\nprose\n")).ok, false);
+    assert.equal(checkBodyScopeEdit(BODY, BODY + "## Extra\n").ok, false);
+  });
+
+  test("diffHasHunkNearLine matches a touching or adjacent hunk, not a distant one", () => {
+    const d = "--- a/f\n+++ b/f\n@@ -10,2 +10,3 @@\n-a\n-b\n+c\n+d\n+e\n";
+    assert.equal(diffHasHunkNearLine(d, 10), true);
+    assert.equal(diffHasHunkNearLine(d, 12), true);
+    assert.equal(diffHasHunkNearLine(d, 9), true);
+    assert.equal(diffHasHunkNearLine(d, 40), false);
+    assert.equal(diffHasHunkNearLine("", 10), false);
+    assert.equal(diffHasHunkNearLine(d, 0), false);
+    // pure insertion: "+5 lines after line 20" reports -20,0
+    assert.equal(diffHasHunkNearLine("@@ -20,0 +21,5 @@\n", 20), true);
   });
 });
 
@@ -190,6 +230,25 @@ describe("qa-verdict phases for the reviewer commit", () => {
     const out = (await runQaVerdictPhase("reviewer-commit", phaseInput, fetchers())) as any;
     assert.equal(out.action, "commit-a");
     assert.deepEqual(out.degraded, []);
+  });
+
+  test("stage off (or an unreadable stage) makes no diff, changed-files or body read", async () => {
+    const reads: string[] = [];
+    const spy = (stage: any) =>
+      fetchers({
+        rolloutStage: async () => stage,
+        prDiff: async () => { reads.push("diff"); return TWO_WAY_DIFF; },
+        prBody: async () => { reads.push("body"); return ""; },
+        changedFiles: async () => { reads.push("changed"); return []; },
+      });
+    const off = (await runQaVerdictPhase("reviewer-commit", phaseInput, spy("off"))) as any;
+    assert.equal(off.action, "none");
+    assert.equal(off.reason, "stage-off");
+    await runQaVerdictPhase("reviewer-commit", phaseInput, spy(null));
+    assert.deepEqual(reads, []);
+    // sibling shape: an enabled stage still reads all three facts
+    await runQaVerdictPhase("reviewer-commit", phaseInput, spy("A"));
+    assert.deepEqual(reads.sort(), ["body", "changed", "diff"]);
   });
 
   test("an adapter without the new getters degrades to none", async () => {
@@ -248,9 +307,45 @@ describe("playbook step 9.4 pins", () => {
 
   test("the commit carries the QA-Fix: A trailer, is detached and runs the local proof before the push", () => {
     assert.ok(step94.includes('-m "QA-Fix: A"'));
-    assert.ok(step94.includes("git checkout --detach"));
+    assert.ok(step94.includes("git worktree add --detach"));
     assert.ok(step94.indexOf("scripts/ci/qa-fix-proof.ts") < step94.indexOf("git push origin"));
     assert.ok(step94.indexOf("gh pr edit") < step94.indexOf("git push origin"));
+  });
+
+  test("the phase runs only on a FAIL verdict and is gated before the RC_JSON reads", () => {
+    const gate = step94.indexOf('if [ "$REVIEW_VERDICT" = "FAIL" ]; then');
+    assert.ok(gate !== -1 && gate < step94.indexOf("qa-verdict.ts reviewer-commit"));
+  });
+
+  test("only blocking paths must be staged; follow-up paths are an optional subset", () => {
+    assert.ok(step94.includes("RC_BLOCKING_PATHS") && step94.includes("RC_FOLLOWUP_PATHS"));
+    assert.ok(step94.includes('grep -qvxF -f <(printf \'%s\\n\' "$RC_BLOCKING_PATHS" "$RC_FOLLOWUP_PATHS")'));
+    assert.ok(!step94.includes("RC_PATHS"));
+  });
+
+  test("the proof and regenerators run from the master-based session tree against a separate PR worktree", () => {
+    assert.ok(step94.includes('SESSION_ROOT=$(git rev-parse --show-toplevel)'));
+    assert.ok(step94.includes('"$SESSION_ROOT/scripts/ci/qa-fix-proof.ts"'));
+    assert.ok(step94.includes('git worktree add --detach "$PR_WT"'));
+    assert.ok(!/node [^\n]*[ "]scripts\/ci\/qa-fix-proof\.ts/.test(step94), "no PR-tree relative script path");
+    assert.ok(!step94.includes("git checkout --detach"), "the session tree is never switched to the PR head");
+  });
+
+  test("a claimed body fix requires BODY_CHANGED unconditionally, and only Files in scope bullets may be added", () => {
+    assert.ok(step94.includes('[ "$BODY_FIX" != true ] || [ "$BODY_CHANGED" = 1 ] || RC_OK=0'));
+    assert.ok(step94.includes("body-scope-check"));
+  });
+
+  test("each blocking row with a line has an executable diff-hunk check", () => {
+    assert.ok(step94.includes("-U0"));
+    assert.ok(step94.includes("ROW_FILE") && step94.includes("ROW_LINE"));
+  });
+
+  test("cleanup is gated on a created PR worktree, leaves the session tree untouched, and removes tempfiles", () => {
+    assert.ok(step94.includes('[ "$CHECKED_OUT" = 1 ]'));
+    assert.ok(step94.includes("SESSION_HEAD") && !step94.includes("ORIG_HEAD"));
+    assert.ok(step94.includes('rm -f "$ORIG_BODY_FILE" "$RC_BODY_FILE"'));
+    assert.ok(step94.includes("--allow-empty"));
   });
 
   test("step 9.4 adds no second fold call and no prior-findings variables", () => {
