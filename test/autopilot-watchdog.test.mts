@@ -23,10 +23,11 @@ import {
   throwIfTimedOut,
 } from "./_helpers/watchdog-timeouts.mts";
 import { RESTART_TIMEOUT_MS } from "../src/host-probe/probe.ts";
-import { decideWedge, runWedge, type WedgeConfig } from "../src/watchdog/wedge.ts";
+import { decideWedge, newestSlotActivity, runWedge, type WedgeConfig } from "../src/watchdog/wedge.ts";
 import {
   createProductionWedgeDeps,
   parseStatePid,
+  parseStateSlots,
   probeTunnel,
   readPendingWork,
   readHeartbeatMtimeEpoch,
@@ -68,6 +69,10 @@ interface FakeScript {
   heartbeatAgeS?: number | null;
   /** What signal() reports (delivered?). */
   signalOk?: boolean;
+  /** Occupied slots of state.json (default none). */
+  slots?: Array<{ class: string; taskId: string }>;
+  /** Slot-events read result: entries, or null = unknown (default []). */
+  events?: Array<{ id: string; fields: Record<string, string> }> | null;
 }
 
 /** In-memory fake implementing the same ports as production; records every effect. */
@@ -77,6 +82,7 @@ function makeFake(script: FakeScript) {
   const sleeps: number[] = [];
   const lines: string[] = [];
   let aliveCalls = 0;
+  let redisReads = 0;
   const deps: WedgeDeps = {
     host: {
       serviceActive: async () => (script.serviceActive === undefined ? true : script.serviceActive),
@@ -98,11 +104,18 @@ function makeFake(script: FakeScript) {
         const age = script.heartbeatAgeS === undefined ? 10 : script.heartbeatAgeS;
         return age === null ? null : NOW - age;
       },
+      readSlotRefs: () => script.slots ?? [],
+    },
+    slotEvents: {
+      readRecent: async () => {
+        redisReads++;
+        return script.events === undefined ? [] : script.events;
+      },
     },
     clock: { nowEpochS: () => NOW },
     log: (l) => lines.push(l),
   };
-  return { deps, signals, sleeps, lines };
+  return { deps, signals, sleeps, lines, redisReads: () => redisReads };
 }
 
 const CONFIG: WedgeConfig = {
@@ -112,6 +125,95 @@ const CONFIG: WedgeConfig = {
   thresholdS: 1500,
   graceS: 30,
 };
+
+describe("wedge subagent-activity shield (issue #5349)", () => {
+  const NOW_S = 1_800_000_000;
+  const SLOT = { class: "dev_orch", taskId: "abc123def" };
+  const ev = (taskId: string, ageS: number, event = "subagent_tool_call") => ({
+    id: `${(NOW_S - ageS) * 1000}-0`,
+    fields: { event, task_id: taskId, ts_epoch: String(NOW_S - ageS) },
+  });
+
+  test("a real wedge is still killed: stale heartbeat, slot occupied but no recent event", async () => {
+    const f = makeFake({ aliveSeq: [true, false], heartbeatAgeS: 1800, slots: [SLOT], events: [ev(SLOT.taskId, 1700)] });
+    const v = await runWedge(f.deps, CONFIG);
+    assert.equal(v.kind, "wedged");
+    assert.deepEqual(f.signals.map((s) => s.sig), ["SIGTERM"]);
+  });
+
+  test("a parent waiting on live subagents is not killed and logs a non-STALE line", async () => {
+    const f = makeFake({ heartbeatAgeS: 1800, slots: [SLOT], events: [ev(SLOT.taskId, 20)] });
+    const v = await runWedge(f.deps, CONFIG);
+    assert.equal(v.kind, "waiting-on-subagents");
+    assert.deepEqual(f.signals, []);
+    const line = f.lines.join("\n");
+    assert.doesNotMatch(line, /STALE/);
+    assert.match(line, /hydra-autopilot-watchdog: waiting on live subagents/);
+    assert.match(line, /dev_orch/);
+    assert.match(line, /abc123def/);
+  });
+
+  test("events from sessions that are not an occupied slot never shield", async () => {
+    const f = makeFake({
+      aliveSeq: [true, false],
+      heartbeatAgeS: 1800,
+      slots: [SLOT],
+      events: [ev("ffff0000", 5), ev(SLOT.taskId, 5, "slot_complete")],
+    });
+    const v = await runWedge(f.deps, CONFIG);
+    assert.equal(v.kind, "wedged");
+  });
+
+  test("unknown activity (read failed / Redis down) never shields", async () => {
+    const f = makeFake({ aliveSeq: [true, false], heartbeatAgeS: 1800, slots: [SLOT], events: null });
+    const v = await runWedge(f.deps, CONFIG);
+    assert.equal(v.kind, "wedged");
+  });
+
+  test("the shield is bounded by the ceiling: heartbeat past 3h is wedged despite activity", async () => {
+    const f = makeFake({ aliveSeq: [true, false], heartbeatAgeS: 10800, slots: [SLOT], events: [ev(SLOT.taskId, 1)] });
+    const v = await runWedge(f.deps, CONFIG);
+    assert.equal(v.kind, "wedged");
+  });
+
+  test("no Redis read on the common path: healthy tick, or no occupied slots", async () => {
+    const healthy = makeFake({ heartbeatAgeS: 100, slots: [SLOT] });
+    await runWedge(healthy.deps, CONFIG);
+    assert.equal(healthy.redisReads(), 0);
+    const slotless = makeFake({ aliveSeq: [true, false], heartbeatAgeS: 1800, slots: [] });
+    const v = await runWedge(slotless.deps, CONFIG);
+    assert.equal(v.kind, "wedged");
+    assert.equal(slotless.redisReads(), 0);
+  });
+
+  test("decideWedge stays pure and keeps earlier guards ahead of the shield", () => {
+    const base = {
+      serviceActive: true,
+      state: { pid: 1, runId: "r" },
+      pidAlive: true,
+      thresholdS: 1500,
+      slotActivity: { class: "dev_orch", taskId: "ab", ageS: 5 },
+    } as const;
+    assert.equal(decideWedge({ ...base, heartbeatAgeS: 100 }).kind, "healthy");
+    assert.equal(decideWedge({ ...base, heartbeatAgeS: 1500 }).kind, "waiting-on-subagents");
+    assert.equal(decideWedge({ ...base, pidAlive: false, heartbeatAgeS: 1500 }).kind, "pid-dead");
+    assert.equal(decideWedge({ ...base, serviceActive: false, heartbeatAgeS: 1500 }).kind, "service-inactive");
+  });
+
+  test("newestSlotActivity and parseStateSlots apply the join policy", () => {
+    assert.deepEqual(
+      parseStateSlots('{"slots":{"dev_orch":{"task_id":"abc123"},"qa_orch":null,"x":{"task_id":"worktree-agent-1"},"y":{}}}'),
+      [{ class: "dev_orch", taskId: "abc123" }],
+    );
+    assert.deepEqual(parseStateSlots("garbage"), []);
+    const a = newestSlotActivity([{ class: "dev_orch", taskId: "abc" }], [
+      { id: `${(NOW_S - 400) * 1000}-0`, fields: { event: "subagent_tool_call", task_id: "abc" } }, // stream-id fallback
+      ev("abc", 900),
+    ], NOW_S);
+    assert.deepEqual(a, { class: "dev_orch", taskId: "abc", ageS: 400 });
+    assert.equal(newestSlotActivity([], [ev("abc", 1)], NOW_S), null);
+  });
+});
 
 describe("watchdog wedge check (decideWedge / runWedge over fake ports)", () => {
   test("service inactive short-circuits FIRST: no signal even with stale heartbeat + live PID", async () => {

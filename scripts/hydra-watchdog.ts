@@ -106,13 +106,18 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
   if (cmd === "wedge") {
-    await runWedge(createProductionWedgeDeps((line) => console.log(line)), {
-      unit: "hydra-autopilot.service",
-      statePath: process.env.HYDRA_AUTOPILOT_STATE || "/tmp/hydra-autopilot-state.json",
-      heartbeatPath: process.env.HYDRA_AUTOPILOT_HEARTBEAT || "/tmp/hydra-autopilot-heartbeat.txt",
-      thresholdS: envNumber("STALE_THRESHOLD_SECONDS", WATCHDOG_WEDGE_KILL_THRESHOLD_S),
-      graceS: envNumber("KILL_GRACE_SECONDS", WATCHDOG_KILL_GRACE_S),
-    });
+    try {
+      await runWedge(createProductionWedgeDeps((line) => console.log(line)), {
+        unit: "hydra-autopilot.service",
+        statePath: process.env.HYDRA_AUTOPILOT_STATE || "/tmp/hydra-autopilot-state.json",
+        heartbeatPath: process.env.HYDRA_AUTOPILOT_HEARTBEAT || "/tmp/hydra-autopilot-heartbeat.txt",
+        thresholdS: envNumber("STALE_THRESHOLD_SECONDS", WATCHDOG_WEDGE_KILL_THRESHOLD_S),
+        graceS: envNumber("KILL_GRACE_SECONDS", WATCHDOG_KILL_GRACE_S),
+      });
+    } finally {
+      // One-shot process: the slot-events read may have opened a Redis connection.
+      closeRedisConnections();
+    }
     return;
   }
   if (cmd === "launch-flow") {

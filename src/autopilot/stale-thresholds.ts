@@ -22,6 +22,15 @@
  */
 export const WATCHDOG_WEDGE_KILL_THRESHOLD_S = 1500;
 
+/**
+ * Upper bound (3h) on the subagent-activity shield (issue #5349). A parent
+ * whose heartbeat is stale but whose occupied slots show recent
+ * `subagent_tool_call` activity is "waiting on live subagents", not wedged -
+ * but only until the heartbeat age reaches this ceiling, so a runaway child
+ * cannot pin a frozen parent forever. Ceiling >> WATCHDOG_WEDGE_KILL_THRESHOLD_S.
+ */
+export const WATCHDOG_SUBAGENT_SHIELD_CEILING_S = 10800;
+
 /** Seconds between the watchdog's SIGTERM and its SIGKILL escalation. */
 export const WATCHDOG_KILL_GRACE_S = 30;
 
