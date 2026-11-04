@@ -100,6 +100,12 @@ describe("reset marker (INV-4, INV-5)", () => {
     assert.equal(countReviewedFailRoundsSinceReset(bodies.slice(0, 2), 7), 2);
     assert.equal(countReviewedFailRoundsSinceReset(bodies, 7), 1);
   });
+
+  test("a malformed Hydra-Cap-Reset line does NOT reset the PR-side round count (INV-4)", () => {
+    for (const bad of ["Hydra-Cap-Reset: garbage", "Hydra-Cap-Reset: by=op", "Hydra-Cap-Reset: by=op ts=notadate"]) {
+      assert.equal(countReviewedFailRoundsSinceReset([failBody(7, 1), failBody(7, 2), bad, failBody(7, 3)], 7), 3, bad);
+    }
+  });
 });
 
 describe("one comparator, per-arm counts (INV-2, INV-3)", () => {
@@ -413,6 +419,18 @@ describe("openClaim wiring (INV-6, INV-7, INV-10, INV-12, INV-13)", () => {
     const second = await openClaim(claimInput({ dispatchId: "dNew2" }), w.deps);
     assert.equal(second.ok, false);
     assert.equal((second as any).code, "parked:total-claims");
+  });
+
+  test("total-claims parks an alternating-arm loop while every per-arm count stays under its limit (AC1)", async () => {
+    const w = world("enforce", ["ready-for-agent"]);
+    const shapes = [{}, { class: "qa_orch", pr: 5 }, { pr: 5, purpose: "resume" }];
+    for (let i = 0; i < 10; i++) {
+      const r = await openClaim(claimInput({ dispatchId: `d${i}`, ...shapes[i % 3] }), w.deps);
+      assert.equal(r.ok, true, `claim ${i + 1} opens`);
+      await releaseClaim(42, `d${i}`, w.deps, "cli", "pr-opened");
+    }
+    const eleventh = await openClaim(claimInput({ dispatchId: "d10" }), w.deps);
+    assert.deepEqual(eleventh, { ok: false, code: "parked:total-claims", written: true });
   });
 
   test("Hydra-Cap-Reset on the issue restarts every count", async () => {

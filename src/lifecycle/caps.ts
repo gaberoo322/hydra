@@ -132,9 +132,9 @@ export function latestResetMs(bodies: ReadonlyArray<string | null | undefined>):
   return latest;
 }
 
-/** True when some line of the body starts with the reset prefix (positional PR-side check). */
+/** True when the body carries a VALID reset line (same validity as the issue side). */
 function hasResetLine(body: string | null | undefined): boolean {
-  return typeof body === "string" && body.split("\n").some((l) => l.startsWith(CAP_RESET_PREFIX));
+  return parseCapResetTs(body) !== null;
 }
 
 /**
