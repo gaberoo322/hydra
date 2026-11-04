@@ -37,7 +37,9 @@ Modes:
                 usage); 0 with token_source=transcript-no-usage when the
                 transcript has no readable usage line, token_source=unknown
                 when there is no transcript. A stat() failure on a found
-                transcript reaps NOTHING (verdict=unknown).
+                transcript is verdict=unknown (no reap) while the slot has
+                been occupied < subagent_max_wall_seconds, BOUNDED: past that
+                threshold (or env override) it falls through to DEAD.
 
   completion  — Idempotent completion reap (issue #411).
                 Records the dispatched subagent's final token count once
@@ -2255,6 +2257,33 @@ def _final_usage_context_total(path: Path) -> int | None:
     return last
 
 
+def _wait_or_reap_max_wall_seconds(state: dict | None) -> int:
+    """The silent-wedge threshold, mirroring decide.py::_subagent_max_wall_seconds
+    (env, then state.limits, default 3600)."""
+    env = os.environ.get("HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS")
+    if env:
+        try:
+            return int(env)
+        except (TypeError, ValueError):
+            pass
+    limits = (state or {}).get("limits") or {}
+    try:
+        if limits.get("subagent_max_wall_seconds") is not None:
+            return int(limits["subagent_max_wall_seconds"])
+    except (TypeError, ValueError):
+        pass
+    return 3600
+
+
+def _slot_occupied_seconds(state: dict | None, slot: str) -> int | None:
+    """Seconds the slot has been occupied, or None when unknowable."""
+    slot_obj = ((state or {}).get("slots") or {}).get(slot)
+    started = _slot_started_epoch(slot_obj)
+    if started is None:
+        return None
+    return max(0, int(time.time()) - started)
+
+
 def run_wait_or_reap(slot: str, task_id: str) -> int:
     """`wait-or-reap` mode (issue #5282): liveness by transcript mtime, then a
     forced reap through run_completion when the child is dead."""
@@ -2269,11 +2298,24 @@ def run_wait_or_reap(slot: str, task_id: str) -> int:
         except OSError as exc:
             print(f"[autopilot] wait-or-reap: stat failed: {exc}", file=sys.stderr)
             # Transcript exists but liveness is unknowable: never reap a
-            # possibly live child on a transient stat failure.
-            msg = f"wait_or_reap verdict=unknown slot={slot} task_id={task_id} reason=stat-failed"
-            print(f"[autopilot] {msg}")
-            _append_log(msg)
-            return 0
+            # possibly live child on a transient stat failure -- but BOUND the
+            # fail-safe (operator ruling 2026-11-04): once the slot has been
+            # occupied past subagent_max_wall_seconds (the silent-wedge
+            # threshold that emitted this action) a persistent stat failure
+            # falls through to DEAD and reaps, so it cannot pin the slot.
+            occupied_s = _slot_occupied_seconds(load_state(), slot)
+            max_wall = _wait_or_reap_max_wall_seconds(load_state())
+            if occupied_s is None or occupied_s < max_wall:
+                msg = f"wait_or_reap verdict=unknown slot={slot} task_id={task_id} reason=stat-failed"
+                print(f"[autopilot] {msg}")
+                _append_log(msg)
+                return 0
+            transcript = None  # DEAD: unreadable past the wedge threshold
+            print(
+                f"[autopilot] wait-or-reap: stat failure persisted past "
+                f"{max_wall}s slot occupancy; treating as DEAD",
+                file=sys.stderr,
+            )
     if transcript is not None and age is not None and age < WAIT_OR_REAP_LIVE_WINDOW_S:
         msg = f"wait_or_reap verdict=live slot={slot} task_id={task_id} transcript_age_s={age}"
         print(f"[autopilot] {msg}")

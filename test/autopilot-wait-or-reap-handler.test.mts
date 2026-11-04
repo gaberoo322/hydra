@@ -17,7 +17,7 @@ const PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.
 const DEAD_API_BASE = "http://127.0.0.1:1";
 const TASK = "a5282deadbeef0001";
 
-function setup(opts: { transcript?: { ageSec: number } }) {
+function setup(opts: { transcript?: { ageSec: number }; slotAgeSec?: number }) {
   const dir = mkdtempSync(join(tmpdir(), "wait-or-reap-"));
   const state = join(dir, "state.json");
   const log = join(dir, "nightly.log");
@@ -31,7 +31,15 @@ function setup(opts: { transcript?: { ageSec: number } }) {
       dispatches: 1,
       burned_classes: [],
       reaped_task_ids: [],
-      slots: { dev_orch: { skill: "hydra-dev", task_id: TASK, started: "now" }, qa_orch: null },
+      slots: {
+        dev_orch: {
+          skill: "hydra-dev",
+          task_id: TASK,
+          started: "now",
+          ...(opts.slotAgeSec !== undefined ? { started_epoch: Math.floor(Date.now() / 1000) - opts.slotAgeSec } : {}),
+        },
+        qa_orch: null,
+      },
       signal_last_fired: {},
       failure_log: [],
     }),
@@ -115,6 +123,29 @@ describe("reap.py wait-or-reap (issue #5282)", () => {
     assert.equal(r.status, 0);
     assert.match(r.stdout, /verdict=reaped .*tokens=0 token_source=transcript-no-usage/);
     assert.equal(readState(e.state).slots.dev_orch, null);
+  });
+
+  test("stat() failure on a found transcript past the wedge threshold: bounded, falls through to DEAD and reaps", () => {
+    const e = setup({ slotAgeSec: 7200 });
+    const sub = join(e.projects, "-home-x", "sess-uuid", "subagents");
+    mkdirSync(sub, { recursive: true });
+    symlinkSync(join(e.dir, "does-not-exist"), join(sub, `agent-${TASK}.jsonl`));
+    const r = run(e, ["wait-or-reap", "dev_orch", TASK]);
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /verdict=reaped slot=dev_orch/);
+    assert.equal(readState(e.state).slots.dev_orch, null);
+  });
+
+  test("stat() failure on a found transcript, young slot: verdict=unknown, nothing reaped", () => {
+    const e = setup({ slotAgeSec: 60 });
+    const sub = join(e.projects, "-home-x", "sess-uuid", "subagents");
+    mkdirSync(sub, { recursive: true });
+    symlinkSync(join(e.dir, "does-not-exist"), join(sub, `agent-${TASK}.jsonl`));
+    const before = readFileSync(e.state, "utf8");
+    const r = run(e, ["wait-or-reap", "dev_orch", TASK]);
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /verdict=unknown .*reason=stat-failed/);
+    assert.equal(readFileSync(e.state, "utf8"), before);
   });
 
   test("stat() failure on a found transcript: verdict=unknown, nothing reaped", () => {
