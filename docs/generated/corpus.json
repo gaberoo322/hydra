@@ -499,7 +499,7 @@
       "path": "docs/operations/watchdog.md",
       "tier": "living",
       "route": "/docs/ref/operations/watchdog",
-      "title": "Watchdog (issues #388, #397, #705, #727)"
+      "title": "Watchdog (issues #388, #397, #705, #727, #5094, #5099)"
     },
     {
       "path": "docs/operator-playbooks/hydra-architect.md",
