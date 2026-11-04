@@ -337,7 +337,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     assert.deepEqual(titles(out.prompt.slice(out.prompt.indexOf("Red-PR forward-fix contract"))), want);
   });
 
-  test("conflict_fix renders the matching delta per arm; `do NOT address review findings` is conflict-only (issues #4807, #5253)", () => {
+  test("conflict_fix renders the matching delta per arm; the no-address-findings clause is conflict-only (issues #4807, #5253)", () => {
     const flat = (text: string) => text.replace(/\s+/g, " ");
     const base = { anchor: "issue-4511", resume: true, resume_branch: "b", forward_fix_pr: 4818, conflict_fix: true };
     const conflictOnly = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: base })).prompt;
