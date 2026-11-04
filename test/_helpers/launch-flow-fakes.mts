@@ -80,7 +80,7 @@ export interface Harness {
   state: {
     tick: PaceGateLastTick | null | "throw";
     heartbeatMs: number | null | "unreadable";
-    pick: GlmDrainerLastPick | null;
+    pick: GlmDrainerLastPick | null | "unreadable";
     drainerPrs: number | null | "throw";
     failPage: boolean;
     failPublish: boolean;

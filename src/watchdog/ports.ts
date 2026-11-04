@@ -19,7 +19,7 @@ import {
 } from "../host-probe/probe.ts";
 import { OperatorChannel, operatorChannel } from "../operator-channel/channel.ts";
 import { EventBus } from "../event-bus.ts";
-import { getGlmDrainerLastPick, getGlmDrainerLiveness } from "../redis/autopilot.ts";
+import { getGlmDrainerLiveness, readGlmDrainerLastPick } from "../redis/autopilot.ts";
 import { getPaceGateLastTick } from "../redis/launch-flow.ts";
 import {
   anchorEpisodeSince,
@@ -471,7 +471,11 @@ export function createProductionLaunchFlowDeps(log: (line: string) => void): Lau
       markFired: markEpisodeFired,
       clear: clearEpisodeKeys,
     },
-    glm: { liveness: (nowMs) => getGlmDrainerLiveness(nowMs), lastPick: getGlmDrainerLastPick },
+    glm: { liveness: (nowMs) => getGlmDrainerLiveness(nowMs), lastPick: async () => {
+        const r = await readGlmDrainerLastPick();
+        return r.kind === "ok" ? r.pick : r.kind === "absent" ? null : "unreadable";
+      },
+    },
     github: createProductionWatchdogGithub(),
     channel: operatorChannel,
     bus: {

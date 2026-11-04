@@ -149,7 +149,8 @@ export interface LaunchFlowDeps {
   store: EpisodeStore;
   glm: {
     liveness(nowMs: number): Promise<GlmDrainerLiveness>;
-    lastPick(): Promise<GlmDrainerLastPick | null>;
+    /** `null` = key absent; `"unreadable"` = Redis/parse failure (INV-4). */
+    lastPick(): Promise<GlmDrainerLastPick | null | "unreadable">;
   };
   github: WatchdogGithub;
   channel: Pick<OperatorChannel, "page" | "resolve">;
@@ -180,6 +181,8 @@ export async function readGlmSterile(
   if (!hb.live || hb.heartbeatMs === null || hb.heartbeatMs > nowMs) return { known: true, member: false };
 
   const pick = await deps.glm.lastPick();
+  // An unreadable verdict is a failed measurement, not an absent one (INV-4).
+  if (pick === "unreadable") return { known: false };
   if (pick === null) return { known: true, member: false };
   const age = nowMs - pick.at;
   if (!(age >= 0 && age <= GLM_DRAINER_HEARTBEAT_TTL_SECONDS * 1000)) return { known: true, member: false };
