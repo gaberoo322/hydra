@@ -47,3 +47,11 @@ export async function markEpisodeFired(keys: EpisodeKeyPair): Promise<void> {
 export async function clearEpisodeKeys(keys: EpisodeKeyPair): Promise<void> {
   await getRedisConnection().del(keys.since, keys.fired);
 }
+
+/** Key-template prefix of the Redis-backup freshness episode (issue #5098; the bash block held the same literal). */
+export const REDIS_BACKUP_KEY_PREFIX = "hydra:autopilot:redis-backup-freshness";
+
+/** The `{since, fired}` pair for the Redis-backup staleness episode. */
+export function redisBackupEpisodeKeys(): EpisodeKeyPair {
+  return { since: `${REDIS_BACKUP_KEY_PREFIX}:since`, fired: `${REDIS_BACKUP_KEY_PREFIX}:fired` };
+}
