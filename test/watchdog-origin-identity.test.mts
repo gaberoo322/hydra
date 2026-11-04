@@ -5,6 +5,7 @@
  * no PATH shims, no real git.
  */
 
+import { WATCHDOG_CHECKS } from "../src/watchdog/checks.ts";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -376,11 +377,12 @@ describe("run_origin_identity auto-repair (#5065)", () => {
     assert.equal(parseSinceMarker("")?.outcome, "alarm");
   });
 
-  it("the bash entry point calls origin-identity LAST (just after brief-missing) with the 120s bound", () => {
-    const sh = readFileSync(join(import.meta.dirname, "..", "scripts", "hydra-watchdog.sh"), "utf8");
-    assert.match(sh, /run_origin_identity_cli\(\) \{ run_watchdog_cli origin-identity "hydra-origin-identity-watchdog:" 120; \}/);
-    assert.match(sh, /run_brief_missing\n\s*run_origin_identity_cli\n\s*exit 0/);
-    assert.doesNotMatch(sh, /run_origin_identity\(\)/);
+  it("WATCHDOG_CHECKS runs origin-identity LAST (just after brief-missing) with the 120s bound", () => {
+    const last = WATCHDOG_CHECKS.at(-1);
+    assert.equal(last?.subcommand, "origin-identity");
+    assert.equal(last?.timeoutS, 120);
+    assert.equal(last?.logPrefix, ORIGIN_IDENTITY_LOG_PREFIX);
+    assert.equal(WATCHDOG_CHECKS.at(-2)?.subcommand, "brief-missing");
   });
 
   it("no module in src/watchdog imports node:child_process (every effect rides a seam)", () => {
