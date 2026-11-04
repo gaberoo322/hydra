@@ -19,10 +19,14 @@
     "docs/operator-playbooks/hydra-sweep.md": 1,
     "scripts/autopilot/reap_stall.py": 13,
     "scripts/autopilot/recover-stale.sh": 4,
+    "scripts/ci/hydra-cleanup-emit.ts": 1,
+    "scripts/ci/hydra-target-cleanup-emit.ts": 2,
+    "scripts/ci/hydra-target-wire-or-retire-emit.ts": 2,
     "src/api/autopilot-board.ts": 2,
     "src/glm/drainer-driver.ts": 2,
     "src/glm/finish.ts": 6,
     "src/operator-actions/registry.ts": 6,
-    "src/pattern-memory/escalation.ts": 1
+    "src/pattern-memory/escalation.ts": 2,
+    "src/scheduler/chores/wiring-liveness-dark-alarm.ts": 1
   }
 }

@@ -114,6 +114,10 @@ export function scanTextSites(text: string): number[] {
       const quoted = m[2] ?? m[3];
       const operand = quoted ?? m[4] ?? "";
       const bareIdentifier = quoted === undefined && argList;
+      if (bareIdentifier && operand) {
+        hit = true; // list form, non-literal operand (`labelFor(x)`, `labels[i]`): fail closed
+        continue;
+      }
       for (const part of operand.split(",")) {
         if (part && operandIsSite(part, bareIdentifier)) hit = true;
       }
@@ -131,7 +135,22 @@ export function scanTextSites(text: string): number[] {
     }
     if (hit) sites.push(lineNo);
   }
-  return sites;
+  // Argv list form with the flag and its operand on separate physical lines (prettier-formatted).
+  const seen = new Set(sites);
+  for (const m of text.matchAll(FLAG_RE)) {
+    if (m[1] === undefined || !m[0].includes("\n")) continue; // single-line matches handled above
+    if (m[0].startsWith("--label") && !/\bcreate\b/.test(text.slice(Math.max(0, m.index! - 300), m.index!))) continue;
+    const quoted = m[2] ?? m[3];
+    const operand = quoted ?? m[4] ?? "";
+    const isSite =
+      quoted === undefined ? operand !== "" : operand.split(",").some((p) => p && operandIsSite(p, false));
+    const line = text.slice(0, m.index!).split("\n").length;
+    if (isSite && !seen.has(line)) {
+      seen.add(line);
+      sites.push(line);
+    }
+  }
+  return sites.sort((a, b) => a - b);
 }
 
 /** Split `text` on top-level commas, honouring nesting and string literals. */
@@ -195,6 +214,20 @@ function tsOperandIsSite(expr: string, consts: Map<string, string>): boolean {
   return true;
 }
 
+/** Is `name` also bound as a function parameter or destructured binding anywhere in the file? */
+function isShadowedBinding(src: string, name: string): boolean {
+  const n = name.replace(/\$/g, "\\$");
+  const destructure = new RegExp(`\\b(?:const|let|var)\\s*[{\\[][^=;]*(?<![\\w$])${n}(?![\\w$])[^=;]*[}\\]]\\s*=`);
+  if (destructure.test(src)) return true;
+  const params = new RegExp(`\\(([^()]*(?<![\\w$.])${n}(?![\\w$])[^()]*)\\)\\s*(?::[^{=;]+)?(?:=>|\\{)`, "g");
+  for (const m of src.matchAll(params)) {
+    const before = src.slice(Math.max(0, m.index! - 8), m.index!);
+    if (/\b(?:if|while|for|switch|catch|with)\s*$/.test(before)) continue; // control flow, not params
+    return true;
+  }
+  return false;
+}
+
 /** Module-scope consts only (column 0); a name declared more than once anywhere is unresolvable. */
 function collectConsts(src: string): Map<string, string> {
   const consts = new Map<string, string>();
@@ -202,6 +235,7 @@ function collectConsts(src: string): Map<string, string> {
     const name = m[1]!;
     const decls = src.match(new RegExp(`\\b(?:const|let|var)\\s+${name.replace(/\$/g, "\\$")}\\b`, "g"));
     if (decls && decls.length > 1) continue;
+    if (isShadowedBinding(src, name)) continue;
     const rhs = m[2]!.trim();
     const lit = /^["'`]([^"'`$]*)["'`]$/.exec(rhs);
     if (lit) {

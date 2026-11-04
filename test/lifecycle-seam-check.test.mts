@@ -9,6 +9,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
+const { OPEN_STATES } = await import("../src/lifecycle/index.ts");
 const {
   LIFECYCLE_STATE_NAMES,
   REPO_ROOT,
@@ -21,10 +22,7 @@ const {
 
 describe("lifecycle-seam-check: live tree vs committed baseline", () => {
   test("scanner vocabulary is exactly OPEN_STATES", () => {
-    // Names come from the src/lifecycle table (the script imports it); pin
-    // representative open states and that the closed state is excluded.
-    assert.ok(LIFECYCLE_STATE_NAMES.includes("needs-qa"));
-    assert.ok(LIFECYCLE_STATE_NAMES.includes("ready-for-agent"));
+    assert.deepEqual([...LIFECYCLE_STATE_NAMES], [...OPEN_STATES]);
     assert.equal(LIFECYCLE_STATE_NAMES.includes("closed"), false);
   });
 
@@ -161,6 +159,26 @@ describe("lifecycle-seam-check: detection grammar (synthetic)", () => {
     assert.deepEqual(ts(src), [5]);
     assert.deepEqual(ts('const label = "glm-withhold";\naddIssueLabel(1, label);'), []);
     assert.deepEqual(ts('const label = "glm-withhold";\nfunction f() { const label = "x"; }\naddIssueLabel(1, label);'), [3]);
+  });
+
+  test("TS: prettier-formatted argv with flag and operand on separate lines is a site; a flag operand is not", () => {
+    assert.deepEqual(ts('run("gh", [\n  "issue",\n  "--add-label",\n  "needs-qa",\n]);'), [3]);
+    assert.deepEqual(ts('run("gh", [\n  "issue",\n  "--add-label",\n  "glm-withhold",\n]);'), []);
+  });
+
+  test("TS: argv list form with a non-literal operand fails closed; a flag literal does not", () => {
+    assert.deepEqual(ts('run("gh", ["issue", "edit", "5", "--add-label", labelFor(x)]);'), [1]);
+    assert.deepEqual(ts('run("gh", ["issue", "edit", "5", "--add-label", labels[i]]);'), [1]);
+    assert.deepEqual(ts('run("gh", ["issue", "edit", "5", "--add-label", "glm-withhold"]);'), []);
+  });
+
+  test("TS: a module const shadowed by a parameter or destructured binding is unresolvable", () => {
+    const param = 'const label = "glm-withhold";\nfunction b(label: string) {\n  addIssueLabel(1, label);\n}';
+    assert.deepEqual(ts(param), [3]);
+    const destructured = 'const label = "glm-withhold";\nfunction b(o) {\n  const { label } = o;\n  addIssueLabel(1, label);\n}';
+    assert.deepEqual(ts(destructured), [4]);
+    // sibling: an `if (label) {` control-flow paren is not a binding, so the flag const still resolves
+    assert.deepEqual(ts('const label = "glm-withhold";\nif (label) {\n  addIssueLabel(1, label);\n}'), []);
   });
 
   test("block comments keep line numbers stable", () => {
