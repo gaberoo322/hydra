@@ -205,6 +205,21 @@ export async function closeDispatchClaim(
   }
 }
 
+export type ReadClaimResult =
+  | { ok: true; claim: DispatchClaim | null }
+  | { ok: false; error: string };
+
+/** Read (never modify) the held dispatch claim, or `claim: null` when none. */
+export async function readDispatchClaim(repo: string, issue: number): Promise<ReadClaimResult> {
+  try {
+    const raw = await getRedisConnection().get(lifecycleClaimKey(repo, issue));
+    return { ok: true, claim: parseClaim(raw) };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] readDispatchClaim failed");
+    return fail("readDispatchClaim", err);
+  }
+}
+
 function parseClaim(raw: string | null): DispatchClaim | null {
   if (raw === null) return null;
   try {

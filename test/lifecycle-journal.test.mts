@@ -19,6 +19,7 @@ import {
   lifecycleJournalKey,
   openDispatchClaim,
   persistJournal,
+  readDispatchClaim,
   readLifecycleJournal,
   type LifecycleJournalEntry,
 } from "../src/redis/lifecycle-journal.ts";
@@ -114,6 +115,16 @@ describe("lifecycle-journal Redis seam (issue #5310)", () => {
     const again = await closeDispatchClaim(REPO, ISSUE, "d1");
     assert.ok(again.ok);
     assert.equal(again.prior, null);
+  });
+
+  test("readDispatchClaim reads without modifying the held claim", async () => {
+    const none = await readDispatchClaim(REPO, ISSUE);
+    assert.deepEqual(none, { ok: true, claim: null });
+    const claim = { dispatchId: "d1", class: "qa_orch", run: "r1", artifactHash: null, openedAt: 1 };
+    await openDispatchClaim(REPO, ISSUE, claim);
+    const held = await readDispatchClaim(REPO, ISSUE);
+    assert.deepEqual(held, { ok: true, claim });
+    assert.equal(await redis.exists(lifecycleClaimKey(REPO, ISSUE)), 1);
   });
 
   test("closeDispatchClaim with expectedDispatchId only deletes an owned claim (atomic)", async () => {
