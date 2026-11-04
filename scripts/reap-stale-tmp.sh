@@ -32,9 +32,12 @@
 #   Default is a dry run that prints what would be removed.
 #   HYDRA_TMP_REAP_ROOT overrides the scanned directory (test seam; default /tmp).
 #
-# Exits 0 even when a removal fails (the failure is logged), like the sibling
-# reap-stale-test-procs.sh, so the timer unit stays clean; read
-# `journalctl --user -u hydra-tmp-reaper` for the output.
+# Exits 0 even when a removal fails (the failure and rm's error are logged on
+# the FAILED line), like the sibling reap-stale-test-procs.sh, so the timer unit
+# stays clean. Exits 1 when the top-level enumeration of the root itself fails
+# (SUMMARY then carries enum=failed): a scan that could not list the root must
+# not report a healthy matched=0. Read `journalctl --user -u hydra-tmp-reaper`
+# for the output.
 
 set -uo pipefail
 
@@ -51,7 +54,7 @@ while [ $# -gt 0 ]; do
       MAX_AGE_MIN="${1:-}"
       ;;
     -h|--help)
-      sed -n '2,37p' "$0"
+      sed -n '2,/^$/p' "$0"
       exit 0
       ;;
     *)
@@ -77,11 +80,13 @@ fi
 # (`csb-outcomes-route-1d5vgA`, `pmh-e2e-Ab12Cd`). Matching the SHAPE instead
 # of a list of known prefixes is the point: a safety net has to catch the next
 # leaker nobody has found yet, not only the ones already filed. The 6-char
-# suffix must also LOOK random (contain a digit or an uppercase letter, see
-# RANDOM_SUFFIX_RE): ordinary names like `build-output`, `my-backup`,
-# `hydra-deploy` or `old-config` fit the bare shape but are words, and are
-# spared. A genuinely random all-lowercase suffix ((26/62)^6, ~0.5%) is also
-# spared; the safety net accepts that miss rather than delete a named dir.
+# suffix must also LOOK random (is_random_suffix below): it must mix letters AND
+# digits, and must not lead with a year (19xx/20xx). So words (`build-output`,
+# `my-backup`, `old-Backup`), numbers and dates (`backup-202610`, `logs-202611`,
+# `export-123456`) and year-led labels (`report-2026Q4`) fit the bare shape but
+# are spared. The cost is misses: a genuinely random suffix with no digit
+# ((52/62)^6, ~35%) is spared too. The safety net accepts that miss rather than
+# delete a named dir; the per-leaker fixes remain the primary defense.
 #
 # Vitest's root tmp dir is a 21-char nanoid whose ONLY entry is `ssr/`; any
 # other nanoid-named dir is not ours to judge.
@@ -90,11 +95,15 @@ fi
 # is_quiet below), not just the dir's own mtime, so a temp dir a long-running
 # process is still writing into is never touched however old the dir itself is.
 MKDTEMP_RE='^[A-Za-z][A-Za-z0-9_.-]*[-.][A-Za-z0-9]{6}$'
-RANDOM_SUFFIX_RE='[0-9A-Z]'
 NANOID_RE='^[A-Za-z0-9_-]{21}$'
 # Top-level names this reaper must never remove even if they fit a shape:
 # per-user runtime dirs owned by long-lived tools.
 DENY_RE='^(claude-|tsx-|systemd-|tmux-|ssh-|snap-|node-compile-cache|com\.google\.|\.)'
+
+# is_random_suffix <6 chars> -> true when the suffix looks like mkdtemp output.
+is_random_suffix() {
+  [[ "$1" =~ [0-9] ]] && [[ "$1" =~ [A-Za-z] ]] && ! [[ "$1" =~ ^(19|20)[0-9]{2} ]]
+}
 
 # classify <basename> <path> -> prints the class name, or nothing if no match.
 classify() {
@@ -108,7 +117,7 @@ classify() {
     fi
     return
   fi
-  if [[ "$name" =~ $MKDTEMP_RE ]] && [[ "${name: -6}" =~ $RANDOM_SUFFIX_RE ]]; then
+  if [[ "$name" =~ $MKDTEMP_RE ]] && is_random_suffix "${name: -6}"; then
     # Class label = the mkdtemp prefix, for the per-class journal counts.
     printf 'mkdtemp:%s\n' "${name:0:${#name}-6}"
   fi
@@ -134,8 +143,23 @@ failed=0
 spared=0
 declare -A by_class=()
 
-while IFS= read -r -d '' path; do
-  name="${path##*/}"
+# Enumerate the root's top-level candidates. The list is captured (not streamed
+# through a process substitution) so find's exit status is checked, and find's
+# stderr stays on the script's stderr so the cause reaches the journal. Each
+# entry is printed as `<basename>/`: a basename can never contain `/`, so `/` is
+# a safe separator (a shell variable cannot hold the NULs of -print0). A partial
+# listing is still processed (every entry is individually gated below), but the
+# run reports enum=failed and exits 1.
+enum=ok
+if ! listing=$(find "$ROOT" -mindepth 1 -maxdepth 1 -xdev -type d -user "$uid" -mmin "+$MAX_AGE_MIN" -printf '%f/'); then
+  enum=failed
+  echo "reap-stale-tmp: enumeration of '$ROOT' failed; the scan is incomplete" >&2
+fi
+names=()
+IFS=/ read -r -d '' -a names < <(printf '%s' "$listing") || true
+
+for name in "${names[@]}"; do
+  path="${ROOT%/}/$name"
   class=$(classify "$name" "$path")
   if [ -z "$class" ]; then
     spared=$((spared + 1))
@@ -150,16 +174,16 @@ while IFS= read -r -d '' path; do
   if [ "$APPLY" -eq 1 ]; then
     # --one-file-system keeps the delete on the filesystem is_quiet examined
     # (find -xdev): a mount inside the dir is never descended into.
-    if rm -rf --one-file-system -- "$path" 2>/dev/null; then
+    if rm_err=$(rm -rf --one-file-system -- "$path" 2>&1); then
       removed=$((removed + 1))
     else
       failed=$((failed + 1))
-      echo "FAILED path=$path class=$class"
+      echo "FAILED path=$path class=$class error=${rm_err//$'\n'/ | }"
     fi
   else
     echo "WOULD-REMOVE path=$path class=$class"
   fi
-done < <(find "$ROOT" -mindepth 1 -maxdepth 1 -xdev -type d -user "$uid" -mmin "+$MAX_AGE_MIN" -print0 2>/dev/null)
+done
 
 for class in "${!by_class[@]}"; do
   echo "CLASS class=$class count=${by_class[$class]}"
@@ -167,5 +191,6 @@ done | sort
 
 mode=dry-run
 [ "$APPLY" -eq 1 ] && mode=apply
-echo "SUMMARY mode=$mode root=$ROOT max_age_min=$MAX_AGE_MIN matched=$matched removed=$removed failed=$failed spared=$spared"
+echo "SUMMARY mode=$mode root=$ROOT max_age_min=$MAX_AGE_MIN matched=$matched removed=$removed failed=$failed spared=$spared enum=$enum"
+[ "$enum" = ok ] || exit 1
 exit 0

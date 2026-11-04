@@ -61,6 +61,7 @@
     "test/hydra-branch-prune.test.mts": "uses a fixed /tmp path (clobbers under concurrency)",
     "test/process-probe.test.mts": "runs `git worktree` operations against a shared repo (index.lock contention)",
     "test/reap-stale-test-procs.test.mts": "binds or dials a fixed port",
+    "test/reap-stale-tmp.test.mts": "uses a constant-name path under tmpdir() (clobbers under concurrency)",
     "test/recover-stale.test.mts": "uses a constant-name path under tmpdir() (clobbers under concurrency)",
     "test/schemas-dispatches.test.mts": "uses /dev/shm (shared between concurrent pools)",
     "test/skill-prune-contract-token-parity.test.mts": "runs `git worktree` operations against a shared repo (index.lock contention)",

@@ -93,7 +93,7 @@ describe("reap-stale-tmp.sh", () => {
 
     assert.equal(r.status, 0);
     assert.equal(existsSync(leaked), true);
-    assert.match(r.stdout, new RegExp(`WOULD-REMOVE path=${leaked} class=mkdtemp:pmh-e2e-`));
+    assert.ok(r.stdout.includes(`WOULD-REMOVE path=${leaked} class=mkdtemp:pmh-e2e-`), r.stdout);
     assert.match(r.summary, /mode=dry-run .*matched=1 removed=0/);
   });
 
@@ -114,9 +114,11 @@ describe("reap-stale-tmp.sh", () => {
     const root = fixtureRoot();
     const young = makeDir(root, "glm-recover-Ab12Cd", ["f"], 30);
 
-    run(root, "--apply", "--max-age", "60");
+    const r = run(root, "--apply", "--max-age", "60");
 
     assert.equal(existsSync(young), true);
+    // Filtered out by the enumeration itself, so it is not even counted as spared.
+    assert.match(r.summary, /matched=0 removed=0 failed=0 spared=0/);
   });
 
   test("names outside the temp-dir shapes, deny-listed runtime dirs, and non-ssr nanoid dirs are spared", () => {
@@ -129,6 +131,14 @@ describe("reap-stale-tmp.sh", () => {
       makeDir(root, "my-backup"),
       makeDir(root, "hydra-deploy"),
       makeDir(root, "old-config"),
+      // A suffix must MIX letters and digits and must not lead with a year:
+      // dates, numbers, capitalised words and year-led labels are names (#5328 QA r2).
+      makeDir(root, "backup-202610"),
+      makeDir(root, "logs-202611"),
+      makeDir(root, "export-123456"),
+      makeDir(root, "report-2026Q4"),
+      makeDir(root, "old-Backup"),
+      makeDir(root, "notes-ABCDEF"),
       makeDir(root, "tmp.AbCdEfGhIj"), // mktemp(1) default: 10-char suffix
       makeDir(root, "claude-1000Ab12Cd"), // deny-listed runtime prefix
       makeDir(root, "tsx-1000-Ab12Cd"),
@@ -141,7 +151,8 @@ describe("reap-stale-tmp.sh", () => {
     const r = run(root, "--apply");
 
     for (const dir of spared) assert.equal(existsSync(dir), true, `${dir} must survive`);
-    assert.match(r.summary, /matched=0 removed=0/);
+    assert.match(r.summary, /matched=0 removed=0 failed=0 spared=18 enum=ok/);
+    assert.equal(r.status, 0);
   });
 
   test("a symlink with a leaked name is never followed or removed, and its target survives", () => {
@@ -201,6 +212,54 @@ describe("reap-stale-tmp.sh", () => {
 
     assert.equal(existsSync(leaked), false, "rm must be called with --one-file-system");
     assert.match(r.summary, /removed=1 failed=0/);
+  });
+
+  test("a failed removal is logged with rm's error and still exits 0", () => {
+    const root = fixtureRoot();
+    const leaked = makeDir(root, "pace-nudge-Fa11Ed");
+    const bin = fixtureRoot();
+    writeFileSync(join(bin, "rm"), "#!/usr/bin/env bash\necho \"rm: cannot remove: Device or resource busy\" >&2\nexit 1\n");
+    chmodSync(join(bin, "rm"), 0o755);
+
+    const r = runWithEnv(root, { PATH: `${bin}:${process.env.PATH ?? ""}` }, "--apply");
+
+    assert.equal(r.status, 0);
+    assert.equal(existsSync(leaked), true);
+    assert.ok(
+      r.stdout.includes(`FAILED path=${leaked} class=mkdtemp:pace-nudge- error=rm: cannot remove: Device or resource busy`),
+      r.stdout,
+    );
+    assert.match(r.summary, /matched=1 removed=0 failed=1/);
+  });
+
+  test("an enumeration failure of the root is surfaced in SUMMARY with a non-zero exit", (t) => {
+    if (process.getuid?.() === 0) {
+      t.skip("root lists mode-300 dirs, so find cannot fail this way");
+      return;
+    }
+    const root = fixtureRoot();
+    makeDir(root, "pace-nudge-En0m8r");
+    // Searchable but not readable: find cannot list the root's entries.
+    chmodSync(root, 0o300);
+    try {
+      const r = run(root, "--apply");
+
+      assert.equal(r.status, 1);
+      assert.match(r.summary, /matched=0 removed=0 failed=0 spared=0 enum=failed/);
+      assert.match(r.stderr, /Permission denied/, "find's error must not be discarded");
+      assert.match(r.stderr, /enumeration of .* failed/);
+    } finally {
+      chmodSync(root, 0o755);
+    }
+  });
+
+  test("--help prints the whole header", () => {
+    const r = run(fixtureRoot(), "--help");
+
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /Usage: reap-stale-tmp\.sh/);
+    assert.match(r.stdout, /journalctl --user -u hydra-tmp-reaper/);
+    assert.doesNotMatch(r.stdout, /set -uo pipefail/);
   });
 
   test("--max-age below 60 minutes is refused", () => {
