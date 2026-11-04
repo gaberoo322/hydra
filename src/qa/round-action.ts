@@ -7,7 +7,8 @@
  */
 
 import type { ReviewVerdict } from "./admission.ts";
-import { priorFindingsSection, qaVerdictHistory } from "./prior-round.ts";
+import { CAP_DEFAULTS, countReviewedFailRoundsSinceReset } from "../lifecycle/caps.ts";
+import { qaVerdictHistory } from "./prior-round.ts";
 import { isFailVerdict, nextQaVerdictRound, type FinalVerdict, type QaVerdictTrailer } from "./verdict-trailer.ts";
 
 /**
@@ -201,7 +202,7 @@ export function decideDeepQaAction(
 // ---------------------------------------------------------------------------
 
 /** The FAIL round (1-based, per PR) at which T1–T3 QA escalates instead of bouncing. */
-export const QA_FAIL_ROUND_CAP = 3;
+export const QA_FAIL_ROUND_CAP = CAP_DEFAULTS["qa-fail-rounds"];
 
 /**
  * The marker text the step-6.6 admission-gate skip path puts in its
@@ -271,9 +272,8 @@ export function decideQaRoundAction(input: {
   if (!isFailVerdict(verdict)) {
     return { action: "proceed", round, failRound: null, reason: "Not a FAIL — normal verdict routing." };
   }
-  const priorFails = qaVerdictHistory(input.priorBodies, input.pr).filter(
-    (t) => isFailVerdict(t.verdict) && priorFindingsSection(input.priorBodies, input.pr, t.round) !== "",
-  ).length;
+  // Only rounds after the latest `Hydra-Cap-Reset:` marker count (ADR-0047 D6).
+  const priorFails = countReviewedFailRoundsSinceReset(input.priorBodies, input.pr);
   const currentReviewed = input.currentReviewed !== false;
   const failRound = priorFails + (currentReviewed ? 1 : 0);
   if (currentReviewed && failRound >= QA_FAIL_ROUND_CAP) {

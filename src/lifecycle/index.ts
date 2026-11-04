@@ -52,12 +52,33 @@ export {
   type StateEntryRecord,
 } from "./gates.ts";
 export {
+  CAP_ARMS,
+  CAP_DEFAULTS,
+  CAP_RESET_PREFIX,
+  CAP_TABLE,
+  capEnvName,
+  classRole,
+  countReviewedFailRoundsSinceReset,
+  evaluateCaps,
+  latestResetMs,
+  resolveCapLimits,
+  type CapArm,
+  type CapCount,
+  type CapEvaluation,
+  type CapSource,
+  type CapUnit,
+} from "./caps.ts";
+export { parkForCap, postCapReset, renderParkComment, type CapResetResult, type ParkResult } from "./park.ts";
+export {
   LIFECYCLE_ROLLOUT_CONFIG_PATH,
   advance,
   defaultSeamDeps,
   loadLifecycleMode,
   openClaim,
   releaseClaim,
+  CLAIM_OUTCOMES,
+  type ClaimOutcome,
+  type ClaimPurpose,
   resolveLifecycleMode,
   type AdvanceInput,
   type AdvanceResult,
