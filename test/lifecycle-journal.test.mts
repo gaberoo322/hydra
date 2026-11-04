@@ -15,7 +15,10 @@ import {
   closeDispatchClaim,
   expireJournalOnClose,
   journalCloseTtlSeconds,
+  holdExitIndexKey,
   lifecycleClaimKey,
+  listHoldExits,
+  recordHoldExit,
   lifecycleJournalKey,
   openDispatchClaim,
   persistJournal,
@@ -37,7 +40,7 @@ function entry(over: Partial<LifecycleJournalEntry> = {}): LifecycleJournalEntry
 describe("lifecycle-journal Redis seam (issue #5310)", () => {
   let redis: any;
   const cleanup = async () => {
-    await redis.del(lifecycleJournalKey(REPO, ISSUE), lifecycleClaimKey(REPO, ISSUE));
+    await redis.del(lifecycleJournalKey(REPO, ISSUE), lifecycleClaimKey(REPO, ISSUE), holdExitIndexKey(REPO));
   };
 
   before(() => {
@@ -126,6 +129,26 @@ describe("lifecycle-journal Redis seam (issue #5310)", () => {
     assert.ok(right.ok);
     assert.equal(right.prior?.dispatchId, "d1");
     assert.equal(await redis.exists(lifecycleClaimKey(REPO, ISSUE)), 0);
+  });
+
+  test("hold-exit index: recordHoldExit ZADDs by ts, listHoldExits filters by since, 30d members are trimmed", async () => {
+    const now = 1_760_000_000_000;
+    const DAY = 24 * 60 * 60 * 1000;
+    const old = entry({ ts: now - 40 * DAY, kind: "external", source: "external", from: "parked", to: "needs-triage" });
+    const recent = entry({ ts: now - 2 * DAY, kind: "external", source: "external", from: "ready-for-human", to: "ready-for-agent" });
+    assert.ok((await recordHoldExit(REPO, 11, old)).ok);
+    assert.ok((await recordHoldExit(REPO, 12, recent)).ok);
+    // The 40d-old member was trimmed by the second add (cutoff = recent.ts - 30d).
+    assert.equal(await redis.zcard(holdExitIndexKey(REPO)), 1);
+    const listed = await listHoldExits(REPO, now - 7 * DAY);
+    assert.ok(listed.ok);
+    assert.deepEqual(listed.exits.map((x) => x.issue), [12]);
+    assert.equal(listed.exits[0].source, "external");
+    const none = await listHoldExits(REPO, now);
+    assert.ok(none.ok);
+    assert.deepEqual(none.exits, []);
+    // The journal LIST itself is untouched by the index.
+    assert.equal(await redis.exists(lifecycleJournalKey(REPO, 12)), 0);
   });
 });
 

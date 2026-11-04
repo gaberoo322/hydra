@@ -194,6 +194,8 @@ const QUIET_RANK0 = {
   // Issue #4624: rank 1 reads PRs through stalled-prs — stub it quiet too.
   getStalledPrs: async (): Promise<StalledPrsResult> => stalledSnapshot(),
   readHitlGrillIssues: async () => ({ ok: true as const, rows: [] }),
+  // #5313: rank-2 hold-exit line — stub it quiet so no test touches live Redis.
+  readHoldExits: async () => ({ ok: true as const, exits: [] as any[] }),
   readPaused: async () => ({ paused: false }),
   readSessionBlockedUntil: async () => null,
   readSchedulerStop: async () => ({ stopReason: null, deliberateStoppedAt: null }),
@@ -823,6 +825,71 @@ describe("getAttentionFeed — dismissal + calibration wiring", () => {
     });
     assert.deepEqual(result.items, []);
     assert.equal(result.sourcesOk, true);
+  });
+});
+
+describe("getAttentionFeed — waiting-on-you:hold-exit (ADR-0047 D3, issue #5313)", () => {
+  const base = {
+    ...QUIET_RANK0,
+    getIssuesWaiting: async () => stuckSnapshot(),
+    getFrictionPatterns: async () => frictionSnapshot(),
+    ...NO_DISMISSALS,
+    ...NO_COUNTING,
+    githubRepo: "gaberoo322/hydra",
+    now: NOW,
+  };
+  const exit = (issue: number, ts: number, over: object = {}) => ({
+    issue, ts, from: "ready-for-human", to: "ready-for-agent", source: "external", actor: "x", ...over,
+  });
+
+  test("a journaled external hold exit surfaces ONE item per issue (its latest) with the exit-scoped id", async () => {
+    const t1 = NOW.getTime() - 3 * 86400_000;
+    const t2 = NOW.getTime() - 1 * 86400_000;
+    let askedSince = 0;
+    const result = await getAttentionFeed({
+      ...base,
+      readHoldExits: async (_repo: string, since: number) => {
+        askedSince = since;
+        return { ok: true as const, exits: [exit(5, t1, { from: "parked" }), exit(5, t2), exit(6, t1, { source: "cli" })] as any[] };
+      },
+    });
+    assert.equal(askedSince, NOW.getTime() - 7 * 86400_000);
+    const items = result.items.filter((i) => i.key === "waiting-on-you:hold-exit");
+    assert.equal(items.length, 2);
+    const five = items.find((i) => i.id.startsWith("hold-exit-issue-5-"))!;
+    assert.equal(five.id, `hold-exit-issue-5-${t2}`);
+    assert.equal(five.title, "#5 left ready-for-human via external");
+    assert.equal(five.url, "https://github.com/gaberoo322/hydra/issues/5");
+    assert.equal(five.thresholdLabel, "human-hold exit outside operator-route");
+    assert.equal(five.crossedAt, new Date(t2).toISOString());
+    assert.equal(five.bucket, "waiting-on-you");
+    assert.match(five.action.recommended.kind === "terminal-skill" ? five.action.recommended.command : "", /gh issue view 5 --repo gaberoo322\/hydra/);
+    const bucket = result.buckets.find((b) => b.bucket === "waiting-on-you")!;
+    assert.equal(bucket.sourcesOk, true);
+  });
+
+  test("a failed read names hold-exits and renders the bucket UNKNOWN, never an asserted zero", async () => {
+    const result = await getAttentionFeed({
+      ...base,
+      readHoldExits: async () => ({ ok: false as const, error: "redis down" }),
+    });
+    const bucket = result.buckets.find((b) => b.bucket === "waiting-on-you")!;
+    assert.equal(bucket.sourcesOk, false);
+    assert.ok(bucket.sourceErrors.includes("hold-exits"));
+    assert.equal(result.sourcesOk, false);
+  });
+
+  test("a rejected read degrades the same way (never throws)", async () => {
+    const result = await getAttentionFeed({
+      ...base,
+      readHoldExits: async () => { throw new Error("boom"); },
+    });
+    assert.ok(result.buckets.find((b) => b.bucket === "waiting-on-you")!.sourceErrors.includes("hold-exits"));
+  });
+
+  test("hold-exit is a waiting-on-you line only, not a target-items line (ADR-0047 is orch-board only)", () => {
+    assert.ok(ADMISSION_LINE_KEYS.includes("waiting-on-you:hold-exit"));
+    assert.equal(ADMISSION_LINE_KEYS.includes("target-items:hold-exit"), false);
   });
 });
 
