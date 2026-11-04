@@ -559,7 +559,9 @@ export function decideReviewerCommit(input: ReviewerCommitInput): ReviewerCommit
     let bodyFix = false;
     const consider = (location: string, blocking: boolean): ReviewerCommitDecision | null => {
       if (/^\s*pr body\s*$/i.test(String(location ?? ""))) {
-        bodyFix = true;
+        // Only a BLOCKING row demands a body edit; a low follow-up at the PR
+        // body must never force bodyFix on (round-4 finding, INV-3).
+        if (blocking) bodyFix = true;
         return null;
       }
       const path = reviewerCommitLocationPath(location);

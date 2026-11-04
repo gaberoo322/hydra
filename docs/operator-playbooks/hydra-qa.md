@@ -1049,18 +1049,29 @@ The posted comment is therefore: the findings table (severity, axis, reviewer, f
 
 ### 9.4 Reviewer commit (class A) (issue #5267, ADR-0046 Decision 2)
 
-Runs only when step 9 produced `REVIEW_VERDICT=FAIL`. It is gated by the `reviewer-commits` rollout switch, which ships `off` in `config/orchestrator/qa-rollout.json`: with the switch off the `reviewer-commit` phase answers `none` (`reason=stage-off`) and this step changes nothing. The switch is read from THIS session's own master-based tree (never the PR tree) by the phase itself; with the switch off the phase answers before it reads the diff, the changed paths or the body, and the block below does not call it at all unless the verdict is FAIL. The PR head is checked out into a SEPARATE worktree and treated as data: the proof, the regenerators and the re-verify checks always run from this session's master-based tree, never from PR-authored scripts.
+Runs only when step 9 produced `REVIEW_VERDICT=FAIL`. It is gated by the `reviewer-commits` rollout switch, which ships `off` in `config/orchestrator/qa-rollout.json`: with the switch off the `reviewer-commit` phase answers `none` (`reason=stage-off`) and this step changes nothing. The switch is read by the phase running from a dedicated detached worktree of `$FIXED_SHA` (origin/master), never the PR tree; with the switch off the phase answers before it reads the diff, the changed paths or the body, and the block below does not call it at all unless the verdict is FAIL. The PR head is checked out into a SEPARATE worktree and treated as data: the proof, the regenerators and the re-verify checks always run from that master worktree (`$MASTER_WT`) with `HYDRA_REPO_ROOT` pointing the regenerators at the PR worktree, never from PR-authored scripts; the session tree is asserted unchanged on exit.
 
 The `reviewer-commit` phase returns `commit-a` only when ALL of these hold: the stage is `A` or `A+B`; the tier is 1-3; no changed file is Verifier Core; the one-way-door detector says `two-way` (`one-way` and `unknown` both refuse); and EVERY blocking finding of the fold sits in a class-A location (the PR body, or a path `classifyQaFixPath` calls `A`/`AB` that is not listed under the PR body's `## Files out of scope`). One blocking finding anywhere else makes the whole round `none`: nothing is committed, nothing is pushed, and steps 9.5-10 run unchanged on the original FAIL. The phase never edits, filters or re-grades a finding.
 
 ```bash
 QA_FIXES=""
 RC_JSON=""
+MASTER_WT=""
+MASTER_ROOT_DIR=""
+SESSION_ROOT=$(git rev-parse --show-toplevel)
+SESSION_HEAD=$(git rev-parse HEAD)
+SESSION_STATUS=$(git status --porcelain)
 # Gate FIRST: a PASS verdict (or any non-FAIL) never reads the diff, the changed paths or the body.
 if [ "$REVIEW_VERDICT" = "FAIL" ]; then
+  # TRUST: every script below runs from a dedicated detached worktree of $FIXED_SHA (origin/master),
+  # NOT from this session tree (whose HEAD is the PR head, i.e. PR-authored code). Fail closed.
+  MASTER_ROOT_DIR=$(mktemp -d) && [ -n "$FIXED_SHA" ] && git worktree add --detach "$MASTER_ROOT_DIR/master" "$FIXED_SHA" >/dev/null 2>&1 \
+    && MASTER_WT="$MASTER_ROOT_DIR/master" && { [ ! -d "$SESSION_ROOT/node_modules" ] || ln -sfn "$SESSION_ROOT/node_modules" "$MASTER_WT/node_modules"; }
+fi
+if [ "$REVIEW_VERDICT" = "FAIL" ] && [ -n "$MASTER_WT" ]; then
   RC_JSON=$(printf '%s' "$FOLD_JSON" | jq --argjson pr "$pr_number" --argjson tier "${PR_TIER_NUM:-null}" \
     '{pr: $pr, tier: $tier, blocking: .fold.blocking, followUps: .fold.followUps}' \
-    | node --no-warnings --experimental-strip-types scripts/ci/qa-verdict.ts reviewer-commit) || RC_JSON=""
+    | node --no-warnings --experimental-strip-types "$MASTER_WT/scripts/ci/qa-verdict.ts" reviewer-commit) || RC_JSON=""
 fi
 RC_ACTION=$(printf '%s' "$RC_JSON" | jq -r '.action // "none"')
 if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
@@ -1070,11 +1081,10 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
   RC_OK=1
   CHECKED_OUT=0
   PR_WT=""
-  # TRUST: this session's master-based tree is the ONLY place scripts run from. The PR is checked out
-  # into a SEPARATE worktree and treated as data; the proof, the regenerators and the checks below are
-  # invoked by absolute path under SESSION_ROOT, never from the PR-authored tree.
-  SESSION_ROOT=$(git rev-parse --show-toplevel)
-  SESSION_HEAD=$(git rev-parse HEAD)
+  PR_ROOT_DIR=""
+  # TRUST: the master worktree ($MASTER_WT, built from $FIXED_SHA above) is the ONLY place scripts run
+  # from. The PR is checked out into a SEPARATE worktree and treated as data; the proof, the regenerators
+  # and the checks below are invoked by absolute path under MASTER_WT, never from a PR-authored tree.
   ORIG_BODY_FILE=$(mktemp); RC_BODY_FILE=$(mktemp)   # private tempfiles
   BODY_FIX=$(printf '%s' "$RC_JSON" | jq -r '.bodyFix // false')
   RC_BLOCKING_PATHS=$(printf '%s' "$RC_JSON" | jq -r '.blockingPaths[]?')
@@ -1086,7 +1096,7 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
   git rev-parse --git-dir | grep -q '\.git/worktrees/' || RC_OK=0
   # Detached checkout of the EXACT reviewed head into a separate worktree.
   if [ "$RC_OK" = 1 ]; then
-    PR_WT="$(mktemp -d)/pr"
+    PR_ROOT_DIR=$(mktemp -d) && PR_WT="$PR_ROOT_DIR/pr" || RC_OK=0
     git fetch origin "$HEAD_REF" && git worktree add --detach "$PR_WT" "$REVIEWED_HEAD" && CHECKED_OUT=1 || RC_OK=0
   fi
   if [ "$CHECKED_OUT" = 1 ]; then cd "$PR_WT" || RC_OK=0; fi
@@ -1096,8 +1106,9 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
     # Edit step (cwd is the PR worktree). For each blocking row, in order: open the file named in its
     # File:line cell, apply exactly the change its Fix cell names (only paths in RC_BLOCKING_PATHS; a
     # RC_FOLLOWUP_PATHS path is optional), then run the file's own regenerator BY ABSOLUTE PATH from
-    # "$SESSION_ROOT" (npx tsx "$SESSION_ROOT/scripts/docs/generate-inventories.ts" for docs/generated/,
-    # the ratchet's --update-baseline script for test/fixtures/*-baseline.json). When .bodyFix is true,
+    # "$MASTER_WT" with HYDRA_REPO_ROOT="$PR_WT" so it rewrites the PR worktree, never the session tree
+    # (HYDRA_REPO_ROOT="$PR_WT" npx tsx "$MASTER_WT/scripts/docs/generate-inventories.ts" for docs/generated/,
+    # HYDRA_REPO_ROOT="$PR_WT" node "$MASTER_WT/scripts/test/suite-count-check.mjs" --update-baseline --only <files> for test/fixtures/*-baseline.json). When .bodyFix is true,
     # seed "$RC_BODY_FILE" from "$ORIG_BODY_FILE" and ONLY add bullets under "## Files in scope".
     # A row you cannot resolve with a class-A edit aborts: RC_OK=0.
     #
@@ -1121,7 +1132,7 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
       # A corrected body must be non-empty, keep its Closes-ref, and (INV-6) differ ONLY by bullets added
       # under "## Files in scope": every other section byte-identical.
       { [ -s "$RC_BODY_FILE" ] && grep -Eq 'Closes #[0-9]+' "$RC_BODY_FILE"; } || RC_OK=0
-      node --experimental-strip-types "$SESSION_ROOT/scripts/ci/qa-commit-checks.ts" body-scope-check "$ORIG_BODY_FILE" "$RC_BODY_FILE" || RC_OK=0   # body-scope-check
+      node --experimental-strip-types "$MASTER_WT/scripts/ci/qa-commit-checks.ts" body-scope-check "$ORIG_BODY_FILE" "$RC_BODY_FILE" || RC_OK=0   # body-scope-check
     fi
     # Per-row re-verify against the NEW (staged) diff: a row with a file:line needs a git diff -U0 hunk
     # touching or adjacent to that line; a row with no line needs its file in the staged set; the
@@ -1133,7 +1144,7 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
       if [ -z "$ROW_LINE" ]; then
         printf '%s\n' "$STAGED" | grep -qxF -- "$ROW_FILE" || RC_OK=0
       else
-        git diff --cached -U0 -- "$ROW_FILE" | node --experimental-strip-types "$SESSION_ROOT/scripts/ci/qa-commit-checks.ts" row-hunk-check "$ROW_LINE" || RC_OK=0
+        git diff --cached -U0 -- "$ROW_FILE" | node --experimental-strip-types "$MASTER_WT/scripts/ci/qa-commit-checks.ts" row-hunk-check "$ROW_LINE" || RC_OK=0
       fi
     done < <(printf '%s' "$FOLD_JSON" | jq -r '.fold.blocking[].location')
     # A body-only round stages nothing: it still makes an EMPTY `QA-Fix: A` commit (INV-6), so the push
@@ -1143,8 +1154,8 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
     fi
   fi
   # Local deterministic proof BEFORE any push, run from the MASTER-BASED session tree against this PR
-  # worktree (cwd); the reviewer never hand-judges it. Base is the head the fold reviewed.
-  [ "$RC_OK" = 1 ] && { node --experimental-strip-types $SESSION_ROOT/scripts/ci/qa-fix-proof.ts --base "$REVIEWED_HEAD" --head HEAD || RC_OK=0; }
+  # worktree (cwd); the reviewer never hand-judges it. Base is $FIXED_SHA (origin/master): the rollout stage is read from master, never from the PR tree, and the merge-base of it and HEAD bounds the QA-Fix commits proved.
+  [ "$RC_OK" = 1 ] && { node --experimental-strip-types "$MASTER_WT/scripts/ci/qa-fix-proof.ts" --base "$FIXED_SHA" --head HEAD || RC_OK=0; }
   # Body BEFORE push, so the synchronize payload carries the corrected body. Only when .bodyFix is true.
   BODY_EDITED=0
   if [ "$RC_OK" = 1 ] && [ "$BODY_FIX" = true ]; then
@@ -1170,12 +1181,15 @@ Reviewer-fixed in ${QA_FIXES} (QA-Fix: A): each blocking row above is fixed-by $
   fi
   # EVERY exit path: return to the session tree, drop the PR worktree (only if one was created) and the tempfiles.
   cd "$SESSION_ROOT" || echo "ERROR: could not return to $SESSION_ROOT" >&2
-  [ -z "$PR_WT" ] || rm -rf "$(dirname "$PR_WT")"
-  if [ "$CHECKED_OUT" = 1 ]; then git worktree prune || echo "ERROR: could not prune $PR_WT" >&2; fi
+  if [ "$CHECKED_OUT" = 1 ]; then git worktree remove -f "$PR_WT" || echo "ERROR: could not remove $PR_WT" >&2; fi
+  [ -z "$PR_ROOT_DIR" ] || rm -rf "$PR_ROOT_DIR"
   rm -f "$ORIG_BODY_FILE" "$RC_BODY_FILE"
-  # The session tree was never switched: assert it.
-  [ "$(git rev-parse HEAD)" = "$SESSION_HEAD" ] || echo "ERROR: session tree HEAD moved off $SESSION_HEAD" >&2
 fi
+# Drop the master script worktree and assert the session tree was never switched or dirtied.
+if [ -n "$MASTER_WT" ]; then git worktree remove -f "$MASTER_WT" || echo "ERROR: could not remove $MASTER_WT" >&2; fi
+[ -z "$MASTER_ROOT_DIR" ] || rm -rf "$MASTER_ROOT_DIR"
+[ "$(git rev-parse HEAD)" = "$SESSION_HEAD" ] || echo "ERROR: session tree HEAD moved off $SESSION_HEAD" >&2
+[ "$(git -C "$SESSION_ROOT" status --porcelain)" = "$SESSION_STATUS" ] || echo "ERROR: session tree status changed during step 9.4" >&2
 ```
 
 A reviewer-commit round is one `round=` like any other and never counts as a FAIL round; the round cap and the T4 2-strike rule are untouched. Bare `PASS` is unreachable on such a round: the verdict is `PASS-pending-CI` at the NEW head, and the autopilot's auto-merge goes through `qa-merge-guard`, which holds with `qa-fix-proof-not-green` until the `qa-fix-proof` workflow is green on that head. Step 9.5 passes `$QA_FIXES` and the new head SHA explicitly to the `trailer` phase.

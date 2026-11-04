@@ -5,7 +5,9 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 
 import {
@@ -102,6 +104,18 @@ describe("decideReviewerCommit: all-or-nothing eligibility", () => {
     assert.equal(d.action, "commit-a");
     assert.equal(d.bodyFix, true);
     assert.deepEqual(d.blockingPaths, ["docs/guide.md", ".changelog/5267-x.md"]);
+  });
+
+  test("a LOW follow-up at PR body never forces bodyFix; a blocking PR body row still does", () => {
+    const low = decideReviewerCommit(
+      input({ blocking: [{ location: "docs/guide.md:3" }], followUps: [{ location: "PR body" }] }),
+    );
+    assert.equal(low.action, "commit-a");
+    assert.equal(low.bodyFix, false);
+    const blocking = decideReviewerCommit(
+      input({ blocking: [{ location: "docs/guide.md:3" }, { location: "PR body" }] }),
+    );
+    assert.equal(blocking.bodyFix, true);
   });
 
   test("one blocking finding in src/ makes the whole round none", () => {
@@ -314,7 +328,7 @@ describe("playbook step 9.4 pins", () => {
 
   test("the phase runs only on a FAIL verdict and is gated before the RC_JSON reads", () => {
     const gate = step94.indexOf('if [ "$REVIEW_VERDICT" = "FAIL" ]; then');
-    assert.ok(gate !== -1 && gate < step94.indexOf("qa-verdict.ts reviewer-commit"));
+    assert.ok(gate !== -1 && gate < step94.indexOf('qa-verdict.ts" reviewer-commit'));
   });
 
   test("only blocking paths must be staged; follow-up paths are an optional subset", () => {
@@ -325,7 +339,7 @@ describe("playbook step 9.4 pins", () => {
 
   test("the proof and regenerators run from the master-based session tree against a separate PR worktree", () => {
     assert.ok(step94.includes('SESSION_ROOT=$(git rev-parse --show-toplevel)'));
-    assert.ok(step94.includes('$SESSION_ROOT/scripts/ci/qa-fix-proof.ts --base "$REVIEWED_HEAD" --head HEAD'));
+    assert.ok(step94.includes('"$MASTER_WT/scripts/ci/qa-fix-proof.ts" --base "$FIXED_SHA" --head HEAD'));
     assert.ok(step94.includes('git worktree add --detach "$PR_WT"'));
     assert.ok(!/node [^\n]*[ "]scripts\/ci\/qa-fix-proof\.ts/.test(step94), "no PR-tree relative script path");
     assert.ok(!step94.includes("git checkout --detach"), "the session tree is never switched to the PR head");
@@ -362,5 +376,51 @@ describe("playbook step 9.4 pins", () => {
   test("the rollout switch ships off", () => {
     const cfg = JSON.parse(readFileSync(join(ROOT, "config", "orchestrator", "qa-rollout.json"), "utf8"));
     assert.equal(cfg["reviewer-commits"], "off");
+  });
+});
+
+describe("step 9.4 trust: scripts run from a master worktree, regenerators target the PR worktree (round 4)", () => {
+  const start = PLAYBOOK.indexOf("### 9.4 Reviewer commit");
+  const step94 = PLAYBOOK.slice(start, PLAYBOOK.indexOf("\n### ", start + 10));
+
+  test("a master worktree of FIXED_SHA is built, every script is invoked under it, and the session tree is asserted unchanged", () => {
+    assert.ok(step94.includes('git worktree add --detach "$MASTER_ROOT_DIR/master" "$FIXED_SHA"'));
+    assert.ok(step94.includes('"$MASTER_WT/scripts/ci/qa-verdict.ts" reviewer-commit'));
+    assert.ok(!/ scripts\/ci\/qa-verdict\.ts reviewer-commit/.test(step94), "no relative qa-verdict path");
+    assert.ok(!step94.includes("$SESSION_ROOT/scripts"), "no script runs from the session tree");
+    assert.ok(step94.includes('git -C "$SESSION_ROOT" status --porcelain'));
+  });
+
+  test("regenerators are pointed at the PR worktree via HYDRA_REPO_ROOT", () => {
+    assert.ok(step94.includes('HYDRA_REPO_ROOT="$PR_WT"'));
+  });
+});
+
+describe("HYDRA_REPO_ROOT retargets the trusted regenerators (round 4)", () => {
+  test("suite-count-check --update-baseline writes the target checkout, not its own", () => {
+    const own = join(ROOT, "test", "fixtures", "suite-count-baseline.json");
+    const before = readFileSync(own, "utf8");
+    const dir = mkdtempSync(join(tmpdir(), "qa5267-root-"));
+    try {
+      mkdirSync(join(dir, "test", "fixtures"), { recursive: true });
+      writeFileSync(join(dir, "test", "x.test.mts"), 'import { test } from "node:test";\ntest("a", () => {});\n');
+      writeFileSync(join(dir, "test", "fixtures", "suite-count-baseline.json"), "{}\n");
+      const r = spawnSync(
+        process.execPath,
+        [join(ROOT, "scripts", "test", "suite-count-check.mjs"), "--update-baseline", "--only", "test/x.test.mts"],
+        { env: { ...process.env, HYDRA_REPO_ROOT: dir }, encoding: "utf8" },
+      );
+      assert.equal(r.status, 0, r.stderr);
+      const written = JSON.parse(readFileSync(join(dir, "test", "fixtures", "suite-count-baseline.json"), "utf8"));
+      assert.equal(written["test/x.test.mts"], 1);
+      assert.equal(readFileSync(own, "utf8"), before, "the script's own checkout is untouched");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("without HYDRA_REPO_ROOT the script still targets its own checkout (sibling shape)", () => {
+    const src = readFileSync(join(ROOT, "scripts", "test", "suite-count-check.mjs"), "utf8");
+    assert.ok(src.includes("process.env.HYDRA_REPO_ROOT") && src.includes('"..", ".."'));
   });
 });
