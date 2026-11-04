@@ -142,6 +142,19 @@ describe("decide.py - Fable instant-death replay (#5323)", () => {
     assert.ok(mismatch.plan.reasons.includes("instant-death-unjoinable:dev_target"));
   });
 
+  test("a null slot or a slot without dispatch_id is unjoinable -> no replay (INV-3 fail-closed)", () => {
+    const nullSlot = baseState();
+    nullSlot.slots.dev_target = null;
+    const a = decide(nullSlot, [death()]);
+    assert.equal(replays(a.plan).length, 0);
+    assert.ok(a.plan.reasons.includes("instant-death-unjoinable:dev_target"), a.plan.reasons.join());
+    const noId = baseState();
+    delete noId.slots.dev_target.dispatch_id;
+    const b = decide(noId, [death()]);
+    assert.equal(replays(b.plan).length, 0);
+    assert.ok(b.plan.reasons.includes("instant-death-unjoinable:dev_target"), b.plan.reasons.join());
+  });
+
   test("usage hard stop suppresses the replay with a named reason", () => {
     const st = baseState({ usage_eligibility: { allow: false, reasons: ["weekly"], shed: [] } });
     const { plan } = decide(st, [death()]);
@@ -183,6 +196,33 @@ describe("decide.py - route-prs-to-review carries pr_numbers (#5323)", () => {
   test("no sweep set -> an empty list", () => {
     const { plan } = decide(brake(true), []);
     assert.deepEqual(plan.actions.find((a: any) => a.type === "route-prs-to-review").pr_numbers, []);
+  });
+});
+
+describe("reap.py post_instant_death_notice best-effort (#5323 INV-7)", () => {
+  const probe = (exc: string) => spawnSync("python3", ["-I", "-c", `
+import sys, http.client, urllib.error
+sys.path.insert(0, ${JSON.stringify(SCRIPTS)})
+import reap
+reap._append_log = lambda m: None
+def boom(*a, **k):
+    raise ${exc}
+reap.urllib.request.urlopen = boom
+print(reap.post_instant_death_notice("x"))
+`], { encoding: "utf-8" });
+
+  for (const exc of ["http.client.RemoteDisconnected('gone')", "ValueError('bad')"]) {
+    test(`${exc} is swallowed -> False, no traceback`, () => {
+      const r = probe(exc);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout.trim(), "False");
+    });
+  }
+
+  test("sibling shape: URLError still swallowed -> False", () => {
+    const r = probe("urllib.error.URLError('down')");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim(), "False");
   });
 });
 

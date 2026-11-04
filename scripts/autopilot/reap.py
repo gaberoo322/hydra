@@ -63,6 +63,7 @@ not fatal.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -1642,7 +1643,7 @@ def post_instant_death_notice(notice: str, model: str | None = None) -> bool:
         with urllib.request.urlopen(req, timeout=5) as resp:
             resp.read()
         return True
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+    except (urllib.error.URLError, urllib.error.HTTPError, http.client.HTTPException, OSError, ValueError) as exc:
         msg = f"instant_death_notice_skipped err={exc}"
         print(f"[autopilot] reap: {msg}", file=sys.stderr)
         _append_log(msg)

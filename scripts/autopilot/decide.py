@@ -2618,7 +2618,7 @@ def _rule_instant_death_replay(
             continue
         slot_obj = slots.get(cls)
         slot_dispatch = slot_obj.get("dispatch_id") if isinstance(slot_obj, dict) else None
-        if slot_dispatch and slot_dispatch != rec.get("worktreeBranch"):
+        if not slot_dispatch or slot_dispatch != rec.get("worktreeBranch"):
             out.reasons.append(f"instant-death-unjoinable:{cls}")
             continue
         prior_args = rec.get("prompt_args") if isinstance(rec.get("prompt_args"), dict) else {}
