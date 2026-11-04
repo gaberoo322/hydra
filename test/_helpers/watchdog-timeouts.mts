@@ -13,8 +13,9 @@
  * same defect were written WHILE IT WAS OPEN (`watchdog-launch-flow`,
  * `watchdog-pending-work`), so the pattern reintroduced itself within hours: a
  * one-time sweep over a static file list cannot cover files being authored
- * concurrently with it. Hence one shared constant plus a ratchet
- * (`test/watchdog-spawn-timeout-ratchet.test.mts`) rather than another sweep.
+ * concurrently with it. Hence one shared constant rather than another sweep
+ * (the spawn-timeout ratchet test that guarded the population was retired by
+ * #5099, when the collapse left only a few suites spawning the script).
  *
  * THESE BOUND A HANG, NOT A SLOW RUN. A correct watchdog tick finishes in
  * seconds; the ceiling exists only so a wedged child fails the suite instead of
@@ -43,16 +44,6 @@ export const WATCHDOG_SPAWN_TIMEOUT_MS = 120_000;
  * called them out for the same reason as the script ceilings.
  */
 export const WATCHDOG_REDIS_TIMEOUT_MS = 30_000;
-
-/**
- * The ratchet floor. No `spawnSync` in a watchdog-spawning test file may use a
- * numeric `timeout:` below this — enforced by
- * `test/watchdog-spawn-timeout-ratchet.test.mts`.
- *
- * Equal to the smaller of the two budgets above, so both constants satisfy it
- * by construction and the guard has exactly one number to check.
- */
-export const MIN_WATCHDOG_TEST_TIMEOUT_MS = WATCHDOG_REDIS_TIMEOUT_MS;
 
 /** The minimal `spawnSync` result shape these helpers inspect. */
 interface SpawnLike {

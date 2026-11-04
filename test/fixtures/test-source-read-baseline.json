@@ -156,12 +156,10 @@
     "test/watchdog-claude-hooks.test.mts": "behaviour",
     "test/watchdog-deploy-drift.test.mts": "drift-guard",
     "test/watchdog-launch-flow-force-exit.test.mts": "drift-guard",
-    "test/watchdog-node-modules-integrity-untouched.test.mts": "grandfathered",
     "test/watchdog-node-modules-integrity.test.mts": "grandfathered",
     "test/watchdog-operator-channel.test.mts": "grandfathered",
     "test/watchdog-origin-identity.test.mts": "behaviour",
     "test/watchdog-redis-backup-freshness.test.mts": "behaviour",
-    "test/watchdog-spawn-timeout-ratchet.test.mts": "invariant-lint",
     "test/wire-or-retire-carveout-drift.test.mts": "drift-guard",
     "test/work-page.test.mts": "grandfathered"
   }

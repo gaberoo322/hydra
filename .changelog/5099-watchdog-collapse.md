@@ -1,0 +1,1 @@
+- refactor: collapse hydra-watchdog.sh to the timer entry + node_modules-integrity block; port claude-hooks and brief-missing to TypeScript; add the CLI-start alarm (infra:watchdog_cli_failed) (#5099)
