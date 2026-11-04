@@ -1144,7 +1144,7 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
   fi
   # Local deterministic proof BEFORE any push, run from the MASTER-BASED session tree against this PR
   # worktree (cwd); the reviewer never hand-judges it. Base is the head the fold reviewed.
-  [ "$RC_OK" = 1 ] && { node --experimental-strip-types "$SESSION_ROOT/scripts/ci/qa-fix-proof.ts" --base "$REVIEWED_HEAD" --head HEAD || RC_OK=0; }
+  [ "$RC_OK" = 1 ] && { node --experimental-strip-types $SESSION_ROOT/scripts/ci/qa-fix-proof.ts --base "$REVIEWED_HEAD" --head HEAD || RC_OK=0; }
   # Body BEFORE push, so the synchronize payload carries the corrected body. Only when .bodyFix is true.
   BODY_EDITED=0
   if [ "$RC_OK" = 1 ] && [ "$BODY_FIX" = true ]; then

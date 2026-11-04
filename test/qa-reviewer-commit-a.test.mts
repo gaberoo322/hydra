@@ -325,7 +325,7 @@ describe("playbook step 9.4 pins", () => {
 
   test("the proof and regenerators run from the master-based session tree against a separate PR worktree", () => {
     assert.ok(step94.includes('SESSION_ROOT=$(git rev-parse --show-toplevel)'));
-    assert.ok(step94.includes('"$SESSION_ROOT/scripts/ci/qa-fix-proof.ts"'));
+    assert.ok(step94.includes('$SESSION_ROOT/scripts/ci/qa-fix-proof.ts --base "$REVIEWED_HEAD" --head HEAD'));
     assert.ok(step94.includes('git worktree add --detach "$PR_WT"'));
     assert.ok(!/node [^\n]*[ "]scripts\/ci\/qa-fix-proof\.ts/.test(step94), "no PR-tree relative script path");
     assert.ok(!step94.includes("git checkout --detach"), "the session tree is never switched to the PR head");
