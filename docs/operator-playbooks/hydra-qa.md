@@ -1154,8 +1154,9 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
     fi
   fi
   # Local deterministic proof BEFORE any push, run from the MASTER-BASED session tree against this PR
-  # worktree (cwd); the reviewer never hand-judges it. Base is $FIXED_SHA (origin/master): the rollout stage is read from master, never from the PR tree, and the merge-base of it and HEAD bounds the QA-Fix commits proved.
-  [ "$RC_OK" = 1 ] && { node --experimental-strip-types "$MASTER_WT/scripts/ci/qa-fix-proof.ts" --base "$FIXED_SHA" --head HEAD || RC_OK=0; }
+  # worktree (cwd); the reviewer never hand-judges it. Two proofs, both must pass: base `$REVIEWED_HEAD` proves the new commit alone (INV-7), and base `$FIXED_SHA` (origin/master) reads the rollout stage from master, never from the PR tree.
+  [ "$RC_OK" = 1 ] && { node --experimental-strip-types "$MASTER_WT"/scripts/ci/qa-fix-proof.ts --base "$REVIEWED_HEAD" --head HEAD \
+    && node --experimental-strip-types "$MASTER_WT"/scripts/ci/qa-fix-proof.ts --base "$FIXED_SHA" --head HEAD || RC_OK=0; }
   # Body BEFORE push, so the synchronize payload carries the corrected body. Only when .bodyFix is true.
   BODY_EDITED=0
   if [ "$RC_OK" = 1 ] && [ "$BODY_FIX" = true ]; then
