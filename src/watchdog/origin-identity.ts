@@ -2,7 +2,7 @@
  * watchdog/origin-identity.ts — the ORIGIN IDENTITY check (issue #5098, epic
  * #5094, slice 4/5; ADR-0040 Decision 2 shape). Ported from `run_origin_identity`
  * in scripts/hydra-watchdog.sh (#4939 alarm, #5065 auto-repair, #5026 host,
- * #5140 post-XADD marker).
+ * #5140 post-publish marker).
  *
  * Every ~/hydra worktree shares one .git/config, so a Target dispatch can rewrite
  * `remote.origin.url` and a pruning fetch then delete refs/remotes/origin/master.
@@ -11,8 +11,8 @@
  *
  * Dedup is by OUTCOME TRANSITION (alarm | repaired | failed) against a FILE
  * marker `<first> <outcome> <lastAttempt>`, written only after the notification
- * XADD returns a stream id. It deliberately does NOT use `runEpisode` (that
- * tracker marks fired BEFORE delivery; this one must retry a failed XADD).
+ * publish returns a stream id. It deliberately does NOT use `runEpisode` (that
+ * tracker marks fired BEFORE delivery; this one must retry a failed publish).
  *
  * MUTATION FENCE: every repair is `git -C <root> ...` through the typed
  * src/github/git.ts helpers, limited to `config remote.origin.url`,
@@ -328,7 +328,7 @@ async function tick(deps: OriginIdentityDeps, config: OriginIdentityConfig, say:
   const noteClean = cleanNote(repairNote);
   const repairField = outcome === "repaired" ? "repaired" : outcome === "failed" ? "failed" : "not-attempted";
 
-  // The since-marker is written ONLY after the XADD returns a stream id (#5140),
+  // The since-marker is written ONLY after the publish returns a stream id (#5140),
   // so a Redis blip retries next tick instead of silencing the whole episode.
   let streamId: string | null = null;
   try {
