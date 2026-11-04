@@ -21,6 +21,7 @@ import { OperatorChannel, operatorChannel } from "../operator-channel/channel.ts
 import { EventBus } from "../event-bus.ts";
 import { getGlmDrainerLiveness, readGlmDrainerLastPick } from "../redis/autopilot.ts";
 import { getPaceGateLastTick } from "../redis/launch-flow.ts";
+import { readRecentSlotEvents } from "../redis/slot-events.ts";
 import {
   anchorEpisodeSince,
   clearEpisodeKeys,
@@ -56,6 +57,28 @@ export interface WedgeFiles {
   readStatePid(path: string): WedgeState;
   /** OS-heartbeat epoch seconds (file mtime, as the bash block read it), or `null` when missing/unreadable. */
   heartbeatEpochS(path: string): number | null;
+  /** Occupied slots (non-null, bare-hex task_id) of state.json; `[]` when missing/unparseable. */
+  readSlotRefs(path: string): WedgeSlotRef[];
+}
+
+/** One occupied autopilot slot: the dispatch class and its bare-hex harness task id. */
+export interface WedgeSlotRef {
+  class: string;
+  taskId: string;
+}
+
+/** One raw slot-events stream entry (stream id + decoded field map). */
+export interface SlotEventRaw {
+  id: string;
+  fields: Record<string, string>;
+}
+
+export interface WedgeSlotEvents {
+  /**
+   * Newest slot-events entries, or `null` when the read failed / timed out /
+   * Redis is down (unknown activity never shields, issue #5349).
+   */
+  readRecent(): Promise<SlotEventRaw[] | null>;
 }
 
 export interface WedgeClock {
@@ -65,8 +88,36 @@ export interface WedgeClock {
 export interface WedgeDeps {
   host: WedgeHost;
   files: WedgeFiles;
+  slotEvents: WedgeSlotEvents;
   clock: WedgeClock;
   log: (line: string) => void;
+}
+
+/** Bound on the slot-events read: the wedge tick must never hang on Redis. */
+export const SLOT_EVENTS_READ_TIMEOUT_MS = 5000;
+
+/**
+ * Occupied slots from state.json text. Pure. Only non-null slot objects whose
+ * `task_id` is a bare lowercase-hex harness agent id count (an unstamped slot
+ * cannot be joined to the event stream, so it can never shield).
+ */
+export function parseStateSlots(raw: string): WedgeSlotRef[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    /* intentional: unparseable state.json == no occupied slots == nothing can shield */
+    return [];
+  }
+  const slots = (parsed as { slots?: unknown } | null)?.slots;
+  if (slots === null || typeof slots !== "object" || Array.isArray(slots)) return [];
+  const out: WedgeSlotRef[] = [];
+  for (const [cls, slot] of Object.entries(slots as Record<string, unknown>)) {
+    if (slot === null || typeof slot !== "object") continue;
+    const taskId = (slot as { task_id?: unknown }).task_id;
+    if (typeof taskId === "string" && /^[0-9a-f]+$/.test(taskId)) out.push({ class: cls, taskId });
+  }
+  return out;
 }
 
 /** Parse state.json text into a {@link WedgeState}. Pure; unparseable JSON or a non-positive pid is `no-pid`. */
@@ -102,6 +153,38 @@ export function readHeartbeatMtimeEpoch(path: string): number | null {
   }
 }
 
+/**
+ * Bounded slot-events read (INV-4): resolves null (shield off) on timeout or
+ * reader failure, logging a WARN either way so a Redis hang is distinguishable
+ * from an empty stream. Reader and timeout are injectable for tests.
+ */
+export function createSlotEventsReader<T>(
+  read: () => Promise<T>,
+  timeoutMs: number,
+  log: (line: string) => void,
+): () => Promise<T | null> {
+  return async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    try {
+      const timeout = new Promise<null>((resolve) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          resolve(null);
+        }, timeoutMs);
+      });
+      const r = await Promise.race([read(), timeout]);
+      if (timedOut) log(`hydra-autopilot-watchdog: WARN slot-events read timed out after ${timeoutMs}ms; activity unknown, shield off`);
+      return r;
+    } catch (err) {
+      log(`hydra-autopilot-watchdog: WARN slot-events read failed (${err instanceof Error ? err.message : String(err)}); activity unknown, shield off`);
+      return null;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+}
+
 export function createProductionWedgeDeps(log: (line: string) => void): WedgeDeps {
   return {
     host: {
@@ -125,7 +208,16 @@ export function createProductionWedgeDeps(log: (line: string) => void): WedgeDep
         return parseStatePid(raw);
       },
       heartbeatEpochS: (path) => readHeartbeatMtimeEpoch(path),
+      readSlotRefs(path) {
+        try {
+          return parseStateSlots(readFileSync(path, "utf8"));
+        } catch {
+          /* intentional: unreadable state.json == no occupied slots == nothing can shield */
+          return [];
+        }
+      },
     },
+    slotEvents: { readRecent: createSlotEventsReader(readRecentSlotEvents, SLOT_EVENTS_READ_TIMEOUT_MS, log) },
     clock: { nowEpochS: () => Math.floor(Date.now() / 1000) },
     log,
   };
