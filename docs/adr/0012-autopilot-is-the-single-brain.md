@@ -71,6 +71,8 @@ The stale-claim reaper migrates into `decide.py` (extending Phase 2's existing r
 
 `bootstrap.sh` reads `slots`, `burned_classes`, `failure_log`, and the `remediation` map from Redis at run start — with TTL-bounded keys that auto-cleanse. `state.json` on `/tmp` becomes a **per-run cache** of Redis-backed continuous state, not the source of truth.
 
+*Delivered (per-run-cache half): by the Run Ledger (`scripts/autopilot/run_ledger.py`, epic #5071), whose field table is the authority on what carries; `burned_classes` and `failure_log` are reset-per-run there, not Redis-carried. The plan-action hooks half is not claimed delivered.*
+
 New hooks under `scripts/autopilot/hooks/`:
 
 - `pre-tool-use.sh` — fires on every `Agent` / `Bash` (merge|approve|queue-decision) tool call from inside the autopilot harness. XADD `plan-action` event with `state=attempting, action_type, action_payload` to `hydra:autopilot:plan-actions:<runId>:<turn>`.

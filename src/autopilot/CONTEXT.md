@@ -48,6 +48,7 @@ The cluster is an acyclic layered DAG. Read it bottom-up; nothing below depends 
 | | `dispatch-pr-link.ts` | `recordDispatchPr` — links a dispatch to its PR |
 | | `outcome-record.ts` | Dispatch-outcome attribution records (see the name-collision warning below) |
 | Routes / aggregators | `../api/autopilot-*.ts`, `../aggregators/*` | HTTP surface and dashboard rollups |
+| Brain-side state (outside `src/`) | `../../scripts/autopilot/run_ledger.py` | The **Run Ledger**. Nothing in `src/` depends on it. (a) `GET /api/autopilot/inflight-slots` (`readInflightSlotSeed`) is the orchestrator -> ledger SEED direction that `bootstrap.sh`'s `run_ledger.py seed` consumes, not a TS read of the ledger; (b) the only TS reads of the document are two read-only identity peeks, `log.ts` `readCurrentRunIdFromState` (run_id) and `../watchdog/ports.ts` `parseStatePid` (pid, run_id); (c) no TS code writes it |
 
 There are no cycles, and no dead modules — every file above has live production callers. `runs.ts`
 having a single caller is not a smell: it is the write path behind exactly one route, which is what
