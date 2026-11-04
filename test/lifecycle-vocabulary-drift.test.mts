@@ -47,6 +47,30 @@ test("ORCH_BOARD_LABELS lifecycle-state values equal OPEN_STATES", () => {
   }
 });
 
+test("pre-existing ORCH_BOARD_LABELS keys keep their values and new state values stay out of glm/eligibility.ts", () => {
+  const pinned: Record<string, string> = {
+    needs_qa: "needs-qa",
+    ready_for_agent: "ready-for-agent",
+    needs_triage: "needs-triage",
+    needs_research: "needs-research",
+    in_progress: "in-progress",
+    blocked: "blocked",
+    target_backlog: "target-backlog",
+    glm_eligible: "glm-eligible",
+    glm_withhold: "glm-withhold",
+    glm_ab_control: "glm-ab-control",
+    cleanup_scan: "cleanup-scan",
+    needs_design_concept: "needs-design-concept",
+  };
+  for (const [k, v] of Object.entries(pinned)) {
+    assert.equal((ORCH_BOARD_LABELS as Record<string, string>)[k], v, `ORCH_BOARD_LABELS.${k} changed`);
+  }
+  const eligibility = read("src/glm/eligibility.ts");
+  for (const v of ["needs-info", "hitl-grill", "needs-tickets", "needs-dev-resume", "qa-passed", "ready-for-human", "parked"]) {
+    assert.ok(!eligibility.includes(`"${v}"`), `src/glm/eligibility.ts quotes the new label literal "${v}"`);
+  }
+});
+
 test("needs_design_concept flag spelling matches DESIGN_CONCEPT_FLAG", () => {
   assert.equal(ORCH_BOARD_LABELS.needs_design_concept, DESIGN_CONCEPT_FLAG);
   assert.ok(boardFlags.includes(DESIGN_CONCEPT_FLAG));
