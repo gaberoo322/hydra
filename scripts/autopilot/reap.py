@@ -33,8 +33,11 @@ Modes:
                 else ~/.claude/projects). LIVE (mtime < 1800s): mutates
                 nothing, prints `wait_or_reap verdict=live ...`. DEAD (older,
                 or no transcript): calls run_completion with tokens = the
-                LAST usage line's context total (never 0 when a transcript
-                exists, never the summed per-turn usage).
+                LAST usage line's context total (never the summed per-turn
+                usage); 0 with token_source=transcript-no-usage when the
+                transcript has no readable usage line, token_source=unknown
+                when there is no transcript. A stat() failure on a found
+                transcript reaps NOTHING (verdict=unknown).
 
   completion  — Idempotent completion reap (issue #411).
                 Records the dispatched subagent's final token count once
@@ -2211,7 +2214,12 @@ def _find_child_transcript(task_id: str) -> Path | None:
         matches = list(_projects_root().glob(f"*/*/subagents/agent-{task_id}.jsonl"))
         if not matches:
             return None
-        return max(matches, key=lambda p: p.stat().st_mtime)
+        def _mtime(p: Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return -1.0  # unreadable sorts last; run_wait_or_reap's own stat fails safe
+        return max(matches, key=_mtime)
     except OSError as exc:
         print(f"[autopilot] wait-or-reap: transcript lookup failed: {exc}", file=sys.stderr)
         return None
@@ -2250,6 +2258,9 @@ def _final_usage_context_total(path: Path) -> int | None:
 def run_wait_or_reap(slot: str, task_id: str) -> int:
     """`wait-or-reap` mode (issue #5282): liveness by transcript mtime, then a
     forced reap through run_completion when the child is dead."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+        print(f"[autopilot] wait-or-reap: invalid task_id={task_id!r}", file=sys.stderr)
+        return 0
     transcript = _find_child_transcript(task_id)
     age: int | None = None
     if transcript is not None:
@@ -2257,7 +2268,12 @@ def run_wait_or_reap(slot: str, task_id: str) -> int:
             age = max(0, int(time.time() - transcript.stat().st_mtime))
         except OSError as exc:
             print(f"[autopilot] wait-or-reap: stat failed: {exc}", file=sys.stderr)
-            transcript = None
+            # Transcript exists but liveness is unknowable: never reap a
+            # possibly live child on a transient stat failure.
+            msg = f"wait_or_reap verdict=unknown slot={slot} task_id={task_id} reason=stat-failed"
+            print(f"[autopilot] {msg}")
+            _append_log(msg)
+            return 0
     if transcript is not None and age is not None and age < WAIT_OR_REAP_LIVE_WINDOW_S:
         msg = f"wait_or_reap verdict=live slot={slot} task_id={task_id} transcript_age_s={age}"
         print(f"[autopilot] {msg}")
@@ -2270,6 +2286,8 @@ def run_wait_or_reap(slot: str, task_id: str) -> int:
         final = _final_usage_context_total(transcript)
         if final is not None:
             tokens, source = final, "transcript-final-usage"
+        else:
+            source = "transcript-no-usage"
     s = load_state()
     slot_obj = ((s or {}).get("slots") or {}).get(slot)
     skill = slot_obj.get("skill") if isinstance(slot_obj, dict) else None

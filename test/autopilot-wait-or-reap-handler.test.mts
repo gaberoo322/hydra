@@ -6,7 +6,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, utimesSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -103,6 +103,39 @@ describe("reap.py wait-or-reap (issue #5282)", () => {
     assert.equal(r.status, 0);
     assert.match(r.stdout, /transcript_age_s=missing tokens=0 token_source=unknown/);
     assert.equal(readState(e.state).slots.dev_orch, null);
+  });
+
+  test("transcript with no readable usage line: tokens=0 with distinct token_source=transcript-no-usage", () => {
+    const e = setup({ transcript: { ageSec: 5000 } });
+    const f = join(e.projects, "-home-x", "sess-uuid", "subagents", `agent-${TASK}.jsonl`);
+    writeFileSync(f, "not json {\n");
+    const t = Date.now() / 1000 - 5000;
+    utimesSync(f, t, t);
+    const r = run(e, ["wait-or-reap", "dev_orch", TASK]);
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /verdict=reaped .*tokens=0 token_source=transcript-no-usage/);
+    assert.equal(readState(e.state).slots.dev_orch, null);
+  });
+
+  test("stat() failure on a found transcript: verdict=unknown, nothing reaped", () => {
+    const e = setup({});
+    const sub = join(e.projects, "-home-x", "sess-uuid", "subagents");
+    mkdirSync(sub, { recursive: true });
+    symlinkSync(join(e.dir, "does-not-exist"), join(sub, `agent-${TASK}.jsonl`));
+    const before = readFileSync(e.state, "utf8");
+    const r = run(e, ["wait-or-reap", "dev_orch", TASK]);
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /verdict=unknown .*reason=stat-failed/);
+    assert.equal(readFileSync(e.state, "utf8"), before);
+  });
+
+  test("glob metacharacters in task_id are rejected without touching state", () => {
+    const e = setup({ transcript: { ageSec: 5000 } });
+    const before = readFileSync(e.state, "utf8");
+    const r = run(e, ["wait-or-reap", "dev_orch", "a*"]);
+    assert.equal(r.status, 0);
+    assert.match(r.stderr, /invalid task_id/);
+    assert.equal(readFileSync(e.state, "utf8"), before);
   });
 
   test("a second call for the same task_id is a dup_skip and leaves cumulative_tokens alone", () => {
