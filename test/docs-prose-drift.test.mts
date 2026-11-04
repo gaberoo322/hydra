@@ -429,6 +429,17 @@ describe("docs-prose-drift", () => {
   });
 });
 
+describe("run-ledger glossary entry", () => {
+  test("Run Ledger glossary entry never claims TS reads the ledger only through the inflight-slots route", () => {
+    const glossary = readFileSync(join(REPO_ROOT, "CONTEXT.md"), "utf8");
+    ok(glossary.includes("**Run Ledger**:"), "CONTEXT.md must define Run Ledger");
+    ok(
+      !/reads it only through the inflight-slots route/i.test(glossary),
+      "the seed direction is orchestrator -> ledger; TS has two read-only identity peeks",
+    );
+  });
+});
+
 describe("prose-drift: verification never throws on unreadable inputs", () => {
   test("a missing inventory yields an unreadable-input offender row, not a throw", () => {
     const root = mkdtempSync(join(tmpdir(), "prose-drift-noinputs-"));
