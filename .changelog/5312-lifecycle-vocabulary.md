@@ -1,0 +1,1 @@
+- refactor: derive the board-label vocabulary and triage-labels doc from src/lifecycle with a drift test; drop dead labels and key builders (#5312)
