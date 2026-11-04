@@ -33,6 +33,7 @@ process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 const {
   resolveTranscriptPath,
   findSubagentTranscriptPathByAgentId,
+  resetAgentScanCache,
   confineToRoot,
   isUuidShaped,
   encodeProjectDir,
@@ -156,7 +157,30 @@ describe("findSubagentTranscriptPathByAgentId (#5325)", () => {
     assert.equal(await findSubagentTranscriptPathByAgentId(UUID, deps), null);
   });
   test("miss returns null", async () => {
+    resetAgentScanCache();
     assert.equal(await findSubagentTranscriptPathByAgentId("0123456789abcdef", deps), null);
+  });
+  test("repeat probes (hit and miss) are served from the short-TTL cache, not re-scanned", async () => {
+    resetAgentScanCache();
+    let scans = 0;
+    const counting = {
+      ...deps,
+      listProjectDirs: async (p: string) => {
+        scans++;
+        return deps.listProjectDirs(p);
+      },
+    };
+    await findSubagentTranscriptPathByAgentId("fedcba9876543210", counting);
+    const afterFirstMiss = scans;
+    assert.ok(afterFirstMiss > 0);
+    await findSubagentTranscriptPathByAgentId("fedcba9876543210", counting);
+    await findSubagentTranscriptPathByAgentId("fedcba9876543210", counting);
+    assert.equal(scans, afterFirstMiss, "cached miss must not re-scan");
+    // Sibling shape: a cached hit still returns the same path with no re-scan.
+    assert.equal(await findSubagentTranscriptPathByAgentId("abcdef0123456789", counting), hit);
+    const afterHit = scans;
+    assert.equal(await findSubagentTranscriptPathByAgentId("abcdef0123456789", counting), hit);
+    assert.equal(scans, afterHit);
   });
 });
 
@@ -326,6 +350,7 @@ describe("GET /dispatches/:dispatchId/transcript — route contract", () => {
   });
 
   function writeChild(agentId: string, parent: string) {
+    resetAgentScanCache();
     const subDir = join(tmpRoot, ".claude", "projects", "-home-gabe-hydra", parent, "subagents");
     mkdirSync(subDir, { recursive: true });
     writeFileSync(

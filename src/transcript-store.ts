@@ -45,6 +45,7 @@ import { readdir, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { basename, join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
+import { logger } from "./logger.ts";
 
 /**
  * The transcript root — the single source of truth for the
@@ -241,6 +242,20 @@ export async function resolveSubagentTranscriptPath(
 }
 
 /**
+ * Short-TTL cache for {@link findSubagentTranscriptPathByAgentId} (#5325): the
+ * route is public + unauthenticated, so repeated probes (hits AND misses) must
+ * not each cost a full tree scan. Bounded by entry count.
+ */
+const AGENT_SCAN_CACHE_TTL_MS = 30_000;
+const AGENT_SCAN_CACHE_MAX = 256;
+const agentScanCache = new Map<string, { path: string | null; at: number }>();
+
+/** Test seam: drop the agentId scan cache. */
+export function resetAgentScanCache(): void {
+  agentScanCache.clear();
+}
+
+/**
  * Locate an Agent-tool child's JSONL by its bare `agentId` alone (issue #5325).
  *
  * The registry row that carries `parentSessionId` is DELETEd by reap on
@@ -259,6 +274,24 @@ export async function findSubagentTranscriptPathByAgentId(
 ): Promise<string | null> {
   if (!isAgentIdShaped(agentId)) return null;
   const root = deps.root ?? projectsRoot();
+  const cacheKey = `${root}\0${agentId}`;
+  const nowMs = Date.now();
+  const hit = agentScanCache.get(cacheKey);
+  if (hit && nowMs - hit.at < AGENT_SCAN_CACHE_TTL_MS) return hit.path;
+  const result = await scanForAgentId(root, agentId, deps);
+  if (agentScanCache.size >= AGENT_SCAN_CACHE_MAX) {
+    const oldest = agentScanCache.keys().next().value;
+    if (oldest !== undefined) agentScanCache.delete(oldest);
+  }
+  agentScanCache.set(cacheKey, { path: result, at: nowMs });
+  return result;
+}
+
+async function scanForAgentId(
+  root: string,
+  agentId: string,
+  deps: ResolveDeps,
+): Promise<string | null> {
 
   const statExists =
     deps.stat ??
@@ -278,7 +311,7 @@ export async function findSubagentTranscriptPathByAgentId(
         const entries = await readdir(r, { withFileTypes: true });
         return entries.filter((e) => e.isDirectory()).map((e) => e.name);
       } catch (err) {
-        console.error(`[transcript-store] failed to list transcript dir ${r}:`, err);
+        logger.warn({ err, dir: r }, "[transcript-store] failed to list transcript dir");
         return [];
       }
     });
