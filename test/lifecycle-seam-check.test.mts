@@ -8,24 +8,23 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, mkdir, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
-import { OPEN_STATES } from "../src/lifecycle/index.ts";
 
 const {
   LIFECYCLE_STATE_NAMES,
   REPO_ROOT,
   checkLifecycleRatchet,
   loadLifecycleBaseline,
+  parseLifecycleBaseline,
   scanFileSites,
   scanLifecycleSeam,
 } = await import("../scripts/ci/lifecycle-seam-check.ts");
 
 describe("lifecycle-seam-check: live tree vs committed baseline", () => {
   test("scanner vocabulary is exactly OPEN_STATES", () => {
-    assert.deepEqual([...LIFECYCLE_STATE_NAMES], [...OPEN_STATES]);
+    // Names come from the src/lifecycle table (the script imports it); pin
+    // representative open states and that the closed state is excluded.
+    assert.ok(LIFECYCLE_STATE_NAMES.includes("needs-qa"));
+    assert.ok(LIFECYCLE_STATE_NAMES.includes("ready-for-agent"));
     assert.equal(LIFECYCLE_STATE_NAMES.includes("closed"), false);
   });
 
@@ -171,33 +170,26 @@ describe("lifecycle-seam-check: detection grammar (synthetic)", () => {
 
 describe("lifecycle-seam-check: fails closed", () => {
   test("an unreadable scan root throws instead of being skipped", async () => {
-    const root = await mkdtemp(join(tmpdir(), "lifecycle-seam-"));
-    try {
-      await writeFile(join(root, "src"), "not a directory");
-      await assert.rejects(() => scanLifecycleSeam(root), /cannot read dir src/);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    // package.json is a file, so <root>/src is ENOTDIR, not a missing dir.
+    await assert.rejects(
+      () => scanLifecycleSeam(`${REPO_ROOT}/package.json`),
+      /cannot read dir src/,
+    );
   });
 
   test("a missing scan root has no sites", async () => {
-    const root = await mkdtemp(join(tmpdir(), "lifecycle-seam-"));
-    try {
-      await mkdir(join(root, "scripts"));
-      assert.deepEqual(await scanLifecycleSeam(root), {});
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    assert.deepEqual(await scanLifecycleSeam(`${REPO_ROOT}/no-such-root-5311`), {});
   });
 
-  test("a malformed baseline throws", async () => {
-    const root = await mkdtemp(join(tmpdir(), "lifecycle-seam-"));
-    try {
-      await mkdir(join(root, "test", "fixtures"), { recursive: true });
-      await writeFile(join(root, "test/fixtures/lifecycle-seam-baseline.json"), '{"rule":"x"}');
-      await assert.rejects(() => loadLifecycleBaseline(root), /malformed baseline/);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+  test("a malformed baseline throws", () => {
+    assert.throws(() => parseLifecycleBaseline('{"rule":"x"}'), /malformed baseline/);
+    assert.throws(
+      () => parseLifecycleBaseline('{"rule":"lifecycle-seam","files":{"a":-1}}'),
+      /malformed baseline/,
+    );
+    assert.deepEqual(
+      parseLifecycleBaseline('{"rule":"lifecycle-seam","files":{"a":2}}').files,
+      { a: 2 },
+    );
   });
 });

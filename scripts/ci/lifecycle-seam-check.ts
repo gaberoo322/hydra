@@ -338,7 +338,11 @@ export async function scanLifecycleSeam(root: string = REPO_ROOT): Promise<Obser
 export async function loadLifecycleBaseline(
   root: string = REPO_ROOT,
 ): Promise<LifecycleBaseline> {
-  const raw = await readFile(join(root, LIFECYCLE_SEAM_BASELINE_REL), "utf8");
+  return parseLifecycleBaseline(await readFile(join(root, LIFECYCLE_SEAM_BASELINE_REL), "utf8"));
+}
+
+/** Pure shape check of the baseline JSON text; throws on a malformed baseline. */
+export function parseLifecycleBaseline(raw: string): LifecycleBaseline {
   const parsed = JSON.parse(raw) as Partial<LifecycleBaseline> | null;
   const files = parsed?.files;
   if (
