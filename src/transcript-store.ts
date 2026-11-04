@@ -247,12 +247,33 @@ export async function resolveSubagentTranscriptPath(
  * not each cost a full tree scan. Bounded by entry count.
  */
 const AGENT_SCAN_CACHE_TTL_MS = 30_000;
+const AGENT_SCAN_MISS_TTL_MS = 5_000;
 const AGENT_SCAN_CACHE_MAX = 256;
-const agentScanCache = new Map<string, { path: string | null; at: number }>();
+const AGENT_SCAN_MAX_CONCURRENT = 2;
+const agentScanCache = new Map<string, { path: string | null; at: number; ttl: number }>();
+/** Single-flight: concurrent probes for the same key share one scan. */
+const agentScanInflight = new Map<string, Promise<string | null>>();
+let agentScansRunning = 0;
+const agentScanWaiters: Array<() => void> = [];
+
+async function acquireAgentScanSlot(): Promise<void> {
+  if (agentScansRunning < AGENT_SCAN_MAX_CONCURRENT) {
+    agentScansRunning++;
+    return;
+  }
+  await new Promise<void>((resolve) => agentScanWaiters.push(resolve));
+}
+
+function releaseAgentScanSlot(): void {
+  const next = agentScanWaiters.shift();
+  if (next) next(); // slot handed over; running count unchanged
+  else agentScansRunning--;
+}
 
 /** Test seam: drop the agentId scan cache. */
 export function resetAgentScanCache(): void {
   agentScanCache.clear();
+  agentScanInflight.clear();
 }
 
 /**
@@ -277,22 +298,43 @@ export async function findSubagentTranscriptPathByAgentId(
   const cacheKey = `${root}\0${agentId}`;
   const nowMs = Date.now();
   const hit = agentScanCache.get(cacheKey);
-  if (hit && nowMs - hit.at < AGENT_SCAN_CACHE_TTL_MS) return hit.path;
-  const result = await scanForAgentId(root, agentId, deps);
-  if (agentScanCache.size >= AGENT_SCAN_CACHE_MAX) {
-    const oldest = agentScanCache.keys().next().value;
-    if (oldest !== undefined) agentScanCache.delete(oldest);
-  }
-  agentScanCache.set(cacheKey, { path: result, at: nowMs });
-  return result;
+  if (hit && nowMs - hit.at < hit.ttl) return hit.path;
+  const pending = agentScanInflight.get(cacheKey);
+  if (pending) return pending;
+  const run = (async () => {
+    await acquireAgentScanSlot();
+    try {
+      const flags = { errored: false };
+      const result = await scanForAgentId(root, agentId, deps, flags);
+      // A miss caused by a listing error is NOT cached: a transient readdir
+      // failure must not turn a real transcript into a sticky 404.
+      if (result === null && flags.errored) return null;
+      agentScanCache.delete(cacheKey); // re-set moves the key to the newest slot
+      if (agentScanCache.size >= AGENT_SCAN_CACHE_MAX) {
+        const oldest = agentScanCache.keys().next().value;
+        if (oldest !== undefined) agentScanCache.delete(oldest);
+      }
+      agentScanCache.set(cacheKey, {
+        path: result,
+        at: Date.now(),
+        ttl: result === null ? AGENT_SCAN_MISS_TTL_MS : AGENT_SCAN_CACHE_TTL_MS,
+      });
+      return result;
+    } finally {
+      releaseAgentScanSlot();
+      agentScanInflight.delete(cacheKey);
+    }
+  })();
+  agentScanInflight.set(cacheKey, run);
+  return run;
 }
 
 async function scanForAgentId(
   root: string,
   agentId: string,
   deps: ResolveDeps,
+  flags: { errored: boolean },
 ): Promise<string | null> {
-
   const statExists =
     deps.stat ??
     (async (p: string) => {
@@ -312,14 +354,24 @@ async function scanForAgentId(
         return entries.filter((e) => e.isDirectory()).map((e) => e.name);
       } catch (err) {
         logger.warn({ err, dir: r }, "[transcript-store] failed to list transcript dir");
+        flags.errored = true;
         return [];
       }
     });
+  const safeList = async (r: string): Promise<string[]> => {
+    try {
+      return await listDirs(r);
+    } catch (err) {
+      logger.warn({ err, dir: r }, "[transcript-store] listProjectDirs threw");
+      flags.errored = true;
+      return [];
+    }
+  };
 
-  for (const projectDir of await listDirs(root)) {
+  for (const projectDir of await safeList(root)) {
     const projectPath = confineToRoot(root, join(root, projectDir));
     if (!projectPath) continue;
-    for (const sessionDir of await listDirs(projectPath)) {
+    for (const sessionDir of await safeList(projectPath)) {
       const candidate = confineToRoot(
         root,
         join(projectPath, sessionDir, "subagents", `agent-${agentId}.jsonl`),

@@ -182,6 +182,71 @@ describe("findSubagentTranscriptPathByAgentId (#5325)", () => {
     assert.equal(await findSubagentTranscriptPathByAgentId("abcdef0123456789", counting), hit);
     assert.equal(scans, afterHit);
   });
+  test("concurrent probes for one id share a single in-flight scan (single-flight)", async () => {
+    resetAgentScanCache();
+    let rootListings = 0;
+    const slow = {
+      ...deps,
+      listProjectDirs: async (p: string) => {
+        if (p === "/r") rootListings++;
+        await new Promise((r) => setTimeout(r, 20));
+        return deps.listProjectDirs(p);
+      },
+    };
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => findSubagentTranscriptPathByAgentId("abcdef0123456789", slow)),
+    );
+    assert.ok(results.every((r) => r === hit));
+    assert.equal(rootListings, 1, "5 concurrent probes -> 1 scan");
+  });
+  test("concurrent scans of DISTINCT ids are capped", async () => {
+    resetAgentScanCache();
+    let live = 0;
+    let peak = 0;
+    const slow = {
+      ...deps,
+      listProjectDirs: async (p: string) => {
+        if (p !== "/r") return [];
+        live++;
+        peak = Math.max(peak, live);
+        await new Promise((r) => setTimeout(r, 15));
+        live--;
+        return [];
+      },
+    };
+    await Promise.all(
+      Array.from({ length: 8 }, (_, i) =>
+        findSubagentTranscriptPathByAgentId(`00000000000000${i}0`.slice(-16), slow),
+      ),
+    );
+    assert.ok(peak <= 2, `peak concurrent scans ${peak} must be <= 2`);
+  });
+  test("a miss caused by a listing error is not cached; a clean miss still is", async () => {
+    resetAgentScanCache();
+    let calls = 0;
+    let fail = true;
+    const flaky = {
+      ...deps,
+      listProjectDirs: async (p: string) => {
+        calls++;
+        if (fail) throw new Error("EIO");
+        return deps.listProjectDirs(p);
+      },
+    };
+    assert.equal(await findSubagentTranscriptPathByAgentId("abcdef0123456789", flaky), null);
+    fail = false;
+    assert.equal(
+      await findSubagentTranscriptPathByAgentId("abcdef0123456789", flaky),
+      hit,
+      "errored miss must not be negatively cached",
+    );
+    // Sibling: clean miss is cached.
+    calls = 0;
+    await findSubagentTranscriptPathByAgentId("1111111111111111", flaky);
+    const c = calls;
+    await findSubagentTranscriptPathByAgentId("1111111111111111", flaky);
+    assert.equal(calls, c);
+  });
 });
 
 describe("sessionMetadataFrom", () => {
