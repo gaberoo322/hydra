@@ -88,8 +88,7 @@ test("triage-labels.md Human-hold column matches HUMAN_HOLD_STATES", () => {
 
 test("triage-labels.md Flag labels table lists every non-state board label and no state", () => {
   const got = tableRows("Flag labels").map((r) => label(r[0]));
-  const boardOnly = got.filter((g) => boardFlags.includes(g));
-  assert.deepEqual([...boardOnly].sort(), [...boardFlags].sort(), diff(boardFlags, boardOnly));
+  assert.deepEqual([...got].sort(), [...boardFlags].sort(), diff(boardFlags, got));
   for (const g of got) assert.ok(!stateSet.has(g), `flag table lists lifecycle state ${g}`);
 });
 
