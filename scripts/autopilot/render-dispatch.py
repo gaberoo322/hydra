@@ -127,6 +127,14 @@ FORWARD_FIX_CONTRACT = """Red-PR forward-fix contract (issues #4460, #5058, INV-
 4. **Design-concept-reconcile failure specifically:** the gate reads the PR body captured at push time (webhook snapshot). Correct the body FIRST via `gh pr edit {pr} --body-file <file>`, THEN push the fix commit — a push that lands before the body edit replays the stale body and re-fails the check (bit #4242 twice).
 5. **Verify in the foreground** (`npm test`, `npm run typecheck` AND `npm run typecheck:test`, before the push that is meant to be final), commit, push — the same commit-before-verify discipline as any dev dispatch: commit and push first, verify, push again once green. When done, post exactly ONE comment on the PR naming what was fixed and which required check(s) or QA finding(s) the fix targets, plus any finding you rebutted and why, naming both tests (the red-without-the-fix test and the sibling-shape pin) for each QA-FAIL finding fixed with a code change — none for a rebutted finding or a CI-only fix. Do not relabel the anchor issue by hand — reap's needs-qa promotion (INV-9) advances it when the closing PR is confirmed."""
 
+# The conflict fix-forward deltas (playbook § dev_orch dispatch, issues #4807,
+# #5253) — appended after FORWARD_FIX_CONTRACT when `prompt_args.conflict_fix`
+# is set, one per arm. Verbatim copies of the playbook paragraphs; the parity
+# test in test/autopilot-render-dispatch.test.mts pins them against it.
+CONFLICT_ONLY_DELTA = """**Conflict fix-forward delta (issue #4807).** When `prompt_args.conflict_fix` is true (the `orch_dirty_forward_fix` pin), first apply `conflict-fix-attempted` to the PR via `gh api repos/gaberoo322/hydra/issues/<pr>/labels -f 'labels[]=conflict-fix-attempted'` (never `gh pr edit`), then carry the contract above with step 1's reset kept and: merge `origin/master` into the head (NEVER rebase, force-push or `gh pr create`); keep both sides' intent; regenerate `npm run docs:inventories` and union `test/fixtures/suite-count-baseline.json` keys then `--update-baseline`; run targeted tests + `typecheck` + `typecheck:test`; push to the SAME branch; do NOT address review findings. An unresolvable conflict ends with no push and one PR comment naming the paths; never remove the marker."""
+
+TWO_PHASE_DELTA = """**Two-phase conflict fix-forward delta (issue #5253).** When `prompt_args.qa_fail_at_head` is true (a QA FAIL is pending at the PR's pre-merge head), carry the contract above in this order: (a) apply `conflict-fix-attempted` to the PR via `gh api repos/gaberoo322/hydra/issues/<pr>/labels -f 'labels[]=conflict-fix-attempted'` (never `gh pr edit`); (b) reset to the PR head per step 1; (c) merge `origin/master` into the head (NEVER rebase, force-push or `gh pr create`), keep both sides' intent, regenerate `npm run docs:inventories` and union `test/fixtures/suite-count-baseline.json` keys then `--update-baseline`, commit and push the merge to the SAME branch; (d) only then carry steps 2-5 on the merged head, taking the finding list from the `### Findings` comment whose trailing `QA-Verdict` sha matches the pre-merge head's FAIL trailer — finding work never happens on an unmerged head. An unresolvable conflict ends with no push, one PR comment naming the paths and no finding work; never remove the marker."""
+
 UNPINNED_RANKING = """Ordering the unpinned pick (issue #3981) — when more than one `ready-for-agent` issue is eligible, break the tie in this order (a tie-break, not a quota): 1. **Maintainability** — refactors, test coverage, dead-code removal, silent-catch audits, module splits; 2. **Operator surface** — the dashboard and the observability it renders; 3. **Throughput** — new capability. If the top-ranked eligible issue is blocked, has an open PR already referencing it (grep PR bodies for `Closes #N`), or lacks a `## Files in scope` section, fall through to the next — do not relabel to force it."""
 
 DEV_VERIFY_RULES = (
@@ -393,6 +401,8 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
                 )
         if pa.get("forward_fix_pr"):
             out.append(FORWARD_FIX_CONTRACT.format(pr=pa.get("forward_fix_pr"), branch=pa.get("resume_branch") or "<resume_branch>"))
+            if pa.get("conflict_fix"):
+                out.append(TWO_PHASE_DELTA if pa.get("qa_fail_at_head") else CONFLICT_ONLY_DELTA)
         else:
             out.append(
                 "Open the PR from the worktree branch with a body that carries `## Files in scope`, a `Tier:` line and "

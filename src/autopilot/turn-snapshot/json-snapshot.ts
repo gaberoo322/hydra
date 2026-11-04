@@ -312,6 +312,8 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     // #4808: a bare anchor, not a pin — there is no PR, branch or head to name.
     orch_dev_resume_nopr_anchor: v.prGate.devResumeNoprPick.ok ? v.prGate.devResumeNoprPick.value : null,
     orch_dirty_forward_fix: pin(dirtyFix.pick),
+    // #5253: the pick's PR number iff a QA FAIL is pending at its head (two-phase arm), else null.
+    orch_dirty_forward_fix_fail_pr: v.prGate.dirtyFixFailPr,
     orch_prs_dirty_surface: dirtyFix.surface.map((e) => ({ pr: e.pr, closing_issue: e.closingIssue })),
     // #5052: fail closed - a degraded recheck renders [] (the collector already marked it).
     orch_qa_verdict_recheck: v.prGate.qaVerdictRecheck.ok

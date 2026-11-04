@@ -150,6 +150,8 @@ const SignalsSchema = z
     // PR references, so the PR-keyed pins above structurally can't name it.
     orch_dev_resume_nopr_anchor: IssueNumber.nullable(),
     orch_dirty_forward_fix: PinSchema.nullable(),
+    // #5253: the dirty pick's PR number iff a QA FAIL is pending at its head (two-phase arm)
+    orch_dirty_forward_fix_fail_pr: IssueNumber.nullable(),
     orch_prs_dirty_surface: DirtySurfaceSchema,
     // #5052: open PRs whose QA verdict may now be mergeable - re-evaluated every turn
     orch_qa_verdict_recheck: QaRecheckSchema,
@@ -227,6 +229,7 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   orch_dev_resume_pick: null,
   orch_dev_resume_nopr_anchor: null,
   orch_dirty_forward_fix: null,
+  orch_dirty_forward_fix_fail_pr: null,
   orch_prs_dirty_surface: [],
   orch_qa_verdict_recheck: [],
   orch_pending_grill_anchor: null,
