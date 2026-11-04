@@ -1,0 +1,1 @@
+- fix: autopilot turns now run the stale in-progress/blocked recovery pass so uncollected dev PRs no longer strand (#5344)

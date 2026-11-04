@@ -488,6 +488,41 @@ def summary(state: dict) -> dict:
     }
 
 
+def _anchor_issue_number(anchor: Any) -> int | None:
+    """An occupied slot's anchor ('issue-N' or 'N') as an issue number; None when it names none."""
+    token = str(anchor).strip()
+    if token.startswith("issue-"):
+        token = token[len("issue-") :]
+    return int(token) if token.isdigit() else None
+
+
+def stale_recovery(state: Any) -> dict:
+    """The stale-recovery pass's input (#5344): the stored snapshot's orch stale lists minus the
+    anchors of occupied slots (those belong to the reap paths). Fail-safe: an absent signal, a marker
+    document or an all-degraded snapshot reads as [] — no data means no relabel. Never raises (the
+    loud-fail replay contract applies to decide.py's reads only)."""
+    signals = _signals(state) or {}
+    slots = state.get("slots") if isinstance(state, dict) and isinstance(state.get("slots"), dict) else {}
+    inflight: set[int] = set()
+    for slot in slots.values():
+        if isinstance(slot, dict):
+            n = _anchor_issue_number(slot.get("anchor"))
+            if n is not None:
+                inflight.add(n)
+
+    def listed(name: str) -> list[int]:
+        raw = signals.get(name)
+        return sorted({n for n in _int_tokens(raw) if n > 0}) if isinstance(raw, list) else []
+
+    in_progress, blocked = listed("orch_stale_in_progress_items"), listed("orch_stale_blocked_items")
+    skipped = sorted(inflight & (set(in_progress) | set(blocked)))
+    return {
+        "stale_in_progress": [n for n in in_progress if n not in inflight],
+        "stale_blocked": [n for n in blocked if n not in inflight],
+        "skipped_inflight": skipped,
+    }
+
+
 def _apply_cli(args: list[str]) -> int:
     if len(args) >= 2 and args[0] == "--degraded":
         snap_path, reason, rest = None, args[1] or "the Turn Snapshot emit failed", args[2:]
@@ -557,7 +592,8 @@ def _apply_cli(args: list[str]) -> int:
 USAGE = (
     "usage: turn_snapshot.py apply <snapshot.json | -> [state.json]\n"
     "       turn_snapshot.py apply --degraded <reason> [state.json]\n"
-    "       turn_snapshot.py summary [state.json]"
+    "       turn_snapshot.py summary [state.json]\n"
+    "       turn_snapshot.py stale-recovery [state.json]"
 )
 
 
@@ -570,6 +606,12 @@ def main(argv: list[str]) -> int:
         if state is None:
             return 1
         print(json.dumps(summary(state)))
+        code = 0
+    elif cmd == "stale-recovery" and len(args) <= 1:
+        state = _read_state(args[0] if args else DEFAULT_STATE_PATH)
+        if state is None:
+            return 1
+        print(json.dumps(stale_recovery(state)))
         code = 0
     else:
         code = -1
