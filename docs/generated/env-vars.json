@@ -46,6 +46,24 @@
       }
     },
     {
+      "name": "CLAUDE_SKILLS_DIR",
+      "readSites": [
+        {
+          "path": "scripts/ci/check-skill-playbook-drift.sh"
+        },
+        {
+          "path": "scripts/hydra-watchdog.ts"
+        },
+        {
+          "path": "scripts/sync-skills.sh"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/ci/check-skill-playbook-drift.sh"
+      }
+    },
+    {
       "name": "CODEX_BIN",
       "readSites": [],
       "inEnvExample": true,
@@ -106,6 +124,9 @@
         },
         {
           "path": "scripts/hydra-watchdog.sh"
+        },
+        {
+          "path": "scripts/hydra-watchdog.ts"
         },
         {
           "path": "scripts/setup-claude-hooks.sh"
@@ -963,6 +984,18 @@
       "inEnvExample": false,
       "source": {
         "path": "bin/hydra"
+      }
+    },
+    {
+      "name": "HYDRA_BASH_BIN",
+      "readSites": [
+        {
+          "path": "src/host-probe/exec.ts"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "src/host-probe/exec.ts"
       }
     },
     {
@@ -2216,6 +2249,9 @@
           "path": "scripts/hydra-watchdog.sh"
         },
         {
+          "path": "scripts/hydra-watchdog.ts"
+        },
+        {
           "path": "src/aggregators/architecture-graph.ts"
         },
         {
@@ -2608,84 +2644,48 @@
       "name": "HYDRA_WATCHDOG_AUTODEPLOY",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
-      }
-    },
-    {
-      "name": "HYDRA_WATCHDOG_AUTODEPLOY_DRY_RUN",
-      "readSites": [
-        {
-          "path": "scripts/hydra-watchdog.sh"
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_BACKUP_DIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
-      }
-    },
-    {
-      "name": "HYDRA_WATCHDOG_BACKUP_NOTIFY_STREAM",
-      "readSites": [
-        {
-          "path": "scripts/hydra-watchdog.sh"
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_BACKUP_STALE_HOURS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
-      }
-    },
-    {
-      "name": "HYDRA_WATCHDOG_BACKUP_TIMER_STATE",
-      "readSites": [
-        {
-          "path": "scripts/hydra-watchdog.sh"
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
@@ -2716,12 +2716,12 @@
       "name": "HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
@@ -2821,183 +2821,147 @@
       }
     },
     {
-      "name": "HYDRA_WATCHDOG_DRIFT_DEPLOYED_SHA",
-      "readSites": [
-        {
-          "path": "scripts/hydra-watchdog.sh"
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/hydra-watchdog.sh"
-      }
-    },
-    {
-      "name": "HYDRA_WATCHDOG_DRIFT_REMOTE_SHA",
-      "readSites": [
-        {
-          "path": "scripts/hydra-watchdog.sh"
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/hydra-watchdog.sh"
-      }
-    },
-    {
       "name": "HYDRA_WATCHDOG_DRIFT_STATE_DIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_EXPECTED_ORIGIN_HOST",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_WINDOW_HOURS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_LATENCY_BUDGET_MS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_METER_DARK_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
-      }
-    },
-    {
-      "name": "HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM",
-      "readSites": [
-        {
-          "path": "scripts/hydra-watchdog.sh"
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_NOW_MS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_LAUNCH_QUOTA_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
@@ -3088,132 +3052,84 @@
       "name": "HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_ORIGIN_FETCH_TIMEOUT_S",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
-      }
-    },
-    {
-      "name": "HYDRA_WATCHDOG_ORIGIN_MASTER_PRESENT",
-      "readSites": [
-        {
-          "path": "scripts/hydra-watchdog.sh"
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/hydra-watchdog.sh"
-      }
-    },
-    {
-      "name": "HYDRA_WATCHDOG_ORIGIN_NOTIFY_STREAM",
-      "readSites": [
-        {
-          "path": "scripts/hydra-watchdog.sh"
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_ORIGIN_REPAIR_BACKOFF_S",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_ORIGIN_STATE_DIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
-      }
-    },
-    {
-      "name": "HYDRA_WATCHDOG_ORIGIN_URL",
-      "readSites": [
-        {
-          "path": "scripts/hydra-watchdog.sh"
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_SKILL_MIRROR_AUTOFIX",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
-      }
-    },
-    {
-      "name": "HYDRA_WATCHDOG_SKILL_MIRROR_AUTOFIX_DRY_RUN",
-      "readSites": [
-        {
-          "path": "scripts/hydra-watchdog.sh"
-        }
-      ],
-      "inEnvExample": false,
-      "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_SKILL_MIRROR_AUTOFIX_GRACE_SECONDS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_SKILL_MIRROR_LIVE_DIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
@@ -3566,6 +3482,27 @@
       "inEnvExample": false,
       "source": {
         "path": "src/operator-channel/credentials.ts"
+      }
+    },
+    {
+      "name": "TMPDIR",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh"
+        },
+        {
+          "path": "scripts/osv-scan.sh"
+        },
+        {
+          "path": "scripts/sync-skills.sh"
+        },
+        {
+          "path": "src/watchdog/ports.ts"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/hooks/on-subagent-tool-call.sh"
       }
     }
   ]

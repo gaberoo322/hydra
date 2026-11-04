@@ -525,7 +525,7 @@ Detail: `hydra-autopilot-dispatch-reference.md` § qa_target.
 
 ## Phases (one-line each — full prose lives in code)
 
-- **Phase 0** — `bootstrap.sh "$@"` initialises `/tmp/hydra-autopilot-state.json` (slash args via `args-parse.sh`), then the **schema-version handshake** (see below) runs before any other phase
+- **Phase 0** — `bootstrap.sh "$@"` seeds the Run Ledger (default path `/tmp/hydra-autopilot-state.json`, resolved by `run_ledger.py path`; slash args via `args-parse.sh`), then the **schema-version handshake** (see below) runs before any other phase
 - **Phases 1 → 4 as one command** — `turn.sh events.json` (issue #4831): JSON Turn Snapshot → `turn_snapshot.py apply` (stored as emitted; a failed emit is replaced by `turn-snapshot.ts --all-degraded`) → the Phase 1.5 stale-recovery pass → `decide.py` → `assert_invariants.py`, then the plan + usage summary. The per-phase lines below say what it runs.
 - **Phase 1** — `turn-snapshot.ts` emits the typed Turn Snapshot (ADR-0043, #4934), validated on emit by `src/schemas/turn-snapshot.ts` alone; the accessor `turn_snapshot.py` is store-only (#5083), and the replay contract in `test/turn-snapshot-json.test.mts` (#5085) is the only guard on the signals `decide.py` reads
 - **Phase 1.5** — `turn.sh` runs `recover-stale.sh stale_in_progress <N...> stale_blocked <M...>` itself (#5344) once per turn, after the snapshot is stored and before `decide.py`, from the snapshot's `orch_stale_in_progress_items` / `orch_stale_blocked_items` read via `turn_snapshot.py stale-recovery` (anchors of occupied slots excluded — the reap paths own those). Fail-open (never changes the exit code or plan; script under `timeout`, output on stderr); skipped in replay mode unless `HYDRA_AUTOPILOT_RECOVER_STALE` overrides the path. Caveat: a `/hydra-epic-sprint` slice looks stranded, so it is reached only when the operator keeps the autopilot live during a sprint
@@ -547,7 +547,7 @@ schema matches the schema bootstrap wrote:
 ```bash
 PLAYBOOK_SCHEMA=$(grep -oP '^HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA:\s*\K[0-9]+' \
   docs/operator-playbooks/hydra-autopilot.md)
-STATE_SCHEMA=$(jq -r '.limits.schema_version // 1' /tmp/hydra-autopilot-state.json)
+STATE_SCHEMA=$(python3 scripts/autopilot/run_ledger.py get "$(python3 scripts/autopilot/run_ledger.py path)" limits.schema_version --default 1)
 
 if [ -z "$PLAYBOOK_SCHEMA" ]; then
   echo "[autopilot] FATAL: playbook missing HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA marker; run scripts/sync-skills.sh"

@@ -25,6 +25,7 @@
       "referenceDocs": [],
       "slices": {
         "env-vars": [
+          "HYDRA_BASH_BIN",
           "HYDRA_DF_BIN",
           "HYDRA_DU_BIN",
           "HYDRA_FLOCK_BIN",
@@ -157,8 +158,6 @@
         ],
         "redis-keys": [
           "alerts",
-          "anchorAbandonmentCount",
-          "anchorPermSkip",
           "anchorPriorFailures",
           "anchorProcessing",
           "anchorReframeQueue",
@@ -1481,6 +1480,7 @@
         "0020",
         "0024",
         "0029",
+        "0032",
         "0033",
         "0034",
         "0045"
@@ -1748,7 +1748,7 @@
     },
     {
       "slug": "scripts-autopilot",
-      "name": "scripts/autopilot/ (decide.py, classes.json)",
+      "name": "scripts/autopilot/ (decide.py, classes.json, run_ledger.py — the Run Ledger)",
       "table": "infra",
       "paths": [
         "scripts/autopilot/"
@@ -1830,7 +1830,8 @@
           "HYDRA_REDIS_PORT",
           "HYDRA_ROOT",
           "HYDRA_TARGET_REPO",
-          "REPO"
+          "REPO",
+          "TMPDIR"
         ],
         "classes": [
           "dev_orch (implement/sonnet)",
@@ -2188,7 +2189,8 @@
       ],
       "adrsCited": [
         "0009",
-        "0033"
+        "0033",
+        "0038"
       ],
       "referenceDocs": [
         {

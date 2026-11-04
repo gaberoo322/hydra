@@ -1,0 +1,1 @@
+- docs: define the Run Ledger in the glossary, module map and autopilot playbook (#5076)

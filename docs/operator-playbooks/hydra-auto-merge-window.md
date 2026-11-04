@@ -13,7 +13,7 @@ arguments: [action]
 > configured it has nothing eligible to act on. It is a reusable template for the
 > *next* bulk-PR wave (a refactor batch, a migration sweep, a dependency bump
 > campaign), not infrastructure that runs during normal operation. Its original
-> use — the ADR-0006 CLI-removal `refactor-batch-2026-05` wave — has passed; that label
+> use — the ADR-0006 CLI-removal wave — has passed; its label
 > is no longer hardcoded. **To reactivate:** set `$HYDRA_BATCH_LABEL` to the live
 > campaign's GitHub label (see Configuration) and open a window. When no campaign
 > is running, leave it dormant.
@@ -51,7 +51,7 @@ WINDOW_FILE=~/.config/hydra/auto-merge-until.txt
 LOG_FILE=~/.config/hydra/auto-merge-log.txt
 REPO=gaberoo322/hydra
 # Campaign label — set this to the live batch's GitHub label before running.
-# No default: the ADR-0006 CLI-removal `refactor-batch-2026-05` wave is over, so the
+# No default: the ADR-0006 CLI-removal wave is over, so the
 # template ships dormant. Point it at the next campaign's label to reactivate.
 BATCH_LABEL="${HYDRA_BATCH_LABEL:-}"
 MAX_WINDOW_HOURS=24

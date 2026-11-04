@@ -28,6 +28,7 @@ import {
   GLM_DRAINER_HEARTBEAT_TTL_SECONDS,
   GLM_DRAINER_LAST_PICK_KEY,
   getGlmDrainerLastPick,
+  readGlmDrainerLastPick,
   setGlmDrainerLastPick,
 } from "../src/redis/autopilot.ts";
 import { parseLsRemoteHeads } from "../src/github/git.ts";
@@ -636,6 +637,14 @@ describe("setGlmDrainerLastPick / getGlmDrainerLastPick (hydra:glm:drainer:last-
 
   test("absent key reads null", async () => {
     assert.equal(await getGlmDrainerLastPick(), null);
+  });
+
+  test("readGlmDrainerLastPick: absent key is {absent}, malformed JSON is {unreadable} (watchdog INV-4)", async () => {
+    assert.deepEqual(await readGlmDrainerLastPick(), { kind: "absent" });
+    await redis.set(GLM_DRAINER_LAST_PICK_KEY, "{not json");
+    assert.deepEqual(await readGlmDrainerLastPick(), { kind: "unreadable" });
+    assert.equal(await getGlmDrainerLastPick(), null, "legacy accessor still collapses to null");
+    await redis.del(GLM_DRAINER_LAST_PICK_KEY);
   });
 });
 

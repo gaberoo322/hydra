@@ -123,6 +123,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import process from "node:process";
 import { compareCapture, fileCoverageDiff, loadBaseline, testFilesFromArgs } from "./suite-count-check.mjs";
+import { buildPoolInvocations, loadManifest, parallelConcurrency, runPools } from "./test-pools.mjs";
 
 const REDIS_HOST = "127.0.0.1";
 const REDIS_PORT = 6379;
@@ -634,6 +635,23 @@ async function retryShortfallsInIsolation(result, baseline, redisUrl) {
 //     default disposition terminates the process.
 // ---------------------------------------------------------------------------
 
+/**
+ * Pool children (issue #5199) run detached in their own process groups so one
+ * child's death can take down exactly its sibling's tree. Tracked here so a
+ * signal to the LAUNCHER also reaps them — no orphan `node --test` outlives
+ * the launcher (INV-7).
+ */
+const livePoolChildren = new Set();
+function killPoolChildren(signal) {
+  for (const c of livePoolChildren) {
+    try {
+      process.kill(-c.pid, signal);
+    } catch {
+      /* intentional: the child's group already exited (ESRCH) — nothing left to reap */
+    }
+  }
+}
+
 /** Which phase of the launch lifecycle this launcher is currently in. */
 let launcherPhase = "startup";
 
@@ -759,6 +777,7 @@ function installLauncherSignalHandlers() {
   for (const signal of ["SIGTERM", "SIGINT"]) {
     process.on(signal, () => {
       console.error(launcherInfraKillLine(signal, launcherPhase));
+      killPoolChildren(signal);
       process.removeAllListeners(signal);
       process.kill(process.pid, signal);
     });
@@ -782,7 +801,11 @@ if (isMain) {
 
 async function main() {
 installLauncherSignalHandlers();
-const args = process.argv.slice(2);
+let args = process.argv.slice(2);
+// Issue #5199 (INV-9): the explicit opt-in. Only `test` / `test:debug` pass
+// --pools; `test:file` keeps the single-child behaviour byte-for-byte.
+const poolsMode = args[0] === "--pools";
+if (poolsMode) args = args.slice(1);
 const resolved = resolveRedisUrl(process.env, process.cwd());
 
 if (args[0] === "--print-url") {
@@ -865,18 +888,35 @@ if (testFiles.length > 0) {
 }
 
 launcherPhase = "test-suite";
-const child = spawn(args[0], args.slice(1), {
-  stdio: "inherit",
-  env: hermeticChildEnv(redisChildEnv(process.env, resolved.url, resolved.db)),
-});
-if (child.pid !== undefined) {
-  // INV-6 (#4292): the test child's pid, for post-mortem attribution.
-  console.error(`[redis-db-launch] test child pid ${child.pid}`);
+const spawnEnv = hermeticChildEnv(redisChildEnv(process.env, resolved.url, resolved.db));
+
+/**
+ * Run the test command and resolve to `{ code, signal }` once it has fully
+ * exited. Default: one inherited-stdio child. `--pools` (issue #5199): a serial
+ * child (concurrency 1, live stdout) and a parallel child (private stdout
+ * buffered then appended after both exit — INV-6) run concurrently; reporter
+ * destinations are per-pool and concatenated back (INV-5); the exit is
+ * non-zero if EITHER child is, a signal-death of either takes the INFRA-KILL
+ * path and the sibling's process group is terminated first (INV-7).
+ */
+function runTestCommand() {
+  if (!poolsMode) {
+    return new Promise((resolveRun) => {
+      const child = spawn(args[0], args.slice(1), { stdio: "inherit", env: spawnEnv });
+      if (child.pid !== undefined) {
+        // INV-6 (#4292): the test child's pid, for post-mortem attribution.
+        console.error(`[redis-db-launch] test child pid ${child.pid}`);
+      }
+      child.on("error", (err) => {
+        console.error(`[redis-db-launch] failed to spawn ${args[0]}: ${err.message}`);
+        process.exit(1);
+      });
+      child.on("exit", (code, signal) => resolveRun({ code, signal }));
+    });
+  }
+  const invocations = buildPoolInvocations(args, loadManifest(), parallelConcurrency());
+  return runPools({ invocations, env: spawnEnv, children: livePoolChildren });
 }
-child.on("error", (err) => {
-  console.error(`[redis-db-launch] failed to spawn ${args[0]}: ${err.message}`);
-  process.exit(1);
-});
 // Issue #5106: the single exit seam for every path after the child exited.
 function verdictFields() {
   const counts = testFiles.length > 0 ? captureTopLevelCounts(capturePath) : null;
@@ -906,7 +946,8 @@ function exitWithVerdict(code, suitesGate) {
   );
   process.exit(resolved.code);
 }
-child.on("exit", async (code, signal) => {
+const { code, signal } = await runTestCommand();
+{
   launcherPhase = "suite-count-verdict";
   let suitesGate = "ok";
   if (signal) {
@@ -1130,5 +1171,5 @@ child.on("exit", async (code, signal) => {
     }
   }
   exitWithVerdict(code ?? 1, suitesGate);
-});
+}
 }

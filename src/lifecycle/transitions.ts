@@ -57,6 +57,7 @@ export type GateId =
   | "dispatch"
   | "pr-open"
   | "close"
+  | "research-exit"
   | "not-yet-implemented";
 
 export interface Transition {
@@ -89,7 +90,7 @@ export const TRANSITIONS: readonly Transition[] = [
   { from: "needs-triage", to: "ready-for-human", firedBy: "agent", gate: "adr5" },
   { from: "needs-triage", to: "closed", firedBy: "agent", gate: "close" },
   // Research exits need a Hydra-Research trailer (#5320).
-  ...rows("needs-research", "agent", "not-yet-implemented", [
+  ...rows("needs-research", "agent", "research-exit", [
     "needs-triage",
     "needs-info",
     "hitl-grill",

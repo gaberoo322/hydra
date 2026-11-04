@@ -41,6 +41,10 @@ import { join, resolve } from "node:path";
 
 import { BRIEF_LAST_SENT_KEY } from "../src/redis/operator-channel.ts";
 import { PAGE_KINDS, isPageKind } from "../src/operator-channel/page-list.ts";
+import { DEPLOY_DRIFT_LOG_PREFIX } from "../src/watchdog/deploy-drift.ts";
+import { ORIGIN_IDENTITY_LOG_PREFIX, ORIGIN_IDENTITY_PAGE_KIND } from "../src/watchdog/origin-identity.ts";
+import { REDIS_BACKUP_LOG_PREFIX, REDIS_BACKUP_STALE_KIND } from "../src/watchdog/redis-backup.ts";
+import { SKILL_MIRROR_LOG_PREFIX } from "../src/watchdog/skill-mirror.ts";
 import {
   WATCHDOG_SPAWN_TIMEOUT_MS,
   WATCHDOG_REDIS_TIMEOUT_MS,
@@ -181,21 +185,20 @@ describe("run_brief_missing — structure (issue #5048, ADR-0045 Decision 8)", (
     assert.equal(syntax.status, 0, `bash -n failed: ${syntax.stderr}`);
   });
 
-  test("the block is wired into the entry point, just before run_origin_identity", () => {
+  test("the block is wired into the entry point, just before run_origin_identity_cli", () => {
     const src = read("scripts/hydra-watchdog.sh");
     const defIdx = src.indexOf("run_brief_missing()");
-    const originIdx = src.indexOf("run_origin_identity() {");
+    const originIdx = src.indexOf("run_origin_identity_cli() {");
     assert.ok(defIdx >= 0, "run_brief_missing() definition not found");
-    // The origin-identity suite slices from ITS definition to the entry point
-    // and pins `run_origin_identity` as the last call before `exit 0`, so this
+    // `run_origin_identity_cli` (#5098) is the last call before `exit 0`, so this
     // block is defined before it and dispatched before it.
-    assert.ok(originIdx > defIdx, "the block definition must precede run_origin_identity's (the origin-identity suite slices from there)");
+    assert.ok(originIdx > defIdx, "the block definition must precede the origin-identity wrapper's");
     const guard = 'if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then';
     const guardIdx = src.lastIndexOf(guard);
     assert.ok(guardIdx > defIdx, "the sourcing-guarded entry point must follow the block definition");
     const entry = src.slice(guardIdx);
     assert.match(entry, /^\s*run_brief_missing$/m, "block must run on every real tick");
-    assert.match(entry, /run_brief_missing\n\s*run_origin_identity\n\s*exit 0/, "block sits just before run_origin_identity in the main sequence");
+    assert.match(entry, /run_brief_missing\n\s*run_origin_identity_cli\n\s*exit 0/, "block sits just before run_origin_identity_cli in the main sequence");
   });
 
   test("reads the TS-owned last-sent key name verbatim (drift guard) and never writes it", () => {
@@ -455,5 +458,182 @@ describe("run_brief_missing — redis timeout + DEL gating (issue #5115)", () =>
     installStub(healthyStub());
     const r = runWithStub({ HYDRA_WATCHDOG_BRIEF_STALE_HOURS: "08" });
     assert.equal(r.status, 0, `"08" must not abort under set -e: ${r.stderr}`);
+  });
+});
+
+// =============================================================================
+// Operator Channel CLI delivery across the remaining bash blocks (ADR-0045 D2,
+// issue #5046), plus the launch-flow port boundary (issue #5097). Moved here
+// from test/watchdog-launch-flow.test.mts when `run_launch_flow` left bash, so
+// the launch-flow suites carry no bash source reads at all.
+// =============================================================================
+
+describe("scripts/hydra-watchdog.sh — Operator Channel CLI delivery (ADR-0045 D2, issue #5046)", () => {
+  /** Code-only view of the whole script (comment lines stripped). */
+  function scriptCode(): string {
+    return readFileSync(WATCHDOG, "utf-8")
+      .split("\n")
+      .filter((l) => !/^\s*#/.test(l))
+      .join("\n");
+  }
+
+  test("no block names the Telegram Bot API host or curls it — the CLI is the only sender", () => {
+    const code = scriptCode();
+    assert.ok(!code.includes("api.telegram.org"), "scripts/hydra-watchdog.sh must not carry the Bot API host on a code line");
+    assert.equal((code.match(/\bcurl\s[^\n]*TELEGRAM/g) ?? []).length, 0, "no curl reads a Telegram credential");
+    assert.ok(!code.includes("TELEGRAM_BOT_TOKEN") && !code.includes("TELEGRAM_CHAT_ID"), "the watchdog never reads Telegram credentials itself (one loader, in the CLI)");
+  });
+
+  test("every remaining page-list bash block owns a deliver_page helper that resolves the CLI through HYDRA_WATCHDOG_OPERATOR_NOTIFY", () => {
+    const code = scriptCode();
+    const helpers = code.match(/^\s*deliver_page\(\) \{/gm) ?? [];
+    assert.equal(helpers.length, 2, "node-modules-integrity and brief-missing (#5048) each keep their own helper (the rc_write duplication precedent); launch-flow left bash in #5097, redis-backup and origin-identity in #5098");
+    for (const block of ["run_node_modules_integrity()", "run_brief_missing()"]) {
+      const start = code.indexOf(block);
+      assert.ok(start >= 0, `${block} not found`);
+      const body = code.slice(start, start + code.slice(start).search(/^}/m) + 1);
+      const hStart = body.indexOf("deliver_page() {");
+      assert.ok(hStart >= 0, `${block} must define deliver_page`);
+      const helper = body.slice(hStart, hStart + body.slice(hStart).indexOf("\n  }\n") + 4);
+      assert.ok(helper.includes("HYDRA_WATCHDOG_OPERATOR_NOTIFY"), `${block}'s helper must honour the test override`);
+      assert.ok(helper.includes("scripts/operator-notify.ts"), `${block}'s helper must default to the repo CLI`);
+      assert.ok(helper.includes("--experimental-strip-types"), `${block}'s helper must run node --experimental-strip-types`);
+      assert.ok(!helper.includes("npx"), `${block}'s helper must never shell npx (a unit's PATH cannot see the global tsx)`);
+      assert.match(helper, /timeout 25/, `${block}'s helper is wrapped in timeout 25`);
+      assert.match(helper, /\|\| log "WARN/, `${block}'s helper degrades to a logged WARN`);
+      assert.match(body, /deliver_page page --kind/, `${block} must page at its fired transition`);
+      assert.match(body, /deliver_page resolve --dedup-key/, `${block} must resolve at its recovery edge`);
+    }
+  });
+
+  test("every remaining watchdog page kind is on the closed page list, with dedupKey == kind", () => {
+    const code = scriptCode();
+    const kinds = new Set<string>();
+    for (const m of code.matchAll(/deliver_page page --kind "?([a-z_:]+)"? --dedup-key "?([a-z_:$]+)"?/g)) {
+      if (m[1].startsWith("$")) continue;
+      kinds.add(m[1]);
+      assert.equal(m[2], m[1], `page call for ${m[1]} must use dedupKey == kind (${m[2]})`);
+    }
+    for (const k of ["infra:node_modules_wiped"]) {
+      assert.ok(kinds.has(k), `expected a literal page call for ${k}`);
+      assert.ok(isPageKind(k), `${k} must be on the closed page list`);
+    }
+    // The ported blocks (#5098) are re-asserted against the TS module constants:
+    // each is a page kind and pages with dedupKey == kind.
+    for (const k of [REDIS_BACKUP_STALE_KIND, ORIGIN_IDENTITY_PAGE_KIND]) {
+      assert.ok(isPageKind(k), `${k} must be on the closed page list`);
+    }
+    for (const f of ["redis-backup.ts", "origin-identity.ts"]) {
+      const src = readFileSync(join(REPO_ROOT, "src", "watchdog", f), "utf-8");
+      assert.match(src, /dedupKey: (REDIS_BACKUP_STALE_KIND|ORIGIN_IDENTITY_PAGE_KIND)/, `${f} pages with dedupKey == kind`);
+    }
+  });
+
+  test("hydra-watchdog.service loads %h/hydra/.env dash-prefixed (the other blocks must run without it)", () => {
+    const unit = readFileSync(join(REPO_ROOT, "scripts", "systemd", "hydra-watchdog.service"), "utf-8");
+    assert.match(unit, /^EnvironmentFile=-%h\/hydra\/\.env$/m, "expected EnvironmentFile=-%h/hydra/.env under [Service]");
+    assert.doesNotMatch(unit, /^EnvironmentFile=%h/m, "must stay optional (dash-prefixed): a missing .env never silences the other blocks");
+    assert.doesNotMatch(unit, /^Environment=TELEGRAM_/m, "never an inline credential");
+  });
+
+  test("hydra-watchdog.service puts %h/.local/bin ahead of /usr/bin so `gh` resolves to the maintained binary, not apt's stale one", () => {
+    const unit = readFileSync(join(REPO_ROOT, "scripts", "systemd", "hydra-watchdog.service"), "utf-8");
+    const m = unit.match(/^Environment=PATH=(.+)$/m);
+    assert.ok(m, "expected an explicit Environment=PATH= (systemd's default PATH has no ~/.local/bin)");
+    const dirs = m[1].split(":");
+    const local = dirs.indexOf("%h/.local/bin");
+    const usr = dirs.indexOf("/usr/bin");
+    assert.ok(local >= 0, "PATH must include %h/.local/bin");
+    assert.ok(usr < 0 || local < usr, "%h/.local/bin must precede /usr/bin");
+  });
+});
+
+describe("launch flow left bash (issue #5097, INV-1/2/6/7/14)", () => {
+  const sh = (): string => readFileSync(WATCHDOG, "utf-8");
+  const cli = (): string => readFileSync(join(REPO_ROOT, "scripts", "hydra-watchdog.ts"), "utf-8");
+  const launchModules = (): string[] =>
+    ["launch-flow.ts", "episode.ts", "ports.ts"].map((f) => readFileSync(join(REPO_ROOT, "src", "watchdog", f), "utf-8"));
+
+  test("run_launch_flow() and its HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM rebind hook are gone; the entry list calls the CLI wrapper", () => {
+    assert.ok(!sh().includes("run_launch_flow()"));
+    assert.ok(!sh().includes("HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM"));
+    assert.match(sh(), /^run_launch_flow_cli\(\) \{ run_watchdog_cli launch-flow "hydra-launch-flow-watchdog:" \d+; \}$/m);
+    assert.match(sh(), /^  run_launch_flow_cli$/m);
+  });
+
+  test("the launch-flow track_signal is deleted: only the node-modules-integrity copy remains in bash", () => {
+    const defs = sh().match(/^\s*track_signal\(\) \{/gm) ?? [];
+    assert.equal(defs.length, 1, "exactly one bash track_signal definition survives");
+    const start = sh().indexOf("run_node_modules_integrity()");
+    assert.ok(sh().indexOf("track_signal() {") > start, "and it is inside run_node_modules_integrity");
+  });
+
+  test("the predicates are imported, never re-typed: no 45-min / 90-min literals in the CLI or src/watchdog (INV-1)", () => {
+    for (const src of [cli(), ...launchModules()]) {
+      assert.doesNotMatch(src, /2700000|5400000/);
+    }
+  });
+
+  test("pages go through the Operator Channel module in-process: no operator-notify spawn, no Bot API host (INV-6)", () => {
+    for (const src of [cli(), ...launchModules()]) {
+      assert.ok(!src.includes("operator-notify"));
+      assert.ok(!src.includes("api.telegram.org"));
+    }
+  });
+
+  test("the only launch-flow XADD is EventBus.publish(): no hand-built XADD in the CLI or src/watchdog (INV-7)", () => {
+    for (const src of [cli(), ...launchModules()]) {
+      assert.doesNotMatch(src, /xadd/i);
+    }
+  });
+});
+
+describe("slice 4 left bash (issue #5098, INV-2/3/14)", () => {
+  const sh = (): string => readFileSync(WATCHDOG, "utf-8");
+  const mods = ["deploy-drift.ts", "skill-mirror.ts", "redis-backup.ts", "origin-identity.ts", "drift-gate.ts"];
+  const read = (f: string): string => readFileSync(join(REPO_ROOT, "src", "watchdog", f), "utf-8");
+
+  test("the four bash blocks and their per-block helper copies are deleted; the entry list calls the CLI wrappers in the same order", () => {
+    for (const fn of ["run_deploy_drift()", "run_redis_backup_freshness()", "run_skill_mirror_drift()", "run_origin_identity()"]) {
+      assert.ok(!sh().includes(fn), `${fn} must be gone`);
+    }
+    const entry = sh().slice(sh().lastIndexOf('if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then'));
+    assert.match(
+      entry,
+      /run_liveness_cli\n\s*run_wedge_cli\n\s*run_disk_cli\n\s*run_deploy_drift_cli\n\s*run_redis_backup_cli\n\s*run_skill_mirror_cli\n\s*run_claude_hooks\n\s*run_launch_flow_cli\n\s*run_node_modules_integrity\n\s*run_brief_missing\n\s*run_origin_identity_cli\n\s*exit 0/,
+    );
+    for (const hook of ["DRIFT_DEPLOYED_SHA", "DRIFT_REMOTE_SHA", "AUTODEPLOY_DRY_RUN", "SKILL_MIRROR_AUTOFIX_DRY_RUN", "HYDRA_WATCHDOG_ORIGIN_URL", "ORIGIN_MASTER_PRESENT", "BACKUP_TIMER_STATE", "BACKUP_NOTIFY_STREAM", "ORIGIN_NOTIFY_STREAM"]) {
+      assert.ok(!sh().includes(hook), `the bash-only injection hook ${hook} is retired`);
+    }
+  });
+
+  test("each wrapper is sized for the opt-in actions it must not kill (deploy >= 1200s, mirror >= 300s, origin >= 120s, backup 90s)", () => {
+    const bound = (name: string): number => Number(sh().match(new RegExp(`${name}\\(\\) \\{ run_watchdog_cli \\S+ "[^"]+" (\\d+);`))?.[1]);
+    assert.ok(bound("run_deploy_drift_cli") >= 1200);
+    assert.ok(bound("run_skill_mirror_cli") >= 300);
+    assert.ok(bound("run_origin_identity_cli") >= 120);
+    assert.equal(bound("run_redis_backup_cli"), 90);
+  });
+
+  test("log prefixes are unchanged so journal greps keep working", () => {
+    assert.equal(DEPLOY_DRIFT_LOG_PREFIX, "hydra-deploy-drift-watchdog:");
+    assert.equal(REDIS_BACKUP_LOG_PREFIX, "hydra-redis-backup-freshness-watchdog:");
+    assert.equal(SKILL_MIRROR_LOG_PREFIX, "hydra-skill-mirror-drift-watchdog:");
+    assert.equal(ORIGIN_IDENTITY_LOG_PREFIX, "hydra-origin-identity-watchdog:");
+  });
+
+  test("pages go through the Operator Channel module in-process: no operator-notify spawn, no Bot API host, no hand-built XADD (INV-3)", () => {
+    for (const f of mods) {
+      const src = read(f);
+      assert.ok(!src.includes("operator-notify"), f);
+      assert.ok(!src.includes("api.telegram.org"), f);
+      assert.doesNotMatch(src, /xadd/i, f);
+      assert.doesNotMatch(src, /from "node:child_process"/, f);
+    }
+  });
+
+  test("git-remote-fence.sh is NOT edited: it never parses, normalises, redacts or prints a remote URL (INV-11)", () => {
+    const fence = readFileSync(join(REPO_ROOT, "scripts", "claude-hooks", "git-remote-fence.sh"), "utf-8");
+    assert.doesNotMatch(fence, /redact|remote-url\.ts/i);
   });
 });

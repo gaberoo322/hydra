@@ -6,6 +6,7 @@
  * this file; the fetchers live in `seam.ts` behind an injectable `deps.fetch`.
  * A failed fetch is a refusal (`fetch-failed`), never a pass.
  */
+import { hasScopeSection } from "../scope-section.ts";
 import { isAdr5Reason, isAllowedReason } from "./reasons.ts";
 import type { GateId, LifecycleState } from "./transitions.ts";
 
@@ -28,9 +29,27 @@ export interface PrRecord {
   body: string;
 }
 
+/** A GitHub issue comment, bound to its repo + issue via the REST `issue_url`. */
+export interface CommentRecord {
+  id: number;
+  /** `owner/name`, derived from the comment's `issue_url`. */
+  repo: string;
+  issue: number;
+  /** GitHub server `created_at` (never `updated_at`), epoch ms. */
+  createdAtMs: number;
+  body: string;
+}
+
+/** When the issue last entered a state (latest `labeled` event); null = never seen. */
+export interface StateEntryRecord {
+  enteredAtMs: number | null;
+}
+
 export interface GateRecords {
   designConcept?: Fetched<DesignConceptRecord>;
   pr?: Fetched<PrRecord>;
+  comment?: Fetched<CommentRecord>;
+  stateEntry?: Fetched<StateEntryRecord>;
 }
 
 export interface GateInput {
@@ -44,6 +63,10 @@ export interface GateInput {
   rationale?: string;
   /** `completed | not planned` when `to === "closed"`. */
   closeReason?: string;
+  /** `owner/name` the seam operates on (record binding). */
+  repo?: string;
+  /** Issue body as re-read by the seam (spine step 1). */
+  body?: string;
 }
 
 const pass = (code = "ok"): GateResult => ({ ok: true, code });
@@ -131,11 +154,76 @@ export function gateClose(input: GateInput, records: GateRecords): GateResult {
   return pass();
 }
 
+export const RESEARCH_TRAILER_PREFIX = "Hydra-Research:";
+
+export type ResearchTrailer =
+  | { kind: "ok"; issue: number; next: string }
+  | { kind: "missing" | "malformed" | "ambiguous" };
+
+/**
+ * Parse the `Hydra-Research: issue=<N> next=<state>` trailer (ADR-0047 D4).
+ * Line-anchored, trailing whitespace tolerated; pure, never throws.
+ */
+export function parseResearchTrailer(body: string): ResearchTrailer {
+  const prefixed = body.split(/\r?\n/).filter((l) => l.startsWith(RESEARCH_TRAILER_PREFIX));
+  if (prefixed.length === 0) return { kind: "missing" };
+  if (prefixed.length > 1) return { kind: "ambiguous" };
+  const m = /^Hydra-Research: issue=(\d+) next=([a-z][a-z-]*)\s*$/.exec(prefixed[0]);
+  return m ? { kind: "ok", issue: Number(m[1]), next: m[2] } : { kind: "malformed" };
+}
+
+/** `comment=<url ending #issuecomment-<id> | bare numeric id>` -> comment id. */
+export function parseCommentEvidence(evidence: Readonly<Record<string, string>>): number | null {
+  const raw = evidence.comment;
+  if (raw === undefined) return null;
+  const m = /^(?:\d+|https?:\/\/\S+#issuecomment-(\d+))$/.exec(raw.trim());
+  if (!m) return null;
+  const id = Number(m[1] ?? raw.trim());
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+/**
+ * `needs-research -> *`. Composes {@link gateJudgment} FIRST (its codes win),
+ * then requires a `Hydra-Research:` trailer comment, bound to this repo+issue,
+ * created strictly after the issue entered `needs-research`. `-> ready-for-agent`
+ * also requires a `## Files in scope` section on the re-read body.
+ */
+export function gateResearchExit(input: GateInput, records: GateRecords): GateResult {
+  const judged = gateJudgment(input);
+  if (!judged.ok) return judged;
+  if (parseCommentEvidence(input.evidence) === null) return fail("evidence-required:comment");
+  const comment = records.comment;
+  const entry = records.stateEntry;
+  if (comment === undefined || comment.ok === false) return fail("fetch-failed");
+  if (entry === undefined || entry.ok === false) return fail("fetch-failed");
+  const c = comment.value;
+  if (input.repo === undefined || c.repo.toLowerCase() !== input.repo.toLowerCase() || c.issue !== input.issue) {
+    return fail("record-binding-mismatch");
+  }
+  const trailer = parseResearchTrailer(c.body);
+  if (trailer.kind !== "ok") return fail(`research-trailer-${trailer.kind}`);
+  if (trailer.issue !== input.issue) return fail("record-binding-mismatch");
+  if (trailer.next !== input.to) return fail("research-trailer-next-mismatch");
+  if (entry.value.enteredAtMs === null) return fail("state-entry-unknown");
+  if (!(c.createdAtMs > entry.value.enteredAtMs)) return fail("research-trailer-stale");
+  if (input.to === "ready-for-agent" && !hasScopeSection(input.body ?? "")) {
+    return fail("scope-section-missing");
+  }
+  return pass();
+}
+
 /** Which fetches a gate needs; the seam runs exactly these. */
-export function recordsNeeded(gate: GateId): { designConcept: boolean; pr: boolean } {
+export function recordsNeeded(gate: GateId): {
+  designConcept: boolean;
+  pr: boolean;
+  comment: boolean;
+  stateEntry: boolean;
+} {
   return {
     designConcept: gate === "dispatch",
     pr: gate === "pr-open" || gate === "close",
+    comment: gate === "research-exit",
+    stateEntry: gate === "research-exit",
   };
 }
 
@@ -154,6 +242,8 @@ export function evaluateGate(gate: GateId, input: GateInput, records: GateRecord
       return gatePrOpen(input, records);
     case "close":
       return gateClose(input, records);
+    case "research-exit":
+      return gateResearchExit(input, records);
     case "not-yet-implemented":
       return fail("gate-unimplemented");
   }

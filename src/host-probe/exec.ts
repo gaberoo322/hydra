@@ -92,6 +92,10 @@ export interface ProbeExecOptions {
   timeout?: number;
   /** Max bytes captured per stream. Defaults to 1MB. */
   maxBuffer?: number;
+  /** Working directory for the spawned process (repo-script runners). */
+  cwd?: string;
+  /** Extra environment on top of `process.env`. */
+  env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -135,6 +139,14 @@ export function flockBin(): string {
 }
 
 /**
+ * Resolve the `bash` binary, honoring the `HYDRA_BASH_BIN` test/override hook.
+ * Used only by the typed repo-script runners in `probe.ts`.
+ */
+export function bashBin(): string {
+  return process.env.HYDRA_BASH_BIN || "bash";
+}
+
+/**
  * The private spawn primitive. NOT exported past the seam in spirit — only the
  * `probe.ts` accessors should call it. Never throws; surfaces everything via
  * {@link RawProbeResult}.
@@ -156,7 +168,8 @@ export function runProbe(
     let child;
     try {
       child = spawn(bin, args, {
-        env: process.env,
+        cwd: opts.cwd,
+        env: opts.env ? { ...process.env, ...opts.env } : process.env,
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (err: any) {

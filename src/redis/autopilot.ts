@@ -239,18 +239,30 @@ export async function setGlmDrainerLastPick(
   }
 }
 
-/** Read the last published pick verdict, or `null` when absent/unreadable. Never throws. */
-export async function getGlmDrainerLastPick(): Promise<GlmDrainerLastPick | null> {
+/** Tri-state last-pick read: a failed read is NOT an absent key (watchdog INV-4, #5097). */
+export type GlmDrainerLastPickRead =
+  | { kind: "ok"; pick: GlmDrainerLastPick }
+  | { kind: "absent" }
+  | { kind: "unreadable" };
+
+/** Read the last pick verdict, distinguishing absent from unreadable. Never throws. */
+export async function readGlmDrainerLastPick(): Promise<GlmDrainerLastPickRead> {
   try {
     const raw = await getRedisConnection().get(GLM_DRAINER_LAST_PICK_KEY);
-    if (raw === null || raw === "") return null;
+    if (raw === null || raw === "") return { kind: "absent" };
     const parsed = JSON.parse(raw) as GlmDrainerLastPick;
-    if (!parsed || typeof parsed !== "object" || typeof parsed.at !== "number") return null;
-    return parsed;
+    if (!parsed || typeof parsed !== "object" || typeof parsed.at !== "number") return { kind: "unreadable" };
+    return { kind: "ok", pick: parsed };
   } catch (err: any) {
     logger.error({ err }, "[autopilot/glm-drainer] last-pick read failed (#4686)");
-    return null;
+    return { kind: "unreadable" };
   }
+}
+
+/** Read the last published pick verdict, or `null` when absent/unreadable. Never throws. */
+export async function getGlmDrainerLastPick(): Promise<GlmDrainerLastPick | null> {
+  const r = await readGlmDrainerLastPick();
+  return r.kind === "ok" ? r.pick : null;
 }
 
 /**
