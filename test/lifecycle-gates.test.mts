@@ -11,12 +11,20 @@ import {
   gateDispatch,
   gateJudgment,
   gatePrOpen,
+  gateResearchExit,
+  parseCommentEvidence,
+  parseResearchTrailer,
+  recordsNeeded,
+  findTransition,
+  TRANSITIONS,
   evaluateGate,
   openClaim,
   releaseClaim,
   resolveLifecycleMode,
   loadLifecycleMode,
+  type CommentRecord,
   type GateInput,
+  type GateRecords,
   type SeamDeps,
   type LifecycleMode,
 } from "../src/lifecycle/index.ts";
@@ -124,11 +132,15 @@ function harness(
     noApply?: boolean;
     pr?: { number: number; state: string; body: string } | null;
     dc?: { exists: boolean; status: string } | null;
+    body?: string;
+    comment?: CommentRecord | null;
+    /** Entry clock: number = entered at, null = no labeled event, undefined = fetch fails. */
+    entry?: number | null;
   } = {},
 ): Harness {
   const h: Harness = { deps: undefined as never, journal: [], edits: [], closes: [], state: { labels: [...labels], state: "OPEN" }, expired: [] };
   const row = () => ({
-    number: 10, title: "t", url: "u", createdAt: "", body: "", labels: [...h.state.labels], state: h.state.state,
+    number: 10, title: "t", url: "u", createdAt: "", body: opts.body ?? "", labels: [...h.state.labels], state: h.state.state,
   });
   h.deps = {
     repo: "o/r",
@@ -148,6 +160,9 @@ function harness(
     fetch: {
       designConcept: async () => (opts.dc ? { ok: true, value: opts.dc } : { ok: false }),
       pr: async () => (opts.pr ? { ok: true, value: opts.pr } : { ok: false }),
+      comment: async () => (opts.comment ? { ok: true, value: opts.comment } : { ok: false }),
+      stateEntry: async () =>
+        opts.entry === undefined ? { ok: false } : { ok: true, value: { enteredAtMs: opts.entry } },
     },
     journal: {
       append: async (_r, _i, e) => { h.journal.push(e); return { ok: true }; },
@@ -393,5 +408,160 @@ describe("operator ruling round 4 (#5310): label-less issues", () => {
     const res = await advance({ issue: 10, to: "ready-for-agent" }, h.deps);
     assert.equal(res.ok && res.wouldRefuse, "state-missing");
     assert.equal(h.journal[0].result, "shadow-would-refuse:state-missing");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Research-exit gate (ADR-0047 D4, issue #5320)
+// ---------------------------------------------------------------------------
+
+const TRAILER = (n: number, next: string) => `findings\n\nHydra-Research: issue=${n} next=${next}`;
+const SCOPED_BODY = "## Files in scope\n\n- `src/a.ts`\n";
+
+function cmt(over: Partial<CommentRecord> = {}): CommentRecord {
+  return { id: 77, repo: "o/r", issue: 10, createdAtMs: 2000, body: TRAILER(10, "needs-triage"), ...over };
+}
+
+function ri(over: Partial<GateInput> = {}): GateInput {
+  return {
+    issue: 10,
+    repo: "o/r",
+    from: "needs-research",
+    to: "needs-triage",
+    flags: [],
+    evidence: { comment: "https://github.com/o/r/issues/10#issuecomment-77" },
+    reason: "needs-retriage",
+    rationale: "settled the unknown",
+    ...over,
+  };
+}
+
+function rr(comment: CommentRecord | null = cmt(), entry: number | null = 1000): GateRecords {
+  return {
+    comment: comment ? { ok: true, value: comment } : { ok: false },
+    stateEntry: { ok: true, value: { enteredAtMs: entry } },
+  };
+}
+
+describe("research-exit gate", () => {
+  test("every needs-research exit row uses the research-exit gate and no other row does", () => {
+    const research = TRANSITIONS.filter((t) => t.from === "needs-research");
+    assert.deepEqual(research.map((t) => t.to).sort(), ["hitl-grill", "needs-info", "needs-tickets", "needs-triage", "ready-for-agent"]);
+    assert.ok(research.every((t) => t.gate === "research-exit"));
+    assert.ok(TRANSITIONS.filter((t) => t.from !== "needs-research").every((t) => t.gate !== "research-exit"));
+    assert.equal(findTransition("needs-research", "needs-triage")?.gate, "research-exit");
+  });
+
+  test("trailer parser: ok, missing, malformed, ambiguous, trailing whitespace", () => {
+    assert.deepEqual(parseResearchTrailer(TRAILER(10, "needs-triage")), { kind: "ok", issue: 10, next: "needs-triage" });
+    assert.deepEqual(parseResearchTrailer("Hydra-Research: issue=10 next=hitl-grill  \r\n"), { kind: "ok", issue: 10, next: "hitl-grill" });
+    assert.equal(parseResearchTrailer("no trailer here").kind, "missing");
+    assert.equal(parseResearchTrailer("mention Hydra-Research: issue=10 next=needs-triage inline").kind, "missing");
+    assert.equal(parseResearchTrailer("Hydra-Research: issue=ten next=x").kind, "malformed");
+    assert.equal(parseResearchTrailer("Hydra-Research: issue=10").kind, "malformed");
+    assert.equal(parseResearchTrailer("Hydra-Research: issue=10 next=needs-triage extra").kind, "malformed");
+    assert.equal(parseResearchTrailer(`${TRAILER(10, "needs-triage")}\nHydra-Research: issue=10 next=needs-triage`).kind, "ambiguous");
+  });
+
+  test("comment evidence accepts a comment URL or bare id only", () => {
+    assert.equal(parseCommentEvidence({ comment: "https://github.com/o/r/issues/10#issuecomment-77" }), 77);
+    assert.equal(parseCommentEvidence({ comment: "77" }), 77);
+    assert.equal(parseCommentEvidence({ comment: "https://github.com/o/r/issues/10" }), null);
+    assert.equal(parseCommentEvidence({ comment: "0" }), null);
+    assert.equal(parseCommentEvidence({}), null);
+  });
+
+  test("judgment codes win over trailer codes", () => {
+    assert.equal(gateResearchExit(ri({ reason: undefined }), rr()).code, "reason-required");
+    assert.equal(gateResearchExit(ri({ reason: "bogus" }), rr()).code, "reason-not-allowed");
+    assert.equal(gateResearchExit(ri({ rationale: " " }), rr()).code, "rationale-required");
+    assert.equal(gateResearchExit(ri({ rationale: " ", evidence: {} }), {}).code, "rationale-required");
+  });
+
+  test("refusal ladder", () => {
+    assert.equal(gateResearchExit(ri({ evidence: {} }), rr()).code, "evidence-required:comment");
+    assert.equal(gateResearchExit(ri(), {}).code, "fetch-failed");
+    assert.equal(gateResearchExit(ri(), rr(null)).code, "fetch-failed");
+    assert.equal(gateResearchExit(ri(), { comment: rr().comment, stateEntry: { ok: false } }).code, "fetch-failed");
+    assert.equal(gateResearchExit(ri(), rr(cmt({ repo: "x/y" }))).code, "record-binding-mismatch");
+    assert.equal(gateResearchExit(ri(), rr(cmt({ issue: 11 }))).code, "record-binding-mismatch");
+    assert.equal(gateResearchExit(ri({ repo: undefined }), rr()).code, "record-binding-mismatch");
+    assert.equal(gateResearchExit(ri(), rr(cmt({ body: TRAILER(11, "needs-triage") }))).code, "record-binding-mismatch");
+    assert.equal(gateResearchExit(ri(), rr(cmt({ body: "findings only" }))).code, "research-trailer-missing");
+    assert.equal(gateResearchExit(ri(), rr(cmt({ body: "Hydra-Research: bad" }))).code, "research-trailer-malformed");
+    assert.equal(gateResearchExit(ri(), rr(cmt({ body: `${TRAILER(10, "needs-triage")}\n${TRAILER(10, "needs-triage")}` }))).code, "research-trailer-ambiguous");
+    assert.equal(gateResearchExit(ri(), rr(cmt({ body: TRAILER(10, "hitl-grill") }))).code, "research-trailer-next-mismatch");
+    assert.equal(gateResearchExit(ri(), rr(cmt(), null)).code, "state-entry-unknown");
+    assert.equal(gateResearchExit(ri(), rr(cmt({ createdAtMs: 1000 }), 1000)).code, "research-trailer-stale");
+    assert.equal(gateResearchExit(ri(), rr(cmt({ createdAtMs: 999 }), 1000)).code, "research-trailer-stale");
+    assert.equal(gateResearchExit(ri(), rr()).ok, true);
+  });
+
+  test("scope section is required only for -> ready-for-agent", () => {
+    const rfa = ri({ to: "ready-for-agent", reason: "research-complete" });
+    const rec = rr(cmt({ body: TRAILER(10, "ready-for-agent") }));
+    assert.equal(gateResearchExit({ ...rfa, body: "no scope" }, rec).code, "scope-section-missing");
+    assert.equal(gateResearchExit(rfa, rec).code, "scope-section-missing");
+    assert.equal(gateResearchExit({ ...rfa, body: SCOPED_BODY }, rec).ok, true);
+    assert.equal(gateResearchExit({ ...ri(), body: "no scope" }, rr()).ok, true);
+  });
+
+  test("recordsNeeded requests the comment + entry records only for research-exit", () => {
+    assert.deepEqual(recordsNeeded("research-exit"), { designConcept: false, pr: false, comment: true, stateEntry: true });
+    for (const g of ["none", "judgment", "adr5", "dispatch", "pr-open", "close", "not-yet-implemented"] as const) {
+      const n = recordsNeeded(g);
+      assert.equal(n.comment || n.stateEntry, false, g);
+    }
+    assert.equal(evaluateGate("research-exit", ri(), rr()).ok, true);
+  });
+
+  const EV = { comment: "https://github.com/o/r/issues/10#issuecomment-77" };
+  const ADV = { issue: 10, to: "needs-triage", evidence: EV, reason: "needs-retriage", rationale: "r" };
+
+  test("seam enforce: a missing trailer is refused with no write", async () => {
+    const h = harness(["needs-research"], "enforce", { comment: cmt({ body: "no trailer" }), entry: 1000 });
+    const res = await advance(ADV, h.deps);
+    assert.equal("code" in res ? res.code : null, "research-trailer-missing");
+    assert.equal(h.edits.length, 0);
+    assert.equal(h.journal[0].result, "refused:research-trailer-missing");
+    assert.equal(h.journal[0].written, false);
+  });
+
+  test("seam shadow: a stale trailer still writes and journals shadow-would-refuse", async () => {
+    const h = harness(["needs-research"], "shadow", { comment: cmt({ createdAtMs: 500 }), entry: 1000 });
+    const res = await advance(ADV, h.deps);
+    assert.equal(res.ok && res.wouldRefuse, "research-trailer-stale");
+    assert.equal(h.edits.length, 1);
+    assert.equal(h.journal[0].result, "shadow-would-refuse:research-trailer-stale");
+  });
+
+  test("seam enforce: happy path journals a transition carrying the comment evidence", async () => {
+    const h = harness(["needs-research"], "enforce", { comment: cmt(), entry: 1000 });
+    const res = await advance(ADV, h.deps);
+    assert.equal(res.ok, true);
+    assert.equal(h.journal[0].kind, "transition");
+    assert.deepEqual(h.journal[0].evidence, EV);
+    assert.deepEqual(h.state.labels, ["needs-triage"]);
+  });
+
+  test("seam enforce: fetch failures fail closed", async () => {
+    const noComment = harness(["needs-research"], "enforce", { entry: 1000 });
+    const r0 = await advance(ADV, noComment.deps);
+    assert.equal("code" in r0 ? r0.code : null, "fetch-failed");
+    assert.equal(noComment.edits.length, 0);
+    const noEntry = harness(["needs-research"], "enforce", { comment: cmt() });
+    const res = await advance(ADV, noEntry.deps);
+    assert.equal("code" in res ? res.code : null, "fetch-failed");
+    assert.equal(noEntry.edits.length, 0);
+  });
+
+  test("seam enforce: -> ready-for-agent reads scope from the re-read body", async () => {
+    const adv = { ...ADV, to: "ready-for-agent", reason: "research-complete" };
+    const rec = cmt({ body: TRAILER(10, "ready-for-agent") });
+    const bare = harness(["needs-research"], "enforce", { comment: rec, entry: 1000, body: "none" });
+    const r1 = await advance(adv, bare.deps);
+    assert.equal("code" in r1 ? r1.code : null, "scope-section-missing");
+    const scoped = harness(["needs-research"], "enforce", { comment: rec, entry: 1000, body: SCOPED_BODY });
+    assert.equal((await advance(adv, scoped.deps)).ok, true);
   });
 });
