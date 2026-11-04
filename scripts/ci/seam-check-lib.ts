@@ -103,9 +103,13 @@ export function stripComments(source: string): string {
     // Block comment — drop, leaving a space so neighbouring tokens don't glue.
     if (c === "/" && next === "*") {
       i += 2;
-      while (i < n && !(source[i] === "*" && source[i + 1] === "/")) i++;
+      let nl = "";
+      while (i < n && !(source[i] === "*" && source[i + 1] === "/")) {
+        if (source[i] === "\n") nl += "\n"; // keep line numbers stable for site reports
+        i++;
+      }
       i += 2;
-      out += " ";
+      out += nl || " ";
       continue;
     }
 

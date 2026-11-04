@@ -84,16 +84,32 @@ function operandIsSite(operand: string, identifierIsVariable: boolean): boolean 
 }
 
 const FLAG_RE =
-  /--(?:add|remove)-label(?:(["']?\s*,\s*)|[ =]+)(?:"([^"]*)"|'([^']*)'|([^\s"',)\]]+))/g;
+  /--(?:add-|remove-)?label(?:(["']?\s*,\s*)|[ =]+)(?:"([^"]*)"|'([^']*)'|([^\s"')\]]+))/g;
+/** Bare `--label` only writes state on create commands (elsewhere it is a list filter). */
+const CREATE_CMD_RE = /\bgh\s+(?:issue|pr)\s+create\b/;
+
+/** Join backslash-continued physical lines; each logical line keeps its first physical line number. */
+function logicalLines(text: string): Array<{ line: number; text: string }> {
+  const phys = text.split(/\r?\n/);
+  const out: Array<{ line: number; text: string }> = [];
+  for (let i = 0; i < phys.length; i++) {
+    const start = i;
+    let cur = phys[i]!;
+    while (/\\\s*$/.test(cur) && i + 1 < phys.length) {
+      cur = cur.replace(/\\\s*$/, " ") + phys[++i]!.trimStart();
+    }
+    out.push({ line: start + 1, text: cur });
+  }
+  return out;
+}
 
 /** Line grammar for markdown / shell / python / mjs. Returns 1-based site line numbers. */
 export function scanTextSites(text: string): number[] {
   const sites: number[] = [];
-  const lines = text.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
+  for (const { line: lineNo, text: line } of logicalLines(text)) {
     let hit = false;
     for (const m of line.matchAll(FLAG_RE)) {
+      if (m[0].startsWith("--label") && !CREATE_CMD_RE.test(line)) continue;
       const argList = m[1] !== undefined; // `"--add-label", x` list form
       const quoted = m[2] ?? m[3];
       const operand = quoted ?? m[4] ?? "";
@@ -102,9 +118,9 @@ export function scanTextSites(text: string): number[] {
         if (part && operandIsSite(part, bareIdentifier)) hit = true;
       }
     }
-    if (!hit && /\bgh\s+api\b/.test(line) && /\/labels\b/.test(line)) {
+    if (!hit && /\bgh\s+api\b/.test(line) && (/\/labels\b/.test(line) || /labels\[\]=/.test(line))) {
       const isWrite =
-        /(?:-X|--method)[ =]+(?:POST|PUT|PATCH|DELETE)\b/i.test(line) || /-[fF]\s+labels\[\]=/.test(line);
+        /(?:-X|--method)[ =]+(?:POST|PUT|PATCH|DELETE)\b/i.test(line) || /-[fF]\s*["']?labels\[\]=/.test(line);
       if (isWrite) {
         const operands: string[] = [];
         const tail = /\/labels\/?([^\s"']*)/.exec(line);
@@ -113,7 +129,7 @@ export function scanTextSites(text: string): number[] {
         if (operands.some((o) => operandIsSite(o, false))) hit = true;
       }
     }
-    if (hit) sites.push(i + 1);
+    if (hit) sites.push(lineNo);
   }
   return sites;
 }
@@ -179,9 +195,13 @@ function tsOperandIsSite(expr: string, consts: Map<string, string>): boolean {
   return true;
 }
 
+/** Module-scope consts only (column 0); a name declared more than once anywhere is unresolvable. */
 function collectConsts(src: string): Map<string, string> {
   const consts = new Map<string, string>();
-  for (const m of src.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)(?:\s*:\s*[^=]+)?\s*=\s*([^;\n]+)/g)) {
+  for (const m of src.matchAll(/^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)(?:\s*:\s*[^=]+)?\s*=\s*([^;\n]+)/gm)) {
+    const name = m[1]!;
+    const decls = src.match(new RegExp(`\\b(?:const|let|var)\\s+${name.replace(/\$/g, "\\$")}\\b`, "g"));
+    if (decls && decls.length > 1) continue;
     const rhs = m[2]!.trim();
     const lit = /^["'`]([^"'`$]*)["'`]$/.exec(rhs);
     if (lit) {
@@ -239,7 +259,14 @@ export function scanTsSites(source: string): number[] {
 /** Sites in one file (exempt paths and non-surfaces yield none). */
 export function scanFileSites(relPath: string, text: string): number[] {
   if (isExemptPath(relPath)) return [];
-  if (relPath.endsWith(".ts")) return scanTsSites(text);
+  if (relPath.endsWith(".ts")) {
+    // Call grammar plus the text grammar over comment-stripped source (argv-style `gh` shell-outs).
+    // The call grammar counts per site; text-grammar lines it already covers are not double-counted.
+    const calls = scanTsSites(text);
+    const seen = new Set(calls);
+    const extra = scanTextSites(stripComments(text)).filter((l) => !seen.has(l));
+    return [...calls, ...extra].sort((a, b) => a - b);
+  }
   return scanTextSites(text);
 }
 
@@ -270,13 +297,14 @@ function isSurface(rel: string): boolean {
   return false;
 }
 
-async function walk(root: string, dir: string, out: string[]): Promise<void> {
+async function walk(root: string, dir: string, out: string[], isScanRoot = false): Promise<void> {
   let entries;
   try {
     entries = await readdir(join(root, dir), { withFileTypes: true });
   } catch (err) {
-    console.warn(`[lifecycle-seam-check] cannot read dir ${dir}, skipped:`, err);
-    return;
+    // A missing scan root has no sites; any other failure must not fail open.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT" && isScanRoot) return;
+    throw new Error(`[lifecycle-seam-check] cannot read dir ${dir}: ${String(err)}`, { cause: err });
   }
   for (const e of entries) {
     if (SKIP_DIRS.has(e.name)) continue;
@@ -290,7 +318,7 @@ async function walk(root: string, dir: string, out: string[]): Promise<void> {
 export async function scanLifecycleSeam(root: string = REPO_ROOT): Promise<Observed> {
   const files: string[] = [];
   for (const top of ["docs/operator-playbooks", "docs/agents", "src", "scripts"]) {
-    await walk(root, top, files);
+    await walk(root, top, files, true);
   }
   const observed: Observed = {};
   for (const rel of files.sort()) {
@@ -299,8 +327,7 @@ export async function scanLifecycleSeam(root: string = REPO_ROOT): Promise<Obser
     try {
       text = await readFile(join(root, rel), "utf8");
     } catch (err) {
-      console.warn(`[lifecycle-seam-check] cannot read ${rel}, skipped:`, err);
-      continue;
+      throw new Error(`[lifecycle-seam-check] cannot read ${rel}: ${String(err)}`, { cause: err });
     }
     const lines = scanFileSites(rel, text);
     if (lines.length > 0) observed[rel] = { count: lines.length, lines };
@@ -312,7 +339,18 @@ export async function loadLifecycleBaseline(
   root: string = REPO_ROOT,
 ): Promise<LifecycleBaseline> {
   const raw = await readFile(join(root, LIFECYCLE_SEAM_BASELINE_REL), "utf8");
-  return JSON.parse(raw) as LifecycleBaseline;
+  const parsed = JSON.parse(raw) as Partial<LifecycleBaseline> | null;
+  const files = parsed?.files;
+  if (
+    !parsed ||
+    parsed.rule !== "lifecycle-seam" ||
+    typeof files !== "object" ||
+    files === null ||
+    !Object.values(files).every((n) => Number.isInteger(n) && n >= 0)
+  ) {
+    throw new Error(`[lifecycle-seam-check] malformed baseline ${LIFECYCLE_SEAM_BASELINE_REL}`);
+  }
+  return parsed as LifecycleBaseline;
 }
 
 export interface RatchetVerdict {

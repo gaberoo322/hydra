@@ -8,6 +8,9 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile, mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { OPEN_STATES } from "../src/lifecycle/index.ts";
 
@@ -129,5 +132,72 @@ describe("lifecycle-seam-check: detection grammar (synthetic)", () => {
       scanFileSites("docs/operator-playbooks/hydra-target-qa.md", "gh issue edit 5 --add-label needs-qa"),
       [],
     );
+  });
+
+  test("backslash-continued flag with the label on the next line is a site; a flag continuation is not", () => {
+    assert.deepEqual(md("gh issue edit 5 --add-label \\\n  needs-qa"), [1]);
+    assert.deepEqual(md("gh issue edit 5 --add-label \\\n  glm-withhold"), []);
+  });
+
+  test("comma-separated labels: any state in the list makes a site", () => {
+    assert.deepEqual(md("gh issue edit 5 --add-label glm-withhold,needs-qa"), [1]);
+    assert.deepEqual(md("gh issue edit 5 --add-label glm-withhold,other-flag"), []);
+  });
+
+  test("TS: argv-style gh shell-out is a site; a flag argv is not", () => {
+    assert.deepEqual(ts('run("gh", ["issue", "edit", "5", "--add-label", "needs-qa"]);'), [1]);
+    assert.deepEqual(ts('run("gh", ["issue", "edit", "5", "--add-label", "glm-withhold"]);'), []);
+  });
+
+  test("gh api labels[]= (bare and quoted -f) and gh issue create --label are sites; flags/filters are not", () => {
+    assert.deepEqual(md("gh api repos/x/issues/5 -f labels[]=needs-qa"), [1]);
+    assert.deepEqual(md('gh api repos/x/issues/5 -f "labels[]=needs-qa"'), [1]);
+    assert.deepEqual(md('gh issue create --title t --label "needs-triage"'), [1]);
+    assert.deepEqual(md("gh api repos/x/issues/5 -f labels[]=glm-withhold"), []);
+    assert.deepEqual(md("gh issue list --label needs-qa"), []);
+  });
+
+  test("TS: a function-local const does not clear another function's parameter operand", () => {
+    const src = 'function a() {\n  const label = "glm-withhold";\n}\nfunction b(label: string) {\n  addIssueLabel(1, label);\n}';
+    assert.deepEqual(ts(src), [5]);
+    assert.deepEqual(ts('const label = "glm-withhold";\naddIssueLabel(1, label);'), []);
+    assert.deepEqual(ts('const label = "glm-withhold";\nfunction f() { const label = "x"; }\naddIssueLabel(1, label);'), [3]);
+  });
+
+  test("block comments keep line numbers stable", () => {
+    assert.deepEqual(ts('/* a\n b\n c */\naddIssueLabel(1, "needs-qa");'), [4]);
+  });
+});
+
+describe("lifecycle-seam-check: fails closed", () => {
+  test("an unreadable scan root throws instead of being skipped", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lifecycle-seam-"));
+    try {
+      await writeFile(join(root, "src"), "not a directory");
+      await assert.rejects(() => scanLifecycleSeam(root), /cannot read dir src/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a missing scan root has no sites", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lifecycle-seam-"));
+    try {
+      await mkdir(join(root, "scripts"));
+      assert.deepEqual(await scanLifecycleSeam(root), {});
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a malformed baseline throws", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lifecycle-seam-"));
+    try {
+      await mkdir(join(root, "test", "fixtures"), { recursive: true });
+      await writeFile(join(root, "test/fixtures/lifecycle-seam-baseline.json"), '{"rule":"x"}');
+      await assert.rejects(() => loadLifecycleBaseline(root), /malformed baseline/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
