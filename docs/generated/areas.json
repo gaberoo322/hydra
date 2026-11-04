@@ -1748,7 +1748,7 @@
     },
     {
       "slug": "scripts-autopilot",
-      "name": "scripts/autopilot/ (decide.py, classes.json)",
+      "name": "scripts/autopilot/ (decide.py, classes.json, run_ledger.py — the Run Ledger)",
       "table": "infra",
       "paths": [
         "scripts/autopilot/"
