@@ -104,6 +104,7 @@ export function createDispatchesRouter() {
       if (body.currentStep !== undefined) dispatch.currentStep = body.currentStep;
       if (body.issueRef !== undefined) dispatch.issueRef = body.issueRef;
       if (body.prRef !== undefined) dispatch.prRef = body.prRef;
+      if (body.anchor !== undefined) dispatch.anchor = body.anchor;
 
       await registerSubagentDispatch(dispatch);
       return { registered: true, dispatch };

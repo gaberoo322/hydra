@@ -1627,7 +1627,18 @@ def _synthesize_worktree_branch(state: dict, slot: str) -> str:
     return f"worktree-agent-{run_token}-t{turn_token}-{slot}"
 
 
-def make_dispatch_sentinel(skill: str, dispatch_id: str, run_id: str | None = None) -> str:
+# Anchor refs the sentinel may carry (issue #5350 INV-3): the sentinel field
+# grammar stops at whitespace or `>`, so anything outside this set is omitted
+# rather than truncated or escaped.
+_SENTINEL_ANCHOR_RE = re.compile(r"^[A-Za-z0-9._:#/-]+$")
+
+
+def make_dispatch_sentinel(
+    skill: str,
+    dispatch_id: str,
+    run_id: str | None = None,
+    anchor: str | None = None,
+) -> str:
     """Build the hidden dispatch sentinel comment (issue #692).
 
     The autopilot playbook prepends this single line to the FIRST user
@@ -1639,7 +1650,9 @@ def make_dispatch_sentinel(skill: str, dispatch_id: str, run_id: str | None = No
 
     Form (`runId` omitted when not in an autopilot run):
 
-        <!-- hydra-dispatch v1 skill={skill} dispatchId={id} runId={runId} -->
+        <!-- hydra-dispatch v1 skill={skill} dispatchId={id} runId={runId} anchor={ref} -->
+
+    (`anchor` is optional, emitted only for a pinned, grammar-safe anchor ref.)
 
     Field values are emitted verbatim; callers pass already-clean tokens
     (the skill name and the synthesised worktree branch). The hook's
@@ -1653,6 +1666,10 @@ def make_dispatch_sentinel(skill: str, dispatch_id: str, run_id: str | None = No
     ]
     if run_id:
         parts.append(f"runId={run_id}")
+    # Issue #5350: optional pinned anchor so the subagent dispatch registry (and
+    # thereby `deriveInflightSlotSeed`) knows the anchor. Omitted unless safe.
+    if isinstance(anchor, str) and anchor and _SENTINEL_ANCHOR_RE.match(anchor):
+        parts.append(f"anchor={anchor}")
     parts.append("-->")
     return " ".join(parts)
 
@@ -3826,10 +3843,13 @@ def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
         action["isolation"] = class_isolation(slot)
         skill = action.get("skill")
         if isinstance(skill, str) and skill:
+            pa = action.get("prompt_args")
+            pinned_anchor = pa.get("anchor") if isinstance(pa, dict) else None
             action["dispatchSentinel"] = make_dispatch_sentinel(
                 skill,
                 action["worktreeBranch"],
                 run_token,
+                pinned_anchor if isinstance(pinned_anchor, str) else None,
             )
 
 
