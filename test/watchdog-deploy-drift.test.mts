@@ -1,250 +1,163 @@
 /**
- * Regression test for issue #734 — the ## DEPLOY DRIFT block in
- * scripts/hydra-watchdog.sh.
+ * The DEPLOY DRIFT watchdog check (issue #734; ported to TypeScript in #5098).
  *
- * The deploy-drift backstop compares the SHA the orchestrator is running
- * from (deployed) against origin/master HEAD (remote) and surfaces drift.
- * Hard invariants pinned here (from the gate-approved design-concept for
- * issue-734):
- *
- *   1. Advisory by default — drift logs a WARNING only; it does NOT deploy
- *      unless HYDRA_WATCHDOG_AUTODEPLOY=1.
- *   2. Grace-windowed — even with auto-deploy enabled, drift must persist
- *      past HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS before a deploy fires.
- *   3. Respects deliberate operator stops — never auto-deploys when the
- *      scheduler reports stopReason="deliberate".
- *   4. Read-only / fail-safe — git or network errors skip+log and the
- *      script still exits 0.
- *
- * The block honours off-by-default injection hooks (documented in the
- * script header) so the test never touches the real git remote or runs a
- * real deploy:
- *   HYDRA_WATCHDOG_DRIFT_DEPLOYED_SHA / HYDRA_WATCHDOG_DRIFT_REMOTE_SHA
- *       Inject the two SHAs.
- *   HYDRA_WATCHDOG_AUTODEPLOY_DRY_RUN=1
- *       In the auto-deploy branch, log "would-deploy" instead of execing.
- *   HYDRA_WATCHDOG_DRIFT_STATE_DIR
- *       Per-test marker dir so the grace-window marker doesn't collide
- *       with a live watchdog on the dev host.
- *
- * The behavioural cases SOURCE the script and call `run_deploy_drift` alone
- * (issue #4500) rather than executing every block of a full tick. The script
- * guards its entry point on `BASH_SOURCE[0] == $0`, so sourcing is
- * side-effect-free (the same seam test/watchdog-pending-work.test.mts uses).
- * A full tick used to cost ~12s per case, almost all of it the SKILL MIRROR
- * DRIFT block regenerating every skill via scripts/sync-skills.sh — work
- * these cases never asserted on (they only ever read the
- * `hydra-deploy-drift-watchdog:` lines). The block is sourced under the
- * script's own `set -euo pipefail`, and the entry-point wiring the full
- * spawn used to exercise implicitly is pinned structurally below.
+ * The cases of the former bash suite, driven 1:1 over in-memory fake ports
+ * (test/_helpers/watchdog-drift-fakes.mts) — no bash, no PATH shims, no real
+ * git. The marker is a FILE in epoch SECONDS (INV-6), so an in-flight episode
+ * survives the cut-over deploy.
  */
 
-import test, { describe } from "node:test";
+import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import {
-  WATCHDOG_SPAWN_TIMEOUT_MS,
-  throwIfTimedOut,
-} from "./_helpers/watchdog-timeouts.mts";
+  DEFAULT_DEPLOY_DRIFT_GRACE_S,
+  DEPLOY_DRIFT_LOG_PREFIX,
+  DEPLOY_DRIFT_MARKER_NAME,
+  decideDeployDrift,
+  runDeployDrift,
+} from "../src/watchdog/deploy-drift.ts";
+import { DEPLOY_DRIFT_GRACE_SECONDS } from "../src/health/deployed-sha.ts";
+import { NOW_MS, NOW_S, makeDeployDriftHarness } from "./_helpers/watchdog-drift-fakes.mts";
 
-const REPO_ROOT = resolve(import.meta.dirname, "..");
-const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
+const SHA_A = "a".repeat(40);
+const SHA_B = "b".repeat(40);
+const root = "/home/gabe/hydra";
+const cfg = (over: Partial<{ autoDeploy: boolean; graceS: number }> = {}) => ({
+  root,
+  autoDeploy: false,
+  graceS: 600,
+  ...over,
+});
+const text = (logs: string[]): string => logs.join("\n");
 
-const SHA_A = "1111111111111111111111111111111111111111";
-const SHA_B = "2222222222222222222222222222222222222222";
-
-// scripts/hydra-watchdog.sh's worst case is ~55s (9 curl calls, up to
-// --max-time 10, plus a sleep 5) — see issue #4044. 20s left only a ~2s
-// margin locally and reddened this REQUIRED gate on unrelated PRs whenever
-// the shared CI box was under load. 120s is comfortably above the script's
-// real worst case; this bounds a hang, not a slow-but-correct run.
-
-/**
- * Run ONE drift tick: source the watchdog (entry point guarded, so nothing
- * else executes) and call `run_deploy_drift` — the unit under test — with the
- * script's own `set -euo pipefail` in force.
- */
-function runWatchdog(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
-  const r = spawnSync("bash", ["-c", 'set -euo pipefail; source "$1"; run_deploy_drift', "drift-tick", WATCHDOG], {
-    // Kept from the full-tick form: harmless when only the drift block runs,
-    // and it keeps the env identical to what these cases always passed.
-    env: {
-      ...process.env,
-      HYDRA_AUTOPILOT_STATE: join(tmpdir(), "hydra-5095-no-such-state.json"),
-      ...env,
-      PATH: process.env.PATH ?? "",
-    },
-    encoding: "utf-8",
-    timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
-  });
-  throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "watchdog run_deploy_drift tick");
-  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-}
-
-/** Extract only the deploy-drift block's log lines for focused assertions. */
-function driftLines(stdout: string): string {
-  return stdout
-    .split("\n")
-    .filter((l) => l.includes("hydra-deploy-drift-watchdog:"))
-    .join("\n");
-}
-
-function makeStateDir(): string {
-  return mkdtempSync(join(tmpdir(), "watchdog-drift-test-"));
-}
-
-describe("scripts/hydra-watchdog.sh — ## DEPLOY DRIFT block (issue #734)", () => {
-  test("watchdog script exists and is executable", () => {
-    assert.ok(existsSync(WATCHDOG), "watchdog script missing");
-    const mode = spawnSync("stat", ["-c", "%a", WATCHDOG], { encoding: "utf-8" }).stdout.trim();
-    assert.match(mode, /^[7][0-9]{2}$/, `watchdog not executable (mode=${mode})`);
+describe("watchdog deploy-drift check (issue #734, #5098)", () => {
+  test("the grace default IS DEPLOY_DRIFT_GRACE_SECONDS (one home, never a second literal)", () => {
+    assert.equal(DEFAULT_DEPLOY_DRIFT_GRACE_S, DEPLOY_DRIFT_GRACE_SECONDS);
+    const cli = readFileSync(join(import.meta.dirname, "..", "scripts", "hydra-watchdog.ts"), "utf8");
+    assert.doesNotMatch(cli, /AUTODEPLOY_GRACE_SECONDS",\s*600/);
   });
 
-  test("run_deploy_drift is wired into the entry-point call list, inside the sourcing guard", () => {
-    // The behavioural cases below source the script and call run_deploy_drift
-    // directly (issue #4500), so they no longer prove a real tick reaches the
-    // block. Pin that wiring here instead.
-    const src = readFileSync(WATCHDOG, "utf-8");
-    const defIdx = src.indexOf("run_deploy_drift()");
-    assert.ok(defIdx >= 0, "run_deploy_drift() definition not found");
-    const guard = 'if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then';
-    const guardIdx = src.lastIndexOf(guard);
-    assert.ok(guardIdx > defIdx, "the sourcing-guarded entry point must follow the block definition");
-    const entry = src.slice(guardIdx);
-    assert.match(entry, /^\s*run_deploy_drift$/m, "run_deploy_drift must be called inside the sourcing guard");
-    assert.match(entry, /^\s*exit 0$/m, "the guarded entry point must still exit 0 after running every block");
+  test("the bash entry point calls the deploy-drift CLI wrapper with the 1200s bound, in tick order", () => {
+    const sh = readFileSync(join(import.meta.dirname, "..", "scripts", "hydra-watchdog.sh"), "utf8");
+    assert.match(sh, /run_deploy_drift_cli\(\) \{ run_watchdog_cli deploy-drift "hydra-deploy-drift-watchdog:" 1200; \}/);
+    const entry = sh.slice(sh.indexOf('if [[ "${BASH_SOURCE[0]}" == "${0}" ]]'));
+    assert.match(entry, /run_disk_cli\n\s*run_deploy_drift_cli\n\s*run_redis_backup_cli/);
+    assert.doesNotMatch(sh, /run_deploy_drift\(\)/);
   });
 
-  test("in sync (deployed == remote): logs 'in sync', no drift warning", () => {
-    const dir = makeStateDir();
-    try {
-      const r = runWatchdog({
-        HYDRA_WATCHDOG_DRIFT_DEPLOYED_SHA: SHA_A,
-        HYDRA_WATCHDOG_DRIFT_REMOTE_SHA: SHA_A,
-        HYDRA_WATCHDOG_DRIFT_STATE_DIR: dir,
-      });
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-      const lines = driftLines(r.stdout);
-      assert.match(lines, /in sync/, `expected 'in sync', got: ${lines}`);
-      assert.doesNotMatch(lines, /DRIFT|would-deploy|AUTO-DEPLOY/, `must not warn drift, got: ${lines}`);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  test("in sync (deployed == remote): logs 'in sync', no drift warning", async () => {
+    const h = makeDeployDriftHarness();
+    await runDeployDrift(h.deps, cfg());
+    assert.match(text(h.logs), /in sync \(deployed=aaaaaaaa == origin\/master=aaaaaaaa\)/);
+    assert.doesNotMatch(text(h.logs), /WARNING DRIFT/);
+    assert.ok(h.logs.every((l) => l.startsWith(DEPLOY_DRIFT_LOG_PREFIX)));
+    assert.equal(h.deploys.length, 0);
   });
 
-  test("drift, auto-deploy OFF (default): advisory WARNING only, never deploys", () => {
-    const dir = makeStateDir();
-    try {
-      const r = runWatchdog({
-        HYDRA_WATCHDOG_DRIFT_DEPLOYED_SHA: SHA_A,
-        HYDRA_WATCHDOG_DRIFT_REMOTE_SHA: SHA_B,
-        HYDRA_WATCHDOG_DRIFT_STATE_DIR: dir,
-        // HYDRA_WATCHDOG_AUTODEPLOY unset -> advisory default
-      });
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-      const lines = driftLines(r.stdout);
-      assert.match(lines, /WARNING DRIFT/, `expected drift warning, got: ${lines}`);
-      assert.match(lines, /auto-deploy disabled/, `expected advisory-only log, got: ${lines}`);
-      assert.doesNotMatch(lines, /would-deploy|AUTO-DEPLOY/, `must not deploy when disabled, got: ${lines}`);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  test("drift, auto-deploy OFF (default): advisory WARNING only, never deploys", async () => {
+    const h = makeDeployDriftHarness();
+    h.state.remote = SHA_B;
+    await runDeployDrift(h.deps, cfg());
+    assert.match(text(h.logs), /WARNING DRIFT — deployed=aaaaaaaa != origin\/master=bbbbbbbb \(drift first seen 0s ago\)/);
+    assert.match(text(h.logs), /auto-deploy disabled .*advisory only/);
+    assert.equal(h.deploys.length, 0);
+    assert.deepEqual(h.marker.writes, [NOW_S], "the first drift tick anchors the marker");
+    assert.equal(h.scheduler.calls, 0, "advisory never consults the scheduler");
   });
 
-  test("drift, auto-deploy ON but within grace window: waits, does not deploy", () => {
-    const dir = makeStateDir();
-    try {
-      const r = runWatchdog({
-        HYDRA_WATCHDOG_DRIFT_DEPLOYED_SHA: SHA_A,
-        HYDRA_WATCHDOG_DRIFT_REMOTE_SHA: SHA_B,
-        HYDRA_WATCHDOG_DRIFT_STATE_DIR: dir,
-        HYDRA_WATCHDOG_AUTODEPLOY: "1",
-        HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS: "600",
-        HYDRA_WATCHDOG_AUTODEPLOY_DRY_RUN: "1",
-      });
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-      const lines = driftLines(r.stdout);
-      assert.match(lines, /within grace window/, `expected grace-window log, got: ${lines}`);
-      assert.doesNotMatch(lines, /would-deploy|AUTO-DEPLOY/, `must wait within grace, got: ${lines}`);
-      // Marker file should now exist recording first-seen epoch.
-      assert.ok(existsSync(join(dir, "hydra-watchdog-drift-since")), "expected drift marker file written");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  test("drift, auto-deploy ON but within grace window: waits, does not deploy", async () => {
+    const h = makeDeployDriftHarness({ marker: `${NOW_S - 100}\n` });
+    h.state.remote = SHA_B;
+    await runDeployDrift(h.deps, cfg({ autoDeploy: true }));
+    assert.match(text(h.logs), /within grace window \(drift 100s < 600s\)/);
+    assert.equal(h.deploys.length, 0);
+    assert.equal(h.marker.raw, `${NOW_S - 100}\n`, "an existing marker is kept, not restamped");
+    assert.equal(h.scheduler.calls, 0);
   });
 
-  test("drift, auto-deploy ON, grace elapsed: would-deploy (dry-run)", () => {
-    const dir = makeStateDir();
-    try {
-      // Pre-seed the marker far in the past so the grace window is already
-      // satisfied on this single tick.
-      const marker = join(dir, "hydra-watchdog-drift-since");
-      writeFileSync(marker, String(Math.floor(Date.now() / 1000) - 5000));
-      const r = runWatchdog({
-        HYDRA_WATCHDOG_DRIFT_DEPLOYED_SHA: SHA_A,
-        HYDRA_WATCHDOG_DRIFT_REMOTE_SHA: SHA_B,
-        HYDRA_WATCHDOG_DRIFT_STATE_DIR: dir,
-        HYDRA_WATCHDOG_AUTODEPLOY: "1",
-        HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS: "600",
-        HYDRA_WATCHDOG_AUTODEPLOY_DRY_RUN: "1",
-      });
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-      const lines = driftLines(r.stdout);
-      // Deliberate-stop guard reads /api/scheduler/status. On a host where the
-      // orchestrator is stopped deliberately the block would short-circuit
-      // there. Accept either: would-deploy (no deliberate stop) OR the
-      // deliberate-stop guard line. Both prove grace elapsed + gate honored.
-      assert.match(
-        lines,
-        /would-deploy|stopped deliberately/,
-        `expected would-deploy or deliberate-stop guard, got: ${lines}`,
-      );
-      // Critically: a real deploy must never have been exec'd in dry-run.
-      assert.doesNotMatch(lines, /^.*AUTO-DEPLOY — drift sustained.*\n.*auto-deploy completed/m,
-        `dry-run must not run a real deploy, got: ${lines}`);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  test("drift, auto-deploy ON, grace elapsed: clears the marker BEFORE running deploy.sh", async () => {
+    const h = makeDeployDriftHarness({ marker: `${NOW_S - 700}\n` });
+    h.state.remote = SHA_B;
+    const order: string[] = [];
+    const clear = h.marker.clear.bind(h.marker);
+    h.marker.clear = () => {
+      order.push("clear");
+      clear();
+    };
+    const deploy = h.deps.host.deploy;
+    h.deps.host.deploy = async (r) => {
+      order.push("deploy");
+      return deploy(r);
+    };
+    await runDeployDrift(h.deps, cfg({ autoDeploy: true }));
+    assert.deepEqual(order, ["clear", "deploy"]);
+    assert.deepEqual(h.deploys, [root]);
+    assert.match(text(h.logs), /AUTO-DEPLOY — drift sustained 700s >= grace 600s/);
+    assert.match(text(h.logs), /auto-deploy completed/);
   });
 
-  test("fail-safe: empty remote SHA (git/network error) skips with WARN, exits 0", () => {
-    const dir = makeStateDir();
-    try {
-      // Inject a deployed SHA but force the remote resolution down the real
-      // ls-remote path by pointing HYDRA_ROOT at a throwaway non-repo dir so
-      // `git ls-remote` fails -> empty remote_sha -> WARN + return 0.
-      const r = runWatchdog({
-        HYDRA_ROOT: dir, // not a git repo
-        HYDRA_WATCHDOG_DRIFT_DEPLOYED_SHA: SHA_A, // skip deployed rev-parse
-        HYDRA_WATCHDOG_DRIFT_STATE_DIR: dir,
-      });
-      assert.equal(r.status, 0, `expected exit 0 on git error, got ${r.status}; stderr=${r.stderr}`);
-      const lines = driftLines(r.stdout);
-      assert.match(lines, /could not resolve origin\/master SHA/, `expected fail-safe WARN, got: ${lines}`);
-      assert.doesNotMatch(lines, /DRIFT|would-deploy|AUTO-DEPLOY/, `must not act on a resolution failure, got: ${lines}`);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  test("a non-zero deploy.sh exit is one WARN line and the marker stays cleared (next tick re-arms)", async () => {
+    const h = makeDeployDriftHarness({ marker: `${NOW_S - 700}\n` });
+    h.state.remote = SHA_B;
+    h.state.deployRc = 3;
+    await runDeployDrift(h.deps, cfg({ autoDeploy: true }));
+    assert.match(text(h.logs), /WARN auto-deploy \(scripts\/deploy\.sh\) returned non-zero/);
+    assert.equal(h.marker.raw, null);
   });
 
-  test("no-drift clears a stale grace marker", () => {
-    const dir = makeStateDir();
-    try {
-      const marker = join(dir, "hydra-watchdog-drift-since");
-      writeFileSync(marker, String(Math.floor(Date.now() / 1000) - 9999));
-      assert.ok(existsSync(marker), "precondition: marker exists");
-      const r = runWatchdog({
-        HYDRA_WATCHDOG_DRIFT_DEPLOYED_SHA: SHA_A,
-        HYDRA_WATCHDOG_DRIFT_REMOTE_SHA: SHA_A, // now in sync
-        HYDRA_WATCHDOG_DRIFT_STATE_DIR: dir,
-      });
-      assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-      assert.ok(!existsSync(marker), "expected stale marker cleared once back in sync");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  test("a scheduler stopped deliberately blocks the auto-deploy; an unreachable API does not", async () => {
+    const stopped = makeDeployDriftHarness({ marker: `${NOW_S - 700}\n`, stopReason: "deliberate" });
+    stopped.state.remote = SHA_B;
+    await runDeployDrift(stopped.deps, cfg({ autoDeploy: true }));
+    assert.match(text(stopped.logs), /scheduler stopped deliberately/);
+    assert.equal(stopped.deploys.length, 0);
+
+    const unreachable = makeDeployDriftHarness({ marker: `${NOW_S - 700}\n`, stopReason: null });
+    unreachable.state.remote = SHA_B;
+    await runDeployDrift(unreachable.deps, cfg({ autoDeploy: true }));
+    assert.equal(unreachable.deploys.length, 1);
+  });
+
+  test("fail-safe: an unresolvable SHA logs ONE WARN and leaves the marker untouched", async () => {
+    const remoteDown = makeDeployDriftHarness({ marker: `${NOW_S - 50}\n` });
+    remoteDown.state.remote = null;
+    await runDeployDrift(remoteDown.deps, cfg());
+    assert.equal(remoteDown.logs.length, 1);
+    assert.match(text(remoteDown.logs), /WARN could not resolve origin\/master SHA/);
+    assert.equal(remoteDown.marker.raw, `${NOW_S - 50}\n`);
+
+    const deployedDown = makeDeployDriftHarness();
+    deployedDown.state.deployed = null;
+    await runDeployDrift(deployedDown.deps, cfg());
+    assert.match(text(deployedDown.logs), /WARN could not resolve deployed SHA/);
+  });
+
+  test("a missing .git skips with a WARN", async () => {
+    const h = makeDeployDriftHarness();
+    h.state.hasGit = false;
+    await runDeployDrift(h.deps, cfg());
+    assert.match(text(h.logs), /WARN \/home\/gabe\/hydra is not a git repo/);
+  });
+
+  test("no-drift clears a stale grace marker", async () => {
+    const h = makeDeployDriftHarness({ marker: `${NOW_S - 9999}\n` });
+    await runDeployDrift(h.deps, cfg({ autoDeploy: true }));
+    assert.equal(h.marker.raw, null);
+    assert.equal(h.deploys.length, 0);
+  });
+
+  test("a garbage marker reads as now (age 0) and a future marker clamps to age 0", () => {
+    const garbage = decideDeployDrift({ deployedSha: SHA_A, remoteSha: SHA_B, markerRaw: "not-a-number", nowMs: NOW_MS });
+    assert.deepEqual(garbage, { kind: "drift", firstSeenMs: NOW_MS, newlyAnchored: false });
+    const future = decideDeployDrift({ deployedSha: SHA_A, remoteSha: SHA_B, markerRaw: `${NOW_S + 500}`, nowMs: NOW_MS });
+    assert.equal(future.kind, "drift");
+  });
+
+  test("the marker keeps its pre-cut-over file name (continuity across the deploy)", () => {
+    assert.equal(DEPLOY_DRIFT_MARKER_NAME, "hydra-watchdog-drift-since");
+    assert.equal(existsSync(join(import.meta.dirname, "..", "src", "watchdog", "deploy-drift.ts")), true);
   });
 });

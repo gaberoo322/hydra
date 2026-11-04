@@ -1,71 +1,54 @@
 /**
- * Regression test for issue #4604 — the `## REDIS BACKUP FRESHNESS` block in
- * scripts/hydra-watchdog.sh (`run_redis_backup_freshness`), plus the
- * deploy-install contract for the Redis backup units and the SSD-unmounted
- * guard in scripts/redis-backup.sh.
+ * The REDIS BACKUP FRESHNESS watchdog check (issue #4604; ported to TypeScript
+ * in #5098), plus the deploy-install contract for the Redis backup units and the
+ * SSD-unmounted guard in scripts/redis-backup.sh.
  *
- * Context: the nightly Redis backup shipped in #2742 as a repo-tracked script
- * plus a HAND-installed unit pair — the hand step was never done on this
- * host, so no scheduled Redis backup ran and nothing noticed. #4604 makes
- * deploy.sh install+enable the timer, seeds a first dump, adds this watchdog
- * block (missing/stale dump → once-per-episode alert onto
- * hydra:notifications, timer-not-enabled → advisory log), and extends
- * hydra-doctor. Hard invariants pinned here (from the gate-approved
- * design-concept for issue-4604):
+ * The nightly Redis backup is the ONLY copy of all orchestrator state off the
+ * hydra_redis-data docker volume. Hard invariants pinned here:
  *
- *   1. Deploy installs the units + script copy and `enable --now`s the timer
- *      (same convergent shape as the reaper/drainer blocks).
+ *   1. Deploy installs the units + script copy and `enable --now`s the timer.
  *   2. The units carry the pinned shape (Type=oneshot, ExecStart=%h path,
  *      OnFailure template; OnCalendar 03:15, Persistent, Unit, WantedBy).
- *   3. A backup problem must NEVER fail or abort deploy.sh — the seed stanza
- *      stays exit-0 under `set -euo pipefail` even when every command in it
- *      fails; a failed seed pages via OnFailure, not the deploy's exit code.
- *   4. redis-backup.sh refuses to run (exit 1, `[redis-backup] FAILED` on
- *      stderr) when /mnt/hydra-ssd/backups is absent, instead of mkdir-ing
- *      the tree onto the root filesystem.
- *   5. The watchdog block is advisory and fail-safe: STALE on missing/old
- *      dump, fires the in-band delivery ONCE per episode, DELs on recovery,
- *      and never exits non-zero — including when Redis itself is unreachable.
- *
- * Isolation, mirroring test/watchdog-node-modules-integrity.test.mts:
- *   - the extracted block COPY is rebound onto a per-run Redis key namespace,
- *     so a live production watchdog tick can neither rewrite our fixtures nor
- *     be disturbed by them;
- *   - in-band delivery is pointed at a per-run NOTIFY STREAM via the block's
- *     own HYDRA_WATCHDOG_BACKUP_NOTIFY_STREAM hook, so a behavioural case can
- *     NEVER write a real event onto the PRODUCTION hydra:notifications stream;
- *   - the backup dir is a synthetic temp dir via HYDRA_WATCHDOG_BACKUP_DIR —
- *     no case ever reads the real /mnt/hydra-ssd state;
- *   - the redis-backup.sh guard cases run a COPY with the SSD root rebound
- *     onto a temp path and a stubbed `docker`, so the real container is never
- *     touched.
+ *   3. A backup problem must NEVER fail or abort deploy.sh.
+ *   4. redis-backup.sh refuses to run when /mnt/hydra-ssd/backups is absent.
+ *   5. The watchdog check is advisory and fail-safe: STALE on missing/old dump,
+ *      fires ONCE per episode on the shared episode tracker (threshold 0),
+ *      resolves on recovery, and never throws (#5098: now driven 1:1 over
+ *      in-memory fake ports — no bash, docker or Redis).
  */
 
-import test, { describe, before, beforeEach, after } from "node:test";
+import test, { describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   writeFileSync,
-  unlinkSync,
   mkdirSync,
   rmSync,
-  utimesSync,
   chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 
 import { STREAMS } from "../src/event-bus-stream-keys.ts";
+import { REDIS_BACKUP_KEY_PREFIX, redisBackupEpisodeKeys } from "../src/redis/watchdog-episodes.ts";
+import {
+  DEFAULT_REDIS_BACKUP_STALE_HOURS,
+  REDIS_BACKUP_LOG_PREFIX,
+  REDIS_BACKUP_STALE_KIND,
+  decideRedisBackup,
+  parseStaleHours,
+  runRedisBackup,
+} from "../src/watchdog/redis-backup.ts";
+import { ALERT_TYPES } from "../src/notification/alert-grammar.ts";
+import { isPageKind } from "../src/operator-channel/page-list.ts";
 import {
   WATCHDOG_SPAWN_TIMEOUT_MS,
-  WATCHDOG_REDIS_TIMEOUT_MS,
   throwIfTimedOut,
 } from "./_helpers/watchdog-timeouts.mts";
+import { NOW_MS, NOW_S, makeRedisBackupHarness } from "./_helpers/watchdog-drift-fakes.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
@@ -73,141 +56,6 @@ const DEPLOY = join(REPO_ROOT, "scripts", "deploy.sh");
 const BACKUP_SCRIPT = join(REPO_ROOT, "scripts", "redis-backup.sh");
 const BACKUP_SERVICE = join(REPO_ROOT, "scripts", "systemd", "hydra-redis-backup.service");
 const BACKUP_TIMER = join(REPO_ROOT, "scripts", "systemd", "hydra-redis-backup.timer");
-
-const RB_KEY_PREFIX_LITERAL = "hydra:autopilot:redis-backup-freshness";
-
-// Per-run key/stream namespace (see file header): nothing here may touch
-// shared production keys/streams.
-const RUN_NS = `hydra:test:rb-freshness-${process.pid}-${randomUUID().slice(0, 8)}`;
-const TEST_RB_PREFIX = `${RUN_NS}:rb-freshness`;
-const TEST_NOTIFY_STREAM = `${RUN_NS}:notifications`;
-
-const SINCE_KEY = `${TEST_RB_PREFIX}:since`;
-const FIRED_KEY = `${TEST_RB_PREFIX}:fired`;
-
-function dockerRedisAvailable(): boolean {
-  const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "PING"], {
-    encoding: "utf-8",
-    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
-  });
-  return (r.stdout ?? "").trim() === "PONG";
-}
-
-const DOCKER = dockerRedisAvailable();
-
-function drc(args: string[]): string {
-  const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
-    encoding: "utf-8",
-    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
-  });
-  return (r.stdout ?? "").trim();
-}
-
-/** One XADD'd in-band entry off the namespaced notify stream, fields folded
- * (mirrors test/watchdog-node-modules-integrity.test.mts). */
-function notifyEntriesSimple(): { fields: Record<string, string> }[] {
-  const out = drc(["XRANGE", TEST_NOTIFY_STREAM, "-", "+"]);
-  if (out === "") return [];
-  const lines = out.split("\n");
-  const FIELD_NAMES = ["id", "type", "source", "timestamp", "correlationId", "payload"];
-  const entries: { fields: Record<string, string> }[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    i += 1; // skip entry-id line
-    const fields: Record<string, string> = {};
-    for (const name of FIELD_NAMES) {
-      assert.equal(lines[i], name, `expected envelope field '${name}' at line ${i}: ${JSON.stringify(lines)}`);
-      fields[name] = lines[i + 1];
-      i += 2;
-    }
-    entries.push({ fields });
-  }
-  return entries;
-}
-
-// ---------------------------------------------------------------------------
-// Extract run_redis_backup_freshness() into a temp file, rebound onto this
-// run's Redis key namespace (mirrors test/watchdog-node-modules-integrity
-// .test.mts).
-// ---------------------------------------------------------------------------
-
-const BLOCK = join(tmpdir(), `hydra-rb-freshness-block-${process.pid}.sh`);
-
-before(() => {
-  const src = readFileSync(WATCHDOG, "utf-8");
-  const start = src.indexOf("run_redis_backup_freshness()");
-  assert.ok(start >= 0, "run_redis_backup_freshness() not found in hydra-watchdog.sh");
-  const after = src.slice(start);
-  const end = after.search(/^}/m);
-  assert.ok(end >= 0, "run_redis_backup_freshness() closing brace not found");
-  const body = after.slice(0, end + 1);
-  assert.ok(body.includes("deliver_signal"), "extracted block missing deliver_signal");
-  assert.ok(body.includes("rc_write"), "extracted block missing rc_write");
-
-  const namespaced = body.split(`"${RB_KEY_PREFIX_LITERAL}"`).join(`"${TEST_RB_PREFIX}"`);
-  assert.ok(
-    namespaced.includes(`"${TEST_RB_PREFIX}"`),
-    "failed to rebind RB_KEY_PREFIX onto the test namespace",
-  );
-  writeFileSync(BLOCK, namespaced);
-});
-
-after(() => {
-  try {
-    unlinkSync(BLOCK);
-  } catch {
-    /* best-effort cleanup */
-  }
-});
-
-/**
- * Source the extracted block and call it once. `extra` wins over the pinned
- * isolation env (last-spread wins), so a case can point Redis elsewhere.
- */
-function runBlock(extra: Record<string, string>): { status: number; stdout: string; stderr: string } {
-  const r = spawnSync("bash", ["-c", `set -euo pipefail; source '${BLOCK}'; run_redis_backup_freshness`], {
-    env: {
-      ...process.env,
-      HYDRA_REDIS_HOST: "docker",
-      // Pinned to "0" for the same reason as the node-modules-integrity
-      // suite: this suite's own seed/read helpers (drc) are hardcoded to db 0
-      // with no `-n` selector. scripts/test/redis-db-launch.mjs exports
-      // HYDRA_REDIS_DB into the whole node:test process env, so an unpinned
-      // `...process.env` would redirect the block to the launcher's per-run
-      // DB while every assertion here kept reading db 0.
-      HYDRA_REDIS_DB: "0",
-      // ADR-0045 D2 (#5046): the block now calls the Operator Channel CLI at its
-      // fired/recovery edges through HYDRA_WATCHDOG_OPERATOR_NOTIFY; this suite
-      // asserts nothing about that delivery (test/launch-flow-delivery does), so
-      // a no-op stub keeps it from booting the PRODUCTION checkout's CLI.
-      HYDRA_WATCHDOG_OPERATOR_NOTIFY: "/bin/true",
-      HYDRA_WATCHDOG_BACKUP_NOTIFY_STREAM: TEST_NOTIFY_STREAM,
-      HYDRA_WATCHDOG_BACKUP_DIR: "/nonexistent-rb-freshness-dir",
-      HYDRA_WATCHDOG_BACKUP_TIMER_STATE: "enabled",
-      ...extra,
-    },
-    encoding: "utf-8",
-    timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
-  });
-  throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_redis_backup_freshness block");
-  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-}
-
-function rbLines(stdout: string): string {
-  return stdout
-    .split("\n")
-    .filter((l) => l.includes("hydra-redis-backup-freshness-watchdog:"))
-    .join("\n");
-}
-
-/** Write a fixture dump with an explicit mtime (default: now). */
-function makeDump(dir: string, ageHours: number): string {
-  const p = join(dir, `hydra-redis-2026-09-${String(10 + Math.floor(Math.random() * 9)).padStart(2, "0")}_0315.rdb.gz`);
-  writeFileSync(p, "fake-rdb");
-  const when = new Date(Date.now() - ageHours * 3600 * 1000);
-  utimesSync(p, when, when);
-  return p;
-}
 
 // =============================================================================
 // Structural cases — deploy.sh install contract, unit shape, wiring, the
@@ -259,32 +107,28 @@ describe("scripts/deploy.sh + units — Redis backup install (issue #4604)", () 
     assert.match(timer, /^WantedBy=timers\.target$/m, "install target");
   });
 
-  test("run_redis_backup_freshness is wired into the entry point alongside run_deploy_drift", () => {
+  test("the bash entry point calls the redis-backup CLI wrapper (90s bound) alongside deploy-drift", () => {
     const src = read("scripts/hydra-watchdog.sh");
-    const defIdx = src.indexOf("run_redis_backup_freshness()");
-    assert.ok(defIdx >= 0, "run_redis_backup_freshness() definition not found");
-    const guard = 'if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then';
-    const guardIdx = src.lastIndexOf(guard);
-    assert.ok(guardIdx > defIdx, "the sourcing-guarded entry point must follow the block definition");
+    assert.match(src, /run_redis_backup_cli\(\) \{ run_watchdog_cli redis-backup "hydra-redis-backup-freshness-watchdog:" 90; \}/);
+    const guardIdx = src.lastIndexOf('if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then');
     const entry = src.slice(guardIdx);
-    assert.match(entry, /^\s*run_redis_backup_freshness$/m, "block must run on every real tick");
-    assert.match(
-      entry, /run_deploy_drift\n\s*run_redis_backup_freshness/,
-      "block must sit alongside run_deploy_drift in the main sequence",
-    );
+    assert.match(entry, /run_deploy_drift_cli\n\s*run_redis_backup_cli\n\s*run_skill_mirror_cli/, "block must sit alongside deploy-drift in the main sequence");
+    assert.doesNotMatch(src, /run_redis_backup_freshness/, "the bash block is deleted");
   });
 
-  test("delivery envelope drift-guards the stream key and event type", () => {
-    const src = read("scripts/hydra-watchdog.sh");
-    const start = src.indexOf("run_redis_backup_freshness()");
-    const block = src.slice(start, src.indexOf("# Entry point") > start ? src.indexOf("# Entry point") : undefined);
-    assert.ok(block.includes(`:-${STREAMS.NOTIFICATIONS}}`), "in-band delivery default must be the TS-owned stream key");
-    assert.ok(block.includes("infra:redis_backup_stale"), "must publish type infra:redis_backup_stale");
-    assert.ok(block.includes("watchdog-redis-backup-freshness"), "source must be watchdog-redis-backup-freshness");
-    assert.match(block, /rc_write XADD "\$NOTIFY_STREAM" '\*'/, "enveloped XADD onto the notify stream");
-    for (const field of ["id", "type", "source", "timestamp", "correlationId", "payload"]) {
-      assert.ok(new RegExp(`\\b${field}\\b `).test(block), `envelope must carry the '${field}' field`);
-    }
+  test("the event type stays a module constant, OUT of the alert vocabulary", () => {
+    assert.equal(REDIS_BACKUP_STALE_KIND, "infra:redis_backup_stale");
+    assert.equal(ALERT_TYPES.has(REDIS_BACKUP_STALE_KIND), false, "the alert surface does not change");
+    assert.equal(STREAMS.NOTIFICATIONS, "hydra:notifications");
+    assert.equal(isPageKind(REDIS_BACKUP_STALE_KIND), true, "the Page kind is a registered Operator Channel kind");
+  });
+
+  test("the episode keys keep the pre-cut-over Redis key names", () => {
+    assert.equal(REDIS_BACKUP_KEY_PREFIX, "hydra:autopilot:redis-backup-freshness");
+    assert.deepEqual(redisBackupEpisodeKeys(), {
+      since: "hydra:autopilot:redis-backup-freshness:since",
+      fired: "hydra:autopilot:redis-backup-freshness:fired",
+    });
   });
 
   test("a failing backup seed never fails deploy.sh (guarded under set -euo pipefail)", () => {
@@ -403,149 +247,134 @@ describe("scripts/redis-backup.sh — SSD-unmounted guard (issue #4604)", () => 
 });
 
 // =============================================================================
-// Behavioural cases — gated on the docker hydra-redis-1 container.
+// Detection + delivery over fake ports (issue #4604, #5098)
 // =============================================================================
 
-describe("run_redis_backup_freshness — detection + delivery (issue #4604)", { skip: !DOCKER }, () => {
-  const SCRATCH = join(tmpdir(), `hydra-rb-freshness-scratch-${process.pid}`);
-  let backupDir: string;
-
-  beforeEach(() => {
-    rmSync(SCRATCH, { recursive: true, force: true });
-    backupDir = join(SCRATCH, "redis");
-    mkdirSync(backupDir, { recursive: true });
-    drc(["DEL", SINCE_KEY, FIRED_KEY]);
-    drc(["DEL", TEST_NOTIFY_STREAM]);
-  });
-
-  after(() => {
-    rmSync(SCRATCH, { recursive: true, force: true });
-    drc(["DEL", SINCE_KEY, FIRED_KEY]);
-    drc(["DEL", TEST_NOTIFY_STREAM]);
-  });
-
-  test("flags STALE when the newest dump is older than the threshold", () => {
-    makeDump(backupDir, 48); // 48h old, default threshold 36h
-    const r = runBlock({ HYDRA_WATCHDOG_BACKUP_DIR: backupDir });
-    assert.equal(r.status, 0, `block must never exit non-zero: ${r.stderr}`);
-    const lines = rbLines(r.stdout);
-    assert.match(lines, /WARNING REDIS BACKUP STALE — stale/, "must warn on an old dump");
-    assert.match(lines, /newest backup: hydra-redis-.*\.rdb\.gz/, "must name the newest dump");
-    assert.equal(drc(["EXISTS", FIRED_KEY]), "1", "fired marker must be set");
-    const entries = notifyEntriesSimple();
-    assert.equal(entries.length, 1, "exactly one delivery per episode");
-    assert.equal(entries[0].fields.type, "infra:redis_backup_stale");
-    assert.equal(entries[0].fields.source, "watchdog-redis-backup-freshness");
-    assert.match(entries[0].fields.payload, /"thresholdMs":129600000/, "36h threshold in the envelope");
-  });
-
-  test("flags STALE with reason=missing when the dir has no dumps", () => {
-    const r = runBlock({ HYDRA_WATCHDOG_BACKUP_DIR: backupDir }); // empty dir
-    assert.equal(r.status, 0, `block must never exit non-zero: ${r.stderr}`);
-    assert.match(rbLines(r.stdout), /WARNING REDIS BACKUP STALE — missing/, "an empty backup dir is STALE");
-    assert.equal(drc(["EXISTS", FIRED_KEY]), "1");
-    assert.equal(notifyEntriesSimple().length, 1);
-  });
-
-  test("stays quiet against a fresh backup", () => {
-    makeDump(backupDir, 1); // 1h old
-    const r = runBlock({ HYDRA_WATCHDOG_BACKUP_DIR: backupDir });
-    assert.equal(r.status, 0);
-    assert.doesNotMatch(rbLines(r.stdout), /WARNING/, "a fresh backup must never warn");
-    assert.equal(drc(["EXISTS", FIRED_KEY]), "0", "no fired marker");
-    assert.equal(notifyEntriesSimple().length, 0, "no delivery for a fresh backup");
-  });
-
-  test("honours the stale-hours hook", () => {
-    makeDump(backupDir, 2); // 2h old
-    const r = runBlock({ HYDRA_WATCHDOG_BACKUP_DIR: backupDir, HYDRA_WATCHDOG_BACKUP_STALE_HOURS: "1" });
-    assert.equal(r.status, 0);
-    assert.match(rbLines(r.stdout), /WARNING REDIS BACKUP STALE/, "threshold override must apply");
-  });
-
-  test("dedup: a second consecutive stale tick does not re-deliver", () => {
-    makeDump(backupDir, 48);
-    runBlock({ HYDRA_WATCHDOG_BACKUP_DIR: backupDir });
-    assert.equal(notifyEntriesSimple().length, 1);
-    const r2 = runBlock({ HYDRA_WATCHDOG_BACKUP_DIR: backupDir });
-    assert.equal(r2.status, 0);
-    const lines2 = rbLines(r2.stdout);
-    assert.match(lines2, /WARNING REDIS BACKUP STALE/, "the journal still flags every stale tick");
-    assert.equal((lines2.match(/in-band delivery published/g) ?? []).length, 0, "the fired marker must suppress a re-delivery");
-    assert.equal(notifyEntriesSimple().length, 1, "still exactly one delivery after the second tick");
-  });
-
-  test("recovery clears the episode, and a fresh streak re-delivers", () => {
-    makeDump(backupDir, 48);
-    runBlock({ HYDRA_WATCHDOG_BACKUP_DIR: backupDir });
-    assert.equal(drc(["EXISTS", FIRED_KEY]), "1");
-
-    // Recover: a fresh dump lands, next tick DELs both keys.
-    makeDump(backupDir, 0);
-    const r2 = runBlock({ HYDRA_WATCHDOG_BACKUP_DIR: backupDir });
-    assert.equal(drc(["EXISTS", FIRED_KEY]), "0", "recovery must DEL the fired marker");
-    assert.equal(drc(["EXISTS", SINCE_KEY]), "0", "recovery must DEL the since anchor too");
-    assert.match(rbLines(r2.stdout), /fresh again/, "recovery is logged");
-
-    // Recur: the dump ages out again — a fresh episode must re-deliver.
-    // Clear the dir FIRST: adding another (older-mtime) file would leave the
-    // fresh dump as the newest and the case would silently not recur.
-    for (const f of readdirSync(backupDir)) rmSync(join(backupDir, f));
-    makeDump(backupDir, 48);
-    const r3 = runBlock({ HYDRA_WATCHDOG_BACKUP_DIR: backupDir });
-    assert.match(rbLines(r3.stdout), /WARNING REDIS BACKUP STALE/, "a fresh streak must re-fire");
-    assert.equal(notifyEntriesSimple().length, 2, "the fresh episode delivers a second event");
-  });
-
-  test("missing backup dir is STALE, not a wedged block", () => {
-    const r = runBlock({ HYDRA_WATCHDOG_BACKUP_DIR: join(SCRATCH, "does-not-exist") });
-    assert.equal(r.status, 0, `an absent dir must not break the block: ${r.stderr}`);
-    assert.match(rbLines(r.stdout), /WARNING REDIS BACKUP STALE — missing/);
-  });
+const cfg = (over: Partial<{ backupDir: string; staleHours: number }> = {}) => ({
+  backupDir: "/mnt/hydra-ssd/backups/redis",
+  staleHours: 36,
+  ...over,
 });
+const hoursAgo = (h: number) => ({ name: "hydra-redis-2026-09-10_0315.rdb.gz", mtimeS: NOW_S - h * 3600 });
+const text = (logs: string[]): string => logs.join("\n");
 
-// =============================================================================
-// Fail-safe without Redis — Redis being down must not break the block
-// (INV-6), and the off-by-default hooks must rebind everything a test needs
-// (INV-7). No docker dependency: rc_* calls point at a dead local port and
-// fail closed instantly; nothing lands anywhere.
-// =============================================================================
-
-describe("run_redis_backup_freshness — fail-safe without Redis (issue #4604)", () => {
-  const SCRATCH = join(tmpdir(), `hydra-rb-freshness-noredis-${process.pid}`);
-  const DEAD_REDIS = { HYDRA_REDIS_HOST: "127.0.0.1", HYDRA_REDIS_PORT: "9" };
-
-  beforeEach(() => {
-    rmSync(SCRATCH, { recursive: true, force: true });
-    mkdirSync(SCRATCH, { recursive: true });
-  });
-
-  after(() => {
-    rmSync(SCRATCH, { recursive: true, force: true });
-  });
-
-  test("never exits non-zero and still detects when Redis is unreachable", () => {
-    makeDump(SCRATCH, 48);
-    const r = runBlock({ ...DEAD_REDIS, HYDRA_WATCHDOG_BACKUP_DIR: SCRATCH });
-    assert.equal(r.status, 0, `Redis being down must not break the block: ${r.stderr}`);
-    const lines = rbLines(r.stdout);
-    assert.match(lines, /WARNING REDIS BACKUP STALE — stale/, "detection must still work with Redis down");
-    assert.match(lines, /in-band delivery published \(best-effort\)/, "delivery degrades to best-effort, never an abort");
-  });
-
-  test("off-by-default hooks rebind dir, stale hours, notify stream, and timer state", () => {
-    makeDump(SCRATCH, 0); // fresh
-    const r = runBlock({
-      ...DEAD_REDIS,
-      HYDRA_WATCHDOG_BACKUP_DIR: SCRATCH,
-      HYDRA_WATCHDOG_BACKUP_STALE_HOURS: "36",
-      HYDRA_WATCHDOG_BACKUP_TIMER_STATE: "disabled",
+describe("redis-backup freshness check — detection + delivery", () => {
+  test("flags STALE when the newest dump is older than the threshold: event + Page + fired marker", async () => {
+    const h = makeRedisBackupHarness();
+    h.state.newest = hoursAgo(40);
+    await runRedisBackup(h.deps, cfg());
+    assert.match(text(h.logs), /WARNING REDIS BACKUP STALE — stale in \/mnt\/hydra-ssd\/backups\/redis \(threshold 36h\)/);
+    assert.equal(h.published.length, 1);
+    const ev = h.published[0];
+    assert.equal(ev.stream, STREAMS.NOTIFICATIONS);
+    assert.equal(ev.event.type, "infra:redis_backup_stale");
+    assert.equal(ev.event.source, "watchdog-redis-backup-freshness");
+    assert.equal(ev.event.correlationId, "redis-backup-freshness");
+    assert.deepEqual(ev.event.payload, {
+      signal: "redis-backup",
+      reason: "stale",
+      durationMs: 40 * 3600 * 1000,
+      thresholdMs: 36 * 3600 * 1000,
     });
-    assert.equal(r.status, 0);
-    const lines = rbLines(r.stdout);
-    assert.match(lines, /not enabled \(state=disabled\)/, "a disabled timer is logged separately");
-    assert.doesNotMatch(lines, /WARNING REDIS BACKUP STALE/, "the timer log is not the staleness signal");
-    // And the fresh-path quiet behaviour via the rebound dir hook:
-    assert.match(lines, /newest backup: hydra-redis-/);
+    assert.equal(h.pages.length, 1);
+    assert.equal(h.pages[0].kind, REDIS_BACKUP_STALE_KIND);
+    assert.equal(h.pages[0].dedupKey, REDIS_BACKUP_STALE_KIND, "dedupKey == kind");
+    assert.ok(h.store.kv.has(`${REDIS_BACKUP_KEY_PREFIX}:fired`));
+    assert.ok(h.logs.every((l) => l.startsWith(REDIS_BACKUP_LOG_PREFIX)));
+  });
+
+  test("flags STALE with reason=missing (age 0) when the dir has no dumps", async () => {
+    const h = makeRedisBackupHarness();
+    h.state.newest = null;
+    await runRedisBackup(h.deps, cfg({ backupDir: "/nonexistent-rb-freshness-dir" }));
+    assert.equal((h.published[0].event.payload as { reason: string; durationMs: number }).reason, "missing");
+    assert.equal((h.published[0].event.payload as { durationMs: number }).durationMs, 0);
+    assert.match(text(h.logs), /STALE — missing in \/nonexistent-rb-freshness-dir/);
+  });
+
+  test("stays quiet against a fresh backup", async () => {
+    const h = makeRedisBackupHarness();
+    h.state.newest = hoursAgo(1);
+    await runRedisBackup(h.deps, cfg());
+    assert.equal(h.published.length, 0);
+    assert.equal(h.pages.length, 0);
+    assert.equal(h.store.kv.size, 0);
+    assert.match(text(h.logs), /newest backup: hydra-redis-2026-09-10_0315\.rdb\.gz \(age 3600s ≈ 1h; stale threshold 36h\)/);
+  });
+
+  test("honours the stale-hours knob (boundary is >=)", async () => {
+    const h = makeRedisBackupHarness();
+    h.state.newest = hoursAgo(2);
+    await runRedisBackup(h.deps, cfg({ staleHours: 1 }));
+    assert.equal(h.published.length, 1);
+    assert.deepEqual(decideRedisBackup({ name: "x", mtimeS: NOW_S - 3600 }, NOW_S, 1), { stale: true, reason: "stale", ageS: 3600 });
+    assert.equal(decideRedisBackup({ name: "x", mtimeS: NOW_S - 3599 }, NOW_S, 1).stale, false);
+    assert.equal(parseStaleHours("abc"), DEFAULT_REDIS_BACKUP_STALE_HOURS);
+    assert.equal(parseStaleHours("12"), 12);
+    assert.equal(parseStaleHours(undefined), 36);
+  });
+
+  test("an mtime in the future clamps to age 0 (fresh)", () => {
+    assert.deepEqual(decideRedisBackup({ name: "x", mtimeS: NOW_S + 999 }, NOW_S, 36), { stale: false, ageS: 0 });
+  });
+
+  test("dedup: a second consecutive stale tick does not re-deliver", async () => {
+    const h = makeRedisBackupHarness();
+    h.state.newest = hoursAgo(40);
+    await runRedisBackup(h.deps, cfg());
+    await runRedisBackup(h.deps, cfg());
+    assert.equal(h.published.length, 1);
+    assert.equal(h.pages.length, 1);
+  });
+
+  test("recovery resolves the Page and clears the episode, and a fresh streak re-delivers", async () => {
+    const h = makeRedisBackupHarness();
+    h.state.newest = hoursAgo(40);
+    await runRedisBackup(h.deps, cfg());
+    h.state.newest = hoursAgo(1);
+    await runRedisBackup(h.deps, cfg());
+    assert.deepEqual(h.resolves, [{ key: REDIS_BACKUP_STALE_KIND, title: "Redis backup fresh again" }]);
+    assert.equal(h.store.kv.size, 0);
+    assert.match(text(h.logs), /redis backup fresh again — clearing the staleness episode/);
+    h.state.newest = hoursAgo(40);
+    await runRedisBackup(h.deps, cfg());
+    assert.equal(h.published.length, 2);
+  });
+
+  test("a fresh tick with no fired marker resolves nothing", async () => {
+    const h = makeRedisBackupHarness();
+    h.state.newest = hoursAgo(1);
+    await runRedisBackup(h.deps, cfg());
+    assert.equal(h.resolves.length, 0);
+  });
+
+  test("timer visibility is a WARN line only, never part of the stale signal", async () => {
+    const h = makeRedisBackupHarness();
+    h.state.newest = hoursAgo(1);
+    h.state.timer = "disabled";
+    await runRedisBackup(h.deps, cfg());
+    assert.match(text(h.logs), /WARN hydra-redis-backup\.timer is not enabled \(state=disabled\)/);
+    assert.equal(h.published.length, 0);
+  });
+
+  test("fail-safe: a failing publish is a WARN, the Page still goes out, the fired marker stays set", async () => {
+    const h = makeRedisBackupHarness();
+    h.state.newest = hoursAgo(40);
+    h.state.failPublish = true;
+    await runRedisBackup(h.deps, cfg());
+    assert.match(text(h.logs), /WARN in-band delivery FAILED/);
+    assert.equal(h.pages.length, 1);
+    assert.ok(h.store.kv.has(`${REDIS_BACKUP_KEY_PREFIX}:fired`));
+  });
+
+  test("fail-safe: an unreachable Redis skips the signal and still detects (never throws)", async () => {
+    const h = makeRedisBackupHarness();
+    h.state.newest = hoursAgo(40);
+    h.store.failReads = true;
+    await runRedisBackup(h.deps, cfg());
+    assert.match(text(h.logs), /WARNING REDIS BACKUP STALE/);
+    assert.match(text(h.logs), /state read failed/);
+    assert.equal(h.published.length, 0);
+    assert.equal(NOW_MS > 0, true);
   });
 });

@@ -8,7 +8,6 @@
     "test/api-500-catch-ratchet.test.mts": "invariant-lint",
     "test/api-tier-router.test.mts": "grandfathered",
     "test/api-versions.test.mts": "grandfathered",
-    "test/attention-buckets.test.mts": "grandfathered",
     "test/attention-calibration.test.mts": "grandfathered",
     "test/attention-target-bucket.test.mts": "grandfathered",
     "test/attention.test.mts": "grandfathered",
@@ -82,6 +81,7 @@
     "test/github-issues.test.mts": "grandfathered",
     "test/github-pr-refs.test.mts": "grandfathered",
     "test/github-prs.test.mts": "grandfathered",
+    "test/github-remote-url.test.mts": "behaviour",
     "test/glm-beachhead-report.test.mts": "behaviour",
     "test/glm-drainer-loop.test.mts": "grandfathered",
     "test/glm-drainer-runner.test.mts": "grandfathered",
@@ -161,7 +161,6 @@
     "test/watchdog-operator-channel.test.mts": "grandfathered",
     "test/watchdog-origin-identity.test.mts": "behaviour",
     "test/watchdog-redis-backup-freshness.test.mts": "behaviour",
-    "test/watchdog-skill-mirror-drift.test.mts": "drift-guard",
     "test/watchdog-spawn-timeout-ratchet.test.mts": "invariant-lint",
     "test/wire-or-retire-carveout-drift.test.mts": "drift-guard",
     "test/work-page.test.mts": "grandfathered"
