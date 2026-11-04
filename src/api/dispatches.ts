@@ -38,7 +38,12 @@ import {
   SubagentDispatchPostBodySchema,
   TranscriptQuerySchema,
 } from "../schemas/dispatches.ts";
-import { resolveTranscriptPath, resolveSubagentTranscriptPath } from "../transcript-store.ts";
+import {
+  resolveTranscriptPath,
+  resolveSubagentTranscriptPath,
+  findSubagentTranscriptPathByAgentId,
+  isAgentIdShaped,
+} from "../transcript-store.ts";
 import { parseTranscript, paginate } from "../transcript-projection.ts";
 import { logger } from "../logger.ts";
 import { isolateAggregator } from "./route-helpers.ts";
@@ -151,24 +156,45 @@ export function createDispatchesRouter() {
       const { offset, limit } = parsedQuery.data;
 
       const dispatch = await getSubagentDispatch(dispatchId);
-      if (!dispatch) {
-        return res.status(404).json({
-          code: "dispatch-not-found",
-          dispatchId,
-        });
+      let sessionMetadata: Record<string, string | null>;
+      let path: string | null;
+      let resolvedVia: "registry" | "disk-fallback";
+      if (dispatch) {
+        resolvedVia = "registry";
+        sessionMetadata = sessionMetadataFrom(dispatch);
+        // dispatchId === sessionId for the subagent source. Resolve the JSONL.
+        // Agent-tool children (#4965) carry parentSessionId: their JSONL lives
+        // at <parent>/subagents/agent-<id>.jsonl, not <sessionId>.jsonl.
+        path = dispatch.parentSessionId
+          ? await resolveSubagentTranscriptPath(
+              dispatch.parentSessionId,
+              dispatch.sessionId,
+            )
+          : await resolveTranscriptPath(dispatch.sessionId, dispatch.projectDir);
+      } else {
+        // Registry miss. reap DELETEs the row on completion (#5142), so a
+        // completed Agent-tool child is found by its unique hash on disk
+        // (#5325). Only agent-hash ids; anything else stays a 404 so
+        // top-level sessions are never exposed.
+        const found = isAgentIdShaped(dispatchId)
+          ? await findSubagentTranscriptPathByAgentId(dispatchId)
+          : null;
+        if (!found) {
+          return res.status(404).json({
+            code: "dispatch-not-found",
+            dispatchId,
+          });
+        }
+        resolvedVia = "disk-fallback";
+        path = found;
+        sessionMetadata = {
+          skill: null,
+          dispatchId: null,
+          runId: null,
+          startedAt: null,
+          projectDir: null,
+        };
       }
-
-      const sessionMetadata = sessionMetadataFrom(dispatch);
-
-      // dispatchId === sessionId for the subagent source. Resolve the JSONL.
-      // Agent-tool children (#4965) carry parentSessionId: their JSONL lives
-      // at <parent>/subagents/agent-<id>.jsonl, not <sessionId>.jsonl.
-      const path = dispatch.parentSessionId
-        ? await resolveSubagentTranscriptPath(
-            dispatch.parentSessionId,
-            dispatch.sessionId,
-          )
-        : await resolveTranscriptPath(dispatch.sessionId, dispatch.projectDir);
       if (!path) {
         // Known dispatch but the transcript file is gone (cleanup / >30d) or
         // never materialised. NOT a 500 — render metadata, empty messages.
@@ -179,6 +205,7 @@ export function createDispatchesRouter() {
           offset,
           limit,
           sessionMetadata,
+          resolvedVia,
         });
       }
 
@@ -200,6 +227,7 @@ export function createDispatchesRouter() {
           offset,
           limit,
           sessionMetadata,
+          resolvedVia,
         });
       }
 
@@ -212,6 +240,7 @@ export function createDispatchesRouter() {
         offset,
         limit,
         sessionMetadata,
+        resolvedVia,
       });
     } catch (err: any) {
       // Not an isolateAggregator route: the success path writes 404 /

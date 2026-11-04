@@ -185,7 +185,7 @@ export async function resolveTranscriptPath(
 /** An Agent-tool child's `agent_id` is a lowercase hex hash (#4965). */
 const AGENT_ID_RE = /^[0-9a-f]{8,40}$/;
 
-function isAgentIdShaped(value: string): boolean {
+export function isAgentIdShaped(value: string): boolean {
   return typeof value === "string" && AGENT_ID_RE.test(value);
 }
 
@@ -236,6 +236,63 @@ export async function resolveSubagentTranscriptPath(
       join(root, dir, parent, "subagents", `agent-${agentId}.jsonl`),
     );
     if (candidate && (await statExists(candidate))) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Locate an Agent-tool child's JSONL by its bare `agentId` alone (issue #5325).
+ *
+ * The registry row that carries `parentSessionId` is DELETEd by reap on
+ * completion (#5142), so a completed dispatch's transcript can no longer be
+ * resolved through {@link resolveSubagentTranscriptPath}. The agent hash is
+ * unique, so scan two levels — `<root>/<projectDir>/<sessionDir>/subagents/
+ * agent-<agentId>.jsonl` — and return the first hit. Bounded by directory
+ * count, not file count. Only Agent-tool-child shaped (lowercase hex) ids are
+ * accepted: a UUID would expose top-level operator sessions.
+ *
+ * READ-ONLY, never throws; an unreadable directory at either level is skipped.
+ */
+export async function findSubagentTranscriptPathByAgentId(
+  agentId: string,
+  deps: ResolveDeps = {},
+): Promise<string | null> {
+  if (!isAgentIdShaped(agentId)) return null;
+  const root = deps.root ?? projectsRoot();
+
+  const statExists =
+    deps.stat ??
+    (async (p: string) => {
+      try {
+        await stat(p);
+        return true;
+      } catch {
+        /* intentional: missing file is the normal not-found path */
+        return false;
+      }
+    });
+  const listDirs =
+    deps.listProjectDirs ??
+    (async (r: string) => {
+      try {
+        const entries = await readdir(r, { withFileTypes: true });
+        return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+      } catch (err) {
+        console.error(`[transcript-store] failed to list transcript dir ${r}:`, err);
+        return [];
+      }
+    });
+
+  for (const projectDir of await listDirs(root)) {
+    const projectPath = confineToRoot(root, join(root, projectDir));
+    if (!projectPath) continue;
+    for (const sessionDir of await listDirs(projectPath)) {
+      const candidate = confineToRoot(
+        root,
+        join(projectPath, sessionDir, "subagents", `agent-${agentId}.jsonl`),
+      );
+      if (candidate && (await statExists(candidate))) return candidate;
+    }
   }
   return null;
 }

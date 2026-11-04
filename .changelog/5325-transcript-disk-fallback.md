@@ -1,0 +1,1 @@
+- fix: serve transcripts of completed dispatches via an on-disk fallback when the registry row is gone (#5325)

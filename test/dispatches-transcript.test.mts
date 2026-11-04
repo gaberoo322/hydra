@@ -32,6 +32,7 @@ process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const {
   resolveTranscriptPath,
+  findSubagentTranscriptPathByAgentId,
   confineToRoot,
   isUuidShaped,
   encodeProjectDir,
@@ -138,6 +139,26 @@ describe("resolveTranscriptPath", () => {
 // ---------------------------------------------------------------------------
 // sessionMetadataFrom
 // ---------------------------------------------------------------------------
+
+describe("findSubagentTranscriptPathByAgentId (#5325)", () => {
+  const hit = "/r/-proj/sess/subagents/agent-abcdef0123456789.jsonl";
+  const deps = {
+    root: "/r",
+    listProjectDirs: async (p: string) =>
+      p === "/r" ? ["-proj", "-other"] : p === "/r/-proj" ? ["sess"] : [],
+    stat: async (p: string) => p === hit,
+  };
+  test("finds the child under any project/session dir", async () => {
+    assert.equal(await findSubagentTranscriptPathByAgentId("abcdef0123456789", deps), hit);
+  });
+  test("malformed or traversal ids return null before any scan", async () => {
+    assert.equal(await findSubagentTranscriptPathByAgentId("../../etc", deps), null);
+    assert.equal(await findSubagentTranscriptPathByAgentId(UUID, deps), null);
+  });
+  test("miss returns null", async () => {
+    assert.equal(await findSubagentTranscriptPathByAgentId("0123456789abcdef", deps), null);
+  });
+});
 
 describe("sessionMetadataFrom", () => {
   test("projects required + optional fields, nulling absent optionals", () => {
@@ -289,6 +310,77 @@ describe("GET /dispatches/:dispatchId/transcript — route contract", () => {
     assert.equal(body.total, 2);
     assert.equal(body.messages[1].blocks[0].text, "child answer");
     assert.equal(body.sessionMetadata.dispatchId, "worktree-agent-a1b2c3d4e5f60718-t1-dev_orch");
+  });
+
+  test("registry hit carries resolvedVia registry", async () => {
+    await registerSubagentDispatch({
+      sessionId: UUID,
+      skill: "hydra-dev",
+      dispatchId: "wt-xyz",
+      startedAt: "2026-05-30T00:00:00Z",
+      projectDir: "/home/gabe/hydra",
+    });
+    const res = await fetch(`${baseUrl}/api/dispatches/${UUID}/transcript`);
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).resolvedVia, "registry");
+  });
+
+  function writeChild(agentId: string, parent: string) {
+    const subDir = join(tmpRoot, ".claude", "projects", "-home-gabe-hydra", parent, "subagents");
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(
+      join(subDir, `agent-${agentId}.jsonl`),
+      JSON.stringify({ type: "user", message: { content: "child question" } }),
+      "utf8",
+    );
+  }
+
+  test("reaped Agent-tool child (#5325): row DELETEd after completion still resolves via disk-fallback", async () => {
+    const agentId = "b1b2c3d4e5f60718";
+    const post = await fetch(`${baseUrl}/api/dispatches/subagent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sessionId: agentId,
+        parentSessionId: UUID,
+        skill: "hydra-dev",
+        dispatchId: "worktree-agent-b1b2c3d4e5f60718-t1-dev_orch",
+        startedAt: "2026-10-17T00:00:00Z",
+      }),
+    });
+    assert.equal(post.status, 200);
+    writeChild(agentId, UUID);
+    const del = await fetch(`${baseUrl}/api/dispatches/subagent/${agentId}`, { method: "DELETE" });
+    assert.equal(del.status, 200);
+    const res = await fetch(`${baseUrl}/api/dispatches/${agentId}/transcript`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.transcriptStatus, "available");
+    assert.equal(body.resolvedVia, "disk-fallback");
+    assert.equal(body.total, 1);
+    assert.deepEqual(body.sessionMetadata, {
+      skill: null,
+      dispatchId: null,
+      runId: null,
+      startedAt: null,
+      projectDir: null,
+    });
+  });
+
+  test("unregistered agent hash with no file on disk -> 404 dispatch-not-found", async () => {
+    const res = await fetch(`${baseUrl}/api/dispatches/c1c2c3d4e5f60718/transcript`);
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.equal(body.code, "dispatch-not-found");
+  });
+
+  test("UUID-shaped unregistered id never takes the disk fallback", async () => {
+    const other = "99999999-2222-4333-8444-555555555555";
+    const dir = join(tmpRoot, ".claude", "projects", "-home-gabe-hydra");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${other}.jsonl`), JSON.stringify({ type: "user", message: { content: "secret" } }), "utf8");
+    const res = await fetch(`${baseUrl}/api/dispatches/${other}/transcript`);
+    assert.equal(res.status, 404);
   });
 
   test("invalid query params → 400 schema-validation-failed", async () => {
