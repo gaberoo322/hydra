@@ -68,7 +68,7 @@
     {
       "family": "config",
       "metric": "rows",
-      "value": 34
+      "value": 35
     },
     {
       "family": "config",
@@ -108,7 +108,7 @@
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 269
+      "value": 272
     },
     {
       "family": "pages",
@@ -168,7 +168,7 @@
     {
       "family": "units-scripts",
       "metric": "rows",
-      "value": 41
+      "value": 42
     }
   ]
 }

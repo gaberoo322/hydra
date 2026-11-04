@@ -133,11 +133,31 @@ function withResetAnchor<T>(anchorIso: string | undefined, fn: () => Promise<T>)
 // Single module-level lifecycle: open the shared client ONCE and close it ONCE
 // at the very end. A per-describe after() that disconnects the shared client
 // would tear it out from under later suites (PR #518 / shared-client lesson).
+//
+// It also pins the launch-model pair (#5239). src/api/usage.ts reads
+// HYDRA_AUTOPILOT_PRIMARY_MODEL / _FALLBACK_MODEL per request, and the
+// #4839 Sonnet-parent trial systemd drop-in exports them on this host, so
+// the fable/opus literals asserted below would otherwise depend on the host.
+const DEFAULT_MODEL_PAIR_ENV: Record<string, string> = {
+  HYDRA_AUTOPILOT_PRIMARY_MODEL: "fable",
+  HYDRA_AUTOPILOT_FALLBACK_MODEL: "opus",
+};
+const savedModelPairEnv: Record<string, string | undefined> = {};
+
 before(() => {
+  for (const [k, v] of Object.entries(DEFAULT_MODEL_PAIR_ENV)) {
+    savedModelPairEnv[k] = process.env[k];
+    process.env[k] = v;
+  }
   redis = new Redis(REDIS_URL);
 });
 
 after(async () => {
+  for (const k of Object.keys(DEFAULT_MODEL_PAIR_ENV)) {
+    const prev = savedModelPairEnv[k];
+    if (prev !== undefined) process.env[k] = prev;
+    else delete process.env[k];
+  }
   if (redis) {
     await cleanKey();
     redis.disconnect();

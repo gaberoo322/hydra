@@ -392,6 +392,36 @@ describe("scripts/autopilot/heartbeat.py", () => {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
   });
+
+  test("type-invalid state still writes the heartbeat (lenient fallback, #5293 QA round 4)", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, { failure_log: "not-a-list", turn: 7 });
+      const r = runHeartbeat({
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+      });
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+      assert.match(readFileSync(tmp.heartbeat, "utf-8"), /turn=7 /);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("sibling: an unparseable state.json still returns 2 without a heartbeat", () => {
+    const tmp = makeTmp();
+    try {
+      writeFileSync(tmp.state, "{not json");
+      const r = runHeartbeat({
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+      });
+      assert.equal(r.status, 2);
+      assert.ok(!existsSync(tmp.heartbeat));
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
 });
 
 /**
@@ -1162,5 +1192,103 @@ describe("scripts/autopilot/heartbeat.py — taxonomy-derived denominators (issu
     assert.equal(/try:\s*\n\s+from decide import/.test(src), false, "the import is not wrapped in try/except");
     assert.match(src, /len\(PIPELINE_SLOTS\)/);
     assert.match(src, /len\(SIGNAL_CLASSES\)/);
+  });
+});
+
+describe("scripts/autopilot/heartbeat.py — denominators against a fixture taxonomy (issue #5202)", () => {
+  const DENOMINATORS_RE = /pipeline_filled=(\d+)\/(\d+) signal_active=(\d+)\/(\d+) /;
+  const ADD_PIPELINE = 2;
+  const ADD_SIGNAL = 3;
+
+  /** Fixture = real classes.json + fictional scope=orch rows (target rows would trip _validate_target_isolation). */
+  function writeFixture(dir: string): { path: string; pipelines: number; signals: number } {
+    const doc = JSON.parse(readFileSync(CLASSES_JSON, "utf-8"));
+    const rows = doc.classes as Array<Record<string, unknown>>;
+    const pRow = rows.find((r) => r.kind === "pipeline" && r.scope === "orch");
+    const sRow = rows.find((r) => r.kind === "signal" && r.scope === "orch");
+    assert.ok(pRow && sRow, "real taxonomy has orch pipeline + signal rows to clone");
+    for (let i = 0; i < ADD_PIPELINE; i++) rows.push({ ...pRow, name: `fixture_pipeline_${i}` });
+    for (let i = 0; i < ADD_SIGNAL; i++) rows.push({ ...sRow, name: `fixture_signal_${i}` });
+    const path = join(dir, "classes.fixture.json");
+    writeFileSync(path, JSON.stringify(doc));
+    return {
+      path,
+      pipelines: rows.filter((r) => r.kind === "pipeline").length,
+      signals: rows.filter((r) => r.kind === "signal").length,
+    };
+  }
+
+  test("fixture counts discriminate from shipped counts and from each other", () => {
+    const tmp = makeTmp();
+    try {
+      const fx = writeFixture(tmp.dir);
+      assert.notEqual(fx.pipelines, PIPELINE_COUNT);
+      assert.notEqual(fx.signals, SIGNAL_COUNT);
+      assert.notEqual(fx.pipelines, fx.signals);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("normal line: denominators follow the HYDRA_CLASSES_JSON fixture", () => {
+    const tmp = makeTmp();
+    try {
+      const fx = writeFixture(tmp.dir);
+      writeState(tmp.state);
+      const r = runHeartbeat({
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+        HYDRA_CLASSES_JSON: fx.path,
+      });
+      assert.equal(r.status, 0, `heartbeat.py exited non-zero: ${r.stderr}`);
+      const m = readFileSync(tmp.heartbeat, "utf-8").match(DENOMINATORS_RE);
+      assert.ok(m, "line carries both ratios");
+      assert.equal(Number(m![2]), fx.pipelines);
+      assert.equal(Number(m![4]), fx.signals);
+      assert.ok(Number(m![1]) <= Number(m![2]));
+      assert.ok(Number(m![3]) <= Number(m![4]));
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-state line: carries the fixture denominators", () => {
+    const tmp = makeTmp();
+    try {
+      const fx = writeFixture(tmp.dir);
+      const r = runHeartbeat({
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+        HYDRA_CLASSES_JSON: fx.path,
+      });
+      assert.equal(r.status, 1);
+      const body = readFileSync(tmp.heartbeat, "utf-8");
+      assert.match(body, /note=no-state/);
+      const m = body.match(DENOMINATORS_RE);
+      assert.ok(m);
+      assert.equal(Number(m![2]), fx.pipelines);
+      assert.equal(Number(m![4]), fx.signals);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a missing override path fails loud naming the path — no fallback to the shipped taxonomy", () => {
+    const tmp = makeTmp();
+    try {
+      const missing = join(tmp.dir, "does-not-exist.json");
+      writeState(tmp.state);
+      const r = runHeartbeat({
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+        HYDRA_CLASSES_JSON: missing,
+      });
+      assert.notEqual(r.status, 0);
+      assert.match(r.stderr, /TaxonomyError|file is missing/);
+      assert.ok(r.stderr.includes(missing), "stderr names the override path");
+      assert.equal(existsSync(tmp.heartbeat), false, "no heartbeat written from a fallback alphabet");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
   });
 });

@@ -1,0 +1,1 @@
+- feat: add the lifecycle writer seam (src/lifecycle, journal accessor, rollout switch, CLI) in shadow mode (#5310)

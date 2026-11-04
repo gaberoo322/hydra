@@ -101,6 +101,8 @@ const SignalsSchema = z
     needs_triage_orch: z.boolean(),
     needs_qa_numbers: NumberList,
     orch_needs_triage_items: NumberList,
+    orch_stale_in_progress_items: NumberList, // #5344
+    orch_stale_blocked_items: NumberList, // #5344
     untriaged_orphans_orch: z.boolean(),
     // target lane
     target_work_available: z.boolean(),
@@ -184,6 +186,8 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   needs_triage_orch: false,
   needs_qa_numbers: [],
   orch_needs_triage_items: [],
+  orch_stale_in_progress_items: [],
+  orch_stale_blocked_items: [],
   untriaged_orphans_orch: false,
   target_work_available: false,
   target_board_work_available: false,

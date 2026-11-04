@@ -204,6 +204,34 @@ function ghCalls(paths: Paths): string[] {
 }
 
 describe("reap.py completion → dev_orch no-PR stall detection (issue #3866)", () => {
+  test("STALL on a wrong-typed document: resume record still lands in state.json, exit 0 (#5293 QA round 4)", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, {
+        failure_log: "not-a-list",
+        slots: {
+          dev_orch: {
+            skill: "hydra-dev",
+            started_epoch: Math.floor(Date.now() / 1000) - 600,
+            task_id: "t1",
+            anchor: "issue-3726",
+            branch: "issue-3726-fix",
+          },
+        },
+      });
+      const r = runCompletion(["dev_orch", "t1", "50000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_VIEW_JSON: '{"state":"OPEN"}',
+      });
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.equal(s.dev_resume_pending?.length, 1);
+      assert.equal(s.dev_resume_pending[0].anchor, "issue-3726");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
   test("STALL: no open PR references the anchor → relabel + comment + queue a resume record", () => {
     const tmp = makeTmp();
     try {
