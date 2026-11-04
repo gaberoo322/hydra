@@ -41,6 +41,10 @@ import { join, resolve } from "node:path";
 
 import { BRIEF_LAST_SENT_KEY } from "../src/redis/operator-channel.ts";
 import { PAGE_KINDS, isPageKind } from "../src/operator-channel/page-list.ts";
+import { DEPLOY_DRIFT_LOG_PREFIX } from "../src/watchdog/deploy-drift.ts";
+import { ORIGIN_IDENTITY_LOG_PREFIX, ORIGIN_IDENTITY_PAGE_KIND } from "../src/watchdog/origin-identity.ts";
+import { REDIS_BACKUP_LOG_PREFIX, REDIS_BACKUP_STALE_KIND } from "../src/watchdog/redis-backup.ts";
+import { SKILL_MIRROR_LOG_PREFIX } from "../src/watchdog/skill-mirror.ts";
 import {
   WATCHDOG_SPAWN_TIMEOUT_MS,
   WATCHDOG_REDIS_TIMEOUT_MS,
@@ -181,21 +185,20 @@ describe("run_brief_missing — structure (issue #5048, ADR-0045 Decision 8)", (
     assert.equal(syntax.status, 0, `bash -n failed: ${syntax.stderr}`);
   });
 
-  test("the block is wired into the entry point, just before run_origin_identity", () => {
+  test("the block is wired into the entry point, just before run_origin_identity_cli", () => {
     const src = read("scripts/hydra-watchdog.sh");
     const defIdx = src.indexOf("run_brief_missing()");
-    const originIdx = src.indexOf("run_origin_identity() {");
+    const originIdx = src.indexOf("run_origin_identity_cli() {");
     assert.ok(defIdx >= 0, "run_brief_missing() definition not found");
-    // The origin-identity suite slices from ITS definition to the entry point
-    // and pins `run_origin_identity` as the last call before `exit 0`, so this
+    // `run_origin_identity_cli` (#5098) is the last call before `exit 0`, so this
     // block is defined before it and dispatched before it.
-    assert.ok(originIdx > defIdx, "the block definition must precede run_origin_identity's (the origin-identity suite slices from there)");
+    assert.ok(originIdx > defIdx, "the block definition must precede the origin-identity wrapper's");
     const guard = 'if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then';
     const guardIdx = src.lastIndexOf(guard);
     assert.ok(guardIdx > defIdx, "the sourcing-guarded entry point must follow the block definition");
     const entry = src.slice(guardIdx);
     assert.match(entry, /^\s*run_brief_missing$/m, "block must run on every real tick");
-    assert.match(entry, /run_brief_missing\n\s*run_origin_identity\n\s*exit 0/, "block sits just before run_origin_identity in the main sequence");
+    assert.match(entry, /run_brief_missing\n\s*run_origin_identity_cli\n\s*exit 0/, "block sits just before run_origin_identity_cli in the main sequence");
   });
 
   test("reads the TS-owned last-sent key name verbatim (drift guard) and never writes it", () => {
@@ -484,8 +487,8 @@ describe("scripts/hydra-watchdog.sh — Operator Channel CLI delivery (ADR-0045 
   test("every remaining page-list bash block owns a deliver_page helper that resolves the CLI through HYDRA_WATCHDOG_OPERATOR_NOTIFY", () => {
     const code = scriptCode();
     const helpers = code.match(/^\s*deliver_page\(\) \{/gm) ?? [];
-    assert.equal(helpers.length, 4, "node-modules-integrity, redis-backup-freshness, origin-identity and brief-missing (#5048) each keep their own helper (the rc_write duplication precedent); launch-flow left bash in #5097");
-    for (const block of ["run_node_modules_integrity()", "run_redis_backup_freshness()", "run_origin_identity()", "run_brief_missing()"]) {
+    assert.equal(helpers.length, 2, "node-modules-integrity and brief-missing (#5048) each keep their own helper (the rc_write duplication precedent); launch-flow left bash in #5097, redis-backup and origin-identity in #5098");
+    for (const block of ["run_node_modules_integrity()", "run_brief_missing()"]) {
       const start = code.indexOf(block);
       assert.ok(start >= 0, `${block} not found`);
       const body = code.slice(start, start + code.slice(start).search(/^}/m) + 1);
@@ -511,9 +514,18 @@ describe("scripts/hydra-watchdog.sh — Operator Channel CLI delivery (ADR-0045 
       kinds.add(m[1]);
       assert.equal(m[2], m[1], `page call for ${m[1]} must use dedupKey == kind (${m[2]})`);
     }
-    for (const k of ["infra:node_modules_wiped", "infra:redis_backup_stale", "infra:origin_identity_wrong"]) {
+    for (const k of ["infra:node_modules_wiped"]) {
       assert.ok(kinds.has(k), `expected a literal page call for ${k}`);
       assert.ok(isPageKind(k), `${k} must be on the closed page list`);
+    }
+    // The ported blocks (#5098) are re-asserted against the TS module constants:
+    // each is a page kind and pages with dedupKey == kind.
+    for (const k of [REDIS_BACKUP_STALE_KIND, ORIGIN_IDENTITY_PAGE_KIND]) {
+      assert.ok(isPageKind(k), `${k} must be on the closed page list`);
+    }
+    for (const f of ["redis-backup.ts", "origin-identity.ts"]) {
+      const src = readFileSync(join(REPO_ROOT, "src", "watchdog", f), "utf-8");
+      assert.match(src, /dedupKey: (REDIS_BACKUP_STALE_KIND|ORIGIN_IDENTITY_PAGE_KIND)/, `${f} pages with dedupKey == kind`);
     }
   });
 
@@ -573,5 +585,55 @@ describe("launch flow left bash (issue #5097, INV-1/2/6/7/14)", () => {
     for (const src of [cli(), ...launchModules()]) {
       assert.doesNotMatch(src, /xadd/i);
     }
+  });
+});
+
+describe("slice 4 left bash (issue #5098, INV-2/3/14)", () => {
+  const sh = (): string => readFileSync(WATCHDOG, "utf-8");
+  const mods = ["deploy-drift.ts", "skill-mirror.ts", "redis-backup.ts", "origin-identity.ts", "drift-gate.ts"];
+  const read = (f: string): string => readFileSync(join(REPO_ROOT, "src", "watchdog", f), "utf-8");
+
+  test("the four bash blocks and their per-block helper copies are deleted; the entry list calls the CLI wrappers in the same order", () => {
+    for (const fn of ["run_deploy_drift()", "run_redis_backup_freshness()", "run_skill_mirror_drift()", "run_origin_identity()"]) {
+      assert.ok(!sh().includes(fn), `${fn} must be gone`);
+    }
+    const entry = sh().slice(sh().lastIndexOf('if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then'));
+    assert.match(
+      entry,
+      /run_liveness_cli\n\s*run_wedge_cli\n\s*run_disk_cli\n\s*run_deploy_drift_cli\n\s*run_redis_backup_cli\n\s*run_skill_mirror_cli\n\s*run_claude_hooks\n\s*run_launch_flow_cli\n\s*run_node_modules_integrity\n\s*run_brief_missing\n\s*run_origin_identity_cli\n\s*exit 0/,
+    );
+    for (const hook of ["DRIFT_DEPLOYED_SHA", "DRIFT_REMOTE_SHA", "AUTODEPLOY_DRY_RUN", "SKILL_MIRROR_AUTOFIX_DRY_RUN", "HYDRA_WATCHDOG_ORIGIN_URL", "ORIGIN_MASTER_PRESENT", "BACKUP_TIMER_STATE", "BACKUP_NOTIFY_STREAM", "ORIGIN_NOTIFY_STREAM"]) {
+      assert.ok(!sh().includes(hook), `the bash-only injection hook ${hook} is retired`);
+    }
+  });
+
+  test("each wrapper is sized for the opt-in actions it must not kill (deploy >= 1200s, mirror >= 300s, origin >= 120s, backup 90s)", () => {
+    const bound = (name: string): number => Number(sh().match(new RegExp(`${name}\\(\\) \\{ run_watchdog_cli \\S+ "[^"]+" (\\d+);`))?.[1]);
+    assert.ok(bound("run_deploy_drift_cli") >= 1200);
+    assert.ok(bound("run_skill_mirror_cli") >= 300);
+    assert.ok(bound("run_origin_identity_cli") >= 120);
+    assert.equal(bound("run_redis_backup_cli"), 90);
+  });
+
+  test("log prefixes are unchanged so journal greps keep working", () => {
+    assert.equal(DEPLOY_DRIFT_LOG_PREFIX, "hydra-deploy-drift-watchdog:");
+    assert.equal(REDIS_BACKUP_LOG_PREFIX, "hydra-redis-backup-freshness-watchdog:");
+    assert.equal(SKILL_MIRROR_LOG_PREFIX, "hydra-skill-mirror-drift-watchdog:");
+    assert.equal(ORIGIN_IDENTITY_LOG_PREFIX, "hydra-origin-identity-watchdog:");
+  });
+
+  test("pages go through the Operator Channel module in-process: no operator-notify spawn, no Bot API host, no hand-built XADD (INV-3)", () => {
+    for (const f of mods) {
+      const src = read(f);
+      assert.ok(!src.includes("operator-notify"), f);
+      assert.ok(!src.includes("api.telegram.org"), f);
+      assert.doesNotMatch(src, /xadd/i, f);
+      assert.doesNotMatch(src, /from "node:child_process"/, f);
+    }
+  });
+
+  test("git-remote-fence.sh is NOT edited: it never parses, normalises, redacts or prints a remote URL (INV-11)", () => {
+    const fence = readFileSync(join(REPO_ROOT, "scripts", "claude-hooks", "git-remote-fence.sh"), "utf-8");
+    assert.doesNotMatch(fence, /redact|remote-url\.ts/i);
   });
 });

@@ -1,0 +1,1 @@
+- feat: gate needs-research exits on a post-entry Hydra-Research trailer comment (#5320)
