@@ -25,6 +25,7 @@
       "referenceDocs": [],
       "slices": {
         "env-vars": [
+          "HYDRA_BASH_BIN",
           "HYDRA_DF_BIN",
           "HYDRA_DU_BIN",
           "HYDRA_FLOCK_BIN",
@@ -1829,7 +1830,8 @@
           "HYDRA_REDIS_PORT",
           "HYDRA_ROOT",
           "HYDRA_TARGET_REPO",
-          "REPO"
+          "REPO",
+          "TMPDIR"
         ],
         "classes": [
           "dev_orch (implement/sonnet)",

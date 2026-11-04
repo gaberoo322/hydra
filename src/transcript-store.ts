@@ -45,6 +45,7 @@ import { readdir, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { basename, join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
+import { logger } from "./logger.ts";
 
 /**
  * The transcript root — the single source of truth for the
@@ -185,8 +186,19 @@ export async function resolveTranscriptPath(
 /** An Agent-tool child's `agent_id` is a lowercase hex hash (#4965). */
 const AGENT_ID_RE = /^[0-9a-f]{8,40}$/;
 
-function isAgentIdShaped(value: string): boolean {
+export function isAgentIdShaped(value: string): boolean {
   return typeof value === "string" && AGENT_ID_RE.test(value);
+}
+
+/**
+ * Harness agent ids are exactly 17 lowercase hex chars. The registry-less disk
+ * fallback (#5325) is the only gate on transcript content for a public route,
+ * so it demands the real length (a 32-bit guess space is too weak).
+ */
+const HARNESS_AGENT_ID_RE = /^[0-9a-f]{17}$/;
+
+export function isHarnessAgentId(value: string): boolean {
+  return typeof value === "string" && HARNESS_AGENT_ID_RE.test(value);
 }
 
 /**
@@ -236,6 +248,181 @@ export async function resolveSubagentTranscriptPath(
       join(root, dir, parent, "subagents", `agent-${agentId}.jsonl`),
     );
     if (candidate && (await statExists(candidate))) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Short-TTL cache for {@link findSubagentTranscriptPathByAgentId} (#5325): the
+ * route is public + unauthenticated, so repeated probes (hits AND misses) must
+ * not each cost a full tree scan. Bounded by entry count.
+ */
+const AGENT_SCAN_CACHE_TTL_MS = 30_000;
+const AGENT_SCAN_MISS_TTL_MS = 5_000;
+const AGENT_SCAN_CACHE_MAX = 256;
+const AGENT_SCAN_MAX_CONCURRENT = 2;
+const AGENT_SCAN_WAITERS_MAX = 32;
+/** Positive (hit) entries. Misses live in their own map so a flood of misses can never evict hits. */
+const agentScanCache = new Map<string, { path: string | null; at: number; ttl: number }>();
+const agentScanMissCache = new Map<string, { path: string | null; at: number; ttl: number }>();
+/** Single-flight: concurrent probes for the same key share one scan. */
+const agentScanInflight = new Map<string, Promise<string | null>>();
+let agentScansRunning = 0;
+const agentScanWaiters: Array<() => void> = [];
+
+/** Returns false (load shed) when the waiter queue is full; never enqueues then. */
+async function acquireAgentScanSlot(): Promise<boolean> {
+  if (agentScansRunning < AGENT_SCAN_MAX_CONCURRENT) {
+    agentScansRunning++;
+    return true;
+  }
+  if (agentScanWaiters.length >= AGENT_SCAN_WAITERS_MAX) return false;
+  await new Promise<void>((resolve) => agentScanWaiters.push(resolve));
+  return true;
+}
+
+function setBounded(
+  m: Map<string, { path: string | null; at: number; ttl: number }>,
+  key: string,
+  v: { path: string | null; at: number; ttl: number },
+): void {
+  m.delete(key); // re-set moves the key to the newest slot
+  if (m.size >= AGENT_SCAN_CACHE_MAX) {
+    const oldest = m.keys().next().value;
+    if (oldest !== undefined) m.delete(oldest);
+  }
+  m.set(key, v);
+}
+
+function releaseAgentScanSlot(): void {
+  const next = agentScanWaiters.shift();
+  if (next) next(); // slot handed over; running count unchanged
+  else agentScansRunning--;
+}
+
+/** Test seam: drop the agentId scan cache. */
+export function resetAgentScanCache(): void {
+  agentScanCache.clear();
+  agentScanMissCache.clear();
+  agentScanWaiters.length = 0;
+  agentScansRunning = 0;
+  agentScanInflight.clear();
+}
+
+/**
+ * Locate an Agent-tool child's JSONL by its bare `agentId` alone (issue #5325).
+ *
+ * The registry row that carries `parentSessionId` is DELETEd by reap on
+ * completion (#5142), so a completed dispatch's transcript can no longer be
+ * resolved through {@link resolveSubagentTranscriptPath}. The agent hash is
+ * unique, so scan two levels — `<root>/<projectDir>/<sessionDir>/subagents/
+ * agent-<agentId>.jsonl` — and return the first hit. Bounded by directory
+ * count, not file count. Only exactly-17-lowercase-hex ids (isHarnessAgentId) are
+ * accepted: a UUID would expose top-level operator sessions.
+ *
+ * READ-ONLY, never throws; an unreadable directory at either level is skipped.
+ */
+export async function findSubagentTranscriptPathByAgentId(
+  agentId: string,
+  deps: ResolveDeps = {},
+): Promise<string | null> {
+  if (!isHarnessAgentId(agentId)) return null;
+  const root = deps.root ?? projectsRoot();
+  const cacheKey = `${root}\0${agentId}`;
+  const nowMs = Date.now();
+  const hit = agentScanCache.get(cacheKey) ?? agentScanMissCache.get(cacheKey);
+  if (hit && nowMs - hit.at < hit.ttl) return hit.path;
+  const pending = agentScanInflight.get(cacheKey);
+  if (pending) return pending;
+  const run = (async () => {
+    let acquired = false;
+    try {
+      acquired = await acquireAgentScanSlot();
+      if (!acquired) return null; // shed load, uncached
+      const flags = { errored: false };
+      let result: string | null = null;
+      try {
+        result = await scanForAgentId(root, agentId, deps, flags);
+      } catch (err) {
+        logger.warn({ err }, "[transcript-store] agent scan threw");
+        flags.errored = true;
+      }
+      // A miss caused by a listing/stat error is NOT cached: a transient
+      // failure must not turn a real transcript into a sticky 404.
+      if (result === null && flags.errored) return null;
+      if (result === null) {
+        setBounded(agentScanMissCache, cacheKey, { path: null, at: Date.now(), ttl: AGENT_SCAN_MISS_TTL_MS });
+      } else {
+        setBounded(agentScanCache, cacheKey, { path: result, at: Date.now(), ttl: AGENT_SCAN_CACHE_TTL_MS });
+      }
+      return result;
+    } finally {
+      if (acquired) releaseAgentScanSlot();
+      if (agentScanInflight.get(cacheKey) === run) agentScanInflight.delete(cacheKey);
+    }
+  })();
+  agentScanInflight.set(cacheKey, run);
+  return run;
+}
+
+async function scanForAgentId(
+  root: string,
+  agentId: string,
+  deps: ResolveDeps,
+  flags: { errored: boolean },
+): Promise<string | null> {
+  const rawStat =
+    deps.stat ??
+    (async (p: string) => {
+      try {
+        await stat(p);
+        return true;
+      } catch {
+        /* intentional: missing file is the normal not-found path */
+        return false;
+      }
+    });
+  const statExists = async (p: string): Promise<boolean> => {
+    try {
+      return await rawStat(p);
+    } catch (err) {
+      logger.warn({ err, path: p }, "[transcript-store] stat threw");
+      flags.errored = true;
+      return false;
+    }
+  };
+  const listDirs =
+    deps.listProjectDirs ??
+    (async (r: string) => {
+      try {
+        const entries = await readdir(r, { withFileTypes: true });
+        return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+      } catch (err) {
+        logger.warn({ err, dir: r }, "[transcript-store] failed to list transcript dir");
+        flags.errored = true;
+        return [];
+      }
+    });
+  const safeList = async (r: string): Promise<string[]> => {
+    try {
+      return await listDirs(r);
+    } catch (err) {
+      logger.warn({ err, dir: r }, "[transcript-store] listProjectDirs threw");
+      flags.errored = true;
+      return [];
+    }
+  };
+
+  for (const projectDir of await safeList(root)) {
+    const projectPath = confineToRoot(root, join(root, projectDir));
+    if (!projectPath) continue;
+    for (const sessionDir of await safeList(projectPath)) {
+      const candidate = confineToRoot(
+        root,
+        join(projectPath, sessionDir, "subagents", `agent-${agentId}.jsonl`),
+      );
+      if (candidate && (await statExists(candidate))) return candidate;
+    }
   }
   return null;
 }

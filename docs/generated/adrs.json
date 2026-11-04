@@ -1314,7 +1314,8 @@
       "readWhen": "Writing or routing any issue state label, dispatch claims, cycle caps/parking, `qa-passed`, or the parent-exception metric.",
       "citedBy": [
         "CONTEXT-MAP.md",
-        "docs/agents/triage-labels.md"
+        "docs/agents/triage-labels.md",
+        "docs/operator-playbooks/hydra-issue-research.md"
       ],
       "source": {
         "path": "docs/adr/0047-work-item-lifecycle-is-data.md"
