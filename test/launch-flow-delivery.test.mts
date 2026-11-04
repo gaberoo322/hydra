@@ -1,368 +1,49 @@
 /**
- * Regression test for issue #3848 (gamma, epic #3844) — the DELIVERY half of
- * the watchdog's ## LAUNCH FLOW block in scripts/hydra-watchdog.sh, plus the
- * TypeScript grammar it publishes onto.
+ * LAUNCH FLOW delivery (issue #3848, gamma; GLM-sterile #3868/#4691; ported to
+ * TypeScript by issue #5097, epic #5094).
  *
- * #3847 (beta) made the block DETECT five sustained signals and log a WARNING
- * at the fired-marker absent→present transition. Detection without a delivery
- * surface is indistinguishable from no detection — map #3807 measured the
- * wiring-liveness dark alarm had NEVER fired and the stagnation alert had no
- * consumer at all. This file pins the gamma contract, mirroring the
- * gate-approved design-concept artifact for issue-3848:
+ * Delivery is the half every detection-only attempt missed: at the exact tick
+ * a signal's fired marker flips absent->present the check surfaces it on a
+ * channel derived from whether the Orchestrator is provably up in that
+ * signal's failure mode:
  *
- *   Surface routing (derived from whether the Orchestrator is provably up in
- *   that signal's failure mode — DEFECTIVE AND FULLY BLOCKING ⇒ out-of-band).
- *   Since ADR-0045 Decision 2 (issue #5046) every Telegram message leaves the
- *   watchdog through the Operator Channel CLI (`scripts/operator-notify.ts`),
- *   never a bash curl:
- *     fail-safe, meter-dark → OUT-OF-BAND: one CLI `page` call (kinds
- *         launch:fail_safe / launch:meter_dark on the closed page list);
- *         depends on NO Orchestrator HTTP endpoint and never XADDs.
- *     quota, latency, glm-sterile → IN-BAND: the enveloped XADD onto the
- *         notifications stream is KEPT byte-for-byte (the dashboard-alert
- *         path) AND one CLI `page` call is made with dedupKey == kind, so the
- *         in-process consumer's page for the same event is suppressed by the
- *         shared Redis dedup state rather than delivered twice.
- *     pause                 → IN-BAND, DIGEST LINE ONLY: same XADD (type never
- *         in ALERT_TYPES) plus the CLI page call.
+ *   fail-safe, meter-dark          -> Operator Channel page only (no bus publish)
+ *   quota, latency, pause, glm-sterile -> EventBus.publish() envelope PLUS one
+ *                                      page, dedupKey == kind
  *
- *   Delivery fires at the EXACT fired absent→present transition inside
- *   track_signal — reusing the #3847 fired/since keys as the sole dedup state
- *   (zero new Redis keys). At the fired→absent recovery edge (only when the
- *   fired key existed before the DEL) the block calls CLI `resolve` once, so
- *   the "recovered" message is one edge, not one per healthy tick.
- *
- *   Telegram credentials are the CLI's concern: the block never gates on
- *   TELEGRAM_* and invokes the CLI regardless. A failing CLI call logs a
- *   distinguishable WARN and never fails the run. No delivery path can throw
- *   out of the block or change its exit code.
- *
- * Behavioural cases are gated on the docker `hydra-redis-1` container (the
- * same contract as test/watchdog-launch-flow.test.mts). Two isolation
- * mechanisms, both inherited from that file's #4072 lesson:
- *   - the extracted block COPY is rebound onto a per-run key namespace, so a
- *     live production watchdog tick can rewrite neither our fixtures nor
- *     itself be disturbed;
- *   - in-band delivery is pointed at a per-run NOTIFY STREAM via the block's
- *     own HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM hook, so a behavioural case can
- *     NEVER write a real event onto the PRODUCTION hydra:notifications stream
- *     (the live consumer would push a real dashboard alert + Telegram line).
- * The CLI is intercepted through the block's HYDRA_WATCHDOG_OPERATOR_NOTIFY
- * hook with an argv-recording stub — no network, no Redis, no token.
+ * These cases drive the real `runLaunchFlow` over the in-memory ports in
+ * test/_helpers/launch-flow-fakes.mts: a recording fake channel, a recording
+ * fake bus and a scripted WatchdogGithub. The kind strings come from
+ * NOTIFICATION_EVENT_TYPES / PAGE_KINDS and the freshness windows from
+ * src/redis/autopilot.ts, so a typo is a compile error rather than a drifted
+ * regex pin.
  */
 
-import test, { describe, before, beforeEach, after } from "node:test";
+import test, { describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, unlinkSync, mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
 
 import { STREAMS } from "../src/event-bus-stream-keys.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
+import { ALERT_TYPES, formatAlertMessage } from "../src/notification/alert-grammar.ts";
+import { PAGE_KINDS, isPageKind } from "../src/operator-channel/page-list.ts";
+import { GLM_DRAINER_HEARTBEAT_STALE_MS, GLM_DRAINER_HEARTBEAT_TTL_SECONDS } from "../src/redis/autopilot.ts";
+import { WATCHDOG_LAUNCH_SIGNALS } from "../src/redis/launch-flow.ts";
 import {
-  ALERT_TYPES,
-  formatAlertMessage,
-} from "../src/notification/alert-grammar.ts";
-import { isPageKind } from "../src/operator-channel/page-list.ts";
-import {
-  PACE_GATE_LAST_TICK_KEY,
-  LAUNCH_FLOW_KEY_PREFIX,
-} from "../src/redis/launch-flow.ts";
-import {
-  GLM_DRAINER_ACTIVE_KEY,
-  GLM_DRAINER_HEARTBEAT_STALE_MS,
-  GLM_DRAINER_HEARTBEAT_TTL_SECONDS,
-  GLM_DRAINER_LAST_PICK_KEY,
-} from "../src/redis/autopilot.ts";
-import {
-  WATCHDOG_SPAWN_TIMEOUT_MS,
-  WATCHDOG_REDIS_TIMEOUT_MS,
-  throwIfTimedOut,
-} from "./_helpers/watchdog-timeouts.mts";
-import {
-  installRedisDockerShim,
-  removeRedisDockerShim,
-  withRedisDockerShim,
-} from "./_helpers/watchdog-redis-shim.mts";
+  DEFAULT_LAUNCH_FLOW_CONFIG,
+  LAUNCH_FLOW_PAGE_KIND,
+  LAUNCH_FLOW_SIGNAL_ORDER,
+  readGlmSterile,
+  runLaunchFlow,
+  type LaunchFlowConfig,
+} from "../src/watchdog/launch-flow.ts";
+import { countDrainerPrsInRows } from "../src/watchdog/ports.ts";
+import { T0, firedOf, makeHarness, seedFired, seedSince, sinceOf } from "./_helpers/launch-flow-fakes.mts";
 
-const REPO_ROOT = resolve(import.meta.dirname, "..");
-const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
-
-const SIGNALS = ["fail-safe", "meter-dark", "quota", "pause", "latency", "glm-sterile"] as const;
-
-// Per-run key namespace (see file header + test/watchdog-launch-flow.test.mts
-// #4072 for why nothing here may touch the shared production keys).
-const RUN_NS = `hydra:test:launch-flow-delivery-${process.pid}-${randomUUID().slice(0, 8)}`;
-const TEST_LF_PREFIX = `${RUN_NS}:launch-flow`;
-const TEST_LAST_TICK_KEY = `${RUN_NS}:pace-gate:last-tick`;
-const TEST_NOTIFY_STREAM = `${RUN_NS}:notifications`;
-
-const SINCE = (s: string) => `${TEST_LF_PREFIX}:since:${s}`;
-const FIRED = (s: string) => `${TEST_LF_PREFIX}:fired:${s}`;
-
-// Issue #3868: the GLM drainer heartbeat key, rebound onto this run's
-// namespace by the extraction below so behavioural cases can seed a
-// fresh/stale heartbeat without ever touching the PRODUCTION
-// hydra:glm:drainer:active key (which gates the live Opus lane partition).
-const TEST_GLM_HB_KEY = `${RUN_NS}:glm-drainer-active`;
-
-// Issue #4691: the pick verdict key, rebound the same way so behavioural
-// cases seed THIS run's key, never the PRODUCTION
-// hydra:glm:drainer:last-pick (the drainer's own published verdict).
-const TEST_GLM_LAST_PICK_KEY = `${RUN_NS}:glm-drainer-last-pick`;
-
-/** Fixed deterministic clock for threshold maths (epoch-ms). */
-const T0 = 1_700_000_000_000;
-
-// ---------------------------------------------------------------------------
-// Redis helpers (docker exec → DB 0, the watchdog's default target).
-// Every call below is bare `redis-cli` with no `-n` selector, so they all
-// target db 0. The two spawn sites that source run_launch_flow therefore
-// pin HYDRA_REDIS_DB="0" to keep the block's reads on the same DB (#4183).
-// ---------------------------------------------------------------------------
-
-function dockerRedisAvailable(): boolean {
-  const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "PING"], {
-    encoding: "utf-8",
-    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
-  });
-  return (r.stdout ?? "").trim() === "PONG";
-}
-
-const DOCKER = dockerRedisAvailable();
-
-function drc(args: string[]): string {
-  const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
-    encoding: "utf-8",
-    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
-  });
-  return (r.stdout ?? "").trim();
-}
-
-function cleanState(): void {
-  const keys = [TEST_LAST_TICK_KEY, TEST_GLM_HB_KEY, TEST_GLM_LAST_PICK_KEY];
-  for (const s of SIGNALS) keys.push(SINCE(s), FIRED(s));
-  spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", "DEL", ...keys], {
-    encoding: "utf-8",
-    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
-  });
-  drc(["DEL", TEST_NOTIFY_STREAM]);
-}
-
-function hsetLastTick(fields: Record<string, string>): void {
-  const args = ["HSET", TEST_LAST_TICK_KEY];
-  for (const [k, v] of Object.entries(fields)) args.push(k, v);
-  spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
-    encoding: "utf-8",
-    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
-  });
-}
-
-function seedSince(signal: string, ms: number): void {
-  spawnSync(
-    "docker",
-    ["exec", "hydra-redis-1", "redis-cli", "--raw", "SET", SINCE(signal), String(ms), "NX"],
-    { encoding: "utf-8", timeout: WATCHDOG_REDIS_TIMEOUT_MS },
-  );
-}
-
-function getFired(signal: string): boolean {
-  return drc(["EXISTS", FIRED(signal)]) === "1";
-}
-
-/** One XADD'd in-band entry off the namespaced notify stream, fields folded.
- *
- * XRANGE --raw emits one flat line per token: entry-id, then the six
- * field/value pairs in the order the watchdog XADDs them (id, type, source,
- * timestamp, correlationId, payload — the EventBus.publish envelope). The
- * payload is single-line JSON by construction (printf, no embedded newlines),
- * so a strict positional walk is exact.
- */
-function notifyEntriesSimple(): { fields: Record<string, string> }[] {
-  const out = drc(["XRANGE", TEST_NOTIFY_STREAM, "-", "+"]);
-  if (out === "") return [];
-  const lines = out.split("\n");
-  const FIELD_NAMES = ["id", "type", "source", "timestamp", "correlationId", "payload"];
-  const entries: { fields: Record<string, string> }[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    // Skip the entry-id line, then read the six field/value pairs.
-    i += 1;
-    const fields: Record<string, string> = {};
-    for (const name of FIELD_NAMES) {
-      assert.equal(lines[i], name, `expected envelope field '${name}' at line ${i}: ${JSON.stringify(lines)}`);
-      fields[name] = lines[i + 1];
-      i += 2;
-    }
-    entries.push({ fields });
-  }
-  return entries;
-}
-
-// ---------------------------------------------------------------------------
-// Extract run_launch_flow() into a temp file (mirrors
-// test/watchdog-launch-flow.test.mts), rebound onto this run's namespace.
-// ---------------------------------------------------------------------------
-
-const BLOCK = join(tmpdir(), `hydra-launch-flow-delivery-block-${process.pid}.sh`);
-
-/**
- * PATH-shim `docker` for the block's OWN redis round-trips (issue #4500): same
- * argv, TCP transport instead of a ~60ms `docker exec` per call. Proven
- * byte-equivalent to real `redis-cli --raw` before use, else null (real docker).
- * This suite's seed/read oracle (drc & co.) never goes through it.
- */
-let REDIS_SHIM_DIR: string | null = null;
-
-before(() => {
-  if (DOCKER) REDIS_SHIM_DIR = installRedisDockerShim("launch-flow-delivery");
-  const src = readFileSync(WATCHDOG, "utf-8");
-  const start = src.indexOf("run_launch_flow()");
-  assert.ok(start >= 0, "run_launch_flow() not found in hydra-watchdog.sh");
-  const after = src.slice(start);
-  const end = after.search(/^}/m);
-  assert.ok(end >= 0, "run_launch_flow() closing brace not found");
-  const body = after.slice(0, end + 1);
-  assert.ok(body.includes("track_signal"), "extracted block missing track_signal");
-  assert.ok(body.includes("deliver_signal"), "extracted block missing deliver_signal (issue #3848 delivery hook)");
-
-  const namespaced = body
-    .split(`"${PACE_GATE_LAST_TICK_KEY}"`)
-    .join(`"${TEST_LAST_TICK_KEY}"`)
-    .split(`"${LAUNCH_FLOW_KEY_PREFIX}"`)
-    .join(`"${TEST_LF_PREFIX}"`)
-    // Issue #3868: rebind the GLM drainer heartbeat literal too, so the
-    // glm-sterile behavioural cases seed THIS run's key, never the production
-    // hydra:glm:drainer:active. Splitting on the TS-owned constant doubles as
-    // a drift-guard: if the bash literal ever diverges from
-    // src/redis/autopilot.ts's GLM_DRAINER_ACTIVE_KEY the assertion below
-    // fails loudly instead of silently leaving the production key in place.
-    .split(`"${GLM_DRAINER_ACTIVE_KEY}"`)
-    .join(`"${TEST_GLM_HB_KEY}"`)
-    // Issue #4691: rebind the pick-verdict key the same way — the glm-sterile
-    // membership reads THIS run's key, never the production
-    // hydra:glm:drainer:last-pick. Splitting on the TS-owned constant keeps
-    // the same free drift-guard as the heartbeat rebind above.
-    .split(`"${GLM_DRAINER_LAST_PICK_KEY}"`)
-    .join(`"${TEST_GLM_LAST_PICK_KEY}"`);
-  assert.ok(
-    namespaced.includes(`"${TEST_LAST_TICK_KEY}"`),
-    "failed to rebind LAST_TICK_KEY onto the test namespace",
-  );
-  assert.ok(
-    namespaced.includes(`"${TEST_LF_PREFIX}"`),
-    "failed to rebind LF_KEY_PREFIX onto the test namespace",
-  );
-  assert.ok(
-    namespaced.includes(`"${TEST_GLM_HB_KEY}"`),
-    `failed to rebind the GLM drainer heartbeat key: the bash block no longer contains the literal "${GLM_DRAINER_ACTIVE_KEY}" (issue #3868) — either the watchdog literal drifted from src/redis/autopilot.ts's GLM_DRAINER_ACTIVE_KEY or the membership block was removed`,
-  );
-  assert.ok(
-    namespaced.includes(`"${TEST_GLM_LAST_PICK_KEY}"`),
-    `failed to rebind the GLM drainer last-pick key: the bash block no longer contains the literal "${GLM_DRAINER_LAST_PICK_KEY}" (issue #4691) — either the watchdog literal drifted from src/redis/autopilot.ts's GLM_DRAINER_LAST_PICK_KEY or the membership block was removed`,
-  );
-  writeFileSync(BLOCK, namespaced);
-});
-
-after(() => {
-  removeRedisDockerShim(REDIS_SHIM_DIR);
-  try {
-    if (DOCKER) cleanState();
-    unlinkSync(BLOCK);
-  } catch {
-    /* best-effort cleanup */
-  }
-});
-
-// ---------------------------------------------------------------------------
-// operator-notify PATH-shim — the Operator Channel CLI stand-in (ADR-0045 D2,
-// issue #5046). Records its argv, never touches the network, Redis or the real
-// CLI. The block resolves the binary through HYDRA_WATCHDOG_OPERATOR_NOTIFY.
-// ---------------------------------------------------------------------------
-
-const SHIM_DIR = join(tmpdir(), `hydra-launch-flow-notify-shim-${process.pid}`);
-const NOTIFY_LOG = join(SHIM_DIR, "operator-notify-calls.log");
-const NOTIFY_SHIM = join(SHIM_DIR, "operator-notify-stub");
-
-function writeNotifyShim(exitCode: number): void {
-  mkdirSync(SHIM_DIR, { recursive: true });
-  // One invocation = one log line (a --title / --fact value may carry spaces;
-  // any newline is folded so call-count assertions never overcount).
-  writeFileSync(NOTIFY_SHIM, [
-    "#!/usr/bin/env bash",
-    `printf '%s' "$*" | tr '\\n' '~' >> '${NOTIFY_LOG}'`,
-    `printf '\\n' >> '${NOTIFY_LOG}'`,
-    `echo '{"stub":true}'`,
-    `exit ${exitCode}`,
-    "",
-  ].join("\n"));
-  spawnSync("chmod", ["+x", NOTIFY_SHIM]);
-}
-
-function notifyCalls(): string[] {
-  try {
-    return readFileSync(NOTIFY_LOG, "utf-8").split("\n").filter((l) => l !== "");
-  } catch {
-    return [];
-  }
-}
-
-/** The recorded CLI calls whose first argv word is `subcommand`. */
-function notifyCallsOf(subcommand: "page" | "resolve"): string[] {
-  return notifyCalls().filter((c) => c.startsWith(`${subcommand} `));
-}
-
-/** Source run_launch_flow under prod flags and call it once.
- *
- * NB: unlike test/watchdog-launch-flow.test.mts, PATH is NOT force-restored
- * after the env spread — every caller's env must be able to prepend the gh
- * shim dir to PATH (the glm-sterile interception depends on it).
- */
-function runBlock(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
-  const r = spawnSync("bash", ["-c", `set -euo pipefail; source '${BLOCK}'; run_launch_flow`], {
-    // HYDRA_REDIS_DB is pinned to "0" (issue #4183), matching the identical
-    // pin in test/watchdog-launch-flow.test.mts. This suite's seed/read
-    // helpers (drc, cleanState, hsetLastTick, seedSince) shell bare
-    // `redis-cli` with no `-n` selector — that IS db 0, the watchdog's
-    // default target. scripts/test/redis-db-launch.mjs now exports
-    // HYDRA_REDIS_DB into this whole node:test process's env, so an unpinned
-    // `...process.env` would redirect rc_write/rc_read to the launcher's
-    // derived per-run DB while every seed and assertion here kept using
-    // db 0 — rc_read would find nothing and every case would degrade to the
-    // "no pace-gate last-tick record" branch. DB selection itself is covered
-    // by the dedicated #4183 describe in test/watchdog-launch-flow.test.mts.
-    // A caller may still override via its own `env` (last-spread wins).
-    // The redis PATH-shim dir (issue #4500) is prepended to whatever PATH the
-    // caller settled on, so the caller's curl/gh shims keep their precedence
-    // over the real binaries and the block's `docker exec … redis-cli` goes
-    // over TCP. Null shim dir → PATH exactly as before.
-    env: (() => {
-      const merged: Record<string, string | undefined> = {
-        ...process.env,
-        HYDRA_REDIS_HOST: "docker",
-        HYDRA_REDIS_DB: "0",
-        ...env,
-      };
-      return { ...merged, PATH: withRedisDockerShim(REDIS_SHIM_DIR, merged.PATH) };
-    })(),
-    encoding: "utf-8",
-    timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
-  });
-  throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_launch_flow delivery block");
-  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-}
-
-function lfLines(stdout: string): string {
-  return stdout
-    .split("\n")
-    .filter((l) => l.includes("hydra-launch-flow-watchdog:"))
-    .join("\n");
-}
+const HOUR = 3_600_000;
+const cfg = (over: Partial<LaunchFlowConfig> = {}): LaunchFlowConfig => ({ ...DEFAULT_LAUNCH_FLOW_CONFIG, nowMs: T0, ...over });
 
 // =============================================================================
-// Structural / drift-guard cases — run unconditionally (no Redis needed).
+// TypeScript delivery grammar (unchanged vocabulary the check publishes into)
 // =============================================================================
 
 describe("issue #3848 — TypeScript delivery grammar", () => {
@@ -375,10 +56,7 @@ describe("issue #3848 — TypeScript delivery grammar", () => {
   test("quota and latency are in ALERT_TYPES; pause is NOT (digest line only)", () => {
     assert.ok(ALERT_TYPES.has(E.LAUNCH_QUOTA_STRETCH), "quota stretch must raise a dashboard alert");
     assert.ok(ALERT_TYPES.has(E.LAUNCH_LATENCY_BREACH), "latency breach must raise a dashboard alert");
-    assert.ok(
-      !ALERT_TYPES.has(E.LAUNCH_PAUSE_FORGOTTEN),
-      "a forgotten pause must NEVER raise a dashboard alert (alarm-fatigue guard)",
-    );
+    assert.ok(!ALERT_TYPES.has(E.LAUNCH_PAUSE_FORGOTTEN), "a forgotten pause must NEVER raise a dashboard alert (alarm-fatigue guard)");
   });
 
   test("all three are on the closed page list (immediate Page)", () => {
@@ -390,7 +68,7 @@ describe("issue #3848 — TypeScript delivery grammar", () => {
   test("formatAlertMessage renders the two alert-worthy signals", () => {
     const quota = formatAlertMessage({
       type: E.LAUNCH_QUOTA_STRETCH,
-      payload: { signal: "quota", reason: "session-blocked", durationMs: 6 * 3_600_000, thresholdMs: 4 * 3_600_000 },
+      payload: { signal: "quota", reason: "session-blocked", durationMs: 6 * HOUR, thresholdMs: 4 * HOUR },
     });
     assert.match(quota, /Launch quota stretch/);
     assert.match(quota, /session-blocked/);
@@ -404,878 +82,439 @@ describe("issue #3848 — TypeScript delivery grammar", () => {
     assert.match(latency, /Launch latency breach/);
     assert.match(latency, /1\.5h/);
   });
-});
 
-describe("scripts/hydra-watchdog.sh — delivery structure (issue #3848)", () => {
-  function blockSource(): string {
-    const src = readFileSync(WATCHDOG, "utf-8");
-    return src.slice(src.indexOf("run_launch_flow()"), src.indexOf("# Entry point"));
-  }
-
-  /** Code-only view: comment lines stripped, so "never references X" checks
-   * match CODE, not the explanatory comments around it (which legitimately
-   * mention the other path's signal names when explaining the routing). */
-  function codeOnly(s: string): string {
-    return s
-      .split("\n")
-      .filter((l) => !/^\s*#/.test(l))
-      .join("\n");
-  }
-
-  test("bash script parses under set -euo pipefail", () => {
-    const syntax = spawnSync("bash", ["-n", WATCHDOG], { encoding: "utf-8" });
-    assert.equal(syntax.status, 0, `watchdog bash -n failed: ${syntax.stderr}`);
-  });
-
-  test("in-band event-type literals drift-guard the TS vocabulary", () => {
-    const block = blockSource();
-    for (const [sig, member] of [
-      ["quota", E.LAUNCH_QUOTA_STRETCH],
-      ["latency", E.LAUNCH_LATENCY_BREACH],
-      ["pause", E.LAUNCH_PAUSE_FORGOTTEN],
-    ] as const) {
-      assert.ok(
-        block.includes(member),
-        `bash deliver_in_band must publish '${member}' for signal '${sig}'`,
-      );
-    }
-  });
-
-  test("NOTIFY_STREAM default drift-guards STREAMS.NOTIFICATIONS", () => {
-    const block = blockSource();
-    assert.ok(
-      block.includes(`:-${STREAMS.NOTIFICATIONS}}`),
-      `the in-band delivery default must be the TS-owned stream key '${STREAMS.NOTIFICATIONS}'`,
-    );
-  });
-
-  test("delivery fires ONLY at the fired absent→present transition inside track_signal", () => {
-    const block = blockSource();
-    assert.equal(
-      (block.match(/deliver_signal "\$sig"/g) ?? []).length,
-      1,
-      "exactly one deliver_signal call site (inside track_signal's fire branch)",
-    );
-    const callIdx = block.indexOf('deliver_signal "$sig"');
-    const firedIdx = block.indexOf('rc_write SET "$fired_key" 1');
-    assert.ok(
-      firedIdx >= 0 && callIdx > firedIdx,
-      "the fired marker must be set BEFORE delivering (dedup holds even if delivery fails)",
-    );
-    // Zero NEW Redis keys: delivery introduces no key writes beyond since/fired.
-    assert.ok(!/rc_write (SET|HSET|LPUSH|RPUSH|SADD|ZADD) .*(delivered|acked|notified)/.test(block),
-      "no new delivered/acked marker keys (the #3847 fired/since pair is the sole dedup state)");
-  });
-
-  test("surface routing: fail-safe/meter-dark go out-of-band, the rest in-band", () => {
-    const block = blockSource();
-    assert.match(block, /fail-safe\|meter-dark\)/, "deliver_signal must route fail-safe|meter-dark out-of-band");
-    const inBand = codeOnly(block.slice(
-      block.indexOf("deliver_in_band() {"),
-      block.indexOf("deliver_signal() {"),
-    ));
-    for (const sig of ["quota", "latency", "pause"]) {
-      assert.ok(inBand.includes(sig), `deliver_in_band must handle '${sig}'`);
-    }
-    assert.ok(!inBand.includes("fail-safe"), "out-of-band signals must NOT take the in-band path");
-  });
-
-  test("out-of-band path is a CLI page call (ADR-0045 D2) and never XADDs, curls or names the Bot API", () => {
-    const block = blockSource();
-    const oob = codeOnly(block.slice(
-      block.indexOf("deliver_out_of_band() {"),
-      block.indexOf("deliver_in_band() {"),
-    ));
-    assert.match(oob, /deliver_page page --kind "\$etype" --dedup-key "\$etype"/, "one CLI page call, dedupKey == kind");
-    assert.ok(oob.includes("launch:fail_safe"), "fail-safe must page as launch:fail_safe");
-    assert.ok(oob.includes("launch:meter_dark"), "meter-dark must page as launch:meter_dark");
-    assert.equal((oob.match(/XADD/g) ?? []).length, 0, "out-of-band must not write the notifications stream");
-    assert.equal((oob.match(/curl\s/g) ?? []).length, 0, "out-of-band must not curl");
-    assert.ok(!oob.includes("api.telegram.org"), "only the Operator Channel may name the Bot API host");
-    assert.ok(!oob.includes("localhost"), "out-of-band must not depend on any Orchestrator HTTP endpoint");
-  });
-
-  test("in-band path is an enveloped XADD (unchanged) PLUS one CLI page call, and never curls", () => {
-    const block = blockSource();
-    const inb = codeOnly(block.slice(
-      block.indexOf("deliver_in_band() {"),
-      block.indexOf("deliver_signal() {"),
-    ));
-    assert.match(inb, /rc_write XADD "\$NOTIFY_STREAM" '\*'/, "enveloped XADD onto the notify stream");
-    for (const field of ["id", "type", "source", "timestamp", "correlationId", "payload"]) {
-      assert.ok(new RegExp(`\\b${field}\\b `).test(inb), `envelope must carry the '${field}' field`);
-    }
-    assert.equal((inb.match(/curl\s/g) ?? []).length, 0, "in-band must not curl");
-    assert.equal(
-      (inb.match(/deliver_page page --kind "\$etype" --dedup-key "\$etype"/g) ?? []).length,
-      1,
-      "exactly one CLI page call after the XADD, dedupKey == kind (so the consumer's own page dedups against it)",
-    );
-    assert.ok(inb.indexOf("rc_write XADD") < inb.indexOf("deliver_page page"), "the XADD stays first; the page call follows");
-  });
-
-  test("the block never gates on Telegram credentials and never names the Bot API (credentials are the CLI's concern)", () => {
-    const code = codeOnly(blockSource());
-    for (const forbidden of ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "api.telegram.org", "curl "]) {
-      assert.ok(!code.includes(forbidden), `run_launch_flow code must not contain '${forbidden}' (ADR-0045 D2: one Telegram sender)`);
-    }
-    const helper = code.slice(code.indexOf("deliver_page() {"), code.indexOf("deliver_out_of_band() {"));
-    assert.ok(helper.includes("HYDRA_WATCHDOG_OPERATOR_NOTIFY"), "the CLI binary resolves through HYDRA_WATCHDOG_OPERATOR_NOTIFY");
-    assert.ok(helper.includes("scripts/operator-notify.ts"), "default binary is the repo CLI");
-    assert.ok(helper.includes("--experimental-strip-types"), "default runtime is node --experimental-strip-types (never npx tsx)");
-    assert.ok(!helper.includes("npx"), "a systemd unit's PATH cannot see the global tsx; npx would try the network");
-    assert.match(helper, /timeout 25/, "wrapped in timeout 25");
-    assert.match(helper, /\|\| log "WARN/, "a failed CLI call degrades to a logged WARN");
-  });
-
-  test("recovery edge: resolve is called only when the fired key existed before the DEL", () => {
-    // run_launch_flow only (blockSource() runs to the entry point, past the
-    // node-modules / origin-identity blocks, which own their own resolve).
-    const whole = codeOnly(blockSource());
-    const code = whole.slice(0, whole.search(/^}/m) + 1);
-    const ts = code.slice(code.indexOf("track_signal() {"));
-    const fireIdx = ts.indexOf('deliver_signal "$sig"');
-    const resolveIdx = ts.indexOf("deliver_page resolve --dedup-key");
-    const delIdx = ts.indexOf('rc_write DEL "$since_key" "$fired_key"');
-    assert.ok(fireIdx >= 0 && delIdx > fireIdx, "track_signal must keep its fire branch before its clear branch");
-    assert.ok(resolveIdx > fireIdx, "the membership-false branch must call CLI resolve");
-    assert.ok(resolveIdx < delIdx, "resolve must be decided BEFORE the DEL (the fired key is the edge detector)");
-    const clearBranch = ts.slice(fireIdx, delIdx);
-    assert.match(clearBranch, /if \[\[ "\$\(rc_read EXISTS "\$fired_key" \| tr -dc '0-9'\)" == "1" \]\]/, "resolve is gated on the fired key existing (one edge, not one per healthy tick)");
-    assert.equal((code.match(/deliver_page resolve --dedup-key/g) ?? []).length, 1, "exactly one resolve call site");
-  });
-});
-
-// =============================================================================
-// Behavioural cases — gated on the docker redis container (CI runners + dev).
-// =============================================================================
-
-describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848; CLI delivery per #5046)", { skip: !DOCKER }, () => {
-  beforeEach(() => {
-    cleanState();
-    try {
-      unlinkSync(NOTIFY_LOG);
-    } catch {
-      /* absent log is fine */
-    }
-    writeNotifyShim(0);
-  });
-
-  after(() => {
-    try {
-      rmSync(SHIM_DIR, { recursive: true, force: true });
-    } catch {
-      /* best-effort */
-    }
-  });
-
-  /** Standard env: creds present (the block ignores them — they are the
-   * CLI's concern), argv-recording operator-notify stub, namespaced stream. */
-  const CREDS = {
-    TELEGRAM_BOT_TOKEN: "test-token",
-    TELEGRAM_CHAT_ID: "test-chat",
-  };
-
-  function envWith(over: Record<string, string>): Record<string, string> {
-    return {
-      ...CREDS,
-      HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM: TEST_NOTIFY_STREAM,
-      HYDRA_WATCHDOG_OPERATOR_NOTIFY: NOTIFY_SHIM,
-      PATH: `${SHIM_DIR}:${process.env.PATH ?? ""}`,
-      ...over,
-    };
-  }
-
-  test("fail-safe delivers out-of-band via one CLI page call at the fire tick (no XADD)", () => {
-    hsetLastTick({ reason: "eligibility-unreachable", class: "fail-safe", at: String(T0), latency_ms: "" });
-    seedSince("fail-safe", T0);
-    const r = runBlock(envWith({
-      HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2",
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
-    }));
-    assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-    const calls = notifyCalls();
-    assert.equal(calls.length, 1, `exactly one CLI invocation, got ${calls.length}: ${JSON.stringify(calls)}`);
-    assert.match(calls[0], /^page --kind launch:fail_safe --dedup-key launch:fail_safe /, "page subcommand, kind on the closed list, dedupKey == kind");
-    assert.match(calls[0], /--fact signal=fail-safe/, "facts name the signal");
-    assert.match(calls[0], /--fact sustained_ms=5000/, "facts carry the streak maths");
-    assert.match(calls[0], /--fact threshold_ms=2000/);
-    assert.match(calls[0], /--fact reason=eligibility-unreachable/, "facts carry the pace-gate reason");
-    assert.ok(!calls[0].includes("test-token"), "the block never passes credentials to the CLI (env-only, one loader)");
-    // Out-of-band signals must NOT appear on the notify stream.
-    assert.equal(notifyEntriesSimple().length, 0, "fail-safe must not write the notifications stream");
-    // Second tick: no re-delivery within the same streak.
-    const r2 = runBlock(envWith({
-      HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2",
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 6_000),
-    }));
-    assert.equal(r2.status, 0);
-    assert.equal(notifyCalls().length, 1, "fired marker suppresses re-alarm for the streak's duration");
-  });
-
-  test("meter-dark also delivers out-of-band as launch:meter_dark (infrastructure-is-broken character)", () => {
-    hsetLastTick({ reason: "meter-unavailable", class: "fail-safe", at: String(T0), latency_ms: "90" });
-    seedSince("meter-dark", T0);
-    const r = runBlock(envWith({
-      HYDRA_WATCHDOG_LAUNCH_METER_DARK_SECONDS: "2",
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
-    }));
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    const calls = notifyCalls();
-    assert.equal(calls.length, 1);
-    assert.match(calls[0], /^page --kind launch:meter_dark --dedup-key launch:meter_dark /);
-    assert.match(calls[0], /--fact signal=meter-dark/);
-    assert.equal(notifyEntriesSimple().length, 0);
-  });
-
-  test("missing TELEGRAM_BOT_TOKEN: the CLI is still invoked (credentials are the CLI's concern), run still succeeds", () => {
-    hsetLastTick({ reason: "curl-missing", class: "fail-safe", at: String(T0), latency_ms: "" });
-    seedSince("fail-safe", T0);
-    const r = runBlock(envWith({
-      TELEGRAM_BOT_TOKEN: "",
-      HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2",
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
-    }));
-    assert.equal(r.status, 0, `the run must not fail on an unconfigured credential; stderr=${r.stderr}`);
-    assert.equal(notifyCallsOf("page").length, 1, "the block does not gate on credentials — the CLI's single loader decides and logs skipped-no-credentials");
-    assert.doesNotMatch(lfLines(r.stdout), /SKIPPED — missing Telegram config/, "the old bash credential gate is gone");
-    assert.equal(getFired("fail-safe"), true, "detection still fires — unconfigured ≠ undetected");
-  });
-
-  test("both credentials missing: the CLI is still invoked exactly once", () => {
-    hsetLastTick({ reason: "eligibility-unreachable", class: "fail-safe", at: String(T0), latency_ms: "" });
-    seedSince("fail-safe", T0);
-    const r = runBlock(envWith({
-      TELEGRAM_BOT_TOKEN: "",
-      TELEGRAM_CHAT_ID: "",
-      HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2",
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
-    }));
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    assert.equal(notifyCallsOf("page").length, 1);
-  });
-
-  test("a failing CLI call never fails the block; the fired marker still holds; the WARN is distinguishable", () => {
-    writeNotifyShim(1);
-    hsetLastTick({ reason: "eligibility-unreachable", class: "fail-safe", at: String(T0), latency_ms: "" });
-    seedSince("fail-safe", T0);
-    const r = runBlock(envWith({
-      HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2",
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
-    }));
-    assert.equal(r.status, 0, `a CLI non-zero must not change the block's exit code; stderr=${r.stderr}`);
-    assert.match(lfLines(r.stdout), /WARN operator-notify page FAILED \(rc=1\) for 'launch:fail_safe'/,
-      "a failed CLI call is distinguishable in the journal");
-    assert.equal(getFired("fail-safe"), true, "dedup state survives a failed delivery");
-  });
-
-  test("quota delivers in-band: one enveloped entry with the TS-owned type AND one CLI page call", () => {
-    hsetLastTick({ reason: "session-blocked", class: "deliberate-skip", at: String(T0), latency_ms: "100" });
-    seedSince("quota", T0);
-    const r = runBlock(envWith({
-      HYDRA_WATCHDOG_LAUNCH_QUOTA_SECONDS: "2",
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
-    }));
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    const entries = notifyEntriesSimple();
-    assert.equal(entries.length, 1, "exactly one XADD per streak (unchanged)");
-    const f = entries[0].fields;
-    assert.equal(f.type, E.LAUNCH_QUOTA_STRETCH);
-    assert.equal(f.source, "watchdog-launch-flow");
-    assert.ok(f.id.startsWith("launch-flow-"), `id field must be an envelope id, got '${f.id}'`);
-    assert.match(f.timestamp, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, "ISO timestamp");
-    assert.equal(f.correlationId, "launch-flow-quota");
-    const payload = JSON.parse(f.payload);
-    assert.equal(payload.signal, "quota");
-    assert.equal(payload.reason, "session-blocked");
-    assert.equal(payload.durationMs, 5000);
-    assert.equal(payload.thresholdMs, 2000);
-    const calls = notifyCalls();
-    assert.equal(calls.length, 1, "exactly one CLI page call alongside the XADD");
-    assert.match(calls[0], /^page --kind launch:quota_stretch --dedup-key launch:quota_stretch /, "dedupKey == kind: the consumer's own page for this XADD dedups against it");
-  });
-
-  test("latency delivers in-band with launch:latency_breach plus one CLI page call", () => {
-    hsetLastTick({ reason: "allow-false", class: "deliberate-skip", at: String(T0), latency_ms: "2500" });
-    seedSince("latency", T0);
-    const r = runBlock(envWith({
-      HYDRA_WATCHDOG_LAUNCH_LATENCY_BUDGET_MS: "1000",
-      HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS: "2",
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
-    }));
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    const entries = notifyEntriesSimple();
-    assert.equal(entries.length, 1);
-    assert.equal(entries[0].fields.type, E.LAUNCH_LATENCY_BREACH);
-    const calls = notifyCalls();
-    assert.equal(calls.length, 1);
-    assert.match(calls[0], /^page --kind launch:latency_breach --dedup-key launch:latency_breach /);
-  });
-
-  test("pause delivers in-band with launch:pause_forgotten plus one CLI page call, with no credentials in the env", () => {
-    hsetLastTick({ reason: "paused", class: "deliberate-skip", at: String(T0), latency_ms: "100" });
-    seedSince("pause", T0);
-    const r = runBlock(envWith({
-      TELEGRAM_BOT_TOKEN: "",
-      TELEGRAM_CHAT_ID: "",
-      HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS: "2",
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
-    }));
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    const entries = notifyEntriesSimple();
-    assert.equal(entries.length, 1);
-    assert.equal(entries[0].fields.type, E.LAUNCH_PAUSE_FORGOTTEN);
-    const calls = notifyCalls();
-    assert.equal(calls.length, 1, "the CLI is invoked regardless of credentials (its loader decides)");
-    assert.match(calls[0], /^page --kind launch:pause_forgotten --dedup-key launch:pause_forgotten /);
-  });
-
-  test("un-suppression is recurrence: recovery clears fired and calls CLI resolve once; a fresh streak re-delivers", () => {
-    // Streak 1: fire + deliver.
-    hsetLastTick({ reason: "paused", class: "deliberate-skip", at: String(T0), latency_ms: "100" });
-    seedSince("pause", T0);
-    runBlock(envWith({
-      HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS: "2",
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
-    }));
-    assert.equal(getFired("pause"), true, "precondition: first streak fired");
-    assert.equal(notifyEntriesSimple().length, 1);
-    assert.equal(notifyCallsOf("page").length, 1);
-    assert.equal(notifyCallsOf("resolve").length, 0, "no resolve while still bad");
-
-    // Recovery: a healthy tick DELs since+fired (stateless, never ack-gated)
-    // and calls CLI resolve exactly once — only for the signal that was fired.
-    hsetLastTick({ reason: "eligible-launch", class: "launch", at: String(T0 + 6_000), latency_ms: "120" });
-    runBlock(envWith({
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 6_000),
-    }));
-    assert.equal(getFired("pause"), false, "recovery clears the fired marker");
-    const resolves = notifyCallsOf("resolve");
-    assert.equal(resolves.length, 1, `exactly one resolve at the fired→absent edge, got ${JSON.stringify(resolves)}`);
-    assert.match(resolves[0], /^resolve --dedup-key launch:pause_forgotten /, "resolve carries the same dedupKey the page used");
-
-    // A second healthy tick: nothing was fired any more → no resolve (one edge, not one per healthy tick).
-    hsetLastTick({ reason: "eligible-launch", class: "launch", at: String(T0 + 6_500), latency_ms: "120" });
-    runBlock(envWith({
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 6_500),
-    }));
-    assert.equal(notifyCallsOf("resolve").length, 1, "a healthy tick with no fired key must not resolve again");
-
-    // Streak 2: re-cross the threshold → delivers AGAIN.
-    hsetLastTick({ reason: "paused", class: "deliberate-skip", at: String(T0 + 7_000), latency_ms: "100" });
-    seedSince("pause", T0 + 7_000);
-    const r = runBlock(envWith({
-      HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS: "2",
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 20_000),
-    }));
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    assert.equal(getFired("pause"), true, "second streak re-fires");
-    const entries = notifyEntriesSimple();
-    assert.equal(entries.length, 2, "recurrence after recovery delivers again");
-    assert.equal(entries[1].fields.type, E.LAUNCH_PAUSE_FORGOTTEN);
-    assert.equal(notifyCallsOf("page").length, 2, "the CLI is paged again on the fresh streak");
-  });
-
-  test("no delivery before threshold or after a read failure", () => {
-    // Under threshold: streak active, no crossing → nothing delivered.
-    hsetLastTick({ reason: "session-blocked", class: "deliberate-skip", at: String(T0), latency_ms: "100" });
-    seedSince("quota", T0);
-    runBlock(envWith({
-      HYDRA_WATCHDOG_LAUNCH_QUOTA_SECONDS: "60",
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
-    }));
-    assert.equal(notifyEntriesSimple().length, 0, "under threshold → no delivery");
-    assert.equal(notifyCalls().length, 0);
-
-    // Read failure (unreachable redis): no mutation, no delivery, exit 0.
-    const r = spawnSync(
-      "bash",
-      ["-c", `set -euo pipefail; source '${BLOCK}'; run_launch_flow`],
-      {
-        env: {
-          ...process.env,
-          HYDRA_REDIS_HOST: "127.0.0.1",
-          HYDRA_REDIS_PORT: "1", // nothing listening
-          // Pinned for the same reason as runBlock() above (#4183). The host
-          // is unreachable so the DB is never selected, but leaving it
-          // unpinned would leave the ambient per-run value here as a latent
-          // trap the moment this case ever points at a live Redis.
-          HYDRA_REDIS_DB: "0",
-          HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
-          HYDRA_WATCHDOG_OPERATOR_NOTIFY: NOTIFY_SHIM,
-          PATH: `${SHIM_DIR}:${process.env.PATH ?? ""}`,
-          ...CREDS,
-        },
-        encoding: "utf-8",
-        timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
-      },
-    );
-    throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_launch_flow delivery block (unreachable-redis case)");
-    assert.equal(r.status ?? -1, 0, `read failure must not abort (set -e); stderr=${r.stderr}`);
-    assert.equal(notifyCalls().length, 0, "no CLI call on a read failure");
-  });
-});
-
-// =============================================================================
-// Issue #3868 / #4691 — glm-sterile: the live-but-sterile GLM drainer signal.
-//
-// Detection contract: membership is the AND of (1) a fresh
-// hydra:glm:drainer:active heartbeat, (2) a fresh, parseable pick verdict at
-// hydra:glm:drainer:last-pick — the epsilon pick phase's own published record
-// (#4686 / ADR-0040 row 10); #4691 replaced the watchdog's gh issue-queue
-// re-derivation with this record, (3) that verdict's `picked` being a
-// positive integer (ADR-0040 row 10's `pickable > 0` — picked null means
-// every candidate was legitimately skipped, the correctly-IDLE shape, never
-// an alarm), (4) zero drainer PRs — the shared #4048 OR-predicate
-// (glm-authored label OR worktree-agent-glm-* head branch) — created in the
-// trailing window (default 6h). Delivery rides the existing
-// deliver_signal/track_signal layer IN-BAND (no new Redis keys, no second
-// alarm path); a failed pulls query or a missing gh/jq binary leaves the
-// streak state UNTOUCHED, while a missing/stale/unparseable verdict CLEARS
-// it (the heartbeat's own fail-quiet direction).
-// =============================================================================
-
-describe("issue #3868 — glm-sterile structural / drift guards", () => {
-  function blockSource(): string {
-    const src = readFileSync(WATCHDOG, "utf-8");
-    return src.slice(src.indexOf("run_launch_flow()"), src.indexOf("# Entry point"));
-  }
-  /** Comment lines stripped, so "never references X" checks match CODE. */
-  function codeOnly(s: string): string {
-    return s
-      .split("\n")
-      .filter((l) => !/^\s*#/.test(l))
-      .join("\n");
-  }
-
-  test("TS grammar: glm:drainer_sterile is an alert type AND an immediate digest line", () => {
+  test("TS grammar: glm:drainer_sterile is an alert type AND an immediate page", () => {
     assert.equal(E.GLM_DRAINER_STERILE, "glm:drainer_sterile");
     assert.ok(ALERT_TYPES.has(E.GLM_DRAINER_STERILE), "a sterile drainer must raise a dashboard alert");
-    assert.ok(
-      isPageKind(E.GLM_DRAINER_STERILE),
-      "a sterile drainer must be a Page (board starvation is per-hour damage)",
-    );
+    assert.ok(isPageKind(E.GLM_DRAINER_STERILE), "a sterile drainer must be a Page (board starvation is per-hour damage)");
     const msg = formatAlertMessage({
       type: E.GLM_DRAINER_STERILE,
-      payload: { signal: "glm-sterile", reason: "eligible-launch", durationMs: 2 * 3_600_000, thresholdMs: 3_600_000 },
+      payload: { signal: "glm-sterile", reason: "eligible-launch", durationMs: 2 * HOUR, thresholdMs: HOUR },
     });
     assert.match(msg, /GLM drainer sterile/);
     assert.match(msg, /2h/);
     assert.match(msg, /1h/);
   });
+});
 
-  test("bash publishes the TS-owned type and routes glm-sterile in-band", () => {
-    const block = blockSource();
-    assert.ok(
-      block.includes(E.GLM_DRAINER_STERILE),
-      "deliver_in_band must publish the TS-owned 'glm:drainer_sterile' literal",
-    );
-    const inBand = codeOnly(block.slice(
-      block.indexOf("deliver_in_band() {"),
-      block.indexOf("deliver_signal() {"),
-    ));
-    assert.ok(inBand.includes("glm-sterile"), "deliver_in_band must handle 'glm-sterile'");
-    const oob = codeOnly(block.slice(
-      block.indexOf("deliver_out_of_band() {"),
-      block.indexOf("deliver_in_band() {"),
-    ));
-    assert.ok(!oob.includes("glm-sterile"), "glm-sterile must NOT take the out-of-band Telegram path");
+// =============================================================================
+// INV-17 — compile-time pins replace the deleted regex pins
+// =============================================================================
+
+describe("every kind the launch flow pages is on the closed page list (INV-17)", () => {
+  test("LAUNCH_FLOW_PAGE_KIND covers all six signals, each isPageKind()-true and in PAGE_KINDS", () => {
+    assert.deepEqual([...LAUNCH_FLOW_SIGNAL_ORDER].sort(), [...WATCHDOG_LAUNCH_SIGNALS, "glm-sterile"].sort());
+    for (const sig of LAUNCH_FLOW_SIGNAL_ORDER) {
+      const kind = LAUNCH_FLOW_PAGE_KIND[sig];
+      assert.ok(isPageKind(kind), `${sig} -> ${kind} must be on the closed page list`);
+      assert.ok((PAGE_KINDS as readonly string[]).includes(kind));
+    }
   });
 
-  test("drainer-PR predicate is byte-identical to glm-beachhead-report.sh's (shared #4048 predicate)", () => {
-    const beach = readFileSync(join(REPO_ROOT, "scripts", "glm-beachhead-report.sh"), "utf-8");
-    const wd = readFileSync(WATCHDOG, "utf-8");
-    const re = /GLM_PR_MATCH_JQ='([^']+)'/;
-    const beachLit = beach.match(re);
-    const wdLit = wd.match(re);
-    assert.ok(beachLit, "glm-beachhead-report.sh no longer defines GLM_PR_MATCH_JQ");
-    assert.ok(wdLit, "hydra-watchdog.sh must define GLM_PR_MATCH_JQ (the shared drainer-PR predicate)");
-    assert.equal(
-      wdLit![1],
-      beachLit![1],
-      "the watchdog's drainer-PR predicate drifted from glm-beachhead-report.sh — the alarm and the beachhead report would disagree about what a drainer PR is (issue #4048)",
-    );
-    // The --arg bindings must supply the beachhead's own label/prefix values.
-    const label = beach.match(/GLM_LABEL_AUTHORED="([^"]+)"/)![1];
-    const prefix = beach.match(/GLM_DRAINER_BRANCH_PREFIX="([^"]+)"/)![1];
-    assert.ok(wd.includes(`--arg label "${label}"`), `watchdog must bind --arg label "${label}"`);
-    assert.ok(wd.includes(`--arg prefix "${prefix}"`), `watchdog must bind --arg prefix "${prefix}"`);
-  });
-
-  test("heartbeat freshness window mirrors src/redis/autopilot.ts's GLM_DRAINER_HEARTBEAT_STALE_MS", () => {
-    assert.ok(
-      blockSource().includes(`local GLM_HEARTBEAT_STALE_MS=${GLM_DRAINER_HEARTBEAT_STALE_MS}`),
-      `the bash staleness window must equal GLM_DRAINER_HEARTBEAT_STALE_MS (${GLM_DRAINER_HEARTBEAT_STALE_MS}ms) — a drift here makes the alarm and the #3754 partition disagree about "live"`,
-    );
-  });
-
-  test("verdict staleness window mirrors the writer's own key TTL (#4691)", () => {
-    assert.ok(
-      blockSource().includes(`local GLM_LAST_PICK_STALE_MS=${GLM_DRAINER_HEARTBEAT_TTL_SECONDS * 1000}`),
-      `the bash verdict-staleness window must equal GLM_DRAINER_HEARTBEAT_TTL_SECONDS*1000 (${GLM_DRAINER_HEARTBEAT_TTL_SECONDS * 1000}ms — the writer's own SET EX TTL), NOT the 45-min heartbeat window: a pick runs once per drainer tick before a ~50-min session, so a healthy verdict is legitimately up to ~65 min old and a 45-min window would flip membership off mid-cycle in exactly the timeout loop this alarm exists for`,
-    );
-  });
-
-  test("no queue re-derivation: no glm-eligible mention, no /issues gh path, TS-owned verdict key (#4691)", () => {
-    const whole = readFileSync(WATCHDOG, "utf-8");
-    assert.ok(
-      !whole.includes("glm-eligible"),
-      "scripts/hydra-watchdog.sh must not contain the string 'glm-eligible' anywhere (code or comments) — ADR-0040 row 10 moved the pickability decision to the drainer's own published verdict, and any surviving mention is a stale re-derivation seed",
-    );
-    const block = blockSource();
-    assert.ok(
-      !codeOnly(block).includes("/issues"),
-      "run_launch_flow's code must not query the GitHub issue queue — the verdict at hydra:glm:drainer:last-pick is the single authority on pickability (#4691)",
-    );
-    assert.ok(
-      block.includes(`local GLM_LAST_PICK_KEY="${GLM_DRAINER_LAST_PICK_KEY}"`),
-      "the block must declare the TS-owned last-pick key as a double-quoted literal — the before() rebind drift-guards the bash literal against src/redis/autopilot.ts's GLM_DRAINER_LAST_PICK_KEY",
-    );
-  });
-
-  test("membership decision never reads candidates or skipped — picked is the only verdict field (#4691)", () => {
-    const code = codeOnly(blockSource());
-    assert.ok(
-      !code.includes(".candidates") && !code.includes(".skipped"),
-      "the membership decision may not consult the verdict's candidates/skipped histogram: pick returns on the first admitted candidate, so candidates>0 with picked=null is the correctly-idle shape — deriving pickable from the histogram re-opens the #4286 false-alarm class",
-    );
-  });
-
-  test("track_signal for glm-sterile is guarded by glm_sterile_known (failed query never extends or clears)", () => {
-    const block = codeOnly(blockSource());
-    const guardIdx = block.indexOf('if [[ "$glm_sterile_known" == "1" ]]');
-    const callIdx = block.indexOf("track_signal glm-sterile");
-    assert.ok(guardIdx >= 0, "the glm_sterile_known guard must exist");
-    assert.ok(callIdx > guardIdx, "track_signal glm-sterile must sit inside the known-inputs guard");
-  });
-
-  test("playbook documents the two stop levers (paused vs pace-gate.timer) in one subsection", () => {
-    // Issue #4827 moved the operator-facing sections out of the always-loaded
-    // playbook body into the operator-guide sidecar (a `reference_files`
-    // fragment, emitted beside SKILL.md). The subsection is pinned where it
-    // now lives, and the playbook must still point at that file.
-    const playbooks = join(REPO_ROOT, "docs", "operator-playbooks");
-    const guideName = "hydra-autopilot-operator-guide.md";
-    const play = readFileSync(join(playbooks, "_fragments", guideName), "utf-8");
-    const body = readFileSync(join(playbooks, "hydra-autopilot.md"), "utf-8");
-    assert.ok(
-      body.includes(`_fragments/${guideName}`),
-      `hydra-autopilot.md must list _fragments/${guideName} in reference_files so sync-skills emits it`,
-    );
-    const invocation = body.slice(body.indexOf("\n## Invocation\n"));
-    assert.ok(
-      invocation.slice(0, invocation.indexOf("\n## ", 4)).includes(guideName),
-      "the playbook's Invocation section must point at the operator guide that documents the stop levers",
-    );
-    const h = play.indexOf("### Stopping the autopilot: the two levers");
-    assert.ok(h >= 0, "operator-guide subsection '### Stopping the autopilot: the two levers' is missing");
-    const tail = play.slice(h);
-    const nextIdx = tail.slice(4).search(/\n#{2,3} /);
-    const section = nextIdx >= 0 ? tail.slice(0, nextIdx + 4) : tail;
-    assert.ok(section.includes("api/autopilot/paused"), "subsection must name the total-stop lever (POST /api/autopilot/paused)");
-    assert.ok(section.includes("hydra-pace-gate.timer"), "subsection must name the Claude-only stop lever (hydra-pace-gate.timer)");
+  test("the in-band kinds are the TS-owned vocabulary members; fail-safe / meter-dark are the page-list literals", () => {
+    assert.equal(LAUNCH_FLOW_PAGE_KIND.quota, E.LAUNCH_QUOTA_STRETCH);
+    assert.equal(LAUNCH_FLOW_PAGE_KIND.latency, E.LAUNCH_LATENCY_BREACH);
+    assert.equal(LAUNCH_FLOW_PAGE_KIND.pause, E.LAUNCH_PAUSE_FORGOTTEN);
+    assert.equal(LAUNCH_FLOW_PAGE_KIND["glm-sterile"], E.GLM_DRAINER_STERILE);
+    assert.equal(LAUNCH_FLOW_PAGE_KIND["fail-safe"], "launch:fail_safe");
+    assert.equal(LAUNCH_FLOW_PAGE_KIND["meter-dark"], "launch:meter_dark");
   });
 });
 
-describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }, () => {
-  const GH_LOG = join(SHIM_DIR, "gh-calls.log");
-  const GH_SHIM = join(SHIM_DIR, "gh");
-  const PULLS_FIXTURE = join(SHIM_DIR, "gh-pulls.json");
+// =============================================================================
+// Delivery behaviour
+// =============================================================================
 
-  /** PATH-shim `gh` — serves canned REST fixtures, applies any --jq via real
-   * jq, records every invocation, never touches the network. GH_STUB_EXIT=N
-   * simulates a gh failure (rate limit / 503 / auth). Since #4691 the pulls
-   * PR-window query is the ONLY gh call the block can make — there is no
-   * /issues arm left to serve. */
-  function writeGhShim(): void {
-    mkdirSync(SHIM_DIR, { recursive: true });
-    writeFileSync(GH_SHIM, [
-      "#!/usr/bin/env bash",
-      `printf '%s\\n' "$*" >> '${GH_LOG}'`,
-      'if [[ "${GH_STUB_EXIT:-0}" != "0" ]]; then exit "${GH_STUB_EXIT}"; fi',
-      'jqprog=""; path=""; expect_jq=0',
-      'for a in "$@"; do',
-      '  if [[ "$expect_jq" == "1" ]]; then jqprog="$a"; expect_jq=0; continue; fi',
-      '  if [[ "$a" == "--jq" ]]; then expect_jq=1; continue; fi',
-      '  if [[ "$a" == repos/* ]]; then path="$a"; fi',
-      "done",
-      'case "$path" in',
-      `  *"/pulls"*)  src='${PULLS_FIXTURE}' ;;`,
-      '  *) echo "[]"; exit 0 ;;',
-      "esac",
-      'if [[ -n "$jqprog" ]]; then jq "$jqprog" < "$src"; else cat "$src"; fi',
-      "",
-    ].join("\n"));
-    spawnSync("chmod", ["+x", GH_SHIM]);
-  }
-
-  function ghCalls(): string[] {
-    try {
-      return readFileSync(GH_LOG, "utf-8").split("\n").filter((l) => l !== "");
-    } catch {
-      return [];
-    }
-  }
-
-  /** REST created_at without fractional seconds (jq's fromdateiso8601 rejects them). */
-  const iso = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
-
-  // The pick phase's published verdicts (epsilon #4686): {at, picked, reason,
-  // candidates, skipped}. #4691 replaced the watchdog's own queue
-  // re-derivation with this record — the drainer is the single authority on
-  // what is pickable.
-  const VERDICT_IDLE = {
-    at: T0,
-    picked: null,
-    reason: "idle",
-    candidates: 6,
-    skipped: { "artifact-missing": 6 },
-  };
-  const VERDICT_PICKED = {
-    at: T0,
-    picked: 9001,
-    reason: "approved-artifact",
-    candidates: 3,
-    skipped: { "artifact-missing": 2 },
-  };
-
-  const PULLS_NONE_RECENT = JSON.stringify([
-    // A drainer PR OUTSIDE the 6h window and a recent NON-drainer PR: zero
-    // drainer PRs in-window, so a live drainer that PICKED work reads STERILE.
-    { labels: [{ name: "glm-authored" }], head: { ref: "worktree-agent-glm-1-100" }, created_at: iso(T0 - 10 * 3_600_000) },
-    { labels: [], head: { ref: "worktree-agent-0abc12-x" }, created_at: iso(T0 - 10 * 60_000) },
-  ]);
-  const PULLS_RECENT_LABELED = JSON.stringify([
-    { labels: [{ name: "glm-authored" }], head: { ref: "issue-42-fix" }, created_at: iso(T0 - 30 * 60_000) },
-  ]);
-  const PULLS_RECENT_BRANCH_ONLY = JSON.stringify([
-    // No glm-authored label (the #3900 lost-label case) — the branch-prefix
-    // FALLBACK of the shared OR-predicate must still count it.
-    { labels: [], head: { ref: "worktree-agent-glm-77-999" }, created_at: iso(T0 - 30 * 60_000) },
-  ]);
-
-  function seedHeartbeat(ms: number): void {
-    drc(["SET", TEST_GLM_HB_KEY, String(ms)]);
-  }
-
-  function seedVerdict(v: Record<string, unknown>): void {
-    drc(["SET", TEST_GLM_LAST_PICK_KEY, JSON.stringify(v)]);
-  }
-
-  /** Env: creds present (ignored by the block), operator-notify + gh shims,
-   * namespaced stream, fresh-fire defaults (2s sustain threshold, now = T0+5s,
-   * healthy pace-gate tick). */
-  function glmEnv(over: Record<string, string> = {}): Record<string, string> {
-    return {
-      TELEGRAM_BOT_TOKEN: "test-token",
-      TELEGRAM_CHAT_ID: "test-chat",
-      HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM: TEST_NOTIFY_STREAM,
-      HYDRA_WATCHDOG_OPERATOR_NOTIFY: NOTIFY_SHIM,
-      PATH: `${SHIM_DIR}:${process.env.PATH ?? ""}`,
-      HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_SECONDS: "2",
-      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
-      ...over,
-    };
-  }
-
+describe("runLaunchFlow — delivery behaviour (issue #3848; Operator Channel per #5046/#5097)", () => {
+  let h: ReturnType<typeof makeHarness>;
   beforeEach(() => {
-    cleanState();
-    for (const f of [NOTIFY_LOG, GH_LOG]) {
-      try {
-        unlinkSync(f);
-      } catch {
-        /* absent log is fine */
-      }
-    }
-    writeNotifyShim(0);
-    writeGhShim();
-    writeFileSync(PULLS_FIXTURE, PULLS_NONE_RECENT);
-    // Healthy pace-gate tick so none of the five reason-derived signals fire —
-    // any XADD observed below is attributable to glm-sterile alone.
-    hsetLastTick({ reason: "eligible-launch", class: "launch", at: String(T0), latency_ms: "100" });
+    h = makeHarness();
+  });
+  const tick = (reason: string, latencyMs: number | null = null) => {
+    h.state.tick = { reason, latencyMs };
+  };
+
+  test("fail-safe delivers out-of-band: one channel page, NO bus publish", async () => {
+    tick("eligibility-unreachable");
+    seedSince(h.store, "fail-safe", T0 - 2 * HOUR);
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.published.length, 0, "the Orchestrator is unproven: nothing rides the bus");
+    assert.equal(h.pages.length, 1);
+    const p = h.pages[0];
+    assert.equal(p.kind, "launch:fail_safe");
+    assert.equal(p.dedupKey, "launch:fail_safe", "dedupKey == kind");
+    assert.equal(p.severity, "page");
+    assert.equal(p.title, "Launch flow 'fail-safe' sustained 7200000ms (>= 7200000ms) — Orchestrator may be down");
+    assert.deepEqual(p.facts, [
+      { label: "signal", value: "fail-safe" },
+      { label: "reason", value: "eligibility-unreachable" },
+      { label: "sustained_ms", value: "7200000" },
+      { label: "threshold_ms", value: "7200000" },
+    ]);
   });
 
-  after(() => {
-    try {
-      rmSync(SHIM_DIR, { recursive: true, force: true });
-    } catch {
-      /* best-effort */
-    }
+  test("meter-dark also delivers out-of-band as launch:meter_dark", async () => {
+    tick("token-refresh-nudge");
+    seedSince(h.store, "meter-dark", T0 - 3 * HOUR);
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.published.length, 0);
+    assert.equal(h.pages.length, 1);
+    assert.equal(h.pages[0].kind, "launch:meter_dark");
+    assert.match(h.pages[0].title, /Orchestrator may be down/);
   });
 
-  test("fires: fresh heartbeat + pickable verdict + zero drainer PRs in window → one in-band event, deduped", () => {
-    seedHeartbeat(T0);
-    seedVerdict(VERDICT_PICKED);
-    seedSince("glm-sterile", T0);
-    const r = runBlock(glmEnv());
-    assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
-    assert.match(
-      lfLines(r.stdout),
-      /WARNING LAUNCH FLOW — signal 'glm-sterile' sustained 5000ms >= 2000ms/,
-      "the sustained streak must fire the WARNING",
+  test("quota delivers in-band: ONE bus envelope with the TS-owned type AND one page", async () => {
+    tick("session-blocked");
+    seedSince(h.store, "quota", T0 - 5 * HOUR);
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.published.length, 1);
+    const { stream, event } = h.published[0];
+    assert.equal(stream, STREAMS.NOTIFICATIONS);
+    assert.equal(event.type, E.LAUNCH_QUOTA_STRETCH);
+    assert.equal(event.source, "watchdog-launch-flow");
+    assert.equal(event.correlationId, "launch-flow-quota");
+    assert.deepEqual(event.payload, { signal: "quota", reason: "session-blocked", durationMs: 5 * HOUR, thresholdMs: 4 * HOUR });
+    assert.equal(h.pages.length, 1);
+    assert.equal(h.pages[0].kind, E.LAUNCH_QUOTA_STRETCH);
+    assert.equal(h.pages[0].dedupKey, E.LAUNCH_QUOTA_STRETCH);
+    assert.equal(h.pages[0].title, "Launch flow 'quota' sustained 18000000ms (>= 14400000ms)");
+  });
+
+  test("latency delivers in-band with launch:latency_breach plus one page", async () => {
+    tick("eligible-launch", 4200);
+    seedSince(h.store, "latency", T0 - HOUR);
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.published.length, 1);
+    assert.equal(h.published[0].event.type, E.LAUNCH_LATENCY_BREACH);
+    assert.equal(h.published[0].event.correlationId, "launch-flow-latency");
+    assert.equal(h.pages.length, 1);
+    assert.equal(h.pages[0].kind, E.LAUNCH_LATENCY_BREACH);
+  });
+
+  test("pause delivers in-band with launch:pause_forgotten plus one page", async () => {
+    tick("paused");
+    seedSince(h.store, "pause", T0 - 25 * HOUR);
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.published.length, 1);
+    assert.equal(h.published[0].event.type, E.LAUNCH_PAUSE_FORGOTTEN);
+    assert.equal(h.pages.length, 1);
+    assert.equal(h.pages[0].kind, E.LAUNCH_PAUSE_FORGOTTEN);
+  });
+
+  test("the reason is sanitized for the envelope (a quote or backslash can never reach the payload)", async () => {
+    seedSince(h.store, "latency", T0 - HOUR);
+    tick('weird "reason"\\', 9000);
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.published.length, 1);
+    assert.equal((h.published[0].event.payload as { reason: string }).reason, "weirdreason");
+  });
+
+  test("a failing channel never fails the run; the fired marker still holds; the WARN is distinguishable", async () => {
+    tick("eligibility-unreachable");
+    seedSince(h.store, "fail-safe", T0 - 3 * HOUR);
+    h.state.failPage = true;
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(firedOf(h.store, "fail-safe"), true, "marker set before delivery");
+    assert.ok(h.logs.some((l) => /WARN operator-channel page FAILED for 'launch:fail_safe' \(best-effort/.test(l)));
+    assert.ok(h.logs.some((l) => /launch-flow tick processed/.test(l)), "the run completed");
+  });
+
+  test("a failing bus never fails the run and the page is still attempted", async () => {
+    tick("session-blocked");
+    seedSince(h.store, "quota", T0 - 5 * HOUR);
+    h.state.failPublish = true;
+    await runLaunchFlow(h.deps, cfg());
+    assert.ok(h.logs.some((l) => /WARN in-band delivery FAILED for 'quota'/.test(l)));
+    assert.equal(h.pages.length, 1);
+    assert.equal(firedOf(h.store, "quota"), true);
+  });
+
+  test("un-suppression is recurrence: recovery calls resolve ONCE; a fresh streak re-delivers", async () => {
+    tick("session-blocked");
+    seedSince(h.store, "quota", T0 - 5 * HOUR);
+    await runLaunchFlow(h.deps, cfg());
+    await runLaunchFlow(h.deps, cfg({ nowMs: T0 + 120_000 }));
+    assert.equal(h.pages.length, 1, "the fired marker suppresses the second tick");
+    assert.equal(h.published.length, 1);
+
+    tick("eligible-launch");
+    await runLaunchFlow(h.deps, cfg({ nowMs: T0 + 240_000 }));
+    assert.deepEqual(h.resolves, [{ key: E.LAUNCH_QUOTA_STRETCH, title: "Launch flow 'quota' recovered" }]);
+    assert.equal(firedOf(h.store, "quota"), false);
+    assert.equal(sinceOf(h.store, "quota"), null);
+
+    await runLaunchFlow(h.deps, cfg({ nowMs: T0 + 360_000 }));
+    assert.equal(h.resolves.length, 1, "healthy ticks after the edge do not re-resolve");
+
+    tick("session-blocked");
+    await runLaunchFlow(h.deps, cfg({ nowMs: T0 + 480_000, quotaS: 0 }));
+    assert.equal(h.pages.length, 2, "a fresh streak crossing the threshold delivers again");
+  });
+
+  test("no delivery before threshold or after a read failure", async () => {
+    tick("session-blocked");
+    seedSince(h.store, "quota", T0 - HOUR);
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.pages.length + h.published.length, 0, "under threshold");
+
+    seedSince(h.store, "quota", T0 - 9 * HOUR);
+    h.state.tick = "throw";
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.pages.length + h.published.length, 0, "unreadable last-tick");
+    h.state.tick = { reason: "session-blocked", latencyMs: null };
+    h.store.failReads = true;
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.pages.length + h.published.length, 0, "unreadable episode store");
+  });
+
+  test("the WARNING line keeps the pre-port wording", async () => {
+    tick("session-blocked");
+    seedSince(h.store, "quota", T0 - 5 * HOUR);
+    await runLaunchFlow(h.deps, cfg());
+    assert.ok(
+      h.logs.includes(
+        "hydra-launch-flow-watchdog: WARNING LAUNCH FLOW — signal 'quota' sustained 18000000ms >= 14400000ms threshold (reason=session-blocked); see epic #3844",
+      ),
     );
-    assert.equal(getFired("glm-sterile"), true, "fired marker set");
-    const calls = ghCalls();
-    assert.equal(calls.length, 1, "exactly ONE gh call per tick — the pulls PR-window query; #4691 deleted the queue query");
-    assert.match(calls[0]!, /\/pulls/, "the one gh call must be the PR-window pulls query");
-    assert.ok(!calls[0]!.includes("/issues"), "no issue-queue gh call may run anymore (#4691)");
-    const pages = notifyCallsOf("page");
-    assert.equal(pages.length, 1, "glm-sterile is in-band (XADD) AND one CLI page call");
-    assert.match(pages[0], /^page --kind glm:drainer_sterile --dedup-key glm:drainer_sterile /, "dedupKey == kind");
-    const entries = notifyEntriesSimple();
-    assert.equal(entries.length, 1, "exactly one XADD per streak");
-    const f = entries[0].fields;
-    assert.equal(f.type, E.GLM_DRAINER_STERILE);
-    assert.equal(f.source, "watchdog-launch-flow");
-    assert.equal(f.correlationId, "launch-flow-glm-sterile");
-    const payload = JSON.parse(f.payload);
-    assert.equal(payload.signal, "glm-sterile");
-    assert.equal(payload.durationMs, 5000);
-    assert.equal(payload.thresholdMs, 2000);
-    // Second tick within the same streak: fired marker suppresses re-delivery.
-    const r2 = runBlock(glmEnv({ HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 6_000) }));
-    assert.equal(r2.status, 0);
-    assert.equal(notifyEntriesSimple().length, 1, "no re-delivery within the same streak");
-    assert.equal(notifyCallsOf("page").length, 1, "no second CLI page within the same streak");
+  });
+});
+
+// =============================================================================
+// glm-sterile membership (INV-8, INV-9)
+// =============================================================================
+
+describe("runLaunchFlow — glm-sterile (issues #3868, #4691; INV-9)", () => {
+  let h: ReturnType<typeof makeHarness>;
+  beforeEach(() => {
+    h = makeHarness();
+    h.state.tick = { reason: "eligible-launch", latencyMs: null };
+    // fresh heartbeat + a fresh verdict that ADMITTED issue 4242
+    h.state.heartbeatMs = T0 - 60_000;
+    h.state.pick = { at: T0 - 120_000, picked: 4242, reason: "ready", candidates: 3, skipped: {} };
   });
 
-  test("quiet: a recent drainer PR by LABEL clears membership and the streak", () => {
-    seedHeartbeat(T0);
-    seedVerdict(VERDICT_PICKED);
-    seedSince("glm-sterile", T0);
-    writeFileSync(PULLS_FIXTURE, PULLS_RECENT_LABELED);
-    const r = runBlock(glmEnv());
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/, "must not fire while drainer PRs exist in the window");
-    assert.equal(getFired("glm-sterile"), false);
-    assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "membership false must clear the since anchor (stateless recovery)");
-    assert.equal(notifyEntriesSimple().length, 0, "no delivery");
+  test("fires: fresh heartbeat + pickable verdict + zero drainer PRs -> in-band event + page, deduped", async () => {
+    seedSince(h.store, "glm-sterile", T0 - HOUR);
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.published.length, 1);
+    assert.equal(h.published[0].event.type, E.GLM_DRAINER_STERILE);
+    assert.equal(h.published[0].event.correlationId, "launch-flow-glm-sterile");
+    assert.equal(h.pages.length, 1);
+    assert.equal(h.pages[0].kind, E.GLM_DRAINER_STERILE);
+    await runLaunchFlow(h.deps, cfg({ nowMs: T0 + 120_000 }));
+    assert.equal(h.published.length, 1, "deduped by the fired marker");
   });
 
-  test("quiet: a branch-prefix-only drainer PR (lost label, #3900) also counts — OR-predicate fallback", () => {
-    seedHeartbeat(T0);
-    seedVerdict(VERDICT_PICKED);
-    seedSince("glm-sterile", T0);
-    writeFileSync(PULLS_FIXTURE, PULLS_RECENT_BRANCH_ONLY);
-    const r = runBlock(glmEnv());
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/, "the branch-prefix fallback must count as drainer output");
-    assert.equal(getFired("glm-sterile"), false);
-    assert.equal(notifyEntriesSimple().length, 0);
+  test("the PR window is the trailing GLM_STERILE_WINDOW_HOURS (default 6h) and is the ONLY gh call", async () => {
+    await runLaunchFlow(h.deps, cfg());
+    assert.deepEqual(h.ghCalls, [T0 - 6 * HOUR]);
+    h.ghCalls.length = 0;
+    await runLaunchFlow(h.deps, cfg({ glmSterileWindowHours: 2 }));
+    assert.deepEqual(h.ghCalls, [T0 - 2 * HOUR]);
   });
 
-  test("quiet: idle verdict (picked=null, all candidates skipped) is the #4286 shape — clears, zero gh calls", () => {
-    // 6 candidates all skipped for artifact-missing across N ticks: the OLD
-    // queue-deriving detector false-alarmed on exactly this (#4286). The
-    // published verdict's picked=null is the correctly-idle shape and must
-    // clear even a threshold-aged streak, with ZERO gh calls.
-    seedHeartbeat(T0);
-    seedVerdict(VERDICT_IDLE);
-    seedSince("glm-sterile", T0);
-    const r = runBlock(glmEnv());
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/, "an idle drainer must never alarm, however many candidates it skipped");
-    assert.equal(getFired("glm-sterile"), false);
-    assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "an idle verdict must clear the since anchor (correctly idle, not sterile)");
-    assert.equal(notifyEntriesSimple().length, 0);
-    assert.equal(ghCalls().length, 0, "an idle verdict must make ZERO gh calls");
-    // Second tick: still idle, still quiet — N consecutive idle ticks never alarm.
-    const r2 = runBlock(glmEnv({ HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 6_000) }));
-    assert.equal(r2.status, 0);
-    assert.equal(getFired("glm-sterile"), false);
-    assert.equal(notifyEntriesSimple().length, 0);
-    assert.equal(ghCalls().length, 0);
+  test("quiet: a recent drainer PR clears membership and the streak", async () => {
+    h.state.drainerPrs = 2;
+    seedSince(h.store, "glm-sterile", T0 - 5 * HOUR);
+    seedFired(h.store, "glm-sterile");
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(sinceOf(h.store, "glm-sterile"), null);
+    assert.equal(firedOf(h.store, "glm-sterile"), false);
+    assert.equal(h.resolves.length, 1, "the fired streak recovers with one resolve");
   });
 
-  test("quiet: no last-pick record — fail-quiet like the heartbeat's own direction, zero gh calls", () => {
-    seedHeartbeat(T0);
-    seedSince("glm-sterile", T0);
-    const r = runBlock(glmEnv());
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/);
-    assert.equal(getFired("glm-sterile"), false);
-    assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "a missing verdict clears the streak (measured-absent, not measurement-failed)");
-    assert.equal(notifyEntriesSimple().length, 0);
-    assert.equal(ghCalls().length, 0, "a missing verdict must make ZERO gh calls");
+  test("quiet: idle verdict (picked=null, every candidate skipped) is the #4286 shape — clears, ZERO gh calls", async () => {
+    h.state.pick = { at: T0 - 60_000, picked: null, reason: "idle", candidates: 4, skipped: { "artifact-missing": 4 } };
+    seedSince(h.store, "glm-sterile", T0 - 5 * HOUR);
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.ghCalls.length, 0);
+    assert.equal(sinceOf(h.store, "glm-sterile"), null);
   });
 
-  test("quiet: stale verdict (at older than the writer's TTL) — not sterile, zero gh calls", () => {
-    seedHeartbeat(T0);
-    seedVerdict({ ...VERDICT_PICKED, at: T0 - (GLM_DRAINER_HEARTBEAT_TTL_SECONDS * 1000 + 60_000) });
-    seedSince("glm-sterile", T0);
-    const r = runBlock(glmEnv());
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/, "a stale pick verdict is not evidence of current pickability");
-    assert.equal(getFired("glm-sterile"), false);
-    assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "a stale verdict clears the streak");
-    assert.equal(notifyEntriesSimple().length, 0);
-    assert.equal(ghCalls().length, 0, "a stale verdict must make ZERO gh calls");
+  test("INV-4: an UNREADABLE heartbeat is a failed measurement — streak and fired marker untouched, no recovered page, zero gh calls", async () => {
+    h.state.heartbeatMs = "unreadable";
+    seedSince(h.store, "glm-sterile", T0 - 5 * HOUR);
+    seedFired(h.store, "glm-sterile");
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(sinceOf(h.store, "glm-sterile"), T0 - 5 * HOUR, "streak untouched");
+    assert.equal(firedOf(h.store, "glm-sterile"), true, "fired marker untouched");
+    assert.equal(h.resolves.length, 0, "no spurious recovered page");
+    assert.equal(h.ghCalls.length, 0);
   });
 
-  test("quiet: unparseable verdict value — jq failure degrades to not-sterile, exit 0", () => {
-    seedHeartbeat(T0);
-    seedSince("glm-sterile", T0);
-    drc(["SET", TEST_GLM_LAST_PICK_KEY, "not-json"]);
-    const r = runBlock(glmEnv());
-    assert.equal(r.status, 0, `a jq parse failure must not fail the block (set -euo pipefail); stderr=${r.stderr}`);
-    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/);
-    assert.equal(getFired("glm-sterile"), false);
-    assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "an unparseable verdict clears the streak");
-    assert.equal(notifyEntriesSimple().length, 0);
-    assert.equal(ghCalls().length, 0, "an unparseable verdict must make ZERO gh calls");
+  test("sibling pin: an ABSENT heartbeat (drainer measurably down) still clears the streak and recovers", async () => {
+    h.state.heartbeatMs = null;
+    seedSince(h.store, "glm-sterile", T0 - 5 * HOUR);
+    seedFired(h.store, "glm-sterile");
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(sinceOf(h.store, "glm-sterile"), null);
+    assert.equal(h.resolves.length, 1);
   });
 
-  for (const [label, verdict] of [
-    ["non-numeric at", '{"at":"soon","picked":2}'],
-    ["future at", `{"at":${T0 + 3_600_000},"picked":2}`],
-    ["picked 0", `{"at":${T0},"picked":0}`],
-    ["picked fractional", `{"at":${T0},"picked":1.5}`],
-    ["picked string", `{"at":${T0},"picked":"2"}`],
-    ["picked bool", `{"at":${T0},"picked":true}`],
-    ["non-object JSON", "42"],
+  test("INV-4: an UNREADABLE last-pick is a failed measurement — streak and fired marker untouched, no recovered page, zero gh calls", async () => {
+    h.state.pick = "unreadable";
+    seedSince(h.store, "glm-sterile", T0 - 5 * HOUR);
+    seedFired(h.store, "glm-sterile");
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(sinceOf(h.store, "glm-sterile"), T0 - 5 * HOUR, "streak untouched");
+    assert.equal(firedOf(h.store, "glm-sterile"), true, "fired marker untouched");
+    assert.equal(h.resolves.length, 0, "no spurious recovered page");
+    assert.equal(h.ghCalls.length, 0);
+  });
+
+  test("sibling pin: an ABSENT last-pick (measured no verdict) still clears the streak and recovers", async () => {
+    h.state.pick = null;
+    seedSince(h.store, "glm-sterile", T0 - 5 * HOUR);
+    seedFired(h.store, "glm-sterile");
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(sinceOf(h.store, "glm-sterile"), null);
+    assert.equal(h.resolves.length, 1);
+  });
+
+  test("quiet: no last-pick record — fail-quiet like the heartbeat's own direction, zero gh calls", async () => {
+    h.state.pick = null;
+    seedSince(h.store, "glm-sterile", T0 - 5 * HOUR);
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.ghCalls.length, 0);
+    assert.equal(sinceOf(h.store, "glm-sterile"), null, "a measured fact (no verdict) clears the old anchor");
+  });
+
+  test("quiet: a verdict older than the writer's TTL is not sterile; exactly the TTL still counts", async () => {
+    const ttlMs = GLM_DRAINER_HEARTBEAT_TTL_SECONDS * 1000;
+    h.state.pick = { at: T0 - ttlMs - 1, picked: 4242, reason: "ready", candidates: 1, skipped: {} };
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.ghCalls.length, 0, "stale verdict -> zero gh calls");
+    h.state.pick = { at: T0 - ttlMs, picked: 4242, reason: "ready", candidates: 1, skipped: {} };
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.ghCalls.length, 1, "the boundary is inclusive (0 <= age <= TTL)");
+  });
+
+  test("the verdict window is the writer's TTL, deliberately wider than the 45-min heartbeat window", async () => {
+    assert.ok(GLM_DRAINER_HEARTBEAT_TTL_SECONDS * 1000 > GLM_DRAINER_HEARTBEAT_STALE_MS);
+    h.state.pick = { at: T0 - GLM_DRAINER_HEARTBEAT_STALE_MS - 60_000, picked: 7, reason: "ready", candidates: 1, skipped: {} };
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.ghCalls.length, 1, "a 46-min-old verdict is still a fresh verdict");
+  });
+
+  test("quiet: a verdict timestamped in the future is not fresh", async () => {
+    h.state.pick = { at: T0 + 60_000, picked: 7, reason: "ready", candidates: 1, skipped: {} };
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.ghCalls.length, 0);
+  });
+
+  for (const [label, picked] of [
+    ["picked zero", 0],
+    ["picked negative", -3],
+    ["picked fractional", 2.5],
+    ["picked a string", "7"],
+    ["picked NaN-ish object", {}],
   ] as const) {
-    test(`quiet: malformed verdict (${label}) — fail-quiet, cleared streak, zero gh calls`, () => {
-      seedHeartbeat(T0);
-      seedSince("glm-sterile", T0);
-      drc(["SET", TEST_GLM_LAST_PICK_KEY, verdict]);
-      const r = runBlock(glmEnv());
-      assert.equal(r.status, 0, `stderr=${r.stderr}`);
-      assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/);
-      assert.equal(getFired("glm-sterile"), false);
-      assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "a malformed verdict clears the streak");
-      assert.equal(notifyEntriesSimple().length, 0);
-      assert.equal(ghCalls().length, 0, "a malformed verdict must make ZERO gh calls");
+    test(`quiet: malformed verdict (${label}) — fail-quiet, cleared streak, zero gh calls`, async () => {
+      h.state.pick = { at: T0 - 60_000, picked: picked as unknown as number, reason: "ready", candidates: 1, skipped: {} };
+      seedSince(h.store, "glm-sterile", T0 - 5 * HOUR);
+      await runLaunchFlow(h.deps, cfg());
+      assert.equal(h.ghCalls.length, 0);
+      assert.equal(sinceOf(h.store, "glm-sterile"), null);
     });
   }
 
-  test("a failed PR-window gh query leaves the streak state untouched (never extends, never clears)", () => {
-    seedHeartbeat(T0);
-    seedVerdict(VERDICT_PICKED);
-    seedSince("glm-sterile", T0);
-    const r = runBlock(glmEnv({ GH_STUB_EXIT: "1" }));
-    assert.equal(r.status, 0, `a gh failure must not fail the block; stderr=${r.stderr}`);
-    assert.match(
-      lfLines(r.stdout),
-      /WARN glm-sterile PR-window query failed/,
-      "a failed query must be loudly distinguishable from a quiet no-alarm tick, naming the PR-window query",
+  test("INV-4: a failed PR-window query leaves the streak state UNTOUCHED (never extends, never clears)", async () => {
+    h.state.drainerPrs = null;
+    seedSince(h.store, "glm-sterile", T0 - 5 * HOUR);
+    seedFired(h.store, "glm-sterile");
+    const writesBefore = h.store.writes.length;
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.ghCalls.length, 1);
+    assert.equal(sinceOf(h.store, "glm-sterile"), T0 - 5 * HOUR);
+    assert.equal(firedOf(h.store, "glm-sterile"), true);
+    assert.equal(
+      h.store.writes.slice(writesBefore).filter((w) => w.endsWith(":glm-sterile")).length,
+      0,
+      "no glm-sterile write of any kind",
     );
-    assert.equal(drc(["GET", SINCE("glm-sterile")]), String(T0), "an in-progress streak must survive a gh failure");
-    assert.equal(getFired("glm-sterile"), false, "a gh failure must never fire");
-    assert.equal(notifyEntriesSimple().length, 0);
+    assert.ok(h.logs.some((l) => /WARN glm-sterile PR-window query failed\/unparseable/.test(l)));
+    assert.equal(h.pages.length + h.published.length + h.resolves.length, 0);
   });
 
-  test("quiet: stale heartbeat — the 'down' case is board-state's, so no alarm and NO gh calls", () => {
-    seedHeartbeat(T0 - (GLM_DRAINER_HEARTBEAT_STALE_MS + 60_000));
-    // A pickable verdict is seeded too: ONLY the stale heartbeat may keep the
-    // block from reaching the pulls query (read order, #4691).
-    seedVerdict(VERDICT_PICKED);
-    seedSince("glm-sterile", T0);
-    const r = runBlock(glmEnv());
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
-    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/);
-    assert.equal(getFired("glm-sterile"), false);
-    assert.equal(notifyEntriesSimple().length, 0);
-    assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "a non-fresh heartbeat clears the streak");
-    assert.equal(ghCalls().length, 0, "a non-fresh heartbeat must short-circuit BEFORE any gh query");
+  test("INV-4: a THROWN PR-window query is the same failed measurement — skipped, other signals still run", async () => {
+    h.state.drainerPrs = "throw";
+    h.state.tick = { reason: "curl-missing", latencyMs: null };
+    seedSince(h.store, "glm-sterile", T0 - 5 * HOUR);
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(sinceOf(h.store, "glm-sterile"), T0 - 5 * HOUR);
+    assert.equal(sinceOf(h.store, "fail-safe"), T0, "the other signals were still tracked");
+    assert.ok(h.logs.some((l) => /WARN glm-sterile read failed \(gh exploded\)/.test(l)));
+  });
+
+  test("quiet: stale/absent heartbeat — the 'down' case is board-state's, so no alarm and NO verdict/gh reads", async () => {
+    h.state.heartbeatMs = T0 - GLM_DRAINER_HEARTBEAT_STALE_MS - 1;
+    seedSince(h.store, "glm-sterile", T0 - 5 * HOUR);
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.ghCalls.length, 0);
+    assert.equal(sinceOf(h.store, "glm-sterile"), null);
+
+    h.state.heartbeatMs = null;
+    await runLaunchFlow(h.deps, cfg());
+    assert.equal(h.ghCalls.length, 0);
+  });
+
+  test("readGlmSterile reads cheap -> expensive: a stale heartbeat never even asks for the verdict", async () => {
+    h.state.heartbeatMs = null;
+    let verdictReads = 0;
+    const deps = { ...h.deps, glm: { liveness: h.deps.glm.liveness, lastPick: async () => (verdictReads++, h.state.pick) } };
+    assert.deepEqual(await readGlmSterile(deps, T0, 6), { known: true, member: false });
+    assert.equal(verdictReads, 0);
+  });
+
+  test("readGlmSterile verdicts: member / not member / unknown", async () => {
+    assert.deepEqual(await readGlmSterile(h.deps, T0, 6), { known: true, member: true });
+    h.state.drainerPrs = 1;
+    assert.deepEqual(await readGlmSterile(h.deps, T0, 6), { known: true, member: false });
+    h.state.drainerPrs = null;
+    assert.deepEqual(await readGlmSterile(h.deps, T0, 6), { known: false });
+  });
+});
+
+// =============================================================================
+// The drainer-PR window predicate (INV-8)
+// =============================================================================
+
+describe("countDrainerPrsInRows — the shared isGlmProvenance predicate over REST rows (INV-8)", () => {
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const since = T0 - 6 * HOUR;
+  const row = (over: Record<string, unknown>) => ({ labels: [], head: { ref: "feature/x" }, created_at: iso(T0), ...over });
+
+  test("counts a PR by the glm-authored LABEL", () => {
+    assert.equal(countDrainerPrsInRows([row({ labels: [{ name: "glm-authored" }] })], since), 1);
+  });
+
+  test("counts a PR by the worktree-agent-glm- BRANCH prefix alone (lost label, #3900)", () => {
+    assert.equal(countDrainerPrsInRows([row({ head: { ref: "worktree-agent-glm-abc" } })], since), 1);
+  });
+
+  test("ignores non-drainer PRs, PRs outside the window, and rows with no parseable created_at", () => {
+    const rows = [
+      row({}),
+      row({ labels: [{ name: "enhancement" }] }),
+      row({ labels: [{ name: "glm-authored" }], created_at: iso(since - 1) }),
+      row({ labels: [{ name: "glm-authored" }], created_at: "" }),
+      row({ labels: [{ name: "glm-authored" }], created_at: undefined }),
+      row({ labels: [{ name: "glm-authored" }], created_at: "not-a-date" }),
+    ];
+    assert.equal(countDrainerPrsInRows(rows, since), 0);
+  });
+
+  test("the window start is inclusive", () => {
+    assert.equal(countDrainerPrsInRows([row({ labels: [{ name: "glm-authored" }], created_at: iso(since) })], since), 1);
+  });
+
+  test("tolerates malformed rows; a non-array payload is a failed measurement (null), not zero", () => {
+    assert.equal(countDrainerPrsInRows([null, 7, "x", { labels: "nope" }, row({ head: null })], since), 0);
+    assert.equal(countDrainerPrsInRows({ message: "Bad credentials" }, since), null);
+    assert.equal(countDrainerPrsInRows(null, since), null);
+  });
+
+  test("an empty page is a measured zero", () => {
+    assert.equal(countDrainerPrsInRows([], since), 0);
   });
 });

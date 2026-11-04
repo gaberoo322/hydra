@@ -17,7 +17,21 @@ import {
   readTopInodeConsumers,
   restartService,
 } from "../host-probe/probe.ts";
-import { OperatorChannel } from "../operator-channel/channel.ts";
+import { OperatorChannel, operatorChannel } from "../operator-channel/channel.ts";
+import { EventBus } from "../event-bus.ts";
+import { getGlmDrainerLiveness, readGlmDrainerLastPick } from "../redis/autopilot.ts";
+import { getPaceGateLastTick } from "../redis/launch-flow.ts";
+import {
+  anchorEpisodeSince,
+  clearEpisodeKeys,
+  episodeFiredExists,
+  markEpisodeFired,
+  readEpisodeSince,
+} from "../redis/watchdog-episodes.ts";
+import { ghBin, runExec } from "../github/exec.ts";
+import { resolveOrchestratorRepo } from "../github/repo.ts";
+import { isGlmProvenance } from "../autopilot/turn-snapshot/pr-gate.ts";
+import type { LaunchFlowDeps } from "./launch-flow.ts";
 import type { DiskDeps, StatfsReading } from "./disk.ts";
 import { isLivePid, signalPid } from "../process-probe.ts";
 import { countOpenBoard } from "../autopilot/turn-snapshot/board-saturation.ts";
@@ -380,6 +394,97 @@ export function createProductionDiskDeps(log: (line: string) => void): DiskDeps 
     resolve: (key, title) => channel.resolve(key, title),
     isOpen: (key) => channel.isOpen(key),
     clear: (key) => channel.clear(key),
+    log,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// LAUNCH FLOW ports (issue #5097)
+// ---------------------------------------------------------------------------
+
+/**
+ * The watchdog's one typed GitHub read (ADR-0043 D1: one method per read,
+ * never a generic gh(args) port).
+ */
+export interface WatchdogGithub {
+  /**
+   * Number of drainer (GLM) PRs created at or after `windowStartMs`, or `null`
+   * when the query failed or was unparseable (a failed query is not zero).
+   */
+  countDrainerPrsCreatedSince(windowStartMs: number): Promise<number | null>;
+}
+
+/**
+ * Pure: count drainer PRs among raw REST `pulls` rows created in the window.
+ * The "is this drainer output" predicate is the shared `isGlmProvenance`
+ * (issue #4048) — never re-typed. Rows without a parseable `created_at` are
+ * not counted. A non-array payload is `null` (a failed measurement).
+ */
+export function countDrainerPrsInRows(rows: unknown, windowStartMs: number): number | null {
+  if (!Array.isArray(rows)) return null;
+  let n = 0;
+  for (const row of rows) {
+    if (row === null || typeof row !== "object") continue;
+    const r = row as { labels?: unknown; head?: { ref?: unknown }; created_at?: unknown };
+    const names = new Set<unknown>(
+      Array.isArray(r.labels) ? r.labels.map((l) => (l && typeof l === "object" ? (l as { name?: unknown }).name : undefined)) : [],
+    );
+    if (!isGlmProvenance(names, r.head?.ref ?? "")) continue;
+    const created = typeof r.created_at === "string" && r.created_at ? Date.parse(r.created_at) : NaN;
+    if (Number.isFinite(created) && created >= windowStartMs) n += 1;
+  }
+  return n;
+}
+
+/** Production adapter: `gh api repos/<repo>/pulls?...` over the exec seam (REST, never GraphQL). */
+/** Timeout for the one gh API call a launch-flow tick makes. */
+export const GH_EXEC_TIMEOUT_MS = 30_000;
+
+export function createProductionWatchdogGithub(): WatchdogGithub {
+  return {
+    async countDrainerPrsCreatedSince(windowStartMs) {
+      const raw = await runExec(
+        ghBin(),
+        ["api", `repos/${resolveOrchestratorRepo()}/pulls?state=all&sort=created&direction=desc&per_page=100`],
+        { timeout: GH_EXEC_TIMEOUT_MS },
+      );
+      if (raw.exitCode !== 0 || raw.timedOut || raw.spawnErrorCode) return null;
+      try {
+        return countDrainerPrsInRows(JSON.parse(raw.stdout), windowStartMs);
+      } catch {
+        /* intentional: unparseable output is a failed measurement (null); the caller logs the WARN */
+        return null;
+      }
+    },
+  };
+}
+
+/** Production wiring of the launch-flow ports. The EventBus is constructed on the first fire only. */
+export function createProductionLaunchFlowDeps(log: (line: string) => void): LaunchFlowDeps {
+  let bus: EventBus | null = null;
+  return {
+    lastTick: getPaceGateLastTick,
+    store: {
+      anchor: anchorEpisodeSince,
+      readSince: readEpisodeSince,
+      firedExists: episodeFiredExists,
+      markFired: markEpisodeFired,
+      clear: clearEpisodeKeys,
+    },
+    glm: { liveness: (nowMs) => getGlmDrainerLiveness(nowMs), lastPick: async () => {
+        const r = await readGlmDrainerLastPick();
+        return r.kind === "ok" ? r.pick : r.kind === "absent" ? null : "unreadable";
+      },
+    },
+    github: createProductionWatchdogGithub(),
+    channel: operatorChannel,
+    bus: {
+      publish: (stream, event) => {
+        bus ??= new EventBus();
+        return bus.publish(stream, event);
+      },
+    },
+    clock: { nowMs: () => Date.now() },
     log,
   };
 }

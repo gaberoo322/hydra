@@ -78,16 +78,15 @@ export const PACE_GATE_LAST_TICK_KEY = "hydra:autopilot:pace-gate:last-tick";
 // ---------------------------------------------------------------------------
 // Launch-flow DETECTION state (issue #3847, epic #3844).
 //
-// `scripts/hydra-watchdog.sh`'s `run_launch_flow` block is the SECOND bash
-// reader of `PACE_GATE_LAST_TICK_KEY` (the first being pace-gate.sh's writer);
-// `test/watchdog-launch-flow.test.mts` drift-guards that literal against this
-// constant, sibling to `test/launch-flow-key-contract.test.mts` (which guards
-// pace-gate.sh). The block asks whether a defective / quota / pause signal —
-// or a slow eligibility probe — has been SUSTAINED past a threshold, using the
-// per-signal streak state below. It is DETECTION ONLY; the watchdog bash is the
-// SOLE writer (SET NX / DEL via redis-cli), and this module owns only the key
-// NAMES — mirroring the `wiring-liveness-dark-outcomes.ts` split exactly
-// (TypeScript owns the name, bash owns the mutation).
+// The watchdog's launch-flow check (`src/watchdog/launch-flow.ts`, ported from
+// bash by issue #5097) reads `PACE_GATE_LAST_TICK_KEY` through
+// {@link getPaceGateLastTick} (pace-gate.sh stays the bash WRITER;
+// `test/launch-flow-key-contract.test.mts` guards that literal). The check
+// asks whether a defective / quota / pause signal — or a slow eligibility
+// probe, or a sterile GLM drainer — has been SUSTAINED past a threshold, using
+// the per-signal streak state below. It is DETECTION ONLY; the shared episode
+// tracker (`src/watchdog/episode.ts` over `./watchdog-episodes.ts`) is the
+// writer (SET NX / DEL), and this module owns the key NAMES.
 // ---------------------------------------------------------------------------
 
 /**
@@ -102,6 +101,15 @@ export type WatchdogLaunchSignal =
   | "quota"
   | "pause"
   | "latency";
+
+/**
+ * Every signal that owns a `{since, fired}` key pair: the five reason-derived
+ * {@link WatchdogLaunchSignal}s plus `glm-sterile` (issue #3868), which is
+ * derived from the drainer heartbeat + published pick verdict + PR window
+ * instead of the pace-gate reason and is deliberately NOT in
+ * {@link WATCHDOG_LAUNCH_SIGNALS}.
+ */
+export type LaunchFlowEpisodeSignal = WatchdogLaunchSignal | "glm-sterile";
 
 /** The reason-keyed signals plus `"healthy"` (any reason outside the four
  *  alarm member-sets — endpoint was readable, not defective — which clears
@@ -181,7 +189,7 @@ export const LAUNCH_FLOW_KEY_PREFIX = "hydra:autopilot:launch-flow";
  * first qualifying tick; it is a no-op after, so `now - since` grows to reflect
  * the true sustained duration. Value is an epoch-ms string.
  */
-export function launchFlowSinceKey(signal: WatchdogLaunchSignal): string {
+export function launchFlowSinceKey(signal: LaunchFlowEpisodeSignal): string {
   return `${LAUNCH_FLOW_KEY_PREFIX}:since:${signal}`;
 }
 
@@ -192,8 +200,38 @@ export function launchFlowSinceKey(signal: WatchdogLaunchSignal): string {
  * cleared on recovery so a later streak fires fresh. Value is unimportant
  * (presence is the signal).
  */
-export function launchFlowFiredKey(signal: WatchdogLaunchSignal): string {
+export function launchFlowFiredKey(signal: LaunchFlowEpisodeSignal): string {
   return `${LAUNCH_FLOW_KEY_PREFIX}:fired:${signal}`;
+}
+
+/**
+ * The `{since, fired}` key pair for one signal — the signal-agnostic shape the
+ * watchdog episode tracker (`src/watchdog/episode.ts`) takes (issue #5097).
+ */
+export function launchFlowEpisodeKeys(signal: LaunchFlowEpisodeSignal): { since: string; fired: string } {
+  return { since: launchFlowSinceKey(signal), fired: launchFlowFiredKey(signal) };
+}
+
+/** The pace-gate last-tick fields the launch-flow check reads. */
+export interface PaceGateLastTick {
+  reason: string;
+  /** Eligibility-probe round-trip in ms, or `null` when absent/non-numeric. */
+  latencyMs: number | null;
+}
+
+/**
+ * One typed HGETALL of {@link PACE_GATE_LAST_TICK_KEY} (issue #5097, INV-10).
+ * `null` when the hash is absent or has no `reason`. THROWS on a Redis
+ * failure — the watchdog turns that into the same "leave every anchor
+ * untouched" outcome as an absent record.
+ */
+export async function getPaceGateLastTick(): Promise<PaceGateLastTick | null> {
+  const h = await getRedisConnection().hgetall(PACE_GATE_LAST_TICK_KEY);
+  const reason = h?.reason;
+  if (!reason) return null;
+  const raw = h.latency_ms;
+  const latencyMs = typeof raw === "string" && /^[0-9]+$/.test(raw) ? Number(raw) : null;
+  return { reason, latencyMs };
 }
 
 /**
@@ -202,7 +240,7 @@ export function launchFlowFiredKey(signal: WatchdogLaunchSignal): string {
  * (defensive — bash only ever writes a number). Never throws.
  */
 export async function getLaunchFlowSince(
-  signal: WatchdogLaunchSignal,
+  signal: LaunchFlowEpisodeSignal,
 ): Promise<number | null> {
   const r = getRedisConnection();
   const raw = await r.get(launchFlowSinceKey(signal));
@@ -216,7 +254,7 @@ export async function getLaunchFlowSince(
  * `true` means "already fired — do not re-emit this tick". Never throws.
  */
 export async function isLaunchFlowFired(
-  signal: WatchdogLaunchSignal,
+  signal: LaunchFlowEpisodeSignal,
 ): Promise<boolean> {
   const r = getRedisConnection();
   return (await r.exists(launchFlowFiredKey(signal))) === 1;
@@ -228,7 +266,7 @@ export async function isLaunchFlowFired(
  * recovery). Idempotent. Never throws.
  */
 export async function clearLaunchFlowStreak(
-  signal: WatchdogLaunchSignal,
+  signal: LaunchFlowEpisodeSignal,
 ): Promise<void> {
   const r = getRedisConnection();
   await r.del(launchFlowSinceKey(signal), launchFlowFiredKey(signal));
