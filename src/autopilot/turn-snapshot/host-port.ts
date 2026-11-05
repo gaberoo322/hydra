@@ -77,14 +77,21 @@ const QA_VERDICT_EVENT_SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)),
 const QA_MERGE_GUARD_TIMEOUT_MS = 60_000;
 const QA_MERGE_GUARD_SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../scripts/ci/qa-merge-guard.ts");
 
-export function createQaVerdictRunner(): QaVerdictRunner {
+/** Test seam: override the guard process (default is the real qa-merge-guard.ts under node). */
+export interface QaVerdictRunnerOptions {
+  readonly guardFile?: string;
+  readonly guardArgs?: readonly string[];
+  readonly guardTimeoutMs?: number;
+}
+
+export function createQaVerdictRunner(opts: QaVerdictRunnerOptions = {}): QaVerdictRunner {
   return {
     runQaMergeGuard(pr) {
       return new Promise((resolveRead) => {
         execFile(
-          process.execPath,
-          ["--no-warnings", "--experimental-strip-types", QA_MERGE_GUARD_SCRIPT, "--pr", String(pr)],
-          { timeout: QA_MERGE_GUARD_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
+          opts.guardFile ?? process.execPath,
+          [...(opts.guardArgs ?? ["--no-warnings", "--experimental-strip-types", QA_MERGE_GUARD_SCRIPT]), "--pr", String(pr)],
+          { timeout: opts.guardTimeoutMs ?? QA_MERGE_GUARD_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
           (err, stdout, stderr) => {
             const code = err === null ? 0 : (err as { code?: unknown }).code;
             if (code !== 0 && code !== 1) {
