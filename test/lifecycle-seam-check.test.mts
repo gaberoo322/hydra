@@ -247,6 +247,20 @@ describe("lifecycle-seam-check: evasion forms (#5367)", () => {
     assert.deepEqual(md("gh issue create --title t -lx needs-triage"), []);
   });
 
+  test("short -l: ls/wc/grep -l with a variable operand is not a site even when `create` appears earlier", () => {
+    assert.deepEqual(md("# create the dir\nls -l $dir"), []);
+    assert.deepEqual(md("gh issue create --title t\nwc -l $f"), []);
+    assert.deepEqual(md("gh issue create --title t -l $state"), [1]);
+  });
+
+  test("TS: `deps.f ?? ((n, l) => seamFn(n, l))` is a wrapper; a non-arrow `x ?? other(..)` is not", () => {
+    assert.deepEqual(
+      ts("const addLabel = deps.addLabel ?? ((n: number, label: string) => addIssueLabel(n, label));\naddLabel(1, lbl);"),
+      [1, 2],
+    );
+    assert.deepEqual(ts("const addLabel = deps.addLabel ?? makeThing(addIssueLabel);\naddLabel(1, lbl);"), []);
+  });
+
   test("python f-string placeholder operand is a site", () => {
     assert.deepEqual(md('cmd = f"gh issue edit 5 --add-label {state}"'), [1]);
     assert.deepEqual(md("gh issue edit 5 --add-label={x}"), [1]);

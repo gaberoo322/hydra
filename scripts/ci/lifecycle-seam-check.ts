@@ -119,8 +119,21 @@ function isCreateOnlyFlag(matched: string): boolean {
 /** Bare `--label` only writes state on create commands (elsewhere it is a list filter). */
 const CREATE_CMD_RE = /\bcreate\b/;
 /** A bare `--label` is a create-time write when `create` appears within 300 chars before it (same or earlier line). */
-function inCreateContext(text: string, idx: number): boolean {
-  return CREATE_CMD_RE.test(text.slice(Math.max(0, idx - 300), idx));
+function inCreateContext(text: string, idx: number, matched = ""): boolean {
+  const win = text.slice(Math.max(0, idx - 300), idx);
+  // Short `-l` is also `ls -l` / `wc -l` / `grep -l`: demand `issue|pr create` (shell or argv), not a bare `create`.
+  if (/^["']?-l(?![\w-])/.test(matched)) {
+    // Same command only: drop everything up to the last non-continued newline (`\` joins lines).
+    let from = 0;
+    for (let i = win.length - 1; i >= 0; i--) {
+      if (win[i] === "\n" && win[i - 1] !== "\\") {
+        from = i;
+        break;
+      }
+    }
+    return /\b(?:issue|pr)["',\s[]+create\b/.test(win.slice(from));
+  }
+  return CREATE_CMD_RE.test(win);
 }
 
 /** Join backslash-continued physical lines; each logical line keeps its first physical line number. */
@@ -150,7 +163,7 @@ export function scanTextSites(text: string): number[] {
   for (const { line: lineNo, text: line, offset } of logicalLines(text)) {
     let hit = false;
     for (const m of line.matchAll(FLAG_RE)) {
-      if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, offset + (m.index ?? 0))) continue;
+      if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, offset + (m.index ?? 0), m[0])) continue;
       const argList = m[1] !== undefined; // `"--add-label", x` list form
       const quoted = m[2] ?? m[3];
       const operand = quoted ?? m[4] ?? "";
@@ -165,7 +178,7 @@ export function scanTextSites(text: string): number[] {
     }
     for (const re of [CONCAT_RE, TRAILING_EQ_RE]) {
       for (const m of line.matchAll(re)) {
-        if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, offset + (m.index ?? 0))) continue;
+        if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, offset + (m.index ?? 0), m[0])) continue;
         hit = true; // operand not inside the literal: unresolvable, fail closed
       }
     }
@@ -188,7 +201,7 @@ export function scanTextSites(text: string): number[] {
   const seen = new Set(sites);
   for (const m of text.matchAll(FLAG_RE)) {
     if (m[1] === undefined || !m[0].includes("\n")) continue; // single-line matches handled above
-    if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, m.index!)) continue;
+    if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, m.index!, m[0])) continue;
     const quoted = m[2] ?? m[3];
     const operand = quoted ?? m[4] ?? "";
     const isSite =
@@ -358,7 +371,14 @@ function collectWrappers(src: string): Map<string, string> {
       const call = new RegExp(`(?<![\\w$])${f}\\s*(?:<[^()]*>)?\\s*(?:\\?\\.)?\\s*\\(`);
       const callAt = init.search(call);
       // Arrow wrapper: the initializer itself IS the arrow (params then `=>`), body calls F.
-      const isArrow = /^(?:async\s*)?(?:\([^)]*\)|[\w$]+)\s*(?::[^=]+?)?=>/.test(init.trim());
+      // Strip `X ??` / `X ||` prefixes and wrapping parens: `deps.f ?? ((n, l) => F(n, l))` is a wrapper.
+      let arrowInit = init.trim();
+      for (;;) {
+        const next = arrowInit.replace(/^[\w$.]+\s*(?:\?\?|\|\|)\s*/, "").replace(/^\((?=\s*(?:async\s*)?(?:\(|[\w$]+\s*(?::[^=]+?)?=>))/, "");
+        if (next === arrowInit) break;
+        arrowInit = next;
+      }
+      const isArrow = /^(?:async\s*)?(?:\([^)]*\)|[\w$]+)\s*(?::[^=]+?)?=>/.test(arrowInit);
       if (bare.test(init.trim()) || (isArrow && arrowAt !== -1 && callAt !== -1 && arrowAt < callAt)) {
         wrappers.set(name, f);
         break;
