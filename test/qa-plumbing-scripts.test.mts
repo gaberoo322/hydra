@@ -738,6 +738,27 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     assert.deepEqual(dry.writes(), []);
   });
 
+  test("route: a T4 FAIL without a deepQa decision still posts the QA-Verdict-Error comment (pre-verdict exit)", async () => {
+    const h = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", roundAction: "deep-qa", deepQa: null }) });
+    await assert.rejects(runRoute(ROUTE_OPTS, readyPre({ tier: { num: 4, adversarial: true } }), h.ports, realDeps()), /deepQa decision/);
+    assert.equal(h.writes().length, 1, "only the error comment; no disarm, no relabel");
+    assert.equal(argAfter(h.writes()[0] as string[], "--body"), errorComment);
+  });
+
+  test("route FAIL: a failed disarm is retried once then surfaced as degraded disarm-failed; a clean disarm is not", async () => {
+    const mk = (failDisarm: boolean) => harness({
+      ghHandler: (a) => (failDisarm && a[0] === "pr" && a[1] === "merge" ? fail("gh: 502") : withState("OPEN")(a)),
+      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium" }),
+    });
+    const bad = mk(true);
+    const r = await runRoute(ROUTE_OPTS, readyPre(), bad.ports, realDeps());
+    assert.ok(r.degraded.includes("disarm-failed"));
+    assert.equal(bad.writes().filter((a) => a[0] === "pr" && a[1] === "merge").length, 2, "retried once");
+    const good = mk(false);
+    const r2 = await runRoute(ROUTE_OPTS, readyPre(), good.ports, realDeps());
+    assert.ok(!r2.degraded.includes("disarm-failed"), "sibling: clean disarm");
+  });
+
   test("route PASS: arm-auto-merge only when the needs-qa strip AND the PASS comment both landed", async () => {
     const pre = readyPre({ tier: { num: 2, adversarial: false } });
     for (const [what, broken] of [["strip", "edit"], ["comment", "comment"]] as const) {

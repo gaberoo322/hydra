@@ -352,7 +352,7 @@ SUMMARIES_FILE=$(mktemp)   # {"standardsSummary": "...", "specSummary": "..."}
 [ -f "$FINDINGS_FILE" ] || : > "$FINDINGS_FILE"   # a missing file is malformed reviewer output, not a crash
 ROUTE_JSON=$(node --no-warnings --experimental-strip-types scripts/qa/route.ts \
   --preflight "$PF" --packet "$PK" --findings "$FINDINGS_FILE" --summaries "$SUMMARIES_FILE") \
-  || { echo "[hydra-qa] ERROR: route produced no verdict — pre-verdict exit, nothing posted, needs-qa untouched" >&2; exit 1; }
+  || { echo "[hydra-qa] ERROR: route produced no verdict — pre-verdict exit, one QA-Verdict-Error comment at most, needs-qa untouched" >&2; exit 1; }
 rm -f "$FINDINGS_FILE" "$SUMMARIES_FILE"
 NEXT=$(printf '%s' "$ROUTE_JSON" | jq -er '.nextStep') || exit 1
 ```

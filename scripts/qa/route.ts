@@ -213,6 +213,13 @@ async function runRouteImpl(
     gh(kind, `issue#${issue}`, ["issue", "edit", String(issue), "--repo", repo, "--remove-label", remove, "--add-label", add]);
   const disarm = () => gh("disarm-auto-merge", `pr#${pr}`, ["pr", "merge", String(pr), "--repo", repo, "--disable-auto"]);
 
+  /** Disarm once, retry once; a still-failed disarm leaves auto-merge armed on a FAILed PR, so surface it. */
+  const disarmChecked = async (): Promise<void> => {
+    if (await disarm()) return;
+    if (await disarm()) return;
+    degraded.push("disarm-failed");
+  };
+
   /** The bounce lane: a LIVE per-call read; ready-for-agent only on a confirmed CLOSED/MERGED PR (#4766). */
   const bounceLabel = async (): Promise<"needs-dev-resume" | "ready-for-agent"> => {
     const res = await ports.gh(["pr", "view", String(pr), "--repo", repo, "--json", "state", "--jq", '.state // ""']);
@@ -357,6 +364,12 @@ async function runRouteImpl(
   const names = (k: string): string[] => (Array.isArray(labels[k]) ? (labels[k] as unknown[]).map(String) : []);
   let nextStep: RouteResult["nextStep"] = "none";
 
+  // A T4 FAIL with no deep-QA decision is a pre-verdict exit: validate it BEFORE effectsStarted
+  // flips, so the visible QA-Verdict-Error comment still posts for it.
+  if (verdict !== "PASS" && verdict !== "PASS-pending-CI" && tier === 4 && !isRecord(roundOut.deepQa)) {
+    throw new Error("T4 FAIL without a deepQa decision (pre-verdict exit)");
+  }
+
   // ---- Effects (step 10). ----
   ctx.effectsStarted = true;
   if (verdict === "PASS") {
@@ -381,12 +394,11 @@ async function runRouteImpl(
     await issueEdit("needs-qa", "in-progress", "pending-ci-relabel");
   } else if (tier === 4) {
     // T4 FAIL — the Deep-QA Remediation Loop. Disarm FIRST (#4737), then the marker comment.
-    const deep = isRecord(roundOut.deepQa) ? roundOut.deepQa : null;
-    if (deep === null) throw new Error("T4 FAIL without a deepQa decision (pre-verdict exit)");
+    const deep = isRecord(roundOut.deepQa) ? roundOut.deepQa : {};
     const action = String(deep.action ?? "");
     const failNo = typeof deep.failNumber === "number" ? deep.failNumber : 1;
     const marker = typeof roundOut.failMarker === "string" ? roundOut.failMarker : "";
-    await disarm();
+    await disarmChecked();
     await prComment(bodies.t4Review(report, verdict, verdictReason, marker, failNo, checksBlock, trailer), "t4-review-comment");
     if (action === "block-and-escalate") {
       await issueEdit("needs-qa", "ready-for-human", "t4-escalate-relabel");
@@ -398,7 +410,7 @@ async function runRouteImpl(
     }
   } else {
     // T1/T2/T3 (and unknown-tier) FAIL — the universal remediation bounce, capped at the 3rd round.
-    await disarm();
+    await disarmChecked();
     await prComment(bodies.fail(report, verdict, verdictReason, checksBlock, trailer));
     if (roundAction === "escalate") {
       let labelsOk = true;
