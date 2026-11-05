@@ -2622,7 +2622,7 @@ def _rule_instant_death_replay(
         if not isinstance(rec, dict) or not rec.get("skill") or not rec.get("worktreeBranch"):
             out.reasons.append(f"instant-death-unjoinable:{cls}")
             continue
-        # INV-3: the dispatch_id join applies only to a pipeline class (one
+        # INV-3 (#5323): the dispatch_id join applies only to a pipeline class (one
         # with a `state.slots` entry). A signal class has no slot record
         # (stamp-slot.py writes only `signal_last_fired`), so the recorded
         # `last_dispatch_by_class` alone joins it.
