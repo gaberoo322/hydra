@@ -352,10 +352,14 @@ function collectWrappers(src: string): Map<string, string> {
     const init = src.slice(start, initializerEnd(src, start));
     const arrowAt = init.indexOf("=>");
     for (const f of SEAM_FNS) {
-      const bare = new RegExp(`(?<![\\w$])${f}(?![\\w$])(?!\\s*(?:<[^()]*>)?\\s*(?:\\?\\.)?\\()`);
+      // Bare alias: the whole initializer is `F`, `X ?? F`, `X || F` (optionally `as T`); object
+      // shorthand / call-result bindings (`{ F }`, `xs.map(..F..)`) are not wrappers (#5367 QA).
+      const bare = new RegExp(`^(?:\\(*[\\w$.]+\\)*\\s*(?:\\?\\?|\\|\\|)\\s*)*\\(*${f}\\)*(?:\\s+as\\s+[^;]+)?$`);
       const call = new RegExp(`(?<![\\w$])${f}\\s*(?:<[^()]*>)?\\s*(?:\\?\\.)?\\s*\\(`);
       const callAt = init.search(call);
-      if (bare.test(init) || (arrowAt !== -1 && callAt !== -1 && arrowAt < callAt)) {
+      // Arrow wrapper: the initializer itself IS the arrow (params then `=>`), body calls F.
+      const isArrow = /^(?:async\s*)?(?:\([^)]*\)|[\w$]+)\s*(?::[^=]+?)?=>/.test(init.trim());
+      if (bare.test(init.trim()) || (isArrow && arrowAt !== -1 && callAt !== -1 && arrowAt < callAt)) {
         wrappers.set(name, f);
         break;
       }
@@ -371,8 +375,12 @@ export function scanTsSites(source: string): number[] {
   const wrappers = collectWrappers(src);
   const sites: number[] = [];
   const lineOf = (idx: number) => src.slice(0, idx).split("\n").length;
-  const names = [...SEAM_FNS, ...wrappers.keys()].map(escId).join("|");
-  const callRe = new RegExp(`(?<![\\w$])(${names})\\s*(?:<[^()]*>)?\\s*(?:\\?\\.)?\\s*\\(`, "g");
+  // Seam fns match as member calls too (`gh.addIssueLabel(..)`); wrapper aliases are local
+  // bindings, so `proc.run(a, b)` must NOT match a wrapper named `run` (#5367 QA).
+  const seamNames = SEAM_FNS.map(escId).join("|");
+  const wrapNames = [...wrappers.keys()].map(escId).join("|");
+  const names = wrapNames ? `(?<![\\w$])(?:${seamNames})|(?<![\\w$.])(?:${wrapNames})` : `(?<![\\w$])(?:${seamNames})`;
+  const callRe = new RegExp(`(${names})\\s*(?:<[^()]*>)?\\s*(?:\\?\\.)?\\s*\\(`, "g");
   for (const m of src.matchAll(callRe)) {
     if (/\bfunction\s+$/.test(src.slice(Math.max(0, m.index! - 12), m.index!))) continue;
     const open = m.index! + m[0].length - 1;

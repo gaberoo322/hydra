@@ -304,6 +304,24 @@ describe("lifecycle-seam-check: evasion forms (#5367)", () => {
     assert.deepEqual(ts('const res = await addIssueLabel(1, "glm-withhold");\nres(1, "needs-qa");'), []);
   });
 
+  test("QA #5367: a member call named like a wrapper is not a wrapper call", () => {
+    // red without the fix: `run` is a wrapper (arrow over addIssueLabel); `proc.run(a, b)` must not count.
+    const src = 'const run = (n: number) => addIssueLabel(n, l);\nproc.run(a, b);';
+    assert.deepEqual(ts(src), [1]);
+    // sibling shape keeps its verdict: a bare wrapper call still counts; a member seam call still counts.
+    assert.deepEqual(ts('const run = (n: number, l: string) => addIssueLabel(n, l);\nrun(1, x);'), [1, 2]);
+    assert.deepEqual(ts("gh.addIssueLabel(1, x);"), [1]);
+  });
+
+  test("QA #5367: object shorthand and call-result bindings are not wrappers", () => {
+    // red without the fix: the initializer merely mentions the seam fn.
+    assert.deepEqual(ts("const deps = { addIssueLabel };\ndeps(1, x);"), []);
+    assert.deepEqual(ts("const r = xs.map((x) => addIssueLabel(x, 'glm-withhold'));\nr(1, x);"), []);
+    // sibling shape keeps its verdict: bare alias and `??` alias are still wrappers.
+    assert.deepEqual(ts("const a = addIssueLabel;\na(1, x);"), [2]);
+    assert.deepEqual(ts("const a = deps.addIssueLabel ?? addIssueLabel;\na(1, x);"), [2]);
+  });
+
   test("isExemptPath: only the three transport files are exempt under src/github", () => {
     for (const f of ["src/github/issues.ts", "src/github/issue-actions.ts", "src/github/prs.ts"]) {
       assert.equal(isExemptPath(f), true, f);
