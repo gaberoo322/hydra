@@ -337,6 +337,37 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     assert.deepEqual(titles(out.prompt.slice(out.prompt.indexOf("Red-PR forward-fix contract"))), want);
   });
 
+  test("conflict_fix renders the matching delta per arm; the no-address-findings clause is conflict-only (issues #4807, #5253)", () => {
+    const flat = (text: string) => text.replace(/\s+/g, " ");
+    const base = { anchor: "issue-4511", resume: true, resume_branch: "b", forward_fix_pr: 4818, conflict_fix: true };
+    const conflictOnly = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: base })).prompt;
+    const twoPhase = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { ...base, qa_fail_at_head: true } })).prompt;
+    const plain = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { ...base, conflict_fix: undefined } })).prompt;
+
+    assert.ok(conflictOnly.includes("**Conflict fix-forward delta (issue #4807).**"));
+    assert.ok(conflictOnly.includes("do NOT address review findings"));
+    assert.ok(!conflictOnly.includes("Two-phase conflict fix-forward delta"));
+
+    assert.ok(twoPhase.includes("**Two-phase conflict fix-forward delta (issue #5253).**"));
+    assert.ok(!twoPhase.includes("do NOT address review findings"));
+    assert.ok(twoPhase.indexOf("(c) merge `origin/master`") < twoPhase.indexOf("(d) only then carry steps 2-5 on the merged head"));
+    assert.ok(!twoPhase.includes("**Conflict fix-forward delta (issue #4807).**"));
+
+    assert.ok(!plain.includes("conflict fix-forward delta") && !plain.includes("Conflict fix-forward delta"), "a plain forward-fix carries no delta");
+
+    // Playbook parity: each rendered delta is a verbatim paragraph of the playbook.
+    const paragraphs = PLAYBOOK.split(/\n\s*\n/).map(flat);
+    for (const [head, prompt] of [
+      ["**Conflict fix-forward delta (issue #4807).**", conflictOnly],
+      ["**Two-phase conflict fix-forward delta (issue #5253).**", twoPhase],
+    ] as const) {
+      const rendered = flat(prompt.slice(prompt.indexOf(head))).split(" ").join(" ");
+      const para = paragraphs.find((p) => p.startsWith(head));
+      assert.ok(para !== undefined, `playbook paragraph ${head}`);
+      assert.ok(rendered.startsWith(para), `renderer constant for ${head} matches the playbook paragraph verbatim`);
+    }
+  });
+
   test("qa_orch names the needs-qa lane head and the rest of the lane, and the review rules", () => {
     const out = render("qa_orch", action("qa_orch", "hydra-qa", { prompt_args: { scope: "orch" } }));
     assert.match(out.prompt, /The needs-qa lane head is \*\*issue #4700\*\*; the rest of the lane, in order: #4825, #4821\./);

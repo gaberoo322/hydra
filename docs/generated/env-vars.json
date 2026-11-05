@@ -2695,24 +2695,24 @@
       "name": "HYDRA_WATCHDOG_BRIEF_NOW_MS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_BRIEF_STALE_HOURS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
@@ -2731,52 +2731,64 @@
       "name": "HYDRA_WATCHDOG_CLAUDE_HOOKS_DIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_CLAUDE_HOOKS_NOTIFY_STREAM",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_CLAUDE_HOOKS_SETUP",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_CLAUDE_HOOKS_STATE_DIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_CLAUDE_SETTINGS",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.ts"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.ts"
+      }
+    },
+    {
+      "name": "HYDRA_WATCHDOG_CLI_ALARM_STATE_DIR",
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh"

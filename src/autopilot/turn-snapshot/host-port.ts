@@ -62,13 +62,53 @@ export interface QaVerdictRunner {
    * unparseable output (the caller omits the entry - fail closed).
    */
   runQaVerdictEvent(pr: number, tier: number): Promise<unknown>;
+  /**
+   * #5253: run `scripts/ci/qa-merge-guard.ts --pr <pr>` and return its parsed
+   * stdout JSON. The guard exits 1 when it DENIES (which is exactly the FAIL
+   * case), so stdout is parsed on exit 0 AND 1; exit 2, a spawn error, a
+   * timeout or bad JSON yields `null`. Optional so older fakes keep compiling.
+   */
+  runQaMergeGuard?(pr: number): Promise<unknown>;
 }
 
 const QA_VERDICT_EVENT_TIMEOUT_MS = 90_000;
 const QA_VERDICT_EVENT_SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../scripts/autopilot/qa-verdict-event.sh");
 
-export function createQaVerdictRunner(): QaVerdictRunner {
+const QA_MERGE_GUARD_TIMEOUT_MS = 60_000;
+const QA_MERGE_GUARD_SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../scripts/ci/qa-merge-guard.ts");
+
+/** Test seam: override the guard process (default is the real qa-merge-guard.ts under node). */
+export interface QaVerdictRunnerOptions {
+  readonly guardFile?: string;
+  readonly guardArgs?: readonly string[];
+  readonly guardTimeoutMs?: number;
+}
+
+export function createQaVerdictRunner(opts: QaVerdictRunnerOptions = {}): QaVerdictRunner {
   return {
+    runQaMergeGuard(pr) {
+      return new Promise((resolveRead) => {
+        execFile(
+          opts.guardFile ?? process.execPath,
+          [...(opts.guardArgs ?? ["--no-warnings", "--experimental-strip-types", QA_MERGE_GUARD_SCRIPT]), "--pr", String(pr)],
+          { timeout: opts.guardTimeoutMs ?? QA_MERGE_GUARD_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
+          (err, stdout, stderr) => {
+            const code = err === null ? 0 : (err as { code?: unknown }).code;
+            if (code !== 0 && code !== 1) {
+              console.error(`[turn-snapshot] qa-merge-guard.ts failed for PR ${pr}:`, err?.message, typeof stderr === "string" ? stderr.slice(0, 300) : "");
+              resolveRead(null);
+              return;
+            }
+            try {
+              resolveRead(JSON.parse(typeof stdout === "string" ? stdout : ""));
+            } catch (parseErr) {
+              console.error(`[turn-snapshot] qa-merge-guard.ts output for PR ${pr} was not JSON:`, parseErr);
+              resolveRead(null);
+            }
+          },
+        );
+      });
+    },
     runQaVerdictEvent(pr, tier) {
       return new Promise((resolveRead) => {
         execFile("bash", [QA_VERDICT_EVENT_SCRIPT, String(pr), String(tier)], { timeout: QA_VERDICT_EVENT_TIMEOUT_MS }, (err, stdout, stderr) => {

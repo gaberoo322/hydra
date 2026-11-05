@@ -820,8 +820,9 @@
         "0012"
       ],
       "adrsCited": [
-        "0001",
-        "0006"
+        "0006",
+        "0015",
+        "0045"
       ],
       "referenceDocs": [
         {
@@ -849,13 +850,14 @@
           "4 stale-key-prune",
           "5 worktree-orphan-prune",
           "6 glm-eligibility-sweep",
-          "7 target-outcomes-publish",
-          "8 wiring-liveness",
-          "9 attribution-record",
-          "10 holdback-merge-watch",
-          "11 cycle-merge-reconcile",
-          "12 holdback-merge-event-enrol",
-          "13 pattern-cue-demotion"
+          "7 lifecycle-reconcile",
+          "8 target-outcomes-publish",
+          "9 wiring-liveness",
+          "10 attribution-record",
+          "11 holdback-merge-watch",
+          "12 cycle-merge-reconcile",
+          "13 holdback-merge-event-enrol",
+          "14 pattern-cue-demotion"
         ],
         "env-vars": [
           "HYDRA_AUTO_CYCLE_INTERVAL_MS",

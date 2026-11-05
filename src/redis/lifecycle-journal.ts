@@ -205,6 +205,21 @@ export async function closeDispatchClaim(
   }
 }
 
+export type ReadClaimResult =
+  | { ok: true; claim: DispatchClaim | null }
+  | { ok: false; error: string };
+
+/** Read (never modify) the held dispatch claim, or `claim: null` when none. */
+export async function readDispatchClaim(repo: string, issue: number): Promise<ReadClaimResult> {
+  try {
+    const raw = await getRedisConnection().get(lifecycleClaimKey(repo, issue));
+    return { ok: true, claim: parseClaim(raw) };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] readDispatchClaim failed");
+    return fail("readDispatchClaim", err);
+  }
+}
+
 function parseClaim(raw: string | null): DispatchClaim | null {
   if (raw === null) return null;
   try {
@@ -212,5 +227,49 @@ function parseClaim(raw: string | null): DispatchClaim | null {
   } catch (err) {
     logger.error({ err }, "[lifecycle-journal] malformed claim value");
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile report (ADR-0047 D5, issue #5316)
+// ---------------------------------------------------------------------------
+
+export function lifecycleReconcileKey(repo: string): string {
+  return `hydra:lifecycle:reconcile:${repo}`;
+}
+
+/** Persist the latest reconcile report: a hash holding the JSON and its epoch-ms `ts`. */
+export async function writeReconcileReport(
+  repo: string,
+  report: object,
+  ts: number,
+): Promise<JournalWriteResult> {
+  try {
+    await getRedisConnection().hset(lifecycleReconcileKey(repo), "json", JSON.stringify(report), "ts", String(ts));
+    return { ok: true };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] writeReconcileReport failed");
+    return fail("writeReconcileReport", err);
+  }
+}
+
+export type ReadReconcileReportResult =
+  | { ok: true; report: Record<string, unknown> | null; ts: number | null }
+  | { ok: false; error: string };
+
+/** Read the latest persisted reconcile report; `report: null` when none was ever written. */
+export async function readReconcileReport(repo: string): Promise<ReadReconcileReportResult> {
+  try {
+    const hash = await getRedisConnection().hgetall(lifecycleReconcileKey(repo));
+    if (!hash || typeof hash.json !== "string") return { ok: true, report: null, ts: null };
+    const ts = Number(hash.ts);
+    const parsed: unknown = JSON.parse(hash.json);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { ok: true, report: null, ts: null };
+    }
+    return { ok: true, report: parsed as Record<string, unknown>, ts: Number.isFinite(ts) ? ts : null };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] readReconcileReport failed");
+    return fail("readReconcileReport", err);
   }
 }

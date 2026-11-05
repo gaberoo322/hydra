@@ -43,7 +43,7 @@
     {
       "family": "chores",
       "metric": "rows",
-      "value": 14
+      "value": 15
     },
     {
       "family": "ci-gates",
@@ -108,7 +108,7 @@
     {
       "family": "env-vars",
       "metric": "rows",
-      "value": 266
+      "value": 267
     },
     {
       "family": "pages",

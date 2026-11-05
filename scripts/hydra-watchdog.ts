@@ -22,6 +22,13 @@
  *       timeout never skips the others; env names and defaults unchanged from the
  *       bash blocks (HYDRA_WATCHDOG_AUTODEPLOY*, _SKILL_MIRROR_*, _BACKUP_*,
  *       _EXPECTED_ORIGIN_*, _CANONICAL_ORIGIN_URL, _ORIGIN_*, _DRIFT_STATE_DIR)
+ *   node --experimental-strip-types scripts/hydra-watchdog.ts claude-hooks | brief-missing
+ *       the last two decision blocks (issue #5099): the Claude Code PreToolUse hook
+ *       install alarm (#5064, in-band only) and the 26h Morning Brief alarm (#5048)
+ *   node --experimental-strip-types scripts/hydra-watchdog.ts plan
+ *       print the check table (src/watchdog/checks.ts), one tab-separated line per
+ *       check; hydra-watchdog.sh iterates it, and a failing `plan` is the
+ *       "CLI failed to start" alarm (the whole check graph did not boot)
  *   node --experimental-strip-types scripts/hydra-watchdog.ts thresholds
  *       print src/autopilot/stale-thresholds.ts as JSON (status.sh, deploy smoke)
  *
@@ -103,6 +110,8 @@ import {
   runSkillMirror,
 } from "../src/watchdog/skill-mirror.ts";
 import {
+  createProductionBriefMissingDeps,
+  createProductionClaudeHooksDeps,
   createProductionDeployDriftDeps,
   createProductionDiskDeps,
   createProductionLaunchFlowDeps,
@@ -113,6 +122,14 @@ import {
   createProductionWedgeDeps,
 } from "../src/watchdog/ports.ts";
 import { runWedge, WEDGE_LOG_PREFIX } from "../src/watchdog/wedge.ts";
+import { formatWatchdogPlan } from "../src/watchdog/checks.ts";
+import {
+  BRIEF_MISSING_LOG_PREFIX,
+  BRIEF_MISSING_TIMEOUT_S,
+  parseBriefStaleHours,
+  runBriefMissing,
+} from "../src/watchdog/brief-missing.ts";
+import { CLAUDE_HOOKS_LOG_PREFIX, CLAUDE_HOOKS_TIMEOUT_S, runClaudeHooks } from "../src/watchdog/claude-hooks.ts";
 
 function envNumber(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -125,6 +142,13 @@ async function main(argv: string[]): Promise<void> {
   const cmd = argv[0];
   if (cmd === "thresholds") {
     console.log(JSON.stringify(staleThresholdsJson()));
+    return;
+  }
+  if (cmd === "plan") {
+    // The check table (bash iterates it) AND the startability probe: this file
+    // statically imports every check module, so reaching here proves the whole
+    // graph booted. Pure print, no I/O.
+    console.log(formatWatchdogPlan());
     return;
   }
   if (cmd === "liveness") {
@@ -274,8 +298,29 @@ async function main(argv: string[]): Promise<void> {
       );
     });
   }
+  if (cmd === "claude-hooks") {
+    await runOneShot(CLAUDE_HOOKS_LOG_PREFIX, CLAUDE_HOOKS_TIMEOUT_S, async () => {
+      const home = process.env.HOME || "";
+      await runClaudeHooks(createProductionClaudeHooksDeps((line) => console.log(line)), {
+        setupPath: process.env.HYDRA_WATCHDOG_CLAUDE_HOOKS_SETUP || join(hydraRoot(), "scripts", "setup-claude-hooks.sh"),
+        hooksDir: process.env.HYDRA_WATCHDOG_CLAUDE_HOOKS_DIR || join(home, ".claude", "hooks", "hydra"),
+        settingsPath: process.env.HYDRA_WATCHDOG_CLAUDE_SETTINGS || join(home, ".claude", "settings.json"),
+        stateDir: process.env.HYDRA_WATCHDOG_CLAUDE_HOOKS_STATE_DIR || "/tmp",
+        notifyStream: process.env.HYDRA_WATCHDOG_CLAUDE_HOOKS_NOTIFY_STREAM || "hydra:notifications",
+      });
+    });
+  }
+  if (cmd === "brief-missing") {
+    await runOneShot(BRIEF_MISSING_LOG_PREFIX, BRIEF_MISSING_TIMEOUT_S, async () => {
+      const rawNow = process.env.HYDRA_WATCHDOG_BRIEF_NOW_MS;
+      await runBriefMissing(createProductionBriefMissingDeps((line) => console.log(line)), {
+        staleHours: parseBriefStaleHours(process.env.HYDRA_WATCHDOG_BRIEF_STALE_HOURS),
+        nowMs: rawNow !== undefined && /^[0-9]+$/.test(rawNow) ? Number(rawNow) : null,
+      });
+    });
+  }
   console.error(
-    `hydra-watchdog.ts: unknown subcommand '${cmd ?? ""}' (expected: liveness | wedge | disk | launch-flow | deploy-drift | redis-backup | skill-mirror | origin-identity | thresholds)`,
+    `hydra-watchdog.ts: unknown subcommand '${cmd ?? ""}' (expected: plan | liveness | wedge | disk | launch-flow | deploy-drift | redis-backup | skill-mirror | claude-hooks | brief-missing | origin-identity | thresholds)`,
   );
 }
 

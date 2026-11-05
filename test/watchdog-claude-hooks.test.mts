@@ -11,16 +11,16 @@
  *     an unknown argument exits 2 instead of installing;
  *   - scripts/deploy.sh invokes the installer, non-fatally, before the service
  *     restart;
- *   - the watchdog's ## CLAUDE HOOKS block (`run_claude_hooks`) alarms on a
- *     missing hook file and on a missing or inexact settings registration, is
- *     silent when both are present, and publishes ONE enveloped XADD per
- *     episode — an XADD error reply is a failed delivery, never a dedup marker;
- *   - `run_claude_hooks` is CALLED from the watchdog's guarded entry point.
+ *   - the watchdog's claude-hooks check (src/watchdog/claude-hooks.ts, issue
+ *     #5099) alarms on a missing hook file and on a missing or inexact settings
+ *     registration, is silent when both are present, and publishes ONE bus event
+ *     per episode — a publish that returns no stream id is a failed delivery,
+ *     never a dedup marker.
  *
- * The watchdog block is SOURCED and called alone (the #4500 seam, as in
- * test/watchdog-origin-identity.test.mts); a fake `redis-cli` on PATH records
- * the XADD argv, so no Redis or docker is needed. Every path is a throwaway
- * temp dir — the real ~/.claude is never read or written.
+ * The check runs IN-PROCESS over its typed ports: the installer (`--list`), the
+ * hooks dir and settings.json are REAL throwaway temp files; only the bus is a
+ * recording fake. No PATH shim, no sourced bash. The real ~/.claude is never
+ * read or written.
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -43,38 +43,23 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { WATCHDOG_SPAWN_TIMEOUT_MS } from "./_helpers/watchdog-timeouts.mts";
+import { decideClaudeHooks, parseHookListing, runClaudeHooks } from "../src/watchdog/claude-hooks.ts";
+import { createProductionClaudeHooksDeps } from "../src/watchdog/ports.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
-const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
 const SETUP = join(REPO_ROOT, "scripts", "setup-claude-hooks.sh");
 const DEPLOY = join(REPO_ROOT, "scripts", "deploy.sh");
 
 let tmp: string;
-let binDir: string;
 let stateDir: string;
 let hooksDir: string;
 let settings: string;
-let xaddLog: string;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "claude-hooks-"));
-  binDir = join(tmp, "bin");
   stateDir = join(tmp, "state");
   hooksDir = join(tmp, "hooks", "hydra");
   settings = join(tmp, "settings.json");
-  xaddLog = join(tmp, "xadd.log");
-  mkdirSync(binDir);
-  const fake = join(binDir, "redis-cli");
-  // Default reply is a stream id. FAKE_XADD_REPLY stands in for a server error
-  // reply, which `redis-cli --raw` prints on stdout and still exits 0;
-  // FAKE_XADD_FAIL prints nothing (the transport-down case).
-  writeFileSync(
-    fake,
-    `#!/usr/bin/env bash\necho "$@" >> "${xaddLog}"\n` +
-      `if [ -n "$FAKE_XADD_REPLY" ]; then printf '%s\\n' "$FAKE_XADD_REPLY"; exit 0; fi\n` +
-      `[ -n "$FAKE_XADD_FAIL" ] || echo "1-0"\n`,
-  );
-  chmodSync(fake, 0o755);
 });
 
 afterEach(() => {
@@ -83,7 +68,7 @@ afterEach(() => {
 
 function baseEnv(): Record<string, string> {
   return {
-    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    PATH: process.env.PATH ?? "",
     // A throwaway HOME so neither script can touch the real ~/.claude.
     HOME: tmp,
   };
@@ -103,33 +88,6 @@ function expectedHooks(): string[] {
   assert.equal(r.status, 0, r.out);
   return r.out.trim().split("\n").filter(Boolean).map((e) => e.split("|")[0]);
 }
-
-function tick(env: Record<string, string> = {}): { out: string; rc: number } {
-  const r = spawnSync(
-    "bash",
-    ["-c", `source "${WATCHDOG}"; run_claude_hooks; echo "rc=$?"`],
-    {
-      encoding: "utf-8",
-      timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
-      env: {
-        ...baseEnv(),
-        HYDRA_ROOT: REPO_ROOT,
-        HYDRA_REDIS_HOST: "127.0.0.1",
-        HYDRA_WATCHDOG_CLAUDE_HOOKS_DIR: hooksDir,
-        HYDRA_WATCHDOG_CLAUDE_SETTINGS: settings,
-        HYDRA_WATCHDOG_CLAUDE_HOOKS_STATE_DIR: stateDir,
-        HYDRA_WATCHDOG_CLAUDE_HOOKS_NOTIFY_STREAM: "test:notifications",
-        ...env,
-      },
-    },
-  );
-  const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
-  const m = /rc=(\d+)/.exec(out);
-  return { out, rc: m ? Number(m[1]) : -1 };
-}
-
-const xadds = (): string[] =>
-  existsSync(xaddLog) ? readFileSync(xaddLog, "utf-8").trim().split("\n").filter(Boolean) : [];
 
 type Block = { matcher?: string; hooks?: { type?: string; command?: string }[] };
 const preToolUse = (): Block[] =>
@@ -262,165 +220,180 @@ describe("deploy.sh installs the Claude hooks (#5064)", () => {
   });
 });
 
-describe("run_claude_hooks watchdog block (#5064)", () => {
-  it("is silent and returns 0 when every hook is installed and registered", () => {
+describe("claude-hooks watchdog check (#5064, ported #5099)", () => {
+  /** A recording bus: `reply` is the stream id (or null for a delivery that landed nowhere). */
+  function harness(reply: string | null | Error = "1-0") {
+    const published: { stream: string; type: string; payload: unknown }[] = [];
+    const logs: string[] = [];
+    const base = createProductionClaudeHooksDeps((l) => logs.push(l));
+    const deps = {
+      ...base,
+      bus: {
+        publish: async (stream: string, event: { type: string; payload?: unknown }) => {
+          published.push({ stream, type: event.type, payload: event.payload });
+          if (reply instanceof Error) throw reply;
+          return reply;
+        },
+      },
+    };
+    return { deps, published, logs, text: () => logs.join("\n") };
+  }
+
+  const cfg = (over: Record<string, string> = {}) => ({
+    setupPath: SETUP,
+    hooksDir,
+    settingsPath: settings,
+    stateDir,
+    notifyStream: "test:notifications",
+    ...over,
+  });
+  const marker = (): string => join(stateDir, "hydra-claude-hooks-missing.since");
+
+  it("is silent when every hook is installed and registered", async () => {
     assert.equal(runSetup().status, 0);
-    const r = tick();
-    assert.equal(r.rc, 0, r.out);
-    assert.doesNotMatch(r.out, /ALARM/);
-    assert.match(r.out, /claude-hooks tick processed/);
-    assert.equal(xadds().length, 0);
+    const h = harness();
+    await runClaudeHooks(h.deps, cfg());
+    assert.doesNotMatch(h.text(), /ALARM/);
+    assert.match(h.text(), /claude-hooks tick processed/);
+    assert.equal(h.published.length, 0);
   });
 
-  it("alarms on a missing hook file and publishes ONE event per episode", () => {
+  it("alarms on a missing hook file and publishes ONE event per episode", async () => {
     assert.equal(runSetup().status, 0);
     unlinkSync(join(hooksDir, "git-remote-fence.sh"));
-    const first = tick();
-    assert.equal(first.rc, 0);
-    assert.match(first.out, /ALARM .*file-missing:git-remote-fence\.sh/);
-    assert.doesNotMatch(first.out, /unregistered:/);
-    const entries = xadds();
-    assert.equal(entries.length, 1);
-    assert.match(entries[0], /XADD test:notifications \*/);
-    assert.match(entries[0], /type infra:claude_hooks_missing/);
+    const h = harness();
+    await runClaudeHooks(h.deps, cfg());
+    assert.match(h.text(), /ALARM .*file-missing:git-remote-fence\.sh/);
+    assert.doesNotMatch(h.text(), /unregistered:/);
+    assert.equal(h.published.length, 1);
+    assert.equal(h.published[0].stream, "test:notifications");
+    assert.equal(h.published[0].type, "infra:claude_hooks_missing");
+    assert.deepEqual(h.published[0].payload, { signal: "claude-hooks", reason: "file-missing:git-remote-fence.sh" });
 
-    const second = tick();
-    assert.match(second.out, /ALARM/);
-    assert.equal(xadds().length, 1, "same episode must not re-publish");
+    await runClaudeHooks(h.deps, cfg());
+    assert.match(h.text(), /ALARM/);
+    assert.equal(h.published.length, 1, "same episode must not re-publish");
   });
 
-  it("alarms on a missing settings registration (the live 2026-10-20 state)", () => {
+  it("alarms on a missing settings registration (the live 2026-10-20 state)", async () => {
     assert.equal(runSetup().status, 0);
     const data = JSON.parse(readFileSync(settings, "utf-8"));
     data.hooks.PreToolUse = (data.hooks.PreToolUse as Block[]).filter(
-      (b) => !b.hooks?.some((h) => h.command?.includes("git-remote-fence.sh")),
+      (b) => !b.hooks?.some((hk) => hk.command?.includes("git-remote-fence.sh")),
     );
     writeFileSync(settings, JSON.stringify(data, null, 2));
-    const r = tick();
-    assert.equal(r.rc, 0);
-    assert.match(r.out, /ALARM .*unregistered:git-remote-fence\.sh/);
-    assert.doesNotMatch(r.out, /unregistered:worktree-write-fence/);
-    assert.doesNotMatch(r.out, /file-missing:/);
-    assert.equal(xadds().length, 1);
+    const h = harness();
+    await runClaudeHooks(h.deps, cfg());
+    assert.match(h.text(), /ALARM .*unregistered:git-remote-fence\.sh/);
+    assert.doesNotMatch(h.text(), /unregistered:worktree-write-fence/);
+    assert.doesNotMatch(h.text(), /file-missing:/);
+    assert.equal(h.published.length, 1);
   });
 
-  it("alarms when settings.json is absent or unparseable", () => {
+  it("alarms when settings.json is absent or unparseable", async () => {
     assert.equal(runSetup().status, 0);
     writeFileSync(settings, "{ not json");
-    const r = tick();
-    assert.match(r.out, /ALARM .*settings-unreadable/);
+    const h = harness();
+    await runClaudeHooks(h.deps, cfg());
+    assert.match(h.text(), /ALARM .*settings-unreadable/);
     rmSync(settings);
-    const r2 = tick();
-    assert.match(r2.out, /ALARM .*settings-unreadable/);
+    rmSync(marker(), { force: true });
+    const h2 = harness();
+    await runClaudeHooks(h2.deps, cfg());
+    assert.match(h2.text(), /ALARM .*settings-unreadable/);
   });
 
-  it("retries the XADD next tick when delivery fails, and re-arms after recovery", () => {
-    const failed = tick({ FAKE_XADD_FAIL: "1" });
-    assert.match(failed.out, /ALARM/);
-    assert.match(failed.out, /in-band delivery FAILED/);
-    assert.equal(existsSync(join(stateDir, "hydra-claude-hooks-missing.since")), false);
+  it("retries the publish next tick when delivery fails, and re-arms after recovery", async () => {
+    const failed = harness(new Error("redis down"));
+    await runClaudeHooks(failed.deps, cfg());
+    assert.match(failed.text(), /ALARM/);
+    assert.match(failed.text(), /in-band delivery FAILED/);
+    assert.equal(existsSync(marker()), false);
 
-    tick();
-    assert.equal(existsSync(join(stateDir, "hydra-claude-hooks-missing.since")), true);
+    const ok = harness();
+    await runClaudeHooks(ok.deps, cfg());
+    assert.equal(existsSync(marker()), true);
 
     assert.equal(runSetup().status, 0);
-    const healed = tick();
-    assert.match(healed.out, /healthy again/);
-    assert.equal(existsSync(join(stateDir, "hydra-claude-hooks-missing.since")), false);
+    const healed = harness();
+    await runClaudeHooks(healed.deps, cfg());
+    assert.match(healed.text(), /healthy again/);
+    assert.equal(existsSync(marker()), false);
   });
 
-  it("treats an XADD error reply as a FAILED delivery: no since-marker, retried every tick", () => {
+  it("treats a publish with no stream id as a FAILED delivery: no since-marker, retried every tick", async () => {
     // Nothing installed, so every tick is in the alarm episode.
-    const marker = join(stateDir, "hydra-claude-hooks-missing.since");
-    const errorReplies = [
-      "ERR wrong number of arguments for 'xadd' command",
-      "WRONGTYPE Operation against a key holding the wrong kind of value",
-      "NOAUTH Authentication required.",
-      "OK",
-    ];
-    for (const reply of errorReplies) {
-      const r = tick({ FAKE_XADD_REPLY: reply });
-      assert.equal(r.rc, 0, r.out);
-      assert.match(r.out, /ALARM/);
-      assert.match(r.out, /in-band delivery FAILED \(XADD reply '.*' is not a stream id\)/, r.out);
-      assert.doesNotMatch(r.out, /in-band delivery published/);
-      assert.equal(existsSync(marker), false, `reply "${reply}" must not write the since-marker`);
+    for (const reply of [null, "OK", "ERR wrong number of arguments"]) {
+      const h = harness(reply);
+      await runClaudeHooks(h.deps, cfg());
+      assert.match(h.text(), /ALARM/);
+      assert.match(h.text(), /in-band delivery FAILED \(publish reply '.*' is not a stream id\)/, h.text());
+      assert.doesNotMatch(h.text(), /in-band delivery published/);
+      assert.equal(existsSync(marker()), false, `reply "${reply}" must not write the since-marker`);
     }
-    assert.equal(xadds().length, errorReplies.length, "an unsilenced episode retries the XADD on every tick");
-
-    const delivered = tick();
-    assert.match(delivered.out, /in-band delivery published .*\(id 1-0\)/);
-    assert.equal(existsSync(marker), true, "a stream-id reply writes the since-marker");
+    const delivered = harness();
+    await runClaudeHooks(delivered.deps, cfg());
+    assert.match(delivered.text(), /in-band delivery published .*\(id 1-0\)/);
+    assert.equal(existsSync(marker()), true, "a stream-id reply writes the since-marker");
   });
 
-  it("requires an EXACT registration: a wrong matcher or a decorated command counts as unregistered", () => {
+  it("requires an EXACT registration: a wrong matcher or a decorated command counts as unregistered", async () => {
     assert.equal(runSetup().status, 0);
     const data = JSON.parse(readFileSync(settings, "utf-8"));
     for (const b of data.hooks.PreToolUse as Block[]) {
-      const h = b.hooks?.[0];
-      if (!h?.command) continue;
+      const hk = b.hooks?.[0];
+      if (!hk?.command) continue;
       // Right command, wrong tools: the fence would never fire on Bash.
-      if (h.command.endsWith("/git-remote-fence.sh")) b.matcher = "Edit";
+      if (hk.command.endsWith("/git-remote-fence.sh")) b.matcher = "Edit";
       // Still CONTAINS "<dir>/worktree-write-fence.sh", so a substring check passes it.
-      if (h.command.endsWith("/worktree-write-fence.sh")) h.command = `${h.command}.disabled`;
+      if (hk.command.endsWith("/worktree-write-fence.sh")) hk.command = `${hk.command}.disabled`;
     }
     writeFileSync(settings, JSON.stringify(data, null, 2));
-    const r = tick();
-    assert.equal(r.rc, 0, r.out);
-    assert.match(r.out, /ALARM .*unregistered:worktree-write-fence\.sh/);
-    assert.match(r.out, /ALARM .*unregistered:git-remote-fence\.sh/);
-    assert.doesNotMatch(r.out, /file-missing:/);
+    const h = harness();
+    await runClaudeHooks(h.deps, cfg());
+    assert.match(h.text(), /ALARM .*unregistered:worktree-write-fence\.sh/);
+    assert.match(h.text(), /ALARM .*unregistered:git-remote-fence\.sh/);
+    assert.doesNotMatch(h.text(), /file-missing:/);
   });
 
-  it("is CALLED from the watchdog's guarded main block (deleting the call goes red)", () => {
-    const src = readFileSync(WATCHDOG, "utf-8");
-    const defIdx = src.indexOf("run_claude_hooks() {");
-    const guard = 'if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then\n';
-    const guardIdx = src.lastIndexOf(guard);
-    assert.ok(defIdx >= 0, "run_claude_hooks() definition not found");
-    assert.ok(guardIdx > defIdx, "the guarded entry point must follow the block definition");
-    // The main block is exactly guard .. its closing `fi` — NOT "anywhere after
-    // the guard", so a call moved below the `fi` (or the file) doesn't count.
-    const fiIdx = src.indexOf("\nfi\n", guardIdx);
-    assert.ok(fiIdx > guardIdx, "the guarded entry point must close with `fi`");
-    const mainBody = src.slice(guardIdx + guard.length, fiIdx + 1);
-    const lines = mainBody.split("\n").map((l) => l.trim());
-    assert.equal(
-      lines.filter((l) => l === "run_claude_hooks").length,
-      1,
-      `the main block must call run_claude_hooks exactly once as a bare, uncommented line:\n${mainBody}`,
-    );
-    assert.ok(
-      lines.indexOf("run_claude_hooks") < lines.indexOf("exit 0"),
-      "run_claude_hooks must be called before the main block's `exit 0`",
-    );
+  it("skips with a WARN (fail-safe) when the installer script is missing or its --list fails", async () => {
+    const h = harness();
+    await runClaudeHooks(h.deps, cfg({ setupPath: join(tmp, "nope.sh") }));
+    assert.match(h.text(), /WARN installer .* not found/);
+    assert.doesNotMatch(h.text(), /ALARM/);
 
-    // Behavioural: execute the REAL main-block text with every run_* block
-    // stubbed to report itself. A call that is present but unreachable (e.g.
-    // wrapped in a false conditional) fails here even though the line exists.
-    const r = spawnSync(
-      "bash",
-      [
-        "-c",
-        `source "${WATCHDOG}"\n` +
-          `for f in $(compgen -A function run_); do eval "$f() { echo CALLED:$f; }"; done\n` +
-          mainBody,
-      ],
-      { encoding: "utf-8", timeout: WATCHDOG_SPAWN_TIMEOUT_MS, env: baseEnv() },
-    );
-    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
-    const called = r.stdout.split("\n").filter((l) => l.startsWith("CALLED:"));
-    assert.deepEqual(
-      called.filter((l) => l === "CALLED:run_claude_hooks"),
-      ["CALLED:run_claude_hooks"],
-      `the main block must reach run_claude_hooks exactly once; called: ${called.join(", ")}`,
-    );
+    const failing = join(tmp, "failing.sh");
+    writeFileSync(failing, "#!/bin/bash\nexit 3\n");
+    const h2 = harness();
+    await runClaudeHooks(h2.deps, cfg({ setupPath: failing }));
+    assert.match(h2.text(), /--list failed \(rc=3\) — skipping/);
+    assert.equal(h2.published.length, 0);
+
+    const empty = join(tmp, "empty.sh");
+    writeFileSync(empty, "#!/bin/bash\nexit 0\n");
+    const h3 = harness();
+    await runClaudeHooks(h3.deps, cfg({ setupPath: empty }));
+    assert.match(h3.text(), /returned no hooks — skipping/);
   });
 
-  it("skips with a WARN (fail-safe) when the installer script is missing", () => {
-    const r = tick({ HYDRA_WATCHDOG_CLAUDE_HOOKS_SETUP: join(tmp, "nope.sh") });
-    assert.equal(r.rc, 0);
-    assert.match(r.out, /WARN installer .* not found/);
-    assert.doesNotMatch(r.out, /ALARM/);
+  it("decideClaudeHooks is pure: reasons vocabulary over parsed entries", () => {
+    const expected = parseHookListing("a.sh|Bash\n\nb.sh|Edit|Write\n");
+    assert.deepEqual(expected, [
+      { name: "a.sh", matcher: "Bash" },
+      { name: "b.sh", matcher: "Edit|Write" },
+    ]);
+    const settingsText = JSON.stringify({
+      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "bash /h/a.sh" }] }] },
+    });
+    assert.deepEqual(decideClaudeHooks({ expected, installed: new Set(["a.sh", "b.sh"]), settingsText, hooksDir: "/h/" }), [
+      "unregistered:b.sh",
+    ]);
+    assert.deepEqual(decideClaudeHooks({ expected, installed: new Set(["a.sh"]), settingsText: null, hooksDir: "/h" }), [
+      "file-missing:b.sh",
+      "settings-unreadable",
+    ]);
+    assert.deepEqual(decideClaudeHooks({ expected, installed: new Set(["a.sh", "b.sh"]), settingsText: "[]", hooksDir: "/h" }), [
+      "settings-unreadable",
+    ]);
   });
 });

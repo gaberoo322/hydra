@@ -21,10 +21,10 @@
  *    #4807, #4812), 1:1 — same fixtures, same assertions — now driving
  *    `collectPrGate` through a fake port returning typed fixtures instead of
  *    regex-extracting a python heredoc. `runPrGate` also asserts the read
- *    budget (5 + the single UNKNOWN re-poll) on every case.
+ *    budget (6 + the single UNKNOWN re-poll) on every case.
  *
- * 3. The port READ-COUNT + ORDER guard (#4941): exactly five reads in the
- *    recorded order with no UNKNOWN PR; six with one (the re-poll second,
+ * 3. The port READ-COUNT + ORDER guard (#4941, +1 parked read #5319): exactly six reads in the
+ *    recorded order with no UNKNOWN PR; seven with one (the re-poll second,
  *    after the sleep) — the zero-added-reads property the deleted "no Redis
  *    access" bash case used to pin.
  */
@@ -81,7 +81,7 @@ interface Golden {
   nowMs: number;
   env: Record<string, string>;
   prRefsUnavailable: boolean;
-  gh: Partial<Record<"first" | "repoll" | "runsPush" | "runsPullRequest" | "required" | "resume", GoldenRead>>;
+  gh: Partial<Record<"first" | "repoll" | "runsPush" | "runsPullRequest" | "required" | "resume" | "parked", GoldenRead>>;
   expected: {
     /** `--format values` output: `{ "pr-gate": <typed PrGateSnapshot> }`. */
     values: Record<string, unknown>;
@@ -100,6 +100,7 @@ function goldenKey(args: string[]): keyof Golden["gh"] | null {
   if (joined.includes("event=pull_request")) return "runsPullRequest";
   if (joined.includes("required_status_checks")) return "required";
   if (joined.includes("needs-dev-resume")) return "resume";
+  if (joined.includes("--label parked")) return "parked"; // #5319
   return null;
 }
 
@@ -142,7 +143,8 @@ describe("Turn Snapshot pr-gate — golden files from the bash collectors (ADR-0
       const transport: GhTransport = async (args) => {
         calls.push([...args]);
         const key = goldenKey(args);
-        const r = key === null ? undefined : g.gh[key];
+        // #5319: the corpus predates the parked read; an unscripted one is a healthy empty set.
+        const r = key === null ? undefined : (g.gh[key] ?? (key === "parked" ? { stdout: "[]", stderr: "", exitCode: 0 } : undefined));
         if (r === undefined) return { ok: false, stderr: `unscripted call: ${args.join(" ")}` };
         return r.exitCode === 0 ? { ok: true, stdout: r.stdout, stderr: r.stderr } : { ok: false, stderr: r.stderr };
       };
@@ -229,6 +231,8 @@ interface FakeOpts {
   runsPullRequest?: string | null;
   required?: GhJsonRead;
   resume?: GhJsonRead;
+  /** #5319: the `parked` label read (default: a healthy empty set). */
+  parked?: GhJsonRead;
 }
 
 /** A fake TurnSnapshotGithub returning typed fixtures, counting and logging reads. */
@@ -262,9 +266,10 @@ function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => numb
       log.push("requiredStatusContexts");
       return o.required ?? ok(REQUIRED);
     },
-    async listOpenIssueRowsByLabel() {
+    async listOpenIssueRowsByLabel(label) {
       totalReads++;
       log.push("listOpenIssueRowsByLabel");
+      if (label === "parked") return o.parked ?? ok([]);
       return o.resume ?? ok([]);
     },
     // The needs-triage / needs-qa number read — no longer the pr-gate
@@ -322,6 +327,8 @@ interface PrGateOverrides {
   /** "" models a FAILED read (the INV-5 fail-closed path). */
   requiredContextsJson?: string;
   devResumeIssuesJson?: string;
+  /** #5319: "" models a FAILED parked read. */
+  parkedIssuesJson?: string;
   glmRedQuiescenceSeconds?: string;
   devResumeNoprQuiescenceSeconds?: string;
   prRefs?: PrRefsAvailability;
@@ -344,6 +351,7 @@ async function runPrGate(prs: unknown[], overrides: PrGateOverrides = {}, repoll
     repoll,
     required: jsonOrEmpty(overrides.requiredContextsJson ?? JSON.stringify(REQUIRED)),
     resume: jsonOrEmpty(overrides.devResumeIssuesJson ?? "[]"),
+    parked: jsonOrEmpty(overrides.parkedIssuesJson ?? "[]"),
   });
   const outcome = await collectPrGate({
     github,
@@ -357,9 +365,10 @@ async function runPrGate(prs: unknown[], overrides: PrGateOverrides = {}, repoll
     },
     ...(overrides.prRefs ? { prRefs: overrides.prRefs } : {}),
   });
-  // The read budget (#4941): five reads, plus the single #4812 re-poll when
-  // the first payload holds an UNKNOWN — an added read trips every ported case.
-  assert.equal(github.totalReads(), 5 + (hasUnknownMergeState(prs) ? 1 : 0));
+  // The read budget (#4941, +1 for the #5319 parked read): six reads, plus the
+  // single #4812 re-poll when the first payload holds an UNKNOWN — an added
+  // read trips every ported case.
+  assert.equal(github.totalReads(), 6 + (hasUnknownMergeState(prs) ? 1 : 0));
   const v = outcome.value;
   const dirtyFix = v.dirtyFix.ok ? v.dirtyFix.value : { pick: null, surface: [] };
   return {
@@ -981,10 +990,11 @@ describe("pr-gate — port read-count + order guard (#4941)", () => {
     "latestWorkflowRunCreatedAt(push)",
     "latestWorkflowRunCreatedAt(pull_request)",
     "requiredStatusContexts",
-    "listOpenIssueRowsByLabel",
+    "listOpenIssueRowsByLabel", // needs-dev-resume
+    "listOpenIssueRowsByLabel", // parked (#5319)
   ];
 
-  test("no UNKNOWN: EXACTLY five port reads, in the recorded order — the zero-added-reads guard", async () => {
+  test("no UNKNOWN: EXACTLY six port reads, in the recorded order — the zero-added-reads guard", async () => {
     // The deleted "no Redis access in the PR-gate python block" case pinned
     // the collector's zero-added-reads property at the bash seam; this
     // restores that guard at the port seam — an added read (an extra gh call,
@@ -992,11 +1002,11 @@ describe("pr-gate — port read-count + order guard (#4941)", () => {
     // read trips the log.
     const github = fakeGithub({ first: ok([{ number: 1, mergeStateStatus: "CLEAN", headRefName: "b1", body: "", labels: [] }]) });
     await collectPrGate({ github, now: () => NOW_MS, sleep: async () => {}, ghListLimit: 100 });
-    assert.equal(github.totalReads(), 5);
+    assert.equal(github.totalReads(), 6);
     assert.deepEqual(github.readLog(), CLEAN_ORDER);
   });
 
-  test("one UNKNOWN: EXACTLY six reads — listOpenPrMergeStates second, after the sleep", async () => {
+  test("one UNKNOWN: EXACTLY seven reads — listOpenPrMergeStates second, after the sleep", async () => {
     const github = fakeGithub({
       first: ok([{ number: 2, mergeStateStatus: "UNKNOWN", headRefName: "b2", body: "", labels: [] }]),
       repoll: ok([{ number: 2, mergeStateStatus: "CLEAN" }]),
@@ -1013,7 +1023,7 @@ describe("pr-gate — port read-count + order guard (#4941)", () => {
       ghListLimit: 100,
       env: { unknownRepollDelaySeconds: "0" },
     });
-    assert.equal(github.totalReads(), 6);
+    assert.equal(github.totalReads(), 7);
     assert.deepEqual(github.readLog(), ["listOpenPrs", "listOpenPrMergeStates", ...CLEAN_ORDER.slice(1)]);
     assert.deepEqual(sleeps, ["0"]);
     assert.deepEqual(logAtSleep, [["listOpenPrs"]], "the re-poll read is issued after the delay elapses, not before it");
@@ -1163,7 +1173,7 @@ describe("pr-gate — no-PR durable resume pick (issue #4808)", () => {
   test("the needs-dev-resume read is widened in place — one listOpenIssueRowsByLabel call, parseDevResumeIssues output unchanged", async () => {
     // No open PRs at all: the union is legitimately empty and the pick is the
     // lowest quiescent, non-progress issue. runPrGate's own read-budget assert
-    // (5 reads) + the CLEAN_ORDER guard pin INV-3's zero-added-reads property.
+    // (6 reads) + the CLEAN_ORDER guard pin INV-3's zero-added-reads property.
     const r = await runPrGate([], { devResumeIssuesJson: noprRowsJson });
     assert.equal(r.devResumeNoprAnchor, 4826);
     assert.doesNotMatch(r.stderr, /#4808 INV-4/, "a healthy read must not emit the fail-closed note");
@@ -1412,10 +1422,10 @@ describe("pr-gate — QA-verdict recheck (#5052)", () => {
     assert.ok(o.degraded.some((d) => d.field === "qaVerdictRecheck"));
   });
 
-  test("the five-read order is unchanged; only the open-PR read gains autoMergeRequest", async () => {
+  test("the read order is unchanged; only the open-PR read gains autoMergeRequest", async () => {
     const github = fakeGithub({ first: ok([candidatePr(7)]), repoll: ok([]), required: ok(REQUIRED), resume: ok([]) });
     await collectPrGate({ github, now: () => NOW_MS, sleep: async () => {}, ghListLimit: 100, host: passHost() });
-    assert.equal(github.totalReads(), 5);
+    assert.equal(github.totalReads(), 6);
     assert.ok(PR_GATE_PR_FIELDS.endsWith(",autoMergeRequest"));
   });
 
@@ -1554,5 +1564,206 @@ describe("pr-gate — rollup + required-contexts edge shapes (#5089 QA round 1)"
     assert.equal(empty.degraded.some((x) => x.field === "requiredContexts"), false);
     const mixed = await collect('["test", 5, "", null]');
     assert.equal(mixed.degraded.some((x) => x.field === "requiredContexts"), false, "non-string / empty members are dropped, not degraded");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #5253 - the two-phase dirty arm's predicate (orch_dirty_forward_fix_fail_pr)
+// ---------------------------------------------------------------------------
+
+describe("pr-gate - dirty fix-forward QA-FAIL-at-head predicate (issue #5253)", () => {
+  const dirtyPr = (n: number, extra: Record<string, unknown> = {}) =>
+    ({ ...basePrGate({ number: n, mergeStateStatus: "DIRTY" }), headRefName: `fix/${n}`, body: `Closes #${n + 1000}`, ...extra }) as unknown;
+  type Guard = (pr: number) => Promise<unknown>;
+  function collect(prs: unknown[], guard: Guard | null) {
+    const calls: number[] = [];
+    const host =
+      guard === null
+        ? { runQaVerdictEvent: async () => null }
+        : {
+            runQaVerdictEvent: async () => null,
+            runQaMergeGuard: async (pr: number) => {
+              calls.push(pr);
+              return guard(pr);
+            },
+          };
+    return collectPrGate({
+      github: fakeGithub({ first: ok(prs), repoll: ok([]), required: ok(REQUIRED), resume: ok([]) }),
+      now: () => NOW_MS,
+      sleep: async () => {},
+      ghListLimit: 100,
+      host,
+    }).then((o) => ({ o, calls }));
+  }
+  const guardJson = (verdict: string | null, verdictAtHead: boolean) => async () => ({ allowed: false, reason: "verdict-fail", verdict, verdictAtHead });
+
+  test("FAIL at the current head sets the field to the pick PR", async () => {
+    const { o, calls } = await collect([dirtyPr(4775)], guardJson("FAIL", true));
+    assert.equal(o.value.dirtyFixFailPr, 4775);
+    assert.deepEqual(calls, [4775]);
+  });
+
+  test("FAIL-pending-CI at head also counts (exit-1 trap: the guard denies exactly on a FAIL)", async () => {
+    const { o } = await collect([dirtyPr(4775)], guardJson("FAIL-pending-CI", true));
+    assert.equal(o.value.dirtyFixFailPr, 4775);
+  });
+
+  test("FAIL at an older sha (fixes already pushed) keeps conflict-only", async () => {
+    const { o } = await collect([dirtyPr(4775)], guardJson("FAIL", false));
+    assert.equal(o.value.dirtyFixFailPr, null);
+  });
+
+  test("PASS at head and no verdict at all keep conflict-only", async () => {
+    for (const g of [guardJson("PASS", true), guardJson("PASS-pending-CI", true), guardJson(null, false)]) {
+      const { o } = await collect([dirtyPr(4775)], g);
+      assert.equal(o.value.dirtyFixFailPr, null);
+    }
+  });
+
+  test("guard unreadable (null, throw, malformed, missing port) fails closed to null with a note naming the PR and #5253", async () => {
+    const shapes: Array<Guard | null> = [
+      async () => null,
+      async () => {
+        throw new Error("boom");
+      },
+      async () => ({ verdict: 5 }),
+      async () => "nope",
+      null,
+    ];
+    for (const g of shapes) {
+      const { o } = await collect([dirtyPr(4775)], g);
+      assert.equal(o.value.dirtyFixFailPr, null);
+      assert.ok(o.notes.some((n) => n.includes("PR 4775") && n.includes("#5253")), `note for ${String(g)}`);
+    }
+  });
+
+  test("no dirty pick: the guard is never invoked", async () => {
+    const { o, calls } = await collect([basePrGate({ number: 4246 }) as unknown], guardJson("FAIL", true));
+    assert.equal(o.value.dirtyFixFailPr, null);
+    assert.deepEqual(calls, []);
+  });
+
+  test("two dirty PRs: the guard runs once, for the lowest-numbered pick only", async () => {
+    const { o, calls } = await collect([dirtyPr(4800), dirtyPr(4775)], guardJson("FAIL", true));
+    assert.deepEqual(calls, [4775]);
+    assert.equal(o.value.dirtyFixFailPr, 4775);
+  });
+
+  test("a dirty PR already carrying conflict-fix-attempted is not the pick: no guard run", async () => {
+    const { o, calls } = await collect([dirtyPr(4775, { labels: [{ name: "conflict-fix-attempted" }] })], guardJson("FAIL", true));
+    assert.equal(o.value.dirtyFixFailPr, null);
+    assert.deepEqual(calls, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #5319 - autopilot skips parked work (ADR-0047 Decision 6)
+// ---------------------------------------------------------------------------
+
+describe("pr-gate — parked closing issue is skipped by every PR arm (#5319)", () => {
+  const green = REQUIRED.map((name) => ({ __typename: "CheckRun", name, status: "COMPLETED", conclusion: "SUCCESS", startedAt: isoSecondsAgo(7000) }));
+  const prFor = (n: number, closes: number, extra: Partial<PrGateOpenPr> = {}) =>
+    basePrGate({
+      number: n,
+      mergeStateStatus: "UNSTABLE",
+      headRefName: `worktree-agent-${n}`,
+      body: `Tier: 3 (core)\n\nCloses #${closes}`,
+      statusCheckRollup: green,
+      updatedAt: isoSecondsAgo(7200),
+      ...extra,
+    });
+  const RESUME_BOTH = { devResumeIssuesJson: JSON.stringify([{ number: 100 }, { number: 200 }]) };
+  const PARKED_100 = { parkedIssuesJson: JSON.stringify([{ number: 100 }]) };
+
+  test("a parked-closing PR is absent from the resume pick while its unparked sibling survives", async () => {
+    const prs = [prFor(11, 100), prFor(12, 200)];
+    const before = await runPrGate(prs, RESUME_BOTH);
+    assert.match(before.devResumePick, /^issue-100:11:/, "control: lowest PR wins when nothing is parked");
+    const after = await runPrGate(prs, { ...RESUME_BOTH, ...PARKED_100 });
+    assert.match(after.devResumePick, /^issue-200:12:/, "the parked PR is skipped, the sibling is picked");
+  });
+
+  test("dirty / behind / unchecked buckets and the dirty pin drop the parked PR only", async () => {
+    const dirty = (n: number, closes: number) => prFor(n, closes, { mergeStateStatus: "DIRTY" });
+    const behind = (n: number, closes: number) => prFor(n, closes, { mergeStateStatus: "BEHIND" });
+    const unchecked = (n: number, closes: number) => prFor(n, closes, { mergeStateStatus: "CLEAN", statusCheckRollup: [], createdAt: isoSecondsAgo(7200) });
+    const prs = [dirty(21, 100), dirty(22, 200), behind(23, 100), behind(24, 200), unchecked(25, 100), unchecked(26, 200)];
+    const base = await runPrGate(prs);
+    assert.deepEqual([base.dirty, base.behind, base.unchecked], [[21, 22], [23, 24], [25, 26]]);
+    assert.equal(base.dirtyForwardFix, "issue-100:21:worktree-agent-21", "control: the lowest dirty PR is pinned");
+    const r = await runPrGate(prs, PARKED_100);
+    assert.deepEqual(r.dirty, [22]);
+    assert.deepEqual(r.behind, [24]);
+    assert.deepEqual(r.unchecked, [26]);
+    assert.equal(r.dirtyForwardFix, "issue-200:22:worktree-agent-22", "the parked dirty PR is never pinned for conflict-fix");
+  });
+
+  test("red-resume drops a parked-closing red PR", async () => {
+    const red = REQUIRED.map((name, i) => ({ ...green[i], conclusion: i === 0 ? "FAILURE" : "SUCCESS" }));
+    const prs = [prFor(31, 100, { statusCheckRollup: red }), prFor(32, 200, { statusCheckRollup: red })];
+    assert.deepEqual((await runPrGate(prs)).redResume, [31, 32]);
+    assert.deepEqual((await runPrGate(prs, PARKED_100)).redResume, [32]);
+  });
+
+  test("the no-PR resume pick excludes a parked issue number directly", async () => {
+    const rows = JSON.stringify([
+      { number: 100, labels: [{ name: "needs-dev-resume" }], updatedAt: isoSecondsAgo(7000) },
+      { number: 301, labels: [{ name: "needs-dev-resume" }], updatedAt: isoSecondsAgo(7000) },
+    ]);
+    assert.equal((await runPrGate([], { devResumeIssuesJson: rows })).devResumeNoprAnchor, 100);
+    assert.equal((await runPrGate([], { devResumeIssuesJson: rows, ...PARKED_100 })).devResumeNoprAnchor, 301);
+  });
+
+  test("a Refs mention of a parked issue is NOT a closing ref: the PR keeps today's handling (INV-2)", async () => {
+    const pr = prFor(41, 200, { body: "Refs #100\n\nCloses #200", mergeStateStatus: "BEHIND" });
+    const r = await runPrGate([pr], PARKED_100);
+    assert.deepEqual(r.behind, [41]);
+  });
+
+  test("the recheck candidates never include a parked-closing PR", async () => {
+    const pr = (n: number, closes: number) => ({ ...prFor(n, closes, { mergeStateStatus: "CLEAN" }), autoMergeRequest: null });
+    const run = (parked: GhJsonRead) =>
+      collectPrGate({
+        github: fakeGithub({ first: ok([pr(51, 100), pr(52, 200)]), required: ok(REQUIRED), parked }),
+        now: () => NOW_MS,
+        sleep: async () => {},
+        ghListLimit: 100,
+        host: {
+          runQaVerdictEvent: async (n: number, tier: number) => ({ type: "qa-verdict", pr_number: n, tier, verdict: "PASS", verdict_sha: "a", head_sha: "ab", verdict_at_head: true }),
+        },
+      });
+    const open = await run(ok([]));
+    assert.deepEqual(open.value.qaVerdictRecheck.ok && open.value.qaVerdictRecheck.value.map((e) => e.pr), [51, 52]);
+    const skipped = await run(ok([{ number: 100 }]));
+    assert.deepEqual(skipped.value.qaVerdictRecheck.ok && skipped.value.qaVerdictRecheck.value.map((e) => e.pr), [52]);
+  });
+
+  test("an unreadable parked read fails the dispatch outputs closed with a parkedIssues marker; buckets stay open", async () => {
+    const prs = [prFor(61, 100), prFor(62, 200, { mergeStateStatus: "BEHIND" })];
+    const r = await runPrGate(prs, { ...RESUME_BOTH, parkedIssuesJson: "" });
+    assert.equal(r.devResumePick, "none");
+    assert.deepEqual(r.redResume, []);
+    assert.deepEqual(r.behind, [62], "informational buckets fail open exactly as today");
+    assert.match(r.stderr, /parked-issues read unusable/);
+    const o = await collectPrGate({
+      github: fakeGithub({ first: ok(prs), required: ok(REQUIRED), resume: ok([{ number: 100 }]), parked: EMPTY }),
+      now: () => NOW_MS,
+      sleep: async () => {},
+      ghListLimit: 100,
+    });
+    assert.ok(o.degraded.some((d) => d.field === "parkedIssues"));
+    assert.equal(o.value.parkedIssues.ok, false);
+    assert.equal(o.value.qaVerdictRecheck.ok, false);
+  });
+
+  test("an EMPTY-array parked read is a healthy empty set, not a degrade", async () => {
+    const o = await collectPrGate({
+      github: fakeGithub({ first: ok([prFor(71, 100)]), required: ok(REQUIRED), parked: ok([]) }),
+      now: () => NOW_MS,
+      sleep: async () => {},
+      ghListLimit: 100,
+    });
+    assert.ok(!o.degraded.some((d) => d.field === "parkedIssues"));
+    assert.equal(o.value.parkedIssues.ok, true);
   });
 });

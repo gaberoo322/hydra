@@ -32,6 +32,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { WATCHDOG_CHECKS } from "../src/watchdog/checks.ts";
 import { STREAMS } from "../src/event-bus-stream-keys.ts";
 import { REDIS_BACKUP_KEY_PREFIX, redisBackupEpisodeKeys } from "../src/redis/watchdog-episodes.ts";
 import {
@@ -107,13 +108,12 @@ describe("scripts/deploy.sh + units — Redis backup install (issue #4604)", () 
     assert.match(timer, /^WantedBy=timers\.target$/m, "install target");
   });
 
-  test("the bash entry point calls the redis-backup CLI wrapper (90s bound) alongside deploy-drift", () => {
-    const src = read("scripts/hydra-watchdog.sh");
-    assert.match(src, /run_redis_backup_cli\(\) \{ run_watchdog_cli redis-backup "hydra-redis-backup-freshness-watchdog:" 90; \}/);
-    const guardIdx = src.lastIndexOf('if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then');
-    const entry = src.slice(guardIdx);
-    assert.match(entry, /run_deploy_drift_cli\n\s*run_redis_backup_cli\n\s*run_skill_mirror_cli/, "block must sit alongside deploy-drift in the main sequence");
-    assert.doesNotMatch(src, /run_redis_backup_freshness/, "the bash block is deleted");
+  test("WATCHDOG_CHECKS runs redis-backup (90s bound) between deploy-drift and skill-mirror", () => {
+    const subs = WATCHDOG_CHECKS.map((c) => c.subcommand);
+    const i = subs.indexOf("redis-backup");
+    assert.deepEqual(subs.slice(i - 1, i + 2), ["deploy-drift", "redis-backup", "skill-mirror"]);
+    assert.equal(WATCHDOG_CHECKS[i].timeoutS, 90);
+    assert.equal(WATCHDOG_CHECKS[i].logPrefix, REDIS_BACKUP_LOG_PREFIX);
   });
 
   test("the event type stays a module constant, OUT of the alert vocabulary", () => {

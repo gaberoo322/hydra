@@ -123,6 +123,9 @@ function healthyValues(): TurnSnapshotValues {
       unchecked: [4950],
       behind: [4952, 4951, 4953],
       qaVerdictRecheck: ok([]),
+      dirtyFixFailPr: null,
+      parkedIssues: ok(new Set([4905, 4902])), // #5319: emitted sorted ascending as orch_parked_issues
+      parkedPrs: new Set([4910, 4907]), // QA r1: emitted sorted ascending as orch_parked_prs
       ciTriggerStale: ok(false),
       redResume: ok([4890]),
       devResumePick: ok({ issue: 4718, pr: 4890, headRefName: "worktree-agent-a1b2" }),
@@ -218,6 +221,8 @@ function edgeValues(): TurnSnapshotValues {
       redResume: ok([4881, 4882]),
       devResumePick: FAILED,
       devResumeNoprPick: FAILED,
+      parkedIssues: FAILED, // degraded -> orch_parked_unreadable true
+      parkedPrs: new Set(),
       dirtyFix: ok({ pick: null, surface: [] }),
     },
     picks: { ...h.picks, grillPick: null, devReadyPick: null, candidateExclusions: [], boardDegraded: true },
@@ -635,6 +640,9 @@ describe("turn snapshot JSON: validation degrades PER FIELD on emit (#4934)", ()
     assert.match(out.note ?? "", /structurally invalid.*all-degraded/);
     assert.ok(TurnSnapshotSchema.safeParse(doc).success, "the replacement is itself a valid document");
     assert.deepEqual(doc.signals, ALL_DEGRADED_SIGNALS);
+    // #5319 QA r2: a wholly degraded marker has no healthy parked read - the belt fails closed.
+    assert.equal(doc.signals.orch_parked_unreadable, true);
+    assert.deepEqual(doc.signals.orch_parked_issues, []);
     assert.deepEqual(doc.blobs, {});
     assert.equal(doc.degraded.length, 1);
     assert.match(doc.degraded[0].reason, /^schema-invalid: schema_version/);
@@ -794,13 +802,13 @@ describe("turn snapshot JSON: the all-degraded snapshot (#4934)", () => {
   test("it is conservative by construction: nothing available or due, every producer cap saturated, the doctor raised", () => {
     // The naming convention the accessor's marker reading relies on (#5083): a
     // flag is raised in the all-degraded document IFF its name ends `_fail`,
-    // `_degraded` or `_saturated` — a new fault / cap flag must follow it. Every
+    // `_degraded`, `_saturated` or `_unreadable` — a new fault / cap flag must follow it. Every
     // NON-boolean value must read exactly as an absent key does on a marker
     // turn (the accessor returns None there), so it is null, 0, "" or [].
     const s = ALL_DEGRADED_SIGNALS as Record<string, unknown>;
     assert.ok(s.health_fail === true && s.orch_board_signals_degraded === true && s.arch_board_saturated === true);
     for (const [k, v] of Object.entries(s)) {
-      if (typeof v === "boolean") assert.equal(v, /_(fail|degraded|saturated)$/.test(k), k);
+      if (typeof v === "boolean") assert.equal(v, /_(fail|degraded|saturated|unreadable)$/.test(k), k);
       else assert.ok(v === null || v === 0 || v === "" || (Array.isArray(v) && v.length === 0), `${k}=${JSON.stringify(v)} must be null, 0, "" or [] (what an absent key reads as)`);
     }
   });
