@@ -1,0 +1,1 @@
+- feat: dirty-PR conflict fix-forward runs two-phase (merge master, then resolve findings) when a QA FAIL is pending at head (#5253)

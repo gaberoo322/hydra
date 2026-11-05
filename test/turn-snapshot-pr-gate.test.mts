@@ -1556,3 +1556,92 @@ describe("pr-gate — rollup + required-contexts edge shapes (#5089 QA round 1)"
     assert.equal(mixed.degraded.some((x) => x.field === "requiredContexts"), false, "non-string / empty members are dropped, not degraded");
   });
 });
+
+// ---------------------------------------------------------------------------
+// #5253 - the two-phase dirty arm's predicate (orch_dirty_forward_fix_fail_pr)
+// ---------------------------------------------------------------------------
+
+describe("pr-gate - dirty fix-forward QA-FAIL-at-head predicate (issue #5253)", () => {
+  const dirtyPr = (n: number, extra: Record<string, unknown> = {}) =>
+    ({ ...basePrGate({ number: n, mergeStateStatus: "DIRTY" }), headRefName: `fix/${n}`, body: `Closes #${n + 1000}`, ...extra }) as unknown;
+  type Guard = (pr: number) => Promise<unknown>;
+  function collect(prs: unknown[], guard: Guard | null) {
+    const calls: number[] = [];
+    const host =
+      guard === null
+        ? { runQaVerdictEvent: async () => null }
+        : {
+            runQaVerdictEvent: async () => null,
+            runQaMergeGuard: async (pr: number) => {
+              calls.push(pr);
+              return guard(pr);
+            },
+          };
+    return collectPrGate({
+      github: fakeGithub({ first: ok(prs), repoll: ok([]), required: ok(REQUIRED), resume: ok([]) }),
+      now: () => NOW_MS,
+      sleep: async () => {},
+      ghListLimit: 100,
+      host,
+    }).then((o) => ({ o, calls }));
+  }
+  const guardJson = (verdict: string | null, verdictAtHead: boolean) => async () => ({ allowed: false, reason: "verdict-fail", verdict, verdictAtHead });
+
+  test("FAIL at the current head sets the field to the pick PR", async () => {
+    const { o, calls } = await collect([dirtyPr(4775)], guardJson("FAIL", true));
+    assert.equal(o.value.dirtyFixFailPr, 4775);
+    assert.deepEqual(calls, [4775]);
+  });
+
+  test("FAIL-pending-CI at head also counts (exit-1 trap: the guard denies exactly on a FAIL)", async () => {
+    const { o } = await collect([dirtyPr(4775)], guardJson("FAIL-pending-CI", true));
+    assert.equal(o.value.dirtyFixFailPr, 4775);
+  });
+
+  test("FAIL at an older sha (fixes already pushed) keeps conflict-only", async () => {
+    const { o } = await collect([dirtyPr(4775)], guardJson("FAIL", false));
+    assert.equal(o.value.dirtyFixFailPr, null);
+  });
+
+  test("PASS at head and no verdict at all keep conflict-only", async () => {
+    for (const g of [guardJson("PASS", true), guardJson("PASS-pending-CI", true), guardJson(null, false)]) {
+      const { o } = await collect([dirtyPr(4775)], g);
+      assert.equal(o.value.dirtyFixFailPr, null);
+    }
+  });
+
+  test("guard unreadable (null, throw, malformed, missing port) fails closed to null with a note naming the PR and #5253", async () => {
+    const shapes: Array<Guard | null> = [
+      async () => null,
+      async () => {
+        throw new Error("boom");
+      },
+      async () => ({ verdict: 5 }),
+      async () => "nope",
+      null,
+    ];
+    for (const g of shapes) {
+      const { o } = await collect([dirtyPr(4775)], g);
+      assert.equal(o.value.dirtyFixFailPr, null);
+      assert.ok(o.notes.some((n) => n.includes("PR 4775") && n.includes("#5253")), `note for ${String(g)}`);
+    }
+  });
+
+  test("no dirty pick: the guard is never invoked", async () => {
+    const { o, calls } = await collect([basePrGate({ number: 4246 }) as unknown], guardJson("FAIL", true));
+    assert.equal(o.value.dirtyFixFailPr, null);
+    assert.deepEqual(calls, []);
+  });
+
+  test("two dirty PRs: the guard runs once, for the lowest-numbered pick only", async () => {
+    const { o, calls } = await collect([dirtyPr(4800), dirtyPr(4775)], guardJson("FAIL", true));
+    assert.deepEqual(calls, [4775]);
+    assert.equal(o.value.dirtyFixFailPr, 4775);
+  });
+
+  test("a dirty PR already carrying conflict-fix-attempted is not the pick: no guard run", async () => {
+    const { o, calls } = await collect([dirtyPr(4775, { labels: [{ name: "conflict-fix-attempted" }] })], guardJson("FAIL", true));
+    assert.equal(o.value.dirtyFixFailPr, null);
+    assert.deepEqual(calls, []);
+  });
+});

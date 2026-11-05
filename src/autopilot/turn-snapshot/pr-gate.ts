@@ -58,6 +58,7 @@ import {
 } from "./dev-resume.ts";
 import { ghTimestampSeconds, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { QaVerdictRunner } from "./host-port.ts";
+import { isFailVerdict, type FinalVerdict } from "../../qa/verdict-trailer.ts";
 
 export const PR_GATE_COLLECTOR = "pr-gate";
 
@@ -130,6 +131,12 @@ export interface PrGateSnapshot {
    * `[]`; no path synthesises a PASS.
    */
   readonly qaVerdictRecheck: Classified<readonly QaRecheckEntry[]>;
+  /**
+   * #5253: the dirty pick's PR number iff qa-merge-guard reports a FAIL-family
+   * verdict AT the PR's current (pre-merge) head, else `null`. Fail-closed to
+   * `null` (the conflict-only arm) on every unreadable / unknown shape.
+   */
+  readonly dirtyFixFailPr: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -668,6 +675,7 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
       dirtyFix,
       // Filled by collectPrGate (it needs the host port); fail-closed until then.
       qaVerdictRecheck: { ok: false, reason: DEGRADE.NOT_EVALUATED },
+      dirtyFixFailPr: null,
     },
     notes,
   };
@@ -934,9 +942,12 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
   const qaVerdictRecheck = await collectQaRecheck(prs, payload.kind === "ok", requiredContexts, deps.host, notes, deps.now());
   if ("reason" in qaVerdictRecheck) degraded.push({ field: "qaVerdictRecheck", reason: qaVerdictRecheck.reason });
 
+  // 6. #5253: the two-phase dirty arm's predicate - AT MOST one guard run, for the single dirty pick.
+  const dirtyFixFailPr = await collectDirtyFixFailPr(classified.value.dirtyFix, deps.host, notes);
+
   return {
     collector: PR_GATE_COLLECTOR,
-    value: { inflight, ...classified.value, qaVerdictRecheck },
+    value: { inflight, ...classified.value, qaVerdictRecheck, dirtyFixFailPr },
     degraded,
     notes,
   };
@@ -1015,6 +1026,39 @@ async function collectQaRecheck(
   return { ok: true, value: entries };
 }
 
+/**
+ * #5253 INV-1/2/5: is a QA FAIL pending AT the dirty pick's current head?
+ * Runs qa-merge-guard once, for the pick only (never when there is no pick).
+ * `isFailVerdict && verdictAtHead` - a FAIL at an older sha keeps conflict-only.
+ * Every unreadable shape fails closed to `null` with one note naming the PR.
+ */
+async function collectDirtyFixFailPr(
+  dirtyFix: PrGateSnapshot["dirtyFix"],
+  host: PrGateDeps["host"],
+  notes: string[],
+): Promise<number | null> {
+  if (!dirtyFix.ok || dirtyFix.value.pick === null) return null;
+  const pr = dirtyFix.value.pick.pr;
+  const closedNote = (why: string): null => {
+    notes.push(`orch dirty-fix QA-FAIL-at-head read ${why} for PR ${pr} - conflict-only arm (issue #5253, INV-2)`);
+    return null;
+  };
+  if (host === undefined || host.runQaMergeGuard === undefined) return closedNote("unavailable (no host port)");
+  let raw: unknown;
+  try {
+    raw = await host.runQaMergeGuard(pr);
+  } catch (err) {
+    /* intentional: surfaced as a stderr note; unknown verdict fails closed to the conflict-only arm */
+    return closedNote(`threw (${err instanceof Error ? err.message : String(err)})`);
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return closedNote("unreadable");
+  const r = raw as Record<string, unknown>;
+  const verdict = r.verdict;
+  if (verdict === null) return null; // no verdict recorded: conflict-only, not an error
+  if (typeof verdict !== "string" || typeof r.verdictAtHead !== "boolean") return closedNote("malformed");
+  return isFailVerdict(verdict as FinalVerdict) && r.verdictAtHead ? pr : null;
+}
+
 /** The snapshot the CLI renders when the collector itself could not run (every field degraded). */
 export function prGateFallbackSnapshot(reason: DegradeReason): PrGateSnapshot {
   return {
@@ -1028,5 +1072,6 @@ export function prGateFallbackSnapshot(reason: DegradeReason): PrGateSnapshot {
     devResumeNoprPick: { ok: false, reason },
     dirtyFix: { ok: false, reason },
     qaVerdictRecheck: { ok: false, reason },
+    dirtyFixFailPr: null,
   };
 }

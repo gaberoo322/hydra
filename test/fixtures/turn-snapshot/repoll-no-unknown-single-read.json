@@ -126,7 +126,8 @@
         "qaVerdictRecheck": {
           "ok": true,
           "value": []
-        }
+        },
+        "dirtyFixFailPr": null
       }
     }
   }

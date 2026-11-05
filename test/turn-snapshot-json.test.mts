@@ -123,6 +123,7 @@ function healthyValues(): TurnSnapshotValues {
       unchecked: [4950],
       behind: [4952, 4951, 4953],
       qaVerdictRecheck: ok([]),
+      dirtyFixFailPr: null,
       ciTriggerStale: ok(false),
       redResume: ok([4890]),
       devResumePick: ok({ issue: 4718, pr: 4890, headRefName: "worktree-agent-a1b2" }),

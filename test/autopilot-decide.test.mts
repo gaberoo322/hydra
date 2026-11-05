@@ -4981,6 +4981,40 @@ describe("decide.py — dirty PR conflict fix-forward pin (issue #4807)", () => 
     assert.equal((plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length, 0);
   });
 
+  test("a QA FAIL pending at the pinned PR's head selects the two-phase arm (issue #5253)", () => {
+    const plan = runDecide(
+      baseState({ signals: { orch_prs_dirty: "4818", orch_dirty_forward_fix: DIRTY_FIX, orch_dirty_forward_fix_fail_pr: 4818 } }),
+      null,
+    );
+    const d = devOrch(plan);
+    assert.equal(d.length, 1);
+    assert.deepEqual(d[0].prompt_args, {
+      anchor: "issue-4511",
+      resume: true,
+      resume_branch: "worktree-agent-abc123",
+      forward_fix_pr: 4818,
+      conflict_fix: true,
+      qa_fail_at_head: true,
+    });
+    assert.match(d[0].reason, /#4807/);
+    assert.match(d[0].reason, /#5253/);
+    assert.match(d[0].reason, /two-phase/);
+  });
+
+  test("a null or mismatched fail-pr field keeps the conflict-only arm byte-stable (issue #5253)", () => {
+    for (const failPr of [null, 9999, "nonsense"]) {
+      const plan = runDecide(
+        baseState({ signals: { orch_prs_dirty: "4818", orch_dirty_forward_fix: DIRTY_FIX, orch_dirty_forward_fix_fail_pr: failPr } }),
+        null,
+      );
+      const d = devOrch(plan);
+      assert.equal(d.length, 1);
+      assert.equal("qa_fail_at_head" in d[0].prompt_args, false, `fail_pr=${String(failPr)}`);
+      assert.equal(d[0].prompt_args.conflict_fix, true);
+      assert.match(d[0].reason, /^dirty PR conflict fix-forward: PR 4818 \(issue #4511\) on worktree-agent-abc123 — merge origin\/master, one attempt per PR \(issue #4807\)$/);
+    }
+  });
+
   test("the conflict-fix pin outranks the #4518 resume pick", () => {
     const plan = runDecide(
       baseState({ signals: { orch_dirty_forward_fix: DIRTY_FIX, orch_dev_resume_pick: RESUME_PICK } }),

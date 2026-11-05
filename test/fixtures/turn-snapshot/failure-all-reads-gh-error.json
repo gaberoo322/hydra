@@ -127,7 +127,8 @@
         "qaVerdictRecheck": {
           "ok": false,
           "reason": "pr-list-unreadable"
-        }
+        },
+        "dirtyFixFailPr": null
       }
     }
   }

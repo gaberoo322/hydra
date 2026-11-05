@@ -11,6 +11,7 @@ from __future__ import annotations
 from decide_base import (
     RED_FORWARD_FIX_CAP,
     _dev_resume_pick_signal,
+    _dirty_fix_fail_pr,
     _issue_pr_branch_signal,
     _orch_anchor_signal,
     _red_forward_fix_attempt_count,
@@ -164,6 +165,31 @@ def _select_slot_dev_orch(
     dirty_fix = _dirty_forward_fix_signal(state, events)
     if dirty_fix is not None:
         fix_issue, fix_pr, fix_branch = dirty_fix
+        # ISSUE #5253: a QA FAIL pending AT this PR's pre-merge head selects the
+        # two-phase arm (merge master FIRST, then the forward-fix contract on
+        # the merged head). The Turn Snapshot's collector owns the predicate
+        # (pure here, ADR-0007); the field must name THIS pin's PR, so a signal
+        # event that overrode the pin without the field falls to conflict-only.
+        two_phase = _dirty_fix_fail_pr(state, events) == fix_pr
+        if two_phase:
+            return make_dispatch(
+                cls,
+                "hydra-dev",
+                prompt_args={
+                    "anchor": f"issue-{fix_issue}",
+                    "resume": True,
+                    "resume_branch": fix_branch,
+                    "forward_fix_pr": fix_pr,
+                    "conflict_fix": True,
+                    "qa_fail_at_head": True,
+                },
+                reason=(
+                    f"dirty PR two-phase conflict fix-forward: PR {fix_pr} (issue #{fix_issue}) "
+                    f"on {fix_branch} — QA FAIL pending at head: merge origin/master FIRST, "
+                    "then resolve the findings on the merged head, one attempt per PR "
+                    "(issues #4807, #5253)"
+                ),
+            )
         return make_dispatch(
             cls,
             "hydra-dev",

@@ -283,6 +283,14 @@ def pin(state: dict, events: list[dict], name: str) -> tuple[int, int, str] | No
     return _parse_pin(_raw_signal(state, events, name))
 
 
+def pr_number(state: dict, events: list[dict], name: str) -> int | None:
+    """A single-PR-number signal (`orch_dirty_forward_fix_fail_pr`, #5253): the
+    one positive int token, else None. Events take precedence over state.
+    Absent / null / malformed -> None (the fail-closed arm); never raises."""
+    nums = pr_numbers(state, events, name)
+    return nums[0] if len(nums) == 1 else None
+
+
 def dirty_surface_pairs(state: dict, events: list[dict], name: str) -> list[tuple[int, int | None]]:
     """A dirty-surface signal (`orch_prs_dirty_surface`, #4807) as
     `[(pr, closing_issue|None)]`, ascending, deduplicated by PR (last wins).
