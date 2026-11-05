@@ -29,6 +29,7 @@
  *   - stale-key-prune (the stale-Redis-key sweep + stale-inProgress return, #1876),
  *   - worktree-orphan-prune,
  *   - glm-eligibility-sweep,
+ *   - lifecycle-reconcile (the ADR-0047 label reconcile pass, #5316),
  *   - target-outcomes-publish,
  *   - wiring-liveness,
  *   - attribution-record,
@@ -63,6 +64,7 @@ import { runDesignConceptSnapshot } from "./chores/design-concept-snapshot.ts";
 import { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
 import { runWorktreeOrphanPrune } from "./chores/worktree-orphan-prune.ts";
 import { runGlmEligibilitySweep } from "./chores/glm-eligibility-sweep.ts";
+import { runLifecycleReconcile } from "./chores/lifecycle-reconcile.ts";
 import { runWiringLiveness } from "./chores/wiring-liveness.ts";
 import { runTargetOutcomesPublish } from "./chores/target-outcomes-publish.ts";
 import { runUsageWeeklySnapshot } from "./chores/usage-weekly-snapshot.ts";
@@ -275,6 +277,12 @@ async function runHousekeeping(
      * so `runHousekeeping` makes no network call to the Target.
      */
     publishTargetOutcomes?: () => Promise<unknown>;
+    /**
+     * Injectable lifecycle reconcile pass (issue #5316). Defaults to the real
+     * {@link runLifecycleReconcile} chore, which reads and WRITES GitHub labels;
+     * composition tests inject a no-op so `runHousekeeping` touches no board.
+     */
+    runLifecycleReconcile?: () => Promise<unknown>;
   } = {},
 ): Promise<{ ran: string[]; skipped: string[] }> {
   const ran: string[] = [];
@@ -287,6 +295,7 @@ async function runHousekeeping(
   const runSweep = deps.runGlmEligibilitySweep ?? runGlmEligibilitySweep;
   // Issue #4477: injectable so composition tests make no Target HTTP call.
   const publishTargetOutcomes = deps.publishTargetOutcomes ?? (() => runTargetOutcomesPublish());
+  const reconcileLifecycle = deps.runLifecycleReconcile ?? (() => runLifecycleReconcile());
 
   // The chores as declarations. Each carries an optional `guard` (the cadence
   // window, read at the composition level) and a `work` thunk that delegates to
@@ -388,6 +397,20 @@ async function runHousekeeping(
       name: "glm-eligibility-sweep",
       work: async () => {
         await runSweep();
+      },
+    },
+
+    {
+      // Issue #5316 (ADR-0047): lifecycle reconcile pass. Journals out-of-seam
+      // label edits as `external` (never reverting them), fires record-checked
+      // qa-passed exits and the zero-state backstop through the seam, flags
+      // issues with 2+ state labels, and persists the enforce-readiness report
+      // the attention feed reads. No Redis time-guard — every write is
+      // diff-first and idempotent, so an hourly tick over a settled board is a
+      // no-op. Never throws — faults fold to a logged null.
+      name: "lifecycle-reconcile",
+      work: async () => {
+        await reconcileLifecycle();
       },
     },
 

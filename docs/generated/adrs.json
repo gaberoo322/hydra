@@ -1315,6 +1315,7 @@
       "readWhen": "Writing or routing any issue state label, dispatch claims, cycle caps/parking, `qa-passed`, or the parent-exception metric.",
       "citedBy": [
         "CONTEXT-MAP.md",
+        "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
         "docs/agents/triage-labels.md",
         "docs/operator-playbooks/hydra-issue-research.md"
       ],
