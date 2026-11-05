@@ -374,7 +374,7 @@ function buildDefaultTickDeps(env: NodeJS.ProcessEnv = process.env): TickDeps {
         },
         seam,
       );
-      return r.ok ? { ok: true } : { ok: false, code: r.code };
+      return r.ok === false ? { ok: false, code: r.code } : { ok: true };
     },
     releaseClaim: async (issue, dispatchId, outcome) => {
       const seam = defaultSeamDeps(config.repoRoot ?? DEFAULT_REPO_ROOT);

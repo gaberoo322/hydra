@@ -57,7 +57,7 @@ export async function runBackfill(apply: boolean, deps: BackfillDeps): Promise<B
     }
     if (!apply) continue;
     const res = await deps.open(issue, `legacy-backfill-${issue}`, run);
-    if (res.ok) summary.claimed += 1;
+    if (res.ok === true) summary.claimed += 1;
     else if (res.code === "claim-held") summary.held += 1;
     else summary.failed += 1;
   }
