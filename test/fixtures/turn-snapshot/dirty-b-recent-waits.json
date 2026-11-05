@@ -82,6 +82,20 @@
         "100",
         "--json",
         "number,labels,updatedAt"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--label",
+        "parked",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels,updatedAt"
       ]
     ],
     "sleeps": [],
@@ -127,7 +141,13 @@
         "qaVerdictRecheck": {
           "ok": true,
           "value": []
-        }
+        },
+        "dirtyFixFailPr": null,
+        "parkedIssues": {
+          "ok": true,
+          "value": {}
+        },
+        "parkedPrs": {}
       }
     }
   }

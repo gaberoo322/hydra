@@ -1658,6 +1658,35 @@ const RAW_ENTRIES = [
     doc: HYDRA_REVIEW_DOC,
   },
   {
+    key: "waiting-on-you:hold-exit",
+    recommended: {
+      kind: "terminal-skill",
+      command: "gh issue view {number} --repo {repo} --comments",
+      label: "Check who moved it",
+      preconditions: [],
+      consequence: "reads the issue and its comments to see who took it out of a human-hold state and why",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Hand off to the review loop",
+        preconditions: [],
+        consequence: "walks it alongside other operator-attention issues",
+      },
+      {
+        kind: "terminal-skill",
+        command: "gh api repos/{repo}/issues/{number}/timeline",
+        label: "Read the label timeline",
+        preconditions: [],
+        consequence: "shows exactly which actor removed the human-hold label and when",
+      },
+    ],
+    rationale:
+      "a human-hold state (ready-for-human / parked / hitl-grill / needs-info) was exited outside the operator-route board path (ADR-0047 D3) — the operator is the only sanctioned exit, so an agent or external move needs a look.",
+    doc: HYDRA_REVIEW_DOC,
+  },
+  {
     key: "waiting-on-you:blocked-live",
     recommended: {
       kind: "terminal-skill",
@@ -1685,6 +1714,36 @@ const RAW_ENTRIES = [
     ],
     rationale:
       "blocked-live crosses at blockedDays (2) while its referenced blocker is still genuinely open, distinct from stale-blocked (blocker is stale/closed) — this default entry is the read-only hand-off until that distinction resolves.",
+    doc: HYDRA_REVIEW_DOC,
+  },
+
+  {
+    key: "waiting-on-you:invalid-state",
+    recommended: {
+      kind: "terminal-skill",
+      command: "gh issue view {number} --repo {repo} --json labels",
+      label: "Inspect the conflicting state labels",
+      preconditions: [],
+      consequence: "shows which lifecycle state labels the issue carries so you can keep the one that is true",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Walk it in the review cockpit",
+        preconditions: [],
+        consequence: "decides the right state with you and removes the stray label",
+      },
+      {
+        kind: "terminal-skill",
+        command: "npx tsx scripts/lifecycle.ts reconcile --report",
+        label: "Read the latest reconcile report",
+        preconditions: [],
+        consequence: "prints every invalid issue and the enforce-readiness counts without scanning or changing anything",
+      },
+    ],
+    rationale:
+      "an open issue with 2+ lifecycle state labels is ambiguous: the lifecycle seam refuses to move it and no dispatcher will pick it, and the reconcile never edits labels on its own (ADR-0047 D1) — an operator removes the stray label.",
     doc: HYDRA_REVIEW_DOC,
   },
 

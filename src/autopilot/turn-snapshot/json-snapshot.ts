@@ -303,6 +303,10 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     retro_run_drillable: v.retro.drillable === true,
     review_retro_due: v.retro.reviewDue === true,
 
+    // #5319: the parked issue set (sorted); [] on degrade (the collector marks `parkedIssues`).
+    orch_parked_issues: v.prGate.parkedIssues.ok ? [...v.prGate.parkedIssues.value].sort((a, b) => a - b) : [],
+    orch_parked_prs: [...v.prGate.parkedPrs].sort((a, b) => a - b),
+    orch_parked_unreadable: !v.prGate.parkedIssues.ok,
     orch_prs_dirty: [...v.prGate.dirty],
     orch_prs_unchecked: [...v.prGate.unchecked],
     orch_prs_behind: [...v.prGate.behind],
@@ -312,6 +316,8 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     // #4808: a bare anchor, not a pin — there is no PR, branch or head to name.
     orch_dev_resume_nopr_anchor: v.prGate.devResumeNoprPick.ok ? v.prGate.devResumeNoprPick.value : null,
     orch_dirty_forward_fix: pin(dirtyFix.pick),
+    // #5253: the pick's PR number iff a QA FAIL is pending at its head (two-phase arm), else null.
+    orch_dirty_forward_fix_fail_pr: v.prGate.dirtyFixFailPr,
     orch_prs_dirty_surface: dirtyFix.surface.map((e) => ({ pr: e.pr, closing_issue: e.closingIssue })),
     // #5052: fail closed - a degraded recheck renders [] (the collector already marked it).
     orch_qa_verdict_recheck: v.prGate.qaVerdictRecheck.ok

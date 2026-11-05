@@ -253,6 +253,17 @@ describe("lifecycle-seam-check: evasion forms (#5367)", () => {
     assert.deepEqual(md("gh issue create --title t -l $state"), [1]);
   });
 
+  test("short -l reaches across a multi-line argv list and a heredoc body (same reach as --label)", () => {
+    assert.deepEqual(ts('run("gh", [\n  "issue",\n  "create",\n  "--title", t,\n  "-l", "needs-triage",\n]);'), [5]);
+    assert.deepEqual(ts('run("gh", [\r\n  "issue",\r\n  "create",\r\n  "-l", "needs-triage",\r\n]);'), [4]);
+    assert.deepEqual(md("gh issue create --title t --body-file - <<'EOF'\nbody line\nEOF\n  -l needs-triage"), [4]);
+    assert.deepEqual(md("gh issue create --title t \\\r\n  -l needs-triage"), [1]);
+    // sibling shapes keep their verdict: a later command on a new line or after a boundary is not create context
+    assert.deepEqual(md("gh issue create --title t\nwc -l $f"), []);
+    assert.deepEqual(md("gh issue create --title t; wc -l $f"), []);
+    assert.deepEqual(md("gh issue create --title t && ls -l $f"), []);
+  });
+
   test("TS: `deps.f ?? ((n, l) => seamFn(n, l))` is a wrapper; a non-arrow `x ?? other(..)` is not", () => {
     assert.deepEqual(
       ts("const addLabel = deps.addLabel ?? ((n: number, label: string) => addIssueLabel(n, label));\naddLabel(1, lbl);"),

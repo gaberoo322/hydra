@@ -529,7 +529,6 @@
         "src/autopilot/work-projections.ts"
       ],
       "routes": [
-        "POST /api/autopilot/board/promote",
         "POST /api/autopilot/board/reopen"
       ],
       "source": {
@@ -758,9 +757,7 @@
     {
       "name": "RELABEL_TARGETS",
       "file": "src/schemas/autopilot-board.ts",
-      "importedBy": [
-        "src/autopilot/work-projections.ts"
-      ],
+      "importedBy": [],
       "routes": [],
       "source": {
         "path": "src/schemas/autopilot-board.ts"

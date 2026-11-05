@@ -11,8 +11,11 @@ from __future__ import annotations
 from decide_base import (
     RED_FORWARD_FIX_CAP,
     _dev_resume_pick_signal,
+    _dirty_fix_fail_pr,
+    _is_parked_anchor,
     _issue_pr_branch_signal,
     _orch_anchor_signal,
+    _parked_read_degraded,
     _red_forward_fix_attempt_count,
     _red_resume_prs,
     _signal_present,
@@ -92,9 +95,23 @@ def _select_slot_dev_orch(
     # persists via change-detection for `research_force_counter` /
     # `target_triage_item_stamps`.
     resume_pending = state.get("dev_resume_pending") if isinstance(state, dict) else None
-    if isinstance(resume_pending, list) and resume_pending:
+    if (
+        isinstance(resume_pending, list)
+        and resume_pending
+        # QA r2: a degraded parked read must NOT drain (pop) the queued resume -
+        # the entry survives for a healthy-read turn; only a positively parked
+        # anchor on a healthy read is dropped.
+        and not _parked_read_degraded(state, events)
+    ):
         entry = resume_pending[0]
-        if isinstance(entry, dict) and entry.get("anchor"):
+        # ISSUE #5319 (INV-6): a park that landed after reap queued the resume
+        # is DROPPED (never re-queued - the operator owns a parked issue) by the
+        # same pop as a malformed entry below.
+        if (
+            isinstance(entry, dict)
+            and entry.get("anchor")
+            and not _is_parked_anchor(state, events, entry["anchor"])
+        ):
             resume_pending.pop(0)
             prompt_args: dict = {"anchor": entry["anchor"], "resume": True}
             if entry.get("branch"):
@@ -108,7 +125,7 @@ def _select_slot_dev_orch(
                     f"— prior completion opened no PR (issue #3866)"
                 ),
             )
-        # Malformed entry (no anchor) — drop it rather than looping on it
+        # Malformed (no anchor) or parked entry — drop it rather than looping on it
         # forever; still counts as a state mutation main() will persist.
         resume_pending.pop(0)
 
@@ -142,7 +159,7 @@ def _select_slot_dev_orch(
     # no-PR stall comments on the issue and hands it to `ready-for-human`
     # at the third, instead of queueing another resume.
     nopr_anchor = _orch_anchor_signal(state, "orch_dev_resume_nopr_anchor")
-    if nopr_anchor is not None:
+    if nopr_anchor is not None and not _is_parked_anchor(state, events, nopr_anchor):
         return make_dispatch(
             cls,
             "hydra-dev",
@@ -162,8 +179,33 @@ def _select_slot_dev_orch(
     # `conflict-fix-attempted` PR label (applied by the dispatch binding
     # BEFORE the spawn) IS the durable cap: no tracker, no state key.
     dirty_fix = _dirty_forward_fix_signal(state, events)
-    if dirty_fix is not None:
+    if dirty_fix is not None and not _is_parked_anchor(state, events, dirty_fix[0]):  # #5319 belt
         fix_issue, fix_pr, fix_branch = dirty_fix
+        # ISSUE #5253: a QA FAIL pending AT this PR's pre-merge head selects the
+        # two-phase arm (merge master FIRST, then the forward-fix contract on
+        # the merged head). The Turn Snapshot's collector owns the predicate
+        # (pure here, ADR-0007); the field must name THIS pin's PR, so a signal
+        # event that overrode the pin without the field falls to conflict-only.
+        two_phase = _dirty_fix_fail_pr(state, events) == fix_pr
+        if two_phase:
+            return make_dispatch(
+                cls,
+                "hydra-dev",
+                prompt_args={
+                    "anchor": f"issue-{fix_issue}",
+                    "resume": True,
+                    "resume_branch": fix_branch,
+                    "forward_fix_pr": fix_pr,
+                    "conflict_fix": True,
+                    "qa_fail_at_head": True,
+                },
+                reason=(
+                    f"dirty PR two-phase conflict fix-forward: PR {fix_pr} (issue #{fix_issue}) "
+                    f"on {fix_branch} — QA FAIL pending at head: merge origin/master FIRST, "
+                    "then resolve the findings on the merged head, one attempt per PR "
+                    "(issues #4807, #5253)"
+                ),
+            )
         return make_dispatch(
             cls,
             "hydra-dev",
@@ -223,7 +265,7 @@ def _select_slot_dev_orch(
     # forward-fix dispatch contract (continue the PR's head, push to the
     # SAME branch, NEVER `gh pr create`).
     resume_pick = _dev_resume_pick_signal(state, events)
-    if resume_pick is not None:
+    if resume_pick is not None and not _is_parked_anchor(state, events, resume_pick[0]):  # #5319 belt
         pick_issue, pick_pr, pick_branch = resume_pick
         prompt_args = {
             "anchor": f"issue-{pick_issue}",

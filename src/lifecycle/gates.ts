@@ -7,6 +7,7 @@
  * A failed fetch is a refusal (`fetch-failed`), never a pass.
  */
 import { hasScopeSection } from "../scope-section.ts";
+import { parseQaVerdictTrailers, qaVerdictShaMatches } from "../qa/verdict-trailer.ts";
 import { isAdr5Reason, isAllowedReason } from "./reasons.ts";
 import type { GateId, LifecycleState } from "./transitions.ts";
 
@@ -45,7 +46,53 @@ export interface StateEntryRecord {
   enteredAtMs: number | null;
 }
 
+/**
+ * A PR read live at head for the `qa-passed` exit decision (ADR-0047 D4). The
+ * fetcher folds the required-check rollup to `checks`; `bodies` are the PR's
+ * comment then review bodies (they carry the `QA-Verdict:` trailers).
+ */
+export interface QaLivePr {
+  number: number;
+  /** Upper-cased `OPEN | MERGED | CLOSED`. */
+  state: string;
+  isDraft: boolean;
+  /** Upper-cased GitHub `mergeStateStatus` (`DIRTY`, `CLEAN`, `UNKNOWN`, ...). */
+  mergeStateStatus: string;
+  headSha: string;
+  /** Required checks folded: `unknown` when they could not be read. */
+  checks: "red" | "green" | "pending" | "unknown";
+  bodies: readonly string[];
+}
+
+export type QaExitTarget = "closed" | "ready-for-agent" | "needs-dev-resume" | "needs-qa";
+
+/**
+ * The ONE pure predicate for a `qa-passed` exit (ADR-0047 D4, #5316 INV-3):
+ * the reconcile uses it to CHOOSE the target and the `qa-exit` gate uses it to
+ * VERIFY the requested one. Decision order is fixed: MERGED -> closed; CLOSED
+ * unmerged -> ready-for-agent; draft -> none; DIRTY -> needs-dev-resume;
+ * settled-red required checks -> needs-dev-resume; settled-green with no PASS
+ * trailer matching the head sha -> needs-qa; otherwise none.
+ */
+export function classifyQaPassedExit(live: QaLivePr): QaExitTarget | "none" {
+  if (live.state === "MERGED") return "closed";
+  if (live.state === "CLOSED") return "ready-for-agent";
+  if (live.state !== "OPEN" || live.isDraft) return "none";
+  if (live.mergeStateStatus === "DIRTY") return "needs-dev-resume";
+  if (live.checks === "red") return "needs-dev-resume";
+  if (live.checks === "green") {
+    const passAtHead = live.bodies.some((b) =>
+      parseQaVerdictTrailers(b).some(
+        (t) => t.verdict === "PASS" && t.pr === live.number && qaVerdictShaMatches(t, live.headSha),
+      ),
+    );
+    return passAtHead ? "none" : "needs-qa";
+  }
+  return "none";
+}
+
 export interface GateRecords {
+  qaLive?: Fetched<QaLivePr>;
   designConcept?: Fetched<DesignConceptRecord>;
   pr?: Fetched<PrRecord>;
   comment?: Fetched<CommentRecord>;
@@ -154,6 +201,20 @@ export function gateClose(input: GateInput, records: GateRecords): GateResult {
   return pass();
 }
 
+/**
+ * `qa-passed -> needs-dev-resume | needs-qa | ready-for-agent`: evidence `pr=N`
+ * must be re-read live at head and {@link classifyQaPassedExit} must name the
+ * requested target. Fails closed on a fetch miss.
+ */
+export function gateQaExit(input: GateInput, records: GateRecords): GateResult {
+  const prNumber = parsePrEvidence(input.evidence);
+  if (prNumber === null) return fail("evidence-required:pr");
+  const live = records.qaLive;
+  if (live === undefined || live.ok === false) return fail("fetch-failed");
+  if (live.value.number !== prNumber) return fail("record-binding-mismatch");
+  return classifyQaPassedExit(live.value) === input.to ? pass() : fail("qa-exit-cause-mismatch");
+}
+
 export const RESEARCH_TRAILER_PREFIX = "Hydra-Research:";
 
 export type ResearchTrailer =
@@ -218,8 +279,10 @@ export function recordsNeeded(gate: GateId): {
   pr: boolean;
   comment: boolean;
   stateEntry: boolean;
+  qaLive: boolean;
 } {
   return {
+    qaLive: gate === "qa-exit",
     designConcept: gate === "dispatch",
     pr: gate === "pr-open" || gate === "close",
     comment: gate === "research-exit",
@@ -244,6 +307,8 @@ export function evaluateGate(gate: GateId, input: GateInput, records: GateRecord
       return gateClose(input, records);
     case "research-exit":
       return gateResearchExit(input, records);
+    case "qa-exit":
+      return gateQaExit(input, records);
     case "not-yet-implemented":
       return fail("gate-unimplemented");
   }

@@ -13,6 +13,8 @@ import turn_snapshot as ts
 from decide_base import (
     QA_STALL_MAX_ATTEMPTS,
     _needs_qa_target_pr_ref,
+    _parked_issues,
+    _parked_read_degraded,
     _signal_present,
     make_dispatch,
 )
@@ -52,8 +54,25 @@ def _select_slot_qa_orch(
     # actually reviewed, risking a false "stalled" verdict on a
     # healthy-but-queued issue the moment it becomes the new head.
     numbers = _qa_orch_needs_qa_numbers(state, events)
+    pinned_issue: int | None = None
+    # #5319 INV-4: a degraded parked read fails CLOSED on every path, including
+    # the absent/empty-numbers boolean fallback below (QA r2).
+    if _parked_read_degraded(state, events):
+        return None
     if numbers:
+        # #5319 (ADR-0047 Decision 6): a parked needs-qa issue is the operator's
+        # (human hold) - never reviewed. Drop parked numbers; if nothing is left
+        # there is nothing to dispatch on.
+        parked = _parked_issues(state, events)
+        unfiltered = numbers
+        numbers = [n for n in numbers if n not in parked]
+        if not numbers:
+            return None
         head = numbers[0]
+        # Pin only when the parked filter changed the head hydra-qa would
+        # self-select; an unparked lane keeps the unpinned dispatch shape.
+        if head != unfiltered[0]:
+            pinned_issue = head
         attempts = _qa_orch_item_attempts(state)
         if not _qa_orch_item_eligible(attempts.get(head, 0)):
             # The head issue has exhausted its attempt cap -> suppress
@@ -78,7 +97,12 @@ def _select_slot_qa_orch(
     # board read or a pre-#3829 playbook) -> fail OPEN on the coarse
     # boolean alone, preserving pre-#3829 behaviour so a transient wiring
     # gap never dead-arms qa_orch (the #3709 defect class).
-    return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "orch"}, reason="needs-qa")
+    prompt_args: dict = {"scope": "orch"}
+    if pinned_issue is not None:
+        # QA r2: pin the parked-filtered head so hydra-qa does not self-select
+        # its own unfiltered `.[0]` (which could be a parked issue).
+        prompt_args["issue"] = f"issue-{pinned_issue}"
+    return make_dispatch(cls, "hydra-qa", prompt_args=prompt_args, reason="needs-qa")
 
 
 def _select_slot_qa_target(

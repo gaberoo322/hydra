@@ -132,6 +132,8 @@ export const DEGRADE = {
   NOT_REQUESTED: "not-requested",
   /** The PR-list read failed (no-PR resume pick). */
   PR_LIST_READ_FAILED: "pr-list-read-failed",
+  /** The parked-issue read failed, so the parked skip cannot be proven (#5319). */
+  PARKED_UNREADABLE: "parked-unreadable",
 } as const;
 
 /** Dynamic detail appended to a degradation: an error message, an HTTP status, an interpolated cause. */

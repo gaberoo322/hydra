@@ -123,15 +123,23 @@ function inCreateContext(text: string, idx: number, matched = ""): boolean {
   const win = text.slice(Math.max(0, idx - 300), idx);
   // Short `-l` is also `ls -l` / `wc -l` / `grep -l`: demand `issue|pr create` (shell or argv), not a bare `create`.
   if (/^["']?-l(?![\w-])/.test(matched)) {
-    // Same command only: drop everything up to the last non-continued newline (`\` joins lines).
-    let from = 0;
-    for (let i = win.length - 1; i >= 0; i--) {
-      if (win[i] === "\n" && win[i - 1] !== "\\") {
-        from = i;
-        break;
-      }
+    // Same command only, bounded by command boundaries rather than newlines: the last
+    // `issue|pr create` must reach the flag with no `;` / `&&` / `||` / `|` between. A newline
+    // ends the command only when no bracket is open (multi-line argv list), no `\` continues it
+    // and no heredoc (`<<`) is in play. Gives `-l` the same reach as `--label` (INV-2).
+    let create = -1;
+    for (const m of win.matchAll(/\b(?:issue|pr)["',\s[]+create\b/g)) create = m.index ?? -1;
+    if (create < 0) return false;
+    const tail = win.slice(create).replace(/\\\r?\n/g, " ").replace(/\r/g, "");
+    if (tail.includes("<<")) return true;
+    // Brackets opened just before `issue` (`run("gh", [` then newline-separated items) still count.
+    let depth = 0;
+    for (const ch of win.slice(Math.max(0, create - 80), create) + tail) {
+      if (ch === "[" || ch === "(" || ch === "{") depth++;
+      else if (ch === "]" || ch === ")" || ch === "}") depth--;
     }
-    return /\b(?:issue|pr)["',\s[]+create\b/.test(win.slice(from));
+    if (/;|&&|\|/.test(tail)) return false;
+    return depth > 0 || !tail.includes("\n");
   }
   return CREATE_CMD_RE.test(win);
 }

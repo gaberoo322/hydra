@@ -321,8 +321,8 @@ describe("issue #4608 — operator tooling resolves the Target through the seam,
     const start = watchdog.indexOf("run_node_modules_integrity()");
     assert.ok(start >= 0, "run_node_modules_integrity() not found");
     const body = watchdog.slice(start, start + watchdog.slice(start).search(/^}/m));
-    assert.match(body, /WATCHED_ROOTS=\(/, "roots stay an array");
-    assert.match(body, /for root in "\$\{WATCHED_ROOTS\[@\]\}"/, "the check still iterates the array");
+    assert.match(body, /roots=\(/, "roots stay an array");
+    assert.match(body, /for root in "\$\{roots\[@\]\}"/, "the check still iterates the array");
     assert.match(body, /HYDRA_WATCHDOG_NM_ROOTS/, "the colon-separated override still wins");
     assert.match(body, /"\$HOME\/hydra\/node_modules"/, "the orchestrator root is always watched");
     assert.match(body, /scripts\/target\/print-target-facts\.ts/, "the Target root is resolved through the seam");
