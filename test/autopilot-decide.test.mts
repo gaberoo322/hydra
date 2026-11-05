@@ -5711,3 +5711,58 @@ describe("decide.py — a terminating turn still arms its QA PASS (#5144)", () =
     lastIsTerminate(plan, "budget");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #5319 - decide.py skips parked work (ADR-0047 Decision 6, INV-6 belt)
+// ---------------------------------------------------------------------------
+
+describe("decide.py - parked issues are never dispatched or armed (issue #5319)", () => {
+  const PARKED = 5319;
+  const RESUME_PICK = `issue-${PARKED}:5400:worktree-agent-abc123`;
+  const DIRTY_FIX = `issue-${PARKED}:5401:worktree-agent-def456`;
+
+  const devOrch = (plan: any): any[] => (plan.actions ?? []).filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
+  const namesParked = (plan: any): boolean => JSON.stringify(plan.actions ?? []).includes(String(PARKED));
+
+  test("fixture snapshot: pins, no-PR anchor, queued resume and a qa-verdict for a parked issue produce no action naming it", () => {
+    const s = baseState({
+      signals: {
+        orch_parked_issues: [PARKED],
+        orch_dev_resume_pick: RESUME_PICK,
+        orch_dirty_forward_fix: DIRTY_FIX,
+        orch_dev_resume_nopr_anchor: `issue-${PARKED}`,
+        orch_work_available: false,
+      },
+    });
+    s.dev_resume_pending = [{ anchor: `issue-${PARKED}`, branch: "worktree-agent-abc" }]; // dropped, never dispatched
+    const events = [
+      { type: "qa-verdict", pr_number: 5400, tier: 3, closing_issue: PARKED, mechanical: null, has_scope_justification: false, verdict: "PASS" },
+    ];
+    const plan = runDecide(s, null, events);
+    assert.equal(namesParked(plan), false, `no action may name the parked issue: ${JSON.stringify(plan.actions)}`);
+    assert.equal(findAction(plan, (a) => a.type === "auto-merge"), undefined);
+    assert.ok((plan.reasons ?? []).includes(`parked:#${PARKED}`), "the auto-merge hold is named, not silent");
+  });
+
+  test("control: the same snapshot WITHOUT the parked set dispatches the no-PR anchor", () => {
+    const s = baseState({ signals: { orch_dev_resume_nopr_anchor: `issue-${PARKED}`, orch_work_available: false } });
+    const d = devOrch(runDecide(s, null));
+    assert.equal(d.length, 1);
+    assert.equal(d[0].prompt_args.anchor, `issue-${PARKED}`);
+  });
+
+  test("a parked resume pick does not shadow an unparked one-turn-later pick: the pin is simply declined", () => {
+    const s = baseState({ signals: { orch_parked_issues: [PARKED], orch_dev_resume_pick: RESUME_PICK } });
+    assert.equal(devOrch(runDecide(s, null)).filter((a) => a.prompt_args?.forward_fix_pr === 5400).length, 0);
+  });
+
+  test("an unparked sibling qa-verdict still auto-merges next to a parked one", () => {
+    const events = [
+      { type: "qa-verdict", pr_number: 5400, tier: 1, closing_issue: PARKED, mechanical: null, has_scope_justification: false, verdict: "PASS" },
+      { type: "qa-verdict", pr_number: 5402, tier: 1, closing_issue: 5320, mechanical: null, has_scope_justification: false, verdict: "PASS" },
+    ];
+    const plan = runDecide(baseState({ signals: { orch_parked_issues: [PARKED] } }), null, events);
+    const merged = (plan.actions ?? []).filter((a: any) => a.type === "auto-merge").map((a: any) => a.pr_number);
+    assert.deepEqual(merged, [5402]);
+  });
+});

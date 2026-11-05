@@ -96,11 +96,14 @@ def _select_slot_dev_orch(
     resume_pending = state.get("dev_resume_pending") if isinstance(state, dict) else None
     if isinstance(resume_pending, list) and resume_pending:
         entry = resume_pending[0]
-        if isinstance(entry, dict) and _is_parked_anchor(state, events, entry.get("anchor")):
-            # ISSUE #5319 (INV-6): a park that landed after reap queued the
-            # resume. DROP, never re-queue - the operator owns a parked issue.
-            resume_pending.pop(0)
-        elif isinstance(entry, dict) and entry.get("anchor"):
+        # ISSUE #5319 (INV-6): a park that landed after reap queued the resume
+        # is DROPPED (never re-queued - the operator owns a parked issue) by the
+        # same pop as a malformed entry below.
+        if (
+            isinstance(entry, dict)
+            and entry.get("anchor")
+            and not _is_parked_anchor(state, events, entry["anchor"])
+        ):
             resume_pending.pop(0)
             prompt_args: dict = {"anchor": entry["anchor"], "resume": True}
             if entry.get("branch"):
@@ -114,7 +117,7 @@ def _select_slot_dev_orch(
                     f"— prior completion opened no PR (issue #3866)"
                 ),
             )
-        # Malformed entry (no anchor) — drop it rather than looping on it
+        # Malformed (no anchor) or parked entry — drop it rather than looping on it
         # forever; still counts as a state mutation main() will persist.
         resume_pending.pop(0)
 

@@ -75,6 +75,20 @@
         "100",
         "--json",
         "number,labels,updatedAt"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--label",
+        "parked",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels,updatedAt"
       ]
     ],
     "sleeps": [],
@@ -115,7 +129,11 @@
           "ok": false,
           "reason": "pr-list-unreadable"
         },
-        "dirtyFixFailPr": null
+        "dirtyFixFailPr": null,
+        "parkedIssues": {
+          "ok": true,
+          "value": {}
+        }
       }
     }
   }
