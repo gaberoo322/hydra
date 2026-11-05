@@ -289,3 +289,48 @@ describe("the 3rd reviewed FAIL parks through the seam (INV-5, INV-6)", () => {
     assert.equal(w.edits[0].add[0], "needs-dev-resume");
   });
 });
+
+describe("QA-FAIL round-1 fixes (#5317 PR #5377)", () => {
+  test("INV-3 latest trailer is chosen by post time, not array order", () => {
+    // newer comment FAIL listed first, stale review PASS listed last
+    const t = [timed(trailer("FAIL", 2), AFTER + 5000), timed(trailer("PASS", 1), AFTER)];
+    assert.deepEqual(classifyQaVerdictTarget(live({ timedBodies: t }), ENTERED), { ok: true, target: "needs-dev-resume" });
+    // sibling shape: ordered input keeps its old verdict
+    const ordered = [timed(trailer("FAIL", 1), AFTER), timed(trailer("PASS", 2), AFTER + 5000)];
+    assert.deepEqual(classifyQaVerdictTarget(live({ timedBodies: ordered }), ENTERED), { ok: true, target: "qa-passed" });
+  });
+
+  test("defer arm: trailer-less advance in enforce routes by live PR state (red without the defer gate)", async () => {
+    const w = world("enforce", live());
+    const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7", defer: "1" }, actor: "hydra-qa" }, w.deps);
+    assert.equal(res.ok, true);
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
+    const w2 = world("enforce", live({ state: "CLOSED" }));
+    assert.equal((await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7", defer: "1" } }, w2.deps)).ok, true);
+  });
+
+  test("defer evidence never admits qa-passed, a wrong lane, or a merged PR; no defer still needs a trailer", async () => {
+    const w = world("enforce", live());
+    const r1 = await advance({ issue: 10, to: "qa-passed", evidence: { pr: "7", defer: "1" } }, w.deps);
+    assert.equal((r1 as { code?: string }).code, "qa-verdict-mismatch");
+    const r2 = await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7", defer: "1" } }, w.deps);
+    assert.equal((r2 as { code?: string }).code, "qa-verdict-mismatch");
+    const wm = world("enforce", live({ state: "MERGED" }));
+    const r3 = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7", defer: "1" } }, wm.deps);
+    assert.equal((r3 as { code?: string }).code, "pr-merged");
+    const r4 = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps);
+    assert.equal((r4 as { code?: string }).code, "qa-verdict-missing");
+    assert.deepEqual(w.edits, []);
+  });
+
+  test("closed-PR FAIL edge runs the qa-fail-rounds cap (3rd FAIL parks); a defer never does", async () => {
+    const three = [failBody(1), failBody(2), failBody(3)];
+    const w = world("enforce", live({ state: "CLOSED", timedBodies: [timed(failBody(3))] }), three);
+    const res = await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7" }, actor: "hydra-qa" }, w.deps);
+    assert.equal((res as { code?: string }).code, "parked:qa-fail-rounds");
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["parked"] }]);
+    const wd = world("enforce", live({ state: "CLOSED" }), three);
+    const rd = await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7", defer: "1" } }, wd.deps);
+    assert.equal(rd.ok, true);
+  });
+});

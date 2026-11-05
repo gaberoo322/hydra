@@ -652,7 +652,12 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
   //     needs-dev-resume` runs the trailer-sourced `qa-fail-rounds` arm. The
   //     verdict comment (this round's trailer) is already posted, so a 3rd
   //     reviewed FAIL counts 3 >= 3 and, in enforce, parks INSTEAD of bouncing.
-  if (stateLabels.length === 1 && from === "needs-qa" && to === "needs-dev-resume") {
+  if (
+    stateLabels.length === 1 &&
+    from === "needs-qa" &&
+    (to === "needs-dev-resume" || to === "ready-for-agent") &&
+    gateEvidence.defer !== "1"
+  ) {
     const prNumber = parsePrEvidence(gateEvidence);
     if (prNumber !== null && prNumber > 0) {
       const check = await checkCaps(deps, issue, { kind: "qa-fail", pr: prNumber }, prNumber);

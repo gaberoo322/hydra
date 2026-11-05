@@ -171,7 +171,7 @@ live_state_labels() {
   local raw s out=""
   raw=$(gh issue view "$1" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null) || return 1
   for s in $LIFECYCLE_STATE_LABELS; do
-    if printf '%s\n' "$raw" | grep -Fxq -- "$s"; then out="${out:+$out,}$s"; fi
+    if grep -Fxq -- "$s" <<<"$raw"; then out="${out:+$out,}$s"; fi
   done
   printf '%s' "$out"
 }
@@ -179,9 +179,19 @@ live_state_labels() {
 live_state_is() {
   local live
   live=$(live_state_labels "$1") || { echo "[autopilot] recover-stale: skip issue=$1 (live label read failed)"; return 1; }
+  # Skip only when the listed state is absent from the live set, or a state
+  # DOWNSTREAM of it is present. Double-labelled drift that still carries the
+  # listed state is reported loudly as state-ambiguous but still acted on.
+  case ",$live," in
+    *",$2,"*) ;;
+    *) echo "[autopilot] recover-stale: skip issue=$1 (live state '${live:-none}' != listed '$2')"; return 1 ;;
+  esac
   if [ "$live" != "$2" ]; then
-    echo "[autopilot] recover-stale: skip issue=$1 (live state '${live:-none}' != listed '$2')"
-    return 1
+    case "$live" in
+      *needs-qa*|*qa-passed*|*needs-dev-resume*|*ready-for-human*|*parked*)
+        echo "[autopilot] recover-stale: skip issue=$1 (live state '$live' != listed '$2': downstream state present)"; return 1 ;;
+    esac
+    echo "[autopilot] recover-stale: WARN state-ambiguous issue=$1 live='$live' listed='$2' (acting on listed state)"
   fi
   return 0
 }

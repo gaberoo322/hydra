@@ -577,7 +577,7 @@ fi
   No verdict is being emitted — the PR cannot merge on this pass. The full review (including the Verifier-Core fan-out for a T4 PR) runs once the PR is rebased / CI is green. QA has exited; the autopilot re-queues it when the PR is ready."
   BOUNCE_LABEL=$(qa_bounce_label)
   if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then
-    npx tsx scripts/lifecycle.ts advance $issue_number needs-dev-resume --evidence pr=$pr_number --actor hydra-qa \
+    npx tsx scripts/lifecycle.ts advance $issue_number needs-dev-resume --evidence pr=$pr_number --evidence defer=1 --actor hydra-qa \
       || { echo "[hydra-qa] ERROR: lifecycle advance needs-dev-resume refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1; }
     if [ "$GLM_AUTHORED" = "1" ]; then
       gh issue comment $issue_number --repo gaberoo322/hydra --body \
@@ -603,7 +603,7 @@ fi
   else
     # Not-open fallback (#4766): live read confirmed CLOSED/MERGED — no open
     # PR remains, so a fresh dev pick is the right lane.
-    npx tsx scripts/lifecycle.ts advance $issue_number ready-for-agent --evidence pr=$pr_number --actor hydra-qa \
+    npx tsx scripts/lifecycle.ts advance $issue_number ready-for-agent --evidence pr=$pr_number --evidence defer=1 --actor hydra-qa \
       || { echo "[hydra-qa] ERROR: lifecycle advance ready-for-agent refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1; }
   fi
   exit 0
@@ -1162,8 +1162,12 @@ fi
 # the PASS trailer at head posted after the issue entered needs-qa. A refusal
 # exits non-zero (never a by-hand label edit — ADR-0047 D4); the comment above
 # is the durable record and reconcile / the next QA pick recover.
-npx tsx scripts/lifecycle.ts advance $issue_number qa-passed --evidence pr=$pr_number --actor hydra-qa \
-  || { echo "[hydra-qa] ERROR: lifecycle advance qa-passed refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1; }
+ADV_OUT=$(npx tsx scripts/lifecycle.ts advance $issue_number qa-passed --evidence pr=$pr_number --actor hydra-qa); ADV_RC=$?; printf '%s\n' "$ADV_OUT"
+if [ "$ADV_RC" != "0" ]; then
+    # pr-merged is NOT an error: the PR merged under us, and reconcile owns needs-qa -> closed (#5317 QA).
+    [ "$(printf '%s' "$ADV_OUT" | jq -r '.code // empty' 2>/dev/null)" = "pr-merged" ] && exit 0
+    echo "[hydra-qa] ERROR: lifecycle advance qa-passed refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1
+fi
 
 # Enable auto-merge (squash) rather than a blocking immediate merge: the merge
 # gate is CI required-status-checks (feedback_hydra_repo_no_auto_merge), so
@@ -1213,8 +1217,12 @@ ${QA_VERDICT_TRAILER}"
 # re-dispatch QA every tick. PASS-pending-CI is a PASS for routing: the issue
 # goes to qa-passed, and the reconcile pass reads CI live (a later red CI
 # bounces it back). `in-progress` is never written here.
-npx tsx scripts/lifecycle.ts advance $issue_number qa-passed --evidence pr=$pr_number --actor hydra-qa \
-  || { echo "[hydra-qa] ERROR: lifecycle advance qa-passed refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1; }
+ADV_OUT=$(npx tsx scripts/lifecycle.ts advance $issue_number qa-passed --evidence pr=$pr_number --actor hydra-qa); ADV_RC=$?; printf '%s\n' "$ADV_OUT"
+if [ "$ADV_RC" != "0" ]; then
+    # pr-merged is NOT an error: the PR merged under us, and reconcile owns needs-qa -> closed (#5317 QA).
+    [ "$(printf '%s' "$ADV_OUT" | jq -r '.code // empty' 2>/dev/null)" = "pr-merged" ] && exit 0
+    echo "[hydra-qa] ERROR: lifecycle advance qa-passed refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1
+fi
 ```
 
 **Verdict `FAIL` or `FAIL-pending-CI`** (any axis has hard findings, or a required check has already failed):
@@ -1275,8 +1283,16 @@ if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then
 else
   # Not-open fallback (#4766): live read confirmed CLOSED/MERGED — no open
   # PR remains, so a fresh dev pick (not a resume) is the right lane.
-  npx tsx scripts/lifecycle.ts advance $issue_number ready-for-agent --evidence pr=$pr_number --actor hydra-qa \
-    || { echo "[hydra-qa] ERROR: lifecycle advance ready-for-agent refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1; }
+  ADV_OUT=$(npx tsx scripts/lifecycle.ts advance $issue_number ready-for-agent --evidence pr=$pr_number --actor hydra-qa); ADV_RC=$?; printf '%s\n' "$ADV_OUT"
+  if [ "$ADV_RC" != "0" ]; then
+      # pr-merged is NOT an error: the PR merged under us, and reconcile owns needs-qa -> closed (#5317 QA).
+      [ "$(printf '%s' "$ADV_OUT" | jq -r '.code // empty' 2>/dev/null)" = "pr-merged" ] && exit 0
+      if [ "$(printf '%s' "$ADV_OUT" | jq -r '.code // empty' 2>/dev/null)" = "parked:qa-fail-rounds" ]; then
+        ROUND_ACTION=escalate  # closed-PR edge runs the round cap too (#4735 parity; parked in the same call)
+      else
+        echo "[hydra-qa] ERROR: lifecycle advance ready-for-agent refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1
+      fi
+  fi
 fi
 if [ "$ROUND_ACTION" = "escalate" ]; then
   # Off-list escalation (ADR-0047 D6): the issue is PARKED, not ready-for-human.

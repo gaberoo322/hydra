@@ -429,7 +429,7 @@ describe("recover-stale.sh — live-state guard (issue #5317)", () => {
     }
   });
 
-  test("a live double-state set (in-progress + needs-qa) is not the listed state → skipped", () => {
+  test("a live double-state set with a DOWNSTREAM state (in-progress + needs-qa) → skipped", () => {
     const dir = mkdtempSync(join(tmpdir(), "recover-stale-livestate-"));
     try {
       const stub = makeGhStub(
@@ -440,6 +440,24 @@ describe("recover-stale.sh — live-state guard (issue #5317)", () => {
       const r = runRecoverStale(stub.binDir, ["stale_in_progress", "961"]);
       assert.equal(r.status, 0, r.stderr);
       assert.deepEqual(stub.readEdits(), []);
+      assert.match(r.stdout, /downstream state present/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("double-label drift WITHOUT a downstream state (in-progress + ready-for-agent) is acted on, loudly (#5317 QA)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "recover-stale-livestate-"));
+    try {
+      const stub = makeGhStub(
+        dir,
+        [{ number: 963, state: "OPEN", body: "x", labels: ["in-progress", "ready-for-agent"] }],
+        [],
+      );
+      const r = runRecoverStale(stub.binDir, ["stale_in_progress", "963"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /WARN state-ambiguous issue=963/);
+      assert.notDeepEqual(stub.readEdits(), [], "drift must not be skipped forever");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

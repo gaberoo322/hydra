@@ -109,11 +109,18 @@ export function classifyQaVerdictTarget(
   live: QaLivePr,
   enteredAtMs: number,
 ): { ok: true; target: QaVerdictTarget } | { ok: false; code: string } {
+  // INV-3: the LATEST trailer is the one with the max post time (NOT array
+  // order: comments are listed before reviews, so a stale review-body trailer
+  // would otherwise override a newer comment trailer). Ties keep the later
+  // array position; an unreadable time sorts oldest.
   let latest: { verdict: FinalVerdict; createdAtMs: number | null } | undefined;
+  const rank = (ms: number | null): number => (ms === null ? Number.NEGATIVE_INFINITY : ms);
   for (const tb of live.timedBodies ?? []) {
     for (const t of parseQaVerdictTrailers(tb.body)) {
       if (t.pr === live.number && qaVerdictShaMatches(t, live.headSha)) {
-        latest = { verdict: t.verdict, createdAtMs: tb.createdAtMs };
+        if (latest === undefined || rank(tb.createdAtMs) >= rank(latest.createdAtMs)) {
+          latest = { verdict: t.verdict, createdAtMs: tb.createdAtMs };
+        }
       }
     }
   }
@@ -268,6 +275,15 @@ export function gateQaVerdict(input: GateInput, records: GateRecords): GateResul
   if (live === undefined || live.ok === false) return fail("fetch-failed");
   if (entry === undefined || entry.ok === false) return fail("fetch-failed");
   if (live.value.number !== prNumber) return fail("record-binding-mismatch");
+  // Defer arm (hydra-qa step 6.6): no verdict was emitted, so there is no
+  // trailer to gate on. `defer=1` evidence admits ONLY the live-state bounce
+  // (OPEN -> needs-dev-resume, CLOSED -> ready-for-agent); never qa-passed.
+  if (input.evidence.defer === "1") {
+    const deferTarget =
+      live.value.state === "OPEN" ? "needs-dev-resume" : live.value.state === "CLOSED" ? "ready-for-agent" : null;
+    if (deferTarget === null) return fail("pr-merged");
+    return deferTarget === input.to ? pass() : fail("qa-verdict-mismatch");
+  }
   if (entry.value.enteredAtMs === null) return fail("state-entry-unknown");
   const c = classifyQaVerdictTarget(live.value, entry.value.enteredAtMs);
   if (c.ok === false) return fail(c.code);
