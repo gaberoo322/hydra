@@ -1705,6 +1705,13 @@ const RAW_ENTRIES = [
         preconditions: [],
         consequence: "decides the right state with you and removes the stray label",
       },
+      {
+        kind: "terminal-skill",
+        command: "npx tsx scripts/lifecycle.ts reconcile --report",
+        label: "Read the latest reconcile report",
+        preconditions: [],
+        consequence: "prints every invalid issue and the enforce-readiness counts without scanning or changing anything",
+      },
     ],
     rationale:
       "an open issue with 2+ lifecycle state labels is ambiguous: the lifecycle seam refuses to move it and no dispatcher will pick it, and the reconcile never edits labels on its own (ADR-0047 D1) — an operator removes the stray label.",

@@ -1243,3 +1243,70 @@ describe("redis/attention — typed dismiss + dismissal ledger", () => {
     for (const ids of dismissed.values()) assert.equal(ids.size, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// waiting-on-you:invalid-state (issue #5316, ADR-0047 D1)
+// ---------------------------------------------------------------------------
+
+describe("getAttentionFeed - waiting-on-you:invalid-state line", () => {
+  const fresh = NOW.getTime() - 60_000;
+  const invalid = [{ number: 77, labels: ["in-progress", "needs-qa"] }];
+  const quietFriction = async () => ({
+    bySkill: [], thresholdCandidates: [], recentMetaFrictionIssues: [], promotionThreshold: PROMOTION_THRESHOLD,
+    candidateWindow: 1, windowHours: 168, generatedAt: NOW.toISOString(), scanned: 0, sourcesOk: true,
+  });
+
+  test("invalid-state: one item per invalid issue composed from the persisted report alone", async () => {
+    const result = await getAttentionFeed({
+      ...QUIET_RANK0,
+      ...NO_DISMISSALS,
+      ...NO_COUNTING,
+      now: NOW,
+      getIssuesWaiting: async () => stuckSnapshot(),
+      getFrictionPatterns: quietFriction,
+      readLifecycleReconcile: async () => ({ ok: true, ts: fresh, invalid }),
+    });
+    const items = result.items.filter((i) => i.key === "waiting-on-you:invalid-state");
+    assert.equal(items.length, 1);
+    assert.equal(items[0].id, "invalid-state-issue-77");
+    assert.equal(items[0].signal, "blocked-on-human");
+    assert.equal(items[0].url, "https://github.com/gaberoo322/hydra/issues/77");
+    assert.equal(items[0].detail, "in-progress, needs-qa");
+    assert.equal(items[0].bucket, "waiting-on-you");
+  });
+
+  test("invalid-state: the line is healthy only while the report exists and is under 3h old", async () => {
+    let seen: ReadonlyMap<string, { healthy: boolean }> = new Map();
+    const run = async (read: () => Promise<any>) => {
+      await getAttentionFeed({
+        ...QUIET_RANK0,
+        ...NO_DISMISSALS,
+        now: NOW,
+        getIssuesWaiting: async () => stuckSnapshot(),
+        getFrictionPatterns: quietFriction,
+        reconcileLedgers: async (m) => {
+          seen = m;
+        },
+        readLifecycleReconcile: read,
+      });
+      return seen.get("waiting-on-you:invalid-state")!;
+    };
+    assert.equal((await run(async () => ({ ok: true, ts: fresh, invalid: [] }))).healthy, true);
+    assert.equal((await run(async () => ({ ok: true, ts: NOW.getTime() - 4 * 3_600_000, invalid: [] }))).healthy, false);
+    assert.equal((await run(async () => ({ ok: true, ts: null, invalid: [] }))).healthy, false);
+    assert.equal((await run(async () => ({ ok: false }))).healthy, false);
+  });
+
+  test("invalid-state: a stale report admits no items", async () => {
+    const result = await getAttentionFeed({
+      ...QUIET_RANK0,
+      ...NO_DISMISSALS,
+      ...NO_COUNTING,
+      now: NOW,
+      getIssuesWaiting: async () => stuckSnapshot(),
+      getFrictionPatterns: quietFriction,
+      readLifecycleReconcile: async () => ({ ok: true, ts: NOW.getTime() - 5 * 3_600_000, invalid }),
+    });
+    assert.equal(result.items.filter((i) => i.key === "waiting-on-you:invalid-state").length, 0);
+  });
+});
