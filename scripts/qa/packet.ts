@@ -99,7 +99,15 @@ export async function runPacket(
   for (const f of names.stdout.split("\n")) {
     if (f === "") continue;
     const shown = await ports.git(["show", `HEAD:${f}`]);
-    const body = shown.ok ? chomp(shown.stdout) : DELETED_SENTINEL;
+    let body: string;
+    if (shown.ok) body = chomp(shown.stdout);
+    else if (/does not exist|exists on disk, but not in/i.test(shown.stderr)) body = DELETED_SENTINEL;
+    else {
+      // Not a missing path: a transient error must not read as a deleted file.
+      console.error(`[hydra-qa] WARN: show HEAD:${f} failed — packet entry unavailable:`, shown.stderr.slice(0, 300));
+      degraded.push("changed-file-unreadable");
+      body = `(file contents unavailable — show failed: ${shown.stderr.slice(0, 120)})`;
+    }
     changedFilesPacket += `===== ${f} @ HEAD =====\n${body}\n\n`;
   }
   let packet = `Diff (${fixedSha.slice(0, 12)}…HEAD):\n\n${diffText}\n\nFull contents of every changed file at HEAD:\n\n${changedFilesPacket}`;
@@ -120,7 +128,11 @@ export async function runPacket(
     packet += `\n\nRE-REVIEW CONTEXT — the previous QA round FAILed with the findings below. Review the FULL change above as usual. In your report, first state fixed/not-fixed for each prior finding; for anything new, prefer medium+ and say why it wasn't visible before.\n\n${priorFindings}`;
     if (rereviewDiffBase !== "") {
       const since = await ports.git(["diff", "--no-renames", rereviewDiffBase, "HEAD"]);
-      packet += `\n\nChanges since the prior verdict (${rereviewDiffBase}..HEAD), context only:\n\n${since.ok ? chomp(since.stdout) : ""}`;
+      if (!since.ok) {
+        console.error("[hydra-qa] WARN: since-prior-verdict diff failed:", since.stderr.slice(0, 300));
+        degraded.push("since-diff");
+      }
+      packet += `\n\nChanges since the prior verdict (${rereviewDiffBase}..HEAD), context only:\n\n${since.ok ? chomp(since.stdout) : "(since-diff unavailable — diff failed)"}`;
     }
   } else {
     rereviewDiffBase = "";

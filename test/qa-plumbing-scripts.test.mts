@@ -255,6 +255,18 @@ describe("preflight (steps 1-6.7 in one read-only call)", () => {
     assert.equal(noPr.stop?.target, "issue");
   });
 
+  test("preflight: a failed gh list is a pre-stage exit, never read as 'nothing found' (no false no-pr / no-issue)", async () => {
+    await assert.rejects(
+      runPreflight({ ...PRE_OPTS, pr: undefined }, harness({ ghHandler: (a) => (a[0] === "pr" && a[1] === "list" ? fail("gh: 502") : undefined) }).ports),
+      /gh pr list failed/,
+    );
+    await assert.rejects(
+      runPreflight({ ...PRE_OPTS, issue: undefined, pr: undefined }, harness({ ghHandler: (a) => (a[0] === "issue" && a[1] === "list" ? fail("gh: 502") : undefined) }).ports),
+      /gh issue list failed/,
+    );
+    // Sibling pin: a SUCCESSFUL empty list keeps its clean no-pr stage (covered above) and writes nothing.
+  });
+
   test("preflight: a required check already red on T3 yields skip-required-failed with the engine's FAIL verdict carried", async () => {
     const red = ROLLUP.map((c) => (c.name === "test" ? { ...c, conclusion: "FAILURE" } : c));
     const h = harness({
@@ -406,6 +418,23 @@ describe("packet (steps 7.0 / 7.0a / 7.0b)", () => {
       assert.equal(r.standardsFound, true);
       assert.equal(readFileSync(r.specInputPath as string, "utf8"), JSON.stringify(CONCEPT));
       assert.match(packet, /\n\nMerge danger check \(informational\): declared=two-way detector=\w[\w-]* outcome=\w[\w-]* classes=.*$/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("packet: a non-missing-path show failure is degraded, not rendered as a deleted file; a failed since-diff is degraded", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "qa-packet-test-"));
+    try {
+      const h = harness({
+        gitHandler: packetGit({ "show HEAD:src/a.ts": fail("fatal: unable to read tree (index lock)") }),
+        ghHandler: prBodyGh(""),
+      });
+      const r = await runPacket(readyPre(), "gaberoo322/hydra", h.ports, { loadStandards: standardsOk, outDir: dir });
+      const packet = readFileSync(r.reviewPacketPath, "utf8");
+      assert.ok(r.degraded.includes("changed-file-unreadable"));
+      assert.ok(!packet.includes("===== src/a.ts @ HEAD =====\n(file deleted"), "a transient error is not the deleted sentinel");
+      assert.ok(packet.includes("===== src/gone.ts @ HEAD =====\n(file deleted or absent at HEAD"), "sibling: a genuinely missing path keeps the sentinel");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -683,16 +712,57 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     assert.equal(r.nextStep, "none", "a pending-CI PASS is re-polled by the autopilot, never merged here");
   });
 
-  test("route: a fold failure is exit 1 with no gh write (pre-verdict exit), never a PASS", async () => {
+  const errorComment = "> *Automated QA — fold failed, no verdict emitted*\n\nQA-Verdict-Error: pr=77 reason=fold-phase-failed";
+
+  test("route: a fold failure is exit 1 with ONE visible QA-Verdict-Error comment and no label change, never a PASS", async () => {
     for (const c of [{ foldThrows: true }, { trailerThrows: true }, { roundThrows: true }] as const) {
       const h = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "PASS", ...c }) });
       await assert.rejects(runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps()), /down/);
-      assert.deepEqual(h.writes(), [], `${Object.keys(c)[0]}: nothing posted, needs-qa untouched`);
+      const w = h.writes();
+      assert.equal(w.length, 1, `${Object.keys(c)[0]}: only the error comment, needs-qa untouched`);
+      assert.deepEqual(w[0]?.slice(0, 3), ["pr", "comment", "77"]);
+      assert.equal(argAfter(w[0] as string[], "--body"), errorComment);
     }
     // An action-less round-action result is a pre-verdict exit too.
     const h = harness({ phase: async (p) => (p === "round-action" ? { round: {} } : cannedPhase({ verdict: "PASS" })(p, {})) });
     await assert.rejects(runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps()), /round\.action is missing/);
-    assert.deepEqual(h.writes(), []);
+    assert.equal(argAfter(h.writes()[0] as string[], "--body"), errorComment);
+    assert.equal(h.writes().length, 1);
+  });
+
+  test("route: the error comment is best-effort (a failing post still rethrows the original error) and never posted on --dry-run", async () => {
+    const failing = harness({ ghHandler: (a) => (a[0] === "pr" && a[1] === "comment" ? fail("gh: down") : undefined), phase: cannedPhase({ verdict: "PASS", foldThrows: true }) });
+    await assert.rejects(runRoute(ROUTE_OPTS, readyPre(), failing.ports, realDeps()), /fold down/);
+    const dry = harness({ phase: cannedPhase({ verdict: "PASS", foldThrows: true }) });
+    await assert.rejects(runRoute({ ...ROUTE_OPTS, dryRun: true }, readyPre(), dry.ports, realDeps()), /fold down/);
+    assert.deepEqual(dry.writes(), []);
+  });
+
+  test("route PASS: arm-auto-merge only when the needs-qa strip AND the PASS comment both landed", async () => {
+    const pre = readyPre({ tier: { num: 2, adversarial: false } });
+    for (const [what, broken] of [["strip", "edit"], ["comment", "comment"]] as const) {
+      const h = harness({
+        ghHandler: (a) => (a[0] === (broken === "edit" ? "issue" : "pr") && a[1] === broken ? fail("gh: 502") : undefined),
+        phase: cannedPhase({ verdict: "PASS" }),
+      });
+      const r = await runRoute(ROUTE_OPTS, pre, h.ports, realDeps());
+      assert.equal(r.nextStep, "none", `failed ${what} must not arm auto-merge`);
+      assert.ok(r.degraded.includes("pass-effects"), what);
+    }
+    const okRun = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "PASS" }) });
+    const r = await runRoute(ROUTE_OPTS, pre, okRun.ports, realDeps());
+    assert.equal(r.nextStep, "arm-auto-merge", "sibling: all effects ok keeps the arm step");
+    assert.ok(!r.degraded.includes("pass-effects"));
+  });
+
+  test("route PASS at T4: a failed pass-proof comment withholds arm-auto-merge", async () => {
+    let n = 0;
+    const h = harness({
+      ghHandler: (a) => (a[0] === "pr" && a[1] === "comment" && ++n === 2 ? fail("gh: 502") : undefined),
+      phase: cannedPhase({ verdict: "PASS", passMarker: "MARKER", roundAction: "deep-qa", deepQa: { action: "proceed" } }),
+    });
+    const r = await runRoute(ROUTE_OPTS, readyPre({ tier: { num: 4, adversarial: true } }), h.ports, realDeps());
+    assert.equal(r.nextStep, "none");
   });
 
   test("route: unreadable checks at preflight is a pre-verdict exit, never an implicit PASS", async () => {

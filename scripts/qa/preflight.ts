@@ -86,6 +86,15 @@ async function ghJson(ports: PlumbingPorts, args: string[]): Promise<unknown | u
   return tryParse(r.stdout);
 }
 
+/** A LIST read where a failed call must NOT read as "nothing found": a failure throws (pre-stage exit). */
+async function ghList(ports: PlumbingPorts, args: string[]): Promise<unknown[]> {
+  const r = await ports.gh(args);
+  if (!r.ok) throw new Error(`gh ${args.slice(0, 2).join(" ")} failed: ${r.stderr}`);
+  const v = tryParse(r.stdout);
+  if (!Array.isArray(v)) throw new Error(`gh ${args.slice(0, 2).join(" ")} returned no readable list`);
+  return v;
+}
+
 function labelNames(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
   return v.map((l) => (isRecord(l) && typeof l.name === "string" ? l.name : "")).filter((n) => n !== "");
@@ -113,7 +122,7 @@ export async function runPreflight(opts: PreflightOptions, ports: PlumbingPorts)
   // 1. Select issue.
   let issue = opts.issue ?? null;
   if (issue === null) {
-    const list = await ghJson(ports, [
+    const list = await ghList(ports, [
       "issue", "list", "--repo", repo, "--label", "needs-qa", "--state", "open", "--json", "number", "--limit", "1",
     ]);
     const first = Array.isArray(list) && isRecord(list[0]) ? list[0].number : undefined;
@@ -124,7 +133,7 @@ export async function runPreflight(opts: PreflightOptions, ports: PlumbingPorts)
   // 2. Find the linked open PR.
   let prNumber = opts.pr ?? null;
   if (prNumber === null) {
-    const open = await ghJson(ports, [
+    const open = await ghList(ports, [
       "pr", "list", "--repo", repo, "--state", "open", "--json", "number,body", "--limit", "200",
     ]);
     const re = new RegExp(`(?:closes|fixes) #${issue}(?!\\d)`, "i");

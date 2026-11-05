@@ -137,11 +137,48 @@ function bindFindings(raw: string, mergeDangerRow: unknown): unknown {
   return parsed;
 }
 
+/** Shared between runRoute and its impl: lets the wrapper post the pre-verdict failure signal. */
+interface RouteCtx {
+  /** Set by the impl once the first verdict effect is about to run. */
+  effectsStarted: boolean;
+  /** Set by the impl once its gh helpers exist. */
+  postPreVerdictError: ((reason: string) => Promise<boolean>) | null;
+}
+
+/**
+ * A fold / trailer / round-action failure is a PRE-VERDICT exit (no verdict, needs-qa
+ * stays, exit 1). A persistent failure must not re-dispatch the fan-out forever in
+ * silence, so leave the visible, best-effort `QA-Verdict-Error` PR comment first (it
+ * carries no round=, so it is never counted as a round; ADR-0046 INV-7). Usage errors
+ * (bad flags / files) and dry runs post nothing.
+ */
 export async function runRoute(
   opts: RouteOptions,
   pre: PreflightResult,
   ports: PlumbingPorts,
   deps: RouteDeps,
+): Promise<RouteResult> {
+  const ctx: RouteCtx = { effectsStarted: false, postPreVerdictError: null };
+  try {
+    return await runRouteImpl(opts, pre, ports, deps, ctx);
+  } catch (err) {
+    if (!(err instanceof UsageError) && !ctx.effectsStarted && !opts.dryRun && ctx.postPreVerdictError !== null) {
+      try {
+        await ctx.postPreVerdictError("fold-phase-failed");
+      } catch (postErr) {
+        console.error("[hydra-qa] WARN: QA-Verdict-Error comment failed:", postErr);
+      }
+    }
+    throw err;
+  }
+}
+
+async function runRouteImpl(
+  opts: RouteOptions,
+  pre: PreflightResult,
+  ports: PlumbingPorts,
+  deps: RouteDeps,
+  ctx: RouteCtx,
 ): Promise<RouteResult> {
   const { repo } = opts;
   const issue = pre.issue ?? 0;
@@ -233,6 +270,12 @@ export async function runRoute(
   if (pre.checks.source === null) {
     throw new Error("checks were unreadable at preflight; a verdict cannot be computed (pre-verdict exit)");
   }
+  // From here a throw is a fold-phase failure: arm the visible QA-Verdict-Error signal.
+  ctx.postPreVerdictError = (reason) =>
+    prComment(
+      `> *Automated QA — fold failed, no verdict emitted*\n\nQA-Verdict-Error: pr=${pr} reason=${reason}`,
+      "pre-verdict-error-comment",
+    );
   let reviewVerdict: "PASS" | "FAIL";
   let report: string;
   let verdict: string;
@@ -315,19 +358,24 @@ export async function runRoute(
   let nextStep: RouteResult["nextStep"] = "none";
 
   // ---- Effects (step 10). ----
+  ctx.effectsStarted = true;
   if (verdict === "PASS") {
     // Strip needs-qa FIRST (#974), before anything that can abort; in-progress in the same call (#3788).
-    await issueEdit("needs-qa", "in-progress", "pass-relabel");
-    await prComment(bodies.pass(report, verdictReason, checksBlock, trailer));
+    const stripped = await issueEdit("needs-qa", "in-progress", "pass-relabel");
+    const commented = await prComment(bodies.pass(report, verdictReason, checksBlock, trailer));
+    let proofOk = true;
     if (tier === 4) {
       const line = typeof roundOut.passMarker === "string" ? roundOut.passMarker : "";
-      if (line !== "") await prComment(bodies.passProof(line), "t4-pass-proof");
+      if (line !== "") proofOk = await prComment(bodies.passProof(line), "t4-pass-proof");
       else {
         console.error("[hydra-qa] WARN: no deep-QA PASS marker from round-action (degraded) — none posted");
         degraded.push("pass-marker");
       }
     }
-    nextStep = "arm-auto-merge";
+    // Arm auto-merge only once the PASS is durably recorded: the verdict comment, the
+    // needs-qa strip, and (T4) the pass-proof marker all landed.
+    if (stripped && commented && proofOk) nextStep = "arm-auto-merge";
+    else degraded.push("pass-effects");
   } else if (verdict === "PASS-pending-CI") {
     await prComment(bodies.passPendingCi(report, checksBlock, trailer), "pending-ci-pr-comment");
     await issueEdit("needs-qa", "in-progress", "pending-ci-relabel");
