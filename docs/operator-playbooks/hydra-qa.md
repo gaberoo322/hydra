@@ -77,7 +77,7 @@ The Spec axis reads the **design-concept artifact** for the issue (Phase A of #4
 > Check and the slot-lifecycle hook — lives in `hydra-qa-reference.md` (sibling of
 > this SKILL.md). Read it only when you need that background.
 
-## Verification depth
+## Tier-aware verification depth
 
 QA depth ascends with the Modification Tier of the PR (`GET /api/tier`, the single tier authority): T1/T2 one standard pass, T3 the two-reviewer refutation fan-out, T4 the same plus the checklist below. Tier-aware depth, the severity-gated fold and convergent review are in `hydra-qa-reference.md` (sibling of this SKILL.md).
 

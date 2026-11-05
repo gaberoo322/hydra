@@ -190,7 +190,7 @@ describe("PASS strips needs-qa reachably (issue #974)", () => {
 
 describe("hydra-qa bounce label keys on open-PR state, not GLM provenance (issue #4766)", () => {
   test("the playbook no longer carries a bounce-label helper or any hand-spelled label fence", () => {
-    assert.ok(!PLAYBOOK.includes("qa_bounce_label() {"), "the helper moved into route.ts — one definition, in code");
+    assert.ok(!PLAYBOOK.includes(["qa_bounce_label", "() {"].join("")), "the helper moved into route.ts — one definition, in code");
     assert.ok(!/\$\(qa_bounce_label\)/.test(PLAYBOOK));
     assert.ok(!/gh issue (edit|comment)\b/.test(PLAYBOOK), "no gh issue edit/comment fence outside the retained merge fence");
     assert.ok(!/gh pr comment\b/.test(PLAYBOOK), "no gh pr comment fence outside the retained merge fence");

@@ -320,6 +320,15 @@
       }
     },
     {
+      "name": "CheckListSchema",
+      "file": "src/schemas/qa-plumbing-cli.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/qa-plumbing-cli.ts"
+      }
+    },
+    {
       "name": "ContextTraceQuerySchema",
       "file": "src/schemas/learning.ts",
       "importedBy": [
@@ -712,6 +721,24 @@
       }
     },
     {
+      "name": "PREFLIGHT_STAGES",
+      "file": "src/schemas/qa-plumbing-cli.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/qa-plumbing-cli.ts"
+      }
+    },
+    {
+      "name": "PacketResultSchema",
+      "file": "src/schemas/qa-plumbing-cli.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/qa-plumbing-cli.ts"
+      }
+    },
+    {
       "name": "PatternBodySchema",
       "file": "src/schemas/pattern-memory.ts",
       "importedBy": [
@@ -722,6 +749,24 @@
       ],
       "source": {
         "path": "src/schemas/pattern-memory.ts"
+      }
+    },
+    {
+      "name": "PollResultSchema",
+      "file": "src/schemas/qa-plumbing-cli.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/qa-plumbing-cli.ts"
+      }
+    },
+    {
+      "name": "PreflightResultSchema",
+      "file": "src/schemas/qa-plumbing-cli.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/qa-plumbing-cli.ts"
       }
     },
     {
@@ -834,6 +879,24 @@
       ],
       "source": {
         "path": "src/schemas/retro.ts"
+      }
+    },
+    {
+      "name": "RouteEffectSchema",
+      "file": "src/schemas/qa-plumbing-cli.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/qa-plumbing-cli.ts"
+      }
+    },
+    {
+      "name": "RouteResultSchema",
+      "file": "src/schemas/qa-plumbing-cli.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/qa-plumbing-cli.ts"
       }
     },
     {
@@ -982,6 +1045,15 @@
       ],
       "source": {
         "path": "src/schemas/metrics.ts"
+      }
+    },
+    {
+      "name": "SummariesSchema",
+      "file": "src/schemas/qa-plumbing-cli.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/qa-plumbing-cli.ts"
       }
     },
     {
