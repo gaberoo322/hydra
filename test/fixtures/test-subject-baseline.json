@@ -20,7 +20,7 @@
   "scripts/autopilot/args-parse.sh": 1,
   "scripts/autopilot/assert_invariants.py": 1,
   "scripts/autopilot/bootstrap.sh": 7,
-  "scripts/autopilot/decide.py": 17,
+  "scripts/autopilot/decide.py": 18,
   "scripts/autopilot/dispatch.sh": 3,
   "scripts/autopilot/grill-artifact.sh": 1,
   "scripts/autopilot/hooks/on-subagent-tool-call.sh": 2,

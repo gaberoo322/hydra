@@ -84,6 +84,13 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   exit 0
 fi
 
+# Journal one typed parent-exception (#5323, ADR-0047 Decision 8) on the Run
+# Ledger. Best-effort: a no-op without a state file, never changes an exit code.
+parent_exception() {
+  [ -s "$STATE" ] || return 0
+  python3 "$SCRIPT_DIR/run_ledger.py" parent-exception "$STATE" "$1" --source turn.sh --detail "${2:-}" >/dev/null 2>&1 || true
+}
+
 if [ ! -s "$STATE" ]; then
   echo "[turn] FATAL: no state at $STATE — run bootstrap.sh first (Phase 0)" >&2
   exit 2
@@ -122,8 +129,11 @@ else
     fi
   fi
 fi
-if ! applied=$(python3 "$SCRIPT_DIR/turn_snapshot.py" apply "${apply_args[@]}" "$STATE"); then
+applied=$(python3 "$SCRIPT_DIR/turn_snapshot.py" apply "${apply_args[@]}" "$STATE")
+apply_rc=$?
+if [ "$apply_rc" -ne 0 ]; then
   echo "[turn] FATAL: turn_snapshot.py apply could not update $STATE" >&2
+  parent_exception script-error "snapshot-apply:$apply_rc"
   exit 2
 fi
 echo "[turn] snapshot: $(jq -r --arg fell_back "$snapshot_form" '"form=\(if $fell_back != "" then $fell_back else .form end) degraded=\(.degraded)"' <<<"$applied" 2>/dev/null || echo "$applied") cursor=$cursor"
@@ -174,12 +184,16 @@ python3 "$SCRIPT_DIR/decide.py" decide "$STATE" "$CANDIDATES" "$EVENTS" >"$PLAN"
 decide_rc=$?
 if [ "$decide_rc" -ne 0 ] || [ ! -s "$PLAN" ]; then
   echo "[turn] FATAL: decide.py exit=$decide_rc" >&2
+  parent_exception script-error "decide:$decide_rc"
   tail -5 "$decide_err" >&2
   exit "$(( decide_rc == 0 ? 2 : decide_rc ))"
 fi
 
 # --- Phase 4: invariants ------------------------------------------------------
-if ! python3 "$SCRIPT_DIR/assert_invariants.py" "$PLAN" "$STATE"; then
+inv_err="${PLAN%.json}.invariants.err"
+if ! python3 "$SCRIPT_DIR/assert_invariants.py" "$PLAN" "$STATE" 2>"$inv_err"; then
+  cat "$inv_err" >&2
+  parent_exception invariant-reject "$(head -n 1 "$inv_err" 2>/dev/null)"
   echo "[turn] FATAL: assert_invariants.py rejected the plan — do NOT execute it" >&2
   exit 1
 fi
