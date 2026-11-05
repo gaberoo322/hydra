@@ -5835,14 +5835,14 @@ describe("decide.py - parked issues are never dispatched or armed (issue #5319)"
   });
 
   test("QA r2 #2: qa_orch pins the parked-filtered head in prompt_args.issue", () => {
-    const s = baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: `${PARKED},3841`, orch_parked_issues: [PARKED] } });
+    const s = baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: `${PARKED} 3841`, orch_parked_issues: [PARKED] } });
     const q = qaOrch(runDecide(s, null));
     assert.equal(q.length, 1);
     assert.equal(q[0].prompt_args.issue, "issue-3841");
   });
 
   test("QA r2 #2 sibling: an unparked head (or no needs_qa_numbers) keeps the unpinned scope=orch dispatch", () => {
-    const u = qaOrch(runDecide(baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: `3841,${PARKED}`, orch_parked_issues: [PARKED] } }), null));
+    const u = qaOrch(runDecide(baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: `3841 ${PARKED}`, orch_parked_issues: [PARKED] } }), null));
     assert.equal(u[0].prompt_args.issue, undefined);
     const q = qaOrch(runDecide(baseState({ signals: { needs_qa_orch: true, orch_parked_unreadable: false } }), null));
     assert.equal(q.length, 1);
