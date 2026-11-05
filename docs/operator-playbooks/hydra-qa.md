@@ -271,6 +271,19 @@ qa_bounce_label() {
     echo "needs-dev-resume"
   fi
 }
+# ONE lifecycle-advance wrapper for every step-6.6 / step-10 advance site
+# (#5317 QA round 3): sets QA_ADV_OUT / QA_ADV_RC / QA_ADV_CODE / QA_ADV_WOULD_PARK
+# and returns the CLI exit code. `pr-merged` is NOT an error — the PR merged under
+# us and reconcile owns needs-qa -> closed — so it exits 0 here, at EVERY site,
+# instead of exiting 1 and leaving needs-qa set (the #974 busy-loop).
+qa_advance() {
+  QA_ADV_OUT=$(npx tsx scripts/lifecycle.ts advance "$@"); QA_ADV_RC=$?
+  printf '%s\n' "$QA_ADV_OUT"
+  QA_ADV_CODE=$(printf '%s' "$QA_ADV_OUT" | jq -r '.code // empty' 2>/dev/null)
+  QA_ADV_WOULD_PARK=$(printf '%s' "$QA_ADV_OUT" | jq -r '.wouldPark // empty' 2>/dev/null)
+  if [ "$QA_ADV_RC" != "0" ] && [ "$QA_ADV_CODE" = "pr-merged" ]; then exit 0; fi
+  return "$QA_ADV_RC"
+}
 # Resolve to a SHA so a concurrent push to master doesn't shift the diff under us.
 git fetch origin "$FIXED_POINT"
 FIXED_SHA=$(git rev-parse "origin/${FIXED_POINT}")
@@ -577,7 +590,7 @@ fi
   No verdict is being emitted — the PR cannot merge on this pass. The full review (including the Verifier-Core fan-out for a T4 PR) runs once the PR is rebased / CI is green. QA has exited; the autopilot re-queues it when the PR is ready."
   BOUNCE_LABEL=$(qa_bounce_label)
   if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then
-    npx tsx scripts/lifecycle.ts advance $issue_number needs-dev-resume --evidence pr=$pr_number --evidence defer=1 --actor hydra-qa \
+    qa_advance $issue_number needs-dev-resume --evidence pr=$pr_number --evidence defer=1 --actor hydra-qa \
       || { echo "[hydra-qa] ERROR: lifecycle advance needs-dev-resume refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1; }
     if [ "$GLM_AUTHORED" = "1" ]; then
       gh issue comment $issue_number --repo gaberoo322/hydra --body \
@@ -603,7 +616,7 @@ fi
   else
     # Not-open fallback (#4766): live read confirmed CLOSED/MERGED — no open
     # PR remains, so a fresh dev pick is the right lane.
-    npx tsx scripts/lifecycle.ts advance $issue_number ready-for-agent --evidence pr=$pr_number --evidence defer=1 --actor hydra-qa \
+    qa_advance $issue_number ready-for-agent --evidence pr=$pr_number --evidence defer=1 --actor hydra-qa \
       || { echo "[hydra-qa] ERROR: lifecycle advance ready-for-agent refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1; }
   fi
   exit 0
@@ -1262,40 +1275,59 @@ ${QA_VERDICT_TRAILER}"
 # too. Name the red required check(s) when CI is what failed.
 BOUNCE_LABEL=$(qa_bounce_label)
 ROUND_ACTION=bounce
+SHADOW_PARK=0
+# Shadow mode (current default): the seam bounced and journalled wouldPark. Keep
+# the cap live by parking explicitly (needs-dev-resume/ready-for-agent -> parked
+# is a legal cap row) — on BOTH the open and the CLOSED-PR arm (#4735 parity).
+qa_shadow_park() {
+  qa_advance $issue_number parked --reason cap:qa-fail-rounds \
+    --rationale "QA-fail round cap reached (3 reviewed FAIL rounds on PR #$pr_number)" --actor hydra-qa \
+    || { echo "[hydra-qa] ERROR: lifecycle advance parked refused — NOT editing labels by hand (#5317)" >&2; exit 1; }
+  ROUND_ACTION=escalate
+  SHADOW_PARK=1
+}
 if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then
-  ADV_OUT=$(npx tsx scripts/lifecycle.ts advance $issue_number needs-dev-resume --evidence pr=$pr_number --actor hydra-qa); ADV_RC=$?
-  printf '%s\n' "$ADV_OUT"
-  ADV_CODE=$(printf '%s' "$ADV_OUT" | jq -r '.code // empty' 2>/dev/null)
-  ADV_WOULD_PARK=$(printf '%s' "$ADV_OUT" | jq -r '.wouldPark // empty' 2>/dev/null)
+  qa_advance $issue_number needs-dev-resume --evidence pr=$pr_number --actor hydra-qa; ADV_RC=$?
   if [ "$ADV_RC" != "0" ]; then
-    case "$ADV_CODE" in
+    case "$QA_ADV_CODE" in
       parked:qa-fail-rounds) ROUND_ACTION=escalate ;;  # enforce: parked in the same call (issue #5317 INV-5)
-      *) echo "[hydra-qa] ERROR: lifecycle advance needs-dev-resume refused ($ADV_CODE) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1 ;;
+      *) echo "[hydra-qa] ERROR: lifecycle advance needs-dev-resume refused ($QA_ADV_CODE) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1 ;;
     esac
-  elif [ "$ADV_WOULD_PARK" = "qa-fail-rounds" ]; then
-    # Shadow mode: the seam bounced and journalled the would-park. Keep the cap
-    # live by parking explicitly (needs-dev-resume -> parked is a legal cap row).
-    npx tsx scripts/lifecycle.ts advance $issue_number parked --reason cap:qa-fail-rounds \
-      --rationale "QA-fail round cap reached (3 reviewed FAIL rounds on PR #$pr_number)" --actor hydra-qa \
-      || { echo "[hydra-qa] ERROR: lifecycle advance parked refused — NOT editing labels by hand (#5317)" >&2; exit 1; }
-    ROUND_ACTION=escalate
+  elif [ "$QA_ADV_WOULD_PARK" = "qa-fail-rounds" ]; then
+    qa_shadow_park
   fi
 else
   # Not-open fallback (#4766): live read confirmed CLOSED/MERGED — no open
   # PR remains, so a fresh dev pick (not a resume) is the right lane.
-  ADV_OUT=$(npx tsx scripts/lifecycle.ts advance $issue_number ready-for-agent --evidence pr=$pr_number --actor hydra-qa); ADV_RC=$?; printf '%s\n' "$ADV_OUT"
+  qa_advance $issue_number ready-for-agent --evidence pr=$pr_number --actor hydra-qa; ADV_RC=$?
   if [ "$ADV_RC" != "0" ]; then
-      # pr-merged is NOT an error: the PR merged under us, and reconcile owns needs-qa -> closed (#5317 QA).
-      [ "$(printf '%s' "$ADV_OUT" | jq -r '.code // empty' 2>/dev/null)" = "pr-merged" ] && exit 0
-      if [ "$(printf '%s' "$ADV_OUT" | jq -r '.code // empty' 2>/dev/null)" = "parked:qa-fail-rounds" ]; then
-        ROUND_ACTION=escalate  # closed-PR edge runs the round cap too (#4735 parity; parked in the same call)
-      else
-        echo "[hydra-qa] ERROR: lifecycle advance ready-for-agent refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1
-      fi
+    if [ "$QA_ADV_CODE" = "parked:qa-fail-rounds" ]; then
+      ROUND_ACTION=escalate  # closed-PR edge runs the round cap too (#4735 parity; parked in the same call)
+    else
+      echo "[hydra-qa] ERROR: lifecycle advance ready-for-agent refused ($QA_ADV_CODE) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1
+    fi
+  elif [ "$QA_ADV_WOULD_PARK" = "qa-fail-rounds" ]; then
+    qa_shadow_park   # shadow-mode 3rd reviewed FAIL on a CLOSED PR parks too (wouldPark honoured)
   fi
 fi
 if [ "$ROUND_ACTION" = "escalate" ]; then
   # Off-list escalation (ADR-0047 D6): the issue is PARKED, not ready-for-human.
+  if [ "$SHADOW_PARK" = "1" ]; then
+    # Shadow mode: the seam did not park, so it did not post the unified comment —
+    # post the SAME `## Hydra cap park` body parkForCap renders (src/lifecycle/park.ts)
+    # so /hydra-review's Hydra-Cap-Park: parse and the un-park instructions work.
+    gh issue comment $issue_number --repo gaberoo322/hydra --body "## Hydra cap park
+
+This issue was parked automatically: the \`qa-fail-rounds\` cap was reached (3 of 3 per pr).
+
+| Arm | Count | Limit | Unit |
+|---|---|---|---|
+| qa-fail-rounds | 3 | 3 | pr |
+
+To un-park: investigate why the attempts keep failing, then remove the \`parked\` label, add the right state label, and post \`Hydra-Cap-Reset: by=<you> ts=<ISO-8601>\` so every count restarts from that moment.
+
+Hydra-Cap-Park: arm=qa-fail-rounds count=3 limit=3 unit=pr pr=$pr_number source=trailer ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || true
+  fi
   gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA escalated — round cap reached*
 
 \`${VERDICT}\` on PR #$pr_number — ${BLOCKER_SUMMARY}. The issue is \`parked\`; no dev lane will pick it up until the operator un-parks it.
@@ -1390,7 +1422,7 @@ else
   # deep-QA fail count rides PR-comment markers, not issue labels, so the
   # label change cannot disturb decideDeepQaAction.
   BOUNCE_LABEL=$(qa_bounce_label)
-  npx tsx scripts/lifecycle.ts advance $issue_number "$BOUNCE_LABEL" --evidence pr=$pr_number --actor hydra-qa \
+  qa_advance $issue_number "$BOUNCE_LABEL" --evidence pr=$pr_number --actor hydra-qa \
     || { echo "[hydra-qa] ERROR: lifecycle advance $BOUNCE_LABEL refused — NOT editing labels by hand (#5317)" >&2; exit 1; }
   gh issue comment $issue_number --repo gaberoo322/hydra --body "> *T4 Deep-QA failed (1st) — bouncing to dev*
 
