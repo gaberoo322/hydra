@@ -38,6 +38,7 @@ import {
   copyFileSync,
   chmodSync,
 } from "node:fs";
+import { withTurnSnapshot } from "./_helpers/turn-snapshot-state.mts";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SIGNAL_CLASS_COOLDOWNS } from "../src/taxonomy/classes.ts";
@@ -1943,6 +1944,9 @@ describe("scripts/autopilot/bootstrap.sh — dev_resume_pending carry-forward (i
       const events = join(tmp.dir, "events.json");
       writeFileSync(cands, JSON.stringify(null));
       writeFileSync(events, JSON.stringify([]));
+      // #5319 QA r2: a real turn carries a healthy Turn Snapshot; without one the
+      // marker document reads orch_parked_unreadable=true and the belt fails closed.
+      writeFileSync(tmp.state, JSON.stringify(withTurnSnapshot(JSON.parse(readFileSync(tmp.state, "utf-8")))));
       const d = spawnSync("python3", [join(SCRIPTS, "decide.py"), "decide", tmp.state, cands, events], {
         encoding: "utf-8",
         env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" },

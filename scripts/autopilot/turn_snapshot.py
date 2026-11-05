@@ -86,8 +86,8 @@ REPLAY_ENV = "HYDRA_AUTOPILOT_SNAPSHOT_REPLAY"
 BLOB_FIELDS = ("usage_eligibility", "emergency_brake", "target_risk_surface", "class_stats", "candidate_exclusions")
 # Every blob name a reader may ask for (slot_events feeds state.slot_events).
 _KNOWN_BLOBS = BLOB_FIELDS + ("slot_events",)
-# A document without signals raises the flags named by the all-degraded convention: faults and caps.
-_RAISED_WHEN_UNREAD = ("_fail", "_degraded", "_saturated")
+# A document without signals raises the flags named by the all-degraded convention: faults, caps and unreadable-read flags (#5319 INV-4).
+_RAISED_WHEN_UNREAD = ("_fail", "_degraded", "_saturated", "_unreadable")
 
 
 class UnknownSignalError(LookupError):
