@@ -554,7 +554,7 @@ fi
   dev agent via the universal remediation loop. **Do NOT leave `needs-qa` in
   place** — that busy-loops `hydra-qa` every autopilot tick, 30-65k tokens each
   (issue #974); the bounce is a lifecycle-seam transition
-  (`scripts/lifecycle.ts advance`, ADR-0047 D3 — no direct label writes, #5317),
+  (the `advance` verb of `scripts/lifecycle.ts`, ADR-0047 D3 — no direct label writes, #5317),
   and the seam never leaves the issue label-less. A deferred
   PR is, by construction, one that cannot merge on this pass, so INV-C holds:
   every PR that reaches auto-merge has been reviewed at full depth.
