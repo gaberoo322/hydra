@@ -282,7 +282,7 @@ async function runHousekeeping(
      * guard and ran/skipped bookkeeping stay the real code path. Production
      * passes nothing, so every chore binds its real runner.
      */
-    workOverrides?: Record<string, () => Promise<unknown>>;
+    workOverrides?: Record<string, () => Promise<boolean | void>>;
   } = {},
 ): Promise<{ ran: string[]; skipped: string[] }> {
   const ran: string[] = [];
