@@ -106,7 +106,7 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
     // performs a live GitHub write (the sweep mutates an external service with no
     // Redis substrate to fail-soft on, unlike the gh-reading chores).
     const router = createMaintenanceRouter(mockEventBus(), {
-      housekeepingDeps: { runGlmEligibilitySweep: async () => 0 },
+      housekeepingDeps: { runGlmEligibilitySweep: async () => 0, runLifecycleReconcile: async () => null },
     });
     const handler = findHandler(router, "POST", "/maintenance/housekeeping");
     assert.ok(handler, "POST /maintenance/housekeeping handler should exist");
@@ -117,7 +117,7 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
     // performs a live GitHub write (the sweep mutates an external service with no
     // Redis substrate to fail-soft on, unlike the gh-reading chores).
     const router = createMaintenanceRouter(mockEventBus(), {
-      housekeepingDeps: { runGlmEligibilitySweep: async () => 0 },
+      housekeepingDeps: { runGlmEligibilitySweep: async () => 0, runLifecycleReconcile: async () => null },
     });
     const handler = findHandler(router, "POST", "/maintenance/housekeeping");
 
@@ -164,7 +164,7 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
     // performs a live GitHub write (the sweep mutates an external service with no
     // Redis substrate to fail-soft on, unlike the gh-reading chores).
     const router = createMaintenanceRouter(mockEventBus(), {
-      housekeepingDeps: { runGlmEligibilitySweep: async () => 0 },
+      housekeepingDeps: { runGlmEligibilitySweep: async () => 0, runLifecycleReconcile: async () => null },
     });
     const handler = findHandler(router, "POST", "/maintenance/housekeeping");
 
@@ -197,7 +197,7 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
     // performs a live GitHub write (the sweep mutates an external service with no
     // Redis substrate to fail-soft on, unlike the gh-reading chores).
     const router = createMaintenanceRouter(mockEventBus(), {
-      housekeepingDeps: { runGlmEligibilitySweep: async () => 0 },
+      housekeepingDeps: { runGlmEligibilitySweep: async () => 0, runLifecycleReconcile: async () => null },
     });
     const handler = findHandler(router, "POST", "/maintenance/housekeeping");
 

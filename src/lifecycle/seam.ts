@@ -31,6 +31,8 @@ import {
 import { ghExec, ghJson } from "../github/gh.ts";
 import { isGhFailure } from "../github/exec.ts";
 import { resolveGithubRepo, viewPr } from "../github/issues.ts";
+import { listRequiredStatusContextsOrNull, parseRollupEntries } from "../github/prs.ts";
+import { foldRollup, isRed, isSettled } from "../github/check-rollup.ts";
 import {
   CLAIM_OWNER_MISMATCH,
   appendLifecycleEntry,
@@ -59,6 +61,7 @@ import {
   type GateInput,
   type GateRecords,
   type PrRecord,
+  type QaLivePr,
   type StateEntryRecord,
 } from "./gates.ts";
 import {
@@ -161,6 +164,8 @@ export interface SeamDeps {
     timeline: (issue: number) => Promise<Fetched<TimelineLabelEvent[]>>;
     /** A PR's comment bodies then review bodies, chronological (carry `QA-Verdict:` trailers). */
     prBodies: (prNumber: number) => Promise<Fetched<string[]>>;
+    /** A PR read live at head for the `qa-passed` exit gate; absent = fail closed (`fetch-failed`). */
+    qaLive?: (prNumber: number) => Promise<Fetched<QaLivePr>>;
   };
   journal: {
     append: (repo: string, issue: number, entry: LifecycleJournalEntry) => Promise<JournalWriteResult>;
@@ -276,6 +281,48 @@ export async function fetchPrBodies(repo: string, prNumber: number): Promise<Fet
   }
 }
 
+/**
+ * A PR read live at head for the `qa-passed` exit decision: state, draft,
+ * `mergeStateStatus`, head sha, the REQUIRED checks folded to one verdict, and
+ * the comment + review bodies (they carry the `QA-Verdict:` trailers). Required
+ * contexts are read, never guessed; an unreadable set folds to `unknown`.
+ * Never throws.
+ */
+export async function fetchQaLive(repo: string, prNumber: number): Promise<Fetched<QaLivePr>> {
+  try {
+    const res = await ghJson<Record<string, unknown>>([
+      "pr", "view", String(prNumber), "--repo", repo, "--json",
+      "number,state,isDraft,mergeStateStatus,headRefOid,statusCheckRollup,comments,reviews",
+    ]);
+    if (isGhFailure(res) || !res.data || typeof res.data !== "object") return { ok: false };
+    const d = res.data;
+    if (typeof d.number !== "number" || typeof d.state !== "string") return { ok: false };
+    const required = await listRequiredStatusContextsOrNull("lifecycle", { repo });
+    let checks: QaLivePr["checks"] = "unknown";
+    if (required !== null) {
+      const fold = foldRollup(parseRollupEntries(d.statusCheckRollup), { required });
+      checks = !isSettled(fold) ? "pending" : isRed(fold) ? "red" : "green";
+    }
+    const bodies = (list: unknown): string[] =>
+      Array.isArray(list) ? list.map((c) => String((c as { body?: unknown } | null)?.body ?? "")) : [];
+    return {
+      ok: true,
+      value: {
+        number: d.number,
+        state: d.state.toUpperCase(),
+        isDraft: d.isDraft === true,
+        mergeStateStatus: typeof d.mergeStateStatus === "string" ? d.mergeStateStatus.toUpperCase() : "",
+        headSha: typeof d.headRefOid === "string" ? d.headRefOid : "",
+        checks,
+        bodies: [...bodies(d.comments), ...bodies(d.reviews)],
+      },
+    };
+  } catch (err) {
+    logger.error({ err, prNumber }, "[lifecycle] qa-live pr fetch failed");
+    return { ok: false };
+  }
+}
+
 /** Post a comment on an issue or PR number. Never throws. */
 export async function postIssueComment(repo: string, number: number, body: string): Promise<IssueActionWriteResult> {
   try {
@@ -332,6 +379,7 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
       issueComments: (issue) => fetchIssueComments(resolveGithubRepo(), issue),
       timeline: (issue) => fetchLabelTimeline(resolveGithubRepo(), issue),
       prBodies: (prNumber) => fetchPrBodies(resolveGithubRepo(), prNumber),
+      qaLive: (prNumber) => fetchQaLive(resolveGithubRepo(), prNumber),
     },
     journal: {
       append: appendLifecycleEntry,
@@ -609,6 +657,13 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
     if (needs.comment) {
       const commentId = parseCommentEvidence(gateEvidence);
       records.comment = commentId !== null ? await deps.fetch.comment(commentId) : undefined;
+    }
+    if (needs.qaLive) {
+      const prNumber = parsePrEvidence(gateEvidence);
+      records.qaLive =
+        prNumber !== null && prNumber > 0 && deps.fetch.qaLive !== undefined
+          ? await deps.fetch.qaLive(prNumber)
+          : { ok: false };
     }
     if (needs.stateEntry) records.stateEntry = await deps.fetch.stateEntry(issue, transition.from);
     const gateInput: GateInput = {

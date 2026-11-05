@@ -68,6 +68,16 @@ export {
   type CapSource,
   type CapUnit,
 } from "./caps.ts";
+export { classifyQaPassedExit, gateQaExit, type QaExitTarget, type QaLivePr } from "./gates.ts";
+export { externalMoves, lastKnownState, replayStateSnapshots } from "./timeline.ts";
+export {
+  isZeroStateExempt,
+  resolveQaPr,
+  runReconcile,
+  type ReconcileDeps,
+  type ReconcileOptions,
+  type ReconcileReport,
+} from "./reconcile.ts";
 export { parkForCap, postCapReset, renderParkComment, type CapResetResult, type ParkResult } from "./park.ts";
 export {
   LIFECYCLE_ROLLOUT_CONFIG_PATH,
