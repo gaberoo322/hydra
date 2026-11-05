@@ -91,7 +91,7 @@ function world(mode: "shadow" | "enforce" = "enforce") {
       return i ? { ok: true, row: row(n, i) } : { ok: false, code: "gh-failed" };
     },
     edit: async (n, l) => {
-      if (w.editFails) return { ok: false, code: "gh-failed" };
+      if (w.editFails) return { ok: false, code: "gh-failed", stderr: "x" };
       w.edits.push({ issue: n, remove: l.remove, add: l.add });
       const i = w.issues.get(n)!;
       i.labels = i.labels.filter((x) => !l.remove.includes(x)).concat(l.add);
@@ -103,7 +103,7 @@ function world(mode: "shadow" | "enforce" = "enforce") {
       return { ok: true };
     },
     comment: async (number, body) => {
-      if (w.postFails) return { ok: false, code: "gh-failed" };
+      if (w.postFails) return { ok: false, code: "gh-failed", stderr: "x" };
       w.posted.push({ number, body });
       w.comments.set(number, [...(w.comments.get(number) ?? []), body]);
       return { ok: true };

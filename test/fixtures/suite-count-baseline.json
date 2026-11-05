@@ -312,7 +312,7 @@
   "test/lifecycle-caps.test.mts": 8,
   "test/lifecycle-gates.test.mts": 6,
   "test/lifecycle-journal.test.mts": 2,
-  "test/lifecycle-reconcile.test.mts": 7,
+  "test/lifecycle-reconcile.test.mts": 8,
   "test/lifecycle-seam-check.test.mts": 4,
   "test/lifecycle-transitions.test.mts": 3,
   "test/lifecycle-vocabulary-drift.test.mts": 7,
