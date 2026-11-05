@@ -339,7 +339,11 @@ from decide_base import (
     RED_FORWARD_FIX_CAP,
     QA_STALL_MAX_ATTEMPTS,
     ZERO_YIELD_BACKOFF_LADDER,
+    _anchor_issue_number,
     _dev_resume_pick_signal,
+    _is_parked_anchor,
+    _parked_prs,
+    _parked_read_degraded,
     _needs_qa_target_pr_ref,
     _normalize_target_risk_surface,
     _orch_board_read_degraded,
@@ -749,8 +753,9 @@ WALL_CLOCK_HEARTBEAT_SEC = 900
 
 # Silent-wedge fallback timer (issue #509). When an active slot has been
 # in flight for longer than this without a corresponding subagent_stop
-# hook event, decide.py emits a `wait_or_reap` action so the operator
-# loop falls back to reap.py. The slot_events stream is the primary
+# hook event, decide.py emits a `wait_or_reap` action; the autopilot brain
+# handles it through the playbook's `wait_or_reap` row, which runs
+# `reap.py wait-or-reap <slot> <task_id>` (issue #5282). The slot_events stream is the primary
 # accounting path; this fallback only fires when the hook itself silently
 # failed (e.g. the subagent process crashed before reaching the harness's
 # SubagentStop dispatch).
@@ -1591,11 +1596,12 @@ def make_wait_or_reap(slot: str, task_id: str, age_seconds: int, reason: str = "
     """Silent-wedge fallback (issue #509). Hooks are the primary slot
     accounting path; this action fires when an active slot has aged past
     `subagent_max_wall_seconds` with no matching `subagent_stop` event in
-    `state.slot_events`. The autopilot turn handles it by invoking
-    `reap.py completion` as a forced reap — the existing fallback CLI.
+    `state.slot_events`. The autopilot brain handles it through the
+    playbook's `wait_or_reap` row, which runs `reap.py wait-or-reap <slot>
+    <task_id>` (issue #5282).
 
-    The action carries enough metadata that the harness can dispatch the
-    reap deterministically: `{slot, task_id, age_seconds, reason}`.
+    The action carries enough metadata for that command:
+    `{slot, task_id, age_seconds, reason}`.
     """
     return {
         "type": "wait_or_reap",
@@ -3014,6 +3020,8 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
     # already named - same downstream holds, stale-verdict check, depth policy.
     sweep = [ev for ev in events if ev.get("type") == "qa-verdict"]
     sweep += ts.qa_verdict_recheck(state, events, "orch_qa_verdict_recheck")
+    parked_prs = sorted(_parked_prs(state, events))  # #5319: read once, whether or not a verdict is queued
+    parked_degraded = _parked_read_degraded(state, events)
     for ev in sweep:
         if ev.get("recheck"):
             out.reasons.append(f"qa-recheck:#{ev.get('pr_number')}")
@@ -3023,6 +3031,22 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
         mechanical = ev.get("mechanical")
         has_scope_justif = bool(ev.get("has_scope_justification"))
         if pr_number is None or tier is None:
+            continue
+        # ISSUE #5319 (INV-6): a PR whose closing issue / anchor is parked is
+        # never armed - covers the in-session `qa-verdict` events that bypass
+        # the pr-gate collector (a park landing mid-run).
+        # The real event carries only `pr_number`, so the PR-keyed
+        # `orch_parked_prs` set is the primary key; `closing_issue` / `anchor`
+        # stay as a secondary key. A degraded parked read holds every PR.
+        if parked_degraded:
+            out.reasons.append(f"parked:#{pr_number}:read-degraded")
+            continue
+        parked_ref = next(
+            (r for r in (ev.get("closing_issue"), ev.get("anchor")) if _is_parked_anchor(state, events, r)),
+            None,
+        )
+        if parked_ref is not None or _pr_gate_number_in(pr_number, parked_prs):
+            out.reasons.append(f"parked:#{_anchor_issue_number(parked_ref) if parked_ref is not None else pr_number}")
             continue
         if _pr_gate_number_in(pr_number, buckets["dirty"]):
             out.reasons.append(f"hold:#{pr_number}:dirty")
@@ -3826,7 +3850,7 @@ def _rule_silent_wedge(state: dict, events: list[dict], now: int) -> _RuleOutput
 
     If an active slot has aged past `subagent_max_wall_seconds` AND no
     `subagent_stop` event arrived for its task_id, emit a `wait_or_reap` so the
-    harness invokes reap.py as a forced fallback. Hooks are the primary path;
+    brain runs `reap.py wait-or-reap` via the playbook's `wait_or_reap` row. Hooks are the primary path;
     this only fires when the hook itself silently failed.
 
     Checked AFTER dispatch decisions because a wait_or_reap is a slot-clear

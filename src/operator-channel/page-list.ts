@@ -18,6 +18,10 @@ export const PAGE_KINDS = [
   // /tmp or /dev/shm inode/space use over the watchdog threshold (issue #5327;
   // the 2026-10-31 inode-full outage was silent). Watchdog-only, out-of-band.
   "infra:tmpfs_exhausted",
+  // The watchdog CLI itself cannot boot (broken node_modules / strip-types error
+  // / node missing) so EVERY ported check is disarmed (issue #5099). Redis-free,
+  // raised from hydra-watchdog.sh via operator-notify; never rides the bus.
+  "infra:watchdog_cli_failed",
   E.LAUNCH_QUOTA_STRETCH,
   E.LAUNCH_LATENCY_BREACH,
   E.LAUNCH_PAUSE_FORGOTTEN,

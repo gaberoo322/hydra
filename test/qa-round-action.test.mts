@@ -5,6 +5,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { CAP_DEFAULTS } from "../src/lifecycle/caps.ts";
 import { glmLane } from "../src/glm/eligibility.ts";
 import {
   DEEP_QA_FAIL_MARKER,
@@ -236,6 +237,23 @@ describe("decideQaRoundAction — bounce vs escalate from the prior FAIL rounds 
       assert.ok(d.reason.length > 0);
     });
   }
+
+  test("FAIL rounds before the latest Hydra-Cap-Reset marker do not count (ADR-0047 D6)", () => {
+    const reset = "Hydra-Cap-Reset: by=operator ts=2026-11-04T10:00:00Z";
+    const before = decideQaRoundAction({ tier: 3, verdict: "FAIL", pr: 7, priorBodies: [f1, f2] });
+    assert.equal(before.action, "escalate");
+    const after = decideQaRoundAction({ tier: 3, verdict: "FAIL", pr: 7, priorBodies: [f1, f2, reset] });
+    assert.equal(after.action, "bounce");
+    assert.equal(after.failRound, 1);
+    // round numbering is unchanged: it still counts every trailer on the PR
+    assert.equal(after.round, 3);
+    const oneAfter = decideQaRoundAction({ tier: 3, verdict: "FAIL", pr: 7, priorBodies: [f1, f2, reset, verdictBody(3, "FAIL", SHA_C, 1, "high")] });
+    assert.equal(oneAfter.failRound, 2);
+  });
+
+  test("QA_FAIL_ROUND_CAP is sourced from the caps.ts default, not env-overridable", () => {
+    assert.equal(QA_FAIL_ROUND_CAP, CAP_DEFAULTS["qa-fail-rounds"]);
+  });
 
   test("the cap is 3 and T4's 2nd-fail rule is untouched", () => {
     assert.equal(QA_FAIL_ROUND_CAP, 3);

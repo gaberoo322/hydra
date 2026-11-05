@@ -20,12 +20,12 @@
   "docs/operator-playbooks/": 54412,
   ".github/workflows/ (Verifier Core)": 23639,
   "scripts/autopilot/ (decide.py, classes.json, run_ledger.py — the Run Ledger)": 84493,
-  "dashboard/": 33714,
+  "dashboard/": 33810,
   "config/direction/, config/orchestrator/": 4406,
   "docs/adr/ itself": 5249,
   "process / policy (no code area)": 45702,
   "test/, scripts/test/ (the suite itself)": 8970,
   "src/glm/, scripts/glm/": 43911,
   "scripts/sync-skills.sh, src/skills/ (skill generation)": 7008,
-  "src/notification/, src/operator-channel/": 5896
+  "src/notification/, src/operator-channel/": 5961
 }

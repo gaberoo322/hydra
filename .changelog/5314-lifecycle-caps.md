@@ -1,0 +1,1 @@
+- feat: lifecycle cap table, same-call cap park and Hydra-Cap-Reset in the writer seam (#5314)

@@ -13,8 +13,9 @@ This CLI survives as the FALLBACK path. Use it only when a slot is
 provably silent-wedged — no `SubagentStop` event has arrived within
 `subagent_max_wall_seconds` (default 3600s, env override
 `HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS`). `decide.py` emits a
-`wait_or_reap` action for exactly that case; the harness translates
-that into a `reap.py completion ...` invocation here.
+`wait_or_reap` action for exactly that case; the autopilot brain handles it
+through the playbook's `wait_or_reap` row, which runs the `wait-or-reap`
+mode below (issue #5282).
 
 A bare `reap.py` (no subcommand) prints the usage line and exits 0. The former
 in-flight hard-cap sweep over `partial_tokens` was deleted (issue #5075): no
@@ -23,6 +24,23 @@ count), so the sweep could never trip. The soft-cap burn in `completion`
 (which reads a REAL total) is the runaway guard.
 
 Modes:
+
+  (default)   — a bare call prints the usage line and exits 0.
+
+  wait-or-reap <slot> <task_id> — silent-wedge handler (issue #5282). Finds
+                the child transcript `<projectsRoot>/*/*/subagents/agent-
+                <task_id>.jsonl` (projectsRoot = $HYDRA_CLAUDE_PROJECTS_ROOT,
+                else ~/.claude/projects). LIVE (mtime < 1800s): mutates
+                nothing, prints `wait_or_reap verdict=live ...`. DEAD (older,
+                or no transcript): calls run_completion with tokens = the
+                LAST usage line's context total (never the summed per-turn
+                usage); 0 with token_source=unknown when the transcript has
+                no readable usage line or there is no transcript. A stat()
+                failure on a found transcript is verdict=unknown (no reap)
+                while the slot has been occupied < subagent_max_wall_seconds,
+                BOUNDED: past that threshold (or env override) it falls
+                through to DEAD, still reading the final usage line and
+                logging transcript_age_s=stat-failed.
 
   completion  — Idempotent completion reap (issue #411).
                 Records the dispatched subagent's final token count once
@@ -2215,12 +2233,154 @@ def run_reconcile_seeded(state_path: str) -> int:
     return 0
 
 
+WAIT_OR_REAP_LIVE_WINDOW_S = 1800
+
+
+def _projects_root() -> Path:
+    root = os.environ.get("HYDRA_CLAUDE_PROJECTS_ROOT")
+    return Path(root) if root else Path.home() / ".claude" / "projects"
+
+
+def _find_child_transcript(task_id: str) -> Path | None:
+    """Newest `<projectsRoot>/*/*/subagents/agent-<task_id>.jsonl`, or None."""
+    try:
+        matches = list(_projects_root().glob(f"*/*/subagents/agent-{task_id}.jsonl"))
+        if not matches:
+            return None
+        def _mtime(p: Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return -1.0  # unreadable sorts last; run_wait_or_reap's own stat fails safe
+        return max(matches, key=_mtime)
+    except OSError as exc:
+        print(f"[autopilot] wait-or-reap: transcript lookup failed: {exc}", file=sys.stderr)
+        return None
+
+
+def _final_usage_context_total(path: Path) -> int | None:
+    """Last assistant usage line's context total (input + cache_read +
+    cache_creation + output) — the unit of the Agent completion
+    notification's total_tokens. None when no usage line is readable."""
+    last: int | None = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    msg = (json.loads(line) or {}).get("message") or {}
+                    usage = msg.get("usage") if isinstance(msg, dict) else None
+                    if not isinstance(usage, dict):
+                        continue
+                    last = sum(
+                        int(usage.get(k) or 0)
+                        for k in (
+                            "input_tokens",
+                            "cache_read_input_tokens",
+                            "cache_creation_input_tokens",
+                            "output_tokens",
+                        )
+                    )
+                except (ValueError, TypeError, AttributeError):
+                    continue  # malformed line: skip, never raise into the brain's turn
+    except OSError as exc:
+        print(f"[autopilot] wait-or-reap: transcript read failed: {exc}", file=sys.stderr)
+        return None
+    return last
+
+
+def _wait_or_reap_max_wall_seconds(state: dict | None) -> int:
+    """The silent-wedge threshold, mirroring decide.py::_subagent_max_wall_seconds
+    (env, then state.limits, default 3600)."""
+    env = os.environ.get("HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS")
+    if env:
+        try:
+            return int(env)
+        except (TypeError, ValueError):
+            pass
+    limits = (state or {}).get("limits") or {}
+    try:
+        if limits.get("subagent_max_wall_seconds") is not None:
+            return int(limits["subagent_max_wall_seconds"])
+    except (TypeError, ValueError):
+        pass
+    return 3600
+
+
+def _slot_occupied_seconds(state: dict | None, slot: str) -> int | None:
+    """Seconds the slot has been occupied, or None when unknowable."""
+    slot_obj = ((state or {}).get("slots") or {}).get(slot)
+    started = _slot_started_epoch(slot_obj)
+    if started is None:
+        return None
+    return max(0, int(time.time()) - started)
+
+
+def run_wait_or_reap(slot: str, task_id: str) -> int:
+    """`wait-or-reap` mode (issue #5282): liveness by transcript mtime, then a
+    forced reap through run_completion when the child is dead."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+        print(f"[autopilot] wait-or-reap: invalid task_id={task_id!r}", file=sys.stderr)
+        return 0
+    transcript = _find_child_transcript(task_id)
+    age: int | None = None
+    stat_failed = False
+    if transcript is not None:
+        try:
+            age = max(0, int(time.time() - transcript.stat().st_mtime))
+        except OSError as exc:
+            print(f"[autopilot] wait-or-reap: stat failed: {exc}", file=sys.stderr)
+            # Transcript exists but liveness is unknowable: never reap a
+            # possibly live child on a transient stat failure -- but BOUND the
+            # fail-safe (operator ruling 2026-11-04): once the slot has been
+            # occupied past subagent_max_wall_seconds (the silent-wedge
+            # threshold that emitted this action) a persistent stat failure
+            # falls through to DEAD and reaps, so it cannot pin the slot.
+            occupied_s = _slot_occupied_seconds(load_state(), slot)
+            max_wall = _wait_or_reap_max_wall_seconds(load_state())
+            if occupied_s is None or occupied_s < max_wall:
+                msg = f"wait_or_reap verdict=unknown slot={slot} task_id={task_id} reason=stat-failed"
+                print(f"[autopilot] {msg}")
+                _append_log(msg)
+                return 0
+            stat_failed = True  # DEAD: unreadable mtime past the wedge threshold
+            print(
+                f"[autopilot] wait-or-reap: stat failure persisted past "
+                f"{max_wall}s slot occupancy; treating as DEAD",
+                file=sys.stderr,
+            )
+    if transcript is not None and age is not None and age < WAIT_OR_REAP_LIVE_WINDOW_S:
+        msg = f"wait_or_reap verdict=live slot={slot} task_id={task_id} transcript_age_s={age}"
+        print(f"[autopilot] {msg}")
+        _append_log(msg)
+        return 0
+
+    tokens = 0
+    source = "unknown"
+    if transcript is not None:
+        final = _final_usage_context_total(transcript)
+        if final is not None:
+            tokens, source = final, "transcript-final-usage"
+        # No readable usage line: tokens=0, token_source stays "unknown".
+    s = load_state()
+    slot_obj = ((s or {}).get("slots") or {}).get(slot)
+    skill = slot_obj.get("skill") if isinstance(slot_obj, dict) else None
+    age_s = "stat-failed" if stat_failed else (str(age) if age is not None else "missing")
+    msg = (
+        f"wait_or_reap verdict=reaped slot={slot} task_id={task_id} "
+        f"transcript_age_s={age_s} tokens={tokens} token_source={source}"
+    )
+    print(f"[autopilot] {msg}")
+    _append_log(msg)
+    return run_completion(slot, task_id, tokens, skill)
+
+
 def main(argv: list[str]) -> int:
     # Issue #5075: the bare-invocation hard-cap sweep is deleted (no writer
     # ever populated `partial_tokens`); a bare call prints usage, exits 0.
     if len(argv) <= 1:
         print("usage: reap.py completion <class> <task_id> <total_tokens> [skill] "
-              "[last_segment_tokens] | grill-crash <task_id>", file=sys.stderr)
+              "[last_segment_tokens] | wait-or-reap <slot> <task_id> | "
+              "grill-crash <task_id>", file=sys.stderr)
         return 0
 
     sub = argv[1]
@@ -2288,6 +2448,13 @@ def main(argv: list[str]) -> int:
         if notice:
             post_instant_death_notice(notice, dispatch_model)
         return rc
+
+    if sub == "wait-or-reap":
+        # Usage: reap.py wait-or-reap <slot> <task_id>   (issue #5282)
+        if len(argv) != 4:
+            print("[autopilot] reap wait-or-reap usage: wait-or-reap <slot> <task_id>", file=sys.stderr)
+            return 0
+        return run_wait_or_reap(argv[2], argv[3])
 
     if sub == "grill-crash":
         # Usage: reap.py grill-crash <task_id>
