@@ -207,6 +207,27 @@ describe("legacy-backfill script (INV-7)", () => {
   });
 });
 
+describe("playbook + lint-ratchet shape (INV-5, INV-10)", () => {
+  const ROOT = join(import.meta.dirname, "..");
+
+  test("workers never add in-progress: parent flow step 4 only reads; the QA pick step opens a label-free claim", () => {
+    const parent = readFileSync(join(ROOT, "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md"), "utf8");
+    assert.equal(/--add-label in-progress/.test(parent), false);
+    assert.match(parent, /scripts\/lifecycle\.ts dispatch \$issue_number --dispatch \$dispatch_id --class dev_orch --run \$run_id/);
+    const qa = readFileSync(join(ROOT, "docs/operator-playbooks/hydra-qa.md"), "utf8");
+    assert.match(qa, /scripts\/lifecycle\.ts claim \$issue_number --dispatch \$dispatch_id --class qa_orch --run \$run_id --pr \$pr_number/);
+  });
+
+  test("lint ratchet shrinks: the dev parent flow row is 3 and drainer-driver carries no direct state-write row", () => {
+    const base = JSON.parse(readFileSync(join(ROOT, "test/fixtures/lifecycle-seam-baseline.json"), "utf8")) as {
+      files: Record<string, number>;
+    };
+    assert.equal(base.files["docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md"], 3);
+    assert.equal(base.files["src/glm/drainer-driver.ts"], undefined);
+    assert.equal(base.files["docs/operator-playbooks/hydra-qa.md"], 11, "qa sites stay at 11 (#5317/#5321 territory)");
+  });
+});
+
 describe("GLM finish action -> claim outcome (INV-6)", () => {
   test("open-pr -> pr-opened; keep-partial-for-resume -> stall; every other arm -> no-pr", () => {
     const f = (action: string) => ({ action }) as any;
