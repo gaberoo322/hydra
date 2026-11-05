@@ -403,3 +403,53 @@ describe("runHousekeeping — attribution-record runs before holdback-merge-watc
   });
 });
 
+describe("runHousekeeping — workOverrides contract (issue #5199)", () => {
+  function makeBus() {
+    return { async publish() { return "fake-id"; } };
+  }
+  const baseDeps = {
+    runGlmEligibilitySweep: async () => 0,
+    runLifecycleReconcile: async () => null,
+    publishTargetOutcomes: async () => {},
+  };
+
+  test("an override key naming no registered chore is rejected (no vacuous stub)", async () => {
+    await assert.rejects(
+      runHousekeeping(makeBus() as any, {
+        ...baseDeps,
+        workOverrides: { ...SLOW_CHORE_STUBS, "review-pikcup-notify": noopWork },
+      }),
+      (err: any) => err.code === "invalid-argument" && /review-pikcup-notify/.test(err.message),
+    );
+  });
+
+  test("an inherited Object.prototype key is not treated as an override", async () => {
+    await assert.rejects(
+      runHousekeeping(makeBus() as any, {
+        ...baseDeps,
+        workOverrides: { constructor: noopWork } as any,
+      }),
+      (err: any) => err.code === "invalid-argument",
+    );
+  });
+
+  test("every stubbed chore's override is actually invoked in place of the real work", async () => {
+    const called: string[] = [];
+    const recording = Object.fromEntries(
+      Object.keys(SLOW_CHORE_STUBS).map((name) => [name, async () => { called.push(name); }]),
+    );
+    // Null cadence readers so the time-windowed usage-weekly-snapshot guard passes.
+    const nullTs = async () => null;
+    const summary = await runHousekeeping(makeBus() as any, {
+      ...baseDeps,
+      getUsageSnapshotLastWeekly: nullTs,
+      getMemoryLastConsolidation: nullTs,
+      getCleanupLastDaily: nullTs,
+      workOverrides: recording,
+    });
+    assert.deepEqual([...called].sort(), Object.keys(SLOW_CHORE_STUBS).sort());
+    for (const name of Object.keys(SLOW_CHORE_STUBS)) {
+      assert.ok(summary.ran.includes(name), `${name} must be classified ran via its override`);
+    }
+  });
+});

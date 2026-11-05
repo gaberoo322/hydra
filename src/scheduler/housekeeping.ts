@@ -51,6 +51,7 @@
 
 import * as Sentry from "@sentry/node";
 import { logger } from "../logger.ts";
+import { InvalidArgumentError } from "../errors.ts";
 import {
   getMemoryLastConsolidation,
   getCleanupLastDaily,
@@ -553,8 +554,21 @@ async function runHousekeeping(
     },
   ];
 
+  // Issue #5199: an override key that names no registered chore would leave
+  // the real (slow, live-gh) chore running and the test passing vacuously, so
+  // reject it loudly. Own-property lookup only: a key like `constructor` must
+  // never resolve to an inherited Object.prototype member.
+  const overrides = deps.workOverrides ?? {};
+  const choreNames = new Set(chores.map((c) => c.name));
+  const unknownKeys = Object.keys(overrides).filter((k) => !choreNames.has(k));
+  if (unknownKeys.length > 0) {
+    throw new InvalidArgumentError(
+      `runHousekeeping: workOverrides names unregistered chore(s): ${unknownKeys.join(", ")}`,
+    );
+  }
+
   for (const chore of chores) {
-    const override = deps.workOverrides?.[chore.name];
+    const override = Object.hasOwn(overrides, chore.name) ? overrides[chore.name] : undefined;
     await runChore(override ? { ...chore, work: override } : chore, ran, skipped);
   }
 
