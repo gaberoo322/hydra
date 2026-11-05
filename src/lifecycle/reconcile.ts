@@ -118,7 +118,11 @@ function bump(map: Record<string, number>, key: string): void {
   map[key] = (map[key] ?? 0) + 1;
 }
 
-/** Fold a journal's 7-day window into the report's seam-transition / would-refuse / would-park counts. */
+/**
+ * Fold a journal's 7-day window into the report's seam-transition / would-refuse / would-park counts.
+ * Scope (INV-10, deliberately narrowed): only OPEN issues' journals are tallied; issues closed
+ * inside the window are not counted because no journal-wide SCAN accessor exists.
+ */
 function tallyJournal(report: ReconcileReport, entries: readonly LifecycleJournalEntry[], now: number): void {
   for (const e of entries) {
     if (typeof e.ts !== "number" || e.ts < now - REPORT_WINDOW_MS) continue;
@@ -238,7 +242,10 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
           issue.number,
           externalEntry(now, "closed", states.length === 1 ? states[0] : "unknown", { labels: states.join(",") }, "external:reopened"),
         );
-        if (!dryRun) await deps.persistJournal(repo, issue.number);
+        if (!dryRun) {
+          const persisted = await deps.persistJournal(repo, issue.number);
+          if (persisted.ok === false) report.errors.push(`persist-failed:#${issue.number}`);
+        }
         report.externalEntries++;
         return;
       }
@@ -271,14 +278,19 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
           report.zeroStateExempt++;
           return;
         }
-        report.zeroStateRelabeled.push(issue.number);
-        await apply({
+        const relabel = await apply({
           issue: issue.number,
           to: "needs-triage",
           actor: RECONCILE_ACTOR,
           reason: "rerouted",
           rationale: "zero-state backstop",
         });
+        // Count only a relabel that was written (or, in dry-run, would be attempted).
+        if (relabel !== null && relabel.ok === false) {
+          report.errors.push(`zero-state-refused:#${issue.number}:${relabel.code}`);
+        } else {
+          report.zeroStateRelabeled.push(issue.number);
+        }
         return;
       }
 
@@ -292,15 +304,17 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
         } else {
           const moves = externalMoves(tl.value, known, current);
           let parkExitMs: number | null = null;
+          for (const m of moves) if (m.from === "parked" && m.tsMs > 0) parkExitMs = m.tsMs;
+          // Marker first: if it cannot be confirmed, append nothing so the diff
+          // (journal != GitHub) fires again next tick and the marker is retried.
+          if (parkExitMs !== null && !(await postResetOnce(issue.number, parkExitMs))) return;
           for (const m of moves) {
             await append(
               issue.number,
               externalEntry(m.tsMs > 0 ? m.tsMs : now, m.from, m.to, { at: new Date(m.tsMs > 0 ? m.tsMs : now).toISOString() }, "external"),
             );
             report.externalEntries++;
-            if (m.from === "parked" && m.tsMs > 0) parkExitMs = m.tsMs;
           }
-          if (parkExitMs !== null) await postResetOnce(issue.number, parkExitMs);
         }
       }
 
@@ -317,9 +331,10 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
           return;
         }
         const target = classifyQaPassedExit(live.value);
-        report.qaExits[target]++;
-        if (target !== "none") {
-          await apply({
+        if (target === "none") {
+          report.qaExits.none++;
+        } else {
+          const exit = await apply({
             issue: issue.number,
             to: target,
             evidence: { pr: String(pr) },
@@ -327,25 +342,34 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
             reason: "rerouted",
             rationale: `qa-passed exit read live at head of PR #${pr}`,
           });
+          // Count the exit only once the seam wrote it (null = dry-run: would route).
+          if (exit !== null && exit.ok === false) {
+            report.errors.push(`qa-exit-refused:#${issue.number}:${exit.code}`);
+          } else {
+            report.qaExits[target]++;
+          }
         }
       }
     }
 
     // One cap-reset marker per external un-park, keyed by the event's own timestamp.
-    async function postResetOnce(issue: number, eventMs: number): Promise<void> {
+    // Resolves true when the marker is posted or already present (safe to journal the move).
+    async function postResetOnce(issue: number, eventMs: number): Promise<boolean> {
       const comments = await deps.seam.fetch.issueComments(issue);
       if (comments.ok === false) {
         report.errors.push(`cap-reset-comments-failed:#${issue}`);
-        return;
+        return false;
       }
-      if (!(latestResetMs(comments.value) < eventMs)) return;
+      if (!(latestResetMs(comments.value) < eventMs)) return true;
       report.capResetsPosted++;
-      if (dryRun) return;
+      if (dryRun) return true;
       const res = await postCapReset(issue, { by: "external", ts: new Date(eventMs).toISOString() }, deps.seam);
       if (res.ok === false) {
         report.capResetsPosted--;
         report.errors.push(`cap-reset-failed:#${issue}`);
+        return false;
       }
+      return true;
     }
 
     // External close (INV-9): a recently closed issue whose journal has no terminal closed entry.
@@ -364,7 +388,10 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
             issue.number,
             externalEntry(now, lastKnownState(j.entries), "closed", {}, "external:closed"),
           );
-          if (!dryRun) await deps.seam.journal.expireOnClose(repo, issue.number);
+          if (!dryRun) {
+            const expired = await deps.seam.journal.expireOnClose(repo, issue.number);
+            if (expired.ok === false) report.errors.push(`expire-failed:#${issue.number}`);
+          }
           report.externalEntries++;
         } catch (err) {
           logger.error({ err, issue: issue.number }, "[lifecycle-reconcile] closed-issue pass failed");

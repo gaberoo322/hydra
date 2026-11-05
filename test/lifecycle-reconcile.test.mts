@@ -70,6 +70,10 @@ function world(mode: "shadow" | "enforce" = "enforce") {
     timelineFetches: 0,
     openIssuesFail: false,
     journalThrowFor: new Set<number>(),
+    editFails: false,
+    persistFails: false,
+    expireFails: false,
+    postFails: false,
     deps: undefined as unknown as ReconcileDeps,
   };
   const j = (n: number): LifecycleJournalEntry[] => {
@@ -87,6 +91,7 @@ function world(mode: "shadow" | "enforce" = "enforce") {
       return i ? { ok: true, row: row(n, i) } : { ok: false, code: "gh-failed" };
     },
     edit: async (n, l) => {
+      if (w.editFails) return { ok: false, code: "gh-failed" };
       w.edits.push({ issue: n, remove: l.remove, add: l.add });
       const i = w.issues.get(n)!;
       i.labels = i.labels.filter((x) => !l.remove.includes(x)).concat(l.add);
@@ -98,6 +103,7 @@ function world(mode: "shadow" | "enforce" = "enforce") {
       return { ok: true };
     },
     comment: async (number, body) => {
+      if (w.postFails) return { ok: false, code: "gh-failed" };
       w.posted.push({ number, body });
       w.comments.set(number, [...(w.comments.get(number) ?? []), body]);
       return { ok: true };
@@ -122,7 +128,8 @@ function world(mode: "shadow" | "enforce" = "enforce") {
         j(n).push(e);
         return { ok: true };
       },
-      expireOnClose: async (_r, n) => (w.expired.push(n), { ok: true }),
+      expireOnClose: async (_r, n) =>
+        w.expireFails ? { ok: false, error: "x" } : (w.expired.push(n), { ok: true }),
       openClaim: async () => ({ ok: false, code: "redis-failed", error: "n/a" }),
       closeClaim: async () => ({ ok: true, prior: null }),
       read: async (_r, n) => {
@@ -144,7 +151,8 @@ function world(mode: "shadow" | "enforce" = "enforce") {
       ok: true,
       rows: w.closedRows.map((n) => row(n, w.issues.get(n) ?? { labels: [], body: "", state: "CLOSED" })),
     }),
-    persistJournal: async (_r, n) => (w.persisted.push(n), { ok: true }),
+    persistJournal: async (_r, n) =>
+      w.persistFails ? { ok: false, error: "x" } : (w.persisted.push(n), { ok: true }),
     writeReport: async (report) => (w.reports.push(report), { ok: true }),
   };
   const add = (n: number, labels: string[], over: Partial<Issue> = {}) =>
@@ -533,5 +541,78 @@ describe("report, dry-run and never-throw (INV-10, INV-11)", () => {
     assert.equal(w.posted.length, 0);
     assert.equal(w.appends.length, before);
     assert.equal(w.reports.length, 0);
+  });
+});
+
+describe("report counts only written effects and surfaces failed writes (QA round 1)", () => {
+  test("a refused zero-state relabel is an error, not a relabel; a written one still counts", async () => {
+    const { w, add } = world();
+    add(110, ["wontfix"]);
+    w.editFails = true;
+    const refused = await runReconcile(w.deps);
+    assert.deepEqual(refused.zeroStateRelabeled, []);
+    assert.ok(refused.errors.some((e) => e.startsWith("zero-state-refused:#110")), refused.errors.join());
+    w.editFails = false;
+    const ok = await runReconcile(w.deps);
+    assert.deepEqual(ok.zeroStateRelabeled, [110]);
+  });
+
+  test("a refused qa-passed exit is an error, not a routed exit; none still counts", async () => {
+    const { w, add, journal } = world();
+    add(111, ["qa-passed"]);
+    journal(111).push(je({ to: "qa-passed", evidence: { pr: "311" } }));
+    w.lives.set(311, live({ number: 311, checks: "green" }));
+    w.prRecords.set(311, { number: 311, state: "OPEN", body: "Closes #111" });
+    w.editFails = true;
+    const refused = await runReconcile(w.deps);
+    assert.equal(refused.qaExits["needs-qa"], 0);
+    assert.ok(refused.errors.some((e) => e.startsWith("qa-exit-refused:#111")), refused.errors.join());
+    w.editFails = false;
+    const ok = await runReconcile(w.deps);
+    assert.equal(ok.qaExits["needs-qa"], 1);
+  });
+
+  test("failed PERSIST on reopen and failed expire on close are reported", async () => {
+    const { w, add, journal } = world();
+    add(112, ["needs-triage"]);
+    journal(112).push(je({ to: "closed" }));
+    add(113, [], { state: "CLOSED" });
+    journal(113).push(je({ to: "in-progress" }));
+    w.closedRows = [113];
+    w.persistFails = true;
+    w.expireFails = true;
+    const report = await runReconcile(w.deps);
+    assert.ok(report.errors.includes("persist-failed:#112"), report.errors.join());
+    assert.ok(report.errors.includes("expire-failed:#113"), report.errors.join());
+  });
+
+  test("a failed cap-reset post leaves the diff unchanged so the next tick retries and posts the marker", async () => {
+    const { w, add, journal } = world();
+    add(114, ["ready-for-agent"]);
+    journal(114).push(je({ kind: "transition", to: "parked", reason: "cap:total-claims" }));
+    w.timelines.set(114, [
+      { event: "labeled", label: "parked", tsMs: T1 },
+      { event: "unlabeled", label: "parked", tsMs: T2 },
+      { event: "labeled", label: "ready-for-agent", tsMs: T2 },
+    ]);
+    w.postFails = true;
+    const first = await runReconcile(w.deps);
+    assert.ok(first.errors.some((e) => e.startsWith("cap-reset-failed:#114")));
+    assert.equal(w.appends.filter((a) => a.issue === 114).length, 0);
+    w.postFails = false;
+    const second = await runReconcile(w.deps);
+    assert.equal(w.posted.filter((p) => p.number === 114 && p.body.startsWith("Hydra-Cap-Reset:")).length, 1);
+    assert.equal(second.externalEntries, 1);
+  });
+
+  test("INV-10 tally scope is open issues only: a closed issue's journal is not counted", async () => {
+    const { w, add, journal } = world();
+    add(115, ["ready-for-agent"]);
+    journal(115).push(je({ kind: "transition", ts: NOW - 1000, to: "ready-for-agent" }));
+    add(116, [], { state: "CLOSED" });
+    journal(116).push(je({ kind: "transition", ts: NOW - 1000, to: "closed", written: true }));
+    w.closedRows = [116];
+    const report = await runReconcile(w.deps);
+    assert.equal(report.seamTransitions, 1);
   });
 });
