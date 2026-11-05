@@ -345,7 +345,7 @@ def _parked_read_degraded(state: dict, events: list[dict]) -> bool:
     """True when the collector's parked read was unreadable (INV-4): the empty
     `orch_parked_issues` is then NOT a healthy empty set, so the belt fails
     closed on every dispatch-shaped path."""
-    return _signal_present(state, events, "orch_parked_degraded")
+    return _signal_present(state, events, "orch_parked_unreadable")
 
 
 def _is_parked_anchor(state: dict, events: list[dict], anchor: object) -> bool:

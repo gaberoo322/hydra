@@ -5794,7 +5794,7 @@ describe("decide.py - parked issues are never dispatched or armed (issue #5319)"
 
   test("QA r1 #3: a degraded parked read fails closed - no resume drain, no auto-merge, no qa_orch", () => {
     const s = baseState({
-      signals: { orch_parked_degraded: true, orch_parked_issues: [], orch_dev_resume_nopr_anchor: "issue-777", orch_work_available: false, needs_qa_orch: true, needs_qa_numbers: "3841" },
+      signals: { orch_parked_unreadable: true, orch_parked_issues: [], orch_dev_resume_nopr_anchor: "issue-777", orch_work_available: false, needs_qa_orch: true, needs_qa_numbers: "3841" },
     });
     s.dev_resume_pending = [{ anchor: "issue-778", branch: "worktree-agent-abc" }];
     const plan = runDecide(s, null, [realEvent(5402)]);
@@ -5804,9 +5804,9 @@ describe("decide.py - parked issues are never dispatched or armed (issue #5319)"
   });
 
   test("QA r1 #3 sibling: a healthy EMPTY parked read (degraded=false) leaves dispatch and auto-merge open", () => {
-    const s = baseState({ signals: { orch_parked_degraded: false, orch_parked_issues: [], orch_dev_resume_nopr_anchor: "issue-777", orch_work_available: false } });
+    const s = baseState({ signals: { orch_parked_unreadable: false, orch_parked_issues: [], orch_dev_resume_nopr_anchor: "issue-777", orch_work_available: false } });
     assert.equal(devOrch(runDecide(s, null)).length, 1);
-    const merged = (runDecide(baseState({ signals: { orch_parked_degraded: false } }), null, [realEvent(5402)]).actions ?? []).filter((a: any) => a.type === "auto-merge");
+    const merged = (runDecide(baseState({ signals: { orch_parked_unreadable: false } }), null, [realEvent(5402)]).actions ?? []).filter((a: any) => a.type === "auto-merge");
     assert.equal(merged.length, 1);
   });
 });

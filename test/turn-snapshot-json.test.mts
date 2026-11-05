@@ -221,7 +221,7 @@ function edgeValues(): TurnSnapshotValues {
       redResume: ok([4881, 4882]),
       devResumePick: FAILED,
       devResumeNoprPick: FAILED,
-      parkedIssues: FAILED, // degraded -> orch_parked_degraded true
+      parkedIssues: FAILED, // degraded -> orch_parked_unreadable true
       parkedPrs: new Set(),
       dirtyFix: ok({ pick: null, surface: [] }),
     },

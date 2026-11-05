@@ -260,7 +260,7 @@ def to_json_form(state: dict) -> dict:
     if signals:
         # Legacy captures predate #5319: their (absent) parked set was a healthy
         # empty read, not a degraded one - otherwise the belt fails every pick closed.
-        signals.setdefault("orch_parked_degraded", False)
+        signals.setdefault("orch_parked_unreadable", False)
     snap = {
         "schema_version": ts.SCHEMA_VERSION,
         "generated_at": "plan-parity",
