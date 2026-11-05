@@ -146,7 +146,8 @@
         "parkedIssues": {
           "ok": true,
           "value": {}
-        }
+        },
+        "parkedPrs": {}
       }
     }
   }
