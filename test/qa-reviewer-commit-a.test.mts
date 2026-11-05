@@ -18,6 +18,7 @@ import {
   reviewerCommitLocationPath,
   type ReviewerCommitInput,
 } from "../src/qa/round-action.ts";
+import { createGhQaVerdictFetchers } from "../src/qa/fetchers.ts";
 import { runQaVerdictPhase, type QaVerdictFetchers } from "../src/qa/phases.ts";
 import { buildQaVerdictTrailer, parseQaVerdictTrailer } from "../src/qa/verdict-trailer.ts";
 
@@ -423,5 +424,45 @@ describe("HYDRA_REPO_ROOT retargets the trusted regenerators (round 4)", () => {
   test("without HYDRA_REPO_ROOT the script still targets its own checkout (sibling shape)", () => {
     const src = readFileSync(join(ROOT, "scripts", "test", "suite-count-check.mjs"), "utf8");
     assert.ok(src.includes("process.env.HYDRA_REPO_ROOT") && src.includes('"..", ".."'));
+  });
+});
+
+describe("reviewer-commits rollout stage authority (INV-1, #5267 round 5)", () => {
+  function treeWithStage(stage: string): string {
+    const dir = mkdtempSync(join(tmpdir(), "qa-rollout-"));
+    mkdirSync(join(dir, "config", "orchestrator"), { recursive: true });
+    mkdirSync(join(dir, "test", "fixtures"), { recursive: true });
+    writeFileSync(join(dir, "test", "fixtures", "qa-cohort-baseline.json"), JSON.stringify({ metrics: { tripped: false } }));
+    writeFileSync(
+      join(dir, "config", "orchestrator", "qa-rollout.json"),
+      JSON.stringify({ "two-way-pair": "off", "reviewer-commits": stage }),
+    );
+    return dir;
+  }
+
+  test("the real adapter reads the stage from cwd: master (off) wins over a PR tree saying A", async () => {
+    const master = treeWithStage("off");
+    const prTree = treeWithStage("A");
+    const prev = process.cwd();
+    try {
+      const f = createGhQaVerdictFetchers("o/r");
+      process.chdir(master);
+      assert.equal(await f.rolloutStage!(), "off");
+      // sibling shape: run from the tree that says A, the adapter reports A
+      process.chdir(prTree);
+      assert.equal(await f.rolloutStage!(), "A");
+    } finally {
+      process.chdir(prev);
+      rmSync(master, { recursive: true, force: true });
+      rmSync(prTree, { recursive: true, force: true });
+    }
+  });
+
+  test("playbook runs the phase with cwd = $MASTER_WT and the pinned master tsx, not npx", () => {
+    const start = PLAYBOOK.indexOf("### 9.4 Reviewer commit");
+    const step94 = PLAYBOOK.slice(start, PLAYBOOK.indexOf("\n### ", start + 10));
+    assert.ok(/\(cd "\$MASTER_WT" && node [^\n]*qa-verdict\.ts" reviewer-commit\)/.test(step94));
+    assert.ok(step94.includes('"$MASTER_WT/node_modules/.bin/tsx"'));
+    assert.ok(!step94.includes("npx tsx"));
   });
 });

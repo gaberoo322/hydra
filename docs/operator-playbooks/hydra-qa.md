@@ -1071,7 +1071,7 @@ fi
 if [ "$REVIEW_VERDICT" = "FAIL" ] && [ -n "$MASTER_WT" ]; then
   RC_JSON=$(printf '%s' "$FOLD_JSON" | jq --argjson pr "$pr_number" --argjson tier "${PR_TIER_NUM:-null}" \
     '{pr: $pr, tier: $tier, blocking: .fold.blocking, followUps: .fold.followUps}' \
-    | node --no-warnings --experimental-strip-types "$MASTER_WT/scripts/ci/qa-verdict.ts" reviewer-commit) || RC_JSON=""
+    | (cd "$MASTER_WT" && node --no-warnings --experimental-strip-types "$MASTER_WT/scripts/ci/qa-verdict.ts" reviewer-commit)) || RC_JSON=""   # cwd = master: rolloutStage() reads process.cwd() (INV-1)
 fi
 RC_ACTION=$(printf '%s' "$RC_JSON" | jq -r '.action // "none"')
 if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
@@ -1107,7 +1107,7 @@ if [ "$REVIEW_VERDICT" = "FAIL" ] && [ "$RC_ACTION" = "commit-a" ]; then
     # File:line cell, apply exactly the change its Fix cell names (only paths in RC_BLOCKING_PATHS; a
     # RC_FOLLOWUP_PATHS path is optional), then run the file's own regenerator BY ABSOLUTE PATH from
     # "$MASTER_WT" with HYDRA_REPO_ROOT="$PR_WT" so it rewrites the PR worktree, never the session tree
-    # (HYDRA_REPO_ROOT="$PR_WT" npx tsx "$MASTER_WT/scripts/docs/generate-inventories.ts" for docs/generated/,
+    # (HYDRA_REPO_ROOT="$PR_WT" "$MASTER_WT/node_modules/.bin/tsx" "$MASTER_WT/scripts/docs/generate-inventories.ts" for docs/generated/,
     # HYDRA_REPO_ROOT="$PR_WT" node "$MASTER_WT/scripts/test/suite-count-check.mjs" --update-baseline --only <files> for test/fixtures/*-baseline.json). When .bodyFix is true,
     # seed "$RC_BODY_FILE" from "$ORIG_BODY_FILE" and ONLY add bullets under "## Files in scope".
     # A row you cannot resolve with a class-A edit aborts: RC_OK=0.
