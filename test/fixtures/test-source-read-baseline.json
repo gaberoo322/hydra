@@ -47,6 +47,7 @@
     "test/autopilot-token-recover-reap-completion.test.mts": "behaviour",
     "test/autopilot-turn-runner.test.mts": "behaviour",
     "test/autopilot-unattended.test.mts": "behaviour",
+    "test/autopilot-wait-or-reap-handler.test.mts": "behaviour",
     "test/autopilot-watchdog.test.mts": "behaviour",
     "test/branch-prune-script.test.mts": "behaviour",
     "test/build-spritesheet.test.mts": "behaviour",
