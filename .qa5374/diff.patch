@@ -1,0 +1,2781 @@
+diff --git a/.changelog/5319-autopilot-skips-parked.md b/.changelog/5319-autopilot-skips-parked.md
+new file mode 100644
+index 000000000..0275a715f
+--- /dev/null
++++ b/.changelog/5319-autopilot-skips-parked.md
+@@ -0,0 +1 @@
++- feat: autopilot skips PRs whose closing issue is parked, and /hydra-review lists parked work as its own queue (#5319)
+diff --git a/docs/operator-playbooks/hydra-review.md b/docs/operator-playbooks/hydra-review.md
+index e7968e7bc..3cae9943f 100644
+--- a/docs/operator-playbooks/hydra-review.md
++++ b/docs/operator-playbooks/hydra-review.md
+@@ -8,51 +8,52 @@ allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
+ # Operator Review — the HITL pipeline cockpit
+ 
+ Interactive session to advance every item that needs the operator's hand toward
+ **AFK-dispatchable** — the point where `hydra-autopilot` can work it with no
+ operator in the loop. Not just a label drainer: it classifies each item,
+ verifies the classification against the tracker rather than trusting a label, and
+ names the single action that unsticks it.
+ 
+ **Scope: the Orchestrator plus every configured Target project.** This one cockpit
+ covers both boards (ADR-0031 unified the Target onto a GitHub-Issues board, exactly
+ like the Orchestrator's). Stalled PRs (§0.9) and the operator-attention tail
+ (`ready-for-human`, `reframe`, stale-`blocked`) are walked for the Orchestrator
+ **and** each Target board in one session (§0.9, §1.5). This retires the separate target-review skill, which read a
+ now-dead Redis backlog and was blind to the live Target GitHub board. The Target
+ enumeration is a **loop** over `target-config.ts` (`getTargetGithubRepo()`), so it is
+ N-ready; today Hydra is a single swappable Target (ADR-0013), so the loop has one
+ entry (`$TARGET_GH_REPO`, resolved through the target seam below). The `hitl-grill` park lane is **not** part of
+ this cockpit: a parked idea blocks no AFK work, so it is neither gathered nor
+ reported here. `/hydra-hitl-grill` is the standalone drain for that lane.
+ 
+ ## Buckets, in drain order
+ 
+ 1. **Stalled PRs** (§0.9) — green-but-conflicted and green-but-unshepherded PRs across `gaberoo322/hydra` and every Target repo. A PR is not an issue (so no bucket above walks it), its passing checks alarm nothing, and a merge conflict raises no signal — finished work that is not landing sits invisible until somebody looks.
+ 2. **`ready-for-human`** (Orchestrator) — `gaberoo322/hydra` issues requiring operator decisions, including a `hydra-grill` gate-fail handoff (a `## hydra-grill handoff` comment on the anchor issue, ADR-0034 §8.1).
+ 3. **Stale-blocked** (Orchestrator) — `blocked` issues where no linked open issue justifies the block
+-4. **Per-Target operator-attention items** (§1.5) — for each configured Target board (`target-config.ts`), the Target's `ready-for-human`, `reframe` (a build that failed 2+ times, stamped by `hydra-target-qa`), and stale-`blocked` issues. Deliberately **not** `needs-triage` — that is `hydra-target-sweep`'s autonomous lane (mirroring how the Orchestrator buckets leave triage to `hydra-sweep`).
++4. **Parked (cap-exhausted work)** (Orchestrator) — open `gaberoo322/hydra` issues carrying the `parked` human-hold label (ADR-0047 Decision 6): the lifecycle writer seam parked them in the same call that found a cap exceeded, and the autopilot now skips every PR whose closing issue is parked (resume, QA, forward-fix, update-branch, conflict-fix, auto-merge). Only the operator un-parks. These are not stalled PRs — the PR is deliberately left open.
++5. **Per-Target operator-attention items** (§1.5) — for each configured Target board (`target-config.ts`), the Target's `ready-for-human`, `reframe` (a build that failed 2+ times, stamped by `hydra-target-qa`), and stale-`blocked` issues. Deliberately **not** `needs-triage` — that is `hydra-target-sweep`'s autonomous lane (mirroring how the Orchestrator buckets leave triage to `hydra-sweep`).
+ 
+ Stalled PRs drain first: a green-but-stuck PR is finished work that is not landing, and it is the cheapest thing on the board to unstick — usually one command — so clearing it first converts effort into merged work before the session spends judgment on undecided issues. `ready-for-human` and stale-blocked follow: these need real operator thought, and a stale-blocked row in particular is only worth walking after its blocker has been verified against the tracker rather than trusted from the label. Per-Target items drain after the Orchestrator buckets: the Orchestrator-self board is primary (it builds the machine that builds the Targets), and a Target `reframe`/`ready-for-human` blocks only that one Target build loop, not the whole AFK frontier. `hitl-grill` is deliberately absent: parked ideas are not attention items, and `/hydra-hitl-grill` drains that lane on its own schedule.
+ 
+ ## Procedure
+ 
+ @include _fragments/target-seam-preamble.md
+ 
+ ### GLM dev-drainer beachhead report (informational — read once, no draining)
+ 
+ Before touching any bucket, print the GLM dev-drainer's beachhead readout
+ (issue #3690, ADR-0032 Decision 6's ~2-week/~25-PR keep-or-kill window):
+ 
+ ```bash
+ bash scripts/glm-beachhead-report.sh
+ ```
+ 
+ This is context, not a queue entry: it carries no operator-decision options
+ and nothing here drains it — it is a single informational line placed ahead
+ of the operator-decision buckets below because it colors how the operator
+ reads everything else this session (e.g. a KILL-signal readout is a cue to
+ look harder at any `glm-authored` PR encountered later in the session). The
+ script computes window progress, first-pass QA PASS-rate, the live
+ `percentLast7d` delta against a bootstrapped day-0 baseline, and churn vs a
+ non-GLM baseline, folding them into a `recommendation:` string. **That
+ recommendation is advisory prose only** — no code path anywhere auto-flips
+@@ -271,95 +272,107 @@ OVERRIDE_LINE=$(PR="$PR" HEAD_SHA="$HEAD_SHA" REASON="$REASON" node --no-warning
+     process.stdout.write(line);
+   }).catch((err) => { console.error('[hydra-review] renderQaOverrideLine failed:', err); process.exit(1); });
+ ") \
+   && BODY_FILE=$(mktemp) \
+   && printf '%s\n\n%s\n' '> *This was generated by AI during operator review.*' "$OVERRIDE_LINE" > "$BODY_FILE" \
+   && gh pr comment "$PR" --repo "$RREPO" --body-file "$BODY_FILE" \
+   && gh pr merge "$PR" --repo "$RREPO" --squash --match-head-commit "$HEAD_SHA"
+ # A required check still pending? Replace the last line with the --auto arm,
+ # which is head-pinned the same way:
+ #   gh pr merge "$PR" --repo "$RREPO" --auto --squash --match-head-commit "$HEAD_SHA"
+ # <<< qa-override
+ ```
+ 
+ If any step fails (a bad head, a blank reason, a comment error), nothing
+ merges: the override is recorded before the merge or not at all.
+ 
+ ### 1. Gather (Orchestrator)
+ 
+ ```bash
+ gh issue list --repo gaberoo322/hydra --label "ready-for-human" --state open --json number,title,labels,createdAt,updatedAt
+ gh issue list --repo gaberoo322/hydra --label "blocked" --state open --json number,title,labels,body,createdAt,updatedAt
+ ```
+ 
+ For each blocked issue, check body/comments for "blocked by #N", "depends on #N", or links. Referenced issue closed or no blocker referenced → stale-blocked.
+ 
++Parked (cap-exhausted work) is gathered separately (issue #5319):
++
++```bash
++gh issue list --repo gaberoo322/hydra --label "parked" --state open --json number,title,labels,createdAt,updatedAt,comments
++```
++
++For each parked issue, read the LATEST `Hydra-Cap-Park:` machine line in its comments (`Hydra-Cap-Park: arm=… count=… limit=… unit=… [pr=N] source=… ts=…`, posted under the `## Hydra cap park` comment). Its `arm`, `count`/`limit` and `pr` fields fill the §2 table; no machine line (a hand-applied `parked` label) → show `?` for those cells and say so.
++
+ ### 1.5. Gather (per Target board)
+ 
+ Enumerate the configured Target repos and gather each board's operator-attention
+ labels. The enumeration mirrors `target-config.ts` (`getTargetGithubRepo()` / the
+ `HYDRA_TARGET_GITHUB_REPO` env, defaulting to the seam-resolved `$TARGET_GH_REPO`) as an **array**,
+ so this is N-ready — today it resolves to one Target (ADR-0013 single swappable
+ Target):
+ 
+ ```bash
+ # N-ready: one line to update if/when target-config exposes multiple Targets.
+ TARGET_REPOS=("${HYDRA_TARGET_GITHUB_REPO:-$TARGET_GH_REPO}")
+ 
+ for TREPO in "${TARGET_REPOS[@]}"; do
+   echo "=== target: $TREPO ==="
+   gh issue list --repo "$TREPO" --label "ready-for-human" --state open --json number,title,labels,createdAt,updatedAt
+   gh issue list --repo "$TREPO" --label "reframe"         --state open --json number,title,labels,body,createdAt,updatedAt
+   gh issue list --repo "$TREPO" --label "blocked"          --state open --json number,title,labels,body,createdAt,updatedAt
+ done
+ ```
+ 
+ Same stale-blocked test as the Orchestrator: for each Target `blocked` issue, check
+ body/comments for a "blocked by #N" reference — referenced issue closed, or no
+ blocker referenced, → stale-blocked. **Do not** gather `needs-triage` (that is
+ `hydra-target-sweep`'s autonomous lane). A `reframe` item is a Target build that
+ failed 2+ times (stamped by `hydra-target-qa` alongside `ready-for-human`); surface
+ its prior-attempt history so the operator decides informed.
+ 
+ ### 2. Present
+ 
+ ```
+ ## Issues needing attention (N total)
+ 
+ ### Stalled PRs (C) — green-but-conflicted / green-but-unshepherded (§0.9)
+ (both Orchestrator and every Target repo)
+ | # | Repo | State | Title |
+ |---|------|-------|-------|
+ 
+ ### Ready-for-human (M) — Orchestrator
+ | # | Title | Age | Why here |
+ |---|-------|-----|----------|
+ 
+ ### Stale-blocked (K) — Orchestrator
+ | # | Title | Age | Blocker status |
+ |---|-------|-----|----------------|
+ 
++### Parked (P) — Orchestrator, cap-exhausted work
++| # | Arm | Count/Limit | PR | Age | Title |
++|---|-----|-------------|----|-----|-------|
++
+ ### Target: <repo> — ready-for-human / reframe / stale-blocked (T) — §1.5
+ (one block per configured Target board; omit a Target with nothing needing attention)
+ | # | Kind | Title | Age | Why here / prior attempts |
+ |---|------|-------|-----|---------------------------|
+ ```
+ 
+ ### 2.5. Classify before presenting
+ 
+ **Classification is not optional, and it runs inline.** Before presenting
+ anything, resolve each gathered row's *cheap* facts with parallel `gh` calls — no
+ subagents:
+ 
+ - **stale-blocked candidates** — does the named blocker still exist, is it CLOSED,
+   and does its close event carry a real `commit_id`? A `completed` close with a
+   null `commit_id` is not proof a fix shipped, so confirm the change is actually
+   on the default branch before calling a row stale.
+ - **stalled PRs** — the state of each *required* check (branch-protection set
+   only; `advisory-checks` is ambient-red and must never count).
+ 
+ ~1–2 `gh` calls per row, and what makes the table and the §3 previews truthful.
+ It is also the real winnowing — report a row confirmed *genuinely* blocked as a
+ suppressed count, never walk it.
+ 
+ **Everything else is walked.** There is no separate filter step and no
+ subagent fan-out: after classification a board is routinely 2–3 actionable rows,
+@@ -383,50 +396,72 @@ Per row:
+    dev failure / stale-blocked / **Target ready-for-human / reframe /
+    stale-blocked**).
+ 3. Write a concise summary as ordinary text *above* the prompt — the prompt
+    carries the choice, the text carries the reasoning.
+ 4. Call `AskUserQuestion` with **exactly one question** for this row, using that
+    bucket's canonical options from §4. One row = one question = one call; never
+    batch two rows into one call, and never pre-stage the next row's question.
+ 5. Execute the pick via `gh` — **always pass the row's own repo**
+    (`--repo gaberoo322/hydra` for Orchestrator rows, `--repo <TREPO>` for Target
+    rows); explore that repo's checkout (`~/hydra` vs `$TARGET_APP_DIR`)
+    before asking obvious questions.
+ 6. Move on.
+ 
+ **Prompt shape.** `header` is the bucket (≤12 chars: `Stalled PR`, `Blocked`,
+ `Triage`, `Reframe`). `question` names the row by number and title. Each option
+ carries a `description` saying what will actually happen — the label is the verb,
+ the description is the consequence.
+ 
+ **Slot 1 is the recommendation**, labelled `<action> (Recommended)`. This is the
+ whole point: the operator clicks option 1 without reading further when they agree.
+ Never present a neutral menu — commit to a position and put it first.
+ 
+ **Slot 4 is always Skip.** "Other" is appended automatically by the tool for free
+ text, so it is never an option you write.
+ 
++**Parked rows (issue #5319).** Read the issue, the `Hydra-Cap-Park:` line and the
++open PR (if `pr=N`), then ask whether the cap that tripped was a real signal (a
++runaway loop: leave it parked, or close) or a limit that was set too low (un-park).
++There is NO §4 option-table row for this bucket yet: a row needs a
++`waiting-on-you:parked` admission line in ADR-0034 §8.1's closed vocabulary, which
++belongs with #5313's human-hold attention rule. Until then the walk is a plain
++`AskUserQuestion` whose slot 1 is the recommendation and slot 4 is Skip. The
++un-park route, when the operator chooses to resume the work:
++
++1. **The state exit.** Preferred: the confirm-first board route
++   `POST /api/autopilot/board/promote` (registry-pinned) for "resume as
++   `ready-for-agent`", or `POST /api/autopilot/board/relabel` for any other lane -
++   the sanctioned `operator-route` exit from a human-hold state once #5313 re-points
++   those routes at the lifecycle writer seam so they strip `parked` as they strip
++   `hitl-grill` today. Until #5313 lands, un-park through the GitHub UI (an
++   `external` exit, ADR-0047 Decision 3). Never write a lifecycle state label with
++   `gh issue edit` from this playbook.
++2. **The reset marker (mandatory in BOTH paths).** Post the marker comment so the cap
++   counts restart from here: `gh issue comment <N> --repo gaberoo322/hydra --body
++   "Hydra-Cap-Reset: by=operator:<name> ts=<ISO-8601>"` (until #5316's reconcile
++   posts it automatically for external exits).
++
+ **Evidence `preview` — two buckets only.** `preview` renders monospace markdown
+ beside the options and is single-select-only, which is exactly this walk. Use it
+ where **evidence decides the row**:
+ 
+ - **Stale-blocked** — the blocker's number, state, and (if closed) its close-event
+   `commit_id`, plus whether that commit is actually on the default branch. A
+   `completed` close with a null `commit_id` is NOT proof a fix shipped.
+ - **Stalled PRs** — the required-check table (name → state), so the operator sees
+   the state that decided which mechanism "Land it" will use.
+ 
+ Do **not** attach a preview to judgment rows (triage, `ready-for-human`,
+ `reframe`). There the decision is prose the summary already carries, and a
+ preview would compete with the options instead of informing them.
+ 
+ **Transcript deep-link (issue #695).** Whenever a row references a subagent
+ dispatch — a dev failure naming its dispatching session — include a deep-link
+ line in the summary text:
+ 
+ ```
+ - transcript: http://localhost:4000/dispatch/<sessionId>/transcript
+ ```
+ 
+ `<sessionId>` is the harness session id (the unified active-dispatch row's `id`
+ for `source === "subagent"`). It resolves a known dispatch even after its row
+ expires from the Now page; a registered dispatch whose JSONL was cleaned up
+@@ -492,51 +527,51 @@ label on the Target repo (hydra-target-qa's FAIL routing never stamps it —
+ the FAIL goes to the operator here first). The slot labels 2–4 and the
+ registry-asserted cells are unchanged; only the resolution semantics above
+ are new. The Orchestrator analogue is the PR-side stranding-label clear in §0.9
+ (issue #5058). An Orchestrator stalled PR handed back to a lane drops
+ `ready-for-human` and `conflict-fix-attempted` from the PR itself, in addition to
+ the issue relabel.
+ 
+ ### 5. Wrap-up
+ 
+ ```
+ ## Session summary
+ 
+ | # | Title | Was | Resolution | Now |
+ |---|-------|-----|------------|-----|
+ 
+ Resolved: X | Deferred: Y | Remaining: Z
+ Targets: <repo> — agent-ready=G, reframed=F, unblocked=U, abandoned=B (one line per Target board touched)
+ ```
+ 
+ Report how much work crossed the AFK line this session: every row relabelled
+ `ready-for-agent` and every PR landed turns operator judgment into work autopilot
+ carries on its next tick. That is the point of the cockpit — count it.
+ 
+ ## Rules
+ 
+-- **Drain order: stalled PRs (§0.9) → Orchestrator ready-for-human → Orchestrator stale-blocked → per-Target items (§1.5).** Stalled PRs come first because they are the cheapest conversion of effort into merged work on the board — don't reorder anything ahead of them. **Per-Target items drain after the Orchestrator buckets** (the Orchestrator-self board is primary); within the Target phase, finish one Target board fully before starting the next.
++- **Drain order: stalled PRs (§0.9) → Orchestrator ready-for-human → Orchestrator stale-blocked → Orchestrator parked → per-Target items (§1.5).** Stalled PRs come first because they are the cheapest conversion of effort into merged work on the board — don't reorder anything ahead of them. **Per-Target items drain after the Orchestrator buckets** (the Orchestrator-self board is primary); within the Target phase, finish one Target board fully before starting the next.
+ - **Target rows resolve against the Target repo, never `gaberoo322/hydra`.** Every `gh` command for a Target row carries `--repo <TREPO>` (the row's own repo from the §1.5 enumeration), and codebase exploration uses that Target's workspace (`$TARGET_APP_DIR`, not `~/hydra`). Never gather or resolve a Target `needs-triage` item here — that is `hydra-target-sweep`'s autonomous lane.
+ - **`hitl-grill` is out of scope for this session — never gather, report, promote, close, relabel, or comment on a parked idea here.** The lane has exactly two write paths, the Work page's HITL grill inbox and `/hydra-hitl-grill`, and both go through the board routes (`POST /api/autopilot/board/promote` / `close`) so a promote strips the park label in the same verified write that adds `ready-for-agent`, and a dismiss retains it as the producers' dedup baseline. A third path from here would risk the half-written states that design exists to prevent. If the operator asks about parked ideas, point them at `/hydra-hitl-grill`.
+ - **One issue at a time. No batching.** This survives `AskUserQuestion` intact:
+   one row = one question = one call. Classification (§2.5) does the winnowing a
+   batch step would otherwise do, and it does it on evidence rather than on a
+   guess from a title. See the pre-close PR check below for what batching cost
+   once.
+ - **Classify before presenting, and verify rather than trust a label.** A
+   `blocked` row is only stale once its blocker is confirmed closed AND its fix
+   confirmed on the default branch — a `completed` close with a null `commit_id`
+   ships nothing. A stalled PR is only unshepherded once every *required* check is
+   confirmed green; `advisory-checks` is ambient-red on master and must never
+   count toward that predicate.
+ - **Never present a neutral menu.** Slot 1 is a committed recommendation labelled
+   `(Recommended)`, so agreeing costs one click. Slot 4 is always Skip. "Other" is
+   appended by the tool — never write it as an option.
+ - Every comment posted to GitHub starts with: `> *This was generated by AI during operator review.*`
+ - Agent briefs (when relabeling to `ready-for-agent`) include: category, summary, current/desired behavior, acceptance criteria, out-of-scope, key interfaces.
+ - Explore the codebase before asking obvious questions.
+ - "Skip" / "later" → move on without action.
+ - Track before/after states as you go — don't re-read labels at the end.
+ - **Before closing any issue, check for open PRs that reference it.** Tracking parents in particular can have in-flight work that supersedes a stale "no plan / no signal" close-comment. Run:
+   ```bash
+   gh pr list --repo gaberoo322/hydra --state open --search "#<num>" --json number,title,body \
+     --jq "[.[] | select(.body | test(\"#<num>\\\\b\"))] | .[] | \"#\(.number) \(.title)\""
+diff --git a/scripts/autopilot/decide.py b/scripts/autopilot/decide.py
+index 95684dd05..6392c8617 100755
+--- a/scripts/autopilot/decide.py
++++ b/scripts/autopilot/decide.py
+@@ -317,51 +317,55 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+ import turn_snapshot as ts  # noqa: E402
+ import run_ledger  # noqa: E402  (leaf module; main() is its only caller)
+ 
+ # ---------------------------------------------------------------------------
+ # Sibling brain modules (issue #4511) — imports point DOWN only
+ # ---------------------------------------------------------------------------
+ # decide.py -> decide_selectors/*.py -> decide_base.py; nothing below this file
+ # imports `decide` (see FILE LAYOUT in the module docstring). The guarded
+ # sys.path insert is the reap.py pattern (issue #4366): three test files load
+ # this module through importlib.util.spec_from_file_location with cwd at the
+ # repo root, where the script's own directory is not on sys.path and a bare
+ # `from decide_base import ...` would raise ModuleNotFoundError. Every other
+ # entry (the CLI, sys.path insert + `import decide`, heartbeat.py) already has
+ # the directory there, so the insert is a no-op. The imports are name-binding,
+ # so `decide.<name>` keeps resolving and ESCALATION_POLICY is ONE dict object
+ # shared by identity with decide_base and the selector modules.
+ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ if _SCRIPT_DIR not in sys.path:
+     sys.path.insert(0, _SCRIPT_DIR)
+ from decide_base import (
+     BACKFILL_STARVATION_FLOOR_SEC,
+     ESCALATION_POLICY,
+     RED_FORWARD_FIX_CAP,
+     QA_STALL_MAX_ATTEMPTS,
+     ZERO_YIELD_BACKOFF_LADDER,
++    _anchor_issue_number,
+     _dev_resume_pick_signal,
++    _is_parked_anchor,
++    _parked_prs,
++    _parked_read_degraded,
+     _needs_qa_target_pr_ref,
+     _normalize_target_risk_surface,
+     _orch_board_read_degraded,
+     _red_forward_fix_attempt_count,
+     _red_resume_prs,
+     _signal_present,
+     _target_dev_resume_pick_signal,
+     _zero_yield_entry,
+     make_dispatch,
+ )
+ from decide_selectors.architecture import _select_signal_architecture_orch
+ from decide_selectors.cleanup import (
+     _select_signal_cleanup_orch,
+     _select_signal_cleanup_target,
+ )
+ from decide_selectors.design_concept import _select_slot_design_concept_orch
+ from decide_selectors.design_qa import _select_signal_design_qa_target
+ from decide_selectors.dev import (
+     _select_slot_dev_orch,
+     _select_slot_dev_target,
+ )
+ from decide_selectors.discover import (
+     _select_signal_discover_orch,
+     _select_signal_discover_target,
+ )
+@@ -2832,60 +2836,78 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
+     `dirty` or `unchecked` bucket NEVER yields an auto-merge this turn. An
+     auto-merge on a DIRTY PR arms `--auto` on a branch that can never satisfy
+     "branch up to date"; on an unchecked PR nothing can ever go green (PR
+     #4236 sat permanently unmergeable and silent for 3h). The hold is named in
+     the plan's reasons (hold:#N:dirty | hold:#N:unchecked) instead of being
+     silence — the defect this issue filed was precisely that "no checks
+     reported" produced no action, no reason, and no debug field.
+     """
+     out = _RuleOutput()
+     emergency_brake = _normalize_emergency_brake(ts.blob(state, "emergency_brake"))
+     if emergency_brake["engaged"]:
+         out.debug["emergency_brake_engaged"] = True
+         out.emit(
+             make_route_prs_to_review("emergency brake engaged — all auto-merge paused, routing open PRs to /hydra-review"),
+             reason="emergency-brake:route-prs-to-review",
+         )
+         # Skip the per-PR auto-merge sweep entirely — the brake overrides the
+         # depth verdict, so no qa-verdict event can produce an auto-merge.
+         return out
+     buckets = _pr_gate_buckets(state, events)
+     # #5052: the durable recheck. Session `qa-verdict` events first (they win a
+     # PR both name), then the Turn Snapshot's re-evaluation entries for PRs not
+     # already named - same downstream holds, stale-verdict check, depth policy.
+     sweep = [ev for ev in events if ev.get("type") == "qa-verdict"]
+     sweep += ts.qa_verdict_recheck(state, events, "orch_qa_verdict_recheck")
++    parked_prs = sorted(_parked_prs(state, events))  # #5319: read once, whether or not a verdict is queued
++    parked_degraded = _parked_read_degraded(state, events)
+     for ev in sweep:
+         if ev.get("recheck"):
+             out.reasons.append(f"qa-recheck:#{ev.get('pr_number')}")
+         verdict = ev.get("verdict") or "PENDING"
+         pr_number = ev.get("pr_number")
+         tier = ev.get("tier")
+         mechanical = ev.get("mechanical")
+         has_scope_justif = bool(ev.get("has_scope_justification"))
+         if pr_number is None or tier is None:
+             continue
++        # ISSUE #5319 (INV-6): a PR whose closing issue / anchor is parked is
++        # never armed - covers the in-session `qa-verdict` events that bypass
++        # the pr-gate collector (a park landing mid-run).
++        # The real event carries only `pr_number`, so the PR-keyed
++        # `orch_parked_prs` set is the primary key; `closing_issue` / `anchor`
++        # stay as a secondary key. A degraded parked read holds every PR.
++        if parked_degraded:
++            out.reasons.append(f"parked:#{pr_number}:read-degraded")
++            continue
++        parked_ref = next(
++            (r for r in (ev.get("closing_issue"), ev.get("anchor")) if _is_parked_anchor(state, events, r)),
++            None,
++        )
++        if parked_ref is not None or _pr_gate_number_in(pr_number, parked_prs):
++            out.reasons.append(f"parked:#{_anchor_issue_number(parked_ref) if parked_ref is not None else pr_number}")
++            continue
+         if _pr_gate_number_in(pr_number, buckets["dirty"]):
+             out.reasons.append(f"hold:#{pr_number}:dirty")
+             continue
+         if _pr_gate_number_in(pr_number, buckets["unchecked"]):
+             out.reasons.append(f"hold:#{pr_number}:unchecked")
+             continue
+         # QA merge guard (issue #4737): a PASS reviewed at a head other than
+         # the PR's current one must not arm auto-merge — alongside INV-007.
+         if verdict == "PASS" and _qa_verdict_is_stale(ev):
+             out.reasons.append(f"hold:#{pr_number}:stale-verdict")
+             continue
+         decision = should_auto_merge(
+             tier,
+             mechanical=mechanical,
+             has_scope_justification=has_scope_justif,
+             qa_verdict=verdict,
+         )
+         # Policy collapse (#742): should_auto_merge() returns only
+         # "auto-merge" or "hold" — no tier-triggered queue-decision /
+         # apply-operator-approved. Operator escalation now arrives solely
+         # via the Deep-QA Remediation Loop (#740), not from this sweep.
+         if decision == "auto-merge":
+             out.emit(make_auto_merge(pr_number, tier, "qa pass + required depth met"), reason=f"auto-merge:#{pr_number}")
+         # "hold" → no action (required verification depth not yet provably met)
+     return out
+diff --git a/scripts/autopilot/decide_base.py b/scripts/autopilot/decide_base.py
+index 9051ed4e6..31175ecb6 100644
+--- a/scripts/autopilot/decide_base.py
++++ b/scripts/autopilot/decide_base.py
+@@ -288,50 +288,97 @@ def signal_dark_past_floor(
+ # key). In-run state (`state.red_forward_fix_attempts`), NOT persisted to the
+ # board — a new run re-arms the cap exactly like every other in-run tracker.
+ RED_FORWARD_FIX_CAP = 2
+ 
+ 
+ def _dev_resume_pick_signal(
+     state: dict, events: list[dict]
+ ) -> tuple[int, int, str] | None:
+     """Parse the `orch_dev_resume_pick` signal (issues #4518, #5058).
+ 
+     The Turn Snapshot carries it as an `{issue, pr, branch}` pin for the
+     lowest-numbered open, non-draft, not-`ready-for-human`, quiescent PR — of
+     ANY provenance (GLM, Claude, a future worker lane) — whose single closing
+     issue carries `needs-dev-resume` OR that is red on a required check, or no
+     pin. The label + the open-PR ledger are the source of truth;
+     `state.dev_resume_pending` is only a cache that a Pace Gate relaunch or a
+     quota-capped run can lose. Events take precedence over state (the
+     `_signal_present` seam). Absent / `none` / malformed fails CLOSED to no
+     pin — a bad signal means "no dispatch this turn", never a crash (#4130).
+ 
+     Pure: reads the passed-in dicts only, no I/O (ADR-0007).
+     """
+     return _issue_pr_branch_signal(state, events, "orch_dev_resume_pick")
+ 
+ 
++def _parked_issues(state: dict, events: list[dict]) -> set[int]:
++    """The `orch_parked_issues` set (issue #5319, ADR-0047 Decision 6): open
++    issues carrying the `parked` human-hold label. decide.py's belt filter on
++    every PR-keyed dispatch source (defence in depth behind the pr-gate
++    collector, and the only guard for sources that bypass it). Absent /
++    malformed -> empty set (the collector already failed its own dispatch
++    outputs closed on a degraded read). Pure; never calls gh (ADR-0007)."""
++    return ts.item_set(state, events, "orch_parked_issues") or set()
++
++
++def _anchor_issue_number(anchor: object) -> int | None:
++    """`issue-N` (or a bare positive int / digit string) -> N, else None."""
++    if isinstance(anchor, bool):
++        return None
++    if isinstance(anchor, int):
++        return anchor if anchor > 0 else None
++    if not isinstance(anchor, str):
++        return None
++    text = anchor.strip()
++    if text.startswith("issue-"):
++        text = text[len("issue-"):]
++    return int(text) if text.isdigit() and int(text) > 0 else None
++
++
++def _parked_prs(state: dict, events: list[dict]) -> set[int]:
++    """The `orch_parked_prs` set (issue #5319 QA round 1): open PR numbers whose
++    closing issue is parked. PR-keyed, so the in-session `qa-verdict` event
++    (which carries only `pr_number`) can be held without a closing-issue field."""
++    return ts.item_set(state, events, "orch_parked_prs") or set()
++
++
++def _parked_read_degraded(state: dict, events: list[dict]) -> bool:
++    """True when the collector's parked read was unreadable (INV-4): the empty
++    `orch_parked_issues` is then NOT a healthy empty set, so the belt fails
++    closed on every dispatch-shaped path."""
++    return _signal_present(state, events, "orch_parked_unreadable")
++
++
++def _is_parked_anchor(state: dict, events: list[dict], anchor: object) -> bool:
++    """True when `anchor` names a parked issue (issue #5319). Fails CLOSED
++    (True for any well-formed anchor) while the parked read is degraded."""
++    number = _anchor_issue_number(anchor)
++    if number is None:
++        return False
++    return _parked_read_degraded(state, events) or number in _parked_issues(state, events)
++
++
+ def _dirty_fix_fail_pr(state: dict, events: list[dict]) -> int | None:
+     """The `orch_dirty_forward_fix_fail_pr` signal (issue #5253): the dirty
+     pick's PR number iff a QA FAIL is pending at its pre-merge head (the
+     two-phase arm), else None. Absent / malformed -> None (conflict-only).
+     Pure (ADR-0007)."""
+     return ts.pr_number(state, events, "orch_dirty_forward_fix_fail_pr")
+ 
+ 
+ def _red_resume_prs(state: dict, events: list[dict]) -> set[int]:
+     """The `orch_prs_red_resume` set (issue #5058): resume-pick candidates that
+     qualified ONLY through the red-CI arm — the scope of RED_FORWARD_FIX_CAP.
+     Absent / malformed -> empty (fail toward the uncapped label arm, never a
+     phantom exhausted cap). Pure."""
+     return set(ts.pr_numbers(state, events, "orch_prs_red_resume"))
+ 
+ 
+ def _target_dev_resume_pick_signal(
+     state: dict, events: list[dict]
+ ) -> tuple[int, int, str] | None:
+     """Parse the `target_dev_resume_pick` signal (issue #4739, INV-1/INV-5).
+ 
+     The Turn Snapshot carries it as an `{issue, pr, branch}` pin for the
+     lowest-numbered open Target issue labelled `needs-dev-resume` that is the
+     single closing issue of an open non-draft Target PR, or no pin
+     — the same shape as `orch_dev_resume_pick` (#4518), parsed by
+diff --git a/scripts/autopilot/decide_selectors/dev.py b/scripts/autopilot/decide_selectors/dev.py
+index 143b8adf7..b75e46955 100644
+--- a/scripts/autopilot/decide_selectors/dev.py
++++ b/scripts/autopilot/decide_selectors/dev.py
+@@ -1,39 +1,40 @@
+ """decide_selectors.dev — dev_orch / dev_target pipeline-slot selectors (issue #4511).
+ 
+ Layer 2 of 3 of the decision brain. Imports the standard library and
+ decide_base only — never `decide`, never another decide_selectors module.
+ decide.py binds the handlers below by name into `_SLOT_SELECTORS`.
+ Every definition here moved verbatim from decide.py.
+ """
+ 
+ from __future__ import annotations
+ 
+ from decide_base import (
+     RED_FORWARD_FIX_CAP,
+     _dev_resume_pick_signal,
+     _dirty_fix_fail_pr,
++    _is_parked_anchor,
+     _issue_pr_branch_signal,
+     _orch_anchor_signal,
+     _red_forward_fix_attempt_count,
+     _red_resume_prs,
+     _signal_present,
+     _target_dev_resume_pick_signal,
+     make_dispatch,
+ )
+ 
+ 
+ def research_recommended(candidates_payload: dict | None) -> bool:
+     """Read the candidate feed's precomputed `research_recommended` flag.
+ 
+     `src/anchor-candidates.ts` is the single source of truth for "the
+     target board is empty / top score is too weak → recommend research"
+     (it applies RESEARCH_THRESHOLD). Both the research_target slot and the
+     dev_target steer slot consume this one flag rather than each re-deriving
+     a private score threshold, so the dispatch/research boundary has a single
+     home and cannot silently diverge (issue #1129 finished).
+ 
+     A missing/unusable payload (feed unreachable, or no `candidates` array)
+     defaults to True — degrade toward research direction rather than
+     starving the target backlog. This mirrors the pre-#1129 inline check,
+     whose `best is None` arm fired research whenever the feed produced no
+     top candidate.
+@@ -73,119 +74,126 @@ def _select_slot_dev_orch(
+     best_score: float,
+     now: int,
+ ) -> dict | None:
+     """`dev_orch` pipeline-slot selector (provenance: #3866, #458, #3711, #751, #628, #1230, #1088, #3798, #4821, #3795, #1093)."""
+     # ISSUE #3866: drain state.dev_resume_pending BEFORE the fresh-pick
+     # gate below. reap.py appends a resume record here when a PRIOR
+     # dev_orch completion opened no PR (a stall, not a finished cycle) —
+     # it also relabels that anchor's issue away from `ready-for-agent`
+     # (to `needs-dev-resume`), so `orch_work_available` may well be False
+     # even though there is real, already-started work waiting to resume.
+     # Checking this queue first — independent of `orch_work_available` —
+     # is what stops the stalled anchor from being starved by an otherwise
+     # empty board. `prompt_args.anchor` reuses the SAME pinned-anchor
+     # contract `orch_dev_ready_anchor` already established below (the
+     # dispatch preamble names the anchor verbatim); `resume`/
+     # `resume_branch` are additive hints so the dispatch prompt can tell
+     # the fresh subagent to check for and continue the stalled branch
+     # instead of reimplementing from zero. Pop (not peek) so this exact
+     # anchor is only pinned once per queued stall — decide() mutates
+     # `state` in place here, the same sanctioned pattern `main()` already
+     # persists via change-detection for `research_force_counter` /
+     # `target_triage_item_stamps`.
+     resume_pending = state.get("dev_resume_pending") if isinstance(state, dict) else None
+     if isinstance(resume_pending, list) and resume_pending:
+         entry = resume_pending[0]
+-        if isinstance(entry, dict) and entry.get("anchor"):
++        # ISSUE #5319 (INV-6): a park that landed after reap queued the resume
++        # is DROPPED (never re-queued - the operator owns a parked issue) by the
++        # same pop as a malformed entry below.
++        if (
++            isinstance(entry, dict)
++            and entry.get("anchor")
++            and not _is_parked_anchor(state, events, entry["anchor"])
++        ):
+             resume_pending.pop(0)
+             prompt_args: dict = {"anchor": entry["anchor"], "resume": True}
+             if entry.get("branch"):
+                 prompt_args["resume_branch"] = entry["branch"]
+             return make_dispatch(
+                 cls,
+                 "hydra-dev",
+                 prompt_args=prompt_args,
+                 reason=(
+                     f"resuming stalled dev_orch anchor {entry['anchor']} "
+                     f"— prior completion opened no PR (issue #3866)"
+                 ),
+             )
+-        # Malformed entry (no anchor) — drop it rather than looping on it
++        # Malformed (no anchor) or parked entry — drop it rather than looping on it
+         # forever; still counts as a state mutation main() will persist.
+         resume_pending.pop(0)
+ 
+     # ISSUE #4808: the no-PR durable resume pin. The drain above only owns
+     # records the CURRENT state.json still holds; an issue bounced to
+     # `needs-dev-resume` by a run that then restarted (or reaped by a session
+     # whose state was rebuilt) has no in-state entry, the #4518 pin below keys
+     # off an OPEN PR (there is none — that is the point). The Turn Snapshot's
+     # `orch_dev_resume_nopr_anchor` closes that gap from what the loop owns
+     # durably: the `needs-dev-resume` label plus the open-PR ledger — the
+     # LOWEST-numbered such issue that NO open PR references (head-branch or
+     # body, drafts included), not in-progress/ready-for-human, and quiescent
+     # for the pr-gate window (default 5400s), all resolved upstream in the
+     # collector. This selector only reads the signal — no gh, no per-PR I/O
+     # (ADR-0007).
+     #
+     # SEQUENCING (#4808 INV-5): AFTER the #3866 drain above (an in-state
+     # record carries the stalled branch this label-derived pin structurally
+     # cannot — no PR, no headRefName; and the drain returning first is what
+     # keeps the two from dispatching twice in one turn), BEFORE the #4807 /
+     # #4518 PR-keyed pins — an issue referenced by ANY open PR is excluded
+     # from the signal upstream, so the three picks are disjoint.
+     # Like those pins it ignores `orch_work_available` (the anchor is
+     # `needs-dev-resume`, not `ready-for-agent`, so the board gate reads
+     # false precisely when this pin matters) and the `orch_pending_grill_
+     # anchor` yield (the anchor's lifecycle is past grilling — it already
+     # had a dispatch).
+     #
+     # NO state key and NO in-run tracker: the durable cap is enforced at
+     # REAP time (#4808 INV-8/9) — `_handle_dev_orch_stall` counts prior
+     # no-PR stall comments on the issue and hands it to `ready-for-human`
+     # at the third, instead of queueing another resume.
+     nopr_anchor = _orch_anchor_signal(state, "orch_dev_resume_nopr_anchor")
+-    if nopr_anchor is not None:
++    if nopr_anchor is not None and not _is_parked_anchor(state, events, nopr_anchor):
+         return make_dispatch(
+             cls,
+             "hydra-dev",
+             prompt_args={"anchor": nopr_anchor, "resume": True},
+             reason=(
+                 f"no-PR durable dev resume: {nopr_anchor} is needs-dev-resume "
+                 "with no open PR referencing it — label-derived pin, "
+                 "quiescent and in-flight-excluded upstream "
+                 "(issue #4808)"
+             ),
+         )
+ 
+     # ISSUE #4807 (INV-5): one conflict fix-forward per DIRTY PR. A DIRTY PR
+     # fails both sibling pins below (#4518 / #4460 reject DIRTY), so the three
+     # picks are disjoint; placement before them only fixes determinism, and —
+     # like them — it ignores `orch_work_available` and the grill yield. The
+     # `conflict-fix-attempted` PR label (applied by the dispatch binding
+     # BEFORE the spawn) IS the durable cap: no tracker, no state key.
+     dirty_fix = _dirty_forward_fix_signal(state, events)
+-    if dirty_fix is not None:
++    if dirty_fix is not None and not _is_parked_anchor(state, events, dirty_fix[0]):  # #5319 belt
+         fix_issue, fix_pr, fix_branch = dirty_fix
+         # ISSUE #5253: a QA FAIL pending AT this PR's pre-merge head selects the
+         # two-phase arm (merge master FIRST, then the forward-fix contract on
+         # the merged head). The Turn Snapshot's collector owns the predicate
+         # (pure here, ADR-0007); the field must name THIS pin's PR, so a signal
+         # event that overrode the pin without the field falls to conflict-only.
+         two_phase = _dirty_fix_fail_pr(state, events) == fix_pr
+         if two_phase:
+             return make_dispatch(
+                 cls,
+                 "hydra-dev",
+                 prompt_args={
+                     "anchor": f"issue-{fix_issue}",
+                     "resume": True,
+                     "resume_branch": fix_branch,
+                     "forward_fix_pr": fix_pr,
+                     "conflict_fix": True,
+                     "qa_fail_at_head": True,
+                 },
+                 reason=(
+                     f"dirty PR two-phase conflict fix-forward: PR {fix_pr} (issue #{fix_issue}) "
+                     f"on {fix_branch} — QA FAIL pending at head: merge origin/master FIRST, "
+                     "then resolve the findings on the merged head, one attempt per PR "
+                     "(issues #4807, #5253)"
+                 ),
+@@ -227,51 +235,51 @@ def _select_slot_dev_orch(
+     # SEQUENCING: AFTER the in-state drain (which can carry a branch for a
+     # NO-PR stall this ledger-derived pick structurally cannot — no PR, no
+     # headRefName), BEFORE the `orch_work_available` gate. Placement IS the
+     # bypass: the anchor is labelled `needs-dev-resume` (or is a red PR's
+     # closing issue), not `ready-for-agent`, so `orch_work_available` may be
+     # false; and its design-concept artifact already exists (a PR is open),
+     # so the grill yield does not apply.
+     #
+     # CAP — RED-CI ARM ONLY (#5058, ex-#4460 INV-8): when the pick's PR is in
+     # `orch_prs_red_resume` (it qualified ONLY because a required check is
+     # red), `state.red_forward_fix_attempts[<pr>]` counts pinned dispatches
+     # per PR, in-run state only. At RED_FORWARD_FIX_CAP the pin declines and
+     # falls through to the normal selector path below (a healthy board may
+     # still pin fresh work); `_rule_pr_gate` surfaces the PR the SAME turn.
+     # The tracker bump happens ONLY on an actual dispatch, so the surface-pr
+     # rule (which runs earlier in decide() and reads the pre-bump value) and
+     # this gate agree on the boundary: attempts==CAP-1 dispatches and bumps
+     # to CAP; attempts==CAP declines and surfaces. The `needs-dev-resume`
+     # arm is uncapped (#4518): idempotency is the label itself — reap's
+     # needs-qa promotion (#4460 INV-9) relabels it away once the closing PR
+     # is confirmed, and the quiescence window keeps an actively-pushed PR
+     # from being re-pinned. `forward_fix_pr` reuses the playbook's
+     # forward-fix dispatch contract (continue the PR's head, push to the
+     # SAME branch, NEVER `gh pr create`).
+     resume_pick = _dev_resume_pick_signal(state, events)
+-    if resume_pick is not None:
++    if resume_pick is not None and not _is_parked_anchor(state, events, resume_pick[0]):  # #5319 belt
+         pick_issue, pick_pr, pick_branch = resume_pick
+         prompt_args = {
+             "anchor": f"issue-{pick_issue}",
+             "resume": True,
+             "resume_branch": pick_branch,
+             "forward_fix_pr": pick_pr,
+         }
+         if pick_pr not in _red_resume_prs(state, events):
+             return make_dispatch(
+                 cls,
+                 "hydra-dev",
+                 prompt_args=prompt_args,
+                 reason=(
+                     f"durable dev resume: issue #{pick_issue} is needs-dev-resume "
+                     f"with open PR {pick_pr} on {pick_branch} — label + PR ledger "
+                     "pin, independent of state.dev_resume_pending (issue #4518)"
+                 ),
+             )
+         red_attempts = _red_forward_fix_attempt_count(state, pick_pr)
+         if red_attempts < RED_FORWARD_FIX_CAP:
+             tracker = state.get("red_forward_fix_attempts")
+             if not isinstance(tracker, dict):
+                 tracker = {}
+                 state["red_forward_fix_attempts"] = tracker
+             tracker[str(pick_pr)] = red_attempts + 1
+diff --git a/scripts/autopilot/decide_selectors/qa.py b/scripts/autopilot/decide_selectors/qa.py
+index fa21ec184..cecfd529c 100644
+--- a/scripts/autopilot/decide_selectors/qa.py
++++ b/scripts/autopilot/decide_selectors/qa.py
+@@ -1,80 +1,90 @@
+ """decide_selectors.qa — qa_orch / qa_target pipeline-slot selectors (issue #4511).
+ 
+ Layer 2 of 3 of the decision brain. Imports the standard library and
+ decide_base only — never `decide`, never another decide_selectors module.
+ decide.py binds the handlers below by name into `_SLOT_SELECTORS`.
+ Every definition here moved verbatim from decide.py.
+ """
+ 
+ from __future__ import annotations
+ 
+ import turn_snapshot as ts
+ 
+ from decide_base import (
+     QA_STALL_MAX_ATTEMPTS,
+     _needs_qa_target_pr_ref,
++    _parked_issues,
++    _parked_read_degraded,
+     _signal_present,
+     make_dispatch,
+ )
+ 
+ 
+ def _select_slot_qa_orch(
+     cls: str,
+     state: dict,
+     candidates: dict | None,
+     events: list[dict],
+     best: dict | None,
+     best_score: float,
+     now: int,
+ ) -> dict | None:
+     """`qa_orch` pipeline-slot selector (provenance: #3829, #3729, #3709)."""
+     if not _signal_present(state, events, "needs_qa_orch"):
+         return None
+     # Per-issue STALL CAP guard (issue #3829, design-concept issue-3829).
+     # The coarse `needs_qa_orch` boolean above stays TRUE for as long as
+     # ANY needs-qa issue sits on the board — including one that
+     # structurally cannot reach a verdict (repeatable worktree loss, an
+     # infra failure that reproduces every retry, etc.), which busy-loops
+     # qa_orch at 30-65k tokens/turn with no bound. This is an ADDITIONAL,
+     # independent, AND-composed condition (invariant 7: a healthy,
+     # non-stalled backlog's dispatch path is unchanged until the cap is
+     # actually hit).
+     #
+     # UNLIKE the #3729 sweep_target per-item guard (which tracks EVERY
+     # current item), this tracks ONLY the HEAD of the needs-qa set —
+     # `needs_qa_numbers[0]` — because hydra-qa self-selects via its own
+     # unsorted-default `gh issue list --label needs-qa --jq '.[0]'` query,
+     # so the head is deterministically the ONLY issue any given qa_orch
+     # dispatch will actually review (invariant 4). Bumping every item in
+     # the set (as a naive #3729-style port would) was considered and
+     # rejected at design time: it would falsely accumulate attempts
+     # against issues sitting further back in the queue that were never
+     # actually reviewed, risking a false "stalled" verdict on a
+     # healthy-but-queued issue the moment it becomes the new head.
+     numbers = _qa_orch_needs_qa_numbers(state, events)
+     if numbers:
++        # #5319 (ADR-0047 Decision 6): a parked needs-qa issue is the operator's
++        # (human hold) - never reviewed. Drop parked numbers; if nothing is left
++        # (or the parked read is degraded) there is nothing to dispatch on.
++        degraded = _parked_read_degraded(state, events)
++        parked = _parked_issues(state, events)
++        numbers = [] if degraded else [n for n in numbers if n not in parked]
++        if not numbers:
++            return None
+         head = numbers[0]
+         attempts = _qa_orch_item_attempts(state)
+         if not _qa_orch_item_eligible(attempts.get(head, 0)):
+             # The head issue has exhausted its attempt cap -> suppress
+             # this turn. `needs_qa_orch` stays true (the raw label count
+             # did not change); the pipeline rule surfaces this specific
+             # reason instead of the generic "idle" one, and the stalled
+             # issue number rides the dispatch_decision event + plan debug
+             # for visibility (issue #3829 acceptance criterion: "becomes
+             # visible ... rather than silently consuming budget";
+             # design-concept invariant 1: a structured signal, never a GH
+             # label mutation from this pure decision engine).
+             state["qa_orch_stalled_issue"] = head
+             return None
+         state.pop("qa_orch_stalled_issue", None)
+         # Bump ONLY the head's count. Rebuilding the tracker to hold just
+         # this one (bumped) entry is what implements the prune contract
+         # (invariant 5): a former head that is no longer the head this
+         # turn (verdict reached, or superseded by a new head) is dropped,
+         # so a later re-open under the same number starts fresh at 0.
+         _bump_qa_orch_stall_tracker(state, head)
+     # `numbers` absent/empty (no per-item fact this turn — a degraded
+     # board read or a pre-#3829 playbook) -> fail OPEN on the coarse
+     # boolean alone, preserving pre-#3829 behaviour so a transient wiring
+     # gap never dead-arms qa_orch (the #3709 defect class).
+diff --git a/src/autopilot/turn-snapshot/collector.ts b/src/autopilot/turn-snapshot/collector.ts
+index a333e8269..b1e57b2d3 100644
+--- a/src/autopilot/turn-snapshot/collector.ts
++++ b/src/autopilot/turn-snapshot/collector.ts
+@@ -110,50 +110,52 @@ export const DEGRADE = {
+   REDUCER_FAILED: "reducer-failed",
+   /** The pr-refs predicate is unavailable. */
+   PREDICATE_UNAVAILABLE: "predicate-unavailable",
+   /** The PR list could not be read. */
+   PR_LIST_UNREADABLE: "pr-list-unreadable",
+   /** The required-contexts input could not be read. */
+   REQUIRED_CONTEXTS_UNREADABLE: "required-contexts-unreadable",
+   /** The host adapter is not wired. */
+   HOST_UNAVAILABLE: "host-unavailable",
+   /** A field expected to be an issue number is not. */
+   NOT_AN_ISSUE_NUMBER: "not-an-issue-number",
+   /** A passthrough body did not parse. */
+   UNPARSEABLE_BODY: "unparseable-body",
+   /** A field expected to be numeric is not. */
+   NOT_NUMERIC: "not-numeric",
+   /** A malformed snapshot entry was dropped. */
+   MALFORMED_ENTRY_DROPPED: "malformed-entry-dropped",
+   /** The durable dev-resume classifier lacked one of its inputs. */
+   DEV_RESUME_INPUT_UNAVAILABLE: "dev-resume-input-unavailable",
+   /** The open-PR page filled to its limit, so the list may be truncated. */
+   PR_PAGE_SATURATED: "pr-page-saturated",
+   /** The collector was not selected by `--collectors`, so its snapshot is the fallback. */
+   NOT_REQUESTED: "not-requested",
+   /** The PR-list read failed (no-PR resume pick). */
+   PR_LIST_READ_FAILED: "pr-list-read-failed",
++  /** The parked-issue read failed, so the parked skip cannot be proven (#5319). */
++  PARKED_UNREADABLE: "parked-unreadable",
+ } as const;
+ 
+ /** Dynamic detail appended to a degradation: an error message, an HTTP status, an interpolated cause. */
+ export type DegradeDetail = string & { readonly __degradeDetail: true };
+ 
+ /**
+  * Mark a runtime-built reason (a thrown error's message, `http-503`, a
+  * `${code}: ${cause}` pair) as a degradation reason. The only way a string
+  * that is not a {@link DEGRADE} code becomes a {@link DegradeReason}, so a bare
+  * literal cannot slip in at a call site.
+  */
+ export const degradeDetail = (text: string): DegradeDetail => text as DegradeDetail;
+ 
+ /** A declared {@link DEGRADE} code, or a {@link degradeDetail}-marked runtime string. */
+ export type DegradeReason = (typeof DEGRADE)[keyof typeof DEGRADE] | DegradeDetail;
+ 
+ /** What a collector hands back: typed values, explicit degradation, stderr notes. */
+ export interface CollectorOutcome<T> {
+   /** The collector's CLI name (`--collectors <name>`). */
+   readonly collector: string;
+   readonly value: T;
+   readonly degraded: readonly DegradedMarker[];
+   readonly notes: readonly string[];
+ }
+ 
+diff --git a/src/autopilot/turn-snapshot/json-snapshot.ts b/src/autopilot/turn-snapshot/json-snapshot.ts
+index afd3cc411..7a8b3519c 100644
+--- a/src/autopilot/turn-snapshot/json-snapshot.ts
++++ b/src/autopilot/turn-snapshot/json-snapshot.ts
+@@ -281,50 +281,54 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number;
+     needs_triage_target: targetCount(v.targetBoard, "target_needs_triage") > 0,
+     target_needs_triage_items: scan ? [...scan.needsTriageItems] : [],
+     target_stale_in_progress_items: [...(v.targetBoard.staleInProgress ?? [])], // #5167
+     target_blocked_items: [...(scan?.blockedItems ?? [])], // #5167
+ 
+     health_fail: healthFail(v.health),
+     scout_walk_due: staleDays(lastWalk, 7, opts.nowMs),
+     scout_board_saturated: intOrZero(v.scout.openEnhancements.ok ? v.scout.openEnhancements.value : "0") > 20,
+ 
+     orch_backfill_idle: board.backfillIdle,
+     arch_board_saturated: board.archSaturated,
+     hitl_grill_open: hitl.open,
+     hitl_grill_saturated: hitl.saturated,
+     orch_board_signals_degraded: v.archBoards.orchBoardDegraded === "1",
+     cleanup_board_saturated: board.cleanupSaturated,
+     skill_prune_board_saturated: board.skillPruneSaturated,
+     target_backfill_idle: scan?.backfillIdle ?? false,
+     target_cleanup_board_saturated: scan?.cleanupSaturated ?? true,
+     wire_or_retire_target_available: (scan?.wireOrRetireTriage ?? 0) > 0,
+     design_qa_target_due: scan ? !scan.designQaSaturated && v.targetScan.adrPresent : false,
+     design_qa_target_saturated: scan?.designQaSaturated ?? true,
+     retro_run_available: v.retro.runs.ok && v.retro.runs.value.available,
+     retro_run_drillable: v.retro.drillable === true,
+     review_retro_due: v.retro.reviewDue === true,
+ 
++    // #5319: the parked issue set (sorted); [] on degrade (the collector marks `parkedIssues`).
++    orch_parked_issues: v.prGate.parkedIssues.ok ? [...v.prGate.parkedIssues.value].sort((a, b) => a - b) : [],
++    orch_parked_prs: [...v.prGate.parkedPrs].sort((a, b) => a - b),
++    orch_parked_unreadable: !v.prGate.parkedIssues.ok,
+     orch_prs_dirty: [...v.prGate.dirty],
+     orch_prs_unchecked: [...v.prGate.unchecked],
+     orch_prs_behind: [...v.prGate.behind],
+     orch_ci_trigger_stale: v.prGate.ciTriggerStale.ok && v.prGate.ciTriggerStale.value,
+     orch_prs_red_resume: v.prGate.redResume.ok ? [...v.prGate.redResume.value] : [],
+     orch_dev_resume_pick: pin(v.prGate.devResumePick.ok ? v.prGate.devResumePick.value : null),
+     // #4808: a bare anchor, not a pin — there is no PR, branch or head to name.
+     orch_dev_resume_nopr_anchor: v.prGate.devResumeNoprPick.ok ? v.prGate.devResumeNoprPick.value : null,
+     orch_dirty_forward_fix: pin(dirtyFix.pick),
+     // #5253: the pick's PR number iff a QA FAIL is pending at its head (two-phase arm), else null.
+     orch_dirty_forward_fix_fail_pr: v.prGate.dirtyFixFailPr,
+     orch_prs_dirty_surface: dirtyFix.surface.map((e) => ({ pr: e.pr, closing_issue: e.closingIssue })),
+     // #5052: fail closed - a degraded recheck renders [] (the collector already marked it).
+     orch_qa_verdict_recheck: v.prGate.qaVerdictRecheck.ok
+       ? v.prGate.qaVerdictRecheck.value.map((e) => ({ pr: e.pr, tier: e.tier, verdict: e.verdict, verdict_sha: e.verdictSha, head_sha: e.headSha, verdict_at_head: e.verdictAtHead }))
+       : [],
+ 
+     orch_pending_grill_anchor: anchor("picks", "orch_pending_grill_anchor", v.picks.grillPick),
+     orch_dev_ready_anchor: anchor("picks", "orch_dev_ready_anchor", v.picks.devReadyPick),
+ 
+     wayfinder_orch_frontier: anchor("wayfinder-frontier", "wayfinder_orch_frontier", v.wayfinder.frontier),
+     wayfinder_orch_ticket_type: v.wayfinder.ticketType,
+     wayfinder_orch_inflight_global: v.wayfinder.inflightGlobal,
+     tickets_available: ticketsPick !== null,
+     tickets_orch_pending_spec: anchor("tickets", "tickets_orch_pending_spec", ticketsPick),
+diff --git a/src/autopilot/turn-snapshot/orch-board.ts b/src/autopilot/turn-snapshot/orch-board.ts
+index 11a6e428d..2db5be312 100644
+--- a/src/autopilot/turn-snapshot/orch-board.ts
++++ b/src/autopilot/turn-snapshot/orch-board.ts
+@@ -185,50 +185,51 @@ export function needsQaNumbers(read: GhJsonRead): Classified<readonly number[]>
+  *     anchor out from under the queued resume.
+  *
+  * Deliberately NOT here: `needs-design-concept` (#4096 removed it — without
+  * `ready-for-agent` it is an unreachable lane whose only recovery is this
+  * backstop; with `ready-for-agent` it stays excluded via that entry), and
+  * `meta-friction` (the backstop's motivating example). Producer/category
+  * tags (`design-qa`, `cleanup-scan`, `architecture-scan`, `tool-scout`),
+  * PR-only labels (`operator-approved`, `glm-authored`,
+  * `no-rebase`) and modifier tags (`keep-open`,
+  * `design-concept-exempt`, `glm-eligible`, `glm-withhold`, …) always ride
+  * alongside a lifecycle label, so they are audited out, not added.
+  */
+ export const UNTRIAGED_ORPHAN_EXCLUDED_LABELS: readonly string[] = [
+   ORCH_BOARD_LABELS.ready_for_agent,
+   ORCH_BOARD_LABELS.in_progress,
+   ORCH_BOARD_LABELS.blocked,
+   ORCH_BOARD_LABELS.needs_qa,
+   ORCH_BOARD_LABELS.needs_triage,
+   ORCH_BOARD_LABELS.needs_research,
+   ORCH_BOARD_LABELS.target_backlog,
+   "ready-for-human",
+   "needs-info",
+   "needs-tickets",
+   "hitl-grill",
+   "needs-dev-resume",
++  "parked", // #5319: ADR-0047 human-hold; else sweep_orch re-triages a parked issue out of the park
+ ];
+ 
+ /**
+  * `wayfinder:*` tickets carry no lifecycle label BY DESIGN (they dispatch via
+  * `wayfinder_orch_frontier`), so the family is dropped by PREFIX (#3728) — a
+  * future ticket type is covered by construction; an issue with genuinely no
+  * labels still matches neither test and stays counted.
+  */
+ const WAYFINDER_LABEL_PREFIX = "wayfinder:";
+ 
+ /** The untriaged-orphan count over `number,labels` rows, or `null` when the read failed. */
+ export function countUntriagedOrphans(read: GhJsonRead): number | null {
+   if (read.kind !== "ok" || !Array.isArray(read.data)) return null;
+   const excluded = new Set(UNTRIAGED_ORPHAN_EXCLUDED_LABELS);
+   let count = 0;
+   for (const issue of read.data) {
+     const labels = issue !== null && typeof issue === "object" ? (issue as { labels?: unknown }).labels : undefined;
+     const names = (Array.isArray(labels) ? labels : [])
+       .map((l) => (l !== null && typeof l === "object" ? (l as { name?: unknown }).name : undefined))
+       .filter((n): n is string => typeof n === "string");
+     if (names.some((n) => excluded.has(n))) continue;
+     if (names.some((n) => n.startsWith(WAYFINDER_LABEL_PREFIX))) continue;
+     count++;
+   }
+   return count;
+diff --git a/src/autopilot/turn-snapshot/pr-gate.ts b/src/autopilot/turn-snapshot/pr-gate.ts
+index 1ac2c2654..45b0f2195 100644
+--- a/src/autopilot/turn-snapshot/pr-gate.ts
++++ b/src/autopilot/turn-snapshot/pr-gate.ts
+@@ -115,50 +115,58 @@ export interface PrGateSnapshot {
+   readonly redResume: Classified<readonly number[]>;
+   /**
+    * The ONE provenance-agnostic durable resume pick (#4518 + the retired
+    * GLM-only #4460 arm, unified by #5058). Fail-closed: degraded → `none`.
+    */
+   readonly devResumePick: Classified<PrPick | null>;
+   /**
+    * The no-PR durable resume pick (#4808): the lowest-numbered
+    * `needs-dev-resume` issue NO open PR references, or `null`. Fail-closed on
+    * any unusable input — degraded renders `null`, never a guess.
+    */
+   readonly devResumeNoprPick: Classified<number | null>;
+   /** Fail-closed: degraded → `none` + empty surface. */
+   readonly dirtyFix: Classified<{ readonly pick: PrPick | null; readonly surface: readonly DirtySurfaceEntry[] }>;
+   /**
+    * #5052: PRs to re-evaluate for merge this turn. Fail-closed: degraded ->
+    * `[]`; no path synthesises a PASS.
+    */
+   readonly qaVerdictRecheck: Classified<readonly QaRecheckEntry[]>;
+   /**
+    * #5253: the dirty pick's PR number iff qa-merge-guard reports a FAIL-family
+    * verdict AT the PR's current (pre-merge) head, else `null`. Fail-closed to
+    * `null` (the conflict-only arm) on every unreadable / unknown shape.
+    */
+   readonly dirtyFixFailPr: number | null;
++  /**
++   * #5319 (ADR-0047 Decision 6): the open issues carrying the `parked` human-hold
++   * label. A PR whose CLOSING issue is in this set is excluded from every arm
++   * below. Degraded -> the dispatch-shaped outputs fail closed.
++   */
++  readonly parkedIssues: Classified<ReadonlySet<number>>;
++  /** #5319 QA r1: open PRs whose closing issue is parked - the PR-keyed hold for the qa-verdict event. */
++  readonly parkedPrs: ReadonlySet<number>;
+ }
+ 
+ // ---------------------------------------------------------------------------
+ // Reference predicates (src/github/pr-refs.ts), injectable so a test can model
+ // the predicate being unavailable — the bash's `pr-refs.py import FAILED`
+ // fail-closed arm (#4460 INV-5, #4807 INV-4).
+ // ---------------------------------------------------------------------------
+ 
+ export interface PrRefPredicates {
+   referenced(rows: readonly PrRefRow[]): ReadonlySet<number>;
+   branch(rows: readonly PrRefRow[]): ReadonlySet<number>;
+   body(rows: readonly PrRefRow[]): ReadonlySet<number>;
+   closing(rows: readonly PrRefRow[]): ReadonlySet<number>;
+ }
+ 
+ export const DEFAULT_PR_REF_PREDICATES: PrRefPredicates = {
+   referenced: (rows) => referencedIssues(rows),
+   branch: (rows) => referencedIssues(rows.map((r) => ({ headRefName: r.headRefName }))),
+   body: (rows) => referencedIssues(rows.map((r) => ({ body: r.body }))),
+   closing: (rows) => closedIssues(rows),
+ };
+ 
+ export type PrRefsAvailability =
+   | { readonly ok: true; readonly predicates: PrRefPredicates }
+   | { readonly ok: false; readonly error: string };
+@@ -323,50 +331,54 @@ function inflightRefs(prs: readonly unknown[], prRefs: PrRefsAvailability): Infl
+ 
+ /** Behind-bucket + dirty-surface quiescence window (seconds). */
+ const BEHIND_QUIESCENCE_SECONDS = 5400;
+ /** Attempted-and-quiescent dirty surface window (seconds, #4807). */
+ const DIRTY_ATTEMPTED_SURFACE_SECONDS = 5400;
+ const DEFAULT_UNCHECKED_GRACE_SECONDS = 600;
+ /**
+  * The resume / dirty-fix quiescence window (seconds). The env knob keeps its
+  * historical `HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS` name (operator-facing);
+  * the window itself is provenance-agnostic.
+  */
+ const DEFAULT_GLM_RED_QUIESCENCE_SECONDS = 1800;
+ 
+ interface PrGateInputs {
+   /** The (re-polled) open-PR rows; non-object rows are skipped. */
+   readonly prs: readonly unknown[];
+   readonly nowSeconds: number;
+   readonly uncheckedGraceSeconds: number;
+   readonly glmRedQuiescenceSeconds: number;
+   /** Newest push / pull_request run `created_at`; `null` when the read degraded. */
+   readonly runsPushCreatedAt: string | null;
+   readonly runsPullRequestCreatedAt: string | null;
+   readonly requiredContexts: Classified<ReadonlySet<string>>;
+   readonly devResumeIssues: Classified<ReadonlySet<number>>;
+   readonly prRefs: PrRefsAvailability;
++  /** #5319: open issues labelled `parked`; `{ok:false}` on an unreadable read. */
++  readonly parkedIssues: Classified<ReadonlySet<number>>;
++  /** #5319: open PRs whose closing issue is parked ({@link parkedPrNumbers}). */
++  readonly parkedPrs: ReadonlySet<number>;
+   /**
+    * #4808 (INV-4): `false` when the open-PR read was empty/unparseable — an
+    * empty in-flight set from a failed read would make EVERY resume issue look
+    * PR-less, so the no-PR pick fails closed on it.
+    */
+   readonly prListReadOk: boolean;
+   /** The widened needs-dev-resume rows (#4808, INV-3); `{ok:false}` on an empty/unparseable read. */
+   readonly devResumeRows: Classified<readonly NoPrResumeRow[]>;
+   /** The no-PR pick's quiescence window in seconds (#4808). */
+   readonly noprQuiescenceSeconds: number;
+   /**
+    * The open-PR read's `--limit`: a payload at/over the limit is a saturated
+    * page that may hide the referencing PR, so the no-PR pick fails closed
+    * (#4808 INV-4). `undefined` = unbounded (no saturation check).
+    */
+   readonly ghListLimit?: number;
+ }
+ 
+ /** One orch-pre-qualified resume candidate (its required-check verdict read once). */
+ interface ResumeCandidate {
+   readonly pr: number;
+   readonly headRefName: string | null;
+   readonly row: Row;
+   /** A required check is red at the head (the red-CI arm). */
+   readonly red: boolean;
+@@ -387,92 +399,125 @@ export function checkVerdictFor(rollup: unknown, required: ReadonlySet<string>):
+   const settled = isSettled(fold);
+   return { settled, red: settled && isRed(fold) };
+ }
+ 
+ /**
+  * The `Tier: N` line of a PR body (N in 1-4), or `null` when absent/unparseable.
+  * Line-anchored so a mid-sentence mention never counts.
+  */
+ export function parseTierLine(body: unknown): number | null {
+   if (typeof body !== "string") return null;
+   const m = /^[ \t>*_-]*Tier\s*:\s*[*_]*\s*([1-4])(?!\d)/im.exec(body);
+   return m === null ? null : Number(m[1]);
+ }
+ 
+ /**
+  * #5052 INV-6: the pure pre-filter over the ONE open-PR read. A candidate is
+  * open, non-draft, not `ready-for-human`, not already armed for auto-merge
+  * (`autoMergeRequest === null` - an absent field is NOT proof it is unarmed),
+  * mergeable-shaped (not DIRTY/UNKNOWN), carries a parseable `Tier: N` line,
+  * and has every required check settled and none red. No script run or read is
+  * spent on anything else.
+  */
+ export function qaRecheckCandidates(
+   prs: readonly unknown[],
+   required: ReadonlySet<string>,
++  parkedPrs: ReadonlySet<number> = new Set(),
+ ): { readonly pr: number; readonly tier: number }[] {
+   const out: { pr: number; tier: number }[] = [];
+   for (const pr of rowsOf(prs)) {
+     const number = pr.number;
+     if (typeof number !== "number" || !Number.isInteger(number) || number <= 0) continue;
++    if (parkedPrs.has(number)) continue; // #5319: the auto-merge sweep never arms a parked PR
+     if (isSet(pr.isDraft) || labelsOf(pr).has("ready-for-human")) continue;
+     if (pr.autoMergeRequest !== null) continue;
+     const state = orEmpty(pr.mergeStateStatus);
+     if (state === "DIRTY" || state === "UNKNOWN") continue;
+     const tier = parseTierLine(pr.body);
+     if (tier === null) continue;
+     const verdict = checkVerdictFor(pr.statusCheckRollup, required);
+     if (!verdict.settled || verdict.red) continue;
+     out.push({ pr: number, tier });
+   }
+   return out.sort((a, b) => a.pr - b.pr);
+ }
+ 
+ /** A `qa-verdict-event.sh` stdout object as a typed entry, or `null` when it is not the expected shape. */
+ export function parseQaRecheckEntry(raw: unknown, pr: number, tier: number): QaRecheckEntry | null {
+   const e = asRow(raw);
+   if (e === null) return null;
+   if (e.pr_number !== pr || e.tier !== tier) return null;
+   if (typeof e.verdict !== "string" || e.verdict === "") return null;
+   if (typeof e.verdict_sha !== "string" || typeof e.head_sha !== "string") return null;
+   if (typeof e.verdict_at_head !== "boolean") return null;
+   return { pr, tier, verdict: e.verdict, verdictSha: e.verdict_sha, headSha: e.head_sha, verdictAtHead: e.verdict_at_head };
+ }
+ 
++/**
++ * #5319 INV-2: the open PRs whose CLOSING issue (`refs.predicates.closing`,
++ * body `Closes/Fixes/Resolves #N` only) is parked. Empty when either input is
++ * unavailable (the dispatch outputs fail closed on that separately). A PR whose
++ * closing parse throws is never parked-skipped (it keeps today's handling).
++ */
++export function parkedPrNumbers(
++  prs: readonly unknown[],
++  prRefs: PrRefsAvailability,
++  parkedIssues: Classified<ReadonlySet<number>>,
++  notes: string[],
++): ReadonlySet<number> {
++  const out = new Set<number>();
++  if (!prRefs.ok || !parkedIssues.ok || parkedIssues.value.size === 0) return out;
++  for (const pr of rowsOf(prs)) {
++    const number = pr.number;
++    if (typeof number !== "number") continue;
++    try {
++      for (const n of prRefs.predicates.closing([refRow(pr)])) {
++        if (parkedIssues.value.has(n)) out.add(number);
++      }
++    } catch (err) {
++      /* intentional: surfaced as a stderr note; a PR with an unparseable body keeps today's handling */
++      const msg = err instanceof Error ? err.message : String(err);
++      notes.push(`orch parked-skip closing_issues() failed for PR ${number} (${msg}) - not parked-skipped (issue #5319)`);
++    }
++  }
++  return out;
++}
++
+ /** Classify every open PR. Returns the snapshot fields (minus in-flight) plus the classifier's stderr notes. */
+ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "inflight">; notes: string[] } {
+   const notes: string[] = [];
+   const now = inputs.nowSeconds;
+   const quiet = inputs.glmRedQuiescenceSeconds;
+   const prs = rowsOf(inputs.prs);
+ 
+   const dirty: number[] = [];
+   const unchecked: number[] = [];
+   const behind: number[] = [];
+   for (const pr of prs) {
+     const number = pr.number;
+     if (typeof number !== "number") continue;
++    if (inputs.parkedPrs.has(number)) continue; // #5319: parked work is never surfaced, rebased or CI-nudged
+     const state = orEmpty(pr.mergeStateStatus);
+     const names = labelsOf(pr);
+     const created = ghTimestampSeconds(pr.createdAt);
+     const updated = ghTimestampSeconds(pr.updatedAt);
+     const draft = isSet(pr.isDraft);
+     // ready-for-human is the surfacing idempotency key (classifyPR parity).
+     const surfaced = names.has("ready-for-human");
+     if (state === "DIRTY" && !surfaced && !draft) {
+       dirty.push(number);
+       continue;
+     }
+     if (state === "BEHIND" && !draft && !names.has("no-rebase") && updated !== null && now - updated > BEHIND_QUIESCENCE_SECONDS) {
+       behind.push(number);
+       continue;
+     }
+     const rollup = pr.statusCheckRollup;
+     if (
+       !surfaced &&
+       !draft &&
+       Array.isArray(rollup) &&
+       rollup.length === 0 &&
+       state !== "DIRTY" &&
+       state !== "UNKNOWN" &&
+       state !== "BEHIND" &&
+       created !== null &&
+@@ -489,70 +534,75 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
+   } else {
+     let stale = false;
+     const push = ghTimestampSeconds(inputs.runsPushCreatedAt);
+     const prRun = ghTimestampSeconds(inputs.runsPullRequestCreatedAt);
+     if (push !== null && prRun !== null && unchecked.length > 0) {
+       const newest = Math.max(push, prRun);
+       for (const n of unchecked) {
+         const pr = prs.find((p) => p.number === n);
+         const created = ghTimestampSeconds(pr?.createdAt);
+         if (created !== null && created > newest) {
+           stale = true;
+           break;
+         }
+       }
+     }
+     ciTriggerStale = { ok: true, value: stale };
+   }
+ 
+   // The unified durable dev-resume pick (#4518 + #4460, unified by #5058) —
+   // fail closed on any unavailable input (INV-5).
+   const req = inputs.requiredContexts;
+   const resume = inputs.devResumeIssues;
+   const refs = inputs.prRefs;
+   let redResume: PrGateSnapshot["redResume"];
+   let devResumePick: PrGateSnapshot["devResumePick"];
+-  if (!req.ok || !resume.ok || !refs.ok) {
+-    const reason = DEGRADE.DEV_RESUME_INPUT_UNAVAILABLE;
++  const parked = inputs.parkedIssues;
++  if ("reason" in parked) {
++    notes.push(`orch parked-issues read unusable (${parked.reason}) - dispatch outputs fail closed (issue #5319, INV-4)`);
++  }
++  if (!req.ok || !resume.ok || !refs.ok || !parked.ok) {
++    const reason = parked.ok ? DEGRADE.DEV_RESUME_INPUT_UNAVAILABLE : DEGRADE.PARKED_UNREADABLE;
+     notes.push(`orch dev-resume classifier fail-closed (${reason}) — issue #4460 INV-5`);
+     redResume = { ok: false, reason };
+     devResumePick = { ok: false, reason };
+   } else {
+     // Provenance-agnostic (#5058): a GLM, Claude or any future worker lane's
+     // PR qualifies alike. Only the orch pre-qualification gates live here; the
+     // selection is the ONE pick both realms share (dev-resume.ts, #4932).
+     // `ready-for-human` stays a hard exclusion: it is the operator's cue
+     // (QA round-cap #4735, conflict / cap-exhausted surface) and the
+     // surface-pr idempotency key — /hydra-review clears it when the operator
+     // hands the PR back to an autonomous lane.
+     const candidates: ResumeCandidate[] = [];
+     for (const pr of prs) {
+       const number = pr.number;
+       if (typeof number !== "number") continue;
+       const names = labelsOf(pr);
+       const head = orEmpty(pr.headRefName);
+       if (isSet(pr.isDraft) || names.has("ready-for-human")) continue;
++      if (inputs.parkedPrs.has(number)) continue; // #5319 INV-3
+       const state = orEmpty(pr.mergeStateStatus);
+       if (state === "DIRTY" || state === "UNKNOWN") continue;
+       const updated = ghTimestampSeconds(pr.updatedAt);
+       if (updated === null || now - updated < quiet) continue;
+       const verdict = checkVerdictFor(pr.statusCheckRollup, req.value);
+       candidates.push({
+         pr: number,
+         headRefName: isSet(head) ? String(head) : null,
+         row: pr,
+         red: verdict.red,
+         settled: verdict.settled,
+       });
+     }
+     // Memoised so the pick and the red-resume bucket read each PR's closing
+     // set (and emit its failure note) exactly once.
+     const closingMemo = new Map<number, ReadonlySet<number> | null>();
+     const closing = (c: ResumeCandidate): ReadonlySet<number> | null => {
+       const memo = closingMemo.get(c.pr);
+       if (memo !== undefined) return memo;
+       let closed: ReadonlySet<number> | null;
+       try {
+         closed = refs.predicates.closing([refRow(c.row)]);
+       } catch (err) {
+         /* intentional: surfaced as a stderr note on the outcome; the PR is skipped, never the turn */
+         const msg = err instanceof Error ? err.message : String(err);
+@@ -600,104 +650,109 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
+     let pick: PrPick | null = null;
+     const surface: DirtySurfaceEntry[] = [];
+     for (const number of [...dirty].sort(ascending)) {
+       const pr = byNumber.get(number);
+       if (pr === undefined) continue;
+       const names = labelsOf(pr);
+       const updated = ghTimestampSeconds(pr.updatedAt);
+       let closed: number[];
+       try {
+         closed = [...refs.predicates.closing([refRow(pr)])];
+       } catch (err) {
+         /* intentional: surfaced as a stderr note on the outcome — an unparseable body can never be pinned, so surface it (a terminal wait strands the PR) */
+         const msg = err instanceof Error ? err.message : String(err);
+         notes.push(`orch dirty-fix closing_issues() failed for PR ${number} (${msg}) — surfacing (issue #4807)`);
+         closed = [];
+       }
+       const single = closed.length === 1 ? closed[0] : null;
+       const age = updated !== null ? now - updated : null;
+       if (!names.has("conflict-fix-attempted")) {
+         const head = orEmpty(pr.headRefName);
+         if (single === null || !isSet(head) || String(head).includes(":")) {
+           surface.push({ pr: number, closingIssue: single });
+           continue;
+         }
+         if (age === null || age < quiet) continue;
++        if (!parked.ok) continue; // #5319 INV-4: the pin is dispatch-shaped - fail closed (surface stays open)
+         if (pick === null) pick = { issue: single, pr: number, headRefName: String(head) };
+       } else if (age === null || age >= DIRTY_ATTEMPTED_SURFACE_SECONDS) {
+         surface.push({ pr: number, closingIssue: single });
+       }
+     }
+     dirtyFix = { ok: true, value: { pick, surface } };
+   }
+ 
+   // No-PR durable dev resume (#4808): a `needs-dev-resume` issue NO open PR
+   // references — exactly the anchor none of the PR-keyed pins above can name.
+   // Fail closed on any unusable input (INV-4): an empty in-flight set from a
+   // failed open-PR read would make every resume issue look PR-less, unavailable
+   // pr-refs predicates silently empty the same set, and a saturated page may
+   // hide the referencing PR. Independent of the required-contexts read by
+   // design (the pick needs no CI verdict — there is no PR to judge).
+   let devResumeNoprPick: PrGateSnapshot["devResumeNoprPick"];
+   const noprFail = (reason: DegradeReason): PrGateSnapshot["devResumeNoprPick"] => {
+     notes.push(`orch dev-resume no-PR pick fail-closed (${reason}) — issue #4808 INV-4`);
+     return { ok: false, reason };
+   };
+   const noprRows = inputs.devResumeRows;
+   if (!inputs.prListReadOk) {
+     devResumeNoprPick = noprFail(DEGRADE.PR_LIST_READ_FAILED);
+   } else if (!refs.ok) {
+     devResumeNoprPick = noprFail(DEGRADE.PR_REFS_UNAVAILABLE);
+   } else if ("reason" in noprRows) {
+     devResumeNoprPick = noprFail(degradeDetail(`needs-dev-resume read ${noprRows.reason}`));
++  } else if (!parked.ok) {
++    devResumeNoprPick = noprFail(DEGRADE.PARKED_UNREADABLE);
+   } else if (inputs.ghListLimit !== undefined && inputs.prs.length >= inputs.ghListLimit) {
+     devResumeNoprPick = noprFail(DEGRADE.PR_PAGE_SATURATED);
+   } else {
+     devResumeNoprPick = {
+       ok: true,
+       value: pickNoPrResume({
+-        rows: noprRows.value,
++        rows: noprRows.value.filter((r) => !parked.value.has(r.number)), // #5319: the issue itself is parked
+         inflightUnion: new Set(inflightRefs(inputs.prs, inputs.prRefs).union),
+         nowSeconds: now,
+         quiescenceSeconds: inputs.noprQuiescenceSeconds,
+       }),
+     };
+   }
+ 
+   return {
+     value: {
+       dirty: dirty.sort(ascending),
+       unchecked: unchecked.sort(ascending),
+       behind: behind.sort(ascending),
+       ciTriggerStale,
+       redResume,
+       devResumePick,
+       devResumeNoprPick,
+       dirtyFix,
+       // Filled by collectPrGate (it needs the host port); fail-closed until then.
+       qaVerdictRecheck: { ok: false, reason: DEGRADE.NOT_EVALUATED },
+       dirtyFixFailPr: null,
++      parkedIssues: inputs.parkedIssues,
++      parkedPrs: inputs.parkedPrs,
+     },
+     notes,
+   };
+ }
+ 
+ // ---------------------------------------------------------------------------
+ // Input parsers (pure) — the JSON-vs-empty discipline of #4130
+ // ---------------------------------------------------------------------------
+ 
+ /** Branch protection `.contexts` (post-jq): the shared parser's list; null -> healthy empty set; other JSON -> malformed (fail closed). */
+ function readRequiredContexts(read: GhJsonRead): Classified<ReadonlySet<string>> {
+   if (read.kind === "empty") return { ok: false, reason: DEGRADE.EMPTY_PAYLOAD };
+   if (read.kind === "unparseable") return { ok: false, reason: DEGRADE.UNPARSEABLE };
+   const contexts = parseRequiredStatusContexts({ contexts: read.data });
+   if (contexts === null) return { ok: false, reason: DEGRADE.MALFORMED_PAYLOAD };
+   return { ok: true, value: new Set(contexts) };
+ }
+ 
+ /** `[{"number": N}, …]` → the issue numbers. A non-iterable JSON value is a failed read (Python's TypeError). */
+ function parseDevResumeIssues(read: GhJsonRead): Classified<ReadonlySet<number>> {
+   if (read.kind === "empty") return { ok: false, reason: DEGRADE.EMPTY_PAYLOAD };
+   if (read.kind === "unparseable") return { ok: false, reason: DEGRADE.UNPARSEABLE };
+   const data = read.data;
+   if (typeof data === "string" || (data !== null && typeof data === "object" && !Array.isArray(data))) {
+     return { ok: true, value: new Set() };
+@@ -858,156 +913,167 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
+   let runsPr = await deps.github.latestWorkflowRunCreatedAt("pull_request");
+   if (runsPush === null || runsPr === null) {
+     runsPush = null;
+     runsPr = null;
+     notes.push("orch ci-trigger runs read FAILED (empty payload) — orch_ci_trigger_stale fails open to false (issue #4240, INV-E)");
+     degraded.push({ field: "ciTriggerStale", reason: DEGRADE.RUNS_READ_FAILED });
+   }
+   if (payload.kind === "empty") {
+     notes.push("orch pr-gate PR-list read FAILED (empty payload) — emitting empty PR-gate buckets (issue #4240)");
+   }
+ 
+   // 3. The dev-resume inputs — fail CLOSED (INV-5).
+   const requiredRead = await deps.github.requiredStatusContexts();
+   if (requiredRead.kind === "empty") {
+     notes.push(
+       "orch dev-resume required-contexts read FAILED (empty payload) — orch_prs_red_resume/orch_dev_resume_pick fail closed to none (issue #4460, INV-5)",
+     );
+   }
+   const resumeRead = await deps.github.listOpenIssueRowsByLabel("needs-dev-resume", limit);
+   if (resumeRead.kind === "empty") {
+     notes.push(
+       "orch dev-resume needs-dev-resume issue read FAILED (empty payload) — orch_prs_red_resume/orch_dev_resume_pick fail closed to none (issue #4460, INV-5)",
+     );
+   }
+ 
++  // 3b. #5319 (ADR-0047 Decision 6): the ONE parked-issues read - dispatch outputs fail CLOSED on it.
++  const parkedRead = await deps.github.listOpenIssueRowsByLabel("parked", limit);
++  const parkedIssues = parseDevResumeIssues(parkedRead);
++  if ("reason" in parkedIssues) degraded.push({ field: "parkedIssues", reason: parkedIssues.reason });
++
+   // 4. Classification inputs (the old heredoc's own preamble notes).
+   if (payload.kind !== "ok") {
+     const reason = payload.kind === "empty" ? DEGRADE.EMPTY_PAYLOAD : DEGRADE.UNPARSEABLE;
+     notes.push(`orch pr-gate PR-list JSON parse FAILED (${reason}) — falling back to empty PR list (issue #4240)`);
+     degraded.push({ field: "prList", reason });
+   }
+   const grace = windowSeconds(env.uncheckedGraceSeconds, DEFAULT_UNCHECKED_GRACE_SECONDS);
+   if (grace.error !== null) {
+     notes.push(
+       `orch pr-gate ORCH_PR_UNCHECKED_GRACE_SECONDS unparsable (${grace.error}) — falling back to 600s default (issue #4240)`,
+     );
+   }
+   if ("error" in prRefs) {
+     notes.push(`orch dev-resume pr-refs.py import FAILED (${prRefs.error}) — fail closed (issue #4460)`);
+     degraded.push({ field: "prRefs", reason: DEGRADE.PREDICATE_UNAVAILABLE });
+   }
+   const quiet = windowSeconds(env.glmRedQuiescenceSeconds, DEFAULT_GLM_RED_QUIESCENCE_SECONDS);
+   if (quiet.error !== null) {
+     notes.push(
+       `orch pr-gate ORCH_GLM_RED_QUIESCENCE_SECONDS unparsable (${quiet.error}) — falling back to 1800s default (issue #4460)`,
+     );
+   }
+   const noprQuiet = windowSeconds(env.devResumeNoprQuiescenceSeconds, DEFAULT_NOPR_RESUME_QUIESCENCE_SECONDS);
+   if (noprQuiet.error !== null) {
+     notes.push(
+       `orch dev-resume no-PR pick HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS unparsable (${noprQuiet.error}) — falling back to 5400s default (issue #4808)`,
+     );
+   }
+ 
+   const requiredContexts = readRequiredContexts(requiredRead);
+   const devResumeIssues = parseDevResumeIssues(resumeRead);
+   const devResumeRows = parseNoPrResumeRows(resumeRead);
+   if ("reason" in requiredContexts) degraded.push({ field: "requiredContexts", reason: requiredContexts.reason });
+   if ("reason" in devResumeIssues) degraded.push({ field: "devResumeIssues", reason: devResumeIssues.reason });
+ 
++  const parkedPrs = parkedPrNumbers(prs, prRefs, parkedIssues, notes);
+   const classified = classifyPrGate({
+     prs,
++    parkedIssues,
++    parkedPrs,
+     nowSeconds: deps.now() / 1000,
+     uncheckedGraceSeconds: grace.value,
+     glmRedQuiescenceSeconds: quiet.value,
+     runsPushCreatedAt: runsPush,
+     runsPullRequestCreatedAt: runsPr,
+     requiredContexts,
+     devResumeIssues,
+     prRefs,
+     prListReadOk: payload.kind === "ok",
+     devResumeRows,
+     noprQuiescenceSeconds: noprQuiet.value,
+     ghListLimit: limit,
+   });
+   notes.push(...classified.notes);
+   // INV-4: the no-PR pick's degradation is its OWN marker — never
+   // orch_board_signals_degraded (that is the board read's flag, not pr-gate's).
+   const noprOutcome = classified.value.devResumeNoprPick;
+   if ("reason" in noprOutcome) {
+     degraded.push({ field: "devResumeNoprPick", reason: noprOutcome.reason });
+   }
+ 
+   // 5. #5052: the durable QA-verdict recheck - fail CLOSED, never a synthesised PASS.
+-  const qaVerdictRecheck = await collectQaRecheck(prs, payload.kind === "ok", requiredContexts, deps.host, notes, deps.now());
++  const qaVerdictRecheck = await collectQaRecheck(prs, payload.kind === "ok", requiredContexts, deps.host, notes, deps.now(), parkedIssues, parkedPrs);
+   if ("reason" in qaVerdictRecheck) degraded.push({ field: "qaVerdictRecheck", reason: qaVerdictRecheck.reason });
+ 
+   // 6. #5253: the two-phase dirty arm's predicate - AT MOST one guard run, for the single dirty pick.
+   const dirtyFixFailPr = await collectDirtyFixFailPr(classified.value.dirtyFix, deps.host, notes);
+ 
+   return {
+     collector: PR_GATE_COLLECTOR,
+     value: { inflight, ...classified.value, qaVerdictRecheck, dirtyFixFailPr },
+     degraded,
+     notes,
+   };
+ }
+ 
+ /** Max `qa-verdict-event.sh` runs in flight at once, and per snapshot turn (#5052 QA round 1). */
+ const QA_RECHECK_CONCURRENCY = 3; // matches the gh secondary-rate-limit-safe parallelism used elsewhere in the snapshot
+ const QA_RECHECK_MAX_PER_TURN = 12; // 4 waves at concurrency 3: ~1 minute typical, up to 4 x 90s per-script timeout worst case
+ /**
+  * #5052 QA rounds 2-3: pick at most `max` candidates, starting at a pseudo-random
+  * offset derived from a hash of the wall-clock millisecond and wrapping, so a
+  * persistent set of non-mergeable low-numbered PRs cannot starve higher-numbered
+  * PASS-pending-CI PRs. Stateless, and (unlike a linear `floor(now/period)*max`
+  * offset) it cannot alias with a fixed turn cadence: the start is a mixed hash,
+  * not an arithmetic progression, so no turn spacing pins the same window.
+  */
+ export function rotateQaRecheckBatch<T>(candidates: readonly T[], max: number, nowMs: number): T[] {
+   if (candidates.length <= max) return [...candidates];
+   // 32-bit integer mix (murmur3 finalizer) of the epoch-ms value.
+   let h = (Math.floor(nowMs) ^ Math.floor(nowMs / 4294967296)) >>> 0;
+   h = Math.imul(h ^ (h >>> 16), 0x85ebca6b) >>> 0;
+   h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+   h = (h ^ (h >>> 16)) >>> 0;
+   const start = h % candidates.length;
+   return Array.from({ length: max }, (_, k) => candidates[(start + k) % candidates.length]);
+ }
+ 
+ async function collectQaRecheck(
+   prs: readonly unknown[],
+   prListReadOk: boolean,
+   requiredContexts: Classified<ReadonlySet<string>>,
+   host: PrGateDeps["host"],
+   notes: string[],
+   nowMs: number,
++  parkedIssues: Classified<ReadonlySet<number>>,
++  parkedPrs: ReadonlySet<number>,
+ ): Promise<Classified<readonly QaRecheckEntry[]>> {
+   if (!prListReadOk) return { ok: false, reason: DEGRADE.PR_LIST_UNREADABLE };
+   if (!requiredContexts.ok) return { ok: false, reason: DEGRADE.REQUIRED_CONTEXTS_UNREADABLE };
+-  const candidates = qaRecheckCandidates(prs, requiredContexts.value);
++  if (!parkedIssues.ok) return { ok: false, reason: DEGRADE.PARKED_UNREADABLE }; // #5319 INV-4
++  const candidates = qaRecheckCandidates(prs, requiredContexts.value, parkedPrs);
+   if (candidates.length === 0) return { ok: true, value: [] };
+   if (host === undefined) return { ok: false, reason: DEGRADE.HOST_UNAVAILABLE };
+   // Bounded: at most QA_RECHECK_MAX_PER_TURN scripts per turn in a ROTATING window
+   // (no starvation), QA_RECHECK_CONCURRENCY at a time. Skipped PRs are omitted (fail closed) and named.
+   const batch = rotateQaRecheckBatch(candidates, QA_RECHECK_MAX_PER_TURN, nowMs);
+   if (candidates.length > batch.length) {
+     const picked = new Set(batch.map((c) => c.pr));
+     const skipped = candidates.filter((c) => !picked.has(c.pr)).map((c) => `#${c.pr}`);
+     notes.push(
+       `orch qa-verdict recheck capped at ${QA_RECHECK_MAX_PER_TURN} PR(s) this turn; skipped ${skipped.join(", ")} (rotates next turn; issue #5052)`,
+     );
+   }
+   const results: (QaRecheckEntry | null)[] = new Array(batch.length).fill(null);
+   let next = 0;
+   const worker = async (): Promise<void> => {
+     while (next < batch.length) {
+       const i = next++;
+       const c = batch[i];
+       try {
+         results[i] = parseQaRecheckEntry(await host.runQaVerdictEvent(c.pr, c.tier), c.pr, c.tier);
+       } catch (err) {
+         /* intentional: surfaced as a stderr note; the PR's entry is omitted (fail closed), never the turn */
+         const msg = err instanceof Error ? err.message : String(err);
+         notes.push(`orch qa-verdict recheck host call threw for PR ${c.pr} (${msg}) - omitting entry (issue #5052)`);
+         results[i] = null;
+@@ -1051,27 +1117,29 @@ async function collectDirtyFixFailPr(
+     /* intentional: surfaced as a stderr note; unknown verdict fails closed to the conflict-only arm */
+     return closedNote(`threw (${err instanceof Error ? err.message : String(err)})`);
+   }
+   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return closedNote("unreadable");
+   const r = raw as Record<string, unknown>;
+   const verdict = r.verdict;
+   if (verdict === null) return null; // no verdict recorded: conflict-only, not an error
+   if (typeof verdict !== "string" || typeof r.verdictAtHead !== "boolean") return closedNote("malformed");
+   return isFailVerdict(verdict as FinalVerdict) && r.verdictAtHead ? pr : null;
+ }
+ 
+ /** The snapshot the CLI renders when the collector itself could not run (every field degraded). */
+ export function prGateFallbackSnapshot(reason: DegradeReason): PrGateSnapshot {
+   return {
+     inflight: EMPTY_INFLIGHT,
+     dirty: [],
+     unchecked: [],
+     behind: [],
+     ciTriggerStale: { ok: false, reason },
+     redResume: { ok: false, reason },
+     devResumePick: { ok: false, reason },
+     devResumeNoprPick: { ok: false, reason },
+     dirtyFix: { ok: false, reason },
+     qaVerdictRecheck: { ok: false, reason },
+     dirtyFixFailPr: null,
++    parkedIssues: { ok: false, reason },
++    parkedPrs: new Set(),
+   };
+ }
+diff --git a/src/schemas/turn-snapshot.ts b/src/schemas/turn-snapshot.ts
+index a3f403254..596f39fd2 100644
+--- a/src/schemas/turn-snapshot.ts
++++ b/src/schemas/turn-snapshot.ts
+@@ -116,50 +116,56 @@ const SignalsSchema = z
+     needs_triage_target: z.boolean(),
+     target_needs_triage_items: NumberList,
+     target_stale_in_progress_items: NumberList, // #5167
+     target_blocked_items: NumberList, // #5167
+     // health / scout
+     health_fail: z.boolean(),
+     scout_walk_due: z.boolean(),
+     scout_board_saturated: z.boolean(),
+     // backfill producers and their saturation caps
+     orch_backfill_idle: z.boolean(),
+     arch_board_saturated: z.boolean(),
+     hitl_grill_open: z.number().int().nonnegative(),
+     hitl_grill_saturated: z.boolean(),
+     orch_board_signals_degraded: z.boolean(),
+     cleanup_board_saturated: z.boolean(),
+     skill_prune_board_saturated: z.boolean(),
+     target_backfill_idle: z.boolean(),
+     target_cleanup_board_saturated: z.boolean(),
+     wire_or_retire_target_available: z.boolean(),
+     design_qa_target_due: z.boolean(),
+     design_qa_target_saturated: z.boolean(),
+     retro_run_available: z.boolean(),
+     retro_run_drillable: z.boolean(),
+     review_retro_due: z.boolean(),
+     // PR gate (#4240) and the resume / conflict-fix picks
++    // #5319: open issues labelled `parked` (ADR-0047 Decision 6) - decide.py's belt filter set
++    orch_parked_issues: NumberList,
++    // #5319 QA r1: open PRs whose closing issue is parked (the qa-verdict event is PR-keyed)
++    orch_parked_prs: NumberList,
++    // #5319 QA r1: the parked read was unreadable - [] above is NOT a healthy empty set
++    orch_parked_unreadable: z.boolean(),
+     orch_prs_dirty: NumberList,
+     orch_prs_unchecked: NumberList,
+     orch_prs_behind: NumberList,
+     orch_ci_trigger_stale: z.boolean(),
+     // #5058: the provenance-agnostic resume pick (ex-#4460 GLM arm folded in)
+     // and its red-CI-only subset — decide.py's per-PR forward-fix cap scope.
+     orch_prs_red_resume: NumberList,
+     orch_dev_resume_pick: PinSchema.nullable(),
+     // #4808: the no-PR durable resume pick — a needs-dev-resume issue NO open
+     // PR references, so the PR-keyed pins above structurally can't name it.
+     orch_dev_resume_nopr_anchor: IssueNumber.nullable(),
+     orch_dirty_forward_fix: PinSchema.nullable(),
+     // #5253: the dirty pick's PR number iff a QA FAIL is pending at its head (two-phase arm)
+     orch_dirty_forward_fix_fail_pr: IssueNumber.nullable(),
+     orch_prs_dirty_surface: DirtySurfaceSchema,
+     // #5052: open PRs whose QA verdict may now be mergeable - re-evaluated every turn
+     orch_qa_verdict_recheck: QaRecheckSchema,
+     // grill gate (#628 / #3711)
+     orch_pending_grill_anchor: IssueNumber.nullable(),
+     orch_dev_ready_anchor: IssueNumber.nullable(),
+     // wayfinder / tickets stages (ADR-0029, ADR-0030)
+     wayfinder_orch_frontier: IssueNumber.nullable(),
+     wayfinder_orch_ticket_type: z.string(),
+     wayfinder_orch_inflight_global: z.number().int().nonnegative(),
+     tickets_available: z.boolean(),
+@@ -199,50 +205,53 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
+   target_needs_qa_pr_ref: "",
+   target_needs_qa_pr_head: "",
+   target_dev_resume_pick: null,
+   needs_triage_target: false,
+   target_needs_triage_items: [],
+   target_stale_in_progress_items: [],
+   target_blocked_items: [],
+   health_fail: true,
+   scout_walk_due: false,
+   scout_board_saturated: true,
+   orch_backfill_idle: false,
+   arch_board_saturated: true,
+   hitl_grill_open: 0,
+   hitl_grill_saturated: true,
+   orch_board_signals_degraded: true,
+   cleanup_board_saturated: true,
+   skill_prune_board_saturated: true,
+   target_backfill_idle: false,
+   target_cleanup_board_saturated: true,
+   wire_or_retire_target_available: false,
+   design_qa_target_due: false,
+   design_qa_target_saturated: true,
+   retro_run_available: false,
+   retro_run_drillable: false,
+   review_retro_due: false,
++  orch_parked_issues: [],
++  orch_parked_prs: [],
++  orch_parked_unreadable: false, // all-degraded convention: only _fail/_degraded/_saturated flags are raised; a marker turn carries no picks for the belt to guard
+   orch_prs_dirty: [],
+   orch_prs_unchecked: [],
+   orch_prs_behind: [],
+   orch_ci_trigger_stale: false,
+   orch_prs_red_resume: [],
+   orch_dev_resume_pick: null,
+   orch_dev_resume_nopr_anchor: null,
+   orch_dirty_forward_fix: null,
+   orch_dirty_forward_fix_fail_pr: null,
+   orch_prs_dirty_surface: [],
+   orch_qa_verdict_recheck: [],
+   orch_pending_grill_anchor: null,
+   orch_dev_ready_anchor: null,
+   wayfinder_orch_frontier: null,
+   wayfinder_orch_ticket_type: "",
+   wayfinder_orch_inflight_global: 0,
+   tickets_available: false,
+   tickets_orch_pending_spec: null,
+   orch_realm_weekly_share: null,
+ });
+ 
+ /** The data-plane bodies decide.py normalises itself. Absent = unparseable this turn (previous state value kept). */
+ const BlobsSchema = z
+   .object({
+     // decide.py indexes these two as mappings; a non-object is dropped
+diff --git a/test/autopilot-decide.test.mts b/test/autopilot-decide.test.mts
+index 59c7e06e0..6d763276c 100644
+--- a/test/autopilot-decide.test.mts
++++ b/test/autopilot-decide.test.mts
+@@ -5689,25 +5689,124 @@ describe("decide.py — a terminating turn still arms its QA PASS (#5144)", () =
+     noDispatchOrReap(plan);
+   });
+ 
+   test("holds still apply on a terminating turn: stale-SHA, FAIL and dirty PASS never arm; terminate stays the only action", () => {
+     const state = baseState({ cumulative_tokens: 2_000_001, signals: { ...busyBoard, orch_prs_dirty: [7003] } });
+     const plan = runDecide(state, null, [
+       passEvent(7001, { verdict_sha: "fedcba987654", verdict_at_head: false }),
+       passEvent(7002, { verdict: "FAIL" }),
+       passEvent(7003),
+     ]);
+     assert.equal(merges(plan).length, 0);
+     assert.deepEqual(actionTypes(plan), ["terminate"]);
+     const reasons = plan.reasons ?? [];
+     assert.ok(reasons.includes("hold:#7001:stale-verdict"));
+     assert.ok(reasons.includes("hold:#7003:dirty"));
+   });
+ 
+   test("the emergency brake overrides on a terminating turn too (zero auto-merge, terminate last)", () => {
+     const state = baseState({ cumulative_tokens: 2_000_001, signals: busyBoard });
+     state.emergency_brake = { engaged: true };
+     const plan = runDecide(state, null, [passEvent(7004)]);
+     assert.equal(merges(plan).length, 0);
+     lastIsTerminate(plan, "budget");
+   });
+ });
++
++// ---------------------------------------------------------------------------
++// Issue #5319 - decide.py skips parked work (ADR-0047 Decision 6, INV-6 belt)
++// ---------------------------------------------------------------------------
++
++describe("decide.py - parked issues are never dispatched or armed (issue #5319)", () => {
++  const PARKED = 5319;
++  const RESUME_PICK = `issue-${PARKED}:5400:worktree-agent-abc123`;
++  const DIRTY_FIX = `issue-${PARKED}:5401:worktree-agent-def456`;
++
++  const devOrch = (plan: any): any[] => (plan.actions ?? []).filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
++  const namesParked = (plan: any): boolean => JSON.stringify(plan.actions ?? []).includes(String(PARKED));
++
++  test("fixture snapshot: pins, no-PR anchor, queued resume and a qa-verdict for a parked issue produce no action naming it", () => {
++    const s = baseState({
++      signals: {
++        orch_parked_issues: [PARKED],
++        orch_dev_resume_pick: RESUME_PICK,
++        orch_dirty_forward_fix: DIRTY_FIX,
++        orch_dev_resume_nopr_anchor: `issue-${PARKED}`,
++        orch_work_available: false,
++      },
++    });
++    s.dev_resume_pending = [{ anchor: `issue-${PARKED}`, branch: "worktree-agent-abc" }]; // dropped, never dispatched
++    const events = [
++      { type: "qa-verdict", pr_number: 5400, tier: 3, closing_issue: PARKED, mechanical: null, has_scope_justification: false, verdict: "PASS" },
++    ];
++    const plan = runDecide(s, null, events);
++    assert.equal(namesParked(plan), false, `no action may name the parked issue: ${JSON.stringify(plan.actions)}`);
++    assert.equal(findAction(plan, (a) => a.type === "auto-merge"), undefined);
++    assert.ok((plan.reasons ?? []).includes(`parked:#${PARKED}`), "the auto-merge hold is named, not silent");
++  });
++
++  test("control: the same snapshot WITHOUT the parked set dispatches the no-PR anchor", () => {
++    const s = baseState({ signals: { orch_dev_resume_nopr_anchor: `issue-${PARKED}`, orch_work_available: false } });
++    const d = devOrch(runDecide(s, null));
++    assert.equal(d.length, 1);
++    assert.equal(d[0].prompt_args.anchor, `issue-${PARKED}`);
++  });
++
++  test("a parked resume pick does not shadow an unparked one-turn-later pick: the pin is simply declined", () => {
++    const s = baseState({ signals: { orch_parked_issues: [PARKED], orch_dev_resume_pick: RESUME_PICK } });
++    assert.equal(devOrch(runDecide(s, null)).filter((a) => a.prompt_args?.forward_fix_pr === 5400).length, 0);
++  });
++
++  test("an unparked sibling qa-verdict still auto-merges next to a parked one", () => {
++    const events = [
++      { type: "qa-verdict", pr_number: 5400, tier: 1, closing_issue: PARKED, mechanical: null, has_scope_justification: false, verdict: "PASS" },
++      { type: "qa-verdict", pr_number: 5402, tier: 1, closing_issue: 5320, mechanical: null, has_scope_justification: false, verdict: "PASS" },
++    ];
++    const plan = runDecide(baseState({ signals: { orch_parked_issues: [PARKED] } }), null, events);
++    const merged = (plan.actions ?? []).filter((a: any) => a.type === "auto-merge").map((a: any) => a.pr_number);
++    assert.deepEqual(merged, [5402]);
++  });
++
++  // QA round 1 (PR #5374) findings, one red-without-the-fix test each + sibling pins.
++  const qaOrch = (plan: any): any[] => (plan.actions ?? []).filter((a: any) => a.type === "dispatch" && a.slot === "qa_orch");
++  const realEvent = (pr: number) => ({ type: "qa-verdict", pr_number: pr, tier: 1, mechanical: null, has_scope_justification: false, verdict: "PASS" });
++
++  test("QA r1 #1: qa_orch never dispatches when every needs-qa issue is parked", () => {
++    const s = baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: String(PARKED), orch_parked_issues: [PARKED] } });
++    assert.equal(qaOrch(runDecide(s, null)).length, 0);
++  });
++
++  test("QA r1 #1 sibling: qa_orch still dispatches when the needs-qa issue is not parked", () => {
++    const s = baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: "3841", orch_parked_issues: [PARKED] } });
++    assert.equal(qaOrch(runDecide(s, null)).length, 1);
++  });
++
++  test("QA r1 #2: the REAL qa-verdict event shape (pr_number only) is held via orch_parked_prs", () => {
++    const plan = runDecide(baseState({ signals: { orch_parked_prs: [5400] } }), null, [realEvent(5400)]);
++    assert.equal(findAction(plan, (a) => a.type === "auto-merge"), undefined);
++    assert.ok((plan.reasons ?? []).includes("parked:#5400"));
++  });
++
++  test("QA r1 #2 sibling: an unparked PR with the real event shape still auto-merges", () => {
++    const plan = runDecide(baseState({ signals: { orch_parked_prs: [5400] } }), null, [realEvent(5402)]);
++    const merged = (plan.actions ?? []).filter((a: any) => a.type === "auto-merge").map((a: any) => a.pr_number);
++    assert.deepEqual(merged, [5402]);
++  });
++
++  test("QA r1 #3: a degraded parked read fails closed - no resume drain, no auto-merge, no qa_orch", () => {
++    const s = baseState({
++      signals: { orch_parked_unreadable: true, orch_parked_issues: [], orch_dev_resume_nopr_anchor: "issue-777", orch_work_available: false, needs_qa_orch: true, needs_qa_numbers: "3841" },
++    });
++    s.dev_resume_pending = [{ anchor: "issue-778", branch: "worktree-agent-abc" }];
++    const plan = runDecide(s, null, [realEvent(5402)]);
++    assert.equal(devOrch(plan).length, 0);
++    assert.equal(qaOrch(plan).length, 0);
++    assert.equal(findAction(plan, (a) => a.type === "auto-merge"), undefined);
++  });
++
++  test("QA r1 #3 sibling: a healthy EMPTY parked read (degraded=false) leaves dispatch and auto-merge open", () => {
++    const s = baseState({ signals: { orch_parked_unreadable: false, orch_parked_issues: [], orch_dev_resume_nopr_anchor: "issue-777", orch_work_available: false } });
++    assert.equal(devOrch(runDecide(s, null)).length, 1);
++    const merged = (runDecide(baseState({ signals: { orch_parked_unreadable: false } }), null, [realEvent(5402)]).actions ?? []).filter((a: any) => a.type === "auto-merge");
++    assert.equal(merged.length, 1);
++  });
++});
+diff --git a/test/turn-snapshot-json.test.mts b/test/turn-snapshot-json.test.mts
+index 6430b4fa3..6cc3d641b 100644
+--- a/test/turn-snapshot-json.test.mts
++++ b/test/turn-snapshot-json.test.mts
+@@ -102,50 +102,52 @@ function healthyValues(): TurnSnapshotValues {
+       orchBoardDegraded: false,
+       needsTriageItems: ok([4928, 4930]),
+     },
+     targetBoard: {
+       counts: ok([
+         ["target_ready_for_agent", "2"],
+         ["target_ready_blocker_excluded", "1"],
+         ["target_needs_qa", "1"],
+         ["target_needs_triage", "0"],
+         ["target_needs_research", "0"],
+       ]),
+       wip: ok({ limit: 3, inProgress: 3, live: 3, saturated: true }),
+       needsQaPr: { ref: "https://github.com/example/target/pull/274", head: "feature/f454182f-t2-dev_target" },
+       devResumePick: ok({ issue: 812, pr: 815, headRefName: "feature/resume-812" }),
+       laneDegraded: false,
+     },
+     untriagedOrphans: ok(1),
+     needsQaNumbers: ok([4941, 4936, 4941]),
+     prGate: {
+       inflight: { union: [4900], branch: [4900], body: [] },
+       dirty: [4938, 4814, 4814],
+       unchecked: [4950],
+       behind: [4952, 4951, 4953],
+       qaVerdictRecheck: ok([]),
+       dirtyFixFailPr: null,
++      parkedIssues: ok(new Set([4905, 4902])), // #5319: emitted sorted ascending as orch_parked_issues
++      parkedPrs: new Set([4910, 4907]), // QA r1: emitted sorted ascending as orch_parked_prs
+       ciTriggerStale: ok(false),
+       redResume: ok([4890]),
+       devResumePick: ok({ issue: 4718, pr: 4890, headRefName: "worktree-agent-a1b2" }),
+       devResumeNoprPick: ok(4806),
+       dirtyFix: ok({ pick: { issue: 4810, pr: 4814, headRefName: "fix/4810" }, surface: [{ pr: 4938, closingIssue: 4934 }, { pr: 4818, closingIssue: null }] }),
+     },
+     picks: {
+       grillPick: 4931,
+       devReadyPick: 4934,
+       candidateExclusions: [{ anchor: "issue-4900", member: "in-flight-dev-exclusion", verdict: "excluded", evidence: "open PR #4901" }],
+       activeDevOrch: 1,
+       boardDegraded: false,
+     },
+     redisQueues: { "work-queue": ok(2), "reframe-queue": ok(0), "prior-failures": ok(0) },
+     scout: { lastWalkIso: ok('"2026-10-05T08:00:00Z"'), openEnhancements: ok("25"), tokensToday: "1200", mirrored: ok(true) },
+     archBoards: {
+       lastRunIso: ok("2026-10-06T00:00:00Z"),
+       workQueue: 2,
+       board: ok({ backfillIdle: false, archOpenScan: 1, archOpenEnhancements: 4, archSaturated: true, cleanupOpenScan: 0, cleanupSaturated: false, skillPruneOpen: 0, skillPruneSaturated: false }),
+       orchBoardDegraded: "0",
+     },
+     hitlGrill: ok({ open: 17, saturated: true }),
+     targetScan: {
+       signalsDegraded: false,
+       signals: ok({ truncated: false, needsTriageItems: [301, 299], backfillIdle: false, cleanupOpenScan: 0, cleanupSaturated: false, wireOrRetireTriage: 2, wireOrRetireUnlabelled: 0, designQaOpen: 0, designQaSaturated: false }),
+@@ -197,50 +199,52 @@ function fallbackValues(): TurnSnapshotValues {
+ }
+ 
+ /** The inherited derivation (fromisoformat), the degraded arms and the "previous value kept" arms. */
+ function edgeValues(): TurnSnapshotValues {
+   const h = healthyValues();
+   return {
+     ...h,
+     // service status not `ok`, but no failed unit
+     health: { service: ok({ status: "degraded", redis: false }), failedServices: 0 },
+     // the gh-derived counts (the #4949 fallback path)
+     orchBoard: {
+       counts: { source: "derived", values: { needs_qa: 4, ready_for_agent: 5, needs_triage: 1, needs_research: 0, in_progress: 0, blocked: 0, stale_in_progress: 0, stale_blocked: 0 } as never },
+       boardState: null,
+       orchBoardDegraded: true,
+       needsTriageItems: ok([]),
+     },
+     // a failed Target counts read (every count key emits 0), a failed WIP read
+     targetBoard: { ...h.targetBoard, counts: FAILED, wip: FAILED, needsQaPr: { ref: "", head: "" }, devResumePick: ok(null) },
+     needsQaNumbers: FAILED,
+     prGate: {
+       ...h.prGate,
+       ciTriggerStale: ok(true),
+       redResume: ok([4881, 4882]),
+       devResumePick: FAILED,
+       devResumeNoprPick: FAILED,
++      parkedIssues: FAILED, // degraded -> orch_parked_unreadable true
++      parkedPrs: new Set(),
+       dirtyFix: ok({ pick: null, surface: [] }),
+     },
+     picks: { ...h.picks, grillPick: null, devReadyPick: null, candidateExclusions: [], boardDegraded: true },
+     scout: { lastWalkIso: ok("2020-01-01T00:00:00"), openEnhancements: ok("3"), tokensToday: "0", mirrored: FAILED },
+     targetScan: { ...h.targetScan, adrPresent: false },
+     retro: { runs: ok({ available: true, candidate: "abc" }), drillable: null, reviewDue: false },
+     wayfinder: { frontier: null, ticketType: "", inflightGlobal: 2 },
+     tickets: ok(null),
+     realmShare: ok(0.99995),
+     // unparseable body → absent (the previous state value is kept)
+     usageEligibility: ok("<html>502 Bad Gateway</html>"),
+     // a body with trailing data after the JSON value → unparseable → absent
+     classStats: ok('{"scoreboard":{"classes":[]},"shadow":{"verdicts":[]}}\n{"trailing":1}'),
+     slotEvents: ok('{"events": [], "last_id": null}'),
+   };
+ }
+ 
+ /**
+  * `healthyValues` with ONLY the board-state read degraded (#4949): the service
+  * body is unusable, so the collector took the `deriveBoardState` fallback over
+  * the gh rows — non-zero counts, everything else healthy. This is the
+  * production shape of "the data plane is down, gh still answers":
+  * `orchBoardDegraded` stays false (the #4130 flag is set only on a FAILED
+  * fallback read, and a successful derived read never flips it).
+  */
+diff --git a/test/turn-snapshot-orch-board.test.mts b/test/turn-snapshot-orch-board.test.mts
+index b03146190..24d7ae778 100644
+--- a/test/turn-snapshot-orch-board.test.mts
++++ b/test/turn-snapshot-orch-board.test.mts
+@@ -173,50 +173,51 @@ describe("Turn Snapshot orch-board — golden files from the bash collectors (AD
+ 
+ const ok = (data: unknown): GhJsonRead => ({ kind: "ok", data });
+ const EMPTY: GhJsonRead = { kind: "empty" };
+ 
+ /** The ported `count()`: the classifier over `number,labels` rows, as the emitted string. */
+ function count(issues: readonly { labels: string[] }[]): string {
+   const n = countUntriagedOrphans(ok(issues.map((i, idx) => ({ number: idx + 1, labels: i.labels.map((name) => ({ name })) }))));
+   assert.notEqual(n, null);
+   return String(n);
+ }
+ 
+ describe("untriaged_orphans exclusion set (#2828, #2958)", () => {
+   test("every lifecycle + operator-wait label excludes the issue on its own", () => {
+     const required = [
+       "ready-for-agent",
+       "in-progress",
+       "blocked",
+       "needs-qa",
+       "needs-triage",
+       "needs-research",
+       "target-backlog",
+       "ready-for-human",
+       "needs-info",
+       "needs-tickets",
+       "hitl-grill",
++      "parked", // #5319: ADR-0047 human-hold - sweep_orch must not re-triage a parked issue out of the park
+     ];
+     for (const label of required) {
+       assert.ok(UNTRIAGED_ORPHAN_EXCLUDED_LABELS.includes(label), `exclusion set missing "${label}"`);
+       assert.equal(count([{ labels: [label] }]), "0", `"${label}" alone must not be an orphan`);
+     }
+     assert.ok(
+       !UNTRIAGED_ORPHAN_EXCLUDED_LABELS.includes("needs-design-concept"),
+       'untriaged_orphans must NOT unconditionally exclude "needs-design-concept" (#4096)',
+     );
+   });
+ });
+ 
+ describe("untriaged_orphans wayfinder prefix exclusion (#3728)", () => {
+   test("an issue labelled only wayfinder:grilling is NOT an untriaged orphan", () => {
+     assert.equal(count([{ labels: ["wayfinder:grilling"] }]), "0");
+   });
+ 
+   test("an issue with genuinely no labels IS still an untriaged orphan (backstop intact)", () => {
+     assert.equal(count([{ labels: [] }]), "1");
+   });
+ 
+   test("every known wayfinder label type is excluded", () => {
+     assert.equal(
+       count([
+         { labels: ["wayfinder:map"] },
+diff --git a/test/turn-snapshot-pr-gate.test.mts b/test/turn-snapshot-pr-gate.test.mts
+index e61273fb9..7fb93f165 100644
+--- a/test/turn-snapshot-pr-gate.test.mts
++++ b/test/turn-snapshot-pr-gate.test.mts
+@@ -1,52 +1,52 @@
+ /**
+  * Turn Snapshot — in-flight PR + PR-gate collector (ADR-0043 slice 1, #4929).
+  *
+  * Three suites, all at the TS interface with NO `gh` on PATH:
+  *
+  * 1. GOLDEN (ADR-0043 Decision 4): every file under
+  *    test/fixtures/turn-snapshot/ was captured by running the OLD bash
+  *    collectors (`collect_orch_inflight_prs` + `collect_pr_gate_reachability`,
+  *    at the slice's base SHA) over each fixture the pre-slice tests used —
+  *    failure fixtures included. Each is replayed through the real CLI `main`
+  *    (`--format values`) + the production `TurnSnapshotGithub` port over a
+  *    recording transport: the TYPED value (`expected.values`, in-flight sets
+  *    included — captured while the retired kv wire still matched the bash
+  *    byte for byte, #4934), the `orch …` stderr-note set exactly, and the
+  *    `gh` argv list exactly (the same underlying calls, in the same order).
+  *    The capture recipe + provenance: test/fixtures/turn-snapshot/README.md;
+  *    the opt-in expected-block re-record mode: UPDATE_TURN_SNAPSHOT_PR_GATE_GOLDEN.
+  *
+  * 2. PORTED behavioural cases: the cases that lived in
+  *    test/collect-state-inflight-exclusion.test.mts (#4240, #4460, #4518,
+  *    #4807, #4812), 1:1 — same fixtures, same assertions — now driving
+  *    `collectPrGate` through a fake port returning typed fixtures instead of
+  *    regex-extracting a python heredoc. `runPrGate` also asserts the read
+- *    budget (5 + the single UNKNOWN re-poll) on every case.
++ *    budget (6 + the single UNKNOWN re-poll) on every case.
+  *
+- * 3. The port READ-COUNT + ORDER guard (#4941): exactly five reads in the
+- *    recorded order with no UNKNOWN PR; six with one (the re-poll second,
++ * 3. The port READ-COUNT + ORDER guard (#4941, +1 parked read #5319): exactly six reads in the
++ *    recorded order with no UNKNOWN PR; seven with one (the re-poll second,
+  *    after the sleep) — the zero-added-reads property the deleted "no Redis
+  *    access" bash case used to pin.
+  */
+ 
+ import { degradeDetail } from "../src/autopilot/turn-snapshot/collector.ts";
+ import test, { describe } from "node:test";
+ import assert from "node:assert/strict";
+ import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+ import { join, resolve } from "node:path";
+ 
+ import { main, parseArgs } from "../scripts/autopilot/turn-snapshot.ts";
+ import {
+   applyMergeStateRepoll,
+   checkVerdictFor,
+   collectPrGate,
+   hasUnknownMergeState,
+   parseTierLine,
+   prGateFallbackSnapshot,
+   type PrGateEnv,
+   type PrRefsAvailability,
+   rotateQaRecheckBatch,
+ } from "../src/autopilot/turn-snapshot/pr-gate.ts";
+ import {
+   createTurnSnapshotGithub,
+   ghTimestampSeconds,
+@@ -59,112 +59,114 @@ import {
+ import { pickNoPrResume } from "../src/autopilot/turn-snapshot/dev-resume.ts";
+ import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
+ 
+ const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot");
+ 
+ const PR_REFS_UNAVAILABLE: PrRefsAvailability = {
+   ok: false,
+   error: "[Errno 2] No such file or directory: '/nonexistent/pr-refs.py'",
+ };
+ 
+ // ---------------------------------------------------------------------------
+ // 1. Golden files
+ // ---------------------------------------------------------------------------
+ 
+ interface GoldenRead {
+   stdout: string;
+   stderr: string;
+   exitCode: number;
+ }
+ 
+ interface Golden {
+   name: string;
+   nowMs: number;
+   env: Record<string, string>;
+   prRefsUnavailable: boolean;
+-  gh: Partial<Record<"first" | "repoll" | "runsPush" | "runsPullRequest" | "required" | "resume", GoldenRead>>;
++  gh: Partial<Record<"first" | "repoll" | "runsPush" | "runsPullRequest" | "required" | "resume" | "parked", GoldenRead>>;
+   expected: {
+     /** `--format values` output: `{ "pr-gate": <typed PrGateSnapshot> }`. */
+     values: Record<string, unknown>;
+     stderrNotes: string[];
+     ghCalls: string[][];
+     sleeps: string[];
+   };
+ }
+ 
+ /** Route an argv to the golden read the old fake `gh` served for it. */
+ function goldenKey(args: string[]): keyof Golden["gh"] | null {
+   const joined = args.join(" ");
+   if (joined.includes("number,headRefName,body,mergeStateStatus,statusCheckRollup,createdAt,updatedAt,isDraft,labels")) return "first";
+   if (joined.includes("--json number,mergeStateStatus")) return "repoll";
+   if (joined.includes("event=push")) return "runsPush";
+   if (joined.includes("event=pull_request")) return "runsPullRequest";
+   if (joined.includes("required_status_checks")) return "required";
+   if (joined.includes("needs-dev-resume")) return "resume";
++  if (joined.includes("--label parked")) return "parked"; // #5319
+   return null;
+ }
+ 
+ function goldenEnv(env: Record<string, string>): PrGateEnv {
+   return {
+     uncheckedGraceSeconds: env.HYDRA_ORCH_PR_UNCHECKED_GRACE_SECONDS,
+     glmRedQuiescenceSeconds: env.HYDRA_ORCH_GLM_RED_QUIESCENCE_SECONDS,
+     unknownRepollDelaySeconds: env.HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS,
+     devResumeNoprQuiescenceSeconds: env.HYDRA_ORCH_DEV_RESUME_NOPR_QUIESCENCE_SECONDS,
+   };
+ }
+ 
+ // Other slices' goldens share the directory under their own prefix (slice 2: `orch-board-`).
+ const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".json") && !f.startsWith("orch-board-")).sort();
+ 
+ /**
+  * Re-record the goldens' `expected` blocks — ONLY for an intentional
+  * collector behaviour change, never to silence a mismatch:
+  *
+  *   UPDATE_TURN_SNAPSHOT_PR_GATE_GOLDEN=1 npm run test:file -- test/turn-snapshot-pr-gate.test.mts
+  *
+  * Same convention as UPDATE_DECIDE_GOLDEN (test/decide-golden.test.mts) and
+  * UPDATE_TURN_SNAPSHOT_JSON_GOLDEN (test/turn-snapshot-json.test.mts). Each
+  * golden's scenario inputs (`name`, `nowMs`, `env`, `prRefsUnavailable`,
+  * `gh`) are never touched — only the `expected` block is rewritten from the
+  * TS replay. The historical bash capture recipe + provenance live in
+  * test/fixtures/turn-snapshot/README.md.
+  */
+ const UPDATE_GOLDEN = process.env.UPDATE_TURN_SNAPSHOT_PR_GATE_GOLDEN === "1";
+ 
+ describe("Turn Snapshot pr-gate — golden files from the bash collectors (ADR-0043 D4)", () => {
+   test("the golden corpus is present (guards a vacuous pass)", () => {
+     assert.ok(goldenFiles.length >= 90, `expected the captured corpus, found ${goldenFiles.length} files`);
+   });
+ 
+   for (const file of goldenFiles) {
+     const g = JSON.parse(readFileSync(join(GOLDEN_DIR, file), "utf-8")) as Golden;
+     test(`golden: ${g.name}`, async () => {
+       const calls: string[][] = [];
+       const transport: GhTransport = async (args) => {
+         calls.push([...args]);
+         const key = goldenKey(args);
+-        const r = key === null ? undefined : g.gh[key];
++        // #5319: the corpus predates the parked read; an unscripted one is a healthy empty set.
++        const r = key === null ? undefined : (g.gh[key] ?? (key === "parked" ? { stdout: "[]", stderr: "", exitCode: 0 } : undefined));
+         if (r === undefined) return { ok: false, stderr: `unscripted call: ${args.join(" ")}` };
+         return r.exitCode === 0 ? { ok: true, stdout: r.stdout, stderr: r.stderr } : { ok: false, stderr: r.stderr };
+       };
+       const sleeps: string[] = [];
+       let stdout = "";
+       let stderr = "";
+       const code = await main(
+         ["--collectors", "pr-gate", "--format", "values", "--gh-list-limit", "100"],
+         {
+           github: createTurnSnapshotGithub({ transport, repo: DEFAULT_GITHUB_REPO }),
+           now: () => g.nowMs,
+           sleep: async (s) => {
+             sleeps.push(String(s));
+           },
+           env: goldenEnv(g.env),
+           ...(g.prRefsUnavailable ? { prRefs: PR_REFS_UNAVAILABLE } : {}),
+         },
+         {
+           stdout: (t) => (stdout += t),
+           stderr: (t) => (stderr += t),
+         },
+       );
+       assert.equal(code, 0);
+       const notes = stderr.split("\n").filter((l) => l.startsWith("orch "));
+       if (UPDATE_GOLDEN) {
+@@ -207,86 +209,89 @@ const REQUIRED = [
+   "secret-scan",
+   "deep-qa-gate",
+   "design-concept-reconcile",
+ ];
+ 
+ interface PrGateOpenPr {
+   number: number;
+   mergeStateStatus: string;
+   statusCheckRollup: unknown[];
+   createdAt: string;
+   updatedAt: string;
+   isDraft: boolean;
+   labels: { name: string }[];
+   headRefName?: string;
+   body?: string;
+ }
+ 
+ interface FakeOpts {
+   first?: GhJsonRead;
+   repoll?: GhJsonRead;
+   repollStderr?: string;
+   runsPush?: string | null;
+   runsPullRequest?: string | null;
+   required?: GhJsonRead;
+   resume?: GhJsonRead;
++  /** #5319: the `parked` label read (default: a healthy empty set). */
++  parked?: GhJsonRead;
+ }
+ 
+ /** A fake TurnSnapshotGithub returning typed fixtures, counting and logging reads. */
+ function fakeGithub(o: FakeOpts): TurnSnapshotGithub & { prListReads: () => number; totalReads: () => number; readLog: () => string[] } {
+   let prListReads = 0;
+   let totalReads = 0;
+   const log: string[] = [];
+   return {
+     prListReads: () => prListReads,
+     totalReads: () => totalReads,
+     readLog: () => log,
+     async listOpenPrs() {
+       prListReads++;
+       totalReads++;
+       log.push("listOpenPrs");
+       return o.first ?? ok([]);
+     },
+     async listOpenPrMergeStates() {
+       prListReads++;
+       totalReads++;
+       log.push("listOpenPrMergeStates");
+       return { read: o.repoll ?? ok([]), stderrHead: o.repollStderr ?? "" };
+     },
+     async latestWorkflowRunCreatedAt(event) {
+       totalReads++;
+       log.push(`latestWorkflowRunCreatedAt(${event})`);
+       return (event === "push" ? o.runsPush : o.runsPullRequest) ?? null;
+     },
+     async requiredStatusContexts() {
+       totalReads++;
+       log.push("requiredStatusContexts");
+       return o.required ?? ok(REQUIRED);
+     },
+-    async listOpenIssueRowsByLabel() {
++    async listOpenIssueRowsByLabel(label) {
+       totalReads++;
+       log.push("listOpenIssueRowsByLabel");
++      if (label === "parked") return o.parked ?? ok([]);
+       return o.resume ?? ok([]);
+     },
+     // The needs-triage / needs-qa number read — no longer the pr-gate
+     // collector's (#4808 INV-3 widened it to listOpenIssueRowsByLabel in
+     // place); kept so the fake still satisfies the full port type.
+     openIssueNumbersByLabel: unusedRead,
+     // Slice-2 reads (#4930) — never issued by the pr-gate collector.
+     async listOpenIssueBoardRows() {
+       return EMPTY;
+     },
+     async listOpenIssueLabelRows() {
+       return EMPTY;
+     },
+     // slice 3 (#4931) reads — unused by the pr-gate collector
+     listReadyForAgentIssues: async () => ok([]),
+     searchOpenIssueNumbers: async () => ok([]),
+     listMergedPrs: async () => ok([]),
+     listOpenPrHeads: async () => ok([]),
+     // Slice 5B (#4933) reads — never part of a pr-gate run.
+     ...SLICE_5B_READS_UNUSED,
+     // Slice 4 (#4932) Target-board reads — issued against the Target repo's port, never this one.
+     listOpenIssueLabelNames: unusedRead,
+     listOpenPullsRest: unusedRead,
+     listOpenIssuesByLabelRest: unusedRead,
+     listQaVerdictCommentsRest: unusedRead,
+@@ -300,88 +305,92 @@ const SLICE_5B_READS_UNUSED = {
+   openIssuesWithLabel: unusedRead,
+   openIssueLabelsWithLabel: unusedRead,
+   openIssueAssigneesWithLabel: unusedRead,
+   wayfinderMapSubIssues: unusedRead,
+ };
+ 
+ interface PrGateBuckets {
+   dirty: number[];
+   unchecked: number[];
+   behind: number[];
+   ciTriggerStale: boolean;
+   /** `orch_prs_red_resume`: pick candidates qualifying ONLY via the red-CI arm (#5058). */
+   redResume: number[];
+   devResumePick: string;
+   /** The #4808 no-PR pick: the anchor, or null when absent OR degraded. */
+   devResumeNoprAnchor: number | null;
+   dirtyForwardFix: string;
+   dirtySurface: string;
+   stderr: string;
+ }
+ 
+ interface PrGateOverrides {
+   /** "" models a FAILED read (the INV-5 fail-closed path). */
+   requiredContextsJson?: string;
+   devResumeIssuesJson?: string;
++  /** #5319: "" models a FAILED parked read. */
++  parkedIssuesJson?: string;
+   glmRedQuiescenceSeconds?: string;
+   devResumeNoprQuiescenceSeconds?: string;
+   prRefs?: PrRefsAvailability;
+ }
+ 
+ /** "" models a FAILED read; anything else goes through the port's own JSON parse. */
+ const jsonOrEmpty = (s: string): GhJsonRead => parseJsonRead(s);
+ 
+ /**
+  * A pin in the Anchor-reference notation signal EVENTS carry
+  * (`issue-N:PR:branch`), `none` when absent or degraded — the ported cases
+  * keep their assertions in it.
+  */
+ const pinRef = (p: { issue: number; pr: number; headRefName: string } | null) => (p === null ? "none" : `issue-${p.issue}:${p.pr}:${p.headRefName}`);
+ 
+ /** The ported `runPrGate`: the collector over a fake port, its typed value as flat buckets. */
+ async function runPrGate(prs: unknown[], overrides: PrGateOverrides = {}, repoll?: GhJsonRead): Promise<PrGateBuckets> {
+   const github = fakeGithub({
+     first: ok(prs),
+     repoll,
+     required: jsonOrEmpty(overrides.requiredContextsJson ?? JSON.stringify(REQUIRED)),
+     resume: jsonOrEmpty(overrides.devResumeIssuesJson ?? "[]"),
++    parked: jsonOrEmpty(overrides.parkedIssuesJson ?? "[]"),
+   });
+   const outcome = await collectPrGate({
+     github,
+     now: () => NOW_MS,
+     sleep: async () => {},
+     ghListLimit: 100,
+     env: {
+       uncheckedGraceSeconds: "600",
+       glmRedQuiescenceSeconds: overrides.glmRedQuiescenceSeconds ?? "1800",
+       devResumeNoprQuiescenceSeconds: overrides.devResumeNoprQuiescenceSeconds ?? "5400",
+     },
+     ...(overrides.prRefs ? { prRefs: overrides.prRefs } : {}),
+   });
+-  // The read budget (#4941): five reads, plus the single #4812 re-poll when
+-  // the first payload holds an UNKNOWN — an added read trips every ported case.
+-  assert.equal(github.totalReads(), 5 + (hasUnknownMergeState(prs) ? 1 : 0));
++  // The read budget (#4941, +1 for the #5319 parked read): six reads, plus the
++  // single #4812 re-poll when the first payload holds an UNKNOWN — an added
++  // read trips every ported case.
++  assert.equal(github.totalReads(), 6 + (hasUnknownMergeState(prs) ? 1 : 0));
+   const v = outcome.value;
+   const dirtyFix = v.dirtyFix.ok ? v.dirtyFix.value : { pick: null, surface: [] };
+   return {
+     dirty: [...v.dirty],
+     unchecked: [...v.unchecked],
+     behind: [...v.behind],
+     ciTriggerStale: v.ciTriggerStale.ok && v.ciTriggerStale.value,
+     redResume: v.redResume.ok ? [...v.redResume.value] : [],
+     devResumePick: pinRef(v.devResumePick.ok ? v.devResumePick.value : null),
+     devResumeNoprAnchor: v.devResumeNoprPick.ok ? v.devResumeNoprPick.value : null,
+     dirtyForwardFix: pinRef(dirtyFix.pick),
+     dirtySurface: dirtyFix.surface.map((e) => `${e.pr}:${e.closingIssue ?? "none"}`).join(" "),
+     stderr: outcome.notes.map((n) => `${n}\n`).join(""),
+   };
+ }
+ 
+ function basePrGate(overrides: Partial<PrGateOpenPr>): PrGateOpenPr {
+   return {
+     number: 9001,
+     mergeStateStatus: "BEHIND",
+     statusCheckRollup: [],
+     createdAt: isoSecondsAgo(7200),
+     updatedAt: isoSecondsAgo(7200),
+     isDraft: false,
+     labels: [],
+@@ -959,83 +968,84 @@ describe("pr-gate — dirty PR conflict fix-forward (issue #4807)", () => {
+     const b = await runPrGate([dirtyPr({ labels: [{ name: "ready-for-human" }] })]);
+     assert.equal(b.dirtyForwardFix, "none");
+     assert.equal(b.dirtySurface, "");
+     assert.deepEqual(b.dirty, []);
+   });
+ 
+   test("INV-4: an unavailable reference predicate fails closed to none + empty surface, bucket intact", async () => {
+     const r = await runPrGate([dirtyPr()], { requiredContextsJson: "[]", prRefs: PR_REFS_UNAVAILABLE });
+     assert.equal(r.dirtyForwardFix, "none");
+     assert.equal(r.dirtySurface, "");
+     assert.deepEqual(r.dirty, [4775]);
+     assert.match(r.stderr, /#4807/);
+   });
+ });
+ 
+ // ---------------------------------------------------------------------------
+ // 3. Port read-count guard (#4941)
+ // ---------------------------------------------------------------------------
+ 
+ describe("pr-gate — port read-count + order guard (#4941)", () => {
+   const CLEAN_ORDER = [
+     "listOpenPrs",
+     "latestWorkflowRunCreatedAt(push)",
+     "latestWorkflowRunCreatedAt(pull_request)",
+     "requiredStatusContexts",
+-    "listOpenIssueRowsByLabel",
++    "listOpenIssueRowsByLabel", // needs-dev-resume
++    "listOpenIssueRowsByLabel", // parked (#5319)
+   ];
+ 
+-  test("no UNKNOWN: EXACTLY five port reads, in the recorded order — the zero-added-reads guard", async () => {
++  test("no UNKNOWN: EXACTLY six port reads, in the recorded order — the zero-added-reads guard", async () => {
+     // The deleted "no Redis access in the PR-gate python block" case pinned
+     // the collector's zero-added-reads property at the bash seam; this
+     // restores that guard at the port seam — an added read (an extra gh call,
+     // a Redis touch through a second port) trips the count, and a reordered
+     // read trips the log.
+     const github = fakeGithub({ first: ok([{ number: 1, mergeStateStatus: "CLEAN", headRefName: "b1", body: "", labels: [] }]) });
+     await collectPrGate({ github, now: () => NOW_MS, sleep: async () => {}, ghListLimit: 100 });
+-    assert.equal(github.totalReads(), 5);
++    assert.equal(github.totalReads(), 6);
+     assert.deepEqual(github.readLog(), CLEAN_ORDER);
+   });
+ 
+-  test("one UNKNOWN: EXACTLY six reads — listOpenPrMergeStates second, after the sleep", async () => {
++  test("one UNKNOWN: EXACTLY seven reads — listOpenPrMergeStates second, after the sleep", async () => {
+     const github = fakeGithub({
+       first: ok([{ number: 2, mergeStateStatus: "UNKNOWN", headRefName: "b2", body: "", labels: [] }]),
+       repoll: ok([{ number: 2, mergeStateStatus: "CLEAN" }]),
+     });
+     const sleeps: string[] = [];
+     const logAtSleep: string[][] = [];
+     await collectPrGate({
+       github,
+       now: () => NOW_MS,
+       sleep: async (s) => {
+         sleeps.push(String(s));
+         logAtSleep.push([...github.readLog()]);
+       },
+       ghListLimit: 100,
+       env: { unknownRepollDelaySeconds: "0" },
+     });
+-    assert.equal(github.totalReads(), 6);
++    assert.equal(github.totalReads(), 7);
+     assert.deepEqual(github.readLog(), ["listOpenPrs", "listOpenPrMergeStates", ...CLEAN_ORDER.slice(1)]);
+     assert.deepEqual(sleeps, ["0"]);
+     assert.deepEqual(logAtSleep, [["listOpenPrs"]], "the re-poll read is issued after the delay elapses, not before it");
+   });
+ });
+ 
+ // ---------------------------------------------------------------------------
+ // 4. The CLI + port contract (new for the TS entry point)
+ // ---------------------------------------------------------------------------
+ 
+ describe("turn-snapshot CLI — fail-open contract (ADR-0043 D2)", () => {
+   test("usage errors exit 2 without output (turn.sh then applies the all-degraded snapshot)", async () => {
+     for (const argv of [
+       ["--collectors", "pr-gate"],
+       ["--collectors", "bogus", "--format", "values"],
+       ["--collectors", "pr-gate", "--format", "json"],
+       ["--collectors", "pr-gate", "--format", "kv"],
+       ["--format", "values"],
+       ["--gh-list-limit", "x", "--collectors", "pr-gate", "--format", "values"],
+     ]) {
+       let stdout = "";
+       let stderr = "";
+       const code = await main(argv, { github: fakeGithub({}), now: () => NOW_MS, sleep: async () => {} }, {
+         stdout: (t) => (stdout += t),
+         stderr: (t) => (stderr += t),
+@@ -1141,51 +1151,51 @@ describe("pr-gate — no-PR durable resume pick (issue #4808)", () => {
+     const pick = pickNoPrResume({
+       rows: [noprRow(4826, ["needs-qa"], 7000), noprRow(4827, ["needs-dev-resume"], null), noprRow(4828, ["needs-dev-resume"], 7000)],
+       inflightUnion: new Set<number>(),
+       nowSeconds: NOW_SECONDS,
+       quiescenceSeconds: 5400,
+     });
+     assert.equal(pick, 4828, "missing/unparseable updatedAt skips the ROW, not the read (INV-2)");
+   });
+ 
+   test("pickNoPrResume: never throws on empty inputs", () => {
+     assert.equal(pickNoPrResume({ rows: [], inflightUnion: new Set<number>(), nowSeconds: NOW_SECONDS, quiescenceSeconds: 5400 }), null);
+   });
+ 
+   /** The widened needs-dev-resume payload both parsers share (INV-3). */
+   const noprRowsJson = JSON.stringify([
+     { number: 4831, labels: [{ name: "needs-dev-resume" }, { name: "in-progress" }], updatedAt: isoSecondsAgo(7000) },
+     { number: 4830, labels: [{ name: "needs-dev-resume" }], updatedAt: isoSecondsAgo(7000) },
+     { number: 4826, labels: [{ name: "needs-dev-resume" }], updatedAt: isoSecondsAgo(7000) },
+     { number: 4832, labels: [{ name: "needs-dev-resume" }], updatedAt: isoSecondsAgo(100) },
+     { number: 4833, labels: [{ name: "needs-dev-resume" }] },
+   ]);
+ 
+   test("the needs-dev-resume read is widened in place — one listOpenIssueRowsByLabel call, parseDevResumeIssues output unchanged", async () => {
+     // No open PRs at all: the union is legitimately empty and the pick is the
+     // lowest quiescent, non-progress issue. runPrGate's own read-budget assert
+-    // (5 reads) + the CLEAN_ORDER guard pin INV-3's zero-added-reads property.
++    // (6 reads) + the CLEAN_ORDER guard pin INV-3's zero-added-reads property.
+     const r = await runPrGate([], { devResumeIssuesJson: noprRowsJson });
+     assert.equal(r.devResumeNoprAnchor, 4826);
+     assert.doesNotMatch(r.stderr, /#4808 INV-4/, "a healthy read must not emit the fail-closed note");
+   });
+ 
+   test("an issue referenced by any open PR is excluded from the collector pick too (INV-7)", async () => {
+     // PR 5001 closes #4826 (the lowest row) — the pick falls to 4830 while the
+     // #4518 pin simultaneously owns 4826 through the SAME widened read. The
+     // rollup is green on every required context so the #4518 arm's settled
+     // gate passes (greenRollup is scoped to the #4518 describe; same shape).
+     const green = REQUIRED.map((name) => ({
+       __typename: "CheckRun",
+       name,
+       status: "COMPLETED",
+       conclusion: "SUCCESS",
+       startedAt: isoSecondsAgo(7000),
+     }));
+     const pr = basePrGate({
+       number: 5001,
+       mergeStateStatus: "UNSTABLE",
+       headRefName: "worktree-agent-x-4826",
+       body: "Closes #4826",
+       statusCheckRollup: green,
+     });
+     const r = await runPrGate([pr], { devResumeIssuesJson: noprRowsJson });
+@@ -1390,54 +1400,54 @@ describe("pr-gate — QA-verdict recheck (#5052)", () => {
+       assert.equal(batch.length, 12);
+       assert.equal(new Set(batch).size, 12, "no duplicates within a window");
+       batch.forEach((n) => seen.add(n));
+     }
+     assert.equal(seen.has(30), true, "the highest-numbered candidate is evaluated even when 12 lower ones never merge");
+     assert.deepEqual(rotateQaRecheckBatch([1, 2, 3], 12, 999_999), [1, 2, 3]);
+   });
+ 
+   test("rotation does not alias with a fixed 5-minute turn cadence (n = 15/20/30/60)", () => {
+     for (const n of [15, 20, 30, 60]) {
+       const cands = Array.from({ length: n }, (_, i) => i + 1);
+       const seen = new Set<number>();
+       for (let turn = 0; turn < 60; turn++) {
+         rotateQaRecheckBatch(cands, 12, 1_700_000_000_000 + turn * 300_000).forEach((c) => seen.add(c));
+       }
+       assert.equal(seen.size, n, `every candidate reached at n=${n}`);
+     }
+   });
+ 
+   test("fail closed: a candidate with no host port yields [] plus a marker", async () => {
+     const o = await run([candidatePr(7)], { host: null });
+     assert.equal(o.value.qaVerdictRecheck.ok, false);
+     assert.ok(o.degraded.some((d) => d.field === "qaVerdictRecheck"));
+   });
+ 
+-  test("the five-read order is unchanged; only the open-PR read gains autoMergeRequest", async () => {
++  test("the read order is unchanged; only the open-PR read gains autoMergeRequest", async () => {
+     const github = fakeGithub({ first: ok([candidatePr(7)]), repoll: ok([]), required: ok(REQUIRED), resume: ok([]) });
+     await collectPrGate({ github, now: () => NOW_MS, sleep: async () => {}, ghListLimit: 100, host: passHost() });
+-    assert.equal(github.totalReads(), 5);
++    assert.equal(github.totalReads(), 6);
+     assert.ok(PR_GATE_PR_FIELDS.endsWith(",autoMergeRequest"));
+   });
+ 
+   test("prGateFallbackSnapshot carries the recheck degraded", () => {
+     assert.equal(prGateFallbackSnapshot(degradeDetail("x")).qaVerdictRecheck.ok, false);
+   });
+ });
+ 
+ // ---------------------------------------------------------------------------
+ // 4. A malformed payload degrades, never throws (#5084, the #4934 per-field contract)
+ // ---------------------------------------------------------------------------
+ 
+ /** Payloads no healthy `gh` read produces — every shape a typed fold must survive. */
+ const MALFORMED_READS: readonly GhJsonRead[] = [
+   { kind: "unparseable" },
+   ok(null),
+   ok(true),
+   ok(7),
+   ok("text"),
+   ok({ a: 1 }),
+   ok([null, 7, "x", true, [], {}]),
+   ok([
+     {
+       number: [1],
+       labels: null,
+@@ -1623,25 +1633,137 @@ describe("pr-gate - dirty fix-forward QA-FAIL-at-head predicate (issue #5253)",
+     for (const g of shapes) {
+       const { o } = await collect([dirtyPr(4775)], g);
+       assert.equal(o.value.dirtyFixFailPr, null);
+       assert.ok(o.notes.some((n) => n.includes("PR 4775") && n.includes("#5253")), `note for ${String(g)}`);
+     }
+   });
+ 
+   test("no dirty pick: the guard is never invoked", async () => {
+     const { o, calls } = await collect([basePrGate({ number: 4246 }) as unknown], guardJson("FAIL", true));
+     assert.equal(o.value.dirtyFixFailPr, null);
+     assert.deepEqual(calls, []);
+   });
+ 
+   test("two dirty PRs: the guard runs once, for the lowest-numbered pick only", async () => {
+     const { o, calls } = await collect([dirtyPr(4800), dirtyPr(4775)], guardJson("FAIL", true));
+     assert.deepEqual(calls, [4775]);
+     assert.equal(o.value.dirtyFixFailPr, 4775);
+   });
+ 
+   test("a dirty PR already carrying conflict-fix-attempted is not the pick: no guard run", async () => {
+     const { o, calls } = await collect([dirtyPr(4775, { labels: [{ name: "conflict-fix-attempted" }] })], guardJson("FAIL", true));
+     assert.equal(o.value.dirtyFixFailPr, null);
+     assert.deepEqual(calls, []);
+   });
+ });
++
++// ---------------------------------------------------------------------------
++// #5319 - autopilot skips parked work (ADR-0047 Decision 6)
++// ---------------------------------------------------------------------------
++
++describe("pr-gate — parked closing issue is skipped by every PR arm (#5319)", () => {
++  const green = REQUIRED.map((name) => ({ __typename: "CheckRun", name, status: "COMPLETED", conclusion: "SUCCESS", startedAt: isoSecondsAgo(7000) }));
++  const prFor = (n: number, closes: number, extra: Partial<PrGateOpenPr> = {}) =>
++    basePrGate({
++      number: n,
++      mergeStateStatus: "UNSTABLE",
++      headRefName: `worktree-agent-${n}`,
++      body: `Tier: 3 (core)\n\nCloses #${closes}`,
++      statusCheckRollup: green,
++      updatedAt: isoSecondsAgo(7200),
++      ...extra,
++    });
++  const RESUME_BOTH = { devResumeIssuesJson: JSON.stringify([{ number: 100 }, { number: 200 }]) };
++  const PARKED_100 = { parkedIssuesJson: JSON.stringify([{ number: 100 }]) };
++
++  test("a parked-closing PR is absent from the resume pick while its unparked sibling survives", async () => {
++    const prs = [prFor(11, 100), prFor(12, 200)];
++    const before = await runPrGate(prs, RESUME_BOTH);
++    assert.match(before.devResumePick, /^issue-100:11:/, "control: lowest PR wins when nothing is parked");
++    const after = await runPrGate(prs, { ...RESUME_BOTH, ...PARKED_100 });
++    assert.match(after.devResumePick, /^issue-200:12:/, "the parked PR is skipped, the sibling is picked");
++  });
++
++  test("dirty / behind / unchecked buckets and the dirty pin drop the parked PR only", async () => {
++    const dirty = (n: number, closes: number) => prFor(n, closes, { mergeStateStatus: "DIRTY" });
++    const behind = (n: number, closes: number) => prFor(n, closes, { mergeStateStatus: "BEHIND" });
++    const unchecked = (n: number, closes: number) => prFor(n, closes, { mergeStateStatus: "CLEAN", statusCheckRollup: [], createdAt: isoSecondsAgo(7200) });
++    const prs = [dirty(21, 100), dirty(22, 200), behind(23, 100), behind(24, 200), unchecked(25, 100), unchecked(26, 200)];
++    const base = await runPrGate(prs);
++    assert.deepEqual([base.dirty, base.behind, base.unchecked], [[21, 22], [23, 24], [25, 26]]);
++    assert.equal(base.dirtyForwardFix, "issue-100:21:worktree-agent-21", "control: the lowest dirty PR is pinned");
++    const r = await runPrGate(prs, PARKED_100);
++    assert.deepEqual(r.dirty, [22]);
++    assert.deepEqual(r.behind, [24]);
++    assert.deepEqual(r.unchecked, [26]);
++    assert.equal(r.dirtyForwardFix, "issue-200:22:worktree-agent-22", "the parked dirty PR is never pinned for conflict-fix");
++  });
++
++  test("red-resume drops a parked-closing red PR", async () => {
++    const red = REQUIRED.map((name, i) => ({ ...green[i], conclusion: i === 0 ? "FAILURE" : "SUCCESS" }));
++    const prs = [prFor(31, 100, { statusCheckRollup: red }), prFor(32, 200, { statusCheckRollup: red })];
++    assert.deepEqual((await runPrGate(prs)).redResume, [31, 32]);
++    assert.deepEqual((await runPrGate(prs, PARKED_100)).redResume, [32]);
++  });
++
++  test("the no-PR resume pick excludes a parked issue number directly", async () => {
++    const rows = JSON.stringify([
++      { number: 100, labels: [{ name: "needs-dev-resume" }], updatedAt: isoSecondsAgo(7000) },
++      { number: 301, labels: [{ name: "needs-dev-resume" }], updatedAt: isoSecondsAgo(7000) },
++    ]);
++    assert.equal((await runPrGate([], { devResumeIssuesJson: rows })).devResumeNoprAnchor, 100);
++    assert.equal((await runPrGate([], { devResumeIssuesJson: rows, ...PARKED_100 })).devResumeNoprAnchor, 301);
++  });
++
++  test("a Refs mention of a parked issue is NOT a closing ref: the PR keeps today's handling (INV-2)", async () => {
++    const pr = prFor(41, 200, { body: "Refs #100\n\nCloses #200", mergeStateStatus: "BEHIND" });
++    const r = await runPrGate([pr], PARKED_100);
++    assert.deepEqual(r.behind, [41]);
++  });
++
++  test("the recheck candidates never include a parked-closing PR", async () => {
++    const pr = (n: number, closes: number) => ({ ...prFor(n, closes, { mergeStateStatus: "CLEAN" }), autoMergeRequest: null });
++    const run = (parked: GhJsonRead) =>
++      collectPrGate({
++        github: fakeGithub({ first: ok([pr(51, 100), pr(52, 200)]), required: ok(REQUIRED), parked }),
++        now: () => NOW_MS,
++        sleep: async () => {},
++        ghListLimit: 100,
++        host: {
++          runQaVerdictEvent: async (n: number, tier: number) => ({ type: "qa-verdict", pr_number: n, tier, verdict: "PASS", verdict_sha: "a", head_sha: "ab", verdict_at_head: true }),
++        },
++      });
++    const open = await run(ok([]));
++    assert.deepEqual(open.value.qaVerdictRecheck.ok && open.value.qaVerdictRecheck.value.map((e) => e.pr), [51, 52]);
++    const skipped = await run(ok([{ number: 100 }]));
++    assert.deepEqual(skipped.value.qaVerdictRecheck.ok && skipped.value.qaVerdictRecheck.value.map((e) => e.pr), [52]);
++  });
++
++  test("an unreadable parked read fails the dispatch outputs closed with a parkedIssues marker; buckets stay open", async () => {
++    const prs = [prFor(61, 100), prFor(62, 200, { mergeStateStatus: "BEHIND" })];
++    const r = await runPrGate(prs, { ...RESUME_BOTH, parkedIssuesJson: "" });
++    assert.equal(r.devResumePick, "none");
++    assert.deepEqual(r.redResume, []);
++    assert.deepEqual(r.behind, [62], "informational buckets fail open exactly as today");
++    assert.match(r.stderr, /parked-issues read unusable/);
++    const o = await collectPrGate({
++      github: fakeGithub({ first: ok(prs), required: ok(REQUIRED), resume: ok([{ number: 100 }]), parked: EMPTY }),
++      now: () => NOW_MS,
++      sleep: async () => {},
++      ghListLimit: 100,
++    });
++    assert.ok(o.degraded.some((d) => d.field === "parkedIssues"));
++    assert.equal(o.value.parkedIssues.ok, false);
++    assert.equal(o.value.qaVerdictRecheck.ok, false);
++  });
++
++  test("an EMPTY-array parked read is a healthy empty set, not a degrade", async () => {
++    const o = await collectPrGate({
++      github: fakeGithub({ first: ok([prFor(71, 100)]), required: ok(REQUIRED), parked: ok([]) }),
++      now: () => NOW_MS,
++      sleep: async () => {},
++      ghListLimit: 100,
++    });
++    assert.ok(!o.degraded.some((d) => d.field === "parkedIssues"));
++    assert.equal(o.value.parkedIssues.ok, true);
++  });
++});

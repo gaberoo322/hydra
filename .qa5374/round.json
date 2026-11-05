@@ -1,0 +1,1 @@
+{"round":{"action":"bounce","round":2,"failRound":2,"reason":"FAIL round 2 of 3 — bounce to dev (the universal remediation loop)."},"deepQa":null,"passMarker":null,"escalationSummary":null,"labels":{"issueRemove":["needs-qa","ready-for-agent","needs-dev-resume","in-progress"],"issueAdd":["ready-for-human"],"prAdd":["ready-for-human"]},"failMarker":null,"degraded":[]}
