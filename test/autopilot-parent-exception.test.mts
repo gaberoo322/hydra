@@ -155,6 +155,17 @@ describe("decide.py - Fable instant-death replay (#5323)", () => {
     assert.ok(b.plan.reasons.includes("instant-death-unjoinable:dev_target"), b.plan.reasons.join());
   });
 
+  test("a signal class with no slot entry still replays on the recorded dispatch (INV-3)", () => {
+    const st = baseState({
+      slots: { dev_target: null },
+      last_dispatch_by_class: { retro_orch: { turn: 2, skill: "hydra-retro", prompt_args: {}, worktreeBranch: BRANCH } },
+    });
+    const { plan } = decide(st, [death({ slot: "retro_orch" })]);
+    const [d] = plan.actions.filter((a: any) => a.type === "dispatch" && a.slot === "retro_orch");
+    assert.ok(d, plan.reasons.join());
+    assert.equal(d.prompt_args.escalate_model, "opus");
+  });
+
   test("usage hard stop suppresses the replay with a named reason", () => {
     const st = baseState({ usage_eligibility: { allow: false, reasons: ["weekly"], shed: [] } });
     const { plan } = decide(st, [death()]);
@@ -164,7 +175,7 @@ describe("decide.py - Fable instant-death replay (#5323)", () => {
 
   test("an `inherit` class has no dispatch_model on the reap action", () => {
     const st = baseState({
-      slots: { dev_target: null, wayfinder_orch: { skill: "hydra-wayfinder", task_id: "abc123", started: "t0", started_epoch: 1, dispatch_id: BRANCH } },
+      slots: { dev_target: null },
       last_dispatch_by_class: { wayfinder_orch: { turn: 2, skill: "hydra-wayfinder", prompt_args: {}, worktreeBranch: BRANCH } },
     });
     const { plan } = decide(st, [death({ slot: "wayfinder_orch" })]);

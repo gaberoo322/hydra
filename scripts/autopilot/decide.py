@@ -2622,11 +2622,16 @@ def _rule_instant_death_replay(
         if not isinstance(rec, dict) or not rec.get("skill") or not rec.get("worktreeBranch"):
             out.reasons.append(f"instant-death-unjoinable:{cls}")
             continue
-        slot_obj = slots.get(cls)
-        slot_dispatch = slot_obj.get("dispatch_id") if isinstance(slot_obj, dict) else None
-        if not slot_dispatch or slot_dispatch != rec.get("worktreeBranch"):
-            out.reasons.append(f"instant-death-unjoinable:{cls}")
-            continue
+        # INV-3: the dispatch_id join applies only to a pipeline class (one
+        # with a `state.slots` entry). A signal class has no slot record
+        # (stamp-slot.py writes only `signal_last_fired`), so the recorded
+        # `last_dispatch_by_class` alone joins it.
+        if cls in slots:
+            slot_obj = slots.get(cls)
+            slot_dispatch = slot_obj.get("dispatch_id") if isinstance(slot_obj, dict) else None
+            if not slot_dispatch or slot_dispatch != rec.get("worktreeBranch"):
+                out.reasons.append(f"instant-death-unjoinable:{cls}")
+                continue
         prior_args = rec.get("prompt_args") if isinstance(rec.get("prompt_args"), dict) else {}
         if prior_args.get("prior_attempt_status") == "instant-death":
             out.reasons.append(f"instant-death-replay-exhausted:{cls}")
@@ -2639,7 +2644,7 @@ def _rule_instant_death_replay(
             continue
         try:
             prior_attempt = int(prior_args.get("attempt") or 1)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError):  # intentional: a non-numeric recorded attempt restarts the count at 1
             prior_attempt = 1
         args = dict(prior_args)
         args.update({
@@ -2782,7 +2787,7 @@ def _rule_escalation(
         slot_obj = slots.get(slot)
         try:
             prior_attempt = int(slot_obj.get("attempt")) if isinstance(slot_obj, dict) and slot_obj.get("attempt") is not None else 1
-        except (TypeError, ValueError):
+        except (TypeError, ValueError):  # intentional: a non-numeric recorded attempt restarts the count at 1
             prior_attempt = 1
         sat_signal = ESCALATION_SATURATION_SIGNAL.get(slot)
         board_saturated = bool(sat_signal and _signal_present(state, events, sat_signal))
