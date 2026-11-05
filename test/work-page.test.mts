@@ -514,8 +514,9 @@ function seamWith(rows: any[], over: any = {}) {
       pr: async () => ({ ok: false }),
     },
     journal: {
-      append: async (_repo: string, _n: number, e: any) => {
+      append: async (_repo: string, n: number, e: any, idx?: boolean) => {
         journal.push(e);
+        if (idx) holdExits.push({ n, e });
         return { ok: true };
       },
       expireOnClose: async () => ({ ok: true }),
@@ -523,10 +524,6 @@ function seamWith(rows: any[], over: any = {}) {
       closeClaim: async () => ({ ok: false, error: "n/a" }),
       persist: async (_repo: string, n: number) => {
         persisted.push(n);
-        return { ok: true };
-      },
-      recordHoldExit: async (_repo: string, n: number, e: any) => {
-        holdExits.push({ n, e });
         return { ok: true };
       },
     },
@@ -805,6 +802,20 @@ describe("POST /autopilot/board/close + /reopen — immediate-tier state writes"
     assert.equal(s.journal[0].to, "needs-triage");
     assert.equal(s.journal[0].source, "operator-route");
     assert.equal(s.journal[0].actor, "board:reopen");
+  });
+
+  test("reopen of an already-OPEN issue: idempotent ok with the observed state, no write and no journal", async () => {
+    const s = seamWith([issue({ number: 5, state: "OPEN", labels: ["needs-triage"] })]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
+    const handler = findHandler(router, "POST", "/autopilot/board/reopen");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler!(mockReq({ method: "POST", body: { issue: 5 } }), res);
+    assert.equal(res._body.ok, true);
+    assert.equal(res._body.verified.state, "OPEN");
+    assert.deepEqual(s.reopen.calls, []);
+    assert.deepEqual(s.persisted, []);
+    assert.equal(s.journal.length, 0);
   });
 
   test("malformed body (no issue) → 400 before any write", async () => {

@@ -125,6 +125,8 @@ interface RedisCommands {
     withscores: "WITHSCORES",
   ): Promise<string[]>;
   pipeline(commands?: unknown[][]): PipelineCommander;
+  /** Atomic MULTI/EXEC chain (same relaxed exec() typing as pipeline). */
+  multi(): PipelineCommander;
   mget(...keys: RedisKey[]): Promise<(string | null)[]>;
   // EventEmitter surface, also dropped by the aggregate compile; used by the
   // one-shot Turn Snapshot CLI to route connection errors (#4933).

@@ -31,6 +31,7 @@ import {
   type SeamDeps,
   type LifecycleMode,
 } from "../src/lifecycle/index.ts";
+import { isUnsanctionedHoldExit } from "../src/lifecycle/hold-exit.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
 
 function gi(over: Partial<GateInput> = {}): GateInput {
@@ -443,7 +444,11 @@ function operatorHarness(labels: string[], mode: LifecycleMode, opts: { state?: 
     return { ok: true };
   };
   h.deps.journal.persist = async (_r, i) => { persisted.push(i); return { ok: true }; };
-  h.deps.journal.recordHoldExit = async (_r, i, e) => { indexed.push({ issue: i, e }); return { ok: true }; };
+  h.deps.journal.append = async (_r, i, e, idx) => {
+    h.journal.push(e);
+    if (idx) indexed.push({ issue: i, e });
+    return { ok: true };
+  };
   return { h, indexed, persisted, reopens };
 }
 
@@ -537,13 +542,14 @@ describe("operatorReopen (#5313 INV-8)", () => {
     assert.equal(o.h.journal[0].source, "operator-route");
   });
 
-  test("reopening an already-OPEN issue is refused issue-not-closed with no write, persist or transition journal", async () => {
+  test("reopening an already-OPEN issue is idempotent ok with the observed state: no write, persist or journal", async () => {
     const o = operatorHarness(["needs-triage"], "enforce");
     const res = await operatorReopen({ issue: 10, actor: "board:reopen" }, o.h.deps);
-    assert.equal((res as any).code, "issue-not-closed");
+    assert.equal(res.ok, true);
+    assert.equal((res as any).observed.state, "OPEN");
     assert.deepEqual(o.reopens, []);
     assert.deepEqual(o.persisted, []);
-    assert.equal(o.h.journal.some((e) => e.kind === "transition"), false);
+    assert.equal(o.h.journal.length, 0);
   });
 
   test("a reopen the re-read does not confirm is write-unverified", async () => {
@@ -551,6 +557,35 @@ describe("operatorReopen (#5313 INV-8)", () => {
     o.h.deps.reopen = async () => ({ ok: true });
     const res = await operatorReopen({ issue: 10, actor: "board:reopen" }, o.h.deps);
     assert.equal((res as any).code, "write-unverified");
+  });
+});
+
+describe("shadow-mode CLI human-hold exit (#5313 round 3)", () => {
+  test("a shadow-journaled refused+written exit from a hold state is indexed via the single append point", async () => {
+    const o = operatorHarness([], "shadow");
+    const shadowExit: LifecycleJournalEntry = {
+      v: 1, ts: 5, kind: "refused", from: "parked", to: "ready-for-agent", source: "cli",
+      actor: "cli", evidence: {}, reason: null, rationale: null, result: "shadow-would-refuse:illegal-transition", written: true,
+    };
+    assert.equal(isUnsanctionedHoldExit(shadowExit), true);
+    await journalEntry(o.h.deps, 10, shadowExit);
+    assert.equal(o.indexed.length, 1);
+    assert.equal(o.indexed[0].e, shadowExit);
+  });
+
+  test("sibling: advance() from a hold state is refused human-hold-exit with written:false in shadow, and is NOT indexed", async () => {
+    const o = operatorHarness(["parked", "enhancement"], "shadow");
+    const res = await advance({ issue: 10, to: "ready-for-agent" }, o.h.deps);
+    assert.equal(res.ok, false);
+    assert.equal(o.h.journal.at(-1)!.written, false);
+    assert.equal(o.indexed.length, 0);
+  });
+
+  test("sibling: a refused entry that wrote nothing, or left a non-hold state, is not an unsanctioned exit", () => {
+    const e = { kind: "refused" as const, written: false, source: "cli" as const, from: "parked", to: "ready-for-agent" };
+    assert.equal(isUnsanctionedHoldExit(e), false);
+    assert.equal(isUnsanctionedHoldExit({ ...e, written: true, from: "needs-triage" }), false);
+    assert.equal(isUnsanctionedHoldExit({ ...e, written: true, source: "operator-route" as const }), false);
   });
 });
 

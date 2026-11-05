@@ -41,7 +41,6 @@ import {
   expireJournalOnClose,
   openDispatchClaim,
   persistJournal,
-  recordHoldExit,
   readDispatchClaim,
   readLifecycleJournal,
   type CloseClaimResult,
@@ -177,14 +176,14 @@ export interface SeamDeps {
     qaLive?: (prNumber: number) => Promise<Fetched<QaLivePr>>;
   };
   journal: {
-    append: (repo: string, issue: number, entry: LifecycleJournalEntry) => Promise<JournalWriteResult>;
+    /** `indexHoldExit` joins the hold-exit index write into the append's one MULTI (#5313). */
+    append: (repo: string, issue: number, entry: LifecycleJournalEntry, indexHoldExit?: boolean) => Promise<JournalWriteResult>;
     expireOnClose: (repo: string, issue: number) => Promise<JournalWriteResult>;
     openClaim: (repo: string, issue: number, claim: DispatchClaim) => Promise<OpenClaimResult>;
     closeClaim: (repo: string, issue: number, expectedDispatchId: string) => Promise<CloseClaimResult>;
     /** Drop the close-retention clock on reopen (operatorReopen only). */
     persist?: (repo: string, issue: number) => Promise<JournalWriteResult>;
     /** Index an unsanctioned human-hold exit for the attention feed (#5313). */
-    recordHoldExit?: (repo: string, issue: number, entry: LifecycleJournalEntry) => Promise<JournalWriteResult>;
     read: (repo: string, issue: number) => Promise<ReadJournalResult>;
     readClaim: (repo: string, issue: number) => Promise<ReadClaimResult>;
   };
@@ -401,7 +400,6 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
       openClaim: openDispatchClaim,
       closeClaim: closeDispatchClaim,
       persist: persistJournal,
-      recordHoldExit,
       read: readLifecycleJournal,
       readClaim: readDispatchClaim,
     },
@@ -581,14 +579,9 @@ function entry(
  * human-hold exit is also indexed for the attention feed (#5313).
  */
 export async function journalEntry(deps: SeamDeps, issue: number, e: LifecycleJournalEntry): Promise<void> {
-  const res = await deps.journal.append(deps.repo, issue, e);
+  const res = await deps.journal.append(deps.repo, issue, e, isUnsanctionedHoldExit(e));
   if (res.ok === false) {
     logger.error({ issue, error: res.error }, "[lifecycle] journal append failed");
-    return;
-  }
-  if (deps.journal.recordHoldExit && isUnsanctionedHoldExit(e)) {
-    const idx = await deps.journal.recordHoldExit(deps.repo, issue, e);
-    if (idx.ok === false) logger.error({ issue, error: idx.error }, "[lifecycle] hold-exit index failed");
   }
 }
 const journal = journalEntry;
@@ -888,7 +881,19 @@ export async function operatorReopen(
 
   const before = await deps.view(issue);
   if (before.ok === false) return fail("fetch-failed", null, false);
-  if (before.row.state !== "CLOSED") return fail("issue-not-closed", null, false);
+  if (before.row.state !== "CLOSED") {
+    // Reopening an already-OPEN issue stays idempotent (the pre-seam spine
+    // accepted it): ok with the observed state, no write, no persist, no journal.
+    const open = stateLabelsOf(before.row.labels);
+    return {
+      ok: true,
+      issue,
+      from: open.length > 0 ? open.join(",") : null,
+      to: (open[0] ?? "needs-triage") as LifecycleState,
+      mode,
+      observed: observedOf(before),
+    };
+  }
   if (!deps.reopen) return fail("write-failed:no-reopen", "closed", false);
   const write = await deps.reopen(issue);
   if (write.ok === false) return fail(`write-failed:${write.code}`, "closed", false);
