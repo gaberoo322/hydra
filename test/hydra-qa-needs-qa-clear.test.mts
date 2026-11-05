@@ -116,7 +116,7 @@ describe("hydra-qa playbook clears needs-qa on every verdict (issue #638)", () =
       );
     });
 
-    test("a refused advance reaches a deterministic exit and never falls back to a direct label edit (issue #5317 INV-9, round 3)", () => {
+    test("a refused advance exits non-zero and never falls back to a direct label edit (issue #5317 INV-9)", () => {
       assert.match(block, /^qa_pass_advance\b/m, "PASS routes through the one wrapper");
       const helper = playbook.slice(playbook.indexOf("qa_pass_advance() {"), playbook.indexOf("# Resolve to a SHA so a concurrent push"));
       assert.match(helper, /qa_advance \$issue_number qa-passed --evidence pr=\$pr_number --actor hydra-qa/);
