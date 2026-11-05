@@ -3,10 +3,10 @@
  * runs `reap.py wait-or-reap <slot> <task_id>` (transcript-mtime liveness,
  * final-usage token read, reap through run_completion).
  */
-import test, { describe } from "node:test";
+import test, { describe, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, utimesSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, utimesSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -17,8 +17,14 @@ const PLAYBOOK = join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.
 const DEAD_API_BASE = "http://127.0.0.1:1";
 const TASK = "a5282deadbeef0001";
 
+const scratchDirs: string[] = [];
+after(() => {
+  for (const d of scratchDirs) rmSync(d, { recursive: true, force: true });
+});
+
 function setup(opts: { transcript?: { ageSec: number }; slotAgeSec?: number }) {
   const dir = mkdtempSync(join(tmpdir(), "wait-or-reap-"));
+  scratchDirs.push(dir);
   const state = join(dir, "state.json");
   const log = join(dir, "nightly.log");
   const projects = join(dir, "projects");
@@ -113,7 +119,7 @@ describe("reap.py wait-or-reap (issue #5282)", () => {
     assert.equal(readState(e.state).slots.dev_orch, null);
   });
 
-  test("transcript with no readable usage line: tokens=0 with distinct token_source=transcript-no-usage", () => {
+  test("transcript with no readable usage line: tokens=0 with token_source=unknown", () => {
     const e = setup({ transcript: { ageSec: 5000 } });
     const f = join(e.projects, "-home-x", "sess-uuid", "subagents", `agent-${TASK}.jsonl`);
     writeFileSync(f, "not json {\n");
@@ -121,7 +127,7 @@ describe("reap.py wait-or-reap (issue #5282)", () => {
     utimesSync(f, t, t);
     const r = run(e, ["wait-or-reap", "dev_orch", TASK]);
     assert.equal(r.status, 0);
-    assert.match(r.stdout, /verdict=reaped .*tokens=0 token_source=transcript-no-usage/);
+    assert.match(r.stdout, /verdict=reaped .*tokens=0 token_source=unknown/);
     assert.equal(readState(e.state).slots.dev_orch, null);
   });
 
@@ -132,7 +138,43 @@ describe("reap.py wait-or-reap (issue #5282)", () => {
     symlinkSync(join(e.dir, "does-not-exist"), join(sub, `agent-${TASK}.jsonl`));
     const r = run(e, ["wait-or-reap", "dev_orch", TASK]);
     assert.equal(r.status, 0);
-    assert.match(r.stdout, /verdict=reaped slot=dev_orch/);
+    assert.match(r.stdout, /verdict=reaped slot=dev_orch .*transcript_age_s=stat-failed tokens=0 token_source=unknown/);
+    assert.equal(readState(e.state).slots.dev_orch, null);
+  });
+
+  test("stat() failure past the wedge threshold but readable transcript: final usage still read, age=stat-failed", () => {
+    const e = setup({ slotAgeSec: 7200, transcript: { ageSec: 5000 } });
+    const harness = [
+      "import sys, pathlib",
+      `sys.path.insert(0, ${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot"))})`,
+      "import reap",
+      "real = pathlib.Path.stat",
+      "def fake(self, *a, **k):",
+      "    if self.name.startswith('agent-') and self.suffix == '.jsonl':",
+      "        raise OSError('injected')",
+      "    return real(self, *a, **k)",
+      "reap._find_child_transcript = lambda tid: next(reap._projects_root().glob(f'*/*/subagents/agent-{tid}.jsonl'))",
+      "pathlib.Path.stat = fake",
+      "sys.exit(reap.main(['reap.py', 'wait-or-reap', 'dev_orch', sys.argv[1]]))",
+    ].join("\n");
+    const r = spawnSync("python3", ["-c", harness, TASK], {
+      env: {
+        ...process.env,
+        HYDRA_API_BASE: DEAD_API_BASE,
+        HYDRA_BASE_URL: DEAD_API_BASE,
+        HYDRA_AUTOPILOT_STATE: e.state,
+        HYDRA_AUTOPILOT_LOG: e.log,
+        HYDRA_CLAUDE_PROJECTS_ROOT: e.projects,
+        HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+        GH_TOKEN: "invalid-test-token",
+        HYDRA_REAP_WORKTREE_GC: "0",
+        HYDRA_AUTOPILOT_REDIS_CLI: "true",
+        HYDRA_AUTOPILOT_GH_CLI: "false",
+      },
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /verdict=reaped .*transcript_age_s=stat-failed tokens=4137 token_source=transcript-final-usage/);
     assert.equal(readState(e.state).slots.dev_orch, null);
   });
 

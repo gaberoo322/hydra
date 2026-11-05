@@ -34,12 +34,13 @@ Modes:
                 nothing, prints `wait_or_reap verdict=live ...`. DEAD (older,
                 or no transcript): calls run_completion with tokens = the
                 LAST usage line's context total (never the summed per-turn
-                usage); 0 with token_source=transcript-no-usage when the
-                transcript has no readable usage line, token_source=unknown
-                when there is no transcript. A stat() failure on a found
-                transcript is verdict=unknown (no reap) while the slot has
-                been occupied < subagent_max_wall_seconds, BOUNDED: past that
-                threshold (or env override) it falls through to DEAD.
+                usage); 0 with token_source=unknown when the transcript has
+                no readable usage line or there is no transcript. A stat()
+                failure on a found transcript is verdict=unknown (no reap)
+                while the slot has been occupied < subagent_max_wall_seconds,
+                BOUNDED: past that threshold (or env override) it falls
+                through to DEAD, still reading the final usage line and
+                logging transcript_age_s=stat-failed.
 
   completion  — Idempotent completion reap (issue #411).
                 Records the dispatched subagent's final token count once
@@ -2292,6 +2293,7 @@ def run_wait_or_reap(slot: str, task_id: str) -> int:
         return 0
     transcript = _find_child_transcript(task_id)
     age: int | None = None
+    stat_failed = False
     if transcript is not None:
         try:
             age = max(0, int(time.time() - transcript.stat().st_mtime))
@@ -2310,7 +2312,7 @@ def run_wait_or_reap(slot: str, task_id: str) -> int:
                 print(f"[autopilot] {msg}")
                 _append_log(msg)
                 return 0
-            transcript = None  # DEAD: unreadable past the wedge threshold
+            stat_failed = True  # DEAD: unreadable mtime past the wedge threshold
             print(
                 f"[autopilot] wait-or-reap: stat failure persisted past "
                 f"{max_wall}s slot occupancy; treating as DEAD",
@@ -2328,12 +2330,11 @@ def run_wait_or_reap(slot: str, task_id: str) -> int:
         final = _final_usage_context_total(transcript)
         if final is not None:
             tokens, source = final, "transcript-final-usage"
-        else:
-            source = "transcript-no-usage"
+        # No readable usage line: tokens=0, token_source stays "unknown".
     s = load_state()
     slot_obj = ((s or {}).get("slots") or {}).get(slot)
     skill = slot_obj.get("skill") if isinstance(slot_obj, dict) else None
-    age_s = str(age) if age is not None else "missing"
+    age_s = "stat-failed" if stat_failed else (str(age) if age is not None else "missing")
     msg = (
         f"wait_or_reap verdict=reaped slot={slot} task_id={task_id} "
         f"transcript_age_s={age_s} tokens={tokens} token_source={source}"
