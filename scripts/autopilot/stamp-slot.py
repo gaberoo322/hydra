@@ -151,9 +151,16 @@ def plan_claim(state: dict, plan: dict, slot: str) -> dict:
         return {"claim": "skipped", "reason": "target-scope"}
     if slot not in (state.get("slots") or {}):
         return {"claim": "skipped", "reason": "signal-class"}
+    # Only dev_* / qa_* classes have a reap-side release (reap.claim_release_outcome):
+    # any other pipeline class would leak a no-TTL claim (INV-6).
+    if not (slot.startswith("dev_") or slot.startswith("qa_")):
+        return {"claim": "skipped", "reason": "no-release-role"}
     prompt_args = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
     anchor = prompt_args.get("anchor")
     m = _ISSUE_ANCHOR_RE.match(anchor) if isinstance(anchor, str) else None
+    if m is None and slot.startswith("qa_"):
+        # A pinned qa dispatch carries the issue as prompt_args.issue (int, "N", "#N" or "issue-N").
+        m = re.match(r"^(\d+)$", re.sub(r"\D", "", str(prompt_args.get("issue") or "")))
     if m is None:
         return {"claim": "skipped", "reason": "unpinned"}
     run_id = str(state.get("run_id") or "")
@@ -223,6 +230,17 @@ def run_claim(slot: str) -> int:
     out = (proc.stdout or "").strip()
     last = out.splitlines()[-1] if out else json.dumps({"ok": False, "code": "no-output"})
     print(last)
+    try:
+        parsed = json.loads(last)
+    except ValueError:
+        parsed = None
+    # Fail closed (INV-3, INV-11): exit 0 is not enough, the seam must report ok:true.
+    if proc.returncode == 0 and not (isinstance(parsed, dict) and parsed.get("ok") is True):
+        print(
+            f"[stamp-slot] claim result unusable issue=#{spec['issue']} dispatch={spec['dispatch_id']}: {last}",
+            file=sys.stderr,
+        )
+        return 1
     if proc.returncode != 0:
         print(
             f"[stamp-slot] claim refused issue=#{spec['issue']} dispatch={spec['dispatch_id']} "

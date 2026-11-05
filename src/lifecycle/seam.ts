@@ -935,6 +935,8 @@ export type DispatchResult =
       claim: DispatchClaim;
       /** The `-> in-progress` advance; `null` for a label-free (qa / other) claim or an already-in-progress issue. */
       advanced: AdvanceResult | null;
+      /** Set when a dev claim was opened but no advance fired (zero/multiple/non-dispatchable state labels). */
+      advanceSkipped?: "non-dispatchable-state";
       /** Set in shadow when the advance would have been refused in enforce. */
       wouldRefuse?: string;
       /** Set in shadow when a cap check would have parked the issue in enforce. */
@@ -995,7 +997,11 @@ export async function dispatch(input: DispatchInput, deps: SeamDeps): Promise<Di
   }
   const labels = stateLabelsOf(view.row.labels);
   if (labels.length !== 1 || !DISPATCHABLE_STATES.includes(labels[0])) {
-    return { ok: true, claim: opened.claim, advanced: null, ...parkNote };
+    logger.warn(
+      { issue, dispatchId: input.dispatchId, labels },
+      "[lifecycle] dev claim opened without an advance: issue not in a single dispatchable state",
+    );
+    return { ok: true, claim: opened.claim, advanced: null, advanceSkipped: "non-dispatchable-state", ...parkNote };
   }
   const adv = await advance(
     { issue, to: "in-progress", evidence: { dispatch: input.dispatchId, class: input.class, run: input.run }, actor },

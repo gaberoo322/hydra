@@ -104,6 +104,16 @@ describe("dispatch composite verb (INV-1)", () => {
     assert.equal(res.ok && res.advanced, null);
   });
 
+  test("dev claim on a non-dispatchable state label returns advanceSkipped (sibling: a single dispatchable label has none)", async () => {
+    const w = world("enforce", ["in-progress"]);
+    const res = await dispatch(input(), w.deps);
+    assert.equal(res.ok, true);
+    assert.equal(res.ok && res.advanced, null);
+    assert.equal(res.ok && res.advanceSkipped, "non-dispatchable-state");
+    const ok = await dispatch(input({ dispatchId: "d2" }), world("enforce", ["ready-for-agent"]).deps);
+    assert.equal(ok.ok && ok.advanceSkipped, undefined);
+  });
+
   test("enforce refusal releases the claim BEFORE returning (the claim never outlives a refused dispatch)", async () => {
     const w = world("enforce", ["ready-for-agent", "needs-design-concept"], { exists: true, status: "draft", artifactHash: "h" });
     const res = await dispatch(input(), w.deps);
@@ -298,6 +308,43 @@ describe("stamp-slot.py claim (INV-3, INV-4)", () => {
       assert.equal(r.status, 0, name);
       assert.deepEqual(JSON.parse(r.stdout), { claim: "skipped", reason }, name);
       assert.equal(r.argv, "", `${name}: seam must not be called`);
+    }
+  });
+
+  test("INV-6: non-dev/qa pinned classes open no claim (reap would never release it)", () => {
+    for (const slot of ["design_concept_orch", "research_orch", "tickets_orch"]) {
+      const r = claimRun({ ...SLOTS, [slot]: null }, { prompt_args: { anchor: "issue-9" } }, slot);
+      assert.equal(r.status, 0, slot);
+      assert.deepEqual(JSON.parse(r.stdout), { claim: "skipped", reason: "no-release-role" }, slot);
+      assert.equal(r.argv, "", slot);
+    }
+  });
+
+  test("a pinned qa_orch dispatch reads prompt_args.issue and opens a claim", () => {
+    for (const issue of [77, "77", "#77", "issue-77"]) {
+      const r = claimRun(SLOTS, { worktreeBranch: "b", prompt_args: { issue } }, "qa_orch");
+      assert.equal(r.status, 0, String(issue));
+      assert.match(r.argv, /dispatch 77 --dispatch b --class qa_orch/, String(issue));
+    }
+  });
+
+  test("fail closed: seam exit 0 with silent or non-JSON or ok:false output exits 1", () => {
+    for (const body of ["true", "echo not-json", "echo '{\"ok\":false}'"]) {
+      const dir = mkdtempSync(join(tmpdir(), "stamp-claim-"));
+      const statePath = join(dir, "state.json");
+      const planPath = join(dir, "plan.json");
+      writeFileSync(statePath, JSON.stringify({ run_id: "abcdef12-0000", turn: 3, slots: SLOTS }));
+      writeFileSync(planPath, JSON.stringify({ actions: [{ type: "dispatch", slot: "dev_orch", worktreeBranch: "b", prompt_args: { anchor: "issue-5" } }] }));
+      const bin = join(dir, "bin");
+      spawnSync("mkdir", ["-p", bin]);
+      writeFileSync(join(bin, "npx"), `#!/bin/sh\n${body}\nexit 0\n`);
+      chmodSync(join(bin, "npx"), 0o755);
+      const r = spawnSync("python3", ["-I", STAMP, "claim", "dev_orch"], {
+        env: { PATH: `${bin}:${process.env.PATH}`, HYDRA_AUTOPILOT_STATE: statePath, HYDRA_AUTOPILOT_PLAN: planPath, HOME: process.env.HOME ?? "" },
+        encoding: "utf8",
+      });
+      assert.equal(r.status, 1, `body=${JSON.stringify(body)}`);
+      assert.match(r.stderr, /claim result unusable/);
     }
   });
 
