@@ -68,7 +68,15 @@ export {
   type CapSource,
   type CapUnit,
 } from "./caps.ts";
-export { classifyQaPassedExit, gateQaExit, type QaExitTarget, type QaLivePr } from "./gates.ts";
+export {
+  classifyQaPassedExit,
+  classifyQaVerdictTarget,
+  gateQaExit,
+  gateQaVerdict,
+  type QaExitTarget,
+  type QaLivePr,
+  type QaVerdictTarget,
+} from "./gates.ts";
 export { externalMoves, lastKnownState, replayStateSnapshots } from "./timeline.ts";
 export {
   isZeroStateExempt,

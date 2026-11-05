@@ -157,8 +157,38 @@ if [ "${#STALE_IN_PROGRESS[@]}" -gt 0 ] || [ "${#STALE_BLOCKED[@]}" -gt 0 ]; the
   fi
 fi
 
+# Live-state guard (issue #5317, ADR-0047 D2). The stale lists come from a Turn
+# Snapshot STORED at turn start and read one turn later, so an issue listed as
+# stale `in-progress` may since have moved on — notably QA PASS lands it in
+# `qa-passed`. An unconditional relabel would then write a second state label
+# (`needs-qa` next to `qa-passed`) and restart the PASS -> in-progress -> needs-qa
+# bounce. So re-read the issue's labels immediately before each write and act
+# only when its state-label set is EXACTLY the one the snapshot listed. An
+# unreadable read skips (never writes). The state names mirror OPEN_STATES in
+# src/lifecycle/transitions.ts.
+LIFECYCLE_STATE_LABELS="needs-triage needs-info needs-research hitl-grill needs-tickets ready-for-agent blocked in-progress needs-dev-resume needs-qa qa-passed ready-for-human parked"
+live_state_labels() {
+  local raw s out=""
+  raw=$(gh issue view "$1" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null) || return 1
+  for s in $LIFECYCLE_STATE_LABELS; do
+    if printf '%s\n' "$raw" | grep -Fxq -- "$s"; then out="${out:+$out,}$s"; fi
+  done
+  printf '%s' "$out"
+}
+# live_state_is ISSUE STATE → 0 only when the live state-label set is exactly STATE.
+live_state_is() {
+  local live
+  live=$(live_state_labels "$1") || { echo "[autopilot] recover-stale: skip issue=$1 (live label read failed)"; return 1; }
+  if [ "$live" != "$2" ]; then
+    echo "[autopilot] recover-stale: skip issue=$1 (live state '${live:-none}' != listed '$2')"
+    return 1
+  fi
+  return 0
+}
+
 for ISSUE in "${STALE_IN_PROGRESS[@]:-}"; do
   [ -z "$ISSUE" ] && continue
+  live_state_is "$ISSUE" in-progress || continue
   if inflight_contains "$INFLIGHT_PR_ISSUES" "$ISSUE"; then
     # An open PR already references this issue → awaiting review, not stalled.
     if gh issue edit "$ISSUE" --repo "$REPO" --remove-label in-progress --add-label needs-qa 2>/dev/null; then
@@ -222,6 +252,7 @@ if [ "${#CANDIDATES[@]}" -gt 0 ]; then
         echo "[autopilot] recover-stale: skip malformed blockers-cleared line (issue='$ISSUE')"
         continue
       fi
+      live_state_is "$ISSUE" blocked || continue
       if inflight_contains "$INFLIGHT_PR_ISSUES" "$ISSUE"; then
         # An open PR already references it: awaiting review, never ready-for-agent.
         if gh issue edit "$ISSUE" --repo "$REPO" --remove-label blocked --add-label needs-qa 2>/dev/null; then

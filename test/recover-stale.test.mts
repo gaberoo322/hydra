@@ -58,6 +58,8 @@ interface FakeIssue {
   number: number;
   state: "OPEN" | "CLOSED";
   body: string;
+  /** Live labels served to the #5317 live-state guard; unset = still in the listed state. */
+  labels?: string[];
 }
 
 interface FakePr {
@@ -145,6 +147,11 @@ def cmd_view(rest):
         sys.stdout.write(hit["body"] + "\\n")
     elif json_field == "state":
         sys.stdout.write(hit["state"] + "\\n")
+    elif json_field == "labels":
+        # Live-state guard (#5317): per-issue labels, defaulting to the state the
+        # suite's lists name (an unset field = still in the listed state).
+        for name in hit.get("labels", ["in-progress"]):
+            sys.stdout.write(name + "\\n")
     else:
         sys.stderr.write(f"stub: unsupported --json {json_field}\\n")
         sys.exit(99)
@@ -398,6 +405,55 @@ describe("recover-stale.sh — open-PR guard on stale in-progress (issue #3852)"
         "ready-for-agent",
         "a PR referencing another issue must not route this one to needs-qa",
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("recover-stale.sh — live-state guard (issue #5317)", () => {
+  test("listed as stale in-progress but live qa-passed + open PR → zero edits", () => {
+    const dir = mkdtempSync(join(tmpdir(), "recover-stale-livestate-"));
+    try {
+      const stub = makeGhStub(
+        dir,
+        [{ number: 960, state: "OPEN", body: "x", labels: ["qa-passed", "enhancement"] }],
+        [{ headRefName: "issue-960-thing", body: "Closes #960" }],
+      );
+      const r = runRecoverStale(stub.binDir, ["stale_in_progress", "960"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(stub.readEdits(), [], "a qa-passed issue must never be edited");
+      assert.match(r.stdout, /skip issue=960 \(live state 'qa-passed' != listed 'in-progress'\)/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a live double-state set (in-progress + needs-qa) is not the listed state → skipped", () => {
+    const dir = mkdtempSync(join(tmpdir(), "recover-stale-livestate-"));
+    try {
+      const stub = makeGhStub(
+        dir,
+        [{ number: 961, state: "OPEN", body: "x", labels: ["in-progress", "needs-qa"] }],
+        [],
+      );
+      const r = runRecoverStale(stub.binDir, ["stale_in_progress", "961"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(stub.readEdits(), []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unreadable live label read skips (never writes)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "recover-stale-livestate-"));
+    try {
+      // Issue 962 is absent from the stub's table, so `gh issue view 962` exits 1.
+      const stub = makeGhStub(dir, [{ number: 1, state: "OPEN", body: "x" }], []);
+      const r = runRecoverStale(stub.binDir, ["stale_in_progress", "962"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(stub.readEdits(), []);
+      assert.match(r.stdout, /live label read failed/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

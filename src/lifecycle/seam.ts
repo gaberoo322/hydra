@@ -305,9 +305,20 @@ export async function fetchQaLive(repo: string, prNumber: number): Promise<Fetch
     }
     const bodies = (list: unknown): string[] =>
       Array.isArray(list) ? list.map((c) => String((c as { body?: unknown } | null)?.body ?? "")) : [];
+    // Comments carry `createdAt`, reviews `submittedAt`; an unparseable time is null (never post-dated).
+    const timed = (list: unknown, field: string): { body: string; createdAtMs: number | null }[] =>
+      Array.isArray(list)
+        ? list.map((c) => {
+            const rec = c as Record<string, unknown> | null;
+            const raw = rec?.[field];
+            const t = typeof raw === "string" ? Date.parse(raw) : Number.NaN;
+            return { body: String(rec?.body ?? ""), createdAtMs: Number.isNaN(t) ? null : t };
+          })
+        : [];
     return {
       ok: true,
       value: {
+        timedBodies: [...timed(d.comments, "createdAt"), ...timed(d.reviews, "submittedAt")],
         number: d.number,
         state: d.state.toUpperCase(),
         isDraft: d.isDraft === true,
@@ -423,7 +434,8 @@ async function checkCaps(
     const entries = journalRead.ok ? journalRead.entries : [];
     const journalFailed = journalRead.ok === false;
     let timeline: TimelineLabelEvent[] | null = null;
-    if (isJournalMiss(entries, resetMs, journalFailed)) {
+    // The qa-fail arm is trailer-sourced: the journal/timeline arms cannot park it.
+    if (attempt.kind !== "qa-fail" && isJournalMiss(entries, resetMs, journalFailed)) {
       const t = await deps.fetch.timeline(issue);
       if (t.ok === false) return { status: "skipped" };
       timeline = t.value;
@@ -611,6 +623,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
   // 3b. cap check (ADR-0047 D6): the in-progress -> ready-for-agent edge IS the stale
   //     re-queue. Over cap in enforce the seam parks INSTEAD of writing ready-for-agent.
   let shadowOver: NonNullable<CapEvaluation["over"]> | null = null;
+  let shadowOverPr: number | null = null;
   if (stateLabels.length === 1 && from === "in-progress" && to === "ready-for-agent") {
     const check = await checkCaps(deps, issue, { kind: "requeue" }, null);
     stamp = new CapStamp(check);
@@ -632,6 +645,38 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
         return { ok: false, issue, code: `parked:${over.arm}`, mode, written: park.written };
       }
       shadowOver = over;
+    }
+  }
+
+  // 3c. cap check (ADR-0047 D6, #5317): a reviewed QA FAIL bouncing `needs-qa ->
+  //     needs-dev-resume` runs the trailer-sourced `qa-fail-rounds` arm. The
+  //     verdict comment (this round's trailer) is already posted, so a 3rd
+  //     reviewed FAIL counts 3 >= 3 and, in enforce, parks INSTEAD of bouncing.
+  if (stateLabels.length === 1 && from === "needs-qa" && to === "needs-dev-resume") {
+    const prNumber = parsePrEvidence(gateEvidence);
+    if (prNumber !== null && prNumber > 0) {
+      const check = await checkCaps(deps, issue, { kind: "qa-fail", pr: prNumber }, prNumber);
+      stamp = new CapStamp(check);
+      const over = check.status === "checked" ? check.evaluation.over : null;
+      if (check.status === "checked" && over !== null) {
+        if (mode === "enforce") {
+          const park = await parkForCap(
+            {
+              issue,
+              from,
+              over,
+              counts: check.evaluation.counts,
+              pr: prNumber,
+              actor: input.actor,
+              evidence: stamp.extra(parkEntryProbe(deps, over)),
+            },
+            deps,
+          );
+          return { ok: false, issue, code: `parked:${over.arm}`, mode, written: park.written };
+        }
+        shadowOver = over;
+        shadowOverPr = prNumber;
+      }
     }
   }
 
@@ -719,7 +764,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       entry(deps, { kind: "refused", from, result: `shadow-would-refuse:${verdict.code}`, written: true }, input),
     );
   }
-  if (shadowOver !== null) await jr(shadowParkEntry(deps, shadowOver, from, null, input.actor ?? "cli"));
+  if (shadowOver !== null) await jr(shadowParkEntry(deps, shadowOver, from, shadowOverPr, input.actor ?? "cli"));
   if (to === "closed") {
     const exp = await deps.journal.expireOnClose(deps.repo, issue);
     if (exp.ok === false) logger.error({ issue, error: exp.error }, "[lifecycle] journal expire failed");
