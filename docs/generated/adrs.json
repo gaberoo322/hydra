@@ -1316,7 +1316,8 @@
       "citedBy": [
         "CONTEXT-MAP.md",
         "docs/agents/triage-labels.md",
-        "docs/operator-playbooks/hydra-issue-research.md"
+        "docs/operator-playbooks/hydra-issue-research.md",
+        "docs/operator-playbooks/hydra-review.md"
       ],
       "source": {
         "path": "docs/adr/0047-work-item-lifecycle-is-data.md"
