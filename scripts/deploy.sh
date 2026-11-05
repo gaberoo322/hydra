@@ -74,13 +74,13 @@ install -D -m 0644 scripts/systemd/hydra-notify-failure@.service "$HOME/.config/
 systemctl --user daemon-reload
 
 echo "==> Installing consolidated watchdog (issue #705, cutover #727)..."
-# Consolidated watchdog (issue #705) — one script with two clearly-labelled
-# blocks: ## SERVICE LIVENESS (former hydra-orchestrator-watchdog.sh) and
-# ## AUTOPILOT WEDGE (former hydra-autopilot-watchdog.sh). Per-block stale
-# thresholds (service 15min, autopilot 25min). Issue #727 is the cutover:
-# this single timer is now the live recovery mechanism, running at the
-# 2-minute cadence the consolidated script was written for. The two legacy
-# watchdogs are retired (see convergence step below).
+# Consolidated watchdog (issue #705) — one timer, 2-minute cadence. Since #5099
+# the script is only the timer entry (it runs every check of `hydra-watchdog.ts
+# plan` as its own process), the CLI-start alarm and the node_modules-integrity
+# block; every decision block is TypeScript under src/watchdog/ (see
+# docs/operations/watchdog.md). Issue #727 was the cutover: this single timer
+# is the live recovery mechanism and the two legacy watchdogs are retired (see
+# convergence step below).
 install -D -m 0755 scripts/hydra-watchdog.sh "$HOME/.local/bin/hydra-watchdog.sh"
 
 # Defensive convergence (issue #727): retire the two legacy watchdog timers so
@@ -96,11 +96,12 @@ install -D -m 0644 scripts/systemd/hydra-watchdog.service "$HOME/.config/systemd
 install -D -m 0644 scripts/systemd/hydra-watchdog.timer "$HOME/.config/systemd/user/hydra-watchdog.timer"
 systemctl --user daemon-reload
 systemctl --user enable --now hydra-watchdog.timer
-# The wedge check is a TypeScript CLI that runs from this checkout (a lone copy
-# in ~/.local/bin could not resolve its ../src imports). Smoke-run it so a broken
-# node/strip-types runtime fails the deploy instead of silently disarming the
-# wedge check (issue #5095).
-node --experimental-strip-types "$HYDRA_ROOT/scripts/hydra-watchdog.ts" thresholds >/dev/null
+# The checks are a TypeScript CLI that runs from this checkout (a lone copy in
+# ~/.local/bin could not resolve its ../src imports). Smoke-run `plan`: it
+# statically imports the whole check graph, so a broken node/strip-types
+# runtime or a bad src/watchdog module fails the deploy instead of silently
+# disarming every check (issues #5095, #5099).
+node --experimental-strip-types "$HYDRA_ROOT/scripts/hydra-watchdog.ts" plan >/dev/null
 # The systemd unit sets no PATH, so also prove the watchdog's own node resolver
 # finds a node under the unit's minimal environment (QA round 2, issue #5095).
 env -i HOME="$HOME" PATH=/usr/local/bin:/usr/bin:/bin bash -c 'source "$1" && resolve_watchdog_node >/dev/null' _ "$HYDRA_ROOT/scripts/hydra-watchdog.sh"
@@ -236,7 +237,7 @@ echo "==> Installing Claude Code PreToolUse hooks (issue #5064)..."
 # NON-FATAL BY DESIGN: a hook-install failure must never block the service
 # restart below. Child-process `|| RC=$?` form (same rationale as the health
 # and stamp steps) keeps the installer's own `set -e` live. The watchdog's
-# ## CLAUDE HOOKS block (run_claude_hooks) alarms if hooks stay missing.
+# claude-hooks check (src/watchdog/claude-hooks.ts) alarms if hooks stay missing.
 HOOKS_RC=0
 bash scripts/setup-claude-hooks.sh || HOOKS_RC=$?
 if [ "$HOOKS_RC" -ne 0 ]; then
@@ -286,7 +287,8 @@ echo "==> Stamping semver version tag (issue #3677)..."
 #
 # NON-FATAL BY DESIGN (#3733). Everything past the health gate is post-conditional
 # bookkeeping, while the deploy job's red/green is the ONLY prod-behind-master
-# alarm the system has (the watchdog checks health, not SHA drift). A permanently
+# hard alarm the system has (the watchdog's deploy-drift check is advisory by
+# default — src/watchdog/deploy-drift.ts, #734). A permanently
 # red deploy job does not merely lose information — it TRAINS operators and
 # autopilot to filter out the one signal that guards against silently stale prod,
 # which is exactly the ambient-poison-pill failure mode. So a stamping failure
