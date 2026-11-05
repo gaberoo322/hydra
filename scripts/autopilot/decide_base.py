@@ -325,7 +325,7 @@ def intent_from_dict(raw):
 
 
 def escalation_intent(slot: str):
-    """Intent for a slot's cascade-routing escalation re-dispatch (INV-3).
+    """Intent for a slot's cascade-routing escalation re-dispatch (design-concept issue-5381).
 
     dev_orch re-dispatches as Fresh (self-select); every other slot is None in
     slice 1 (its dispatch still rides prompt_args)."""
