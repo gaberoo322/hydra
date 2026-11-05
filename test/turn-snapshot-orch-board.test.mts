@@ -195,6 +195,7 @@ describe("untriaged_orphans exclusion set (#2828, #2958)", () => {
       "needs-info",
       "needs-tickets",
       "hitl-grill",
+      "parked", // #5319: ADR-0047 human-hold - sweep_orch must not re-triage a parked issue out of the park
     ];
     for (const label of required) {
       assert.ok(UNTRIAGED_ORPHAN_EXCLUDED_LABELS.includes(label), `exclusion set missing "${label}"`);

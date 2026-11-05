@@ -58,6 +58,7 @@ export type GateId =
   | "pr-open"
   | "close"
   | "research-exit"
+  | "qa-exit"
   | "not-yet-implemented";
 
 export interface Transition {
@@ -127,10 +128,10 @@ export const TRANSITIONS: readonly Transition[] = [
   { from: "needs-qa", to: "ready-for-human", firedBy: "agent", gate: "adr5" },
   { from: "needs-qa", to: "closed", firedBy: "reconcile", gate: "close" },
   // qa-passed exits are reconcile-fired, split by cause (#5288 D5).
-  { from: "qa-passed", to: "needs-dev-resume", firedBy: "reconcile", gate: "not-yet-implemented" },
-  { from: "qa-passed", to: "needs-qa", firedBy: "reconcile", gate: "not-yet-implemented" },
+  { from: "qa-passed", to: "needs-dev-resume", firedBy: "reconcile", gate: "qa-exit" },
+  { from: "qa-passed", to: "needs-qa", firedBy: "reconcile", gate: "qa-exit" },
   { from: "qa-passed", to: "closed", firedBy: "reconcile", gate: "close" },
-  { from: "qa-passed", to: "ready-for-agent", firedBy: "reconcile", gate: "not-yet-implemented" },
+  { from: "qa-passed", to: "ready-for-agent", firedBy: "reconcile", gate: "qa-exit" },
   { from: "qa-passed", to: "ready-for-human", firedBy: "agent", gate: "adr5" },
 ];
 

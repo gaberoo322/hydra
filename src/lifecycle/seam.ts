@@ -29,9 +29,11 @@ import {
   type IssueActionWriteResult,
   type IssueViewResult,
 } from "../github/issue-actions.ts";
-import { ghJson } from "../github/gh.ts";
+import { ghExec, ghJson } from "../github/gh.ts";
 import { isGhFailure } from "../github/exec.ts";
 import { resolveGithubRepo, viewPr } from "../github/issues.ts";
+import { listRequiredStatusContextsOrNull, parseRollupEntries } from "../github/prs.ts";
+import { foldRollup, isRed, isSettled } from "../github/check-rollup.ts";
 import {
   CLAIM_OWNER_MISMATCH,
   appendLifecycleEntry,
@@ -40,12 +42,16 @@ import {
   openDispatchClaim,
   persistJournal,
   recordHoldExit,
+  readDispatchClaim,
+  readLifecycleJournal,
   type CloseClaimResult,
   type DispatchClaim,
   type JournalSource,
   type JournalWriteResult,
   type LifecycleJournalEntry,
   type OpenClaimResult,
+  type ReadClaimResult,
+  type ReadJournalResult,
 } from "../redis/lifecycle-journal.ts";
 import { getDesignConceptHash } from "../redis/design-concept.ts";
 import {
@@ -59,9 +65,22 @@ import {
   type GateInput,
   type GateRecords,
   type PrRecord,
+  type QaLivePr,
   type StateEntryRecord,
 } from "./gates.ts";
 import { isUnsanctionedHoldExit } from "./hold-exit.ts";
+import {
+  buildSeedEvidence,
+  countReviewedFailRoundsSinceReset,
+  evaluateCaps,
+  isJournalMiss,
+  latestResetMs,
+  resolveCapLimits,
+  type CapAttempt,
+  type CapEvaluation,
+  type TimelineLabelEvent,
+} from "./caps.ts";
+import { parkForCap } from "./park.ts";
 import {
   findOperatorTransition,
   findTransition,
@@ -138,12 +157,24 @@ export interface SeamDeps {
   close: (issue: number, reason: string) => Promise<IssueActionWriteResult>;
   /** Reopen write, used only by {@link operatorReopen}. */
   reopen?: (issue: number) => Promise<IssueActionWriteResult>;
+  /** Post a comment on an issue or PR number. */
+  comment: (number: number, body: string) => Promise<IssueActionWriteResult>;
+  /** Env the cap limits are resolved from (`HYDRA_LIFECYCLE_CAP_*`). */
+  env: () => Readonly<Record<string, string | undefined>>;
   fetch: {
     designConcept: (issue: number) => Promise<Fetched<DesignConceptRecord>>;
     pr: (prNumber: number) => Promise<Fetched<PrRecord>>;
     comment: (commentId: number) => Promise<Fetched<CommentRecord>>;
     /** Latest `labeled` event time for `state` on the issue (the entry clock). */
     stateEntry: (issue: number, state: string) => Promise<Fetched<StateEntryRecord>>;
+    /** The issue's comment bodies (carry the `Hydra-Cap-Reset:` marker). */
+    issueComments: (issue: number) => Promise<Fetched<string[]>>;
+    /** The issue's `labeled` / `unlabeled` timeline events. */
+    timeline: (issue: number) => Promise<Fetched<TimelineLabelEvent[]>>;
+    /** A PR's comment bodies then review bodies, chronological (carry `QA-Verdict:` trailers). */
+    prBodies: (prNumber: number) => Promise<Fetched<string[]>>;
+    /** A PR read live at head for the `qa-passed` exit gate; absent = fail closed (`fetch-failed`). */
+    qaLive?: (prNumber: number) => Promise<Fetched<QaLivePr>>;
   };
   journal: {
     append: (repo: string, issue: number, entry: LifecycleJournalEntry) => Promise<JournalWriteResult>;
@@ -154,6 +185,8 @@ export interface SeamDeps {
     persist?: (repo: string, issue: number) => Promise<JournalWriteResult>;
     /** Index an unsanctioned human-hold exit for the attention feed (#5313). */
     recordHoldExit?: (repo: string, issue: number, entry: LifecycleJournalEntry) => Promise<JournalWriteResult>;
+    read: (repo: string, issue: number) => Promise<ReadJournalResult>;
+    readClaim: (repo: string, issue: number) => Promise<ReadClaimResult>;
   };
   now: () => number;
 }
@@ -208,6 +241,113 @@ export async function fetchStateEntry(
   }
 }
 
+/** Issue comment bodies in order. Never throws. */
+export async function fetchIssueComments(repo: string, issue: number): Promise<Fetched<string[]>> {
+  try {
+    const res = await ghJson<unknown>(["api", `repos/${repo}/issues/${issue}/comments`, "--paginate", "--slurp"]);
+    if (isGhFailure(res) || !Array.isArray(res.data)) return { ok: false };
+    const comments = res.data.flatMap((page) => (Array.isArray(page) ? page : [page]));
+    return { ok: true, value: comments.map((c) => String((c as { body?: unknown } | null)?.body ?? "")) };
+  } catch (err) {
+    logger.error({ err, issue }, "[lifecycle] issue comments fetch failed");
+    return { ok: false };
+  }
+}
+
+/** The issue timeline reduced to label events. Never throws. */
+export async function fetchLabelTimeline(repo: string, issue: number): Promise<Fetched<TimelineLabelEvent[]>> {
+  try {
+    const res = await ghJson<unknown>(["api", `repos/${repo}/issues/${issue}/timeline`, "--paginate", "--slurp"]);
+    if (isGhFailure(res) || !Array.isArray(res.data)) return { ok: false };
+    const events = res.data.flatMap((page) => (Array.isArray(page) ? page : [page]));
+    const out: TimelineLabelEvent[] = [];
+    for (const ev of events) {
+      const e = ev as { event?: unknown; label?: { name?: unknown }; created_at?: unknown } | null;
+      if (!e || (e.event !== "labeled" && e.event !== "unlabeled") || typeof e.label?.name !== "string") continue;
+      const t = typeof e.created_at === "string" ? Date.parse(e.created_at) : Number.NaN;
+      if (Number.isNaN(t)) {
+        logger.error({ issue }, "[lifecycle] timeline event has unparseable created_at");
+        return { ok: false };
+      }
+      out.push({ event: e.event, label: e.label.name, tsMs: t });
+    }
+    return { ok: true, value: out };
+  } catch (err) {
+    logger.error({ err, issue }, "[lifecycle] timeline fetch failed");
+    return { ok: false };
+  }
+}
+
+/** A PR's comment bodies followed by its review bodies. Never throws. */
+export async function fetchPrBodies(repo: string, prNumber: number): Promise<Fetched<string[]>> {
+  try {
+    const res = await ghJson<{ comments?: unknown; reviews?: unknown }>([
+      "pr", "view", String(prNumber), "--repo", repo, "--json", "comments,reviews",
+    ]);
+    if (isGhFailure(res) || !res.data || typeof res.data !== "object") return { ok: false };
+    const bodies = (list: unknown): string[] =>
+      Array.isArray(list) ? list.map((c) => String((c as { body?: unknown } | null)?.body ?? "")) : [];
+    return { ok: true, value: [...bodies(res.data.comments), ...bodies(res.data.reviews)] };
+  } catch (err) {
+    logger.error({ err, prNumber }, "[lifecycle] pr bodies fetch failed");
+    return { ok: false };
+  }
+}
+
+/**
+ * A PR read live at head for the `qa-passed` exit decision: state, draft,
+ * `mergeStateStatus`, head sha, the REQUIRED checks folded to one verdict, and
+ * the comment + review bodies (they carry the `QA-Verdict:` trailers). Required
+ * contexts are read, never guessed; an unreadable set folds to `unknown`.
+ * Never throws.
+ */
+export async function fetchQaLive(repo: string, prNumber: number): Promise<Fetched<QaLivePr>> {
+  try {
+    const res = await ghJson<Record<string, unknown>>([
+      "pr", "view", String(prNumber), "--repo", repo, "--json",
+      "number,state,isDraft,mergeStateStatus,headRefOid,statusCheckRollup,comments,reviews",
+    ]);
+    if (isGhFailure(res) || !res.data || typeof res.data !== "object") return { ok: false };
+    const d = res.data;
+    if (typeof d.number !== "number" || typeof d.state !== "string") return { ok: false };
+    const required = await listRequiredStatusContextsOrNull("lifecycle", { repo });
+    let checks: QaLivePr["checks"] = "unknown";
+    if (required !== null) {
+      const fold = foldRollup(parseRollupEntries(d.statusCheckRollup), { required });
+      checks = !isSettled(fold) ? "pending" : isRed(fold) ? "red" : "green";
+    }
+    const bodies = (list: unknown): string[] =>
+      Array.isArray(list) ? list.map((c) => String((c as { body?: unknown } | null)?.body ?? "")) : [];
+    return {
+      ok: true,
+      value: {
+        number: d.number,
+        state: d.state.toUpperCase(),
+        isDraft: d.isDraft === true,
+        mergeStateStatus: typeof d.mergeStateStatus === "string" ? d.mergeStateStatus.toUpperCase() : "",
+        headSha: typeof d.headRefOid === "string" ? d.headRefOid : "",
+        checks,
+        bodies: [...bodies(d.comments), ...bodies(d.reviews)],
+      },
+    };
+  } catch (err) {
+    logger.error({ err, prNumber }, "[lifecycle] qa-live pr fetch failed");
+    return { ok: false };
+  }
+}
+
+/** Post a comment on an issue or PR number. Never throws. */
+export async function postIssueComment(repo: string, number: number, body: string): Promise<IssueActionWriteResult> {
+  try {
+    const res = await ghExec(["issue", "comment", String(number), "--repo", repo, "--body", body]);
+    if (res.ok === false) return { ok: false, code: res.code, stderr: res.stderr };
+    return { ok: true };
+  } catch (err) {
+    logger.error({ err, number }, "[lifecycle] comment post failed");
+    return { ok: false, code: "gh-failed", stderr: String(err) };
+  }
+}
+
 /** Production deps: real gh, real Redis, mode read from the git-tracked config. */
 export function defaultSeamDeps(repoRoot: string): SeamDeps {
   return {
@@ -217,6 +357,8 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
     edit: (n, labels) => editIssueLabels(n, labels),
     close: (n, reason) => closeIssue(n, reason),
     reopen: (n) => reopenIssue(n),
+    comment: (n, body) => postIssueComment(resolveGithubRepo(), n, body),
+    env: () => process.env,
     fetch: {
       designConcept: async (n) => {
         try {
@@ -248,6 +390,10 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
       },
       comment: (commentId) => fetchComment(resolveGithubRepo(), commentId),
       stateEntry: (issue, state) => fetchStateEntry(resolveGithubRepo(), issue, state),
+      issueComments: (issue) => fetchIssueComments(resolveGithubRepo(), issue),
+      timeline: (issue) => fetchLabelTimeline(resolveGithubRepo(), issue),
+      prBodies: (prNumber) => fetchPrBodies(resolveGithubRepo(), prNumber),
+      qaLive: (prNumber) => fetchQaLive(resolveGithubRepo(), prNumber),
     },
     journal: {
       append: appendLifecycleEntry,
@@ -256,8 +402,125 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
       closeClaim: closeDispatchClaim,
       persist: persistJournal,
       recordHoldExit,
+      read: readLifecycleJournal,
+      readClaim: readDispatchClaim,
     },
     now: () => Date.now(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// cap check (ADR-0047 D6, issue #5314)
+// ---------------------------------------------------------------------------
+
+export type CapCheck =
+  | { status: "skipped" }
+  | { status: "checked"; evaluation: CapEvaluation };
+
+/**
+ * Gather every cap source and evaluate. Any fetch failure (issue comments,
+ * journal AND timeline, PR bodies) skips the check for this call (INV-12): the
+ * attempt proceeds and never parks. Never throws.
+ */
+async function checkCaps(
+  deps: SeamDeps,
+  issue: number,
+  attempt: CapAttempt,
+  pr: number | null,
+): Promise<CapCheck> {
+  try {
+    const comments = await deps.fetch.issueComments(issue);
+    if (comments.ok === false) return { status: "skipped" };
+    const resetMs = latestResetMs(comments.value);
+    const resolved = resolveCapLimits(deps.env());
+    for (const w of resolved.warnings) logger.warn({ issue }, `[lifecycle] ${w}`);
+
+    const journalRead = await deps.journal.read(deps.repo, issue);
+    const entries = journalRead.ok ? journalRead.entries : [];
+    const journalFailed = journalRead.ok === false;
+    let timeline: TimelineLabelEvent[] | null = null;
+    if (isJournalMiss(entries, resetMs, journalFailed)) {
+      const t = await deps.fetch.timeline(issue);
+      if (t.ok === false) return { status: "skipped" };
+      timeline = t.value;
+    }
+    let trailerRounds: number | null = null;
+    if (pr !== null) {
+      const bodies = await deps.fetch.prBodies(pr);
+      if (bodies.ok === false) return { status: "skipped" };
+      trailerRounds = countReviewedFailRoundsSinceReset(bodies.value, pr);
+    }
+    const evaluation = evaluateCaps({
+      attempt,
+      entries,
+      journalFailed,
+      resetMs,
+      timeline,
+      trailerRounds,
+      limits: resolved.limits,
+    });
+    return { status: "checked", evaluation };
+  } catch (err) {
+    logger.error({ err, issue }, "[lifecycle] cap check crashed; skipping");
+    return { status: "skipped" };
+  }
+}
+
+/** Stamps cap evidence onto the FIRST journal entry of a call (skip marker or timeline seed). */
+class CapStamp {
+  private done = false;
+  private check: CapCheck | null;
+  constructor(check: CapCheck | null) {
+    this.check = check;
+  }
+  /** The cap evidence to add to `e` (once per call); {} afterwards or when nothing applies. */
+  extra(e: LifecycleJournalEntry): Record<string, string> {
+    if (this.done || this.check === null) return {};
+    this.done = true;
+    if (this.check.status === "skipped") return { "cap-check": "skipped:fetch-failed" };
+    const tl = this.check.evaluation.timelineCounts;
+    return tl === null ? {} : buildSeedEvidence(tl, e);
+  }
+  apply(e: LifecycleJournalEntry): LifecycleJournalEntry {
+    const extra = this.extra(e);
+    return Object.keys(extra).length === 0 ? e : { ...e, evidence: { ...e.evidence, ...extra } };
+  }
+}
+
+/** A throwaway entry shaped like the park transition, used only to compute seed contributions. */
+function parkEntryProbe(deps: SeamDeps, over: NonNullable<CapEvaluation["over"]>): LifecycleJournalEntry {
+  return {
+    v: 1, ts: deps.now(), kind: "transition", from: null, to: "parked", source: "cli", actor: "cli",
+    evidence: {}, reason: `cap:${over.arm}`, rationale: null, result: `parked:${over.arm}`, written: true,
+  };
+}
+
+function shadowParkEntry(
+  deps: SeamDeps,
+  over: NonNullable<CapEvaluation["over"]>,
+  from: string | null,
+  pr: number | null,
+  actor: string,
+): LifecycleJournalEntry {
+  return {
+    v: 1,
+    ts: deps.now(),
+    kind: "refused",
+    from,
+    to: "parked",
+    source: "cli",
+    actor,
+    evidence: {
+      arm: over.arm,
+      count: String(over.count),
+      limit: String(over.limit),
+      source: over.source,
+      ...(pr !== null ? { pr: String(pr) } : {}),
+    },
+    reason: `cap:${over.arm}`,
+    rationale: null,
+    result: `shadow-would-park:${over.arm}`,
+    written: false,
   };
 }
 
@@ -287,6 +550,8 @@ export type AdvanceResult =
       wouldRefuse?: string;
       /** The seam's own post-write re-read (no extra gh read for callers). */
       observed: { state: string; labels: string[] };
+      /** Set in shadow when a cap check would have parked the issue in enforce. */
+      wouldPark?: string;
     }
   | { ok: false; issue: number; code: string; mode: LifecycleMode | null; written: boolean };
 
@@ -341,11 +606,14 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
   const to: LifecycleState = input.to;
   const closeReason = normaliseCloseReason(input.closeReason);
   const mode = await deps.mode();
+  let stamp = new CapStamp(null);
+  const gateEvidence = input.evidence ?? {};
+  const jr = async (e: LifecycleJournalEntry): Promise<void> => journal(deps, issue, stamp.apply(e));
 
   // 1. re-read
   const before = await deps.view(issue);
   if (before.ok === false) {
-    await journal(deps, issue, entry(deps, { kind: "refused", result: "refused:fetch-failed", written: false }, input));
+    await jr(entry(deps, { kind: "refused", result: "refused:fetch-failed", written: false }, input));
     return { ok: false, issue, code: "fetch-failed", mode, written: false };
   }
 
@@ -361,17 +629,42 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
 
   // 3. human-hold exit: refused in BOTH modes, before the mode branch.
   if (!isClosed && stateLabels.some((s) => isHumanHold(s))) {
-    await journal(
-      deps,
-      issue,
+    await jr(
       entry(deps, { kind: "refused", from: stateLabels.join(","), result: "refused:human-hold-exit", written: false }, input),
     );
     return { ok: false, issue, code: "human-hold-exit", mode, written: false };
   }
   // A closed issue has nothing to advance: refused in both modes.
   if (isClosed) {
-    await journal(deps, issue, entry(deps, { kind: "refused", from, result: "refused:issue-closed", written: false }, input));
+    await jr(entry(deps, { kind: "refused", from, result: "refused:issue-closed", written: false }, input));
     return { ok: false, issue, code: "issue-closed", mode, written: false };
+  }
+
+  // 3b. cap check (ADR-0047 D6): the in-progress -> ready-for-agent edge IS the stale
+  //     re-queue. Over cap in enforce the seam parks INSTEAD of writing ready-for-agent.
+  let shadowOver: NonNullable<CapEvaluation["over"]> | null = null;
+  if (stateLabels.length === 1 && from === "in-progress" && to === "ready-for-agent") {
+    const check = await checkCaps(deps, issue, { kind: "requeue" }, null);
+    stamp = new CapStamp(check);
+    const over = check.status === "checked" ? check.evaluation.over : null;
+    if (check.status === "checked" && over !== null) {
+      if (mode === "enforce") {
+        const park = await parkForCap(
+          {
+            issue,
+            from,
+            over,
+            counts: check.evaluation.counts,
+            pr: null,
+            actor: input.actor,
+            evidence: stamp.extra(parkEntryProbe(deps, over)),
+          },
+          deps,
+        );
+        return { ok: false, issue, code: `parked:${over.arm}`, mode, written: park.written };
+      }
+      shadowOver = over;
+    }
   }
 
   // 4. legality. `none` (zero state labels) may only enter needs-triage, gate-free;
@@ -390,12 +683,19 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
     const records: GateRecords = {};
     if (needs.designConcept) records.designConcept = await deps.fetch.designConcept(issue);
     if (needs.pr) {
-      const prNumber = parsePrEvidence(input.evidence ?? {});
+      const prNumber = parsePrEvidence(gateEvidence);
       records.pr = prNumber !== null && prNumber > 0 ? await deps.fetch.pr(prNumber) : undefined;
     }
     if (needs.comment) {
-      const commentId = parseCommentEvidence(input.evidence ?? {});
+      const commentId = parseCommentEvidence(gateEvidence);
       records.comment = commentId !== null ? await deps.fetch.comment(commentId) : undefined;
+    }
+    if (needs.qaLive) {
+      const prNumber = parsePrEvidence(gateEvidence);
+      records.qaLive =
+        prNumber !== null && prNumber > 0 && deps.fetch.qaLive !== undefined
+          ? await deps.fetch.qaLive(prNumber)
+          : { ok: false };
     }
     if (needs.stateEntry) records.stateEntry = await deps.fetch.stateEntry(issue, transition.from);
     const gateInput: GateInput = {
@@ -405,7 +705,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       from: transition.from,
       to,
       flags,
-      evidence: input.evidence ?? {},
+      evidence: gateEvidence,
       reason: input.reason,
       rationale: input.rationale,
       closeReason: to === "closed" ? (closeReason ?? "completed") : undefined,
@@ -415,7 +715,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
 
   // 6. mode branch
   if (!verdict.ok && mode === "enforce") {
-    await journal(deps, issue, entry(deps, { kind: "refused", from, result: `refused:${verdict.code}`, written: false }, input));
+    await jr(entry(deps, { kind: "refused", from, result: `refused:${verdict.code}`, written: false }, input));
     return { ok: false, issue, code: verdict.code, mode, written: false };
   }
 
@@ -427,7 +727,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       : await deps.edit(issue, { remove: [...removed], add: [to] });
   if (write.ok === false) {
     const code = `write-failed:${write.code}`;
-    await journal(deps, issue, entry(deps, { kind: "refused", from, result: code, written: false }, input));
+    await jr(entry(deps, { kind: "refused", from, result: code, written: false }, input));
     return { ok: false, issue, code, mode, written: false };
   }
 
@@ -439,20 +739,19 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       ? after.row.state === "CLOSED"
       : after.row.labels.includes(to) && removed.every((s) => !after.row.labels.includes(s)));
   if (!verified) {
-    await journal(deps, issue, entry(deps, { kind: "refused", from, result: "write-unverified", written: true }, input));
+    await jr(entry(deps, { kind: "refused", from, result: "write-unverified", written: true }, input));
     return { ok: false, issue, code: "write-unverified", mode, written: true };
   }
 
   // 9. journal (after verify, so `result` reflects what GitHub shows)
   if (verdict.ok) {
-    await journal(deps, issue, entry(deps, { kind: "transition", from, result: "ok", written: true }, input));
+    await jr(entry(deps, { kind: "transition", from, result: "ok", written: true }, input));
   } else {
-    await journal(
-      deps,
-      issue,
+    await jr(
       entry(deps, { kind: "refused", from, result: `shadow-would-refuse:${verdict.code}`, written: true }, input),
     );
   }
+  if (shadowOver !== null) await jr(shadowParkEntry(deps, shadowOver, from, null, input.actor ?? "cli"));
   if (to === "closed") {
     const exp = await deps.journal.expireOnClose(deps.repo, issue);
     if (exp.ok === false) logger.error({ issue, error: exp.error }, "[lifecycle] journal expire failed");
@@ -465,6 +764,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
     mode,
     ...(verdict.ok ? {} : { wouldRefuse: verdict.code }),
     observed: observedOf(after),
+    ...(shadowOver !== null ? { wouldPark: shadowOver.arm } : {}),
   };
 }
 
@@ -622,8 +922,15 @@ export async function operatorReopen(
 }
 
 // ---------------------------------------------------------------------------
-// claim / release (change no label)
+// claim / release (change no label, except a cap park)
 // ---------------------------------------------------------------------------
+
+export type ClaimPurpose = "fresh" | "resume" | "forward-fix";
+export const CLAIM_PURPOSES: readonly ClaimPurpose[] = ["fresh", "resume", "forward-fix"];
+
+/** Closed enum a claim is released with (ADR-0047 D5/D6). */
+export const CLAIM_OUTCOMES = ["pr-opened", "no-pr", "verdict-posted", "stall", "released"] as const;
+export type ClaimOutcome = (typeof CLAIM_OUTCOMES)[number];
 
 export interface ClaimInput {
   issue: number;
@@ -632,11 +939,20 @@ export interface ClaimInput {
   run: string;
   artifactHash?: string | null;
   actor?: string;
+  /** The PR this dispatch works on (QA / forward-fix); arms the PR-unit caps. */
+  pr?: number;
+  purpose?: ClaimPurpose;
 }
 
 export type ClaimResult =
-  | { ok: true; claim: DispatchClaim }
-  | { ok: false; code: "claim-held" | "redis-failed"; existing?: DispatchClaim | null };
+  | {
+      ok: true;
+      claim: DispatchClaim;
+      /** Set in shadow when the cap check would have parked this claim in enforce. */
+      wouldPark?: string;
+    }
+  | { ok: false; code: "claim-held" | "redis-failed"; existing?: DispatchClaim | null }
+  | { ok: false; code: `parked:${string}`; written: boolean };
 
 function claimEntry(
   deps: SeamDeps,
@@ -661,6 +977,8 @@ function claimEntry(
 }
 
 export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<ClaimResult> {
+  const issue = input.issue;
+  const actor = input.actor ?? "cli";
   const claim: DispatchClaim = {
     dispatchId: input.dispatchId,
     class: input.class,
@@ -668,7 +986,49 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
     artifactHash: input.artifactHash ?? null,
     openedAt: deps.now(),
   };
-  const res = await deps.journal.openClaim(deps.repo, input.issue, claim);
+
+  // INV-10: the claim-held check runs BEFORE any counting or park.
+  const held = await deps.journal.readClaim(deps.repo, issue);
+  if (held.ok && held.claim) return { ok: false, code: "claim-held", existing: held.claim };
+
+  // Re-read the issue to stamp `state` (INV-13). A failed read skips the cap check (INV-12).
+  const mode = await deps.mode();
+  const view = await deps.view(issue);
+  let state = "unknown";
+  let capState = "";
+  if (view.ok) {
+    const labels = stateLabelsOf(view.row.labels);
+    state = labels.length === 1 ? labels[0] : "none";
+    capState = labels.length === 1 ? labels[0] : "";
+  }
+  const check: CapCheck = view.ok
+    ? await checkCaps(
+        deps,
+        issue,
+        { kind: "claim", class: input.class, state: capState, pr: input.pr ?? null, purpose: input.purpose ?? null },
+        input.pr ?? null,
+      )
+    : { status: "skipped" };
+  const stamp = new CapStamp(check);
+  const over = check.status === "checked" ? check.evaluation.over : null;
+
+  if (check.status === "checked" && over !== null && mode === "enforce") {
+    const park = await parkForCap(
+      {
+        issue,
+        from: capState === "" ? null : capState,
+        over,
+        counts: check.evaluation.counts,
+        pr: input.pr ?? null,
+        actor,
+        evidence: stamp.extra(parkEntryProbe(deps, over)),
+      },
+      deps,
+    );
+    return { ok: false, code: `parked:${over.arm}`, written: park.written };
+  }
+
+  const res = await deps.journal.openClaim(deps.repo, issue, claim);
   if (res.ok === false) {
     return res.code === "claim-held"
       ? { ok: false, code: "claim-held", existing: res.existing }
@@ -676,9 +1036,22 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
   }
   await journal(
     deps,
-    input.issue,
-    claimEntry(deps, "claim-opened", input.actor ?? "cli", { dispatch: input.dispatchId, class: input.class, run: input.run }),
+    issue,
+    stamp.apply(
+      claimEntry(deps, "claim-opened", actor, {
+        dispatch: input.dispatchId,
+        class: input.class,
+        run: input.run,
+        state,
+        ...(input.pr !== undefined ? { pr: String(input.pr) } : {}),
+        ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+      }),
+    ),
   );
+  if (check.status === "checked" && over !== null) {
+    await journal(deps, issue, shadowParkEntry(deps, over, capState === "" ? null : capState, input.pr ?? null, actor));
+    return { ok: true, claim, wouldPark: over.arm };
+  }
   return { ok: true, claim };
 }
 
@@ -686,12 +1059,14 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
  * Release a dispatch claim. `dispatchId` is REQUIRED: every release goes through
  * the atomic compare-and-delete ownership check (INV-11), so a release can never
  * delete a claim another dispatch holds. There is deliberately no force path.
+ * The optional `outcome` is recorded on the claim-closed entry for the cap arms.
  */
 export async function releaseClaim(
   issue: number,
   dispatchId: string,
   deps: SeamDeps,
   actor = "cli",
+  outcome?: ClaimOutcome,
 ): Promise<{ ok: true; prior: DispatchClaim | null } | { ok: false; code: "redis-failed" | "claim-owner-mismatch" }> {
   const res = await deps.journal.closeClaim(deps.repo, issue, dispatchId);
   if (res.ok === false) {
@@ -700,7 +1075,10 @@ export async function releaseClaim(
   await journal(
     deps,
     issue,
-    claimEntry(deps, "claim-closed", actor, res.prior ? { dispatch: res.prior.dispatchId } : {}),
+    claimEntry(deps, "claim-closed", actor, {
+      ...(res.prior ? { dispatch: res.prior.dispatchId, class: res.prior.class } : {}),
+      ...(outcome !== undefined ? { outcome } : {}),
+    }),
   );
   return { ok: true, prior: res.prior };
 }

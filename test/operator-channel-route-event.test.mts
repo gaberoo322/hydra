@@ -41,6 +41,7 @@ describe("PAGE_KINDS closed page list", () => {
       "infra:redis_backup_stale",
       // The watchdog's /tmp + /dev/shm inode/space alarm (#5327).
       "infra:tmpfs_exhausted",
+      "infra:watchdog_cli_failed",
       "launch:fail_safe",
       "launch:latency_breach",
       "launch:meter_dark",

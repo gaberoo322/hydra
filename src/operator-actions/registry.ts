@@ -1717,6 +1717,36 @@ const RAW_ENTRIES = [
     doc: HYDRA_REVIEW_DOC,
   },
 
+  {
+    key: "waiting-on-you:invalid-state",
+    recommended: {
+      kind: "terminal-skill",
+      command: "gh issue view {number} --repo {repo} --json labels",
+      label: "Inspect the conflicting state labels",
+      preconditions: [],
+      consequence: "shows which lifecycle state labels the issue carries so you can keep the one that is true",
+    },
+    alternatives: [
+      {
+        kind: "terminal-skill",
+        command: "/hydra-review",
+        label: "Walk it in the review cockpit",
+        preconditions: [],
+        consequence: "decides the right state with you and removes the stray label",
+      },
+      {
+        kind: "terminal-skill",
+        command: "npx tsx scripts/lifecycle.ts reconcile --report",
+        label: "Read the latest reconcile report",
+        preconditions: [],
+        consequence: "prints every invalid issue and the enforce-readiness counts without scanning or changing anything",
+      },
+    ],
+    rationale:
+      "an open issue with 2+ lifecycle state labels is ambiguous: the lifecycle seam refuses to move it and no dispatcher will pick it, and the reconcile never edits labels on its own (ADR-0047 D1) — an operator removes the stray label.",
+    doc: HYDRA_REVIEW_DOC,
+  },
+
   // --- target-items (rank 3, per-issue, context {repo, number, kind}) -------
   {
     key: "target-items:ready-for-human",

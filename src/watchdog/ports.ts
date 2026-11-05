@@ -8,23 +8,45 @@
  * signals through src/process-probe.ts (a syscall, not a binary).
  */
 
-import { readFileSync, statSync, statfsSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  statfsSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   isProbeFailure,
   probeFileLockFree,
   readServiceActiveEnterMonotonicUs,
   readServiceStatus,
   readTopInodeConsumers,
+  readUnitEnabledState,
   restartService,
+  runDeployScript,
+  runInstallerList,
+  runSyncSkillsScript,
 } from "../host-probe/probe.ts";
 import { OperatorChannel, operatorChannel } from "../operator-channel/channel.ts";
 import { EventBus } from "../event-bus.ts";
 import { getGlmDrainerLiveness, readGlmDrainerLastPick } from "../redis/autopilot.ts";
 import { getPaceGateLastTick } from "../redis/launch-flow.ts";
+import { getBriefLastSent } from "../redis/operator-channel.ts";
 import { readRecentSlotEvents } from "../redis/slot-events.ts";
 import {
   anchorEpisodeSince,
+  briefMissingEpisodeKeys,
+  clearEpisodeFired,
   clearEpisodeKeys,
+  clearEpisodeSince,
+  episodeSinceExists,
   episodeFiredExists,
   markEpisodeFired,
   readEpisodeSince,
@@ -32,7 +54,17 @@ import {
 import { ghBin, runExec } from "../github/exec.ts";
 import { resolveOrchestratorRepo } from "../github/repo.ts";
 import { isGlmProvenance } from "../autopilot/turn-snapshot/pr-gate.ts";
+import { fetchOrigin, hasGitConfigKey, readGitConfig, refResolves, setGitConfig } from "../github/git.ts";
+import { getDeployedSha, getRemoteMasterSha } from "../health/deployed-sha.ts";
 import type { LaunchFlowDeps } from "./launch-flow.ts";
+import type { DriftMarkerPort, SchedulerStopPort } from "./drift-gate.ts";
+import type { DeployDriftDeps } from "./deploy-drift.ts";
+import type { SkillMirrorDeps, SyncRun } from "./skill-mirror.ts";
+import type { NewestBackup, RedisBackupDeps } from "./redis-backup.ts";
+import { ORIGIN_FETCH_REFSPEC, type OriginIdentityDeps } from "./origin-identity.ts";
+import type { EpisodeStore } from "./episode.ts";
+import type { BriefMissingDeps } from "./brief-missing.ts";
+import type { ClaudeHooksDeps } from "./claude-hooks.ts";
 import type { DiskDeps, StatfsReading } from "./disk.ts";
 import { isLivePid, signalPid } from "../process-probe.ts";
 import { countOpenBoard } from "../autopilot/turn-snapshot/board-saturation.ts";
@@ -576,6 +608,347 @@ export function createProductionLaunchFlowDeps(log: (line: string) => void): Lau
         return bus.publish(stream, event);
       },
     },
+    clock: { nowMs: () => Date.now() },
+    log,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Slice 4 ports (issue #5098): deploy drift, skill mirror, redis backup,
+// origin identity. No `node:child_process`: git rides src/github/git.ts, the
+// host effects ride src/host-probe/probe.ts.
+// ---------------------------------------------------------------------------
+
+/** The production Redis-backed {@link EpisodeStore} (used by redis-backup). */
+export function createProductionEpisodeStore(): EpisodeStore {
+  return {
+    anchor: anchorEpisodeSince,
+    readSince: readEpisodeSince,
+    firedExists: episodeFiredExists,
+    markFired: markEpisodeFired,
+    clear: clearEpisodeKeys,
+  };
+}
+
+function lazyBus(): Pick<EventBus, "publish"> {
+  let bus: EventBus | null = null;
+  return {
+    publish: (stream, event) => {
+      bus ??= new EventBus();
+      return bus.publish(stream, event);
+    },
+  };
+}
+
+/** An epoch-seconds FILE marker at `path` (same path and format as the bash blocks, INV-6). */
+export function createFileDriftMarker(path: string, log: (line: string) => void): DriftMarkerPort {
+  return {
+    read() {
+      try {
+        return readFileSync(path, "utf8");
+      } catch {
+        /* intentional: no marker file == no drift episode in flight */
+        return null;
+      }
+    },
+    write(epochS) {
+      try {
+        writeFileSync(path, `${epochS}\n`);
+      } catch (err) {
+        log(`WARN could not write drift marker ${path}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+    clear() {
+      try {
+        unlinkSync(path);
+      } catch {
+        /* intentional: rm -f semantics — an absent marker is already cleared */
+      }
+    },
+  };
+}
+
+/** GET /api/scheduler/status (5s bound) -> `stopReason`; `null` when the API is unreachable (does not block). */
+export function createSchedulerStopPort(baseUrl: string): SchedulerStopPort {
+  return {
+    async stopReason() {
+      const body = (await fetchJson(`${baseUrl}/api/scheduler/status`)) as Record<string, unknown> | null;
+      if (body === null || typeof body !== "object") return null;
+      return typeof body.stopReason === "string" && body.stopReason ? body.stopReason : null;
+    },
+  };
+}
+
+export function createProductionDeployDriftDeps(
+  log: (line: string) => void,
+  config: { markerPath: string; baseUrl: string },
+): DeployDriftDeps {
+  return {
+    repo: {
+      hasGit: (root) => existsSync(join(root, ".git")),
+      deployedSha: () => getDeployedSha(),
+      remoteSha: () => getRemoteMasterSha(),
+    },
+    marker: createFileDriftMarker(config.markerPath, log),
+    scheduler: createSchedulerStopPort(config.baseUrl),
+    host: {
+      async deploy(root) {
+        const r = await runDeployScript(root);
+        return r.ok ? r.data.exitCode : null;
+      },
+    },
+    clock: { nowMs: () => Date.now() },
+    log,
+  };
+}
+
+function toSyncRun(r: Awaited<ReturnType<typeof runSyncSkillsScript>>): SyncRun {
+  return r.ok ? { ran: true, exitCode: r.data.exitCode, stderrTail: r.data.stderrTail } : { ran: false };
+}
+
+export function createProductionSkillMirrorDeps(
+  log: (line: string) => void,
+  config: { markerPath: string; baseUrl: string },
+): SkillMirrorDeps {
+  return {
+    files: {
+      syncScriptExists: (root) => existsSync(join(root, "scripts", "sync-skills.sh")),
+      makeScratch() {
+        try {
+          return mkdtempSync(join(process.env.TMPDIR || tmpdir(), "hydra-skill-mirror-drift."));
+        } catch {
+          /* intentional: the run logs the WARN for a null scratch dir */
+          return null;
+        }
+      },
+      removeScratch(dir) {
+        rmSync(dir, { recursive: true, force: true });
+      },
+      listSkills(dir) {
+        try {
+          return readdirSync(dir, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => d.name)
+            .sort();
+        } catch {
+          /* intentional: a regenerated dir that does not exist has no skills to compare */
+          return [];
+        }
+      },
+      readSkill(dir, name) {
+        try {
+          return readFileSync(join(dir, name, "SKILL.md"), "latin1");
+        } catch {
+          /* intentional: an absent SKILL.md is the (missing-live) / skip arm */
+          return null;
+        }
+      },
+    },
+    host: {
+      regenerate: async (root, skillsDir) => toSyncRun(await runSyncSkillsScript(root, { skillsDir })),
+      resync: async (root) => toSyncRun(await runSyncSkillsScript(root)),
+    },
+    marker: createFileDriftMarker(config.markerPath, log),
+    scheduler: createSchedulerStopPort(config.baseUrl),
+    clock: { nowMs: () => Date.now() },
+    log,
+  };
+}
+
+export function createProductionRedisBackupDeps(log: (line: string) => void): RedisBackupDeps {
+  return {
+    files: {
+      newestBackup(dir): NewestBackup | null {
+        let names: string[];
+        try {
+          names = readdirSync(dir);
+        } catch {
+          /* intentional: a missing/unreadable backup dir IS the 'missing' verdict input */
+          return null;
+        }
+        let best: NewestBackup | null = null;
+        for (const name of names) {
+          if (!/^hydra-redis-.*\.rdb\.gz$/.test(name)) continue;
+          try {
+            const mtimeS = Math.floor(statSync(join(dir, name)).mtimeMs / 1000);
+            if (best === null || mtimeS > best.mtimeS) best = { name, mtimeS };
+          } catch {
+            /* intentional: a file that vanished between readdir and stat is simply not a candidate */
+          }
+        }
+        return best;
+      },
+    },
+    host: {
+      async timerState(unit) {
+        const r = await readUnitEnabledState(unit);
+        return r.ok ? r.data : "unknown";
+      },
+    },
+    store: createProductionEpisodeStore(),
+    channel: operatorChannel,
+    bus: lazyBus(),
+    clock: { nowMs: () => Date.now() },
+    log,
+  };
+}
+
+export function createProductionOriginIdentityDeps(
+  log: (line: string) => void,
+  config: { stateDir: string },
+): OriginIdentityDeps {
+  const sincePath = join(config.stateDir, "hydra-origin-identity.since");
+  const mtimePath = join(config.stateDir, "hydra-origin-identity.config-mtime");
+  return {
+    files: {
+      ensureStateDir() {
+        try {
+          mkdirSync(config.stateDir, { recursive: true });
+          return true;
+        } catch {
+          /* intentional: the run logs the WARN for an unusable state dir */
+          return false;
+        }
+      },
+      configMtimeS(root) {
+        try {
+          const st = statSync(join(root, ".git", "config"));
+          return st.isFile() ? Math.floor(st.mtimeMs / 1000) : null;
+        } catch {
+          /* intentional: no .git/config (worktree gitfile, bare) == no breadcrumb */
+          return null;
+        }
+      },
+      readMtimeMarker() {
+        try {
+          return readFileSync(mtimePath, "utf8");
+        } catch {
+          /* intentional: first run has no breadcrumb marker */
+          return null;
+        }
+      },
+      writeMtimeMarker(mtimeS) {
+        try {
+          writeFileSync(mtimePath, String(mtimeS));
+        } catch (err) {
+          log(`WARN could not write ${mtimePath}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      },
+      readSince() {
+        try {
+          return readFileSync(sincePath, "utf8");
+        } catch {
+          /* intentional: no since-marker == no alarm episode in flight */
+          return null;
+        }
+      },
+      writeSince(line) {
+        try {
+          writeFileSync(sincePath, `${line}\n`);
+        } catch (err) {
+          log(`WARN could not write ${sincePath}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      },
+      clearSince() {
+        try {
+          unlinkSync(sincePath);
+        } catch {
+          /* intentional: rm -f semantics */
+        }
+      },
+      hasGitDir: (root) => existsSync(join(root, ".git")),
+    },
+    git: {
+      readOriginUrl: (root) => readGitConfig(root, "remote.origin.url"),
+      masterResolves: (root) => refResolves(root, "refs/remotes/origin/master"),
+      async setOriginUrl(root, url) {
+        const r = await setGitConfig(root, "remote.origin.url", url);
+        return r.ok;
+      },
+      hasFetchRefspec: (root) => hasGitConfigKey(root, "remote.origin.fetch"),
+      async setFetchRefspec(root) {
+        const r = await setGitConfig(root, "remote.origin.fetch", ORIGIN_FETCH_REFSPEC);
+        return r.ok;
+      },
+      fetchOrigin: (root, timeoutMs) => fetchOrigin(root, timeoutMs),
+    },
+    bus: lazyBus(),
+    channel: operatorChannel,
+    clock: { nowMs: () => Date.now() },
+    log,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Slice 5 ports (issue #5099): claude hooks, brief missing.
+// ---------------------------------------------------------------------------
+
+export function createProductionClaudeHooksDeps(log: (line: string) => void): ClaudeHooksDeps {
+  const bus = lazyBus();
+  return {
+    files: {
+      exists: (path) => existsSync(path),
+      ensureStateDir(dir) {
+        try {
+          mkdirSync(dir, { recursive: true });
+          return true;
+        } catch {
+          /* intentional: the run logs the WARN for an unusable state dir */
+          return false;
+        }
+      },
+      readSettings(path) {
+        try {
+          return readFileSync(path, "utf8");
+        } catch {
+          /* intentional: absent/unreadable settings.json is the settings-unreadable reason */
+          return null;
+        }
+      },
+      hasSinceMarker: (path) => existsSync(path),
+      writeSinceMarker(path, epochS) {
+        try {
+          writeFileSync(path, `${epochS}\n`);
+        } catch (err) {
+          log(`WARN could not write ${path}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      },
+      clearSinceMarker(path) {
+        try {
+          unlinkSync(path);
+        } catch {
+          /* intentional: rm -f semantics */
+        }
+      },
+    },
+    host: {
+      async listInstaller(setupPath) {
+        const r = await runInstallerList(setupPath);
+        return r.ok ? { ok: true, exitCode: r.data.exitCode, stdout: r.data.stdout } : { ok: false, exitCode: -1, stdout: "" };
+      },
+    },
+    bus: {
+      publish: (stream, event) => bus.publish(stream as never, event),
+    },
+    clock: { nowMs: () => Date.now() },
+    log,
+  };
+}
+
+export function createProductionBriefMissingDeps(log: (line: string) => void): BriefMissingDeps {
+  const keys = briefMissingEpisodeKeys();
+  return {
+    store: {
+      readLastSent: () => getBriefLastSent(),
+      anchorExists: () => episodeSinceExists(keys),
+      anchor: (nowMs) => anchorEpisodeSince(keys, nowMs),
+      readAnchor: () => readEpisodeSince(keys),
+      deleteAnchor: () => clearEpisodeSince(keys),
+      firedExists: () => episodeFiredExists(keys),
+      markFired: () => markEpisodeFired(keys),
+      deleteFired: () => clearEpisodeFired(keys),
+    },
+    channel: operatorChannel,
     clock: { nowMs: () => Date.now() },
     log,
   };

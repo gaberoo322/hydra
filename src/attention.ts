@@ -97,9 +97,11 @@ import {
 } from "./schemas/autopilot-board.ts";
 import {
   listIssuesByLabel,
+  resolveGithubRepo,
   type IssueReadResult,
   type IssueRow,
 } from "./github/issues.ts";
+import { readReconcileReport } from "./redis/lifecycle-journal.ts";
 import { projectHitlGrillLane } from "./autopilot/work-projections.ts";
 import { HOLD_EXIT_ALERT_WINDOW_DAYS } from "./lifecycle/index.ts";
 import { listHoldExits, type ListHoldExitsResult } from "./redis/lifecycle-journal.ts";
@@ -203,8 +205,37 @@ export interface AttentionFeedDeps {
    * src/redis/lifecycle-journal.ts listHoldExits.
    */
   readHoldExits?: (repo: string, sinceMs: number) => Promise<ListHoldExitsResult>;
+  /**
+   * `waiting-on-you:invalid-state` line read (issue #5316): the persisted
+   * lifecycle reconcile report, composed from ONE Redis read and zero gh
+   * calls. Default: src/redis/lifecycle-journal.ts readReconcileReport().
+   */
+  readLifecycleReconcile?: () => Promise<InvalidStateRead>;
   /** Override the operator-action registry (tests only). */
   registry?: readonly OperatorActionEntry[];
+}
+
+/** The slice of the persisted reconcile report the `invalid-state` line composes from. */
+export type InvalidStateRead =
+  | { ok: true; ts: number | null; invalid: Array<{ number: number; labels: string[] }> }
+  | { ok: false };
+
+/** The `invalid-state` line is healthy only while the report is younger than this (3h). */
+export const INVALID_STATE_REPORT_MAX_AGE_MS = 3 * 60 * 60 * 1000;
+
+async function readLifecycleReconcileDefault(): Promise<InvalidStateRead> {
+  const res = await readReconcileReport(resolveGithubRepo());
+  if (res.ok === false) return { ok: false };
+  const raw = res.report?.invalid;
+  const invalid = Array.isArray(raw)
+    ? raw.flatMap((r) => {
+        const row = r as { number?: unknown; labels?: unknown } | null;
+        return row && typeof row.number === "number" && Array.isArray(row.labels)
+          ? [{ number: row.number, labels: row.labels.map(String) }]
+          : [];
+      })
+    : [];
+  return { ok: true, ts: res.report === null ? null : res.ts, invalid };
 }
 
 /** Per-item template context (ADR-0034 §8.2 BUCKET_CONTEXT). */
@@ -257,6 +288,14 @@ export async function getAttentionFeed(
       settle(readLane),
       settle(() => readHoldExits(repo, holdSinceMs)),
     ]);
+  // Issue #5316: the invalid-state line reads the persisted reconcile report only.
+  const invalidResult = await settle(deps.readLifecycleReconcile ?? readLifecycleReconcileDefault);
+  const invalidRead: InvalidStateRead =
+    invalidResult.status === "fulfilled" ? invalidResult.value : { ok: false };
+  const invalidFresh =
+    invalidRead.ok &&
+    invalidRead.ts !== null &&
+    nowDate.getTime() - invalidRead.ts < INVALID_STATE_REPORT_MAX_AGE_MS;
 
   const emptyWaiting = (): IssuesWaitingResult => ({
     items: [],
@@ -349,6 +388,9 @@ export async function getAttentionFeed(
       waitingDraft(issue, "waiting-on-you", repo, waiting.thresholds, undefined),
     ),
     ...holdExits.drafts,
+    ...(invalidRead.ok && invalidFresh
+      ? invalidRead.invalid.map((row) => invalidStateDraft(row, repo, invalidRead.ts as number))
+      : []),
     ...targetRead.drafts,
     ...repetitionItems(friction).map((item): Draft => ({
       key: "repetition:hits",
@@ -417,6 +459,9 @@ export async function getAttentionFeed(
   for (const key of admittedByLine.keys()) {
     admittedByLine.get(key)!.healthy = evidence.get(bucketOf(key))!.errors.length === 0;
   }
+  // The invalid-state line is healthy iff the persisted report exists and is fresh.
+  admittedByLine.get("waiting-on-you:invalid-state")!.healthy =
+    admittedByLine.get("waiting-on-you:invalid-state")!.healthy && invalidFresh;
   try {
     await reconcile(admittedByLine, nowDate);
   } catch (err) {
@@ -710,6 +755,34 @@ function readHoldExitDrafts(
       },
     }));
   return { drafts, scanned: read.exits.length, failed: false };
+}
+
+/**
+ * `waiting-on-you:invalid-state` (issue #5316): one item per open issue the
+ * reconcile found with 2+ lifecycle state labels. Composed from the persisted
+ * report alone, so there is no gh call at compose time.
+ */
+function invalidStateDraft(
+  row: { number: number; labels: string[] },
+  repo: string,
+  reportTs: number,
+): Draft {
+  return {
+    key: "waiting-on-you:invalid-state",
+    context: { repo, number: row.number, kind: "issue" },
+    base: {
+      id: `invalid-state-issue-${row.number}`,
+      signal: "blocked-on-human",
+      title: `Issue #${row.number} carries ${row.labels.length} lifecycle state labels`,
+      url: `https://github.com/${repo}/issues/${row.number}`,
+      dismissed: false,
+      observedValue: row.labels.length,
+      threshold: 2,
+      thresholdLabel: "2+ lifecycle state labels",
+      crossedAt: new Date(reportTs).toISOString(),
+      detail: row.labels.join(", "),
+    },
+  };
 }
 
 interface ParkedLane {

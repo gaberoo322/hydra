@@ -145,3 +145,73 @@ export async function deleteRemoteBranch(
   const { transport, execOpts } = splitTransport(opts);
   return transport(["push", "origin", "--delete", branch], execOpts);
 }
+
+// ---------------------------------------------------------------------------
+// Watchdog origin-identity helpers (issue #5098) — every repair is
+// `git -C <root> ...`, limited to the three mutations below. No `git remote`,
+// push, pull or prune.
+// ---------------------------------------------------------------------------
+
+/** `git config --get <key>`: the value, "absent" (exit 1 — a finding), or a tooling failure (exit > 1 / spawn / timeout). */
+export type GitConfigRead =
+  | { kind: "value"; value: string }
+  | { kind: "absent" }
+  | { kind: "error"; exitCode: number; stderr: string };
+
+/**
+ * Read one git config key under `root`, preserving the exit-code split that
+ * `gitExec` drops: `git config --get` exits 1 when the key is ABSENT (a
+ * finding: the remote has no URL) but > 1 on a tooling failure (skip the tick).
+ * Never throws.
+ */
+export async function readGitConfig(root: string, key: string, opts: GhExecOptions = {}): Promise<GitConfigRead> {
+  const raw = await runExec(gitBin(), ["-C", root, "config", "--get", key], opts);
+  if (raw.spawnErrorCode || raw.timedOut) return { kind: "error", exitCode: raw.exitCode, stderr: raw.stderr };
+  if (raw.exitCode === 0) return { kind: "value", value: raw.stdout.replace(/\r?\n$/, "") };
+  if (raw.exitCode === 1) return { kind: "absent" };
+  return { kind: "error", exitCode: raw.exitCode, stderr: raw.stderr };
+}
+
+/** Whether `git config --get-all <key>` finds at least one value under `root`. */
+export async function hasGitConfigKey(root: string, key: string, opts: GhExecOptions = {}): Promise<boolean> {
+  const raw = await runExec(gitBin(), ["-C", root, "config", "--get-all", key], opts);
+  return raw.exitCode === 0 && !raw.timedOut && !raw.spawnErrorCode;
+}
+
+/** `git -C <root> config <key> <value>`. Never throws. */
+export function setGitConfig(
+  root: string,
+  key: string,
+  value: string,
+  opts: GhExecOptions = {},
+): Promise<GhResult<{ stdout: string; stderr: string }>> {
+  return gitExec(["-C", root, "config", key, value], opts);
+}
+
+/** Whether `ref` resolves under `root` (`git rev-parse --verify -q`). Read-only; never throws. */
+export async function refResolves(root: string, ref: string, opts: GhExecOptions = {}): Promise<boolean> {
+  const raw = await runExec(gitBin(), ["-C", root, "rev-parse", "--verify", "-q", ref], opts);
+  return raw.exitCode === 0 && !raw.timedOut && !raw.spawnErrorCode;
+}
+
+/** Result of the watchdog's `git fetch --quiet origin`. */
+export interface FetchOriginResult {
+  ok: boolean;
+  exitCode: number;
+  timedOut: boolean;
+  /** Raw stderr; callers redact it (remote-url.ts) before logging. */
+  stderr: string;
+}
+
+/**
+ * `GIT_TERMINAL_PROMPT=0 git -C <root> fetch --quiet origin` under `timeoutMs`.
+ * Reports the raw exit code and timeout flag (the caller words 'timed out').
+ */
+export async function fetchOrigin(root: string, timeoutMs: number): Promise<FetchOriginResult> {
+  const raw = await runExec(gitBin(), ["-C", root, "fetch", "--quiet", "origin"], {
+    timeout: timeoutMs,
+    env: { GIT_TERMINAL_PROMPT: "0" },
+  });
+  const ok = raw.exitCode === 0 && !raw.timedOut && !raw.spawnErrorCode;
+  return { ok, exitCode: raw.exitCode, timedOut: raw.timedOut, stderr: raw.stderr };
+}

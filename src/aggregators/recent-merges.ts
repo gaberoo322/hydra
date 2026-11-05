@@ -63,6 +63,7 @@ import { logger } from "../logger.ts";
 
 import { execFileViaSeam } from "../github/exec-file-compat.ts";
 import { viewPr } from "../github/issues.ts";
+import { redactUrlUserinfo } from "../github/remote-url.ts";
 import { provenanceFromLabels } from "../taxonomy/classes.ts";
 import {
   GIT_LOG_FIELD_SEP,
@@ -219,20 +220,6 @@ const FETCH_TIMEOUT_MS = 5000;
 
 // `GIT_LOG_FIELD_SEP` (the `%cI|%s` delimiter) lives in the parser leaf and is
 // imported above — the git-log pretty format here must use the same literal.
-
-/**
- * Strip `user[:token]@` userinfo from a remote URL so a credentialed origin
- * (https://user:TOKEN@github.com/...) never reaches a log sink (#4939 QA).
- * Everything after `scheme://` through the LAST `@` is removed (greedy), so a
- * token containing `@` or `/` never leaks (#5026 INV-8, QA round 4); an `@`
- * in the path is over-stripped, which is fail-safe for a log sink. The scheme
- * follows RFC 3986 (`[A-Za-z][A-Za-z0-9+.-]*`). scp-style `git@host:path` has
- * no scheme and is left alone (no secret). Mirrors the watchdog's `shown_url`
- * sed in scripts/hydra-watchdog.sh.
- */
-export function redactUrlUserinfo(url: string): string {
-  return url.replace(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/).*@/, "$1");
-}
 
 /**
  * Public primitive (issue #2177) — the intermediate "list recent merge

@@ -160,7 +160,12 @@ function harness(
       h.state.state = "CLOSED";
       return { ok: true };
     },
+    comment: async () => ({ ok: true }),
+    env: () => ({}),
     fetch: {
+      issueComments: async () => ({ ok: true, value: [] }),
+      timeline: async () => ({ ok: true, value: [] }),
+      prBodies: async () => ({ ok: true, value: [] }),
       designConcept: async () => (opts.dc ? { ok: true, value: opts.dc } : { ok: false }),
       pr: async () => (opts.pr ? { ok: true, value: opts.pr } : { ok: false }),
       comment: async () => (opts.comment ? { ok: true, value: opts.comment } : { ok: false }),
@@ -172,6 +177,8 @@ function harness(
       expireOnClose: async (_r, i) => { h.expired.push(i); return { ok: true }; },
       openClaim: async (_r, _i, claim) => ({ ok: true, claim }),
       closeClaim: async () => ({ ok: true, prior: null }),
+      read: async () => ({ ok: true, entries: [...h.journal] }),
+      readClaim: async () => ({ ok: true, claim: null }),
     },
     now: () => 1000,
   };
@@ -342,7 +349,7 @@ describe("claim / release (INV-11)", () => {
     const res = await releaseClaim(10, "d1", deps);
     assert.equal(res.ok, true);
     assert.equal(h.journal[0].kind, "claim-closed");
-    assert.deepEqual(h.journal[0].evidence, { dispatch: "d1" });
+    assert.deepEqual(h.journal[0].evidence, { dispatch: "d1", class: "dev_orch" });
   });
 });
 
@@ -660,7 +667,7 @@ describe("research-exit gate", () => {
   });
 
   test("recordsNeeded requests the comment + entry records only for research-exit", () => {
-    assert.deepEqual(recordsNeeded("research-exit"), { designConcept: false, pr: false, comment: true, stateEntry: true });
+    assert.deepEqual(recordsNeeded("research-exit"), { designConcept: false, pr: false, comment: true, stateEntry: true, qaLive: false });
     for (const g of ["none", "judgment", "adr5", "dispatch", "pr-open", "close", "not-yet-implemented"] as const) {
       const n = recordsNeeded(g);
       assert.equal(n.comment || n.stateEntry, false, g);

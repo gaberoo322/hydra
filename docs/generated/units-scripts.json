@@ -138,7 +138,7 @@
         "path": "scripts/hydra-watchdog.sh"
       },
       "kind": "sh",
-      "description": "hydra-watchdog.sh — consolidated Hydra watchdog (issue #705)"
+      "description": "hydra-watchdog.sh — the watchdog TIMER ENTRY (issue #705; collapsed by #5099, epic #5094)"
     },
     {
       "path": "scripts/hydra-watchdog.ts",

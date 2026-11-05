@@ -17,6 +17,18 @@
  *   node --experimental-strip-types scripts/hydra-watchdog.ts launch-flow
  *       the LAUNCH FLOW check (issue #5097): pace-gate last-tick streaks via the
  *       shared episode tracker, delivered through the Operator Channel + EventBus
+ *   node --experimental-strip-types scripts/hydra-watchdog.ts deploy-drift | redis-backup | skill-mirror | origin-identity
+ *       the four slice-4 checks (issue #5098), each its own process so one crash or
+ *       timeout never skips the others; env names and defaults unchanged from the
+ *       bash blocks (HYDRA_WATCHDOG_AUTODEPLOY*, _SKILL_MIRROR_*, _BACKUP_*,
+ *       _EXPECTED_ORIGIN_*, _CANONICAL_ORIGIN_URL, _ORIGIN_*, _DRIFT_STATE_DIR)
+ *   node --experimental-strip-types scripts/hydra-watchdog.ts claude-hooks | brief-missing
+ *       the last two decision blocks (issue #5099): the Claude Code PreToolUse hook
+ *       install alarm (#5064, in-band only) and the 26h Morning Brief alarm (#5048)
+ *   node --experimental-strip-types scripts/hydra-watchdog.ts plan
+ *       print the check table (src/watchdog/checks.ts), one tab-separated line per
+ *       check; hydra-watchdog.sh iterates it, and a failing `plan` is the
+ *       "CLI failed to start" alarm (the whole check graph did not boot)
  *   node --experimental-strip-types scripts/hydra-watchdog.ts thresholds
  *       print src/autopilot/stale-thresholds.ts as JSON (status.sh, deploy smoke)
  *
@@ -65,13 +77,59 @@ import {
   LAUNCH_FLOW_LOG_PREFIX,
   runLaunchFlow,
 } from "../src/watchdog/launch-flow.ts";
+import { join } from "node:path";
+import { resolveOrchestratorRepo } from "../src/github/repo.ts";
+import { parseNonNegativeInt } from "../src/watchdog/drift-gate.ts";
 import {
+  DEFAULT_DEPLOY_DRIFT_GRACE_S,
+  DEPLOY_DRIFT_LOG_PREFIX,
+  DEPLOY_DRIFT_MARKER_NAME,
+  DEPLOY_DRIFT_TIMEOUT_S,
+  runDeployDrift,
+} from "../src/watchdog/deploy-drift.ts";
+import {
+  DEFAULT_ORIGIN_FETCH_TIMEOUT_S,
+  DEFAULT_ORIGIN_HOST,
+  DEFAULT_ORIGIN_REPAIR_BACKOFF_S,
+  ORIGIN_IDENTITY_LOG_PREFIX,
+  ORIGIN_IDENTITY_TIMEOUT_S,
+  runOriginIdentity,
+} from "../src/watchdog/origin-identity.ts";
+import {
+  DEFAULT_REDIS_BACKUP_DIR,
+  REDIS_BACKUP_LOG_PREFIX,
+  REDIS_BACKUP_TIMEOUT_S,
+  parseStaleHours,
+  runRedisBackup,
+} from "../src/watchdog/redis-backup.ts";
+import {
+  DEFAULT_SKILL_MIRROR_GRACE_S,
+  SKILL_MIRROR_LOG_PREFIX,
+  SKILL_MIRROR_MARKER_NAME,
+  SKILL_MIRROR_TIMEOUT_S,
+  runSkillMirror,
+} from "../src/watchdog/skill-mirror.ts";
+import {
+  createProductionBriefMissingDeps,
+  createProductionClaudeHooksDeps,
+  createProductionDeployDriftDeps,
   createProductionDiskDeps,
   createProductionLaunchFlowDeps,
   createProductionLivenessDeps,
+  createProductionOriginIdentityDeps,
+  createProductionRedisBackupDeps,
+  createProductionSkillMirrorDeps,
   createProductionWedgeDeps,
 } from "../src/watchdog/ports.ts";
 import { runWedge, WEDGE_LOG_PREFIX } from "../src/watchdog/wedge.ts";
+import { formatWatchdogPlan } from "../src/watchdog/checks.ts";
+import {
+  BRIEF_MISSING_LOG_PREFIX,
+  BRIEF_MISSING_TIMEOUT_S,
+  parseBriefStaleHours,
+  runBriefMissing,
+} from "../src/watchdog/brief-missing.ts";
+import { CLAUDE_HOOKS_LOG_PREFIX, CLAUDE_HOOKS_TIMEOUT_S, runClaudeHooks } from "../src/watchdog/claude-hooks.ts";
 
 function envNumber(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -84,6 +142,13 @@ async function main(argv: string[]): Promise<void> {
   const cmd = argv[0];
   if (cmd === "thresholds") {
     console.log(JSON.stringify(staleThresholdsJson()));
+    return;
+  }
+  if (cmd === "plan") {
+    // The check table (bash iterates it) AND the startability probe: this file
+    // statically imports every check module, so reaching here proves the whole
+    // graph booted. Pure print, no I/O.
+    console.log(formatWatchdogPlan());
     return;
   }
   if (cmd === "liveness") {
@@ -170,7 +235,118 @@ async function main(argv: string[]): Promise<void> {
       process.exit(0);
     }
   }
-  console.error(`hydra-watchdog.ts: unknown subcommand '${cmd ?? ""}' (expected: liveness | wedge | disk | launch-flow | thresholds)`);
+  if (cmd === "deploy-drift") {
+    await runOneShot(DEPLOY_DRIFT_LOG_PREFIX, DEPLOY_DRIFT_TIMEOUT_S, async () => {
+      const stateDir = process.env.HYDRA_WATCHDOG_DRIFT_STATE_DIR || "/tmp";
+      await runDeployDrift(
+        createProductionDeployDriftDeps((line) => console.log(line), {
+          markerPath: join(stateDir, DEPLOY_DRIFT_MARKER_NAME),
+          baseUrl: process.env.HYDRA_BASE_URL || "http://localhost:4000",
+        }),
+        {
+          root: hydraRoot(),
+          autoDeploy: process.env.HYDRA_WATCHDOG_AUTODEPLOY === "1",
+          graceS: parseNonNegativeInt(process.env.HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS, DEFAULT_DEPLOY_DRIFT_GRACE_S),
+        },
+      );
+    });
+  }
+  if (cmd === "skill-mirror") {
+    await runOneShot(SKILL_MIRROR_LOG_PREFIX, SKILL_MIRROR_TIMEOUT_S, async () => {
+      const stateDir = process.env.HYDRA_WATCHDOG_DRIFT_STATE_DIR || "/tmp";
+      await runSkillMirror(
+        createProductionSkillMirrorDeps((line) => console.log(line), {
+          markerPath: join(stateDir, SKILL_MIRROR_MARKER_NAME),
+          baseUrl: process.env.HYDRA_BASE_URL || "http://localhost:4000",
+        }),
+        {
+          root: hydraRoot(),
+          liveDir:
+            process.env.HYDRA_WATCHDOG_SKILL_MIRROR_LIVE_DIR ||
+            process.env.CLAUDE_SKILLS_DIR ||
+            join(process.env.HOME || "", ".claude", "skills"),
+          autoFix: process.env.HYDRA_WATCHDOG_SKILL_MIRROR_AUTOFIX === "1",
+          graceS: parseNonNegativeInt(process.env.HYDRA_WATCHDOG_SKILL_MIRROR_AUTOFIX_GRACE_SECONDS, DEFAULT_SKILL_MIRROR_GRACE_S),
+        },
+      );
+    });
+  }
+  if (cmd === "redis-backup") {
+    await runOneShot(REDIS_BACKUP_LOG_PREFIX, REDIS_BACKUP_TIMEOUT_S, async () => {
+      await runRedisBackup(createProductionRedisBackupDeps((line) => console.log(line)), {
+        backupDir: process.env.HYDRA_WATCHDOG_BACKUP_DIR || DEFAULT_REDIS_BACKUP_DIR,
+        staleHours: parseStaleHours(process.env.HYDRA_WATCHDOG_BACKUP_STALE_HOURS),
+      });
+    });
+  }
+  if (cmd === "origin-identity") {
+    await runOneShot(ORIGIN_IDENTITY_LOG_PREFIX, ORIGIN_IDENTITY_TIMEOUT_S, async () => {
+      await runOriginIdentity(
+        createProductionOriginIdentityDeps((line) => console.log(line), {
+          stateDir: process.env.HYDRA_WATCHDOG_ORIGIN_STATE_DIR || "/tmp",
+        }),
+        {
+          root: hydraRoot(),
+          // Unset-only default: an explicit empty value is honoured (repair then refuses to act).
+          expectedRepo: process.env.HYDRA_WATCHDOG_EXPECTED_ORIGIN_REPO ?? resolveOrchestratorRepo(),
+          expectedHost: process.env.HYDRA_WATCHDOG_EXPECTED_ORIGIN_HOST || DEFAULT_ORIGIN_HOST,
+          canonicalEnv: process.env.HYDRA_WATCHDOG_CANONICAL_ORIGIN_URL,
+          autoRepair: process.env.HYDRA_WATCHDOG_ORIGIN_AUTOREPAIR !== "0",
+          fetchTimeoutS: parseNonNegativeInt(process.env.HYDRA_WATCHDOG_ORIGIN_FETCH_TIMEOUT_S, DEFAULT_ORIGIN_FETCH_TIMEOUT_S),
+          backoffS: parseNonNegativeInt(process.env.HYDRA_WATCHDOG_ORIGIN_REPAIR_BACKOFF_S, DEFAULT_ORIGIN_REPAIR_BACKOFF_S),
+        },
+      );
+    });
+  }
+  if (cmd === "claude-hooks") {
+    await runOneShot(CLAUDE_HOOKS_LOG_PREFIX, CLAUDE_HOOKS_TIMEOUT_S, async () => {
+      const home = process.env.HOME || "";
+      await runClaudeHooks(createProductionClaudeHooksDeps((line) => console.log(line)), {
+        setupPath: process.env.HYDRA_WATCHDOG_CLAUDE_HOOKS_SETUP || join(hydraRoot(), "scripts", "setup-claude-hooks.sh"),
+        hooksDir: process.env.HYDRA_WATCHDOG_CLAUDE_HOOKS_DIR || join(home, ".claude", "hooks", "hydra"),
+        settingsPath: process.env.HYDRA_WATCHDOG_CLAUDE_SETTINGS || join(home, ".claude", "settings.json"),
+        stateDir: process.env.HYDRA_WATCHDOG_CLAUDE_HOOKS_STATE_DIR || "/tmp",
+        notifyStream: process.env.HYDRA_WATCHDOG_CLAUDE_HOOKS_NOTIFY_STREAM || "hydra:notifications",
+      });
+    });
+  }
+  if (cmd === "brief-missing") {
+    await runOneShot(BRIEF_MISSING_LOG_PREFIX, BRIEF_MISSING_TIMEOUT_S, async () => {
+      const rawNow = process.env.HYDRA_WATCHDOG_BRIEF_NOW_MS;
+      await runBriefMissing(createProductionBriefMissingDeps((line) => console.log(line)), {
+        staleHours: parseBriefStaleHours(process.env.HYDRA_WATCHDOG_BRIEF_STALE_HOURS),
+        nowMs: rawNow !== undefined && /^[0-9]+$/.test(rawNow) ? Number(rawNow) : null,
+      });
+    });
+  }
+  console.error(
+    `hydra-watchdog.ts: unknown subcommand '${cmd ?? ""}' (expected: plan | liveness | wedge | disk | launch-flow | deploy-drift | redis-backup | skill-mirror | claude-hooks | brief-missing | origin-identity | thresholds)`,
+  );
+}
+
+/** The checkout the watchdog inspects (bash: `${HYDRA_ROOT:-/home/gabe/hydra}`; same default as src/health/deployed-sha.ts). */
+function hydraRoot(): string {
+  return process.env.HYDRA_ROOT || join(process.env.HOME || "", "hydra");
+}
+
+/**
+ * Run one of the slice-4 checks as its own one-shot process (INV-1/INV-14): an
+ * unref'd force-exit timer just under the bash wrapper's timeout, every
+ * internal error a WARN, Redis/bus connections released, exit 0 always.
+ */
+async function runOneShot(prefix: string, wrapperTimeoutS: number, body: () => Promise<void>): Promise<never> {
+  setTimeout(() => {
+    console.log(`${prefix} WARN force-exit before the ${wrapperTimeoutS}s wrapper bound (tick did not settle)`);
+    process.exit(0);
+  }, Math.max(1, wrapperTimeoutS - 10) * 1000).unref();
+  try {
+    await body();
+  } catch (err) {
+    console.log(`${prefix} WARN ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    closeRedisConnections();
+    process.exit(0);
+  }
 }
 
 main(process.argv.slice(2)).catch((err) => {

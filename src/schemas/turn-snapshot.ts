@@ -138,6 +138,12 @@ const SignalsSchema = z
     retro_run_drillable: z.boolean(),
     review_retro_due: z.boolean(),
     // PR gate (#4240) and the resume / conflict-fix picks
+    // #5319: open issues labelled `parked` (ADR-0047 Decision 6) - decide.py's belt filter set
+    orch_parked_issues: NumberList,
+    // #5319 QA r1: open PRs whose closing issue is parked (the qa-verdict event is PR-keyed)
+    orch_parked_prs: NumberList,
+    // #5319 QA r1: the parked read was unreadable - [] above is NOT a healthy empty set
+    orch_parked_unreadable: z.boolean(),
     orch_prs_dirty: NumberList,
     orch_prs_unchecked: NumberList,
     orch_prs_behind: NumberList,
@@ -150,6 +156,8 @@ const SignalsSchema = z
     // PR references, so the PR-keyed pins above structurally can't name it.
     orch_dev_resume_nopr_anchor: IssueNumber.nullable(),
     orch_dirty_forward_fix: PinSchema.nullable(),
+    // #5253: the dirty pick's PR number iff a QA FAIL is pending at its head (two-phase arm)
+    orch_dirty_forward_fix_fail_pr: IssueNumber.nullable(),
     orch_prs_dirty_surface: DirtySurfaceSchema,
     // #5052: open PRs whose QA verdict may now be mergeable - re-evaluated every turn
     orch_qa_verdict_recheck: QaRecheckSchema,
@@ -219,6 +227,9 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   retro_run_available: false,
   retro_run_drillable: false,
   review_retro_due: false,
+  orch_parked_issues: [],
+  orch_parked_prs: [],
+  orch_parked_unreadable: true, // an all-degraded marker turn has NO healthy parked read: the belt must fail closed (INV-4, QA r2)
   orch_prs_dirty: [],
   orch_prs_unchecked: [],
   orch_prs_behind: [],
@@ -227,6 +238,7 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   orch_dev_resume_pick: null,
   orch_dev_resume_nopr_anchor: null,
   orch_dirty_forward_fix: null,
+  orch_dirty_forward_fix_fail_pr: null,
   orch_prs_dirty_surface: [],
   orch_qa_verdict_recheck: [],
   orch_pending_grill_anchor: null,
