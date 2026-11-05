@@ -85,7 +85,7 @@ In the same audit, 17 of 67 FAIL rounds raised a blocker that already existed at
 
 - **Class sweep** (every reviewer, every round, step 7): when you raise a finding, list every instance of that defect class in the diff and the touched files in the same round. At 3+ instances, or on adversarial inputs, recommend the structural fix.
 - **Re-review context** (step 7.0a, prompt only): after a FAIL, the prior findings table is appended to the review packet, plus `git diff <prior sha>..HEAD` when the prior `sha=` is still an ancestor of HEAD. Reviewers still get the FULL diff and changed files, first state fixed/not-fixed for each prior finding, and justify anything new. Nothing in code filters or demotes a finding: `foldReviewFindings()` alone decides the verdict (operator decision on #4735).
-- **Round cap** (step 10): the 3rd reviewed FAIL round on a T1–T3 PR escalates instead of bouncing (`decideQaRoundAction()`). A CI-only round (the step-6.6 admission-gate skip) reviewed nothing and does not count; a round whose findings fold failed does count (its comment still carries a `### Findings` heading). The issue loses every dev-lane label and gains `ready-for-human`. The PR gains `ready-for-human` too, and the issue gets a round-by-round summary plus a recommendation. T4 keeps its 2nd-fail rule below.
+- **Round cap** (step 10): the 3rd reviewed FAIL round on a T1–T3 PR escalates instead of bouncing (`decideQaRoundAction()`). A CI-only round (the step-6.6 admission-gate skip) reviewed nothing and does not count; a round whose findings fold failed does count (its comment still carries a `### Findings` heading). The lifecycle seam parks the issue (`parked`, an off-list escalation per ADR-0047 D6 — never `ready-for-human`) and posts the unified cap-park comment; the issue also gets a round-by-round summary plus a recommendation. T4 keeps its 2nd-fail rule below.
 
 ### T4 Verifier-Core checklist + Deep-QA Remediation Loop (issue #740)
 
@@ -103,7 +103,7 @@ The fired checklist items become the **findings** in the FAIL comment.
 - **1st deep-QA FAIL** → identical to the universal loop: comment findings + bounce the PR to a dev agent (re-label `needs-dev-resume` while the PR is open). It never escalates on the first fail.
 - **2nd consecutive deep-QA FAIL on the same PR** → **block** the PR (FAIL comment + `ready-for-human`, do not re-bounce) and add the **source issue** to the `/hydra-review` pickup set: `ready-for-human` label + a structured comment (PR ref, both failing summaries, the fired Verifier-Core checklist items). This is the **existing** operator surface — no new channel, no new verdict literal. (`#745`'s phone-notify hook fires orthogonally when the pickup set goes non-empty.)
 
-**How the fail number is counted.** The bounce path is stateless on the issue (step 10 strips `needs-qa` and adds the bounce label — `needs-dev-resume` while the PR is open, `ready-for-agent` otherwise (issue #4766) — resetting any label-carried counter on every bounce). So the count is derived **live** from the **PR** — the durable per-attempt ledger: every T4 deep-QA FAIL comment carries the machine-greppable marker line `Verifier-Core deep-QA: FAIL`. The next pass counts prior markers: `failNumber = priorMarkers + 1`; `failNumber >= 2` ⇒ block-and-escalate, else bounce. There is **no** new Redis key and **no** issue-label counter. "Consecutive" and "total fails on this PR" coincide because a PASS merges the PR and ends the loop. The pure decision rule is `decideDeepQaAction()` in `scripts/ci/qa-verdict.ts`.
+**How the fail number is counted.** The bounce path is stateless on the issue (step 10 moves the issue through the lifecycle seam to the bounce state — `needs-dev-resume` while the PR is open, `ready-for-agent` otherwise (issue #4766) — resetting any label-carried counter on every bounce). So the count is derived **live** from the **PR** — the durable per-attempt ledger: every T4 deep-QA FAIL comment carries the machine-greppable marker line `Verifier-Core deep-QA: FAIL`. The next pass counts prior markers: `failNumber = priorMarkers + 1`; `failNumber >= 2` ⇒ block-and-escalate, else bounce. There is **no** new Redis key and **no** issue-label counter. "Consecutive" and "total fails on this PR" coincide because a PASS merges the PR and ends the loop. The pure decision rule is `decideDeepQaAction()` in `scripts/ci/qa-verdict.ts`.
 
 ### `deep-qa-gate` — authoritative commit StatusContext vs advisory CheckRun mirror (issue #868)
 
@@ -553,8 +553,9 @@ fi
 - **`defer`** — the PR cannot merge on this pass. Post a comment and bounce to a
   dev agent via the universal remediation loop. **Do NOT leave `needs-qa` in
   place** — that busy-loops `hydra-qa` every autopilot tick, 30-65k tokens each
-  (issue #974); the bounce label (a dev-lane label either way) is the bridging
-  label that also avoids the label-less orphan gap (issue #3788). A deferred
+  (issue #974); the bounce is a lifecycle-seam transition
+  (`scripts/lifecycle.ts advance`, ADR-0047 D3 — no direct label writes, #5317),
+  and the seam never leaves the issue label-less. A deferred
   PR is, by construction, one that cannot merge on this pass, so INV-C holds:
   every PR that reaches auto-merge has been reviewed at full depth.
   **Open-PR bounce (issue #4766):** the bounce target comes from step 3's
@@ -576,9 +577,8 @@ fi
   No verdict is being emitted — the PR cannot merge on this pass. The full review (including the Verifier-Core fan-out for a T4 PR) runs once the PR is rebased / CI is green. QA has exited; the autopilot re-queues it when the PR is ready."
   BOUNCE_LABEL=$(qa_bounce_label)
   if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then
-    gh issue edit $issue_number --repo gaberoo322/hydra \
-      --remove-label "needs-qa" --add-label "needs-dev-resume" 2>/dev/null \
-      || echo "WARN: failed to re-label issue #$issue_number on defer (non-fatal)"
+    npx tsx scripts/lifecycle.ts advance $issue_number needs-dev-resume --evidence pr=$pr_number --actor hydra-qa \
+      || { echo "[hydra-qa] ERROR: lifecycle advance needs-dev-resume refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1; }
     if [ "$GLM_AUTHORED" = "1" ]; then
       gh issue comment $issue_number --repo gaberoo322/hydra --body \
         "> *Automated QA — review deferred (GLM-authored PR)*
@@ -603,9 +603,8 @@ fi
   else
     # Not-open fallback (#4766): live read confirmed CLOSED/MERGED — no open
     # PR remains, so a fresh dev pick is the right lane.
-    gh issue edit $issue_number --repo gaberoo322/hydra \
-      --remove-label "needs-qa" --add-label "ready-for-agent" 2>/dev/null \
-      || echo "WARN: failed to re-label issue #$issue_number on defer (non-fatal)"
+    npx tsx scripts/lifecycle.ts advance $issue_number ready-for-agent --evidence pr=$pr_number --actor hydra-qa \
+      || { echo "[hydra-qa] ERROR: lifecycle advance ready-for-agent refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1; }
   fi
   exit 0
   ```
@@ -1083,7 +1082,7 @@ BLOCKER_SUMMARY="${BLOCKERS:-0} blocker(s), worst: ${MAX_SEVERITY:-none}${WORST_
 
 ### 9.6 Decide the round action (one `round-action` call)
 
-After the trailer renders and BEFORE this round's comment is posted (so the prior bodies the engine reads never include the current verdict), make exactly ONE `round-action` call. It returns everything step 10 routes on: the T1–T3 round-cap decision (`.round.action` is `proceed | bounce | escalate | deep-qa`), the T4 Deep-QA action (`.deepQa.action`, `.deepQa.failNumber`), the SHA-bound PASS marker (`.passMarker`, T4 PASS only), the FAIL marker (`.failMarker`, T4 FAIL only), the escalation comment body (`.escalationSummary`) and the escalation label sets (`.labels.issueAdd`, `.labels.issueRemove`, `.labels.prAdd`). No label name is spelled in this playbook's escalation loop; it reads them from this JSON.
+After the trailer renders and BEFORE this round's comment is posted (so the prior bodies the engine reads never include the current verdict), make exactly ONE `round-action` call. It returns everything step 10 routes on: the T1–T3 round-cap decision (`.round.action` is `proceed | bounce | escalate | deep-qa`), the T4 Deep-QA action (`.deepQa.action`, `.deepQa.failNumber`), the SHA-bound PASS marker (`.passMarker`, T4 PASS only), the FAIL marker (`.failMarker`, T4 FAIL only), the escalation comment body (`.escalationSummary`). Step 10 no longer reads `.labels`: state writes go through the lifecycle seam (#5317).
 
 A CI-only round (the step-6.6 `skip-required-failed` short-circuit) reviewed nothing and never counts toward the cap, so `currentReviewed` is set from the branch the playbook took (`GATE_ACTION`) — never by grepping the skip marker text out of `REVIEW_REPORT`.
 
@@ -1111,13 +1110,10 @@ Step 10 routes on `$ROUND_JSON` from step 9.6 on every path, including the step-
 
 **Verdict `PASS`** (both axes pass + all required checks green):
 ```bash
-# Strip needs-qa FIRST (issue #974), before any command that can abort on a
-# self-authored PR, so a lingering needs-qa never re-dispatches QA. Use
-# `gh issue edit` (not the broken `gh pr edit`). Add `in-progress` in the SAME
-# call (issue #3788): the PR is open, so the issue must never sit label-less
-# while it waits in the merge queue; `in-progress` does not key the #974 loop.
-gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" --add-label "in-progress" 2>/dev/null \
-  || true  # already cleared (e.g. by a prior auto-close) — expected and non-fatal
+# PASS lands in qa-passed through the lifecycle seam (issue #5317, ADR-0047
+# D2/D4) AFTER the verdict comment below: the `qa-verdict` gate reads the
+# `QA-Verdict:` trailer at head, so the record must exist before the call.
+# `in-progress` is never written here — it now means only "an agent is working".
 
 # Record the PASS as a COMMENT, not an approval: the shared gaberoo322 identity
 # cannot self-approve its own PR (reference_qa_cannot_self_approve / #848), and
@@ -1162,13 +1158,20 @@ The Verifier-Core deep-QA branch passed against this exact head SHA. The \`deep-
   fi
 fi
 
+# Seam call BEFORE the merge call (#5317 INV-8): needs-qa -> qa-passed, gated on
+# the PASS trailer at head posted after the issue entered needs-qa. A refusal
+# exits non-zero (never a by-hand label edit — ADR-0047 D4); the comment above
+# is the durable record and reconcile / the next QA pick recover.
+npx tsx scripts/lifecycle.ts advance $issue_number qa-passed --evidence pr=$pr_number --actor hydra-qa \
+  || { echo "[hydra-qa] ERROR: lifecycle advance qa-passed refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1; }
+
 # Enable auto-merge (squash) rather than a blocking immediate merge: the merge
 # gate is CI required-status-checks (feedback_hydra_repo_no_auto_merge), so
 # `--auto` lets GitHub squash-merge the instant the checks settle without this
-# dispatch blocking on them. needs-qa was already stripped above, so even if
-# this call errors the source issue is not left in the #974 busy-loop.
+# dispatch blocking on them. The issue already left needs-qa (seam call above),
+# so even if this call errors it is not left in the #974 busy-loop.
 gh pr merge $pr_number --repo gaberoo322/hydra --auto --squash --delete-branch \
-  || echo "WARN: failed to enable auto-merge on PR #${pr_number} (non-fatal — needs-qa already cleared; CI is the merge gate)"
+  || echo "WARN: failed to enable auto-merge on PR #${pr_number} (non-fatal — issue already in qa-passed; CI is the merge gate)"
 ```
 **If `--auto` is refused, a direct merge goes through the QA merge guard (issue
 #4738).** When GitHub refuses to arm auto-merge (e.g. a red non-required check —
@@ -1183,9 +1186,9 @@ GUARD_JSON=$(node --experimental-strip-types scripts/ci/qa-merge-guard.ts --pr "
 ```
 A denied guard leaves the PR for the autopilot or `/hydra-review`; QA never
 posts a `QA-Override:`.
-The needs-qa strip runs first (issue #974), so the label is cleared regardless
-of whether the comment or auto-merge calls below it succeed. The issue
-auto-closes via `closes #N` in the PR body when the squash-merge lands.
+The seam call precedes the merge call (issue #5317), so the issue has left
+needs-qa whether or not auto-merge arms. The issue auto-closes via `closes #N`
+in the PR body when the squash-merge lands.
 
 **Verdict `PASS-pending-CI`** (review PASS + at least one check still queued/in_progress):
 ```bash
@@ -1205,12 +1208,13 @@ Verdict: \`PASS-pending-CI\`. Autopilot will re-evaluate once required checks co
 
 ${QA_VERDICT_TRAILER}"
 
-# Clear needs-qa (issue #638): review is done; the autopilot polls CI itself
-# via statusCheckRollup, so a lingering needs-qa would re-dispatch QA every
-# tick. A later CI failure is re-labelled by the autopilot poll loop. Bridge
-# with `in-progress` in the same call — same rationale as the PASS branch.
-gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" --add-label "in-progress" 2>/dev/null \
-  || echo "WARN: failed to clear needs-qa from issue #$issue_number (non-fatal)"
+# Leave needs-qa through the seam (issues #638, #5317): review is done and the
+# autopilot polls CI itself via statusCheckRollup, so a lingering needs-qa would
+# re-dispatch QA every tick. PASS-pending-CI is a PASS for routing: the issue
+# goes to qa-passed, and the reconcile pass reads CI live (a later red CI
+# bounces it back). `in-progress` is never written here.
+npx tsx scripts/lifecycle.ts advance $issue_number qa-passed --evidence pr=$pr_number --actor hydra-qa \
+  || { echo "[hydra-qa] ERROR: lifecycle advance qa-passed refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1; }
 ```
 
 **Verdict `FAIL` or `FAIL-pending-CI`** (any axis has hard findings, or a required check has already failed):
@@ -1219,57 +1223,16 @@ Every FAIL is posted as a PR **comment**, never a request-changes review: GitHub
 
 **Disarm auto-merge FIRST, on every FAIL, every tier (issue #4737).** A PASS arms auto-merge; nothing else ever disarms it, so a later FAIL on a re-review would otherwise merge the moment CI goes green (#4380 merged 4s after its FAIL posted). Both FAIL blocks below therefore open with the same non-fatal disarm call; on a PR with no auto-merge armed it errors, which is logged and ignored. The same rule, read from QA's own record, is the QA merge guard (scripts/ci/qa-merge-guard.ts --pr N): it exits 0 only when the latest QA-Verdict trailer is a PASS at the PR's current head SHA, or the PR only touches docs/research/ or docs/adr/.
 
-For T1 / T2 / T3 (PR_TIER empty/1/2/3) — the universal remediation bounce, capped at the 3rd FAIL round (issue #4735). The round-cap block runs BEFORE this round's comment is posted, so the prior bodies it reads never include the current verdict. On escalate it moves the labels itself: it adds ready-for-human to the issue and the PR, then removes every dev-lane label from the issue. The routing below then posts the escalation summary instead of bouncing. If the decision is unavailable (a gh or node failure), QA bounces as it did before #4735 and logs a warning. (No inline code spans in this paragraph: test/hydra-qa-needs-qa-clear.test.mts reads this section up to the first bash fence.)
+For T1 / T2 / T3 (PR_TIER empty/1/2/3) — the universal remediation bounce, capped at the 3rd reviewed FAIL round (issues #4735, #5317). The verdict comment (carrying this round's trailer) is posted FIRST, then the bounce goes through the lifecycle seam. The seam owns the cap: the 3rd reviewed FAIL parks the issue (never ready-for-human) and posts the unified cap-park comment in the same call; in shadow mode the seam bounces and reports a would-park, and the routing below parks explicitly. The round-action call only supplies the escalation summary text. If a seam call is refused the routing exits non-zero and never edits labels by hand. (No inline code spans in this paragraph: test/hydra-qa-needs-qa-clear.test.mts reads this section up to the first bash fence.)
 ```bash
 # Disarm any auto-merge a prior PASS armed (issue #4737) — before anything else.
 gh pr merge $pr_number --repo gaberoo322/hydra --disable-auto \
   || echo "[hydra-qa] WARN: --disable-auto on PR #${pr_number} failed (non-fatal — likely not armed)" >&2
-# The round-cap decision was made by the step-9.6 round-action call (before this
-# round's comment, so its prior bodies never include the current verdict).
-ROUND_ACTION=bounce
-QA_ESCALATION_SUMMARY=""
-ESC_LABELS_OK=1
-ESC_LABEL_NOTE=""
-# The Skill loader substitutes the BARE issue-number token into this text; it
-# never sets a shell variable, so the braced form would render empty (PR #4759).
-ESC_ISSUE="$issue_number"
-case "$(printf '%s' "$ROUND_JSON" | jq -r '.round.action // empty' 2>/dev/null)" in
-  escalate) ROUND_ACTION=escalate ;;
-  *) ;;
-esac
-if [ "$ROUND_ACTION" = "escalate" ]; then
-  QA_ESCALATION_SUMMARY=$(printf '%s' "$ROUND_JSON" | jq -r '.escalationSummary')
-  case "$ESC_ISSUE" in
-    ''|*[!0-9]*)
-      echo "[hydra-qa] ERROR: no issue number to escalate (got '$ESC_ISSUE') — issue labels NOT changed" >&2
-      ESC_LABELS_OK=0 ;;
-    *)
-      # Add first, so the issue is in the operator queue even if a removal fails.
-      for l in $(printf '%s' "$ROUND_JSON" | jq -r '.labels.issueAdd[]'); do
-        gh api -X POST "repos/gaberoo322/hydra/issues/$ESC_ISSUE/labels" -f "labels[]=$l" >/dev/null \
-          || { ESC_LABELS_OK=0; echo "[hydra-qa] ERROR: could not add $l to issue #$ESC_ISSUE" >&2; }
-      done
-      # The label name goes in the URL path (a DELETE with -f name= wipes ALL
-      # labels). A 404 means the label was not on the issue — that is success.
-      for l in $(printf '%s' "$ROUND_JSON" | jq -r '.labels.issueRemove[]'); do
-        if ! ESC_ERR=$(gh api -X DELETE "repos/gaberoo322/hydra/issues/$ESC_ISSUE/labels/$l" 2>&1 >/dev/null); then
-          case "$ESC_ERR" in
-            *404*|*"Label does not exist"*) ;;
-            *) ESC_LABELS_OK=0; echo "[hydra-qa] ERROR: could not remove $l from issue #$ESC_ISSUE: $ESC_ERR" >&2 ;;
-          esac
-        fi
-      done ;;
-  esac
-  for l in $(printf '%s' "$ROUND_JSON" | jq -r '.labels.prAdd[]'); do
-    gh api -X POST "repos/gaberoo322/hydra/issues/$pr_number/labels" -f "labels[]=$l" >/dev/null \
-      || { ESC_LABELS_OK=0; echo "[hydra-qa] ERROR: could not add $l to PR #$pr_number" >&2; }
-  done
-  if [ "$ESC_LABELS_OK" = "1" ]; then
-    ESC_LABEL_NOTE="Labelled \`ready-for-human\` (issue and PR) and removed every dev-lane label; no dev lane will pick this up."
-  else
-    ESC_LABEL_NOTE="**Label routing FAILED** (see the QA log): add \`ready-for-human\` and remove \`needs-qa\`, \`ready-for-agent\`, \`needs-dev-resume\` and \`in-progress\` by hand, or QA will re-run on this issue."
-  fi
-fi
+# The 3rd reviewed FAIL is detected by the SEAM (ADR-0047 D6): the verdict
+# comment below carries this round's trailer, so the seam's trailer-sourced
+# qa-fail-rounds count includes it. ROUND_JSON supplies only the summary text.
+QA_ESCALATION_SUMMARY=$(printf '%s' "$ROUND_JSON" | jq -r '.escalationSummary // empty' 2>/dev/null)
+QA_ESCALATION_SUMMARY="${QA_ESCALATION_SUMMARY:-See the PR thread for the round-by-round findings.}"
 gh pr comment $pr_number --repo gaberoo322/hydra --body "> *Automated QA — two-axis review*
 
 $REVIEW_REPORT
@@ -1281,27 +1244,50 @@ $REVIEW_REPORT
 $CHECKS_BLOCK
 
 ${QA_VERDICT_TRAILER}"
-# Bounce label (issue #4766): while the PR is OPEN the bounce is
+# Bounce lane (issue #4766): while the PR is OPEN the bounce is
 # needs-dev-resume, NOT ready-for-agent — ready-for-agent on an open PR is a
 # FRESH dev pick, which opens a duplicate PR instead of resuming the branch;
 # the autopilot's durable resume pin (the Turn Snapshot orch_dev_resume_pick,
 # #4518, provenance-agnostic since #5058) owns any open PR. GLM_AUTHORED selects
-# only the comment wording below. This is the SAME relabel site step 6.6's
+# only the comment wording below. This is the SAME site step 6.6's
 # `skip-required-failed` routes into, so the short-circuit bounce is covered
 # too. Name the red required check(s) when CI is what failed.
-# Round cap first (issue #4735): an escalated issue is never re-labelled for dev.
 BOUNCE_LABEL=$(qa_bounce_label)
+ROUND_ACTION=bounce
+if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then
+  ADV_OUT=$(npx tsx scripts/lifecycle.ts advance $issue_number needs-dev-resume --evidence pr=$pr_number --actor hydra-qa); ADV_RC=$?
+  printf '%s\n' "$ADV_OUT"
+  ADV_CODE=$(printf '%s' "$ADV_OUT" | jq -r '.code // empty' 2>/dev/null)
+  ADV_WOULD_PARK=$(printf '%s' "$ADV_OUT" | jq -r '.wouldPark // empty' 2>/dev/null)
+  if [ "$ADV_RC" != "0" ]; then
+    case "$ADV_CODE" in
+      parked:qa-fail-rounds) ROUND_ACTION=escalate ;;  # enforce: parked in the same call (issue #5317 INV-5)
+      *) echo "[hydra-qa] ERROR: lifecycle advance needs-dev-resume refused ($ADV_CODE) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1 ;;
+    esac
+  elif [ "$ADV_WOULD_PARK" = "qa-fail-rounds" ]; then
+    # Shadow mode: the seam bounced and journalled the would-park. Keep the cap
+    # live by parking explicitly (needs-dev-resume -> parked is a legal cap row).
+    npx tsx scripts/lifecycle.ts advance $issue_number parked --reason cap:qa-fail-rounds \
+      --rationale "QA-fail round cap reached (3 reviewed FAIL rounds on PR #$pr_number)" --actor hydra-qa \
+      || { echo "[hydra-qa] ERROR: lifecycle advance parked refused — NOT editing labels by hand (#5317)" >&2; exit 1; }
+    ROUND_ACTION=escalate
+  fi
+else
+  # Not-open fallback (#4766): live read confirmed CLOSED/MERGED — no open
+  # PR remains, so a fresh dev pick (not a resume) is the right lane.
+  npx tsx scripts/lifecycle.ts advance $issue_number ready-for-agent --evidence pr=$pr_number --actor hydra-qa \
+    || { echo "[hydra-qa] ERROR: lifecycle advance ready-for-agent refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1; }
+fi
 if [ "$ROUND_ACTION" = "escalate" ]; then
-  gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA escalated — operator decision needed*
+  # Off-list escalation (ADR-0047 D6): the issue is PARKED, not ready-for-human.
+  gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA escalated — round cap reached*
 
-\`${VERDICT}\` on PR #$pr_number — ${BLOCKER_SUMMARY}. ${ESC_LABEL_NOTE}
+\`${VERDICT}\` on PR #$pr_number — ${BLOCKER_SUMMARY}. The issue is \`parked\`; no dev lane will pick it up until the operator un-parks it.
 
 ${QA_ESCALATION_SUMMARY}
 
 ${QA_VERDICT_TRAILER}"
 elif [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then
-  gh issue edit $issue_number --repo gaberoo322/hydra \
-    --remove-label "needs-qa" --add-label "needs-dev-resume"
   if [ "$GLM_AUTHORED" = "1" ]; then
     gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA failed (GLM-authored PR)*
 
@@ -1324,9 +1310,6 @@ Relabelled \`needs-dev-resume\` (not \`ready-for-agent\`) — the PR is still op
 ${QA_VERDICT_TRAILER}"
   fi
 else
-  # Not-open fallback (#4766): live read confirmed CLOSED/MERGED — no open
-  # PR remains, so a fresh dev pick (not a resume) is the right lane.
-  gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" --add-label "ready-for-agent"
   gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA failed*
 
 \`${VERDICT}\` on PR #$pr_number — ${BLOCKER_SUMMARY}. Full review on the PR.
@@ -1372,8 +1355,9 @@ if [ "$DEEP_QA_ACTION" = "block-and-escalate" ]; then
   # 2nd consecutive deep-QA FAIL — block the PR (do NOT re-bounce) and route the
   # SOURCE ISSUE to the /hydra-review pickup set. Same surface as every other
   # ready-for-human escalation; no new operator channel, no new verdict literal.
-  gh issue edit $issue_number --repo gaberoo322/hydra \
-    --remove-label "needs-qa" --add-label "ready-for-human"
+  npx tsx scripts/lifecycle.ts advance $issue_number ready-for-human --reason t4-deep-qa-exhausted \
+    --rationale "T4 deep-QA failed twice consecutively on PR #$pr_number (fail #${DEEP_QA_FAILNO})" --actor hydra-qa \
+    || { echo "[hydra-qa] ERROR: lifecycle advance ready-for-human refused — NOT editing labels by hand (#5317)" >&2; exit 1; }
   gh issue comment $issue_number --repo gaberoo322/hydra --body "> *T4 Deep-QA blocked — operator decision needed*
 
 PR #$pr_number failed the Verifier-Core deep-QA gate **twice consecutively** (fail #${DEEP_QA_FAILNO}). Per the Deep-QA Remediation Loop the PR is now **blocked** and routed to the operator instead of bouncing again.
@@ -1390,8 +1374,8 @@ else
   # deep-QA fail count rides PR-comment markers, not issue labels, so the
   # label change cannot disturb decideDeepQaAction.
   BOUNCE_LABEL=$(qa_bounce_label)
-  gh issue edit $issue_number --repo gaberoo322/hydra \
-    --remove-label "needs-qa" --add-label "$BOUNCE_LABEL"
+  npx tsx scripts/lifecycle.ts advance $issue_number "$BOUNCE_LABEL" --evidence pr=$pr_number --actor hydra-qa \
+    || { echo "[hydra-qa] ERROR: lifecycle advance $BOUNCE_LABEL refused — NOT editing labels by hand (#5317)" >&2; exit 1; }
   gh issue comment $issue_number --repo gaberoo322/hydra --body "> *T4 Deep-QA failed (1st) — bouncing to dev*
 
 \`${VERDICT}\` on PR #$pr_number — ${BLOCKER_SUMMARY}. Full review on the PR.

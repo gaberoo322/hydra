@@ -423,27 +423,27 @@ const SHA_A = "aaaaaaaaaaaa1111111111111111111111111111";
 const SHA_B = "bbbbbbbbbbbb2222222222222222222222222222";
 const SHA_C = "cccccccccccc3333333333333333333333333333";
 
-describe("hydra-qa step 10 label effects stay plain text pins (issue #4735, INV-8)", () => {
+describe("hydra-qa step 10 state writes go through the lifecycle seam (issues #4735 INV-8, #5317 INV-2)", () => {
+  const step10 = QA_PLAYBOOK.slice(QA_PLAYBOOK.indexOf("### 10. Verdict routing"), QA_PLAYBOOK.indexOf("### 11. Lesson capture"));
+
   test("the playbook never uses the braced ${issue_number} form (the loader only substitutes the bare token)", () => {
     assert.ok(!QA_PLAYBOOK.includes("${issue_number}"), "found ${issue_number} in hydra-qa.md");
   });
 
-  test("a 404 on removing an absent label is not a failure; the label name goes in the URL path", () => {
-    assert.ok(QA_PLAYBOOK.includes('*404*|*"Label does not exist"*) ;;'));
-    assert.ok(QA_PLAYBOOK.includes('gh api -X DELETE "repos/gaberoo322/hydra/issues/$ESC_ISSUE/labels/$l"'));
+  test("no direct state-label write survives in the playbook: the label loops and DELETE calls are gone", () => {
+    assert.doesNotMatch(QA_PLAYBOOK, /--(?:add|remove)-label\s+["'$]?(?:needs-qa|needs-dev-resume|ready-for-agent|ready-for-human|in-progress|qa-passed|parked)/);
+    assert.ok(!QA_PLAYBOOK.includes("-X DELETE"), "no label DELETE call");
+    assert.ok(!QA_PLAYBOOK.includes("jq -r '.labels.issueAdd[]'"));
+    assert.ok(!QA_PLAYBOOK.includes("jq -r '.labels.prAdd[]'"));
   });
 
-  test("a failed label call never claims `Labelled`; an unsubstituted issue number fails loud", () => {
-    assert.ok(QA_PLAYBOOK.includes('ESC_LABELS_OK=0; echo "[hydra-qa] ERROR: could not add'));
-    assert.ok(QA_PLAYBOOK.includes('**Label routing FAILED**'));
-    assert.ok(QA_PLAYBOOK.includes("no issue number to escalate"));
+  test("a refused seam call exits non-zero and says it never edits labels by hand (INV-9)", () => {
+    assert.ok(step10.includes("NOT editing labels by hand"));
+    assert.ok(step10.includes("exit 1"));
   });
 
-  test("labels and escalation text come from the round-action JSON, never spelled in the loop", () => {
-    assert.ok(QA_PLAYBOOK.includes("jq -r '.labels.issueAdd[]'"));
-    assert.ok(QA_PLAYBOOK.includes("jq -r '.labels.issueRemove[]'"));
-    assert.ok(QA_PLAYBOOK.includes("jq -r '.labels.prAdd[]'"));
-    assert.ok(QA_PLAYBOOK.includes("jq -r '.escalationSummary'"));
+  test("the escalation summary still comes from the round-action JSON", () => {
+    assert.ok(QA_PLAYBOOK.includes("jq -r '.escalationSummary // empty'"));
   });
 });
 
@@ -465,20 +465,24 @@ describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
     assert.match(s7, /first state fixed\/not-fixed for each prior finding; for anything new, prefer medium\+ and say why it wasn't visible before/);
   });
 
-  test("T1–T3: the round cap runs before this round's comment, and escalation never re-labels for dev", () => {
+  test("T1–T3: round-action runs before this round's comment; the seam owns the cap and parks, never ready-for-human (issue #5317 INV-5/6)", () => {
     const step9 = QA_PLAYBOOK.slice(QA_PLAYBOOK.indexOf("### 9.6 "), QA_PLAYBOOK.indexOf("### 10. Verdict routing"));
-    assert.ok(step9.includes("scripts/ci/qa-verdict.ts round-action"), "the round cap is decided by the round-action call in step 9.6");
+    assert.ok(step9.includes("scripts/ci/qa-verdict.ts round-action"), "the round summary is produced by the round-action call in step 9.6");
     assert.ok(QA_PLAYBOOK.indexOf("### 9.6 ") < QA_PLAYBOOK.indexOf("### 10. Verdict routing"), "round-action reads the PR before any step-10 comment is posted");
-    const esc = t13.indexOf('if [ "$ROUND_ACTION" = "escalate" ]; then\n  gh issue comment');
-    // Re-anchored by #4766: the second routing branch is now the open-PR
-    // bounce arm (step 3's qa_bounce_label helper), replacing the retired
-    // GLM_AUTHORED arm — escalate must still be the FIRST branch.
+    // The verdict comment (this round's trailer) precedes the first seam call.
+    const comment = t13.indexOf("gh pr comment $pr_number");
+    const firstAdvance = t13.indexOf("scripts/lifecycle.ts advance");
+    assert.ok(comment > 0 && comment < firstAdvance, "the PR verdict comment must be posted before the seam counts the round");
+    // Enforce parks in the same call; shadow parks explicitly.
+    assert.ok(t13.includes("parked:qa-fail-rounds)"), "enforce: a parked:qa-fail-rounds refusal is the escalation, not an error");
+    assert.ok(t13.includes('.wouldPark'), "shadow: the would-park report is read from the advance JSON");
+    assert.match(t13, /advance \$issue_number parked --reason cap:qa-fail-rounds/);
+    const t13Code = t13.slice(t13.indexOf("```bash")).split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+    assert.ok(!t13Code.includes("ready-for-human"), "a T1-T3 round cap never writes ready-for-human");
+    // Escalate is the first comment branch.
+    const esc = t13.indexOf('if [ "$ROUND_ACTION" = "escalate" ]; then\n  # Off-list');
     const bounce = t13.indexOf('elif [ "$BOUNCE_LABEL" = "needs-dev-resume" ]');
-    assert.ok(esc > 0 && esc < bounce, "escalate must be the first routing branch");
-    const branch = t13.slice(esc, bounce);
-    assert.ok(!branch.includes("ready-for-agent"));
-    assert.ok(branch.includes("${ESC_LABEL_NOTE}"), "the labelled claim comes from the label calls' outcome");
-    assert.ok(!branch.includes("Labelled `ready-for-human`"), "no unconditional labelled claim");
+    assert.ok(esc > 0 && esc < bounce, "escalate must be the first comment branch");
   });
 
   test("T4 keeps decideDeepQaAction and never runs the T1–T3 round cap", () => {
