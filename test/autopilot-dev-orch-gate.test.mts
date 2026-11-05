@@ -180,16 +180,16 @@ describe("decide.py — first-attempt dev_orch dispatches carry no frontier rout
       });
       const dev = findDevDispatch(runDecide(state));
       assert.ok(dev, "dev_orch must still be pinned to the grill-clear anchor (#3711)");
-      assert.equal(dev.prompt_args.anchor, "issue-3707");
+      assert.equal(dev.intent.anchor, "issue-3707");
       assert.equal(
-        dev.prompt_args.route_model,
+        dev.prompt_args?.route_model,
         undefined,
         "a first-attempt dev_orch dispatch must resolve its model from the static per-class map",
       );
     });
   }
 
-  test("pinned anchor without the retired signal → prompt_args is exactly the anchor pin", () => {
+  test("pinned anchor without the retired signal → the intent is exactly Fresh(anchor)", () => {
     const state = decideBaseState({
       signals: {
         orch_work_available: true,
@@ -199,7 +199,8 @@ describe("decide.py — first-attempt dev_orch dispatches carry no frontier rout
     });
     const dev = findDevDispatch(runDecide(state));
     assert.ok(dev);
-    assert.deepEqual(dev.prompt_args, { anchor: "issue-3707" });
+    assert.deepEqual(dev.intent, { kind: "Fresh", anchor: "issue-3707" });
+    assert.equal(dev.prompt_args, undefined);
   });
 
   test("UNPINNED dev_orch dispatch carries neither an anchor nor route_model", () => {
@@ -215,7 +216,8 @@ describe("decide.py — first-attempt dev_orch dispatches carry no frontier rout
     });
     const dev = findDevDispatch(runDecide(state));
     assert.ok(dev, "dev_orch dispatches when no grill is pending");
-    assert.equal(dev.prompt_args?.anchor, undefined, "no grill pending → no pin");
+    assert.equal(dev.intent.kind, "Fresh");
+    assert.equal(dev.intent.anchor, undefined, "no grill pending → no pin");
     assert.equal(dev.prompt_args?.route_model, undefined);
   });
 

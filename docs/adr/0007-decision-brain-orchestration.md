@@ -162,6 +162,40 @@ Bump procedure (operator-only, single commit):
 Anything less makes the next autopilot run abort at Phase 0 — which is
 the intended, loud failure mode.
 
+## Amendment — the dispatch action carries a typed Dispatch Intent (2026-11-05, issue #5381, epic #5380)
+
+A bespoke pipeline slot's `dispatch` action used to carry an untyped
+`prompt_args` bag that the renderer re-derived the work shape from by ANDing
+flags (`resume`, `resume_branch`, `forward_fix_pr`, `conflict_fix`,
+`qa_fail_at_head`), with conditional delta text and a silent fallback. The
+rule from here:
+
+- **A bespoke slot carries a Dispatch Intent**, a closed set of kinds, each
+  holding only its own fields. On the wire it is `action.intent = {kind, ...}`
+  and the action has no `prompt_args` key (the escalation re-dispatch is the one
+  dual-shape action: it also carries the slot-generic `escalate_model` /
+  `attempt` / `prior_attempt_status`).
+- **The types are Python, in the brain** (`decide_base.py`, stdlib frozen
+  dataclasses plus a kind registry). They are never a TS schema mirrored into
+  Python.
+- **`make_dispatch` is the one writer** and refuses an intent combined with
+  work-shape `prompt_args`.
+- **The renderer is a pure function of the intent.** A dev_orch action whose
+  intent is missing, of an unknown kind, or whose kind has no renderer raises
+  `RenderError` and `render-dispatch.py` exits 2. It never falls back to a
+  generic task text. Delta text is unconditional: the kind is the condition.
+- **Readers go through `decide_base` accessors** (`dispatch_anchor`,
+  `dispatch_resume_branch`, `dispatch_attempt`, `dispatch_forced`,
+  `dispatch_intent`) that work for intent-carrying and `prompt_args`-carrying
+  actions alike.
+- Signal classes keep generic `prompt_args`. Model choice stays renderer-side.
+
+Slice 1 (#5381) defines the six dev_orch kinds: `Fresh`, `ResumeBranch`,
+`ResumeSalvage`, `ForwardFixRed`, `ForwardFixConflict`,
+`ForwardFixConflictWithFail`. The strangler continues one slot group per slice:
+#5382 (qa_orch), #5383 (dev_target / qa_target), #5384 (design_concept,
+wayfinder, research), #5385 (retire the remaining `prompt_args` handling).
+
 ## Related
 
 - ADR-0001 Untouchable Core & gate extraction

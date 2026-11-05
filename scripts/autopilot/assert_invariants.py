@@ -66,6 +66,7 @@ from typing import Iterable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import run_ledger  # noqa: E402  (the ONE state-document parser, #5075)
+from decide_base import dispatch_anchor, dispatch_forced  # noqa: E402  (#5381 accessors)
 
 
 class InvariantError(AssertionError):
@@ -263,8 +264,7 @@ def check_inv009(actions: list[dict], state: dict) -> None:
         if a.get("type") != "dispatch":
             continue
         slot = a.get("slot")
-        prompt = a.get("prompt_args") or {}
-        anchor = prompt.get("anchor")
+        anchor = dispatch_anchor(a)
         if not anchor:
             continue
         if slot == "dev_orch":
@@ -322,8 +322,7 @@ def check_inv010(actions: list[dict], state: dict) -> None:
     for a in actions:
         if a.get("type") != "dispatch":
             continue
-        prompt = a.get("prompt_args") or {}
-        if prompt.get("forced") is not True:
+        if not dispatch_forced(a):
             continue
         slot = str(a.get("slot") or "")
         if not slot.startswith("research"):

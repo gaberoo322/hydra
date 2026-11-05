@@ -352,6 +352,9 @@ from decide_base import (
     _signal_present,
     _target_dev_resume_pick_signal,
     _zero_yield_entry,
+    dispatch_anchor,
+    dispatch_resume_branch,
+    escalation_intent,
     make_dispatch,
 )
 from decide_selectors.architecture import _select_signal_architecture_orch
@@ -2732,6 +2735,7 @@ def _rule_escalation(
                 slot,
                 skill,
                 prompt_args=escalation_prompt_args,
+                intent=escalation_intent(slot),
                 reason=decision["reason"],
             ),
             reason=decision["reason"],
@@ -3867,8 +3871,7 @@ def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
         action["isolation"] = class_isolation(slot)
         skill = action.get("skill")
         if isinstance(skill, str) and skill:
-            pa = action.get("prompt_args")
-            pinned_anchor = pa.get("anchor") if isinstance(pa, dict) else None
+            pinned_anchor = dispatch_anchor(action)
             action["dispatchSentinel"] = make_dispatch_sentinel(
                 skill,
                 action["worktreeBranch"],
@@ -4313,13 +4316,13 @@ def _dev_target_resume_record(action: dict, state: dict) -> dict | None:
 
     Pure: reads the passed-in dicts only, no I/O (ADR-0007).
     """
-    prompt_args = action.get("prompt_args")
-    if not isinstance(prompt_args, dict) or prompt_args.get("resume") is not True:
-        return None
-    branch = prompt_args.get("resume_branch")
+    branch = dispatch_resume_branch(action)
     if not isinstance(branch, str) or not branch:
         return None
-    pr = prompt_args.get("resume_pr")
+    # `resume_pr` stays a prompt_args read until slice 3 (#5383) gives
+    # dev_target an intent.
+    prompt_args = action.get("prompt_args")
+    pr = prompt_args.get("resume_pr") if isinstance(prompt_args, dict) else None
     if isinstance(pr, bool) or not isinstance(pr, int):
         return None
     worktree_branch = action.get("worktreeBranch")
