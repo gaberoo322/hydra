@@ -342,6 +342,8 @@ from decide_base import (
     _anchor_issue_number,
     _dev_resume_pick_signal,
     _is_parked_anchor,
+    _parked_prs,
+    _parked_read_degraded,
     _needs_qa_target_pr_ref,
     _normalize_target_risk_surface,
     _orch_board_read_degraded,
@@ -2856,6 +2858,8 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
     # already named - same downstream holds, stale-verdict check, depth policy.
     sweep = [ev for ev in events if ev.get("type") == "qa-verdict"]
     sweep += ts.qa_verdict_recheck(state, events, "orch_qa_verdict_recheck")
+    parked_prs = sorted(_parked_prs(state, events))  # #5319: read once, whether or not a verdict is queued
+    parked_degraded = _parked_read_degraded(state, events)
     for ev in sweep:
         if ev.get("recheck"):
             out.reasons.append(f"qa-recheck:#{ev.get('pr_number')}")
@@ -2869,12 +2873,18 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
         # ISSUE #5319 (INV-6): a PR whose closing issue / anchor is parked is
         # never armed - covers the in-session `qa-verdict` events that bypass
         # the pr-gate collector (a park landing mid-run).
+        # The real event carries only `pr_number`, so the PR-keyed
+        # `orch_parked_prs` set is the primary key; `closing_issue` / `anchor`
+        # stay as a secondary key. A degraded parked read holds every PR.
+        if parked_degraded:
+            out.reasons.append(f"parked:#{pr_number}:read-degraded")
+            continue
         parked_ref = next(
             (r for r in (ev.get("closing_issue"), ev.get("anchor")) if _is_parked_anchor(state, events, r)),
             None,
         )
-        if parked_ref is not None:
-            out.reasons.append(f"parked:#{_anchor_issue_number(parked_ref)}")
+        if parked_ref is not None or _pr_gate_number_in(pr_number, parked_prs):
+            out.reasons.append(f"parked:#{_anchor_issue_number(parked_ref) if parked_ref is not None else pr_number}")
             continue
         if _pr_gate_number_in(pr_number, buckets["dirty"]):
             out.reasons.append(f"hold:#{pr_number}:dirty")

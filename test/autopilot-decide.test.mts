@@ -5765,4 +5765,48 @@ describe("decide.py - parked issues are never dispatched or armed (issue #5319)"
     const merged = (plan.actions ?? []).filter((a: any) => a.type === "auto-merge").map((a: any) => a.pr_number);
     assert.deepEqual(merged, [5402]);
   });
+
+  // QA round 1 (PR #5374) findings, one red-without-the-fix test each + sibling pins.
+  const qaOrch = (plan: any): any[] => (plan.actions ?? []).filter((a: any) => a.type === "dispatch" && a.slot === "qa_orch");
+  const realEvent = (pr: number) => ({ type: "qa-verdict", pr_number: pr, tier: 1, mechanical: null, has_scope_justification: false, verdict: "PASS" });
+
+  test("QA r1 #1: qa_orch never dispatches when every needs-qa issue is parked", () => {
+    const s = baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: String(PARKED), orch_parked_issues: [PARKED] } });
+    assert.equal(qaOrch(runDecide(s, null)).length, 0);
+  });
+
+  test("QA r1 #1 sibling: qa_orch still dispatches when the needs-qa issue is not parked", () => {
+    const s = baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: "3841", orch_parked_issues: [PARKED] } });
+    assert.equal(qaOrch(runDecide(s, null)).length, 1);
+  });
+
+  test("QA r1 #2: the REAL qa-verdict event shape (pr_number only) is held via orch_parked_prs", () => {
+    const plan = runDecide(baseState({ signals: { orch_parked_prs: [5400] } }), null, [realEvent(5400)]);
+    assert.equal(findAction(plan, (a) => a.type === "auto-merge"), undefined);
+    assert.ok((plan.reasons ?? []).includes("parked:#5400"));
+  });
+
+  test("QA r1 #2 sibling: an unparked PR with the real event shape still auto-merges", () => {
+    const plan = runDecide(baseState({ signals: { orch_parked_prs: [5400] } }), null, [realEvent(5402)]);
+    const merged = (plan.actions ?? []).filter((a: any) => a.type === "auto-merge").map((a: any) => a.pr_number);
+    assert.deepEqual(merged, [5402]);
+  });
+
+  test("QA r1 #3: a degraded parked read fails closed - no resume drain, no auto-merge, no qa_orch", () => {
+    const s = baseState({
+      signals: { orch_parked_degraded: true, orch_parked_issues: [], orch_dev_resume_nopr_anchor: "issue-777", orch_work_available: false, needs_qa_orch: true, needs_qa_numbers: "3841" },
+    });
+    s.dev_resume_pending = [{ anchor: "issue-778", branch: "worktree-agent-abc" }];
+    const plan = runDecide(s, null, [realEvent(5402)]);
+    assert.equal(devOrch(plan).length, 0);
+    assert.equal(qaOrch(plan).length, 0);
+    assert.equal(findAction(plan, (a) => a.type === "auto-merge"), undefined);
+  });
+
+  test("QA r1 #3 sibling: a healthy EMPTY parked read (degraded=false) leaves dispatch and auto-merge open", () => {
+    const s = baseState({ signals: { orch_parked_degraded: false, orch_parked_issues: [], orch_dev_resume_nopr_anchor: "issue-777", orch_work_available: false } });
+    assert.equal(devOrch(runDecide(s, null)).length, 1);
+    const merged = (runDecide(baseState({ signals: { orch_parked_degraded: false } }), null, [realEvent(5402)]).actions ?? []).filter((a: any) => a.type === "auto-merge");
+    assert.equal(merged.length, 1);
+  });
 });

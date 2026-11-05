@@ -125,6 +125,7 @@ function healthyValues(): TurnSnapshotValues {
       qaVerdictRecheck: ok([]),
       dirtyFixFailPr: null,
       parkedIssues: ok(new Set([4905, 4902])), // #5319: emitted sorted ascending as orch_parked_issues
+      parkedPrs: new Set([4910, 4907]), // QA r1: emitted sorted ascending as orch_parked_prs
       ciTriggerStale: ok(false),
       redResume: ok([4890]),
       devResumePick: ok({ issue: 4718, pr: 4890, headRefName: "worktree-agent-a1b2" }),
@@ -220,7 +221,8 @@ function edgeValues(): TurnSnapshotValues {
       redResume: ok([4881, 4882]),
       devResumePick: FAILED,
       devResumeNoprPick: FAILED,
-      parkedIssues: FAILED,
+      parkedIssues: FAILED, // degraded -> orch_parked_degraded true
+      parkedPrs: new Set(),
       dirtyFix: ok({ pick: null, surface: [] }),
     },
     picks: { ...h.picks, grillPick: null, devReadyPick: null, candidateExclusions: [], boardDegraded: true },

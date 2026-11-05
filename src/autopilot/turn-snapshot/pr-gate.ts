@@ -143,6 +143,8 @@ export interface PrGateSnapshot {
    * below. Degraded -> the dispatch-shaped outputs fail closed.
    */
   readonly parkedIssues: Classified<ReadonlySet<number>>;
+  /** #5319 QA r1: open PRs whose closing issue is parked - the PR-keyed hold for the qa-verdict event. */
+  readonly parkedPrs: ReadonlySet<number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +730,7 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
       qaVerdictRecheck: { ok: false, reason: DEGRADE.NOT_EVALUATED },
       dirtyFixFailPr: null,
       parkedIssues: inputs.parkedIssues,
+      parkedPrs: inputs.parkedPrs,
     },
     notes,
   };
@@ -1137,5 +1140,6 @@ export function prGateFallbackSnapshot(reason: DegradeReason): PrGateSnapshot {
     qaVerdictRecheck: { ok: false, reason },
     dirtyFixFailPr: null,
     parkedIssues: { ok: false, reason },
+    parkedPrs: new Set(),
   };
 }

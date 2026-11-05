@@ -334,10 +334,27 @@ def _anchor_issue_number(anchor: object) -> int | None:
     return int(text) if text.isdigit() and int(text) > 0 else None
 
 
+def _parked_prs(state: dict, events: list[dict]) -> set[int]:
+    """The `orch_parked_prs` set (issue #5319 QA round 1): open PR numbers whose
+    closing issue is parked. PR-keyed, so the in-session `qa-verdict` event
+    (which carries only `pr_number`) can be held without a closing-issue field."""
+    return ts.item_set(state, events, "orch_parked_prs") or set()
+
+
+def _parked_read_degraded(state: dict, events: list[dict]) -> bool:
+    """True when the collector's parked read was unreadable (INV-4): the empty
+    `orch_parked_issues` is then NOT a healthy empty set, so the belt fails
+    closed on every dispatch-shaped path."""
+    return _signal_present(state, events, "orch_parked_degraded")
+
+
 def _is_parked_anchor(state: dict, events: list[dict], anchor: object) -> bool:
-    """True when `anchor` names a parked issue (issue #5319)."""
+    """True when `anchor` names a parked issue (issue #5319). Fails CLOSED
+    (True for any well-formed anchor) while the parked read is degraded."""
     number = _anchor_issue_number(anchor)
-    return number is not None and number in _parked_issues(state, events)
+    if number is None:
+        return False
+    return _parked_read_degraded(state, events) or number in _parked_issues(state, events)
 
 
 def _dirty_fix_fail_pr(state: dict, events: list[dict]) -> int | None:

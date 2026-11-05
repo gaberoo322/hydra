@@ -257,6 +257,10 @@ def to_json_form(state: dict) -> dict:
             # it is converted to ABSENT, which is also how decide.py reads it.
             if _emittable_blob(field, value):
                 blobs[field] = value
+    if signals:
+        # Legacy captures predate #5319: their (absent) parked set was a healthy
+        # empty read, not a degraded one - otherwise the belt fails every pick closed.
+        signals.setdefault("orch_parked_degraded", False)
     snap = {
         "schema_version": ts.SCHEMA_VERSION,
         "generated_at": "plan-parity",

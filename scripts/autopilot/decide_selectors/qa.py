@@ -13,6 +13,8 @@ import turn_snapshot as ts
 from decide_base import (
     QA_STALL_MAX_ATTEMPTS,
     _needs_qa_target_pr_ref,
+    _parked_issues,
+    _parked_read_degraded,
     _signal_present,
     make_dispatch,
 )
@@ -53,6 +55,14 @@ def _select_slot_qa_orch(
     # healthy-but-queued issue the moment it becomes the new head.
     numbers = _qa_orch_needs_qa_numbers(state, events)
     if numbers:
+        # #5319 (ADR-0047 Decision 6): a parked needs-qa issue is the operator's
+        # (human hold) - never reviewed. Drop parked numbers; if nothing is left
+        # (or the parked read is degraded) there is nothing to dispatch on.
+        degraded = _parked_read_degraded(state, events)
+        parked = _parked_issues(state, events)
+        numbers = [] if degraded else [n for n in numbers if n not in parked]
+        if not numbers:
+            return None
         head = numbers[0]
         attempts = _qa_orch_item_attempts(state)
         if not _qa_orch_item_eligible(attempts.get(head, 0)):
