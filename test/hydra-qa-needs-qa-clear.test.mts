@@ -117,7 +117,8 @@ describe("hydra-qa playbook clears needs-qa on every verdict (issue #638)", () =
     });
 
     test("a refused advance exits non-zero and never falls back to a direct label edit (issue #5317 INV-9)", () => {
-      assert.match(block, /scripts\/lifecycle\.ts advance[^\n]*\\\n\s*\|\| \{[^}]*exit 1/, "advance refusal must exit 1");
+      assert.match(block, /scripts\/lifecycle\.ts advance[^\n]*qa-passed[^\n]*ADV_RC=\$\?[\s\S]*?refused[^\n]*exit 1/, "advance refusal must exit 1");
+      assert.match(block, /"pr-merged" \] && exit 0/, "a pr-merged refusal is tolerated (reconcile owns the close)");
       assert.doesNotMatch(block, /gh issue edit/, "no direct label fallback after a refusal");
     });
   });
