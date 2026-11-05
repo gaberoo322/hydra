@@ -224,6 +224,17 @@ describe("choreGuard — cadence windowing as pure arithmetic (issue #3091)", ()
   });
 });
 
+// Issue #5199 (lever 2): stub the chores that make live gh/network calls so
+// these composition tests do not pay ~15 s of real I/O per runHousekeeping call.
+// Guard windowing and ran/skipped classification stay the real code path.
+const noopWork = async () => {};
+const SLOW_CHORE_STUBS = {
+  "review-pickup-notify": noopWork,
+  "usage-weekly-snapshot": noopWork,
+  "holdback-merge-event-enrol": noopWork,
+  "pattern-cue-demotion": noopWork,
+};
+
 describe("runHousekeeping — cadence guards injectable without Redis (issue #3091)", () => {
   const now = 1_700_000_000_000;
 
@@ -246,6 +257,7 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     // no Redis substrate to fail-soft on, unlike the gh-reading chores).
     runGlmEligibilitySweep: async () => 0,
     publishTargetOutcomes: async () => {},
+    workOverrides: SLOW_CHORE_STUBS,
   };
   const guardedChores = [
     "usage-weekly-snapshot",
@@ -282,6 +294,7 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
       now: () => now,
       runGlmEligibilitySweep: async () => 0,
       publishTargetOutcomes: async () => {},
+      workOverrides: SLOW_CHORE_STUBS,
     });
     const classified = new Set([...summary.ran, ...summary.skipped]);
     for (const name of guardedChores) {
@@ -300,6 +313,7 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     const summary = await runHousekeeping(makeBus() as any, {
       runGlmEligibilitySweep: async () => 0,
       publishTargetOutcomes: async () => {},
+      workOverrides: SLOW_CHORE_STUBS,
     });
     assert.ok(Array.isArray(summary.ran), "ran is an array");
     assert.ok(Array.isArray(summary.skipped), "skipped is an array");
@@ -358,6 +372,7 @@ describe("runHousekeeping — attribution-record runs before holdback-merge-watc
     const summary = await runHousekeeping(makeBus() as any, {
       runGlmEligibilitySweep: async () => 0,
       publishTargetOutcomes: async () => {},
+      workOverrides: SLOW_CHORE_STUBS,
     });
 
     const bothInRan =

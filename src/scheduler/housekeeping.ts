@@ -275,6 +275,14 @@ async function runHousekeeping(
      * so `runHousekeeping` makes no network call to the Target.
      */
     publishTargetOutcomes?: () => Promise<unknown>;
+    /**
+     * Per-chore `work` overrides keyed by chore name (issue #5199, lever 2).
+     * A composition test stubs the chores that make live `gh`/network calls
+     * (the dominant wall time of the housekeeping endpoint suite) while the
+     * guard and ran/skipped bookkeeping stay the real code path. Production
+     * passes nothing, so every chore binds its real runner.
+     */
+    workOverrides?: Record<string, () => Promise<unknown>>;
   } = {},
 ): Promise<{ ran: string[]; skipped: string[] }> {
   const ran: string[] = [];
@@ -523,7 +531,8 @@ async function runHousekeeping(
   ];
 
   for (const chore of chores) {
-    await runChore(chore, ran, skipped);
+    const override = deps.workOverrides?.[chore.name];
+    await runChore(override ? { ...chore, work: override } : chore, ran, skipped);
   }
 
   return { ran, skipped };

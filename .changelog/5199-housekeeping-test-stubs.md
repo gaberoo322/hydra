@@ -1,0 +1,1 @@
+- perf: stub live-gh housekeeping chores in two composition test files, cutting ~65 s from the serial test pool (#5199)

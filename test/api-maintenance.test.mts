@@ -80,6 +80,21 @@ function findHandler(router: any, method: string, path: string): Function | null
   return null;
 }
 
+// Issue #5199 (lever 2): stub the chores that make live gh/network calls
+// (~15 s per handler call combined). The assertions below only inspect the
+// Redis-guarded chores and the always-run review-pickup-notify, none of whose
+// bookkeeping depends on these workers' real I/O.
+const noopWork = async () => {};
+const HOUSEKEEPING_STUBS = {
+  runGlmEligibilitySweep: async () => 0,
+  workOverrides: {
+    "review-pickup-notify": noopWork,
+    "usage-weekly-snapshot": noopWork,
+    "holdback-merge-event-enrol": noopWork,
+    "pattern-cue-demotion": noopWork,
+  },
+};
+
 describe("Maintenance housekeeping endpoint (issue #723)", () => {
   let createMaintenanceRouter: any;
 
@@ -106,7 +121,7 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
     // performs a live GitHub write (the sweep mutates an external service with no
     // Redis substrate to fail-soft on, unlike the gh-reading chores).
     const router = createMaintenanceRouter(mockEventBus(), {
-      housekeepingDeps: { runGlmEligibilitySweep: async () => 0 },
+      housekeepingDeps: HOUSEKEEPING_STUBS,
     });
     const handler = findHandler(router, "POST", "/maintenance/housekeeping");
     assert.ok(handler, "POST /maintenance/housekeeping handler should exist");
@@ -117,7 +132,7 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
     // performs a live GitHub write (the sweep mutates an external service with no
     // Redis substrate to fail-soft on, unlike the gh-reading chores).
     const router = createMaintenanceRouter(mockEventBus(), {
-      housekeepingDeps: { runGlmEligibilitySweep: async () => 0 },
+      housekeepingDeps: HOUSEKEEPING_STUBS,
     });
     const handler = findHandler(router, "POST", "/maintenance/housekeeping");
 
@@ -164,7 +179,7 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
     // performs a live GitHub write (the sweep mutates an external service with no
     // Redis substrate to fail-soft on, unlike the gh-reading chores).
     const router = createMaintenanceRouter(mockEventBus(), {
-      housekeepingDeps: { runGlmEligibilitySweep: async () => 0 },
+      housekeepingDeps: HOUSEKEEPING_STUBS,
     });
     const handler = findHandler(router, "POST", "/maintenance/housekeeping");
 
@@ -197,7 +212,7 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
     // performs a live GitHub write (the sweep mutates an external service with no
     // Redis substrate to fail-soft on, unlike the gh-reading chores).
     const router = createMaintenanceRouter(mockEventBus(), {
-      housekeepingDeps: { runGlmEligibilitySweep: async () => 0 },
+      housekeepingDeps: HOUSEKEEPING_STUBS,
     });
     const handler = findHandler(router, "POST", "/maintenance/housekeeping");
 
