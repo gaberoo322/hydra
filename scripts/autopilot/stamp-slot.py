@@ -151,16 +151,17 @@ def plan_claim(state: dict, plan: dict, slot: str) -> dict:
         return {"claim": "skipped", "reason": "target-scope"}
     if slot not in (state.get("slots") or {}):
         return {"claim": "skipped", "reason": "signal-class"}
-    # Only dev_* / qa_* classes have a reap-side release (reap.claim_release_outcome):
-    # any other pipeline class would leak a no-TTL claim (INV-6).
-    if not (slot.startswith("dev_") or slot.startswith("qa_")):
+    # Only dev_* classes are claimed here and released by reap (reap.claim_release_outcome
+    # keys on the slot's `anchor`): any other pipeline class would leak a no-TTL claim
+    # (INV-6). qa_* workers claim and release their own review (hydra-qa playbook, INV-5):
+    # decide.py emits no prompt_args.issue and a pinned qa slot carries no `anchor`.
+    if slot.startswith("qa_"):
+        return {"claim": "skipped", "reason": "worker-claims"}
+    if not slot.startswith("dev_"):
         return {"claim": "skipped", "reason": "no-release-role"}
     prompt_args = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
     anchor = prompt_args.get("anchor")
     m = _ISSUE_ANCHOR_RE.match(anchor) if isinstance(anchor, str) else None
-    if m is None and slot.startswith("qa_"):
-        # A pinned qa dispatch carries the issue as prompt_args.issue (int, "N", "#N" or "issue-N").
-        m = re.match(r"^(\d+)$", re.sub(r"\D", "", str(prompt_args.get("issue") or "")))
     if m is None:
         return {"claim": "skipped", "reason": "unpinned"}
     run_id = str(state.get("run_id") or "")
@@ -251,9 +252,42 @@ def run_claim(slot: str) -> int:
     return 0
 
 
+def run_release_claim(slot: str) -> int:
+    """`stamp-slot.py release-claim <slot>`: roll back the pre-spawn claim when `Agent`
+    never spawned (hook deny, error), so no orphan claim blocks the next dispatch
+    (INV-3 needs its matching close). Releases with outcome `released`. Exit 0 also
+    when no claim applies; exit 1 when the seam refuses; exit 2: unreadable files."""
+    try:
+        state = run_ledger.read_prior(STATE_PATH)
+        if not isinstance(state, dict):
+            raise ValueError(f"{STATE_PATH} is not a JSON object")
+        plan = _load_plan(PLAN_PATH)
+    except (OSError, ValueError) as exc:
+        print(f"[stamp-slot] cannot read state/plan: {exc}", file=sys.stderr)
+        return 2
+    spec = plan_claim(state, plan, slot)
+    if spec["claim"] == "skipped":
+        print(json.dumps(spec))
+        return 0
+    argv = [
+        "npx", "tsx", "scripts/lifecycle.ts", "release", str(spec["issue"]),
+        "--dispatch", spec["dispatch_id"], "--outcome", "released",
+    ]
+    try:
+        proc = subprocess.run(argv, cwd=REPO_ROOT, capture_output=True, text=True, check=False, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"[stamp-slot] release-claim failed issue=#{spec['issue']}: {exc}", file=sys.stderr)
+        return 1
+    out = (proc.stdout or "").strip()
+    print(out.splitlines()[-1] if out else json.dumps({"ok": False, "code": "no-output"}))
+    return 0 if proc.returncode == 0 else 1
+
+
 def main(argv: list[str]) -> int:
     if len(argv) == 3 and argv[1] == "claim":
         return run_claim(argv[2])
+    if len(argv) == 3 and argv[1] == "release-claim":
+        return run_release_claim(argv[2])
     if len(argv) != 4 or argv[1] in ("-h", "--help"):
         print("usage: stamp-slot.py <slot> <task_id> <model>  |  stamp-slot.py claim <slot>", file=sys.stderr)
         return 2

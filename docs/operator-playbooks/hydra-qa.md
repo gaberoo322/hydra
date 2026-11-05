@@ -224,7 +224,7 @@ If still no PR → comment on issue and stop.
 ```bash
 npx tsx scripts/lifecycle.ts claim $issue_number --dispatch $dispatch_id --class qa_orch --run $run_id --pr $pr_number
 ```
-`claim-held` here is a logged WARN and the review proceeds (a stale dev claim must not freeze QA); the claim changes no label, and `reap.py` releases it with `verdict-posted` on completion.
+`claim-held` here is a logged WARN and the review proceeds (a stale dev claim must not freeze QA); the claim changes no label. The QA worker owns this claim (the dispatcher opens none for `qa_*`): after posting the verdict, release it with `npx tsx scripts/lifecycle.ts release $issue_number --dispatch $dispatch_id --outcome verdict-posted`.
 
 ### 3. Pin the fixed point (upstream `review` step 1)
 

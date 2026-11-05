@@ -298,7 +298,7 @@ describe("stamp-slot.py claim (INV-3, INV-4)", () => {
   test("skip matrix: unpinned, target scope, signal class, no dispatch action -> exit 0 skipped, seam never called", () => {
     const cases: Array<[string, Record<string, unknown> | null, string, string]> = [
       ["unpinned", { prompt_args: {} }, "dev_orch", "unpinned"],
-      ["unpinned qa", { prompt_args: { anchor: "unpinned" } }, "qa_orch", "unpinned"],
+      ["qa worker-claims", { prompt_args: { anchor: "unpinned" } }, "qa_orch", "worker-claims"],
       ["target", { prompt_args: { anchor: "issue-9" } }, "dev_target", "target-scope"],
       ["signal", { prompt_args: { anchor: "issue-9" } }, "sweep_orch", "signal-class"],
       ["no action", null, "dev_orch", "no-dispatch-action"],
@@ -320,12 +320,41 @@ describe("stamp-slot.py claim (INV-3, INV-4)", () => {
     }
   });
 
-  test("a pinned qa_orch dispatch reads prompt_args.issue and opens a claim", () => {
-    for (const issue of [77, "77", "#77", "issue-77"]) {
-      const r = claimRun(SLOTS, { worktreeBranch: "b", prompt_args: { issue } }, "qa_orch");
-      assert.equal(r.status, 0, String(issue));
-      assert.match(r.argv, /dispatch 77 --dispatch b --class qa_orch/, String(issue));
+  test("qa_* is never claimed by the dispatcher (worker claims and releases its own review)", () => {
+    for (const prompt_args of [{ issue: 77 }, { anchor: "issue-77" }]) {
+      const r = claimRun(SLOTS, { worktreeBranch: "b", prompt_args }, "qa_orch");
+      assert.equal(r.status, 0);
+      assert.deepEqual(JSON.parse(r.stdout), { claim: "skipped", reason: "worker-claims" });
+      assert.equal(r.argv, "");
     }
+  });
+
+  test("release-claim rolls back a dev claim with outcome released; qa is a no-op", () => {
+    const run = (slot: string, action: Record<string, unknown>) => {
+      const dir = mkdtempSync(join(tmpdir(), "stamp-rel-"));
+      const statePath = join(dir, "state.json");
+      const planPath = join(dir, "plan.json");
+      const argvLog = join(dir, "argv.txt");
+      writeFileSync(statePath, JSON.stringify({ run_id: "abcdef12-0000", turn: 3, slots: SLOTS }));
+      writeFileSync(planPath, JSON.stringify({ actions: [{ type: "dispatch", slot, ...action }] }));
+      const bin = join(dir, "bin");
+      spawnSync("mkdir", ["-p", bin]);
+      writeFileSync(join(bin, "npx"), `#!/bin/sh\necho "$@" >> "${argvLog}"\necho '{"ok":true}'\n`);
+      chmodSync(join(bin, "npx"), 0o755);
+      const r = spawnSync("python3", ["-I", STAMP, "release-claim", slot], {
+        env: { PATH: `${bin}:${process.env.PATH}`, HYDRA_AUTOPILOT_STATE: statePath, HYDRA_AUTOPILOT_PLAN: planPath, HOME: process.env.HOME ?? "" },
+        encoding: "utf8",
+      });
+      let argv = "";
+      try { argv = readFileSync(argvLog, "utf8").trim(); } catch { /* intentional: stub never ran */ }
+      return { status: r.status, argv };
+    };
+    const d = run("dev_orch", { worktreeBranch: "b1", prompt_args: { anchor: "issue-5" } });
+    assert.equal(d.status, 0);
+    assert.equal(d.argv, "tsx scripts/lifecycle.ts release 5 --dispatch b1 --outcome released");
+    const q = run("qa_orch", { worktreeBranch: "b2", prompt_args: { anchor: "issue-5" } });
+    assert.equal(q.status, 0);
+    assert.equal(q.argv, "");
   });
 
   test("fail closed: seam exit 0 with silent or non-JSON or ok:false output exits 1", () => {
