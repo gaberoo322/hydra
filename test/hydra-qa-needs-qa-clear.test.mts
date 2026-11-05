@@ -228,8 +228,8 @@ describe("hydra-qa bounce label keys on open-PR state, not GLM provenance (issue
     // Every bounce site consults the helper; nothing else picks the label.
     assert.equal(
       (playbook.match(/\$\(qa_bounce_label\)/g) ?? []).length,
-      3,
-      "exactly three call sites: step 6.6 defer, step-10 T1/T2/T3 FAIL, step-10 T4 1st deep-QA FAIL",
+      4,
+      "exactly four call sites: step 6.6 defer, the qa_pass_advance refusal reroute, step-10 T1/T2/T3 FAIL, step-10 T4 1st deep-QA FAIL",
     );
   });
 
