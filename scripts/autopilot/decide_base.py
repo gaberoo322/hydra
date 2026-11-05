@@ -310,6 +310,36 @@ def _dev_resume_pick_signal(
     return _issue_pr_branch_signal(state, events, "orch_dev_resume_pick")
 
 
+def _parked_issues(state: dict, events: list[dict]) -> set[int]:
+    """The `orch_parked_issues` set (issue #5319, ADR-0047 Decision 6): open
+    issues carrying the `parked` human-hold label. decide.py's belt filter on
+    every PR-keyed dispatch source (defence in depth behind the pr-gate
+    collector, and the only guard for sources that bypass it). Absent /
+    malformed -> empty set (the collector already failed its own dispatch
+    outputs closed on a degraded read). Pure; never calls gh (ADR-0007)."""
+    return ts.item_set(state, events, "orch_parked_issues") or set()
+
+
+def _anchor_issue_number(anchor: object) -> int | None:
+    """`issue-N` (or a bare positive int / digit string) -> N, else None."""
+    if isinstance(anchor, bool):
+        return None
+    if isinstance(anchor, int):
+        return anchor if anchor > 0 else None
+    if not isinstance(anchor, str):
+        return None
+    text = anchor.strip()
+    if text.startswith("issue-"):
+        text = text[len("issue-"):]
+    return int(text) if text.isdigit() and int(text) > 0 else None
+
+
+def _is_parked_anchor(state: dict, events: list[dict], anchor: object) -> bool:
+    """True when `anchor` names a parked issue (issue #5319)."""
+    number = _anchor_issue_number(anchor)
+    return number is not None and number in _parked_issues(state, events)
+
+
 def _dirty_fix_fail_pr(state: dict, events: list[dict]) -> int | None:
     """The `orch_dirty_forward_fix_fail_pr` signal (issue #5253): the dirty
     pick's PR number iff a QA FAIL is pending at its pre-merge head (the

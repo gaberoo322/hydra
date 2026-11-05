@@ -12,6 +12,7 @@ from decide_base import (
     RED_FORWARD_FIX_CAP,
     _dev_resume_pick_signal,
     _dirty_fix_fail_pr,
+    _is_parked_anchor,
     _issue_pr_branch_signal,
     _orch_anchor_signal,
     _red_forward_fix_attempt_count,
@@ -95,7 +96,11 @@ def _select_slot_dev_orch(
     resume_pending = state.get("dev_resume_pending") if isinstance(state, dict) else None
     if isinstance(resume_pending, list) and resume_pending:
         entry = resume_pending[0]
-        if isinstance(entry, dict) and entry.get("anchor"):
+        if isinstance(entry, dict) and _is_parked_anchor(state, events, entry.get("anchor")):
+            # ISSUE #5319 (INV-6): a park that landed after reap queued the
+            # resume. DROP, never re-queue - the operator owns a parked issue.
+            resume_pending.pop(0)
+        elif isinstance(entry, dict) and entry.get("anchor"):
             resume_pending.pop(0)
             prompt_args: dict = {"anchor": entry["anchor"], "resume": True}
             if entry.get("branch"):
@@ -143,7 +148,7 @@ def _select_slot_dev_orch(
     # no-PR stall comments on the issue and hands it to `ready-for-human`
     # at the third, instead of queueing another resume.
     nopr_anchor = _orch_anchor_signal(state, "orch_dev_resume_nopr_anchor")
-    if nopr_anchor is not None:
+    if nopr_anchor is not None and not _is_parked_anchor(state, events, nopr_anchor):
         return make_dispatch(
             cls,
             "hydra-dev",
@@ -163,7 +168,7 @@ def _select_slot_dev_orch(
     # `conflict-fix-attempted` PR label (applied by the dispatch binding
     # BEFORE the spawn) IS the durable cap: no tracker, no state key.
     dirty_fix = _dirty_forward_fix_signal(state, events)
-    if dirty_fix is not None:
+    if dirty_fix is not None and not _is_parked_anchor(state, events, dirty_fix[0]):  # #5319 belt
         fix_issue, fix_pr, fix_branch = dirty_fix
         # ISSUE #5253: a QA FAIL pending AT this PR's pre-merge head selects the
         # two-phase arm (merge master FIRST, then the forward-fix contract on
@@ -249,7 +254,7 @@ def _select_slot_dev_orch(
     # forward-fix dispatch contract (continue the PR's head, push to the
     # SAME branch, NEVER `gh pr create`).
     resume_pick = _dev_resume_pick_signal(state, events)
-    if resume_pick is not None:
+    if resume_pick is not None and not _is_parked_anchor(state, events, resume_pick[0]):  # #5319 belt
         pick_issue, pick_pr, pick_branch = resume_pick
         prompt_args = {
             "anchor": f"issue-{pick_issue}",

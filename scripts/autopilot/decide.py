@@ -339,7 +339,9 @@ from decide_base import (
     RED_FORWARD_FIX_CAP,
     QA_STALL_MAX_ATTEMPTS,
     ZERO_YIELD_BACKOFF_LADDER,
+    _anchor_issue_number,
     _dev_resume_pick_signal,
+    _is_parked_anchor,
     _needs_qa_target_pr_ref,
     _normalize_target_risk_surface,
     _orch_board_read_degraded,
@@ -2863,6 +2865,16 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
         mechanical = ev.get("mechanical")
         has_scope_justif = bool(ev.get("has_scope_justification"))
         if pr_number is None or tier is None:
+            continue
+        # ISSUE #5319 (INV-6): a PR whose closing issue / anchor is parked is
+        # never armed - covers the in-session `qa-verdict` events that bypass
+        # the pr-gate collector (a park landing mid-run).
+        parked_ref = next(
+            (r for r in (ev.get("closing_issue"), ev.get("anchor")) if _is_parked_anchor(state, events, r)),
+            None,
+        )
+        if parked_ref is not None:
+            out.reasons.append(f"parked:#{_anchor_issue_number(parked_ref)}")
             continue
         if _pr_gate_number_in(pr_number, buckets["dirty"]):
             out.reasons.append(f"hold:#{pr_number}:dirty")

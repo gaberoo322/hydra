@@ -138,6 +138,8 @@ const SignalsSchema = z
     retro_run_drillable: z.boolean(),
     review_retro_due: z.boolean(),
     // PR gate (#4240) and the resume / conflict-fix picks
+    // #5319: open issues labelled `parked` (ADR-0047 Decision 6) - decide.py's belt filter set
+    orch_parked_issues: NumberList,
     orch_prs_dirty: NumberList,
     orch_prs_unchecked: NumberList,
     orch_prs_behind: NumberList,
@@ -221,6 +223,7 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   retro_run_available: false,
   retro_run_drillable: false,
   review_retro_due: false,
+  orch_parked_issues: [],
   orch_prs_dirty: [],
   orch_prs_unchecked: [],
   orch_prs_behind: [],

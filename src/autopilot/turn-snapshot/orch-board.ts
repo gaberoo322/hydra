@@ -207,6 +207,7 @@ export const UNTRIAGED_ORPHAN_EXCLUDED_LABELS: readonly string[] = [
   "needs-tickets",
   "hitl-grill",
   "needs-dev-resume",
+  "parked", // #5319: ADR-0047 human-hold; else sweep_orch re-triages a parked issue out of the park
 ];
 
 /**

@@ -303,6 +303,8 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     retro_run_drillable: v.retro.drillable === true,
     review_retro_due: v.retro.reviewDue === true,
 
+    // #5319: the parked issue set (sorted); [] on degrade (the collector marks `parkedIssues`).
+    orch_parked_issues: v.prGate.parkedIssues.ok ? [...v.prGate.parkedIssues.value].sort((a, b) => a - b) : [],
     orch_prs_dirty: [...v.prGate.dirty],
     orch_prs_unchecked: [...v.prGate.unchecked],
     orch_prs_behind: [...v.prGate.behind],
