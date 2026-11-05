@@ -153,6 +153,18 @@
       "description": "hydra-watchdog.ts — one-shot watchdog CLI (issue #5095, epic #5094)."
     },
     {
+      "path": "scripts/lifecycle-legacy-backfill.ts",
+      "name": "lifecycle-legacy-backfill.ts",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/lifecycle-legacy-backfill.ts"
+      },
+      "kind": "ts",
+      "description": "scripts/lifecycle-legacy-backfill.ts — one-time claim pass (ADR-0047 D4, #5315)."
+    },
+    {
       "path": "scripts/lifecycle.ts",
       "name": "lifecycle.ts",
       "execStart": null,
