@@ -86,7 +86,7 @@ export async function runPacket(
   // exit before any packet file exists (S5's pre-spawn exit, preserved).
   const standards = await deps.loadStandards(process.cwd());
   if (!standards.ok) {
-    throw new Error(`standards catalog read failed: ${standards.message}`);
+    throw new Error(`standards catalog read failed: ${(standards as { message: string }).message}`);
   }
 
   // 7.0 the shared review packet, captured ONCE.

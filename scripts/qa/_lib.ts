@@ -19,7 +19,9 @@ export const DEFAULT_REPO = "gaberoo322/hydra";
 export const DEFAULT_API_BASE = "http://localhost:4000";
 
 /** Result of one `gh` / `git` invocation. Never throws. */
-export type CmdResult = { ok: true; stdout: string } | { ok: false; stderr: string };
+export type CmdResult =
+  | { ok: true; stdout: string; stderr?: string }
+  | { ok: false; stderr: string; stdout?: string };
 
 export interface HttpResult {
   status: number;
