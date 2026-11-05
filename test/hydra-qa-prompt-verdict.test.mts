@@ -471,12 +471,12 @@ describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
     assert.ok(QA_PLAYBOOK.indexOf("### 9.6 ") < QA_PLAYBOOK.indexOf("### 10. Verdict routing"), "round-action reads the PR before any step-10 comment is posted");
     // The verdict comment (this round's trailer) precedes the first seam call.
     const comment = t13.indexOf("gh pr comment $pr_number");
-    const firstAdvance = t13.indexOf("scripts/lifecycle.ts advance");
+    const firstAdvance = t13.indexOf("qa_advance");
     assert.ok(comment > 0 && comment < firstAdvance, "the PR verdict comment must be posted before the seam counts the round");
     // Enforce parks in the same call; shadow parks explicitly.
     assert.ok(t13.includes("parked:qa-fail-rounds)"), "enforce: a parked:qa-fail-rounds refusal is the escalation, not an error");
-    assert.ok(t13.includes('.wouldPark'), "shadow: the would-park report is read from the advance JSON");
-    assert.match(t13, /advance \$issue_number parked --reason cap:qa-fail-rounds/);
+    assert.ok(t13.includes('QA_ADV_WOULD_PARK'), "shadow: the would-park report is read from the advance JSON");
+    assert.match(t13, /qa_advance \$issue_number parked --reason cap:qa-fail-rounds/);
     const t13Code = t13.slice(t13.indexOf("```bash")).split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
     assert.ok(!t13Code.includes("ready-for-human"), "a T1-T3 round cap never writes ready-for-human");
     // Escalate is the first comment branch.

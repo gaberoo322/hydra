@@ -1316,17 +1316,12 @@ if [ "$ROUND_ACTION" = "escalate" ]; then
     # Shadow mode: the seam did not park, so it did not post the unified comment —
     # post the SAME `## Hydra cap park` body parkForCap renders (src/lifecycle/park.ts)
     # so /hydra-review's Hydra-Cap-Park: parse and the un-park instructions work.
-    gh issue comment $issue_number --repo gaberoo322/hydra --body "## Hydra cap park
-
-This issue was parked automatically: the \`qa-fail-rounds\` cap was reached (3 of 3 per pr).
-
-| Arm | Count | Limit | Unit |
-|---|---|---|---|
-| qa-fail-rounds | 3 | 3 | pr |
-
-To un-park: investigate why the attempts keep failing, then remove the \`parked\` label, add the right state label, and post \`Hydra-Cap-Reset: by=<you> ts=<ISO-8601>\` so every count restarts from that moment.
-
-Hydra-Cap-Park: arm=qa-fail-rounds count=3 limit=3 unit=pr pr=$pr_number source=trailer ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || true
+    printf '%s\n' "## Hydra cap park" "" \
+      "This issue was parked automatically: the \`qa-fail-rounds\` cap was reached (3 of 3 per pr)." "" \
+      "| Arm | Count | Limit | Unit |" "|---|---|---|---|" "| qa-fail-rounds | 3 | 3 | pr |" "" \
+      "To un-park: investigate why the attempts keep failing, then remove the \`parked\` label, add the right state label, and post \`Hydra-Cap-Reset: by=<you> ts=<ISO-8601>\` so every count restarts from that moment." "" \
+      "Hydra-Cap-Park: arm=qa-fail-rounds count=3 limit=3 unit=pr pr=$pr_number source=trailer ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      | gh issue comment $issue_number --repo gaberoo322/hydra --body-file - 2>/dev/null || true
   fi
   gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA escalated — round cap reached*
 

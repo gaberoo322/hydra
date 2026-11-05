@@ -150,19 +150,19 @@ describe("hydra-qa playbook clears needs-qa on every verdict (issue #638)", () =
     // Issue #4766: the FAIL bounce branches (open PR vs not-open fallback), so
     // the #638/#974 contract is asserted per arm — EVERY bounce arm must leave
     // needs-qa through the seam, or the issue busy-loops QA again.
-    const openArmIdx = block.indexOf('if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then\n  ADV_OUT');
+    const openArmIdx = block.indexOf('if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then\n  qa_advance');
     assert.ok(openArmIdx > 0, "FAIL routing must branch on the bounce-label helper (issue #4766)");
     const fallbackIdx = block.indexOf("# Not-open fallback");
     assert.ok(fallbackIdx > openArmIdx, "FAIL routing must have a not-open fallback arm after the open-PR arm");
     const escalateIdx = block.indexOf('if [ "$ROUND_ACTION" = "escalate" ]; then');
     assert.match(
       block.slice(openArmIdx, fallbackIdx),
-      /scripts\/lifecycle\.ts advance\s+\$issue_number\s+needs-dev-resume\s+--evidence\s+pr=\$pr_number/,
+      /qa_advance\s+\$issue_number\s+needs-dev-resume\s+--evidence\s+pr=\$pr_number/,
       "the open-PR arm must advance to needs-dev-resume",
     );
     assert.match(
       block.slice(fallbackIdx, escalateIdx),
-      /scripts\/lifecycle\.ts advance\s+\$issue_number\s+ready-for-agent\s+--evidence\s+pr=\$pr_number/,
+      /qa_advance\s+\$issue_number\s+ready-for-agent\s+--evidence\s+pr=\$pr_number/,
       "the not-open fallback arm must advance to ready-for-agent",
     );
   });
@@ -251,16 +251,16 @@ describe("hydra-qa bounce label keys on open-PR state, not GLM provenance (issue
   test("open-PR bounce arms add needs-dev-resume, never ready-for-agent; the fallback keeps ready-for-agent", () => {
     // T1/T2/T3 FAIL routing (also the landing zone of step 6.6's
     // skip-required-failed short-circuit, which jumps here).
-    const openArmIdx = failBlock.indexOf('if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then\n  ADV_OUT');
+    const openArmIdx = failBlock.indexOf('if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then\n  qa_advance');
     assert.ok(openArmIdx > 0, "T1/T2/T3 FAIL routing must branch on the bounce-label helper");
     const fallbackIdx = failBlock.indexOf("# Not-open fallback");
     assert.ok(fallbackIdx > openArmIdx, "the not-open fallback arm must follow the open-PR arm");
     const escalateIdx = failBlock.indexOf('if [ "$ROUND_ACTION" = "escalate" ]; then');
     const openArm = failBlock.slice(openArmIdx, fallbackIdx);
     const fallbackArm = failBlock.slice(fallbackIdx, escalateIdx);
-    assert.match(openArm, /lifecycle\.ts advance\s+\$issue_number\s+needs-dev-resume/, "the open-PR arm advances to needs-dev-resume (INV-1)");
+    assert.match(openArm, /qa_advance\s+\$issue_number\s+needs-dev-resume/, "the open-PR arm advances to needs-dev-resume (INV-1)");
     assert.doesNotMatch(openArm, /advance\s+\$issue_number\s+ready-for-agent/, "the open-PR arm must NOT advance to ready-for-agent (INV-1)");
-    assert.match(fallbackArm, /lifecycle\.ts advance\s+\$issue_number\s+ready-for-agent/, "the not-open fallback arm advances to ready-for-agent (INV-2)");
+    assert.match(fallbackArm, /qa_advance\s+\$issue_number\s+ready-for-agent/, "the not-open fallback arm advances to ready-for-agent (INV-2)");
 
     // Step 6.6 defer.
     const deferOpenIdx = deferBlock.indexOf('if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then');
@@ -268,14 +268,14 @@ describe("hydra-qa bounce label keys on open-PR state, not GLM provenance (issue
     const deferFallbackIdx = deferBlock.indexOf("# Not-open fallback");
     assert.ok(deferFallbackIdx > deferOpenIdx, "the defer not-open fallback must follow the open-PR arm");
     const deferOpen = deferBlock.slice(deferOpenIdx, deferFallbackIdx);
-    assert.match(deferOpen, /lifecycle\.ts advance\s+\$issue_number\s+needs-dev-resume/, "the defer open-PR arm advances to needs-dev-resume (INV-1)");
+    assert.match(deferOpen, /qa_advance\s+\$issue_number\s+needs-dev-resume/, "the defer open-PR arm advances to needs-dev-resume (INV-1)");
     assert.doesNotMatch(deferOpen, /advance\s+\$issue_number\s+ready-for-agent/, "the defer open-PR arm must NOT advance to ready-for-agent (INV-1)");
-    assert.match(deferBlock.slice(deferFallbackIdx), /lifecycle\.ts advance\s+\$issue_number\s+ready-for-agent/, "the defer not-open fallback advances to ready-for-agent (INV-2)");
+    assert.match(deferBlock.slice(deferFallbackIdx), /qa_advance\s+\$issue_number\s+ready-for-agent/, "the defer not-open fallback advances to ready-for-agent (INV-2)");
 
     // Step 10 T4 1st deep-QA FAIL bounce — same rule, single arm.
     const t4Bounce = t4Block.slice(t4Block.indexOf("1st deep-QA FAIL"));
     assert.match(t4Bounce, /BOUNCE_LABEL=\$\(qa_bounce_label\)/, "the T4 1st-FAIL bounce consults the helper (INV-1)");
-    assert.match(t4Bounce, /lifecycle\.ts advance\s+\$issue_number\s+"\$BOUNCE_LABEL"/, "the T4 bounce advances to the helper's label");
+    assert.match(t4Bounce, /qa_advance\s+\$issue_number\s+"\$BOUNCE_LABEL"/, "the T4 bounce advances to the helper's label");
     assert.doesNotMatch(t4Bounce, /advance\s+\$issue_number\s+ready-for-agent/, "the T4 bounce must not hard-code ready-for-agent (INV-1)");
   });
 
@@ -310,5 +310,29 @@ describe("the needs-qa collector documents the needs-qa contract (issue #638)", 
       /needs[_-]qa[\s\S]{0,800}#638/,
       "the orch-board collector's needs-qa doc must reference issue #638's contract",
     );
+  });
+});
+
+describe("QA-FAIL round-2 fixes: one qa_advance wrapper at every advance site (#5317 PR #5377)", () => {
+  const pb = readFileSync(PLAYBOOK_PATH, "utf8");
+  const helperStart = pb.indexOf("qa_advance() {");
+  const helper = pb.slice(helperStart, pb.indexOf("\n}\n", helperStart));
+  const failStart = pb.indexOf("BOUNCE_LABEL=$(qa_bounce_label)\nROUND_ACTION=bounce");
+  const failBlock = pb.slice(failStart, pb.indexOf("### 11. Lesson capture"));
+
+  test("the wrapper exits 0 on pr-merged (no needs-qa busy-loop) and is the only caller of the bounce advances", () => {
+    assert.ok(helperStart > 0, "qa_advance helper defined");
+    assert.match(helper, /pr-merged/);
+    assert.match(helper, /exit 0/);
+    assert.doesNotMatch(pb, /npx tsx scripts\/lifecycle\.ts advance \$issue_number (needs-dev-resume|ready-for-agent|"\$BOUNCE_LABEL")/);
+    assert.equal((pb.match(/qa_advance \$issue_number (needs-dev-resume|ready-for-agent) .*defer=1/g) ?? []).length, 2, "both defer arms");
+    assert.match(pb, /qa_advance \$issue_number "\$BOUNCE_LABEL"/, "T4 1st-FAIL bounce");
+  });
+
+  test("the CLOSED-PR arm honours wouldPark (shadow) as the open arm does, and shadow posts the unified cap-park comment", () => {
+    const closedArm = failBlock.slice(failBlock.indexOf("# Not-open fallback"), failBlock.indexOf('if [ "$ROUND_ACTION" = "escalate" ]; then'));
+    assert.match(closedArm, /QA_ADV_WOULD_PARK" = "qa-fail-rounds"[\s\S]*qa_shadow_park/);
+    assert.match(closedArm, /parked:qa-fail-rounds/, "enforce code still escalates on the closed arm (sibling shape)");
+    assert.match(failBlock, /SHADOW_PARK" = "1"[\s\S]*## Hydra cap park[\s\S]*Hydra-Cap-Park: arm=qa-fail-rounds/);
   });
 });
