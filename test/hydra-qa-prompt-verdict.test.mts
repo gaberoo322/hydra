@@ -70,77 +70,50 @@ import { glmLane } from "../src/glm/eligibility.ts";
 // Issue #4729 — canonical `QA-Verdict:` trailer: helper shape + playbook pin.
 // ---------------------------------------------------------------------------
 
-describe("hydra-qa playbook emits the QA-Verdict trailer on every verdict post (issue #4729)", () => {
+describe("hydra-qa emits the QA-Verdict trailer on every verdict post (issue #4729)", () => {
   const playbook = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "..", "docs", "operator-playbooks", "hydra-qa.md"),
     "utf8",
   );
-  const step10 = playbook.slice(
-    playbook.indexOf("### 10. Verdict routing"),
-    playbook.indexOf("### 11. Lesson capture"),
-  );
-  // Every `--body "…"` template in step 10 (bodies end at the first unescaped `"`).
-  const bodies = [...step10.matchAll(/(gh (?:pr|issue) (?:comment|review))[^\n]*--body "((?:[^"\\]|\\.)*)"/g)].map(
-    (m) => ({ cmd: m[1] as string, body: m[2] as string }),
+  // Since #5269 (ADR-0046 Decision 7) the verdict bodies, the trailer render call and the
+  // pre-verdict exits live in scripts/qa/route.ts. The golden bodies and the effect order are
+  // pinned by test/qa-plumbing-scripts.test.mts; this block keeps the invariants that tie the
+  // PLAYBOOK to that script.
+  const routeSrc = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "qa", "route.ts"),
+    "utf8",
   );
 
-  test("step 9.5 renders the trailer via buildQaVerdictTrailer", () => {
-    assert.match(playbook, /### 9\.5 Render the `QA-Verdict:` trailer/);
-    assert.match(playbook, /scripts\/ci\/qa-verdict\.ts trailer/);
+  test("route renders the trailer through the engine's trailer phase; the playbook documents its shape", () => {
+    assert.ok(routeSrc.includes('ports.phase("trailer"'), "route.ts must render the trailer via the engine, never by hand");
     assert.match(
       playbook,
       /QA-Verdict: <PASS\|FAIL\|PASS-pending-CI\|FAIL-pending-CI> pr=<N> round=<k> sha=<head12> blockers=<n> max_severity=<high\|medium\|low\|none>/,
     );
   });
 
-  test("every verdict body in step 10 (PR and issue side, T1-T4) ends with exactly one trailer", () => {
-    const verdictBodies = bodies.filter((b) => !b.body.includes("PASS proof"));
-    // PASS, PASS-pending-CI, T1-T3 FAIL review + 4 issue pointers (escalated
-    // #4735, GLM wording, open-PR #4766, not-open fallback), T4 review + 2
-    // issue pointers = 10.
-    assert.equal(verdictBodies.length, 10, `found ${verdictBodies.length} verdict bodies`);
-    for (const { cmd, body } of verdictBodies) {
-      const count = body.split("${QA_VERDICT_TRAILER}").length - 1;
-      assert.equal(count, 1, `${cmd} body must carry exactly one trailer:\n${body.slice(0, 200)}`);
-      assert.ok(body.trimEnd().endsWith("${QA_VERDICT_TRAILER}"), `${cmd} trailer must be the last line`);
+  test("no verdict body template remains in the playbook: every posted body lives in route.ts", () => {
+    assert.doesNotMatch(playbook, /--body "> \*(Automated QA|T4 Deep-QA)/, "a body template in the playbook would drift from the golden bodies");
+    assert.doesNotMatch(playbook, /\$\{?QA_VERDICT_TRAILER\}?/, "no playbook variable carries the trailer any more");
+    for (const heading of ["Automated QA — two-axis review", "Automated QA — two-axis review (pending CI)", "T4 Verifier-Core deep review", "PASS proof"]) {
+      assert.ok(routeSrc.includes(heading), `route.ts must post the '${heading}' body`);
     }
   });
 
-  test("issue-side comments are short pointers that keep their bounce markers (≤800 chars with worst-case fields, #4746)", () => {
-    const issueBodies = bodies.filter((b) => b.cmd === "gh issue comment").map((b) => b.body);
-    // 6 since #4766: escalated #4735, GLM wording, open-PR wording, not-open
-    // fallback, T4 blocked, T4 1st-FAIL bounce.
-    assert.equal(issueBodies.length, 6);
-    for (const body of issueBodies) {
-      const filled = fillWorstCase(body);
-      assert.ok(!/\$\{?\w/.test(filled), `unexpanded variable left in pointer:\n${filled}`);
-      // The #4735 escalation carries the round-by-round summary (≤10 rows), so it gets a larger bound.
-      const limit = body.includes("${QA_ESCALATION_SUMMARY}") ? 2500 : 800;
-      assert.ok(filled.length <= limit, `issue pointer too long with worst-case fields (${filled.length} chars):\n${filled}`);
-      assert.ok(!body.includes("$REVIEW_REPORT"), "the full review must live only on the PR");
-      assert.match(body, /PR #\$pr_number/);
-      assert.match(body, /\$\{BLOCKER_SUMMARY\}/);
-      assert.match(body, /Automated QA failed|Automated QA escalated|T4 Deep-QA failed|T4 Deep-QA blocked/);
-    }
+  test("fail-closed (#5306 QA round 1): the trailer and round-action results are validated BEFORE the first effect", () => {
+    const trailerAt = routeSrc.indexOf('ports.phase("trailer"');
+    const roundAt = routeSrc.indexOf('ports.phase("round-action"');
+    const firstEffect = routeSrc.indexOf('if (verdict === "PASS")');
+    assert.ok(trailerAt > 0 && roundAt > trailerAt && firstEffect > roundAt, "engine calls precede every PASS/FAIL effect");
+    assert.match(routeSrc, /const trailer = requireField\(trailerOut\.trailer/, "an absent trailer is a pre-verdict exit");
+    assert.match(routeSrc, /const roundAction = requireField\(round\.action/, "an action-less round-action result is a pre-verdict exit");
+    assert.doesNotMatch(playbook, /trailer \| jq -r/, "a pipe into jq masks the node exit status");
   });
 
-  test("fail-closed bash (#5306 QA round 1): trailer capture is not piped into jq; ROUND_JSON is asserted; fold fields use jq -e", () => {
-    const s95 = playbook.slice(playbook.indexOf("### 9.5 "), playbook.indexOf("### 9.6 "));
-    assert.doesNotMatch(s95, /trailer \| jq -r/, "a pipe into jq masks the node exit status");
-    assert.match(s95, /TRAILER_JSON=\$\(/);
-    assert.match(s95, /jq -er '\.trailer'/);
-    const s96 = playbook.slice(playbook.indexOf("### 9.6 "), playbook.indexOf("### 10. Verdict routing"));
-    assert.match(s96, /jq -e '\.round\.action'/, "an empty ROUND_JSON aborts before step 10");
-    const s9 = playbook.slice(playbook.indexOf("### 9. Classify"), playbook.indexOf("### 9.5 "));
-    assert.match(s9, /fold_field/);
-    assert.doesNotMatch(s9, /\$FOLD_JSON" \| jq -r '\.counts/, "no literal-null jq -r on required fold fields");
-    assert.match(s9, /QA-Verdict-Error: pr=\$pr_number/, "a failed fold leaves a visible error comment");
-  });
-
-  test("the skip-required-failed path runs step 9.5 before step 10", () => {
-    const skip = playbook.slice(playbook.indexOf("- **`skip-required-failed`** (T1/T2/T3 only"));
-    assert.match(skip.slice(0, 4000), /run steps 9\.5 (?:\(the trailer\) )?and 9\.6/i);
-    assert.match(skip.slice(0, 4000), /MAX_SEVERITY=high/);
+  test("the playbook routes skip-required-failed and defer through `route`, not a hand-run fold", () => {
+    assert.match(playbook, /skip-required-failed/);
+    assert.match(playbook, /scripts\/qa\/route\.ts/);
+    assert.doesNotMatch(playbook, /scripts\/ci\/qa-verdict\.ts (fold|trailer|round-action)/, "INV-1: no engine shim returns to the playbook");
   });
 });
 
@@ -151,11 +124,12 @@ describe("hydra-qa playbook — spawn step branches on change shape (issue #4733
     new URL("../docs/operator-playbooks/hydra-qa.md", import.meta.url),
     "utf8",
   );
+  const preflightSrc = readFileSync(new URL("../scripts/qa/preflight.ts", import.meta.url), "utf8");
 
-  test("step 6.7 sizes the fan-out via `qa-verdict.ts fanout`", () => {
-    assert.match(playbook, /### 6\.7 [^\n]*change shape/i);
-    assert.ok(playbook.includes("scripts/ci/qa-verdict.ts fanout"), "step 6.7 sizes the fan-out via `qa-verdict.ts fanout`");
-    assert.ok(playbook.includes("FANOUT_MODE"), "playbook must carry FANOUT_MODE");
+  test("preflight sizes the fan-out via the engine's `fanout` phase; the playbook branches on .fanout.mode", () => {
+    assert.ok(preflightSrc.includes('ports.phase("fanout"'), "preflight must size the fan-out through the engine");
+    assert.ok(playbook.includes("fanout.mode"), "playbook must branch on the preflight's .fanout.mode");
+    assert.ok(playbook.includes("fanout.reviewers"), "playbook must carry the decided reviewer list");
   });
 
   test("step 7 has a single-reviewer branch; T4 and code PRs keep the full fan-out", () => {
@@ -166,14 +140,14 @@ describe("hydra-qa playbook — spawn step branches on change shape (issue #4733
     );
   });
 
-  test("fan-out fallback sets FANOUT_REVIEWERS; diffs use --no-renames; step 6 shares the prompt-path list", () => {
-    const start = playbook.indexOf("### 6.7 ");
-    const section = playbook.slice(start, playbook.indexOf("### 7. ", start));
-    assert.ok(section.includes("|| FANOUT_JSON=\"\""), "6.7 CLI failure must fall to the tier fan-out");
-    assert.equal(section.match(/FANOUT_REVIEWERS=/g)?.length, 3, "6.7 must set FANOUT_REVIEWERS on success AND both fallback arms");
-    assert.ok(!/^CHANGED=\$\(git diff --name-only/m.test(playbook), "CHANGED lists must use --no-renames");
-    assert.ok(playbook.includes("if .promptOnly == true"), "step 6 must use the engine's shared prompt-path predicate (admission .promptOnly)");
+  test("fan-out fallback keeps the tier reviewers; diffs use --no-renames; the prompt-path list is the engine's", () => {
+    assert.ok(preflightSrc.includes("kept the tier path"), "a failed sizing call must keep the tier fan-out");
+    assert.ok(preflightSrc.includes('"reviewer-A-standards", "reviewer-A-spec", "reviewer-B-standards", "reviewer-B-spec"'));
+    assert.ok(preflightSrc.includes('["standards", "spec"]'));
+    assert.ok(preflightSrc.includes('"--no-renames", "--name-only"'), "CHANGED lists must use --no-renames");
+    assert.ok(preflightSrc.includes("out.promptOnly === true"), "step 6 must use the engine's shared prompt-path predicate (admission .promptOnly)");
     assert.ok(!playbook.includes(".claude/skills/*|config/*|docs/operator-playbooks/*"), "the old step-6 case list must be gone");
+    assert.ok(!/^CHANGED=\$\(git diff --name-only/m.test(playbook), "CHANGED lists must use --no-renames");
   });
 
   test("step 7.5 completeness check covers the one-reviewer fan-out", () => {
@@ -182,7 +156,7 @@ describe("hydra-qa playbook — spawn step branches on change shape (issue #4733
     assert.ok(start > 0 && end > start, "step 7.5 section must exist");
     const section = playbook.slice(start, end);
     assert.ok(section.includes("reviewer-single"), "7.5 must name the single-reviewer spawn");
-    assert.ok(section.includes("FANOUT_REVIEWERS"), "7.5 must check against the decided reviewer list");
+    assert.ok(section.includes("fanout.reviewers"), "7.5 must check against the decided reviewer list");
   });
 });
 
@@ -278,11 +252,13 @@ describe("one definition of a red required check (issue #4746)", () => {
     }
   });
 
-  test("the playbook's RED_REQUIRED_LIST + skip-path BLOCKERS derive from the admission call's redRequired (no divergent jq filter)", () => {
-    assert.match(QA_PLAYBOOK, /RED_REQUIRED_JSON=\$\(printf '%s' "\$ADMISSION_JSON" \| jq -c '\.redRequired/);
+  test("preflight's redRequired and route's skip-path BLOCKERS derive from the admission call's redRequired (no divergent jq filter)", () => {
+    const preflightSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "preflight.ts"), "utf8");
+    const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "route.ts"), "utf8");
+    assert.match(preflightSrc, /redRequired: Array\.isArray\(out\.redRequired\)/, "the red list is the engine's, copied verbatim");
     assert.doesNotMatch(QA_PLAYBOOK, /IN\("failure"/, "no hand-rolled conclusion filter may remain");
-    assert.match(QA_PLAYBOOK, /BLOCKERS=\$\(printf '%s' "\$RED_REQUIRED_JSON" \| jq 'length'/);
-    assert.match(QA_PLAYBOOK, /WORST_FINDING="required CI check\(s\) red: \$\{RED_REQUIRED_LIST/);
+    assert.match(routeSrc, /blockers = Math\.max\(1, pre\.gate\.redRequired\.length\)/);
+    assert.match(routeSrc, /worstFinding = `required CI check\(s\) red: \$\{redList \|\| "see checks block"\}`/);
   });
 });
 
@@ -291,11 +267,11 @@ describe("hydra-qa FAIL path posts a comment, never a request-changes review (is
     assert.doesNotMatch(QA_PLAYBOOK, /gh pr review \$pr_number[^\n]*--request-changes/);
   });
 
-  test("the T1-T3 and T4 FAIL verdict bodies are `gh pr comment`s", () => {
-    const step10 = QA_PLAYBOOK.slice(QA_PLAYBOOK.indexOf("### 10. Verdict routing"), QA_PLAYBOOK.indexOf("### 11. Lesson capture"));
-    const failSection = step10.slice(step10.indexOf("**Verdict `FAIL` or `FAIL-pending-CI`**"));
-    assert.match(failSection, /gh pr comment \$pr_number --repo gaberoo322\/hydra --body "> \*Automated QA — two-axis review\*/);
-    assert.match(failSection, /gh pr comment \$pr_number --repo gaberoo322\/hydra --body "> \*Automated QA — T4 Verifier-Core deep review\*/);
+  test("route posts the T1-T3 and T4 FAIL verdict bodies as `gh pr comment`s, never a review", () => {
+    const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "route.ts"), "utf8");
+    assert.match(routeSrc, /\["pr", "comment", String\(pr\), "--repo", repo, "--body", body\]/);
+    assert.doesNotMatch(routeSrc, /"review"|request-changes/);
+    assert.ok(routeSrc.includes("Automated QA — two-axis review") && routeSrc.includes("T4 Verifier-Core deep review"));
   });
 });
 
@@ -323,12 +299,12 @@ describe("hydra-qa playbook wires the severity fold (issue #4734)", () => {
     assert.ok(QA_PLAYBOOK.includes('"severity": "high|medium|low"'), "reviewers must emit the severity field");
   });
 
-  test("steps 8–9 fold through the `fold` CLI phase (rules live in the engine, not the playbook)", () => {
-    const s8 = QA_PLAYBOOK.slice(QA_PLAYBOOK.indexOf("### 8. Aggregate"), QA_PLAYBOOK.indexOf("### 9.5 "));
-    assert.ok(s8.includes("scripts/ci/qa-verdict.ts fold"), "step 9 must call the fold phase");
-    assert.ok(s8.includes("--rawfile raw"), "the findings file is bound with --rawfile (malformed reaches the engine as a raw string)");
-    assert.ok(s8.includes("try ($raw | fromjson) catch $raw"), "a malformed file must fail closed in the engine, never abort jq");
-    assert.ok(s8.includes("aggregateAdversarialReview()"), "T4 keeps the unchanged adversarial AND");
+  test("route folds through the engine's `fold` phase (rules live in the engine, not the playbook)", () => {
+    const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "route.ts"), "utf8");
+    const s8 = QA_PLAYBOOK.slice(QA_PLAYBOOK.indexOf("### 8. Aggregate"), QA_PLAYBOOK.indexOf("### 9."));
+    assert.ok(routeSrc.includes('ports.phase("fold"'), "route must call the fold phase");
+    assert.ok(routeSrc.includes("const parsed = tryParse(raw);") && routeSrc.includes("if (parsed === undefined) return raw;"), "a malformed file must reach the engine RAW and fail closed there");
+    assert.ok(QA_PLAYBOOK.includes("aggregateAdversarialReview()"), "T4 keeps the unchanged adversarial AND");
     assert.doesNotMatch(QA_PLAYBOOK, /renderChecksBlock\(r\)/, "verdict comments no longer repeat the full CI table");
     assert.doesNotMatch(s8, /\|\| '\[\]'\)/, "no defaulted empty findings array");
     assert.doesNotMatch(QA_PLAYBOOK, /process\.env\.REVIEWER_A_VERDICT/);
@@ -376,11 +352,12 @@ describe("qa-verdict constants pin the playbook's hand-copied text (issue #4758)
     assert.match(QA_PLAYBOOK, /`Dockerfile:12` is path-like only WITH a line number/);
   });
 
-  test("QA_ADMISSION_SKIP_MARKER: step 6.6's skip REVIEW_REPORT carries it for humans; CURRENT_REVIEWED comes from GATE_ACTION, not the marker text", () => {
+  test("QA_ADMISSION_SKIP_MARKER: route's skip REVIEW_REPORT carries it for humans; currentReviewed comes from the gate action, not the marker text", () => {
+    const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "route.ts"), "utf8");
     assert.equal(QA_ADMISSION_SKIP_MARKER, "Review skipped by the admission gate");
-    assert.ok(QA_PLAYBOOK.includes(`REVIEW_REPORT="_${QA_ADMISSION_SKIP_MARKER}`), "step 6.6's skip report carries the marker");
-    assert.ok(!QA_PLAYBOOK.includes(`*"${QA_ADMISSION_SKIP_MARKER}"*`), "no case pattern greps the marker out of REVIEW_REPORT");
-    assert.ok(QA_PLAYBOOK.includes('[ "$GATE_ACTION" = "skip-required-failed" ] && CURRENT_REVIEWED=false'));
+    assert.ok(routeSrc.includes("`_${QA_ADMISSION_SKIP_MARKER} (issue #3815)"), "route's skip report carries the marker");
+    assert.ok(!routeSrc.includes(`*"${QA_ADMISSION_SKIP_MARKER}"*`), "no case pattern greps the marker out of the report");
+    assert.ok(routeSrc.includes('const currentReviewed = pre.gate.action !== "skip-required-failed";'));
   });
 
   test("QA_FINDINGS_HEADING: priorFindingsSection keys on the heading the report writes", () => {
@@ -429,21 +406,23 @@ describe("hydra-qa step 10 label effects stay plain text pins (issue #4735, INV-
   });
 
   test("a 404 on removing an absent label is not a failure; the label name goes in the URL path", () => {
-    assert.ok(QA_PLAYBOOK.includes('*404*|*"Label does not exist"*) ;;'));
-    assert.ok(QA_PLAYBOOK.includes('gh api -X DELETE "repos/gaberoo322/hydra/issues/$ESC_ISSUE/labels/$l"'));
+    const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa/route.ts"), "utf8");
+    assert.ok(routeSrc.includes('res.stderr.includes("Label does not exist")') && routeSrc.includes("/404/.test(res.stderr)"));
+    assert.ok(routeSrc.includes("`repos/${repo}/issues/${issue}/labels/${l}`"), "the DELETE carries the name in the path, never -f name=");
   });
 
-  test("a failed label call never claims `Labelled`; an unsubstituted issue number fails loud", () => {
-    assert.ok(QA_PLAYBOOK.includes('ESC_LABELS_OK=0; echo "[hydra-qa] ERROR: could not add'));
-    assert.ok(QA_PLAYBOOK.includes('**Label routing FAILED**'));
-    assert.ok(QA_PLAYBOOK.includes("no issue number to escalate"));
+  test("a failed label call never claims `Labelled`", () => {
+    const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa/route.ts"), "utf8");
+    assert.ok(routeSrc.includes("labelsOk ? ESC_NOTE_OK : ESC_NOTE_FAILED"));
+    assert.ok(routeSrc.includes("**Label routing FAILED**"));
+    // The old bash needed a guard against an unsubstituted issue number; the issue is a typed
+    // positive integer in the preflight schema now, so that failure mode no longer exists.
   });
 
   test("labels and escalation text come from the round-action JSON, never spelled in the loop", () => {
-    assert.ok(QA_PLAYBOOK.includes("jq -r '.labels.issueAdd[]'"));
-    assert.ok(QA_PLAYBOOK.includes("jq -r '.labels.issueRemove[]'"));
-    assert.ok(QA_PLAYBOOK.includes("jq -r '.labels.prAdd[]'"));
-    assert.ok(QA_PLAYBOOK.includes("jq -r '.escalationSummary'"));
+    const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa/route.ts"), "utf8");
+    for (const key of ["issueAdd", "issueRemove", "prAdd"]) assert.ok(routeSrc.includes(`names("${key}")`), key);
+    assert.ok(routeSrc.includes("roundOut.escalationSummary"));
   });
 });
 
@@ -458,32 +437,33 @@ describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
   });
 
   test("the re-review context is APPENDED to the full packet, with the confirm-first instruction", () => {
-    const s7 = QA_PLAYBOOK.slice(QA_PLAYBOOK.indexOf("#### 7.0a"), QA_PLAYBOOK.indexOf("#### 7a."));
-    assert.ok(s7.includes("${PRIOR_FINDINGS}"));
-    assert.ok(s7.includes('git diff --no-renames "$REREVIEW_DIFF_BASE" HEAD'));
-    assert.ok(s7.includes('REVIEW_PACKET="${REVIEW_PACKET}'), "the context is appended; the full diff and changed files stay");
-    assert.match(s7, /first state fixed\/not-fixed for each prior finding; for anything new, prefer medium\+ and say why it wasn't visible before/);
+    const packetSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "packet.ts"), "utf8");
+    assert.ok(packetSrc.includes("${priorFindings}"));
+    assert.ok(packetSrc.includes('["diff", "--no-renames", rereviewDiffBase, "HEAD"]'));
+    assert.ok(packetSrc.includes("packet += `"), "the context is appended; the full diff and changed files stay first");
+    assert.match(packetSrc, /first state fixed\/not-fixed for each prior finding; for anything new, prefer medium\+ and say why it wasn't visible before/);
+    assert.match(QA_PLAYBOOK, /first state fixed\/not-fixed for each prior finding; for anything new, prefer medium\+ and say why it wasn't visible before/i, "the re-review brief stays in the reviewer prompts");
   });
 
-  test("T1–T3: the round cap runs before this round's comment, and escalation never re-labels for dev", () => {
-    const step9 = QA_PLAYBOOK.slice(QA_PLAYBOOK.indexOf("### 9.6 "), QA_PLAYBOOK.indexOf("### 10. Verdict routing"));
-    assert.ok(step9.includes("scripts/ci/qa-verdict.ts round-action"), "the round cap is decided by the round-action call in step 9.6");
-    assert.ok(QA_PLAYBOOK.indexOf("### 9.6 ") < QA_PLAYBOOK.indexOf("### 10. Verdict routing"), "round-action reads the PR before any step-10 comment is posted");
-    const esc = t13.indexOf('if [ "$ROUND_ACTION" = "escalate" ]; then\n  gh issue comment');
-    // Re-anchored by #4766: the second routing branch is now the open-PR
-    // bounce arm (step 3's qa_bounce_label helper), replacing the retired
-    // GLM_AUTHORED arm — escalate must still be the FIRST branch.
-    const bounce = t13.indexOf('elif [ "$BOUNCE_LABEL" = "needs-dev-resume" ]');
+  test("T1–T3: the round cap is decided before any effect, and escalation never re-labels for dev", () => {
+    const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "route.ts"), "utf8");
+    assert.ok(routeSrc.includes('ports.phase("round-action"'), "the round cap is decided by the round-action call");
+    assert.ok(routeSrc.indexOf('ports.phase("round-action"') < routeSrc.indexOf("// ---- Effects (step 10). ----"), "round-action reads the PR before any effect is posted");
+    const t13 = routeSrc.slice(routeSrc.indexOf("// T1/T2/T3 (and unknown-tier) FAIL"));
+    const esc = t13.indexOf('if (roundAction === "escalate")');
+    const bounce = t13.indexOf("const label = await bounceLabel();");
     assert.ok(esc > 0 && esc < bounce, "escalate must be the first routing branch");
     const branch = t13.slice(esc, bounce);
     assert.ok(!branch.includes("ready-for-agent"));
-    assert.ok(branch.includes("${ESC_LABEL_NOTE}"), "the labelled claim comes from the label calls' outcome");
+    assert.ok(branch.includes("labelsOk ? ESC_NOTE_OK : ESC_NOTE_FAILED"), "the labelled claim comes from the label calls' outcome");
     assert.ok(!branch.includes("Labelled `ready-for-human`"), "no unconditional labelled claim");
   });
 
   test("T4 keeps decideDeepQaAction and never runs the T1–T3 round cap", () => {
-    assert.ok(t4.includes(".deepQa.action"), "T4 reads the deep-QA action from the round-action JSON");
-    assert.ok(!t4.includes("qa-round-cap") && !t4.includes("decideQaRoundAction") && !t4.includes('.round.action'));
+    const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "route.ts"), "utf8");
+    const t4 = routeSrc.slice(routeSrc.indexOf("// T4 FAIL — the Deep-QA Remediation Loop"), routeSrc.indexOf("// T1/T2/T3 (and unknown-tier) FAIL"));
+    assert.ok(t4.includes("roundOut.deepQa"), "T4 reads the deep-QA action from the round-action JSON");
+    assert.ok(!t4.includes("qa-round-cap") && !t4.includes("decideQaRoundAction") && !t4.includes("roundAction"));
   });
 });
 
@@ -492,12 +472,12 @@ describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
 // the re-review context is PROMPT ONLY. No code path filters, demotes or narrows
 // a finding; step 9 always folds with plain foldReviewFindings.
 describe("no demotion path: step 9 always folds with plain foldReviewFindings (issue #4735)", () => {
-  test("the playbook makes exactly one fold call, ALWAYS passing the spawned reviewers (#4758)", () => {
-    const s9 = QA_PLAYBOOK.slice(QA_PLAYBOOK.indexOf("### 9. Classify"), QA_PLAYBOOK.indexOf("### 9.5 "));
-    assert.equal((s9.match(/scripts\/ci\/qa-verdict\.ts fold/g) ?? []).length, 1, "one fold call, no scoped variant");
-    assert.ok(s9.includes("spawnedReviewers: ($spawned | split"), "spawnedReviewers is passed unconditionally (empty included)");
-    for (const v of ["PRIOR_FINDINGS", "REREVIEW_DIFF_BASE"]) {
-      const fold = s9.slice(s9.indexOf("FOLD_JSON=$("), s9.indexOf("rm -f \"$FINDINGS_FILE\""));
+  test("route makes exactly one fold call, ALWAYS passing the spawned reviewers (#4758), and never the re-review context", () => {
+    const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "route.ts"), "utf8");
+    assert.equal((routeSrc.match(/ports\.phase\("fold"/g) ?? []).length, 1, "one fold call, no scoped variant");
+    assert.ok(routeSrc.includes("spawnedReviewers: pre.fanout.reviewers"), "spawnedReviewers is passed unconditionally (empty included)");
+    const fold = routeSrc.slice(routeSrc.indexOf('ports.phase("fold"'), routeSrc.indexOf("const fold = isRecord(foldResult.fold)"));
+    for (const v of ["priorFindings", "rereviewDiffBase", "PRIOR_FINDINGS", "REREVIEW_DIFF_BASE"]) {
       assert.ok(!fold.includes(v), `the fold must not read re-review context (${v})`);
     }
   });

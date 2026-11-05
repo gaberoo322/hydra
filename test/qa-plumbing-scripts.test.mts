@@ -767,6 +767,28 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     await assert.rejects(runRoute({ ...ROUTE_OPTS, defer: true }, readyPre(), h.ports, realDeps()), /--defer is only valid/);
   });
 
+  test("route: a non-ready preflight stage posts its ONE stop comment and nothing else (no engine call, no relabel)", async () => {
+    const calls: string[] = [];
+    const stopPre = readyPre({ ok: false, stage: "spec-missing-enforce", stop: { target: "pr", body: "STOP-BODY" } });
+    const noFiles = { ...ROUTE_OPTS, findingsPath: undefined, summariesPath: undefined };
+    const h = harness({ phase: async (p) => { calls.push(p); return {}; } });
+    const r = await runRoute(noFiles, stopPre, h.ports, realDeps());
+    assert.deepEqual(h.writes().map((a) => `${a[0]} ${a[1]}`), ["pr comment"]);
+    assert.equal(argAfter(h.writes()[0] as string[], "--body"), "STOP-BODY");
+    assert.deepEqual(calls, []);
+    assert.equal(r.verdict, null);
+
+    const noPr = readyPre({ ok: false, stage: "no-pr", pr: null, stop: { target: "issue", body: "NO-PR" } });
+    const h2 = harness();
+    await runRoute(noFiles, noPr, h2.ports, realDeps());
+    assert.deepEqual(h2.writes().map((a) => `${a[0]} ${a[1]}`), ["issue comment"]);
+
+    const none = readyPre({ ok: false, stage: "no-issue", issue: null, pr: null, stop: null });
+    const h3 = harness();
+    await runRoute(noFiles, none, h3.ports, realDeps());
+    assert.deepEqual(h3.gh, [], "no issue to review: report and stop, nothing posted");
+  });
+
   test("route --dry-run prints the identical effect plan with zero writes", async () => {
     const mk = () => harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium" }) });
     const live = mk();

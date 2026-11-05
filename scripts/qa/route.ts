@@ -143,12 +143,9 @@ export async function runRoute(
   ports: PlumbingPorts,
   deps: RouteDeps,
 ): Promise<RouteResult> {
-  if (!pre.ok || pre.pr === null || pre.issue === null) {
-    throw new UsageError(`preflight stage '${pre.stage}' has no verdict to route`);
-  }
   const { repo } = opts;
-  const issue = pre.issue;
-  const pr = pre.pr.number;
+  const issue = pre.issue ?? 0;
+  const pr = pre.pr?.number ?? 0;
   const tier = pre.tier.num;
   const redList = pre.gate.redRequired.join(", ");
   const degraded: string[] = [];
@@ -186,6 +183,36 @@ export async function runRoute(
     return state === "CLOSED" || state === "MERGED" ? "ready-for-agent" : "needs-dev-resume";
   };
 
+  /** The result of a path that posted without a verdict (a stop comment or a defer). */
+  const noVerdict = (reason: string): RouteResult => ({
+    verdict: null,
+    reason,
+    reviewVerdict: null,
+    blockers: 0,
+    maxSeverity: "none",
+    worstFinding: "",
+    trailer: "",
+    round: null,
+    deepQa: null,
+    effects,
+    nextStep: "none",
+    dryRun: opts.dryRun,
+    degraded,
+  });
+
+  // ---- A non-ready preflight stage (no issue / no PR / spec missing in enforce): post its ONE comment and end. ----
+  if (!pre.ok) {
+    if (pre.stop) {
+      if (pre.stop.target === "pr" && pre.pr) await prComment(pre.stop.body, "stop-pr-comment");
+      else if (pre.stop.target === "issue" && pre.issue !== null) await issueComment(pre.stop.body, "stop-issue-comment");
+      else throw new UsageError(`preflight stage '${pre.stage}' has a stop comment with no target to post it on`);
+    }
+    return noVerdict(`preflight stage '${pre.stage}'`);
+  }
+  if (pre.pr === null || pre.issue === null) {
+    throw new UsageError(`preflight stage '${pre.stage}' carries no issue / PR to route`);
+  }
+
   // ---- --defer: PR comment -> bounce relabel -> issue comment, no verdict. ----
   if (deferring) {
     await prComment(bodies.deferPr(pre.gate.reason), "defer-pr-comment");
@@ -199,21 +226,7 @@ export async function runRoute(
     } else {
       await issueEdit("needs-qa", "ready-for-agent");
     }
-    return {
-      verdict: null,
-      reason: pre.gate.reason,
-      reviewVerdict: null,
-      blockers: 0,
-      maxSeverity: "none",
-      worstFinding: "",
-      trailer: "",
-      round: null,
-      deepQa: null,
-      effects,
-      nextStep: "none",
-      dryRun: opts.dryRun,
-      degraded,
-    };
+    return noVerdict(pre.gate.reason);
   }
 
   // ---- Compute the verdict (engine), BEFORE any write. ----
