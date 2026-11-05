@@ -76,7 +76,13 @@ rc_write() { rc_read "$@" >/dev/null; }
 # callers treat failure as best-effort (`|| true`) unless they gate state on it.
 deliver_page() {
   local prefix="$1"; shift
-  local notify_bin="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-node --experimental-strip-types ${HYDRA_ROOT:-$HOME/hydra}/scripts/operator-notify.ts}"
+  local notify_bin="${HYDRA_WATCHDOG_OPERATOR_NOTIFY:-}" node_bin
+  if [ -z "$notify_bin" ]; then
+    # The unit PATH carries no nvm node: use the SAME resolved binary as the
+    # checks (bare `node` only if nothing resolves), else the page rc=127s.
+    node_bin="$(resolve_watchdog_node)" || node_bin=node
+    notify_bin="$node_bin --experimental-strip-types ${HYDRA_ROOT:-$HOME/hydra}/scripts/operator-notify.ts"
+  fi
   local out err_file rc=0
   err_file="$(mktemp 2>/dev/null || printf '/tmp/hydra-operator-notify-%s.err' "$$")"
   # shellcheck disable=SC2086  # word-splitting binary+flags is intended

@@ -19,7 +19,7 @@
  * required check, so a red ratchet is routed around. Only checks inside the
  * already-required `test` job block, and running here needs no workflow edit
  * (which would land in the Verifier Core). Same reasoning, same lane, as
- * the (retired, #5099) watchdog spawn-timeout ratchet test.
+ * test/watchdog-spawn-timeout-ratchet.test.mts.
  *
  * HOW TO SATISFY IT. Add your cases to the test file that already covers the
  * subject. If a new file is genuinely right, regenerate the baseline in the

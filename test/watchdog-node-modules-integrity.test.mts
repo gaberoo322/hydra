@@ -311,6 +311,29 @@ describe("scripts/hydra-watchdog.sh — CLI-start alarm (issue #5099)", () => {
     assert.equal(existsSync(ALARM_MARKER), true);
   });
 
+  test("nvm-only node, NO notify override: the page is delivered through the resolved node (not bare `node`)", () => {
+    const bin = join(SCRATCH, "nvmonly-bin");
+    mkdirSync(bin, { recursive: true });
+    for (const tool of ["bash", "timeout", "ls", "sort", "tail", "dirname", "env", "date", "find", "wc", "tr", "mktemp", "rm", "grep", "cut", "cat", "head", "sh"]) {
+      const found = spawnSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf-8" }).stdout.trim();
+      if (found && !existsSync(join(bin, tool))) symlinkSync(found, join(bin, tool));
+    }
+    const home = join(SCRATCH, "nvmonly-home");
+    const nvmBin = join(home, ".nvm", "versions", "node", "v99.0.0", "bin");
+    mkdirSync(nvmBin, { recursive: true });
+    symlinkSync(NODE_STUB, join(nvmBin, "node"));
+    const r = runScript(
+      { HYDRA_WATCHDOG_NODE: "", HYDRA_WATCHDOG_OPERATOR_NOTIFY: "", HOME: home, STUB_PLAN_RC: "7", HYDRA_REDIS_HOST: "127.0.0.1", HYDRA_REDIS_PORT: "9" },
+      { path: bin },
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const calls = nodeCalls();
+    const page = calls.find((c) => c.includes("operator-notify.ts"));
+    assert.ok(page, `the page must run via the nvm node stub; node calls: ${calls.join(" | ")}`);
+    assert.match(page, /operator-notify\.ts page --kind infra:watchdog_cli_failed /);
+    assert.equal(existsSync(ALARM_MARKER), true, "page delivered => marker written");
+  });
+
   test("no node anywhere (the unit's minimal PATH, no nvm) raises the alarm with reason node-missing", () => {
     const bin = join(SCRATCH, "nodeless-bin");
     mkdirSync(bin, { recursive: true });
