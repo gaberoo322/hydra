@@ -62,7 +62,7 @@ describe("hydra-qa playbook clears needs-qa on every verdict (issue #638)", () =
     // evidence so a refactor that swaps issue for PR is caught.
     assert.match(
       block,
-      /npx tsx scripts\/lifecycle\.ts advance\s+\$issue_number\s+qa-passed\s+--evidence\s+pr=\$pr_number/,
+      /^qa_pass_advance\b/m,
       "PASS branch must advance the issue needs-qa -> qa-passed via the lifecycle seam",
     );
     assert.doesNotMatch(block, /--(?:add|remove)-label/, "PASS branch must not write state labels directly (ADR-0047 D3)");
@@ -102,7 +102,7 @@ describe("hydra-qa playbook clears needs-qa on every verdict (issue #638)", () =
 
     test("the lifecycle advance call follows the verdict comment and precedes the merge call (issue #5317 INV-8)", () => {
       const commentIdx = block.search(/gh pr comment\s+\$pr_number/);
-      const advanceIdx = block.search(/scripts\/lifecycle\.ts advance\s+\$issue_number\s+qa-passed/);
+      const advanceIdx = block.search(/^qa_pass_advance\b/m);
       const mergeIdx = block.search(/gh pr merge\s+\$pr_number/);
       assert.ok(advanceIdx >= 0, "PASS branch must contain the seam advance call");
       assert.ok(mergeIdx >= 0, "PASS branch must contain a merge call");
@@ -116,9 +116,14 @@ describe("hydra-qa playbook clears needs-qa on every verdict (issue #638)", () =
       );
     });
 
-    test("a refused advance exits non-zero and never falls back to a direct label edit (issue #5317 INV-9)", () => {
-      assert.match(block, /scripts\/lifecycle\.ts advance[^\n]*qa-passed[^\n]*ADV_RC=\$\?[\s\S]*?refused[^\n]*exit 1/, "advance refusal must exit 1");
-      assert.match(block, /"pr-merged" \] && exit 0/, "a pr-merged refusal is tolerated (reconcile owns the close)");
+    test("a refused advance reaches a deterministic exit and never falls back to a direct label edit (issue #5317 INV-9, round 3)", () => {
+      assert.match(block, /^qa_pass_advance\b/m, "PASS routes through the one wrapper");
+      const helper = playbook.slice(playbook.indexOf("qa_pass_advance() {"), playbook.indexOf("# Resolve to a SHA so a concurrent push"));
+      assert.match(helper, /qa_advance \$issue_number qa-passed --evidence pr=\$pr_number --actor hydra-qa/);
+      assert.match(helper, /QA-Verdict-Error: verdict=PASS/, "a non-pr-merged refusal posts a QA-Verdict-Error");
+      assert.match(helper, /--evidence defer=1 --actor hydra-qa/, "and reroutes off needs-qa through the seam defer edge");
+      assert.match(helper, /both refused[^\n]*NOT editing labels by hand/, "only a double refusal exits 1");
+      assert.doesNotMatch(helper, /gh issue edit/, "no direct label fallback");
       assert.doesNotMatch(block, /gh issue edit/, "no direct label fallback after a refusal");
     });
   });
@@ -127,7 +132,7 @@ describe("hydra-qa playbook clears needs-qa on every verdict (issue #638)", () =
     const block = extractVerdictBlock(playbook, "PASS-pending-CI");
     assert.match(
       block,
-      /scripts\/lifecycle\.ts advance\s+\$issue_number\s+qa-passed\s+--evidence\s+pr=\$pr_number/,
+      /^qa_pass_advance\b/m,
       "PASS-pending-CI branch must leave needs-qa for qa-passed — this is the busy-loop fix from issue #638",
     );
     assert.doesNotMatch(block, /--(?:add|remove)-label/, "no direct state-label writes (ADR-0047 D3)");

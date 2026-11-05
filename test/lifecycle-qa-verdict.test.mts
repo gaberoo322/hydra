@@ -306,17 +306,17 @@ describe("QA-FAIL round-1 fixes (#5317 PR #5377)", () => {
     assert.equal(res.ok, true);
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
     const w2 = world("enforce", live({ state: "CLOSED" }));
-    assert.equal((await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7", defer: "1" } }, w2.deps)).ok, true);
+    assert.equal((await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7", defer: "1" }, actor: "hydra-qa" }, w2.deps)).ok, true);
   });
 
   test("defer evidence never admits qa-passed, a wrong lane, or a merged PR; no defer still needs a trailer", async () => {
     const w = world("enforce", live());
-    const r1 = await advance({ issue: 10, to: "qa-passed", evidence: { pr: "7", defer: "1" } }, w.deps);
+    const r1 = await advance({ issue: 10, to: "qa-passed", evidence: { pr: "7", defer: "1" }, actor: "hydra-qa" }, w.deps);
     assert.equal((r1 as { code?: string }).code, "qa-verdict-mismatch");
-    const r2 = await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7", defer: "1" } }, w.deps);
+    const r2 = await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7", defer: "1" }, actor: "hydra-qa" }, w.deps);
     assert.equal((r2 as { code?: string }).code, "qa-verdict-mismatch");
     const wm = world("enforce", live({ state: "MERGED" }));
-    const r3 = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7", defer: "1" } }, wm.deps);
+    const r3 = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7", defer: "1" }, actor: "hydra-qa" }, wm.deps);
     assert.equal((r3 as { code?: string }).code, "pr-merged");
     const r4 = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps);
     assert.equal((r4 as { code?: string }).code, "qa-verdict-missing");
@@ -330,7 +330,50 @@ describe("QA-FAIL round-1 fixes (#5317 PR #5377)", () => {
     assert.equal((res as { code?: string }).code, "parked:qa-fail-rounds");
     assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["parked"] }]);
     const wd = world("enforce", live({ state: "CLOSED" }), three);
-    const rd = await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7", defer: "1" } }, wd.deps);
+    const rd = await advance({ issue: 10, to: "ready-for-agent", evidence: { pr: "7", defer: "1" }, actor: "hydra-qa" }, wd.deps);
     assert.equal(rd.ok, true);
+  });
+});
+
+describe("QA-FAIL round-3 fixes (#5317 PR #5377)", () => {
+  test("defer=1 is accepted only from actor hydra-qa (red without the actor check)", async () => {
+    for (const actor of [undefined, "cli", "hydra-dev"]) {
+      const w = world("enforce", live());
+      const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7", defer: "1" }, ...(actor ? { actor } : {}) }, w.deps);
+      assert.equal((res as { code?: string }).code, "defer-actor-not-allowed", `actor=${actor}`);
+      assert.deepEqual(w.edits, []);
+    }
+    // sibling shape: hydra-qa keeps its old verdict
+    const ok = world("enforce", live());
+    const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7", defer: "1" }, actor: "hydra-qa" }, ok.deps);
+    assert.equal(res.ok, true);
+  });
+
+  test("gateQaVerdict unit: defer from hydra-qa passes, from anyone else is refused", () => {
+    const records = { qaLive: { ok: true as const, value: live() }, stateEntry: { ok: true as const, value: { enteredAtMs: ENTERED } } };
+    const base = { issue: 10, from: "needs-qa" as const, to: "needs-dev-resume" as const, flags: [], evidence: { pr: "7", defer: "1" } };
+    assert.equal(gateQaVerdict({ ...base, actor: "hydra-qa" }, records).ok, true);
+    assert.equal(gateQaVerdict({ ...base, actor: "hydra-dev" }, records).code, "defer-actor-not-allowed");
+    assert.equal(gateQaVerdict(base, records).code, "defer-actor-not-allowed");
+  });
+
+  test("missing needs-qa entry time falls back to the timeline (red without the fallback)", async () => {
+    const w = world("enforce", live({ timedBodies: [timed(trailer("PASS"))] }));
+    w.deps.fetch.stateEntry = async () => ({ ok: true, value: { enteredAtMs: null } });
+    w.deps.fetch.timeline = async () => ({
+      ok: true,
+      value: [{ event: "labeled", label: "needs-qa", tsMs: ENTERED }],
+    });
+    const res = await advance({ issue: 10, to: "qa-passed", evidence: { pr: "7" }, actor: "hydra-qa" }, w.deps);
+    assert.equal(res.ok, true);
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["qa-passed"] }]);
+  });
+
+  test("sibling: no entry time anywhere (journal AND timeline) still refuses state-entry-unknown", async () => {
+    const w = world("enforce", live({ timedBodies: [timed(trailer("PASS"))] }));
+    w.deps.fetch.stateEntry = async () => ({ ok: true, value: { enteredAtMs: null } });
+    const res = await advance({ issue: 10, to: "qa-passed", evidence: { pr: "7" }, actor: "hydra-qa" }, w.deps);
+    assert.equal((res as { code?: string }).code, "state-entry-unknown");
+    assert.deepEqual(w.edits, []);
   });
 });

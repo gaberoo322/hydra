@@ -161,6 +161,8 @@ export interface GateInput {
   repo?: string;
   /** Issue body as re-read by the seam (spine step 1). */
   body?: string;
+  /** Who is advancing (`--actor`); gates restricting a path to one actor read it. */
+  actor?: string;
 }
 
 const pass = (code = "ok"): GateResult => ({ ok: true, code });
@@ -267,6 +269,9 @@ export function gateQaExit(input: GateInput, records: GateRecords): GateResult {
  * is a locator; the verdict record is the live trailer at head posted after the
  * issue entered `needs-qa`, and its classified target must equal `to`.
  */
+/** The only actor allowed to use the trailer-less `defer=1` evidence. */
+export const QA_DEFER_ACTOR = "hydra-qa";
+
 export function gateQaVerdict(input: GateInput, records: GateRecords): GateResult {
   const prNumber = parsePrEvidence(input.evidence);
   if (prNumber === null) return fail("evidence-required:pr");
@@ -278,7 +283,10 @@ export function gateQaVerdict(input: GateInput, records: GateRecords): GateResul
   // Defer arm (hydra-qa step 6.6): no verdict was emitted, so there is no
   // trailer to gate on. `defer=1` evidence admits ONLY the live-state bounce
   // (OPEN -> needs-dev-resume, CLOSED -> ready-for-agent); never qa-passed.
+  // Restricted to actor `hydra-qa`: the trailer-less bounce skips the trailer,
+  // freshness and cap checks, so no other caller may use it.
   if (input.evidence.defer === "1") {
+    if (input.actor !== QA_DEFER_ACTOR) return fail("defer-actor-not-allowed");
     const deferTarget =
       live.value.state === "OPEN" ? "needs-dev-resume" : live.value.state === "CLOSED" ? "ready-for-agent" : null;
     if (deferTarget === null) return fail("pr-merged");

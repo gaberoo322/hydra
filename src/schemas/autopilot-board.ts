@@ -382,6 +382,7 @@ const BOARD_ACTION_REASONS = [
   "read-failed",
   "write-failed",
   "write-unverified",
+  "lifecycle-refused",
 ] as const;
 export type BoardActionReason = (typeof BOARD_ACTION_REASONS)[number];
 

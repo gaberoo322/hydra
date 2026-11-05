@@ -6,8 +6,12 @@ export {
   HUMAN_HOLD_STATES,
   LIFECYCLE_STATES,
   OPEN_STATES,
+  OPERATOR_TARGETS,
+  OPERATOR_TRANSITIONS,
   TRANSITIONS,
+  findOperatorTransition,
   findTransition,
+  isOperatorTarget,
   isHumanHold,
   isLegalTransition,
   isLifecycleState,
@@ -17,6 +21,8 @@ export {
   type HumanHoldState,
   type LifecycleState,
   type OpenState,
+  type OperatorTarget,
+  type OperatorTransition,
   type Transition,
 } from "./transitions.ts";
 export {
@@ -51,6 +57,10 @@ export {
   type ResearchTrailer,
   type StateEntryRecord,
 } from "./gates.ts";
+export {
+  HOLD_EXIT_ALERT_WINDOW_DAYS,
+  isUnsanctionedHoldExit,
+} from "./hold-exit.ts";
 export {
   CAP_ARMS,
   CAP_DEFAULTS,
@@ -91,13 +101,17 @@ export {
   LIFECYCLE_ROLLOUT_CONFIG_PATH,
   advance,
   defaultSeamDeps,
+  journalEntry,
   loadLifecycleMode,
   openClaim,
+  operatorAdvance,
+  operatorReopen,
   releaseClaim,
   CLAIM_OUTCOMES,
   type ClaimOutcome,
   type ClaimPurpose,
   resolveLifecycleMode,
+  type OperatorAdvanceInput,
   type AdvanceInput,
   type AdvanceResult,
   type ClaimInput,

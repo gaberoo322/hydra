@@ -284,6 +284,22 @@ qa_advance() {
   if [ "$QA_ADV_RC" != "0" ] && [ "$QA_ADV_CODE" = "pr-merged" ]; then exit 0; fi
   return "$QA_ADV_RC"
 }
+# PASS advance (needs-qa -> qa-passed) with a DETERMINISTIC exit on EVERY refusal
+# (#5317 round-3 ruling): pr-merged exits 0 inside qa_advance; any other refusal
+# (pr-not-open, qa-verdict-stale, state-entry-unknown, ...) posts a QA-Verdict-Error
+# comment and routes the issue OFF needs-qa through the seam's trailer-less defer
+# edge (OPEN -> needs-dev-resume, CLOSED -> ready-for-agent; actor hydra-qa only).
+# It never exits 1 with needs-qa still set (the #974 busy-loop).
+qa_pass_advance() {
+  qa_advance $issue_number qa-passed --evidence pr=$pr_number --actor hydra-qa && return 0
+  QA_PASS_REFUSAL="${QA_ADV_CODE:-unknown}"
+  gh pr comment $pr_number --repo gaberoo322/hydra --body "QA-Verdict-Error: verdict=PASS pr=$pr_number reason=lifecycle advance to qa-passed refused ($QA_PASS_REFUSAL); routing the issue off needs-qa through the seam" \
+    || echo "[hydra-qa] WARN: QA-Verdict-Error comment failed on PR #${pr_number}" >&2
+  QA_PASS_BOUNCE=$(qa_bounce_label)
+  qa_advance $issue_number "$QA_PASS_BOUNCE" --evidence pr=$pr_number --evidence defer=1 --actor hydra-qa \
+    || { echo "[hydra-qa] ERROR: PASS refusal (${QA_PASS_REFUSAL}) and the defer reroute to ${QA_PASS_BOUNCE} were both refused — NOT editing labels by hand (#5317)" >&2; exit 1; }
+  return 0
+}
 # Resolve to a SHA so a concurrent push to master doesn't shift the diff under us.
 git fetch origin "$FIXED_POINT"
 FIXED_SHA=$(git rev-parse "origin/${FIXED_POINT}")
@@ -1175,12 +1191,7 @@ fi
 # the PASS trailer at head posted after the issue entered needs-qa. A refusal
 # exits non-zero (never a by-hand label edit — ADR-0047 D4); the comment above
 # is the durable record and reconcile / the next QA pick recover.
-ADV_OUT=$(npx tsx scripts/lifecycle.ts advance $issue_number qa-passed --evidence pr=$pr_number --actor hydra-qa); ADV_RC=$?; printf '%s\n' "$ADV_OUT"
-if [ "$ADV_RC" != "0" ]; then
-    # pr-merged is NOT an error: the PR merged under us, and reconcile owns needs-qa -> closed (#5317 QA).
-    [ "$(printf '%s' "$ADV_OUT" | jq -r '.code // empty' 2>/dev/null)" = "pr-merged" ] && exit 0
-    echo "[hydra-qa] ERROR: lifecycle advance qa-passed refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1
-fi
+qa_pass_advance  # needs-qa -> qa-passed via the seam; every refusal reaches a deterministic exit (see the helper)
 
 # Enable auto-merge (squash) rather than a blocking immediate merge: the merge
 # gate is CI required-status-checks (feedback_hydra_repo_no_auto_merge), so
@@ -1230,12 +1241,7 @@ ${QA_VERDICT_TRAILER}"
 # re-dispatch QA every tick. PASS-pending-CI is a PASS for routing: the issue
 # goes to qa-passed, and the reconcile pass reads CI live (a later red CI
 # bounces it back). `in-progress` is never written here.
-ADV_OUT=$(npx tsx scripts/lifecycle.ts advance $issue_number qa-passed --evidence pr=$pr_number --actor hydra-qa); ADV_RC=$?; printf '%s\n' "$ADV_OUT"
-if [ "$ADV_RC" != "0" ]; then
-    # pr-merged is NOT an error: the PR merged under us, and reconcile owns needs-qa -> closed (#5317 QA).
-    [ "$(printf '%s' "$ADV_OUT" | jq -r '.code // empty' 2>/dev/null)" = "pr-merged" ] && exit 0
-    echo "[hydra-qa] ERROR: lifecycle advance qa-passed refused (see the JSON code above) — the verdict comment is already posted; NOT editing labels by hand (#5317)" >&2; exit 1
-fi
+qa_pass_advance  # needs-qa -> qa-passed via the seam; every refusal reaches a deterministic exit (see the helper)
 ```
 
 **Verdict `FAIL` or `FAIL-pending-CI`** (any axis has hard findings, or a required check has already failed):
