@@ -43,7 +43,7 @@
     {
       "family": "chores",
       "metric": "rows",
-      "value": 14
+      "value": 15
     },
     {
       "family": "ci-gates",

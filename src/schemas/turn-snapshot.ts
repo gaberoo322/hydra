@@ -138,6 +138,12 @@ const SignalsSchema = z
     retro_run_drillable: z.boolean(),
     review_retro_due: z.boolean(),
     // PR gate (#4240) and the resume / conflict-fix picks
+    // #5319: open issues labelled `parked` (ADR-0047 Decision 6) - decide.py's belt filter set
+    orch_parked_issues: NumberList,
+    // #5319 QA r1: open PRs whose closing issue is parked (the qa-verdict event is PR-keyed)
+    orch_parked_prs: NumberList,
+    // #5319 QA r1: the parked read was unreadable - [] above is NOT a healthy empty set
+    orch_parked_unreadable: z.boolean(),
     orch_prs_dirty: NumberList,
     orch_prs_unchecked: NumberList,
     orch_prs_behind: NumberList,
@@ -221,6 +227,9 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   retro_run_available: false,
   retro_run_drillable: false,
   review_retro_due: false,
+  orch_parked_issues: [],
+  orch_parked_prs: [],
+  orch_parked_unreadable: true, // an all-degraded marker turn has NO healthy parked read: the belt must fail closed (INV-4, QA r2)
   orch_prs_dirty: [],
   orch_prs_unchecked: [],
   orch_prs_behind: [],

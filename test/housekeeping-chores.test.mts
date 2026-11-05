@@ -255,7 +255,7 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     // Issue #3756: stub the GLM eligibility sweep so this composition test never
     // performs a live GitHub write (the sweep mutates an external service with
     // no Redis substrate to fail-soft on, unlike the gh-reading chores).
-    runGlmEligibilitySweep: async () => 0,
+    runGlmEligibilitySweep: async () => 0, runLifecycleReconcile: async () => null,
     publishTargetOutcomes: async () => {},
     workOverrides: SLOW_CHORE_STUBS,
   };
@@ -292,7 +292,7 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
       getMemoryLastConsolidation: nullTs,
       getCleanupLastDaily: nullTs,
       now: () => now,
-      runGlmEligibilitySweep: async () => 0,
+      runGlmEligibilitySweep: async () => 0, runLifecycleReconcile: async () => null,
       publishTargetOutcomes: async () => {},
       workOverrides: SLOW_CHORE_STUBS,
     });
@@ -311,7 +311,7 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     // `runChore` fail-softs any I/O error. Reaching a well-formed summary proves
     // the default binding is intact (zero-diff for callers that pass nothing).
     const summary = await runHousekeeping(makeBus() as any, {
-      runGlmEligibilitySweep: async () => 0,
+      runGlmEligibilitySweep: async () => 0, runLifecycleReconcile: async () => null,
       publishTargetOutcomes: async () => {},
       workOverrides: SLOW_CHORE_STUBS,
     });
@@ -328,7 +328,7 @@ describe("runHousekeeping — target-outcomes-publish registration (issue #4477)
   test("target-outcomes-publish runs via the injected publisher, before wiring-liveness", async () => {
     let calls = 0;
     const summary = await runHousekeeping(makeBus() as any, {
-      runGlmEligibilitySweep: async () => 0,
+      runGlmEligibilitySweep: async () => 0, runLifecycleReconcile: async () => null,
       publishTargetOutcomes: async () => {
         calls += 1;
       },
@@ -370,7 +370,7 @@ describe("runHousekeeping — attribution-record runs before holdback-merge-watc
   // live Redis makes them run or a Redis fault makes them skip.
   test("recorder is sequenced ahead of the registry-draining watch", async () => {
     const summary = await runHousekeeping(makeBus() as any, {
-      runGlmEligibilitySweep: async () => 0,
+      runGlmEligibilitySweep: async () => 0, runLifecycleReconcile: async () => null,
       publishTargetOutcomes: async () => {},
       workOverrides: SLOW_CHORE_STUBS,
     });
@@ -402,3 +402,4 @@ describe("runHousekeeping — attribution-record runs before holdback-merge-watc
     );
   });
 });
+

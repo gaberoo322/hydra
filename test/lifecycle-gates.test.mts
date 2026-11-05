@@ -514,7 +514,7 @@ describe("research-exit gate", () => {
   });
 
   test("recordsNeeded requests the comment + entry records only for research-exit", () => {
-    assert.deepEqual(recordsNeeded("research-exit"), { designConcept: false, pr: false, comment: true, stateEntry: true });
+    assert.deepEqual(recordsNeeded("research-exit"), { designConcept: false, pr: false, comment: true, stateEntry: true, qaLive: false });
     for (const g of ["none", "judgment", "adr5", "dispatch", "pr-open", "close", "not-yet-implemented"] as const) {
       const n = recordsNeeded(g);
       assert.equal(n.comment || n.stateEntry, false, g);

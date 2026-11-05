@@ -87,6 +87,7 @@ function findHandler(router: any, method: string, path: string): Function | null
 const noopWork = async () => {};
 const HOUSEKEEPING_STUBS = {
   runGlmEligibilitySweep: async () => 0,
+  runLifecycleReconcile: async () => null,
   workOverrides: {
     "review-pickup-notify": noopWork,
     "usage-weekly-snapshot": noopWork,
