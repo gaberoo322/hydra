@@ -1,0 +1,1 @@
+- feat: hydra-qa verdicts route through the lifecycle seam (PASS lands in qa-passed, 3rd reviewed FAIL parks); recover-stale re-reads live state (#5317)
