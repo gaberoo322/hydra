@@ -147,11 +147,13 @@ describe("isUnsanctionedHoldExit (#5313 INV-9)", () => {
     assert.equal(isUnsanctionedHoldExit(e({ kind: "transition", source: "cli" })), true);
     assert.equal(isUnsanctionedHoldExit(e({ source: "workflow" })), true);
     assert.equal(isUnsanctionedHoldExit(e({ from: "needs-triage,hitl-grill" })), true);
+    // A shadow-mode write is journaled kind refused with written:true (#5313 round 3).
+    assert.equal(isUnsanctionedHoldExit(e({ kind: "refused", source: "cli" })), true);
   });
 
   test("false for operator-route, refused, unwritten, non-hold, null-from and hold-to-itself", () => {
     assert.equal(isUnsanctionedHoldExit(e({ source: "operator-route" })), false);
-    assert.equal(isUnsanctionedHoldExit(e({ kind: "refused" })), false);
+    assert.equal(isUnsanctionedHoldExit(e({ kind: "refused", written: false })), false);
     assert.equal(isUnsanctionedHoldExit(e({ written: false })), false);
     assert.equal(isUnsanctionedHoldExit(e({ from: "needs-triage" })), false);
     assert.equal(isUnsanctionedHoldExit(e({ from: null })), false);
