@@ -416,7 +416,13 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
 
     elif slot == "qa_orch":
         lane = [str(n) for n in (ts.ordered_numbers(state, [], "needs_qa_numbers") or [])]
-        head = f"The needs-qa lane head is **issue #{lane[0]}**" if lane else "Resolve the needs-qa lane head yourself"
+        pinned = _issue_number(pa.get("issue"))
+        if pinned:
+            # #5319 QA r2: the selector's parked-filtered head - review exactly this issue.
+            lane = [str(pinned)]
+            head = f"Review **issue #{pinned}** (pinned by the selector - do NOT self-select a different needs-qa issue)"
+        else:
+            head = f"The needs-qa lane head is **issue #{lane[0]}**" if lane else "Resolve the needs-qa lane head yourself"
         rest = f"; the rest of the lane, in order: {', '.join('#' + n for n in lane[1:])}" if len(lane) > 1 else ""
         out.append(
             f"Invoke the `{skill}` skill (via the Skill tool; scope: {scope or 'orch'}, repo {ORCH_REPO}). {head}{rest}. "

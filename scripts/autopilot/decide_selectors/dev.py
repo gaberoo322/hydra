@@ -15,6 +15,7 @@ from decide_base import (
     _is_parked_anchor,
     _issue_pr_branch_signal,
     _orch_anchor_signal,
+    _parked_read_degraded,
     _red_forward_fix_attempt_count,
     _red_resume_prs,
     _signal_present,
@@ -94,7 +95,14 @@ def _select_slot_dev_orch(
     # persists via change-detection for `research_force_counter` /
     # `target_triage_item_stamps`.
     resume_pending = state.get("dev_resume_pending") if isinstance(state, dict) else None
-    if isinstance(resume_pending, list) and resume_pending:
+    if (
+        isinstance(resume_pending, list)
+        and resume_pending
+        # QA r2: a degraded parked read must NOT drain (pop) the queued resume -
+        # the entry survives for a healthy-read turn; only a positively parked
+        # anchor on a healthy read is dropped.
+        and not _parked_read_degraded(state, events)
+    ):
         entry = resume_pending[0]
         # ISSUE #5319 (INV-6): a park that landed after reap queued the resume
         # is DROPPED (never re-queued - the operator owns a parked issue) by the

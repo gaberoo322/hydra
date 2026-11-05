@@ -640,6 +640,9 @@ describe("turn snapshot JSON: validation degrades PER FIELD on emit (#4934)", ()
     assert.match(out.note ?? "", /structurally invalid.*all-degraded/);
     assert.ok(TurnSnapshotSchema.safeParse(doc).success, "the replacement is itself a valid document");
     assert.deepEqual(doc.signals, ALL_DEGRADED_SIGNALS);
+    // #5319 QA r2: a wholly degraded marker has no healthy parked read - the belt fails closed.
+    assert.equal(doc.signals.orch_parked_unreadable, true);
+    assert.deepEqual(doc.signals.orch_parked_issues, []);
     assert.deepEqual(doc.blobs, {});
     assert.equal(doc.degraded.length, 1);
     assert.match(doc.degraded[0].reason, /^schema-invalid: schema_version/);

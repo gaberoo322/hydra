@@ -5809,4 +5809,48 @@ describe("decide.py - parked issues are never dispatched or armed (issue #5319)"
     const merged = (runDecide(baseState({ signals: { orch_parked_unreadable: false } }), null, [realEvent(5402)]).actions ?? []).filter((a: any) => a.type === "auto-merge");
     assert.equal(merged.length, 1);
   });
+
+  // QA round 2 (PR #5374).
+  test("QA r2 #1: a degraded parked read does NOT pop the queued dev_resume_pending entry", () => {
+    const s = baseState({ signals: { orch_parked_unreadable: true, orch_parked_issues: [], orch_work_available: false } });
+    s.dev_resume_pending = [{ anchor: "issue-778", branch: "worktree-agent-abc" }];
+    const t = makeTmp();
+    runDecide(s, null, [], t);
+    const after = JSON.parse(readFileSync(t.state, "utf-8"));
+    rmSync(t.dir, { recursive: true, force: true });
+    assert.deepEqual(after.dev_resume_pending, [{ anchor: "issue-778", branch: "worktree-agent-abc" }]);
+  });
+
+  test("QA r2 #1 sibling: a healthy read still drains an unparked entry and drops a parked one", () => {
+    const s = baseState({ signals: { orch_parked_unreadable: false, orch_parked_issues: [PARKED] } });
+    s.dev_resume_pending = [{ anchor: "issue-778", branch: "b" }];
+    assert.equal(devOrch(runDecide(s, null)).filter((a) => a.prompt_args?.anchor === "issue-778").length, 1);
+    const p = baseState({ signals: { orch_parked_unreadable: false, orch_parked_issues: [PARKED] } });
+    p.dev_resume_pending = [{ anchor: `issue-${PARKED}`, branch: "b" }];
+    const t = makeTmp();
+    runDecide(p, null, [], t);
+    const after = JSON.parse(readFileSync(t.state, "utf-8"));
+    rmSync(t.dir, { recursive: true, force: true });
+    assert.deepEqual(after.dev_resume_pending, []);
+  });
+
+  test("QA r2 #2: qa_orch pins the parked-filtered head in prompt_args.issue", () => {
+    const s = baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: `${PARKED},3841`, orch_parked_issues: [PARKED] } });
+    const q = qaOrch(runDecide(s, null));
+    assert.equal(q.length, 1);
+    assert.equal(q[0].prompt_args.issue, "issue-3841");
+  });
+
+  test("QA r2 #2 sibling: an unparked head (or no needs_qa_numbers) keeps the unpinned scope=orch dispatch", () => {
+    const u = qaOrch(runDecide(baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: `3841,${PARKED}`, orch_parked_issues: [PARKED] } }), null));
+    assert.equal(u[0].prompt_args.issue, undefined);
+    const q = qaOrch(runDecide(baseState({ signals: { needs_qa_orch: true, orch_parked_unreadable: false } }), null));
+    assert.equal(q.length, 1);
+    assert.equal(q[0].prompt_args.issue, undefined);
+  });
+
+  test("QA r2 #3: degraded parked read blocks qa_orch even with absent needs_qa_numbers", () => {
+    const s = baseState({ signals: { needs_qa_orch: true, orch_parked_unreadable: true } });
+    assert.equal(qaOrch(runDecide(s, null)).length, 0);
+  });
 });

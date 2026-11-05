@@ -229,7 +229,7 @@ export const ALL_DEGRADED_SIGNALS: TurnSnapshotSignals = Object.freeze({
   review_retro_due: false,
   orch_parked_issues: [],
   orch_parked_prs: [],
-  orch_parked_unreadable: false, // all-degraded convention: only _fail/_degraded/_saturated flags are raised; a marker turn carries no picks for the belt to guard
+  orch_parked_unreadable: true, // an all-degraded marker turn has NO healthy parked read: the belt must fail closed (INV-4, QA r2)
   orch_prs_dirty: [],
   orch_prs_unchecked: [],
   orch_prs_behind: [],
