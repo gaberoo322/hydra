@@ -1,0 +1,1 @@
+- feat: dispatcher writes the claim - autopilot and the GLM drainer open a journaled claim and fire ready->in-progress through the lifecycle seam before a worker starts; run `npx tsx scripts/lifecycle-legacy-backfill.ts --apply` once after merge (#5315)

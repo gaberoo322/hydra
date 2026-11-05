@@ -285,10 +285,12 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     claudeCwds: string[];
     prompts: string[];
     provCalls: string[];
+    claimArgs: Array<{ dispatchId: string; run: string; resume: boolean }>;
   }
 
   function rig(
     opts: {
+      claimRefused?: string;
       paused?: boolean;
       candidates?: boolean;
       resume?: { branch: string; ahead: number } | null;
@@ -307,6 +309,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     const claudeCwds: string[] = [];
     const prompts: string[] = [];
     const provCalls: string[] = [];
+    const claimArgs: Rig["claimArgs"] = [];
     const config = { ...loadDrainerConfig({}), capDir: "/cap", worktreeRoot: "/wt-root", dryRun: opts.dryRun ?? false };
     const gateDeps: GateDeps = {
       getAutopilotPaused: async () => ({ paused: opts.paused ?? false }),
@@ -372,7 +375,12 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
       repoRoot: "/repo",
       now: () => NOW_MS,
       log: (m) => { logs.push(m); },
-      claimIssue: async (n) => { calls.push(`claim:${n}`); return { ok: true }; },
+      dispatchClaim: async (n, c) => {
+        calls.push(`claim:${n}`);
+        claimArgs.push(c);
+        return opts.claimRefused ? { ok: false, code: opts.claimRefused } : { ok: true };
+      },
+      releaseClaim: async (n, id, outcome) => { calls.push(`release:${n}:${id}:${outcome}`); },
       readIssueBody: async (n) => { calls.push(`body:${n}`); if (opts.bodyThrows) throw new Error("gh exploded"); return row.body; },
       git: async (args) => {
         calls.push(`git:${args.join(" ")}`);
@@ -404,7 +412,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
           return { code: 0, stdout: "", stderr: "" };
         }) as unknown as DriverDeps["runGlmClaude"]),
     });
-    return { deps, calls, logs, finishCalls, claudeCwds, prompts, provCalls };
+    return { deps, calls, logs, finishCalls, claudeCwds, prompts, provCalls, claimArgs };
   }
 
   async function tickOf(r: Rig): Promise<{ exitCode: number; line: any }> {
@@ -474,6 +482,15 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     assert.ok(r.logs.some((l) => /grill-clear .* — idle$/.test(l)));
   });
 
+  test("a refused seam claim (claim-held / parked / enforce refusal) ends the tick before any author session", async () => {
+    const r = rig({ claimRefused: "claim-held" });
+    const { exitCode, line } = await tickOf(r);
+    assert.equal(exitCode, 0);
+    assert.deepEqual(r.calls, ["claim:77"], "no body read, no worktree, no author, no release for a claim never opened");
+    assert.equal(line.finish, null);
+    assert.ok(r.logs.some((m) => m.includes("claim refused for issue #77 (claim-held)")));
+  });
+
   test("fresh pick: claim -> body -> fetch -> worktree add -b off origin/master -> link -> author in the worktree -> finish", async () => {
     const r = rig();
     const { exitCode, line } = await tickOf(r);
@@ -487,7 +504,9 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
       `git:worktree add -b ${branch} ${wt} origin/master`,
       `link:/repo->${wt}`,
       "author",
+      `release:77:agent-glm-77-${TS}:no-pr`,
     ]);
+    assert.deepEqual(r.claimArgs, [{ dispatchId: `agent-glm-77-${TS}`, run: `glm-drainer-${TS}`, resume: false }]);
     assert.deepEqual(r.claudeCwds, [wt]);
     assert.match(r.prompts[0], /^\/hydra-dev 77\n/);
     assert.match(r.prompts[0], /## Files in scope/);
@@ -568,7 +587,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     assert.equal(exitCode, 0);
     assert.deepEqual(r.calls, [], "a dry-run tick must make no gh/git/spawn calls");
     assert.deepEqual(r.finishCalls, [], "finish must make no effect calls under dry-run");
-    assert.ok(r.logs.includes("would-claim issue #77 (ready-for-agent -> in-progress, DRY_RUN=1)"));
+    assert.ok(r.logs.includes("would-claim issue #77 via the lifecycle seam (DRY_RUN=1)"));
     assert.ok(r.logs.includes(`would-create-worktree issue #77 branch=worktree-agent-glm-77-${TS} path=${wt} (DRY_RUN=1)`));
     assert.ok(r.logs.includes(`would-author issue #77 in ${wt} (DRY_RUN=1)`));
     assert.equal(line.finish.dryRun, true);

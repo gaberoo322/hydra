@@ -76,6 +76,7 @@ import {
   type TimelineLabelEvent,
 } from "./caps.ts";
 import { parkForCap } from "./park.ts";
+import { classRole } from "./caps.ts";
 import {
   findTransition,
   isHumanHold,
@@ -351,7 +352,11 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
           const hash = await getDesignConceptHash(`issue-${n}`);
           return {
             ok: true,
-            value: { exists: Object.keys(hash).length > 0, status: hash.status ?? "" },
+            value: {
+              exists: Object.keys(hash).length > 0,
+              status: hash.status ?? "",
+              artifactHash: hash.artifactHash ? hash.artifactHash : null,
+            },
           };
         } catch (err) {
           logger.error({ err }, "[lifecycle] design-concept fetch failed");
@@ -746,6 +751,9 @@ export const CLAIM_PURPOSES: readonly ClaimPurpose[] = ["fresh", "resume", "forw
 export const CLAIM_OUTCOMES = ["pr-opened", "no-pr", "verdict-posted", "stall", "released"] as const;
 export type ClaimOutcome = (typeof CLAIM_OUTCOMES)[number];
 
+/** Class of the one-time placeholder claim `scripts/lifecycle-legacy-backfill.ts` opens. */
+export const LEGACY_BACKFILL_CLASS = "legacy-backfill";
+
 export interface ClaimInput {
   issue: number;
   dispatchId: string;
@@ -802,7 +810,14 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
   };
 
   // INV-10: the claim-held check runs BEFORE any counting or park.
-  const held = await deps.journal.readClaim(deps.repo, issue);
+  // INV-2 (#5315): SET NX is the concurrency gate in both modes. The ONE exception is a
+  // held `legacy-backfill` placeholder: it is released (ownership-checked by its own
+  // dispatchId, outcome `released`) and the real dispatch's claim is opened in this call.
+  let held = await deps.journal.readClaim(deps.repo, issue);
+  if (held.ok && held.claim && held.claim.class === LEGACY_BACKFILL_CLASS) {
+    const released = await releaseClaim(issue, held.claim.dispatchId, deps, actor, "released");
+    if (released.ok) held = { ok: true, claim: null };
+  }
   if (held.ok && held.claim) return { ok: false, code: "claim-held", existing: held.claim };
 
   // Re-read the issue to stamp `state` (INV-13). A failed read skips the cap check (INV-12).
@@ -895,4 +910,108 @@ export async function releaseClaim(
     }),
   );
   return { ok: true, prior: res.prior };
+}
+
+// ---------------------------------------------------------------------------
+// dispatch (ADR-0047 D4/D7, issue #5315): the dispatcher's one composite verb
+// ---------------------------------------------------------------------------
+
+/** States a dev-role dispatch advances to `in-progress` from. */
+const DISPATCHABLE_STATES: readonly string[] = ["ready-for-agent", "needs-dev-resume"];
+
+export interface DispatchInput {
+  issue: number;
+  dispatchId: string;
+  class: string;
+  run: string;
+  pr?: number;
+  purpose?: ClaimPurpose;
+  actor?: string;
+}
+
+export type DispatchResult =
+  | {
+      ok: true;
+      claim: DispatchClaim;
+      /** The `-> in-progress` advance; `null` for a label-free (qa / other) claim or an already-in-progress issue. */
+      advanced: AdvanceResult | null;
+      /** Set in shadow when the advance would have been refused in enforce. */
+      wouldRefuse?: string;
+      /** Set in shadow when a cap check would have parked the issue in enforce. */
+      wouldPark?: string;
+    }
+  | { ok: false; code: string; existing?: DispatchClaim | null; mode?: LifecycleMode | null; written?: boolean };
+
+/**
+ * Open the claim, then (dev role only) fire `ready-for-agent|needs-dev-resume ->
+ * in-progress`. Fixed order: design-concept record -> claim (artifactHash copied
+ * only from an `approved` record) -> advance -> on a refused advance, release the
+ * claim BEFORE returning, so a claim never outlives a refused dispatch. Never throws
+ * and never falls back to a direct label write.
+ */
+export async function dispatch(input: DispatchInput, deps: SeamDeps): Promise<DispatchResult> {
+  const issue = input.issue;
+  const actor = input.actor ?? "cli";
+
+  // (a) the Design Concept record; (b) its hash is copied onto the claim only when approved.
+  const dc = await deps.fetch.designConcept(issue);
+  const artifactHash =
+    dc.ok && dc.value.exists && dc.value.status === "approved" ? (dc.value.artifactHash ?? null) : null;
+
+  const opened = await openClaim(
+    {
+      issue,
+      dispatchId: input.dispatchId,
+      class: input.class,
+      run: input.run,
+      artifactHash,
+      actor,
+      pr: input.pr,
+      purpose: input.purpose,
+    },
+    deps,
+  );
+  if (opened.ok === false) return opened;
+  const parkNote = opened.wouldPark !== undefined ? { wouldPark: opened.wouldPark } : {};
+
+  // A qa / other role class opens a label-free claim: steps (a)-(b) only.
+  if (classRole(input.class) !== "dev") return { ok: true, claim: opened.claim, advanced: null, ...parkNote };
+
+  const releaseAfterRefusal = async (): Promise<void> => {
+    const rel = await releaseClaim(issue, input.dispatchId, deps, actor, "released");
+    if (rel.ok === false) {
+      logger.error(
+        { issue, dispatchId: input.dispatchId, code: rel.code },
+        "[lifecycle] claim release after refused dispatch failed",
+      );
+    }
+  };
+
+  // (c) advance only from a single dispatchable state label.
+  const view = await deps.view(issue);
+  if (view.ok === false) {
+    await releaseAfterRefusal();
+    return { ok: false, code: "fetch-failed", mode: null, written: false };
+  }
+  const labels = stateLabelsOf(view.row.labels);
+  if (labels.length !== 1 || !DISPATCHABLE_STATES.includes(labels[0])) {
+    return { ok: true, claim: opened.claim, advanced: null, ...parkNote };
+  }
+  const adv = await advance(
+    { issue, to: "in-progress", evidence: { dispatch: input.dispatchId, class: input.class, run: input.run }, actor },
+    deps,
+  );
+  if (adv.ok === false) {
+    // (d) a refused advance (enforce gate, park, write failure) releases the claim first.
+    await releaseAfterRefusal();
+    return { ok: false, code: adv.code, mode: adv.mode, written: adv.written };
+  }
+  const wouldPark = adv.wouldPark ?? opened.wouldPark;
+  return {
+    ok: true,
+    claim: opened.claim,
+    advanced: adv,
+    ...(adv.wouldRefuse !== undefined ? { wouldRefuse: adv.wouldRefuse } : {}),
+    ...(wouldPark !== undefined ? { wouldPark } : {}),
+  };
 }

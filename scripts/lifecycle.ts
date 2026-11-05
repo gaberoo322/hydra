@@ -5,7 +5,11 @@
  *   npx tsx scripts/lifecycle.ts advance <issue> <to> [--evidence k=v]...
  *       [--reason R] [--rationale T] [--close-reason completed|"not planned"] [--actor A]
  *   npx tsx scripts/lifecycle.ts claim <issue> --dispatch ID --class C --run R [--artifact-hash H]
+ *       [--pr N] [--purpose fresh|resume|forward-fix]
+ *   npx tsx scripts/lifecycle.ts dispatch <issue> --dispatch ID --class C --run R
+ *       [--pr N] [--purpose fresh|resume|forward-fix]
  *   npx tsx scripts/lifecycle.ts release <issue> --dispatch ID
+ *       [--outcome pr-opened|no-pr|verdict-posted|stall|released]
  *   npx tsx scripts/lifecycle.ts reconcile [--dry-run | --report]
  *
  * Talks to GitHub (gh) and Redis directly: no :4000 dependency. Prints one JSON
@@ -15,7 +19,17 @@
  */
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { advance, defaultSeamDeps, openClaim, releaseClaim } from "../src/lifecycle/index.ts";
+import {
+  CLAIM_OUTCOMES,
+  CLAIM_PURPOSES,
+  advance,
+  defaultSeamDeps,
+  dispatch,
+  openClaim,
+  releaseClaim,
+  type ClaimOutcome,
+  type ClaimPurpose,
+} from "../src/lifecycle/index.ts";
 import { closeRedisConnections } from "../src/redis/connection.ts";
 import { resolveGithubRepo } from "../src/github/issues.ts";
 import { readReconcileReport } from "../src/redis/lifecycle-journal.ts";
@@ -102,8 +116,10 @@ export async function main(argv: readonly string[]): Promise<number> {
   const [verb, issueRaw, to] = parsed.positional;
   if (verb === "reconcile") return runReconcileVerb(parsed.flags);
   const issue = parseIssue(issueRaw);
-  if (issue === null || (verb !== "advance" && verb !== "claim" && verb !== "release")) {
-    console.error("[lifecycle] usage: advance <issue> <to> | claim <issue> --dispatch <id> ... | release <issue> --dispatch <id>");
+  if (issue === null || (verb !== "advance" && verb !== "claim" && verb !== "dispatch" && verb !== "release")) {
+    console.error(
+      "[lifecycle] usage: advance <issue> <to> | claim|dispatch <issue> --dispatch <id> ... | release <issue> --dispatch <id>",
+    );
     return 2;
   }
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -130,15 +146,40 @@ export async function main(argv: readonly string[]): Promise<number> {
     return res.ok ? 0 : 1;
   }
 
-  if (verb === "claim") {
+  if (verb === "claim" || verb === "dispatch") {
     const { class: cls, run } = parsed.flags;
     const dispatchId = parsed.flags.dispatch ?? parsed.flags["dispatch-id"];
     if (!dispatchId || !cls || !run) {
-      console.error("[lifecycle] claim requires --dispatch, --class and --run");
+      console.error(`[lifecycle] ${verb} requires --dispatch, --class and --run`);
       return 2;
     }
+    const pr = parsed.flags.pr === undefined ? undefined : parseIssue(parsed.flags.pr);
+    if (pr === null) {
+      console.error("[lifecycle] --pr must be a positive integer");
+      return 2;
+    }
+    const purposeRaw = parsed.flags.purpose;
+    if (purposeRaw !== undefined && !(CLAIM_PURPOSES as readonly string[]).includes(purposeRaw)) {
+      console.error(`[lifecycle] --purpose must be one of ${CLAIM_PURPOSES.join("|")}`);
+      return 2;
+    }
+    const purpose = purposeRaw as ClaimPurpose | undefined;
+    if (verb === "dispatch") {
+      const out = await dispatch({ issue, dispatchId, class: cls, run, pr, purpose, actor: parsed.flags.actor }, deps);
+      emit(out);
+      return out.ok ? 0 : 1;
+    }
     const res = await openClaim(
-      { issue, dispatchId, class: cls, run, artifactHash: parsed.flags["artifact-hash"] ?? null, actor: parsed.flags.actor },
+      {
+        issue,
+        dispatchId,
+        class: cls,
+        run,
+        artifactHash: parsed.flags["artifact-hash"] ?? null,
+        actor: parsed.flags.actor,
+        pr,
+        purpose,
+      },
       deps,
     );
     emit(res);
@@ -151,7 +192,18 @@ export async function main(argv: readonly string[]): Promise<number> {
     console.error("[lifecycle] release requires --dispatch <id>");
     return 2;
   }
-  const res = await releaseClaim(issue, releaseDispatch, deps, parsed.flags.actor);
+  const outcomeRaw = parsed.flags.outcome;
+  if (outcomeRaw !== undefined && !(CLAIM_OUTCOMES as readonly string[]).includes(outcomeRaw)) {
+    console.error(`[lifecycle] --outcome must be one of ${CLAIM_OUTCOMES.join("|")}`);
+    return 2;
+  }
+  const res = await releaseClaim(
+    issue,
+    releaseDispatch,
+    deps,
+    parsed.flags.actor,
+    outcomeRaw as ClaimOutcome | undefined,
+  );
   emit(res);
   return res.ok ? 0 : 1;
 }

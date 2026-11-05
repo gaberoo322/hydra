@@ -40,6 +40,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -133,9 +134,110 @@ def stamp(state: dict, plan: dict, slot: str, task_id: str, model: str, now: int
     return record
 
 
+REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+_ISSUE_ANCHOR_RE = re.compile(r"^issue-(\d+)$")
+
+
+def plan_claim(state: dict, plan: dict, slot: str) -> dict:
+    """Decide the pre-spawn lifecycle claim for `slot` (issue #5315, INV-3/INV-4).
+
+    Pure. Returns `{"claim": "skipped", "reason": ...}` when no claim applies, else
+    `{"claim": "dispatch", "issue", "dispatch_id", "cls", "run", "purpose", "pr"}`.
+    A skip is NOT an error: the parent still calls `Agent`."""
+    action = find_dispatch(plan, slot)
+    if action is None:
+        return {"claim": "skipped", "reason": "no-dispatch-action"}
+    if slot.endswith("_target"):
+        return {"claim": "skipped", "reason": "target-scope"}
+    if slot not in (state.get("slots") or {}):
+        return {"claim": "skipped", "reason": "signal-class"}
+    prompt_args = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
+    anchor = prompt_args.get("anchor")
+    m = _ISSUE_ANCHOR_RE.match(anchor) if isinstance(anchor, str) else None
+    if m is None:
+        return {"claim": "skipped", "reason": "unpinned"}
+    run_id = str(state.get("run_id") or "")
+    turn = int(state.get("turn") or 0)
+    dispatch_id = action.get("worktreeBranch") or f"worktree-agent-{run_id[:8]}-t{turn}-{slot}"
+    pr_raw = prompt_args.get("forward_fix_pr")
+    pr_digits = re.sub(r"\D", "", str(pr_raw)) if pr_raw else ""
+    pr = int(pr_digits) if pr_digits else None
+    if pr:
+        purpose = "forward-fix"
+    elif prompt_args.get("resume") is True:
+        purpose = "resume"
+    else:
+        purpose = "fresh"
+    return {
+        "claim": "dispatch",
+        "issue": int(m.group(1)),
+        "dispatch_id": dispatch_id,
+        "cls": slot,
+        "run": run_id,
+        "purpose": purpose,
+        "pr": pr,
+    }
+
+
+def claim_argv(spec: dict) -> list[str]:
+    """The `npx tsx scripts/lifecycle.ts dispatch ...` argv for a `dispatch` spec."""
+    argv = [
+        "npx", "tsx", "scripts/lifecycle.ts", "dispatch", str(spec["issue"]),
+        "--dispatch", spec["dispatch_id"], "--class", spec["cls"], "--run", spec["run"],
+        "--purpose", spec["purpose"],
+    ]
+    if spec.get("pr"):
+        argv += ["--pr", str(spec["pr"])]
+    return argv
+
+
+def run_claim(slot: str) -> int:
+    """`stamp-slot.py claim <slot>`: run between render-dispatch.py and `Agent(...)`.
+
+    Exit 0 prints one JSON line (the seam's result, or `{"claim":"skipped",...}`);
+    exit 1 (claim-held, parked:<arm>, an enforce refusal, an unusable seam result)
+    means the parent MUST NOT call `Agent` and MUST NOT run the post-spawn stamp —
+    the slot stays empty and decide.py re-plans next turn. Exit 2: unreadable files."""
+    try:
+        state = run_ledger.read_prior(STATE_PATH)
+        if not isinstance(state, dict):
+            raise ValueError(f"{STATE_PATH} is not a JSON object")
+        plan = _load_plan(PLAN_PATH)
+    except (OSError, ValueError) as exc:
+        print(f"[stamp-slot] cannot read state/plan: {exc}", file=sys.stderr)
+        return 2
+    spec = plan_claim(state, plan, slot)
+    if spec["claim"] == "skipped":
+        print(json.dumps(spec))
+        return 0
+    try:
+        proc = subprocess.run(
+            claim_argv(spec), cwd=REPO_ROOT, capture_output=True, text=True, check=False, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(
+            f"[stamp-slot] claim failed issue=#{spec['issue']} dispatch={spec['dispatch_id']}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    out = (proc.stdout or "").strip()
+    last = out.splitlines()[-1] if out else json.dumps({"ok": False, "code": "no-output"})
+    print(last)
+    if proc.returncode != 0:
+        print(
+            f"[stamp-slot] claim refused issue=#{spec['issue']} dispatch={spec['dispatch_id']} "
+            f"rc={proc.returncode}: {last}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if len(argv) == 3 and argv[1] == "claim":
+        return run_claim(argv[2])
     if len(argv) != 4 or argv[1] in ("-h", "--help"):
-        print("usage: stamp-slot.py <slot> <task_id> <model>", file=sys.stderr)
+        print("usage: stamp-slot.py <slot> <task_id> <model>  |  stamp-slot.py claim <slot>", file=sys.stderr)
         return 2
     slot, task_id, model = argv[1], argv[2], argv[3]
     try:

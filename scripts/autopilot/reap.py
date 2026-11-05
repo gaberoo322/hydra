@@ -1560,6 +1560,9 @@ class CompletionSnapshot:
     worktree_branch: str | None
     duration_ms: int
     slot_occupied: bool
+    # Issue #5315: the slot's stamped `dispatch_id` (== its worktree branch) — the
+    # lifecycle claim's dispatchId. None when the slot carried none.
+    dispatch_id: str | None = None
 
 
 def _snapshot_completion_slot(s: dict, cls: str, task_id: str) -> CompletionSnapshot:
@@ -1610,12 +1613,60 @@ def _snapshot_completion_slot(s: dict, cls: str, task_id: str) -> CompletionSnap
     worktree_branch = slot.get("branch") if isinstance(slot, dict) else None
     if slot is not None and not worktree_branch:
         worktree_branch = _recover_worktree_branch(task_id)
+    dispatch_id = slot.get("dispatch_id") if isinstance(slot, dict) else None
     return CompletionSnapshot(
         anchor_ref=anchor_ref,
         worktree_branch=worktree_branch,
         duration_ms=duration_ms,
         slot_occupied=slot is not None,
+        dispatch_id=dispatch_id or None,
     )
+
+
+def claim_release_outcome(cls: str, status: str, pr_opened: bool | None) -> str | None:
+    """Issue #5315 (INV-6): the `CLAIM_OUTCOMES` value a completion releases its
+    lifecycle claim with, or None when the class opens no claim.
+
+    Pure. Mirrors `classRole` (src/lifecycle/caps.ts): `dev_*` -> dev, `qa_*` -> qa.
+    Target classes are out of scope (the seam is orch-repo only). dev: a PR
+    reference -> `pr-opened`; failed/timeout -> `stall`; otherwise `no-pr`.
+    qa: completed -> `verdict-posted`; otherwise `stall`."""
+    if cls.endswith("_target"):
+        return None
+    if cls.startswith("dev_"):
+        if pr_opened is True:
+            return "pr-opened"
+        return "stall" if status in ("failed", "timeout") else "no-pr"
+    if cls.startswith("qa_"):
+        return "verdict-posted" if status == "completed" else "stall"
+    return None
+
+
+def _fire_claim_release(cls: str, anchor_ref: str | None, dispatch_id: str | None, outcome: str | None) -> None:
+    """Issue #5315 (INV-6): release the lifecycle claim the dispatcher opened.
+
+    Best-effort and non-fatal: one `claim_release ...` run-log line. A
+    `claim-owner-mismatch` is logged and left for reconcile (#5316), never forced."""
+    m = re.match(r"^issue-(\d+)$", anchor_ref or "")
+    if outcome is None or not dispatch_id or m is None:
+        return
+    issue = m.group(1)
+    argv = [
+        "npx", "tsx", "scripts/lifecycle.ts", "release", issue,
+        "--dispatch", dispatch_id, "--outcome", outcome,
+    ]
+    try:
+        proc = subprocess.run(
+            argv, cwd=str(Path(__file__).resolve().parents[2]),
+            capture_output=True, text=True, check=False, timeout=120,
+        )
+        tail = ((proc.stdout or "").strip().splitlines() or [""])[-1][:300]
+        _append_log(
+            f"claim_release class={cls} issue=#{issue} dispatch={dispatch_id} "
+            f"outcome={outcome} rc={proc.returncode} {tail}"
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _append_log(f"claim_release class={cls} issue=#{issue} dispatch={dispatch_id} outcome={outcome} failed: {exc}")
 
 
 def _release_pipeline_slot(s: dict, cls: str, total_tokens: int) -> None:
@@ -2113,6 +2164,15 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # read. Fully best-effort/non-fatal, like the dev_orch block above.
     _handle_dev_target_stall(
         s, cls, skill, snap.anchor_ref, task_id, snap.worktree_branch, dev_target_pr_list_json
+    )
+
+    # Issue #5315 (INV-6): every claim the dispatcher opened has an owner that
+    # closes it — release it with the outcome this completion implies. Last of
+    # the label/PR steps so the stall + promotion handlers above are unaffected;
+    # best-effort and non-fatal.
+    _fire_claim_release(
+        cls, snap.anchor_ref, snap.dispatch_id or snap.worktree_branch,
+        claim_release_outcome(cls, status, pr_exists),
     )
 
     # Issue #911: reclaim the just-freed worktree (and any other orphans) at

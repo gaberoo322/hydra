@@ -1,0 +1,316 @@
+/**
+ * Dispatcher-written claim (ADR-0047 D4/D7, issue #5315): the seam `dispatch`
+ * verb, the legacy-backfill takeover + script, `stamp-slot.py claim`, and the
+ * reap release-outcome mapping. Offline: gh / Redis / clock are in-memory fakes;
+ * the Python halves run as subprocesses with a stubbed `npx` on PATH.
+ */
+import { test, describe } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { dispatch, openClaim, type LifecycleMode, type SeamDeps } from "../src/lifecycle/seam.ts";
+import { runBackfill } from "../scripts/lifecycle-legacy-backfill.ts";
+import { claimOutcomeOf } from "../src/glm/drainer-driver.ts";
+import type { DispatchClaim, LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
+
+const NOW = Date.parse("2026-11-05T12:00:00Z");
+
+interface World {
+  deps: SeamDeps;
+  journal: LifecycleJournalEntry[];
+  edits: Array<{ issue: number; remove: string[]; add: string[] }>;
+  labels: string[];
+  claim: DispatchClaim | null;
+  dc: { exists: boolean; status: string; artifactHash?: string | null };
+  claimOpens: number;
+}
+
+function world(mode: LifecycleMode, labels: string[], dc: World["dc"] = { exists: true, status: "approved", artifactHash: "abc123hash" }): World {
+  const w: World = { journal: [], edits: [], labels: [...labels], claim: null, dc, claimOpens: 0, deps: undefined as unknown as SeamDeps };
+  w.deps = {
+    repo: "o/r",
+    mode: async () => mode,
+    view: async (n) => ({ ok: true, row: { number: n, title: "t", url: "", createdAt: "", labels: [...w.labels], body: "", state: "OPEN" } }),
+    edit: async (issue, l) => {
+      w.edits.push({ issue, remove: l.remove, add: l.add });
+      w.labels = w.labels.filter((x) => !l.remove.includes(x)).concat(l.add);
+      return { ok: true };
+    },
+    close: async () => ({ ok: true }),
+    comment: async () => ({ ok: true }),
+    env: () => ({}),
+    fetch: {
+      designConcept: async () => ({ ok: true, value: w.dc }),
+      pr: async () => ({ ok: false }),
+      comment: async () => ({ ok: false }),
+      stateEntry: async () => ({ ok: true, value: { enteredAtMs: null } }),
+      issueComments: async () => ({ ok: true, value: [] }),
+      timeline: async () => ({ ok: true, value: [] }),
+      prBodies: async () => ({ ok: true, value: [] }),
+    },
+    journal: {
+      append: async (_r, _i, e) => (w.journal.push(e), { ok: true }),
+      expireOnClose: async () => ({ ok: true }),
+      openClaim: async (_r, _i, c) => {
+        if (w.claim) return { ok: false, code: "claim-held", existing: w.claim };
+        w.claim = c;
+        w.claimOpens += 1;
+        return { ok: true, claim: c };
+      },
+      closeClaim: async (_r, _i, id) => {
+        if (w.claim && w.claim.dispatchId !== id) return { ok: false, error: "claim-owner-mismatch" };
+        const prior = w.claim;
+        w.claim = null;
+        return { ok: true, prior };
+      },
+      read: async () => ({ ok: true, entries: [...w.journal] }),
+      readClaim: async () => ({ ok: true, claim: w.claim }),
+    },
+    now: () => NOW,
+  };
+  return w;
+}
+
+const input = (over: Record<string, unknown> = {}) =>
+  ({ issue: 42, dispatchId: "worktree-agent-aaaa-t1-dev_orch", class: "dev_orch", run: "run-1", ...over }) as any;
+
+describe("dispatch composite verb (INV-1)", () => {
+  test("dev class: claim then ready-for-agent -> in-progress, with dispatch evidence on the transition", async () => {
+    const w = world("enforce", ["ready-for-agent"]);
+    const res = await dispatch(input(), w.deps);
+    assert.equal(res.ok, true);
+    assert.deepEqual(w.edits, [{ issue: 42, remove: ["ready-for-agent"], add: ["in-progress"] }]);
+    assert.equal(w.claim?.dispatchId, "worktree-agent-aaaa-t1-dev_orch");
+    const t = w.journal.find((e) => e.kind === "transition")!;
+    assert.deepEqual(t.evidence, { dispatch: "worktree-agent-aaaa-t1-dev_orch", class: "dev_orch", run: "run-1" });
+  });
+
+  test("needs-dev-resume is also advanced to in-progress", async () => {
+    const w = world("enforce", ["needs-dev-resume"]);
+    const res = await dispatch(input({ purpose: "resume" }), w.deps);
+    assert.equal(res.ok, true);
+    assert.deepEqual(w.edits, [{ issue: 42, remove: ["needs-dev-resume"], add: ["in-progress"] }]);
+  });
+
+  test("qa role opens a label-free claim: no label write", async () => {
+    const w = world("enforce", ["needs-qa"]);
+    const res = await dispatch(input({ class: "qa_orch", pr: 9 }), w.deps);
+    assert.equal(res.ok, true);
+    assert.equal(w.edits.length, 0);
+    assert.ok(w.claim);
+    assert.equal(res.ok && res.advanced, null);
+  });
+
+  test("enforce refusal releases the claim BEFORE returning (the claim never outlives a refused dispatch)", async () => {
+    const w = world("enforce", ["ready-for-agent", "needs-design-concept"], { exists: true, status: "draft", artifactHash: "h" });
+    const res = await dispatch(input(), w.deps);
+    assert.equal(res.ok, false);
+    assert.equal(!res.ok && res.code, "design-concept-draft");
+    assert.equal(w.claim, null, "claim released");
+    assert.equal(w.edits.length, 0, "no label write on a refused dispatch");
+    const closedEntry = w.journal.find((e) => e.kind === "claim-closed")!;
+    assert.equal(closedEntry.evidence.outcome, "released");
+  });
+
+  test("shadow still writes and reports wouldRefuse", async () => {
+    const w = world("shadow", ["ready-for-agent", "needs-design-concept"], { exists: true, status: "draft", artifactHash: "h" });
+    const res = await dispatch(input(), w.deps);
+    assert.equal(res.ok, true);
+    assert.equal(res.ok && res.wouldRefuse, "design-concept-draft");
+    assert.deepEqual(w.edits, [{ issue: 42, remove: ["ready-for-agent"], add: ["in-progress"] }]);
+    assert.ok(w.claim, "claim kept in shadow");
+  });
+});
+
+describe("SET NX is the concurrency gate in both modes (INV-2)", () => {
+  for (const mode of ["shadow", "enforce"] as const) {
+    test(`${mode}: a second dispatcher is refused claim-held with no label write and no journal entry`, async () => {
+      const w = world(mode, ["ready-for-agent"]);
+      assert.equal((await dispatch(input(), w.deps)).ok, true);
+      const journalBefore = w.journal.length;
+      const editsBefore = w.edits.length;
+      const second = await dispatch(input({ dispatchId: "other-dispatch" }), w.deps);
+      assert.equal(second.ok, false);
+      assert.equal(!second.ok && second.code, "claim-held");
+      assert.equal(w.journal.length, journalBefore);
+      assert.equal(w.edits.length, editsBefore);
+      assert.equal(w.claim?.dispatchId, "worktree-agent-aaaa-t1-dev_orch");
+    });
+  }
+
+  test("a held legacy-backfill claim is released (outcome released) and the new claim opened in the same call", async () => {
+    const w = world("enforce", ["in-progress"]);
+    w.claim = { dispatchId: "legacy-backfill-42", class: "legacy-backfill", run: "legacy-backfill-2026-11-05", artifactHash: null, openedAt: NOW - 1 };
+    const res = await openClaim({ issue: 42, dispatchId: "real-1", class: "dev_orch", run: "r" }, w.deps);
+    assert.equal(res.ok, true);
+    assert.equal(w.claim?.dispatchId, "real-1");
+    assert.equal(w.journal.find((e) => e.kind === "claim-closed")?.evidence.outcome, "released");
+  });
+});
+
+describe("artifactHash is copied, never claimed (INV-8)", () => {
+  test("an approved record's hash lands on the claim", async () => {
+    const w = world("enforce", ["ready-for-agent"], { exists: true, status: "approved", artifactHash: "deadbeef" });
+    await dispatch(input(), w.deps);
+    assert.equal(w.claim?.artifactHash, "deadbeef");
+  });
+
+  test("a draft record's hash is NOT copied", async () => {
+    const w = world("shadow", ["ready-for-agent"], { exists: true, status: "draft", artifactHash: "deadbeef" });
+    await dispatch(input(), w.deps);
+    assert.equal(w.claim?.artifactHash, null);
+  });
+});
+
+describe("legacy-backfill script (INV-7)", () => {
+  function backfillRig(inProgress: number[], held: Set<number>) {
+    const opened: number[] = [];
+    const deps = {
+      repo: "o/r",
+      listInProgress: async () => inProgress,
+      readClaim: async (_r: string, n: number) => ({ ok: true as const, claim: held.has(n) ? ({ dispatchId: "x" } as DispatchClaim) : null }),
+      open: async (n: number, id: string, run: string) => {
+        assert.equal(id, `legacy-backfill-${n}`);
+        assert.equal(run, "legacy-backfill-2026-11-05");
+        if (held.has(n)) return { ok: false as const, code: "claim-held" as const };
+        held.add(n);
+        opened.push(n);
+        return { ok: true as const, claim: { dispatchId: id } as DispatchClaim };
+      },
+      today: () => "2026-11-05",
+    };
+    return { deps, opened };
+  }
+
+  test("dry-run (default) writes nothing", async () => {
+    const r = backfillRig([1, 2, 3], new Set([2]));
+    const s = await runBackfill(false, r.deps);
+    assert.deepEqual(s, { scanned: 3, claimed: 0, held: 1, failed: 0 });
+    assert.deepEqual(r.opened, []);
+  });
+
+  test("--apply claims every unheld issue; a second run claims nothing (idempotent)", async () => {
+    const r = backfillRig([1, 2, 3], new Set([2]));
+    assert.deepEqual(await runBackfill(true, r.deps), { scanned: 3, claimed: 2, held: 1, failed: 0 });
+    assert.deepEqual(r.opened, [1, 3]);
+    assert.deepEqual(await runBackfill(true, r.deps), { scanned: 3, claimed: 0, held: 3, failed: 0 });
+    assert.deepEqual(r.opened, [1, 3]);
+  });
+
+  test("an unreadable issue list is a failure, never an empty success", async () => {
+    const r = backfillRig([], new Set());
+    const s = await runBackfill(true, { ...r.deps, listInProgress: async () => null });
+    assert.equal(s.failed, 1);
+  });
+});
+
+describe("GLM finish action -> claim outcome (INV-6)", () => {
+  test("open-pr -> pr-opened; keep-partial-for-resume -> stall; every other arm -> no-pr", () => {
+    const f = (action: string) => ({ action }) as any;
+    assert.equal(claimOutcomeOf(f("open-pr")), "pr-opened");
+    assert.equal(claimOutcomeOf(f("keep-partial-for-resume")), "stall");
+    for (const a of ["release-not-authored", "release-nothing-produced", "withhold-preflight-blocked", "release-after-failed-pr", "finish-fault"]) {
+      assert.equal(claimOutcomeOf(f(a)), "no-pr", a);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Python halves
+// ---------------------------------------------------------------------------
+
+const STAMP = join(import.meta.dirname, "..", "scripts", "autopilot", "stamp-slot.py");
+const REAP_DIR = join(import.meta.dirname, "..", "scripts", "autopilot");
+
+function claimRun(slots: Record<string, unknown>, action: Record<string, unknown> | null, slot: string, stubExit = 0) {
+  const dir = mkdtempSync(join(tmpdir(), "stamp-claim-"));
+  const statePath = join(dir, "state.json");
+  const planPath = join(dir, "plan.json");
+  const argvLog = join(dir, "npx-argv.txt");
+  writeFileSync(statePath, JSON.stringify({ run_id: "abcdef12-0000", turn: 3, slots }));
+  writeFileSync(planPath, JSON.stringify({ actions: action ? [{ type: "dispatch", slot, ...action }] : [] }));
+  const bin = join(dir, "bin");
+  spawnSync("mkdir", ["-p", bin]);
+  writeFileSync(join(bin, "npx"), `#!/bin/sh\necho "$@" >> "${argvLog}"\necho '{"ok":${stubExit === 0}}'\nexit ${stubExit}\n`);
+  chmodSync(join(bin, "npx"), 0o755);
+  const r = spawnSync("python3", ["-I", STAMP, "claim", slot], {
+    env: { PATH: `${bin}:${process.env.PATH}`, HYDRA_AUTOPILOT_STATE: statePath, HYDRA_AUTOPILOT_PLAN: planPath, HOME: process.env.HOME ?? "" },
+    encoding: "utf8",
+  });
+  let argv = "";
+  try { argv = readFileSync(argvLog, "utf8").trim(); } catch { /* intentional: stub never ran => skipped */ }
+  return { status: r.status, stdout: r.stdout.trim(), stderr: r.stderr, argv };
+}
+
+describe("stamp-slot.py claim (INV-3, INV-4)", () => {
+  const SLOTS = { dev_orch: null, qa_orch: null, dev_target: null };
+
+  test("a pinned dev_orch dispatch runs the seam dispatch verb with branch as dispatchId, run id, purpose fresh", () => {
+    const r = claimRun(SLOTS, { worktreeBranch: "worktree-agent-abcdef12-t3-dev_orch", prompt_args: { anchor: "issue-5315" } }, "dev_orch");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(
+      r.argv,
+      "tsx scripts/lifecycle.ts dispatch 5315 --dispatch worktree-agent-abcdef12-t3-dev_orch --class dev_orch --run abcdef12-0000 --purpose fresh",
+    );
+  });
+
+  test("resume and forward-fix purposes; forward-fix carries --pr", () => {
+    const a = claimRun(SLOTS, { worktreeBranch: "b", prompt_args: { anchor: "issue-7", resume: true } }, "dev_orch");
+    assert.match(a.argv, /--purpose resume$/);
+    const b = claimRun(SLOTS, { worktreeBranch: "b", prompt_args: { anchor: "issue-7", forward_fix_pr: 88 } }, "dev_orch");
+    assert.match(b.argv, /--purpose forward-fix --pr 88$/);
+  });
+
+  test("skip matrix: unpinned, target scope, signal class, no dispatch action -> exit 0 skipped, seam never called", () => {
+    const cases: Array<[string, Record<string, unknown> | null, string, string]> = [
+      ["unpinned", { prompt_args: {} }, "dev_orch", "unpinned"],
+      ["unpinned qa", { prompt_args: { anchor: "unpinned" } }, "qa_orch", "unpinned"],
+      ["target", { prompt_args: { anchor: "issue-9" } }, "dev_target", "target-scope"],
+      ["signal", { prompt_args: { anchor: "issue-9" } }, "sweep_orch", "signal-class"],
+      ["no action", null, "dev_orch", "no-dispatch-action"],
+    ];
+    for (const [name, action, slot, reason] of cases) {
+      const r = claimRun(SLOTS, action, slot);
+      assert.equal(r.status, 0, name);
+      assert.deepEqual(JSON.parse(r.stdout), { claim: "skipped", reason }, name);
+      assert.equal(r.argv, "", `${name}: seam must not be called`);
+    }
+  });
+
+  test("a refused claim (seam exit 1) exits 1 so the parent skips Agent and the stamp", () => {
+    const r = claimRun(SLOTS, { worktreeBranch: "b", prompt_args: { anchor: "issue-5" } }, "dev_orch", 1);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /claim refused issue=#5/);
+  });
+});
+
+describe("reap claim-release outcome mapping (INV-6)", () => {
+  function outcome(cls: string, status: string, pr: string): string {
+    const code = `import sys;sys.path.insert(0,${JSON.stringify(REAP_DIR)});import reap;` +
+      `print(reap.claim_release_outcome(${JSON.stringify(cls)},${JSON.stringify(status)},${pr}))`;
+    const r = spawnSync("python3", ["-c", code], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  }
+
+  test("dev role: PR -> pr-opened; failed -> stall; completed/empty without PR -> no-pr", () => {
+    assert.equal(outcome("dev_orch", "completed", "True"), "pr-opened");
+    assert.equal(outcome("dev_orch", "completed", "False"), "no-pr");
+    assert.equal(outcome("dev_orch", "empty", "False"), "no-pr");
+    assert.equal(outcome("dev_orch", "failed", "False"), "stall");
+    assert.equal(outcome("dev_orch", "completed", "None"), "no-pr");
+  });
+
+  test("qa role: completed -> verdict-posted; otherwise stall", () => {
+    assert.equal(outcome("qa_orch", "completed", "None"), "verdict-posted");
+    assert.equal(outcome("qa_orch", "failed", "None"), "stall");
+  });
+
+  test("other / target classes release nothing", () => {
+    assert.equal(outcome("sweep_orch", "completed", "None"), "None");
+    assert.equal(outcome("dev_target", "completed", "True"), "None");
+  });
+});

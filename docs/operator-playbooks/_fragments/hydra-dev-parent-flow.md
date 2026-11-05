@@ -94,9 +94,21 @@ issue may still need a one-time correction.
 
 The dispatched child prompt MUST include the scope-respect block below.
 
-### 4. Mark in-progress
+### 4. Read the claim — workers never add `in-progress` (issue #5315)
+
+The dispatcher fires `ready-for-agent|needs-dev-resume -> in-progress` through the
+lifecycle seam BEFORE the worker starts (`stamp-slot.py claim <slot>` for
+autopilot, the seam `dispatch` call in the GLM drainer). A **PINNED** dispatch
+therefore only READS the issue and proceeds; a missing `in-progress` label is
+logged, never repaired by the worker:
 ```bash
-gh issue edit $issue_number --remove-label ready-for-agent --add-label in-progress
+gh issue view $issue_number --repo gaberoo322/hydra --json labels --jq '[.labels[].name] | index("in-progress")'
+```
+An **UNPINNED** `dev_orch` worker fires the dispatcher's own record on its behalf
+at pick time, with the two values read from the `<!-- hydra-dispatch v1 … -->`
+sentinel in its first message; on `claim-held` it picks a different issue:
+```bash
+npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch $dispatch_id --class dev_orch --run $run_id
 ```
 
 ### 5. Spawn worktree agent
