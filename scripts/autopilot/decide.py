@@ -749,8 +749,9 @@ WALL_CLOCK_HEARTBEAT_SEC = 900
 
 # Silent-wedge fallback timer (issue #509). When an active slot has been
 # in flight for longer than this without a corresponding subagent_stop
-# hook event, decide.py emits a `wait_or_reap` action so the operator
-# loop falls back to reap.py. The slot_events stream is the primary
+# hook event, decide.py emits a `wait_or_reap` action; the autopilot brain
+# handles it through the playbook's `wait_or_reap` row, which runs
+# `reap.py wait-or-reap <slot> <task_id>` (issue #5282). The slot_events stream is the primary
 # accounting path; this fallback only fires when the hook itself silently
 # failed (e.g. the subagent process crashed before reaching the harness's
 # SubagentStop dispatch).
@@ -1583,11 +1584,12 @@ def make_wait_or_reap(slot: str, task_id: str, age_seconds: int, reason: str = "
     """Silent-wedge fallback (issue #509). Hooks are the primary slot
     accounting path; this action fires when an active slot has aged past
     `subagent_max_wall_seconds` with no matching `subagent_stop` event in
-    `state.slot_events`. The autopilot turn handles it by invoking
-    `reap.py completion` as a forced reap — the existing fallback CLI.
+    `state.slot_events`. The autopilot brain handles it through the
+    playbook's `wait_or_reap` row, which runs `reap.py wait-or-reap <slot>
+    <task_id>` (issue #5282).
 
-    The action carries enough metadata that the harness can dispatch the
-    reap deterministically: `{slot, task_id, age_seconds, reason}`.
+    The action carries enough metadata for that command:
+    `{slot, task_id, age_seconds, reason}`.
     """
     return {
         "type": "wait_or_reap",
@@ -3661,7 +3663,7 @@ def _rule_silent_wedge(state: dict, events: list[dict], now: int) -> _RuleOutput
 
     If an active slot has aged past `subagent_max_wall_seconds` AND no
     `subagent_stop` event arrived for its task_id, emit a `wait_or_reap` so the
-    harness invokes reap.py as a forced fallback. Hooks are the primary path;
+    brain runs `reap.py wait-or-reap` via the playbook's `wait_or_reap` row. Hooks are the primary path;
     this only fires when the hook itself silently failed.
 
     Checked AFTER dispatch decisions because a wait_or_reap is a slot-clear

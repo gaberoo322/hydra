@@ -226,8 +226,9 @@ falls back to a wall-clock timer. When an active slot's `started_epoch`
 is older than `subagent_max_wall_seconds` (default `3600`, env override
 `HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS`) AND no matching
 `subagent_stop` event has been observed for the slot's `task_id`,
-`decide.py` emits a `wait_or_reap` action. The harness translates that
-into `reap.py completion ...` — the existing fallback CLI.
+`decide.py` emits a `wait_or_reap` action. The brain runs
+`reap.py wait-or-reap <slot> <task_id>` from the playbook's `wait_or_reap`
+action-table row (liveness by transcript mtime, then the forced reap). A transcript `stat()` failure stays `verdict=unknown` (no reap) only until the slot has been occupied past `subagent_max_wall_seconds`; after that it is treated as dead and reaped.
 
 `reap.py` survives in the tree but is now the **fallback path**, not
 the primary; see its module docstring.
