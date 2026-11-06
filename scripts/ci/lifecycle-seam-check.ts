@@ -122,14 +122,18 @@ const CREATE_CMD_RE = /\bcreate\b/;
  * A `;` / `&&` / `||` / `|` outside quotes in `tail` (which starts at `issue|pr`). `before` is the
  * char ahead of it: a quote there means `tail` opens inside that literal (argv form).
  */
-function hasUnquotedBoundary(tail: string, before: string): boolean {
+function hasUnquotedBoundary(tail: string, before: string, startDepth = 0): boolean {
   let quote = before === '"' || before === "'" ? before : "";
+  let depth = startDepth;
   for (let i = 0; i < tail.length; i++) {
     const ch = tail[i]!;
     if (quote) {
       if (ch === "\\" && quote === '"') i++;
       else if (ch === quote) quote = "";
     } else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === "[" || ch === "(" || ch === "{") depth++;
+    else if (ch === "]" || ch === ")" || ch === "}") depth--;
+    else if (ch === "\n" && depth <= 0) return true; // unquoted newline outside any bracket ends the command
     else if (ch === ";" || ch === "|" || (ch === "&" && tail[i + 1] === "&")) return true;
   }
   return false;
@@ -151,12 +155,11 @@ function inCreateContext(text: string, idx: number, matched = ""): boolean {
     if (tail.includes("<<")) return true;
     // Brackets opened just before `issue` (`run("gh", [` then newline-separated items) still count.
     let depth = 0;
-    for (const ch of win.slice(Math.max(0, create - 80), create) + tail) {
+    for (const ch of win.slice(Math.max(0, create - 80), create)) {
       if (ch === "[" || ch === "(" || ch === "{") depth++;
       else if (ch === "]" || ch === ")" || ch === "}") depth--;
     }
-    if (hasUnquotedBoundary(tail, win[create - 1] ?? "")) return false;
-    return depth > 0 || !tail.includes("\n");
+    return !hasUnquotedBoundary(tail, win[create - 1] ?? "", depth);
   }
   return CREATE_CMD_RE.test(win);
 }

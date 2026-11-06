@@ -276,6 +276,15 @@ describe("lifecycle-seam-check: evasion forms (#5367)", () => {
     assert.deepEqual(md("gh issue create --title 'a; b' && ls -l $f"), []);
   });
 
+  test("short -l: a newline inside a quoted multi-line body is not a command boundary", () => {
+    assert.deepEqual(md('gh issue create --title t --body "line1\nline2" -l needs-triage'), [2]);
+    assert.deepEqual(md("gh issue create --title t --body 'a\nb\nc' -l needs-triage"), [3]);
+    assert.deepEqual(ts('run("gh", ["issue", "create", "--body", "a\nb", "-l", "needs-triage"]);'), [2]);
+    // sibling: the --label twin agrees, and an unquoted newline still ends the command
+    assert.deepEqual(md('gh issue create --title t --body "line1\nline2" --label needs-triage'), [2]);
+    assert.deepEqual(md('gh issue create --title "t"\nwc -l $f'), []);
+  });
+
   test("TS: `deps.f ?? ((n, l) => seamFn(n, l))` is a wrapper; a non-arrow `x ?? other(..)` is not", () => {
     assert.deepEqual(
       ts("const addLabel = deps.addLabel ?? ((n: number, label: string) => addIssueLabel(n, label));\naddLabel(1, lbl);"),
