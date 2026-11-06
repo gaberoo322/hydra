@@ -74,7 +74,6 @@
       "path": "config/direction/outcomes.yaml",
       "section": "direction",
       "readBy": [
-        "docs/operator-playbooks/hydra-qa.md",
         "src/aggregators/outcome-trends.ts",
         "src/api/outcomes.ts",
         "src/holdback-policy.ts",

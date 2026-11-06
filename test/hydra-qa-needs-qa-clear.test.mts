@@ -1,27 +1,32 @@
 /**
- * Regression test for issue #638 — hydra-qa skill MUST clear `needs-qa`
- * from the source issue in every verdict-routing branch (PASS,
- * PASS-pending-CI, FAIL/FAIL-pending-CI).
+ * Regression test for issues #638 / #974 / #4766 — hydra-qa MUST clear
+ * `needs-qa` from the source issue in every verdict-routing branch, and the
+ * QA bounce label keys on "the linked PR is still open", not on GLM provenance.
  *
- * Before #638, the PASS-pending-CI branch deliberately left `needs-qa`
- * on the source issue so autopilot would "re-dispatch on the next tick"
- * — but `src/autopilot/turn-snapshot/orch-board.ts` counts `needs-qa` on
- * issues to drive `signals.needs_qa_orch`, and `decide.py:1135` fires
- * `qa_orch` whenever that signal is True. The result was a busy-loop:
- * every autopilot tick re-ran hydra-qa against PRs whose verdict was
- * already filed and awaiting CI, burning 30-65k tokens per re-dispatch
- * with no progress until the PR merged.
+ * Before #5269 these invariants were pinned by parsing the bash fences of
+ * `docs/operator-playbooks/hydra-qa.md` step 10. That bash now lives in
+ * `scripts/qa/route.ts` (ADR-0046 Decision 7), so the SAME invariants are
+ * asserted here against the route script's behaviour through a recording fake
+ * `gh` — plus text pins on the playbook stubs that remain (strip-before-merge,
+ * comment-not-approve, the retained merge fence).
  *
- * The fix landed in `docs/operator-playbooks/hydra-qa.md` (Step 10).
- * This test parses the playbook and asserts each verdict-routing branch
- * moves `$issue_number` out of `needs-qa`. If a future edit deletes the
- * clear-on-verdict block, this test fails loudly.
+ * Issue #5317 (ADR-0047 D3): the exit is no longer a direct label edit. Every arm
+ * leaves `needs-qa` through ONE `scripts/lifecycle.ts advance` seam call (the
+ * `PlumbingPorts.advance` port here); PASS lands in `qa-passed`, never
+ * `in-progress`, and only AFTER the verdict comment (the seam's `qa-verdict`
+ * gate reads the trailer at head). No arm writes a state label by hand.
  *
- * Issue #5317 (ADR-0047 D3): the exit is no longer a direct
- * `gh issue edit --remove-label needs-qa`; every arm calls
- * `npx tsx scripts/lifecycle.ts advance $issue_number <target> --evidence
- * pr=$pr_number`, and PASS lands in `qa-passed`, never `in-progress`. The
- * assertions below pin the seam call per arm.
+ * Background of the contracts:
+ *   - #638: a lingering `needs-qa` busy-looped `qa_orch` every autopilot tick
+ *     (`src/autopilot/turn-snapshot/orch-board.ts` counts it to drive
+ *     `signals.needs_qa_orch`), so EVERY verdict branch strips it.
+ *   - #974: the strip must be REACHABLE before anything that can abort on a
+ *     self-authored PR — `gh pr review --approve` always errors there, so a
+ *     PASS is recorded as a comment and the strip runs first.
+ *   - #4766: `ready-for-agent` on an open PR is a FRESH dev pick (duplicate PR);
+ *     the open-PR bounce is `needs-dev-resume`, `ready-for-agent` only on a
+ *     LIVE read of CLOSED/MERGED, and a failed/empty read defaults to
+ *     `needs-dev-resume`. GLM provenance selects comment wording only.
  */
 
 import { test, describe } from "node:test";
@@ -30,275 +35,207 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PLAYBOOK_PATH = join(__dirname, "..", "docs", "operator-playbooks", "hydra-qa.md");
+import { runRoute, type RouteDeps, type RouteOptions } from "../scripts/qa/route.ts";
+import type { AdvanceResult, CmdResult, PlumbingPorts } from "../scripts/qa/_lib.ts";
+import type { PreflightResult } from "../src/schemas/qa-plumbing-cli.ts";
+import { QA_ESCALATION_LABELS } from "../src/qa/round-action.ts";
 
-/**
- * Extract the bash block that follows a given "**Verdict `X`**" heading,
- * up to the next blank-line-terminated triple-fence. The playbook
- * structure is documented and stable; this parser is intentionally
- * literal so a docs reflow surfaces here as a test failure (which is
- * the right place to notice).
- */
-function extractVerdictBlock(playbook: string, verdict: string): string {
-  // Match the heading then capture until the closing ```.
-  const pattern = new RegExp(
-    "\\*\\*Verdict\\s+`" + verdict.replace(/[-]/g, "\\-") + "`[^`]*```bash\\n([\\s\\S]*?)\\n```",
-  );
-  const m = playbook.match(pattern);
-  assert.ok(
-    m,
-    `playbook missing verdict block for \`${verdict}\` — did the section heading change?`,
-  );
-  return m![1];
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PLAYBOOK = readFileSync(join(__dirname, "..", "docs", "operator-playbooks", "hydra-qa.md"), "utf8");
+const ROUTE_SRC = readFileSync(join(__dirname, "..", "scripts", "qa", "route.ts"), "utf8");
+
+// ---- a minimal recording gh for runRoute ----------------------------------
+
+const TRAILER = "QA-Verdict: FAIL pr=7 round=1 sha=0123456789ab blockers=1 max_severity=high";
+
+function pre(over: Partial<PreflightResult> = {}, glm = false): PreflightResult {
+  return {
+    ok: true,
+    stage: "ready",
+    issue: 70,
+    pr: { number: 7, headSha: "a".repeat(40), headRefName: "b", baseRefName: "master", mergeStateStatus: "CLEAN", glmAuthored: glm },
+    fixedSha: "b".repeat(40),
+    changedPaths: ["src/x.ts"],
+    checks: { list: [{ name: "test", status: "completed", conclusion: "success", required: true }], degraded: false, source: "branch-protection" },
+    spec: { found: false, input: null, skippedReason: "x", mode: "warn" },
+    tier: { num: 3, adversarial: true },
+    gate: { action: "admit", reason: "admit", redRequired: [], skipVerdict: null, skipCiSummary: null },
+    fanout: { mode: "standard", reviewers: ["standards", "spec"], reason: "r" },
+    stop: null,
+    degraded: [],
+    ...over,
+  };
 }
 
-describe("hydra-qa playbook clears needs-qa on every verdict (issue #638)", () => {
-  const playbook = readFileSync(PLAYBOOK_PATH, "utf8");
+interface Canned {
+  verdict: string;
+  roundAction?: string;
+  deepQa?: { action: string; failNumber?: number } | null;
+}
 
-  test("PASS verdict block advances the source issue to qa-passed through the seam (issue #5317)", () => {
-    const block = extractVerdictBlock(playbook, "PASS");
-    // We intentionally match the issue handle (`$issue_number`) and the PR
-    // evidence so a refactor that swaps issue for PR is caught.
-    assert.match(
-      block,
-      /^qa_pass_advance\b/m,
-      "PASS branch must advance the issue needs-qa -> qa-passed via the lifecycle seam",
+function phase(c: Canned): PlumbingPorts["phase"] {
+  return async (p) => {
+    if (p === "fold") {
+      return {
+        fold: { reviewVerdict: c.verdict.startsWith("PASS") ? "PASS" : "FAIL", worstFinding: "", blocking: [], followUps: [] },
+        counts: { blockers: c.verdict.startsWith("PASS") ? 0 : 1, maxSeverity: c.verdict.startsWith("PASS") ? "none" : "high" },
+        report: "REPORT",
+        verdict: { verdict: c.verdict, reason: "R" },
+        ciSummary: "CI",
+      };
+    }
+    if (p === "trailer") return { trailer: TRAILER, round: 1 };
+    return {
+      round: { action: c.roundAction ?? "bounce" },
+      deepQa: c.deepQa ?? null,
+      passMarker: c.deepQa?.action === "proceed" ? "M" : null,
+      failMarker: c.deepQa ? "F" : null,
+      escalationSummary: c.roundAction === "escalate" ? "E" : null,
+      labels: QA_ESCALATION_LABELS,
+    };
+  };
+}
+
+async function route(
+  c: Canned,
+  o: { pre?: PreflightResult; state?: string; defer?: boolean; advance?: (args: string[]) => Partial<AdvanceResult> | undefined } = {},
+): Promise<string[][]> {
+  const calls: string[][] = [];
+  const ports: PlumbingPorts = {
+    async advance(args): Promise<AdvanceResult> {
+      calls.push(["lifecycle", "advance", ...args]);
+      return { rc: 0, code: "", wouldPark: "", ...(o.advance?.(args) ?? {}) };
+    },
+    async gh(argv): Promise<CmdResult> {
+      calls.push(argv);
+      if (argv[0] === "pr" && argv[1] === "view") return { ok: true, stdout: `${o.state ?? "OPEN"}\n` };
+      return { ok: true, stdout: "" };
+    },
+    async git() {
+      return { ok: true, stdout: "" };
+    },
+    http: async () => null,
+    fetchers: {} as never,
+    phase: phase(c),
+  };
+  const opts: RouteOptions = {
+    repo: "gaberoo322/hydra",
+    defer: o.defer ?? false,
+    dryRun: false,
+    findingsPath: "/f",
+    summariesPath: "/s",
+  };
+  const deps: RouteDeps = {
+    readText: (p) => (p === "/s" ? JSON.stringify({ standardsSummary: "S", specSummary: "P" }) : "{}"),
+    appendRows: async () => {},
+    now: () => new Date(0),
+    sleep: async () => {},
+  };
+  await runRoute(opts, o.pre ?? pre(), ports, deps);
+  return calls.filter((a) => !(a[0] === "pr" && a[1] === "view"));
+}
+
+const argAfter = (a: readonly string[], f: string) => a[a.indexOf(f) + 1];
+/** Does this call move the issue off needs-qa? Only the lifecycle seam may (ADR-0047 D4). */
+const leavesNeedsQa = (a: readonly string[]): boolean => a[0] === "lifecycle" && a[1] === "advance";
+/** The seam target of an advance call. */
+const target = (a: readonly string[]): string => a[3] as string;
+/** A by-hand state-label write (the retired shape): never allowed. */
+const handLabelWrite = (a: readonly string[]): boolean =>
+  (a[0] === "issue" && a[1] === "edit") || (a[0] === "api" && (a.includes("DELETE") || a.some((x) => x.includes("/labels"))));
+
+describe("hydra-qa clears needs-qa on every verdict (issue #638)", () => {
+  const arms: Array<[string, Canned, Parameters<typeof route>[1]]> = [
+    ["PASS", { verdict: "PASS" }, {}],
+    ["PASS-pending-CI", { verdict: "PASS-pending-CI" }, {}],
+    ["FAIL on an open PR", { verdict: "FAIL" }, {}],
+    ["FAIL on a GLM-authored PR", { verdict: "FAIL" }, { pre: pre({}, true) }],
+    ["FAIL on a closed PR (not-open fallback)", { verdict: "FAIL" }, { state: "CLOSED" }],
+    ["FAIL escalated (round cap, enforce park)", { verdict: "FAIL", roundAction: "escalate" }, { advance: (a) => (a[1] === "needs-dev-resume" ? { rc: 1, code: "parked:qa-fail-rounds" } : undefined) }],
+    ["T4 1st deep-QA FAIL (bounce)", { verdict: "FAIL", roundAction: "deep-qa", deepQa: { action: "bounce", failNumber: 1 } }, { pre: pre({ tier: { num: 4, adversarial: true } }) }],
+    ["T4 2nd deep-QA FAIL (block-and-escalate)", { verdict: "FAIL", roundAction: "deep-qa", deepQa: { action: "block-and-escalate", failNumber: 2 } }, { pre: pre({ tier: { num: 4, adversarial: true } }) }],
+    ["step-6.6 defer", { verdict: "PASS" }, { pre: pre({ gate: { action: "defer", reason: "d", redRequired: [], skipVerdict: null, skipCiSummary: null } }), defer: true }],
+  ];
+  for (const [name, canned, o] of arms) {
+    test(`${name} leaves needs-qa through the lifecycle seam, with no by-hand label write`, async () => {
+      const calls = await route(canned, o);
+      assert.ok(calls.some(leavesNeedsQa), `no seam advance among: ${calls.map((c) => c.slice(0, 3).join(" ")).join(" | ")}`);
+      assert.ok(!calls.some(handLabelWrite), "ADR-0047 D4: no direct state-label write");
+    });
+  }
+
+  test("a not-open defer still leaves needs-qa to ready-for-agent through the seam (the label-less orphan gap, #3788)", async () => {
+    const calls = await route(
+      { verdict: "PASS" },
+      { pre: pre({ gate: { action: "defer", reason: "d", redRequired: [], skipVerdict: null, skipCiSummary: null } }), defer: true, state: "MERGED" },
     );
-    assert.doesNotMatch(block, /--(?:add|remove)-label/, "PASS branch must not write state labels directly (ADR-0047 D3)");
-    assert.doesNotMatch(block, /in-progress["']?\s*$/m, "PASS branch must never route to in-progress (ADR-0047 D2)");
+    const adv = calls.find(leavesNeedsQa) as string[];
+    assert.equal(target(adv), "ready-for-agent");
+    assert.ok(adv.includes("defer=1"), "the trailer-less defer edge");
   });
 
-  // Issue #974 — the QA-side twin of the dev-side #846 gap.
-  // ROOT CAUSE: the PASS branch's FIRST command used to be
-  // `gh pr review --approve`, which ALWAYS errors on a self-authored PR
-  // (shared gaberoo322 identity; reference_qa_cannot_self_approve / #848).
-  // That abort meant the trailing `gh issue edit --remove-label needs-qa`
-  // never ran, so the label lingered until a LATER autopilot run stripped it
-  // (~1h23m busy-loop, PR#970/#961). The fix makes the strip REACHABLE
-  // irrespective of the approve/merge outcome: remove the self-approve and
-  // ensure the strip runs before any command that aborts on self-author.
-  describe("PASS branch strips needs-qa reachably (issue #974)", () => {
-    const block = extractVerdictBlock(playbook, "PASS");
-
-    test("PASS branch does not use the self-aborting `gh pr review --approve`", () => {
-      // `--approve` on a self-authored PR (shared identity) errors and would
-      // abort the sequence before the needs-qa strip. The documented pattern
-      // is to record the verdict as a comment instead.
-      assert.doesNotMatch(
-        block,
-        /gh pr review\s+\$pr_number[^\n]*--approve/,
-        "PASS branch must NOT `gh pr review --approve` — it always errors on a self-authored PR and aborts before the needs-qa strip (issue #974 / reference_qa_cannot_self_approve). Post the verdict as `gh pr comment` instead.",
-      );
-    });
-
-    test("PASS verdict is recorded via `gh pr comment`, not an approval", () => {
-      assert.match(
-        block,
-        /gh pr comment\s+\$pr_number/,
-        "PASS branch must record its verdict as a PR comment (self-author cannot self-approve — #848).",
-      );
-    });
-
-    test("the lifecycle advance call follows the verdict comment and precedes the merge call (issue #5317 INV-8)", () => {
-      const commentIdx = block.search(/gh pr comment\s+\$pr_number/);
-      const advanceIdx = block.search(/^qa_pass_advance\b/m);
-      const mergeIdx = block.search(/gh pr merge\s+\$pr_number/);
-      assert.ok(advanceIdx >= 0, "PASS branch must contain the seam advance call");
-      assert.ok(mergeIdx >= 0, "PASS branch must contain a merge call");
-      assert.ok(
-        commentIdx >= 0 && commentIdx < advanceIdx,
-        "the qa-verdict gate reads the trailer at head, so the verdict comment must be posted BEFORE the advance call",
-      );
-      assert.ok(
-        advanceIdx < mergeIdx,
-        "the advance call must run BEFORE the merge call so the issue has left needs-qa even if the merge aborts (the #974 busy-loop fix, now via the seam)",
-      );
-    });
-
-    test("a refused advance exits non-zero and never falls back to a direct label edit (issue #5317 INV-9)", () => {
-      assert.match(block, /^qa_pass_advance\b/m, "PASS routes through the one wrapper");
-      const helper = playbook.slice(playbook.indexOf("qa_pass_advance() {"), playbook.indexOf("# Resolve to a SHA so a concurrent push"));
-      assert.match(helper, /qa_advance \$issue_number qa-passed --evidence pr=\$pr_number --actor hydra-qa/);
-      assert.match(helper, /QA-Verdict-Error: verdict=PASS/, "a non-pr-merged refusal posts a QA-Verdict-Error");
-      assert.match(helper, /--evidence defer=1 --actor hydra-qa/, "and reroutes off needs-qa through the seam defer edge");
-      assert.match(helper, /both refused[^\n]*NOT editing labels by hand/, "only a double refusal exits 1");
-      assert.doesNotMatch(helper, /gh issue edit/, "no direct label fallback");
-      assert.doesNotMatch(block, /gh issue edit/, "no direct label fallback after a refusal");
-    });
-  });
-
-  test("PASS-pending-CI verdict block advances the source issue to qa-passed (issues #638, #5317)", () => {
-    const block = extractVerdictBlock(playbook, "PASS-pending-CI");
-    assert.match(
-      block,
-      /^qa_pass_advance\b/m,
-      "PASS-pending-CI branch must leave needs-qa for qa-passed — this is the busy-loop fix from issue #638",
-    );
-    assert.doesNotMatch(block, /--(?:add|remove)-label/, "no direct state-label writes (ADR-0047 D3)");
-    // Critical: the block MUST NOT contain the old "Leave the needs-qa label in place" comment.
-    assert.doesNotMatch(
-      block,
-      /Leave the needs-qa label in place/i,
-      "The pre-#638 'leave needs-qa in place' instruction must be removed",
-    );
-  });
-
-  test("FAIL verdict block leaves needs-qa through the seam, per arm (issues #638, #5317)", () => {
-    // The FAIL block uses a different heading shape: `**Verdict `FAIL` or `FAIL-pending-CI`**`.
-    const m = playbook.match(
-      /\*\*Verdict\s+`FAIL`\s+or\s+`FAIL-pending-CI`[^`]*```bash\n([\s\S]*?)\n```/,
-    );
-    assert.ok(m, "playbook missing FAIL verdict block");
-    const block = m![1];
-    assert.doesNotMatch(block, /--(?:add|remove)-label|gh issue edit|labels"/, "FAIL routing must not write state labels directly (ADR-0047 D3)");
-    // Issue #4766: the FAIL bounce branches (open PR vs not-open fallback), so
-    // the #638/#974 contract is asserted per arm — EVERY bounce arm must leave
-    // needs-qa through the seam, or the issue busy-loops QA again.
-    const openArmIdx = block.indexOf('if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then\n  qa_advance');
-    assert.ok(openArmIdx > 0, "FAIL routing must branch on the bounce-label helper (issue #4766)");
-    const fallbackIdx = block.indexOf("# Not-open fallback");
-    assert.ok(fallbackIdx > openArmIdx, "FAIL routing must have a not-open fallback arm after the open-PR arm");
-    const escalateIdx = block.indexOf('if [ "$ROUND_ACTION" = "escalate" ]; then');
-    assert.match(
-      block.slice(openArmIdx, fallbackIdx),
-      /qa_advance\s+\$issue_number\s+needs-dev-resume\s+--evidence\s+pr=\$pr_number/,
-      "the open-PR arm must advance to needs-dev-resume",
-    );
-    assert.match(
-      block.slice(fallbackIdx, escalateIdx),
-      /qa_advance\s+\$issue_number\s+ready-for-agent\s+--evidence\s+pr=\$pr_number/,
-      "the not-open fallback arm must advance to ready-for-agent",
-    );
+  test("PASS-pending-CI never leaves the pre-#638 'leave needs-qa in place' instruction anywhere", () => {
+    assert.doesNotMatch(PLAYBOOK, /Leave the needs-qa label in place/i);
+    assert.doesNotMatch(ROUTE_SRC, /Leave the needs-qa label in place/i);
   });
 });
 
-/**
- * Issue #4766 — the QA bounce label keys on "the linked PR is still open at
- * bounce time", not on GLM provenance.
- *
- * Before #4766, step 6.6's defer and step 10's T1/T2/T3 FAIL routing sent
- * every NON-GLM open PR back to `ready-for-agent`. But `ready-for-agent` is
- * a FRESH dev pick: since #4518 the durable resume pin (the Turn Snapshot's
- * orch_dev_resume_pick → decide.py's pinned forward-fix) owns any open PR,
- * and it only consumes `needs-dev-resume`. A `ready-for-agent` relabel on an
- * open PR therefore opened a DUPLICATE PR or forced a hand relabel (live
- * evidence in the issue: #4594/PR #4763 FAIL path, #4591/PR #4751 defer
- * path). The GLM-only arm dated from #4460, written before #4518 existed.
- *
- * Same literal-parse approach as the #638 tests above: a playbook reflow
- * that breaks the extraction surfaces here as a failure.
- */
+describe("PASS leaves needs-qa reachably (issues #974, #5317)", () => {
+  test("PASS records its verdict as a comment, never `gh pr review --approve` (self-author cannot self-approve, #848)", async () => {
+    const calls = await route({ verdict: "PASS" });
+    assert.ok(!calls.some((a) => a[0] === "pr" && a[1] === "review"), "no pr review call of any kind");
+    assert.ok(calls.some((a) => a[0] === "pr" && a[1] === "comment"));
+    assert.doesNotMatch(PLAYBOOK, /gh pr review\s+\$pr_number[^\n]*--approve/);
+  });
+
+  test("the PASS verdict comment precedes the qa-passed seam call (the qa-verdict gate reads the trailer), and route never reaches the merge call", async () => {
+    const calls = await route({ verdict: "PASS" });
+    const adv = calls.findIndex(leavesNeedsQa);
+    const comment = calls.findIndex((a) => a[0] === "pr" && a[1] === "comment");
+    assert.ok(comment >= 0 && adv > comment, "comment first (#5317 INV-8), then the seam call");
+    assert.equal(target(calls[adv] as string[]), "qa-passed", "PASS lands in qa-passed, never in-progress");
+    assert.ok(!calls.some((a) => a[0] === "pr" && a[1] === "merge"));
+  });
+
+  test("the playbook keeps the merge call AFTER the route stub, so the seam call has already run", () => {
+    const route = PLAYBOOK.indexOf("scripts/qa/route.ts");
+    const merge = PLAYBOOK.indexOf("gh pr merge $pr_number --repo gaberoo322/hydra --auto --squash --delete-branch");
+    assert.ok(route > 0 && merge > route, "route (which advances off needs-qa) runs before the retained merge fence");
+  });
+});
+
 describe("hydra-qa bounce label keys on open-PR state, not GLM provenance (issue #4766)", () => {
-  const playbook = readFileSync(PLAYBOOK_PATH, "utf8");
-
-  /** The step-3 fence (pin the fixed point), where the helper is defined. */
-  const step3 = playbook.slice(
-    playbook.indexOf("### 3. Pin the fixed point"),
-    playbook.indexOf("### 4. Resolve the spec source"),
-  );
-
-  /** Step 6.6's defer bullet, fence included (the table row above uses the same bold marker, so anchor on the bullet prose). */
-  const deferBlock = playbook.slice(
-    playbook.indexOf("- **`defer`** — the PR cannot merge"),
-    playbook.indexOf("- **`skip-required-failed`** (T1/T2/T3 only"),
-  );
-
-  /** Step 10's T1/T2/T3 FAIL-routing fence (the first FAIL bash block). */
-  const failBlock = playbook.match(
-    /\*\*Verdict\s+`FAIL`\s+or\s+`FAIL-pending-CI`[^`]*```bash\n([\s\S]*?)\n```/,
-  )![1];
-
-  /** Step 10's T4 deep-QA loop, from its heading to step 11. */
-  const t4Block = playbook.slice(
-    playbook.indexOf("For **T4**"),
-    playbook.indexOf("### 11."),
-  );
-
-  test("step 3 defines qa_bounce_label exactly once — the single decision point", () => {
-    assert.ok(
-      step3.includes("qa_bounce_label() {"),
-      "step 3 must define the qa_bounce_label helper (INV-3)",
-    );
-    assert.equal(
-      (playbook.match(/qa_bounce_label\(\) \{/g) ?? []).length,
-      1,
-      "the helper must be defined exactly once (INV-3) — no per-site re-implementation of the open/not-open logic",
-    );
-    // Every bounce site consults the helper; nothing else picks the label.
-    assert.equal(
-      (playbook.match(/\$\(qa_bounce_label\)/g) ?? []).length,
-      4,
-      "exactly four call sites: step 6.6 defer, the qa_pass_advance refusal reroute, step-10 T1/T2/T3 FAIL, step-10 T4 1st deep-QA FAIL",
-    );
+  test("the playbook no longer carries a bounce-label helper or any hand-spelled label fence", () => {
+    assert.ok(!PLAYBOOK.includes(["qa_bounce_label", "() {"].join("")), "the helper moved into route.ts — one definition, in code");
+    assert.ok(!/\$\(qa_bounce_label\)/.test(PLAYBOOK));
+    assert.ok(!/gh issue (edit|comment)\b/.test(PLAYBOOK), "no gh issue edit/comment fence outside the retained merge fence");
+    assert.ok(!/gh pr comment\b/.test(PLAYBOOK), "no gh pr comment fence outside the retained merge fence");
   });
 
-  test("the helper reads PR state LIVE and defaults to needs-dev-resume unless CLOSED/MERGED", () => {
-    assert.match(
-      step3,
-      /gh pr view "\$pr_number"[\s\S]{0,120}?--json state/,
-      "the bounce label must come from a live gh pr view --json state read at bounce time, not step 3's snapshot (INV-2)",
-    );
-    const helper = step3.slice(step3.indexOf("qa_bounce_label() {"));
-    assert.ok(
-      helper.includes('QA_PR_STATE" = "CLOSED"') && helper.includes('QA_PR_STATE" = "MERGED"'),
-      "only a confirmed CLOSED/MERGED read may yield ready-for-agent (INV-2)",
-    );
-    const closedIdx = helper.indexOf('QA_PR_STATE" = "CLOSED"');
-    const rfaIdx = helper.indexOf('echo "ready-for-agent"');
-    const ndrIdx = helper.indexOf('echo "needs-dev-resume"');
-    assert.ok(
-      closedIdx > 0 && rfaIdx > closedIdx && ndrIdx > rfaIdx,
-      "ready-for-agent only inside the CLOSED/MERGED arm; needs-dev-resume is the else default, so a failed/empty read lands there (INV-2)",
-    );
+  test("the bounce label is read LIVE per call and defaults to needs-dev-resume unless CLOSED/MERGED", () => {
+    const helper = ROUTE_SRC.slice(ROUTE_SRC.indexOf('const res = await ports.gh(["pr", "view"'), ROUTE_SRC.indexOf("/** The result of a path that posted"));
+    assert.match(helper, /"pr", "view", String\(pr\)[\s\S]{0,80}"--json", "state"/, "a live gh pr view --json state read at bounce time (INV-2)");
+    assert.ok(helper.includes('state === "CLOSED" || state === "MERGED"'));
+    const rfa = helper.indexOf('"ready-for-agent"');
+    const ndr = helper.indexOf('"needs-dev-resume"');
+    assert.ok(rfa > 0 && ndr > rfa, "ready-for-agent only on the confirmed CLOSED/MERGED arm; needs-dev-resume is the default");
+    assert.equal((ROUTE_SRC.match(/await bounceLabel\(\)/g) ?? []).length, 4, "four call sites: defer, PASS-refusal defer reroute, T1-T3 FAIL, T4 1st deep-QA FAIL");
   });
 
-  test("open-PR bounce arms add needs-dev-resume, never ready-for-agent; the fallback keeps ready-for-agent", () => {
-    // T1/T2/T3 FAIL routing (also the landing zone of step 6.6's
-    // skip-required-failed short-circuit, which jumps here).
-    const openArmIdx = failBlock.indexOf('if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then\n  qa_advance');
-    assert.ok(openArmIdx > 0, "T1/T2/T3 FAIL routing must branch on the bounce-label helper");
-    const fallbackIdx = failBlock.indexOf("# Not-open fallback");
-    assert.ok(fallbackIdx > openArmIdx, "the not-open fallback arm must follow the open-PR arm");
-    const escalateIdx = failBlock.indexOf('if [ "$ROUND_ACTION" = "escalate" ]; then');
-    const openArm = failBlock.slice(openArmIdx, fallbackIdx);
-    const fallbackArm = failBlock.slice(fallbackIdx, escalateIdx);
-    assert.match(openArm, /qa_advance\s+\$issue_number\s+needs-dev-resume/, "the open-PR arm advances to needs-dev-resume (INV-1)");
-    assert.doesNotMatch(openArm, /advance\s+\$issue_number\s+ready-for-agent/, "the open-PR arm must NOT advance to ready-for-agent (INV-1)");
-    assert.match(fallbackArm, /qa_advance\s+\$issue_number\s+ready-for-agent/, "the not-open fallback arm advances to ready-for-agent (INV-2)");
-
-    // Step 6.6 defer.
-    const deferOpenIdx = deferBlock.indexOf('if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then');
-    assert.ok(deferOpenIdx > 0, "the defer bounce must branch on the bounce-label helper");
-    const deferFallbackIdx = deferBlock.indexOf("# Not-open fallback");
-    assert.ok(deferFallbackIdx > deferOpenIdx, "the defer not-open fallback must follow the open-PR arm");
-    const deferOpen = deferBlock.slice(deferOpenIdx, deferFallbackIdx);
-    assert.match(deferOpen, /qa_advance\s+\$issue_number\s+needs-dev-resume/, "the defer open-PR arm advances to needs-dev-resume (INV-1)");
-    assert.doesNotMatch(deferOpen, /advance\s+\$issue_number\s+ready-for-agent/, "the defer open-PR arm must NOT advance to ready-for-agent (INV-1)");
-    assert.match(deferBlock.slice(deferFallbackIdx), /qa_advance\s+\$issue_number\s+ready-for-agent/, "the defer not-open fallback advances to ready-for-agent (INV-2)");
-
-    // Step 10 T4 1st deep-QA FAIL bounce — same rule, single arm.
-    const t4Bounce = t4Block.slice(t4Block.indexOf("1st deep-QA FAIL"));
-    assert.match(t4Bounce, /BOUNCE_LABEL=\$\(qa_bounce_label\)/, "the T4 1st-FAIL bounce consults the helper (INV-1)");
-    assert.match(t4Bounce, /qa_advance\s+\$issue_number\s+"\$BOUNCE_LABEL"/, "the T4 bounce advances to the helper's label");
-    assert.doesNotMatch(t4Bounce, /advance\s+\$issue_number\s+ready-for-agent/, "the T4 bounce must not hard-code ready-for-agent (INV-1)");
+  test("an open PR bounces to needs-dev-resume — GLM or not — and never adds ready-for-agent", async () => {
+    for (const glm of [false, true]) {
+      const calls = await route({ verdict: "FAIL" }, { pre: pre({}, glm) });
+      const advs = calls.filter(leavesNeedsQa);
+      assert.equal(advs.length, 1);
+      assert.equal(target(advs[0] as string[]), "needs-dev-resume", `glm=${glm}`);
+    }
   });
 
-  test("GLM_AUTHORED selects comment wording only, never the bounce label", () => {
-    // Inside each open-PR arm the GLM conditional (if any) must open with a
-    // comment call — wording — not a label edit.
-    const commentArms = failBlock.slice(failBlock.indexOf('if [ "$ROUND_ACTION" = "escalate" ]; then'));
-    const failOpenArm = commentArms.slice(
-      commentArms.indexOf('elif [ "$BOUNCE_LABEL" = "needs-dev-resume" ]'),
-    );
-    const glmFail = failOpenArm.match(/if \[ "\$GLM_AUTHORED" = "1" \]; then\n\s*gh issue comment/);
-    assert.ok(glmFail, "the T1/T2/T3 open-PR arm's GLM conditional selects the comment, not the label (INV-3)");
-    const deferOpenArm = deferBlock.slice(
-      deferBlock.indexOf('if [ "$BOUNCE_LABEL" = "needs-dev-resume" ]; then'),
-      deferBlock.indexOf("# Not-open fallback"),
-    );
-    const glmDefer = deferOpenArm.match(/if \[ "\$GLM_AUTHORED" = "1" \]; then\n\s*gh issue comment/);
-    assert.ok(glmDefer, "the defer open-PR arm's GLM conditional selects the comment, not the label (INV-3)");
+  test("failed or empty state reads default to needs-dev-resume; a confirmed CLOSED/MERGED PR is the only fallback", async () => {
+    for (const [state, want] of [["CLOSED", "ready-for-agent"], ["MERGED", "ready-for-agent"], ["OPEN", "needs-dev-resume"], ["", "needs-dev-resume"]] as const) {
+      const calls = await route({ verdict: "FAIL" }, { state });
+      assert.equal(target(calls.find(leavesNeedsQa) as string[]), want, `state '${state}'`);
+    }
   });
 });
 
@@ -315,29 +252,5 @@ describe("the needs-qa collector documents the needs-qa contract (issue #638)", 
       /needs[_-]qa[\s\S]{0,800}#638/,
       "the orch-board collector's needs-qa doc must reference issue #638's contract",
     );
-  });
-});
-
-describe("QA-FAIL round-2 fixes: one qa_advance wrapper at every advance site (#5317 PR #5377)", () => {
-  const pb = readFileSync(PLAYBOOK_PATH, "utf8");
-  const helperStart = pb.indexOf("qa_advance() {");
-  const helper = pb.slice(helperStart, pb.indexOf("\n}\n", helperStart));
-  const failStart = pb.indexOf("BOUNCE_LABEL=$(qa_bounce_label)\nROUND_ACTION=bounce");
-  const failBlock = pb.slice(failStart, pb.indexOf("### 11. Lesson capture"));
-
-  test("the wrapper exits 0 on pr-merged (no needs-qa busy-loop) and is the only caller of the bounce advances", () => {
-    assert.ok(helperStart > 0, "qa_advance helper defined");
-    assert.match(helper, /pr-merged/);
-    assert.match(helper, /exit 0/);
-    assert.doesNotMatch(pb, /npx tsx scripts\/lifecycle\.ts advance \$issue_number (needs-dev-resume|ready-for-agent|"\$BOUNCE_LABEL")/);
-    assert.equal((pb.match(/qa_advance \$issue_number (needs-dev-resume|ready-for-agent) .*defer=1/g) ?? []).length, 2, "both defer arms");
-    assert.match(pb, /qa_advance \$issue_number "\$BOUNCE_LABEL"/, "T4 1st-FAIL bounce");
-  });
-
-  test("the CLOSED-PR arm honours wouldPark (shadow) as the open arm does, and shadow posts the unified cap-park comment", () => {
-    const closedArm = failBlock.slice(failBlock.indexOf("# Not-open fallback"), failBlock.indexOf('if [ "$ROUND_ACTION" = "escalate" ]; then'));
-    assert.match(closedArm, /QA_ADV_WOULD_PARK" = "qa-fail-rounds"[\s\S]*qa_shadow_park/);
-    assert.match(closedArm, /parked:qa-fail-rounds/, "enforce code still escalates on the closed arm (sibling shape)");
-    assert.match(failBlock, /SHADOW_PARK" = "1"[\s\S]*## Hydra cap park[\s\S]*Hydra-Cap-Park: arm=qa-fail-rounds/);
   });
 });
