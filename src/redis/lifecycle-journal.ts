@@ -71,32 +71,47 @@ function fail(op: string, err: unknown): { ok: false; error: string } {
 }
 
 /**
- * Append one entry: `RPUSH` then `LTRIM -500 -1`. With `indexHoldExit` the
- * hold-exit index write (`ZADD` + trim) joins the SAME `MULTI`, so an
- * unsanctioned exit can never be journaled without being indexed (#5313).
+ * Which write-time indexes join an append's one `MULTI`. `true` is the legacy
+ * spelling of `{ holdExit: true }` (#5313); `capEvent` mirrors cap parks,
+ * shadow would-parks and claim-opens into the cap-events index (#5324).
+ */
+export type LifecycleIndexSelector = boolean | { holdExit?: boolean; capEvent?: boolean };
+
+/**
+ * Append one entry: `RPUSH` then `LTRIM -500 -1`. With an index selected the
+ * index write (`ZADD` + trim) joins the SAME `MULTI`, so an entry can never be
+ * journaled without being indexed (#5313, #5324).
  */
 export async function appendLifecycleEntry(
   repo: string,
   issue: number,
   entry: LifecycleJournalEntry,
-  indexHoldExit = false,
+  index: LifecycleIndexSelector = false,
 ): Promise<JournalWriteResult> {
   try {
     const r = getRedisConnection();
     const key = lifecycleJournalKey(repo, issue);
-    if (!indexHoldExit) {
+    const sel = typeof index === "boolean" ? { holdExit: index, capEvent: false } : index;
+    const capRecord = sel.capEvent ? capEventRecord(issue, entry) : null;
+    if (!sel.holdExit && capRecord === null) {
       await r.rpush(key, JSON.stringify(entry));
       await r.ltrim(key, -LIFECYCLE_JOURNAL_MAX_ENTRIES, -1);
       return { ok: true };
     }
-    const idxKey = holdExitIndexKey(repo);
-    const results = await r
-      .multi()
-      .rpush(key, JSON.stringify(entry))
-      .ltrim(key, -LIFECYCLE_JOURNAL_MAX_ENTRIES, -1)
-      .zadd(idxKey, entry.ts, JSON.stringify(holdExitRecord(issue, entry)))
-      .zremrangebyscore(idxKey, "-inf", entry.ts - HOLD_EXIT_RETENTION_MS)
-      .exec();
+    const multi = r.multi().rpush(key, JSON.stringify(entry)).ltrim(key, -LIFECYCLE_JOURNAL_MAX_ENTRIES, -1);
+    if (sel.holdExit) {
+      const idxKey = holdExitIndexKey(repo);
+      multi
+        .zadd(idxKey, entry.ts, JSON.stringify(holdExitRecord(issue, entry)))
+        .zremrangebyscore(idxKey, "-inf", entry.ts - HOLD_EXIT_RETENTION_MS);
+    }
+    if (capRecord !== null) {
+      const capKey = capEventsIndexKey(repo);
+      multi
+        .zadd(capKey, entry.ts, JSON.stringify(capRecord))
+        .zremrangebyscore(capKey, "-inf", entry.ts - CAP_EVENTS_RETENTION_MS);
+    }
+    const results = await multi.exec();
     const failed = results?.find(([err]) => err !== null);
     if (results === null || failed) {
       return fail("appendLifecycleEntry", failed?.[0] ?? new Error("MULTI aborted"));
@@ -105,6 +120,78 @@ export async function appendLifecycleEntry(
   } catch (err) {
     logger.error({ err }, "[lifecycle-journal] appendLifecycleEntry failed");
     return fail("appendLifecycleEntry", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cap-events index (ADR-0047 Decision 9, issue #5324)
+// ---------------------------------------------------------------------------
+
+export const CAP_EVENTS_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function capEventsIndexKey(repo: string): string {
+  return `hydra:lifecycle:cap-events:${repo}`;
+}
+
+export type CapEventKind = "park" | "would-park" | "claim";
+
+export interface CapEventRecord {
+  kind: CapEventKind;
+  issue: number;
+  ts: number;
+  arm?: string;
+  pr?: number;
+  actor: string;
+}
+
+/**
+ * Pure: classify one journal entry as a cap event, or `null` when it is not
+ * one. A cap park (`to=parked`, reason `cap:<arm>`) is a `park`; a shadow
+ * refusal (`result` `shadow-would-park:<arm>`) is a `would-park`; a
+ * `claim-opened` entry is a `claim` (the park-rate denominator).
+ */
+export function capEventRecord(issue: number, entry: LifecycleJournalEntry): CapEventRecord | null {
+  const pr = Number(entry.evidence?.pr);
+  const prPart = Number.isInteger(pr) && pr > 0 ? { pr } : {};
+  if (entry.kind === "claim-opened") {
+    return { kind: "claim", issue, ts: entry.ts, actor: entry.actor };
+  }
+  if (typeof entry.result === "string" && entry.result.startsWith("shadow-would-park:")) {
+    return {
+      kind: "would-park",
+      issue,
+      ts: entry.ts,
+      arm: entry.result.slice("shadow-would-park:".length),
+      ...prPart,
+      actor: entry.actor,
+    };
+  }
+  if (entry.to === "parked" && entry.written === true && typeof entry.reason === "string" && entry.reason.startsWith("cap:")) {
+    return { kind: "park", issue, ts: entry.ts, arm: entry.reason.slice("cap:".length), ...prPart, actor: entry.actor };
+  }
+  return null;
+}
+
+export type ListCapEventsResult =
+  | { ok: true; events: CapEventRecord[] }
+  | { ok: false; error: string };
+
+/** Cap events with `ts >= sinceMs`, oldest first; malformed members are skipped (logged). */
+export async function listCapEvents(repo: string, sinceMs: number): Promise<ListCapEventsResult> {
+  try {
+    const raw: string[] = await getRedisConnection().zrangebyscore(capEventsIndexKey(repo), sinceMs, "+inf");
+    const events: CapEventRecord[] = [];
+    for (const row of raw) {
+      try {
+        events.push(JSON.parse(row) as CapEventRecord);
+      } catch (parseErr) {
+        logger.error({ err: parseErr }, "[lifecycle-journal] skipping malformed cap-event member");
+      }
+    }
+    return { ok: true, events };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] listCapEvents failed");
+    return fail("listCapEvents", err);
   }
 }
 

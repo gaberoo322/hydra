@@ -446,7 +446,7 @@ function operatorHarness(labels: string[], mode: LifecycleMode, opts: { state?: 
   h.deps.journal.persist = async (_r, i) => { persisted.push(i); return { ok: true }; };
   h.deps.journal.append = async (_r, i, e, idx) => {
     h.journal.push(e);
-    if (idx) indexed.push({ issue: i, e });
+    if (idx === true || (idx && idx.holdExit)) indexed.push({ issue: i, e });
     return { ok: true };
   };
   return { h, indexed, persisted, reopens };

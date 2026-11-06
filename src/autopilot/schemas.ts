@@ -350,6 +350,11 @@ export const TurnBodySchema = z
     burned_classes: z.unknown().optional(),
     usage_shed: z.unknown().optional(),
     usage_allow: z.unknown().optional(),
+    // Issue #5324 (ADR-0047 Decision 9) — the per-turn mirror of the Run
+    // Ledger's parent_exceptions rows (turn_n and turn_n-1) that heartbeat.py
+    // forwards. `z.unknown()` for the same reason as above: recordTurn
+    // sanitises and logs, a malformed field never 400s the turn row.
+    parent_exceptions: z.unknown().optional(),
   });
 
 export type TurnBody = z.infer<typeof TurnBodySchema>;
