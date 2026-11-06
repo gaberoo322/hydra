@@ -1,0 +1,1 @@
+- refactor: design_concept, wayfinder and research dispatches carry typed Dispatch Intents; the renderer no longer reads the Turn Snapshot (#5384)
