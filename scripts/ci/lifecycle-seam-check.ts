@@ -118,13 +118,30 @@ function isCreateOnlyFlag(matched: string): boolean {
 }
 /** Bare `--label` only writes state on create commands (elsewhere it is a list filter). */
 const CREATE_CMD_RE = /\bcreate\b/;
+/**
+ * A `;` / `&&` / `||` / `|` outside quotes in `tail` (which starts at `issue|pr`). `before` is the
+ * char ahead of it: a quote there means `tail` opens inside that literal (argv form).
+ */
+function hasUnquotedBoundary(tail: string, before: string): boolean {
+  let quote = before === '"' || before === "'" ? before : "";
+  for (let i = 0; i < tail.length; i++) {
+    const ch = tail[i]!;
+    if (quote) {
+      if (ch === "\\" && quote === '"') i++;
+      else if (ch === quote) quote = "";
+    } else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === ";" || ch === "|" || (ch === "&" && tail[i + 1] === "&")) return true;
+  }
+  return false;
+}
+
 /** A bare `--label` is a create-time write when `create` appears within 300 chars before it (same or earlier line). */
 function inCreateContext(text: string, idx: number, matched = ""): boolean {
   const win = text.slice(Math.max(0, idx - 300), idx);
   // Short `-l` is also `ls -l` / `wc -l` / `grep -l`: demand `issue|pr create` (shell or argv), not a bare `create`.
   if (/^["']?-l(?![\w-])/.test(matched)) {
     // Same command only, bounded by command boundaries rather than newlines: the last
-    // `issue|pr create` must reach the flag with no `;` / `&&` / `||` / `|` between. A newline
+    // `issue|pr create` must reach the flag with no unquoted `;` / `&&` / `||` / `|` between. A newline
     // ends the command only when no bracket is open (multi-line argv list), no `\` continues it
     // and no heredoc (`<<`) is in play. Gives `-l` the same reach as `--label` (INV-2).
     let create = -1;
@@ -138,7 +155,7 @@ function inCreateContext(text: string, idx: number, matched = ""): boolean {
       if (ch === "[" || ch === "(" || ch === "{") depth++;
       else if (ch === "]" || ch === ")" || ch === "}") depth--;
     }
-    if (/;|&&|\|/.test(tail)) return false;
+    if (hasUnquotedBoundary(tail, win[create - 1] ?? "")) return false;
     return depth > 0 || !tail.includes("\n");
   }
   return CREATE_CMD_RE.test(win);

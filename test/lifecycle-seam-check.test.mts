@@ -264,6 +264,18 @@ describe("lifecycle-seam-check: evasion forms (#5367)", () => {
     assert.deepEqual(md("gh issue create --title t && ls -l $f"), []);
   });
 
+  test("short -l: a `;` / `&&` / `|` inside a quoted title or body is not a command boundary", () => {
+    assert.deepEqual(md('gh issue create --title "fix; x" -l needs-triage'), [1]);
+    assert.deepEqual(md('gh issue create --body "a | b" -l needs-triage'), [1]);
+    assert.deepEqual(md("gh issue create --title 'a && b' -l needs-triage"), [1]);
+    assert.deepEqual(md('gh issue create --title "say \\"hi\\"; x" -l needs-triage'), [1]);
+    assert.deepEqual(ts('run("gh", ["issue", "create", "--title", "fix; x", "-l", "needs-triage"]);'), [1]);
+    assert.deepEqual(ts('run("gh", ["issue", "create", "--body", "a | b", "-l", "needs-triage"]);'), [1]);
+    // sibling shapes: a real boundary after a closed quote still ends the create command
+    assert.deepEqual(md('gh issue create --title "t"; wc -l $f'), []);
+    assert.deepEqual(md("gh issue create --title 'a; b' && ls -l $f"), []);
+  });
+
   test("TS: `deps.f ?? ((n, l) => seamFn(n, l))` is a wrapper; a non-arrow `x ?? other(..)` is not", () => {
     assert.deepEqual(
       ts("const addLabel = deps.addLabel ?? ((n: number, label: string) => addIssueLabel(n, label));\naddLabel(1, lbl);"),
