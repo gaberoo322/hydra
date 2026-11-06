@@ -211,6 +211,16 @@ describe("rollbackDispatch: a dispatcher-owned undo that works in enforce (QA ro
   });
 });
 
+describe("recover-stale stale-requeue arm releases the claim (QA round 4)", () => {
+  test("the requeue arm frees the held claim with outcome stall; the open-PR arm leaves it for its worker", () => {
+    const sh = readFileSync(join(import.meta.dirname, "..", "scripts/autopilot/recover-stale.sh"), "utf8");
+    const requeue = sh.slice(sh.indexOf("--add-label ready-for-agent"), sh.indexOf("re-queued in-progress"));
+    assert.match(requeue, /scripts\/lifecycle\.ts release "\$ISSUE" --held --outcome stall/);
+    const toQa = sh.slice(sh.indexOf("--add-label needs-qa"), sh.indexOf("routed in-progress"));
+    assert.equal(/lifecycle\.ts release/.test(toQa), false);
+  });
+});
+
 describe("GLM pick: claims that block a pick (QA round 4)", () => {
   const c = (cls: string): DispatchClaim => ({ dispatchId: "d", class: cls, run: "r", artifactHash: null, openedAt: 1 });
   test("a held legacy-backfill placeholder (takeover-able) does not block; a real dispatch claim does", () => {
