@@ -288,6 +288,7 @@
       "readWhen": "Changing dispatch logic or `decide.py`.",
       "citedBy": [
         "CONTEXT-MAP.md",
+        "CONTEXT.md",
         "docs/adr/0008-design-concept-gate.md",
         "docs/adr/0011-schemas-seam-for-http-request-bodies.md",
         "docs/adr/0012-autopilot-is-the-single-brain.md",
