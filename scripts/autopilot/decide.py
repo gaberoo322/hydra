@@ -336,6 +336,8 @@ if _SCRIPT_DIR not in sys.path:
 from decide_base import (
     BACKFILL_STARVATION_FLOOR_SEC,
     ESCALATION_POLICY,
+    INTENT_KINDS_BY_SLOT,
+    _INTENT_REGISTRY,
     RED_FORWARD_FIX_CAP,
     QA_STALL_MAX_ATTEMPTS,
     ZERO_YIELD_BACKOFF_LADDER,
@@ -344,6 +346,7 @@ from decide_base import (
     _is_parked_anchor,
     _parked_prs,
     _parked_read_degraded,
+    _needs_qa_target_pr_head,
     _needs_qa_target_pr_ref,
     _normalize_target_risk_surface,
     _orch_board_read_degraded,
@@ -352,6 +355,12 @@ from decide_base import (
     _signal_present,
     _target_dev_resume_pick_signal,
     _zero_yield_entry,
+    dispatch_anchor,
+    dispatch_intent,
+    dispatch_pr,
+    dispatch_resume_branch,
+    escalation_intent,
+    intent_from_dict,
     make_dispatch,
 )
 from decide_selectors.architecture import _select_signal_architecture_orch
@@ -603,6 +612,28 @@ SIGNAL_CLASSES = tuple(r["name"] for r in CLASS_TAXONOMY if r["kind"] == "signal
 # re-dispatching; derive it from the taxonomy alphabet so the escalation path
 # can never name a skill that drifts from the class's real dispatch skill.
 CLASS_SKILL = {r["name"]: r["skill"] for r in CLASS_TAXONOMY}
+
+# Class -> ticket-type -> skill routing (issue #5384, INV-4). The brain resolves
+# a ticket-typed dispatch's effective skill in step 7 from the intent kind's
+# `ticket_type`; the renderer no longer reads classes.json for routing.
+CLASS_SKILL_BY_TICKET_TYPE = {
+    r["name"]: r["skill_by_ticket_type"] for r in CLASS_TAXONOMY if r.get("skill_by_ticket_type")
+}
+
+
+def _validate_ticket_type_routing() -> None:
+    """Fail loud at import unless every ticket_type an intent kind declares is routable."""
+    for slot, kind_names in INTENT_KINDS_BY_SLOT.items():
+        for kind_name in kind_names:
+            tt = getattr(_INTENT_REGISTRY[kind_name], "ticket_type", None)
+            if tt is not None and tt not in CLASS_SKILL_BY_TICKET_TYPE.get(slot, {}):
+                raise _taxonomy_fail(
+                    f"{slot}: intent kind {kind_name!r} declares ticket_type {tt!r} "
+                    "with no skill_by_ticket_type route in classes.json"
+                )
+
+
+_validate_ticket_type_routing()
 
 # Class -> taxonomy scope projection (issue #4161). The orch-realm share
 # guard suppresses ORCH-scope dispatch only: classes whose taxonomy row
@@ -2652,8 +2683,25 @@ def _rule_instant_death_replay(
             "attempt": prior_attempt + 1,
             "prior_attempt_status": "instant-death",
         })
+        # Issue #5381 QA round 1: a typed-intent dispatch (dev_orch) is recorded
+        # with its intent and replayed through it; escalation keys ride prompt_args.
+        rec_intent = None
+        if rec.get("intent") is None and cls in INTENT_KINDS_BY_SLOT:
+            # A pre-intent record of an intent-bearing slot has no typed intent; render-dispatch
+            # would exit 2 on the replay, so it is unjoinable, not replayed blind.
+            out.reasons.append(f"instant-death-unjoinable:{cls}")
+            continue
+        if rec.get("intent") is not None:
+            try:
+                rec_intent = intent_from_dict(rec["intent"])
+            except ValueError:  # intentional: an unparseable recorded intent is unjoinable, never replayed blind
+                out.reasons.append(f"instant-death-unjoinable:{cls}")
+                continue
         out.emit(
-            make_dispatch(cls, rec["skill"], prompt_args=args, reason=f"instant-death-replay:{cls}"),
+            make_dispatch(
+                cls, rec["skill"], prompt_args=args, intent=rec_intent,
+                reason=f"instant-death-replay:{cls}",
+            ),
             reason=f"instant-death-replay:{cls}",
         )
         out.dispatched += 1
@@ -2675,6 +2723,8 @@ def _record_last_dispatches(actions: list[dict], state: dict) -> None:
                 "prompt_args": a.get("prompt_args") or {},
                 "worktreeBranch": a.get("worktreeBranch"),
             }
+            if a.get("intent") is not None:
+                last[a["slot"]]["intent"] = a["intent"]
             changed = True
     if changed:
         state["last_dispatch_by_class"] = last
@@ -2888,6 +2938,7 @@ def _rule_escalation(
                 slot,
                 skill,
                 prompt_args=escalation_prompt_args,
+                intent=escalation_intent(slot),
                 reason=decision["reason"],
             ),
             reason=decision["reason"],
@@ -4035,10 +4086,19 @@ def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
         # Issue #4476 INV-3: the playbook passes isolation="worktree" iff this
         # is "worktree", omits it iff "self". Data only — no model/prompt text.
         action["isolation"] = class_isolation(slot)
+        # Issue #5384 INV-3: forward the Cost module's admission verdict verbatim
+        # (absent when the usage blob has none) so the renderer stays pure.
+        adm = ts.usage_eligibility(state).get("admission")
+        if isinstance(adm, dict):
+            action["admission"] = adm
+        # Issue #5384 INV-4: a ticket-typed intent resolves its effective skill here.
+        intent = dispatch_intent(action)
+        tt = getattr(intent, "ticket_type", None)
+        if tt is not None:
+            action["skill"] = CLASS_SKILL_BY_TICKET_TYPE[slot][tt]
         skill = action.get("skill")
         if isinstance(skill, str) and skill:
-            pa = action.get("prompt_args")
-            pinned_anchor = pa.get("anchor") if isinstance(pa, dict) else None
+            pinned_anchor = dispatch_anchor(action)
             action["dispatchSentinel"] = make_dispatch_sentinel(
                 skill,
                 action["worktreeBranch"],
@@ -4425,22 +4485,6 @@ def _select_for_slot(
     return handler(cls, state, candidates, events, best, best_score, now)
 
 
-def _needs_qa_target_pr_head(state: dict, events: list[dict]) -> str | None:
-    """Read the current turn's pre-resolved Target QA PR head ref (issue #4653).
-
-    Same string signal, and the SAME event-preferred-over-snapshot lookup
-    order, as `_needs_qa_target_pr_ref` immediately
-    above. The Turn Snapshot emits `target_needs_qa_pr_head` as the `head.ref`
-    of the SAME PR whose `html_url` is `target_needs_qa_pr_ref`, projected
-    from the already-fetched PR payload inside the #4576 resolver — no new
-    network call (issue #4653). Returns `None` when the signal is ABSENT or
-    EMPTY.
-
-    Pure: no side effects.
-    """
-    return ts.text(state, events, "target_needs_qa_pr_head")
-
-
 # Bare `<run8>-t<N>-dev_target` dispatch token, with an optional
 # `worktree-agent-` prefix stripped (issue #4653). `run8` is the 8-hex-char
 # run id `bootstrap.sh` mints; `N` is the pipeline slot's 1-based turn index.
@@ -4483,8 +4527,8 @@ def _dev_target_resume_record(action: dict, state: dict) -> dict | None:
     for `cls == "dev_target"` — the same post-gate position as the #4611
     `stamp_signal` call, so one stamp corresponds 1:1 to one emitted dispatch.
     Returns `{token, branch, pr}` iff the action is a #4739 resume pin
-    (`prompt_args.resume` True + non-empty string `resume_branch` + int
-    `resume_pr`); anything else returns None and nothing is stamped.
+    (a TargetResume intent, #5383: non-empty branch + int pr); anything else
+    returns None and nothing is stamped.
 
     `token` is the bare token of the SAME worktreeBranch the action carries —
     `action.worktreeBranch` if pre-set, else `_synthesize_worktree_branch`
@@ -4495,14 +4539,11 @@ def _dev_target_resume_record(action: dict, state: dict) -> dict | None:
 
     Pure: reads the passed-in dicts only, no I/O (ADR-0007).
     """
-    prompt_args = action.get("prompt_args")
-    if not isinstance(prompt_args, dict) or prompt_args.get("resume") is not True:
-        return None
-    branch = prompt_args.get("resume_branch")
+    branch = dispatch_resume_branch(action)
     if not isinstance(branch, str) or not branch:
         return None
-    pr = prompt_args.get("resume_pr")
-    if isinstance(pr, bool) or not isinstance(pr, int):
+    pr = dispatch_pr(action)
+    if pr is None:
         return None
     worktree_branch = action.get("worktreeBranch")
     if not (isinstance(worktree_branch, str) and worktree_branch):

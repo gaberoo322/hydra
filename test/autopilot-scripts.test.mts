@@ -1955,10 +1955,10 @@ describe("scripts/autopilot/bootstrap.sh — dev_resume_pending carry-forward (i
       const plan = JSON.parse(d.stdout);
       const dev = (plan.actions ?? []).filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
       assert.equal(dev.length, 1, JSON.stringify(plan.actions));
-      assert.deepEqual(dev[0].prompt_args, {
+      assert.deepEqual(dev[0].intent, {
+        kind: "ResumeBranch",
         anchor: "issue-4510",
-        resume: true,
-        resume_branch: "worktree-agent-4510",
+        branch: "worktree-agent-4510",
       });
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });

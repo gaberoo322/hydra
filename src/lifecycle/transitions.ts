@@ -158,8 +158,9 @@ export function stateLabelsOf(labels: readonly string[]): OpenState[] {
 
 /**
  * The only states the board HTTP routes may move an issue INTO. Agent-owned
- * states (`in-progress`, `needs-qa`, `qa-passed`, `parked`, ...) are never set
- * by hand from the board.
+ * states (`in-progress` dispatch claim, `qa-passed` QA record, `parked` cap
+ * machinery) are never set by hand from the board. `needs-dev-resume` and
+ * `needs-qa` are the two operator hand-back lanes (#5321, the #5058 recipe).
  */
 export const OPERATOR_TARGETS = [
   "needs-triage",
@@ -167,6 +168,8 @@ export const OPERATOR_TARGETS = [
   "ready-for-human",
   "blocked",
   "ready-for-agent",
+  "needs-dev-resume",
+  "needs-qa",
   "closed",
 ] as const;
 export type OperatorTarget = (typeof OPERATOR_TARGETS)[number];

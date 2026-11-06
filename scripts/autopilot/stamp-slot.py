@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import run_ledger  # noqa: E402  (the ONE state-document parser/writer, #5075)
+from decide_base import dispatch_anchor, dispatch_attempt  # noqa: E402  (#5381 accessors)
 
 STATE_PATH = run_ledger.resolve_state_path()
 PLAN_PATH = os.environ.get("HYDRA_AUTOPILOT_PLAN", "/tmp/hydra-autopilot-plan.json")
@@ -88,13 +89,9 @@ def find_dispatch(plan: dict, slot: str) -> dict | None:
 
 def build_slot(action: dict, task_id: str, model: str, run_id: str, turn: int, now: int) -> dict:
     """The slot record for a pipeline dispatch — pure, for the fixture suite."""
-    prompt_args = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
     cls = str(action.get("slot"))
     branch = action.get("worktreeBranch") or f"worktree-agent-{run_id[:8]}-t{turn}-{cls}"
-    try:
-        attempt = int(prompt_args.get("attempt") or 1)
-    except (TypeError, ValueError):
-        attempt = 1
+    attempt = dispatch_attempt(action)
     record: dict = {
         "skill": effective_skill(action),
         "task_id": task_id,
@@ -108,7 +105,7 @@ def build_slot(action: dict, task_id: str, model: str, run_id: str, turn: int, n
         "attempt": attempt,
         "isolation": action.get("isolation") or "worktree",
     }
-    anchor = prompt_args.get("anchor")
+    anchor = dispatch_anchor(action)
     if isinstance(anchor, str) and anchor:
         record["anchor"] = anchor
     return record

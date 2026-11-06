@@ -1698,14 +1698,15 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     // target-scope path (nothing reads prompt_args.scope), so a literal
     // hydra-qa dispatch reviewed an orchestrator PR or no-op'd.
     assert.equal(a.skill, "hydra-target-qa");
-    assert.equal((a.prompt_args ?? {}).scope, "target");
-    // INV-4/INV-5: absent pre-resolution signal → NO pr_ref key (never "" or
-    // null) and the dispatch still fires — hydra-target-qa's own step 1
-    // resolves the PR when pr_ref is absent.
-    assert.equal(
-      "pr_ref" in (a.prompt_args ?? {}),
-      false,
-      "pr_ref must be absent when target_needs_qa_pr_ref is not served",
+    // #5383: the action carries a typed intent, no prompt_args bag.
+    assert.equal("prompt_args" in a, false);
+    // INV-4/INV-5: absent pre-resolution signal → TargetReviewSelfSelect (no
+    // pr_ref) and the dispatch still fires — hydra-target-qa's own step 1
+    // resolves the PR.
+    assert.deepEqual(
+      a.intent,
+      { kind: "TargetReviewSelfSelect" },
+      "no pr_ref when target_needs_qa_pr_ref is not served",
     );
   });
 
@@ -1718,7 +1719,8 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     const a = findAction(plan, qaTarget);
     assert.ok(a, "qa_target must still dispatch when the PR pre-resolution is served");
     assert.equal(a.skill, "hydra-target-qa");
-    assert.equal((a.prompt_args ?? {}).pr_ref, url, "pr_ref must carry the html_url verbatim");
+    assert.equal(a.intent.kind, "TargetReviewPr");
+    assert.equal(a.intent.pr_ref, url, "pr_ref must carry the html_url verbatim");
     // INV-4's lookup order: an event value is PREFERRED over state.signals —
     // the same seam as _triage_item_set / _qa_orch_needs_qa_numbers.
     const plan2 = runDecide(
@@ -1729,7 +1731,7 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     const a2 = findAction(plan2, qaTarget);
     assert.ok(a2);
     assert.equal(
-      (a2.prompt_args ?? {}).pr_ref,
+      a2.intent.pr_ref,
       "https://github.com/example/t/pull/9",
       "the event value must win over the state.signals value",
     );
@@ -1746,10 +1748,10 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
       "an empty pre-resolution must never suppress qa_target (INV-5 — hydra-target-qa self-resolves)",
     );
     assert.equal(a.skill, "hydra-target-qa");
-    assert.equal(
-      "pr_ref" in (a.prompt_args ?? {}),
-      false,
-      "an empty signal must yield NO pr_ref key — never pr_ref:\"\" or null",
+    assert.deepEqual(
+      a.intent,
+      { kind: "TargetReviewSelfSelect" },
+      "an empty signal must yield the self-select intent — never pr_ref:\"\" or null",
     );
   });
 
@@ -2095,8 +2097,8 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     const a = findAction(plan, devTarget);
     assert.ok(a, "the resume pick must dispatch dev_target");
     assert.equal(
-      (a.prompt_args ?? {}).resume,
-      true,
+      a.intent.kind,
+      "TargetResume",
       "the dispatch must be a resume pin (#4739)",
     );
     assert.equal(
@@ -2159,8 +2161,8 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     const a = findAction(plan, devTarget);
     assert.ok(a, "target_work_available must dispatch dev_target");
     assert.equal(
-      "resume" in (a.prompt_args ?? {}),
-      false,
+      a.intent.kind,
+      "TargetFresh",
       "an ordinary board dispatch carries no resume pin",
     );
     assert.equal(

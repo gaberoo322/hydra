@@ -200,7 +200,8 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
     assert.equal(dispatch.skill, "hydra-dev");
     // dev_orch no longer carries a target-side anchor (#458 was specifically
     // about NOT routing target candidates through dev_orch).
-    assert.equal(dispatch.prompt_args.anchor, undefined,
+    assert.equal(dispatch.intent.kind, "Fresh");
+    assert.equal(dispatch.intent.anchor, undefined,
       "dev_orch must not receive an anchor from /api/anchor/candidates (#458)");
   });
 
@@ -266,7 +267,18 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
     const plan = runDecide(state, null);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "qa_target");
     assert.ok(dispatch);
-    assert.equal(dispatch.prompt_args.scope, "target");
+    assert.deepEqual(dispatch.intent, { kind: "TargetReviewSelfSelect" });
+    assert.equal("prompt_args" in dispatch, false);
+  });
+
+  test("dispatches qa_target with the Target PR ref AND head in the TargetReviewPr intent (#5383)", () => {
+    const url = "https://github.com/o/t/pull/9";
+    const state = baseState({ signals: { needs_qa_target: true, target_needs_qa_pr_ref: url, target_needs_qa_pr_head: "feature/x" } });
+    const dispatch = findAction(runDecide(state, null), (a) => a.type === "dispatch" && a.slot === "qa_target");
+    assert.deepEqual(dispatch.intent, { kind: "TargetReviewPr", pr_ref: url, head: "feature/x" });
+    const noHead = baseState({ signals: { needs_qa_target: true, target_needs_qa_pr_ref: url } });
+    const d2 = findAction(runDecide(noHead, null), (a) => a.type === "dispatch" && a.slot === "qa_target");
+    assert.deepEqual(d2.intent, { kind: "TargetReviewPr", pr_ref: url });
   });
 
   test("dispatches dev_target on target_work_available signal", () => {
@@ -318,8 +330,9 @@ describe("decide.py — design_concept_orch anchor-only trigger (#3870)", () => 
       "design_concept_orch must fire on orch_pending_grill_anchor alone, even with orch_work_available absent (#3870 — the GLM-partition starvation bug)",
     );
     assert.equal(dispatch.skill, "hydra-grill");
-    assert.equal(dispatch.prompt_args.scope, "orch");
-    assert.equal(dispatch.prompt_args.anchor, "issue-3785");
+    assert.deepEqual(dispatch.intent, { kind: "Grill", anchor: "issue-3785" });
+    assert.equal("prompt_args" in dispatch, false, "typed intent replaces prompt_args (#5384)");
+    assert.equal(dispatch.anchor, "issue-3785", "top-level anchor projection kept for dashboard/retro joins");
   });
 
   // The fix removes a redundant precondition; it must not make the selector
@@ -2980,27 +2993,36 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
     assert.ok(dispatch, "orch_work_available must fire dev_orch");
     assert.equal(dispatch.skill, "hydra-dev");
-    assert.equal(dispatch.prompt_args.anchor, undefined,
-      "dev_orch must NOT pass a target-product anchor — that's the bug #458 fixes");
-    assert.equal(dispatch.prompt_args.score, undefined,
-      "dev_orch must NOT pass a candidate score — candidates are target work");
+    assert.deepEqual(dispatch.intent, { kind: "Fresh" },
+      "dev_orch must NOT pass a target-product anchor or candidate score — that's the bug #458 fixes");
+    assert.equal(dispatch.prompt_args, undefined);
   });
 
   test("ISSUE-458: dev_target dispatches on target_work_available AND carries top candidate as anchor", () => {
     // The candidates feed IS the target backlog — when dev_target fires,
-    // the top entry is surfaced as `prompt_args.anchor` so hydra-target-build
-    // gets a clear pointer.
+    // the top `issue-N` entry is surfaced as the TargetFresh intent's anchor so
+    // hydra-target-build gets a clear pointer (#5383: an intent, no prompt_args).
     const state = baseState({ signals: { target_work_available: true } });
     const cands = {
-      candidates: [{ issue: 267, anchorRef: "item-267", score: 0.85 }],
+      candidates: [{ issue: 267, anchorRef: "issue-267", score: 0.85 }],
     };
     const plan = runDecide(state, cands);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
     assert.ok(dispatch, "target_work_available must fire dev_target");
     assert.equal(dispatch.skill, "hydra-target-build");
-    assert.equal(dispatch.prompt_args.anchor, "item-267",
+    assert.deepEqual(dispatch.intent, { kind: "TargetFresh", anchor: "issue-267" },
       "dev_target must surface the top candidate as its anchor (#458)");
-    assert.equal(dispatch.prompt_args.score, 0.85);
+    assert.equal("prompt_args" in dispatch, false);
+  });
+
+  test("ISSUE-458/#5383: a non-issue-ref candidate hint (item-267) dispatches an UNPINNED TargetFresh", () => {
+    const state = baseState({ signals: { target_work_available: true } });
+    const cands = { candidates: [{ issue: 267, anchorRef: "item-267", score: 0.85 }] };
+    const plan = runDecide(state, cands);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
+    assert.ok(dispatch);
+    assert.deepEqual(dispatch.intent, { kind: "TargetFresh" });
+    assert.equal("prompt_args" in dispatch, false);
   });
 
   test("ISSUE-458/#1129: dev_target with a research-recommended board fires WITHOUT an anchor hint", () => {
@@ -3015,7 +3037,7 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     const plan = runDecide(state, cands);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
     assert.ok(dispatch);
-    assert.equal(dispatch.prompt_args.anchor, undefined,
+    assert.deepEqual(dispatch.intent, { kind: "TargetFresh" },
       "a research-recommended board must NOT be surfaced as a dev_target anchor");
   });
 
@@ -3031,10 +3053,9 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
     assert.ok(dispatch, "dev_target must still dispatch on the work signal");
     assert.equal(dispatch.skill, "hydra-target-build");
-    assert.equal(dispatch.prompt_args.anchor, undefined,
+    assert.deepEqual(dispatch.intent, { kind: "TargetFresh" },
       "research_recommended=true must suppress the anchor hint regardless of score (#1129)");
-    assert.equal(dispatch.prompt_args.score, undefined,
-      "no score hint when the feed recommends research");
+    assert.equal("prompt_args" in dispatch, false, "no score hint when the feed recommends research");
   });
 
   test("ISSUE #1129 (finished): research_recommended=false attaches the dev_target anchor hint even with a low candidate score", () => {
@@ -3043,13 +3064,12 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     // unified semantics decide.py no longer second-guesses the feed with a
     // private 0.5 cutoff.
     const state = baseState({ signals: { target_work_available: true } });
-    const cands = { candidates: [{ issue: 43, anchorRef: "item-43", score: 0.4 }], research_recommended: false };
+    const cands = { candidates: [{ issue: 43, anchorRef: "issue-43", score: 0.4 }], research_recommended: false };
     const plan = runDecide(state, cands);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
     assert.ok(dispatch);
-    assert.equal(dispatch.prompt_args.anchor, "item-43",
+    assert.deepEqual(dispatch.intent, { kind: "TargetFresh", anchor: "issue-43" },
       "research_recommended=false must surface the candidate as a dev_target anchor regardless of score (#1129)");
-    assert.equal(dispatch.prompt_args.score, 0.4);
   });
 
   test("ISSUE-458: dev_target with NO candidates feed fires bare (no anchor)", () => {
@@ -3059,7 +3079,7 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     const plan = runDecide(state, null);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
     assert.ok(dispatch);
-    assert.equal(dispatch.prompt_args.anchor, undefined);
+    assert.deepEqual(dispatch.intent, { kind: "TargetFresh" });
   });
 
   test("ISSUE-458/#3832: empty candidates force NEITHER research_target nor research_orch", () => {
@@ -3100,7 +3120,7 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     const state = baseState({
       signals: { orch_work_available: true, target_work_available: true },
     });
-    const cands = { candidates: [{ issue: 267, anchorRef: "item-267", score: 0.85 }] };
+    const cands = { candidates: [{ issue: 267, anchorRef: "issue-267", score: 0.85 }] };
     const plan = runDecide(state, cands);
 
     const devOrch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
@@ -3108,12 +3128,13 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
 
     assert.ok(devOrch, "dev_orch must fire on the orch board signal");
     assert.equal(devOrch.skill, "hydra-dev");
-    assert.equal(devOrch.prompt_args.anchor, undefined,
+    assert.equal(devOrch.intent.kind, "Fresh");
+    assert.equal(devOrch.intent.anchor, undefined,
       "dev_orch carries no target anchor");
 
     assert.ok(devTarget, "dev_target must fire on the target queue signal");
     assert.equal(devTarget.skill, "hydra-target-build");
-    assert.equal(devTarget.prompt_args.anchor, "item-267",
+    assert.equal(devTarget.intent.anchor, "issue-267",
       "dev_target picks up the target-product candidate");
   });
 
@@ -3588,11 +3609,10 @@ describe("decide.py — wayfinder_orch signal class (issue #3351)", () => {
     const plan = runDecide(wfState(), null);
     const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
     assert.ok(a, "wayfinder_orch must dispatch when a frontier ticket is pre-resolved and cooled");
-    // decide.py emits the taxonomy default skill; the playbook overrides per type.
     assert.equal(a.skill, "hydra-issue-research");
-    assert.ok(a.prompt_args, "dispatch must carry prompt_args referencing the pre-resolved ticket");
-    assert.equal(a.prompt_args.ticket, "issue-4242", "prompt_args.ticket must be the pre-resolved frontier ref");
-    assert.equal(a.prompt_args.ticket_type, "research", "prompt_args.ticket_type must carry the frontier type");
+    assert.deepEqual(a.intent, { kind: "WayfinderResearch", ticket: "issue-4242" });
+    assert.equal("prompt_args" in a, false, "typed intent replaces prompt_args (#5384)");
+    assert.equal("anchor" in a, false, "a wayfinder ticket is not an anchor: no top-level projection");
   });
 
   test("carries the task ticket_type verbatim for task frontier tickets", () => {
@@ -3605,8 +3625,8 @@ describe("decide.py — wayfinder_orch signal class (issue #3351)", () => {
     const plan = runDecide(state, null);
     const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
     assert.ok(a, "wayfinder_orch must dispatch on a task-typed frontier ticket");
-    assert.equal(a.prompt_args.ticket, "issue-4243");
-    assert.equal(a.prompt_args.ticket_type, "task", "task type must pass through so the playbook routes to hydra-dev");
+    assert.deepEqual(a.intent, { kind: "WayfinderTask", ticket: "issue-4243" });
+    assert.equal(a.skill, "hydra-dev", "the brain resolves the task ticket's skill from the intent kind (#5384 INV-4)");
   });
 
   test("does NOT fire without the wayfinder_orch_frontier signal (AC #2 absent-signal arm)", () => {
@@ -3638,7 +3658,7 @@ describe("decide.py — wayfinder_orch signal class (issue #3351)", () => {
     const plan = runDecide(state, null);
     const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
     assert.ok(a, "an unstamped ticket_type must still dispatch (default research)");
-    assert.equal(a.prompt_args.ticket_type, "research", "missing ticket_type defaults to research (matches the taxonomy default skill)");
+    assert.equal(a.intent.kind, "WayfinderResearch", "missing ticket_type defaults to research (matches the taxonomy default skill)");
   });
 
   test("OMITS the model param — inherit parent per #1093 (authoring/judgment work)", () => {
@@ -4471,12 +4491,13 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     const d = devOrchDispatches(plan);
     assert.equal(d.length, 1, `expected exactly one pinned dispatch: ${JSON.stringify(d)}`);
     assert.equal(d[0].skill, "hydra-dev");
-    assert.deepEqual(d[0].prompt_args, {
+    assert.deepEqual(d[0].intent, {
+      kind: "ForwardFixRed",
       anchor: "issue-4240",
-      resume: true,
-      resume_branch: "worktree-agent-glm-4240-1789",
-      forward_fix_pr: 4433,
+      branch: "worktree-agent-glm-4240-1789",
+      pr: 4433,
     });
+    assert.equal(d[0].prompt_args, undefined, "an intent action carries no prompt_args bag");
     assert.match(d[0].reason, /red PR forward-fix/);
     assert.match(d[0].reason, /#5058/);
     assert.match(d[0].reason, /1\/2/);
@@ -4486,7 +4507,7 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     const s = glmState({ signals: { orch_dev_resume_pick: "issue-4240:4433:worktree-agent-a5706403c05633ec3" } });
     const d = devOrchDispatches(runDecide(s, null));
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.resume_branch, "worktree-agent-a5706403c05633ec3");
+    assert.equal(d[0].intent.branch, "worktree-agent-a5706403c05633ec3");
     assert.match(d[0].reason, /1\/2/);
   });
 
@@ -4531,8 +4552,8 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     const plan = runDecide(s, null);
     const d = devOrchDispatches(plan);
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.anchor, "issue-100", "the resume record must win");
-    assert.equal(d[0].prompt_args.forward_fix_pr, undefined);
+    assert.equal(d[0].intent.kind, "ResumeBranch");
+    assert.equal(d[0].intent.anchor, "issue-100", "the resume record must win");
   });
 
   test("#4460 INV-6 bypass: a pending grill anchor does NOT yield the pin (the stranded PR's artifact already exists)", () => {
@@ -4542,7 +4563,7 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     const plan = runDecide(s, null);
     const d = devOrchDispatches(plan);
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.forward_fix_pr, 4433);
+    assert.equal(d[0].intent.pr, 4433);
   });
 
   test("`none` / absent / malformed signal spellings are fully dormant", () => {
@@ -4571,7 +4592,7 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     );
     const d = devOrchDispatches(plan);
     assert.equal(d.length, 1, "the event-borne signal wins");
-    assert.equal(d[0].prompt_args.forward_fix_pr, 4433);
+    assert.equal(d[0].intent.pr, 4433);
   });
 
   test("main() persists the attempts bump via change-detection (state file carries the tracker after the turn)", () => {
@@ -4642,11 +4663,11 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
     const d = devOrchDispatches(runDecide(s, null));
     assert.equal(d.length, 1, `expected exactly one pinned dispatch: ${JSON.stringify(d)}`);
     assert.equal(d[0].skill, "hydra-dev");
-    assert.deepEqual(d[0].prompt_args, {
+    assert.deepEqual(d[0].intent, {
+      kind: "ForwardFixRed",
       anchor: "issue-4510",
-      resume: true,
-      resume_branch: "worktree-agent-a5706403c05633ec3",
-      forward_fix_pr: 4532,
+      branch: "worktree-agent-a5706403c05633ec3",
+      pr: 4532,
     });
     assert.match(d[0].reason, /#4518/);
   });
@@ -4656,8 +4677,8 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
     s.dev_resume_pending = [{ anchor: "issue-100", branch: "worktree-agent-abc" }];
     const d = devOrchDispatches(runDecide(s, null));
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.anchor, "issue-100", "the in-state drain runs first");
-    assert.equal(d[0].prompt_args.forward_fix_pr, undefined);
+    assert.equal(d[0].intent.kind, "ResumeBranch");
+    assert.equal(d[0].intent.anchor, "issue-100", "the in-state drain runs first");
   });
 
   test("a label-arm pick (not in orch_prs_red_resume) never bumps the red-CI cap tracker", () => {
@@ -4669,7 +4690,7 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
       writeFileSync(t.events, JSON.stringify([]));
       const d = devOrchDispatches(runDecideOnFiles(t));
       assert.equal(d.length, 1);
-      assert.equal(d[0].prompt_args.anchor, "issue-4510");
+      assert.equal(d[0].intent.anchor, "issue-4510");
       const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
       assert.equal(
         persisted.red_forward_fix_attempts,
@@ -4685,7 +4706,7 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
     const s = resumeState({ signals: { orch_pending_grill_anchor: "issue-999" } });
     const d = devOrchDispatches(runDecide(s, null));
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.anchor, "issue-4510");
+    assert.equal(d[0].intent.anchor, "issue-4510");
   });
 
   test("`none` / absent / malformed resume-pick spellings fail closed to no pin", () => {
@@ -4704,7 +4725,7 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
     );
     const d = devOrchDispatches(plan);
     assert.equal(d.length, 1, "the event-borne signal wins");
-    assert.equal(d[0].prompt_args.forward_fix_pr, 4532);
+    assert.equal(d[0].intent.pr, 4532);
   });
 
   test("a busy dev_orch slot means no resume pin (the pick rides the normal slot-free pipeline)", () => {
@@ -4727,7 +4748,7 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
       writeFileSync(t.events, JSON.stringify([]));
       const d = devOrchDispatches(runDecideOnFiles(t));
       assert.equal(d.length, 1);
-      assert.equal(d[0].prompt_args.forward_fix_pr, 4433);
+      assert.equal(d[0].intent.pr, 4433);
       assert.match(d[0].reason, /1\/2/);
       const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
       assert.deepEqual(persisted.red_forward_fix_attempts, { "4433": 1 });
@@ -4972,12 +4993,11 @@ describe("decide.py — dirty PR conflict fix-forward pin (issue #4807)", () => 
     const d = devOrch(plan);
     assert.equal(d.length, 1);
     assert.equal(d[0].skill, "hydra-dev");
-    assert.deepEqual(d[0].prompt_args, {
+    assert.deepEqual(d[0].intent, {
+      kind: "ForwardFixConflict",
       anchor: "issue-4511",
-      resume: true,
-      resume_branch: "worktree-agent-abc123",
-      forward_fix_pr: 4818,
-      conflict_fix: true,
+      branch: "worktree-agent-abc123",
+      pr: 4818,
     });
     assert.equal((plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length, 0);
   });
@@ -4989,13 +5009,11 @@ describe("decide.py — dirty PR conflict fix-forward pin (issue #4807)", () => 
     );
     const d = devOrch(plan);
     assert.equal(d.length, 1);
-    assert.deepEqual(d[0].prompt_args, {
+    assert.deepEqual(d[0].intent, {
+      kind: "ForwardFixConflictWithFail",
       anchor: "issue-4511",
-      resume: true,
-      resume_branch: "worktree-agent-abc123",
-      forward_fix_pr: 4818,
-      conflict_fix: true,
-      qa_fail_at_head: true,
+      branch: "worktree-agent-abc123",
+      pr: 4818,
     });
     assert.match(d[0].reason, /#4807/);
     assert.match(d[0].reason, /#5253/);
@@ -5010,8 +5028,7 @@ describe("decide.py — dirty PR conflict fix-forward pin (issue #4807)", () => 
       );
       const d = devOrch(plan);
       assert.equal(d.length, 1);
-      assert.equal("qa_fail_at_head" in d[0].prompt_args, false, `fail_pr=${String(failPr)}`);
-      assert.equal(d[0].prompt_args.conflict_fix, true);
+      assert.equal(d[0].intent.kind, "ForwardFixConflict", `fail_pr=${String(failPr)}`);
       assert.match(d[0].reason, /^dirty PR conflict fix-forward: PR 4818 \(issue #4511\) on worktree-agent-abc123 — merge origin\/master, one attempt per PR \(issue #4807\)$/);
     }
   });
@@ -5023,7 +5040,7 @@ describe("decide.py — dirty PR conflict fix-forward pin (issue #4807)", () => 
     );
     const d = devOrch(plan);
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.conflict_fix, true);
+    assert.equal(d[0].intent.kind, "ForwardFixConflict");
   });
 
   test("`none` / malformed orch_dirty_forward_fix pins nothing", () => {
@@ -5086,9 +5103,9 @@ describe("decide.py — no-PR durable resume pin (issue #4808)", () => {
     const d = devOrch(runDecide(s, null));
     assert.equal(d.length, 1, `expected exactly one pinned dispatch: ${JSON.stringify(d)}`);
     assert.equal(d[0].skill, "hydra-dev");
-    // INV-6: EXACTLY anchor + resume — no branch, no forward_fix_pr, no
-    // conflict_fix (there is no PR to name; the cap is reap-time, not here).
-    assert.deepEqual(d[0].prompt_args, { anchor: NOPR_ANCHOR, resume: true });
+    // INV-6: EXACTLY a ResumeSalvage - no branch, no PR (there is no PR to
+    // name; the cap is reap-time, not here).
+    assert.deepEqual(d[0].intent, { kind: "ResumeSalvage", anchor: NOPR_ANCHOR });
     assert.match(d[0].reason, /#4808/);
   });
 
@@ -5098,7 +5115,7 @@ describe("decide.py — no-PR durable resume pin (issue #4808)", () => {
     });
     const d = devOrch(runDecide(s, null));
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.anchor, NOPR_ANCHOR);
+    assert.equal(d[0].intent.anchor, NOPR_ANCHOR);
   });
 
   test("ordering: an in-state dev_resume_pending record outranks the no-PR pin (the #3866 drain runs first)", () => {
@@ -5106,8 +5123,8 @@ describe("decide.py — no-PR durable resume pin (issue #4808)", () => {
     s.dev_resume_pending = [{ anchor: "issue-100", branch: "worktree-agent-abc" }];
     const d = devOrch(runDecide(s, null));
     assert.equal(d.length, 1, "the drain pops its record and returns — never two resumes in one turn");
-    assert.equal(d[0].prompt_args.anchor, "issue-100");
-    assert.equal(d[0].prompt_args.resume_branch, "worktree-agent-abc");
+    assert.equal(d[0].intent.anchor, "issue-100");
+    assert.equal(d[0].intent.branch, "worktree-agent-abc");
   });
 
   test("`none` / absent spellings pin nothing", () => {
@@ -5749,12 +5766,12 @@ describe("decide.py - parked issues are never dispatched or armed (issue #5319)"
     const s = baseState({ signals: { orch_dev_resume_nopr_anchor: `issue-${PARKED}`, orch_work_available: false } });
     const d = devOrch(runDecide(s, null));
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.anchor, `issue-${PARKED}`);
+    assert.equal(d[0].intent.anchor, `issue-${PARKED}`);
   });
 
   test("a parked resume pick does not shadow an unparked one-turn-later pick: the pin is simply declined", () => {
     const s = baseState({ signals: { orch_parked_issues: [PARKED], orch_dev_resume_pick: RESUME_PICK } });
-    assert.equal(devOrch(runDecide(s, null)).filter((a) => a.prompt_args?.forward_fix_pr === 5400).length, 0);
+    assert.equal(devOrch(runDecide(s, null)).filter((a) => a.intent?.pr === 5400).length, 0);
   });
 
   test("an unparked sibling qa-verdict still auto-merges next to a parked one", () => {
@@ -5825,7 +5842,7 @@ describe("decide.py - parked issues are never dispatched or armed (issue #5319)"
   test("QA r2 #1 sibling: a healthy read still drains an unparked entry and drops a parked one", () => {
     const s = baseState({ signals: { orch_parked_unreadable: false, orch_parked_issues: [PARKED] } });
     s.dev_resume_pending = [{ anchor: "issue-778", branch: "b" }];
-    assert.equal(devOrch(runDecide(s, null)).filter((a) => a.prompt_args?.anchor === "issue-778").length, 1);
+    assert.equal(devOrch(runDecide(s, null)).filter((a) => a.intent?.anchor === "issue-778").length, 1);
     const p = baseState({ signals: { orch_parked_unreadable: false, orch_parked_issues: [PARKED] } });
     p.dev_resume_pending = [{ anchor: `issue-${PARKED}`, branch: "b" }];
     const t = makeTmp();
@@ -5835,23 +5852,97 @@ describe("decide.py - parked issues are never dispatched or armed (issue #5319)"
     assert.deepEqual(after.dev_resume_pending, []);
   });
 
-  test("QA r2 #2: qa_orch pins the parked-filtered head in prompt_args.issue", () => {
+  test("QA r2 #2: qa_orch names the parked-filtered head in a ReviewLane intent", () => {
     const s = baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: `${PARKED} 3841`, orch_parked_issues: [PARKED] } });
     const q = qaOrch(runDecide(s, null));
     assert.equal(q.length, 1);
-    assert.equal(q[0].prompt_args.issue, "issue-3841");
+    assert.equal(q[0].intent.kind, "ReviewLane");
+    assert.equal(q[0].intent.anchor, "issue-3841");
+    assert.deepEqual(q[0].intent.rest, []);
+    assert.equal("prompt_args" in q[0], false);
+    assert.equal(q[0].anchor, "issue-3841");
   });
 
-  test("QA r2 #2 sibling: an unparked head (or no needs_qa_numbers) keeps the unpinned scope=orch dispatch", () => {
+  test("QA r2 #2 sibling: an unparked head still yields ReviewLane with the parked tail filtered out; no numbers -> ReviewSelfSelect (#5382)", () => {
     const u = qaOrch(runDecide(baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: `3841 ${PARKED}`, orch_parked_issues: [PARKED] } }), null));
-    assert.equal(u[0].prompt_args.issue, undefined);
+    assert.equal(u[0].intent.kind, "ReviewLane");
+    assert.equal(u[0].intent.anchor, "issue-3841");
+    assert.deepEqual(u[0].intent.rest, [], "the parked tail is filtered even when the head was not parked");
+    assert.equal("prompt_args" in u[0], false);
+    const m = qaOrch(runDecide(baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: "3841 3842 3843" } }), null));
+    assert.deepEqual(m[0].intent, { kind: "ReviewLane", anchor: "issue-3841", rest: ["issue-3842", "issue-3843"] });
     const q = qaOrch(runDecide(baseState({ signals: { needs_qa_orch: true, orch_parked_unreadable: false } }), null));
     assert.equal(q.length, 1);
-    assert.equal(q[0].prompt_args.issue, undefined);
+    assert.deepEqual(q[0].intent, { kind: "ReviewSelfSelect" });
+    assert.equal("prompt_args" in q[0], false);
   });
 
   test("QA r2 #3: degraded parked read blocks qa_orch even with absent needs_qa_numbers", () => {
     const s = baseState({ signals: { needs_qa_orch: true, orch_parked_unreadable: true } });
     assert.equal(qaOrch(runDecide(s, null)).length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dispatch Intent slice 4 (issue #5384): research kinds, brain-resolved skill, admission stamp
+// ---------------------------------------------------------------------------
+describe("decide.py — design_concept / wayfinder / research intents (issue #5384)", () => {
+  test("research_orch and research_target dispatches carry their kind and no prompt_args", () => {
+    const orch = findAction(
+      runDecide(baseState({ signals: { needs_research: true, orch_work_available: true } }), null),
+      (a) => a.type === "dispatch" && a.slot === "research_orch",
+    );
+    assert.ok(orch, "research_orch dispatches on needs_research");
+    {
+      assert.deepEqual(orch.intent, { kind: "ResearchNeeded" });
+      assert.equal("prompt_args" in orch, false);
+    }
+    const target = findAction(
+      runDecide(baseState({ signals: { target_board_research_due: true } }), null),
+      (a) => a.type === "dispatch" && a.slot === "research_target",
+    );
+    assert.ok(target, "research_target dispatches on target_board_research_due");
+    {
+      assert.deepEqual(target.intent, { kind: "TargetResearchDue" });
+      assert.equal("prompt_args" in target, false);
+    }
+  });
+
+  test("the wayfinder skill is READ from classes.json skill_by_ticket_type, not hardcoded (#4592 AC3, moved here by #5384)", () => {
+    const rows = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8"));
+    const row = rows.classes.find((c: { name: string }) => c.name === "wayfinder_orch");
+    row.skill_by_ticket_type = { research: "mutated-research-skill", task: "mutated-task-skill" };
+    row.skill = "mutated-research-skill";
+    const t = makeTmp();
+    const mutated = join(t.dir, "classes.json");
+    writeFileSync(mutated, JSON.stringify(rows));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(baseState({ signals: { wayfinder_orch_frontier: "issue-4243", wayfinder_orch_ticket_type: "task" } }))));
+    writeFileSync(t.cands, "null");
+    writeFileSync(t.events, "[]");
+    const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
+      encoding: "utf-8",
+      env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off", HYDRA_CLASSES_JSON: mutated },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const a = findAction(JSON.parse(r.stdout), (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
+    rmSync(t.dir, { recursive: true, force: true });
+    assert.ok(a, "wayfinder_orch dispatches");
+    assert.equal(a.skill, "mutated-task-skill");
+  });
+
+  test("step 7 stamps action.admission verbatim from the usage blob on every dispatch, and omits it when the blob has none", () => {
+    const admission = { launchModel: "opus", primaryModel: "fable", fallbackModel: "opus", modelFallbackReason: "out-of-credits" };
+    const withAdm = {
+      ...baseState({ signals: { orch_pending_grill_anchor: "issue-3785" } }),
+      usage_eligibility: { allow: true, shed: [], reasons: {}, usage: {}, admission },
+    };
+    const dispatches = (runDecide(withAdm, null).actions ?? []).filter((a: any) => a.type === "dispatch");
+    assert.ok(dispatches.length > 0);
+    for (const d of dispatches) assert.deepEqual(d.admission, admission, d.slot);
+    const without = (runDecide(baseState({ signals: { orch_pending_grill_anchor: "issue-3785" } }), null).actions ?? []).filter(
+      (a: any) => a.type === "dispatch",
+    );
+    assert.ok(without.length > 0);
+    for (const d of without) assert.equal("admission" in d, false, d.slot);
   });
 });

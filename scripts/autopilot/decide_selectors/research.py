@@ -9,6 +9,8 @@ Every definition here moved verbatim from decide.py.
 from __future__ import annotations
 
 from decide_base import (
+    ResearchNeeded,
+    TargetResearchDue,
     _signal_present,
     make_dispatch,
 )
@@ -31,7 +33,7 @@ def _select_slot_research_orch(
     # research_orch now. The daily cap still applies if the signal
     # repeatedly fires within a day.
     if _signal_present(state, events, "needs_research"):
-        return make_dispatch(cls, "hydra-issue-research", reason="explicit needs-research signal")
+        return make_dispatch(cls, "hydra-issue-research", intent=ResearchNeeded(), reason="explicit needs-research signal")
     return None
 
 
@@ -79,6 +81,7 @@ def _select_slot_research_target(
         return make_dispatch(
             cls,
             "hydra-target-research",
+            intent=TargetResearchDue(),
             reason="target GitHub board empty of ready-for-agent work",
         )
     return None
