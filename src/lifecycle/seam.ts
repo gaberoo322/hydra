@@ -171,7 +171,7 @@ export interface SeamDeps {
   journal: {
     append: (repo: string, issue: number, entry: LifecycleJournalEntry) => Promise<JournalWriteResult>;
     expireOnClose: (repo: string, issue: number) => Promise<JournalWriteResult>;
-    openClaim: (repo: string, issue: number, claim: DispatchClaim) => Promise<OpenClaimResult>;
+    openClaim: (repo: string, issue: number, claim: DispatchClaim, ttlSeconds?: number) => Promise<OpenClaimResult>;
     closeClaim: (repo: string, issue: number, expectedDispatchId: string) => Promise<CloseClaimResult>;
     read: (repo: string, issue: number) => Promise<ReadJournalResult>;
     readClaim: (repo: string, issue: number) => Promise<ReadClaimResult>;
@@ -764,6 +764,8 @@ export interface ClaimInput {
   /** The PR this dispatch works on (QA / forward-fix); arms the PR-unit caps. */
   pr?: number;
   purpose?: ClaimPurpose;
+  /** Claim expiry; dispatcher- and worker-opened claims set one so a crash cannot strand the issue. */
+  ttlSeconds?: number;
 }
 
 export type ClaimResult =
@@ -857,7 +859,7 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
     return { ok: false, code: `parked:${over.arm}`, written: park.written };
   }
 
-  const res = await deps.journal.openClaim(deps.repo, issue, claim);
+  const res = await deps.journal.openClaim(deps.repo, issue, claim, input.ttlSeconds);
   if (res.ok === false) {
     return res.code === "claim-held"
       ? { ok: false, code: "claim-held", existing: res.existing }
@@ -927,6 +929,7 @@ export interface DispatchInput {
   pr?: number;
   purpose?: ClaimPurpose;
   actor?: string;
+  ttlSeconds?: number;
 }
 
 export type DispatchResult =
@@ -970,6 +973,7 @@ export async function dispatch(input: DispatchInput, deps: SeamDeps): Promise<Di
       actor,
       pr: input.pr,
       purpose: input.purpose,
+      ttlSeconds: input.ttlSeconds,
     },
     deps,
   );

@@ -108,7 +108,7 @@ An **UNPINNED** `dev_orch` worker fires the dispatcher's own record on its behal
 at pick time, with the two values read from the `<!-- hydra-dispatch v1 … -->`
 sentinel in its first message; on `claim-held` it picks a different issue:
 ```bash
-npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch $dispatch_id --class dev_orch --run $run_id
+npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch $dispatch_id --class dev_orch --run $run_id --ttl 14400
 ```
 
 ### 5. Spawn worktree agent

@@ -217,6 +217,31 @@ describe("runPick — grill-clear admission table (ported D9, issue #4286 rows)"
 // D6 / D7 / D8 — skips and exclusions
 // ---------------------------------------------------------------------------
 
+describe("runPick — held lifecycle claim skip (#5315)", () => {
+  test("a candidate with a held dispatch claim is skipped; the next candidate is picked", async () => {
+    const h = harness({ issues: [cand(130, [], "", "2026-08-01T00:00:00Z"), cand(131, [], "", "2026-08-02T00:00:00Z")] });
+    h.deps.claimHeld = async (n) => n === 130;
+    const r = await runPick(h.deps);
+    assert.equal(picked(r), 131);
+  });
+
+  test("every candidate claim-held -> idle with the claim-held skip counted", async () => {
+    const h = harness({ issues: [cand(130, ["cleanup-scan"])] });
+    h.deps.claimHeld = async () => true;
+    const r = await runPick(h.deps);
+    assert.ok("idle" in r);
+    assert.equal((r as any).skipped["claim-held"], 1);
+  });
+
+  test("sibling shape: claimHeld false (or absent) keeps the pick", async () => {
+    const h = harness({ issues: [cand(130, ["cleanup-scan"])] });
+    h.deps.claimHeld = async () => false;
+    assert.equal(picked(await runPick(h.deps)), 130);
+    const h2 = harness({ issues: [cand(130, ["cleanup-scan"])] });
+    assert.equal(picked(await runPick(h2.deps)), 130);
+  });
+});
+
 describe("runPick — open-PR skip (ported D6), merged-PR skip (D7), lane exclusion (D8)", () => {
   test("D6: a candidate with an open PR body 'Closes #N' is skipped; next candidate picked", async () => {
     const h = harness({

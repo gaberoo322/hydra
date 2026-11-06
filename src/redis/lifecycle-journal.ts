@@ -140,16 +140,24 @@ export type OpenClaimResult =
   | { ok: false; code: "claim-held"; existing: DispatchClaim | null }
   | { ok: false; code: "redis-failed"; error: string };
 
-/** Atomic `SET key value NX`, no TTL. A second open returns `claim-held`. */
+/**
+ * Atomic `SET key value [EX ttl] NX`. A second open returns `claim-held`. No TTL
+ * unless `ttlSeconds` is a positive integer: dispatcher- and worker-opened claims
+ * pass one so a crash between claim and release can never strand an issue.
+ */
 export async function openDispatchClaim(
   repo: string,
   issue: number,
   claim: DispatchClaim,
+  ttlSeconds?: number,
 ): Promise<OpenClaimResult> {
   try {
     const r = getRedisConnection();
     const key = lifecycleClaimKey(repo, issue);
-    const set = await r.set(key, JSON.stringify(claim), "NX");
+    const set =
+      ttlSeconds !== undefined && Number.isInteger(ttlSeconds) && ttlSeconds > 0
+        ? await r.set(key, JSON.stringify(claim), "EX", ttlSeconds, "NX")
+        : await r.set(key, JSON.stringify(claim), "NX");
     if (set === "OK") return { ok: true, claim };
     const existingRaw = await r.get(key);
     return { ok: false, code: "claim-held", existing: parseClaim(existingRaw) };

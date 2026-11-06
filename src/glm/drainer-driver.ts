@@ -349,6 +349,9 @@ interface TickResult {
   finish: FinishResult | null;
 }
 
+/** Drainer claims expire after 4h (longer than any author session; finish releases far sooner). */
+const GLM_CLAIM_TTL_SECONDS = 4 * 60 * 60;
+
 const DEFAULT_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /** Production tick deps for `env` (names match what bash read). */
@@ -371,6 +374,8 @@ function buildDefaultTickDeps(env: NodeJS.ProcessEnv = process.env): TickDeps {
           run: claim.run,
           purpose: claim.resume ? "resume" : "fresh",
           actor: "glm-drainer",
+          // Expires on its own: a crashed drainer must not strand the issue behind a no-TTL claim.
+          ttlSeconds: GLM_CLAIM_TTL_SECONDS,
         },
         seam,
       );

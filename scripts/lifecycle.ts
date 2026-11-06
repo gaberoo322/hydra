@@ -5,9 +5,9 @@
  *   npx tsx scripts/lifecycle.ts advance <issue> <to> [--evidence k=v]...
  *       [--reason R] [--rationale T] [--close-reason completed|"not planned"] [--actor A]
  *   npx tsx scripts/lifecycle.ts claim <issue> --dispatch ID --class C --run R [--artifact-hash H]
- *       [--pr N] [--purpose fresh|resume|forward-fix]
+ *       [--pr N] [--purpose fresh|resume|forward-fix] [--ttl SECONDS]
  *   npx tsx scripts/lifecycle.ts dispatch <issue> --dispatch ID --class C --run R
- *       [--pr N] [--purpose fresh|resume|forward-fix]
+ *       [--pr N] [--purpose fresh|resume|forward-fix] [--ttl SECONDS]
  *   npx tsx scripts/lifecycle.ts release <issue> --dispatch ID
  *       [--outcome pr-opened|no-pr|verdict-posted|stall|released]
  *   npx tsx scripts/lifecycle.ts reconcile [--dry-run | --report]
@@ -164,8 +164,17 @@ export async function main(argv: readonly string[]): Promise<number> {
       return 2;
     }
     const purpose = purposeRaw as ClaimPurpose | undefined;
+    const ttlRaw = parsed.flags.ttl;
+    const ttlSeconds = ttlRaw === undefined ? undefined : parseIssue(ttlRaw);
+    if (ttlSeconds === null) {
+      console.error("[lifecycle] --ttl must be a positive integer (seconds)");
+      return 2;
+    }
     if (verb === "dispatch") {
-      const out = await dispatch({ issue, dispatchId, class: cls, run, pr, purpose, actor: parsed.flags.actor }, deps);
+      const out = await dispatch(
+        { issue, dispatchId, class: cls, run, pr, purpose, actor: parsed.flags.actor, ttlSeconds },
+        deps,
+      );
       emit(out);
       return out.ok ? 0 : 1;
     }
@@ -179,6 +188,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         actor: parsed.flags.actor,
         pr,
         purpose,
+        ttlSeconds,
       },
       deps,
     );

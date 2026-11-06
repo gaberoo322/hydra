@@ -26,10 +26,12 @@ interface World {
   claim: DispatchClaim | null;
   dc: { exists: boolean; status: string; artifactHash?: string | null };
   claimOpens: number;
+  /** The ttlSeconds each journal.openClaim call received. */
+  claimTtls: Array<number | undefined>;
 }
 
 function world(mode: LifecycleMode, labels: string[], dc: World["dc"] = { exists: true, status: "approved", artifactHash: "abc123hash" }): World {
-  const w: World = { journal: [], edits: [], labels: [...labels], claim: null, dc, claimOpens: 0, deps: undefined as unknown as SeamDeps };
+  const w: World = { journal: [], edits: [], labels: [...labels], claim: null, dc, claimOpens: 0, claimTtls: [], deps: undefined as unknown as SeamDeps };
   w.deps = {
     repo: "o/r",
     mode: async () => mode,
@@ -54,7 +56,8 @@ function world(mode: LifecycleMode, labels: string[], dc: World["dc"] = { exists
     journal: {
       append: async (_r, _i, e) => (w.journal.push(e), { ok: true }),
       expireOnClose: async () => ({ ok: true }),
-      openClaim: async (_r, _i, c) => {
+      openClaim: async (_r, _i, c, ttl) => {
+        w.claimTtls.push(ttl);
         if (w.claim) return { ok: false, code: "claim-held", existing: w.claim };
         w.claim = c;
         w.claimOpens += 1;
@@ -93,6 +96,19 @@ describe("dispatch composite verb (INV-1)", () => {
     const res = await dispatch(input({ purpose: "resume" }), w.deps);
     assert.equal(res.ok, true);
     assert.deepEqual(w.edits, [{ issue: 42, remove: ["needs-dev-resume"], add: ["in-progress"] }]);
+  });
+
+  test("ttlSeconds reaches the journal claim open (dispatch and claim); absent stays no-TTL", async () => {
+    const a = world("enforce", ["ready-for-agent"]);
+    assert.equal((await dispatch(input({ ttlSeconds: 14400 }), a.deps)).ok, true);
+    assert.deepEqual(a.claimTtls, [14400]);
+    const b = world("enforce", ["ready-for-agent"]);
+    assert.equal((await openClaim({ issue: 42, dispatchId: "q1", class: "qa_orch", run: "r", ttlSeconds: 7200 }, b.deps)).ok, true);
+    assert.deepEqual(b.claimTtls, [7200]);
+    // sibling shape: a claim opened without a ttl keeps the no-expiry behaviour
+    const c = world("enforce", ["ready-for-agent"]);
+    assert.equal((await dispatch(input(), c.deps)).ok, true);
+    assert.deepEqual(c.claimTtls, [undefined]);
   });
 
   test("qa role opens a label-free claim: no label write", async () => {
@@ -284,15 +300,15 @@ describe("stamp-slot.py claim (INV-3, INV-4)", () => {
     assert.equal(r.status, 0, r.stderr);
     assert.equal(
       r.argv,
-      "tsx scripts/lifecycle.ts dispatch 5315 --dispatch worktree-agent-abcdef12-t3-dev_orch --class dev_orch --run abcdef12-0000 --purpose fresh",
+      "tsx scripts/lifecycle.ts dispatch 5315 --dispatch worktree-agent-abcdef12-t3-dev_orch --class dev_orch --run abcdef12-0000 --purpose fresh --ttl 14400",
     );
   });
 
   test("resume and forward-fix purposes; forward-fix carries --pr", () => {
     const a = claimRun(SLOTS, { worktreeBranch: "b", prompt_args: { anchor: "issue-7", resume: true } }, "dev_orch");
-    assert.match(a.argv, /--purpose resume$/);
+    assert.match(a.argv, /--purpose resume --ttl 14400$/);
     const b = claimRun(SLOTS, { worktreeBranch: "b", prompt_args: { anchor: "issue-7", forward_fix_pr: 88 } }, "dev_orch");
-    assert.match(b.argv, /--purpose forward-fix --pr 88$/);
+    assert.match(b.argv, /--purpose forward-fix --ttl 14400 --pr 88$/);
   });
 
   test("skip matrix: unpinned, target scope, signal class, no dispatch action -> exit 0 skipped, seam never called", () => {

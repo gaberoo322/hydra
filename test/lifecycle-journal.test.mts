@@ -105,6 +105,18 @@ describe("lifecycle-journal Redis seam (issue #5310)", () => {
     assert.equal(!b.ok && b.code === "claim-held" && b.existing?.dispatchId, "d1");
   });
 
+  test("a ttlSeconds claim gets an expiry and is still SET NX; an invalid ttl falls back to no TTL", async () => {
+    const claim = { dispatchId: "d1", class: "dev_orch", run: "r1", artifactHash: null, openedAt: 1 };
+    assert.equal((await openDispatchClaim(REPO, ISSUE, claim, 600)).ok, true);
+    const ttl = await redis.ttl(lifecycleClaimKey(REPO, ISSUE));
+    assert.ok(ttl > 0 && ttl <= 600, `ttl=${ttl}`);
+    const second = await openDispatchClaim(REPO, ISSUE, { ...claim, dispatchId: "d2" }, 600);
+    assert.equal(!second.ok && second.code, "claim-held");
+    await closeDispatchClaim(REPO, ISSUE, "d1");
+    assert.equal((await openDispatchClaim(REPO, ISSUE, claim, -5)).ok, true);
+    assert.equal(await redis.ttl(lifecycleClaimKey(REPO, ISSUE)), -1);
+  });
+
   test("closeDispatchClaim returns the prior claim and frees the key", async () => {
     const claim = { dispatchId: "d1", class: "qa_orch", run: "r1", artifactHash: "abc", openedAt: 1 };
     await openDispatchClaim(REPO, ISSUE, claim);

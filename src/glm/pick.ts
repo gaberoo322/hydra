@@ -32,6 +32,7 @@ import {
 } from "./eligibility.ts";
 import {
   listIssuesByLabel,
+  resolveGithubRepo,
   isIssueReadFailure,
   type IssueReadResult,
   type IssueRow,
@@ -39,6 +40,7 @@ import {
 import { listOpenPrs, type PrRow } from "../github/prs.ts";
 import { gitExec, lsRemoteHeads } from "../github/git.ts";
 import { setGlmDrainerLastPick } from "../redis/autopilot.ts";
+import { readDispatchClaim } from "../redis/lifecycle-journal.ts";
 
 /** In-progress issues idle longer than this are re-queued (matches bash, 90 min). */
 export const STALE_IN_PROGRESS_SECONDS = 5400;
@@ -85,6 +87,13 @@ export interface PickDeps {
   /** Runs `recover-stale.sh stale_in_progress <n...> stale_blocked`; resolves its exit code. */
   runRecoverStale: (issues: number[]) => Promise<number>;
   listResumeRows: (issue: number) => Promise<ResumeRow[]>;
+  /**
+   * Whether a lifecycle dispatch claim is currently held on the issue (fail-open:
+   * `false` on a read failure). A held issue is skipped so a refused claim cannot
+   * make every tick re-pick the same head candidate and starve the lane (#5315).
+   * Absent = no claim filtering.
+   */
+  claimHeld?: (issue: number) => Promise<boolean>;
   publishLastPick: (verdict: {
     picked: number | null;
     reason: string;
@@ -217,6 +226,12 @@ async function pickInner(deps: PickDeps): Promise<PickResult & PickMeta> {
     }
     const reason = verdict.reason;
 
+    if (deps.claimHeld !== undefined && (await deps.claimHeld(n))) {
+      deps.log(`skipping issue #${n} — a lifecycle dispatch claim is held on it — trying the next candidate`);
+      skipped["claim-held"] = (skipped["claim-held"] ?? 0) + 1;
+      continue;
+    }
+
     deps.log(`picked issue #${n} (grill-clear: ${reason})`);
     let resumeBranch: string | null = null;
     let resumeCommits: number | null = null;
@@ -304,6 +319,10 @@ export function buildDefaultPickDeps(env: NodeJS.ProcessEnv = process.env): Pick
         logger.warn({ err, issue }, "[glm-pick] design-concept fetch failed — treating as not approved");
         return null;
       }
+    },
+    claimHeld: async (issue) => {
+      const r = await readDispatchClaim(resolveGithubRepo(), issue);
+      return r.ok === true && r.claim !== null;
     },
     runRecoverStale: (issues) =>
       runRecoverStaleScript(`${repoRoot}/scripts/autopilot/recover-stale.sh`, issues),

@@ -135,6 +135,10 @@ def stamp(state: dict, plan: dict, slot: str, task_id: str, model: str, now: int
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+# Dispatcher-opened claims expire on their own (a crash between claim and Agent, or a
+# lost release, must never strand the issue behind a no-TTL claim). Must exceed the
+# longest dev run; reap releases the claim long before this on every normal path.
+CLAIM_TTL_SECONDS = 4 * 60 * 60
 _ISSUE_ANCHOR_RE = re.compile(r"^issue-(\d+)$")
 
 
@@ -192,7 +196,7 @@ def claim_argv(spec: dict) -> list[str]:
     argv = [
         "npx", "tsx", "scripts/lifecycle.ts", "dispatch", str(spec["issue"]),
         "--dispatch", spec["dispatch_id"], "--class", spec["cls"], "--run", spec["run"],
-        "--purpose", spec["purpose"],
+        "--purpose", spec["purpose"], "--ttl", str(CLAIM_TTL_SECONDS),
     ]
     if spec.get("pr"):
         argv += ["--pr", str(spec["pr"])]

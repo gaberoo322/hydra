@@ -222,9 +222,9 @@ If still no PR → comment on issue and stop.
 
 **Claim the review (issue #5315, label-free).** Once the PR is selected, open the QA claim with the `dispatchId` / `runId` read from the `<!-- hydra-dispatch v1 … -->` sentinel in your first message (the dispatcher's own record):
 ```bash
-npx tsx scripts/lifecycle.ts claim $issue_number --dispatch $dispatch_id --class qa_orch --run $run_id --pr $pr_number
+npx tsx scripts/lifecycle.ts claim $issue_number --dispatch $dispatch_id --class qa_orch --run $run_id --pr $pr_number --ttl 7200
 ```
-`claim-held` here is a logged WARN and the review proceeds (a stale dev claim must not freeze QA); the claim changes no label. The QA worker owns this claim (the dispatcher opens none for `qa_*`): after posting the verdict, release it with `npx tsx scripts/lifecycle.ts release $issue_number --dispatch $dispatch_id --outcome verdict-posted`.
+`claim-held` here is a logged WARN and the review proceeds (a stale dev claim must not freeze QA); the claim changes no label. The QA worker owns this claim (the dispatcher opens none for `qa_*`) and it expires after 2h (`--ttl 7200`) so a crashed or timed-out worker cannot strand the issue behind a claim: after posting the verdict, release it with `npx tsx scripts/lifecycle.ts release $issue_number --dispatch $dispatch_id --outcome verdict-posted`.
 
 ### 3. Pin the fixed point (upstream `review` step 1)
 
