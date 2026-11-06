@@ -223,11 +223,15 @@ def _need_str(kind: str, name: str, value) -> None:
         raise ValueError(f"dispatch intent {kind!r}: {name} must be a non-empty string, got {value!r}")
 
 
-def _need_anchor(kind: str, value) -> None:
-    """An anchor must be an `issue-<N>` ref: the renderer pins only that shape, so
+def _need_issue_ref(kind: str, name: str, value) -> None:
+    """A ref field must be an `issue-<N>` ref: the renderer pins only that shape, so
     anything else would silently render UNPINNED (the fallback ADR-0007 forbids)."""
     if not isinstance(value, str) or not re.fullmatch(r"issue-\d+", value):
-        raise ValueError(f"dispatch intent {kind!r}: anchor must match issue-<N>, got {value!r}")
+        raise ValueError(f"dispatch intent {kind!r}: {name} must match issue-<N>, got {value!r}")
+
+
+def _need_anchor(kind: str, value) -> None:
+    _need_issue_ref(kind, "anchor", value)
 
 
 def _need_pr(kind: str, value) -> None:
@@ -442,6 +446,70 @@ class TargetReviewSelfSelect:
         return {"kind": self.kind}
 
 
+@dataclass(frozen=True)
+class Grill:
+    """Produce the design-concept artifact for `anchor` (issue #5384; design_concept_orch)."""
+
+    kind: ClassVar[str] = "Grill"
+    anchor: str
+
+    def __post_init__(self):
+        _need_anchor(self.kind, self.anchor)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "anchor": self.anchor}
+
+
+@dataclass(frozen=True)
+class WayfinderResearch:
+    """Work a research-typed wayfinder frontier `ticket` (issue #5384, ADR-0029)."""
+
+    kind: ClassVar[str] = "WayfinderResearch"
+    ticket_type: ClassVar[str] = "research"
+    ticket: str
+
+    def __post_init__(self):
+        _need_issue_ref(self.kind, "ticket", self.ticket)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "ticket": self.ticket}
+
+
+@dataclass(frozen=True)
+class WayfinderTask:
+    """Work a task-typed wayfinder frontier `ticket` through hydra-dev (issue #5384, ADR-0029)."""
+
+    kind: ClassVar[str] = "WayfinderTask"
+    ticket_type: ClassVar[str] = "task"
+    ticket: str
+
+    def __post_init__(self):
+        _need_issue_ref(self.kind, "ticket", self.ticket)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "ticket": self.ticket}
+
+
+@dataclass(frozen=True)
+class ResearchNeeded:
+    """The explicit orchestrator `needs_research` signal fired (issue #5384; research_orch)."""
+
+    kind: ClassVar[str] = "ResearchNeeded"
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind}
+
+
+@dataclass(frozen=True)
+class TargetResearchDue:
+    """The Target board is empty of ready-for-agent work (issue #5384; research_target)."""
+
+    kind: ClassVar[str] = "TargetResearchDue"
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind}
+
+
 DEV_INTENT_CLASSES = (
     Fresh,
     ResumeBranch,
@@ -457,13 +525,34 @@ DEV_TARGET_INTENT_CLASSES = (TargetFresh, TargetResume)
 DEV_TARGET_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in DEV_TARGET_INTENT_CLASSES)
 QA_TARGET_INTENT_CLASSES = (TargetReviewPr, TargetReviewSelfSelect)
 QA_TARGET_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in QA_TARGET_INTENT_CLASSES)
+DESIGN_CONCEPT_INTENT_CLASSES = (Grill,)
+DESIGN_CONCEPT_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in DESIGN_CONCEPT_INTENT_CLASSES)
+WAYFINDER_INTENT_CLASSES = (WayfinderResearch, WayfinderTask)
+WAYFINDER_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in WAYFINDER_INTENT_CLASSES)
+RESEARCH_ORCH_INTENT_CLASSES = (ResearchNeeded,)
+RESEARCH_ORCH_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in RESEARCH_ORCH_INTENT_CLASSES)
+RESEARCH_TARGET_INTENT_CLASSES = (TargetResearchDue,)
+RESEARCH_TARGET_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in RESEARCH_TARGET_INTENT_CLASSES)
 INTENT_KINDS_BY_SLOT: dict[str, tuple[str, ...]] = {
     "dev_orch": DEV_INTENT_KINDS,
     "qa_orch": QA_INTENT_KINDS,
     "dev_target": DEV_TARGET_INTENT_KINDS,
     "qa_target": QA_TARGET_INTENT_KINDS,
+    "design_concept_orch": DESIGN_CONCEPT_INTENT_KINDS,
+    "wayfinder_orch": WAYFINDER_INTENT_KINDS,
+    "research_orch": RESEARCH_ORCH_INTENT_KINDS,
+    "research_target": RESEARCH_TARGET_INTENT_KINDS,
 }
-_ALL_INTENT_CLASSES = DEV_INTENT_CLASSES + QA_INTENT_CLASSES + DEV_TARGET_INTENT_CLASSES + QA_TARGET_INTENT_CLASSES
+_ALL_INTENT_CLASSES = (
+    DEV_INTENT_CLASSES
+    + QA_INTENT_CLASSES
+    + DEV_TARGET_INTENT_CLASSES
+    + QA_TARGET_INTENT_CLASSES
+    + DESIGN_CONCEPT_INTENT_CLASSES
+    + WAYFINDER_INTENT_CLASSES
+    + RESEARCH_ORCH_INTENT_CLASSES
+    + RESEARCH_TARGET_INTENT_CLASSES
+)
 _INTENT_REGISTRY = {c.kind: c for c in _ALL_INTENT_CLASSES}
 assert len(_INTENT_REGISTRY) == len(_ALL_INTENT_CLASSES), "intent kind names must be globally unique"
 

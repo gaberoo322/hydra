@@ -9,6 +9,7 @@ Every definition here moved verbatim from decide.py.
 from __future__ import annotations
 
 from decide_base import (
+    Grill,
     _orch_anchor_signal,
     make_dispatch,
 )
@@ -99,7 +100,7 @@ def _select_slot_design_concept_orch(
         return make_dispatch(
             cls,
             "hydra-grill",
-            prompt_args={"scope": "orch", "anchor": orch_anchor},
+            intent=Grill(anchor=orch_anchor),
             reason=(
                 "orch GH ready-for-agent issue lacks fresh design-concept artifact "
                 "(Phase B warn-only, #628 orch-scope path)"

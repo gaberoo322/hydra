@@ -337,6 +337,7 @@ from decide_base import (
     BACKFILL_STARVATION_FLOOR_SEC,
     ESCALATION_POLICY,
     INTENT_KINDS_BY_SLOT,
+    _INTENT_REGISTRY,
     RED_FORWARD_FIX_CAP,
     QA_STALL_MAX_ATTEMPTS,
     ZERO_YIELD_BACKOFF_LADDER,
@@ -355,6 +356,7 @@ from decide_base import (
     _target_dev_resume_pick_signal,
     _zero_yield_entry,
     dispatch_anchor,
+    dispatch_intent,
     dispatch_pr,
     dispatch_resume_branch,
     escalation_intent,
@@ -610,6 +612,28 @@ SIGNAL_CLASSES = tuple(r["name"] for r in CLASS_TAXONOMY if r["kind"] == "signal
 # re-dispatching; derive it from the taxonomy alphabet so the escalation path
 # can never name a skill that drifts from the class's real dispatch skill.
 CLASS_SKILL = {r["name"]: r["skill"] for r in CLASS_TAXONOMY}
+
+# Class -> ticket-type -> skill routing (issue #5384, INV-4). The brain resolves
+# a ticket-typed dispatch's effective skill in step 7 from the intent kind's
+# `ticket_type`; the renderer no longer reads classes.json for routing.
+CLASS_SKILL_BY_TICKET_TYPE = {
+    r["name"]: r["skill_by_ticket_type"] for r in CLASS_TAXONOMY if r.get("skill_by_ticket_type")
+}
+
+
+def _validate_ticket_type_routing() -> None:
+    """Fail loud at import unless every ticket_type an intent kind declares is routable."""
+    for slot, kind_names in INTENT_KINDS_BY_SLOT.items():
+        for kind_name in kind_names:
+            tt = getattr(_INTENT_REGISTRY[kind_name], "ticket_type", None)
+            if tt is not None and tt not in CLASS_SKILL_BY_TICKET_TYPE.get(slot, {}):
+                raise _taxonomy_fail(
+                    f"{slot}: intent kind {kind_name!r} declares ticket_type {tt!r} "
+                    "with no skill_by_ticket_type route in classes.json"
+                )
+
+
+_validate_ticket_type_routing()
 
 # Class -> taxonomy scope projection (issue #4161). The orch-realm share
 # guard suppresses ORCH-scope dispatch only: classes whose taxonomy row
@@ -4062,6 +4086,16 @@ def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
         # Issue #4476 INV-3: the playbook passes isolation="worktree" iff this
         # is "worktree", omits it iff "self". Data only — no model/prompt text.
         action["isolation"] = class_isolation(slot)
+        # Issue #5384 INV-3: forward the Cost module's admission verdict verbatim
+        # (absent when the usage blob has none) so the renderer stays pure.
+        adm = ts.usage_eligibility(state).get("admission")
+        if isinstance(adm, dict):
+            action["admission"] = adm
+        # Issue #5384 INV-4: a ticket-typed intent resolves its effective skill here.
+        intent = dispatch_intent(action)
+        tt = getattr(intent, "ticket_type", None)
+        if tt is not None:
+            action["skill"] = CLASS_SKILL_BY_TICKET_TYPE[slot][tt]
         skill = action.get("skill")
         if isinstance(skill, str) and skill:
             pinned_anchor = dispatch_anchor(action)

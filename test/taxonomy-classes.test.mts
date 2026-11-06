@@ -807,7 +807,7 @@ describe("taxonomy: stage / model / skill_by_ticket_type columns (#4592)", () =>
     assert.deepEqual(tupleValues("_TAXONOMY_MODELS"), [...DISPATCH_CLASS_MODELS]);
   });
 
-  test("decide.py derives no dispatch projection from model or skill_by_ticket_type (#4592 INV-6)", () => {
+  test("decide.py derives no dispatch projection from the model column (#4592 INV-6; skill routing moved to the brain by #5384)", () => {
     // Whole brain corpus (decide.py + decide_base.py + decide_selectors/*.py):
     // a selector module adding a model projection must not pass undetected.
     const src = readBrainSource().joined;
@@ -816,6 +816,10 @@ describe("taxonomy: stage / model / skill_by_ticket_type columns (#4592)", () =>
     // reader is the pre-existing ESCALATION_POLICY path (policy["model"] /
     // ESCALATION_POLICY[class]["model"]) — that table predates #4592 and is
     // keyed by escalation pattern, not by the taxonomy row.
+    // Issue #5384 (INV-4) lifted the old ban on `skill_by_ticket_type`: the brain
+    // (decide.py step 7) now owns wayfinder's ticket-typed skill routing via
+    // CLASS_SKILL_BY_TICKET_TYPE (the renderer's own copy was deleted). The ban on
+    // a `model` projection onto dispatch actions is unchanged.
     const loader = src.split("def _load_class_taxonomy")[1].split("CLASS_TAXONOMY =")[0];
     assert.ok(loader.includes("_TAXONOMY_MODELS"), "loader extraction failed — split anchors drifted");
     const outside = src
@@ -830,10 +834,8 @@ describe("taxonomy: stage / model / skill_by_ticket_type columns (#4592)", () =>
       .replace(/\bpolicy\s*\[\s*["']model["']\s*\]/g, "");
     for (const forbidden of [
       /\bCLASS_MODEL\b/,
-      /\bCLASS_SKILL_BY_TICKET_TYPE\b/,
       /\[\s*["']model["']\s*\]/,
       /^\s*["']model["']\s*:/m,
-      /skill_by_ticket_type/,
     ]) {
       assert.doesNotMatch(
         outside,

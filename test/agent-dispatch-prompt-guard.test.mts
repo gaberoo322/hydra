@@ -164,7 +164,15 @@ function renderPrompt(slot: string, isolation: "worktree" | "self", opts: Render
           ? { intent: opts.intent ?? { kind: "TargetFresh", anchor: "issue-1234" } }
           : slot === "qa_target"
             ? { intent: opts.intent ?? { kind: "TargetReviewSelfSelect" } }
-            : { prompt_args: opts.promptArgs ?? { anchor: "issue-1234", scope: "orch" } }),
+            : slot === "design_concept_orch"
+              ? { intent: opts.intent ?? { kind: "Grill", anchor: "issue-1234" } }
+              : slot === "wayfinder_orch"
+                ? { intent: opts.intent ?? { kind: "WayfinderResearch", ticket: "issue-1234" } }
+                : slot === "research_orch"
+                  ? { intent: opts.intent ?? { kind: "ResearchNeeded" } }
+                  : slot === "research_target"
+                    ? { intent: opts.intent ?? { kind: "TargetResearchDue" } }
+                    : { prompt_args: opts.promptArgs ?? { anchor: "issue-1234", scope: "orch" } }),
     worktreeBranch: `worktree-agent-4dfd1dc9-t4-${slot}`,
     isolation,
     dispatchSentinel: `<!-- hydra-dispatch v1 skill=${skill} dispatchId=worktree-agent-4dfd1dc9-t4-${slot} runId=${runId} -->`,
@@ -199,8 +207,8 @@ const VARIANTS: Array<{ name: string; slot: string; isolation: "worktree" | "sel
   { name: "dev_orch escalate_model", slot: "dev_orch", isolation: "worktree", skill: "hydra-dev", intent: { kind: "Fresh", anchor: "issue-1234" }, promptArgs: { escalate_model: "opus" } },
   { name: "dev_target resume pin", slot: "dev_target", isolation: "self", skill: "hydra-target-build", intent: { kind: "TargetResume", anchor: "issue-77", pr: 88, branch: "feature/x" } },
   { name: "qa_target pr_ref", slot: "qa_target", isolation: "self", skill: "hydra-target-qa", intent: { kind: "TargetReviewPr", pr_ref: "https://github.com/o/r/pull/88", head: "feature/x" } },
-  { name: "wayfinder_orch task ticket", slot: "wayfinder_orch", isolation: "worktree", skill: "hydra-issue-research", promptArgs: { ticket: "issue-4200", ticket_type: "task" } },
-  { name: "wayfinder_orch research ticket", slot: "wayfinder_orch", isolation: "worktree", skill: "hydra-issue-research", promptArgs: { ticket: "issue-4201", ticket_type: "research" } },
+  { name: "wayfinder_orch task ticket", slot: "wayfinder_orch", isolation: "worktree", skill: "hydra-issue-research", intent: { kind: "WayfinderTask", ticket: "issue-4200" } },
+  { name: "wayfinder_orch research ticket", slot: "wayfinder_orch", isolation: "worktree", skill: "hydra-issue-research", intent: { kind: "WayfinderResearch", ticket: "issue-4201" } },
   { name: "signal class apply:true", slot: "cleanup_orch", isolation: "worktree", skill: "hydra-cleanup", promptArgs: { scope: "orch", apply: true } },
 ];
 
