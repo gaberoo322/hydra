@@ -282,7 +282,10 @@ describe("decide CLI Run Ledger seam: persistence + load contract (#5074 INV-5/6
     const changed = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(
       (k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]),
     );
-    assert.deepEqual(changed, ["turn"]);
+    // #5323: decide() records each emitted dispatch in the decide-owned
+    // `last_dispatch_by_class` row (the instant-death replay's source); that is
+    // the ONLY key allowed beyond the turn bump.
+    assert.deepEqual(changed.filter((k) => k !== "last_dispatch_by_class"), ["turn"]);
   });
 
   test("INV-6: an OSError on persist degrades to ONE loud stderr line and the turn still emits a plan (exit 0)", (t) => {

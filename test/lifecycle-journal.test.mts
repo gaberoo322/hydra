@@ -5,6 +5,7 @@
 import { test, describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
+import { readFileSync } from "node:fs";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
 process.env.REDIS_URL = REDIS_URL;
@@ -15,7 +16,10 @@ import {
   closeDispatchClaim,
   expireJournalOnClose,
   journalCloseTtlSeconds,
+  holdExitIndexKey,
   lifecycleClaimKey,
+  listHoldExits,
+  recordHoldExit,
   lifecycleJournalKey,
   openDispatchClaim,
   persistJournal,
@@ -38,7 +42,7 @@ function entry(over: Partial<LifecycleJournalEntry> = {}): LifecycleJournalEntry
 describe("lifecycle-journal Redis seam (issue #5310)", () => {
   let redis: any;
   const cleanup = async () => {
-    await redis.del(lifecycleJournalKey(REPO, ISSUE), lifecycleClaimKey(REPO, ISSUE));
+    await redis.del(lifecycleJournalKey(REPO, ISSUE), lifecycleClaimKey(REPO, ISSUE), holdExitIndexKey(REPO));
   };
 
   before(() => {
@@ -150,6 +154,39 @@ describe("lifecycle-journal Redis seam (issue #5310)", () => {
     assert.equal(right.prior?.dispatchId, "d1");
     assert.equal(await redis.exists(lifecycleClaimKey(REPO, ISSUE)), 0);
   });
+
+  test("append with indexHoldExit writes the journal entry and the index member in one MULTI; without it, no index", async () => {
+    const now = 1_760_000_000_000;
+    const e = entry({ ts: now, kind: "external", source: "external", from: "parked", to: "needs-triage" });
+    assert.ok((await appendLifecycleEntry(REPO, 21, e)).ok);
+    assert.equal(await redis.zcard(holdExitIndexKey(REPO)), 0);
+    assert.ok((await appendLifecycleEntry(REPO, 22, e, true)).ok);
+    assert.equal(await redis.zcard(holdExitIndexKey(REPO)), 1);
+    assert.equal(await redis.llen(lifecycleJournalKey(REPO, 22)), 1);
+    const listed = await listHoldExits(REPO, now - 1000);
+    assert.ok(listed.ok);
+    assert.deepEqual(listed.exits.map((x) => x.issue), [22]);
+  });
+
+  test("hold-exit index: recordHoldExit ZADDs by ts, listHoldExits filters by since, 30d members are trimmed", async () => {
+    const now = 1_760_000_000_000;
+    const DAY = 24 * 60 * 60 * 1000;
+    const old = entry({ ts: now - 40 * DAY, kind: "external", source: "external", from: "parked", to: "needs-triage" });
+    const recent = entry({ ts: now - 2 * DAY, kind: "external", source: "external", from: "ready-for-human", to: "ready-for-agent" });
+    assert.ok((await recordHoldExit(REPO, 11, old)).ok);
+    assert.ok((await recordHoldExit(REPO, 12, recent)).ok);
+    // The 40d-old member was trimmed by the second add (cutoff = recent.ts - 30d).
+    assert.equal(await redis.zcard(holdExitIndexKey(REPO)), 1);
+    const listed = await listHoldExits(REPO, now - 7 * DAY);
+    assert.ok(listed.ok);
+    assert.deepEqual(listed.exits.map((x) => x.issue), [12]);
+    assert.equal(listed.exits[0].source, "external");
+    const none = await listHoldExits(REPO, now);
+    assert.ok(none.ok);
+    assert.deepEqual(none.exits, []);
+    // The journal LIST itself is untouched by the index.
+    assert.equal(await redis.exists(lifecycleJournalKey(REPO, 12)), 0);
+  });
 });
 
 describe("operator ruling round 4 (#5310): release requires --dispatch (INV-11)", () => {
@@ -179,5 +216,15 @@ describe("operator ruling round 4 (#5310): release requires --dispatch (INV-11)"
     } finally {
       await redis.del(lifecycleClaimKey(repo, issue));
     }
+  });
+});
+
+describe("source is not a caller parameter (#5313 INV-2)", () => {
+  test("scripts/lifecycle.ts never imports the operator entry points or takes a source flag", () => {
+    const raw = readFileSync(new URL("../scripts/lifecycle.ts", import.meta.url), "utf8");
+    // Code only: the header comment legitimately says "no --operator flag".
+    const cli = raw.split("\n").filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l)).join("\n");
+    assert.equal(/operatorAdvance|operatorReopen/.test(cli), false);
+    assert.equal(/--operator|--source/.test(cli), false);
   });
 });

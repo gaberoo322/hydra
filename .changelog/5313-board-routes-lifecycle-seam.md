@@ -1,0 +1,1 @@
+- feat: board relabel/promote/close/reopen now write through the lifecycle seam as operator-route, and unsanctioned human-hold exits surface on the attention feed (#5313)
