@@ -137,7 +137,7 @@
   "test/branch-prune-script.test.mts": 2,
   "test/build-spritesheet.test.mts": 2,
   "test/builder-health-stagnation.test.mts": 6,
-  "test/builder-health.test.mts": 5,
+  "test/builder-health.test.mts": 10,
   "test/builder-page.test.mts": 6,
   "test/candidate-exclusions.test.mts": 3,
   "test/capacity-floor-classifier.test.mts": 2,

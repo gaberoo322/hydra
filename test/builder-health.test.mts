@@ -787,3 +787,14 @@ describe("lifecycle fields — baselines are read-only inputs", () => {
     assert.equal(s.coveredTo, "2026-11-05");
   });
 });
+
+describe("committed builder-health baselines (#5324 QA round 1)", () => {
+  test("a recorded parentExceptionRate baseline is never a vacuous 0 over zero exception turns", async () => {
+    const { readFileSync } = await import("node:fs");
+    const doc = JSON.parse(readFileSync(new URL("../config/orchestrator/builder-health-baselines.json", import.meta.url), "utf8"));
+    const b = doc.parentExceptionRate.baseline;
+    if (b.value === null) assert.equal(b.computedAt, null);
+    else assert.ok(b.turns > 0 && b.computedAt !== null);
+    assert.equal(b.value === 0 && b.exceptionTurns === 0, false, "0 with 0 exception turns is the pre-mirror fabrication");
+  });
+});
