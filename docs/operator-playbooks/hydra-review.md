@@ -174,7 +174,7 @@ oldest-first, one PR at a time, and offer the canonical four (§4):
   follow-up `AskUserQuestion` (header `QA override`). This is the only
   sanctioned second question on a row, because an override must be an explicit
   choice:
-  1. **Route to QA (Recommended)** — add `needs-qa` to the linked issue; no merge.
+  1. **Route to QA (Recommended)** — relabel the linked issue `needs-qa` via `POST /api/autopilot/board/relabel`; no merge.
   2. **Override: accept the FAIL** / 3. **Override: QA not needed** — the label
      is the reason ("Other" text replaces it). Run the QA-Override recipe below.
   4. **Skip**.
@@ -217,7 +217,8 @@ LANE=needs-dev-resume   # or needs-qa — the lane the operator's resolution nam
 # The subshell scopes every `exit 1` below: a failure aborts the recipe loudly
 # without closing the operator's shell.
 (
-# 1. Clear the PR's stranding labels. Name in the URL path — the `-f name=` form
+# 1. Clear the PR's stranding labels. (These are PR FLAGS, not issue lifecycle state:
+#    ready-for-human on a PR is the pr-gate "surfaced" flag - ADR-0047 D2 scopes state to issues.) Name in the URL path — the `-f name=` form
 #    wipes ALL labels. ONLY an HTTP 404 / "Label does not exist" means the label
 #    is already absent and is tolerated. Any other failure (auth, rate limit,
 #    network) prints the error and aborts BEFORE the issue is relabelled.
@@ -240,8 +241,11 @@ if [ -n "$LEFT" ]; then
   echo "ERROR: PR #$PR still carries $LEFT; issue #$ISSUE NOT relabelled" >&2
   exit 1
 fi
-# 3. Route the linked issue to the chosen lane.
-gh issue edit "$ISSUE" --repo "$RREPO" --remove-label ready-for-human --add-label "$LANE"
+# 3. Route the linked issue to the chosen lane through the board route (ADR-0047:
+#    the sanctioned operator-route exit; never `gh issue edit` a state label).
+curl -sf -X POST http://localhost:4000/api/autopilot/board/relabel \
+  -H 'content-type: application/json' \
+  -d "{\"issue\":$ISSUE,\"label\":\"$LANE\"}" | jq .
 )
 ```
 
@@ -400,10 +404,11 @@ Per row:
 4. Call `AskUserQuestion` with **exactly one question** for this row, using that
    bucket's canonical options from §4. One row = one question = one call; never
    batch two rows into one call, and never pre-stage the next row's question.
-5. Execute the pick via `gh` — **always pass the row's own repo**
-   (`--repo gaberoo322/hydra` for Orchestrator rows, `--repo <TREPO>` for Target
-   rows); explore that repo's checkout (`~/hydra` vs `$TARGET_APP_DIR`)
-   before asking obvious questions.
+5. Execute the pick — Orchestrator rows' state moves ride the board routes
+   (`POST /api/autopilot/board/{promote|relabel|close|reopen}`, ADR-0047); Target
+   rows and flag labels use `gh` with **the row's own repo** (`--repo <TREPO>`). Orchestrator verbs: "Make it agent-ready" = promote,
+   "Needs more info" = relabel `needs-info`, "Won't do" = close. Explore that
+   repo's checkout (`~/hydra` vs `$TARGET_APP_DIR`) before asking obvious questions.
 6. Move on.
 
 **Prompt shape.** `header` is the bucket (≤12 chars: `Stalled PR`, `Blocked`,
@@ -422,23 +427,20 @@ text, so it is never an option you write.
 open PR (if `pr=N`), then ask whether the cap that tripped was a real signal (a
 runaway loop: leave it parked, or close) or a limit that was set too low (un-park).
 There is NO §4 option-table row for this bucket yet: a row needs a
-`waiting-on-you:parked` admission line in ADR-0034 §8.1's closed vocabulary, which
-belongs with #5313's human-hold attention rule. Until then the walk is a plain
-`AskUserQuestion` whose slot 1 is the recommendation and slot 4 is Skip. The
-un-park route, when the operator chooses to resume the work:
+`waiting-on-you:parked` admission line in ADR-0034 §8.1's closed vocabulary. The
+walk is a plain `AskUserQuestion` whose slot 1 is the recommendation and slot 4 is
+Skip. A judgment park (journal reason `off-list-escalation` / `deferred` /
+`duplicate-candidate`, no `Hydra-Cap-Park:` machine line) is walked and un-parked
+exactly like a cap park. The un-park route, when the operator chooses to resume:
 
-1. **The state exit.** Preferred: the confirm-first board route
-   `POST /api/autopilot/board/promote` (registry-pinned) for "resume as
-   `ready-for-agent`", or `POST /api/autopilot/board/relabel` for any other lane -
-   the sanctioned `operator-route` exit from a human-hold state once #5313 re-points
-   those routes at the lifecycle writer seam so they strip `parked` as they strip
-   `hitl-grill` today. Until #5313 lands, un-park through the GitHub UI (an
-   `external` exit, ADR-0047 Decision 3). Never write a lifecycle state label with
-   `gh issue edit` from this playbook.
-2. **The reset marker (mandatory in BOTH paths).** Post the marker comment so the cap
-   counts restart from here: `gh issue comment <N> --repo gaberoo322/hydra --body
-   "Hydra-Cap-Reset: by=operator:<name> ts=<ISO-8601>"` (until #5316's reconcile
-   posts it automatically for external exits).
+1. **The state exit.** The confirm-first board route `POST /api/autopilot/board/promote`
+   for "resume as `ready-for-agent`", or `POST /api/autopilot/board/relabel` for any
+   other lane - the sanctioned `operator-route` exit from a human-hold state (the
+   seam strips `parked` as it strips `hitl-grill`). Never write a lifecycle state
+   label with `gh issue edit` from this playbook.
+2. **The reset marker.** Post the marker comment so the cap counts restart from
+   here: `gh issue comment <N> --repo gaberoo322/hydra --body
+   "Hydra-Cap-Reset: by=operator:<name> ts=<ISO-8601>"`.
 
 **Evidence `preview` — two buckets only.** `preview` renders monospace markdown
 beside the options and is single-select-only, which is exactly this walk. Use it
