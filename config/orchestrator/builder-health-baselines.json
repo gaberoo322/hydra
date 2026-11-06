@@ -1,0 +1,55 @@
+{
+  "parentExceptionRate": {
+    "baseline": {
+      "value": 0,
+      "source": "replay: scripts/lifecycle-parent-exception-baseline.ts",
+      "method": "exception turns / turns over recorded Autopilot Runs",
+      "coveredFrom": "2026-11-06",
+      "coveredTo": "2026-11-06",
+      "computedAt": "2026-11-06T05:01:42.464Z",
+      "runs": 3,
+      "turns": 24,
+      "exceptionTurns": 0
+    },
+    "rows": {
+      "7a759584-207f-4125-bfe4-50e50d395ca3": {
+        "started_epoch": 1793930641,
+        "turns": 8,
+        "exceptionTurns": 0,
+        "byCause": {}
+      },
+      "1562c952-b403-4073-b8b9-8e5398c971f2": {
+        "started_epoch": 1793934419,
+        "turns": 8,
+        "exceptionTurns": 0,
+        "byCause": {}
+      },
+      "32866fe8-c35b-4460-90a4-f4614568f7cd": {
+        "started_epoch": 1793937300,
+        "turns": 8,
+        "exceptionTurns": 0,
+        "byCause": {}
+      }
+    }
+  },
+  "firstPassQaYield": {
+    "baseline": {
+      "value": 0.41,
+      "source": "#5291",
+      "method": "label-proxy, lower bound",
+      "coveredFrom": null,
+      "coveredTo": null,
+      "computedAt": "2026-11-05T00:00:00.000Z"
+    }
+  },
+  "parkRatePerArm": {
+    "baseline": {
+      "value": null,
+      "source": "#5291: caps not durable before #5314",
+      "method": null,
+      "coveredFrom": null,
+      "coveredTo": null,
+      "computedAt": null
+    }
+  }
+}
