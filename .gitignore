@@ -40,7 +40,7 @@ secrets.json
 
 # Per-test TAP artifact from `npm run test:debug` (issue #1076) — regenerated
 # on every debug run, never committed.
-test-debug.tap
+test-debug.tap*
 
 # Per-run NDJSON capture from scripts/test/suite-count-check.mjs's reporter
 # mode (issue #4020) — regenerated on every `npm test` / `test:debug` /

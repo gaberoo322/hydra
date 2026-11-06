@@ -289,7 +289,9 @@ export type CapAttempt =
       pr: number | null;
       purpose: "fresh" | "resume" | "forward-fix" | null;
     }
-  | { kind: "requeue" };
+  | { kind: "requeue" }
+  /** A reviewed QA FAIL on `pr` is about to bounce `needs-qa -> needs-dev-resume` (#5317). */
+  | { kind: "qa-fail"; pr: number };
 
 export interface CapInput {
   attempt: CapAttempt;
@@ -330,10 +332,12 @@ export function evaluateCaps(input: CapInput): CapEvaluation {
   const miss = isJournalMiss(input.entries, input.resetMs, input.journalFailed);
   const timelineCounts = miss && input.timeline ? timelineArmCounts(input.timeline, input.resetMs) : null;
   const claim = input.attempt.kind === "claim" ? input.attempt : null;
+  const qaFail = input.attempt.kind === "qa-fail";
   const role = claim ? classRole(claim.class) : "other";
   const pr = claim ? claim.pr : null;
 
   const applicable = (arm: CapArm): boolean => {
+    if (qaFail) return arm === "qa-fail-rounds";
     if (!claim) return arm === "stale-requeue";
     switch (arm) {
       case "total-claims":

@@ -254,8 +254,9 @@ alias is not entitled in every environment — a background
 the selected model (claude-fable-5) … it may not exist or you may not have
 access to it"* (0 tokens, 0 tool uses). When a `fable`-routed dispatch
 terminates immediately this way (no tool uses + a model-access error),
-**re-dispatch the identical action with `model: "opus"` (Opus 4.8) — do not
-leave the class unrun.** This still applies to the `inherit-parent` classes
+`decide.py` re-dispatches the identical action with `escalate_model: opus`
+(Opus 4.8) in the same plan (#5323) — the class is never left unrun, and the
+parent does not detect it. This still applies to the `inherit-parent` classes
 (`wire_or_retire_target`, `design_qa_target`, `wayfinder_orch`) when the
 parent session's saved default is Fable, and to `dev_orch`'s `escalate_model`
 hint (still `fable`). If this fallback becomes the steady state rather than an
@@ -274,8 +275,9 @@ model, …"* — a quota 429, NOT a model-access error, and the CLI's own
 When a `fable`-routed dispatch — or the parent session itself — dies with that
 notice:
 
-1. **Arm the flag** so the next launch and every same-turn pre-resolution sees
-   it:
+1. **The flag is armed for you** for an in-run subagent death: the instant-death
+   `reap` action carries the notice and `reap.py` POSTs it (#5323). The manual
+   command, for a death no reap saw:
 
    ```bash
    curl -sf --max-time 5 -X POST -H 'content-type: application/json' \
@@ -289,8 +291,8 @@ notice:
    On a parent-session death the ExecStopPost reap posts this automatically
    (bootstrap.sh greps the journal); post it yourself only for an in-run
    subagent death.
-2. **Re-dispatch the identical action on `opus` the SAME turn** — do not leave
-   the class unrun and do not wait out the flag for work that is ready now.
+2. **The opus replay** is emitted by `decide.py` the SAME turn (at most once per
+   original dispatch) — do not leave the class unrun.
 3. Apply the pre-resolution rule (Per-class model routing above) for the rest
    of the turn — the next Turn Snapshot reads the armed flag either way.
 

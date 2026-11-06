@@ -24,6 +24,7 @@ import { logger } from "../logger.ts";
 import {
   closeIssue,
   editIssueLabels,
+  reopenIssue,
   viewIssue,
   type IssueActionWriteResult,
   type IssueViewResult,
@@ -39,10 +40,12 @@ import {
   closeDispatchClaim,
   expireJournalOnClose,
   openDispatchClaim,
+  persistJournal,
   readDispatchClaim,
   readLifecycleJournal,
   type CloseClaimResult,
   type DispatchClaim,
+  type JournalSource,
   type JournalWriteResult,
   type LifecycleJournalEntry,
   type OpenClaimResult,
@@ -64,6 +67,7 @@ import {
   type QaLivePr,
   type StateEntryRecord,
 } from "./gates.ts";
+import { isUnsanctionedHoldExit } from "./hold-exit.ts";
 import {
   buildSeedEvidence,
   countReviewedFailRoundsSinceReset,
@@ -77,9 +81,11 @@ import {
 } from "./caps.ts";
 import { parkForCap } from "./park.ts";
 import {
+  findOperatorTransition,
   findTransition,
   isHumanHold,
   isLifecycleState,
+  isOperatorTarget,
   stateLabelsOf,
   type LifecycleState,
 } from "./transitions.ts";
@@ -148,6 +154,8 @@ export interface SeamDeps {
     labels: { remove: string[]; add: string[] },
   ) => Promise<IssueActionWriteResult>;
   close: (issue: number, reason: string) => Promise<IssueActionWriteResult>;
+  /** Reopen write, used only by {@link operatorReopen}. */
+  reopen?: (issue: number) => Promise<IssueActionWriteResult>;
   /** Post a comment on an issue or PR number. */
   comment: (number: number, body: string) => Promise<IssueActionWriteResult>;
   /** Env the cap limits are resolved from (`HYDRA_LIFECYCLE_CAP_*`). */
@@ -168,10 +176,14 @@ export interface SeamDeps {
     qaLive?: (prNumber: number) => Promise<Fetched<QaLivePr>>;
   };
   journal: {
-    append: (repo: string, issue: number, entry: LifecycleJournalEntry) => Promise<JournalWriteResult>;
+    /** `indexHoldExit` joins the hold-exit index write into the append's one MULTI (#5313). */
+    append: (repo: string, issue: number, entry: LifecycleJournalEntry, indexHoldExit?: boolean) => Promise<JournalWriteResult>;
     expireOnClose: (repo: string, issue: number) => Promise<JournalWriteResult>;
     openClaim: (repo: string, issue: number, claim: DispatchClaim) => Promise<OpenClaimResult>;
     closeClaim: (repo: string, issue: number, expectedDispatchId: string) => Promise<CloseClaimResult>;
+    /** Drop the close-retention clock on reopen (operatorReopen only). */
+    persist?: (repo: string, issue: number) => Promise<JournalWriteResult>;
+    /** Index an unsanctioned human-hold exit for the attention feed (#5313). */
     read: (repo: string, issue: number) => Promise<ReadJournalResult>;
     readClaim: (repo: string, issue: number) => Promise<ReadClaimResult>;
   };
@@ -305,9 +317,20 @@ export async function fetchQaLive(repo: string, prNumber: number): Promise<Fetch
     }
     const bodies = (list: unknown): string[] =>
       Array.isArray(list) ? list.map((c) => String((c as { body?: unknown } | null)?.body ?? "")) : [];
+    // Comments carry `createdAt`, reviews `submittedAt`; an unparseable time is null (never post-dated).
+    const timed = (list: unknown, field: string): { body: string; createdAtMs: number | null }[] =>
+      Array.isArray(list)
+        ? list.map((c) => {
+            const rec = c as Record<string, unknown> | null;
+            const raw = rec?.[field];
+            const t = typeof raw === "string" ? Date.parse(raw) : Number.NaN;
+            return { body: String(rec?.body ?? ""), createdAtMs: Number.isNaN(t) ? null : t };
+          })
+        : [];
     return {
       ok: true,
       value: {
+        timedBodies: [...timed(d.comments, "createdAt"), ...timed(d.reviews, "submittedAt")],
         number: d.number,
         state: d.state.toUpperCase(),
         isDraft: d.isDraft === true,
@@ -343,6 +366,7 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
     view: (n) => viewIssue(n),
     edit: (n, labels) => editIssueLabels(n, labels),
     close: (n, reason) => closeIssue(n, reason),
+    reopen: (n) => reopenIssue(n),
     comment: (n, body) => postIssueComment(resolveGithubRepo(), n, body),
     env: () => process.env,
     fetch: {
@@ -386,6 +410,7 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
       expireOnClose: expireJournalOnClose,
       openClaim: openDispatchClaim,
       closeClaim: closeDispatchClaim,
+      persist: persistJournal,
       read: readLifecycleJournal,
       readClaim: readDispatchClaim,
     },
@@ -423,7 +448,8 @@ async function checkCaps(
     const entries = journalRead.ok ? journalRead.entries : [];
     const journalFailed = journalRead.ok === false;
     let timeline: TimelineLabelEvent[] | null = null;
-    if (isJournalMiss(entries, resetMs, journalFailed)) {
+    // The qa-fail arm is trailer-sourced: the journal/timeline arms cannot park it.
+    if (attempt.kind !== "qa-fail" && isJournalMiss(entries, resetMs, journalFailed)) {
       const t = await deps.fetch.timeline(issue);
       if (t.ok === false) return { status: "skipped" };
       timeline = t.value;
@@ -532,6 +558,8 @@ export type AdvanceResult =
       mode: LifecycleMode;
       /** Set in shadow when the transition would have been refused in enforce. */
       wouldRefuse?: string;
+      /** The seam's own post-write re-read (no extra gh read for callers). */
+      observed: { state: string; labels: string[] };
       /** Set in shadow when a cap check would have parked the issue in enforce. */
       wouldPark?: string;
     }
@@ -540,14 +568,15 @@ export type AdvanceResult =
 function entry(
   deps: SeamDeps,
   over: Partial<LifecycleJournalEntry> & Pick<LifecycleJournalEntry, "kind" | "result" | "written">,
-  input: AdvanceInput,
+  input: Pick<AdvanceInput, "to" | "evidence" | "reason" | "rationale" | "actor">,
+  source: JournalSource = "cli",
 ): LifecycleJournalEntry {
   return {
     v: 1,
     ts: deps.now(),
     from: null,
     to: input.to,
-    source: "cli",
+    source,
     actor: input.actor ?? "cli",
     evidence: input.evidence ?? {},
     reason: input.reason ?? null,
@@ -556,10 +585,18 @@ function entry(
   };
 }
 
-async function journal(deps: SeamDeps, issue: number, e: LifecycleJournalEntry): Promise<void> {
-  const res = await deps.journal.append(deps.repo, issue, e);
-  if (res.ok === false) logger.error({ issue, error: res.error }, "[lifecycle] journal append failed");
+/**
+ * The seam's ONE journal append point (also used by the #5316 reconcile to
+ * append `external` entries). After a successful append, an unsanctioned
+ * human-hold exit is also indexed for the attention feed (#5313).
+ */
+export async function journalEntry(deps: SeamDeps, issue: number, e: LifecycleJournalEntry): Promise<void> {
+  const res = await deps.journal.append(deps.repo, issue, e, isUnsanctionedHoldExit(e));
+  if (res.ok === false) {
+    logger.error({ issue, error: res.error }, "[lifecycle] journal append failed");
+  }
 }
+const journal = journalEntry;
 
 /** `not-planned` (artifact / reasons spelling) and `not planned` (gh spelling) are one reason. */
 export function normaliseCloseReason(raw: string | undefined): string | undefined {
@@ -611,6 +648,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
   // 3b. cap check (ADR-0047 D6): the in-progress -> ready-for-agent edge IS the stale
   //     re-queue. Over cap in enforce the seam parks INSTEAD of writing ready-for-agent.
   let shadowOver: NonNullable<CapEvaluation["over"]> | null = null;
+  let shadowOverPr: number | null = null;
   if (stateLabels.length === 1 && from === "in-progress" && to === "ready-for-agent") {
     const check = await checkCaps(deps, issue, { kind: "requeue" }, null);
     stamp = new CapStamp(check);
@@ -632,6 +670,43 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
         return { ok: false, issue, code: `parked:${over.arm}`, mode, written: park.written };
       }
       shadowOver = over;
+    }
+  }
+
+  // 3c. cap check (ADR-0047 D6, #5317): a reviewed QA FAIL bouncing `needs-qa ->
+  //     needs-dev-resume` runs the trailer-sourced `qa-fail-rounds` arm. The
+  //     verdict comment (this round's trailer) is already posted, so a 3rd
+  //     reviewed FAIL counts 3 >= 3 and, in enforce, parks INSTEAD of bouncing.
+  if (
+    stateLabels.length === 1 &&
+    from === "needs-qa" &&
+    (to === "needs-dev-resume" || to === "ready-for-agent") &&
+    gateEvidence.defer !== "1"
+  ) {
+    const prNumber = parsePrEvidence(gateEvidence);
+    if (prNumber !== null && prNumber > 0) {
+      const check = await checkCaps(deps, issue, { kind: "qa-fail", pr: prNumber }, prNumber);
+      stamp = new CapStamp(check);
+      const over = check.status === "checked" ? check.evaluation.over : null;
+      if (check.status === "checked" && over !== null) {
+        if (mode === "enforce") {
+          const park = await parkForCap(
+            {
+              issue,
+              from,
+              over,
+              counts: check.evaluation.counts,
+              pr: prNumber,
+              actor: input.actor,
+              evidence: stamp.extra(parkEntryProbe(deps, over)),
+            },
+            deps,
+          );
+          return { ok: false, issue, code: `parked:${over.arm}`, mode, written: park.written };
+        }
+        shadowOver = over;
+        shadowOverPr = prNumber;
+      }
     }
   }
 
@@ -665,7 +740,18 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
           ? await deps.fetch.qaLive(prNumber)
           : { ok: false };
     }
-    if (needs.stateEntry) records.stateEntry = await deps.fetch.stateEntry(issue, transition.from);
+    if (needs.stateEntry) {
+      records.stateEntry = await deps.fetch.stateEntry(issue, transition.from);
+      // Entry-time miss: fall back to the entry derived from the issue timeline,
+      // as the cap arms do, instead of hard-failing `state-entry-unknown`.
+      if (records.stateEntry.ok === true && records.stateEntry.value.enteredAtMs === null) {
+        const tl = await deps.fetch.timeline(issue);
+        if (tl.ok === true) {
+          const ts = tl.value.filter((e) => e.event === "labeled" && e.label === transition.from).map((e) => e.tsMs);
+          if (ts.length > 0) records.stateEntry = { ok: true, value: { enteredAtMs: Math.max(...ts) } };
+        }
+      }
+    }
     const gateInput: GateInput = {
       issue,
       repo: deps.repo,
@@ -677,6 +763,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       reason: input.reason,
       rationale: input.rationale,
       closeReason: to === "closed" ? (closeReason ?? "completed") : undefined,
+      actor: input.actor,
     };
     verdict = evaluateGate(transition.gate, gateInput, records);
   }
@@ -719,7 +806,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       entry(deps, { kind: "refused", from, result: `shadow-would-refuse:${verdict.code}`, written: true }, input),
     );
   }
-  if (shadowOver !== null) await jr(shadowParkEntry(deps, shadowOver, from, null, input.actor ?? "cli"));
+  if (shadowOver !== null) await jr(shadowParkEntry(deps, shadowOver, from, shadowOverPr, input.actor ?? "cli"));
   if (to === "closed") {
     const exp = await deps.journal.expireOnClose(deps.repo, issue);
     if (exp.ok === false) logger.error({ issue, error: exp.error }, "[lifecycle] journal expire failed");
@@ -731,7 +818,173 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
     to,
     mode,
     ...(verdict.ok ? {} : { wouldRefuse: verdict.code }),
+    observed: observedOf(after),
     ...(shadowOver !== null ? { wouldPark: shadowOver.arm } : {}),
+  };
+}
+
+function observedOf(after: IssueViewResult): { state: string; labels: string[] } {
+  return after.ok ? { state: after.row.state, labels: [...after.row.labels] } : { state: "", labels: [] };
+}
+
+// ---------------------------------------------------------------------------
+// operatorAdvance / operatorReopen (ADR-0047 Decision 3, issue #5313)
+// ---------------------------------------------------------------------------
+//
+// The operator's sanctioned path through the seam. `source` is FIXED to
+// `operator-route` here and is never a caller parameter; `advance()` above
+// keeps `source: "cli"` and refuses every human-hold exit. Only
+// src/api/autopilot-board.ts imports these (pinned by a test); the CLI never
+// does. Legality is the generated OPERATOR_TRANSITIONS table; the operator
+// may also repair a 0-or-many state-label pre-state. Both entry points share
+// the seam's entry/journal helpers and the re-read verify.
+
+export interface OperatorAdvanceInput {
+  issue: number;
+  to: string;
+  closeReason?: string;
+  /** `board:<action>`. */
+  actor: string;
+}
+
+const OPERATOR_SOURCE: JournalSource = "operator-route";
+
+function operatorEntry(
+  deps: SeamDeps,
+  over: Partial<LifecycleJournalEntry> & Pick<LifecycleJournalEntry, "kind" | "result" | "written">,
+  input: { to: string; actor: string },
+): LifecycleJournalEntry {
+  return entry(deps, over, { to: input.to, actor: input.actor }, OPERATOR_SOURCE);
+}
+
+export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDeps): Promise<AdvanceResult> {
+  const issue = input.issue;
+  const refuse = async (code: string, mode: LifecycleMode | null, from: string | null): Promise<AdvanceResult> => {
+    await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: `refused:${code}`, written: false }, input));
+    return { ok: false, issue, code, mode, written: false };
+  };
+  if (!isLifecycleState(input.to)) {
+    return { ok: false, issue, code: "unknown-target-state", mode: null, written: false };
+  }
+  const to: LifecycleState = input.to;
+  const mode = await deps.mode();
+
+  const before = await deps.view(issue);
+  if (before.ok === false) return refuse("fetch-failed", mode, null);
+  if (before.row.state === "CLOSED") {
+    // Closing an already-closed issue stays idempotent (the pre-seam spine
+    // accepted it): ok with the observed state, no write, no journal.
+    if (to === "closed") return { ok: true, issue, from: "closed", to, mode, observed: observedOf(before) };
+    return refuse("issue-closed", mode, "closed");
+  }
+
+  const stateLabels = stateLabelsOf(before.row.labels);
+  const from = stateLabels.length > 0 ? stateLabels.join(",") : null;
+
+  // Legality: a single pre-state needs an operator row; 0 / many states are
+  // the operator's to repair, but the TARGET must still be operator-owned.
+  const selfMove = stateLabels.length === 1 && stateLabels[0] === to;
+  const legal =
+    isOperatorTarget(to) &&
+    (stateLabels.length !== 1 || findOperatorTransition(stateLabels[0], to) !== undefined);
+  if (!legal && !selfMove) return refuse("illegal-transition", mode, from);
+
+  const removed = stateLabels.filter((s) => s !== to);
+  const alreadyThere = (stateLabels as string[]).includes(to);
+  const closeReason = normaliseCloseReason(input.closeReason);
+  let write: IssueActionWriteResult = { ok: true };
+  if (to === "closed") {
+    write = await deps.close(issue, closeReason ?? "completed");
+  } else if (removed.length > 0 || !alreadyThere) {
+    write = await deps.edit(issue, { remove: [...removed], add: alreadyThere ? [] : [to] });
+  }
+  if (write.ok === false) {
+    const code = `write-failed:${write.code}`;
+    await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: code, written: false }, input));
+    return { ok: false, issue, code, mode, written: false };
+  }
+
+  const after = await deps.view(issue);
+  const verified =
+    after.ok &&
+    (to === "closed"
+      ? after.row.state === "CLOSED"
+      : after.row.labels.includes(to) && removed.every((s) => !after.row.labels.includes(s)));
+  if (!verified) {
+    await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: "write-unverified", written: true }, input));
+    return { ok: false, issue, code: "write-unverified", mode, written: true };
+  }
+
+  if (!selfMove) {
+    await journal(deps, issue, operatorEntry(deps, { kind: "transition", from, result: "ok", written: true }, input));
+  }
+  if (to === "closed") {
+    const exp = await deps.journal.expireOnClose(deps.repo, issue);
+    if (exp.ok === false) logger.error({ issue, error: exp.error }, "[lifecycle] journal expire failed");
+  }
+  return { ok: true, issue, from, to, mode, observed: observedOf(after) };
+}
+
+export async function operatorReopen(
+  input: { issue: number; actor: string },
+  deps: SeamDeps,
+): Promise<AdvanceResult> {
+  const issue = input.issue;
+  const mode = await deps.mode();
+  const jIn = { to: "reopened", actor: input.actor };
+  const fail = async (code: string, from: string | null, written: boolean): Promise<AdvanceResult> => {
+    await journal(
+      deps,
+      issue,
+      operatorEntry(deps, { kind: "refused", from, result: written ? code : `refused:${code}`, written }, jIn),
+    );
+    return { ok: false, issue, code, mode, written };
+  };
+
+  const before = await deps.view(issue);
+  if (before.ok === false) return fail("fetch-failed", null, false);
+  if (before.row.state !== "CLOSED") {
+    // Reopening an already-OPEN issue stays idempotent (the pre-seam spine
+    // accepted it): ok with the observed state, no write, no persist, no journal.
+    const open = stateLabelsOf(before.row.labels);
+    return {
+      ok: true,
+      issue,
+      from: open.length > 0 ? open.join(",") : null,
+      to: (open[0] ?? "needs-triage") as LifecycleState,
+      mode,
+      observed: observedOf(before),
+    };
+  }
+  if (!deps.reopen) return fail("write-failed:no-reopen", "closed", false);
+  const write = await deps.reopen(issue);
+  if (write.ok === false) return fail(`write-failed:${write.code}`, "closed", false);
+
+  const after = await deps.view(issue);
+  if (after.ok === false || after.row.state !== "OPEN") return fail("write-unverified", "closed", true);
+
+  // Decision 5: reopening drops the close-retention clock BEFORE journaling.
+  if (deps.journal.persist) {
+    const p = await deps.journal.persist(deps.repo, issue);
+    if (p.ok === false) logger.error({ issue, error: p.error }, "[lifecycle] journal persist failed");
+  }
+  const derived = stateLabelsOf(after.row.labels);
+  await journal(
+    deps,
+    issue,
+    operatorEntry(
+      deps,
+      { kind: "transition", from: "closed", to: derived.length > 0 ? derived.join(",") : null, result: "ok", written: true },
+      jIn,
+    ),
+  );
+  return {
+    ok: true,
+    issue,
+    from: "closed",
+    to: (derived[0] ?? "needs-triage") as LifecycleState,
+    mode,
+    observed: observedOf(after),
   };
 }
 

@@ -1270,7 +1270,7 @@ def make_auto_merge(pr_number: int | str, tier: int | str, reason: str) -> dict:
     return {"type": "auto-merge", "pr_number": pr_number, "tier": tier, "reason": reason}
 
 
-def make_route_prs_to_review(reason: str) -> dict:
+def make_route_prs_to_review(reason: str, pr_numbers: list[int] | None = None) -> dict:
     """Emergency-brake action (issue #744).
 
     Emitted exactly once per turn when the operator-only emergency brake is
@@ -1281,8 +1281,16 @@ def make_route_prs_to_review(reason: str) -> dict:
     reviewPickupArmed seam (src/redis/review.ts, #745). There is intentionally
     NO `make_engage_brake` / `make_disengage_brake` counterpart — the brake is
     operator-only and the autopilot has no write path to the flag.
+
+    `pr_numbers` (#5323) is the sorted, de-duplicated PR set the brake
+    displaces (the auto-merge sweep set); it may be empty. The playbook binding
+    labels exactly this list and never enumerates PRs itself.
     """
-    return {"type": "route-prs-to-review", "reason": reason}
+    return {
+        "type": "route-prs-to-review",
+        "reason": reason,
+        "pr_numbers": sorted({int(n) for n in (pr_numbers or [])}),
+    }
 
 
 def make_apply_operator_approved(pr_number: int | str, tier: int | str, reason: str, mechanical: bool) -> dict:
@@ -2507,15 +2515,63 @@ def _rule_slot_events(state: dict, now: int) -> tuple[_RuleOutput, list[dict]]:
     return out, synthesised_completions
 
 
-def _rule_completion_reaps(events: list[dict]) -> _RuleOutput:
-    """Step 2 — completion reaps first (INV-006 — reap before dispatch).
+# Fable instant-death replay (#5323, ADR-0047 Decision 8). A Fable dispatch
+# that dies with ZERO tokens and ZERO tool uses inside this many ms never
+# started (the observed shape is <1s; the margin absorbs harness jitter).
+INSTANT_DEATH_MAX_MS = 5000
 
-    This rule is the ONLY producer of `reap` actions, and it MUST fire for
-    every subagent completion — pipeline OR signal class. We intentionally do
-    NOT filter by PIPELINE_SLOTS / SIGNAL_CLASSES membership: a reap for an
-    unknown class is still safer than a missed reap (reap.py is idempotent and
-    the unknown-class path is a no-op on slot bookkeeping). The `class` key is
-    accepted as a synonym of `slot`.
+
+def _event_int(ev: dict, key: str) -> int | None:
+    """Strict integer read of a completion-event usage field (bool/None/str -> None)."""
+    v = ev.get(key)
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _dispatch_model_alias(state: dict, slot: str) -> str | None:
+    """The model alias the dead dispatch resolved to: the recorded
+    `prompt_args.escalate_model` hint wins, else the classes.json `model` column."""
+    rec = (state.get("last_dispatch_by_class") or {}).get(slot)
+    pa = rec.get("prompt_args") if isinstance(rec, dict) else None
+    hint = pa.get("escalate_model") if isinstance(pa, dict) else None
+    if isinstance(hint, str) and hint:
+        return hint
+    for row in CLASS_TAXONOMY:
+        if row["name"] == slot:
+            model = row.get("model")
+            return model if isinstance(model, str) and model else None
+    return None
+
+
+def is_fable_instant_death(ev: dict, state: dict) -> bool:
+    """True iff a `completion` event is a Fable instant death: total_tokens == 0
+    AND tool_uses == 0 AND 0 <= duration_ms < INSTANT_DEATH_MAX_MS AND the dead
+    dispatch resolved to Fable (`fable`, or `inherit` which may be Fable). Any
+    usage field missing or non-integer -> False (a normal completion)."""
+    if ev.get("type") != "completion":
+        return False
+    tokens, tools, dur = (_event_int(ev, k) for k in ("total_tokens", "tool_uses", "duration_ms"))
+    if tokens != 0 or tools != 0 or dur is None or not (0 <= dur < INSTANT_DEATH_MAX_MS):
+        return False
+    slot = ev.get("slot") or ev.get("class")
+    if not slot:
+        return False
+    return _dispatch_model_alias(state, slot) in ("fable", "inherit")
+
+
+def _rule_completion_reaps(events: list[dict], state: dict | None = None) -> _RuleOutput:
+    """Step 2 - emit a `reap` action for every `completion` event (INV-006).
+
+    The playbook turns a harness task-completion notification into a typed
+    `completion` event with `slot`, `task_id` and `total_tokens` (and, for the
+    #5323 instant-death arm, the verbatim `tool_uses`, `duration_ms` and
+    `notice` first line). Reaping an unknown class is still safer than a missed
+    reap (reap.py is idempotent and the unknown-class path is a no-op on slot
+    bookkeeping). The `class` key is accepted as a synonym of `slot`.
+
+    A Fable instant death (`is_fable_instant_death`) reaps with
+    `instant_death: true`, the transcribed `notice` and the resolved
+    `dispatch_model` (omitted for `inherit`) so reap.py can report the
+    out-of-credits line to the usage tracker (#5323 INV-7).
     """
     out = _RuleOutput()
     for ev in events:
@@ -2526,8 +2582,105 @@ def _rule_completion_reaps(events: list[dict]) -> _RuleOutput:
         tokens = int(ev.get("total_tokens") or 0)
         skill = ev.get("skill")
         if slot and task_id:
-            out.emit(make_reap(slot, task_id, tokens, skill), reason=f"reap:{slot}")
+            action = make_reap(slot, task_id, tokens, skill)
+            if isinstance(state, dict) and is_fable_instant_death(ev, state):
+                action["instant_death"] = True
+                notice = ev.get("notice")
+                action["notice"] = notice.strip().splitlines()[0] if isinstance(notice, str) and notice.strip() else ""
+                alias = _dispatch_model_alias(state, slot)
+                if alias and alias != "inherit":
+                    action["dispatch_model"] = alias
+            out.emit(action, reason=f"reap:{slot}")
     return out
+
+
+def _rule_instant_death_replay(
+    state: dict,
+    events: list[dict],
+    *,
+    dispatch_blocked: bool = False,
+    shed_classes: set[str] = frozenset(),
+) -> tuple[_RuleOutput, set[str]]:
+    """Step 2.45 - replay a Fable instant death ONCE on opus (#5323).
+
+    The replay is the identical recorded dispatch (`last_dispatch_by_class`)
+    with `escalate_model: opus`, `attempt + 1` and
+    `prior_attempt_status: instant-death`. Bounded (a recorded
+    `instant-death` dispatch is never replayed again), join-checked (a slot's
+    `dispatch_id` must equal the recorded `worktreeBranch`), and suppressed -
+    with a named reason - under the usage hard stop / shed. Returns the replayed
+    class set so the escalation, signal and pipeline rules never double-dispatch.
+    """
+    out = _RuleOutput()
+    replayed: set[str] = set()
+    slots = state.get("slots") or {}
+    recorded = state.get("last_dispatch_by_class") or {}
+    for ev in events:
+        if not is_fable_instant_death(ev, state):
+            continue
+        cls = ev.get("slot") or ev.get("class")
+        if cls in replayed:
+            continue
+        rec = recorded.get(cls) if isinstance(recorded, dict) else None
+        if not isinstance(rec, dict) or not rec.get("skill") or not rec.get("worktreeBranch"):
+            out.reasons.append(f"instant-death-unjoinable:{cls}")
+            continue
+        # INV-3 (#5323): the dispatch_id join applies only to a pipeline class (one
+        # with a `state.slots` entry). A signal class has no slot record
+        # (stamp-slot.py writes only `signal_last_fired`), so the recorded
+        # `last_dispatch_by_class` alone joins it.
+        if cls in slots:
+            slot_obj = slots.get(cls)
+            slot_dispatch = slot_obj.get("dispatch_id") if isinstance(slot_obj, dict) else None
+            if not slot_dispatch or slot_dispatch != rec.get("worktreeBranch"):
+                out.reasons.append(f"instant-death-unjoinable:{cls}")
+                continue
+        prior_args = rec.get("prompt_args") if isinstance(rec.get("prompt_args"), dict) else {}
+        if prior_args.get("prior_attempt_status") == "instant-death":
+            out.reasons.append(f"instant-death-replay-exhausted:{cls}")
+            continue
+        if dispatch_blocked:
+            out.reasons.append(f"instant-death-replay-suppressed:{cls}:usage_dispatch_blocked")
+            continue
+        if cls in shed_classes:
+            out.reasons.append(f"instant-death-replay-suppressed:{cls}:usage_shed")
+            continue
+        try:
+            prior_attempt = int(prior_args.get("attempt") or 1)
+        except (TypeError, ValueError):  # intentional: a non-numeric recorded attempt restarts the count at 1
+            prior_attempt = 1
+        args = dict(prior_args)
+        args.update({
+            "escalate_model": "opus",
+            "attempt": prior_attempt + 1,
+            "prior_attempt_status": "instant-death",
+        })
+        out.emit(
+            make_dispatch(cls, rec["skill"], prompt_args=args, reason=f"instant-death-replay:{cls}"),
+            reason=f"instant-death-replay:{cls}",
+        )
+        out.dispatched += 1
+        replayed.add(cls)
+    return out, replayed
+
+
+def _record_last_dispatches(actions: list[dict], state: dict) -> None:
+    """Record every emitted dispatch in `state.last_dispatch_by_class` (the
+    decide-owned ledger row the next turn's instant-death replay reads)."""
+    last = state.get("last_dispatch_by_class")
+    last = dict(last) if isinstance(last, dict) else {}
+    changed = False
+    for a in actions:
+        if isinstance(a, dict) and a.get("type") == "dispatch" and a.get("slot"):
+            last[a["slot"]] = {
+                "turn": int(state.get("turn", 0) or 0),
+                "skill": a.get("skill"),
+                "prompt_args": a.get("prompt_args") or {},
+                "worktreeBranch": a.get("worktreeBranch"),
+            }
+            changed = True
+    if changed:
+        state["last_dispatch_by_class"] = last
 
 
 # Per-class board-saturation signal name for the escalation saturation guard
@@ -2547,6 +2700,7 @@ def _rule_escalation(
     *,
     dispatch_blocked: bool = False,
     shed_classes: set[str] = frozenset(),
+    skip_slots: set[str] = frozenset(),
 ) -> tuple[_RuleOutput, set[str]]:
     """Cascade-routing escalation re-dispatch (issue #3274, design-concept issue-3274).
 
@@ -2629,12 +2783,14 @@ def _rule_escalation(
         slot = fields.get("slot") or "unknown"
         if slot not in ESCALATION_POLICY:
             continue
+        if slot in skip_slots:  # #5323: the instant-death replay already re-dispatched this class
+            continue
         status = fields.get("status") or "unknown"
         # Attempt number of the dispatch that JUST stopped (1 = original).
         slot_obj = slots.get(slot)
         try:
             prior_attempt = int(slot_obj.get("attempt")) if isinstance(slot_obj, dict) and slot_obj.get("attempt") is not None else 1
-        except (TypeError, ValueError):
+        except (TypeError, ValueError):  # intentional: a non-numeric recorded attempt restarts the count at 1
             prior_attempt = 1
         sat_signal = ESCALATION_SATURATION_SIGNAL.get(slot)
         board_saturated = bool(sat_signal and _signal_present(state, events, sat_signal))
@@ -2849,8 +3005,19 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
     emergency_brake = _normalize_emergency_brake(ts.blob(state, "emergency_brake"))
     if emergency_brake["engaged"]:
         out.debug["emergency_brake_engaged"] = True
+        displaced: list[int] = []
+        for ev in [e for e in events if e.get("type") == "qa-verdict"] + ts.qa_verdict_recheck(
+            state, events, "orch_qa_verdict_recheck"
+        ):
+            try:
+                displaced.append(int(ev.get("pr_number")))
+            except (TypeError, ValueError):  # intentional: an event without an integer PR number names no PR
+                continue
         out.emit(
-            make_route_prs_to_review("emergency brake engaged — all auto-merge paused, routing open PRs to /hydra-review"),
+            make_route_prs_to_review(
+                "emergency brake engaged — all auto-merge paused, routing open PRs to /hydra-review",
+                displaced,
+            ),
             reason="emergency-brake:route-prs-to-review",
         )
         # Skip the per-PR auto-merge sweep entirely — the brake overrides the
@@ -3066,6 +3233,7 @@ def _rule_pipeline_dispatch(
     *,
     dispatch_blocked: bool,
     shed_classes: set[str],
+    skip_slots: set[str] = frozenset(),
 ) -> _RuleOutput:
     """Step 4 — pipeline dispatch over the fixed slots, in priority order.
 
@@ -3097,6 +3265,8 @@ def _rule_pipeline_dispatch(
     )
 
     for cls in pipeline_priority:
+        if cls in skip_slots:  # #5323: already replayed this turn (instant-death)
+            continue
         if dispatch_blocked:
             # Budget-style suppression: usage tracker said "allow=False".
             out.events.append(
@@ -4070,7 +4240,7 @@ def decide(
         events = synthesised_completions + events
 
     # 2. Completion reaps first (INV-006 — reap before dispatch).
-    fold(_rule_completion_reaps(events))
+    fold(_rule_completion_reaps(events, state))
 
     # 2.4. Subscription Usage Tracker eligibility gate (PR B1). Read AHEAD of the
     #      escalation rule (step 2.5) — `_rule_usage_eligibility` is pure over
@@ -4091,10 +4261,19 @@ def decide(
     #      hard-suppresses the re-dispatch under the usage gate so a cheap-tier
     #      no_op cannot trigger a MORE expensive Sonnet escalation near budget
     #      exhaustion (issue #3274 QA blocker) — mirroring the pipeline/signal rules.
+    #      2.45 (#5323): a Fable instant death is replayed once on opus BEFORE
+    #      the escalation rule; the replayed class joins escalated_slots so no
+    #      later rule double-dispatches it.
+    replay_out, replayed_slots = _rule_instant_death_replay(
+        state, events, dispatch_blocked=dispatch_blocked, shed_classes=shed_classes
+    )
+    fold(replay_out)
     escalation_out, escalated_slots = _rule_escalation(
-        state, events, now, dispatch_blocked=dispatch_blocked, shed_classes=shed_classes
+        state, events, now, dispatch_blocked=dispatch_blocked, shed_classes=shed_classes,
+        skip_slots=replayed_slots,
     )
     fold(escalation_out)
+    escalated_slots = escalated_slots | replayed_slots
 
     # 3. Auto-merge sweep — before dispatch so freed PRs don't compete with
     #    new work; emergency brake (issue #744) overrides the depth verdict.
@@ -4111,6 +4290,7 @@ def decide(
     pipeline_out = _rule_pipeline_dispatch(
         state, candidates, events, scope, now,
         dispatch_blocked=dispatch_blocked, shed_classes=shed_classes,
+        skip_slots=replayed_slots,
     )
     fold(pipeline_out)
 
@@ -4124,6 +4304,7 @@ def decide(
 
     dispatched_any = (
         pipeline_out.dispatched + signal_out.dispatched + escalation_out.dispatched
+        + replay_out.dispatched
     ) > 0
     skipped_count = pipeline_out.skipped + signal_out.skipped
 
@@ -4150,6 +4331,7 @@ def decide(
     #    (issue #527 / issue #692) — once per plan, after dispatch decisions
     #    are finalised, so every dispatch carries a stable identifier.
     _stamp_dispatch_metadata(plan.actions, state)
+    _record_last_dispatches(plan.actions, state)
 
     # Slice A observability close-out (issue #668). Emit `turn_end` last
     # so the dashboard knows the turn finished decision-making cleanly

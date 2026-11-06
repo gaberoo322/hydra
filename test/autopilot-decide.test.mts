@@ -461,6 +461,7 @@ describe("decide.py — retired candidate-feed no longer forces research_target 
       const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
       assert.equal(dispatch, undefined);
       const after = JSON.parse(readFileSync(t.state, "utf-8"));
+      delete after.last_dispatch_by_class; // #5323: the decide-owned dispatch record is expected
       assert.deepEqual(
         after,
         { ...before, turn: before.turn + 1 },
