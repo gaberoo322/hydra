@@ -4,7 +4,7 @@
   "files": {
     "docs/agents/issue-tracker.md": 2,
     "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md": 1,
-    "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md": 4,
+    "docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md": 3,
     "docs/operator-playbooks/hydra-architecture-scan.md": 3,
     "docs/operator-playbooks/hydra-discover.md": 2,
     "docs/operator-playbooks/hydra-grill.md": 2,
@@ -21,7 +21,6 @@
     "scripts/ci/hydra-target-cleanup-emit.ts": 2,
     "scripts/ci/hydra-target-wire-or-retire-emit.ts": 2,
     "scripts/qa/pair-graduation.ts": 1,
-    "src/glm/drainer-driver.ts": 2,
     "src/glm/finish.ts": 6,
     "src/operator-actions/registry.ts": 6,
     "src/pattern-memory/escalation.ts": 2,

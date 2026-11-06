@@ -107,6 +107,7 @@
     "test/hydra-target-wire-or-retire-emit.test.mts": "grandfathered",
     "test/launch-flow-key-contract.test.mts": "grandfathered",
     "test/learning-friction-capture.test.mts": "grandfathered",
+    "test/lifecycle-dispatch-claim.test.mts": "drift-guard",
     "test/lifecycle-journal.test.mts": "invariant-lint",
     "test/lifecycle-reconcile.test.mts": "behaviour",
     "test/lifecycle-vocabulary-drift.test.mts": "drift-guard",

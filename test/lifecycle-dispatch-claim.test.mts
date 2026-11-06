@@ -250,7 +250,7 @@ describe("playbook + lint-ratchet shape (INV-5, INV-10)", () => {
     };
     assert.equal(base.files["docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md"], 3);
     assert.equal(base.files["src/glm/drainer-driver.ts"], undefined);
-    assert.equal(base.files["docs/operator-playbooks/hydra-qa.md"], 11, "qa sites stay at 11 (#5317/#5321 territory)");
+    assert.equal(base.files["docs/operator-playbooks/hydra-qa.md"], undefined, "qa sites migrated to the seam by #5317");
   });
 });
 
