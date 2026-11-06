@@ -219,7 +219,7 @@ describe("runPick — grill-clear admission table (ported D9, issue #4286 rows)"
 
 describe("runPick — held lifecycle claim skip (#5315)", () => {
   test("a candidate with a held dispatch claim is skipped; the next candidate is picked", async () => {
-    const h = harness({ issues: [cand(130, [], "", "2026-08-01T00:00:00Z"), cand(131, [], "", "2026-08-02T00:00:00Z")] });
+    const h = harness({ issues: [cand(130, ["cleanup-scan"], "", "2026-08-01T00:00:00Z"), cand(131, ["cleanup-scan"], "", "2026-08-02T00:00:00Z")] });
     h.deps.claimHeld = async (n) => n === 130;
     const r = await runPick(h.deps);
     assert.equal(picked(r), 131);

@@ -111,7 +111,7 @@ describe("lifecycle-journal Redis seam (issue #5310)", () => {
     const ttl = await redis.ttl(lifecycleClaimKey(REPO, ISSUE));
     assert.ok(ttl > 0 && ttl <= 600, `ttl=${ttl}`);
     const second = await openDispatchClaim(REPO, ISSUE, { ...claim, dispatchId: "d2" }, 600);
-    assert.equal(!second.ok && second.code, "claim-held");
+    assert.equal(second.ok === false && second.code, "claim-held");
     await closeDispatchClaim(REPO, ISSUE, "d1");
     assert.equal((await openDispatchClaim(REPO, ISSUE, claim, -5)).ok, true);
     assert.equal(await redis.ttl(lifecycleClaimKey(REPO, ISSUE)), -1);
