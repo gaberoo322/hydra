@@ -213,6 +213,18 @@
       "description": "reap-stale-test-procs.sh — defense in depth for issue #226."
     },
     {
+      "path": "scripts/reap-stale-tmp.sh",
+      "name": "reap-stale-tmp.sh",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/reap-stale-tmp.sh"
+      },
+      "kind": "sh",
+      "description": "reap-stale-tmp.sh — out-of-process safety net for leaked test temp dirs in"
+    },
+    {
       "path": "scripts/redis-backup.sh",
       "name": "redis-backup.sh",
       "execStart": null,
@@ -451,6 +463,30 @@
       },
       "kind": "timer",
       "description": "Hourly Hydra stale-process reaper (issue #226 defense in depth)"
+    },
+    {
+      "path": "scripts/systemd/hydra-tmp-reaper.service",
+      "name": "hydra-tmp-reaper.service",
+      "execStart": "/bin/bash -c '${HYDRA_ROOT}/scripts/reap-stale-tmp.sh --apply --max-age 720'",
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/systemd/hydra-tmp-reaper.service"
+      },
+      "kind": "service",
+      "description": "Hydra stale test temp-dir reaper for the shared /tmp (2026-10-31 inode exhaustion)"
+    },
+    {
+      "path": "scripts/systemd/hydra-tmp-reaper.timer",
+      "name": "hydra-tmp-reaper.timer",
+      "execStart": null,
+      "triggers": "hydra-tmp-reaper.service",
+      "schedule": "hourly",
+      "source": {
+        "path": "scripts/systemd/hydra-tmp-reaper.timer"
+      },
+      "kind": "timer",
+      "description": "Hourly Hydra stale test temp-dir reaper (2026-10-31 inode exhaustion)"
     },
     {
       "path": "scripts/systemd/hydra-watchdog.service",
