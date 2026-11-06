@@ -247,33 +247,40 @@ export class OperatorChannel {
       if (unknownKind) logger.warn({ kind }, "[OperatorChannel] report() for a kind with no table row — briefing it");
       const msg = messageFromEvent({ type: kind, payload });
 
-      let outcome: ReportResult["outcome"];
-      let delivered: boolean;
-      if (disposition === "page") {
-        const res = await this.serialize(msg.dedupKey, () => this.pageUnlocked(msg));
-        outcome = res;
-        delivered = res.sent;
-      } else {
-        const res = await this.serialize(msg.dedupKey, () => this.briefUnlocked(msg));
-        outcome = res;
-        delivered = res.appended;
-      }
-
-      let alertWritten = false;
+      // The dashboard alert is independent of delivery: start it FIRST so a
+      // throwing or slow page/brief transport can neither drop nor delay it.
+      let alertPromise: Promise<boolean> = Promise.resolve(false);
       if (row && resolveAlert(row, payload)) {
         const severity = row.alertSeverity ?? (disposition === "page" ? "error" : "info");
-        alertWritten = await this.writeAlert(
-          {
-            id: meta?.id || `alert-${this.now()}`,
-            type: kind,
-            timestamp: meta?.timestamp || new Date(this.now()).toISOString(),
-            message: formatAlertMessage({ type: kind, payload }),
-            severity,
-            dismissed: false,
-            payload,
-          },
-        );
+        alertPromise = this.writeAlert({
+          id: meta?.id || `alert-${this.now()}`,
+          type: kind,
+          timestamp: meta?.timestamp || new Date(this.now()).toISOString(),
+          message: formatAlertMessage({ type: kind, payload }),
+          severity,
+          dismissed: false,
+          payload,
+        });
       }
+
+      let outcome: ReportResult["outcome"];
+      let delivered: boolean;
+      try {
+        if (disposition === "page") {
+          const res = await this.serialize(msg.dedupKey, () => this.pageUnlocked(msg));
+          outcome = res;
+          delivered = res.sent;
+        } else {
+          const res = await this.serialize(msg.dedupKey, () => this.briefUnlocked(msg));
+          outcome = res;
+          delivered = res.appended;
+        }
+      } catch (err) {
+        logger.error({ err, kind }, "[OperatorChannel] report() delivery failed (non-fatal)");
+        delivered = false;
+        outcome = disposition === "page" ? { sent: false, reason: "transport-failed" } : { appended: false };
+      }
+      const alertWritten = await alertPromise;
       return { disposition, delivered, alertWritten, unknownKind, outcome };
     } catch (err) {
       logger.error({ err, kind }, "[OperatorChannel] report() failed (non-fatal)");

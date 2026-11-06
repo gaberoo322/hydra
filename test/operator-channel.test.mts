@@ -639,6 +639,34 @@ describe("OperatorChannel.report()", () => {
     assert.equal(alerts[0].severity, "error");
   });
 
+  test("the alert write starts before delivery: a transport that waits on the alert still completes (QA #5394 finding 2)", async () => {
+    let seen!: () => void;
+    const alertSeen = new Promise<void>((r) => (seen = r));
+    const ch = new OperatorChannel({
+      store: memoryStore().store,
+      transport: async () => {
+        await alertSeen; // deadlocks if the alert is only written after the page step
+        return { ok: true, mode: "HTML" };
+      },
+      now: clock().now,
+      alerts: async () => (seen(), true),
+    });
+    const res = await Promise.race([
+      ch.report("launch:quota_stretch", {}),
+      new Promise<"hung">((r) => setTimeout(() => r("hung"), 1000)),
+    ]);
+    assert.notEqual(res, "hung");
+    assert.equal((res as { alertWritten: boolean }).alertWritten, true);
+  });
+
+  test("sibling shape: a page-only kind (no alert) still delivers and writes none", async () => {
+    const { ch, tr, alerts } = setup();
+    const res = await ch.report("launch:pause_forgotten", {});
+    assert.equal(res.delivered, true);
+    assert.equal(tr.sent.length, 1);
+    assert.equal(alerts.length, 0);
+  });
+
   test("never throws: a failing alert writer and a failing store both resolve to a result", async () => {
     const boom = setup(async () => {
       throw new Error("redis down");
