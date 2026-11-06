@@ -141,3 +141,12 @@ describe("hydra-review — the hitl-grill bucket is gone", () => {
     assert.match(review, /never gather, report, promote, close, relabel, or comment on a parked idea here/i);
   });
 });
+
+describe("hydra-hitl-grill — the board routes are the only exit (ADR-0047, #5321)", () => {
+  test("lifecycle advance is never pointed at a hitl-grill issue; the two routes are the sanctioned operator-route exit", () => {
+    assert.match(grill, /sanctioned `operator-route` exit from `hitl-grill`/);
+    assert.match(grill, /never point `scripts\/lifecycle\.ts advance` at a\s+hitl-grill issue/);
+    // No playbook step may itself run `advance` on a parked row.
+    assert.doesNotMatch(grill, /npx tsx scripts\/lifecycle\.ts advance/);
+  });
+});
