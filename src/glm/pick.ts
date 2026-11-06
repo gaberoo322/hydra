@@ -40,7 +40,16 @@ import {
 import { listOpenPrs, type PrRow } from "../github/prs.ts";
 import { gitExec, lsRemoteHeads } from "../github/git.ts";
 import { setGlmDrainerLastPick } from "../redis/autopilot.ts";
-import { readDispatchClaim } from "../redis/lifecycle-journal.ts";
+import { readDispatchClaim, type DispatchClaim } from "../redis/lifecycle-journal.ts";
+import { LEGACY_BACKFILL_CLASS } from "../lifecycle/index.ts";
+
+/**
+ * Whether a held dispatch claim should make GLM skip the issue. A legacy-backfill placeholder
+ * is takeover-able (`openClaim` releases it for the real dispatch), so it never blocks a pick.
+ */
+export function claimBlocksPick(claim: DispatchClaim | null): boolean {
+  return claim !== null && claim.class !== LEGACY_BACKFILL_CLASS;
+}
 
 /** In-progress issues idle longer than this are re-queued (matches bash, 90 min). */
 export const STALE_IN_PROGRESS_SECONDS = 5400;
@@ -322,7 +331,7 @@ export function buildDefaultPickDeps(env: NodeJS.ProcessEnv = process.env): Pick
     },
     claimHeld: async (issue) => {
       const r = await readDispatchClaim(resolveGithubRepo(), issue);
-      return r.ok === true && r.claim !== null;
+      return r.ok === true && claimBlocksPick(r.claim);
     },
     runRecoverStale: (issues) =>
       runRecoverStaleScript(`${repoRoot}/scripts/autopilot/recover-stale.sh`, issues),

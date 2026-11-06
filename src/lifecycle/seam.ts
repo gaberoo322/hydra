@@ -73,6 +73,7 @@ import {
   countReviewedFailRoundsSinceReset,
   evaluateCaps,
   isJournalMiss,
+  classRole,
   latestResetMs,
   resolveCapLimits,
   type CapAttempt,
@@ -80,7 +81,6 @@ import {
   type TimelineLabelEvent,
 } from "./caps.ts";
 import { parkForCap } from "./park.ts";
-import { classRole } from "./caps.ts";
 import {
   findOperatorTransition,
   findTransition,
@@ -1140,6 +1140,24 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
 }
 
 /**
+ * Release whichever claim is currently held on `issue` (the stale-requeue arm of
+ * recover-stale: the owner is gone). Reads the claim, then releases it through the same
+ * atomic compare-and-delete on the id it read, so a claim re-opened between the read and
+ * the delete is never deleted. A no-claim issue is a no-op success.
+ */
+export async function releaseHeldClaim(
+  issue: number,
+  deps: SeamDeps,
+  actor = "cli",
+  outcome?: ClaimOutcome,
+): Promise<{ ok: true; prior: DispatchClaim | null } | { ok: false; code: "redis-failed" | "claim-owner-mismatch" }> {
+  const held = await deps.journal.readClaim(deps.repo, issue);
+  if (held.ok === false) return { ok: false, code: "redis-failed" };
+  if (held.claim === null) return { ok: true, prior: null };
+  return releaseClaim(issue, held.claim.dispatchId, deps, actor, outcome);
+}
+
+/**
  * Release a dispatch claim. `dispatchId` is REQUIRED: every release goes through
  * the atomic compare-and-delete ownership check (INV-11), so a release can never
  * delete a claim another dispatch holds. There is deliberately no force path.
@@ -1277,4 +1295,83 @@ export async function dispatch(input: DispatchInput, deps: SeamDeps): Promise<Di
     ...(adv.wouldRefuse !== undefined ? { wouldRefuse: adv.wouldRefuse } : {}),
     ...(wouldPark !== undefined ? { wouldPark } : {}),
   };
+}
+
+// ---------------------------------------------------------------------------
+// rollbackDispatch (ADR-0047 D4, issue #5315): undo a dispatch whose Agent never spawned
+// ---------------------------------------------------------------------------
+
+/** Journal `reason` of a dispatcher rollback; excluded from the stale-requeue cap arm. */
+export const DISPATCH_ROLLBACK_REASON = "dispatch-rollback";
+
+export interface RollbackInput {
+  issue: number;
+  dispatchId: string;
+  actor?: string;
+}
+
+export type RollbackResult =
+  | {
+      ok: true;
+      /** The state label restored; `null` when this dispatch never advanced (only the claim was released). */
+      restored: "ready-for-agent" | "needs-dev-resume" | null;
+      observed?: { state: string; labels: string[] };
+    }
+  | { ok: false; code: string };
+
+/**
+ * Release the dispatch claim (ownership-checked) and, ONLY when this dispatch's own
+ * `-> in-progress` transition is in the journal, return the issue to the state it was
+ * dispatched from. The prior state comes from that journal entry, never from a guess,
+ * and the move is a dispatcher-owned verb (not the gated `in-progress -> ready-for-agent`
+ * reconcile edge), so it works in enforce mode and is tagged so it never eats the
+ * stale-requeue cap. Never throws; never writes a label it did not itself advance.
+ */
+export async function rollbackDispatch(input: RollbackInput, deps: SeamDeps): Promise<RollbackResult> {
+  const { issue, dispatchId } = input;
+  const actor = input.actor ?? "cli";
+  const rel = await releaseClaim(issue, dispatchId, deps, actor, "released");
+  if (rel.ok === false) return { ok: false, code: rel.code };
+
+  const jr = await deps.journal.read(deps.repo, issue);
+  if (jr.ok === false) return { ok: false, code: "journal-read-failed" };
+  const advanced = [...jr.entries]
+    .reverse()
+    .find(
+      (e) =>
+        e.kind === "transition" &&
+        e.written === true &&
+        e.to === "in-progress" &&
+        e.evidence.dispatch === dispatchId,
+    );
+  const prior = advanced?.from ?? null;
+  if (prior !== "ready-for-agent" && prior !== "needs-dev-resume") return { ok: true, restored: null };
+
+  const view = await deps.view(issue);
+  if (view.ok === false) return { ok: false, code: "fetch-failed" };
+  const labels = stateLabelsOf(view.row.labels);
+  if (view.row.state === "CLOSED" || labels.length !== 1 || labels[0] !== "in-progress") {
+    return { ok: true, restored: null, observed: observedOf(view) };
+  }
+  const write = await deps.edit(issue, { remove: ["in-progress"], add: [prior] });
+  if (write.ok === false) return { ok: false, code: `write-failed:${write.code}` };
+  const after = await deps.view(issue);
+  if (!(after.ok && after.row.labels.includes(prior) && !after.row.labels.includes("in-progress"))) {
+    return { ok: false, code: "write-unverified" };
+  }
+  await journalEntry(deps, issue, {
+    v: 1,
+    ts: deps.now(),
+    kind: "transition",
+    from: "in-progress",
+    to: prior,
+    source: "cli",
+    actor,
+    evidence: { dispatch: dispatchId },
+    reason: DISPATCH_ROLLBACK_REASON,
+    rationale: null,
+    result: "ok",
+    written: true,
+  });
+  return { ok: true, restored: prior, observed: observedOf(after) };
 }

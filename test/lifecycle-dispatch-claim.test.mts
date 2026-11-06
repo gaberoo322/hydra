@@ -11,9 +11,11 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { dispatch, openClaim, type LifecycleMode, type SeamDeps } from "../src/lifecycle/seam.ts";
+import { dispatch, openClaim, releaseHeldClaim, rollbackDispatch, type LifecycleMode, type SeamDeps } from "../src/lifecycle/seam.ts";
 import { runBackfill } from "../scripts/lifecycle-legacy-backfill.ts";
 import { claimOutcomeOf } from "../src/glm/drainer-driver.ts";
+import { entryContribution } from "../src/lifecycle/caps.ts";
+import { claimBlocksPick } from "../src/glm/pick.ts";
 import type { DispatchClaim, LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
 
 const NOW = Date.parse("2026-11-05T12:00:00Z");
@@ -151,6 +153,73 @@ describe("dispatch composite verb (INV-1)", () => {
   });
 });
 
+describe("rollbackDispatch: a dispatcher-owned undo that works in enforce (QA round 4)", () => {
+  test("enforce: fresh dispatch is rolled back to ready-for-agent, claim released, rollback tagged", async () => {
+    const w = world("enforce", ["ready-for-agent"]);
+    assert.equal((await dispatch(input(), w.deps)).ok, true);
+    assert.deepEqual(w.labels, ["in-progress"]);
+    const res = await rollbackDispatch({ issue: 42, dispatchId: "worktree-agent-aaaa-t1-dev_orch" }, w.deps);
+    assert.equal(res.ok && res.restored, "ready-for-agent");
+    assert.deepEqual(w.labels, ["ready-for-agent"]);
+    assert.equal(w.claim, null);
+    const last = w.journal[w.journal.length - 1];
+    assert.equal(last.reason, "dispatch-rollback");
+    assert.equal(last.written, true);
+  });
+
+  test("sibling: a resume dispatch is restored to needs-dev-resume (prior comes from the journal)", async () => {
+    const w = world("enforce", ["needs-dev-resume"]);
+    await dispatch(input({ purpose: "resume" }), w.deps);
+    const res = await rollbackDispatch({ issue: 42, dispatchId: "worktree-agent-aaaa-t1-dev_orch" }, w.deps);
+    assert.equal(res.ok && res.restored, "needs-dev-resume");
+    assert.deepEqual(w.labels, ["needs-dev-resume"]);
+  });
+
+  test("a dispatch that never advanced (non-dispatchable state) only releases the claim, no label write", async () => {
+    const w = world("enforce", ["in-progress"]);
+    const d = await dispatch(input({ purpose: "resume" }), w.deps);
+    assert.equal(d.ok && d.advanceSkipped, "non-dispatchable-state");
+    const res = await rollbackDispatch({ issue: 42, dispatchId: "worktree-agent-aaaa-t1-dev_orch" }, w.deps);
+    assert.equal(res.ok && res.restored, null);
+    assert.equal(w.edits.length, 0);
+    assert.deepEqual(w.labels, ["in-progress"]);
+    assert.equal(w.claim, null);
+  });
+
+  test("another dispatch's claim is never released nor its label moved (ownership)", async () => {
+    const w = world("enforce", ["ready-for-agent"]);
+    await dispatch(input(), w.deps);
+    const res = await rollbackDispatch({ issue: 42, dispatchId: "someone-else" }, w.deps);
+    assert.equal(res.ok, false);
+    assert.deepEqual(w.labels, ["in-progress"]);
+  });
+
+  test("a rollback entry does not count toward stale-requeue; a plain in-progress -> ready-for-agent does", () => {
+    const base = { ts: 1, kind: "transition", from: "in-progress", to: "ready-for-agent", evidence: {}, result: "ok", written: true };
+    assert.equal(entryContribution("stale-requeue", { ...base, reason: "dispatch-rollback" }), 0);
+    assert.equal(entryContribution("stale-requeue", { ...base, reason: null }), 1);
+  });
+
+  test("releaseHeldClaim frees whichever claim is held (stall); no claim is a no-op", async () => {
+    const w = world("enforce", ["in-progress"]);
+    assert.deepEqual(await releaseHeldClaim(42, w.deps, "t", "stall"), { ok: true, prior: null });
+    await openClaim({ issue: 42, dispatchId: "d1", class: "dev_orch", run: "r" }, w.deps);
+    const r = await releaseHeldClaim(42, w.deps, "t", "stall");
+    assert.equal(r.ok && r.prior?.dispatchId, "d1");
+    assert.equal(w.claim, null);
+    assert.equal(w.journal.find((e) => e.kind === "claim-closed")!.evidence.outcome, "stall");
+  });
+});
+
+describe("GLM pick: claims that block a pick (QA round 4)", () => {
+  const c = (cls: string): DispatchClaim => ({ dispatchId: "d", class: cls, run: "r", artifactHash: null, openedAt: 1 });
+  test("a held legacy-backfill placeholder (takeover-able) does not block; a real dispatch claim does", () => {
+    assert.equal(claimBlocksPick(c("legacy-backfill")), false);
+    assert.equal(claimBlocksPick(c("dev_orch")), true);
+    assert.equal(claimBlocksPick(null), false);
+  });
+});
+
 describe("SET NX is the concurrency gate in both modes (INV-2)", () => {
   for (const mode of ["shadow", "enforce"] as const) {
     test(`${mode}: a second dispatcher is refused claim-held with no label write and no journal entry`, async () => {
@@ -248,7 +317,8 @@ describe("playbook + lint-ratchet shape (INV-5, INV-10)", () => {
     const base = JSON.parse(readFileSync(join(ROOT, "test/fixtures/lifecycle-seam-baseline.json"), "utf8")) as {
       files: Record<string, number>;
     };
-    assert.equal(base.files["docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md"], 3);
+    // Shrink-only ratchet: a later legitimate shrink must not fail this guard.
+    assert.ok(base.files["docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md"] <= 3);
     assert.equal(base.files["src/glm/drainer-driver.ts"], undefined);
     assert.equal(base.files["docs/operator-playbooks/hydra-qa.md"], undefined, "qa sites migrated to the seam by #5317");
   });
@@ -367,15 +437,11 @@ describe("stamp-slot.py claim (INV-3, INV-4)", () => {
     };
     const d = run("dev_orch", { worktreeBranch: "b1", prompt_args: { anchor: "issue-5" } });
     assert.equal(d.status, 0);
-    assert.equal(
-      d.argv,
-      "tsx scripts/lifecycle.ts release 5 --dispatch b1 --outcome released\n" +
-        "tsx scripts/lifecycle.ts advance 5 ready-for-agent --reason dispatch-rollback",
-    );
-    // sibling shape: a resume dispatch rolls back to needs-dev-resume, not ready-for-agent
+    // One seam verb: the label restored is read from the journal by the seam, never guessed here.
+    assert.equal(d.argv, "tsx scripts/lifecycle.ts rollback 5 --dispatch b1");
     const rs = run("dev_orch", { worktreeBranch: "b3", prompt_args: { anchor: "issue-5", resume: true } });
     assert.equal(rs.status, 0);
-    assert.match(rs.argv, /advance 5 needs-dev-resume --reason dispatch-rollback$/);
+    assert.equal(rs.argv, "tsx scripts/lifecycle.ts rollback 5 --dispatch b3");
     const q = run("qa_orch", { worktreeBranch: "b2", prompt_args: { anchor: "issue-5" } });
     assert.equal(q.status, 0);
     assert.equal(q.argv, "");

@@ -221,7 +221,13 @@ export function timelineArmCounts(
 }
 
 function isStaleRequeueEntry(e: CapJournalEntry): boolean {
-  return e.from === "in-progress" && e.to === "ready-for-agent" && e.written === true;
+  // A dispatcher rollback (the Agent never spawned) is not a stale re-queue (#5315).
+  return (
+    e.from === "in-progress" &&
+    e.to === "ready-for-agent" &&
+    e.written === true &&
+    e.reason !== "dispatch-rollback"
+  );
 }
 
 /** How many times `e` counts toward a timeline arm (also the seed contribution). */

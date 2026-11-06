@@ -256,7 +256,9 @@ def run_claim(slot: str) -> int:
 def run_release_claim(slot: str) -> int:
     """`stamp-slot.py release-claim <slot>`: roll back the pre-spawn claim when `Agent`
     never spawned (hook deny, error), so no orphan claim blocks the next dispatch
-    (INV-3 needs its matching close). Releases with outcome `released`. Exit 0 also
+    (INV-3 needs its matching close). The seam `rollback` verb releases the claim (outcome
+    `released`) and, only when this dispatch itself advanced the issue to in-progress,
+    returns it to the state recorded in the journal (never guessed from the purpose). Exit 0 also
     when no claim applies; exit 1 when the seam refuses; exit 2: unreadable files."""
     try:
         state = run_ledger.read_prior(STATE_PATH)
@@ -271,8 +273,8 @@ def run_release_claim(slot: str) -> int:
         print(json.dumps(spec))
         return 0
     argv = [
-        "npx", "tsx", "scripts/lifecycle.ts", "release", str(spec["issue"]),
-        "--dispatch", spec["dispatch_id"], "--outcome", "released",
+        "npx", "tsx", "scripts/lifecycle.ts", "rollback", str(spec["issue"]),
+        "--dispatch", spec["dispatch_id"],
     ]
     try:
         proc = subprocess.run(argv, cwd=REPO_ROOT, capture_output=True, text=True, check=False, timeout=120)
@@ -281,23 +283,7 @@ def run_release_claim(slot: str) -> int:
         return 1
     out = (proc.stdout or "").strip()
     print(out.splitlines()[-1] if out else json.dumps({"ok": False, "code": "no-output"}))
-    if proc.returncode != 0:
-        return 1
-    # The dispatch already advanced the issue to in-progress: send it back through the seam
-    # to the state it was dispatched from, or it sits in-progress with no claim and no worker.
-    back = "ready-for-agent" if spec["purpose"] == "fresh" else "needs-dev-resume"
-    adv = [
-        "npx", "tsx", "scripts/lifecycle.ts", "advance", str(spec["issue"]), back,
-        "--reason", "dispatch-rollback",
-    ]
-    try:
-        aproc = subprocess.run(adv, cwd=REPO_ROOT, capture_output=True, text=True, check=False, timeout=120)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        print(f"[stamp-slot] release-claim label rollback failed issue=#{spec['issue']}: {exc}", file=sys.stderr)
-        return 1
-    aout = (aproc.stdout or "").strip()
-    print(aout.splitlines()[-1] if aout else json.dumps({"ok": False, "code": "no-output"}))
-    return 0 if aproc.returncode == 0 else 1
+    return 0 if proc.returncode == 0 else 1
 
 
 def main(argv: list[str]) -> int:

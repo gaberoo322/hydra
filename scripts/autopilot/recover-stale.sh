@@ -209,6 +209,10 @@ for ISSUE in "${STALE_IN_PROGRESS[@]:-}"; do
     fi
   else
     if gh issue edit "$ISSUE" --repo "$REPO" --remove-label in-progress --add-label ready-for-agent 2>/dev/null; then
+      # The owner is gone: free its dispatch claim (outcome stall) so the GLM pick filter and a
+      # fresh dispatch do not wait out the claim TTL (#5315). Best-effort, never fatal.
+      (cd "$SCRIPT_DIR/../.." && npx tsx scripts/lifecycle.ts release "$ISSUE" --held --outcome stall >/dev/null 2>&1) \
+        || echo "[autopilot] recover-stale: WARN claim release failed issue=$ISSUE (claim expires at TTL)"
       gh issue comment "$ISSUE" --repo "$REPO" --body "> *Autopilot:* Re-queued. >90 min idle in in-progress." 2>/dev/null || true
       echo "[autopilot] recover-stale: re-queued in-progress issue=$ISSUE"
     else

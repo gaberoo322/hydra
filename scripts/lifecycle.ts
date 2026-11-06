@@ -10,6 +10,8 @@
  *       [--pr N] [--purpose fresh|resume|forward-fix] [--ttl SECONDS]
  *   npx tsx scripts/lifecycle.ts release <issue> --dispatch ID
  *       [--outcome pr-opened|no-pr|verdict-posted|stall|released]
+ *   npx tsx scripts/lifecycle.ts release <issue> --held --outcome stall   (stale-requeue)
+ *   npx tsx scripts/lifecycle.ts rollback <issue> --dispatch ID
  *   npx tsx scripts/lifecycle.ts reconcile [--dry-run | --report]
  *
  * Talks to GitHub (gh) and Redis directly: no :4000 dependency. Prints one JSON
@@ -27,6 +29,8 @@ import {
   dispatch,
   openClaim,
   releaseClaim,
+  releaseHeldClaim,
+  rollbackDispatch,
   type ClaimOutcome,
   type ClaimPurpose,
 } from "../src/lifecycle/index.ts";
@@ -36,7 +40,7 @@ import { readReconcileReport } from "../src/redis/lifecycle-journal.ts";
 import { runLifecycleReconcile } from "../src/scheduler/chores/lifecycle-reconcile.ts";
 
 /** Flags that take no value (`reconcile --dry-run | --report`). */
-const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["dry-run", "report"]);
+const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["dry-run", "report", "held"]);
 
 export interface ParsedArgs {
   positional: string[];
@@ -116,9 +120,9 @@ export async function main(argv: readonly string[]): Promise<number> {
   const [verb, issueRaw, to] = parsed.positional;
   if (verb === "reconcile") return runReconcileVerb(parsed.flags);
   const issue = parseIssue(issueRaw);
-  if (issue === null || (verb !== "advance" && verb !== "claim" && verb !== "dispatch" && verb !== "release")) {
+  if (issue === null || (verb !== "advance" && verb !== "claim" && verb !== "dispatch" && verb !== "release" && verb !== "rollback")) {
     console.error(
-      "[lifecycle] usage: advance <issue> <to> | claim|dispatch <issue> --dispatch <id> ... | release <issue> --dispatch <id>",
+      "[lifecycle] usage: advance <issue> <to> | claim|dispatch <issue> --dispatch <id> ... | release|rollback <issue> --dispatch <id>",
     );
     return 2;
   }
@@ -196,15 +200,32 @@ export async function main(argv: readonly string[]): Promise<number> {
     return res.ok ? 0 : 1;
   }
 
+  if (verb === "rollback") {
+    const rbDispatch = parsed.flags.dispatch ?? parsed.flags["dispatch-id"];
+    if (!rbDispatch) {
+      console.error("[lifecycle] rollback requires --dispatch <id>");
+      return 2;
+    }
+    const rb = await rollbackDispatch({ issue, dispatchId: rbDispatch, actor: parsed.flags.actor }, deps);
+    emit(rb);
+    return rb.ok ? 0 : 1;
+  }
+
   // INV-11: release is always ownership-checked; there is no unowned/force path.
   const releaseDispatch = parsed.flags.dispatch ?? parsed.flags["dispatch-id"];
-  if (!releaseDispatch) {
-    console.error("[lifecycle] release requires --dispatch <id>");
-    return 2;
-  }
   const outcomeRaw = parsed.flags.outcome;
   if (outcomeRaw !== undefined && !(CLAIM_OUTCOMES as readonly string[]).includes(outcomeRaw)) {
     console.error(`[lifecycle] --outcome must be one of ${CLAIM_OUTCOMES.join("|")}`);
+    return 2;
+  }
+  // `--held`: release whichever claim is held (stale-requeue, the owner is gone); still a CAD.
+  if (!releaseDispatch && parsed.flags.held === "true") {
+    const held = await releaseHeldClaim(issue, deps, parsed.flags.actor, outcomeRaw as ClaimOutcome | undefined);
+    emit(held);
+    return held.ok ? 0 : 1;
+  }
+  if (!releaseDispatch) {
+    console.error("[lifecycle] release requires --dispatch <id> (or --held)");
     return 2;
   }
   const res = await releaseClaim(
