@@ -59,6 +59,7 @@ export type GateId =
   | "close"
   | "research-exit"
   | "qa-exit"
+  | "qa-verdict"
   | "not-yet-implemented";
 
 export interface Transition {
@@ -122,8 +123,10 @@ export const TRANSITIONS: readonly Transition[] = [
   { from: "needs-dev-resume", to: "ready-for-human", firedBy: "agent", gate: "adr5" },
   { from: "needs-dev-resume", to: "closed", firedBy: "agent", gate: "close" },
   // Review.
-  { from: "needs-qa", to: "qa-passed", firedBy: "agent", gate: "not-yet-implemented" },
-  { from: "needs-qa", to: "needs-dev-resume", firedBy: "agent", gate: "not-yet-implemented" },
+  { from: "needs-qa", to: "qa-passed", firedBy: "agent", gate: "qa-verdict" },
+  { from: "needs-qa", to: "needs-dev-resume", firedBy: "agent", gate: "qa-verdict" },
+  // FAIL with the PR already CLOSED (unmerged) is a fresh pick (#4766 INV-2).
+  { from: "needs-qa", to: "ready-for-agent", firedBy: "agent", gate: "qa-verdict" },
   { from: "needs-qa", to: "parked", firedBy: "cap", gate: "judgment" },
   { from: "needs-qa", to: "ready-for-human", firedBy: "agent", gate: "adr5" },
   { from: "needs-qa", to: "closed", firedBy: "reconcile", gate: "close" },
