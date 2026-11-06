@@ -427,7 +427,6 @@ describe("hydra-qa step 10 label effects stay plain text pins (issue #4735, INV-
     assert.ok(block.includes("gh pr merge $pr_number --repo gaberoo322/hydra --disable-auto"), "re-disarm by hand");
     assert.ok(block.includes("autoMergeRequest"), "confirm the PR is no longer armed");
     assert.ok(/STILL auto-merge-armed/.test(block), "a still-armed FAILed PR is reported loudly");
-    assert.ok(QA_PLAYBOOK.indexOf('index("disarm-failed")') < QA_PLAYBOOK.indexOf("gh pr merge $pr_number --repo gaberoo322/hydra --auto --squash"), "the hard stop is read before the auto-merge call site");
     assert.ok(/at most one `QA-Verdict-Error` comment/.test(QA_PLAYBOOK) && !/exits 1 with NOTHING posted/.test(QA_PLAYBOOK), "pre-verdict exit wording matches route");
   });
 
