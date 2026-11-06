@@ -4493,8 +4493,8 @@ def _dev_target_resume_record(action: dict, state: dict) -> dict | None:
     for `cls == "dev_target"` — the same post-gate position as the #4611
     `stamp_signal` call, so one stamp corresponds 1:1 to one emitted dispatch.
     Returns `{token, branch, pr}` iff the action is a #4739 resume pin
-    (`prompt_args.resume` True + non-empty string `resume_branch` + int
-    `resume_pr`); anything else returns None and nothing is stamped.
+    (a TargetResume intent, #5383: non-empty branch + int pr); anything else
+    returns None and nothing is stamped.
 
     `token` is the bare token of the SAME worktreeBranch the action carries —
     `action.worktreeBranch` if pre-set, else `_synthesize_worktree_branch`

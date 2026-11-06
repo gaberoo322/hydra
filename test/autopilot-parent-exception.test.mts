@@ -56,7 +56,7 @@ function baseState(over: Record<string, unknown> = {}): any {
     signal_last_fired: {},
     research_force_counter: {},
     last_dispatch_by_class: {
-      dev_target: { turn: 2, skill: "hydra-target-build", prompt_args: { anchor: "issue-9", attempt: 1 }, worktreeBranch: BRANCH },
+      dev_target: { turn: 2, skill: "hydra-target-build", prompt_args: { attempt: 1 }, intent: { kind: "TargetFresh", anchor: "issue-9" }, worktreeBranch: BRANCH },
     },
     ...over,
   };
@@ -91,7 +91,8 @@ describe("decide.py - Fable instant-death replay (#5323)", () => {
     assert.equal(reap.dispatch_model, "fable");
     const [d] = replays(plan);
     assert.equal(d.skill, "hydra-target-build");
-    assert.deepEqual(d.prompt_args, { anchor: "issue-9", attempt: 2, escalate_model: "opus", prior_attempt_status: "instant-death" });
+    assert.deepEqual(d.intent, { kind: "TargetFresh", anchor: "issue-9" });
+    assert.deepEqual(d.prompt_args, { attempt: 2, escalate_model: "opus", prior_attempt_status: "instant-death" });
     assert.equal(replays(plan).length, 1, "no double dispatch from the pipeline rule");
     assert.ok(plan.actions.indexOf(reap) < plan.actions.indexOf(d), "reap precedes dispatch (INV-006)");
     assert.equal(d.worktreeBranch.length > 0, true);
@@ -140,6 +141,17 @@ describe("decide.py - Fable instant-death replay (#5323)", () => {
     const mismatch = decide(st, [death()]);
     assert.equal(replays(mismatch.plan).length, 0);
     assert.ok(mismatch.plan.reasons.includes("instant-death-unjoinable:dev_target"));
+  });
+
+  test("a pre-intent (prompt_args-only) dev_target record is unjoinable, never replayed intent-less (#5383)", () => {
+    const st = baseState({
+      last_dispatch_by_class: {
+        dev_target: { turn: 2, skill: "hydra-target-build", prompt_args: { anchor: "issue-9", attempt: 1 }, worktreeBranch: BRANCH },
+      },
+    });
+    const { plan } = decide(st, [death()]);
+    assert.equal(replays(plan).length, 0);
+    assert.ok(plan.reasons.includes("instant-death-unjoinable:dev_target"), plan.reasons.join());
   });
 
   test("a null slot or a slot without dispatch_id is unjoinable -> no replay (INV-3 fail-closed)", () => {

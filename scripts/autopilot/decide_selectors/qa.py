@@ -126,15 +126,14 @@ def _select_slot_qa_target(
     # Post-#4576 the dispatch skill is `hydra-target-qa`, the purpose-built
     # Target QA skill (classes.json's qa_target row has always named it —
     # this selector was the drift). The previously-dispatched `hydra-qa` has
-    # NO target-scope path: nothing in it reads `prompt_args.scope`, it
-    # self-selects from the ORCHESTRATOR repo's needs-qa lane, so a literal
-    # dispatch either duplicated qa_orch's review or no-op'd (issue #4576's
-    # finding). `prompt_args.scope` stays "target" (INV-4 — the trigger's
-    # board provenance, same shape as qa_orch's "orch"), and a pre-resolved
-    # `pr_ref` is attached ONLY when `target_needs_qa_pr_ref` is a non-empty
-    # string — never "" or null — so hydra-target-qa always receives either
-    # a real PR URL or no key at all (its own step 1 resolves the PR the
-    # current Target build opened when the key is absent).
+    # NO target-scope path: it self-selects from the ORCHESTRATOR repo's
+    # needs-qa lane, so a literal dispatch either duplicated qa_orch's review
+    # or no-op'd (issue #4576's finding). Since #5383 the dispatch carries a
+    # typed intent (qa_target is target-scope by its class row): a
+    # TargetReviewPr is built ONLY when `target_needs_qa_pr_ref` is a
+    # non-empty string — never "" or null — otherwise TargetReviewSelfSelect,
+    # so hydra-target-qa always receives either a real PR URL or none (its own
+    # step 1 resolves the PR the current Target build opened).
     if _signal_present(state, events, "needs_qa_target"):
         # Issue #5383: the action carries a typed intent (no prompt_args). A
         # non-empty ref -> TargetReviewPr(pr_ref, head); absent/empty ->

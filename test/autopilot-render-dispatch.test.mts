@@ -114,6 +114,29 @@ function qaAction(intent?: Record<string, unknown>): Record<string, unknown> {
   return a;
 }
 
+/** A dev_target dispatch action carrying a typed Dispatch Intent and NO prompt_args key (#5383). */
+function devTargetAction(intent?: Record<string, unknown>): Record<string, unknown> {
+  const a = action("dev_target", "hydra-target-build", { isolation: "self", intent: intent ?? { kind: "TargetFresh" } });
+  delete a.prompt_args;
+  return a;
+}
+
+/** A qa_target dispatch action carrying a typed Dispatch Intent and NO prompt_args key (#5383). */
+function qaTargetAction(intent?: Record<string, unknown>): Record<string, unknown> {
+  const a = action("qa_target", "hydra-target-qa", { isolation: "self", intent: intent ?? { kind: "TargetReviewSelfSelect" } });
+  delete a.prompt_args;
+  return a;
+}
+
+/** The right action builder for a class: intent-bearing slots get an intent, the rest a plain action. */
+function actionFor(cls: string): Record<string, unknown> {
+  if (cls === "dev_orch") return devAction();
+  if (cls === "qa_orch") return qaAction();
+  if (cls === "dev_target") return devTargetAction();
+  if (cls === "qa_target") return qaTargetAction();
+  return action(cls, "hydra-x");
+}
+
 const dirs: string[] = [];
 after(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
@@ -181,7 +204,7 @@ describe("render-dispatch.py — preamble blocks come from the playbook fences (
   });
 
   test("dev_target (isolation self): the self-isolation guard REPLACES the default, plus its own forbidden-ending variant and the CYCLE_ID line", () => {
-    const out = render("dev_target", action("dev_target", "hydra-target-build", { isolation: "self" }));
+    const out = render("dev_target", devTargetAction());
     assert.ok(out.prompt.includes(SELF_GUARD));
     assert.equal(out.prompt.includes(DEFAULT_GUARD), false, "the default's cwd-ABORT clause would false-abort a self dispatch (#4178)");
     assert.ok(out.prompt.includes(NEVER_DEV_TARGET));
@@ -190,21 +213,34 @@ describe("render-dispatch.py — preamble blocks come from the playbook fences (
     assert.equal(out.isolation, null, "omit the kwarg for a self class");
   });
 
-  test("qa_target pinned on a PR also sets TARGET_WT_BASE to the PR head from the signals", () => {
+  test("qa_target pinned on a PR also sets TARGET_WT_BASE to the PR head carried in the intent", () => {
     const out = render(
       "qa_target",
-      action("qa_target", "hydra-target-qa", {
-        isolation: "self",
-        prompt_args: { scope: "target", pr_ref: "https://github.com/example/target/pull/235" },
-      }),
+      qaTargetAction({ kind: "TargetReviewPr", pr_ref: "https://github.com/example/target/pull/235", head: "feature/aeb984cb-t1-dev_target" }),
     );
     assert.match(out.prompt, /Use CYCLE_ID=`4dfd1dc9-t4-qa_target` for the Target worktree id and set `TARGET_WT_BASE=origin\/feature\/aeb984cb-t1-dev_target` \(the PR head\)\./);
     assert.ok(out.prompt.includes("on Target PR `https://github.com/example/target/pull/235` (`pr_ref`)"));
     assert.equal(out.description, "qa_target: hydra-target-qa on PR 235");
   });
 
+  test("qa_target purity (#5383): the PR head comes from the intent, never the Turn Snapshot signal", () => {
+    // baseState() carries target_needs_qa_pr_head = feature/aeb984cb-t1-dev_target.
+    const out = render(
+      "qa_target",
+      qaTargetAction({ kind: "TargetReviewPr", pr_ref: "https://github.com/example/target/pull/235", head: "feature/from-intent" }),
+    );
+    assert.match(out.prompt, /TARGET_WT_BASE=origin\/feature\/from-intent/);
+    assert.equal(out.prompt.includes("aeb984cb"), false, "the state signal must not leak into the prompt");
+  });
+
+  test("qa_target pinned with NO head: the CYCLE_ID line carries no TARGET_WT_BASE clause", () => {
+    const out = render("qa_target", qaTargetAction({ kind: "TargetReviewPr", pr_ref: "https://github.com/example/target/pull/235" }));
+    assert.match(out.prompt, /^Use CYCLE_ID=`4dfd1dc9-t4-qa_target` for the Target worktree id\. NEVER symlink/m);
+    assert.match(out.prompt, /on Target PR `https:\/\/github.com\/example\/target\/pull\/235` \(`pr_ref`\)/);
+  });
+
   test("qa_target unpinned: no TARGET_WT_BASE, the skill resolves the PR itself", () => {
-    const out = render("qa_target", action("qa_target", "hydra-target-qa", { isolation: "self", prompt_args: { scope: "target" } }));
+    const out = render("qa_target", qaTargetAction());
     // The self-isolation fence itself mentions TARGET_WT_BASE; the CYCLE_ID line must not.
     assert.match(out.prompt, /^Use CYCLE_ID=`4dfd1dc9-t4-qa_target` for the Target worktree id\. NEVER symlink/m);
     assert.match(out.prompt, /unpinned — its own step 1 resolves the PR/);
@@ -240,15 +276,25 @@ describe("render-dispatch.py — dev_orch is a pure function of the Dispatch Int
     ForwardFixConflict: /\*\*Conflict fix-forward delta \(issue #4807\)\.\*\*/,
     ForwardFixConflictWithFail: /\*\*Two-phase conflict fix-forward delta \(issue #5253\)\.\*\*/,
   };
-  const SAMPLE_FIELDS = { anchor: "issue-12", branch: "b", pr: 9 };
+  const SAMPLE_FIELDS = { anchor: "issue-12", branch: "b", pr: 9, pr_ref: "https://github.com/o/r/pull/9", head: "feature/h" };
 
   const QA_SIGNATURE: Record<string, RegExp> = {
     ReviewLane: /parked-filtered needs-qa lane head/,
     ReviewSelfSelect: /Resolve the needs-qa lane head yourself/,
   };
+  const DEV_TARGET_SIGNATURE: Record<string, RegExp> = {
+    TargetFresh: /Work \*\*Target issue #12\*\* \(anchor `issue-12`\) — pinned/,
+    TargetResume: /RESUME pin: Target issue #12 is `needs-dev-resume` with open PR #9 on branch `b`/,
+  };
+  const QA_TARGET_SIGNATURE: Record<string, RegExp> = {
+    TargetReviewPr: /on Target PR `https:\/\/github.com\/o\/r\/pull\/9` \(`pr_ref`\) — pinned/,
+    TargetReviewSelfSelect: /unpinned — its own step 1 resolves the PR/,
+  };
   const SAMPLE_BY_SLOT: Record<string, { build: (i?: Record<string, unknown>) => Record<string, unknown>; sig: Record<string, RegExp> }> = {
     dev_orch: { build: devAction, sig: SIGNATURE },
     qa_orch: { build: qaAction, sig: QA_SIGNATURE },
+    dev_target: { build: devTargetAction, sig: DEV_TARGET_SIGNATURE },
+    qa_target: { build: qaTargetAction, sig: QA_TARGET_SIGNATURE },
   };
 
   test("completeness: every kind of every slot in INTENT_KINDS_BY_SLOT renders (a kind without a renderer, or a slot without a test signature, turns this red)", () => {
@@ -295,6 +341,48 @@ describe("render-dispatch.py — dev_orch is a pure function of the Dispatch Int
     const crossDev = run("dev_orch", [devAction({ kind: "ReviewLane", anchor: "issue-1", rest: [] })]);
     assert.equal(crossDev.status, 2);
     assert.match(crossDev.stderr, /dev_orch.*ReviewLane/);
+  });
+
+  test("dev_target / qa_target: unknown, missing and cross-slot intent kinds exit 2 naming the slot and kind (#5383)", () => {
+    for (const [slot, build, cross] of [
+      ["dev_target", devTargetAction, { kind: "Fresh" }],
+      ["qa_target", qaTargetAction, { kind: "ReviewLane", anchor: "issue-1", rest: [] }],
+    ] as const) {
+      const bogus = run(slot, [build({ kind: "Bogus" })]);
+      assert.equal(bogus.status, 2, slot);
+      assert.match(bogus.stderr, /Bogus/);
+      const a = build();
+      delete a.intent;
+      const missing = run(slot, [a]);
+      assert.equal(missing.status, 2, slot);
+      assert.match(missing.stderr, /no intent/);
+      const crossed = run(slot, [build(cross)]);
+      assert.equal(crossed.status, 2, slot);
+      assert.match(crossed.stderr, new RegExp(`${slot}.*${cross.kind}`));
+    }
+    const crossOrch = run("dev_orch", [devAction({ kind: "TargetFresh" })]);
+    assert.equal(crossOrch.status, 2);
+    assert.match(crossOrch.stderr, /dev_orch.*TargetFresh/);
+  });
+
+  test("dispatch_pr: the intent's pr wins; a prompt_args-only action resolves as _dev_target_resume_record did (#5383)", () => {
+    const cases: Array<[Record<string, unknown>, number | null]> = [
+      [{ intent: { kind: "TargetResume", anchor: "issue-5", pr: 57, branch: "b" } }, 57],
+      [{ prompt_args: { resume: true, resume_pr: 57 } }, 57],
+      [{ intent: { kind: "ForwardFixRed", anchor: "issue-5", pr: 8, branch: "b" } }, 8],
+      [{ intent: { kind: "TargetFresh" } }, null],
+      [{ prompt_args: { resume_pr: true } }, null],
+      [{ prompt_args: { resume_pr: "57" } }, null],
+      [{ prompt_args: {} }, null],
+    ];
+    for (const [act, want] of cases) {
+      const res = spawnSync(
+        "python3",
+        ["-c", "import json, sys, decide_base; print(json.dumps(decide_base.dispatch_pr(json.loads(sys.argv[1]))))", JSON.stringify(act)],
+        { cwd: join(REPO_ROOT, "scripts", "autopilot"), encoding: "utf-8" },
+      );
+      assert.equal(JSON.parse(res.stdout), want, JSON.stringify(act));
+    }
   });
 
   test("the dev_orch branch ignores any prompt_args bag: only the intent selects the shape", () => {
@@ -582,15 +670,15 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
   });
 
   test("dev_target asks for delegated mode; a resume pin names the issue, PR and branch", () => {
-    const fresh = render("dev_target", action("dev_target", "hydra-target-build", { isolation: "self" }));
+    const fresh = render("dev_target", devTargetAction());
     assert.match(fresh.prompt, /\*\*Use delegated mode\*\*/);
     assert.match(fresh.prompt, /Pick ONE `ready-for-agent` Target issue/);
+    const pinned = render("dev_target", devTargetAction({ kind: "TargetFresh", anchor: "issue-210" }));
+    assert.match(pinned.prompt, /Work \*\*Target issue #210\*\* \(anchor `issue-210`\) — pinned; no other issue\./);
+    assert.doesNotMatch(pinned.prompt, /Pick ONE/);
     const resume = render(
       "dev_target",
-      action("dev_target", "hydra-target-build", {
-        isolation: "self",
-        prompt_args: { anchor: "issue-210", resume: true, resume_issue: 210, resume_pr: 240, resume_branch: "feature/x-t1-dev_target" },
-      }),
+      devTargetAction({ kind: "TargetResume", anchor: "issue-210", pr: 240, branch: "feature/x-t1-dev_target" }),
     );
     assert.match(resume.prompt, /RESUME pin: Target issue #210 is `needs-dev-resume` with open PR #240 on branch `feature\/x-t1-dev_target`/);
     assert.doesNotMatch(resume.prompt, /Pick ONE/);
@@ -667,8 +755,7 @@ describe("render-dispatch.py — model resolution (#1093, #3274, #4585)", () => 
   test("the model column the renderer reads covers every taxonomy class; the inherit set is the column's", () => {
     const seen: Record<string, string | null> = {};
     for (const cls of CLASSES) {
-      const skill = "hydra-x";
-      const out = render(cls, cls === "dev_orch" ? devAction() : cls === "qa_orch" ? qaAction() : action(cls, skill));
+      const out = render(cls, actionFor(cls));
       seen[cls] = out.model;
       assert.ok(out.model === null || ["fable", "sonnet", "haiku", "opus"].includes(out.model), `${cls}: ${out.model}`);
     }
@@ -686,7 +773,7 @@ describe("render-dispatch.py — model resolution (#1093, #3274, #4585)", () => 
     assert.ok(Object.keys(column).length >= 18, `column rows: ${Object.keys(column).length}`);
     for (const cls of Object.keys(column)) {
       const cell = column[cls];
-      const out = render(cls, cls === "dev_orch" ? devAction() : cls === "qa_orch" ? qaAction() : action(cls, "hydra-x"));
+      const out = render(cls, actionFor(cls));
       assert.equal(out.model, cell === "inherit" ? null : cell, cls);
       assert.equal(out.model_source, cell === "inherit" ? "model-column:inherit" : "model-column", cls);
     }
@@ -709,7 +796,7 @@ describe("render-dispatch.py — model resolution (#1093, #3274, #4585)", () => 
     const withAdm = (adm: unknown) =>
       baseState({ usage_eligibility: { allow: true, reasons: {}, admission: adm } });
     const exhausted = withAdm(admission());
-    const a = action("dev_target", "hydra-target-build", { isolation: "self" });
+    const a = devTargetAction();
     const out = render("dev_target", a, exhausted);
     assert.equal(out.model, "opus");
     assert.equal(out.model_source, "model-column→fable-exhausted-fallback");
