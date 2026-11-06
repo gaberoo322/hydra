@@ -2981,10 +2981,9 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
     assert.ok(dispatch, "orch_work_available must fire dev_orch");
     assert.equal(dispatch.skill, "hydra-dev");
-    assert.equal(dispatch.intent.anchor, undefined,
-      "dev_orch must NOT pass a target-product anchor — that's the bug #458 fixes");
-    assert.equal(dispatch.intent.score, undefined,
-      "dev_orch must NOT pass a candidate score — candidates are target work");
+    assert.deepEqual(dispatch.intent, { kind: "Fresh" },
+      "dev_orch must NOT pass a target-product anchor or candidate score — that's the bug #458 fixes");
+    assert.equal(dispatch.prompt_args, undefined);
   });
 
   test("ISSUE-458: dev_target dispatches on target_work_available AND carries top candidate as anchor", () => {

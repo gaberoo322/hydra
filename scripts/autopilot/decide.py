@@ -355,6 +355,7 @@ from decide_base import (
     dispatch_anchor,
     dispatch_resume_branch,
     escalation_intent,
+    intent_from_dict,
     make_dispatch,
 )
 from decide_selectors.architecture import _select_signal_architecture_orch
@@ -2655,8 +2656,20 @@ def _rule_instant_death_replay(
             "attempt": prior_attempt + 1,
             "prior_attempt_status": "instant-death",
         })
+        # Issue #5381 QA round 1: a typed-intent dispatch (dev_orch) is recorded
+        # with its intent and replayed through it; escalation keys ride prompt_args.
+        rec_intent = None
+        if rec.get("intent") is not None:
+            try:
+                rec_intent = intent_from_dict(rec["intent"])
+            except ValueError:  # intentional: an unparseable recorded intent is unjoinable, never replayed blind
+                out.reasons.append(f"instant-death-unjoinable:{cls}")
+                continue
         out.emit(
-            make_dispatch(cls, rec["skill"], prompt_args=args, reason=f"instant-death-replay:{cls}"),
+            make_dispatch(
+                cls, rec["skill"], prompt_args=args, intent=rec_intent,
+                reason=f"instant-death-replay:{cls}",
+            ),
             reason=f"instant-death-replay:{cls}",
         )
         out.dispatched += 1
@@ -2678,6 +2691,8 @@ def _record_last_dispatches(actions: list[dict], state: dict) -> None:
                 "prompt_args": a.get("prompt_args") or {},
                 "worktreeBranch": a.get("worktreeBranch"),
             }
+            if a.get("intent") is not None:
+                last[a["slot"]]["intent"] = a["intent"]
             changed = True
     if changed:
         state["last_dispatch_by_class"] = last

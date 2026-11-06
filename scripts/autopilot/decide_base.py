@@ -217,12 +217,26 @@ ZERO_YIELD_BACKOFF_LADDER: tuple[tuple[int, int], ...] = (
 # reconstitute the dataclass through `dispatch_intent(action)`.
 
 
+def _need_str(kind: str, name: str, value) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"dispatch intent {kind!r}: {name} must be a non-empty string, got {value!r}")
+
+
+def _need_pr(kind: str, value) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"dispatch intent {kind!r}: pr must be a positive int, got {value!r}")
+
+
 @dataclass(frozen=True)
 class Fresh:
     """Self-select the next ready-for-agent issue, or build a pinned `anchor` (#3711)."""
 
     kind: ClassVar[str] = "Fresh"
     anchor: str | None = None
+
+    def __post_init__(self):
+        if self.anchor is not None:
+            _need_str(self.kind, "anchor", self.anchor)
 
     def to_dict(self) -> dict:
         d: dict = {"kind": self.kind}
@@ -239,6 +253,10 @@ class ResumeBranch:
     anchor: str
     branch: str
 
+    def __post_init__(self):
+        _need_str(self.kind, "anchor", self.anchor)
+        _need_str(self.kind, "branch", self.branch)
+
     def to_dict(self) -> dict:
         return {"kind": self.kind, "anchor": self.anchor, "branch": self.branch}
 
@@ -249,6 +267,9 @@ class ResumeSalvage:
 
     kind: ClassVar[str] = "ResumeSalvage"
     anchor: str
+
+    def __post_init__(self):
+        _need_str(self.kind, "anchor", self.anchor)
 
     def to_dict(self) -> dict:
         return {"kind": self.kind, "anchor": self.anchor}
@@ -264,6 +285,11 @@ class ForwardFixRed:
     pr: int
     branch: str
 
+    def __post_init__(self):
+        _need_str(self.kind, "anchor", self.anchor)
+        _need_pr(self.kind, self.pr)
+        _need_str(self.kind, "branch", self.branch)
+
     def to_dict(self) -> dict:
         return {"kind": self.kind, "anchor": self.anchor, "pr": self.pr, "branch": self.branch}
 
@@ -277,6 +303,11 @@ class ForwardFixConflict:
     pr: int
     branch: str
 
+    def __post_init__(self):
+        _need_str(self.kind, "anchor", self.anchor)
+        _need_pr(self.kind, self.pr)
+        _need_str(self.kind, "branch", self.branch)
+
     def to_dict(self) -> dict:
         return {"kind": self.kind, "anchor": self.anchor, "pr": self.pr, "branch": self.branch}
 
@@ -289,6 +320,11 @@ class ForwardFixConflictWithFail:
     anchor: str
     pr: int
     branch: str
+
+    def __post_init__(self):
+        _need_str(self.kind, "anchor", self.anchor)
+        _need_pr(self.kind, self.pr)
+        _need_str(self.kind, "branch", self.branch)
 
     def to_dict(self) -> dict:
         return {"kind": self.kind, "anchor": self.anchor, "pr": self.pr, "branch": self.branch}

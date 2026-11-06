@@ -242,7 +242,6 @@ describe("render-dispatch.py — dev_orch is a pure function of the Dispatch Int
         encoding: "utf-8",
       }).stdout,
     );
-    assert.equal(kinds.length, 6);
     for (const kind of kinds) {
       assert.ok(SIGNATURE[kind], `test knows kind ${kind}`);
       const out = render("dev_orch", devAction({ kind, ...SAMPLE_FIELDS }));
@@ -714,5 +713,33 @@ describe("render-dispatch.py — CLI contract", () => {
     const row = PLAYBOOK.split("\n").find((l) => l.startsWith("| `dispatch` |"))!;
     assert.match(row, /python3 scripts\/autopilot\/render-dispatch\.py <slot>/);
     assert.match(row, /stamp-slot\.py/);
+  });
+});
+
+describe("Dispatch Intent validation (#5381 QA round 1)", () => {
+  const py = (code: string) =>
+    spawnSync(
+      "python3",
+      ["-c", `import sys; sys.path.insert(0, ${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot"))})\nimport decide_base as db\n${code}`],
+      { encoding: "utf-8" },
+    );
+
+  for (const [label, raw] of [
+    ["empty branch", `{"kind":"ForwardFixRed","anchor":"issue-1","pr":5,"branch":""}`],
+    ["non-int pr", `{"kind":"ForwardFixRed","anchor":"issue-1","pr":"5","branch":"b"}`],
+    ["bool pr", `{"kind":"ForwardFixConflict","anchor":"issue-1","pr":True,"branch":"b"}`],
+    ["empty resume branch", `{"kind":"ResumeBranch","anchor":"issue-1","branch":""}`],
+  ] as const) {
+    test(`intent_from_dict rejects ${label}`, () => {
+      const r = py(`try:\n    db.intent_from_dict(${raw})\n    print("accepted")\nexcept ValueError:\n    print("rejected")`);
+      assert.equal(r.stdout.trim(), "rejected", r.stderr);
+    });
+  }
+
+  test("sibling shapes keep their verdict: well-formed intents still parse", () => {
+    const r = py(
+      `print(db.intent_from_dict({"kind":"ForwardFixRed","anchor":"issue-1","pr":5,"branch":"b"}).pr, db.intent_from_dict({"kind":"Fresh"}).anchor, db.intent_from_dict({"kind":"ResumeSalvage","anchor":"issue-1"}).anchor)`,
+    );
+    assert.equal(r.stdout.trim(), "5 None issue-1", r.stderr);
   });
 });

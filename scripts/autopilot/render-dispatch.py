@@ -430,9 +430,8 @@ def _forward_fix_kind(delta: str | None):
     def render_kind(intent, skill: str | None) -> list[str]:
         n = _issue_number(intent.anchor)
         out = _pinned_or_unpinned(n, skill)
-        if intent.branch:
-            out.append(_stalled_branch(intent.branch))
-        out.append(FORWARD_FIX_CONTRACT.format(pr=intent.pr, branch=intent.branch or "<resume_branch>"))
+        out.append(_stalled_branch(intent.branch))
+        out.append(FORWARD_FIX_CONTRACT.format(pr=intent.pr, branch=intent.branch))
         if delta:
             out.append(delta)
         return out
@@ -691,8 +690,9 @@ def describe(slot: str, action: dict, skill: str | None) -> str:
     tail = ""
     try:
         pinned = db.dispatch_anchor(action)
-    except ValueError:
+    except ValueError as exc:
         pinned = None  # an unknown intent kind is the renderer's RenderError, not describe's
+        print(f"render-dispatch: describe: {exc}", file=sys.stderr)
     if _issue_number(pinned):
         tail = f" on #{_issue_number(pinned)}"
     elif pa.get("pr_ref"):

@@ -182,10 +182,11 @@ describe("decide.py — first-attempt dev_orch dispatches carry no frontier rout
       assert.ok(dev, "dev_orch must still be pinned to the grill-clear anchor (#3711)");
       assert.equal(dev.intent.anchor, "issue-3707");
       assert.equal(
-        dev.prompt_args?.route_model,
+        dev.prompt_args,
         undefined,
-        "a first-attempt dev_orch dispatch must resolve its model from the static per-class map",
+        "a first-attempt dev_orch dispatch carries no prompt_args (so no route_model): the model comes from the static per-class map",
       );
+      assert.deepEqual(dev.intent, { kind: "Fresh", anchor: "issue-3707" });
     });
   }
 
@@ -218,7 +219,8 @@ describe("decide.py — first-attempt dev_orch dispatches carry no frontier rout
     assert.ok(dev, "dev_orch dispatches when no grill is pending");
     assert.equal(dev.intent.kind, "Fresh");
     assert.equal(dev.intent.anchor, undefined, "no grill pending → no pin");
-    assert.equal(dev.prompt_args?.route_model, undefined);
+    assert.equal(dev.prompt_args, undefined, "unpinned first attempt: no prompt_args, so no route_model");
+    assert.deepEqual(dev.intent, { kind: "Fresh" });
   });
 
   test("#1093 purity — the pinned dispatch emits NO concrete `model` field", () => {

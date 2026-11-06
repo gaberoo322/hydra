@@ -184,6 +184,35 @@ describe("decide.py - Fable instant-death replay (#5323)", () => {
     assert.equal("dispatch_model" in reap, false);
   });
 
+  test("an INTENT-shaped dev_orch dispatch is replayed THROUGH its intent, not stranded without one (#5381)", () => {
+    const intent = { kind: "ResumeBranch", anchor: "issue-9", branch: "feat/9-x" };
+    const st = baseState({
+      slots: { dev_orch: { skill: "hydra-dev", task_id: "abc123", started: "t0", started_epoch: 1, dispatch_id: BRANCH }, dev_target: null },
+      last_dispatch_by_class: {
+        dev_orch: { turn: 2, skill: "hydra-dev", prompt_args: { escalate_model: "fable" }, intent, worktreeBranch: BRANCH },
+      },
+    });
+    const { plan, stateAfter } = decide(st, [death({ slot: "dev_orch" })]);
+    const [d] = plan.actions.filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.ok(d, "replayed");
+    assert.deepEqual(d.intent, intent);
+    assert.equal(d.anchor, "issue-9");
+    assert.deepEqual(d.prompt_args, { escalate_model: "opus", attempt: 2, prior_attempt_status: "instant-death" });
+    assert.deepEqual(stateAfter.last_dispatch_by_class.dev_orch.intent, intent, "the replay is itself recorded with its intent");
+  });
+
+  test("a recorded dev_orch intent that no longer parses is unjoinable, never replayed blind (#5381)", () => {
+    const st = baseState({
+      slots: { dev_orch: { skill: "hydra-dev", task_id: "abc123", started: "t0", started_epoch: 1, dispatch_id: BRANCH }, dev_target: null },
+      last_dispatch_by_class: {
+        dev_orch: { turn: 2, skill: "hydra-dev", prompt_args: { escalate_model: "fable" }, intent: { kind: "Bogus" }, worktreeBranch: BRANCH },
+      },
+    });
+    const { plan } = decide(st, [death({ slot: "dev_orch" })]);
+    assert.equal(plan.actions.filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch").length, 0);
+    assert.ok(plan.reasons.includes("instant-death-unjoinable:dev_orch"), plan.reasons.join());
+  });
+
   test("decide records every emitted dispatch in state.last_dispatch_by_class", () => {
     const { plan, stateAfter } = decide(baseState(), [death()]);
     const [d] = replays(plan);
