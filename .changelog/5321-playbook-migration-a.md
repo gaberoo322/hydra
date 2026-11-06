@@ -1,0 +1,1 @@
+- refactor: triage-side playbooks write issue state through the lifecycle seam; needs-dev-resume and needs-qa become operator relabel targets (#5321)
