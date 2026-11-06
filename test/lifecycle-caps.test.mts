@@ -20,6 +20,7 @@ import {
   resolveCapLimits,
   timelineArmCounts,
   type CapJournalEntry,
+  entryContribution,
 } from "../src/lifecycle/caps.ts";
 import { advance, openClaim, releaseClaim, type SeamDeps, type LifecycleMode } from "../src/lifecycle/seam.ts";
 import { postCapReset } from "../src/lifecycle/park.ts";
@@ -540,5 +541,13 @@ describe("postCapReset (INV-14)", () => {
     const res = await postCapReset(42, { by: "op", ts: "nope" }, w.deps);
     assert.deepEqual(res, { ok: false, code: "invalid-reset-input" });
     assert.equal(w.comments.length, 0);
+  });
+});
+
+describe("stale-requeue journal arm excludes dispatcher rollbacks (#5315 QA round 4)", () => {
+  test("a dispatch-rollback entry counts 0; a plain in-progress -> ready-for-agent counts 1", () => {
+    const base = { ts: 1, kind: "transition", from: "in-progress", to: "ready-for-agent", evidence: {}, result: "ok", written: true };
+    assert.equal(entryContribution("stale-requeue", { ...base, reason: "dispatch-rollback" }), 0);
+    assert.equal(entryContribution("stale-requeue", { ...base, reason: null }), 1);
   });
 });

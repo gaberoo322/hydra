@@ -14,8 +14,6 @@ import { join } from "node:path";
 import { dispatch, openClaim, releaseHeldClaim, rollbackDispatch, type LifecycleMode, type SeamDeps } from "../src/lifecycle/seam.ts";
 import { runBackfill } from "../scripts/lifecycle-legacy-backfill.ts";
 import { claimOutcomeOf } from "../src/glm/drainer-driver.ts";
-import { entryContribution } from "../src/lifecycle/caps.ts";
-import { claimBlocksPick } from "../src/glm/pick.ts";
 import type { DispatchClaim, LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
 
 const NOW = Date.parse("2026-11-05T12:00:00Z");
@@ -194,12 +192,6 @@ describe("rollbackDispatch: a dispatcher-owned undo that works in enforce (QA ro
     assert.deepEqual(w.labels, ["in-progress"]);
   });
 
-  test("a rollback entry does not count toward stale-requeue; a plain in-progress -> ready-for-agent does", () => {
-    const base = { ts: 1, kind: "transition", from: "in-progress", to: "ready-for-agent", evidence: {}, result: "ok", written: true };
-    assert.equal(entryContribution("stale-requeue", { ...base, reason: "dispatch-rollback" }), 0);
-    assert.equal(entryContribution("stale-requeue", { ...base, reason: null }), 1);
-  });
-
   test("releaseHeldClaim frees whichever claim is held (stall); no claim is a no-op", async () => {
     const w = world("enforce", ["in-progress"]);
     assert.deepEqual(await releaseHeldClaim(42, w.deps, "t", "stall"), { ok: true, prior: null });
@@ -218,15 +210,6 @@ describe("recover-stale stale-requeue arm releases the claim (QA round 4)", () =
     assert.match(requeue, /scripts\/lifecycle\.ts release "\$ISSUE" --held --outcome stall/);
     const toQa = sh.slice(sh.indexOf("--add-label needs-qa"), sh.indexOf("routed in-progress"));
     assert.equal(/lifecycle\.ts release/.test(toQa), false);
-  });
-});
-
-describe("GLM pick: claims that block a pick (QA round 4)", () => {
-  const c = (cls: string): DispatchClaim => ({ dispatchId: "d", class: cls, run: "r", artifactHash: null, openedAt: 1 });
-  test("a held legacy-backfill placeholder (takeover-able) does not block; a real dispatch claim does", () => {
-    assert.equal(claimBlocksPick(c("legacy-backfill")), false);
-    assert.equal(claimBlocksPick(c("dev_orch")), true);
-    assert.equal(claimBlocksPick(null), false);
   });
 });
 

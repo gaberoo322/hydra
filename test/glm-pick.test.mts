@@ -21,6 +21,7 @@ import {
   type ArtifactStatus,
   type PickDeps,
   type PickResult,
+  claimBlocksPick,
   type ResumeRow,
 } from "../src/glm/pick.ts";
 import { runDriverMode, type DriverDeps } from "../src/glm/drainer-driver.ts";
@@ -239,6 +240,15 @@ describe("runPick — held lifecycle claim skip (#5315)", () => {
     assert.equal(picked(await runPick(h.deps)), 130);
     const h2 = harness({ issues: [cand(130, ["cleanup-scan"])] });
     assert.equal(picked(await runPick(h2.deps)), 130);
+  });
+});
+
+describe("claimBlocksPick — legacy placeholder is takeover-able (#5315 QA round 4)", () => {
+  const c = (cls: string) => ({ dispatchId: "d", class: cls, run: "r", artifactHash: null, openedAt: 1 });
+  test("a held legacy-backfill placeholder does not block a pick; a real dispatch claim does", () => {
+    assert.equal(claimBlocksPick(c("legacy-backfill")), false);
+    assert.equal(claimBlocksPick(c("dev_orch")), true);
+    assert.equal(claimBlocksPick(null), false);
   });
 });
 
