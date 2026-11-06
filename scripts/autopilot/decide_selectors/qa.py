@@ -15,6 +15,8 @@ from decide_base import (
     _needs_qa_target_pr_ref,
     _parked_issues,
     _parked_read_degraded,
+    ReviewLane,
+    ReviewSelfSelect,
     _signal_present,
     make_dispatch,
 )
@@ -44,17 +46,17 @@ def _select_slot_qa_orch(
     #
     # UNLIKE the #3729 sweep_target per-item guard (which tracks EVERY
     # current item), this tracks ONLY the HEAD of the needs-qa set —
-    # `needs_qa_numbers[0]` — because hydra-qa self-selects via its own
-    # unsorted-default `gh issue list --label needs-qa --jq '.[0]'` query,
-    # so the head is deterministically the ONLY issue any given qa_orch
-    # dispatch will actually review (invariant 4). Bumping every item in
+    # `needs_qa_numbers[0]` — because the dispatch's ReviewLane intent names
+    # exactly that parked-filtered head (#5382), so the head is
+    # deterministically the ONLY issue any given qa_orch dispatch will
+    # actually review (invariant 4). Bumping every item in
     # the set (as a naive #3729-style port would) was considered and
     # rejected at design time: it would falsely accumulate attempts
     # against issues sitting further back in the queue that were never
     # actually reviewed, risking a false "stalled" verdict on a
     # healthy-but-queued issue the moment it becomes the new head.
     numbers = _qa_orch_needs_qa_numbers(state, events)
-    pinned_issue: int | None = None
+    intent = ReviewSelfSelect()
     # #5319 INV-4: a degraded parked read fails CLOSED on every path, including
     # the absent/empty-numbers boolean fallback below (QA r2).
     if _parked_read_degraded(state, events):
@@ -64,15 +66,10 @@ def _select_slot_qa_orch(
         # (human hold) - never reviewed. Drop parked numbers; if nothing is left
         # there is nothing to dispatch on.
         parked = _parked_issues(state, events)
-        unfiltered = numbers
         numbers = [n for n in numbers if n not in parked]
         if not numbers:
             return None
         head = numbers[0]
-        # Pin only when the parked filter changed the head hydra-qa would
-        # self-select; an unparked lane keeps the unpinned dispatch shape.
-        if head != unfiltered[0]:
-            pinned_issue = head
         attempts = _qa_orch_item_attempts(state)
         if not _qa_orch_item_eligible(attempts.get(head, 0)):
             # The head issue has exhausted its attempt cap -> suppress
@@ -93,16 +90,14 @@ def _select_slot_qa_orch(
         # turn (verdict reached, or superseded by a new head) is dropped,
         # so a later re-open under the same number starts fresh at 0.
         _bump_qa_orch_stall_tracker(state, head)
+        # #5382: always name the head the selector chose plus the parked-filtered
+        # remainder, so the renderer never re-reads the lane (the #5319 bug class).
+        intent = ReviewLane(anchor=f"issue-{head}", rest=tuple(f"issue-{n}" for n in numbers[1:]))
     # `numbers` absent/empty (no per-item fact this turn — a degraded
-    # board read or a pre-#3829 playbook) -> fail OPEN on the coarse
-    # boolean alone, preserving pre-#3829 behaviour so a transient wiring
+    # board read or a pre-#3829 playbook) -> ReviewSelfSelect: fail OPEN on the
+    # coarse boolean alone, preserving pre-#3829 behaviour so a transient wiring
     # gap never dead-arms qa_orch (the #3709 defect class).
-    prompt_args: dict = {"scope": "orch"}
-    if pinned_issue is not None:
-        # QA r2: pin the parked-filtered head so hydra-qa does not self-select
-        # its own unfiltered `.[0]` (which could be a parked issue).
-        prompt_args["issue"] = f"issue-{pinned_issue}"
-    return make_dispatch(cls, "hydra-qa", prompt_args=prompt_args, reason="needs-qa")
+    return make_dispatch(cls, "hydra-qa", intent=intent, reason="needs-qa")
 
 
 def _select_slot_qa_target(

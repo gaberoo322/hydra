@@ -107,6 +107,13 @@ function devAction(intent?: Record<string, unknown>): Record<string, unknown> {
   return a;
 }
 
+/** A qa_orch dispatch action carrying a typed Dispatch Intent and NO prompt_args key (#5382). */
+function qaAction(intent?: Record<string, unknown>): Record<string, unknown> {
+  const a = action("qa_orch", "hydra-qa", { intent: intent ?? { kind: "ReviewLane", anchor: "issue-4700", rest: ["issue-4825", "issue-4821"] } });
+  delete a.prompt_args;
+  return a;
+}
+
 const dirs: string[] = [];
 after(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
@@ -167,7 +174,7 @@ describe("render-dispatch.py — preamble blocks come from the playbook fences (
   });
 
   test("qa_orch gets the blocking-fan-out variant, not the flat ban", () => {
-    const out = render("qa_orch", action("qa_orch", "hydra-qa", { prompt_args: { scope: "orch" } }));
+    const out = render("qa_orch", qaAction());
     assert.ok(out.prompt.includes(NEVER_QA_ORCH));
     assert.equal(out.prompt.includes(NEVER_DEV_ORCH), false);
     assert.equal(count(out.prompt, "## NEVER END WAITING"), 1);
@@ -235,17 +242,30 @@ describe("render-dispatch.py — dev_orch is a pure function of the Dispatch Int
   };
   const SAMPLE_FIELDS = { anchor: "issue-12", branch: "b", pr: 9 };
 
-  test("completeness: every kind defined in decide_base renders (a kind without a renderer turns this red)", () => {
-    const kinds: string[] = JSON.parse(
-      spawnSync("python3", ["-c", "import json, decide_base; print(json.dumps(list(decide_base.DEV_INTENT_KINDS)))"], {
+  const QA_SIGNATURE: Record<string, RegExp> = {
+    ReviewLane: /parked-filtered needs-qa lane head/,
+    ReviewSelfSelect: /Resolve the needs-qa lane head yourself/,
+  };
+  const SAMPLE_BY_SLOT: Record<string, { build: (i?: Record<string, unknown>) => Record<string, unknown>; sig: Record<string, RegExp> }> = {
+    dev_orch: { build: devAction, sig: SIGNATURE },
+    qa_orch: { build: qaAction, sig: QA_SIGNATURE },
+  };
+
+  test("completeness: every kind of every slot in INTENT_KINDS_BY_SLOT renders (a kind without a renderer, or a slot without a test signature, turns this red)", () => {
+    const bySlot: Record<string, string[]> = JSON.parse(
+      spawnSync("python3", ["-c", "import json, decide_base; print(json.dumps({s: list(k) for s, k in decide_base.INTENT_KINDS_BY_SLOT.items()}))"], {
         cwd: join(REPO_ROOT, "scripts", "autopilot"),
         encoding: "utf-8",
       }).stdout,
     );
-    for (const kind of kinds) {
-      assert.ok(SIGNATURE[kind], `test knows kind ${kind}`);
-      const out = render("dev_orch", devAction({ kind, ...SAMPLE_FIELDS }));
-      assert.match(out.prompt, SIGNATURE[kind], `${kind} renders its signature sentence`);
+    assert.deepEqual(Object.keys(bySlot).sort(), Object.keys(SAMPLE_BY_SLOT).sort());
+    for (const [slot, kinds] of Object.entries(bySlot)) {
+      const t = SAMPLE_BY_SLOT[slot];
+      for (const kind of kinds) {
+        assert.ok(t.sig[kind], `test knows kind ${kind}`);
+        const out = render(slot, t.build({ kind, ...SAMPLE_FIELDS, rest: ["issue-13"] }));
+        assert.match(out.prompt, t.sig[kind], `${slot}/${kind} renders its signature sentence`);
+      }
     }
   });
 
@@ -258,6 +278,23 @@ describe("render-dispatch.py — dev_orch is a pure function of the Dispatch Int
     const missing = run("dev_orch", [a]);
     assert.equal(missing.status, 2);
     assert.match(missing.stderr, /no intent/);
+  });
+
+  test("qa_orch: unknown, missing and cross-slot intent kinds exit 2 naming the slot and kind", () => {
+    const bogus = run("qa_orch", [qaAction({ kind: "Bogus" })]);
+    assert.equal(bogus.status, 2);
+    assert.match(bogus.stderr, /Bogus/);
+    const a = qaAction();
+    delete a.intent;
+    const missing = run("qa_orch", [a]);
+    assert.equal(missing.status, 2);
+    assert.match(missing.stderr, /no intent/);
+    const cross = run("qa_orch", [qaAction({ kind: "Fresh" })]);
+    assert.equal(cross.status, 2);
+    assert.match(cross.stderr, /qa_orch.*Fresh/);
+    const crossDev = run("dev_orch", [devAction({ kind: "ReviewLane", anchor: "issue-1", rest: [] })]);
+    assert.equal(crossDev.status, 2);
+    assert.match(crossDev.stderr, /dev_orch.*ReviewLane/);
   });
 
   test("the dev_orch branch ignores any prompt_args bag: only the intent selects the shape", () => {
@@ -501,18 +538,38 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     }
   });
 
-  test("qa_orch names the needs-qa lane head and the rest of the lane, and the review rules", () => {
-    const out = render("qa_orch", action("qa_orch", "hydra-qa", { prompt_args: { scope: "orch" } }));
-    assert.match(out.prompt, /The needs-qa lane head is \*\*issue #4700\*\*; the rest of the lane, in order: #4825, #4821\./);
+  test("qa_orch ReviewLane names the intent's head and rest, and the review rules", () => {
+    const out = render("qa_orch", qaAction());
+    assert.match(out.prompt, /Review \*\*issue #4700\*\* \(the selector's parked-filtered needs-qa lane head - do NOT self-select a different needs-qa issue\); the rest of the lane, in order: #4825, #4821\./);
     assert.match(out.prompt, /FULL step-7 Standards \+ Spec fan-out \(blocking reviewer spawns, all in one message\)/);
     assert.match(out.prompt, /do NOT `gh pr checkout` and do NOT approve the PR/);
     assert.match(out.prompt, /`QA-Verdict:` trailer and execute the step-10 routing/);
+    assert.match(out.prompt, /move on to the next issue in the lane above \(never one outside it\)\./);
     assert.match(out.prompt, /gh pr update-branch/);
   });
 
-  test("qa_orch with an empty lane does not invent a head", () => {
-    const out = render("qa_orch", action("qa_orch", "hydra-qa", { prompt_args: { scope: "orch" } }), baseState({ signals: {} }));
-    assert.match(out.prompt, /Resolve the needs-qa lane head yourself\./);
+  test("qa_orch ReviewLane with an empty rest omits the rest-of-lane clause", () => {
+    const out = render("qa_orch", qaAction({ kind: "ReviewLane", anchor: "issue-4700", rest: [] }));
+    assert.match(out.prompt, /different needs-qa issue\)\. Find its open PR by closing-ref/);
+    assert.doesNotMatch(out.prompt, /the rest of the lane, in order/);
+  });
+
+  test("qa_orch ReviewSelfSelect renders the unpinned text", () => {
+    const out = render("qa_orch", qaAction({ kind: "ReviewSelfSelect" }), baseState({ signals: {} }));
+    assert.match(out.prompt, /Resolve the needs-qa lane head yourself\. Find its open PR/);
+    assert.match(out.prompt, /move on to the next needs-qa issue instead\./);
+  });
+
+  test("a parked issue in the Turn Snapshot's needs-qa lane but absent from the intent never reaches the qa_orch prompt (#5319 bug class)", () => {
+    const out = render("qa_orch", qaAction({ kind: "ReviewLane", anchor: "issue-4700", rest: ["issue-4825"] }));
+    assert.equal(out.prompt.includes("4821"), false, "the parked lane member is nowhere in the prompt");
+    assert.ok(out.prompt.includes("#4700") && out.prompt.includes("#4825"));
+  });
+
+  test("qa_orch renders head and rest from the intent alone (no lane in the snapshot, no prompt_args)", () => {
+    const out = render("qa_orch", qaAction(), baseState({ signals: {} }));
+    assert.match(out.prompt, /issue #4700/);
+    assert.match(out.prompt, /#4825, #4821/);
   });
 
   test("design_concept_orch carries the AFK grill rules (premise-check on master, commit to a position, persistence read-back)", () => {
@@ -592,14 +649,14 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
 
   test("dispatcher notes are appended verbatim, after the skeleton", () => {
     const notes = "- PR #4826 is at head fc7a492c\n- skip #4700, it already has a verdict\n";
-    const r = run("qa_orch", [action("qa_orch", "hydra-qa", { prompt_args: { scope: "orch" } })], baseState(), ["--notes", "-"], { input: notes });
+    const r = run("qa_orch", [qaAction()], baseState(), ["--notes", "-"], { input: notes });
     assert.equal(r.status, 0, r.stderr);
     const out: Rendered = JSON.parse(r.stdout);
     assert.ok(out.prompt.endsWith(`Notes from the dispatcher:\n${notes.trim()}\n`), out.prompt.slice(-300));
-    const viaFile = run("qa_orch", [action("qa_orch", "hydra-qa")], baseState(), ["--notes-file", join(r.dir, "notes.md")]);
+    const viaFile = run("qa_orch", [qaAction()], baseState(), ["--notes-file", join(r.dir, "notes.md")]);
     assert.equal(viaFile.status, 2, "missing notes file → exit 2");
     writeFileSync(join(r.dir, "notes.md"), notes);
-    const ok = run("qa_orch", [action("qa_orch", "hydra-qa")], baseState(), ["--notes-file", join(r.dir, "notes.md")]);
+    const ok = run("qa_orch", [qaAction()], baseState(), ["--notes-file", join(r.dir, "notes.md")]);
     assert.equal(ok.status, 0, ok.stderr);
     assert.ok((JSON.parse(ok.stdout) as Rendered).prompt.includes(notes.trim()));
   });
@@ -611,7 +668,7 @@ describe("render-dispatch.py — model resolution (#1093, #3274, #4585)", () => 
     const seen: Record<string, string | null> = {};
     for (const cls of CLASSES) {
       const skill = "hydra-x";
-      const out = render(cls, cls === "dev_orch" ? devAction() : action(cls, skill));
+      const out = render(cls, cls === "dev_orch" ? devAction() : cls === "qa_orch" ? qaAction() : action(cls, skill));
       seen[cls] = out.model;
       assert.ok(out.model === null || ["fable", "sonnet", "haiku", "opus"].includes(out.model), `${cls}: ${out.model}`);
     }
@@ -629,7 +686,7 @@ describe("render-dispatch.py — model resolution (#1093, #3274, #4585)", () => 
     assert.ok(Object.keys(column).length >= 18, `column rows: ${Object.keys(column).length}`);
     for (const cls of Object.keys(column)) {
       const cell = column[cls];
-      const out = render(cls, cls === "dev_orch" ? devAction() : action(cls, "hydra-x"));
+      const out = render(cls, cls === "dev_orch" ? devAction() : cls === "qa_orch" ? qaAction() : action(cls, "hydra-x"));
       assert.equal(out.model, cell === "inherit" ? null : cell, cls);
       assert.equal(out.model_source, cell === "inherit" ? "model-column:inherit" : "model-column", cls);
     }
