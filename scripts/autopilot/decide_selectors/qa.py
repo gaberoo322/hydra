@@ -92,7 +92,9 @@ def _select_slot_qa_orch(
         _bump_qa_orch_stall_tracker(state, head)
         # #5382: always name the head the selector chose plus the parked-filtered
         # remainder, so the renderer never re-reads the lane (the #5319 bug class).
-        intent = ReviewLane(anchor=f"issue-{head}", rest=tuple(f"issue-{n}" for n in numbers[1:]))
+        # A duplicated number in the snapshot (fixture or double-read) collapses to its first occurrence.
+        rest = tuple(f"issue-{n}" for n in dict.fromkeys(numbers[1:]) if n != head)
+        intent = ReviewLane(anchor=f"issue-{head}", rest=rest)
     # `numbers` absent/empty (no per-item fact this turn — a degraded
     # board read or a pre-#3829 playbook) -> ReviewSelfSelect: fail OPEN on the
     # coarse boolean alone, preserving pre-#3829 behaviour so a transient wiring
