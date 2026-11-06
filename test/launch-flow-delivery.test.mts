@@ -24,8 +24,8 @@ import assert from "node:assert/strict";
 
 import { STREAMS } from "../src/event-bus-stream-keys.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
-import { ALERT_TYPES, formatAlertMessage } from "../src/notification/alert-grammar.ts";
-import { PAGE_KINDS, isPageKind } from "../src/operator-channel/page-list.ts";
+import { formatAlertMessage } from "../src/notification/alert-grammar.ts";
+import { ALERT_TYPES, PAGE_KINDS, isPageKind } from "../src/operator-channel/page-list.ts";
 import { GLM_DRAINER_HEARTBEAT_STALE_MS, GLM_DRAINER_HEARTBEAT_TTL_SECONDS } from "../src/redis/autopilot.ts";
 import { WATCHDOG_LAUNCH_SIGNALS } from "../src/redis/launch-flow.ts";
 import {

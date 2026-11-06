@@ -3,9 +3,8 @@
 // and consumer-registration index for the background streams. Originally lifted
 // out of the process entry-point src/index.ts.
 //
-// The alert-routing grammar (which events become dashboard alerts, how each
-// maps to a message, what severity it carries) was extracted into its own
-// focused Seam at src/notification/alert-grammar.ts (issue #1979). The
+// The dashboard-alert message grammar lives in its own focused Seam at
+// src/notification/alert-grammar.ts (issue #1979). The
 // `cycle:completed` domain reaction (classify the merged files, stamp the
 // capacity-floor side history, publish the orchestrator-share metric) was
 // extracted into a sibling focused Seam at
@@ -17,17 +16,10 @@
 // notification-routing domain. Process lifecycle (port guard, eventBus.init,
 // SIGTERM) stays in index.ts.
 //
-// The three grammar symbols this Module still consumes internally
-// (ALERT_TYPES, formatAlertMessage, classifyAlertSeverity) are imported
-// directly from that Seam for use inside handleNotificationEvent. The
-// compatibility re-export bridge that briefly forwarded the lifted grammar
-// symbols (issue #1979) has been dropped — every importer (including
-// test/notification-consumer.test.mts) now resolves the grammar from its
-// single owner src/notification/alert-grammar.ts directly (issue #2000).
-//
-// Runtime behaviour is unchanged from the pre-extraction module: same events
-// produce the same Redis alerts, the same capacity-floor side records, and the
-// same restart/backoff sequence.
+// Since issue #5389 this Module no longer touches the alert grammar at all:
+// every bus event and the two dead-letter / dead-consumer producers go through
+// `channel.report()`, whose per-kind table (src/operator-channel/page-list.ts)
+// decides page vs brief and whether a dashboard alert is also written.
 // ---------------------------------------------------------------------------
 
 import { EventBus } from "./event-bus.ts";
@@ -135,10 +127,10 @@ export async function startConsumerWithRecovery(
 
 /**
  * Handle a single event off the NOTIFICATIONS stream: route it to the
- * Operator Channel (page or Morning Brief item), stamp the capacity-floor side
- * history on cycle:completed (best
- * effort — issue #245 / #315 contract preserved), and persist alert-worthy
- * events as dashboard alerts.
+ * Operator Channel via `report()` (page or Morning Brief item, plus the
+ * dashboard alert when the kind's row says so) and stamp the capacity-floor
+ * side history on cycle:completed (best effort — issue #245 / #315 contract
+ * preserved).
  */
 async function handleNotificationEvent(event: NotificationEvent): Promise<void> {
   routeNotificationEvent(event);
@@ -176,7 +168,7 @@ export function startConsumers(
       );
   }
 
-  // Notification consumer — stores alerts in Redis for the dashboard and
+  // Notification consumer —
   // routes every event to the Operator Channel (page / Morning Brief item)
   startConsumerWithRecovery("notifications", () =>
     eventBus.consume(STREAMS.NOTIFICATIONS, "openclaw", `notify-${process.pid}`,

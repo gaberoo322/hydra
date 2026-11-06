@@ -27,11 +27,11 @@ import assert from "node:assert/strict";
 
 import {
   formatAlertMessage,
-  classifyAlertSeverity,
-  ALERT_TYPES,
-  type AlertSeverity,
   type AlertGrammarEvent,
 } from "../src/notification/alert-grammar.ts";
+import { ALERT_TYPES } from "../src/operator-channel/page-list.ts";
+import { OperatorChannel } from "../src/operator-channel/channel.ts";
+import type { DashboardAlert } from "../src/redis/alerts.ts";
 import {
   startConsumerWithRecovery,
   MAX_CONSUMER_RESTARTS,
@@ -44,20 +44,20 @@ import type { EventBus } from "../src/event-bus.ts";
 
 /** A recording channel so consumer tests never reach Redis or Telegram. */
 function stubChannel() {
-  const pages: OperatorMessage[] = [];
-  const briefs: OperatorMessage[] = [];
+  const reports: Array<{ kind: string; payload: Record<string, unknown> }> = [];
   const resolved: string[] = [];
   return {
-    pages,
-    briefs,
+    reports,
     resolved,
-    page: async (m: OperatorMessage) => {
-      pages.push(m);
-      return { sent: true as const, kind: "page" as const };
-    },
-    brief: async (m: OperatorMessage) => {
-      briefs.push(m);
-      return { appended: true };
+    report: async (kind: string, payload: Record<string, unknown> = {}) => {
+      reports.push({ kind, payload });
+      return {
+        disposition: "page" as const,
+        delivered: true,
+        alertWritten: false,
+        unknownKind: false,
+        outcome: { sent: true as const, kind: "page" as const },
+      };
     },
     resolve: async (key: string) => {
       resolved.push(key);
@@ -156,59 +156,6 @@ test("AlertGrammarEvent is a structural subset of NotificationEvent (assignable 
   assert.ok(msg.includes("3"));
 });
 
-test("classifyAlertSeverity maps each tier from its canonical event type", () => {
-  // Error tier: a dead consumer — the only live type with a dedicated arm.
-  assert.equal(classifyAlertSeverity("consumer:dead"), "error");
-  // Info tier: every other live type.
-  for (const t of [
-    "cycle:completed", "dlq:alert", "dlq:entry", "review:pickup_ready",
-    "launch:quota_stretch", "launch:latency_breach", "launch:pause_forgotten",
-    "infra:node_modules_wiped", "infra:origin_identity_wrong", "glm:drainer_sterile",
-  ]) {
-    assert.equal(classifyAlertSeverity(t), "info", t);
-  }
-});
-
-test("classifyAlertSeverity: codex-era types retired by issue #5044 have no dedicated tier", () => {
-  // cycle:failed / cycle:rolled_back (error) and cycle:stalled /
-  // cycle:auto_killed (warning) lost their arms with the types themselves.
-  for (const t of ["cycle:failed", "cycle:rolled_back", "cycle:stalled", "cycle:auto_killed"]) {
-    assert.equal(classifyAlertSeverity(t), "info", t);
-  }
-});
-
-test("classifyAlertSeverity returns 'info' for unknown event types (default branch)", () => {
-  assert.equal(classifyAlertSeverity("totally:unknown_event"), "info");
-  assert.equal(classifyAlertSeverity(""), "info");
-});
-
-test("classifyAlertSeverity returns one of the three documented tiers for every ALERT_TYPES member", () => {
-  const tiers: AlertSeverity[] = ["error", "warning", "info"];
-  for (const type of ALERT_TYPES) {
-    const sev = classifyAlertSeverity(type);
-    assert.ok(tiers.includes(sev), `classifyAlertSeverity(${type}) = ${sev} is not a documented tier`);
-  }
-});
-
-test("classifyAlertSeverity is byte-identical to the pre-extraction inline ternary for ALERT_TYPES", () => {
-  // Pins behaviour preservation: the extracted function must agree with the
-  // exact substring ternary that lived inline in handleNotificationEvent for
-  // every event type that can reach it (issue #1855).
-  const legacy = (t: string): AlertSeverity =>
-    t.includes("failed") || t.includes("dead") || t.includes("rolled_back")
-      ? "error"
-      : t.includes("stalled") || t.includes("auto_killed")
-        ? "warning"
-        : "info";
-  for (const type of ALERT_TYPES) {
-    assert.equal(
-      classifyAlertSeverity(type),
-      legacy(type),
-      `severity drift for ${type}: extracted=${classifyAlertSeverity(type)} legacy=${legacy(type)}`,
-    );
-  }
-});
-
 test("startConsumerWithRecovery returns immediately when startFn succeeds (no restarts)", async () => {
   let calls = 0;
   const delays: number[] = [];
@@ -300,10 +247,43 @@ test("a dead consumer is paged once through the channel, deduped per consumer na
     async () => {},
     ch,
   );
-  assert.equal(ch.pages.length, 1);
-  assert.equal(ch.pages[0].kind, "consumer:dead");
-  assert.equal(ch.pages[0].dedupKey, "consumer:dead:dlq");
-  assert.equal(ch.pages[0].severity, "page");
+  assert.equal(ch.reports.length, 1);
+  assert.equal(ch.reports[0].kind, "consumer:dead");
+  assert.equal(ch.reports[0].payload.consumer, "dlq");
+  assert.equal(ch.reports[0].payload.restarts, MAX_CONSUMER_RESTARTS + 1);
+});
+
+test("a dead consumer through a real channel pages once, dedupes per consumer name and writes an error alert", async () => {
+  const alerts: DashboardAlert[] = [];
+  let sent = 0;
+  const dedup = new Map<string, unknown>();
+  const channel = new OperatorChannel({
+    store: {
+      readDedup: async (k: string) => (dedup.get(k) as never) ?? null,
+      writeDedup: async (k: string, s: unknown) => void dedup.set(k, s),
+      incrSuppressed: async () => {},
+      delDedup: async (k: string) => void dedup.delete(k),
+      appendBrief: async () => {},
+      appendLog: async () => {},
+    },
+    transport: async () => {
+      sent++;
+      return { ok: true, mode: "html" } as never;
+    },
+    alerts: async (a) => (alerts.push(a), true),
+  });
+  await startConsumerWithRecovery("dlq", async () => { throw new Error("boom"); }, async () => {}, channel);
+  assert.equal(sent, 1, "one page");
+  assert.equal(dedup.has("consumer:dead:dlq"), true, "deduped per consumer name");
+  assert.equal(alerts.length, 1, "the consumer:dead alert is now actually written");
+  assert.equal(alerts[0].type, "consumer:dead");
+  assert.equal(alerts[0].severity, "error");
+});
+
+test("handleNotificationEvent no longer writes dashboard alerts itself (report() owns it)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("../src/notification-consumer.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /pushAlert|ALERT_TYPES|formatAlertMessage|classifyAlertSeverity/);
 });
 
 test("startConsumers resolves consumer:dead:<name> for every consumer at boot", () => {
