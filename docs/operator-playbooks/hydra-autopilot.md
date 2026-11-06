@@ -339,17 +339,17 @@ reap-side read path, what the helper refuses to write) is in
 
 `dev_orch` normally dispatches **unpinned** — `hydra-dev` picks its own issue off
 the orch board (#458). But when a design concept is pending for some *other*
-anchor, `decide.py` emits `prompt_args.anchor = "issue-<N>"`: the pre-resolved
+anchor, `decide.py` emits a `Fresh(anchor="issue-<N>")` Dispatch Intent: the pre-resolved
 grill-clear anchor from `orch_dev_ready_anchor`.
 
-**When `prompt_args.anchor` is present you MUST name that issue in the dispatch
+**When the `Fresh` intent carries an anchor you MUST name that issue in the dispatch
 prompt** ("Invoke the `hydra-dev` skill on **issue #N**" — the form the parent
 flow already accepts: *"If `$issue_number` provided, use it."*). The pin is the
 safety half of the per-anchor gate, not a hint: `hydra-dev` otherwise
 self-selects via an unguarded `gh issue list --label ready-for-agent … | .[0]`
 with no design-concept check in its path, so an unpinned dispatch could land on
 the very anchor being grilled this turn — the grill-before-dev violation #628
-exists to prevent. No `prompt_args.anchor` → today's self-selection.
+exists to prevent. A `Fresh` intent with no anchor → today's self-selection.
 
 **A second, independent source of a pinned anchor: draining
 `state.dev_resume_pending` (issue #3866).** `reap.py` appends a resume record
@@ -359,9 +359,8 @@ selector in `decide.py` drains this queue BEFORE the grill-gate/self-select
 logic above, so it can pin a dispatch even when the anchor's issue is no
 longer labelled `ready-for-agent` (it was relabelled `needs-dev-resume`) and
 `orch_work_available` is otherwise false. Such an action carries
-`prompt_args.resume: true` and, when the stalled worktree branch is known,
-`prompt_args.resume_branch = "<branch-name>"`. **When `prompt_args.resume` is
-true, say so in the dispatch prompt** — e.g. *"This anchor previously stalled
+a `ResumeBranch` intent (anchor + the stalled worktree branch) or, when no branch
+is known, a `ResumeSalvage` intent (anchor only). **For either resume kind, say so in the dispatch prompt** — e.g. *"This anchor previously stalled
 without a PR (branch `<resume_branch>`, if given). Before implementing from
 scratch, check whether that branch still exists (`git ls-remote origin
 <resume_branch>`) and continue from it if so — do not silently redo already-
@@ -374,7 +373,7 @@ committed portion of the prior attempt.
 
 **Red-PR forward-fix dispatch contract (issues #4460, #5058, INV-10).** When the
 `dev_orch` selector's dispatch action carries
-`prompt_args.forward_fix_pr = <pr>` (alongside `anchor`/`resume`/`resume_branch`,
+a `ForwardFixRed`, `ForwardFixConflict` or `ForwardFixConflictWithFail` intent (anchor + PR + branch,
 emitted for an open PR of ANY provenance whose closing issue is `needs-dev-resume`
 or that is stranded red on a required check — see the provenance-agnostic
 `orch_dev_resume_pick` signal, produced by the Turn Snapshot `pr-gate` collector), the dispatch
@@ -420,9 +419,9 @@ issue NOT `needs-dev-resume`). At cap, no dispatch fires and `_rule_pr_gate` emi
 `surface-pr {cause: red-forward-fix-exhausted}` — the operator owns it. The
 `needs-dev-resume` arm is uncapped: the label is its idempotency key.
 
-**Conflict fix-forward delta (issue #4807).** When `prompt_args.conflict_fix` is true and `prompt_args.qa_fail_at_head` is not set (the `orch_dirty_forward_fix` pin with no FAIL pending), first apply `conflict-fix-attempted` to the PR via `gh api repos/gaberoo322/hydra/issues/<pr>/labels -f 'labels[]=conflict-fix-attempted'` (never `gh pr edit`), then carry the contract above with step 1's reset kept and: merge `origin/master` into the head (NEVER rebase, force-push or `gh pr create`); keep both sides' intent; regenerate `npm run docs:inventories` and union `test/fixtures/suite-count-baseline.json` keys then `--update-baseline`; run targeted tests + `typecheck` + `typecheck:test`; push to the SAME branch; do NOT address review findings. An unresolvable conflict ends with no push and one PR comment naming the paths; never remove the marker.
+**Conflict fix-forward delta (issue #4807).** This is the `orch_dirty_forward_fix` pin with no QA FAIL pending at the head: first apply `conflict-fix-attempted` to the PR via `gh api repos/gaberoo322/hydra/issues/<pr>/labels -f 'labels[]=conflict-fix-attempted'` (never `gh pr edit`), then carry the contract above with step 1's reset kept and: merge `origin/master` into the head (NEVER rebase, force-push or `gh pr create`); keep both sides' intent; regenerate `npm run docs:inventories` and union `test/fixtures/suite-count-baseline.json` keys then `--update-baseline`; run targeted tests + `typecheck` + `typecheck:test`; push to the SAME branch; do NOT address review findings. An unresolvable conflict ends with no push and one PR comment naming the paths; never remove the marker.
 
-**Two-phase conflict fix-forward delta (issue #5253).** When `prompt_args.qa_fail_at_head` is true (a QA FAIL is pending at the PR's pre-merge head), carry the contract above in this order: (a) apply `conflict-fix-attempted` to the PR via `gh api repos/gaberoo322/hydra/issues/<pr>/labels -f 'labels[]=conflict-fix-attempted'` (never `gh pr edit`); (b) reset to the PR head per step 1; (c) merge `origin/master` into the head (NEVER rebase, force-push or `gh pr create`), keep both sides' intent, regenerate `npm run docs:inventories` and union `test/fixtures/suite-count-baseline.json` keys then `--update-baseline`, commit and push the merge to the SAME branch; (d) only then carry steps 2-5 on the merged head, taking the finding list from the `### Findings` comment whose trailing `QA-Verdict` sha matches the pre-merge head's FAIL trailer — finding work never happens on an unmerged head. An unresolvable conflict ends with no push, one PR comment naming the paths and no finding work; never remove the marker.
+**Two-phase conflict fix-forward delta (issue #5253).** A QA FAIL is pending at the PR's pre-merge head: carry the contract above in this order: (a) apply `conflict-fix-attempted` to the PR via `gh api repos/gaberoo322/hydra/issues/<pr>/labels -f 'labels[]=conflict-fix-attempted'` (never `gh pr edit`); (b) reset to the PR head per step 1; (c) merge `origin/master` into the head (NEVER rebase, force-push or `gh pr create`), keep both sides' intent, regenerate `npm run docs:inventories` and union `test/fixtures/suite-count-baseline.json` keys then `--update-baseline`, commit and push the merge to the SAME branch; (d) only then carry steps 2-5 on the merged head, taking the finding list from the `### Findings` comment whose trailing `QA-Verdict` sha matches the pre-merge head's FAIL trailer — finding work never happens on an unmerged head. An unresolvable conflict ends with no push, one PR comment naming the paths and no finding work; never remove the marker.
 
 The renderer (`scripts/autopilot/render-dispatch.py`) appends the matching delta itself: the two-phase arm when the Turn Snapshot's `orch_dirty_forward_fix_fail_pr` equals the pinned PR (qa-merge-guard reports a FAIL-family verdict at the PR's current head; computed by the pr-gate collector once per turn for the dirty pick only, fail-closed to conflict-only), otherwise the conflict-only arm. Do not hand-append either delta.
 

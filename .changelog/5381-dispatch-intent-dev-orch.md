@@ -1,0 +1,1 @@
+- refactor: dev_orch dispatch actions carry a typed Dispatch Intent instead of prompt_args; the renderer is a pure function of it (#5381)

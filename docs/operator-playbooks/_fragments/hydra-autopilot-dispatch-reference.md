@@ -150,7 +150,7 @@ cache, so the resume path no longer depends on it surviving. Four mechanisms:
    closed to `none`). The `dev_orch` selector pins it AFTER the in-state drain
    above, regardless of `orch_work_available`, of whether
    `dev_resume_pending` holds a record, or of which run queued it. The action
-   carries `prompt_args.forward_fix_pr`, so the forward-fix dispatch contract
+   carries a `ForwardFixRed` intent (anchor, PR, branch), so the forward-fix dispatch contract
    below applies verbatim (continue the PR's head, push to the SAME branch,
    NEVER `gh pr create`). Only the red-CI arm (`orch_prs_red_resume`) is
    capped (`RED_FORWARD_FIX_CAP`). Reap's needs-qa promotion clears the label.
@@ -166,8 +166,8 @@ cache, so the resume path no longer depends on it surviving. Four mechanisms:
    (widened to `--json number,labels,updatedAt` — zero added reads) and
    fail-closed to `none` on any unusable input. The `dev_orch` selector pins it
    immediately AFTER the in-state drain (mechanism 2) and BEFORE the
-   #4807/#4518 PR-keyed pins, with `prompt_args` exactly
-   `{"anchor": "issue-<N>", "resume": true}` — no branch to continue, so the
+   #4807/#4518 PR-keyed pins, with a `ResumeSalvage`
+   intent for `issue-<N>` — no branch to continue, so the
    dispatch prompt reads the issue's own comments for the last reap stall's
    `**Branch:**` line instead. There is NO state key: the durable cap is
    enforced at reap time — `_handle_dev_orch_stall` counts the issue's prior

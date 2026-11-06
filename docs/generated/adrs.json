@@ -205,6 +205,7 @@
         "docs/operations/glm-lane.md",
         "docs/operator-playbooks/hydra-branch-prune.md",
         "docs/operator-playbooks/hydra-cleanup.md",
+        "docs/operator-playbooks/hydra-sweep.md",
         "docs/operator-playbooks/hydra-target-qa.md",
         "docs/operator-playbooks/hydra-tool-scout.md",
         "docs/operator-playbooks/hydra-wire-or-retire.md",
@@ -285,6 +286,7 @@
       "readWhen": "Changing dispatch logic or `decide.py`.",
       "citedBy": [
         "CONTEXT-MAP.md",
+        "CONTEXT.md",
         "docs/adr/0008-design-concept-gate.md",
         "docs/adr/0011-schemas-seam-for-http-request-bodies.md",
         "docs/adr/0012-autopilot-is-the-single-brain.md",
@@ -1313,7 +1315,8 @@
         "docs/agents/triage-labels.md",
         "docs/operator-playbooks/hydra-issue-research.md",
         "docs/operator-playbooks/hydra-qa.md",
-        "docs/operator-playbooks/hydra-review.md"
+        "docs/operator-playbooks/hydra-review.md",
+        "docs/operator-playbooks/hydra-sweep.md"
       ],
       "source": {
         "path": "docs/adr/0047-work-item-lifecycle-is-data.md"

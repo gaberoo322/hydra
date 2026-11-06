@@ -738,7 +738,7 @@ describe("POST /autopilot/board/relabel — immediate-tier lane move", () => {
     const router = createAutopilotBoardRouter({ seam: s.deps });
     const handler = findHandler(router, "POST", "/autopilot/board/relabel");
     const res = mockRes();
-    await handler!(mockReq({ method: "POST", body: { issue: 9, label: "needs-qa" } }), res);
+    await handler!(mockReq({ method: "POST", body: { issue: 9, label: "in-progress" } }), res);
     assert.equal(res._status, 400);
     assert.equal(res._body.code, "schema-validation-failed");
   });

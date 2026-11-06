@@ -56,7 +56,7 @@ function baseState(over: Record<string, unknown> = {}): any {
     signal_last_fired: {},
     research_force_counter: {},
     last_dispatch_by_class: {
-      dev_target: { turn: 2, skill: "hydra-target-build", prompt_args: { anchor: "issue-9", attempt: 1 }, worktreeBranch: BRANCH },
+      dev_target: { turn: 2, skill: "hydra-target-build", prompt_args: { attempt: 1 }, intent: { kind: "TargetFresh", anchor: "issue-9" }, worktreeBranch: BRANCH },
     },
     ...over,
   };
@@ -91,7 +91,8 @@ describe("decide.py - Fable instant-death replay (#5323)", () => {
     assert.equal(reap.dispatch_model, "fable");
     const [d] = replays(plan);
     assert.equal(d.skill, "hydra-target-build");
-    assert.deepEqual(d.prompt_args, { anchor: "issue-9", attempt: 2, escalate_model: "opus", prior_attempt_status: "instant-death" });
+    assert.deepEqual(d.intent, { kind: "TargetFresh", anchor: "issue-9" });
+    assert.deepEqual(d.prompt_args, { attempt: 2, escalate_model: "opus", prior_attempt_status: "instant-death" });
     assert.equal(replays(plan).length, 1, "no double dispatch from the pipeline rule");
     assert.ok(plan.actions.indexOf(reap) < plan.actions.indexOf(d), "reap precedes dispatch (INV-006)");
     assert.equal(d.worktreeBranch.length > 0, true);
@@ -142,6 +143,17 @@ describe("decide.py - Fable instant-death replay (#5323)", () => {
     assert.ok(mismatch.plan.reasons.includes("instant-death-unjoinable:dev_target"));
   });
 
+  test("a pre-intent (prompt_args-only) dev_target record is unjoinable, never replayed intent-less (#5383)", () => {
+    const st = baseState({
+      last_dispatch_by_class: {
+        dev_target: { turn: 2, skill: "hydra-target-build", prompt_args: { anchor: "issue-9", attempt: 1 }, worktreeBranch: BRANCH },
+      },
+    });
+    const { plan } = decide(st, [death()]);
+    assert.equal(replays(plan).length, 0);
+    assert.ok(plan.reasons.includes("instant-death-unjoinable:dev_target"), plan.reasons.join());
+  });
+
   test("a null slot or a slot without dispatch_id is unjoinable -> no replay (INV-3 fail-closed)", () => {
     const nullSlot = baseState();
     nullSlot.slots.dev_target = null;
@@ -182,6 +194,47 @@ describe("decide.py - Fable instant-death replay (#5323)", () => {
     const reap = plan.actions.find((a: any) => a.type === "reap");
     assert.equal(reap.instant_death, true);
     assert.equal("dispatch_model" in reap, false);
+  });
+
+  test("an INTENT-shaped dev_orch dispatch is replayed THROUGH its intent, not stranded without one (#5381)", () => {
+    const intent = { kind: "ResumeBranch", anchor: "issue-9", branch: "feat/9-x" };
+    const st = baseState({
+      slots: { dev_orch: { skill: "hydra-dev", task_id: "abc123", started: "t0", started_epoch: 1, dispatch_id: BRANCH }, dev_target: null },
+      last_dispatch_by_class: {
+        dev_orch: { turn: 2, skill: "hydra-dev", prompt_args: { escalate_model: "fable" }, intent, worktreeBranch: BRANCH },
+      },
+    });
+    const { plan, stateAfter } = decide(st, [death({ slot: "dev_orch" })]);
+    const [d] = plan.actions.filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.ok(d, "replayed");
+    assert.deepEqual(d.intent, intent);
+    assert.equal(d.anchor, "issue-9");
+    assert.deepEqual(d.prompt_args, { escalate_model: "opus", attempt: 2, prior_attempt_status: "instant-death" });
+    assert.deepEqual(stateAfter.last_dispatch_by_class.dev_orch.intent, intent, "the replay is itself recorded with its intent");
+  });
+
+  test("a recorded dev_orch intent that no longer parses is unjoinable, never replayed blind (#5381)", () => {
+    const st = baseState({
+      slots: { dev_orch: { skill: "hydra-dev", task_id: "abc123", started: "t0", started_epoch: 1, dispatch_id: BRANCH }, dev_target: null },
+      last_dispatch_by_class: {
+        dev_orch: { turn: 2, skill: "hydra-dev", prompt_args: { escalate_model: "fable" }, intent: { kind: "Bogus" }, worktreeBranch: BRANCH },
+      },
+    });
+    const { plan } = decide(st, [death({ slot: "dev_orch" })]);
+    assert.equal(plan.actions.filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch").length, 0);
+    assert.ok(plan.reasons.includes("instant-death-unjoinable:dev_orch"), plan.reasons.join());
+  });
+
+  test("a pre-intent dev_orch record (no intent) is unjoinable, never replayed intent-less (#5381)", () => {
+    const st = baseState({
+      slots: { dev_orch: { skill: "hydra-dev", task_id: "abc123", started: "t0", started_epoch: 1, dispatch_id: BRANCH }, dev_target: null },
+      last_dispatch_by_class: {
+        dev_orch: { turn: 2, skill: "hydra-dev", prompt_args: { anchor: "issue-9", escalate_model: "fable" }, worktreeBranch: BRANCH },
+      },
+    });
+    const { plan } = decide(st, [death({ slot: "dev_orch" })]);
+    assert.equal(plan.actions.filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch").length, 0);
+    assert.ok(plan.reasons.includes("instant-death-unjoinable:dev_orch"), plan.reasons.join());
   });
 
   test("decide records every emitted dispatch in state.last_dispatch_by_class", () => {

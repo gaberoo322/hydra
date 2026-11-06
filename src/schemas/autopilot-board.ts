@@ -173,14 +173,16 @@ export type WorkQueueLane = (typeof WORK_QUEUE_LANES)[number];
 /**
  * The lane labels a relabel action may move an issue between (ADR-0034 §7:
  * relabel is immediate-tier). Promoting to `ready-for-agent` is its own
- * confirm-gated action; `in-progress`/`needs-qa` are agent-owned and never
- * set by hand.
+ * confirm-gated action; `in-progress`/`qa-passed`/`parked` are machine
+ * records and never set by hand.
  */
 export const RELABEL_TARGETS = [
   "needs-triage",
   "needs-info",
   "ready-for-human",
   "blocked",
+  "needs-dev-resume",
+  "needs-qa",
 ] as const;
 export type RelabelTarget = (typeof RELABEL_TARGETS)[number];
 

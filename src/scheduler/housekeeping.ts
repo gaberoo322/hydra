@@ -51,6 +51,7 @@
 
 import * as Sentry from "@sentry/node";
 import { logger } from "../logger.ts";
+import { InvalidArgumentError } from "../errors.ts";
 import {
   getMemoryLastConsolidation,
   getCleanupLastDaily,
@@ -235,8 +236,12 @@ async function runChore(
  *
  * Returns a `{ ran, skipped }` summary so callers (the endpoint, tests) can
  * see which chores did work this invocation vs. which were skipped by their
- * time-guard. Never throws — each chore is independently run through
- * `runChore`, which try/catches so one failure doesn't abort the rest.
+ * time-guard. A failing chore never throws out of here — each chore is
+ * independently run through `runChore`, which try/catches so one failure
+ * doesn't abort the rest. The one throw is up-front argument validation: a
+ * `deps.workOverrides` key naming no registered chore throws
+ * `InvalidArgumentError` (`code: invalid-argument`, issue #5199) before any
+ * chore runs.
  */
 async function runHousekeeping(
   eventBus: PublishableBus,
@@ -277,6 +282,14 @@ async function runHousekeeping(
      * so `runHousekeeping` makes no network call to the Target.
      */
     publishTargetOutcomes?: () => Promise<unknown>;
+    /**
+     * Per-chore `work` overrides keyed by chore name (issue #5199, lever 2).
+     * A composition test stubs the chores that make live `gh`/network calls
+     * (the dominant wall time of the housekeeping endpoint suite) while the
+     * guard and ran/skipped bookkeeping stay the real code path. Production
+     * passes nothing, so every chore binds its real runner.
+     */
+    workOverrides?: Record<string, () => Promise<boolean | void>>;
     /**
      * Injectable lifecycle reconcile pass (issue #5316). Defaults to the real
      * {@link runLifecycleReconcile} chore, which reads and WRITES GitHub labels;
@@ -545,8 +558,22 @@ async function runHousekeeping(
     },
   ];
 
+  // Issue #5199: an override key that names no registered chore would leave
+  // the real (slow, live-gh) chore running and the test passing vacuously, so
+  // reject it loudly. Own-property lookup only: a key like `constructor` must
+  // never resolve to an inherited Object.prototype member.
+  const overrides = deps.workOverrides ?? {};
+  const choreNames = new Set(chores.map((c) => c.name));
+  const unknownKeys = Object.keys(overrides).filter((k) => !choreNames.has(k));
+  if (unknownKeys.length > 0) {
+    throw new InvalidArgumentError(
+      `runHousekeeping: workOverrides names unregistered chore(s): ${unknownKeys.join(", ")}`,
+    );
+  }
+
   for (const chore of chores) {
-    await runChore(chore, ran, skipped);
+    const override = Object.hasOwn(overrides, chore.name) ? overrides[chore.name] : undefined;
+    await runChore(override ? { ...chore, work: override } : chore, ran, skipped);
   }
 
   return { ran, skipped };

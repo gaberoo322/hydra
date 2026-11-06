@@ -8,8 +8,18 @@ Every definition here moved verbatim from decide.py.
 
 from __future__ import annotations
 
+import re
+
 from decide_base import (
     RED_FORWARD_FIX_CAP,
+    TargetFresh,
+    TargetResume,
+    ForwardFixConflict,
+    ForwardFixConflictWithFail,
+    ForwardFixRed,
+    Fresh,
+    ResumeBranch,
+    ResumeSalvage,
     _dev_resume_pick_signal,
     _dirty_fix_fail_pr,
     _is_parked_anchor,
@@ -113,13 +123,14 @@ def _select_slot_dev_orch(
             and not _is_parked_anchor(state, events, entry["anchor"])
         ):
             resume_pending.pop(0)
-            prompt_args: dict = {"anchor": entry["anchor"], "resume": True}
             if entry.get("branch"):
-                prompt_args["resume_branch"] = entry["branch"]
+                resume_intent = ResumeBranch(anchor=entry["anchor"], branch=entry["branch"])
+            else:
+                resume_intent = ResumeSalvage(anchor=entry["anchor"])
             return make_dispatch(
                 cls,
                 "hydra-dev",
-                prompt_args=prompt_args,
+                intent=resume_intent,
                 reason=(
                     f"resuming stalled dev_orch anchor {entry['anchor']} "
                     f"— prior completion opened no PR (issue #3866)"
@@ -163,7 +174,7 @@ def _select_slot_dev_orch(
         return make_dispatch(
             cls,
             "hydra-dev",
-            prompt_args={"anchor": nopr_anchor, "resume": True},
+            intent=ResumeSalvage(anchor=nopr_anchor),
             reason=(
                 f"no-PR durable dev resume: {nopr_anchor} is needs-dev-resume "
                 "with no open PR referencing it — label-derived pin, "
@@ -191,14 +202,9 @@ def _select_slot_dev_orch(
             return make_dispatch(
                 cls,
                 "hydra-dev",
-                prompt_args={
-                    "anchor": f"issue-{fix_issue}",
-                    "resume": True,
-                    "resume_branch": fix_branch,
-                    "forward_fix_pr": fix_pr,
-                    "conflict_fix": True,
-                    "qa_fail_at_head": True,
-                },
+                intent=ForwardFixConflictWithFail(
+                    anchor=f"issue-{fix_issue}", pr=fix_pr, branch=fix_branch
+                ),
                 reason=(
                     f"dirty PR two-phase conflict fix-forward: PR {fix_pr} (issue #{fix_issue}) "
                     f"on {fix_branch} — QA FAIL pending at head: merge origin/master FIRST, "
@@ -209,13 +215,9 @@ def _select_slot_dev_orch(
         return make_dispatch(
             cls,
             "hydra-dev",
-            prompt_args={
-                "anchor": f"issue-{fix_issue}",
-                "resume": True,
-                "resume_branch": fix_branch,
-                "forward_fix_pr": fix_pr,
-                "conflict_fix": True,
-            },
+            intent=ForwardFixConflict(
+                anchor=f"issue-{fix_issue}", pr=fix_pr, branch=fix_branch
+            ),
             reason=(
                 f"dirty PR conflict fix-forward: PR {fix_pr} (issue #{fix_issue}) "
                 f"on {fix_branch} — merge origin/master, one attempt per PR "
@@ -267,17 +269,14 @@ def _select_slot_dev_orch(
     resume_pick = _dev_resume_pick_signal(state, events)
     if resume_pick is not None and not _is_parked_anchor(state, events, resume_pick[0]):  # #5319 belt
         pick_issue, pick_pr, pick_branch = resume_pick
-        prompt_args = {
-            "anchor": f"issue-{pick_issue}",
-            "resume": True,
-            "resume_branch": pick_branch,
-            "forward_fix_pr": pick_pr,
-        }
+        pick_intent = ForwardFixRed(
+            anchor=f"issue-{pick_issue}", pr=pick_pr, branch=pick_branch
+        )
         if pick_pr not in _red_resume_prs(state, events):
             return make_dispatch(
                 cls,
                 "hydra-dev",
-                prompt_args=prompt_args,
+                intent=pick_intent,
                 reason=(
                     f"durable dev resume: issue #{pick_issue} is needs-dev-resume "
                     f"with open PR {pick_pr} on {pick_branch} — label + PR ledger "
@@ -294,7 +293,7 @@ def _select_slot_dev_orch(
             return make_dispatch(
                 cls,
                 "hydra-dev",
-                prompt_args=prompt_args,
+                intent=pick_intent,
                 reason=(
                     f"red PR forward-fix: PR {pick_pr} "
                     f"(issue #{pick_issue}) red on a required check, "
@@ -396,14 +395,16 @@ def _select_slot_dev_orch(
         return make_dispatch(
             cls,
             "hydra-dev",
-            prompt_args={"anchor": dev_ready_anchor},
+            intent=Fresh(anchor=dev_ready_anchor),
             reason=(
                 f"orch board has a grill-clear ready-for-agent anchor "
                 f"({dev_ready_anchor}) while {orch_anchor} awaits a design "
                 f"concept (per-anchor gate, #3711)"
             ),
         )
-    return make_dispatch(cls, "hydra-dev", reason="orch board has ready-for-agent issues")
+    return make_dispatch(
+        cls, "hydra-dev", intent=Fresh(), reason="orch board has ready-for-agent issues"
+    )
 
 
 def _select_slot_dev_target(
@@ -435,13 +436,7 @@ def _select_slot_dev_target(
         return make_dispatch(
             cls,
             "hydra-target-build",
-            prompt_args={
-                "anchor": f"issue-{pick_issue}",
-                "resume": True,
-                "resume_issue": pick_issue,
-                "resume_pr": pick_pr,
-                "resume_branch": pick_branch,
-            },
+            intent=TargetResume(anchor=f"issue-{pick_issue}", pr=pick_pr, branch=pick_branch),
             reason=(
                 "target dev resume pin: needs-dev-resume issue-"
                 f"{pick_issue} held by open PR #{pick_pr} "
@@ -468,7 +463,7 @@ def _select_slot_dev_target(
         _signal_present(state, events, "target_work_available")
         or _signal_present(state, events, "target_board_work_available")
     ):
-        prompt_args: dict = {}
+        intent = TargetFresh()
         # ISSUE #1129 (finished): the dev-steer half of the single target
         # candidate boundary now reads the SAME feed-owned flag the
         # research_target slot does. `not research_recommended(candidates)`
@@ -478,13 +473,15 @@ def _select_slot_dev_target(
         # The `best` guard stays only to extract the anchorRef/score hint.
         if best and not research_recommended(candidates):
             ref = best.get("anchorRef") or best.get("issue")
-            if ref is not None:
-                prompt_args["anchor"] = ref
-                prompt_args["score"] = best_score
+            # Issue #5383: only an `issue-<N>` hint pins; any other shape
+            # (item-267, an int) was always rendered UNPINNED, so the brain
+            # now decides that instead of a silent renderer fallback.
+            if isinstance(ref, str) and re.fullmatch(r"issue-\d+", ref):
+                intent = TargetFresh(anchor=ref)
         return make_dispatch(
             cls,
             "hydra-target-build",
-            prompt_args=prompt_args,
+            intent=intent,
             reason="target work queue non-empty",
         )
     return None
