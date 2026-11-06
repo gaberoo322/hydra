@@ -19,6 +19,8 @@ export const RELABEL_TARGETS: readonly string[] = Object.freeze([
   "needs-info",
   "ready-for-human",
   "blocked",
+  "needs-dev-resume",
+  "needs-qa",
 ]);
 
 export type Verdicts = Record<string, boolean>;

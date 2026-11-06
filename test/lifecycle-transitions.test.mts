@@ -121,9 +121,16 @@ describe("operator-route legality is data (#5313 INV-3)", () => {
   });
 
   test("agent-owned states are never operator targets", () => {
-    for (const s of ["in-progress", "needs-qa", "qa-passed", "parked", "needs-dev-resume"]) {
+    for (const s of ["in-progress", "qa-passed", "parked"]) {
       assert.equal((OPERATOR_TARGETS as readonly string[]).includes(s), false, s);
       assert.equal(findOperatorTransition("needs-triage", s as never), undefined, s);
+    }
+  });
+
+  test("needs-dev-resume and needs-qa are operator targets (the #5058 hand-back lanes)", () => {
+    for (const s of ["needs-dev-resume", "needs-qa"]) {
+      assert.equal((OPERATOR_TARGETS as readonly string[]).includes(s), true, s);
+      assert.ok(findOperatorTransition("ready-for-human", s as never), s);
     }
   });
 

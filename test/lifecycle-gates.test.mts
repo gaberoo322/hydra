@@ -475,7 +475,7 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
 
   test("agent-owned targets are illegal from the board, journaled as refused operator-route", async () => {
     const o = operatorHarness(["needs-triage"], "shadow");
-    for (const to of ["in-progress", "needs-qa", "qa-passed", "parked"]) {
+    for (const to of ["in-progress", "qa-passed", "parked"]) {
       const res = await operatorAdvance({ issue: 10, to, actor: "board:relabel" }, o.h.deps);
       assert.equal(res.ok, false, to);
       assert.equal((res as any).code, "illegal-transition", to);

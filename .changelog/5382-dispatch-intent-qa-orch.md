@@ -1,0 +1,1 @@
+- refactor: qa_orch dispatches carry a typed Dispatch Intent (ReviewLane / ReviewSelfSelect) so a parked issue can never reach a QA prompt through the renderer (#5382)
