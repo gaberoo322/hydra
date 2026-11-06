@@ -338,6 +338,41 @@ class ForwardFixConflictWithFail:
         return {"kind": self.kind, "anchor": self.anchor, "pr": self.pr, "branch": self.branch}
 
 
+@dataclass(frozen=True)
+class ReviewLane:
+    """Review the selector's parked-filtered needs-qa lane head `anchor`; `rest` is
+    the remaining parked-filtered lane in order (issue #5382)."""
+
+    kind: ClassVar[str] = "ReviewLane"
+    anchor: str
+    rest: tuple = ()
+
+    def __post_init__(self):
+        _need_anchor(self.kind, self.anchor)
+        if not isinstance(self.rest, (list, tuple)):
+            raise ValueError(f"dispatch intent {self.kind!r}: rest must be a list, got {self.rest!r}")
+        rest = tuple(self.rest)
+        for r in rest:
+            _need_anchor(self.kind, r)
+        if self.anchor in rest:
+            raise ValueError(f"dispatch intent {self.kind!r}: rest must not contain the head {self.anchor!r}")
+        object.__setattr__(self, "rest", rest)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "anchor": self.anchor, "rest": list(self.rest)}
+
+
+@dataclass(frozen=True)
+class ReviewSelfSelect:
+    """No per-issue lane fact this turn (degraded board read): hydra-qa resolves the
+    needs-qa lane head itself (#3709 fail-open on the coarse boolean)."""
+
+    kind: ClassVar[str] = "ReviewSelfSelect"
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind}
+
+
 DEV_INTENT_CLASSES = (
     Fresh,
     ResumeBranch,
@@ -347,7 +382,14 @@ DEV_INTENT_CLASSES = (
     ForwardFixConflictWithFail,
 )
 DEV_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in DEV_INTENT_CLASSES)
-_INTENT_REGISTRY = {c.kind: c for c in DEV_INTENT_CLASSES}
+QA_INTENT_CLASSES = (ReviewLane, ReviewSelfSelect)
+QA_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in QA_INTENT_CLASSES)
+INTENT_KINDS_BY_SLOT: dict[str, tuple[str, ...]] = {
+    "dev_orch": DEV_INTENT_KINDS,
+    "qa_orch": QA_INTENT_KINDS,
+}
+_INTENT_REGISTRY = {c.kind: c for c in DEV_INTENT_CLASSES + QA_INTENT_CLASSES}
+assert len(_INTENT_REGISTRY) == len(DEV_INTENT_CLASSES) + len(QA_INTENT_CLASSES), "intent kind names must be globally unique"
 
 # prompt_args keys that may ride ALONGSIDE an intent: slot-generic dispatch
 # machinery (cascade routing #3274), not the work shape.

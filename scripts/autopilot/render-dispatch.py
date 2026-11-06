@@ -451,16 +451,77 @@ DEV_INTENT_RENDERERS = {
 }
 
 
-def dev_orch_task(action: dict, skill: str | None) -> list[str]:
+def _intent_renderer(slot: str, action: dict, renderers: dict):
+    """Parse the action's intent and look up its renderer; the one fail-loud path
+    shared by every intent-driven slot (missing / unknown / cross-slot kind -> RenderError)."""
     try:
         intent = db.dispatch_intent(action)
     except ValueError as exc:
-        raise RenderError(f"dev_orch: {exc}") from exc
+        raise RenderError(f"{slot}: {exc}") from exc
     if intent is None:
-        raise RenderError("dev_orch: dispatch action carries no intent")
-    fn = DEV_INTENT_RENDERERS.get(intent.kind)
+        raise RenderError(f"{slot}: dispatch action carries no intent")
+    fn = renderers.get(intent.kind)
     if fn is None:
-        raise RenderError(f"dev_orch: no renderer for intent kind {intent.kind!r}")
+        raise RenderError(f"{slot}: no renderer for intent kind {intent.kind!r}")
+    return intent, fn
+
+
+# ---------------------------------------------------------------------------
+# qa_orch: a pure function of the typed Dispatch Intent (issue #5382)
+# ---------------------------------------------------------------------------
+
+_QA_FIND_PR = "Find its open PR by closing-ref (`Closes #N` in the PR body), not by title."
+
+
+def _render_review_lane(intent, skill: str | None) -> list[str]:
+    rest_n = [str(_issue_number(r)) for r in intent.rest]
+    rest = f"; the rest of the lane, in order: {', '.join('#' + n for n in rest_n)}" if rest_n else ""
+    return [
+        f"Invoke the `{skill}` skill (via the Skill tool; scope: orch, repo {ORCH_REPO}). "
+        f"Review **issue #{_issue_number(intent.anchor)}** (the selector's parked-filtered needs-qa lane head - "
+        f"do NOT self-select a different needs-qa issue){rest}. {_QA_FIND_PR}"
+    ]
+
+
+def _render_review_self_select(intent, skill: str | None) -> list[str]:
+    return [
+        f"Invoke the `{skill}` skill (via the Skill tool; scope: orch, repo {ORCH_REPO}). "
+        f"Resolve the needs-qa lane head yourself. {_QA_FIND_PR}"
+    ]
+
+
+QA_INTENT_RENDERERS = {
+    "ReviewLane": _render_review_lane,
+    "ReviewSelfSelect": _render_review_self_select,
+}
+
+_QA_REVIEW_RULES = (
+    "Review that PR with the FULL step-7 Standards + Spec fan-out (blocking reviewer spawns, all in one message) — "
+    "never an inline single-reviewer substitute. Review with `gh pr view` / `gh pr diff` only; do NOT `gh pr checkout` "
+    "and do NOT approve the PR (shared identity 422s). If the PR is BEHIND master, `gh pr update-branch` first so you "
+    "do not report phantom reversions. If a design-concept artifact exists for the anchor "
+    "(`curl -s http://localhost:4000/api/design-concepts/issue-<N>`), review Spec against it; otherwise against the "
+    "issue's acceptance criteria — and do not FAIL a PR for picking an option the issue itself offers."
+)
+
+
+def qa_orch_task(action: dict, skill: str | None) -> list[str]:
+    intent, fn = _intent_renderer("qa_orch", action, QA_INTENT_RENDERERS)
+    move_on = (
+        "move on to the next issue in the lane above (never one outside it)."
+        if intent.kind == "ReviewLane"
+        else "move on to the next needs-qa issue instead."
+    )
+    return fn(intent, skill) + [
+        _QA_REVIEW_RULES,
+        "Post the verdict as a PR comment with the `QA-Verdict:` trailer and execute the step-10 routing. If the lane "
+        f"head already has a verdict at its current head SHA, {move_on}",
+        "Final message: the PR(s) reviewed, the verdict(s) posted (with head SHA), and the routing applied — or a `## Friction Report`.",
+    ]
+
+
+def dev_orch_task(action: dict, skill: str | None) -> list[str]:
+    intent, fn = _intent_renderer("dev_orch", action, DEV_INTENT_RENDERERS)
     return fn(intent, skill) + [
         DEV_VERIFY_RULES,
         "Final message: the PR number and head SHA (or the commits pushed to the existing PR), the required-check state you observed, or a `## Friction Report` naming a hard blocker.",
@@ -477,32 +538,7 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
         out.extend(dev_orch_task(action, skill))
 
     elif slot == "qa_orch":
-        lane = [str(n) for n in (ts.ordered_numbers(state, [], "needs_qa_numbers") or [])]
-        pinned = _issue_number(pa.get("issue"))
-        if pinned:
-            # #5319 QA r2: the selector's parked-filtered head - review exactly this issue.
-            lane = [str(pinned)]
-            head = f"Review **issue #{pinned}** (pinned by the selector - do NOT self-select a different needs-qa issue)"
-        else:
-            head = f"The needs-qa lane head is **issue #{lane[0]}**" if lane else "Resolve the needs-qa lane head yourself"
-        rest = f"; the rest of the lane, in order: {', '.join('#' + n for n in lane[1:])}" if len(lane) > 1 else ""
-        out.append(
-            f"Invoke the `{skill}` skill (via the Skill tool; scope: {scope or 'orch'}, repo {ORCH_REPO}). {head}{rest}. "
-            "Find its open PR by closing-ref (`Closes #N` in the PR body), not by title."
-        )
-        out.append(
-            "Review that PR with the FULL step-7 Standards + Spec fan-out (blocking reviewer spawns, all in one message) — "
-            "never an inline single-reviewer substitute. Review with `gh pr view` / `gh pr diff` only; do NOT `gh pr checkout` "
-            "and do NOT approve the PR (shared identity 422s). If the PR is BEHIND master, `gh pr update-branch` first so you "
-            "do not report phantom reversions. If a design-concept artifact exists for the anchor "
-            "(`curl -s http://localhost:4000/api/design-concepts/issue-<N>`), review Spec against it; otherwise against the "
-            "issue's acceptance criteria — and do not FAIL a PR for picking an option the issue itself offers."
-        )
-        out.append(
-            "Post the verdict as a PR comment with the `QA-Verdict:` trailer and execute the step-10 routing. If the lane "
-            "head already has a verdict at its current head SHA, move on to the next needs-qa issue instead."
-        )
-        out.append("Final message: the PR(s) reviewed, the verdict(s) posted (with head SHA), and the routing applied — or a `## Friction Report`.")
+        out.extend(qa_orch_task(action, skill))
 
     elif slot == "design_concept_orch":
         out.append(

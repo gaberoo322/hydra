@@ -5833,19 +5833,29 @@ describe("decide.py - parked issues are never dispatched or armed (issue #5319)"
     assert.deepEqual(after.dev_resume_pending, []);
   });
 
-  test("QA r2 #2: qa_orch pins the parked-filtered head in prompt_args.issue", () => {
+  test("QA r2 #2: qa_orch names the parked-filtered head in a ReviewLane intent", () => {
     const s = baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: `${PARKED} 3841`, orch_parked_issues: [PARKED] } });
     const q = qaOrch(runDecide(s, null));
     assert.equal(q.length, 1);
-    assert.equal(q[0].prompt_args.issue, "issue-3841");
+    assert.equal(q[0].intent.kind, "ReviewLane");
+    assert.equal(q[0].intent.anchor, "issue-3841");
+    assert.deepEqual(q[0].intent.rest, []);
+    assert.equal("prompt_args" in q[0], false);
+    assert.equal(q[0].anchor, "issue-3841");
   });
 
-  test("QA r2 #2 sibling: an unparked head (or no needs_qa_numbers) keeps the unpinned scope=orch dispatch", () => {
+  test("QA r2 #2 sibling: an unparked head still yields ReviewLane with the parked tail filtered out; no numbers -> ReviewSelfSelect (#5382)", () => {
     const u = qaOrch(runDecide(baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: `3841 ${PARKED}`, orch_parked_issues: [PARKED] } }), null));
-    assert.equal(u[0].prompt_args.issue, undefined);
+    assert.equal(u[0].intent.kind, "ReviewLane");
+    assert.equal(u[0].intent.anchor, "issue-3841");
+    assert.deepEqual(u[0].intent.rest, [], "the parked tail is filtered even when the head was not parked");
+    assert.equal("prompt_args" in u[0], false);
+    const m = qaOrch(runDecide(baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: "3841 3842 3843" } }), null));
+    assert.deepEqual(m[0].intent, { kind: "ReviewLane", anchor: "issue-3841", rest: ["issue-3842", "issue-3843"] });
     const q = qaOrch(runDecide(baseState({ signals: { needs_qa_orch: true, orch_parked_unreadable: false } }), null));
     assert.equal(q.length, 1);
-    assert.equal(q[0].prompt_args.issue, undefined);
+    assert.deepEqual(q[0].intent, { kind: "ReviewSelfSelect" });
+    assert.equal("prompt_args" in q[0], false);
   });
 
   test("QA r2 #3: degraded parked read blocks qa_orch even with absent needs_qa_numbers", () => {

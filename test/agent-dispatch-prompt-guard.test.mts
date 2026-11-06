@@ -158,7 +158,9 @@ function renderPrompt(slot: string, isolation: "worktree" | "self", opts: Render
     skill,
     ...(slot === "dev_orch"
       ? { intent: opts.intent ?? { kind: "Fresh", anchor: "issue-1234" }, ...(opts.promptArgs ? { prompt_args: opts.promptArgs } : {}) }
-      : { prompt_args: opts.promptArgs ?? { anchor: "issue-1234", scope: "orch" } }),
+      : slot === "qa_orch"
+        ? { intent: opts.intent ?? { kind: "ReviewLane", anchor: "issue-1234", rest: [] } }
+        : { prompt_args: opts.promptArgs ?? { anchor: "issue-1234", scope: "orch" } }),
     worktreeBranch: `worktree-agent-4dfd1dc9-t4-${slot}`,
     isolation,
     dispatchSentinel: `<!-- hydra-dispatch v1 skill=${skill} dispatchId=worktree-agent-4dfd1dc9-t4-${slot} runId=${runId} -->`,
