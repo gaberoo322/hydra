@@ -248,7 +248,10 @@ describe("hydra-review playbook — hand-back clears the PR's stranding labels (
     assert.doesNotMatch(body, /gh pr edit/, "gh pr edit is broken for labels — never use it");
     assert.doesNotMatch(body, /gh api[^\n]*-f name=/, "the -f name= DELETE form wipes every label");
     // The linked issue is routed too.
-    assert.match(body, /curl -sf -X POST http:\/\/localhost:4000\/api\/autopilot\/board\/relabel/);
+    assert.match(body, /curl -s -o \/dev\/stderr -w '%\{http_code\}' -X POST http:\/\/localhost:4000\/api\/autopilot\/board\/relabel/);
+    // The relabel itself fails loud: a non-2xx HTTP code exits non-zero (QA round 1).
+    assert.match(body, /\*\) echo "ERROR: relabel of #\$ISSUE refused[^\n]*>&2; exit 1/);
+    assert.doesNotMatch(body, /\| jq \./, "a pipe into jq would mask the curl/HTTP status");
     assert.match(body, /\\"issue\\":\$ISSUE,\\"label\\":\\"\$LANE\\"/);
     assert.doesNotMatch(body, /gh issue edit/, "the issue relabel rides the board route, never gh issue edit");
   });
@@ -273,8 +276,8 @@ describe("hydra-review playbook — hand-back clears the PR's stranding labels (
     assert.match(body, /still carries[^\n]*NOT relabelled/);
     // Ordering: every abort sits BEFORE the issue relabel.
     const relabel = body.indexOf("/api/autopilot/board/relabel");
-    const lastExit = body.lastIndexOf("exit 1");
-    assert.ok(relabel > -1 && lastExit > -1 && lastExit < relabel, "every abort must precede the issue relabel");
+    const guardExit = body.indexOf("exit 1", body.indexOf("still carries"));
+    assert.ok(relabel > -1 && guardExit > -1 && guardExit < relabel, "every pre-relabel abort must precede the issue relabel");
   });
 
   test("a QA round-cap escalation (#4735) the operator keeps is explicitly NOT a hand-back", () => {
