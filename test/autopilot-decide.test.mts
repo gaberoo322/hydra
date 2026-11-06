@@ -330,8 +330,9 @@ describe("decide.py — design_concept_orch anchor-only trigger (#3870)", () => 
       "design_concept_orch must fire on orch_pending_grill_anchor alone, even with orch_work_available absent (#3870 — the GLM-partition starvation bug)",
     );
     assert.equal(dispatch.skill, "hydra-grill");
-    assert.equal(dispatch.prompt_args.scope, "orch");
-    assert.equal(dispatch.prompt_args.anchor, "issue-3785");
+    assert.deepEqual(dispatch.intent, { kind: "Grill", anchor: "issue-3785" });
+    assert.equal("prompt_args" in dispatch, false, "typed intent replaces prompt_args (#5384)");
+    assert.equal(dispatch.anchor, "issue-3785", "top-level anchor projection kept for dashboard/retro joins");
   });
 
   // The fix removes a redundant precondition; it must not make the selector
@@ -3608,11 +3609,10 @@ describe("decide.py — wayfinder_orch signal class (issue #3351)", () => {
     const plan = runDecide(wfState(), null);
     const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
     assert.ok(a, "wayfinder_orch must dispatch when a frontier ticket is pre-resolved and cooled");
-    // decide.py emits the taxonomy default skill; the playbook overrides per type.
     assert.equal(a.skill, "hydra-issue-research");
-    assert.ok(a.prompt_args, "dispatch must carry prompt_args referencing the pre-resolved ticket");
-    assert.equal(a.prompt_args.ticket, "issue-4242", "prompt_args.ticket must be the pre-resolved frontier ref");
-    assert.equal(a.prompt_args.ticket_type, "research", "prompt_args.ticket_type must carry the frontier type");
+    assert.deepEqual(a.intent, { kind: "WayfinderResearch", ticket: "issue-4242" });
+    assert.equal("prompt_args" in a, false, "typed intent replaces prompt_args (#5384)");
+    assert.equal("anchor" in a, false, "a wayfinder ticket is not an anchor: no top-level projection");
   });
 
   test("carries the task ticket_type verbatim for task frontier tickets", () => {
@@ -3625,8 +3625,8 @@ describe("decide.py — wayfinder_orch signal class (issue #3351)", () => {
     const plan = runDecide(state, null);
     const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
     assert.ok(a, "wayfinder_orch must dispatch on a task-typed frontier ticket");
-    assert.equal(a.prompt_args.ticket, "issue-4243");
-    assert.equal(a.prompt_args.ticket_type, "task", "task type must pass through so the playbook routes to hydra-dev");
+    assert.deepEqual(a.intent, { kind: "WayfinderTask", ticket: "issue-4243" });
+    assert.equal(a.skill, "hydra-dev", "the brain resolves the task ticket's skill from the intent kind (#5384 INV-4)");
   });
 
   test("does NOT fire without the wayfinder_orch_frontier signal (AC #2 absent-signal arm)", () => {
@@ -3658,7 +3658,7 @@ describe("decide.py — wayfinder_orch signal class (issue #3351)", () => {
     const plan = runDecide(state, null);
     const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
     assert.ok(a, "an unstamped ticket_type must still dispatch (default research)");
-    assert.equal(a.prompt_args.ticket_type, "research", "missing ticket_type defaults to research (matches the taxonomy default skill)");
+    assert.equal(a.intent.kind, "WayfinderResearch", "missing ticket_type defaults to research (matches the taxonomy default skill)");
   });
 
   test("OMITS the model param — inherit parent per #1093 (authoring/judgment work)", () => {
@@ -5880,5 +5880,69 @@ describe("decide.py - parked issues are never dispatched or armed (issue #5319)"
   test("QA r2 #3: degraded parked read blocks qa_orch even with absent needs_qa_numbers", () => {
     const s = baseState({ signals: { needs_qa_orch: true, orch_parked_unreadable: true } });
     assert.equal(qaOrch(runDecide(s, null)).length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dispatch Intent slice 4 (issue #5384): research kinds, brain-resolved skill, admission stamp
+// ---------------------------------------------------------------------------
+describe("decide.py — design_concept / wayfinder / research intents (issue #5384)", () => {
+  test("research_orch and research_target dispatches carry their kind and no prompt_args", () => {
+    const orch = findAction(
+      runDecide(baseState({ signals: { needs_research: true, orch_work_available: true } }), null),
+      (a) => a.type === "dispatch" && a.slot === "research_orch",
+    );
+    assert.ok(orch, "research_orch dispatches on needs_research");
+    {
+      assert.deepEqual(orch.intent, { kind: "ResearchNeeded" });
+      assert.equal("prompt_args" in orch, false);
+    }
+    const target = findAction(
+      runDecide(baseState({ signals: { target_board_research_due: true } }), null),
+      (a) => a.type === "dispatch" && a.slot === "research_target",
+    );
+    assert.ok(target, "research_target dispatches on target_board_research_due");
+    {
+      assert.deepEqual(target.intent, { kind: "TargetResearchDue" });
+      assert.equal("prompt_args" in target, false);
+    }
+  });
+
+  test("the wayfinder skill is READ from classes.json skill_by_ticket_type, not hardcoded (#4592 AC3, moved here by #5384)", () => {
+    const rows = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8"));
+    const row = rows.classes.find((c: { name: string }) => c.name === "wayfinder_orch");
+    row.skill_by_ticket_type = { research: "mutated-research-skill", task: "mutated-task-skill" };
+    row.skill = "mutated-research-skill";
+    const t = makeTmp();
+    const mutated = join(t.dir, "classes.json");
+    writeFileSync(mutated, JSON.stringify(rows));
+    writeFileSync(t.state, JSON.stringify(withTurnSnapshot(baseState({ signals: { wayfinder_orch_frontier: "issue-4243", wayfinder_orch_ticket_type: "task" } }))));
+    writeFileSync(t.cands, "null");
+    writeFileSync(t.events, "[]");
+    const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
+      encoding: "utf-8",
+      env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off", HYDRA_CLASSES_JSON: mutated },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const a = findAction(JSON.parse(r.stdout), (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
+    rmSync(t.dir, { recursive: true, force: true });
+    assert.ok(a, "wayfinder_orch dispatches");
+    assert.equal(a.skill, "mutated-task-skill");
+  });
+
+  test("step 7 stamps action.admission verbatim from the usage blob on every dispatch, and omits it when the blob has none", () => {
+    const admission = { launchModel: "opus", primaryModel: "fable", fallbackModel: "opus", modelFallbackReason: "out-of-credits" };
+    const withAdm = {
+      ...baseState({ signals: { orch_pending_grill_anchor: "issue-3785" } }),
+      usage_eligibility: { allow: true, shed: [], reasons: {}, usage: {}, admission },
+    };
+    const dispatches = (runDecide(withAdm, null).actions ?? []).filter((a: any) => a.type === "dispatch");
+    assert.ok(dispatches.length > 0);
+    for (const d of dispatches) assert.deepEqual(d.admission, admission, d.slot);
+    const without = (runDecide(baseState({ signals: { orch_pending_grill_anchor: "issue-3785" } }), null).actions ?? []).filter(
+      (a: any) => a.type === "dispatch",
+    );
+    assert.ok(without.length > 0);
+    for (const d of without) assert.equal("admission" in d, false, d.slot);
   });
 });

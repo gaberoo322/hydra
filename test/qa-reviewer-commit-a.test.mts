@@ -23,7 +23,7 @@ import { runQaVerdictPhase, type QaVerdictFetchers } from "../src/qa/phases.ts";
 import { buildQaVerdictTrailer, parseQaVerdictTrailer } from "../src/qa/verdict-trailer.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
-const PLAYBOOK = readFileSync(join(ROOT, "docs", "operator-playbooks", "hydra-qa.md"), "utf8");
+const PLAYBOOK = readFileSync(join(ROOT, "docs", "operator-playbooks", "_fragments", "hydra-qa-reference.md"), "utf8");
 
 const TWO_WAY_DIFF = [
   "diff --git a/docs/guide.md b/docs/guide.md",
@@ -310,7 +310,7 @@ describe("playbook step 9.4 pins", () => {
   const step94 = PLAYBOOK.slice(start, end);
 
   test("step 9.4 sits between step 9 and step 9.5", () => {
-    assert.ok(start > PLAYBOOK.indexOf("### 9. Classify"));
+    assert.ok(start !== -1, "step 9.4 lives in the hydra-qa reference sidecar after the #5269 refactor");
     assert.ok(end > start);
   });
 

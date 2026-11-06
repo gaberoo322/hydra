@@ -127,6 +127,7 @@
     "test/qa-merge-guard-callsites.test.mts": "invariant-lint",
     "test/qa-merge-guard.test.mts": "invariant-lint",
     "test/qa-reviewer-commit-a.test.mts": "invariant-lint",
+    "test/qa-plumbing-scripts.test.mts": "behaviour",
     "test/qa-verdict-cli.test.mts": "behaviour",
     "test/qa-verdict-trailer.test.mts": "grandfathered",
     "test/reap-stale-test-procs.test.mts": "behaviour",

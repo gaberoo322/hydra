@@ -72,6 +72,18 @@
       }
     },
     {
+      "name": "DESIGN_CONCEPT_MODE",
+      "readSites": [
+        {
+          "path": "scripts/qa/preflight.ts"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/qa/preflight.ts"
+      }
+    },
+    {
       "name": "GITHUB_STEP_SUMMARY",
       "readSites": [
         {
@@ -222,6 +234,15 @@
         },
         {
           "path": "scripts/hooks/session-start-capture.sh"
+        },
+        {
+          "path": "scripts/qa/packet.ts"
+        },
+        {
+          "path": "scripts/qa/preflight.ts"
+        },
+        {
+          "path": "scripts/qa/route.ts"
         }
       ],
       "inEnvExample": false,

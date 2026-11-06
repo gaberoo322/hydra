@@ -31,12 +31,12 @@ Where the text comes from — nothing here is a second copy of a rule:
     routing table became a pointer to that column; dispatch-time lookups read
     data, not prose), then `prompt_args.escalate_model` (#3274), then the
     Fable out-of-credits pre-resolution (#4585:
-    `state.usage_eligibility.admission.modelFallbackReason` set →
-    `admission.launchModel`, the verdict's one launch-model rule, #5103).
-  * The skill is the action's, except `wayfinder_orch`, whose
-    `prompt_args.ticket_type` selects hydra-issue-research / hydra-dev at
-    dispatch time (#3351). stamp-slot.py imports `effective_skill` from here
-    so the stamped slot records the skill that ran.
+    `action.admission.modelFallbackReason` set → `admission.launchModel`, the
+    verdict's one launch-model rule, #5103; decide.py stamps it, #5384).
+  * The skill is the action's: decide.py step 7 resolves wayfinder_orch's
+    hydra-issue-research / hydra-dev from the intent kind (#3351, #5384).
+    stamp-slot.py imports `effective_skill` from here so the stamped slot
+    records the skill that ran.
 
 The `## Task` skeleton carries the sentences the playbook makes MANDATORY for
 a prompt_args shape (pinned anchor #3711, resume + resume_branch #3866, the
@@ -61,11 +61,10 @@ import re
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# The Turn Snapshot accessor (ADR-0043, #4934) — the ONE reader of this
-# turn's signals and blobs; a sibling module (stamp-slot.py imports this file
-# by spec, so the path insert keeps the import resolvable from there too).
+# Sibling modules (stamp-slot.py imports this file by spec, so the path insert
+# keeps the imports resolvable from there too). The renderer reads NO Turn
+# Snapshot (issue #5384): the brain stamps everything it needs on the action.
 sys.path.insert(0, SCRIPT_DIR)
-import turn_snapshot as ts  # noqa: E402
 import decide_base as db  # noqa: E402  (Dispatch Intent types + accessors, #5381)
 import run_ledger  # noqa: E402  (the ONE state-document parser, #5075)
 
@@ -277,7 +276,7 @@ def model_column(path: str = CLASSES_PATH) -> dict[str, str | None]:
     return table
 
 
-def resolve_model(slot: str, action: dict, table: dict[str, str | None], state: dict) -> tuple[str | None, str]:
+def resolve_model(slot: str, action: dict, table: dict[str, str | None]) -> tuple[str | None, str]:
     """(alias-or-None, source). Static row → escalate_model hint → Fable pre-resolution."""
     prompt_args = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
     hint = prompt_args.get("escalate_model")
@@ -288,10 +287,11 @@ def resolve_model(slot: str, action: dict, table: dict[str, str | None], state: 
     else:
         model, source = None, "unmapped-class:inherit"
     # #5103: the launch-model rule lives in the admission verdict
-    # (src/cost/admission.ts); this reads the same decision off the projection
-    # instead of keeping a second copy. A snapshot without `.admission`, or one
-    # with no fallback reason, resolves from the column (fail-safe).
-    adm = ts.usage_eligibility(state).get("admission")
+    # (src/cost/admission.ts); decide.py step 7 stamps that verdict on the action
+    # (#5384) and this reads it instead of keeping a second copy. An action
+    # without `.admission`, or one with no fallback reason, resolves from the
+    # column (fail-safe).
+    adm = action.get("admission")
     if (
         isinstance(adm, dict)
         and adm.get("modelFallbackReason")
@@ -307,39 +307,10 @@ def resolve_model(slot: str, action: dict, table: dict[str, str | None], state: 
 # Skill + ids
 # ---------------------------------------------------------------------------
 
-def skill_by_ticket_type(slot: str, path: str | None = None) -> dict[str, str]:
-    """The class row's `skill_by_ticket_type` routing map from classes.json (#4592 AC3).
-
-    Empty dict when the row declares none. A read/parse failure warns on stderr
-    and returns {} so callers fall back to the taxonomy-default skill (the
-    function stays total: stamp-slot.py imports effective_skill and must not
-    crash a dispatch stamp) — but never silently.
-    """
-    path = path or CLASSES_PATH
-    try:
-        with open(path, encoding="utf-8") as fh:
-            rows = json.load(fh).get("classes")
-    except (OSError, ValueError) as err:
-        print(f"render-dispatch: WARN skill-routing-lookup-failed ({path}: {err})", file=sys.stderr)
-        return {}
-    for row in rows if isinstance(rows, list) else []:
-        if isinstance(row, dict) and row.get("name") == slot:
-            mapping = row.get("skill_by_ticket_type")
-            if isinstance(mapping, dict):
-                return {k: v for k, v in mapping.items() if isinstance(k, str) and isinstance(v, str) and v}
-            return {}
-    return {}
-
-
 def effective_skill(action: dict) -> str | None:
-    """The skill that actually runs — a class with a `skill_by_ticket_type` row
-    routes by ticket_type (#3351; read from classes.json, #4592 AC3)."""
-    prompt_args = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
-    slot = action.get("slot")
-    if slot == "wayfinder_orch":
-        routed = skill_by_ticket_type(slot).get(prompt_args.get("ticket_type"))
-        if routed:
-            return routed
+    """The skill that actually runs. decide.py step 7 resolves a ticket-typed
+    dispatch's skill from its intent kind (#5384), so this is the action's own
+    skill; kept as the import seam stamp-slot.py loads through importlib."""
     return action.get("skill")
 
 
@@ -596,11 +567,104 @@ def qa_target_task(action: dict, skill: str | None) -> list[str]:
     ]
 
 
+def _render_grill(intent, skill: str | None) -> list[str]:
+    n = _issue_number(intent.anchor)
+    return [
+        f"Invoke the `{skill}` skill (via the Skill tool) on **issue #{n}** of {ORCH_REPO} "
+        f"(anchor `issue-{n}`, scope=orch) and follow it end to end in AFK (non-interactive) "
+        "mode: produce the design-concept artifact for that anchor, or the skill's gate-fail handoff if a gap is "
+        "genuinely unresolvable.",
+        "Grill against `origin/master`, not any stale local branch — verify each premise in the issue against the code on "
+        "master before designing around it (premise-check first; if the issue is already fixed or a duplicate of shipped "
+        "work, say so and route it per the skill rather than writing a concept). Commit to a recommended position on each "
+        "open question; no neutral option matrices.",
+        "The artifact must actually PERSIST: after writing it, confirm it is readable back via "
+        f"`curl -s http://localhost:4000/api/design-concepts/issue-{n}` (use the skill's `grill-artifact.sh` "
+        "write + approve path if its own persistence step did not land it).",
+        "Final message: whether the artifact persisted (and its approval status as read back from the API), or the handoff you posted, plus the key decisions.",
+    ]
+
+
+DESIGN_CONCEPT_INTENT_RENDERERS = {"Grill": _render_grill}
+
+
+def design_concept_task(action: dict, skill: str | None) -> list[str]:
+    intent, fn = _intent_renderer("design_concept_orch", action, DESIGN_CONCEPT_INTENT_RENDERERS)
+    return fn(intent, skill)
+
+
+def _render_wayfinder(intent, skill: str | None) -> list[str]:
+    n = _issue_number(intent.ticket)
+    out = [
+        f"You are the `wayfinder_orch` worker for wayfinder frontier ticket **#{n}** (type `{intent.ticket_type}`).",
+        f"Step 0 — CLAIM FIRST (issue #3354): `gh issue edit {n} --repo {ORCH_REPO} --add-assignee @me`. Skipping the claim makes both saturation guards inert.",
+    ]
+    if intent.ticket_type == "task":
+        out.append(f"Then invoke the `hydra-dev` skill on #{n}: implement it in this worktree and open a PR whose body ends `Closes #{n}`. {DEV_VERIFY_RULES}")
+    else:
+        out.append(f"Then invoke the `hydra-issue-research` skill on #{n}: research the codebase (against `origin/master`) and enrich the ticket's body with the findings; if a findings doc belongs in the repo (`docs/research/`), open a PR for it.")
+    out.append(
+        "Resolution protocol when done (ADR-0029): (1) post a resolution comment on the ticket summarising findings / PR; "
+        "(2) close the ticket once the enrichment or PR has landed (a `task` ticket closes when its PR merges — leave it "
+        "open with the PR referenced if the PR is still in CI); (3) append a line to the parent map's `## Decisions so far` "
+        "section (the map issue named in the ticket's body; edit via `gh api -X PATCH`) recording what this ticket cleared."
+    )
+    out.append("Final message: findings headline, PR (if any), and whether the map was updated.")
+    return out
+
+
+WAYFINDER_INTENT_RENDERERS = {
+    "WayfinderResearch": _render_wayfinder,
+    "WayfinderTask": _render_wayfinder,
+}
+
+
+def wayfinder_task(action: dict, skill: str | None) -> list[str]:
+    intent, fn = _intent_renderer("wayfinder_orch", action, WAYFINDER_INTENT_RENDERERS)
+    return fn(intent, skill)
+
+
+def _render_research_target(intent, skill: str | None) -> list[str]:
+    return [
+        f"Invoke the `{skill}` skill (via the Skill tool; scope: target). The Target board has zero `ready-for-agent` "
+        "issues, so the build lane has nothing to pick up; the goal is a SMALL number of well-scoped, buildable "
+        "`ready-for-agent` Target issues that advance the Target's stated vision and priorities.",
+        "Before filing anything, check open AND recently closed Target issues and open Target PRs for duplicates. An empty "
+        "ready lane with open PRs in flight is not by itself evidence that more issues are needed; prefer filing nothing "
+        "over a duplicate or a padding item. Every issue you label `ready-for-agent` must carry concrete acceptance "
+        "criteria and a `## Files in scope` section. Never read or grep `.env` files; never scrape sites the Target's "
+        "direction docs rule out.",
+        "Final message: the issues you filed or updated (numbers + one line each), any direction-doc PR you pushed, and what you deliberately did not file and why.",
+    ]
+
+
+RESEARCH_TARGET_INTENT_RENDERERS = {"TargetResearchDue": _render_research_target}
+
+
+def research_target_task(action: dict, skill: str | None) -> list[str]:
+    intent, fn = _intent_renderer("research_target", action, RESEARCH_TARGET_INTENT_RENDERERS)
+    return fn(intent, skill)
+
+
+def _render_research_orch(intent, skill: str | None) -> list[str]:
+    return [
+        f"Invoke the `{skill}` skill (via the Skill tool; scope: orch, repo {ORCH_REPO}) and follow it end to end in this "
+        "session. Research against `origin/master`; verify every finding against real current behaviour (code on master, "
+        "the live API on http://localhost:4000) before writing it down.",
+        "Final message: the issues enriched or filed (numbers + one line each) and the key findings.",
+    ]
+
+
+RESEARCH_ORCH_INTENT_RENDERERS = {"ResearchNeeded": _render_research_orch}
+
+
+def research_orch_task(action: dict, skill: str | None) -> list[str]:
+    intent, fn = _intent_renderer("research_orch", action, RESEARCH_ORCH_INTENT_RENDERERS)
+    return fn(intent, skill)
+
+
 def task_section(slot: str, action: dict, state: dict, skill: str | None) -> list[str]:
-    pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
     out: list[str] = ["## Task"]
-    anchor_n = _issue_number(pa.get("anchor"))
-    scope = pa.get("scope")
 
     if slot == "dev_orch":
         out.extend(dev_orch_task(action, skill))
@@ -609,24 +673,7 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
         out.extend(qa_orch_task(action, skill))
 
     elif slot == "design_concept_orch":
-        out.append(
-            f"Invoke the `{skill}` skill (via the Skill tool) on **issue #{anchor_n or '<N>'}** of {ORCH_REPO} "
-            f"(anchor `issue-{anchor_n or '<N>'}`, scope={scope or 'orch'}) and follow it end to end in AFK (non-interactive) "
-            "mode: produce the design-concept artifact for that anchor, or the skill's gate-fail handoff if a gap is "
-            "genuinely unresolvable."
-        )
-        out.append(
-            "Grill against `origin/master`, not any stale local branch — verify each premise in the issue against the code on "
-            "master before designing around it (premise-check first; if the issue is already fixed or a duplicate of shipped "
-            "work, say so and route it per the skill rather than writing a concept). Commit to a recommended position on each "
-            "open question; no neutral option matrices."
-        )
-        out.append(
-            "The artifact must actually PERSIST: after writing it, confirm it is readable back via "
-            f"`curl -s http://localhost:4000/api/design-concepts/issue-{anchor_n or '<N>'}` (use the skill's `grill-artifact.sh` "
-            "write + approve path if its own persistence step did not land it)."
-        )
-        out.append("Final message: whether the artifact persisted (and its approval status as read back from the API), or the handoff you posted, plus the key decisions.")
+        out.extend(design_concept_task(action, skill))
 
     elif slot == "dev_target":
         out.extend(dev_target_task(action, skill))
@@ -635,49 +682,17 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
         out.extend(qa_target_task(action, skill))
 
     elif slot == "wayfinder_orch":
-        ticket_n = _issue_number(pa.get("ticket"))
-        tt = pa.get("ticket_type")
-        out.append(
-            f"You are the `wayfinder_orch` worker for wayfinder frontier ticket **#{ticket_n or '<N>'}** (type `{tt or 'unknown'}`)."
-        )
-        out.append(f"Step 0 — CLAIM FIRST (issue #3354): `gh issue edit {ticket_n or '<N>'} --repo {ORCH_REPO} --add-assignee @me`. Skipping the claim makes both saturation guards inert.")
-        if tt == "task":
-            out.append(f"Then invoke the `hydra-dev` skill on #{ticket_n or '<N>'}: implement it in this worktree and open a PR whose body ends `Closes #{ticket_n or '<N>'}`. {DEV_VERIFY_RULES}")
-        else:
-            out.append(f"Then invoke the `hydra-issue-research` skill on #{ticket_n or '<N>'}: research the codebase (against `origin/master`) and enrich the ticket's body with the findings; if a findings doc belongs in the repo (`docs/research/`), open a PR for it.")
-        out.append(
-            "Resolution protocol when done (ADR-0029): (1) post a resolution comment on the ticket summarising findings / PR; "
-            "(2) close the ticket once the enrichment or PR has landed (a `task` ticket closes when its PR merges — leave it "
-            "open with the PR referenced if the PR is still in CI); (3) append a line to the parent map's `## Decisions so far` "
-            "section (the map issue named in the ticket's body; edit via `gh api -X PATCH`) recording what this ticket cleared."
-        )
-        out.append("Final message: findings headline, PR (if any), and whether the map was updated.")
+        out.extend(wayfinder_task(action, skill))
 
     elif slot == "research_target":
-        out.append(
-            f"Invoke the `{skill}` skill (via the Skill tool; scope: target). The Target board has zero `ready-for-agent` "
-            "issues, so the build lane has nothing to pick up; the goal is a SMALL number of well-scoped, buildable "
-            "`ready-for-agent` Target issues that advance the Target's stated vision and priorities."
-        )
-        out.append(
-            "Before filing anything, check open AND recently closed Target issues and open Target PRs for duplicates. An empty "
-            "ready lane with open PRs in flight is not by itself evidence that more issues are needed; prefer filing nothing "
-            "over a duplicate or a padding item. Every issue you label `ready-for-agent` must carry concrete acceptance "
-            "criteria and a `## Files in scope` section. Never read or grep `.env` files; never scrape sites the Target's "
-            "direction docs rule out."
-        )
-        out.append("Final message: the issues you filed or updated (numbers + one line each), any direction-doc PR you pushed, and what you deliberately did not file and why.")
+        out.extend(research_target_task(action, skill))
 
     elif slot == "research_orch":
-        out.append(
-            f"Invoke the `{skill}` skill (via the Skill tool; scope: orch, repo {ORCH_REPO}) and follow it end to end in this "
-            "session. Research against `origin/master`; verify every finding against real current behaviour (code on master, "
-            "the live API on http://localhost:4000) before writing it down."
-        )
-        out.append("Final message: the issues enriched or filed (numbers + one line each) and the key findings.")
+        out.extend(research_orch_task(action, skill))
 
     else:
         # Signal classes — the skill's own contract plus the prompt_args it was fired with.
+        pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
         args_txt = ", ".join(f"{k}: {json.dumps(v)}" for k, v in pa.items())
         out.append(
             f"Invoke the `{skill}` skill (via the Skill tool"
@@ -759,9 +774,12 @@ def describe(slot: str, action: dict, skill: str | None) -> str:
     pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
     tail = ""
     intent_pr_ref = None
+    intent_ticket = None
     try:
         pinned = db.dispatch_anchor(action)
-        intent_pr_ref = getattr(db.dispatch_intent(action), "pr_ref", None)
+        parsed = db.dispatch_intent(action)
+        intent_pr_ref = getattr(parsed, "pr_ref", None)
+        intent_ticket = getattr(parsed, "ticket", None)
     except ValueError as exc:
         pinned = None  # an unknown intent kind is the renderer's RenderError, not describe's
         print(f"render-dispatch: describe: {exc}", file=sys.stderr)
@@ -770,8 +788,8 @@ def describe(slot: str, action: dict, skill: str | None) -> str:
         tail = f" on #{_issue_number(pinned)}"
     elif pr_ref:
         tail = f" on PR {str(pr_ref).rstrip('/').rsplit('/', 1)[-1]}"
-    elif _issue_number(pa.get("ticket")):
-        tail = f" on ticket #{_issue_number(pa.get('ticket'))}"
+    elif _issue_number(intent_ticket):
+        tail = f" on ticket #{_issue_number(intent_ticket)}"
     elif pa.get("scope"):
         tail = f" ({pa.get('scope')})"
     return f"{slot}: {skill}{tail}"
@@ -781,7 +799,7 @@ def render(slot: str, action: dict, state: dict, playbook: str, fragment: str, n
     blocks = preamble_blocks(playbook, fragment)
     table = model_column()
     skill = effective_skill(action)
-    model, source = resolve_model(slot, action, table, state)
+    model, source = resolve_model(slot, action, table)
     isolation = action.get("isolation") or "worktree"
     return {
         "slot": slot,

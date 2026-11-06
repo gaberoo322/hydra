@@ -74,7 +74,6 @@
       "path": "config/direction/outcomes.yaml",
       "section": "direction",
       "readBy": [
-        "docs/operator-playbooks/hydra-qa.md",
         "src/aggregators/outcome-trends.ts",
         "src/api/outcomes.ts",
         "src/holdback-policy.ts",
@@ -214,7 +213,6 @@
       "path": "config/orchestrator/qa-rollout.json",
       "section": null,
       "readBy": [
-        "docs/operator-playbooks/hydra-qa.md",
         "docs/operator-playbooks/hydra-retro.md",
         "scripts/qa/pair-graduation.ts",
         "src/qa/rollout-switches.ts"

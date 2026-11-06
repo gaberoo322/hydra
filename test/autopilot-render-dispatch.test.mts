@@ -128,12 +128,45 @@ function qaTargetAction(intent?: Record<string, unknown>): Record<string, unknow
   return a;
 }
 
+/** A design_concept_orch dispatch action carrying a typed Dispatch Intent and NO prompt_args key (#5384). */
+function designConceptAction(intent?: Record<string, unknown>): Record<string, unknown> {
+  const a = action("design_concept_orch", "hydra-grill", { intent: intent ?? { kind: "Grill", anchor: "issue-4806" }, anchor: "issue-4806" });
+  delete a.prompt_args;
+  return a;
+}
+
+/** A wayfinder_orch dispatch action; `skill` is what decide.py step 7 resolved from the kind (#5384). */
+function wayfinderAction(intent?: Record<string, unknown>): Record<string, unknown> {
+  const i = intent ?? { kind: "WayfinderResearch", ticket: "issue-4706" };
+  const a = action("wayfinder_orch", i.kind === "WayfinderTask" ? "hydra-dev" : "hydra-issue-research", { intent: i });
+  delete a.prompt_args;
+  return a;
+}
+
+/** A research_orch dispatch action carrying a typed Dispatch Intent (#5384). */
+function researchOrchAction(intent?: Record<string, unknown>): Record<string, unknown> {
+  const a = action("research_orch", "hydra-issue-research", { intent: intent ?? { kind: "ResearchNeeded" } });
+  delete a.prompt_args;
+  return a;
+}
+
+/** A research_target dispatch action carrying a typed Dispatch Intent (#5384). */
+function researchTargetAction(intent?: Record<string, unknown>): Record<string, unknown> {
+  const a = action("research_target", "hydra-target-research", { isolation: "self", intent: intent ?? { kind: "TargetResearchDue" } });
+  delete a.prompt_args;
+  return a;
+}
+
 /** The right action builder for a class: intent-bearing slots get an intent, the rest a plain action. */
 function actionFor(cls: string): Record<string, unknown> {
   if (cls === "dev_orch") return devAction();
   if (cls === "qa_orch") return qaAction();
   if (cls === "dev_target") return devTargetAction();
   if (cls === "qa_target") return qaTargetAction();
+  if (cls === "design_concept_orch") return designConceptAction();
+  if (cls === "wayfinder_orch") return wayfinderAction();
+  if (cls === "research_orch") return researchOrchAction();
+  if (cls === "research_target") return researchTargetAction();
   return action(cls, "hydra-x");
 }
 
@@ -247,8 +280,8 @@ describe("render-dispatch.py — preamble blocks come from the playbook fences (
   });
 
   test("every other class gets the short generic unattended block (one of each block, never a playbook variant)", () => {
-    for (const [slot, skill] of [["sweep_orch", "hydra-sweep"], ["research_orch", "hydra-issue-research"], ["design_concept_orch", "hydra-grill"], ["health", "hydra-doctor"]]) {
-      const out = render(slot, action(slot, skill, { prompt_args: slot === "design_concept_orch" ? { scope: "orch", anchor: "issue-4806" } : {} }));
+    for (const slot of ["sweep_orch", "research_orch", "design_concept_orch", "health"]) {
+      const out = render(slot, slot === "sweep_orch" ? action(slot, "hydra-sweep") : slot === "health" ? action(slot, "hydra-doctor") : actionFor(slot));
       assert.equal(count(out.prompt, "## CRITICAL SAFETY RULE"), 1, slot);
       assert.equal(count(out.prompt, "## NEVER END WAITING"), 1, slot);
       assert.match(out.prompt, /^## NEVER END WAITING\nThis is an UNATTENDED dispatch; reap\.py records/m, slot);
@@ -257,7 +290,7 @@ describe("render-dispatch.py — preamble blocks come from the playbook fences (
   });
 
   test("a legacy action without isolation / sentinel fails safe to the default guard and no sentinel line", () => {
-    const a = action("research_orch", "hydra-issue-research");
+    const a = researchOrchAction();
     delete a.isolation;
     delete a.dispatchSentinel;
     const out = render("research_orch", a);
@@ -276,7 +309,7 @@ describe("render-dispatch.py — dev_orch is a pure function of the Dispatch Int
     ForwardFixConflict: /\*\*Conflict fix-forward delta \(issue #4807\)\.\*\*/,
     ForwardFixConflictWithFail: /\*\*Two-phase conflict fix-forward delta \(issue #5253\)\.\*\*/,
   };
-  const SAMPLE_FIELDS = { anchor: "issue-12", branch: "b", pr: 9, pr_ref: "https://github.com/o/r/pull/9", head: "feature/h" };
+  const SAMPLE_FIELDS = { anchor: "issue-12", ticket: "issue-12", branch: "b", pr: 9, pr_ref: "https://github.com/o/r/pull/9", head: "feature/h" };
 
   const QA_SIGNATURE: Record<string, RegExp> = {
     ReviewLane: /parked-filtered needs-qa lane head/,
@@ -290,11 +323,28 @@ describe("render-dispatch.py — dev_orch is a pure function of the Dispatch Int
     TargetReviewPr: /on Target PR `https:\/\/github.com\/o\/r\/pull\/9` \(`pr_ref`\) — pinned/,
     TargetReviewSelfSelect: /unpinned — its own step 1 resolves the PR/,
   };
+  const DESIGN_CONCEPT_SIGNATURE: Record<string, RegExp> = {
+    Grill: /on \*\*issue #12\*\* of gaberoo322\/hydra \(anchor `issue-12`, scope=orch\)/,
+  };
+  const WAYFINDER_SIGNATURE: Record<string, RegExp> = {
+    WayfinderResearch: /\(type `research`\)[\s\S]*invoke the `hydra-issue-research` skill on #12/,
+    WayfinderTask: /\(type `task`\)[\s\S]*invoke the `hydra-dev` skill on #12/,
+  };
+  const RESEARCH_ORCH_SIGNATURE: Record<string, RegExp> = {
+    ResearchNeeded: /scope: orch, repo gaberoo322\/hydra/,
+  };
+  const RESEARCH_TARGET_SIGNATURE: Record<string, RegExp> = {
+    TargetResearchDue: /The Target board has zero `ready-for-agent`/,
+  };
   const SAMPLE_BY_SLOT: Record<string, { build: (i?: Record<string, unknown>) => Record<string, unknown>; sig: Record<string, RegExp> }> = {
     dev_orch: { build: devAction, sig: SIGNATURE },
     qa_orch: { build: qaAction, sig: QA_SIGNATURE },
     dev_target: { build: devTargetAction, sig: DEV_TARGET_SIGNATURE },
     qa_target: { build: qaTargetAction, sig: QA_TARGET_SIGNATURE },
+    design_concept_orch: { build: designConceptAction, sig: DESIGN_CONCEPT_SIGNATURE },
+    wayfinder_orch: { build: wayfinderAction, sig: WAYFINDER_SIGNATURE },
+    research_orch: { build: researchOrchAction, sig: RESEARCH_ORCH_SIGNATURE },
+    research_target: { build: researchTargetAction, sig: RESEARCH_TARGET_SIGNATURE },
   };
 
   test("completeness: every kind of every slot in INTENT_KINDS_BY_SLOT renders (a kind without a renderer, or a slot without a test signature, turns this red)", () => {
@@ -661,7 +711,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
   });
 
   test("design_concept_orch carries the AFK grill rules (premise-check on master, commit to a position, persistence read-back)", () => {
-    const out = render("design_concept_orch", action("design_concept_orch", "hydra-grill", { prompt_args: { scope: "orch", anchor: "issue-4806" } }));
+    const out = render("design_concept_orch", designConceptAction());
     assert.match(out.prompt, /on \*\*issue #4806\*\* of gaberoo322\/hydra \(anchor `issue-4806`, scope=orch\)/);
     assert.match(out.prompt, /Grill against `origin\/master`/);
     assert.match(out.prompt, /no neutral option matrices/);
@@ -685,41 +735,43 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
   });
 
   test("wayfinder_orch: claim first, ticket-type routes the skill, the three-step resolution protocol", () => {
-    const task = render("wayfinder_orch", action("wayfinder_orch", "hydra-issue-research", { prompt_args: { ticket: "issue-4705", ticket_type: "task" } }));
+    const task = render("wayfinder_orch", wayfinderAction({ kind: "WayfinderTask", ticket: "issue-4705" }));
     assert.equal(task.skill, "hydra-dev", "task tickets run hydra-dev (#3351)");
     assert.match(task.prompt, /Step 0 — CLAIM FIRST \(issue #3354\): `gh issue edit 4705 --repo gaberoo322\/hydra --add-assignee @me`/);
     assert.match(task.prompt, /invoke the `hydra-dev` skill on #4705/);
     assert.match(task.prompt, /\(1\) post a resolution comment.*\(2\) close the ticket.*\(3\) append a line to the parent map's `## Decisions so far`/);
     assert.equal(task.model, null, "wayfinder_orch inherits the parent");
     assert.equal(task.description, "wayfinder_orch: hydra-dev on ticket #4705");
-    const research = render("wayfinder_orch", action("wayfinder_orch", "hydra-issue-research", { prompt_args: { ticket: "issue-4706", ticket_type: "research" } }));
+    const research = render("wayfinder_orch", wayfinderAction({ kind: "WayfinderResearch", ticket: "issue-4706" }));
     assert.equal(research.skill, "hydra-issue-research");
     assert.match(research.prompt, /invoke the `hydra-issue-research` skill on #4706/);
   });
 
-  test("wayfinder_orch: ticket-type skill routing is READ from classes.json skill_by_ticket_type, not hardcoded (#4592 AC3)", () => {
-    const rows = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8"));
-    const row = rows.classes.find((c: { name: string }) => c.name === "wayfinder_orch");
-    row.skill_by_ticket_type = { research: "mutated-research-skill", task: "mutated-task-skill" };
-    const dir = mkdtempSync(join(tmpdir(), "render-classes-"));
-    dirs.push(dir);
-    const mutated = join(dir, "classes.json");
-    writeFileSync(mutated, JSON.stringify(rows));
-    const env = { HYDRA_CLASSES_JSON: mutated };
-    const task = render(
-      "wayfinder_orch",
-      action("wayfinder_orch", "hydra-issue-research", { prompt_args: { ticket: "issue-4705", ticket_type: "task" } }),
-      undefined,
-      env,
-    );
-    assert.equal(task.skill, "mutated-task-skill");
-    const research = render(
-      "wayfinder_orch",
-      action("wayfinder_orch", "hydra-issue-research", { prompt_args: { ticket: "issue-4706", ticket_type: "research" } }),
-      undefined,
-      env,
-    );
-    assert.equal(research.skill, "mutated-research-skill");
+  test("wayfinder_orch: the renderer has no skill routing of its own — the action's skill is what runs (#5384 INV-4)", () => {
+    const a = wayfinderAction({ kind: "WayfinderTask", ticket: "issue-4705" });
+    a.skill = "stamped-by-the-brain";
+    assert.equal(render("wayfinder_orch", a).skill, "stamped-by-the-brain");
+  });
+
+  test("design_concept / wayfinder / research: unknown, missing and cross-slot intent kinds exit 2 naming the slot and kind", () => {
+    for (const [slot, build, cross] of [
+      ["design_concept_orch", designConceptAction, "Fresh"],
+      ["wayfinder_orch", wayfinderAction, "Grill"],
+      ["research_orch", researchOrchAction, "TargetResearchDue"],
+      ["research_target", researchTargetAction, "ResearchNeeded"],
+    ] as const) {
+      const bogus = run(slot, [build({ kind: "Bogus" })]);
+      assert.equal(bogus.status, 2, slot);
+      assert.match(bogus.stderr, /Bogus/, slot);
+      const crossed = run(slot, [build({ kind: cross, anchor: "issue-1", ticket: "issue-1" })]);
+      assert.equal(crossed.status, 2, `${slot} rejects ${cross}`);
+      assert.match(crossed.stderr, new RegExp(`${slot}.*${cross}`), slot);
+      const a = build();
+      delete a.intent;
+      const missing = run(slot, [a]);
+      assert.equal(missing.status, 2, slot);
+      assert.match(missing.stderr, /no intent/, slot);
+    }
   });
 
   test("apply:true scan classes say so, issue-producing classes carry the admission rule, sweeps carry the label-API rule", () => {
@@ -785,7 +837,7 @@ describe("render-dispatch.py — model resolution (#1093, #3274, #4585)", () => 
     assert.equal(out.model_source, "escalate_model");
   });
 
-  test("Fable exhausted (admission.modelFallbackReason set) → admission.launchModel (#5103)", () => {
+  test("Fable exhausted (action.admission.modelFallbackReason set) → admission.launchModel (#5103, #5384)", () => {
     const admission = (over: Record<string, unknown> = {}) => ({
       launchModel: "opus",
       primaryModel: "fable",
@@ -793,26 +845,40 @@ describe("render-dispatch.py — model resolution (#1093, #3274, #4585)", () => 
       modelFallbackReason: "out-of-credits",
       ...over,
     });
-    const withAdm = (adm: unknown) =>
-      baseState({ usage_eligibility: { allow: true, reasons: {}, admission: adm } });
-    const exhausted = withAdm(admission());
+    const withAdm = (a: Record<string, unknown>, adm: unknown) => ({ ...a, admission: adm });
     const a = devTargetAction();
-    const out = render("dev_target", a, exhausted);
+    const out = render("dev_target", withAdm(a, admission()));
     assert.equal(out.model, "opus");
     assert.equal(out.model_source, "model-column→fable-exhausted-fallback");
-    // The launch model is the projection's value, not a second env read.
-    assert.equal(render("dev_target", a, withAdm(admission({ launchModel: "sonnet" }))).model, "sonnet");
-    const env = render("dev_target", a, exhausted, { HYDRA_AUTOPILOT_FALLBACK_MODEL: "haiku" });
+    // The launch model is the verdict's value, not a second env read.
+    assert.equal(render("dev_target", withAdm(a, admission({ launchModel: "sonnet" }))).model, "sonnet");
+    const env = render("dev_target", withAdm(a, admission()), undefined, { HYDRA_AUTOPILOT_FALLBACK_MODEL: "haiku" });
     assert.equal(env.model, "opus", "the renderer no longer reads the fallback env itself");
-    const calm = withAdm(admission({ modelFallbackReason: null, launchModel: "fable" }));
-    assert.equal(render("dev_target", a, calm).model, "fable", "no fallback reason does nothing");
-    const legacy = baseState({ usage_eligibility: { allow: true, reasons: { fableExhaustedUntil: "2099-01-01T00:00:00.000Z" } } });
-    assert.equal(render("dev_target", a, legacy).model, "fable", "no .admission → column value (fail-safe)");
-    const hint = render("cleanup_orch", action("cleanup_orch", "hydra-cleanup", { prompt_args: { escalate_model: "fable" } }), exhausted);
+    const calm = withAdm(a, admission({ modelFallbackReason: null, launchModel: "fable" }));
+    assert.equal(render("dev_target", calm).model, "fable", "no fallback reason does nothing");
+    assert.equal(render("dev_target", a).model, "fable", "no action.admission → column value (fail-safe)");
+    const hint = render("cleanup_orch", withAdm(action("cleanup_orch", "hydra-cleanup", { prompt_args: { escalate_model: "fable" } }), admission()));
     assert.equal(hint.model, "opus", "the hint is pre-resolved too");
     assert.equal(hint.model_source, "escalate_model→fable-exhausted-fallback");
-    const sonnetClass = render("dev_orch", devAction(), exhausted);
+    const sonnetClass = render("dev_orch", withAdm(devAction(), admission()));
     assert.equal(sonnetClass.model, "sonnet", "non-fable rows are untouched");
+  });
+
+  test("purity: an admission verdict ONLY in the state file (not on the action) is never read (#5384 INV-3)", () => {
+    const stateOnly = baseState({
+      usage_eligibility: {
+        allow: true,
+        reasons: {},
+        admission: { launchModel: "opus", primaryModel: "fable", fallbackModel: "opus", modelFallbackReason: "out-of-credits" },
+      },
+    });
+    assert.equal(render("dev_target", devTargetAction(), stateOnly).model, "fable");
+  });
+
+  test("render-dispatch.py imports no turn_snapshot and has no skill_by_ticket_type routing (#5384)", () => {
+    const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "render-dispatch.py"), "utf-8");
+    assert.equal(src.includes("import turn_snapshot"), false);
+    assert.equal(src.includes("skill_by_ticket_type"), false);
   });
 
   test("an unknown class inherits (model null) and says why", () => {
