@@ -243,9 +243,10 @@ if [ -n "$LEFT" ]; then
 fi
 # 3. Route the linked issue to the chosen lane through the board route (ADR-0047:
 #    the sanctioned operator-route exit; never a direct gh label write).
-curl -sf -X POST http://localhost:4000/api/autopilot/board/relabel \
+CODE=$(curl -s -o /dev/stderr -w '%{http_code}' -X POST http://localhost:4000/api/autopilot/board/relabel \
   -H 'content-type: application/json' \
-  -d "{\"issue\":$ISSUE,\"label\":\"$LANE\"}" | jq .
+  -d "{\"issue\":$ISSUE,\"label\":\"$LANE\"}")
+case "$CODE" in 2??) echo "issue #$ISSUE relabelled to $LANE" ;; *) echo "ERROR: relabel of #$ISSUE refused (HTTP $CODE)" >&2; exit 1 ;; esac
 )
 ```
 

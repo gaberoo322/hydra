@@ -95,7 +95,7 @@ gh pr list --repo gaberoo322/hydra --state open --json number,body,title \
 # 3. ≥1 `blocked` child whose blocker is still open AND itself progressing (a clearing path exists)
 ```
 
-If **none** hold → the epic is **STUCK** → `advance <N> parked --reason off-list-escalation` (a STUCK tracking parent is not an ADR-0005 reason, so it parks, not `ready-for-human`) with a comment naming WHY (see the two branches below). If **any** hold → PROGRESSING → skip silently (or a non-routing note); do **not** touch its labels.
+If **none** hold → the epic is **STUCK** → `advance <N> parked --reason off-list-escalation --rationale "<WHY>"` (a STUCK tracking parent is not an ADR-0005 reason, so it parks, not `ready-for-human`) with a comment naming WHY (see the two branches below). If **any** hold → PROGRESSING → skip silently (or a non-routing note); do **not** touch its labels.
 
 #### Score `ready-for-agent` candidates by downstream impact
 
@@ -131,14 +131,14 @@ Process all QA before new dev.
 #### `blocked` — check resolution
 1. Read body for "Blocked by #N".
 2. `gh issue view $blocker --json state` and `gh pr list --search "closes #$blocker" --state merged`.
-3. All blockers closed → `advance $number needs-triage --reason rerouted`, and the `needs-triage` lane below promotes it in the same pass (it runs the **Open-PR pre-promotion gate**; `blocked` → `ready-for-agent` directly is a reconcile-fired row, the two-hop route is legal). If the gate reports `has-open-pr`, leave it at `needs-triage`.
+3. All blockers closed → `advance $number needs-triage --reason rerouted --rationale "<blockers closed>"`, and the `needs-triage` lane below promotes it in the same pass (it runs the **Open-PR pre-promotion gate**; `blocked` → `ready-for-agent` directly is a reconcile-fired row, the two-hop route is legal). If the gate reports `has-open-pr`, leave it at `needs-triage`.
 4. Still blocked → skip; report which blockers remain.
 
 #### `ready-for-agent` — develop
 
 Skip tracking parents - run the stuck-ness gate above. A tracking parent should never sit in `ready-for-agent` (it's not directly implementable):
 
-- **PROGRESSING** (≥1 child in `ready-for-agent`/`in-progress`/`needs-qa`/`needs-research`, OR an open PR referencing it/a child, OR a `blocked` child with a clearing path) → `advance $number needs-triage --reason rerouted` (where PROGRESSING parents already sit); do **NOT** park it. Optional non-routing note:
+- **PROGRESSING** (≥1 child in `ready-for-agent`/`in-progress`/`needs-qa`/`needs-research`, OR an open PR referencing it/a child, OR a `blocked` child with a clearing path) → `advance $number needs-triage --reason rerouted --rationale "<why progressing>"` (where PROGRESSING parents already sit); do **NOT** park it. Optional non-routing note:
   ```
   > *Automated sweep*
 
@@ -183,7 +183,7 @@ no HITL surface consumes it — so the orphan backstop counts the issue
 - Also carrying `ready-for-agent` → already routed into the grill walk; change
   nothing.
 - Without `ready-for-agent` → run the **Open-PR pre-promotion gate** (above). On
-  `promote: true`, `advance $number ready-for-agent --reason scoped` and KEEP `needs-design-concept` — the
+  `promote: true`, `advance $number ready-for-agent --reason scoped --rationale "<why promotable>"` and KEEP `needs-design-concept` — the
   sweep MUST NOT strip `needs-design-concept`: the grill obligation the label
   records is still owed, and the paired labels are exactly what
   `design_concept_orch` consumes. On a `has-open-pr` verdict, report it and
@@ -218,8 +218,8 @@ Well-structured = "What to build" or clear problem + acceptance criteria + paren
 Auto-triage:
 1. Apply category label (`bug`/`enhancement`) if missing.
 2. Blockers check:
-   - Open blockers → `advance $number blocked --reason blocked-by-issue`.
-   - All closed (or none) → run the **Open-PR pre-promotion gate** (above); on `promote: true` `advance $number ready-for-agent --reason scoped` (or `--reason unblocked` for a formerly blocked issue), otherwise report `has-open-pr` and leave it at `needs-triage`.
+   - Open blockers → `advance $number blocked --reason blocked-by-issue --rationale "<open blockers>"`.
+   - All closed (or none) → run the **Open-PR pre-promotion gate** (above); on `promote: true` `advance $number ready-for-agent --reason scoped --rationale "<why promotable>"` (or `--reason unblocked --rationale "<blockers closed>"` for a formerly blocked issue), otherwise report `has-open-pr` and leave it at `needs-triage`.
    - A verdict of "needs a design concept" routes to BOTH `needs-design-concept` AND `ready-for-agent` (see the `needs-design-concept` lane above) — never the parking label alone (#4096).
 3. Comment:
    ```
