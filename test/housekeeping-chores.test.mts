@@ -438,13 +438,12 @@ describe("runHousekeeping — workOverrides contract (issue #5199)", () => {
     const recording = Object.fromEntries(
       Object.keys(SLOW_CHORE_STUBS).map((name) => [name, async () => { called.push(name); }]),
     );
-    // Null cadence readers so the time-windowed usage-weekly-snapshot guard passes.
+    // Null only the usage-weekly-snapshot cadence reader so its time-windowed guard passes;
+    // the other readers stay as baseDeps so no unstubbed real chore runs here.
     const nullTs = async () => null;
     const summary = await runHousekeeping(makeBus() as any, {
       ...baseDeps,
       getUsageSnapshotLastWeekly: nullTs,
-      getMemoryLastConsolidation: nullTs,
-      getCleanupLastDaily: nullTs,
       workOverrides: recording,
     });
     assert.deepEqual([...called].sort(), Object.keys(SLOW_CHORE_STUBS).sort());
