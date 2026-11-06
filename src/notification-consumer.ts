@@ -38,20 +38,13 @@ import {
 } from "./event-bus-vocabulary.ts";
 import {
   operatorChannel,
-  messageFromEvent,
   checkOperatorChannelCredentials,
   routeNotificationEvent,
   type OperatorChannel,
 } from "./operator-channel/index.ts";
-import { pushAlert } from "./redis/alerts.ts";
 import { reactToCycleCompleted } from "./notification/cycle-completed-reactor.ts";
 import { startSlotEventsBridge } from "./autopilot/slot-events-bridge.ts";
 import { startRecommendationConsumer } from "./autopilot/recommendation-consumer.ts";
-import {
-  ALERT_TYPES,
-  formatAlertMessage,
-  classifyAlertSeverity,
-} from "./notification/alert-grammar.ts";
 import { logger } from "./logger.ts";
 
 export const MAX_CONSUMER_RESTARTS = 5;
@@ -110,7 +103,7 @@ export async function startConsumerWithRecovery(
   name: string,
   startFn: () => Promise<unknown>,
   sleep: Sleep = realSleep,
-  channel: Pick<OperatorChannel, "page"> = operatorChannel,
+  channel: Pick<OperatorChannel, "report"> = operatorChannel,
 ): Promise<void> {
   let restarts = 0;
   while (true) {
@@ -127,12 +120,7 @@ export async function startConsumerWithRecovery(
         logger.error({ name, restarts }, "[Consumer] exceeded max restarts — giving up");
         // A dead consumer is a Page (ADR-0045), deduped per consumer name.
         await channel
-          .page(
-            messageFromEvent({
-              type: E.CONSUMER_DEAD,
-              payload: { consumer: name, error: err.message, restarts },
-            }),
-          )
+          .report(E.CONSUMER_DEAD, { consumer: name, error: err.message, restarts })
           .catch((pageErr) =>
             logger.error({ name, err: pageErr }, "[Consumer] failed to page consumer:dead"),
           );
@@ -163,20 +151,6 @@ async function handleNotificationEvent(event: NotificationEvent): Promise<void> 
   if (event.type === "cycle:completed") {
     await reactToCycleCompleted(event);
   }
-
-  // Persist important events as dashboard alerts
-  if (ALERT_TYPES.has(event.type)) {
-    const alert = {
-      id: event.id || `alert-${Date.now()}`,
-      type: event.type,
-      timestamp: event.timestamp || new Date().toISOString(),
-      message: formatAlertMessage(event),
-      severity: classifyAlertSeverity(event.type),
-      dismissed: false,
-      payload: event.payload,
-    };
-    await pushAlert(JSON.stringify(alert), 100);
-  }
 }
 
 /**
@@ -188,7 +162,7 @@ async function handleNotificationEvent(event: NotificationEvent): Promise<void> 
  */
 export function startConsumers(
   eventBus: EventBus,
-  channel: Pick<OperatorChannel, "page" | "brief" | "resolve"> = operatorChannel,
+  channel: Pick<OperatorChannel, "report" | "resolve"> = operatorChannel,
 ): void {
   checkOperatorChannelCredentials();
 
@@ -220,15 +194,10 @@ export function startConsumers(
         { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
         "[DLQ] failed event",
       );
-      // Dead-letter is not on the closed page list (ADR-0045 Decision 3): a brief item.
+      // Dead-letter is a brief kind with a dashboard alert (ADR-0045 Decision 3, #5389).
       await channel
-        .brief(
-          messageFromEvent({
-            type: E.DLQ_ALERT,
-            payload: { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
-          }),
-        )
-        .catch((err) => logger.error({ err }, "[DLQ] failed to append brief item"));
+        .report(E.DLQ_ALERT, { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount })
+        .catch((err) => logger.error({ err }, "[DLQ] failed to report dead-letter alert"));
     }, { count: 1, blockMs: 10000 }),
     undefined,
     channel,
