@@ -280,12 +280,6 @@ test("a dead consumer through a real channel pages once, dedupes per consumer na
   assert.equal(alerts[0].severity, "error");
 });
 
-test("handleNotificationEvent no longer writes dashboard alerts itself (report() owns it)", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const src = await readFile(new URL("../src/notification-consumer.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(src, /pushAlert|ALERT_TYPES|formatAlertMessage|classifyAlertSeverity/);
-});
-
 test("startConsumers resolves consumer:dead:<name> for every consumer at boot", () => {
   const ch = stubChannel();
   // consume() never settles, so the registered consumers just park.

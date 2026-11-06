@@ -545,6 +545,16 @@ describe("KIND_TABLE — the one per-kind table", () => {
   });
 });
 
+describe("per-kind table import direction", () => {
+  test("alert-grammar.ts stays a leaf: it does not import from the operator-channel module", () => {
+    const grammar = readFileSync(new URL("../src/notification/alert-grammar.ts", import.meta.url), "utf8");
+    assert.doesNotMatch(grammar, /from\s+["'][^"']*operator-channel/);
+    const table = readFileSync(new URL("../src/operator-channel/page-list.ts", import.meta.url), "utf8");
+    const imports = [...table.matchAll(/from\s+["']([^"']+)["']/g)].map((m) => m[1]).sort();
+    assert.deepEqual(imports, ["../event-bus-vocabulary.ts", "../notification/alert-grammar.ts", "./message.ts"]);
+  });
+});
+
 describe("OperatorChannel.report()", () => {
   function setup(alertsImpl?: (a: DashboardAlert) => Promise<boolean>) {
     const mem = memoryStore();
