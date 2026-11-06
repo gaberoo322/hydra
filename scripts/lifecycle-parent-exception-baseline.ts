@@ -23,18 +23,13 @@ import {
   summarizeBaselineRows,
   type BaselineRunRow,
   type RunTurns,
+  MIRROR_SHIPPED_EPOCH,
 } from "../src/aggregators/lifecycle-health.ts";
 import { listAutopilotRunTurnsDesc, listAutopilotRunsSince } from "../src/redis/autopilot-runs.ts";
 import { closeRedisConnections } from "../src/redis/connection.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WINDOW_DAYS = 30;
-/**
- * Runs that started before the per-turn `parent_exceptions` mirror shipped
- * carry no exception data, so counting their turns would fabricate a 0% rate.
- * They are skipped (the live ledger run is exempt: it has the events itself).
- */
-const MIRROR_SHIPPED_EPOCH = Date.parse("2026-11-06T00:00:00Z") / 1000;
 
 async function main(argv: string[]): Promise<number> {
   let ledgerPath: string | null = null;

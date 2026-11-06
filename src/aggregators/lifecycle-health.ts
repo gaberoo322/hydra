@@ -299,8 +299,20 @@ export async function loadBuilderHealthBaselines(
 // Default readers
 // ---------------------------------------------------------------------------
 
+/**
+ * Runs that started before the per-turn `parent_exceptions` mirror shipped
+ * carry no exception data, so counting their turns would dilute the rate
+ * toward a fabricated low value. Shared with the baseline replay script.
+ */
+export const MIRROR_SHIPPED_EPOCH = Date.parse("2026-11-06T00:00:00Z") / 1000;
+
+/** Clamp a window start so it never reaches back before the mirror shipped. */
+export function applyMirrorCutoff(sinceEpochSeconds: number): number {
+  return Math.max(sinceEpochSeconds, MIRROR_SHIPPED_EPOCH);
+}
+
 async function defaultReadRunTurns(sinceEpochSeconds: number): Promise<RunTurns[]> {
-  const runs = await listAutopilotRunsSince(sinceEpochSeconds);
+  const runs = await listAutopilotRunsSince(applyMirrorCutoff(sinceEpochSeconds));
   const out: RunTurns[] = [];
   for (const run of runs) {
     out.push({
