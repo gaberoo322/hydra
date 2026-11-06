@@ -373,6 +373,75 @@ class ReviewSelfSelect:
         return {"kind": self.kind}
 
 
+@dataclass(frozen=True)
+class TargetFresh:
+    """Self-select the next ready-for-agent Target issue, or build a pinned `anchor`
+    (issue #5383; the dev_target board arm, #458/#1129)."""
+
+    kind: ClassVar[str] = "TargetFresh"
+    anchor: str | None = None
+
+    def __post_init__(self):
+        if self.anchor is not None:
+            _need_anchor(self.kind, self.anchor)
+
+    def to_dict(self) -> dict:
+        d: dict = {"kind": self.kind}
+        if self.anchor is not None:
+            d["anchor"] = self.anchor
+        return d
+
+
+@dataclass(frozen=True)
+class TargetResume:
+    """Resume a needs-dev-resume Target issue's open PR on its prior branch (#4739)."""
+
+    kind: ClassVar[str] = "TargetResume"
+    anchor: str
+    pr: int
+    branch: str
+
+    def __post_init__(self):
+        _need_anchor(self.kind, self.anchor)
+        _need_pr(self.kind, self.pr)
+        _need_str(self.kind, "branch", self.branch)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "anchor": self.anchor, "pr": self.pr, "branch": self.branch}
+
+
+@dataclass(frozen=True)
+class TargetReviewPr:
+    """Review the pre-resolved Target PR `pr_ref`; `head` is its head ref when the
+    Turn Snapshot resolved one (issue #5383, #4576/#4653)."""
+
+    kind: ClassVar[str] = "TargetReviewPr"
+    pr_ref: str
+    head: str | None = None
+
+    def __post_init__(self):
+        _need_str(self.kind, "pr_ref", self.pr_ref)
+        if self.head is not None:
+            _need_str(self.kind, "head", self.head)
+
+    def to_dict(self) -> dict:
+        d: dict = {"kind": self.kind, "pr_ref": self.pr_ref}
+        if self.head is not None:
+            d["head"] = self.head
+        return d
+
+
+@dataclass(frozen=True)
+class TargetReviewSelfSelect:
+    """No pre-resolved Target PR this turn: hydra-target-qa resolves it itself
+    (#4576 INV-5 fail-open)."""
+
+    kind: ClassVar[str] = "TargetReviewSelfSelect"
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind}
+
+
 DEV_INTENT_CLASSES = (
     Fresh,
     ResumeBranch,
@@ -384,12 +453,19 @@ DEV_INTENT_CLASSES = (
 DEV_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in DEV_INTENT_CLASSES)
 QA_INTENT_CLASSES = (ReviewLane, ReviewSelfSelect)
 QA_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in QA_INTENT_CLASSES)
+DEV_TARGET_INTENT_CLASSES = (TargetFresh, TargetResume)
+DEV_TARGET_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in DEV_TARGET_INTENT_CLASSES)
+QA_TARGET_INTENT_CLASSES = (TargetReviewPr, TargetReviewSelfSelect)
+QA_TARGET_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in QA_TARGET_INTENT_CLASSES)
 INTENT_KINDS_BY_SLOT: dict[str, tuple[str, ...]] = {
     "dev_orch": DEV_INTENT_KINDS,
     "qa_orch": QA_INTENT_KINDS,
+    "dev_target": DEV_TARGET_INTENT_KINDS,
+    "qa_target": QA_TARGET_INTENT_KINDS,
 }
-_INTENT_REGISTRY = {c.kind: c for c in DEV_INTENT_CLASSES + QA_INTENT_CLASSES}
-assert len(_INTENT_REGISTRY) == len(DEV_INTENT_CLASSES) + len(QA_INTENT_CLASSES), "intent kind names must be globally unique"
+_ALL_INTENT_CLASSES = DEV_INTENT_CLASSES + QA_INTENT_CLASSES + DEV_TARGET_INTENT_CLASSES + QA_TARGET_INTENT_CLASSES
+_INTENT_REGISTRY = {c.kind: c for c in _ALL_INTENT_CLASSES}
+assert len(_INTENT_REGISTRY) == len(_ALL_INTENT_CLASSES), "intent kind names must be globally unique"
 
 # prompt_args keys that may ride ALONGSIDE an intent: slot-generic dispatch
 # machinery (cascade routing #3274), not the work shape.
@@ -503,6 +579,17 @@ def dispatch_resume_branch(action):
     if pa.get("resume") is not True:
         return None
     return pa.get("resume_branch")
+
+
+def dispatch_pr(action):
+    """PR number a dispatch resumes/fixes (intent `pr` wins, else int `prompt_args.resume_pr`)."""
+    intent = dispatch_intent(action)
+    if intent is not None:
+        return getattr(intent, "pr", None)
+    pr = _legacy_pa(action).get("resume_pr")
+    if isinstance(pr, bool) or not isinstance(pr, int):
+        return None
+    return pr
 
 
 def dispatch_attempt(action) -> int:
@@ -755,6 +842,20 @@ def _needs_qa_target_pr_ref(state: dict, events: list[dict]) -> str | None:
     Pure: no side effects.
     """
     return ts.text(state, events, "target_needs_qa_pr_ref")
+
+
+def _needs_qa_target_pr_head(state: dict, events: list[dict]) -> str | None:
+    """Read the current turn's pre-resolved Target QA PR head ref (issue #4653).
+
+    Same string signal, and the SAME event-preferred-over-snapshot lookup
+    order, as `_needs_qa_target_pr_ref` above: the `head.ref` of the SAME PR
+    whose `html_url` is `target_needs_qa_pr_ref`. Returns `None` when ABSENT or
+    EMPTY. Moved here from decide.py (issue #5383) so the qa selector can put
+    it in the TargetReviewPr intent.
+
+    Pure: no side effects.
+    """
+    return ts.text(state, events, "target_needs_qa_pr_head")
 
 
 def _signal_present(state: dict, events: list[dict], signal: str) -> bool:

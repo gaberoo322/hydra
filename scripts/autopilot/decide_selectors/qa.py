@@ -12,11 +12,14 @@ import turn_snapshot as ts
 
 from decide_base import (
     QA_STALL_MAX_ATTEMPTS,
+    _needs_qa_target_pr_head,
     _needs_qa_target_pr_ref,
     _parked_issues,
     _parked_read_degraded,
     ReviewLane,
     ReviewSelfSelect,
+    TargetReviewPr,
+    TargetReviewSelfSelect,
     _signal_present,
     make_dispatch,
 )
@@ -133,11 +136,15 @@ def _select_slot_qa_target(
     # a real PR URL or no key at all (its own step 1 resolves the PR the
     # current Target build opened when the key is absent).
     if _signal_present(state, events, "needs_qa_target"):
-        prompt_args: dict = {"scope": "target"}
+        # Issue #5383: the action carries a typed intent (no prompt_args). A
+        # non-empty ref -> TargetReviewPr(pr_ref, head); absent/empty ->
+        # TargetReviewSelfSelect (the #4576 INV-5 fail-open arm).
         pr_ref = _needs_qa_target_pr_ref(state, events)
         if pr_ref:
-            prompt_args["pr_ref"] = pr_ref
-        return make_dispatch(cls, "hydra-target-qa", prompt_args=prompt_args, reason="needs-qa target")
+            intent = TargetReviewPr(pr_ref=pr_ref, head=_needs_qa_target_pr_head(state, events) or None)
+        else:
+            intent = TargetReviewSelfSelect()
+        return make_dispatch(cls, "hydra-target-qa", intent=intent, reason="needs-qa target")
     return None
 
 

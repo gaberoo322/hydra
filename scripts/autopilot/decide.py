@@ -336,6 +336,7 @@ if _SCRIPT_DIR not in sys.path:
 from decide_base import (
     BACKFILL_STARVATION_FLOOR_SEC,
     ESCALATION_POLICY,
+    INTENT_KINDS_BY_SLOT,
     RED_FORWARD_FIX_CAP,
     QA_STALL_MAX_ATTEMPTS,
     ZERO_YIELD_BACKOFF_LADDER,
@@ -344,6 +345,7 @@ from decide_base import (
     _is_parked_anchor,
     _parked_prs,
     _parked_read_degraded,
+    _needs_qa_target_pr_head,
     _needs_qa_target_pr_ref,
     _normalize_target_risk_surface,
     _orch_board_read_degraded,
@@ -353,6 +355,7 @@ from decide_base import (
     _target_dev_resume_pick_signal,
     _zero_yield_entry,
     dispatch_anchor,
+    dispatch_pr,
     dispatch_resume_branch,
     escalation_intent,
     intent_from_dict,
@@ -2659,8 +2662,8 @@ def _rule_instant_death_replay(
         # Issue #5381 QA round 1: a typed-intent dispatch (dev_orch) is recorded
         # with its intent and replayed through it; escalation keys ride prompt_args.
         rec_intent = None
-        if rec.get("intent") is None and escalation_intent(cls) is not None:
-            # A pre-intent dev_orch record has no typed intent; render-dispatch
+        if rec.get("intent") is None and cls in INTENT_KINDS_BY_SLOT:
+            # A pre-intent record of an intent-bearing slot has no typed intent; render-dispatch
             # would exit 2 on the replay, so it is unjoinable, not replayed blind.
             out.reasons.append(f"instant-death-unjoinable:{cls}")
             continue
@@ -4448,22 +4451,6 @@ def _select_for_slot(
     return handler(cls, state, candidates, events, best, best_score, now)
 
 
-def _needs_qa_target_pr_head(state: dict, events: list[dict]) -> str | None:
-    """Read the current turn's pre-resolved Target QA PR head ref (issue #4653).
-
-    Same string signal, and the SAME event-preferred-over-snapshot lookup
-    order, as `_needs_qa_target_pr_ref` immediately
-    above. The Turn Snapshot emits `target_needs_qa_pr_head` as the `head.ref`
-    of the SAME PR whose `html_url` is `target_needs_qa_pr_ref`, projected
-    from the already-fetched PR payload inside the #4576 resolver — no new
-    network call (issue #4653). Returns `None` when the signal is ABSENT or
-    EMPTY.
-
-    Pure: no side effects.
-    """
-    return ts.text(state, events, "target_needs_qa_pr_head")
-
-
 # Bare `<run8>-t<N>-dev_target` dispatch token, with an optional
 # `worktree-agent-` prefix stripped (issue #4653). `run8` is the 8-hex-char
 # run id `bootstrap.sh` mints; `N` is the pipeline slot's 1-based turn index.
@@ -4521,11 +4508,8 @@ def _dev_target_resume_record(action: dict, state: dict) -> dict | None:
     branch = dispatch_resume_branch(action)
     if not isinstance(branch, str) or not branch:
         return None
-    # `resume_pr` stays a prompt_args read until slice 3 (#5383) gives
-    # dev_target an intent.
-    prompt_args = action.get("prompt_args")
-    pr = prompt_args.get("resume_pr") if isinstance(prompt_args, dict) else None
-    if isinstance(pr, bool) or not isinstance(pr, int):
+    pr = dispatch_pr(action)
+    if pr is None:
         return None
     worktree_branch = action.get("worktreeBranch")
     if not (isinstance(worktree_branch, str) and worktree_branch):

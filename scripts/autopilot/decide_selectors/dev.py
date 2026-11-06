@@ -8,8 +8,12 @@ Every definition here moved verbatim from decide.py.
 
 from __future__ import annotations
 
+import re
+
 from decide_base import (
     RED_FORWARD_FIX_CAP,
+    TargetFresh,
+    TargetResume,
     ForwardFixConflict,
     ForwardFixConflictWithFail,
     ForwardFixRed,
@@ -432,13 +436,7 @@ def _select_slot_dev_target(
         return make_dispatch(
             cls,
             "hydra-target-build",
-            prompt_args={
-                "anchor": f"issue-{pick_issue}",
-                "resume": True,
-                "resume_issue": pick_issue,
-                "resume_pr": pick_pr,
-                "resume_branch": pick_branch,
-            },
+            intent=TargetResume(anchor=f"issue-{pick_issue}", pr=pick_pr, branch=pick_branch),
             reason=(
                 "target dev resume pin: needs-dev-resume issue-"
                 f"{pick_issue} held by open PR #{pick_pr} "
@@ -465,7 +463,7 @@ def _select_slot_dev_target(
         _signal_present(state, events, "target_work_available")
         or _signal_present(state, events, "target_board_work_available")
     ):
-        prompt_args: dict = {}
+        intent = TargetFresh()
         # ISSUE #1129 (finished): the dev-steer half of the single target
         # candidate boundary now reads the SAME feed-owned flag the
         # research_target slot does. `not research_recommended(candidates)`
@@ -475,13 +473,15 @@ def _select_slot_dev_target(
         # The `best` guard stays only to extract the anchorRef/score hint.
         if best and not research_recommended(candidates):
             ref = best.get("anchorRef") or best.get("issue")
-            if ref is not None:
-                prompt_args["anchor"] = ref
-                prompt_args["score"] = best_score
+            # Issue #5383: only an `issue-<N>` hint pins; any other shape
+            # (item-267, an int) was always rendered UNPINNED, so the brain
+            # now decides that instead of a silent renderer fallback.
+            if isinstance(ref, str) and re.fullmatch(r"issue-\d+", ref):
+                intent = TargetFresh(anchor=ref)
         return make_dispatch(
             cls,
             "hydra-target-build",
-            prompt_args=prompt_args,
+            intent=intent,
             reason="target work queue non-empty",
         )
     return None
