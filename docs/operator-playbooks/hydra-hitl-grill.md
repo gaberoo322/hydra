@@ -41,6 +41,9 @@ moot cluster go in one question.
    closes `not planned` and **retains** `hitl-grill` as the producers' dedup
    baseline. Never `gh issue edit --add-label/--remove-label` the park or
    ready labels by hand (half-written states are exactly what the routes prevent).
+   These two routes ARE the sanctioned `operator-route` exit from `hitl-grill`,
+   journaled by the lifecycle seam; never point the lifecycle CLI's `advance` verb at a
+   hitl-grill issue (it refuses `human-hold-exit` for every caller).
 4. **Cluster verdicts are for Dismiss only.** Promotes are always per item.
 5. **Every verdict leaves a comment** starting
    `> *Verdict via /hydra-hitl-grill: <verdict> — <one-line reason>*` so the

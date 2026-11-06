@@ -36,19 +36,27 @@ Build a report log in memory. For each issue processed:
 
 Do NOT re-read issue labels at the end — labels change during processing.
 
+## State writes — the one idiom (ADR-0047)
+
+Every ISSUE state change in this playbook is exactly one command, run from `~/hydra`:
+
+```bash
+npx tsx scripts/lifecycle.ts advance <N> <to> --reason <enum> --rationale "<one line>" --actor hydra-sweep
+```
+
+Exit `0` = written (report any `wouldRefuse:<code>` in the run summary, never retry); `1` = refused or failed (leave the label as is, report the code, NEVER fall back to `gh issue edit` / `gh api .../labels`); `2` = playbook bug. `--reason` is a closed enum from `src/lifecycle/reasons.ts` (`ready-for-agent` <- `scoped` | `unblocked`; `blocked` <- `blocked-by-issue`; `needs-triage` <- `rerouted`; `parked` <- `off-list-escalation`); `-> needs-triage` from a zero-state issue is gate-free and takes no reason; `closed` takes `--evidence pr=<MERGED PR>`. Flag labels (`needs-design-concept`, `enhancement`, `bug`, `sentry`) stay plain `gh` writes. The sweep never writes `ready-for-human` and never exits a human-hold state (`needs-info`, `ready-for-human`, `hitl-grill`, `parked`) - those are report-only here; the operator exits them via `/hydra-review`.
+
 ## Process
 
 ### 0. Housekeeping
 
-Clean stale workflow labels from closed issues:
+Stale state labels on CLOSED issues are count-only: every reader filters `--state open`, and a closed `hitl-grill` issue is the producers' dedup baseline, so the sweep does not strip them (the seam refuses `issue-closed` writes). Report the count under **Labels cleaned**:
 
 ```bash
 for label in needs-qa ready-for-agent in-progress needs-triage blocked needs-research; do
   gh issue list --repo gaberoo322/hydra --state closed --label "$label" --json number --jq '.[].number'
 done
 ```
-
-For each result: remove the stale workflow label(s). Don't remove category labels (`bug`, `enhancement`, `sentry`). Log each as action: `cleanup`.
 
 ### 1. Scan
 
@@ -66,9 +74,9 @@ gh issue list --state open --json number,body \
 
 Tracking parents need special handling — they are NOT directly implementable.
 
-##### Is a tracking parent STUCK? (gate before routing to `ready-for-human`)
+##### Is a tracking parent STUCK? (gate before parking)
 
-A tracking parent only belongs in `ready-for-human` when it is **stuck** — no autonomous path forward, so it genuinely needs an operator decision. A healthy/progressing epic must be left as a plain tracking parent (do NOT apply `ready-for-human`) — otherwise the sweep churns against `/hydra-review`, which drops the label minutes after every sweep re-applies it, and the `ready-for-human` bucket fills with every open epic, diluting the "needs a decision" signal (the 2026-05-30 #735/#690 incident → issue #777).
+A tracking parent only belongs in `parked` when it is **stuck** — no autonomous path forward, so it genuinely needs an operator decision. A healthy/progressing epic must be left as a plain tracking parent (do NOT park it) — otherwise the sweep churns against `/hydra-review`, and the operator's hold buckets fill with every open epic, diluting the "needs a decision" signal (the 2026-05-30 #735/#690 incident → issue #777).
 
 An epic is **PROGRESSING** (→ leave alone) if **any** of these hold across its children:
 
@@ -87,7 +95,7 @@ gh pr list --repo gaberoo322/hydra --state open --json number,body,title \
 # 3. ≥1 `blocked` child whose blocker is still open AND itself progressing (a clearing path exists)
 ```
 
-If **none** hold → the epic is **STUCK** → route to `ready-for-human` with a comment naming WHY (see the two branches below). If **any** hold → PROGRESSING → skip silently (or a non-routing note); do **not** touch its labels.
+If **none** hold → the epic is **STUCK** → `advance <N> parked --reason off-list-escalation --rationale "<WHY>"` (a STUCK tracking parent is not an ADR-0005 reason, so it parks, not `ready-for-human`) with a comment naming WHY (see the two branches below). If **any** hold → PROGRESSING → skip silently (or a non-routing note); do **not** touch its labels.
 
 #### Score `ready-for-agent` candidates by downstream impact
 
@@ -95,7 +103,7 @@ For each `ready-for-agent` issue N, count how many `blocked` issues reference `#
 
 #### Open-PR pre-promotion gate (issue #772 — MANDATORY at every edge that writes `ready-for-agent`)
 
-Before applying `ready-for-agent` to ANY issue `#N` — whether from the `needs-triage` auto-triage lane, the `blocked`-cleared lane, or the `in-progress` stale-relabel lane — check whether an **OPEN** PR already references it. If one does, do NOT promote: an open PR means a build is already in flight, and promoting would let the autopilot dispatch a duplicate `dev_orch` build (the 2026-05-30 #750→#754/#770 incident).
+Before applying `ready-for-agent` to ANY issue `#N` — whether from the `needs-triage` auto-triage lane or the `blocked`-cleared lane — check whether an **OPEN** PR already references it. If one does, do NOT promote: an open PR means a build is already in flight, and promoting would let the autopilot dispatch a duplicate `dev_orch` build (the 2026-05-30 #750→#754/#770 incident).
 
 The routing decision is a pure predicate over the issue number and the live open-PR list — apply it at every promotion edge. Run the live query once per sweep, then apply this decision at every promotion edge:
 
@@ -105,14 +113,14 @@ OPEN_PRS=$(gh pr list --repo gaberoo322/hydra --state open \
   --json number,body,title,mergeable)
 
 # For a candidate issue #N about to be promoted to ready-for-agent:
-#   referencing OPEN PR found?  -> DIVERT (do not promote); route by PR mergeability:
-#     mergeable=MERGEABLE   -> needs-qa        (verify the existing work)
-#     mergeable=CONFLICTING -> ready-for-human (DIRTY/parked; operator unblocks, as #754 was)
-#     mergeable=UNKNOWN/—   -> leave OUT of ready-for-agent; add a 'has-open-pr' note in the report
+#   referencing OPEN PR found?  -> DIVERT (do not promote), NO label write:
+#     report `has-open-pr: PR #N` - the PR arms (red-resume, dirty fix-forward,
+#     QA recheck) own the PR; neither needs-qa nor ready-for-human is a legal
+#     agent transition from needs-triage / blocked
 #   no referencing OPEN PR  -> PROMOTE normally to ready-for-agent
 ```
 
-Gate strictly on `--state open`. A **closed-unmerged** PR means the prior attempt was abandoned, so the issue SHOULD become `ready-for-agent` again (exactly the #754→#770 handoff); a **merged** PR means the work is done. The sweep report MUST name every suppression and the referencing PR number (e.g. `suppressed: open PR #754 → needs-qa`). The decision is idempotent: re-running the sweep on the same board reaches the same outcome because state is read live from GitHub. This gate is independent of (and does not modify) the merge gate or the autopilot candidate selection — those remain separate defense layers.
+Gate strictly on `--state open`. A **closed-unmerged** PR means the prior attempt was abandoned, so the issue SHOULD become `ready-for-agent` again (exactly the #754→#770 handoff); a **merged** PR means the work is done. The sweep report MUST name every suppression and the referencing PR number (e.g. `has-open-pr: PR #754`). The decision is idempotent: re-running the sweep on the same board reaches the same outcome because state is read live from GitHub. This gate is independent of (and does not modify) the merge gate or the autopilot candidate selection — those remain separate defense layers.
 
 ### 2. Group and process
 
@@ -123,24 +131,24 @@ Process all QA before new dev.
 #### `blocked` — check resolution
 1. Read body for "Blocked by #N".
 2. `gh issue view $blocker --json state` and `gh pr list --search "closes #$blocker" --state merged`.
-3. All blockers closed → run the **Open-PR pre-promotion gate** (above) for this issue; PROMOTE (remove `blocked`, add `ready-for-agent`) only when it returns `promote: true`, otherwise remove `blocked` and DIVERT to the gate's `targetLane`.
+3. All blockers closed → `advance $number needs-triage --reason rerouted --rationale "<blockers closed>"`, and the `needs-triage` lane below promotes it in the same pass (it runs the **Open-PR pre-promotion gate**; `blocked` → `ready-for-agent` directly is a reconcile-fired row, the two-hop route is legal). If the gate reports `has-open-pr`, leave it at `needs-triage`.
 4. Still blocked → skip; report which blockers remain.
 
 #### `ready-for-agent` — develop
 
-Skip tracking parents — but only route to `ready-for-human` when STUCK (run the stuck-ness gate above). A tracking parent should never sit in `ready-for-agent` (it's not directly implementable), so always remove `ready-for-agent`; whether it gains `ready-for-human` depends on stuck-ness:
+Skip tracking parents - run the stuck-ness gate above. A tracking parent should never sit in `ready-for-agent` (it's not directly implementable):
 
-- **PROGRESSING** (≥1 child in `ready-for-agent`/`in-progress`/`needs-qa`/`needs-research`, OR an open PR referencing it/a child, OR a `blocked` child with a clearing path) → remove `ready-for-agent`, do **NOT** add `ready-for-human`. Leave it as a plain tracking parent. Optional non-routing note:
+- **PROGRESSING** (≥1 child in `ready-for-agent`/`in-progress`/`needs-qa`/`needs-research`, OR an open PR referencing it/a child, OR a `blocked` child with a clearing path) → `advance $number needs-triage --reason rerouted --rationale "<why progressing>"` (where PROGRESSING parents already sit); do **NOT** park it. Optional non-routing note:
   ```
   > *Automated sweep*
 
   Tracking parent — children are the implementation units. Progressing (active child / open PR), so leaving as-is, not routing to operator.
   ```
-- **STUCK** (none of the above) → remove `ready-for-agent`, add `ready-for-human`, comment naming WHY:
+- **STUCK** (none of the above) → `advance $number parked --reason off-list-escalation --rationale "<WHY>"`, and comment naming WHY (the comment stays - it is what the operator reads in `/hydra-review`'s Parked bucket):
   ```
   > *Automated sweep*
 
-  Tracking parent with no autonomous path forward — STUCK: <reason, e.g. "all children closed but epic still open" / "no progressing child, no open PR, no clearing blocker">. Routing to operator.
+  Tracking parent with no autonomous path forward — STUCK: <reason, e.g. "all children closed but epic still open" / "no progressing child, no open PR, no clearing blocker">. Parked for the operator.
   ```
 
 Pick by downstream impact (highest unblock count first; tie → oldest). Invoke `/hydra-dev $number`. One at a time — worktree isolation.
@@ -152,15 +160,15 @@ Invoke `/hydra-issue-research $number`. Multiple in parallel OK (read-only).
 
 #### `in-progress` — check for stale work
 1. PR exists? `gh pr list --search "closes #$number"`
-2. No PR + updated >12h ago: comment, then run the **Open-PR pre-promotion gate** (above) before relabeling `ready-for-agent` — promote only on `promote: true`, otherwise DIVERT to the gate's `targetLane`. (The gate is the authoritative open-PR check here; fold it into this step rather than re-deriving open-PR state from the `closes #` search.)
-3. PR merged: relabel `needs-qa`.
-4. PR open: skip.
+2. PR merged and the issue still open: `advance $number closed --evidence pr=<PR> --rationale "PR merged, issue still open" --actor hydra-sweep` (post-merge `needs-qa` is retired: `needs-qa` needs an OPEN PR).
+3. PR open: skip.
+4. No PR + updated >12h ago: **report only** (stale in-progress). The re-queue and its cap arm belong to the deterministic writer (`recover-stale.sh`); the sweep writes nothing.
 
 #### `needs-info` — check for new activity
-Reporter/operator replied since last triage note → relabel `needs-triage`.
+Human-hold: a reporter/operator reply is **report-only** under "Needs operator attention" - the seam refuses `human-hold-exit` for every caller, and the operator moves it via `/hydra-review`.
 
-#### (no label) — apply initial label
-`gh issue edit $number --add-label "needs-triage"`
+#### (no label) — apply initial state
+`npx tsx scripts/lifecycle.ts advance $number needs-triage --actor hydra-sweep` (gate-free from a zero-state issue). Skip epics (`## Sub-issues` or keep-open) and `wayfinder:*` issues, exactly as reconcile does.
 
 #### `needs-design-concept` (without `ready-for-agent`) — restore reachability (issue #4096)
 
@@ -175,11 +183,11 @@ no HITL surface consumes it — so the orphan backstop counts the issue
 - Also carrying `ready-for-agent` → already routed into the grill walk; change
   nothing.
 - Without `ready-for-agent` → run the **Open-PR pre-promotion gate** (above). On
-  `promote: true`, ADD `ready-for-agent` and KEEP `needs-design-concept` — the
+  `promote: true`, `advance $number ready-for-agent --reason scoped --rationale "<why promotable>"` and KEEP `needs-design-concept` — the
   sweep MUST NOT strip `needs-design-concept`: the grill obligation the label
   records is still owed, and the paired labels are exactly what
-  `design_concept_orch` consumes. On any other gate verdict, DIVERT to the
-  gate's `targetLane`.
+  `design_concept_orch` consumes. On a `has-open-pr` verdict, report it and
+  write nothing.
 - The recovery is additive and idempotent: once paired, the issue leaves the
   orphan count — one fire, one fix, no churn.
 
@@ -190,19 +198,19 @@ sink: promoted out of `needs-triage` into a lane nothing reads.
 
 #### `needs-triage` — auto-triage if well-structured
 
-Skip tracking parents — run the stuck-ness gate above before routing. Only a **STUCK** parent goes to `ready-for-human`; a **PROGRESSING** one stays a plain tracking parent (no routing, no churn):
+Skip tracking parents — run the stuck-ness gate above before routing. Only a **STUCK** parent is parked; a **PROGRESSING** one stays a plain tracking parent (no churn):
 
-- **PROGRESSING** → leave as a tracking parent; do not apply `ready-for-human`. Optional non-routing note:
+- **PROGRESSING** → leave as a tracking parent; do not park it. Optional non-routing note:
   ```
   > *This was generated by AI during triage.*
 
   Tracking parent — progressing (active child / open PR). Leaving as-is; not routing to operator.
   ```
-- **STUCK** → `ready-for-human` + comment naming WHY:
+- **STUCK** → `advance $number parked --reason off-list-escalation --rationale "<WHY>"` + comment naming WHY:
   ```
   > *This was generated by AI during triage.*
 
-  Tracking parent with no autonomous path forward — STUCK: <reason>. Routing to operator.
+  Tracking parent with no autonomous path forward — STUCK: <reason>. Parked for the operator.
   ```
 
 Well-structured = "What to build" or clear problem + acceptance criteria + parent ref or standalone scope.
@@ -210,8 +218,8 @@ Well-structured = "What to build" or clear problem + acceptance criteria + paren
 Auto-triage:
 1. Apply category label (`bug`/`enhancement`) if missing.
 2. Blockers check:
-   - Open blockers → `blocked`, remove `needs-triage`.
-   - All closed (or none) → run the **Open-PR pre-promotion gate** (above); on `promote: true` apply `ready-for-agent`, otherwise DIVERT to the gate's `targetLane` (e.g. `needs-qa` / `ready-for-human` / `has-open-pr` note). Either way, remove `needs-triage`.
+   - Open blockers → `advance $number blocked --reason blocked-by-issue --rationale "<open blockers>"`.
+   - All closed (or none) → run the **Open-PR pre-promotion gate** (above); on `promote: true` `advance $number ready-for-agent --reason scoped --rationale "<why promotable>"` (or `--reason unblocked --rationale "<blockers closed>"` for a formerly blocked issue), otherwise report `has-open-pr` and leave it at `needs-triage`.
    - A verdict of "needs a design concept" routes to BOTH `needs-design-concept` AND `ready-for-agent` (see the `needs-design-concept` lane above) — never the parking label alone (#4096).
 3. Comment:
    ```

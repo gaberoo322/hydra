@@ -15,6 +15,10 @@ performs I/O: decide() stays a pure function of (state, candidates, events, now)
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass, fields
+from typing import ClassVar
+
 import turn_snapshot as ts
 
 
@@ -206,15 +210,307 @@ ZERO_YIELD_BACKOFF_LADDER: tuple[tuple[int, int], ...] = (
 )
 
 
+# --- Dispatch Intent (issue #5381, epic #5380; ADR-0007 amendment 2026-11-05) -
+# A bespoke pipeline slot's `dispatch` action carries a typed, closed-kind
+# Dispatch Intent instead of the untyped `prompt_args` bag. Each kind holds only
+# its own fields. On the wire the action stores `intent.to_dict()` (a plain
+# `{kind, ...}` object, so the Plan stays json.dumps-able); readers
+# reconstitute the dataclass through `dispatch_intent(action)`.
+
+
+def _need_str(kind: str, name: str, value) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"dispatch intent {kind!r}: {name} must be a non-empty string, got {value!r}")
+
+
+def _need_anchor(kind: str, value) -> None:
+    """An anchor must be an `issue-<N>` ref: the renderer pins only that shape, so
+    anything else would silently render UNPINNED (the fallback ADR-0007 forbids)."""
+    if not isinstance(value, str) or not re.fullmatch(r"issue-\d+", value):
+        raise ValueError(f"dispatch intent {kind!r}: anchor must match issue-<N>, got {value!r}")
+
+
+def _need_pr(kind: str, value) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"dispatch intent {kind!r}: pr must be a positive int, got {value!r}")
+
+
+@dataclass(frozen=True)
+class Fresh:
+    """Self-select the next ready-for-agent issue, or build a pinned `anchor` (#3711)."""
+
+    kind: ClassVar[str] = "Fresh"
+    anchor: str | None = None
+
+    def __post_init__(self):
+        if self.anchor is not None:
+            _need_anchor(self.kind, self.anchor)
+
+    def to_dict(self) -> dict:
+        d: dict = {"kind": self.kind}
+        if self.anchor is not None:
+            d["anchor"] = self.anchor
+        return d
+
+
+@dataclass(frozen=True)
+class ResumeBranch:
+    """Resume a stalled no-PR run from its prior `branch` (#3866)."""
+
+    kind: ClassVar[str] = "ResumeBranch"
+    anchor: str
+    branch: str
+
+    def __post_init__(self):
+        _need_anchor(self.kind, self.anchor)
+        _need_str(self.kind, "branch", self.branch)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "anchor": self.anchor, "branch": self.branch}
+
+
+@dataclass(frozen=True)
+class ResumeSalvage:
+    """Resume a stalled no-PR run with no known branch (#3866 / #4808)."""
+
+    kind: ClassVar[str] = "ResumeSalvage"
+    anchor: str
+
+    def __post_init__(self):
+        _need_anchor(self.kind, self.anchor)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "anchor": self.anchor}
+
+
+@dataclass(frozen=True)
+class ForwardFixRed:
+    """Forward-fix an open PR: both arms of the #5058 `orch_dev_resume_pick`
+    (needs-dev-resume, or red on a required check)."""
+
+    kind: ClassVar[str] = "ForwardFixRed"
+    anchor: str
+    pr: int
+    branch: str
+
+    def __post_init__(self):
+        _need_anchor(self.kind, self.anchor)
+        _need_pr(self.kind, self.pr)
+        _need_str(self.kind, "branch", self.branch)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "anchor": self.anchor, "pr": self.pr, "branch": self.branch}
+
+
+@dataclass(frozen=True)
+class ForwardFixConflict:
+    """Conflict fix-forward of a DIRTY PR, no QA FAIL pending at head (#4807)."""
+
+    kind: ClassVar[str] = "ForwardFixConflict"
+    anchor: str
+    pr: int
+    branch: str
+
+    def __post_init__(self):
+        _need_anchor(self.kind, self.anchor)
+        _need_pr(self.kind, self.pr)
+        _need_str(self.kind, "branch", self.branch)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "anchor": self.anchor, "pr": self.pr, "branch": self.branch}
+
+
+@dataclass(frozen=True)
+class ForwardFixConflictWithFail:
+    """Two-phase conflict fix-forward: a QA FAIL is pending at head (#5253)."""
+
+    kind: ClassVar[str] = "ForwardFixConflictWithFail"
+    anchor: str
+    pr: int
+    branch: str
+
+    def __post_init__(self):
+        _need_anchor(self.kind, self.anchor)
+        _need_pr(self.kind, self.pr)
+        _need_str(self.kind, "branch", self.branch)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "anchor": self.anchor, "pr": self.pr, "branch": self.branch}
+
+
+@dataclass(frozen=True)
+class ReviewLane:
+    """Review the selector's parked-filtered needs-qa lane head `anchor`; `rest` is
+    the remaining parked-filtered lane in order (issue #5382)."""
+
+    kind: ClassVar[str] = "ReviewLane"
+    anchor: str
+    rest: tuple = ()
+
+    def __post_init__(self):
+        _need_anchor(self.kind, self.anchor)
+        if not isinstance(self.rest, (list, tuple)):
+            raise ValueError(f"dispatch intent {self.kind!r}: rest must be a list, got {self.rest!r}")
+        rest = tuple(self.rest)
+        for r in rest:
+            _need_anchor(self.kind, r)
+        if self.anchor in rest:
+            raise ValueError(f"dispatch intent {self.kind!r}: rest must not contain the head {self.anchor!r}")
+        object.__setattr__(self, "rest", rest)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "anchor": self.anchor, "rest": list(self.rest)}
+
+
+@dataclass(frozen=True)
+class ReviewSelfSelect:
+    """No per-issue lane fact this turn (degraded board read): hydra-qa resolves the
+    needs-qa lane head itself (#3709 fail-open on the coarse boolean)."""
+
+    kind: ClassVar[str] = "ReviewSelfSelect"
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind}
+
+
+@dataclass(frozen=True)
+class TargetFresh:
+    """Self-select the next ready-for-agent Target issue, or build a pinned `anchor`
+    (issue #5383; the dev_target board arm, #458/#1129)."""
+
+    kind: ClassVar[str] = "TargetFresh"
+    anchor: str | None = None
+
+    def __post_init__(self):
+        if self.anchor is not None:
+            _need_anchor(self.kind, self.anchor)
+
+    def to_dict(self) -> dict:
+        d: dict = {"kind": self.kind}
+        if self.anchor is not None:
+            d["anchor"] = self.anchor
+        return d
+
+
+@dataclass(frozen=True)
+class TargetResume:
+    """Resume a needs-dev-resume Target issue's open PR on its prior branch (#4739)."""
+
+    kind: ClassVar[str] = "TargetResume"
+    anchor: str
+    pr: int
+    branch: str
+
+    def __post_init__(self):
+        _need_anchor(self.kind, self.anchor)
+        _need_pr(self.kind, self.pr)
+        _need_str(self.kind, "branch", self.branch)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "anchor": self.anchor, "pr": self.pr, "branch": self.branch}
+
+
+@dataclass(frozen=True)
+class TargetReviewPr:
+    """Review the pre-resolved Target PR `pr_ref`; `head` is its head ref when the
+    Turn Snapshot resolved one (issue #5383, #4576/#4653)."""
+
+    kind: ClassVar[str] = "TargetReviewPr"
+    pr_ref: str
+    head: str | None = None
+
+    def __post_init__(self):
+        _need_str(self.kind, "pr_ref", self.pr_ref)
+        if self.head is not None:
+            _need_str(self.kind, "head", self.head)
+
+    def to_dict(self) -> dict:
+        d: dict = {"kind": self.kind, "pr_ref": self.pr_ref}
+        if self.head is not None:
+            d["head"] = self.head
+        return d
+
+
+@dataclass(frozen=True)
+class TargetReviewSelfSelect:
+    """No pre-resolved Target PR this turn: hydra-target-qa resolves it itself
+    (#4576 INV-5 fail-open)."""
+
+    kind: ClassVar[str] = "TargetReviewSelfSelect"
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind}
+
+
+DEV_INTENT_CLASSES = (
+    Fresh,
+    ResumeBranch,
+    ResumeSalvage,
+    ForwardFixRed,
+    ForwardFixConflict,
+    ForwardFixConflictWithFail,
+)
+DEV_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in DEV_INTENT_CLASSES)
+QA_INTENT_CLASSES = (ReviewLane, ReviewSelfSelect)
+QA_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in QA_INTENT_CLASSES)
+DEV_TARGET_INTENT_CLASSES = (TargetFresh, TargetResume)
+DEV_TARGET_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in DEV_TARGET_INTENT_CLASSES)
+QA_TARGET_INTENT_CLASSES = (TargetReviewPr, TargetReviewSelfSelect)
+QA_TARGET_INTENT_KINDS: tuple[str, ...] = tuple(c.kind for c in QA_TARGET_INTENT_CLASSES)
+INTENT_KINDS_BY_SLOT: dict[str, tuple[str, ...]] = {
+    "dev_orch": DEV_INTENT_KINDS,
+    "qa_orch": QA_INTENT_KINDS,
+    "dev_target": DEV_TARGET_INTENT_KINDS,
+    "qa_target": QA_TARGET_INTENT_KINDS,
+}
+_ALL_INTENT_CLASSES = DEV_INTENT_CLASSES + QA_INTENT_CLASSES + DEV_TARGET_INTENT_CLASSES + QA_TARGET_INTENT_CLASSES
+_INTENT_REGISTRY = {c.kind: c for c in _ALL_INTENT_CLASSES}
+assert len(_INTENT_REGISTRY) == len(_ALL_INTENT_CLASSES), "intent kind names must be globally unique"
+
+# prompt_args keys that may ride ALONGSIDE an intent: slot-generic dispatch
+# machinery (cascade routing #3274), not the work shape.
+ESCALATION_META_KEYS = frozenset({"escalate_model", "attempt", "prior_attempt_status"})
+
+
+def intent_from_dict(raw):
+    """Parse a wire `{kind, ...}` dict into its intent dataclass; raise on unknown kind."""
+    if not isinstance(raw, dict):
+        raise ValueError(f"dispatch intent must be an object, got {type(raw).__name__}")
+    kind = raw.get("kind")
+    cls = _INTENT_REGISTRY.get(kind)
+    if cls is None:
+        raise ValueError(f"unknown dispatch intent kind {kind!r}")
+    try:
+        return cls(**{f.name: raw[f.name] for f in fields(cls) if f.name in raw})
+    except TypeError as exc:
+        raise ValueError(f"malformed dispatch intent {kind!r}: {exc}") from exc
+
+
+def escalation_intent(slot: str):
+    """Intent for a slot's cascade-routing escalation re-dispatch (design-concept issue-5381).
+
+    dev_orch re-dispatches as Fresh (self-select); every other slot is None in
+    slice 1 (its dispatch still rides prompt_args)."""
+    if slot == "dev_orch":
+        return Fresh()
+    return None
+
+
 def make_dispatch(
     slot: str,
     skill: str,
     *,
     prompt_args: dict | None = None,
+    intent=None,
     reason: str = "",
     worktree_branch: str | None = None,
 ) -> dict:
-    """Construct a `dispatch` action.
+    """Construct a `dispatch` action — the ONE writer of the action shape.
+
+    With `intent` (issue #5381) the action carries `intent.to_dict()` and NO
+    `prompt_args` key, plus a top-level `anchor` projection when the kind pins
+    one (the legacy join field the dashboard/retro views fall back to). Passing
+    both `intent` and prompt_args keys outside ESCALATION_META_KEYS raises.
 
     `worktree_branch` (issue #527) is the branch name the dispatched
     subagent will run under. When None at construction time, `decide()`
@@ -231,12 +527,82 @@ def make_dispatch(
         "type": "dispatch",
         "slot": slot,
         "skill": skill,
-        "prompt_args": prompt_args or {},
-        "reason": reason,
     }
+    if intent is None:
+        action["prompt_args"] = prompt_args or {}
+    else:
+        extra = set(prompt_args or {}) - ESCALATION_META_KEYS
+        if extra:
+            raise ValueError(
+                "make_dispatch: intent and prompt_args are mutually exclusive "
+                f"(unexpected prompt_args keys {sorted(extra)})"
+            )
+        action["intent"] = intent.to_dict()
+        if prompt_args:
+            action["prompt_args"] = prompt_args
+        anchor = getattr(intent, "anchor", None)
+        if anchor:
+            action["anchor"] = anchor
+    action["reason"] = reason
     if worktree_branch:
         action["worktreeBranch"] = worktree_branch
     return action
+
+
+def dispatch_intent(action):
+    """The action's typed intent, or None when it carries none. Unknown kind raises."""
+    raw = action.get("intent") if isinstance(action, dict) else None
+    if raw is None:
+        return None
+    return intent_from_dict(raw)
+
+
+def _legacy_pa(action) -> dict:
+    pa = action.get("prompt_args") if isinstance(action, dict) else None
+    return pa if isinstance(pa, dict) else {}
+
+
+def dispatch_anchor(action):
+    """Pinned anchor of a dispatch action (intent field wins, else prompt_args.anchor)."""
+    intent = dispatch_intent(action)
+    if intent is not None:
+        return getattr(intent, "anchor", None)
+    return _legacy_pa(action).get("anchor")
+
+
+def dispatch_resume_branch(action):
+    """Stalled-run branch to resume (the prompt_args form requires `resume is True`)."""
+    intent = dispatch_intent(action)
+    if intent is not None:
+        return getattr(intent, "branch", None)
+    pa = _legacy_pa(action)
+    if pa.get("resume") is not True:
+        return None
+    return pa.get("resume_branch")
+
+
+def dispatch_pr(action):
+    """PR number a dispatch resumes/fixes (intent `pr` wins, else int `prompt_args.resume_pr`)."""
+    intent = dispatch_intent(action)
+    if intent is not None:
+        return getattr(intent, "pr", None)
+    pr = _legacy_pa(action).get("resume_pr")
+    if isinstance(pr, bool) or not isinstance(pr, int):
+        return None
+    return pr
+
+
+def dispatch_attempt(action) -> int:
+    """Escalation attempt number (always prompt_args-borne); non-int -> 1."""
+    try:
+        return int(_legacy_pa(action).get("attempt") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def dispatch_forced(action) -> bool:
+    """True iff the dispatch was force-fired (`prompt_args.forced is True`)."""
+    return _legacy_pa(action).get("forced") is True
 
 
 def signal_dark_past_floor(
@@ -476,6 +842,20 @@ def _needs_qa_target_pr_ref(state: dict, events: list[dict]) -> str | None:
     Pure: no side effects.
     """
     return ts.text(state, events, "target_needs_qa_pr_ref")
+
+
+def _needs_qa_target_pr_head(state: dict, events: list[dict]) -> str | None:
+    """Read the current turn's pre-resolved Target QA PR head ref (issue #4653).
+
+    Same string signal, and the SAME event-preferred-over-snapshot lookup
+    order, as `_needs_qa_target_pr_ref` above: the `head.ref` of the SAME PR
+    whose `html_url` is `target_needs_qa_pr_ref`. Returns `None` when ABSENT or
+    EMPTY. Moved here from decide.py (issue #5383) so the qa selector can put
+    it in the TargetReviewPr intent.
+
+    Pure: no side effects.
+    """
+    return ts.text(state, events, "target_needs_qa_pr_head")
 
 
 def _signal_present(state: dict, events: list[dict], signal: str) -> bool:

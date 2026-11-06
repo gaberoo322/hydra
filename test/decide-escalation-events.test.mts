@@ -641,6 +641,21 @@ describe("decide.py — dev_orch Sonnet demotion safety net (2026-07-29)", () =>
     );
   });
 
+  test("INV-3 (#5381): the dev_orch escalation carries a Fresh intent PLUS the escalation prompt_args", () => {
+    const plan = runDecide(baseState({ slotEvents: [stopEvent("dev_orch", "failure", "tDEV", "tsc failed")] }));
+    const esc = escalationFor(plan, "dev_orch");
+    assert.ok(esc);
+    assert.deepEqual(esc.intent, { kind: "Fresh" });
+    assert.deepEqual(esc.prompt_args, { escalate_model: "fable", attempt: 2, prior_attempt_status: "failure" });
+  });
+
+  test("sibling shape: a non-intent class escalation (cleanup_orch) keeps the legacy prompt_args shape, no intent", () => {
+    const plan = runDecide(baseState({ slotEvents: [stopEvent("cleanup_orch", "no_op")] }));
+    const esc = escalationFor(plan, "cleanup_orch");
+    assert.ok(esc, "cleanup_orch no_op escalates");
+    assert.equal(esc.intent, undefined);
+  });
+
   test("a dev_orch no_op does NOT escalate — a no_op here is board-driven, not capability-driven", () => {
     // This is the deliberate asymmetry vs cleanup_orch, which DOES escalate a
     // fresh-board no_op. A dev_orch no_op overwhelmingly means the board had

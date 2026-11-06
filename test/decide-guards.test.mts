@@ -511,9 +511,9 @@ describe("decide.py — dev_resume_pending drain (issue #3866)", () => {
       const a = findAction(plan, devOrch);
       assert.ok(a, "dev_orch must dispatch to drain a pending resume even when orch_work_available is unset");
       assert.equal(a.skill, "hydra-dev");
-      assert.equal(a.prompt_args.anchor, "issue-3726");
-      assert.equal(a.prompt_args.resume, true);
-      assert.equal(a.prompt_args.resume_branch, "issue-3726-fix");
+      assert.equal(a.intent.kind, "ResumeBranch");
+      assert.equal(a.intent.anchor, "issue-3726");
+      assert.equal(a.intent.branch, "issue-3726-fix");
       assert.match(a.reason, /resuming stalled dev_orch anchor issue-3726/);
 
       const persisted = JSON.parse(readFileSync(statePath, "utf-8"));
@@ -539,14 +539,14 @@ describe("decide.py — dev_resume_pending drain (issue #3866)", () => {
       const a = findAction(plan, devOrch);
       assert.ok(a, "dev_orch must dispatch");
       assert.equal(
-        a.prompt_args.anchor,
+        a.intent.anchor,
         "issue-42",
         "the resume queue must be drained before the generic ready-for-agent self-select path",
       );
       assert.equal(
-        a.prompt_args.resume_branch,
-        undefined,
-        "an empty branch string must not be forwarded as resume_branch",
+        a.intent.kind,
+        "ResumeSalvage",
+        "an empty branch string must not be forwarded as a branch (salvage kind)",
       );
     } finally {
       rmSync(resolve(statePath, ".."), { recursive: true, force: true });
@@ -561,7 +561,7 @@ describe("decide.py — dev_resume_pending drain (issue #3866)", () => {
       assert.ok(a, "dev_orch must dispatch on ordinary ready-for-agent availability");
       assert.equal(a.skill, "hydra-dev");
       assert.equal(
-        a.prompt_args.anchor,
+        a.intent.anchor,
         undefined,
         "the ordinary self-select path must not pin an anchor (regression guard)",
       );

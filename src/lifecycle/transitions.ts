@@ -59,6 +59,7 @@ export type GateId =
   | "close"
   | "research-exit"
   | "qa-exit"
+  | "qa-verdict"
   | "not-yet-implemented";
 
 export interface Transition {
@@ -122,8 +123,10 @@ export const TRANSITIONS: readonly Transition[] = [
   { from: "needs-dev-resume", to: "ready-for-human", firedBy: "agent", gate: "adr5" },
   { from: "needs-dev-resume", to: "closed", firedBy: "agent", gate: "close" },
   // Review.
-  { from: "needs-qa", to: "qa-passed", firedBy: "agent", gate: "not-yet-implemented" },
-  { from: "needs-qa", to: "needs-dev-resume", firedBy: "agent", gate: "not-yet-implemented" },
+  { from: "needs-qa", to: "qa-passed", firedBy: "agent", gate: "qa-verdict" },
+  { from: "needs-qa", to: "needs-dev-resume", firedBy: "agent", gate: "qa-verdict" },
+  // FAIL with the PR already CLOSED (unmerged) is a fresh pick (#4766 INV-2).
+  { from: "needs-qa", to: "ready-for-agent", firedBy: "agent", gate: "qa-verdict" },
   { from: "needs-qa", to: "parked", firedBy: "cap", gate: "judgment" },
   { from: "needs-qa", to: "ready-for-human", firedBy: "agent", gate: "adr5" },
   { from: "needs-qa", to: "closed", firedBy: "reconcile", gate: "close" },
@@ -147,4 +150,57 @@ export function isLegalTransition(from: LifecycleState, to: LifecycleState): boo
 /** State labels present in `labels`, in {@link OPEN_STATES} order. */
 export function stateLabelsOf(labels: readonly string[]): OpenState[] {
   return OPEN_STATES.filter((s) => labels.includes(s));
+}
+
+// ---------------------------------------------------------------------------
+// Operator-route legality (ADR-0047 Decision 3, issue #5313)
+// ---------------------------------------------------------------------------
+
+/**
+ * The only states the board HTTP routes may move an issue INTO. Agent-owned
+ * states (`in-progress` dispatch claim, `qa-passed` QA record, `parked` cap
+ * machinery) are never set by hand from the board. `needs-dev-resume` and
+ * `needs-qa` are the two operator hand-back lanes (#5321, the #5058 recipe).
+ */
+export const OPERATOR_TARGETS = [
+  "needs-triage",
+  "needs-info",
+  "ready-for-human",
+  "blocked",
+  "ready-for-agent",
+  "needs-dev-resume",
+  "needs-qa",
+  "closed",
+] as const;
+export type OperatorTarget = (typeof OPERATOR_TARGETS)[number];
+
+export interface OperatorTransition {
+  readonly from: OpenState;
+  readonly to: OperatorTarget;
+  readonly firedBy: "operator";
+  readonly gate: "none";
+}
+
+/**
+ * The operator's table, generated: every open state (human-hold included) x
+ * every {@link OPERATOR_TARGETS} entry except a self-move. A SEPARATE table
+ * from {@link TRANSITIONS}, whose "no human-hold-from rows" guarantee stays
+ * intact; the operator's click is the judgment, so every row is gate-free.
+ */
+export const OPERATOR_TRANSITIONS: readonly OperatorTransition[] = OPERATOR_TARGETS.flatMap(
+  (to) =>
+    OPEN_STATES.filter((from) => from !== to).map(
+      (from): OperatorTransition => ({ from, to, firedBy: "operator", gate: "none" }),
+    ),
+);
+
+export function isOperatorTarget(v: string): v is OperatorTarget {
+  return (OPERATOR_TARGETS as readonly string[]).includes(v);
+}
+
+export function findOperatorTransition(
+  from: OpenState,
+  to: LifecycleState,
+): OperatorTransition | undefined {
+  return OPERATOR_TRANSITIONS.find((t) => t.from === from && t.to === to);
 }

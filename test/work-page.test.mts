@@ -52,7 +52,6 @@ import {
   toWorkQueueRow,
   compareWorkQueueRows,
   evaluatePromoteEligibility,
-  computeRelabelTransitions,
   parseParkReason,
   toHitlGrillRow,
   compareHitlGrillRows,
@@ -350,40 +349,6 @@ describe("evaluatePromoteEligibility — promote refusal table (INV-5)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// computeRelabelTransitions
-// ---------------------------------------------------------------------------
-
-describe("computeRelabelTransitions — the lane-move plan", () => {
-  test("moving lanes drops the other relabel lanes and adds the target", () => {
-    assert.deepEqual(
-      computeRelabelTransitions(["needs-triage", "bug"], "needs-info"),
-      { remove: ["needs-triage"], add: true },
-    );
-  });
-
-  test("already on target → no-op (nothing removed, nothing added)", () => {
-    assert.deepEqual(
-      computeRelabelTransitions(["blocked"], "blocked"),
-      { remove: [], add: false },
-    );
-  });
-
-  test("drops EVERY other relabel lane in one move", () => {
-    assert.deepEqual(
-      computeRelabelTransitions(["needs-triage", "needs-info", "blocked"], "ready-for-human"),
-      { remove: ["needs-triage", "needs-info", "blocked"], add: true },
-    );
-  });
-
-  test("non-lane labels (agent-owned, provenance) are never touched", () => {
-    assert.deepEqual(
-      computeRelabelTransitions(["in-progress", "needs-qa"], "needs-triage"),
-      { remove: [], add: true },
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
 // hasScopeSection — the ONE parser, shared with the CI scope gate
 // ---------------------------------------------------------------------------
 
@@ -522,35 +487,80 @@ describe("GET /autopilot/work-queue — the queue read", () => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /autopilot/board/* — the action verify-spine (INV-6)
+// POST /autopilot/board/* — the action routes ride the lifecycle seam (#5313)
 // ---------------------------------------------------------------------------
 
+/**
+ * A recording SeamDeps over a scripted view sequence. Every board write goes
+ * through `operatorAdvance` / `operatorReopen`, so the writers are the seam's
+ * `edit` / `close` / `reopen` and the journal is observable.
+ */
+function seamWith(rows: any[], over: any = {}) {
+  const edit = recorder();
+  const close = recorder();
+  const reopen = recorder();
+  const journal: any[] = [];
+  const holdExits: any[] = [];
+  const persisted: number[] = [];
+  const deps: any = {
+    repo: "gaberoo322/hydra",
+    mode: async () => "enforce",
+    view: seqView(rows),
+    edit: over.edit ?? edit.fn,
+    close: over.close ?? close.fn,
+    reopen: over.reopen ?? reopen.fn,
+    fetch: {
+      designConcept: async () => ({ ok: false }),
+      pr: async () => ({ ok: false }),
+    },
+    journal: {
+      append: async (_repo: string, n: number, e: any, idx?: boolean) => {
+        journal.push(e);
+        if (idx) holdExits.push({ n, e });
+        return { ok: true };
+      },
+      expireOnClose: async () => ({ ok: true }),
+      openClaim: async () => ({ ok: false, code: "redis-failed", error: "n/a" }),
+      closeClaim: async () => ({ ok: false, error: "n/a" }),
+      persist: async (_repo: string, n: number) => {
+        persisted.push(n);
+        return { ok: true };
+      },
+    },
+    now: () => 1_700_000_000_000,
+  };
+  return { deps, edit, close, reopen, journal, holdExits, persisted };
+}
+
+/** promote re-reads twice before the write (route gate + seam) and once after. */
+function promoteRows(pre: any, post: any): any[] {
+  return [pre, pre, post];
+}
+
 describe("POST /autopilot/board/promote — confirm-gated, refusal reasons surface (INV-5)", () => {
-  function routerWith(overrides: any) {
+  function routerWith(seam: any, overrides: any = {}) {
     return createAutopilotBoardRouter({
       resolveOpenBlockers: async () => new Set(),
+      seam,
       ...overrides,
     });
   }
 
   test("no confirm:true → 400 schema-validation-failed BEFORE any write", async () => {
-    const add = recorder();
-    const router = routerWith({ view: seqView([]), addLabel: add.fn });
+    const s = seamWith([]);
+    const router = routerWith(s.deps);
     const handler = findHandler(router, "POST", "/autopilot/board/promote");
     assert.ok(handler);
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 42 } }), res);
     assert.equal(res._status, 400);
     assert.equal(res._body.code, "schema-validation-failed");
-    assert.equal(add.calls.length, 0);
+    assert.equal(s.edit.calls.length, 0);
   });
 
   test("missing Files-in-scope section → 200 refusal, reason missing-scope-section, NO write", async () => {
-    const add = recorder();
-    const router = routerWith({
-      view: seqView([issue({ number: 42, body: "no scope section here" })]),
-      addLabel: add.fn,
-    });
+    const s = seamWith([issue({ number: 42, body: "no scope section here" })]);
+    const router = routerWith(s.deps);
     const handler = findHandler(router, "POST", "/autopilot/board/promote");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 42, confirm: true } }), res);
@@ -558,36 +568,28 @@ describe("POST /autopilot/board/promote — confirm-gated, refusal reasons surfa
     assert.equal(res._body.ok, false);
     assert.equal(res._body.reason, "missing-scope-section");
     assert.match(res._body.detail, /Files in scope/);
-    assert.equal(add.calls.length, 0);
+    assert.equal(s.edit.calls.length, 0);
   });
 
   test("open strict blocker → 200 refusal, reason blocked, NO write", async () => {
-    const add = recorder();
-    const router = routerWith({
-      view: seqView([
-        issue({ number: 42, body: "## Files in scope\n\n- `src/a.ts`\n\nBlocked by #7" }),
-      ]),
-      addLabel: add.fn,
-      resolveOpenBlockers: async () => new Set([7]),
-    });
+    const s = seamWith([
+      issue({ number: 42, body: "## Files in scope\n\n- `src/a.ts`\n\nBlocked by #7" }),
+    ]);
+    const router = routerWith(s.deps, { resolveOpenBlockers: async () => new Set([7]) });
     const handler = findHandler(router, "POST", "/autopilot/board/promote");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 42, confirm: true } }), res);
     assert.equal(res._body.ok, false);
     assert.equal(res._body.reason, "blocked");
     assert.match(res._body.detail, /#7/);
-    assert.equal(add.calls.length, 0);
+    assert.equal(s.edit.calls.length, 0);
   });
 
-  test("happy path → addLabel rides the one proven surface; verified carries the OBSERVED post state", async () => {
-    const add = recorder();
-    const router = routerWith({
-      view: seqView([
-        issue({ number: 42, labels: [] }),
-        issue({ number: 42, labels: ["ready-for-agent"] }),
-      ]),
-      addLabel: add.fn,
-    });
+  test("happy path → ONE edit; verified carries the seam's OBSERVED post state; journaled operator-route", async () => {
+    const s = seamWith(
+      promoteRows(issue({ number: 42, labels: [] }), issue({ number: 42, labels: ["ready-for-agent"] })),
+    );
+    const router = routerWith(s.deps);
     const handler = findHandler(router, "POST", "/autopilot/board/promote");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 42, confirm: true } }), res);
@@ -595,31 +597,33 @@ describe("POST /autopilot/board/promote — confirm-gated, refusal reasons surfa
     assert.equal(res._body.ok, true);
     assert.equal(res._body.verified.state, "OPEN");
     assert.deepEqual(res._body.verified.labels, ["ready-for-agent"]);
-    assert.deepEqual(add.calls, [[42, "ready-for-agent"]]);
+    assert.deepEqual(s.edit.calls, [[42, { remove: [], add: ["ready-for-agent"] }]]);
+    assert.equal(s.journal.length, 1);
+    assert.equal(s.journal[0].kind, "transition");
+    assert.equal(s.journal[0].source, "operator-route");
+    assert.equal(s.journal[0].actor, "board:promote");
   });
 
   test("write accepted but post state lacks the label → write-unverified, never success", async () => {
-    const add = recorder();
-    const router = routerWith({
-      view: seqView([
-        issue({ number: 42, labels: [] }),
-        issue({ number: 42, labels: [] }), // post-read: label never landed
-      ]),
-      addLabel: add.fn,
-    });
+    const s = seamWith(
+      promoteRows(issue({ number: 42, labels: [] }), issue({ number: 42, labels: [] })),
+    );
+    const router = routerWith(s.deps);
     const handler = findHandler(router, "POST", "/autopilot/board/promote");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 42, confirm: true } }), res);
     assert.equal(res._body.ok, false);
     assert.equal(res._body.reason, "write-unverified");
-    assert.equal(add.calls.length, 1); // the write DID fire; the VERIFY caught it
+    assert.equal(s.edit.calls.length, 1); // the write DID fire; the VERIFY caught it
+    assert.equal(s.journal[0].kind, "refused");
+    assert.equal(s.journal[0].source, "operator-route");
   });
 
   test("gh write failure → write-failed with the code, no success", async () => {
-    const router = routerWith({
-      view: seqView([issue({ number: 42, labels: [] })]),
-      addLabel: recorder({ ok: false, code: "gh-failed", stderr: "label quota" }).fn,
+    const s = seamWith(promoteRows(issue({ number: 42, labels: [] }), null), {
+      edit: recorder({ ok: false, code: "gh-failed", stderr: "label quota" }).fn,
     });
+    const router = routerWith(s.deps);
     const handler = findHandler(router, "POST", "/autopilot/board/promote");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 42, confirm: true } }), res);
@@ -629,82 +633,99 @@ describe("POST /autopilot/board/promote — confirm-gated, refusal reasons surfa
   });
 
   test("pre-write re-read fails → read-failed, no write attempted", async () => {
-    const add = recorder();
-    const router = routerWith({ view: seqView(["FAIL"]), addLabel: add.fn });
+    const s = seamWith(["FAIL"]);
+    const router = routerWith(s.deps);
     const handler = findHandler(router, "POST", "/autopilot/board/promote");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 42, confirm: true } }), res);
     assert.equal(res._body.ok, false);
     assert.equal(res._body.reason, "read-failed");
-    assert.equal(add.calls.length, 0);
+    assert.equal(s.edit.calls.length, 0);
   });
 });
 
 describe("POST /autopilot/board/relabel — immediate-tier lane move", () => {
   test("closed issue → refused as closed, no writes", async () => {
-    const remove = recorder();
-    const add = recorder();
-    const router = createAutopilotBoardRouter({
-      view: seqView([issue({ number: 9, state: "CLOSED", labels: ["needs-triage"] })]),
-      removeLabel: remove.fn,
-      addLabel: add.fn,
-    });
+    const s = seamWith([issue({ number: 9, state: "CLOSED", labels: ["needs-triage"] })]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
     const handler = findHandler(router, "POST", "/autopilot/board/relabel");
     assert.ok(handler);
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 9, label: "blocked" } }), res);
     assert.equal(res._body.ok, false);
     assert.equal(res._body.reason, "closed");
-    assert.equal(remove.calls.length + add.calls.length, 0);
+    assert.equal(s.edit.calls.length, 0);
   });
 
-  test("happy path: remove the old lane, add the target, verify the OBSERVED labels", async () => {
-    const remove = recorder();
-    const add = recorder();
-    const router = createAutopilotBoardRouter({
-      view: seqView([
-        issue({ number: 9, labels: ["needs-triage"] }),
-        issue({ number: 9, labels: ["blocked"] }),
-      ]),
-      removeLabel: remove.fn,
-      addLabel: add.fn,
-    });
+  test("happy path: ONE edit removes the old state and adds the target; journal from→to", async () => {
+    const s = seamWith([
+      issue({ number: 9, labels: ["needs-triage", "bug"] }),
+      issue({ number: 9, labels: ["bug", "blocked"] }),
+    ]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
     const handler = findHandler(router, "POST", "/autopilot/board/relabel");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 9, label: "blocked" } }), res);
     assert.equal(res._body.ok, true);
-    assert.deepEqual(remove.calls, [[9, "needs-triage"]]);
-    assert.deepEqual(add.calls, [[9, "blocked"]]);
-    assert.deepEqual(res._body.verified.labels, ["blocked"]);
+    // Flags (non-state labels like `bug`) are never touched.
+    assert.deepEqual(s.edit.calls, [[9, { remove: ["needs-triage"], add: ["blocked"] }]]);
+    assert.deepEqual(res._body.verified.labels, ["bug", "blocked"]);
+    assert.equal(s.journal[0].from, "needs-triage");
+    assert.equal(s.journal[0].to, "blocked");
+    assert.equal(s.journal[0].actor, "board:relabel");
+  });
+
+  test("ONE state after every write: strips EVERY other state label (ambiguous pre-state repaired)", async () => {
+    const s = seamWith([
+      issue({ number: 9, labels: ["needs-triage", "needs-info", "in-progress"] }),
+      issue({ number: 9, labels: ["ready-for-human"] }),
+    ]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
+    const handler = findHandler(router, "POST", "/autopilot/board/relabel");
+    const res = mockRes();
+    await handler!(mockReq({ method: "POST", body: { issue: 9, label: "ready-for-human" } }), res);
+    assert.equal(res._body.ok, true);
+    assert.equal(s.edit.calls.length, 1);
+    assert.deepEqual(s.edit.calls[0][1].remove, ["needs-triage", "needs-info", "in-progress"]);
+    assert.deepEqual(s.edit.calls[0][1].add, ["ready-for-human"]);
+    assert.equal(s.journal[0].from.split(",").length, 3);
+  });
+
+  test("operator-route EXITS a human-hold state (the sanctioned path)", async () => {
+    const s = seamWith([
+      issue({ number: 9, labels: ["ready-for-human"] }),
+      issue({ number: 9, labels: ["needs-triage"] }),
+    ]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
+    const handler = findHandler(router, "POST", "/autopilot/board/relabel");
+    const res = mockRes();
+    await handler!(mockReq({ method: "POST", body: { issue: 9, label: "needs-triage" } }), res);
+    assert.equal(res._body.ok, true);
+    assert.deepEqual(s.edit.calls, [[9, { remove: ["ready-for-human"], add: ["needs-triage"] }]]);
+    assert.equal(s.journal[0].source, "operator-route");
+    // An operator-route exit is sanctioned: it is never indexed as a hold exit.
+    assert.equal(s.holdExits.length, 0);
   });
 
   test("already on target → zero-write move, still verified by the re-read", async () => {
-    const remove = recorder();
-    const add = recorder();
-    const router = createAutopilotBoardRouter({
-      view: seqView([
-        issue({ number: 9, labels: ["blocked"] }),
-        issue({ number: 9, labels: ["blocked"] }),
-      ]),
-      removeLabel: remove.fn,
-      addLabel: add.fn,
-    });
+    const s = seamWith([
+      issue({ number: 9, labels: ["blocked"] }),
+      issue({ number: 9, labels: ["blocked"] }),
+    ]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
     const handler = findHandler(router, "POST", "/autopilot/board/relabel");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 9, label: "blocked" } }), res);
     assert.equal(res._body.ok, true);
-    assert.equal(remove.calls.length + add.calls.length, 0);
+    assert.equal(s.edit.calls.length, 0);
   });
 
-  test("a non-target lane survives the write → write-unverified", async () => {
-    const router = createAutopilotBoardRouter({
-      view: seqView([
-        issue({ number: 9, labels: ["needs-triage"] }),
-        issue({ number: 9, labels: ["needs-triage", "blocked"] }), // remove never landed
-      ]),
-      removeLabel: recorder().fn,
-      addLabel: recorder().fn,
-    });
+  test("a non-target state survives the write → write-unverified", async () => {
+    const s = seamWith([
+      issue({ number: 9, labels: ["needs-triage"] }),
+      issue({ number: 9, labels: ["needs-triage", "blocked"] }), // remove never landed
+    ]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
     const handler = findHandler(router, "POST", "/autopilot/board/relabel");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 9, label: "blocked" } }), res);
@@ -713,44 +734,39 @@ describe("POST /autopilot/board/relabel — immediate-tier lane move", () => {
   });
 
   test("unknown target label → 400 schema-validation-failed", async () => {
-    const router = createAutopilotBoardRouter({ view: seqView([]) });
+    const s = seamWith([]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
     const handler = findHandler(router, "POST", "/autopilot/board/relabel");
     const res = mockRes();
-    await handler!(mockReq({ method: "POST", body: { issue: 9, label: "needs-qa" } }), res);
+    await handler!(mockReq({ method: "POST", body: { issue: 9, label: "in-progress" } }), res);
     assert.equal(res._status, 400);
     assert.equal(res._body.code, "schema-validation-failed");
   });
 });
 
 describe("POST /autopilot/board/close + /reopen — immediate-tier state writes", () => {
-  test("close: verified only against the OBSERVED post state", async () => {
-    const close = recorder();
-    const router = createAutopilotBoardRouter({
-      view: seqView([
-        issue({ number: 5, state: "OPEN" }),
-        issue({ number: 5, state: "CLOSED" }),
-      ]),
-      close: close.fn,
-    });
+  test("close: verified only against the OBSERVED post state; default reason is completed", async () => {
+    const s = seamWith([
+      issue({ number: 5, state: "OPEN" }),
+      issue({ number: 5, state: "CLOSED" }),
+    ]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
     const handler = findHandler(router, "POST", "/autopilot/board/close");
     assert.ok(handler);
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 5 } }), res);
     assert.equal(res._body.ok, true);
     assert.equal(res._body.verified.state, "CLOSED");
-    // #4028: the close write now carries the optional reason slot — undefined
-    // when the body omitted it (the plain-close shape).
-    assert.deepEqual(close.calls, [[5, undefined]]);
+    assert.deepEqual(s.close.calls, [[5, "completed"]]);
+    assert.equal(s.journal[0].actor, "board:close");
   });
 
   test("close whose post state stays OPEN → write-unverified", async () => {
-    const router = createAutopilotBoardRouter({
-      view: seqView([
-        issue({ number: 5, state: "OPEN" }),
-        issue({ number: 5, state: "OPEN" }),
-      ]),
-      close: recorder().fn,
-    });
+    const s = seamWith([
+      issue({ number: 5, state: "OPEN" }),
+      issue({ number: 5, state: "OPEN" }),
+    ]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
     const handler = findHandler(router, "POST", "/autopilot/board/close");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 5 } }), res);
@@ -758,26 +774,53 @@ describe("POST /autopilot/board/close + /reopen — immediate-tier state writes"
     assert.equal(res._body.reason, "write-unverified");
   });
 
-  test("reopen: verified against the observed OPEN state", async () => {
-    const reopen = recorder();
-    const router = createAutopilotBoardRouter({
-      view: seqView([
-        issue({ number: 5, state: "CLOSED" }),
-        issue({ number: 5, state: "OPEN" }),
-      ]),
-      reopen: reopen.fn,
-    });
+  test("close of an already-closed issue → idempotent ok, no write", async () => {
+    const s = seamWith([issue({ number: 5, state: "CLOSED" })]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
+    const handler = findHandler(router, "POST", "/autopilot/board/close");
+    const res = mockRes();
+    await handler!(mockReq({ method: "POST", body: { issue: 5 } }), res);
+    assert.equal(res._body.ok, true);
+    assert.equal(s.close.calls.length, 0);
+  });
+
+  test("reopen: verified against the observed OPEN state; journal persisted then written from closed", async () => {
+    const s = seamWith([
+      issue({ number: 5, state: "CLOSED" }),
+      issue({ number: 5, state: "OPEN", labels: ["needs-triage"] }),
+    ]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
     const handler = findHandler(router, "POST", "/autopilot/board/reopen");
     assert.ok(handler);
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 5 } }), res);
     assert.equal(res._body.ok, true);
     assert.equal(res._body.verified.state, "OPEN");
-    assert.deepEqual(reopen.calls, [[5]]);
+    assert.deepEqual(s.reopen.calls, [[5]]);
+    assert.deepEqual(s.persisted, [5]);
+    assert.equal(s.journal[0].from, "closed");
+    assert.equal(s.journal[0].to, "needs-triage");
+    assert.equal(s.journal[0].source, "operator-route");
+    assert.equal(s.journal[0].actor, "board:reopen");
+  });
+
+  test("reopen of an already-OPEN issue: idempotent ok with the observed state, no write and no journal", async () => {
+    const s = seamWith([issue({ number: 5, state: "OPEN", labels: ["needs-triage"] })]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
+    const handler = findHandler(router, "POST", "/autopilot/board/reopen");
+    assert.ok(handler);
+    const res = mockRes();
+    await handler!(mockReq({ method: "POST", body: { issue: 5 } }), res);
+    assert.equal(res._body.ok, true);
+    assert.equal(res._body.verified.state, "OPEN");
+    assert.deepEqual(s.reopen.calls, []);
+    assert.deepEqual(s.persisted, []);
+    assert.equal(s.journal.length, 0);
   });
 
   test("malformed body (no issue) → 400 before any write", async () => {
-    const router = createAutopilotBoardRouter({ view: seqView([]) });
+    const s = seamWith([]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
     const handler = findHandler(router, "POST", "/autopilot/board/close");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: {} }), res);
@@ -881,95 +924,86 @@ describe("GET /autopilot/hitl-grill — the parked-idea inbox read", () => {
 // ---------------------------------------------------------------------------
 
 describe("POST /autopilot/board/promote — hitl-grill strip is atomic + verified", () => {
-  function routerWith(overrides: any) {
+  function routerWith(seam: any, overrides: any = {}) {
     return createAutopilotBoardRouter({
       resolveOpenBlockers: async () => new Set(),
+      seam,
       ...overrides,
     });
   }
 
-  test("pre-state carries hitl-grill → add ready-for-agent AND remove hitl-grill in ONE write set", async () => {
-    const add = recorder();
-    const remove = recorder();
-    const router = routerWith({
-      view: seqView([
+  test("pre-state carries hitl-grill → add ready-for-agent AND remove hitl-grill in ONE edit", async () => {
+    const s = seamWith(
+      promoteRows(
         parked({ number: 42, labels: ["hitl-grill", "architecture-scan"] }),
         parked({ number: 42, labels: ["ready-for-agent", "architecture-scan"] }),
-      ]),
-      addLabel: add.fn,
-      removeLabel: remove.fn,
-    });
+      ),
+    );
+    const router = routerWith(s.deps);
     const handler = findHandler(router, "POST", "/autopilot/board/promote");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 42, confirm: true } }), res);
     assert.equal(res._status, 200);
     assert.equal(res._body.ok, true);
-    assert.deepEqual(add.calls, [[42, "ready-for-agent"]]);
-    assert.deepEqual(remove.calls, [[42, "hitl-grill"]]);
+    assert.deepEqual(s.edit.calls, [
+      [42, { remove: ["hitl-grill"], add: ["ready-for-agent"] }],
+    ]);
     // verified carries the OBSERVED post state — no lingering park label.
     assert.deepEqual(res._body.verified.labels, ["ready-for-agent", "architecture-scan"]);
+    // The promote left a human-hold state via the operator route: sanctioned.
+    assert.equal(s.journal[0].source, "operator-route");
+    assert.equal(s.holdExits.length, 0);
   });
 
   test("post-write state where hitl-grill LINGERS alongside ready-for-agent → write-unverified", async () => {
-    const add = recorder();
-    const remove = recorder();
-    const router = routerWith({
-      view: seqView([
+    const s = seamWith(
+      promoteRows(
         parked({ number: 42, labels: ["hitl-grill", "architecture-scan"] }),
         // The remove never landed: both labels present — the verify re-read
         // must catch it, never report success.
         parked({ number: 42, labels: ["ready-for-agent", "hitl-grill", "architecture-scan"] }),
-      ]),
-      addLabel: add.fn,
-      removeLabel: remove.fn,
-    });
+      ),
+    );
+    const router = routerWith(s.deps);
     const handler = findHandler(router, "POST", "/autopilot/board/promote");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 42, confirm: true } }), res);
     assert.equal(res._body.ok, false);
     assert.equal(res._body.reason, "write-unverified");
-    assert.match(res._body.detail, /hitl-grill/);
-    assert.equal(add.calls.length + remove.calls.length, 2); // both writes DID fire
+    assert.equal(s.edit.calls.length, 1); // the write DID fire
   });
 
-  test("plain promote (no hitl-grill anywhere) → the single add write, byte-identical to #4010", async () => {
-    const add = recorder();
-    const remove = recorder();
-    const router = routerWith({
-      view: seqView([
-        issue({ number: 42, labels: ["needs-triage"] }),
-        issue({ number: 42, labels: ["ready-for-agent", "needs-triage"] }),
-      ]),
-      addLabel: add.fn,
-      removeLabel: remove.fn,
-    });
+  test("ONE state after promote: every other state label is stripped, flags are untouched", async () => {
+    const s = seamWith(
+      promoteRows(
+        issue({ number: 42, labels: ["needs-triage", "bug"] }),
+        issue({ number: 42, labels: ["ready-for-agent", "bug"] }),
+      ),
+    );
+    const router = routerWith(s.deps);
     const handler = findHandler(router, "POST", "/autopilot/board/promote");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 42, confirm: true } }), res);
     assert.equal(res._body.ok, true);
-    assert.deepEqual(add.calls, [[42, "ready-for-agent"]]);
-    assert.equal(remove.calls.length, 0); // no gratuitous strip write
+    assert.deepEqual(s.edit.calls, [
+      [42, { remove: ["needs-triage"], add: ["ready-for-agent"] }],
+    ]);
   });
 
   test("a parked issue whose body lacks a scope section → the SAME missing-scope-section refusal (no new gate)", async () => {
-    const add = recorder();
-    const remove = recorder();
-    const router = routerWith({
-      view: seqView([
-        parked({
-          number: 42,
-          body: "# hitl-grill: x\n\n> Reason: Worth exploring.\n\nNo scope section.",
-        }),
-      ]),
-      addLabel: add.fn,
-      removeLabel: remove.fn,
-    });
+    const s = seamWith([
+      parked({
+        number: 42,
+        body: "# hitl-grill: x\n\n> Reason: Worth exploring.\n\nNo scope section.",
+      }),
+    ]);
+    const router = routerWith(s.deps);
     const handler = findHandler(router, "POST", "/autopilot/board/promote");
     const res = mockRes();
     await handler!(mockReq({ method: "POST", body: { issue: 42, confirm: true } }), res);
     assert.equal(res._body.ok, false);
     assert.equal(res._body.reason, "missing-scope-section");
-    assert.equal(add.calls.length + remove.calls.length, 0);
+    assert.equal(s.edit.calls.length, 0);
   });
 });
 
@@ -979,16 +1013,11 @@ describe("POST /autopilot/board/promote — hitl-grill strip is atomic + verifie
 
 describe("POST /autopilot/board/close — optional not-planned reason (issue #4028 slice 4)", () => {
   test("reason 'not planned' rides the write; hitl-grill is RETAINED (no label writes)", async () => {
-    const close = recorder();
-    const remove = recorder();
-    const router = createAutopilotBoardRouter({
-      view: seqView([
-        parked({ number: 5, labels: ["hitl-grill", "architecture-scan"], state: "OPEN" }),
-        parked({ number: 5, labels: ["hitl-grill", "architecture-scan"], state: "CLOSED" }),
-      ]),
-      close: close.fn,
-      removeLabel: remove.fn,
-    });
+    const s = seamWith([
+      parked({ number: 5, labels: ["hitl-grill", "architecture-scan"], state: "OPEN" }),
+      parked({ number: 5, labels: ["hitl-grill", "architecture-scan"], state: "CLOSED" }),
+    ]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
     const handler = findHandler(router, "POST", "/autopilot/board/close");
     const res = mockRes();
     await handler!(
@@ -998,30 +1027,15 @@ describe("POST /autopilot/board/close — optional not-planned reason (issue #40
     assert.equal(res._status, 200);
     assert.equal(res._body.ok, true);
     assert.equal(res._body.verified.state, "CLOSED");
-    assert.deepEqual(close.calls, [[5, "not planned"]]);
+    assert.deepEqual(s.close.calls, [[5, "not planned"]]);
     // Dismiss NEVER strips the label — retained for audit + producer dedup.
-    assert.equal(remove.calls.length, 0);
-  });
-
-  test("reason omitted → the write carries no reason (back-compat with #4010's plain close)", async () => {
-    const close = recorder();
-    const router = createAutopilotBoardRouter({
-      view: seqView([
-        issue({ number: 5, state: "OPEN" }),
-        issue({ number: 5, state: "CLOSED" }),
-      ]),
-      close: close.fn,
-    });
-    const handler = findHandler(router, "POST", "/autopilot/board/close");
-    const res = mockRes();
-    await handler!(mockReq({ method: "POST", body: { issue: 5 } }), res);
-    assert.equal(res._body.ok, true);
-    assert.deepEqual(close.calls, [[5, undefined]]);
+    assert.equal(s.edit.calls.length, 0);
+    assert.deepEqual(res._body.verified.labels, ["hitl-grill", "architecture-scan"]);
   });
 
   test("an off-vocabulary reason → 400 schema-validation-failed before any write", async () => {
-    const close = recorder();
-    const router = createAutopilotBoardRouter({ view: seqView([]), close: close.fn });
+    const s = seamWith([]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
     const handler = findHandler(router, "POST", "/autopilot/board/close");
     const res = mockRes();
     await handler!(
@@ -1030,18 +1044,15 @@ describe("POST /autopilot/board/close — optional not-planned reason (issue #40
     );
     assert.equal(res._status, 400);
     assert.equal(res._body.code, "schema-validation-failed");
-    assert.equal(close.calls.length, 0);
+    assert.equal(s.close.calls.length, 0);
   });
 
   test("reopen keeps the bare issue-ref body (no reason field there)", async () => {
-    const reopen = recorder();
-    const router = createAutopilotBoardRouter({
-      view: seqView([
-        issue({ number: 5, state: "CLOSED" }),
-        issue({ number: 5, state: "OPEN" }),
-      ]),
-      reopen: reopen.fn,
-    });
+    const s = seamWith([
+      issue({ number: 5, state: "CLOSED" }),
+      issue({ number: 5, state: "OPEN" }),
+    ]);
+    const router = createAutopilotBoardRouter({ seam: s.deps });
     const handler = findHandler(router, "POST", "/autopilot/board/reopen");
     const res = mockRes();
     await handler!(

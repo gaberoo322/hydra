@@ -8,14 +8,20 @@ import {
   HUMAN_HOLD_STATES,
   LIFECYCLE_STATES,
   OPEN_STATES,
+  OPERATOR_TARGETS,
+  OPERATOR_TRANSITIONS,
+  HOLD_EXIT_ALERT_WINDOW_DAYS,
   TRANSITIONS,
+  findOperatorTransition,
   findTransition,
+  isUnsanctionedHoldExit,
   isAdr5Reason,
   isAllowedReason,
   isHumanHold,
   isLegalTransition,
   stateLabelsOf,
 } from "../src/lifecycle/index.ts";
+import { RELABEL_TARGETS } from "../src/schemas/autopilot-board.ts";
 
 describe("lifecycle state set (INV-1)", () => {
   test("is exactly the 13 open states plus closed", () => {
@@ -98,5 +104,70 @@ describe("reason enums (INV-8)", () => {
     assert.equal(isAllowedReason("parked", "cap:qa-fail-rounds"), true);
     assert.equal(isAllowedReason("parked", "cap:"), false);
     assert.equal(isAllowedReason("in-progress", "anything"), false);
+  });
+});
+
+describe("operator-route legality is data (#5313 INV-3)", () => {
+  test("OPERATOR_TRANSITIONS is every open state x every operator target, no self-moves", () => {
+    assert.equal(OPERATOR_TRANSITIONS.length, OPERATOR_TARGETS.length * OPEN_STATES.length - OPERATOR_TARGETS.filter((t) => t !== "closed").length);
+    for (const t of OPERATOR_TRANSITIONS) {
+      assert.equal(t.firedBy, "operator");
+      assert.equal(t.gate, "none");
+      assert.notEqual(t.from, t.to);
+    }
+    for (const hold of HUMAN_HOLD_STATES) {
+      assert.ok(findOperatorTransition(hold, "needs-triage"), hold);
+    }
+  });
+
+  test("agent-owned states are never operator targets", () => {
+    for (const s of ["in-progress", "qa-passed", "parked"]) {
+      assert.equal((OPERATOR_TARGETS as readonly string[]).includes(s), false, s);
+      assert.equal(findOperatorTransition("needs-triage", s as never), undefined, s);
+    }
+  });
+
+  test("needs-dev-resume and needs-qa are operator targets (the #5058 hand-back lanes)", () => {
+    for (const s of ["needs-dev-resume", "needs-qa"]) {
+      assert.equal((OPERATOR_TARGETS as readonly string[]).includes(s), true, s);
+      assert.ok(findOperatorTransition("ready-for-human", s as never), s);
+    }
+  });
+
+  test("the agent TRANSITIONS table still has no human-hold-from rows", () => {
+    for (const t of TRANSITIONS) assert.equal(isHumanHold(t.from), false, t.from);
+  });
+
+  test("RELABEL_TARGETS (the board schema) is a subset of OPERATOR_TARGETS", () => {
+    for (const t of RELABEL_TARGETS) assert.ok((OPERATOR_TARGETS as readonly string[]).includes(t), t);
+  });
+});
+
+describe("isUnsanctionedHoldExit (#5313 INV-9)", () => {
+  const e = (over: object) => ({
+    kind: "external" as const, written: true, source: "external" as const,
+    from: "parked" as string | null, to: "ready-for-agent" as string | null, ...over,
+  });
+
+  test("true for a written non-operator-route exit out of a human-hold state", () => {
+    assert.equal(isUnsanctionedHoldExit(e({})), true);
+    assert.equal(isUnsanctionedHoldExit(e({ kind: "transition", source: "cli" })), true);
+    assert.equal(isUnsanctionedHoldExit(e({ source: "workflow" })), true);
+    assert.equal(isUnsanctionedHoldExit(e({ from: "needs-triage,hitl-grill" })), true);
+    // A shadow-mode write is journaled kind refused with written:true (#5313 round 3).
+    assert.equal(isUnsanctionedHoldExit(e({ kind: "refused", source: "cli" })), true);
+  });
+
+  test("false for operator-route, refused, unwritten, non-hold, null-from and hold-to-itself", () => {
+    assert.equal(isUnsanctionedHoldExit(e({ source: "operator-route" })), false);
+    assert.equal(isUnsanctionedHoldExit(e({ kind: "refused", written: false })), false);
+    assert.equal(isUnsanctionedHoldExit(e({ written: false })), false);
+    assert.equal(isUnsanctionedHoldExit(e({ from: "needs-triage" })), false);
+    assert.equal(isUnsanctionedHoldExit(e({ from: null })), false);
+    assert.equal(isUnsanctionedHoldExit(e({ to: "parked" })), false);
+  });
+
+  test("the alert window is 7 days", () => {
+    assert.equal(HOLD_EXIT_ALERT_WINDOW_DAYS, 7);
   });
 });
