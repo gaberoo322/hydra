@@ -513,7 +513,18 @@ async function runRouteImpl(
       }
     }
   } catch (err) {
-    if (!(err instanceof PrMergedStop)) throw err;
+    if (!(err instanceof PrMergedStop)) {
+      // A throw after a still-failed disarm exits 1 with no result JSON, bypassing the playbook HARD STOP:
+      // re-attempt the disarm once and say so LOUDLY on stderr (round-4 finding).
+      if (degraded.includes("disarm-failed")) {
+        const ok = opts.dryRun ? false : await disarm();
+        console.error(
+          `[hydra-qa] HARD STOP: auto-merge may still be ARMED on FAILed PR #${pr} (disarm-failed, route aborted); ` +
+            (ok ? "final re-disarm succeeded" : `run: gh pr merge ${pr} --repo ${repo} --disable-auto`),
+        );
+      }
+      throw err;
+    }
     nextStep = "none";
     degraded.push("pr-merged");
   }

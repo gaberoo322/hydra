@@ -803,6 +803,30 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     assert.deepEqual(sleeps, [], "sibling: a clean disarm never waits");
   });
 
+  test("route FAIL: a failed disarm followed by a refused seam advance re-disarms and prints a loud HARD STOP on stderr, then still throws; a clean disarm prints none", async () => {
+    const mk = (failDisarm: boolean) => harness({
+      ghHandler: (a) => (failDisarm && a[0] === "pr" && a[1] === "merge" ? fail("gh: 502") : withState("OPEN")(a)),
+      advanceHandler: refuse("needs-dev-resume", "state-entry-unknown"),
+      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium" }),
+    });
+    const errs: string[] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => { errs.push(a.map(String).join(" ")); };
+    try {
+      const bad = mk(true);
+      await assert.rejects(runRoute(ROUTE_OPTS, readyPre(), bad.ports, realDeps()), /refused \(state-entry-unknown\)/);
+      assert.equal(bad.writes().filter((a) => a[0] === "pr" && a[1] === "merge").length, 3, "2 in disarmChecked + 1 final re-disarm");
+      assert.ok(errs.some((e) => /HARD STOP.*#77.*--disable-auto/.test(e)), "loud stderr names the manual disarm");
+      errs.length = 0;
+      const good = mk(false);
+      await assert.rejects(runRoute(ROUTE_OPTS, readyPre(), good.ports, realDeps()), /refused/);
+      assert.equal(good.writes().filter((a) => a[0] === "pr" && a[1] === "merge").length, 1, "sibling: clean disarm, no extra re-disarm");
+      assert.ok(!errs.some((e) => /HARD STOP/.test(e)), "sibling: no HARD STOP line");
+    } finally {
+      console.error = orig;
+    }
+  });
+
   test("route PASS: arm-auto-merge only when the PASS comment AND the qa-passed advance both landed", async () => {
     const pre = readyPre({ tier: { num: 2, adversarial: false } });
     const commentFails = harness({
