@@ -160,7 +160,7 @@ Invoke `/hydra-issue-research $number`. Multiple in parallel OK (read-only).
 
 #### `in-progress` — check for stale work
 1. PR exists? `gh pr list --search "closes #$number"`
-2. PR merged and the issue still open: `advance $number closed --evidence pr=<PR>` (post-merge `needs-qa` is retired: `needs-qa` needs an OPEN PR).
+2. PR merged and the issue still open: `advance $number closed --evidence pr=<PR> --rationale "PR merged, issue still open" --actor hydra-sweep` (post-merge `needs-qa` is retired: `needs-qa` needs an OPEN PR).
 3. PR open: skip.
 4. No PR + updated >12h ago: **report only** (stale in-progress). The re-queue and its cap arm belong to the deterministic writer (`recover-stale.sh`); the sweep writes nothing.
 
