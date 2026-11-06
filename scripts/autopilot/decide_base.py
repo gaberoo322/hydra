@@ -15,6 +15,7 @@ performs I/O: decide() stays a pure function of (state, candidates, events, now)
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, fields
 from typing import ClassVar
 
@@ -222,6 +223,13 @@ def _need_str(kind: str, name: str, value) -> None:
         raise ValueError(f"dispatch intent {kind!r}: {name} must be a non-empty string, got {value!r}")
 
 
+def _need_anchor(kind: str, value) -> None:
+    """An anchor must be an `issue-<N>` ref: the renderer pins only that shape, so
+    anything else would silently render UNPINNED (the fallback ADR-0007 forbids)."""
+    if not isinstance(value, str) or not re.fullmatch(r"issue-\d+", value):
+        raise ValueError(f"dispatch intent {kind!r}: anchor must match issue-<N>, got {value!r}")
+
+
 def _need_pr(kind: str, value) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"dispatch intent {kind!r}: pr must be a positive int, got {value!r}")
@@ -236,7 +244,7 @@ class Fresh:
 
     def __post_init__(self):
         if self.anchor is not None:
-            _need_str(self.kind, "anchor", self.anchor)
+            _need_anchor(self.kind, self.anchor)
 
     def to_dict(self) -> dict:
         d: dict = {"kind": self.kind}
@@ -254,7 +262,7 @@ class ResumeBranch:
     branch: str
 
     def __post_init__(self):
-        _need_str(self.kind, "anchor", self.anchor)
+        _need_anchor(self.kind, self.anchor)
         _need_str(self.kind, "branch", self.branch)
 
     def to_dict(self) -> dict:
@@ -269,7 +277,7 @@ class ResumeSalvage:
     anchor: str
 
     def __post_init__(self):
-        _need_str(self.kind, "anchor", self.anchor)
+        _need_anchor(self.kind, self.anchor)
 
     def to_dict(self) -> dict:
         return {"kind": self.kind, "anchor": self.anchor}
@@ -286,7 +294,7 @@ class ForwardFixRed:
     branch: str
 
     def __post_init__(self):
-        _need_str(self.kind, "anchor", self.anchor)
+        _need_anchor(self.kind, self.anchor)
         _need_pr(self.kind, self.pr)
         _need_str(self.kind, "branch", self.branch)
 
@@ -304,7 +312,7 @@ class ForwardFixConflict:
     branch: str
 
     def __post_init__(self):
-        _need_str(self.kind, "anchor", self.anchor)
+        _need_anchor(self.kind, self.anchor)
         _need_pr(self.kind, self.pr)
         _need_str(self.kind, "branch", self.branch)
 
@@ -322,7 +330,7 @@ class ForwardFixConflictWithFail:
     branch: str
 
     def __post_init__(self):
-        _need_str(self.kind, "anchor", self.anchor)
+        _need_anchor(self.kind, self.anchor)
         _need_pr(self.kind, self.pr)
         _need_str(self.kind, "branch", self.branch)
 

@@ -729,6 +729,9 @@ describe("Dispatch Intent validation (#5381 QA round 1)", () => {
     ["non-int pr", `{"kind":"ForwardFixRed","anchor":"issue-1","pr":"5","branch":"b"}`],
     ["bool pr", `{"kind":"ForwardFixConflict","anchor":"issue-1","pr":True,"branch":"b"}`],
     ["empty resume branch", `{"kind":"ResumeBranch","anchor":"issue-1","branch":""}`],
+    ["non-issue anchor on Fresh", `{"kind":"Fresh","anchor":"foo"}`],
+    ["non-issue anchor on ResumeSalvage", `{"kind":"ResumeSalvage","anchor":"issue-"}`],
+    ["non-numeric issue anchor on a forward-fix", `{"kind":"ForwardFixRed","anchor":"issue-x","pr":5,"branch":"b"}`],
   ] as const) {
     test(`intent_from_dict rejects ${label}`, () => {
       const r = py(`try:\n    db.intent_from_dict(${raw})\n    print("accepted")\nexcept ValueError:\n    print("rejected")`);
@@ -741,5 +744,58 @@ describe("Dispatch Intent validation (#5381 QA round 1)", () => {
       `print(db.intent_from_dict({"kind":"ForwardFixRed","anchor":"issue-1","pr":5,"branch":"b"}).pr, db.intent_from_dict({"kind":"Fresh"}).anchor, db.intent_from_dict({"kind":"ResumeSalvage","anchor":"issue-1"}).anchor)`,
     );
     assert.equal(r.stdout.trim(), "5 None issue-1", r.stderr);
+  });
+});
+
+describe("Dispatch Intent through the INV-7 consumers (#5381)", () => {
+  const py = (code: string) =>
+    spawnSync(
+      "python3",
+      ["-c", `import sys, json; sys.path.insert(0, ${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot"))})\n${code}`],
+      { encoding: "utf-8" },
+    );
+
+  test("the pinned-anchor sentinel is read from an INTENT action (no prompt_args)", () => {
+    const r = py(
+      `import decide_base as db, decide\n` +
+        `a = db.make_dispatch('dev_orch', 'hydra-dev', intent=db.ResumeSalvage(anchor='issue-77'))\n` +
+        `acts = [a]\ndecide._stamp_dispatch_metadata(acts, {'run_id': 'r1', 'turn': 1})\n` +
+        `print(json.dumps({'sentinel': acts[0]['dispatchSentinel'], 'pa': acts[0].get('prompt_args')}))`,
+    );
+    const out = JSON.parse(r.stdout);
+    assert.ok(!out.pa, "intent actions carry no prompt_args");
+    assert.match(out.sentinel, /anchor=issue-77/);
+  });
+
+  test("sibling shape: a legacy prompt_args action still stamps its anchor into the sentinel", () => {
+    const r = py(
+      `import decide\n` +
+        `acts = [{'type': 'dispatch', 'slot': 'dev_orch', 'skill': 'hydra-dev', 'prompt_args': {'anchor': 'issue-78'}}]\n` +
+        `decide._stamp_dispatch_metadata(acts, {'run_id': 'r1', 'turn': 1})\nprint(acts[0]['dispatchSentinel'])`,
+    );
+    assert.match(r.stdout, /anchor=issue-78/);
+  });
+
+  test("stamp-slot build_slot stamps anchor and attempt from an INTENT action", () => {
+    const r = py(
+      `import importlib.util, decide_base as db\n` +
+        `spec = importlib.util.spec_from_file_location('stamp_slot', ${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot", "stamp-slot.py"))})\n` +
+        `m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n` +
+        `a = db.make_dispatch('dev_orch', 'hydra-dev', intent=db.ForwardFixRed(anchor='issue-5', pr=9, branch='b'), prompt_args={'attempt': 3, 'escalate_model': 'fable'})\n` +
+        `rec = m.build_slot(a, 'tid', 'sonnet', 'abcdef012345', 4, 1000)\n` +
+        `print(json.dumps({'anchor': rec.get('anchor'), 'attempt': rec['attempt']}))`,
+    );
+    assert.deepEqual(JSON.parse(r.stdout), { anchor: "issue-5", attempt: 3 }, r.stderr);
+  });
+
+  test("sibling shape: build_slot on an unpinned Fresh intent stamps no anchor, attempt 1", () => {
+    const r = py(
+      `import importlib.util, decide_base as db\n` +
+        `spec = importlib.util.spec_from_file_location('stamp_slot', ${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot", "stamp-slot.py"))})\n` +
+        `m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n` +
+        `rec = m.build_slot(db.make_dispatch('dev_orch', 'hydra-dev', intent=db.Fresh()), 'tid', 'sonnet', 'abcdef012345', 4, 1000)\n` +
+        `print(json.dumps({'has_anchor': 'anchor' in rec, 'attempt': rec['attempt']}))`,
+    );
+    assert.deepEqual(JSON.parse(r.stdout), { has_anchor: false, attempt: 1 }, r.stderr);
   });
 });

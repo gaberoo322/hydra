@@ -2659,6 +2659,11 @@ def _rule_instant_death_replay(
         # Issue #5381 QA round 1: a typed-intent dispatch (dev_orch) is recorded
         # with its intent and replayed through it; escalation keys ride prompt_args.
         rec_intent = None
+        if rec.get("intent") is None and escalation_intent(cls) is not None:
+            # A pre-intent dev_orch record has no typed intent; render-dispatch
+            # would exit 2 on the replay, so it is unjoinable, not replayed blind.
+            out.reasons.append(f"instant-death-unjoinable:{cls}")
+            continue
         if rec.get("intent") is not None:
             try:
                 rec_intent = intent_from_dict(rec["intent"])

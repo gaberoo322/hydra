@@ -213,6 +213,18 @@ describe("decide.py - Fable instant-death replay (#5323)", () => {
     assert.ok(plan.reasons.includes("instant-death-unjoinable:dev_orch"), plan.reasons.join());
   });
 
+  test("a pre-intent dev_orch record (no intent) is unjoinable, never replayed intent-less (#5381)", () => {
+    const st = baseState({
+      slots: { dev_orch: { skill: "hydra-dev", task_id: "abc123", started: "t0", started_epoch: 1, dispatch_id: BRANCH }, dev_target: null },
+      last_dispatch_by_class: {
+        dev_orch: { turn: 2, skill: "hydra-dev", prompt_args: { anchor: "issue-9", escalate_model: "fable" }, worktreeBranch: BRANCH },
+      },
+    });
+    const { plan } = decide(st, [death({ slot: "dev_orch" })]);
+    assert.equal(plan.actions.filter((a: any) => a.type === "dispatch" && a.slot === "dev_orch").length, 0);
+    assert.ok(plan.reasons.includes("instant-death-unjoinable:dev_orch"), plan.reasons.join());
+  });
+
   test("decide records every emitted dispatch in state.last_dispatch_by_class", () => {
     const { plan, stateAfter } = decide(baseState(), [death()]);
     const [d] = replays(plan);
