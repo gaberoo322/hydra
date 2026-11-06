@@ -313,6 +313,7 @@
       ],
       "composedFrom": [
         "docs/operator-playbooks/_vendor/code-review.md",
+        "docs/operator-playbooks/_fragments/hydra-qa-reference.md",
         "docs/operator-playbooks/_fragments/checks-fetch.md"
       ],
       "route": "/docs/skill/hydra-qa",
