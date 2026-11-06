@@ -153,6 +153,18 @@
       "description": "hydra-watchdog.ts — one-shot watchdog CLI (issue #5095, epic #5094)."
     },
     {
+      "path": "scripts/lifecycle-parent-exception-baseline.ts",
+      "name": "lifecycle-parent-exception-baseline.ts",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/lifecycle-parent-exception-baseline.ts"
+      },
+      "kind": "ts",
+      "description": "scripts/lifecycle-parent-exception-baseline.ts — idempotent replay of the"
+    },
+    {
       "path": "scripts/lifecycle.ts",
       "name": "lifecycle.ts",
       "execStart": null,

@@ -68,7 +68,7 @@
     {
       "family": "config",
       "metric": "rows",
-      "value": 35
+      "value": 36
     },
     {
       "family": "config",
@@ -168,7 +168,7 @@
     {
       "family": "units-scripts",
       "metric": "rows",
-      "value": 42
+      "value": 43
     }
   ]
 }

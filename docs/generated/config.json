@@ -199,6 +199,19 @@
     },
     {
       "kind": "file",
+      "path": "config/orchestrator/builder-health-baselines.json",
+      "section": null,
+      "readBy": [
+        "scripts/lifecycle-parent-exception-baseline.ts",
+        "src/aggregators/lifecycle-health.ts"
+      ],
+      "unread": false,
+      "source": {
+        "path": "config/orchestrator/builder-health-baselines.json"
+      }
+    },
+    {
+      "kind": "file",
       "path": "config/orchestrator/lifecycle-rollout.json",
       "section": null,
       "readBy": [

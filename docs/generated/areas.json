@@ -71,7 +71,8 @@
         "0024",
         "0033",
         "0034",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -640,7 +641,8 @@
         "0024",
         "0033",
         "0034",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -949,7 +951,8 @@
         "0024",
         "0033",
         "0034",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -1139,7 +1142,8 @@
         "0020",
         "0033",
         "0034",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -1296,7 +1300,8 @@
         "0024",
         "0033",
         "0034",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -1546,7 +1551,8 @@
         "0024",
         "0033",
         "0034",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -1892,7 +1898,8 @@
         "0020",
         "0024",
         "0033",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -1953,7 +1960,8 @@
         "0024",
         "0033",
         "0034",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -1974,6 +1982,7 @@
           "file config/direction/proposal-policy.md",
           "file config/direction/tech-preferences.md",
           "file config/direction/vision.md",
+          "file config/orchestrator/builder-health-baselines.json",
           "file config/orchestrator/lifecycle-rollout.json",
           "file config/orchestrator/qa-rollout.json",
           "file config/orchestrator/vision.md"
