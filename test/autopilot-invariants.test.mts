@@ -373,14 +373,14 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
     const plan = {
       actions: [
         { type: "dispatch", slot: "design_concept_orch", skill: "hydra-grill",
-          prompt_args: { anchor: "issue-conflict", scope: "orch" } },
+          prompt_args: { anchor: "issue-412", scope: "orch" } },
         { type: "dispatch", slot: "dev_orch", skill: "hydra-dev",
-          intent: { kind: "Fresh", anchor: "issue-conflict" }, anchor: "issue-conflict" },
+          intent: { kind: "Fresh", anchor: "issue-412" }, anchor: "issue-412" },
       ],
     };
     const r = runAsserts(plan, baseState());
     assert.equal(r.status, 0, r.stderr);
-    assert.equal((r.stderr.match(/WARN INV-009 .*issue-conflict/g) ?? []).length, 1);
+    assert.equal((r.stderr.match(/WARN INV-009 .*issue-412/g) ?? []).length, 1);
   });
 
   test("INV-009: dev_orch and design_concept_orch on DIFFERENT anchors is allowed", () => {
