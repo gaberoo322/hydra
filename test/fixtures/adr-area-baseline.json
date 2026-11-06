@@ -19,7 +19,7 @@
   "self-modification": 29769,
   "docs/operator-playbooks/": 54412,
   ".github/workflows/ (Verifier Core)": 23639,
-  "scripts/autopilot/ (decide.py, classes.json, run_ledger.py — the Run Ledger)": 84493,
+  "scripts/autopilot/ (decide.py, classes.json, run_ledger.py — the Run Ledger)": 86496,
   "dashboard/": 33956,
   "config/direction/, config/orchestrator/": 4406,
   "docs/adr/ itself": 5249,
