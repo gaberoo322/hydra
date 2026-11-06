@@ -367,7 +367,15 @@ describe("stamp-slot.py claim (INV-3, INV-4)", () => {
     };
     const d = run("dev_orch", { worktreeBranch: "b1", prompt_args: { anchor: "issue-5" } });
     assert.equal(d.status, 0);
-    assert.equal(d.argv, "tsx scripts/lifecycle.ts release 5 --dispatch b1 --outcome released");
+    assert.equal(
+      d.argv,
+      "tsx scripts/lifecycle.ts release 5 --dispatch b1 --outcome released\n" +
+        "tsx scripts/lifecycle.ts advance 5 ready-for-agent --reason dispatch-rollback",
+    );
+    // sibling shape: a resume dispatch rolls back to needs-dev-resume, not ready-for-agent
+    const rs = run("dev_orch", { worktreeBranch: "b3", prompt_args: { anchor: "issue-5", resume: true } });
+    assert.equal(rs.status, 0);
+    assert.match(rs.argv, /advance 5 needs-dev-resume --reason dispatch-rollback$/);
     const q = run("qa_orch", { worktreeBranch: "b2", prompt_args: { anchor: "issue-5" } });
     assert.equal(q.status, 0);
     assert.equal(q.argv, "");
