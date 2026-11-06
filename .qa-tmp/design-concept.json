@@ -1,0 +1,210 @@
+{
+  "anchorRef": "issue-5269",
+  "scope": "orch",
+  "createdAt": 1793385284281,
+  "artifactHash": "0aa33442933e081b01501b63bdc4da84a6f5835542482b3f7cd352c82db35792",
+  "glossaryTerms": [
+    "Pre-merge Gate — CONTEXT.md (CI required jobs + branch protection; this slice changes no gate: the merge stays `gh pr merge --auto` in the playbook behind the QA merge guard, and every new file is T3)",
+    "Verifier Core — CONTEXT.md (the six files; none is touched. `.github/workflows/deep-qa-gate.yml` imports `hasFreshDeepQaPass` from `scripts/ci/qa-verdict.ts`, so that export set is frozen and `route.ts` only forwards marker lines the engine already rendered)",
+    "Modification Tier — CONTEXT.md (`scripts/tier-classify.ts` run on every new path: `scripts/qa/*.ts`, `src/schemas/qa-plumbing-cli.ts`, the playbook and the tests all classify T3 — no T4 PR is forced)",
+    "Deep-QA Remediation Loop — CONTEXT.md (the T4 1st-FAIL bounce / 2nd-FAIL block-and-escalate; its rule stays in `decideDeepQaAction`; `route.ts` reads `.deepQa.action` and `.failMarker` from the one `round-action` result and performs the labels/comments)",
+    "Deep-QA PASS marker — CONTEXT.md (the SHA-bound `Verifier-Core deep-QA: PASS @ <sha>` comment; rendered by the engine as `.passMarker`, posted by `route.ts` only when non-empty, literal never spelled in the scripts)",
+    "Design Concept — CONTEXT.md (the Spec axis input; `preflight.ts` resolves it through `GET /api/design-concepts/:n/resolve` and unwraps the flat `.concept` exactly as step 4 does today, including the exempt-label and Phase A warn arms)",
+    "Post-merge Regression Check — CONTEXT.md (sections A/B of the playbook are reference for a QA pass — the watch is driven by the holdback-merge-watch chore — so they move verbatim to the on-demand reference sidecar)",
+    "Live-Gate Invariant — CONTEXT.md (unaffected: no Verifier Core file changes, so nothing here is judged by the proposed gate)"
+  ],
+  "glossaryGaps": [],
+  "modulesTouched": [
+    {
+      "path": "scripts/qa/preflight.ts",
+      "interfaceImpact": "none",
+      "depthClassification": "deep"
+    },
+    {
+      "path": "scripts/qa/packet.ts",
+      "interfaceImpact": "none",
+      "depthClassification": "deep"
+    },
+    {
+      "path": "scripts/qa/route.ts",
+      "interfaceImpact": "none",
+      "depthClassification": "deep"
+    },
+    {
+      "path": "scripts/qa/poll.ts",
+      "interfaceImpact": "none",
+      "depthClassification": "shallow"
+    },
+    {
+      "path": "src/schemas/qa-plumbing-cli.ts",
+      "interfaceImpact": "none",
+      "depthClassification": "shallow"
+    },
+    {
+      "path": "docs/operator-playbooks/hydra-qa.md",
+      "interfaceImpact": "none",
+      "depthClassification": "deep"
+    },
+    {
+      "path": "docs/operator-playbooks/_fragments/hydra-qa-reference.md",
+      "interfaceImpact": "none",
+      "depthClassification": "shallow"
+    },
+    {
+      "path": "test/qa-plumbing-scripts.test.mts",
+      "interfaceImpact": "none",
+      "depthClassification": "shallow"
+    },
+    {
+      "path": "test/hydra-qa-needs-qa-clear.test.mts",
+      "interfaceImpact": "breaking",
+      "depthClassification": "shallow"
+    },
+    {
+      "path": "test/hydra-qa-prompt-verdict.test.mts",
+      "interfaceImpact": "breaking",
+      "depthClassification": "shallow"
+    },
+    {
+      "path": "scripts/ci/skill-size-baseline.json",
+      "interfaceImpact": "none",
+      "depthClassification": "shallow"
+    },
+    {
+      "path": "test/fixtures/suite-count-baseline.json",
+      "interfaceImpact": "none",
+      "depthClassification": "shallow"
+    },
+    {
+      "path": ".changelog/5269-qa-plumbing-scripts.md",
+      "interfaceImpact": "none",
+      "depthClassification": "shallow"
+    },
+    {
+      "path": "docs/generated/",
+      "interfaceImpact": "none",
+      "depthClassification": "shallow"
+    }
+  ],
+  "invariants": [
+    "INV-1 (sequencing: Q1 builds on the engine CLI, never beside it): the branch forks from a master that contains PR #5306 (#5081, qa-verdict-engine 4/4 — `Blocked by #5081` was added to the issue body by this grill); every engine decision the scripts need (admission, fanout, prior-context, fold, trailer, round-action) is reached through `runQaVerdictPhase` (src/qa/phases.ts) with `createGhQaVerdictFetchers` (src/qa/fetchers.ts) or the `scripts/ci/qa-verdict.ts <phase>` CLI — no rule is re-implemented in scripts/qa/ and no `node -e` shim returns. Verified by: `file-lacks: docs/operator-playbooks/hydra-qa.md :: import('./scripts/ci/qa-verdict.ts')` and `file-lacks: scripts/qa/route.ts :: foldReviewFindings(`.",
+    "INV-2 (frozen contract, ADR-0046 Decision 7): `scripts/ci/qa-verdict.ts`'s export set, `src/qa/round-action.ts` (`hasFreshDeepQaPass`, `DEEP_QA_FAIL_MARKER`, `renderDeepQaPassMarker`, `decideDeepQaAction`), `src/qa/fold.ts`, `.github/workflows/deep-qa-gate.yml` and `src/untouchable.ts` are byte-unchanged; `route.ts` never spells a marker literal — it posts `.passMarker` / `.failMarker` from the one `round-action` result, and posts no marker when the field is empty. Verified by: `file-lacks: scripts/qa/route.ts :: Verifier-Core deep-QA:`.",
+    "INV-3 (the merge call site stays in the playbook — test/qa-merge-guard-callsites.test.mts passes UNCHANGED): step 10's PASS stub keeps, verbatim, the fence `gh pr merge $pr_number --repo gaberoo322/hydra --auto --squash --delete-branch` (the test's EXEMPT literal) and the guard-gated direct-merge fence (`scripts/ci/qa-merge-guard.ts --pr` + `--match-head-commit \"$(jq -r .headSha <<<\"$GUARD_JSON\")\"` in the same block); `route.ts` performs every other PASS effect and returns `nextStep: 'arm-auto-merge'`; the only `gh pr merge` in `route.ts` is the `--disable-auto` disarm. Verified by: `file-contains: docs/operator-playbooks/hydra-qa.md :: gh pr merge $pr_number --repo gaberoo322/hydra --auto --squash --delete-branch` and `file-lacks: scripts/qa/route.ts :: --auto --squash`.",
+    "INV-4 (preflight is read-only and emits the fail-closed defaults itself): `scripts/qa/preflight.ts --issue N [--pr N] [--repo owner/name]` performs zero writes (no labels, comments, git checkout, or Redis) and prints ONE JSON object validated by `PreflightResultSchema` in src/schemas/qa-plumbing-cli.ts: `{ok, stage, issue, pr:{number, headSha, headRefName, baseRefName, mergeStateStatus, glmAuthored}, fixedSha, changedPaths[], checks:{list[], degraded}, spec:{found, input|null, skippedReason|null, mode}, tier:{num|null, adversarial}, gate:{action, reason, redRequired[]}, fanout:{mode, reviewers[], reason}, degraded[]}` — i.e. steps 1–6.7 in one call. Every unknown fails closed exactly as today: unreachable tier → `tier.num:null, adversarial:true` and the engine's admit; checks-fetch failure → the rollup-only all-optional mapping (INV-7 of #4757) tagged in `degraded`; resolve unreachable in `warn` mode → the Phase A skip reason; fanout failure → the tier fan-out with the 'kept the tier path' reason; `single` mode sets `adversarial:false`. `ok:false` with `stage` (`no-issue` | `no-pr` | `spec-missing-enforce`) is exit 0 — the playbook stub posts today's one comment and stops; exit 2 is usage/schema only. Verified by: `test: test/qa-plumbing-scripts.test.mts :: \"preflight: unreachable tier classifier yields tier null, adversarial true and gate admit\"` and `test: test/qa-plumbing-scripts.test.mts :: \"preflight performs no write: the fake gh records only read verbs\"`.",
+    "INV-5 (packet is a pure read, byte-identical packet): `scripts/qa/packet.ts --preflight <file>` writes only `mktemp` files and prints `{reviewPacketPath, standardsPacketPath|null, standardsFound, specInputPath|null, priorFindings, rereviewDiffBase, degraded[]}`; the review packet text (`Diff (<sha12>…HEAD):` header, `===== <f> @ HEAD =====` sections, the deleted-file sentinel, the appended re-review context when `priorFindings` is non-empty) is byte-identical to the post-#5306 step 7.0/7.0a bash; the re-review context comes from the engine `prior-context` phase; the Standards packet comes from `loadCodingStandards` and an `ok:false` catalog read exits 1 BEFORE any reviewer is spawned (S5's pre-spawn exit, preserved); the review packet never carries the standards text (Spec never sees it). Verified by: `test: test/qa-plumbing-scripts.test.mts :: \"packet: standards catalog read failure exits 1 and writes no packet\"`.",
+    "INV-6 (route is the single effect owner and composes the engine in-process): `scripts/qa/route.ts --preflight <file> --findings <file> --summaries <file> [--defer] [--dry-run]` makes exactly one pass: fold → classify → trailer → round-action through `runQaVerdictPhase` (findings bound RAW so a malformed file reaches the fold and fails closed to the `reviewer-output-malformed` high blocker), then performs the step-10 / step-6.6 effects and prints `{verdict, reason, reviewVerdict, blockers, maxSeverity, worstFinding, trailer, round, deepQa, effects:[{kind, target, ok}], nextStep:'arm-auto-merge'|'none', degraded[]}`; `--dry-run` prints the identical plan with zero writes. Effect ORDER is pinned by a fake `gh` on PATH recording argv: PASS = strip `needs-qa` + add `in-progress` → PR comment → T4 `.passMarker` comment; PASS-pending-CI = PR comment → strip + `in-progress`; FAIL T1–T3 = `gh pr merge --disable-auto` → PR comment → (escalate: `.labels.issueAdd` POSTs before `.labels.issueRemove` DELETEs with the label name in the URL path and a 404 counted as success, then `.labels.prAdd`) or (bounce: `needs-dev-resume` while a LIVE per-call read says the PR is OPEN, `ready-for-agent` only on a confirmed CLOSED/MERGED read, any failed or empty read → `needs-dev-resume`; `glmAuthored` selects comment wording only) → issue comment; T4 FAIL = disarm → PR comment carrying `.failMarker` → `block-and-escalate` (`ready-for-human`) or 1st-fail bounce; `--defer` = PR comment → bounce relabel → issue comment, no verdict; a non-zero fold/trailer/round-action result is exit 1 with NOTHING posted and `needs-qa` untouched (the pre-verdict exit of #5306 INV-4), never a verdict literal invented in the script. Verified by: `test: test/qa-plumbing-scripts.test.mts :: \"route PASS: needs-qa strip precedes the PR comment and no gh pr merge --auto is issued\"` and `test: test/qa-plumbing-scripts.test.mts :: \"route FAIL on an open PR relabels needs-dev-resume; a failed state read also relabels needs-dev-resume\"`.",
+    "INV-7 (posted bytes frozen): for the same fold, CI state, head sha, prior thread and labels, every string `route.ts` posts — the PR comment bodies (`> *Automated QA — two-axis review*`, `(pending CI)`, `— T4 Verifier-Core deep review`, `— review deferred`, the PASS-proof body), the issue-side pointers (`Automated QA failed (open PR)` / `(GLM-authored PR)` / `Automated QA failed` / `Automated QA escalated — operator decision needed` / `T4 Deep-QA failed (1st)` / `T4 Deep-QA blocked`), the `QA-Verdict:` trailer as the LAST line of every verdict body (exactly one per body), and every label operation — is byte-identical to the post-#5306 playbook's bash templates; golden fixtures in test/qa-plumbing-scripts.test.mts cover each arm (PASS, PASS-pending-CI, FAIL open, FAIL GLM wording, FAIL not-open, escalate, T4 bounce, T4 block, defer open, defer not-open, skip-required-failed). Issue pointers stay ≤ 800 chars (≤ 2500 with the escalation summary) and never carry `$REVIEW_REPORT`. Verified by: `test: test/qa-plumbing-scripts.test.mts :: \"golden: every verdict body ends with exactly one QA-Verdict trailer line and matches the recorded template\"`.",
+    "INV-8 (review-findings rows ride the route step, ADR-0046 Decision 8 / R1 #5270): after the PR verdict comment posts and when the trailer carries a readable `round=`, `route.ts` appends `rowsFromFold(fold, {pr, round, sha}, {at, source:'route'})` via `appendReviewFindingRows` (src/redis/review-findings.ts — STD-REDIS-SEAM; `await import()`ed inside the main guard so the static graph gains no ioredis edge); any failure is logged with context and named in `degraded[]` (`review-findings`), is never fatal, and never reorders or blocks the gh effects; `--dry-run` appends nothing. Verified by: `file-contains: scripts/qa/route.ts :: appendReviewFindingRows(`.",
+    "INV-9 (poll is a bounded script, never re-armed): `scripts/qa/poll.ts --pr N [--repo owner/name] [--iterations 40] [--interval 15]` replaces the 30-line foreground poll fence; it prints `{pending, settled, iterations, checks:[{name, state}]}`; an unreadable `gh pr checks` keeps polling with `pending` left unknown (fail closed) and reports `settled:false` at budget expiry; it never loops past `--iterations`; the playbook keeps the 'post a partial-but-posted verdict, never wait' rule as prose and still forbids CI polling for the verdict itself (#405 single-pass exit). hydra-dev / hydra-target-build adoption of poll.ts is out of scope. Verified by: `test: test/qa-plumbing-scripts.test.mts :: \"poll: budget expiry reports settled:false and never re-arms\"`.",
+    "INV-10 (playbook shape — judgement stays, plumbing becomes stubs, reference moves to an on-demand sidecar): the preface + blocking-dispatch mandate + never-end rule, the T4 Verifier-Core checklist (its Verifier Core file-count sentence untouched for test/verifier-core-docs-drift), steps 7a/7b/7c reviewer briefs, 7.5, 8 and step 11's criterion classification stay verbatim; steps 1–6.7 collapse to one `preflight` stub that branches on `.gate.action` (admit → 7, defer → `route --defer`, skip-required-failed → `route` with the nominal PASS review verdict and the admission-skip REVIEW_REPORT), 7.0/7.0a to one `packet` stub, 9/9.5/9.6/10 to one `route` stub plus the retained merge fence (INV-3), the poll fence to one `poll` stub; `qa_bounce_label()` and every `gh issue edit` / `gh issue comment` / `gh pr comment` fence outside the merge fence leave the body; the reference bucket (tier-aware depth, severity-gated fold, convergent review, deep-qa-gate StatusContext vs CheckRun, Phase A shadow mode, verdict tiers, INV-A..INV-G definitions, Post-merge Regression Check A/B, Invariants, slot-lifecycle hook, catch-rate section) moves VERBATIM into `docs/operator-playbooks/_fragments/hydra-qa-reference.md`, declared in the frontmatter `reference_files:` list (copied beside SKILL.md, read on demand — NOT an `@include`, the #4827 sidecar precedent) with `(sibling of this SKILL.md)` pointers left at each former location; `@include _fragments/checks-fetch.md` disappears from hydra-qa.md because preflight calls the same `checks` phase (the fragment itself and hydra-autopilot.md's use of it are untouched); the measured body is ≤ 7,000 words (from 16,463 post-#5306) and the skill-size-baseline row for hydra-qa.md is LOWERED to the measured size in the same PR (shrink-only; the new sidecar row is seeded at its measured size). Verified by: `file-lacks: docs/operator-playbooks/hydra-qa.md :: qa_bounce_label() {` and `file-contains: docs/operator-playbooks/hydra-qa.md :: reference_files:`.",
+    "INV-11 (tests move, nothing is silently lost — flip-first order per CLAUDE.md): BEFORE the playbook edit, every pin in test/hydra-qa-needs-qa-clear.test.mts and test/hydra-qa-prompt-verdict.test.mts that asserts bash-in-playbook (the `**Verdict \\`X\\`**` fence extractor, the `qa_bounce_label() {` definition and `$(qa_bounce_label)` call counts, the 10 verdict bodies / 6 issue pointers, the 6.7 `FANOUT_REVIEWERS=` arms, `.catch(` on the 6.7 helper, the step-9.5 heading + CLI-phase names) is rewritten to pin the SAME invariant at its new home — `route.ts` / `preflight.ts` behaviour through the fake gh in test/qa-plumbing-scripts.test.mts, or a text pin on the new stub (strip-before-anything-that-can-abort, comment-not-approve, the open-PR `needs-dev-resume` arm, the not-open fallback, the `--disable-auto` disarm first on every FAIL) — then watched go red against the unchanged playbook, then greened; `node scripts/test/suite-count-check.mjs --update-baseline --only test/qa-plumbing-scripts.test.mts test/hydra-qa-needs-qa-clear.test.mts test/hydra-qa-prompt-verdict.test.mts` runs in the same PR; test/qa-merge-guard-callsites.test.mts is not edited. Verified by: `file-lacks: test/hydra-qa-needs-qa-clear.test.mts :: qa_bounce_label() {`.",
+    "INV-12 (depth never cut by a script boundary — #3815 INV-B/INV-E carried over): no script returns a bare exit code where the playbook previously carried a fail-closed default; preflight emits `admit` / adversarial / tier-fanout defaults itself, route never maps a degraded fold or an empty round-action to PASS, a T4 round-action degradation stays a pre-verdict exit, and `--defer` is the ONLY path that posts without a verdict; the emitted verdict literals (PASS / FAIL / PASS-pending-CI / FAIL-pending-CI), `classifyVerdict`, `foldReviewFindings`, `decideReviewAdmission`, `decideReviewerFanout`, `decideQaRoundAction`, `QA_FAIL_ROUND_CAP` and `QA_ESCALATION_LABELS` are byte-unchanged (no src/qa/ rule file is in scope). Verified by: `test: test/qa-plumbing-scripts.test.mts :: \"route: a fold failure is exit 1 with no gh write (pre-verdict exit), never a PASS\"`."
+  ],
+  "rejectedAlternatives": [
+    {
+      "alt": "Ship Q1 now, in parallel with the open PR #5306 (#5081), rebasing whichever lands second",
+      "why": "Rejected: both PRs rewrite steps 6–10 of hydra-qa.md and #5306 defines the engine CLI/round-action output the scripts consume (`.passMarker`, `.failMarker`, `.labels`, degraded shapes). Building on master-before-#5306 means re-deriving those projections and a guaranteed conflict wave; `Blocked by #5081` was added to the issue so the autopilot's dependency filter holds the pick until it merges."
+    },
+    {
+      "alt": "Make `route.ts` print a plan the session executes (the decide.py / plan split the inventory floated)",
+      "why": "Rejected: the session re-typing 15–20 gh calls IS the plumbing the issue removes, and a transcribed plan re-opens every byte-drift the golden templates close. `--dry-run` gives the same transcript visibility (the full effect list) without a second executor; the effects ledger in the output records what ran."
+    },
+    {
+      "alt": "Move `gh pr merge --auto` and the guard-gated direct merge into `route.ts`",
+      "why": "Rejected: test/qa-merge-guard-callsites.test.mts (frozen by the issue and ADR-0046 D7) asserts hydra-qa.md still CARRIES a merge call site and that its EXEMPT entry matches the live literal; hiding the merge in a script would silently vacate the detector. The merge stays as the one retained fence; route returns `nextStep:'arm-auto-merge'`."
+    },
+    {
+      "alt": "A new `scripts/qa/fold.ts` as the fifth file",
+      "why": "Rejected: the fold contract already exists as the engine's `fold` + `trailer` + `round-action` phases (#5080/#5081) and `src/qa/fold.ts` is out of scope; a wrapper file would be a second spelling of the same contract. 'fold' in the five is satisfied by route.ts calling `runQaVerdictPhase` in-process."
+    },
+    {
+      "alt": "Let preflight perform the defer / skip-required-failed bounce itself and exit with a code the playbook branches on (turn.sh style, as the inventory suggested)",
+      "why": "Rejected: it would make two scripts own label/comment effects, duplicating the bounce-label rule and splitting the fake-gh golden tests. Preflight stays read-only; `route --defer` performs the bounce from the same preflight JSON."
+    },
+    {
+      "alt": "Write the scripts in bash (scripts/autopilot/turn.sh precedent)",
+      "why": "Rejected: the decisions they compose live in TypeScript (src/qa/phases.ts, fetchers port, review-findings seam) and the acceptance criterion asks for typed contracts with unit tests; bash would re-introduce the jq/env plumbing and the E2BIG tempfile hazards the engine CLI just removed."
+    },
+    {
+      "alt": "One `scripts/qa/qa.ts` with `preflight|packet|route|poll` subcommands (mirroring qa-verdict.ts)",
+      "why": "Rejected: the issue names three files and the contracts differ in trust (packet/preflight are pure reads, route is the only writer) — separate files keep the write surface greppable and the scope gate legible; shared helpers (gh runner port, JSON I/O, schemas) go in src/schemas/qa-plumbing-cli.ts and a small `scripts/qa/_lib.ts` only if duplication appears, never a monolith."
+    },
+    {
+      "alt": "Leave the reference bucket in the body and only script the plumbing",
+      "why": "Rejected: that caps the shrink near 46% and leaves ~2.8k words loaded on every QA pass that no QA step reads; the #4827 `reference_files:` sidecar is a proven, test-covered move with zero behaviour change, and it is what gets the issue to its ~63% target honestly (ratchet lowered, not laundered)."
+    },
+    {
+      "alt": "Schema definitions inside the scripts rather than src/schemas/qa-plumbing-cli.ts",
+      "why": "Rejected: the engine precedent (src/schemas/qa-verdict-cli.ts) keeps CLI contracts next to the other zod schemas where the schema-seam check and knip see them; one extra in-scope file beats a second convention."
+    }
+  ],
+  "qaTrace": [
+    {
+      "q": "Premise check: is the issue still true on origin/master, or already fixed / duplicated by shipped work?",
+      "a": "True but with a sequencing change. hydra-qa.md is 1,704 lines on master (after S5 #5299); the inventory (docs/research/2026-10-24-hydra-qa-playbook-plumbing-inventory.md) still describes it: ~55% plumbing, five contracts. Nothing under scripts/qa/ implements preflight/packet/route/poll (only cohort-baseline.ts and review-findings-reconcile.ts exist). NOT a duplicate — but PR #5306 (#5081, OPEN, mergeStateStatus UNSTABLE) rewrites the same steps into engine CLI calls and adds step 9.6 round-action; Q1 must build on it, so `Blocked by #5081` was added to #5269's body."
+    },
+    {
+      "q": "What exactly is frozen by ADR-0046 Decision 7, and does any of the five contracts touch Verifier Core?",
+      "a": "Frozen: scripts/ci/qa-verdict.ts's exports (deep-qa-gate.yml imports hasFreshDeepQaPass from it; the function lives in src/qa/round-action.ts) and the step-10 merge call sites pinned by test/qa-merge-guard-callsites.test.mts. `scripts/tier-classify.ts` classifies every new path (scripts/qa/*.ts, src/schemas/qa-plumbing-cli.ts, the playbook, the tests) as T3; no Verifier Core file is touched. Decision: route.ts forwards `.passMarker`/`.failMarker` from round-action and never spells a marker literal."
+    },
+    {
+      "q": "Where does the merge call live after Q1 — script or playbook?",
+      "a": "Playbook. The callsites test asserts `mergeCallSites(read('hydra-qa.md')).length > 0` and that the EXEMPT literal `gh pr merge $pr_number --repo gaberoo322/hydra --auto --squash --delete-branch` matches a live call site; it only scans playbooks, so a merge inside route.ts would vacate the detector. Decision: route performs every other PASS effect, returns nextStep:'arm-auto-merge', and the playbook keeps the merge fence + guard-gated fallback verbatim."
+    },
+    {
+      "q": "Which modules does Q1 touch, and are they deep or shallow?",
+      "a": "Deep: preflight.ts (composes steps 1–6.7 and owns the fail-closed defaults), packet.ts (packet discipline, pre-spawn exit, prior-context composition), route.ts (single effect owner, engine composition, effect ordering), hydra-qa.md (the loaded contract). Shallow: poll.ts, src/schemas/qa-plumbing-cli.ts, the reference sidecar, both ratchet baselines, the changelog fragment, docs/generated, and the three test files. src/qa/* rule modules are untouched (fold.ts is out of scope by the issue)."
+    },
+    {
+      "q": "Does any script extend or break an existing public interface?",
+      "a": "No production interface changes: the four scripts are new CLIs; src/schemas gains one file; scripts/ci/qa-verdict.ts, src/qa/phases.ts and fetchers.ts are consumed, not edited. The only 'breaking' impact is on two test files whose pins assert bash-in-playbook and must be rewritten (flip-first) — recorded as interfaceImpact:'breaking' on test/hydra-qa-needs-qa-clear.test.mts and test/hydra-qa-prompt-verdict.test.mts."
+    },
+    {
+      "q": "Should route call the engine phases in-process or should the playbook call `qa-verdict.ts fold|trailer|round-action` and then route?",
+      "a": "In-process via runQaVerdictPhase + createGhQaVerdictFetchers (the same objects the CLI's main guard wires). Nothing the session decides sits between fold and routing — step 10 is fully determined by the fold output — so splitting it only grows the stub and the transcript; route's output carries the fold result anyway. The fold rule itself stays in src/qa (INV-1, INV-12)."
+    },
+    {
+      "q": "Is 'fold' then a fifth file or not?",
+      "a": "Not a file. The engine phases ARE the fold contract and src/qa/fold.ts is out of scope; a scripts/qa/fold.ts wrapper would be a second spelling. The 'five contracts' of the title map to: preflight.ts, packet.ts, route.ts (which composes fold/trailer/round-action), poll.ts, and the engine phases."
+    },
+    {
+      "q": "Where does poll go, given the issue's Files-in-scope lists only three scripts?",
+      "a": "scripts/qa/poll.ts, added to the PR body's `## Files in scope` (the scope gate reads the PR body live; unlisted files only count toward the >80% soft-fail ratio and nothing here is in the hard-fail out-of-scope list). hydra-dev / hydra-target-build carry the same loop but adopting it there is out of scope."
+    },
+    {
+      "q": "Does preflight perform the defer/skip bounce (inventory suggestion) or stay read-only?",
+      "a": "Read-only. One effect owner (route) keeps the bounce-label rule, the label-ordering rules and the golden fake-gh tests in one place; `route --defer` consumes the same preflight JSON. Preflight's `ok:false` arms (no-issue, no-pr, spec-missing-enforce) are exit 0 and the stub posts today's single comment and stops."
+    },
+    {
+      "q": "How are the #3815 INV-B / INV-E fail-closed properties preserved across a script boundary?",
+      "a": "Each script emits the conservative value itself rather than a bare exit code: preflight emits tier null + adversarial + the engine's admit, the rollup-only all-optional checks mapping tagged degraded, the Phase A skip reason, and the tier fan-out on fanout failure; route never maps a degraded fold to PASS and a T4 round-action degradation stays a pre-verdict exit (nothing posted, needs-qa untouched). This is INV-4 / INV-12."
+    },
+    {
+      "q": "What about the review-findings rows ADR-0046 D8 / R1 say are 'appended by QA's route step'? Is that wired yet?",
+      "a": "Not wired: the playbook has no reference to review-findings and R1 (#5270, merged) shipped the seam + rowsFromFold with the comment 'the route-step call-site contract'. Decision: route.ts appends rows after the PR comment posts, via appendReviewFindingRows behind a dynamic import inside the main guard, non-fatal and named in degraded[] on failure (INV-8)."
+    },
+    {
+      "q": "How does the reference bucket leave the loaded body without an @include (which would still load it)?",
+      "a": "Via the `reference_files:` frontmatter list — the #4827 sidecar precedent: files under _fragments/ listed there are copied beside SKILL.md and read on demand, and the skill-size ratchet note records they 'add nothing to the always-loaded body'. One new file `_fragments/hydra-qa-reference.md` receives the reference sections verbatim with pointers left in place."
+    },
+    {
+      "q": "Which tests pin the playbook text and what happens to each?",
+      "a": "Readers of hydra-qa.md: qa-merge-guard-callsites (frozen — unchanged, merge fence retained), hydra-qa-needs-qa-clear + hydra-qa-prompt-verdict (bash pins rewritten flip-first to route/preflight behaviour and stub text), verifier-core-docs-drift (T4 checklist stays verbatim), sync-skills (generic fixtures, unaffected), qa-change-shape / qa-fold (use the path as a string only). Suite-count baseline regenerated with --only; skill-size-baseline hydra-qa row lowered, sidecar row seeded."
+    },
+    {
+      "q": "Are there terms in the issue not in CONTEXT.md?",
+      "a": "No glossary gap. 'preflight', 'packet', 'fold', 'route', 'poll' and 'deterministic plumbing' are script identifiers defined by ADR-0046 Decision 7, not ubiquitous-language concepts; the domain terms the design grounds in (Pre-merge Gate, Verifier Core, Modification Tier, Deep-QA Remediation Loop, Deep-QA PASS marker, Design Concept, Post-merge Regression Check, Live-Gate Invariant) are all CONTEXT.md entries. 'Review packet' and 'QA-Verdict trailer' are long-standing playbook terms absent from CONTEXT.md, but they pre-date this issue and are not introduced by it; a glossary addition is an optional ubiquitous-language follow-up, not a gate for Q1."
+    },
+    {
+      "q": "What is the dev agent's PR-body scope list and the other gates it must satisfy?",
+      "a": "`## Files in scope`: scripts/qa/preflight.ts, packet.ts, route.ts, poll.ts, src/schemas/qa-plumbing-cli.ts, docs/operator-playbooks/hydra-qa.md, docs/operator-playbooks/_fragments/hydra-qa-reference.md, test/qa-plumbing-scripts.test.mts, test/hydra-qa-needs-qa-clear.test.mts, test/hydra-qa-prompt-verdict.test.mts, scripts/ci/skill-size-baseline.json, test/fixtures/suite-count-baseline.json, .changelog/5269-qa-plumbing-scripts.md, docs/generated/*. Out of scope (hard-fail): src/qa/fold.ts, .github/workflows/deep-qa-gate.yml, src/untouchable.ts. Also: design-concept reconciliation section quoting these INVs with the verified-by forms above, `npm run docs:inventories` (reference_files changes skills.json composedFrom), `npm run typecheck:test`, and the sync-skills regeneration."
+    }
+  ],
+  "prototypes": [],
+  "status": "approved",
+  "approvedBy": "auto-gate",
+  "gate": {
+    "ok": true,
+    "reasons": []
+  }
+}
