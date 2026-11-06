@@ -789,12 +789,20 @@ describe("lifecycle fields — baselines are read-only inputs", () => {
 });
 
 describe("committed builder-health baselines (#5324 QA round 1)", () => {
-  test("a recorded parentExceptionRate baseline is never a vacuous 0 over zero exception turns", async () => {
+  // Vacuous = a recorded value with no provenance (zero turns/runs). A genuine 0 over real turns is healthy.
+  const isProvenanced = (b: any): boolean =>
+    b.value === null ? true : b.turns > 0 && b.runs > 0 && b.computedAt !== null && b.value === b.exceptionTurns / b.turns;
+
+  test("a recorded parentExceptionRate baseline carries provenance (null placeholder allowed)", async () => {
     const { readFileSync } = await import("node:fs");
     const doc = JSON.parse(readFileSync(new URL("../config/orchestrator/builder-health-baselines.json", import.meta.url), "utf8"));
-    const b = doc.parentExceptionRate.baseline;
-    if (b.value === null) assert.equal(b.computedAt, null);
-    else assert.ok(b.turns > 0 && b.computedAt !== null);
-    assert.equal(b.value === 0 && b.exceptionTurns === 0, false, "0 with 0 exception turns is the pre-mirror fabrication");
+    assert.ok(isProvenanced(doc.parentExceptionRate.baseline));
+  });
+
+  test("guard shapes: genuine 0 over real turns passes; fabricated 0 and zero-turn values fail; null passes", () => {
+    assert.equal(isProvenanced({ value: 0, turns: 40, runs: 3, exceptionTurns: 0, computedAt: "2026-11-06T00:00:00Z" }), true);
+    assert.equal(isProvenanced({ value: 0, turns: 0, runs: 0, exceptionTurns: 0, computedAt: "2026-11-06T00:00:00Z" }), false);
+    assert.equal(isProvenanced({ value: 0, turns: 40, runs: 3, exceptionTurns: 0, computedAt: null }), false);
+    assert.equal(isProvenanced({ value: null, computedAt: null }), true);
   });
 });
