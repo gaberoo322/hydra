@@ -12,6 +12,7 @@
  * script from a test adds no ioredis/pino edge to the static graph.
  */
 
+import { fileURLToPath } from "node:url";
 import { runQaVerdictPhase, type QaVerdictFetchers } from "../../src/qa/phases.ts";
 import type { QaVerdictPhase } from "../../src/schemas/qa-verdict-cli.ts";
 
@@ -28,7 +29,21 @@ export interface HttpResult {
   body: string;
 }
 
+/**
+ * Outcome of one lifecycle-seam `advance` call (ADR-0047 D3, #5317): the CLI
+ * exit code plus the two JSON fields the routing reads. `rc === 0` is accepted.
+ */
+export interface AdvanceResult {
+  rc: number;
+  /** The refusal / outcome `code` from the CLI JSON ("" when absent). */
+  code: string;
+  /** `wouldPark` (shadow-mode cap report) from the CLI JSON ("" when absent). */
+  wouldPark: string;
+}
+
 export interface PlumbingPorts {
+  /** `npx tsx scripts/lifecycle.ts advance <args>` — the ONLY state-label writer (no leading `advance`). */
+  advance(args: string[]): Promise<AdvanceResult>;
   /** `gh <args>` (no leading `gh`). */
   gh(args: string[]): Promise<CmdResult>;
   /** `git <args>` (no leading `git`), run in the process cwd. */
@@ -83,7 +98,28 @@ export async function createProductionPorts(repo: string, apiBase: string): Prom
   const fetchers = createGhQaVerdictFetchers(repo);
   const toCmd = (r: { ok: boolean; data?: { stdout: string }; stderr?: string }): CmdResult =>
     r.ok ? { ok: true, stdout: (r.data as { stdout: string }).stdout } : { ok: false, stderr: r.stderr ?? "" };
+  const { execFile } = await import("node:child_process");
   return {
+    advance(args) {
+      return new Promise((resolve) => {
+        execFile(
+          "npx",
+          ["tsx", fileURLToPath(new URL("../lifecycle.ts", import.meta.url)), "advance", ...args],
+          { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
+          (err, stdout) => {
+            const parsed = tryParse(stdout.trim().split("\n").at(-1) ?? "");
+            const j = isRecord(parsed) ? parsed : {};
+            const rc = err === null ? 0 : typeof err.code === "number" ? err.code : 1;
+            if (rc !== 0) console.error("[qa-plumbing] lifecycle advance exited", rc, stdout.slice(0, 300));
+            resolve({
+              rc,
+              code: typeof j.code === "string" ? j.code : "",
+              wouldPark: typeof j.wouldPark === "string" ? j.wouldPark : "",
+            });
+          },
+        );
+      });
+    },
     async gh(args) {
       return toCmd(await ghExec(args));
     },

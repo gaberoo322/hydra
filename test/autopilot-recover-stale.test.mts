@@ -54,6 +54,8 @@ interface FakeIssue {
   number: number;
   state: "OPEN" | "CLOSED";
   body: string;
+  /** Live labels served to the #5317 live-state guard; unset = still in the listed state. */
+  labels?: string[];
   /** Model the number as a pull request: merged vs closed-unmerged vs open. */
   pr?: "merged" | "closed-unmerged";
 }
@@ -155,6 +157,11 @@ def cmd_view(rest):
         sys.stdout.write(hit["body"] + "\\n")
     elif json_field == "state":
         sys.stdout.write(hit["state"] + "\\n")
+    elif json_field == "labels":
+        # Live-state guard (#5317): per-issue labels, defaulting to the state the
+        # suite's lists name (an unset field = still in the listed state).
+        for name in hit.get("labels", ["blocked"]):
+            sys.stdout.write(name + "\\n")
     else:
         sys.stderr.write(f"stub: unsupported --json {json_field}\\n")
         sys.exit(99)
@@ -476,7 +483,7 @@ describe("recover-stale.sh — calendar guard (issue #838)", () => {
     try {
       // in-progress recovery never reads the body, so a calendar marker is irrelevant.
       const stub = makeGhStub(dir, [
-        { number: 950, state: "OPEN", body: `**Do not start before ${FUTURE}.**` },
+        { number: 950, state: "OPEN", body: `**Do not start before ${FUTURE}.**`, labels: ["in-progress"] },
       ]);
       const r = runRecoverStale(stub.binDir, ["stale_in_progress", "950"]);
       assert.equal(r.status, 0, r.stderr);

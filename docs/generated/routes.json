@@ -198,6 +198,7 @@
       "areas": [
         "src/autopilot/",
         "src/github/",
+        "src/lifecycle/",
         "src/logger.ts",
         "src/redis/",
         "src/schemas/",
@@ -219,6 +220,7 @@
       "areas": [
         "src/autopilot/",
         "src/github/",
+        "src/lifecycle/",
         "src/logger.ts",
         "src/redis/",
         "src/schemas/",
@@ -240,6 +242,7 @@
       "areas": [
         "src/autopilot/",
         "src/github/",
+        "src/lifecycle/",
         "src/logger.ts",
         "src/redis/",
         "src/schemas/",
@@ -259,6 +262,7 @@
       "areas": [
         "src/autopilot/",
         "src/github/",
+        "src/lifecycle/",
         "src/logger.ts",
         "src/redis/",
         "src/schemas/",
@@ -278,6 +282,7 @@
       "areas": [
         "src/autopilot/",
         "src/github/",
+        "src/lifecycle/",
         "src/logger.ts",
         "src/redis/",
         "src/schemas/",
@@ -297,6 +302,7 @@
       "areas": [
         "src/autopilot/",
         "src/github/",
+        "src/lifecycle/",
         "src/logger.ts",
         "src/redis/",
         "src/schemas/",
@@ -316,6 +322,7 @@
       "areas": [
         "src/autopilot/",
         "src/github/",
+        "src/lifecycle/",
         "src/logger.ts",
         "src/redis/",
         "src/schemas/",

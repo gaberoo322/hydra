@@ -10,6 +10,12 @@
  * `gh` — plus text pins on the playbook stubs that remain (strip-before-merge,
  * comment-not-approve, the retained merge fence).
  *
+ * Issue #5317 (ADR-0047 D3): the exit is no longer a direct label edit. Every arm
+ * leaves `needs-qa` through ONE `scripts/lifecycle.ts advance` seam call (the
+ * `PlumbingPorts.advance` port here); PASS lands in `qa-passed`, never
+ * `in-progress`, and only AFTER the verdict comment (the seam's `qa-verdict`
+ * gate reads the trailer at head). No arm writes a state label by hand.
+ *
  * Background of the contracts:
  *   - #638: a lingering `needs-qa` busy-looped `qa_orch` every autopilot tick
  *     (`src/autopilot/turn-snapshot/orch-board.ts` counts it to drive
@@ -30,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { runRoute, type RouteDeps, type RouteOptions } from "../scripts/qa/route.ts";
-import type { CmdResult, PlumbingPorts } from "../scripts/qa/_lib.ts";
+import type { AdvanceResult, CmdResult, PlumbingPorts } from "../scripts/qa/_lib.ts";
 import type { PreflightResult } from "../src/schemas/qa-plumbing-cli.ts";
 import { QA_ESCALATION_LABELS } from "../src/qa/round-action.ts";
 
@@ -92,10 +98,14 @@ function phase(c: Canned): PlumbingPorts["phase"] {
 
 async function route(
   c: Canned,
-  o: { pre?: PreflightResult; state?: string; defer?: boolean } = {},
+  o: { pre?: PreflightResult; state?: string; defer?: boolean; advance?: (args: string[]) => Partial<AdvanceResult> | undefined } = {},
 ): Promise<string[][]> {
   const calls: string[][] = [];
   const ports: PlumbingPorts = {
+    async advance(args): Promise<AdvanceResult> {
+      calls.push(["lifecycle", "advance", ...args]);
+      return { rc: 0, code: "", wouldPark: "", ...(o.advance?.(args) ?? {}) };
+    },
     async gh(argv): Promise<CmdResult> {
       calls.push(argv);
       if (argv[0] === "pr" && argv[1] === "view") return { ok: true, stdout: `${o.state ?? "OPEN"}\n` };
@@ -119,16 +129,20 @@ async function route(
     readText: (p) => (p === "/s" ? JSON.stringify({ standardsSummary: "S", specSummary: "P" }) : "{}"),
     appendRows: async () => {},
     now: () => new Date(0),
+    sleep: async () => {},
   };
   await runRoute(opts, o.pre ?? pre(), ports, deps);
   return calls.filter((a) => !(a[0] === "pr" && a[1] === "view"));
 }
 
 const argAfter = (a: readonly string[], f: string) => a[a.indexOf(f) + 1];
-/** Does this call strip needs-qa from the issue (relabel edit, or the escalation DELETE)? */
-const stripsNeedsQa = (a: readonly string[]): boolean =>
-  (a[0] === "issue" && a[1] === "edit" && argAfter(a, "--remove-label") === "needs-qa") ||
-  (a[0] === "api" && a.includes("DELETE") && a.some((x) => x.endsWith("/issues/70/labels/needs-qa")));
+/** Does this call move the issue off needs-qa? Only the lifecycle seam may (ADR-0047 D4). */
+const leavesNeedsQa = (a: readonly string[]): boolean => a[0] === "lifecycle" && a[1] === "advance";
+/** The seam target of an advance call. */
+const target = (a: readonly string[]): string => a[3] as string;
+/** A by-hand state-label write (the retired shape): never allowed. */
+const handLabelWrite = (a: readonly string[]): boolean =>
+  (a[0] === "issue" && a[1] === "edit") || (a[0] === "api" && (a.includes("DELETE") || a.some((x) => x.includes("/labels"))));
 
 describe("hydra-qa clears needs-qa on every verdict (issue #638)", () => {
   const arms: Array<[string, Canned, Parameters<typeof route>[1]]> = [
@@ -137,26 +151,27 @@ describe("hydra-qa clears needs-qa on every verdict (issue #638)", () => {
     ["FAIL on an open PR", { verdict: "FAIL" }, {}],
     ["FAIL on a GLM-authored PR", { verdict: "FAIL" }, { pre: pre({}, true) }],
     ["FAIL on a closed PR (not-open fallback)", { verdict: "FAIL" }, { state: "CLOSED" }],
-    ["FAIL escalated (round cap)", { verdict: "FAIL", roundAction: "escalate" }, {}],
+    ["FAIL escalated (round cap, enforce park)", { verdict: "FAIL", roundAction: "escalate" }, { advance: (a) => (a[1] === "needs-dev-resume" ? { rc: 1, code: "parked:qa-fail-rounds" } : undefined) }],
     ["T4 1st deep-QA FAIL (bounce)", { verdict: "FAIL", roundAction: "deep-qa", deepQa: { action: "bounce", failNumber: 1 } }, { pre: pre({ tier: { num: 4, adversarial: true } }) }],
     ["T4 2nd deep-QA FAIL (block-and-escalate)", { verdict: "FAIL", roundAction: "deep-qa", deepQa: { action: "block-and-escalate", failNumber: 2 } }, { pre: pre({ tier: { num: 4, adversarial: true } }) }],
     ["step-6.6 defer", { verdict: "PASS" }, { pre: pre({ gate: { action: "defer", reason: "d", redRequired: [], skipVerdict: null, skipCiSummary: null } }), defer: true }],
   ];
   for (const [name, canned, o] of arms) {
-    test(`${name} strips needs-qa from the source issue`, async () => {
+    test(`${name} leaves needs-qa through the lifecycle seam, with no by-hand label write`, async () => {
       const calls = await route(canned, o);
-      assert.ok(calls.some(stripsNeedsQa), `no needs-qa strip among: ${calls.map((c) => c.slice(0, 3).join(" ")).join(" | ")}`);
+      assert.ok(calls.some(leavesNeedsQa), `no seam advance among: ${calls.map((c) => c.slice(0, 3).join(" ")).join(" | ")}`);
+      assert.ok(!calls.some(handLabelWrite), "ADR-0047 D4: no direct state-label write");
     });
   }
 
-  test("a not-open defer still strips needs-qa (the label-less orphan gap, #3788)", async () => {
+  test("a not-open defer still leaves needs-qa to ready-for-agent through the seam (the label-less orphan gap, #3788)", async () => {
     const calls = await route(
       { verdict: "PASS" },
       { pre: pre({ gate: { action: "defer", reason: "d", redRequired: [], skipVerdict: null, skipCiSummary: null } }), defer: true, state: "MERGED" },
     );
-    const edit = calls.find((a) => a[1] === "edit") as string[];
-    assert.equal(argAfter(edit, "--remove-label"), "needs-qa");
-    assert.equal(argAfter(edit, "--add-label"), "ready-for-agent");
+    const adv = calls.find(leavesNeedsQa) as string[];
+    assert.equal(target(adv), "ready-for-agent");
+    assert.ok(adv.includes("defer=1"), "the trailer-less defer edge");
   });
 
   test("PASS-pending-CI never leaves the pre-#638 'leave needs-qa in place' instruction anywhere", () => {
@@ -165,7 +180,7 @@ describe("hydra-qa clears needs-qa on every verdict (issue #638)", () => {
   });
 });
 
-describe("PASS strips needs-qa reachably (issue #974)", () => {
+describe("PASS leaves needs-qa reachably (issues #974, #5317)", () => {
   test("PASS records its verdict as a comment, never `gh pr review --approve` (self-author cannot self-approve, #848)", async () => {
     const calls = await route({ verdict: "PASS" });
     assert.ok(!calls.some((a) => a[0] === "pr" && a[1] === "review"), "no pr review call of any kind");
@@ -173,18 +188,19 @@ describe("PASS strips needs-qa reachably (issue #974)", () => {
     assert.doesNotMatch(PLAYBOOK, /gh pr review\s+\$pr_number[^\n]*--approve/);
   });
 
-  test("the needs-qa strip precedes the verdict comment, and route never reaches the merge call", async () => {
+  test("the PASS verdict comment precedes the qa-passed seam call (the qa-verdict gate reads the trailer), and route never reaches the merge call", async () => {
     const calls = await route({ verdict: "PASS" });
-    const strip = calls.findIndex(stripsNeedsQa);
+    const adv = calls.findIndex(leavesNeedsQa);
     const comment = calls.findIndex((a) => a[0] === "pr" && a[1] === "comment");
-    assert.ok(strip >= 0 && comment > strip, "strip first (#974), before anything that can abort");
+    assert.ok(comment >= 0 && adv > comment, "comment first (#5317 INV-8), then the seam call");
+    assert.equal(target(calls[adv] as string[]), "qa-passed", "PASS lands in qa-passed, never in-progress");
     assert.ok(!calls.some((a) => a[0] === "pr" && a[1] === "merge"));
   });
 
-  test("the playbook keeps the merge call AFTER the route stub, so the strip has already run", () => {
+  test("the playbook keeps the merge call AFTER the route stub, so the seam call has already run", () => {
     const route = PLAYBOOK.indexOf("scripts/qa/route.ts");
     const merge = PLAYBOOK.indexOf("gh pr merge $pr_number --repo gaberoo322/hydra --auto --squash --delete-branch");
-    assert.ok(route > 0 && merge > route, "route (which strips needs-qa) runs before the retained merge fence");
+    assert.ok(route > 0 && merge > route, "route (which advances off needs-qa) runs before the retained merge fence");
   });
 });
 
@@ -203,22 +219,22 @@ describe("hydra-qa bounce label keys on open-PR state, not GLM provenance (issue
     const rfa = helper.indexOf('"ready-for-agent"');
     const ndr = helper.indexOf('"needs-dev-resume"');
     assert.ok(rfa > 0 && ndr > rfa, "ready-for-agent only on the confirmed CLOSED/MERGED arm; needs-dev-resume is the default");
-    assert.equal((ROUTE_SRC.match(/await bounceLabel\(\)/g) ?? []).length, 3, "three call sites: defer, T1-T3 FAIL, T4 1st deep-QA FAIL");
+    assert.equal((ROUTE_SRC.match(/await bounceLabel\(\)/g) ?? []).length, 4, "four call sites: defer, PASS-refusal defer reroute, T1-T3 FAIL, T4 1st deep-QA FAIL");
   });
 
   test("an open PR bounces to needs-dev-resume — GLM or not — and never adds ready-for-agent", async () => {
     for (const glm of [false, true]) {
       const calls = await route({ verdict: "FAIL" }, { pre: pre({}, glm) });
-      const edits = calls.filter((a) => a[1] === "edit");
-      assert.equal(edits.length, 1);
-      assert.equal(argAfter(edits[0] as string[], "--add-label"), "needs-dev-resume", `glm=${glm}`);
+      const advs = calls.filter(leavesNeedsQa);
+      assert.equal(advs.length, 1);
+      assert.equal(target(advs[0] as string[]), "needs-dev-resume", `glm=${glm}`);
     }
   });
 
   test("failed or empty state reads default to needs-dev-resume; a confirmed CLOSED/MERGED PR is the only fallback", async () => {
     for (const [state, want] of [["CLOSED", "ready-for-agent"], ["MERGED", "ready-for-agent"], ["OPEN", "needs-dev-resume"], ["", "needs-dev-resume"]] as const) {
       const calls = await route({ verdict: "FAIL" }, { state });
-      assert.equal(argAfter(calls.find((a) => a[1] === "edit") as string[], "--add-label"), want, `state '${state}'`);
+      assert.equal(target(calls.find(leavesNeedsQa) as string[]), want, `state '${state}'`);
     }
   });
 });

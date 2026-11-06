@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import type { QaVerdictFetchers } from "../src/qa/phases.ts";
-import { phaseRunner, type CmdResult, type PlumbingPorts } from "../scripts/qa/_lib.ts";
+import { phaseRunner, type AdvanceResult, type CmdResult, type PlumbingPorts } from "../scripts/qa/_lib.ts";
 import { runPreflight, type PreflightOptions } from "../scripts/qa/preflight.ts";
 import { NO_STANDARDS_SENTINEL, runPacket } from "../scripts/qa/packet.ts";
 import { SKIP_REVIEW_REPORT, runRoute, type RouteDeps, type RouteOptions } from "../scripts/qa/route.ts";
@@ -66,6 +66,8 @@ function isWrite(argv: readonly string[]): boolean {
 
 interface Harness {
   ports: PlumbingPorts;
+  /** Every `scripts/lifecycle.ts advance` argv (after `advance`), in order. */
+  advances: string[][];
   gh: string[][];
   git: string[][];
   writes: () => string[][];
@@ -74,6 +76,8 @@ interface Harness {
 interface HarnessOptions {
   ghHandler?: (argv: string[]) => CmdResult | undefined;
   gitHandler?: (argv: string[]) => CmdResult | undefined;
+  /** Per-call advance outcome (default: accepted). */
+  advanceHandler?: (args: string[]) => Partial<AdvanceResult> | undefined;
   http?: PlumbingPorts["http"];
   fetchers?: QaVerdictFetchers;
   phase?: PlumbingPorts["phase"];
@@ -82,10 +86,19 @@ interface HarnessOptions {
 function harness(o: HarnessOptions = {}): Harness {
   const gh: string[][] = [];
   const git: string[][] = [];
+  const advances: string[][] = [];
+  /** Every state-changing call (gh writes AND seam advances) in call order. */
+  const log: string[][] = [];
   const fetchers = o.fetchers ?? fixtureFetchers();
   const ports: PlumbingPorts = {
+    async advance(args) {
+      advances.push(args);
+      log.push(["lifecycle", "advance", ...args]);
+      return { rc: 0, code: "", wouldPark: "", ...(o.advanceHandler?.(args) ?? {}) };
+    },
     async gh(argv) {
       gh.push(argv);
+      if (isWrite(argv)) log.push(argv);
       return o.ghHandler?.(argv) ?? ok("");
     },
     async git(argv) {
@@ -96,7 +109,7 @@ function harness(o: HarnessOptions = {}): Harness {
     fetchers,
     phase: o.phase ?? phaseRunner(fetchers),
   };
-  return { ports, gh, git, writes: () => gh.filter(isWrite) };
+  return { ports, advances, gh, git, writes: () => log };
 }
 
 const argAfter = (argv: readonly string[], flag: string): string | undefined => {
@@ -585,7 +598,17 @@ const realDeps = (rows: unknown[][] = []): RouteDeps => ({
     rows.push(r);
   },
   now: () => new Date("2026-11-05T00:00:00Z"),
+  sleep: async (ms) => {
+    sleeps.push(ms);
+  },
 });
+/** Backoff waits requested through `RouteDeps.sleep` (never a real timer in tests). */
+const sleeps: number[] = [];
+
+/** An `advance` fake: refuse the Nth call (or every call to `target`) with `code`. */
+const refuse = (target: string, code: string, rc = 1) => (args: string[]): Partial<AdvanceResult> | undefined =>
+  args[1] === target ? { rc, code } : undefined;
+const advTo = (args: string[]): string => args[1] as string;
 
 /** A `gh` fake: answers the live PR-state read, records the rest. */
 const withState = (state: string | "fail" | "empty") => (argv: string[]): CmdResult | undefined => {
@@ -599,12 +622,13 @@ const withState = (state: string | "fail" | "empty") => (argv: string[]): CmdRes
 const summary = (b: number, s: string, w = "") => `${b} blocker(s), worst: ${s}${w ? ` — ${w}` : ""}`;
 
 describe("route (steps 9.5-10, the single effect owner)", () => {
-  test("route PASS: needs-qa strip precedes the PR comment and no gh pr merge --auto is issued", async () => {
+  test("route PASS: the verdict comment precedes the qa-passed seam advance; no direct label write, no gh pr merge --auto", async () => {
     const h = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "PASS" }) });
     const r = await runRoute(ROUTE_OPTS, readyPre({ tier: { num: 2, adversarial: false } }), h.ports, realDeps());
     const w = h.writes();
-    assert.deepEqual(w.map((a) => `${a[0]} ${a[1]}`), ["issue edit", "pr comment"]);
-    assert.deepEqual(w[0], ["issue", "edit", "5269", "--repo", "gaberoo322/hydra", "--remove-label", "needs-qa", "--add-label", "in-progress"]);
+    assert.deepEqual(w.map((a) => `${a[0]} ${a[1]}`), ["pr comment", "lifecycle advance"]);
+    assert.deepEqual(w[1], ["lifecycle", "advance", "5269", "qa-passed", "--evidence", "pr=77", "--actor", "hydra-qa"]);
+    assert.ok(!h.gh.some((a) => a[0] === "issue" && a[1] === "edit"), "no direct state-label write (ADR-0047 D4)");
     assert.ok(!h.gh.some((a) => a[0] === "pr" && a[1] === "merge"), "route never arms auto-merge");
     assert.equal(r.nextStep, "arm-auto-merge");
     assert.equal(r.verdict, "PASS");
@@ -624,91 +648,107 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     assert.ok(r.degraded.includes("pass-marker"));
   });
 
-  test("route FAIL on an open PR relabels needs-dev-resume; a failed state read also relabels needs-dev-resume", async () => {
+  test("route FAIL on an open PR advances to needs-dev-resume; a failed state read also does", async () => {
     for (const state of ["OPEN", "fail", "empty"] as const) {
       const h = harness({ ghHandler: withState(state), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium", worst: "w" }) });
       await runRoute(ROUTE_OPTS, readyPre({ tier: { num: 3, adversarial: true } }), h.ports, realDeps());
-      const edit = h.writes().find((a) => a[0] === "issue" && a[1] === "edit") as string[];
-      assert.equal(argAfter(edit, "--add-label"), "needs-dev-resume", `state read '${state}'`);
-      assert.equal(argAfter(edit, "--remove-label"), "needs-qa");
+      assert.deepEqual(h.advances.map(advTo), ["needs-dev-resume"], `state read '${state}'`);
+      assert.deepEqual(h.advances[0], ["5269", "needs-dev-resume", "--evidence", "pr=77", "--actor", "hydra-qa"]);
     }
     for (const state of ["CLOSED", "MERGED"]) {
       const h = harness({ ghHandler: withState(state), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium" }) });
       await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
-      const edit = h.writes().find((a) => a[0] === "issue" && a[1] === "edit") as string[];
-      assert.equal(argAfter(edit, "--add-label"), "ready-for-agent", `confirmed ${state} is the only ready-for-agent arm`);
+      assert.deepEqual(h.advances.map(advTo), ["ready-for-agent"], `confirmed ${state} is the only ready-for-agent arm`);
     }
   });
 
-  test("route: GLM provenance selects comment wording only, never the bounce label", async () => {
+  test("route: GLM provenance selects comment wording only, never the bounce lane", async () => {
     const pre = readyPre({ pr: { ...(readyPre().pr as NonNullable<PreflightResult["pr"]>), glmAuthored: true } });
     const h = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium" }) });
     await runRoute(ROUTE_OPTS, pre, h.ports, realDeps());
-    const edit = h.writes().find((a) => a[0] === "issue" && a[1] === "edit") as string[];
-    assert.equal(argAfter(edit, "--add-label"), "needs-dev-resume");
+    assert.deepEqual(h.advances.map(advTo), ["needs-dev-resume"]);
     const issueBody = argAfter(h.writes().filter((a) => a[0] === "issue" && a[1] === "comment")[0] as string[], "--body");
     assert.match(issueBody ?? "", /^> \*Automated QA failed \(GLM-authored PR\)\*/);
   });
 
-  test("route FAIL (T1-T3) effect order: disarm, PR comment, relabel, issue comment — the disarm is first", async () => {
+  test("route FAIL (T1-T3) effect order: disarm, PR verdict comment, seam advance, issue comment — the disarm is first", async () => {
     const h = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium" }) });
     await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
-    assert.deepEqual(h.writes().map((a) => `${a[0]} ${a[1]}`), ["pr merge", "pr comment", "issue edit", "issue comment"]);
+    assert.deepEqual(h.writes().map((a) => `${a[0]} ${a[1]}`), ["pr merge", "pr comment", "lifecycle advance", "issue comment"]);
     assert.deepEqual(h.writes()[0], ["pr", "merge", "77", "--repo", "gaberoo322/hydra", "--disable-auto"]);
   });
 
-  test("route escalate: issueAdd POSTs before issueRemove DELETEs (name in the URL path), 404 is success, then prAdd", async () => {
+  test("route escalate (enforce): the seam's parked:qa-fail-rounds refusal IS the escalation - one advance, no ready-for-human, no by-hand label call", async () => {
     const h = harness({
-      ghHandler: (argv) => {
-        if (argv[0] === "api" && argv.includes("DELETE") && argv.some((a) => a.endsWith("/labels/ready-for-agent"))) return fail("gh: Not Found (HTTP 404)");
-        return undefined;
-      },
+      ghHandler: withState("OPEN"),
+      advanceHandler: refuse("needs-dev-resume", "parked:qa-fail-rounds"),
       phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 2, maxSeverity: "high", roundAction: "escalate", escalationSummary: "ESCALATION-SUMMARY" }),
     });
     const r = await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
-    const apis = h.writes().filter((a) => a[0] === "api").map((a) => `${a[2]} ${a[3]}${a[4] === "-f" ? ` ${a[5]}` : ""}`);
-    assert.deepEqual(apis, [
-      "POST repos/gaberoo322/hydra/issues/5269/labels labels[]=ready-for-human",
-      "DELETE repos/gaberoo322/hydra/issues/5269/labels/needs-qa",
-      "DELETE repos/gaberoo322/hydra/issues/5269/labels/ready-for-agent",
-      "DELETE repos/gaberoo322/hydra/issues/5269/labels/needs-dev-resume",
-      "DELETE repos/gaberoo322/hydra/issues/5269/labels/in-progress",
-      "POST repos/gaberoo322/hydra/issues/77/labels labels[]=ready-for-human",
-    ]);
-    assert.ok(!h.gh.some((a) => a[0] === "issue" && a[1] === "edit"), "an escalated issue is never re-labelled for dev");
+    assert.deepEqual(h.advances.map(advTo), ["needs-dev-resume"], "the seam parked in the same call; QA adds nothing");
+    assert.ok(!h.gh.some((a) => a[0] === "api" || (a[0] === "issue" && a[1] === "edit")), "no label call by hand");
+    assert.ok(!h.advances.some((a) => a.includes("ready-for-human")), "a T1-T3 round cap never writes ready-for-human");
     const last = argAfter(h.writes().at(-1) as string[], "--body") as string;
-    assert.match(last, /Labelled `ready-for-human` \(issue and PR\) and removed every dev-lane label/, "all label calls ok (404 counts) => the labelled claim");
-    assert.ok(r.effects.every((e) => e.ok));
+    assert.match(last, /round cap reached/);
+    assert.match(last, /ESCALATION-SUMMARY/);
+    assert.equal(h.writes().filter((a) => a[1] === "comment" && a[0] === "issue").length, 1, "enforce: the seam posted the cap-park comment, QA posts only its own");
+    assert.ok(r.effects.some((e) => e.kind === "fail-bounce-advance" && !e.ok));
   });
 
-  test("route escalate: a failed label call never claims 'Labelled'", async () => {
+  test("route escalate (shadow): a wouldPark report parks explicitly and posts the unified cap-park comment first", async () => {
     const h = harness({
-      ghHandler: (argv) => (argv[0] === "api" && argv.includes("POST") ? fail("gh: forbidden") : undefined),
-      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", roundAction: "escalate", escalationSummary: "S" }),
+      ghHandler: withState("OPEN"),
+      advanceHandler: (a) => (a[1] === "needs-dev-resume" ? { wouldPark: "qa-fail-rounds" } : undefined),
+      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", escalationSummary: "ESC" }),
     });
     await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
-    const body = argAfter(h.writes().at(-1) as string[], "--body") as string;
-    assert.match(body, /\*\*Label routing FAILED\*\*/);
-    assert.doesNotMatch(body, /Labelled `ready-for-human`/);
+    assert.deepEqual(h.advances.map(advTo), ["needs-dev-resume", "parked"]);
+    assert.deepEqual(h.advances[1]?.slice(2), ["--reason", "cap:qa-fail-rounds", "--rationale", "QA-fail round cap reached (3 reviewed FAIL rounds on PR #77)", "--actor", "hydra-qa"]);
+    const bodies = h.writes().filter((a) => a[0] === "issue" && a[1] === "comment").map((a) => argAfter(a, "--body") as string);
+    assert.equal(bodies.length, 2);
+    assert.match(bodies[0] ?? "", /^## Hydra cap park\n/);
+    assert.match(bodies[0] ?? "", /Hydra-Cap-Park: arm=qa-fail-rounds count=3 limit=3 unit=pr pr=77 source=trailer ts=2026-11-05T00:00:00Z$/);
+    assert.match(bodies[1] ?? "", /round cap reached/);
+    // sibling: no wouldPark report keeps the plain bounce (one advance).
+    const plain = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high" }) });
+    await runRoute(ROUTE_OPTS, readyPre(), plain.ports, realDeps());
+    assert.deepEqual(plain.advances.map(advTo), ["needs-dev-resume"]);
   });
 
-  test("route T4 FAIL: disarm, then the PR comment carrying .failMarker, then block-and-escalate or the 1st-fail bounce", async () => {
+  test("route FAIL: any other seam refusal ends the route (exit 1), never a by-hand label edit; pr-merged ends it with exit 0", async () => {
+    const mk = (code: string) => harness({
+      ghHandler: withState("OPEN"),
+      advanceHandler: refuse("needs-dev-resume", code),
+      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium" }),
+    });
+    const bad = mk("state-entry-unknown");
+    await assert.rejects(runRoute(ROUTE_OPTS, readyPre(), bad.ports, realDeps()), /refused \(state-entry-unknown\)/);
+    assert.ok(!bad.gh.some((a) => a[0] === "issue" && a[1] === "edit"));
+    assert.equal(bad.writes().filter((a) => a[0] === "issue" && a[1] === "comment").length, 0, "no issue comment after a refused advance");
+    const merged = mk("pr-merged");
+    const r = await runRoute(ROUTE_OPTS, readyPre(), merged.ports, realDeps());
+    assert.ok(r.degraded.includes("pr-merged"));
+    assert.equal(r.nextStep, "none");
+  });
+
+  test("route T4 FAIL: disarm, then the PR comment carrying .failMarker, then block-and-escalate or the 1st-fail bounce through the seam", async () => {
     const pre = readyPre({ tier: { num: 4, adversarial: true } });
     const block = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", roundAction: "deep-qa", deepQa: { action: "block-and-escalate", failNumber: 2 }, failMarker: "FAIL-MARKER" }) });
     await runRoute(ROUTE_OPTS, pre, block.ports, realDeps());
-    assert.deepEqual(block.writes().map((a) => `${a[0]} ${a[1]}`), ["pr merge", "pr comment", "issue edit", "issue comment"]);
-    assert.equal(argAfter(block.writes()[2] as string[], "--add-label"), "ready-for-human");
+    assert.deepEqual(block.writes().map((a) => `${a[0]} ${a[1]}`), ["pr merge", "pr comment", "lifecycle advance", "issue comment"]);
+    assert.deepEqual(block.advances[0]?.slice(0, 4), ["5269", "ready-for-human", "--reason", "t4-deep-qa-exhausted"]);
     assert.match(argAfter(block.writes()[1] as string[], "--body") ?? "", /\n\nFAIL-MARKER \(fail #2 on this PR\)\n\n/);
 
     const bounce = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", roundAction: "deep-qa", deepQa: { action: "bounce", failNumber: 1 }, failMarker: "FAIL-MARKER" }) });
     await runRoute(ROUTE_OPTS, pre, bounce.ports, realDeps());
-    assert.equal(argAfter(bounce.writes()[2] as string[], "--add-label"), "needs-dev-resume");
+    assert.deepEqual(bounce.advances, [["5269", "needs-dev-resume", "--evidence", "pr=77", "--actor", "hydra-qa"]]);
   });
 
-  test("route: PASS-pending-CI posts the pending comment then strips needs-qa", async () => {
+  test("route: PASS-pending-CI posts the pending comment then enters qa-passed through the seam", async () => {
     const h = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "PASS-pending-CI" }) });
     const r = await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
-    assert.deepEqual(h.writes().map((a) => `${a[0]} ${a[1]}`), ["pr comment", "issue edit"]);
+    assert.deepEqual(h.writes().map((a) => `${a[0]} ${a[1]}`), ["pr comment", "lifecycle advance"]);
+    assert.equal(advTo(h.advances[0] as string[]), "qa-passed");
     assert.equal(r.nextStep, "none", "a pending-CI PASS is re-polled by the autopilot, never merged here");
   });
 
@@ -751,29 +791,54 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
       phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium" }),
     });
     const bad = mk(true);
+    sleeps.length = 0;
     const r = await runRoute(ROUTE_OPTS, readyPre(), bad.ports, realDeps());
     assert.ok(r.degraded.includes("disarm-failed"));
     assert.equal(bad.writes().filter((a) => a[0] === "pr" && a[1] === "merge").length, 2, "retried once");
+    assert.ok(sleeps.length > 0 && sleeps.every((ms) => ms > 0), "a short backoff precedes the single retry");
     const good = mk(false);
+    sleeps.length = 0;
     const r2 = await runRoute(ROUTE_OPTS, readyPre(), good.ports, realDeps());
     assert.ok(!r2.degraded.includes("disarm-failed"), "sibling: clean disarm");
+    assert.deepEqual(sleeps, [], "sibling: a clean disarm never waits");
   });
 
-  test("route PASS: arm-auto-merge only when the needs-qa strip AND the PASS comment both landed", async () => {
+  test("route PASS: arm-auto-merge only when the PASS comment AND the qa-passed advance both landed", async () => {
     const pre = readyPre({ tier: { num: 2, adversarial: false } });
-    for (const [what, broken] of [["strip", "edit"], ["comment", "comment"]] as const) {
-      const h = harness({
-        ghHandler: (a) => (a[0] === (broken === "edit" ? "issue" : "pr") && a[1] === broken ? fail("gh: 502") : undefined),
-        phase: cannedPhase({ verdict: "PASS" }),
-      });
-      const r = await runRoute(ROUTE_OPTS, pre, h.ports, realDeps());
-      assert.equal(r.nextStep, "none", `failed ${what} must not arm auto-merge`);
-      assert.ok(r.degraded.includes("pass-effects"), what);
-    }
+    const commentFails = harness({
+      ghHandler: (a) => (a[0] === "pr" && a[1] === "comment" ? fail("gh: 502") : undefined),
+      phase: cannedPhase({ verdict: "PASS" }),
+    });
+    const r1 = await runRoute(ROUTE_OPTS, pre, commentFails.ports, realDeps());
+    assert.equal(r1.nextStep, "none", "a failed PASS comment must not arm auto-merge");
+    assert.ok(r1.degraded.includes("pass-effects"));
     const okRun = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "PASS" }) });
     const r = await runRoute(ROUTE_OPTS, pre, okRun.ports, realDeps());
     assert.equal(r.nextStep, "arm-auto-merge", "sibling: all effects ok keeps the arm step");
     assert.ok(!r.degraded.includes("pass-effects"));
+  });
+
+  test("route PASS: a refused qa-passed advance posts a QA-Verdict-Error, defers off needs-qa through the seam, and never arms", async () => {
+    const h = harness({
+      ghHandler: withState("OPEN"),
+      advanceHandler: refuse("qa-passed", "qa-verdict-stale"),
+      phase: cannedPhase({ verdict: "PASS" }),
+    });
+    const r = await runRoute(ROUTE_OPTS, readyPre({ tier: { num: 2, adversarial: false } }), h.ports, realDeps());
+    assert.deepEqual(h.advances.map(advTo), ["qa-passed", "needs-dev-resume"]);
+    assert.deepEqual(h.advances[1]?.slice(2), ["--evidence", "pr=77", "--evidence", "defer=1", "--actor", "hydra-qa"]);
+    const bodies = h.writes().filter((a) => a[0] === "pr" && a[1] === "comment").map((a) => argAfter(a, "--body") as string);
+    assert.match(bodies[1] ?? "", /^QA-Verdict-Error: verdict=PASS pr=77 reason=lifecycle advance to qa-passed refused \(qa-verdict-stale\)/);
+    assert.equal(r.nextStep, "none");
+    assert.ok(r.degraded.includes("qa-passed-refused"));
+    // both refused: exit 1, never a by-hand edit.
+    const both = harness({ ghHandler: withState("OPEN"), advanceHandler: () => ({ rc: 1, code: "nope" }), phase: cannedPhase({ verdict: "PASS" }) });
+    await assert.rejects(runRoute(ROUTE_OPTS, readyPre({ tier: { num: 2, adversarial: false } }), both.ports, realDeps()), /refused/);
+    // pr-merged exits 0 with no further effects.
+    const merged = harness({ ghHandler: withState("OPEN"), advanceHandler: refuse("qa-passed", "pr-merged"), phase: cannedPhase({ verdict: "PASS" }) });
+    const rm = await runRoute(ROUTE_OPTS, readyPre({ tier: { num: 2, adversarial: false } }), merged.ports, realDeps());
+    assert.equal(rm.nextStep, "none");
+    assert.deepEqual(merged.advances.map(advTo), ["qa-passed"], "no defer reroute after pr-merged");
   });
 
   test("route PASS at T4: a failed pass-proof comment withholds arm-auto-merge", async () => {
@@ -845,12 +910,13 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     assert.ok(argAfter(h.writes()[1] as string[], "--body")?.includes(SKIP_REVIEW_REPORT));
   });
 
-  test("route --defer: PR comment, bounce relabel, issue comment — and no verdict, trailer or engine call", async () => {
+  test("route --defer: PR comment, seam bounce, issue comment — and no verdict, trailer or engine call", async () => {
     const calls: string[] = [];
     const pre = readyPre({ gate: { action: "defer", reason: "mergeStateStatus is DIRTY", redRequired: ["test"], skipVerdict: null, skipCiSummary: null } });
     const h = harness({ ghHandler: withState("OPEN"), phase: async (p) => { calls.push(p); return {}; } });
     const r = await runRoute({ ...ROUTE_OPTS, defer: true, findingsPath: undefined, summariesPath: undefined }, pre, h.ports, realDeps());
-    assert.deepEqual(h.writes().map((a) => `${a[0]} ${a[1]}`), ["pr comment", "issue edit", "issue comment"]);
+    assert.deepEqual(h.writes().map((a) => `${a[0]} ${a[1]}`), ["pr comment", "lifecycle advance", "issue comment"]);
+    assert.deepEqual(h.advances[0], ["5269", "needs-dev-resume", "--evidence", "pr=77", "--evidence", "defer=1", "--actor", "hydra-qa"]);
     assert.deepEqual(calls, [], "a defer reaches no fold / trailer / round-action");
     assert.equal(r.verdict, null);
     assert.equal(r.trailer, "");
@@ -907,7 +973,7 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
       },
     });
     assert.ok(r.degraded.includes("review-findings"));
-    assert.equal(failing.writes().length, 4, "the gh effects were all performed");
+    assert.equal(failing.writes().length, 4, "the gh and seam effects were all performed");
   });
 
   test("route: a Merge-danger finding row is added to the findings map and the gap line is appended to the report", async () => {
@@ -943,6 +1009,7 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
 describe("route golden bodies (posted bytes frozen, issue #5269 INV-7)", () => {
   interface Arm {
     name: string;
+    advance?: (args: string[]) => Partial<AdvanceResult> | undefined;
     pre: PreflightResult;
     canned: Canned;
     state?: string;
@@ -1009,12 +1076,26 @@ describe("route golden bodies (posted bytes frozen, issue #5269 INV-7)", () => {
       bodies: [failPr, `> *Automated QA failed*\n\n\`FAIL\` on PR #77 — ${sum}. Full review on the PR.\n\nReturning to ready-for-agent for retry.\n\n${TRAILER}`],
     },
     {
-      name: "escalate",
+      name: "escalate (enforce: the seam parked)",
       pre: readyPre(),
+      advance: (a) => (a[1] === "needs-dev-resume" ? { rc: 1, code: "parked:qa-fail-rounds" } : undefined),
       canned: { ...failCanned, roundAction: "escalate", escalationSummary: "ESCALATION-SUMMARY" },
+      state: "OPEN",
       bodies: [
         failPr,
-        `> *Automated QA escalated — operator decision needed*\n\n\`FAIL\` on PR #77 — ${sum}. Labelled \`ready-for-human\` (issue and PR) and removed every dev-lane label; no dev lane will pick this up.\n\nESCALATION-SUMMARY\n\n${TRAILER}`,
+        `> *Automated QA escalated — round cap reached*\n\n\`FAIL\` on PR #77 — ${sum}. The issue is \`parked\`; no dev lane will pick it up until the operator un-parks it.\n\nESCALATION-SUMMARY\n\n${TRAILER}`,
+      ],
+    },
+    {
+      name: "escalate (shadow: explicit park)",
+      pre: readyPre(),
+      advance: (a) => (a[1] === "needs-dev-resume" ? { wouldPark: "qa-fail-rounds" } : undefined),
+      canned: { ...failCanned, escalationSummary: "ESCALATION-SUMMARY" },
+      state: "OPEN",
+      bodies: [
+        failPr,
+        "## Hydra cap park\n\nThis issue was parked automatically: the `qa-fail-rounds` cap was reached (3 of 3 per pr).\n\n| Arm | Count | Limit | Unit |\n|---|---|---|---|\n| qa-fail-rounds | 3 | 3 | pr |\n\nTo un-park: investigate why the attempts keep failing, then remove the `parked` label, add the right state label, and post `Hydra-Cap-Reset: by=<you> ts=<ISO-8601>` so every count restarts from that moment.\n\nHydra-Cap-Park: arm=qa-fail-rounds count=3 limit=3 unit=pr pr=77 source=trailer ts=2026-11-05T00:00:00Z",
+        `> *Automated QA escalated — round cap reached*\n\n\`FAIL\` on PR #77 — ${sum}. The issue is \`parked\`; no dev lane will pick it up until the operator un-parks it.\n\nESCALATION-SUMMARY\n\n${TRAILER}`,
       ],
     },
     {
@@ -1085,13 +1166,13 @@ describe("route golden bodies (posted bytes frozen, issue #5269 INV-7)", () => {
 
   test("golden: every verdict body ends with exactly one QA-Verdict trailer line and matches the recorded template", async () => {
     for (const arm of arms) {
-      const h = harness({ ghHandler: withState(arm.state ?? "OPEN"), phase: cannedPhase(arm.canned) });
+      const h = harness({ ghHandler: withState(arm.state ?? "OPEN"), advanceHandler: arm.advance, phase: cannedPhase(arm.canned) });
       await runRoute({ ...ROUTE_OPTS, ...arm.opts }, arm.pre, h.ports, realDeps());
       const posted = h.writes().filter((a) => a[1] === "comment").map((a) => argAfter(a, "--body") as string);
       assert.deepEqual(posted, arm.bodies, `arm '${arm.name}'`);
       const isDefer = arm.opts?.defer === true;
       for (const b of posted) {
-        if (isDefer || b.includes("PASS proof")) continue;
+        if (isDefer || b.includes("PASS proof") || b.startsWith("## Hydra cap park")) continue;
         assert.equal(b.split("QA-Verdict:").length - 1, 1, `arm '${arm.name}': exactly one trailer`);
         assert.ok(b.trimEnd().split("\n").at(-1)?.startsWith("QA-Verdict: "), `arm '${arm.name}': the trailer is the LAST line`);
       }
@@ -1272,6 +1353,8 @@ describe("spawned CLIs (production adapter, fake gh on PATH)", () => {
           "esac",
         ].join("\n"),
       );
+      // The seam CLI is `npx tsx scripts/lifecycle.ts advance ...`: a fake npx records it and accepts.
+      fakeBin(dir, "npx", `echo "npx $*" >> ${log}; echo '{"ok":true}'`);
       const pre = join(dir, "pre.json");
       writeFileSync(pre, JSON.stringify(readyPre({ tier: { num: 2, adversarial: false }, fanout: { mode: "standard", reviewers: ["standards", "spec"], reason: "Review fan-out: standard" } })));
       const findings = join(dir, "findings.json");
@@ -1286,8 +1369,9 @@ describe("spawned CLIs (production adapter, fake gh on PATH)", () => {
       assert.equal(out.nextStep, "arm-auto-merge");
       assert.match(out.trailer, /^QA-Verdict: PASS pr=77 round=1 sha=0123456789ab blockers=0 max_severity=none$/);
       assert.ok(out.degraded.includes("review-findings"), `Redis is unreachable on port 1: ${r.stdout} ${r.stderr}`);
-      const writes = readFileSync(log, "utf8").trim().split("\n").filter((l) => /^(issue edit|pr comment)/.test(l));
-      assert.deepEqual(writes.map((l) => l.split(" ").slice(0, 2).join(" ")), ["issue edit", "pr comment"]);
+      const writes = readFileSync(log, "utf8").trim().split("\n").filter((l) => /^(npx|pr comment)/.test(l));
+      assert.deepEqual(writes.map((l) => l.split(" ").slice(0, 2).join(" ")), ["pr comment", "npx tsx"]);
+      assert.match(writes[1] ?? "", /scripts\/lifecycle\.ts advance 5269 qa-passed --evidence pr=77 --actor hydra-qa$/);
       assert.ok(!readFileSync(log, "utf8").includes("pr merge"), "the merge call site stays in the playbook");
     } finally {
       rmSync(dir, { recursive: true, force: true });

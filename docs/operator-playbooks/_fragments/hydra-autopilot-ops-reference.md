@@ -136,13 +136,11 @@ quiet across a multi-minute nap). This is not a truncation — it is an honest
 baton-pass: the in-flight subagents live in the durable dispatch ledger
 (`hydra:dispatches:subagent:*`) that the next pace-gate-launched run re-seeds
 (#1352). It is recorded with the clean `term_reason=handoff` (in
-`CLEAN_TERM_REASONS`, `src/autopilot/runs.ts`), via two layers: (1) the model
-POSTs `run-end(cause=handoff)` before its final message when it ends a turn with
-slots > 0 and no further dispatchable work (the `wait` action row above), and
-(2) the ExecStopPost reap backstop (`bootstrap.sh __reap_derive_cause`) derives
-`handoff` whenever a CLEAN exit (code 0/143/130) shows `state.json` slots
-occupied > 0 — so a missed in-loop POST still classifies the baton-pass
-honestly. `interrupted` is now reserved for a clean ZERO-slot exit that bypassed
+`CLEAN_TERM_REASONS`, `src/autopilot/runs.ts`), by ONE scripted writer (#5323):
+the ExecStopPost reap backstop (`bootstrap.sh __reap_derive_cause`, wired in
+`hydra-autopilot.service`) derives `handoff` whenever a CLEAN exit (code
+0/143/130) shows `state.json` slots occupied > 0. The parent session posts
+nothing for a baton-pass. `interrupted` is now reserved for a clean ZERO-slot exit that bypassed
 decide.py's terminate (a genuine print-mode end with nothing pending).
 
 The clean-termination rate over recent runs is surfaced as

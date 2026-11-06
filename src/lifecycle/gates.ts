@@ -7,7 +7,7 @@
  * A failed fetch is a refusal (`fetch-failed`), never a pass.
  */
 import { hasScopeSection } from "../scope-section.ts";
-import { parseQaVerdictTrailers, qaVerdictShaMatches } from "../qa/verdict-trailer.ts";
+import { isFailVerdict, isPassVerdict, parseQaVerdictTrailers, qaVerdictShaMatches, type FinalVerdict } from "../qa/verdict-trailer.ts";
 import { isAdr5Reason, isAllowedReason } from "./reasons.ts";
 import type { GateId, LifecycleState } from "./transitions.ts";
 
@@ -62,6 +62,11 @@ export interface QaLivePr {
   /** Required checks folded: `unknown` when they could not be read. */
   checks: "red" | "green" | "pending" | "unknown";
   bodies: readonly string[];
+  /**
+   * The same comment + review bodies with their post time (epoch ms; null when
+   * unreadable). Absent = no timed record, so the `qa-verdict` gate refuses.
+   */
+  timedBodies?: readonly { body: string; createdAtMs: number | null }[];
 }
 
 export type QaExitTarget = "closed" | "ready-for-agent" | "needs-dev-resume" | "needs-qa";
@@ -83,12 +88,54 @@ export function classifyQaPassedExit(live: QaLivePr): QaExitTarget | "none" {
   if (live.checks === "green") {
     const passAtHead = live.bodies.some((b) =>
       parseQaVerdictTrailers(b).some(
-        (t) => t.verdict === "PASS" && t.pr === live.number && qaVerdictShaMatches(t, live.headSha),
+        (t) => isPassVerdict(t.verdict) && t.pr === live.number && qaVerdictShaMatches(t, live.headSha),
       ),
     );
     return passAtHead ? "none" : "needs-qa";
   }
   return "none";
+}
+
+export type QaVerdictTarget = "qa-passed" | "needs-dev-resume" | "ready-for-agent";
+
+/**
+ * The ONE pure predicate for a `needs-qa` verdict exit (ADR-0047 D4, #5317
+ * INV-3). The verdict record is the LATEST `QA-Verdict:` trailer naming this
+ * PR whose `sha=` matches the live head. Returns the routing target, or a
+ * refusal code: `qa-verdict-missing` (no trailer at head), `qa-verdict-stale`
+ * (the trailer predates `enteredAtMs`), `pr-merged` (reconcile owns it).
+ */
+export function classifyQaVerdictTarget(
+  live: QaLivePr,
+  enteredAtMs: number,
+): { ok: true; target: QaVerdictTarget } | { ok: false; code: string } {
+  // INV-3: the LATEST trailer is the one with the max post time (NOT array
+  // order: comments are listed before reviews, so a stale review-body trailer
+  // would otherwise override a newer comment trailer). Ties keep the later
+  // array position; an unreadable time sorts oldest.
+  let latest: { verdict: FinalVerdict; createdAtMs: number | null } | undefined;
+  const rank = (ms: number | null): number => (ms === null ? Number.NEGATIVE_INFINITY : ms);
+  for (const tb of live.timedBodies ?? []) {
+    for (const t of parseQaVerdictTrailers(tb.body)) {
+      if (t.pr === live.number && qaVerdictShaMatches(t, live.headSha)) {
+        if (latest === undefined || rank(tb.createdAtMs) >= rank(latest.createdAtMs)) {
+          latest = { verdict: t.verdict, createdAtMs: tb.createdAtMs };
+        }
+      }
+    }
+  }
+  if (latest === undefined) return { ok: false, code: "qa-verdict-missing" };
+  if (latest.createdAtMs === null || !(latest.createdAtMs > enteredAtMs)) {
+    return { ok: false, code: "qa-verdict-stale" };
+  }
+  if (live.state === "MERGED") return { ok: false, code: "pr-merged" };
+  if (isPassVerdict(latest.verdict)) {
+    return live.state === "OPEN" ? { ok: true, target: "qa-passed" } : { ok: false, code: "pr-not-open" };
+  }
+  if (!isFailVerdict(latest.verdict)) return { ok: false, code: "qa-verdict-missing" };
+  if (live.state === "OPEN") return { ok: true, target: "needs-dev-resume" };
+  if (live.state === "CLOSED") return { ok: true, target: "ready-for-agent" };
+  return { ok: false, code: "pr-not-open" };
 }
 
 export interface GateRecords {
@@ -114,6 +161,8 @@ export interface GateInput {
   repo?: string;
   /** Issue body as re-read by the seam (spine step 1). */
   body?: string;
+  /** Who is advancing (`--actor`); gates restricting a path to one actor read it. */
+  actor?: string;
 }
 
 const pass = (code = "ok"): GateResult => ({ ok: true, code });
@@ -215,6 +264,40 @@ export function gateQaExit(input: GateInput, records: GateRecords): GateResult {
   return classifyQaPassedExit(live.value) === input.to ? pass() : fail("qa-exit-cause-mismatch");
 }
 
+/**
+ * `needs-qa -> qa-passed | needs-dev-resume | ready-for-agent`: evidence `pr=N`
+ * is a locator; the verdict record is the live trailer at head posted after the
+ * issue entered `needs-qa`, and its classified target must equal `to`.
+ */
+/** The only actor allowed to use the trailer-less `defer=1` evidence. */
+export const QA_DEFER_ACTOR = "hydra-qa";
+
+export function gateQaVerdict(input: GateInput, records: GateRecords): GateResult {
+  const prNumber = parsePrEvidence(input.evidence);
+  if (prNumber === null) return fail("evidence-required:pr");
+  const live = records.qaLive;
+  const entry = records.stateEntry;
+  if (live === undefined || live.ok === false) return fail("fetch-failed");
+  if (entry === undefined || entry.ok === false) return fail("fetch-failed");
+  if (live.value.number !== prNumber) return fail("record-binding-mismatch");
+  // Defer arm (hydra-qa step 6.6): no verdict was emitted, so there is no
+  // trailer to gate on. `defer=1` evidence admits ONLY the live-state bounce
+  // (OPEN -> needs-dev-resume, CLOSED -> ready-for-agent); never qa-passed.
+  // Restricted to actor `hydra-qa`: the trailer-less bounce skips the trailer,
+  // freshness and cap checks, so no other caller may use it.
+  if (input.evidence.defer === "1") {
+    if (input.actor !== QA_DEFER_ACTOR) return fail("defer-actor-not-allowed");
+    const deferTarget =
+      live.value.state === "OPEN" ? "needs-dev-resume" : live.value.state === "CLOSED" ? "ready-for-agent" : null;
+    if (deferTarget === null) return fail("pr-merged");
+    return deferTarget === input.to ? pass() : fail("qa-verdict-mismatch");
+  }
+  if (entry.value.enteredAtMs === null) return fail("state-entry-unknown");
+  const c = classifyQaVerdictTarget(live.value, entry.value.enteredAtMs);
+  if (c.ok === false) return fail(c.code);
+  return c.target === input.to ? pass() : fail("qa-verdict-mismatch");
+}
+
 export const RESEARCH_TRAILER_PREFIX = "Hydra-Research:";
 
 export type ResearchTrailer =
@@ -282,11 +365,11 @@ export function recordsNeeded(gate: GateId): {
   qaLive: boolean;
 } {
   return {
-    qaLive: gate === "qa-exit",
+    qaLive: gate === "qa-exit" || gate === "qa-verdict",
     designConcept: gate === "dispatch",
     pr: gate === "pr-open" || gate === "close",
     comment: gate === "research-exit",
-    stateEntry: gate === "research-exit",
+    stateEntry: gate === "research-exit" || gate === "qa-verdict",
   };
 }
 
@@ -309,6 +392,8 @@ export function evaluateGate(gate: GateId, input: GateInput, records: GateRecord
       return gateResearchExit(input, records);
     case "qa-exit":
       return gateQaExit(input, records);
+    case "qa-verdict":
+      return gateQaVerdict(input, records);
     case "not-yet-implemented":
       return fail("gate-unimplemented");
   }

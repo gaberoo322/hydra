@@ -405,23 +405,34 @@ describe("hydra-qa step 10 label effects stay plain text pins (issue #4735, INV-
     assert.ok(!QA_PLAYBOOK.includes("${issue_number}"), "found ${issue_number} in hydra-qa.md");
   });
 
-  test("a 404 on removing an absent label is not a failure; the label name goes in the URL path", () => {
+  test("no direct state-label write survives in route.ts or the playbook: only the lifecycle seam moves state (ADR-0047 D4, #5317)", () => {
     const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa/route.ts"), "utf8");
-    assert.ok(routeSrc.includes('res.stderr.includes("Label does not exist")') && routeSrc.includes("/404/.test(res.stderr)"));
-    assert.ok(routeSrc.includes("`repos/${repo}/issues/${issue}/labels/${l}`"), "the DELETE carries the name in the path, never -f name=");
+    assert.doesNotMatch(routeSrc, /"--(?:add|remove)-label"/, "no gh issue edit label flags");
+    assert.ok(!routeSrc.includes("-X\", \"DELETE") && !/"DELETE"/.test(routeSrc), "no label DELETE call");
+    assert.ok(!/\/labels`/.test(routeSrc), "no label POST/DELETE endpoint");
+    assert.ok(routeSrc.includes("ports.advance(args)"), "state moves ride ports.advance -> scripts/lifecycle.ts advance");
+    assert.doesNotMatch(QA_PLAYBOOK, /--(?:add|remove)-label\s+["'$]?(?:needs-qa|needs-dev-resume|ready-for-agent|ready-for-human|in-progress|qa-passed|parked)/);
   });
 
-  test("a failed label call never claims `Labelled`", () => {
+  test("a refused seam call ends the route non-zero and says it never edits labels by hand (INV-9)", () => {
     const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa/route.ts"), "utf8");
-    assert.ok(routeSrc.includes("labelsOk ? ESC_NOTE_OK : ESC_NOTE_FAILED"));
-    assert.ok(routeSrc.includes("**Label routing FAILED**"));
-    // The old bash needed a guard against an unsubstituted issue number; the issue is a typed
-    // positive integer in the preflight schema now, so that failure mode no longer exists.
+    assert.ok(routeSrc.includes("not editing labels by hand"));
+    assert.ok(routeSrc.includes("advanceOrThrow"));
   });
 
-  test("labels and escalation text come from the round-action JSON, never spelled in the loop", () => {
+  test("a degraded disarm-failed is a HARD STOP in the playbook: manual --disable-auto, confirm autoMergeRequest == null, report loudly", () => {
+    const a = QA_PLAYBOOK.indexOf('index("disarm-failed")');
+    assert.ok(a > 0, "the playbook reads .degraded for disarm-failed after route");
+    const block = QA_PLAYBOOK.slice(a, a + 900);
+    assert.ok(block.includes("gh pr merge $pr_number --repo gaberoo322/hydra --disable-auto"), "re-disarm by hand");
+    assert.ok(block.includes("autoMergeRequest"), "confirm the PR is no longer armed");
+    assert.ok(/STILL auto-merge-armed/.test(block), "a still-armed FAILed PR is reported loudly");
+    assert.ok(QA_PLAYBOOK.indexOf('index("disarm-failed")') < QA_PLAYBOOK.indexOf("gh pr merge $pr_number --repo gaberoo322/hydra --auto --squash"), "the hard stop is read before the auto-merge call site");
+    assert.ok(/at most one `QA-Verdict-Error` comment/.test(QA_PLAYBOOK) && !/exits 1 with NOTHING posted/.test(QA_PLAYBOOK), "pre-verdict exit wording matches route");
+  });
+
+  test("the escalation summary still comes from the round-action JSON", () => {
     const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa/route.ts"), "utf8");
-    for (const key of ["issueAdd", "issueRemove", "prAdd"]) assert.ok(routeSrc.includes(`names("${key}")`), key);
     assert.ok(routeSrc.includes("roundOut.escalationSummary"));
   });
 });
@@ -445,23 +456,25 @@ describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
     assert.match(QA_PLAYBOOK, /first state fixed\/not-fixed for each prior finding; for anything new, prefer medium\+ and say why it wasn't visible before/i, "the re-review brief stays in the reviewer prompts");
   });
 
-  test("T1–T3: the round cap is decided before any effect, and escalation never re-labels for dev", () => {
+  test("T1–T3: round-action runs before any effect; the seam owns the cap and parks, never ready-for-human (issue #5317 INV-5/6)", () => {
     const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "route.ts"), "utf8");
-    assert.ok(routeSrc.includes('ports.phase("round-action"'), "the round cap is decided by the round-action call");
+    assert.ok(routeSrc.includes('ports.phase("round-action"'), "the round summary is produced by the round-action call");
     assert.ok(routeSrc.indexOf('ports.phase("round-action"') < routeSrc.indexOf("// ---- Effects (step 10). ----"), "round-action reads the PR before any effect is posted");
     const t13 = routeSrc.slice(routeSrc.indexOf("// T1/T2/T3 (and unknown-tier) FAIL"));
-    const esc = t13.indexOf('if (roundAction === "escalate")');
-    const bounce = t13.indexOf("const label = await bounceLabel();");
-    assert.ok(esc > 0 && esc < bounce, "escalate must be the first routing branch");
-    const branch = t13.slice(esc, bounce);
-    assert.ok(!branch.includes("ready-for-agent"));
-    assert.ok(branch.includes("labelsOk ? ESC_NOTE_OK : ESC_NOTE_FAILED"), "the labelled claim comes from the label calls' outcome");
-    assert.ok(!branch.includes("Labelled `ready-for-human`"), "no unconditional labelled claim");
+    // The verdict comment (this round's trailer) precedes the first seam call.
+    const comment = t13.indexOf("await prComment(bodies.fail(");
+    const firstAdvance = t13.indexOf("await advance(label");
+    assert.ok(comment > 0 && comment < firstAdvance, "the PR verdict comment is posted before the seam counts the round");
+    assert.ok(t13.includes('"parked:qa-fail-rounds"'), "enforce: a parked:qa-fail-rounds refusal is the escalation, not an error");
+    assert.ok(t13.includes('adv.wouldPark === "qa-fail-rounds"'), "shadow: the would-park report is read from the advance result");
+    assert.ok(t13.includes('advanceOrThrow("parked"'), "shadow: an explicit park keeps the cap live");
+    const code = t13.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+    assert.ok(!code.includes("ready-for-human"), "a T1-T3 round cap never writes ready-for-human");
   });
 
   test("T4 keeps decideDeepQaAction and never runs the T1–T3 round cap", () => {
     const routeSrc = readFileSync(join(REPO_ROOT, "scripts", "qa", "route.ts"), "utf8");
-    const t4 = routeSrc.slice(routeSrc.indexOf("// T4 FAIL — the Deep-QA Remediation Loop"), routeSrc.indexOf("// T1/T2/T3 (and unknown-tier) FAIL"));
+    const t4 = routeSrc.slice(routeSrc.indexOf("// T4 FAIL: the Deep-QA Remediation Loop"), routeSrc.indexOf("// T1/T2/T3 (and unknown-tier) FAIL"));
     assert.ok(t4.includes("roundOut.deepQa"), "T4 reads the deep-QA action from the round-action JSON");
     assert.ok(!t4.includes("qa-round-cap") && !t4.includes("decideQaRoundAction") && !t4.includes("roundAction"));
   });
