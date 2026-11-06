@@ -217,8 +217,8 @@ LANE=needs-dev-resume   # or needs-qa — the lane the operator's resolution nam
 # The subshell scopes every `exit 1` below: a failure aborts the recipe loudly
 # without closing the operator's shell.
 (
-# 1. Clear the PR's stranding labels. (These are PR FLAGS, not issue lifecycle state:
-#    ready-for-human on a PR is the pr-gate "surfaced" flag - ADR-0047 D2 scopes state to issues.) Name in the URL path — the `-f name=` form
+# 1. Clear the PR's stranding labels (PR FLAGS, not issue lifecycle state: ready-for-human
+#    on a PR is the pr-gate "surfaced" flag - ADR-0047 D2 scopes state to issues). Name in the URL path — the `-f name=` form
 #    wipes ALL labels. ONLY an HTTP 404 / "Label does not exist" means the label
 #    is already absent and is tolerated. Any other failure (auth, rate limit,
 #    network) prints the error and aborts BEFORE the issue is relabelled.
@@ -242,7 +242,7 @@ if [ -n "$LEFT" ]; then
   exit 1
 fi
 # 3. Route the linked issue to the chosen lane through the board route (ADR-0047:
-#    the sanctioned operator-route exit; never `gh issue edit` a state label).
+#    the sanctioned operator-route exit; never a direct gh label write).
 curl -sf -X POST http://localhost:4000/api/autopilot/board/relabel \
   -H 'content-type: application/json' \
   -d "{\"issue\":$ISSUE,\"label\":\"$LANE\"}" | jq .

@@ -249,7 +249,7 @@ describe("hydra-review playbook — hand-back clears the PR's stranding labels (
     assert.doesNotMatch(body, /gh api[^\n]*-f name=/, "the -f name= DELETE form wipes every label");
     // The linked issue is routed too.
     assert.match(body, /curl -sf -X POST http:\/\/localhost:4000\/api\/autopilot\/board\/relabel/);
-    assert.match(body, /"issue":\$ISSUE,"label":"\$LANE"/);
+    assert.match(body, /\\"issue\\":\$ISSUE,\\"label\\":\\"\$LANE\\"/);
     assert.doesNotMatch(body, /gh issue edit/, "the issue relabel rides the board route, never gh issue edit");
   });
 
