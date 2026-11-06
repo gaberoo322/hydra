@@ -236,8 +236,12 @@ async function runChore(
  *
  * Returns a `{ ran, skipped }` summary so callers (the endpoint, tests) can
  * see which chores did work this invocation vs. which were skipped by their
- * time-guard. Never throws — each chore is independently run through
- * `runChore`, which try/catches so one failure doesn't abort the rest.
+ * time-guard. A failing chore never throws out of here — each chore is
+ * independently run through `runChore`, which try/catches so one failure
+ * doesn't abort the rest. The one throw is up-front argument validation: a
+ * `deps.workOverrides` key naming no registered chore throws
+ * `InvalidArgumentError` (`code: invalid-argument`, issue #5199) before any
+ * chore runs.
  */
 async function runHousekeeping(
   eventBus: PublishableBus,

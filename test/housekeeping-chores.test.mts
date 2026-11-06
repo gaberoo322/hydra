@@ -318,6 +318,56 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     assert.ok(Array.isArray(summary.ran), "ran is an array");
     assert.ok(Array.isArray(summary.skipped), "skipped is an array");
   });
+
+  describe("runHousekeeping — workOverrides contract (issue #5199)", () => {
+    function makeBus() {
+      return { async publish() { return "fake-id"; } };
+    }
+    const baseDeps = {
+      runGlmEligibilitySweep: async () => 0,
+      runLifecycleReconcile: async () => null,
+      publishTargetOutcomes: async () => {},
+    };
+
+    test("an override key naming no registered chore is rejected (no vacuous stub)", async () => {
+      await assert.rejects(
+        runHousekeeping(makeBus() as any, {
+          ...baseDeps,
+          workOverrides: { ...SLOW_CHORE_STUBS, "review-pikcup-notify": noopWork },
+        }),
+        (err: any) => err.code === "invalid-argument" && /review-pikcup-notify/.test(err.message),
+      );
+    });
+
+    test("an inherited Object.prototype key is not treated as an override", async () => {
+      await assert.rejects(
+        runHousekeeping(makeBus() as any, {
+          ...baseDeps,
+          workOverrides: { constructor: noopWork } as any,
+        }),
+        (err: any) => err.code === "invalid-argument",
+      );
+    });
+
+    test("every stubbed chore's override is actually invoked in place of the real work", async () => {
+      const called: string[] = [];
+      const recording = Object.fromEntries(
+        Object.keys(SLOW_CHORE_STUBS).map((name) => [name, async () => { called.push(name); }]),
+      );
+      // Null only the usage-weekly-snapshot cadence reader so its time-windowed guard passes and
+      // its stub is exercised; the other cadence readers are left at their defaults.
+      const nullTs = async () => null;
+      const summary = await runHousekeeping(makeBus() as any, {
+        ...baseDeps,
+        getUsageSnapshotLastWeekly: nullTs,
+        workOverrides: recording,
+      });
+      assert.deepEqual([...called].sort(), Object.keys(SLOW_CHORE_STUBS).sort());
+      for (const name of Object.keys(SLOW_CHORE_STUBS)) {
+        assert.ok(summary.ran.includes(name), `${name} must be classified ran via its override`);
+      }
+    });
+  });
 });
 
 describe("runHousekeeping — target-outcomes-publish registration (issue #4477)", () => {
@@ -400,55 +450,5 @@ describe("runHousekeeping — attribution-record runs before holdback-merge-watc
         "read-only recorder opens its windows before the watch drains the " +
         `pending-enroll registry (issue #3113); order was ${JSON.stringify(arr)}`,
     );
-  });
-});
-
-describe("runHousekeeping — workOverrides contract (issue #5199)", () => {
-  function makeBus() {
-    return { async publish() { return "fake-id"; } };
-  }
-  const baseDeps = {
-    runGlmEligibilitySweep: async () => 0,
-    runLifecycleReconcile: async () => null,
-    publishTargetOutcomes: async () => {},
-  };
-
-  test("an override key naming no registered chore is rejected (no vacuous stub)", async () => {
-    await assert.rejects(
-      runHousekeeping(makeBus() as any, {
-        ...baseDeps,
-        workOverrides: { ...SLOW_CHORE_STUBS, "review-pikcup-notify": noopWork },
-      }),
-      (err: any) => err.code === "invalid-argument" && /review-pikcup-notify/.test(err.message),
-    );
-  });
-
-  test("an inherited Object.prototype key is not treated as an override", async () => {
-    await assert.rejects(
-      runHousekeeping(makeBus() as any, {
-        ...baseDeps,
-        workOverrides: { constructor: noopWork } as any,
-      }),
-      (err: any) => err.code === "invalid-argument",
-    );
-  });
-
-  test("every stubbed chore's override is actually invoked in place of the real work", async () => {
-    const called: string[] = [];
-    const recording = Object.fromEntries(
-      Object.keys(SLOW_CHORE_STUBS).map((name) => [name, async () => { called.push(name); }]),
-    );
-    // Null only the usage-weekly-snapshot cadence reader so its time-windowed guard passes;
-    // the other readers stay as baseDeps so no unstubbed real chore runs here.
-    const nullTs = async () => null;
-    const summary = await runHousekeeping(makeBus() as any, {
-      ...baseDeps,
-      getUsageSnapshotLastWeekly: nullTs,
-      workOverrides: recording,
-    });
-    assert.deepEqual([...called].sort(), Object.keys(SLOW_CHORE_STUBS).sort());
-    for (const name of Object.keys(SLOW_CHORE_STUBS)) {
-      assert.ok(summary.ran.includes(name), `${name} must be classified ran via its override`);
-    }
   });
 });
