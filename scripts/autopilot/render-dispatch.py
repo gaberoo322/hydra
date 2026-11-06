@@ -528,6 +528,74 @@ def dev_orch_task(action: dict, skill: str | None) -> list[str]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# dev_target / qa_target: pure functions of the typed Dispatch Intent (issue #5383)
+# ---------------------------------------------------------------------------
+
+def _render_target_fresh(intent, skill: str | None) -> list[str]:
+    n = _issue_number(intent.anchor)
+    if n:
+        return [f"Work **Target issue #{n}** (anchor `issue-{n}`) — pinned; no other issue."]
+    return [
+        "Pick ONE `ready-for-agent` Target issue per the skill's own selection (money-critical first when the skill's "
+        "ranking ties). Check the open Target PRs first and do not duplicate work already in flight; branch off the "
+        "Target's default branch."
+    ]
+
+
+def _render_target_resume(intent, skill: str | None) -> list[str]:
+    return [
+        f"This is a RESUME pin: Target issue #{_issue_number(intent.anchor)} is `needs-dev-resume` with open PR #{intent.pr} "
+        f"on branch `{intent.branch}`. Continue that PR/branch — fix forward on the same branch, never a second PR for the same anchor."
+    ]
+
+
+DEV_TARGET_INTENT_RENDERERS = {
+    "TargetFresh": _render_target_fresh,
+    "TargetResume": _render_target_resume,
+}
+
+
+def _render_target_review_pr(intent, skill: str | None) -> list[str]:
+    return [f"Invoke the `{skill}` skill (via the Skill tool) on Target PR `{intent.pr_ref}` (`pr_ref`) — pinned (issue #4576)."]
+
+
+def _render_target_review_self_select(intent, skill: str | None) -> list[str]:
+    return [f"Invoke the `{skill}` skill (via the Skill tool) unpinned — its own step 1 resolves the PR the current Target build opened."]
+
+
+QA_TARGET_INTENT_RENDERERS = {
+    "TargetReviewPr": _render_target_review_pr,
+    "TargetReviewSelfSelect": _render_target_review_self_select,
+}
+
+
+def dev_target_task(action: dict, skill: str | None) -> list[str]:
+    intent, fn = _intent_renderer("dev_target", action, DEV_TARGET_INTENT_RENDERERS)
+    return [
+        f"Invoke the `{skill}` skill (via the Skill tool; scope: target). **Use delegated mode** (spawn the build child, "
+        "then poll it to completion in the FOREGROUND) — inline mode skips anchors touching more than five files.",
+        *fn(intent, skill),
+        "Open the PR with a body ending `Closes #<N>`, label the issue per the skill's contract, and do NOT merge or "
+        "self-approve — Target QA is a separate dispatch. Run the Target's real test suite as its own `package.json` "
+        "defines it. If the board state has changed (the issue claimed or closed), report that via ## Friction Report "
+        "instead of inventing work.",
+        "Final message: the PR opened (number, head SHA, closing ref) or the forward-fix commits pushed — state only what you directly observed.",
+    ]
+
+
+def qa_target_task(action: dict, skill: str | None) -> list[str]:
+    intent, fn = _intent_renderer("qa_target", action, QA_TARGET_INTENT_RENDERERS)
+    return [
+        *fn(intent, skill),
+        "Run the Standards pass, the Spec pass, and the adversarial fold the skill prescribes for the PR's risk class "
+        "(money-critical / risk-surface PRs get the full fan-out — never an inline substitute). Read the linked issue's "
+        "operator scope notes and verify the PR satisfies them. Post the verdict per the skill (on the linked issue, with "
+        "the head SHA named). Do not merge; do not approve; never scrape external sites; never read or grep `.env` files.",
+        "Final message: the PR reviewed, the verdict posted (with head SHA) and where, or a `## Friction Report`.",
+    ]
+
+
 def task_section(slot: str, action: dict, state: dict, skill: str | None) -> list[str]:
     pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
     out: list[str] = ["## Task"]
@@ -561,46 +629,10 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
         out.append("Final message: whether the artifact persisted (and its approval status as read back from the API), or the handoff you posted, plus the key decisions.")
 
     elif slot == "dev_target":
-        out.append(
-            f"Invoke the `{skill}` skill (via the Skill tool; scope: target). **Use delegated mode** (spawn the build child, "
-            "then poll it to completion in the FOREGROUND) — inline mode skips anchors touching more than five files."
-        )
-        if pa.get("resume"):
-            out.append(
-                f"This is a RESUME pin: Target issue #{pa.get('resume_issue') or anchor_n or '<N>'} is `needs-dev-resume`"
-                + (f" with open PR #{pa.get('resume_pr')}" if pa.get("resume_pr") else "")
-                + (f" on branch `{pa.get('resume_branch')}`" if pa.get("resume_branch") else "")
-                + ". Continue that PR/branch — fix forward on the same branch, never a second PR for the same anchor."
-            )
-        elif anchor_n:
-            out.append(f"Work **Target issue #{anchor_n}** (anchor `issue-{anchor_n}`) — pinned; no other issue.")
-        else:
-            out.append(
-                "Pick ONE `ready-for-agent` Target issue per the skill's own selection (money-critical first when the skill's "
-                "ranking ties). Check the open Target PRs first and do not duplicate work already in flight; branch off the "
-                "Target's default branch."
-            )
-        out.append(
-            "Open the PR with a body ending `Closes #<N>`, label the issue per the skill's contract, and do NOT merge or "
-            "self-approve — Target QA is a separate dispatch. Run the Target's real test suite as its own `package.json` "
-            "defines it. If the board state has changed (the issue claimed or closed), report that via ## Friction Report "
-            "instead of inventing work."
-        )
-        out.append("Final message: the PR opened (number, head SHA, closing ref) or the forward-fix commits pushed — state only what you directly observed.")
+        out.extend(dev_target_task(action, skill))
 
     elif slot == "qa_target":
-        pr_ref = pa.get("pr_ref")
-        if pr_ref:
-            out.append(f"Invoke the `{skill}` skill (via the Skill tool) on Target PR `{pr_ref}` (`pr_ref`) — pinned (issue #4576).")
-        else:
-            out.append(f"Invoke the `{skill}` skill (via the Skill tool) unpinned — its own step 1 resolves the PR the current Target build opened.")
-        out.append(
-            "Run the Standards pass, the Spec pass, and the adversarial fold the skill prescribes for the PR's risk class "
-            "(money-critical / risk-surface PRs get the full fan-out — never an inline substitute). Read the linked issue's "
-            "operator scope notes and verify the PR satisfies them. Post the verdict per the skill (on the linked issue, with "
-            "the head SHA named). Do not merge; do not approve; never scrape external sites; never read or grep `.env` files."
-        )
-        out.append("Final message: the PR reviewed, the verdict posted (with head SHA) and where, or a `## Friction Report`.")
+        out.extend(qa_target_task(action, skill))
 
     elif slot == "wayfinder_orch":
         ticket_n = _issue_number(pa.get("ticket"))
@@ -698,10 +730,12 @@ def render_prompt(slot: str, action: dict, state: dict, blocks: dict[str, str], 
         parts.append(blocks["self_guard"])
         cid = cycle_id(action, state)
         line = f"Use CYCLE_ID=`{cid}` for the Target worktree id"
-        pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
-        head = ts.text(state, [], "target_needs_qa_pr_head")
-        if slot == "qa_target" and pa.get("pr_ref") and head:
-            line += f" and set `TARGET_WT_BASE=origin/{head}` (the PR head)"
+        if slot == "qa_target":
+            # Issue #5383: the PR head travels in the TargetReviewPr intent, not the Turn Snapshot.
+            intent, _fn = _intent_renderer(slot, action, QA_TARGET_INTENT_RENDERERS)
+            head = getattr(intent, "head", None)
+            if getattr(intent, "pr_ref", None) and head:
+                line += f" and set `TARGET_WT_BASE=origin/{head}` (the PR head)"
         parts.append(line + ". NEVER symlink node_modules into the Target worktree.")
     else:
         parts.append(blocks["default_guard"])
@@ -724,15 +758,18 @@ def render_prompt(slot: str, action: dict, state: dict, blocks: dict[str, str], 
 def describe(slot: str, action: dict, skill: str | None) -> str:
     pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
     tail = ""
+    intent_pr_ref = None
     try:
         pinned = db.dispatch_anchor(action)
+        intent_pr_ref = getattr(db.dispatch_intent(action), "pr_ref", None)
     except ValueError as exc:
         pinned = None  # an unknown intent kind is the renderer's RenderError, not describe's
         print(f"render-dispatch: describe: {exc}", file=sys.stderr)
+    pr_ref = intent_pr_ref or pa.get("pr_ref")
     if _issue_number(pinned):
         tail = f" on #{_issue_number(pinned)}"
-    elif pa.get("pr_ref"):
-        tail = f" on PR {str(pa.get('pr_ref')).rstrip('/').rsplit('/', 1)[-1]}"
+    elif pr_ref:
+        tail = f" on PR {str(pr_ref).rstrip('/').rsplit('/', 1)[-1]}"
     elif _issue_number(pa.get("ticket")):
         tail = f" on ticket #{_issue_number(pa.get('ticket'))}"
     elif pa.get("scope"):
