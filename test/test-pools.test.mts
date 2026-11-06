@@ -277,6 +277,20 @@ describe("test-pools — hazard scan is transitive (QA round 2)", () => {
     }
   });
 
+  test("a mkdtemp-wrapped tmpdir() prefix is unique per call and is not a hazard; a bare constant path is", () => {
+    const root = tree({
+      "test/a.test.mts": 'const d = mkdtempSync(join(tmpdir(), "a-test-"));\n',
+      "test/b.test.mts": 'const p = join(tmpdir(), "shared-name");\n',
+    });
+    try {
+      const m = scanPools(root);
+      assert.deepEqual(m.parallel, ["test/a.test.mts"]);
+      assert.ok("test/b.test.mts" in m.serialPinned);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("a spawned slashless script that the scan cannot resolve fails toward serial", () => {
     const root = tree({
       "test/a.test.mts": 'spawn("mystery.mjs");\n',
