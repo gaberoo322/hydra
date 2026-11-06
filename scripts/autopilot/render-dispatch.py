@@ -66,6 +66,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # by spec, so the path insert keeps the import resolvable from there too).
 sys.path.insert(0, SCRIPT_DIR)
 import turn_snapshot as ts  # noqa: E402
+import decide_base as db  # noqa: E402  (Dispatch Intent types + accessors, #5381)
 import run_ledger  # noqa: E402  (the ONE state-document parser, #5075)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
@@ -128,12 +129,12 @@ FORWARD_FIX_CONTRACT = """Red-PR forward-fix contract (issues #4460, #5058, INV-
 5. **Verify in the foreground** (`npm test`, `npm run typecheck` AND `npm run typecheck:test`, before the push that is meant to be final), commit, push — the same commit-before-verify discipline as any dev dispatch: commit and push first, verify, push again once green. When done, post exactly ONE comment on the PR naming what was fixed and which required check(s) or QA finding(s) the fix targets, plus any finding you rebutted and why, naming both tests (the red-without-the-fix test and the sibling-shape pin) for each QA-FAIL finding fixed with a code change — none for a rebutted finding or a CI-only fix. Do not relabel the anchor issue by hand — reap's needs-qa promotion (INV-9) advances it when the closing PR is confirmed."""
 
 # The conflict fix-forward deltas (playbook § dev_orch dispatch, issues #4807,
-# #5253) — appended after FORWARD_FIX_CONTRACT when `prompt_args.conflict_fix`
-# is set, one per arm. Verbatim copies of the playbook paragraphs; the parity
+# #5253) — appended after FORWARD_FIX_CONTRACT for the ForwardFixConflict /
+# ForwardFixConflictWithFail intent kinds (the kind IS the condition). Verbatim copies of the playbook paragraphs; the parity
 # test in test/autopilot-render-dispatch.test.mts pins them against it.
-CONFLICT_ONLY_DELTA = """**Conflict fix-forward delta (issue #4807).** When `prompt_args.conflict_fix` is true and `prompt_args.qa_fail_at_head` is not set (the `orch_dirty_forward_fix` pin with no FAIL pending), first apply `conflict-fix-attempted` to the PR via `gh api repos/gaberoo322/hydra/issues/<pr>/labels -f 'labels[]=conflict-fix-attempted'` (never `gh pr edit`), then carry the contract above with step 1's reset kept and: merge `origin/master` into the head (NEVER rebase, force-push or `gh pr create`); keep both sides' intent; regenerate `npm run docs:inventories` and union `test/fixtures/suite-count-baseline.json` keys then `--update-baseline`; run targeted tests + `typecheck` + `typecheck:test`; push to the SAME branch; do NOT address review findings. An unresolvable conflict ends with no push and one PR comment naming the paths; never remove the marker."""
+CONFLICT_ONLY_DELTA = """**Conflict fix-forward delta (issue #4807).** This is the `orch_dirty_forward_fix` pin with no QA FAIL pending at the head: first apply `conflict-fix-attempted` to the PR via `gh api repos/gaberoo322/hydra/issues/<pr>/labels -f 'labels[]=conflict-fix-attempted'` (never `gh pr edit`), then carry the contract above with step 1's reset kept and: merge `origin/master` into the head (NEVER rebase, force-push or `gh pr create`); keep both sides' intent; regenerate `npm run docs:inventories` and union `test/fixtures/suite-count-baseline.json` keys then `--update-baseline`; run targeted tests + `typecheck` + `typecheck:test`; push to the SAME branch; do NOT address review findings. An unresolvable conflict ends with no push and one PR comment naming the paths; never remove the marker."""
 
-TWO_PHASE_DELTA = """**Two-phase conflict fix-forward delta (issue #5253).** When `prompt_args.qa_fail_at_head` is true (a QA FAIL is pending at the PR's pre-merge head), carry the contract above in this order: (a) apply `conflict-fix-attempted` to the PR via `gh api repos/gaberoo322/hydra/issues/<pr>/labels -f 'labels[]=conflict-fix-attempted'` (never `gh pr edit`); (b) reset to the PR head per step 1; (c) merge `origin/master` into the head (NEVER rebase, force-push or `gh pr create`), keep both sides' intent, regenerate `npm run docs:inventories` and union `test/fixtures/suite-count-baseline.json` keys then `--update-baseline`, commit and push the merge to the SAME branch; (d) only then carry steps 2-5 on the merged head, taking the finding list from the `### Findings` comment whose trailing `QA-Verdict` sha matches the pre-merge head's FAIL trailer — finding work never happens on an unmerged head. An unresolvable conflict ends with no push, one PR comment naming the paths and no finding work; never remove the marker."""
+TWO_PHASE_DELTA = """**Two-phase conflict fix-forward delta (issue #5253).** A QA FAIL is pending at the PR's pre-merge head: carry the contract above in this order: (a) apply `conflict-fix-attempted` to the PR via `gh api repos/gaberoo322/hydra/issues/<pr>/labels -f 'labels[]=conflict-fix-attempted'` (never `gh pr edit`); (b) reset to the PR head per step 1; (c) merge `origin/master` into the head (NEVER rebase, force-push or `gh pr create`), keep both sides' intent, regenerate `npm run docs:inventories` and union `test/fixtures/suite-count-baseline.json` keys then `--update-baseline`, commit and push the merge to the SAME branch; (d) only then carry steps 2-5 on the merged head, taking the finding list from the `### Findings` comment whose trailing `QA-Verdict` sha matches the pre-merge head's FAIL trailer — finding work never happens on an unmerged head. An unresolvable conflict ends with no push, one PR comment naming the paths and no finding work; never remove the marker."""
 
 UNPINNED_RANKING = """Ordering the unpinned pick (issue #3981) — when more than one `ready-for-agent` issue is eligible, break the tie in this order (a tie-break, not a quota): 1. **Maintainability** — refactors, test coverage, dead-code removal, silent-catch audits, module splits; 2. **Operator surface** — the dashboard and the observability it renders; 3. **Throughput** — new capability. If the top-ranked eligible issue is blocked, has an open PR already referencing it (grep PR bodies for `Closes #N`), or lacks a `## Files in scope` section, fall through to the next — do not relabel to force it."""
 
@@ -359,6 +360,113 @@ def _issue_number(ref) -> str | None:
 # The `## Task` skeleton
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# dev_orch: a pure function of the typed Dispatch Intent (issue #5381)
+# ---------------------------------------------------------------------------
+
+def _pinned_or_unpinned(anchor_n: str | None, skill: str | None) -> list[str]:
+    if anchor_n:
+        return [
+            f"Invoke the `{skill}` skill (via the Skill tool) on **issue #{anchor_n}** of {ORCH_REPO} "
+            f"(anchor `issue-{anchor_n}`) — this anchor is PINNED (issue #3711): work that issue and no other."
+        ]
+    return [
+        f"Invoke the `{skill}` skill (via the Skill tool) on the orch board ({ORCH_REPO}), unpinned — "
+        "it self-selects one `ready-for-agent` issue.",
+        UNPINNED_RANKING,
+    ]
+
+
+def _stalled_branch(branch: str) -> str:
+    # #3866 wording — unchanged (issue #4808 INV-10).
+    return (
+        f"This anchor previously stalled without a landed result (branch `{branch}`). Before implementing from "
+        "scratch, check whether that branch still exists (`git ls-remote origin <branch>`) and continue "
+        "from it if so — do not silently redo already-committed work. This is a fresh session, not a "
+        "resumed one; reusing the branch is what avoids re-paying for the committed portion."
+    )
+
+
+def _salvage(anchor_n: str | None) -> str:
+    # #4808: the no-PR resume pin has no headRefName to carry — the
+    # salvage branch (if any) lives in the issue's own comment
+    # history, in the last reap stall comment's **Branch:** line or
+    # a recovery comment an operator/supervisor left behind.
+    return (
+        f"This anchor previously stalled without a landed result and no branch was recorded in the resume "
+        f"pin. Read the issue's comments (`gh issue view {anchor_n} --json comments`) for the latest reap "
+        "stall comment's `**Branch:**` line, or a recovery comment naming a salvage branch; check whether "
+        "that branch still exists (`git ls-remote origin <branch>`), and judge whether continuing it "
+        "against current origin/master beats starting fresh — do not silently redo already-committed work."
+    )
+
+
+def _open_pr(anchor_n: str | None) -> str:
+    return (
+        "Open the PR from the worktree branch with a body that carries `## Files in scope`, a `Tier:` line and "
+        f"ends `Closes #{anchor_n or '<N>'}`; fetch the design concept first if one exists "
+        f"(`curl -s http://localhost:4000/api/design-concepts/issue-{anchor_n or '<N>'}`) and include the "
+        "reconciliation section the design-concept gate requires. Do NOT merge or self-approve (shared identity "
+        "422s; CI is the merge gate) and do NOT relabel the issue by hand — reap's needs-qa promotion advances it."
+    )
+
+
+def _render_fresh(intent, skill: str | None) -> list[str]:
+    n = _issue_number(intent.anchor)
+    return _pinned_or_unpinned(n, skill) + [_open_pr(n)]
+
+
+def _render_resume_branch(intent, skill: str | None) -> list[str]:
+    n = _issue_number(intent.anchor)
+    return _pinned_or_unpinned(n, skill) + [_stalled_branch(intent.branch), _open_pr(n)]
+
+
+def _render_resume_salvage(intent, skill: str | None) -> list[str]:
+    n = _issue_number(intent.anchor)
+    return _pinned_or_unpinned(n, skill) + [_salvage(n), _open_pr(n)]
+
+
+def _forward_fix_kind(delta: str | None):
+    def render_kind(intent, skill: str | None) -> list[str]:
+        n = _issue_number(intent.anchor)
+        out = _pinned_or_unpinned(n, skill)
+        out.append(_stalled_branch(intent.branch))
+        out.append(FORWARD_FIX_CONTRACT.format(pr=intent.pr, branch=intent.branch))
+        if delta:
+            out.append(delta)
+        return out
+
+    return render_kind
+
+
+# kind-name -> fn(intent, skill) -> sentence list. A dev_orch intent whose kind
+# has no row here raises RenderError (exit 2) - the completeness mechanism.
+DEV_INTENT_RENDERERS = {
+    "Fresh": _render_fresh,
+    "ResumeBranch": _render_resume_branch,
+    "ResumeSalvage": _render_resume_salvage,
+    "ForwardFixRed": _forward_fix_kind(None),
+    "ForwardFixConflict": _forward_fix_kind(CONFLICT_ONLY_DELTA),
+    "ForwardFixConflictWithFail": _forward_fix_kind(TWO_PHASE_DELTA),
+}
+
+
+def dev_orch_task(action: dict, skill: str | None) -> list[str]:
+    try:
+        intent = db.dispatch_intent(action)
+    except ValueError as exc:
+        raise RenderError(f"dev_orch: {exc}") from exc
+    if intent is None:
+        raise RenderError("dev_orch: dispatch action carries no intent")
+    fn = DEV_INTENT_RENDERERS.get(intent.kind)
+    if fn is None:
+        raise RenderError(f"dev_orch: no renderer for intent kind {intent.kind!r}")
+    return fn(intent, skill) + [
+        DEV_VERIFY_RULES,
+        "Final message: the PR number and head SHA (or the commits pushed to the existing PR), the required-check state you observed, or a `## Friction Report` naming a hard blocker.",
+    ]
+
+
 def task_section(slot: str, action: dict, state: dict, skill: str | None) -> list[str]:
     pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
     out: list[str] = ["## Task"]
@@ -366,53 +474,7 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
     scope = pa.get("scope")
 
     if slot == "dev_orch":
-        if anchor_n:
-            out.append(
-                f"Invoke the `{skill}` skill (via the Skill tool) on **issue #{anchor_n}** of {ORCH_REPO} "
-                f"(anchor `issue-{anchor_n}`) — this anchor is PINNED (issue #3711): work that issue and no other."
-            )
-        else:
-            out.append(
-                f"Invoke the `{skill}` skill (via the Skill tool) on the orch board ({ORCH_REPO}), unpinned — "
-                "it self-selects one `ready-for-agent` issue."
-            )
-            out.append(UNPINNED_RANKING)
-        if pa.get("resume"):
-            branch = pa.get("resume_branch")
-            if branch:
-                # #3866 wording — unchanged (issue #4808 INV-10).
-                out.append(
-                    f"This anchor previously stalled without a landed result (branch `{branch}`). Before implementing from "
-                    "scratch, check whether that branch still exists (`git ls-remote origin <branch>`) and continue "
-                    "from it if so — do not silently redo already-committed work. This is a fresh session, not a "
-                    "resumed one; reusing the branch is what avoids re-paying for the committed portion."
-                )
-            else:
-                # #4808: the no-PR resume pin has no headRefName to carry — the
-                # salvage branch (if any) lives in the issue's own comment
-                # history, in the last reap stall comment's **Branch:** line or
-                # a recovery comment an operator/supervisor left behind.
-                out.append(
-                    f"This anchor previously stalled without a landed result and no branch was recorded in the resume "
-                    f"pin. Read the issue's comments (`gh issue view {anchor_n} --json comments`) for the latest reap "
-                    "stall comment's `**Branch:**` line, or a recovery comment naming a salvage branch; check whether "
-                    "that branch still exists (`git ls-remote origin <branch>`), and judge whether continuing it "
-                    "against current origin/master beats starting fresh — do not silently redo already-committed work."
-                )
-        if pa.get("forward_fix_pr"):
-            out.append(FORWARD_FIX_CONTRACT.format(pr=pa.get("forward_fix_pr"), branch=pa.get("resume_branch") or "<resume_branch>"))
-            if pa.get("conflict_fix"):
-                out.append(TWO_PHASE_DELTA if pa.get("qa_fail_at_head") else CONFLICT_ONLY_DELTA)
-        else:
-            out.append(
-                "Open the PR from the worktree branch with a body that carries `## Files in scope`, a `Tier:` line and "
-                f"ends `Closes #{anchor_n or '<N>'}`; fetch the design concept first if one exists "
-                f"(`curl -s http://localhost:4000/api/design-concepts/issue-{anchor_n or '<N>'}`) and include the "
-                "reconciliation section the design-concept gate requires. Do NOT merge or self-approve (shared identity "
-                "422s; CI is the merge gate) and do NOT relabel the issue by hand — reap's needs-qa promotion advances it."
-            )
-        out.append(DEV_VERIFY_RULES)
-        out.append("Final message: the PR number and head SHA (or the commits pushed to the existing PR), the required-check state you observed, or a `## Friction Report` naming a hard blocker.")
+        out.extend(dev_orch_task(action, skill))
 
     elif slot == "qa_orch":
         lane = [str(n) for n in (ts.ordered_numbers(state, [], "needs_qa_numbers") or [])]
@@ -626,8 +688,13 @@ def render_prompt(slot: str, action: dict, state: dict, blocks: dict[str, str], 
 def describe(slot: str, action: dict, skill: str | None) -> str:
     pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
     tail = ""
-    if _issue_number(pa.get("anchor")):
-        tail = f" on #{_issue_number(pa.get('anchor'))}"
+    try:
+        pinned = db.dispatch_anchor(action)
+    except ValueError as exc:
+        pinned = None  # an unknown intent kind is the renderer's RenderError, not describe's
+        print(f"render-dispatch: describe: {exc}", file=sys.stderr)
+    if _issue_number(pinned):
+        tail = f" on #{_issue_number(pinned)}"
     elif pa.get("pr_ref"):
         tail = f" on PR {str(pa.get('pr_ref')).rstrip('/').rsplit('/', 1)[-1]}"
     elif _issue_number(pa.get("ticket")):

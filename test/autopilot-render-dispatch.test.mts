@@ -100,6 +100,13 @@ function action(slot: string, skill: string, extra: Record<string, unknown> = {}
   };
 }
 
+/** A dev_orch dispatch action carrying a typed Dispatch Intent and NO prompt_args key (#5381). */
+function devAction(intent?: Record<string, unknown>): Record<string, unknown> {
+  const a = action("dev_orch", "hydra-dev", { intent: intent ?? { kind: "Fresh" } });
+  delete a.prompt_args;
+  return a;
+}
+
 const dirs: string[] = [];
 after(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
@@ -149,7 +156,7 @@ const count = (hay: string, needle: string) => hay.split(needle).length - 1;
 // ---------------------------------------------------------------------------
 describe("render-dispatch.py — preamble blocks come from the playbook fences (issue #4833)", () => {
   test("dev_orch: sentinel, the default guard, the dev_orch flat-ban block — each verbatim, once", () => {
-    const a = action("dev_orch", "hydra-dev");
+    const a = devAction();
     const out = render("dev_orch", a);
     assert.ok(out.prompt.startsWith(`${a.dispatchSentinel}\n\n${DEFAULT_GUARD}\n\n${NEVER_DEV_ORCH}\n\n## Task`), out.prompt.slice(0, 600));
     assert.equal(count(out.prompt, "## CRITICAL SAFETY RULE"), 1);
@@ -217,9 +224,130 @@ describe("render-dispatch.py — preamble blocks come from the playbook fences (
 });
 
 // ---------------------------------------------------------------------------
+describe("render-dispatch.py — dev_orch is a pure function of the Dispatch Intent (issue #5381)", () => {
+  const SIGNATURE: Record<string, RegExp> = {
+    Fresh: /Open the PR from the worktree branch/,
+    ResumeBranch: /previously stalled without a landed result \(branch `b`\)/,
+    ResumeSalvage: /no branch was recorded in the resume pin/,
+    ForwardFixRed: /Red-PR forward-fix contract/,
+    ForwardFixConflict: /\*\*Conflict fix-forward delta \(issue #4807\)\.\*\*/,
+    ForwardFixConflictWithFail: /\*\*Two-phase conflict fix-forward delta \(issue #5253\)\.\*\*/,
+  };
+  const SAMPLE_FIELDS = { anchor: "issue-12", branch: "b", pr: 9 };
+
+  test("completeness: every kind defined in decide_base renders (a kind without a renderer turns this red)", () => {
+    const kinds: string[] = JSON.parse(
+      spawnSync("python3", ["-c", "import json, decide_base; print(json.dumps(list(decide_base.DEV_INTENT_KINDS)))"], {
+        cwd: join(REPO_ROOT, "scripts", "autopilot"),
+        encoding: "utf-8",
+      }).stdout,
+    );
+    for (const kind of kinds) {
+      assert.ok(SIGNATURE[kind], `test knows kind ${kind}`);
+      const out = render("dev_orch", devAction({ kind, ...SAMPLE_FIELDS }));
+      assert.match(out.prompt, SIGNATURE[kind], `${kind} renders its signature sentence`);
+    }
+  });
+
+  test("an unknown kind and a missing intent both exit 2 naming the problem (never generic task text)", () => {
+    const bogus = run("dev_orch", [devAction({ kind: "Bogus" })]);
+    assert.equal(bogus.status, 2);
+    assert.match(bogus.stderr, /Bogus/);
+    const a = devAction();
+    delete a.intent;
+    const missing = run("dev_orch", [a]);
+    assert.equal(missing.status, 2);
+    assert.match(missing.stderr, /no intent/);
+  });
+
+  test("the dev_orch branch ignores any prompt_args bag: only the intent selects the shape", () => {
+    const a = devAction({ kind: "Fresh" });
+    a.prompt_args = { anchor: "issue-999", resume: true, forward_fix_pr: 1 };
+    const out = render("dev_orch", a);
+    assert.match(out.prompt, /unpinned/);
+    assert.doesNotMatch(out.prompt, /999|forward-fix contract/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("decide_base — Dispatch Intent accessors and the make_dispatch writer (issue #5381)", () => {
+  const PY = `
+import json, sys
+import decide_base as db
+pairs = json.loads(sys.stdin.read())
+out = []
+for p in pairs:
+    row = []
+    for act in (p["intent"], p["legacy"]):
+        row.append([db.dispatch_anchor(act), db.dispatch_resume_branch(act), db.dispatch_attempt(act), db.dispatch_forced(act)])
+    out.append(row)
+print(json.dumps(out))
+`;
+  const wrap = (extra: Record<string, unknown>) => ({ type: "dispatch", slot: "dev_orch", skill: "hydra-dev", ...extra });
+  const pyRun = (code: string, input = "") =>
+    spawnSync("python3", ["-c", code], { cwd: join(REPO_ROOT, "scripts", "autopilot"), encoding: "utf-8", input });
+
+  test("each accessor returns the same facts for an intent action and its legacy prompt_args equivalent", () => {
+    const pairs = [
+      { intent: wrap({ intent: { kind: "Fresh" } }), legacy: wrap({ prompt_args: {} }) },
+      { intent: wrap({ intent: { kind: "Fresh", anchor: "issue-3" } }), legacy: wrap({ prompt_args: { anchor: "issue-3" } }) },
+      { intent: wrap({ intent: { kind: "ResumeBranch", anchor: "issue-3", branch: "b" } }), legacy: wrap({ prompt_args: { anchor: "issue-3", resume: true, resume_branch: "b" } }) },
+      { intent: wrap({ intent: { kind: "ResumeSalvage", anchor: "issue-3" } }), legacy: wrap({ prompt_args: { anchor: "issue-3", resume: true } }) },
+      { intent: wrap({ intent: { kind: "ForwardFixRed", anchor: "issue-3", pr: 7, branch: "b" } }), legacy: wrap({ prompt_args: { anchor: "issue-3", resume: true, resume_branch: "b", forward_fix_pr: 7 } }) },
+      { intent: wrap({ intent: { kind: "ForwardFixConflict", anchor: "issue-3", pr: 7, branch: "b" } }), legacy: wrap({ prompt_args: { anchor: "issue-3", resume: true, resume_branch: "b", forward_fix_pr: 7, conflict_fix: true } }) },
+      { intent: wrap({ intent: { kind: "ForwardFixConflictWithFail", anchor: "issue-3", pr: 7, branch: "b" } }), legacy: wrap({ prompt_args: { anchor: "issue-3", resume: true, resume_branch: "b", forward_fix_pr: 7, conflict_fix: true, qa_fail_at_head: true } }) },
+    ];
+    const r = pyRun(PY, JSON.stringify(pairs));
+    assert.equal(r.status, 0, r.stderr);
+    for (const [i, [a, b]] of (JSON.parse(r.stdout) as unknown[][][]).entries()) assert.deepEqual(a, b, `pair ${i}`);
+  });
+
+  test("the legacy resume_branch accessor still requires resume === true; attempt coerces; forced is strict", () => {
+    const pairs = [
+      { intent: wrap({ prompt_args: { resume_branch: "b" } }), legacy: wrap({ prompt_args: { attempt: "nope", forced: "yes" } }) },
+    ];
+    const r = pyRun(PY, JSON.stringify(pairs));
+    assert.equal(r.status, 0, r.stderr);
+    const [[a, b]] = JSON.parse(r.stdout);
+    assert.deepEqual(a, [null, null, 1, false]);
+    assert.deepEqual(b, [null, null, 1, false]);
+  });
+
+  test("an intent action carries NO prompt_args key and projects the pinned anchor to the top level (INV-1, INV-8)", () => {
+    const r = pyRun(
+      "import json, decide_base as db; a = db.make_dispatch('dev_orch', 'hydra-dev', intent=db.Fresh(anchor='issue-5'), reason='r'); b = db.make_dispatch('dev_orch', 'hydra-dev', intent=db.Fresh(), reason='r'); print(json.dumps([a, b]))",
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const [a, b] = JSON.parse(r.stdout);
+    assert.deepEqual(a.intent, { kind: "Fresh", anchor: "issue-5" });
+    assert.equal("prompt_args" in a, false);
+    assert.equal(a.anchor, "issue-5");
+    assert.equal("anchor" in b, false);
+  });
+
+  test("make_dispatch refuses an intent combined with work-shape prompt_args but allows the escalation keys (INV-1, INV-3)", () => {
+    const bad = pyRun("import decide_base as db; db.make_dispatch('dev_orch', 'hydra-dev', intent=db.Fresh(), prompt_args={'anchor': 'issue-1'})");
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /ValueError/);
+    const ok = pyRun("import json, decide_base as db; print(json.dumps(db.make_dispatch('dev_orch', 'hydra-dev', intent=db.escalation_intent('dev_orch'), prompt_args={'escalate_model': 'fable', 'attempt': 2, 'prior_attempt_status': 'failure'})))");
+    assert.equal(ok.status, 0, ok.stderr);
+    const a = JSON.parse(ok.stdout);
+    assert.deepEqual(a.intent, { kind: "Fresh" });
+    assert.equal(a.prompt_args.attempt, 2);
+    assert.equal(pyRun("import decide_base as db; print(db.escalation_intent('qa_orch'))").stdout.trim(), "None");
+  });
+
+  test("intent_from_dict fails loud on an unknown kind", () => {
+    const r = pyRun("import decide_base as db; db.intent_from_dict({'kind': 'Nope'})");
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /unknown dispatch intent kind 'Nope'/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_args shape", () => {
   test("dev_orch pinned anchor names the issue and forbids self-selection (#3711)", () => {
-    const out = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4687" } }));
+    const out = render("dev_orch", devAction({ kind: "Fresh", anchor: "issue-4687" }));
     assert.match(out.prompt, /on \*\*issue #4687\*\* of gaberoo322\/hydra \(anchor `issue-4687`\) — this anchor is PINNED/);
     assert.doesNotMatch(out.prompt, /Ordering the unpinned pick/);
     assert.match(out.prompt, /ends `Closes #4687`/);
@@ -228,14 +356,14 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
   });
 
   test("dev_orch unpinned carries the #3981 tie-break ranking and the Files-in-scope / open-PR fall-through", () => {
-    const out = render("dev_orch", action("dev_orch", "hydra-dev"));
+    const out = render("dev_orch", devAction());
     assert.match(out.prompt, /unpinned — it self-selects one `ready-for-agent` issue/);
     assert.match(out.prompt, /1\. \*\*Maintainability\*\*.*2\. \*\*Operator surface\*\*.*3\. \*\*Throughput\*\*/);
     assert.match(out.prompt, /lacks a `## Files in scope` section, fall through/);
   });
 
   test("dev_orch resume names the branch and the ls-remote check (#3866)", () => {
-    const out = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4511", resume: true, resume_branch: "dev/4511-split" } }));
+    const out = render("dev_orch", devAction({ kind: "ResumeBranch", anchor: "issue-4511", branch: "dev/4511-split" }));
     assert.match(out.prompt, /previously stalled without a landed result \(branch `dev\/4511-split`\)/);
     assert.match(out.prompt, /git ls-remote origin <branch>/);
     assert.doesNotMatch(out.prompt, /forward-fix contract/);
@@ -245,7 +373,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     // The no-PR resume pin carries NO resume_branch (there is no PR, so no
     // headRefName) — the salvage branch, if any, lives in the issue's own
     // comment history.
-    const out = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4806", resume: true } }));
+    const out = render("dev_orch", devAction({ kind: "ResumeSalvage", anchor: "issue-4806" }));
     assert.match(out.prompt, /no branch was recorded in the resume pin/);
     assert.match(out.prompt, /gh issue view 4806 --json comments/);
     assert.match(out.prompt, /latest reap stall comment's `\*\*Branch:\*\*` line/);
@@ -254,7 +382,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     // The #3866 with-branch wording stays byte-identical for branch-carrying
     // resumes — and never leaks into the no-branch prompt.
     assert.doesNotMatch(out.prompt, /previously stalled without a landed result \(branch/);
-    const withBranch = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4806", resume: true, resume_branch: "dev/4806" } }));
+    const withBranch = render("dev_orch", devAction({ kind: "ResumeBranch", anchor: "issue-4806", branch: "dev/4806" }));
     assert.match(withBranch.prompt, /previously stalled without a landed result \(branch `dev\/4806`\)/);
     assert.doesNotMatch(withBranch.prompt, /no branch was recorded in the resume pin/);
   });
@@ -262,7 +390,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
   test("dev_orch forward-fix carries the #4460 INV-10 contract (provenance-agnostic since #5058) with the PR and branch substituted", () => {
     const out = render(
       "dev_orch",
-      action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4728", resume: true, resume_branch: "worktree-agent-glm-4728", forward_fix_pr: 4776 } }),
+      devAction({ kind: "ForwardFixRed", anchor: "issue-4728", branch: "worktree-agent-glm-4728", pr: 4776 }),
     );
     for (const needle of [
       "Red-PR forward-fix contract (issues #4460, #5058, INV-10) — PR #4776 on branch `worktree-agent-glm-4728` already exists",
@@ -283,7 +411,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
   test("a QA-FAIL forward-fix reads hydra-qa's findings comment and green CI does not complete it (#4849)", () => {
     const out = render(
       "dev_orch",
-      action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4728", resume: true, resume_branch: "worktree-agent-glm-4728", forward_fix_pr: 4776 } }),
+      devAction({ kind: "ForwardFixRed", anchor: "issue-4728", branch: "worktree-agent-glm-4728", pr: 4776 }),
     );
     const secStart = PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract");
     const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only): `state.red_forward_fix_attempts`");
@@ -310,7 +438,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
   test("a forward-fix resolves a code finding with a test and verifies with the full dev trio (#5036)", () => {
     const out = render(
       "dev_orch",
-      action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-4720", resume: true, resume_branch: "b", forward_fix_pr: 5003 } }),
+      devAction({ kind: "ForwardFixRed", anchor: "issue-4720", branch: "b", pr: 5003 }),
     );
     const secStart = PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract");
     const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only): `state.red_forward_fix_attempts`");
@@ -329,7 +457,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
   });
 
   test("the forward-fix contract's five steps are the playbook's five (same bold step titles, same order)", () => {
-    const out = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { anchor: "issue-1", resume: true, resume_branch: "b", forward_fix_pr: 2 } }));
+    const out = render("dev_orch", devAction({ kind: "ForwardFixRed", anchor: "issue-1", branch: "b", pr: 2 }));
     const titles = (text: string) => [...text.matchAll(/^\d\. \*\*([^*]+)\*\*/gm)].map((m) => m[1]);
     const section = PLAYBOOK.slice(PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract"), PLAYBOOK.indexOf("The cap (red-CI arm only): `state.red_forward_fix_attempts`"));
     const want = titles(section);
@@ -337,12 +465,12 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     assert.deepEqual(titles(out.prompt.slice(out.prompt.indexOf("Red-PR forward-fix contract"))), want);
   });
 
-  test("conflict_fix renders the matching delta per arm; the no-address-findings clause is conflict-only (issues #4807, #5253)", () => {
+  test("the conflict kinds render the matching delta per arm; the no-address-findings clause is conflict-only (issues #4807, #5253)", () => {
     const flat = (text: string) => text.replace(/\s+/g, " ");
-    const base = { anchor: "issue-4511", resume: true, resume_branch: "b", forward_fix_pr: 4818, conflict_fix: true };
-    const conflictOnly = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: base })).prompt;
-    const twoPhase = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { ...base, qa_fail_at_head: true } })).prompt;
-    const plain = render("dev_orch", action("dev_orch", "hydra-dev", { prompt_args: { ...base, conflict_fix: undefined } })).prompt;
+    const base = { anchor: "issue-4511", branch: "b", pr: 4818 };
+    const conflictOnly = render("dev_orch", devAction({ kind: "ForwardFixConflict", ...base })).prompt;
+    const twoPhase = render("dev_orch", devAction({ kind: "ForwardFixConflictWithFail", ...base })).prompt;
+    const plain = render("dev_orch", devAction({ kind: "ForwardFixRed", ...base })).prompt;
 
     assert.ok(conflictOnly.includes("**Conflict fix-forward delta (issue #4807).**"));
     assert.ok(conflictOnly.includes("do NOT address review findings"));
@@ -354,6 +482,11 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     assert.ok(!twoPhase.includes("**Conflict fix-forward delta (issue #4807).**"));
 
     assert.ok(!plain.includes("conflict fix-forward delta") && !plain.includes("Conflict fix-forward delta"), "a plain forward-fix carries no delta");
+
+    // The kind IS the condition: neither delta (nor its playbook paragraph) names a prompt_args flag.
+    for (const delta of [conflictOnly.slice(conflictOnly.indexOf("**Conflict fix-forward delta")), twoPhase.slice(twoPhase.indexOf("**Two-phase conflict"))]) {
+      assert.ok(!delta.split(/\n\s*\n/)[0].includes("prompt_args"), "delta paragraph states its instructions without a prompt_args condition");
+    }
 
     // Playbook parity: each rendered delta is a verbatim paragraph of the playbook.
     const paragraphs = PLAYBOOK.split(/\n\s*\n/).map(flat);
@@ -478,7 +611,7 @@ describe("render-dispatch.py — model resolution (#1093, #3274, #4585)", () => 
     const seen: Record<string, string | null> = {};
     for (const cls of CLASSES) {
       const skill = "hydra-x";
-      const out = render(cls, action(cls, skill));
+      const out = render(cls, cls === "dev_orch" ? devAction() : action(cls, skill));
       seen[cls] = out.model;
       assert.ok(out.model === null || ["fable", "sonnet", "haiku", "opus"].includes(out.model), `${cls}: ${out.model}`);
     }
@@ -496,7 +629,7 @@ describe("render-dispatch.py — model resolution (#1093, #3274, #4585)", () => 
     assert.ok(Object.keys(column).length >= 18, `column rows: ${Object.keys(column).length}`);
     for (const cls of Object.keys(column)) {
       const cell = column[cls];
-      const out = render(cls, action(cls, "hydra-x"));
+      const out = render(cls, cls === "dev_orch" ? devAction() : action(cls, "hydra-x"));
       assert.equal(out.model, cell === "inherit" ? null : cell, cls);
       assert.equal(out.model_source, cell === "inherit" ? "model-column:inherit" : "model-column", cls);
     }
@@ -534,7 +667,7 @@ describe("render-dispatch.py — model resolution (#1093, #3274, #4585)", () => 
     const hint = render("cleanup_orch", action("cleanup_orch", "hydra-cleanup", { prompt_args: { escalate_model: "fable" } }), exhausted);
     assert.equal(hint.model, "opus", "the hint is pre-resolved too");
     assert.equal(hint.model_source, "escalate_model→fable-exhausted-fallback");
-    const sonnetClass = render("dev_orch", action("dev_orch", "hydra-dev"), exhausted);
+    const sonnetClass = render("dev_orch", devAction(), exhausted);
     assert.equal(sonnetClass.model, "sonnet", "non-fable rows are untouched");
   });
 
@@ -555,7 +688,7 @@ describe("render-dispatch.py — CLI contract", () => {
   });
 
   test("--prompt-only prints the prompt text, nothing else", () => {
-    const r = run("dev_orch", [action("dev_orch", "hydra-dev")], baseState(), ["--prompt-only"]);
+    const r = run("dev_orch", [devAction()], baseState(), ["--prompt-only"]);
     assert.equal(r.status, 0, r.stderr);
     assert.ok(r.stdout.startsWith("<!-- hydra-dispatch v1"));
     assert.ok(r.stdout.includes("## Task"));
@@ -566,7 +699,7 @@ describe("render-dispatch.py — CLI contract", () => {
     const noArgs = spawnSync("python3", [SCRIPT], { encoding: "utf-8" });
     assert.equal(noArgs.status, 2);
     assert.match(noArgs.stderr, /usage:/);
-    const badFlag = run("dev_orch", [action("dev_orch", "hydra-dev")], baseState(), ["--bogus"]);
+    const badFlag = run("dev_orch", [devAction()], baseState(), ["--bogus"]);
     assert.equal(badFlag.status, 2);
     const r = spawnSync("python3", [SCRIPT, "dev_orch"], {
       encoding: "utf-8",
@@ -580,5 +713,89 @@ describe("render-dispatch.py — CLI contract", () => {
     const row = PLAYBOOK.split("\n").find((l) => l.startsWith("| `dispatch` |"))!;
     assert.match(row, /python3 scripts\/autopilot\/render-dispatch\.py <slot>/);
     assert.match(row, /stamp-slot\.py/);
+  });
+});
+
+describe("Dispatch Intent validation (#5381 QA round 1)", () => {
+  const py = (code: string) =>
+    spawnSync(
+      "python3",
+      ["-c", `import sys; sys.path.insert(0, ${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot"))})\nimport decide_base as db\n${code}`],
+      { encoding: "utf-8" },
+    );
+
+  for (const [label, raw] of [
+    ["empty branch", `{"kind":"ForwardFixRed","anchor":"issue-1","pr":5,"branch":""}`],
+    ["non-int pr", `{"kind":"ForwardFixRed","anchor":"issue-1","pr":"5","branch":"b"}`],
+    ["bool pr", `{"kind":"ForwardFixConflict","anchor":"issue-1","pr":True,"branch":"b"}`],
+    ["empty resume branch", `{"kind":"ResumeBranch","anchor":"issue-1","branch":""}`],
+    ["non-issue anchor on Fresh", `{"kind":"Fresh","anchor":"foo"}`],
+    ["non-issue anchor on ResumeSalvage", `{"kind":"ResumeSalvage","anchor":"issue-"}`],
+    ["non-numeric issue anchor on a forward-fix", `{"kind":"ForwardFixRed","anchor":"issue-x","pr":5,"branch":"b"}`],
+  ] as const) {
+    test(`intent_from_dict rejects ${label}`, () => {
+      const r = py(`try:\n    db.intent_from_dict(${raw})\n    print("accepted")\nexcept ValueError:\n    print("rejected")`);
+      assert.equal(r.stdout.trim(), "rejected", r.stderr);
+    });
+  }
+
+  test("sibling shapes keep their verdict: well-formed intents still parse", () => {
+    const r = py(
+      `print(db.intent_from_dict({"kind":"ForwardFixRed","anchor":"issue-1","pr":5,"branch":"b"}).pr, db.intent_from_dict({"kind":"Fresh"}).anchor, db.intent_from_dict({"kind":"ResumeSalvage","anchor":"issue-1"}).anchor)`,
+    );
+    assert.equal(r.stdout.trim(), "5 None issue-1", r.stderr);
+  });
+});
+
+describe("Dispatch Intent through the INV-7 consumers (#5381)", () => {
+  const py = (code: string) =>
+    spawnSync(
+      "python3",
+      ["-c", `import sys, json; sys.path.insert(0, ${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot"))})\n${code}`],
+      { encoding: "utf-8" },
+    );
+
+  test("the pinned-anchor sentinel is read from an INTENT action (no prompt_args)", () => {
+    const r = py(
+      `import decide_base as db, decide\n` +
+        `a = db.make_dispatch('dev_orch', 'hydra-dev', intent=db.ResumeSalvage(anchor='issue-77'))\n` +
+        `acts = [a]\ndecide._stamp_dispatch_metadata(acts, {'run_id': 'r1', 'turn': 1})\n` +
+        `print(json.dumps({'sentinel': acts[0]['dispatchSentinel'], 'pa': acts[0].get('prompt_args')}))`,
+    );
+    const out = JSON.parse(r.stdout);
+    assert.ok(!out.pa, "intent actions carry no prompt_args");
+    assert.match(out.sentinel, /anchor=issue-77/);
+  });
+
+  test("sibling shape: a legacy prompt_args action still stamps its anchor into the sentinel", () => {
+    const r = py(
+      `import decide\n` +
+        `acts = [{'type': 'dispatch', 'slot': 'dev_orch', 'skill': 'hydra-dev', 'prompt_args': {'anchor': 'issue-78'}}]\n` +
+        `decide._stamp_dispatch_metadata(acts, {'run_id': 'r1', 'turn': 1})\nprint(acts[0]['dispatchSentinel'])`,
+    );
+    assert.match(r.stdout, /anchor=issue-78/);
+  });
+
+  test("stamp-slot build_slot stamps anchor and attempt from an INTENT action", () => {
+    const r = py(
+      `import importlib.util, decide_base as db\n` +
+        `spec = importlib.util.spec_from_file_location('stamp_slot', ${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot", "stamp-slot.py"))})\n` +
+        `m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n` +
+        `a = db.make_dispatch('dev_orch', 'hydra-dev', intent=db.ForwardFixRed(anchor='issue-5', pr=9, branch='b'), prompt_args={'attempt': 3, 'escalate_model': 'fable'})\n` +
+        `rec = m.build_slot(a, 'tid', 'sonnet', 'abcdef012345', 4, 1000)\n` +
+        `print(json.dumps({'anchor': rec.get('anchor'), 'attempt': rec['attempt']}))`,
+    );
+    assert.deepEqual(JSON.parse(r.stdout), { anchor: "issue-5", attempt: 3 }, r.stderr);
+  });
+
+  test("sibling shape: build_slot on an unpinned Fresh intent stamps no anchor, attempt 1", () => {
+    const r = py(
+      `import importlib.util, decide_base as db\n` +
+        `spec = importlib.util.spec_from_file_location('stamp_slot', ${JSON.stringify(join(REPO_ROOT, "scripts", "autopilot", "stamp-slot.py"))})\n` +
+        `m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n` +
+        `rec = m.build_slot(db.make_dispatch('dev_orch', 'hydra-dev', intent=db.Fresh()), 'tid', 'sonnet', 'abcdef012345', 4, 1000)\n` +
+        `print(json.dumps({'has_anchor': 'anchor' in rec, 'attempt': rec['attempt']}))`,
+    );
+    assert.deepEqual(JSON.parse(r.stdout), { has_anchor: false, attempt: 1 }, r.stderr);
   });
 });

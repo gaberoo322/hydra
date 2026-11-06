@@ -435,7 +435,7 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
     assert.ok(dev,
       "dev_orch must NOT yield globally when a different grill-clear anchor is available (#3711)");
     assert.equal(dev.skill, "hydra-dev");
-    assert.equal(dev.prompt_args.anchor, "issue-3707",
+    assert.equal(dev.intent.anchor, "issue-3707",
       "dev_orch must be PINNED to the grill-clear anchor — an unpinned dispatch lets " +
       "hydra-dev self-select via its own `gh issue list | .[0]` and land on the grilled anchor");
     assert.match(dev.reason, /3711/,
@@ -512,7 +512,7 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
     const plan = runDecide(state, { candidates: [] });
     const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
     assert.ok(dev, "dev_orch dispatches when no grill is pending");
-    assert.equal(dev.prompt_args?.anchor, undefined,
+    assert.equal(dev.intent.anchor, undefined,
       "no grill pending → no pin; hydra-dev selects its own anchor per #458");
   });
 

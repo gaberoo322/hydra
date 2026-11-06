@@ -352,6 +352,10 @@ from decide_base import (
     _signal_present,
     _target_dev_resume_pick_signal,
     _zero_yield_entry,
+    dispatch_anchor,
+    dispatch_resume_branch,
+    escalation_intent,
+    intent_from_dict,
     make_dispatch,
 )
 from decide_selectors.architecture import _select_signal_architecture_orch
@@ -2652,8 +2656,25 @@ def _rule_instant_death_replay(
             "attempt": prior_attempt + 1,
             "prior_attempt_status": "instant-death",
         })
+        # Issue #5381 QA round 1: a typed-intent dispatch (dev_orch) is recorded
+        # with its intent and replayed through it; escalation keys ride prompt_args.
+        rec_intent = None
+        if rec.get("intent") is None and escalation_intent(cls) is not None:
+            # A pre-intent dev_orch record has no typed intent; render-dispatch
+            # would exit 2 on the replay, so it is unjoinable, not replayed blind.
+            out.reasons.append(f"instant-death-unjoinable:{cls}")
+            continue
+        if rec.get("intent") is not None:
+            try:
+                rec_intent = intent_from_dict(rec["intent"])
+            except ValueError:  # intentional: an unparseable recorded intent is unjoinable, never replayed blind
+                out.reasons.append(f"instant-death-unjoinable:{cls}")
+                continue
         out.emit(
-            make_dispatch(cls, rec["skill"], prompt_args=args, reason=f"instant-death-replay:{cls}"),
+            make_dispatch(
+                cls, rec["skill"], prompt_args=args, intent=rec_intent,
+                reason=f"instant-death-replay:{cls}",
+            ),
             reason=f"instant-death-replay:{cls}",
         )
         out.dispatched += 1
@@ -2675,6 +2696,8 @@ def _record_last_dispatches(actions: list[dict], state: dict) -> None:
                 "prompt_args": a.get("prompt_args") or {},
                 "worktreeBranch": a.get("worktreeBranch"),
             }
+            if a.get("intent") is not None:
+                last[a["slot"]]["intent"] = a["intent"]
             changed = True
     if changed:
         state["last_dispatch_by_class"] = last
@@ -2888,6 +2911,7 @@ def _rule_escalation(
                 slot,
                 skill,
                 prompt_args=escalation_prompt_args,
+                intent=escalation_intent(slot),
                 reason=decision["reason"],
             ),
             reason=decision["reason"],
@@ -4037,8 +4061,7 @@ def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
         action["isolation"] = class_isolation(slot)
         skill = action.get("skill")
         if isinstance(skill, str) and skill:
-            pa = action.get("prompt_args")
-            pinned_anchor = pa.get("anchor") if isinstance(pa, dict) else None
+            pinned_anchor = dispatch_anchor(action)
             action["dispatchSentinel"] = make_dispatch_sentinel(
                 skill,
                 action["worktreeBranch"],
@@ -4495,13 +4518,13 @@ def _dev_target_resume_record(action: dict, state: dict) -> dict | None:
 
     Pure: reads the passed-in dicts only, no I/O (ADR-0007).
     """
-    prompt_args = action.get("prompt_args")
-    if not isinstance(prompt_args, dict) or prompt_args.get("resume") is not True:
-        return None
-    branch = prompt_args.get("resume_branch")
+    branch = dispatch_resume_branch(action)
     if not isinstance(branch, str) or not branch:
         return None
-    pr = prompt_args.get("resume_pr")
+    # `resume_pr` stays a prompt_args read until slice 3 (#5383) gives
+    # dev_target an intent.
+    prompt_args = action.get("prompt_args")
+    pr = prompt_args.get("resume_pr") if isinstance(prompt_args, dict) else None
     if isinstance(pr, bool) or not isinstance(pr, int):
         return None
     worktree_branch = action.get("worktreeBranch")

@@ -48,7 +48,6 @@
   "serialPinned": {
     "test/agent-dispatch-prompt-guard.test.mts": "uses a constant-name path under tmpdir() (clobbers under concurrency)",
     "test/autopilot-recover-stale.test.mts": "uses a constant-name path under tmpdir() (clobbers under concurrency)",
-    "test/autopilot-render-dispatch.test.mts": "uses a constant-name path under tmpdir() (clobbers under concurrency)",
     "test/build-spritesheet.test.mts": "runs `git worktree` operations against a shared repo (index.lock contention)",
     "test/dashboard-routes.test.mts": "names a script (../dashboard/scripts/parse-control-plane.mjs) the scan cannot resolve - treated as unsafe",
     "test/derive-version-bump.test.mts": "binds or dials a fixed port",

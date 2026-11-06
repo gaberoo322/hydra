@@ -130,6 +130,8 @@ interface RenderOpts {
   notes?: string;
   skill?: string;
   promptArgs?: Record<string, unknown>;
+  /** Typed Dispatch Intent (#5381): dev_orch actions carry this instead of prompt_args. */
+  intent?: Record<string, unknown>;
 }
 
 function renderPrompt(slot: string, isolation: "worktree" | "self", opts: RenderOpts = {}): string {
@@ -154,7 +156,9 @@ function renderPrompt(slot: string, isolation: "worktree" | "self", opts: Render
     type: "dispatch",
     slot,
     skill,
-    prompt_args: opts.promptArgs ?? { anchor: "issue-1234", scope: "orch" },
+    ...(slot === "dev_orch"
+      ? { intent: opts.intent ?? { kind: "Fresh", anchor: "issue-1234" }, ...(opts.promptArgs ? { prompt_args: opts.promptArgs } : {}) }
+      : { prompt_args: opts.promptArgs ?? { anchor: "issue-1234", scope: "orch" } }),
     worktreeBranch: `worktree-agent-4dfd1dc9-t4-${slot}`,
     isolation,
     dispatchSentinel: `<!-- hydra-dispatch v1 skill=${skill} dispatchId=worktree-agent-4dfd1dc9-t4-${slot} runId=${runId} -->`,
@@ -181,12 +185,12 @@ function renderPrompt(slot: string, isolation: "worktree" | "self", opts: Render
 }
 
 /** prompt_args shapes whose `## Task` skeleton sentences differ (render-dispatch task_section). */
-const VARIANTS: Array<{ name: string; slot: string; isolation: "worktree" | "self"; skill: string; promptArgs: Record<string, unknown> }> = [
-  { name: "dev_orch resume with branch", slot: "dev_orch", isolation: "worktree", skill: "hydra-dev", promptArgs: { anchor: "issue-1234", scope: "orch", resume: true, resume_branch: "worktree-agent-abc-t3-dev_orch" } },
-  { name: "dev_orch resume without branch", slot: "dev_orch", isolation: "worktree", skill: "hydra-dev", promptArgs: { anchor: "issue-1234", scope: "orch", resume: true } },
-  { name: "dev_orch red-PR forward-fix", slot: "dev_orch", isolation: "worktree", skill: "hydra-dev", promptArgs: { anchor: "issue-1234", scope: "orch", resume: true, resume_branch: "fix/1234-x", forward_fix_pr: 5145 } },
-  { name: "dev_orch unpinned", slot: "dev_orch", isolation: "worktree", skill: "hydra-dev", promptArgs: { scope: "orch" } },
-  { name: "dev_orch escalate_model", slot: "dev_orch", isolation: "worktree", skill: "hydra-dev", promptArgs: { anchor: "issue-1234", scope: "orch", escalate_model: "opus" } },
+const VARIANTS: Array<{ name: string; slot: string; isolation: "worktree" | "self"; skill: string; promptArgs?: Record<string, unknown>; intent?: Record<string, unknown> }> = [
+  { name: "dev_orch resume with branch", slot: "dev_orch", isolation: "worktree", skill: "hydra-dev", intent: { kind: "ResumeBranch", anchor: "issue-1234", branch: "worktree-agent-abc-t3-dev_orch" } },
+  { name: "dev_orch resume without branch", slot: "dev_orch", isolation: "worktree", skill: "hydra-dev", intent: { kind: "ResumeSalvage", anchor: "issue-1234" } },
+  { name: "dev_orch red-PR forward-fix", slot: "dev_orch", isolation: "worktree", skill: "hydra-dev", intent: { kind: "ForwardFixRed", anchor: "issue-1234", pr: 5145, branch: "fix/1234-x" } },
+  { name: "dev_orch unpinned", slot: "dev_orch", isolation: "worktree", skill: "hydra-dev", intent: { kind: "Fresh" } },
+  { name: "dev_orch escalate_model", slot: "dev_orch", isolation: "worktree", skill: "hydra-dev", intent: { kind: "Fresh", anchor: "issue-1234" }, promptArgs: { escalate_model: "opus" } },
   { name: "dev_target resume pin", slot: "dev_target", isolation: "self", skill: "hydra-target-build", promptArgs: { anchor: "issue-77", scope: "target", resume: true, resume_issue: 77, resume_pr: 88, resume_branch: "feature/x" } },
   { name: "qa_target pr_ref", slot: "qa_target", isolation: "self", skill: "hydra-target-qa", promptArgs: { scope: "target", pr_ref: "https://github.com/o/r/pull/88" } },
   { name: "wayfinder_orch task ticket", slot: "wayfinder_orch", isolation: "worktree", skill: "hydra-issue-research", promptArgs: { ticket: "issue-4200", ticket_type: "task" } },
@@ -223,7 +227,7 @@ describe("agent-dispatch-prompt-guard — in scope, rendered prompts pass", () =
 
   for (const v of VARIANTS) {
     test(`prompt_args variant "${v.name}" renders a prompt that is ALLOWED`, () => {
-      const prompt = renderPrompt(v.slot, v.isolation, { skill: v.skill, promptArgs: v.promptArgs });
+      const prompt = renderPrompt(v.slot, v.isolation, { skill: v.skill, promptArgs: v.promptArgs, intent: v.intent });
       assert.match(prompt, /^## Task$/m);
       assertAllowed(runHook(agent(prompt)));
     });
@@ -242,7 +246,7 @@ describe("agent-dispatch-prompt-guard — in scope, rendered prompts pass", () =
 
   test("every prompt_args variant with issue-text notes is ALLOWED", () => {
     for (const v of VARIANTS) {
-      const prompt = renderPrompt(v.slot, v.isolation, { skill: v.skill, promptArgs: v.promptArgs, notes: ISSUE_TEXT_NOTES });
+      const prompt = renderPrompt(v.slot, v.isolation, { skill: v.skill, promptArgs: v.promptArgs, intent: v.intent, notes: ISSUE_TEXT_NOTES });
       const r = runHook(agent(prompt));
       assert.equal(r.status, 0, `${v.name} denied: ${r.stderr}`);
     }

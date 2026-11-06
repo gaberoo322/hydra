@@ -200,7 +200,8 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
     assert.equal(dispatch.skill, "hydra-dev");
     // dev_orch no longer carries a target-side anchor (#458 was specifically
     // about NOT routing target candidates through dev_orch).
-    assert.equal(dispatch.prompt_args.anchor, undefined,
+    assert.equal(dispatch.intent.kind, "Fresh");
+    assert.equal(dispatch.intent.anchor, undefined,
       "dev_orch must not receive an anchor from /api/anchor/candidates (#458)");
   });
 
@@ -2980,10 +2981,9 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
     assert.ok(dispatch, "orch_work_available must fire dev_orch");
     assert.equal(dispatch.skill, "hydra-dev");
-    assert.equal(dispatch.prompt_args.anchor, undefined,
-      "dev_orch must NOT pass a target-product anchor — that's the bug #458 fixes");
-    assert.equal(dispatch.prompt_args.score, undefined,
-      "dev_orch must NOT pass a candidate score — candidates are target work");
+    assert.deepEqual(dispatch.intent, { kind: "Fresh" },
+      "dev_orch must NOT pass a target-product anchor or candidate score — that's the bug #458 fixes");
+    assert.equal(dispatch.prompt_args, undefined);
   });
 
   test("ISSUE-458: dev_target dispatches on target_work_available AND carries top candidate as anchor", () => {
@@ -3108,7 +3108,8 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
 
     assert.ok(devOrch, "dev_orch must fire on the orch board signal");
     assert.equal(devOrch.skill, "hydra-dev");
-    assert.equal(devOrch.prompt_args.anchor, undefined,
+    assert.equal(devOrch.intent.kind, "Fresh");
+    assert.equal(devOrch.intent.anchor, undefined,
       "dev_orch carries no target anchor");
 
     assert.ok(devTarget, "dev_target must fire on the target queue signal");
@@ -4471,12 +4472,13 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     const d = devOrchDispatches(plan);
     assert.equal(d.length, 1, `expected exactly one pinned dispatch: ${JSON.stringify(d)}`);
     assert.equal(d[0].skill, "hydra-dev");
-    assert.deepEqual(d[0].prompt_args, {
+    assert.deepEqual(d[0].intent, {
+      kind: "ForwardFixRed",
       anchor: "issue-4240",
-      resume: true,
-      resume_branch: "worktree-agent-glm-4240-1789",
-      forward_fix_pr: 4433,
+      branch: "worktree-agent-glm-4240-1789",
+      pr: 4433,
     });
+    assert.equal(d[0].prompt_args, undefined, "an intent action carries no prompt_args bag");
     assert.match(d[0].reason, /red PR forward-fix/);
     assert.match(d[0].reason, /#5058/);
     assert.match(d[0].reason, /1\/2/);
@@ -4486,7 +4488,7 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     const s = glmState({ signals: { orch_dev_resume_pick: "issue-4240:4433:worktree-agent-a5706403c05633ec3" } });
     const d = devOrchDispatches(runDecide(s, null));
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.resume_branch, "worktree-agent-a5706403c05633ec3");
+    assert.equal(d[0].intent.branch, "worktree-agent-a5706403c05633ec3");
     assert.match(d[0].reason, /1\/2/);
   });
 
@@ -4531,8 +4533,8 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     const plan = runDecide(s, null);
     const d = devOrchDispatches(plan);
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.anchor, "issue-100", "the resume record must win");
-    assert.equal(d[0].prompt_args.forward_fix_pr, undefined);
+    assert.equal(d[0].intent.kind, "ResumeBranch");
+    assert.equal(d[0].intent.anchor, "issue-100", "the resume record must win");
   });
 
   test("#4460 INV-6 bypass: a pending grill anchor does NOT yield the pin (the stranded PR's artifact already exists)", () => {
@@ -4542,7 +4544,7 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     const plan = runDecide(s, null);
     const d = devOrchDispatches(plan);
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.forward_fix_pr, 4433);
+    assert.equal(d[0].intent.pr, 4433);
   });
 
   test("`none` / absent / malformed signal spellings are fully dormant", () => {
@@ -4571,7 +4573,7 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     );
     const d = devOrchDispatches(plan);
     assert.equal(d.length, 1, "the event-borne signal wins");
-    assert.equal(d[0].prompt_args.forward_fix_pr, 4433);
+    assert.equal(d[0].intent.pr, 4433);
   });
 
   test("main() persists the attempts bump via change-detection (state file carries the tracker after the turn)", () => {
@@ -4642,11 +4644,11 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
     const d = devOrchDispatches(runDecide(s, null));
     assert.equal(d.length, 1, `expected exactly one pinned dispatch: ${JSON.stringify(d)}`);
     assert.equal(d[0].skill, "hydra-dev");
-    assert.deepEqual(d[0].prompt_args, {
+    assert.deepEqual(d[0].intent, {
+      kind: "ForwardFixRed",
       anchor: "issue-4510",
-      resume: true,
-      resume_branch: "worktree-agent-a5706403c05633ec3",
-      forward_fix_pr: 4532,
+      branch: "worktree-agent-a5706403c05633ec3",
+      pr: 4532,
     });
     assert.match(d[0].reason, /#4518/);
   });
@@ -4656,8 +4658,8 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
     s.dev_resume_pending = [{ anchor: "issue-100", branch: "worktree-agent-abc" }];
     const d = devOrchDispatches(runDecide(s, null));
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.anchor, "issue-100", "the in-state drain runs first");
-    assert.equal(d[0].prompt_args.forward_fix_pr, undefined);
+    assert.equal(d[0].intent.kind, "ResumeBranch");
+    assert.equal(d[0].intent.anchor, "issue-100", "the in-state drain runs first");
   });
 
   test("a label-arm pick (not in orch_prs_red_resume) never bumps the red-CI cap tracker", () => {
@@ -4669,7 +4671,7 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
       writeFileSync(t.events, JSON.stringify([]));
       const d = devOrchDispatches(runDecideOnFiles(t));
       assert.equal(d.length, 1);
-      assert.equal(d[0].prompt_args.anchor, "issue-4510");
+      assert.equal(d[0].intent.anchor, "issue-4510");
       const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
       assert.equal(
         persisted.red_forward_fix_attempts,
@@ -4685,7 +4687,7 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
     const s = resumeState({ signals: { orch_pending_grill_anchor: "issue-999" } });
     const d = devOrchDispatches(runDecide(s, null));
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.anchor, "issue-4510");
+    assert.equal(d[0].intent.anchor, "issue-4510");
   });
 
   test("`none` / absent / malformed resume-pick spellings fail closed to no pin", () => {
@@ -4704,7 +4706,7 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
     );
     const d = devOrchDispatches(plan);
     assert.equal(d.length, 1, "the event-borne signal wins");
-    assert.equal(d[0].prompt_args.forward_fix_pr, 4532);
+    assert.equal(d[0].intent.pr, 4532);
   });
 
   test("a busy dev_orch slot means no resume pin (the pick rides the normal slot-free pipeline)", () => {
@@ -4727,7 +4729,7 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
       writeFileSync(t.events, JSON.stringify([]));
       const d = devOrchDispatches(runDecideOnFiles(t));
       assert.equal(d.length, 1);
-      assert.equal(d[0].prompt_args.forward_fix_pr, 4433);
+      assert.equal(d[0].intent.pr, 4433);
       assert.match(d[0].reason, /1\/2/);
       const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
       assert.deepEqual(persisted.red_forward_fix_attempts, { "4433": 1 });
@@ -4972,12 +4974,11 @@ describe("decide.py — dirty PR conflict fix-forward pin (issue #4807)", () => 
     const d = devOrch(plan);
     assert.equal(d.length, 1);
     assert.equal(d[0].skill, "hydra-dev");
-    assert.deepEqual(d[0].prompt_args, {
+    assert.deepEqual(d[0].intent, {
+      kind: "ForwardFixConflict",
       anchor: "issue-4511",
-      resume: true,
-      resume_branch: "worktree-agent-abc123",
-      forward_fix_pr: 4818,
-      conflict_fix: true,
+      branch: "worktree-agent-abc123",
+      pr: 4818,
     });
     assert.equal((plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length, 0);
   });
@@ -4989,13 +4990,11 @@ describe("decide.py — dirty PR conflict fix-forward pin (issue #4807)", () => 
     );
     const d = devOrch(plan);
     assert.equal(d.length, 1);
-    assert.deepEqual(d[0].prompt_args, {
+    assert.deepEqual(d[0].intent, {
+      kind: "ForwardFixConflictWithFail",
       anchor: "issue-4511",
-      resume: true,
-      resume_branch: "worktree-agent-abc123",
-      forward_fix_pr: 4818,
-      conflict_fix: true,
-      qa_fail_at_head: true,
+      branch: "worktree-agent-abc123",
+      pr: 4818,
     });
     assert.match(d[0].reason, /#4807/);
     assert.match(d[0].reason, /#5253/);
@@ -5010,8 +5009,7 @@ describe("decide.py — dirty PR conflict fix-forward pin (issue #4807)", () => 
       );
       const d = devOrch(plan);
       assert.equal(d.length, 1);
-      assert.equal("qa_fail_at_head" in d[0].prompt_args, false, `fail_pr=${String(failPr)}`);
-      assert.equal(d[0].prompt_args.conflict_fix, true);
+      assert.equal(d[0].intent.kind, "ForwardFixConflict", `fail_pr=${String(failPr)}`);
       assert.match(d[0].reason, /^dirty PR conflict fix-forward: PR 4818 \(issue #4511\) on worktree-agent-abc123 — merge origin\/master, one attempt per PR \(issue #4807\)$/);
     }
   });
@@ -5023,7 +5021,7 @@ describe("decide.py — dirty PR conflict fix-forward pin (issue #4807)", () => 
     );
     const d = devOrch(plan);
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.conflict_fix, true);
+    assert.equal(d[0].intent.kind, "ForwardFixConflict");
   });
 
   test("`none` / malformed orch_dirty_forward_fix pins nothing", () => {
@@ -5086,9 +5084,9 @@ describe("decide.py — no-PR durable resume pin (issue #4808)", () => {
     const d = devOrch(runDecide(s, null));
     assert.equal(d.length, 1, `expected exactly one pinned dispatch: ${JSON.stringify(d)}`);
     assert.equal(d[0].skill, "hydra-dev");
-    // INV-6: EXACTLY anchor + resume — no branch, no forward_fix_pr, no
-    // conflict_fix (there is no PR to name; the cap is reap-time, not here).
-    assert.deepEqual(d[0].prompt_args, { anchor: NOPR_ANCHOR, resume: true });
+    // INV-6: EXACTLY a ResumeSalvage - no branch, no PR (there is no PR to
+    // name; the cap is reap-time, not here).
+    assert.deepEqual(d[0].intent, { kind: "ResumeSalvage", anchor: NOPR_ANCHOR });
     assert.match(d[0].reason, /#4808/);
   });
 
@@ -5098,7 +5096,7 @@ describe("decide.py — no-PR durable resume pin (issue #4808)", () => {
     });
     const d = devOrch(runDecide(s, null));
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.anchor, NOPR_ANCHOR);
+    assert.equal(d[0].intent.anchor, NOPR_ANCHOR);
   });
 
   test("ordering: an in-state dev_resume_pending record outranks the no-PR pin (the #3866 drain runs first)", () => {
@@ -5106,8 +5104,8 @@ describe("decide.py — no-PR durable resume pin (issue #4808)", () => {
     s.dev_resume_pending = [{ anchor: "issue-100", branch: "worktree-agent-abc" }];
     const d = devOrch(runDecide(s, null));
     assert.equal(d.length, 1, "the drain pops its record and returns — never two resumes in one turn");
-    assert.equal(d[0].prompt_args.anchor, "issue-100");
-    assert.equal(d[0].prompt_args.resume_branch, "worktree-agent-abc");
+    assert.equal(d[0].intent.anchor, "issue-100");
+    assert.equal(d[0].intent.branch, "worktree-agent-abc");
   });
 
   test("`none` / absent spellings pin nothing", () => {
@@ -5749,12 +5747,12 @@ describe("decide.py - parked issues are never dispatched or armed (issue #5319)"
     const s = baseState({ signals: { orch_dev_resume_nopr_anchor: `issue-${PARKED}`, orch_work_available: false } });
     const d = devOrch(runDecide(s, null));
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.anchor, `issue-${PARKED}`);
+    assert.equal(d[0].intent.anchor, `issue-${PARKED}`);
   });
 
   test("a parked resume pick does not shadow an unparked one-turn-later pick: the pin is simply declined", () => {
     const s = baseState({ signals: { orch_parked_issues: [PARKED], orch_dev_resume_pick: RESUME_PICK } });
-    assert.equal(devOrch(runDecide(s, null)).filter((a) => a.prompt_args?.forward_fix_pr === 5400).length, 0);
+    assert.equal(devOrch(runDecide(s, null)).filter((a) => a.intent?.pr === 5400).length, 0);
   });
 
   test("an unparked sibling qa-verdict still auto-merges next to a parked one", () => {
@@ -5825,7 +5823,7 @@ describe("decide.py - parked issues are never dispatched or armed (issue #5319)"
   test("QA r2 #1 sibling: a healthy read still drains an unparked entry and drops a parked one", () => {
     const s = baseState({ signals: { orch_parked_unreadable: false, orch_parked_issues: [PARKED] } });
     s.dev_resume_pending = [{ anchor: "issue-778", branch: "b" }];
-    assert.equal(devOrch(runDecide(s, null)).filter((a) => a.prompt_args?.anchor === "issue-778").length, 1);
+    assert.equal(devOrch(runDecide(s, null)).filter((a) => a.intent?.anchor === "issue-778").length, 1);
     const p = baseState({ signals: { orch_parked_unreadable: false, orch_parked_issues: [PARKED] } });
     p.dev_resume_pending = [{ anchor: `issue-${PARKED}`, branch: "b" }];
     const t = makeTmp();
