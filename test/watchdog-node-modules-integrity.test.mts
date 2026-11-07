@@ -270,7 +270,7 @@ describe("scripts/hydra-watchdog.sh — CLI-start alarm (issue #5099)", () => {
     assert.equal(calls.length, 1);
     assert.match(
       calls[0],
-      /^page --kind infra:watchdog_cli_failed --dedup-key infra:watchdog_cli_failed --title Watchdog CLI failed to start \(plan-failed\) --fact reason=plan-failed --fact rc=7$/,
+      /^report --kind infra:watchdog_cli_failed --fact reason=plan-failed --fact rc=7$/,
     );
     assert.equal(existsSync(ALARM_MARKER), true, "marker written after the CLI exited 0");
     assert.match(nmLines(r.stdout), /tick processed/, "the nm block must not depend on the CLI");
@@ -329,7 +329,7 @@ describe("scripts/hydra-watchdog.sh — CLI-start alarm (issue #5099)", () => {
     const calls = nodeCalls();
     const page = calls.find((c) => c.includes("operator-notify.ts"));
     assert.ok(page, `the page must run via the nvm node stub; node calls: ${calls.join(" | ")}`);
-    assert.match(page, /operator-notify\.ts page --kind infra:watchdog_cli_failed /);
+    assert.match(page, /operator-notify\.ts report --kind infra:watchdog_cli_failed /);
     assert.equal(existsSync(ALARM_MARKER), true, "page delivered => marker written");
   });
 
@@ -348,7 +348,7 @@ describe("scripts/hydra-watchdog.sh — CLI-start alarm (issue #5099)", () => {
     );
     assert.equal(r.status, 0);
     assert.match(r.stdout, /watchdog CLI failed to start \(reason=node-missing, rc=127\)/);
-    assert.match(notifyCalls()[0] ?? "", /^page --kind infra:watchdog_cli_failed .* --fact reason=node-missing --fact rc=127$/);
+    assert.match(notifyCalls()[0] ?? "", /^report --kind infra:watchdog_cli_failed --fact reason=node-missing --fact rc=127$/);
     assert.match(nmLines(r.stdout), /tick processed/, "the nm block still ran without node");
   });
 });
@@ -407,9 +407,9 @@ describe("node-modules-integrity — detection + delivery (issue #4175)", { skip
     const payload = JSON.parse(entries[0].fields.payload);
     assert.equal(payload.reason, "no-bin-dir");
     assert.equal(payload.thresholdMs, 0);
-    const pages = notifyCalls().filter((c) => c.startsWith("page "));
+    const pages = notifyCalls().filter((c) => c.startsWith("report "));
     assert.equal(pages.length, 1);
-    assert.match(pages[0], /^page --kind infra:node_modules_wiped --dedup-key infra:node_modules_wiped --title node_modules integrity: /);
+    assert.match(pages[0], /^report --kind infra:node_modules_wiped --fact signal=/);
     assert.match(pages[0], /--fact reason=no-bin-dir/);
   });
 
@@ -431,7 +431,7 @@ describe("node-modules-integrity — detection + delivery (issue #4175)", { skip
     assert.doesNotMatch(nmLines(r.stdout), /WARNING/, "a healthy install must never warn");
     assert.ok(!getFired(healthy));
     assert.equal(notifyEntries().length, 0);
-    assert.equal(notifyCalls().filter((c) => c.startsWith("page ")).length, 0);
+    assert.equal(notifyCalls().filter((c) => c.startsWith("report ")).length, 0);
   });
 
   test("checks multiple watched roots independently (colon-separated list)", () => {
@@ -449,7 +449,7 @@ describe("node-modules-integrity — detection + delivery (issue #4175)", { skip
     assert.equal(r2.status, 0);
     assert.doesNotMatch(nmLines(r2.stdout), /WARNING/, "the fired marker must suppress a re-warn");
     assert.equal(notifyEntries().length, 1);
-    assert.equal(notifyCalls().filter((c) => c.startsWith("page ")).length, 1);
+    assert.equal(notifyCalls().filter((c) => c.startsWith("report ")).length, 1);
   });
 
   test("recovery resolves once, clears both markers, and a fresh streak re-delivers", () => {

@@ -4,10 +4,10 @@
  *
  * - {@link OperatorChannel.report}: the producer entry point — the per-kind
  *   table decides page vs brief and the dashboard alert; never throws.
- * - {@link OperatorChannel.page}: edge-triggered per dedupKey (send once on bad,
- *   one reminder after 6h while still bad, suppressed repeats counted).
+ * - page (private): edge-triggered per dedupKey (send once on bad, one reminder
+ *   after 6h while still bad, suppressed repeats counted); reached via report().
  * - {@link OperatorChannel.resolve}: one "recovered" message, then clears state.
- * - {@link OperatorChannel.brief}: appends a Morning Brief item (Redis list).
+ * - brief (private): appends a Morning Brief item (Redis list); reached via report().
  * - {@link OperatorChannel.briefOnce}: a brief item once per episode (dedup-keyed).
  * - {@link OperatorChannel.isOpen} / {@link OperatorChannel.reminderDue}: read-only episode probes.
  * - {@link OperatorChannel.clear}: silently close a key (no "recovered" message).
@@ -16,7 +16,7 @@
  * and a failure is logged and treated as "no state" so the page is still sent.
  * A per-process map bounds repeats while Redis is down. Nothing here throws to
  * a producer for transport or Redis failure — only for a caller bug (a
- * non-page kind passed to `page`, a page kind passed to `brief`).
+ * page kind passed to `briefOnce`).
  */
 
 import { InvalidArgumentError } from "../errors.ts";
@@ -37,7 +37,6 @@ import {
   ALERT_TYPES,
   dedupKeyOf,
   isPageEvent,
-  isPageKind,
   resolveAlert,
   resolveDisposition,
   rowOf,
@@ -231,8 +230,8 @@ export class OperatorChannel {
    * The producer entry point (ADR-0045 Decision 3, issue #5389): the per-kind
    * table decides page vs brief and whether a dashboard alert is also written.
    * Never throws; an unknown kind is briefed with the generic line and flagged.
-   * Routes through the internal unlocked paths under the per-dedupKey
-   * {@link serialize}, never the public throwing guards of page()/brief().
+   * Routes through the private page()/brief() under the per-dedupKey
+   * {@link serialize}.
    */
   async report(
     kind: string,
@@ -268,11 +267,11 @@ export class OperatorChannel {
       let delivered: boolean;
       try {
         if (disposition === "page") {
-          const res = await this.serialize(msg.dedupKey, () => this.pageUnlocked(msg));
+          const res = await this.serialize(msg.dedupKey, () => this.page(msg));
           outcome = res;
           delivered = res.sent;
         } else {
-          const res = await this.serialize(msg.dedupKey, () => this.briefUnlocked(msg));
+          const res = await this.serialize(msg.dedupKey, () => this.brief(msg));
           outcome = res;
           delivered = res.appended;
         }
@@ -369,15 +368,8 @@ export class OperatorChannel {
     return next;
   }
 
-  /** Send (or suppress) a Page. Throws only for a non-page kind. */
-  async page(msg: OperatorMessage): Promise<ChannelResult> {
-    if (!isPageKind(msg.kind)) {
-      throw new InvalidArgumentError(`"${msg.kind}" is not on the closed page list (ADR-0045 Decision 3)`);
-    }
-    return this.serialize(msg.dedupKey, () => this.pageUnlocked(msg));
-  }
-
-  private async pageUnlocked(msg: OperatorMessage): Promise<ChannelResult> {
+  /** Send (or suppress) a Page: edge-triggered per dedupKey. Private: producers call {@link report}. */
+  private async page(msg: OperatorMessage): Promise<ChannelResult> {
     const now = this.now();
     const prev = await this.bounded("readDedup", () => this.store.readDedup(msg.dedupKey));
 
@@ -464,6 +456,10 @@ export class OperatorChannel {
    * process. Throws only when handed a page kind.
    */
   async briefOnce(item: OperatorMessage): Promise<{ appended: boolean }> {
+    const factPayload = Object.fromEntries((item.facts ?? []).map((f) => [f.label, f.value]));
+    if (isPageEvent(item.kind, factPayload)) {
+      throw new InvalidArgumentError(`"${item.kind}" is a page kind — use report(), not briefOnce()`);
+    }
     return this.serialize(item.dedupKey, async () => {
       const prev = await this.bounded("readDedup", () => this.store.readDedup(item.dedupKey));
       if (prev === UNAVAILABLE ? this.localSent.has(item.dedupKey) : prev !== null) return { appended: false };
@@ -479,16 +475,8 @@ export class OperatorChannel {
     });
   }
 
-  /** Append a Morning Brief item. Throws only when handed a page kind. */
-  async brief(item: OperatorMessage): Promise<{ appended: boolean }> {
-    const factPayload = Object.fromEntries((item.facts ?? []).map((f) => [f.label, f.value]));
-    if (isPageEvent(item.kind, factPayload)) {
-      throw new InvalidArgumentError(`"${item.kind}" is a page kind — use page(), not brief()`);
-    }
-    return this.briefUnlocked(item);
-  }
-
-  private async briefUnlocked(item: OperatorMessage): Promise<{ appended: boolean }> {
+  /** Append a Morning Brief item. Private: producers call {@link report} or {@link briefOnce}. */
+  private async brief(item: OperatorMessage): Promise<{ appended: boolean }> {
     const out = await this.bounded("appendBrief", () =>
       this.store.appendBrief({ ...item, severity: "brief", at: this.now() }),
     );
