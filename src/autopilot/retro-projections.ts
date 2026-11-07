@@ -29,13 +29,16 @@
  *     `confirmDrillableCycleIds`. Groups dispatches across runs by canonical
  *     identity.
  *
- * Everything here is pure: zero Redis imports, zero `await`, no clock beyond
+ * Everything here is pure (the one non-local import is the side-effect-free
+ * predicate `isHarnessAgentId` from `../transcript-store.ts`, #5392; it is
+ * called with no I/O): zero Redis imports, zero `await`, no clock beyond
  * caller-supplied input — purity is enforced by the import boundary of this
  * module (the downstream `retro-enrichment.ts` / `retro-bundle.ts` own every
  * read), not merely documented.
  */
 
 import { bucketDispatchOutcome } from "./cycle-status.ts";
+import { isHarnessAgentId } from "../transcript-store.ts";
 import type { StuckSignal } from "./run-health.ts";
 // Issue #4856: the taxonomy-derived PR-producing class set (a constant import —
 // no I/O function is pulled in beyond the taxonomy's one-time classes.json
@@ -57,8 +60,9 @@ import { PR_PRODUCING_SKILLS, classByName } from "../taxonomy/classes.ts";
  */
 export interface RetroDispatch {
   /**
-   * The cycle id (transcript handle) this dispatch resolved to, or `""` when
-   * none exists. An action/outcome-joined dispatch carries the recorded
+   * The cycle-record key (`worktree_branch or task_id`, reap.py) this dispatch
+   * resolved to — NOT a transcript handle (use {@link transcriptId}), or `""`
+   * when none exists. An action/outcome-joined dispatch carries the recorded
    * `outcome.cycleId`. A snapshot-only dispatch (the crashed/interrupted-run
    * case) RECOVERS a candidate from the slot's `task_id` — the same id reap
    * sends on its durable `cycle-record` write — and `assembleRetroBundle`
@@ -118,6 +122,15 @@ export interface RetroDispatch {
    * across turns) still collapses to one (#3738).
    */
   occupancyId: string | null;
+  /**
+   * The bare 17-hex harness agent hash that `GET /api/dispatches/:id/transcript`
+   * (and the on-disk `agent-<hash>.jsonl` fallback) accept (issue #5392), or
+   * `null` when none is recoverable (epoch-only / identity-less occupancy).
+   * Derived from {@link occupancyId} by {@link transcriptIdOf}; materialised by
+   * `assembleRetroBundle` AFTER dedup — the projection only seeds `null`.
+   * Additive: drillability stays keyed on `cycleId !== ""`.
+   */
+  transcriptId: string | null;
   /** Cycle status (`merged`, `failed`, `abandoned`, ...) or `null` if pending. */
   status: string | null;
   /**
@@ -457,6 +470,16 @@ function occupancyIdOf(taskId: string | null, epochKey: string | null): string |
 }
 
 /**
+ * The bare 17-hex agent hash behind an `id:<hash>` occupancyId (issue #5392),
+ * or `null` for epoch-only / identity-less / malformed occupancies.
+ */
+export function transcriptIdOf(occupancyId: string | null): string | null {
+  if (typeof occupancyId !== "string" || !occupancyId.startsWith("id:")) return null;
+  const hash = occupancyId.slice(3);
+  return isHarnessAgentId(hash) ? hash : null;
+}
+
+/**
  * Fill a dispatch's null fields from a slot-snapshot entry. Existing values
  * always win (action-join / earliest-turn canonical row), so this is
  * enrich-only — used both for the same-turn `(turn, slot)` merge and for the
@@ -605,6 +628,7 @@ export function projectDispatches(
         // filled from the same-turn slots_snapshot below (enrichFromSlot), or
         // from a later turn's snapshot via the cross-turn identity map.
         occupancyId: null,
+        transcriptId: null,
         status,
         bucket: bucketOf(status),
         // abandonReason / regression are enriched from the metrics sidecar
@@ -749,6 +773,7 @@ export function projectDispatches(
         prNumber: prNumberFromAnchor(slotAnchor),
         slot,
         occupancyId,
+        transcriptId: null,
         status: null,
         bucket: null,
         abandonReason: null,
