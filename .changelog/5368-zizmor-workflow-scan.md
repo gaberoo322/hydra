@@ -1,0 +1,1 @@
+- feat: add advisory zizmor scan of GitHub Actions workflows via a pinned, SHA256-verified binary (#5368)
