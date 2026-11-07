@@ -1,11 +1,13 @@
 /**
- * Notification event -> Operator Channel router (ADR-0045, issues #5047 / #5049).
+ * Notification event -> Operator Channel router (ADR-0045, issues #5047 / #5049 /
+ * #5389).
  *
  * The one entry point the notification consumer (`src/notification-consumer.ts`)
- * calls per bus event: a page-kind event (the closed list in `./page-list.ts`)
- * goes to `channel.page()`; every other event is appended as a Morning Brief
- * item via `channel.brief()`. Nothing is buffered in memory — the brief reads
- * the bounded Redis list.
+ * calls per bus event. It is a thin fire-and-forget wrapper over
+ * `channel.report()`: the per-kind table in `./page-list.ts` decides page vs
+ * Morning Brief item and whether a dashboard alert is also written, so a bus
+ * event's page and alert are one call. Nothing is buffered in memory — the
+ * brief reads the bounded Redis list.
  *
  * This router is what survived of `src/digest.ts`, which used to own the
  * 4-hourly Telegram digest (`DigestAccumulator`, `shouldSendDigest`, the
@@ -15,27 +17,23 @@
  */
 
 import { logger } from "../logger.ts";
-import { operatorChannel, messageFromEvent, type ChannelEventInput, type OperatorChannel } from "./channel.ts";
-import { isPageEvent } from "./page-list.ts";
+import { operatorChannel, type ChannelEventInput, type OperatorChannel } from "./channel.ts";
 
 /**
- * Route one notification event to the Operator Channel. Page-kind events go
- * straight to `channel.page()` (edge-triggered, deduped); everything else is
- * appended as a brief item. Fire-and-forget: a channel failure is logged and
- * never reaches the consumer, so alerting can never break a cycle.
+ * Route one notification event through `channel.report()`. Fire-and-forget: a
+ * channel failure is logged and never reaches the consumer, so alerting can
+ * never break a cycle.
  */
 export function routeNotificationEvent(
   event: ChannelEventInput,
-  channel: Pick<OperatorChannel, "page" | "brief"> = operatorChannel,
+  channel: Pick<OperatorChannel, "report"> = operatorChannel,
 ): void {
   const type = event.type || "unknown";
-  if (isPageEvent(type, event.payload)) {
-    channel.page(messageFromEvent(event)).catch((err) =>
-      logger.error({ err, type }, "[OperatorChannel] page failed (non-fatal)"),
-    );
-    return;
+  try {
+    channel
+      .report(type, event.payload ?? {}, { id: event.id, timestamp: event.timestamp })
+      .catch((err) => logger.error({ err, type }, "[OperatorChannel] report failed (non-fatal)"));
+  } catch (err) {
+    logger.error({ err, type }, "[OperatorChannel] report failed (non-fatal)");
   }
-  channel.brief(messageFromEvent(event)).catch((err) =>
-    logger.error({ err, type }, "[OperatorChannel] brief append failed (non-fatal)"),
-  );
 }

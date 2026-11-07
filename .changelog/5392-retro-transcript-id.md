@@ -1,0 +1,1 @@
+- fix: retro bundle dispatch rows now carry transcriptId so retro transcript drills stop 404ing (#5392)

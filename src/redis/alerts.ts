@@ -60,6 +60,26 @@ export async function pushAlert(alertJson: string, maxLen: number): Promise<bool
   return true;
 }
 
+/** The persisted dashboard alert record (`GET /alerts` shape). */
+export interface DashboardAlert {
+  id: string;
+  type: string;
+  timestamp: string;
+  message: string;
+  severity: "error" | "warning" | "info";
+  dismissed: boolean;
+  payload?: Record<string, unknown>;
+}
+
+/**
+ * Typed wrapper over {@link pushAlert} that owns the JSON encoding — the one
+ * write path for Operator Channel kinds (issue #5389). Returns `false` when the
+ * alert was rejected.
+ */
+export async function pushDashboardAlert(alert: DashboardAlert, maxLen = 100): Promise<boolean> {
+  return pushAlert(JSON.stringify(alert), maxLen);
+}
+
 /**
  * Atomic LPUSH + LTRIM (issue #3619). KEYS[1] = alerts list; ARGV[1] = alert
  * JSON string; ARGV[2] = maxLen. Executed atomically so a concurrent

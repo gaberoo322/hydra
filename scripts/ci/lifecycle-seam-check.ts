@@ -21,6 +21,22 @@
  *   npx tsx scripts/ci/lifecycle-seam-check.ts --shrink-baseline
  *
  * There is no tool path that grows a baseline row.
+ *
+ * The scanner is a best-effort heuristic behind a shrink-only ratchet, not a
+ * sound analysis (#5359 round-4 ruling). Beyond plain flags and calls it counts:
+ * create-context short `-l`; unresolvable flag operands (`{x}` placeholders,
+ * `"--add-label " + x` concatenation, a trailing `=`); generic / optional calls
+ * (`addIssueLabel<T>(`, `f?.(`); and one-hop aliases/wrappers of the seam
+ * functions (`import { F as x }`, `const w = F ?? ...`, `const w = (..) => F(..)`).
+ *
+ * Not counted (documented evasions) — each is pinned by a synthetic test:
+ *  - python `%`-formatting / `.format()` where the placeholder is not a brace
+ *    at operand position (`"--add-label %s" % x`);
+ *  - arity-changing wrappers (`const w = (l) => addIssueLabel(N, l); w("x")`):
+ *    the wrapper definition line is counted, its calls are not;
+ *  - two-hop aliases and `export { F as x }` re-exports from another module;
+ *  - flags assembled from a separately-bound string (`const FLAG = "--add-label"`);
+ *  - `.github/workflows/**` (ADR-0047 D1).
  */
 
 import { readdir, readFile, writeFile } from "node:fs/promises";
@@ -49,13 +65,11 @@ export const LIFECYCLE_EXEMPTIONS: ReadonlyArray<{
   reason: string;
 }> = [
   { matches: (p) => p.startsWith("src/lifecycle/"), reason: "the seam itself" },
-  { matches: (p) => p.startsWith("src/github/"), reason: "label-write transport definitions" },
+  { matches: (p) => p === "src/github/issues.ts", reason: "label-write transport definition" },
+  { matches: (p) => p === "src/github/issue-actions.ts", reason: "label-write transport definition" },
+  { matches: (p) => p === "src/github/prs.ts", reason: "label-write transport definition" },
   { matches: (p) => p === "scripts/lifecycle.ts", reason: "the CLI adapter over the seam" },
   { matches: (p) => p === "scripts/ci/lifecycle-seam-check.ts", reason: "this checker" },
-  {
-    matches: (p) => p.startsWith("scripts/claude-hooks/"),
-    reason: "command-text guards that match label commands but never write",
-  },
   {
     matches: (p) =>
       /^docs\/operator-playbooks\/(?:_fragments\/)?hydra-target-[^/]*\.md$/.test(p) ||
@@ -78,20 +92,76 @@ const STATE_TOKEN_RE = new RegExp(
 );
 
 function operandIsSite(operand: string, identifierIsVariable: boolean): boolean {
-  if (operand.includes("$")) return true;
+  if (operand.includes("$") || operand.includes("{")) return true;
   if (identifierIsVariable && /^[A-Za-z_][\w.]*$/.test(operand)) return true;
   return STATE_TOKEN_RE.test(operand);
 }
 
 /** `gh api` as a shell command or an argv list (`"gh", ["api", ...]`). */
 const GH_API_RE = /\bgh\b["'\s,[]*\bapi\b|["']api["']\s*,/;
-const FLAG_RE =
-  /--(?:add-|remove-)?label(?:(["']?\s*,\s*)|[ =]+)(?:"([^"]*)"|'([^']*)'|([^\s"')\]]+))/g;
+/** Label flags: `--add-label` / `--remove-label` / `--label`, and short `-l` (own token only). */
+const FLAG_NAME_SRC = String.raw`--(?:add-|remove-)?label|(?<![^\s"',])-l(?=[\s="',]|$)`;
+const FLAG_RE = new RegExp(
+  String.raw`(?:${FLAG_NAME_SRC})(?:(["']?\s*,\s*)|[ =]+)(?:"([^"]*)"|'([^']*)'|([^\s"')\]]+))`,
+  "g",
+);
+/** `"--add-label " + x` / `"--add-label=" + x`: the operand lives outside the literal. */
+const CONCAT_RE = new RegExp(String.raw`(?:${FLAG_NAME_SRC})[ =]*["']\s*\+`, "g");
+/** `"--add-label="` (flag literal closes right after `=`) or a flag `=` ending the logical line. */
+const TRAILING_EQ_RE = new RegExp(
+  String.raw`(["'])(?:${FLAG_NAME_SRC})=\1|(?:${FLAG_NAME_SRC})=\s*$`,
+  "g",
+);
+/** Bare `--label` / `-l` write only on create commands (elsewhere they are list filters). */
+function isCreateOnlyFlag(matched: string): boolean {
+  return /^["']?(?:--label|-l)(?![\w-])/.test(matched);
+}
 /** Bare `--label` only writes state on create commands (elsewhere it is a list filter). */
 const CREATE_CMD_RE = /\bcreate\b/;
+/**
+ * A `;` / `&&` / `||` / `|` outside quotes in `tail` (which starts at `issue|pr`). `before` is the
+ * char ahead of it: a quote there means `tail` opens inside that literal (argv form).
+ */
+function hasUnquotedBoundary(tail: string, before: string, startDepth = 0): boolean {
+  let quote = before === '"' || before === "'" ? before : "";
+  let depth = startDepth;
+  for (let i = 0; i < tail.length; i++) {
+    const ch = tail[i]!;
+    if (quote) {
+      if (ch === "\\" && quote === '"') i++;
+      else if (ch === quote) quote = "";
+    } else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === "[" || ch === "(" || ch === "{") depth++;
+    else if (ch === "]" || ch === ")" || ch === "}") depth--;
+    else if (ch === "\n" && depth <= 0) return true; // unquoted newline outside any bracket ends the command
+    else if (ch === ";" || ch === "|" || (ch === "&" && tail[i + 1] === "&")) return true;
+  }
+  return false;
+}
+
 /** A bare `--label` is a create-time write when `create` appears within 300 chars before it (same or earlier line). */
-function inCreateContext(text: string, idx: number): boolean {
-  return CREATE_CMD_RE.test(text.slice(Math.max(0, idx - 300), idx));
+function inCreateContext(text: string, idx: number, matched = ""): boolean {
+  const win = text.slice(Math.max(0, idx - 300), idx);
+  // Short `-l` is also `ls -l` / `wc -l` / `grep -l`: demand `issue|pr create` (shell or argv), not a bare `create`.
+  if (/^["']?-l(?![\w-])/.test(matched)) {
+    // Same command only, bounded by command boundaries rather than newlines: the last
+    // `issue|pr create` must reach the flag with no unquoted `;` / `&&` / `||` / `|` between. A newline
+    // ends the command only when no bracket is open (multi-line argv list), no `\` continues it
+    // and no heredoc (`<<`) is in play. Gives `-l` the same reach as `--label` (INV-2).
+    let create = -1;
+    for (const m of win.matchAll(/\b(?:issue|pr)["',\s[]+create\b/g)) create = m.index ?? -1;
+    if (create < 0) return false;
+    const tail = win.slice(create).replace(/\\\r?\n/g, " ").replace(/\r/g, "");
+    if (tail.includes("<<")) return true;
+    // Brackets opened just before `issue` (`run("gh", [` then newline-separated items) still count.
+    let depth = 0;
+    for (const ch of win.slice(Math.max(0, create - 80), create)) {
+      if (ch === "[" || ch === "(" || ch === "{") depth++;
+      else if (ch === "]" || ch === ")" || ch === "}") depth--;
+    }
+    return !hasUnquotedBoundary(tail, win[create - 1] ?? "", depth);
+  }
+  return CREATE_CMD_RE.test(win);
 }
 
 /** Join backslash-continued physical lines; each logical line keeps its first physical line number. */
@@ -121,7 +191,7 @@ export function scanTextSites(text: string): number[] {
   for (const { line: lineNo, text: line, offset } of logicalLines(text)) {
     let hit = false;
     for (const m of line.matchAll(FLAG_RE)) {
-      if (m[0].startsWith("--label") && !inCreateContext(text, offset + (m.index ?? 0))) continue;
+      if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, offset + (m.index ?? 0), m[0])) continue;
       const argList = m[1] !== undefined; // `"--add-label", x` list form
       const quoted = m[2] ?? m[3];
       const operand = quoted ?? m[4] ?? "";
@@ -132,6 +202,12 @@ export function scanTextSites(text: string): number[] {
       }
       for (const part of operand.split(",")) {
         if (part && operandIsSite(part, bareIdentifier)) hit = true;
+      }
+    }
+    for (const re of [CONCAT_RE, TRAILING_EQ_RE]) {
+      for (const m of line.matchAll(re)) {
+        if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, offset + (m.index ?? 0), m[0])) continue;
+        hit = true; // operand not inside the literal: unresolvable, fail closed
       }
     }
     if (!hit && GH_API_RE.test(line) && (/\/labels\b/.test(line) || /labels\[\]=/.test(line))) {
@@ -153,7 +229,7 @@ export function scanTextSites(text: string): number[] {
   const seen = new Set(sites);
   for (const m of text.matchAll(FLAG_RE)) {
     if (m[1] === undefined || !m[0].includes("\n")) continue; // single-line matches handled above
-    if (m[0].startsWith("--label") && !inCreateContext(text, m.index!)) continue;
+    if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, m.index!, m[0])) continue;
     const quoted = m[2] ?? m[3];
     const operand = quoted ?? m[4] ?? "";
     const isSite =
@@ -266,13 +342,93 @@ function collectConsts(src: string): Map<string, string> {
   return consts;
 }
 
+const SEAM_FNS = ["addIssueLabel", "removeIssueLabel", "editIssueLabels"] as const;
+const IDENT = "[A-Za-z_$][\\w$]*";
+const escId = (n: string) => n.replace(/\$/g, "\\$");
+
+/** End index of a `const x = <init>` initializer: `;` at depth 0, or a newline that does not continue the expression. */
+function initializerEnd(src: string, start: number): number {
+  let depth = 0;
+  let quote = "";
+  const limit = Math.min(src.length, start + 1500);
+  for (let i = start; i < limit; i++) {
+    const c = src[i]!;
+    if (quote) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = "";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") quote = c;
+    else if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c)) {
+      if (--depth < 0) return i;
+    } else if (c === ";" && depth === 0) return i;
+    else if (c === "\n" && depth === 0) {
+      const prev = src.slice(start, i).trimEnd();
+      const next = src.slice(i).trimStart();
+      if (!/(?:[?|&,:+(]|=>)$/.test(prev) && !/^[?|&.:]/.test(next)) return i;
+    }
+  }
+  return limit;
+}
+
+/**
+ * One-hop wrappers of the seam functions, file-wide: `import { F as x }`, or
+ * `const|let|var x [: T] = <init>` whose initializer mentions F as a bare
+ * reference or inside an arrow body (`=>` before `F(`). A direct call result
+ * (`const r = await F(..)`) is not a wrapper. Returns wrapper name -> seam fn.
+ */
+function collectWrappers(src: string): Map<string, string> {
+  const wrappers = new Map<string, string>();
+  const reserved = new Set<string>(SEAM_FNS);
+  for (const f of SEAM_FNS) {
+    const imp = new RegExp(`import\\s*(?:type\\s*)?\\{[^}]*?(?<![\\w$])${f}\\s+as\\s+(${IDENT})`, "g");
+    for (const m of src.matchAll(imp)) if (!reserved.has(m[1]!)) wrappers.set(m[1]!, f);
+  }
+  const declRe = new RegExp(`\\b(?:const|let|var)\\s+(${IDENT})\\s*(?::(?:=>|[^=;])+?)?=(?![=>])`, "g");
+  for (const m of src.matchAll(declRe)) {
+    const name = m[1]!;
+    if (reserved.has(name)) continue;
+    const start = m.index! + m[0].length + (/^\s*/.exec(src.slice(m.index! + m[0].length))?.[0].length ?? 0);
+    const init = src.slice(start, initializerEnd(src, start));
+    const arrowAt = init.indexOf("=>");
+    for (const f of SEAM_FNS) {
+      // Bare alias: the whole initializer is `F`, `X ?? F`, `X || F` (optionally `as T`); object
+      // shorthand / call-result bindings (`{ F }`, `xs.map(..F..)`) are not wrappers (#5367 QA).
+      const bare = new RegExp(`^(?:\\(*[\\w$.]+\\)*\\s*(?:\\?\\?|\\|\\|)\\s*)*\\(*${f}\\)*(?:\\s+as\\s+[^;]+)?$`);
+      const call = new RegExp(`(?<![\\w$])${f}\\s*(?:<[^()]*>)?\\s*(?:\\?\\.)?\\s*\\(`);
+      const callAt = init.search(call);
+      // Arrow wrapper: the initializer itself IS the arrow (params then `=>`), body calls F.
+      // Strip `X ??` / `X ||` prefixes and wrapping parens: `deps.f ?? ((n, l) => F(n, l))` is a wrapper.
+      let arrowInit = init.trim();
+      for (;;) {
+        const next = arrowInit.replace(/^[\w$.]+\s*(?:\?\?|\|\|)\s*/, "").replace(/^\((?=\s*(?:async\s*)?(?:\(|[\w$]+\s*(?::[^=]+?)?=>))/, "");
+        if (next === arrowInit) break;
+        arrowInit = next;
+      }
+      const isArrow = /^(?:async\s*)?(?:\([^)]*\)|[\w$]+)\s*(?::[^=]+?)?=>/.test(arrowInit);
+      if (bare.test(init.trim()) || (isArrow && arrowAt !== -1 && callAt !== -1 && arrowAt < callAt)) {
+        wrappers.set(name, f);
+        break;
+      }
+    }
+  }
+  return wrappers;
+}
+
 /** Call grammar for `src/` and `scripts/*.ts`. Returns 1-based site line numbers (one per site). */
 export function scanTsSites(source: string): number[] {
   const src = stripComments(source);
   const consts = collectConsts(src);
+  const wrappers = collectWrappers(src);
   const sites: number[] = [];
   const lineOf = (idx: number) => src.slice(0, idx).split("\n").length;
-  const callRe = /\b(addIssueLabel|removeIssueLabel|editIssueLabels)\s*\(/g;
+  // Seam fns match as member calls too (`gh.addIssueLabel(..)`); wrapper aliases are local
+  // bindings, so `proc.run(a, b)` must NOT match a wrapper named `run` (#5367 QA).
+  const seamNames = SEAM_FNS.map(escId).join("|");
+  const wrapNames = [...wrappers.keys()].map(escId).join("|");
+  const names = wrapNames ? `(?<![\\w$])(?:${seamNames})|(?<![\\w$.])(?:${wrapNames})` : `(?<![\\w$])(?:${seamNames})`;
+  const callRe = new RegExp(`(${names})\\s*(?:<[^()]*>)?\\s*(?:\\?\\.)?\\s*\\(`, "g");
   for (const m of src.matchAll(callRe)) {
     if (/\bfunction\s+$/.test(src.slice(Math.max(0, m.index! - 12), m.index!))) continue;
     const open = m.index! + m[0].length - 1;
@@ -280,7 +436,10 @@ export function scanTsSites(source: string): number[] {
     const args = splitTop(src.slice(open + 1, close === -1 ? undefined : close));
     const line = lineOf(m.index!);
     const second = (args[1] ?? "").trim();
-    if (m[1] !== "editIssueLabels") {
+    const wrapped = wrappers.get(m[1]!);
+    if (wrapped !== undefined && args.length < 2) continue; // arity-changing wrapper: documented non-count
+    const fn = wrapped ?? m[1]!;
+    if (fn !== "editIssueLabels") {
       if (tsOperandIsSite(second, consts)) sites.push(line);
       continue;
     }

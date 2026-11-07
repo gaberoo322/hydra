@@ -2125,6 +2125,18 @@
       }
     },
     {
+      "name": "HYDRA_RECOVER_STALE_DEBUG",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/recover-stale.sh"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/recover-stale.sh"
+      }
+    },
+    {
       "name": "HYDRA_RECS_DAILY_CAP_USD",
       "readSites": [
         {
@@ -3531,6 +3543,9 @@
         },
         {
           "path": "scripts/sync-skills.sh"
+        },
+        {
+          "path": "scripts/zizmor-scan.sh"
         },
         {
           "path": "src/watchdog/ports.ts"

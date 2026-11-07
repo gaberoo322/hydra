@@ -1,0 +1,1 @@
+- refactor: watchdog checks raise operator conditions through the Operator Channel report() only, ending the double delivery (#5390)

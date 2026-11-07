@@ -1,0 +1,1 @@
+- test: count short -l, f-string/concatenation/trailing-= operands, generic/optional calls and one-hop wrappers in the lifecycle-seam ratchet; narrow its exemptions (#5367)

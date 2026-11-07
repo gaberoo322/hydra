@@ -103,6 +103,7 @@ import {
   projectDispatches,
   flagDispatchesForDrill,
   drillReasonOf,
+  transcriptIdOf,
   flagRunForDrill,
   novelStuckSignals as foldNovelStuckSignals,
   stuckSignalKey as foldStuckSignalKey,
@@ -375,6 +376,7 @@ export async function assembleRetroBundle(
   // disagree.
   const flaggedSet = new Set(flagged);
   for (const d of dispatches) {
+    d.transcriptId = transcriptIdOf(d.occupancyId);
     d.flagged = flaggedSet.has(d);
     d.drillReason = d.flagged ? drillReasonOf(d) : null;
   }

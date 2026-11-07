@@ -23,6 +23,7 @@
     "src/glm/finish.ts": 6,
     "src/operator-actions/registry.ts": 6,
     "src/pattern-memory/escalation.ts": 2,
+    "src/scheduler/chores/glm-eligibility-sweep.ts": 1,
     "src/scheduler/chores/wiring-liveness-dark-alarm.ts": 1
   }
 }
