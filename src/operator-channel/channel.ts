@@ -296,12 +296,10 @@ export class OperatorChannel {
 
   /** Store one dashboard alert; a store failure is logged and reported as not written. */
   private async writeAlert(alert: DashboardAlert): Promise<boolean> {
-    try {
-      return await this.alerts(alert);
-    } catch (err) {
-      logger.error({ err, type: alert.type }, "[OperatorChannel] dashboard alert write failed (non-fatal)");
-      return false;
-    }
+    // bounded() fails open on a hang or throw (logged), so report() never waits
+    // longer than the channel timeout for the alert write.
+    const out = await this.bounded("pushAlert", () => this.alerts(alert));
+    return out === UNAVAILABLE ? false : out;
   }
 
   /** Run a store call under the timeout; log and return UNAVAILABLE on failure. */

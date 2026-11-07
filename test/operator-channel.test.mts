@@ -659,6 +659,24 @@ describe("OperatorChannel.report()", () => {
     assert.equal((res as { alertWritten: boolean }).alertWritten, true);
   });
 
+  test("a hung alert write is bounded by the channel timeout: report() resolves, alertWritten=false (QA #5394 round 3)", async () => {
+    const tr = fakeTransport();
+    const ch = new OperatorChannel({
+      store: memoryStore().store,
+      transport: tr.transport,
+      now: clock().now,
+      timeoutMs: 30,
+      alerts: () => new Promise<boolean>(() => {}), // never settles
+    });
+    const res = await Promise.race([
+      ch.report("launch:quota_stretch", {}),
+      new Promise<"hung">((r) => setTimeout(() => r("hung"), 1000)),
+    ]);
+    assert.notEqual(res, "hung");
+    assert.equal((res as { alertWritten: boolean }).alertWritten, false);
+    assert.equal((res as { delivered: boolean }).delivered, true);
+  });
+
   test("sibling shape: a page-only kind (no alert) still delivers and writes none", async () => {
     const { ch, tr, alerts } = setup();
     const res = await ch.report("launch:pause_forgotten", {});
