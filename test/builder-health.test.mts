@@ -26,6 +26,9 @@ import {
   foldParkRate,
   loadBuilderHealthBaselines,
   summarizeBaselineRows,
+  applyMirrorCutoff,
+  computeParentExceptionRate,
+  MIRROR_SHIPPED_EPOCH,
   type LifecycleHealthDeps,
 } from "../src/aggregators/lifecycle-health.ts";
 import { capEventRecord, type LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
@@ -804,5 +807,30 @@ describe("committed builder-health baselines (#5324 QA round 1)", () => {
     assert.equal(isProvenanced({ value: 0, turns: 0, runs: 0, exceptionTurns: 0, computedAt: "2026-11-06T00:00:00Z" }), false);
     assert.equal(isProvenanced({ value: 0, turns: 40, runs: 3, exceptionTurns: 0, computedAt: null }), false);
     assert.equal(isProvenanced({ value: null, computedAt: null }), true);
+  });
+});
+
+describe("mirror-ship cutoff on the live parentExceptionRate window (#5324 QA round 4)", () => {
+  test("applyMirrorCutoff clamps a pre-mirror start to the epoch and leaves a later start alone", () => {
+    assert.equal(applyMirrorCutoff(MIRROR_SHIPPED_EPOCH - 6 * 86400), MIRROR_SHIPPED_EPOCH);
+    assert.equal(applyMirrorCutoff(MIRROR_SHIPPED_EPOCH + 3600), MIRROR_SHIPPED_EPOCH + 3600);
+  });
+
+  test("default reader excludes pre-mirror runs; post-mirror runs still count (sibling pin)", async () => {
+    const { addAutopilotRunToIndex, addAutopilotRunTurn } = await import("../src/redis/autopilot-runs.ts");
+    const tag = `cutoff-${process.pid}-${Date.now()}`;
+    const oldRun = `${tag}-old`;
+    const newRun = `${tag}-new`;
+    await addAutopilotRunToIndex(oldRun, MIRROR_SHIPPED_EPOCH - 3600, 300);
+    await addAutopilotRunToIndex(newRun, MIRROR_SHIPPED_EPOCH + 3600, 300);
+    for (const run of [oldRun, newRun]) {
+      for (let t = 1; t <= 3; t++) await addAutopilotRunTurn(run, t, JSON.stringify({ turn_n: t }), 300);
+    }
+    // Window start is ~1 day before the epoch, so only the cutoff keeps the old run out.
+    const now = new Date((MIRROR_SHIPPED_EPOCH + 86400) * 1000);
+    const metric = await computeParentExceptionRate(2, { now });
+    // Per-run Redis DB isolation: only the two seeded runs exist.
+    assert.equal(metric.runs, 1, "pre-mirror run excluded");
+    assert.equal(metric.turns, 3, "only the post-mirror run's turns counted");
   });
 });
