@@ -888,6 +888,55 @@ describe("gh-label-delete-guard — heredoc bodies are data (issue #5401)", () =
     assert.equal(r.status, 2);
   });
 
+  // QA round 3 / operator ruling: wrapper-prefixed piped interpreters execute
+  // the body, so a collection DELETE inside it is DENIED as on master.
+  const PIPE_INTERPS = ["bash", "sh", "python3", "ssh host", "xargs sh -c", "eval", "source"];
+  for (const interp of PIPE_INTERPS) {
+    for (const [pipe, wrap] of [["|", ""], ["|&", ""], ["|", "sudo "], ["|", "sudo -E "], ["|", "env "], ["|", "env FOO=1 "]]) {
+      test(`cat <<'EOF' ${pipe} ${wrap}${interp}: executed body is DENIED`, () => {
+        const r = runHook(
+          bash(`cat <<'EOF' ${pipe} ${wrap}${interp}\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF`),
+        );
+        assert.equal(r.status, 2, r.stderr);
+      });
+    }
+  }
+
+  test("sibling: cat <<EOF | sudo tee f (wrapper, non-interpreter sink) is still ALLOWED", () => {
+    const r = runHook(
+      bash(`cat <<EOF | sudo tee f\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF\nls`),
+    );
+    assert.equal(r.status, 0, r.stderr);
+  });
+
+  test("the verbatim #5373 hand-back recipe after a quote-odd comment heredoc is ALLOWED", () => {
+    const r = runHook(
+      bash(
+        [
+          "cat > $S/c.md <<'EOF'",
+          "- tracks `\"`/`'` state, including `\\\"` escapes inside double quotes, and counts `;` / `&&` / `||` / `|` only outside quotes.",
+          "EOF",
+          "RREPO=gaberoo322/hydra",
+          "PR=5373",
+          "for L in ready-for-human conflict-fix-attempted; do",
+          '  if ! ERR=$(gh api -X DELETE "repos/$RREPO/issues/$PR/labels/$L" --silent 2>&1); then',
+          "    if grep -qE 'HTTP 404|Label does not exist' <<<\"$ERR\"; then",
+          '      echo "note: \'$L\' was not on PR #$PR (HTTP 404 tolerated)"',
+          "    else",
+          '      echo "ERROR: could not remove \'$L\' from PR #$PR: $ERR" >&2',
+          "      exit 1",
+          "    fi",
+          "  fi",
+          "done",
+          'LEFT=$(gh api "repos/$RREPO/issues/$PR/labels" \\',
+          `  --jq '[.[].name | select(. == "ready-for-human" or . == "conflict-fix-attempted")] | join(",")') \\`,
+          '  || { echo "ERROR: could not re-read PR #$PR labels" >&2; exit 1; }',
+        ].join("\n"),
+      ),
+    );
+    assert.equal(r.status, 0, r.stderr);
+  });
+
   test("<<- tab-indented terminator closes the body", () => {
     const r = runHook(
       bash(`cat <<-EOF\n\tsay "hi\n\tEOF\ngh api -X DELETE repos/o/r/issues/42/labels`),

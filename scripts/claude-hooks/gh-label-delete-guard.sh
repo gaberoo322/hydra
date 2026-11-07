@@ -237,7 +237,11 @@ _INTERP = r"(?:bash|sh|zsh|dash|ksh|python[0-9.]*|node|perl|ruby|ssh|eval|source
 INTERP_RECV = re.compile(r"(?:^|[\s;&|(/])" + _INTERP + r"(?:\s|$)")
 # Receiver AFTER the operator: `cat <<'EOF' | bash` pipes the body into an
 # interpreter, so it is executed code too (QA round 2, high finding).
-INTERP_PIPE = re.compile(r"\|&?\s*(?:\S*/)?" + _INTERP + r"(?:\s|$)")
+# An optional `sudo`/`env` wrapper (with any flags / VAR=value / `-u user`
+# tokens) may sit between the pipe and the interpreter (QA round 3).
+INTERP_PIPE = re.compile(
+    r"\|&?\s*(?:(?:sudo|env)\s+(?:\S+\s+)*?)?(?:\S*/)?" + _INTERP + r"(?:\s|$)"
+)
 
 
 def _strip_heredoc_bodies(text):
