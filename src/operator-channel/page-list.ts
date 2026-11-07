@@ -90,14 +90,15 @@ const launchTitle =
     `Launch flow '${str(p.signal, "?")}' sustained ${str(p.durationMs, "?")}ms (>= ${str(p.thresholdMs, "?")}ms)${suffix}`;
 const PAGE_ALERT = { disposition: "page", alert: true } as const;
 
-/** Strip ONE trailing `.service` (local twin of the CLI's helper; this module cannot import scripts/). */
-const stripOneTrailingDotService = (unit: string): string =>
-  unit.endsWith(".service") ? unit.slice(0, -".service".length) : unit;
+/** Strip ONE trailing `.service` so `@%n` and `@%n.service` resolve alike (the single copy; scripts/operator-notify.ts imports it). */
+export function stripUnitSuffix(unit: string): string {
+  return unit.endsWith(".service") ? unit.slice(0, -".service".length) : unit;
+}
 
 /** Per-unit episode identity + title for the service-failed rows (hydra-redis-backup and hydra-pg-backup dedup independently). */
 const SERVICE_EPISODE = {
-  dedupKey: (p: Payload): string => `service:${stripOneTrailingDotService(str(p.unit, "?"))}`,
-  title: (p: Payload): string => `Service failed: ${stripOneTrailingDotService(str(p.unit, "?"))}`,
+  dedupKey: (p: Payload): string => `service:${stripUnitSuffix(str(p.unit, "?"))}`,
+  title: (p: Payload): string => `Service failed: ${stripUnitSuffix(str(p.unit, "?"))}`,
 } as const;
 const SERVICE_PAGE = { ...PAGE, ...SERVICE_EPISODE } as const;
 

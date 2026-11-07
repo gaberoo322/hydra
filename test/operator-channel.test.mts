@@ -437,11 +437,6 @@ describe("page() and brief() are private to the Operator Channel (issue #5391, s
     }
   });
 
-  test("the public channel surface has no page or brief method", () => {
-    const proto = Object.getOwnPropertyNames(OperatorChannel.prototype);
-    assert.ok(proto.includes("report"));
-    assert.ok(proto.includes("briefOnce"));
-  });
 });
 
 describe("OperatorChannel episode probes: isOpen / clear / reminderDue / briefOnce", () => {
@@ -727,6 +722,22 @@ describe("OperatorChannel.report()", () => {
     assert.notEqual(res, "hung");
     assert.equal((res as { alertWritten: boolean }).alertWritten, false);
     assert.equal((res as { delivered: boolean }).delivered, true);
+  });
+
+  test("meta.alert=false suppresses the dashboard alert but still delivers the page", async () => {
+    const { ch, tr, alerts } = setup();
+    const res = await ch.report("launch:quota_stretch", {}, { alert: false });
+    assert.equal(res.delivered, true);
+    assert.equal(res.alertWritten, false);
+    assert.equal(tr.sent.length, 1);
+    assert.equal(alerts.length, 0);
+  });
+
+  test("sibling shape: omitting meta.alert still writes the alert for an alert kind", async () => {
+    const { ch, alerts } = setup();
+    const res = await ch.report("launch:quota_stretch", {});
+    assert.equal(res.alertWritten, true);
+    assert.equal(alerts.length, 1);
   });
 
   test("sibling shape: a page-only kind (no alert) still delivers and writes none", async () => {

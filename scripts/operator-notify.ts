@@ -64,6 +64,7 @@ import {
   type PageKind,
   type ReportResult,
   dedupKeyOf,
+  stripUnitSuffix,
 } from "../src/operator-channel/index.ts";
 
 export const FORCE_EXIT_MS = 20_000;
@@ -100,10 +101,7 @@ Exit 0 for every delivery outcome (see the JSON line on stdout); exit 2 for a us
 // Pure helpers (exported for the test)
 // ---------------------------------------------------------------------------
 
-/** Strip ONE trailing `.service` so `@%n` and `@%n.service` resolve alike. */
-export function stripUnitSuffix(unit: string): string {
-  return unit.endsWith(".service") ? unit.slice(0, -".service".length) : unit;
-}
+export { stripUnitSuffix };
 
 export interface UnitExitFacts {
   result?: string;
@@ -293,7 +291,9 @@ export async function runOperatorNotify(argv: string[], deps: OperatorNotifyDeps
         const kind = requireFlag(parsed, "kind");
         const payload = factsPayload(withHost(parsed.facts, host));
         const dedupKey = dedupKeyOf(kind, payload);
-        const result = await channel().report(kind, payload);
+        // `--alert false`: the caller already published the same event on the bus
+        // (whose consumer writes the dashboard alert), so skip a second one.
+        const result = await channel().report(kind, payload, parsed.flags.alert === "false" ? { alert: false } : undefined);
         return done("report", kind, dedupKey, result, emit);
       }
       case "resolve": {

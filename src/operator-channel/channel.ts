@@ -236,7 +236,7 @@ export class OperatorChannel {
   async report(
     kind: string,
     payload: Record<string, unknown> = {},
-    meta?: { id?: string; timestamp?: string },
+    meta?: { id?: string; timestamp?: string; alert?: boolean },
   ): Promise<ReportResult> {
     let disposition: "page" | "brief" = "brief";
     let unknownKind = false;
@@ -250,7 +250,7 @@ export class OperatorChannel {
       // The dashboard alert is independent of delivery: start it FIRST so a
       // throwing or slow page/brief transport can neither drop nor delay it.
       let alertPromise: Promise<boolean> = Promise.resolve(false);
-      if (row && resolveAlert(row, payload)) {
+      if (row && meta?.alert !== false && resolveAlert(row, payload)) {
         const severity = row.alertSeverity ?? (disposition === "page" ? "error" : "info");
         alertPromise = this.writeAlert({
           id: meta?.id || `alert-${this.now()}`,
