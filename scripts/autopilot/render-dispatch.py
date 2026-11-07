@@ -276,11 +276,17 @@ def model_column(path: str = CLASSES_PATH) -> dict[str, str | None]:
     return table
 
 
+def _signal_args(slot: str, action: dict) -> dict:
+    """The signal classes' argument bag; {} for a bespoke slot (its dispatch is its intent, #5385)."""
+    if slot in db.INTENT_KINDS_BY_SLOT:
+        return {}
+    return action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
+
+
 def resolve_model(slot: str, action: dict, table: dict[str, str | None]) -> tuple[str | None, str]:
     """(alias-or-None, source). Static row → escalate_model hint → Fable pre-resolution."""
-    prompt_args = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
-    hint = prompt_args.get("escalate_model")
-    if isinstance(hint, str) and hint:
+    hint = db.dispatch_escalate_model(action)
+    if hint:
         model, source = hint.lower(), "escalate_model"
     elif slot in table:
         model, source = table[slot], "model-column" if table[slot] else "model-column:inherit"
@@ -692,7 +698,7 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
 
     else:
         # Signal classes — the skill's own contract plus the prompt_args it was fired with.
-        pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
+        pa = _signal_args(slot, action)
         args_txt = ", ".join(f"{k}: {json.dumps(v)}" for k, v in pa.items())
         out.append(
             f"Invoke the `{skill}` skill (via the Skill tool"
@@ -771,7 +777,7 @@ def render_prompt(slot: str, action: dict, state: dict, blocks: dict[str, str], 
 
 
 def describe(slot: str, action: dict, skill: str | None) -> str:
-    pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
+    pa = _signal_args(slot, action)
     tail = ""
     intent_pr_ref = None
     intent_ticket = None

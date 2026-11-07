@@ -578,8 +578,10 @@ def intent_from_dict(raw):
 def escalation_intent(slot: str):
     """Intent for a slot's cascade-routing escalation re-dispatch (design-concept issue-5381).
 
-    dev_orch re-dispatches as Fresh (self-select); every other slot is None in
-    slice 1 (its dispatch still rides prompt_args)."""
+    dev_orch re-dispatches as Fresh (self-select). Every other intent-bearing
+    slot has no ESCALATION_POLICY row; a future row for one MUST add its kind
+    here (pinned by test), or the re-dispatch would carry no intent and the
+    renderer would refuse it."""
     if slot == "dev_orch":
         return Fresh()
     return None
@@ -646,52 +648,48 @@ def dispatch_intent(action):
     return intent_from_dict(raw)
 
 
-def _legacy_pa(action) -> dict:
+def _escalation_pa(action) -> dict:
+    """The prompt_args bag, read ONLY for the slot-generic keys that stay there
+    (ESCALATION_META_KEYS + INV-010's `forced`); work-shape lives on the intent."""
     pa = action.get("prompt_args") if isinstance(action, dict) else None
     return pa if isinstance(pa, dict) else {}
 
 
 def dispatch_anchor(action):
-    """Pinned anchor of a dispatch action (intent field wins, else prompt_args.anchor)."""
+    """Pinned anchor of a dispatch action (intent only; None without an intent)."""
     intent = dispatch_intent(action)
-    if intent is not None:
-        return getattr(intent, "anchor", None)
-    return _legacy_pa(action).get("anchor")
+    return getattr(intent, "anchor", None) if intent is not None else None
 
 
 def dispatch_resume_branch(action):
-    """Stalled-run branch to resume (the prompt_args form requires `resume is True`)."""
+    """Stalled-run branch to resume (intent `branch`; None without an intent)."""
     intent = dispatch_intent(action)
-    if intent is not None:
-        return getattr(intent, "branch", None)
-    pa = _legacy_pa(action)
-    if pa.get("resume") is not True:
-        return None
-    return pa.get("resume_branch")
+    return getattr(intent, "branch", None) if intent is not None else None
 
 
 def dispatch_pr(action):
-    """PR number a dispatch resumes/fixes (intent `pr` wins, else int `prompt_args.resume_pr`)."""
+    """PR number a dispatch resumes/fixes (intent `pr`; None without an intent)."""
     intent = dispatch_intent(action)
-    if intent is not None:
-        return getattr(intent, "pr", None)
-    pr = _legacy_pa(action).get("resume_pr")
-    if isinstance(pr, bool) or not isinstance(pr, int):
-        return None
-    return pr
+    return getattr(intent, "pr", None) if intent is not None else None
+
+
+def dispatch_escalate_model(action):
+    """Cascade-routing model hint (always prompt_args-borne, #3274); non-str/empty -> None."""
+    hint = _escalation_pa(action).get("escalate_model")
+    return hint if isinstance(hint, str) and hint else None
 
 
 def dispatch_attempt(action) -> int:
     """Escalation attempt number (always prompt_args-borne); non-int -> 1."""
     try:
-        return int(_legacy_pa(action).get("attempt") or 1)
+        return int(_escalation_pa(action).get("attempt") or 1)
     except (TypeError, ValueError):
         return 1
 
 
 def dispatch_forced(action) -> bool:
     """True iff the dispatch was force-fired (`prompt_args.forced is True`)."""
-    return _legacy_pa(action).get("forced") is True
+    return _escalation_pa(action).get("forced") is True
 
 
 def signal_dark_past_floor(
