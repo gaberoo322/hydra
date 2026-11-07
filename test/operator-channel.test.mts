@@ -431,6 +431,12 @@ describe("page() and brief() are private to the Operator Channel (issue #5391, s
     assert.deepEqual(offenders, []);
   });
 
+  test("severityOf is not re-introduced anywhere in the Operator Channel module", () => {
+    for (const f of readdirSync(join(REPO_ROOT, "src/operator-channel"))) {
+      assert.ok(!readFileSync(join(REPO_ROOT, "src/operator-channel", f), "utf8").includes("severityOf"), f);
+    }
+  });
+
   test("the public channel surface has no page or brief method", () => {
     const proto = Object.getOwnPropertyNames(OperatorChannel.prototype);
     assert.ok(proto.includes("report"));
