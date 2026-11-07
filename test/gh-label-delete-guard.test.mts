@@ -782,3 +782,63 @@ describe("gh-label-delete-guard — fail closed on internal error (#4745)", () =
     assert.equal(runWithShim("ls").status, 0);
   });
 });
+
+describe("gh-label-delete-guard — heredoc bodies are data (issue #5401)", () => {
+  test("a quote-odd heredoc body before a path DELETE + collection GET is ALLOWED (was DENY)", () => {
+    const r = runHook(
+      bash(
+        `cat <<'EOF'\nsay "hi\nEOF\ngh api -X DELETE "repos/o/r/issues/42/labels/x"\ngh api "repos/o/r/issues/42/labels" --jq .\necho "tail`,
+      ),
+    );
+    assert.equal(r.status, 0, r.stderr);
+  });
+
+  test("a real collection DELETE after a quote-free heredoc is still DENIED", () => {
+    const r = runHook(
+      bash(`cat <<'EOF'\nhello\nEOF\ngh api -X DELETE repos/o/r/issues/42/labels`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("collection-DELETE text only inside a heredoc body is ALLOWED", () => {
+    const r = runHook(
+      bash(`cat > f.md <<'EOF'\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF\nls`),
+    );
+    assert.equal(r.status, 0, r.stderr);
+  });
+
+  test("a DELETE on the heredoc operator line itself is still inspected", () => {
+    const r = runHook(
+      bash(`gh api -X DELETE repos/o/r/issues/42/labels --input - <<'EOF'\n{}\nEOF`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("a <<< here-string is not a heredoc (read binding still resolves)", () => {
+    const r = runHook(
+      bash(`read -r URL <<< "repos/o/r/issues/42/labels"; gh api -X DELETE "$URL"`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("an unterminated heredoc leaves the command unchanged", () => {
+    const r = runHook(
+      bash(`cat <<'EOF'\ngh api -X DELETE repos/o/r/issues/42/labels\n`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("an odd quote in a heredoc body followed by a real collection DELETE is DENIED", () => {
+    const r = runHook(
+      bash(`cat <<'EOF'\nit's\nEOF\ngh api -X DELETE repos/o/r/issues/42/labels`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("<<- tab-indented terminator closes the body", () => {
+    const r = runHook(
+      bash(`cat <<-EOF\n\tsay "hi\n\tEOF\ngh api -X DELETE repos/o/r/issues/42/labels`),
+    );
+    assert.equal(r.status, 2);
+  });
+});

@@ -213,6 +213,42 @@ import shlex
 
 cmd = os.environ.get("GH_LABEL_GUARD_CMD", "")
 
+# Issue #5401: a heredoc BODY is data, not shell, but its quote characters
+# would still drive shlex's quote state below and can merge two later
+# statements into one segment (false DENY of the #5058 label hand-back
+# recipe). Strip every body (operator line kept verbatim, body lines through
+# the terminator line removed) BEFORE the continuation collapse, variable
+# resolution and shlex segmentation. `<<<` here-strings are never heredocs
+# (#4728 `read NAME <<< value`). An unterminated heredoc returns the text
+# unchanged (fail open to the pre-#5401 pipeline). Known gaps (out of scope,
+# #4728 "accidental misuse, not obfuscation"): a `<<WORD` inside a quoted
+# string on an operator line plus a later bare `WORD` line; `$(gh api -X
+# DELETE ...)` inside an unquoted body.
+HEREDOC_OP = re.compile(r"(?<!<)<<(?!<)(-)?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+
+
+def _strip_heredoc_bodies(text):
+    lines = text.split("\n")
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        for m in HEREDOC_OP.finditer(line):
+            dash, word = m.group(1), m.group(3)
+            while True:
+                if i >= len(lines):
+                    return text  # unterminated: fail open, unchanged
+                body = lines[i]
+                i += 1
+                if (body.lstrip("\t") if dash else body) == word:
+                    break
+    return "\n".join(out)
+
+
+cmd = _strip_heredoc_bodies(cmd)
+
 # Collapse shell line-continuations (a backslash immediately followed by a
 # newline) to a single space BEFORE segment-splitting — this is what the
 # shell itself does before executing the command. Without this, a
