@@ -787,10 +787,24 @@ describe("gh-label-delete-guard — heredoc bodies are data (issue #5401)", () =
   test("a quote-odd heredoc body before a path DELETE + collection GET is ALLOWED (was DENY)", () => {
     const r = runHook(
       bash(
-        `cat <<'EOF'\nsay "hi\nEOF\ngh api -X DELETE "repos/o/r/issues/42/labels/x"\ngh api "repos/o/r/issues/42/labels" --jq .\necho "tail`,
+        `cat <<'EOF'\nsay "hi\nEOF\ngh api -X DELETE "repos/o/r/issues/42/labels/x"\ngh api "repos/o/r/issues/42/labels" --jq .\necho tail`,
       ),
     );
     assert.equal(r.status, 0, r.stderr);
+  });
+
+  test("a collection DELETE inside a bash <<'EOF' body (executed) is DENIED", () => {
+    const r = runHook(
+      bash(`bash <<'EOF'\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("a quote-odd data heredoc then real collection DELETE is DENIED", () => {
+    const r = runHook(
+      bash(`cat <<'EOF'\nsay "hi\nEOF\ngh api -X DELETE repos/o/r/issues/42/labels\necho tail`),
+    );
+    assert.equal(r.status, 2);
   });
 
   test("a real collection DELETE after a quote-free heredoc is still DENIED", () => {

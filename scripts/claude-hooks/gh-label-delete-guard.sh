@@ -220,11 +220,18 @@ cmd = os.environ.get("GH_LABEL_GUARD_CMD", "")
 # the terminator line removed) BEFORE the continuation collapse, variable
 # resolution and shlex segmentation. `<<<` here-strings are never heredocs
 # (#4728 `read NAME <<< value`). An unterminated heredoc returns the text
-# unchanged (fail open to the pre-#5401 pipeline). Known gaps (out of scope,
+# unchanged (fail open to the pre-#5401 pipeline). A heredoc fed to an
+# interpreter (bash/sh/python/ssh/eval/source/xargs) is NOT stripped. Known gaps (out of scope,
 # #4728 "accidental misuse, not obfuscation"): a `<<WORD` inside a quoted
 # string on an operator line plus a later bare `WORD` line; `$(gh api -X
 # DELETE ...)` inside an unquoted body.
 HEREDOC_OP = re.compile(r"(?<!<)<<(?!<)(-)?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+# A body fed to an interpreter (bash <<'EOF', python <<EOF, ssh host <<EOF,
+# xargs sh -c, eval, source) is EXECUTED code, not data: never strip it, so a
+# collection DELETE inside it is still inspected (QA round 1, high finding).
+INTERP_RECV = re.compile(
+    r"(?:^|[\s;&|(])(?:bash|sh|zsh|dash|ksh|python[0-9.]*|node|perl|ruby|ssh|eval|source|xargs)(?:\s|$)"
+)
 
 
 def _strip_heredoc_bodies(text):
@@ -236,6 +243,8 @@ def _strip_heredoc_bodies(text):
         out.append(line)
         i += 1
         for m in HEREDOC_OP.finditer(line):
+            if INTERP_RECV.search(line[: m.start()]):
+                break  # executed body: keep it for segmentation
             dash, word = m.group(1), m.group(3)
             while True:
                 if i >= len(lines):
