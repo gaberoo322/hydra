@@ -268,14 +268,17 @@ if __name__ == "__main__":
 function runRecoverStale(
   binDir: string,
   args: string[],
+  debug: "1" | "unset" = "1",
 ): { status: number; stdout: string; stderr: string } {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    HYDRA_AUTOPILOT_REPO: "gaberoo322/hydra",
+    HYDRA_RECOVER_STALE_DEBUG: "1",
+  };
+  if (debug === "unset") delete env.HYDRA_RECOVER_STALE_DEBUG;
   const r = spawnSync(join(SCRIPTS, "recover-stale.sh"), args, {
-    env: {
-      ...process.env,
-      PATH: `${binDir}:${process.env.PATH ?? ""}`,
-      HYDRA_AUTOPILOT_REPO: "gaberoo322/hydra",
-      HYDRA_RECOVER_STALE_DEBUG: "1",
-    },
+    env,
     encoding: "utf-8",
   });
   return {
@@ -524,11 +527,12 @@ function runCase(
   issues: FakeIssue[],
   args: string[],
   opts: Parameters<typeof makeGhStub>[2] = {},
+  debug: "1" | "unset" = "1",
 ): { r: ReturnType<typeof runRecoverStale>; edits: string[][] } {
   const dir = mkdtempSync(join(tmpdir(), "recover-stale-blockers-"));
   try {
     const stub = makeGhStub(dir, issues, opts);
-    const r = runRecoverStale(stub.binDir, args);
+    const r = runRecoverStale(stub.binDir, args, debug);
     return { r, edits: stub.readEdits() };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -683,6 +687,42 @@ describe("recover-stale.sh — blocker clearance predicate (issue #4806)", () =>
     assert.equal(r.status, 0, r.stderr);
     assert.equal(edits.length, 0);
     assert.match(r.stdout, /open-PR list unreadable/);
+  });
+});
+
+describe("recover-stale.sh — flake diagnostics (issue #5393, INV-2)", () => {
+  const openBlocker = (): FakeIssue[] => [
+    { number: 60, state: "OPEN", body: "Blocked by #61." },
+    { number: 61, state: "OPEN", body: "still open" },
+  ];
+  const closedBlocker = (): FakeIssue[] => [
+    { number: 60, state: "OPEN", body: "Blocked by #61." },
+    { number: 61, state: "CLOSED", body: "x" },
+  ];
+
+  test("HYDRA_RECOVER_STALE_DEBUG unset: no DEBUG lines are emitted", () => {
+    const { r } = runCase(openBlocker(), ["stale_blocked", "60"], {}, "unset");
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, /DEBUG/);
+  });
+
+  test("HYDRA_RECOVER_STALE_DEBUG=1: DEBUG dump is emitted", () => {
+    const { r } = runCase(openBlocker(), ["stale_blocked", "60"], {}, "1");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /recover-stale: DEBUG blockers-cleared rc=0/);
+  });
+
+  test("cleared-nothing arm names itself exactly once", () => {
+    const { r, edits } = runCase(openBlocker(), ["stale_blocked", "60"], {}, "unset");
+    assert.equal(edits.length, 0);
+    const n = r.stdout.split("\n").filter((l) => l.includes("cleared nothing for 1 candidate(s)")).length;
+    assert.equal(n, 1, diag(r));
+  });
+
+  test("sibling shape: a cleared blocker still promotes and prints no cleared-nothing line", () => {
+    const { r, edits } = runCase(closedBlocker(), ["stale_blocked", "60"], {}, "unset");
+    assert.equal(wasUnblocked(edits, 60), true, diag(r));
+    assert.doesNotMatch(r.stdout, /cleared nothing/);
   });
 });
 
