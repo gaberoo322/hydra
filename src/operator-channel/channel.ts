@@ -123,7 +123,8 @@ export interface ChannelEventInput {
 export function messageFromEvent(event: ChannelEventInput): OperatorMessage {
   const kind = event.type || "unknown";
   const payload = event.payload || {};
-  let title = ALERT_TYPES.has(kind) ? formatAlertMessage({ type: kind, payload }) : kind;
+  let title =
+    rowOf(kind)?.title?.(payload) ?? (ALERT_TYPES.has(kind) ? formatAlertMessage({ type: kind, payload }) : kind);
   const facts: OperatorFact[] = [];
   for (const [label, value] of Object.entries(payload)) {
     if (facts.length >= 8) break;

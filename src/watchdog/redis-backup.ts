@@ -14,10 +14,7 @@
  * disk.ts's DISK_PAGE_KIND).
  */
 
-import { STREAMS } from "../event-bus-stream-keys.ts";
-import type { EventBus } from "../event-bus.ts";
 import type { OperatorChannel } from "../operator-channel/channel.ts";
-import type { OperatorMessage } from "../operator-channel/message.ts";
 import { redisBackupEpisodeKeys } from "../redis/watchdog-episodes.ts";
 import { runEpisode, type EpisodeStore } from "./episode.ts";
 
@@ -28,8 +25,6 @@ export const REDIS_BACKUP_TIMEOUT_S = 90;
 
 /** The event type and the Page kind (dedupKey == kind). */
 export const REDIS_BACKUP_STALE_KIND = "infra:redis_backup_stale";
-export const REDIS_BACKUP_EVENT_SOURCE = "watchdog-redis-backup-freshness";
-export const REDIS_BACKUP_CORRELATION_ID = "redis-backup-freshness";
 
 export const DEFAULT_REDIS_BACKUP_DIR = "/mnt/hydra-ssd/backups/redis";
 export const DEFAULT_REDIS_BACKUP_STALE_HOURS = 36;
@@ -56,8 +51,7 @@ export interface RedisBackupDeps {
     timerState(unit: string): Promise<string>;
   };
   store: EpisodeStore;
-  channel: Pick<OperatorChannel, "page" | "resolve">;
-  bus: Pick<EventBus, "publish">;
+  channel: Pick<OperatorChannel, "report" | "resolve">;
   clock: { nowMs(): number };
   log: (line: string) => void;
 }
@@ -124,35 +118,18 @@ export async function runRedisBackup(deps: RedisBackupDeps, config: RedisBackupC
           /* intentional: threshold 0 — a member tick always fires or is already fired, never below */
         },
         onFire: async () => {
+          // One report() at the fire edge (ADR-0045 Decision 3, issue #5390): the
+          // table row owns the page title and dedupKey; report() never throws.
           try {
-            await deps.bus.publish(STREAMS.NOTIFICATIONS, {
-              type: REDIS_BACKUP_STALE_KIND,
-              source: REDIS_BACKUP_EVENT_SOURCE,
-              correlationId: REDIS_BACKUP_CORRELATION_ID,
-              payload: { signal: "redis-backup", reason: sanitize(reason), durationMs: ageMs, thresholdMs: thrMs },
+            await deps.channel.report(REDIS_BACKUP_STALE_KIND, {
+              signal: "redis-backup",
+              reason: sanitize(reason),
+              durationMs: ageMs,
+              thresholdMs: thrMs,
             });
-            say(`in-band delivery published (best-effort) for stale redis backup (type=${REDIS_BACKUP_STALE_KIND} -> ${STREAMS.NOTIFICATIONS})`);
+            say(`operator-channel report ok for '${REDIS_BACKUP_STALE_KIND}'`);
           } catch (err) {
-            say(`WARN in-band delivery FAILED (best-effort — detection state is unchanged): ${msg(err)}`);
-          }
-          const page: OperatorMessage = {
-            severity: "page",
-            kind: REDIS_BACKUP_STALE_KIND,
-            title: `Redis backup ${sanitize(reason)} (threshold ${config.staleHours}h)`,
-            facts: [
-              { label: "reason", value: sanitize(reason) },
-              { label: "age_ms", value: String(ageMs) },
-              { label: "threshold_ms", value: String(thrMs) },
-              { label: "backup_dir", value: config.backupDir },
-            ],
-            links: [],
-            dedupKey: REDIS_BACKUP_STALE_KIND,
-          };
-          try {
-            await deps.channel.page(page);
-            say(`operator-channel page ok for '${REDIS_BACKUP_STALE_KIND}'`);
-          } catch (err) {
-            say(`WARN operator-channel page FAILED for '${REDIS_BACKUP_STALE_KIND}' (best-effort — detection state is unchanged): ${msg(err)}`);
+            say(`WARN operator-channel report FAILED for '${REDIS_BACKUP_STALE_KIND}' (best-effort — detection state is unchanged): ${msg(err)}`);
           }
         },
         onRecover: async () => {

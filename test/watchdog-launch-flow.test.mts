@@ -349,7 +349,7 @@ describe("runLaunchFlow — detection behaviour (issue #3847)", () => {
     assert.equal(sinceOf(h.store, "fail-safe"), T0 - HOUR);
     assert.equal(firedOf(h.store, "quota"), true);
     assert.ok(h.logs.some((l) => l.startsWith(LAUNCH_FLOW_LOG_PREFIX) && /WARN no pace-gate last-tick record/.test(l)));
-    assert.equal(h.pages.length + h.published.length, 0);
+    assert.equal(h.pages.length + h.reports.length, 0);
   });
 
   test("INV-4: an absent last-tick (no tick ever recorded) logs the same WARN and mutates nothing", async () => {

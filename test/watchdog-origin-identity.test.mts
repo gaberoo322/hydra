@@ -37,14 +37,14 @@ const cfg = (over: Partial<OriginIdentityConfig> = {}): OriginIdentityConfig => 
   ...over,
 });
 const text = (h: OriginHarness): string => h.logs.join("\n");
-const payloadOf = (h: OriginHarness, i = 0): Record<string, unknown> => h.published[i].event.payload;
+const payloadOf = (h: OriginHarness, i = 0): Record<string, unknown> => h.reports[i].payload;
 
 describe("run_origin_identity (#4939)", () => {
   it("is silent for the expected https URL with origin/master present", async () => {
     const h = makeOriginHarness();
     await runOriginIdentity(h.deps, cfg());
     assert.doesNotMatch(text(h), /ALARM/);
-    assert.equal(h.published.length, 0);
+    assert.equal(h.reports.length, 0);
     assert.equal(h.pages.length, 0);
     assert.match(text(h), /origin-identity tick processed \(origin=gaberoo322\/hydra, origin_master=present\)/);
     assert.ok(h.logs.every((l) => l.startsWith(ORIGIN_IDENTITY_LOG_PREFIX)));
@@ -55,20 +55,17 @@ describe("run_origin_identity (#4939)", () => {
     h.state.url = "git@github.com:gaberoo322/hydra.git";
     await runOriginIdentity(h.deps, cfg({ autoRepair: false }));
     // scp-style host is github.com -> no wrong-origin-host; same repo -> no wrong-origin-url.
-    assert.equal(h.published.length, 0);
+    assert.equal(h.reports.length, 0);
     assert.doesNotMatch(text(h), /ALARM/);
   });
 
-  it("alarms and publishes ONE enveloped event for a Target-repo origin URL, deduped across ticks", async () => {
+  it("alarms with exactly ONE channel.report() for a Target-repo origin URL, deduped across ticks", async () => {
     const h = makeOriginHarness();
     h.state.url = TARGET;
     await runOriginIdentity(h.deps, cfg({ autoRepair: false }));
-    assert.equal(h.published.length, 1);
-    const ev = h.published[0];
-    assert.equal(ev.stream, "hydra:notifications");
-    assert.equal(ev.event.type, "infra:origin_identity_wrong");
-    assert.equal(ev.event.source, "watchdog-origin-identity");
-    assert.equal(ev.event.correlationId, "origin-identity");
+    assert.equal(h.reports.length, 1);
+    assert.equal(h.reports[0].kind, "infra:origin_identity_wrong");
+    assert.deepEqual(Object.keys(h.reports[0].payload).sort(), ["fetch", "newUrl", "note", "reason", "repair", "signal", "url"]);
     assert.equal(payloadOf(h).signal, "origin-identity");
     assert.equal(payloadOf(h).reason, "wrong-origin-url");
     assert.equal(payloadOf(h).repair, "not-attempted");
@@ -79,7 +76,7 @@ describe("run_origin_identity (#4939)", () => {
     // The since-marker records the outcome; a second tick with the same outcome publishes nothing.
     assert.equal(parseSinceMarker(h.files.since)?.outcome, "alarm");
     await runOriginIdentity(h.deps, cfg({ autoRepair: false }));
-    assert.equal(h.published.length, 1);
+    assert.equal(h.reports.length, 1);
     assert.equal(h.pages.length, 1);
   });
 
@@ -87,7 +84,7 @@ describe("run_origin_identity (#4939)", () => {
     const h = makeOriginHarness();
     h.state.url = "https://octo:ghp_SECRETTOKEN@github.com/gaberoo322/claw-street-bets.git";
     await runOriginIdentity(h.deps, cfg({ autoRepair: false }));
-    const everything = JSON.stringify([h.logs, h.published, h.pages]);
+    const everything = JSON.stringify([h.logs, h.reports, h.pages]);
     assert.doesNotMatch(everything, /SECRETTOKEN|octo/);
     assert.match(String(payloadOf(h).url), /https:\/\/github\.com\/gaberoo322\/claw-street-bets\.git/);
   });
@@ -96,14 +93,14 @@ describe("run_origin_identity (#4939)", () => {
     const h = makeOriginHarness();
     h.state.url = "https://user:ghp_ab@cd@github.com/gaberoo322/claw-street-bets.git";
     await runOriginIdentity(h.deps, cfg({ autoRepair: false }));
-    assert.doesNotMatch(JSON.stringify([h.logs, h.published, h.pages]), /ghp_ab|cd@/);
+    assert.doesNotMatch(JSON.stringify([h.logs, h.reports, h.pages]), /ghp_ab|cd@/);
   });
 
   it("redacts userinfo up to the LAST @ even when the token contains `/` (QA round 4)", async () => {
     const h = makeOriginHarness();
     h.state.url = "https://user:ghp_a/b@github.com/gaberoo322/claw-street-bets.git";
     await runOriginIdentity(h.deps, cfg({ autoRepair: false }));
-    assert.doesNotMatch(JSON.stringify([h.logs, h.published, h.pages]), /ghp_a/);
+    assert.doesNotMatch(JSON.stringify([h.logs, h.reports, h.pages]), /ghp_a/);
   });
 
   it("alarms wrong-origin-host when the host is not the expected one", async () => {
@@ -114,26 +111,15 @@ describe("run_origin_identity (#4939)", () => {
     assert.match(text(h), /wrong-origin-host/);
   });
 
-  it("does not create the dedup marker when the publish throws, so the next tick retries", async () => {
+  it("one report() even when delivery fails (store down): since-marker written, no second report next tick (#5390 INV-9)", async () => {
     const h = makeOriginHarness();
     h.state.url = TARGET;
-    h.state.publish = "throw";
+    h.state.failReport = true;
     await runOriginIdentity(h.deps, cfg({ autoRepair: false }));
-    assert.equal(h.files.since, null);
-    assert.match(text(h), /will retry next tick/);
-    h.state.publish = null;
+    assert.equal(h.reports.length, 1);
+    assert.notEqual(h.files.since, null, "report() never throws, so the marker is written unconditionally");
     await runOriginIdentity(h.deps, cfg({ autoRepair: false }));
-    assert.equal(h.published.length, 1, "the retry delivers");
-    assert.notEqual(h.files.since, null);
-  });
-
-  it("a publish that returns no stream id (#5140) does not write the since-marker and retries", async () => {
-    const h = makeOriginHarness();
-    h.state.url = TARGET;
-    h.state.publish = "empty";
-    await runOriginIdentity(h.deps, cfg({ autoRepair: false }));
-    assert.equal(h.files.since, null);
-    assert.match(text(h), /WARN in-band delivery FAILED/);
+    assert.equal(h.reports.length, 1, "no retry storm: the episode is already marked");
   });
 
   it("alarms on a correct URL when refs/remotes/origin/master does not resolve", async () => {
@@ -155,7 +141,7 @@ describe("run_origin_identity (#4939)", () => {
     assert.deepEqual(h.resolves, [{ key: ORIGIN_IDENTITY_PAGE_KIND, title: "~/hydra origin identity healthy again" }]);
     h.state.url = TARGET;
     await runOriginIdentity(h.deps, cfg({ autoRepair: false }));
-    assert.equal(h.published.length, 2, "a recurrence publishes fresh");
+    assert.equal(h.reports.length, 2, "a recurrence reports fresh");
   });
 
   it("logs an INFO line when .git/config mtime moves between ticks", async () => {
@@ -173,7 +159,7 @@ describe("run_origin_identity (#4939)", () => {
     h.state.hasGitDir = false;
     await runOriginIdentity(h.deps, cfg());
     assert.match(text(h), /WARN \/home\/gabe\/hydra\/\.git not found — skipping origin identity check/);
-    assert.equal(h.published.length, 0);
+    assert.equal(h.reports.length, 0);
   });
 
   it("skips the tick on a git tooling failure (exit > 1), but treats an absent key (exit 1) as a finding", async () => {
@@ -181,7 +167,7 @@ describe("run_origin_identity (#4939)", () => {
     tooling.state.url = { error: 128 };
     await runOriginIdentity(tooling.deps, cfg());
     assert.match(text(tooling), /WARN git config read failed \(rc=128\) — skipping origin identity check/);
-    assert.equal(tooling.published.length, 0);
+    assert.equal(tooling.reports.length, 0);
 
     const absent = makeOriginHarness();
     absent.state.url = "absent";
@@ -210,7 +196,8 @@ describe("run_origin_identity auto-repair (#5065)", () => {
     assert.equal(payloadOf(h).fetch, "ok");
     assert.equal(payloadOf(h).newUrl, GOOD);
     assert.match(text(h), /REPAIRED ~\/hydra origin identity: wrong-origin-url\+origin-master-missing/);
-    assert.equal(h.pages.length, 0, "repaired is the recovery edge: a resolve, never a page");
+    assert.equal(h.reports.length, 1, "repaired: one report() carrying the brief disposition");
+    assert.equal(h.pages.length, 0, "repaired is the recovery edge: a brief item plus a resolve, never a page");
     assert.equal(h.resolves.length, 1);
     assert.equal(parseSinceMarker(h.files.since)?.outcome, "repaired");
   });
@@ -289,10 +276,10 @@ describe("run_origin_identity auto-repair (#5065)", () => {
     assert.equal(payloadOf(h).repair, "failed");
     assert.match(String(payloadOf(h).note), /auto-repair FAILED: origin fetch failed \(rc=128\)/);
     assert.equal(h.pages.length, 1);
-    assert.doesNotMatch(JSON.stringify([h.logs, h.published]), /TOKEN/);
-    const before = h.published.length;
+    assert.doesNotMatch(JSON.stringify([h.logs, h.reports]), /TOKEN/);
+    const before = h.reports.length;
     await runOriginIdentity(h.deps, cfg());
-    assert.equal(h.published.length, before, "same outcome inside the backoff window publishes nothing");
+    assert.equal(h.reports.length, before, "same outcome inside the backoff window publishes nothing");
   });
 
   it("an alarm that later self-heals republishes once as 'repaired'", async () => {
@@ -301,7 +288,7 @@ describe("run_origin_identity auto-repair (#5065)", () => {
     await runOriginIdentity(h.deps, cfg({ autoRepair: false }));
     assert.equal(parseSinceMarker(h.files.since)?.outcome, "alarm");
     await runOriginIdentity(h.deps, cfg());
-    assert.equal(h.published.length, 2);
+    assert.equal(h.reports.length, 2);
     assert.equal(payloadOf(h, 1).repair, "repaired");
     assert.equal(parseSinceMarker(h.files.since)?.outcome, "repaired");
   });
@@ -368,7 +355,7 @@ describe("run_origin_identity auto-repair (#5065)", () => {
     await runOriginIdentity(h.deps, cfg());
     assert.equal(h.gitCalls.length > 0, true, "past the backoff a fresh attempt runs");
     assert.deepEqual(h.files.written.at(-1), `${NOW_S - 5000} failed ${NOW_S}`, "same-outcome failed restamps lastAttempt only");
-    assert.equal(h.published.length, 0, "no republish for a same-outcome failure");
+    assert.equal(h.reports.length, 0, "no republish for a same-outcome failure");
   });
 
   it("a legacy bare-epoch marker reads as outcome 'alarm'", () => {
