@@ -675,6 +675,11 @@ export function projectDispatches(
       out.push(dispatch);
       if (slot && !bySlot.has(slot)) bySlot.set(slot, dispatch);
       registerIdentity(cycleId ? `id:${cycleId}` : null, dispatch);
+      // dispatch_id facet (issue #5369): worktreeBranch === the slot's
+      // dispatch_id by construction, so register it even for an outcome-less
+      // action (cycleId === '') — a later turn's snapshot then joins this row.
+      const actionBranch = typeof a.worktreeBranch === "string" && a.worktreeBranch ? a.worktreeBranch : null;
+      registerIdentity(actionBranch ? `id:${actionBranch}` : null, dispatch);
     }
 
     // Fold the slots_snapshot in: enrich an action-derived dispatch's null
@@ -703,6 +708,9 @@ export function projectDispatches(
       // keys on), carried separately from the candidate cycleId so it survives
       // the confirmation protocol's blank.
       const occupancyId = occupancyIdOf(slotTaskId, epochKey);
+      // dispatch_id (fallback worktreeBranch) equals the action's cycleId /
+      // worktreeBranch (issue #5369) — a coarser per-(run,turn,slot) facet.
+      const slotDispatchId = slotStr(slotObj, "dispatch_id") ?? slotStr(slotObj, "worktreeBranch");
       const existing = bySlot.get(slot);
       if (existing) {
         // Same-turn (turn, slot) merge: enrich the action-derived row's null
@@ -712,6 +720,7 @@ export function projectDispatches(
         // diverge (the epoch key covers that).
         enrichFromSlot(existing, slotSkill, slotAnchor, slotTaskId, occupancyId);
         registerIdentity(slotTaskId ? `id:${slotTaskId}` : null, existing);
+        registerIdentity(slotDispatchId ? `id:${slotDispatchId}` : null, existing);
         registerIdentity(existing.cycleId ? `id:${existing.cycleId}` : null, existing);
         registerIdentity(epochKey, existing);
         continue;
@@ -721,14 +730,24 @@ export function projectDispatches(
       // been projected on an earlier turn — a dispatch occupying its slot for
       // N turns appears in N snapshots. Enrich the canonical earliest-turn row
       // instead of emitting a duplicate.
+      // Lookup order (issue #5369): task_id (strictest) -> dispatch_id (only
+      // when the prior row is un-joined or the same occupancy, preserving the
+      // #3834 distinct-occupancy invariant) -> slot@epoch.
+      const dispatchIdHit = slotDispatchId ? byIdentity.get(`id:${slotDispatchId}`) : undefined;
+      const dispatchIdPrior =
+        dispatchIdHit && (dispatchIdHit.occupancyId == null || dispatchIdHit.occupancyId === occupancyId)
+          ? dispatchIdHit
+          : undefined;
       const crossTurnPrior =
         (slotTaskId ? byIdentity.get(`id:${slotTaskId}`) : undefined) ??
+        dispatchIdPrior ??
         (epochKey ? byIdentity.get(epochKey) : undefined);
       if (crossTurnPrior) {
         enrichFromSlot(crossTurnPrior, slotSkill, slotAnchor, slotTaskId, occupancyId);
         // Register any identity facet this snapshot revealed that the earlier
         // turn's entry lacked (e.g. first turn had no started_epoch).
         registerIdentity(slotTaskId ? `id:${slotTaskId}` : null, crossTurnPrior);
+        registerIdentity(slotDispatchId ? `id:${slotDispatchId}` : null, crossTurnPrior);
         registerIdentity(epochKey, crossTurnPrior);
         continue;
       }
