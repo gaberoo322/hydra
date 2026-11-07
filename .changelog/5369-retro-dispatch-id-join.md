@@ -1,0 +1,1 @@
+- fix: retro bundle joins a slot dispatch_id to its action so completed dispatches stop re-emitting as run-handoff rows (#5369)
