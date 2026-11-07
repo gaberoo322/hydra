@@ -282,3 +282,34 @@ jobs:
       - name: Skill-size ratchet (issue #2946 shrink-only word-count baseline)
         if: always()
         run: npx tsx scripts/ci/skill-size-ratchet.ts
+
+      # ── zizmor workflow static analysis (issue #5368) ──────────────────────
+      # Advisory scan of .github/workflows via the pinned, SHA256-verified zizmor
+      # binary (scripts/zizmor-scan.sh; offline, scan-only). Never a required
+      # check: the script's non-zero exit on findings is swallowed here.
+      - name: zizmor workflow scan (advisory; scripts/zizmor-scan.sh)
+        if: always()
+        run: |
+          bash scripts/zizmor-scan.sh > zizmor-results.json || true
+          if [ -s zizmor-results.json ] && jq -e 'type == "array"' zizmor-results.json >/dev/null 2>&1; then
+            total=$(jq '[.[] | select(.determinations.severity == "High")] | length' zizmor-results.json)
+            echo "::warning title=zizmor::${total} High-severity workflow finding(s) (advisory baseline — see zizmor-results.json artifact)"
+            {
+              echo "### zizmor findings by ident and severity"
+              echo
+              echo "| ident | severity | count |"
+              echo "|---|---|---|"
+              jq -r 'group_by([.ident, .determinations.severity])[] | "| \(.[0].ident) | \(.[0].determinations.severity) | \(length) |"' zizmor-results.json
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=zizmor::scan produced no JSON (advisory — see job log)"
+          fi
+
+      - name: Upload zizmor results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zizmor-results
+          path: zizmor-results.json
+          if-no-files-found: ignore
+          retention-days: 14
