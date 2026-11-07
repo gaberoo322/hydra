@@ -671,6 +671,17 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
     }
   });
 
+  test("a forward-fix records artifact deviations in the PR body before the push; non-forward-fix prompts do not carry it (#5370)", () => {
+    const flat = (text: string) => text.replace(/\s+/g, " ");
+    const fix = flat(render("dev_orch", devAction({ kind: "ForwardFixRed", anchor: "issue-5325", branch: "b", pr: 5355 })).prompt);
+    assert.ok(fix.includes("deviate from the design-concept artifact (narrower or broader than an invariant line)"));
+    assert.ok(fix.includes("record the deviation plus evidence in the PR body's reconciliation section via `gh pr edit 5355 --body-file <file>` BEFORE the push"));
+    for (const intent of [{ kind: "Fresh" }, { kind: "ResumeBranch", anchor: "issue-1", branch: "b" }]) {
+      const other = flat(render("dev_orch", devAction(intent as never)).prompt);
+      assert.ok(!other.includes("deviate from the design-concept artifact"), `${intent.kind} must not carry the deviation sentence`);
+    }
+  });
+
   test("the forward-fix contract's five steps are the playbook's five (same bold step titles, same order)", () => {
     const out = render("dev_orch", devAction({ kind: "ForwardFixRed", anchor: "issue-1", branch: "b", pr: 2 }));
     const titles = (text: string) => [...text.matchAll(/^\d\. \*\*([^*]+)\*\*/gm)].map((m) => m[1]);

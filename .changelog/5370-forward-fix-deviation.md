@@ -1,0 +1,1 @@
+- fix: forward-fix dispatches record design-concept deviations in the PR body before pushing (#5370)
