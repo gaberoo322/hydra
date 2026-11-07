@@ -3530,6 +3530,9 @@
           "path": "scripts/sync-skills.sh"
         },
         {
+          "path": "scripts/zizmor-scan.sh"
+        },
+        {
           "path": "src/watchdog/ports.ts"
         }
       ],
