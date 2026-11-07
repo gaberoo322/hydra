@@ -21,28 +21,15 @@ import {
   nextDedupState,
   renderMessage,
   MAX_RENDERED_CHARS,
-  type ChannelResult,
   type OperatorChannelStore,
   type OperatorMessage,
 } from "../src/operator-channel/index.ts";
+import { priv } from "./_helpers/operator-channel-priv.mts";
 import { ALERT_TYPES, KIND_TABLE, PAGE_KINDS, renderBriefLine, type BriefItem } from "../src/operator-channel/index.ts";
 import { REPO_ROOT, listTrackedFiles, stripComments } from "../scripts/ci/seam-check-lib.ts";
 import type { DashboardAlert } from "../src/redis/alerts.ts";
 import type { DedupState, DeliveryLogEntry } from "../src/redis/operator-channel.ts";
 import type { TelegramTransportFn, TelegramTransportResult } from "../src/operator-channel/transport.ts";
-
-/**
- * page()/brief() are private to the channel (issue #5391). The dedup-reducer
- * drives below exercise the edge-trigger state machine with hand-built
- * messages, which report() derives from the per-kind table instead, so they
- * reach the private methods through this one typed cast.
- */
-function priv(ch: OperatorChannel) {
-  return ch as unknown as {
-    page(msg: OperatorMessage): Promise<ChannelResult>;
-    brief(msg: OperatorMessage): Promise<{ appended: boolean }>;
-  };
-}
 
 const HOUR = 60 * 60 * 1000;
 

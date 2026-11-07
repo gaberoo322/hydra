@@ -17,8 +17,6 @@ import {
   KIND_TABLE,
   BriefScheduler,
   OperatorChannel,
-  type ChannelResult,
-  type OperatorMessage,
   REVIEW_PICKUP_ACTION,
   briefDue,
   briefItemFromStored,
@@ -37,6 +35,7 @@ import {
   type BriefStore,
   type OperatorChannelStore,
 } from "../src/operator-channel/index.ts";
+import { priv } from "./_helpers/operator-channel-priv.mts";
 import { PAGE_KINDS } from "../src/operator-channel/page-list.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
 import { createOperatorChannelRouter } from "../src/api/operator-channel.ts";
@@ -149,19 +148,6 @@ function throwingDeps(): BriefSourcesDeps {
 // ---------------------------------------------------------------------------
 // briefDue — pure
 // ---------------------------------------------------------------------------
-
-/**
- * page()/brief() are private to the channel (issue #5391). The dedup-reducer
- * drives below exercise the edge-trigger state machine with hand-built
- * messages, which report() derives from the per-kind table instead, so they
- * reach the private methods through this one typed cast.
- */
-function priv(ch: OperatorChannel) {
-  return ch as unknown as {
-    page(msg: OperatorMessage): Promise<ChannelResult>;
-    brief(msg: OperatorMessage): Promise<{ appended: boolean }>;
-  };
-}
 
 describe("briefDue (pure)", () => {
   test("not due before 07:30 local, even with no last-sent key", () => {

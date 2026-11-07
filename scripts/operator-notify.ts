@@ -89,11 +89,12 @@ export const SYSTEMCTL_SHOW_PROPERTIES = "Result,ExecMainCode,ExecMainStatus,NRe
 
 export const USAGE = `operator-notify — Hydra Operator Channel CLI (ADR-0045)
 
-  operator-notify report         --kind <kind> [--fact label=value]...
+  operator-notify report         --kind <kind> [--fact label=value]... [--alert false]
   operator-notify resolve        --dedup-key <key> [--title <t>]
   operator-notify service-failed --unit <unit[.service]>
   operator-notify --help
 
+"--alert false" skips the dashboard alert (the caller already published the event on the bus).
 Exit 0 for every delivery outcome (see the JSON line on stdout); exit 2 for a usage error.
 `;
 

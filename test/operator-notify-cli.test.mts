@@ -214,6 +214,21 @@ describe("operator-notify: report / resolve through runOperatorNotify (INV-2, IN
     });
   });
 
+  test("report --alert false skips the dashboard alert; without it the alert is written (INV-4 deviation, pinned both ways)", async () => {
+    const run = async (extra: string[]) => {
+      const mem = memoryStore();
+      const { transport } = fakeTransport();
+      const alerts: unknown[] = [];
+      await runOperatorNotify(["report", "--kind", "infra:node_modules_wiped", "--fact", "root=/x", ...extra], {
+        transport, store: mem.store, stdout: () => {}, host: "h",
+        alerts: async (a) => { alerts.push(a); return true; },
+      });
+      return alerts.length;
+    };
+    assert.equal(await run([]), 1, "default: the alert is written");
+    assert.equal(await run(["--alert", "false"]), 0, "--alert false: suppressed");
+  });
+
   test("an unknown kind is briefed with the generic line, exit 0, flagged unknownKind (the CLI never decides severity)", async () => {
     const mem = memoryStore();
     const { sent, transport } = fakeTransport();
