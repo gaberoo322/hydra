@@ -10,9 +10,9 @@
  * not the expected repo, the host is wrong, or origin/master does not resolve.
  *
  * Dedup is by OUTCOME TRANSITION (alarm | repaired | failed) against a FILE
- * marker `<first> <outcome> <lastAttempt>`, written only after the notification
- * publish returns a stream id. It deliberately does NOT use `runEpisode` (that
- * tracker marks fired BEFORE delivery; this one must retry a failed publish).
+ * marker `<first> <outcome> <lastAttempt>`, written once report() has returned
+ * (it never throws). It deliberately does NOT use `runEpisode` (outcome-transition
+ * dedup, not a duration threshold).
  *
  * MUTATION FENCE: every repair is `git -C <root> ...` through the typed
  * src/github/git.ts helpers, limited to `config remote.origin.url`,
@@ -21,12 +21,9 @@
  */
 
 import { NOTIFICATION_EVENT_TYPES as E } from "../event-bus-vocabulary.ts";
-import { STREAMS } from "../event-bus-stream-keys.ts";
-import type { EventBus } from "../event-bus.ts";
 import type { FetchOriginResult, GitConfigRead } from "../github/git.ts";
 import { normaliseRemoteRepo, redactUrlUserinfo, redactUrlUserinfoText, remoteHost } from "../github/remote-url.ts";
 import type { OperatorChannel } from "../operator-channel/channel.ts";
-import type { OperatorMessage } from "../operator-channel/message.ts";
 
 export const ORIGIN_IDENTITY_LOG_PREFIX = "hydra-origin-identity-watchdog:";
 
@@ -34,8 +31,6 @@ export const ORIGIN_IDENTITY_LOG_PREFIX = "hydra-origin-identity-watchdog:";
 export const ORIGIN_IDENTITY_TIMEOUT_S = 120;
 
 export const ORIGIN_IDENTITY_PAGE_KIND = E.INFRA_ORIGIN_IDENTITY_WRONG;
-export const ORIGIN_IDENTITY_EVENT_SOURCE = "watchdog-origin-identity";
-export const ORIGIN_IDENTITY_CORRELATION_ID = "origin-identity";
 
 export const DEFAULT_ORIGIN_HOST = "github.com";
 export const DEFAULT_ORIGIN_FETCH_TIMEOUT_S = 60;
@@ -94,8 +89,7 @@ export interface OriginIdentityDeps {
     setFetchRefspec(root: string): Promise<boolean>;
     fetchOrigin(root: string, timeoutMs: number): Promise<FetchOriginResult>;
   };
-  bus: Pick<EventBus, "publish">;
-  channel: Pick<OperatorChannel, "page" | "resolve">;
+  channel: Pick<OperatorChannel, "report" | "resolve">;
   clock: { nowMs(): number };
   log: (line: string) => void;
 }
@@ -328,58 +322,27 @@ async function tick(deps: OriginIdentityDeps, config: OriginIdentityConfig, say:
   const noteClean = cleanNote(repairNote);
   const repairField = outcome === "repaired" ? "repaired" : outcome === "failed" ? "failed" : "not-attempted";
 
-  // The since-marker is written ONLY after the publish returns a stream id (#5140),
-  // so a Redis blip retries next tick instead of silencing the whole episode.
-  let streamId: string | null = null;
-  try {
-    streamId = await deps.bus.publish(STREAMS.NOTIFICATIONS, {
-      type: E.INFRA_ORIGIN_IDENTITY_WRONG,
-      source: ORIGIN_IDENTITY_EVENT_SOURCE,
-      correlationId: ORIGIN_IDENTITY_CORRELATION_ID,
-      payload: {
-        signal: "origin-identity",
-        reason: reasonStr,
-        url: urlClean,
-        repair: repairField,
-        newUrl: newClean,
-        fetch: fetchResult,
-        note: noteClean,
-      },
-    });
-  } catch (err) {
-    say(`WARN in-band delivery threw (${msg(err)})`);
-  }
-  if (streamId) {
-    deps.files.writeSince(`${nowS} ${outcome} ${nowS}`);
-    say(`in-band delivery published type=${ORIGIN_IDENTITY_PAGE_KIND} repair=${repairField} -> ${STREAMS.NOTIFICATIONS}`);
-  } else {
-    say("WARN in-band delivery FAILED (publish returned no stream id) — will retry next tick");
-  }
+  // One report() per outcome transition (ADR-0045 Decision 3, issue #5390): the
+  // per-kind table decides page vs brief (a self-healed identity is a brief item)
+  // and writes the dashboard alert. report() never throws and fails open when
+  // Redis is down (Decision 6), so the since-marker is written unconditionally
+  // once it has returned.
+  await deps.channel.report(ORIGIN_IDENTITY_PAGE_KIND, {
+    signal: "origin-identity",
+    reason: reasonStr,
+    url: urlClean,
+    repair: repairField,
+    newUrl: newClean,
+    fetch: fetchResult,
+    note: noteClean,
+  });
+  deps.files.writeSince(`${nowS} ${outcome} ${nowS}`);
+  say(`operator-channel report ok for '${ORIGIN_IDENTITY_PAGE_KIND}' repair=${repairField}`);
 
   // A self-healed identity needs no operator action, so `repaired` is this
-  // check's recovery edge; alarm / failed page with dedupKey == kind.
+  // check's recovery edge: close the open page episode.
   if (outcome === "repaired") {
     await deliverResolve(deps, say, `~/hydra origin identity repaired: ${reasonStr}`);
-  } else {
-    const page: OperatorMessage = {
-      severity: "page",
-      kind: ORIGIN_IDENTITY_PAGE_KIND,
-      title: `~/hydra origin identity broken: ${reasonStr}`,
-      facts: [
-        { label: "reason", value: reasonStr },
-        { label: "url", value: urlClean },
-        { label: "repair", value: repairField },
-        { label: "note", value: noteClean },
-      ],
-      links: [],
-      dedupKey: ORIGIN_IDENTITY_PAGE_KIND,
-    };
-    try {
-      await deps.channel.page(page);
-      say(`operator-channel page ok for '${ORIGIN_IDENTITY_PAGE_KIND}'`);
-    } catch (err) {
-      say(`WARN operator-channel page FAILED for '${ORIGIN_IDENTITY_PAGE_KIND}' (best-effort — detection state is unchanged): ${msg(err)}`);
-    }
   }
 }
 

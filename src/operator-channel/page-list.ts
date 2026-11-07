@@ -69,11 +69,25 @@ export interface KindRow {
   alertSeverity?: AlertSeverity;
   /** Edge-trigger identity derivation; default is the kind. */
   dedupKey?: (payload: Payload) => string;
+  /**
+   * Page title renderer (the page-side twin of `briefLine`), for a page kind
+   * whose title is not `formatAlertMessage` (non-alert kinds). Must not throw on
+   * an empty payload. Default: `formatAlertMessage` for an alert kind, else the kind.
+   */
+  title?: (payload: Payload) => string;
   /** Morning Brief line. Required when the disposition is the literal "brief" or a function. */
   briefLine?: BriefLineRenderer;
 }
 
 const PAGE = { disposition: "page", alert: false } as const;
+
+const str = (v: unknown, fallback: string): string => (v === undefined || v === null || v === "" ? fallback : String(v));
+
+/** Page title for the launch-flow signals (the watchdog's former hand-built text). */
+const launchTitle =
+  (suffix: string) =>
+  (p: Payload): string =>
+    `Launch flow '${str(p.signal, "?")}' sustained ${str(p.durationMs, "?")}ms (>= ${str(p.thresholdMs, "?")}ms)${suffix}`;
 const PAGE_ALERT = { disposition: "page", alert: true } as const;
 
 const ROWS = {
@@ -88,10 +102,22 @@ const ROWS = {
     briefLine: (item: BriefItem): string =>
       `~/hydra origin identity auto-repaired: ${fact(item, "reason") || "wrong"} — origin ${fact(item, "url") || "unknown"} -> ${fact(item, "newUrl") || "canonical"}, fetch ${fact(item, "fetch") || "ok"}`,
   },
-  "infra:redis_backup_stale": PAGE,
+  "infra:redis_backup_stale": {
+    ...PAGE,
+    title: (p: Payload): string => {
+      const h = Number(p.thresholdMs) / 3_600_000;
+      return `Redis backup ${str(p.reason, "stale")} (threshold ${Number.isFinite(h) ? h : "?"}h)`;
+    },
+  },
   // /tmp or /dev/shm inode/space use over the watchdog threshold (issue #5327;
   // the 2026-10-31 inode-full outage was silent). Watchdog-only, out-of-band.
-  "infra:tmpfs_exhausted": PAGE,
+  "infra:tmpfs_exhausted": {
+    ...PAGE,
+    // One episode per mount: the dedupKey carries the path and the level (#5390).
+    dedupKey: (p: Payload): string => `infra:tmpfs_exhausted:${str(p.path, "?")}:critical`,
+    title: (p: Payload): string =>
+      `${str(p.path, "?")} critical: ${str(p.over, "over threshold")} — temp-file writes fail with ENOSPC at 100%`,
+  },
   // The watchdog CLI itself cannot boot (broken node_modules / strip-types error
   // / node missing) so EVERY ported check is disarmed (issue #5099). Redis-free,
   // raised from hydra-watchdog.sh via operator-notify; never rides the bus.
@@ -100,12 +126,12 @@ const ROWS = {
   [E.LAUNCH_LATENCY_BREACH]: PAGE_ALERT,
   // Deliberately NOT an alert: a deliberate overnight operator pause must never
   // leave a lingering unread dashboard alert (issue #3848).
-  [E.LAUNCH_PAUSE_FORGOTTEN]: PAGE,
+  [E.LAUNCH_PAUSE_FORGOTTEN]: { ...PAGE, title: launchTitle("") },
   [E.GLM_DRAINER_STERILE]: PAGE_ALERT,
   // Launch-flow fail-safe / meter-dark (watchdog-only, out-of-band: the
   // orchestrator may be down, so they never ride the bus — issue #5046).
-  "launch:fail_safe": PAGE,
-  "launch:meter_dark": PAGE,
+  "launch:fail_safe": { ...PAGE, title: launchTitle(" — Orchestrator may be down") },
+  "launch:meter_dark": { ...PAGE, title: launchTitle(" — Orchestrator may be down") },
   // The notification consumer is dead, deduped per consumer name.
   [E.CONSUMER_DEAD]: {
     disposition: "page",
@@ -125,7 +151,7 @@ const ROWS = {
   // No Morning Brief delivered for 26h (ADR-0045 Decision 8, issue #5048):
   // raised by the watchdog from the Redis last-sent key, independent of the
   // scheduler's running state — a silent channel must itself be noticeable.
-  "brief:missing": PAGE,
+  "brief:missing": { ...PAGE, title: (p: Payload): string => `No Morning Brief delivered for ${str(p.ageH, "?")}h` },
 
   // ---- Morning Brief kinds -------------------------------------------------
   [E.CYCLE_COMPLETED]: {
@@ -187,6 +213,15 @@ const ROWS = {
     alert: false,
     briefLine: (item: BriefItem): string =>
       `Builder-health stagnation: ${fact(item, "signal") ?? "?"} [${fact(item, "realm") ?? "?"}] now ${num(fact(item, "current"))} vs baseline ${num(fact(item, "baseline"))}, sustained ${num(fact(item, "sustainedCycles"))} cycles`,
+  },
+  // The disk check's warn level (issue #5327): an episode-keyed Morning Brief
+  // item appended through `briefOnce` (report()'s brief path appends on EVERY
+  // call, which would spam the brief each watchdog tick).
+  "infra:tmpfs_pressure": {
+    disposition: "brief",
+    alert: false,
+    dedupKey: (p: Payload): string => `infra:tmpfs_pressure:${str(p.path, "?")}:warn`,
+    briefLine: (item: BriefItem): string => `Tmpfs pressure: ${item.title}${fact(item, "free") ? ` (${fact(item, "free")} free)` : ""}`,
   },
   // The watchdog's per-unit failure brief item (operator-notify service-failed
   // path for a unit with no page row).
