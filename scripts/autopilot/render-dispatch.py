@@ -124,7 +124,7 @@ FORWARD_FIX_CONTRACT = """Red-PR forward-fix contract (issues #4460, #5058, INV-
 1. **Stay on the harness branch.** Work in the dispatched worktree, then `git fetch origin {branch} && git reset --hard FETCH_HEAD` — the forward-fix continues the PR's exact head, never a rebase or a new branch. NEVER `gh pr create`: the PR exists; a second PR duplicates the anchor. NEVER remove the `glm-authored` label (or any provenance label) — provenance is display / telemetry the retro surfaces read (no selector gates on it since #5058).
 2. **Read the failure before fixing it.** For a CI-required-check failure, `gh run view <run-id> --log-failed` for the failing run (find the run id via `gh pr checks {pr} --json` or the PR's checks UI). For a QA-FAIL bounce (`needs-dev-resume` applied by hydra-qa's INV-7 path), the finding list is the `### Findings` table in the latest hydra-qa comment on the PR containing `### Findings` whose own trailing `QA-Verdict` sha matches the `sha=` in the anchor issue's latest `QA-Verdict: FAIL pr={pr}` trailer (`gh issue view <anchor> --json comments`; the PR's comments via `gh pr view {pr} --json comments`) — hydra-qa posts FAILs as comments, never a review (#4746); a later non-Findings hydra-qa comment is not the finding list, and the trailer names the round. Green required checks do NOT complete a QA-FAIL forward-fix: push a commit resolving every blocking finding, or rebut a wrong finding by name in the step-5 comment — "no code change needed" is never the outcome while the latest verdict is FAIL (#4849). Fix the named defect, not a neighbouring one. A blocking (medium/high) finding whose fix changes behaviour (executable code under `src/`, `scripts/`, `dashboard/src/` or `.github/` — judged by what changed: prompt or doc text needs no test, even when it lives under `scripts/`) is resolved ONLY by a commit that ALSO adds or extends a test that is red without the fix, AND adds or cites a test pinning the nearest sibling shape that must keep its old verdict; a rebutted finding, a PR-body finding, or a docs/prompt-only finding needs no test.
 3. **Push to the SAME branch:** `git push origin HEAD:{branch}`. The existing PR's CI re-runs on the push.
-4. **Design-concept-reconcile failure specifically:** the gate reads the PR body captured at push time (webhook snapshot). Correct the body FIRST via `gh pr edit {pr} --body-file <file>`, THEN push the fix commit — a push that lands before the body edit replays the stale body and re-fails the check (bit #4242 twice).
+4. **Design-concept-reconcile failure specifically:** the gate reads the PR body captured at push time (webhook snapshot). Correct the body FIRST via `gh pr edit {pr} --body-file <file>`, THEN push the fix commit — a push that lands before the body edit replays the stale body and re-fails the check (bit #4242 twice). The same applies when resolving a finding makes the code deviate from the design-concept artifact (narrower or broader than an invariant line): record the deviation plus evidence in the PR body's reconciliation section via `gh pr edit {pr} --body-file <file>` BEFORE the push, so the push-time webhook snapshot carries it.
 5. **Verify in the foreground** (`npm test`, `npm run typecheck` AND `npm run typecheck:test`, before the push that is meant to be final), commit, push — the same commit-before-verify discipline as any dev dispatch: commit and push first, verify, push again once green. When done, post exactly ONE comment on the PR naming what was fixed and which required check(s) or QA finding(s) the fix targets, plus any finding you rebutted and why, naming both tests (the red-without-the-fix test and the sibling-shape pin) for each QA-FAIL finding fixed with a code change — none for a rebutted finding or a CI-only fix. Do not relabel the anchor issue by hand — reap's needs-qa promotion (INV-9) advances it when the closing PR is confirmed."""
 
 # The conflict fix-forward deltas (playbook § dev_orch dispatch, issues #4807,
@@ -276,11 +276,17 @@ def model_column(path: str = CLASSES_PATH) -> dict[str, str | None]:
     return table
 
 
+def _signal_args(slot: str, action: dict) -> dict:
+    """The signal classes' argument bag; {} for a bespoke slot (its dispatch is its intent, #5385)."""
+    if slot in db.INTENT_KINDS_BY_SLOT:
+        return {}
+    return action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
+
+
 def resolve_model(slot: str, action: dict, table: dict[str, str | None]) -> tuple[str | None, str]:
     """(alias-or-None, source). Static row → escalate_model hint → Fable pre-resolution."""
-    prompt_args = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
-    hint = prompt_args.get("escalate_model")
-    if isinstance(hint, str) and hint:
+    hint = db.dispatch_escalate_model(action)
+    if hint:
         model, source = hint.lower(), "escalate_model"
     elif slot in table:
         model, source = table[slot], "model-column" if table[slot] else "model-column:inherit"
@@ -692,7 +698,7 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
 
     else:
         # Signal classes — the skill's own contract plus the prompt_args it was fired with.
-        pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
+        pa = _signal_args(slot, action)
         args_txt = ", ".join(f"{k}: {json.dumps(v)}" for k, v in pa.items())
         out.append(
             f"Invoke the `{skill}` skill (via the Skill tool"
@@ -771,7 +777,7 @@ def render_prompt(slot: str, action: dict, state: dict, blocks: dict[str, str], 
 
 
 def describe(slot: str, action: dict, skill: str | None) -> str:
-    pa = action.get("prompt_args") if isinstance(action.get("prompt_args"), dict) else {}
+    pa = _signal_args(slot, action)
     tail = ""
     intent_pr_ref = None
     intent_ticket = None

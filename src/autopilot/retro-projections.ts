@@ -29,13 +29,16 @@
  *     `confirmDrillableCycleIds`. Groups dispatches across runs by canonical
  *     identity.
  *
- * Everything here is pure: zero Redis imports, zero `await`, no clock beyond
+ * Everything here is pure (the one non-local import is the side-effect-free
+ * predicate `isHarnessAgentId` from `../transcript-store.ts`, #5392; it is
+ * called with no I/O): zero Redis imports, zero `await`, no clock beyond
  * caller-supplied input — purity is enforced by the import boundary of this
  * module (the downstream `retro-enrichment.ts` / `retro-bundle.ts` own every
  * read), not merely documented.
  */
 
 import { bucketDispatchOutcome } from "./cycle-status.ts";
+import { isHarnessAgentId } from "../transcript-store.ts";
 import type { StuckSignal } from "./run-health.ts";
 // Issue #4856: the taxonomy-derived PR-producing class set (a constant import —
 // no I/O function is pulled in beyond the taxonomy's one-time classes.json
@@ -57,8 +60,9 @@ import { PR_PRODUCING_SKILLS, classByName } from "../taxonomy/classes.ts";
  */
 export interface RetroDispatch {
   /**
-   * The cycle id (transcript handle) this dispatch resolved to, or `""` when
-   * none exists. An action/outcome-joined dispatch carries the recorded
+   * The cycle-record key (`worktree_branch or task_id`, reap.py) this dispatch
+   * resolved to — NOT a transcript handle (use {@link transcriptId}), or `""`
+   * when none exists. An action/outcome-joined dispatch carries the recorded
    * `outcome.cycleId`. A snapshot-only dispatch (the crashed/interrupted-run
    * case) RECOVERS a candidate from the slot's `task_id` — the same id reap
    * sends on its durable `cycle-record` write — and `assembleRetroBundle`
@@ -118,6 +122,15 @@ export interface RetroDispatch {
    * across turns) still collapses to one (#3738).
    */
   occupancyId: string | null;
+  /**
+   * The bare 17-hex harness agent hash that `GET /api/dispatches/:id/transcript`
+   * (and the on-disk `agent-<hash>.jsonl` fallback) accept (issue #5392), or
+   * `null` when none is recoverable (epoch-only / identity-less occupancy).
+   * Derived from {@link occupancyId} by {@link transcriptIdOf}; materialised by
+   * `assembleRetroBundle` AFTER dedup — the projection only seeds `null`.
+   * Additive: drillability stays keyed on `cycleId !== ""`.
+   */
+  transcriptId: string | null;
   /** Cycle status (`merged`, `failed`, `abandoned`, ...) or `null` if pending. */
   status: string | null;
   /**
@@ -457,6 +470,16 @@ function occupancyIdOf(taskId: string | null, epochKey: string | null): string |
 }
 
 /**
+ * The bare 17-hex agent hash behind an `id:<hash>` occupancyId (issue #5392),
+ * or `null` for epoch-only / identity-less / malformed occupancies.
+ */
+export function transcriptIdOf(occupancyId: string | null): string | null {
+  if (typeof occupancyId !== "string" || !occupancyId.startsWith("id:")) return null;
+  const hash = occupancyId.slice(3);
+  return isHarnessAgentId(hash) ? hash : null;
+}
+
+/**
  * Fill a dispatch's null fields from a slot-snapshot entry. Existing values
  * always win (action-join / earliest-turn canonical row), so this is
  * enrich-only — used both for the same-turn `(turn, slot)` merge and for the
@@ -605,6 +628,7 @@ export function projectDispatches(
         // filled from the same-turn slots_snapshot below (enrichFromSlot), or
         // from a later turn's snapshot via the cross-turn identity map.
         occupancyId: null,
+        transcriptId: null,
         status,
         bucket: bucketOf(status),
         // abandonReason / regression are enriched from the metrics sidecar
@@ -651,6 +675,11 @@ export function projectDispatches(
       out.push(dispatch);
       if (slot && !bySlot.has(slot)) bySlot.set(slot, dispatch);
       registerIdentity(cycleId ? `id:${cycleId}` : null, dispatch);
+      // dispatch_id facet (issue #5369): worktreeBranch === the slot's
+      // dispatch_id by construction, so register it even for an outcome-less
+      // action (cycleId === '') — a later turn's snapshot then joins this row.
+      const actionBranch = typeof a.worktreeBranch === "string" && a.worktreeBranch ? a.worktreeBranch : null;
+      registerIdentity(actionBranch ? `id:${actionBranch}` : null, dispatch);
     }
 
     // Fold the slots_snapshot in: enrich an action-derived dispatch's null
@@ -679,6 +708,9 @@ export function projectDispatches(
       // keys on), carried separately from the candidate cycleId so it survives
       // the confirmation protocol's blank.
       const occupancyId = occupancyIdOf(slotTaskId, epochKey);
+      // dispatch_id (fallback worktreeBranch) equals the action's cycleId /
+      // worktreeBranch (issue #5369) — a coarser per-(run,turn,slot) facet.
+      const slotDispatchId = slotStr(slotObj, "dispatch_id") ?? slotStr(slotObj, "worktreeBranch");
       const existing = bySlot.get(slot);
       if (existing) {
         // Same-turn (turn, slot) merge: enrich the action-derived row's null
@@ -688,6 +720,7 @@ export function projectDispatches(
         // diverge (the epoch key covers that).
         enrichFromSlot(existing, slotSkill, slotAnchor, slotTaskId, occupancyId);
         registerIdentity(slotTaskId ? `id:${slotTaskId}` : null, existing);
+        registerIdentity(slotDispatchId ? `id:${slotDispatchId}` : null, existing);
         registerIdentity(existing.cycleId ? `id:${existing.cycleId}` : null, existing);
         registerIdentity(epochKey, existing);
         continue;
@@ -697,14 +730,24 @@ export function projectDispatches(
       // been projected on an earlier turn — a dispatch occupying its slot for
       // N turns appears in N snapshots. Enrich the canonical earliest-turn row
       // instead of emitting a duplicate.
+      // Lookup order (issue #5369): task_id (strictest) -> dispatch_id (only
+      // when the prior row is un-joined or the same occupancy, preserving the
+      // #3834 distinct-occupancy invariant) -> slot@epoch.
+      const dispatchIdHit = slotDispatchId ? byIdentity.get(`id:${slotDispatchId}`) : undefined;
+      const dispatchIdPrior =
+        dispatchIdHit && (dispatchIdHit.occupancyId == null || dispatchIdHit.occupancyId === occupancyId)
+          ? dispatchIdHit
+          : undefined;
       const crossTurnPrior =
         (slotTaskId ? byIdentity.get(`id:${slotTaskId}`) : undefined) ??
+        dispatchIdPrior ??
         (epochKey ? byIdentity.get(epochKey) : undefined);
       if (crossTurnPrior) {
         enrichFromSlot(crossTurnPrior, slotSkill, slotAnchor, slotTaskId, occupancyId);
         // Register any identity facet this snapshot revealed that the earlier
         // turn's entry lacked (e.g. first turn had no started_epoch).
         registerIdentity(slotTaskId ? `id:${slotTaskId}` : null, crossTurnPrior);
+        registerIdentity(slotDispatchId ? `id:${slotDispatchId}` : null, crossTurnPrior);
         registerIdentity(epochKey, crossTurnPrior);
         continue;
       }
@@ -730,6 +773,7 @@ export function projectDispatches(
         prNumber: prNumberFromAnchor(slotAnchor),
         slot,
         occupancyId,
+        transcriptId: null,
         status: null,
         bucket: null,
         abandonReason: null,

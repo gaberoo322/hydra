@@ -233,6 +233,8 @@ const SLOW_CHORE_STUBS = {
   "usage-weekly-snapshot": noopWork,
   "holdback-merge-event-enrol": noopWork,
   "pattern-cue-demotion": noopWork,
+  // ~2.2 s of live gh/git reconcile per runHousekeeping call (6 calls in this file).
+  "cycle-merge-reconcile": noopWork,
 };
 
 describe("runHousekeeping — cadence guards injectable without Redis (issue #3091)", () => {

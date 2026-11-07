@@ -24,6 +24,8 @@ import {
   type OperatorChannelStore,
   type OperatorMessage,
 } from "../src/operator-channel/index.ts";
+import { ALERT_TYPES, KIND_TABLE, PAGE_KINDS, renderBriefLine, type BriefItem } from "../src/operator-channel/index.ts";
+import type { DashboardAlert } from "../src/redis/alerts.ts";
 import type { DedupState, DeliveryLogEntry } from "../src/redis/operator-channel.ts";
 import type { TelegramTransportFn, TelegramTransportResult } from "../src/operator-channel/transport.ts";
 
@@ -507,5 +509,197 @@ describe("checkOperatorChannelCredentials (boot check)", () => {
     const { checkOperatorChannelCredentials } = await import("../src/operator-channel/channel.ts");
     assert.equal(checkOperatorChannelCredentials({}), false);
     assert.equal(checkOperatorChannelCredentials({ TELEGRAM_BOT_TOKEN: "t", TELEGRAM_CHAT_ID: "1" }), true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The per-kind table + report() (issue #5389)
+// ---------------------------------------------------------------------------
+
+describe("KIND_TABLE — the one per-kind table", () => {
+  test("every notification event type and every CLI kind has a row", async () => {
+    const { NOTIFICATION_EVENT_TYPES } = await import("../src/event-bus-vocabulary.ts");
+    const { UNIT_PAGE_KINDS, UNIT_FAILED_BRIEF_KIND } = await import("../scripts/operator-notify.ts");
+    const watchdog = readFileSync(new URL("../scripts/hydra-watchdog.sh", import.meta.url), "utf8");
+    const cliKinds = [...watchdog.matchAll(/--kind "([^"]+)"/g)].map((m) => m[1]);
+    const expected = new Set<string>([
+      ...Object.values(NOTIFICATION_EVENT_TYPES),
+      ...Object.values(UNIT_PAGE_KINDS),
+      UNIT_FAILED_BRIEF_KIND,
+      ...cliKinds,
+    ]);
+    const missing = [...expected].filter((k) => !Object.hasOwn(KIND_TABLE, k));
+    assert.deepEqual(missing, [], `kinds with no KIND_TABLE row: ${missing.join(", ")}`);
+    assert.equal(Object.keys(KIND_TABLE).length, 30);
+  });
+
+  test("PAGE_KINDS, BRIEF_KINDS and ALERT_TYPES are derived from the table", () => {
+    assert.equal(PAGE_KINDS.length, 19);
+    assert.deepEqual(
+      [...ALERT_TYPES].sort(),
+      Object.entries(KIND_TABLE).filter(([, r]) => r.alert !== false).map(([k]) => k).sort(),
+    );
+    assert.equal(ALERT_TYPES.size, 7);
+    assert.equal(ALERT_TYPES.has("launch:pause_forgotten"), false);
+    assert.equal(isPageKind("constructor"), false, "prototype keys are not kinds");
+  });
+});
+
+describe("per-kind table import direction", () => {
+  test("alert-grammar.ts stays a leaf: it does not import from the operator-channel module", () => {
+    const grammar = readFileSync(new URL("../src/notification/alert-grammar.ts", import.meta.url), "utf8");
+    assert.doesNotMatch(grammar, /from\s+["'][^"']*operator-channel/);
+    const table = readFileSync(new URL("../src/operator-channel/page-list.ts", import.meta.url), "utf8");
+    const imports = [...table.matchAll(/from\s+["']([^"']+)["']/g)].map((m) => m[1]).sort();
+    assert.deepEqual(imports, ["../event-bus-vocabulary.ts", "../notification/alert-grammar.ts", "./message.ts"]);
+  });
+});
+
+describe("OperatorChannel.report()", () => {
+  function setup(alertsImpl?: (a: DashboardAlert) => Promise<boolean>) {
+    const mem = memoryStore();
+    const tr = fakeTransport();
+    const alerts: DashboardAlert[] = [];
+    const ch = new OperatorChannel({
+      store: mem.store,
+      transport: tr.transport,
+      now: clock().now,
+      alerts: alertsImpl ?? (async (a) => (alerts.push(a), true)),
+    });
+    return { ch, mem, tr, alerts };
+  }
+
+  test("a page kind with an alert pages and writes an error alert with the bus id/timestamp", async () => {
+    const { ch, tr, alerts } = setup();
+    const res = await ch.report("launch:quota_stretch", { reason: "5h cap" }, { id: "e1", timestamp: "2026-11-05T00:00:00.000Z" });
+    assert.equal(res.disposition, "page");
+    assert.equal(res.delivered, true);
+    assert.equal(res.alertWritten, true);
+    assert.equal(res.unknownKind, false);
+    assert.equal(tr.sent.length, 1);
+    assert.equal(alerts[0].severity, "error");
+    assert.equal(alerts[0].id, "e1");
+    assert.equal(alerts[0].timestamp, "2026-11-05T00:00:00.000Z");
+    assert.equal(alerts[0].dismissed, false);
+    assert.deepEqual(alerts[0].payload, { reason: "5h cap" });
+    assert.match(alerts[0].message, /^Launch quota stretch/);
+  });
+
+  test("a suppressed repeat page is delivered:false with reason suppressed, but still writes the alert", async () => {
+    const { ch, alerts } = setup();
+    await ch.report("consumer:dead", { consumer: "dlq", restarts: 6 });
+    const second = await ch.report("consumer:dead", { consumer: "dlq", restarts: 6 });
+    assert.equal(second.delivered, false);
+    assert.deepEqual(second.outcome, { sent: false, reason: "suppressed" });
+    assert.equal(alerts.length, 2);
+    assert.match(alerts[0].id, /^alert-/);
+  });
+
+  test("a brief kind with an alert is appended and gets an info alert (dlq:alert)", async () => {
+    const { ch, mem, alerts } = setup();
+    const res = await ch.report("dlq:alert", { originalStream: "s", eventType: "e", deliveryCount: 3 });
+    assert.equal(res.disposition, "brief");
+    assert.equal(res.delivered, true);
+    assert.equal(mem.briefs.length, 1);
+    assert.equal(alerts[0].severity, "info");
+  });
+
+  test("a page kind without an alert flag writes none", async () => {
+    const { ch, alerts } = setup();
+    const res = await ch.report("launch:pause_forgotten", {});
+    assert.equal(res.alertWritten, false);
+    assert.equal(alerts.length, 0);
+  });
+
+  test("an unknown kind is briefed with the generic line, flagged, never thrown", async () => {
+    const { ch, mem, tr, alerts } = setup();
+    const res = await ch.report("totally:unknown", { a: "x", n: 2, nested: { z: 1 } });
+    assert.equal(res.disposition, "brief");
+    assert.equal(res.unknownKind, true);
+    assert.equal(res.alertWritten, false);
+    assert.equal(res.delivered, true);
+    assert.equal(tr.sent.length, 0);
+    assert.equal(alerts.length, 0);
+    assert.equal(mem.briefs[0].title, "totally:unknown");
+    assert.deepEqual(mem.briefs[0].facts, [{ label: "a", value: "x" }, { label: "n", value: "2" }]);
+  });
+
+  test("a repaired origin identity is a dedicated brief line, no page and no alert; unrepaired still pages with an alert", async () => {
+    const { ch, mem, tr, alerts } = setup();
+    const kind = "infra:origin_identity_wrong";
+    const repaired = await ch.report(kind, { reason: "wrong-origin-url", url: "https://evil", repair: "repaired", newUrl: "https://good", fetch: "ok" });
+    assert.equal(repaired.disposition, "brief");
+    assert.equal(repaired.alertWritten, false);
+    assert.equal(tr.sent.length, 0);
+    const line = renderBriefLine({ ...(mem.briefs[0] as object), at: 1 } as BriefItem);
+    assert.equal(line, "~/hydra origin identity auto-repaired: wrong-origin-url — origin https://evil -> https://good, fetch ok");
+    const failed = await ch.report(kind, { reason: "wrong-origin-url", url: "https://evil", repair: "failed" });
+    assert.equal(failed.disposition, "page");
+    assert.equal(failed.alertWritten, true);
+    assert.equal(alerts[0].severity, "error");
+  });
+
+  test("the alert write starts before delivery: a transport that waits on the alert still completes (QA #5394 finding 2)", async () => {
+    let seen!: () => void;
+    const alertSeen = new Promise<void>((r) => (seen = r));
+    const ch = new OperatorChannel({
+      store: memoryStore().store,
+      transport: async () => {
+        await alertSeen; // deadlocks if the alert is only written after the page step
+        return { ok: true, mode: "HTML" };
+      },
+      now: clock().now,
+      alerts: async () => (seen(), true),
+    });
+    const res = await Promise.race([
+      ch.report("launch:quota_stretch", {}),
+      new Promise<"hung">((r) => setTimeout(() => r("hung"), 1000)),
+    ]);
+    assert.notEqual(res, "hung");
+    assert.equal((res as { alertWritten: boolean }).alertWritten, true);
+  });
+
+  test("a hung alert write is bounded by the channel timeout: report() resolves, alertWritten=false (QA #5394 round 3)", async () => {
+    const tr = fakeTransport();
+    const ch = new OperatorChannel({
+      store: memoryStore().store,
+      transport: tr.transport,
+      now: clock().now,
+      timeoutMs: 30,
+      alerts: () => new Promise<boolean>(() => {}), // never settles
+    });
+    const res = await Promise.race([
+      ch.report("launch:quota_stretch", {}),
+      new Promise<"hung">((r) => setTimeout(() => r("hung"), 1000)),
+    ]);
+    assert.notEqual(res, "hung");
+    assert.equal((res as { alertWritten: boolean }).alertWritten, false);
+    assert.equal((res as { delivered: boolean }).delivered, true);
+  });
+
+  test("sibling shape: a page-only kind (no alert) still delivers and writes none", async () => {
+    const { ch, tr, alerts } = setup();
+    const res = await ch.report("launch:pause_forgotten", {});
+    assert.equal(res.delivered, true);
+    assert.equal(tr.sent.length, 1);
+    assert.equal(alerts.length, 0);
+  });
+
+  test("never throws: a failing alert writer and a failing store both resolve to a result", async () => {
+    const boom = setup(async () => {
+      throw new Error("redis down");
+    });
+    const res = await boom.ch.report("launch:quota_stretch", {});
+    assert.equal(res.delivered, true);
+    assert.equal(res.alertWritten, false);
+    const rejecting = new OperatorChannel({
+      store: memoryStore("reject").store,
+      transport: async () => {
+        throw new Error("net down");
+      },
+      alerts: async () => true,
+    });
+    await assert.doesNotReject(rejecting.report("consumer:dead", { consumer: "x" }));
+    await assert.doesNotReject(rejecting.report("cycle:completed", {}));
   });
 });

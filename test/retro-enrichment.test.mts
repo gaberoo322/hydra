@@ -41,6 +41,7 @@ function dispatch(over: Partial<RetroDispatch> = {}): RetroDispatch {
     prNumber: null,
     slot: null,
     occupancyId: null,
+    transcriptId: null,
     status: "merged",
     bucket: "merged",
     abandonReason: null,

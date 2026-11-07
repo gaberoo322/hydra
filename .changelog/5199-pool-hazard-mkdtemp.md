@@ -1,0 +1,1 @@
+- perf: stub the cycle-merge-reconcile chore in the housekeeping composition tests and stop flagging mkdtemp-unique tmpdir prefixes as pool hazards (#5199)

@@ -254,6 +254,15 @@ if [ "${#CANDIDATES[@]}" -gt 0 ]; then
     if [ "$CLEARED_RC" -ne 0 ]; then
       echo "[autopilot] recover-stale: skip stale_blocked (blockers-cleared exited $CLEARED_RC; promoting nothing): $(head -n 3 "$CLEARED_ERR_FILE" | tr '\n' ' ')"
       CLEARED_LINES=""
+    elif [ -z "$CLEARED_LINES" ]; then
+      # Previously silent arm (issue #5393): rc 0 but nothing cleared. Name it so a
+      # flaky "not unblocked" outcome is attributable from the captured stdout.
+      echo "[autopilot] recover-stale: skip stale_blocked (blockers-cleared cleared nothing for ${#CANDIDATES[@]} candidate(s)): $(head -n 3 "$CLEARED_ERR_FILE" | tr '\n' ' ')"
+    fi
+    if [ "${HYDRA_RECOVER_STALE_DEBUG:-}" = 1 ]; then
+      # Full child stderr (e.g. ghJson failure codes), read BEFORE the rm below.
+      echo "[autopilot] recover-stale: DEBUG blockers-cleared rc=$CLEARED_RC stderr:"
+      sed 's/^/[autopilot] recover-stale: DEBUG | /' "$CLEARED_ERR_FILE"
     fi
     rm -f "$CLEARED_ERR_FILE"
     while read -r ISSUE CLEARED; do

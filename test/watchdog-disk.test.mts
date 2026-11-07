@@ -24,7 +24,8 @@ import {
   type StatfsReading,
 } from "../src/watchdog/disk.ts";
 import { parseDuInodesOutput } from "../src/host-probe/probe.ts";
-import { isPageKind } from "../src/operator-channel/page-list.ts";
+import { messageFromEvent } from "../src/operator-channel/channel.ts";
+import { dedupKeyOf, isPageKind } from "../src/operator-channel/page-list.ts";
 import type { OperatorMessage } from "../src/operator-channel/message.ts";
 
 const T: DiskThresholds = { warnPct: 80, criticalPct: 95, recoverMarginPct: DISK_RECOVER_MARGIN_PCT };
@@ -125,7 +126,9 @@ function fakeDeps(
     async isOpen(key) {
       return storeDown ? null : open.has(key);
     },
-    async page(msg) {
+    async report(kind, payload) {
+      // The REAL per-kind table renders the message (title, dedupKey, severity).
+      const msg = messageFromEvent({ type: kind, payload });
       if (failPageFor !== null && msg.dedupKey.includes(`:${failPageFor}:`)) throw new Error("channel down");
       rec.pages.push(msg);
     },
@@ -168,7 +171,7 @@ describe("runDisk (fake ports)", () => {
     assert.equal(p.severity, "page");
     assert.equal(p.dedupKey, "infra:tmpfs_exhausted:/tmp:critical");
     assert.match(p.title, /^\/tmp critical: inodes 100%/);
-    const top = p.facts.find((f) => f.label === "top inode users");
+    const top = p.facts.find((f) => f.label === "topInodeUsers");
     assert.equal(top?.value, "/tmp/vitest-leak 900000");
     assert.deepEqual(rec.duCalls, ["/tmp"], "du runs once per paging mount");
     assert.deepEqual(rec.resolves, [], "the warn key is held while critical");
@@ -180,7 +183,7 @@ describe("runDisk (fake ports)", () => {
     await runDisk(deps, { paths: ["/tmp"], thresholds: T });
     assert.equal(rec.pages.length, 1);
     assert.equal(rec.pages[0].dedupKey, diskDedupKey("/tmp", "critical"));
-    assert.match(rec.pages[0].facts.find((f) => f.label === "top inode users")!.value, /unavailable/);
+    assert.match(rec.pages[0].facts.find((f) => f.label === "topInodeUsers")!.value, /unavailable/);
   });
 
   test("recovery: back under the margin resolves critical, clears warn silently, pages nothing", async () => {
@@ -217,10 +220,10 @@ describe("runDisk episode semantics", () => {
     const critK = diskDedupKey("/tmp", "critical");
     const readings: Record<string, StatfsReading | null> = { "/tmp": fs(85, 5) };
     const { deps, rec } = fakeDeps(readings, undefined, open);
-    const origPage = deps.page;
-    deps.page = async (m) => {
-      await origPage(m);
-      open.add(m.dedupKey);
+    const origReport = deps.report;
+    deps.report = async (kind, payload) => {
+      await origReport(kind, payload);
+      open.add(dedupKeyOf(kind, payload));
     };
     deps.resolve = async (k) => {
       if (open.delete(k)) rec.resolves.push(k);
@@ -273,7 +276,7 @@ describe("runDisk episode semantics", () => {
     await runDisk(deps, { paths: ["/tmp"], thresholds: T });
     assert.deepEqual(rec.duCalls, []);
     assert.equal(rec.pages.length, 1);
-    assert.match(rec.pages[0].facts.find((f) => f.label === "top inode users")!.value, /not scanned/);
+    assert.match(rec.pages[0].facts.find((f) => f.label === "topInodeUsers")!.value, /not scanned/);
   });
 
   test("a channel failure on /tmp does not skip /dev/shm", async () => {

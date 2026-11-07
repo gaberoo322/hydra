@@ -268,13 +268,17 @@ if __name__ == "__main__":
 function runRecoverStale(
   binDir: string,
   args: string[],
+  debug: "1" | "unset" = "1",
 ): { status: number; stdout: string; stderr: string } {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    HYDRA_AUTOPILOT_REPO: "gaberoo322/hydra",
+    HYDRA_RECOVER_STALE_DEBUG: "1",
+  };
+  if (debug === "unset") delete env.HYDRA_RECOVER_STALE_DEBUG;
   const r = spawnSync(join(SCRIPTS, "recover-stale.sh"), args, {
-    env: {
-      ...process.env,
-      PATH: `${binDir}:${process.env.PATH ?? ""}`,
-      HYDRA_AUTOPILOT_REPO: "gaberoo322/hydra",
-    },
+    env,
     encoding: "utf-8",
   });
   return {
@@ -282,6 +286,14 @@ function runRecoverStale(
     stdout: r.stdout ?? "",
     stderr: r.stderr ?? "",
   };
+}
+
+/**
+ * Assertion message that embeds the script's captured stdout + stderr so a flake
+ * names the branch recover-stale.sh took (issue #5393).
+ */
+function diag(r: { stdout: string; stderr: string }, msg?: string): string {
+  return `${msg ? msg + "\n" : ""}--- recover-stale stdout ---\n${r.stdout.trim()}\n--- recover-stale stderr ---\n${r.stderr.trim()}`;
 }
 
 /** Did the script issue an unblock edit (remove blocked → add ready) for N? */
@@ -314,7 +326,7 @@ describe("recover-stale.sh — calendar guard (issue #838)", () => {
       ]);
       const r = runRecoverStale(stub.binDir, ["stale_blocked", "664"]);
       assert.equal(r.status, 0, r.stderr);
-      assert.equal(wasUnblocked(stub.readEdits(), 664), false, "must not unblock a future-calendar issue");
+      assert.equal(wasUnblocked(stub.readEdits(), 664), false, diag(r, "must not unblock a future-calendar issue"));
       assert.match(r.stdout, new RegExp(`calendar-blocked until ${FUTURE}`));
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -334,7 +346,7 @@ describe("recover-stale.sh — calendar guard (issue #838)", () => {
       ]);
       const r = runRecoverStale(stub.binDir, ["stale_blocked", "664"]);
       assert.equal(r.status, 0, r.stderr);
-      assert.equal(wasUnblocked(stub.readEdits(), 664), false);
+      assert.equal(wasUnblocked(stub.readEdits(), 664), false, diag(r));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -366,7 +378,7 @@ describe("recover-stale.sh — calendar guard (issue #838)", () => {
       ]);
       const r = runRecoverStale(stub.binDir, ["stale_blocked", "664"]);
       assert.equal(r.status, 0, r.stderr);
-      assert.equal(wasUnblocked(stub.readEdits(), 664), false, "#664 must survive every turn until its date passes");
+      assert.equal(wasUnblocked(stub.readEdits(), 664), false, diag(r, "#664 must survive every turn until its date passes"));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -385,7 +397,7 @@ describe("recover-stale.sh — calendar guard (issue #838)", () => {
       ]);
       const r = runRecoverStale(stub.binDir, ["stale_blocked", "700"]);
       assert.equal(r.status, 0, r.stderr);
-      assert.equal(wasUnblocked(stub.readEdits(), 700), true, "a past calendar date must not gate recovery");
+      assert.equal(wasUnblocked(stub.readEdits(), 700), true, diag(r, "a past calendar date must not gate recovery"));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -401,7 +413,7 @@ describe("recover-stale.sh — calendar guard (issue #838)", () => {
       ]);
       const r = runRecoverStale(stub.binDir, ["stale_blocked", "800"]);
       assert.equal(r.status, 0, r.stderr);
-      assert.equal(wasUnblocked(stub.readEdits(), 800), true);
+      assert.equal(wasUnblocked(stub.readEdits(), 800), true, diag(r));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -417,7 +429,7 @@ describe("recover-stale.sh — calendar guard (issue #838)", () => {
       ]);
       const r = runRecoverStale(stub.binDir, ["stale_blocked", "801"]);
       assert.equal(r.status, 0, r.stderr);
-      assert.equal(wasUnblocked(stub.readEdits(), 801), false, "open blocker must still gate recovery");
+      assert.equal(wasUnblocked(stub.readEdits(), 801), false, diag(r, "open blocker must still gate recovery"));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -438,7 +450,7 @@ describe("recover-stale.sh — calendar guard (issue #838)", () => {
       ]);
       const r = runRecoverStale(stub.binDir, ["stale_blocked", "802"]);
       assert.equal(r.status, 0, r.stderr);
-      assert.equal(wasUnblocked(stub.readEdits(), 802), false);
+      assert.equal(wasUnblocked(stub.readEdits(), 802), false, diag(r));
       assert.match(r.stdout, new RegExp(`calendar-blocked until ${later}`), "latest future date wins");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -454,7 +466,7 @@ describe("recover-stale.sh — calendar guard (issue #838)", () => {
       ]);
       const r = runRecoverStale(stub.binDir, ["stale_blocked", "803"]);
       assert.equal(r.status, 0, r.stderr);
-      assert.equal(wasUnblocked(stub.readEdits(), 803), false);
+      assert.equal(wasUnblocked(stub.readEdits(), 803), false, diag(r));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -471,8 +483,8 @@ describe("recover-stale.sh — calendar guard (issue #838)", () => {
       const r = runRecoverStale(stub.binDir, ["stale_blocked", "664", "900"]);
       assert.equal(r.status, 0, r.stderr);
       const edits = stub.readEdits();
-      assert.equal(wasUnblocked(edits, 664), false, "calendar-blocked sibling stays blocked");
-      assert.equal(wasUnblocked(edits, 900), true, "genuinely-recoverable sibling still recovers");
+      assert.equal(wasUnblocked(edits, 664), false, diag(r, "calendar-blocked sibling stays blocked"));
+      assert.equal(wasUnblocked(edits, 900), true, diag(r, "genuinely-recoverable sibling still recovers"));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -515,11 +527,12 @@ function runCase(
   issues: FakeIssue[],
   args: string[],
   opts: Parameters<typeof makeGhStub>[2] = {},
+  debug: "1" | "unset" = "1",
 ): { r: ReturnType<typeof runRecoverStale>; edits: string[][] } {
   const dir = mkdtempSync(join(tmpdir(), "recover-stale-blockers-"));
   try {
     const stub = makeGhStub(dir, issues, opts);
-    const r = runRecoverStale(stub.binDir, args);
+    const r = runRecoverStale(stub.binDir, args, debug);
     return { r, edits: stub.readEdits() };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -551,7 +564,7 @@ describe("recover-stale.sh — blocker clearance predicate (issue #4806)", () =>
   test("slice with closed blocker is promoted despite open Parent/sibling mentions", () => {
     const { r, edits } = runCase(slice(), ["stale_blocked", "4628"]);
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(wasUnblocked(edits, 4628), true);
+    assert.equal(wasUnblocked(edits, 4628), true, diag(r));
   });
 
   test("a merged PR blocker counts as cleared", () => {
@@ -563,7 +576,7 @@ describe("recover-stale.sh — blocker clearance predicate (issue #4806)", () =>
       ["stale_blocked", "10"],
     );
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(wasUnblocked(edits, 10), true);
+    assert.equal(wasUnblocked(edits, 10), true, diag(r));
   });
 
   test("a closed-unmerged PR blocker holds the issue", () => {
@@ -615,7 +628,7 @@ describe("recover-stale.sh — blocker clearance predicate (issue #4806)", () =>
   });
 
   test("an open PR referencing the cleared issue routes to needs-qa, never ready-for-agent", () => {
-    const { edits } = runCase(
+    const { r, edits } = runCase(
       [
         { number: 50, state: "OPEN", body: "Blocked by #51." },
         { number: 51, state: "CLOSED", body: "x" },
@@ -624,7 +637,7 @@ describe("recover-stale.sh — blocker clearance predicate (issue #4806)", () =>
       { openPrs: [{ headRefName: "feat/x", body: "Closes #50" }] },
     );
     assert.equal(wasRoutedNeedsQa(edits, 50), true);
-    assert.equal(wasUnblocked(edits, 50), false);
+    assert.equal(wasUnblocked(edits, 50), false, diag(r));
   });
 
   test("lookup failure (batched open search) promotes nothing and exits 0", () => {
@@ -674,6 +687,42 @@ describe("recover-stale.sh — blocker clearance predicate (issue #4806)", () =>
     assert.equal(r.status, 0, r.stderr);
     assert.equal(edits.length, 0);
     assert.match(r.stdout, /open-PR list unreadable/);
+  });
+});
+
+describe("recover-stale.sh — flake diagnostics (issue #5393, INV-2)", () => {
+  const openBlocker = (): FakeIssue[] => [
+    { number: 60, state: "OPEN", body: "Blocked by #61." },
+    { number: 61, state: "OPEN", body: "still open" },
+  ];
+  const closedBlocker = (): FakeIssue[] => [
+    { number: 60, state: "OPEN", body: "Blocked by #61." },
+    { number: 61, state: "CLOSED", body: "x" },
+  ];
+
+  test("HYDRA_RECOVER_STALE_DEBUG unset: no DEBUG lines are emitted", () => {
+    const { r } = runCase(openBlocker(), ["stale_blocked", "60"], {}, "unset");
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, /DEBUG/);
+  });
+
+  test("HYDRA_RECOVER_STALE_DEBUG=1: DEBUG dump is emitted", () => {
+    const { r } = runCase(openBlocker(), ["stale_blocked", "60"], {}, "1");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /recover-stale: DEBUG blockers-cleared rc=0/);
+  });
+
+  test("cleared-nothing arm names itself exactly once", () => {
+    const { r, edits } = runCase(openBlocker(), ["stale_blocked", "60"], {}, "unset");
+    assert.equal(edits.length, 0);
+    const n = r.stdout.split("\n").filter((l) => l.includes("cleared nothing for 1 candidate(s)")).length;
+    assert.equal(n, 1, diag(r));
+  });
+
+  test("sibling shape: a cleared blocker still promotes and prints no cleared-nothing line", () => {
+    const { r, edits } = runCase(closedBlocker(), ["stale_blocked", "60"], {}, "unset");
+    assert.equal(wasUnblocked(edits, 60), true, diag(r));
+    assert.doesNotMatch(r.stdout, /cleared nothing/);
   });
 });
 

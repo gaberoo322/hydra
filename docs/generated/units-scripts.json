@@ -523,6 +523,18 @@
       },
       "kind": "ts",
       "description": "Tool-currency check — pure logic (issue #480)."
+    },
+    {
+      "path": "scripts/zizmor-scan.sh",
+      "name": "zizmor-scan.sh",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/zizmor-scan.sh"
+      },
+      "kind": "sh",
+      "description": null
     }
   ]
 }

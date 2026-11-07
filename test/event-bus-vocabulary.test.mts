@@ -384,7 +384,14 @@ function producerLanes(lanes: Lanes, member: string, value: string): string[] {
   );
   // Issue #5047: a publish helper taking the on-wire type as its 1st/2nd arg.
   const srcPublishArgRe = new RegExp(`\\bpublish\\w*\\(\\s*(?:[^,()]+,\\s*)?"${v}"`);
-  if (lanes.src.some((body) => srcRe.test(body) || srcPublishArgRe.test(body))) found.push("src");
+  // Issue #5389: producers call `channel.report(E.MEMBER, payload)` (the
+  // Operator Channel entry point) instead of building a `{ type: … }` event.
+  const srcReportArgRe = new RegExp(
+    `\\breport\\(\\s*(?:E|NOTIFICATION_EVENT_TYPES)\\.${member}\\b`,
+  );
+  if (lanes.src.some((body) => srcRe.test(body) || srcPublishArgRe.test(body) || srcReportArgRe.test(body))) {
+    found.push("src");
+  }
   if (lanes.scriptLines.some((line) => line.includes(`"${value}"`) || line.includes(`'${value}'`))) {
     found.push("scripts");
   }
