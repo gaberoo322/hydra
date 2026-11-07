@@ -37,6 +37,7 @@ export const QA_VERDICT_PHASES = [
   "fold",
   "trailer",
   "round-action",
+  "reviewer-commit",
 ] as const;
 export type QaVerdictPhase = (typeof QA_VERDICT_PHASES)[number];
 
@@ -72,6 +73,16 @@ export const QaVerdictCliSchemas = {
     blockers: z.number().int().nonnegative(),
     maxSeverity: z.enum(["high", "medium", "low", "none"]),
     priorBodies: bodies,
+    qaFixes: z.array(z.string()).optional(),
+  }),
+  "reviewer-commit": z.object({
+    pr,
+    tier,
+    blocking: z.array(z.object({ location: z.string() }).passthrough()),
+    followUps: z.array(z.object({ location: z.string() }).passthrough()).optional(),
+    changedPaths: z.array(z.string()).optional(),
+    diff: z.string().optional(),
+    prBody: z.string().optional(),
   }),
   "round-action": z.object({
     pr,
