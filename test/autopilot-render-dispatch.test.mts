@@ -415,10 +415,29 @@ describe("render-dispatch.py — dev_orch is a pure function of the Dispatch Int
     assert.match(crossOrch.stderr, /dev_orch.*TargetFresh/);
   });
 
-  test("dispatch_pr: the intent's pr wins; a prompt_args-only action resolves as _dev_target_resume_record did (#5383)", () => {
+  test("a bespoke slot carrying a legacy work-shape prompt_args bag and no intent is refused, never rendered generically (#5385 AC2)", () => {
+    const bags: Record<string, Record<string, unknown>> = {
+      dev_orch: { anchor: "issue-9", resume: true, resume_branch: "b" },
+      qa_orch: { anchor: "issue-9", scope: "orch" },
+      dev_target: { anchor: "issue-9", resume: true, resume_pr: 4, resume_branch: "b" },
+      qa_target: { scope: "target", pr_ref: "gaberoo322/x#4" },
+      design_concept_orch: { anchor: "issue-9", scope: "orch" },
+      wayfinder_orch: { ticket: "issue-9", ticket_type: "task" },
+      research_orch: { scope: "orch" },
+      research_target: { scope: "target" },
+    };
+    for (const [slot, bag] of Object.entries(bags)) {
+      const res = run(slot, [{ type: "dispatch", slot, skill: "x", prompt_args: bag }]);
+      assert.equal(res.status, 2, slot);
+      assert.match(res.stderr, /carries no intent/, slot);
+      assert.doesNotMatch(res.stdout, /## Task/, slot);
+    }
+  });
+
+  test("dispatch_pr: the intent's pr wins; a prompt_args-only action resolves None (#5385)", () => {
     const cases: Array<[Record<string, unknown>, number | null]> = [
       [{ intent: { kind: "TargetResume", anchor: "issue-5", pr: 57, branch: "b" } }, 57],
-      [{ prompt_args: { resume: true, resume_pr: 57 } }, 57],
+      [{ prompt_args: { resume: true, resume_pr: 57 } }, null],
       [{ intent: { kind: "ForwardFixRed", anchor: "issue-5", pr: 8, branch: "b" } }, 8],
       [{ intent: { kind: "TargetFresh" } }, null],
       [{ prompt_args: { resume_pr: true } }, null],
@@ -462,22 +481,43 @@ print(json.dumps(out))
   const pyRun = (code: string, input = "") =>
     spawnSync("python3", ["-c", code], { cwd: join(REPO_ROOT, "scripts", "autopilot"), encoding: "utf-8", input });
 
-  test("each accessor returns the same facts for an intent action and its legacy prompt_args equivalent", () => {
+  test("anchor / resume_branch / pr are intent-only: a prompt_args-only action resolves None (#5385)", () => {
     const pairs = [
       { intent: wrap({ intent: { kind: "Fresh" } }), legacy: wrap({ prompt_args: {} }) },
       { intent: wrap({ intent: { kind: "Fresh", anchor: "issue-3" } }), legacy: wrap({ prompt_args: { anchor: "issue-3" } }) },
       { intent: wrap({ intent: { kind: "ResumeBranch", anchor: "issue-3", branch: "b" } }), legacy: wrap({ prompt_args: { anchor: "issue-3", resume: true, resume_branch: "b" } }) },
-      { intent: wrap({ intent: { kind: "ResumeSalvage", anchor: "issue-3" } }), legacy: wrap({ prompt_args: { anchor: "issue-3", resume: true } }) },
-      { intent: wrap({ intent: { kind: "ForwardFixRed", anchor: "issue-3", pr: 7, branch: "b" } }), legacy: wrap({ prompt_args: { anchor: "issue-3", resume: true, resume_branch: "b", forward_fix_pr: 7 } }) },
-      { intent: wrap({ intent: { kind: "ForwardFixConflict", anchor: "issue-3", pr: 7, branch: "b" } }), legacy: wrap({ prompt_args: { anchor: "issue-3", resume: true, resume_branch: "b", forward_fix_pr: 7, conflict_fix: true } }) },
-      { intent: wrap({ intent: { kind: "ForwardFixConflictWithFail", anchor: "issue-3", pr: 7, branch: "b" } }), legacy: wrap({ prompt_args: { anchor: "issue-3", resume: true, resume_branch: "b", forward_fix_pr: 7, conflict_fix: true, qa_fail_at_head: true } }) },
     ];
     const r = pyRun(PY, JSON.stringify(pairs));
     assert.equal(r.status, 0, r.stderr);
-    for (const [i, [a, b]] of (JSON.parse(r.stdout) as unknown[][][]).entries()) assert.deepEqual(a, b, `pair ${i}`);
+    const rows = JSON.parse(r.stdout) as unknown[][][];
+    assert.deepEqual(rows[0][0].slice(0, 2), [null, null]);
+    assert.deepEqual(rows[1][0].slice(0, 2), ["issue-3", null]);
+    assert.deepEqual(rows[2][0].slice(0, 2), ["issue-3", "b"]);
+    for (const [i, [, legacy]] of rows.entries()) assert.deepEqual(legacy.slice(0, 2), [null, null], `legacy pair ${i}`);
   });
 
-  test("the legacy resume_branch accessor still requires resume === true; attempt coerces; forced is strict", () => {
+  test("dispatch_escalate_model reads the prompt_args hint; non-string / empty -> None (#5385)", () => {
+    const r = pyRun(
+      "import json, decide_base as db; print(json.dumps([db.dispatch_escalate_model({'prompt_args': {'escalate_model': 'fable'}}), db.dispatch_escalate_model({'prompt_args': {'escalate_model': 3}}), db.dispatch_escalate_model({'intent': {'kind': 'Fresh'}})]))",
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), ["fable", null, null]);
+  });
+
+  test("every ESCALATION_POLICY slot that is intent-bearing has an escalation_intent (#5385 INV-5)", () => {
+    const r = pyRun(
+      "import json, decide_base as db; print(json.dumps([s for s in db.ESCALATION_POLICY if s in db.INTENT_KINDS_BY_SLOT and db.escalation_intent(s) is None]))",
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), []);
+  });
+
+  test("render-dispatch.py reads action prompt_args in exactly one place (#5385 INV-1)", () => {
+    const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "render-dispatch.py"), "utf-8");
+    assert.equal((src.match(/action\.get\("prompt_args"\)/g) ?? []).length, 2, "one helper line: the isinstance guard names it twice");
+  });
+
+  test("the legacy resume_branch / attempt / forced coercions: attempt coerces; forced is strict", () => {
     const pairs = [
       { intent: wrap({ prompt_args: { resume_branch: "b" } }), legacy: wrap({ prompt_args: { attempt: "nope", forced: "yes" } }) },
     ];
@@ -977,13 +1017,13 @@ describe("Dispatch Intent through the INV-7 consumers (#5381)", () => {
     assert.match(out.sentinel, /anchor=issue-77/);
   });
 
-  test("sibling shape: a legacy prompt_args action still stamps its anchor into the sentinel", () => {
+  test("a legacy prompt_args-only action no longer yields an anchor in the sentinel (#5385)", () => {
     const r = py(
       `import decide\n` +
         `acts = [{'type': 'dispatch', 'slot': 'dev_orch', 'skill': 'hydra-dev', 'prompt_args': {'anchor': 'issue-78'}}]\n` +
         `decide._stamp_dispatch_metadata(acts, {'run_id': 'r1', 'turn': 1})\nprint(acts[0]['dispatchSentinel'])`,
     );
-    assert.match(r.stdout, /anchor=issue-78/);
+    assert.doesNotMatch(r.stdout, /anchor=issue-78/);
   });
 
   test("stamp-slot build_slot stamps anchor and attempt from an INTENT action", () => {

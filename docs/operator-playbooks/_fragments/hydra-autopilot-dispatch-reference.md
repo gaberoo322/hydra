@@ -58,6 +58,14 @@ was never measured. Frontier is retained where the evidence does not reach.
 | `discover_orch` / `discover_target` | Patrol/diagnostics, designed small/fast/cheap |
 | `wayfinder_orch` | Works a wayfinder-map frontier ticket (research enrichment or a `wayfinder:task` build) — real authoring/judgment on a foggy initiative, not a deterministic check. Omit `model` so it inherits the parent (Fable 5), per #1093, avoiding the Haiku-premature-exit failure mode. |
 
+## Dispatch Intent vs prompt_args
+
+A bespoke pipeline slot's dispatch is described by its **Dispatch Intent**
+(`action.intent`, closed kinds in `decide_base.py`); `render-dispatch.py` renders
+it and refuses a bespoke action that carries no intent. `prompt_args` is the
+**signal classes'** argument bag only; the escalation keys below (`escalate_model`,
+`attempt`, `prior_attempt_status`) ride `prompt_args` on every class.
+
 ## Cascade-routing escalation
 
 SKILL.md § Per-class model routing carries the three mandatory steps and the

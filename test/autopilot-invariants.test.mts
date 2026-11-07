@@ -356,9 +356,9 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
     const plan = {
       actions: [
         { type: "dispatch", slot: "design_concept_orch", skill: "hydra-grill",
-          prompt_args: { anchor: "issue-conflict", scope: "orch" } },
+          intent: { kind: "Grill", anchor: "issue-777" } },
         { type: "dispatch", slot: "dev_orch", skill: "hydra-dev",
-          prompt_args: { anchor: "issue-conflict" } },
+          intent: { kind: "Fresh", anchor: "issue-777" } },
       ],
     };
     const r = runAsserts(plan, baseState());
@@ -366,14 +366,14 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
     // conflicting anchor, and no `warnings` key is ever written to state.
     assert.equal(r.status, 0,
       `INV-009 must NOT raise in Phase B (warn-only); got stderr: ${r.stderr}`);
-    assert.equal((r.stderr.match(/WARN INV-009 .*issue-conflict/g) ?? []).length, 1);
+    assert.equal((r.stderr.match(/WARN INV-009 .*issue-777/g) ?? []).length, 1);
   });
 
   test("INV-009: an INTENT-shaped dev_orch (no prompt_args) on the same anchor still warns once", () => {
     const plan = {
       actions: [
         { type: "dispatch", slot: "design_concept_orch", skill: "hydra-grill",
-          prompt_args: { anchor: "issue-412", scope: "orch" } },
+          intent: { kind: "Grill", anchor: "issue-412" } },
         { type: "dispatch", slot: "dev_orch", skill: "hydra-dev",
           intent: { kind: "Fresh", anchor: "issue-412" }, anchor: "issue-412" },
       ],
@@ -387,9 +387,9 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
     const plan = {
       actions: [
         { type: "dispatch", slot: "design_concept_orch", skill: "hydra-grill",
-          prompt_args: { anchor: "issue-A", scope: "orch" } },
+          intent: { kind: "Grill", anchor: "issue-11" } },
         { type: "dispatch", slot: "dev_orch", skill: "hydra-dev",
-          prompt_args: { anchor: "issue-B" } },
+          intent: { kind: "Fresh", anchor: "issue-12" } },
       ],
     };
     const r = runAsserts(plan, baseState());
