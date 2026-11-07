@@ -54,9 +54,10 @@ verify_sha() {
 if [ ! -x "$BIN" ] || ! verify_sha "$BIN" "$ZIZMOR_BIN_SHA256" 2>/dev/null; then
   mkdir -p "$CACHE_DIR"
   WORK="$(mktemp -d "${CACHE_DIR}/dl.XXXXXX")"
+  trap 'rm -rf "$WORK"' EXIT
   URL="https://github.com/zizmorcore/zizmor/releases/download/${ZIZMOR_VERSION}/${ZIZMOR_ASSET}"
   echo "zizmor-scan: downloading ${ZIZMOR_ASSET} @ ${ZIZMOR_VERSION}" >&2
-  if ! curl -sSL "$URL" -o "$WORK/zizmor.tgz"; then
+  if ! curl -fsSL --retry 3 --max-time 120 "$URL" -o "$WORK/zizmor.tgz"; then
     echo "zizmor-scan: download failed from $URL" >&2
     rm -rf "$WORK"
     exit 1

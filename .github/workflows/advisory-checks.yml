@@ -292,8 +292,8 @@ jobs:
         run: |
           bash scripts/zizmor-scan.sh > zizmor-results.json || true
           if [ -s zizmor-results.json ] && jq -e 'type == "array"' zizmor-results.json >/dev/null 2>&1; then
-            total=$(jq 'length' zizmor-results.json)
-            echo "::warning title=zizmor::${total} workflow finding(s) (advisory baseline — see zizmor-results.json artifact)"
+            total=$(jq '[.[] | select(.determinations.severity == "High")] | length' zizmor-results.json)
+            echo "::warning title=zizmor::${total} High-severity workflow finding(s) (advisory baseline — see zizmor-results.json artifact)"
             {
               echo "### zizmor findings by ident and severity"
               echo
@@ -312,3 +312,4 @@ jobs:
           name: zizmor-results
           path: zizmor-results.json
           if-no-files-found: ignore
+          retention-days: 14
