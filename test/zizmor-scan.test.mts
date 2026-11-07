@@ -131,6 +131,18 @@ describe("zizmor-scan.sh download + verify path", () => {
   });
 });
 
+describe("zizmor-scan.sh scan-only", () => {
+  test("never passes --fix (scan-only)", () => {
+    const sb = sandbox();
+    const h = pinnedHashes();
+    stubSha(sb, h.tgz, h.binary);
+    writeFakeTarball(sb, FAKE_ZIZMOR);
+    const r = runScript(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!/--fix|--gh-token/.test(r.stdout), "argv given to zizmor has no rewrite/token flags");
+  });
+});
+
 describe("zizmor-scan.sh cached-binary path", () => {
   /** Pre-seed the cache with a fake binary whose (stubbed) hash verifies. */
   function seedCache(sb: Sandbox, h: { tgz: string; binary: string }): void {

@@ -548,5 +548,5 @@
   "test/worktree-orphan-prune.test.mts": 1,
   "test/worktree-orphan.test.mts": 4,
   "test/worktree-write-fence.test.mts": 5,
-  "test/zizmor-scan.test.mts": 3
+  "test/zizmor-scan.test.mts": 4
 }
