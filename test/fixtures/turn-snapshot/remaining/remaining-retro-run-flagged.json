@@ -39,6 +39,7 @@
           }
         },
         "drillable": true,
+        "drillableReason": "run-flagged",
         "reviewDue": false
       }
     }

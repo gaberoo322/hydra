@@ -34,6 +34,7 @@
           }
         },
         "drillable": null,
+        "drillableReason": "no-candidate",
         "reviewDue": false
       }
     }

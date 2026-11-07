@@ -35,6 +35,7 @@
           }
         },
         "drillable": true,
+        "drillableReason": "fail-open-bundle-read-failed",
         "reviewDue": false
       }
     }
