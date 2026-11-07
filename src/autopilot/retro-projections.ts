@@ -29,7 +29,9 @@
  *     `confirmDrillableCycleIds`. Groups dispatches across runs by canonical
  *     identity.
  *
- * Everything here is pure: zero Redis imports, zero `await`, no clock beyond
+ * Everything here is pure (the one non-local import is the side-effect-free
+ * predicate `isHarnessAgentId` from `../transcript-store.ts`, #5392; it is
+ * called with no I/O): zero Redis imports, zero `await`, no clock beyond
  * caller-supplied input — purity is enforced by the import boundary of this
  * module (the downstream `retro-enrichment.ts` / `retro-bundle.ts` own every
  * read), not merely documented.
