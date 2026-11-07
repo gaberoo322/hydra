@@ -461,16 +461,20 @@ function slotEpoch(slotObj: unknown): string | null {
  * confirmation protocol blanks `cycleId` but must leave this identity intact,
  * so the post-confirm dedup can still tell distinct same-slot occupancies apart.
  */
-export function transcriptIdOf(occupancyId: string | null): string | null {
-  if (typeof occupancyId !== "string" || !occupancyId.startsWith("id:")) return null;
-  const hash = occupancyId.slice(3);
-  return isHarnessAgentId(hash) ? hash : null;
-}
-
 function occupancyIdOf(taskId: string | null, epochKey: string | null): string | null {
   if (taskId) return `id:${taskId}`;
   if (epochKey) return epochKey; // already `epoch:<slot>@<epoch>`
   return null;
+}
+
+/**
+ * The bare 17-hex agent hash behind an `id:<hash>` occupancyId (issue #5392),
+ * or `null` for epoch-only / identity-less / malformed occupancies.
+ */
+export function transcriptIdOf(occupancyId: string | null): string | null {
+  if (typeof occupancyId !== "string" || !occupancyId.startsWith("id:")) return null;
+  const hash = occupancyId.slice(3);
+  return isHarnessAgentId(hash) ? hash : null;
 }
 
 /**

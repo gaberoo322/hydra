@@ -127,6 +127,7 @@ those, read the full transcript. The ONLY handle is `dispatches[].transcriptId`
 cycle-record key, NOT a transcript handle — never pass it to the route:
 
 ```bash
+TRANSCRIPT_ID=<dispatches[].transcriptId>
 curl -sf "http://localhost:4000/api/dispatches/${TRANSCRIPT_ID}/transcript"
 ```
 

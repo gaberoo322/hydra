@@ -1471,6 +1471,83 @@ describe("assembleRetroBundle — composition", () => {
     assert.equal(qa.transcriptId, null, "epoch-only identity has no transcript handle");
   });
 
+  test("action-joined dispatch with a worktree-branch cycleId gets transcriptId; cycleId and occupancyId unchanged (#5392)", async () => {
+    const TASK_ID = "a0482322bbb9143db";
+    const BRANCH = "worktree-agent-a0482322-t1-dev_orch";
+    const slotEntry = { skill: "hydra-dev", anchor: "issue-5392", task_id: TASK_ID };
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-5392c", status: "ended", term_reason: "budget" },
+          turns: [
+            {
+              turn_n: 1,
+              actions: [
+                {
+                  type: "dispatch",
+                  slot: "dev_orch",
+                  skill: "hydra-dev",
+                  anchorReference: "issue-5392",
+                  cycleId: BRANCH,
+                },
+              ],
+              slots_snapshot: { dev_orch: slotEntry },
+            },
+          ],
+        }) as any,
+      readCycleMetrics: async (id: string) =>
+        id === BRANCH ? { anchorReference: "issue-5392" } : {},
+      readCycleHash: async (id: string) => (id === BRANCH ? { status: "merged" } : {}),
+    });
+    const bundle = await assembleRetroBundle("run-5392c", deps);
+    assert.equal(bundle.dispatches.length, 1);
+    const d = bundle.dispatches[0];
+    assert.equal(d.cycleId, BRANCH, "cycleId stays the cycle-record key (INV-4)");
+    assert.equal(d.occupancyId, `id:${TASK_ID}`, "occupancyId unchanged (INV-4)");
+    assert.equal(d.transcriptId, TASK_ID, "transcriptId is the bare hash, not the branch");
+  });
+
+  test("dedup: transcriptId survives when only the dropped duplicate carried occupancyId (#5392)", async () => {
+    const TASK_ID = "a0482322bbb9143db";
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-5392d", status: "ended", term_reason: "budget" },
+          turns: [
+            {
+              turn_n: 2,
+              actions: [],
+              slots_snapshot: {
+                dev_orch: { skill: "hydra-dev", anchor: "issue-5392", task_id: TASK_ID },
+              },
+            },
+            {
+              turn_n: 1,
+              actions: [
+                {
+                  type: "dispatch",
+                  slot: "dev_orch",
+                  skill: "hydra-dev",
+                  anchorReference: "issue-5392",
+                  cycleId: TASK_ID,
+                },
+              ],
+            },
+          ],
+        }) as any,
+      readCycleMetrics: async (id: string) =>
+        id === TASK_ID ? { anchorReference: "issue-5392" } : {},
+      readCycleHash: async (id: string) => (id === TASK_ID ? { status: "merged" } : {}),
+    });
+    const bundle = await assembleRetroBundle("run-5392d", deps);
+    const rows = bundle.dispatches.filter((x) => x.cycleId === TASK_ID);
+    assert.equal(rows.length, 1, "one real cycle, one row");
+    assert.equal(rows[0].transcriptId, TASK_ID, "transcriptId derived after dedup");
+    assert.equal(rows[0].occupancyId, `id:${TASK_ID}`);
+  });
+
   test("transcriptIdOf rejects null, epoch, and non-17-hex remainders (#5392)", () => {
     assert.equal(transcriptIdOf(null), null);
     assert.equal(transcriptIdOf("epoch:dev_orch@123"), null);
