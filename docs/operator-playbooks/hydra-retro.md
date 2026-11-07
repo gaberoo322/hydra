@@ -122,18 +122,21 @@ still drill-worthy: its drill material is run-level, not transcripts (step 3).
 ## 3. Deep-read ONLY the flagged transcripts
 
 For each flagged dispatch (the ones the bundle flagged for drill), and ONLY
-those, read the full transcript:
+those, read the full transcript. The ONLY handle is `dispatches[].transcriptId`
+(the bare agent hash, same value as `slot.task_id`); `cycleId` is the
+cycle-record key, NOT a transcript handle — never pass it to the route:
 
 ```bash
-curl -sf "http://localhost:4000/api/dispatches/<id>/transcript"
+curl -sf "http://localhost:4000/api/dispatches/${TRANSCRIPT_ID}/transcript"
 ```
 
 If the route 404s (`dispatch-not-found` — the registry row expired or was never
 written), fall back to the on-disk JSONL:
-`<projects-root>/<encoded-parent-cwd>/<parent-session>/subagents/agent-<hash>.jsonl`
-(`~/.claude/projects/-home-gabe-hydra/<parent-session>/subagents/agent-<hash>.jsonl`;
-the `<hash>` is the bare agent id, the same value as `slot.task_id`). Do not let
-a 404 block the retro.
+`<projects-root>/<encoded-parent-cwd>/<parent-session>/subagents/agent-${TRANSCRIPT_ID}.jsonl`
+(`~/.claude/projects/-home-gabe-hydra/<parent-session>/subagents/agent-${TRANSCRIPT_ID}.jsonl`).
+A flagged row with `transcriptId: null` is transcript-less: record it as such
+and drill from bundle signals only (not a 404 fallback). Do not let a 404
+block the retro.
 
 This is the cost bound: a clean run flags nothing and reads no transcripts. A
 happy-path (merged, regression-free) dispatch is never drilled.

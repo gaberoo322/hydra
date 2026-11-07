@@ -27,6 +27,8 @@ import {
   assembleRetroBundle,
   type RetroBundleDeps,
 } from "../src/autopilot/retro-bundle.ts";
+import { transcriptIdOf } from "../src/autopilot/retro-projections.ts";
+import { isHarnessAgentId } from "../src/transcript-store.ts";
 import {
   collectProvisionalCycleIds,
   confirmDrillableCycleIds,
@@ -72,6 +74,7 @@ function dispatch(over: Partial<RetroDispatch> = {}): RetroDispatch {
     prNumber: null,
     slot: null,
     occupancyId: null,
+    transcriptId: null,
     status: "merged",
     bucket: "merged",
     abandonReason: null,
@@ -1436,6 +1439,45 @@ describe("assembleRetroBundle — composition", () => {
     assert.equal(d.cycleId, "", "unconfirmed in-flight candidate dropped back to ''");
     assert.equal(d.undrillable, true, "recorded undrillable once — not once per turn");
     assert.equal(flagDispatchesForDrill(bundle.dispatches).length, 0, "no duplicate drill flags");
+  });
+
+  test("transcriptId is the bare 17-hex hash derived from occupancyId, else null (#5392)", async () => {
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-5392", status: "ended", term_reason: "interrupted" },
+          turns: [
+            {
+              turn_n: 1,
+              actions: [],
+              slots_snapshot: {
+                dev_orch: { skill: "hydra-dev", anchor: "issue-1", task_id: "a0482322bbb9143db" },
+                qa_orch: { skill: "hydra-qa", anchor: "issue-2", started_epoch: 1781210559 },
+              },
+            },
+          ],
+        }) as any,
+      readCycleMetrics: async () => ({}),
+      readCycleHash: async () => ({}),
+    });
+    const bundle = await assembleRetroBundle("run-5392", deps);
+    const dev = bundle.dispatches.find((d) => d.slot === "dev_orch")!;
+    const qa = bundle.dispatches.find((d) => d.slot === "qa_orch")!;
+    assert.equal(dev.occupancyId, "id:a0482322bbb9143db");
+    assert.equal(dev.transcriptId, "a0482322bbb9143db");
+    assert.equal(isHarnessAgentId(dev.transcriptId!), true);
+    assert.match(qa.occupancyId ?? "", /^epoch:/);
+    assert.equal(qa.transcriptId, null, "epoch-only identity has no transcript handle");
+  });
+
+  test("transcriptIdOf rejects null, epoch, and non-17-hex remainders (#5392)", () => {
+    assert.equal(transcriptIdOf(null), null);
+    assert.equal(transcriptIdOf("epoch:dev_orch@123"), null);
+    assert.equal(transcriptIdOf("id:taskA"), null);
+    assert.equal(transcriptIdOf("id:"), null);
+    assert.equal(transcriptIdOf("id:A0482322BBB9143DB"), null);
+    assert.equal(transcriptIdOf("id:a0482322bbb9143db"), "a0482322bbb9143db");
   });
 
   test("clean stop does NOT fabricate a failure status for a pending dispatch", async () => {
