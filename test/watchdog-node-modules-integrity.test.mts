@@ -409,7 +409,7 @@ describe("node-modules-integrity — detection + delivery (issue #4175)", { skip
     assert.equal(payload.thresholdMs, 0);
     const pages = notifyCalls().filter((c) => c.startsWith("report "));
     assert.equal(pages.length, 1);
-    assert.match(pages[0], /^report --kind infra:node_modules_wiped --fact signal=/);
+    assert.match(pages[0], /^report --kind infra:node_modules_wiped --alert false --fact signal=/); // XADD already carries the alert
     assert.match(pages[0], /--fact reason=no-bin-dir/);
   });
 
