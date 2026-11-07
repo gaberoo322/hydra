@@ -784,7 +784,7 @@ describe("gh-label-delete-guard — fail closed on internal error (#4745)", () =
 });
 
 describe("gh-label-delete-guard — heredoc bodies are data (issue #5401)", () => {
-  test("a quote-odd heredoc body before a path DELETE + collection GET is ALLOWED (was DENY on master)", () => {
+  test("a quote-odd heredoc body before a path DELETE + collection GET is ALLOWED (was DENY)", () => {
     // Quote parity is EVEN end to end (the body's lone apostrophe pairs with the
     // escaped apostrophe in the tail), so shlex does NOT fail open: master merges
     // the DELETE and the GET into one segment and DENIES (verified exit 2 against
