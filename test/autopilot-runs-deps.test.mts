@@ -800,6 +800,10 @@ describe("recordTurn — injected deps (#2158)", () => {
     const t3 = JSON.parse(store.turnMembers.get("run-pe:3")!);
     assert.deepEqual(t2.parent_exceptions, [good]);
     assert.equal("parent_exceptions" in t3, false);
+    await recordTurn({ run_id: "run-pe", turn_n: 4, parent_exceptions: [] } as any, deps);
+    assert.deepEqual(JSON.parse(store.turnMembers.get("run-pe:4")!).parent_exceptions, [], "empty list kept as the mirror marker");
+    await recordTurn({ run_id: "run-pe", turn_n: 5, parent_exceptions: ["junk"] } as any, deps);
+    assert.equal("parent_exceptions" in JSON.parse(store.turnMembers.get("run-pe:5")!), false, "all-malformed list is dropped, not a marker");
   });
 
   test("is idempotent on (runId, turn_n) — a duplicate turn is a no-op", async () => {

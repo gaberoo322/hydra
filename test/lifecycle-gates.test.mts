@@ -607,6 +607,32 @@ describe("journalEntry — the single append point indexes unsanctioned hold exi
   });
 });
 
+describe("journalEntry — passes capEvent so cap parks reach the park-rate index (#5324)", () => {
+  const base: LifecycleJournalEntry = {
+    v: 1, ts: 5, kind: "transition", from: "in-progress", to: "parked", source: "cli",
+    actor: "x", evidence: { pr: 42 }, reason: "cap:qa-stall", rationale: null, result: "ok", written: true,
+  };
+
+  test("claim-opened, cap park and shadow would-park each append with capEvent: true", async () => {
+    const o = operatorHarness([], "enforce");
+    const selectors: unknown[] = [];
+    o.h.deps.journal.append = async (_r, _i, _e, idx) => { selectors.push(idx); return { ok: true }; };
+    await journalEntry(o.h.deps, 10, { ...base, kind: "claim-opened", to: null, reason: null });
+    await journalEntry(o.h.deps, 10, base);
+    await journalEntry(o.h.deps, 10, { ...base, kind: "refused", written: false, result: "shadow-would-park:qa-stall" });
+    assert.equal(selectors.length, 3);
+    for (const sel of selectors) assert.equal((sel as { capEvent?: boolean }).capEvent, true);
+  });
+
+  test("sibling: the hold-exit selector is still set independently of capEvent", async () => {
+    const o = operatorHarness([], "enforce");
+    let sel: { holdExit?: boolean; capEvent?: boolean } | undefined;
+    o.h.deps.journal.append = async (_r, _i, _e, idx) => { sel = idx as typeof sel; return { ok: true }; };
+    await journalEntry(o.h.deps, 10, { ...base, kind: "external", from: "ready-for-human", to: "ready-for-agent", source: "external", reason: null });
+    assert.equal(sel?.holdExit, true);
+  });
+});
+
 // Research-exit gate (ADR-0047 D4, issue #5320)
 // ---------------------------------------------------------------------------
 

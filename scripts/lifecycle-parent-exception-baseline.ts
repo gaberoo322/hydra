@@ -22,8 +22,8 @@ import {
   ledgerToRunTurns,
   summarizeBaselineRows,
   type BaselineRunRow,
+  filterMirrorRuns,
   type RunTurns,
-  MIRROR_SHIPPED_EPOCH,
 } from "../src/aggregators/lifecycle-health.ts";
 import { listAutopilotRunTurnsDesc, listAutopilotRunsSince } from "../src/redis/autopilot-runs.ts";
 import { closeRedisConnections } from "../src/redis/connection.ts";
@@ -49,7 +49,7 @@ async function main(argv: string[]): Promise<number> {
   const rows: Record<string, BaselineRunRow> = (section.rows ??= {});
 
   const runs: RunTurns[] = [];
-  const sinceEpoch = Math.max(Math.floor(Date.now() / 1000) - WINDOW_DAYS * 86400, MIRROR_SHIPPED_EPOCH);
+  const sinceEpoch = Math.floor(Date.now() / 1000) - WINDOW_DAYS * 86400;
   for (const run of await listAutopilotRunsSince(sinceEpoch)) {
     runs.push({
       runId: run.runId,
@@ -57,6 +57,8 @@ async function main(argv: string[]): Promise<number> {
       members: await listAutopilotRunTurnsDesc(run.runId, 5000),
     });
   }
+  // Redis runs that predate the per-turn mirror carry no data; drop them.
+  runs.splice(0, runs.length, ...filterMirrorRuns(runs));
   if (ledgerPath !== null) {
     const live = ledgerToRunTurns(JSON.parse(await readFile(ledgerPath, "utf8")));
     if (live === null) {

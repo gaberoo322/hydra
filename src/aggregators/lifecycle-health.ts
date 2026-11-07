@@ -300,19 +300,31 @@ export async function loadBuilderHealthBaselines(
 // ---------------------------------------------------------------------------
 
 /**
- * Runs that started before the per-turn `parent_exceptions` mirror shipped
- * carry no exception data, so counting their turns would dilute the rate
- * toward a fabricated low value. Shared with the baseline replay script.
+ * A run counts toward parentExceptionRate only if at least one of its turn rows
+ * carries a `parent_exceptions` ARRAY (heartbeat.py always forwards the list,
+ * `[]` when clean). Runs from before the mirror shipped have no such field, and
+ * counting their turns would dilute the rate toward a fabricated low value.
+ * Data-driven, so no ship-date constant to rot. Shared with the replay script.
  */
-export const MIRROR_SHIPPED_EPOCH = Date.parse("2026-11-06T00:00:00Z") / 1000;
+export function runCarriesMirror(run: RunTurns): boolean {
+  for (const member of run.members) {
+    try {
+      const parsed = JSON.parse(member) as { parent_exceptions?: unknown } | null;
+      if (Array.isArray(parsed?.parent_exceptions)) return true;
+    } catch (err) {
+      logger.warn({ err, runId: run.runId }, "[lifecycle-health] skipping malformed turn row in mirror check");
+    }
+  }
+  return false;
+}
 
-/** Clamp a window start so it never reaches back before the mirror shipped. */
-export function applyMirrorCutoff(sinceEpochSeconds: number): number {
-  return Math.max(sinceEpochSeconds, MIRROR_SHIPPED_EPOCH);
+/** Drop runs that predate the per-turn mirror. */
+export function filterMirrorRuns(runs: readonly RunTurns[]): RunTurns[] {
+  return runs.filter(runCarriesMirror);
 }
 
 async function defaultReadRunTurns(sinceEpochSeconds: number): Promise<RunTurns[]> {
-  const runs = await listAutopilotRunsSince(applyMirrorCutoff(sinceEpochSeconds));
+  const runs = await listAutopilotRunsSince(sinceEpochSeconds);
   const out: RunTurns[] = [];
   for (const run of runs) {
     out.push({
@@ -321,7 +333,7 @@ async function defaultReadRunTurns(sinceEpochSeconds: number): Promise<RunTurns[
       members: await listAutopilotRunTurnsDesc(run.runId, TURN_READ_LIMIT),
     });
   }
-  return out;
+  return filterMirrorRuns(out);
 }
 
 // ---------------------------------------------------------------------------
@@ -437,7 +449,8 @@ export function ledgerToRunTurns(state: unknown): RunTurns | null {
   const members: string[] = [];
   for (let t = 1; t <= (s.turn as number); t++) {
     const mine = events.filter((e) => e && e.turn === t);
-    members.push(JSON.stringify({ turn_n: t, ...(mine.length > 0 ? { parent_exceptions: mine } : {}) }));
+    // The live ledger is mirror-era by definition: `[]` marks a clean turn.
+    members.push(JSON.stringify({ turn_n: t, parent_exceptions: mine }));
   }
   return { runId: s.run_id, startedEpoch: s.started_epoch as number, members };
 }

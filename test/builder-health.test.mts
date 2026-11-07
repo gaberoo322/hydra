@@ -26,9 +26,10 @@ import {
   foldParkRate,
   loadBuilderHealthBaselines,
   summarizeBaselineRows,
-  applyMirrorCutoff,
+  filterMirrorRuns,
+  ledgerToRunTurns,
+  baselineRowFor,
   computeParentExceptionRate,
-  MIRROR_SHIPPED_EPOCH,
   type LifecycleHealthDeps,
 } from "../src/aggregators/lifecycle-health.ts";
 import { capEventRecord, type LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
@@ -791,7 +792,7 @@ describe("lifecycle fields — baselines are read-only inputs", () => {
   });
 });
 
-describe("committed builder-health baselines (#5324 QA round 1)", () => {
+describe("committed builder-health baselines are provenanced (#5324)", () => {
   // Vacuous = a recorded value with no provenance (zero turns/runs). A genuine 0 over real turns is healthy.
   const isProvenanced = (b: any): boolean =>
     b.value === null ? true : b.turns > 0 && b.runs > 0 && b.computedAt !== null && b.value === b.exceptionTurns / b.turns;
@@ -810,27 +811,37 @@ describe("committed builder-health baselines (#5324 QA round 1)", () => {
   });
 });
 
-describe("mirror-ship cutoff on the live parentExceptionRate window (#5324 QA round 4)", () => {
-  test("applyMirrorCutoff clamps a pre-mirror start to the epoch and leaves a later start alone", () => {
-    assert.equal(applyMirrorCutoff(MIRROR_SHIPPED_EPOCH - 6 * 86400), MIRROR_SHIPPED_EPOCH);
-    assert.equal(applyMirrorCutoff(MIRROR_SHIPPED_EPOCH + 3600), MIRROR_SHIPPED_EPOCH + 3600);
+describe("mirror-presence filter on the parentExceptionRate runs", () => {
+  const turn = (n: number, pe?: unknown[]) => JSON.stringify({ turn_n: n, ...(pe !== undefined ? { parent_exceptions: pe } : {}) });
+
+  test("filterMirrorRuns drops runs whose turns never carried the field; a clean run with [] stays", () => {
+    const pre = { runId: "pre", startedEpoch: 1, members: [turn(1), turn(2)] };
+    const clean = { runId: "clean", startedEpoch: 2, members: [turn(1, []), turn(2, [])] };
+    const dirty = { runId: "dirty", startedEpoch: 3, members: [turn(1), turn(2, [{ cause: "x", turn: 2, ts_epoch: 1 }])] };
+    assert.deepEqual(filterMirrorRuns([pre, clean, dirty]).map((r) => r.runId), ["clean", "dirty"]);
   });
 
-  test("default reader excludes pre-mirror runs; post-mirror runs still count (sibling pin)", async () => {
+  test("default reader excludes pre-mirror runs; mirror-era runs (clean or not) still count", async () => {
     const { addAutopilotRunToIndex, addAutopilotRunTurn } = await import("../src/redis/autopilot-runs.ts");
-    const tag = `cutoff-${process.pid}-${Date.now()}`;
-    const oldRun = `${tag}-old`;
-    const newRun = `${tag}-new`;
-    await addAutopilotRunToIndex(oldRun, MIRROR_SHIPPED_EPOCH - 3600, 300);
-    await addAutopilotRunToIndex(newRun, MIRROR_SHIPPED_EPOCH + 3600, 300);
-    for (const run of [oldRun, newRun]) {
-      for (let t = 1; t <= 3; t++) await addAutopilotRunTurn(run, t, JSON.stringify({ turn_n: t }), 300);
+    const tag = `mirror-${process.pid}-${Date.now()}`;
+    const nowSec = Math.floor(Date.now() / 1000);
+    await addAutopilotRunToIndex(`${tag}-old`, nowSec - 3600, 300);
+    await addAutopilotRunToIndex(`${tag}-new`, nowSec - 1800, 300);
+    for (let t = 1; t <= 3; t++) {
+      await addAutopilotRunTurn(`${tag}-old`, t, turn(t), 300);
+      await addAutopilotRunTurn(`${tag}-new`, t, turn(t, []), 300);
     }
-    // Window start is ~1 day before the epoch, so only the cutoff keeps the old run out.
-    const now = new Date((MIRROR_SHIPPED_EPOCH + 86400) * 1000);
-    const metric = await computeParentExceptionRate(2, { now });
+    const metric = await computeParentExceptionRate(2, {});
     // Per-run Redis DB isolation: only the two seeded runs exist.
     assert.equal(metric.runs, 1, "pre-mirror run excluded");
-    assert.equal(metric.turns, 3, "only the post-mirror run's turns counted");
+    assert.equal(metric.turns, 3, "only the mirror-era run's turns counted");
+    assert.equal(metric.rate, 0);
+  });
+
+  test("ledger replay marks every turn mirror-era, so a clean live run is recorded, not dropped", () => {
+    const run = ledgerToRunTurns({ run_id: "live", started_epoch: 5, turn: 3 });
+    assert.ok(run);
+    assert.equal(filterMirrorRuns([run]).length, 1);
+    assert.equal(baselineRowFor(run).turns, 3);
   });
 });

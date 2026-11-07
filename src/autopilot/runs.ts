@@ -795,7 +795,8 @@ export interface TurnParentException {
 /**
  * Keep only well-formed parent-exception rows (string cause/source, integer
  * turn and ts_epoch); drop the rest with a warn. `undefined` when the field
- * is absent or yields no valid row, so the member omits it.
+ * is absent or yields no valid row, so the member omits it. A genuinely empty
+ * array is kept as `[]`: it marks a clean, mirror-era turn (#5324).
  */
 function sanitizeParentExceptions(
   raw: unknown,
@@ -833,7 +834,7 @@ function sanitizeParentExceptions(
       "[autopilot] recordTurn dropped malformed parent_exceptions rows",
     );
   }
-  return kept.length > 0 ? kept : undefined;
+  return kept.length > 0 || raw.length === 0 ? kept : undefined;
 }
 
 /**

@@ -752,7 +752,7 @@ describe("scripts/autopilot/heartbeat.py — stale-plan freshness check (issue #
     assert.deepEqual(body.burned_classes, ["sweep_orch"], "burned_classes is state-sourced, sent every turn");
   });
 
-  test("parent_exceptions mirror: forwards ledger rows for turn_n and turn_n-1 only; omitted when none (issue #5324)", async () => {
+  test("parent_exceptions mirror: forwards ledger rows for turn_n and turn_n-1 only; empty list (mirror marker) when none (issue #5324)", async () => {
     const row = (turn: number, cause: string, ts: number) => ({ cause, turn, source: "parent", detail: "", ts_epoch: ts });
     const { requests } = await runWithPlan(
       { actions: [], reasons: [], run_id: RUN_ID, turn: 3, events: [] },
@@ -763,7 +763,7 @@ describe("scripts/autopilot/heartbeat.py — stale-plan freshness check (issue #
       [2, 3],
     );
     const none = await runWithPlan({ actions: [], reasons: [], run_id: RUN_ID, turn: 3, events: [] });
-    assert.equal("parent_exceptions" in none.requests[0].body, false);
+    assert.deepEqual(none.requests[0].body.parent_exceptions, [], "a clean turn still marks the run mirror-era");
   });
 
   test("missing plan file → observability fields omitted, burned_classes defaults to [] (issue #4635)", async () => {

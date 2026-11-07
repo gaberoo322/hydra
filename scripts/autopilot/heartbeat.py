@@ -381,8 +381,9 @@ def post_turn(state: dict, plan: dict, now: int) -> None:
     # the ledger stays the single writer; omitted when there are none, and the
     # server dedupes on (run_id, turn, cause, ts_epoch).
     mirrored = _mirrored_parent_exceptions(state, int(turn_n))
-    if mirrored:
-        body["parent_exceptions"] = mirrored
+    # Always forward the list (`[]` when clean): its presence marks a run as
+    # mirror-era so the rate fold can tell a clean run from a pre-mirror one.
+    body["parent_exceptions"] = mirrored
     try:
         payload = json.dumps(body).encode("utf-8")
     except (TypeError, ValueError) as exc:
