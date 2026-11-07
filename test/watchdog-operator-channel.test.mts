@@ -27,7 +27,11 @@ import { join, resolve } from "node:path";
 
 import { BRIEF_LAST_SENT_KEY } from "../src/redis/operator-channel.ts";
 import { BRIEF_MISSING_KEY_PREFIX, briefMissingEpisodeKeys } from "../src/redis/watchdog-episodes.ts";
-import { PAGE_KINDS, isPageKind } from "../src/operator-channel/page-list.ts";
+import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
+import { formatAlertMessage } from "../src/notification/alert-grammar.ts";
+import { OperatorChannel, messageFromEvent } from "../src/operator-channel/channel.ts";
+import { KIND_TABLE, PAGE_KINDS, dedupKeyOf, isPageKind } from "../src/operator-channel/page-list.ts";
+import { diskDedupKey } from "../src/watchdog/disk.ts";
 import type { OperatorMessage } from "../src/operator-channel/message.ts";
 import {
   BRIEF_LAST_SENT_KEY_LABEL,
@@ -101,9 +105,11 @@ function makeHarness(init: Partial<Harness["state"]> = {}): Harness {
   const deps: BriefMissingDeps = {
     store,
     channel: {
-      async page(msg: OperatorMessage) {
-        pages.push(msg);
-        return { sent: true } as never;
+      async report(kind: string, payload: Record<string, unknown> = {}) {
+        // The REAL per-kind table renders the message (title, dedupKey, severity).
+        const msg = messageFromEvent({ type: kind, payload });
+        if (msg.severity === "page") pages.push(msg);
+        return { disposition: "page", delivered: true, alertWritten: false, unknownKind: false, outcome: { sent: true, kind: "page" } } as never;
       },
       async resolve(dedupKey: string, title?: string) {
         resolves.push({ dedupKey, title });
@@ -206,21 +212,21 @@ describe("brief-missing — detection + delivery over fake ports (issue #5048)",
     assert.equal(h.pages[0].title, "No Morning Brief delivered for 27h");
     assert.deepEqual(h.pages[0].facts, [
       { label: "reason", value: "never-delivered" },
-      { label: "age_h", value: "27" },
-      { label: "threshold_h", value: "26" },
-      { label: "last_sent_key", value: BRIEF_LAST_SENT_KEY },
+      { label: "ageH", value: "27" },
+      { label: "thresholdH", value: "26" },
+      { label: "lastSentKey", value: BRIEF_LAST_SENT_KEY },
     ]);
     assert.equal(h.state.anchor, T0, "the anchor is NOT re-stamped by the SET NX on a later tick");
   });
 
   test("the fired marker is SET before the page (dedup holds when delivery fails)", async () => {
     const h = makeHarness({ lastSent: T0 - 30 * HOUR_MS });
-    h.deps.channel.page = async () => {
+    h.deps.channel.report = async () => {
       assert.equal(h.state.fired, true, "marker set before delivery");
       throw new Error("telegram down");
     };
     await runBriefMissing(h.deps, cfg());
-    assert.match(h.text(), /WARN operator-channel page FAILED/);
+    assert.match(h.text(), /WARN operator-channel report FAILED/);
     assert.equal(h.state.fired, true);
   });
 
@@ -356,11 +362,87 @@ describe("watchdog page kinds and the service unit (ADR-0045 D2, issue #5046)", 
     assert.match(readFileSync(ADR, "utf-8"), /infra:watchdog_cli_failed/, "ADR-0045 Decision 3 lists the CLI-start alarm");
   });
 
-  test("ported modules page with dedupKey == kind", () => {
-    for (const f of ["redis-backup.ts", "origin-identity.ts"]) {
-      const src = readFileSync(join(REPO_ROOT, "src", "watchdog", f), "utf-8");
-      assert.match(src, /dedupKey: (REDIS_BACKUP_STALE_KIND|ORIGIN_IDENTITY_PAGE_KIND)/, `${f} pages with dedupKey == kind`);
+  test("ported modules page with dedupKey == kind (derived by the table, not hand-built)", () => {
+    for (const k of [REDIS_BACKUP_STALE_KIND, ORIGIN_IDENTITY_PAGE_KIND, BRIEF_MISSING_KIND, "launch:fail_safe", E.LAUNCH_QUOTA_STRETCH]) {
+      assert.equal(dedupKeyOf(k), k, `${k}: dedupKeyOf(kind) === kind`);
     }
+    for (const f of ["redis-backup.ts", "origin-identity.ts", "launch-flow.ts", "brief-missing.ts"]) {
+      const src = readFileSync(join(REPO_ROOT, "src", "watchdog", f), "utf-8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+      assert.doesNotMatch(src, /dedupKey:\s*[A-Za-z_]/, `${f} builds no dedupKey by hand`);
+    }
+  });
+
+  test("INV-1: the five converted modules never publish to the notifications bus", () => {
+    for (const f of ["origin-identity.ts", "redis-backup.ts", "launch-flow.ts", "disk.ts", "brief-missing.ts"]) {
+      const src = readFileSync(join(REPO_ROOT, "src", "watchdog", f), "utf-8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+      assert.doesNotMatch(src, /bus\.publish|STREAMS\.NOTIFICATIONS|event-bus-stream-keys|from "\.\.\/event-bus\.ts"/, `${f} must not touch the bus`);
+    }
+  });
+
+  test("INV-7: the tmpfs page key comes from the table and keeps today's byte-for-byte string", () => {
+    assert.equal(dedupKeyOf("infra:tmpfs_exhausted", { path: "/tmp" }), "infra:tmpfs_exhausted:/tmp:critical");
+    assert.equal(dedupKeyOf("infra:tmpfs_pressure", { path: "/dev/shm" }), "infra:tmpfs_pressure:/dev/shm:warn");
+    assert.equal(diskDedupKey("/tmp", "critical"), "infra:tmpfs_exhausted:/tmp:critical");
+    assert.equal(diskDedupKey("/dev/shm", "warn"), "infra:tmpfs_pressure:/dev/shm:warn");
+  });
+
+  test("INV-8: title renderers reproduce the old hand-built titles and never throw on an empty payload", () => {
+    assert.equal(
+      messageFromEvent({ type: "infra:redis_backup_stale", payload: { reason: "missing", thresholdMs: 36 * HOUR_MS } }).title,
+      "Redis backup missing (threshold 36h)",
+    );
+    assert.equal(
+      messageFromEvent({ type: "launch:meter_dark", payload: { signal: "meter-dark", durationMs: 5, thresholdMs: 3 } }).title,
+      "Launch flow 'meter-dark' sustained 5ms (>= 3ms) — Orchestrator may be down",
+    );
+    assert.equal(messageFromEvent({ type: "brief:missing", payload: { ageH: 27 } }).title, "No Morning Brief delivered for 27h");
+    assert.match(
+      messageFromEvent({ type: "infra:tmpfs_exhausted", payload: { path: "/tmp", over: "inodes 100%" } }).title,
+      /^\/tmp critical: inodes 100% — temp-file writes fail with ENOSPC at 100%$/,
+    );
+    for (const [kind, row] of Object.entries(KIND_TABLE)) {
+      assert.doesNotThrow(() => row.title?.({}), `${kind} title renderer on an empty payload`);
+      assert.doesNotThrow(() => messageFromEvent({ type: kind, payload: {} }), `${kind} messageFromEvent on an empty payload`);
+    }
+  });
+
+  test("INV-4: a real channel writes ONE dashboard alert for an origin-identity alarm and a launch quota fire, none for redis_backup_stale", async () => {
+    const alerts: Array<{ type: string; message: string; severity: string }> = [];
+    const channel = new OperatorChannel({
+      store: {
+        readDedup: async () => null,
+        writeDedup: async () => {},
+        incrSuppressed: async () => {},
+        delDedup: async () => {},
+        appendBrief: async () => {},
+        appendLog: async () => {},
+      },
+      transport: async () => ({ ok: true, mode: "HTML" }),
+      alerts: async (a) => {
+        alerts.push(a);
+        return true;
+      },
+    });
+    const origin = { signal: "origin-identity", reason: "wrong-origin-url", url: "x/y", repair: "not-attempted", newUrl: "x/y", fetch: "skipped", note: "n" };
+    const quota = { signal: "quota", reason: "session-blocked", durationMs: 5, thresholdMs: 3 };
+    await channel.report(ORIGIN_IDENTITY_PAGE_KIND, origin);
+    await channel.report(E.LAUNCH_QUOTA_STRETCH, quota);
+    await channel.report(REDIS_BACKUP_STALE_KIND, { signal: "redis-backup", reason: "stale", durationMs: 1, thresholdMs: 2 });
+    assert.equal(alerts.length, 2);
+    assert.equal(alerts[0].type, ORIGIN_IDENTITY_PAGE_KIND);
+    assert.equal(alerts[0].message, formatAlertMessage({ type: ORIGIN_IDENTITY_PAGE_KIND, payload: origin }));
+    assert.equal(alerts[0].severity, "error");
+    assert.equal(alerts[1].message, formatAlertMessage({ type: E.LAUNCH_QUOTA_STRETCH, payload: quota }));
+  });
+
+  test("INV-10: the disk warn level stays on briefOnce and has a real brief line", () => {
+    const row = KIND_TABLE["infra:tmpfs_pressure"];
+    assert.equal(row.disposition, "brief");
+    assert.ok(row.briefLine);
+    assert.match(
+      row.briefLine({ ...messageFromEvent({ type: "infra:tmpfs_pressure", payload: {} }), title: "/tmp warn: inodes 85%", at: 0 }),
+      /^Tmpfs pressure: \/tmp warn: inodes 85%/,
+    );
   });
 
   test("hydra-watchdog.service loads %h/hydra/.env dash-prefixed (the other checks must run without it)", () => {

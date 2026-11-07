@@ -33,6 +33,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { WATCHDOG_CHECKS } from "../src/watchdog/checks.ts";
+import { OperatorChannel } from "../src/operator-channel/channel.ts";
 import { STREAMS } from "../src/event-bus-stream-keys.ts";
 import { REDIS_BACKUP_KEY_PREFIX, redisBackupEpisodeKeys } from "../src/redis/watchdog-episodes.ts";
 import {
@@ -258,18 +259,15 @@ const hoursAgo = (h: number) => ({ name: "hydra-redis-2026-09-10_0315.rdb.gz", m
 const text = (logs: string[]): string => logs.join("\n");
 
 describe("redis-backup freshness check — detection + delivery", () => {
-  test("flags STALE when the newest dump is older than the threshold: event + Page + fired marker", async () => {
+  test("flags STALE when the newest dump is older than the threshold: ONE report() + fired marker", async () => {
     const h = makeRedisBackupHarness();
     h.state.newest = hoursAgo(40);
     await runRedisBackup(h.deps, cfg());
     assert.match(text(h.logs), /WARNING REDIS BACKUP STALE — stale in \/mnt\/hydra-ssd\/backups\/redis \(threshold 36h\)/);
-    assert.equal(h.published.length, 1);
-    const ev = h.published[0];
-    assert.equal(ev.stream, STREAMS.NOTIFICATIONS);
-    assert.equal(ev.event.type, "infra:redis_backup_stale");
-    assert.equal(ev.event.source, "watchdog-redis-backup-freshness");
-    assert.equal(ev.event.correlationId, "redis-backup-freshness");
-    assert.deepEqual(ev.event.payload, {
+    assert.equal(h.reports.length, 1);
+    const ev = h.reports[0];
+    assert.equal(ev.kind, "infra:redis_backup_stale");
+    assert.deepEqual(ev.payload, {
       signal: "redis-backup",
       reason: "stale",
       durationMs: 40 * 3600 * 1000,
@@ -278,6 +276,7 @@ describe("redis-backup freshness check — detection + delivery", () => {
     assert.equal(h.pages.length, 1);
     assert.equal(h.pages[0].kind, REDIS_BACKUP_STALE_KIND);
     assert.equal(h.pages[0].dedupKey, REDIS_BACKUP_STALE_KIND, "dedupKey == kind");
+    assert.equal(h.pages[0].title, "Redis backup stale (threshold 36h)", "the table's title renderer keeps the old text");
     assert.ok(h.store.kv.has(`${REDIS_BACKUP_KEY_PREFIX}:fired`));
     assert.ok(h.logs.every((l) => l.startsWith(REDIS_BACKUP_LOG_PREFIX)));
   });
@@ -286,8 +285,8 @@ describe("redis-backup freshness check — detection + delivery", () => {
     const h = makeRedisBackupHarness();
     h.state.newest = null;
     await runRedisBackup(h.deps, cfg({ backupDir: "/nonexistent-rb-freshness-dir" }));
-    assert.equal((h.published[0].event.payload as { reason: string; durationMs: number }).reason, "missing");
-    assert.equal((h.published[0].event.payload as { durationMs: number }).durationMs, 0);
+    assert.equal(h.reports[0].payload.reason, "missing");
+    assert.equal(h.reports[0].payload.durationMs, 0);
     assert.match(text(h.logs), /STALE — missing in \/nonexistent-rb-freshness-dir/);
   });
 
@@ -295,7 +294,7 @@ describe("redis-backup freshness check — detection + delivery", () => {
     const h = makeRedisBackupHarness();
     h.state.newest = hoursAgo(1);
     await runRedisBackup(h.deps, cfg());
-    assert.equal(h.published.length, 0);
+    assert.equal(h.reports.length, 0);
     assert.equal(h.pages.length, 0);
     assert.equal(h.store.kv.size, 0);
     assert.match(text(h.logs), /newest backup: hydra-redis-2026-09-10_0315\.rdb\.gz \(age 3600s ≈ 1h; stale threshold 36h\)/);
@@ -305,7 +304,7 @@ describe("redis-backup freshness check — detection + delivery", () => {
     const h = makeRedisBackupHarness();
     h.state.newest = hoursAgo(2);
     await runRedisBackup(h.deps, cfg({ staleHours: 1 }));
-    assert.equal(h.published.length, 1);
+    assert.equal(h.reports.length, 1);
     assert.deepEqual(decideRedisBackup({ name: "x", mtimeS: NOW_S - 3600 }, NOW_S, 1), { stale: true, reason: "stale", ageS: 3600 });
     assert.equal(decideRedisBackup({ name: "x", mtimeS: NOW_S - 3599 }, NOW_S, 1).stale, false);
     assert.equal(parseStaleHours("abc"), DEFAULT_REDIS_BACKUP_STALE_HOURS);
@@ -322,7 +321,7 @@ describe("redis-backup freshness check — detection + delivery", () => {
     h.state.newest = hoursAgo(40);
     await runRedisBackup(h.deps, cfg());
     await runRedisBackup(h.deps, cfg());
-    assert.equal(h.published.length, 1);
+    assert.equal(h.reports.length, 1);
     assert.equal(h.pages.length, 1);
   });
 
@@ -337,7 +336,7 @@ describe("redis-backup freshness check — detection + delivery", () => {
     assert.match(text(h.logs), /redis backup fresh again — clearing the staleness episode/);
     h.state.newest = hoursAgo(40);
     await runRedisBackup(h.deps, cfg());
-    assert.equal(h.published.length, 2);
+    assert.equal(h.reports.length, 2);
   });
 
   test("a fresh tick with no fired marker resolves nothing", async () => {
@@ -353,17 +352,44 @@ describe("redis-backup freshness check — detection + delivery", () => {
     h.state.timer = "disabled";
     await runRedisBackup(h.deps, cfg());
     assert.match(text(h.logs), /WARN hydra-redis-backup\.timer is not enabled \(state=disabled\)/);
-    assert.equal(h.published.length, 0);
+    assert.equal(h.reports.length, 0);
   });
 
-  test("fail-safe: a failing publish is a WARN, the Page still goes out, the fired marker stays set", async () => {
+  test("fail-safe: a throwing report() is a WARN, nothing escapes the tick, the fired marker stays set", async () => {
     const h = makeRedisBackupHarness();
     h.state.newest = hoursAgo(40);
-    h.state.failPublish = true;
+    h.state.failReport = true;
     await runRedisBackup(h.deps, cfg());
-    assert.match(text(h.logs), /WARN in-band delivery FAILED/);
-    assert.equal(h.pages.length, 1);
+    assert.match(text(h.logs), /WARN operator-channel report FAILED/);
     assert.ok(h.store.kv.has(`${REDIS_BACKUP_KEY_PREFIX}:fired`));
+  });
+
+  test("Decision 6 fail-open: against a REAL OperatorChannel with a dead store the page is still sent exactly once", async () => {
+    const dead = async (): Promise<never> => {
+      throw new Error("redis down");
+    };
+    const sent: string[] = [];
+    const channel = new OperatorChannel({
+      store: { readDedup: dead, writeDedup: dead, incrSuppressed: dead, delDedup: dead, appendBrief: dead, appendLog: dead },
+      transport: async (text) => {
+        sent.push(text);
+        return { ok: true, mode: "HTML" };
+      },
+      alerts: async () => false,
+      timeoutMs: 50,
+    });
+    const h = makeRedisBackupHarness();
+    h.state.newest = hoursAgo(40);
+    await runRedisBackup({ ...h.deps, channel }, cfg());
+    assert.equal(sent.length, 1, "the page is delivered even though every store call throws");
+    assert.match(sent[0], /Redis backup stale/);
+  });
+
+  test("the module no longer touches the notifications bus", () => {
+    const src = readFileSync(resolve(import.meta.dirname, "../src/watchdog/redis-backup.ts"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    assert.doesNotMatch(src, /bus\.publish|STREAMS\.NOTIFICATIONS|event-bus/);
   });
 
   test("fail-safe: an unreachable Redis skips the signal and still detects (never throws)", async () => {
@@ -373,7 +399,7 @@ describe("redis-backup freshness check — detection + delivery", () => {
     await runRedisBackup(h.deps, cfg());
     assert.match(text(h.logs), /WARNING REDIS BACKUP STALE/);
     assert.match(text(h.logs), /state read failed/);
-    assert.equal(h.published.length, 0);
+    assert.equal(h.reports.length, 0);
     assert.equal(NOW_MS > 0, true);
   });
 });

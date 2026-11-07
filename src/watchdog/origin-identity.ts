@@ -327,7 +327,7 @@ async function tick(deps: OriginIdentityDeps, config: OriginIdentityConfig, say:
   // and writes the dashboard alert. report() never throws and fails open when
   // Redis is down (Decision 6), so the since-marker is written unconditionally
   // once it has returned.
-  await deps.channel.report(ORIGIN_IDENTITY_PAGE_KIND, {
+  await deps.channel.report(E.INFRA_ORIGIN_IDENTITY_WRONG, {
     signal: "origin-identity",
     reason: reasonStr,
     url: urlClean,

@@ -1,6 +1,6 @@
 /**
  * In-memory ports for the launch-flow check (issue #5097): an EpisodeStore, a
- * recording Operator Channel, a recording EventBus and a scripted
+ * recording Operator Channel, and a scripted
  * WatchdogGithub, assembled into a LaunchFlowDeps. No Redis, no bash, no
  * spawn — the suites that import this run the real `runLaunchFlow` /
  * `runEpisode` over these fakes.
@@ -11,6 +11,7 @@ import { GLM_DRAINER_HEARTBEAT_STALE_MS } from "../../src/redis/autopilot.ts";
 import { launchFlowFiredKey, launchFlowSinceKey, type LaunchFlowEpisodeSignal, type PaceGateLastTick } from "../../src/redis/launch-flow.ts";
 import type { EpisodeKeyPair, EpisodeStore } from "../../src/watchdog/episode.ts";
 import type { LaunchFlowDeps } from "../../src/watchdog/launch-flow.ts";
+import { messageFromEvent } from "../../src/operator-channel/channel.ts";
 import type { OperatorMessage } from "../../src/operator-channel/message.ts";
 
 /** Fixed deterministic clock for threshold maths (epoch-ms). */
@@ -74,7 +75,8 @@ export interface Harness {
   logs: string[];
   pages: OperatorMessage[];
   resolves: Array<{ key: string; title?: string }>;
-  published: Array<{ stream: string; event: { type: string; source: string; correlationId?: string | null; payload?: unknown } }>;
+  /** Every channel.report(kind, payload) call, in order (exactly one per fire edge). */
+  reports: Array<{ kind: string; payload: Record<string, unknown> }>;
   ghCalls: number[];
   /** Mutable scenario state. */
   state: {
@@ -83,7 +85,6 @@ export interface Harness {
     pick: GlmDrainerLastPick | null | "unreadable";
     drainerPrs: number | null | "throw";
     failPage: boolean;
-    failPublish: boolean;
   };
 }
 
@@ -92,7 +93,7 @@ export function makeHarness(): Harness {
   const logs: string[] = [];
   const pages: OperatorMessage[] = [];
   const resolves: Harness["resolves"] = [];
-  const published: Harness["published"] = [];
+  const reports: Harness["reports"] = [];
   const ghCalls: number[] = [];
   const state: Harness["state"] = {
     tick: null,
@@ -100,7 +101,6 @@ export function makeHarness(): Harness {
     pick: null,
     drainerPrs: 0,
     failPage: false,
-    failPublish: false,
   };
   const deps: LaunchFlowDeps = {
     async lastTick() {
@@ -129,25 +129,27 @@ export function makeHarness(): Harness {
       },
     },
     channel: {
-      async page(m: OperatorMessage) {
+      async report(kind: string, payload: Record<string, unknown> = {}) {
         if (state.failPage) throw new Error("channel down");
-        pages.push(m);
-        return { sent: true as const, kind: "page" as const };
+        reports.push({ kind, payload });
+        // The REAL per-kind table renders the message (title, dedupKey, severity).
+        const m = messageFromEvent({ type: kind, payload });
+        if (m.severity === "page") pages.push(m);
+        return {
+          disposition: m.severity === "page" ? ("page" as const) : ("brief" as const),
+          delivered: true,
+          alertWritten: false,
+          unknownKind: false,
+          outcome: { sent: true as const, kind: "page" as const },
+        };
       },
       async resolve(key: string, title?: string) {
         resolves.push({ key, title });
         return { sent: true as const, kind: "recovered" as const };
       },
     },
-    bus: {
-      async publish(stream, event) {
-        if (state.failPublish) throw new Error("bus down");
-        published.push({ stream, event: event as Harness["published"][number]["event"] });
-        return "1-0";
-      },
-    },
     clock: { nowMs: () => T0 },
     log: (line) => logs.push(line),
   };
-  return { deps, store, logs, pages, resolves, published, ghCalls, state };
+  return { deps, store, logs, pages, resolves, reports, ghCalls, state };
 }
