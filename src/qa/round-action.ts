@@ -11,7 +11,7 @@ import type { ReviewVerdict } from "./admission.ts";
 import { classifyQaFixPath } from "./fix-proof.ts";
 import { detectOneWayDoor, requiresOneWayDepth } from "./one-way-door.ts";
 import type { ReviewerCommitsValue } from "./rollout-switches.ts";
-import { priorFindingsSection, qaVerdictHistory } from "./prior-round.ts";
+import { qaVerdictHistory } from "./prior-round.ts";
 import { CAP_DEFAULTS, countReviewedFailRoundsSinceReset } from "../lifecycle/caps.ts";
 import { isFailVerdict, nextQaVerdictRound, type FinalVerdict, type QaVerdictTrailer } from "./verdict-trailer.ts";
 
@@ -491,15 +491,30 @@ const noReviewerCommit = (reason: ReviewerCommitReason, detail: string): Reviewe
   bodyFix: false,
 });
 
-/** The repo path a finding location names, or null for a placeholder / non-path. */
-export function reviewerCommitLocationPath(location: string): string | null {
+/**
+ * The repo path (and first line number, when present) a finding location names,
+ * or null for a placeholder / non-path. The single parser behind the step-9.4
+ * per-row re-verify (`qa-commit-checks.ts row-loc`), so the playbook never
+ * re-implements it in shell.
+ */
+export function reviewerCommitLocationRef(location: string): { path: string; line: number | null } | null {
   let s = String(location ?? "").replace(/\s+/g, " ").trim();
   s = s.replace(/^(["'`])(.*)\1$/, "$2").trim();
   s = s.replace(/\s*\([^)]*\)\s*$/, "").trim();
-  s = s.replace(/(?:[:#]\s*L?\d+(?:[-:]\d+)*|\s+L\d+)$/i, "").trim();
+  let line: number | null = null;
+  const m = /(?:[:#]\s*L?(\d+)(?:[-:]\d+)*|\s+L(\d+))$/i.exec(s);
+  if (m) {
+    line = Number(m[1] ?? m[2]);
+    s = s.slice(0, m.index).trim();
+  }
   s = s.replace(/^\.\//, "");
   if (!/^[A-Za-z0-9_.\-/]+$/.test(s)) return null;
-  return s.includes("/") || s.includes(".") ? s : null;
+  return s.includes("/") || s.includes(".") ? { path: s, line } : null;
+}
+
+/** The repo path a finding location names, or null for a placeholder / non-path. */
+export function reviewerCommitLocationPath(location: string): string | null {
+  return reviewerCommitLocationRef(location)?.path ?? null;
 }
 
 /** Paths listed under a PR body's `## Files out of scope` heading (backticked or bare bullets). */
@@ -519,7 +534,11 @@ export function parseFilesOutOfScope(body: string): string[] {
       continue;
     }
     const bullet = /^\s*[-*]\s+(\S+)/.exec(line);
-    if (bullet) out.push(bullet[1] as string);
+    if (bullet) {
+      // Strip emphasis wrappers and trailing punctuation so "- src/x.ts: reason" and "- **docs/x.md**" match the path.
+      const token = (bullet[1] as string).replace(/^[*_]+/, "").replace(/[*_:,;.]+$/, "");
+      if (token !== "") out.push(token);
+    }
   }
   return out.map((p) => p.replace(/^\.\//, "")).filter((p) => p !== "");
 }

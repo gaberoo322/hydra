@@ -15,6 +15,7 @@ import {
   diffHasHunkNearLine,
   decideReviewerCommit,
   parseFilesOutOfScope,
+  reviewerCommitLocationRef,
   reviewerCommitLocationPath,
   type ReviewerCommitInput,
 } from "../src/qa/round-action.ts";
@@ -189,6 +190,27 @@ describe("location and scope parsing", () => {
   test("parseFilesOutOfScope reads the section only", () => {
     const body = "## Files in scope\n\n- `a.ts`\n\n## Files out of scope\n\n- `docs/x.md`\n- src/y.ts\n\n## Other\n\n- `z.ts`\n";
     assert.deepEqual(parseFilesOutOfScope(body), ["docs/x.md", "src/y.ts"]);
+  });
+
+  test("parseFilesOutOfScope normalises punctuated and emphasised bare bullets (fence must not fail open)", () => {
+    const body = "## Files out of scope\n\n- src/x.ts: reason\n- **docs/x.md**\n- _a/b.ts_.\n- plain/c.ts\n";
+    assert.deepEqual(parseFilesOutOfScope(body), ["src/x.ts", "docs/x.md", "a/b.ts", "plain/c.ts"]);
+  });
+
+  test("reviewerCommitLocationRef returns path and first line (row-loc backing parser)", () => {
+    assert.deepEqual(reviewerCommitLocationRef("docs/a.md:12-18"), { path: "docs/a.md", line: 12 });
+    assert.deepEqual(reviewerCommitLocationRef("`docs/a.md#L7`"), { path: "docs/a.md", line: 7 });
+    assert.deepEqual(reviewerCommitLocationRef("docs/a.md"), { path: "docs/a.md", line: null });
+    assert.equal(reviewerCommitLocationRef("PR body"), null);
+  });
+
+  test("qa-commit-checks row-loc subcommand calls the TS parser; a non-path exits 1", () => {
+    const run = (loc: string) =>
+      spawnSync("node", ["--no-warnings", "--experimental-strip-types", "scripts/ci/qa-commit-checks.ts", "row-loc", loc], { encoding: "utf8", cwd: ROOT });
+    const ok = run("docs/a.md:12 (term)");
+    assert.equal(ok.status, 0);
+    assert.deepEqual(JSON.parse(ok.stdout), { file: "docs/a.md", line: 12 });
+    assert.equal(run("PR body").status, 1);
   });
 });
 
