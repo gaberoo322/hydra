@@ -17,6 +17,8 @@ import {
   KIND_TABLE,
   BriefScheduler,
   OperatorChannel,
+  type ChannelResult,
+  type OperatorMessage,
   REVIEW_PICKUP_ACTION,
   briefDue,
   briefItemFromStored,
@@ -147,6 +149,19 @@ function throwingDeps(): BriefSourcesDeps {
 // ---------------------------------------------------------------------------
 // briefDue — pure
 // ---------------------------------------------------------------------------
+
+/**
+ * page()/brief() are private to the channel (issue #5391). The dedup-reducer
+ * drives below exercise the edge-trigger state machine with hand-built
+ * messages, which report() derives from the per-kind table instead, so they
+ * reach the private methods through this one typed cast.
+ */
+function priv(ch: OperatorChannel) {
+  return ch as unknown as {
+    page(msg: OperatorMessage): Promise<ChannelResult>;
+    brief(msg: OperatorMessage): Promise<{ appended: boolean }>;
+  };
+}
 
 describe("briefDue (pure)", () => {
   test("not due before 07:30 local, even with no last-sent key", () => {
@@ -659,7 +674,7 @@ describe("review:pickup_ready reaches the operator as an actionable Page", () =>
     const { store } = memoryStore();
     const { transport, sent } = fakeTransport();
     const ch = new OperatorChannel({ store, transport, now: () => TUE(8, 0) });
-    const res = await ch.page(messageFromEvent({ type: E.REVIEW_PICKUP_READY, payload }));
+    const res = await priv(ch).page(messageFromEvent({ type: E.REVIEW_PICKUP_READY, payload }));
     assert.deepEqual(res, { sent: true, kind: "page" });
     assert.ok(sent[0].includes("Action: <code>/hydra-review</code>"), sent[0]);
     assert.ok(sent[0].includes('<a href="https://x/710">Decide tier for PR #710</a>'), sent[0]);
@@ -674,7 +689,7 @@ describe("review:pickup_ready reaches the operator as an actionable Page", () =>
     const bus = {
       async publish(_stream: string, ev: any) {
         // Stand in for the notification consumer's recordEvent routing.
-        await ch.page(messageFromEvent(ev));
+        await priv(ch).page(messageFromEvent(ev));
         return "id";
       },
     };
