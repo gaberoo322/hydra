@@ -33,8 +33,7 @@ import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 
 import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
-import { ALERT_TYPES } from "../src/notification/alert-grammar.ts";
-import { isPageKind } from "../src/operator-channel/page-list.ts";
+import { ALERT_TYPES, isPageKind } from "../src/operator-channel/page-list.ts";
 import { WATCHDOG_CHECKS } from "../src/watchdog/checks.ts";
 import { WATCHDOG_SPAWN_TIMEOUT_MS, WATCHDOG_REDIS_TIMEOUT_MS, throwIfTimedOut } from "./_helpers/watchdog-timeouts.mts";
 import { ownedDbContext } from "./_helpers/owned-redis-db.mts";

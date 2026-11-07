@@ -43,8 +43,7 @@ import {
   parseStaleHours,
   runRedisBackup,
 } from "../src/watchdog/redis-backup.ts";
-import { ALERT_TYPES } from "../src/notification/alert-grammar.ts";
-import { isPageKind } from "../src/operator-channel/page-list.ts";
+import { ALERT_TYPES, isPageKind } from "../src/operator-channel/page-list.ts";
 import {
   WATCHDOG_SPAWN_TIMEOUT_MS,
   throwIfTimedOut,

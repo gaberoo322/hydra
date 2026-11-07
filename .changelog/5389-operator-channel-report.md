@@ -1,0 +1,1 @@
+- refactor: Operator Channel decides page, brief and dashboard alert from one per-kind table through report() (#5389)
