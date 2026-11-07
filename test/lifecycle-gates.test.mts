@@ -610,7 +610,7 @@ describe("journalEntry — the single append point indexes unsanctioned hold exi
 describe("journalEntry — passes capEvent so cap parks reach the park-rate index (#5324)", () => {
   const base: LifecycleJournalEntry = {
     v: 1, ts: 5, kind: "transition", from: "in-progress", to: "parked", source: "cli",
-    actor: "x", evidence: { pr: 42 }, reason: "cap:qa-stall", rationale: null, result: "ok", written: true,
+    actor: "x", evidence: { pr: "42" }, reason: "cap:qa-stall", rationale: null, result: "ok", written: true,
   };
 
   test("claim-opened, cap park and shadow would-park each append with capEvent: true", async () => {
