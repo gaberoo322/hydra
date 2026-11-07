@@ -220,6 +220,55 @@ describe("flagDispatchesForDrill", () => {
 // ---------------------------------------------------------------------------
 
 describe("projectDispatches", () => {
+  const BRANCH = "worktree-agent-ab2331d4-t6-dev_orch";
+  const dispatchAction = {
+    type: "dispatch",
+    skill: "hydra-dev",
+    slot: "dev_orch",
+    worktreeBranch: BRANCH,
+    outcome: { cycleId: BRANCH, status: "completed" },
+  };
+  const slotAt = (taskId: string, dispatchId: string) => ({
+    dev_orch: { skill: "hydra-dev", anchor: "issue-1", task_id: taskId, dispatch_id: dispatchId },
+  });
+
+  test("slot dispatch_id joins an earlier action with a null snapshot -> one row (#5369)", () => {
+    const out = projectDispatches([
+      { turn_n: 6, actions: [dispatchAction], slots_snapshot: { dev_orch: null } },
+      { turn_n: 7, actions: [], slots_snapshot: slotAt("a8e26dad6183e4a7b", BRANCH) },
+    ]);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].turn_n, 6);
+    assert.equal(out[0].cycleId, BRANCH);
+    assert.equal(out[0].status, "completed");
+    assert.equal(out[0].occupancyId, "id:a8e26dad6183e4a7b");
+  });
+
+  test("outcome-less action registered by worktreeBranch still joins (#5369)", () => {
+    const out = projectDispatches([
+      { turn_n: 6, actions: [{ ...dispatchAction, outcome: null }], slots_snapshot: {} },
+      { turn_n: 7, actions: [], slots_snapshot: slotAt("t1", BRANCH) },
+    ]);
+    assert.equal(out.length, 1);
+  });
+
+  test("same dispatch_id with a second distinct task_id emits a second row (#3834 preserved)", () => {
+    const out = projectDispatches([
+      { turn_n: 6, actions: [dispatchAction], slots_snapshot: { dev_orch: null } },
+      { turn_n: 7, actions: [], slots_snapshot: slotAt("taskA", BRANCH) },
+      { turn_n: 8, actions: [], slots_snapshot: slotAt("taskB", BRANCH) },
+    ]);
+    assert.equal(out.length, 2);
+  });
+
+  test("a different dispatch_id does not join (#5369)", () => {
+    const out = projectDispatches([
+      { turn_n: 6, actions: [dispatchAction], slots_snapshot: { dev_orch: null } },
+      { turn_n: 7, actions: [], slots_snapshot: slotAt("taskA", "other") },
+    ]);
+    assert.equal(out.length, 2);
+  });
+
   test("projects dispatch actions and joins outcome status/PR", () => {
     const turns = [
       {
