@@ -22,7 +22,6 @@
 import test, { describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
-import { STREAMS } from "../src/event-bus-stream-keys.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
 import { formatAlertMessage } from "../src/notification/alert-grammar.ts";
 import { ALERT_TYPES, PAGE_KINDS, isPageKind } from "../src/operator-channel/page-list.ts";
@@ -134,59 +133,54 @@ describe("runLaunchFlow — delivery behaviour (issue #3848; Operator Channel pe
     h.state.tick = { reason, latencyMs };
   };
 
-  test("fail-safe delivers out-of-band: one channel page, NO bus publish", async () => {
+  test("fail-safe delivers out-of-band: exactly ONE channel.report(), page disposition, no dashboard alert", async () => {
     tick("eligibility-unreachable");
     seedSince(h.store, "fail-safe", T0 - 2 * HOUR);
     await runLaunchFlow(h.deps, cfg());
-    assert.equal(h.published.length, 0, "the Orchestrator is unproven: nothing rides the bus");
+    assert.equal(h.reports.length, 1, "one report() per fire edge");
     assert.equal(h.pages.length, 1);
     const p = h.pages[0];
     assert.equal(p.kind, "launch:fail_safe");
     assert.equal(p.dedupKey, "launch:fail_safe", "dedupKey == kind");
     assert.equal(p.severity, "page");
     assert.equal(p.title, "Launch flow 'fail-safe' sustained 7200000ms (>= 7200000ms) — Orchestrator may be down");
-    assert.deepEqual(p.facts, [
-      { label: "signal", value: "fail-safe" },
-      { label: "reason", value: "eligibility-unreachable" },
-      { label: "sustained_ms", value: "7200000" },
-      { label: "threshold_ms", value: "7200000" },
-    ]);
+    assert.deepEqual(h.reports[0].payload, {
+      signal: "fail-safe",
+      reason: "eligibility-unreachable",
+      durationMs: 7200000,
+      thresholdMs: 7200000,
+    });
   });
 
   test("meter-dark also delivers out-of-band as launch:meter_dark", async () => {
     tick("token-refresh-nudge");
     seedSince(h.store, "meter-dark", T0 - 3 * HOUR);
     await runLaunchFlow(h.deps, cfg());
-    assert.equal(h.published.length, 0);
+    assert.equal(h.reports.length, 1);
     assert.equal(h.pages.length, 1);
     assert.equal(h.pages[0].kind, "launch:meter_dark");
     assert.match(h.pages[0].title, /Orchestrator may be down/);
   });
 
-  test("quota delivers in-band: ONE bus envelope with the TS-owned type AND one page", async () => {
+  test("quota: exactly ONE report() with the TS-owned kind and the former bus-envelope payload", async () => {
     tick("session-blocked");
     seedSince(h.store, "quota", T0 - 5 * HOUR);
     await runLaunchFlow(h.deps, cfg());
-    assert.equal(h.published.length, 1);
-    const { stream, event } = h.published[0];
-    assert.equal(stream, STREAMS.NOTIFICATIONS);
-    assert.equal(event.type, E.LAUNCH_QUOTA_STRETCH);
-    assert.equal(event.source, "watchdog-launch-flow");
-    assert.equal(event.correlationId, "launch-flow-quota");
-    assert.deepEqual(event.payload, { signal: "quota", reason: "session-blocked", durationMs: 5 * HOUR, thresholdMs: 4 * HOUR });
+    assert.equal(h.reports.length, 1);
+    assert.equal(h.reports[0].kind, E.LAUNCH_QUOTA_STRETCH);
+    assert.deepEqual(h.reports[0].payload, { signal: "quota", reason: "session-blocked", durationMs: 5 * HOUR, thresholdMs: 4 * HOUR });
     assert.equal(h.pages.length, 1);
     assert.equal(h.pages[0].kind, E.LAUNCH_QUOTA_STRETCH);
     assert.equal(h.pages[0].dedupKey, E.LAUNCH_QUOTA_STRETCH);
-    assert.equal(h.pages[0].title, "Launch flow 'quota' sustained 18000000ms (>= 14400000ms)");
+    assert.equal(h.pages[0].title, formatAlertMessage({ type: E.LAUNCH_QUOTA_STRETCH, payload: h.reports[0].payload }));
   });
 
   test("latency delivers in-band with launch:latency_breach plus one page", async () => {
     tick("eligible-launch", 4200);
     seedSince(h.store, "latency", T0 - HOUR);
     await runLaunchFlow(h.deps, cfg());
-    assert.equal(h.published.length, 1);
-    assert.equal(h.published[0].event.type, E.LAUNCH_LATENCY_BREACH);
-    assert.equal(h.published[0].event.correlationId, "launch-flow-latency");
+    assert.equal(h.reports.length, 1);
+    assert.equal(h.reports[0].kind, E.LAUNCH_LATENCY_BREACH);
     assert.equal(h.pages.length, 1);
     assert.equal(h.pages[0].kind, E.LAUNCH_LATENCY_BREACH);
   });
@@ -195,18 +189,19 @@ describe("runLaunchFlow — delivery behaviour (issue #3848; Operator Channel pe
     tick("paused");
     seedSince(h.store, "pause", T0 - 25 * HOUR);
     await runLaunchFlow(h.deps, cfg());
-    assert.equal(h.published.length, 1);
-    assert.equal(h.published[0].event.type, E.LAUNCH_PAUSE_FORGOTTEN);
+    assert.equal(h.reports.length, 1);
+    assert.equal(h.reports[0].kind, E.LAUNCH_PAUSE_FORGOTTEN);
+    assert.equal(h.pages[0].title, "Launch flow 'pause' sustained 90000000ms (>= 86400000ms)");
     assert.equal(h.pages.length, 1);
     assert.equal(h.pages[0].kind, E.LAUNCH_PAUSE_FORGOTTEN);
   });
 
-  test("the reason is sanitized for the envelope (a quote or backslash can never reach the payload)", async () => {
+  test("the reason is sanitized for the report payload (a quote or backslash can never reach the payload)", async () => {
     seedSince(h.store, "latency", T0 - HOUR);
     tick('weird "reason"\\', 9000);
     await runLaunchFlow(h.deps, cfg());
-    assert.equal(h.published.length, 1);
-    assert.equal((h.published[0].event.payload as { reason: string }).reason, "weirdreason");
+    assert.equal(h.reports.length, 1);
+    assert.equal(h.reports[0].payload.reason, "weirdreason");
   });
 
   test("a failing channel never fails the run; the fired marker still holds; the WARN is distinguishable", async () => {
@@ -215,18 +210,12 @@ describe("runLaunchFlow — delivery behaviour (issue #3848; Operator Channel pe
     h.state.failPage = true;
     await runLaunchFlow(h.deps, cfg());
     assert.equal(firedOf(h.store, "fail-safe"), true, "marker set before delivery");
-    assert.ok(h.logs.some((l) => /WARN operator-channel page FAILED for 'launch:fail_safe' \(best-effort/.test(l)));
+    assert.ok(h.logs.some((l) => /WARN operator-channel report FAILED for 'launch:fail_safe' \(best-effort/.test(l)));
     assert.ok(h.logs.some((l) => /launch-flow tick processed/.test(l)), "the run completed");
   });
 
-  test("a failing bus never fails the run and the page is still attempted", async () => {
-    tick("session-blocked");
-    seedSince(h.store, "quota", T0 - 5 * HOUR);
-    h.state.failPublish = true;
-    await runLaunchFlow(h.deps, cfg());
-    assert.ok(h.logs.some((l) => /WARN in-band delivery FAILED for 'quota'/.test(l)));
-    assert.equal(h.pages.length, 1);
-    assert.equal(firedOf(h.store, "quota"), true);
+  test("the deps carry no bus port: report() is the only delivery path", () => {
+    assert.equal("bus" in h.deps, false);
   });
 
   test("un-suppression is recurrence: recovery calls resolve ONCE; a fresh streak re-delivers", async () => {
@@ -235,7 +224,7 @@ describe("runLaunchFlow — delivery behaviour (issue #3848; Operator Channel pe
     await runLaunchFlow(h.deps, cfg());
     await runLaunchFlow(h.deps, cfg({ nowMs: T0 + 120_000 }));
     assert.equal(h.pages.length, 1, "the fired marker suppresses the second tick");
-    assert.equal(h.published.length, 1);
+    assert.equal(h.reports.length, 1);
 
     tick("eligible-launch");
     await runLaunchFlow(h.deps, cfg({ nowMs: T0 + 240_000 }));
@@ -255,16 +244,16 @@ describe("runLaunchFlow — delivery behaviour (issue #3848; Operator Channel pe
     tick("session-blocked");
     seedSince(h.store, "quota", T0 - HOUR);
     await runLaunchFlow(h.deps, cfg());
-    assert.equal(h.pages.length + h.published.length, 0, "under threshold");
+    assert.equal(h.pages.length + h.reports.length, 0, "under threshold");
 
     seedSince(h.store, "quota", T0 - 9 * HOUR);
     h.state.tick = "throw";
     await runLaunchFlow(h.deps, cfg());
-    assert.equal(h.pages.length + h.published.length, 0, "unreadable last-tick");
+    assert.equal(h.pages.length + h.reports.length, 0, "unreadable last-tick");
     h.state.tick = { reason: "session-blocked", latencyMs: null };
     h.store.failReads = true;
     await runLaunchFlow(h.deps, cfg());
-    assert.equal(h.pages.length + h.published.length, 0, "unreadable episode store");
+    assert.equal(h.pages.length + h.reports.length, 0, "unreadable episode store");
   });
 
   test("the WARNING line keeps the pre-port wording", async () => {
@@ -296,13 +285,12 @@ describe("runLaunchFlow — glm-sterile (issues #3868, #4691; INV-9)", () => {
   test("fires: fresh heartbeat + pickable verdict + zero drainer PRs -> in-band event + page, deduped", async () => {
     seedSince(h.store, "glm-sterile", T0 - HOUR);
     await runLaunchFlow(h.deps, cfg());
-    assert.equal(h.published.length, 1);
-    assert.equal(h.published[0].event.type, E.GLM_DRAINER_STERILE);
-    assert.equal(h.published[0].event.correlationId, "launch-flow-glm-sterile");
+    assert.equal(h.reports.length, 1);
+    assert.equal(h.reports[0].kind, E.GLM_DRAINER_STERILE);
     assert.equal(h.pages.length, 1);
     assert.equal(h.pages[0].kind, E.GLM_DRAINER_STERILE);
     await runLaunchFlow(h.deps, cfg({ nowMs: T0 + 120_000 }));
-    assert.equal(h.published.length, 1, "deduped by the fired marker");
+    assert.equal(h.reports.length, 1, "deduped by the fired marker");
   });
 
   test("the PR window is the trailing GLM_STERILE_WINDOW_HOURS (default 6h) and is the ONLY gh call", async () => {
@@ -433,7 +421,7 @@ describe("runLaunchFlow — glm-sterile (issues #3868, #4691; INV-9)", () => {
       "no glm-sterile write of any kind",
     );
     assert.ok(h.logs.some((l) => /WARN glm-sterile PR-window query failed\/unparseable/.test(l)));
-    assert.equal(h.pages.length + h.published.length + h.resolves.length, 0);
+    assert.equal(h.pages.length + h.reports.length + h.resolves.length, 0);
   });
 
   test("INV-4: a THROWN PR-window query is the same failed measurement — skipped, other signals still run", async () => {

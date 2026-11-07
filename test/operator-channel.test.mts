@@ -530,7 +530,7 @@ describe("KIND_TABLE — the one per-kind table", () => {
     ]);
     const missing = [...expected].filter((k) => !Object.hasOwn(KIND_TABLE, k));
     assert.deepEqual(missing, [], `kinds with no KIND_TABLE row: ${missing.join(", ")}`);
-    assert.equal(Object.keys(KIND_TABLE).length, 29);
+    assert.equal(Object.keys(KIND_TABLE).length, 30);
   });
 
   test("PAGE_KINDS, BRIEF_KINDS and ALERT_TYPES are derived from the table", () => {

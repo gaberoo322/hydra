@@ -505,14 +505,15 @@ export function readStatfs(path: string): StatfsReading | null {
 }
 
 export function createProductionDiskDeps(log: (line: string) => void): DiskDeps {
-  const channel = new OperatorChannel();
+  // One channel per process (ADR-0045 Decision 2): the shared singleton.
+  const channel = operatorChannel;
   return {
     statfs: readStatfs,
     async topInodeConsumers(path, limit) {
       const r = await readTopInodeConsumers(path, limit);
       return r.ok ? r.data.map((c) => `${c.path} ${c.inodes}`) : null;
     },
-    page: (msg) => channel.page(msg),
+    report: (kind, payload) => channel.report(kind, payload),
     briefOnce: (msg) => channel.briefOnce(msg),
     reminderDue: (key) => channel.reminderDue(key),
     resolve: (key, title) => channel.resolve(key, title),
@@ -583,9 +584,8 @@ export function createProductionWatchdogGithub(): WatchdogGithub {
   };
 }
 
-/** Production wiring of the launch-flow ports. The EventBus is constructed on the first fire only. */
+/** Production wiring of the launch-flow ports. */
 export function createProductionLaunchFlowDeps(log: (line: string) => void): LaunchFlowDeps {
-  let bus: EventBus | null = null;
   return {
     lastTick: getPaceGateLastTick,
     store: {
@@ -602,12 +602,6 @@ export function createProductionLaunchFlowDeps(log: (line: string) => void): Lau
     },
     github: createProductionWatchdogGithub(),
     channel: operatorChannel,
-    bus: {
-      publish: (stream, event) => {
-        bus ??= new EventBus();
-        return bus.publish(stream, event);
-      },
-    },
     clock: { nowMs: () => Date.now() },
     log,
   };
@@ -787,7 +781,6 @@ export function createProductionRedisBackupDeps(log: (line: string) => void): Re
     },
     store: createProductionEpisodeStore(),
     channel: operatorChannel,
-    bus: lazyBus(),
     clock: { nowMs: () => Date.now() },
     log,
   };
@@ -872,7 +865,6 @@ export function createProductionOriginIdentityDeps(
       },
       fetchOrigin: (root, timeoutMs) => fetchOrigin(root, timeoutMs),
     },
-    bus: lazyBus(),
     channel: operatorChannel,
     clock: { nowMs: () => Date.now() },
     log,

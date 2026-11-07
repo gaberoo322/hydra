@@ -11,6 +11,7 @@ import type { SkillMirrorDeps, SyncRun } from "../../src/watchdog/skill-mirror.t
 import type { OriginIdentityDeps } from "../../src/watchdog/origin-identity.ts";
 import type { RedisBackupDeps, NewestBackup } from "../../src/watchdog/redis-backup.ts";
 import type { GitConfigRead, FetchOriginResult } from "../../src/github/git.ts";
+import { messageFromEvent } from "../../src/operator-channel/channel.ts";
 import type { OperatorMessage } from "../../src/operator-channel/message.ts";
 import { memoryEpisodeStore } from "./launch-flow-fakes.mts";
 
@@ -146,8 +147,8 @@ export interface RedisBackupHarness {
   logs: string[];
   pages: OperatorMessage[];
   resolves: Array<{ key: string; title?: string }>;
-  published: Array<{ stream: string; event: { type: string; source: string; correlationId?: string | null; payload?: unknown } }>;
-  state: { newest: NewestBackup | null; timer: string; failPublish: boolean };
+  reports: Array<{ kind: string; payload: Record<string, unknown> }>;
+  state: { newest: NewestBackup | null; timer: string; failReport: boolean };
 }
 
 export function makeRedisBackupHarness(): RedisBackupHarness {
@@ -155,33 +156,36 @@ export function makeRedisBackupHarness(): RedisBackupHarness {
   const logs: string[] = [];
   const pages: OperatorMessage[] = [];
   const resolves: RedisBackupHarness["resolves"] = [];
-  const published: RedisBackupHarness["published"] = [];
-  const state: RedisBackupHarness["state"] = { newest: null, timer: "enabled", failPublish: false };
+  const reports: RedisBackupHarness["reports"] = [];
+  const state: RedisBackupHarness["state"] = { newest: null, timer: "enabled", failReport: false };
   const deps: RedisBackupDeps = {
     files: { newestBackup: () => state.newest },
     host: { timerState: async () => state.timer },
     store,
     channel: {
-      async page(m: OperatorMessage) {
-        pages.push(m);
-        return { sent: true as const, kind: "page" as const };
+      async report(kind: string, payload: Record<string, unknown> = {}) {
+        if (state.failReport) throw new Error("channel down");
+        reports.push({ kind, payload });
+        // The REAL per-kind table renders the message (title, dedupKey, severity).
+        const m = messageFromEvent({ type: kind, payload });
+        if (m.severity === "page") pages.push(m);
+        return {
+          disposition: m.severity === "page" ? ("page" as const) : ("brief" as const),
+          delivered: true,
+          alertWritten: false,
+          unknownKind: false,
+          outcome: { sent: true as const, kind: "page" as const },
+        };
       },
       async resolve(key: string, title?: string) {
         resolves.push({ key, title });
         return { sent: true as const, kind: "recovered" as const };
       },
     },
-    bus: {
-      async publish(stream, event) {
-        if (state.failPublish) throw new Error("bus down");
-        published.push({ stream, event: event as RedisBackupHarness["published"][number]["event"] });
-        return "1-0";
-      },
-    },
     clock: { nowMs: () => NOW_MS },
     log: (line) => logs.push(line),
   };
-  return { deps, store, logs, pages, resolves, published, state };
+  return { deps, store, logs, pages, resolves, reports, state };
 }
 
 export interface OriginHarness {
@@ -189,7 +193,7 @@ export interface OriginHarness {
   logs: string[];
   pages: OperatorMessage[];
   resolves: Array<{ key: string; title?: string }>;
-  published: Array<{ stream: string; event: { type: string; source: string; correlationId?: string | null; payload: Record<string, unknown> } }>;
+  reports: Array<{ kind: string; payload: Record<string, unknown> }>;
   /** Ordered record of every git mutation/fetch the check asked for. */
   gitCalls: string[];
   files: { since: string | null; mtimeMarker: string | null; written: string[] };
@@ -209,7 +213,7 @@ export interface OriginHarness {
     /** Whether a successful fetch makes origin/master resolve. */
     fetchFixesMaster: boolean;
     /** `null` = publish returns a stream id; "empty" = returns null; "throw" = rejects. */
-    publish: null | "empty" | "throw";
+    failReport: boolean;
   };
 }
 
@@ -217,7 +221,7 @@ export function makeOriginHarness(): OriginHarness {
   const logs: string[] = [];
   const pages: OperatorMessage[] = [];
   const resolves: OriginHarness["resolves"] = [];
-  const published: OriginHarness["published"] = [];
+  const reports: OriginHarness["reports"] = [];
   const gitCalls: string[] = [];
   const files: OriginHarness["files"] = { since: null, mtimeMarker: null, written: [] };
   const state: OriginHarness["state"] = {
@@ -232,7 +236,7 @@ export function makeOriginHarness(): OriginHarness {
     setRefspecOk: true,
     fetch: { ok: true, exitCode: 0, timedOut: false, stderr: "" },
     fetchFixesMaster: true,
-    publish: null,
+    failReport: false,
   };
   const read = (): GitConfigRead => {
     if (state.url === "absent") return { kind: "absent" };
@@ -285,17 +289,23 @@ export function makeOriginHarness(): OriginHarness {
         return state.fetch;
       },
     },
-    bus: {
-      async publish(stream, event) {
-        if (state.publish === "throw") throw new Error("bus down");
-        published.push({ stream, event: event as OriginHarness["published"][number]["event"] });
-        return state.publish === "empty" ? null : "1-0";
-      },
-    },
     channel: {
-      async page(m: OperatorMessage) {
-        pages.push(m);
-        return { sent: true as const, kind: "page" as const };
+      async report(kind: string, payload: Record<string, unknown> = {}) {
+        reports.push({ kind, payload });
+        // report() never throws (ADR-0045): a down channel/store yields delivered:false.
+        if (state.failReport) {
+          return { disposition: "page" as const, delivered: false, alertWritten: false, unknownKind: false, outcome: { sent: false as const, reason: "transport-failed" as const } };
+        }
+        // The REAL per-kind table renders the message (title, dedupKey, severity).
+        const m = messageFromEvent({ type: kind, payload });
+        if (m.severity === "page") pages.push(m);
+        return {
+          disposition: m.severity === "page" ? ("page" as const) : ("brief" as const),
+          delivered: true,
+          alertWritten: false,
+          unknownKind: false,
+          outcome: { sent: true as const, kind: "page" as const },
+        };
       },
       async resolve(key: string, title?: string) {
         resolves.push({ key, title });
@@ -305,5 +315,5 @@ export function makeOriginHarness(): OriginHarness {
     clock: { nowMs: () => NOW_MS },
     log: (line) => logs.push(line),
   };
-  return { deps, logs, pages, resolves, published, gitCalls, files, state };
+  return { deps, logs, pages, resolves, reports, gitCalls, files, state };
 }

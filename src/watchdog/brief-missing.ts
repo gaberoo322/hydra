@@ -20,7 +20,6 @@
  */
 
 import type { OperatorChannel } from "../operator-channel/channel.ts";
-import type { OperatorMessage } from "../operator-channel/message.ts";
 
 export const BRIEF_MISSING_LOG_PREFIX = "hydra-brief-missing-watchdog:";
 
@@ -52,7 +51,7 @@ export interface BriefMissingStore {
 
 export interface BriefMissingDeps {
   store: BriefMissingStore;
-  channel: Pick<OperatorChannel, "page" | "resolve">;
+  channel: Pick<OperatorChannel, "report" | "resolve">;
   clock: { nowMs(): number };
   log: (line: string) => void;
 }
@@ -134,24 +133,16 @@ export async function runBriefMissing(deps: BriefMissingDeps, config: BriefMissi
         say("still missing — already paged this episode (the fired marker holds the dedup)");
       } else {
         await deps.store.markFired();
-        const page: OperatorMessage = {
-          severity: "page",
-          kind: BRIEF_MISSING_KIND,
-          title: `No Morning Brief delivered for ${ageH}h`,
-          facts: [
-            { label: "reason", value: d.reason },
-            { label: "age_h", value: String(ageH) },
-            { label: "threshold_h", value: String(config.staleHours) },
-            { label: "last_sent_key", value: BRIEF_LAST_SENT_KEY_LABEL },
-          ],
-          links: [],
-          dedupKey: BRIEF_MISSING_KIND,
-        };
         try {
-          await deps.channel.page(page);
-          say(`operator-channel page ok for '${BRIEF_MISSING_KIND}'`);
+          await deps.channel.report(BRIEF_MISSING_KIND, {
+            reason: d.reason,
+            ageH,
+            thresholdH: config.staleHours,
+            lastSentKey: BRIEF_LAST_SENT_KEY_LABEL,
+          });
+          say(`operator-channel report ok for '${BRIEF_MISSING_KIND}'`);
         } catch (err) {
-          say(`WARN operator-channel page FAILED for '${BRIEF_MISSING_KIND}' (best-effort — detection state is unchanged): ${msg(err)}`);
+          say(`WARN operator-channel report FAILED for '${BRIEF_MISSING_KIND}' (best-effort — detection state is unchanged): ${msg(err)}`);
         }
       }
     } else {
