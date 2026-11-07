@@ -784,11 +784,50 @@ describe("gh-label-delete-guard — fail closed on internal error (#4745)", () =
 });
 
 describe("gh-label-delete-guard — heredoc bodies are data (issue #5401)", () => {
-  test("a quote-odd heredoc body before a path DELETE + collection GET is ALLOWED (was DENY)", () => {
+  test("a quote-odd heredoc body before a path DELETE + collection GET is ALLOWED (was DENY on master)", () => {
+    // Quote parity is EVEN end to end (the body's lone apostrophe pairs with the
+    // escaped apostrophe in the tail), so shlex does NOT fail open: master merges
+    // the DELETE and the GET into one segment and DENIES (verified exit 2 against
+    // master's guard). The strip makes it ALLOW.
     const r = runHook(
       bash(
-        `cat <<'EOF'\nsay "hi\nEOF\ngh api -X DELETE "repos/o/r/issues/42/labels/x"\ngh api "repos/o/r/issues/42/labels" --jq .\necho tail`,
+        `cat > f <<'EOF'\nit's\nEOF\ngh api -X DELETE "repos/o/r/issues/42/labels/x"\ngh api "repos/o/r/issues/42/labels" --jq .\necho a\\'b`,
       ),
+    );
+    assert.equal(r.status, 0, r.stderr);
+  });
+
+  test("cat <<'EOF' | bash pipes the body into an interpreter: DENIED (QA round 2)", () => {
+    const r = runHook(
+      bash(`cat <<'EOF' | bash\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("cat <<EOF | /usr/bin/python3 (path-prefixed piped interpreter) is DENIED", () => {
+    const r = runHook(
+      bash(`cat <<EOF | /usr/bin/python3\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("/bin/bash <<'EOF' (path-prefixed receiver) is DENIED", () => {
+    const r = runHook(
+      bash(`/bin/bash <<'EOF'\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("sibling: cat <<EOF | tee f (non-interpreter pipe) still strips the body: ALLOWED", () => {
+    const r = runHook(
+      bash(`cat <<EOF | tee f\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF\nls`),
+    );
+    assert.equal(r.status, 0, r.stderr);
+  });
+
+  test("a hyphenated delimiter (<<END-OF) body is data: ALLOWED", () => {
+    const r = runHook(
+      bash(`cat <<END-OF\ngh api -X DELETE repos/o/r/issues/42/labels\nEND-OF\nls`),
     );
     assert.equal(r.status, 0, r.stderr);
   });

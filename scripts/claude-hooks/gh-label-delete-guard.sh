@@ -5,6 +5,9 @@
 # The single-label form puts the name in the URL PATH
 # (`.../issues/<n>/labels/<name>`) and is always allowed.
 #
+# Stage history — #5401: heredoc bodies are stripped before segmentation (data,
+# not shell) unless fed to an interpreter (before the operator or piped after).
+#
 # Background — issue #4654 (3 hits across 2 classes, 2026-09-04 / 2026-09-23).
 # Agents removing one label keep reaching for
 #   gh api repos/gaberoo322/hydra/issues/<n>/labels -X DELETE -f name=<label>
@@ -225,13 +228,16 @@ cmd = os.environ.get("GH_LABEL_GUARD_CMD", "")
 # #4728 "accidental misuse, not obfuscation"): a `<<WORD` inside a quoted
 # string on an operator line plus a later bare `WORD` line; `$(gh api -X
 # DELETE ...)` inside an unquoted body.
-HEREDOC_OP = re.compile(r"(?<!<)<<(?!<)(-)?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+HEREDOC_OP = re.compile(r"(?<!<)<<(?!<)(-)?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_.-]*)\2")
 # A body fed to an interpreter (bash <<'EOF', python <<EOF, ssh host <<EOF,
 # xargs sh -c, eval, source) is EXECUTED code, not data: never strip it, so a
 # collection DELETE inside it is still inspected (QA round 1, high finding).
-INTERP_RECV = re.compile(
-    r"(?:^|[\s;&|(])(?:bash|sh|zsh|dash|ksh|python[0-9.]*|node|perl|ruby|ssh|eval|source|xargs)(?:\s|$)"
-)
+_INTERP = r"(?:bash|sh|zsh|dash|ksh|python[0-9.]*|node|perl|ruby|ssh|eval|source|xargs)"
+# Receiver BEFORE the operator; a path prefix (/bin/bash) counts (QA round 2).
+INTERP_RECV = re.compile(r"(?:^|[\s;&|(/])" + _INTERP + r"(?:\s|$)")
+# Receiver AFTER the operator: `cat <<'EOF' | bash` pipes the body into an
+# interpreter, so it is executed code too (QA round 2, high finding).
+INTERP_PIPE = re.compile(r"\|&?\s*(?:\S*/)?" + _INTERP + r"(?:\s|$)")
 
 
 def _strip_heredoc_bodies(text):
@@ -243,7 +249,7 @@ def _strip_heredoc_bodies(text):
         out.append(line)
         i += 1
         for m in HEREDOC_OP.finditer(line):
-            if INTERP_RECV.search(line[: m.start()]):
+            if INTERP_RECV.search(line[: m.start()]) or INTERP_PIPE.search(line[m.end():]):
                 break  # executed body: keep it for segmentation
             dash, word = m.group(1), m.group(3)
             while True:
