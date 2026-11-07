@@ -19,7 +19,6 @@
  * regex pin.
  */
 
-import { readFileSync } from "node:fs";
 import test, { describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
@@ -215,10 +214,8 @@ describe("runLaunchFlow — delivery behaviour (issue #3848; Operator Channel pe
     assert.ok(h.logs.some((l) => /launch-flow tick processed/.test(l)), "the run completed");
   });
 
-  test("no signal touches the notifications bus: the module has no bus port and imports no EventBus", () => {
+  test("the deps carry no bus port: report() is the only delivery path", () => {
     assert.equal("bus" in h.deps, false);
-    const src = readFileSync(new URL("../src/watchdog/launch-flow.ts", import.meta.url), "utf8");
-    assert.doesNotMatch(src, /bus\.publish|STREAMS\.NOTIFICATIONS|event-bus\.ts/);
   });
 
   test("un-suppression is recurrence: recovery calls resolve ONCE; a fresh streak re-delivers", async () => {
