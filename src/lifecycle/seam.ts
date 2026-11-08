@@ -1022,6 +1022,12 @@ export interface ClaimInput {
   /** The PR this dispatch works on (QA / forward-fix); arms the PR-unit caps. */
   pr?: number;
   purpose?: ClaimPurpose;
+  /**
+   * Skip the cap check (INV-9). In-process only: the legacy backfill passes it so a
+   * bookkeeping placeholder can never park an issue. Deliberately NOT keyed on `class`
+   * and NOT exposed by the CLI verbs, so a caller-supplied class string cannot bypass caps.
+   */
+  skipCaps?: boolean;
 }
 
 export type ClaimResult =
@@ -1089,7 +1095,7 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
   }
   // INV-9: a legacy-backfill placeholder is bookkeeping, never a dispatch attempt: no cap
   // check, so it can never park (write a label) an over-cap in-progress issue.
-  const check: CapCheck = view.ok && input.class !== LEGACY_BACKFILL_CLASS
+  const check: CapCheck = view.ok && input.skipCaps !== true
     ? await checkCaps(
         deps,
         issue,

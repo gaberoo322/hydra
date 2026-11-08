@@ -326,10 +326,18 @@ describe("legacy backfill never cap-parks (INV-9)", () => {
     const { w, seam } = world("enforce");
     w.labels.set(1, ["in-progress"]);
     const deps = overCap(w, seam);
-    const res = await openClaim({ issue: 1, dispatchId: "legacy-backfill-1", class: "legacy-backfill", run: "x" }, deps);
+    const res = await openClaim({ issue: 1, dispatchId: "legacy-backfill-1", class: "legacy-backfill", run: "x", skipCaps: true }, deps);
     assert.equal(res.ok, true);
     assert.equal(w.edits.length, 0);
     assert.equal(w.claims.get(1)?.class, "legacy-backfill");
+  });
+
+  test("a caller-supplied class string alone does not bypass the cap gate", async () => {
+    const { w, seam } = world("enforce");
+    w.labels.set(1, ["in-progress"]);
+    const res = await openClaim({ issue: 1, dispatchId: "legacy-backfill-1", class: "legacy-backfill", run: "x" }, overCap(w, seam));
+    assert.equal(res.ok, false);
+    assert.match(res.ok === false ? res.code : "", /^parked:/);
   });
 
   test("sibling: a real dispatch class over the same cap still parks in enforce mode", async () => {

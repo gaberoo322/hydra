@@ -66,7 +66,7 @@ export async function runBackfill(
         continue;
       }
       const res = await openClaim(
-        { issue: row.number, dispatchId: `legacy-backfill-${row.number}`, class: LEGACY_BACKFILL_CLASS, run, actor: "legacy-backfill" },
+        { issue: row.number, dispatchId: `legacy-backfill-${row.number}`, class: LEGACY_BACKFILL_CLASS, run, actor: "legacy-backfill", skipCaps: true },
         deps.seam,
       );
       if (res.ok === true) summary.claimed++;
