@@ -148,7 +148,7 @@ pr_number=$(jq -r '.pr.number // empty' "$PF")
 jq '{ok, stage, issue, pr: .pr.number, tier: .tier, gate: .gate.action, fanout: .fanout.mode}' "$PF"
 ```
 
-**Pick-time claim (ADR-0047 D4).** Immediately after the preflight returns `.ok == true` (issue and PR resolved) — before any `defer` / `skip-required-failed` / `admit` branch acts on the issue — open the QA claim (label-free for the qa role; it copies the approved artifact hash and arms the PR-unit caps). `.ok == false` paths claim nothing. Take `<dispatchId>` / `<runId>` from the `hydra-dispatch` sentinel on the first line of your prompt; with no sentinel (operator-interactive) use `interactive-qa-$issue_number-<epoch>` and run `interactive`, and release your own claim after `route` with `--outcome verdict-posted` (a dispatched worker leaves release to reap):
+**Pick-time claim (ADR-0047 D4).** Immediately after the preflight returns `.ok == true` (issue and PR resolved) — before any `defer` / `skip-required-failed` / `admit` branch acts on the issue — open the QA claim (label-free for the qa role; it copies the approved artifact hash and arms the PR-unit caps). `.ok == false` paths claim nothing. Take `<dispatchId>` / `<runId>` from the dispatch sentinel comment on the first line of your prompt; with no sentinel (operator-interactive) use `interactive-qa-$issue_number-<epoch>` and run `interactive`, and release your own claim after `route` with `--outcome verdict-posted` (a dispatched worker leaves release to reap):
 
 ```bash
 npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch <dispatchId> --class qa_orch --run <runId> --pr $pr_number --purpose fresh

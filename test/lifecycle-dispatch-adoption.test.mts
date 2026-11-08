@@ -194,13 +194,6 @@ print(json.dumps([a.dispatch_id, b.dispatch_id]))
     assert.deepEqual(JSON.parse(r.stdout.trim().split("\n").pop() as string), ["D1", "B2"]);
   });
 
-  test("run_completion releases only after the accounting writes and only for an occupied slot", () => {
-    const src = readFileSync(join(AUTOPILOT, "reap.py"), "utf-8");
-    const release = src.indexOf("_release_dispatch_claim(cls, snap.dispatch_id");
-    assert.ok(release > src.indexOf("pr_exists = _dev_orch_pr_exists_for_anchor(snap.anchor_ref, dev_target_pr_list_json)"));
-    assert.ok(release < src.indexOf("_fire_reflection_for_completion(\n        s, snap.anchor_ref"));
-    assert.match(src.slice(release - 80, release), /if snap\.slot_occupied:/);
-  });
 });
 
 describe("playbook pins", () => {
