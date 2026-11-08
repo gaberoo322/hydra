@@ -629,18 +629,27 @@ describe("caps as data (#5421)", () => {
   }
 
   test("an illegal transition refuses before any cap count is read", async () => {
-    const w = world("enforce", ["needs-triage"]);
+    // ready-for-agent -> needs-dev-resume has NO row, yet its destination is a qa-fail capped one.
+    const w = world("enforce", ["ready-for-agent"]);
+    w.prBodies = [failBody(5, 1), failBody(5, 2), failBody(5, 3)];
     let capReads = 0;
     const orig = w.deps.fetch.issueComments;
     w.deps.fetch.issueComments = async (n) => {
       capReads++;
       return orig(n);
     };
-    requeueSeed(w, 5);
-    const res = (await advance({ issue: 42, to: "in-progress" }, w.deps)) as any;
+    const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
     assert.equal(res.ok, false);
     assert.equal(res.code, "illegal-transition");
     assert.equal(capReads, 0);
     assert.deepEqual(w.edits, []);
+  });
+
+  test("sibling shape: the same destination from the legal capped edge still parks", async () => {
+    const w = world("enforce", ["needs-qa"]);
+    w.prBodies = [failBody(5, 1), failBody(5, 2), failBody(5, 3)];
+    const res = (await advance({ issue: 42, to: "needs-dev-resume", evidence: { pr: "5" } }, w.deps)) as any;
+    assert.equal(res.ok, false);
+    assert.equal(res.code, "parked:qa-fail-rounds");
   });
 });
