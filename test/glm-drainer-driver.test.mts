@@ -28,7 +28,8 @@ import { quotaBlockFilePath, type GateDeps } from "../src/glm/gate.ts";
 import type { WorkerProvidersResult } from "../src/glm/providers.ts";
 import type { PickDeps } from "../src/glm/pick.ts";
 import type { FinishDeps } from "../src/glm/finish.ts";
-import type { TickDeps } from "../src/glm/drainer-driver.ts";
+import { claimOutcomeOf, type TickDeps } from "../src/glm/drainer-driver.ts";
+import type { DispatchInput, DispatchResult } from "../src/lifecycle/index.ts";
 
 /** A spawn stub that fails loudly if it is ever actually invoked. */
 const unusedSpawn: SpawnFn = (() => {
@@ -285,6 +286,8 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     claudeCwds: string[];
     prompts: string[];
     provCalls: string[];
+    dispatches: DispatchInput[];
+    releases: Array<{ issue: number; dispatchId: string; outcome: string }>;
   }
 
   function rig(
@@ -299,8 +302,13 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
       runGlmClaude?: DriverDeps["runGlmClaude"];
       providers?: WorkerProvidersResult;
       files?: Map<string, string>;
+      dispatchResult?: unknown;
+      releaseFails?: boolean;
+      /** `runFinish` is real; this forces the author outcome via runGlmClaude/files instead. */
     } = {},
   ): Rig {
+    const dispatches: DispatchInput[] = [];
+    const releases: Array<{ issue: number; dispatchId: string; outcome: string }> = [];
     const calls: string[] = [];
     const logs: string[] = [];
     const finishCalls: string[] = [];
@@ -339,6 +347,8 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
       runRecoverStale: async () => 0,
       listResumeRows: async () =>
         opts.resume ? [{ branch: opts.resume.branch, aheadCount: opts.resume.ahead, ts: 1 }] : [],
+      readJournal: async () => ({ ok: true, entries: [] }),
+      readClaim: async () => ({ ok: true, claim: null }),
       publishLastPick: async () => undefined,
     } as unknown as PickDeps;
     const finish = {
@@ -372,7 +382,21 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
       repoRoot: "/repo",
       now: () => NOW_MS,
       log: (m) => { logs.push(m); },
-      claimIssue: async (n) => { calls.push(`claim:${n}`); return { ok: true }; },
+      lifecycle: {
+        dispatch: async (input) => {
+          calls.push(`dispatch:${input.issue}`);
+          dispatches.push(input);
+          return (opts.dispatchResult ?? {
+            ok: true,
+            claim: { dispatchId: input.dispatchId, class: input.class, run: input.run, artifactHash: null, openedAt: NOW_MS },
+            advanced: null,
+          }) as DispatchResult;
+        },
+        release: async (issue, dispatchId, outcome) => {
+          releases.push({ issue, dispatchId, outcome });
+          return opts.releaseFails ? { ok: false, code: "claim-owner-mismatch" } : { ok: true };
+        },
+      },
       readIssueBody: async (n) => { calls.push(`body:${n}`); if (opts.bodyThrows) throw new Error("gh exploded"); return row.body; },
       git: async (args) => {
         calls.push(`git:${args.join(" ")}`);
@@ -404,7 +428,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
           return { code: 0, stdout: "", stderr: "" };
         }) as unknown as DriverDeps["runGlmClaude"]),
     });
-    return { deps, calls, logs, finishCalls, claudeCwds, prompts, provCalls };
+    return { deps, calls, logs, finishCalls, claudeCwds, prompts, provCalls, dispatches, releases };
   }
 
   async function tickOf(r: Rig): Promise<{ exitCode: number; line: any }> {
@@ -457,7 +481,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     const r = rig({ paused: true });
     const { exitCode, line } = await tickOf(r);
     assert.equal(exitCode, 0);
-    assert.deepEqual(line, { gate: { able: false, reason: "paused" }, pick: null, finish: null });
+    assert.deepEqual(line, { gate: { able: false, reason: "paused" }, pick: null, claim: null, finish: null });
     assert.deepEqual(r.calls, []);
     assert.ok(r.logs.some((l) => /^operator paused — skip \(no heartbeat/.test(l)));
     assert.ok(!r.logs.some((l) => l.startsWith("pick:")), "pick must not run after a skip");
@@ -481,7 +505,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     const branch = `worktree-agent-glm-77-${TS}`;
     assert.equal(exitCode, 0);
     assert.deepEqual(r.calls, [
-      "claim:77",
+      "dispatch:77",
       "body:77",
       "git:fetch origin --quiet",
       `git:worktree add -b ${branch} ${wt} origin/master`,
@@ -568,10 +592,113 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     assert.equal(exitCode, 0);
     assert.deepEqual(r.calls, [], "a dry-run tick must make no gh/git/spawn calls");
     assert.deepEqual(r.finishCalls, [], "finish must make no effect calls under dry-run");
-    assert.ok(r.logs.includes("would-claim issue #77 (ready-for-agent -> in-progress, DRY_RUN=1)"));
+    assert.ok(
+      r.logs.includes(
+        `would-dispatch issue #77 (dispatch=agent-glm-77-${TS} class=dev_orch run=glm-drainer-${TS} purpose=fresh, DRY_RUN=1)`,
+      ),
+    );
+    assert.equal(r.dispatches.length, 0, "dry-run makes zero lifecycle.dispatch calls");
+    assert.equal(r.releases.length, 0, "dry-run makes zero lifecycle.release calls");
+    assert.ok(r.logs.some((l) => /^would-release claim for issue #77 \(outcome=\w[\w-]*, DRY_RUN=1\)$/.test(l)));
     assert.ok(r.logs.includes(`would-create-worktree issue #77 branch=worktree-agent-glm-77-${TS} path=${wt} (DRY_RUN=1)`));
     assert.ok(r.logs.includes(`would-author issue #77 in ${wt} (DRY_RUN=1)`));
     assert.equal(line.finish.dryRun, true);
+  });
+
+  // ---- dispatcher-claim seam adoption (issue #5419) ----
+
+  test("claim: dispatch is the first call after pick and precedes body/git; dispatchId is the worktree basename, run is glm-drainer-<TS>, purpose fresh", async () => {
+    const r = rig();
+    await tickOf(r);
+    assert.equal(r.calls[0], "dispatch:77");
+    assert.ok(r.calls.indexOf("dispatch:77") < r.calls.indexOf("body:77"));
+    assert.deepEqual(r.dispatches, [
+      { issue: 77, dispatchId: `agent-glm-77-${TS}`, class: "dev_orch", run: `glm-drainer-${TS}`, purpose: "fresh", actor: "glm-drainer" },
+    ]);
+  });
+
+  test("claim: a resume pick dispatches with purpose resume and the NEW worktree dir name, not the old branch", async () => {
+    const r = rig({ resume: { branch: "worktree-agent-glm-77-1790000000", ahead: 2 } });
+    await tickOf(r);
+    assert.equal(r.dispatches[0].purpose, "resume");
+    assert.equal(r.dispatches[0].dispatchId, `agent-glm-77-${TS}`);
+  });
+
+  const refusals: Array<[string, unknown, string]> = [
+    ["claim-held", { ok: false, code: "claim-held", existing: { dispatchId: "other", class: "qa_orch", run: "r", artifactHash: null, openedAt: 1 } }, "claim-held"],
+    ["parked", { ok: false, code: "parked:total-claims", written: true }, "parked:total-claims"],
+    ["advance-refused", { ok: false, code: "advance-refused", reason: "illegal", released: true }, "advance-refused"],
+    ["redis-failed", { ok: false, code: "redis-failed" }, "redis-failed"],
+  ];
+  for (const [name, dispatchResult, code] of refusals) {
+    test(`claim refused (${name}): ends the tick before any body/git/author/finish, no release, exit 0, line.claim.code`, async () => {
+      const r = rig({ dispatchResult });
+      const { exitCode, line } = await tickOf(r);
+      assert.equal(exitCode, 0);
+      assert.deepEqual(r.calls, ["dispatch:77"]);
+      assert.deepEqual(r.finishCalls, []);
+      assert.equal(r.releases.length, 0);
+      assert.equal(line.finish, null);
+      assert.equal(line.claim.ok, false);
+      assert.equal(line.claim.code, code);
+      assert.ok(r.logs.some((l) => l.startsWith(`claim refused for issue #77: ${code}`) && l.endsWith("— ending tick")));
+    });
+  }
+
+  test("claim-held log line names the existing dispatchId and class", async () => {
+    const r = rig({ dispatchResult: refusals[0][1] });
+    await tickOf(r);
+    assert.ok(r.logs.some((l) => l.includes("held by other, class qa_orch")));
+  });
+
+  test("a completed tick releases exactly once with the dispatchId and the mapped outcome; line.claim is ok", async () => {
+    const r = rig();
+    const { line } = await tickOf(r);
+    assert.equal(r.releases.length, 1);
+    assert.equal(r.releases[0].dispatchId, `agent-glm-77-${TS}`);
+    assert.equal(r.releases[0].outcome, claimOutcomeOf(line.finish));
+    assert.deepEqual(line.claim, { dispatchId: `agent-glm-77-${TS}`, run: `glm-drainer-${TS}`, ok: true });
+  });
+
+  test("worktree-create failure, pre-author throw and author throw each release exactly once as released", async () => {
+    for (const o of [{ worktreeAddFails: true }, { bodyThrows: true }, {
+      runGlmClaude: (async () => { throw new Error("spawn exploded"); }) as unknown as DriverDeps["runGlmClaude"],
+    }]) {
+      const r = rig(o);
+      await tickOf(r);
+      assert.equal(r.releases.length, 1);
+      assert.equal(r.releases[0].outcome, "released");
+    }
+  });
+
+  test("a throw out of finish still reaches the finally: the claim is released once, and the throw is a driver fault", async () => {
+    const r = rig();
+    (r.deps.finish as unknown as { editIssueLabels: unknown }).editIssueLabels = async () => { throw new Error("x"); };
+    (r.deps.finish as unknown as { runGit: unknown }).runGit = async () => { throw new Error("git exploded"); };
+    await runDriverMode(["tick"], r.deps);
+    assert.equal(r.releases.length, 1);
+  });
+
+  test("a release failure logs a WARN and the tick still completes", async () => {
+    const r = rig({ releaseFails: true });
+    const { exitCode } = await tickOf(r);
+    assert.equal(exitCode, 0);
+    assert.equal(r.releases.length, 1);
+    assert.ok(r.logs.some((l) => /^WARN claim release failed for issue #77 \(dispatch=agent-glm-77-\d+\): claim-owner-mismatch — stale arm will close it$/.test(l)));
+  });
+
+  test("claimOutcomeOf maps each finish action; a quota block or a null finish is released", () => {
+    const f = (action: string, quotaBlockedUntil: number | null = null) =>
+      ({ action, issue: 1, labels: [], pr: null, quotaBlockedUntil, dryRun: false }) as never;
+    assert.equal(claimOutcomeOf(f("open-pr")), "pr-opened");
+    assert.equal(claimOutcomeOf(f("keep-partial-for-resume")), "stall");
+    assert.equal(claimOutcomeOf(f("release-nothing-produced")), "no-pr");
+    assert.equal(claimOutcomeOf(f("release-after-failed-pr")), "no-pr");
+    assert.equal(claimOutcomeOf(f("withhold-preflight-blocked")), "no-pr");
+    assert.equal(claimOutcomeOf(f("release-not-authored")), "released");
+    assert.equal(claimOutcomeOf(f("finish-fault")), "released");
+    assert.equal(claimOutcomeOf(f("release-nothing-produced", 123)), "released");
+    assert.equal(claimOutcomeOf(null), "released");
   });
 });
 
