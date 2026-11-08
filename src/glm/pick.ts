@@ -33,7 +33,6 @@ import {
 import {
   listIssuesByLabel,
   isIssueReadFailure,
-  resolveGithubRepo,
   type IssueReadResult,
   type IssueRow,
 } from "../github/issues.ts";
@@ -383,10 +382,11 @@ export function buildDefaultPickDeps(env: NodeJS.ProcessEnv = process.env): Pick
       }
       return rows;
     },
-    // One keyspace: the SAME repo string the seam stamps into claim/journal keys
-    // (not HYDRA_AUTOPILOT_REPO, which the gh reads above keep).
-    readJournal: (issue) => readLifecycleJournal(resolveGithubRepo(), issue),
-    readClaim: (issue) => readDispatchClaim(resolveGithubRepo(), issue),
+    // One keyspace: the SAME repo string the drainer's claim path stamps into
+    // claim/journal keys (buildClaimSeamDeps threads config.repo, i.e.
+    // HYDRA_AUTOPILOT_REPO), so the skips read keys the dispatcher wrote.
+    readJournal: (issue) => readLifecycleJournal(repo, issue),
+    readClaim: (issue) => readDispatchClaim(repo, issue),
     publishLastPick: (verdict) => setGlmDrainerLastPick(verdict),
   };
 }

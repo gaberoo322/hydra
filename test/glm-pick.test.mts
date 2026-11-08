@@ -13,8 +13,10 @@ import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
+import { lifecycleClaimKey } from "../src/redis/lifecycle-journal.ts";
 import {
   PICK_FETCH_LIMIT,
+  buildDefaultPickDeps,
   pickResumeBranch,
   refusedPending,
   resumeBranchTs,
@@ -765,5 +767,39 @@ describe("runRecoverStaleScript — child stdout never reaches driver stdout (IN
     assert.equal(lines.length, 1, `stdout: ${r.stdout}\nstderr: ${r.stderr}`);
     assert.deepEqual(JSON.parse(lines[0]), { issue: 7, code: 0 });
     assert.match(r.stderr, /\[autopilot\] recover-stale: requeued 7/);
+  });
+});
+
+describe("buildDefaultPickDeps — claim keyspace matches the dispatch repo (QA round 2)", () => {
+  const AUTOPILOT = "acme/pick-keyspace-autopilot";
+  const OTHER = "acme/pick-keyspace-github";
+  const ISSUE = 987654;
+  let redis: Redis;
+  before(() => {
+    redis = new Redis(REDIS_URL);
+  });
+  after(async () => {
+    await redis.del(lifecycleClaimKey(AUTOPILOT, ISSUE), lifecycleClaimKey(OTHER, ISSUE));
+    redis.disconnect();
+  });
+
+  test("readClaim reads the key under HYDRA_AUTOPILOT_REPO even when HYDRA_GITHUB_REPO differs", async () => {
+    const prev = process.env.HYDRA_GITHUB_REPO;
+    process.env.HYDRA_GITHUB_REPO = OTHER;
+    try {
+      const claim = { dispatchId: "d-1", class: "qa_orch", run: "r", artifactHash: null, openedAt: 1 };
+      await redis.set(lifecycleClaimKey(AUTOPILOT, ISSUE), JSON.stringify(claim));
+      const deps = buildDefaultPickDeps({ ...process.env, HYDRA_AUTOPILOT_REPO: AUTOPILOT });
+      const r = await deps.readClaim(ISSUE);
+      assert.ok(r.ok && r.claim?.dispatchId === "d-1");
+      // Sibling shape: a claim held only under the OTHER repo is NOT seen.
+      await redis.del(lifecycleClaimKey(AUTOPILOT, ISSUE));
+      await redis.set(lifecycleClaimKey(OTHER, ISSUE), JSON.stringify(claim));
+      const r2 = await deps.readClaim(ISSUE);
+      assert.ok(r2.ok && r2.claim === null);
+    } finally {
+      if (prev === undefined) delete process.env.HYDRA_GITHUB_REPO;
+      else process.env.HYDRA_GITHUB_REPO = prev;
+    }
   });
 });
