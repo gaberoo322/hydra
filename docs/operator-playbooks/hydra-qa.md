@@ -148,6 +148,14 @@ pr_number=$(jq -r '.pr.number // empty' "$PF")
 jq '{ok, stage, issue, pr: .pr.number, tier: .tier, gate: .gate.action, fanout: .fanout.mode}' "$PF"
 ```
 
+**Pick-time claim (ADR-0047 D4).** Immediately after the preflight returns `.ok == true` (issue and PR resolved) — before any `defer` / `skip-required-failed` / `admit` branch acts on the issue — open the QA claim (label-free for the qa role; it copies the approved artifact hash and arms the PR-unit caps). `.ok == false` paths claim nothing. Take `<dispatchId>` / `<runId>` from the `hydra-dispatch` sentinel on the first line of your prompt; with no sentinel (operator-interactive) use `interactive-qa-$issue_number-<epoch>` and run `interactive`, and release your own claim after `route` with `--outcome verdict-posted` (a dispatched worker leaves release to reap):
+
+```bash
+npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch <dispatchId> --class qa_orch --run <runId> --pr $pr_number --purpose fresh
+```
+
+`claim-held` → log `[hydra-qa] WARN claim held by <existing.dispatchId>` and proceed with the review; `parked:*` → end with a `## Friction Report`, no review (parked is a human-hold state). When the lane head already has a verdict at head SHA and you move on to the next issue, first run `npx tsx scripts/lifecycle.ts release $issue_number --dispatch <dispatchId> --outcome released`, then claim the next — one held claim per dispatchId at any time.
+
 Preflight is **read-only** and fails closed exactly as the old bash did: no tier → `tier.num: null, adversarial: true` (deeper review); a failed admission call → `admit`; a failed fan-out sizing → the tier fan-out; unreadable required contexts → the all-optional mapping tagged in `.degraded`. It prints ONE JSON object. Branch on it:
 
 - **`.ok == false`** (`no-issue` | `no-pr` | `spec-missing-enforce`) — run `route` (below) with the same `--preflight "$PF"` and nothing else: it posts the one stop comment (`.stop`, if any) and ends. Then **stop**; no review runs. In Phase B/C (`DESIGN_CONCEPT_MODE=enforce`) a missing artifact is `spec-missing-enforce`; in Phase A (`warn`, the default) it is a logged skip, not a stop.
