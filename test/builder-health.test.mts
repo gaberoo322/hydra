@@ -609,19 +609,49 @@ describe("lifecycle fields — parentExceptionRate", () => {
     assert.deepEqual(f.byCause, { "script-error": 1, "notes-steer": 1, "defect-filed": 1 });
   });
 
-  test("an event whose turn has no posted row does not inflate exceptionTurns past turns", () => {
+  test("a turn aborted before its heartbeat (no posted row) still counts: its mirrored event adds the turn to BOTH numerator and denominator (INV-2)", () => {
     const f = foldParentExceptions([
       {
         runId: "r1",
         startedEpoch: 1,
-        // turn 1's row is gone (TTL); turn 2's row mirrors the turn-1 event
+        // turn 1 aborted (invariant-reject) before Phase 5 posted its row; turn 2's row mirrors the turn-1 event (turn_n-1)
         members: [turnRow(2, [{ cause: "script-error", turn: 1, ts_epoch: 90 }, { cause: "notes-steer", turn: 2, ts_epoch: 100 }])],
       },
     ]);
-    assert.equal(f.turns, 1);
-    assert.equal(f.exceptionTurns, 1, "only turn 2 has a row");
+    assert.equal(f.turns, 2, "the row-less aborted turn joins the denominator");
+    assert.equal(f.exceptionTurns, 2, "the aborted turn's exception is counted, not dropped");
     assert.ok(f.exceptionTurns <= f.turns);
     assert.deepEqual(f.byCause, { "script-error": 1, "notes-steer": 1 });
+  });
+
+  test("live Redis rows and the Run Ledger replay of the same run fold identically (INV-4)", () => {
+    const events = [
+      { cause: "invariant-reject", turn: 2, ts_epoch: 200 },
+      { cause: "notes-steer", turn: 4, ts_epoch: 400 },
+    ];
+    // Redis: turn 2 aborted before heartbeat (no row); turn 3 mirrors it as turn_n-1.
+    const redisRun = {
+      runId: "r-parity",
+      startedEpoch: 7,
+      members: [
+        turnRow(1, []),
+        turnRow(3, [events[0]]),
+        turnRow(4, [events[0], events[1]].filter((e) => e.turn >= 3)),
+        turnRow(5, [events[1]]),
+      ],
+    };
+    const ledgerRun = ledgerToRunTurns({
+      run_id: "r-parity",
+      started_epoch: 7,
+      turn: 5,
+      parent_exceptions: events.map((e) => ({ ...e, source: "parent", detail: "" })),
+    });
+    assert.ok(ledgerRun);
+    const live = foldParentExceptions([redisRun]);
+    const replay = foldParentExceptions([ledgerRun]);
+    assert.deepEqual(live, replay);
+    assert.deepEqual(live, { turns: 5, exceptionTurns: 2, byCause: { "invariant-reject": 1, "notes-steer": 1 } });
+    assert.deepEqual(baselineRowFor(redisRun), baselineRowFor(ledgerRun));
   });
 
   test("mergeBaselineRow keeps the larger-turns row on a re-seen run, and takes a fuller or first row", () => {

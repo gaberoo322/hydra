@@ -35,7 +35,7 @@ import {
 import { listQaVerdictCommentsSince, resolveGithubRepo, type QaVerdictCommentsResult } from "../github/issues.ts";
 import { isPassVerdict, parseQaVerdictTrailers } from "../qa/verdict-trailer.ts";
 import { logger } from "../logger.ts";
-import { InvariantViolationError } from "../errors.ts";
+import { InvariantViolationError, RedisSeamError } from "../errors.ts";
 
 export const BUILDER_HEALTH_BASELINES_PATH = "config/orchestrator/builder-health-baselines.json";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -158,8 +158,14 @@ function memberEvents(member: string): { events: MirroredEvent[]; ok: boolean; t
 
 /**
  * Fold one set of runs into turn / exception-turn / by-cause counts. A turn is
- * one turn row; an exception turn is a distinct `(runId, event.turn)` with at
- * least one event (the event's own `turn` keys it, NOT the row it rode in on).
+ * a distinct turn number of the run: every posted row's `turn_n` UNION every
+ * event's own `turn` — a turn aborted before its Phase 5 heartbeat (invariant
+ * reject, script error) posts no row, but the next turn mirrors its event as
+ * turn_n-1, so it still counts as a turn. An exception turn is a distinct
+ * `(runId, event.turn)` with at least one event (INV-2: the event's own `turn`
+ * keys it, NOT the row it rode in on), so exceptionTurns <= turns always holds
+ * without dropping events, and the live Redis rows fold identically to the Run
+ * Ledger replay (INV-4). A row with no integer `turn_n` counts as one turn.
  * Events de-duplicate on `(runId, turn, cause, ts_epoch)` because the heartbeat
  * mirrors turn_n and turn_n-1.
  */
@@ -169,20 +175,22 @@ export function foldParentExceptions(runs: readonly RunTurns[]): ParentException
   const seen = new Set<string>();
   const byCause: Record<string, number> = {};
   for (const run of runs) {
-    const parsed = run.members.map(memberEvents).filter((m) => m.ok);
-    // An exception turn only counts when that turn has a posted row, so the
-    // numerator can never exceed the `turns` denominator.
-    const postedTurns = new Set(parsed.map((m) => m.turnN).filter((n): n is number => n !== null));
-    for (const { events } of parsed) {
-      turns += 1;
+    const runTurns = new Set<number>();
+    let unnumberedRows = 0;
+    for (const { events, ok, turnN } of run.members.map(memberEvents)) {
+      if (!ok) continue;
+      if (turnN === null) unnumberedRows += 1;
+      else runTurns.add(turnN);
       for (const ev of events) {
         const dedupe = `${run.runId}|${ev.turn}|${ev.cause}|${ev.ts_epoch}`;
         if (seen.has(dedupe)) continue;
         seen.add(dedupe);
         byCause[ev.cause] = (byCause[ev.cause] ?? 0) + 1;
-        if (postedTurns.has(ev.turn)) exceptionTurns.add(`${run.runId}|${ev.turn}`);
+        runTurns.add(ev.turn);
+        exceptionTurns.add(`${run.runId}|${ev.turn}`);
       }
     }
+    turns += runTurns.size + unnumberedRows;
   }
   return { turns, exceptionTurns: exceptionTurns.size, byCause };
 }
@@ -289,6 +297,7 @@ export async function loadBuilderHealthBaselines(
     if ((err as { code?: unknown } | null)?.code !== "ENOENT") {
       logger.warn({ err }, "[lifecycle-health] baselines file unreadable; baselines null");
     }
+    /* intentional: a missing baselines file (ENOENT) is the documented "no baseline recorded yet" state, so it degrades to null baselines without a log */
     return none;
   }
   if (doc === null || typeof doc !== "object") return none;
@@ -391,7 +400,7 @@ export async function computeParkRatePerArm(
     (deps.readMode ?? (async () => (await loadLifecycleMode(repoRoot)).mode))(),
     loadBuilderHealthBaselines(deps),
   ]);
-  if (res.ok === false) throw new InvariantViolationError(res.error);
+  if (res.ok === false) throw new RedisSeamError(res.error);
   const { claimsOpened, arms } = foldParkRate(res.events);
   return { mode, claimsOpened, arms, windowDays, baseline: baselines.parkRatePerArm };
 }
