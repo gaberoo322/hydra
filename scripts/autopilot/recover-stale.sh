@@ -137,9 +137,10 @@ INFLIGHT_PR_ISSUES=""
 # pass below REQUIRES it (issue #4806: an unreadable list promotes nothing),
 # while the in-progress pass degrades to today's ready-for-agent relabel.
 PR_LIST_OK=0
+INFLIGHT_PR_PAIRS=""
 if [ "${#STALE_IN_PROGRESS[@]}" -gt 0 ] || [ "${#STALE_BLOCKED[@]}" -gt 0 ]; then
   PR_JSON=$(gh pr list --repo "$REPO" --state open --limit "${GH_ISSUE_LIST_LIMIT:-100}" \
-    --json headRefName,body 2>/dev/null || true)
+    --json number,headRefName,body 2>/dev/null || true)
   # PR_LIST_OK=1 only once the payload is a JSON array AND pr-refs.py exited 0
   # (QA #4869 finding 1): pr-refs.py swallows parse errors into an empty set, so
   # an unvalidated payload would read as "no open PR" and mis-route a
@@ -149,6 +150,9 @@ if [ "${#STALE_IN_PROGRESS[@]}" -gt 0 ] || [ "${#STALE_BLOCKED[@]}" -gt 0 ]; the
     if PR_REFS_OUT=$(printf '%s' "$PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null); then
       PR_LIST_OK=1
       INFLIGHT_PR_ISSUES="$PR_REFS_OUT"
+      # `<issue> <pr>` lines (same predicate, first PR wins) for the seam's
+      # `--evidence pr=<N>` on the needs-qa promotions (issue #5318 INV-10).
+      INFLIGHT_PR_PAIRS=$(printf '%s' "$PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --pairs 2>/dev/null || true)
       PR_COUNT=$(printf '%s' "$PR_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
       if [ "$PR_COUNT" -ge "${GH_ISSUE_LIST_LIMIT:-100}" ]; then
         echo "[autopilot] recover-stale: WARN open-PR list hit the ${GH_ISSUE_LIST_LIMIT:-100} cap; PR-referenced issues beyond it may be missed"
@@ -157,62 +161,99 @@ if [ "${#STALE_IN_PROGRESS[@]}" -gt 0 ] || [ "${#STALE_BLOCKED[@]}" -gt 0 ]; the
   fi
 fi
 
-# Live-state guard (issue #5317, ADR-0047 D2). The stale lists come from a Turn
-# Snapshot STORED at turn start and read one turn later, so an issue listed as
-# stale `in-progress` may since have moved on — notably QA PASS lands it in
-# `qa-passed`. An unconditional relabel would then write a second state label
-# (`needs-qa` next to `qa-passed`) and restart the PASS -> in-progress -> needs-qa
-# bounce. So re-read the issue's labels immediately before each write and act
-# only when its state-label set is EXACTLY the one the snapshot listed. An
-# unreadable read skips (never writes). The state names mirror OPEN_STATES in
-# src/lifecycle/transitions.ts.
-LIFECYCLE_STATE_LABELS="needs-triage needs-info needs-research hitl-grill needs-tickets ready-for-agent blocked in-progress needs-dev-resume needs-qa qa-passed ready-for-human parked"
-live_state_labels() {
-  local raw s out=""
-  raw=$(gh issue view "$1" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null) || return 1
-  for s in $LIFECYCLE_STATE_LABELS; do
-    if grep -Fxq -- "$s" <<<"$raw"; then out="${out:+$out,}$s"; fi
-  done
-  printf '%s' "$out"
-}
-# live_state_is ISSUE STATE → 0 only when the live state-label set is exactly STATE.
-live_state_is() {
-  local live
-  live=$(live_state_labels "$1") || { echo "[autopilot] recover-stale: skip issue=$1 (live label read failed)"; return 1; }
-  # Skip only when the listed state is absent from the live set, or a state
-  # DOWNSTREAM of it is present. Double-labelled drift that still carries the
-  # listed state is reported loudly as state-ambiguous but still acted on.
-  case ",$live," in
-    *",$2,"*) ;;
-    *) echo "[autopilot] recover-stale: skip issue=$1 (live state '${live:-none}' != listed '$2')"; return 1 ;;
-  esac
-  if [ "$live" != "$2" ]; then
-    case "$live" in
-      *needs-qa*|*qa-passed*|*needs-dev-resume*|*ready-for-human*|*parked*)
-        echo "[autopilot] recover-stale: skip issue=$1 (live state '$live' != listed '$2': downstream state present)"; return 1 ;;
-    esac
-    echo "[autopilot] recover-stale: WARN state-ambiguous issue=$1 live='$live' listed='$2' (acting on listed state)"
+# State writes go ONLY through the lifecycle seam (ADR-0047 D3, issue #5318).
+# The issue-#5317 live-state guard that lived here (a re-read plus a mirrored
+# copy of the state-label vocabulary) is gone: the stale lists come from a Turn
+# Snapshot read one turn after it was stored, so each advance passes
+# `--from <listed state>` and the seam's compare-and-set refuses `from-mismatch`
+# (in shadow AND enforce, before any write) when the issue has since moved on,
+# notably QA PASS landing it in `qa-passed`. ANY non-zero exit (a refusal code,
+# `from-mismatch`, `parked:*`, `write-failed:*`) skips the issue: there is NO
+# fallback to a direct label write.
+#
+# HYDRA_LIFECYCLE_BIN overrides the CLI (tests inject a stub; production leaves
+# it unset and runs the repo's lifecycle CLI through npx tsx from the repo root).
+lifecycle() {
+  if [ -n "${HYDRA_LIFECYCLE_BIN:-}" ]; then
+    "$HYDRA_LIFECYCLE_BIN" "$@"
+  else
+    (cd "$SCRIPT_DIR/../.." && npx tsx scripts/lifecycle.ts "$@")
   fi
+}
+
+# pr_for_issue ISSUE: the first open PR number referencing it (empty = unknown).
+pr_for_issue() {
+  local i p
+  while read -r i p; do
+    if [ "$i" = "$1" ]; then printf '%s' "$p"; return 0; fi
+  done <<< "$INFLIGHT_PR_PAIRS"
   return 0
+}
+
+# seam_advance ISSUE TO FROM: exit 0 only when the seam performed the move.
+seam_advance() {
+  local issue="$1" to="$2" from="$3" pr args
+  args=(advance "$issue" "$to" --from "$from" --actor recover-stale)
+  if [ "$to" = needs-qa ]; then
+    pr=$(pr_for_issue "$issue")
+    [ -n "$pr" ] && args+=(--evidence "pr=$pr")
+  fi
+  lifecycle "${args[@]}" >/dev/null 2>&1
+}
+
+# stale_claim_verdict ISSUE: prints `none` | `fresh` | `stale <dispatchId>`;
+# returns 1 (prints nothing) when the claim could not be read. A held claim
+# younger than the stale threshold means a fresh dispatch exists: never touch it.
+STALE_CLAIM_MIN="${HYDRA_RECOVER_STALE_CLAIM_MIN:-90}"
+stale_claim_verdict() {
+  local raw
+  raw=$(lifecycle claim-show "$1" 2>/dev/null) || return 1
+  printf '%s' "$raw" | python3 -c '
+import json, sys, time
+try:
+    claim = json.loads(sys.stdin.read()).get("claim")
+except Exception:
+    sys.exit(1)
+if not claim:
+    print("none")
+else:
+    age_min = (time.time() * 1000 - float(claim.get("openedAt", 0))) / 60000.0
+    print("fresh" if age_min < float(sys.argv[1]) else "stale " + str(claim.get("dispatchId", "")))
+' "$STALE_CLAIM_MIN" 2>/dev/null
 }
 
 for ISSUE in "${STALE_IN_PROGRESS[@]:-}"; do
   [ -z "$ISSUE" ] && continue
-  live_state_is "$ISSUE" in-progress || continue
+  # Release the held claim BEFORE the flip (#5318 INV-6): a claim opened after
+  # the flip belongs to a fresh dispatcher and must never be released here.
+  if ! verdict=$(stale_claim_verdict "$ISSUE"); then
+    echo "[autopilot] recover-stale: skip issue=$ISSUE (claim read failed)"
+    continue
+  fi
+  case "$verdict" in
+    fresh)
+      echo "[autopilot] recover-stale: skip issue=$ISSUE (claim younger than ${STALE_CLAIM_MIN} min: a fresh dispatch exists)"
+      continue ;;
+    "stale "*)
+      if ! lifecycle release "$ISSUE" --dispatch "${verdict#stale }" --outcome stale --actor recover-stale >/dev/null 2>&1; then
+        echo "[autopilot] recover-stale: skip issue=$ISSUE (claim release refused)"
+        continue
+      fi ;;
+  esac
   if inflight_contains "$INFLIGHT_PR_ISSUES" "$ISSUE"; then
-    # An open PR already references this issue → awaiting review, not stalled.
-    if gh issue edit "$ISSUE" --repo "$REPO" --remove-label in-progress --add-label needs-qa 2>/dev/null; then
+    # An open PR already references this issue: awaiting review, not stalled.
+    if seam_advance "$ISSUE" needs-qa in-progress; then
       gh issue comment "$ISSUE" --repo "$REPO" --body "> *Autopilot:* Routed to needs-qa — an open PR already references this issue (recover-stale open-PR guard, #3852)." 2>/dev/null || true
       echo "[autopilot] recover-stale: routed in-progress→needs-qa issue=$ISSUE (open PR references it)"
     else
-      echo "[autopilot] recover-stale: skip issue=$ISSUE (gh edit failed)"
+      echo "[autopilot] recover-stale: skip issue=$ISSUE (seam refused or failed)"
     fi
   else
-    if gh issue edit "$ISSUE" --repo "$REPO" --remove-label in-progress --add-label ready-for-agent 2>/dev/null; then
+    if seam_advance "$ISSUE" ready-for-agent in-progress; then
       gh issue comment "$ISSUE" --repo "$REPO" --body "> *Autopilot:* Re-queued. >90 min idle in in-progress." 2>/dev/null || true
       echo "[autopilot] recover-stale: re-queued in-progress issue=$ISSUE"
     else
-      echo "[autopilot] recover-stale: skip issue=$ISSUE (gh edit failed)"
+      echo "[autopilot] recover-stale: skip issue=$ISSUE (seam refused or failed)"
     fi
   fi
 done
@@ -271,20 +312,19 @@ if [ "${#CANDIDATES[@]}" -gt 0 ]; then
         echo "[autopilot] recover-stale: skip malformed blockers-cleared line (issue='$ISSUE')"
         continue
       fi
-      live_state_is "$ISSUE" blocked || continue
       if inflight_contains "$INFLIGHT_PR_ISSUES" "$ISSUE"; then
         # An open PR already references it: awaiting review, never ready-for-agent.
-        if gh issue edit "$ISSUE" --repo "$REPO" --remove-label blocked --add-label needs-qa 2>/dev/null; then
+        if seam_advance "$ISSUE" needs-qa blocked; then
           gh issue comment "$ISSUE" --repo "$REPO" --body "> *Autopilot:* Blockers cleared (#${CLEARED//,/, #}); routed to needs-qa — an open PR already references this issue (#4806)." 2>/dev/null || true
           echo "[autopilot] recover-stale: unblocked issue=$ISSUE -> needs-qa (open PR references it)"
         else
-          echo "[autopilot] recover-stale: skip issue=$ISSUE (gh edit failed)"
+          echo "[autopilot] recover-stale: skip issue=$ISSUE (seam refused or failed)"
         fi
-      elif gh issue edit "$ISSUE" --repo "$REPO" --remove-label blocked --add-label ready-for-agent 2>/dev/null; then
+      elif seam_advance "$ISSUE" ready-for-agent blocked; then
         gh issue comment "$ISSUE" --repo "$REPO" --body "> *Autopilot:* Unblocked — blockers cleared (#${CLEARED//,/, #})." 2>/dev/null || true
         echo "[autopilot] recover-stale: unblocked issue=$ISSUE (all blockers closed: $CLEARED)"
       else
-        echo "[autopilot] recover-stale: skip issue=$ISSUE (gh edit failed)"
+        echo "[autopilot] recover-stale: skip issue=$ISSUE (seam refused or failed)"
       fi
     done <<< "$CLEARED_LINES"
   fi

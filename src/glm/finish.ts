@@ -59,6 +59,7 @@ import {
   type PreflightResult,
 } from "./drainer-runner.ts";
 import { editIssueLabels, viewIssue, type IssueActionWriteResult } from "../github/issue-actions.ts";
+import { advance, defaultSeamDeps, type SeamDeps } from "../lifecycle/index.ts";
 import { createPr, listOpenPrs, type PrRow } from "../github/prs.ts";
 import {
   gitExec,
@@ -363,10 +364,24 @@ export interface FinishDeps {
   now: () => number;
   /** Journal line sink (stderr in production, `hydra-glm-drainer:` prefixed by the default). */
   log: (msg: string) => void;
+  /**
+   * Flag / PR-side label writes only (`glm-withhold`, `glm-authored`): lifecycle
+   * STATE moves go through {@link FinishDeps.advanceState} (ADR-0047 D3, #5318).
+   */
   editIssueLabels: (
     issue: number,
     labels: { remove?: string[]; add?: string[] },
   ) => Promise<IssueActionWriteResult>;
+  /**
+   * The lifecycle seam's `advance` with a `--from` compare-and-set (#5318
+   * INV-12). Default: `advance()` over `defaultSeamDeps`. A release counts
+   * toward the non-live stale-requeue arm (shadow: would-park journal only).
+   */
+  advanceState: (
+    issue: number,
+    to: string,
+    opts: { from: string; evidence?: Record<string, string> },
+  ) => Promise<{ ok: true } | { ok: false; code: string }>;
   /** The issue title, or `null` when the read fails (the caller falls back). */
   viewIssueTitle: (issue: number) => Promise<string | null>;
   createPr: (input: {
@@ -462,9 +477,9 @@ async function defensivePush(deps: FinishDeps, input: FinishInput): Promise<void
 
 async function releaseClaim(deps: FinishDeps, issue: number, withhold: boolean): Promise<void> {
   const r = await safe(deps, `release issue #${issue}`, () =>
-    deps.editIssueLabels(issue, { remove: [LABEL_IN_PROGRESS], add: [LABEL_READY] }),
+    deps.advanceState(issue, LABEL_READY, { from: LABEL_IN_PROGRESS }),
   );
-  if (r && r.ok === false) deps.log(`WARN failed to release issue #${issue} (non-fatal)`);
+  if (r && r.ok === false) deps.log(`WARN failed to release issue #${issue} (non-fatal): ${r.code}`);
   if (withhold) {
     const w = await safe(deps, `add glm-withhold to issue #${issue}`, () =>
       deps.editIssueLabels(issue, { add: [LABEL_WITHHOLD] }),
@@ -475,12 +490,15 @@ async function releaseClaim(deps: FinishDeps, issue: number, withhold: boolean):
   }
 }
 
-async function advanceToNeedsQa(deps: FinishDeps, issue: number): Promise<void> {
+async function advanceToNeedsQa(deps: FinishDeps, issue: number, prNumber: number | null): Promise<void> {
   const r = await safe(deps, `advance issue #${issue} to needs-qa`, () =>
-    deps.editIssueLabels(issue, { remove: [LABEL_READY, LABEL_IN_PROGRESS], add: [LABEL_NEEDS_QA] }),
+    deps.advanceState(issue, LABEL_NEEDS_QA, {
+      from: LABEL_IN_PROGRESS,
+      ...(prNumber !== null ? { evidence: { pr: String(prNumber) } } : {}),
+    }),
   );
   if (r && r.ok === false) {
-    deps.log(`WARN failed to advance issue #${issue} to needs-qa (non-fatal — relabel by hand)`);
+    deps.log(`WARN failed to advance issue #${issue} to needs-qa (non-fatal): ${r.code}`);
   }
 }
 
@@ -948,7 +966,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
     case "open-pr": {
       // The advance: counter reset, needs-qa relabel, daily cap, worktree.
       removeTimeoutCounter(deps, issue); // INV-6: a PR opened — the budget resets
-      await advanceToNeedsQa(deps, issue);
+      await advanceToNeedsQa(deps, issue, pr?.number ?? null);
       await safe(deps, "daily-cap increment", async () => incrementDailyCap(deps, nowMs, input.provider));
       deps.log(
         `issue #${issue}: PR opened (branch=${input.branch}), advanced to needs-qa, daily cap incremented`,
@@ -1027,6 +1045,7 @@ const DEFAULT_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..",
 export function buildDefaultFinishDeps(env: NodeJS.ProcessEnv = process.env): FinishDeps {
   const config = loadDrainerConfig(env);
   const repoRoot = config.repoRoot ?? DEFAULT_REPO_ROOT;
+  let seamDeps: SeamDeps | undefined; // built on first use: dry-run never touches the seam
   return {
     config,
     repoRoot,
@@ -1035,6 +1054,14 @@ export function buildDefaultFinishDeps(env: NodeJS.ProcessEnv = process.env): Fi
       process.stderr.write(`hydra-glm-drainer: ${msg}\n`);
     },
     editIssueLabels: (issue, labels) => editIssueLabels(issue, labels, { repo: config.repo }),
+    advanceState: async (issue, to, opts) => {
+      seamDeps ??= defaultSeamDeps(repoRoot);
+      const res = await advance(
+        { issue, to, from: opts.from, evidence: opts.evidence, actor: "glm-finish" },
+        seamDeps,
+      );
+      return res.ok === true ? { ok: true } : { ok: false, code: res.code };
+    },
     viewIssueTitle: async (issue) => {
       const r = await viewIssue(issue, { repo: config.repo });
       return r.ok ? r.row.title : null;
