@@ -448,6 +448,13 @@ describe("lifecycle-seam-check: PR-context carve-out (#5428)", () => {
     assert.deepEqual(md("gh pr edit 5 --add-label ready-for-human"), []);
   });
 
+  test("a long-body gh issue with a nested gh pr still counts (window wider than 300 chars)", () => {
+    const body = "x".repeat(500);
+    assert.deepEqual(md(`gh issue edit 5 --body "${body} $(gh pr view 5 -q .number)" --add-label needs-qa`), [1]);
+    // sibling: a long-body gh pr command keeps its PR-flag exemption
+    assert.deepEqual(md(`gh pr edit 5 --body "${body}" --add-label ready-for-human`), []);
+  });
+
   test("chained gh api calls are judged per invocation", () => {
     assert.deepEqual(
       md('gh api -X DELETE repos/o/r/issues/$PR/labels/x && gh api -X DELETE repos/o/r/issues/$ISSUE/labels/needs-qa'),
