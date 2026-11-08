@@ -111,8 +111,8 @@ cli_alarm_raise() {
   local marker="${HYDRA_WATCHDOG_CLI_ALARM_STATE_DIR:-/tmp}/hydra-watchdog-cli-failed.since"
   log "$CLI_LOG" "WARN watchdog CLI failed to start (reason=$reason, rc=$rc) — every ported check is skipped this tick"
   [ -f "$marker" ] && return 0
-  if deliver_page "$CLI_LOG" page --kind "infra:watchdog_cli_failed" --dedup-key "infra:watchdog_cli_failed" \
-      --title "Watchdog CLI failed to start ($reason)" --fact "reason=$reason" --fact "rc=$rc"; then
+  if deliver_page "$CLI_LOG" report --kind "infra:watchdog_cli_failed" \
+      --fact "reason=$reason" --fact "rc=$rc"; then
     date +%s > "$marker" 2>/dev/null || true
   fi
   return 0
@@ -159,9 +159,9 @@ nm_deliver() {
     correlationId "node-modules-integrity-${sig}" \
     payload "$payload"
   log "$NM_LOG" "in-band delivery published (best-effort) for '$root' (type=infra:node_modules_wiped)"
-  deliver_page "$NM_LOG" page --kind "infra:node_modules_wiped" --dedup-key "infra:node_modules_wiped" \
-    --title "node_modules integrity: '$root_clean' $reason_clean" \
-    --fact "root=$root_clean" --fact "reason=$reason_clean" --fact "sustained_ms=$4" --fact "threshold_ms=$5" || true
+  # --alert false: the XADD above already reaches the bus consumer, which writes the dashboard alert.
+  deliver_page "$NM_LOG" report --kind "infra:node_modules_wiped" --alert false \
+    --fact "signal=$root_clean" --fact "reason=$reason_clean" --fact "sustained_ms=$4" --fact "threshold_ms=$5" || true
   return 0
 }
 
