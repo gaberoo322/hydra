@@ -294,7 +294,7 @@ describe("reap run_completion wires the claim release (INV-10/12)", () => {
         encoding: "utf-8",
       });
       const log = existsSync(join(dir, "run.log")) ? readFileSync(join(dir, "run.log"), "utf-8") : "";
-      const calls = existsSync(npxLog) ? readFileSync(npxLog, "utf-8").trim().split("\n").filter(Boolean) : [];
+      const calls = existsSync(npxLog) ? readFileSync(npxLog, "utf-8").trim().split("\n").filter((l) => l.includes("lifecycle.ts release")) : [];
       return { status: r.status ?? -1, stderr: r.stderr ?? "", log, calls };
     } finally {
       rmSync(dir, { recursive: true, force: true });
