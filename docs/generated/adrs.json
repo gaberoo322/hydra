@@ -205,6 +205,7 @@
         "docs/operations/glm-lane.md",
         "docs/operator-playbooks/hydra-branch-prune.md",
         "docs/operator-playbooks/hydra-cleanup.md",
+        "docs/operator-playbooks/hydra-grill.md",
         "docs/operator-playbooks/hydra-sweep.md",
         "docs/operator-playbooks/hydra-target-qa.md",
         "docs/operator-playbooks/hydra-tool-scout.md",
@@ -1313,11 +1314,18 @@
         "CONTEXT-MAP.md",
         "CONTEXT.md",
         "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
+        "docs/agents/issue-tracker.md",
         "docs/agents/triage-labels.md",
+        "docs/operator-playbooks/hydra-discover.md",
+        "docs/operator-playbooks/hydra-grill.md",
+        "docs/operator-playbooks/hydra-incident.md",
         "docs/operator-playbooks/hydra-issue-research.md",
         "docs/operator-playbooks/hydra-qa.md",
+        "docs/operator-playbooks/hydra-research.md",
+        "docs/operator-playbooks/hydra-retro.md",
         "docs/operator-playbooks/hydra-review.md",
-        "docs/operator-playbooks/hydra-sweep.md"
+        "docs/operator-playbooks/hydra-sweep.md",
+        "docs/operator-playbooks/hydra-tickets.md"
       ],
       "source": {
         "path": "docs/adr/0047-work-item-lifecycle-is-data.md"
