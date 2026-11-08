@@ -237,11 +237,11 @@ _INTERP = r"(?:bash|sh|zsh|dash|ksh|python[0-9.]*|node|perl|ruby|ssh|eval|source
 INTERP_RECV = re.compile(r"(?:^|[\s;&|(/])" + _INTERP + r"(?:\s|$)")
 # Receiver AFTER the operator: `cat <<'EOF' | bash` pipes the body into an
 # interpreter, so it is executed code too (QA round 2, high finding).
-# An optional `sudo`/`env` wrapper (with any flags / VAR=value / `-u user`
-# tokens) may sit between the pipe and the interpreter (QA round 3).
-INTERP_PIPE = re.compile(
-    r"\|&?\s*(?:(?:sudo|env)\s+(?:\S+\s+)*?)?(?:\S*/)?" + _INTERP + r"(?:\s|$)"
-)
+# Inverted, fail-toward-not-stripping (QA round 4): ANY interpreter word after
+# the pipe, before the next `;`/`&`/`|`, keeps the body -- so `| sudo bash`,
+# `| (bash)`, `| { bash; }`, `| nohup/timeout/exec/command bash` all count.
+# A non-interpreter sink (`| tee f`, `| tee bash.log`) is still stripped.
+INTERP_PIPE = re.compile(r"\|&?[^\n;&|]*?(?<![\w.-])" + _INTERP + r"(?![\w.-])")
 
 
 def _strip_heredoc_bodies(text):

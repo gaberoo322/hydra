@@ -892,7 +892,7 @@ describe("gh-label-delete-guard — heredoc bodies are data (issue #5401)", () =
   // the body, so a collection DELETE inside it is DENIED as on master.
   const PIPE_INTERPS = ["bash", "sh", "python3", "ssh host", "xargs sh -c", "eval", "source"];
   for (const interp of PIPE_INTERPS) {
-    for (const [pipe, wrap] of [["|", ""], ["|&", ""], ["|", "sudo "], ["|", "sudo -E "], ["|", "env "], ["|", "env FOO=1 "]]) {
+    for (const [pipe, wrap] of [["|", ""], ["|&", ""], ["|", "sudo "], ["|", "sudo -E "], ["|", "env "], ["|", "env FOO=1 "], ["|", "nohup "], ["|", "timeout 5 "], ["|", "exec "], ["|", "command "], ["|", "/usr/bin/env "], ["|", "( "], ["|", "{ "]]) {
       test(`cat <<'EOF' ${pipe} ${wrap}${interp}: executed body is DENIED`, () => {
         const r = runHook(
           bash(`cat <<'EOF' ${pipe} ${wrap}${interp}\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF`),
@@ -901,6 +901,13 @@ describe("gh-label-delete-guard — heredoc bodies are data (issue #5401)", () =
       });
     }
   }
+
+  test("sibling: a non-interpreter sink whose name contains an interpreter word (tee bash.log) is still ALLOWED", () => {
+    const r = runHook(
+      bash(`cat <<EOF | tee bash.log\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF\nls`),
+    );
+    assert.equal(r.status, 0, r.stderr);
+  });
 
   test("sibling: cat <<EOF | sudo tee f (wrapper, non-interpreter sink) is still ALLOWED", () => {
     const r = runHook(
