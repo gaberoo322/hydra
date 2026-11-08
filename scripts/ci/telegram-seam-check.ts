@@ -135,10 +135,10 @@ const CONFIG = {
     "NEW telegram-seam violations (Operator Channel transport, ADR-0045 D2):",
   newViolationsHelp: [
     "These files name the Telegram Bot API host outside the Operator Channel.",
-    "TypeScript: import src/operator-channel/ (operatorChannel.page / brief) —",
+    "TypeScript: import src/operator-channel/ (operatorChannel.report) —",
     "the transport in src/operator-channel/transport.ts owns the one fetch.",
     "Bash and systemd units: call scripts/operator-notify.ts",
-    "(page / resolve / brief / service-failed).",
+    "(report / resolve / service-failed).",
   ],
 };
 
