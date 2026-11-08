@@ -1766,6 +1766,18 @@
       }
     },
     {
+      "name": "HYDRA_LIFECYCLE_BIN",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/recover-stale.sh"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/recover-stale.sh"
+      }
+    },
+    {
       "name": "HYDRA_LOG_DETERMINISTIC",
       "readSites": [
         {
@@ -2122,6 +2134,18 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/reap-stale-test-procs.sh"
+      }
+    },
+    {
+      "name": "HYDRA_RECOVER_STALE_CLAIM_MIN",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/recover-stale.sh"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/recover-stale.sh"
       }
     },
     {

@@ -414,6 +414,16 @@ def _lifecycle_advance(
     False and logs; the caller skips the issue and NEVER falls back to a direct
     label write (INV-2). Never raises.
     """
+    if GH_CLI_OVERRIDE and not LIFECYCLE_CLI_OVERRIDE:
+        # Hermeticity: a stubbed `gh` means a test/operator rig. Running the REAL
+        # seam CLI there would write to the live board, so refuse unless the rig
+        # also injected a lifecycle CLI.
+        print(
+            f"[autopilot] reap: WARN lifecycle advance skipped for {context}: "
+            "HYDRA_AUTOPILOT_GH_CLI is set without HYDRA_AUTOPILOT_LIFECYCLE_CLI",
+            file=sys.stderr,
+        )
+        return False
     argv = _lifecycle_argv("advance", issue_num, to, "--from", from_state, "--actor", actor)
     for key, value in (evidence or {}).items():
         argv += ["--evidence", f"{key}={value}"]
