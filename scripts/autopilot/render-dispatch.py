@@ -105,15 +105,21 @@ ADMISSION_RULE = (
     "before filing; filing nothing is an acceptable outcome."
 )
 
+# FLAG-label mechanics -- every sweep slot (orchestrator AND Target) carries it.
+LABEL_API_RULE = (
+    "Label mutations go through `gh api repos/" + ORCH_REPO + "/issues/<N>/labels` "
+    "(`gh pr edit` is broken for labels); to remove a label put its name in the "
+    "URL PATH (`DELETE .../labels/<name>`) — the `-f name=` form wipes ALL labels. "
+    "If GraphQL `gh --json` calls rate-limit, fall back to `gh api repos/...` REST."
+)
+
+# STATE-label rule (ADR-0047) -- orchestrator slots only; the Target board is
+# outside the lifecycle seam. Carries the flag-label mechanics too.
 LIFECYCLE_LABEL_RULE = (
     "Issue STATE labels (the 13 lifecycle states) move only through "
     "`npx tsx scripts/lifecycle.ts advance <N> <to> ...`; a refusal exits non-zero and is "
     "final — never fall back to `gh issue edit`/`gh api` for a state. FLAG labels "
-    "(provenance, `conflict-fix-attempted`, `needs-design-concept`, `glm-*`) still go through "
-    "`gh api repos/" + ORCH_REPO + "/issues/<N>/labels` (`gh pr edit` is broken for labels); "
-    "to remove one put its name in the URL PATH (`DELETE .../labels/<name>`) — the "
-    "`-f name=` form wipes ALL labels. If GraphQL `gh --json` calls rate-limit, fall back to "
-    "`gh api repos/...` REST."
+    "(provenance, `conflict-fix-attempted`, `needs-design-concept`, `glm-*`): " + LABEL_API_RULE
 )
 
 ISSUE_PRODUCING_CLASSES = {
@@ -724,8 +730,7 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
                 "named event), not re-triaged again. Do not relabel, comment on, or re-route an item a pipeline dispatch is "
                 "working right now."
             )
-            if slot.endswith("_orch"):
-                out.append(LIFECYCLE_LABEL_RULE)
+            out.append(LIFECYCLE_LABEL_RULE if slot.endswith("_orch") else LABEL_API_RULE)
         if slot in ("discover_orch", "discover_target"):
             out.append(
                 "Dedup before filing: run every candidate through `scripts/ci/issue-dedup.ts` against the shared backfill "

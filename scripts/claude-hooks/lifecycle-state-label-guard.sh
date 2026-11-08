@@ -28,7 +28,7 @@
 # `gh pr edit` (PR labels are flags, ADR-0047 D2), an unresolvable `$VAR`
 # operand (fail open — the doc lint owns docs), `gh issue edit|create --repo
 # <anything other than gaberoo322/hydra>` (the Target board is outside the
-# seam; an unresolved `--repo "$VAR"` fails open too), comments/echo mentions,
+# seam; of unresolved vars only `$TARGET_GH_REPO` is exempt), comments/echo mentions,
 # `npx tsx scripts/lifecycle.ts ...`, and `bash scripts/autopilot/
 # recover-stale.sh` (inner commands are not inspected; #5318 migrates them).
 #
@@ -432,12 +432,14 @@ HYDRA_REPO = "gaberoo322/hydra"
 
 
 def _foreign_repo(val):
-    # Exempt only a LITERAL repo that is not the Orchestrator. An unresolved
-    # `$VAR` is inspected (a worker's `--repo "$REPO"` must not bypass the deny)
-    # unless it is the Target-board idiom (`$TARGET_GH_REPO`, `$TARGET_REPO`).
+    # Exempt only the Target board: a LITERAL repo that is not the Orchestrator,
+    # or the Target idiom `$TARGET_GH_REPO` (QA round 2: the broader
+    # "any $VAR containing TARGET" match is gone). The Target board is outside
+    # the ADR-0047 seam; any other unresolved `$VAR` is inspected (a worker's
+    # `--repo "$REPO"` must not bypass the deny).
     val = val.strip("\"'")
     if "$" in val:
-        return "TARGET" in val.upper()
+        return val.lstrip("$").strip("{}").upper() == "TARGET_GH_REPO"
     return val.lower() != HYDRA_REPO
 
 
@@ -476,9 +478,57 @@ def _issue_label_state(args):
     return None
 
 
+def _json_labels(text):
+    # Label values of a raw JSON body ({"labels": ["a", {"name": "b"}]});
+    # an unparseable body is scanned whole (fail toward deny).
+    import json
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return [text] if "label" in text.lower() else []
+    out = []
+    if isinstance(data, dict):
+        for item in data.get("labels") or []:
+            out.append(item.get("name", "") if isinstance(item, dict) else str(item))
+    return out
+
+
+def _label_fields(args, payload):
+    # Values of the label-bearing request fields only: `-f labels[]=x`,
+    # `-F labels=x`, `--field=labels[]=x`, plus the labels of a raw JSON body
+    # (heredoc `--input -` bodies and readable `--input FILE` contents).
+    out = []
+    for i, tok in enumerate(args):
+        kv = None
+        if tok in ("-f", "-F", "--field", "--raw-field") and i + 1 < len(args):
+            kv = args[i + 1]
+        else:
+            for f in ("--field=", "--raw-field="):
+                if tok.startswith(f):
+                    kv = tok[len(f):]
+        if kv and "=" in kv:
+            key, val = kv.split("=", 1)
+            if key.lower().startswith("labels"):
+                out.append(val)
+    for text in payload:
+        if text.lstrip().startswith(("{", "[")):
+            out.extend(_json_labels(text))
+    return out
+
+
 def _api_label_state(args):
     # `gh api`: mutating call that writes labels on an issue: either
     # issues/<n>/labels[/<name>] or a PATCH/POST of issues/<n> carrying labels.
+    if args and args[0] == "graphql":
+        # A label mutation through GraphQL (addLabelsToLabelable /
+        # removeLabelsFromLabelable / updateIssue labelIds) carries opaque
+        # ids, but deny it when the same command names a lifecycle state.
+        blob = " ".join(args) + " " + " ".join(API_BODIES)
+        if re.search(r"(?:add|remove)LabelsTo?(?:From)?Labelable|labelIds", blob) and STATE_WORD is not None:
+            hit = STATE_WORD.search(blob)
+            if hit:
+                return hit.group(1).lower()
+        return None
     path = None
     labels_path = False
     for tok in args:
@@ -529,8 +579,12 @@ def _api_label_state(args):
                     payload.append(fh.read(65536))
             except OSError:
                 pass  # intentional: unreadable payload file fails open
-    if not labels_path and not any("label" in t.lower() for t in payload):
-        return None  # PATCH issues/<n> that carries no labels field
+    if not labels_path:
+        # PATCH/POST issues/<n>: scan ONLY the label-bearing fields, so a
+        # title/body that merely mentions a state word is not a false deny.
+        payload = _label_fields(args, payload)
+        if not payload:
+            return None  # carries no labels field
     if STATE_WORD is not None:
         for tok in payload:
             hit = STATE_WORD.search(tok)
@@ -539,13 +593,50 @@ def _api_label_state(args):
     return None
 
 
-def _gh_args(toks):
-    # Peel wrappers (`command`, `env`, `sudo`, `exec`, `nohup`, `time`, NAME=val
-    # words) and a path-prefixed gh (`/usr/bin/gh`); fold gh's global
-    # `-R/--repo` flag back into the subcommand args. Returns None if not gh.
+KEYWORDS = ("do", "then", "else", "elif", "if", "while", "until", "!", "{", "(", "}", ")", "time")
+SHELLS = ("bash", "sh", "zsh", "dash", "ksh")
+# Wrapper -> flags that consume the NEXT token.
+WRAPPER_ARG_FLAGS = {
+    "sudo": ("-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D", "-R"),
+    "env": ("-u", "-C", "-S"),
+    "xargs": ("-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a"),
+    "timeout": ("-s", "-k", "--signal", "--kill-after"),
+    "nice": ("-n",),
+    "command": (), "exec": (), "nohup": (), "stdbuf": (),
+}
+DURATION = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+
+
+def _peel(toks):
+    # Peel shell keywords (`do`/`then`/`(`/`{`/`!`...), wrappers (command, env,
+    # sudo [-u x], exec, nohup, time, timeout [opts] N, xargs [opts], nice) and
+    # NAME=val words, so the effective command comes first.
     toks = list(toks)
-    while toks and (ASSIGN_TOKEN.match(toks[0]) or toks[0] in ("command", "env", "sudo", "exec", "nohup", "time")):
-        toks.pop(0)
+    while toks:
+        t = toks[0]
+        if ASSIGN_TOKEN.match(t) or t in KEYWORDS:
+            toks.pop(0)
+        elif t in WRAPPER_ARG_FLAGS:
+            toks.pop(0)
+            flags = WRAPPER_ARG_FLAGS[t]
+            while toks and toks[0].startswith("-") and toks[0] != "--":
+                f = toks.pop(0)
+                if f in flags and toks:
+                    toks.pop(0)
+            if toks and toks[0] == "--":
+                toks.pop(0)
+            if t == "timeout" and toks and DURATION.match(toks[0]):
+                toks.pop(0)
+        else:
+            break
+    return toks
+
+
+def _gh_args(toks):
+    # Return (subcommand args, folded -R/--repo pre-args) of a gh invocation, or
+    # None. Handles a path-prefixed gh (`/usr/bin/gh`) and folds gh's global
+    # `-R/--repo` flag back into the subcommand args.
+    toks = _peel(toks)
     if not toks or os.path.basename(toks[0]) != "gh":
         return None
     pre = []
@@ -559,20 +650,43 @@ def _gh_args(toks):
     return toks[i:], pre
 
 
-offending = None
-for seg in _segments(cmd):
-    g = _gh_args(seg)
-    if g is None:
-        continue
-    toks, pre = g
-    if len(toks) < 2:
-        continue
-    if toks[0] == "issue" and toks[1] in ("edit", "create"):
-        offending = _issue_label_state(toks[2:] + pre)
-    elif toks[0] == "api":
-        offending = _api_label_state(toks[1:] + pre)
-    if offending:
-        break
+def _shell_c_strings(toks):
+    # `bash -c 'gh ...'` / `sh -lc '...'`: the string operand is code. Return
+    # the command strings so the caller re-scans them.
+    toks = _peel(toks)
+    if not toks or os.path.basename(toks[0]) not in SHELLS:
+        return []
+    out = []
+    for i, tok in enumerate(toks[1:], 1):
+        if re.match(r"^-[A-Za-z]*c[A-Za-z]*$", tok) and i + 1 < len(toks):
+            out.append(toks[i + 1])
+    return out
+
+
+def _scan(text, depth=0):
+    for seg in _segments(text):
+        g = _gh_args(seg)
+        if g is None:
+            if depth < 3:
+                for inner in _shell_c_strings(seg):
+                    hit = _scan(inner, depth + 1)
+                    if hit:
+                        return hit
+            continue
+        toks, pre = g
+        if len(toks) < 2:
+            continue
+        hit = None
+        if toks[0] == "issue" and toks[1] in ("edit", "create"):
+            hit = _issue_label_state(toks[2:] + pre)
+        elif toks[0] == "api":
+            hit = _api_label_state(toks[1:] + pre)
+        if hit:
+            return hit
+    return None
+
+
+offending = _scan(cmd)
 
 if offending is None:
     print("ALLOW")

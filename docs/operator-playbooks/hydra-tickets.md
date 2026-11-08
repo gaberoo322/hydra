@@ -104,7 +104,7 @@ on the **Target board** (issue #5168), and four things change:
    `enhancement` only and no state. On the Target board `needs-triage` is
    `hydra-target-sweep`'s promote lane, so a triage label would queue the epic
    itself for a build.
-4. **Lane labels.** Create each child with `childLabels(slice, scope)` (flags)
+4. **Lane labels (Target-only exception to INV-3).** On the Orchestrator board `gh issue create` carries FLAG labels only and the lane advance goes through the seam; the Target board is outside the seam (ADR-0047), so here — and only here — the lane label is a creation-time `--label`, which the deny hook permits solely because of `--repo "$TARGET_GH_REPO"`. Create each child with `childLabels(slice, scope)` (flags)
    plus the lane `childInitialState(slice, scope)` as a `--label`: in Target
    scope a slice with a `dependsOn` edge gets **`blocked`** instead
    of `ready-for-agent` (never bare). Its rendered

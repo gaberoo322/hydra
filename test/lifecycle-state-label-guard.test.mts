@@ -16,8 +16,9 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve, join } from "node:path";
 import { OPEN_STATES } from "../src/lifecycle/index.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -227,5 +228,79 @@ describe("lifecycle-state-label-guard: performance", () => {
     }
     samples.sort((a, b) => a - b);
     assert.ok(samples[2] < 1000, `guard median ${samples[2]}ms (samples ${samples.join(",")})`);
+  });
+});
+
+describe("lifecycle-state-label-guard: QA round-2 hardening (#5322)", () => {
+  // finding 1 (high): shell keywords stay as leading tokens
+  test("denies a state write behind do/then/else/( { ! keywords", () => {
+    assertDeny(`for n in 1 2; do ${GH_EDIT} $n ${ADD} needs-qa; done`);
+    assertDeny(`if true; then ${GH_EDIT} 5 ${ADD} needs-qa; fi`);
+    assertDeny(`(${GH_EDIT} 5 ${ADD} needs-qa)`);
+    assertDeny(`{ ${GH_EDIT} 5 ${ADD} needs-qa; }`);
+  });
+  test("keyword-wrapped FLAG label write is still allowed (sibling pin)", () => {
+    assertAllow(`for n in 1 2; do ${GH_EDIT} $n ${ADD} glm-eligible; done`);
+    assertAllow(`if true; then ${GH_EDIT} 5 ${ADD} enhancement; fi`);
+  });
+
+  // finding 8: wrapper bypasses
+  test("denies bash -c / sh -c / xargs / timeout / sudo -u wrappers", () => {
+    assertDeny(`bash -c '${GH_EDIT} 5 ${ADD} needs-qa'`);
+    assertDeny(`sh -lc "${GH_EDIT} 5 ${ADD} needs-qa"`);
+    assertDeny(`echo 5 | xargs -I{} ${GH_EDIT} {} ${ADD} needs-qa`);
+    assertDeny(`timeout 5 ${GH_EDIT} 5 ${ADD} needs-qa`);
+    assertDeny(`sudo -u bob ${GH_EDIT} 5 ${ADD} needs-qa`);
+  });
+  test("wrapped FLAG label writes and wrapped reads stay allowed (sibling pin)", () => {
+    assertAllow(`bash -c '${GH_EDIT} 5 ${ADD} glm-eligible'`);
+    assertAllow(`timeout 5 ${GH_EDIT} 5 ${ADD} enhancement`);
+    assertAllow(`bash -c 'gh issue list --label ready-for-agent'`);
+  });
+
+  // finding 4: PATCH payload scanning limited to label-bearing fields
+  test("PATCH issues/N: state word in title is not a label write", () => {
+    assertAllow(`${GH_API} -X PATCH repos/gaberoo322/hydra/issues/5 -f title='unblock: blocked on X' -f 'labels[]=bug'`);
+  });
+  test("PATCH issues/N: state in labels[] is still denied (sibling pin)", () => {
+    assertDeny(`${GH_API} -X PATCH repos/gaberoo322/hydra/issues/5 -f title=t -f 'labels[]=blocked'`);
+  });
+
+  // finding 9: GraphQL label mutation
+  test("gh api graphql label mutation naming a state is denied", () => {
+    assertDeny(`${GH_API} graphql -f query='mutation { addLabelsToLabelable(input:{labelableId:"X", labelIds:["needs-qa"]}) { clientMutationId } }'`);
+  });
+  test("gh api graphql read query naming a state is allowed (sibling pin)", () => {
+    assertAllow(`${GH_API} graphql -f query='{ repository(owner:"a",name:"b") { label(name:"needs-qa") { id } } }'`);
+  });
+
+  // finding 7: --repo exemption narrowed to the Target idiom
+  test("--repo $TARGET_REPO (not the sanctioned idiom) is inspected", () => {
+    assertDeny(`${GH_EDIT} 5 --repo $TARGET_REPO ${ADD} in-progress`);
+  });
+  test("--repo $TARGET_GH_REPO stays exempt (sibling pin)", () => {
+    assertAllow(`${GH_EDIT} 5 --repo "$TARGET_GH_REPO" ${ADD} in-progress`);
+  });
+
+  // finding 5: INV-7 fail-closed when the python verdict machinery crashes
+  function runWithBrokenVerdictPython(command: string) {
+    const dir = mkdtempSync(join(tmpdir(), "lsg-shim-"));
+    const real = spawnSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).stdout.trim();
+    const shim = join(dir, "python3");
+    // The JSON-parse call uses `-c`; the verdict script is fed on stdin as `-`.
+    writeFileSync(shim, `#!/bin/sh\nif [ "$1" = "-" ]; then exit 1; fi\nexec ${real} "$@"\n`);
+    chmodSync(shim, 0o755);
+    const r = spawnSync("bash", [HOOK], {
+      input: JSON.stringify(bash(command)),
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+    });
+    return r.status;
+  }
+  test("verdict crash on a suspect command fails closed (exit 2)", () => {
+    assert.equal(runWithBrokenVerdictPython(`${GH_EDIT} 5 ${ADD} needs-qa`), 2);
+  });
+  test("verdict crash on an unrelated command exits 0 (sibling pin)", () => {
+    assert.equal(runWithBrokenVerdictPython("ls -la"), 0);
   });
 });
