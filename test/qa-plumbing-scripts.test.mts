@@ -695,21 +695,21 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     assert.ok(r.effects.some((e) => e.kind === "fail-bounce-advance" && !e.ok));
   });
 
-  test("route escalate (shadow): a wouldPark report parks explicitly and posts the unified cap-park comment first", async () => {
+  test("route escalate (shadow): a live-arm park is the same parked:qa-fail-rounds refusal - no shadow-park branch, no caller-side cap comment", async () => {
+    // qa-fail-rounds is a live arm: the shadow seam parks and posts the unified comment itself, so the
+    // route sees the identical refusal it sees in enforce and adds only its own escalation comment.
     const h = harness({
       ghHandler: withState("OPEN"),
-      advanceHandler: (a) => (a[1] === "needs-dev-resume" ? { wouldPark: "qa-fail-rounds" } : undefined),
+      advanceHandler: refuse("needs-dev-resume", "parked:qa-fail-rounds"),
       phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high", escalationSummary: "ESC" }),
     });
     await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
-    assert.deepEqual(h.advances.map(advTo), ["needs-dev-resume", "parked"]);
-    assert.deepEqual(h.advances[1]?.slice(2), ["--reason", "cap:qa-fail-rounds", "--rationale", "QA-fail round cap reached (3 reviewed FAIL rounds on PR #77)", "--actor", "hydra-qa"]);
+    assert.deepEqual(h.advances.map(advTo), ["needs-dev-resume"], "no explicit follow-up park advance");
     const bodies = h.writes().filter((a) => a[0] === "issue" && a[1] === "comment").map((a) => argAfter(a, "--body") as string);
-    assert.equal(bodies.length, 2);
-    assert.match(bodies[0] ?? "", /^## Hydra cap park\n/);
-    assert.match(bodies[0] ?? "", /Hydra-Cap-Park: arm=qa-fail-rounds count=3 limit=3 unit=pr pr=77 source=trailer ts=2026-11-05T00:00:00Z$/);
-    assert.match(bodies[1] ?? "", /round cap reached/);
-    // sibling: no wouldPark report keeps the plain bounce (one advance).
+    assert.equal(bodies.length, 1, "QA posts only failEscalated; the unified park comment is the seam's");
+    assert.match(bodies[0] ?? "", /round cap reached/);
+    assert.ok(!bodies.some((b) => b.startsWith("## Hydra cap park")));
+    // sibling: no refusal keeps the plain bounce (one advance).
     const plain = harness({ ghHandler: withState("OPEN"), phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "high" }) });
     await runRoute(ROUTE_OPTS, readyPre(), plain.ports, realDeps());
     assert.deepEqual(plain.advances.map(advTo), ["needs-dev-resume"]);
@@ -1111,18 +1111,6 @@ describe("route golden bodies (posted bytes frozen, issue #5269 INV-7)", () => {
       ],
     },
     {
-      name: "escalate (shadow: explicit park)",
-      pre: readyPre(),
-      advance: (a) => (a[1] === "needs-dev-resume" ? { wouldPark: "qa-fail-rounds" } : undefined),
-      canned: { ...failCanned, escalationSummary: "ESCALATION-SUMMARY" },
-      state: "OPEN",
-      bodies: [
-        failPr,
-        "## Hydra cap park\n\nThis issue was parked automatically: the `qa-fail-rounds` cap was reached (3 of 3 per pr).\n\n| Arm | Count | Limit | Unit |\n|---|---|---|---|\n| qa-fail-rounds | 3 | 3 | pr |\n\nTo un-park: investigate why the attempts keep failing, then remove the `parked` label, add the right state label, and post `Hydra-Cap-Reset: by=<you> ts=<ISO-8601>` so every count restarts from that moment.\n\nHydra-Cap-Park: arm=qa-fail-rounds count=3 limit=3 unit=pr pr=77 source=trailer ts=2026-11-05T00:00:00Z",
-        `> *Automated QA escalated — round cap reached*\n\n\`FAIL\` on PR #77 — ${sum}. The issue is \`parked\`; no dev lane will pick it up until the operator un-parks it.\n\nESCALATION-SUMMARY\n\n${TRAILER}`,
-      ],
-    },
-    {
       name: "T4 bounce",
       pre: readyPre({ tier: { num: 4, adversarial: true } }),
       canned: { ...failCanned, roundAction: "deep-qa", deepQa: { action: "bounce", failNumber: 1 }, failMarker: "Verifier-Core deep-QA: FAIL" },
@@ -1196,7 +1184,7 @@ describe("route golden bodies (posted bytes frozen, issue #5269 INV-7)", () => {
       assert.deepEqual(posted, arm.bodies, `arm '${arm.name}'`);
       const isDefer = arm.opts?.defer === true;
       for (const b of posted) {
-        if (isDefer || b.includes("PASS proof") || b.startsWith("## Hydra cap park")) continue;
+        if (isDefer || b.includes("PASS proof")) continue;
         assert.equal(b.split("QA-Verdict:").length - 1, 1, `arm '${arm.name}': exactly one trailer`);
         assert.ok(b.trimEnd().split("\n").at(-1)?.startsWith("QA-Verdict: "), `arm '${arm.name}': the trailer is the LAST line`);
       }

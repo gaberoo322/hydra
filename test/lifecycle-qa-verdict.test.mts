@@ -255,14 +255,19 @@ describe("the 3rd reviewed FAIL parks through the seam (INV-5, INV-6)", () => {
     assert.ok(!w.labels.includes("ready-for-human"));
   });
 
-  test("shadow: bounces, reports wouldPark, and journals shadow-would-park for the PR", async () => {
+  test("shadow: qa-fail-rounds is a live arm - parks exactly as in enforce, the park entry tagged mode=shadow live=1", async () => {
     const w = world("shadow", liveThree(), three);
-    const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps);
-    assert.equal(res.ok, true);
-    assert.equal((res as { wouldPark?: string }).wouldPark, "qa-fail-rounds");
-    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["needs-dev-resume"] }]);
-    const shadow = w.journal.find((e) => e.result === "shadow-would-park:qa-fail-rounds")!;
-    assert.equal(shadow.evidence.pr, "7");
+    const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" }, actor: "hydra-qa" }, w.deps);
+    assert.deepEqual(
+      { ok: res.ok, code: (res as { code?: string }).code, written: (res as { written?: boolean }).written },
+      { ok: false, code: "parked:qa-fail-rounds", written: true },
+    );
+    assert.deepEqual(w.edits, [{ issue: 10, remove: ["needs-qa"], add: ["parked"] }]);
+    assert.equal(w.comments.filter((c) => c.number === 10 && c.body.includes("## Hydra cap park")).length, 1, "unified comment exactly once");
+    const park = w.journal.find((e) => e.result === "parked:qa-fail-rounds")!;
+    assert.equal(park.evidence.mode, "shadow");
+    assert.equal(park.evidence.live, "1");
+    assert.ok(!w.journal.some((e) => e.result.startsWith("shadow-would-park")), "a live park is not a would-park");
   });
 
   test("the playbook's explicit shadow follow-up (needs-dev-resume -> parked, cap: reason) is a legal transition", async () => {
