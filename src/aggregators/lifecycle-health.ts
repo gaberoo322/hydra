@@ -35,6 +35,7 @@ import {
 import { listQaVerdictCommentsSince, resolveGithubRepo, type QaVerdictCommentsResult } from "../github/issues.ts";
 import { isPassVerdict, parseQaVerdictTrailers } from "../qa/verdict-trailer.ts";
 import { logger } from "../logger.ts";
+import { InvariantViolationError } from "../errors.ts";
 
 export const BUILDER_HEALTH_BASELINES_PATH = "config/orchestrator/builder-health-baselines.json";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -133,14 +134,16 @@ interface MirroredEvent {
   ts_epoch: number;
 }
 
-function memberEvents(member: string): { events: MirroredEvent[]; ok: boolean } {
+function memberEvents(member: string): { events: MirroredEvent[]; ok: boolean; turnN: number | null } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(member);
   } catch (err) {
     logger.warn({ err }, "[lifecycle-health] skipping malformed turn row");
-    return { events: [], ok: false };
+    return { events: [], ok: false, turnN: null };
   }
+  const rawTurnN = (parsed as { turn_n?: unknown } | null)?.turn_n;
+  const turnN = Number.isInteger(rawTurnN) ? (rawTurnN as number) : null;
   const raw = (parsed as { parent_exceptions?: unknown } | null)?.parent_exceptions;
   const events: MirroredEvent[] = [];
   if (Array.isArray(raw)) {
@@ -150,7 +153,7 @@ function memberEvents(member: string): { events: MirroredEvent[]; ok: boolean } 
       }
     }
   }
-  return { events, ok: true };
+  return { events, ok: true, turnN };
 }
 
 /**
@@ -166,16 +169,18 @@ export function foldParentExceptions(runs: readonly RunTurns[]): ParentException
   const seen = new Set<string>();
   const byCause: Record<string, number> = {};
   for (const run of runs) {
-    for (const member of run.members) {
-      const { events, ok } = memberEvents(member);
-      if (!ok) continue;
+    const parsed = run.members.map(memberEvents).filter((m) => m.ok);
+    // An exception turn only counts when that turn has a posted row, so the
+    // numerator can never exceed the `turns` denominator.
+    const postedTurns = new Set(parsed.map((m) => m.turnN).filter((n): n is number => n !== null));
+    for (const { events } of parsed) {
       turns += 1;
       for (const ev of events) {
         const dedupe = `${run.runId}|${ev.turn}|${ev.cause}|${ev.ts_epoch}`;
         if (seen.has(dedupe)) continue;
         seen.add(dedupe);
         byCause[ev.cause] = (byCause[ev.cause] ?? 0) + 1;
-        exceptionTurns.add(`${run.runId}|${ev.turn}`);
+        if (postedTurns.has(ev.turn)) exceptionTurns.add(`${run.runId}|${ev.turn}`);
       }
     }
   }
@@ -363,7 +368,7 @@ export async function computeFirstPassQaYield(
     deps.readQaVerdictComments ??
     ((since: string) => listQaVerdictCommentsSince(since, { repo: resolveGithubRepo(deps.githubRepo) }));
   const [res, baselines] = await Promise.all([reader(new Date(windowStart).toISOString()), loadBuilderHealthBaselines(deps)]);
-  if (res.ok === false) throw new Error(`qa-verdict comment read failed: ${res.code}`);
+  if (res.ok === false) throw new InvariantViolationError(`qa-verdict comment read failed: ${res.code}`);
   const { population, firstPass } = foldFirstPassQaYield(res.comments, windowStart);
   return {
     yield: population === 0 ? null : firstPass / population,
@@ -386,7 +391,7 @@ export async function computeParkRatePerArm(
     (deps.readMode ?? (async () => (await loadLifecycleMode(repoRoot)).mode))(),
     loadBuilderHealthBaselines(deps),
   ]);
-  if (res.ok === false) throw new Error(res.error);
+  if (res.ok === false) throw new InvariantViolationError(res.error);
   const { claimsOpened, arms } = foldParkRate(res.events);
   return { mode, claimsOpened, arms, windowDays, baseline: baselines.parkRatePerArm };
 }
@@ -429,6 +434,15 @@ export function summarizeBaselineRows(
     turns,
     exceptionTurns,
   };
+}
+
+/**
+ * Merge a re-seen run's fresh row into its stored row: keep the one with more
+ * turns (a run near the 7d TTL has lost early turn rows, so the fresh replay
+ * can be smaller than what was recorded earlier).
+ */
+export function mergeBaselineRow(prev: BaselineRunRow | undefined, next: BaselineRunRow): BaselineRunRow {
+  return prev !== undefined && prev.turns > next.turns ? prev : next;
 }
 
 /** One run's recorded baseline row (the same fold the live field uses). */

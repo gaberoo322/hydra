@@ -29,6 +29,7 @@ import {
   filterMirrorRuns,
   ledgerToRunTurns,
   baselineRowFor,
+  mergeBaselineRow,
   computeParentExceptionRate,
   type LifecycleHealthDeps,
 } from "../src/aggregators/lifecycle-health.ts";
@@ -606,6 +607,28 @@ describe("lifecycle fields — parentExceptionRate", () => {
     assert.equal(f.turns, 4);
     assert.equal(f.exceptionTurns, 2);
     assert.deepEqual(f.byCause, { "script-error": 1, "notes-steer": 1, "defect-filed": 1 });
+  });
+
+  test("an event whose turn has no posted row does not inflate exceptionTurns past turns", () => {
+    const f = foldParentExceptions([
+      {
+        runId: "r1",
+        startedEpoch: 1,
+        // turn 1's row is gone (TTL); turn 2's row mirrors the turn-1 event
+        members: [turnRow(2, [{ cause: "script-error", turn: 1, ts_epoch: 90 }, { cause: "notes-steer", turn: 2, ts_epoch: 100 }])],
+      },
+    ]);
+    assert.equal(f.turns, 1);
+    assert.equal(f.exceptionTurns, 1, "only turn 2 has a row");
+    assert.ok(f.exceptionTurns <= f.turns);
+    assert.deepEqual(f.byCause, { "script-error": 1, "notes-steer": 1 });
+  });
+
+  test("mergeBaselineRow keeps the larger-turns row on a re-seen run, and takes a fuller or first row", () => {
+    const row = (turns: number) => ({ started_epoch: 1, turns, exceptionTurns: 0, byCause: {} });
+    assert.equal(mergeBaselineRow(row(10), row(4)).turns, 10, "shrunk replay must not overwrite");
+    assert.equal(mergeBaselineRow(row(4), row(10)).turns, 10);
+    assert.equal(mergeBaselineRow(undefined, row(3)).turns, 3);
   });
 
   test("turns=0 => rate null; a malformed turn row is skipped, not counted", async () => {

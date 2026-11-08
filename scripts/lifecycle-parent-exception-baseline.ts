@@ -7,7 +7,7 @@
  * Replays every Autopilot Run it can see (runs:index + turn rows in Redis, the
  * 7d TTL window) plus, with `--ledger`, the live Run Ledger, into per-run rows
  * keyed by run_id in config/orchestrator/builder-health-baselines.json. Rows
- * already in the file are kept and a re-seen run overwrites its own row, so the
+ * already in the file are kept and a re-seen run keeps whichever of its rows has more turns, so the
  * script is re-runnable: after ~5 weekly runs the file holds a true 30d
  * baseline. `summary` is recomputed over rows within 30d of the newest row and
  * records the real covered span (a baseline that covers 3 days says 3 days).
@@ -20,6 +20,7 @@ import {
   BUILDER_HEALTH_BASELINES_PATH,
   baselineRowFor,
   ledgerToRunTurns,
+  mergeBaselineRow,
   summarizeBaselineRows,
   type BaselineRunRow,
   filterMirrorRuns,
@@ -71,7 +72,8 @@ async function main(argv: string[]): Promise<number> {
     else runs.push(live);
   }
 
-  for (const run of runs) rows[run.runId] = baselineRowFor(run);
+  // A run near the 7d TTL has lost early turn rows; never shrink a stored row.
+  for (const run of runs) rows[run.runId] = mergeBaselineRow(rows[run.runId], baselineRowFor(run));
   section.baseline = summarizeBaselineRows(rows, new Date().toISOString());
 
   if (!dryRun) await writeFile(file, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
