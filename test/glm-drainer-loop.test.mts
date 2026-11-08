@@ -196,7 +196,7 @@ describe("scripts/glm/drainer-loop.sh — one dry-run tick end to end through re
     assert.doesNotMatch(r.combined, /would-heartbeat/);
     assert.doesNotMatch(r.combined, /tick driver faulted/);
     // stdout carries the one `{gate,pick,finish}` JSON line.
-    assert.match(r.combined, /\{"gate":\{"able":false,"reason":"paused"\},"pick":null,"finish":null\}/);
+    assert.match(r.combined, /\{"gate":\{"able":false,"reason":"paused"\},"pick":null,"claim":null,"finish":null\}/);
   });
 });
 
