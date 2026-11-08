@@ -12,7 +12,8 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, chmodSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -26,13 +27,16 @@ function py(code: string, env: Record<string, string> = {}): { status: number; s
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-const STAMP_PROBE = `
+const STAMP_LOAD = `
 import importlib.util, json, os, sys
 sys.path.insert(0, os.environ["AUTOPILOT"])
 spec = importlib.util.spec_from_file_location("stamp_slot_u", os.path.join(os.environ["AUTOPILOT"], "stamp-slot.py"))
 ss = importlib.util.module_from_spec(spec)
 sys.modules["stamp_slot_u"] = ss
 spec.loader.exec_module(ss)
+`;
+
+const STAMP_PROBE = `${STAMP_LOAD}
 calls = []
 class CP:
     def __init__(self, rc, out): self.returncode = rc; self.stdout = out; self.stderr = ""
@@ -115,12 +119,73 @@ describe("stamp-slot claim mode", () => {
   });
 
   test("a plan without a dispatch action for the slot exits 1 (not a skip)", () => {
-    const r = py(
-      STAMP_PROBE.replace('os.environ["SLOT"])\nprint', '"dev_orch")\nprint'),
-      { AUTOPILOT, CANNED: '{"rc":0,"out":""}', STATE: '{"slots":{"dev_orch":null}}', PLAN: '{"actions":[]}', SLOT: "dev_orch" },
-    );
+    const r = py(STAMP_PROBE, {
+      AUTOPILOT, CANNED: '{"rc":0,"out":""}', STATE: '{"slots":{"dev_orch":null}}', PLAN: '{"actions":[]}', SLOT: "dev_orch",
+    });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(JSON.parse(r.stdout.trim().split("\n").pop() as string).rc, 1);
+  });
+
+  test("a hung or unrunnable claim subprocess fails closed (exit 1, claim-error)", () => {
+    const r = py(
+      STAMP_PROBE.replace("ss.subprocess.run = fake_run", "def fake_run(argv, **kw):\n    raise ss.subprocess.TimeoutExpired(argv, 60)\nss.subprocess.run = fake_run"),
+      {
+        AUTOPILOT, CANNED: "{}", SLOT: "dev_orch",
+        STATE: JSON.stringify({ run_id: "abcdef12", turn: 1, slots: { dev_orch: null } }),
+        PLAN: JSON.stringify({ actions: [{ type: "dispatch", slot: "dev_orch", intent: { kind: "Fresh", anchor: "issue-7" } }] }),
+      },
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /"code": "claim-error"/);
+    assert.equal(JSON.parse(r.stdout.trim().split("\n").pop() as string).rc, 1);
+  });
+
+  test("garbage stdout on a nonzero claim exit still refuses (exit 1)", () => {
+    const out = claim("dev_orch", { kind: "Fresh", anchor: "issue-77" }, { rc: 1, out: "not json at all" });
+    assert.equal(out.rc, 1);
+    assert.equal(out.untouched, true);
+  });
+
+  test("main(): unreadable plan/state exits 2 (script-error), not a refusal", () => {
+    const r = py(`${STAMP_LOAD}\nprint(ss.main(["stamp-slot.py", "claim", "dev_orch"]))`, {
+      AUTOPILOT, HYDRA_AUTOPILOT_PLAN: "/nonexistent/plan.json", HYDRA_AUTOPILOT_STATE: "/nonexistent/state.json",
+    });
+    assert.equal(r.stdout.trim().split("\n").pop(), "2", r.stderr);
+  });
+
+  test("the claim --dispatch id equals the stamped slot dispatch_id, with and without worktreeBranch", () => {
+    const code = `${STAMP_LOAD}
+state = {"run_id": "abcdef12-0000", "turn": 3}
+out = []
+for extra in ({}, {"worktreeBranch": "worktree-agent-given"}):
+    action = {"type": "dispatch", "slot": "dev_orch", "intent": {"kind": "Fresh", "anchor": "issue-7"}, **extra}
+    argv = ss.build_claim_argv(state, action, "dev_orch")
+    rec = ss.build_slot(action, "t", "sonnet", "abcdef12-0000", 3, 0)
+    out.append([argv[argv.index("--dispatch") + 1], rec["dispatch_id"]])
+print(json.dumps(out))
+`;
+    const r = py(code, { AUTOPILOT });
+    assert.equal(r.status, 0, r.stderr);
+    const pairs = JSON.parse(r.stdout.trim().split("\n").pop() as string) as string[][];
+    for (const [claimId, slotId] of pairs) assert.equal(claimId, slotId);
+    assert.equal(pairs[0][0], "worktree-agent-abcdef12-t3-dev_orch");
+    assert.equal(pairs[1][0], "worktree-agent-given");
+  });
+
+  test("_is_dev_role agrees with src/lifecycle classRole for every classes.json slot (drift guard)", async () => {
+    // Loaded by computed path: this file's subject is the autopilot scripts, so a
+    // static import would count it as a second test file for caps.ts (#4134 ratchet).
+    const { classRole } = (await import(join(REPO_ROOT, "src", "lifecycle", "caps.ts"))) as { classRole: (c: string) => string };
+    const classes = (JSON.parse(readFileSync(join(AUTOPILOT, "classes.json"), "utf-8")) as { classes: { name: string }[] }).classes.map((c) => c.name);
+    const names = [...classes, "glm-dev", "glm_orch", "dev_future", "qa_future", "other_thing"];
+    const r = py(`${STAMP_LOAD}\nprint(json.dumps({n: ss._is_dev_role(n) for n in json.loads(os.environ["NAMES"])}))`, {
+      AUTOPILOT, NAMES: JSON.stringify(names),
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const got = JSON.parse(r.stdout.trim().split("\n").pop() as string) as Record<string, boolean>;
+    for (const n of names) assert.equal(got[n], classRole(n) === "dev", `${n} drifted from classRole`);
+    assert.equal(got["dev_orch"], true);
+    assert.equal(got["qa_orch"], false);
   });
 });
 
@@ -196,13 +261,85 @@ print(json.dumps([a.dispatch_id, b.dispatch_id]))
 
 });
 
+describe("reap run_completion wires the claim release (INV-10/12)", () => {
+  function runReap(opts: { slot: Record<string, unknown> | null; prList: string; npxExit: number; npxOut: string }) {
+    const dir = mkdtempSync(join(tmpdir(), "reap-claim-release-"));
+    try {
+      const npxLog = join(dir, "npx.log");
+      const bin = join(dir, "bin");
+      const gh = join(dir, "gh.sh");
+      writeFileSync(gh, `#!/usr/bin/env bash\nif [ "$1 $2" = "pr list" ]; then printf '%s' "$STUB_PR_LIST"; fi\nexit 0\n`);
+      chmodSync(gh, 0o755);
+      mkdirSync(bin);
+      writeFileSync(join(bin, "npx"), `#!/usr/bin/env bash\necho "$*" >> "${npxLog}"\nprintf '%s' "$NPX_OUT"\nexit ${opts.npxExit}\n`);
+      chmodSync(join(bin, "npx"), 0o755);
+      const state = join(dir, "state.json");
+      writeFileSync(state, JSON.stringify({
+        started_epoch: Math.floor(Date.now() / 1000),
+        limits: { token_budget: 2_000_000, subagent_max_tokens: 400_000, subagent_hard_max_tokens: 800_000 },
+        cumulative_tokens: 0, dispatches: 0, idle_turns: 0, burned_classes: [], reaped_task_ids: [],
+        slots: { dev_orch: opts.slot, qa_orch: null, research_orch: null, dev_target: null, qa_target: null, research_target: null },
+        signal_last_fired: {}, failure_log: [],
+      }));
+      const r = spawnSync("python3", [join(AUTOPILOT, "reap.py"), "completion", "dev_orch", "t1", "50000", "hydra-dev"], {
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          HYDRA_API_BASE: "http://127.0.0.1:1", HYDRA_BASE_URL: "http://127.0.0.1:1",
+          HYDRA_AUTOPILOT_STATE: state, HYDRA_AUTOPILOT_LOG: join(dir, "run.log"),
+          HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture", HYDRA_REAP_WORKTREE_GC: "0",
+          HYDRA_AUTOPILOT_GH_CLI: gh, HYDRA_AUTOPILOT_REDIS_CLI: "true",
+          STUB_PR_LIST: opts.prList, NPX_OUT: opts.npxOut,
+        },
+        encoding: "utf-8",
+      });
+      const log = existsSync(join(dir, "run.log")) ? readFileSync(join(dir, "run.log"), "utf-8") : "";
+      const calls = existsSync(npxLog) ? readFileSync(npxLog, "utf-8").trim().split("\n").filter(Boolean) : [];
+      return { status: r.status ?? -1, stderr: r.stderr ?? "", log, calls };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const slot = { skill: "hydra-dev", started_epoch: Math.floor(Date.now() / 1000) - 600, task_id: "t1", anchor: "issue-4001", dispatch_id: "did-1", branch: "did-1" };
+
+  test("an occupied slot with a PR for the anchor releases by dispatch id with pr-opened, exit 0", () => {
+    const r = runReap({
+      slot, npxExit: 0, npxOut: '{"ok":true,"prior":{"state":"in-progress"}}',
+      prList: JSON.stringify([{ headRefName: "issue-4001-fix", body: "Closes #4001" }]),
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.calls.length, 1, JSON.stringify(r.calls));
+    assert.match(r.calls[0], /scripts\/lifecycle\.ts release --dispatch did-1 --outcome pr-opened --actor reap/);
+    assert.match(r.log, /claim_release cls=dev_orch dispatch_id=did-1 outcome=pr-opened result=ok/);
+  });
+
+  test("no PR for the anchor releases with outcome no-pr", () => {
+    const r = runReap({ slot, npxExit: 0, npxOut: '{"ok":true,"prior":null}', prList: "[]" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.calls[0] ?? "", /--outcome no-pr/);
+    assert.match(r.log, /result=ok:no-claim/);
+  });
+
+  test("a slot-less completion (already cleared) releases nothing", () => {
+    const r = runReap({ slot: null, npxExit: 0, npxOut: "{}", prList: "[]" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(r.calls, []);
+  });
+
+  test("a failing release CLI is logged and reap still exits 0", () => {
+    const r = runReap({ slot, npxExit: 1, npxOut: '{"ok":false,"code":"redis-failed"}', prList: "[]" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.log, /claim_release .*result=redis-failed/);
+  });
+});
+
 describe("playbook pins", () => {
   const frag = (n: string) =>
     readFileSync(join(REPO_ROOT, "docs", "operator-playbooks", "_fragments", n), "utf-8");
 
   test("neither hydra-dev fragment writes in-progress directly", () => {
     for (const n of ["hydra-dev-parent-flow.md", "hydra-dev-child-flow.md"]) {
-      assert.ok(!frag(n).includes("--add-label in-progress"), n);
+      assert.doesNotMatch(frag(n), /--add-label[ =]+["']?in-progress/, n);
     }
   });
 

@@ -96,10 +96,17 @@ def find_dispatch(plan: dict, slot: str) -> dict | None:
     return None
 
 
+def slot_branch(action: dict, run_id: str, turn: int, cls: str) -> str:
+    """The dispatch id / worktree branch for a dispatch — the ONE derivation shared
+    by `build_slot` (the stamp) and `build_claim_argv` (the claim), so the claim
+    key and the stamped slot's `dispatch_id` cannot drift (#5418)."""
+    return action.get("worktreeBranch") or f"worktree-agent-{run_id[:8]}-t{turn}-{cls}"
+
+
 def build_slot(action: dict, task_id: str, model: str, run_id: str, turn: int, now: int) -> dict:
     """The slot record for a pipeline dispatch — pure, for the fixture suite."""
     cls = str(action.get("slot"))
-    branch = action.get("worktreeBranch") or f"worktree-agent-{run_id[:8]}-t{turn}-{cls}"
+    branch = slot_branch(action, run_id, turn, cls)
     attempt = dispatch_attempt(action)
     record: dict = {
         "skill": effective_skill(action),
@@ -153,7 +160,8 @@ _CLAIM_PURPOSES = {
 
 
 def _is_dev_role(slot: str) -> bool:
-    """Mirror of src/lifecycle/caps.ts classRole(): `dev_*` / `glm*` -> dev."""
+    """Mirror of src/lifecycle/caps.ts classRole(): `dev_*` / `glm*` -> dev.
+    Drift-guarded over every classes.json slot by test/lifecycle-dispatch-adoption.test.mts."""
     return slot.startswith("dev_") or slot.startswith("glm")
 
 
@@ -181,7 +189,7 @@ def build_claim_argv(state: dict, action: dict, slot: str) -> list[str]:
     purpose = _CLAIM_PURPOSES.get(getattr(intent, "kind", ""), "fresh")
     run_id = str(state.get("run_id") or "")
     turn = int(state.get("turn") or 0)
-    branch = action.get("worktreeBranch") or f"worktree-agent-{run_id[:8]}-t{turn}-{slot}"
+    branch = slot_branch(action, run_id, turn, slot)
     argv = [
         "npx", "tsx", "scripts/lifecycle.ts", "dispatch", m.group(1),
         "--dispatch", str(branch), "--class", slot, "--run", run_id,
