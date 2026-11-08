@@ -204,10 +204,12 @@ for i in 1..N; do
   CHILD_BODY=$(... renderChildBody(input, i, PARENT_NUM, SIBLING_NUMS, EXPECTED_TIER[i]) ...)
   CHILD_TITLE="${slice[i].title}"
   # childLabels(): the kind flag only (`enhancement`, or `bug` per slice.kind).
+  KIND_FLAG=(--label enhancement)
+  [ "${slice[i].kind}" = "bug" ] && KIND_FLAG=(--label bug)   # kind flag only, never a state
   CHILD_NUM=$(gh issue create \
     --repo gaberoo322/hydra \
     --title "$CHILD_TITLE" \
-    --label "${slice[i].kind:-enhancement}" \
+    "${KIND_FLAG[@]}" \
     --body "$CHILD_BODY" | grep -oP '/issues/\K\d+')
   # Two-hop birth: zero-state -> needs-triage is gate-free; then the child's
   # childInitialState() (`ready-for-agent`). A returned illegal-transition with
