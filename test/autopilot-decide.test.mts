@@ -4583,7 +4583,7 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     assert.equal(d[0].intent.pr, 4433);
   });
 
-  test("main() persists NO red-forward-fix tracker (#5318 INV-7): the state file carries no such key after the turn", () => {
+  test("#5318 INV-7: main() persists NO red-forward-fix tracker - the state file carries no such key after the turn", () => {
     const t = makeTmp();
     try {
       writeFileSync(t.state, JSON.stringify(withTurnSnapshot(glmState())));

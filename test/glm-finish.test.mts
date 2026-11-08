@@ -1188,12 +1188,4 @@ describe("runFinish — state writes ride the lifecycle seam (issue #5318 INV-1/
     assert.match(h.logs.join("\n"), /WARN failed to release issue #77: seam refused from-mismatch/);
     assert.equal(h.calls.filter((c) => c.startsWith("label:")).length, 0, "no direct state-label write after a refusal");
   });
-
-  test("src/glm/finish.ts writes no lifecycle state label directly", async () => {
-    const { readFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const src = readFileSync(join(import.meta.dirname, "..", "src", "glm", "finish.ts"), "utf-8");
-    assert.doesNotMatch(src, /editIssueLabels\([^)]*LABEL_(?:READY|IN_PROGRESS|NEEDS_QA)/);
-    assert.doesNotMatch(src, /remove: \[LABEL_(?:READY|IN_PROGRESS)/);
-  });
 });

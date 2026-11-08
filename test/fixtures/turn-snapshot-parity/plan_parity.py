@@ -27,6 +27,12 @@ GLM-only #4460 signals were folded into the provenance-agnostic resume pick
 (see `_fold_retired_glm_signals`), which changed only the red-forward-fix
 dispatch reason / surface-pr cause strings in the affected Plans.
 
+Re-recorded for #5318 (ADR-0047 D6/D7): the per-run `red_forward_fix_attempts` /
+`qa_orch_item_attempts` counters are retired, so the red-forward-fix dispatch
+reason lost its "attempt N/2" suffix and the capped `surface-pr
+red-forward-fix-exhausted` / QA-stall suppression Plans now dispatch (the seam's
+Live Caps park instead); every other Plan is byte-identical.
+
 Re-recorded again for #5078 (INV-7(c)): a `qa-verdict` event carrying SHA
 evidence but no `verdict_at_head` is now STALE (fail closed), so exactly one
 captured entry (index 129, a legacy-shaped matching-SHA PASS) no longer
