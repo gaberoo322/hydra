@@ -311,6 +311,7 @@
   "test/learning-promotion-threshold.test.mts": 1,
   "test/learning-reflection-health.test.mts": 1,
   "test/lifecycle-caps.test.mts": 8,
+  "test/lifecycle-dispatch-claim.test.mts": 6,
   "test/lifecycle-gates.test.mts": 11,
   "test/lifecycle-journal.test.mts": 3,
   "test/lifecycle-qa-verdict.test.mts": 8,

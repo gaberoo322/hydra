@@ -314,6 +314,44 @@ export async function readDispatchClaim(repo: string, issue: number): Promise<Re
   }
 }
 
+export type ListClaimsResult =
+  | { ok: true; claims: Array<{ issue: number; claim: DispatchClaim }> }
+  | { ok: false; error: string };
+
+/**
+ * SCAN `hydra:lifecycle:claim:<repo>#*` + GET each key. Read-only: never
+ * modifies a claim, writes no reverse index. Malformed values and keys whose
+ * suffix is not an issue number are skipped (logged).
+ */
+export async function listDispatchClaims(repo: string): Promise<ListClaimsResult> {
+  try {
+    const r = getRedisConnection();
+    const prefix = `hydra:lifecycle:claim:${repo}#`;
+    const keys = new Set<string>();
+    let cursor = "0";
+    do {
+      const [next, batch] = await r.scan(cursor, "MATCH", `${prefix}*`, "COUNT", 200);
+      cursor = next;
+      for (const k of batch) keys.add(k);
+    } while (cursor !== "0");
+    const claims: Array<{ issue: number; claim: DispatchClaim }> = [];
+    for (const key of keys) {
+      const suffix = key.slice(prefix.length);
+      if (!/^\d+$/.test(suffix)) {
+        logger.warn({ key }, "[lifecycle-journal] skipping claim key with non-numeric issue");
+        continue;
+      }
+      const claim = parseClaim(await r.get(key));
+      if (claim !== null) claims.push({ issue: Number(suffix), claim });
+    }
+    claims.sort((a, b) => a.issue - b.issue);
+    return { ok: true, claims };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] listDispatchClaims failed");
+    return fail("listDispatchClaims", err);
+  }
+}
+
 function parseClaim(raw: string | null): DispatchClaim | null {
   if (raw === null) return null;
   try {

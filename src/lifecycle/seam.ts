@@ -39,6 +39,7 @@ import {
   appendLifecycleEntry,
   closeDispatchClaim,
   expireJournalOnClose,
+  listDispatchClaims,
   openDispatchClaim,
   persistJournal,
   readDispatchClaim,
@@ -47,6 +48,7 @@ import {
   type DispatchClaim,
   type JournalSource,
   type JournalWriteResult,
+  type ListClaimsResult,
   type LifecycleJournalEntry,
   type OpenClaimResult,
   type ReadClaimResult,
@@ -70,6 +72,7 @@ import {
 import { isUnsanctionedHoldExit } from "./hold-exit.ts";
 import {
   buildSeedEvidence,
+  classRole,
   countReviewedFailRoundsSinceReset,
   evaluateCaps,
   isJournalMiss,
@@ -186,6 +189,8 @@ export interface SeamDeps {
     /** Index an unsanctioned human-hold exit for the attention feed (#5313). */
     read: (repo: string, issue: number) => Promise<ReadJournalResult>;
     readClaim: (repo: string, issue: number) => Promise<ReadClaimResult>;
+    /** SCAN the held claims (stale arm, release-by-dispatch). Absent = those paths report `redis-failed`. */
+    listClaims?: (repo: string) => Promise<ListClaimsResult>;
   };
   now: () => number;
 }
@@ -375,7 +380,11 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
           const hash = await getDesignConceptHash(`issue-${n}`);
           return {
             ok: true,
-            value: { exists: Object.keys(hash).length > 0, status: hash.status ?? "" },
+            value: {
+              exists: Object.keys(hash).length > 0,
+              status: hash.status ?? "",
+              artifactHash: hash.artifactHash ? hash.artifactHash : null,
+            },
           };
         } catch (err) {
           logger.error({ err }, "[lifecycle] design-concept fetch failed");
@@ -413,6 +422,7 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
       persist: persistJournal,
       read: readLifecycleJournal,
       readClaim: readDispatchClaim,
+      listClaims: listDispatchClaims,
     },
     now: () => Date.now(),
   };
@@ -992,11 +1002,14 @@ export async function operatorReopen(
 // claim / release (change no label, except a cap park)
 // ---------------------------------------------------------------------------
 
+/** Class of the placeholder claims written by `scripts/lifecycle-legacy-backfill.ts`. */
+export const LEGACY_BACKFILL_CLASS = "legacy-backfill";
+
 export type ClaimPurpose = "fresh" | "resume" | "forward-fix";
 export const CLAIM_PURPOSES: readonly ClaimPurpose[] = ["fresh", "resume", "forward-fix"];
 
 /** Closed enum a claim is released with (ADR-0047 D5/D6). */
-export const CLAIM_OUTCOMES = ["pr-opened", "no-pr", "verdict-posted", "stall", "released"] as const;
+export const CLAIM_OUTCOMES = ["pr-opened", "no-pr", "verdict-posted", "stall", "released", "stale"] as const;
 export type ClaimOutcome = (typeof CLAIM_OUTCOMES)[number];
 
 export interface ClaimInput {
@@ -1055,7 +1068,13 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
   };
 
   // INV-10: the claim-held check runs BEFORE any counting or park.
-  const held = await deps.journal.readClaim(deps.repo, issue);
+  // Sole exception (INV-7): a `legacy-backfill` placeholder is released by its own
+  // dispatchId so the real dispatch can take over in the same call.
+  let held = await deps.journal.readClaim(deps.repo, issue);
+  if (held.ok && held.claim && held.claim.class === LEGACY_BACKFILL_CLASS) {
+    const takeover = await releaseClaim(issue, held.claim.dispatchId, deps, actor, "released");
+    if (takeover.ok) held = { ok: true, claim: null };
+  }
   if (held.ok && held.claim) return { ok: false, code: "claim-held", existing: held.claim };
 
   // Re-read the issue to stamp `state` (INV-13). A failed read skips the cap check (INV-12).
@@ -1148,4 +1167,121 @@ export async function releaseClaim(
     }),
   );
   return { ok: true, prior: res.prior };
+}
+
+export type ReleaseByDispatchResult =
+  | { ok: true; prior: DispatchClaim | null; issue: number | null }
+  | { ok: false; code: "redis-failed" | "claim-owner-mismatch" | "claim-ambiguous" };
+
+/**
+ * Release the claim whose `dispatchId` matches, without knowing its issue (SCAN
+ * over claim keys; no reverse index). Zero matches is idempotent: `prior: null`,
+ * no journal entry. The close itself is the same compare-and-delete as
+ * {@link releaseClaim}, so a claim re-opened under another id in between is
+ * never deleted. Never throws.
+ */
+export async function releaseClaimByDispatch(
+  dispatchId: string,
+  deps: SeamDeps,
+  actor = "cli",
+  outcome?: ClaimOutcome,
+): Promise<ReleaseByDispatchResult> {
+  if (dispatchId === "" || !deps.journal.listClaims) return { ok: false, code: "redis-failed" };
+  const listed = await deps.journal.listClaims(deps.repo);
+  if (listed.ok === false) return { ok: false, code: "redis-failed" };
+  const matches = listed.claims.filter((c) => c.claim.dispatchId === dispatchId);
+  if (matches.length === 0) return { ok: true, prior: null, issue: null };
+  if (matches.length > 1) {
+    logger.error({ dispatchId, issues: matches.map((m) => m.issue) }, "[lifecycle] ambiguous dispatch id");
+    return { ok: false, code: "claim-ambiguous" };
+  }
+  const res = await releaseClaim(matches[0].issue, dispatchId, deps, actor, outcome);
+  return res.ok === true ? { ok: true, prior: res.prior, issue: matches[0].issue } : res;
+}
+
+// ---------------------------------------------------------------------------
+// composite dispatch verb (ADR-0047 D5/D7, issue #5315)
+// ---------------------------------------------------------------------------
+
+export interface DispatchInput {
+  issue: number;
+  dispatchId: string;
+  class: string;
+  run: string;
+  actor?: string;
+  pr?: number;
+  purpose?: ClaimPurpose;
+}
+
+export type DispatchResult =
+  | {
+      ok: true;
+      claim: DispatchClaim;
+      /** The `in-progress` advance, or null when none was attempted (non-dev role, other state, failed read). */
+      advanced: Extract<AdvanceResult, { ok: true }> | null;
+      /** Set in shadow when the advance would have been refused in enforce. */
+      wouldRefuse?: string;
+      wouldPark?: string;
+    }
+  | { ok: false; code: "claim-held" | "redis-failed"; existing?: DispatchClaim | null }
+  | { ok: false; code: `parked:${string}`; written: boolean }
+  | { ok: false; code: "advance-refused"; reason: string; released: boolean };
+
+/**
+ * Fetch the Design Concept, open the claim (copying the artifact hash only when
+ * the artifact is `approved`), then advance dev-role dispatches to `in-progress`.
+ * A refused advance in enforce releases the claim BEFORE the refusal is returned.
+ * Callers never supply the hash. Never throws.
+ */
+export async function dispatch(input: DispatchInput, deps: SeamDeps): Promise<DispatchResult> {
+  const { issue } = input;
+  const actor = input.actor ?? "cli";
+
+  const dc = await deps.fetch.designConcept(issue);
+  const artifactHash =
+    dc.ok && dc.value.exists && dc.value.status === "approved" ? (dc.value.artifactHash ?? null) : null;
+
+  const claimed = await openClaim(
+    {
+      issue,
+      dispatchId: input.dispatchId,
+      class: input.class,
+      run: input.run,
+      artifactHash,
+      actor,
+      pr: input.pr,
+      purpose: input.purpose,
+    },
+    deps,
+  );
+  if (claimed.ok === false) return claimed;
+  const base = { claim: claimed.claim, ...(claimed.wouldPark !== undefined ? { wouldPark: claimed.wouldPark } : {}) };
+
+  if (classRole(input.class) !== "dev") return { ok: true, ...base, advanced: null };
+  const view = await deps.view(issue);
+  if (view.ok === false) return { ok: true, ...base, advanced: null };
+  const states = stateLabelsOf(view.row.labels);
+  if (states.length !== 1 || (states[0] !== "ready-for-agent" && states[0] !== "needs-dev-resume")) {
+    return { ok: true, ...base, advanced: null };
+  }
+
+  const adv = await advance(
+    {
+      issue,
+      to: "in-progress",
+      evidence: { dispatch: input.dispatchId, class: input.class, run: input.run },
+      actor,
+    },
+    deps,
+  );
+  if (adv.ok === false) {
+    const released = await releaseClaim(issue, input.dispatchId, deps, actor, "released");
+    return { ok: false, code: "advance-refused", reason: adv.code, released: released.ok };
+  }
+  return {
+    ok: true,
+    ...base,
+    advanced: adv,
+    ...(adv.wouldRefuse !== undefined ? { wouldRefuse: adv.wouldRefuse } : {}),
+  };
 }
