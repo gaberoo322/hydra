@@ -36,7 +36,11 @@
  *    the wrapper definition line is counted, its calls are not;
  *  - two-hop aliases and `export { F as x }` re-exports from another module;
  *  - flags assembled from a separately-bound string (`const FLAG = "--add-label"`);
- *  - `.github/workflows/**` (ADR-0047 D1).
+ *  - `.github/workflows/**` (ADR-0047 D1);
+ *  - PR labels are flags, not state (ADR-0047 D2, #5428): a label flag inside a
+ *    `gh pr <subcmd>` command (shell or argv form) and a `gh api` write on an
+ *    `issues/$PR*|{pr*}/labels` path are not sites. The latter is identifier-based, so the
+ *    aliasing evasion `PR=$ISSUE; gh api -X DELETE repos/o/r/issues/$PR/labels/x` is not counted.
  */
 
 import { readdir, readFile, writeFile } from "node:fs/promises";
@@ -164,6 +168,39 @@ function inCreateContext(text: string, idx: number, matched = ""): boolean {
   return CREATE_CMD_RE.test(win);
 }
 
+/** `issues/$PR/labels`, `issues/${PR_NUMBER}/labels`, `issues/{pr_number}/labels`: PR-identifier label path (#5428). */
+const PR_LABEL_PATH_RE = /issues\/(?:\$\{?|\{)(?:PR|pr)\w*\}?\/labels/;
+
+/**
+ * Is the flag at `idx` inside a `gh pr <subcmd>` command (shell or argv form)? PR labels are flags
+ * (ADR-0047 D2). Same command bound as `-l`: the nearest `gh pr|issue` start before the flag must be
+ * `pr`, with no unquoted `;` / `&&` / `||` / `|` / unbracketed newline between (#5428).
+ */
+function inPrContext(text: string, idx: number): boolean {
+  const win = text.slice(Math.max(0, idx - 300), idx);
+  let pr = -1;
+  let issue = -1;
+  for (const m of win.matchAll(/\bgh["',\s[]+(pr|issue)\b/g)) {
+    const at = (m.index ?? 0) + m[0].length - m[1]!.length;
+    if (m[1] === "pr") pr = at;
+    else issue = at;
+  }
+  for (const m of win.matchAll(/(["'])(pr|issue)\1\s*,\s*["']\w+["']/g)) {
+    const at = (m.index ?? 0) + 1;
+    if (m[2] === "pr") pr = Math.max(pr, at);
+    else issue = Math.max(issue, at);
+  }
+  if (pr < 0 || issue > pr) return false;
+  const tail = win.slice(pr).replace(/\\\r?\n/g, " ").replace(/\r/g, "");
+  if (tail.includes("<<")) return true;
+  let depth = 0;
+  for (const ch of win.slice(Math.max(0, pr - 80), pr)) {
+    if (ch === "[" || ch === "(" || ch === "{") depth++;
+    else if (ch === "]" || ch === ")" || ch === "}") depth--;
+  }
+  return !hasUnquotedBoundary(tail, win[pr - 1] ?? "", depth);
+}
+
 /** Join backslash-continued physical lines; each logical line keeps its first physical line number. */
 function logicalLines(text: string): Array<{ line: number; text: string; offset: number }> {
   const phys = text.split(/\r?\n/);
@@ -191,6 +228,7 @@ export function scanTextSites(text: string): number[] {
   for (const { line: lineNo, text: line, offset } of logicalLines(text)) {
     let hit = false;
     for (const m of line.matchAll(FLAG_RE)) {
+      if (inPrContext(text, offset + (m.index ?? 0))) continue;
       if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, offset + (m.index ?? 0), m[0])) continue;
       const argList = m[1] !== undefined; // `"--add-label", x` list form
       const quoted = m[2] ?? m[3];
@@ -206,11 +244,12 @@ export function scanTextSites(text: string): number[] {
     }
     for (const re of [CONCAT_RE, TRAILING_EQ_RE]) {
       for (const m of line.matchAll(re)) {
+        if (inPrContext(text, offset + (m.index ?? 0))) continue;
         if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, offset + (m.index ?? 0), m[0])) continue;
         hit = true; // operand not inside the literal: unresolvable, fail closed
       }
     }
-    if (!hit && GH_API_RE.test(line) && (/\/labels\b/.test(line) || /labels\[\]=/.test(line))) {
+    if (!hit && GH_API_RE.test(line) && !PR_LABEL_PATH_RE.test(line) && (/\/labels\b/.test(line) || /labels\[\]=/.test(line))) {
       const isWrite =
         /(?:-X|--method)["',= ]+(?:POST|PUT|PATCH|DELETE)\b/i.test(line) ||
         /(?:-[fF]|--field|--raw-field)["',= ]*["']?labels\[\]=/.test(line) ||
@@ -229,6 +268,7 @@ export function scanTextSites(text: string): number[] {
   const seen = new Set(sites);
   for (const m of text.matchAll(FLAG_RE)) {
     if (m[1] === undefined || !m[0].includes("\n")) continue; // single-line matches handled above
+    if (inPrContext(text, m.index!)) continue;
     if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, m.index!, m[0])) continue;
     const quoted = m[2] ?? m[3];
     const operand = quoted ?? m[4] ?? "";

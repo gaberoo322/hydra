@@ -404,6 +404,48 @@ describe("lifecycle-seam-check: evasion forms (#5367)", () => {
   });
 });
 
+describe("lifecycle-seam-check: PR-context carve-out (#5428)", () => {
+  const md = (text: string) => scanFileSites("docs/operator-playbooks/hydra-x.md", text);
+  const ts = (text: string) => scanFileSites("src/x.ts", text);
+
+  test("gh pr edit --add-label of a state is not a site", () => {
+    assert.deepEqual(md("gh pr edit 5 --add-label ready-for-human"), []);
+    assert.deepEqual(md('gh pr edit "${PR_NUMBER}" --repo o/r --add-label ready-for-human'), []);
+  });
+
+  test("gh pr create --label and -l are not sites", () => {
+    assert.deepEqual(md("gh pr create --label needs-qa --title t"), []);
+    assert.deepEqual(md("gh pr create -l needs-qa --title t"), []);
+  });
+
+  test("PR context is command-bounded: a following gh issue write is still a site", () => {
+    assert.deepEqual(md("gh pr edit 5 --add-label x && gh issue edit 5 --add-label needs-qa"), [1]);
+  });
+
+  test("argv form gh pr edit is not a site", () => {
+    assert.deepEqual(ts('run("gh", ["pr", "edit", "--add-label", "ready-for-human"]);'), []);
+  });
+
+  test("gh api on a PR-identifier label path is not a site", () => {
+    assert.deepEqual(md('gh api -X DELETE "repos/o/r/issues/$PR/labels/$L"'), []);
+    assert.deepEqual(md("gh api -X DELETE repos/o/r/issues/${PR_NUMBER}/labels/ready-for-human"), []);
+  });
+
+  test("gh api on an issue identifier or literal number stays a site", () => {
+    assert.deepEqual(md('gh api -X DELETE "repos/o/r/issues/$ISSUE/labels/$L"'), [1]);
+    assert.deepEqual(md("gh api -X DELETE repos/o/r/issues/42/labels/needs-qa"), [1]);
+  });
+
+  test("documented non-count: PR aliased from an issue number", () => {
+    assert.deepEqual(md("PR=$ISSUE; gh api -X DELETE repos/o/r/issues/$PR/labels/needs-qa"), []);
+  });
+
+  test("hydra-review and hydra-pr-rebase remain scan surfaces", () => {
+    assert.deepEqual(scanFileSites("docs/operator-playbooks/hydra-review.md", "gh issue edit 5 --add-label needs-qa"), [1]);
+    assert.deepEqual(scanFileSites("docs/operator-playbooks/hydra-pr-rebase.md", "gh issue edit 5 --add-label needs-qa"), [1]);
+  });
+});
+
 describe("lifecycle-seam-check: fails closed", () => {
   test("an unreadable scan root throws instead of being skipped", async () => {
     // package.json is a file, so <root>/docs/... is ENOTDIR, not a missing dir.
