@@ -302,6 +302,34 @@ describe("seam spine (INV-3..6)", () => {
     assert.equal("code" in bad ? bad.code : null, "unknown-target-state");
   });
 
+  test("--from compare-and-set (#5318 INV-5): a differing / ambiguous / absent live state refuses from-mismatch BEFORE any write, in BOTH modes", async () => {
+    for (const mode of ["shadow", "enforce"] as const) {
+      for (const labels of [["qa-passed"], ["in-progress", "needs-qa"], ["enhancement"]]) {
+        const h = harness(labels, mode);
+        const res = await advance({ issue: 10, to: "needs-qa", expectFrom: "in-progress", evidence: { pr: "55" } }, h.deps);
+        assert.equal("code" in res ? res.code : null, "from-mismatch", `${mode} ${labels.join(",")}`);
+        assert.equal(h.edits.length, 0, "a stale caller premise never reaches the write");
+        assert.equal(h.journal.at(-1)?.result, "refused:from-mismatch");
+      }
+    }
+  });
+
+  test("--from matching the live single state proceeds exactly as without it", async () => {
+    const h = harness(["in-progress"], "enforce", { pr: { number: 55, state: "OPEN", body: "Closes #10" } });
+    const res = await advance({ issue: 10, to: "needs-qa", expectFrom: "in-progress", evidence: { pr: "55" } }, h.deps);
+    assert.equal(res.ok, true);
+    assert.equal(h.edits.length, 1);
+  });
+
+  test("blocked -> needs-qa is a legal reconcile row gated on an open PR (#5318 INV-10)", async () => {
+    const ok = harness(["blocked"], "enforce", { pr: { number: 55, state: "OPEN", body: "Closes #10" } });
+    const res = await advance({ issue: 10, to: "needs-qa", expectFrom: "blocked", evidence: { pr: "55" } }, ok.deps);
+    assert.equal(res.ok, true);
+    const noPr = harness(["blocked"], "enforce");
+    const refused = await advance({ issue: 10, to: "needs-qa", expectFrom: "blocked" }, noPr.deps);
+    assert.equal(refused.ok, false, "without pr evidence the pr-open gate refuses");
+  });
+
   test("two state labels are invalid: shadow writes and removes both, enforce refuses", async () => {
     const shadow = harness(["needs-qa", "in-progress"], "shadow");
     const s = await advance({ issue: 10, to: "needs-dev-resume" }, shadow.deps);

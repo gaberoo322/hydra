@@ -452,3 +452,27 @@ describe("github/pr-refs (issue #4683)", () => {
     );
   });
 });
+
+describe("pr-refs.py --pairs (issue #5318 INV-10)", () => {
+  function pairs(prs: unknown[]): string {
+    const r = spawnSync("python3", [PY_SCRIPT, "--pairs"], { input: JSON.stringify(prs), encoding: "utf-8" });
+    assert.equal(r.status, 0, `pr-refs.py --pairs exited non-zero: ${r.stderr}`);
+    return r.stdout;
+  }
+
+  test("prints '<issue> <pr>' lines over the union predicate; the first PR wins", () => {
+    const out = pairs([
+      { number: 10, headRefName: "issue-5-thing", body: "" },
+      { number: 11, headRefName: "other", body: "Closes #5 and Refs #6" },
+      { number: 12, headRefName: "misc", body: "see #7" },
+    ]);
+    assert.equal(out, "5 10\n6 11\n");
+  });
+
+  test("rows without an integer number are skipped; a malformed payload prints nothing", () => {
+    assert.equal(pairs([{ headRefName: "issue-5-x", body: "" }]), "");
+    const r = spawnSync("python3", [PY_SCRIPT, "--pairs"], { input: "not json", encoding: "utf-8" });
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout, "");
+  });
+});

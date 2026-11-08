@@ -62,6 +62,9 @@ interface Paths {
   log: string;
   ghStub: string;
   ghCallsLog: string;
+  /** Recorder standing in for scripts/lifecycle.ts (HYDRA_AUTOPILOT_LIFECYCLE_CLI, #5318). */
+  lifecycleStub: string;
+  lifecycleCallsLog: string;
 }
 
 /**
@@ -139,7 +142,20 @@ esac
 `,
   );
   chmodSync(ghStub, 0o755);
-  return { dir, state: join(dir, "state.json"), log: join(dir, "nightly.log"), ghStub, ghCallsLog };
+  // #5318: reap writes issue state only through the lifecycle seam CLI. The recorder
+  // logs argv and exits $STUB_LIFECYCLE_EXIT (default 0; non-zero = a seam refusal).
+  const lifecycleStub = join(dir, "lifecycle-stub.sh");
+  const lifecycleCallsLog = join(dir, "lifecycle-calls.log");
+  writeFileSync(
+    lifecycleStub,
+    `#!/usr/bin/env bash
+echo "$*" >> "${lifecycleCallsLog}"
+echo '{"ok":true}'
+exit "\${STUB_LIFECYCLE_EXIT:-0}"
+`,
+  );
+  chmodSync(lifecycleStub, 0o755);
+  return { dir, state: join(dir, "state.json"), log: join(dir, "nightly.log"), ghStub, ghCallsLog, lifecycleStub, lifecycleCallsLog };
 }
 
 function writeState(path: string, patch: Record<string, unknown>): void {
@@ -184,6 +200,7 @@ function runCompletion(
       HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
       HYDRA_REAP_WORKTREE_GC: "0", // keep the worktree-GC side-effect out of the test
       HYDRA_AUTOPILOT_GH_CLI: paths.ghStub,
+      HYDRA_AUTOPILOT_LIFECYCLE_CLI: paths.lifecycleStub,
       // Issue #4503: keep the branch-recovery HGET off `docker exec` (live Redis).
       HYDRA_AUTOPILOT_REDIS_CLI: "true",
       ...ghEnv,
@@ -195,6 +212,12 @@ function runCompletion(
 
 function runLog(paths: Paths): string {
   return existsSync(paths.log) ? readFileSync(paths.log, "utf-8") : "";
+}
+
+function lifecycleCalls(paths: Paths): string[] {
+  return existsSync(paths.lifecycleCallsLog)
+    ? readFileSync(paths.lifecycleCallsLog, "utf-8").trim().split("\n").filter(Boolean)
+    : [];
 }
 
 function ghCalls(paths: Paths): string[] {
@@ -265,16 +288,11 @@ describe("reap.py completion → dev_orch no-PR stall detection (issue #3866)", 
         calls.some((c) => c.startsWith("pr list") && c.includes("--repo hydra-test/nonexistent-fixture")),
         `must query open PRs for the anchor's repo: ${JSON.stringify(calls)}`,
       );
-      assert.ok(
-        calls.some(
-          (c) =>
-            c.startsWith("issue edit 3726") &&
-            c.includes("--remove-label ready-for-agent") &&
-            c.includes("--remove-label in-progress") &&
-            c.includes("--add-label needs-dev-resume"),
-        ),
-        `must relabel issue #3726 to needs-dev-resume: ${JSON.stringify(calls)}`,
-      );
+      // #5318: the state move is a seam compare-and-set, never a direct gh edit.
+      assert.deepEqual(lifecycleCalls(tmp), [
+        "advance 3726 needs-dev-resume --from in-progress --actor reap --evidence dispatch=issue-3726-fix",
+      ]);
+      assert.ok(!calls.some((c) => c.startsWith("issue edit")), `no direct label write: ${JSON.stringify(calls)}`);
       assert.ok(
         calls.some((c) => c.startsWith("issue comment 3726")),
         `must post an explanatory comment on issue #3726: ${JSON.stringify(calls)}`,
@@ -723,20 +741,15 @@ print("NONE" if proc is None else f"RETURNCODE={proc.returncode}")
 });
 
 // ---------------------------------------------------------------------------
-// Issue #4808 — the durable no-PR resume cap. The label-derived
-// orch_dev_resume_nopr_anchor pin (decide.py) has no state key by design;
-// its cap lives HERE, at stall time: `_handle_dev_orch_stall` counts the
-// anchor's prior no-PR stall comments (ONE `gh issue view --json comments`
-// read on the already-narrow confirmed-stall branch) and, at the third
-// stall, hands the anchor to the operator instead of queueing another
-// resume. An unreadable count falls back to today's behaviour.
+// Issue #5318 (ADR-0047 D6/D7) — the durable no-PR resume cap moved OUT of reap.
+// The #4808 comment-marker counter, its ready-for-human relabel and its cap
+// comment are deleted; the seam's `dev-nopr-resume` Live Cap counts the
+// `claim-closed outcome=no-pr` entries reap writes when it releases the claim
+// and parks (reason cap:dev-nopr-resume) at the next resume claim.
 // ---------------------------------------------------------------------------
 
-describe("reap.py completion → no-PR resume cap (issue #4808)", () => {
-  // Byte-identical to NOPR_STALL_COMMENT_MARKER's prefixed comment in
-  // reap_ghrefs.py — the count matches on the marker substring.
+describe("reap.py completion → no-PR stall hands the cap to the seam (issue #5318)", () => {
   const STALL_BODY = "> *Automated reap — dev_orch stalled with no PR (issue #3866)*\n\nprior stall";
-  const CAP_BODY = "> *Automated reap — dev_orch no-PR resume cap reached (issue #4808)*\n\nprior cap";
   const commentsJson = (bodies: string[]): string =>
     JSON.stringify({ comments: bodies.map((body) => ({ body })) });
 
@@ -751,166 +764,59 @@ describe("reap.py completion → no-PR resume cap (issue #4808)", () => {
     writeState(path, { slots: { dev_orch: slot } });
   }
 
-  test("CAP REACHED: third no-PR stall relabels ready-for-human, posts the cap comment, queues nothing", () => {
+  test("a stall with MANY prior stall comments still just advances + queues: no comment count, no ready-for-human, no cap comment", () => {
     const tmp = makeTmp();
     try {
       writeStalledSlot(tmp.state, "t9", "worktree-agent-glm-3726-1");
       const r = runCompletion(["dev_orch", "t9", "50000", "hydra-dev"], tmp, {
         STUB_PR_LIST_JSON: "[]",
         STUB_ISSUE_VIEW_JSON: '{"state":"OPEN"}',
-        // Two prior no-PR stall comments — at DEV_NOPR_RESUME_CAP (2), so
-        // this reap is the THIRD stall: cap, don't queue.
-        STUB_ISSUE_COMMENTS_JSON: commentsJson([STALL_BODY, STALL_BODY]),
-      });
-      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
-
-      const log = runLog(tmp);
-      assert.match(
-        log,
-        /dev_stall_no_pr_capped anchor=issue-3726 task_id=t9 branch=worktree-agent-glm-3726-1 prior_stalls=2 relabelled=True/,
-        "the capped stall must log dev_stall_no_pr_capped with its prior count",
-      );
-      assert.ok(!log.includes("dev_stall_no_pr anchor="), "the ordinary stall log line must not also fire");
-
-      const calls = ghCalls(tmp);
-      assert.ok(
-        calls.some((c) => c.startsWith("issue view 3726") && c.includes("--json comments")),
-        `must count prior stall comments via ONE issue view --json comments read: ${JSON.stringify(calls)}`,
-      );
-      assert.ok(
-        calls.some(
-          (c) =>
-            c.startsWith("issue edit 3726") &&
-            c.includes("--remove-label ready-for-agent") &&
-            c.includes("--remove-label in-progress") &&
-            c.includes("--remove-label needs-dev-resume") &&
-            c.includes("--add-label ready-for-human"),
-        ),
-        `must relabel to ready-for-human and strip needs-dev-resume at the cap: ${JSON.stringify(calls)}`,
-      );
-      assert.ok(
-        !calls.some((c) => c.startsWith("issue edit") && c.includes("--add-label needs-dev-resume")),
-        `must NOT relabel needs-dev-resume at the cap (that would queue yet another resume): ${JSON.stringify(calls)}`,
-      );
-      assert.ok(
-        calls.some((c) => c.startsWith("issue comment 3726")),
-        "must post the cap comment",
-      );
-      assert.ok(
-        calls.some((c) => c.includes("dev_orch no-PR resume cap reached")),
-        `the posted comment must carry the cap marker literal reap_ghrefs counts: ${JSON.stringify(calls)}`,
-      );
-      assert.ok(
-        calls.some((c) => c.includes("**Branch:**")),
-        "the cap comment must name the stalled branch when known (the operator's salvage handle)",
-      );
-      assert.ok(
-        !calls.some((c) => c.includes("dev_orch stalled with no PR (issue #3866)")),
-        `the ordinary #3866 stall comment must NOT also be posted at the cap: ${JSON.stringify(calls)}`,
-      );
-
-      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      assert.ok(
-        !s.dev_resume_pending || s.dev_resume_pending.length === 0,
-        "a capped stall must queue NOTHING — the cycle ends with the operator, not another resume",
-      );
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("CAP RELABEL FAILED: no cap comment is posted (it would reset the count); ordinary stall path runs", () => {
-    const tmp = makeTmp();
-    try {
-      writeStalledSlot(tmp.state, "t9b", "worktree-agent-glm-3726-3");
-      const r = runCompletion(["dev_orch", "t9b", "50000", "hydra-dev"], tmp, {
-        STUB_PR_LIST_JSON: "[]",
-        STUB_ISSUE_VIEW_JSON: '{"state":"OPEN"}',
-        STUB_ISSUE_COMMENTS_JSON: commentsJson([STALL_BODY, STALL_BODY]),
-        STUB_ISSUE_EDIT_EXIT: "1",
+        STUB_ISSUE_COMMENTS_JSON: commentsJson([STALL_BODY, STALL_BODY, STALL_BODY]),
       });
       assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
       const calls = ghCalls(tmp);
       assert.ok(
-        !calls.some((c) => c.includes("dev_orch no-PR resume cap reached")),
-        `a failed cap relabel must NOT post the cap comment: ${JSON.stringify(calls)}`,
+        !calls.some((c) => c.includes("--json comments")),
+        `reap must not read the comment history to count stalls any more: ${JSON.stringify(calls)}`,
       );
+      assert.ok(!calls.some((c) => c.includes("ready-for-human")), "reap never hands the anchor to the operator itself");
+      assert.ok(!calls.some((c) => c.includes("resume cap reached")), "no cap comment");
       assert.ok(!runLog(tmp).includes("dev_stall_no_pr_capped"));
-      assert.match(r.stderr, /failed to relabel issue #3726 to ready-for-human at the no-PR resume cap/);
+      assert.deepEqual(lifecycleCalls(tmp), [
+        "advance 3726 needs-dev-resume --from in-progress --actor reap --evidence dispatch=worktree-agent-glm-3726-1",
+      ]);
+      assert.match(runLog(tmp), /dev_stall_no_pr anchor=issue-3726 task_id=t9 .*relabelled=True/);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.equal(s.dev_resume_pending.length, 1, "the resume record is queued; the seam parks at the NEXT claim");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
   });
 
-  test("CAP READ UNREADABLE: falls back to today's behaviour + one WARN naming #4808", () => {
+  test("a seam refusal is logged and skips the label write: relabelled=False, no fallback gh edit (INV-2)", () => {
     const tmp = makeTmp();
     try {
       writeStalledSlot(tmp.state, "t10", "worktree-agent-glm-3726-2");
       const r = runCompletion(["dev_orch", "t10", "50000", "hydra-dev"], tmp, {
         STUB_PR_LIST_JSON: "[]",
         STUB_ISSUE_VIEW_JSON: '{"state":"OPEN"}',
-        STUB_ISSUE_COMMENTS_EXIT: "1", // gh fails on the comments read only
+        STUB_LIFECYCLE_EXIT: "1",
       });
       assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
-      assert.match(
-        r.stderr,
-        /WARN #4808 prior-stall comment count unreadable for #3726/,
-        "the unreadable count must WARN naming #4808 (fail loud, CLAUDE.md)",
-      );
-
-      // Today's behaviour, unchanged: ordinary relabel + stall comment + queue.
-      assert.match(runLog(tmp), /dev_stall_no_pr anchor=issue-3726 task_id=t10 .*relabelled=True/);
-      const calls = ghCalls(tmp);
-      assert.ok(
-        calls.some((c) => c.startsWith("issue edit 3726") && c.includes("--add-label needs-dev-resume")),
-        "unknown data must never escalate to ready-for-human — the ordinary relabel fires",
-      );
-      assert.ok(calls.some((c) => c.startsWith("issue comment 3726")));
-      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      assert.equal(s.dev_resume_pending.length, 1);
-      assert.equal(s.dev_resume_pending[0].anchor, "issue-3726");
+      assert.match(r.stderr, /lifecycle advance in-progress->needs-dev-resume refused for #3726/);
+      assert.match(runLog(tmp), /dev_stall_no_pr anchor=issue-3726 task_id=t10 .*relabelled=False/);
+      assert.ok(!ghCalls(tmp).some((c) => c.startsWith("issue edit")), "no fallback direct label write");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
   });
 
-  test("BELOW CAP: one prior stall still queues the ordinary needs-dev-resume resume", () => {
-    const tmp = makeTmp();
-    try {
-      writeStalledSlot(tmp.state, "t11");
-      const r = runCompletion(["dev_orch", "t11", "50000", "hydra-dev"], tmp, {
-        STUB_PR_LIST_JSON: "[]",
-        STUB_ISSUE_VIEW_JSON: '{"state":"OPEN"}',
-        STUB_ISSUE_COMMENTS_JSON: commentsJson([STALL_BODY]), // 1 < 2 → not capped
-      });
-      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
-      assert.match(runLog(tmp), /dev_stall_no_pr anchor=issue-3726 task_id=t11 /);
-      assert.ok(!runLog(tmp).includes("dev_stall_no_pr_capped"));
-      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      assert.equal(s.dev_resume_pending.length, 1, "the FIRST no-PR stall still earns a resume");
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
+  test("the retired cap machinery is gone from reap_stall.py / reap_ghrefs.py (INV-3)", () => {
+    const stall = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "reap_stall.py"), "utf-8");
+    const ghrefs = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "reap_ghrefs.py"), "utf-8");
+    for (const sym of ["DEV_NOPR_RESUME_CAP", "NOPR_CAP_COMMENT_MARKER", "NOPR_STALL_COMMENT_MARKER", "_count_prior_nopr_stall_comments"]) {
+      assert.ok(!stall.includes(sym) && !ghrefs.includes(sym), `${sym} must be deleted`);
     }
-  });
-
-  test("CAP RESET: only stall comments AFTER the most recent cap comment count", () => {
-    const tmp = makeTmp();
-    try {
-      // Two old stalls, then a cap (cycle terminated), then ONE fresh stall —
-      // the operator restarted the cycle, so the count restarts at 1 < 2.
-      writeStalledSlot(tmp.state, "t12");
-      const r = runCompletion(["dev_orch", "t12", "50000", "hydra-dev"], tmp, {
-        STUB_PR_LIST_JSON: "[]",
-        STUB_ISSUE_VIEW_JSON: '{"state":"OPEN"}',
-        STUB_ISSUE_COMMENTS_JSON: commentsJson([STALL_BODY, STALL_BODY, CAP_BODY, STALL_BODY]),
-      });
-      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
-      assert.match(runLog(tmp), /dev_stall_no_pr anchor=issue-3726 task_id=t12 /);
-      assert.ok(!runLog(tmp).includes("dev_stall_no_pr_capped"));
-      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      assert.equal(s.dev_resume_pending.length, 1, "a post-cap restart must count from zero");
-    } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
-    }
+    assert.ok(!/"ready-for-human"/.test(stall), "reap_stall.py must not write ready-for-human");
   });
 });

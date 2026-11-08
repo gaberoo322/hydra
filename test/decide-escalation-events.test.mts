@@ -276,24 +276,23 @@ describe("decide.py — cascade-routing escalation (issue #3274)", () => {
   // suppresses the ordinary pipeline dispatch on its own, with no
   // ESCALATION_POLICY row and no dependence on any subagent_stop event
   // having occurred this turn.
-  test("issue #3829: the qa_orch per-issue stall-cap guard is independent of ESCALATION_POLICY", () => {
+  test("issue #5318: qa_orch's stall cap is the lifecycle seam's, not decide.py's - a legacy per-run counter no longer suppresses, and qa_orch stays out of ESCALATION_POLICY", () => {
     const state = baseState({
       signals: { needs_qa_orch: true, needs_qa_numbers: "3841" },
     });
-    (state as any).qa_orch_item_attempts = { "3841": 3 };
+    (state as any).qa_orch_item_attempts = { "3841": 3 }; // retired key: must be inert
     const plan = runDecide(state);
     const ordinaryDispatch = (plan.actions ?? []).find(
       (a: any) => a.type === "dispatch" && a.slot === "qa_orch",
     );
-    assert.equal(
+    assert.ok(
       ordinaryDispatch,
-      undefined,
-      "an exhausted head needs-qa issue suppresses the ordinary pipeline dispatch even with zero slot_events this turn — the guard does not ride on ESCALATION_POLICY's stop-event trigger",
+      "decide.py no longer counts qa_orch attempts; a stalled head is parked by the seam's qa-stall Live Cap and filtered via the parked set",
     );
     assert.equal(
       escalationFor(plan, "qa_orch"),
       undefined,
-      "qa_orch still never appears in ESCALATION_POLICY — invariant 5 holds unchanged alongside the new guard",
+      "qa_orch still never appears in ESCALATION_POLICY - invariant 5 holds",
     );
   });
 

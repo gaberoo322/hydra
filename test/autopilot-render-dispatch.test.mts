@@ -629,7 +629,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
       devAction({ kind: "ForwardFixRed", anchor: "issue-4728", branch: "worktree-agent-glm-4728", pr: 4776 }),
     );
     const secStart = PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract");
-    const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only): `state.red_forward_fix_attempts`");
+    const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only) is the lifecycle seam's");
     assert.ok(secStart >= 0 && secEnd > secStart, "playbook contract section markers present");
     const section = PLAYBOOK.slice(secStart, secEnd);
     const flat = (text: string) => text.replace(/\s+/g, " ");
@@ -656,7 +656,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
       devAction({ kind: "ForwardFixRed", anchor: "issue-4720", branch: "b", pr: 5003 }),
     );
     const secStart = PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract");
-    const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only): `state.red_forward_fix_attempts`");
+    const secEnd = PLAYBOOK.indexOf("The cap (red-CI arm only) is the lifecycle seam's");
     assert.ok(secStart >= 0 && secEnd > secStart, "playbook section markers must exist in order");
     const flat = (text: string) => text.replace(/\s+/g, " ");
     for (const text of [out.prompt, flat(PLAYBOOK.slice(secStart, secEnd))]) {
@@ -685,7 +685,7 @@ describe("render-dispatch.py — the mandatory `## Task` sentences per prompt_ar
   test("the forward-fix contract's five steps are the playbook's five (same bold step titles, same order)", () => {
     const out = render("dev_orch", devAction({ kind: "ForwardFixRed", anchor: "issue-1", branch: "b", pr: 2 }));
     const titles = (text: string) => [...text.matchAll(/^\d\. \*\*([^*]+)\*\*/gm)].map((m) => m[1]);
-    const section = PLAYBOOK.slice(PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract"), PLAYBOOK.indexOf("The cap (red-CI arm only): `state.red_forward_fix_attempts`"));
+    const section = PLAYBOOK.slice(PLAYBOOK.indexOf("**Red-PR forward-fix dispatch contract"), PLAYBOOK.indexOf("The cap (red-CI arm only) is the lifecycle seam's"));
     const want = titles(section);
     assert.equal(want.length, 5, "the playbook contract has five steps");
     assert.deepEqual(titles(out.prompt.slice(out.prompt.indexOf("Red-PR forward-fix contract"))), want);

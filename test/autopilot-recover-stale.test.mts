@@ -46,9 +46,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { writeLifecycleStub } from "./_helpers/recover-stale-lifecycle-stub.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
+
+/** Per-stub lifecycle-CLI env (keyed by the stub's binDir), merged by runRecoverStale. */
+const LIFECYCLE_ENV = new Map<string, Record<string, string>>();
 
 interface FakeIssue {
   number: number;
@@ -253,6 +257,12 @@ if __name__ == "__main__":
   writeFileSync(join(dir, "gh-stub.py"), helper);
   chmodSync(join(dir, "gh-stub.py"), 0o755);
 
+  const lc = writeLifecycleStub(dir, issuesFile, editsFile, { defaultLabel: "blocked" });
+  LIFECYCLE_ENV.set(binDir, {
+    HYDRA_RECOVER_STALE_LIFECYCLE_CLI: lc.cli,
+    ...lc.env,
+  });
+
   return {
     binDir,
     editsFile,
@@ -275,6 +285,7 @@ function runRecoverStale(
     PATH: `${binDir}:${process.env.PATH ?? ""}`,
     HYDRA_AUTOPILOT_REPO: "gaberoo322/hydra",
     HYDRA_RECOVER_STALE_DEBUG: "1",
+    ...(LIFECYCLE_ENV.get(binDir) ?? {}),
   };
   if (debug === "unset") delete env.HYDRA_RECOVER_STALE_DEBUG;
   const r = spawnSync(join(SCRIPTS, "recover-stale.sh"), args, {

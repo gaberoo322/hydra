@@ -160,8 +160,8 @@ cache, so the resume path no longer depends on it surviving. Four mechanisms:
    `dev_resume_pending` holds a record, or of which run queued it. The action
    carries a `ForwardFixRed` intent (anchor, PR, branch), so the forward-fix dispatch contract
    below applies verbatim (continue the PR's head, push to the SAME branch,
-   NEVER `gh pr create`). Only the red-CI arm (`orch_prs_red_resume`) is
-   capped (`RED_FORWARD_FIX_CAP`). Reap's needs-qa promotion clears the label.
+   NEVER `gh pr create`). The red-CI arm (`orch_prs_red_resume`) is
+   capped by the lifecycle seam's `red-ci-forward-fix` Live Cap (#5318), not by decide.py. Reap's needs-qa promotion clears the label.
 4. **The label alone covers the no-PR case (issue #4808).** A `needs-dev-resume`
    issue with NO open PR referencing it is invisible to mechanism 3 (which keys
    off an open PR). The Turn

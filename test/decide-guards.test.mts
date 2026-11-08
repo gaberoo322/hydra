@@ -186,127 +186,46 @@ function dispatchDecisionFor(plan: any, cls: string): any | undefined {
   return (plan.events ?? []).find((e: any) => e.event === "dispatch_decision" && e.class === cls);
 }
 
-describe("decide.py — qa_orch per-issue stall-cap guard (issue #3829)", () => {
-  test("fresh head issue (no prior attempts) -> qa_orch dispatches and the tracker is bumped to 1", () => {
+describe("decide.py — qa_orch needs-qa head selection after the stall cap moved to the seam (issues #3829, #5318)", () => {
+  // #5318 INV-7/8: the per-run `qa_orch_item_attempts` counter, QA_STALL_MAX_ATTEMPTS
+  // and the `qa_orch_stalled_issue` suppression are deleted. The head always
+  // dispatches; the seam's qa-stall Live Cap (reap releases a stalled claim with
+  // outcome=stall) parks a stuck issue, and parked heads are filtered out below.
+  test("a head issue dispatches qa_orch and decide.py writes NO attempt tracker", () => {
     const state = baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: "3841" } });
     const { plan, stateAfter } = runDecide(state);
     const a = findQaOrch(plan);
-    assert.ok(a, "a head issue under the cap must dispatch qa_orch");
+    assert.ok(a, "a head issue must dispatch qa_orch");
     assert.equal(a.skill, "hydra-qa");
-    assert.deepEqual(
-      stateAfter.qa_orch_item_attempts,
-      { "3841": 1 },
-      "on fire, the head issue's attempt counter is bumped",
-    );
+    assert.equal(stateAfter.qa_orch_item_attempts, undefined, "the retired per-run counter is never written");
   });
 
-  test("the head issue at the attempt cap -> qa_orch does NOT dispatch (the busy-loop terminates)", () => {
-    const state = baseState({
-      signals: { needs_qa_orch: true, needs_qa_numbers: "3841" },
-      qa_orch_item_attempts: { "3841": MAX_ATTEMPTS },
-    });
-    const { plan, stateAfter } = runDecide(state);
-    assert.equal(
-      findQaOrch(plan),
-      undefined,
-      "a head issue that already used every attempt must not be re-dispatched",
-    );
-    assert.deepEqual(
-      stateAfter.qa_orch_item_attempts,
-      { "3841": MAX_ATTEMPTS },
-      "a suppressed turn must not mutate the tracker",
-    );
-  });
-
-  test("suppression is visible: dispatch_decision reason + plan debug name the stalled head issue + cap", () => {
+  test("a legacy at-cap counter in an old state document is inert: the head still dispatches, no suppression debug", () => {
     const state = baseState({
       signals: { needs_qa_orch: true, needs_qa_numbers: "3841" },
       qa_orch_item_attempts: { "3841": MAX_ATTEMPTS },
     });
     const { plan } = runDecide(state);
+    assert.ok(findQaOrch(plan), "no per-run cap exists any more");
+    assert.equal(plan.debug?.qa_orch_stalled_issue, undefined);
     const dd = dispatchDecisionFor(plan, "qa_orch");
-    assert.ok(dd, "qa_orch must still emit a dispatch_decision event when suppressed");
-    assert.match(dd.reason, /3841/, "the suppression reason must name the stalled head issue number");
-    assert.match(
-      dd.reason,
-      new RegExp(String(MAX_ATTEMPTS)),
-      "the suppression reason must name the attempt cap",
-    );
-    assert.equal(
-      plan.debug?.qa_orch_stalled_issue,
-      3841,
-      "the stalled issue number rides the plan debug field for dashboard/operator visibility (AC: becomes visible)",
-    );
+    assert.ok(!dd || !/exhausted/.test(dd.reason ?? ""), "no suppression reason is emitted");
   });
 
-  test("design-concept invariant 4: a queued NON-HEAD issue is NEVER touched, even while the head is capped", () => {
-    // 3841 is exhausted and stays head (queue order unchanged); 3850 sits
-    // behind it and has never been reviewed. The busy-loop backstop must
-    // suppress the whole slot (hydra-qa always picks the head) WITHOUT
-    // bumping 3850's counter — bumping it would falsely start a "stalled"
-    // clock on an issue nothing has actually attempted yet.
+  test("a parked head is the operator's: filtered out, the next needs-qa issue is the dispatch head", () => {
     const state = baseState({
-      signals: { needs_qa_orch: true, needs_qa_numbers: "3841 3850" },
-      qa_orch_item_attempts: { "3841": MAX_ATTEMPTS },
+      signals: { needs_qa_orch: true, needs_qa_numbers: "3841 3850", orch_parked_issues: "3841" },
     });
-    const { plan, stateAfter } = runDecide(state);
-    assert.equal(
-      findQaOrch(plan),
-      undefined,
-      "the whole slot is suppressed while the head is capped — hydra-qa never reaches issue #3850 on this turn",
-    );
-    assert.deepEqual(
-      stateAfter.qa_orch_item_attempts,
-      { "3841": MAX_ATTEMPTS },
-      "the non-head issue #3850 must NOT appear in the tracker at all",
-    );
-  });
-
-  test("the head issue is eligible and dispatches even while a DIFFERENT (fully independent) issue number was previously tracked as head", () => {
-    // 3841 was the prior head and got capped; 3850 has since become the new
-    // head (queue order changed — e.g. #3841's PR finally got a verdict and
-    // dropped off needs-qa). The tracker must have already dropped #3841 and
-    // start #3850 fresh, not inherit or block on the old head's exhausted count.
-    const state = baseState({
-      signals: { needs_qa_orch: true, needs_qa_numbers: "3850" },
-      qa_orch_item_attempts: { "3841": MAX_ATTEMPTS },
-    });
-    const { plan, stateAfter } = runDecide(state);
-    assert.ok(findQaOrch(plan), "a fresh new head must dispatch even though a DIFFERENT prior head was capped");
-    assert.deepEqual(
-      stateAfter.qa_orch_item_attempts,
-      { "3850": 1 },
-      "the tracker is rebuilt to hold only the current head — the former head #3841 is pruned",
-    );
-  });
-
-  test("pruning: once the head issue leaves the needs-qa set, its tracker entry is dropped (design-concept invariant 5)", () => {
-    const state = baseState({
-      signals: { needs_qa_orch: true, needs_qa_numbers: "" },
-      qa_orch_item_attempts: { "3841": MAX_ATTEMPTS },
-    });
-    const { plan, stateAfter } = runDecide(state);
-    // Empty item list -> fail-open on the coarse boolean (see below), and no
-    // per-item fire happens this turn, so the tracker is left untouched here
-    // — the point is that on the NEXT turn where 3841 actually reappears as
-    // a head, it starts fresh because a real fire always rebuilds from
-    // scratch (pinned by the "different head" case above).
-    assert.ok(findQaOrch(plan), "empty item list fails open on the coarse boolean alone");
-    assert.deepEqual(stateAfter.qa_orch_item_attempts, { "3841": MAX_ATTEMPTS });
+    const { plan } = runDecide(state);
+    const a = findQaOrch(plan);
+    assert.ok(a, "an unparked issue behind a parked head still dispatches");
   });
 
   test("fail-open on absence: needs_qa_numbers signal absent -> dispatches on the coarse boolean (no dead-arm)", () => {
-    // A degraded board read (or a pre-#3829 playbook) emits the coarse count
-    // but not the per-item list. Suppressing here would re-dead-arm qa_orch
-    // (the #3709 defect class), so the guard fails OPEN on absence.
     const state = baseState({ signals: { needs_qa_orch: true } });
     const { plan, stateAfter } = runDecide(state);
     assert.ok(findQaOrch(plan), "with no per-item list, qa_orch must fire on the coarse boolean alone");
-    assert.equal(
-      stateAfter.qa_orch_item_attempts,
-      undefined,
-      "firing on the coarse boolean alone stamps nothing (no head known)",
-    );
+    assert.equal(stateAfter.qa_orch_item_attempts, undefined);
   });
 
   test("an item list emitted but empty -> fail-open dispatch (consistent with absence)", () => {
@@ -326,21 +245,14 @@ describe("decide.py — qa_orch per-issue stall-cap guard (issue #3829)", () => 
   });
 
   test("events override state.signals for the item list (precedence, like every signal)", () => {
-    const state = baseState({
-      signals: { needs_qa_orch: true, needs_qa_numbers: "3841" },
-      qa_orch_item_attempts: { "3841": MAX_ATTEMPTS },
-    });
+    const state = baseState({ signals: { needs_qa_orch: true, needs_qa_numbers: "3841" } });
     const events = [{ type: "signal", name: "needs_qa_numbers", value: "4200 3841" }];
-    const { plan, stateAfter } = runDecide(state, null, events);
-    assert.ok(findQaOrch(plan), "the event-supplied new head 4200 makes the slot eligible");
-    assert.deepEqual(
-      stateAfter.qa_orch_item_attempts,
-      { "4200": 1 },
-      "the event-overridden HEAD (first element) is what gets bumped on fire — 3841 is no longer head and is dropped",
-    );
+    const { plan } = runDecide(state, null, events);
+    const a = findQaOrch(plan);
+    assert.ok(a, "the event-supplied head makes the slot eligible");
   });
 
-  test("qa_orch excluded under target-only scope (the guard never bypasses scope)", () => {
+  test("qa_orch excluded under target-only scope (head selection never bypasses scope)", () => {
     const state = baseState({
       scope: "target-only",
       signals: { needs_qa_orch: true, needs_qa_numbers: "3841" },
@@ -351,30 +263,6 @@ describe("decide.py — qa_orch per-issue stall-cap guard (issue #3829)", () => 
       undefined,
       "target-only scope must exclude qa_orch regardless of head eligibility",
     );
-  });
-
-  test("attempt count exactly one below the cap is still eligible (boundary)", () => {
-    const state = baseState({
-      signals: { needs_qa_orch: true, needs_qa_numbers: "3841" },
-      qa_orch_item_attempts: { "3841": MAX_ATTEMPTS - 1 },
-    });
-    const { plan, stateAfter } = runDecide(state);
-    assert.ok(findQaOrch(plan), "attempts < cap must still be eligible");
-    assert.deepEqual(stateAfter.qa_orch_item_attempts, { "3841": MAX_ATTEMPTS });
-  });
-
-  test("design-concept invariant 3: qa_orch stays absent from ESCALATION_POLICY even with the stall-cap guard active", () => {
-    // The stall cap and ESCALATION_POLICY are structurally independent
-    // mechanisms — full cross-file coverage lives in
-    // test/decide-cascade-escalation.test.mts; this is a same-file sanity
-    // pin that a stall-capped turn's plan carries no escalate_model hint.
-    const state = baseState({
-      signals: { needs_qa_orch: true, needs_qa_numbers: "3841" },
-      qa_orch_item_attempts: { "3841": MAX_ATTEMPTS },
-    });
-    const { plan } = runDecide(state);
-    const anyQaOrchAction = (plan.actions ?? []).find((a: any) => a.slot === "qa_orch");
-    assert.equal(anyQaOrchAction, undefined, "no qa_orch action of any kind (dispatch or escalation) this turn");
   });
 });
 }

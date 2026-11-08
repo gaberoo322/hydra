@@ -350,6 +350,10 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
         finishCalls.push(`label:${issue}:r=${(l.remove ?? []).join("+")}:a=${(l.add ?? []).join("+")}`);
         return { ok: true };
       },
+      advanceState: async (issue: number, to: string, from: string) => {
+        finishCalls.push(`advance:${issue}:${from}>${to}`);
+        return { ok: true };
+      },
       viewIssueTitle: async () => "title",
       createPr: async () => ({ ok: false, stderr: "no" }),
       listOpenPrs: async () => ({ ok: true, rows: [] }),
@@ -523,7 +527,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     assert.ok(!r.calls.includes("author"), "no authoring after a failed worktree");
     assert.ok(!r.calls.some((c) => c.startsWith("link:")));
     assert.equal(line.finish.action, "release-not-authored");
-    assert.ok(r.finishCalls.includes("label:77:r=in-progress:a=ready-for-agent"));
+    assert.ok(r.finishCalls.includes("advance:77:in-progress>ready-for-agent"));
     assert.ok(!r.finishCalls.some((c) => c.startsWith("rm:")), "no worktree to remove");
     assert.ok(r.logs.some((l) => /^ERROR could not create a worktree for issue #77 — handing a synthetic not-run outcome/.test(l)));
   });
@@ -534,7 +538,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     assert.equal(exitCode, 0);
     assert.ok(!r.calls.includes("author"), "no authoring after a pre-author throw");
     assert.ok(line.finish, "finish must be reached");
-    assert.ok(r.finishCalls.includes("label:77:r=in-progress:a=ready-for-agent"));
+    assert.ok(r.finishCalls.includes("advance:77:in-progress>ready-for-agent"));
   });
 
   test("a non-timeout author rejection still reaches finish (driver-fault arm): exit 0, claim released", async () => {
@@ -546,7 +550,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     const { exitCode, line } = await tickOf(r);
     assert.equal(exitCode, 0);
     assert.equal(line.finish.action, "release-not-authored");
-    assert.ok(r.finishCalls.includes("label:77:r=in-progress:a=ready-for-agent"));
+    assert.ok(r.finishCalls.includes("advance:77:in-progress>ready-for-agent"));
   });
 
   test("a timed-out author session is an outcome handed to finish, not a fault", async () => {

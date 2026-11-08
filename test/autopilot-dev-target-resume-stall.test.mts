@@ -66,6 +66,9 @@ interface Paths {
   state: string;
   log: string;
   ghStub: string;
+  /** Recorder standing in for scripts/lifecycle.ts (HYDRA_AUTOPILOT_LIFECYCLE_CLI, #5318). */
+  lifecycleStub: string;
+  lifecycleCallsLog: string;
   ghCallsLog: string;
 }
 
@@ -122,7 +125,11 @@ esac
 `,
   );
   chmodSync(ghStub, 0o755);
-  return { dir, state: join(dir, "state.json"), log: join(dir, "nightly.log"), ghStub, ghCallsLog };
+  const lifecycleStub = join(dir, "lifecycle-stub.sh");
+  const lifecycleCallsLog = join(dir, "lifecycle-calls.log");
+  writeFileSync(lifecycleStub, `#!/usr/bin/env bash\necho "$*" >> "${lifecycleCallsLog}"\necho '{"ok":true}'\n`);
+  chmodSync(lifecycleStub, 0o755);
+  return { dir, state: join(dir, "state.json"), log: join(dir, "nightly.log"), ghStub, ghCallsLog, lifecycleStub, lifecycleCallsLog };
 }
 
 function writeState(path: string, patch: Record<string, unknown>): void {
@@ -168,6 +175,7 @@ function runCompletion(
       HYDRA_TARGET_GITHUB_REPO: TARGET_REPO_FIXTURE,
       HYDRA_REAP_WORKTREE_GC: "0", // keep the worktree-GC side-effect out of the test
       HYDRA_AUTOPILOT_GH_CLI: paths.ghStub,
+      HYDRA_AUTOPILOT_LIFECYCLE_CLI: paths.lifecycleStub,
       ...ghEnv,
     },
     encoding: "utf-8",
@@ -597,15 +605,12 @@ describe("reap.py completion → dev_orch path unchanged by the #4195 extraction
         !calls.some((c) => c.includes(`--repo ${TARGET_REPO_FIXTURE}`)),
         `dev_orch must never target the TARGET repo: ${JSON.stringify(calls)}`,
       );
-      assert.ok(
-        calls.some(
-          (c) =>
-            c.startsWith("issue edit 3726") &&
-            c.includes("--remove-label in-progress") &&
-            c.includes("--add-label needs-dev-resume"),
-        ),
-        `dev_orch keeps its needs-dev-resume relabel: ${JSON.stringify(calls)}`,
-      );
+      // #5318: the dev_orch (Orchestrator-board) move goes through the lifecycle seam;
+      // the dev_target path above keeps its direct writes (INV-11).
+      assert.deepEqual(readFileSync(tmp.lifecycleCallsLog, "utf-8").trim().split("\n"), [
+        "advance 3726 needs-dev-resume --from in-progress --actor reap --evidence dispatch=issue-3726-fix",
+      ]);
+      assert.ok(!calls.some((c) => c.startsWith("issue edit 3726")), "no direct orch state-label write");
 
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
       assert.equal(s.dev_resume_pending.length, 1, "dev_orch keeps its resume-pin queue append");

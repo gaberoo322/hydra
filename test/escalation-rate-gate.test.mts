@@ -578,8 +578,8 @@ exit 0
     assert.ok(invocations.some(l => l.startsWith("issue reopen 4242")), "expected a reopen");
     assert.ok(invocations.some(l => l.startsWith("issue comment 4242")), "expected a comment after reopen");
     assert.ok(
-      invocations.some(l => l.startsWith("issue edit 4242") && l.includes("--add-label")),
-      "a proceeding reopen must re-apply a lifecycle label so the issue doesn't land label-less (issue #4073)",
+      invocations.some(l => l.startsWith("issue edit 4242") && l.includes("--add-label") && l.includes("needs-triage")),
+      "a proceeding reopen re-enters needs-triage through the lifecycle seam so the issue doesn't land label-less (issues #4073, #5318)",
     );
   });
 
@@ -611,8 +611,10 @@ exit 0
     });
     assert.equal(result.status, "reopened");
     const invocations = await readInvocations();
+    // The only `issue view` allowed is the lifecycle seam's own re-read
+    // (ISSUE_JSON_FIELDS, #5318); the rate-gate HISTORY fetch asks for comments.
     assert.ok(
-      !invocations.some(l => l.startsWith("issue view ")),
+      !invocations.some(l => l.startsWith("issue view ") && l.includes("comments")),
       "non-rate-gated cues must NOT trigger a history fetch on the reopen path either",
     );
     assert.ok(invocations.some(l => l.startsWith("issue reopen 4242")), "expected an unconditional reopen");

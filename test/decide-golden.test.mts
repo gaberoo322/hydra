@@ -249,8 +249,8 @@ describe("decide CLI Run Ledger seam: persistence + load contract (#5074 INV-5/6
   test("INV-5(a): a selector mutation of a decide-owned key persists through the decide CLI", () => {
     const { r, before, after } = runCli(FORWARD_FIX);
     assert.equal(r.status, 0, r.stderr);
-    assert.notDeepEqual(after.red_forward_fix_attempts, before.red_forward_fix_attempts ?? {});
-    assert.ok(Object.keys(after.red_forward_fix_attempts).length > 0);
+    assert.notDeepEqual(after.last_dispatch_by_class, before.last_dispatch_by_class ?? {});
+    assert.ok(Object.keys(after.last_dispatch_by_class).length > 0);
   });
 
   test("INV-6: a crash on the post-decide persist leaves the bumped-turn document with none of decide()'s mutations", () => {
@@ -270,7 +270,7 @@ describe("decide CLI Run Ledger seam: persistence + load contract (#5074 INV-5/6
       const after = JSON.parse(readFileSync(sp, "utf-8"));
       // The first (turn-bump) persist landed; the second (decide-owned) did not.
       assert.equal(after.turn, before.turn + 1);
-      assert.deepEqual(after.red_forward_fix_attempts ?? {}, before.red_forward_fix_attempts ?? {});
+      assert.deepEqual(after.last_dispatch_by_class ?? {}, before.last_dispatch_by_class ?? {});
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -74,8 +74,6 @@ interface StateOverrides {
   idle_drain_turns?: number;
   context_compaction_turns?: number;
   target_risk_surface?: Record<string, unknown>;
-  /** issue #5058 (ex-#4460): per-PR pinned red-CI forward-fix attempt counts. */
-  red_forward_fix_attempts?: Record<string, number>;
   /** issue #4999: per-class zero-yield back-off ladder state. */
   zero_yield_backoff?: Record<string, { streak: number; last_fired: number }>;
 }
@@ -120,12 +118,6 @@ function baseState(o: StateOverrides = {}): any {
     },
     signals: o.signals ?? {},
     research_force_counter: o.research_force_counter ?? {},
-    // Issue #5058 (ex-#4460) — per-PR pinned red-CI forward-fix attempt counts
-    // (in-run state; the key is ABSENT until the selector's first bump,
-    // mirroring production).
-    ...(o.red_forward_fix_attempts
-      ? { red_forward_fix_attempts: o.red_forward_fix_attempts }
-      : {}),
     // Issue #4411 — `state.target_risk_surface` is Turn-Snapshot-owned
     // (via `scripts/target/print-target-facts.ts`) resolved Target Manifest
     // risk surface that `wire_or_retire_target`'s dispatch threads into
@@ -247,19 +239,14 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
   // that the guard is wired into the SAME pipeline dispatch path this
   // describe block exercises, and that it fails open when the Turn Snapshot
   // hasn't been updated to emit the per-item signal yet.
-  test("qa_orch per-issue stall cap (#3829): a head issue that exhausted its cap suppresses dispatch even though needs_qa_orch stays true", () => {
+  test("qa_orch stall cap moved to the seam (#5318): decide.py no longer counts attempts - a legacy counter is inert and the head dispatches", () => {
     const state = baseState({
       signals: { needs_qa_orch: true, needs_qa_numbers: "3841" },
-      // qa_orch_item_attempts is not part of StateOverrides — merge directly.
     });
-    (state as any).qa_orch_item_attempts = { "3841": 3 };
+    (state as any).qa_orch_item_attempts = { "3841": 3 }; // retired key
     const plan = runDecide(state, null);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "qa_orch");
-    assert.equal(
-      dispatch,
-      undefined,
-      "a head issue that exhausted its attempt cap must not be re-dispatched, even though the coarse needs_qa_orch boolean is still true",
-    );
+    assert.ok(dispatch, "the qa-stall Live Cap parks a stuck head at the seam; decide.py just dispatches");
   });
 
   test("dispatches qa_target when needs_qa_target signal present", () => {
@@ -4456,8 +4443,9 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
 // The pick sits AFTER the #3866 dev_resume_pending drain and BEFORE the
 // orch_work_available gate — placement IS the deliberate bypass of the
 // grill yield and pool-sizing. A pick listed in `orch_prs_red_resume` (red
-// on a required check, closing issue NOT needs-dev-resume) is capped at
-// RED_FORWARD_FIX_CAP per PR; any provenance qualifies (#5058).
+// on a required check, closing issue NOT needs-dev-resume) qualifies from any
+// provenance (#5058). Its per-PR cap is NOT decide.py's any more: the lifecycle
+// seam's red-ci-forward-fix Live Cap parks at the third forward-fix claim (#5318).
 // ---------------------------------------------------------------------------
 
 describe("decide.py — red-CI forward-fix arm of the unified resume pick (issues #4460, #5058)", () => {
@@ -4500,7 +4488,7 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     assert.equal(d[0].prompt_args, undefined, "an intent action carries no prompt_args bag");
     assert.match(d[0].reason, /red PR forward-fix/);
     assert.match(d[0].reason, /#5058/);
-    assert.match(d[0].reason, /1\/2/);
+    assert.doesNotMatch(d[0].reason, /\d\/2/, "no per-run attempt counter in the reason (#5318)");
   });
 
   test("#5058: a NON-GLM red PR gets the identical capped forward-fix (no provenance gate)", () => {
@@ -4508,32 +4496,32 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     const d = devOrchDispatches(runDecide(s, null));
     assert.equal(d.length, 1);
     assert.equal(d[0].intent.branch, "worktree-agent-a5706403c05633ec3");
-    assert.match(d[0].reason, /1\/2/);
   });
 
-  test("#4460 INV-8: the tracker caps at RED_FORWARD_FIX_CAP=2 — third encounter emits NO dispatch and surface-pr exhausts instead", () => {
-    // attempts=1 -> attempt 2/2 still dispatches
-    let s = glmState({ red_forward_fix_attempts: { "4433": 1 } });
-    let plan = runDecide(s, null);
-    assert.equal(devOrchDispatches(plan).length, 1);
-    assert.match(devOrchDispatches(plan)[0].reason, /2\/2/);
-
-    // attempts=2 (cap) -> no dispatch; the PR-gate rule surfaces the PR
-    s = glmState({ red_forward_fix_attempts: { "4433": 2 } });
-    plan = runDecide(s, null);
-    assert.equal(devOrchDispatches(plan).length, 0, "the pin must stop at the cap");
-    const surfaces = (plan.actions ?? []).filter((a: any) => a.type === "surface-pr");
-    assert.equal(surfaces.length, 1);
-    assert.equal(surfaces[0].pr_number, 4433);
-    assert.equal(surfaces[0].cause, "red-forward-fix-exhausted");
-    assert.match(surfaces[0].reason, /#5058/);
+  test("#5318 INV-7: decide.py keeps no per-run red-forward-fix counter - a legacy tracker is inert, the pick always dispatches and NEVER surfaces red-forward-fix-exhausted", () => {
+    for (const legacy of [{ "4433": 1 }, { "4433": 2 }, { "4433": 9 }]) {
+      const s = glmState();
+      (s as any).red_forward_fix_attempts = legacy;
+      const plan = runDecide(s, null);
+      assert.equal(devOrchDispatches(plan).length, 1, "the seam's Live Cap, not decide.py, bounds the attempts");
+      assert.equal(
+        (plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length,
+        0,
+        "the parallel ready-for-human escalation is gone (the seam parks instead)",
+      );
+    }
   });
 
-  test("#5058: the needs-dev-resume arm is UNCAPPED — a pick outside orch_prs_red_resume dispatches past the cap and never surfaces", () => {
-    const s = glmState({ red_forward_fix_attempts: { "4433": 5 }, signals: { orch_prs_red_resume: "" } });
+  test("#5318: a parked red PR falls out of the resume pick (the seam's park, #5319), so decide.py has nothing to dispatch", () => {
+    const s = glmState({ signals: { orch_dev_resume_pick: "none" } });
+    assert.equal(devOrchDispatches(runDecide(s, null)).length, 0);
+  });
+
+  test("#5058: the needs-dev-resume arm dispatches with its own reason and never surfaces", () => {
+    const s = glmState({ signals: { orch_prs_red_resume: "" } });
     const plan = runDecide(s, null);
     const d = devOrchDispatches(plan);
-    assert.equal(d.length, 1, "the label arm is not subject to the red-CI cap");
+    assert.equal(d.length, 1);
     assert.match(d[0].reason, /durable dev resume/);
     assert.equal((plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length, 0);
   });
@@ -4595,7 +4583,7 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
     assert.equal(d[0].intent.pr, 4433);
   });
 
-  test("main() persists the attempts bump via change-detection (state file carries the tracker after the turn)", () => {
+  test("main() persists NO red-forward-fix tracker (#5318 INV-7): the state file carries no such key after the turn", () => {
     const t = makeTmp();
     try {
       writeFileSync(t.state, JSON.stringify(withTurnSnapshot(glmState())));
@@ -4603,11 +4591,7 @@ describe("decide.py — red-CI forward-fix arm of the unified resume pick (issue
       writeFileSync(t.events, JSON.stringify([]));
       runDecideOnFiles(t);
       const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
-      assert.deepEqual(
-        persisted.red_forward_fix_attempts,
-        { "4433": 1 },
-        "the bump must persist to the state file for the next turn's cap check",
-      );
+      assert.equal(persisted.red_forward_fix_attempts, undefined);
     } finally {
       rmSync(t.dir, { recursive: true, force: true });
     }
@@ -4740,7 +4724,7 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
     assert.equal(devOrchDispatches(runDecide(s, null)).length, 0);
   });
 
-  test("a red-arm pick (in orch_prs_red_resume) pins attempt 1/2 and bumps its tracker", () => {
+  test("a red-arm pick (in orch_prs_red_resume) pins the forward-fix and writes no tracker (#5318)", () => {
     const t = makeTmp();
     try {
       writeFileSync(t.state, JSON.stringify(withTurnSnapshot(baseState({ signals: { orch_dev_resume_pick: "issue-4240:4433:worktree-agent-glm-4240-1789", orch_prs_red_resume: "4433" } }))));
@@ -4749,9 +4733,8 @@ describe("decide.py — durable dev resume pick (issues #4518, #5058)", () => {
       const d = devOrchDispatches(runDecideOnFiles(t));
       assert.equal(d.length, 1);
       assert.equal(d[0].intent.pr, 4433);
-      assert.match(d[0].reason, /1\/2/);
       const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
-      assert.deepEqual(persisted.red_forward_fix_attempts, { "4433": 1 });
+      assert.equal(persisted.red_forward_fix_attempts, undefined);
     } finally {
       rmSync(t.dir, { recursive: true, force: true });
     }

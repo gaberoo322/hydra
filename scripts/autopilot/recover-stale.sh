@@ -171,12 +171,24 @@ fi
 # (any refusal, `parked:*`, `write-failed:*`) skips the issue: there is NO
 # fallback direct label write.
 #
+# lifecycle_cli ARGS... — the seam CLI. HYDRA_RECOVER_STALE_LIFECYCLE_CLI (a
+# whitespace-split prefix) lets tests inject a recorder, mirroring
+# HYDRA_AUTOPILOT_GH_CLI; the default runs from the repo root.
+lifecycle_cli() {
+  if [ -n "${HYDRA_RECOVER_STALE_LIFECYCLE_CLI:-}" ]; then
+    # shellcheck disable=SC2086
+    $HYDRA_RECOVER_STALE_LIFECYCLE_CLI "$@"
+  else
+    npx tsx scripts/lifecycle.ts "$@"
+  fi
+}
+
 # seam_advance ISSUE TO FROM [PR] → 0 only when the seam moved the issue.
 seam_advance() {
   local issue="$1" to="$2" from="$3" pr="${4:-}" out rc
   local args=(advance "$issue" "$to" --from "$from" --actor recover-stale)
   [ -n "$pr" ] && args+=(--evidence "pr=$pr")
-  out=$(cd "$SCRIPT_DIR/../.." && npx tsx scripts/lifecycle.ts "${args[@]}" 2>/dev/null)
+  out=$(cd "$SCRIPT_DIR/../.." && lifecycle_cli "${args[@]}" 2>/dev/null)
   rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "[autopilot] recover-stale: skip issue=$issue (seam refused $from->$to rc=$rc: $(printf '%s' "$out" | head -c 200))"
@@ -201,7 +213,7 @@ pr_for() {
 STALE_MINUTES="${HYDRA_RECOVER_STALE_MINUTES:-90}"
 release_stale_claim() {
   local issue="$1" show claim dispatch_id age_ok
-  show=$(cd "$SCRIPT_DIR/../.." && npx tsx scripts/lifecycle.ts claim-show "$issue" 2>/dev/null) || {
+  show=$(cd "$SCRIPT_DIR/../.." && lifecycle_cli claim-show "$issue" 2>/dev/null) || {
     echo "[autopilot] recover-stale: skip issue=$issue (claim-show failed)"; return 1; }
   claim=$(printf '%s' "$show" | python3 -c '
 import json, sys, time
@@ -228,7 +240,7 @@ print(("stale " + str(c.get("dispatchId", ""))) if age_min >= float(sys.argv[1])
     fresh) echo "[autopilot] recover-stale: skip issue=$issue (held claim younger than ${STALE_MINUTES}m: a fresh dispatch exists)"; return 1 ;;
     "stale "*)
       dispatch_id="${claim#stale }"
-      if ! (cd "$SCRIPT_DIR/../.." && npx tsx scripts/lifecycle.ts release "$issue" --dispatch "$dispatch_id" --outcome stale >/dev/null 2>&1); then
+      if ! (cd "$SCRIPT_DIR/../.." && lifecycle_cli release "$issue" --dispatch "$dispatch_id" --outcome stale >/dev/null 2>&1); then
         echo "[autopilot] recover-stale: skip issue=$issue (stale claim release failed)"; return 1
       fi
       return 0 ;;

@@ -209,12 +209,31 @@ def fake_run(argv, **kw):
 reap.subprocess.run = fake_run
 cls = os.environ["CLS"]
 pr = {"true": True, "false": False, "none": None}[os.environ["PR"]]
-reap._release_dispatch_claim(cls, os.environ.get("DID") or None, reap._claim_release_outcome(cls, pr))
+# #5318 INV-8: qa_orch's outcome reads the anchor's live label once (stubbed here).
+gh_labels = os.environ.get("GH_LABELS")
+if gh_labels is not None:
+    def fake_gh(*a, **k):
+        if gh_labels == "FAIL":
+            return CP(1, "")
+        return CP(0, json.dumps({"labels": [{"name": n} for n in gh_labels.split(",") if n]}))
+    reap._gh_run = fake_gh
+anchor = os.environ.get("ANCHOR") or None
+reap._release_dispatch_claim(cls, os.environ.get("DID") or None, reap._claim_release_outcome(cls, pr, anchor))
 print(json.dumps({"calls": calls, "logs": logs}))
 `;
 
-function release(cls: string, pr: string, did = "worktree-agent-x-t1-" + cls, mode = "ok") {
-  const r = py(REAP_PROBE, { AUTOPILOT, CLS: cls, PR: pr, DID: did, MODE: mode, HYDRA_AUTOPILOT_LOG: "/dev/null" });
+function release(
+  cls: string,
+  pr: string,
+  did = "worktree-agent-x-t1-" + cls,
+  mode = "ok",
+  qa: { anchor?: string; labels?: string } = {},
+) {
+  const r = py(REAP_PROBE, {
+    AUTOPILOT, CLS: cls, PR: pr, DID: did, MODE: mode, HYDRA_AUTOPILOT_LOG: "/dev/null",
+    ...(qa.anchor ? { ANCHOR: qa.anchor } : {}),
+    ...(qa.labels !== undefined ? { GH_LABELS: qa.labels } : {}),
+  });
   assert.equal(r.status, 0, `probe failed: ${r.stderr}`);
   return JSON.parse(r.stdout.trim().split("\n").pop() as string) as { calls: string[][]; logs: string[] };
 }
@@ -227,8 +246,13 @@ describe("reap releases the dispatcher claim by dispatch id", () => {
     assert.ok(outcomes("none").includes("--outcome released"));
   });
 
-  test("qa_orch releases with verdict-posted", () => {
-    assert.ok(release("qa_orch", "none").calls[0].join(" ").includes("--outcome verdict-posted"));
+  test("qa_orch outcome follows the anchor's live label (#5318 INV-8): needs-qa -> stall, moved -> verdict-posted, unreadable -> released", () => {
+    const outcome = (qa: { anchor?: string; labels?: string }) => release("qa_orch", "none", undefined, "ok", qa).calls[0].join(" ");
+    assert.ok(outcome({ anchor: "issue-77", labels: "needs-qa,enhancement" }).includes("--outcome stall"));
+    assert.ok(outcome({ anchor: "issue-77", labels: "qa-passed" }).includes("--outcome verdict-posted"));
+    assert.ok(outcome({ anchor: "issue-77", labels: "FAIL" }).includes("--outcome released"), "an unreadable label read releases without counting");
+    assert.ok(outcome({}).includes("--outcome released"), "no anchor means nothing to read");
+    assert.ok(outcome({ anchor: "failing-tests", labels: "needs-qa" }).includes("--outcome released"), "a non issue-N anchor is never read");
   });
 
   test("dev_target and a missing dispatch id release nothing", () => {
