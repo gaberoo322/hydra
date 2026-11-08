@@ -436,6 +436,26 @@ describe("lifecycle-seam-check: PR-context carve-out (#5428)", () => {
     assert.deepEqual(md("gh api -X DELETE repos/o/r/issues/42/labels/needs-qa"), [1]);
   });
 
+  test("PR-path allowlist is exact: PR-prefixed issue identifiers stay sites", () => {
+    assert.deepEqual(md('gh api -X DELETE "repos/o/r/issues/$PRD_ISSUE/labels/needs-qa"'), [1]);
+    assert.deepEqual(md("gh api -X DELETE repos/o/r/issues/${PRIORITY_ISSUE}/labels/needs-qa"), [1]);
+    assert.deepEqual(md("gh api -X DELETE repos/o/r/issues/$PROJECT_NUMBER/labels/needs-qa"), [1]);
+    assert.deepEqual(md("gh api -X DELETE repos/o/r/issues/${PR_NUM}/labels/ready-for-human"), []);
+  });
+
+  test("a gh pr nested in a gh issue command does not exempt the issue write", () => {
+    assert.deepEqual(md('gh issue edit "$(gh pr view 5 --json number -q .number)" --add-label needs-qa'), [1]);
+    assert.deepEqual(md("gh pr edit 5 --add-label ready-for-human"), []);
+  });
+
+  test("chained gh api calls are judged per invocation", () => {
+    assert.deepEqual(
+      md('gh api -X DELETE repos/o/r/issues/$PR/labels/x && gh api -X DELETE repos/o/r/issues/$ISSUE/labels/needs-qa'),
+      [1],
+    );
+    assert.deepEqual(md("gh api -X DELETE repos/o/r/issues/$PR/labels/x && gh api -X DELETE repos/o/r/issues/${PR_NUMBER}/labels/y"), []);
+  });
+
   test("documented non-count: PR aliased from an issue number", () => {
     assert.deepEqual(md("PR=$ISSUE; gh api -X DELETE repos/o/r/issues/$PR/labels/needs-qa"), []);
   });

@@ -169,7 +169,7 @@ function inCreateContext(text: string, idx: number, matched = ""): boolean {
 }
 
 /** `issues/$PR/labels`, `issues/${PR_NUMBER}/labels`, `issues/{pr_number}/labels`: PR-identifier label path (#5428). */
-const PR_LABEL_PATH_RE = /issues\/(?:\$\{?|\{)(?:PR|pr)\w*\}?\/labels/;
+const PR_LABEL_PATH_RE = /issues\/(?:\$\{?|\{)(?:PR|PR_NUMBER|PR_NUM|PR_ID|pr|pr_number|pr_num|pr_id)\}?\/labels/;
 
 /**
  * Is the flag at `idx` inside a `gh pr <subcmd>` command (shell or argv form)? PR labels are flags
@@ -191,6 +191,8 @@ function inPrContext(text: string, idx: number): boolean {
     else issue = Math.max(issue, at);
   }
   if (pr < 0 || issue > pr) return false;
+  // `gh issue edit $(gh pr view ...) --add-label x`: the `gh pr` is nested in the issue command's args (INV-3).
+  if (issue >= 0 && !hasUnquotedBoundary(win.slice(issue, pr), win[issue - 1] ?? "")) return false;
   const tail = win.slice(pr).replace(/\\\r?\n/g, " ").replace(/\r/g, "");
   if (tail.includes("<<")) return true;
   let depth = 0;
@@ -249,17 +251,20 @@ export function scanTextSites(text: string): number[] {
         hit = true; // operand not inside the literal: unresolvable, fail closed
       }
     }
-    if (!hit && GH_API_RE.test(line) && !PR_LABEL_PATH_RE.test(line) && (/\/labels\b/.test(line) || /labels\[\]=/.test(line))) {
+    // Per `gh api` invocation: a PR-path write must not hide a chained issue-path write on the same line.
+    for (const chunk of line.split(/(?=\bgh["'\s,[]*\bapi\b)/)) {
+      if (hit) break;
+      if (!(GH_API_RE.test(chunk) && !PR_LABEL_PATH_RE.test(chunk) && (/\/labels\b/.test(chunk) || /labels\[\]=/.test(chunk)))) continue;
       const isWrite =
-        /(?:-X|--method)["',= ]+(?:POST|PUT|PATCH|DELETE)\b/i.test(line) ||
-        /(?:-[fF]|--field|--raw-field)["',= ]*["']?labels\[\]=/.test(line) ||
-        /--input\b/.test(line);
+        /(?:-X|--method)["',= ]+(?:POST|PUT|PATCH|DELETE)\b/i.test(chunk) ||
+        /(?:-[fF]|--field|--raw-field)["',= ]*["']?labels\[\]=/.test(chunk) ||
+        /--input\b/.test(chunk);
       if (isWrite) {
         const operands: string[] = [];
-        const tail = /\/labels\/?([^\s"',]*)/.exec(line);
+        const tail = /\/labels\/?([^\s"',]*)/.exec(chunk);
         if (tail && tail[1]) operands.push(tail[1]);
-        for (const f of line.matchAll(/labels\[\]=([^\s"',]+)/g)) operands.push(f[1]!);
-        if (/--input\b/.test(line) || operands.some((o) => operandIsSite(o, false))) hit = true;
+        for (const f of chunk.matchAll(/labels\[\]=([^\s"',]+)/g)) operands.push(f[1]!);
+        if (/--input\b/.test(chunk) || operands.some((o) => operandIsSite(o, false))) hit = true;
       }
     }
     if (hit) sites.push(lineNo);
