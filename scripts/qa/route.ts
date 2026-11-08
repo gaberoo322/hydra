@@ -101,8 +101,6 @@ export const bodies = {
     `> *Automated QA — two-axis review*\n\n${report}\n\n---\n\n**Verdict:** \`${verdict}\` — ${reason}\n\n${checks}\n\n${trailer}`,
   failEscalated: (verdict: string, pr: number, summary: string, escalation: string, trailer: string): string =>
     `> *Automated QA escalated — round cap reached*\n\n\`${verdict}\` on PR #${pr} — ${summary}. The issue is \`parked\`; no dev lane will pick it up until the operator un-parks it.\n\n${escalation}\n\n${trailer}`,
-  capPark: (pr: number, ts: string): string =>
-    `## Hydra cap park\n\nThis issue was parked automatically: the \`qa-fail-rounds\` cap was reached (3 of 3 per pr).\n\n| Arm | Count | Limit | Unit |\n|---|---|---|---|\n| qa-fail-rounds | 3 | 3 | pr |\n\nTo un-park: investigate why the attempts keep failing, then remove the \`parked\` label, add the right state label, and post \`Hydra-Cap-Reset: by=<you> ts=<ISO-8601>\` so every count restarts from that moment.\n\nHydra-Cap-Park: arm=qa-fail-rounds count=3 limit=3 unit=pr pr=${pr} source=trailer ts=${ts}`,
   failGlm: (verdict: string, pr: number, summary: string, red: string, trailer: string): string =>
     `> *Automated QA failed (GLM-authored PR)*\n\n\`${verdict}\` on PR #${pr} — ${summary}. Full review on the PR.${redLine(red)}\n\nRelabelled \`needs-dev-resume\` (not \`ready-for-agent\`) — the GLM drainer skips open-PR anchors; the autopilot's pinned forward-fix (issue #4460) owns the retry on this branch.\n\n${trailer}`,
   failOpen: (verdict: string, pr: number, summary: string, red: string, trailer: string): string =>
@@ -478,28 +476,15 @@ async function runRouteImpl(
       await prComment(bodies.fail(report, verdict, verdictReason, checksBlock, trailer));
       const label = await bounceLabel();
       let escalate = false;
-      let shadowPark = false;
       const adv = await advance(label, [`pr=${pr}`], "fail-bounce-advance");
       if (adv.rc !== 0) {
-        // enforce: parked in the same call (#5317 INV-5); any other refusal ends the route.
+        // The seam parks the 3rd reviewed FAIL in enforce AND shadow (qa-fail-rounds is a live arm), posting
+        // the unified park comment itself; any other refusal ends the route.
         if (adv.code !== "parked:qa-fail-rounds") throw new Error(`lifecycle advance ${label} refused (${adv.code || "unknown"}) - not editing labels by hand`);
         escalate = true;
-      } else if (adv.wouldPark === "qa-fail-rounds") {
-        // Shadow mode: the seam bounced and journalled wouldPark. Keep the cap live by parking explicitly.
-        await advanceOrThrow("parked", [], "fail-shadow-park", [
-          "--reason", "cap:qa-fail-rounds",
-          "--rationale", `QA-fail round cap reached (3 reviewed FAIL rounds on PR #${pr})`,
-        ]);
-        escalate = true;
-        shadowPark = true;
       }
       if (escalate) {
         // Off-list escalation (ADR-0047 D6): the issue is PARKED, never ready-for-human.
-        if (shadowPark) {
-          // The seam did not park, so it posted no unified comment: post the SAME body parkForCap renders.
-          const ts = deps.now().toISOString().replace(/\.\d+Z$/, "Z");
-          await issueComment(bodies.capPark(pr, ts), "cap-park-comment");
-        }
         const esc = typeof roundOut.escalationSummary === "string" && roundOut.escalationSummary !== "" ? roundOut.escalationSummary : ESC_FALLBACK_SUMMARY;
         await issueComment(bodies.failEscalated(verdict, pr, summary, esc, trailer), "escalate-issue-comment");
       } else if (label === "needs-dev-resume") {
