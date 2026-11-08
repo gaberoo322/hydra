@@ -619,6 +619,12 @@ export interface AdvanceInput {
   /** `completed` (default) or `not planned`, when `to === "closed"`. */
   closeReason?: string;
   actor?: string;
+  /**
+   * Optional compare-and-set precondition (#5318 INV-5): the single state label
+   * the caller believes the issue carries. A differing/absent/ambiguous re-read
+   * refuses `from-mismatch` BEFORE any write, in BOTH modes.
+   */
+  expectFrom?: string;
 }
 
 export type AdvanceResult =
@@ -715,6 +721,13 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
   if (isClosed) {
     await jr(entry(deps, { kind: "refused", from, result: "refused:issue-closed", written: false }, input));
     return { ok: false, issue, code: "issue-closed", mode, written: false };
+  }
+
+  // 3a. compare-and-set precondition (#5318 INV-5): a stale caller premise is
+  //     not a gate the shadow switch may bypass, so it refuses in BOTH modes.
+  if (input.expectFrom !== undefined && from !== input.expectFrom) {
+    await jr(entry(deps, { kind: "refused", from, result: "refused:from-mismatch", written: false }, input));
+    return { ok: false, issue, code: "from-mismatch", mode, written: false };
   }
 
   // 3b. legality lookup comes BEFORE the cap step, so an illegal move refuses

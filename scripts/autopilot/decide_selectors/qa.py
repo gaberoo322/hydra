@@ -11,7 +11,6 @@ from __future__ import annotations
 import turn_snapshot as ts
 
 from decide_base import (
-    QA_STALL_MAX_ATTEMPTS,
     _needs_qa_target_pr_head,
     _needs_qa_target_pr_ref,
     _parked_issues,
@@ -73,26 +72,10 @@ def _select_slot_qa_orch(
         if not numbers:
             return None
         head = numbers[0]
-        attempts = _qa_orch_item_attempts(state)
-        if not _qa_orch_item_eligible(attempts.get(head, 0)):
-            # The head issue has exhausted its attempt cap -> suppress
-            # this turn. `needs_qa_orch` stays true (the raw label count
-            # did not change); the pipeline rule surfaces this specific
-            # reason instead of the generic "idle" one, and the stalled
-            # issue number rides the dispatch_decision event + plan debug
-            # for visibility (issue #3829 acceptance criterion: "becomes
-            # visible ... rather than silently consuming budget";
-            # design-concept invariant 1: a structured signal, never a GH
-            # label mutation from this pure decision engine).
-            state["qa_orch_stalled_issue"] = head
-            return None
-        state.pop("qa_orch_stalled_issue", None)
-        # Bump ONLY the head's count. Rebuilding the tracker to hold just
-        # this one (bumped) entry is what implements the prune contract
-        # (invariant 5): a former head that is no longer the head this
-        # turn (verdict reached, or superseded by a new head) is dropped,
-        # so a later re-open under the same number starts fresh at 0.
-        _bump_qa_orch_stall_tracker(state, head)
+        # #5318 INV-7/8: no per-run stall counter and no label write here. The
+        # qa-stall Live Cap (reap releases a qa_orch claim `stall` when the head is
+        # still `needs-qa`) parks a stalled head at the next claim, and a parked
+        # issue is filtered out above.
         # #5382: always name the head the selector chose plus the parked-filtered
         # remainder, so the renderer never re-reads the lane (the #5319 bug class).
         # A duplicated number in the snapshot (fixture or double-read) collapses to its first occurrence.
@@ -148,22 +131,8 @@ def _select_slot_qa_target(
 
 
 # ---------------------------------------------------------------------------
-# qa_orch per-issue stall-cap guard (issue #3829, design-concept issue-3829)
+# qa_orch needs-qa head (issue #3829; stall cap moved to the lifecycle seam, #5318)
 # ---------------------------------------------------------------------------
-#
-# Loosely mirrors the #3729 sweep_target per-item guard directly above's
-# collect-state-emits-a-fresh-per-turn-list shape, but the eligibility rule is
-# different in kind: #3729 tracks EVERY current item on a TIME backoff (an
-# item is eligible once its stamp ages past a window — a throttle on a
-# noisy-but-eventually-correct verdict). #3829 tracks ONLY the HEAD of the
-# needs-qa set on an ATTEMPT COUNT cap (the head stops being eligible once
-# qa_orch has fired against it QA_STALL_MAX_ATTEMPTS times) because it needs
-# to actually STOP dispatching against an issue that structurally cannot reach
-# a verdict — a time backoff alone would not terminate the loop, only slow it
-# (see QA_STALL_MAX_ATTEMPTS's docstring), and tracking every item (not just
-# the head) would falsely accumulate attempts against queued issues hydra-qa
-# never actually reviewed (design-concept invariant 4 — see the rejected
-# alternative in the design-concept artifact for the full reasoning).
 
 def _qa_orch_needs_qa_numbers(state: dict, events: list[dict]) -> list[int] | None:
     """Read the current turn's orch needs-qa issue-number list (issue #3829).
@@ -183,54 +152,3 @@ def _qa_orch_needs_qa_numbers(state: dict, events: list[dict]) -> list[int] | No
     Pure: no side effects.
     """
     return ts.ordered_numbers(state, events, "needs_qa_numbers")
-
-
-def _qa_orch_item_attempts(state: dict) -> dict[int, int]:
-    """Read the persisted per-issue attempt tracker as `{issue_number: count}`.
-
-    `state.qa_orch_item_attempts` is keyed by the STRING issue number (JSON
-    object keys are strings). By construction (see `_bump_qa_orch_stall_
-    tracker`) this map holds AT MOST ONE entry — the current needs-qa head —
-    at any time. Returns a fresh `{int: int}` dict; an absent/malformed map
-    yields `{}` (the current head, if any, is fresh at 0 prior attempts).
-
-    Pure: no side effects.
-    """
-    raw = state.get("qa_orch_item_attempts")
-    if not isinstance(raw, dict):
-        return {}
-    out: dict[int, int] = {}
-    for k, v in raw.items():
-        try:
-            out[int(k)] = int(v)
-        except (TypeError, ValueError):
-            continue
-    return out
-
-
-def _qa_orch_item_eligible(attempts: int) -> bool:
-    """True iff a single issue's attempt count is under the cap. Pure."""
-    return attempts < QA_STALL_MAX_ATTEMPTS
-
-
-def _bump_qa_orch_stall_tracker(state: dict, head: int) -> bool:
-    """Mutate state: increment the attempt count for the CURRENT needs-qa
-    HEAD issue only (a qa_orch dispatch just fired against it), replacing
-    whatever the tracker held before.
-
-    Issue #3829, design-concept invariant 4 (never increment a non-head
-    issue) + invariant 5 (prune once an issue leaves the needs-qa set):
-    rebuilding the map to hold ONLY the current head's bumped count is what
-    implements both — a former head that is no longer head this turn
-    (verdict reached, or a new head took over) is dropped, so a later
-    re-open under the same number starts back at 0 rather than inheriting a
-    stale count, and a non-head issue merely present in the set is never
-    touched. Returns True iff the map changed (so `main()` can persist it via
-    the run_ledger diff seam, the same change-detection pattern as
-    `target_triage_item_stamps` / `research_force_counter` — invariant 6).
-    """
-    before = state.get("qa_orch_item_attempts")
-    prior = _qa_orch_item_attempts(state)
-    updated = {str(head): prior.get(head, 0) + 1}
-    state["qa_orch_item_attempts"] = updated
-    return before != updated

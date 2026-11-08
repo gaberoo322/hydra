@@ -295,8 +295,6 @@ FIELDS = [
     _row("orch_triage_item_stamps", "object", {}, RESET, seeded=False, decide_owned=True),
     _row("target_stale_item_stamps", "object", {}, RESET, seeded=False, decide_owned=True),
     _row("target_blocked_item_stamps", "object", {}, RESET, seeded=False, decide_owned=True),
-    _row("qa_orch_item_attempts", "object", {}, RESET, seeded=False, decide_owned=True),
-    _row("red_forward_fix_attempts", "object", {}, RESET, seeded=False, decide_owned=True),
     # Last emitted dispatch per class (#5323): the instant-death replay's source.
     _row("last_dispatch_by_class", "object", {}, RESET, seeded=False, decide_owned=True),
     # Typed parent-exception journal (#5323): {cause, turn, source, detail, ts_epoch}.

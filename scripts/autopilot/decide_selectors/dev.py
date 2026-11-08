@@ -11,7 +11,6 @@ from __future__ import annotations
 import re
 
 from decide_base import (
-    RED_FORWARD_FIX_CAP,
     TargetFresh,
     TargetResume,
     ForwardFixConflict,
@@ -26,7 +25,6 @@ from decide_base import (
     _issue_pr_branch_signal,
     _orch_anchor_signal,
     _parked_read_degraded,
-    _red_forward_fix_attempt_count,
     _red_resume_prs,
     _signal_present,
     _target_dev_resume_pick_signal,
@@ -250,17 +248,13 @@ def _select_slot_dev_orch(
     # false; and its design-concept artifact already exists (a PR is open),
     # so the grill yield does not apply.
     #
-    # CAP — RED-CI ARM ONLY (#5058, ex-#4460 INV-8): when the pick's PR is in
-    # `orch_prs_red_resume` (it qualified ONLY because a required check is
-    # red), `state.red_forward_fix_attempts[<pr>]` counts pinned dispatches
-    # per PR, in-run state only. At RED_FORWARD_FIX_CAP the pin declines and
-    # falls through to the normal selector path below (a healthy board may
-    # still pin fresh work); `_rule_pr_gate` surfaces the PR the SAME turn.
-    # The tracker bump happens ONLY on an actual dispatch, so the surface-pr
-    # rule (which runs earlier in decide() and reads the pre-bump value) and
-    # this gate agree on the boundary: attempts==CAP-1 dispatches and bumps
-    # to CAP; attempts==CAP declines and surfaces. The `needs-dev-resume`
-    # arm is uncapped (#4518): idempotency is the label itself — reap's
+    # CAP — RED-CI ARM (#5318, ADR-0047 D6/D7): there is NO per-run counter
+    # here any more. The seam's red-ci-forward-fix Live Cap counts
+    # `claim-opened purpose=forward-fix pr=N` (stamp-slot stamps it at dispatch)
+    # and parks the issue at the third claim; the parked issue then falls out of
+    # the Turn Snapshot's resume pick (#5319), so this selector just keeps
+    # emitting the ForwardFixRed pick. The `needs-dev-resume`
+    # arm's idempotency is the label itself (#4518) — reap's
     # needs-qa promotion (#4460 INV-9) relabels it away once the closing PR
     # is confirmed, and the quiescence window keeps an actively-pushed PR
     # from being re-pinned. `forward_fix_pr` reuses the playbook's
@@ -283,26 +277,16 @@ def _select_slot_dev_orch(
                     "pin, independent of state.dev_resume_pending (issue #4518)"
                 ),
             )
-        red_attempts = _red_forward_fix_attempt_count(state, pick_pr)
-        if red_attempts < RED_FORWARD_FIX_CAP:
-            tracker = state.get("red_forward_fix_attempts")
-            if not isinstance(tracker, dict):
-                tracker = {}
-                state["red_forward_fix_attempts"] = tracker
-            tracker[str(pick_pr)] = red_attempts + 1
-            return make_dispatch(
-                cls,
-                "hydra-dev",
-                intent=pick_intent,
-                reason=(
-                    f"red PR forward-fix: PR {pick_pr} "
-                    f"(issue #{pick_issue}) red on a required check, "
-                    f"attempt {red_attempts + 1}/{RED_FORWARD_FIX_CAP} "
-                    "(issue #5058)"
-                ),
-            )
-        # Cap exhausted — NO dispatch; _rule_pr_gate's surface-pr owns the
-        # operator handoff for THIS PR. Fall through.
+        return make_dispatch(
+            cls,
+            "hydra-dev",
+            intent=pick_intent,
+            reason=(
+                f"red PR forward-fix: PR {pick_pr} "
+                f"(issue #{pick_issue}) red on a required check "
+                "(issue #5058)"
+            ),
+        )
 
     # ISSUE #458: dev_orch must consume the orchestrator GH `ready-for-agent`
     # board, NOT /api/anchor/candidates. The unified candidates feed is

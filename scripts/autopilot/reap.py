@@ -1601,11 +1601,41 @@ def _release_dispatch_claim(cls: str, dispatch_id: str | None, outcome: str) -> 
     _append_log(f"claim_release cls={cls} dispatch_id={dispatch_id} outcome={outcome} result={result}")
 
 
-def _claim_release_outcome(cls: str, pr_exists: bool | None) -> str:
+def _qa_anchor_outcome(anchor_ref: str | None) -> str:
+    """qa_orch claim outcome from the anchor's LIVE label (issue #5318 INV-8).
+
+    `stall` when the anchor still carries `needs-qa` at reap time (the QA
+    dispatch ended without moving it), `verdict-posted` when it moved,
+    `released` when unreadable or the anchor is not an `issue-N` ref. The seam's
+    qa-stall Live Cap counts `claim-closed outcome=stall`; the one label read
+    replaces the retired per-run `qa_orch_item_attempts` counter."""
+    m = re.match(r"^issue-(\d+)$", (anchor_ref or "").strip())
+    if not m:
+        return "released"
+    proc = _gh_run(
+        "issue", "view", m.group(1), "--repo", REPO, "--json", "labels",
+        context=f"#{m.group(1)} qa claim outcome labels",
+    )
+    if proc is None or proc.returncode != 0:
+        return "released"
+    try:
+        names = {
+            e.get("name") for e in json.loads(proc.stdout).get("labels", [])
+            if isinstance(e, dict)
+        }
+    except (ValueError, AttributeError) as exc:
+        print(f"[autopilot] reap: WARN qa outcome labels parse failed (non-fatal): {exc}", file=sys.stderr)
+        return "released"
+    return "stall" if "needs-qa" in names else "verdict-posted"
+
+
+def _claim_release_outcome(
+    cls: str, pr_exists: bool | None, anchor_ref: str | None = None
+) -> str:
     if cls == "dev_orch":
         return "pr-opened" if pr_exists is True else ("no-pr" if pr_exists is False else "released")
     if cls == "qa_orch":
-        return "verdict-posted"
+        return _qa_anchor_outcome(anchor_ref)
     return "released"
 
 
@@ -2148,7 +2178,9 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # ADR-0047 D4 (#5418): release the dispatcher claim by dispatch id, after
     # the accounting writes and the hoisted PR-list fetch. Non-fatal, order-neutral.
     if snap.slot_occupied:
-        _release_dispatch_claim(cls, snap.dispatch_id, _claim_release_outcome(cls, pr_exists))
+        _release_dispatch_claim(
+            cls, snap.dispatch_id, _claim_release_outcome(cls, pr_exists, snap.anchor_ref)
+        )
 
     # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
     # (self_heal.append_failure → _fire_reflection_record) was dead on the live
@@ -2171,7 +2203,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # pinned resume dispatch. Fully best-effort/non-fatal.
     _handle_dev_orch_stall(
         s, cls, skill, snap.anchor_ref, task_id, snap.worktree_branch,
-        dev_orch_pr_list_json
+        dev_orch_pr_list_json, snap.dispatch_id,
     )
 
     # Issue #4045: the flip side of the stall check above — a dev_orch

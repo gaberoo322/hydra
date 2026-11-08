@@ -75,6 +75,67 @@ def _resolve_target_repo() -> str:
 TARGET_REPO = _resolve_target_repo()
 
 
+# Issue #5318 (ADR-0047 D3): reap writes issue STATE labels only through the
+# lifecycle seam CLI. Same stub-injection pattern as GH_CLI_OVERRIDE: tests set
+# HYDRA_AUTOPILOT_LIFECYCLE_CLI to a recorder script; the default is
+# `npx tsx scripts/lifecycle.ts` run from the repo root.
+LIFECYCLE_CLI_OVERRIDE = os.environ.get("HYDRA_AUTOPILOT_LIFECYCLE_CLI", "").strip()
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+
+
+def _lifecycle_argv(*args: str) -> list[str]:
+    prefix = (
+        LIFECYCLE_CLI_OVERRIDE.split()
+        if LIFECYCLE_CLI_OVERRIDE
+        else ["npx", "tsx", "scripts/lifecycle.ts"]
+    )
+    return [*prefix, *args]
+
+
+def _lifecycle_advance(
+    issue_num: str,
+    to: str,
+    from_state: str,
+    *,
+    evidence: dict[str, str] | None = None,
+    context: str,
+    actor: str = "reap",
+) -> bool:
+    """Move one issue through the lifecycle seam (`advance --from`), never raising.
+
+    True only when the seam exited 0 (moved, or a shadow would-refuse that still
+    wrote). ANY other outcome — refusal, `parked:*`, `from-mismatch`, spawn
+    failure — is logged loudly and returns False; callers skip the issue and
+    NEVER fall back to a direct label write (#5318 INV-2).
+    """
+    argv = _lifecycle_argv(
+        "advance", str(issue_num), to, "--from", from_state, "--actor", actor
+    )
+    for k, v in (evidence or {}).items():
+        argv += ["--evidence", f"{k}={v}"]
+    try:
+        proc = subprocess.run(
+            argv, check=False, capture_output=True, text=True, timeout=90,
+            cwd=_REPO_ROOT,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        print(
+            f"[autopilot] reap: WARN lifecycle advance {to} failed for {context} "
+            f"(non-fatal): {exc}",
+            file=sys.stderr,
+        )
+        return False
+    if proc.returncode != 0:
+        print(
+            f"[autopilot] reap: WARN lifecycle advance {from_state}->{to} refused for "
+            f"{context} rc={proc.returncode} (non-fatal, no fallback write): "
+            f"{(proc.stdout or proc.stderr).strip()[:200]}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def _gh_argv(*args: str) -> list[str]:
     """Build a `gh` CLI argv, honouring HYDRA_AUTOPILOT_GH_CLI (issue #3866).
 
@@ -168,6 +229,24 @@ def _pr_refs_closing_issues(pr_list_json: str) -> set[int]:
     return _load_pr_refs_module().closing_issues(pr_list_json)
 
 
+def _closing_pr_number(pr_list_json: str | None, issue_num: str) -> str | None:
+    """The number of the open PR that CLOSES `issue_num` per pr-refs.py's closing
+    predicate (issue #5318): the `pr=<N>` evidence the seam's pr-open gate needs.
+    None when unknown (no payload, parse failure, no numbered closing PR)."""
+    if pr_list_json is None:
+        return None
+    try:
+        n = _load_pr_refs_module().closing_pr_number(pr_list_json, int(issue_num))
+    except Exception as exc:  # noqa: BLE001 — best-effort, never abort the reap
+        print(
+            f"[autopilot] reap: WARN closing-PR number lookup failed for "
+            f"#{issue_num} (non-fatal): {exc}",
+            file=sys.stderr,
+        )
+        return None
+    return None if n is None else str(n)
+
+
 def _fetch_pr_list_json(repo: str, anchor_ref: str) -> str | None:
     """Fetch a repo's OPEN PR list ONCE for a given anchor's stall/closing
     checks (issues #3866, #4045, #4195).
@@ -203,7 +282,7 @@ def _fetch_pr_list_json(repo: str, anchor_ref: str) -> str | None:
         return None
     proc = _gh_run(
         "pr", "list", "--repo", repo, "--state", "open",
-        "--json", "headRefName,body,closingIssuesReferences", "--limit", "200",
+        "--json", "headRefName,body,number,closingIssuesReferences", "--limit", "200",
         context=f"repo={repo} anchor={anchor_ref} pr list",
     )
     if proc is None:
@@ -369,92 +448,3 @@ def _anchor_issue_is_closed(issue_num: str, repo: str = REPO) -> bool | None:
         )
         return None
     return state.strip().upper() == "CLOSED"
-
-
-# Issue #4808 INV-8/9: the two comment-body literals the durable no-PR resume
-# cap counts. The stall literal prefixes the ordinary #3866 stall comment
-# (`> *Automated reap — dev_orch stalled with no PR (issue #3866)*`); the cap
-# literal prefixes the #4808 cap comment that terminates the resume cycle.
-NOPR_STALL_COMMENT_MARKER = "Automated reap — dev_orch stalled with no PR"
-NOPR_CAP_COMMENT_MARKER = "Automated reap — dev_orch no-PR resume cap reached"
-
-
-def _count_prior_nopr_stall_comments(issue_num: str, repo: str = REPO) -> int | None:
-    """How many prior no-PR stall comments does issue #N carry? (issue #4808 INV-9)
-
-    ONE `gh issue view --json comments` read, issued only from
-    `_handle_dev_orch_stall`'s already-narrow confirmed-stall branch (after
-    the #4057 closed-anchor check) — never on the found-a-PR majority case,
-    never folded into a shared fetch.
-
-    Counts the comments whose body contains the stall literal
-    {@link NOPR_STALL_COMMENT_MARKER} posted AFTER the most recent comment
-    containing the cap literal {@link NOPR_CAP_COMMENT_MARKER} (a cap comment
-    is the cycle terminator; anything posted after one starts a fresh count,
-    e.g. after the operator relabels by hand and restarts the cycle).
-
-    Returns:
-      int  — the stall-comment count (0 when none match).
-      None — unreadable (`gh` failure/timeout, non-zero exit, or unparseable
-             output). Callers MUST fall back to today's behaviour — never
-             escalate an issue to ready-for-human on unknown data.
-    """
-    proc = _gh_run(
-        "issue", "view", issue_num, "--repo", repo,
-        "--json", "comments",
-        context=f"#{issue_num} issue view (comments, #4808 no-PR resume cap)",
-    )
-    if proc is None:
-        print(
-            f"[autopilot] reap: WARN #4808 prior-stall comment count "
-            f"unreadable for #{issue_num} (gh failed) — falling back to the "
-            f"ordinary stall handling",
-            file=sys.stderr,
-        )
-        return None
-    if proc.returncode != 0:
-        print(
-            f"[autopilot] reap: WARN #4808 prior-stall comment count "
-            f"unreadable for #{issue_num} (gh issue view exited "
-            f"{proc.returncode}) — falling back to the ordinary stall handling",
-            file=sys.stderr,
-        )
-        return None
-    try:
-        comments = json.loads(proc.stdout).get("comments")
-    except (json.JSONDecodeError, AttributeError) as exc:
-        print(
-            f"[autopilot] reap: WARN #4808 prior-stall comment count "
-            f"unreadable for #{issue_num} (unparseable output: {exc}) — "
-            f"falling back to the ordinary stall handling",
-            file=sys.stderr,
-        )
-        return None
-    if not isinstance(comments, list):
-        print(
-            f"[autopilot] reap: WARN #4808 prior-stall comment count "
-            f"unreadable for #{issue_num} (comments is not a list) — "
-            f"falling back to the ordinary stall handling",
-            file=sys.stderr,
-        )
-        return None
-
-    def _body(raw: object) -> str | None:
-        if not isinstance(raw, dict):
-            return None
-        body = raw.get("body")
-        return body if isinstance(body, str) else None
-
-    # gh returns comments oldest-first; the count reset is the LAST cap
-    # comment (cap_index -1 when there has never been one → count them all).
-    cap_index = -1
-    for i, raw in enumerate(comments):
-        body = _body(raw)
-        if body is not None and NOPR_CAP_COMMENT_MARKER in body:
-            cap_index = i
-    count = 0
-    for raw in comments[cap_index + 1:]:
-        body = _body(raw)
-        if body is not None and NOPR_STALL_COMMENT_MARKER in body:
-            count += 1
-    return count

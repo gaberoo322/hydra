@@ -58,6 +58,7 @@ import {
   type PreflightOptions,
   type PreflightResult,
 } from "./drainer-runner.ts";
+import { advance, defaultSeamDeps } from "../lifecycle/index.ts";
 import { editIssueLabels, viewIssue, type IssueActionWriteResult } from "../github/issue-actions.ts";
 import { createPr, listOpenPrs, type PrRow } from "../github/prs.ts";
 import {
@@ -367,6 +368,19 @@ export interface FinishDeps {
     issue: number,
     labels: { remove?: string[]; add?: string[] },
   ) => Promise<IssueActionWriteResult>;
+  /**
+   * The ONLY state-label writer (#5318, ADR-0047 D3): move one issue through the
+   * lifecycle seam with a compare-and-set `from`. `ok:false` means the seam
+   * refused (or the write failed): the caller logs and does NOT fall back to a
+   * direct label write. Flags (`glm-withhold`, the PR author label) stay on
+   * `editIssueLabels`.
+   */
+  advanceState: (
+    issue: number,
+    to: string,
+    from: string,
+    evidence?: Record<string, string>,
+  ) => Promise<{ ok: boolean; code?: string }>;
   /** The issue title, or `null` when the read fails (the caller falls back). */
   viewIssueTitle: (issue: number) => Promise<string | null>;
   createPr: (input: {
@@ -461,10 +475,13 @@ async function defensivePush(deps: FinishDeps, input: FinishInput): Promise<void
 }
 
 async function releaseClaim(deps: FinishDeps, issue: number, withhold: boolean): Promise<void> {
+  // A release is a requeue: the seam's non-live stale-requeue arm counts it (#5318 INV-12).
   const r = await safe(deps, `release issue #${issue}`, () =>
-    deps.editIssueLabels(issue, { remove: [LABEL_IN_PROGRESS], add: [LABEL_READY] }),
+    deps.advanceState(issue, LABEL_READY, LABEL_IN_PROGRESS),
   );
-  if (r && r.ok === false) deps.log(`WARN failed to release issue #${issue} (non-fatal)`);
+  if (r && r.ok === false) {
+    deps.log(`WARN failed to release issue #${issue}: seam refused ${r.code ?? "unknown"} (non-fatal, no fallback write)`);
+  }
   if (withhold) {
     const w = await safe(deps, `add glm-withhold to issue #${issue}`, () =>
       deps.editIssueLabels(issue, { add: [LABEL_WITHHOLD] }),
@@ -475,12 +492,17 @@ async function releaseClaim(deps: FinishDeps, issue: number, withhold: boolean):
   }
 }
 
-async function advanceToNeedsQa(deps: FinishDeps, issue: number): Promise<void> {
+async function advanceToNeedsQa(deps: FinishDeps, issue: number, prNumber: number | null): Promise<void> {
   const r = await safe(deps, `advance issue #${issue} to needs-qa`, () =>
-    deps.editIssueLabels(issue, { remove: [LABEL_READY, LABEL_IN_PROGRESS], add: [LABEL_NEEDS_QA] }),
+    deps.advanceState(
+      issue,
+      LABEL_NEEDS_QA,
+      LABEL_IN_PROGRESS,
+      prNumber !== null ? { pr: String(prNumber) } : undefined,
+    ),
   );
   if (r && r.ok === false) {
-    deps.log(`WARN failed to advance issue #${issue} to needs-qa (non-fatal — relabel by hand)`);
+    deps.log(`WARN failed to advance issue #${issue} to needs-qa: seam refused ${r.code ?? "unknown"} (non-fatal — reap's promotion backstops)`);
   }
 }
 
@@ -948,7 +970,7 @@ async function finishInner(deps: FinishDeps, input: FinishInput): Promise<Finish
     case "open-pr": {
       // The advance: counter reset, needs-qa relabel, daily cap, worktree.
       removeTimeoutCounter(deps, issue); // INV-6: a PR opened — the budget resets
-      await advanceToNeedsQa(deps, issue);
+      await advanceToNeedsQa(deps, issue, pr?.number ?? null);
       await safe(deps, "daily-cap increment", async () => incrementDailyCap(deps, nowMs, input.provider));
       deps.log(
         `issue #${issue}: PR opened (branch=${input.branch}), advanced to needs-qa, daily cap incremented`,
@@ -1035,6 +1057,13 @@ export function buildDefaultFinishDeps(env: NodeJS.ProcessEnv = process.env): Fi
       process.stderr.write(`hydra-glm-drainer: ${msg}\n`);
     },
     editIssueLabels: (issue, labels) => editIssueLabels(issue, labels, { repo: config.repo }),
+    advanceState: async (issue, to, from, evidence) => {
+      const res = await advance(
+        { issue, to, expectFrom: from, evidence, actor: "glm-finish" },
+        defaultSeamDeps(repoRoot),
+      );
+      return res.ok === true ? { ok: true } : { ok: false, code: res.code };
+    },
     viewIssueTitle: async (issue) => {
       const r = await viewIssue(issue, { repo: config.repo });
       return r.ok ? r.row.title : null;

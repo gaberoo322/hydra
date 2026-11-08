@@ -54,8 +54,12 @@
 
 import { ghExec, ghJson } from "../github/gh.ts";
 import { isGhFailure } from "../github/exec.ts";
-import { addIssueLabel, isIssueLabelWriteFailure } from "../github/issues.ts";
+import { advance, defaultSeamDeps } from "../lifecycle/index.ts";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { logger } from "../logger.ts";
+
+const SEAM_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 // Issue #3850 / #4073 — the rate-vs-baseline gate for steady-rate cues is
 // composed of a pure parser/decision pair in the zero-IO cue-policy leaf
 // (parseEscalationBumpSeries / shouldRateEscalate) plus the rate-gated-cue
@@ -357,30 +361,33 @@ async function reopenIssue(issueNumber: number): Promise<void> {
   if (isGhFailure(result)) throw new GhInvocationError(result.code, result.stderr);
 }
 
-/** Issue #4073 — the label a reopened escalation issue is routed to by default. */
-const DEFAULT_REOPEN_LABEL = "ready-for-human";
+/** Issue #4073 / #5318 — the lifecycle state a reopened escalation issue re-enters. */
+const REOPEN_STATE = "needs-triage";
 
 /**
- * Issue #4073 — re-apply a lifecycle label after a reopen. The closing paths
+ * Issue #4073 — re-apply a lifecycle state after a reopen. The closing paths
  * (operator review, automated sweep) strip whatever lifecycle label was
  * present, and `reopenIssue()` itself restores nothing, so every reopened
  * escalation issue previously arrived as a label-less untriaged orphan —
- * forcing the sweep to re-route it and consuming an operator-review slot on
- * every single cycle (issue #2528's own timeline shows `unlabeled
- * ready-for-human` / `unlabeled needs-triage` on each of its four reopens).
- * Defaults to `ready-for-human`: the escalation itself IS the operator-facing
- * signal, so routing a freshly-reopened issue straight to the human-review
- * lane is the correct default absent a recorded "label present at close" to
- * restore verbatim. Best-effort — a label-add failure must not fail the
- * reopen it follows (which has already succeeded); logged for visibility via
- * the same seam `addIssueLabel` already uses.
+ * forcing the sweep to re-route it (issue #2528's own timeline shows an
+ * unlabel on each of its four reopens).
+ *
+ * Issue #5318 (ADR-0047 D3): the write goes through the lifecycle seam, never a
+ * direct label edit, and a reopened issue re-enters `needs-triage` (the only
+ * gate-free entry for a state-less open issue) rather than jumping to the
+ * human-hold lane, which is off the ADR-0005 list for an automated writer.
+ * Best-effort: a seam refusal must not fail the reopen it follows (already
+ * succeeded); it is logged and the issue is left for the reconcile pass.
  */
 async function restoreLifecycleLabel(issueNumber: number): Promise<void> {
-  const result = await addIssueLabel(issueNumber, DEFAULT_REOPEN_LABEL, { repo: REPO });
-  if (isIssueLabelWriteFailure(result)) {
+  const result = await advance(
+    { issue: issueNumber, to: REOPEN_STATE, actor: "escalation" },
+    defaultSeamDeps(SEAM_REPO_ROOT),
+  );
+  if (result.ok === false) {
     logger.warn(
-      { issueNumber, code: result.code, stderr: result.stderr.slice(0, 200) },
-      "restoreLifecycleLabel: gh issue edit --add-label failed — issue may remain label-less",
+      { issueNumber, code: result.code },
+      "restoreLifecycleLabel: lifecycle seam refused the reopen re-entry — issue may remain label-less",
     );
   }
 }

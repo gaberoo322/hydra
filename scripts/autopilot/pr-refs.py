@@ -44,6 +44,10 @@ src/github/pr-refs.ts's `mergedPrReferences()` directly.
 (body closing verb only) from the CLI; hydra-target-build's shipped-anchor
 preflight pipes a REST merged-pulls payload through it.
 
+`--pairs` (issue #5318) prints `<issue> <pr>` lines (the first PR referencing
+each issue, same union predicate) so recover-stale.sh can pass `pr=<N>` evidence
+to the lifecycle seam; the PR rows must then carry `number`.
+
 Pure: stdin JSON in, stdout numbers out. It NEVER shells out to `gh` — the
 callers (recover-stale.sh, the target-build preflight) own the `gh pr list` call and
 the never-abort degradation contract. Any parse error prints nothing and
@@ -201,6 +205,40 @@ def closing_issues(pr_json):
     return out
 
 
+def referenced_pairs(pr_json):
+    """Return `{issue: pr_number}` for the union predicate (issue #5318 INV-10).
+
+    Same evidence channels as `referenced_issues()` (branch convention OR body
+    keyword ref); the FIRST PR (in `gh pr list` order) that references an issue
+    wins. PR rows lacking an integer `number` are skipped. recover-stale.sh feeds
+    the PR number to the seam as `--evidence pr=<N>` for its needs-qa moves.
+    """
+    out = {}
+    for pr in _prs(pr_json):
+        number = pr.get("number")
+        if not isinstance(number, int) or isinstance(number, bool):
+            continue
+        for issue in sorted(_branch_refs(pr) | _body_refs(pr)):
+            out.setdefault(issue, number)
+    return out
+
+
+def closing_pr_number(pr_json, issue):
+    """The number of the first open PR that CLOSES `issue`, or None (issue #5318).
+
+    Same negation-aware closing predicate as `closing_issues()`; reap.py passes
+    the number to the lifecycle seam as `pr=<N>` evidence for the needs-qa move.
+    """
+    for pr in _prs(pr_json):
+        number = pr.get("number")
+        if not isinstance(number, int) or isinstance(number, bool):
+            continue
+        for m in _CLOSE_RE.finditer(pr.get("body") or ""):
+            if m.group(1) is not None and int(m.group(1)) == issue:
+                return number
+    return None
+
+
 def _selector_for(argv):
     """Map argv onto a predicate. Zero args = the union (the contract
     recover-stale.sh and the hydra-dev parent flow already depend on);
@@ -211,10 +249,12 @@ def _selector_for(argv):
         return referenced_issues
     if len(argv) == 1 and argv[0] == "--closing":
         return closing_issues
+    if len(argv) == 1 and argv[0] == "--pairs":
+        return referenced_pairs
     if len(argv) == 2 and argv[0] == "--source" and argv[1] in ("branch", "body"):
         return branch_issues if argv[1] == "branch" else bodyref_issues
     sys.stderr.write(
-        "usage: pr-refs.py [--source branch|body] [--closing] < gh-pr-list-JSON\n"
+        "usage: pr-refs.py [--source branch|body] [--closing] [--pairs] < gh-pr-list-JSON\n"
         f"unknown arguments: {' '.join(argv)}\n"
     )
     sys.exit(2)
@@ -222,6 +262,11 @@ def _selector_for(argv):
 
 def main():
     nums = _selector_for(sys.argv[1:])(sys.stdin.read())
+    if isinstance(nums, dict):
+        # --pairs: one `<issue> <pr>` line per referenced issue (issue #5318).
+        for issue in sorted(nums):
+            sys.stdout.write(f"{issue} {nums[issue]}\n")
+        return
     if nums:
         # Space-separated, sorted for determinism. No trailing newline needed —
         # callers word-split. An empty set prints nothing (= "no open PR").
