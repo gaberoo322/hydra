@@ -23,6 +23,7 @@ import {
 } from "../src/lifecycle/caps.ts";
 import { advance, openClaim, releaseClaim, type SeamDeps, type LifecycleMode } from "../src/lifecycle/seam.ts";
 import { postCapReset } from "../src/lifecycle/park.ts";
+import { TRANSITIONS } from "../src/lifecycle/transitions.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
 
 const NOW = Date.parse("2026-11-04T12:00:00Z");
@@ -540,5 +541,106 @@ describe("postCapReset (INV-14)", () => {
     const res = await postCapReset(42, { by: "op", ts: "nope" }, w.deps);
     assert.deepEqual(res, { ok: false, code: "invalid-reset-input" });
     assert.equal(w.comments.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Caps as transition data, one guardCaps step (issue #5421)
+// ---------------------------------------------------------------------------
+
+describe("caps as data (#5421)", () => {
+  test("every CAP_TABLE row declares liveInShadow, pinned per arm", () => {
+    const live = Object.fromEntries(CAP_TABLE.map((r) => [r.arm, r.liveInShadow]));
+    assert.deepEqual(live, {
+      "qa-fail-rounds": true,
+      "dev-nopr-resume": true,
+      "qa-stall": true,
+      "red-ci-forward-fix": true,
+      "stale-requeue": false,
+      "needs-dev-resume-claims": false,
+      "total-claims": false,
+    });
+    for (const r of CAP_TABLE) assert.equal(typeof r.liveInShadow, "boolean", r.arm);
+  });
+
+  test("the edge-to-cap mapping is a field on the Transition rows", () => {
+    const capped = TRANSITIONS.filter((t) => t.cap !== undefined).map((t) => `${t.from}->${t.to}:${t.cap}`);
+    assert.deepEqual(capped.sort(), [
+      "in-progress->ready-for-agent:requeue",
+      "needs-qa->needs-dev-resume:qa-fail",
+      "needs-qa->ready-for-agent:qa-fail",
+    ]);
+  });
+
+  const requeueSeed = (w: World, n: number) => {
+    for (let i = 0; i < n; i++) {
+      w.journal.push({
+        v: 1, ts: NOW - 5000 + i, kind: "transition", from: "in-progress", to: "ready-for-agent", source: "cli",
+        actor: "t", evidence: {}, reason: null, rationale: null, result: "ok", written: true,
+      });
+    }
+  };
+  const noPrSeed = (w: World, n: number) => {
+    for (let i = 0; i < n; i++) {
+      seedClaims(w, 1);
+      w.journal.push({
+        v: 1, ts: NOW - 4000 + i, kind: "claim-closed", from: null, to: null, source: "cli", actor: "t",
+        evidence: { class: "dev_orch", outcome: "no-pr" }, reason: null, rationale: null, result: "ok", written: true,
+      });
+    }
+  };
+
+  const goRequeue = (w: World) => advance({ issue: 42, to: "ready-for-agent" }, w.deps);
+  const goClaim = (w: World) => openClaim(claimInput(), w.deps);
+  const rows = [
+    { name: "requeue edge (stale-requeue, non-live)", labels: ["in-progress"], seed: (w: World) => requeueSeed(w, 2), go: goRequeue, arm: "stale-requeue", live: false },
+    { name: "claim attempt (total-claims, non-live)", labels: ["ready-for-agent"], seed: (w: World) => seedClaims(w, 10), go: goClaim, arm: "total-claims", live: false },
+    { name: "claim attempt (dev-nopr-resume, live)", labels: ["ready-for-agent"], seed: (w: World) => noPrSeed(w, 3), go: goClaim, arm: "dev-nopr-resume", live: true },
+  ];
+
+  for (const r of rows) {
+    test(`${r.name}: enforce parks`, async () => {
+      const w = world("enforce", [...r.labels]);
+      r.seed(w);
+      const res = (await r.go(w)) as any;
+      assert.equal(res.ok, false);
+      assert.equal(res.code, `parked:${r.arm}`);
+      assert.equal(w.edits.at(-1)!.add[0], "parked");
+    });
+    test(`${r.name}: shadow ${r.live ? "parks on the live arm (journal mode=shadow live=1)" : "writes and journals would-park"}`, async () => {
+      const w = world("shadow", [...r.labels]);
+      r.seed(w);
+      const res = (await r.go(w)) as any;
+      if (r.live) {
+        assert.equal(res.ok, false);
+        assert.equal(res.code, `parked:${r.arm}`);
+        assert.equal(w.edits.at(-1)!.add[0], "parked");
+        const park = w.journal.find((e) => e.result === `parked:${r.arm}`)!;
+        assert.equal(park.evidence.mode, "shadow");
+        assert.equal(park.evidence.live, "1");
+        assert.equal(w.comments.filter((c) => c.body.startsWith("## Hydra cap park")).length, 1);
+      } else {
+        assert.equal(res.ok, true);
+        assert.equal(res.wouldPark, r.arm);
+        assert.ok(w.journal.some((e) => e.result === `shadow-would-park:${r.arm}`));
+        assert.ok(!w.edits.some((e) => e.add.includes("parked")));
+      }
+    });
+  }
+
+  test("an illegal transition refuses before any cap count is read", async () => {
+    const w = world("enforce", ["needs-triage"]);
+    let capReads = 0;
+    const orig = w.deps.fetch.issueComments;
+    w.deps.fetch.issueComments = async (n) => {
+      capReads++;
+      return orig(n);
+    };
+    requeueSeed(w, 5);
+    const res = (await advance({ issue: 42, to: "in-progress" }, w.deps)) as any;
+    assert.equal(res.ok, false);
+    assert.equal(res.code, "illegal-transition");
+    assert.equal(capReads, 0);
+    assert.deepEqual(w.edits, []);
   });
 });

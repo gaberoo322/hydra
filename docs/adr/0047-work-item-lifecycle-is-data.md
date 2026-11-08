@@ -112,17 +112,27 @@ GitHub UI (`external`). A human-hold exit from any other source goes on the atte
 ### Decision 6: Durable per-issue caps park instead of looping (#5290)
 
 Caps are per arm, plus a total dispatch-claim budget per issue. The limits live in one table in
-`src/lifecycle/caps.ts` and can be overridden by env:
+`src/lifecycle/caps.ts` and can be overridden by env (the live column is not overridable):
 
-| Arm | Unit | Limit |
-|---|---|---|
-| QA FAIL rounds | PR | 3 |
-| dev no-PR resume | issue | 2 |
-| QA stall | issue | 3 |
-| red-CI forward-fix | PR | 2 |
-| stale re-queue | issue | 2 |
-| `needs-dev-resume` claims | issue | 4 |
-| total dispatch claims | issue | 10 |
+| Arm | Unit | Limit | Live in shadow |
+|---|---|---|---|
+| QA FAIL rounds | PR | 3 | yes |
+| dev no-PR resume | issue | 2 | yes |
+| QA stall | issue | 3 | yes |
+| red-CI forward-fix | PR | 2 | yes |
+| stale re-queue | issue | 2 | no |
+| `needs-dev-resume` claims | issue | 4 | no |
+| total dispatch claims | issue | 10 | no |
+
+- **Edges carry their cap:** a `Transition` row in `src/lifecycle/transitions.ts` may declare
+  `cap: "requeue" | "qa-fail"` (`in-progress -> ready-for-agent` is `requeue`; the `needs-qa ->
+  needs-dev-resume | ready-for-agent` rows are `qa-fail`, counted only with a `pr=` evidence locator and
+  `defer` not `1`). One private `guardCaps` step in `src/lifecycle/seam.ts` enforces caps for
+  both `advance` (after the legality lookup, so an illegal move refuses instead of parking) and
+  `openClaim`.
+- **Live arms:** `liveInShadow` is true for the arms that were enforced before the seam existed
+  (QA FAIL rounds, dev no-PR resume, QA stall, red-CI forward-fix) and false for the arms new with it.
+  See Decision 7.
 
 - **Counting:**
   - QA FAIL rounds stay counted from `QA-Verdict:` trailers; every other arm counts from the journal.
