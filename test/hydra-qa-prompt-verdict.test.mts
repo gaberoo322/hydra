@@ -465,8 +465,8 @@ describe("hydra-qa playbook wires convergent review (issue #4735)", () => {
     const firstAdvance = t13.indexOf("await advance(label");
     assert.ok(comment > 0 && comment < firstAdvance, "the PR verdict comment is posted before the seam counts the round");
     assert.ok(t13.includes('"parked:qa-fail-rounds"'), "enforce: a parked:qa-fail-rounds refusal is the escalation, not an error");
-    assert.ok(t13.includes('adv.wouldPark === "qa-fail-rounds"'), "shadow: the would-park report is read from the advance result");
-    assert.ok(t13.includes('advanceOrThrow("parked"'), "shadow: an explicit park keeps the cap live");
+    assert.ok(!t13.includes("wouldPark"), "no shadow-park branch: qa-fail-rounds is a live arm, the seam parks in shadow too (#5421)");
+    assert.ok(!t13.includes('advanceOrThrow("parked"'), "no explicit caller-side park");
     const code = t13.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
     assert.ok(!code.includes("ready-for-human"), "a T1-T3 round cap never writes ready-for-human");
   });

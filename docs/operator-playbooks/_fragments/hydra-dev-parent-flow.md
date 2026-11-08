@@ -94,15 +94,18 @@ issue may still need a one-time correction.
 
 The dispatched child prompt MUST include the scope-respect block below.
 
-### 4. Claim the anchor (the parent is the dispatcher)
+### 4. Claim the anchor (the parent is the dispatcher — ADR-0047 D4)
+The seam performs the `ready-for-agent` -> `in-progress` advance; workers never
+write the label directly.
 ```bash
 dispatch_id="hydra-dev-$(date +%s)"
 npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch "$dispatch_id" --class dev_orch --run interactive --purpose fresh
 ```
-Keep the `$dispatch_id`: step 6 releases the claim with it. `claim-held` means
-another dispatch owns the issue — stop. A non-zero exit is final; never fall
-back to a direct `in-progress` label write (ADR-0047 D4; the
-`lifecycle-state-label-guard` PreToolUse hook denies it).
+Keep the `$dispatch_id`: step 6 releases the claim with it. `claim-held` ->
+exclude that issue and re-run selection (at most 3 picks, then stop with a
+report); `parked:*` or an enforce `advance-refused` -> stop and report. A
+non-zero exit is final; never fall back to a direct `in-progress` label write
+(the `lifecycle-state-label-guard` PreToolUse hook denies it).
 
 ### 5. Spawn worktree agent
 

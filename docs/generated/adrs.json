@@ -1316,6 +1316,7 @@
         "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
         "docs/agents/issue-tracker.md",
         "docs/agents/triage-labels.md",
+        "docs/operator-playbooks/hydra-autopilot.md",
         "docs/operator-playbooks/hydra-discover.md",
         "docs/operator-playbooks/hydra-grill.md",
         "docs/operator-playbooks/hydra-incident.md",

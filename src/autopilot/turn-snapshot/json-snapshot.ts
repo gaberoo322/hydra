@@ -395,6 +395,13 @@ function observability(v: TurnSnapshotValues): Record<string, unknown> {
     // #412's live-PR count — the kv wire printed it for the session to read;
     // no decide.py rule gates on it (dev_orch gates on its slot + pick).
     active_dev_orch: v.picks.activeDevOrch,
+    // #5406: provenance for retro_run_drillable — which candidate and which
+    // clause. Never under `blobs` (closed decide.py-normalised set).
+    retro: {
+      candidate: v.retro.runs.ok ? v.retro.runs.value.candidate : null,
+      drillable: v.retro.drillable,
+      drillableReason: v.retro.drillableReason,
+    },
   };
 }
 
