@@ -178,6 +178,18 @@ _Avoid_: using this term for anything live, "research throttle" (informal), "res
 A GitHub issue carrying a `## Sub-issues` section that links N child issues; satisfaction is "every child CLOSED." The **unit of work**. Auto-closes via the `hydra-epic-close` skill when satisfaction holds. The orchestrator-side analogue of a "deliverable" — multi-PR work that hangs together and finishes together. Examples: #437 (design-concept gate, three sub-phases), #642 (now-pixel dashboard slices). Distinct from **Focus Label** (theme tag on individual issues); the retired **Roadmap Milestone** (timeline grouping of epics) is no longer an axis.
 _Avoid_: "parent issue" (ambiguous — could also mean a tracking issue without satisfaction semantics), "story" (Jira-flavored), "feature" (overloaded)
 
+**Cap Arm**:
+One counted retry path on a work item, with the limit at which it stops looping: QA FAIL rounds, dev no-PR resumes, QA stalls, red-CI forward-fixes, stale re-queues, `needs-dev-resume` claims, and the total dispatch-claim budget. Each arm is one row of `CAP_TABLE` in `src/lifecycle/caps.ts`. It counts from the lifecycle journal (QA FAIL rounds count from `QA-Verdict:` trailers), starting at the latest `Hydra-Cap-Reset:` marker. An arm over its limit **Parks** the work item. Defined by [[ADR-0047]] Decision 6.
+_Avoid_: "retry limit" or "round cap" for the general concept (each is one arm), a per-run counter in `state.json` (caps are durable per issue or PR, not per run)
+
+**Park**:
+The move of a work item into the operator-only `parked` state when a **Cap Arm** is over its limit. The lifecycle writer seam (`src/lifecycle/seam.ts`, `parkForCap`) parks in the same call that hit the cap: it closes the dispatch claim, writes `parked` with `reason=cap:<arm>`, posts one unified escalation comment, and leaves any open PR open. Every autopilot arm then skips the item until the operator un-parks it with a `Hydra-Cap-Reset:` marker. A Park is an off-list escalation, so it never writes `ready-for-human`, which keeps its [[ADR-0005]] meaning. Defined by [[ADR-0047]] Decisions 2 and 6.
+_Avoid_: "escalate to ready-for-human" for a cap exhaustion, "block" (`blocked` is a dependency wait, not a cap)
+
+**Live Cap**:
+A **Cap Arm** that **Parks** even while the lifecycle seam runs in shadow mode (`config/orchestrator/lifecycle-rollout.json`). Set by the `liveInShadow` column of `CAP_TABLE`, and true for the arms Hydra enforced before the seam existed: QA FAIL rounds (#4735), dev no-PR resumes (#4808), red-CI forward-fixes and QA stalls. Arms the seam introduced only journal `would-park` until the flip to enforce. A live park in shadow returns the same `parked:<arm>` result as in enforce, and its journal entry is tagged `live=1` so the would-park triage for the enforce flip leaves it out. Introduced by the cap-guard slice (#5421), which amends [[ADR-0047]] Decision 7.
+_Avoid_: a caller-side park (a script that writes `parked` itself after a shadow `wouldPark`), "enforced cap" (enforce is the seam-wide mode, not a property of an arm)
+
 **Roadmap Milestone** — **RETIRED** (#4479):
 A timeline grouping once kept in config/direction/roadmap.md, naming the **Epics** intended to ship in the same window. The roadmap file was deleted with the claw-street-bets target swap (#4479) and nothing replaced it. Retained here only so the term resolves when it appears in older issues and prose.
 _Avoid_: using this term for anything live, "milestone" (unqualified — GitHub also has a Milestone object; we don't use that), "sprint" (we don't sprint)
