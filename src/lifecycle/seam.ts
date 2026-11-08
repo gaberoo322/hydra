@@ -1087,7 +1087,9 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
     state = labels.length === 1 ? labels[0] : "none";
     capState = labels.length === 1 ? labels[0] : "";
   }
-  const check: CapCheck = view.ok
+  // INV-9: a legacy-backfill placeholder is bookkeeping, never a dispatch attempt: no cap
+  // check, so it can never park (write a label) an over-cap in-progress issue.
+  const check: CapCheck = view.ok && input.class !== LEGACY_BACKFILL_CLASS
     ? await checkCaps(
         deps,
         issue,

@@ -60,7 +60,12 @@ export function lifecycleJournalKey(repo: string, issue: number): string {
 }
 
 export function lifecycleClaimKey(repo: string, issue: number): string {
-  return `hydra:lifecycle:claim:${repo}#${issue}`;
+  return `${claimKeyPrefix(repo)}${issue}`;
+}
+
+/** SCAN prefix shared by every claim key of `repo`; `lifecycleClaimKey` is `prefix + issue`. */
+export function claimKeyPrefix(repo: string): string {
+  return `hydra:lifecycle:claim:${repo}#`;
 }
 
 export type JournalWriteResult = { ok: true } | { ok: false; error: string };
@@ -326,7 +331,7 @@ export type ListClaimsResult =
 export async function listDispatchClaims(repo: string): Promise<ListClaimsResult> {
   try {
     const r = getRedisConnection();
-    const prefix = `hydra:lifecycle:claim:${repo}#`;
+    const prefix = claimKeyPrefix(repo);
     const keys = new Set<string>();
     let cursor = "0";
     do {

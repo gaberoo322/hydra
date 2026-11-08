@@ -307,6 +307,40 @@ describe("legacy backfill (INV-9)", () => {
   });
 });
 
+describe("legacy backfill never cap-parks (INV-9)", () => {
+  const overCap = (w: ReturnType<typeof world>["w"], seam: SeamDeps): SeamDeps => ({
+    ...seam,
+    env: () => ({ HYDRA_LIFECYCLE_CAP_TOTAL_CLAIMS: "1" }),
+    journal: {
+      ...seam.journal,
+      read: async () => ({
+        ok: true,
+        entries: [
+          { ts: NOW - 1000, kind: "claim-opened", from: null, to: null, evidence: { class: "dev_orch", state: "in-progress" }, reason: null, result: "ok", written: true },
+        ] as LifecycleJournalEntry[],
+      }),
+    },
+  });
+
+  test("an over-cap in-progress issue is claimed by backfill in enforce mode with no label write", async () => {
+    const { w, seam } = world("enforce");
+    w.labels.set(1, ["in-progress"]);
+    const deps = overCap(w, seam);
+    const res = await openClaim({ issue: 1, dispatchId: "legacy-backfill-1", class: "legacy-backfill", run: "x" }, deps);
+    assert.equal(res.ok, true);
+    assert.equal(w.edits.length, 0);
+    assert.equal(w.claims.get(1)?.class, "legacy-backfill");
+  });
+
+  test("sibling: a real dispatch class over the same cap still parks in enforce mode", async () => {
+    const { w, seam } = world("enforce");
+    w.labels.set(1, ["in-progress"]);
+    const res = await openClaim({ issue: 1, dispatchId: "d1", class: "dev_orch", run: "r1" }, overCap(w, seam));
+    assert.equal(res.ok, false);
+    assert.match(res.ok === false ? res.code : "", /^parked:/);
+  });
+});
+
 describe("no TTL, no force path (INV-1, INV-2)", () => {
   test("no hydra:lifecycle:claim:* write carries an expiry", () => {
     const src = readFileSync(new URL("../src/redis/lifecycle-journal.ts", import.meta.url), "utf8");
