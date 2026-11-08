@@ -35,6 +35,7 @@ import {
   type BriefStore,
   type OperatorChannelStore,
 } from "../src/operator-channel/index.ts";
+import { priv } from "./_helpers/operator-channel-priv.mts";
 import { PAGE_KINDS } from "../src/operator-channel/page-list.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
 import { createOperatorChannelRouter } from "../src/api/operator-channel.ts";
@@ -659,7 +660,7 @@ describe("review:pickup_ready reaches the operator as an actionable Page", () =>
     const { store } = memoryStore();
     const { transport, sent } = fakeTransport();
     const ch = new OperatorChannel({ store, transport, now: () => TUE(8, 0) });
-    const res = await ch.page(messageFromEvent({ type: E.REVIEW_PICKUP_READY, payload }));
+    const res = await priv(ch).page(messageFromEvent({ type: E.REVIEW_PICKUP_READY, payload }));
     assert.deepEqual(res, { sent: true, kind: "page" });
     assert.ok(sent[0].includes("Action: <code>/hydra-review</code>"), sent[0]);
     assert.ok(sent[0].includes('<a href="https://x/710">Decide tier for PR #710</a>'), sent[0]);
@@ -674,7 +675,7 @@ describe("review:pickup_ready reaches the operator as an actionable Page", () =>
     const bus = {
       async publish(_stream: string, ev: any) {
         // Stand in for the notification consumer's recordEvent routing.
-        await ch.page(messageFromEvent(ev));
+        await priv(ch).page(messageFromEvent(ev));
         return "id";
       },
     };

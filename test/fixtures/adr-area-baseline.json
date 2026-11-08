@@ -27,5 +27,5 @@
   "test/, scripts/test/ (the suite itself)": 8970,
   "src/glm/, scripts/glm/": 43911,
   "scripts/sync-skills.sh, src/skills/ (skill generation)": 7008,
-  "src/notification/, src/operator-channel/": 7359
+  "src/notification/, src/operator-channel/": 8166
 }
