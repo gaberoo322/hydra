@@ -1,0 +1,1 @@
+- fix: gh-label-delete-guard no longer false-denies the label hand-back recipe after a heredoc with odd quotes (#5401)

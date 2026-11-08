@@ -24,7 +24,9 @@ import {
   type OperatorChannelStore,
   type OperatorMessage,
 } from "../src/operator-channel/index.ts";
+import { priv } from "./_helpers/operator-channel-priv.mts";
 import { ALERT_TYPES, KIND_TABLE, PAGE_KINDS, renderBriefLine, type BriefItem } from "../src/operator-channel/index.ts";
+import { REPO_ROOT, listTrackedFiles, stripComments } from "../scripts/ci/seam-check-lib.ts";
 import type { DashboardAlert } from "../src/redis/alerts.ts";
 import type { DedupState, DeliveryLogEntry } from "../src/redis/operator-channel.ts";
 import type { TelegramTransportFn, TelegramTransportResult } from "../src/operator-channel/transport.ts";
@@ -175,14 +177,26 @@ describe("renderMessage escaping (property-style)", () => {
 // ---------------------------------------------------------------------------
 
 describe("severity is decided by the page list, never the producer", () => {
-  test("page() throws InvalidArgumentError (code invalid-argument) for a kind not on the list", async () => {
-    const ch = new OperatorChannel({ store: memoryStore().store, transport: fakeTransport().transport });
-    await assert.rejects(ch.page(pageMsg({ kind: "cycle:completed" })), (e: any) => e.code === "invalid-argument");
+  test("report() routes a brief kind to the Morning Brief and never pages it", async () => {
+    const m = memoryStore();
+    const t = fakeTransport();
+    const ch = new OperatorChannel({ store: m.store, transport: t.transport, alerts: async () => true });
+    const r = await ch.report("cycle:completed", { cycleId: "c1" });
+    assert.equal(r.disposition, "brief");
+    assert.deepEqual(r.outcome, { appended: true });
+    assert.equal(t.sent.length, 0, "a brief kind sends nothing immediately");
+    assert.equal(m.briefs.length, 1);
   });
 
-  test("brief() refuses a page kind", async () => {
-    const ch = new OperatorChannel({ store: memoryStore().store, transport: fakeTransport().transport });
-    await assert.rejects(ch.brief(pageMsg()), (e: any) => e.code === "invalid-argument");
+  test("report() routes a page kind to a page and never appends a brief item", async () => {
+    const m = memoryStore();
+    const t = fakeTransport();
+    const ch = new OperatorChannel({ store: m.store, transport: t.transport, alerts: async () => true });
+    const r = await ch.report("service:tunnel_failed", { unit: "hydra-tunnel.service" });
+    assert.equal(r.disposition, "page");
+    assert.deepEqual(r.outcome, { sent: true, kind: "page" });
+    assert.equal(t.sent.length, 1);
+    assert.equal(m.briefs.length, 0);
   });
 
   test("messageFromEvent stamps severity from the list and derives dedup keys", () => {
@@ -207,8 +221,9 @@ describe("severity is decided by the page list, never the producer", () => {
     assert.equal(messageFromEvent({ type: kind, payload: {} }).severity, "page");
     assert.equal(isPageEvent(kind, { repair: "repaired" }), false);
     const ch = new OperatorChannel({ store: memoryStore().store, transport: fakeTransport().transport });
-    const res = await ch.brief(messageFromEvent({ type: kind, payload: { repair: "repaired" } }));
-    assert.equal(res.appended, true);
+    const res = await ch.report(kind, { repair: "repaired" });
+    assert.equal(res.disposition, "brief");
+    assert.deepEqual(res.outcome, { appended: true });
   });
 });
 
@@ -255,19 +270,19 @@ describe("OperatorChannel edge-triggered delivery", () => {
     const c = clock();
     const ch = new OperatorChannel({ store, transport, now: c.now });
 
-    assert.deepEqual(await ch.page(pageMsg()), { sent: true, kind: "page" });
+    assert.deepEqual(await priv(ch).page(pageMsg()), { sent: true, kind: "page" });
     assert.equal(sent.length, 1);
     assert.match(sent[0], /^🚨 <b>node_modules wiped<\/b>/);
 
     c.advance(HOUR);
-    assert.deepEqual(await ch.page(pageMsg()), { sent: false, reason: "suppressed" });
+    assert.deepEqual(await priv(ch).page(pageMsg()), { sent: false, reason: "suppressed" });
     c.advance(HOUR);
-    assert.deepEqual(await ch.page(pageMsg()), { sent: false, reason: "suppressed" });
+    assert.deepEqual(await priv(ch).page(pageMsg()), { sent: false, reason: "suppressed" });
     assert.equal(sent.length, 1, "repeats inside 6h send nothing");
     assert.equal(dedup.get("infra:node_modules_wiped")?.suppressed, 2);
 
     c.advance(5 * HOUR);
-    assert.deepEqual(await ch.page(pageMsg()), { sent: true, kind: "reminder" });
+    assert.deepEqual(await priv(ch).page(pageMsg()), { sent: true, kind: "reminder" });
     assert.equal(sent.length, 2);
     assert.match(sent[1], /^🔁 still failing/);
     assert.match(sent[1], /suppressed: <code>2 since /);
@@ -287,22 +302,22 @@ describe("OperatorChannel edge-triggered delivery", () => {
     const { store } = memoryStore();
     const { transport, sent } = fakeTransport();
     const ch = new OperatorChannel({ store, transport });
-    await ch.page(pageMsg());
+    await priv(ch).page(pageMsg());
     await ch.resolve("infra:node_modules_wiped");
-    await ch.page(pageMsg());
+    await priv(ch).page(pageMsg());
     assert.equal(sent.length, 3);
   });
 
   test("delivery log records sent-plain after the plain-text backstop and failed with status", async () => {
     const m1 = memoryStore();
-    await new OperatorChannel({ store: m1.store, transport: fakeTransport({ ok: true, mode: "plain" }).transport }).page(pageMsg());
+    await priv(new OperatorChannel({ store: m1.store, transport: fakeTransport({ ok: true, mode: "plain" }).transport })).page(pageMsg());
     assert.equal(m1.log[0].outcome, "sent-plain");
 
     const m2 = memoryStore();
-    const failed = await new OperatorChannel({
+    const failed = await priv(new OperatorChannel({
       store: m2.store,
       transport: fakeTransport({ ok: false, status: 403, error: "forbidden" }).transport,
-    }).page(pageMsg());
+    })).page(pageMsg());
     assert.deepEqual(failed, { sent: false, reason: "transport-failed" });
     assert.deepEqual([m2.log[0].outcome, m2.log[0].status], ["failed", 403]);
     assert.equal(m2.dedup.size, 0, "a failed send is not recorded as delivered, so the next repeat retries");
@@ -314,14 +329,14 @@ describe("OperatorChannel edge-triggered delivery", () => {
       store: m.store,
       transport: fakeTransport({ ok: false, reason: "no-credentials", error: "x" }).transport,
     });
-    assert.deepEqual(await ch.page(pageMsg()), { sent: false, reason: "no-credentials" });
+    assert.deepEqual(await priv(ch).page(pageMsg()), { sent: false, reason: "no-credentials" });
     assert.equal(m.log[0].outcome, "skipped-no-credentials");
   });
 
   test("brief() appends a bounded-list item and reports appended", async () => {
     const m = memoryStore();
     const ch = new OperatorChannel({ store: m.store, transport: fakeTransport().transport });
-    const r = await ch.brief({ ...pageMsg(), severity: "brief", kind: "cycle:completed", dedupKey: "cycle:completed" });
+    const r = await priv(ch).brief({ ...pageMsg(), severity: "brief", kind: "cycle:completed", dedupKey: "cycle:completed" });
     assert.deepEqual(r, { appended: true });
     assert.equal(m.briefs[0].kind, "cycle:completed");
     assert.equal(m.briefs[0].severity, "brief");
@@ -331,7 +346,7 @@ describe("OperatorChannel edge-triggered delivery", () => {
     const m = memoryStore();
     const t = fakeTransport();
     const ch = new OperatorChannel({ store: m.store, transport: t.transport });
-    await ch.page(pageMsg({ dedupKey: "a1", action: { name: "no-such-action" } }));
+    await priv(ch).page(pageMsg({ dedupKey: "a1", action: { name: "no-such-action" } }));
     assert.equal(t.sent.length, 1);
     assert.ok(!t.sent[0].includes("Action:"));
   });
@@ -343,13 +358,13 @@ describe("OperatorChannel fails OPEN when Redis is unreachable", () => {
     const { transport, sent } = fakeTransport();
     const c = clock();
     const ch = new OperatorChannel({ store: m.store, transport, now: c.now });
-    assert.equal((await ch.page(pageMsg())).sent, true);
+    assert.equal((await priv(ch).page(pageMsg())).sent, true);
     assert.equal(sent.length, 1, "the page is sent despite ECONNREFUSED");
     c.advance(HOUR);
-    assert.deepEqual(await ch.page(pageMsg()), { sent: false, reason: "suppressed" });
+    assert.deepEqual(await priv(ch).page(pageMsg()), { sent: false, reason: "suppressed" });
     assert.equal(sent.length, 1, "fail-open cannot become a flood");
     c.advance(5 * HOUR);
-    assert.equal((await ch.page(pageMsg())).sent, true);
+    assert.equal((await priv(ch).page(pageMsg())).sent, true);
     assert.equal(sent.length, 2);
   });
 
@@ -357,7 +372,7 @@ describe("OperatorChannel fails OPEN when Redis is unreachable", () => {
     const m = memoryStore("hang");
     const { transport, sent } = fakeTransport();
     const ch = new OperatorChannel({ store: m.store, transport, timeoutMs: 20 });
-    const r = await ch.page(pageMsg());
+    const r = await priv(ch).page(pageMsg());
     assert.equal(r.sent, true);
     assert.equal(sent.length, 1);
   });
@@ -365,10 +380,10 @@ describe("OperatorChannel fails OPEN when Redis is unreachable", () => {
   test("concurrent pages for one dedupKey send exactly once (serialized per key)", async () => {
     const { store } = memoryStore();
     const { transport, sent } = fakeTransport();
-    const ch = new OperatorChannel({ store, transport, now: clock().now });
-    const results = await Promise.all([ch.page(pageMsg()), ch.page(pageMsg()), ch.page(pageMsg())]);
+    const ch = new OperatorChannel({ store, transport, now: clock().now, alerts: async () => true });
+    const results = await Promise.all([1, 2, 3].map(() => ch.report("infra:redis_backup_stale", { reason: "stale" })));
     assert.equal(sent.length, 1);
-    assert.equal(results.filter((r) => r.sent).length, 1);
+    assert.equal(results.filter((r) => r.delivered).length, 1);
   });
 
   test("resolve clears the dedup key even when the recovered send fails", async () => {
@@ -376,7 +391,7 @@ describe("OperatorChannel fails OPEN when Redis is unreachable", () => {
     const c = clock();
     const ok = fakeTransport();
     const chOk = new OperatorChannel({ store, transport: ok.transport, now: c.now });
-    await chOk.page(pageMsg());
+    await priv(chOk).page(pageMsg());
     assert.equal(dedup.has("infra:node_modules_wiped"), true);
     const failing = fakeTransport({ ok: false, error: "boom", status: 500 } as TelegramTransportResult);
     const chBad = new OperatorChannel({ store, transport: failing.transport, now: c.now });
@@ -387,9 +402,28 @@ describe("OperatorChannel fails OPEN when Redis is unreachable", () => {
   test("brief() and resolve() never throw when the store is down", async () => {
     const m = memoryStore("reject");
     const ch = new OperatorChannel({ store: m.store, transport: fakeTransport().transport });
-    assert.deepEqual(await ch.brief({ ...pageMsg(), severity: "brief", kind: "cycle:completed" }), { appended: false });
+    assert.deepEqual(await priv(ch).brief({ ...pageMsg(), severity: "brief", kind: "cycle:completed" }), { appended: false });
     assert.deepEqual(await ch.resolve("never-seen"), { sent: false, reason: "not-bad" });
   });
+});
+
+describe("page() and brief() are private to the Operator Channel (issue #5391, seam)", () => {
+  test("no tracked file under src/ or scripts/ outside src/operator-channel/ calls .page( or .brief(", async () => {
+    const offenders: string[] = [];
+    for (const file of await listTrackedFiles(["src/**", "scripts/**"])) {
+      if (file.startsWith("src/operator-channel/") || !/\.(ts|mts|js|mjs)$/.test(file)) continue;
+      const text = stripComments(readFileSync(join(REPO_ROOT, file), "utf8"));
+      if (/\.(page|brief)\(/.test(text)) offenders.push(file);
+    }
+    assert.deepEqual(offenders, []);
+  });
+
+  test("severityOf is not re-introduced anywhere in the Operator Channel module", () => {
+    for (const f of readdirSync(join(REPO_ROOT, "src/operator-channel"))) {
+      assert.ok(!readFileSync(join(REPO_ROOT, "src/operator-channel", f), "utf8").includes("severityOf"), f);
+    }
+  });
+
 });
 
 describe("OperatorChannel episode probes: isOpen / clear / reminderDue / briefOnce", () => {
@@ -401,7 +435,7 @@ describe("OperatorChannel episode probes: isOpen / clear / reminderDue / briefOn
     const { transport, sent } = fakeTransport();
     const ch = new OperatorChannel({ store, transport, now: clock().now });
     assert.equal(await ch.isOpen(KEY), false);
-    await ch.page(pageMsg());
+    await priv(ch).page(pageMsg());
     assert.equal(await ch.isOpen(KEY), true);
     assert.equal(sent.length, 1, "isOpen is read-only");
     await ch.resolve(KEY);
@@ -412,7 +446,7 @@ describe("OperatorChannel episode probes: isOpen / clear / reminderDue / briefOn
     const m = memoryStore("reject");
     const ch = new OperatorChannel({ store: m.store, transport: fakeTransport().transport, now: clock().now });
     assert.equal(await ch.isOpen(KEY), null);
-    await ch.page(pageMsg());
+    await priv(ch).page(pageMsg());
     assert.equal(await ch.isOpen(KEY), true);
   });
 
@@ -420,7 +454,7 @@ describe("OperatorChannel episode probes: isOpen / clear / reminderDue / briefOn
     const { store, dedup } = memoryStore();
     const { transport, sent } = fakeTransport();
     const ch = new OperatorChannel({ store, transport, now: clock().now });
-    await ch.page(pageMsg());
+    await priv(ch).page(pageMsg());
     assert.equal(dedup.has(KEY), true);
     await ch.clear(KEY);
     assert.equal(dedup.has(KEY), false);
@@ -428,13 +462,13 @@ describe("OperatorChannel episode probes: isOpen / clear / reminderDue / briefOn
     assert.equal(sent.length, 1, "clear sends nothing — unlike resolve");
     await ch.clear(KEY); // idempotent
     assert.equal(sent.length, 1);
-    assert.equal((await ch.page(pageMsg())).sent, true, "a cleared key pages again as a fresh episode");
+    assert.equal((await priv(ch).page(pageMsg())).sent, true, "a cleared key pages again as a fresh episode");
   });
 
   test("clear: also drops the process-local fallback when the store is down", async () => {
     const m = memoryStore("reject");
     const ch = new OperatorChannel({ store: m.store, transport: fakeTransport().transport, now: clock().now });
-    await ch.page(pageMsg());
+    await priv(ch).page(pageMsg());
     await ch.clear(KEY);
     assert.equal(await ch.isOpen(KEY), null);
   });
@@ -444,7 +478,7 @@ describe("OperatorChannel episode probes: isOpen / clear / reminderDue / briefOn
     const c = clock();
     const ch = new OperatorChannel({ store, transport: fakeTransport().transport, now: c.now });
     assert.equal(await ch.reminderDue(KEY), false);
-    await ch.page(pageMsg());
+    await priv(ch).page(pageMsg());
     c.advance(5 * HOUR);
     assert.equal(await ch.reminderDue(KEY), false);
     c.advance(HOUR);
@@ -464,7 +498,7 @@ describe("OperatorChannel episode probes: isOpen / clear / reminderDue / briefOn
     assert.equal(briefs.length, 2);
   });
 
-  test("briefOnce: refuses a page kind like brief()", async () => {
+  test("briefOnce: refuses a page kind", async () => {
     const { store } = memoryStore();
     const ch = new OperatorChannel({ store, transport: fakeTransport().transport, now: clock().now });
     await assert.rejects(() => ch.briefOnce({ ...pageMsg(), severity: "brief" }));
@@ -675,6 +709,22 @@ describe("OperatorChannel.report()", () => {
     assert.notEqual(res, "hung");
     assert.equal((res as { alertWritten: boolean }).alertWritten, false);
     assert.equal((res as { delivered: boolean }).delivered, true);
+  });
+
+  test("meta.alert=false suppresses the dashboard alert but still delivers the page", async () => {
+    const { ch, tr, alerts } = setup();
+    const res = await ch.report("launch:quota_stretch", {}, { alert: false });
+    assert.equal(res.delivered, true);
+    assert.equal(res.alertWritten, false);
+    assert.equal(tr.sent.length, 1);
+    assert.equal(alerts.length, 0);
+  });
+
+  test("sibling shape: omitting meta.alert still writes the alert for an alert kind", async () => {
+    const { ch, alerts } = setup();
+    const res = await ch.report("launch:quota_stretch", {});
+    assert.equal(res.alertWritten, true);
+    assert.equal(alerts.length, 1);
   });
 
   test("sibling shape: a page-only kind (no alert) still delivers and writes none", async () => {

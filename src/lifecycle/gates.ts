@@ -21,6 +21,8 @@ export interface DesignConceptRecord {
   exists: boolean;
   /** `draft | approved | stale` as stored on the artifact. */
   status: string;
+  /** The artifact's content hash; null when absent. Copied onto a claim, never supplied by a caller. */
+  artifactHash?: string | null;
 }
 
 export interface PrRecord {

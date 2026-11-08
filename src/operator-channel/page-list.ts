@@ -29,7 +29,7 @@ import type { OperatorMessage } from "./message.ts";
 type Payload = Record<string, unknown>;
 
 /**
- * A stored brief item: the {@link OperatorMessage} `channel.brief()` appended
+ * A stored brief item: the {@link OperatorMessage} the channel's brief path appended
  * plus the `at` stamp it added (`hydra:operator-channel:brief:items`).
  */
 export interface BriefItem extends OperatorMessage {
@@ -90,6 +90,18 @@ const launchTitle =
     `Launch flow '${str(p.signal, "?")}' sustained ${str(p.durationMs, "?")}ms (>= ${str(p.thresholdMs, "?")}ms)${suffix}`;
 const PAGE_ALERT = { disposition: "page", alert: true } as const;
 
+/** Strip ONE trailing `.service` so `@%n` and `@%n.service` resolve alike (the single copy; scripts/operator-notify.ts imports it). */
+export function stripUnitSuffix(unit: string): string {
+  return unit.endsWith(".service") ? unit.slice(0, -".service".length) : unit;
+}
+
+/** Per-unit episode identity + title for the service-failed rows (hydra-redis-backup and hydra-pg-backup dedup independently). */
+const SERVICE_EPISODE = {
+  dedupKey: (p: Payload): string => `service:${stripUnitSuffix(str(p.unit, "?"))}`,
+  title: (p: Payload): string => `Service failed: ${stripUnitSuffix(str(p.unit, "?"))}`,
+} as const;
+const SERVICE_PAGE = { ...PAGE, ...SERVICE_EPISODE } as const;
+
 const ROWS = {
   // ---- Infra alarms --------------------------------------------------------
   [E.INFRA_NODE_MODULES_WIPED]: PAGE_ALERT,
@@ -121,7 +133,10 @@ const ROWS = {
   // The watchdog CLI itself cannot boot (broken node_modules / strip-types error
   // / node missing) so EVERY ported check is disarmed (issue #5099). Redis-free,
   // raised from hydra-watchdog.sh via operator-notify; never rides the bus.
-  "infra:watchdog_cli_failed": PAGE,
+  "infra:watchdog_cli_failed": {
+    ...PAGE,
+    title: (p: Payload): string => `Watchdog CLI failed to start (${str(p.reason, "?")})`,
+  },
   [E.LAUNCH_QUOTA_STRETCH]: PAGE_ALERT,
   [E.LAUNCH_LATENCY_BREACH]: PAGE_ALERT,
   // Deliberately NOT an alert: a deliberate overnight operator pause must never
@@ -142,10 +157,10 @@ const ROWS = {
   // publishes — issue #5047)
   [E.HOLDBACK_REVERT_FAILED]: PAGE,
   // Orchestrator, autopilot, tunnel or backup service failures
-  "service:orchestrator_failed": PAGE,
-  "service:autopilot_failed": PAGE,
-  "service:tunnel_failed": PAGE,
-  "service:backup_failed": PAGE,
+  "service:orchestrator_failed": SERVICE_PAGE,
+  "service:autopilot_failed": SERVICE_PAGE,
+  "service:tunnel_failed": SERVICE_PAGE,
+  "service:backup_failed": SERVICE_PAGE,
   // The /hydra-review pickup set going non-empty
   [E.REVIEW_PICKUP_READY]: PAGE,
   // No Morning Brief delivered for 26h (ADR-0045 Decision 8, issue #5048):
@@ -228,6 +243,7 @@ const ROWS = {
   "service:unit_failed": {
     disposition: "brief",
     alert: false,
+    ...SERVICE_EPISODE,
     briefLine: (item: BriefItem): string => genericBriefLine(item),
   },
 } as const;

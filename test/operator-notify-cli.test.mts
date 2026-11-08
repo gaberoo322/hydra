@@ -14,7 +14,7 @@
  *          and send nothing; everything else (incl. an unreadable systemctl
  *          answer) is failed — fail toward paging, never toward silence.
  *   INV-5  severity from the closed list, never the producer: the unit→kind
- *          map decides page vs. brief; `page` rejects a non-page kind.
+ *          map decides page vs. brief; `report` hands the kind to the channel table.
  *   INV-6  dedup identity: service pages dedup on `service:<unit-base>`; a
  *          crash-looping unit yields exactly one page per window.
  *   INV-7  `%i` tolerance: one trailing `.service` is stripped.
@@ -171,52 +171,83 @@ describe("operator-notify: exit-code policy (INV-4, ADR-0045 Decision 4)", () =>
   });
 
   test("parseArgs: repeated --fact / --link, --help anywhere, bare words rejected", () => {
-    const p = parseArgs(["page", "--kind", "k", "--fact", "a=1", "--fact", "b=x=y", "--link", "Run=https://x/y"]);
-    assert.equal(p.subcommand, "page");
+    const p = parseArgs(["report", "--kind", "k", "--fact", "a=1", "--fact", "b=x=y", "--link", "Run=https://x/y"]);
+    assert.equal(p.subcommand, "report");
     assert.deepEqual(p.facts, [{ label: "a", value: "1" }, { label: "b", value: "x=y" }]);
     assert.deepEqual(p.links, [{ label: "Run", url: "https://x/y" }]);
     assert.equal(parseArgs(["--help"]).help, true);
-    assert.equal(parseArgs(["page", "--help"]).help, true);
-    assert.throws(() => parseArgs(["page", "stray"]), /unexpected argument/);
-    assert.throws(() => parseArgs(["page", "--kind"]), /needs a value/);
+    assert.equal(parseArgs(["report", "--help"]).help, true);
+    assert.throws(() => parseArgs(["report", "stray"]), /unexpected argument/);
+    assert.throws(() => parseArgs(["report", "--kind"]), /needs a value/);
   });
 });
+
+/** The delivery outcome inside the ReportResult the CLI prints for report / service-failed. */
+function outcomeOf(r: { output: { result: unknown } | null }): unknown {
+  return (r.output?.result as { outcome?: unknown } | undefined)?.outcome;
+}
 
 // ---------------------------------------------------------------------------
 // In-process runner
 // ---------------------------------------------------------------------------
 
-describe("operator-notify: page / resolve / brief through runOperatorNotify (INV-2, INV-3, INV-5)", () => {
+describe("operator-notify: report / resolve through runOperatorNotify (INV-2, INV-3, INV-5)", () => {
   test("Redis down (every store call rejects): the page is still sent, exit 0, one JSON line", async () => {
     const { sent, transport } = fakeTransport();
     const { lines, stdout } = collectStdout();
     const r = await runOperatorNotify(
-      ["page", "--kind", "infra:redis_backup_stale", "--dedup-key", "infra:redis_backup_stale", "--title", "Redis backup stale", "--fact", "age_ms=999", "--link", "Runbook=https://example.test/rb"],
+      ["report", "--kind", "infra:redis_backup_stale", "--fact", "reason=stale", "--fact", "age_ms=999", "--fact", "thresholdMs=86400000"],
       { transport, store: rejectingStore(), stdout, host: "testhost", timeoutMs: 50 },
     );
     assert.equal(r.exitCode, 0);
     assert.equal(sent.length, 1, "the page is sent despite Redis being down (fail open)");
-    assert.match(sent[0], /Redis backup stale/);
+    assert.match(sent[0], /Redis backup stale \(threshold 24h\)/);
     assert.match(sent[0], /age_ms: <code>999<\/code>/);
     assert.match(sent[0], /host: <code>testhost<\/code>/);
-    assert.match(sent[0], /<a href="https:\/\/example.test\/rb">Runbook<\/a>/);
     assert.equal(lines.length, 1, "exactly one stdout line");
     const out = JSON.parse(lines[0]);
     assert.deepEqual(out, {
-      subcommand: "page",
+      subcommand: "report",
       kind: "infra:redis_backup_stale",
       dedupKey: "infra:redis_backup_stale",
-      result: { sent: true, kind: "page" },
+      result: { disposition: "page", delivered: true, alertWritten: false, unknownKind: false, outcome: { sent: true, kind: "page" } },
     });
   });
 
-  test("a page kind not on the closed list is a usage error: exit 2, nothing sent (the CLI never decides severity)", async () => {
+  test("report --alert false skips the dashboard alert; without it the alert is written (INV-4 deviation, pinned both ways)", async () => {
+    const run = async (extra: string[]) => {
+      const mem = memoryStore();
+      const { transport } = fakeTransport();
+      const alerts: unknown[] = [];
+      await runOperatorNotify(["report", "--kind", "infra:node_modules_wiped", "--fact", "root=/x", ...extra], {
+        transport, store: mem.store, stdout: () => {}, host: "h",
+        alerts: async (a) => { alerts.push(a); return true; },
+      });
+      return alerts.length;
+    };
+    assert.equal(await run([]), 1, "default: the alert is written");
+    assert.equal(await run(["--alert", "false"]), 0, "--alert false: suppressed");
+  });
+
+  test("an unknown kind is briefed with the generic line, exit 0, flagged unknownKind (the CLI never decides severity)", async () => {
+    const mem = memoryStore();
     const { sent, transport } = fakeTransport();
     const { lines, stdout } = collectStdout();
-    const r = await runOperatorNotify(["page", "--kind", "cycle:completed", "--dedup-key", "x"], { transport, store: rejectingStore(), stdout });
-    assert.equal(r.exitCode, USAGE_EXIT_CODE);
+    const r = await runOperatorNotify(["report", "--kind", "not:a_kind", "--fact", "a=1"], { transport, store: mem.store, stdout, host: "h" });
+    assert.equal(r.exitCode, 0);
     assert.equal(sent.length, 0);
-    assert.match(JSON.parse(lines[0]).result.usageError, /not on the closed page list/);
+    assert.equal(mem.briefs.length, 1);
+    const out = JSON.parse(lines[0]);
+    assert.equal(out.result.unknownKind, true);
+    assert.equal(out.result.disposition, "brief");
+  });
+
+  test("the removed page and brief subcommands are unknown-subcommand usage errors (exit 2)", async () => {
+    const { sent, transport } = fakeTransport();
+    const deps = { transport, store: rejectingStore(), stdout: () => {} };
+    assert.equal((await runOperatorNotify(["page", "--kind", "service:tunnel_failed", "--dedup-key", "k"], deps)).exitCode, USAGE_EXIT_CODE);
+    assert.equal((await runOperatorNotify(["brief", "--kind", "service:unit_failed"], deps)).exitCode, USAGE_EXIT_CODE);
+    assert.equal(sent.length, 0);
   });
 
   test("usage errors exit 2: unknown subcommand, no subcommand, missing --kind / --dedup-key / --unit", async () => {
@@ -224,10 +255,9 @@ describe("operator-notify: page / resolve / brief through runOperatorNotify (INV
     const deps = { transport, store: rejectingStore(), stdout: () => {} };
     assert.equal((await runOperatorNotify(["bogus"], deps)).exitCode, USAGE_EXIT_CODE);
     assert.equal((await runOperatorNotify([], deps)).exitCode, USAGE_EXIT_CODE);
-    assert.equal((await runOperatorNotify(["page", "--dedup-key", "k"], deps)).exitCode, USAGE_EXIT_CODE);
-    assert.equal((await runOperatorNotify(["page", "--kind", "service:tunnel_failed"], deps)).exitCode, USAGE_EXIT_CODE);
+    assert.equal((await runOperatorNotify(["report", "--fact", "a=1"], deps)).exitCode, USAGE_EXIT_CODE);
     assert.equal((await runOperatorNotify(["resolve"], deps)).exitCode, USAGE_EXIT_CODE);
-    assert.equal((await runOperatorNotify(["brief"], deps)).exitCode, USAGE_EXIT_CODE);
+    assert.equal((await runOperatorNotify(["report", "--kind", ""], deps)).exitCode, USAGE_EXIT_CODE);
     assert.equal((await runOperatorNotify(["service-failed"], deps)).exitCode, USAGE_EXIT_CODE);
   });
 
@@ -235,28 +265,28 @@ describe("operator-notify: page / resolve / brief through runOperatorNotify (INV
     const { lines, stdout } = collectStdout();
     const r = await runOperatorNotify(["--help"], { store: rejectingStore(), stdout });
     assert.equal(r.exitCode, 0);
-    assert.match(lines.join("\n"), /operator-notify page/);
+    assert.match(lines.join("\n"), /operator-notify report/);
   });
 
   test("every delivery outcome exits 0: suppressed, no-credentials, transport-failed, not-bad", async () => {
     const mem = memoryStore();
     const { transport } = fakeTransport();
     const quiet = { stdout: () => {} };
-    const first = await runOperatorNotify(["page", "--kind", "service:tunnel_failed", "--dedup-key", "service:hydra-tunnel"], { transport, store: mem.store, ...quiet });
-    assert.deepEqual(first.output?.result, { sent: true, kind: "page" });
-    const second = await runOperatorNotify(["page", "--kind", "service:tunnel_failed", "--dedup-key", "service:hydra-tunnel"], { transport, store: mem.store, ...quiet });
+    const first = await runOperatorNotify(["report", "--kind", "service:tunnel_failed", "--fact", "unit=hydra-tunnel.service"], { transport, store: mem.store, ...quiet });
+    assert.deepEqual(outcomeOf(first), { sent: true, kind: "page" });
+    const second = await runOperatorNotify(["report", "--kind", "service:tunnel_failed", "--fact", "unit=hydra-tunnel.service"], { transport, store: mem.store, ...quiet });
     assert.equal(second.exitCode, 0);
-    assert.deepEqual(second.output?.result, { sent: false, reason: "suppressed" });
+    assert.deepEqual(outcomeOf(second), { sent: false, reason: "suppressed" });
 
     const noCreds = fakeTransport({ ok: false, reason: "no-credentials", error: "missing" });
-    const nc = await runOperatorNotify(["page", "--kind", "service:autopilot_failed", "--dedup-key", "service:hydra-autopilot"], { transport: noCreds.transport, store: rejectingStore(), ...quiet, timeoutMs: 50 });
+    const nc = await runOperatorNotify(["report", "--kind", "service:autopilot_failed", "--fact", "unit=hydra-autopilot.service"], { transport: noCreds.transport, store: rejectingStore(), ...quiet, timeoutMs: 50 });
     assert.equal(nc.exitCode, 0);
-    assert.deepEqual(nc.output?.result, { sent: false, reason: "no-credentials" });
+    assert.deepEqual(outcomeOf(nc), { sent: false, reason: "no-credentials" });
 
     const failing = fakeTransport({ ok: false, status: 502, error: "bad gateway" });
-    const tf = await runOperatorNotify(["page", "--kind", "service:orchestrator_failed", "--dedup-key", "service:hydra-orchestrator"], { transport: failing.transport, store: rejectingStore(), ...quiet, timeoutMs: 50 });
+    const tf = await runOperatorNotify(["report", "--kind", "service:orchestrator_failed", "--fact", "unit=hydra-orchestrator.service"], { transport: failing.transport, store: rejectingStore(), ...quiet, timeoutMs: 50 });
     assert.equal(tf.exitCode, 0);
-    assert.deepEqual(tf.output?.result, { sent: false, reason: "transport-failed" });
+    assert.deepEqual(outcomeOf(tf), { sent: false, reason: "transport-failed" });
 
     const nb = await runOperatorNotify(["resolve", "--dedup-key", "never-bad"], { transport, store: mem.store, ...quiet });
     assert.equal(nb.exitCode, 0);
@@ -267,7 +297,7 @@ describe("operator-notify: page / resolve / brief through runOperatorNotify (INV
     const mem = memoryStore();
     const { sent, transport } = fakeTransport();
     const quiet = { stdout: () => {} };
-    await runOperatorNotify(["page", "--kind", "launch:fail_safe", "--dedup-key", "launch:fail_safe", "--title", "Launch flow fail-safe"], { transport, store: mem.store, ...quiet });
+    await runOperatorNotify(["report", "--kind", "launch:fail_safe", "--fact", "signal=x", "--fact", "durationMs=1", "--fact", "thresholdMs=1"], { transport, store: mem.store, ...quiet });
     assert.ok(mem.dedup.has("launch:fail_safe"), "precondition: key is bad");
     const r = await runOperatorNotify(["resolve", "--dedup-key", "launch:fail_safe", "--title", "Launch flow fail-safe recovered"], { transport, store: mem.store, ...quiet });
     assert.equal(r.exitCode, 0);
@@ -277,20 +307,17 @@ describe("operator-notify: page / resolve / brief through runOperatorNotify (INV
     assert.equal(mem.dedup.has("launch:fail_safe"), false, "resolve clears the key");
   });
 
-  test("brief appends a Morning Brief item; a page kind handed to brief is a usage error", async () => {
+  test("report of a brief kind appends a Morning Brief item and sends nothing", async () => {
     const mem = memoryStore();
     const { sent, transport } = fakeTransport();
     const quiet = { stdout: () => {} };
-    const r = await runOperatorNotify(["brief", "--kind", "service:unit_failed", "--title", "Service failed: claw-street-bets-web", "--fact", "unit=claw-street-bets-web.service"], { transport, store: mem.store, host: "h", ...quiet });
+    const r = await runOperatorNotify(["report", "--kind", "service:unit_failed", "--fact", "unit=claw-street-bets-web.service"], { transport, store: mem.store, host: "h", ...quiet });
     assert.equal(r.exitCode, 0);
-    assert.deepEqual(r.output?.result, { appended: true });
+    assert.deepEqual(outcomeOf(r), { appended: true });
     assert.equal(sent.length, 0, "a brief item is never sent immediately");
     assert.equal(mem.briefs.length, 1);
     assert.equal(mem.briefs[0].kind, "service:unit_failed");
     assert.equal(mem.briefs[0].severity, "brief");
-    const bad = await runOperatorNotify(["brief", "--kind", "service:tunnel_failed", "--title", "x"], { transport, store: mem.store, ...quiet });
-    assert.equal(bad.exitCode, USAGE_EXIT_CODE);
-    assert.equal(mem.briefs.length, 1, "nothing appended for a page kind");
   });
 });
 
@@ -325,7 +352,7 @@ describe("operator-notify: service-failed — exit-code policy, unit→kind map,
     assert.equal(r.exitCode, 0);
     assert.equal(r.output?.kind, "service:tunnel_failed");
     assert.equal(r.output?.dedupKey, "service:hydra-tunnel");
-    assert.deepEqual(r.output?.result, { sent: true, kind: "page" });
+    assert.deepEqual(outcomeOf(r), { sent: true, kind: "page" });
     assert.equal(sent.length, 1);
     assert.match(sent[0], /<b>Service failed: hydra-tunnel<\/b>/);
     assert.match(sent[0], /unit: <code>hydra-tunnel\.service<\/code>/);
@@ -344,7 +371,7 @@ describe("operator-notify: service-failed — exit-code policy, unit→kind map,
     assert.equal(a.output?.dedupKey, "service:hydra-autopilot");
     assert.equal(b.output?.dedupKey, "service:hydra-autopilot");
     assert.equal(a.output?.kind, "service:autopilot_failed");
-    assert.deepEqual(b.output?.result, { sent: false, reason: "suppressed" }, "the second spelling dedups against the first");
+    assert.deepEqual(outcomeOf(b), { sent: false, reason: "suppressed" }, "the second spelling dedups against the first");
     assert.equal(sent.length, 1);
   });
 
@@ -354,18 +381,18 @@ describe("operator-notify: service-failed — exit-code policy, unit→kind map,
     let now = 1_700_000_000_000;
     const deps = { transport, store: mem.store, systemctl: () => SHOW_FAILED_1, now: () => now, ...quiet };
     const r1 = await runOperatorNotify(["service-failed", "--unit", "hydra-tunnel"], deps);
-    assert.deepEqual(r1.output?.result, { sent: true, kind: "page" });
+    assert.deepEqual(outcomeOf(r1), { sent: true, kind: "page" });
     now += 60_000;
     const r2 = await runOperatorNotify(["service-failed", "--unit", "hydra-tunnel"], deps);
     assert.equal(r2.exitCode, 0);
-    assert.deepEqual(r2.output?.result, { sent: false, reason: "suppressed" });
+    assert.deepEqual(outcomeOf(r2), { sent: false, reason: "suppressed" });
     now += 3 * 60 * 60 * 1000;
     const r3 = await runOperatorNotify(["service-failed", "--unit", "hydra-tunnel"], deps);
-    assert.deepEqual(r3.output?.result, { sent: false, reason: "suppressed" });
+    assert.deepEqual(outcomeOf(r3), { sent: false, reason: "suppressed" });
     assert.equal(sent.length, 1, "exactly one page in the window");
     now += 3 * 60 * 60 * 1000 + 1;
     const r4 = await runOperatorNotify(["service-failed", "--unit", "hydra-tunnel"], deps);
-    assert.deepEqual(r4.output?.result, { sent: true, kind: "reminder" });
+    assert.deepEqual(outcomeOf(r4), { sent: true, kind: "reminder" });
     assert.equal(sent.length, 2);
     assert.match(sent[1], /still failing/);
     assert.match(sent[1], /suppressed: <code>2 since/);
@@ -380,7 +407,7 @@ describe("operator-notify: service-failed — exit-code policy, unit→kind map,
     assert.equal(b.output?.kind, "service:backup_failed");
     assert.equal(a.output?.dedupKey, "service:hydra-redis-backup");
     assert.equal(b.output?.dedupKey, "service:hydra-pg-backup");
-    assert.deepEqual(b.output?.result, { sent: true, kind: "page" }, "a different unit is a different edge");
+    assert.deepEqual(outcomeOf(b), { sent: true, kind: "page" }, "a different unit is a different edge");
     assert.equal(sent.length, 2);
   });
 
@@ -391,7 +418,7 @@ describe("operator-notify: service-failed — exit-code policy, unit→kind map,
       const r = await runOperatorNotify(["service-failed", "--unit", unit], { transport, store: mem.store, systemctl: () => SHOW_FAILED_1, ...quiet });
       assert.equal(r.exitCode, 0);
       assert.equal(r.output?.kind, UNIT_FAILED_BRIEF_KIND);
-      assert.deepEqual(r.output?.result, { appended: true });
+      assert.deepEqual(outcomeOf(r), { appended: true });
     }
     assert.equal(sent.length, 0, "no immediate message for a brief-severity unit");
     assert.equal(mem.briefs.length, 3);
@@ -412,17 +439,17 @@ describe("operator-notify: service-failed — exit-code policy, unit→kind map,
     });
     assert.equal(r.exitCode, 0);
     assert.equal(r.output?.kind, "service:orchestrator_failed");
-    assert.deepEqual(r.output?.result, { sent: true, kind: "page" });
+    assert.deepEqual(outcomeOf(r), { sent: true, kind: "page" });
     assert.match(sent[0], /ExecMainStatus: <code>unreadable<\/code>/);
     const garbage = await runOperatorNotify(["service-failed", "--unit", "hydra-tunnel"], { transport, store: mem.store, systemctl: () => "not=a\nreal answer", ...quiet });
-    assert.deepEqual(garbage.output?.result, { sent: true, kind: "page" }, "an unparseable answer also fails toward paging");
+    assert.deepEqual(outcomeOf(garbage), { sent: true, kind: "page" }, "an unparseable answer also fails toward paging");
   });
 
   test("Redis down on the OnFailure path: the tunnel page is still sent (fail open) and exits 0", async () => {
     const { sent, transport } = fakeTransport();
     const r = await runOperatorNotify(["service-failed", "--unit", "hydra-tunnel"], { transport, store: rejectingStore(), systemctl: () => SHOW_FAILED_1, timeoutMs: 50, ...quiet });
     assert.equal(r.exitCode, 0);
-    assert.deepEqual(r.output?.result, { sent: true, kind: "page" });
+    assert.deepEqual(outcomeOf(r), { sent: true, kind: "page" });
     assert.equal(sent.length, 1);
   });
 });
@@ -465,7 +492,7 @@ describe("operator-notify: orchestrator-independent source and runtime (INV-1, I
       env: scrubbedEnv(),
     });
     assert.equal(r.status, 0, `exit ${r.status}; stderr=${r.stderr}`);
-    assert.match(r.stdout, /operator-notify page/, "usage on stdout");
+    assert.match(r.stdout, /operator-notify report/, "usage on stdout");
     assert.match(r.stdout, /service-failed --unit/);
   });
 
@@ -507,13 +534,13 @@ describe("operator-notify: orchestrator-independent source and runtime (INV-1, I
   });
 
   test("usage error from the real entry point exits 2 with the JSON line and the usage on stderr", () => {
-    const r = spawnSync(process.execPath, ["--experimental-strip-types", CLI, "page", "--kind", "not:a_page", "--dedup-key", "k"], {
+    const r = spawnSync(process.execPath, ["--experimental-strip-types", CLI, "report"], {
       encoding: "utf-8",
       timeout: 30_000,
       env: scrubbedEnv(),
     });
     assert.equal(r.status, USAGE_EXIT_CODE, `exit ${r.status}; stderr=${r.stderr}`);
     assert.match(r.stdout, /"usageError"/);
-    assert.match(r.stderr, /operator-notify page/);
+    assert.match(r.stderr, /operator-notify report/);
   });
 });

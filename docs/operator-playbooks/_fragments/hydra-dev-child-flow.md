@@ -11,24 +11,22 @@ Run these numbered steps.
 
 1. **Verify isolation** — `pwd` + `git rev-parse --git-dir` under `.git/worktrees/`.
    Abort loudly if cwd is `/home/gabe/hydra` (never fall back to the main tree).
-1a. **Claim your anchor** (issue #4271, INV-2) — immediately after the issue
-   number is fixed (pinned by the dispatcher, or self-selected right here),
-   swap the lifecycle label idempotently: `ready-for-agent` -> `in-progress`.
-   This is the SAME claim the GLM drainer's `claim_issue` performs before
-   spawning a worker, applied here to the paid Claude lane so the anchor
-   stops being a live `glm-eligible` sweep candidate (`isGlmEligibleCandidate`,
-   `src/scheduler/chores/glm-eligibility-sweep.ts`) for the whole duration of
-   this dispatch — previously every dev_orch anchor stayed `ready-for-agent`
-   end to end, so a slower dispatch could race the hourly sweep and get
-   coin-flipped into the drainer's pool mid-build. No-op if `ready-for-agent`
-   is already absent or `in-progress` is already present (the drainer may
-   have pre-claimed the same issue first). Best-effort — log and continue on
-   a `gh` failure, never abort the dispatch over a label write:
+1a. **Claim your anchor via the seam** (issue #4271, ADR-0047 D4) — workers
+   never write `in-progress` themselves. Parse `dispatchId=` / `runId=` /
+   `anchor=` from the `<!-- hydra-dispatch v1 … -->` sentinel on the first line
+   of the task prompt. If the issue was pinned (sentinel `anchor=` present, or
+   the prompt names the issue) do nothing: the dispatcher already holds the
+   claim. Otherwise (self-selected) open it now, which also takes the anchor
+   off the `glm-eligible` sweep for the dispatch's duration; the seam performs
+   the `ready-for-agent` -> `in-progress` advance:
    ```bash
-   gh issue edit "$ISSUE_NUMBER" --repo gaberoo322/hydra \
-     --remove-label ready-for-agent --add-label in-progress \
-     || echo "[hydra-dev] WARN: anchor claim relabel failed (non-fatal)" >&2
+   npx tsx scripts/lifecycle.ts dispatch "$ISSUE_NUMBER" --dispatch "$DISPATCH_ID" --class dev_orch --run "$RUN_ID" --purpose fresh
    ```
+   `$DISPATCH_ID` / `$RUN_ID` come from the sentinel; without a sentinel use
+   `interactive-dev-$ISSUE_NUMBER-<epoch>` and `interactive`. `claim-held` ->
+   exclude that issue and re-run selection (at most 3 picks, then stop with a
+   report); `parked:*` or an enforce `advance-refused` -> stop and report, no
+   label write.
 2. Read CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs.
 3. Extract the `## Files in scope` + `## Files out of scope` lists from the issue body.
 4. **Fetch per-anchor Reflections via the live API** (see "Reflection injection"

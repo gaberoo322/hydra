@@ -15,7 +15,7 @@
   "src/knowledge-base/": 8150,
   "src/anchor-selection/": 11515,
   "src/design-concept.ts, src/redis/design-concept.ts": 13555,
-  "backlog / GitHub issues": 24877,
+  "backlog / GitHub issues": 26074,
   "self-modification": 29769,
   "docs/operator-playbooks/": 54412,
   ".github/workflows/ (Verifier Core)": 23639,
@@ -27,5 +27,5 @@
   "test/, scripts/test/ (the suite itself)": 8970,
   "src/glm/, scripts/glm/": 43911,
   "scripts/sync-skills.sh, src/skills/ (skill generation)": 7008,
-  "src/notification/, src/operator-channel/": 7359
+  "src/notification/, src/operator-channel/": 8166
 }
