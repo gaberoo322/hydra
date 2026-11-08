@@ -315,7 +315,7 @@
   "src/scheduler/stop-marker.ts": 1,
   "src/scheduler/tick-stagnation-alert.ts": 1,
   "src/schemas/attention.ts": 1,
-  "src/schemas/autopilot-board.ts": 1,
+  "src/schemas/autopilot-board.ts": 2,
   "src/schemas/common.ts": 1,
   "src/schemas/cycles.ts": 1,
   "src/schemas/dispatches.ts": 1,
