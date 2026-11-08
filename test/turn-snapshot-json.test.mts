@@ -45,6 +45,7 @@
  * the reference commit's scripts/autopilot (see plan_parity.py --write-golden).
  */
 
+import type { RetroDrillableReason } from "../src/autopilot/turn-snapshot/afk-frontier.ts";
 import { DEGRADE, degradeDetail } from "../src/autopilot/turn-snapshot/collector.ts";
 import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
@@ -419,6 +420,30 @@ describe("turn snapshot JSON: contract — golden documents through zod and the 
     assert.equal(typeof doc.observability.active_dev_orch, "number");
     assert.deepEqual(Object.keys(doc.observability.retro).sort(), ["candidate", "drillable", "drillableReason"]);
     assert.equal("retro" in doc.blobs, false, "retro provenance never rides under blobs");
+  });
+
+  test("observability.retro carries the exact candidate / drillable / drillableReason values (#5406)", () => {
+    const read = (name: string) => JSON.parse(readFileSync(join(PARITY_DIR, `golden-${name}.json`), "utf-8")).observability.retro;
+    assert.deepEqual(read("healthy"), { candidate: "9ede5aef", drillable: true, drillableReason: "flagged-dispatch" });
+    assert.deepEqual(read("edge"), { candidate: "abc", drillable: null, drillableReason: "no-candidate" });
+    const fallback = buildTurnSnapshot({ ...healthyValues(), retro: { runs: FAILED, drillable: null, drillableReason: "no-candidate", reviewDue: false } }, { nowMs: NOW_MS });
+    assert.deepEqual((fallback.doc.observability as { retro: unknown }).retro, { candidate: null, drillable: null, drillableReason: "no-candidate" });
+  });
+
+  test("signals.retro_run_drillable === (reason not in {none, no-candidate}) for every RetroDrillableReason (#5406 INV-1)", () => {
+    const reasons: RetroDrillableReason[] = [
+      "fail-open-unparseable", "fail-open-not-object", "fail-open-run-not-found", "flagged-dispatch", "reflections",
+      "novel-stuck-signal", "recommendations", "run-flagged", "none", "fail-open-bundle-read-failed", "no-candidate",
+    ];
+    assert.equal(reasons.length, 11);
+    for (const reason of reasons) {
+      const expected = reason !== "none" && reason !== "no-candidate";
+      // The collector's own pairing: no-candidate carries drillable=null, every other reason a boolean.
+      const drillable = reason === "no-candidate" ? null : reason !== "none";
+      const built = buildTurnSnapshot({ ...healthyValues(), retro: { runs: ok({ available: true, candidate: "abc" }), drillable, drillableReason: reason, reviewDue: false } }, { nowMs: NOW_MS });
+      assert.equal(built.doc.signals.retro_run_drillable, expected, reason);
+      assert.equal((built.doc.observability as { retro: { drillableReason: string } }).retro.drillableReason, reason);
+    }
   });
 });
 
