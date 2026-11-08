@@ -317,7 +317,7 @@ describe("legacy backfill never cap-parks (INV-9)", () => {
         ok: true,
         entries: [
           { ts: NOW - 1000, kind: "claim-opened", from: null, to: null, evidence: { class: "dev_orch", state: "in-progress" }, reason: null, result: "ok", written: true },
-        ] as LifecycleJournalEntry[],
+        ] as unknown as LifecycleJournalEntry[],
       }),
     },
   });
