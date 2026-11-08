@@ -238,6 +238,42 @@ describe("seam spine (INV-3..6)", () => {
     }
   }
 
+  // #5318 INV-5: the optional --from compare-and-set refuses BEFORE any write in both modes.
+  for (const mode of ["shadow", "enforce"] as const) {
+    test(`--from mismatch (live qa-passed, caller premise in-progress) is refused from-mismatch in ${mode} with no write`, async () => {
+      const h = harness(["qa-passed"], mode);
+      const res = await advance({ issue: 10, to: "ready-for-agent", from: "in-progress" }, h.deps);
+      assert.deepEqual(res, { ok: false, issue: 10, code: "from-mismatch", mode, written: false });
+      assert.equal(h.edits.length, 0);
+      assert.equal(h.journal[0].kind, "refused");
+      assert.equal(h.journal[0].result, "refused:from-mismatch");
+    });
+
+    test(`--from refuses a double-state set and a state-less issue in ${mode}`, async () => {
+      for (const labels of [["in-progress", "needs-qa"], [] as string[]]) {
+        const h = harness(labels, mode);
+        const res = await advance({ issue: 10, to: "ready-for-agent", from: "in-progress" }, h.deps);
+        assert.equal(res.ok, false);
+        assert.equal("code" in res ? res.code : null, "from-mismatch");
+        assert.equal(h.edits.length, 0);
+      }
+    });
+  }
+
+  test("--from matching the live single state proceeds exactly like the unconditional advance", async () => {
+    const h = harness(["in-progress"], "shadow");
+    const res = await advance({ issue: 10, to: "ready-for-agent", from: "in-progress" }, h.deps);
+    assert.equal(res.ok, true);
+    assert.equal(h.edits.length, 1);
+  });
+
+  test("blocked -> needs-qa is a legal reconcile edge gated on an open PR (#5318 INV-10)", async () => {
+    const h = harness(["blocked"], "enforce");
+    const noPr = await advance({ issue: 10, to: "needs-qa", from: "blocked" }, h.deps);
+    assert.equal(noPr.ok, false, "without pr evidence the pr-open gate refuses");
+    assert.notEqual("code" in noPr ? noPr.code : null, "illegal-transition");
+  });
+
   test("a failed re-read refuses fetch-failed and never writes (INV-4)", async () => {
     const h = harness(["ready-for-agent"], "shadow", { viewFails: true });
     const res = await advance({ issue: 10, to: "in-progress" }, h.deps);

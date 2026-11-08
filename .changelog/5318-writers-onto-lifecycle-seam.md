@@ -1,0 +1,1 @@
+- refactor: route reap, recover-stale, GLM finish and escalation state-label writes through the lifecycle seam and retire the per-run QA/forward-fix cap counters (#5318)

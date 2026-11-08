@@ -203,18 +203,27 @@ class CP:
     def __init__(self, rc, out): self.returncode = rc; self.stdout = out; self.stderr = ""
 mode = os.environ["MODE"]
 def fake_run(argv, **kw):
+    # #5318 INV-8: the qa_orch outcome reads one issue's labels through _gh_run.
+    if "view" in argv:
+        return CP(0, os.environ.get("LABELS", '{"labels":[]}'))
     calls.append(argv)
     if mode == "raise": raise OSError("boom")
     return CP(0, '{"ok":true,"prior":null}')
 reap.subprocess.run = fake_run
 cls = os.environ["CLS"]
 pr = {"true": True, "false": False, "none": None}[os.environ["PR"]]
-reap._release_dispatch_claim(cls, os.environ.get("DID") or None, reap._claim_release_outcome(cls, pr))
+reap._release_dispatch_claim(cls, os.environ.get("DID") or None, reap._claim_release_outcome(cls, pr, os.environ.get("ANCHOR") or None))
 print(json.dumps({"calls": calls, "logs": logs}))
 `;
 
-function release(cls: string, pr: string, did = "worktree-agent-x-t1-" + cls, mode = "ok") {
-  const r = py(REAP_PROBE, { AUTOPILOT, CLS: cls, PR: pr, DID: did, MODE: mode, HYDRA_AUTOPILOT_LOG: "/dev/null" });
+function release(
+  cls: string,
+  pr: string,
+  did = "worktree-agent-x-t1-" + cls,
+  mode = "ok",
+  extra: Record<string, string> = {},
+) {
+  const r = py(REAP_PROBE, { AUTOPILOT, CLS: cls, PR: pr, DID: did, MODE: mode, HYDRA_AUTOPILOT_LOG: "/dev/null", ...extra });
   assert.equal(r.status, 0, `probe failed: ${r.stderr}`);
   return JSON.parse(r.stdout.trim().split("\n").pop() as string) as { calls: string[][]; logs: string[] };
 }
@@ -227,8 +236,12 @@ describe("reap releases the dispatcher claim by dispatch id", () => {
     assert.ok(outcomes("none").includes("--outcome released"));
   });
 
-  test("qa_orch releases with verdict-posted", () => {
-    assert.ok(release("qa_orch", "none").calls[0].join(" ").includes("--outcome verdict-posted"));
+  test("qa_orch: anchor moved off needs-qa -> verdict-posted; still needs-qa -> stall; unreadable/no anchor -> released (#5318 INV-8)", () => {
+    const outcome = (extra: Record<string, string>) => release("qa_orch", "none", undefined, "ok", extra).calls[0].join(" ");
+    assert.ok(outcome({ ANCHOR: "issue-5001", LABELS: '{"labels":[{"name":"qa-passed"}]}' }).includes("--outcome verdict-posted"));
+    assert.ok(outcome({ ANCHOR: "issue-5001", LABELS: '{"labels":[{"name":"needs-qa"}]}' }).includes("--outcome stall"));
+    assert.ok(outcome({ ANCHOR: "issue-5001", LABELS: "not json" }).includes("--outcome released"));
+    assert.ok(outcome({}).includes("--outcome released"), "no anchor -> no label read -> plain release");
   });
 
   test("dev_target and a missing dispatch id release nothing", () => {
