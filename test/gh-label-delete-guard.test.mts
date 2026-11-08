@@ -782,3 +782,172 @@ describe("gh-label-delete-guard — fail closed on internal error (#4745)", () =
     assert.equal(runWithShim("ls").status, 0);
   });
 });
+
+describe("gh-label-delete-guard — heredoc bodies are data (issue #5401)", () => {
+  test("a quote-odd heredoc body before a path DELETE + collection GET is ALLOWED (was DENY)", () => {
+    // Quote parity is EVEN end to end (the body's lone apostrophe pairs with the
+    // escaped apostrophe in the tail), so shlex does NOT fail open: master merges
+    // the DELETE and the GET into one segment and DENIES (verified exit 2 against
+    // master's guard). The strip makes it ALLOW.
+    const r = runHook(
+      bash(
+        `cat > f <<'EOF'\nit's\nEOF\ngh api -X DELETE "repos/o/r/issues/42/labels/x"\ngh api "repos/o/r/issues/42/labels" --jq .\necho a\\'b`,
+      ),
+    );
+    assert.equal(r.status, 0, r.stderr);
+  });
+
+  test("cat <<'EOF' | bash pipes the body into an interpreter: DENIED (QA round 2)", () => {
+    const r = runHook(
+      bash(`cat <<'EOF' | bash\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("cat <<EOF | /usr/bin/python3 (path-prefixed piped interpreter) is DENIED", () => {
+    const r = runHook(
+      bash(`cat <<EOF | /usr/bin/python3\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("/bin/bash <<'EOF' (path-prefixed receiver) is DENIED", () => {
+    const r = runHook(
+      bash(`/bin/bash <<'EOF'\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("sibling: cat <<EOF | tee f (non-interpreter pipe) still strips the body: ALLOWED", () => {
+    const r = runHook(
+      bash(`cat <<EOF | tee f\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF\nls`),
+    );
+    assert.equal(r.status, 0, r.stderr);
+  });
+
+  test("a hyphenated delimiter (<<END-OF) body is data: ALLOWED", () => {
+    const r = runHook(
+      bash(`cat <<END-OF\ngh api -X DELETE repos/o/r/issues/42/labels\nEND-OF\nls`),
+    );
+    assert.equal(r.status, 0, r.stderr);
+  });
+
+  test("a collection DELETE inside a bash <<'EOF' body (executed) is DENIED", () => {
+    const r = runHook(
+      bash(`bash <<'EOF'\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("a quote-odd data heredoc then real collection DELETE is DENIED", () => {
+    const r = runHook(
+      bash(`cat <<'EOF'\nsay "hi\nEOF\ngh api -X DELETE repos/o/r/issues/42/labels\necho tail`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("a real collection DELETE after a quote-free heredoc is still DENIED", () => {
+    const r = runHook(
+      bash(`cat <<'EOF'\nhello\nEOF\ngh api -X DELETE repos/o/r/issues/42/labels`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("collection-DELETE text only inside a heredoc body is ALLOWED", () => {
+    const r = runHook(
+      bash(`cat > f.md <<'EOF'\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF\nls`),
+    );
+    assert.equal(r.status, 0, r.stderr);
+  });
+
+  test("a DELETE on the heredoc operator line itself is still inspected", () => {
+    const r = runHook(
+      bash(`gh api -X DELETE repos/o/r/issues/42/labels --input - <<'EOF'\n{}\nEOF`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("a <<< here-string is not a heredoc (read binding still resolves)", () => {
+    const r = runHook(
+      bash(`read -r URL <<< "repos/o/r/issues/42/labels"; gh api -X DELETE "$URL"`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("an unterminated heredoc leaves the command unchanged", () => {
+    const r = runHook(
+      bash(`cat <<'EOF'\ngh api -X DELETE repos/o/r/issues/42/labels\n`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  test("an odd quote in a heredoc body followed by a real collection DELETE is DENIED", () => {
+    const r = runHook(
+      bash(`cat <<'EOF'\nit's\nEOF\ngh api -X DELETE repos/o/r/issues/42/labels`),
+    );
+    assert.equal(r.status, 2);
+  });
+
+  // QA round 3 / operator ruling: wrapper-prefixed piped interpreters execute
+  // the body, so a collection DELETE inside it is DENIED as on master.
+  const PIPE_INTERPS = ["bash", "sh", "python3", "ssh host", "xargs sh -c", "eval", "source"];
+  for (const interp of PIPE_INTERPS) {
+    for (const [pipe, wrap] of [["|", ""], ["|&", ""], ["|", "sudo "], ["|", "sudo -E "], ["|", "env "], ["|", "env FOO=1 "], ["|", "nohup "], ["|", "timeout 5 "], ["|", "exec "], ["|", "command "], ["|", "/usr/bin/env "], ["|", "( "], ["|", "{ "]]) {
+      test(`cat <<'EOF' ${pipe} ${wrap}${interp}: executed body is DENIED`, () => {
+        const r = runHook(
+          bash(`cat <<'EOF' ${pipe} ${wrap}${interp}\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF`),
+        );
+        assert.equal(r.status, 2, r.stderr);
+      });
+    }
+  }
+
+  test("sibling: a non-interpreter sink whose name contains an interpreter word (tee bash.log) is still ALLOWED", () => {
+    const r = runHook(
+      bash(`cat <<EOF | tee bash.log\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF\nls`),
+    );
+    assert.equal(r.status, 0, r.stderr);
+  });
+
+  test("sibling: cat <<EOF | sudo tee f (wrapper, non-interpreter sink) is still ALLOWED", () => {
+    const r = runHook(
+      bash(`cat <<EOF | sudo tee f\ngh api -X DELETE repos/o/r/issues/42/labels\nEOF\nls`),
+    );
+    assert.equal(r.status, 0, r.stderr);
+  });
+
+  test("the verbatim #5373 hand-back recipe after a quote-odd comment heredoc is ALLOWED", () => {
+    const r = runHook(
+      bash(
+        [
+          "cat > $S/c.md <<'EOF'",
+          "- tracks `\"`/`'` state, including `\\\"` escapes inside double quotes, and counts `;` / `&&` / `||` / `|` only outside quotes.",
+          "EOF",
+          "RREPO=gaberoo322/hydra",
+          "PR=5373",
+          "for L in ready-for-human conflict-fix-attempted; do",
+          '  if ! ERR=$(gh api -X DELETE "repos/$RREPO/issues/$PR/labels/$L" --silent 2>&1); then',
+          "    if grep -qE 'HTTP 404|Label does not exist' <<<\"$ERR\"; then",
+          '      echo "note: \'$L\' was not on PR #$PR (HTTP 404 tolerated)"',
+          "    else",
+          '      echo "ERROR: could not remove \'$L\' from PR #$PR: $ERR" >&2',
+          "      exit 1",
+          "    fi",
+          "  fi",
+          "done",
+          'LEFT=$(gh api "repos/$RREPO/issues/$PR/labels" \\',
+          `  --jq '[.[].name | select(. == "ready-for-human" or . == "conflict-fix-attempted")] | join(",")') \\`,
+          '  || { echo "ERROR: could not re-read PR #$PR labels" >&2; exit 1; }',
+        ].join("\n"),
+      ),
+    );
+    assert.equal(r.status, 0, r.stderr);
+  });
+
+  test("<<- tab-indented terminator closes the body", () => {
+    const r = runHook(
+      bash(`cat <<-EOF\n\tsay "hi\n\tEOF\ngh api -X DELETE repos/o/r/issues/42/labels`),
+    );
+    assert.equal(r.status, 2);
+  });
+});
