@@ -84,16 +84,16 @@ describe("lifecycle-state-label-guard: denies direct state-label writes", () => 
   });
 
   test("gh api labels POST naming a state via labels[]=", () => {
-    assertDeny(`${GH_API} repos/o/r/issues/42/labels -f 'labels[]=in-progress'`);
+    assertDeny(`${GH_API} repos/gaberoo322/hydra/issues/42/labels -f 'labels[]=in-progress'`);
   });
 
   test("gh api single-label DELETE path naming a state", () => {
-    assertDeny(`${GH_API} -X ` + "DELETE" + ` repos/o/r/issues/42/labels/ready-for-agent`);
+    assertDeny(`${GH_API} -X ` + "DELETE" + ` repos/gaberoo322/hydra/issues/42/labels/ready-for-agent`);
   });
 
   test("gh api raw JSON payload naming a state", () => {
-    assertDeny(`${GH_API} repos/o/r/issues/42/labels --input - <<< '{"labels":["needs-qa"]}'`);
-    assertDeny(`${GH_API} -X POST repos/o/r/issues/42/labels -f name=blocked`);
+    assertDeny(`${GH_API} repos/gaberoo322/hydra/issues/42/labels --input - <<< '{"labels":["needs-qa"]}'`);
+    assertDeny(`${GH_API} -X POST repos/gaberoo322/hydra/issues/42/labels -f name=blocked`);
   });
 
   test("after a leading VAR=state binding", () => {

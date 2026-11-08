@@ -91,21 +91,24 @@ fail_closed() {
 }
 trap fail_closed ERR
 
-TOOL=$(printf '%s' "$INPUT" | python3 -c 'import json,sys
+# One python startup parses the JSON once: line 1 = tool name, rest = command.
+PARSED=$(printf '%s' "$INPUT" | python3 -c 'import json,sys
 try:
-  print(json.load(sys.stdin).get("tool_name",""))
+  d=json.load(sys.stdin)
+  print(d.get("tool_name","") or "")
+  print((d.get("tool_input") or {}).get("command","") or "")
 except Exception:
   print("")' 2>/dev/null)
+
+TOOL=${PARSED%%$'\n'*}
+COMMAND=""
+if [[ "$PARSED" == *$'\n'* ]]; then
+  COMMAND=${PARSED#*$'\n'}
+fi
 
 if [ "$TOOL" != "Bash" ]; then
   exit 0
 fi
-
-COMMAND=$(printf '%s' "$INPUT" | python3 -c 'import json,sys
-try:
-  print(json.load(sys.stdin).get("tool_input",{}).get("command",""))
-except Exception:
-  print("")' 2>/dev/null)
 
 if [ -z "$COMMAND" ]; then
   exit 0
@@ -149,6 +152,13 @@ INTERP_RECV = re.compile(r"(?:^|[\s;&|(/])" + _INTERP + r"(?:\s|$)")
 INTERP_PIPE = re.compile(r"\|&?[^\n;&|]*?(?<![\w.-])" + _INTERP + r"(?![\w.-])")
 
 
+# A heredoc fed to `gh api ... --input -` is the request PAYLOAD: it is data
+# for the shell but it names the labels being written, so its body is captured
+# (not discarded) and scanned for a state word by _api_label_state (QA round 1).
+GH_API_LINE = re.compile(r"(?:^|[\s;&|(/])gh\s+(?:-\S+\s+\S+\s+)*api(?:\s|$)")
+API_BODIES = []
+
+
 def _strip_heredoc_bodies(text):
     lines = text.split("\n")
     out = []
@@ -161,13 +171,17 @@ def _strip_heredoc_bodies(text):
             if INTERP_RECV.search(line[: m.start()]) or INTERP_PIPE.search(line[m.end():]):
                 break  # executed body: keep it for segmentation
             dash, word = m.group(1), m.group(3)
+            is_api = bool(GH_API_LINE.search(line))
             while True:
                 if i >= len(lines):
+                    del API_BODIES[:]
                     return text  # unterminated: fail open, unchanged
                 body = lines[i]
                 i += 1
                 if (body.lstrip("\t") if dash else body) == word:
                     break
+                if is_api:
+                    API_BODIES.append(body)
     return "\n".join(out)
 
 
@@ -396,7 +410,8 @@ def _segments(text):
 
 
 STATE_WORD = re.compile(
-    r"(?<![\w-])(" + "|".join(re.escape(s) for s in sorted(STATES, key=len, reverse=True)) + r")(?![\w-])"
+    r"(?<![\w:/.-])(" + "|".join(re.escape(s) for s in sorted(STATES, key=len, reverse=True)) + r")(?![\w:/-])",
+    re.I,
 ) if STATES else None
 ASSIGN_TOKEN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 LABEL_FLAGS = ("--add-label", "--remove-label", "--label", "-l")
@@ -405,19 +420,31 @@ MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 def _state_in_operand(operand):
+    # GitHub label names are case-insensitive: compare lower-cased.
     for part in operand.split(","):
-        if part.strip().strip("\"'") in STATES:
-            return part.strip().strip("\"'")
+        name = part.strip().strip("\"'").lower()
+        if name in STATES:
+            return name
     return None
 
 
 HYDRA_REPO = "gaberoo322/hydra"
 
 
+def _foreign_repo(val):
+    # Exempt only a LITERAL repo that is not the Orchestrator. An unresolved
+    # `$VAR` is inspected (a worker's `--repo "$REPO"` must not bypass the deny)
+    # unless it is the Target-board idiom (`$TARGET_GH_REPO`, `$TARGET_REPO`).
+    val = val.strip("\"'")
+    if "$" in val:
+        return "TARGET" in val.upper()
+    return val.lower() != HYDRA_REPO
+
+
 def _other_repo(args):
     # A `--repo`/`-R` operand naming something other than the Orchestrator repo
-    # (the Target board, or an unresolvable $VAR) is outside the lifecycle seam:
-    # allow (fail open). A bare command defaults to this repo and is inspected.
+    # (the Target board) is outside the lifecycle seam: allow. A bare command
+    # defaults to this repo and is inspected.
     for i, tok in enumerate(args):
         val = None
         if tok in ("--repo", "-R") and i + 1 < len(args):
@@ -425,7 +452,7 @@ def _other_repo(args):
         elif tok.startswith("--repo="):
             val = tok[len("--repo="):]
         if val is not None:
-            return val.strip("\"'") != HYDRA_REPO
+            return _foreign_repo(val)
     return False
 
 
@@ -450,13 +477,22 @@ def _issue_label_state(args):
 
 
 def _api_label_state(args):
-    # `gh api`: mutating call against issues/<n>/labels naming a state.
+    # `gh api`: mutating call that writes labels on an issue: either
+    # issues/<n>/labels[/<name>] or a PATCH/POST of issues/<n> carrying labels.
     path = None
+    labels_path = False
     for tok in args:
         if re.search(r"issues/[^/\s]+/labels", tok):
-            path = tok
+            path, labels_path = tok, True
             break
+        if re.search(r"issues/[^/\s?#]+(?:[?#]\S*)?$", tok):
+            path = tok
     if path is None:
+        return None
+    rm = re.search(r"repos/([^/\s]+/[^/\s]+)/issues/", path)
+    if rm and _foreign_repo(rm.group(1)):
+        return None
+    if _other_repo(args):
         return None
     method = None
     implicit_post = False
@@ -476,30 +512,65 @@ def _api_label_state(args):
     m = re.search(r"issues/[^/\s]+/labels/([^/\s?#]+)", path)
     if m:
         from urllib.parse import unquote
-        name = unquote(m.group(1))
+        name = unquote(m.group(1)).lower()
         if name in STATES:
             return name
+    payload = [tok for tok in args if tok is not path] + list(API_BODIES)
+    # `--input FILE`: the payload lives in a file; read it when readable.
+    for i, tok in enumerate(args):
+        fpath = None
+        if tok == "--input" and i + 1 < len(args):
+            fpath = args[i + 1]
+        elif tok.startswith("--input="):
+            fpath = tok[len("--input="):]
+        if fpath and fpath != "-":
+            try:
+                with open(os.path.expanduser(fpath), "r", errors="replace") as fh:
+                    payload.append(fh.read(65536))
+            except OSError:
+                pass  # intentional: unreadable payload file fails open
+    if not labels_path and not any("label" in t.lower() for t in payload):
+        return None  # PATCH issues/<n> that carries no labels field
     if STATE_WORD is not None:
-        for tok in args:
-            if tok is path:
-                continue
+        for tok in payload:
             hit = STATE_WORD.search(tok)
             if hit:
-                return hit.group(1)
+                return hit.group(1).lower()
     return None
+
+
+def _gh_args(toks):
+    # Peel wrappers (`command`, `env`, `sudo`, `exec`, `nohup`, `time`, NAME=val
+    # words) and a path-prefixed gh (`/usr/bin/gh`); fold gh's global
+    # `-R/--repo` flag back into the subcommand args. Returns None if not gh.
+    toks = list(toks)
+    while toks and (ASSIGN_TOKEN.match(toks[0]) or toks[0] in ("command", "env", "sudo", "exec", "nohup", "time")):
+        toks.pop(0)
+    if not toks or os.path.basename(toks[0]) != "gh":
+        return None
+    pre = []
+    i = 1
+    while i < len(toks) and toks[i].startswith("-"):
+        if toks[i] in ("-R", "--repo") and i + 1 < len(toks):
+            pre += [toks[i], toks[i + 1]]
+            i += 2
+        else:
+            i += 1
+    return toks[i:], pre
 
 
 offending = None
 for seg in _segments(cmd):
-    toks = list(seg)
-    while toks and ASSIGN_TOKEN.match(toks[0]):
-        toks.pop(0)
-    if len(toks) < 3 or toks[0] != "gh":
+    g = _gh_args(seg)
+    if g is None:
         continue
-    if toks[1] == "issue" and toks[2] in ("edit", "create"):
-        offending = _issue_label_state(toks[3:])
-    elif toks[1] == "api":
-        offending = _api_label_state(toks[2:])
+    toks, pre = g
+    if len(toks) < 2:
+        continue
+    if toks[0] == "issue" and toks[1] in ("edit", "create"):
+        offending = _issue_label_state(toks[2:] + pre)
+    elif toks[0] == "api":
+        offending = _api_label_state(toks[1:] + pre)
     if offending:
         break
 

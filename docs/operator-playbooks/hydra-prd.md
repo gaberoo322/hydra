@@ -207,7 +207,7 @@ for i in 1..N; do
   CHILD_NUM=$(gh issue create \
     --repo gaberoo322/hydra \
     --title "$CHILD_TITLE" \
-    --label "enhancement" \
+    --label "${slice[i].kind:-enhancement}" \
     --body "$CHILD_BODY" | grep -oP '/issues/\K\d+')
   # Two-hop birth: zero-state -> needs-triage is gate-free; then the child's
   # childInitialState() (`ready-for-agent`). A returned illegal-transition with

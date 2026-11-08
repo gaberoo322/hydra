@@ -96,9 +96,10 @@ The dispatched child prompt MUST include the scope-respect block below.
 
 ### 4. Claim the anchor (the parent is the dispatcher)
 ```bash
-npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch "hydra-dev-$(date +%s)" --class dev_orch --run interactive --purpose fresh
+dispatch_id="hydra-dev-$(date +%s)"
+npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch "$dispatch_id" --class dev_orch --run interactive --purpose fresh
 ```
-Keep the `--dispatch` id: step 6 releases the claim with it. `claim-held` means
+Keep the `$dispatch_id`: step 6 releases the claim with it. `claim-held` means
 another dispatch owns the issue — stop. A non-zero exit is final; never fall
 back to a direct `in-progress` label write (ADR-0047 D4; the
 `lifecycle-state-label-guard` PreToolUse hook denies it).

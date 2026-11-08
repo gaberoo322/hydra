@@ -724,7 +724,8 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
                 "named event), not re-triaged again. Do not relabel, comment on, or re-route an item a pipeline dispatch is "
                 "working right now."
             )
-            out.append(LIFECYCLE_LABEL_RULE)
+            if slot.endswith("_orch"):
+                out.append(LIFECYCLE_LABEL_RULE)
         if slot in ("discover_orch", "discover_target"):
             out.append(
                 "Dedup before filing: run every candidate through `scripts/ci/issue-dedup.ts` against the shared backfill "
@@ -735,7 +736,9 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
             out.append("Triage with `npx knip` first and close duplicates of already-shipped or closed-not-planned findings before filing; the dashboard `tailwindcss` dependency is a known knip false positive — never re-file it.")
         if slot in ISSUE_PRODUCING_CLASSES:
             out.append(ADMISSION_RULE)
-            if slot not in ("sweep_orch", "sweep_target"):
+            # Orchestrator slots only: the Target board is outside the lifecycle
+            # seam. Sweeps already got the rule above (append exactly once).
+            if slot.endswith("_orch") and slot not in ("sweep_orch", "sweep_target"):
                 out.append(LIFECYCLE_LABEL_RULE)
         out.append("Final message: each item you filed, changed or routed (numbers, before → after as read back from GitHub) — or state plainly that nothing needed doing and why.")
 

@@ -26,9 +26,10 @@ Run these numbered steps.
      `npx tsx scripts/lifecycle.ts dispatch "$ISSUE_NUMBER" --dispatch "$DISPATCH_ID" --class dev_orch --run "$RUN_ID" --purpose fresh`.
      A `claim-held` refusal means another dispatch owns that issue: pick a
      different issue.
-   A non-zero exit from the CLI is final for this step: log the JSON line and
-   continue (reap/reconcile own the hand-back); never fall back to a direct
-   label write (the deny hook refuses it).
+   Any other non-zero exit from the CLI is final for this step: log the JSON
+   line and continue (reap/reconcile own the hand-back); never fall back to a
+   direct label write (the deny hook refuses it). `claim-held` is the exception:
+   it is NOT log-and-continue — stop work on that issue and pick another.
 2. Read CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs.
 3. Extract the `## Files in scope` + `## Files out of scope` lists from the issue body.
 4. **Fetch per-anchor Reflections via the live API** (see "Reflection injection"
