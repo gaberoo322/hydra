@@ -28,7 +28,7 @@ import { quotaBlockFilePath, type GateDeps } from "../src/glm/gate.ts";
 import type { WorkerProvidersResult } from "../src/glm/providers.ts";
 import type { PickDeps } from "../src/glm/pick.ts";
 import type { FinishDeps } from "../src/glm/finish.ts";
-import { claimOutcomeOf, type TickDeps } from "../src/glm/drainer-driver.ts";
+import { buildClaimSeamDeps, claimOutcomeOf, type TickDeps } from "../src/glm/drainer-driver.ts";
 import type { DispatchInput, DispatchResult } from "../src/lifecycle/index.ts";
 
 /** A spawn stub that fails loudly if it is ever actually invoked. */
@@ -304,7 +304,9 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
       files?: Map<string, string>;
       dispatchResult?: unknown;
       releaseFails?: boolean;
-      /** `runFinish` is real; this forces the author outcome via runGlmClaude/files instead. */
+      releaseThrows?: boolean;
+      /** Force the finish phase to return this action (runFinish stubbed); default is the real runFinish. */
+      forceFinish?: { action: string; quotaBlockedUntil?: number | null };
     } = {},
   ): Rig {
     const dispatches: DispatchInput[] = [];
@@ -394,6 +396,7 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
         },
         release: async (issue, dispatchId, outcome) => {
           releases.push({ issue, dispatchId, outcome });
+          if (opts.releaseThrows) throw new Error("redis down");
           return opts.releaseFails ? { ok: false, code: "claim-owner-mismatch" } : { ok: true };
         },
       },
@@ -411,6 +414,18 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
       pick,
       finish,
       tick,
+      ...(opts.forceFinish
+        ? {
+            runFinish: (async () => ({
+              action: opts.forceFinish!.action,
+              issue: 77,
+              labels: [],
+              pr: null,
+              quotaBlockedUntil: opts.forceFinish!.quotaBlockedUntil ?? null,
+              dryRun: false,
+            })) as unknown as DriverDeps["runFinish"],
+          }
+        : {}),
       buildGlmEnv: ((_e: unknown, p?: { id: string }) => {
         provCalls.push(`env:${p?.id ?? "none"}`);
         return { ok: true, env: {} };
@@ -651,14 +666,30 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     assert.ok(r.logs.some((l) => l.includes("held by other, class qa_orch")));
   });
 
-  test("a completed tick releases exactly once with the dispatchId and the mapped outcome; line.claim is ok", async () => {
+  test("a completed tick releases exactly once with the dispatchId; line.claim is ok", async () => {
     const r = rig();
     const { line } = await tickOf(r);
     assert.equal(r.releases.length, 1);
     assert.equal(r.releases[0].dispatchId, `agent-glm-77-${TS}`);
-    assert.equal(r.releases[0].outcome, claimOutcomeOf(line.finish));
     assert.deepEqual(line.claim, { dispatchId: `agent-glm-77-${TS}`, run: `glm-drainer-${TS}`, ok: true });
   });
+
+  const wiring: Array<[string, { action: string; quotaBlockedUntil?: number }, string]> = [
+    ["open-pr", { action: "open-pr" }, "pr-opened"],
+    ["keep-partial-for-resume", { action: "keep-partial-for-resume" }, "stall"],
+    ["release-nothing-produced", { action: "release-nothing-produced" }, "no-pr"],
+    ["release-not-authored", { action: "release-not-authored" }, "released"],
+    ["quota-blocked open-pr", { action: "open-pr", quotaBlockedUntil: 123 }, "released"],
+  ];
+  for (const [name, forceFinish, expected] of wiring) {
+    test(`finish-to-release wiring (${name}): the tick releases once with literal outcome ${expected}`, async () => {
+      const r = rig({ forceFinish });
+      const { exitCode } = await tickOf(r);
+      assert.equal(exitCode, 0);
+      assert.equal(r.releases.length, 1);
+      assert.equal(r.releases[0].outcome, expected);
+    });
+  }
 
   test("worktree-create failure, pre-author throw and author throw each release exactly once as released", async () => {
     for (const o of [{ worktreeAddFails: true }, { bodyThrows: true }, {
@@ -671,12 +702,28 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     }
   });
 
-  test("a throw out of finish still reaches the finally: the claim is released once, and the throw is a driver fault", async () => {
+  test("a throw out of the finish phase still reaches the finally: driver fault surfaced AND the claim is released once as released", async () => {
     const r = rig();
-    (r.deps.finish as unknown as { editIssueLabels: unknown }).editIssueLabels = async () => { throw new Error("x"); };
-    (r.deps.finish as unknown as { runGit: unknown }).runGit = async () => { throw new Error("git exploded"); };
-    await runDriverMode(["tick"], r.deps);
+    r.deps.runFinish = (async () => { throw new Error("finish exploded"); }) as unknown as DriverDeps["runFinish"];
+    const outcome = await runDriverMode(["tick"], r.deps);
+    assert.ok(isDriverFailure(outcome), "an unexpected throw is a driver fault");
+    if (isDriverFailure(outcome)) assert.equal(outcome.code, "glm-driver-fault");
     assert.equal(r.releases.length, 1);
+    assert.equal(r.releases[0].outcome, "released");
+  });
+
+  test("a release that REJECTS is caught: WARN logged, the successful tick result is preserved (exit 0, finish intact)", async () => {
+    const r = rig({ releaseThrows: true, forceFinish: { action: "open-pr" } });
+    const { exitCode, line } = await tickOf(r);
+    assert.equal(exitCode, 0);
+    assert.equal(line.finish.action, "open-pr");
+    assert.equal(r.releases.length, 1);
+    assert.ok(r.logs.some((l) => /^WARN claim release threw for issue #77/.test(l)));
+  });
+
+  test("claim path honors config.repo: the seam deps repo is the configured repo, not resolveGithubRepo()", () => {
+    const deps = buildClaimSeamDeps({ repo: "acme/other", repoRoot: "/repo" });
+    assert.equal(deps.repo, "acme/other");
   });
 
   test("a release failure logs a WARN and the tick still completes", async () => {

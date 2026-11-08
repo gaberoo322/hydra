@@ -39,7 +39,7 @@
  *   - `tick` (issue #4688, ADR-0040 Decision 1) — the whole drainer tick
  *     in-process: gate → (skip: stop) → pick → (idle: stop) → claim →
  *     worktree → `composePrompt` → author (the shared helper `author` mode
- *     also calls) → finish. Line is `{gate,pick,finish}` (`finish` null when
+ *     also calls) → finish. Line is `{gate,pick,claim,finish}` (`finish` null when
  *     not reached); exit `0` for every completed tick, `1` only for a driver
  *     fault. Journal prose goes to stderr via `deps.tick.log`.
  *   - `preflight <changed-files-file>` — read/trim/blank-filter the file,
@@ -169,6 +169,8 @@ export interface DriverDeps {
   finish?: FinishDeps;
   /** Tick-phase deps (issue #4688); built lazily from `env` when absent. */
   tick?: TickDeps;
+  /** Finish-phase runner override (tests force each finish action); defaults to the real `runFinish`. */
+  runFinish?: typeof runFinish;
 }
 
 /** Real dependencies — what the committed CLI entrypoint uses. */
@@ -377,9 +379,19 @@ export function claimOutcomeOf(finish: FinishResult | null): ClaimOutcome {
 
 const DEFAULT_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
+/**
+ * Lifecycle-seam deps for the claim path, with the drainer's configured repo
+ * threaded through so label advance and claim keys target the same repo the
+ * body read uses (`config.repo`), not whatever `resolveGithubRepo()` picks.
+ */
+export function buildClaimSeamDeps(config: { repo: string; repoRoot: string | null }) {
+  return { ...defaultSeamDeps(config.repoRoot ?? DEFAULT_REPO_ROOT), repo: config.repo };
+}
+
 /** Production tick deps for `env` (names match what bash read). */
 function buildDefaultTickDeps(env: NodeJS.ProcessEnv = process.env): TickDeps {
   const config = loadDrainerConfig(env);
+  const seamDeps = buildClaimSeamDeps(config);
   return {
     config,
     repoRoot: config.repoRoot ?? DEFAULT_REPO_ROOT,
@@ -388,9 +400,8 @@ function buildDefaultTickDeps(env: NodeJS.ProcessEnv = process.env): TickDeps {
       process.stderr.write(`hydra-glm-drainer: ${msg}\n`);
     },
     lifecycle: {
-      dispatch: (input) => dispatch(input, defaultSeamDeps(config.repoRoot ?? DEFAULT_REPO_ROOT)),
-      release: (issue, dispatchId, outcome) =>
-        releaseClaim(issue, dispatchId, defaultSeamDeps(config.repoRoot ?? DEFAULT_REPO_ROOT), "glm-drainer", outcome),
+      dispatch: (input) => dispatch(input, seamDeps),
+      release: (issue, dispatchId, outcome) => releaseClaim(issue, dispatchId, seamDeps, "glm-drainer", outcome),
     },
     readIssueBody: async (issue) => {
       const r = await viewIssue(issue, { repo: config.repo, fields: "number,body" });
@@ -556,11 +567,18 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
     if (dryRun) {
       log(`would-release claim for issue #${issue} (outcome=${outcome}, DRY_RUN=1)`);
     } else {
-      const released = await t.lifecycle.release(issue, worktreeName, outcome);
-      if (released.ok === false) {
-        log(
-          `WARN claim release failed for issue #${issue} (dispatch=${worktreeName}): ${released.code} — stale arm will close it`,
-        );
+      // The finally must never throw: a rejecting release would replace the
+      // computed tick result (STD-VERIFY-NEVER-THROW / STD-CATCH-FAIL-LOUD).
+      try {
+        const released = await t.lifecycle.release(issue, worktreeName, outcome);
+        if (released.ok === false) {
+          log(
+            `WARN claim release failed for issue #${issue} (dispatch=${worktreeName}): ${released.code} — stale arm will close it`,
+          );
+        }
+      } catch (err) {
+        logger.error({ err, issue }, "[glm-tick] claim release threw");
+        log(`WARN claim release threw for issue #${issue} (dispatch=${worktreeName}) — stale arm will close it`);
       }
     }
   }
@@ -589,7 +607,7 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
       );
       // The synthetic not-run outcome (finish.ts's not-run arm) releases the
       // claim; no worktree/branch is passed, so nothing is removed.
-      const finish = await runFinish(finishDeps, {
+      const finish = await (deps.runFinish ?? runFinish)(finishDeps, {
         issue,
         worktree: null,
         branch: null,
@@ -612,7 +630,7 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
     prompt = composePrompt(issue, body, resumeBranch, resumeCommits);
   } catch (err) {
     logger.error({ err, issue }, "[glm-tick] pre-author step threw — routing to finish as a driver fault");
-    const finish = await runFinish(finishDeps, {
+    const finish = await (deps.runFinish ?? runFinish)(finishDeps, {
       issue,
       worktree: null,
       branch: null,
@@ -643,7 +661,7 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
   }
   log(`authoring session finished: ${authorRaw.slice(0, 300)}`);
 
-  return runFinish(finishDeps, {
+  return (deps.runFinish ?? runFinish)(finishDeps, {
     issue,
     worktree,
     branch,
@@ -732,7 +750,7 @@ export async function runDriverMode(
     if (mode === "tick") {
       // The whole tick, in-process (issue #4688, ADR-0040 Decision 1): gate ->
       // pick -> claim -> worktree -> prompt -> author -> finish. Prints ONE
-      // `{gate,pick,finish}` line; exit 0 for every completed tick (skip,
+      // `{gate,pick,claim,finish}` line; exit 0 for every completed tick (skip,
       // idle, finish-fault included) — a non-zero exit is a driver fault
       // (an exception caught by the outer boundary below).
       const r = await runTick(deps);
