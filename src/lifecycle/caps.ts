@@ -38,18 +38,29 @@ export interface CapRow {
   readonly arm: CapArm;
   readonly unit: CapUnit;
   readonly limit: number;
+  /**
+   * Enforced even while the seam is in shadow (ADR-0047 D6/D7). True for the arms
+   * that were enforced before the seam existed; false for the arms new with it.
+   * Not env-overridable.
+   */
+  readonly liveInShadow: boolean;
 }
 
 /** Table order is the park-naming order: per-arm rows first, then the total. */
 export const CAP_TABLE: readonly CapRow[] = [
-  { arm: "qa-fail-rounds", unit: "pr", limit: 3 },
-  { arm: "dev-nopr-resume", unit: "issue", limit: 2 },
-  { arm: "qa-stall", unit: "issue", limit: 3 },
-  { arm: "red-ci-forward-fix", unit: "pr", limit: 2 },
-  { arm: "stale-requeue", unit: "issue", limit: 2 },
-  { arm: "needs-dev-resume-claims", unit: "issue", limit: 4 },
-  { arm: "total-claims", unit: "issue", limit: 10 },
+  { arm: "qa-fail-rounds", unit: "pr", limit: 3, liveInShadow: true },
+  { arm: "dev-nopr-resume", unit: "issue", limit: 2, liveInShadow: true },
+  { arm: "qa-stall", unit: "issue", limit: 3, liveInShadow: true },
+  { arm: "red-ci-forward-fix", unit: "pr", limit: 2, liveInShadow: true },
+  { arm: "stale-requeue", unit: "issue", limit: 2, liveInShadow: false },
+  { arm: "needs-dev-resume-claims", unit: "issue", limit: 4, liveInShadow: false },
+  { arm: "total-claims", unit: "issue", limit: 10, liveInShadow: false },
 ];
+
+/** Whether `arm` parks for real even in shadow mode (the `liveInShadow` column). */
+export function isLiveArm(arm: CapArm): boolean {
+  return CAP_TABLE.find((r) => r.arm === arm)?.liveInShadow === true;
+}
 
 export const CAP_DEFAULTS: Readonly<Record<CapArm, number>> = Object.fromEntries(
   CAP_TABLE.map((r) => [r.arm, r.limit]),
