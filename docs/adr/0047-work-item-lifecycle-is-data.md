@@ -153,6 +153,10 @@ Caps are per arm, plus a total dispatch-claim budget per issue. The limits live 
   `config/orchestrator/lifecycle-rollout.json`; a missing value means `shadow`. In shadow the seam
   **always writes**, journaling `would-refuse:<reason>` / `would-park:<arm>`. Dispatch claims are real
   in shadow.
+- **Live arms park in shadow:** a cap arm with `liveInShadow` (Decision 6) parks exactly as in
+  enforce, returning `parked:<arm>` and posting the unified comment, so no previously enforced cap
+  regresses. Its park entry carries `mode=shadow live=1` evidence, so the would-park triage for
+  flip criterion 1 excludes it. Only non-live arms write the move and journal `would-park`.
 - **The `enforce` flip** is an operator-merged PR that requires **all three**:
   1. ~7d and ≥100 seam transitions, with every `would-refuse` triaged and zero attributed to a gate
      bug;
