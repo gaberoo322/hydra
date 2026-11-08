@@ -486,7 +486,7 @@ export function renderChildBody(
 export function childLabels(slice: PrdSlice, scope: RenderScope = { kind: "orch" }): string[] {
   const kind = slice.kind ?? "enhancement";
   if (scope.kind !== "target") return [kind];
-  const labels = [kind];
+  const labels: string[] = [kind];
   if (riskSurfaceMatches(slice.filesInScope, scope.riskSurface).length > 0) labels.push("money-critical");
   return labels;
 }
