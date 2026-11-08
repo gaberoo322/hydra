@@ -40,7 +40,9 @@ import {
   vocabularyCheck,
   renderParentBody,
   renderChildBody,
+  childInitialState,
   childLabels,
+  parentInitialState,
   parentLabels,
   parseArgs,
   isTargetRepoPath,
@@ -433,23 +435,23 @@ describe("renderChildBody — cross-repo scope partition (#2175)", () => {
 });
 
 describe("label helpers", () => {
-  test("childLabels defaults to enhancement + ready-for-agent", () => {
-    assert.deepEqual(childLabels(slice("x")), ["ready-for-agent", "enhancement"]);
+  test("childLabels carries the kind flag only, never a state label (issue #5322)", () => {
+    assert.deepEqual(childLabels(slice("x")), ["enhancement"]);
+    assert.deepEqual(childLabels({ ...slice("x"), kind: "bug" }), ["bug"]);
   });
 
-  test("childLabels respects kind=bug", () => {
-    assert.deepEqual(
-      childLabels({ ...slice("x"), kind: "bug" }),
-      ["ready-for-agent", "bug"],
-    );
+  test("childInitialState pins the child's first lifecycle state as data", () => {
+    assert.equal(childInitialState(slice("x")), "ready-for-agent");
   });
 
-  test("parentLabels reuses the existing enhancement vocabulary", () => {
-    assert.deepEqual(parentLabels(), ["enhancement", "needs-triage"]);
+  test("parentLabels is the enhancement flag only; the needs-triage state is data (issue #5322)", () => {
+    assert.deepEqual(parentLabels(), ["enhancement"]);
+    assert.equal(parentInitialState(), "needs-triage");
   });
 
-  test("parentLabels stamps needs-triage so a fresh epic is never born label-less (issue #3788)", () => {
-    assert.ok(parentLabels().includes("needs-triage"));
+  test("a fresh epic is never born state-less (issue #3788): parentInitialState is needs-triage", () => {
+    assert.equal(parentInitialState(), "needs-triage");
+    assert.ok(!parentLabels().includes("ready-for-agent"));
   });
 });
 
@@ -558,15 +560,16 @@ describe("Target render scope (issue #5168)", () => {
   });
 
   test("childLabels adds money-critical only for a Target slice on the surface", () => {
-    assert.deepEqual(childLabels(input.slices[1], target), ["ready-for-agent", "enhancement", "money-critical"]);
-    assert.deepEqual(childLabels(input.slices[0], target), ["ready-for-agent", "enhancement"]);
-    assert.deepEqual(childLabels(input.slices[1]), ["ready-for-agent", "enhancement"], "orch scope is unchanged");
+    assert.deepEqual(childLabels(input.slices[1], target), ["enhancement", "money-critical"]);
+    assert.deepEqual(childLabels(input.slices[0], target), ["enhancement"]);
+    assert.deepEqual(childLabels(input.slices[1]), ["enhancement"], "orch scope is unchanged");
   });
 
-  test("childLabels files a dependent Target slice blocked, never ready-for-agent", () => {
+  test("childInitialState files a dependent Target slice blocked, never ready-for-agent", () => {
     const dependent = { ...input.slices[1], dependsOn: [1] };
-    assert.deepEqual(childLabels(dependent, target), ["blocked", "enhancement", "money-critical"]);
-    assert.deepEqual(childLabels(dependent), ["ready-for-agent", "enhancement"], "orch scope is unchanged");
+    assert.equal(childInitialState(dependent, target), "blocked");
+    assert.deepEqual(childLabels(dependent, target), ["enhancement", "money-critical"]);
+    assert.equal(childInitialState(dependent), "ready-for-agent", "orch scope is unchanged");
   });
 
   test("riskSurfaceMatches normalises ./ on surface entries too", () => {

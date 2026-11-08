@@ -26,7 +26,9 @@
 # conflict-fix-attempted, provenance, keep-open, target-backlog, wayfinder:*),
 # read verbs (`gh issue list --label ready-for-agent`, `gh issue view`),
 # `gh pr edit` (PR labels are flags, ADR-0047 D2), an unresolvable `$VAR`
-# operand (fail open — the doc lint owns docs), comments/echo mentions,
+# operand (fail open — the doc lint owns docs), `gh issue edit|create --repo
+# <anything other than gaberoo322/hydra>` (the Target board is outside the
+# seam; an unresolved `--repo "$VAR"` fails open too), comments/echo mentions,
 # `npx tsx scripts/lifecycle.ts ...`, and `bash scripts/autopilot/
 # recover-stale.sh` (inner commands are not inspected; #5318 migrates them).
 #
@@ -409,8 +411,28 @@ def _state_in_operand(operand):
     return None
 
 
+HYDRA_REPO = "gaberoo322/hydra"
+
+
+def _other_repo(args):
+    # A `--repo`/`-R` operand naming something other than the Orchestrator repo
+    # (the Target board, or an unresolvable $VAR) is outside the lifecycle seam:
+    # allow (fail open). A bare command defaults to this repo and is inspected.
+    for i, tok in enumerate(args):
+        val = None
+        if tok in ("--repo", "-R") and i + 1 < len(args):
+            val = args[i + 1]
+        elif tok.startswith("--repo="):
+            val = tok[len("--repo="):]
+        if val is not None:
+            return val.strip("\"'") != HYDRA_REPO
+    return False
+
+
 def _issue_label_state(args):
     # `gh issue edit|create`: scan label-flag operands.
+    if _other_repo(args):
+        return None
     for i, tok in enumerate(args):
         for flag in LABEL_FLAGS:
             operand = None

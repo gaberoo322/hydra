@@ -63,7 +63,7 @@ one-liner → stop, tell operator to run `/triage` first.
 
 If body has **>5 acceptance criteria** OR description suggests **>8 files changed**:
 1. `/to-tickets $issue_number` to decompose (Claude; upstream renamed `to-issues`→`to-tickets` in Pocock v1.1)
-2. `gh issue edit $issue_number --add-label blocked --remove-label ready-for-agent`
+2. `npx tsx scripts/lifecycle.ts advance $issue_number blocked --reason blocked-by-issue --rationale "decomposed into #a #b ..." --actor hydra-dev` (list the child numbers; a non-zero exit is final — never fall back to a direct label write, ADR-0047 D4)
 3. Comment on parent listing children
 4. Stop — `/hydra-sweep` picks up children after triage
 
@@ -94,10 +94,14 @@ issue may still need a one-time correction.
 
 The dispatched child prompt MUST include the scope-respect block below.
 
-### 4. Mark in-progress
+### 4. Claim the anchor (the parent is the dispatcher)
 ```bash
-gh issue edit $issue_number --remove-label ready-for-agent --add-label in-progress
+npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch "hydra-dev-$(date +%s)" --class dev_orch --run interactive --purpose fresh
 ```
+Keep the `--dispatch` id: step 6 releases the claim with it. `claim-held` means
+another dispatch owns the issue — stop. A non-zero exit is final; never fall
+back to a direct `in-progress` label write (ADR-0047 D4; the
+`lifecycle-state-label-guard` PreToolUse hook denies it).
 
 ### 5. Spawn worktree agent
 
@@ -261,19 +265,19 @@ The CI `scope-check` job at `.github/workflows/ci.yml` enforces this contract.
 
 **Success (PR URL returned):**
 
-Transition the source issue `ready-for-agent`/`in-progress` → `needs-qa` so
-`qa_orch` auto-fires on the open PR and the stale `ready-for-agent` can't
-re-surface the issue for a duplicate dispatch (the #770/#754 hazard, root cause
-of #846). Remove BOTH `ready-for-agent` AND `in-progress`, add `needs-qa`.
-`gh issue edit --remove-label` is idempotent, so listing both is safe. The
-transition is keyed by the **issue number** via raw `gh issue edit` — NOT
-`moveItemToLane`, a `src/` helper this bash playbook cannot call.
+Move the source issue to `needs-qa` through the lifecycle seam so `qa_orch`
+auto-fires on the open PR and a stale `ready-for-agent` can't re-surface the
+issue for a duplicate dispatch (the #770/#754 hazard, root cause of #846). The
+seam's `pr-open` gate verifies the PR is open and its body closes the issue; a
+non-zero exit is final for this step (log the JSON line; never fall back to a
+direct label write). In the autopilot path reap's needs-qa promotion already
+performs this move, so a `pr-merged` / `illegal-transition` refusal is not an
+error. Then release the claim:
 
 ```bash
-gh issue edit "$issue_number" --repo gaberoo322/hydra \
-  --remove-label "ready-for-agent" --remove-label "in-progress" \
-  --add-label "needs-qa" \
-  || echo "WARN: failed to move issue #${issue_number} to needs-qa (non-fatal) — relabel by hand"
+npx tsx scripts/lifecycle.ts advance "$issue_number" needs-qa --evidence pr="$pr_number" --actor hydra-dev \
+  || echo "WARN: lifecycle advance to needs-qa refused for #${issue_number} (non-fatal; reap/reconcile own the hand-back)"
+npx tsx scripts/lifecycle.ts release "$issue_number" --dispatch "$dispatch_id" --outcome pr-opened
 ```
 
 Dependents are NOT unblocked here: the PR is unmerged, so the blocker is not
@@ -282,7 +286,9 @@ closed yet. The autopilot Phase 1.5 sweep (`recover-stale.sh` via
 
 **Failure (including isolation-abort):**
 ```bash
-gh issue edit $issue_number --remove-label in-progress --add-label ready-for-agent
+npx tsx scripts/lifecycle.ts advance $issue_number ready-for-agent --actor hydra-dev \
+  || echo "WARN: advance to ready-for-agent refused (non-fatal; reap's needs-dev-resume relabel and the reconcile stale arm own the no-PR hand-back)"
+npx tsx scripts/lifecycle.ts release $issue_number --dispatch "$dispatch_id" --outcome no-pr
 gh issue comment $issue_number --body "> *Automated agent comment*
 
 Agent attempted implementation but failed.

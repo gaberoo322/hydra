@@ -443,9 +443,12 @@ anchor issue — no dated queue issue is created (ADR-0034 §8.1, resolution on
 
 1. Is posted as a comment on the anchor issue itself (`gh issue comment
    <anchorNum>`), where `<anchorNum>` is `$ANCHOR` with any `issue-` prefix
-   stripped, plus the `ready-for-human` label on that same issue (`gh issue
-   edit <anchorNum> --add-label ready-for-human`). Never removes
-   `ready-for-agent`, never adds any other label, never mutates the
+   stripped, plus a move of that same issue to `hitl-grill` through the
+   lifecycle seam (`npx tsx scripts/lifecycle.ts advance <anchorNum> hitl-grill
+   --reason design-decision ...`; a design gap is not an ADR-0005 reason, so
+   `ready-for-human` would be refused, and a non-zero exit is final — never
+   fall back to a direct label write, ADR-0047 D4). Never removes
+   `ready-for-agent` by hand, never adds any other label, never mutates the
    artifact's status.
 2. Always starts with the exact heading `## hydra-grill handoff` — never
    freeform prose. The body carries: the anchorRef, the server-computed
@@ -484,7 +487,8 @@ resolved.
 EOF
 )
 gh issue comment "$ANCHOR_NUM" --repo "$REPO" --body "$HANDOFF_BODY"
-gh issue edit "$ANCHOR_NUM" --repo "$REPO" --add-label ready-for-human
+npx tsx scripts/lifecycle.ts advance "$ANCHOR_NUM" hitl-grill --reason design-decision \
+  --rationale "grill handoff; artifact ${ARTIFACT_HASH}" --actor hydra-grill
 ```
 
 Never write the handoff as freeform prose — always the `## hydra-grill
@@ -502,7 +506,7 @@ Side effects:
 
 - Redis write at `hydra:design-concept:<anchorRef>` (7-day TTL).
 - On `gate=fail`: a `## hydra-grill handoff` comment on the anchor issue plus
-  the `ready-for-human` label on that same issue. No GitHub issue is created.
+  the issue moved to `hitl-grill` via the lifecycle seam. No GitHub issue is created.
 - Optional: `ubiquitous-language`-labelled PR(s) for glossary gaps or
   glossary-purity findings (Steps 5, 6).
 - Sandbox under `/tmp/hydra-prototype-<anchor>` is **always** deleted

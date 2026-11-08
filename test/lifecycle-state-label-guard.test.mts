@@ -172,6 +172,12 @@ describe("lifecycle-state-label-guard: allows everything else", () => {
     assertAllow(`# ${GH_EDIT} 42 ${ADD} in-progress`);
   });
 
+  test("issue edit/create on another repo (the Target board) is outside the seam", () => {
+    assertAllow(`${GH_CREATE} --repo "$TARGET_GH_REPO" --title t --label blocked`);
+    assertAllow(`${GH_EDIT} 42 --repo owner/target ${ADD} ready-for-agent`);
+    assertDeny(`${GH_EDIT} 42 --repo gaberoo322/hydra ${ADD} ready-for-agent`);
+  });
+
   test("an unresolvable $VAR operand fails open", () => {
     assertAllow(`${GH_EDIT} 42 ${ADD} "$NEWSTATE"`);
   });

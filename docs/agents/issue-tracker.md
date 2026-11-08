@@ -75,9 +75,10 @@ gh issue view <N> --repo gaberoo322/hydra --json number,title,body,labels,state
 # List ready-for-agent issues
 gh issue list --repo gaberoo322/hydra --label ready-for-agent --state open
 
-# Transition labels
-gh issue edit <N> --repo gaberoo322/hydra --remove-label ready-for-agent --add-label in-progress
-gh issue edit <N> --repo gaberoo322/hydra --remove-label in-progress --add-label needs-qa
+# Transition state labels (the lifecycle writer seam, ADR-0047 D3 — never `gh issue edit`;
+# the lifecycle-state-label-guard PreToolUse hook denies a direct state-label write)
+npx tsx scripts/lifecycle.ts advance <N> needs-qa --evidence pr=<PR>
+npx tsx scripts/lifecycle.ts advance <N> blocked --reason blocked-by-issue --rationale "..."
 
 # Close with a reason
 gh issue close <N> --repo gaberoo322/hydra --comment "Resolved by #<PR>" --reason completed

@@ -105,11 +105,15 @@ ADMISSION_RULE = (
     "before filing; filing nothing is an acceptable outcome."
 )
 
-LABEL_API_RULE = (
-    "Label mutations go through `gh api repos/" + ORCH_REPO + "/issues/<N>/labels` "
-    "(`gh pr edit` is broken for labels); to remove a label put its name in the "
-    "URL PATH (`DELETE .../labels/<name>`) — the `-f name=` form wipes ALL labels. "
-    "If GraphQL `gh --json` calls rate-limit, fall back to `gh api repos/...` REST."
+LIFECYCLE_LABEL_RULE = (
+    "Issue STATE labels (the 13 lifecycle states) move only through "
+    "`npx tsx scripts/lifecycle.ts advance <N> <to> ...`; a refusal exits non-zero and is "
+    "final — never fall back to `gh issue edit`/`gh api` for a state. FLAG labels "
+    "(provenance, `conflict-fix-attempted`, `needs-design-concept`, `glm-*`) still go through "
+    "`gh api repos/" + ORCH_REPO + "/issues/<N>/labels` (`gh pr edit` is broken for labels); "
+    "to remove one put its name in the URL PATH (`DELETE .../labels/<name>`) — the "
+    "`-f name=` form wipes ALL labels. If GraphQL `gh --json` calls rate-limit, fall back to "
+    "`gh api repos/...` REST."
 )
 
 ISSUE_PRODUCING_CLASSES = {
@@ -720,7 +724,7 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
                 "named event), not re-triaged again. Do not relabel, comment on, or re-route an item a pipeline dispatch is "
                 "working right now."
             )
-            out.append(LABEL_API_RULE)
+            out.append(LIFECYCLE_LABEL_RULE)
         if slot in ("discover_orch", "discover_target"):
             out.append(
                 "Dedup before filing: run every candidate through `scripts/ci/issue-dedup.ts` against the shared backfill "
@@ -731,6 +735,8 @@ def task_section(slot: str, action: dict, state: dict, skill: str | None) -> lis
             out.append("Triage with `npx knip` first and close duplicates of already-shipped or closed-not-planned findings before filing; the dashboard `tailwindcss` dependency is a known knip false positive — never re-file it.")
         if slot in ISSUE_PRODUCING_CLASSES:
             out.append(ADMISSION_RULE)
+            if slot not in ("sweep_orch", "sweep_target"):
+                out.append(LIFECYCLE_LABEL_RULE)
         out.append("Final message: each item you filed, changed or routed (numbers, before → after as read back from GitHub) — or state plainly that nothing needed doing and why.")
 
     return out
