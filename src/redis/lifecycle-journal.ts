@@ -76,35 +76,38 @@ function fail(op: string, err: unknown): { ok: false; error: string } {
 }
 
 /**
- * Which write-time indexes join an append's one `MULTI`. `true` is the legacy
- * spelling of `{ holdExit: true }` (#5313); `capEvent` mirrors cap parks,
- * shadow would-parks and claim-opens into the cap-events index (#5324).
+ * Which OPT-IN write-time index joins an append's one `MULTI`: `holdExit`
+ * (#5313) is decided by the caller. The cap-events index (#5324) is NOT
+ * selectable — every append indexes whenever `capEventRecord` classifies the
+ * entry as a cap event, so no producer (park, reconcile, seam) can miss it.
  */
-export type LifecycleIndexSelector = boolean | { holdExit?: boolean; capEvent?: boolean };
+export interface LifecycleIndexSelector {
+  holdExit?: boolean;
+}
 
 /**
- * Append one entry: `RPUSH` then `LTRIM -500 -1`. With an index selected the
- * index write (`ZADD` + trim) joins the SAME `MULTI`, so an entry can never be
- * journaled without being indexed (#5313, #5324).
+ * Append one entry: `RPUSH` then `LTRIM -500 -1`. A selected hold-exit index
+ * and any cap-event index write (`ZADD` + trim) join the SAME `MULTI`, so an
+ * entry can never be journaled without being indexed (#5313, #5324).
  */
 export async function appendLifecycleEntry(
   repo: string,
   issue: number,
   entry: LifecycleJournalEntry,
-  index: LifecycleIndexSelector = false,
+  index: LifecycleIndexSelector = {},
 ): Promise<JournalWriteResult> {
   try {
     const r = getRedisConnection();
     const key = lifecycleJournalKey(repo, issue);
-    const sel = typeof index === "boolean" ? { holdExit: index, capEvent: false } : index;
-    const capRecord = sel.capEvent ? capEventRecord(issue, entry) : null;
-    if (!sel.holdExit && capRecord === null) {
+    const holdExit = index.holdExit === true;
+    const capRecord = capEventRecord(issue, entry);
+    if (!holdExit && capRecord === null) {
       await r.rpush(key, JSON.stringify(entry));
       await r.ltrim(key, -LIFECYCLE_JOURNAL_MAX_ENTRIES, -1);
       return { ok: true };
     }
     const multi = r.multi().rpush(key, JSON.stringify(entry)).ltrim(key, -LIFECYCLE_JOURNAL_MAX_ENTRIES, -1);
-    if (sel.holdExit) {
+    if (holdExit) {
       const idxKey = holdExitIndexKey(repo);
       multi
         .zadd(idxKey, entry.ts, JSON.stringify(holdExitRecord(issue, entry)))

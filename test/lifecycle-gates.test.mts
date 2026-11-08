@@ -446,7 +446,7 @@ function operatorHarness(labels: string[], mode: LifecycleMode, opts: { state?: 
   h.deps.journal.persist = async (_r, i) => { persisted.push(i); return { ok: true }; };
   h.deps.journal.append = async (_r, i, e, idx) => {
     h.journal.push(e);
-    if (idx === true || (idx && idx.holdExit)) indexed.push({ issue: i, e });
+    if (idx?.holdExit) indexed.push({ issue: i, e });
     return { ok: true };
   };
   return { h, indexed, persisted, reopens };
@@ -607,13 +607,13 @@ describe("journalEntry — the single append point indexes unsanctioned hold exi
   });
 });
 
-describe("journalEntry — passes capEvent so cap parks reach the park-rate index (#5324)", () => {
+describe("journalEntry — cap events need no selector; the hold-exit selector is the only opt-in (#5324)", () => {
   const base: LifecycleJournalEntry = {
     v: 1, ts: 5, kind: "transition", from: "in-progress", to: "parked", source: "cli",
     actor: "x", evidence: { pr: "42" }, reason: "cap:qa-stall", rationale: null, result: "ok", written: true,
   };
 
-  test("claim-opened, cap park and shadow would-park each append with capEvent: true", async () => {
+  test("claim-opened, cap park and shadow would-park append with a hold-exit-only selector (indexing is the seam's job)", async () => {
     const o = operatorHarness([], "enforce");
     const selectors: unknown[] = [];
     o.h.deps.journal.append = async (_r, _i, _e, idx) => { selectors.push(idx); return { ok: true }; };
@@ -621,12 +621,12 @@ describe("journalEntry — passes capEvent so cap parks reach the park-rate inde
     await journalEntry(o.h.deps, 10, base);
     await journalEntry(o.h.deps, 10, { ...base, kind: "refused", written: false, result: "shadow-would-park:qa-stall" });
     assert.equal(selectors.length, 3);
-    for (const sel of selectors) assert.equal((sel as { capEvent?: boolean }).capEvent, true);
+    for (const sel of selectors) assert.deepEqual(Object.keys(sel as object), ["holdExit"]);
   });
 
-  test("sibling: the hold-exit selector is still set independently of capEvent", async () => {
+  test("sibling: the hold-exit selector is still set for an unsanctioned hold exit", async () => {
     const o = operatorHarness([], "enforce");
-    let sel: { holdExit?: boolean; capEvent?: boolean } | undefined;
+    let sel: { holdExit?: boolean } | undefined;
     o.h.deps.journal.append = async (_r, _i, _e, idx) => { sel = idx as typeof sel; return { ok: true }; };
     await journalEntry(o.h.deps, 10, { ...base, kind: "external", from: "ready-for-human", to: "ready-for-agent", source: "external", reason: null });
     assert.equal(sel?.holdExit, true);

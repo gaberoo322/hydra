@@ -182,7 +182,7 @@ export interface SeamDeps {
     qaLive?: (prNumber: number) => Promise<Fetched<QaLivePr>>;
   };
   journal: {
-    /** `index` joins the hold-exit (#5313) and cap-events (#5324) index writes into the append's one MULTI. */
+    /** `index` opts into the hold-exit index (#5313); cap events (#5324) are always indexed. Both join the append's one MULTI. */
     append: (repo: string, issue: number, entry: LifecycleJournalEntry, index?: LifecycleIndexSelector) => Promise<JournalWriteResult>;
     expireOnClose: (repo: string, issue: number) => Promise<JournalWriteResult>;
     openClaim: (repo: string, issue: number, claim: DispatchClaim) => Promise<OpenClaimResult>;
@@ -664,7 +664,7 @@ function entry(
  * human-hold exit is also indexed for the attention feed (#5313).
  */
 export async function journalEntry(deps: SeamDeps, issue: number, e: LifecycleJournalEntry): Promise<void> {
-  const res = await deps.journal.append(deps.repo, issue, e, { holdExit: isUnsanctionedHoldExit(e), capEvent: true });
+  const res = await deps.journal.append(deps.repo, issue, e, { holdExit: isUnsanctionedHoldExit(e) });
   if (res.ok === false) {
     logger.error({ issue, error: res.error }, "[lifecycle] journal append failed");
   }
