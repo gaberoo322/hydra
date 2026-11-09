@@ -1326,7 +1326,8 @@
         "docs/operator-playbooks/hydra-retro.md",
         "docs/operator-playbooks/hydra-review.md",
         "docs/operator-playbooks/hydra-sweep.md",
-        "docs/operator-playbooks/hydra-tickets.md"
+        "docs/operator-playbooks/hydra-tickets.md",
+        "docs/reference.md"
       ],
       "source": {
         "path": "docs/adr/0047-work-item-lifecycle-is-data.md"

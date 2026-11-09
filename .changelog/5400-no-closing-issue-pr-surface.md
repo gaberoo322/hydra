@@ -1,0 +1,1 @@
+- fix: surface open PRs with no closing issue so Refs-only partial deliveries stop stranding (#5400)

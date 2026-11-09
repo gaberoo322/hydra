@@ -123,6 +123,7 @@ function healthyValues(): TurnSnapshotValues {
       dirty: [4938, 4814, 4814],
       unchecked: [4950],
       behind: [4952, 4951, 4953],
+      noClosingIssue: [],
       qaVerdictRecheck: ok([]),
       dirtyFixFailPr: null,
       parkedIssues: ok(new Set([4905, 4902])), // #5319: emitted sorted ascending as orch_parked_issues

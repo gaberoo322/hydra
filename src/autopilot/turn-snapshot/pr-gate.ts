@@ -29,6 +29,10 @@
  *   orch_prs_behind  BEHIND, not draft, no `no-rebase`, quiet > 5400s.
  *   orch_prs_unchecked  empty rollup, state not DIRTY/UNKNOWN/BEHIND, not
  *                    draft/surfaced, older than the grace window.
+ *   orch_prs_no_closing_issue  open, non-draft, not ready-for-human / parked /
+ *                    DIRTY, older than the unchecked grace window, and its body
+ *                    carries no Closes/Fixes/Resolves #N - no lane can ever
+ *                    reach it (#5400).
  *   orch_ci_trigger_stale  an unchecked PR is newer than the newest push AND
  *                    pull_request run (only when both timestamps parse).
  *   dev-resume pick  ANY provenance (#5058), not draft / ready-for-human /
@@ -103,6 +107,12 @@ export interface PrGateSnapshot {
   readonly dirty: readonly number[];
   readonly unchecked: readonly number[];
   readonly behind: readonly number[];
+  /**
+   * #5400: open PRs with no closing issue (`Refs #N` / `Part of #N` only) - every
+   * PR lane keys on a closing issue, so these strand unreviewed. Fail-open:
+   * degraded (pr-refs unavailable) -> `[]` (noted once at the collector).
+   */
+  readonly noClosingIssue: readonly number[];
   /** Fail-open: degraded → rendered `false`. */
   readonly ciTriggerStale: Classified<boolean>;
   /**
@@ -482,6 +492,45 @@ export function parkedPrNumbers(
   return out;
 }
 
+/**
+ * #5400 INV-4/5: the open PRs no PR lane can reach because their body carries no
+ * closing reference. Flagged iff open (the payload), non-draft, not
+ * `ready-for-human` (the surfacing idempotency key), not parked, not DIRTY (the
+ * dirty arm already surfaces those), older than the unchecked grace window, and
+ * `closing(refRow(pr))` is empty. CI state is irrelevant. Pure over the ONE
+ * open-PR read (zero extra gh reads); never throws - an unparseable body is a
+ * note, never a flag; pr-refs unavailable -> empty.
+ */
+export function noClosingIssuePrs(
+  prs: readonly unknown[],
+  prRefs: PrRefsAvailability,
+  parkedPrs: ReadonlySet<number>,
+  nowSeconds: number,
+  graceSeconds: number,
+  notes: string[],
+): number[] {
+  const out: number[] = [];
+  // pr-refs unavailable is noted ONCE at the collector (dev-resume "import FAILED" note); no per-arm duplicate.
+  if (!prRefs.ok) return out;
+  for (const pr of rowsOf(prs)) {
+    const number = pr.number;
+    if (typeof number !== "number" || !Number.isInteger(number) || number <= 0) continue;
+    if (parkedPrs.has(number)) continue;
+    if (isSet(pr.isDraft) || labelsOf(pr).has("ready-for-human")) continue;
+    if (orEmpty(pr.mergeStateStatus) === "DIRTY") continue;
+    const created = ghTimestampSeconds(pr.createdAt);
+    if (created === null || nowSeconds - created <= graceSeconds) continue;
+    try {
+      if (prRefs.predicates.closing([refRow(pr)]).size === 0) out.push(number);
+    } catch (err) {
+      /* intentional: surfaced as a stderr note; an unparseable body is never flagged */
+      const msg = err instanceof Error ? err.message : String(err);
+      notes.push(`orch no-closing-issue closing_issues() failed for PR ${number} (${msg}) - not flagged (issue #5400)`);
+    }
+  }
+  return out.sort(ascending);
+}
+
 /** Classify every open PR. Returns the snapshot fields (minus in-flight) plus the classifier's stderr notes. */
 function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "inflight">; notes: string[] } {
   const notes: string[] = [];
@@ -721,6 +770,7 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
       dirty: dirty.sort(ascending),
       unchecked: unchecked.sort(ascending),
       behind: behind.sort(ascending),
+      noClosingIssue: noClosingIssuePrs(inputs.prs, inputs.prRefs, inputs.parkedPrs, now, inputs.uncheckedGraceSeconds, notes),
       ciTriggerStale,
       redResume,
       devResumePick,
@@ -1132,6 +1182,7 @@ export function prGateFallbackSnapshot(reason: DegradeReason): PrGateSnapshot {
     dirty: [],
     unchecked: [],
     behind: [],
+    noClosingIssue: [],
     ciTriggerStale: { ok: false, reason },
     redResume: { ok: false, reason },
     devResumePick: { ok: false, reason },
