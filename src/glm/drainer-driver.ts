@@ -380,12 +380,12 @@ export function claimOutcomeOf(finish: FinishResult | null): ClaimOutcome {
 const DEFAULT_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
- * Lifecycle-seam deps for the claim path, with the drainer's configured repo
- * threaded through so label advance and claim keys target the same repo the
- * body read uses (`config.repo`), not whatever `resolveGithubRepo()` picks.
+ * Lifecycle-seam deps for the claim path: `defaultSeamDeps` unchanged, so
+ * claim/journal keys use `resolveGithubRepo()` — the same keyspace reconcile,
+ * caps and `pick.ts` read (INV-7). `config.repo` is for gh-facing reads only.
  */
 export function buildClaimSeamDeps(config: { repo: string; repoRoot: string | null }) {
-  return { ...defaultSeamDeps(config.repoRoot ?? DEFAULT_REPO_ROOT), repo: config.repo };
+  return defaultSeamDeps(config.repoRoot ?? DEFAULT_REPO_ROOT);
 }
 
 /** Production tick deps for `env` (names match what bash read). */

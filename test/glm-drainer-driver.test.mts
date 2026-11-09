@@ -28,6 +28,7 @@ import { quotaBlockFilePath, type GateDeps } from "../src/glm/gate.ts";
 import type { WorkerProvidersResult } from "../src/glm/providers.ts";
 import type { PickDeps } from "../src/glm/pick.ts";
 import type { FinishDeps } from "../src/glm/finish.ts";
+import { resolveGithubRepo } from "../src/github/issues.ts";
 import { buildClaimSeamDeps, claimOutcomeOf, type TickDeps } from "../src/glm/drainer-driver.ts";
 import type { DispatchInput, DispatchResult } from "../src/lifecycle/index.ts";
 
@@ -721,9 +722,10 @@ describe("src/glm/drainer-driver.ts — tick mode composes gate -> pick -> claim
     assert.ok(r.logs.some((l) => /^WARN claim release threw for issue #77/.test(l)));
   });
 
-  test("claim path honors config.repo: the seam deps repo is the configured repo, not resolveGithubRepo()", () => {
+  test("claim path keyspace (INV-7): the seam deps repo is resolveGithubRepo(), NOT config.repo", () => {
     const deps = buildClaimSeamDeps({ repo: "acme/other", repoRoot: "/repo" });
-    assert.equal(deps.repo, "acme/other");
+    assert.equal(deps.repo, resolveGithubRepo());
+    assert.notEqual(deps.repo, "acme/other");
   });
 
   test("a release failure logs a WARN and the tick still completes", async () => {

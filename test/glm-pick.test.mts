@@ -770,7 +770,7 @@ describe("runRecoverStaleScript — child stdout never reaches driver stdout (IN
   });
 });
 
-describe("buildDefaultPickDeps — claim keyspace matches the dispatch repo (QA round 2)", () => {
+describe("buildDefaultPickDeps — claim keyspace matches the dispatch repo (INV-7, QA round 3)", () => {
   const AUTOPILOT = "acme/pick-keyspace-autopilot";
   const OTHER = "acme/pick-keyspace-github";
   const ISSUE = 987654;
@@ -783,18 +783,18 @@ describe("buildDefaultPickDeps — claim keyspace matches the dispatch repo (QA 
     redis.disconnect();
   });
 
-  test("readClaim reads the key under HYDRA_AUTOPILOT_REPO even when HYDRA_GITHUB_REPO differs", async () => {
+  test("readClaim reads the key under resolveGithubRepo() (HYDRA_GITHUB_REPO) even when HYDRA_AUTOPILOT_REPO differs", async () => {
     const prev = process.env.HYDRA_GITHUB_REPO;
     process.env.HYDRA_GITHUB_REPO = OTHER;
     try {
       const claim = { dispatchId: "d-1", class: "qa_orch", run: "r", artifactHash: null, openedAt: 1 };
-      await redis.set(lifecycleClaimKey(AUTOPILOT, ISSUE), JSON.stringify(claim));
+      await redis.set(lifecycleClaimKey(OTHER, ISSUE), JSON.stringify(claim));
       const deps = buildDefaultPickDeps({ ...process.env, HYDRA_AUTOPILOT_REPO: AUTOPILOT });
       const r = await deps.readClaim(ISSUE);
       assert.ok(r.ok && r.claim?.dispatchId === "d-1");
-      // Sibling shape: a claim held only under the OTHER repo is NOT seen.
-      await redis.del(lifecycleClaimKey(AUTOPILOT, ISSUE));
-      await redis.set(lifecycleClaimKey(OTHER, ISSUE), JSON.stringify(claim));
+      // Sibling shape: a claim held only under the AUTOPILOT repo is NOT seen.
+      await redis.del(lifecycleClaimKey(OTHER, ISSUE));
+      await redis.set(lifecycleClaimKey(AUTOPILOT, ISSUE), JSON.stringify(claim));
       const r2 = await deps.readClaim(ISSUE);
       assert.ok(r2.ok && r2.claim === null);
     } finally {
