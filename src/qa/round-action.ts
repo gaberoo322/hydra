@@ -528,23 +528,30 @@ export function parseFilesOutOfScope(body: string): string[] {
       continue;
     }
     if (!inSection) continue;
-    const ticks = [...line.matchAll(/`([^`]+)`/g)].map((m) => (m[1] as string).trim());
-    if (ticks.length > 0) {
-      out.push(...ticks);
-      continue;
-    }
+    // Fail closed: collect BOTH the backticked spans and the bullet's leading
+    // token, so prose like "- docs/x.md (see `y`)" never drops the real path.
+    out.push(...[...line.matchAll(/`([^`]+)`/g)].map((m) => (m[1] as string).trim()));
     const bullet = /^\s*[-*]\s+(\S+)/.exec(line);
     if (bullet) {
-      // Strip emphasis wrappers and trailing punctuation so "- src/x.ts: reason" and "- **docs/x.md**" match the path.
-      const token = (bullet[1] as string).replace(/^[*_]+/, "").replace(/[*_:,;.]+$/, "");
+      // Strip emphasis wrappers, backticks and trailing punctuation so "- src/x.ts: reason" and "- **docs/x.md**" match the path.
+      const token = (bullet[1] as string).replace(/^[*_`]+/, "").replace(/[*_`:,;.]+$/, "");
       if (token !== "") out.push(token);
     }
   }
-  return out.map((p) => p.replace(/^\.\//, "")).filter((p) => p !== "");
+  return [...new Set(out.map((p) => p.replace(/^\.\//, "")).filter((p) => p !== ""))];
+}
+
+/** Glob entry (`docs/generated/**`): `*` matches anything (even `/`) and `?` one char, so the fence only ever widens. */
+function globToRegExp(glob: string): RegExp {
+  const src = glob.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*+/g, ".*").replace(/\?/g, ".");
+  return new RegExp(`^${src}`);
 }
 
 function isOutOfScope(path: string, outOfScope: readonly string[]): boolean {
-  return outOfScope.some((o) => (o.endsWith("/") ? path.startsWith(o) : path === o || path.startsWith(`${o}/`)));
+  return outOfScope.some((o) =>
+    /[*?[]/.test(o)
+      ? globToRegExp(o).test(path)
+      : o.endsWith("/") ? path.startsWith(o) : path === o || path.startsWith(`${o}/`));
 }
 
 /**

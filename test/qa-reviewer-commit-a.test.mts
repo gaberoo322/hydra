@@ -197,6 +197,18 @@ describe("location and scope parsing", () => {
     assert.deepEqual(parseFilesOutOfScope(body), ["src/x.ts", "docs/x.md", "a/b.ts", "plain/c.ts"]);
   });
 
+  test("out-of-scope fence fails closed on glob entries and backticked prose", () => {
+    const body = "## Files out of scope\n\n- `docs/generated/**`\n- docs/guide.md (see `other`)\n- src/plain.ts\n";
+    const oos = parseFilesOutOfScope(body);
+    assert.ok(oos.includes("docs/guide.md"));
+    assert.ok(oos.includes("other"));
+    assert.equal(decideReviewerCommit(input({ outOfScope: oos, blocking: [{ location: "docs/generated/counts.json" }] })).reason, "out-of-scope");
+    assert.equal(decideReviewerCommit(input({ outOfScope: oos, blocking: [{ location: "docs/guide.md:3" }] })).reason, "out-of-scope");
+    // sibling shape: an unrelated class-A path still commits, and plain entries still match exactly
+    assert.equal(decideReviewerCommit(input({ outOfScope: oos, blocking: [{ location: "docs/other.md:3" }] })).action, "commit-a");
+    assert.deepEqual(parseFilesOutOfScope("## Files out of scope\n\n- `docs/x.md`\n- src/y.ts\n"), ["docs/x.md", "src/y.ts"]);
+  });
+
   test("reviewerCommitLocationRef returns path and first line (row-loc backing parser)", () => {
     assert.deepEqual(reviewerCommitLocationRef("docs/a.md:12-18"), { path: "docs/a.md", line: 12 });
     assert.deepEqual(reviewerCommitLocationRef("`docs/a.md#L7`"), { path: "docs/a.md", line: 7 });
@@ -294,6 +306,15 @@ describe("qa-verdict phases for the reviewer commit", () => {
     const out = (await runQaVerdictPhase("reviewer-commit", phaseInput, f)) as any;
     assert.equal(out.action, "none");
     assert.ok(out.degraded.includes("rollout-stage"));
+  });
+
+  test("an unreadable changed-files list refuses even when the diff reads (Verifier Core fence fails closed)", async () => {
+    const out = (await runQaVerdictPhase("reviewer-commit", phaseInput, fetchers({ changedFiles: async () => null as never }))) as any;
+    assert.equal(out.action, "none");
+    assert.ok(out.degraded.includes("changed-paths"));
+    // sibling shape: a readable list with the same diff still commits
+    const ok = (await runQaVerdictPhase("reviewer-commit", phaseInput, fetchers())) as any;
+    assert.equal(ok.action, "commit-a");
   });
 
   test("an unreadable diff or body degrades to none", async () => {

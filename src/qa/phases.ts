@@ -257,6 +257,16 @@ export async function runQaVerdictPhase(
       const diff = await resolveFact(i.diff, async () => (f.prDiff ? f.prDiff(i.pr) : null), "diff", "", degraded);
       const changedPaths = await resolveFact(
         i.changedPaths, () => f.changedFiles(i.pr), "changed-paths", UNREADABLE_CHANGED_PATHS, degraded);
+      // Fail closed: the sentinel fallback path is not Verifier Core, so a degraded
+      // changed-files read must refuse rather than let the fence pass on a fabricated path.
+      if (degraded.includes("changed-paths")) {
+        return {
+          ...decideReviewerCommit({
+            stage, tier: i.tier, changedPaths: [], diff: "", blocking: i.blocking, outOfScope: null,
+          }),
+          degraded,
+        };
+      }
       const body = await resolveFact<string | null>(
         i.prBody, async () => (f.prBody ? f.prBody(i.pr) : null), "pr-body", null, degraded);
       const decision = decideReviewerCommit({
