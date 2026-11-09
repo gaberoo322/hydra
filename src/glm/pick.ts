@@ -333,7 +333,9 @@ const DEFAULT_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..",
 
 /** Build the production deps from an env (names match what bash read). */
 export function buildDefaultPickDeps(env: NodeJS.ProcessEnv = process.env): PickDeps {
-  const repo = env.HYDRA_AUTOPILOT_REPO || "gaberoo322/hydra";
+  const ghRepo = env.HYDRA_AUTOPILOT_REPO || "gaberoo322/hydra";
+  // Lifecycle keyspace repo (INV-7): same string defaultSeamDeps stamps.
+  const repo = resolveGithubRepo();
   const dcUrl =
     env.HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL || "http://localhost:4000/api/design-concepts";
   const repoRoot = env.HYDRA_GLM_DRAINER_REPO_ROOT || DEFAULT_REPO_ROOT;
@@ -344,12 +346,12 @@ export function buildDefaultPickDeps(env: NodeJS.ProcessEnv = process.env): Pick
       process.stderr.write(`hydra-glm-drainer: ${msg}\n`);
     },
     listGlmEligible: (fields, limit) =>
-      listIssuesByLabel(ORCH_BOARD_LABELS.glm_eligible, { repo, state: "open", fields, limit }),
+      listIssuesByLabel(ORCH_BOARD_LABELS.glm_eligible, { repo: ghRepo, state: "open", fields, limit }),
     listOpenPrs: () =>
-      listOpenPrs({ repo, state: "open", fields: "number,body,headRefName", limit: 100 }),
+      listOpenPrs({ repo: ghRepo, state: "open", fields: "number,body,headRefName", limit: 100 }),
     listMergedPrs: () =>
-      listOpenPrs({ repo, state: "merged", fields: "number,title,body", limit: 100 }),
-    fetchOpenBlockers: (numbers) => fetchOpenBlockerNumbers(numbers, { githubRepo: repo }),
+      listOpenPrs({ repo: ghRepo, state: "merged", fields: "number,title,body", limit: 100 }),
+    fetchOpenBlockers: (numbers) => fetchOpenBlockerNumbers(numbers, { githubRepo: ghRepo }),
     fetchArtifact: async (issue) => {
       try {
         const res = await fetch(`${dcUrl}/issue-${issue}`, { signal: AbortSignal.timeout(10_000) });
@@ -386,8 +388,8 @@ export function buildDefaultPickDeps(env: NodeJS.ProcessEnv = process.env): Pick
     // One keyspace (INV-7): the SAME repo string defaultSeamDeps stamps into
     // claim/journal keys (resolveGithubRepo()); HYDRA_AUTOPILOT_REPO stays for
     // gh-facing reads only.
-    readJournal: (issue) => readLifecycleJournal(resolveGithubRepo(), issue),
-    readClaim: (issue) => readDispatchClaim(resolveGithubRepo(), issue),
+    readJournal: (issue) => readLifecycleJournal(repo, issue),
+    readClaim: (issue) => readDispatchClaim(repo, issue),
     publishLastPick: (verdict) => setGlmDrainerLastPick(verdict),
   };
 }
