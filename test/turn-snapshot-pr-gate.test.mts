@@ -499,7 +499,7 @@ describe("pr-gate — open PR with no closing issue (issue #5400)", () => {
     assert.deepEqual(noClosingIssuePrs(prs, ok, new Set(), NOW_MS / 1000, 600, notes), [5141, 5142]);
   });
 
-  test("a throwing closing() is a note and never a flag; unavailable pr-refs also notes (INV-4)", () => {
+  test("a throwing closing() is a note and never a flag; unavailable pr-refs flags nothing (INV-4)", () => {
     const prs = [aged({ number: 5151, body: "Refs #1" })];
     const throwing = {
       ok: true,
@@ -516,8 +516,7 @@ describe("pr-gate — open PR with no closing issue (issue #5400)", () => {
     assert.match(notes[0], /5151.*bad body/);
     const notes2: string[] = [];
     assert.deepEqual(noClosingIssuePrs(prs, PR_REFS_UNAVAILABLE, new Set(), NOW_MS / 1000, 600, notes2), []);
-    assert.equal(notes2.length, 1);
-    assert.match(notes2[0], /#5400/);
+    assert.equal(notes2.length, 0, "unavailability is noted once at the collector, not per arm");
   });
 });
 

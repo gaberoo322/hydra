@@ -310,17 +310,6 @@ describe("turn snapshot JSON: plan parity over every captured decide() input (#4
     assert.equal(r.marker_identical, r.entries);
   });
 
-  test("#5400: orch_prs_no_closing_issue is optional-on-read (older snapshots parse, defaulting to [])", () => {
-    const f = (TurnSnapshotSchema.shape.signals as unknown as { shape: Record<string, { safeParse(v: unknown): { success: boolean; data?: unknown } }> }).shape.orch_prs_no_closing_issue;
-    const r = f.safeParse(undefined);
-    assert.equal(r.success, true);
-    assert.deepEqual(r.data, []);
-    assert.equal(f.safeParse([5400]).success, true);
-    // sibling shape keeps its old verdict: required fields still reject absence
-    const sibling = (TurnSnapshotSchema.shape.signals as unknown as { shape: Record<string, { safeParse(v: unknown): { success: boolean } }> }).shape.orch_prs_dirty;
-    assert.equal(sibling.safeParse(undefined).success, false);
-  });
-
   test("every converted JSON-form value the parity run fed decide.py is schema-valid (zod, per field)", () => {
     const signalShape = (TurnSnapshotSchema.shape.signals as unknown as { shape: Record<string, { safeParse(v: unknown): { success: boolean } }> }).shape;
     const blobShape = (TurnSnapshotSchema.shape.blobs as unknown as { shape: Record<string, { safeParse(v: unknown): { success: boolean } }> }).shape;

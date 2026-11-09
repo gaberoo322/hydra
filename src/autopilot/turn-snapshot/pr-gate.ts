@@ -110,7 +110,7 @@ export interface PrGateSnapshot {
   /**
    * #5400: open PRs with no closing issue (`Refs #N` / `Part of #N` only) - every
    * PR lane keys on a closing issue, so these strand unreviewed. Fail-open:
-   * degraded (pr-refs unavailable) -> `[]` (with a stderr note).
+   * degraded (pr-refs unavailable) -> `[]` (noted once at the collector).
    */
   readonly noClosingIssue: readonly number[];
   /** Fail-open: degraded → rendered `false`. */
@@ -510,10 +510,8 @@ export function noClosingIssuePrs(
   notes: string[],
 ): number[] {
   const out: number[] = [];
-  if (!prRefs.ok) {
-    notes.push(`orch no-closing-issue pr-refs unavailable (${prRefs.error}) - none flagged (issue #5400)`);
-    return out;
-  }
+  // pr-refs unavailable is noted ONCE at the collector (dev-resume "import FAILED" note); no per-arm duplicate.
+  if (!prRefs.ok) return out;
   for (const pr of rowsOf(prs)) {
     const number = pr.number;
     if (typeof number !== "number" || !Number.isInteger(number) || number <= 0) continue;
