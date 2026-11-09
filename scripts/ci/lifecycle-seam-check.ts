@@ -39,7 +39,7 @@
  *  - `.github/workflows/**` (ADR-0047 D1);
  *  - PR labels are flags, not state (ADR-0047 D2, #5428): a label flag inside a
  *    `gh pr <subcmd>` command (shell or argv form) and a `gh api` write on an
- *    `issues/$PR*|{pr*}/labels` path are not sites. The latter is identifier-based, so the
+ *    `issues/<PR identifier>/labels` path (one of 8 exact identifiers, e.g. `$PR`, `${PR_NUMBER}`, `{pr_id}`) are not sites. The latter is identifier-based, so the
  *    aliasing evasion `PR=$ISSUE; gh api -X DELETE repos/o/r/issues/$PR/labels/x` is not counted.
  */
 
@@ -181,7 +181,7 @@ function inPrContext(text: string, idx: number): boolean {
   const win = text.slice(0, idx);
   let pr = -1;
   let issue = -1;
-  for (const m of win.matchAll(/\bgh["',\s[]+(pr|issue)\b/g)) {
+  for (const m of win.matchAll(/\bgh["',\s[]+(?:(?:-R|--repo)["',\s=]+[\w./-]+["',\s[]+)*(pr|issue)\b/g)) {
     const at = (m.index ?? 0) + m[0].length - m[1]!.length;
     if (m[1] === "pr") pr = at;
     else issue = at;

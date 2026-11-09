@@ -448,11 +448,11 @@ describe("lifecycle-seam-check: PR-context carve-out (#5428)", () => {
     assert.deepEqual(md("gh pr edit 5 --add-label ready-for-human"), []);
   });
 
-  test("a long-body gh issue with a nested gh pr still counts (window wider than 300 chars)", () => {
-    const body = "x".repeat(500);
-    assert.deepEqual(md(`gh issue edit 5 --body "${body} $(gh pr view 5 -q .number)" --add-label needs-qa`), [1]);
-    // sibling: a long-body gh pr command keeps its PR-flag exemption
-    assert.deepEqual(md(`gh pr edit 5 --body "${body}" --add-label ready-for-human`), []);
+  test("gh global flags (-R/--repo) before the subcommand do not hide the issue command", () => {
+    assert.deepEqual(md("gh -R o/r issue edit $(gh pr view 5 -q .number) --add-label needs-qa"), [1]);
+    assert.deepEqual(md("gh --repo o/r issue edit $(gh pr view 5 -q .number) --add-label needs-qa"), [1]);
+    // sibling: a -R prefixed gh pr command keeps its PR-flag exemption
+    assert.deepEqual(md("gh -R o/r pr edit 5 --add-label ready-for-human"), []);
   });
 
   test("a >2000-char body gh issue with a nested gh pr still counts (no fixed lookback)", () => {
