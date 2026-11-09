@@ -13,9 +13,12 @@ import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
+import { lifecycleClaimKey } from "../src/redis/lifecycle-journal.ts";
 import {
   PICK_FETCH_LIMIT,
+  buildDefaultPickDeps,
   pickResumeBranch,
+  refusedPending,
   resumeBranchTs,
   runPick,
   type ArtifactStatus,
@@ -35,6 +38,7 @@ import { parseLsRemoteHeads } from "../src/github/git.ts";
 import { parsePrRows } from "../src/github/prs.ts";
 import type { IssueReadResult, IssueRow } from "../src/github/issues.ts";
 import type { PrRow } from "../src/github/prs.ts";
+import type { DispatchClaim, LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
 import { tmpDirTracker } from "./_helpers/tmp-dir.mts";
 
 // Every temp dir this file creates is removed when the file finishes, so
@@ -88,6 +92,10 @@ interface Board {
   openBlockers?: Set<number> | "all";
   resume?: Record<number, ResumeRow[]>;
   env?: NodeJS.ProcessEnv;
+  /** Lifecycle journals by issue (append order); "fail" makes the read fail. */
+  journals?: Record<number, LifecycleJournalEntry[] | "fail">;
+  /** Held dispatch claims by issue; "fail" makes the read fail. */
+  claims?: Record<number, DispatchClaim | "fail">;
 }
 
 interface Harness {
@@ -138,6 +146,16 @@ function harness(board: Board): Harness {
     listResumeRows: async (n) => {
       h.calls.push(`listResumeRows:${n}`);
       return board.resume?.[n] ?? [];
+    },
+    readJournal: async (n) => {
+      h.calls.push(`readJournal:${n}`);
+      const j = board.journals?.[n];
+      return j === "fail" ? { ok: false, error: "boom" } : { ok: true, entries: j ?? [] };
+    },
+    readClaim: async (n) => {
+      h.calls.push(`readClaim:${n}`);
+      const c = board.claims?.[n];
+      return c === "fail" ? { ok: false, error: "boom" } : { ok: true, claim: c ?? null };
     },
     publishLastPick: async (v) => {
       h.calls.push("publishLastPick");
@@ -500,6 +518,85 @@ describe("runPick — dry-run is hermetic", () => {
 // D14 — resume-branch rule (pure) + wiring
 // ---------------------------------------------------------------------------
 
+function je(kind: LifecycleJournalEntry["kind"], extra: Partial<LifecycleJournalEntry> = {}): LifecycleJournalEntry {
+  return {
+    v: 1, ts: 1, kind, from: null, to: null, source: "cli", actor: "t",
+    evidence: {}, reason: null, rationale: null, result: "ok", written: true, ...extra,
+  };
+}
+const refused = (extra: Partial<LifecycleJournalEntry> = {}) =>
+  je("refused", { to: "in-progress", result: "refused:illegal", written: false, ...extra });
+
+describe("refusedPending — journal-based refused skip (issue #5419 INV-5)", () => {
+  const table: Array<[string, LifecycleJournalEntry[], boolean]> = [
+    ["empty", [], false],
+    ["refused, nothing after", [refused()], true],
+    ["refused then transition", [refused(), je("transition")], false],
+    ["refused then external", [refused(), je("external")], false],
+    ["transition then refused", [je("transition"), refused()], true],
+    ["refused then claim-closed only", [refused(), je("claim-closed")], true],
+    ["refused:fetch-failed only", [refused({ result: "refused:fetch-failed" })], false],
+    ["refused of another target state only", [refused({ to: "needs-qa" })], false],
+  ];
+  for (const [name, entries, want] of table) {
+    test(`${name} -> ${want}`, () => {
+      assert.equal(refusedPending(entries), want);
+    });
+  }
+
+  test("append order wins over ts: an older-ts refused row appended last still pins", () => {
+    assert.equal(refusedPending([je("transition", { ts: 999 }), refused({ ts: 1 })]), true);
+  });
+});
+
+describe("runPick — journal-derived skips (issue #5419 INV-6)", () => {
+  const claim: DispatchClaim = { dispatchId: "agent-x", class: "qa_orch", run: "r", artifactHash: null, openedAt: 1 };
+
+  test("a refused-pending head is skipped, the next candidate is picked, and the histogram records it", async () => {
+    const h = harness({
+      issues: [cand(1, ["cleanup-scan"], "", "2026-08-27T00:00:00Z"), cand(2, ["cleanup-scan"], "", "2026-08-28T00:00:00Z")],
+      journals: { 1: [refused()] },
+    });
+    const r = await runPick(h.deps);
+    assert.equal(picked(r), 2);
+    assert.equal(h.published[0].skipped["refused-pending"], 1);
+    assert.ok(h.logs.some((l) => l.startsWith("skipping issue #1 — latest journal entry for in-progress is a seam refusal")));
+  });
+
+  test("a refusal followed by a transition no longer pins the head", async () => {
+    const h = harness({ issues: [cand(1, ["cleanup-scan"])], journals: { 1: [refused(), je("transition")] } });
+    assert.equal(picked(await runPick(h.deps)), 1);
+  });
+
+  test("a held claim skips the candidate (claim-held) and is logged with its dispatchId and class", async () => {
+    const h = harness({
+      issues: [cand(1, ["cleanup-scan"], "", "2026-08-27T00:00:00Z"), cand(2, ["cleanup-scan"], "", "2026-08-28T00:00:00Z")],
+      claims: { 1: claim },
+    });
+    assert.equal(picked(await runPick(h.deps)), 2);
+    assert.equal(h.published[0].skipped["claim-held"], 1);
+    assert.ok(h.logs.includes("skipping issue #1 — dispatch claim held by agent-x (qa_orch)"));
+  });
+
+  test("reads are lazy: not called for rows skipped by an earlier verdict", async () => {
+    const h = harness({
+      issues: [
+        issue(5, [GLM, READY, "in-progress"], { updatedAt: "2026-08-26T00:00:00Z" }),
+        cand(6, ["cleanup-scan"], "", "2026-08-28T00:00:00Z"),
+      ],
+    });
+    await runPick(h.deps);
+    assert.deepEqual(h.calls.filter((c) => c.startsWith("readJournal") || c.startsWith("readClaim")), ["readJournal:6", "readClaim:6"]);
+  });
+
+  test("fail-open: a journal or claim read failure leaves the row pickable", async () => {
+    const h = harness({ issues: [cand(1, ["cleanup-scan"])], journals: { 1: "fail" }, claims: { 1: "fail" } });
+    assert.equal(picked(await runPick(h.deps)), 1);
+    assert.ok(h.logs.some((l) => l.startsWith("WARN lifecycle journal read failed for issue #1")));
+    assert.ok(h.logs.some((l) => l.startsWith("WARN dispatch claim read failed for issue #1")));
+  });
+});
+
 describe("pickResumeBranch — newest AHEAD head wins (ported D14 55/56/57 cases)", () => {
   const row = (branch: string, aheadCount: number): ResumeRow => ({ branch, aheadCount, ts: resumeBranchTs(branch) as number });
   const cases: Array<{ name: string; rows: ResumeRow[]; expected: string | null }> = [
@@ -670,5 +767,39 @@ describe("runRecoverStaleScript — child stdout never reaches driver stdout (IN
     assert.equal(lines.length, 1, `stdout: ${r.stdout}\nstderr: ${r.stderr}`);
     assert.deepEqual(JSON.parse(lines[0]), { issue: 7, code: 0 });
     assert.match(r.stderr, /\[autopilot\] recover-stale: requeued 7/);
+  });
+});
+
+describe("buildDefaultPickDeps — claim keyspace matches the dispatch repo (INV-7, QA round 3)", () => {
+  const AUTOPILOT = "acme/pick-keyspace-autopilot";
+  const OTHER = "acme/pick-keyspace-github";
+  const ISSUE = 987654;
+  let redis: Redis;
+  before(() => {
+    redis = new Redis(REDIS_URL);
+  });
+  after(async () => {
+    await redis.del(lifecycleClaimKey(AUTOPILOT, ISSUE), lifecycleClaimKey(OTHER, ISSUE));
+    redis.disconnect();
+  });
+
+  test("readClaim reads the key under resolveGithubRepo() (HYDRA_GITHUB_REPO) even when HYDRA_AUTOPILOT_REPO differs", async () => {
+    const prev = process.env.HYDRA_GITHUB_REPO;
+    process.env.HYDRA_GITHUB_REPO = OTHER;
+    try {
+      const claim = { dispatchId: "d-1", class: "qa_orch", run: "r", artifactHash: null, openedAt: 1 };
+      await redis.set(lifecycleClaimKey(OTHER, ISSUE), JSON.stringify(claim));
+      const deps = buildDefaultPickDeps({ ...process.env, HYDRA_AUTOPILOT_REPO: AUTOPILOT });
+      const r = await deps.readClaim(ISSUE);
+      assert.ok(r.ok && r.claim?.dispatchId === "d-1");
+      // Sibling shape: a claim held only under the AUTOPILOT repo is NOT seen.
+      await redis.del(lifecycleClaimKey(OTHER, ISSUE));
+      await redis.set(lifecycleClaimKey(AUTOPILOT, ISSUE), JSON.stringify(claim));
+      const r2 = await deps.readClaim(ISSUE);
+      assert.ok(r2.ok && r2.claim === null);
+    } finally {
+      if (prev === undefined) delete process.env.HYDRA_GITHUB_REPO;
+      else process.env.HYDRA_GITHUB_REPO = prev;
+    }
   });
 });
