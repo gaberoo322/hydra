@@ -91,6 +91,7 @@ LISTS = (
     "orch_prs_dirty",
     "orch_prs_unchecked",
     "orch_prs_behind",
+    "orch_prs_no_closing_issue",
     "orch_prs_red_resume",
 )
 # The schema's scalar keys (src/schemas/turn-snapshot.ts) — converted to their typed shape too.

@@ -114,6 +114,7 @@
         "dirty": [],
         "unchecked": [],
         "behind": [],
+        "noClosingIssue": [],
         "ciTriggerStale": {
           "ok": true,
           "value": false

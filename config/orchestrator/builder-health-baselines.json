@@ -1,0 +1,33 @@
+{
+  "parentExceptionRate": {
+    "baseline": {
+      "value": null,
+      "source": "pending: no mirror-carrying runs recorded yet (re-record via scripts/lifecycle-parent-exception-baseline.ts after the parent_exceptions mirror deploys)",
+      "method": "exception turns / turns over recorded Autopilot Runs",
+      "coveredFrom": null,
+      "coveredTo": null,
+      "computedAt": null
+    },
+    "rows": {}
+  },
+  "firstPassQaYield": {
+    "baseline": {
+      "value": 0.41,
+      "source": "#5291",
+      "method": "label-proxy, lower bound",
+      "coveredFrom": null,
+      "coveredTo": null,
+      "computedAt": "2026-11-05T00:00:00.000Z"
+    }
+  },
+  "parkRatePerArm": {
+    "baseline": {
+      "value": null,
+      "source": "#5291: caps not durable before #5314",
+      "method": null,
+      "coveredFrom": null,
+      "coveredTo": null,
+      "computedAt": null
+    }
+  }
+}

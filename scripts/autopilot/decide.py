@@ -3213,6 +3213,25 @@ def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
                 ),
                 reason=f"surface-pr:#{pr}:unchecked",
             )
+    # ISSUE #5400: an open PR whose body carries no Closes/Fixes/Resolves #N is
+    # unreachable by every PR lane (QA and dev-resume key on a closing issue).
+    # Surface it once; the applied `ready-for-human` label is the terminal
+    # exclusion, so the emission self-extinguishes. Never gates a dispatch.
+    # One surface-pr per PR per turn: skip a PR the unchecked arm above already
+    # surfaced (it is in both buckets when a Refs-only PR has an empty rollup).
+    already_surfaced = set() if buckets["ci_trigger_stale"] else set(buckets["unchecked"])
+    for pr in _pr_gate_numbers(state, events, "orch_prs_no_closing_issue"):
+        if pr in already_surfaced:
+            continue
+        out.emit(
+            make_surface_pr(
+                pr,
+                "no-closing-issue",
+                "open PR carries no Closes/Fixes/Resolves #N, so no QA or dev-resume lane can reach it "
+                "(a Refs-only partial delivery should close a dedicated child issue) — operator review required (issue #5400)",
+            ),
+            reason=f"surface-pr:#{pr}:no-closing-issue",
+        )
     for pr in buckets["behind"][:PR_GATE_UPDATE_BRANCH_CAP]:
         out.emit(
             make_update_branch(

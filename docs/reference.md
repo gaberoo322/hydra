@@ -144,6 +144,10 @@ Defaults live in `src/holdback-policy.ts` (windows), `src/redis/holdback.ts` (ca
 
 T1 (prompt-shaped) merges are never enrolled; T2, T3 and T4 always are, with the window deepening by tier (issue #741, building on the #786 T2 floor).
 
+## Builder-health lifecycle fields (issue #5324, ADR-0047 Decision 9)
+
+`GET /api/builder-health` carries three flat `Metric|null` slots from `src/aggregators/lifecycle-health.ts`, each degrading to `null` independently (a dark tile, never a fabricated 0): `parentExceptionRate` (exception turns / turns, by cause — read from the `parent_exceptions` mirror `heartbeat.py` posts on each `POST /api/autopilot/turn` for turn_n and turn_n-1, de-duplicated on `(run_id, turn, cause, ts_epoch)`; live window bounded by the 7d run TTL), `firstPassQaYield` (from `QA-Verdict:` trailers only, one paginated `repos/<repo>/issues/comments?since=` read), and `parkRatePerArm` (parks / claims opened per cap arm, plus would-park counts and the rollout mode). Park rate reads one write-time per-repo cap-events index (a ZSET scored by ts with a 30d trim; key builder `capEventsIndexKey` in `src/redis/lifecycle-journal.ts`), written in the same `MULTI` as the journal append it mirrors (the `hold-exits` mechanism: `appendLifecycleEntry` indexes every cap park / would-park / claim-opened unconditionally; its selector now carries only `holdExit`). Recorded baselines live in `config/orchestrator/builder-health-baselines.json`; the parent-exception baseline is accumulated by the re-runnable `npx tsx scripts/lifecycle-parent-exception-baseline.ts [--ledger /tmp/hydra-autopilot-state.json]`, which merges per-run rows keyed by `run_id` and records the real covered span.
+
 ## GitHub API rate-limit handling (issue #3137)
 
 All `gh`/`git` invocations funnel through the **GitHub CLI Adapter** (`src/github/exec.ts` + `gh.ts`). Rate-limit handling lives on that seam.

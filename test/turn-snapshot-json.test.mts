@@ -45,6 +45,7 @@
  * the reference commit's scripts/autopilot (see plan_parity.py --write-golden).
  */
 
+import type { RetroDrillableReason } from "../src/autopilot/turn-snapshot/afk-frontier.ts";
 import { DEGRADE, degradeDetail } from "../src/autopilot/turn-snapshot/collector.ts";
 import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
@@ -122,6 +123,7 @@ function healthyValues(): TurnSnapshotValues {
       dirty: [4938, 4814, 4814],
       unchecked: [4950],
       behind: [4952, 4951, 4953],
+      noClosingIssue: [],
       qaVerdictRecheck: ok([]),
       dirtyFixFailPr: null,
       parkedIssues: ok(new Set([4905, 4902])), // #5319: emitted sorted ascending as orch_parked_issues
@@ -154,7 +156,7 @@ function healthyValues(): TurnSnapshotValues {
       adrPresent: true,
     },
     targetRiskSurface: { manifest: ok({ ok: true, riskSurface: ["src/execution/", "src/risk/"], weight: 1.5 }) },
-    retro: { runs: ok({ available: true, candidate: "9ede5aef" }), drillable: true, reviewDue: false },
+    retro: { runs: ok({ available: true, candidate: "9ede5aef" }), drillable: true, drillableReason: "flagged-dispatch", reviewDue: false },
     wayfinder: { frontier: "4880", ticketType: "task", inflightGlobal: 1 },
     tickets: ok("4890"),
     realmShare: ok(0.123456),
@@ -184,7 +186,7 @@ function fallbackValues(): TurnSnapshotValues {
     hitlGrill: FAILED,
     targetScan: targetScanFallbackSnapshot("collector-crashed"),
     targetRiskSurface: { manifest: { ok: false, reason: DEGRADE.COLLECTOR_CRASHED } },
-    retro: { runs: FAILED, drillable: null, reviewDue: false },
+    retro: { runs: FAILED, drillable: null, drillableReason: "no-candidate", reviewDue: false },
     wayfinder: { frontier: null, ticketType: "", inflightGlobal: 0 },
     tickets: FAILED,
     realmShare: FAILED,
@@ -228,7 +230,7 @@ function edgeValues(): TurnSnapshotValues {
     picks: { ...h.picks, grillPick: null, devReadyPick: null, candidateExclusions: [], boardDegraded: true },
     scout: { lastWalkIso: ok("2020-01-01T00:00:00"), openEnhancements: ok("3"), tokensToday: "0", mirrored: FAILED },
     targetScan: { ...h.targetScan, adrPresent: false },
-    retro: { runs: ok({ available: true, candidate: "abc" }), drillable: null, reviewDue: false },
+    retro: { runs: ok({ available: true, candidate: "abc" }), drillable: null, drillableReason: "no-candidate", reviewDue: false },
     wayfinder: { frontier: null, ticketType: "", inflightGlobal: 2 },
     tickets: ok(null),
     realmShare: ok(0.99995),
@@ -414,9 +416,35 @@ describe("turn snapshot JSON: contract — golden documents through zod and the 
 
   test("the observability section carries the collector values no decide.py rule reads", () => {
     const doc = JSON.parse(readFileSync(join(PARITY_DIR, "golden-healthy.json"), "utf-8"));
-    assert.deepEqual(Object.keys(doc.observability).sort(), ["active_dev_orch", "capacity", "direction_drift", "health", "recommendations", "redis_queues", "scheduler"]);
+    assert.deepEqual(Object.keys(doc.observability).sort(), ["active_dev_orch", "capacity", "direction_drift", "health", "recommendations", "redis_queues", "retro", "scheduler"]);
     assert.equal(doc.observability.scheduler.stall, "ok");
     assert.equal(typeof doc.observability.active_dev_orch, "number");
+    assert.deepEqual(Object.keys(doc.observability.retro).sort(), ["candidate", "drillable", "drillableReason"]);
+    assert.equal("retro" in doc.blobs, false, "retro provenance never rides under blobs");
+  });
+
+  test("observability.retro carries the exact candidate / drillable / drillableReason values (#5406)", () => {
+    const read = (name: string) => JSON.parse(readFileSync(join(PARITY_DIR, `golden-${name}.json`), "utf-8")).observability.retro;
+    assert.deepEqual(read("healthy"), { candidate: "9ede5aef", drillable: true, drillableReason: "flagged-dispatch" });
+    assert.deepEqual(read("edge"), { candidate: "abc", drillable: null, drillableReason: "no-candidate" });
+    const fallback = buildTurnSnapshot({ ...healthyValues(), retro: { runs: FAILED, drillable: null, drillableReason: "no-candidate", reviewDue: false } }, { nowMs: NOW_MS });
+    assert.deepEqual((fallback.doc.observability as { retro: unknown }).retro, { candidate: null, drillable: null, drillableReason: "no-candidate" });
+  });
+
+  test("signals.retro_run_drillable === (reason not in {none, no-candidate}) for every RetroDrillableReason (#5406 INV-1)", () => {
+    const reasons: RetroDrillableReason[] = [
+      "fail-open-unparseable", "fail-open-not-object", "fail-open-run-not-found", "flagged-dispatch", "reflections",
+      "novel-stuck-signal", "recommendations", "run-flagged", "none", "fail-open-bundle-read-failed", "no-candidate",
+    ];
+    assert.equal(reasons.length, 11);
+    for (const reason of reasons) {
+      const expected = reason !== "none" && reason !== "no-candidate";
+      // The collector's own pairing: no-candidate carries drillable=null, every other reason a boolean.
+      const drillable = reason === "no-candidate" ? null : reason !== "none";
+      const built = buildTurnSnapshot({ ...healthyValues(), retro: { runs: ok({ available: true, candidate: "abc" }), drillable, drillableReason: reason, reviewDue: false } }, { nowMs: NOW_MS });
+      assert.equal(built.doc.signals.retro_run_drillable, expected, reason);
+      assert.equal((built.doc.observability as { retro: { drillableReason: string } }).retro.drillableReason, reason);
+    }
   });
 });
 

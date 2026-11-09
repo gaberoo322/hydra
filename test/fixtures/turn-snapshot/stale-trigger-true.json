@@ -109,6 +109,9 @@
           4237
         ],
         "behind": [],
+        "noClosingIssue": [
+          4237
+        ],
         "ciTriggerStale": {
           "ok": true,
           "value": true

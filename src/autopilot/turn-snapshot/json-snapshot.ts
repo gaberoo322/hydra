@@ -310,6 +310,8 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     orch_prs_dirty: [...v.prGate.dirty],
     orch_prs_unchecked: [...v.prGate.unchecked],
     orch_prs_behind: [...v.prGate.behind],
+    // #5400: open PRs with no closing issue (unreachable by every PR lane)
+    orch_prs_no_closing_issue: [...v.prGate.noClosingIssue],
     orch_ci_trigger_stale: v.prGate.ciTriggerStale.ok && v.prGate.ciTriggerStale.value,
     orch_prs_red_resume: v.prGate.redResume.ok ? [...v.prGate.redResume.value] : [],
     orch_dev_resume_pick: pin(v.prGate.devResumePick.ok ? v.prGate.devResumePick.value : null),
@@ -395,6 +397,13 @@ function observability(v: TurnSnapshotValues): Record<string, unknown> {
     // #412's live-PR count — the kv wire printed it for the session to read;
     // no decide.py rule gates on it (dev_orch gates on its slot + pick).
     active_dev_orch: v.picks.activeDevOrch,
+    // #5406: provenance for retro_run_drillable — which candidate and which
+    // clause. Never under `blobs` (closed decide.py-normalised set).
+    retro: {
+      candidate: v.retro.runs.ok ? v.retro.runs.value.candidate : null,
+      drillable: v.retro.drillable,
+      drillableReason: v.retro.drillableReason,
+    },
   };
 }
 
