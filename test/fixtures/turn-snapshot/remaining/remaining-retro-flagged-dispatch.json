@@ -39,6 +39,7 @@
           }
         },
         "drillable": true,
+        "drillableReason": "flagged-dispatch",
         "reviewDue": false
       }
     }

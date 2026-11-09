@@ -131,6 +131,9 @@
         "behind": [
           4246
         ],
+        "noClosingIssue": [
+          4246
+        ],
         "ciTriggerStale": {
           "ok": false,
           "reason": "runs-read-failed"

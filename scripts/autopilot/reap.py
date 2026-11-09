@@ -1561,6 +1561,52 @@ class CompletionSnapshot:
     worktree_branch: str | None
     duration_ms: int
     slot_occupied: bool
+    # ADR-0047 D4 (#5418): the dispatch id the lifecycle claim is keyed on
+    # (slot dispatch_id -> slot branch -> recovered worktree branch).
+    dispatch_id: str | None = None
+
+
+def _release_dispatch_claim(cls: str, dispatch_id: str | None, outcome: str) -> None:
+    """Release the dispatcher's lifecycle claim by dispatch id (ADR-0047 D4, #5418).
+
+    Best-effort and NEVER raises (STD-CATCH-FAIL-LOUD: every failure becomes one
+    `claim_release` run-log line). Scans by id (no issue positional) so a
+    non-`issue-N` anchor or a missing anchor still releases. Zero-match is the
+    seam's idempotent `{ok:true, prior:null}` and is logged, not retried."""
+    if not dispatch_id or cls.endswith("_target"):
+        return
+    argv = [
+        "npx", "tsx", "scripts/lifecycle.ts", "release",
+        "--dispatch", str(dispatch_id), "--outcome", outcome, "--actor", "reap",
+    ]
+    try:
+        r = subprocess.run(
+            argv, capture_output=True, text=True, check=False, timeout=60,
+            cwd=_no_work_repo_root(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _append_log(f"claim_release cls={cls} dispatch_id={dispatch_id} outcome={outcome} result=error:{type(exc).__name__}")
+        return
+    result = "ok"
+    try:
+        parsed = json.loads((r.stdout or "").strip().splitlines()[-1]) if (r.stdout or "").strip() else None
+    except (ValueError, IndexError):
+        parsed = None
+        result = "error:unparsable"
+    if r.returncode != 0:
+        code = parsed.get("code") if isinstance(parsed, dict) else None
+        result = str(code or f"exit{r.returncode}")
+    elif isinstance(parsed, dict) and parsed.get("prior") is None and result == "ok":
+        result = "ok:no-claim"
+    _append_log(f"claim_release cls={cls} dispatch_id={dispatch_id} outcome={outcome} result={result}")
+
+
+def _claim_release_outcome(cls: str, pr_exists: bool | None) -> str:
+    if cls == "dev_orch":
+        return "pr-opened" if pr_exists is True else ("no-pr" if pr_exists is False else "released")
+    if cls == "qa_orch":
+        return "verdict-posted"
+    return "released"
 
 
 def _snapshot_completion_slot(s: dict, cls: str, task_id: str) -> CompletionSnapshot:
@@ -1611,11 +1657,15 @@ def _snapshot_completion_slot(s: dict, cls: str, task_id: str) -> CompletionSnap
     worktree_branch = slot.get("branch") if isinstance(slot, dict) else None
     if slot is not None and not worktree_branch:
         worktree_branch = _recover_worktree_branch(task_id)
+    dispatch_id = slot.get("dispatch_id") if isinstance(slot, dict) else None
+    if not dispatch_id:
+        dispatch_id = worktree_branch  # slot branch, else the recovered registry branch
     return CompletionSnapshot(
         anchor_ref=anchor_ref,
         worktree_branch=worktree_branch,
         duration_ms=duration_ms,
         slot_occupied=slot is not None,
+        dispatch_id=dispatch_id or None,
     )
 
 
@@ -2094,6 +2144,11 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
         pr_exists = _dev_orch_pr_exists_for_anchor(snap.anchor_ref, dev_orch_pr_list_json)
     elif cls == "dev_target":
         pr_exists = _dev_orch_pr_exists_for_anchor(snap.anchor_ref, dev_target_pr_list_json)
+
+    # ADR-0047 D4 (#5418): release the dispatcher claim by dispatch id, after
+    # the accounting writes and the hoisted PR-list fetch. Non-fatal, order-neutral.
+    if snap.slot_occupied:
+        _release_dispatch_claim(cls, snap.dispatch_id, _claim_release_outcome(cls, pr_exists))
 
     # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
     # (self_heal.append_failure → _fire_reflection_record) was dead on the live

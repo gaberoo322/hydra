@@ -11,24 +11,22 @@ Run these numbered steps.
 
 1. **Verify isolation** — `pwd` + `git rev-parse --git-dir` under `.git/worktrees/`.
    Abort loudly if cwd is `/home/gabe/hydra` (never fall back to the main tree).
-1a. **Claim your anchor** (issue #4271, INV-2) — immediately after the issue
-   number is fixed (pinned by the dispatcher, or self-selected right here),
-   swap the lifecycle label idempotently: `ready-for-agent` -> `in-progress`.
-   This is the SAME claim the GLM drainer's `claim_issue` performs before
-   spawning a worker, applied here to the paid Claude lane so the anchor
-   stops being a live `glm-eligible` sweep candidate (`isGlmEligibleCandidate`,
-   `src/scheduler/chores/glm-eligibility-sweep.ts`) for the whole duration of
-   this dispatch — previously every dev_orch anchor stayed `ready-for-agent`
-   end to end, so a slower dispatch could race the hourly sweep and get
-   coin-flipped into the drainer's pool mid-build. No-op if `ready-for-agent`
-   is already absent or `in-progress` is already present (the drainer may
-   have pre-claimed the same issue first). Best-effort — log and continue on
-   a `gh` failure, never abort the dispatch over a label write:
+1a. **Claim your anchor via the seam** (issue #4271, ADR-0047 D4) — workers
+   never write `in-progress` themselves. Parse `dispatchId=` / `runId=` /
+   `anchor=` from the `<!-- hydra-dispatch v1 … -->` sentinel on the first line
+   of the task prompt. If the issue was pinned (sentinel `anchor=` present, or
+   the prompt names the issue) do nothing: the dispatcher already holds the
+   claim. Otherwise (self-selected) open it now, which also takes the anchor
+   off the `glm-eligible` sweep for the dispatch's duration; the seam performs
+   the `ready-for-agent` -> `in-progress` advance:
    ```bash
-   gh issue edit "$ISSUE_NUMBER" --repo gaberoo322/hydra \
-     --remove-label ready-for-agent --add-label in-progress \
-     || echo "[hydra-dev] WARN: anchor claim relabel failed (non-fatal)" >&2
+   npx tsx scripts/lifecycle.ts dispatch "$ISSUE_NUMBER" --dispatch "$DISPATCH_ID" --class dev_orch --run "$RUN_ID" --purpose fresh
    ```
+   `$DISPATCH_ID` / `$RUN_ID` come from the sentinel; without a sentinel use
+   `interactive-dev-$ISSUE_NUMBER-<epoch>` and `interactive`. `claim-held` ->
+   exclude that issue and re-run selection (at most 3 picks, then stop with a
+   report); `parked:*` or an enforce `advance-refused` -> stop and report, no
+   label write.
 2. Read CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs.
 3. Extract the `## Files in scope` + `## Files out of scope` lists from the issue body.
 4. **Fetch per-anchor Reflections via the live API** (see "Reflection injection"
@@ -61,6 +59,21 @@ Run these numbered steps.
    `src/github/pr-refs.ts`) AND GitHub's own auto-close both key on the verb,
    and GitHub's auto-close IGNORES negation, so a companion carrying any
    closing verb would close the anchor early and re-wedge the QA lane.
+   **Partial delivery of the anchor itself (issue #5400).** When a FRESH
+   dispatch ships only a slice of the anchor, never open a `Refs`-only PR: every
+   PR lane (QA, dev-resume) finds a PR through the issue it CLOSES, so a
+   `Refs #N`-only PR strands green and unreviewed (#5375, #5386). Instead:
+   (a) before `gh pr create`, file a child issue for exactly that slice, link it
+   as a native sub-issue (`gh api repos/gaberoo322/hydra/issues/<parent>/sub_issues -F sub_issue_id=<child-id>`),
+   with `## Files in scope` (the slice's files) and a `Parent design concept: issue-<parent>`
+   line; (b) the PR body says `Closes #<child>` plus `Part of #<parent>` and
+   never a closing verb next to the parent; (c) right after the PR exists,
+   label the child `needs-qa` (reap's needs-qa promotion is anchor-keyed and does
+   not fire for a child); (d) release the parent (`in-progress` -> `ready-for-agent`)
+   and post one comment naming the shipped slice, the child/PR and the remaining
+   slices. A `ubiquitous-language` companion stays `Refs`-only (above); the Turn
+   Snapshot's `orch_prs_no_closing_issue` signal now surfaces any open PR with no
+   closing issue to the operator as `surface-pr {cause: no-closing-issue}`.
 7. Run the full `npm test` per the canonical "Full `npm test` recipe" in
    `hydra-dev.md` (background launch into `npm-test.log` with a sentinel,
    foreground poll; the `*.log` ignore keeps it out of commits), then read the

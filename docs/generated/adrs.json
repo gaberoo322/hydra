@@ -1314,10 +1314,12 @@
         "CONTEXT.md",
         "docs/adr/0034-orchestrator-dashboard-page-inventory.md",
         "docs/agents/triage-labels.md",
+        "docs/operator-playbooks/hydra-autopilot.md",
         "docs/operator-playbooks/hydra-issue-research.md",
         "docs/operator-playbooks/hydra-qa.md",
         "docs/operator-playbooks/hydra-review.md",
-        "docs/operator-playbooks/hydra-sweep.md"
+        "docs/operator-playbooks/hydra-sweep.md",
+        "docs/reference.md"
       ],
       "source": {
         "path": "docs/adr/0047-work-item-lifecycle-is-data.md"

@@ -165,6 +165,18 @@
       "description": "scripts/lifecycle-legacy-backfill.ts — one-time cutover helper"
     },
     {
+      "path": "scripts/lifecycle-parent-exception-baseline.ts",
+      "name": "lifecycle-parent-exception-baseline.ts",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/lifecycle-parent-exception-baseline.ts"
+      },
+      "kind": "ts",
+      "description": "scripts/lifecycle-parent-exception-baseline.ts — idempotent replay of the"
+    },
+    {
       "path": "scripts/lifecycle.ts",
       "name": "lifecycle.ts",
       "execStart": null,
