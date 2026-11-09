@@ -369,20 +369,34 @@ async function reopenIssue(issueNumber: number): Promise<void> {
  * lifecycle seam (ADR-0047 D3): a state-less open issue may enter
  * `needs-triage` unconditionally, and triage then decides where it goes,
  * instead of this module writing `ready-for-human` straight onto the board.
+ * Deliberate lane change (QA #5433 round 1): the reopen used to land on
+ * `ready-for-human`; the seam has no state-less -> `ready-for-human` edge
+ * for an automated actor (ADR-0047 D3), and a recurring friction cue is
+ * triage-shaped work, not an operator-only hold.
  * Best-effort: a refusal must not fail the reopen it follows (which has
  * already succeeded); it is logged, and there is NO fallback to a direct
  * label write.
  */
-async function restoreLifecycleLabel(issueNumber: number): Promise<void> {
-  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-  const result = await advance(
-    { issue: issueNumber, to: "needs-triage", actor: "escalation" },
-    defaultSeamDeps(repoRoot),
-  );
-  if (result.ok === false) {
+export async function restoreLifecycleLabel(
+  issueNumber: number,
+  advanceFn: typeof advance = advance,
+): Promise<void> {
+  try {
+    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+    const result = await advanceFn(
+      { issue: issueNumber, to: "needs-triage", actor: "escalation" },
+      defaultSeamDeps(repoRoot),
+    );
+    if (result.ok === false) {
+      logger.warn(
+        { issueNumber, code: result.code },
+        "restoreLifecycleLabel: lifecycle advance to needs-triage refused, issue may remain label-less",
+      );
+    }
+  } catch (err) {
     logger.warn(
-      { issueNumber, code: result.code },
-      "restoreLifecycleLabel: lifecycle advance to needs-triage refused, issue may remain label-less",
+      { issueNumber, err },
+      "restoreLifecycleLabel: lifecycle advance threw, issue may remain label-less",
     );
   }
 }

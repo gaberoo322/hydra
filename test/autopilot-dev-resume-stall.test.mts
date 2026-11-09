@@ -804,7 +804,7 @@ describe("reap.py completion → no-PR stall hands the cap to the seam (issue #5
     }
   });
 
-  test("a seam refusal (parked:*, from-mismatch, any code) leaves the issue alone: relabelled=False, no direct-write fallback", () => {
+  test("a seam refusal (parked:*, from-mismatch, any code) leaves the issue alone: no 'Relabelled' comment, no resume queued, no direct-write fallback", () => {
     const tmp = makeTmp();
     try {
       writeStalledSlot(tmp.state, "t11");
@@ -814,8 +814,15 @@ describe("reap.py completion → no-PR stall hands the cap to the seam (issue #5
         STUB_LIFECYCLE_EXIT: "1",
       });
       assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
-      assert.match(runLog(tmp), /dev_stall_no_pr anchor=issue-3726 task_id=t11 .*relabelled=False/);
+      assert.match(runLog(tmp), /dev_stall_no_pr_advance_refused anchor=issue-3726 task_id=t11/);
+      assert.ok(!/dev_stall_no_pr anchor=/.test(runLog(tmp)), "the success log line must not be written on a refusal");
       assert.match(r.stderr, /lifecycle advance refused/);
+      assert.ok(
+        !ghCalls(tmp).some((c) => c.startsWith("issue comment")),
+        `a refusal must not post the 'Relabelled' comment: ${JSON.stringify(ghCalls(tmp))}`,
+      );
+      const st = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.ok(!(st.dev_resume_pending ?? []).length, `a refusal must not queue dev_resume_pending: ${JSON.stringify(st.dev_resume_pending)}`);
       assert.ok(
         !ghCalls(tmp).some((c) => c.startsWith("issue edit")),
         `a refusal must never fall back to gh issue edit: ${JSON.stringify(ghCalls(tmp))}`,

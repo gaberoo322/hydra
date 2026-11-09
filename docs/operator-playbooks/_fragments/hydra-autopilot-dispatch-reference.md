@@ -177,12 +177,10 @@ cache, so the resume path no longer depends on it surviving. Four mechanisms:
    #4807/#4518 PR-keyed pins, with a `ResumeSalvage`
    intent for `issue-<N>` — no branch to continue, so the
    dispatch prompt reads the issue's own comments for the last reap stall's
-   `**Branch:**` line instead. There is NO state key: the durable cap is
-   enforced at reap time — `_handle_dev_orch_stall` counts the issue's prior
-   no-PR stall comments (one `gh issue view --json comments` read on the
-   already-narrow confirmed-stall branch; an unreadable count falls back to
-   today's behaviour) and at the third stall relabels `ready-for-human` and
-   posts one cap comment instead of queueing another resume.
+   `**Branch:**` line instead. There is NO state key: the durable cap is the lifecycle seam's
+   `dev-nopr-resume` Live Cap (#5318), enforced when `_handle_dev_orch_stall`
+   advances the issue to `needs-dev-resume`; a refused advance (cap reached,
+   `parked:*`) leaves the issue untouched, posts no comment and queues no resume.
 
 On the disk side, `scripts/branch-prune.sh` — the only deleter of
 `.claude/worktrees/agent-*` — never removes a worktree holding uncommitted

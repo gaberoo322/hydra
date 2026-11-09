@@ -179,6 +179,18 @@ def _handle_dev_orch_stall(
         evidence=evidence,
     )
 
+    if not relabelled:
+        # Refused advance (from-mismatch, `parked:*` incl. the dev-nopr-resume
+        # Live Cap, write-failed): the issue did NOT move, so posting
+        # "Relabelled" or queueing a resume would be false (QA #5433 round 1).
+        line = (
+            f"dev_stall_no_pr_advance_refused anchor={anchor_ref} "
+            f"task_id={task_id} branch={worktree_branch or ''}"
+        )
+        print(f"[autopilot] {line}")
+        _append_log(line)
+        return
+
     branch_note = f"\n**Branch:** `{worktree_branch}`" if worktree_branch else ""
     _gh_run(
         "issue", "comment", issue_num, "--repo", REPO, "--body",
