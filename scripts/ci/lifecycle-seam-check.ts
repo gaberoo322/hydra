@@ -177,7 +177,8 @@ const PR_LABEL_PATH_RE = /issues\/(?:\$\{?|\{)(?:PR|PR_NUMBER|PR_NUM|PR_ID|pr|pr
  * `pr`, with no unquoted `;` / `&&` / `||` / `|` / unbracketed newline between (#5428).
  */
 function inPrContext(text: string, idx: number): boolean {
-  const win = text.slice(Math.max(0, idx - 2000), idx);
+  // Unbounded walk-back (operator ruling, PR #5431 rounds 2-3): no fixed lookback constant to outgrow.
+  const win = text.slice(0, idx);
   let pr = -1;
   let issue = -1;
   for (const m of win.matchAll(/\bgh["',\s[]+(pr|issue)\b/g)) {
