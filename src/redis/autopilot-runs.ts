@@ -172,6 +172,32 @@ export async function listRecentAutopilotRunIds(limit: number): Promise<string[]
 }
 
 /**
+ * Runs whose started_epoch (index score, seconds) is at or after
+ * `sinceEpochSeconds`, oldest first, with that score. One ZRANGEBYSCORE
+ * WITHSCORES round-trip (issue #5324: the parentExceptionRate window).
+ */
+export async function listAutopilotRunsSince(
+  sinceEpochSeconds: number,
+): Promise<Array<{ runId: string; startedEpoch: number }>> {
+  // The aggregate client type truncates zrangebyscore's WITHSCORES overload
+  // (cf. xrange below, #3037); narrow-cast just this call.
+  const r = getRedisConnection() as unknown as {
+    zrangebyscore(key: string, min: string, max: string, withScores: "WITHSCORES"): Promise<string[]>;
+  };
+  const flat: string[] = await r.zrangebyscore(
+    redisKeys.autopilotRunsIndex(),
+    String(Math.floor(sinceEpochSeconds)),
+    "+inf",
+    "WITHSCORES",
+  );
+  const out: Array<{ runId: string; startedEpoch: number }> = [];
+  for (let i = 0; i + 1 < flat.length; i += 2) {
+    out.push({ runId: flat[i], startedEpoch: Number(flat[i + 1]) });
+  }
+  return out;
+}
+
+/**
  * Count runs in the index whose score (started_epoch, seconds) is at or after
  * `sinceEpochSeconds`. A single ZCOUNT round-trip — returns the cardinality of
  * the score range without pulling the IDs. Owns the runs-index key shape so the

@@ -1,0 +1,1 @@
+- feat: add parent-exception rate, first-pass QA yield and per-arm park rate to the builder-health scorecard and panel (#5324)

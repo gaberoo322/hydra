@@ -77,6 +77,7 @@
  */
 
 import { ghJson, ghExec } from "./gh.ts";
+import { logger } from "../logger.ts";
 import { isGhFailure, type GhErrorCode, type GhExecOptions, type GhResult } from "./exec.ts";
 import { viewPr as viewPrModule } from "./view-pr.ts";
 import type { ViewPrTransport, ViewPrCache } from "./view-pr.ts";
@@ -320,6 +321,55 @@ export async function listOpenIssues(
   const res = await ghJson<unknown>(issueListArgs(repo, [], opts), execOpts(opts));
   if (isGhFailure(res)) return { ok: false, code: res.code };
   return { ok: true, rows: parseIssueRows(res.data, repo) };
+}
+
+/** One issue/PR comment carrying a `QA-Verdict:` trailer (issue #5324). */
+export interface QaVerdictComment {
+  body: string;
+  created_at: string;
+}
+
+export type QaVerdictCommentsResult =
+  | { ok: true; comments: QaVerdictComment[] }
+  | { ok: false; code: GhErrorCode };
+
+/**
+ * Every repo issue/PR comment updated at or after `sinceIso` whose body
+ * contains `QA-Verdict:` — one paginated `gh api` read (`--paginate` +
+ * a per-element `--jq`, so stdout is NDJSON, one object per line). Never
+ * throws; a gh failure is the `{ ok: false }` arm.
+ */
+export async function listQaVerdictCommentsSince(
+  sinceIso: string,
+  opts: { repo?: string; timeout?: number; maxBuffer?: number } = {},
+): Promise<QaVerdictCommentsResult> {
+  const repo = resolveGithubRepo(opts.repo);
+  if (!repo) return { ok: true, comments: [] };
+  const res = await ghExec(
+    [
+      "api",
+      "--paginate",
+      `repos/${repo}/issues/comments?since=${encodeURIComponent(sinceIso)}&per_page=100`,
+      "--jq",
+      '.[] | select((.body // "") | contains("QA-Verdict:")) | {body, created_at}',
+    ],
+    { timeout: opts.timeout ?? 60_000, maxBuffer: opts.maxBuffer ?? DEFAULT_MAX_BUFFER * 4 },
+  );
+  if (isGhFailure(res)) return { ok: false, code: res.code };
+  const comments: QaVerdictComment[] = [];
+  for (const line of res.data.stdout.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const o = JSON.parse(t) as Partial<QaVerdictComment>;
+      if (typeof o.body === "string" && typeof o.created_at === "string") {
+        comments.push({ body: o.body, created_at: o.created_at });
+      }
+    } catch (err) {
+      logger.warn({ err }, "[github/issues] skipping malformed QA-verdict comment line");
+    }
+  }
+  return { ok: true, comments };
 }
 
 // ---------------------------------------------------------------------------

@@ -292,6 +292,18 @@ def _fold_decisions(events: list) -> dict:
     return decisions
 
 
+def _mirrored_parent_exceptions(state: dict, turn_n: int) -> list:
+    """Ledger parent_exceptions entries whose `turn` is turn_n or turn_n-1."""
+    entries = state.get("parent_exceptions")
+    if not isinstance(entries, list):
+        return []
+    return [
+        e for e in entries
+        if isinstance(e, dict) and isinstance(e.get("turn"), int)
+        and e["turn"] in (turn_n, turn_n - 1)
+    ]
+
+
 def post_turn(state: dict, plan: dict, now: int) -> None:
     """Issue #498 — POST one immutable turn record to /api/autopilot/turn.
 
@@ -363,6 +375,15 @@ def post_turn(state: dict, plan: dict, now: int) -> None:
         shed = debug.get("usage_shed")
         body["usage_shed"] = shed if isinstance(shed, list) else []
         body["usage_allow"] = "usage_dispatch_blocked" not in debug
+    # Issue #5324 (ADR-0047 Decision 9): mirror the Run Ledger's parent-exception
+    # rows for this turn and the previous one (turn.sh can journal a script-error
+    # on a turn that aborts before this heartbeat). Read straight from state --
+    # the ledger stays the single writer; omitted when there are none, and the
+    # server dedupes on (run_id, turn, cause, ts_epoch).
+    mirrored = _mirrored_parent_exceptions(state, int(turn_n))
+    # Always forward the list (`[]` when clean): its presence marks a run as
+    # mirror-era so the rate fold can tell a clean run from a pre-mirror one.
+    body["parent_exceptions"] = mirrored
     try:
         payload = json.dumps(body).encode("utf-8")
     except (TypeError, ValueError) as exc:

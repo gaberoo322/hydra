@@ -20,6 +20,20 @@ import {
   getBuilderHealthScorecard,
   type BuilderHealthDeps,
 } from "../src/aggregators/builder-health.ts";
+import {
+  foldFirstPassQaYield,
+  foldParentExceptions,
+  foldParkRate,
+  loadBuilderHealthBaselines,
+  summarizeBaselineRows,
+  filterMirrorRuns,
+  ledgerToRunTurns,
+  baselineRowFor,
+  mergeBaselineRow,
+  computeParentExceptionRate,
+  type LifecycleHealthDeps,
+} from "../src/aggregators/lifecycle-health.ts";
+import { capEventRecord, type LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
 import { percentileInterpolated as percentile } from "../src/metrics/math.ts";
 import {
   classifyAutonomy,
@@ -176,6 +190,22 @@ async function withCapturedStderr(
   }
 }
 
+const NO_FILE = Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+
+/** Stubs for the three ADR-0047 D9 readers: no Redis, no gh, no baselines file. */
+function lifecycleStubs(over: LifecycleHealthDeps = {}): LifecycleHealthDeps {
+  return {
+    readFile: async () => {
+      throw NO_FILE;
+    },
+    readRunTurns: async () => [],
+    readQaVerdictComments: async () => ({ ok: true, comments: [] }),
+    readCapEvents: async () => ({ ok: true, events: [] }),
+    readMode: async () => "shadow",
+    ...over,
+  };
+}
+
 function happyDeps(overrides: Partial<BuilderHealthDeps> = {}): BuilderHealthDeps {
   return {
     now: NOW,
@@ -228,6 +258,7 @@ function happyDeps(overrides: Partial<BuilderHealthDeps> = {}): BuilderHealthDep
             reviews: [],
             commits: [],
           },
+    lifecycleHealth: lifecycleStubs(),
     ...overrides,
   };
 }
@@ -541,5 +572,329 @@ describe("computeStagnationPanel — pure per-realm projection", () => {
     );
     // Degrades gracefully — no throw, target dark.
     assert.equal(panel.signals.cycleYield.target, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0047 Decision 9 fields (#5324): parentExceptionRate, firstPassQaYield,
+// parkRatePerArm
+// ---------------------------------------------------------------------------
+
+const turnRow = (turn: number, events: Array<{ cause: string; turn: number; ts_epoch: number }> = []) =>
+  JSON.stringify({
+    turn_n: turn,
+    ...(events.length > 0
+      ? { parent_exceptions: events.map((e) => ({ ...e, source: "parent", detail: "" })) }
+      : {}),
+  });
+
+describe("lifecycle fields — parentExceptionRate", () => {
+  test("exception turns key on the event's own turn, events dedupe across the turn_n/turn_n-1 mirror, byCause counts events", () => {
+    const dup = { cause: "script-error", turn: 2, ts_epoch: 100 };
+    const f = foldParentExceptions([
+      {
+        runId: "r1",
+        startedEpoch: 1,
+        members: [
+          turnRow(1),
+          turnRow(2, [dup, { cause: "notes-steer", turn: 2, ts_epoch: 101 }]),
+          // turn 3 mirrors the turn-2 event again (turn_n-1) plus its own
+          turnRow(3, [dup, { cause: "defect-filed", turn: 3, ts_epoch: 150 }]),
+          turnRow(4),
+        ],
+      },
+    ]);
+    assert.equal(f.turns, 4);
+    assert.equal(f.exceptionTurns, 2);
+    assert.deepEqual(f.byCause, { "script-error": 1, "notes-steer": 1, "defect-filed": 1 });
+  });
+
+  test("a turn aborted before its heartbeat (no posted row) still counts: its mirrored event adds the turn to BOTH numerator and denominator (INV-2)", () => {
+    const f = foldParentExceptions([
+      {
+        runId: "r1",
+        startedEpoch: 1,
+        // turn 1 aborted (invariant-reject) before Phase 5 posted its row; turn 2's row mirrors the turn-1 event (turn_n-1)
+        members: [turnRow(2, [{ cause: "script-error", turn: 1, ts_epoch: 90 }, { cause: "notes-steer", turn: 2, ts_epoch: 100 }])],
+      },
+    ]);
+    assert.equal(f.turns, 2, "the row-less aborted turn joins the denominator");
+    assert.equal(f.exceptionTurns, 2, "the aborted turn's exception is counted, not dropped");
+    assert.ok(f.exceptionTurns <= f.turns);
+    assert.deepEqual(f.byCause, { "script-error": 1, "notes-steer": 1 });
+  });
+
+  test("live Redis rows and the Run Ledger replay of the same run fold identically (INV-4)", () => {
+    const events = [
+      { cause: "invariant-reject", turn: 2, ts_epoch: 200 },
+      { cause: "notes-steer", turn: 4, ts_epoch: 400 },
+    ];
+    // Redis: turn 2 aborted before heartbeat (no row); turn 3 mirrors it as turn_n-1.
+    const redisRun = {
+      runId: "r-parity",
+      startedEpoch: 7,
+      members: [
+        turnRow(1, []),
+        turnRow(3, [events[0]]),
+        turnRow(4, [events[0], events[1]].filter((e) => e.turn >= 3)),
+        turnRow(5, [events[1]]),
+      ],
+    };
+    const ledgerRun = ledgerToRunTurns({
+      run_id: "r-parity",
+      started_epoch: 7,
+      turn: 5,
+      parent_exceptions: events.map((e) => ({ ...e, source: "parent", detail: "" })),
+    });
+    assert.ok(ledgerRun);
+    const live = foldParentExceptions([redisRun]);
+    const replay = foldParentExceptions([ledgerRun]);
+    assert.deepEqual(live, replay);
+    assert.deepEqual(live, { turns: 5, exceptionTurns: 2, byCause: { "invariant-reject": 1, "notes-steer": 1 } });
+    assert.deepEqual(baselineRowFor(redisRun), baselineRowFor(ledgerRun));
+  });
+
+  test("mergeBaselineRow keeps the larger-turns row on a re-seen run, and takes a fuller or first row", () => {
+    const row = (turns: number) => ({ started_epoch: 1, turns, exceptionTurns: 0, byCause: {} });
+    assert.equal(mergeBaselineRow(row(10), row(4)).turns, 10, "shrunk replay must not overwrite");
+    assert.equal(mergeBaselineRow(row(4), row(10)).turns, 10);
+    assert.equal(mergeBaselineRow(undefined, row(3)).turns, 3);
+  });
+
+  test("turns=0 => rate null; a malformed turn row is skipped, not counted", async () => {
+    const card = await getBuilderHealthScorecard(happyDeps());
+    assert.equal(card.parentExceptionRate?.rate, null);
+    assert.equal(card.parentExceptionRate?.turns, 0);
+    const f = foldParentExceptions([{ runId: "r", startedEpoch: 1, members: ["{not json", turnRow(1)] }]);
+    assert.equal(f.turns, 1);
+  });
+
+  test("scorecard computes rate = exceptionTurns / turns and echoes the recorded baseline verbatim", async () => {
+    const baseline = {
+      value: 0.5,
+      source: "replay",
+      method: "m",
+      coveredFrom: "2026-11-05",
+      coveredTo: "2026-11-05",
+      computedAt: "2026-11-05T00:00:00Z",
+    };
+    const card = await getBuilderHealthScorecard(
+      happyDeps({
+        lifecycleHealth: lifecycleStubs({
+          readFile: async () => JSON.stringify({ parentExceptionRate: { baseline } }),
+          readRunTurns: async () => [
+            { runId: "r1", startedEpoch: 5, members: [turnRow(1, [{ cause: "script-error", turn: 1, ts_epoch: 9 }]), turnRow(2), turnRow(3), turnRow(4)] },
+          ],
+        }),
+      }),
+    );
+    assert.equal(card.parentExceptionRate?.rate, 0.25);
+    assert.deepEqual(card.parentExceptionRate?.baseline, baseline);
+  });
+
+  test("a throwing run reader degrades ONLY this field to null", async () => {
+    const card = await getBuilderHealthScorecard(
+      happyDeps({
+        lifecycleHealth: lifecycleStubs({
+          readRunTurns: async () => {
+            throw new Error("redis down");
+          },
+        }),
+      }),
+    );
+    assert.equal(card.parentExceptionRate, null);
+    assert.notEqual(card.firstPassQaYield, null);
+    assert.notEqual(card.parkRatePerArm, null);
+  });
+});
+
+describe("lifecycle fields — firstPassQaYield", () => {
+  const trailer = (verdict: string, pr: number, round: number) =>
+    `review\n\nQA-Verdict: ${verdict} pr=${pr} round=${round} sha=abcdef123456 blockers=0 max_severity=none`;
+  const start = Date.parse("2026-05-23T12:00:00Z");
+
+  test("population is PRs whose earliest in-window trailer is round 1; PASS-pending-CI passes, FAIL-pending-CI does not", () => {
+    const r = foldFirstPassQaYield(
+      [
+        { body: trailer("PASS", 1, 1), created_at: "2026-05-25T00:00:00Z" },
+        { body: trailer("PASS-pending-CI", 2, 1), created_at: "2026-05-25T00:00:00Z" },
+        { body: trailer("FAIL-pending-CI", 3, 1), created_at: "2026-05-25T00:00:00Z" },
+        { body: trailer("FAIL", 4, 1), created_at: "2026-05-25T00:00:00Z" },
+        { body: trailer("PASS", 4, 2), created_at: "2026-05-26T00:00:00Z" },
+        // PR 5: earliest in-window trailer is round 2 => out of population
+        { body: trailer("PASS", 5, 2), created_at: "2026-05-26T00:00:00Z" },
+        // PR 6: round 1 predates the window => its round 2 is the earliest in-window
+        { body: trailer("FAIL", 6, 1), created_at: "2026-05-01T00:00:00Z" },
+        { body: trailer("PASS", 6, 2), created_at: "2026-05-27T00:00:00Z" },
+        // unlabeled chatter never counts
+        { body: "LGTM, no trailer", created_at: "2026-05-25T00:00:00Z" },
+      ],
+      start,
+    );
+    assert.deepEqual(r, { population: 4, firstPass: 2 });
+  });
+
+  test("empty population => yield null; a comment-read failure degrades to null, never 0", async () => {
+    const empty = await getBuilderHealthScorecard(happyDeps());
+    assert.equal(empty.firstPassQaYield?.yield, null);
+    const failed = await getBuilderHealthScorecard(
+      happyDeps({
+        lifecycleHealth: lifecycleStubs({
+          readQaVerdictComments: async () => ({ ok: false, code: "gh-rate-limited" }),
+        }),
+      }),
+    );
+    assert.equal(failed.firstPassQaYield, null);
+  });
+
+  test("scorecard yield = firstPass / population", async () => {
+    const card = await getBuilderHealthScorecard(
+      happyDeps({
+        lifecycleHealth: lifecycleStubs({
+          readQaVerdictComments: async () => ({
+            ok: true,
+            comments: [
+              { body: trailer("PASS", 1, 1), created_at: "2026-05-29T00:00:00Z" },
+              { body: trailer("FAIL", 2, 1), created_at: "2026-05-29T00:00:00Z" },
+            ],
+          }),
+        }),
+      }),
+    );
+    assert.equal(card.firstPassQaYield?.yield, 0.5);
+    assert.equal(card.firstPassQaYield?.population, 2);
+  });
+});
+
+describe("lifecycle fields — parkRatePerArm", () => {
+  const ev = (kind: "park" | "would-park" | "claim", arm?: string) => ({
+    kind,
+    issue: 1,
+    ts: 1,
+    ...(arm ? { arm } : {}),
+    actor: "cli",
+  });
+
+  test("zero-fills every cap arm; rate = parks / claims; wouldPark reported alongside", () => {
+    const f = foldParkRate([ev("claim"), ev("claim"), ev("claim"), ev("claim"), ev("park", "qa-stall"), ev("would-park", "qa-stall"), ev("would-park", "total-claims")]);
+    assert.equal(f.claimsOpened, 4);
+    assert.equal(Object.keys(f.arms).length, 7);
+    assert.deepEqual(f.arms["qa-stall"], { parks: 1, wouldPark: 1, rate: 0.25 });
+    assert.deepEqual(f.arms["total-claims"], { parks: 0, wouldPark: 1, rate: 0 });
+    assert.deepEqual(f.arms["stale-requeue"], { parks: 0, wouldPark: 0, rate: 0 });
+  });
+
+  test("claimsOpened=0 => rate null (dark) but counts still shown; mode is carried", async () => {
+    const card = await getBuilderHealthScorecard(
+      happyDeps({
+        lifecycleHealth: lifecycleStubs({ readCapEvents: async () => ({ ok: true, events: [ev("would-park", "qa-stall")] }) }),
+      }),
+    );
+    assert.equal(card.parkRatePerArm?.mode, "shadow");
+    assert.equal(card.parkRatePerArm?.arms["qa-stall"].rate, null);
+    assert.equal(card.parkRatePerArm?.arms["qa-stall"].wouldPark, 1);
+  });
+
+  test("an index read failure degrades this field to null", async () => {
+    const card = await getBuilderHealthScorecard(
+      happyDeps({ lifecycleHealth: lifecycleStubs({ readCapEvents: async () => ({ ok: false, error: "x" }) }) }),
+    );
+    assert.equal(card.parkRatePerArm, null);
+  });
+
+  test("capEventRecord mirrors a real cap park, a shadow refusal and a claim-opened; ignores everything else", () => {
+    const base: LifecycleJournalEntry = {
+      v: 1, ts: 10, kind: "transition", from: "in-progress", to: "parked", source: "cli", actor: "a",
+      evidence: { pr: "42" }, reason: "cap:qa-stall", rationale: null, result: "parked:qa-stall", written: true,
+    };
+    assert.deepEqual(capEventRecord(7, base), { kind: "park", issue: 7, ts: 10, arm: "qa-stall", pr: 42, actor: "a" });
+    assert.deepEqual(
+      capEventRecord(7, { ...base, kind: "refused", written: false, result: "shadow-would-park:qa-stall" }),
+      { kind: "would-park", issue: 7, ts: 10, arm: "qa-stall", pr: 42, actor: "a" },
+    );
+    assert.deepEqual(capEventRecord(7, { ...base, kind: "claim-opened", to: null, reason: null, result: "ok" }), {
+      kind: "claim", issue: 7, ts: 10, actor: "a",
+    });
+    assert.equal(capEventRecord(7, { ...base, reason: "other", result: "ok" }), null);
+  });
+});
+
+describe("lifecycle fields — baselines are read-only inputs", () => {
+  test("a missing or unparseable baselines file yields null baselines, never a throw", async () => {
+    const missing = await loadBuilderHealthBaselines({ readFile: async () => { throw NO_FILE; } });
+    assert.deepEqual(missing, { parentExceptionRate: null, firstPassQaYield: null, parkRatePerArm: null });
+    const bad = await loadBuilderHealthBaselines({ readFile: async () => "{nope" });
+    assert.deepEqual(bad, missing);
+  });
+
+  test("summarizeBaselineRows recomputes over rows within 30d of the newest and reports the covered span", () => {
+    const day = 86400;
+    const t0 = Date.parse("2026-11-05T00:00:00Z") / 1000;
+    const s = summarizeBaselineRows(
+      {
+        old: { started_epoch: t0 - 40 * day, turns: 100, exceptionTurns: 100, byCause: {} },
+        a: { started_epoch: t0 - 2 * day, turns: 10, exceptionTurns: 1, byCause: {} },
+        b: { started_epoch: t0, turns: 10, exceptionTurns: 0, byCause: {} },
+      },
+      "2026-11-05T01:00:00Z",
+    );
+    assert.equal(s.runs, 2);
+    assert.equal(s.value, 0.05);
+    assert.equal(s.coveredFrom, "2026-11-03");
+    assert.equal(s.coveredTo, "2026-11-05");
+  });
+});
+
+describe("committed builder-health baselines are provenanced (#5324)", () => {
+  // Vacuous = a recorded value with no provenance (zero turns/runs). A genuine 0 over real turns is healthy.
+  const isProvenanced = (b: any): boolean =>
+    b.value === null ? true : b.turns > 0 && b.runs > 0 && b.computedAt !== null && b.value === b.exceptionTurns / b.turns;
+
+  test("a recorded parentExceptionRate baseline carries provenance (null placeholder allowed)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const doc = JSON.parse(readFileSync(new URL("../config/orchestrator/builder-health-baselines.json", import.meta.url), "utf8"));
+    assert.ok(isProvenanced(doc.parentExceptionRate.baseline));
+  });
+
+  test("guard shapes: genuine 0 over real turns passes; fabricated 0 and zero-turn values fail; null passes", () => {
+    assert.equal(isProvenanced({ value: 0, turns: 40, runs: 3, exceptionTurns: 0, computedAt: "2026-11-06T00:00:00Z" }), true);
+    assert.equal(isProvenanced({ value: 0, turns: 0, runs: 0, exceptionTurns: 0, computedAt: "2026-11-06T00:00:00Z" }), false);
+    assert.equal(isProvenanced({ value: 0, turns: 40, runs: 3, exceptionTurns: 0, computedAt: null }), false);
+    assert.equal(isProvenanced({ value: null, computedAt: null }), true);
+  });
+});
+
+describe("mirror-presence filter on the parentExceptionRate runs", () => {
+  const turn = (n: number, pe?: unknown[]) => JSON.stringify({ turn_n: n, ...(pe !== undefined ? { parent_exceptions: pe } : {}) });
+
+  test("filterMirrorRuns drops runs whose turns never carried the field; a clean run with [] stays", () => {
+    const pre = { runId: "pre", startedEpoch: 1, members: [turn(1), turn(2)] };
+    const clean = { runId: "clean", startedEpoch: 2, members: [turn(1, []), turn(2, [])] };
+    const dirty = { runId: "dirty", startedEpoch: 3, members: [turn(1), turn(2, [{ cause: "x", turn: 2, ts_epoch: 1 }])] };
+    assert.deepEqual(filterMirrorRuns([pre, clean, dirty]).map((r) => r.runId), ["clean", "dirty"]);
+  });
+
+  test("default reader excludes pre-mirror runs; mirror-era runs (clean or not) still count", async () => {
+    const { addAutopilotRunToIndex, addAutopilotRunTurn } = await import("../src/redis/autopilot-runs.ts");
+    const tag = `mirror-${process.pid}-${Date.now()}`;
+    const nowSec = Math.floor(Date.now() / 1000);
+    await addAutopilotRunToIndex(`${tag}-old`, nowSec - 3600, 300);
+    await addAutopilotRunToIndex(`${tag}-new`, nowSec - 1800, 300);
+    for (let t = 1; t <= 3; t++) {
+      await addAutopilotRunTurn(`${tag}-old`, t, turn(t), 300);
+      await addAutopilotRunTurn(`${tag}-new`, t, turn(t, []), 300);
+    }
+    const metric = await computeParentExceptionRate(2, {});
+    // Per-run Redis DB isolation: only the two seeded runs exist.
+    assert.equal(metric.runs, 1, "pre-mirror run excluded");
+    assert.equal(metric.turns, 3, "only the mirror-era run's turns counted");
+    assert.equal(metric.rate, 0);
+  });
+
+  test("ledger replay marks every turn mirror-era, so a clean live run is recorded, not dropped", () => {
+    const run = ledgerToRunTurns({ run_id: "live", started_epoch: 5, turn: 3 });
+    assert.ok(run);
+    assert.equal(filterMirrorRuns([run]).length, 1);
+    assert.equal(baselineRowFor(run).turns, 3);
   });
 });
