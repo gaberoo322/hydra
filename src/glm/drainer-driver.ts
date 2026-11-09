@@ -39,7 +39,7 @@
  *   - `tick` (issue #4688, ADR-0040 Decision 1) — the whole drainer tick
  *     in-process: gate → (skip: stop) → pick → (idle: stop) → claim →
  *     worktree → `composePrompt` → author (the shared helper `author` mode
- *     also calls) → finish. Line is `{gate,pick,finish}` (`finish` null when
+ *     also calls) → finish. Line is `{gate,pick,claim,finish}` (`finish` null when
  *     not reached); exit `0` for every completed tick, `1` only for a driver
  *     fault. Journal prose goes to stderr via `deps.tick.log`.
  *   - `preflight <changed-files-file>` — read/trim/blank-filter the file,
@@ -83,10 +83,17 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { logger } from "../logger.ts";
-import { ORCH_BOARD_LABELS } from "../board-labels.ts";
 import { isGhFailure } from "../github/exec.ts";
 import { gitExec } from "../github/git.ts";
-import { editIssueLabels, viewIssue } from "../github/issue-actions.ts";
+import { viewIssue } from "../github/issue-actions.ts";
+import {
+  defaultSeamDeps,
+  dispatch,
+  releaseClaim,
+  type ClaimOutcome,
+  type DispatchInput,
+  type DispatchResult,
+} from "../lifecycle/index.ts";
 import { setGlmDrainerHeartbeat } from "../redis/autopilot.ts";
 import { loadDrainerConfig, type DrainerConfig } from "./drainer-config.ts";
 import { composePrompt } from "./prompt.ts";
@@ -162,6 +169,8 @@ export interface DriverDeps {
   finish?: FinishDeps;
   /** Tick-phase deps (issue #4688); built lazily from `env` when absent. */
   tick?: TickDeps;
+  /** Finish-phase runner override (tests force each finish action); defaults to the real `runFinish`. */
+  runFinish?: typeof runFinish;
 }
 
 /** Real dependencies — what the committed CLI entrypoint uses. */
@@ -318,8 +327,18 @@ export interface TickDeps {
   now: () => number;
   /** Journal line sink (stderr, `hydra-glm-drainer:` prefixed by the default). */
   log: (msg: string) => void;
-  /** `ready-for-agent` -> `in-progress`. */
-  claimIssue: (issue: number) => Promise<{ ok: boolean; stderr?: string }>;
+  /**
+   * The lifecycle seam (ADR-0047, issue #5419): the dispatcher-owned claim. `dispatch`
+   * opens the claim and advances `ready-for-agent` -> `in-progress`; `release` closes it.
+   */
+  lifecycle: {
+    dispatch: (input: DispatchInput) => Promise<DispatchResult>;
+    release: (
+      issue: number,
+      dispatchId: string,
+      outcome: ClaimOutcome,
+    ) => Promise<{ ok: true } | { ok: false; code: string }>;
+  };
   /** The issue body, or `null` when the read fails (caller uses ""). */
   readIssueBody: (issue: number) => Promise<string | null>;
   /** Raw git argv from `cwd`; ok = exit 0. */
@@ -332,14 +351,47 @@ export interface TickDeps {
 interface TickResult {
   gate: GateLine;
   pick: PickResult | null;
+  /** The dispatch claim verdict (issue #5419); null when the tick stopped at gate/idle. */
+  claim: { dispatchId: string; run: string; ok: boolean; code?: string } | null;
   finish: FinishResult | null;
+}
+
+/**
+ * The claim outcome a finished tick releases with (issue #5419, INV-4). Only a
+ * session that actually RAN against the issue and produced no PR counts as
+ * `no-pr` (a Live Cap input); lane faults and provider 429s are `released`.
+ */
+export function claimOutcomeOf(finish: FinishResult | null): ClaimOutcome {
+  if (finish === null || finish.quotaBlockedUntil !== null) return "released";
+  switch (finish.action) {
+    case "open-pr":
+      return "pr-opened";
+    case "keep-partial-for-resume":
+      return "stall";
+    case "release-nothing-produced":
+    case "release-after-failed-pr":
+    case "withhold-preflight-blocked":
+      return "no-pr";
+    default:
+      return "released";
+  }
 }
 
 const DEFAULT_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
+/**
+ * Lifecycle-seam deps for the claim path: `defaultSeamDeps` unchanged, so
+ * claim/journal keys use `resolveGithubRepo()` — the same keyspace reconcile,
+ * caps and `pick.ts` read (INV-7). `config.repo` is for gh-facing reads only.
+ */
+export function buildClaimSeamDeps(config: { repo: string; repoRoot: string | null }) {
+  return defaultSeamDeps(config.repoRoot ?? DEFAULT_REPO_ROOT);
+}
+
 /** Production tick deps for `env` (names match what bash read). */
 function buildDefaultTickDeps(env: NodeJS.ProcessEnv = process.env): TickDeps {
   const config = loadDrainerConfig(env);
+  const seamDeps = buildClaimSeamDeps(config);
   return {
     config,
     repoRoot: config.repoRoot ?? DEFAULT_REPO_ROOT,
@@ -347,13 +399,9 @@ function buildDefaultTickDeps(env: NodeJS.ProcessEnv = process.env): TickDeps {
     log: (msg) => {
       process.stderr.write(`hydra-glm-drainer: ${msg}\n`);
     },
-    claimIssue: async (issue) => {
-      const r = await editIssueLabels(
-        issue,
-        { remove: [ORCH_BOARD_LABELS.ready_for_agent], add: [ORCH_BOARD_LABELS.in_progress] },
-        { repo: config.repo },
-      );
-      return { ok: r.ok };
+    lifecycle: {
+      dispatch: (input) => dispatch(input, seamDeps),
+      release: (issue, dispatchId, outcome) => releaseClaim(issue, dispatchId, seamDeps, "glm-drainer", outcome),
     },
     readIssueBody: async (issue) => {
       const r = await viewIssue(issue, { repo: config.repo, fields: "number,body" });
@@ -445,7 +493,7 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
   const gateDeps = deps.gateDeps ?? defaultGateDeps(deps.env);
   const gate = await runGate(gateDeps);
   logGateLine(log, gate);
-  if (gate.able === false) return { gate, pick: null, finish: null };
+  if (gate.able === false) return { gate, pick: null, claim: null, finish: null };
   // The gate's selection (first unblocked provider) rides through to author + finish.
   const providersResult = deps.providers ?? gateDeps.providers ?? resolveProviders(deps);
   const provider = isProvidersFailure(providersResult)
@@ -455,7 +503,7 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
     // INV-4 fail-closed: a gate selection that resolves to no configured provider
     // is a driver fault, never a silent fall-through to the first provider.
     log(`ERROR gate selected provider "${gate.provider}" which is not in the worker-provider list — skip tick`);
-    return { gate, pick: null, finish: null };
+    return { gate, pick: null, claim: null, finish: null };
   }
 
   // Pick: stale-claim recovery, candidate pick, resume detection.
@@ -464,36 +512,88 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
     log(
       "no glm-eligible + ready-for-agent issue that is grill-clear (approved design concept, cleanup-scan label, or Expected tier: T1 stamp) — idle",
     );
-    return { gate, pick, finish: null };
+    return { gate, pick, claim: null, finish: null };
   }
   const issue = pick.issue;
   const resumeBranch = pick.resumeBranch ?? "";
+  const resumeCommits = pick.resumeCommits;
   const finishDeps = deps.finish ?? buildDefaultFinishDeps(deps.env);
 
+  // Claim BEFORE any mutation (issue #5419, INV-1): the dispatchId is the worktree
+  // DIRECTORY NAME, never the full path and never the (possibly older) resume branch.
+  const ts = Math.floor(t.now() / 1000);
+  const worktreeName = `agent-glm-${issue}-${ts}`;
+  const worktree = join(t.config.worktreeRoot, worktreeName);
+  const branch = resumeBranch !== "" ? resumeBranch : `worktree-agent-glm-${issue}-${ts}`;
+  const run = `glm-drainer-${ts}`;
+  const purpose = resumeBranch !== "" ? "resume" : "fresh";
+  log(`claiming issue #${issue} (dispatch=${worktreeName})`);
+  if (dryRun) {
+    log(
+      `would-dispatch issue #${issue} (dispatch=${worktreeName} class=dev_orch run=${run} purpose=${purpose}, DRY_RUN=1)`,
+    );
+  } else {
+    const claimed = await t.lifecycle.dispatch({
+      issue,
+      dispatchId: worktreeName,
+      class: "dev_orch",
+      run,
+      purpose,
+      actor: "glm-drainer",
+    });
+    if (claimed.ok === false) {
+      const detail =
+        claimed.code === "claim-held" && claimed.existing
+          ? ` (held by ${claimed.existing.dispatchId}, class ${claimed.existing.class})`
+          : "reason" in claimed && claimed.reason
+            ? ` ${claimed.reason}`
+            : "";
+      log(`claim refused for issue #${issue}: ${claimed.code}${detail} — ending tick`);
+      return { gate, pick, claim: { dispatchId: worktreeName, run, ok: false, code: claimed.code }, finish: null };
+    }
+    if (claimed.advanced === null) {
+      log(`WARN issue #${issue} was not in a dispatchable state at claim time (non-fatal, continuing)`);
+    }
+  }
+  const claim = { dispatchId: worktreeName, run, ok: true };
+
+  // INV-3: one try/finally owns the claim for every exit path below.
+  let finished: FinishResult | null = null;
+  try {
+    finished = await runAfterClaim();
+    return { gate, pick, claim, finish: finished };
+  } finally {
+    const outcome = claimOutcomeOf(finished);
+    if (dryRun) {
+      log(`would-release claim for issue #${issue} (outcome=${outcome}, DRY_RUN=1)`);
+    } else {
+      // The finally must never throw: a rejecting release would replace the
+      // computed tick result (STD-VERIFY-NEVER-THROW / STD-CATCH-FAIL-LOUD).
+      try {
+        const released = await t.lifecycle.release(issue, worktreeName, outcome);
+        if (released.ok === false) {
+          log(
+            `WARN claim release failed for issue #${issue} (dispatch=${worktreeName}): ${released.code} — stale arm will close it`,
+          );
+        }
+      } catch (err) {
+        logger.error({ err, issue }, "[glm-tick] claim release threw");
+        log(`WARN claim release threw for issue #${issue} (dispatch=${worktreeName}) — stale arm will close it`);
+      }
+    }
+  }
+
+  async function runAfterClaim(): Promise<FinishResult> {
   let body = "";
-  let branch = "";
-  let worktree = "";
   let prompt = "";
   // INV-4: everything between the claim and the author session is guarded —
-  // a throw from claim/body-read/worktree/prompt routes to runFinish as a
-  // driver fault so the claim is never stranded.
+  // a throw from body-read/worktree/prompt routes to runFinish as a driver
+  // fault so the issue is never stranded.
   try {
-    // Claim (a failure is a WARN, non-fatal — claim_issue parity).
-    log(`claiming issue #${issue}`);
-    if (dryRun) {
-      log(`would-claim issue #${issue} (ready-for-agent -> in-progress, DRY_RUN=1)`);
-    } else {
-      const claimed = await t.claimIssue(issue);
-      if (!claimed.ok) log(`WARN failed to claim issue #${issue} (non-fatal, continuing)`);
-    }
-
     // Dry-run makes no gh call at all (INV-7): the prompt is never spawned with.
     body = dryRun ? "" : ((await t.readIssueBody(issue)) ?? "");
 
     // Worktree.
-    const ts = Math.floor(t.now() / 1000);
-    branch = resumeBranch !== "" ? resumeBranch : `worktree-agent-glm-${issue}-${ts}`;
-    worktree = join(t.config.worktreeRoot, `agent-glm-${issue}-${ts}`);
     let created = true;
     if (dryRun) {
       log(`would-create-worktree issue #${issue} branch=${branch} path=${worktree} (DRY_RUN=1)`);
@@ -507,7 +607,7 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
       );
       // The synthetic not-run outcome (finish.ts's not-run arm) releases the
       // claim; no worktree/branch is passed, so nothing is removed.
-      const finish = await runFinish(finishDeps, {
+      const finish = await (deps.runFinish ?? runFinish)(finishDeps, {
         issue,
         worktree: null,
         branch: null,
@@ -518,26 +618,26 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
         }),
         authorExitCode: 0,
       });
-      return { gate, pick, finish };
+      return finish;
     }
 
     if (resumeBranch !== "") {
       log(
-        `issue #${issue}: resuming pushed drainer branch ${branch} (${pick.resumeCommits ?? "?"} commit(s) ahead of origin/master)`,
+        `issue #${issue}: resuming pushed drainer branch ${branch} (${resumeCommits ?? "?"} commit(s) ahead of origin/master)`,
       );
     }
 
-    prompt = composePrompt(issue, body, resumeBranch, pick.resumeCommits);
+    prompt = composePrompt(issue, body, resumeBranch, resumeCommits);
   } catch (err) {
     logger.error({ err, issue }, "[glm-tick] pre-author step threw — routing to finish as a driver fault");
-    const finish = await runFinish(finishDeps, {
+    const finish = await (deps.runFinish ?? runFinish)(finishDeps, {
       issue,
       worktree: null,
       branch: null,
       authorRaw: "",
       authorExitCode: 1,
     });
-    return { gate, pick, finish };
+    return finish;
   }
 
   // Author (in-process; the same helper `author` mode calls).
@@ -561,7 +661,7 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
   }
   log(`authoring session finished: ${authorRaw.slice(0, 300)}`);
 
-  const finish = await runFinish(finishDeps, {
+  return (deps.runFinish ?? runFinish)(finishDeps, {
     issue,
     worktree,
     branch,
@@ -569,7 +669,7 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
     authorExitCode,
     provider,
   });
-  return { gate, pick, finish };
+  }
 }
 
 /**
@@ -650,7 +750,7 @@ export async function runDriverMode(
     if (mode === "tick") {
       // The whole tick, in-process (issue #4688, ADR-0040 Decision 1): gate ->
       // pick -> claim -> worktree -> prompt -> author -> finish. Prints ONE
-      // `{gate,pick,finish}` line; exit 0 for every completed tick (skip,
+      // `{gate,pick,claim,finish}` line; exit 0 for every completed tick (skip,
       // idle, finish-fault included) — a non-zero exit is a driver fault
       // (an exception caught by the outer boundary below).
       const r = await runTick(deps);

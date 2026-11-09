@@ -33,12 +33,20 @@ import {
 import {
   listIssuesByLabel,
   isIssueReadFailure,
+  resolveGithubRepo,
   type IssueReadResult,
   type IssueRow,
 } from "../github/issues.ts";
 import { listOpenPrs, type PrRow } from "../github/prs.ts";
 import { gitExec, lsRemoteHeads } from "../github/git.ts";
 import { setGlmDrainerLastPick } from "../redis/autopilot.ts";
+import {
+  readDispatchClaim,
+  readLifecycleJournal,
+  type LifecycleJournalEntry,
+  type ReadClaimResult,
+  type ReadJournalResult,
+} from "../redis/lifecycle-journal.ts";
 
 /** In-progress issues idle longer than this are re-queued (matches bash, 90 min). */
 export const STALE_IN_PROGRESS_SECONDS = 5400;
@@ -85,6 +93,10 @@ export interface PickDeps {
   /** Runs `recover-stale.sh stale_in_progress <n...> stale_blocked`; resolves its exit code. */
   runRecoverStale: (issues: number[]) => Promise<number>;
   listResumeRows: (issue: number) => Promise<ResumeRow[]>;
+  /** The issue's lifecycle journal in append order (ADR-0047). Read lazily, fail-open. */
+  readJournal: (issue: number) => Promise<ReadJournalResult>;
+  /** The issue's held dispatch claim (ADR-0047 D5). Read lazily, fail-open. */
+  readClaim: (issue: number) => Promise<ReadClaimResult>;
   publishLastPick: (verdict: {
     picked: number | null;
     reason: string;
@@ -114,12 +126,34 @@ export function resumeBranchTs(branch: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/**
+ * True iff the issue's latest `in-progress` dispatch verdict is a seam refusal
+ * that no later state change has superseded (issue #5419, INV-5). Walks the
+ * journal in APPEND order (never by `ts`): the last qualifying `refused` row
+ * must come after the last `transition`/`external` row. `claim-opened` /
+ * `claim-closed` rows are ignored, a transient `refused:fetch-failed` never
+ * pins the skip, and a refusal of any other target state is not a dispatch
+ * verdict.
+ */
+export function refusedPending(entries: readonly LifecycleJournalEntry[]): boolean {
+  let lastRefused = -1;
+  let lastState = -1;
+  entries.forEach((e, i) => {
+    if (e.kind === "refused" && e.to === "in-progress" && e.result !== "refused:fetch-failed") lastRefused = i;
+    else if (e.kind === "transition" || e.kind === "external") lastState = i;
+  });
+  return lastRefused !== -1 && lastRefused > lastState;
+}
+
+/** The pick's skip histogram key: the eligibility reasons plus the two journal-derived skips. */
+type PickSkipReason = GlmUnpickableReason | "refused-pending" | "claim-held";
+
 /** Rows without a positive-integer `number` are ignored by the gh readers already. */
 function hasLabel(row: IssueRow, label: string): boolean {
   return row.labels.includes(label);
 }
 
-function bump(h: Record<string, number>, key: GlmUnpickableReason): void {
+function bump(h: Record<string, number>, key: PickSkipReason): void {
   h[key] = (h[key] ?? 0) + 1;
 }
 
@@ -217,6 +251,31 @@ async function pickInner(deps: PickDeps): Promise<PickResult & PickMeta> {
     }
     const reason = verdict.reason;
 
+    // Journal-derived skips (issue #5419, INV-6): lazy (admitted rows only) and
+    // fail-OPEN — the seam's SET NX is the hard duplicate-dispatch gate.
+    const journal = await deps.readJournal(n);
+    if (journal.ok === false) {
+      deps.log(
+        `WARN lifecycle journal read failed for issue #${n} (${journal.error}) — proceeding without the refused-skip (degraded, not blocked)`,
+      );
+    } else if (refusedPending(journal.entries)) {
+      deps.log(
+        `skipping issue #${n} — latest journal entry for in-progress is a seam refusal newer than any state change — not re-dispatching until the journal records a transition`,
+      );
+      bump(skipped, "refused-pending");
+      continue;
+    }
+    const held = await deps.readClaim(n);
+    if (held.ok === false) {
+      deps.log(
+        `WARN dispatch claim read failed for issue #${n} (${held.error}) — proceeding without the claim-held skip (degraded, not blocked)`,
+      );
+    } else if (held.claim !== null) {
+      deps.log(`skipping issue #${n} — dispatch claim held by ${held.claim.dispatchId} (${held.claim.class})`);
+      bump(skipped, "claim-held");
+      continue;
+    }
+
     deps.log(`picked issue #${n} (grill-clear: ${reason})`);
     let resumeBranch: string | null = null;
     let resumeCommits: number | null = null;
@@ -274,7 +333,9 @@ const DEFAULT_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..",
 
 /** Build the production deps from an env (names match what bash read). */
 export function buildDefaultPickDeps(env: NodeJS.ProcessEnv = process.env): PickDeps {
-  const repo = env.HYDRA_AUTOPILOT_REPO || "gaberoo322/hydra";
+  const ghRepo = env.HYDRA_AUTOPILOT_REPO || "gaberoo322/hydra";
+  // Lifecycle keyspace repo (INV-7): same string defaultSeamDeps stamps.
+  const repo = resolveGithubRepo();
   const dcUrl =
     env.HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL || "http://localhost:4000/api/design-concepts";
   const repoRoot = env.HYDRA_GLM_DRAINER_REPO_ROOT || DEFAULT_REPO_ROOT;
@@ -285,12 +346,12 @@ export function buildDefaultPickDeps(env: NodeJS.ProcessEnv = process.env): Pick
       process.stderr.write(`hydra-glm-drainer: ${msg}\n`);
     },
     listGlmEligible: (fields, limit) =>
-      listIssuesByLabel(ORCH_BOARD_LABELS.glm_eligible, { repo, state: "open", fields, limit }),
+      listIssuesByLabel(ORCH_BOARD_LABELS.glm_eligible, { repo: ghRepo, state: "open", fields, limit }),
     listOpenPrs: () =>
-      listOpenPrs({ repo, state: "open", fields: "number,body,headRefName", limit: 100 }),
+      listOpenPrs({ repo: ghRepo, state: "open", fields: "number,body,headRefName", limit: 100 }),
     listMergedPrs: () =>
-      listOpenPrs({ repo, state: "merged", fields: "number,title,body", limit: 100 }),
-    fetchOpenBlockers: (numbers) => fetchOpenBlockerNumbers(numbers, { githubRepo: repo }),
+      listOpenPrs({ repo: ghRepo, state: "merged", fields: "number,title,body", limit: 100 }),
+    fetchOpenBlockers: (numbers) => fetchOpenBlockerNumbers(numbers, { githubRepo: ghRepo }),
     fetchArtifact: async (issue) => {
       try {
         const res = await fetch(`${dcUrl}/issue-${issue}`, { signal: AbortSignal.timeout(10_000) });
@@ -324,6 +385,11 @@ export function buildDefaultPickDeps(env: NodeJS.ProcessEnv = process.env): Pick
       }
       return rows;
     },
+    // One keyspace (INV-7): the SAME repo string defaultSeamDeps stamps into
+    // claim/journal keys (resolveGithubRepo()); HYDRA_AUTOPILOT_REPO stays for
+    // gh-facing reads only.
+    readJournal: (issue) => readLifecycleJournal(repo, issue),
+    readClaim: (issue) => readDispatchClaim(repo, issue),
     publishLastPick: (verdict) => setGlmDrainerLastPick(verdict),
   };
 }
