@@ -309,7 +309,10 @@ describe("qa-verdict phases for the reviewer commit", () => {
   });
 
   test("an unreadable changed-files list refuses even when the diff reads (Verifier Core fence fails closed)", async () => {
-    const out = (await runQaVerdictPhase("reviewer-commit", phaseInput, fetchers({ changedFiles: async () => null as never }))) as any;
+    const out = (await runQaVerdictPhase("reviewer-commit", phaseInput, fetchers({
+      changedFiles: async () => null as never,
+      prDiff: async () => TWO_WAY_DIFF.replaceAll("src/widget.ts", "src/untouchable.ts"),
+    }))) as any;
     assert.equal(out.action, "none");
     assert.ok(out.degraded.includes("changed-paths"));
     // sibling shape: a readable list with the same diff still commits
