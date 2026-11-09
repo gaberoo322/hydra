@@ -22,13 +22,18 @@
 #       POST of -f/-F/--field/--raw-field/--input) against
 #       `issues/<n>/labels` whose payload (`labels[]=`, `name=`, raw JSON)
 #       names a state, or whose trailing `/labels/<name>` path segment is one.
+# Also scanned: gh reached through `$(...)`, backticks, `eval "..."`, `find -exec
+# gh ...`, `bash -c`, and wrappers (sudo/env/xargs/timeout/...). Best-effort:
+# `gh api graphql` label mutations are denied only when the same command names a
+# state (label ids are opaque); other indirection (functions, aliases) is a gap.
 # ALLOWS: every flag label (glm-eligible, needs-design-concept, enhancement,
 # conflict-fix-attempted, provenance, keep-open, target-backlog, wayfinder:*),
 # read verbs (`gh issue list --label ready-for-agent`, `gh issue view`),
 # `gh pr edit` (PR labels are flags, ADR-0047 D2), an unresolvable `$VAR`
 # operand (fail open — the doc lint owns docs), `gh issue edit|create --repo
 # <anything other than gaberoo322/hydra>` (the Target board is outside the
-# seam; of unresolved vars only `$TARGET_GH_REPO` is exempt), comments/echo mentions,
+# seam; of unresolved vars only `$TARGET_GH_REPO` is exempt; a `{owner}/{repo}`
+# / `:owner/:repo` placeholder is THIS repo and is inspected), comments/echo mentions,
 # `npx tsx scripts/lifecycle.ts ...`, and `bash scripts/autopilot/
 # recover-stale.sh` (inner commands are not inspected; #5318 migrates them).
 #
@@ -438,6 +443,10 @@ def _foreign_repo(val):
     # the ADR-0047 seam; any other unresolved `$VAR` is inspected (a worker's
     # `--repo "$REPO"` must not bypass the deny).
     val = val.strip("\"'")
+    # gh placeholders (`{owner}/{repo}`, `:owner/:repo`) resolve to THIS repo at
+    # run time: never a foreign repo, so inspect (fail closed).
+    if "{" in val or "}" in val or val.startswith(":"):
+        return False
     if "$" in val:
         return val.lstrip("$").strip("{}").upper() == "TARGET_GH_REPO"
     return val.lower() != HYDRA_REPO
@@ -663,24 +672,51 @@ def _shell_c_strings(toks):
     return out
 
 
-def _scan(text, depth=0):
-    for seg in _segments(text):
-        g = _gh_args(seg)
-        if g is None:
-            if depth < 3:
-                for inner in _shell_c_strings(seg):
-                    hit = _scan(inner, depth + 1)
+SUBST = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+EXEC_FLAGS = ("-exec", "-execdir", "-ok", "-okdir")
+
+
+def _scan_segment(seg, depth):
+    g = _gh_args(seg)
+    if g is None:
+        if depth < 3:
+            for inner in _shell_c_strings(seg):
+                hit = _scan(inner, depth + 1)
+                if hit:
+                    return hit
+            peeled = _peel(seg)
+            # `eval "gh ..."`: the operands are code.
+            if peeled and peeled[0] == "eval" and len(peeled) > 1:
+                hit = _scan(" ".join(peeled[1:]), depth + 1)
+                if hit:
+                    return hit
+            # `find ... -exec gh ... \;`: the tokens after -exec are a command.
+            for i, tok in enumerate(peeled):
+                if tok in EXEC_FLAGS:
+                    hit = _scan_segment(peeled[i + 1:], depth + 1)
                     if hit:
                         return hit
-            continue
-        toks, pre = g
-        if len(toks) < 2:
-            continue
-        hit = None
-        if toks[0] == "issue" and toks[1] in ("edit", "create"):
-            hit = _issue_label_state(toks[2:] + pre)
-        elif toks[0] == "api":
-            hit = _api_label_state(toks[1:] + pre)
+        return None
+    toks, pre = g
+    if len(toks) < 2:
+        return None
+    if toks[0] == "issue" and toks[1] in ("edit", "create"):
+        return _issue_label_state(toks[2:] + pre)
+    if toks[0] == "api":
+        return _api_label_state(toks[1:] + pre)
+    return None
+
+
+def _scan(text, depth=0):
+    # Command substitutions (`$(gh ...)`, backticks) are code: re-scan their
+    # bodies, then scan the top-level segments.
+    if depth < 3:
+        for m in SUBST.finditer(text):
+            hit = _scan(m.group(1) or m.group(2) or "", depth + 1)
+            if hit:
+                return hit
+    for seg in _segments(text):
+        hit = _scan_segment(seg, depth)
         if hit:
             return hit
     return None

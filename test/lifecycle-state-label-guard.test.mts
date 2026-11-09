@@ -304,3 +304,81 @@ describe("lifecycle-state-label-guard: QA round-2 hardening (#5322)", () => {
     assert.equal(runWithBrokenVerdictPython("ls -la"), 0);
   });
 });
+
+// QA round 4 (operator ruling): the shell-parsing pipeline is hand-copied from
+// gh-label-delete-guard.sh; until a shared module is extracted (follow-up), a
+// parity test keeps the two tokenisations in agreement over one corpus.
+describe("lifecycle-state-label-guard: tokenisation parity with gh-label-delete-guard", () => {
+  const DELETE_HOOK = resolve(REPO_ROOT, "scripts/claude-hooks/gh-label-delete-guard.sh");
+
+  /** Extract a hook's embedded python, cut before its verdict logic, and
+   *  print the post-resolution segments (each joined by a space) for `cmd`. */
+  function segmentsVia(hookPath: string, envVar: string, cmd: string): string[] {
+    const src = readFileSync(hookPath, "utf8");
+    const start = src.indexOf("<<'PY'");
+    assert.ok(start >= 0, `${hookPath}: no embedded python`);
+    const body = src.slice(src.indexOf("\n", start) + 1, src.indexOf("\nPY\n", start));
+    const cut = body.search(/^offending(_issue)? = /m);
+    assert.ok(cut > 0, `${hookPath}: verdict marker not found`);
+    const prog =
+      body.slice(0, cut) +
+      "\nimport json as _j\n" +
+      "_s = _segments(cmd)\n" +
+      "print(_j.dumps([x if isinstance(x, str) else ' '.join(x) for x in _s]))\n";
+    const r = spawnSync("python3", ["-c", prog], {
+      encoding: "utf8",
+      env: { ...process.env, [envVar]: cmd },
+    });
+    assert.equal(r.status, 0, `python failed for ${hookPath}: ${r.stderr}`);
+    return JSON.parse(r.stdout);
+  }
+
+  const CORPUS = [
+    "gh issue view 5 --json labels",
+    "FOO=needs-qa; gh issue edit 5 --add-label $FOO",
+    "export L=blocked && gh issue edit 5 --add-label \"$L\"",
+    "cat <<'EOF' | tee out.txt\nbody with 'quote\nEOF\ngh issue list",
+    "gh issue edit 5 \\\n  --add-label x",
+    "printf -v L %s needs-qa; gh issue edit 5 --add-label $L",
+    "read L <<< needs-qa; gh issue edit 5 --add-label $L",
+    "echo 'a; b' && gh api repos/o/r/issues/5/labels -f 'labels[]=bug'",
+    "for n in 1 2; do gh issue edit $n --add-label bug; done",
+    "ls | grep foo || true",
+  ];
+
+  for (const cmd of CORPUS) {
+    test(`segments agree: ${JSON.stringify(cmd).slice(0, 60)}`, () => {
+      const a = segmentsVia(HOOK, "LIFECYCLE_GUARD_CMD", cmd);
+      const b = segmentsVia(DELETE_HOOK, "GH_LABEL_GUARD_CMD", cmd);
+      assert.deepEqual(a, b);
+    });
+  }
+});
+
+describe("lifecycle-state-label-guard: QA round-4 bypasses (operator ruling)", () => {
+  // high: gh's {owner}/{repo} / :owner/:repo placeholders mean THIS repo.
+  test("gh api repos/{owner}/{repo}/issues/N/labels naming a state is denied", () => {
+    assertDeny(`${GH_API} -X POST 'repos/{owner}/{repo}/issues/5/labels' -f 'labels[]=needs-qa'`);
+  });
+  test("gh api repos/:owner/:repo/issues/N/labels naming a state is denied", () => {
+    assertDeny(`${GH_API} -X POST repos/:owner/:repo/issues/5/labels -f 'labels[]=needs-qa'`);
+  });
+  test("a placeholder repo with a FLAG label stays allowed; literal foreign repo stays exempt (sibling pins)", () => {
+    assertAllow(`${GH_API} -X POST 'repos/{owner}/{repo}/issues/5/labels' -f 'labels[]=bug'`);
+    assertAllow(`${GH_API} -X POST repos/someone/else/issues/5/labels -f 'labels[]=needs-qa'`);
+  });
+  // medium: gh reached through substitution / eval / find -exec.
+  test("gh behind $( ), backticks, eval and find -exec is denied", () => {
+    assertDeny(`echo $(${GH_EDIT} 5 ${ADD} needs-qa)`);
+    assertDeny("echo `" + GH_EDIT + " 5 " + ADD + " needs-qa`");
+    assertDeny(`eval "${GH_EDIT} 5 ${ADD} needs-qa"`);
+    assertDeny(`find . -name x -exec ${GH_EDIT} 5 ${ADD} needs-qa \\;`);
+  });
+  test("the same indirections with a FLAG label or a read stay allowed (sibling pins)", () => {
+    assertAllow(`echo $(${GH_EDIT} 5 ${ADD} bug)`);
+    assertAllow("echo `gh issue view 5 --json labels`");
+    assertAllow(`eval "${GH_EDIT} 5 ${ADD} glm-eligible"`);
+    assertAllow(`find . -name x -exec ${GH_EDIT} 5 ${ADD} bug \\;`);
+    assertAllow("echo $(date) needs-qa");
+  });
+});
