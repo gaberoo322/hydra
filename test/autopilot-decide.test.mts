@@ -4364,6 +4364,13 @@ describe("decide.py — PR gate: absent check-runs made readable (issue #4240)",
     assert.equal((plan.actions ?? []).filter((a: any) => a.type === "surface-pr").length, 0);
   });
 
+  test("#5400 INV-6: one surface-pr cause no-closing-issue per flagged PR, no closing_issue handoff", () => {
+    const plan = runDecide(baseState({ signals: { orch_prs_no_closing_issue: "5375 5386" } }), null);
+    const surfaces = (plan.actions ?? []).filter((a: any) => a.type === "surface-pr");
+    assert.deepEqual(surfaces.map((a: any) => a.pr_number), [5375, 5386]);
+    assert.ok(surfaces.every((a: any) => a.cause === "no-closing-issue" && !("closing_issue" in a)));
+  });
+
   test("#4240 INV-C: unchecked + healthy trigger arm -> surface-pr with cause unchecked", () => {
     const plan = runDecide(baseState({ signals: { orch_prs_unchecked: "4236" } }), null);
     const surfaces = (plan.actions ?? []).filter((a: any) => a.type === "surface-pr");

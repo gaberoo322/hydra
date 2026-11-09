@@ -312,6 +312,7 @@ interface PrGateBuckets {
   dirty: number[];
   unchecked: number[];
   behind: number[];
+  noClosingIssue: number[];
   ciTriggerStale: boolean;
   /** `orch_prs_red_resume`: pick candidates qualifying ONLY via the red-CI arm (#5058). */
   redResume: number[];
@@ -375,6 +376,7 @@ async function runPrGate(prs: unknown[], overrides: PrGateOverrides = {}, repoll
     dirty: [...v.dirty],
     unchecked: [...v.unchecked],
     behind: [...v.behind],
+    noClosingIssue: [...v.noClosingIssue],
     ciTriggerStale: v.ciTriggerStale.ok && v.ciTriggerStale.value,
     redResume: v.redResume.ok ? [...v.redResume.value] : [],
     devResumePick: pinRef(v.devResumePick.ok ? v.devResumePick.value : null),
@@ -449,6 +451,42 @@ describe("pr-gate — BEHIND/draft classification (issue #4240)", () => {
       const buckets = await runPrGate([{ ...basePrGate({ number: 4401, mergeStateStatus: "DIRTY" }), isDraft }]);
       assert.deepEqual(buckets.dirty, [], `isDraft ${JSON.stringify(isDraft)} is Python-truthy`);
     }
+  });
+});
+
+describe("pr-gate — open PR with no closing issue (issue #5400)", () => {
+  const aged = (over: Partial<PrGateOpenPr>) =>
+    basePrGate({ mergeStateStatus: "CLEAN", createdAt: isoSecondsAgo(1200), updatedAt: isoSecondsAgo(1200), ...over });
+
+  test("a Refs #N-only PR is flagged; a Closes #N PR is not (AC3)", async () => {
+    const buckets = await runPrGate([
+      aged({ number: 5101, body: "Partial slice.\n\nRefs #5000" }),
+      aged({ number: 5102, body: "Done.\n\nCloses #5001" }),
+      aged({ number: 5103, body: "Part of #5000\n\nCloses #5104" }),
+      aged({ number: 5105, body: "Part of #5000" }),
+    ]);
+    assert.deepEqual(buckets.noClosingIssue, [5101, 5105]);
+  });
+
+  test("draft, ready-for-human, DIRTY and younger-than-grace PRs are not flagged", async () => {
+    const buckets = await runPrGate([
+      aged({ number: 5111, body: "Refs #1", isDraft: true }),
+      aged({ number: 5112, body: "Refs #1", labels: [{ name: "ready-for-human" }] }),
+      aged({ number: 5113, body: "Refs #1", mergeStateStatus: "DIRTY" }),
+      aged({ number: 5114, body: "Refs #1", createdAt: isoSecondsAgo(30) }),
+      aged({ number: 5115, body: "Refs #1" }),
+    ]);
+    assert.deepEqual(buckets.noClosingIssue, [5115]);
+  });
+
+  test("CI state is irrelevant: a red or checked Refs-only PR is still flagged", async () => {
+    const buckets = await runPrGate([aged({ number: 5121, body: "Refs #1", statusCheckRollup: [{ name: "x", conclusion: "FAILURE" }] })]);
+    assert.deepEqual(buckets.noClosingIssue, [5121]);
+  });
+
+  test("fails closed to [] when the pr-refs predicates are unavailable", async () => {
+    const buckets = await runPrGate([aged({ number: 5131, body: "Refs #1" })], { prRefs: PR_REFS_UNAVAILABLE });
+    assert.deepEqual(buckets.noClosingIssue, []);
   });
 });
 
