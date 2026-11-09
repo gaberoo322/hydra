@@ -285,7 +285,7 @@ export function decideQaRoundAction(input: {
       action: "escalate",
       round,
       failRound,
-      reason: `FAIL round ${failRound} on this PR (cap ${QA_FAIL_ROUND_CAP}) — escalate to the operator (ready-for-human); no further dev bounce.`,
+      reason: `FAIL round ${failRound} on this PR (cap ${QA_FAIL_ROUND_CAP}) — escalate to the operator (the issue is parked); no further dev bounce.`,
     };
   }
   return {

@@ -67,7 +67,15 @@ export interface Transition {
   readonly to: LifecycleState;
   readonly firedBy: FiredBy;
   readonly gate: GateId;
+  /**
+   * The cap arm family this edge consumes (ADR-0047 D6). `requeue` is the stale
+   * re-queue; `qa-fail` is a reviewed QA FAIL bounce, which only counts when a
+   * `pr=` evidence locator is present and `defer` is not `1`.
+   */
+  readonly cap?: CapEdge;
 }
+
+export type CapEdge = "requeue" | "qa-fail";
 
 function rows(
   from: Transition["from"],
@@ -112,7 +120,7 @@ export const TRANSITIONS: readonly Transition[] = [
   // Work in flight.
   { from: "in-progress", to: "needs-qa", firedBy: "reconcile", gate: "pr-open" },
   { from: "in-progress", to: "needs-dev-resume", firedBy: "reconcile", gate: "not-yet-implemented" },
-  { from: "in-progress", to: "ready-for-agent", firedBy: "reconcile", gate: "not-yet-implemented" },
+  { from: "in-progress", to: "ready-for-agent", firedBy: "reconcile", gate: "not-yet-implemented", cap: "requeue" },
   { from: "in-progress", to: "parked", firedBy: "cap", gate: "judgment" },
   { from: "in-progress", to: "ready-for-human", firedBy: "agent", gate: "adr5" },
   { from: "in-progress", to: "blocked", firedBy: "agent", gate: "judgment" },
@@ -124,9 +132,9 @@ export const TRANSITIONS: readonly Transition[] = [
   { from: "needs-dev-resume", to: "closed", firedBy: "agent", gate: "close" },
   // Review.
   { from: "needs-qa", to: "qa-passed", firedBy: "agent", gate: "qa-verdict" },
-  { from: "needs-qa", to: "needs-dev-resume", firedBy: "agent", gate: "qa-verdict" },
+  { from: "needs-qa", to: "needs-dev-resume", firedBy: "agent", gate: "qa-verdict", cap: "qa-fail" },
   // FAIL with the PR already CLOSED (unmerged) is a fresh pick (#4766 INV-2).
-  { from: "needs-qa", to: "ready-for-agent", firedBy: "agent", gate: "qa-verdict" },
+  { from: "needs-qa", to: "ready-for-agent", firedBy: "agent", gate: "qa-verdict", cap: "qa-fail" },
   { from: "needs-qa", to: "parked", firedBy: "cap", gate: "judgment" },
   { from: "needs-qa", to: "ready-for-human", firedBy: "agent", gate: "adr5" },
   { from: "needs-qa", to: "closed", firedBy: "reconcile", gate: "close" },

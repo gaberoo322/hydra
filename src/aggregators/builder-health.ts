@@ -70,6 +70,15 @@ import { getAggregateStats } from "../metrics/aggregate.ts";
 import { getMetricsTrend } from "../metrics/trend.ts";
 import { getLessonsTrend, type LessonsTrendDeps } from "./lessons-trend.ts";
 import { getScopeViolationsByDay } from "../redis/scope-violations.ts";
+import {
+  computeFirstPassQaYield,
+  computeParentExceptionRate,
+  computeParkRatePerArm,
+  type FirstPassQaYieldMetric,
+  type LifecycleHealthDeps,
+  type ParentExceptionRateMetric,
+  type ParkRatePerArmMetric,
+} from "./lifecycle-health.ts";
 import { settledOrNull, settledOr } from "../settled-fold.ts";
 import { dayKey, type TrendPoint } from "./trend-series.ts";
 import {
@@ -144,6 +153,14 @@ export interface BuilderHealthScorecard {
    * source degrades (the never-throws contract).
    */
   stagnation: StagnationPanel | null;
+  /**
+   * ADR-0047 Decision 9 (#5324): three more flat Metric|null slots, each
+   * degrading to `null` independently — a dark field, never a fabricated 0.
+   * Cost per merged PR waits on run-ledger slice #5075 and is not here.
+   */
+  parentExceptionRate: ParentExceptionRateMetric | null;
+  firstPassQaYield: FirstPassQaYieldMetric | null;
+  parkRatePerArm: ParkRatePerArmMetric | null;
 }
 
 export interface BuilderHealthDeps {
@@ -173,6 +190,10 @@ export interface BuilderHealthDeps {
   getDesignConceptProductionCountForDate?: (date: string) => Promise<number>;
   /** GitHub repo handle (`owner/name`) for the per-PR view. Defaults to `gaberoo322/hydra`. */
   githubRepo?: string;
+  /** Overrides for the three ADR-0047 D9 readers (Redis/gh/baseline-file). */
+  lifecycleHealth?: LifecycleHealthDeps;
+  /** Window in days for the ADR-0047 D9 fields. Default 7 (the Autopilot Run TTL). */
+  lifecycleWindowDays?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +206,12 @@ export async function getBuilderHealthScorecard(
   const now = deps.now ?? new Date();
   const prWindow = clampWindow(deps.prWindow, 50, 1, 200);
   const windowDays = clampWindow(deps.windowDays, 7, 1, 90);
+  const lifecycleDays = clampWindow(deps.lifecycleWindowDays, 7, 1, 30);
+  const lifecycleDeps: LifecycleHealthDeps = {
+    now,
+    githubRepo: deps.githubRepo,
+    ...deps.lifecycleHealth,
+  };
 
   const [
     capacityResult,
@@ -194,6 +221,9 @@ export async function getBuilderHealthScorecard(
     scopeResult,
     learningResult,
     stagnationResult,
+    parentExceptionResult,
+    firstPassResult,
+    parkRateResult,
   ] = await Promise.allSettled([
     computeSelfImprovementShare(deps),
     computeReworkRate(deps),
@@ -202,6 +232,9 @@ export async function getBuilderHealthScorecard(
     computeScopeViolations(windowDays, now, deps),
     computeLearningThroughput(windowDays, now, deps),
     computeStagnation(deps),
+    computeParentExceptionRate(lifecycleDays, lifecycleDeps),
+    computeFirstPassQaYield(lifecycleDays, lifecycleDeps),
+    computeParkRatePerArm(lifecycleDays, lifecycleDeps),
   ]);
 
   return {
@@ -214,6 +247,9 @@ export async function getBuilderHealthScorecard(
     scopeViolations: settledOrNull(scopeResult, "scope-violations"),
     learningThroughput: settledOrNull(learningResult, "learning-throughput"),
     stagnation: settledOrNull(stagnationResult, "stagnation"),
+    parentExceptionRate: settledOrNull(parentExceptionResult, "parent-exception-rate"),
+    firstPassQaYield: settledOrNull(firstPassResult, "first-pass-qa-yield"),
+    parkRatePerArm: settledOrNull(parkRateResult, "park-rate-per-arm"),
   };
 }
 

@@ -12,9 +12,8 @@
  * and the OnFailure units matter most (Decision 6).
  *
  * Subcommands
- *   page           --kind <PageKind> --dedup-key <k> [--title <t>] [--fact l=v ...] [--link l=url ...]
+ *   report         --kind <k> [--fact l=v ...]   the per-kind table picks page vs brief, title, dedupKey
  *   resolve        --dedup-key <k> [--title <t>]
- *   brief          --kind <k> [--title <t>] [--fact l=v ...] [--link l=url ...]
  *   service-failed --unit <%i>        the OnFailure entry: exit-code policy + unit→kind map
  *   --help
  *
@@ -22,8 +21,8 @@
  * structured log goes to stderr (journal). Exit 0 for EVERY delivery outcome
  * (sent / suppressed / skipped-no-credentials / transport-failed — the outcome
  * is in the JSON, the log line and the channel's delivery log) and 2 only for
- * a usage error (unknown subcommand, a missing required flag, a `page` kind
- * that is not on the closed page list, a `brief` kind that is). A delivery
+ * a usage error (unknown subcommand, a missing required flag). An unknown
+ * `report` kind is briefed with the generic line, never rejected. A delivery
  * failure never fails an OnFailure unit or a watchdog block.
  *
  * Exit-code policy (Decision 4): `service-failed` reads
@@ -35,8 +34,8 @@
  *
  * Severity (Decision 3) is never the producer's: `service-failed` maps the
  * unit base name onto the closed list ({@link UNIT_PAGE_KINDS}) and every other
- * unit becomes a Morning Brief item of kind `service:unit_failed`; `page`
- * rejects any kind `isPageKind()` says no to.
+ * unit becomes a Morning Brief item of kind `service:unit_failed`; `report`
+ * hands the kind to the channel, whose per-kind table decides page vs brief.
  *
  * Termination (fail open, always terminate): the channel's bounded store calls
  * fail open in 1500ms; the CLI calls `process.exit` after the awaited result;
@@ -62,9 +61,10 @@ import {
   type OperatorChannelDeps,
   type OperatorFact,
   type OperatorLink,
-  type OperatorMessage,
   type PageKind,
-  isPageKind,
+  type ReportResult,
+  dedupKeyOf,
+  stripUnitSuffix,
 } from "../src/operator-channel/index.ts";
 
 export const FORCE_EXIT_MS = 20_000;
@@ -89,12 +89,12 @@ export const SYSTEMCTL_SHOW_PROPERTIES = "Result,ExecMainCode,ExecMainStatus,NRe
 
 export const USAGE = `operator-notify — Hydra Operator Channel CLI (ADR-0045)
 
-  operator-notify page           --kind <PageKind> --dedup-key <key> [--title <t>] [--fact label=value]... [--link label=url]...
+  operator-notify report         --kind <kind> [--fact label=value]... [--alert false]
   operator-notify resolve        --dedup-key <key> [--title <t>]
-  operator-notify brief          --kind <kind> [--title <t>] [--fact label=value]... [--link label=url]...
   operator-notify service-failed --unit <unit[.service]>
   operator-notify --help
 
+"--alert false" skips the dashboard alert (the caller already published the event on the bus).
 Exit 0 for every delivery outcome (see the JSON line on stdout); exit 2 for a usage error.
 `;
 
@@ -102,10 +102,7 @@ Exit 0 for every delivery outcome (see the JSON line on stdout); exit 2 for a us
 // Pure helpers (exported for the test)
 // ---------------------------------------------------------------------------
 
-/** Strip ONE trailing `.service` so `@%n` and `@%n.service` resolve alike. */
-export function stripUnitSuffix(unit: string): string {
-  return unit.endsWith(".service") ? unit.slice(0, -".service".length) : unit;
-}
+export { stripUnitSuffix };
 
 export interface UnitExitFacts {
   result?: string;
@@ -230,6 +227,7 @@ export interface OperatorNotifyDeps extends OperatorChannelDeps {
 /** The `result` field of the one JSON line on stdout. */
 export type OperatorNotifyResult =
   | ChannelResult
+  | ReportResult
   | { appended: boolean }
   | { skipped: "clean-exit" }
   | { usageError: string };
@@ -258,6 +256,11 @@ function requireFlag(parsed: ParsedArgs, name: string): string {
   return v;
 }
 
+/** Facts ARE the report() payload: label -> value. */
+function factsPayload(facts: OperatorFact[]): Record<string, string> {
+  return Object.fromEntries(facts.map((f) => [f.label, f.value]));
+}
+
 function withHost(facts: OperatorFact[], host: string): OperatorFact[] {
   return facts.some((f) => f.label === "host") ? facts : [...facts, { label: "host", value: host }];
 }
@@ -281,47 +284,23 @@ export async function runOperatorNotify(argv: string[], deps: OperatorNotifyDeps
   }
 
   // Constructed lazily so `--help` and usage errors never touch Redis.
-  const channel = () => new OperatorChannel({ store: deps.store, transport: deps.transport, now: deps.now, timeoutMs: deps.timeoutMs });
+  const channel = () => new OperatorChannel({ store: deps.store, transport: deps.transport, now: deps.now, timeoutMs: deps.timeoutMs, alerts: deps.alerts });
 
   try {
     switch (parsed.subcommand) {
-      case "page": {
+      case "report": {
         const kind = requireFlag(parsed, "kind");
-        const dedupKey = requireFlag(parsed, "dedup-key");
-        if (!isPageKind(kind)) {
-          throw new UsageError(`page: "${kind}" is not on the closed page list (ADR-0045 Decision 3) — use brief, or add it to src/operator-channel/page-list.ts`);
-        }
-        const msg: OperatorMessage = {
-          severity: "page",
-          kind,
-          title: parsed.flags.title ?? kind,
-          facts: withHost(parsed.facts, host),
-          links: parsed.links,
-          dedupKey,
-        };
-        const result = await channel().page(msg);
-        return done("page", kind, dedupKey, result, emit);
+        const payload = factsPayload(withHost(parsed.facts, host));
+        const dedupKey = dedupKeyOf(kind, payload);
+        // `--alert false`: the caller already published the same event on the bus
+        // (whose consumer writes the dashboard alert), so skip a second one.
+        const result = await channel().report(kind, payload, parsed.flags.alert === "false" ? { alert: false } : undefined);
+        return done("report", kind, dedupKey, result, emit);
       }
       case "resolve": {
         const dedupKey = requireFlag(parsed, "dedup-key");
         const result = await channel().resolve(dedupKey, parsed.flags.title);
         return done("resolve", "recovered", dedupKey, result, emit);
-      }
-      case "brief": {
-        const kind = requireFlag(parsed, "kind");
-        if (isPageKind(kind)) {
-          throw new UsageError(`brief: "${kind}" is a page kind — use page (the CLI never decides severity)`);
-        }
-        const dedupKey = parsed.flags["dedup-key"] ?? kind;
-        const result = await channel().brief({
-          severity: "brief",
-          kind,
-          title: parsed.flags.title ?? kind,
-          facts: withHost(parsed.facts, host),
-          links: parsed.links,
-          dedupKey,
-        });
-        return done("brief", kind, dedupKey, result, emit);
       }
       case "service-failed": {
         const unitBase = stripUnitSuffix(requireFlag(parsed, "unit"));
@@ -343,37 +322,22 @@ export async function runOperatorNotify(argv: string[], deps: OperatorNotifyDeps
           );
           return done("service-failed", null, dedupKey, { skipped: "clean-exit" }, emit);
         }
-        const renderedFacts: OperatorFact[] = withHost(
-          [
-            { label: "unit", value: unitWithSuffix },
-            { label: "Result", value: readable ? facts.result ?? "?" : "unreadable" },
-            { label: "ExecMainCode", value: readable ? facts.execMainCode ?? "?" : "unreadable" },
-            { label: "ExecMainStatus", value: readable ? facts.execMainStatus ?? "?" : "unreadable" },
-            { label: "NRestarts", value: readable ? facts.nRestarts ?? "?" : "unreadable" },
-          ],
-          host,
+        const payload = factsPayload(
+          withHost(
+            [
+              { label: "unit", value: unitWithSuffix },
+              { label: "Result", value: readable ? facts.result ?? "?" : "unreadable" },
+              { label: "ExecMainCode", value: readable ? facts.execMainCode ?? "?" : "unreadable" },
+              { label: "ExecMainStatus", value: readable ? facts.execMainStatus ?? "?" : "unreadable" },
+              { label: "NRestarts", value: readable ? facts.nRestarts ?? "?" : "unreadable" },
+            ],
+            host,
+          ),
         );
-        const pageKind = UNIT_PAGE_KINDS[unitBase];
-        if (pageKind) {
-          const result = await channel().page({
-            severity: "page",
-            kind: pageKind,
-            title: `Service failed: ${unitBase}`,
-            facts: renderedFacts,
-            links: [],
-            dedupKey,
-          });
-          return done("service-failed", pageKind, dedupKey, result, emit);
-        }
-        const result = await channel().brief({
-          severity: "brief",
-          kind: UNIT_FAILED_BRIEF_KIND,
-          title: `Service failed: ${unitBase}`,
-          facts: renderedFacts,
-          links: [],
-          dedupKey,
-        });
-        return done("service-failed", UNIT_FAILED_BRIEF_KIND, dedupKey, result, emit);
+        // Unit -> kind is a CLI concern; severity, title and dedupKey come from the per-kind table.
+        const kind = UNIT_PAGE_KINDS[unitBase] ?? UNIT_FAILED_BRIEF_KIND;
+        const result = await channel().report(kind, payload);
+        return done("service-failed", kind, dedupKeyOf(kind, payload), result, emit);
       }
       case "":
         throw new UsageError("missing subcommand");

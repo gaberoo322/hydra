@@ -39,6 +39,7 @@ import {
   appendLifecycleEntry,
   closeDispatchClaim,
   expireJournalOnClose,
+  listDispatchClaims,
   openDispatchClaim,
   persistJournal,
   readDispatchClaim,
@@ -47,6 +48,8 @@ import {
   type DispatchClaim,
   type JournalSource,
   type JournalWriteResult,
+  type LifecycleIndexSelector,
+  type ListClaimsResult,
   type LifecycleJournalEntry,
   type OpenClaimResult,
   type ReadClaimResult,
@@ -70,8 +73,10 @@ import {
 import { isUnsanctionedHoldExit } from "./hold-exit.ts";
 import {
   buildSeedEvidence,
+  classRole,
   countReviewedFailRoundsSinceReset,
   evaluateCaps,
+  isLiveArm,
   isJournalMiss,
   latestResetMs,
   resolveCapLimits,
@@ -87,6 +92,7 @@ import {
   isLifecycleState,
   isOperatorTarget,
   stateLabelsOf,
+  type CapEdge,
   type LifecycleState,
 } from "./transitions.ts";
 
@@ -176,8 +182,8 @@ export interface SeamDeps {
     qaLive?: (prNumber: number) => Promise<Fetched<QaLivePr>>;
   };
   journal: {
-    /** `indexHoldExit` joins the hold-exit index write into the append's one MULTI (#5313). */
-    append: (repo: string, issue: number, entry: LifecycleJournalEntry, indexHoldExit?: boolean) => Promise<JournalWriteResult>;
+    /** `index` opts into the hold-exit index (#5313); cap events (#5324) are always indexed. Both join the append's one MULTI. */
+    append: (repo: string, issue: number, entry: LifecycleJournalEntry, index?: LifecycleIndexSelector) => Promise<JournalWriteResult>;
     expireOnClose: (repo: string, issue: number) => Promise<JournalWriteResult>;
     openClaim: (repo: string, issue: number, claim: DispatchClaim) => Promise<OpenClaimResult>;
     closeClaim: (repo: string, issue: number, expectedDispatchId: string) => Promise<CloseClaimResult>;
@@ -186,6 +192,8 @@ export interface SeamDeps {
     /** Index an unsanctioned human-hold exit for the attention feed (#5313). */
     read: (repo: string, issue: number) => Promise<ReadJournalResult>;
     readClaim: (repo: string, issue: number) => Promise<ReadClaimResult>;
+    /** SCAN the held claims (stale arm, release-by-dispatch). Absent = those paths report `redis-failed`. */
+    listClaims?: (repo: string) => Promise<ListClaimsResult>;
   };
   now: () => number;
 }
@@ -375,7 +383,11 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
           const hash = await getDesignConceptHash(`issue-${n}`);
           return {
             ok: true,
-            value: { exists: Object.keys(hash).length > 0, status: hash.status ?? "" },
+            value: {
+              exists: Object.keys(hash).length > 0,
+              status: hash.status ?? "",
+              artifactHash: hash.artifactHash ? hash.artifactHash : null,
+            },
           };
         } catch (err) {
           logger.error({ err }, "[lifecycle] design-concept fetch failed");
@@ -413,6 +425,7 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
       persist: persistJournal,
       read: readLifecycleJournal,
       readClaim: readDispatchClaim,
+      listClaims: listDispatchClaims,
     },
     now: () => Date.now(),
   };
@@ -534,6 +547,66 @@ function shadowParkEntry(
   };
 }
 
+type CapOver = NonNullable<CapEvaluation["over"]>;
+
+interface CapGuardAttempt {
+  issue: number;
+  /** The single re-read state label, or null when none / ambiguous. */
+  from: string | null;
+  /** The attempt to count; null skips the check (bookkeeping, or the issue view failed). */
+  attempt: CapAttempt | null;
+  pr: number | null;
+  actor: string | undefined;
+}
+
+type CapGuard =
+  | { parked: { code: `parked:${string}`; written: boolean }; stamp?: undefined; shadowOver?: undefined }
+  | { parked: null; stamp: CapStamp; shadowOver: CapOver | null };
+
+/**
+ * The ONE cap step (ADR-0047 D6/D7). Checks the caps for `attempt`, then:
+ *  - enforce, over cap: park (`parkForCap`);
+ *  - shadow, over a LIVE arm (`liveInShadow`): park exactly as in enforce, the park
+ *    entry tagged `mode=shadow live=1` so the would-park triage can exclude it;
+ *  - shadow, over a non-live arm: no park; the caller journals `would-park`.
+ * A skipped check (fetch failure, INV-12) never parks.
+ */
+async function guardCaps(a: CapGuardAttempt, deps: SeamDeps, mode: LifecycleMode): Promise<CapGuard> {
+  const check: CapCheck =
+    a.attempt === null ? { status: "skipped" } : await checkCaps(deps, a.issue, a.attempt, a.pr);
+  const stamp = new CapStamp(check);
+  const over = check.status === "checked" ? check.evaluation.over : null;
+  if (check.status !== "checked" || over === null) return { parked: null, stamp, shadowOver: null };
+  const live = mode !== "enforce" && isLiveArm(over.arm);
+  if (mode === "enforce" || live) {
+    const park = await parkForCap(
+      {
+        issue: a.issue,
+        from: a.from,
+        over,
+        counts: check.evaluation.counts,
+        pr: a.pr,
+        actor: a.actor,
+        evidence: { ...stamp.extra(parkEntryProbe(deps, over)), ...(live ? { mode: "shadow", live: "1" } : {}) },
+      },
+      deps,
+    );
+    return { parked: { code: `parked:${over.arm}`, written: park.written } };
+  }
+  return { parked: null, stamp, shadowOver: over };
+}
+
+/** The cap attempt an edge's `cap` field implies for this call, or null when it does not count. */
+function capAttemptForEdge(
+  cap: CapEdge,
+  evidence: Record<string, string>,
+): { attempt: CapAttempt; pr: number | null } | null {
+  if (cap === "requeue") return { attempt: { kind: "requeue" }, pr: null };
+  if (evidence.defer === "1") return null;
+  const pr = parsePrEvidence(evidence);
+  return pr !== null && pr > 0 ? { attempt: { kind: "qa-fail", pr }, pr } : null;
+}
+
 // ---------------------------------------------------------------------------
 // advance
 // ---------------------------------------------------------------------------
@@ -591,7 +664,7 @@ function entry(
  * human-hold exit is also indexed for the attention feed (#5313).
  */
 export async function journalEntry(deps: SeamDeps, issue: number, e: LifecycleJournalEntry): Promise<void> {
-  const res = await deps.journal.append(deps.repo, issue, e, isUnsanctionedHoldExit(e));
+  const res = await deps.journal.append(deps.repo, issue, e, { holdExit: isUnsanctionedHoldExit(e) });
   if (res.ok === false) {
     logger.error({ issue, error: res.error }, "[lifecycle] journal append failed");
   }
@@ -645,74 +718,29 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
     return { ok: false, issue, code: "issue-closed", mode, written: false };
   }
 
-  // 3b. cap check (ADR-0047 D6): the in-progress -> ready-for-agent edge IS the stale
-  //     re-queue. Over cap in enforce the seam parks INSTEAD of writing ready-for-agent.
-  let shadowOver: NonNullable<CapEvaluation["over"]> | null = null;
-  let shadowOverPr: number | null = null;
-  if (stateLabels.length === 1 && from === "in-progress" && to === "ready-for-agent") {
-    const check = await checkCaps(deps, issue, { kind: "requeue" }, null);
-    stamp = new CapStamp(check);
-    const over = check.status === "checked" ? check.evaluation.over : null;
-    if (check.status === "checked" && over !== null) {
-      if (mode === "enforce") {
-        const park = await parkForCap(
-          {
-            issue,
-            from,
-            over,
-            counts: check.evaluation.counts,
-            pr: null,
-            actor: input.actor,
-            evidence: stamp.extra(parkEntryProbe(deps, over)),
-          },
-          deps,
-        );
-        return { ok: false, issue, code: `parked:${over.arm}`, mode, written: park.written };
-      }
-      shadowOver = over;
-    }
-  }
-
-  // 3c. cap check (ADR-0047 D6, #5317): a reviewed QA FAIL bouncing `needs-qa ->
-  //     needs-dev-resume` runs the trailer-sourced `qa-fail-rounds` arm. The
-  //     verdict comment (this round's trailer) is already posted, so a 3rd
-  //     reviewed FAIL counts 3 >= 3 and, in enforce, parks INSTEAD of bouncing.
-  if (
-    stateLabels.length === 1 &&
-    from === "needs-qa" &&
-    (to === "needs-dev-resume" || to === "ready-for-agent") &&
-    gateEvidence.defer !== "1"
-  ) {
-    const prNumber = parsePrEvidence(gateEvidence);
-    if (prNumber !== null && prNumber > 0) {
-      const check = await checkCaps(deps, issue, { kind: "qa-fail", pr: prNumber }, prNumber);
-      stamp = new CapStamp(check);
-      const over = check.status === "checked" ? check.evaluation.over : null;
-      if (check.status === "checked" && over !== null) {
-        if (mode === "enforce") {
-          const park = await parkForCap(
-            {
-              issue,
-              from,
-              over,
-              counts: check.evaluation.counts,
-              pr: prNumber,
-              actor: input.actor,
-              evidence: stamp.extra(parkEntryProbe(deps, over)),
-            },
-            deps,
-          );
-          return { ok: false, issue, code: `parked:${over.arm}`, mode, written: park.written };
-        }
-        shadowOver = over;
-        shadowOverPr = prNumber;
-      }
-    }
-  }
-
-  // 4. legality. `none` (zero state labels) may only enter needs-triage, gate-free;
-  //    every other move refuses `state-missing`. `many` refuses `state-ambiguous`.
+  // 3b. legality lookup comes BEFORE the cap step, so an illegal move refuses
+  //     instead of being able to park (ADR-0047 D6).
   const transition = from === null ? undefined : findTransition(from as LifecycleState, to);
+
+  // 3c. cap step: an edge carrying `cap` runs the ONE guardCaps step; over cap it parks
+  //     INSTEAD of writing the move (enforce, or a live arm in shadow).
+  let shadowOver: CapOver | null = null;
+  let shadowOverPr: number | null = null;
+  if (stateLabels.length === 1 && transition?.cap !== undefined) {
+    const edge = capAttemptForEdge(transition.cap, gateEvidence);
+    if (edge !== null) {
+      const guard = await guardCaps({ issue, from, attempt: edge.attempt, pr: edge.pr, actor: input.actor }, deps, mode);
+      if (guard.parked !== null) {
+        return { ok: false, issue, code: guard.parked.code, mode, written: guard.parked.written };
+      }
+      stamp = guard.stamp;
+      shadowOver = guard.shadowOver;
+      shadowOverPr = edge.pr;
+    }
+  }
+
+  // 4. verdict. `none` (zero state labels) may only enter needs-triage, gate-free;
+  //    every other move refuses `state-missing`. `many` refuses `state-ambiguous`.
   let verdict: { ok: boolean; code: string };
   if (stateLabels.length === 0) {
     verdict = to === "needs-triage" ? { ok: true, code: "ok" } : { ok: false, code: "state-missing" };
@@ -992,11 +1020,14 @@ export async function operatorReopen(
 // claim / release (change no label, except a cap park)
 // ---------------------------------------------------------------------------
 
+/** Class of the placeholder claims written by `scripts/lifecycle-legacy-backfill.ts`. */
+export const LEGACY_BACKFILL_CLASS = "legacy-backfill";
+
 export type ClaimPurpose = "fresh" | "resume" | "forward-fix";
 export const CLAIM_PURPOSES: readonly ClaimPurpose[] = ["fresh", "resume", "forward-fix"];
 
 /** Closed enum a claim is released with (ADR-0047 D5/D6). */
-export const CLAIM_OUTCOMES = ["pr-opened", "no-pr", "verdict-posted", "stall", "released"] as const;
+export const CLAIM_OUTCOMES = ["pr-opened", "no-pr", "verdict-posted", "stall", "released", "stale"] as const;
 export type ClaimOutcome = (typeof CLAIM_OUTCOMES)[number];
 
 export interface ClaimInput {
@@ -1009,6 +1040,12 @@ export interface ClaimInput {
   /** The PR this dispatch works on (QA / forward-fix); arms the PR-unit caps. */
   pr?: number;
   purpose?: ClaimPurpose;
+  /**
+   * Skip the cap check (INV-9). In-process only: the legacy backfill passes it so a
+   * bookkeeping placeholder can never park an issue. Deliberately NOT keyed on `class`
+   * and NOT exposed by the CLI verbs, so a caller-supplied class string cannot bypass caps.
+   */
+  skipCaps?: boolean;
 }
 
 export type ClaimResult =
@@ -1055,7 +1092,13 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
   };
 
   // INV-10: the claim-held check runs BEFORE any counting or park.
-  const held = await deps.journal.readClaim(deps.repo, issue);
+  // Sole exception (INV-7): a `legacy-backfill` placeholder is released by its own
+  // dispatchId so the real dispatch can take over in the same call.
+  let held = await deps.journal.readClaim(deps.repo, issue);
+  if (held.ok && held.claim && held.claim.class === LEGACY_BACKFILL_CLASS) {
+    const takeover = await releaseClaim(issue, held.claim.dispatchId, deps, actor, "released");
+    if (takeover.ok) held = { ok: true, claim: null };
+  }
   if (held.ok && held.claim) return { ok: false, code: "claim-held", existing: held.claim };
 
   // Re-read the issue to stamp `state` (INV-13). A failed read skips the cap check (INV-12).
@@ -1068,32 +1111,24 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
     state = labels.length === 1 ? labels[0] : "none";
     capState = labels.length === 1 ? labels[0] : "";
   }
-  const check: CapCheck = view.ok
-    ? await checkCaps(
-        deps,
-        issue,
-        { kind: "claim", class: input.class, state: capState, pr: input.pr ?? null, purpose: input.purpose ?? null },
-        input.pr ?? null,
-      )
-    : { status: "skipped" };
-  const stamp = new CapStamp(check);
-  const over = check.status === "checked" ? check.evaluation.over : null;
-
-  if (check.status === "checked" && over !== null && mode === "enforce") {
-    const park = await parkForCap(
-      {
-        issue,
-        from: capState === "" ? null : capState,
-        over,
-        counts: check.evaluation.counts,
-        pr: input.pr ?? null,
-        actor,
-        evidence: stamp.extra(parkEntryProbe(deps, over)),
-      },
-      deps,
-    );
-    return { ok: false, code: `parked:${over.arm}`, written: park.written };
-  }
+  // INV-9: a legacy-backfill placeholder is bookkeeping, never a dispatch attempt: no cap
+  // check, so it can never park (write a label) an over-cap in-progress issue.
+  const guard = await guardCaps(
+    {
+      issue,
+      from: capState === "" ? null : capState,
+      attempt:
+        view.ok && input.skipCaps !== true
+          ? { kind: "claim", class: input.class, state: capState, pr: input.pr ?? null, purpose: input.purpose ?? null }
+          : null,
+      pr: input.pr ?? null,
+      actor,
+    },
+    deps,
+    mode,
+  );
+  if (guard.parked !== null) return { ok: false, code: guard.parked.code, written: guard.parked.written };
+  const { stamp, shadowOver } = guard;
 
   const res = await deps.journal.openClaim(deps.repo, issue, claim);
   if (res.ok === false) {
@@ -1115,9 +1150,9 @@ export async function openClaim(input: ClaimInput, deps: SeamDeps): Promise<Clai
       }),
     ),
   );
-  if (check.status === "checked" && over !== null) {
-    await journal(deps, issue, shadowParkEntry(deps, over, capState === "" ? null : capState, input.pr ?? null, actor));
-    return { ok: true, claim, wouldPark: over.arm };
+  if (shadowOver !== null) {
+    await journal(deps, issue, shadowParkEntry(deps, shadowOver, capState === "" ? null : capState, input.pr ?? null, actor));
+    return { ok: true, claim, wouldPark: shadowOver.arm };
   }
   return { ok: true, claim };
 }
@@ -1148,4 +1183,121 @@ export async function releaseClaim(
     }),
   );
   return { ok: true, prior: res.prior };
+}
+
+export type ReleaseByDispatchResult =
+  | { ok: true; prior: DispatchClaim | null; issue: number | null }
+  | { ok: false; code: "redis-failed" | "claim-owner-mismatch" | "claim-ambiguous" };
+
+/**
+ * Release the claim whose `dispatchId` matches, without knowing its issue (SCAN
+ * over claim keys; no reverse index). Zero matches is idempotent: `prior: null`,
+ * no journal entry. The close itself is the same compare-and-delete as
+ * {@link releaseClaim}, so a claim re-opened under another id in between is
+ * never deleted. Never throws.
+ */
+export async function releaseClaimByDispatch(
+  dispatchId: string,
+  deps: SeamDeps,
+  actor = "cli",
+  outcome?: ClaimOutcome,
+): Promise<ReleaseByDispatchResult> {
+  if (dispatchId === "" || !deps.journal.listClaims) return { ok: false, code: "redis-failed" };
+  const listed = await deps.journal.listClaims(deps.repo);
+  if (listed.ok === false) return { ok: false, code: "redis-failed" };
+  const matches = listed.claims.filter((c) => c.claim.dispatchId === dispatchId);
+  if (matches.length === 0) return { ok: true, prior: null, issue: null };
+  if (matches.length > 1) {
+    logger.error({ dispatchId, issues: matches.map((m) => m.issue) }, "[lifecycle] ambiguous dispatch id");
+    return { ok: false, code: "claim-ambiguous" };
+  }
+  const res = await releaseClaim(matches[0].issue, dispatchId, deps, actor, outcome);
+  return res.ok === true ? { ok: true, prior: res.prior, issue: matches[0].issue } : res;
+}
+
+// ---------------------------------------------------------------------------
+// composite dispatch verb (ADR-0047 D5/D7, issue #5315)
+// ---------------------------------------------------------------------------
+
+export interface DispatchInput {
+  issue: number;
+  dispatchId: string;
+  class: string;
+  run: string;
+  actor?: string;
+  pr?: number;
+  purpose?: ClaimPurpose;
+}
+
+export type DispatchResult =
+  | {
+      ok: true;
+      claim: DispatchClaim;
+      /** The `in-progress` advance, or null when none was attempted (non-dev role, other state, failed read). */
+      advanced: Extract<AdvanceResult, { ok: true }> | null;
+      /** Set in shadow when the advance would have been refused in enforce. */
+      wouldRefuse?: string;
+      wouldPark?: string;
+    }
+  | { ok: false; code: "claim-held" | "redis-failed"; existing?: DispatchClaim | null }
+  | { ok: false; code: `parked:${string}`; written: boolean }
+  | { ok: false; code: "advance-refused"; reason: string; released: boolean };
+
+/**
+ * Fetch the Design Concept, open the claim (copying the artifact hash only when
+ * the artifact is `approved`), then advance dev-role dispatches to `in-progress`.
+ * A refused advance in enforce releases the claim BEFORE the refusal is returned.
+ * Callers never supply the hash. Never throws.
+ */
+export async function dispatch(input: DispatchInput, deps: SeamDeps): Promise<DispatchResult> {
+  const { issue } = input;
+  const actor = input.actor ?? "cli";
+
+  const dc = await deps.fetch.designConcept(issue);
+  const artifactHash =
+    dc.ok && dc.value.exists && dc.value.status === "approved" ? (dc.value.artifactHash ?? null) : null;
+
+  const claimed = await openClaim(
+    {
+      issue,
+      dispatchId: input.dispatchId,
+      class: input.class,
+      run: input.run,
+      artifactHash,
+      actor,
+      pr: input.pr,
+      purpose: input.purpose,
+    },
+    deps,
+  );
+  if (claimed.ok === false) return claimed;
+  const base = { claim: claimed.claim, ...(claimed.wouldPark !== undefined ? { wouldPark: claimed.wouldPark } : {}) };
+
+  if (classRole(input.class) !== "dev") return { ok: true, ...base, advanced: null };
+  const view = await deps.view(issue);
+  if (view.ok === false) return { ok: true, ...base, advanced: null };
+  const states = stateLabelsOf(view.row.labels);
+  if (states.length !== 1 || (states[0] !== "ready-for-agent" && states[0] !== "needs-dev-resume")) {
+    return { ok: true, ...base, advanced: null };
+  }
+
+  const adv = await advance(
+    {
+      issue,
+      to: "in-progress",
+      evidence: { dispatch: input.dispatchId, class: input.class, run: input.run },
+      actor,
+    },
+    deps,
+  );
+  if (adv.ok === false) {
+    const released = await releaseClaim(issue, input.dispatchId, deps, actor, "released");
+    return { ok: false, code: "advance-refused", reason: adv.code, released: released.ok };
+  }
+  return {
+    ok: true,
+    ...base,
+    advanced: adv,
+    ...(adv.wouldRefuse !== undefined ? { wouldRefuse: adv.wouldRefuse } : {}),
+  };
 }

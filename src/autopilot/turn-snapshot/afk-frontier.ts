@@ -31,7 +31,7 @@
  *     `tickets_orch_pending_spec=issue-<N>`; otherwise false / none.
  */
 
-import { DEGRADE, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
+import { DEGRADE, degradeDetail, type Classified, type DegradeReason, type CollectorOutcome, type DegradedMarker } from "./collector.ts";
 import { parseJsonRead, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { TurnSnapshotHydra } from "./hydra-http.ts";
 import { eachValue, integerText } from "./json-values.ts";
@@ -151,22 +151,51 @@ export function foldRetroRuns(body: string | null): Classified<RetroRuns> {
   return okv({ available: true, candidate: candidate === "" ? null : candidate });
 }
 
+/**
+ * Why `drillable` read as it did. Closed union; the clause order in
+ * {@link foldRetroBundleReason} is normative (first match wins). The last two
+ * members are assigned by `collectRetro`, not the fold.
+ */
+export type RetroDrillableReason =
+  | "fail-open-unparseable"
+  | "fail-open-not-object"
+  | "fail-open-run-not-found"
+  | "flagged-dispatch"
+  | "reflections"
+  | "novel-stuck-signal"
+  | "recommendations"
+  | "run-flagged"
+  | "none"
+  | "fail-open-bundle-read-failed"
+  | "no-candidate";
+
+/** The bundle heredoc, with provenance: `none` when a parsed, run-found bundle carries nothing to drill. */
+export function foldRetroBundleReason(body: string): RetroDrillableReason {
+  const parsed = parseJsonRead(body);
+  if (parsed.kind !== "ok") return "fail-open-unparseable";
+  const b = parsed.data;
+  if (!isObj(b)) return "fail-open-not-object";
+  if (b.runFound !== true) return "fail-open-run-not-found";
+  const dispatches = "dispatches" in b ? b.dispatches : [];
+  if (Array.isArray(dispatches) && dispatches.some((x) => isObj(x) && isSet(x.flagged))) return "flagged-dispatch";
+  if (isSet(b.reflections)) return "reflections";
+  if (isSet("novelStuckSignals" in b ? b.novelStuckSignals : b.stuckSignals)) return "novel-stuck-signal";
+  if (isSet(b.recommendations)) return "recommendations";
+  if (b.runFlagged === true) return "run-flagged";
+  return "none";
+}
+
 /** The bundle heredoc: true unless a parsed, run-found bundle carries nothing to drill. */
 export function foldRetroBundle(body: string): boolean {
-  const parsed = parseJsonRead(body);
-  if (parsed.kind !== "ok") return true;
-  const b = parsed.data;
-  if (!isObj(b)) return true;
-  if (b.runFound !== true) return true;
-  const dispatches = "dispatches" in b ? b.dispatches : [];
-  const anyFlagged = Array.isArray(dispatches) ? dispatches.some((x) => isObj(x) && isSet(x.flagged)) : false;
-  return anyFlagged || isSet(b.reflections) || isSet("novelStuckSignals" in b ? b.novelStuckSignals : b.stuckSignals) || isSet(b.recommendations) || b.runFlagged === true;
+  return foldRetroBundleReason(body) !== "none";
 }
 
 export interface RetroValue {
   readonly runs: Classified<RetroRuns>;
   /** null = no candidate run (drillable=false); else the bundle verdict. */
   readonly drillable: boolean | null;
+  /** Which clause decided `drillable` (provenance only; never a verdict). */
+  readonly drillableReason: RetroDrillableReason;
   /**
    * `review_retro_due` (#5271): the Redis-only review-findings retro signal.
    * Fail-CLOSED (false) on any read or parse failure - the opposite of
@@ -189,14 +218,14 @@ export async function collectRetro(deps: AfkFrontierDeps): Promise<CollectorOutc
   const reviewDue = foldReviewRetroDue(reviewRead.kind === "ok" ? reviewRead.body : null);
   const runs = foldRetroRuns(runsRead.kind === "ok" ? runsRead.body : null);
   const candidate = runs.ok ? runs.value.candidate : null;
-  if (candidate === null) return outcome("retro", { runs, drillable: null, reviewDue }, "reason" in runs ? [{ field: "retroRuns", reason: runs.reason }] : []);
+  if (candidate === null) return outcome("retro", { runs, drillable: null, drillableReason: "no-candidate", reviewDue }, "reason" in runs ? [{ field: "retroRuns", reason: runs.reason }] : []);
   const bundle = await deps.hydra.get(`/autopilot/runs/${candidate}/retro`);
-  const value: RetroValue = {
-    runs,
-    drillable: bundle.kind === "ok" ? foldRetroBundle(bundle.body) : true,
-    reviewDue,
-  };
-  return outcome("retro", value, bundle.kind === "failed" ? [{ field: "retroBundle", reason: bundle.reason }] : []);
+  const drillableReason: RetroDrillableReason = bundle.kind === "ok" ? foldRetroBundleReason(bundle.body) : "fail-open-bundle-read-failed";
+  const value: RetroValue = { runs, drillable: drillableReason !== "none", drillableReason, reviewDue };
+  const degraded: DegradedMarker[] = [];
+  if (bundle.kind === "failed") degraded.push({ field: "retroBundle", reason: bundle.reason });
+  else if (drillableReason.startsWith("fail-open-")) degraded.push({ field: "retroBundle", reason: degradeDetail(`retro-bundle-fail-open: ${drillableReason}`) });
+  return outcome("retro", value, degraded);
 }
 
 // ---------------------------------------------------------------------------

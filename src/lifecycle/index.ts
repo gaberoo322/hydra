@@ -89,6 +89,8 @@ export {
 } from "./gates.ts";
 export { externalMoves, lastKnownState, replayStateSnapshots } from "./timeline.ts";
 export {
+  MAX_STALE_CLAIM_CLOSES,
+  STALE_CLAIM_AGE_MS,
   isZeroStateExempt,
   resolveQaPr,
   runReconcile,
@@ -107,6 +109,10 @@ export {
   operatorAdvance,
   operatorReopen,
   releaseClaim,
+  releaseClaimByDispatch,
+  dispatch,
+  type DispatchInput,
+  type DispatchResult,
   CLAIM_OUTCOMES,
   type ClaimOutcome,
   type ClaimPurpose,

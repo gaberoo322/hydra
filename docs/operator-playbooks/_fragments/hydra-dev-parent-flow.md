@@ -94,10 +94,15 @@ issue may still need a one-time correction.
 
 The dispatched child prompt MUST include the scope-respect block below.
 
-### 4. Mark in-progress
+### 4. Claim the issue (dispatcher claim — ADR-0047 D4)
+The seam performs the `ready-for-agent` → `in-progress` advance; workers never
+write the label directly. Interactive parent (operator-named issue):
 ```bash
-gh issue edit $issue_number --remove-label ready-for-agent --add-label in-progress
+npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch interactive-dev-$issue_number-$(date +%s) --class dev_orch --run interactive --purpose fresh
 ```
+`claim-held` → exclude that issue and re-run selection (at most 3 picks, then
+stop with a report); `parked:*` or an enforce `advance-refused` → stop and
+report, no label write.
 
 ### 5. Spawn worktree agent
 

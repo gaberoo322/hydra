@@ -72,6 +72,8 @@ interface MemStore {
   runs: Map<string, Record<string, string>>;
   runIndex: Map<string, number>;
   runTurns: Map<string, Set<number>>;
+  /** Raw turn-row JSON by `runId:turnN` (issue #5324). */
+  turnMembers: Map<string, string>;
   cycles: Map<string, Record<string, string>>;
   cycleIndex: Map<string, number>;
   metrics: Map<string, Record<string, string>>;
@@ -93,6 +95,7 @@ function newStore(): MemStore {
     runs: new Map(),
     runIndex: new Map(),
     runTurns: new Map(),
+    turnMembers: new Map(),
     cycles: new Map(),
     cycleIndex: new Map(),
     metrics: new Map(),
@@ -145,7 +148,8 @@ function makeDeps(store: MemStore, opts: FixtureOpts = {}): AutopilotRunsDeps & 
       async addAutopilotRunToIndex(runId, scoreEpochSeconds) {
         store.runIndex.set(runId, scoreEpochSeconds);
       },
-      async addAutopilotRunTurn(runId, turnN) {
+      async addAutopilotRunTurn(runId, turnN, member) {
+        store.turnMembers.set(`${runId}:${turnN}`, member);
         const set = store.runTurns.get(runId) ?? new Set<number>();
         set.add(turnN);
         store.runTurns.set(runId, set);
@@ -783,6 +787,23 @@ describe("recordTurn — injected deps (#2158)", () => {
     // last_heartbeat_epoch defaulted from the injected clock.
     assert.equal(row.last_heartbeat_epoch, String(Math.floor(FIXED_NOW_MS / 1000)));
     assert.ok(store.runTurns.get("run-t")!.has(3));
+  });
+
+  test("persists well-formed parent_exceptions rows on the turn member, drops malformed ones, omits when none (#5324)", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await startRun({ run_id: "run-pe", limits: {} } as any, deps);
+    const good = { cause: "script-error", turn: 2, source: "turn.sh", detail: "d", ts_epoch: 5 };
+    await recordTurn({ run_id: "run-pe", turn_n: 2, parent_exceptions: [good, { cause: 7 }, "junk"] } as any, deps);
+    await recordTurn({ run_id: "run-pe", turn_n: 3, parent_exceptions: "nope" } as any, deps);
+    const t2 = JSON.parse(store.turnMembers.get("run-pe:2")!);
+    const t3 = JSON.parse(store.turnMembers.get("run-pe:3")!);
+    assert.deepEqual(t2.parent_exceptions, [good]);
+    assert.equal("parent_exceptions" in t3, false);
+    await recordTurn({ run_id: "run-pe", turn_n: 4, parent_exceptions: [] } as any, deps);
+    assert.deepEqual(JSON.parse(store.turnMembers.get("run-pe:4")!).parent_exceptions, [], "empty list kept as the mirror marker");
+    await recordTurn({ run_id: "run-pe", turn_n: 5, parent_exceptions: ["junk"] } as any, deps);
+    assert.equal("parent_exceptions" in JSON.parse(store.turnMembers.get("run-pe:5")!), false, "all-malformed list is dropped, not a marker");
   });
 
   test("is idempotent on (runId, turn_n) — a duplicate turn is a no-op", async () => {

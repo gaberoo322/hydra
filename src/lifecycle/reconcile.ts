@@ -32,7 +32,7 @@ import {
   type Fetched,
 } from "./gates.ts";
 import { postCapReset } from "./park.ts";
-import { advance, type AdvanceInput, type AdvanceResult, type SeamDeps } from "./seam.ts";
+import { advance, releaseClaim, type AdvanceInput, type AdvanceResult, type SeamDeps } from "./seam.ts";
 import { externalMoves, lastKnownState } from "./timeline.ts";
 import { stateLabelsOf } from "./transitions.ts";
 
@@ -41,6 +41,10 @@ export const MAX_QA_EXIT_EVALS = 20;
 export const RECENTLY_CLOSED_WINDOW_MS = 48 * 60 * 60 * 1000;
 export const RECENTLY_CLOSED_LIMIT = 100;
 export const REPORT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+/** A held dispatch claim at or past this age is closed by the stale arm (ADR-0047 D5); one value for every class. */
+export const STALE_CLAIM_AGE_MS = 2 * 60 * 60 * 1000;
+/** Bound on stale-claim closes per reconcile pass. */
+export const MAX_STALE_CLAIM_CLOSES = 25;
 export const RECONCILE_ACTOR = "reconcile";
 export const INVALID_STATE_RESULT = "invalid:state-ambiguous";
 
@@ -77,6 +81,11 @@ export interface ReconcileReport {
   zeroStateExempt: number;
   externalEntries: number;
   capResetsPosted: number;
+  /**
+   * Stale-claim arm: claims scanned; closed (in dry-run, would close); spared because
+   * another dispatcher re-opened the issue first; deferred past the per-pass bound; failed.
+   */
+  staleClaims: { scanned: number; closed: number; spared: number; deferred: number; failed: number };
   qaExits: {
     "needs-dev-resume": number;
     "needs-qa": number;
@@ -103,6 +112,7 @@ export function emptyReport(repo: string, ts: number, dryRun: boolean): Reconcil
     zeroStateExempt: 0,
     externalEntries: 0,
     capResetsPosted: 0,
+    staleClaims: { scanned: 0, closed: 0, spared: 0, deferred: 0, failed: 0 },
     qaExits: { "needs-dev-resume": 0, "needs-qa": 0, closed: 0, "ready-for-agent": 0, none: 0, unresolved: 0 },
     seamTransitions: 0,
     wouldRefuseByReason: {},
@@ -372,6 +382,45 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
       return true;
     }
 
+    // Stale-claim arm (ADR-0047 D5): compare-and-delete on each claim's OWN dispatchId,
+    // so a claim re-opened by another dispatcher between list and close survives.
+    async function closeStaleClaims(): Promise<void> {
+      if (!deps.seam.journal.listClaims) return;
+      const listed = await deps.seam.journal.listClaims(repo);
+      if (listed.ok === false) {
+        report.errors.push("stale-claims-list-failed");
+        return;
+      }
+      const stats = report.staleClaims;
+      stats.scanned = listed.claims.length;
+      for (const { issue, claim } of listed.claims) {
+        if (!(now - claim.openedAt >= STALE_CLAIM_AGE_MS)) continue;
+        if (stats.closed + stats.spared + stats.failed >= MAX_STALE_CLAIM_CLOSES) {
+          stats.deferred++;
+          continue;
+        }
+        if (dryRun) {
+          stats.closed++;
+          continue;
+        }
+        try {
+          const res = await releaseClaim(issue, claim.dispatchId, deps.seam, RECONCILE_ACTOR, "stale");
+          if (res.ok === true) {
+            stats.closed++;
+          } else if (res.code === "claim-owner-mismatch") {
+            stats.spared++;
+          } else {
+            stats.failed++;
+            report.errors.push(`stale-claim-close-failed:#${issue}:${res.code}`);
+          }
+        } catch (err) {
+          logger.error({ err, issue }, "[lifecycle-reconcile] stale claim close failed");
+          stats.failed++;
+          report.errors.push(`stale-claim-close-failed:#${issue}`);
+        }
+      }
+    }
+
     // External close (INV-9): a recently closed issue whose journal has no terminal closed entry.
     const sinceIso = new Date(now - RECENTLY_CLOSED_WINDOW_MS).toISOString();
     const closed = await deps.listRecentlyClosed(sinceIso);
@@ -399,6 +448,8 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
         }
       }
     }
+
+    await closeStaleClaims();
 
     if (!dryRun) {
       const written = await deps.writeReport(report, now);

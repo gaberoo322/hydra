@@ -119,6 +119,15 @@ The bundle also carries the **run-level drill flag** (issue #4584):
 `undrillable`, per #1184). A `runFlagged` run with zero flagged dispatches is
 still drill-worthy: its drill material is run-level, not transcripts (step 3).
 
+**Clean bundle (issue #5406).** When the fetched bundle folds clean (no flagged
+dispatch, empty `reflections` / `novelStuckSignals` / `recommendations`,
+`runFlagged` not true) yet you were dispatched, read `observability.retro` from
+`/tmp/hydra-autopilot-snapshot.json` and record its `candidate` and
+`drillableReason` in the artifact (or "weekly override" if that was the arm), so
+a wasted dispatch names its own cause. A `fail-open-*` reason means the
+snapshot's collector could not prove the bundle clean (a `retroBundle` degraded
+marker is persisted alongside).
+
 ## 3. Deep-read ONLY the flagged transcripts
 
 For each flagged dispatch (the ones the bundle flagged for drill), and ONLY
