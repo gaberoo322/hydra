@@ -100,6 +100,16 @@ end-of-session phase) and surfaces the two failure modes:
 - **`unshepherded`** — `mergeable == "MERGEABLE"` **AND** every *required* check
   passes **AND** `autoMergeRequest == null`. Mergeable and green, but no
   mechanism will ever merge it.
+- **`no-closing-issue`** (Orchestrator repo only, #5400) — open, non-draft PR
+  whose body carries no `Closes|Fixes|Resolves #N`. Every PR lane keys on a
+  closing issue, so a `Refs #N`-only partial delivery is unreachable and strands
+  unreviewed. The autopilot Turn Snapshot surfaces these automatically
+  (`orch_prs_no_closing_issue` -> `surface-pr {cause: no-closing-issue}`,
+  `ready-for-human`); list the rest by hand with
+  `gh pr list --repo gaberoo322/hydra --state open --json number,isDraft,body | jq '[.[] | select(.isDraft|not) | select(.body // "" | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?):?[ ]+#[0-9]+") | not) | .number]'`.
+  Recommended action: file the child issue for the slice, edit the body to
+  `Closes #<child>` (then ONE more push so synchronize-time gates re-read the
+  body), or merge by hand for a docs companion.
 
 > **`mergeable == "UNKNOWN"` is "no verdict", never conflicted.** GitHub computes
 > mergeability asynchronously; a freshly-pushed PR reports `UNKNOWN` for a few

@@ -514,9 +514,9 @@ function seamWith(rows: any[], over: any = {}) {
       pr: async () => ({ ok: false }),
     },
     journal: {
-      append: async (_repo: string, n: number, e: any, idx?: boolean) => {
+      append: async (_repo: string, n: number, e: any, idx?: boolean | { holdExit?: boolean }) => {
         journal.push(e);
-        if (idx) holdExits.push({ n, e });
+        if (idx === true || (idx && (idx as { holdExit?: boolean }).holdExit)) holdExits.push({ n, e });
         return { ok: true };
       },
       expireOnClose: async () => ({ ok: true }),

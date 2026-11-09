@@ -133,6 +133,9 @@
         "dirty": [],
         "unchecked": [],
         "behind": [],
+        "noClosingIssue": [
+          4246
+        ],
         "ciTriggerStale": {
           "ok": false,
           "reason": "runs-read-failed"

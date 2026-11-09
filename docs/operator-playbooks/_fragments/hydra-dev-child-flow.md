@@ -59,6 +59,21 @@ Run these numbered steps.
    `src/github/pr-refs.ts`) AND GitHub's own auto-close both key on the verb,
    and GitHub's auto-close IGNORES negation, so a companion carrying any
    closing verb would close the anchor early and re-wedge the QA lane.
+   **Partial delivery of the anchor itself (issue #5400).** When a FRESH
+   dispatch ships only a slice of the anchor, never open a `Refs`-only PR: every
+   PR lane (QA, dev-resume) finds a PR through the issue it CLOSES, so a
+   `Refs #N`-only PR strands green and unreviewed (#5375, #5386). Instead:
+   (a) before `gh pr create`, file a child issue for exactly that slice, link it
+   as a native sub-issue (`gh api repos/gaberoo322/hydra/issues/<parent>/sub_issues -F sub_issue_id=<child-id>`),
+   with `## Files in scope` (the slice's files) and a `Parent design concept: issue-<parent>`
+   line; (b) the PR body says `Closes #<child>` plus `Part of #<parent>` and
+   never a closing verb next to the parent; (c) right after the PR exists,
+   label the child `needs-qa` (reap's needs-qa promotion is anchor-keyed and does
+   not fire for a child); (d) release the parent (`in-progress` -> `ready-for-agent`)
+   and post one comment naming the shipped slice, the child/PR and the remaining
+   slices. A `ubiquitous-language` companion stays `Refs`-only (above); the Turn
+   Snapshot's `orch_prs_no_closing_issue` signal now surfaces any open PR with no
+   closing issue to the operator as `surface-pr {cause: no-closing-issue}`.
 7. Run the full `npm test` per the canonical "Full `npm test` recipe" in
    `hydra-dev.md` (background launch into `npm-test.log` with a sentinel,
    foreground poll; the `*.log` ignore keeps it out of commits), then read the

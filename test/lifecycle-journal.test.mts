@@ -16,7 +16,9 @@ import {
   closeDispatchClaim,
   expireJournalOnClose,
   journalCloseTtlSeconds,
+  capEventsIndexKey,
   holdExitIndexKey,
+  listCapEvents,
   lifecycleClaimKey,
   listHoldExits,
   recordHoldExit,
@@ -27,6 +29,9 @@ import {
   readLifecycleJournal,
   type LifecycleJournalEntry,
 } from "../src/redis/lifecycle-journal.ts";
+import { parkForCap } from "../src/lifecycle/park.ts";
+import type { SeamDeps } from "../src/lifecycle/seam.ts";
+import type { CapCount } from "../src/lifecycle/caps.ts";
 
 const REPO = "test-owner/lifecycle-journal-test";
 const ISSUE = 987654;
@@ -42,7 +47,7 @@ function entry(over: Partial<LifecycleJournalEntry> = {}): LifecycleJournalEntry
 describe("lifecycle-journal Redis seam (issue #5310)", () => {
   let redis: any;
   const cleanup = async () => {
-    await redis.del(lifecycleJournalKey(REPO, ISSUE), lifecycleClaimKey(REPO, ISSUE), holdExitIndexKey(REPO));
+    await redis.del(lifecycleJournalKey(REPO, ISSUE), lifecycleClaimKey(REPO, ISSUE), holdExitIndexKey(REPO), capEventsIndexKey(REPO));
   };
 
   before(() => {
@@ -148,12 +153,70 @@ describe("lifecycle-journal Redis seam (issue #5310)", () => {
     const e = entry({ ts: now, kind: "external", source: "external", from: "parked", to: "needs-triage" });
     assert.ok((await appendLifecycleEntry(REPO, 21, e)).ok);
     assert.equal(await redis.zcard(holdExitIndexKey(REPO)), 0);
-    assert.ok((await appendLifecycleEntry(REPO, 22, e, true)).ok);
+    assert.ok((await appendLifecycleEntry(REPO, 22, e, { holdExit: true })).ok);
     assert.equal(await redis.zcard(holdExitIndexKey(REPO)), 1);
     assert.equal(await redis.llen(lifecycleJournalKey(REPO, 22)), 1);
     const listed = await listHoldExits(REPO, now - 1000);
     assert.ok(listed.ok);
     assert.deepEqual(listed.exits.map((x) => x.issue), [22]);
+  });
+
+  test("every append indexes a cap park / would-park / claim-opened with no selector, in the same MULTI; other entries are not indexed (#5324)", async () => {
+    const now = 1_760_000_000_000;
+    const park = entry({ ts: now, to: "parked", reason: "cap:qa-stall", result: "parked:qa-stall", evidence: { pr: "9" } });
+    const would = entry({ ts: now + 1, kind: "refused", written: false, to: "parked", reason: "cap:total-claims", result: "shadow-would-park:total-claims" });
+    const claim = entry({ ts: now + 2, kind: "claim-opened", from: null, to: null });
+    const plain = entry({ ts: now + 3 });
+    for (const [n, e] of [[31, park], [32, would], [33, claim], [34, plain]] as const) {
+      assert.ok((await appendLifecycleEntry(REPO, n, e)).ok);
+    }
+    assert.equal(await redis.zcard(capEventsIndexKey(REPO)), 3);
+    // a hold-exit selector does not suppress the cap-event index
+    assert.ok((await appendLifecycleEntry(REPO, 35, entry({ ts: now + 4, to: "parked", reason: "cap:qa-stall" }), { holdExit: true })).ok);
+    assert.equal(await redis.zcard(capEventsIndexKey(REPO)), 4);
+    const listed = await listCapEvents(REPO, now);
+    assert.ok(listed.ok);
+    assert.deepEqual(listed.events.map((x) => [x.kind, x.issue, x.arm ?? null]), [
+      ["park", 31, "qa-stall"],
+      ["would-park", 32, "total-claims"],
+      ["claim", 33, null],
+      ["park", 35, "qa-stall"],
+    ]);
+    assert.equal(listed.events[0].pr, 9);
+    assert.equal(await redis.llen(lifecycleJournalKey(REPO, 31)), 1);
+    for (const n of [31, 32, 33, 34, 35]) await redis.del(lifecycleJournalKey(REPO, n));
+  });
+
+  test("a real parkForCap append lands a kind=park member in the cap-events index (#5324)", async () => {
+    const now = 1_760_000_000_000;
+    let labels = ["ready-for-agent"];
+    const deps = {
+      repo: REPO,
+      view: async (n: number) => ({ ok: true, row: { number: n, title: "t", url: "", createdAt: "", labels: [...labels], body: "", state: "OPEN" } }),
+      edit: async (_n: number, l: { remove: string[]; add: string[] }) => {
+        labels = labels.filter((x) => !l.remove.includes(x)).concat(l.add);
+        return { ok: true };
+      },
+      comment: async () => ({ ok: true }),
+      journal: { append: appendLifecycleEntry, readClaim: readDispatchClaim, closeClaim: closeDispatchClaim },
+      now: () => now,
+    } as unknown as SeamDeps;
+    const over = { arm: "qa-stall", unit: "claims", count: 3, limit: 3, source: "journal", applicable: true } as unknown as CapCount;
+    const res = await parkForCap({ issue: 51, from: "ready-for-agent", over, counts: [over], pr: 77 }, deps);
+    assert.equal(res.written, true);
+    const listed = await listCapEvents(REPO, now - 1);
+    assert.ok(listed.ok);
+    assert.deepEqual(listed.events.map((x) => [x.kind, x.issue, x.arm ?? null, x.pr ?? null]), [["park", 51, "qa-stall", 77]]);
+    await redis.del(lifecycleJournalKey(REPO, 51));
+  });
+
+  test("cap-events index trims members older than 30d on write (#5324)", async () => {
+    const now = 1_760_000_000_000;
+    const DAY = 24 * 60 * 60 * 1000;
+    await appendLifecycleEntry(REPO, 41, entry({ ts: now - 40 * DAY, kind: "claim-opened" }));
+    await appendLifecycleEntry(REPO, 42, entry({ ts: now, kind: "claim-opened" }));
+    assert.equal(await redis.zcard(capEventsIndexKey(REPO)), 1);
+    for (const n of [41, 42]) await redis.del(lifecycleJournalKey(REPO, n));
   });
 
   test("hold-exit index: recordHoldExit ZADDs by ts, listHoldExits filters by since, 30d members are trimmed", async () => {

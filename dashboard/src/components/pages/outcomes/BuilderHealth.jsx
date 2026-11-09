@@ -43,10 +43,17 @@ export function BuilderHealth({ windowDays = 7, prWindow = 50 }) {
   const scope = data?.scopeViolations;
   const learning = data?.learningThroughput;
   const stagnation = data?.stagnation;
+  const parentExc = data?.parentExceptionRate;
+  const firstPass = data?.firstPassQaYield;
+  const parkRate = data?.parkRatePerArm;
+
+  // A non-null lifecycle field keeps the section alive (ADR-0047 D9, #5324).
+  const lifecycleLive = parentExc != null || firstPass != null || parkRate != null;
 
   const isEmpty =
     !data ||
-    ((auto?.total ?? 0) === 0 &&
+    (!lifecycleLive &&
+      (auto?.total ?? 0) === 0 &&
       (ttm?.samples ?? 0) === 0 &&
       (rework?.window ?? 0) === 0 &&
       (share?.window ?? 0) === 0 &&
@@ -107,6 +114,9 @@ export function BuilderHealth({ windowDays = 7, prWindow = 50 }) {
             sub={scope ? `last ${scope.windowDays}d` : ""}
           />
         </div>
+
+        {/* Lifecycle row (ADR-0047 Decision 9, issue #5324): each tile is dark on null, never a 0 */}
+        <LifecycleRow parentExc={parentExc} firstPass={firstPass} parkRate={parkRate} />
 
         {/* Rework + learning row */}
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
@@ -371,6 +381,103 @@ function fmtSignal(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return "—";
   return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle (ADR-0047) row — parent-exception rate, first-pass QA yield, park
+// rate per cap arm (issue #5324)
+// ---------------------------------------------------------------------------
+
+const pct = (v, digits = 0) => `${(v * 100).toFixed(digits)}%`;
+
+/** 'baseline 41% (#5291, 11-03..11-05)' — or '' when no baseline is recorded. */
+function baselineLine(baseline, digits = 0) {
+  if (!baseline || baseline.value == null || !Number.isFinite(baseline.value)) return "";
+  const src = String(baseline.source ?? "").startsWith("replay") ? "replay" : baseline.source;
+  const span =
+    baseline.coveredFrom && baseline.coveredTo
+      ? `, ${baseline.coveredFrom.slice(5)}..${baseline.coveredTo.slice(5)}`
+      : "";
+  return `baseline ${pct(baseline.value, digits)} (${src}${span})`;
+}
+
+function LifecycleRow({ parentExc, firstPass, parkRate }) {
+  const causes = parentExc?.byCause ? Object.entries(parentExc.byCause) : [];
+  return (
+    <div>
+      <div className="text-xs uppercase tracking-wide text-zinc-400 mb-2">Lifecycle (ADR-0047)</div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div>
+          <Stat
+            label="Parent-exception rate"
+            value={parentExc && parentExc.rate != null ? pct(parentExc.rate, 1) : "—"}
+            sub={
+              parentExc
+                ? [
+                    `${parentExc.exceptionTurns}/${parentExc.turns} turns, ${parentExc.windowDays}d`,
+                    baselineLine(parentExc.baseline, 1),
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")
+                : "unavailable"
+            }
+          />
+          {causes.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {causes.map(([cause, n]) => (
+                <span key={cause} className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300">
+                  {cause} {n}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+        <Stat
+          label="First-pass QA yield"
+          value={firstPass && firstPass.yield != null ? pct(firstPass.yield) : "—"}
+          sub={
+            firstPass
+              ? [
+                  `${firstPass.firstPass}/${firstPass.population} PRs, ${firstPass.windowDays}d`,
+                  baselineLine(firstPass.baseline),
+                ]
+                  .filter(Boolean)
+                  .join(" · ")
+              : "unavailable"
+          }
+        />
+        <div>
+          <div className="text-xs uppercase tracking-wide text-zinc-500 mb-1">Park rate per cap arm</div>
+          {parkRate ? (
+            <>
+              <div className="flex flex-wrap gap-1">
+                {Object.entries(parkRate.arms).map(([arm, c]) => (
+                  <span
+                    key={arm}
+                    className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono"
+                    title={`${c.parks} parks, ${c.wouldPark} would-park`}
+                  >
+                    {arm} {c.rate != null ? pct(c.rate, 1) : "—"}
+                    {parkRate.mode === "shadow" && c.wouldPark > 0 ? ` (${c.wouldPark} would-park)` : ""}
+                  </span>
+                ))}
+              </div>
+              <div className="text-xs text-zinc-500 mt-1">
+                {parkRate.claimsOpened} claims, {parkRate.windowDays}d
+                {parkRate.mode === "shadow" && (
+                  <span className="ml-2 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-zinc-700/50 text-zinc-400">
+                    shadow
+                  </span>
+                )}
+              </div>
+            </>
+          ) : (
+            <div className="text-2xl font-mono text-zinc-100">—</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function Stat({ label, value, sub, accent = "text-zinc-100" }) {

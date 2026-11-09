@@ -783,6 +783,60 @@ export interface TurnDecision {
   reason: string;
 }
 
+/** One mirrored Run Ledger parent-exception row (issue #5324). */
+export interface TurnParentException {
+  cause: string;
+  turn: number;
+  source: string;
+  detail: string;
+  ts_epoch: number;
+}
+
+/**
+ * Keep only well-formed parent-exception rows (string cause/source, integer
+ * turn and ts_epoch); drop the rest with a warn. `undefined` when the field
+ * is absent or yields no valid row, so the member omits it. A genuinely empty
+ * array is kept as `[]`: it marks a clean, mirror-era turn (#5324).
+ */
+function sanitizeParentExceptions(
+  raw: unknown,
+  runId: string,
+  turnN: number,
+): TurnParentException[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    logger.warn({ runId, turnN }, "[autopilot] recordTurn dropped non-array parent_exceptions field");
+    return undefined;
+  }
+  const kept: TurnParentException[] = [];
+  for (const row of raw) {
+    const r = row as Partial<TurnParentException> | null;
+    if (
+      r &&
+      typeof r === "object" &&
+      typeof r.cause === "string" &&
+      typeof r.source === "string" &&
+      Number.isInteger(r.turn) &&
+      Number.isInteger(r.ts_epoch)
+    ) {
+      kept.push({
+        cause: r.cause,
+        turn: r.turn as number,
+        source: r.source,
+        detail: typeof r.detail === "string" ? r.detail : "",
+        ts_epoch: r.ts_epoch as number,
+      });
+    }
+  }
+  if (kept.length !== raw.length) {
+    logger.warn(
+      { runId, turnN, dropped: raw.length - kept.length },
+      "[autopilot] recordTurn dropped malformed parent_exceptions rows",
+    );
+  }
+  return kept.length > 0 || raw.length === 0 ? kept : undefined;
+}
+
 /**
  * Sanitise the #4635 observability fields off a (loose-schema) turn body.
  *
@@ -929,6 +983,7 @@ export async function recordTurn(
     // Existing keys and their order are unchanged; turns recorded before this
     // deploy simply lack the keys.
     const observability = sanitizeTurnObservabilityFields(body, runId, turnN);
+    const parentExceptions = sanitizeParentExceptions(body.parent_exceptions, runId, turnN);
 
     const turnMember = JSON.stringify({
       turn_n: turnN,
@@ -945,6 +1000,7 @@ export async function recordTurn(
         : {}),
       ...(observability.usage_shed !== undefined ? { usage_shed: observability.usage_shed } : {}),
       ...(observability.usage_allow !== undefined ? { usage_allow: observability.usage_allow } : {}),
+      ...(parentExceptions !== undefined ? { parent_exceptions: parentExceptions } : {}),
     });
 
     // 1. Immutable turn row.
