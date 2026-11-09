@@ -31,7 +31,7 @@ import {
   parsePrEvidence,
   type Fetched,
 } from "./gates.ts";
-import { postCapReset } from "./park.ts";
+import { latestCapParkPr, postCapReset } from "./park.ts";
 import { advance, releaseClaim, type AdvanceInput, type AdvanceResult, type SeamDeps } from "./seam.ts";
 import { externalMoves, lastKnownState } from "./timeline.ts";
 import { stateLabelsOf } from "./transitions.ts";
@@ -370,10 +370,28 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
         report.errors.push(`cap-reset-comments-failed:#${issue}`);
         return false;
       }
-      if (!(latestResetMs(comments.value) < eventMs)) return true;
+      const issueNeeds = latestResetMs(comments.value) < eventMs;
+      // The qa-fail-rounds arm reads PR bodies, so the PR needs its own marker
+      // even when the operator already posted one on the issue.
+      const pr = await latestCapParkPr(issue, deps.seam);
+      let prNeeds = false;
+      if (pr !== null) {
+        const bodies = await deps.seam.fetch.prBodies(pr);
+        if (bodies.ok === false) {
+          report.errors.push(`cap-reset-pr-bodies-failed:#${issue}`);
+          return false;
+        }
+        prNeeds = latestResetMs(bodies.value) < eventMs;
+      }
+      if (!issueNeeds && !prNeeds) return true;
       report.capResetsPosted++;
       if (dryRun) return true;
-      const res = await postCapReset(issue, { by: "external", ts: new Date(eventMs).toISOString() }, deps.seam);
+      const res = await postCapReset(
+        issue,
+        { by: "external", ts: new Date(eventMs).toISOString() },
+        deps.seam,
+        { issue: issueNeeds, pr: prNeeds },
+      );
       if (res.ok === false) {
         report.capResetsPosted--;
         report.errors.push(`cap-reset-failed:#${issue}`);

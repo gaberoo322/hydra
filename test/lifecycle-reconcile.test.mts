@@ -74,6 +74,7 @@ function world(mode: "shadow" | "enforce" = "enforce") {
     persistFails: false,
     expireFails: false,
     postFails: false,
+    prBodiesFail: false,
     deps: undefined as unknown as ReconcileDeps,
   };
   const j = (n: number): LifecycleJournalEntry[] => {
@@ -119,7 +120,7 @@ function world(mode: "shadow" | "enforce" = "enforce") {
         w.timelineFetches++;
         return { ok: true, value: w.timelines.get(n) ?? [] };
       },
-      prBodies: async () => ({ ok: true, value: [] }),
+      prBodies: async (n) => (w.prBodiesFail ? { ok: false } : { ok: true, value: w.comments.get(n) ?? [] }),
       qaLive: async (n) => (w.lives.has(n) ? { ok: true, value: w.lives.get(n)! } : { ok: false }),
     },
     journal: {
@@ -436,6 +437,51 @@ describe("external un-park posts one Hydra-Cap-Reset (INV-7)", () => {
     const report = await runReconcile(w.deps);
     assert.equal(report.capResetsPosted, 0);
     assert.equal(w.posted.length, 0);
+  });
+});
+
+describe("external un-park posts the missing PR-side marker (#5437)", () => {
+  const setup = () => {
+    const ctx = world();
+    ctx.add(80, ["ready-for-agent"]);
+    ctx.journal(80).push(je({ kind: "transition", to: "parked", reason: "cap:qa-fail-rounds", evidence: { pr: "77" } }));
+    ctx.w.timelines.set(80, [
+      { event: "labeled", label: "parked", tsMs: T1 },
+      { event: "unlabeled", label: "parked", tsMs: T2 },
+      { event: "labeled", label: "ready-for-agent", tsMs: T2 },
+    ]);
+    return ctx;
+  };
+  const marker = `Hydra-Cap-Reset: by=op ts=${new Date(T2).toISOString()}`;
+
+  test("an issue-side marker already present still gets the PR marker, once", async () => {
+    const { w } = setup();
+    w.comments.set(80, [marker]);
+    const first = await runReconcile(w.deps);
+    assert.equal(first.capResetsPosted, 1);
+    assert.deepEqual(w.posted.map((p) => p.number), [77]);
+    assert.match(w.posted[0].body, /^Hydra-Cap-Reset: by=external /);
+    const second = await runReconcile(w.deps);
+    assert.equal(second.capResetsPosted, 0);
+    assert.equal(w.posted.length, 1);
+  });
+
+  test("markers on both surfaces post nothing", async () => {
+    const { w } = setup();
+    w.comments.set(80, [marker]);
+    w.comments.set(77, [marker]);
+    const report = await runReconcile(w.deps);
+    assert.equal(report.capResetsPosted, 0);
+    assert.equal(w.posted.length, 0);
+  });
+
+  test("a PR-bodies fetch failure appends nothing and posts nothing", async () => {
+    const { w } = setup();
+    w.prBodiesFail = true;
+    const report = await runReconcile(w.deps);
+    assert.equal(w.posted.length, 0);
+    assert.equal(report.externalEntries, 0);
+    assert.ok(report.errors.some((e) => e.startsWith("cap-reset-pr-bodies-failed")));
   });
 });
 

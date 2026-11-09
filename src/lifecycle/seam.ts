@@ -84,7 +84,7 @@ import {
   type CapEvaluation,
   type TimelineLabelEvent,
 } from "./caps.ts";
-import { parkForCap } from "./park.ts";
+import { parkForCap, postCapReset } from "./park.ts";
 import {
   findOperatorTransition,
   findTransition,
@@ -943,8 +943,33 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
     return { ok: false, issue, code: "write-unverified", mode, written: true };
   }
 
+  // Complete un-park: leaving `parked` restarts every cap arm, including the
+  // PR-side `qa-fail-rounds` count. The marker never decides `ok`.
+  let capReset: string | null = null;
+  if (removed.includes("parked") && to !== "closed") {
+    try {
+      const reset = await postCapReset(issue, { by: input.actor, ts: new Date(deps.now()).toISOString() }, deps);
+      if (reset.ok === false) {
+        capReset = `failed:${reset.code}`;
+        logger.error({ issue, code: reset.code }, "[lifecycle] un-park cap reset failed");
+      } else {
+        capReset = reset.prPosted ? "issue+pr" : "issue";
+      }
+    } catch (err) {
+      capReset = "failed:crashed";
+      logger.error({ err, issue }, "[lifecycle] un-park cap reset crashed");
+    }
+  }
   if (!selfMove) {
-    await journal(deps, issue, operatorEntry(deps, { kind: "transition", from, result: "ok", written: true }, input));
+    await journal(
+      deps,
+      issue,
+      operatorEntry(
+        deps,
+        { kind: "transition", from, result: "ok", written: true, ...(capReset !== null ? { evidence: { capReset } } : {}) },
+        input,
+      ),
+    );
   }
   if (to === "closed") {
     const exp = await deps.journal.expireOnClose(deps.repo, issue);

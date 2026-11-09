@@ -451,9 +451,11 @@ exactly like a cap park. The un-park route, when the operator chooses to resume:
    other lane - the sanctioned `operator-route` exit from a human-hold state (the
    seam strips `parked` as it strips `hitl-grill`). Never write a lifecycle state
    label with `gh issue edit` from this playbook.
-2. **The reset marker.** Post the marker comment so the cap counts restart from
-   here: `gh issue comment <N> --repo gaberoo322/hydra --body
-   "Hydra-Cap-Reset: by=operator:<name> ts=<ISO-8601>"`.
+2. **The reset marker.** The route posts the `Hydra-Cap-Reset:` marker on the
+   issue AND on the park's PR (the `qa-fail-rounds` arm counts PR comments only),
+   so every cap count restarts. Verify it, do not post by hand unless the route's
+   journal evidence says `capReset: failed:<code>`; then post the same line on
+   the issue and on PR #<pr> from the `Hydra-Cap-Park:` comment.
 
 **Evidence `preview` — two buckets only.** `preview` renders monospace markdown
 beside the options and is single-select-only, which is exactly this walk. Use it

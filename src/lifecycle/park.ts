@@ -56,8 +56,10 @@ export function renderParkComment(input: ParkInput, nowIso: string): string {
     "|---|---|---|---|",
     ...rows,
     "",
-    "To un-park: investigate why the attempts keep failing, then remove the `parked` label, add the right state label, " +
-      `and post \`${CAP_RESET_PREFIX} by=<you> ts=<ISO-8601>\` so every count restarts from that moment.`,
+    "To un-park: investigate why the attempts keep failing, then un-park through the board route " +
+      "(`POST /api/autopilot/board/relabel` or `promote`), which posts the reset on the issue and the PR. By hand, remove the " +
+      `\`parked\` label, add the right state label, and post \`${CAP_RESET_PREFIX} by=<you> ts=<ISO-8601>\` on this issue` +
+      `${pr !== null ? ` AND on PR #${pr}` : ""} so every count restarts from that moment.`,
     "",
     `Hydra-Cap-Park: arm=${over.arm} count=${over.count} limit=${over.limit} unit=${over.unit}` +
       `${pr !== null ? ` pr=${pr}` : ""} source=${over.source} ts=${nowIso}`,
@@ -151,30 +153,49 @@ export interface CapResetInput {
 export type CapResetResult = { ok: true; prPosted: boolean } | { ok: false; code: string };
 
 /**
+ * The PR named by the latest `cap:` park journal entry, or null. The
+ * `qa-fail-rounds` arm counts PR comment bodies, so a reset must land there too.
+ */
+export async function latestCapParkPr(issue: number, deps: SeamDeps): Promise<number | null> {
+  const journal = await deps.journal.read(deps.repo, issue);
+  if (!journal.ok) return null;
+  for (const e of [...journal.entries].reverse()) {
+    if (typeof e.reason === "string" && e.reason.startsWith("cap:") && e.to === "parked") {
+      const n = Number(e.evidence.pr);
+      return Number.isInteger(n) && n > 0 ? n : null;
+    }
+  }
+  return null;
+}
+
+export interface CapResetTargets {
+  issue: boolean;
+  pr: boolean;
+}
+
+/**
  * Post `Hydra-Cap-Reset: by=<by> ts=<iso>` on the issue and, when the latest
  * `cap:` park names `pr=`, the same line on that PR (decideQaRoundAction reads
- * only PR bodies). Not wired to any route in #5314: #5313 and #5316 call it.
+ * only PR bodies). Wired to the operator-route un-park (operatorAdvance) and the
+ * reconciler's external un-park; `targets` narrows which surface(s) to post on.
  */
-export async function postCapReset(issue: number, input: CapResetInput, deps: SeamDeps): Promise<CapResetResult> {
+export async function postCapReset(
+  issue: number,
+  input: CapResetInput,
+  deps: SeamDeps,
+  targets: CapResetTargets = { issue: true, pr: true },
+): Promise<CapResetResult> {
   try {
     if (Number.isNaN(Date.parse(input.ts)) || !/^\S+$/.test(input.by)) {
       return { ok: false, code: "invalid-reset-input" };
     }
     const line = `${CAP_RESET_PREFIX} by=${input.by} ts=${input.ts}`;
-    const posted = await deps.comment(issue, line);
-    if (posted.ok === false) return { ok: false, code: `comment-failed:${posted.code}` };
-
-    let pr: number | null = null;
-    const journal = await deps.journal.read(deps.repo, issue);
-    if (journal.ok) {
-      for (const e of [...journal.entries].reverse()) {
-        if (typeof e.reason === "string" && e.reason.startsWith("cap:") && e.to === "parked") {
-          const n = Number(e.evidence.pr);
-          pr = Number.isInteger(n) && n > 0 ? n : null;
-          break;
-        }
-      }
+    if (targets.issue) {
+      const posted = await deps.comment(issue, line);
+      if (posted.ok === false) return { ok: false, code: `comment-failed:${posted.code}` };
     }
+
+    const pr = targets.pr ? await latestCapParkPr(issue, deps) : null;
     let prPosted = false;
     if (pr !== null) {
       const prRes = await deps.comment(pr, line);

@@ -530,6 +530,55 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
   });
 });
 
+describe("operatorAdvance un-park posts the cap reset on issue and PR (#5437)", () => {
+  const parkEntry = (pr?: number): LifecycleJournalEntry => ({
+    v: 1, ts: 1, kind: "transition", from: "in-progress", to: "parked", source: "cli", actor: "cli",
+    evidence: pr ? { pr: String(pr) } : {}, reason: "cap:qa-fail-rounds", rationale: null, result: "parked:qa-fail-rounds", written: true,
+  });
+  const posted = (o: ReturnType<typeof operatorHarness>): Array<{ n: number; body: string }> => {
+    const out: Array<{ n: number; body: string }> = [];
+    o.h.deps.comment = async (n, body) => { out.push({ n, body }); return { ok: true }; };
+    return out;
+  };
+
+  test("leaving parked posts one marker on the issue and the identical line on the PR, counting 0", async () => {
+    const o = operatorHarness(["parked"], "shadow");
+    o.h.journal.push(parkEntry(77));
+    const out = posted(o);
+    const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+    assert.equal(res.ok, true);
+    assert.equal(out.length, 2);
+    assert.deepEqual(out.map((c) => c.n), [10, 77]);
+    assert.equal(out[0].body, out[1].body);
+    assert.match(out[0].body, /^Hydra-Cap-Reset: by=board:promote ts=1970-01-01T00:00:01\.000Z$/);
+    const t = o.h.journal.at(-1)!;
+    assert.equal(t.evidence.capReset, "issue+pr");
+    const { countReviewedFailRoundsSinceReset } = await import("../src/lifecycle/caps.ts");
+    const failBody = "QA-Verdict: FAIL pr=77 round=1";
+    assert.equal(countReviewedFailRoundsSinceReset([failBody, failBody, out[1].body], 77), 0);
+  });
+
+  test("a failed marker never flips ok and is stamped as failed evidence", async () => {
+    const o = operatorHarness(["parked"], "shadow");
+    o.h.journal.push(parkEntry(77));
+    o.h.deps.comment = async () => ({ ok: false, code: "gh-failed", stderr: "x" });
+    const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+    assert.equal(res.ok, true);
+    assert.equal(o.h.journal.at(-1)!.evidence.capReset, "failed:comment-failed:gh-failed");
+  });
+
+  test("a non-parked exit and a close post no marker", async () => {
+    const o = operatorHarness(["needs-triage"], "shadow");
+    const out = posted(o);
+    await operatorAdvance({ issue: 10, to: "blocked", actor: "board:relabel" }, o.h.deps);
+    const p = operatorHarness(["parked"], "shadow");
+    const out2 = posted(p);
+    await operatorAdvance({ issue: 10, to: "closed", actor: "board:close" }, p.h.deps);
+    assert.equal(out.length, 0);
+    assert.equal(out2.length, 0);
+  });
+});
+
 describe("operatorReopen (#5313 INV-8)", () => {
   test("reopens, PERSISTS the journal, then journals from closed with source operator-route", async () => {
     const o = operatorHarness(["needs-triage"], "enforce", { state: "CLOSED" });

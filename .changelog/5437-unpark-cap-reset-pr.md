@@ -1,0 +1,1 @@
+- fix: operator un-park from the board now posts the cap reset on the issue and the park's PR (#5437)
