@@ -180,8 +180,9 @@ def _handle_dev_orch_stall(
     )
 
     if not relabelled:
-        # Refused advance (from-mismatch, `parked:*` incl. the dev-nopr-resume
-        # Live Cap, write-failed): the issue did NOT move, so posting
+        # Refused advance (from-mismatch, an already `parked:*` issue,
+        # write-failed; the dev-nopr-resume Live Cap parks at the NEXT resume
+        # claim, not on this edge): the issue did NOT move, so posting
         # "Relabelled" or queueing a resume would be false (QA #5433 round 1).
         line = (
             f"dev_stall_no_pr_advance_refused anchor={anchor_ref} "

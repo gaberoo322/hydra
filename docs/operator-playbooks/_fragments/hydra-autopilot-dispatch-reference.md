@@ -178,9 +178,12 @@ cache, so the resume path no longer depends on it surviving. Four mechanisms:
    intent for `issue-<N>` — no branch to continue, so the
    dispatch prompt reads the issue's own comments for the last reap stall's
    `**Branch:**` line instead. There is NO state key: the durable cap is the lifecycle seam's
-   `dev-nopr-resume` Live Cap (#5318), enforced when `_handle_dev_orch_stall`
-   advances the issue to `needs-dev-resume`; a refused advance (cap reached,
-   `parked:*`) leaves the issue untouched, posts no comment and queues no resume.
+   `dev-nopr-resume` Live Cap (#5318), counted from `claim-closed outcome=no-pr`
+   journal entries and enforced at the NEXT resume claim (the seam parks the issue
+   then). `_handle_dev_orch_stall` adds no park of its own and the
+   `in-progress -> needs-dev-resume` edge carries no cap; it only skips the
+   comment and resume when an advance is refused for another reason (`parked:*`,
+   from-mismatch, write-failed).
 
 On the disk side, `scripts/branch-prune.sh` — the only deleter of
 `.claude/worktrees/agent-*` — never removes a worktree holding uncommitted

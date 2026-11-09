@@ -164,8 +164,8 @@ def _select_slot_dev_orch(
     # had a dispatch).
     #
     # NO state key and NO in-run tracker: the durable cap is the lifecycle
-    # seam's `dev-nopr-resume` Live Cap, enforced at the resume claim (#5318);
-    # a refused advance parks the issue instead of queueing another resume.
+    # seam's `dev-nopr-resume` Live Cap, enforced at the NEXT resume claim (#5318);
+    # the seam parks the issue then. reap_stall adds no park of its own.
     nopr_anchor = _orch_anchor_signal(state, "orch_dev_resume_nopr_anchor")
     if nopr_anchor is not None and not _is_parked_anchor(state, events, nopr_anchor):
         return make_dispatch(

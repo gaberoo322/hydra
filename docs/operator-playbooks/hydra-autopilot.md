@@ -368,7 +368,7 @@ completed dispatch's live agent handle is not something `decide.py` can act
 on), but reusing the branch avoids re-paying the tokens already spent on the
 committed portion of the prior attempt.
 
-> **CONTEXT POINTER:** how a resume gets queued and survives a relaunch — the reap-side no-PR-stall backstop (issue #3866) and durable dev resume (issue #4518), including the label-derived no-PR pin `orch_dev_resume_nopr_anchor` and its reap-time cap (issue #4808) — lives in `hydra-autopilot-dispatch-reference.md` § dev_orch resume internals (sibling of this SKILL.md). One rule from it applies at dispatch time: every `prompt_args.forward_fix_pr` action from the `orch_dev_resume_pick` pin — ANY provenance since issue #5058 — carries the forward-fix contract below verbatim; the attempt cap applies only to its red-CI arm.
+> **CONTEXT POINTER:** how a resume gets queued and survives a relaunch — the reap-side no-PR-stall backstop (issue #3866) and durable dev resume (issue #4518), including the label-derived no-PR pin `orch_dev_resume_nopr_anchor` and its seam-enforced `dev-nopr-resume` Live Cap (#5318) — lives in `hydra-autopilot-dispatch-reference.md` § dev_orch resume internals (sibling of this SKILL.md). One rule from it applies at dispatch time: every `prompt_args.forward_fix_pr` action from the `orch_dev_resume_pick` pin — ANY provenance since issue #5058 — carries the forward-fix contract below verbatim; the attempt cap applies only to its red-CI arm.
 
 **Red-PR forward-fix dispatch contract (issues #4460, #5058, INV-10).** When the
 `dev_orch` selector's dispatch action carries
