@@ -310,6 +310,8 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     orch_prs_dirty: [...v.prGate.dirty],
     orch_prs_unchecked: [...v.prGate.unchecked],
     orch_prs_behind: [...v.prGate.behind],
+    // #5400: open PRs with no closing issue (unreachable by every PR lane)
+    orch_prs_no_closing_issue: [...v.prGate.noClosingIssue],
     orch_ci_trigger_stale: v.prGate.ciTriggerStale.ok && v.prGate.ciTriggerStale.value,
     orch_prs_red_resume: v.prGate.redResume.ok ? [...v.prGate.redResume.value] : [],
     orch_dev_resume_pick: pin(v.prGate.devResumePick.ok ? v.prGate.devResumePick.value : null),
