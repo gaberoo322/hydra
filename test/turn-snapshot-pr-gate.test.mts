@@ -40,7 +40,9 @@ import {
   applyMergeStateRepoll,
   checkVerdictFor,
   collectPrGate,
+  DEFAULT_PR_REF_PREDICATES,
   hasUnknownMergeState,
+  noClosingIssuePrs,
   parseTierLine,
   prGateFallbackSnapshot,
   type PrGateEnv,
@@ -487,6 +489,35 @@ describe("pr-gate — open PR with no closing issue (issue #5400)", () => {
   test("fails closed to [] when the pr-refs predicates are unavailable", async () => {
     const buckets = await runPrGate([aged({ number: 5131, body: "Refs #1" })], { prRefs: PR_REFS_UNAVAILABLE });
     assert.deepEqual(buckets.noClosingIssue, []);
+  });
+
+  test("a parked PR is not flagged; its unparked sibling is (INV-5)", () => {
+    const prs = [aged({ number: 5141, body: "Refs #1" }), aged({ number: 5142, body: "Refs #1" })];
+    const ok = { ok: true, predicates: DEFAULT_PR_REF_PREDICATES } as const;
+    const notes: string[] = [];
+    assert.deepEqual(noClosingIssuePrs(prs, ok, new Set([5141]), NOW_MS / 1000, 600, notes), [5142]);
+    assert.deepEqual(noClosingIssuePrs(prs, ok, new Set(), NOW_MS / 1000, 600, notes), [5141, 5142]);
+  });
+
+  test("a throwing closing() is a note and never a flag; unavailable pr-refs also notes (INV-4)", () => {
+    const prs = [aged({ number: 5151, body: "Refs #1" })];
+    const throwing = {
+      ok: true,
+      predicates: {
+        ...DEFAULT_PR_REF_PREDICATES,
+        closing: () => {
+          throw new Error("bad body");
+        },
+      },
+    } as const;
+    const notes: string[] = [];
+    assert.deepEqual(noClosingIssuePrs(prs, throwing, new Set(), NOW_MS / 1000, 600, notes), []);
+    assert.equal(notes.length, 1);
+    assert.match(notes[0], /5151.*bad body/);
+    const notes2: string[] = [];
+    assert.deepEqual(noClosingIssuePrs(prs, PR_REFS_UNAVAILABLE, new Set(), NOW_MS / 1000, 600, notes2), []);
+    assert.equal(notes2.length, 1);
+    assert.match(notes2[0], /#5400/);
   });
 });
 

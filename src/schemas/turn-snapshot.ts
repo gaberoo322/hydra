@@ -148,7 +148,7 @@ const SignalsSchema = z
     orch_prs_unchecked: NumberList,
     orch_prs_behind: NumberList,
     // #5400: open PRs with no closing issue
-    orch_prs_no_closing_issue: NumberList,
+    orch_prs_no_closing_issue: NumberList.default([]),
     orch_ci_trigger_stale: z.boolean(),
     // #5058: the provenance-agnostic resume pick (ex-#4460 GLM arm folded in)
     // and its red-CI-only subset — decide.py's per-PR forward-fix cap scope.
