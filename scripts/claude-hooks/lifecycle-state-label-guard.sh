@@ -449,22 +449,27 @@ def _foreign_repo(val):
         return False
     if "$" in val:
         return val.lstrip("$").strip("{}").upper() == "TARGET_GH_REPO"
-    return val.lower() != HYDRA_REPO
+    # Normalise every spelling gh resolves to this repo (scheme/host prefix,
+    # trailing dot-suffix / slash) before comparing.
+    norm = val.lower().rstrip("/")
+    norm = re.sub(r"^(https?://|ssh://[a-z]+@|[a-z]+@)?(www\.)?github\.com[/:]", "", norm)
+    if norm.endswith("." + "git"):
+        norm = norm[:-4]
+    return norm.rstrip("/") != HYDRA_REPO
 
 
 def _other_repo(args):
     # A `--repo`/`-R` operand naming something other than the Orchestrator repo
     # (the Target board) is outside the lifecycle seam: allow. A bare command
     # defaults to this repo and is inspected.
+    # gh honours the LAST --repo operand.
+    last = None
     for i, tok in enumerate(args):
-        val = None
         if tok in ("--repo", "-R") and i + 1 < len(args):
-            val = args[i + 1]
+            last = args[i + 1]
         elif tok.startswith("--repo="):
-            val = tok[len("--repo="):]
-        if val is not None:
-            return _foreign_repo(val)
-    return False
+            last = tok[len("--repo="):]
+    return _foreign_repo(last) if last is not None else False
 
 
 def _issue_label_state(args):
@@ -672,7 +677,45 @@ def _shell_c_strings(toks):
     return out
 
 
-SUBST = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+BACKTICK = re.compile(r"`([^`]*)`")
+
+
+def _subst_bodies(text):
+    # Bodies of every `$( ... )`: balanced-paren and quote-aware, so a body
+    # containing parentheses (`$(gh ... --body "$(date)")`) is captured whole.
+    # An unclosed `$(` takes the rest of the text (fail closed). Backtick
+    # bodies are appended.
+    out = []
+    i = 0
+    n = len(text)
+    while True:
+        i = text.find("$(", i)
+        if i < 0:
+            break
+        j = i + 2
+        depth = 1
+        quote = None
+        while j < n and depth:
+            c = text[j]
+            if quote:
+                if c == "\\" and quote == '"':
+                    j += 1
+                elif c == quote:
+                    quote = None
+            elif c in "\"'":
+                quote = c
+            elif c == "\\":
+                j += 1
+            elif c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            j += 1
+        out.append(text[i + 2:j - 1] if depth == 0 else text[i + 2:])
+        i += 2
+    out.extend(m.group(1) for m in BACKTICK.finditer(text))
+    return out
+
 EXEC_FLAGS = ("-exec", "-execdir", "-ok", "-okdir")
 
 
@@ -711,8 +754,8 @@ def _scan(text, depth=0):
     # Command substitutions (`$(gh ...)`, backticks) are code: re-scan their
     # bodies, then scan the top-level segments.
     if depth < 3:
-        for m in SUBST.finditer(text):
-            hit = _scan(m.group(1) or m.group(2) or "", depth + 1)
+        for body in _subst_bodies(text):
+            hit = _scan(body, depth + 1)
             if hit:
                 return hit
     for seg in _segments(text):

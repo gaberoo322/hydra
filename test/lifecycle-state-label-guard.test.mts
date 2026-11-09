@@ -381,4 +381,22 @@ describe("lifecycle-state-label-guard: QA round-4 bypasses (operator ruling)", (
     assertAllow(`find . -name x -exec ${GH_EDIT} 5 ${ADD} bug \\;`);
     assertAllow("echo $(date) needs-qa");
   });
+  // QA round 4: nested parentheses, repo spellings, last --repo wins.
+  test("nested $( ) with parenthesised bodies is denied (also inside bash -c)", () => {
+    assertDeny(`echo $(${GH_EDIT} 5 ${ADD} needs-qa --body "$(date)")`);
+    assertDeny(`bash -c 'echo $(${GH_EDIT} 5 ${ADD} needs-qa --body "$(date)")'`);
+  });
+  test("nested $( ) with a FLAG label stays allowed (sibling pin)", () => {
+    assertAllow(`echo $(${GH_EDIT} 5 ${ADD} bug --body "$(date)")`);
+  });
+  test("alternate spellings of this repo are inspected, not exempt", () => {
+    for (const r of ["gaberoo322/hydra.git", "https://github.com/gaberoo322/hydra", "github.com/gaberoo322/hydra", "GaberOO322/Hydra/"]) {
+      assertDeny(`${GH_EDIT} 5 --repo ${r} ${ADD} needs-qa`);
+    }
+    assertAllow(`${GH_EDIT} 5 --repo https://github.com/someone/else ${ADD} needs-qa`);
+  });
+  test("the LAST --repo operand decides", () => {
+    assertDeny(`${GH_EDIT} 5 --repo other/x --repo gaberoo322/hydra ${ADD} needs-qa`);
+    assertAllow(`${GH_EDIT} 5 --repo gaberoo322/hydra --repo other/x ${ADD} needs-qa`);
+  });
 });
