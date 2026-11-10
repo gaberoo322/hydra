@@ -14,7 +14,7 @@
  * scripts/qa/cohort-baseline.ts's `cohortOf` seam delegates to, so the
  * 30-PR cohort trip counts only PRs merged after the `on` flip and never
  * shadow PRs. This file imports nothing from cohort-baseline.ts (no cycle);
- * TRIP_MIN_PAIR_PRS is re-declared and pinned equal by test.
+ * MIN_MATURED_PAIR (the 30-PR trip) lives here and cohort-baseline.ts re-exports it.
  *
  * NAMED FOLLOW-UP: the pair-cohort rule is tier/door blind (window PRs the
  * pair did not review inflate the pair cohort — the fail-safe direction); a
@@ -38,8 +38,8 @@ import type { QaVerdictTrailer } from "../../src/qa/verdict-trailer.ts";
 
 /** ADR-0046 D6: "about 20 two-way T3 PRs with none". */
 export const GRADUATION_MIN_SHADOW_PRS = 20;
-/** Re-declared from cohort-baseline.ts MIN_MATURED_PAIR; pinned equal by test. */
-export const TRIP_MIN_PAIR_PRS = 30;
+/** ADR-0046 D6: matured pair-cohort PRs needed to trip; cohort-baseline.ts re-exports this binding. */
+export const MIN_MATURED_PAIR = 30;
 export const FLIP_ITEM_TITLE = "Flip two-way-pair: shadow → on (pair graduation ready)";
 export const FLIP_ITEM_MARKER = "<!-- pair-graduation-flip two-way-pair -->";
 export const FLIP_ITEM_LABEL = "ready-for-human";
@@ -211,7 +211,7 @@ export function assessPairGraduation(inputs: GraduationInputs): {
       trip: {
         state: tripState,
         pairMatured: ct ? ct.pairMatured : null,
-        needed: TRIP_MIN_PAIR_PRS,
+        needed: MIN_MATURED_PAIR,
         tripped: ct ? ct.tripped : null,
         criteriaMet: ct ? ct.criteriaMet : null,
       },
