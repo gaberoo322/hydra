@@ -21,6 +21,7 @@ import { parseQaFixCommitTrailer } from "../src/qa/verdict-trailer.ts";
 import {
   changedTestWarning,
   classifyChangedTestProof,
+  hasTapEvidence,
   diffAddsTestCase,
   parseGitLog,
   selectChangedTestCandidates,
@@ -516,6 +517,14 @@ describe("qa-fix-proof — changed-tests mode (#5447)", () => {
     assert.deepEqual(c.passesAtMergeBase, ["test/c.test.mts"]);
   });
 
+  test("hasTapEvidence: empty/garbled output is no evidence; ok/not ok headers are", () => {
+    assert.equal(hasTapEvidence(""), false);
+    assert.equal(hasTapEvidence(null), false);
+    assert.equal(hasTapEvidence("garbled npm noise\nnothing here"), false);
+    assert.equal(hasTapEvidence("ok 1 - test/c.test.mts\n"), true);
+    assert.equal(hasTapEvidence("not ok 2 - test/c.test.mts\n"), true);
+  });
+
   test("finding wording names both readings and never asserts vacuity", () => {
     const w = changedTestWarning("test/x.test.mts");
     assert.match(w, /^::warning file=test\/x\.test\.mts::/);
@@ -549,6 +558,31 @@ describe("qa-fix-proof — changed-tests mode (#5447)", () => {
     const r = runMode(REPO_ROOT, "deadbeef", "deadbeef");
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /::warning::test-can-fail proof could not run/);
+  });
+
+  test("end to end: a runner that emits no TAP is inconclusive + warned, never passes-at-merge-base", () => {
+    const dir = mkdtempSync(join(tmpdir(), "qa-fix-proof-notap-"));
+    try {
+      git(dir, "init", "-q", "-b", "master");
+      put(dir, "package.json", JSON.stringify({ scripts: { "test:file": "node -e 0" } }));
+      put(dir, "src/mod.ts", "export const v = 1;\n");
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "base");
+      const base = git(dir, "rev-parse", "HEAD");
+      put(dir, "test/new.test.mts", 'import test from "node:test";\ntest("x", () => {});\n');
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "feat");
+      const r = runMode(dir, base, git(dir, "rev-parse", "HEAD"));
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      const lines = r.stdout.trim().split("\n");
+      const out = JSON.parse(lines[lines.length - 1] as string);
+      assert.equal(out.files["test/new.test.mts"].outcome, "inconclusive");
+      assert.deepEqual(out.findings, []);
+      assert.match(r.stdout, /::warning::test-can-fail proof produced no TAP/);
+      assert.doesNotMatch(r.stdout, /already true on master/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("end to end: proven / inconclusive / passes-at-merge-base / skipped, always exit 0", () => {

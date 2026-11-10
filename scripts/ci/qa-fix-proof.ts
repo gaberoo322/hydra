@@ -172,6 +172,11 @@ export function classifyChangedTestProof(
   return out;
 }
 
+/** True when the runner output carries at least one TAP `ok`/`not ok` header. Pure. */
+export function hasTapEvidence(tap: string | null | undefined): boolean {
+  return typeof tap === "string" && /^\s*(not ok|ok)\s+\d+\b/m.test(tap);
+}
+
 /** Annotation wording (INV-9): never asserts vacuity. */
 export function changedTestWarning(file: string): string {
   return (
@@ -211,6 +216,13 @@ export function runChangedTestsMode(base: string, head: string): { lines: string
       overlayFiles: sel.overlay,
       proofFiles: sel.candidates,
     });
+    if (!hasTapEvidence(run.stdout)) {
+      // INV-3/INV-4: no TAP at all is an infrastructure failure, never "passes at merge-base".
+      lines.push("::warning::test-can-fail proof produced no TAP output (infrastructure failure); skipping verdicts");
+      const files: Record<string, unknown> = {};
+      for (const c of sel.candidates) files[c] = { outcome: "inconclusive", assertionFailures: 0, crashed: false };
+      return { lines, body: { ...head0, files, findings: [], error: "no-tap-output" } };
+    }
     const cls = classifyChangedTestProof(parseTapAssertionProof(run.stdout, sel.candidates), sel.candidates);
     for (const f of cls.passesAtMergeBase) lines.push(changedTestWarning(f));
     return { lines, body: { ...head0, files: cls.files, findings: cls.passesAtMergeBase } };
