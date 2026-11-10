@@ -148,12 +148,41 @@ function hasResetLine(body: string | null | undefined): boolean {
   return parseCapResetTs(body) !== null;
 }
 
+/** A PR comment or review body with its creation time (`null` = missing / unparseable). */
+export interface TimedBody {
+  body: string;
+  tsMs: number | null;
+}
+
+/**
+ * The seam's `qa-fail-rounds` count (AUTHORITATIVE; ADR-0047 D6): reviewed FAIL
+ * rounds on `pr` whose body is NEWER than the reset point. The reset point is the
+ * latest valid `Hydra-Cap-Reset:` timestamp across the issue comments
+ * (`issueResetMs`) and the PR bodies (a marker already posted on a PR by hand is
+ * honoured by its `ts=`). A body with no usable time counts as newer than any
+ * reset: fail toward counting, never toward hiding a FAIL round. A CI-only round
+ * (no findings table) reviewed nothing and never counts.
+ */
+export function countReviewedFailRoundsAfterReset(
+  bodies: ReadonlyArray<TimedBody>,
+  pr: number,
+  issueResetMs: number,
+): number {
+  const resetMs = Math.max(issueResetMs, latestResetMs(bodies.map((b) => b.body)));
+  const live = bodies.filter((b) => b.tsMs === null || b.tsMs > resetMs).map((b) => b.body);
+  return qaVerdictHistory(live, pr).filter(
+    (t) => isFailVerdict(t.verdict) && priorFindingsSection(live, pr, t.round) !== "",
+  ).length;
+}
+
 /**
  * Reviewed FAIL rounds on `pr`, counting only `priorBodies` AFTER the last body
  * with a `Hydra-Cap-Reset:` line (positional: PR comments arrive chronological,
  * reviews after). A CI-only round (no findings table) reviewed nothing and never
- * counts. The one predicate behind both `decideQaRoundAction` and the seam's
- * `qa-fail-rounds` arm.
+ * counts. Kept for `decideQaRoundAction` ONLY, whose result `scripts/qa/route.ts`
+ * reads but never uses: the seam's {@link countReviewedFailRoundsAfterReset}
+ * count is authoritative and decides the park. Architecture review card 4
+ * removes this positional form.
  */
 export function countReviewedFailRoundsSinceReset(
   priorBodies: ReadonlyArray<string | null | undefined>,
