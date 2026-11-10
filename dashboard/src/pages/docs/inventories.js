@@ -73,3 +73,18 @@ export function loadInventory(family) {
 export function loadRoutesInventory() {
   return loadInventory("routes");
 }
+
+/**
+ * Every available family's rows keyed by family: the input to the counts fold
+ * (scripts/docs/inventories/counts.ts, #5454). Families whose file is missing
+ * or malformed are simply absent, so the fold never throws on them.
+ */
+export function loadFamilyRows() {
+  const out = new Map();
+  for (const key of Object.keys(inventoryModules)) {
+    const family = key.slice(key.lastIndexOf("/") + 1).replace(/\.json$/, "");
+    const inv = loadInventory(family);
+    if (inv.ok) out.set(family, { rows: inv.rows });
+  }
+  return out;
+}

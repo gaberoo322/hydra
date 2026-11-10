@@ -10,7 +10,7 @@
 //    MarkdownBody, so the module-map section stays there.
 //
 // Everything shown comes from docs/generated/areas.json (+ adrs.json,
-// counts.json, the build-time areaRefs) — never a view-time network call
+// the counts fold over the family inventories, the build-time areaRefs) — never a view-time network call
 // (ADR-0034 §10). `areaRefs` is imported HERE, not into Docs.jsx: the
 // docs-page test pins Docs.jsx's virtual-module import line exactly.
 
@@ -20,7 +20,8 @@ import Generated from "./Generated.jsx";
 import { adrRoute } from "./adrs.js";
 import { CODE_CATALOGUES, catalogueKey } from "./catalogues.js";
 import { docsHref } from "./tree.js";
-import { loadInventory } from "./inventories.js";
+import { buildCounts } from "../../../../scripts/docs/inventories/counts.ts";
+import { loadFamilyRows, loadInventory } from "./inventories.js";
 
 /**
  * The slice families a row's `slices` can key, with the human label and the
@@ -103,17 +104,16 @@ function LiveTile({ row }) {
 
 /**
  * The entry view's Areas grid (#4596 INV-13): ONE Generated frame (family
- * 'areas') whose header line carries counts.json's areas/live and
+ * 'areas') whose header line carries the counts fold's areas/live and
  * areas/retired values, then every row as a tile.
  */
 export function AreasGrid() {
   const areas = loadInventory("areas");
-  const counts = loadInventory("counts");
   // Inventory unavailable (INV-16): the frame renders its explicit state; never
   // read the rows (absent when not ok) or the entry view crashes.
   if (!areas.ok) return <Generated family="areas" inventory={areas} title="Areas" />;
-  const metric = (name) =>
-    counts.ok ? counts.rows.find((r) => r.family === "areas" && r.metric === name)?.value : undefined;
+  const counts = buildCounts(loadFamilyRows());
+  const metric = (name) => counts.find((r) => r.family === "areas" && r.metric === name)?.value;
   const live = metric("live");
   const retired = metric("retired");
   return (
