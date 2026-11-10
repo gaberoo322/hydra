@@ -255,6 +255,8 @@ export type WorkQueueRow = z.infer<typeof WorkQueueRowSchema>;
 const WorkQueueResponseSchema = z
   .object({
     items: z.array(WorkQueueRowSchema),
+    /** The closed relabel picker list (RELABEL_TARGETS), delivered on every read — degraded too — so the dashboard keeps no copy (issue #5453). */
+    relabelTargets: z.array(z.enum(RELABEL_TARGETS)),
     /** Asserted-emptiness evidence: the count of open issues the lookup scanned. */
     scanned: z.number().int().nonnegative(),
     sourcesOk: z.boolean(),
