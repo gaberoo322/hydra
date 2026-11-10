@@ -1,0 +1,1 @@
+- refactor: scheduler status serves the deliberate-stop freshness verdict so the Health page no longer computes it from the browser clock (#5452)

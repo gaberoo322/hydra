@@ -45,6 +45,24 @@ export interface DeliberateStopMarker {
 export const DELIBERATE_STOP_TTL_SECONDS = 24 * 60 * 60;
 
 /**
+ * Is a deliberate stop still inside its 24 h marker TTL? The single freshness
+ * computation (issue #5452, ADR-0034 §8.3): the attention feed and the
+ * scheduler status read (`checks["no-fresh-deliberate-stop"]`) both call it.
+ *
+ * `stoppedAtMs` is the parsed stop time, or `null` when `deliberateStoppedAt`
+ * is missing or unparseable; `fresh` is then `null` ("unknown") so each caller
+ * picks its own fail-safe (the feed stays loud, the status omits the verdict).
+ */
+export function deliberateStopFreshness(
+  deliberateStoppedAt: string | null | undefined,
+  nowMs: number,
+): { fresh: boolean | null; stoppedAtMs: number | null } {
+  const parsed = typeof deliberateStoppedAt === "string" ? Date.parse(deliberateStoppedAt) : NaN;
+  if (Number.isNaN(parsed) || !Number.isFinite(nowMs)) return { fresh: null, stoppedAtMs: Number.isNaN(parsed) ? null : parsed };
+  return { fresh: nowMs - parsed < DELIBERATE_STOP_TTL_SECONDS * 1000, stoppedAtMs: parsed };
+}
+
+/**
  * Serialize a deliberate-stop marker for the Redis write. Pure — the single
  * definition of the marker's on-the-wire shape (folds the inline `JSON.stringify`
  * that used to live in `HeartbeatController.stop()`).
