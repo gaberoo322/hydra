@@ -834,7 +834,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       ? after.row.state === "CLOSED"
       : after.row.labels.includes(to) && removed.every((s) => !after.row.labels.includes(s)));
   if (!verified) {
-    await jr(entry(deps, { kind: "refused", from, result: "write-unverified", written: true }, input));
+    await jr(entry(deps, { kind: "refused", from, result: "write-unverified", written: true, ...capEvidence }, input));
     return { ok: false, issue, code: "write-unverified", mode, written: true };
   }
 
@@ -946,6 +946,9 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
     capReset = res.ok === false ? `failed:${res.code}` : "posted";
   }
 
+  // A marker posted before a refused / unverified write is still on the issue: journal it so the stray
+  // marker is never evidence-free (QA r2 on #5457, INV-3/INV-4).
+  const capEvidence: Partial<LifecycleJournalEntry> = capReset !== null ? { evidence: { capReset } } : {};
   let write: IssueActionWriteResult = { ok: true };
   if (to === "closed") {
     write = await deps.close(issue, closeReason ?? "completed");
@@ -954,7 +957,7 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
   }
   if (write.ok === false) {
     const code = `write-failed:${write.code}`;
-    await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: code, written: false }, input));
+    await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: code, written: false, ...capEvidence }, input));
     return { ok: false, issue, code, mode, written: false };
   }
 
@@ -965,7 +968,7 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
       ? after.row.state === "CLOSED"
       : after.row.labels.includes(to) && removed.every((s) => !after.row.labels.includes(s)));
   if (!verified) {
-    await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: "write-unverified", written: true }, input));
+    await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: "write-unverified", written: true, ...capEvidence }, input));
     return { ok: false, issue, code: "write-unverified", mode, written: true };
   }
 

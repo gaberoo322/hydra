@@ -564,6 +564,25 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
       assert.deepEqual(order, ["comment", "edit"]);
     });
 
+    test("a refused label write after the marker journals capReset on the refusal (INV-4)", async () => {
+      const o = operatorHarness(["parked"], "enforce");
+      recording(o);
+      o.h.deps.edit = async () => ({ ok: false, code: "gh-failed" as never, stderr: "x" });
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, false);
+      const last = o.h.journal.at(-1)!;
+      assert.equal(last.kind, "refused");
+      assert.equal(last.evidence.capReset, "posted");
+    });
+
+    test("a refused write with no park removal journals no capReset (sibling shape)", async () => {
+      const o = operatorHarness(["hitl-grill"], "enforce");
+      o.h.deps.edit = async () => ({ ok: false, code: "gh-failed" as never, stderr: "x" });
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, false);
+      assert.equal(o.h.journal.at(-1)!.evidence.capReset, undefined);
+    });
+
     test("a non-park transition keeps its single write and posts no marker (sibling shape)", async () => {
       const o = operatorHarness(["hitl-grill"], "enforce");
       const order: string[] = [];
