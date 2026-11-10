@@ -22,6 +22,7 @@
  *      Redis), asserting 200 + every entry validates against the schema.
  */
 
+import { buildSchedulerStatus } from "../src/scheduler/status-projection.ts";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -792,7 +793,7 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
       [SERVICE_STRIP_SRC]: {
         imports: ["schedulerVerdicts"],
         lib: "health-verdicts",
-        ids: new Set(Object.keys(schedulerVerdicts({ running: false, stopReason: null }, 0))),
+        ids: new Set(Object.keys(schedulerVerdicts({ running: false, checks: { "no-fresh-deliberate-stop": true } }))),
       },
       // #5152: the /now recommendation tables live in lib/now-verdicts.ts.
       [RECS_PANEL_SRC]: {
@@ -824,6 +825,8 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
 
   test("every id on SERVER_EVALUATED_CHECKS is produced by a server evaluator (#5451 INV-6a)", async () => {
     const PROMOTE = ["issue-open", "not-already-ready", "has-scope-section", "no-open-blocker"];
+    // The scheduler status read carries its own server verdict (#5452).
+    const SCHEDULER = ["no-fresh-deliberate-stop"];
     const produced = new Set(
       Object.keys(
         evaluatePromoteChecks(
@@ -836,6 +839,13 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
       assert.ok((CONTROL_CHECKS as readonly string[]).includes(id), `${id} is a CONTROL_CHECKS id`);
       if (PROMOTE.includes(id)) {
         assert.ok(produced.has(id), `${id} is produced by evaluatePromoteChecks`);
+      } else if (SCHEDULER.includes(id)) {
+        const status = await buildSchedulerStatus(
+          { running: false, stopReason: null, deliberateStoppedAt: null, intervalMs: 0, cyclesRun: 0, cyclesMerged: 0, cyclesFailed: 0, cyclesUnaccounted: 0, lastTickAt: null, lastError: null, startedAt: null, consecutiveErrors: 0 },
+          { rolling: { mergeRate: null, cyclesInWindow: 0 }, emptyRolling: { emptyRate: null, cyclesInWindow: 0 }, mergeRateWindow: 0, emptyRateWindow: 0 },
+          { getAutopilotPaused: async () => ({ paused: false }), getReconcilerHealth: async () => null },
+        );
+        assert.ok(id in status.checks, `${id} is produced by buildSchedulerStatus`);
       } else {
         // The dc-* ids are the registry's approve-control lines, evaluated by
         // the approve-preconditions read, which takes them from that entry.
@@ -1123,10 +1133,11 @@ describe("control:health alert/scheduler/housekeeping entries (issue #4631)", ()
     // Disjointness: the feed row exists only while a deliberate stop is younger
     // than 24 h — exactly when this line is ✗ and the control is disabled.
     assert.ok(checksOf(controlEntry("control:health/scheduler-start")).includes("no-fresh-deliberate-stop"));
-    const fresh = schedulerVerdicts(
-      { running: false, stopReason: "deliberate", deliberateStoppedAt: new Date(1_000_000).toISOString() },
-      1_000_000 + 60_000,
-    );
+    const fresh = schedulerVerdicts({
+      running: false,
+      stopReason: "deliberate",
+      checks: { "no-fresh-deliberate-stop": false },
+    });
     assert.equal(fresh["no-fresh-deliberate-stop"], false, "a fresh deliberate stop disables the control");
   });
 

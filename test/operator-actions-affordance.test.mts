@@ -1427,7 +1427,7 @@ describe("the /health panels render controls from the page's ONE registry read (
     );
     // An UNKNOWN scheduler read renders no control at all (INV-13).
     assert.ok(src.includes("{!schedUnknown && (\n        <div data-testid=\"scheduler-controls\">"));
-    assert.ok(src.includes("schedulerVerdicts(schedUnknown ? null : sched.data, Date.now())"), "an untrusted read yields no verdict");
+    assert.ok(src.includes("schedulerVerdicts(schedUnknown ? null : sched.data)"), "an untrusted read yields no verdict");
   });
 
   test("every undismissed alert row carries its own Dismiss; Dismiss all sits beside the count", async () => {
