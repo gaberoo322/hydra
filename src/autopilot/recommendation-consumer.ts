@@ -42,6 +42,7 @@ import {
   type SignalsSnapshot,
   type PermissionWaitEvent,
 } from "./recommendation-engine.ts";
+import { readRunTurns } from "./turn-row.ts";
 import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
@@ -115,26 +116,14 @@ async function defaultReadRecentTurns(
   limit: number,
 ): Promise<RecentTurn[]> {
   try {
-    const { listAutopilotRunTurnsDesc } = await import("../redis/autopilot-runs.ts");
-    const raw = await listAutopilotRunTurnsDesc(runId, limit);
-    const out: RecentTurn[] = [];
-    for (const member of raw) {
-      try {
-        const parsed = JSON.parse(member);
-        if (!parsed || typeof parsed !== "object") continue;
-        out.push({
-          turn_n: Number(parsed.turn_n || 0),
-          dispatches: Array.isArray(parsed.actions)
-            ? parsed.actions.filter((a: any) => a && a.type === "dispatch").length
-            : 0,
-          skipped: 0,
-          idle: Number(parsed.idle_turns || 0),
-          ts_epoch: Number(parsed.epoch || 0),
-        });
-      } catch {
-        /* intentional: skip unparseable turn member, next reader call retries */
-      }
-    }
+    const turns = await readRunTurns(runId, limit);
+    const out: RecentTurn[] = turns.map((t) => ({
+      turn_n: t.turn_n,
+      dispatches: t.dispatches.length,
+      skipped: 0,
+      idle: t.idle_turns ?? 0,
+      ts_epoch: t.epoch ?? 0,
+    }));
     return out;
   } catch (err: any) {
     logger.error({ err }, "[recs-engine] readRecentTurns");

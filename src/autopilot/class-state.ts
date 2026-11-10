@@ -44,11 +44,11 @@ import { deadClassification } from "./producerless-signals.ts";
 // `TurnDecision` is the sanitised per-class decision recordTurn persists
 // (issue #4635 INV-2); `GetCurrentLifecycleResult` / `GetRunRowResult` are
 // the reader result shapes the injectable deps default to.
-import type { TurnDecision } from "./runs.ts";
+import type { TurnDecision } from "./turn-row.ts";
 import type { GetCurrentLifecycleResult, GetRunRowResult } from "./run-reads.ts";
 import type { AutopilotLifecycle } from "./run-lifecycle-state.ts";
 import { getCurrentLifecycle, getRunRow } from "./run-reads.ts";
-import { listAutopilotRunTurnsDesc } from "../redis/autopilot-runs.ts";
+import { readRunTurns } from "./turn-row.ts";
 import { getSignalLastFired } from "../redis/autopilot-signals.ts";
 import type { GetSignalLastFiredResult } from "../redis/autopilot-signals.ts";
 import { logger } from "../logger.ts";
@@ -79,7 +79,8 @@ export const STARVED_LOOKBACK_TURNS = 50;
 /** One parsed, already-sanitised turn member (shape recordTurn persists). */
 export interface ClassStateTurn {
   turn_n: number;
-  epoch: number;
+  /** Absent when the stored row carried no epoch (freshness is then unknown). */
+  epoch?: number;
   /** Folded {class: {outcome, reason}} from plan.events; absent = no information. */
   decisions?: Record<string, TurnDecision>;
   burned_classes?: string[];
@@ -233,7 +234,7 @@ export function composeClassState(
           runId,
           lifecycle: inputs.lifecycle.state,
           latestTurnN: latest !== null ? latest.turn_n : null,
-          latestTurnEpoch: latest !== null ? latest.epoch : null,
+          latestTurnEpoch: latest !== null ? (latest.epoch ?? null) : null,
         }
       : null;
 
@@ -283,9 +284,12 @@ export function composeClassState(
   let verdictFreshness: ClassStateHeader["verdictFreshness"] = "unknown";
   let verdictAsOf: string | null = null;
   if (active && latest !== null && latest.decisions !== undefined) {
-    verdictFreshness =
-      nowEpoch - latest.epoch <= VERDICT_FRESHNESS_BUDGET_SECONDS ? "fresh" : "stale";
-    verdictAsOf = new Date(latest.epoch * 1000).toISOString();
+    // A turn with no epoch carries decisions but no age: freshness stays unknown.
+    if (latest.epoch !== undefined) {
+      verdictFreshness =
+        nowEpoch - latest.epoch <= VERDICT_FRESHNESS_BUDGET_SECONDS ? "fresh" : "stale";
+      verdictAsOf = new Date(latest.epoch * 1000).toISOString();
+    }
   }
 
   const classes: ClassStateRow[] = inputs.taxonomy.map((row) => {
@@ -315,8 +319,10 @@ export function composeClassState(
         rowFreshness = "not-evaluated";
       } else {
         verdict = { outcome: d.outcome, reason: d.reason, turnN: latest.turn_n };
-        rowFreshness =
-          nowEpoch - latest.epoch <= VERDICT_FRESHNESS_BUDGET_SECONDS ? "fresh" : "stale";
+        if (latest.epoch !== undefined) {
+          rowFreshness =
+            nowEpoch - latest.epoch <= VERDICT_FRESHNESS_BUDGET_SECONDS ? "fresh" : "stale";
+        }
       }
     }
 
@@ -380,7 +386,7 @@ export interface ClassStateReaderDeps {
   getSignalLastFired: () => Promise<GetSignalLastFiredResult>;
   getCurrentLifecycle: () => Promise<GetCurrentLifecycleResult>;
   getRunRow: (runId: string) => Promise<GetRunRowResult>;
-  listTurnsDesc: (runId: string, limit: number) => Promise<string[]>;
+  readTurns: (runId: string, limit: number) => Promise<ClassStateTurn[]>;
   now: () => number;
 }
 
@@ -388,65 +394,9 @@ const defaultClassStateReaderDeps: ClassStateReaderDeps = {
   getSignalLastFired,
   getCurrentLifecycle,
   getRunRow,
-  listTurnsDesc: listAutopilotRunTurnsDesc,
+  readTurns: readRunTurns,
   now: Date.now,
 };
-
-/**
- * Parse one persisted turn member into the composition's turn shape.
- * Pure; null for an unparseable/wrong-shaped member (the caller logs +
- * skips — the #3744 reader-guard pattern). Fields already sanitised by
- * recordTurn are re-guarded here so a direct Redis writer cannot smuggle
- * a malformed verdict into the composition.
- */
-function parseTurnMember(member: string): ClassStateTurn | null {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(member);
-  } catch {
-    return null;
-  }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const t = raw as Record<string, unknown>;
-  if (typeof t.turn_n !== "number" || typeof t.epoch !== "number") return null;
-
-  const turn: ClassStateTurn = { turn_n: t.turn_n, epoch: t.epoch };
-  if (t.decisions && typeof t.decisions === "object" && !Array.isArray(t.decisions)) {
-    const kept: Record<string, TurnDecision> = {};
-    for (const [cls, val] of Object.entries(t.decisions as Record<string, unknown>)) {
-      if (
-        val &&
-        typeof val === "object" &&
-        typeof (val as Record<string, unknown>).outcome === "string" &&
-        typeof (val as Record<string, unknown>).reason === "string"
-      ) {
-        kept[cls] = {
-          outcome: (val as { outcome: string }).outcome,
-          reason: (val as { reason: string }).reason,
-        };
-      }
-    }
-    turn.decisions = kept;
-  }
-  if (Array.isArray(t.burned_classes)) {
-    turn.burned_classes = t.burned_classes.filter((s): s is string => typeof s === "string");
-  }
-  if (Array.isArray(t.usage_shed)) {
-    turn.usage_shed = t.usage_shed.filter((s): s is string => typeof s === "string");
-  }
-  if (typeof t.usage_allow === "boolean") turn.usage_allow = t.usage_allow;
-  if (t.slots_snapshot && typeof t.slots_snapshot === "object" && !Array.isArray(t.slots_snapshot)) {
-    turn.slots_snapshot = t.slots_snapshot as Record<string, unknown>;
-  }
-  if (
-    t.signals_snapshot &&
-    typeof t.signals_snapshot === "object" &&
-    !Array.isArray(t.signals_snapshot)
-  ) {
-    turn.signals_snapshot = t.signals_snapshot as Record<string, unknown>;
-  }
-  return turn;
-}
 
 /**
  * Read every source and compose the class-state envelope. NEVER THROWS:
@@ -486,26 +436,9 @@ export async function readClassState(
       logger.error({ err }, "[autopilot/class-state] getRunRow threw");
     }
     try {
-      const members = await deps.listTurnsDesc(runId, STARVED_LOOKBACK_TURNS);
-      const parsed: ClassStateTurn[] = [];
-      let unparseable = 0;
-      for (const member of members) {
-        const turn = parseTurnMember(member);
-        if (turn === null) {
-          unparseable += 1;
-          continue;
-        }
-        parsed.push(turn);
-      }
-      if (unparseable > 0) {
-        logger.warn(
-          { runId, unparseable },
-          "[autopilot/class-state] skipped unparseable turn members",
-        );
-      }
-      turns = parsed;
+      turns = await deps.readTurns(runId, STARVED_LOOKBACK_TURNS);
     } catch (err: any) {
-      logger.error({ err }, "[autopilot/class-state] listTurnsDesc threw");
+      logger.error({ err }, "[autopilot/class-state] readTurns threw");
     }
   }
 

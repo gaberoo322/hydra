@@ -26,7 +26,8 @@ import {
   filterMirrorRuns,
   type RunTurns,
 } from "../src/aggregators/lifecycle-health.ts";
-import { listAutopilotRunTurnsDesc, listAutopilotRunsSince } from "../src/redis/autopilot-runs.ts";
+import { listAutopilotRunsSince } from "../src/redis/autopilot-runs.ts";
+import { readRunTurns } from "../src/autopilot/turn-row.ts";
 import { closeRedisConnections } from "../src/redis/connection.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -55,7 +56,7 @@ async function main(argv: string[]): Promise<number> {
     runs.push({
       runId: run.runId,
       startedEpoch: run.startedEpoch,
-      members: await listAutopilotRunTurnsDesc(run.runId, 5000),
+      turns: await readRunTurns(run.runId, 5000),
     });
   }
   // Redis runs that predate the per-turn mirror carry no data; drop them.
