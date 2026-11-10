@@ -1,0 +1,1 @@
+- fix: INV-002 no longer rejects the instant-death replay that reaps and re-dispatches the same slot (#5477)
