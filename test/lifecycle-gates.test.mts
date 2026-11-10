@@ -567,13 +567,46 @@ describe("operatorAdvance un-park posts the cap reset on issue and PR (#5437)", 
     assert.equal(o.h.journal.at(-1)!.evidence.capReset, "failed:comment-failed:gh-failed");
   });
 
+  test("a PR-only post failure is stamped issue+pr-post-failed, never as success (#5437 QA)", async () => {
+    const o = operatorHarness(["parked"], "shadow");
+    o.h.journal.push(parkEntry(77));
+    o.h.deps.comment = async (n) => (n === 77 ? { ok: false, code: "gh-failed", stderr: "x" } : { ok: true });
+    const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+    assert.equal(res.ok, true);
+    assert.equal(o.h.journal.at(-1)!.evidence.capReset, "issue+pr-post-failed");
+  });
+
+  test("an unreadable park journal is stamped issue+pr-lookup-failed, distinct from no PR (#5437 QA)", async () => {
+    const o = operatorHarness(["parked"], "shadow");
+    o.h.journal.push(parkEntry(77));
+    const out = posted(o);
+    let reads = 0;
+    o.h.deps.journal.read = async () => (++reads > 1 ? { ok: false, error: "redis" } as never : { ok: true, entries: [...o.h.journal] });
+    const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+    assert.equal(res.ok, true);
+    assert.equal(o.h.journal.at(-1)!.evidence.capReset, "issue+pr-lookup-failed");
+    assert.deepEqual(out.map((c) => c.n), [10]);
+  });
+
+  test("a parked exit with no PR in the park entry is stamped plain issue (sibling pin)", async () => {
+    const o = operatorHarness(["parked"], "shadow");
+    o.h.journal.push(parkEntry());
+    posted(o);
+    await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+    assert.equal(o.h.journal.at(-1)!.evidence.capReset, "issue");
+  });
+
   test("a non-parked exit and a close post no marker", async () => {
     const o = operatorHarness(["needs-triage"], "shadow");
     const out = posted(o);
-    await operatorAdvance({ issue: 10, to: "blocked", actor: "board:relabel" }, o.h.deps);
+    const r1 = await operatorAdvance({ issue: 10, to: "blocked", actor: "board:relabel" }, o.h.deps);
     const p = operatorHarness(["parked"], "shadow");
     const out2 = posted(p);
-    await operatorAdvance({ issue: 10, to: "closed", actor: "board:close" }, p.h.deps);
+    const r2 = await operatorAdvance({ issue: 10, to: "closed", actor: "board:close" }, p.h.deps);
+    assert.equal(r1.ok, true);
+    assert.equal(r2.ok, true);
+    assert.equal(p.h.closes.length, 1);
+    assert.equal(o.h.edits.length, 1);
     assert.equal(out.length, 0);
     assert.equal(out2.length, 0);
   });

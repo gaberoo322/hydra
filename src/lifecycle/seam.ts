@@ -84,7 +84,7 @@ import {
   type CapEvaluation,
   type TimelineLabelEvent,
 } from "./caps.ts";
-import { parkForCap, postCapReset } from "./park.ts";
+import { capResetEvidence, parkForCap, postCapReset } from "./park.ts";
 import {
   findOperatorTransition,
   findTransition,
@@ -953,7 +953,7 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
         capReset = `failed:${reset.code}`;
         logger.error({ issue, code: reset.code }, "[lifecycle] un-park cap reset failed");
       } else {
-        capReset = reset.prPosted ? "issue+pr" : "issue";
+        capReset = capResetEvidence(reset.pr);
       }
     } catch (err) {
       capReset = "failed:crashed";

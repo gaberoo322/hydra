@@ -75,6 +75,7 @@ function world(mode: "shadow" | "enforce" = "enforce") {
     expireFails: false,
     postFails: false,
     prBodiesFail: false,
+    journalReadFails: false,
     deps: undefined as unknown as ReconcileDeps,
   };
   const j = (n: number): LifecycleJournalEntry[] => {
@@ -135,6 +136,7 @@ function world(mode: "shadow" | "enforce" = "enforce") {
       closeClaim: async () => ({ ok: true, prior: null }),
       read: async (_r, n) => {
         if (w.journalThrowFor.has(n)) throw new Error("boom");
+        if (w.journalReadFails) return { ok: false, error: "redis" } as never;
         return { ok: true, entries: [...j(n)] };
       },
       readClaim: async () => ({ ok: true, claim: null }),
@@ -482,6 +484,24 @@ describe("external un-park posts the missing PR-side marker (#5437)", () => {
     assert.equal(w.posted.length, 0);
     assert.equal(report.externalEntries, 0);
     assert.ok(report.errors.some((e) => e.startsWith("cap-reset-pr-bodies-failed")));
+  });
+});
+
+describe("external un-park fails closed when the park journal is unreadable (#5437 QA)", () => {
+  test("journal read failure posts nothing, appends nothing, records an error (sibling: no-PR park still posts the issue marker)", async () => {
+    const ctx = world();
+    ctx.add(81, ["ready-for-agent"]);
+    ctx.journal(81).push(je({ kind: "transition", to: "parked", reason: "cap:qa-fail-rounds", evidence: { pr: "77" } }));
+    ctx.w.timelines.set(81, [
+      { event: "labeled", label: "parked", tsMs: T1 },
+      { event: "unlabeled", label: "parked", tsMs: T2 },
+      { event: "labeled", label: "ready-for-agent", tsMs: T2 },
+    ]);
+    ctx.w.journalReadFails = true;
+    const report = await runReconcile(ctx.w.deps);
+    assert.equal(ctx.w.posted.length, 0);
+    assert.equal(report.externalEntries, 0);
+    assert.ok(report.errors.some((e) => e.startsWith("cap-reset-journal-failed")));
   });
 });
 

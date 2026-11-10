@@ -373,7 +373,13 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
       const issueNeeds = latestResetMs(comments.value) < eventMs;
       // The qa-fail-rounds arm reads PR bodies, so the PR needs its own marker
       // even when the operator already posted one on the issue.
-      const pr = await latestCapParkPr(issue, deps.seam);
+      const found = await latestCapParkPr(issue, deps.seam);
+      if (!found.ok) {
+        // Unreadable park journal is unknown, not "no PR": fail closed and retry next pass.
+        report.errors.push(`cap-reset-journal-failed:#${issue}`);
+        return false;
+      }
+      const pr = found.pr;
       let prNeeds = false;
       if (pr !== null) {
         const bodies = await deps.seam.fetch.prBodies(pr);
@@ -392,7 +398,7 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
         deps.seam,
         { issue: issueNeeds, pr: prNeeds },
       );
-      if (res.ok === false) {
+      if (res.ok === false || res.pr === "post-failed" || res.pr === "lookup-failed") {
         report.capResetsPosted--;
         report.errors.push(`cap-reset-failed:#${issue}`);
         return false;

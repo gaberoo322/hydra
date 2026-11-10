@@ -98,7 +98,7 @@ export {
   type ReconcileOptions,
   type ReconcileReport,
 } from "./reconcile.ts";
-export { parkForCap, postCapReset, renderParkComment, type CapResetResult, type ParkResult } from "./park.ts";
+export { capResetEvidence, parkForCap, postCapReset, renderParkComment, type CapResetPrOutcome, type CapResetResult, type ParkResult } from "./park.ts";
 export {
   LIFECYCLE_ROLLOUT_CONFIG_PATH,
   advance,

@@ -530,7 +530,7 @@ describe("postCapReset (INV-14)", () => {
     });
     const ts = new Date(NOW).toISOString();
     const res = await postCapReset(42, { by: "operator", ts }, w.deps);
-    assert.deepEqual(res, { ok: true, prPosted: true });
+    assert.deepEqual(res, { ok: true, pr: "posted" });
     const line = `Hydra-Cap-Reset: by=operator ts=${ts}`;
     assert.deepEqual(w.comments, [{ number: 42, body: line }, { number: 77, body: line }]);
     assert.equal(latestResetMs([line]), NOW);

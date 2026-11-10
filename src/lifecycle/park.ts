@@ -150,22 +150,35 @@ export interface CapResetInput {
   ts: string;
 }
 
-export type CapResetResult = { ok: true; prPosted: boolean } | { ok: false; code: string };
+/** PR-side outcome of a cap reset: `lookup-failed` = the park journal was unreadable, `post-failed` = the PR comment write failed. */
+export type CapResetPrOutcome = "none" | "posted" | "post-failed" | "lookup-failed";
+
+export type CapResetResult = { ok: true; pr: CapResetPrOutcome } | { ok: false; code: string };
+
+/** Evidence value for `capReset` derived from the PR outcome (shared by the operator route). */
+export function capResetEvidence(pr: CapResetPrOutcome): string {
+  if (pr === "posted") return "issue+pr";
+  if (pr === "none") return "issue";
+  return `issue+pr-${pr}`;
+}
 
 /**
  * The PR named by the latest `cap:` park journal entry, or null. The
  * `qa-fail-rounds` arm counts PR comment bodies, so a reset must land there too.
  */
-export async function latestCapParkPr(issue: number, deps: SeamDeps): Promise<number | null> {
+export async function latestCapParkPr(
+  issue: number,
+  deps: SeamDeps,
+): Promise<{ ok: true; pr: number | null } | { ok: false }> {
   const journal = await deps.journal.read(deps.repo, issue);
-  if (!journal.ok) return null;
+  if (!journal.ok) return { ok: false };
   for (const e of [...journal.entries].reverse()) {
     if (typeof e.reason === "string" && e.reason.startsWith("cap:") && e.to === "parked") {
       const n = Number(e.evidence.pr);
-      return Number.isInteger(n) && n > 0 ? n : null;
+      return { ok: true, pr: Number.isInteger(n) && n > 0 ? n : null };
     }
   }
-  return null;
+  return { ok: true, pr: null };
 }
 
 export interface CapResetTargets {
@@ -195,14 +208,19 @@ export async function postCapReset(
       if (posted.ok === false) return { ok: false, code: `comment-failed:${posted.code}` };
     }
 
-    const pr = targets.pr ? await latestCapParkPr(issue, deps) : null;
-    let prPosted = false;
-    if (pr !== null) {
-      const prRes = await deps.comment(pr, line);
-      if (prRes.ok === false) logger.error({ issue, pr, code: prRes.code }, "[lifecycle] cap reset PR comment failed");
-      prPosted = prRes.ok;
+    let outcome: CapResetPrOutcome = "none";
+    if (targets.pr) {
+      const found = await latestCapParkPr(issue, deps);
+      if (!found.ok) {
+        logger.error({ issue }, "[lifecycle] cap reset PR lookup failed: park journal unreadable");
+        outcome = "lookup-failed";
+      } else if (found.pr !== null) {
+        const prRes = await deps.comment(found.pr, line);
+        if (prRes.ok === false) logger.error({ issue, pr: found.pr, code: prRes.code }, "[lifecycle] cap reset PR comment failed");
+        outcome = prRes.ok ? "posted" : "post-failed";
+      }
     }
-    return { ok: true, prPosted };
+    return { ok: true, pr: outcome };
   } catch (err) {
     logger.error({ err, issue }, "[lifecycle] postCapReset crashed");
     return { ok: false, code: "crashed" };
