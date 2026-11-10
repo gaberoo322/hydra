@@ -1,0 +1,296 @@
+{"file":"test/admission.test.mts","name":"isFutureInstant","ok":true}
+{"file":"test/admission.test.mts","name":"decideAdmission ladder arms","ok":true}
+{"file":"test/admission.test.mts","name":"decideAdmission arm ordering","ok":true}
+{"file":"test/admission.test.mts","name":"OAuth refresh nudge decision (#5103, #4843)","ok":true}
+{"file":"test/admission.test.mts","name":"launch model decision (#5103, #4585)","ok":true}
+{"file":"test/admission.test.mts","name":"reason vocabulary","ok":true}
+{"file":"test/adr-roster.test.mts","name":"ADR roster coverage (assertion 1)","ok":true}
+{"file":"test/adr-roster.test.mts","name":"ADR numbers are unique (assertion 2)","ok":true}
+{"file":"test/adr-roster.test.mts","name":"every ADR declares a Status (assertion 3 — ADR-0037 Decision 5)","ok":true}
+{"file":"test/adr-roster.test.mts","name":"per-area ADR weight ratchet (assertion 4 — ADR-0037 Decision 6)","ok":true}
+{"file":"test/adr-roster.test.mts","name":"every ADR is routed by CONTEXT-MAP (assertion 5 — ADR-0037 Decision 6)","ok":true}
+{"file":"test/adr-roster.test.mts","name":"the roster table is generated in place between its markers (assertion 6 — #4593)","ok":true}
+{"file":"test/adr-roster.test.mts","name":"Reference docs links resolve and cover every living /docs/ref/ doc (assertion 7 — #4596)","ok":true}
+{"file":"test/agent-dispatch-prompt-guard.test.mts","name":"agent-dispatch-prompt-guard — in scope, rendered prompts pass","ok":true}
+{"file":"test/agent-dispatch-prompt-guard.test.mts","name":"agent-dispatch-prompt-guard — in scope, unrendered prompts are denied","ok":true}
+{"file":"test/agent-dispatch-prompt-guard.test.mts","name":"agent-dispatch-prompt-guard — out of scope is never blocked","ok":true}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"projectOperatorRow — pure helper","ok":true}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"projectAutopilotRow — pure helper","ok":true}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"mergeDispatches — pure helper","ok":true}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"getActiveDispatches — autopilot-only","ok":true}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"getActiveDispatches — autopilot liveness (#888, post-#2189)","ok":true}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"getActiveDispatches — operator-only","ok":true}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"getActiveDispatches — mixed scenario","ok":true}
+{"file":"test/aggregator-active-dispatches.test.mts","name":"getActiveDispatches — sub-source failure isolation","ok":true}
+{"file":"test/aggregator-architecture-graph.test.mts","name":"architecture-graph aggregator","ok":true}
+{"file":"test/aggregator-architecture-graph.test.mts","name":"computeGroupLayout (pure layout algorithm)","ok":true}
+{"file":"test/aggregator-autopilot-idle.test.mts","name":"getIdleDiagnostics — pure composition (issue #3116)","ok":true}
+{"file":"test/aggregator-autopilot-idle.test.mts","name":"leaf re-exports the pure primitives (issue #3116)","ok":true}
+{"file":"test/aggregator-autopilot-tick.test.mts","name":"getAutopilotTick — pure composition (issue #3114)","ok":true}
+{"file":"test/aggregator-autopilot-tick.test.mts","name":"defaultReadSchedulerStatus — projection (issue #3181)","ok":true}
+{"file":"test/aggregator-autopilot-tick.test.mts","name":"defaultReadCurrentRun — projection + normalization (issue #3181)","ok":true}
+{"file":"test/aggregator-autopilot-tick.test.mts","name":"defaultReadAutopilotLifecycle — projection (issue #3181)","ok":true}
+{"file":"test/aggregator-behavior-gallery.test.mts","name":"classifyOutcome","ok":true}
+{"file":"test/aggregator-behavior-gallery.test.mts","name":"runMatchesFilters","ok":true}
+{"file":"test/aggregator-behavior-gallery.test.mts","name":"clampLimit","ok":true}
+{"file":"test/aggregator-behavior-gallery.test.mts","name":"getBehaviorGallery — happy path","ok":true}
+{"file":"test/aggregator-cost-burn.test.mts","name":"tokensPerHour — pure helper","ok":true}
+{"file":"test/aggregator-cost-burn.test.mts","name":"computeBurnRates — pure helper","ok":true}
+{"file":"test/aggregator-cost-burn.test.mts","name":"getCostBurn — happy path","ok":true}
+{"file":"test/aggregator-cost-burn.test.mts","name":"getCostBurn — bucket boundary","ok":true}
+{"file":"test/aggregator-cost-burn.test.mts","name":"getCostBurn — empty state","ok":true}
+{"file":"test/aggregator-cost-burn.test.mts","name":"getCostBurn — sub-source failure isolation","ok":true}
+{"file":"test/aggregator-friction-patterns.test.mts","name":"liftFrictionPatterns — pure helper","ok":true}
+{"file":"test/aggregator-friction-patterns.test.mts","name":"normalizeLastEscalation — pure helper (issue #843)","ok":true}
+{"file":"test/aggregator-friction-patterns.test.mts","name":"meta-friction read (via seam) — windowing through getFrictionPatterns","ok":true}
+{"file":"test/aggregator-friction-patterns.test.mts","name":"getFrictionPatterns — happy path","ok":true}
+{"file":"test/aggregator-friction-patterns.test.mts","name":"getFrictionPatterns — sub-source failure isolation","ok":true}
+{"file":"test/aggregator-friction-source.test.mts","name":"readMetaFrictionIssues — seam query","ok":true}
+{"file":"test/aggregator-friction-source.test.mts","name":"readMetaFrictionIssues — window / sort","ok":true}
+{"file":"test/aggregator-friction-source.test.mts","name":"readMetaFrictionIssues — never throws","ok":true}
+{"file":"test/aggregator-friction-source.test.mts","name":"readPatternGroups — namespace fan-out","ok":true}
+{"file":"test/aggregator-friction-source.test.mts","name":"readPatternGroups — parse isolation (never throws)","ok":true}
+{"file":"test/aggregator-friction-source.test.mts","name":"readFrictionPatterns — thin friction wrapper","ok":true}
+{"file":"test/aggregator-issues-waiting-projections.test.mts","name":"projections — structure","ok":true}
+{"file":"test/aggregator-issues-waiting-projections.test.mts","name":"projectStuckIssues — classified expectations","ok":true}
+{"file":"test/aggregator-issues-waiting-projections.test.mts","name":"readWaitingIssues — concurrent reads single-flight (#5093 INV-7)","ok":true}
+{"file":"test/aggregator-issues-waiting-projections.test.mts","name":"projectPickupSet — golden + composition identity with getReviewPickupSet","ok":true}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"classifyWaiting — one line per issue, by precedence","ok":true}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"classifyWaiting — blocker liveness uses the strict predicate","ok":true}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"classifyWaiting — needs-info and presence lines","ok":true}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"getIssuesWaiting — source evidence","ok":true}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"getIssuesWaiting — machine-owned suppression (#4805)","ok":true}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"getIssuesWaiting — Epic exclusion (#4805)","ok":true}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"getIssuesWaiting — lookup failures never hide rows (#4805)","ok":true}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"getIssuesWaiting — 2026-09-30 snapshot fixture (#4805)","ok":true}
+{"file":"test/aggregator-issues-waiting.test.mts","name":"parseArchived (github/repo.ts pure parser)","ok":true}
+{"file":"test/aggregator-lessons-explorer.test.mts","name":"liftPromotedLessons","ok":true}
+{"file":"test/aggregator-lessons-explorer.test.mts","name":"skillMatches","ok":true}
+{"file":"test/aggregator-lessons-explorer.test.mts","name":"getLessonsExplorer — happy path","ok":true}
+{"file":"test/aggregator-lessons-overnight.test.mts","name":"filterNearPromotion — pure helper","ok":true}
+{"file":"test/aggregator-lessons-overnight.test.mts","name":"meta-friction read (via seam) — windowing through getOvernightLessons","ok":true}
+{"file":"test/aggregator-lessons-overnight.test.mts","name":"getOvernightLessons — happy path","ok":true}
+{"file":"test/aggregator-lessons-overnight.test.mts","name":"getOvernightLessons — empty state","ok":true}
+{"file":"test/aggregator-lessons-overnight.test.mts","name":"getOvernightLessons — sub-source failure isolation","ok":true}
+{"file":"test/aggregator-lessons-trend.test.mts","name":"collectPromoted — pure helper","ok":true}
+{"file":"test/aggregator-lessons-trend.test.mts","name":"promotionsByDay — pure helper","ok":true}
+{"file":"test/aggregator-lessons-trend.test.mts","name":"pickTopFriction — pure helper","ok":true}
+{"file":"test/aggregator-lessons-trend.test.mts","name":"metaFrictionOpened — derived from seam reader length","ok":true}
+{"file":"test/aggregator-lessons-trend.test.mts","name":"getLessonsTrend — happy path","ok":true}
+{"file":"test/aggregator-lessons-trend.test.mts","name":"getLessonsTrend — empty state","ok":true}
+{"file":"test/aggregator-lessons-trend.test.mts","name":"getLessonsTrend — failure isolation","ok":true}
+{"file":"test/aggregator-outcome-trends.test.mts","name":"bucketPoints — pure helper (current-only)","ok":true}
+{"file":"test/aggregator-outcome-trends.test.mts","name":"computeDeltaPct — pure helper","ok":true}
+{"file":"test/aggregator-outcome-trends.test.mts","name":"getOutcomeTrends — happy path","ok":true}
+{"file":"test/aggregator-outcome-trends.test.mts","name":"getOutcomeTrends — empty state","ok":true}
+{"file":"test/aggregator-outcome-trends.test.mts","name":"getOutcomeTrends — window boundary (current reading only)","ok":true}
+{"file":"test/aggregator-overnight-summary.test.mts","name":"countNonEmptyLines — pure helper","ok":true}
+{"file":"test/aggregator-overnight-summary.test.mts","name":"countIssuesInWindow — pure helper","ok":true}
+{"file":"test/aggregator-overnight-summary.test.mts","name":"projectHeadroom — pure helper","ok":true}
+{"file":"test/aggregator-overnight-summary.test.mts","name":"getOvernightSummary — happy path","ok":true}
+{"file":"test/aggregator-overnight-summary.test.mts","name":"getOvernightSummary — empty state","ok":true}
+{"file":"test/aggregator-overnight-summary.test.mts","name":"getOvernightSummary — window boundary","ok":true}
+{"file":"test/aggregator-overnight-summary.test.mts","name":"getOvernightSummary — sub-source failure isolation","ok":true}
+{"file":"test/aggregator-recent-merges.test.mts","name":"clampLimit — pure helper","ok":true}
+{"file":"test/aggregator-recent-merges.test.mts","name":"extractPrNumbersFromGitLog — pure helper","ok":true}
+{"file":"test/aggregator-recent-merges.test.mts","name":"extractMergeCommitsFromGitLog — pure helper (issue #2177)","ok":true}
+{"file":"test/aggregator-recent-merges.test.mts","name":"listRecentMergeCommits — cheap git-log primitive (issue #2177)","ok":true}
+{"file":"test/aggregator-recent-merges.test.mts","name":"tierFromLabels — pure helper","ok":true}
+{"file":"test/aggregator-recent-merges.test.mts","name":"prMetaFromView — pure helper","ok":true}
+{"file":"test/aggregator-recent-merges.test.mts","name":"getRecentMerges — happy path","ok":true}
+{"file":"test/aggregator-recent-merges.test.mts","name":"getRecentMerges — empty state","ok":true}
+{"file":"test/aggregator-recent-merges.test.mts","name":"getRecentMerges — origin/master ref freshness (#1757)","ok":true}
+{"file":"test/aggregator-recent-merges.test.mts","name":"getRecentMerges — per-PR meta failure isolation","ok":true}
+{"file":"test/aggregator-recent-merges.test.mts","name":"listRecentMergeCommits — wrong origin remote stays fail-open and loud (#4939)","ok":true}
+{"file":"test/aggregator-service-strip.test.mts","name":"classifyBoolean — pure helper","ok":true}
+{"file":"test/aggregator-service-strip.test.mts","name":"classifyProbe — pure helper","ok":true}
+{"file":"test/aggregator-service-strip.test.mts","name":"getServiceStrip — integration","ok":true}
+{"file":"test/aggregator-settle.test.mts","name":"settle (core fold)","ok":true}
+{"file":"test/aggregator-settle.test.mts","name":"settledOrEmpty","ok":true}
+{"file":"test/aggregator-settle.test.mts","name":"settledOr","ok":true}
+{"file":"test/aggregator-settle.test.mts","name":"settledOrNull","ok":true}
+{"file":"test/aggregator-settle.test.mts","name":"safeSource (accumulating-error-provenance variant)","ok":true}
+{"file":"test/aggregator-settle.test.mts","name":"toDetail","ok":true}
+{"file":"test/aggregator-stalled-prs.test.mts","name":"classifyStalledPrs — admission lines","ok":true}
+{"file":"test/aggregator-stalled-prs.test.mts","name":"rollup fold wiring","ok":true}
+{"file":"test/aggregator-stalled-prs.test.mts","name":"github/prs.ts additive fields (#4624)","ok":true}
+{"file":"test/aggregator-stalled-prs.test.mts","name":"getStalledPrs — sources + asserted emptiness","ok":true}
+{"file":"test/aggregator-stalled-prs.test.mts","name":"getAttentionFeed — rank-1 stalled-PRs wiring","ok":true}
+{"file":"test/aggregator-stuck-items.test.mts","name":"selectPrsWithFailedCi — pure helper","ok":true}
+{"file":"test/aggregator-stuck-items.test.mts","name":"selectPrsWithFailedCi — shared latest-wins collapse semantics (#4624)","ok":true}
+{"file":"test/aggregator-stuck-items.test.mts","name":"getStuckItems — required-context wiring (#4569)","ok":true}
+{"file":"test/aggregator-stuck-items.test.mts","name":"getStuckItems — happy path","ok":true}
+{"file":"test/aggregator-stuck-items.test.mts","name":"getStuckItems — empty state","ok":true}
+{"file":"test/aggregator-stuck-items.test.mts","name":"getStuckItems — custom thresholds","ok":true}
+{"file":"test/aggregator-stuck-items.test.mts","name":"getStuckItems — sub-source failure isolation","ok":true}
+{"file":"test/aggregator-stuck-items.test.mts","name":"getStuckItems — issue half is the classified waiting read (#5093)","ok":true}
+{"file":"test/aggregator-subscription-quota-trend.test.mts","name":"computeQuotaPoints — pure helper (current-only)","ok":true}
+{"file":"test/aggregator-subscription-quota-trend.test.mts","name":"getQuotaTrend — happy path","ok":true}
+{"file":"test/aggregator-subscription-quota-trend.test.mts","name":"getQuotaTrend — empty state","ok":true}
+{"file":"test/aggregator-subscription-quota-trend.test.mts","name":"getQuotaTrend — window boundary (current snapshot only)","ok":true}
+{"file":"test/aggregator-subscription-quota-trend.test.mts","name":"getQuotaTrend — headroom clamping","ok":true}
+{"file":"test/aggregator-target-backlog-findings.test.mts","name":"excerptOf — pure helper","ok":true}
+{"file":"test/aggregator-target-backlog-findings.test.mts","name":"filterUnroutedFindings — pure helper","ok":true}
+{"file":"test/aggregator-target-backlog-findings.test.mts","name":"getNewTargetFindings — happy path","ok":true}
+{"file":"test/aggregator-target-backlog-findings.test.mts","name":"getNewTargetFindings — empty state","ok":true}
+{"file":"test/aggregator-target-backlog-findings.test.mts","name":"getNewTargetFindings — window boundary","ok":true}
+{"file":"test/aggregator-trend-series.test.mts","name":"windowStart","ok":true}
+{"file":"test/aggregator-trend-series.test.mts","name":"dayBucketKey","ok":true}
+{"file":"test/aggregator-trend-series.test.mts","name":"dayKey","ok":true}
+{"file":"test/aggregator-trend-series.test.mts","name":"sortByTimeAsc","ok":true}
+{"file":"test/aggregator-trend-series.test.mts","name":"bucketByDay","ok":true}
+{"file":"test/aggregator-trend-series.test.mts","name":"mean / count folds","ok":true}
+{"file":"test/aggregator-trend-series.test.mts","name":"mergeWindowedPoints","ok":true}
+{"file":"test/aggregator-usage-eligibility.test.mts","name":"getEligibilityView — pure composition (issue #3182)","ok":true}
+{"file":"test/aggregator-usage-eligibility.test.mts","name":"getEligibilityView — fail-safe overlay-input reads (issue #3182)","ok":true}
+{"file":"test/aggregator-usage-eligibility.test.mts","name":"meter-unavailable blocks dispatch (2026-07-30, replaces #1124 fail-open)","ok":true}
+{"file":"test/aggregator-usage-eligibility.test.mts","name":"getEligibilityView — model-exhaustion advisory overlay (issue #4585)","ok":true}
+{"file":"test/anchor-classification-inference-3390.test.mts","name":"inferAnchorTypeFromCycleId — decodes suffix-less + trailing-suffix slots (#3390)","ok":true}
+{"file":"test/anchor-classification-inference-3390.test.mts","name":"getMetricsTrend — re-infers a stored `unclassified` record from its cycleId (#3390)","ok":true}
+{"file":"test/anchor-type-classification.test.mts","name":"anchor-type policy leaf — pure classification (#2858)","ok":true}
+{"file":"test/anchor-type-classification.test.mts","name":"anchor-type policy leaf — cycle-close.ts relay retired (#3225)","ok":true}
+{"file":"test/anchor-type-classification.test.mts","name":"classifyAnchorType — bare-UUID unclassified invariant (#2822)","ok":true}
+{"file":"test/anchor-type-classification.test.mts","name":"classifyAnchorType — prefix-less relay cycleId inference (#3138)","ok":true}
+{"file":"test/anchor-type-classification.test.mts","name":"classifyAnchorType — widened regex preserves #2822/harness negatives (#3138)","ok":true}
+{"file":"test/anchor-type-classification.test.mts","name":"inferAnchorTypeFromCycleId — skill-name + class-prefix legs (#3403)","ok":true}
+{"file":"test/anchor-type-classification.test.mts","name":"PREFIX_ANCHOR_TYPE — ambiguous prefixes never guess (#3403)","ok":true}
+{"file":"test/anchor-type-classification.test.mts","name":"inferAnchorTypeFromCycleId — structurally undecodable ids stay the sentinel (#3403)","ok":true}
+{"file":"test/anchor-type-classification.test.mts","name":"SLOT_ANCHOR_TYPE is derived from the taxonomy — no drift (#3253)","ok":true}
+{"file":"test/anchor-type-classification.test.mts","name":"cycleId inference decodes signal-class slots post-#3253","ok":true}
+{"file":"test/anchor-type-classification.test.mts","name":"inferAnchorTypeFromCycleId — hydra-target-build cycleId leg (#3486)","ok":true}
+{"file":"test/anchor-type-classification.test.mts","name":"inferAnchorTypeFromCycleId — target-build leg never guesses (#3486 / #2822)","ok":true}
+{"file":"test/anchor-type-classification.test.mts","name":"classifyAnchorType — merge-watch branch-fallback decode (#3579)","ok":true}
+{"file":"test/anchor-type-classification.test.mts","name":"classifyNoAttributionShape — names the undecodable structural shape (#3623)","ok":true}
+{"file":"test/anthropic-request.test.mts","name":"anthropic-request: success + cost derivation","ok":true}
+{"file":"test/anthropic-request.test.mts","name":"anthropic-request: error modes","ok":true}
+{"file":"test/anthropic-request.test.mts","name":"anthropic-request: wire shape + AbortSignal discipline","ok":true}
+{"file":"test/anthropic-request.test.mts","name":"anthropic-request: pure helpers","ok":true}
+{"file":"test/anthropic-seam-check.test.mts","name":"anthropic-seam-check: Anthropic fetch grammar","ok":true}
+{"file":"test/anthropic-seam-check.test.mts","name":"anthropic-seam-check: carve-out","ok":true}
+{"file":"test/api-500-catch-ratchet.test.mts","name":"src/api/*.ts hand-rolled 500-catch ratchet (issue #4402)","ok":true}
+{"file":"test/api-alerts.test.mts","name":"GET /alerts — unparseable-entry guard (issue #3744)","ok":true}
+{"file":"test/api-alerts.test.mts","name":"POST /alerts/:id/dismiss — unparseable-entry guard (issue #3793)","ok":true}
+{"file":"test/api-anchor-retirement-collateral.test.mts","name":"metrics router — ADR-0036 vacuous-read removal","ok":true}
+{"file":"test/api-anchor-retirement-collateral.test.mts","name":"health router — ADR-0036 vacuous-read removal","ok":true}
+{"file":"test/api-architecture.test.mts","name":"GET /api/architecture — closure cache (issue #1489)","ok":true}
+{"file":"test/api-attribution.test.mts","name":"GET /api/attribution — read-only marginal-effect view (#2631)","ok":true}
+{"file":"test/api-attribution.test.mts","name":"GET /api/attribution/impact — reverse-loop impact ranking (#3283)","ok":true}
+{"file":"test/api-class-stats.test.mts","name":"GET /api/autopilot/class-stats (issue #2943)","ok":true}
+{"file":"test/api-class-stats.test.mts","name":"GET /api/autopilot/class-stats — 10-minute memo (issue #4637)","ok":true}
+{"file":"test/api-cors-allowlist.test.mts","name":"parseAllowedOrigins — env parsing (issue #4047)","ok":true}
+{"file":"test/api-cors-allowlist.test.mts","name":"CORS exact-match allowlist — mounted app (issue #4047)","ok":true}
+{"file":"test/api-design-concepts-schema.test.mts","name":"design-concepts schema migration — ADR-0011 slice 1","ok":true}
+{"file":"test/api-explore-page.test.mts","name":"explore-page router — route registration (issue #3652)","ok":true}
+{"file":"test/api-explore-page.test.mts","name":"explore-page router — aggregator delegation (issue #3652)","ok":true}
+{"file":"test/api-explore-page.test.mts","name":"explore-page router — schema validation (issue #3652)","ok":true}
+{"file":"test/api-explore-page.test.mts","name":"explore-page router — never-throw-500 (issue #3652)","ok":true}
+{"file":"test/api-health.test.mts","name":"GET /health — basic health check (issue #164)","ok":true}
+{"file":"test/api-maintenance.test.mts","name":"Maintenance housekeeping endpoint (issue #723)","ok":true}
+{"file":"test/api-maintenance.test.mts","name":"runChore guarded-chore runner (issue #1864)","ok":true}
+{"file":"test/api-maintenance.test.mts","name":"cleanup chores folded into housekeeping (issue #1876)","ok":true}
+{"file":"test/api-merge-lock.test.mts","name":"merge-lock router — route registration (issue #3652)","ok":true}
+{"file":"test/api-metrics-cost.test.mts","name":"metrics-cost router — route registration (issue #3652)","ok":true}
+{"file":"test/api-metrics.test.mts","name":"GET /metrics/unclassified (issue #3443)","ok":true}
+{"file":"test/api-metrics.test.mts","name":"GET /metrics — coverage.classesNotRecorded (issue #4392)","ok":true}
+{"file":"test/api-now-endpoints.test.mts","name":"Response schemas — aggregator shape pins","ok":true}
+{"file":"test/api-now-endpoints.test.mts","name":"GET /now/service-strip","ok":true}
+{"file":"test/api-now-endpoints.test.mts","name":"GET /now/autopilot-tick","ok":true}
+{"file":"test/api-now-endpoints.test.mts","name":"GET /now/active-dispatches","ok":true}
+{"file":"test/api-now-endpoints.test.mts","name":"GET /now/cost-burn","ok":true}
+{"file":"test/api-outcomes-page.test.mts","name":"outcomes-page router — route registration (issue #3652)","ok":true}
+{"file":"test/api-outcomes-page.test.mts","name":"outcomes-page router — aggregator delegation (issue #3652)","ok":true}
+{"file":"test/api-outcomes-page.test.mts","name":"outcomes-page router — schema validation (issue #3652)","ok":true}
+{"file":"test/api-outcomes-page.test.mts","name":"outcomes-page router — never-throw-500 (issue #3652)","ok":true}
+{"file":"test/api-quality-gates.test.mts","name":"quality-gate trend aggregation (issue #212)","ok":true}
+{"file":"test/api-route-helpers.test.mts","name":"schemaValidationError","ok":true}
+{"file":"test/api-route-helpers.test.mts","name":"aggregatorRoute — validate half","ok":true}
+{"file":"test/api-route-helpers.test.mts","name":"aggregatorRoute — never-throw half","ok":true}
+{"file":"test/api-route-helpers.test.mts","name":"aggregatorRouteNoQuery","ok":true}
+{"file":"test/api-route-helpers.test.mts","name":"isolateAggregator","ok":true}
+{"file":"test/api-route-helpers.test.mts","name":"degradeIssueRead — degrade-to-flag (never-throw-200, #4327)","ok":true}
+{"file":"test/api-scheduler.test.mts","name":"Scheduler API routes (issue #164)","ok":true}
+{"file":"test/api-tier-router.test.mts","name":"GET /tier route (issue #2183 — moved out of misc.ts)","ok":true}
+{"file":"test/api-tier-router.test.mts","name":"issue #4563 — schemaValidationError() adoption across all six sibling 400 sites","ok":true}
+{"file":"test/api-today-summary.test.mts","name":"OvernightSummaryQuerySchema — happy path","ok":true}
+{"file":"test/api-today-summary.test.mts","name":"OvernightSummaryQuerySchema — rejection cases","ok":true}
+{"file":"test/api-today-summary.test.mts","name":"OvernightSummaryResponseSchema — aggregator shape pin","ok":true}
+{"file":"test/api-today-summary.test.mts","name":"GET /today/summary — route handler","ok":true}
+{"file":"test/api-usage-dispatch-cost.test.mts","name":"POST /api/usage/dispatch-cost + GET /api/usage/by-issue (issue #4126)","ok":true}
+{"file":"test/api-usage-eligibility-admission.test.mts","name":"GET /api/usage/eligibility admission field (issue #5101)","ok":true}
+{"file":"test/api-versions.test.mts","name":"GET /api/versions — the tagless path: orch empty, target commit identity (#3680, #4172)","ok":true}
+{"file":"test/api-versions.test.mts","name":"versions read — never uses git describe (#3680)","ok":true}
+{"file":"test/api-versions.test.mts","name":"versions read — tag enumeration format and ordering (#3680)","ok":true}
+{"file":"test/api-versions.test.mts","name":"versions read — changelog fragment fold (#3680)","ok":true}
+{"file":"test/api-versions.test.mts","name":"versions read — never-throw degradation (#3680)","ok":true}
+{"file":"test/api-versions.test.mts","name":"versions read — 60s per-root cache (#3680)","ok":true}
+{"file":"test/api-versions.test.mts","name":"versions read — pure helpers (#3680)","ok":true}
+{"file":"test/api-versions.test.mts","name":"versions — project roster and module boundary (#3680)","ok":true}
+{"file":"test/api.test.mts","name":"createApi — HTTP mount layer (issue #3097)","ok":true}
+{"file":"test/ast-search.test.mts","name":"ast-search: parseArgs","ok":true}
+{"file":"test/ast-search.test.mts","name":"ast-search: rule mode (issue #4732)","ok":true}
+{"file":"test/ast-search.test.mts","name":"ast-search: normaliseMatches","ok":true}
+{"file":"test/attention-buckets.test.mts","name":"drain order (INV-1)","ok":true}
+{"file":"test/attention-buckets.test.mts","name":"bucket summaries (INV-2, INV-4)","ok":true}
+{"file":"test/attention-buckets.test.mts","name":"legacy signal -> admission line (INV-5)","ok":true}
+{"file":"test/attention-buckets.test.mts","name":"machine-stopped aggregate (INV-6, INV-3)","ok":true}
+{"file":"test/attention-buckets.test.mts","name":"deploy-drift memo (INV-7)","ok":true}
+{"file":"test/attention-buckets.test.mts","name":"resolved registry actions (INV-9, INV-10)","ok":true}
+{"file":"test/attention-buckets.test.mts","name":"blocker-aware waiting rows (#4805)","ok":true}
+{"file":"test/attention-calibration.test.mts","name":"attention-calibration — verdict policy (pure)","ok":true}
+{"file":"test/attention-calibration.test.mts","name":"redis/attention — per-line episode ledger + calibration counters","ok":true}
+{"file":"test/attention-repetition-parked.test.mts","name":"rank 5 parked-over-cap:cap","ok":true}
+{"file":"test/attention-repetition-parked.test.mts","name":"rank 4 repetition:hits (pinned, already wired)","ok":true}
+{"file":"test/attention-target-bucket.test.mts","name":"rank 3 target-items — wired and parameterised","ok":true}
+{"file":"test/attention-target-bucket.test.mts","name":"rank 3 target-items — archived Target","ok":true}
+{"file":"test/attention-target-bucket.test.mts","name":"rank 3 target-items — reframe rows carry the attempt count","ok":true}
+{"file":"test/attention-target-bucket.test.mts","name":"rank 2 — new admission lines","ok":true}
+{"file":"test/attention-target-bucket.test.mts","name":"rank 2 — blocked rows render the live blocker state; stale-blocked has its own id","ok":true}
+{"file":"test/attention.test.mts","name":"AttentionFeedResponseSchema — trust fields","ok":true}
+{"file":"test/attention.test.mts","name":"DismissAttentionRequestSchema — typed dismiss body (INV-8)","ok":true}
+{"file":"test/attention.test.mts","name":"getAttentionFeed — signal wiring onto the common item shape","ok":true}
+{"file":"test/attention.test.mts","name":"getAttentionFeed — asserted-emptiness evidence (ADR-0034 §5.2)","ok":true}
+{"file":"test/attention.test.mts","name":"getAttentionFeed — INV-2: no deviation/spend/quota anywhere in the shape","ok":true}
+{"file":"test/attention.test.mts","name":"getAttentionFeed — dismissal + calibration wiring","ok":true}
+{"file":"test/attention.test.mts","name":"getAttentionFeed — waiting-on-you:hold-exit (ADR-0047 D3, issue #5313)","ok":true}
+{"file":"test/attention.test.mts","name":"crossedAtFrom — pure helper","ok":true}
+{"file":"test/attention.test.mts","name":"GET /attention/feed — route","ok":true}
+{"file":"test/attention.test.mts","name":"POST /attention/:id/dismiss — route","ok":true}
+{"file":"test/attention.test.mts","name":"GET /attention/counts — route","ok":true}
+{"file":"test/attention.test.mts","name":"redis/attention — typed dismiss + dismissal ledger","ok":true}
+{"file":"test/attention.test.mts","name":"getAttentionFeed - waiting-on-you:invalid-state line","ok":true}
+{"file":"test/attribution-self-arm.test.mts","name":"attribution-self-arm — selfArmConfirmedMergedPr (#3639 extraction)","ok":true}
+{"file":"test/attribution-self-arm.test.mts","name":"attribution-self-arm — isSentinelReconcileAnchorType","ok":true}
+{"file":"test/autonomy-rate.test.mts","name":"computeAutonomyRate — fan-out","ok":true}
+{"file":"test/autonomy-rate.test.mts","name":"percentile — pure helper (re-exported from autonomy-rate)","ok":true}
+{"file":"test/autopilot-args.test.mts","name":"scripts/autopilot/args-parse.sh — slash-arg parsing","ok":true}
+{"file":"test/autopilot-args.test.mts","name":"scripts/autopilot/args-parse.sh — executable hygiene","ok":true}
+{"file":"test/autopilot-board.test.mts","name":"deriveBoardState — counts + stale lists (issue #934)","ok":true}
+{"file":"test/autopilot-board.test.mts","name":"deriveBoardState — dependency-aware ready_for_agent (issue #3059)","ok":true}
+{"file":"test/autopilot-board.test.mts","name":"deriveBoardState + blockerExcludedIssueNumbers — declared-Epic subtraction (issue #4823)","ok":true}
+{"file":"test/autopilot-board.test.mts","name":"GET /autopilot/board-state — route (issue #934)","ok":true}
+{"file":"test/autopilot-board.test.mts","name":"board-state query scope param (issue #3434)","ok":true}
+{"file":"test/autopilot-board.test.mts","name":"deriveBoardState reused BYTE-FOR-BYTE for the Target board (issue #3434)","ok":true}
+{"file":"test/autopilot-board.test.mts","name":"GET /autopilot/board-state?scope=target — route (issue #3434)","ok":true}
+{"file":"test/autopilot-board.test.mts","name":"Target board-label leaf — single definition (issue #3434)","ok":true}
+{"file":"test/autopilot-board.test.mts","name":"deriveBoardState — GLM liveness gates the glm-eligible partition (#3754)","ok":true}
+{"file":"test/autopilot-board.test.mts","name":"src/redis/autopilot.ts — GLM drainer heartbeat liveness (#3754)","ok":true}
+{"file":"test/autopilot-board.test.mts","name":"src/redis/autopilot.ts — GLM A/B assignment log (issue #4125)","ok":true}
+{"file":"test/autopilot-board.test.mts","name":"GET /autopilot/board-state — GLM liveness wires the partition (#3754)","ok":true}
+{"file":"test/autopilot-board.test.mts","name":"GET /autopilot/board-state — glm_withheld derived verdict list (issue #4254)","ok":true}
+{"file":"test/autopilot-brain-smoke.test.mts","name":"decide.py — smoke (always runs)","ok":true}
+{"file":"test/autopilot-brain-smoke.test.mts","name":"decide.py — live orchestrator smoke (INTEGRATION=true)","ok":true}
+{"file":"test/autopilot-cooldown-redis-mirror.test.mts","name":"issue #2715 — reap.py mirrors the cross-run subset to Redis on completion","ok":true}
+{"file":"test/autopilot-cooldown-redis-mirror.test.mts","name":"issue #5073 — decide.py no longer mirrors research_force_counter (one writer: the Run Ledger via reap)","ok":true}
+{"file":"test/autopilot-cycle-record-branch-cycleid.test.mts","name":"reap.py completion → cycle-record keyed on the worktree branch (issue #3391)","ok":true}
+{"file":"test/autopilot-cycle-record-branch-cycleid.test.mts","name":"reap.py terminal-failure write sites → cycle-record keyed on the worktree branch (issue #3970)","ok":true}
+{"file":"test/autopilot-cycle-record-branch-cycleid.test.mts","name":"reap.py exits 0 on a type-invalid state document (QA rounds 1-2, #5293)","ok":true}
+{"file":"test/autopilot-cycle-record-task-title.test.mts","name":"reap.py completion → cycle-record task_title from slot anchor (issue #2012)","ok":true}
+{"file":"test/autopilot-cycle-records.test.mts","name":"POST /api/autopilot/cycle-record (issue #430)","ok":true}
+{"file":"test/autopilot-cycle-status.test.mts","name":"autopilot cycle-status taxonomy","ok":true}
+{"file":"test/autopilot-decide-dev-target-resume.test.mts","name":"decide.py — Target dev resume pick (issue #4739)","ok":true}
+{"file":"test/autopilot-decide-events-shape.test.mts","name":"decide.py events shape — typed list vs {events: [...]} wrapper (#4213)","ok":true}
+{"file":"test/autopilot-decide-events-shape.test.mts","name":"decide.py events shape — stream entries re-homed onto state.slot_events (#4213)","ok":true}
+{"file":"test/autopilot-decide-events-shape.test.mts","name":"decide.py events shape — unparseable events.json degrades, never crashes (#4213)","ok":true}
+{"file":"test/autopilot-decide-events-shape.test.mts","name":"decide.py events shape — non-dict entries skipped, not fatal (#4213)","ok":true}
+{"file":"test/autopilot-decide-events-shape.test.mts","name":"decide.py events shape — stale slot_events from a prior run are dropped (#4441)","ok":true}
+{"file":"test/autopilot-decide-events-shape.test.mts","name":"decide.py events shape — signal events inside the wrapper are honoured (#4213)","ok":true}

@@ -65,8 +65,7 @@ describe("fail-loud-ratchet: pure semantics", () => {
 describe("fail-loud-ratchet: live tree vs committed baseline", () => {
   test("no new silent catch/except/`|| true` hits (fails closed on tool error)", async () => {
     const scan = await scanTrackedFiles();
-    assert.equal(scan.ok, true, scan.ok ? "" : `ast-grep scan failed: ${scan.error}`);
-    if (scan.ok === false) return;
+    if (scan.ok === false) assert.fail(`ast-grep scan failed (fail closed): ${scan.error}`);
     const baseline = await loadFailLoudBaseline();
     const diff = diffKeys(scan.keys, baseline.hits);
     assert.equal(diff.newKeys.length, 0, formatFailure(diff));

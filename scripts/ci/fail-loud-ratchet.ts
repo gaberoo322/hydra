@@ -150,6 +150,7 @@ export async function scanTrackedFiles(): Promise<ScanResult> {
   try {
     raw = JSON.parse(result.stdout || "[]") as RawHit[];
   } catch (err) {
+    /* intentional: the parse error is returned in the result object (STD-VERIFY-NEVER-THROW) and the caller fails closed on it */
     return { ok: false, error: `unparsable ast-grep JSON: ${(err as Error).message}` };
   }
   if (!Array.isArray(raw)) return { ok: false, error: "ast-grep JSON was not an array" };
