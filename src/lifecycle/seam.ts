@@ -834,7 +834,7 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
       ? after.row.state === "CLOSED"
       : after.row.labels.includes(to) && removed.every((s) => !after.row.labels.includes(s)));
   if (!verified) {
-    await jr(entry(deps, { kind: "refused", from, result: "write-unverified", written: true, ...capEvidence }, input));
+    await jr(entry(deps, { kind: "refused", from, result: "write-unverified", written: true }, input));
     return { ok: false, issue, code: "write-unverified", mode, written: true };
   }
 
