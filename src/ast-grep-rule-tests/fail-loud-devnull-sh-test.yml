@@ -1,0 +1,28 @@
+# Rule tests for src/ast-grep-rules/fail-loud-devnull-sh.yml (issue #5424).
+# Run: npx --yes -p @ast-grep/cli@0.43.0 ast-grep test --skip-snapshot-tests
+# `valid` snippets must NOT match; `invalid` snippets MUST match.
+id: fail-loud-devnull-sh
+valid:
+  - |
+    rm -f "$f" 2>/dev/null || true  # intentional: best-effort cleanup
+  - |
+    # intentional: the file may already be gone
+    rm -f "$f" 2>/dev/null || true
+  - |
+    rm -f "$f" 2>/dev/null || echo "rm failed: $f" >&2
+  - |
+    rm -f "$f" 2>/dev/null
+  - |
+    rm -f "$f" || true
+  - |
+    gh issue comment 1 --body hi || echo "comment failed" >&2
+invalid:
+  - |
+    rm -f "$f" 2>/dev/null || true
+  - |
+    rm -f "$f" >/dev/null 2>&1 || true
+  - |
+    rm -f "$f" &>/dev/null || true
+  - |
+    set -e
+    gh issue comment 1 --body hi 2>/dev/null || true
