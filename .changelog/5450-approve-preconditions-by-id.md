@@ -1,0 +1,1 @@
+- refactor: pair design-concept approve-precondition verdicts to registry checks by id, not array position (#5450)
