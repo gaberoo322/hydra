@@ -36,6 +36,7 @@ import {
   OperatorActionRegistrySchema,
   OperatorActionsResponseSchema,
   REVIEW_BUCKETS,
+  SERVER_EVALUATED_CHECKS,
   bucketOfKey,
   type Action,
   type OperatorActionEntry,
@@ -51,7 +52,11 @@ import {
 } from "../src/operator-actions/registry.ts";
 import { createOperatorActionsRouter } from "../src/api/operator-actions.ts";
 import { DISPATCH_CLASSES } from "../src/taxonomy/classes.ts";
-import { evaluatePromoteEligibility } from "../src/autopilot/work-projections.ts";
+import {
+  evaluatePromoteChecks,
+  evaluatePromoteEligibility,
+  PROMOTE_CHECK_REFUSALS,
+} from "../src/autopilot/work-projections.ts";
 import {
   designConceptVerdicts,
   enrolVerdicts,
@@ -98,6 +103,13 @@ function validEntry(
 // ---------------------------------------------------------------------------
 // 1. The shipped REGISTRY
 // ---------------------------------------------------------------------------
+
+const PROBE_PROMOTE_CHECKS = {
+  "issue-open": true,
+  "not-already-ready": true,
+  "has-scope-section": true,
+  "no-open-blocker": true,
+};
 
 describe("REGISTRY — the shipped table (issue #4620)", () => {
   test("loads (import-time validateRegistry did not throw) with a default entry per admission line, plus variant entries", () => {
@@ -689,12 +701,9 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
     // A row violating every rule refuses with the FIRST rule; clearing each in
     // checklist order exposes the next — so the gate's precedence and the
     // checklist order cannot drift apart silently.
-    const reasonOf: Record<string, string> = {
-      "issue-open": "closed",
-      "not-already-ready": "already-ready",
-      "has-scope-section": "missing-scope-section",
-      "no-open-blocker": "blocked",
-    };
+    const reasonOf: Record<string, string> = Object.fromEntries(
+      PROMOTE_CHECK_REFUSALS.map((r) => [r.check, r.reason]),
+    );
     const row: any = {
       number: 40,
       title: "fixture",
@@ -764,7 +773,12 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
     const tables: Record<string, { imports: string[]; ids: Set<string>; lib?: string }> = {
       [BOARD_STATE_SRC]: {
         imports: ["rowVerdicts", "reopenVerdicts"],
-        ids: new Set([...Object.keys(rowVerdicts({}, undefined)), ...Object.keys(reopenVerdicts(""))]),
+        // The four promote ids are server-delivered on the row (#5451): probe
+        // the table with a row carrying the map so every id is present.
+        ids: new Set([
+          ...Object.keys(rowVerdicts({ promoteChecks: PROBE_PROMOTE_CHECKS }, undefined)),
+          ...Object.keys(reopenVerdicts("")),
+        ]),
       },
       [HEALTH_SRC]: { imports: ["healthVerdicts"], ids: new Set(Object.keys(healthVerdicts(null, false))) },
       // #4631 (design-concept 5ae4b72c INV-4/5): the alert and scheduler
@@ -804,6 +818,44 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
         for (const check of checksOf(controlEntry(key))) {
           assert.ok(table.ids.has(check), `${rel} renders ${key} but its verdict table lacks "${check}"`);
         }
+      }
+    }
+  });
+
+  test("every id on SERVER_EVALUATED_CHECKS is produced by a server evaluator (#5451 INV-6a)", async () => {
+    const PROMOTE = ["issue-open", "not-already-ready", "has-scope-section", "no-open-blocker"];
+    const produced = new Set(
+      Object.keys(
+        evaluatePromoteChecks(
+          { number: 1, title: "t", url: "u", createdAt: "", updatedAt: "", state: "OPEN", labels: [], body: "" } as any,
+          new Set(),
+        ),
+      ),
+    );
+    for (const id of SERVER_EVALUATED_CHECKS) {
+      assert.ok((CONTROL_CHECKS as readonly string[]).includes(id), `${id} is a CONTROL_CHECKS id`);
+      if (PROMOTE.includes(id)) {
+        assert.ok(produced.has(id), `${id} is produced by evaluatePromoteChecks`);
+      } else {
+        // The dc-* ids are the registry's approve-control lines, evaluated by
+        // the approve-preconditions read, which takes them from that entry.
+        assert.ok(checksOf(controlEntry("control:work/design-concept-approve")).includes(id), `${id} is on the approve control`);
+        const route = await readFile(new URL("../src/api/design-concepts.ts", import.meta.url), "utf8");
+        assert.ok(route.includes("APPROVE_CONTROL_KEY"), "the approve-preconditions read evaluates the approve control's lines");
+      }
+    }
+    assert.equal(new Set(SERVER_EVALUATED_CHECKS).size, SERVER_EVALUATED_CHECKS.length, "no duplicates");
+    for (const id of PROMOTE) assert.ok((SERVER_EVALUATED_CHECKS as readonly string[]).includes(id), `${id} listed`);
+  });
+
+  test("no dashboard verdict table derives a server-evaluated check id (#5451 INV-6b)", async () => {
+    for (const lib of ["control-verdicts", "health-verdicts", "now-verdicts"]) {
+      const src = await readFile(new URL(`../dashboard/src/lib/${lib}.ts`, import.meta.url), "utf8");
+      // A derivation assigns a value to the id as an object key: `"<id>": <expr>`
+      // or `out["<id>"] = <expr>`. Copying server verdicts goes through a loop.
+      for (const id of SERVER_EVALUATED_CHECKS) {
+        assert.ok(!new RegExp(`"${id}"\\s*:`).test(src), `${lib}.ts derives "${id}" in an object literal`);
+        assert.ok(!new RegExp(`\\["${id}"\\]\\s*=`).test(src), `${lib}.ts assigns "${id}" directly`);
       }
     }
   });

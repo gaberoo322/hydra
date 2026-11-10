@@ -1210,30 +1210,36 @@ describe("re-read waiters — a checked refresh resolves a real verdict (PR #515
 });
 
 describe("page verdict tables — lib/control-verdicts.ts (PR #5155 review)", () => {
-  const row = (over: any = {}) => ({ lane: "needs-triage", hasScopeSection: true, openBlockers: [], ...over });
+  const PASS = {
+    "issue-open": true,
+    "not-already-ready": true,
+    "has-scope-section": true,
+    "no-open-blocker": true,
+  };
+  const row = (over: any = {}) => ({ promoteChecks: { ...PASS, ...over } });
 
-  test("a clean non-ready row passes every promote check", () => {
-    assert.deepEqual(rowVerdicts(row(), "blocked"), {
-      "issue-open": true,
-      "not-already-ready": true,
-      "has-scope-section": true,
-      "no-open-blocker": true,
-      "relabel-target-chosen": true,
-    });
+  test("a row delivering four passing promote verdicts passes every promote check", () => {
+    assert.deepEqual(rowVerdicts(row(), "blocked"), { ...PASS, "relabel-target-chosen": true });
   });
 
-  test("a ready-for-agent row fails not-already-ready", () => {
-    assert.equal(rowVerdicts(row({ lane: "ready-for-agent" }), undefined)["not-already-ready"], false);
+  test("each promote verdict is a straight copy of the server-delivered map (#5451 INV-5)", () => {
+    for (const id of Object.keys(PASS)) {
+      assert.equal(rowVerdicts(row({ [id]: false }), undefined)[id], false, id);
+      assert.equal(rowVerdicts(row({ [id]: true }), undefined)[id], true, id);
+    }
   });
 
-  test("an unscoped row fails has-scope-section; a missing fact fails closed too", () => {
-    assert.equal(rowVerdicts(row({ hasScopeSection: false }), undefined)["has-scope-section"], false);
-    assert.equal(rowVerdicts(row({ hasScopeSection: undefined }), undefined)["has-scope-section"], false);
+  test("the page derives nothing from lane, hasScopeSection or openBlockers any more (#5451 INV-5)", () => {
+    const legacy: any = { lane: "ready-for-agent", hasScopeSection: false, openBlockers: [9] };
+    const v = rowVerdicts(legacy, undefined);
+    for (const id of Object.keys(PASS)) assert.equal(id in v, false, `${id} must not be derived page-side`);
   });
 
-  test("an open blocker fails no-open-blocker; a missing blocker list fails closed", () => {
-    assert.equal(rowVerdicts(row({ openBlockers: [9] }), undefined)["no-open-blocker"], false);
-    assert.equal(rowVerdicts(row({ openBlockers: undefined }), undefined)["no-open-blocker"], false);
+  test("a row without the promote map yields no promote verdict (preconditions.ts renders it failed)", () => {
+    for (const r of [{}, { promoteChecks: null }, { promoteChecks: undefined }]) {
+      const v = rowVerdicts(r as any, undefined);
+      for (const id of Object.keys(PASS)) assert.equal(id in v, false, id);
+    }
   });
 
   test("relabel-target-chosen accepts only the closed RELABEL_TARGETS", () => {

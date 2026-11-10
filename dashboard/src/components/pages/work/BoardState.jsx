@@ -33,8 +33,8 @@ import { RELABEL_TARGETS, reopenVerdicts, rowVerdicts } from "../../../lib/contr
  * ✓/✗ checklist and is disabled while any line is ✗ (the tables live in
  * lib/control-verdicts.ts, unit-tested):
  *   - Promote is CONFIRM-FIRST (a promote is a dispatch trigger in disguise);
- *     its four checks are the promote gate's refusal table, fed by the row
- *     facts the server computes (`hasScopeSection`, `openBlockers`). The
+ *     its four checks are the promote gate's refusal table, read from the
+ *     verdicts the server delivers on the row (`promoteChecks`). The
  *     server gate stays the authority — a refusal renders verbatim.
  *   - Relabel / close / reopen are immediate-with-undo: the ~5 s delayed
  *     commit hosted here (useUndoWindowHost + UndoToastStack). The relabel
