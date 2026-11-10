@@ -42,7 +42,7 @@ import {
   type SignalsSnapshot,
   type PermissionWaitEvent,
 } from "./recommendation-engine.ts";
-import { readRunTurns } from "./turn-row.ts";
+import { readRunTurns, type TurnRow } from "./turn-row.ts";
 import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
@@ -111,12 +111,13 @@ export function parseTurnEndStreamEvent(raw: any): TurnEndPayload | null {
  * stream. We keep the readers tolerant of missing fields so the engine
  * can ship before every observability surface is fully populated.
  */
-async function defaultReadRecentTurns(
+export async function defaultReadRecentTurns(
   runId: string,
   limit: number,
+  readTurns: (runId: string, limit: number) => Promise<TurnRow[]> = readRunTurns,
 ): Promise<RecentTurn[]> {
   try {
-    const turns = await readRunTurns(runId, limit);
+    const turns = await readTurns(runId, limit);
     const out: RecentTurn[] = turns.map((t) => ({
       turn_n: t.turn_n,
       dispatches: t.dispatches.length,

@@ -27,6 +27,7 @@
  * src/autopilot/runs.ts and passes a fabricated `AutopilotRunsDeps`.
  */
 
+import { parseTurnRows } from "../src/autopilot/turn-row.ts";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -892,15 +893,15 @@ describe("sweepRunIfDead — injected liveness, no real PID (#2158)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// getRunDispatchClasses — injected listTurnsDesc, no Redis (#2640)
+// getRunDispatchClasses — injected readTurns, no Redis (#2640)
 //
 // The dispatch-class projection moved out of behavior-gallery.ts's dynamic-
 // import `defaultFetchClasses` into this domain Module. Its narrow
-// `{ listTurnsDesc }` deps bag (mirroring ProjectionDeps) makes the turn-scan /
+// `{ readTurns }` deps bag (mirroring ProjectionDeps) makes the turn-scan /
 // dedup / sort / tolerant-parse logic exercisable without a live Redis.
 // ---------------------------------------------------------------------------
 
-describe("getRunDispatchClasses — injected listTurnsDesc, no Redis (#2640)", () => {
+describe("getRunDispatchClasses — injected readTurns, no Redis (#2640)", () => {
   const turn = (actions: unknown[]) => JSON.stringify({ turn_n: 1, actions });
 
   test("harvests dispatch classes deduped + alphabetically sorted", async () => {
@@ -913,14 +914,14 @@ describe("getRunDispatchClasses — injected listTurnsDesc, no Redis (#2640)", (
       turn([{ type: "reason", class: "ignored" }]), // non-dispatch action skipped
     ];
     const classes = await getRunDispatchClasses("r1", {
-      listTurnsDesc: async () => members,
+      readTurns: async () => parseTurnRows(members),
     });
     assert.deepEqual(classes, ["dev_orch", "qa"]);
   });
 
   test("returns [] for a run with no turns", async () => {
     const classes = await getRunDispatchClasses("empty", {
-      listTurnsDesc: async () => [],
+      readTurns: async () => [],
     });
     assert.deepEqual(classes, []);
   });
@@ -933,7 +934,7 @@ describe("getRunDispatchClasses — injected listTurnsDesc, no Redis (#2640)", (
       turn([{ type: "dispatch", class: "cleanup_orch" }]), // the one good row
     ];
     const classes = await getRunDispatchClasses("mixed", {
-      listTurnsDesc: async () => members,
+      readTurns: async () => parseTurnRows(members),
     });
     assert.deepEqual(classes, ["cleanup_orch"]);
   });
@@ -948,15 +949,15 @@ describe("getRunDispatchClasses — injected listTurnsDesc, no Redis (#2640)", (
       turn([{ type: "dispatch", class: "qa_orch", slot: "ignored-when-class-present" }]),
     ];
     const classes = await getRunDispatchClasses("r-slot", {
-      listTurnsDesc: async () => members,
+      readTurns: async () => parseTurnRows(members),
     });
     assert.deepEqual(classes, ["dev_orch", "qa_orch", "sweep_orch"]);
   });
 
-  test("passes the 200-turn scan cap through to listTurnsDesc", async () => {
+  test("passes the 200-turn scan cap through to readTurns", async () => {
     let seenLimit = -1;
     await getRunDispatchClasses("r-cap", {
-      listTurnsDesc: async (_runId, limit) => {
+      readTurns: async (_runId, limit) => {
         seenLimit = limit;
         return [];
       },
