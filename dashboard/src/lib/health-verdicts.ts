@@ -14,14 +14,6 @@
 
 export type Verdicts = Record<string, boolean>;
 
-/**
- * The deliberate-stop marker's lifetime, in ms. Mirrors
- * DELIBERATE_STOP_TTL_SECONDS in src/scheduler/stop-marker.ts (24 h); the
- * dashboard cannot import src/, so test/health-page.test.mts pins the two
- * equal (ADR-0034 §8.1: every threshold cites its existing constant).
- */
-export const DELIBERATE_STOP_TTL_MS = 24 * 60 * 60 * 1000;
-
 /** One GET /alerts entry — the fields the per-row check reads. */
 export interface AlertFacts {
   id?: unknown;
@@ -51,39 +43,28 @@ export function alertsVerdicts(undismissedCount: number | null | undefined): Ver
 export interface SchedulerStatusFacts {
   running?: unknown;
   stopReason?: unknown;
-  deliberateStoppedAt?: unknown;
+  checks?: unknown;
 }
 
 /**
  * Scheduler Stop / Start. The caller passes the status payload only while the
  * /scheduler/status read is trusted (null otherwise → no verdicts).
  *   - scheduler-running / scheduler-not-running need a boolean `running`.
- *   - no-fresh-deliberate-stop needs `stopReason` present (string or null):
- *     false only while `stopReason === "deliberate"` and the marker is
- *     younger than DELIBERATE_STOP_TTL_MS. A deliberate stop whose
- *     `deliberateStoppedAt` is missing or unparseable yields no verdict
- *     rather than a guessed age (fail closed).
+ *   - no-fresh-deliberate-stop is SERVER-evaluated (issue #5452, ADR-0034
+ *     §8.3): copied from `status.checks` when the server delivered a boolean;
+ *     absent (no verdict, fail closed) otherwise. No clock, no TTL here.
  */
-export function schedulerVerdicts(
-  status: SchedulerStatusFacts | null | undefined,
-  nowMs: number,
-): Verdicts {
+export function schedulerVerdicts(status: SchedulerStatusFacts | null | undefined): Verdicts {
   if (status === null || status === undefined || typeof status !== "object") return {};
   const out: Verdicts = {};
   if (typeof status.running === "boolean") {
     out["scheduler-running"] = status.running === true;
     out["scheduler-not-running"] = status.running === false;
   }
-  const reason = status.stopReason;
-  if (reason === null || typeof reason === "string") {
-    if (reason !== "deliberate") {
-      out["no-fresh-deliberate-stop"] = true;
-    } else {
-      const stoppedAt =
-        typeof status.deliberateStoppedAt === "string" ? Date.parse(status.deliberateStoppedAt) : NaN;
-      if (Number.isFinite(stoppedAt) && Number.isFinite(nowMs)) {
-        out["no-fresh-deliberate-stop"] = !(nowMs - stoppedAt < DELIBERATE_STOP_TTL_MS);
-      }
+  const checks = status.checks;
+  if (checks !== null && typeof checks === "object") {
+    for (const [id, verdict] of Object.entries(checks as Record<string, unknown>)) {
+      if (typeof verdict === "boolean") out[id] = verdict;
     }
   }
   return out;
