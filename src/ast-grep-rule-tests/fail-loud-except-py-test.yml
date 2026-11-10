@@ -1,0 +1,62 @@
+# Rule tests for src/ast-grep-rules/fail-loud-except-py.yml (issue #5424).
+# Run: npx --yes -p @ast-grep/cli@0.43.0 ast-grep test --skip-snapshot-tests
+# `valid` snippets must NOT match; `invalid` snippets MUST match.
+id: fail-loud-except-py
+valid:
+  - |
+    try:
+        run()
+    except ValueError as e:
+        _append_log("run failed", e)
+  - |
+    try:
+        run()
+    except ValueError as e:
+        logging.warning("run failed: %s", e)
+  - |
+    try:
+        run()
+    except ValueError:
+        print("run failed", file=sys.stderr)
+  - |
+    try:
+        run()
+    except ValueError as e:
+        sys.stderr.write(str(e))
+  - |
+    try:
+        run()
+    except ValueError:
+        raise
+  - |
+    try:
+        run()
+    except ValueError as e:
+        raise RuntimeError("run failed") from e
+  - |
+    try:
+        run()
+    except ValueError:  # intentional: best-effort cleanup
+        pass
+  - |
+    try:
+        run()
+    except ValueError:
+        # intentional: the cache is optional, a miss is fine
+        pass
+invalid:
+  - |
+    try:
+        run()
+    except (TypeError, ValueError):
+        prior = None
+  - |
+    try:
+        run()
+    except ValueError:
+        pass
+  - |
+    try:
+        run()
+    except Exception as e:
+        fallback = read_prior()

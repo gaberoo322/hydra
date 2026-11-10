@@ -294,6 +294,7 @@
           }
         ],
         "activeDevOrch": 0,
+        "readyInflightExcluded": [],
         "boardDegraded": false
       }
     }

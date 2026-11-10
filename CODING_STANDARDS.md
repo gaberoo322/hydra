@@ -50,7 +50,7 @@ enforced-by: reviewer
 
 Every `catch` either logs with context, rethrows, or carries an `/* intentional: <reason> */` annotation. A silent catch is a finding; in a changed catch it is a blocker.
 
-enforced-by: src/ast-grep-rules/fail-loud-catch.yml
+enforced-by: src/ast-grep-rules/fail-loud-catch.yml, src/ast-grep-rules/fail-loud-except-py.yml, src/ast-grep-rules/fail-loud-devnull-sh.yml, scripts/ci/fail-loud-ratchet.ts
 
 ### STD-LOG-PINO-SEAM
 
