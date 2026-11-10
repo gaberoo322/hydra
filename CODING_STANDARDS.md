@@ -74,9 +74,9 @@ enforced-by: reviewer
 
 ### STD-TEST-NO-TAUTOLOGY
 
-Import the constant; never restate a literal the module defines, and never assert your own setup.
+Import the constant; never restate a literal the module defines, and never assert your own setup. A persisted wire-format constant (Redis key prefix, label name, event-stream name, pinned download version or SHA256) may be pinned as a drift-guard.
 
-enforced-by: reviewer
+enforced-by: src/ast-grep-rules/test-restates-module-literal.yml, reviewer
 
 ### STD-TEST-CAN-FAIL
 

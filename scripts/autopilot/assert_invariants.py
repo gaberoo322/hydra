@@ -147,6 +147,22 @@ def check_inv002(actions: list[dict], state: dict) -> None:
     # can't double-fill the same slot.
     occupied = {k for k, v in slots.items() if v is not None}
     for a in actions:
+        if a.get("type") == "reap":
+            # A reap earlier in the same plan frees the slot it names, but only
+            # when it names the task_id that currently occupies it (#5477): the
+            # instant-death replay reaps the dead dispatch then dispatches into
+            # the same slot. A different/missing task_id frees nothing.
+            reap_slot = a.get("slot") or a.get("class")
+            held = slots.get(reap_slot)
+            tid = a.get("task_id")
+            if (
+                reap_slot in occupied
+                and isinstance(held, dict)
+                and tid
+                and tid == held.get("task_id")
+            ):
+                occupied.discard(reap_slot)
+            continue
         if a.get("type") != "dispatch":
             continue
         slot = a.get("slot")

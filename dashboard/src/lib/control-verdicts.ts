@@ -12,17 +12,6 @@
  * a sibling function here.
  */
 
-/** The relabel targets the server schema accepts (RELABEL_TARGETS' mirror,
- * src/schemas/autopilot-board.ts). */
-export const RELABEL_TARGETS: readonly string[] = Object.freeze([
-  "needs-triage",
-  "needs-info",
-  "ready-for-human",
-  "blocked",
-  "needs-dev-resume",
-  "needs-qa",
-]);
-
 export type Verdicts = Record<string, boolean>;
 
 /** The server-evaluated promote verdicts a work-queue row carries
@@ -45,9 +34,14 @@ const PROMOTE_CHECK_IDS = ["issue-open", "not-already-ready", "has-scope-section
  * never derived here (they need the lane rule, the scope parser and the
  * resolved blocker set). A row without the map yields no promote verdict, which
  * lib/preconditions.ts renders as a failed check. Only `relabel-target-chosen`
- * is evaluated here: it is a direct reading of operator input.
+ * is evaluated here: it is a direct reading of operator input, checked against the
+ * server-DELIVERED `relabelTargets` list (issue #5453); with no list it fails.
  */
-export function rowVerdicts(row: WorkRowFacts, relabelTarget: string | undefined): Verdicts {
+export function rowVerdicts(
+  row: WorkRowFacts,
+  relabelTarget: string | undefined,
+  relabelTargets?: readonly string[] | null,
+): Verdicts {
   const out: Verdicts = {};
   const server = row.promoteChecks;
   if (server != null) {
@@ -56,7 +50,9 @@ export function rowVerdicts(row: WorkRowFacts, relabelTarget: string | undefined
     }
   }
   out["relabel-target-chosen"] =
-    typeof relabelTarget === "string" && RELABEL_TARGETS.includes(relabelTarget);
+    typeof relabelTarget === "string" &&
+    Array.isArray(relabelTargets) &&
+    relabelTargets.includes(relabelTarget);
   return out;
 }
 
