@@ -70,7 +70,7 @@ import {
   schedulerVerdicts,
 } from "../dashboard/src/lib/health-verdicts.ts";
 import { recDismissVerdicts, recMuteVerdicts } from "../dashboard/src/lib/now-verdicts.ts";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -856,6 +856,20 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
       for (const id of SERVER_EVALUATED_CHECKS) {
         assert.ok(!new RegExp(`"${id}"\\s*:`).test(src), `${lib}.ts derives "${id}" in an object literal`);
         assert.ok(!new RegExp(`\\["${id}"\\]\\s*=`).test(src), `${lib}.ts assigns "${id}" directly`);
+      }
+    }
+  });
+
+  test("no dashboard verdict table declares a literal relabel target list (#5453 INV-7)", async () => {
+    const { RELABEL_TARGETS } = await import("../src/schemas/autopilot-board.ts");
+    const files = await readdir(new URL("../dashboard/src", import.meta.url), { recursive: true });
+    for (const f of files.filter((n) => /\.(ts|tsx|js|jsx)$/.test(n))) {
+      const src = await readFile(new URL(`../dashboard/src/${f}`, import.meta.url), "utf8");
+      assert.ok(!/\bRELABEL_TARGETS\b\s*[:=]/.test(src), `${f} declares RELABEL_TARGETS`);
+      // A literal list = one array literal quoting several of the closed targets.
+      for (const m of src.matchAll(/\[[^\]]*\]/g)) {
+        const hits = RELABEL_TARGETS.filter((t) => new RegExp(`["']${t}["']`).test(m[0]));
+        assert.ok(hits.length < 3, `${f} declares an array literal of relabel targets: ${m[0].slice(0, 80)}`);
       }
     }
   });
