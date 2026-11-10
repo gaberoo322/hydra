@@ -384,10 +384,13 @@ export async function runReconcile(deps: ReconcileDeps, opts: ReconcileOptions =
       if (pr !== null) {
         const bodies = await deps.seam.fetch.prBodies(pr);
         if (bodies.ok === false) {
+          // PR side unknown: record it, but never let an unfetchable PR wedge the
+          // entry every pass (unbounded) or block the issue-side marker. Post the
+          // issue half, then resolve; the error surfaces the missing PR marker.
           report.errors.push(`cap-reset-pr-bodies-failed:#${issue}`);
-          return false;
+        } else {
+          prNeeds = latestResetMs(bodies.value) < eventMs;
         }
-        prNeeds = latestResetMs(bodies.value) < eventMs;
       }
       if (!issueNeeds && !prNeeds) return true;
       report.capResetsPosted++;

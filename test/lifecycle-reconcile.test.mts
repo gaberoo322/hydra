@@ -477,12 +477,12 @@ describe("external un-park posts the missing PR-side marker (#5437)", () => {
     assert.equal(w.posted.length, 0);
   });
 
-  test("a PR-bodies fetch failure appends nothing and posts nothing", async () => {
+  test("a PR-bodies fetch failure still posts the issue marker, records the error, and does not wedge (sibling: journal-unreadable stays fail-closed)", async () => {
     const { w } = setup();
     w.prBodiesFail = true;
     const report = await runReconcile(w.deps);
-    assert.equal(w.posted.length, 0);
-    assert.equal(report.externalEntries, 0);
+    assert.equal(w.posted.length, 1, "issue-side marker posted, PR half deferred");
+    assert.equal(report.externalEntries, 1, "entry resolved, not wedged");
     assert.ok(report.errors.some((e) => e.startsWith("cap-reset-pr-bodies-failed")));
   });
 });

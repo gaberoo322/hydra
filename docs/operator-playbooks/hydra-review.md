@@ -454,7 +454,9 @@ exactly like a cap park. The un-park route, when the operator chooses to resume:
 2. **The reset marker.** The route posts the `Hydra-Cap-Reset:` marker on the
    issue AND on the park's PR (the `qa-fail-rounds` arm counts PR comments only),
    so every cap count restarts. Verify it, do not post by hand unless the route's
-   journal evidence says `capReset: failed:<code>`; then post the same line on
+   journal evidence says `capReset` is anything other than `issue` (no PR) or `issue+pr`
+   (`failed:<code>`, `issue+pr-post-failed`, `issue+pr-lookup-failed` all leave a marker
+   missing); then post the same line on
    the issue and on PR #<pr> from the `Hydra-Cap-Park:` comment.
 
 **Evidence `preview` — two buckets only.** `preview` renders monospace markdown
