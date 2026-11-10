@@ -450,7 +450,7 @@ emit `## Friction Report` with the literal body `- (none)`.
 
 STD-TEST-CAN-FAIL was the most-cited review rule in the 2026-11 retro (17 PRs):
 a new test that already passes at the merge-base cannot be pinning your change.
-`scripts/ci/qa-fix-proof.ts --mode changed-tests` overlays your changed `test/**`
+`scripts/ci/qa-fix-proof.ts` in `--mode changed-tests` overlays your changed `test/**`
 files onto a throwaway merge-base worktree and runs the candidates (added test
 files, plus modified ones that add a `test(`/`it(` call). It is the same CLI the
 advisory CI step runs and it ALWAYS exits 0:
