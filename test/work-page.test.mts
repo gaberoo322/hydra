@@ -37,6 +37,7 @@
  * injects its readers/writers).
  */
 
+import { RELABEL_TARGETS } from "../src/schemas/autopilot-board.ts";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -474,6 +475,15 @@ describe("GET /autopilot/work-queue — the queue read", () => {
     assert.equal(res._body.sourcesOk, false);
     assert.equal(res._body.scanned, 0);
     assert.deepEqual(res._body.items, []);
+    assert.deepEqual(res._body.relabelTargets, [...RELABEL_TARGETS], "delivered on degraded reads too (#5453)");
+  });
+
+  test("the queue payload carries the relabel targets from the schema, in order (#5453)", async () => {
+    const router = routerWith(async () => ({ ok: true, rows: [] }));
+    const handler = findHandler(router, "GET", "/autopilot/work-queue");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+    assert.deepEqual(res._body.relabelTargets, [...RELABEL_TARGETS]);
   });
 
   test("clean empty board → sourcesOk:true (an ASSERTED empty the page renders as empty)", async () => {

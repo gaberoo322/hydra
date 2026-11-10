@@ -1,0 +1,1 @@
+- refactor: deliver the /work relabel picker targets from the work-queue payload instead of a dashboard copy (#5453)
