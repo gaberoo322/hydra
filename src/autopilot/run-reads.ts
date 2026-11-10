@@ -256,8 +256,9 @@ const defaultDispatchClassesDeps: DispatchClassesDeps = {
  * Tolerant parse (turn-row.ts): a malformed turn member (unparseable JSON,
  * missing `turn_n`, non-array `actions`, missing class) is skipped — a run's class set is a
  * "no signal" projection, not a correctness surface, so a single bad row must
- * not blank the whole result. This is identical to the behaviour of the retired
- * `defaultFetchClasses` this function replaces.
+ * not blank the whole result. Unlike the retired
+ * `defaultFetchClasses` (which accepted any JSON object), a row with no integer
+ * `turn_n` is now skipped.
  */
 export async function getRunDispatchClasses(
   runId: string,

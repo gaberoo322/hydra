@@ -15,6 +15,8 @@ import {
   serializeTurnMember,
   sanitizeParentExceptions,
 } from "../src/autopilot/turn-row.ts";
+import { foldParentExceptions, ledgerToRunTurns, runCarriesMirror } from "../src/aggregators/lifecycle-health.ts";
+import { getRunDispatchClasses } from "../src/autopilot/run-reads.ts";
 import { recordTurn } from "../src/autopilot/runs.ts";
 import type { AutopilotRunsDeps } from "../src/autopilot/runs.ts";
 import { readClassState } from "../src/autopilot/class-state.ts";
@@ -246,5 +248,57 @@ describe("behaviour changes from the tolerance rule", () => {
     assert.equal(turns.length, 1);
     assert.equal(turns[0].turn_n, 2);
     assert.equal(turns[0].dispatches, 1);
+  });
+});
+
+describe("QA round 1 (#5444): reader parity and named tolerance cases", () => {
+  const ev = { cause: "script-error", turn: 2, source: "parent", detail: "d", ts_epoch: 9 };
+
+  test("ledgerToRunTurns drops a source-less event exactly as the Redis guard does", () => {
+    const run = ledgerToRunTurns({
+      run_id: "r",
+      started_epoch: 1,
+      turn: 2,
+      parent_exceptions: [{ cause: "x", turn: 2, ts_epoch: 5 }],
+    });
+    assert.ok(run);
+    assert.deepEqual(run.turns[1].parent_exceptions, []);
+    const redis = parseTurnRows([JSON.stringify({ turn_n: 2, parent_exceptions: [{ cause: "x", turn: 2, ts_epoch: 5 }] })]);
+    assert.equal(foldParentExceptions([run]).exceptionTurns, foldParentExceptions([{ runId: "r", startedEpoch: 1, turns: redis }]).exceptionTurns);
+  });
+
+  test("sibling pin: ledgerToRunTurns keeps a well-formed event", () => {
+    const run = ledgerToRunTurns({ run_id: "r", started_epoch: 1, turn: 2, parent_exceptions: [ev] });
+    assert.ok(run);
+    assert.equal(run.turns[1].parent_exceptions?.length, 1);
+    assert.equal(foldParentExceptions([run]).exceptionTurns, 1);
+  });
+
+  test("foldParentExceptions skips a row with no integer turn_n (no unnumbered turn)", () => {
+    const f = foldParentExceptions([
+      { runId: "r", startedEpoch: 1, turns: parseTurnRows([JSON.stringify({ parent_exceptions: [] }), JSON.stringify({ turn_n: 1 })]) },
+    ]);
+    assert.equal(f.turns, 1);
+  });
+
+  test("runCarriesMirror: an all-malformed parent_exceptions array reads as no mirror", () => {
+    const turns = parseTurnRows([JSON.stringify({ turn_n: 1, parent_exceptions: [{ cause: "x" }] })]);
+    assert.equal(runCarriesMirror({ runId: "r", startedEpoch: 1, turns }), false);
+  });
+
+  test("runCarriesMirror: a source-less event row is dropped, an empty array still marks mirror", () => {
+    const empty = parseTurnRows([JSON.stringify({ turn_n: 1, parent_exceptions: [] })]);
+    assert.equal(runCarriesMirror({ runId: "r", startedEpoch: 1, turns: empty }), true);
+  });
+
+  test("getRunDispatchClasses skips a row with no turn_n, keeps a numbered one", async () => {
+    const classes = await getRunDispatchClasses("r", {
+      readTurns: async () =>
+        parseTurnRows([
+          JSON.stringify({ actions: [{ type: "dispatch", slot: "ghost_orch" }] }),
+          JSON.stringify({ turn_n: 1, actions: [{ type: "dispatch", slot: "dev_orch" }] }),
+        ]),
+    });
+    assert.deepEqual(classes, ["dev_orch"]);
   });
 });

@@ -29,7 +29,7 @@ import { CAP_ARMS, type CapArm } from "../lifecycle/caps.ts";
 import { loadLifecycleMode, type LifecycleMode } from "../lifecycle/seam.ts";
 import { listCapEvents, type CapEventRecord, type ListCapEventsResult } from "../redis/lifecycle-journal.ts";
 import { listAutopilotRunsSince } from "../redis/autopilot-runs.ts";
-import { readRunTurns, type TurnParentException, type TurnRow } from "../autopilot/turn-row.ts";
+import { readRunTurns, sanitizeParentExceptions, type TurnParentException, type TurnRow } from "../autopilot/turn-row.ts";
 import { listQaVerdictCommentsSince, resolveGithubRepo, type QaVerdictCommentsResult } from "../github/issues.ts";
 import { isPassVerdict, parseQaVerdictTrailers } from "../qa/verdict-trailer.ts";
 import { logger } from "../logger.ts";
@@ -149,7 +149,8 @@ function turnEvents(turn: TurnRow): MirroredEvent[] {
  * `(runId, event.turn)` with at least one event (INV-2: the event's own `turn`
  * keys it, NOT the row it rode in on), so exceptionTurns <= turns always holds
  * without dropping events, and the live Redis rows fold identically to the Run
- * Ledger replay (INV-4). * Events de-duplicate on `(runId, turn, cause, ts_epoch)` because the heartbeat
+ * Ledger replay (INV-4). A row with no integer `turn_n` is skipped by the
+ * Turn Row parser (it no longer counts as one unnumbered turn). Events de-duplicate on `(runId, turn, cause, ts_epoch)` because the heartbeat
  * mirrors turn_n and turn_n-1.
  */
 export function foldParentExceptions(runs: readonly RunTurns[]): ParentExceptionFold {
@@ -444,18 +445,9 @@ export function ledgerToRunTurns(state: unknown): RunTurns | null {
   const turns: TurnRow[] = [];
   for (let t = 1; t <= (s.turn as number); t++) {
     // The live ledger is mirror-era by definition: `[]` marks a clean turn.
-    const parent_exceptions: TurnParentException[] = [];
-    for (const e of events) {
-      if (e && e.turn === t && typeof e.cause === "string" && Number.isInteger(e.ts_epoch)) {
-        parent_exceptions.push({
-          cause: e.cause,
-          turn: t,
-          source: typeof e.source === "string" ? e.source : "",
-          detail: typeof e.detail === "string" ? e.detail : "",
-          ts_epoch: e.ts_epoch as number,
-        });
-      }
-    }
+    // Same guard as the Redis path (sanitizeParentExceptions), so the two folds cannot disagree.
+    const mine = events.filter((e) => e && e.turn === t);
+    const parent_exceptions: TurnParentException[] = sanitizeParentExceptions(mine) ?? [];
     turns.push({ turn_n: t, dispatches: [], parent_exceptions, raw: { turn_n: t, parent_exceptions } });
   }
   return { runId: s.run_id, startedEpoch: s.started_epoch as number, turns };
