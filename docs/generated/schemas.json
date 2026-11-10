@@ -897,6 +897,15 @@
       }
     },
     {
+      "name": "SERVER_EVALUATED_CHECKS",
+      "file": "src/schemas/operator-actions.ts",
+      "importedBy": [],
+      "routes": [],
+      "source": {
+        "path": "src/schemas/operator-actions.ts"
+      }
+    },
+    {
       "name": "SchedulerStartBodySchema",
       "file": "src/schemas/scheduler.ts",
       "importedBy": [
