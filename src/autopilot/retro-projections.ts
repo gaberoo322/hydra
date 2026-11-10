@@ -37,6 +37,7 @@
  * read), not merely documented.
  */
 
+import type { JoinedTurn } from "./turn-row.ts";
 import { bucketDispatchOutcome } from "./cycle-status.ts";
 import { isHarnessAgentId } from "../transcript-store.ts";
 import type { StuckSignal } from "./run-health.ts";
@@ -562,9 +563,7 @@ function enrichFromSlot(
  * Pure over the already-fetched turns — `slots_snapshot` is already on each
  * turn member, so there is no Redis round-trip here.
  */
-export function projectDispatches(
-  turns: Array<Record<string, unknown>>,
-): RetroDispatch[] {
+export function projectDispatches(turns: readonly JoinedTurn[]): RetroDispatch[] {
   const out: RetroDispatch[] = [];
   // Cross-turn identity map (issue #1776): durable-identity key → the
   // canonical (earliest-turn) RetroDispatch. Keys are namespaced so a task_id
@@ -579,23 +578,16 @@ export function projectDispatches(
     if (key && !byIdentity.has(key)) byIdentity.set(key, d);
   };
   for (const turn of turns) {
-    const turnN =
-      typeof turn.turn_n === "number" && Number.isFinite(turn.turn_n)
-        ? (turn.turn_n as number)
-        : null;
-    const actions: any[] = Array.isArray(turn.actions) ? (turn.actions as any[]) : [];
-    const slotsSnapshot =
-      turn.slots_snapshot && typeof turn.slots_snapshot === "object"
-        ? (turn.slots_snapshot as Record<string, unknown>)
-        : {};
+    const turnN = turn.turn_n;
+    const slotsSnapshot = turn.slots_snapshot ?? {};
 
     // Track which slot keys an action already projected, so the slots_snapshot
     // fold enriches those in place rather than emitting a duplicate.
     const bySlot = new Map<string, RetroDispatch>();
 
-    for (const a of actions) {
-      if (!a || a.type !== "dispatch") continue;
-      const outcome = a.outcome && typeof a.outcome === "object" ? a.outcome : null;
+    for (const joined of turn.dispatches) {
+      const a: Record<string, any> = joined.action;
+      const outcome = joined.outcome;
       const cycleId =
         (outcome && typeof outcome.cycleId === "string" && outcome.cycleId) ||
         (typeof a.cycleId === "string" && a.cycleId) ||
