@@ -147,6 +147,9 @@
           }
         ],
         "activeDevOrch": 0,
+        "readyInflightExcluded": [
+          860
+        ],
         "boardDegraded": false
       }
     }

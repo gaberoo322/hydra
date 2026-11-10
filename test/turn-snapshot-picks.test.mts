@@ -32,7 +32,7 @@
 import { degradeDetail } from "../src/autopilot/turn-snapshot/collector.ts";
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { main } from "../scripts/autopilot/turn-snapshot.ts";
@@ -139,6 +139,9 @@ function expectedTsCalls(bash: string[][]): string[][] {
 
 const nums = (s: string) => (s === "" ? [] : s.split(" ").map(Number));
 
+/** `UPDATE_TURN_SNAPSHOT_PICKS_GOLDEN=1 npm run test:file -- test/turn-snapshot-picks.test.mts` re-records `expected.values` / `stderrLines`. */
+const UPDATE_GOLDEN = process.env.UPDATE_TURN_SNAPSHOT_PICKS_GOLDEN === "1";
+
 const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".json")).sort();
 
 describe("Turn Snapshot picks — golden files from the bash collectors (ADR-0043 D4)", () => {
@@ -172,6 +175,12 @@ describe("Turn Snapshot picks — golden files from the bash collectors (ADR-004
         inflight: { union: nums(g.inputs.inflight.union), branch: nums(g.inputs.inflight.branch), body: nums(g.inputs.inflight.body) },
         boardState: g.inputs.boardState,
       });
+      if (UPDATE_GOLDEN) {
+        // Opt-in re-record (fixtures README): rewrite only the typed value + stderr lines.
+        g.expected.values = JSON.parse(JSON.stringify({ picks: outcome.value }));
+        g.expected.stderrLines = [...outcome.notes];
+        writeFileSync(join(GOLDEN_DIR, file), `${JSON.stringify(g, null, 2)}\n`);
+      }
       assert.deepEqual(JSON.parse(JSON.stringify({ picks: outcome.value })), g.expected.values, "the typed value must match the golden");
       assert.deepEqual(outcome.notes, g.expected.stderrLines, "the stderr lines must match, in order");
       assert.equal(outcome.value.boardDegraded, g.expected.boardDegraded, "the ORCH_BOARD_DEGRADED verdict must match");
@@ -1375,7 +1384,7 @@ describe("turn-snapshot CLI — picks collector contract (ADR-0043 D2, slice 3)"
     const github = { ...fakeGithub([], {}, { merged: 0 }), listReadyForAgentIssues: async (): Promise<GhJsonRead> => Promise.reject(new Error("boom")) };
     const code = await main(["--collectors", "pr-gate,picks", "--format", "values"], { github, hydra: fakeHydra({ designConceptBody: async () => "" }), now: () => NOW_MS, sleep: async () => {} }, io(sink));
     assert.equal(code, 0);
-    assert.deepEqual(JSON.parse(sink.stdout).picks, { grillPick: null, devReadyPick: null, candidateExclusions: [], activeDevOrch: 0, boardDegraded: true });
+    assert.deepEqual(JSON.parse(sink.stdout).picks, { grillPick: null, devReadyPick: null, candidateExclusions: [], activeDevOrch: 0, readyInflightExcluded: [], boardDegraded: true });
     assert.match(sink.stderr, /orch turn-snapshot picks collector crashed \(boom\)/);
   });
 
@@ -1543,5 +1552,46 @@ describe("Turn Snapshot picks — payload-shape semantics stay pinned after the 
 
   test("merged refs: a non-text title degrades to the empty set", () => {
     assert.deepEqual([...mergedRefIssues(ok([{ title: "x (#3)", body: "" }, { title: 5, body: "" }]))], []);
+  });
+});
+
+describe("Turn Snapshot picks — readyInflightExcluded: ready rows an open PR covers (issue #5423)", () => {
+  const excluded = async (issues: Issue[], opts: GateOpts = {}) => {
+    const r = await runGate(issues, opts);
+    return { list: JSON.parse(r.stdout).picks.readyInflightExcluded as number[], stderr: r.stderr };
+  };
+  const prFor = (n: number): OpenPr => ({ headRefName: `feature/pr-${n}`, body: `Closes #${n}` });
+
+  test("every ready row PR-covered → all excluded, ascending, with the PR-COVERED note", async () => {
+    const r = await excluded([issue(5406, "x"), issue(5315, "x")], { openPrs: [prFor(5406), prFor(5315)] });
+    assert.deepEqual(r.list, [5315, 5406]);
+    assert.match(r.stderr, /orch board PR-COVERED, not empty: .*#5315 #5406 \(issue #5423\)/);
+  });
+
+  test("a partially covered board excludes only the covered row and prints no PR-COVERED note", async () => {
+    const r = await excluded([issue(10, "x"), issue(11, "x")], { openPrs: [prFor(10)] });
+    assert.deepEqual(r.list, [10]);
+    assert.doesNotMatch(r.stderr, /PR-COVERED/);
+  });
+
+  test("a branch-name-only reference (no closing keyword) counts — the union rule", async () => {
+    const r = await excluded([issue(20, "x")], { openPrs: [{ headRefName: "issue-20-fix", body: "" }] });
+    assert.deepEqual(r.list, [20]);
+  });
+
+  test("no open PRs → nothing excluded (fail open toward work)", async () => {
+    assert.deepEqual((await excluded([issue(30, "x")])).list, []);
+  });
+
+  test("a failed grill-list read → [] (pool unread)", async () => {
+    const sink = { stdout: "", stderr: "" };
+    const github = { ...fakeGithub([], { openPrs: [prFor(40)] }, { merged: 0 }), listReadyForAgentIssues: async () => EMPTY };
+    await main(["--collectors", "pr-gate,picks", "--format", "values"], { github, hydra: fakeHydra({ designConceptBody: async () => "" }), now: () => NOW_MS, sleep: async () => {} }, { stdout: (t: string) => (sink.stdout += t), stderr: (t: string) => (sink.stderr += t), readFile: () => "" });
+    assert.deepEqual(JSON.parse(sink.stdout).picks.readyInflightExcluded, []);
+  });
+
+  test("a GLM-withheld row is not re-subtracted (the base count already excluded it)", async () => {
+    const r = await excluded([issue(50, "x"), issue(51, "x")], { openPrs: [prFor(50), prFor(51)], glmWithheld: [50] });
+    assert.deepEqual(r.list, [51]);
   });
 });
