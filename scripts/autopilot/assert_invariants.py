@@ -89,12 +89,6 @@ class InvariantError(AssertionError):
 RESEARCH_FORCE_DAILY_CAP = 4
 
 
-def _scope_excluded(scope: str, cls: str) -> bool:
-    # The SAME derivation decide.py:scope_excluded() calls (issue #5472): the
-    # taxonomy `scope` column, so INV-008 covers every wrong-scope class.
-    return taxonomy.scope_excluded(scope, cls)
-
-
 # ---------------------------------------------------------------------------
 # Individual invariant checks
 # ---------------------------------------------------------------------------
@@ -225,13 +219,17 @@ def check_inv008(actions: list[dict], state: dict) -> None:
     """
     limits = state.get("limits") or {}
     scope = str(limits.get("scope", "all"))
+    try:
+        rows = taxonomy.load_taxonomy()  # once per check, not once per slot
+    except RuntimeError as exc:  # TaxonomyError: surface as an invariant verdict
+        raise InvariantError("INV-008", f"taxonomy unreadable: {exc}") from exc
     for a in actions:
         if a.get("type") != "dispatch":
             continue
         slot = str(a.get("slot") or "")
         if slot == "health":
             continue
-        if _scope_excluded(scope, slot):
+        if taxonomy.scope_excluded(scope, slot, rows):
             raise InvariantError("INV-008", f"dispatch {slot!r} disallowed under scope={scope!r}")
 
 

@@ -864,7 +864,7 @@ def _main(argv):
     if cmd == "carry-classes":
         try:
             names = carry_classes(load_classes())
-        except (OSError, ValueError, KeyError) as e:
+        except (OSError, RuntimeError, ValueError, KeyError) as e:
             sys.stderr.write("[run-ledger] carry-classes failed: %s\n" % e)
             return 1
         print("\n".join(names))

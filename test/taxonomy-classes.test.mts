@@ -1346,6 +1346,32 @@ print(json.dumps(out))
     }
   });
 
+  test("a missing HYDRA_CLASSES_JSON fails carry-classes cleanly (exit 1, no traceback) and INV-008 as InvariantError; the default file still works", () => {
+    const dir = mkdtempSync(join(tmpdir(), "taxonomy-carry-"));
+    try {
+      const missing = join(dir, "nope.json");
+      const ledger = join(AUTOPILOT_DIR, "run_ledger.py");
+      const bad = spawnSync("python3", [ledger, "carry-classes"], { encoding: "utf-8", env: { ...process.env, HYDRA_CLASSES_JSON: missing } });
+      assert.equal(bad.status, 1, bad.stderr);
+      assert.match(bad.stderr, /carry-classes failed/);
+      assert.doesNotMatch(bad.stderr, /Traceback/);
+      const inv = probeAutopilot(`
+import assert_invariants as a
+try:
+    a.check_inv008([{"type": "dispatch", "slot": "dev_target"}], {"limits": {"scope": "orch-only"}})
+    print(json.dumps("no-raise"))
+except a.InvariantError as e:
+    print(json.dumps(e.code))
+`, { HYDRA_CLASSES_JSON: missing });
+      assert.equal(inv, "INV-008");
+      // Sibling shape: the default taxonomy keeps its old verdict.
+      const ok = spawnSync("python3", [ledger, "carry-classes"], { encoding: "utf-8", env: { ...process.env, HYDRA_CLASSES_JSON: "" } });
+      assert.equal(ok.status, 0, ok.stderr);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("an order tuple that is not exactly the rows of its kind fails at import with TaxonomyError naming tuple and class", () => {
     const cases: Array<[string, (rows: Array<Record<string, unknown>>) => void, RegExp]> = [
       ["extra pipeline row", (rows) => rows.push({ ...rows.find((r) => r.kind === "pipeline" && r.scope === "orch")!, name: "extra_pipeline" }), /PIPELINE_PRIORITY.*missing pipeline class 'extra_pipeline'/],
