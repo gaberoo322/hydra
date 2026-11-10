@@ -695,6 +695,27 @@ describe("route (steps 9.5-10, the single effect owner)", () => {
     assert.ok(r.effects.some((e) => e.kind === "fail-bounce-advance" && !e.ok));
   });
 
+  test("route acts on the seam park, never on round.action: a positional 'escalate' with an allowed advance parks nothing (#5437)", async () => {
+    const h = harness({
+      ghHandler: withState("OPEN"),
+      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium", roundAction: "escalate", escalationSummary: "ESC" }),
+    });
+    await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
+    const bodies = h.writes().filter((a) => a[0] === "issue" && a[1] === "comment").map((a) => argAfter(a as string[], "--body") as string);
+    assert.ok(!bodies.some((b) => /round cap reached/.test(b)), "no escalation comment without the seam refusal");
+  });
+
+  test("route still escalates on the seam refusal when round.action says 'bounce' (sibling shape)", async () => {
+    const h = harness({
+      ghHandler: withState("OPEN"),
+      advanceHandler: refuse("needs-dev-resume", "parked:qa-fail-rounds"),
+      phase: cannedPhase({ verdict: "FAIL", reviewVerdict: "FAIL", blockers: 1, maxSeverity: "medium", roundAction: "bounce" }),
+    });
+    await runRoute(ROUTE_OPTS, readyPre(), h.ports, realDeps());
+    const last = argAfter(h.writes().at(-1) as string[], "--body") as string;
+    assert.match(last, /round cap reached/);
+  });
+
   test("route escalate (shadow): a live-arm park is the same parked:qa-fail-rounds refusal - no shadow-park branch, no caller-side cap comment", async () => {
     // qa-fail-rounds is a live arm: the shadow seam parks and posts the unified comment itself, so the
     // route sees the identical refusal it sees in enforce and adds only its own escalation comment.
