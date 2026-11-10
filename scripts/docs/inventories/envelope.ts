@@ -42,7 +42,7 @@ export interface RouteRow {
   source: SourceRef;
 }
 
-/** One row of the counts family (docs/generated/counts.json). */
+/** One row of the counts fold (inventories/counts.ts; computed, not committed — #5454). */
 export interface CountRow {
   family: string;
   metric: string;
@@ -321,9 +321,6 @@ export interface AdrRow {
   citedBy: string[];
   source: SourceRef;
 }
-
-/** The counts inventory: envelope + metric rows. */
-export type CountsInventory = Inventory<CountRow>;
 
 /**
  * One term a CONTEXT-MAP row's Glossary-terms cell names (#4596): the term's

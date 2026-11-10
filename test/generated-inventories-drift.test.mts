@@ -21,7 +21,7 @@
  * or injected inputs, so the rules hold independent of the live tree's shape.
  */
 
-import { fail as assertFail, deepStrictEqual, ok, throws } from "node:assert/strict";
+import { fail as assertFail, deepStrictEqual, ok, strictEqual, throws } from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,13 +30,11 @@ import { fileURLToPath } from "node:url";
 import { before, describe, it } from "node:test";
 import {
   buildAllInventories,
-  buildCounts,
-  COUNTS_FILE,
   corpusRowLabel,
-  countRowLabel,
   diffLabelMultiset,
   FAMILIES,
 } from "../scripts/docs/generate-inventories.ts";
+import { buildCounts, countRowLabel } from "../scripts/docs/inventories/counts.ts";
 import { serializeInventory } from "../scripts/docs/inventories/envelope.ts";
 import type { AdrsInventory, CorpusRow, RouteRow } from "../scripts/docs/inventories/envelope.ts";
 import { extractCorpus } from "../scripts/docs/inventories/corpus.ts";
@@ -128,6 +126,29 @@ function assertNoDrift(file: string, fresh: { rows: unknown[] }, labelOf: (row: 
   }
 }
 
+/** Every non-relative specifier (node:*, bare package, dynamic import/require) reachable from `entry`
+ * through relative imports, including side-effect (`import "x"`) and re-export forms. */
+function findNonRelativeImports(entry: string, read: (rel: string) => string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const visit = (rel: string): void => {
+    if (seen.has(rel)) return;
+    seen.add(rel);
+    const src = read(rel);
+    const specs = [
+      ...[...src.matchAll(/^\s*(?:import|export)\b[^;]*?\bfrom\s+["']([^"']+)["']/gm)].map((m) => m[1]),
+      ...[...src.matchAll(/^\s*import\s+["']([^"']+)["']/gm)].map((m) => m[1]),
+      ...[...src.matchAll(/\b(?:import|require)\s*\(\s*["']([^"']+)["']/g)].map((m) => m[1]),
+    ];
+    for (const spec of specs) {
+      if (spec.startsWith(".")) visit(join(dirname(rel), spec));
+      else out.push(`${rel} -> ${spec}`);
+    }
+  };
+  visit(entry);
+  return out;
+}
+
 // Built once for the whole suite (lazily, in a before() hook, so an extractor
 // error fails a test instead of crashing the file at import): every family
 // from the one registry.
@@ -148,10 +169,40 @@ describe("generated feature inventories", () => {
     });
   }
 
-  it("docs/generated/counts.json matches freshly computed counts", () => {
-    assertNoDrift(COUNTS_FILE, buildCounts(fresh), (row) =>
-      countRowLabel(row as { family: string; metric: string; value: number }),
+  it("counts are NOT a committed file: the fold is computed, never written (#5454)", () => {
+    ok(!existsSync(join(REPO_ROOT, "docs/generated/counts.json")), "docs/generated/counts.json must not exist");
+  });
+
+  it("the counts fold's transitive import closure has no Node or bare imports, so the dashboard build can bundle it (#5454)", () => {
+    const offenders = findNonRelativeImports("scripts/docs/inventories/counts.ts", (rel) =>
+      readFileSync(join(REPO_ROOT, rel), "utf8"),
     );
+    deepStrictEqual(offenders, []);
+  });
+
+  it("findNonRelativeImports catches transitive node: and side-effect imports, and passes a clean relative closure", () => {
+    const graph: Record<string, string> = {
+      "a/entry.ts": 'import type { X } from "./clean.ts";\nexport const y = 1;\n',
+      "a/clean.ts": "export type X = number;\n",
+      "b/entry.ts": 'import { x } from "./dirty.ts";\n',
+      "b/dirty.ts": 'import { readFileSync } from "node:fs";\nexport const x = readFileSync;\n',
+      "c/entry.ts": 'import "node:fs";\n',
+      "d/entry.ts": 'const m = await import("node:path");\n',
+    };
+    const read = (rel: string) => graph[rel] ?? "";
+    deepStrictEqual(findNonRelativeImports("a/entry.ts", read), []);
+    deepStrictEqual(findNonRelativeImports("b/entry.ts", read), ["b/dirty.ts -> node:fs"]);
+    deepStrictEqual(findNonRelativeImports("c/entry.ts", read), ["c/entry.ts -> node:fs"]);
+    deepStrictEqual(findNonRelativeImports("d/entry.ts", read), ["d/entry.ts -> node:path"]);
+  });
+
+  it("the fold over the committed family files equals the fold over a fresh extraction", () => {
+    const committed = new Map<string, { rows: unknown[] }>();
+    for (const fam of FAMILIES) {
+      committed.set(fam.family, JSON.parse(readFileSync(join(REPO_ROOT, fam.file), "utf8")));
+    }
+    deepStrictEqual(buildCounts(committed), buildCounts(fresh));
+    strictEqual(countRowLabel({ family: "a", metric: "b", value: 3 }), "a/b = 3");
   });
 
   it("family registry: every docs/generated file is registered and counts cover every family", () => {
@@ -159,20 +210,19 @@ describe("generated feature inventories", () => {
       .filter((f) => f.endsWith(".json"))
       .map((f) => `docs/generated/${f}`)
       .sort();
-    deepStrictEqual(committed, [...FAMILIES.map((f) => f.file), COUNTS_FILE].sort());
+    deepStrictEqual(committed, FAMILIES.map((f) => f.file).sort());
     for (const fam of FAMILIES) {
       deepStrictEqual(fam.file, `docs/generated/${fam.family}.json`);
       ok(existsSync(join(REPO_ROOT, `scripts/docs/inventories/${fam.family}.ts`)), `no extractor module for ${fam.family}`);
     }
     const counts = buildCounts(fresh);
-    const metrics = counts.rows.map((r) => `${r.family}/${r.metric}`);
-    for (const fam of FAMILIES) ok(metrics.includes(`${fam.family}/rows`), `counts.json lacks ${fam.family}/rows`);
+    const metrics = counts.map((r) => `${r.family}/${r.metric}`);
+    for (const fam of FAMILIES) ok(metrics.includes(`${fam.family}/rows`), `counts fold lacks ${fam.family}/rows`);
     ok(metrics.includes("redis-keys/retired"));
     for (const m of ["pages/in-nav", "config/unread", "config/missing-sections", "ci-gates/required"]) {
-      ok(metrics.includes(m), `counts.json lacks ${m}`);
+      ok(metrics.includes(m), `counts fold lacks ${m}`);
     }
     ok(metrics.includes("routes/routers") && metrics.includes("routes/routes"));
-    deepStrictEqual(counts.generatedFrom, FAMILIES.map((f) => f.file).sort());
   });
 
   it("docs/generated/corpus.json matches a fresh extractCorpus() run", () => {
@@ -249,7 +299,7 @@ describe("generated feature inventories", () => {
   it("corpus counts are derived from the corpus inventory via buildCounts", () => {
     const corpus = extractCorpus(REPO_ROOT);
     const counts = buildCounts(fresh);
-    const metric = (m: string) => counts.rows.find((r) => r.family === "corpus" && r.metric === m)?.value;
+    const metric = (m: string) => counts.find((r) => r.family === "corpus" && r.metric === m)?.value;
     deepStrictEqual(metric("rows"), corpus.rows.length);
     deepStrictEqual(metric("adr"), corpus.rows.filter((r) => r.tier === "adr").length);
     deepStrictEqual(metric("historical"), corpus.rows.filter((r) => r.tier === "historical").length);
