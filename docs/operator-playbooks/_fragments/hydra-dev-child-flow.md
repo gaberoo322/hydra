@@ -79,9 +79,11 @@ Run these numbered steps.
    foreground poll; the `*.log` ignore keeps it out of commits), then read the
    `# tests` / `# pass` / `# fail` footer, `NPM_TEST_EXIT=` and the VERDICT line
    from it. Also run `npm run typecheck` and `npm run build`.
-7a. **Fail-loud lint on changed files** (issue #4732) — run the ast-grep
-   `fail-loud-catch` rule over the PR's changed `.ts`/`.mts` files and fix every
-   hit before `gh pr create`. Recipe: "Fail-loud lint — changed files" below.
+7a. **Fail-loud lint on changed files** (issue #4732, widened #5424) — run the
+   ast-grep `fail-loud-catch` rule over the PR's changed `.ts`/`.mts` files,
+   `fail-loud-except-py` over changed `.py` files and `fail-loud-devnull-sh` over
+   changed `.sh` files, and fix every hit before `gh pr create` (the shrink-only
+   `test/fail-loud-ratchet.test.mts` in `npm test` blocks any new or edited hit). Recipe: "Fail-loud lint — changed files" below.
 8a. **MANDATORY — deposit the grounding test-count telemetry file** (issue
    #2754). Immediately after `npm test` passes, run the grounding-deposit recipe
    in "Reflection injection" below. Best-effort on I/O error but mandatory.
@@ -454,14 +456,19 @@ yours to fix:
 
 ```bash
 git fetch origin --quiet
-LINT_ARGS=()
-while IFS= read -r f; do
-  [ -f "$f" ] && LINT_ARGS+=(--path "$f")
-done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- '*.ts' '*.mts')
-if [ "${#LINT_ARGS[@]}" -gt 0 ]; then
-  npx tsx scripts/ast-search.ts --rule fail-loud-catch --text "${LINT_ARGS[@]}"
-fi
+for spec in "fail-loud-catch:*.ts *.mts" "fail-loud-except-py:*.py" "fail-loud-devnull-sh:*.sh"; do
+  rule="${spec%%:*}"
+  read -ra pats <<<"${spec#*:}"   # quoted below: the git pathspecs must not glob in the shell
+  LINT_ARGS=()
+  while IFS= read -r f; do
+    [ -f "$f" ] && LINT_ARGS+=(--path "$f")
+  done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- "${pats[@]}")
+  if [ "${#LINT_ARGS[@]}" -gt 0 ]; then
+    npx tsx scripts/ast-search.ts --rule "$rule" --text "${LINT_ARGS[@]}"
+  fi
+done
 # Prints `file:line:col: <catch text>` per hit (0-based line/col); no output = clean.
+# Python/shell use `# intentional: <reason>` as the annotation.
 ```
 
 For every hit in a catch you **added or edited**: log with context

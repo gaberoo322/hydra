@@ -1,0 +1,35 @@
+# ast-grep rule — fail-loud shell swallows (issue #5424).
+#
+# STD-CATCH-FAIL-LOUD for shell: the `|| true` swallow idiom hides the failure
+# cause (a command whose output is discarded AND whose exit code is forced to
+# success). Under `set -e` a bare `2>/dev/null` still aborts the script and is
+# loud, so only the `<cmd> <discard-redirect> || true` shape is flagged.
+#
+# Exemption: a comment containing "intentional" as a child of the matched list
+# or on the same / immediately preceding line (`# intentional: <reason>`).
+#
+# Enforcement: blocking via the shrink-only baseline ratchet
+# scripts/ci/fail-loud-ratchet.ts (run by test/fail-loud-ratchet.test.mts in the
+# required `test` job). Also surfaced advisory by `ast-grep scan`.
+# Rule tests: src/ast-grep-rule-tests/fail-loud-devnull-sh-test.yml
+
+id: fail-loud-devnull-sh
+language: Bash
+severity: warning
+message: >-
+  Swallowed failure: `<cmd> … >/dev/null … || true` discards both the output and
+  the exit status. Log the failure with context or annotate it with
+  `# intentional: <reason>`.
+note: >-
+  STD-CATCH-FAIL-LOUD (issue #5424). Blocking via the baseline ratchet.
+rule:
+  kind: list
+  any:
+    - pattern: $CMD 2>/dev/null || true
+    - pattern: $CMD >/dev/null 2>&1 || true
+    - pattern: $CMD &>/dev/null || true
+  not:
+    any:
+      - has: { stopBy: end, kind: comment, regex: "(?i)intentional" }
+      - follows: { stopBy: neighbor, kind: comment, regex: "(?i)intentional" }
+      - precedes: { stopBy: neighbor, kind: comment, regex: "(?i)intentional" }

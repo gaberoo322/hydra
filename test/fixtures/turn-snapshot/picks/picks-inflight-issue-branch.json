@@ -31,9 +31,7 @@
     "designConcepts": {}
   },
   "expected": {
-    "stderrLines": [
-      "orch board PR-COVERED, not empty: ready-for-agent issues held out by an open PR: #850 (issue #5423)"
-    ],
+    "stderrLines": [],
     "boardDegraded": false,
     "bashGhCalls": [
       [
@@ -111,9 +109,7 @@
           }
         ],
         "activeDevOrch": 0,
-        "readyInflightExcluded": [
-          850
-        ],
+        "readyInflightExcluded": [],
         "boardDegraded": false
       }
     }

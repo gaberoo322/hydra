@@ -38,6 +38,7 @@ import { join, resolve } from "node:path";
 import { main } from "../scripts/autopilot/turn-snapshot.ts";
 import {
   blockedDependencyIssues,
+  inflightExcludedIssues,
   blockerRefUnion,
   collectPicks,
   countActiveDevOrch,
@@ -225,6 +226,8 @@ interface GateOpts {
   mergedFetchFails?: boolean;
   /** When set, a HEALTHY board-state body carrying this glm_withheld list (#4254); absent = degraded read. */
   glmWithheld?: number[];
+  /** The healthy body's `blocker_excluded` list (#4823); setting it (like glmWithheld) makes the board-state read healthy. */
+  blockerExcluded?: number[];
 }
 
 interface GatePicks {
@@ -283,9 +286,9 @@ async function runGate(issues: Issue[], opts: GateOpts = {}): Promise<GatePicks>
     designConceptBody: async (n) => (fresh.has(n) ? JSON.stringify({ createdAt: NOW_MS, status: "approved" }) : ""),
   });
   const board =
-    opts.glmWithheld === undefined
+    opts.glmWithheld === undefined && opts.blockerExcluded === undefined
       ? null
-      : JSON.stringify({ ready_for_agent: 1, degraded: false, sourcesOk: true, glm_withheld: opts.glmWithheld });
+      : JSON.stringify({ ready_for_agent: 1, degraded: false, sourcesOk: true, glm_withheld: opts.glmWithheld ?? [], blocker_excluded: opts.blockerExcluded ?? [] });
   let stdout = "";
   let stderr = "";
   const code = await main(
@@ -1557,7 +1560,7 @@ describe("Turn Snapshot picks — payload-shape semantics stay pinned after the 
 
 describe("Turn Snapshot picks — readyInflightExcluded: ready rows an open PR covers (issue #5423)", () => {
   const excluded = async (issues: Issue[], opts: GateOpts = {}) => {
-    const r = await runGate(issues, opts);
+    const r = await runGate(issues, { glmWithheld: [], ...opts });
     return { list: JSON.parse(r.stdout).picks.readyInflightExcluded as number[], stderr: r.stderr };
   };
   const prFor = (n: number): OpenPr => ({ headRefName: `feature/pr-${n}`, body: `Closes #${n}` });
@@ -1593,5 +1596,53 @@ describe("Turn Snapshot picks — readyInflightExcluded: ready rows an open PR c
   test("a GLM-withheld row is not re-subtracted (the base count already excluded it)", async () => {
     const r = await excluded([issue(50, "x"), issue(51, "x")], { openPrs: [prFor(50), prFor(51)], glmWithheld: [50] });
     assert.deepEqual(r.list, [51]);
+  });
+
+  test("a service blocker_excluded row (B) is not re-subtracted, even when PR-covered (INV-8d, B case)", async () => {
+    const r = await excluded([issue(60, "x"), issue(61, "x")], { openPrs: [prFor(60), prFor(61)], blockerExcluded: [60] });
+    assert.deepEqual(r.list, [61]);
+  });
+
+  test("B is the service list, not the pool's own Blocked-by parse: a row the service did not list is still subtracted", async () => {
+    const r = await excluded([issue(62, "Blocked by #9999")], { openPrs: [prFor(62)] });
+    assert.deepEqual(r.list, [62]);
+  });
+
+  test("extra pool rows the base count never counted (W and B) never hide real work", async () => {
+    // pool: 70 (W), 71 (B), 72 (covered, counted), 73 (uncovered, counted)
+    const r = await excluded([issue(70, "x"), issue(71, "x"), issue(72, "x"), issue(73, "x")], {
+      openPrs: [prFor(70), prFor(71), prFor(72)],
+      glmWithheld: [70],
+      blockerExcluded: [71],
+    });
+    assert.deepEqual(r.list, [72]);
+    assert.doesNotMatch(r.stderr, /PR-COVERED/);
+  });
+
+  test("PR-COVERED note fires when every COUNTED row is covered, even with W/B rows in the pool (INV-5)", async () => {
+    const r = await excluded([issue(80, "x"), issue(81, "x"), issue(82, "x")], {
+      openPrs: [prFor(80), prFor(81), prFor(82)],
+      glmWithheld: [80],
+      blockerExcluded: [81],
+    });
+    assert.deepEqual(r.list, [82]);
+    assert.match(r.stderr, /PR-COVERED, not empty: .*open PR: #82 \(issue #5423\)/);
+  });
+
+  test("a degraded board-state read subtracts nothing: the base is the gh fallback (INV-8c)", async () => {
+    const r = await runGate([issue(90, "x")], { openPrs: [prFor(90)] });
+    assert.deepEqual(JSON.parse(r.stdout).picks.readyInflightExcluded, []);
+  });
+
+  test("a degraded pr-gate (empty open-PR read) → [] even with a non-empty pool and healthy board (INV-8c)", async () => {
+    const sink = { stdout: "", stderr: "" };
+    const github = { ...fakeGithub([issue(95, "x")], {}, { merged: 0 }), listOpenPrs: async () => EMPTY };
+    await main(["--collectors", "pr-gate,picks", "--format", "values", "--board-state-file", "b.json"], { github, hydra: fakeHydra({ designConceptBody: async () => "" }), now: () => NOW_MS, sleep: async () => {} }, { stdout: (t: string) => (sink.stdout += t), stderr: (t: string) => (sink.stderr += t), readFile: () => JSON.stringify({ degraded: false, glm_withheld: [], blocker_excluded: [] }) });
+    assert.deepEqual(JSON.parse(sink.stdout).picks.readyInflightExcluded, []);
+  });
+
+  test("a malformed pool row makes the whole result [] (documented fail-open)", () => {
+    assert.deepEqual(inflightExcludedIssues([{ number: 1 }, "junk"], new Set([1]), new Set(), new Set()), []);
+    assert.deepEqual(inflightExcludedIssues([{ number: 1 }, { number: 2 }], new Set([1]), new Set(), new Set()), [1]);
   });
 });

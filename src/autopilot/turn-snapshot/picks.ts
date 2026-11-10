@@ -305,7 +305,7 @@ export function inflightExcludedIssues(
   items: unknown,
   inflight: ReadonlySet<number>,
   withheld: ReadonlySet<number>,
-  blockedDep: ReadonlySet<number>,
+  blockerExcluded: ReadonlySet<number>,
 ): number[] {
   const rows = elementsOf(items);
   if (rows === MALFORMED) return [];
@@ -314,7 +314,7 @@ export function inflightExcludedIssues(
     const n = fieldOf(it, "number");
     if (n === MALFORMED) return [];
     if (!isInteger(n)) continue;
-    if (inflight.has(n) && !withheld.has(n) && !blockedDep.has(n)) out.add(n);
+    if (inflight.has(n) && !withheld.has(n) && !blockerExcluded.has(n)) out.add(n);
   }
   return [...out].sort((a, b) => a - b);
 }
@@ -325,11 +325,24 @@ export function inflightExcludedIssues(
  * fail-open, no pin is refused (#3754).
  */
 export function parseGlmWithheld(boardState: string | null): ReadonlySet<number> {
+  return parseBoardStateIssueList(boardState, "glm_withheld");
+}
+
+/**
+ * The blocker-excluded set (#4823): `blocker_excluded` off the SAME healthy
+ * board-state body the base `ready_for_agent` count came from — the rows that
+ * count dropped for an open strict blocker. Malformed / degraded is empty.
+ */
+export function parseBlockerExcluded(boardState: string | null): ReadonlySet<number> {
+  return parseBoardStateIssueList(boardState, "blocker_excluded");
+}
+
+function parseBoardStateIssueList(boardState: string | null, key: string): ReadonlySet<number> {
   const out = new Set<number>();
   if (boardState === null) return out;
   const parsed = parseJsonRead(boardState);
   if (parsed.kind !== "ok" || !isDict(parsed.data)) return out;
-  const xs = parsed.data.glm_withheld;
+  const xs = parsed.data[key];
   if (!Array.isArray(xs)) return out;
   for (const x of xs) if (isInteger(x) && x > 0) out.add(x);
   return out;
@@ -528,10 +541,21 @@ export async function collectPicks(deps: PicksDeps): Promise<CollectorOutcome<Pi
   //     union rule (same set grillCandidates uses), minus W and B so an issue
   //     the base count already excluded is never subtracted twice. A degraded
   //     pr-gate (empty inflight) or grill-list read (empty pool) yields [].
-  const readyInflightExcluded = inflightExcludedIssues(pool, new Set(deps.inflight.union), withheld, blockedDep);
-  // Every pool row covered => orch_work_available goes false: say why, so a
-  // retro reading the turn sees the board was PR-covered, not empty.
-  if (readyInflightExcluded.length > 0 && readyInflightExcluded.length >= pool.length) {
+  //     W and B come from the SAME board-state body as the base count (B is the
+  //     service's `blocker_excluded`, not the pool-derived blockedDep), so only
+  //     rows the base count provably included are subtracted. A degraded
+  //     board-state (null) means the base is the gh fallback: subtract nothing.
+  const blockerExcluded = parseBlockerExcluded(deps.boardState);
+  const readyInflightExcluded =
+    deps.boardState === null ? [] : inflightExcludedIssues(pool, new Set(deps.inflight.union), withheld, blockerExcluded);
+  // Every row the base count included is covered => orch_work_available goes
+  // false: say why, so a retro reading the turn sees the board was PR-covered,
+  // not empty. Counted rows = pool minus W minus B.
+  const countedPool = pool.filter((it) => {
+    const n = isDict(it) ? it.number : undefined;
+    return !(isInteger(n) && (withheld.has(n) || blockerExcluded.has(n)));
+  });
+  if (readyInflightExcluded.length > 0 && readyInflightExcluded.length >= countedPool.length) {
     notes.push(
       `orch board PR-COVERED, not empty: ready-for-agent issues held out by an open PR: ${readyInflightExcluded.map((n) => `#${n}`).join(" ")} (issue #5423)`,
     );
