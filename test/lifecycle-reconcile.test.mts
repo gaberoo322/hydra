@@ -497,7 +497,12 @@ describe("external un-park fails closed when the park journal is unreadable (#54
       { event: "unlabeled", label: "parked", tsMs: T2 },
       { event: "labeled", label: "ready-for-agent", tsMs: T2 },
     ]);
-    ctx.w.journalReadFails = true;
+    // The tick's own journal read succeeds; only the PR lookup inside the reset (after the comments fetch) fails.
+    const comments = ctx.w.deps.seam.fetch.issueComments;
+    ctx.w.deps.seam.fetch.issueComments = async (n) => {
+      ctx.w.journalReadFails = true;
+      return comments(n);
+    };
     const report = await runReconcile(ctx.w.deps);
     assert.equal(ctx.w.posted.length, 0);
     assert.equal(report.externalEntries, 0);

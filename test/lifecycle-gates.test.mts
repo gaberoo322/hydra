@@ -580,8 +580,10 @@ describe("operatorAdvance un-park posts the cap reset on issue and PR (#5437)", 
     const o = operatorHarness(["parked"], "shadow");
     o.h.journal.push(parkEntry(77));
     const out = posted(o);
-    let reads = 0;
-    o.h.deps.journal.read = async () => (++reads > 1 ? { ok: false, error: "redis" } as never : { ok: true, entries: [...o.h.journal] });
+    const record = o.h.deps.comment;
+    let issueCommentPosted = false;
+    o.h.deps.comment = async (n, body) => { issueCommentPosted = true; return record(n, body); };
+    o.h.deps.journal.read = async () => (issueCommentPosted ? ({ ok: false, error: "redis" } as never) : { ok: true, entries: [...o.h.journal] });
     const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
     assert.equal(res.ok, true);
     assert.equal(o.h.journal.at(-1)!.evidence.capReset, "issue+pr-lookup-failed");
