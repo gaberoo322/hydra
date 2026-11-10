@@ -176,6 +176,7 @@ Today's feed told the operator **that** something needed them. It did not say **
   - The three ADR-0005 kinds: link plus instruction.
 - **Action-bearing controls on `/work`, `/health` and `/runs`** use the same grammar. A **live ✓/✗ precondition checklist** sits beside the button, the consequence sits under it, and the button is **disabled while any line is ✗**. §7's "render the verified result" applies unchanged.
 - **There is no `/runbook` page.** Instruction sits at the moment of need.
+- **Who evaluates a check (amended #5451).** A page evaluates a check only when the verdict is a direct reading of one field it already reads, or of operator input; anything needing a rule, a constant or arithmetic is computed by the server and delivered by check id. The closed list is `SERVER_EVALUATED_CHECKS` beside `CONTROL_CHECKS` (`src/schemas/operator-actions.ts`): the four promote checks (one evaluator, `evaluatePromoteChecks`, shared by the write gate and carried on each `GET /autopilot/work-queue` row as `promoteChecks`) and the three `dc-*` approve checks. `test/operator-actions-registry.test.mts` pins that each has a server evaluator and that no verdict table in `dashboard/src/lib/` derives one.
 
 **8.4 Calibration is per admission line (#4444; this amends §4's last paragraph).**
 - **Counters key on the registry key `<bucket>:<line>`.** Bucket totals are derived sums, not stored.

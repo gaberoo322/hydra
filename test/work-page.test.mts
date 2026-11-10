@@ -51,6 +51,7 @@ import {
   workQueueBlockerSearchLimit,
   toWorkQueueRow,
   compareWorkQueueRows,
+  evaluatePromoteChecks,
   evaluatePromoteEligibility,
   parseParkReason,
   toHitlGrillRow,
@@ -2001,6 +2002,33 @@ describe("/work live preconditions — the row facts (issue #4629)", () => {
     assert.equal(unscoped!.hasScopeSection, false);
     // The row fact and the promote gate's refusal agree — one parser.
     assert.equal(scoped!.hasScopeSection, hasScopeSection(issue().body));
+  });
+
+  test("toWorkQueueRow carries promoteChecks from the ONE evaluator the write gate refuses with (#5451 INV-1/INV-4)", () => {
+    const blocked = issue({
+      number: 7,
+      labels: ["needs-triage"],
+      body: "No scope.\n\nBlocked by #90",
+    });
+    const open = new Set([90]);
+    const row = toWorkQueueRow(blocked, open, { glmPartitionActive: false });
+    assert.deepEqual(row!.promoteChecks, {
+      "issue-open": true,
+      "not-already-ready": true,
+      "has-scope-section": false,
+      "no-open-blocker": false,
+    });
+    assert.deepEqual(row!.promoteChecks, evaluatePromoteChecks(blocked, open));
+    // Existing row facts stay (INV-4: additive).
+    assert.equal(row!.hasScopeSection, false);
+    assert.deepEqual(row!.openBlockers, [90]);
+    assert.equal(row!.lane, "needs-triage");
+    // The first failing check is the write gate's refusal reason.
+    const gate = evaluatePromoteEligibility(blocked, open);
+    assert.equal(gate.eligible === false ? gate.reason : null, "missing-scope-section");
+    // A ready-for-agent row fails not-already-ready on the same evaluator.
+    const ready = toWorkQueueRow(issue({ labels: ["ready-for-agent"] }), new Set(), { glmPartitionActive: false });
+    assert.equal(ready!.promoteChecks["not-already-ready"], false);
   });
 
   test("GET /autopilot/work-queue resolves blockers ONCE over prospective rows for every operator lane", async () => {
