@@ -260,7 +260,8 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
   const lastWalk = v.scout.lastWalkIso.ok ? (v.scout.lastWalkIso.value ?? "").replaceAll('"', "") : "";
 
   const signals: TurnSnapshotSignals = {
-    orch_work_available: orchBoardCount(v.orchBoard, "ready_for_agent") > 0,
+    // #5423: the base count minus ready rows an open PR already covers (same shape as the Target's adjustedReadyForAgent).
+    orch_work_available: Math.max(0, orchBoardCount(v.orchBoard, "ready_for_agent") - v.picks.readyInflightExcluded.length) > 0,
     needs_qa_orch: orchBoardCount(v.orchBoard, "needs_qa") > 0,
     needs_research: orchBoardCount(v.orchBoard, "needs_research") > 0,
     needs_triage_orch: orchBoardCount(v.orchBoard, "needs_triage") > 0,
@@ -397,6 +398,8 @@ function observability(v: TurnSnapshotValues): Record<string, unknown> {
     // #412's live-PR count — the kv wire printed it for the session to read;
     // no decide.py rule gates on it (dev_orch gates on its slot + pick).
     active_dev_orch: v.picks.activeDevOrch,
+    // #5423: ready-for-agent issues held out of orch_work_available by an open PR.
+    orch_ready_inflight_excluded: [...v.picks.readyInflightExcluded],
     // #5406: provenance for retro_run_drillable — which candidate and which
     // clause. Never under `blobs` (closed decide.py-normalised set).
     retro: {

@@ -139,6 +139,7 @@ function healthyValues(): TurnSnapshotValues {
       devReadyPick: 4934,
       candidateExclusions: [{ anchor: "issue-4900", member: "in-flight-dev-exclusion", verdict: "excluded", evidence: "open PR #4901" }],
       activeDevOrch: 1,
+      readyInflightExcluded: [],
       boardDegraded: false,
     },
     redisQueues: { "work-queue": ok(2), "reframe-queue": ok(0), "prior-failures": ok(0) },
@@ -437,7 +438,7 @@ describe("turn snapshot JSON: contract — golden documents through zod and the 
 
   test("the observability section carries the collector values no decide.py rule reads", () => {
     const doc = JSON.parse(readFileSync(join(PARITY_DIR, "golden-healthy.json"), "utf-8"));
-    assert.deepEqual(Object.keys(doc.observability).sort(), ["active_dev_orch", "capacity", "direction_drift", "health", "recommendations", "redis_queues", "retro", "scheduler"]);
+    assert.deepEqual(Object.keys(doc.observability).sort(), ["active_dev_orch", "capacity", "direction_drift", "health", "orch_ready_inflight_excluded", "recommendations", "redis_queues", "retro", "scheduler"]);
     assert.equal(doc.observability.scheduler.stall, "ok");
     assert.equal(typeof doc.observability.active_dev_orch, "number");
     assert.deepEqual(Object.keys(doc.observability.retro).sort(), ["candidate", "drillable", "drillableReason"]);
@@ -536,6 +537,20 @@ describe("turn snapshot JSON: builder details (#4934)", () => {
     };
     assert.equal(work(3), true);
     for (const notInt of ["3", 2.5, [3], { n: 3 }, true]) assert.equal(work(notInt), false, `${JSON.stringify(notInt)} is not a count`);
+  });
+
+  test("orch_work_available subtracts PR-covered ready rows: max(0, base - excluded) > 0 (#5423)", () => {
+    const at = (excluded: number[], base = 2) => {
+      const h = healthyValues();
+      const counts = { source: "service" as const, values: { ...(h.orchBoard.counts as { values: Record<string, unknown> }).values, ready_for_agent: base } };
+      const out = buildTurnSnapshot({ ...h, orchBoard: { ...h.orchBoard, counts: counts as never }, picks: { ...h.picks, readyInflightExcluded: excluded } }, { nowMs: NOW_MS }).doc;
+      return { work: out.signals.orch_work_available, obs: (out.observability as Record<string, unknown>).orch_ready_inflight_excluded };
+    };
+    assert.deepEqual(at([5315, 5406]), { work: false, obs: [5315, 5406] }, "all ready rows PR-covered");
+    assert.equal(at([5315]).work, true, "partially covered");
+    assert.equal(at([]).work, true, "fallback / nothing excluded: base unchanged");
+    assert.equal(at([1, 2, 3], 2).work, false, "floor at 0 when the reads disagree");
+    assert.equal(at([], 0).work, false);
   });
 
   test("scout_board_saturated is pinned at > 20 open enhancements (a strict cap)", () => {
