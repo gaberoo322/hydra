@@ -80,9 +80,24 @@ const death = (over: Record<string, unknown> = {}) => ({
   type: "completion", slot: "dev_target", task_id: "abc123", total_tokens: 0, tool_uses: 0, duration_ms: 800,
   notice: "You're out of usage credits. Switch to another model", ...over,
 });
+const ASSERTS = join(SCRIPTS, "assert_invariants.py");
+function assertInvariants(plan: any, state: any): { status: number | null; stderr: string } {
+  const dir = tmp();
+  writeFileSync(join(dir, "plan.json"), JSON.stringify(plan));
+  writeFileSync(join(dir, "state.json"), JSON.stringify(withTurnSnapshot(state)));
+  const r = spawnSync("python3", [ASSERTS, join(dir, "plan.json"), join(dir, "state.json")], { encoding: "utf-8" });
+  return { status: r.status, stderr: r.stderr ?? "" };
+}
 const replays = (plan: any) => plan.actions.filter((a: any) => a.type === "dispatch" && a.slot === "dev_target");
 
 describe("decide.py - Fable instant-death replay (#5323)", () => {
+  test("the replay plan passes assert_invariants.py against the post-decide state (#5477)", () => {
+    const { plan, stateAfter } = decide(baseState(), [death()]);
+    assert.equal(replays(plan).length, 1);
+    const r = assertInvariants(plan, stateAfter);
+    assert.equal(r.status, 0, r.stderr);
+  });
+
   test("replays the identical recorded dispatch once on opus, after the reap, and marks the reap", () => {
     const { plan } = decide(baseState(), [death()]);
     const reap = plan.actions.find((a: any) => a.type === "reap");

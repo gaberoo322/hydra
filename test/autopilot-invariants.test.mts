@@ -141,6 +141,48 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
     assert.match(r.stderr, /INV-002/);
   });
 
+  describe("INV-002: a same-plan reap frees the slot it reaps (#5477)", () => {
+    const busy = () => baseState({ slots: {
+      dev_orch: null, qa_orch: null, research_orch: null, qa_target: null, research_target: null,
+      dev_target: { skill: "x", task_id: "abc123" },
+    } });
+    const dispatch = { type: "dispatch", slot: "dev_target", skill: "x" };
+
+    test("a reap of the slot's own task_id before the dispatch frees it", () => {
+      const r = runAsserts({ actions: [{ type: "reap", slot: "dev_target", task_id: "abc123" }, dispatch] }, busy());
+      assert.equal(r.status, 0, r.stderr);
+    });
+    test("class is a synonym for slot on the reap", () => {
+      const r = runAsserts({ actions: [{ type: "reap", class: "dev_target", task_id: "abc123" }, dispatch] }, busy());
+      assert.equal(r.status, 0, r.stderr);
+    });
+    test("a dispatch into an occupied slot with no reap is still rejected", () => {
+      const r = runAsserts({ actions: [dispatch] }, busy());
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /INV-002/);
+    });
+    test("a dispatch that precedes the reap is still rejected", () => {
+      const r = runAsserts({ actions: [dispatch, { type: "reap", slot: "dev_target", task_id: "abc123" }] }, busy());
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /INV-002/);
+    });
+    test("a reap with a different task_id frees nothing", () => {
+      const r = runAsserts({ actions: [{ type: "reap", slot: "dev_target", task_id: "other" }, dispatch] }, busy());
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /INV-002/);
+    });
+    test("a reap with no task_id frees nothing", () => {
+      const r = runAsserts({ actions: [{ type: "reap", slot: "dev_target" }, dispatch] }, busy());
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /INV-002/);
+    });
+    test("two dispatches after one matching reap: the second is rejected", () => {
+      const r = runAsserts({ actions: [{ type: "reap", slot: "dev_target", task_id: "abc123" }, dispatch, dispatch] }, busy());
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /INV-002/);
+    });
+  });
+
   test("INV-002: two dispatches into the same free slot in one plan is rejected", () => {
     const plan = {
       actions: [
