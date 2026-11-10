@@ -53,6 +53,7 @@ import {
   BoardIssueRefSchema,
   HITL_GRILL_LABEL,
   HITL_GRILL_CAP,
+  RELABEL_TARGETS,
   type AutopilotBoardStateResponse,
   type BoardStateScope,
   type BoardActionResponse,
@@ -403,6 +404,8 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
 
     return res.json({
       items,
+      // A constant: delivered on degraded reads too (issue #5453).
+      relabelTargets: [...RELABEL_TARGETS],
       scanned,
       sourcesOk,
       generatedAt: new Date(nowMs).toISOString(),

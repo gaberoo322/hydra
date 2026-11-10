@@ -38,6 +38,7 @@
  * seam (per the CLAUDE.md shared-teardown authoring rule).
  */
 
+import { RELABEL_TARGETS } from "../src/schemas/autopilot-board.ts";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -64,7 +65,6 @@ import {
   resolvePreconditions,
 } from "../dashboard/src/lib/preconditions.ts";
 import {
-  RELABEL_TARGETS,
   designConceptVerdicts,
   healthVerdicts,
   reopenVerdicts,
@@ -1054,14 +1054,15 @@ describe("pages read the registry once and host their own undo windows (issue #4
     assert.ok(select.includes("setRelabelTargets("), "choosing only records the target");
     assert.ok(!select.includes("/autopilot/board/relabel"), "no write fires from the select");
     assert.ok(src.includes("context={{ number: row.number, label: relabelTargets[row.number] }}"));
-    assert.ok(src.includes("verdicts={rowVerdicts(row, relabelTargets[row.number])}"));
+    assert.ok(src.includes("verdicts={rowVerdicts(row, relabelTargets[row.number], relabelOptions)}"));
     assert.ok(src.includes('controlKey="control:work/reopen"'));
     assert.ok(src.includes("verdicts={reopenVerdicts(reopenNumber)}"), "the reopen input feeds issue-number-entered");
     // relabel-target-chosen is ✗ until a closed target is picked (behaviour
     // pinned on the leaf below).
     assert.equal(rowVerdicts({}, undefined)["relabel-target-chosen"], false);
     assert.equal(rowVerdicts({}, "")["relabel-target-chosen"], false);
-    assert.equal(rowVerdicts({}, "needs-info")["relabel-target-chosen"], true);
+    assert.equal(rowVerdicts({}, "needs-info", RELABEL_TARGETS)["relabel-target-chosen"], true);
+    assert.equal(rowVerdicts({}, "needs-info")["relabel-target-chosen"], false, "no delivered list fails closed (#5453)");
   });
 
   test("the promote verdicts read the server-computed row facts, never a client-side body parse", async () => {
@@ -1219,7 +1220,7 @@ describe("page verdict tables — lib/control-verdicts.ts (PR #5155 review)", ()
   const row = (over: any = {}) => ({ promoteChecks: { ...PASS, ...over } });
 
   test("a row delivering four passing promote verdicts passes every promote check", () => {
-    assert.deepEqual(rowVerdicts(row(), "blocked"), { ...PASS, "relabel-target-chosen": true });
+    assert.deepEqual(rowVerdicts(row(), "blocked", RELABEL_TARGETS), { ...PASS, "relabel-target-chosen": true });
   });
 
   test("each promote verdict is a straight copy of the server-delivered map (#5451 INV-5)", () => {
@@ -1242,9 +1243,12 @@ describe("page verdict tables — lib/control-verdicts.ts (PR #5155 review)", ()
     }
   });
 
-  test("relabel-target-chosen accepts only the closed RELABEL_TARGETS", () => {
-    for (const t of RELABEL_TARGETS) assert.equal(rowVerdicts(row(), t)["relabel-target-chosen"], true, t);
-    assert.equal(rowVerdicts(row(), "ready-for-agent")["relabel-target-chosen"], false);
+  test("relabel-target-chosen accepts only a target in the server-delivered list; no list fails closed (#5453)", () => {
+    for (const t of RELABEL_TARGETS) assert.equal(rowVerdicts(row(), t, RELABEL_TARGETS)["relabel-target-chosen"], true, t);
+    assert.equal(rowVerdicts(row(), "ready-for-agent", RELABEL_TARGETS)["relabel-target-chosen"], false);
+    for (const none of [undefined, null, []] as const) {
+      assert.equal(rowVerdicts(row(), "needs-qa", none as any)["relabel-target-chosen"], false);
+    }
   });
 
   test("reopenVerdicts: only a positive integer counts as entered", () => {
