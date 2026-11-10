@@ -283,8 +283,18 @@ function python(script: string, input?: string, args: string[] = [], env: NodeJS
   return JSON.parse(res.stdout);
 }
 
+/**
+ * The stored golden layout (#5441): pretty-printed, one key per line, in the
+ * serialiser's key order, so two PRs adding a signal diff (and merge) line-wise.
+ * Goldens are compared as parsed content, never as text; the serialiser's exact
+ * wire text is pinned once, below.
+ */
+function prettyGolden(text: string): string {
+  return `${JSON.stringify(JSON.parse(text), null, 2)}\n`;
+}
+
 // Golden regeneration happens before any suite collects (the suites below read the files at collection time).
-if (UPDATE_GOLDEN) for (const name of Object.keys(SCENARIOS)) writeFileSync(join(PARITY_DIR, `golden-${name}.json`), emit(name));
+if (UPDATE_GOLDEN) for (const name of Object.keys(SCENARIOS)) writeFileSync(join(PARITY_DIR, `golden-${name}.json`), prettyGolden(emit(name)));
 
 // ---------------------------------------------------------------------------
 
@@ -338,15 +348,26 @@ describe("turn snapshot JSON: plan parity over every captured decide() input (#4
 
 describe("turn snapshot JSON: contract — golden documents through zod and the Python accessor (#4934)", () => {
   for (const name of Object.keys(SCENARIOS)) {
-    test(`${name}: the emitted document matches its golden file byte for byte and validates`, () => {
+    test(`${name}: the emitted document matches its golden file as parsed content and validates`, () => {
       const text = emit(name);
       const path = join(PARITY_DIR, `golden-${name}.json`);
-      assert.equal(text, readFileSync(path, "utf-8"));
+      assert.deepEqual(JSON.parse(text), JSON.parse(readFileSync(path, "utf-8")));
       const parsed = TurnSnapshotSchema.safeParse(JSON.parse(text));
       assert.ok(parsed.success, parsed.success ? "" : JSON.stringify(parsed.error.issues));
       assert.deepEqual(JSON.parse(text).validation, { ok: true });
     });
   }
+
+  test("the serialiser's wire text is the single-line form decide.py reads (the one exact-text pin, #5441)", () => {
+    const text = emit("healthy");
+    assert.ok(text.endsWith("\n") && !text.slice(0, -1).includes("\n"), "the wire text is a single line plus one trailing newline");
+    assert.ok(
+      text.startsWith('{"schema_version":1,"generated_at":"2026-10-07T12:00:00.000Z","signals":{"orch_work_available":true,'),
+      `unexpected wire prefix: ${text.slice(0, 120)}`,
+    );
+    assert.ok(text.includes('"blobs":{"usage_eligibility":{"allow": true, "shed": ["scout_orch"]'), "blobs are spliced in as the service's exact JSON text");
+    assert.ok(text.endsWith('"retro":{"candidate":"9ede5aef","drillable":true,"drillableReason":"flagged-dispatch"}}}\n'), "the document closes compact with one trailing newline");
+  });
 
   const goldens = Object.keys(SCENARIOS).map((name) => ({ name, snapshot: readFileSync(join(PARITY_DIR, `golden-${name}.json`), "utf-8") }));
   const readings: any[] = python("accessor_check.py", JSON.stringify(goldens), [], productionEnv()).cases;
