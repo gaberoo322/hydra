@@ -447,7 +447,7 @@ const NUMBER_WORDS: Record<string, number> = {
 const COUNT_CLAIM_RE =
   /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)[ \t]+(dispatch classes|redis keys|ci jobs|routers|routes|ADRs|pages|classes|skills|playbooks|streams|chores)\b/gi;
 
-/** Fixed noun → counts.json row map (lowercased noun → family/metric). */
+/** Fixed noun → counts-fold row map (lowercased noun → family/metric). */
 const COUNT_NOUN_ROWS: Record<string, { family: string; metric: string }> = {
   routers: { family: "routes", metric: "routers" },
   routes: { family: "routes", metric: "routes" },
