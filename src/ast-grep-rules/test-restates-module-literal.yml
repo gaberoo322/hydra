@@ -1,0 +1,51 @@
+# ast-grep rule — test restates a module literal (issue #5448, STD-TEST-NO-TAUTOLOGY).
+#
+# Flags `assert.equal(SOME_CONSTANT, <literal>)` (either argument order) in
+# test files: the test restates a value the module defines, so it goes red for
+# the wrong reason when the constant legitimately changes. Judgement shapes
+# (re-asserting the definition, asserting a fake's own setup) stay with the
+# reviewer by construction: only a bare UPPER_SNAKE identifier against a
+# number or string literal node matches.
+#
+# Drift-guard carve-out (operator ruling 2026-11-09): persisted wire-format
+# constants (Redis key prefixes, label names, event-stream names, pinned
+# download versions / SHA256s) are exempt; the closed suffix list is the
+# `not.regex` below.
+#
+# Enforcement: ADVISORY, changed files only (no ratchet, no baseline file).
+# hydra-dev child-step 7a runs it over the PR's changed test files, and the
+# whole-repo `ast-grep scan` step in advisory-checks.yml annotates. Run on a
+# file list with:
+#   npx tsx scripts/ast-search.ts --rule test-restates-module-literal --text --path <file>
+# Rule tests: src/ast-grep-rule-tests/test-restates-module-literal-test.yml
+#   npx --yes -p @ast-grep/cli@0.43.0 ast-grep test --skip-snapshot-tests
+
+id: test-restates-module-literal
+language: TypeScript
+severity: warning
+message: >-
+  Test restates a module literal (STD-TEST-NO-TAUTOLOGY). Import the constant
+  and feed it to the code under test as an INPUT, then assert an observable
+  effect through the module interface, never the constant's value. Persisted
+  wire-format constants whose identifier ends in _KEY, _PREFIX, _LABEL, _STREAM,
+  _SHA256 or _VERSION are exempt as drift-guards.
+note: >-
+  Advisory lint (issue #5448). Existing hits on master are not a blocker and
+  shrink when their files are next touched.
+rule:
+  kind: call_expression
+  any:
+    - pattern: assert.equal($A, $B)
+    - pattern: assert.strictEqual($A, $B)
+    - pattern: assert.deepEqual($A, $B)
+    - pattern: assert.deepStrictEqual($A, $B)
+  all:
+    - any:
+        - all:
+            - has: { field: arguments, has: { nthChild: 1, kind: identifier, regex: "^[A-Z][A-Z0-9_]{2,}$", not: { regex: "_(KEY|PREFIX|LABEL|STREAM|SHA256|VERSION)$" } } }
+            - has: { field: arguments, has: { nthChild: 2, any: [{ kind: number }, { kind: string }] } }
+        - all:
+            - has: { field: arguments, has: { nthChild: 2, kind: identifier, regex: "^[A-Z][A-Z0-9_]{2,}$", not: { regex: "_(KEY|PREFIX|LABEL|STREAM|SHA256|VERSION)$" } } }
+            - has: { field: arguments, has: { nthChild: 1, any: [{ kind: number }, { kind: string }] } }
+files:
+  - "test/**/*.test.mts"

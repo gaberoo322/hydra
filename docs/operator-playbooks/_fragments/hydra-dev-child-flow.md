@@ -456,7 +456,7 @@ yours to fix:
 
 ```bash
 git fetch origin --quiet
-for spec in "fail-loud-catch:*.ts *.mts" "fail-loud-except-py:*.py" "fail-loud-devnull-sh:*.sh"; do
+for spec in "fail-loud-catch:*.ts *.mts" "fail-loud-except-py:*.py" "fail-loud-devnull-sh:*.sh" "test-restates-module-literal:*.test.mts"; do
   rule="${spec%%:*}"
   read -ra pats <<<"${spec#*:}"   # quoted below: the git pathspecs must not glob in the shell
   LINT_ARGS=()

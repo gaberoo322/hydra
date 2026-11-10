@@ -1,0 +1,35 @@
+# Rule tests for src/ast-grep-rules/test-restates-module-literal.yml (issue #5448).
+# Run: npx --yes -p @ast-grep/cli@0.43.0 ast-grep test --skip-snapshot-tests
+id: test-restates-module-literal
+valid:
+  - |
+    assert.equal(LAUNCH_FLOW_KEY_PREFIX, "hydra:autopilot:launch-flow");
+  - |
+    assert.equal(PINNED_SHA256, "abc123");
+  - |
+    assert.equal(computeDeadline(TRIP_MIN_PAIR_PRS), TRIP_MIN_PAIR_PRS * 2);
+  - |
+    assert.equal(types.length, 11);
+  - |
+    assert.equal(cfg.MAX_RETRIES, 3);
+  - |
+    assert.equal(tripMinPairPrs, 30);
+  - |
+    assert.equal(RESULT_NAME, `x-${suffix}`);
+  - |
+    assert.equal(OFFSET, -1);
+  - |
+    assert.deepEqual(KINDS, ["a", "b"]);
+invalid:
+  - |
+    assert.equal(TRIP_MIN_PAIR_PRS, 30);
+  - |
+    assert.strictEqual(CALIBRATION_MIN_SURFACED, 5);
+  - |
+    assert.deepEqual(PROMOTION_THRESHOLD, 3);
+  - |
+    assert.deepStrictEqual(DEFAULT_MODE, "shadow");
+  - |
+    assert.equal(30, TRIP_MIN_PAIR_PRS);
+  - |
+    assert.strictEqual("shadow", DEFAULT_MODE);
