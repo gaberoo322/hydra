@@ -447,7 +447,7 @@ export function ledgerToRunTurns(state: unknown): RunTurns | null {
     // The live ledger is mirror-era by definition: `[]` marks a clean turn.
     // Same guard as the Redis path (sanitizeParentExceptions), so the two folds cannot disagree.
     const mine = events.filter((e) => e && e.turn === t);
-    const parent_exceptions: TurnParentException[] = sanitizeParentExceptions(mine) ?? [];
+    const parent_exceptions: TurnParentException[] = sanitizeParentExceptions(mine, {}, { lenientSource: true }) ?? [];
     turns.push({ turn_n: t, dispatches: [], parent_exceptions, raw: { turn_n: t, parent_exceptions } });
   }
   return { runId: s.run_id, startedEpoch: s.started_epoch as number, turns };

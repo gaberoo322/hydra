@@ -871,7 +871,7 @@ describe("mirror-presence filter on the parentExceptionRate runs", () => {
   test("filterMirrorRuns drops runs whose turns never carried the field; a clean run with [] stays", () => {
     const pre = { runId: "pre", startedEpoch: 1, turns: parseTurnRows([turn(1), turn(2)]) };
     const clean = { runId: "clean", startedEpoch: 2, turns: parseTurnRows([turn(1, []), turn(2, [])]) };
-    const dirty = { runId: "dirty", startedEpoch: 3, turns: parseTurnRows([turn(1), turn(2, [{ cause: "x", turn: 2, source: "parent", ts_epoch: 1 }])]) };
+    const dirty = { runId: "dirty", startedEpoch: 3, turns: parseTurnRows([turn(1), turn(2, [{ cause: "x", turn: 2, ts_epoch: 1 }])]) };
     assert.deepEqual(filterMirrorRuns([pre, clean, dirty]).map((r) => r.runId), ["clean", "dirty"]);
   });
 

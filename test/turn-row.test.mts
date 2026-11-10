@@ -251,10 +251,10 @@ describe("behaviour changes from the tolerance rule", () => {
   });
 });
 
-describe("QA round 1 (#5444): reader parity and named tolerance cases", () => {
+describe("reader parity and named tolerance cases (#5444)", () => {
   const ev = { cause: "script-error", turn: 2, source: "parent", detail: "d", ts_epoch: 9 };
 
-  test("ledgerToRunTurns drops a source-less event exactly as the Redis guard does", () => {
+  test("ledgerToRunTurns keeps a source-less event, matching the Redis read path (INV-8)", () => {
     const run = ledgerToRunTurns({
       run_id: "r",
       started_epoch: 1,
@@ -262,9 +262,15 @@ describe("QA round 1 (#5444): reader parity and named tolerance cases", () => {
       parent_exceptions: [{ cause: "x", turn: 2, ts_epoch: 5 }],
     });
     assert.ok(run);
-    assert.deepEqual(run.turns[1].parent_exceptions, []);
+    assert.equal(run.turns[1].parent_exceptions?.length, 1);
     const redis = parseTurnRows([JSON.stringify({ turn_n: 2, parent_exceptions: [{ cause: "x", turn: 2, ts_epoch: 5 }] })]);
-    assert.equal(foldParentExceptions([run]).exceptionTurns, foldParentExceptions([{ runId: "r", startedEpoch: 1, turns: redis }]).exceptionTurns);
+    assert.equal(redis[0].parent_exceptions?.length, 1);
+    assert.equal(foldParentExceptions([run]).exceptionTurns, 1);
+    assert.equal(foldParentExceptions([{ runId: "r", startedEpoch: 1, turns: redis }]).exceptionTurns, 1);
+  });
+
+  test("write guard stays strict: sanitizeParentExceptions without lenientSource drops a source-less row", () => {
+    assert.equal(sanitizeParentExceptions([{ cause: "x", turn: 2, ts_epoch: 5 }]), undefined);
   });
 
   test("sibling pin: ledgerToRunTurns keeps a well-formed event", () => {
@@ -281,12 +287,14 @@ describe("QA round 1 (#5444): reader parity and named tolerance cases", () => {
     assert.equal(f.turns, 1);
   });
 
-  test("runCarriesMirror: an all-malformed parent_exceptions array reads as no mirror", () => {
+  test("runCarriesMirror: an all-malformed parent_exceptions array still reads as mirror-era (pre-module behaviour)", () => {
     const turns = parseTurnRows([JSON.stringify({ turn_n: 1, parent_exceptions: [{ cause: "x" }] })]);
-    assert.equal(runCarriesMirror({ runId: "r", startedEpoch: 1, turns }), false);
+    assert.equal(runCarriesMirror({ runId: "r", startedEpoch: 1, turns }), true);
+    const absent = parseTurnRows([JSON.stringify({ turn_n: 1 })]);
+    assert.equal(runCarriesMirror({ runId: "r", startedEpoch: 1, turns: absent }), false);
   });
 
-  test("runCarriesMirror: a source-less event row is dropped, an empty array still marks mirror", () => {
+  test("runCarriesMirror: an empty array marks mirror", () => {
     const empty = parseTurnRows([JSON.stringify({ turn_n: 1, parent_exceptions: [] })]);
     assert.equal(runCarriesMirror({ runId: "r", startedEpoch: 1, turns: empty }), true);
   });

@@ -122,10 +122,11 @@ function ctxFields(ctx: TurnGuardContext): Record<string, unknown> {
 export function sanitizeParentExceptions(
   raw: unknown,
   ctx: TurnGuardContext = {},
+  opts: { lenientSource?: boolean } = {},
 ): TurnParentException[] | undefined {
   if (raw === undefined) return undefined;
   if (!Array.isArray(raw)) {
-    logger.warn(ctxFields(ctx), "[autopilot] recordTurn dropped non-array parent_exceptions field");
+    logger.warn(ctxFields(ctx), "[autopilot/turn-row] dropped non-array parent_exceptions field");
     return undefined;
   }
   const kept: TurnParentException[] = [];
@@ -135,14 +136,14 @@ export function sanitizeParentExceptions(
       r &&
       typeof r === "object" &&
       typeof r.cause === "string" &&
-      typeof r.source === "string" &&
+      (opts.lenientSource === true || typeof r.source === "string") &&
       Number.isInteger(r.turn) &&
       Number.isInteger(r.ts_epoch)
     ) {
       kept.push({
         cause: r.cause,
         turn: r.turn as number,
-        source: r.source,
+        source: typeof r.source === "string" ? r.source : "",
         detail: typeof r.detail === "string" ? r.detail : "",
         ts_epoch: r.ts_epoch as number,
       });
@@ -151,7 +152,7 @@ export function sanitizeParentExceptions(
   if (kept.length !== raw.length) {
     logger.warn(
       { ...ctxFields(ctx), dropped: raw.length - kept.length },
-      "[autopilot] recordTurn dropped malformed parent_exceptions rows",
+      "[autopilot/turn-row] dropped malformed parent_exceptions rows",
     );
   }
   return kept.length > 0 || raw.length === 0 ? kept : undefined;
@@ -203,14 +204,14 @@ export function sanitizeTurnObservabilityFields(
       if (dropped.length > 0) {
         logger.warn(
           { ...ctxFields(ctx), dropped },
-          "[autopilot] recordTurn dropped malformed decisions entries",
+          "[autopilot/turn-row] dropped malformed decisions entries",
         );
       }
       out.decisions = kept;
     } else {
       logger.warn(
         { ...ctxFields(ctx), value: body.decisions },
-        "[autopilot] recordTurn dropped non-object decisions field",
+        "[autopilot/turn-row] dropped non-object decisions field",
       );
     }
   }
@@ -220,7 +221,7 @@ export function sanitizeTurnObservabilityFields(
     if (!Array.isArray(value)) {
       logger.warn(
         { ...ctxFields(ctx), value },
-        `[autopilot] recordTurn dropped non-list ${label} field`,
+        `[autopilot/turn-row] dropped non-list ${label} field`,
       );
       return undefined;
     }
@@ -228,7 +229,7 @@ export function sanitizeTurnObservabilityFields(
     if (kept.length !== value.length) {
       logger.warn(
         { ...ctxFields(ctx), label, dropped: value.length - kept.length },
-        `[autopilot] recordTurn dropped non-string ${label} elements`,
+        `[autopilot/turn-row] dropped non-string ${label} elements`,
       );
     }
     return kept;
@@ -244,7 +245,7 @@ export function sanitizeTurnObservabilityFields(
     } else {
       logger.warn(
         { ...ctxFields(ctx), value: body.usage_allow },
-        "[autopilot] recordTurn dropped non-boolean usage_allow field",
+        "[autopilot/turn-row] dropped non-boolean usage_allow field",
       );
     }
   }
@@ -335,8 +336,11 @@ export function parseTurnRow(member: string): TurnRow | null {
 
   const ctx: TurnGuardContext = { turnN: row.turn_n };
   Object.assign(row, sanitizeTurnObservabilityFields(raw, ctx));
-  const pe = sanitizeParentExceptions(raw.parent_exceptions, ctx);
+  // Read side is lenient on `source` (INV-8: builder-health folds never read it) and
+  // an all-malformed array still marks a mirror-era row, as before the module.
+  const pe = sanitizeParentExceptions(raw.parent_exceptions, ctx, { lenientSource: true });
   if (pe !== undefined) row.parent_exceptions = pe;
+  else if (Array.isArray(raw.parent_exceptions)) row.parent_exceptions = [];
   return row;
 }
 
