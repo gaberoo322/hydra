@@ -553,6 +553,27 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
       assert.equal(o.h.journal.at(-1)!.evidence.capReset, "failed:comment-failed:gh-failed");
     });
 
+    test("the marker posts BEFORE the label write, so no claimable window sees the old reset point", async () => {
+      const o = operatorHarness(["parked"], "enforce");
+      const order: string[] = [];
+      const origEdit = o.h.deps.edit;
+      o.h.deps.edit = async (...a: Parameters<typeof origEdit>) => { order.push("edit"); return origEdit(...a); };
+      o.h.deps.comment = async () => { order.push("comment"); return { ok: true }; };
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.deepEqual(order, ["comment", "edit"]);
+    });
+
+    test("a non-park transition keeps its single write and posts no marker (sibling shape)", async () => {
+      const o = operatorHarness(["hitl-grill"], "enforce");
+      const order: string[] = [];
+      const origEdit = o.h.deps.edit;
+      o.h.deps.edit = async (...a: Parameters<typeof origEdit>) => { order.push("edit"); return origEdit(...a); };
+      o.h.deps.comment = async () => { order.push("comment"); return { ok: true }; };
+      await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.deepEqual(order, ["edit"]);
+    });
+
     test("no marker when parked was not present or the destination is closed", async () => {
       const o = operatorHarness(["hitl-grill"], "enforce");
       const posted = recording(o);

@@ -932,6 +932,20 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
   const removed = stateLabels.filter((s) => s !== to);
   const alreadyThere = (stateLabels as string[]).includes(to);
   const closeReason = normaliseCloseReason(input.closeReason);
+  // Leaving Park (and not closing) restarts every Cap Arm: post the issue-side marker BEFORE the
+  // label write. While `parked` is still set no lane can claim the issue, so the marker is harmless
+  // early and there is no window where a claim counts the pre-reset FAIL rounds and re-parks (QA
+  // r1 on #5457). The outcome is evidence only; a failed post never changes `ok`.
+  let capReset: string | null = null;
+  if (removed.includes("parked") && to !== "closed") {
+    const res = await postCapReset(
+      issue,
+      { by: input.actor, ts: new Date(deps.now()).toISOString() },
+      deps,
+    );
+    capReset = res.ok === false ? `failed:${res.code}` : "posted";
+  }
+
   let write: IssueActionWriteResult = { ok: true };
   if (to === "closed") {
     write = await deps.close(issue, closeReason ?? "completed");
@@ -953,18 +967,6 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
   if (!verified) {
     await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: "write-unverified", written: true }, input));
     return { ok: false, issue, code: "write-unverified", mode, written: true };
-  }
-
-  // Leaving Park (and not closing) restarts every Cap Arm: post the issue-side
-  // marker. The outcome is evidence only; a failed post never changes `ok`.
-  let capReset: string | null = null;
-  if (removed.includes("parked") && to !== "closed") {
-    const res = await postCapReset(
-      issue,
-      { by: input.actor, ts: new Date(deps.now()).toISOString() },
-      deps,
-    );
-    capReset = res.ok === false ? `failed:${res.code}` : "posted";
   }
 
   if (!selfMove) {
