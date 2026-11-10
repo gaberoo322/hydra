@@ -66,6 +66,7 @@ from typing import Iterable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import run_ledger  # noqa: E402  (the ONE state-document parser, #5075)
+import taxonomy  # noqa: E402  (the ONE classes.json loader + scope derivation, #5472)
 from decide_base import dispatch_anchor, dispatch_forced  # noqa: E402  (#5381 accessors)
 
 
@@ -82,40 +83,16 @@ class InvariantError(AssertionError):
         self.reason = reason
 
 
-# Scope filter mirror — kept in sync with decide.py. We DO NOT import
-# decide here to keep `assert_invariants.py` standalone (tests can run
-# without pulling in the larger module).
-SCOPE_ORCH_ONLY_EXCLUDE = ("dev_target", "research_target", "qa_target", "sweep_target", "discover_target")
-SCOPE_TARGET_ONLY_EXCLUDE = (
-    "dev_orch", "research_orch", "qa_orch", "sweep_orch", "discover_orch",
-    # design_concept_orch is orch-scope by definition (issue #466) —
-    # excluded under target-only. Mirror of decide.py's constant.
-    "design_concept_orch",
-    # scout_orch (issue #485) walks the orchestrator-side AI-leverage
-    # taxonomy + the orch/dashboard runtime deps — orch-scope by
-    # construction. Mirror of decide.py's SCOPE_TARGET_ONLY_EXCLUDE.
-    "scout_orch",
-)
-
-
 # Forced-research daily cap mirror — kept in sync with
-# decide.py:RESEARCH_FORCE_DAILY_CAP (grilled decision 6). Same standalone
-# rationale as the scope constants above: we do NOT import decide here.
+# decide.py:RESEARCH_FORCE_DAILY_CAP (grilled decision 6). Standalone: we do
+# NOT import decide here.
 RESEARCH_FORCE_DAILY_CAP = 4
 
 
 def _scope_excluded(scope: str, cls: str) -> bool:
-    if scope == "all":
-        return False
-    # Only `health` is scope-agnostic — see decide.py:scope_excluded() for
-    # the rationale.
-    if cls == "health":
-        return False
-    if scope == "orch-only":
-        return cls in SCOPE_ORCH_ONLY_EXCLUDE
-    if scope == "target-only":
-        return cls in SCOPE_TARGET_ONLY_EXCLUDE
-    return False
+    # The SAME derivation decide.py:scope_excluded() calls (issue #5472): the
+    # taxonomy `scope` column, so INV-008 covers every wrong-scope class.
+    return taxonomy.scope_excluded(scope, cls)
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +204,8 @@ def check_inv008(actions: list[dict], state: dict) -> None:
 
     Issue #466 extends the scope-exclude list to include
     `design_concept_orch` under `target-only` (the new slot is
-    orch-scope by definition); the membership lookup against
-    SCOPE_TARGET_ONLY_EXCLUDE keeps this invariant cheap.
+    orch-scope by definition); the exclusion is derived from the taxonomy
+    `scope` column (issue #5472), so every wrong-scope class is flagged.
     """
     limits = state.get("limits") or {}
     scope = str(limits.get("scope", "all"))
