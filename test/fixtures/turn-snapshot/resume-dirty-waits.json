@@ -101,59 +101,28 @@
     ],
     "sleeps": [],
     "values": {
-      "pr-gate": {
-        "inflight": {
-          "union": [
-            4510
-          ],
-          "branch": [],
-          "body": [
-            4510
-          ]
-        },
-        "dirty": [
-          4532
+      "inflight": {
+        "union": [
+          4510
         ],
-        "unchecked": [],
-        "behind": [],
-        "noClosingIssue": [],
-        "ciTriggerStale": {
-          "ok": false,
-          "reason": "runs-read-failed"
-        },
-        "redResume": {
-          "ok": true,
-          "value": []
-        },
-        "devResumePick": {
-          "ok": true,
-          "value": null
-        },
-        "devResumeNoprPick": {
-          "ok": true,
-          "value": null
-        },
-        "dirtyFix": {
-          "ok": true,
-          "value": {
-            "pick": {
-              "issue": 4510,
-              "pr": 4532,
-              "headRefName": "worktree-agent-a5706403c05633ec3"
-            },
-            "surface": []
-          }
-        },
-        "qaVerdictRecheck": {
-          "ok": true,
-          "value": []
-        },
-        "dirtyFixFailPr": null,
-        "parkedIssues": {
-          "ok": true,
-          "value": {}
-        },
-        "parkedPrs": {}
+        "branch": [],
+        "body": [
+          4510
+        ]
+      },
+      "dirty": [
+        4532
+      ],
+      "dirtyFix": {
+        "ok": true,
+        "value": {
+          "pick": {
+            "issue": 4510,
+            "pr": 4532,
+            "headRefName": "worktree-agent-a5706403c05633ec3"
+          },
+          "surface": []
+        }
       }
     }
   }

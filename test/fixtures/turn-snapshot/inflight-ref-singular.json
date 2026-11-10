@@ -90,53 +90,14 @@
     ],
     "sleeps": [],
     "values": {
-      "pr-gate": {
-        "inflight": {
-          "union": [
-            42
-          ],
-          "branch": [],
-          "body": [
-            42
-          ]
-        },
-        "dirty": [],
-        "unchecked": [],
-        "behind": [],
-        "noClosingIssue": [],
-        "ciTriggerStale": {
-          "ok": false,
-          "reason": "runs-read-failed"
-        },
-        "redResume": {
-          "ok": true,
-          "value": []
-        },
-        "devResumePick": {
-          "ok": true,
-          "value": null
-        },
-        "devResumeNoprPick": {
-          "ok": true,
-          "value": null
-        },
-        "dirtyFix": {
-          "ok": true,
-          "value": {
-            "pick": null,
-            "surface": []
-          }
-        },
-        "qaVerdictRecheck": {
-          "ok": true,
-          "value": []
-        },
-        "dirtyFixFailPr": null,
-        "parkedIssues": {
-          "ok": true,
-          "value": {}
-        },
-        "parkedPrs": {}
+      "inflight": {
+        "union": [
+          42
+        ],
+        "branch": [],
+        "body": [
+          42
+        ]
       }
     }
   }

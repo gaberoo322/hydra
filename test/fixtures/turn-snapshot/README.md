@@ -54,7 +54,21 @@ Each file records the scenario INPUTS (`nowMs`, `env`, `gh`, `prRefsUnavailable`
 and the captured OUTPUTS (`expected.stderrNotes`, `expected.ghCalls` — exact
 argv, in order — and `expected.sleeps`).
 
-`expected.values` has a different lineage: it was captured at #4934 time by
+### Stored form: a difference from one committed baseline (#5440)
+
+`pr-gate-baseline.json` holds the collector's `pr-gate` struct for a healthy
+"no open PRs" scenario. It is not a fixture (the replay test skips it) and is
+written only by the re-record mode below. Each fixture's `expected.values`
+stores ONLY the top-level fields of that struct that differ from the baseline;
+the replay test merges `{ ...baseline, ...expected.values }` (the shared helper
+`test/_helpers/golden-baseline.mts`) and still `deepEqual`s the collector's
+WHOLE output against the result, so the guard is as strict as before. The merge
+is shallow: a fixture that changes any part of a nested field restates that
+whole field. A new collector field with the same value in every scenario
+therefore changes only the baseline file on re-record. The orch-board family
+has not adopted the helper.
+
+The full `expected.values` struct has a different lineage: it was captured at #4934 time by
 replaying every scenario through the TS CLI's `--format values` WHILE the
 retired kv wire still rendered the bash byte for byte — kv byte-equality was
 the proof the typed values matched the captured bash output. The dead kv
@@ -70,8 +84,8 @@ the replay suite's opt-in re-record mode — never by hand:
 UPDATE_TURN_SNAPSHOT_PR_GATE_GOLDEN=1 npm run test:file -- test/turn-snapshot-pr-gate.test.mts
 ```
 
-With the flag set, the suite rewrites ONLY each golden's `expected` block
-from the TS replay and leaves the scenario inputs (`name`, `nowMs`, `env`,
+With the flag set, the suite rewrites the baseline and ONLY each golden's
+`expected` block (its `values` as a difference from the baseline) from the TS replay and leaves the scenario inputs (`name`, `nowMs`, `env`,
 `prRefsUnavailable`, `gh`) untouched — the same convention as
 UPDATE_DECIDE_GOLDEN (test/decide-golden.test.mts) and
 UPDATE_TURN_SNAPSHOT_JSON_GOLDEN (test/turn-snapshot-json.test.mts). With the
