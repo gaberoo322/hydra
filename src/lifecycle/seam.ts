@@ -30,6 +30,7 @@ import {
   type IssueViewResult,
 } from "../github/issue-actions.ts";
 import { ghExec, ghJson } from "../github/gh.ts";
+import { extractClearanceBlockerRefs, type BlockerRefState } from "../github/blockers.ts";
 import { isGhFailure } from "../github/exec.ts";
 import { resolveGithubRepo, viewPr } from "../github/issues.ts";
 import { listRequiredStatusContextsOrNull, parseRollupEntries } from "../github/prs.ts";
@@ -61,6 +62,7 @@ import {
   parseCommentEvidence,
   parsePrEvidence,
   recordsNeeded,
+  type BlockerRecord,
   type CommentRecord,
   type DesignConceptRecord,
   type Fetched,
@@ -181,6 +183,8 @@ export interface SeamDeps {
     prBodies: (prNumber: number) => Promise<Fetched<TimedBody[]>>;
     /** A PR read live at head for the `qa-passed` exit gate; absent = fail closed (`fetch-failed`). */
     qaLive?: (prNumber: number) => Promise<Fetched<QaLivePr>>;
+    /** Resolve clearance blocker refs for the `unblocked` gate; absent = fail closed (`fetch-failed`). */
+    blockers?: (refs: number[]) => Promise<Fetched<BlockerRecord[]>>;
   };
   journal: {
     /** `index` opts into the hold-exit index (#5313); cap events (#5324) are always indexed. Both join the append's one MULTI. */
@@ -314,6 +318,37 @@ export async function fetchPrBodies(repo: string, prNumber: number): Promise<Fet
 }
 
 /**
+ * Resolve each clearance blocker ref with ONE `gh api repos/<repo>/issues/<n>`
+ * (issues and PRs share the endpoint). closed+merged PR -> merged; closed
+ * unmerged PR -> unknown; closed -> closed; open -> open; any failure ->
+ * unknown. Never throws.
+ */
+export async function fetchBlockerRefs(repo: string, refs: number[]): Promise<Fetched<BlockerRecord[]>> {
+  try {
+    const out: BlockerRecord[] = [];
+    for (const n of refs) {
+      const res = await ghJson<{ state?: unknown; pull_request?: { merged_at?: unknown } | null }>(["api", `repos/${repo}/issues/${n}`]);
+      let state: BlockerRefState = "unknown";
+      if (!isGhFailure(res) && res.data && typeof res.data === "object") {
+        const d = res.data;
+        if (d.state === "open") state = "open";
+        else if (d.state === "closed") {
+          if (d.pull_request) state = typeof d.pull_request.merged_at === "string" && d.pull_request.merged_at ? "merged" : "unknown";
+          else state = "closed";
+        }
+      } else {
+        logger.warn({ repo, ref: n }, "[lifecycle] blocker ref fetch failed");
+      }
+      out.push({ number: n, state });
+    }
+    return { ok: true, value: out };
+  } catch (err) {
+    logger.error({ err, repo }, "[lifecycle] blocker refs fetch failed");
+    return { ok: false };
+  }
+}
+
+/**
  * A PR read live at head for the `qa-passed` exit decision: state, draft,
  * `mergeStateStatus`, head sha, the REQUIRED checks folded to one verdict, and
  * the comment + review bodies (they carry the `QA-Verdict:` trailers). Required
@@ -428,6 +463,7 @@ export function defaultSeamDeps(repoRoot: string): SeamDeps {
       timeline: (issue) => fetchLabelTimeline(resolveGithubRepo(), issue),
       prBodies: (prNumber) => fetchPrBodies(resolveGithubRepo(), prNumber),
       qaLive: (prNumber) => fetchQaLive(resolveGithubRepo(), prNumber),
+      blockers: (refs) => fetchBlockerRefs(resolveGithubRepo(), refs),
     },
     journal: {
       append: appendLifecycleEntry,
@@ -779,6 +815,14 @@ export async function advance(input: AdvanceInput, deps: SeamDeps): Promise<Adva
         prNumber !== null && prNumber > 0 && deps.fetch.qaLive !== undefined
           ? await deps.fetch.qaLive(prNumber)
           : { ok: false };
+    }
+    if (needs.claim) {
+      const c = await deps.journal.readClaim(deps.repo, issue);
+      records.claim = c.ok === true ? { ok: true, value: { held: c.claim ? { dispatchId: c.claim.dispatchId } : null } } : { ok: false };
+    }
+    if (needs.blockers) {
+      const refs = extractClearanceBlockerRefs(before.row.body, issue);
+      records.blockers = deps.fetch.blockers !== undefined ? await deps.fetch.blockers(refs) : { ok: false };
     }
     if (needs.stateEntry) {
       records.stateEntry = await deps.fetch.stateEntry(issue, transition.from);

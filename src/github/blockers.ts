@@ -366,7 +366,7 @@ export async function findClearedBlockedIssues(
 }
 
 /** True when a blocker-bearing body line carries a cross-repo `owner/repo#N` ref. */
-function hasCrossRepoBlockerRef(body: string): boolean {
+export function hasCrossRepoBlockerRef(body: string): boolean {
   const stripped = body.replace(/`[^`]*`/g, "");
   return stripped.split("\n").some(
     (line) =>

@@ -6,6 +6,7 @@
  * this file; the fetchers live in `seam.ts` behind an injectable `deps.fetch`.
  * A failed fetch is a refusal (`fetch-failed`), never a pass.
  */
+import { extractClearanceBlockerRefs, hasCrossRepoBlockerRef, type BlockerRefState } from "../github/blockers.ts";
 import { hasScopeSection } from "../scope-section.ts";
 import { isFailVerdict, isPassVerdict, parseQaVerdictTrailers, qaVerdictShaMatches, type FinalVerdict } from "../qa/verdict-trailer.ts";
 import { isAdr5Reason, isAllowedReason } from "./reasons.ts";
@@ -140,7 +141,20 @@ export function classifyQaVerdictTarget(
   return { ok: false, code: "pr-not-open" };
 }
 
+/** The held dispatch claim for an issue; `held: null` = no claim is open. */
+export interface ClaimRecord {
+  held: { dispatchId: string } | null;
+}
+
+/** One clearance blocker ref resolved by the seam. */
+export interface BlockerRecord {
+  number: number;
+  state: BlockerRefState;
+}
+
 export interface GateRecords {
+  claim?: Fetched<ClaimRecord>;
+  blockers?: Fetched<BlockerRecord[]>;
   qaLive?: Fetched<QaLivePr>;
   designConcept?: Fetched<DesignConceptRecord>;
   pr?: Fetched<PrRecord>;
@@ -358,6 +372,46 @@ export function gateResearchExit(input: GateInput, records: GateRecords): GateRe
   return pass();
 }
 
+/**
+ * `blocked -> ready-for-agent` (recover-stale unblock, ADR-0047 D4). The same
+ * decision `findClearedBlockedIssues` makes: every clearance blocker ref is
+ * closed/merged and the body carries a scope section. Pure, fails closed.
+ */
+export function gateUnblocked(input: GateInput, records: GateRecords): GateResult {
+  const body = input.body;
+  if (body === undefined) return fail("fetch-failed");
+  if (hasCrossRepoBlockerRef(body)) return fail("blocker-cross-repo");
+  const refs = extractClearanceBlockerRefs(body, input.issue);
+  if (refs.length === 0) return fail("blocker-refs-missing");
+  const rec = records.blockers;
+  if (rec === undefined || rec.ok === false) return fail("fetch-failed");
+  const byNumber = new Map(rec.value.map((b) => [b.number, b.state] as const));
+  const states: BlockerRefState[] = [];
+  for (const n of refs) {
+    const st = byNumber.get(n);
+    if (st === undefined) return fail("record-binding-mismatch");
+    states.push(st);
+  }
+  if (states.some((s) => s === "unknown")) return fail("fetch-failed");
+  if (states.some((s) => s === "open")) return fail("blockers-open");
+  if (!hasScopeSection(body)) return fail("scope-section-missing");
+  return pass();
+}
+
+/**
+ * `in-progress -> ready-for-agent | needs-dev-resume` (reconcile exits). The
+ * dispatch is over: no claim is held, or the held claim belongs to the caller
+ * (`evidence.dispatch`, the owner-release arm). Pure, fails closed.
+ */
+export function gateClaimReleased(input: GateInput, records: GateRecords): GateResult {
+  const rec = records.claim;
+  if (rec === undefined || rec.ok === false) return fail("fetch-failed");
+  const held = rec.value.held;
+  if (held === null) return pass();
+  if (input.evidence.dispatch === held.dispatchId) return pass();
+  return fail("claim-held");
+}
+
 /** Which fetches a gate needs; the seam runs exactly these. */
 export function recordsNeeded(gate: GateId): {
   designConcept: boolean;
@@ -365,8 +419,12 @@ export function recordsNeeded(gate: GateId): {
   comment: boolean;
   stateEntry: boolean;
   qaLive: boolean;
+  claim: boolean;
+  blockers: boolean;
 } {
   return {
+    claim: gate === "claim-released",
+    blockers: gate === "unblocked",
     qaLive: gate === "qa-exit" || gate === "qa-verdict",
     designConcept: gate === "dispatch",
     pr: gate === "pr-open" || gate === "close",
@@ -396,6 +454,10 @@ export function evaluateGate(gate: GateId, input: GateInput, records: GateRecord
       return gateQaExit(input, records);
     case "qa-verdict":
       return gateQaVerdict(input, records);
+    case "unblocked":
+      return gateUnblocked(input, records);
+    case "claim-released":
+      return gateClaimReleased(input, records);
     case "not-yet-implemented":
       return fail("gate-unimplemented");
   }
