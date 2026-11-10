@@ -1251,6 +1251,13 @@ describe("page verdict tables — lib/control-verdicts.ts (PR #5155 review)", ()
     }
   });
 
+  test("RELABEL_TARGETS is the six-lane picker list in master's literal order (#5453 INV-3)", () => {
+    assert.deepEqual(
+      [...RELABEL_TARGETS],
+      ["needs-triage", "needs-info", "ready-for-human", "blocked", "needs-dev-resume", "needs-qa"],
+    );
+  });
+
   test("reopenVerdicts: only a positive integer counts as entered", () => {
     assert.equal(reopenVerdicts("12")["issue-number-entered"], true);
     for (const v of ["", "0", "-3", "1.5", "abc"]) assert.equal(reopenVerdicts(v)["issue-number-entered"], false, v);
