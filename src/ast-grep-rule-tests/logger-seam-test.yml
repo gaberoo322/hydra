@@ -1,0 +1,24 @@
+# Rule tests for src/ast-grep-rules/logger-seam.yml (issue #5435).
+# Run: npx --yes -p @ast-grep/cli@0.43.0 ast-grep test --skip-snapshot-tests
+# `valid` snippets must NOT match; `invalid` snippets MUST match.
+id: logger-seam
+valid:
+  - |
+    logger.info({ cycleId }, "cycle merged");
+  - |
+    this.logger.warn({ err }, "degraded");
+  - |
+    process.stderr.write("boot failed\n");
+  - |
+    const s = "console.error(oops)";
+invalid:
+  - |
+    console.error("[x] failed:", err);
+  - |
+    console.log("hello");
+  - |
+    console.warn("careful");
+  - |
+    console.info("info");
+  - |
+    try { run(); } catch (err) { console.error(`[x] failed: ${err}`); }

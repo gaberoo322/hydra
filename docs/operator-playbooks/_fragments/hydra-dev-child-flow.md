@@ -450,13 +450,15 @@ FAIL reason in the 2026-09 audit (9 of 67 FAIL rounds, each a full T3
 re-review). The ast-grep rule `src/ast-grep-rules/fail-loud-catch.yml` flags a
 `try … catch` clause that neither logs (`console.error` / `console.warn` /
 `logger.error` / `logger.warn` / `process.stderr.write`), rethrows, nor carries
-a comment containing `intentional`. Run it as child-step 7a, over ONLY the
+a comment containing `intentional`. Under `src/`, `fail-loud-catch-src` applies
+instead (`console.*` is not a logs branch) and `logger-seam` flags any `console.*`
+call (STD-LOG-PINO-SEAM; `scripts/` and `src/index.ts` exempt). Run it as child-step 7a, over ONLY the
 files this PR touches — existing hits elsewhere on master are advisory and not
 yours to fix:
 
 ```bash
 git fetch origin --quiet
-for spec in "fail-loud-catch:*.ts *.mts" "fail-loud-except-py:*.py" "fail-loud-devnull-sh:*.sh"; do
+for spec in "fail-loud-catch:*.ts *.mts" "fail-loud-catch-src:*.ts" "logger-seam:*.ts" "fail-loud-except-py:*.py" "fail-loud-devnull-sh:*.sh"; do
   rule="${spec%%:*}"
   read -ra pats <<<"${spec#*:}"   # quoted below: the git pathspecs must not glob in the shell
   LINT_ARGS=()

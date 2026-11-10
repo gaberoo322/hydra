@@ -50,13 +50,13 @@ enforced-by: reviewer
 
 Every `catch` either logs with context, rethrows, or carries an `/* intentional: <reason> */` annotation. A silent catch is a finding; in a changed catch it is a blocker.
 
-enforced-by: src/ast-grep-rules/fail-loud-catch.yml, src/ast-grep-rules/fail-loud-except-py.yml, src/ast-grep-rules/fail-loud-devnull-sh.yml, scripts/ci/fail-loud-ratchet.ts
+enforced-by: src/ast-grep-rules/fail-loud-catch.yml, src/ast-grep-rules/fail-loud-catch-src.yml, src/ast-grep-rules/fail-loud-except-py.yml, src/ast-grep-rules/fail-loud-devnull-sh.yml, scripts/ci/fail-loud-ratchet.ts
 
 ### STD-LOG-PINO-SEAM
 
-Structured logging imports `logger` from `src/logger.ts`. Never call `pino()` directly (ADR-0027).
+All logging in `src/` goes through `logger` from `src/logger.ts` — never `console.*`, never `pino()` directly (ADR-0027). Exempt: `scripts/` and the `src/index.ts` process bootstrap. A `console.error` inside a `catch` is fail-loud-compliant only outside `src/`.
 
-enforced-by: reviewer
+enforced-by: reviewer, src/ast-grep-rules/logger-seam.yml
 
 ## Tests
 

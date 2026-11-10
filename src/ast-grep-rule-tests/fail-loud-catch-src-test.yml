@@ -1,0 +1,34 @@
+# Rule tests for src/ast-grep-rules/fail-loud-catch-src.yml (issue #5435).
+# Run: npx --yes -p @ast-grep/cli@0.43.0 ast-grep test --skip-snapshot-tests
+# `valid` snippets must NOT match; `invalid` snippets MUST match.
+# Snippet tests carry no path, so files/ignores are probed manually (see PR body).
+id: fail-loud-catch-src
+valid:
+  - |
+    try { run(); } catch (err) { logger.error({ err }, "run failed"); return null; }
+  - |
+    try { run(); } catch (err) { logger.warn({ err }, "run degraded"); }
+  - |
+    try { run(); } catch (err) { this.logger.error({ err }, "run failed"); }
+  - |
+    try { run(); } catch { /* intentional: best-effort cleanup */ }
+  - |
+    try { run(); } catch (e) {
+      // intentional: the cache is optional, a miss is fine
+      return undefined;
+    }
+  - |
+    try { run(); } catch (err) { throw new RunError("run failed", { cause: err }); }
+  - |
+    try { run(); } catch (err) { process.stderr.write(`run failed: ${err}\n`); process.exit(2); }
+invalid:
+  - |
+    try { run(); } catch (err) { console.error("[x] run failed:", err); }
+  - |
+    try { run(); } catch (err) { console.warn("[x] run degraded:", err); }
+  - |
+    try { run(); } catch {}
+  - |
+    try { run(); } catch (e) { return x; }
+  - |
+    try { run(); } catch (err) { console.log("failed", err); }

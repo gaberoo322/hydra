@@ -1,0 +1,46 @@
+# ast-grep rule — fail-loud catch blocks under src/ (issue #5435).
+#
+# `src/` sibling of `fail-loud-catch` (path-partitioned: that rule ignores
+# `src/**`). Same catch_clause shape, but `console.*` is NOT accepted as the
+# "logs" branch: STD-LOG-PINO-SEAM says all `src/` logging goes through `logger`
+# from `src/logger.ts`, so one line cannot pass this check and fail
+# `logger-seam`. A catch passes when it
+#   - logs through the seam: logger.error / logger.warn (also
+#     `<obj>.logger.error|warn(...)`) or process.stderr.write, or
+#   - rethrows (`throw`), or
+#   - carries a comment containing "intentional".
+#
+# `src/index.ts` (process bootstrap, console.error is its sanctioned log form)
+# is excluded here AND from `logger-seam`; its catch sites lose fail-loud lint
+# coverage by design — do not re-introduce console.* into this rule to recover it.
+#
+# Enforcement: ADVISORY (hydra-dev child-flow step 7a, changed files only).
+#   npx tsx scripts/ast-search.ts --rule fail-loud-catch-src --path <file>
+# Rule tests: src/ast-grep-rule-tests/fail-loud-catch-src-test.yml
+
+id: fail-loud-catch-src
+language: TypeScript
+severity: warning
+message: >-
+  Silent catch in src/: this `catch` neither logs through the seam
+  (logger.error / logger.warn / process.stderr.write — console.* does not count
+  in src/, STD-LOG-PINO-SEAM), rethrows, nor carries an
+  `/* intentional: <reason> */` annotation.
+note: >-
+  Advisory fail-loud lint, src/ lane (issue #5435). Existing hits on master are
+  not a blocker.
+files:
+  - "src/**/*.ts"
+ignores:
+  - "src/index.ts"
+rule:
+  kind: catch_clause
+  not:
+    any:
+      - has: { stopBy: end, pattern: logger.error($$$) }
+      - has: { stopBy: end, pattern: logger.warn($$$) }
+      - has: { stopBy: end, pattern: $OBJ.logger.error($$$) }
+      - has: { stopBy: end, pattern: $OBJ.logger.warn($$$) }
+      - has: { stopBy: end, pattern: process.stderr.write($$$) }
+      - has: { stopBy: end, kind: throw_statement }
+      - has: { stopBy: end, kind: comment, regex: "(?i)intentional" }

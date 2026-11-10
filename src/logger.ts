@@ -20,8 +20,9 @@
  *     `time` and `pid`/`hostname` fields are pinned so serialized JSON lines
  *     are stable to assert on.
  *
- * Migration is additive and incremental (ADR-0027): existing `console.*` calls
- * remain valid until each module is converted; there is no flag-day cutover and
+ * Migration is additive and incremental (ADR-0027): EXISTING `console.*` calls
+ * remain until each module is converted (new `src/` code must not add any;
+ * `logger-seam` lint flags them); there is no flag-day cutover and
  * each file conversion is an independent one-file PR.
  */
 
