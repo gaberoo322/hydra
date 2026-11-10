@@ -148,6 +148,37 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
     } });
     const dispatch = { type: "dispatch", slot: "dev_target", skill: "x" };
 
+    test("the instant-death replay plan from decide.py passes against the post-decide state", () => {
+      const BRANCH = "worktree-agent-4dfd1dc9-t3-dev_target";
+      const state = baseState({ slots: {
+        dev_orch: null, qa_orch: null, research_orch: null, qa_target: null, research_target: null,
+        design_concept_orch: null,
+        dev_target: { skill: "hydra-target-build", task_id: "abc123", started: "t0", started_epoch: 1, dispatch_id: BRANCH },
+      } });
+      Object.assign(state, {
+        run_id: "4dfd1dc9-e7ae-4729-af27-ab7fac74ef29", turn: 3, research_force_counter: {},
+        last_dispatch_by_class: { dev_target: { turn: 2, skill: "hydra-target-build", prompt_args: { attempt: 1 }, intent: { kind: "TargetFresh", anchor: "issue-9" }, worktreeBranch: BRANCH } },
+      });
+      const tmp = makeTmp();
+      try {
+        writeFileSync(tmp.state, JSON.stringify(withTurnSnapshot(state)));
+        writeFileSync(join(tmp.dir, "cands.json"), "null");
+        writeFileSync(join(tmp.dir, "events.json"), JSON.stringify([{
+          type: "completion", slot: "dev_target", task_id: "abc123", total_tokens: 0, tool_uses: 0, duration_ms: 800,
+          notice: "You're out of usage credits. Switch to another model",
+        }]));
+        const d = spawnSync("python3", [DECIDE, "decide", tmp.state, join(tmp.dir, "cands.json"), join(tmp.dir, "events.json")], {
+          encoding: "utf-8", env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" },
+        });
+        assert.equal(d.status, 0, d.stderr);
+        const plan = JSON.parse(d.stdout);
+        assert.equal(plan.actions.filter((a: any) => a.type === "dispatch" && a.slot === "dev_target").length, 1);
+        const r = spawnSync("python3", [ASSERTS, (writeFileSync(tmp.plan, d.stdout), tmp.plan), tmp.state], { encoding: "utf-8" });
+        assert.equal(r.status, 0, r.stderr);
+      } finally {
+        rmSync(tmp.dir, { recursive: true, force: true });
+      }
+    });
     test("a reap of the slot's own task_id before the dispatch frees it", () => {
       const r = runAsserts({ actions: [{ type: "reap", slot: "dev_target", task_id: "abc123" }, dispatch] }, busy());
       assert.equal(r.status, 0, r.stderr);
