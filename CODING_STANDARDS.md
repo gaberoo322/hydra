@@ -42,9 +42,9 @@ enforced-by: reviewer
 
 ### STD-ERROR-TYPED-CODE
 
-Exceptional `throw` sites prefer a subclass from `src/errors.ts` (for example `InvalidArgumentError`) over a bare `Error`. Callers and tests discriminate on `err.code`, not `err.message`.
+Exceptional `throw` sites prefer a subclass from `src/errors.ts` (for example `InvalidArgumentError`) over a bare `Error`. Callers and tests discriminate on `err.code`, not `err.message`. Scope is `src/` and `scripts/`; subclass choice and `err.code` discrimination stay with the reviewer.
 
-enforced-by: reviewer
+enforced-by: src/ast-grep-rules/typed-error-throw.yml, reviewer
 
 ### STD-CATCH-FAIL-LOUD
 

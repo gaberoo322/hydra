@@ -1,0 +1,1 @@
+- chore: add advisory ast-grep rule flagging bare throw new Error (#5434)
