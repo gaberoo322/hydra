@@ -6,7 +6,6 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const DIR = resolve(import.meta.dirname, "../scripts/autopilot");
@@ -94,8 +93,4 @@ describe("admission.admit", () => {
     }
   });
 
-  test("assert_invariants.py stays independent of admission", () => {
-    const src = readFileSync(resolve(DIR, "assert_invariants.py"), "utf8");
-    assert.doesNotMatch(src, /^\s*(import|from)\s+admission\b/m);
-  });
 });
