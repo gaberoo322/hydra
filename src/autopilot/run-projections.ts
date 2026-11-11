@@ -48,6 +48,7 @@ import {
   type JoinedTurn,
   type TurnDispatch,
   type TurnRow,
+  resolveCycleId,
 } from "./turn-row.ts";
 import { osHeartbeatAgeS, isOsHeartbeatStale } from "./os-heartbeat.ts";
 import { bucketCycleStatus } from "./cycle-status.ts";
@@ -187,10 +188,7 @@ export async function fetchTurnsWithJoins(
   const rows = await readRunTurns(runId, limit, deps.listTurnsDesc);
   if (rows.length === 0) return [];
 
-  // The one cycle-id rule: the Turn Row module's candidate, else the
-  // synthetic `<run_id>:<turn_n>:<index>` id.
-  const cycleIdOf = (row: TurnRow, d: TurnDispatch): string =>
-    d.cycleIdCandidate ?? `${runId}:${row.turn_n}:${d.index}`;
+  const cycleIdOf = (row: TurnRow, d: TurnDispatch): string => resolveCycleId(runId, row, d);
 
   const cycleIdsToFetch: string[] = [];
   for (const row of rows) {

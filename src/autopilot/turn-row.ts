@@ -313,6 +313,18 @@ export function resolveCycleIdCandidate(action: Record<string, unknown>): string
   return null;
 }
 
+/**
+ * The one cycle-id rule: the dispatch's candidate, else the synthetic
+ * `<run_id>:<turn_n>:<index>` id (mirrors reap.py / dispatch.sh allocation).
+ */
+export function resolveCycleId(
+  runId: string,
+  row: { turn_n: number },
+  d: { index: number; cycleIdCandidate: string | null },
+): string {
+  return d.cycleIdCandidate ?? `${runId}:${row.turn_n}:${d.index}`;
+}
+
 function resolveDispatches(actions: unknown[] | undefined): TurnDispatch[] {
   const out: TurnDispatch[] = [];
   if (!actions) return out;

@@ -12,6 +12,7 @@ import {
   parseTurnRows,
   readRunTurns,
   resolveCycleIdCandidate,
+  resolveCycleId,
   serializeTurnMember,
   sanitizeParentExceptions,
 } from "../src/autopilot/turn-row.ts";
@@ -126,6 +127,11 @@ describe("parseTurnRow — tolerance rule", () => {
     });
     assert.equal(seen, "r1:7");
     assert.equal(rows.length, 1);
+  });
+
+  test("resolveCycleId synthesises run:turn:index only when no candidate; candidate wins (sibling pin)", () => {
+    assert.equal(resolveCycleId("r1", { turn_n: 3 }, { index: 2, cycleIdCandidate: null }), "r1:3:2");
+    assert.equal(resolveCycleId("r1", { turn_n: 3 }, { index: 2, cycleIdCandidate: "c9" }), "c9");
   });
 
   test("resolveCycleIdCandidate follows cycleId, autopilotTurnId, worktreeBranch order", () => {
