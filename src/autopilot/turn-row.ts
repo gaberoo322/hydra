@@ -319,10 +319,11 @@ export function resolveCycleIdCandidate(action: Record<string, unknown>): string
  */
 export function resolveCycleId(
   runId: string,
-  row: { turn_n: number },
-  d: { index: number; cycleIdCandidate: string | null },
+  turnN: number,
+  index: number,
+  candidate: string | null,
 ): string {
-  return d.cycleIdCandidate ?? `${runId}:${row.turn_n}:${d.index}`;
+  return candidate ?? `${runId}:${turnN}:${index}`;
 }
 
 function resolveDispatches(actions: unknown[] | undefined): TurnDispatch[] {

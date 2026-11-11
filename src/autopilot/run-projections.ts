@@ -188,7 +188,7 @@ export async function fetchTurnsWithJoins(
   const rows = await readRunTurns(runId, limit, deps.listTurnsDesc);
   if (rows.length === 0) return [];
 
-  const cycleIdOf = (row: TurnRow, d: TurnDispatch): string => resolveCycleId(runId, row, d);
+  const cycleIdOf = (row: TurnRow, d: TurnDispatch): string => resolveCycleId(runId, row.turn_n, d.index, d.cycleIdCandidate);
 
   const cycleIdsToFetch: string[] = [];
   for (const row of rows) {
