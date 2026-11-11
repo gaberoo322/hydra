@@ -1,5 +1,6 @@
 {
   "parallel": [
+    "test/autopilot-admission.test.mts",
     "test/autopilot-auto-merge-no-self-approve.test.mts",
     "test/autopilot-dev-target-forbidden-ending-preamble.test.mts",
     "test/autopilot-dev-target-preamble.test.mts",
