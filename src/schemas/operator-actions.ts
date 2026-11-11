@@ -339,7 +339,8 @@ export const CONTROL_CHECKS = [
  * The CONTROL_CHECKS ids a SERVER evaluates and delivers by id (issue #5451,
  * ADR-0034 §8.3): the four promote checks (`evaluatePromoteChecks`, carried on
  * each `GET /autopilot/work-queue` row as `promoteChecks`) and the three
- * design-concept approve checks (the approve-preconditions read). A dashboard
+ * design-concept approve checks (the approve-preconditions read), plus
+ * `no-fresh-deliberate-stop` (carried on `GET /scheduler/status` as `checks`). A dashboard
  * verdict table must not derive any of these from anything but the
  * server-delivered verdict; test/server-evaluated-checks.test.mts pins both
  * halves.
@@ -352,6 +353,8 @@ export const SERVER_EVALUATED_CHECKS = [
   "dc-artifact-stored",
   "dc-status-draft",
   "dc-handoff-hash-matches",
+  // The scheduler status read (`checks`, issue #5452).
+  "no-fresh-deliberate-stop",
 ] as const satisfies ReadonlyArray<(typeof CONTROL_CHECKS)[number]>;
 export const ControlCheckSchema = z.enum(CONTROL_CHECKS);
 export type ControlCheck = z.infer<typeof ControlCheckSchema>;

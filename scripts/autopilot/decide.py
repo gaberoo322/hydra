@@ -316,6 +316,7 @@ from typing import Any, Callable, Iterable, Sequence
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import turn_snapshot as ts  # noqa: E402
 import run_ledger  # noqa: E402  (leaf module; main() is its only caller)
+import taxonomy  # noqa: E402  (the ONE classes.json loader, #5472)
 
 # ---------------------------------------------------------------------------
 # Sibling brain modules (issue #4511) — imports point DOWN only
@@ -412,13 +413,13 @@ from decide_selectors.wire_or_retire import _select_signal_wire_or_retire_target
 # DELIBERATELY no fallback to embedded tuples — a silent fallback would
 # resurrect the four-file taxonomy drift this table exists to kill.
 #
-# TaxonomyError subclasses RuntimeError (NOT SystemExit). heartbeat.py imports
-# this module fail-loud (issue #4637: no try/except fallback), so a bad
-# classes.json surfaces there as an uncaught TaxonomyError traceback at import, and any CLI
+# TaxonomyError (taxonomy.py) subclasses RuntimeError (NOT SystemExit). A bad
+# classes.json surfaces as an uncaught TaxonomyError traceback at import, and any CLI
 # invocation of decide.py still exits non-zero with the message.
 #
-# The brain keeps all POLICY — selectors, cooldown enforcement, scope masks
-# (SCOPE_*_EXCLUDE), the BACKFILL_SIGNAL_CLASSES stagger set.
+# The brain keeps all POLICY — selectors, cooldown enforcement, the dispatch
+# ORDER tuples, the BACKFILL_SIGNAL_CLASSES stagger set. The scope masks are
+# derived from the `scope` column (taxonomy.scope_excluded).
 # The table is only the ALPHABET (ADR-0012). Row order is the file/declaration
 # order of the derived tuples and of the TS views (pinned by the parity tests)
 # — it is NOT dispatch priority: _rule_pipeline_dispatch iterates the hardcoded
@@ -427,185 +428,26 @@ from decide_selectors.wire_or_retire import _select_signal_wire_or_retire_target
 # merely coincides with row order — nothing couples them (issue #4468).
 # Dispatch priority is POLICY and stays here in the brain.
 #
-# HYDRA_CLASSES_JSON (issue #5202) is a TEST SEAM shared with render-dispatch.py:
-# when set (non-empty) it names the taxonomy file and decide.py loads ONLY that
-# file — a missing/invalid override raises TaxonomyError naming the override
-# path, never a fallback to the shipped classes.json. No production entrypoint
-# sets it; unset keeps the sibling classes.json.
+# Loading, validation, the HYDRA_CLASSES_JSON test seam (issue #5202) and the
+# scope-exclusion derivation all live in taxonomy.py (issue #5472), the one
+# loader every Python reader shares; decide.py only consumes the validated rows.
 
-_TAXONOMY_PATH = os.environ.get("HYDRA_CLASSES_JSON") or os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "classes.json"
-)
+_TAXONOMY_PATH = taxonomy.taxonomy_path()
 
-# Every column must be PRESENT on every row (nullable columns carry an
-# explicit null, never an absent key) so a projection miss is loud.
-_TAXONOMY_REQUIRED_COLUMNS = (
-    "name",
-    "kind",
-    "skill",
-    "costClass",
-    "learningAgent",
-    "cooldownSeconds",
-    "scope",
-    "provenanceLabel",
-    "stage",
-    "model",
-)
-
-_TAXONOMY_KINDS = ("pipeline", "signal")
-_TAXONOMY_SCOPES = ("orch", "target", "both")
-_TAXONOMY_LEARNING_AGENTS = ("planner", "executor")
-# The eight stage values a CLASS row may carry (#4592). The two skill-only
-# values ("operator-interactive", "brain") are deliberately NOT members: they
-# exist only on docs/generated/skills.json rows, and rejecting them here is
-# what makes "exactly one brain" enforceable. Kept textually identical to
-# CLASS_STAGES in src/taxonomy/classes.ts — pinned by the parity test.
-_TAXONOMY_STAGES = (
-    "plan",
-    "spec",
-    "tickets",
-    "implement",
-    "review",
-    "pre-plan-producer",
-    "ops",
-    "target",
-)
-# The five closed model values (#4592). DOCUMENTATION-ONLY on a class row:
-# decide.py validates the column and otherwise ignores it — the model lever
-# lives in the playbook (issue #1093), which reads the column at dispatch
-# time. Kept textually identical to DISPATCH_CLASS_MODELS in
-# src/taxonomy/classes.ts — pinned by the parity test.
-_TAXONOMY_MODELS = ("fable", "sonnet", "haiku", "opus", "inherit")
-
-
-class TaxonomyError(RuntimeError):
-    """classes.json is missing, malformed, or violates the row contract.
-
-    Raised at import time (issue #1670) — decide.py refuses to start
-    without a valid Dispatch-Class Taxonomy. NEVER caught internally to
-    fall back to embedded tuples.
-    """
+TaxonomyError = taxonomy.TaxonomyError  # re-exported: heartbeat/tests catch it as decide.TaxonomyError
 
 
 def _taxonomy_fail(reason: str) -> "TaxonomyError":
-    return TaxonomyError(
-        f"decide.py: dispatch-class taxonomy {_TAXONOMY_PATH}: {reason} "
-        "— refusing to start (no fallback tuples; epic #1669 / issue #1670)"
-    )
-
-
-def _load_class_taxonomy(path: str) -> tuple[dict, ...]:
-    """Load + validate classes.json. Hard-fails on any contract violation."""
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            raw = json.load(fh)
-    except FileNotFoundError:
-        raise _taxonomy_fail("file is missing") from None
-    except json.JSONDecodeError as exc:
-        raise _taxonomy_fail(f"malformed JSON ({exc})") from None
-
-    if not isinstance(raw, dict) or not isinstance(raw.get("classes"), list):
-        raise _taxonomy_fail('top level must be an object with a "classes" list')
-    rows = raw["classes"]
-    if not rows:
-        raise _taxonomy_fail('"classes" list is empty')
-
-    seen_names: set[str] = set()
-    for i, row in enumerate(rows):
-        if not isinstance(row, dict):
-            raise _taxonomy_fail(f"row {i} is not an object")
-        missing = [c for c in _TAXONOMY_REQUIRED_COLUMNS if c not in row]
-        if missing:
-            raise _taxonomy_fail(
-                f"row {i} ({row.get('name', '?')}) lacks required column(s): "
-                + ", ".join(missing)
-            )
-        name = row["name"]
-        if not isinstance(name, str) or not name:
-            raise _taxonomy_fail(f"row {i}: name must be a non-empty string")
-        if name in seen_names:
-            raise _taxonomy_fail(f"duplicate class name: {name}")
-        seen_names.add(name)
-        if row["kind"] not in _TAXONOMY_KINDS:
-            raise _taxonomy_fail(
-                f"{name}: kind must be one of {_TAXONOMY_KINDS}, got {row['kind']!r}"
-            )
-        if not isinstance(row["skill"], str) or not row["skill"]:
-            raise _taxonomy_fail(f"{name}: skill must be a non-empty string")
-        if row["stage"] not in _TAXONOMY_STAGES:
-            raise _taxonomy_fail(
-                f"{name}: stage must be one of {_TAXONOMY_STAGES} — the skill-only "
-                "values (operator-interactive, brain) are rejected on class rows "
-                f"(#4592), got {row['stage']!r}"
-            )
-        if row["model"] not in _TAXONOMY_MODELS:
-            raise _taxonomy_fail(
-                f"{name}: model must be one of {_TAXONOMY_MODELS} (non-nullable; "
-                "inherit means the dispatch omits the model kwarg), got "
-                f"{row['model']!r}"
-            )
-        if "skill_by_ticket_type" in row and row["skill_by_ticket_type"] is not None:
-            mapping = row["skill_by_ticket_type"]
-            if (
-                not isinstance(mapping, dict)
-                or not mapping
-                or any(
-                    not isinstance(k, str) or not k or not isinstance(v, str) or not v
-                    for k, v in mapping.items()
-                )
-            ):
-                raise _taxonomy_fail(
-                    f"{name}: skill_by_ticket_type must be a non-empty object "
-                    "mapping non-empty ticket-type strings to non-empty skill names"
-                )
-            if row["skill"] not in mapping.values():
-                raise _taxonomy_fail(
-                    f"{name}: one skill_by_ticket_type value must equal the row's "
-                    f"skill {row['skill']!r} (the default stays reachable)"
-                )
-        if not isinstance(row["costClass"], str) or not row["costClass"]:
-            raise _taxonomy_fail(f"{name}: costClass must be a non-empty string")
-        if row["learningAgent"] is not None and (
-            row["learningAgent"] not in _TAXONOMY_LEARNING_AGENTS
-        ):
-            raise _taxonomy_fail(
-                f"{name}: learningAgent must be null or one of "
-                f"{_TAXONOMY_LEARNING_AGENTS}, got {row['learningAgent']!r}"
-            )
-        if row["scope"] not in _TAXONOMY_SCOPES:
-            raise _taxonomy_fail(
-                f"{name}: scope must be one of {_TAXONOMY_SCOPES}, got {row['scope']!r}"
-            )
-        if row["provenanceLabel"] is not None and (
-            not isinstance(row["provenanceLabel"], str) or not row["provenanceLabel"]
-        ):
-            raise _taxonomy_fail(
-                f"{name}: provenanceLabel must be null or a non-empty string"
-            )
-        cooldown = row["cooldownSeconds"]
-        if row["kind"] == "signal":
-            # bool is an int subclass in Python — exclude it explicitly.
-            if isinstance(cooldown, bool) or not isinstance(cooldown, int) or cooldown < 0:
-                raise _taxonomy_fail(
-                    f"{name}: signal rows need a non-negative integer "
-                    f"cooldownSeconds, got {cooldown!r}"
-                )
-        elif cooldown is not None:
-            raise _taxonomy_fail(
-                f"{name}: pipeline rows must carry cooldownSeconds: null "
-                f"(slots have no class cooldown), got {cooldown!r}"
-            )
-
-    return tuple(rows)
+    return taxonomy.taxonomy_fail(reason, _TAXONOMY_PATH)
 
 
 # The validated row tuple, exposed for future slices (#1671 folds the TS
 # projections; decide.py itself only consumes the three derivations below).
-CLASS_TAXONOMY = _load_class_taxonomy(_TAXONOMY_PATH)
+CLASS_TAXONOMY = taxonomy.load_taxonomy(_TAXONOMY_PATH)
 
-PIPELINE_SLOTS = tuple(r["name"] for r in CLASS_TAXONOMY if r["kind"] == "pipeline")
+PIPELINE_SLOTS = taxonomy.pipeline_slots(CLASS_TAXONOMY)
 
-SIGNAL_CLASSES = tuple(r["name"] for r in CLASS_TAXONOMY if r["kind"] == "signal")
+SIGNAL_CLASSES = taxonomy.signal_classes(CLASS_TAXONOMY)
 
 # Class -> skill projection (issue #3274). The cascade-routing escalation
 # re-dispatch (`_rule_escalation`) needs the skill for the class it is
@@ -724,9 +566,124 @@ def class_isolation(slot: str) -> str:
 # Cooldowns for signal-driven classes (seconds). Mirrors the legacy
 # /tmp/hydra-last-*.txt files but lives inside state.json now. Per-class
 # cadence rationale lives in the row's `notes` field in classes.json.
-SIGNAL_COOLDOWNS = {
-    r["name"]: r["cooldownSeconds"] for r in CLASS_TAXONOMY if r["kind"] == "signal"
-}
+SIGNAL_COOLDOWNS = taxonomy.signal_cooldowns(CLASS_TAXONOMY)
+
+# Dispatch ORDER is POLICY and stays in the brain (issue #5472, INV-6): the two
+# tuples below are not taxonomy columns, but each MUST be exactly the set of rows
+# of its kind -- checked at import, so a class added to classes.json without a
+# place in the order (or a stale name left here) fails loud with a TaxonomyError.
+
+# Step 4 — pipeline slots, in priority order (qa_orch first; deliberately NOT row order, #466/#4468).
+PIPELINE_PRIORITY = (
+    "qa_orch",
+    "qa_target",
+    # design_concept_orch precedes dev_orch in priority order (issue
+    # #466 sequencing rule): when an orch anchor needs a fresh
+    # artifact, we grill before coding. The selector below returns
+    # None for dev_orch on the same turn so they don't double-fire,
+    # and in warn-only mode the artifact's presence (even draft) lets
+    # dev_orch proceed next turn.
+    "design_concept_orch",
+    "dev_orch",
+    "dev_target",
+    "research_orch",
+    "research_target",
+)
+
+# Step 5 — signal classes, in dispatch priority order.
+SIGNAL_LOOP_ORDER = (
+    "health",
+    "sweep_orch",
+    "sweep_target",
+    "discover_orch",
+    "discover_target",
+    # scout_orch (issue #485, Phase B) — calendar-driven, 7d cooldown.
+    # The Turn Snapshot emits `scout_walk_due` when the per-class
+    # cooldown has elapsed; this loop honors the SIGNAL_COOLDOWNS
+    # back-stop in parallel.
+    "scout_orch",
+    # architecture_orch (issue #790) — idle-time fallback. Registered in
+    # the dispatch iteration tuple so a real dispatch sets
+    # dispatched_any=True, which yields idle=0 for the turn and stops
+    # the wait-only idle drain from firing while a fallback is eligible (the AC
+    # is met by being a real dispatch, NOT by editing the terminate path).
+    "architecture_orch",
+    # retro_orch (issue #920, parent #917) — daily per-run retrospective.
+    # Registered LAST in the signal iteration so it is the lowest-priority
+    # signal class: pipeline slots dispatch first (step 4), then the other
+    # signal classes, and only then is spare capacity spent on a retro.
+    # The 24h class cooldown (SIGNAL_COOLDOWNS) is honored by the shared
+    # signal_is_cooled guard inside _select_for_signal.
+    "retro_orch",
+    # cleanup_orch (issue #960, parent #958) — board-idle backfill that runs
+    # the deterministic dead-code / simplification detector. Keyed off the
+    # same `orch_backfill_idle` signal as the backfill set but deliberately
+    # NOT in BACKFILL_SIGNAL_CLASSES (no one-per-turn stagger): the
+    # high-confidence mechanical workhorse runs hot, gated only by its own
+    # `cleanup_board_saturated` cap + the 1h class cooldown.
+    "cleanup_orch",
+    # cleanup_target — the Target mirror: demote-only dead-export sweep
+    # over ~/hydra-betting, filing target-backlog items. Keyed off
+    # `target_backfill_idle`, capped by `target_cleanup_board_saturated`
+    # (checked FIRST in the selector) + the 1h class cooldown.
+    "cleanup_target",
+    # wire_or_retire_target (issue #2722, epic #2720) — the JUDGMENT
+    # counterpart to cleanup_target: resolves open `wire-or-retire`-labelled
+    # Target backlog items sitting in the triage lane into a WIRE / RETIRE /
+    # UNCLEAR verdict. Keyed off `wire_or_retire_target_available`; the 24h
+    # class cooldown (seeded in bootstrap.sh, #2575 class) enforces the
+    # once-per-day cadence. NOT in BACKFILL_SIGNAL_CLASSES.
+    "wire_or_retire_target",
+    # design_qa_target (issue #2739, parent #2732) — periodic VISUAL QA of
+    # the Target UI: captures the nav-registry screenshot set and judges each
+    # page against the Target design-language ADR, filing at most 3 deduped
+    # needs-triage Target-backlog items per run. Calendar cadence like
+    # scout_orch: the 7d class cooldown (seeded in bootstrap.sh, #2575 class)
+    # owns cadence; `design_qa_target_saturated` is the anti-flood cap checked
+    # FIRST in the selector, `design_qa_target_due` the presence signal. NOT
+    # in BACKFILL_SIGNAL_CLASSES. Registered last as the lowest-priority
+    # signal class — spare capacity only.
+    "design_qa_target",
+    # skill_prune (issue #2949, epic #2944) — the eval-gated PROMPT
+    # counterpart to cleanup_orch's mechanical dead-CODE sweep: prunes the
+    # Orchestrator's playbook-generated skills one at a time along the Pocock
+    # taxonomy. Keyed off the same `orch_backfill_idle` spare-capacity signal
+    # as architecture_orch/cleanup_orch, but the 7d class cooldown
+    # (scout_orch's calendar discipline) is the primary cadence and
+    # `skill_prune_board_saturated` is the anti-flood cap checked FIRST in the
+    # selector. NOT in BACKFILL_SIGNAL_CLASSES (rate-limits on its own 7d
+    # cooldown, not the one-per-turn stagger — like cleanup_orch). Registered
+    # last as a lowest-priority signal class — spare capacity only.
+    "skill_prune",
+    # wayfinder_orch (issue #3351, epic #3350, ADR-0029) — the single AFK
+    # working class for wayfinder maps. Fires on the pre-resolved
+    # `wayfinder_orch_frontier` signal (the Turn Snapshot owns the native
+    # GraphQL frontier enumeration; decide.py reads the resolved ticket ref
+    # verbatim — the signal-seam discipline). 1h class cooldown, one frontier
+    # ticket per fire. NOT in BACKFILL_SIGNAL_CLASSES (map-anchored, not
+    # idle-backfill). Registered last as a lowest-priority signal class —
+    # spare capacity only, never preempting a pipeline dispatch.
+    "wayfinder_orch",
+    # tickets_orch (issue #3423, epic #3419, ADR-0030 Decision 2/5 — one
+    # autonomous Pocock skill lineage; the delta/contract slice). The
+    # tickets-STAGE producer: turns a resolved plan/finding into one parent
+    # epic + N tracer-bullet child issues by dispatching the vendored upstream
+    # `to-tickets` skill + the thin Hydra AFK overlay (Option C compose,
+    # alpha #3420; hydra-prd is demoted to the called PrdInput->issue renderer
+    # library invoked BY that overlay). Structural sibling of wayfinder_orch
+    # (the plan-stage producer, also signal, also 1h) — NOT a pipeline slot.
+    # Fires on the precomputed `tickets_available` board signal (signal-seam
+    # discipline: the Turn Snapshot owns the enumeration and emits the signal;
+    # that emission is a follow-on, not this slice's Files-in-scope). 1h class
+    # cooldown (SIGNAL_COOLDOWNS["tickets_orch"]) is the back-stop; board state
+    # is the primary suppressor. NOT in BACKFILL_SIGNAL_CLASSES. Registered
+    # last as a lowest-priority signal class — spare capacity only, never
+    # preempting a pipeline dispatch.
+    "tickets_orch",
+)
+
+taxonomy.check_order_tuple("PIPELINE_PRIORITY", PIPELINE_PRIORITY, CLASS_TAXONOMY, "pipeline", _TAXONOMY_PATH)
+taxonomy.check_order_tuple("SIGNAL_LOOP_ORDER", SIGNAL_LOOP_ORDER, CLASS_TAXONOMY, "signal", _TAXONOMY_PATH)
 
 # Board-idle backfill set (issue #959, epic #958). Both classes key off the
 # single unified `orch_backfill_idle` signal and share a 1h cadence, so on a
@@ -1116,83 +1073,6 @@ def _quota_delta_exceeded(state: dict) -> tuple[str, str] | None:
         )
     return None
 
-
-# Slots that are scope-disallowed exclusion mask. Scope filter is an
-# exclusion mask (grilled decision 3); `health` and `qa_*` are always
-# allowed regardless of scope (qa reviews any PR, health is whole-system).
-SCOPE_ORCH_ONLY_EXCLUDE = (
-    "dev_target", "research_target", "qa_target", "sweep_target", "discover_target",
-    # cleanup_target scans the TARGET (~/hydra-betting) and files target-
-    # backlog items — target-scope by definition, so orch-only excludes it
-    # (the mirror of cleanup_orch's place in SCOPE_TARGET_ONLY_EXCLUDE).
-    "cleanup_target",
-    # wire_or_retire_target (issue #2722, epic #2720) resolves Target
-    # wire-or-retire backlog items (the judgment counterpart to
-    # cleanup_target's mechanical sweep) — target-scope by definition, so
-    # orch-only excludes it, mirroring cleanup_target above.
-    "wire_or_retire_target",
-    # design_qa_target (issue #2739, parent #2732) captures the Target's
-    # nav-registry screenshot set and judges each page against the Target
-    # design-language ADR, filing Target-backlog items — target-scope by
-    # definition, so orch-only excludes it, mirroring cleanup_target /
-    # wire_or_retire_target above.
-    "design_qa_target",
-)
-SCOPE_TARGET_ONLY_EXCLUDE = (
-    "dev_orch", "research_orch", "qa_orch", "sweep_orch", "discover_orch",
-    # design_concept_orch is orch-scope by definition (issue #466) —
-    # excluded under target-only just like dev_orch / qa_orch / etc.
-    "design_concept_orch",
-    # scout_orch (issue #485) walks the orchestrator's AI-leverage
-    # taxonomy + the orchestrator+dashboard runtime deps — purely orch-
-    # scope work. Under `target-only` the autopilot is told to stay out
-    # of orch issues; scout_orch belongs in that exclusion.
-    "scout_orch",
-    # architecture_orch (issue #790) scans the orchestrator's own codebase
-    # architecture and emits orch-scope issues — orch-scope by definition.
-    # Under `target-only` the autopilot stays out of orch work, so
-    # architecture_orch is excluded (no architecture_target mirror yet; the
-    # Target has a PR merge backlog, #718).
-    "architecture_orch",
-    # retro_orch (issue #920) analyses the orchestrator's OWN autopilot runs
-    # and emits orch-scope improvement proposals (prompt/doc/code fixes to the
-    # orchestrator + its subagents) — orch-scope by definition. Under
-    # `target-only` the autopilot stays out of orch work, so retro_orch is
-    # excluded, mirroring scout_orch / architecture_orch.
-    "retro_orch",
-    # cleanup_orch (issue #960) runs a deterministic dead-code / simplification
-    # scan over the ORCHESTRATOR's own codebase and files orch-scope issues —
-    # orch-scope by definition. Under `target-only` the autopilot stays out of
-    # orch work, so cleanup_orch is excluded, mirroring scout_orch /
-    # architecture_orch / retro_orch. Its Target mirror (`cleanup_target`,
-    # operator-approved 2026-06-10 once the Target merge queue proved healthy —
-    # the #718 PR-backlog blocker that deferred it is resolved) is target-scope
-    # and so lives in SCOPE_ORCH_ONLY_EXCLUDE instead.
-    "cleanup_orch",
-    # skill_prune (issue #2949, epic #2944) prunes the ORCHESTRATOR's own
-    # playbook-generated skills (docs/operator-playbooks/*.md) — orch-scope by
-    # definition, the eval-gated prompt counterpart to cleanup_orch's mechanical
-    # code sweep. Under `target-only` the autopilot stays out of orch work, so
-    # skill_prune is excluded, mirroring scout_orch / architecture_orch /
-    # retro_orch / cleanup_orch above.
-    "skill_prune",
-    # wayfinder_orch (issue #3351, epic #3350, ADR-0029) works the next unblocked
-    # frontier ticket on an open approved orchestrator `wayfinder:map` — orch-scope
-    # by definition (the maps live on the orchestrator GH board). Under
-    # `target-only` the autopilot stays out of orch work, so wayfinder_orch is
-    # excluded, mirroring scout_orch / architecture_orch / retro_orch / cleanup_orch
-    # / skill_prune above.
-    "wayfinder_orch",
-    # tickets_orch (issue #3423, epic #3419, ADR-0030 Decision 2/5) turns a
-    # resolved orchestrator plan/finding into one parent epic + N tracer-bullet
-    # child issues on the ORCHESTRATOR GH board (via the vendored upstream
-    # to-tickets skill + Hydra AFK overlay) — orch-scope by definition (ADR-0030
-    # charted the orchestrator taxonomy only; Target mirrors were ruled out at
-    # charting). Under `target-only` the autopilot stays out of orch work, so
-    # tickets_orch is excluded, mirroring wayfinder_orch / scout_orch /
-    # architecture_orch / retro_orch / cleanup_orch / skill_prune above.
-    "tickets_orch",
-)
 
 # 5-retry escalation per pattern (issue #426 AC; failure modes section).
 MAX_FAILURE_RETRIES = 5
@@ -1872,15 +1752,9 @@ def scope_excluded(scope: str, cls: str) -> bool:
     `orch-only` mode would mean dispatching against a class the scope
     explicitly disallows (INV-008).
     """
-    if scope == "all":
-        return False
-    if cls == "health":
-        return False
-    if scope == "orch-only":
-        return cls in SCOPE_ORCH_ONLY_EXCLUDE
-    if scope == "target-only":
-        return cls in SCOPE_TARGET_ONLY_EXCLUDE
-    return False
+    # Derived from the taxonomy `scope` column (issue #5472): no hand-kept
+    # per-scope class lists. `health` is scope `both`, so never excluded.
+    return taxonomy.scope_excluded(scope, cls, CLASS_TAXONOMY)
 
 
 # ---------------------------------------------------------------------------
@@ -3314,21 +3188,7 @@ def _rule_pipeline_dispatch(
     best = best_candidate(candidates)
     best_score = float(best.get("score", 0.0)) if best else 0.0
 
-    pipeline_priority = (
-        "qa_orch",
-        "qa_target",
-        # design_concept_orch precedes dev_orch in priority order (issue
-        # #466 sequencing rule): when an orch anchor needs a fresh
-        # artifact, we grill before coding. The selector below returns
-        # None for dev_orch on the same turn so they don't double-fire,
-        # and in warn-only mode the artifact's presence (even draft) lets
-        # dev_orch proceed next turn.
-        "design_concept_orch",
-        "dev_orch",
-        "dev_target",
-        "research_orch",
-        "research_target",
-    )
+    pipeline_priority = PIPELINE_PRIORITY
 
     for cls in pipeline_priority:
         if cls in skip_slots:  # #5323: already replayed this turn (instant-death)
@@ -3630,96 +3490,7 @@ def _rule_signal_classes(
     # via the same snapshot-before/compare-after writeback as the increment.
     _reset_zero_yield_streaks(state, events)
     backfill_dispatched = False
-    for sig in (
-        "health",
-        "sweep_orch",
-        "sweep_target",
-        "discover_orch",
-        "discover_target",
-        # scout_orch (issue #485, Phase B) — calendar-driven, 7d cooldown.
-        # The Turn Snapshot emits `scout_walk_due` when the per-class
-        # cooldown has elapsed; this loop honors the SIGNAL_COOLDOWNS
-        # back-stop in parallel.
-        "scout_orch",
-        # architecture_orch (issue #790) — idle-time fallback. Registered in
-        # the dispatch iteration tuple so a real dispatch sets
-        # dispatched_any=True, which yields idle=0 for the turn and stops
-        # the wait-only idle drain from firing while a fallback is eligible (the AC
-        # is met by being a real dispatch, NOT by editing the terminate path).
-        "architecture_orch",
-        # retro_orch (issue #920, parent #917) — daily per-run retrospective.
-        # Registered LAST in the signal iteration so it is the lowest-priority
-        # signal class: pipeline slots dispatch first (step 4), then the other
-        # signal classes, and only then is spare capacity spent on a retro.
-        # The 24h class cooldown (SIGNAL_COOLDOWNS) is honored by the shared
-        # signal_is_cooled guard inside _select_for_signal.
-        "retro_orch",
-        # cleanup_orch (issue #960, parent #958) — board-idle backfill that runs
-        # the deterministic dead-code / simplification detector. Keyed off the
-        # same `orch_backfill_idle` signal as the backfill set but deliberately
-        # NOT in BACKFILL_SIGNAL_CLASSES (no one-per-turn stagger): the
-        # high-confidence mechanical workhorse runs hot, gated only by its own
-        # `cleanup_board_saturated` cap + the 1h class cooldown.
-        "cleanup_orch",
-        # cleanup_target — the Target mirror: demote-only dead-export sweep
-        # over ~/hydra-betting, filing target-backlog items. Keyed off
-        # `target_backfill_idle`, capped by `target_cleanup_board_saturated`
-        # (checked FIRST in the selector) + the 1h class cooldown.
-        "cleanup_target",
-        # wire_or_retire_target (issue #2722, epic #2720) — the JUDGMENT
-        # counterpart to cleanup_target: resolves open `wire-or-retire`-labelled
-        # Target backlog items sitting in the triage lane into a WIRE / RETIRE /
-        # UNCLEAR verdict. Keyed off `wire_or_retire_target_available`; the 24h
-        # class cooldown (seeded in bootstrap.sh, #2575 class) enforces the
-        # once-per-day cadence. NOT in BACKFILL_SIGNAL_CLASSES.
-        "wire_or_retire_target",
-        # design_qa_target (issue #2739, parent #2732) — periodic VISUAL QA of
-        # the Target UI: captures the nav-registry screenshot set and judges each
-        # page against the Target design-language ADR, filing at most 3 deduped
-        # needs-triage Target-backlog items per run. Calendar cadence like
-        # scout_orch: the 7d class cooldown (seeded in bootstrap.sh, #2575 class)
-        # owns cadence; `design_qa_target_saturated` is the anti-flood cap checked
-        # FIRST in the selector, `design_qa_target_due` the presence signal. NOT
-        # in BACKFILL_SIGNAL_CLASSES. Registered last as the lowest-priority
-        # signal class — spare capacity only.
-        "design_qa_target",
-        # skill_prune (issue #2949, epic #2944) — the eval-gated PROMPT
-        # counterpart to cleanup_orch's mechanical dead-CODE sweep: prunes the
-        # Orchestrator's playbook-generated skills one at a time along the Pocock
-        # taxonomy. Keyed off the same `orch_backfill_idle` spare-capacity signal
-        # as architecture_orch/cleanup_orch, but the 7d class cooldown
-        # (scout_orch's calendar discipline) is the primary cadence and
-        # `skill_prune_board_saturated` is the anti-flood cap checked FIRST in the
-        # selector. NOT in BACKFILL_SIGNAL_CLASSES (rate-limits on its own 7d
-        # cooldown, not the one-per-turn stagger — like cleanup_orch). Registered
-        # last as a lowest-priority signal class — spare capacity only.
-        "skill_prune",
-        # wayfinder_orch (issue #3351, epic #3350, ADR-0029) — the single AFK
-        # working class for wayfinder maps. Fires on the pre-resolved
-        # `wayfinder_orch_frontier` signal (the Turn Snapshot owns the native
-        # GraphQL frontier enumeration; decide.py reads the resolved ticket ref
-        # verbatim — the signal-seam discipline). 1h class cooldown, one frontier
-        # ticket per fire. NOT in BACKFILL_SIGNAL_CLASSES (map-anchored, not
-        # idle-backfill). Registered last as a lowest-priority signal class —
-        # spare capacity only, never preempting a pipeline dispatch.
-        "wayfinder_orch",
-        # tickets_orch (issue #3423, epic #3419, ADR-0030 Decision 2/5 — one
-        # autonomous Pocock skill lineage; the delta/contract slice). The
-        # tickets-STAGE producer: turns a resolved plan/finding into one parent
-        # epic + N tracer-bullet child issues by dispatching the vendored upstream
-        # `to-tickets` skill + the thin Hydra AFK overlay (Option C compose,
-        # alpha #3420; hydra-prd is demoted to the called PrdInput->issue renderer
-        # library invoked BY that overlay). Structural sibling of wayfinder_orch
-        # (the plan-stage producer, also signal, also 1h) — NOT a pipeline slot.
-        # Fires on the precomputed `tickets_available` board signal (signal-seam
-        # discipline: the Turn Snapshot owns the enumeration and emits the signal;
-        # that emission is a follow-on, not this slice's Files-in-scope). 1h class
-        # cooldown (SIGNAL_COOLDOWNS["tickets_orch"]) is the back-stop; board state
-        # is the primary suppressor. NOT in BACKFILL_SIGNAL_CLASSES. Registered
-        # last as a lowest-priority signal class — spare capacity only, never
-        # preempting a pipeline dispatch.
-        "tickets_orch",
-    ):
+    for sig in SIGNAL_LOOP_ORDER:
         if dispatch_blocked:
             out.events.append(
                 make_dispatch_decision_event(

@@ -84,6 +84,10 @@ Run these numbered steps.
    `fail-loud-except-py` over changed `.py` files and `fail-loud-devnull-sh` over
    changed `.sh` files, and fix every hit before `gh pr create` (the shrink-only
    `test/fail-loud-ratchet.test.mts` in `npm test` blocks any new or edited hit). Recipe: "Fail-loud lint — changed files" below.
+7b. **Test-can-fail proof on changed tests** (issue #5447, STD-TEST-CAN-FAIL) —
+   run the same advisory judge CI runs over the test files you added or
+   extended; for each `passes-at-merge-base` file make a case red-then-green, or
+   justify it in the PR body. Recipe: "Test-can-fail proof — changed tests" below.
 8a. **MANDATORY — deposit the grounding test-count telemetry file** (issue
    #2754). Immediately after `npm test` passes, run the grounding-deposit recipe
    in "Reflection injection" below. Best-effort on I/O error but mandatory.
@@ -441,6 +445,26 @@ soft friction you worked around, so the next dispatch doesn't re-discover it:
 Rules: `cue` MUST be kebab-case and stable across runs (NOT free text);
 `workaround` and `context` are exactly one line each. No friction worth noting →
 emit `## Friction Report` with the literal body `- (none)`.
+
+## Test-can-fail proof — changed tests (issue #5447)
+
+STD-TEST-CAN-FAIL was the most-cited review rule in the 2026-11 retro (17 PRs):
+a new test that already passes at the merge-base cannot be pinning your change.
+`scripts/ci/qa-fix-proof.ts` in `--mode changed-tests` overlays your changed `test/**`
+files onto a throwaway merge-base worktree and runs the candidates (added test
+files, plus modified ones that add a `test(`/`it(` call). It is the same CLI the
+advisory CI step runs and it ALWAYS exits 0:
+
+```bash
+git fetch origin --quiet
+node --experimental-strip-types scripts/ci/qa-fix-proof.ts --mode changed-tests --base origin/master --head HEAD
+```
+
+Per file: `proven` (at least one assertion failure at the merge-base) is clean;
+`inconclusive` (crashes at the merge-base, e.g. imports a module your PR adds) is
+not a finding; `passes-at-merge-base` prints a `::warning file=...::` line. That
+finding is per FILE and may be legitimate (a drift guard for an already-true
+invariant): fix the case so it fails without your change, or say why in the PR body.
 
 ## Fail-loud lint — changed files (issue #4732)
 
