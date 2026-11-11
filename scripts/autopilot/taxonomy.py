@@ -2,8 +2,10 @@
 
 Every Python reader under scripts/autopilot/ (decide.py, render-dispatch.py,
 run_ledger.py, heartbeat.py, assert_invariants.py) loads classes.json through
-this module, so the validation, the HYDRA_CLASSES_JSON override and the scope
-derivation live in exactly one place (epic #5471, issue #5472).
+this module, so the validation, the HYDRA_CLASSES_JSON override, the scope
+derivation and the per-skill completion obligations live in exactly one place
+(epic #5471, issues #5472, #5473). The table holds per-class and per-skill
+facts; decide.py keeps dispatch policy (order, gating, preemption).
 
 HYDRA_CLASSES_JSON (issue #5202) is a TEST SEAM: when set (non-empty) it names
 the taxonomy file and ONLY that file is loaded -- a missing or invalid override
@@ -21,7 +23,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Iterable
+from typing import Iterable, NamedTuple
 
 _DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "classes.json")
 
@@ -44,7 +46,14 @@ _TAXONOMY_REQUIRED_COLUMNS = (
     "provenanceLabel",
     "stage",
     "model",
+    "cycleRecord",
+    "worktreeGc",
+    "reflectionDeposit",
 )
+
+# The three completion-obligation columns (#5473): required booleans that
+# describe the row's DEFAULT `skill` (reap resolves them by the skill that ran).
+_TAXONOMY_OBLIGATION_COLUMNS = ("cycleRecord", "worktreeGc", "reflectionDeposit")
 
 _TAXONOMY_KINDS = ("pipeline", "signal")
 _TAXONOMY_SCOPES = ("orch", "target", "both")
@@ -166,6 +175,9 @@ def load_taxonomy(path: str | None = None) -> tuple[dict, ...]:
                     f"{name}: one skill_by_ticket_type value must equal the row's "
                     f"skill {row['skill']!r} (the default stays reachable)"
                 )
+        for col in _TAXONOMY_OBLIGATION_COLUMNS:
+            if not isinstance(row[col], bool):
+                raise _fail(f"{name}: {col} must be a boolean, got {row[col]!r}")
         if not isinstance(row["costClass"], str) or not row["costClass"]:
             raise _fail(f"{name}: costClass must be a non-empty string")
         if row["learningAgent"] is not None and (
@@ -199,7 +211,54 @@ def load_taxonomy(path: str | None = None) -> tuple[dict, ...]:
                 f"(slots have no class cooldown), got {cooldown!r}"
             )
 
+    # Obligations are per-SKILL facts: rows sharing a default skill must agree,
+    # and every ticket-type route must land on a skill some row dispatches by
+    # default (so the lookup below never meets a routed skill it cannot answer).
+    by_skill: dict[str, tuple[str, tuple[bool, ...]]] = {}
+    for row in rows:
+        flags = tuple(row[c] for c in _TAXONOMY_OBLIGATION_COLUMNS)
+        prior = by_skill.setdefault(row["skill"], (row["name"], flags))
+        if prior[1] != flags:
+            raise _fail(
+                f"rows {prior[0]} and {row['name']} share skill {row['skill']!r} "
+                f"but disagree on {_TAXONOMY_OBLIGATION_COLUMNS}"
+            )
+    for row in rows:
+        for ticket_type, routed in (row.get("skill_by_ticket_type") or {}).items():
+            if routed not in by_skill:
+                raise _fail(
+                    f"{row['name']}: skill_by_ticket_type[{ticket_type!r}] = {routed!r} "
+                    "is not any row's default skill"
+                )
+
     return tuple(rows)
+
+
+# ---------------------------------------------------------------------------
+# Completion obligations -- per-skill facts reap.py resolves by the skill that ran
+# ---------------------------------------------------------------------------
+
+
+class SkillObligations(NamedTuple):
+    cycle_record: bool
+    worktree_gc: bool
+    reflection_deposit: bool
+
+
+_NO_OBLIGATIONS = SkillObligations(False, False, False)
+
+
+def skill_obligations(skill: str, rows: Iterable[dict] | None = None) -> SkillObligations:
+    """The three completion obligations of `skill` -- the skill that RAN, which for
+    a ticket-routed dispatch (a wayfinder_orch `task` ticket) is the routed skill,
+    not the class's default. An unknown skill owes nothing. `rows` defaults to the
+    loaded taxonomy."""
+    for row in rows if rows is not None else load_taxonomy():
+        if row["skill"] == skill:
+            return SkillObligations(
+                row["cycleRecord"], row["worktreeGc"], row["reflectionDeposit"]
+            )
+    return _NO_OBLIGATIONS
 
 
 # ---------------------------------------------------------------------------

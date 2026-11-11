@@ -42,7 +42,7 @@ import { isHarnessAgentId } from "../transcript-store.ts";
 import type { StuckSignal } from "./run-health.ts";
 // Issue #4856: the taxonomy-derived PR-producing class set (a constant import —
 // no I/O function is pulled in beyond the taxonomy's one-time classes.json
-// load, same precedent as cross-run-trend.ts's CYCLE_RECORD_SKILLS complement
+// load, same precedent as cross-run-trend.ts's cycleRecord-column complement
 // import, so this module stays Redis-free as documented). `isPrProducing`
 // resolves a dispatch's skill from the taxonomy instead of hand-listing skill
 // names here — the design concept's INV-8 "neither retro file hand-lists a

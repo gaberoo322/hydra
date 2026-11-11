@@ -71,6 +71,10 @@ const TaxonomyClassRowSchema = z
     scope: z.enum(["orch", "target", "both"]),
     /** GitHub label the class's filing skill stamps; null = files nothing. */
     provenanceLabel: z.string().min(1).nullable(),
+    /** Completion obligations of the row's default skill (#5473). */
+    cycleRecord: z.boolean(),
+    worktreeGc: z.boolean(),
+    reflectionDeposit: z.boolean(),
     /** Free-form design rationale. Optional. */
     notes: z.string().optional(),
   })

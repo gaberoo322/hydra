@@ -94,7 +94,7 @@ Alerts:
 ### Class-liveness evidence rule (issue #4392 — MANDATORY before filing any "class X is dark / 0 dispatches" finding)
 
 Cycle-derived distributions structurally CANNOT show producer classes. Only
-skills in reap.py's `CYCLE_RECORD_SKILLS` (hydra-dev, hydra-target-build,
+skills with `cycleRecord: true` in classes.json (hydra-dev, hydra-target-build,
 hydra-grill) write cycle-records, so `GET /api/metrics`
 (`stats.anchorDistribution`, `trend`) and the retro bundle's
 `crossRunTrend.byClass` are blind to discover/architecture/cleanup/scout/retro
