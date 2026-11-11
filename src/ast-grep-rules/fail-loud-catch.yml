@@ -38,7 +38,7 @@ note: >-
 # `fail-loud-catch-src` (console.* is NOT a logs branch there, STD-LOG-PINO-SEAM).
 # This generic rule ignores `src/**`; its semantics are unchanged elsewhere.
 ignores:
-  - "src/**"
+  - "src/**/*.ts"
 rule:
   kind: catch_clause
   not:

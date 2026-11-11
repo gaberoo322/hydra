@@ -14,7 +14,10 @@
 # is excluded here AND from `logger-seam`; its catch sites lose fail-loud lint
 # coverage by design — do not re-introduce console.* into this rule to recover it.
 #
-# Enforcement: ADVISORY (hydra-dev child-flow step 7a, changed files only).
+# Enforcement: advisory pre-PR (hydra-dev child-flow step 7a) AND wired into the
+# STD-CATCH-FAIL-LOUD ratchet (FAIL_LOUD_RULE_IDS, scripts/ci/fail-loud-ratchet.ts).
+# Path partition: this rule owns src/**/*.ts; fail-loud-catch ignores only that glob,
+# so src/**/*.mts keeps generic coverage.
 #   npx tsx scripts/ast-search.ts --rule fail-loud-catch-src --path <file>
 # Rule tests: src/ast-grep-rule-tests/fail-loud-catch-src-test.yml
 
