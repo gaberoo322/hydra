@@ -1,0 +1,1 @@
+- refactor: one Python taxonomy loader; scope exclusion derived from the scope column, so INV-008 covers every wrong-scope class (#5472)
