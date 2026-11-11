@@ -20,9 +20,11 @@
  *   - {@link readRunTurns} reaches Redis only through the
  *     `listAutopilotRunTurnsDesc` accessor (which still returns strings).
  *
- * Slice B (run view, retro projection, stalled-dispatch signal) adopts the
- * same module later; `fetchTurnsWithJoins` still parses its own members, but
- * {@link resolveCycleIdCandidate} is exported here for it to adopt.
+ * Slice B (#5445): the run view, retro projection and stalled-dispatch signal
+ * read {@link JoinedTurn}s — a Turn Row whose dispatch actions carry their
+ * joined cycle outcome. {@link attachOutcomes} builds one from a row plus an
+ * outcome resolver; {@link joinedTurnFromWire} rebuilds one from the wire form
+ * the run view serves (outcomes already attached).
  */
 
 import { listAutopilotRunTurnsDesc } from "../redis/autopilot-runs.ts";
@@ -67,6 +69,35 @@ export interface TurnDispatch {
   cycleIdCandidate: string | null;
   /** The action object itself. */
   action: Record<string, unknown>;
+}
+
+/**
+ * The cycle outcome joined onto a dispatch action. Every field is optional on
+ * the type because a wire-rebuilt outcome (see {@link joinedTurnFromWire}) is
+ * whatever the producer attached; the live join always fills all six.
+ */
+export interface DispatchOutcome {
+  cycleId?: string;
+  status?: string;
+  prNumber?: string | number | null;
+  filesChanged?: unknown;
+  startedAt?: unknown;
+  completedAt?: unknown;
+}
+
+/** A dispatch with its joined outcome; `null` = no cycle record yet (pending). */
+export interface JoinedDispatch extends TurnDispatch {
+  outcome: DispatchOutcome | null;
+}
+
+/**
+ * A Turn Row whose dispatch actions carry their joined outcome. `dispatches`
+ * holds the typed {@link JoinedDispatch}es; `raw` is the WIRE object — the
+ * stored object (every key, known or unknown) with `outcome` attached to each
+ * dispatch action — which is exactly what the run view serves.
+ */
+export interface JoinedTurn extends Omit<TurnRow, "dispatches"> {
+  dispatches: JoinedDispatch[];
 }
 
 /** The member `recordTurn` stores. Key order here is the stored key order. */
@@ -282,6 +313,19 @@ export function resolveCycleIdCandidate(action: Record<string, unknown>): string
   return null;
 }
 
+/**
+ * The one cycle-id rule: the dispatch's candidate, else the synthetic
+ * `<run_id>:<turn_n>:<index>` id (mirrors reap.py / dispatch.sh allocation).
+ */
+export function resolveCycleId(
+  runId: string,
+  turnN: number,
+  index: number,
+  candidate: string | null,
+): string {
+  return candidate ?? `${runId}:${turnN}:${index}`;
+}
+
 function resolveDispatches(actions: unknown[] | undefined): TurnDispatch[] {
   const out: TurnDispatch[] = [];
   if (!actions) return out;
@@ -319,6 +363,11 @@ export function parseTurnRow(member: string): TurnRow | null {
     /* intentional: an unparseable member is the documented null result; readRunTurns logs the skip count */
     return null;
   }
+  return parseTurnObject(parsed);
+}
+
+/** {@link parseTurnRow} for an already-parsed object (same tolerance rule). */
+export function parseTurnObject(parsed: unknown): TurnRow | null {
   const raw = plainObject(parsed);
   if (!raw || !Number.isInteger(raw.turn_n)) return null;
 
@@ -342,6 +391,43 @@ export function parseTurnRow(member: string): TurnRow | null {
   if (pe !== undefined) row.parent_exceptions = pe;
   else if (Array.isArray(raw.parent_exceptions)) row.parent_exceptions = [];
   return row;
+}
+
+function outcomeFromWire(v: unknown): DispatchOutcome | null {
+  return plainObject(v) ? (v as DispatchOutcome) : null;
+}
+
+/**
+ * Join outcomes onto a Turn Row. `outcomeFor` is asked once per dispatch; the
+ * result's `raw` is a copy of the stored object whose dispatch actions carry
+ * `outcome` (appended after the stored keys, as the pre-module join did).
+ * Non-dispatch actions and every other stored key pass through untouched.
+ */
+export function attachOutcomes(
+  row: TurnRow,
+  outcomeFor: (d: TurnDispatch) => DispatchOutcome | null,
+): JoinedTurn {
+  const dispatches: JoinedDispatch[] = row.dispatches.map((d) => {
+    const outcome = outcomeFor(d);
+    return { ...d, action: { ...d.action, outcome }, outcome };
+  });
+  const raw: Record<string, unknown> = { ...row.raw };
+  if (row.actions) {
+    const actions = row.actions.slice();
+    for (const d of dispatches) actions[d.index] = d.action;
+    raw.actions = actions;
+  }
+  return { ...row, dispatches, raw };
+}
+
+/**
+ * Rebuild a {@link JoinedTurn} from the wire form the run view serves (outcomes
+ * already attached to dispatch actions). Null under the Turn Row tolerance rule
+ * (not an object, or no integer `turn_n`).
+ */
+export function joinedTurnFromWire(wire: unknown): JoinedTurn | null {
+  const row = parseTurnObject(wire);
+  return row ? attachOutcomes(row, (d) => outcomeFromWire(d.action.outcome)) : null;
 }
 
 /**

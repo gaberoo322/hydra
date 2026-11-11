@@ -12,6 +12,7 @@ import {
   parseTurnRows,
   readRunTurns,
   resolveCycleIdCandidate,
+  resolveCycleId,
   serializeTurnMember,
   sanitizeParentExceptions,
 } from "../src/autopilot/turn-row.ts";
@@ -20,6 +21,9 @@ import { getRunDispatchClasses } from "../src/autopilot/run-reads.ts";
 import { recordTurn } from "../src/autopilot/runs.ts";
 import type { AutopilotRunsDeps } from "../src/autopilot/runs.ts";
 import { readClassState } from "../src/autopilot/class-state.ts";
+import { fetchTurnsWithJoins } from "../src/autopilot/run-projections.ts";
+import { joinedTurnFromWire } from "../src/autopilot/turn-row.ts";
+import { countOpenDispatches } from "../src/autopilot/health-signals/stalled-dispatch.ts";
 import { defaultReadRecentTurns } from "../src/autopilot/recommendation-consumer.ts";
 
 describe("parseTurnRow — tolerance rule", () => {
@@ -123,6 +127,11 @@ describe("parseTurnRow — tolerance rule", () => {
     });
     assert.equal(seen, "r1:7");
     assert.equal(rows.length, 1);
+  });
+
+  test("resolveCycleId synthesises run:turn:index only when no candidate; candidate wins (sibling pin)", () => {
+    assert.equal(resolveCycleId("r1", 3, 2, null), "r1:3:2");
+    assert.equal(resolveCycleId("r1", 3, 2, "c9"), "c9");
   });
 
   test("resolveCycleIdCandidate follows cycleId, autopilotTurnId, worktreeBranch order", () => {
@@ -308,5 +317,49 @@ describe("reader parity and named tolerance cases (#5444)", () => {
         ]),
     });
     assert.deepEqual(classes, ["dev_orch"]);
+  });
+});
+
+describe("joined turns (issue #5445)", () => {
+  const noCycles = async () => ({});
+
+  test("fetchTurnsWithJoins skips a member with no integer turn_n instead of keeping it as turn 0", async () => {
+    const turns = await fetchTurnsWithJoins("r", 10, {
+      listTurnsDesc: async () => [
+        JSON.stringify({ actions: [{ type: "dispatch", slot: "ghost_orch" }] }),
+        JSON.stringify({ turn_n: "3", actions: [] }),
+        JSON.stringify({ turn_n: 2, actions: [{ type: "dispatch", slot: "dev_orch" }] }),
+      ],
+      getCycleHashesBatch: noCycles,
+    });
+    assert.deepEqual(turns.map((t) => t.turn_n), [2]);
+  });
+
+  test("a dispatch with no id synthesises <run>:<turn>:<index> and joins that cycle hash", async () => {
+    const turns = await fetchTurnsWithJoins("r", 10, {
+      listTurnsDesc: async () => [
+        JSON.stringify({ turn_n: 7, actions: [{ type: "noop" }, { type: "dispatch", slot: "dev_orch" }] }),
+      ],
+      getCycleHashesBatch: async (ids) => (ids.includes("r:7:1") ? { "r:7:1": { status: "merged" } } : {}),
+    });
+    assert.equal(turns[0].dispatches[0].outcome?.cycleId, "r:7:1");
+    assert.equal(turns[0].dispatches[0].outcome?.status, "merged");
+  });
+
+  test("joinedTurnFromWire round-trips unknown keys and countOpenDispatches counts null outcomes", () => {
+    const wire = {
+      turn_n: 1,
+      mystery: { a: 1 },
+      actions: [
+        { type: "dispatch", outcome: null },
+        { type: "dispatch", outcome: { status: "merged" } },
+        { type: "noop" },
+      ],
+    };
+    const joined = joinedTurnFromWire(wire);
+    assert.ok(joined);
+    assert.deepEqual(joined.raw, wire);
+    assert.equal(countOpenDispatches(joined), 1);
+    assert.equal(joinedTurnFromWire({ actions: [] }), null);
   });
 });

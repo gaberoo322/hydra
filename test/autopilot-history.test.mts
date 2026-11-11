@@ -606,4 +606,340 @@ describe("autopilot history API (issue #500)", () => {
     assert.equal(d.merged_count, 1, "int 42 and string '42' dedup to one merge");
   });
 
+
+  // ---------------------------------------------------------------------------
+  // Issue #5445 — output pins for the Turn Row adoption. These pin the run-view
+  // route, `projectDispatches` and the stalled-dispatch signal on ONE fixed set
+  // of raw turn rows (a legacy `class` row, unknown stored keys, a multi-turn
+  // slot occupancy, a synthetic-cycle-id dispatch). They were added on the
+  // unchanged code; their expected values must not change with the refactor.
+  // ---------------------------------------------------------------------------
+  const PIN_RUN = "run-pin-5445";
+  const PIN_BRANCH = "worktree-agent-aaaa1111-t2-dev_orch";
+  const PIN_SLOT = {
+    dev_orch: {
+      skill: "hydra-dev",
+      anchor: "issue-77",
+      task_id: "aaaa1111bbbb2222",
+      dispatch_id: PIN_BRANCH,
+      started_epoch: 1760000100,
+    },
+  };
+
+  async function seedPinRun(): Promise<void> {
+    await seedRunRow(PIN_RUN, {
+      run_id: PIN_RUN,
+      started: "2026-10-09T08:00:00Z",
+      started_epoch: 1760000000,
+      status: "running",
+      trigger: "manual",
+      pid: 1,
+      turns: 5,
+      dispatches: 3,
+      cumulative_tokens: 10,
+      last_heartbeat_epoch: 1760000500,
+    });
+    await seedCycle("c-legacy", { status: "merged", prNumber: "7", startedAt: "s1", completedAt: "e1" });
+    await seedCycle(`${PIN_RUN}:4:1`, { status: "failed", pr_number: "9" });
+    await seedTurn(
+      PIN_RUN,
+      1,
+      [{ type: "dispatch", class: "dev_orch", skill: "hydra-dev", cycleId: "c-legacy", anchorReference: "issue-5" }],
+      { epoch: 1760000010, custom_unknown: { keep: ["me", 1] } },
+    );
+    await seedTurn(
+      PIN_RUN,
+      2,
+      [{ type: "dispatch", slot: "dev_orch", skill: "hydra-dev", worktreeBranch: PIN_BRANCH, prompt_args: { anchor: "issue-77" } }],
+      { epoch: 1760000100, slots_snapshot: PIN_SLOT },
+    );
+    await seedTurn(PIN_RUN, 3, [{ type: "noop" }], { epoch: 1760000200, slots_snapshot: PIN_SLOT });
+    await seedTurn(
+      PIN_RUN,
+      4,
+      [{ type: "noop" }, { type: "dispatch", slot: "qa_orch", skill: "hydra-qa" }],
+      { epoch: 1760000300, slots_snapshot: PIN_SLOT },
+    );
+    await seedTurn(
+      PIN_RUN,
+      5,
+      [{ type: "dispatch", slot: "research_orch", skill: "hydra-research" }],
+      { epoch: 1760000400, slots_snapshot: PIN_SLOT },
+    );
+  }
+
+  test("PIN #5445: GET /runs/:runId serves the joined turns with every stored key unchanged", async () => {
+    await seedPinRun();
+    const res = mockRes();
+    await runDetail(mockReq({ runId: PIN_RUN }, {}), res);
+    assert.equal(res._status, 200);
+    assert.deepEqual(res._body.turns, PIN_EXPECTED_TURNS);
+  });
+
+  test("PIN #5445: projectDispatches over the joined turns", async () => {
+    await seedPinRun();
+    const { fetchTurnsWithJoins } = await import("../src/autopilot/run-projections.ts");
+    const { projectDispatches } = await import("../src/autopilot/retro-projections.ts");
+    const turns = await fetchTurnsWithJoins(PIN_RUN, 100);
+    assert.deepEqual(projectDispatches(turns), PIN_EXPECTED_DISPATCHES);
+  });
+
+  test("PIN #5445: stalled-dispatch signal off the current-run view", async () => {
+    await seedPinRun();
+    const { detectStalledDispatch } = await import("../src/autopilot/run-health.ts");
+    const { DEFAULT_HEALTH_THRESHOLDS } = await import("../src/autopilot/run-health.ts");
+    const res = mockRes();
+    await runsCurrent(mockReq({}, {}), res);
+    assert.equal(res._status, 200);
+    const view = { ...res._body, age_s: 99999 };
+    const sig = detectStalledDispatch(view, DEFAULT_HEALTH_THRESHOLDS, null);
+    assert.equal(sig.length, 1);
+    assert.equal(sig[0].severity, "critical");
+    assert.equal(sig[0].evidence.openDispatches, 1);
+    assert.equal(sig[0].evidence.runId, PIN_RUN);
+  });
+
 });
+
+const PIN_EXPECTED_TURNS: unknown[] = [
+  {
+    "turn_n": 5,
+    "epoch": 1760000400,
+    "actions": [
+      {
+        "type": "dispatch",
+        "slot": "research_orch",
+        "skill": "hydra-research",
+        "outcome": null
+      }
+    ],
+    "reasons": [],
+    "slots_snapshot": {
+      "dev_orch": {
+        "skill": "hydra-dev",
+        "anchor": "issue-77",
+        "task_id": "aaaa1111bbbb2222",
+        "dispatch_id": "worktree-agent-aaaa1111-t2-dev_orch",
+        "started_epoch": 1760000100
+      }
+    },
+    "signals_snapshot": {},
+    "tokens_after": 0,
+    "idle_turns": 0
+  },
+  {
+    "turn_n": 4,
+    "epoch": 1760000300,
+    "actions": [
+      {
+        "type": "noop"
+      },
+      {
+        "type": "dispatch",
+        "slot": "qa_orch",
+        "skill": "hydra-qa",
+        "outcome": {
+          "cycleId": "run-pin-5445:4:1",
+          "status": "failed",
+          "prNumber": "9",
+          "filesChanged": null,
+          "startedAt": null,
+          "completedAt": null
+        }
+      }
+    ],
+    "reasons": [],
+    "slots_snapshot": {
+      "dev_orch": {
+        "skill": "hydra-dev",
+        "anchor": "issue-77",
+        "task_id": "aaaa1111bbbb2222",
+        "dispatch_id": "worktree-agent-aaaa1111-t2-dev_orch",
+        "started_epoch": 1760000100
+      }
+    },
+    "signals_snapshot": {},
+    "tokens_after": 0,
+    "idle_turns": 0
+  },
+  {
+    "turn_n": 3,
+    "epoch": 1760000200,
+    "actions": [
+      {
+        "type": "noop"
+      }
+    ],
+    "reasons": [],
+    "slots_snapshot": {
+      "dev_orch": {
+        "skill": "hydra-dev",
+        "anchor": "issue-77",
+        "task_id": "aaaa1111bbbb2222",
+        "dispatch_id": "worktree-agent-aaaa1111-t2-dev_orch",
+        "started_epoch": 1760000100
+      }
+    },
+    "signals_snapshot": {},
+    "tokens_after": 0,
+    "idle_turns": 0
+  },
+  {
+    "turn_n": 2,
+    "epoch": 1760000100,
+    "actions": [
+      {
+        "type": "dispatch",
+        "slot": "dev_orch",
+        "skill": "hydra-dev",
+        "worktreeBranch": "worktree-agent-aaaa1111-t2-dev_orch",
+        "prompt_args": {
+          "anchor": "issue-77"
+        },
+        "outcome": null
+      }
+    ],
+    "reasons": [],
+    "slots_snapshot": {
+      "dev_orch": {
+        "skill": "hydra-dev",
+        "anchor": "issue-77",
+        "task_id": "aaaa1111bbbb2222",
+        "dispatch_id": "worktree-agent-aaaa1111-t2-dev_orch",
+        "started_epoch": 1760000100
+      }
+    },
+    "signals_snapshot": {},
+    "tokens_after": 0,
+    "idle_turns": 0
+  },
+  {
+    "turn_n": 1,
+    "epoch": 1760000010,
+    "actions": [
+      {
+        "type": "dispatch",
+        "class": "dev_orch",
+        "skill": "hydra-dev",
+        "cycleId": "c-legacy",
+        "anchorReference": "issue-5",
+        "outcome": {
+          "cycleId": "c-legacy",
+          "status": "merged",
+          "prNumber": "7",
+          "filesChanged": null,
+          "startedAt": "s1",
+          "completedAt": "e1"
+        }
+      }
+    ],
+    "reasons": [],
+    "slots_snapshot": {},
+    "signals_snapshot": {},
+    "tokens_after": 0,
+    "idle_turns": 0,
+    "custom_unknown": {
+      "keep": [
+        "me",
+        1
+      ]
+    }
+  }
+];
+const PIN_EXPECTED_DISPATCHES: unknown[] = [
+  {
+    "cycleId": "",
+    "turn_n": 5,
+    "skill": "hydra-research",
+    "anchorReference": null,
+    "prNumber": null,
+    "slot": "research_orch",
+    "occupancyId": null,
+    "transcriptId": null,
+    "status": null,
+    "bucket": null,
+    "abandonReason": null,
+    "regressionIntroduced": false,
+    "durationMs": null,
+    "resume": false,
+    "flagged": false,
+    "drillReason": null,
+    "undrillable": false
+  },
+  {
+    "cycleId": "aaaa1111bbbb2222",
+    "turn_n": 5,
+    "skill": "hydra-dev",
+    "anchorReference": "issue-77",
+    "prNumber": null,
+    "slot": "dev_orch",
+    "occupancyId": "id:aaaa1111bbbb2222",
+    "transcriptId": null,
+    "status": null,
+    "bucket": null,
+    "abandonReason": null,
+    "regressionIntroduced": false,
+    "durationMs": null,
+    "resume": false,
+    "flagged": false,
+    "drillReason": null,
+    "undrillable": false
+  },
+  {
+    "cycleId": "run-pin-5445:4:1",
+    "turn_n": 4,
+    "skill": "hydra-qa",
+    "anchorReference": null,
+    "prNumber": "9",
+    "slot": "qa_orch",
+    "occupancyId": null,
+    "transcriptId": null,
+    "status": "failed",
+    "bucket": "failed",
+    "abandonReason": null,
+    "regressionIntroduced": false,
+    "durationMs": null,
+    "resume": false,
+    "flagged": false,
+    "drillReason": null,
+    "undrillable": false
+  },
+  {
+    "cycleId": "aaaa1111bbbb2222",
+    "turn_n": 2,
+    "skill": "hydra-dev",
+    "anchorReference": "issue-77",
+    "prNumber": null,
+    "slot": "dev_orch",
+    "occupancyId": "id:aaaa1111bbbb2222",
+    "transcriptId": null,
+    "status": null,
+    "bucket": null,
+    "abandonReason": null,
+    "regressionIntroduced": false,
+    "durationMs": null,
+    "resume": false,
+    "flagged": false,
+    "drillReason": null,
+    "undrillable": false
+  },
+  {
+    "cycleId": "c-legacy",
+    "turn_n": 1,
+    "skill": "hydra-dev",
+    "anchorReference": "issue-5",
+    "prNumber": "7",
+    "slot": null,
+    "occupancyId": null,
+    "transcriptId": null,
+    "status": "merged",
+    "bucket": "merged",
+    "abandonReason": null,
+    "regressionIntroduced": false,
+    "durationMs": null,
+    "resume": false,
+    "flagged": false,
+    "drillReason": null,
+    "undrillable": false
+  }
+];
