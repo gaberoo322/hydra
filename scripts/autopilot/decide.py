@@ -317,6 +317,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import turn_snapshot as ts  # noqa: E402
 import run_ledger  # noqa: E402  (leaf module; main() is its only caller)
 import taxonomy  # noqa: E402  (the ONE classes.json loader, #5472)
+import admission  # noqa: E402  (pure dispatch-admission verdict, #5478)
 
 # ---------------------------------------------------------------------------
 # Sibling brain modules (issue #4511) — imports point DOWN only
@@ -3164,6 +3165,41 @@ def _rule_usage_eligibility(state: dict) -> tuple[_RuleOutput, bool, set[str]]:
     return out, dispatch_blocked, shed_classes
 
 
+def _record_admission_refusal(
+    out: _RuleOutput,
+    state: dict,
+    now: int,
+    cls: str,
+    gate: str,
+    scope: str,
+    *,
+    burned_reason: str,
+) -> None:
+    """Map an `admission.admit` refusal onto the skip event + debug key the
+    pipeline / signal emitters have always written for that gate (#5478)."""
+    if gate == admission.GATE_USAGE_DISPATCH_BLOCKED:
+        outcome, reason = "budget", "usage tracker dispatch_blocked"
+    elif gate == admission.GATE_USAGE_SHED:
+        outcome, reason = "budget", "usage tracker shed"
+    elif gate == admission.GATE_SLOT_BUSY:
+        outcome, reason = "cooldown", "slot busy"
+    elif gate == admission.GATE_SCOPE_EXCLUDED:
+        outcome, reason = "idle", f"scope excluded ({scope})"
+    elif gate == admission.GATE_BURNED:
+        outcome, reason = "cooldown", burned_reason
+    else:  # admission.GATE_ORCH_REALM_SHARE_EXCEEDED
+        cap = orch_realm_share_state(state)
+        out.debug.setdefault("orch_realm_share_skipped", {
+            "max_share": cap["max_share"],
+            "share": cap["share"],
+        })
+        outcome, reason = "budget", "orch realm weekly share exceeded"
+    out.events.append(
+        make_dispatch_decision_event(state, now, cls=cls, outcome=outcome, reason=reason)
+    )
+    out.skipped += 1
+
+
 def _rule_pipeline_dispatch(
     state: dict,
     candidates: dict | None,
@@ -3193,73 +3229,22 @@ def _rule_pipeline_dispatch(
     for cls in pipeline_priority:
         if cls in skip_slots:  # #5323: already replayed this turn (instant-death)
             continue
-        if dispatch_blocked:
-            # Budget-style suppression: usage tracker said "allow=False".
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="budget",
-                    reason="usage tracker dispatch_blocked",
-                )
+        verdict = admission.admit(
+            cls,
+            dispatch_blocked=dispatch_blocked,
+            shed_classes=shed_classes,
+            slots=slots,
+            freed_slots=frozenset(),
+            scope=scope,
+            burned_classes=burned,
+            orch_share_exceeded=orch_realm_share_exceeded(state),
+            rows=CLASS_TAXONOMY,
+        )
+        if not verdict.admitted:
+            _record_admission_refusal(
+                out, state, now, cls, verdict.gate, scope, burned_reason="class burned (soft-cap)"
             )
-            out.skipped += 1
             continue  # do NOT break — keep emitting one event per class
-        if cls in shed_classes:
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="budget",
-                    reason="usage tracker shed",
-                )
-            )
-            out.skipped += 1
-            continue
-        if slots.get(cls) is not None:
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="cooldown",
-                    reason="slot busy",
-                )
-            )
-            out.skipped += 1
-            continue  # slot busy
-        if cls in burned:
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="cooldown",
-                    reason="class burned (soft-cap)",
-                )
-            )
-            out.skipped += 1
-            continue
-        if scope_excluded(scope, cls):
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="idle",
-                    reason=f"scope excluded ({scope})",
-                )
-            )
-            out.skipped += 1
-            continue
-        # Orch-realm weekly-share guard (issue #4161) — checked BEFORE the
-        # selector, as the "harder limit first" gate.
-        # Suppresses ORCH-scope classes only (CLASS_SCOPE "orch"):
-        # target-scope and realm-agnostic ("both") classes fall through, so
-        # the guard is one-directional by construction. Default-disabled —
-        # armed only by an explicit orch_realm_weekly_share_cap AND a usable share
-        # reading, so on a default run this branch is inert.
-        if CLASS_SCOPE.get(cls) == "orch" and orch_realm_share_exceeded(state):
-            cap = orch_realm_share_state(state)
-            out.debug.setdefault("orch_realm_share_skipped", {
-                "max_share": cap["max_share"],
-                "share": cap["share"],
-            })
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="budget",
-                    reason="orch realm weekly share exceeded",
-                )
-            )
-            out.skipped += 1
-            continue
         # Pipeline re-fire interval (issue #4611) — checked BEFORE the selector
         # (and after scope_excluded, so an excluded class neither emits a
         # cooldown event nor gets stamped), mirroring `_select_for_signal`'s
@@ -3491,23 +3476,22 @@ def _rule_signal_classes(
     _reset_zero_yield_streaks(state, events)
     backfill_dispatched = False
     for sig in SIGNAL_LOOP_ORDER:
-        if dispatch_blocked:
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=sig, outcome="budget",
-                    reason="usage tracker dispatch_blocked",
-                )
+        verdict = admission.admit(
+            sig,
+            dispatch_blocked=dispatch_blocked,
+            shed_classes=shed_classes,
+            slots={},  # signal classes have no slot-busy gate; escalation is handled below
+            freed_slots=frozenset(),
+            scope=scope,
+            burned_classes=burned,
+            orch_share_exceeded=orch_realm_share_exceeded(state),
+            rows=CLASS_TAXONOMY,
+        )
+        if not verdict.admitted:
+            _record_admission_refusal(
+                out, state, now, sig, verdict.gate, scope,
+                burned_reason="signal class burned (soft-cap)",
             )
-            out.skipped += 1
-            continue
-        if sig in shed_classes:
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=sig, outcome="budget",
-                    reason="usage tracker shed",
-                )
-            )
-            out.skipped += 1
             continue
         if sig in escalated_slots:
             # The escalation rule (step 2.5) already re-dispatched this class
@@ -3519,43 +3503,6 @@ def _rule_signal_classes(
                 make_dispatch_decision_event(
                     state, now, cls=sig, outcome="cooldown",
                     reason="slot already re-dispatched by escalation this turn",
-                )
-            )
-            out.skipped += 1
-            continue
-        if scope_excluded(scope, sig):
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=sig, outcome="idle",
-                    reason=f"scope excluded ({scope})",
-                )
-            )
-            out.skipped += 1
-            continue
-        # Orch-realm weekly-share guard (issue #4161) — the signal-loop twin
-        # of the pipeline guard above: same default-disabled arming, same
-        # one-directional orch-only suppression (CLASS_SCOPE "orch"), same
-        # budget-outcome skip event. Placed after the scope mask so the
-        # emitted skip reason is the share guard, not a duplicate scope skip.
-        if CLASS_SCOPE.get(sig) == "orch" and orch_realm_share_exceeded(state):
-            cap = orch_realm_share_state(state)
-            out.debug.setdefault("orch_realm_share_skipped", {
-                "max_share": cap["max_share"],
-                "share": cap["share"],
-            })
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=sig, outcome="budget",
-                    reason="orch realm weekly share exceeded",
-                )
-            )
-            out.skipped += 1
-            continue
-        if sig in burned:
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=sig, outcome="cooldown",
-                    reason="signal class burned (soft-cap)",
                 )
             )
             out.skipped += 1
