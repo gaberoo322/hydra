@@ -754,13 +754,13 @@
       "route": "/docs/adr/0025",
       "title": "Target gets its own single-realm incident skill (hydra-target-incident)",
       "status": "accepted",
-      "statusLine": "Accepted (hydra-incident retired 2026-11 by #5493 — the single-realm rule binds hydra-target-incident alone; see the amendment at the end)",
+      "statusLine": "Accepted (amended 2026-11, #5493)",
       "statusDialect": "inline",
       "date": "2026-06-30",
       "supersedes": [],
       "supersededBy": [],
       "decision": "Incident skills are single-realm: `hydra-target-incident` never leaves `~/hydra-betting`.",
-      "readWhen": "Editing either incident skill.",
+      "readWhen": "Editing `hydra-target-incident`.",
       "citedBy": [
         "CONTEXT-MAP.md",
         "docs/operator-playbooks/hydra-target-incident.md"

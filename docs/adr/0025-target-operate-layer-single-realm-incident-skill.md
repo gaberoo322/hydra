@@ -1,6 +1,6 @@
 # ADR-0025: Target gets its own single-realm incident skill (hydra-target-incident)
 
-Status: Accepted (hydra-incident retired 2026-11 by #5493 — the single-realm rule binds hydra-target-incident alone; see the amendment at the end)
+Status: Accepted (amended 2026-11, #5493)
 Date: 2026-06-30
 Deciders: Operator + Hydra (via the design-concept artifact for issue #2553)
 Related: ADR-0013 (swappable single-target builder), ADR-0014 (simplicity discipline), hydra-incident playbook, hydra-target-build playbook (Step 8.6 post-merge health watcher)

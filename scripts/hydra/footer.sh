@@ -2,7 +2,7 @@
 # footer.sh — the canonical `Source: <skill> | <ISO ts>` gh-issue provenance
 # footer, extracted once (issue #2556).
 #
-# The same footer block was hand-copied into hydra-target-incident, hydra-research,
+# The same footer block was hand-copied into the incident skill, hydra-research,
 # hydra-discover (x3), and hydra-target-discover. Downstream parsers key on the
 # exact string shape — classes.json provenance labels and the retro/reconciler
 # footer matching both split on `Source: <skill> |` — so this helper emits a

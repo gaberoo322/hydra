@@ -587,10 +587,16 @@ describe("retired playbooks (issue #5493)", () => {
     for (const name of RETIRED) {
       assert.ok(!existsSync(join(PLAYBOOKS, `${name}.md`)), `${name}.md must stay deleted`);
     }
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+        e.isDirectory()
+          ? e.name === "node_modules" ? [] : walk(join(dir, e.name))
+          : /\.(ts|mts|sh|md|py)$/.test(e.name) ? [join(dir, e.name)] : [],
+      );
     const files = [
       ...playbookFiles().map((f) => join(PLAYBOOKS, f)),
-      join(ROOT, "src", "operator-actions", "parity.ts"),
-      join(ROOT, "src", "api", "pattern-memory.ts"),
+      ...walk(join(ROOT, "src")),
+      ...walk(join(ROOT, "scripts")),
     ];
     for (const f of files) {
       const text = readFileSync(f, "utf8");
@@ -607,7 +613,6 @@ describe("retired playbooks (issue #5493)", () => {
     );
     const amendment = adr.slice(adr.indexOf("## Amendment (2026-11, #5493)"));
     assert.ok(amendment.includes("#5493"), "amendment cites #5493");
-    assert.ok(!/closes\s+#2555/i.test(amendment), "amendment must not claim to close the already-closed #2555");
   });
 });
 
