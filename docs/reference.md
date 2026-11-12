@@ -274,6 +274,10 @@ Sessions without the sentinel (a human running `claude`) silently no-op. Both ho
 - **Baseline** — `scripts/ci/playbook-reference-baseline.json` holds the dead cites that predate the check, as `<kind> <ref>` per playbook. It is shrink-only: a new dead cite fails, and so does a baseline entry that now resolves. Lower it with `npx tsx scripts/ci/playbook-reference-check.ts --write-baseline`.
 - **Not checked** — the scanner's header comment is the authority; `docs/operator-playbooks/_fragments/README.md` summarises it for playbook authors.
 
+## Playbook vocabulary ratchet (issue #5500)
+
+`scripts/ci/playbook-vocabulary-ratchet.ts`, run by `test/playbook-vocabulary-ratchet.test.mts` in the required suite, enforces the mechanical part of the playbook authoring standard (the `STD-PLAYBOOK-*` rules in `CODING_STANDARDS.md`). It counts four shapes per playbook and fragment: status and history phrases, file-and-line-number cites into source files, hardcoded Target names (detection delegated to `scripts/ci/target-coupling-check.ts`), and the retired terms `CONTEXT.md` lists under `_Avoid_` (parsed at run time). `scripts/ci/playbook-vocabulary-baseline.json` holds one count per file per shape. A count above its baseline fails, naming file, line and phrase; a count below fails until `npx tsx scripts/ci/playbook-vocabulary-ratchet.ts --write-baseline` lowers it. A line starting `Historical:` is exempt.
+
 ## Pitfall mechanisms
 
 Full original text of the CLAUDE.md "Common Pitfalls" bullets that were condensed to a rule plus pointer (issue #5218). CLAUDE.md carries the fence; this section carries the mechanism and incident history.

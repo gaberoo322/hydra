@@ -1,0 +1,1 @@
+- feat: playbook authoring standard (STD-PLAYBOOK-*) and a required shrink-only vocabulary ratchet over operator playbooks (#5500)
