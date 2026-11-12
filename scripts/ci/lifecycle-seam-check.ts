@@ -143,6 +143,22 @@ function hasUnquotedBoundary(tail: string, before: string, startDepth = 0): bool
   return false;
 }
 
+/** Net open-bracket count of `s`. */
+function bracketDepth(s: string): number {
+  let depth = 0;
+  for (const ch of s) {
+    if (ch === "[" || ch === "(" || ch === "{") depth++;
+    else if (ch === "]" || ch === ")" || ch === "}") depth--;
+  }
+  return depth;
+}
+
+/** A heredoc (`<<`) keeps the command open only when it appears before the first unquoted command boundary. */
+function heredocReaches(tail: string, before: string, depth: number): boolean {
+  const at = tail.indexOf("<<");
+  return at >= 0 && !hasUnquotedBoundary(tail.slice(0, at), before, depth);
+}
+
 /** A bare `--label` is a create-time write when `create` appears within 300 chars before it (same or earlier line). */
 function inCreateContext(text: string, idx: number, matched = ""): boolean {
   const win = text.slice(Math.max(0, idx - 300), idx);
@@ -156,14 +172,9 @@ function inCreateContext(text: string, idx: number, matched = ""): boolean {
     for (const m of win.matchAll(/\b(?:issue|pr)["',\s[]+create\b/g)) create = m.index ?? -1;
     if (create < 0) return false;
     const tail = win.slice(create).replace(/\\\r?\n/g, " ").replace(/\r/g, "");
-    if (tail.includes("<<")) return true;
     // Brackets opened just before `issue` (`run("gh", [` then newline-separated items) still count.
-    let depth = 0;
-    for (const ch of win.slice(Math.max(0, create - 80), create)) {
-      if (ch === "[" || ch === "(" || ch === "{") depth++;
-      else if (ch === "]" || ch === ")" || ch === "}") depth--;
-    }
-    return !hasUnquotedBoundary(tail, win[create - 1] ?? "", depth);
+    const depth = bracketDepth(win.slice(Math.max(0, create - 80), create));
+    return heredocReaches(tail, win[create - 1] ?? "", depth) || !hasUnquotedBoundary(tail, win[create - 1] ?? "", depth);
   }
   return CREATE_CMD_RE.test(win);
 }
@@ -195,13 +206,8 @@ function inPrContext(text: string, idx: number): boolean {
   // `gh issue edit $(gh pr view ...) --add-label x`: the `gh pr` is nested in the issue command's args (INV-3).
   if (issue >= 0 && !hasUnquotedBoundary(win.slice(issue, pr), win[issue - 1] ?? "")) return false;
   const tail = win.slice(pr).replace(/\\\r?\n/g, " ").replace(/\r/g, "");
-  if (tail.includes("<<")) return true;
-  let depth = 0;
-  for (const ch of win.slice(Math.max(0, pr - 80), pr)) {
-    if (ch === "[" || ch === "(" || ch === "{") depth++;
-    else if (ch === "]" || ch === ")" || ch === "}") depth--;
-  }
-  return !hasUnquotedBoundary(tail, win[pr - 1] ?? "", depth);
+  const depth = bracketDepth(win.slice(Math.max(0, pr - 80), pr));
+  return heredocReaches(tail, win[pr - 1] ?? "", depth) || !hasUnquotedBoundary(tail, win[pr - 1] ?? "", depth);
 }
 
 /** Join backslash-continued physical lines; each logical line keeps its first physical line number. */

@@ -258,6 +258,9 @@ describe("lifecycle-seam-check: evasion forms (#5367)", () => {
     assert.deepEqual(ts('run("gh", [\r\n  "issue",\r\n  "create",\r\n  "-l", "needs-triage",\r\n]);'), [4]);
     assert.deepEqual(md("gh issue create --title t --body-file - <<'EOF'\nbody line\nEOF\n  -l needs-triage"), [4]);
     assert.deepEqual(md("gh issue create --title t \\\r\n  -l needs-triage"), [1]);
+    // a heredoc after a command boundary does not extend the earlier command's reach (INV-3)
+    assert.deepEqual(md("gh pr edit 5; cat <<EOF\nbody\nEOF\nx --add-label needs-qa"), [4]);
+    assert.deepEqual(md("gh issue create --title t; cat <<EOF\nbody\nEOF\nx -l needs-triage"), []);
     // sibling shapes keep their verdict: a later command on a new line or after a boundary is not create context
     assert.deepEqual(md("gh issue create --title t\nwc -l $f"), []);
     assert.deepEqual(md("gh issue create --title t; wc -l $f"), []);
