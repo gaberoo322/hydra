@@ -95,6 +95,7 @@ describe("decideReviewerCommit: gating and fences", () => {
     ].join("\n");
     const d = decideReviewerCommit(input({ diff, changedPaths: ["scripts/sync-skills.sh", "docs/guide.md"] }));
     assert.equal(d.action, "none");
+    assert.equal(d.reason, "one-way-door");
   });
 });
 
