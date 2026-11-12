@@ -248,12 +248,30 @@ class SkillObligations(NamedTuple):
 _NO_OBLIGATIONS = SkillObligations(False, False, False)
 
 
+def _cached_taxonomy() -> tuple[dict, ...]:
+    """load_taxonomy() memoised on (resolved path, mtime_ns, size): one reap asks
+    for obligations up to three times, and an edited classes.json still reloads."""
+    path = taxonomy_path()
+    try:
+        st = os.stat(path)
+        key = (path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = (path, None, None)  # load_taxonomy raises the typed error
+    if _TAXONOMY_CACHE.get("key") != key:
+        _TAXONOMY_CACHE["rows"] = load_taxonomy(path)
+        _TAXONOMY_CACHE["key"] = key
+    return _TAXONOMY_CACHE["rows"]
+
+
+_TAXONOMY_CACHE: dict = {}
+
+
 def skill_obligations(skill: str, rows: Iterable[dict] | None = None) -> SkillObligations:
     """The three completion obligations of `skill` -- the skill that RAN, which for
     a ticket-routed dispatch (a wayfinder_orch `task` ticket) is the routed skill,
     not the class's default. An unknown skill owes nothing. `rows` defaults to the
     loaded taxonomy."""
-    for row in rows if rows is not None else load_taxonomy():
+    for row in rows if rows is not None else _cached_taxonomy():
         if row["skill"] == skill:
             return SkillObligations(
                 row["cycleRecord"], row["worktreeGc"], row["reflectionDeposit"]

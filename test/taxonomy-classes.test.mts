@@ -1414,6 +1414,39 @@ print(json.dumps({s: list(taxonomy.skill_obligations(s, rows)) for s in skills})
     assert.deepEqual(got["hydra-nonexistent"], [false, false, false]);
   });
 
+  test("skill_obligations loads classes.json once per file state, and reloads when the file changes", () => {
+    const got = probeAutopilot(`
+import os, tempfile, taxonomy
+calls = []
+real = taxonomy.load_taxonomy
+taxonomy.load_taxonomy = lambda p=None: (calls.append(p), real(p))[1]
+taxonomy.skill_obligations("hydra-dev"); taxonomy.skill_obligations("hydra-qa"); taxonomy.skill_obligations("hydra-grill")
+first = len(calls)
+d = json.load(open(taxonomy.taxonomy_path()))
+f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False); json.dump(d, f); f.close()
+os.environ["HYDRA_CLASSES_JSON"] = f.name
+taxonomy.skill_obligations("hydra-dev")
+os.unlink(f.name)
+print(json.dumps([first, len(calls)]))
+`);
+    assert.deepEqual(got, [1, 2]);
+  });
+
+  test("reap.py: a corrupt classes.json logs and owes nothing instead of aborting; a valid one still resolves", () => {
+    const got = probeAutopilot(`
+import os, io, contextlib
+os.environ["HYDRA_CLASSES_JSON"] = "/nonexistent/classes.json"
+import reap
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    bad = list(reap._obligations_for("hydra-dev"))
+del os.environ["HYDRA_CLASSES_JSON"]
+good = list(reap._obligations_for("hydra-dev"))
+print(json.dumps([bad, good, "taxonomy-unavailable" in err.getvalue()]))
+`);
+    assert.deepEqual(got, [[false, false, false], [true, true, true], true]);
+  });
+
   test("reap.py no longer hand-keeps the three skill sets", () => {
     const text = readFileSync(REAP_PY, "utf-8");
     for (const name of ["CYCLE_RECORD_SKILLS", "WORKTREE_GC_SKILLS", "REFLECTION_DEPOSIT_SKILLS"]) {

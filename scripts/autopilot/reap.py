@@ -204,6 +204,17 @@ REFL_SOURCES_DIR = Path(os.environ.get("HYDRA_AUTOPILOT_REFL_DIR", "/tmp"))
 # hydra-qa never opens a PR and runs no planning-time deposit recipe.
 CYCLE_RECORD_SCRIPT = Path(__file__).parent / "dispatch.sh"
 
+
+def _obligations_for(skill):
+    """Completion obligations of `skill`; a corrupt/missing classes.json must never
+    abort a reap (the old static sets could not fail), so it logs loudly and owes
+    nothing."""
+    try:
+        return taxonomy.skill_obligations(skill)
+    except taxonomy.TaxonomyError as exc:
+        print(f"[autopilot] WARN taxonomy-unavailable skill={skill}: {exc}", file=sys.stderr)
+        return taxonomy.SkillObligations(False, False, False)
+
 # Worktree-orphan GC trigger (issue #911).
 #
 # Every code-writing / QA dispatch runs inside a `git worktree`, but the
@@ -716,7 +727,7 @@ def _fire_cycle_record(
     # escalated attempt's outcome record and structurally zero the cascade fold.
     if not skill:
         return
-    if not taxonomy.skill_obligations(skill).cycle_record and not escalation:
+    if not _obligations_for(skill).cycle_record and not escalation:
         return
     # Issue #3391: key the cycle-record on the synthesised worktree branch when
     # one is known, so the test-count-bearing write lands on the SAME indexed
@@ -800,7 +811,7 @@ def _fire_worktree_gc(skill: str | None) -> None:
     branch is gone), so overlapping invocations across rapid reaps converge
     harmlessly on the same reclaimed set.
     """
-    if not skill or not taxonomy.skill_obligations(skill).worktree_gc:
+    if not skill or not _obligations_for(skill).worktree_gc:
         return
     if os.environ.get("HYDRA_REAP_WORKTREE_GC", "1") == "0":
         return
@@ -1516,6 +1527,8 @@ def _fire_reflection_for_completion(
 # is now a data dependency: run_completion's fire steps take this record —
 # never the mutable slot — and nothing between the #3895 mismatch probe and
 # the release reads `s["slots"][cls]` at all.
+
+
 @dataclass(frozen=True)
 class CompletionSnapshot:
     """Immutable copy of every slot-derived field a completion's fire steps need.
@@ -1995,7 +2008,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # hydra-grill is excluded regardless: it writes a design-concept artifact,
     # not a reflection-source deposit, so it never runs this recipe at all.
     # Best-effort: print to stderr (operator-visible) AND append to the run log.
-    if (taxonomy.skill_obligations(skill).reflection_deposit and
+    if (_obligations_for(skill).reflection_deposit and
             reflection_presence in (
                 REFL_PRESENCE_EMPTY, REFL_PRESENCE_READ_ERROR, REFL_PRESENCE_NO_TASK_ID,
             )):
