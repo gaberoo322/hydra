@@ -37,6 +37,15 @@
 # `npx tsx scripts/lifecycle.ts ...`, and `bash scripts/autopilot/
 # recover-stale.sh` (inner commands are not inspected; #5318 migrates them).
 #
+# KNOWN GAPS (operator ruling on PR #5426: this hook is a best-effort belt; the
+# CI lifecycle seam scanner and the board routes are the enforcement boundary,
+# so further shell constructs it does not decode are non-blocking follow-ups).
+# Pinned as currently ALLOWED in the test file so the gap is explicit:
+#   - ANSI-C / locale quoting of a label operand (`$'needs-qa'`, `$"needs-qa"`);
+#   - a command-substitution label operand (`--add-label $(echo needs-qa)`);
+#   - a here-string fed to an interpreter (`bash <<< "gh issue edit ..."`);
+#   - `gh api ... --input <file>` (file payloads are unreadable here).
+#
 # Vocabulary: the embedded state list below is pinned to OPEN_STATES in
 # src/lifecycle/transitions.ts by test/lifecycle-state-label-guard.test.mts
 # (set-equality, regex-extracted between the BEGIN/END markers). The hook
@@ -744,9 +753,9 @@ def _scan_segment(seg, depth):
     if len(toks) < 2:
         return None
     if toks[0] == "issue" and toks[1] in ("edit", "create"):
-        return _issue_label_state(toks[2:] + pre)
+        return _issue_label_state(pre + toks[2:])
     if toks[0] == "api":
-        return _api_label_state(toks[1:] + pre)
+        return _api_label_state(pre + toks[1:])
     return None
 
 

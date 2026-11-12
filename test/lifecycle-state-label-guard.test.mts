@@ -400,3 +400,17 @@ describe("lifecycle-state-label-guard: QA round-4 bypasses (operator ruling)", (
     assertAllow(`${GH_EDIT} 5 --repo gaberoo322/hydra --repo other/x ${ADD} needs-qa`);
   });
 });
+
+describe("lifecycle-state-label-guard: -R ordering and documented gaps (PR #5426 operator ruling)", () => {
+  test("global -R other then subcommand --repo this repo is denied (subcommand --repo wins)", () => {
+    assertDeny(`gh -R other/x issue edit 5 ${ADD} needs-qa --repo gaberoo322/hydra`);
+  });
+  test("global -R this repo then subcommand --repo other stays allowed (sibling pin)", () => {
+    assertAllow(`gh -R gaberoo322/hydra issue edit 5 ${ADD} needs-qa --repo other/x`);
+  });
+  test("known gaps are pinned as currently allowed", () => {
+    assertAllow(`${GH_EDIT} 5 ${ADD} $'needs-qa'`);
+    assertAllow(`${GH_EDIT} 5 ${ADD} $(echo needs-qa)`);
+    assertAllow(`bash <<< "${GH_EDIT} 5 ${ADD} needs-qa"`);
+  });
+});
