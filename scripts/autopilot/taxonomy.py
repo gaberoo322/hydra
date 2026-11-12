@@ -252,11 +252,10 @@ def _cached_taxonomy() -> tuple[dict, ...]:
     """load_taxonomy() memoised on (resolved path, mtime_ns, size): one reap asks
     for obligations up to three times, and an edited classes.json still reloads."""
     path = taxonomy_path()
-    try:
-        st = os.stat(path)
-        key = (path, st.st_mtime_ns, st.st_size)
-    except OSError:
-        key = (path, None, None)  # load_taxonomy raises the typed error
+    if not os.path.isfile(path):
+        return load_taxonomy(path)  # raises the typed "file is missing" error
+    st = os.stat(path)
+    key = (path, st.st_mtime_ns, st.st_size)
     if _TAXONOMY_CACHE.get("key") != key:
         _TAXONOMY_CACHE["rows"] = load_taxonomy(path)
         _TAXONOMY_CACHE["key"] = key
