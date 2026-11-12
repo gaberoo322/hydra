@@ -580,3 +580,35 @@ describe("required-ness is joined from branch protection, not the rollup (issue 
   });
 });
 
+describe("retired playbooks (issue #5493)", () => {
+  const RETIRED = ["hydra-" + "incident", "hydra-auto-" + "merge-window"];
+
+  test("retired incident and merge-window playbooks are gone and unreferenced by live playbooks, src and scripts", () => {
+    for (const name of RETIRED) {
+      assert.ok(!existsSync(join(PLAYBOOKS, `${name}.md`)), `${name}.md must stay deleted`);
+    }
+    const files = [
+      ...playbookFiles().map((f) => join(PLAYBOOKS, f)),
+      join(ROOT, "src", "operator-actions", "parity.ts"),
+      join(ROOT, "src", "api", "pattern-memory.ts"),
+      join(ROOT, "scripts", "hydra", "footer.sh"),
+    ];
+    for (const f of files) {
+      const text = readFileSync(f, "utf8");
+      for (const name of RETIRED) {
+        assert.ok(!new RegExp(`${name}(?![-\\w])`).test(text), `${f} must not mention ${name}`);
+      }
+    }
+  });
+
+  test("ADR-0025 amendment records the retirement without claiming to close the already-closed issue", () => {
+    const adr = readFileSync(
+      join(ROOT, "docs", "adr", "0025-target-operate-layer-single-realm-incident-skill.md"),
+      "utf8",
+    );
+    const amendment = adr.slice(adr.indexOf("## Amendment (2026-11, #5493)"));
+    assert.ok(amendment.includes("#5493"), "amendment cites #5493");
+    assert.ok(!/closes\s+#2555/i.test(amendment), "amendment must not claim to close the already-closed #2555");
+  });
+});
+
