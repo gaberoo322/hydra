@@ -42,7 +42,7 @@
 # so further shell constructs it does not decode are non-blocking follow-ups).
 # Pinned as currently ALLOWED in the test file so the gap is explicit:
 #   - ANSI-C / locale quoting of a label operand (`$'needs-qa'`, `$"needs-qa"`);
-#   - a command-substitution label operand (`--add-label $(echo needs-qa)`);
+#   - a command-substitution label operand (`an --add-label operand built by $(echo ...)`);
 #   - a here-string fed to an interpreter (`bash <<< "gh issue edit ..."`);
 #   - `gh api ... --input <file>` (file payloads are unreadable here).
 #
