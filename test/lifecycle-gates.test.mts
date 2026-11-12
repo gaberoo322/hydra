@@ -558,6 +558,93 @@ describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, IN
     assert.equal((again as any).code, "issue-closed");
   });
 
+  describe("un-park posts the cap reset on the issue (#5437)", () => {
+    function recording(o: ReturnType<typeof operatorHarness>, fail?: string) {
+      const posted: Array<{ number: number; body: string }> = [];
+      o.h.deps.comment = async (number, body) => {
+        posted.push({ number, body });
+        return fail ? { ok: false, code: fail as never, stderr: "x" } : { ok: true };
+      };
+      return posted;
+    }
+
+    test("removing parked posts exactly one issue marker and journals capReset=posted", async () => {
+      const o = operatorHarness(["parked"], "enforce");
+      const posted = recording(o);
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.equal(posted.length, 1);
+      assert.equal(posted[0].number, 10);
+      assert.match(posted[0].body, /^Hydra-Cap-Reset: by=board:promote ts=\S+$/);
+      assert.equal(o.h.journal.at(-1)!.evidence.capReset, "posted");
+    });
+
+    test("a failed post leaves the transition ok and journals capReset=failed:<code>", async () => {
+      const o = operatorHarness(["parked"], "enforce");
+      recording(o, "gh-failed");
+      const res = await operatorAdvance({ issue: 10, to: "needs-triage", actor: "board:relabel" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.deepEqual(o.h.state.labels, ["needs-triage"]);
+      assert.equal(o.h.journal.at(-1)!.kind, "transition");
+      assert.equal(o.h.journal.at(-1)!.evidence.capReset, "failed:comment-failed:gh-failed");
+    });
+
+    test("the marker posts BEFORE the label write, so no claimable window sees the old reset point", async () => {
+      const o = operatorHarness(["parked"], "enforce");
+      const order: string[] = [];
+      const origEdit = o.h.deps.edit;
+      o.h.deps.edit = async (...a: Parameters<typeof origEdit>) => { order.push("edit"); return origEdit(...a); };
+      o.h.deps.comment = async () => { order.push("comment"); return { ok: true }; };
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.deepEqual(order, ["comment", "edit"]);
+    });
+
+    test("a refused label write after the marker journals capReset on the refusal (INV-4)", async () => {
+      const o = operatorHarness(["parked"], "enforce");
+      recording(o);
+      o.h.deps.edit = async () => ({ ok: false, code: "gh-failed" as never, stderr: "x" });
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, false);
+      const last = o.h.journal.at(-1)!;
+      assert.equal(last.kind, "refused");
+      assert.equal(last.evidence.capReset, "posted");
+    });
+
+    test("a refused write with no park removal journals no capReset (sibling shape)", async () => {
+      const o = operatorHarness(["hitl-grill"], "enforce");
+      o.h.deps.edit = async () => ({ ok: false, code: "gh-failed" as never, stderr: "x" });
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, false);
+      assert.equal(o.h.journal.at(-1)!.evidence.capReset, undefined);
+    });
+
+    test("a non-park transition keeps its single write and posts no marker (sibling shape)", async () => {
+      const o = operatorHarness(["hitl-grill"], "enforce");
+      const order: string[] = [];
+      const origEdit = o.h.deps.edit;
+      o.h.deps.edit = async (...a: Parameters<typeof origEdit>) => { order.push("edit"); return origEdit(...a); };
+      o.h.deps.comment = async () => { order.push("comment"); return { ok: true }; };
+      await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.deepEqual(order, ["edit"]);
+    });
+
+    test("no marker when parked was not present or the destination is closed", async () => {
+      const o = operatorHarness(["hitl-grill"], "enforce");
+      const posted = recording(o);
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.equal(posted.length, 0);
+      assert.equal(o.h.journal.at(-1)!.evidence.capReset, undefined);
+
+      const c = operatorHarness(["parked"], "enforce");
+      const cPosted = recording(c);
+      const closedRes = await operatorAdvance({ issue: 10, to: "closed", actor: "board:close" }, c.h.deps);
+      assert.equal(closedRes.ok, true);
+      assert.equal(cPosted.length, 0);
+    });
+  });
+
   test("a failed re-read refuses fetch-failed with no write", async () => {
     const h = harness(["parked"], "enforce", { viewFails: true });
     const res = await operatorAdvance({ issue: 10, to: "needs-triage", actor: "board:relabel" }, h.deps);

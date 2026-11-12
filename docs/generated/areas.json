@@ -471,6 +471,7 @@
           "RetroBundleParamsSchema",
           "RouteEffectSchema",
           "RouteResultSchema",
+          "SERVER_EVALUATED_CHECKS",
           "SchedulerStartBodySchema",
           "ScopeViolationBodySchema",
           "ScoutDispatchesQuerySchema",

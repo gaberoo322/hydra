@@ -101,62 +101,31 @@
     ],
     "sleeps": [],
     "values": {
-      "pr-gate": {
-        "inflight": {
-          "union": [
-            4758,
-            4801
-          ],
-          "branch": [],
-          "body": [
-            4758,
-            4801
-          ]
-        },
-        "dirty": [
-          4775,
-          4800
+      "inflight": {
+        "union": [
+          4758,
+          4801
         ],
-        "unchecked": [],
-        "behind": [],
-        "noClosingIssue": [],
-        "ciTriggerStale": {
-          "ok": false,
-          "reason": "runs-read-failed"
-        },
-        "redResume": {
-          "ok": true,
-          "value": []
-        },
-        "devResumePick": {
-          "ok": true,
-          "value": null
-        },
-        "devResumeNoprPick": {
-          "ok": true,
-          "value": null
-        },
-        "dirtyFix": {
-          "ok": true,
-          "value": {
-            "pick": {
-              "issue": 4758,
-              "pr": 4775,
-              "headRefName": "worktree-agent-dirty1"
-            },
-            "surface": []
-          }
-        },
-        "qaVerdictRecheck": {
-          "ok": true,
-          "value": []
-        },
-        "dirtyFixFailPr": null,
-        "parkedIssues": {
-          "ok": true,
-          "value": {}
-        },
-        "parkedPrs": {}
+        "branch": [],
+        "body": [
+          4758,
+          4801
+        ]
+      },
+      "dirty": [
+        4775,
+        4800
+      ],
+      "dirtyFix": {
+        "ok": true,
+        "value": {
+          "pick": {
+            "issue": 4758,
+            "pr": 4775,
+            "headRefName": "worktree-agent-dirty1"
+          },
+          "surface": []
+        }
       }
     }
   }

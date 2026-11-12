@@ -218,6 +218,21 @@ const WorkQueueRowSchema = z
      */
     hasScopeSection: z.boolean(),
     /**
+     * The four promote checks, evaluated by the ONE server evaluator
+     * (`evaluatePromoteChecks`, src/autopilot/work-projections.ts) the promote
+     * write gate refuses with — keyed by CONTROL_CHECKS id, true = passes
+     * (issue #5451, ADR-0034 §8.3). The /work page reads these and never
+     * re-derives them; a row without the map renders every promote check ✗.
+     */
+    promoteChecks: z
+      .object({
+        "issue-open": z.boolean(),
+        "not-already-ready": z.boolean(),
+        "has-scope-section": z.boolean(),
+        "no-open-blocker": z.boolean(),
+      })
+      .strict(),
+    /**
      * Carries the `glmLane` ruling — `true` iff
      * `glmLane(labels, partitionActive).lane === "glm"` (ADR-0040 Decision 4),
      * as computed by the /work queue projection
@@ -240,6 +255,8 @@ export type WorkQueueRow = z.infer<typeof WorkQueueRowSchema>;
 const WorkQueueResponseSchema = z
   .object({
     items: z.array(WorkQueueRowSchema),
+    /** The closed relabel picker list (RELABEL_TARGETS), delivered on every read — degraded too — so the dashboard keeps no copy (issue #5453). */
+    relabelTargets: z.array(z.enum(RELABEL_TARGETS)),
     /** Asserted-emptiness evidence: the count of open issues the lookup scanned. */
     scanned: z.number().int().nonnegative(),
     sourcesOk: z.boolean(),

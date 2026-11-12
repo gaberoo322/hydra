@@ -59,6 +59,9 @@ import sys
 import tempfile
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import taxonomy  # noqa: E402  (the ONE classes.json loader, #5472; a leaf, never decide)
+
 SCHEMA_VERSION = 2  # the one home of the integer (ADR-0007 handshake)
 DEFAULT_STATE_PATH = "/tmp/hydra-autopilot-state.json"
 CRASH_ENV = "HYDRA_RUN_LEDGER_TEST_CRASH"  # test-only seam: "before-replace" | "before-replace-2nd"
@@ -86,7 +89,6 @@ PARENT_EXCEPTION_SOURCES = ("turn.sh", "parent")
 PARENT_EXCEPTION_CAP = 200  # FIFO cap on state.parent_exceptions
 PARENT_EXCEPTION_DETAIL_MAX = 200
 DEFAULT_REDIS_ARGV = ["docker", "exec", "hydra-redis-1", "redis-cli"]
-CLASSES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "classes.json")
 
 # JSON type names. "number" accepts int or float (but never bool).
 _TYPES = {
@@ -536,8 +538,7 @@ def seed_initial(identity, limits, carry, now):
 
 def load_classes(path=None):
     """The classes.json rows (the Dispatch-Class Taxonomy alphabet)."""
-    with open(path or CLASSES_PATH, encoding="utf-8") as fh:
-        return json.load(fh)["classes"]
+    return list(taxonomy.load_taxonomy(path))
 
 
 def _carry_ctx(classes, now):
@@ -861,7 +862,7 @@ def _main(argv):
     if cmd == "carry-classes":
         try:
             names = carry_classes(load_classes())
-        except (OSError, ValueError, KeyError) as e:
+        except (OSError, RuntimeError, ValueError, KeyError) as e:
             sys.stderr.write("[run-ledger] carry-classes failed: %s\n" % e)
             return 1
         print("\n".join(names))

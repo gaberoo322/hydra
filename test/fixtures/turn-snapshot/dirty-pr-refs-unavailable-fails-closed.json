@@ -104,48 +104,24 @@
     ],
     "sleeps": [],
     "values": {
-      "pr-gate": {
-        "inflight": {
-          "union": [],
-          "branch": [],
-          "body": []
-        },
-        "dirty": [
-          4775
-        ],
-        "unchecked": [],
-        "behind": [],
-        "noClosingIssue": [],
-        "ciTriggerStale": {
-          "ok": false,
-          "reason": "runs-read-failed"
-        },
-        "redResume": {
-          "ok": false,
-          "reason": "dev-resume-input-unavailable"
-        },
-        "devResumePick": {
-          "ok": false,
-          "reason": "dev-resume-input-unavailable"
-        },
-        "devResumeNoprPick": {
-          "ok": false,
-          "reason": "pr-refs-unavailable"
-        },
-        "dirtyFix": {
-          "ok": false,
-          "reason": "pr-refs-unavailable"
-        },
-        "qaVerdictRecheck": {
-          "ok": true,
-          "value": []
-        },
-        "dirtyFixFailPr": null,
-        "parkedIssues": {
-          "ok": true,
-          "value": {}
-        },
-        "parkedPrs": {}
+      "dirty": [
+        4775
+      ],
+      "redResume": {
+        "ok": false,
+        "reason": "dev-resume-input-unavailable"
+      },
+      "devResumePick": {
+        "ok": false,
+        "reason": "dev-resume-input-unavailable"
+      },
+      "devResumeNoprPick": {
+        "ok": false,
+        "reason": "pr-refs-unavailable"
+      },
+      "dirtyFix": {
+        "ok": false,
+        "reason": "pr-refs-unavailable"
       }
     }
   }

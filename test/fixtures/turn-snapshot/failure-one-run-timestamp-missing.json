@@ -100,54 +100,12 @@
     ],
     "sleeps": [],
     "values": {
-      "pr-gate": {
-        "inflight": {
-          "union": [],
-          "branch": [],
-          "body": []
-        },
-        "dirty": [],
-        "unchecked": [
-          4237
-        ],
-        "behind": [],
-        "noClosingIssue": [
-          4237
-        ],
-        "ciTriggerStale": {
-          "ok": false,
-          "reason": "runs-read-failed"
-        },
-        "redResume": {
-          "ok": true,
-          "value": []
-        },
-        "devResumePick": {
-          "ok": true,
-          "value": null
-        },
-        "devResumeNoprPick": {
-          "ok": true,
-          "value": null
-        },
-        "dirtyFix": {
-          "ok": true,
-          "value": {
-            "pick": null,
-            "surface": []
-          }
-        },
-        "qaVerdictRecheck": {
-          "ok": true,
-          "value": []
-        },
-        "dirtyFixFailPr": null,
-        "parkedIssues": {
-          "ok": true,
-          "value": {}
-        },
-        "parkedPrs": {}
-      }
+      "unchecked": [
+        4237
+      ],
+      "noClosingIssue": [
+        4237
+      ]
     }
   }
 }

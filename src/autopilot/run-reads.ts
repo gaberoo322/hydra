@@ -43,8 +43,8 @@
 import {
   getAutopilotRun,
   listRecentAutopilotRunIds,
-  listAutopilotRunTurnsDesc,
 } from "../redis/autopilot-runs.ts";
+import { readRunTurns, type TurnRow } from "./turn-row.ts";
 import { listActiveSubagentDispatches } from "../redis/dispatches.ts";
 // The pure read-projections live in `run-projections.ts` (issue #1183). The
 // composite readers below DRIVE these projections; they are imported here for
@@ -128,7 +128,7 @@ export async function getCurrentRun(): Promise<GetCurrentRunResult> {
     }
     const view = projectRunView(await sweepLoadedRow(runId, row));
     const turns = await fetchTurnsWithJoins(runId, 50);
-    (view as any).turns = turns;
+    (view as any).turns = turns.map((t) => t.raw);
     return { ok: true, view };
   } catch (err: any) {
     return errRedis(err);
@@ -148,7 +148,7 @@ export async function getRun(runId: string): Promise<GetRunResult> {
     }
     const view = projectRunView(await sweepLoadedRow(runId, row));
     const turns = await fetchTurnsWithJoins(runId, RUN_TURNS_MAX_FETCH);
-    return { ok: true, run: view, turns };
+    return { ok: true, run: view, turns: turns.map((t) => t.raw) };
   } catch (err: any) {
     return errRedis(err);
   }
@@ -238,11 +238,11 @@ const DISPATCH_CLASSES_TURN_SCAN = 200;
  * sort logic is exercisable without a live Redis.
  */
 export interface DispatchClassesDeps {
-  listTurnsDesc: (runId: string, limit: number) => Promise<string[]>;
+  readTurns: (runId: string, limit: number) => Promise<TurnRow[]>;
 }
 
 const defaultDispatchClassesDeps: DispatchClassesDeps = {
-  listTurnsDesc: listAutopilotRunTurnsDesc,
+  readTurns: readRunTurns,
 };
 
 /**
@@ -253,36 +253,23 @@ const defaultDispatchClassesDeps: DispatchClassesDeps = {
  * `actions[].class`. Returns a deduped, alphabetically
  * sorted `string[]`.
  *
- * Tolerant parse: a malformed turn member (unparseable JSON, non-array
- * `actions`, missing `class`) is silently skipped — a run's class set is a
+ * Tolerant parse (turn-row.ts): a malformed turn member (unparseable JSON,
+ * missing `turn_n`, non-array `actions`, missing class) is skipped — a run's class set is a
  * "no signal" projection, not a correctness surface, so a single bad row must
- * not blank the whole result. This is identical to the behaviour of the retired
- * `defaultFetchClasses` this function replaces.
+ * not blank the whole result. Unlike the retired
+ * `defaultFetchClasses` (which accepted any JSON object), a row with no integer
+ * `turn_n` is now skipped.
  */
 export async function getRunDispatchClasses(
   runId: string,
   deps: DispatchClassesDeps = defaultDispatchClassesDeps,
 ): Promise<string[]> {
-  const members = await deps.listTurnsDesc(runId, DISPATCH_CLASSES_TURN_SCAN);
+  const turns = await deps.readTurns(runId, DISPATCH_CLASSES_TURN_SCAN);
   const classes = new Set<string>();
-  for (const member of members) {
-    try {
-      const turn = JSON.parse(member);
-      const actions = Array.isArray(turn?.actions) ? turn.actions : [];
-      for (const a of actions) {
-        if (!a || a.type !== "dispatch") continue;
-        // decide.py's make_dispatch emits the class under `slot` (the class
-        // name — retro-projections resolves it via classByName(slot)); the
-        // legacy `class` field is honoured first for older turn rows (#4634).
-        const cls =
-          typeof a.class === "string" && a.class
-            ? a.class
-            : typeof a.slot === "string" && a.slot
-              ? a.slot
-              : null;
-        if (cls) classes.add(cls);
-      }
-    } catch { /* intentional: skip malformed turn rows — caller treats absent classes as "no signal" */ }
+  for (const turn of turns) {
+    for (const d of turn.dispatches) {
+      if (d.class) classes.add(d.class);
+    }
   }
   return [...classes].sort();
 }

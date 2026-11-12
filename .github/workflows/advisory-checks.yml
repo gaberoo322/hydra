@@ -65,6 +65,10 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
+        with:
+          # fetch-depth 0: the test-can-fail step needs `git merge-base` and a
+          # detached worktree at the merge-base (issue #5447).
+          fetch-depth: 0
 
       # One shared install so every `npx tsx` step below resolves tsx
       # deterministically (replaces the per-workflow npm ci / ambient-resolve mix).
@@ -304,6 +308,20 @@ jobs:
           else
             echo "::warning title=zizmor::scan produced no JSON (advisory — see job log)"
           fi
+
+      # ── test-can-fail proof on changed tests (issue #5447) ─────────────────
+      # STD-TEST-CAN-FAIL: annotate test files this PR adds/extends whose every
+      # case already passes at the merge-base. Advisory by contract: the CLI exits
+      # 0 on findings and on infrastructure failure (`::warning::`); PR-only because
+      # a push to master has no PR base. Same CLI as hydra-dev child-step 7b.
+      - name: test-can-fail proof on changed tests (advisory; scripts/ci/qa-fix-proof.ts)
+        if: always() && github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          node --experimental-strip-types scripts/ci/qa-fix-proof.ts --mode changed-tests \
+            --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA"
 
       - name: Upload zizmor results
         if: always()

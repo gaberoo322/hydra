@@ -84,6 +84,7 @@
         "devReadyPick": null,
         "candidateExclusions": [],
         "activeDevOrch": 3,
+        "readyInflightExcluded": [],
         "boardDegraded": false
       }
     }

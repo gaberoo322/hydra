@@ -56,8 +56,14 @@ export function renderParkComment(input: ParkInput, nowIso: string): string {
     "|---|---|---|---|",
     ...rows,
     "",
-    "To un-park: investigate why the attempts keep failing, then remove the `parked` label, add the right state label, " +
-      `and post \`${CAP_RESET_PREFIX} by=<you> ts=<ISO-8601>\` so every count restarts from that moment.`,
+    "To un-park: investigate why the attempts keep failing, then un-park through the board route. " +
+      "It posts the reset for you on this issue. Post it by hand ON THIS ISSUE ONLY (never on the PR):",
+    "",
+    "- board route result `capReset=posted`: do nothing.",
+    "- board route result `capReset=failed:<code>`: post the line below.",
+    "- `parked` label removed by hand: wait for the reconciler, or post the line below.",
+    "",
+    `\`${CAP_RESET_PREFIX} by=<you> ts=<ISO-8601>\``,
     "",
     `Hydra-Cap-Park: arm=${over.arm} count=${over.count} limit=${over.limit} unit=${over.unit}` +
       `${pr !== null ? ` pr=${pr}` : ""} source=${over.source} ts=${nowIso}`,
@@ -148,12 +154,12 @@ export interface CapResetInput {
   ts: string;
 }
 
-export type CapResetResult = { ok: true; prPosted: boolean } | { ok: false; code: string };
+export type CapResetResult = { ok: true } | { ok: false; code: string };
 
 /**
- * Post `Hydra-Cap-Reset: by=<by> ts=<iso>` on the issue and, when the latest
- * `cap:` park names `pr=`, the same line on that PR (decideQaRoundAction reads
- * only PR bodies). Not wired to any route in #5314: #5313 and #5316 call it.
+ * Post `Hydra-Cap-Reset: by=<by> ts=<iso>` on the ISSUE, the only surface the
+ * marker is ever written to (ADR-0047 D6). A marker already on a PR is still
+ * honoured by its timestamp when read, but nothing here writes one there.
  */
 export async function postCapReset(issue: number, input: CapResetInput, deps: SeamDeps): Promise<CapResetResult> {
   try {
@@ -163,25 +169,7 @@ export async function postCapReset(issue: number, input: CapResetInput, deps: Se
     const line = `${CAP_RESET_PREFIX} by=${input.by} ts=${input.ts}`;
     const posted = await deps.comment(issue, line);
     if (posted.ok === false) return { ok: false, code: `comment-failed:${posted.code}` };
-
-    let pr: number | null = null;
-    const journal = await deps.journal.read(deps.repo, issue);
-    if (journal.ok) {
-      for (const e of [...journal.entries].reverse()) {
-        if (typeof e.reason === "string" && e.reason.startsWith("cap:") && e.to === "parked") {
-          const n = Number(e.evidence.pr);
-          pr = Number.isInteger(n) && n > 0 ? n : null;
-          break;
-        }
-      }
-    }
-    let prPosted = false;
-    if (pr !== null) {
-      const prRes = await deps.comment(pr, line);
-      if (prRes.ok === false) logger.error({ issue, pr, code: prRes.code }, "[lifecycle] cap reset PR comment failed");
-      prPosted = prRes.ok;
-    }
-    return { ok: true, prPosted };
+    return { ok: true };
   } catch (err) {
     logger.error({ err, issue }, "[lifecycle] postCapReset crashed");
     return { ok: false, code: "crashed" };

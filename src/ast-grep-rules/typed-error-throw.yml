@@ -1,0 +1,49 @@
+# ast-grep rule — typed error throws (issue #5434, STD-ERROR-TYPED-CODE).
+#
+# CODING_STANDARDS.md STD-ERROR-TYPED-CODE: exceptional `throw` sites use a
+# subclass from `src/errors.ts`, and callers discriminate on `err.code`. The
+# rule was reviewer-only, so every bare `throw new Error(...)` cost a QA round
+# (14 of 17 stored review findings across 5 PRs in 30 days were this literal
+# shape). This rule is the machine check for that mechanical form.
+#
+# Flags: a `throw` statement whose expression is `new Error(...)` or `Error(...)`
+# (constructor identifier exactly `Error`, any arity incl. `{ cause }`). It never
+# flags a thrown subclass, a built-in subclass (TypeError/RangeError), a thrown
+# variable, a qualified `new x.Error(...)`, or an un-thrown `new Error(...)`.
+# Subclass choice and `err.code` discrimination stay with the reviewer.
+#
+# Scope: `src/**/*.ts` and `scripts/**/*.ts`; `test/**` is excluded (the `files:`
+# filter holds even when a test file is passed explicitly via --path).
+#
+# Enforcement: ADVISORY, same model as fail-loud-catch. hydra-dev runs it over
+# the PR's changed files before `gh pr create`; existing master hits are not a
+# blocker. Run it on a file list with:
+#   npx tsx scripts/ast-search.ts --rule typed-error-throw --text --path <file> [--path <file> ...]
+# Rule tests (valid/invalid fixtures): src/ast-grep-rule-tests/typed-error-throw-test.yml
+#   npx --yes -p @ast-grep/cli@0.43.0 ast-grep test --skip-snapshot-tests
+
+id: typed-error-throw
+language: TypeScript
+severity: warning
+files:
+  - "src/**/*.ts"
+  - "scripts/**/*.ts"
+message: >-
+  Bare `throw new Error(...)`: STD-ERROR-TYPED-CODE wants a subclass from
+  `src/errors.ts` so callers discriminate on `err.code`. Pick by failure kind -
+  InvalidArgumentError: caller input failed a boundary guard; OutOfRangeError:
+  numeric/enum outside its set; InvariantViolationError: "cannot happen"
+  internal state ONLY, never I/O; NotFoundError: looked-up entity absent;
+  RedisSeamError: Redis read/write failure; UntouchablePathError: Verifier-Core
+  path touched; GateInvariantError: gate self-check violated.
+note: >-
+  Advisory lint (issue #5434). Scripts import the taxonomy via a relative import
+  of src/errors.ts. Merge/grounding/verification code returns result objects
+  instead of throwing (STD-VERIFY-NEVER-THROW). If you need a `cause`-carrying
+  typed error that src/errors.ts cannot express, file an issue rather than
+  falling back to a bare Error. Existing hits on master are not a blocker.
+rule:
+  kind: throw_statement
+  any:
+    - pattern: throw new Error($$$ARGS)
+    - pattern: throw Error($$$ARGS)

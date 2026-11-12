@@ -1,0 +1,34 @@
+# ast-grep rule — fail-loud Python except clauses (issue #5424).
+#
+# STD-CATCH-FAIL-LOUD for Python: an `except` clause either raises, logs, or
+# carries a `# intentional: <reason>` comment. "Loud" is a callee-name regex, not
+# a fixed logger list, because scripts/ log through local helpers (`_append_log`,
+# `_log`, `sys.stderr.write`, `print(..., file=sys.stderr)`):
+#   - a `raise` statement, or
+#   - a call whose callee matches (?i)(log|warn|err|exception), or
+#   - a call whose arguments mention `sys.stderr`, or
+#   - a comment containing "intentional" anywhere in the clause.
+#
+# Enforcement: blocking via the shrink-only baseline ratchet
+# scripts/ci/fail-loud-ratchet.ts (test/fail-loud-ratchet.test.mts).
+# Rule tests: src/ast-grep-rule-tests/fail-loud-except-py-test.yml
+
+id: fail-loud-except-py
+language: Python
+severity: warning
+message: >-
+  Silent except: this `except` clause neither raises, logs (a *log*/*warn*/*err*
+  call or sys.stderr), nor carries a `# intentional: <reason>` comment.
+note: >-
+  STD-CATCH-FAIL-LOUD (issue #5424). Blocking via the baseline ratchet.
+rule:
+  kind: except_clause
+  not:
+    any:
+      - has: { stopBy: end, kind: raise_statement }
+      - has:
+          stopBy: end
+          kind: call
+          has: { field: function, regex: "(?i)(log|warn|err|exception)" }
+      - has: { stopBy: end, kind: call, regex: "sys\\.stderr" }
+      - has: { stopBy: end, kind: comment, regex: "(?i)intentional" }

@@ -1,0 +1,1 @@
+- feat: add advisory ast-grep rule flagging tests that restate a module constant literal (#5448)

@@ -114,7 +114,7 @@ import {
 import { getAutopilotPaused, type AutopilotPauseState } from "./redis/autopilot-pause.ts";
 import { getSessionBlockedUntil } from "./redis/session-block.ts";
 import { getStatus as getSchedulerStatus } from "./scheduler/heartbeat.ts";
-import { DELIBERATE_STOP_TTL_SECONDS } from "./scheduler/stop-marker.ts";
+import { deliberateStopFreshness } from "./scheduler/stop-marker.ts";
 import {
   DEPLOY_DRIFT_GRACE_SECONDS,
   readDeployDrift,
@@ -998,25 +998,6 @@ export interface SchedulerStopRead {
   deliberateStoppedAt: string | null;
 }
 
-/**
- * Is a deliberate stop still inside its 24 h marker TTL? The SAME constant
- * the heartbeat uses for the Redis marker, and the exact complement of
- * /health's `no-fresh-deliberate-stop` verdict (dashboard/src/lib/
- * health-verdicts.ts) — so the feed's confirm-first row and /health's
- * Start control are never both live (issue #5164, ADR-0034 §8.1). A missing
- * or unparseable stamp is treated as FRESH: the row stays loud, while /health
- * yields no verdict for that input and keeps Start disabled (fail closed).
- * Returns the parsed stop time (null when unknown) alongside the verdict.
- */
-function deliberateStopFreshness(
-  stop: SchedulerStopRead,
-  nowMs: number,
-): { fresh: boolean; stoppedAtMs: number | null } {
-  const parsed = stop.deliberateStoppedAt !== null ? Date.parse(stop.deliberateStoppedAt) : NaN;
-  if (Number.isNaN(parsed)) return { fresh: true, stoppedAtMs: null };
-  return { fresh: nowMs - parsed < DELIBERATE_STOP_TTL_SECONDS * 1000, stoppedAtMs: parsed };
-}
-
 interface MachineStoppedRead {
   row: Draft | null;
   scanned: number;
@@ -1086,8 +1067,14 @@ async function readMachineStopped(
   if (stopR.status === "fulfilled") {
     scanned++;
     if (stopR.value.stopReason === "deliberate") {
-      const { fresh, stoppedAtMs } = deliberateStopFreshness(stopR.value, nowDate.getTime());
-      if (fresh) {
+      // A missing or unparseable stamp (fresh === null) is treated as FRESH:
+      // the row stays loud while /health yields no verdict and keeps Start
+      // disabled (fail closed; issue #5164, ADR-0034 §8.1).
+      const { fresh, stoppedAtMs } = deliberateStopFreshness(
+        stopR.value.deliberateStoppedAt,
+        nowDate.getTime(),
+      );
+      if (fresh !== false) {
         active.set("scheduler-deliberate", {
           detail: "scheduler stopped deliberately (stopReason=deliberate)",
           sinceMs: stoppedAtMs,

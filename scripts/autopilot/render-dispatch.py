@@ -67,10 +67,10 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 import decide_base as db  # noqa: E402  (Dispatch Intent types + accessors, #5381)
 import run_ledger  # noqa: E402  (the ONE state-document parser, #5075)
+import taxonomy  # noqa: E402  (the ONE classes.json loader, #5472)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 PLAYBOOK_PATH = os.path.join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md")
-CLASSES_PATH = os.environ.get("HYDRA_CLASSES_JSON") or os.path.join(REPO_ROOT, "scripts", "autopilot", "classes.json")
 SELF_ISOLATION_FRAGMENT_PATH = os.path.join(
     REPO_ROOT, "docs", "operator-playbooks", "_fragments", "target-self-isolation-preamble.md"
 )
@@ -243,22 +243,18 @@ def preamble_blocks(playbook: str, fragment: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def model_column(path: str = CLASSES_PATH) -> dict[str, str | None]:
+def model_column(path: str | None = None) -> dict[str, str | None]:
     """class → alias (None = inherit the parent) from classes.json's `model` column.
 
     #4592 replaced the playbook's hand-kept Per-class model routing table with
     a pointer to this column; the renderer reads the same data the playbook's
-    jq lookup describes, so prose and rendered dispatches cannot drift.
+    jq lookup describes, so prose and rendered dispatches cannot drift. The rows
+    come from the one taxonomy loader (#5472), which also honours HYDRA_CLASSES_JSON.
     """
     try:
-        with open(path, encoding="utf-8") as fh:
-            rows = json.load(fh).get("classes")
-    except OSError as err:
+        rows = taxonomy.load_taxonomy(path)
+    except taxonomy.TaxonomyError as err:
         raise RenderError(f"classes.json: cannot read the model column ({err})")
-    except ValueError as err:
-        raise RenderError(f"classes.json: malformed JSON ({err})")
-    if not isinstance(rows, list) or not rows:
-        raise RenderError("classes.json: no class rows for the model column")
     table: dict[str, str | None] = {}
     for row in rows:
         if not isinstance(row, dict):

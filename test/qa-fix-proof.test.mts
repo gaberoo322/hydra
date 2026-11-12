@@ -18,7 +18,14 @@ import {
   type QaFixCommit,
 } from "../src/qa/fix-proof.ts";
 import { parseQaFixCommitTrailer } from "../src/qa/verdict-trailer.ts";
-import { parseGitLog } from "../scripts/ci/qa-fix-proof.ts";
+import {
+  changedTestWarning,
+  classifyChangedTestProof,
+  hasTapEvidence,
+  diffAddsTestCase,
+  parseGitLog,
+  selectChangedTestCandidates,
+} from "../scripts/ci/qa-fix-proof.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 
@@ -456,6 +463,162 @@ describe("qa-fix-proof CLI entrypoint guard (#5266 round 3)", () => {
       );
       assert.equal(r.status, 2, r.stderr);
       assert.match(r.stderr, /usage/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("qa-fix-proof — changed-tests mode (#5447)", () => {
+  test("selectChangedTestCandidates: added always, modified only with a new case, helpers/deleted/renamed never", () => {
+    const sel = selectChangedTestCandidates([
+      { status: "A", path: "test/new.test.mts", addsCase: false },
+      { status: "M", path: "test/with-case.test.mts", addsCase: true },
+      { status: "M", path: "test/refactor.test.mts", addsCase: false },
+      { status: "A", path: "test/helpers/h.mts", addsCase: false },
+      { status: "D", path: "test/gone.test.mts", addsCase: false },
+      { status: "R", path: "test/renamed.test.mts", addsCase: false },
+      { status: "A", path: "test/fixtures/f.json", addsCase: false },
+    ]);
+    assert.deepEqual(sel.candidates, ["test/new.test.mts", "test/with-case.test.mts"]);
+    assert.deepEqual(sel.skipped, [{ path: "test/refactor.test.mts", reason: "no-new-case" }]);
+    assert.ok(sel.overlay.includes("test/helpers/h.mts"));
+    assert.ok(sel.overlay.includes("test/fixtures/f.json"));
+    assert.ok(!sel.overlay.includes("test/gone.test.mts"));
+  });
+
+  test("diffAddsTestCase matches only added test(/it( lines", () => {
+    assert.equal(diffAddsTestCase('@@ -1 +1,2 @@\n+  test("x", () => {})\n'), true);
+    assert.equal(diffAddsTestCase('@@ -1 +1 @@\n+  it("y", () => {})\n'), true);
+    assert.equal(diffAddsTestCase('@@ -1 +1 @@\n-  test("x", () => {})\n+  const a = 1;\n'), false);
+  });
+
+  test("classifyChangedTestProof: assertion=proven, crash=inconclusive, neither=passes-at-merge-base", () => {
+    const files = ["test/a.test.mts", "test/b.test.mts", "test/c.test.mts"];
+    const tap = parseTapAssertionProof(
+      [
+        "not ok 1 - test/a.test.mts",
+        "  ---",
+        "  code: 'ERR_ASSERTION'",
+        "  location: 'test/a.test.mts:3:1'",
+        "  ...",
+        "not ok 2 - test/b.test.mts",
+        "  ---",
+        "  location: 'test/b.test.mts'",
+        "  exitCode: 1",
+        "  ...",
+        "ok 3 - test/c.test.mts",
+      ].join("\n"),
+      files,
+    );
+    const c = classifyChangedTestProof(tap, files);
+    assert.deepEqual(c.proven, ["test/a.test.mts"]);
+    assert.deepEqual(c.inconclusive, ["test/b.test.mts"]);
+    assert.deepEqual(c.passesAtMergeBase, ["test/c.test.mts"]);
+  });
+
+  test("hasTapEvidence: empty/garbled output is no evidence; ok/not ok headers are", () => {
+    assert.equal(hasTapEvidence(""), false);
+    assert.equal(hasTapEvidence(null), false);
+    assert.equal(hasTapEvidence("garbled npm noise\nnothing here"), false);
+    assert.equal(hasTapEvidence("ok 1 - test/c.test.mts\n"), true);
+    assert.equal(hasTapEvidence("not ok 2 - test/c.test.mts\n"), true);
+  });
+
+  test("finding wording names both readings and never asserts vacuity", () => {
+    const w = changedTestWarning("test/x.test.mts");
+    assert.match(w, /^::warning file=test\/x\.test\.mts::/);
+    assert.match(w, /already true on master/);
+    assert.doesNotMatch(w, /vacuous/i);
+  });
+
+  const CLI = join(REPO_ROOT, "scripts", "ci", "qa-fix-proof.ts");
+  const runMode = (cwd: string, base: string, head: string, mode = "changed-tests") =>
+    spawnSync(
+      process.execPath,
+      ["--no-warnings", "--experimental-strip-types", CLI, "--mode", mode, "--base", base, "--head", head],
+      { encoding: "utf8", cwd, env: cleanEnv() },
+    );
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], {
+      cwd,
+      encoding: "utf8",
+    }).trim();
+  const put = (dir: string, rel: string, body: string) => {
+    mkdirSync(join(dir, rel, ".."), { recursive: true });
+    writeFileSync(join(dir, rel), body);
+  };
+
+  test("an unknown --mode exits 2 (usage)", () => {
+    const r = runMode(REPO_ROOT, "a", "b", "bogus");
+    assert.equal(r.status, 2, r.stderr);
+  });
+
+  test("an infrastructure failure still exits 0 with a ::warning:: naming the cause", () => {
+    const r = runMode(REPO_ROOT, "deadbeef", "deadbeef");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /::warning::test-can-fail proof could not run/);
+  });
+
+  test("end to end: a runner that emits no TAP is inconclusive + warned, never passes-at-merge-base", () => {
+    const dir = mkdtempSync(join(tmpdir(), "qa-fix-proof-notap-"));
+    try {
+      git(dir, "init", "-q", "-b", "master");
+      put(dir, "package.json", JSON.stringify({ scripts: { "test:file": "node -e 0" } }));
+      put(dir, "src/mod.ts", "export const v = 1;\n");
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "base");
+      const base = git(dir, "rev-parse", "HEAD");
+      put(dir, "test/new.test.mts", 'import test from "node:test";\ntest("x", () => {});\n');
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "feat");
+      const r = runMode(dir, base, git(dir, "rev-parse", "HEAD"));
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      const lines = r.stdout.trim().split("\n");
+      const out = JSON.parse(lines[lines.length - 1] as string);
+      assert.equal(out.files["test/new.test.mts"].outcome, "inconclusive");
+      assert.deepEqual(out.findings, []);
+      assert.match(r.stdout, /::warning::test-can-fail proof produced no TAP/);
+      assert.doesNotMatch(r.stdout, /already true on master/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("end to end: proven / inconclusive / passes-at-merge-base / skipped, always exit 0", () => {
+    const dir = mkdtempSync(join(tmpdir(), "qa-fix-proof-ct-"));
+    try {
+      git(dir, "init", "-q", "-b", "master");
+      put(
+        dir,
+        "package.json",
+        JSON.stringify({ scripts: { "test:file": "node --experimental-strip-types --test --test-force-exit --test-reporter=tap" } }),
+      );
+      put(dir, "src/mod.ts", "export const v = 1;\n");
+      put(dir, "test/existing.test.mts", 'import test from "node:test";\ntest("old", () => {});\n');
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "base");
+      const base = git(dir, "rev-parse", "HEAD");
+      put(dir, "src/mod.ts", "export const v = 2;\n");
+      put(dir, "src/added.ts", "export const w = 1;\n");
+      const hdr = 'import test from "node:test";\nimport assert from "node:assert/strict";\n';
+      put(dir, "test/proven.test.mts", hdr + 'import { v } from "../src/mod.ts";\ntest("v is 2", () => { assert.equal(v, 2); });\n');
+      put(dir, "test/vacuous.test.mts", hdr + 'test("always", () => { assert.equal(1, 1); });\n');
+      put(dir, "test/crash.test.mts", hdr + 'import { w } from "../src/added.ts";\ntest("w", () => { assert.equal(w, 1); });\n');
+      put(dir, "test/existing.test.mts", 'import test from "node:test";\n// comment only\ntest("old", () => {});\n');
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "feat");
+      const r = runMode(dir, base, git(dir, "rev-parse", "HEAD"));
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      const lines = r.stdout.trim().split("\n");
+      const out = JSON.parse(lines[lines.length - 1] as string);
+      assert.equal(out.files["test/proven.test.mts"].outcome, "proven");
+      assert.equal(out.files["test/vacuous.test.mts"].outcome, "passes-at-merge-base");
+      assert.equal(out.files["test/crash.test.mts"].outcome, "inconclusive");
+      assert.deepEqual(out.findings, ["test/vacuous.test.mts"]);
+      assert.deepEqual(out.skipped, [{ path: "test/existing.test.mts", reason: "no-new-case" }]);
+      assert.match(r.stdout, /::warning file=test\/vacuous\.test\.mts::/);
+      assert.doesNotMatch(r.stdout, /::warning file=test\/proven/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

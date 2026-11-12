@@ -37,6 +37,7 @@
  * injects its readers/writers).
  */
 
+import { RELABEL_TARGETS } from "../src/schemas/autopilot-board.ts";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -51,6 +52,7 @@ import {
   workQueueBlockerSearchLimit,
   toWorkQueueRow,
   compareWorkQueueRows,
+  evaluatePromoteChecks,
   evaluatePromoteEligibility,
   parseParkReason,
   toHitlGrillRow,
@@ -473,6 +475,15 @@ describe("GET /autopilot/work-queue — the queue read", () => {
     assert.equal(res._body.sourcesOk, false);
     assert.equal(res._body.scanned, 0);
     assert.deepEqual(res._body.items, []);
+    assert.deepEqual(res._body.relabelTargets, [...RELABEL_TARGETS], "delivered on degraded reads too (#5453)");
+  });
+
+  test("the queue payload carries the relabel targets from the schema, in order (#5453)", async () => {
+    const router = routerWith(async () => ({ ok: true, rows: [] }));
+    const handler = findHandler(router, "GET", "/autopilot/work-queue");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+    assert.deepEqual(res._body.relabelTargets, [...RELABEL_TARGETS]);
   });
 
   test("clean empty board → sourcesOk:true (an ASSERTED empty the page renders as empty)", async () => {
@@ -1685,7 +1696,13 @@ describe("GET /design-concepts — paginated list (#4633 INV-1/INV-2)", () => {
 describe("GET /design-concepts/:anchorRef/approve-preconditions (#4633 INV-3/INV-4)", () => {
   const PATH = "/design-concepts/:anchorRef/approve-preconditions";
 
-  function preRouter(opts: { dc?: any; comments?: any; clock?: { t: number }; getConcept?: any }) {
+  function preRouter(opts: {
+    dc?: any;
+    comments?: any;
+    clock?: { t: number };
+    getConcept?: any;
+    approvePreconditions?: any;
+  }) {
     const calls: any[][] = [];
     const clock = opts.clock ?? { t: Date.parse("2026-10-21T00:00:00Z") };
     const router = createDesignConceptsRouter({
@@ -1697,6 +1714,7 @@ describe("GET /design-concepts/:anchorRef/approve-preconditions (#4633 INV-3/INV
         return c ?? { ok: true, comments: [] };
       },
       now: () => clock.t,
+      ...(opts.approvePreconditions ? { approvePreconditions: opts.approvePreconditions } : {}),
     });
     return { handler: findHandler(router, "GET", PATH)!, calls, clock };
   }
@@ -1740,6 +1758,46 @@ describe("GET /design-concepts/:anchorRef/approve-preconditions (#4633 INV-3/INV
     assert.equal(res._body.action.consequence, registryApprove().consequence);
     assert.ok(Number.isFinite(Date.parse(res._body.generatedAt)));
     assert.deepEqual(calls, [["gaberoo322/hydra", 90001]]);
+  });
+
+  test("verdicts follow the check id when the registry precondition order changes (#5450)", async () => {
+    const reordered = [
+      { text: "hash line", check: "dc-handoff-hash-matches" },
+      { text: "status line", check: "dc-status-draft" },
+      { text: "stored line", check: "dc-artifact-stored" },
+    ];
+    // Draft artifact but the handoff comment carries a DIFFERENT hash → only
+    // the hash check is red; under index pairing the red verdict would land on
+    // whichever line happened to sit at position 2.
+    const { handler } = preRouter({
+      dc: concept(),
+      comments: { ok: true, comments: [handoffComment("f".repeat(64))] },
+      approvePreconditions: () => reordered,
+    });
+    const res = await call(handler);
+    const byCheck = Object.fromEntries(res._body.preconditions.map((p: any) => [p.check, p]));
+    assert.equal(byCheck["dc-handoff-hash-matches"].ok, false);
+    assert.match(byCheck["dc-handoff-hash-matches"].detail, /≠ stored/);
+    assert.equal(byCheck["dc-status-draft"].ok, true);
+    assert.equal(byCheck["dc-artifact-stored"].ok, true);
+    assert.equal(res._body.preconditions[0].label, "hash line");
+    assert.equal(res._body.allOk, false);
+  });
+
+  test("a registry check with no evaluator fails closed with the existing detail (#5450)", async () => {
+    const { handler } = preRouter({
+      dc: concept(),
+      comments: { ok: true, comments: [handoffComment(DC_HASH_A)] },
+      approvePreconditions: () => [
+        { text: "stored line", check: "dc-artifact-stored" },
+        { text: "unknown line", check: "holdback-enrol-failed" },
+      ],
+    });
+    const res = await call(handler);
+    assert.equal(res._body.preconditions[0].ok, true);
+    assert.equal(res._body.preconditions[1].ok, false);
+    assert.equal(res._body.preconditions[1].detail, "no evaluator for this precondition");
+    assert.equal(res._body.allOk, false);
   });
 
   test("gh failure → that line ✗ with the reason, still 200, no throw", async () => {
@@ -2001,6 +2059,33 @@ describe("/work live preconditions — the row facts (issue #4629)", () => {
     assert.equal(unscoped!.hasScopeSection, false);
     // The row fact and the promote gate's refusal agree — one parser.
     assert.equal(scoped!.hasScopeSection, hasScopeSection(issue().body));
+  });
+
+  test("toWorkQueueRow carries promoteChecks from the ONE evaluator the write gate refuses with (#5451 INV-1/INV-4)", () => {
+    const blocked = issue({
+      number: 7,
+      labels: ["needs-triage"],
+      body: "No scope.\n\nBlocked by #90",
+    });
+    const open = new Set([90]);
+    const row = toWorkQueueRow(blocked, open, { glmPartitionActive: false });
+    assert.deepEqual(row!.promoteChecks, {
+      "issue-open": true,
+      "not-already-ready": true,
+      "has-scope-section": false,
+      "no-open-blocker": false,
+    });
+    assert.deepEqual(row!.promoteChecks, evaluatePromoteChecks(blocked, open));
+    // Existing row facts stay (INV-4: additive).
+    assert.equal(row!.hasScopeSection, false);
+    assert.deepEqual(row!.openBlockers, [90]);
+    assert.equal(row!.lane, "needs-triage");
+    // The first failing check is the write gate's refusal reason.
+    const gate = evaluatePromoteEligibility(blocked, open);
+    assert.equal(gate.eligible === false ? gate.reason : null, "missing-scope-section");
+    // A ready-for-agent row fails not-already-ready on the same evaluator.
+    const ready = toWorkQueueRow(issue({ labels: ["ready-for-agent"] }), new Set(), { glmPartitionActive: false });
+    assert.equal(ready!.promoteChecks["not-already-ready"], false);
   });
 
   test("GET /autopilot/work-queue resolves blockers ONCE over prospective rows for every operator lane", async () => {
