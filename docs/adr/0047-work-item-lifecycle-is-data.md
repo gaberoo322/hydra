@@ -145,6 +145,7 @@ Caps are per arm, plus a total dispatch-claim budget per issue. The limits live 
   - **leaves the PR open**. Every autopilot arm skips PRs whose closing issue is `parked`.
 - **Un-parking:** the operator un-parks; the un-park posts `Hydra-Cap-Reset: by=operator ts=…`, and
   **every** count (journal, trailers, timeline) runs from the latest marker.
+  The marker is written on the issue only; a marker found on a PR is still honoured by its timestamp.
 - **GLM timeout stays a lane fallback** (`glm-withhold`), not a park.
 
 ### Decision 7: Shadow first; enforce on evidence (#5297)

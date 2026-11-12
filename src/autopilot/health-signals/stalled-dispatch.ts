@@ -10,6 +10,7 @@
  */
 
 import { isOsHeartbeatStale } from "../os-heartbeat.ts";
+import { joinedTurnFromWire, type JoinedTurn } from "../turn-row.ts";
 import {
   type AutopilotHealthThresholds,
   type LiveRunView,
@@ -55,8 +56,9 @@ export function detectStalledDispatch(
   // `getCurrentRun` returns turns newest-first (descending turn_n). The first
   // entry is the most-recent turn; an open dispatch there with no newer turn
   // is the stall signature.
-  const latest = turns[0];
-  const dispatchCount = countOpenDispatchActions(latest);
+  const latest = joinedTurnFromWire(turns[0]);
+  if (!latest) return [];
+  const dispatchCount = countOpenDispatches(latest);
   if (dispatchCount === 0) return [];
 
   const runId = toStr(live.run_id) || "current";
@@ -82,22 +84,10 @@ export function detectStalledDispatch(
 }
 
 /**
- * Count dispatch actions in a turn record that have no resolved outcome
- * (still pending / in-flight). A turn carries `actions: [{type, outcome?}]`
- * (see `fetchTurnsWithJoins`); a dispatch with `outcome: null` is open.
+ * Count dispatches in a joined turn that have no resolved outcome (still
+ * pending / in-flight): a dispatch with `outcome: null` is open, a resolved
+ * (merged/failed) outcome means it is no longer in-flight.
  */
-function countOpenDispatchActions(turn: unknown): number {
-  if (!turn || typeof turn !== "object") return 0;
-  const actions = (turn as { actions?: unknown }).actions;
-  if (!Array.isArray(actions)) return 0;
-  let n = 0;
-  for (const a of actions) {
-    if (!a || typeof a !== "object") continue;
-    const action = a as { type?: unknown; outcome?: unknown };
-    if (action.type !== "dispatch") continue;
-    // outcome null/undefined → still pending. A resolved (merged/failed)
-    // outcome means the dispatch is no longer in-flight.
-    if (action.outcome === null || action.outcome === undefined) n += 1;
-  }
-  return n;
+export function countOpenDispatches(turn: JoinedTurn): number {
+  return turn.dispatches.filter((d) => d.outcome === null).length;
 }

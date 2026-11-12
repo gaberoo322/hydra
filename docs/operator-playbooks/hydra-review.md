@@ -451,9 +451,14 @@ exactly like a cap park. The un-park route, when the operator chooses to resume:
    other lane - the sanctioned `operator-route` exit from a human-hold state (the
    seam strips `parked` as it strips `hitl-grill`). Never write a lifecycle state
    label with `gh issue edit` from this playbook.
-2. **The reset marker.** Post the marker comment so the cap counts restart from
-   here: `gh issue comment <N> --repo gaberoo322/hydra --body
-   "Hydra-Cap-Reset: by=operator:<name> ts=<ISO-8601>"`.
+2. **The reset marker.** The board route posts `Hydra-Cap-Reset: by=<actor> ts=<ISO-8601>`
+   on the ISSUE when it removes `parked` (not when it closes) and stamps the journal
+   entry `capReset=posted` or `capReset=failed:<code>`. Post it by hand on the ISSUE
+   only, never on the PR, and only in these cases:
+   - `capReset=posted`: do nothing.
+   - `capReset=failed:<code>`: `gh issue comment <N> --repo gaberoo322/hydra --body
+     "Hydra-Cap-Reset: by=operator:<name> ts=<ISO-8601>"`.
+   - `parked` removed by hand and the reconciler has not yet run: the same comment.
 
 **Evidence `preview` — two buckets only.** `preview` renders monospace markdown
 beside the options and is single-select-only, which is exactly this walk. Use it

@@ -28,10 +28,8 @@ import { join } from "node:path";
 import { CAP_ARMS, type CapArm } from "../lifecycle/caps.ts";
 import { loadLifecycleMode, type LifecycleMode } from "../lifecycle/seam.ts";
 import { listCapEvents, type CapEventRecord, type ListCapEventsResult } from "../redis/lifecycle-journal.ts";
-import {
-  listAutopilotRunTurnsDesc,
-  listAutopilotRunsSince,
-} from "../redis/autopilot-runs.ts";
+import { listAutopilotRunsSince } from "../redis/autopilot-runs.ts";
+import { readRunTurns, sanitizeParentExceptions, type TurnParentException, type TurnRow } from "../autopilot/turn-row.ts";
 import { listQaVerdictCommentsSince, resolveGithubRepo, type QaVerdictCommentsResult } from "../github/issues.ts";
 import { isPassVerdict, parseQaVerdictTrailers } from "../qa/verdict-trailer.ts";
 import { logger } from "../logger.ts";
@@ -102,8 +100,8 @@ export interface BuilderHealthBaselines {
 export interface RunTurns {
   runId: string;
   startedEpoch: number;
-  /** Raw turn-row JSON members (as stored in the turns ZSET). */
-  members: string[];
+  /** Typed Turn Rows (parsed by turn-row.ts; unparseable members already skipped). */
+  turns: TurnRow[];
 }
 
 export interface ParentExceptionFold {
@@ -134,26 +132,12 @@ interface MirroredEvent {
   ts_epoch: number;
 }
 
-function memberEvents(member: string): { events: MirroredEvent[]; ok: boolean; turnN: number | null } {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(member);
-  } catch (err) {
-    logger.warn({ err }, "[lifecycle-health] skipping malformed turn row");
-    return { events: [], ok: false, turnN: null };
-  }
-  const rawTurnN = (parsed as { turn_n?: unknown } | null)?.turn_n;
-  const turnN = Number.isInteger(rawTurnN) ? (rawTurnN as number) : null;
-  const raw = (parsed as { parent_exceptions?: unknown } | null)?.parent_exceptions;
+function turnEvents(turn: TurnRow): MirroredEvent[] {
   const events: MirroredEvent[] = [];
-  if (Array.isArray(raw)) {
-    for (const e of raw as Array<Partial<MirroredEvent> | null>) {
-      if (e && typeof e.cause === "string" && Number.isInteger(e.turn) && Number.isInteger(e.ts_epoch)) {
-        events.push({ cause: e.cause, turn: e.turn as number, ts_epoch: e.ts_epoch as number });
-      }
-    }
+  for (const e of turn.parent_exceptions ?? []) {
+    events.push({ cause: e.cause, turn: e.turn, ts_epoch: e.ts_epoch });
   }
-  return { events, ok: true, turnN };
+  return events;
 }
 
 /**
@@ -165,8 +149,8 @@ function memberEvents(member: string): { events: MirroredEvent[]; ok: boolean; t
  * `(runId, event.turn)` with at least one event (INV-2: the event's own `turn`
  * keys it, NOT the row it rode in on), so exceptionTurns <= turns always holds
  * without dropping events, and the live Redis rows fold identically to the Run
- * Ledger replay (INV-4). A row with no integer `turn_n` counts as one turn.
- * Events de-duplicate on `(runId, turn, cause, ts_epoch)` because the heartbeat
+ * Ledger replay (INV-4). A row with no integer `turn_n` is skipped by the
+ * Turn Row parser (it no longer counts as one unnumbered turn). Events de-duplicate on `(runId, turn, cause, ts_epoch)` because the heartbeat
  * mirrors turn_n and turn_n-1.
  */
 export function foldParentExceptions(runs: readonly RunTurns[]): ParentExceptionFold {
@@ -176,12 +160,9 @@ export function foldParentExceptions(runs: readonly RunTurns[]): ParentException
   const byCause: Record<string, number> = {};
   for (const run of runs) {
     const runTurns = new Set<number>();
-    let unnumberedRows = 0;
-    for (const { events, ok, turnN } of run.members.map(memberEvents)) {
-      if (!ok) continue;
-      if (turnN === null) unnumberedRows += 1;
-      else runTurns.add(turnN);
-      for (const ev of events) {
+    for (const turn of run.turns) {
+      runTurns.add(turn.turn_n);
+      for (const ev of turnEvents(turn)) {
         const dedupe = `${run.runId}|${ev.turn}|${ev.cause}|${ev.ts_epoch}`;
         if (seen.has(dedupe)) continue;
         seen.add(dedupe);
@@ -190,7 +171,7 @@ export function foldParentExceptions(runs: readonly RunTurns[]): ParentException
         exceptionTurns.add(`${run.runId}|${ev.turn}`);
       }
     }
-    turns += runTurns.size + unnumberedRows;
+    turns += runTurns.size;
   }
   return { turns, exceptionTurns: exceptionTurns.size, byCause };
 }
@@ -321,15 +302,7 @@ export async function loadBuilderHealthBaselines(
  * Data-driven, so no ship-date constant to rot. Shared with the replay script.
  */
 export function runCarriesMirror(run: RunTurns): boolean {
-  for (const member of run.members) {
-    try {
-      const parsed = JSON.parse(member) as { parent_exceptions?: unknown } | null;
-      if (Array.isArray(parsed?.parent_exceptions)) return true;
-    } catch (err) {
-      logger.warn({ err, runId: run.runId }, "[lifecycle-health] skipping malformed turn row in mirror check");
-    }
-  }
-  return false;
+  return run.turns.some((turn) => turn.parent_exceptions !== undefined);
 }
 
 /** Drop runs that predate the per-turn mirror. */
@@ -344,7 +317,7 @@ async function defaultReadRunTurns(sinceEpochSeconds: number): Promise<RunTurns[
     out.push({
       runId: run.runId,
       startedEpoch: run.startedEpoch,
-      members: await listAutopilotRunTurnsDesc(run.runId, TURN_READ_LIMIT),
+      turns: await readRunTurns(run.runId, TURN_READ_LIMIT),
     });
   }
   return filterMirrorRuns(out);
@@ -468,12 +441,14 @@ export function baselineRowFor(run: RunTurns): BaselineRunRow {
 export function ledgerToRunTurns(state: unknown): RunTurns | null {
   const s = state as { run_id?: unknown; started_epoch?: unknown; turn?: unknown; parent_exceptions?: unknown } | null;
   if (!s || typeof s.run_id !== "string" || !Number.isInteger(s.started_epoch) || !Number.isInteger(s.turn)) return null;
-  const events = Array.isArray(s.parent_exceptions) ? (s.parent_exceptions as Array<{ turn?: unknown }>) : [];
-  const members: string[] = [];
+  const events = Array.isArray(s.parent_exceptions) ? (s.parent_exceptions as Array<Partial<TurnParentException> | null>) : [];
+  const turns: TurnRow[] = [];
   for (let t = 1; t <= (s.turn as number); t++) {
-    const mine = events.filter((e) => e && e.turn === t);
     // The live ledger is mirror-era by definition: `[]` marks a clean turn.
-    members.push(JSON.stringify({ turn_n: t, parent_exceptions: mine }));
+    // Same guard as the Redis path (sanitizeParentExceptions), so the two folds cannot disagree.
+    const mine = events.filter((e) => e && e.turn === t);
+    const parent_exceptions: TurnParentException[] = sanitizeParentExceptions(mine, {}, { lenientSource: true }) ?? [];
+    turns.push({ turn_n: t, dispatches: [], parent_exceptions, raw: { turn_n: t, parent_exceptions } });
   }
-  return { runId: s.run_id, startedEpoch: s.started_epoch as number, members };
+  return { runId: s.run_id, startedEpoch: s.started_epoch as number, turns };
 }

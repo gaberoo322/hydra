@@ -22,6 +22,7 @@
  *      Redis), asserting 200 + every entry validates against the schema.
  */
 
+import { buildSchedulerStatus } from "../src/scheduler/status-projection.ts";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -36,6 +37,7 @@ import {
   OperatorActionRegistrySchema,
   OperatorActionsResponseSchema,
   REVIEW_BUCKETS,
+  SERVER_EVALUATED_CHECKS,
   bucketOfKey,
   type Action,
   type OperatorActionEntry,
@@ -51,7 +53,11 @@ import {
 } from "../src/operator-actions/registry.ts";
 import { createOperatorActionsRouter } from "../src/api/operator-actions.ts";
 import { DISPATCH_CLASSES } from "../src/taxonomy/classes.ts";
-import { evaluatePromoteEligibility } from "../src/autopilot/work-projections.ts";
+import {
+  evaluatePromoteChecks,
+  evaluatePromoteEligibility,
+  PROMOTE_CHECK_REFUSALS,
+} from "../src/autopilot/work-projections.ts";
 import {
   designConceptVerdicts,
   enrolVerdicts,
@@ -65,7 +71,7 @@ import {
   schedulerVerdicts,
 } from "../dashboard/src/lib/health-verdicts.ts";
 import { recDismissVerdicts, recMuteVerdicts } from "../dashboard/src/lib/now-verdicts.ts";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -98,6 +104,13 @@ function validEntry(
 // ---------------------------------------------------------------------------
 // 1. The shipped REGISTRY
 // ---------------------------------------------------------------------------
+
+const PROBE_PROMOTE_CHECKS = {
+  "issue-open": true,
+  "not-already-ready": true,
+  "has-scope-section": true,
+  "no-open-blocker": true,
+};
 
 describe("REGISTRY — the shipped table (issue #4620)", () => {
   test("loads (import-time validateRegistry did not throw) with a default entry per admission line, plus variant entries", () => {
@@ -689,12 +702,9 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
     // A row violating every rule refuses with the FIRST rule; clearing each in
     // checklist order exposes the next — so the gate's precedence and the
     // checklist order cannot drift apart silently.
-    const reasonOf: Record<string, string> = {
-      "issue-open": "closed",
-      "not-already-ready": "already-ready",
-      "has-scope-section": "missing-scope-section",
-      "no-open-blocker": "blocked",
-    };
+    const reasonOf: Record<string, string> = Object.fromEntries(
+      PROMOTE_CHECK_REFUSALS.map((r) => [r.check, r.reason]),
+    );
     const row: any = {
       number: 40,
       title: "fixture",
@@ -764,7 +774,12 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
     const tables: Record<string, { imports: string[]; ids: Set<string>; lib?: string }> = {
       [BOARD_STATE_SRC]: {
         imports: ["rowVerdicts", "reopenVerdicts"],
-        ids: new Set([...Object.keys(rowVerdicts({}, undefined)), ...Object.keys(reopenVerdicts(""))]),
+        // The four promote ids are server-delivered on the row (#5451): probe
+        // the table with a row carrying the map so every id is present.
+        ids: new Set([
+          ...Object.keys(rowVerdicts({ promoteChecks: PROBE_PROMOTE_CHECKS }, undefined)),
+          ...Object.keys(reopenVerdicts("")),
+        ]),
       },
       [HEALTH_SRC]: { imports: ["healthVerdicts"], ids: new Set(Object.keys(healthVerdicts(null, false))) },
       // #4631 (design-concept 5ae4b72c INV-4/5): the alert and scheduler
@@ -778,7 +793,7 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
       [SERVICE_STRIP_SRC]: {
         imports: ["schedulerVerdicts"],
         lib: "health-verdicts",
-        ids: new Set(Object.keys(schedulerVerdicts({ running: false, stopReason: null }, 0))),
+        ids: new Set(Object.keys(schedulerVerdicts({ running: false, checks: { "no-fresh-deliberate-stop": true } }))),
       },
       // #5152: the /now recommendation tables live in lib/now-verdicts.ts.
       [RECS_PANEL_SRC]: {
@@ -804,6 +819,67 @@ describe("control:<page>/<name> registry entries (issue #4629)", () => {
         for (const check of checksOf(controlEntry(key))) {
           assert.ok(table.ids.has(check), `${rel} renders ${key} but its verdict table lacks "${check}"`);
         }
+      }
+    }
+  });
+
+  test("every id on SERVER_EVALUATED_CHECKS is produced by a server evaluator (#5451 INV-6a)", async () => {
+    const PROMOTE = ["issue-open", "not-already-ready", "has-scope-section", "no-open-blocker"];
+    // The scheduler status read carries its own server verdict (#5452).
+    const SCHEDULER = ["no-fresh-deliberate-stop"];
+    const produced = new Set(
+      Object.keys(
+        evaluatePromoteChecks(
+          { number: 1, title: "t", url: "u", createdAt: "", updatedAt: "", state: "OPEN", labels: [], body: "" } as any,
+          new Set(),
+        ),
+      ),
+    );
+    for (const id of SERVER_EVALUATED_CHECKS) {
+      assert.ok((CONTROL_CHECKS as readonly string[]).includes(id), `${id} is a CONTROL_CHECKS id`);
+      if (PROMOTE.includes(id)) {
+        assert.ok(produced.has(id), `${id} is produced by evaluatePromoteChecks`);
+      } else if (SCHEDULER.includes(id)) {
+        const status = await buildSchedulerStatus(
+          { running: false, stopReason: null, deliberateStoppedAt: null, intervalMs: 0, cyclesRun: 0, cyclesMerged: 0, cyclesFailed: 0, cyclesUnaccounted: 0, lastTickAt: null, lastError: null, startedAt: null, consecutiveErrors: 0 },
+          { rolling: { mergeRate: null, cyclesInWindow: 0 }, emptyRolling: { emptyRate: null, cyclesInWindow: 0 }, mergeRateWindow: 0, emptyRateWindow: 0 },
+          { getAutopilotPaused: async () => ({ paused: false }), getReconcilerHealth: async () => null },
+        );
+        assert.ok(id in status.checks, `${id} is produced by buildSchedulerStatus`);
+      } else {
+        // The dc-* ids are the registry's approve-control lines, evaluated by
+        // the approve-preconditions read, which takes them from that entry.
+        assert.ok(checksOf(controlEntry("control:work/design-concept-approve")).includes(id), `${id} is on the approve control`);
+        const route = await readFile(new URL("../src/api/design-concepts.ts", import.meta.url), "utf8");
+        assert.ok(route.includes("APPROVE_CONTROL_KEY"), "the approve-preconditions read evaluates the approve control's lines");
+      }
+    }
+    assert.equal(new Set(SERVER_EVALUATED_CHECKS).size, SERVER_EVALUATED_CHECKS.length, "no duplicates");
+    for (const id of PROMOTE) assert.ok((SERVER_EVALUATED_CHECKS as readonly string[]).includes(id), `${id} listed`);
+  });
+
+  test("no dashboard verdict table derives a server-evaluated check id (#5451 INV-6b)", async () => {
+    for (const lib of ["control-verdicts", "health-verdicts", "now-verdicts"]) {
+      const src = await readFile(new URL(`../dashboard/src/lib/${lib}.ts`, import.meta.url), "utf8");
+      // A derivation assigns a value to the id as an object key: `"<id>": <expr>`
+      // or `out["<id>"] = <expr>`. Copying server verdicts goes through a loop.
+      for (const id of SERVER_EVALUATED_CHECKS) {
+        assert.ok(!new RegExp(`"${id}"\\s*:`).test(src), `${lib}.ts derives "${id}" in an object literal`);
+        assert.ok(!new RegExp(`\\["${id}"\\]\\s*=`).test(src), `${lib}.ts assigns "${id}" directly`);
+      }
+    }
+  });
+
+  test("no dashboard verdict table declares a literal relabel target list (#5453 INV-7)", async () => {
+    const { RELABEL_TARGETS } = await import("../src/schemas/autopilot-board.ts");
+    const files = await readdir(new URL("../dashboard/src", import.meta.url), { recursive: true });
+    for (const f of files.filter((n) => /\.(ts|tsx|js|jsx)$/.test(n))) {
+      const src = await readFile(new URL(`../dashboard/src/${f}`, import.meta.url), "utf8");
+      assert.ok(!/\bRELABEL_TARGETS\b\s*[:=]/.test(src), `${f} declares RELABEL_TARGETS`);
+      // A literal list = one array literal quoting several of the closed targets.
+      for (const m of src.matchAll(/\[[^\]]*\]/g)) {
+        const hits = RELABEL_TARGETS.filter((t) => new RegExp(`["']${t}["']`).test(m[0]));
+        assert.ok(hits.length < 3, `${f} declares an array literal of relabel targets: ${m[0].slice(0, 80)}`);
       }
     }
   });
@@ -1057,10 +1133,11 @@ describe("control:health alert/scheduler/housekeeping entries (issue #4631)", ()
     // Disjointness: the feed row exists only while a deliberate stop is younger
     // than 24 h — exactly when this line is ✗ and the control is disabled.
     assert.ok(checksOf(controlEntry("control:health/scheduler-start")).includes("no-fresh-deliberate-stop"));
-    const fresh = schedulerVerdicts(
-      { running: false, stopReason: "deliberate", deliberateStoppedAt: new Date(1_000_000).toISOString() },
-      1_000_000 + 60_000,
-    );
+    const fresh = schedulerVerdicts({
+      running: false,
+      stopReason: "deliberate",
+      checks: { "no-fresh-deliberate-stop": false },
+    });
     assert.equal(fresh["no-fresh-deliberate-stop"], false, "a fresh deliberate stop disables the control");
   });
 

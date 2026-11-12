@@ -42,15 +42,15 @@ enforced-by: reviewer
 
 ### STD-ERROR-TYPED-CODE
 
-Exceptional `throw` sites prefer a subclass from `src/errors.ts` (for example `InvalidArgumentError`) over a bare `Error`. Callers and tests discriminate on `err.code`, not `err.message`.
+Exceptional `throw` sites prefer a subclass from `src/errors.ts` (for example `InvalidArgumentError`) over a bare `Error`. Callers and tests discriminate on `err.code`, not `err.message`. Scope is `src/` and `scripts/`; subclass choice and `err.code` discrimination stay with the reviewer.
 
-enforced-by: reviewer
+enforced-by: src/ast-grep-rules/typed-error-throw.yml, reviewer
 
 ### STD-CATCH-FAIL-LOUD
 
 Every `catch` either logs with context, rethrows, or carries an `/* intentional: <reason> */` annotation. A silent catch is a finding; in a changed catch it is a blocker.
 
-enforced-by: src/ast-grep-rules/fail-loud-catch.yml
+enforced-by: src/ast-grep-rules/fail-loud-catch.yml, src/ast-grep-rules/fail-loud-except-py.yml, src/ast-grep-rules/fail-loud-devnull-sh.yml, scripts/ci/fail-loud-ratchet.ts
 
 ### STD-LOG-PINO-SEAM
 
@@ -74,9 +74,9 @@ enforced-by: reviewer
 
 ### STD-TEST-NO-TAUTOLOGY
 
-Import the constant; never restate a literal the module defines, and never assert your own setup.
+Import the constant; never restate a literal the module defines, and never assert your own setup. A persisted wire-format constant (Redis key prefix, label name, event-stream name, pinned download version or SHA256) may be pinned as a drift-guard.
 
-enforced-by: reviewer
+enforced-by: src/ast-grep-rules/test-restates-module-literal.yml, reviewer
 
 ### STD-TEST-CAN-FAIL
 

@@ -1,0 +1,1 @@
+- refactor: PR-gate golden fixtures store only the difference from a committed healthy baseline (#5440)

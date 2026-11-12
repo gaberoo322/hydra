@@ -1,0 +1,1 @@
+- ci: block new silent catch/except/`|| true` swallows in TypeScript, Python and shell with a shrink-only fail-loud ratchet (#5424)

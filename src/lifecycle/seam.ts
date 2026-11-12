@@ -74,7 +74,7 @@ import { isUnsanctionedHoldExit } from "./hold-exit.ts";
 import {
   buildSeedEvidence,
   classRole,
-  countReviewedFailRoundsSinceReset,
+  countReviewedFailRoundsAfterReset,
   evaluateCaps,
   isLiveArm,
   isJournalMiss,
@@ -82,9 +82,10 @@ import {
   resolveCapLimits,
   type CapAttempt,
   type CapEvaluation,
+  type TimedBody,
   type TimelineLabelEvent,
 } from "./caps.ts";
-import { parkForCap } from "./park.ts";
+import { parkForCap, postCapReset } from "./park.ts";
 import {
   findOperatorTransition,
   findTransition,
@@ -176,8 +177,8 @@ export interface SeamDeps {
     issueComments: (issue: number) => Promise<Fetched<string[]>>;
     /** The issue's `labeled` / `unlabeled` timeline events. */
     timeline: (issue: number) => Promise<Fetched<TimelineLabelEvent[]>>;
-    /** A PR's comment bodies then review bodies, chronological (carry `QA-Verdict:` trailers). */
-    prBodies: (prNumber: number) => Promise<Fetched<string[]>>;
+    /** A PR's comment bodies then review bodies, each with its creation time (carry `QA-Verdict:` trailers). */
+    prBodies: (prNumber: number) => Promise<Fetched<TimedBody[]>>;
     /** A PR read live at head for the `qa-passed` exit gate; absent = fail closed (`fetch-failed`). */
     qaLive?: (prNumber: number) => Promise<Fetched<QaLivePr>>;
   };
@@ -285,16 +286,27 @@ export async function fetchLabelTimeline(repo: string, issue: number): Promise<F
   }
 }
 
-/** A PR's comment bodies followed by its review bodies. Never throws. */
-export async function fetchPrBodies(repo: string, prNumber: number): Promise<Fetched<string[]>> {
+/**
+ * A PR's comment bodies followed by its review bodies, each with its time
+ * (`createdAt` for comments, `submittedAt` for reviews; null when missing or
+ * unparseable, which the count treats as newer than any reset). Never throws.
+ */
+export async function fetchPrBodies(repo: string, prNumber: number): Promise<Fetched<TimedBody[]>> {
   try {
     const res = await ghJson<{ comments?: unknown; reviews?: unknown }>([
       "pr", "view", String(prNumber), "--repo", repo, "--json", "comments,reviews",
     ]);
     if (isGhFailure(res) || !res.data || typeof res.data !== "object") return { ok: false };
-    const bodies = (list: unknown): string[] =>
-      Array.isArray(list) ? list.map((c) => String((c as { body?: unknown } | null)?.body ?? "")) : [];
-    return { ok: true, value: [...bodies(res.data.comments), ...bodies(res.data.reviews)] };
+    const timed = (list: unknown, field: string): TimedBody[] =>
+      Array.isArray(list)
+        ? list.map((c) => {
+            const rec = c as Record<string, unknown> | null;
+            const raw = rec?.[field];
+            const t = typeof raw === "string" ? Date.parse(raw) : Number.NaN;
+            return { body: String(rec?.body ?? ""), tsMs: Number.isNaN(t) ? null : t };
+          })
+        : [];
+    return { ok: true, value: [...timed(res.data.comments, "createdAt"), ...timed(res.data.reviews, "submittedAt")] };
   } catch (err) {
     logger.error({ err, prNumber }, "[lifecycle] pr bodies fetch failed");
     return { ok: false };
@@ -471,7 +483,7 @@ async function checkCaps(
     if (pr !== null) {
       const bodies = await deps.fetch.prBodies(pr);
       if (bodies.ok === false) return { status: "skipped" };
-      trailerRounds = countReviewedFailRoundsSinceReset(bodies.value, pr);
+      trailerRounds = countReviewedFailRoundsAfterReset(bodies.value, pr, resetMs);
     }
     const evaluation = evaluateCaps({
       attempt,
@@ -920,6 +932,23 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
   const removed = stateLabels.filter((s) => s !== to);
   const alreadyThere = (stateLabels as string[]).includes(to);
   const closeReason = normaliseCloseReason(input.closeReason);
+  // Leaving Park (and not closing) restarts every Cap Arm: post the issue-side marker BEFORE the
+  // label write. While `parked` is still set no lane can claim the issue, so the marker is harmless
+  // early and there is no window where a claim counts the pre-reset FAIL rounds and re-parks (QA
+  // r1 on #5457). The outcome is evidence only; a failed post never changes `ok`.
+  let capReset: string | null = null;
+  if (removed.includes("parked") && to !== "closed") {
+    const res = await postCapReset(
+      issue,
+      { by: input.actor, ts: new Date(deps.now()).toISOString() },
+      deps,
+    );
+    capReset = res.ok === false ? `failed:${res.code}` : "posted";
+  }
+
+  // A marker posted before a refused / unverified write is still on the issue: journal it so the stray
+  // marker is never evidence-free (QA r2 on #5457, INV-3/INV-4).
+  const capEvidence: Partial<LifecycleJournalEntry> = capReset !== null ? { evidence: { capReset } } : {};
   let write: IssueActionWriteResult = { ok: true };
   if (to === "closed") {
     write = await deps.close(issue, closeReason ?? "completed");
@@ -928,7 +957,7 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
   }
   if (write.ok === false) {
     const code = `write-failed:${write.code}`;
-    await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: code, written: false }, input));
+    await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: code, written: false, ...capEvidence }, input));
     return { ok: false, issue, code, mode, written: false };
   }
 
@@ -939,12 +968,26 @@ export async function operatorAdvance(input: OperatorAdvanceInput, deps: SeamDep
       ? after.row.state === "CLOSED"
       : after.row.labels.includes(to) && removed.every((s) => !after.row.labels.includes(s)));
   if (!verified) {
-    await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: "write-unverified", written: true }, input));
+    await journal(deps, issue, operatorEntry(deps, { kind: "refused", from, result: "write-unverified", written: true, ...capEvidence }, input));
     return { ok: false, issue, code: "write-unverified", mode, written: true };
   }
 
   if (!selfMove) {
-    await journal(deps, issue, operatorEntry(deps, { kind: "transition", from, result: "ok", written: true }, input));
+    await journal(
+      deps,
+      issue,
+      operatorEntry(
+        deps,
+        {
+          kind: "transition",
+          from,
+          result: "ok",
+          written: true,
+          ...(capReset !== null ? { evidence: { capReset } } : {}),
+        },
+        input,
+      ),
+    );
   }
   if (to === "closed") {
     const exp = await deps.journal.expireOnClose(deps.repo, issue);

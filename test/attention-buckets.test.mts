@@ -32,7 +32,7 @@ import { PROMOTION_THRESHOLD } from "../src/pattern-memory/index.ts";
 import type { StalledPrsResult } from "../src/aggregators/stalled-prs.ts";
 import { REGISTRY } from "../src/operator-actions/registry.ts";
 import { DELIBERATE_STOP_TTL_SECONDS } from "../src/scheduler/stop-marker.ts";
-import { schedulerVerdicts } from "../dashboard/src/lib/health-verdicts.ts";
+import { buildSchedulerStatus } from "../src/scheduler/status-projection.ts";
 import {
   BUCKETS,
   OperatorActionEntrySchema,
@@ -423,11 +423,29 @@ describe("machine-stopped aggregate (INV-6, INV-3)", () => {
       for (const ageMs of [0, TTL_MS - 1, TTL_MS, TTL_MS + 60_000]) {
         const stop = stoppedAgo(ageMs);
         const feedRow = (await rowCount(stop)) === 1;
-        const startEnabled =
-          schedulerVerdicts(
-            { running: false, stopReason: stop.stopReason, deliberateStoppedAt: stop.deliberateStoppedAt },
-            NOW.getTime(),
-          )["no-fresh-deliberate-stop"] === true;
+        const status = await buildSchedulerStatus(
+          {
+            running: false,
+            stopReason: stop.stopReason as "deliberate",
+            deliberateStoppedAt: stop.deliberateStoppedAt,
+            intervalMs: 0,
+            cyclesRun: 0,
+            cyclesMerged: 0,
+            cyclesFailed: 0,
+            cyclesUnaccounted: 0,
+            lastTickAt: null,
+            lastError: null,
+            startedAt: null,
+            consecutiveErrors: 0,
+          },
+          { rolling: { mergeRate: null, cyclesInWindow: 0 }, emptyRolling: { emptyRate: null, cyclesInWindow: 0 }, mergeRateWindow: 0, emptyRateWindow: 0 },
+          {
+            getAutopilotPaused: async () => ({ paused: false }),
+            getReconcilerHealth: async () => null,
+            now: () => NOW.getTime(),
+          },
+        );
+        const startEnabled = status.checks["no-fresh-deliberate-stop"] === true;
         assert.notEqual(feedRow, startEnabled, `age ${ageMs}ms: exactly one start path is live`);
       }
     });

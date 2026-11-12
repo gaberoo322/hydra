@@ -188,7 +188,7 @@ describe("docs-prose-drift", () => {
     ok(!envVarClaimResolves("MY_VARI", new Set(), "MY_VARIABLE = 1"), "word boundary — a longer name does not satisfy a shorter claim");
   });
 
-  test("count claims map number words and multi-word nouns to counts.json rows", () => {
+  test("count claims map number words and multi-word nouns to counts-fold rows", () => {
     const claims = countClaimsIn("six chores, 12 routes, three dispatch classes and one CI job");
     deepStrictEqual(
       claims.map((c) => [c.phrase, c.value, `${c.row.family}/${c.row.metric}`]),
@@ -220,7 +220,7 @@ describe("docs-prose-drift", () => {
     // A row with no live offender takes the fix hint of its OWN kind.
     const orphan = renderReport("new", ["docs/y.md:route:/api/gone"], new Map());
     ok(orphan.includes("docs/y.md:route:/api/gone — not in docs/generated/routes.json"), orphan);
-    ok(!orphan.includes("counts.json disagrees"), orphan);
+    ok(!orphan.includes("count disagrees"), orphan);
     strictEqual(kindOfRow("docs/y.md:route:/api/gone"), "route");
     strictEqual(kindOfRow("docs/y.md:retired-term:codex"), "retired-term");
     strictEqual(kindOfRow("no-kind-here"), null);
@@ -527,7 +527,6 @@ describe("prose-drift: verification never throws on unreadable inputs", () => {
       "docs/generated/streams.json": empty,
       "docs/generated/skills.json": empty,
       "docs/generated/env-vars.json": empty,
-      "docs/generated/counts.json": empty,
       [RETIRED_TERMS_FILE]: "[]\n",
       [BASELINE_FILE]: baseline,
     };

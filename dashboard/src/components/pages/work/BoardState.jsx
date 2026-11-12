@@ -11,7 +11,7 @@ import {
   useOperatorActions,
   useUndoWindowHost,
 } from "../../ActionAffordance.jsx";
-import { RELABEL_TARGETS, reopenVerdicts, rowVerdicts } from "../../../lib/control-verdicts.ts";
+import { reopenVerdicts, rowVerdicts } from "../../../lib/control-verdicts.ts";
 
 /**
  * BoardState — /work's "what is queued" panel (issue #4010, ADR-0034 §2):
@@ -33,8 +33,8 @@ import { RELABEL_TARGETS, reopenVerdicts, rowVerdicts } from "../../../lib/contr
  * ✓/✗ checklist and is disabled while any line is ✗ (the tables live in
  * lib/control-verdicts.ts, unit-tested):
  *   - Promote is CONFIRM-FIRST (a promote is a dispatch trigger in disguise);
- *     its four checks are the promote gate's refusal table, fed by the row
- *     facts the server computes (`hasScopeSection`, `openBlockers`). The
+ *     its four checks are the promote gate's refusal table, read from the
+ *     verdicts the server delivers on the row (`promoteChecks`). The
  *     server gate stays the authority — a refusal renders verbatim.
  *   - Relabel / close / reopen are immediate-with-undo: the ~5 s delayed
  *     commit hosted here (useUndoWindowHost + UndoToastStack). The relabel
@@ -125,6 +125,8 @@ export function BoardState() {
   // A new action clears the previous outcome as its request starts.
   const clearResult = useCallback(() => setActionResult(null), []);
 
+  // The picker list is delivered by the server (issue #5453); absent => empty, fail closed.
+  const relabelOptions = Array.isArray(queue.data?.relabelTargets) ? queue.data.relabelTargets : [];
   const readyQueue = queue.items.filter((row) => row.lane === "ready-for-agent");
   const otherLanes = queue.items.filter((row) => row.lane !== "ready-for-agent");
 
@@ -258,7 +260,7 @@ export function BoardState() {
                             registry={registry}
                             controlKey="control:work/promote"
                             testId="work-promote"
-                            verdicts={rowVerdicts(row, relabelTargets[row.number])}
+                            verdicts={rowVerdicts(row, relabelTargets[row.number], relabelOptions)}
                             context={{ number: row.number }}
                             onFired={refreshBoard}
                             onResult={setActionResult}
@@ -280,7 +282,7 @@ export function BoardState() {
                             aria-label={`Relabel target for issue #${row.number}`}
                           >
                             <option value="">lane…</option>
-                            {RELABEL_TARGETS.map((t) => (
+                            {relabelOptions.map((t) => (
                               <option key={t} value={t}>
                                 {t}
                               </option>
@@ -290,7 +292,7 @@ export function BoardState() {
                             registry={registry}
                             controlKey="control:work/relabel"
                             testId="work-relabel"
-                            verdicts={rowVerdicts(row, relabelTargets[row.number])}
+                            verdicts={rowVerdicts(row, relabelTargets[row.number], relabelOptions)}
                             context={{ number: row.number, label: relabelTargets[row.number] }}
                             onFired={refreshBoard}
                             onResult={setActionResult}
@@ -304,7 +306,7 @@ export function BoardState() {
                           registry={registry}
                           controlKey="control:work/close"
                           testId="work-close"
-                          verdicts={rowVerdicts(row, relabelTargets[row.number])}
+                          verdicts={rowVerdicts(row, relabelTargets[row.number], relabelOptions)}
                           context={{ number: row.number }}
                           onFired={refreshBoard}
                           onResult={setActionResult}

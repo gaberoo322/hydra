@@ -276,7 +276,9 @@ export function decideQaRoundAction(input: {
   if (!isFailVerdict(verdict)) {
     return { action: "proceed", round, failRound: null, reason: "Not a FAIL — normal verdict routing." };
   }
-  // Only rounds after the latest `Hydra-Cap-Reset:` marker count (ADR-0047 D6).
+  // Only rounds after the latest `Hydra-Cap-Reset:` marker count (ADR-0047 D6). This positional
+  // count is advisory: `scripts/qa/route.ts` reads the decision but never acts on it. The seam's
+  // timestamped `countReviewedFailRoundsAfterReset` is authoritative and decides the park.
   const priorFails = countReviewedFailRoundsSinceReset(input.priorBodies, input.pr);
   const currentReviewed = input.currentReviewed !== false;
   const failRound = priorFails + (currentReviewed ? 1 : 0);

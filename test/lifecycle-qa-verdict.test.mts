@@ -17,9 +17,14 @@ import {
   type LifecycleMode,
   type QaLivePr,
   type SeamDeps,
+  type TimedBody,
 } from "../src/lifecycle/index.ts";
 import { isPassVerdict } from "../src/qa/verdict-trailer.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
+
+/** Untimed strings count as newer than any reset (the fail-toward-counting rule). */
+const timedBodies = (bs: Array<string | TimedBody>): TimedBody[] =>
+  bs.map((b) => (typeof b === "string" ? { body: b, tsMs: null } : b));
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const SHA12 = HEAD.slice(0, 12);
@@ -160,10 +165,10 @@ interface World {
   comments: Array<{ number: number; body: string }>;
   labels: string[];
   pr: QaLivePr;
-  prBodies: string[];
+  prBodies: Array<string | TimedBody>;
 }
 
-function world(mode: LifecycleMode, pr: QaLivePr, prBodies: string[] = []): World {
+function world(mode: LifecycleMode, pr: QaLivePr, prBodies: Array<string | TimedBody> = []): World {
   const w: World = { journal: [], edits: [], comments: [], labels: ["needs-qa"], pr, prBodies, deps: undefined as unknown as SeamDeps };
   w.deps = {
     repo: "o/r",
@@ -184,7 +189,7 @@ function world(mode: LifecycleMode, pr: QaLivePr, prBodies: string[] = []): Worl
       stateEntry: async () => ({ ok: true, value: { enteredAtMs: ENTERED } }),
       issueComments: async () => ({ ok: true, value: [] }),
       timeline: async () => ({ ok: true, value: [] }),
-      prBodies: async () => ({ ok: true, value: w.prBodies }),
+      prBodies: async () => ({ ok: true, value: timedBodies(w.prBodies) }),
       qaLive: async () => ({ ok: true, value: w.pr }),
     },
     journal: {
@@ -287,7 +292,13 @@ describe("the 3rd reviewed FAIL parks through the seam (INV-5, INV-6)", () => {
   });
 
   test("a Hydra-Cap-Reset marker restarts the count", async () => {
-    const bodies = [failBody(1), failBody(2), "Hydra-Cap-Reset: by=op ts=2026-11-04T09:00:00Z", failBody(3)];
+    const resetTs = Date.parse("2026-11-04T09:00:00Z");
+    const bodies: TimedBody[] = [
+      { body: failBody(1), tsMs: resetTs - 2000 },
+      { body: failBody(2), tsMs: resetTs - 1000 },
+      { body: "Hydra-Cap-Reset: by=op ts=2026-11-04T09:00:00Z", tsMs: resetTs },
+      { body: failBody(3), tsMs: resetTs + 1000 },
+    ];
     const w = world("enforce", liveThree(), bodies);
     const res = await advance({ issue: 10, to: "needs-dev-resume", evidence: { pr: "7" } }, w.deps);
     assert.equal(res.ok, true);

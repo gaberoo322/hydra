@@ -33,6 +33,7 @@ import {
   computeParentExceptionRate,
   type LifecycleHealthDeps,
 } from "../src/aggregators/lifecycle-health.ts";
+import { parseTurnRows } from "../src/autopilot/turn-row.ts";
 import { capEventRecord, type LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
 import { percentileInterpolated as percentile } from "../src/metrics/math.ts";
 import {
@@ -595,13 +596,13 @@ describe("lifecycle fields — parentExceptionRate", () => {
       {
         runId: "r1",
         startedEpoch: 1,
-        members: [
+        turns: parseTurnRows([
           turnRow(1),
           turnRow(2, [dup, { cause: "notes-steer", turn: 2, ts_epoch: 101 }]),
           // turn 3 mirrors the turn-2 event again (turn_n-1) plus its own
           turnRow(3, [dup, { cause: "defect-filed", turn: 3, ts_epoch: 150 }]),
           turnRow(4),
-        ],
+        ]),
       },
     ]);
     assert.equal(f.turns, 4);
@@ -615,7 +616,7 @@ describe("lifecycle fields — parentExceptionRate", () => {
         runId: "r1",
         startedEpoch: 1,
         // turn 1 aborted (invariant-reject) before Phase 5 posted its row; turn 2's row mirrors the turn-1 event (turn_n-1)
-        members: [turnRow(2, [{ cause: "script-error", turn: 1, ts_epoch: 90 }, { cause: "notes-steer", turn: 2, ts_epoch: 100 }])],
+        turns: parseTurnRows([turnRow(2, [{ cause: "script-error", turn: 1, ts_epoch: 90 }, { cause: "notes-steer", turn: 2, ts_epoch: 100 }])]),
       },
     ]);
     assert.equal(f.turns, 2, "the row-less aborted turn joins the denominator");
@@ -633,12 +634,12 @@ describe("lifecycle fields — parentExceptionRate", () => {
     const redisRun = {
       runId: "r-parity",
       startedEpoch: 7,
-      members: [
+      turns: parseTurnRows([
         turnRow(1, []),
         turnRow(3, [events[0]]),
         turnRow(4, [events[0], events[1]].filter((e) => e.turn >= 3)),
         turnRow(5, [events[1]]),
-      ],
+      ]),
     };
     const ledgerRun = ledgerToRunTurns({
       run_id: "r-parity",
@@ -665,7 +666,7 @@ describe("lifecycle fields — parentExceptionRate", () => {
     const card = await getBuilderHealthScorecard(happyDeps());
     assert.equal(card.parentExceptionRate?.rate, null);
     assert.equal(card.parentExceptionRate?.turns, 0);
-    const f = foldParentExceptions([{ runId: "r", startedEpoch: 1, members: ["{not json", turnRow(1)] }]);
+    const f = foldParentExceptions([{ runId: "r", startedEpoch: 1, turns: parseTurnRows(["{not json", turnRow(1)]) }]);
     assert.equal(f.turns, 1);
   });
 
@@ -683,7 +684,7 @@ describe("lifecycle fields — parentExceptionRate", () => {
         lifecycleHealth: lifecycleStubs({
           readFile: async () => JSON.stringify({ parentExceptionRate: { baseline } }),
           readRunTurns: async () => [
-            { runId: "r1", startedEpoch: 5, members: [turnRow(1, [{ cause: "script-error", turn: 1, ts_epoch: 9 }]), turnRow(2), turnRow(3), turnRow(4)] },
+            { runId: "r1", startedEpoch: 5, turns: parseTurnRows([turnRow(1, [{ cause: "script-error", turn: 1, ts_epoch: 9 }]), turnRow(2), turnRow(3), turnRow(4)]) },
           ],
         }),
       }),
@@ -868,9 +869,9 @@ describe("mirror-presence filter on the parentExceptionRate runs", () => {
   const turn = (n: number, pe?: unknown[]) => JSON.stringify({ turn_n: n, ...(pe !== undefined ? { parent_exceptions: pe } : {}) });
 
   test("filterMirrorRuns drops runs whose turns never carried the field; a clean run with [] stays", () => {
-    const pre = { runId: "pre", startedEpoch: 1, members: [turn(1), turn(2)] };
-    const clean = { runId: "clean", startedEpoch: 2, members: [turn(1, []), turn(2, [])] };
-    const dirty = { runId: "dirty", startedEpoch: 3, members: [turn(1), turn(2, [{ cause: "x", turn: 2, ts_epoch: 1 }])] };
+    const pre = { runId: "pre", startedEpoch: 1, turns: parseTurnRows([turn(1), turn(2)]) };
+    const clean = { runId: "clean", startedEpoch: 2, turns: parseTurnRows([turn(1, []), turn(2, [])]) };
+    const dirty = { runId: "dirty", startedEpoch: 3, turns: parseTurnRows([turn(1), turn(2, [{ cause: "x", turn: 2, ts_epoch: 1 }])]) };
     assert.deepEqual(filterMirrorRuns([pre, clean, dirty]).map((r) => r.runId), ["clean", "dirty"]);
   });
 
