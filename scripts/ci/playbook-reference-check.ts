@@ -39,7 +39,7 @@
  * # Illustrative examples
  *
  * A placeholder path in a good/bad sample is not a claim about the repo. A path
- * or route with a metasyntactic segment (`foo`, `bar`, `baz`, `qux`, `x`, `y`)
+ * or route with a metasyntactic segment (`foo`, `bar`, `baz`, `qux`)
  * is skipped automatically. Mark any other illustration instead of baselining
  * it:
  *
@@ -144,7 +144,7 @@ const EXAMPLE_END = new RegExp(`${MARKER_SRC}-end`);
  * Metasyntactic names (`src/foo.ts`, `src/foo/bar.ts`, `/api/foo`) are
  * illustrations by construction and are never references.
  */
-const METASYNTACTIC = /^(?:foo|bar|baz|qux|x|y)$/i;
+const METASYNTACTIC = /^(?:foo|bar|baz|qux)$/i;
 function hasPlaceholderSegment(pathOrRoute: string): boolean {
   return pathOrRoute.split("/").some((seg) => METASYNTACTIC.test(seg.split(".")[0]));
 }
@@ -407,7 +407,7 @@ const KIND_HINT: Record<ReferenceKind, string> = {
   route: "no such route in docs/generated/routes.json",
   npm: "no such script in package.json",
   adr: "no such ADR in docs/generated/adrs.json",
-  "superseded-adr": "this ADR is superseded; cite the ADR that replaced it",
+  "superseded-adr": "this ADR is superseded; cite the ADR that replaced it, or mark a deliberate historical cite as an example",
   symbol: "the named file does not contain this identifier",
 };
 

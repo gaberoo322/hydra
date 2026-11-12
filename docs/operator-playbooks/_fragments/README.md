@@ -69,7 +69,7 @@ When a cite is an illustration and not a real reference, mark it:
 - several lines — wrap them in `<!-- ref-check: example-start -->` and
   `<!-- ref-check: example-end -->`.
 
-Placeholders (`<name>`, `NNNN`, `*`), metasyntactic names (`foo`, `bar`, `x`),
+Placeholders (`<name>`, `NNNN`, `*`), metasyntactic names (`foo`, `bar`, `baz`, `qux`),
 paths under another root (`$TARGET_WS/...`), Target-side `npm run` scripts and
 routes behind `$TARGET_WEB_URL` are skipped without a marker. This `README.md` is not scanned.
 

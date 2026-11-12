@@ -153,6 +153,10 @@ describe("playbook-reference-check: what is deliberately not a reference", () =>
   test("Target-side npm scripts and Target routes are not checked", () => {
     assert.deepEqual(unresolved("Run `npm run e2e:smoke`.", TARGET_PB), []);
     assert.deepEqual(unresolved("a Target-side `npm run deadcode:ledger` concern"), []);
+    assert.deepEqual(unresolved('(cd "$TARGET_APP_DIR" && npm run deadcode:ledger)'), []);
+    assert.deepEqual(unresolved("the Target board: `npm run deadcode:ledger`"), [
+      "npm deadcode:ledger",
+    ]);
     assert.deepEqual(unresolved('curl "$TARGET_WEB_URL/api/health/full"'), []);
     assert.deepEqual(unresolved('curl "${TARGET_WEB_URL}/api/health/full"'), []);
   });
@@ -177,10 +181,13 @@ describe("playbook-reference-check: what is deliberately not a reference", () =>
 
   test("a metasyntactic placeholder name is not a reference", () => {
     assert.deepEqual(
-      unresolved("`src/foo.ts`, `src/foo/bar.ts`, `test/foo.test.mts`, `src/x.ts`, GET /api/foo"),
+      unresolved("`src/foo.ts`, `src/foo/bar.ts`, `test/foo.test.mts`, GET /api/foo"),
       [],
     );
-    assert.deepEqual(unresolved("`src/foobar.ts`"), ["path src/foobar.ts"]);
+    assert.deepEqual(unresolved("`src/foobar.ts`, `src/x/real.ts`"), [
+      "path src/foobar.ts",
+      "path src/x/real.ts",
+    ]);
   });
 
   test("an unterminated example block exempts nothing", () => {
