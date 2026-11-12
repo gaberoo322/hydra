@@ -266,6 +266,14 @@ Sessions without the sentinel (a human running `claude`) silently no-op. Both ho
 
 **Emergency manual deploy:** `./scripts/deploy.sh`. Never deploy by restarting the service without building the dashboard first — Express serves the dashboard build output, so stale builds mean stale UI.
 
+## Playbook reference check (issue #5499)
+
+`test/playbook-reference-check.test.mts` (required `npm test` suite) runs `scripts/ci/playbook-reference-check.ts` over every operator playbook and fragment. Five kinds of cite must resolve: a repo path (file or code-span directory), an HTTP API route (against `docs/generated/routes.json`), an `npm run` script (against `package.json`), an ADR number (against `docs/generated/adrs.json`; a superseded ADR still resolves), and a code symbol attributed to a file (the identifier must appear in that file). A failure names the playbook, line and reference.
+
+- **Fix a failure** by correcting the cite. If the cite is an illustration, mark the line `ref-check: example` or wrap a block in `ref-check: example-start` / `ref-check: example-end` (syntax: `docs/operator-playbooks/_fragments/README.md`).
+- **Baseline** — `scripts/ci/playbook-reference-baseline.json` holds the dead cites that predate the check, as `<kind> <ref>` per playbook. It is shrink-only: a new dead cite fails, and so does a baseline entry that now resolves. Lower it with `npx tsx scripts/ci/playbook-reference-check.ts --write-baseline`.
+- **Not checked** — placeholders and globs, paths under another root, Target-side `npm run` scripts (Target playbooks, or a line naming the Target), and routes behind `$TARGET_WEB_URL`.
+
 ## Pitfall mechanisms
 
 Full original text of the CLAUDE.md "Common Pitfalls" bullets that were condensed to a rule plus pointer (issue #5218). CLAUDE.md carries the fence; this section carries the mechanism and incident history.
