@@ -30,7 +30,7 @@ import {
   type IssueViewResult,
 } from "../github/issue-actions.ts";
 import { ghExec, ghJson } from "../github/gh.ts";
-import { extractClearanceBlockerRefs, type BlockerRefState } from "../github/blockers.ts";
+import { extractClearanceBlockerRefs, resolveBlockerRefState } from "../github/blockers.ts";
 import { isGhFailure } from "../github/exec.ts";
 import { resolveGithubRepo, viewPr } from "../github/issues.ts";
 import { listRequiredStatusContextsOrNull, parseRollupEntries } from "../github/prs.ts";
@@ -327,18 +327,8 @@ export async function fetchBlockerRefs(repo: string, refs: number[]): Promise<Fe
   try {
     const out: BlockerRecord[] = [];
     for (const n of refs) {
-      const res = await ghJson<{ state?: unknown; pull_request?: { merged_at?: unknown } | null }>(["api", `repos/${repo}/issues/${n}`]);
-      let state: BlockerRefState = "unknown";
-      if (!isGhFailure(res) && res.data && typeof res.data === "object") {
-        const d = res.data;
-        if (d.state === "open") state = "open";
-        else if (d.state === "closed") {
-          if (d.pull_request) state = typeof d.pull_request.merged_at === "string" && d.pull_request.merged_at ? "merged" : "unknown";
-          else state = "closed";
-        }
-      } else {
-        logger.warn({ repo, ref: n }, "[lifecycle] blocker ref fetch failed");
-      }
+      const state = await resolveBlockerRefState(repo, n);
+      if (state === "unknown") logger.warn({ repo, ref: n }, "[lifecycle] blocker ref unresolved");
       out.push({ number: n, state });
     }
     return { ok: true, value: out };
