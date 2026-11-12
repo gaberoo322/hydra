@@ -1,0 +1,1 @@
+- fix: reconcile edges blocked/in-progress exits now carry real record-checked gates (#5459)
