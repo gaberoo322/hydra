@@ -1,0 +1,1 @@
+- fix: give the autopilot wait_or_reap action a playbook handler row backed by a reap.py wait-or-reap subcommand (#5282)

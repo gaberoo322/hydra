@@ -6,7 +6,12 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   advance,
+  journalEntry,
+  operatorAdvance,
+  operatorReopen,
   gateAdr5,
+  gateClaimReleased,
+  gateUnblocked,
   gateClose,
   gateDispatch,
   gateJudgment,
@@ -22,12 +27,16 @@ import {
   releaseClaim,
   resolveLifecycleMode,
   loadLifecycleMode,
+  type BlockerRecord,
+  type ClaimRecord,
   type CommentRecord,
+  type Fetched,
   type GateInput,
   type GateRecords,
   type SeamDeps,
   type LifecycleMode,
 } from "../src/lifecycle/index.ts";
+import { isUnsanctionedHoldExit } from "../src/lifecycle/hold-exit.ts";
 import type { LifecycleJournalEntry } from "../src/redis/lifecycle-journal.ts";
 
 function gi(over: Partial<GateInput> = {}): GateInput {
@@ -157,7 +166,12 @@ function harness(
       h.state.state = "CLOSED";
       return { ok: true };
     },
+    comment: async () => ({ ok: true }),
+    env: () => ({}),
     fetch: {
+      issueComments: async () => ({ ok: true, value: [] }),
+      timeline: async () => ({ ok: true, value: [] }),
+      prBodies: async () => ({ ok: true, value: [] }),
       designConcept: async () => (opts.dc ? { ok: true, value: opts.dc } : { ok: false }),
       pr: async () => (opts.pr ? { ok: true, value: opts.pr } : { ok: false }),
       comment: async () => (opts.comment ? { ok: true, value: opts.comment } : { ok: false }),
@@ -169,6 +183,8 @@ function harness(
       expireOnClose: async (_r, i) => { h.expired.push(i); return { ok: true }; },
       openClaim: async (_r, _i, claim) => ({ ok: true, claim }),
       closeClaim: async () => ({ ok: true, prior: null }),
+      read: async () => ({ ok: true, entries: [...h.journal] }),
+      readClaim: async () => ({ ok: true, claim: null }),
     },
     now: () => 1000,
   };
@@ -179,7 +195,10 @@ describe("seam spine (INV-3..6)", () => {
   test("legal ungated transition writes ONE edit, verifies and journals kind=transition", async () => {
     const h = harness(["ready-for-agent", "enhancement"], "shadow");
     const res = await advance({ issue: 10, to: "in-progress" }, h.deps);
-    assert.deepEqual(res, { ok: true, issue: 10, from: "ready-for-agent", to: "in-progress", mode: "shadow" });
+    assert.deepEqual(res, {
+      ok: true, issue: 10, from: "ready-for-agent", to: "in-progress", mode: "shadow",
+      observed: { state: "OPEN", labels: ["enhancement", "in-progress"] },
+    });
     assert.deepEqual(h.edits, [{ issue: 10, remove: ["ready-for-agent"], add: ["in-progress"] }]);
     assert.equal(h.journal.length, 1);
     assert.equal(h.journal[0].kind, "transition");
@@ -336,7 +355,7 @@ describe("claim / release (INV-11)", () => {
     const res = await releaseClaim(10, "d1", deps);
     assert.equal(res.ok, true);
     assert.equal(h.journal[0].kind, "claim-closed");
-    assert.deepEqual(h.journal[0].evidence, { dispatch: "d1" });
+    assert.deepEqual(h.journal[0].evidence, { dispatch: "d1", class: "dev_orch" });
   });
 });
 
@@ -382,7 +401,10 @@ describe("operator ruling round 4 (#5310): label-less issues", () => {
   test("enforce: a label-less issue moving to needs-triage passes the gate and writes", async () => {
     const h = harness(["enhancement"], "enforce");
     const res = await advance({ issue: 10, to: "needs-triage" }, h.deps);
-    assert.deepEqual(res, { ok: true, issue: 10, from: null, to: "needs-triage", mode: "enforce" });
+    assert.deepEqual(res, {
+      ok: true, issue: 10, from: null, to: "needs-triage", mode: "enforce",
+      observed: { state: "OPEN", labels: ["enhancement", "needs-triage"] },
+    });
     assert.deepEqual(h.edits, [{ issue: 10, remove: [], add: ["needs-triage"] }]);
     assert.equal(h.journal[0].kind, "transition");
     assert.equal(h.journal[0].result, "ok");
@@ -412,6 +434,297 @@ describe("operator ruling round 4 (#5310): label-less issues", () => {
 });
 
 // ---------------------------------------------------------------------------
+// operatorAdvance / operatorReopen (ADR-0047 Decision 3, issue #5313)
+// ---------------------------------------------------------------------------
+
+function operatorHarness(labels: string[], mode: LifecycleMode, opts: { state?: string } = {}) {
+  const h = harness(labels, mode);
+  if (opts.state) h.state.state = opts.state;
+  const indexed: Array<{ issue: number; e: LifecycleJournalEntry }> = [];
+  const persisted: number[] = [];
+  const reopens: number[] = [];
+  h.deps.reopen = async (issue) => {
+    reopens.push(issue);
+    h.state.state = "OPEN";
+    return { ok: true };
+  };
+  h.deps.journal.persist = async (_r, i) => { persisted.push(i); return { ok: true }; };
+  h.deps.journal.append = async (_r, i, e, idx) => {
+    h.journal.push(e);
+    if (idx?.holdExit) indexed.push({ issue: i, e });
+    return { ok: true };
+  };
+  return { h, indexed, persisted, reopens };
+}
+
+describe("operatorAdvance — the operator-route entry point (#5313 INV-2..4, INV-8)", () => {
+  for (const mode of ["shadow", "enforce"] as const) {
+    test(`exits a human-hold state in ${mode} while advance() still refuses it`, async () => {
+      const o = operatorHarness(["parked", "enhancement"], mode);
+      const refused = await advance({ issue: 10, to: "ready-for-agent" }, o.h.deps);
+      assert.equal(refused.ok, false);
+      assert.equal((refused as any).code, "human-hold-exit");
+
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.deepEqual(o.h.edits.at(-1), { issue: 10, remove: ["parked"], add: ["ready-for-agent"] });
+      const last = o.h.journal.at(-1)!;
+      assert.equal(last.kind, "transition");
+      assert.equal(last.source, "operator-route");
+      assert.equal(last.actor, "board:promote");
+      assert.equal(last.from, "parked");
+      // The sanctioned exit is never indexed as an unsanctioned hold exit.
+      assert.equal(o.indexed.length, 0);
+    });
+  }
+
+  test("agent-owned targets are illegal from the board, journaled as refused operator-route", async () => {
+    const o = operatorHarness(["needs-triage"], "shadow");
+    for (const to of ["in-progress", "qa-passed", "parked"]) {
+      const res = await operatorAdvance({ issue: 10, to, actor: "board:relabel" }, o.h.deps);
+      assert.equal(res.ok, false, to);
+      assert.equal((res as any).code, "illegal-transition", to);
+    }
+    assert.equal(o.h.edits.length, 0);
+    assert.ok(o.h.journal.every((e) => e.kind === "refused" && e.source === "operator-route"));
+  });
+
+  test("repairs state-missing and state-ambiguous in ONE edit; journal from is comma-joined / null", async () => {
+    const none = operatorHarness(["enhancement"], "enforce");
+    const r0 = await operatorAdvance({ issue: 10, to: "needs-triage", actor: "board:relabel" }, none.h.deps);
+    assert.equal(r0.ok, true);
+    assert.deepEqual(none.h.edits, [{ issue: 10, remove: [], add: ["needs-triage"] }]);
+    assert.equal(none.h.journal[0].from, null);
+
+    const many = operatorHarness(["needs-triage", "in-progress", "bug"], "enforce");
+    const r2 = await operatorAdvance({ issue: 10, to: "blocked", actor: "board:relabel" }, many.h.deps);
+    assert.equal(r2.ok, true);
+    assert.equal(many.h.edits.length, 1);
+    assert.deepEqual(many.h.edits[0].remove, ["needs-triage", "in-progress"]);
+    assert.equal(many.h.journal[0].from, "needs-triage,in-progress");
+    assert.deepEqual(many.h.state.labels.sort(), ["blocked", "bug"]);
+  });
+
+  test("closing an already-closed issue is idempotent ok: no write, no journal, no expire", async () => {
+    const o = operatorHarness(["hitl-grill"], "enforce", { state: "CLOSED" });
+    const res = await operatorAdvance({ issue: 10, to: "closed", actor: "board:close" }, o.h.deps);
+    assert.equal(res.ok, true);
+    assert.equal(o.h.closes.length, 0);
+    assert.equal(o.h.journal.length, 0);
+    assert.deepEqual(o.h.expired, []);
+  });
+
+  test("close performs no label write and retains labels; a closed issue is refused", async () => {
+    const o = operatorHarness(["hitl-grill"], "enforce");
+    const res = await operatorAdvance({ issue: 10, to: "closed", closeReason: "not-planned", actor: "board:close" }, o.h.deps);
+    assert.equal(res.ok, true);
+    assert.deepEqual(o.h.closes, [{ issue: 10, reason: "not planned" }]);
+    assert.equal(o.h.edits.length, 0);
+    assert.deepEqual(res.ok && res.observed, { state: "CLOSED", labels: ["hitl-grill"] });
+    assert.deepEqual(o.h.expired, [10]);
+
+    const again = await operatorAdvance({ issue: 10, to: "needs-triage", actor: "board:relabel" }, o.h.deps);
+    assert.equal((again as any).code, "issue-closed");
+  });
+
+  describe("un-park posts the cap reset on the issue (#5437)", () => {
+    function recording(o: ReturnType<typeof operatorHarness>, fail?: string) {
+      const posted: Array<{ number: number; body: string }> = [];
+      o.h.deps.comment = async (number, body) => {
+        posted.push({ number, body });
+        return fail ? { ok: false, code: fail as never, stderr: "x" } : { ok: true };
+      };
+      return posted;
+    }
+
+    test("removing parked posts exactly one issue marker and journals capReset=posted", async () => {
+      const o = operatorHarness(["parked"], "enforce");
+      const posted = recording(o);
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.equal(posted.length, 1);
+      assert.equal(posted[0].number, 10);
+      assert.match(posted[0].body, /^Hydra-Cap-Reset: by=board:promote ts=\S+$/);
+      assert.equal(o.h.journal.at(-1)!.evidence.capReset, "posted");
+    });
+
+    test("a failed post leaves the transition ok and journals capReset=failed:<code>", async () => {
+      const o = operatorHarness(["parked"], "enforce");
+      recording(o, "gh-failed");
+      const res = await operatorAdvance({ issue: 10, to: "needs-triage", actor: "board:relabel" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.deepEqual(o.h.state.labels, ["needs-triage"]);
+      assert.equal(o.h.journal.at(-1)!.kind, "transition");
+      assert.equal(o.h.journal.at(-1)!.evidence.capReset, "failed:comment-failed:gh-failed");
+    });
+
+    test("the marker posts BEFORE the label write, so no claimable window sees the old reset point", async () => {
+      const o = operatorHarness(["parked"], "enforce");
+      const order: string[] = [];
+      const origEdit = o.h.deps.edit;
+      o.h.deps.edit = async (...a: Parameters<typeof origEdit>) => { order.push("edit"); return origEdit(...a); };
+      o.h.deps.comment = async () => { order.push("comment"); return { ok: true }; };
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.deepEqual(order, ["comment", "edit"]);
+    });
+
+    test("a refused label write after the marker journals capReset on the refusal (INV-4)", async () => {
+      const o = operatorHarness(["parked"], "enforce");
+      recording(o);
+      o.h.deps.edit = async () => ({ ok: false, code: "gh-failed" as never, stderr: "x" });
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, false);
+      const last = o.h.journal.at(-1)!;
+      assert.equal(last.kind, "refused");
+      assert.equal(last.evidence.capReset, "posted");
+    });
+
+    test("a refused write with no park removal journals no capReset (sibling shape)", async () => {
+      const o = operatorHarness(["hitl-grill"], "enforce");
+      o.h.deps.edit = async () => ({ ok: false, code: "gh-failed" as never, stderr: "x" });
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, false);
+      assert.equal(o.h.journal.at(-1)!.evidence.capReset, undefined);
+    });
+
+    test("a non-park transition keeps its single write and posts no marker (sibling shape)", async () => {
+      const o = operatorHarness(["hitl-grill"], "enforce");
+      const order: string[] = [];
+      const origEdit = o.h.deps.edit;
+      o.h.deps.edit = async (...a: Parameters<typeof origEdit>) => { order.push("edit"); return origEdit(...a); };
+      o.h.deps.comment = async () => { order.push("comment"); return { ok: true }; };
+      await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.deepEqual(order, ["edit"]);
+    });
+
+    test("no marker when parked was not present or the destination is closed", async () => {
+      const o = operatorHarness(["hitl-grill"], "enforce");
+      const posted = recording(o);
+      const res = await operatorAdvance({ issue: 10, to: "ready-for-agent", actor: "board:promote" }, o.h.deps);
+      assert.equal(res.ok, true);
+      assert.equal(posted.length, 0);
+      assert.equal(o.h.journal.at(-1)!.evidence.capReset, undefined);
+
+      const c = operatorHarness(["parked"], "enforce");
+      const cPosted = recording(c);
+      const closedRes = await operatorAdvance({ issue: 10, to: "closed", actor: "board:close" }, c.h.deps);
+      assert.equal(closedRes.ok, true);
+      assert.equal(cPosted.length, 0);
+    });
+  });
+
+  test("a failed re-read refuses fetch-failed with no write", async () => {
+    const h = harness(["parked"], "enforce", { viewFails: true });
+    const res = await operatorAdvance({ issue: 10, to: "needs-triage", actor: "board:relabel" }, h.deps);
+    assert.equal((res as any).code, "fetch-failed");
+    assert.equal(h.edits.length, 0);
+  });
+});
+
+describe("operatorReopen (#5313 INV-8)", () => {
+  test("reopens, PERSISTS the journal, then journals from closed with source operator-route", async () => {
+    const o = operatorHarness(["needs-triage"], "enforce", { state: "CLOSED" });
+    const res = await operatorReopen({ issue: 10, actor: "board:reopen" }, o.h.deps);
+    assert.equal(res.ok, true);
+    assert.deepEqual(o.reopens, [10]);
+    assert.deepEqual(o.persisted, [10]);
+    assert.equal(o.h.journal[0].from, "closed");
+    assert.equal(o.h.journal[0].to, "needs-triage");
+    assert.equal(o.h.journal[0].source, "operator-route");
+  });
+
+  test("reopening an already-OPEN issue is idempotent ok with the observed state: no write, persist or journal", async () => {
+    const o = operatorHarness(["needs-triage"], "enforce");
+    const res = await operatorReopen({ issue: 10, actor: "board:reopen" }, o.h.deps);
+    assert.equal(res.ok, true);
+    assert.equal((res as any).observed.state, "OPEN");
+    assert.deepEqual(o.reopens, []);
+    assert.deepEqual(o.persisted, []);
+    assert.equal(o.h.journal.length, 0);
+  });
+
+  test("a reopen the re-read does not confirm is write-unverified", async () => {
+    const o = operatorHarness(["needs-triage"], "enforce", { state: "CLOSED" });
+    o.h.deps.reopen = async () => ({ ok: true });
+    const res = await operatorReopen({ issue: 10, actor: "board:reopen" }, o.h.deps);
+    assert.equal((res as any).code, "write-unverified");
+  });
+});
+
+describe("shadow-mode CLI human-hold exit (#5313 round 3)", () => {
+  test("a shadow-journaled refused+written exit from a hold state is indexed via the single append point", async () => {
+    const o = operatorHarness([], "shadow");
+    const shadowExit: LifecycleJournalEntry = {
+      v: 1, ts: 5, kind: "refused", from: "parked", to: "ready-for-agent", source: "cli",
+      actor: "cli", evidence: {}, reason: null, rationale: null, result: "shadow-would-refuse:illegal-transition", written: true,
+    };
+    assert.equal(isUnsanctionedHoldExit(shadowExit), true);
+    await journalEntry(o.h.deps, 10, shadowExit);
+    assert.equal(o.indexed.length, 1);
+    assert.equal(o.indexed[0].e, shadowExit);
+  });
+
+  test("sibling: advance() from a hold state is refused human-hold-exit with written:false in shadow, and is NOT indexed", async () => {
+    const o = operatorHarness(["parked", "enhancement"], "shadow");
+    const res = await advance({ issue: 10, to: "ready-for-agent" }, o.h.deps);
+    assert.equal(res.ok, false);
+    assert.equal(o.h.journal.at(-1)!.written, false);
+    assert.equal(o.indexed.length, 0);
+  });
+
+  test("sibling: a refused entry that wrote nothing, or left a non-hold state, is not an unsanctioned exit", () => {
+    const e = { kind: "refused" as const, written: false, source: "cli" as const, from: "parked", to: "ready-for-agent" };
+    assert.equal(isUnsanctionedHoldExit(e), false);
+    assert.equal(isUnsanctionedHoldExit({ ...e, written: true, from: "needs-triage" }), false);
+    assert.equal(isUnsanctionedHoldExit({ ...e, written: true, source: "operator-route" as const }), false);
+  });
+});
+
+describe("journalEntry — the single append point indexes unsanctioned hold exits (#5313 INV-10)", () => {
+  const base: LifecycleJournalEntry = {
+    v: 1, ts: 5, kind: "external", from: "ready-for-human", to: "ready-for-agent", source: "external",
+    actor: "x", evidence: {}, reason: null, rationale: null, result: "ok", written: true,
+  };
+
+  test("an external hold exit is appended AND indexed; operator-route and refused rows are not", async () => {
+    const o = operatorHarness([], "enforce");
+    await journalEntry(o.h.deps, 10, base);
+    await journalEntry(o.h.deps, 10, { ...base, source: "operator-route", kind: "transition" });
+    await journalEntry(o.h.deps, 10, { ...base, kind: "refused", written: false });
+    await journalEntry(o.h.deps, 10, { ...base, from: "needs-triage" });
+    assert.equal(o.h.journal.length, 4);
+    assert.equal(o.indexed.length, 1);
+    assert.equal(o.indexed[0].issue, 10);
+  });
+});
+
+describe("journalEntry — cap events need no selector; the hold-exit selector is the only opt-in (#5324)", () => {
+  const base: LifecycleJournalEntry = {
+    v: 1, ts: 5, kind: "transition", from: "in-progress", to: "parked", source: "cli",
+    actor: "x", evidence: { pr: "42" }, reason: "cap:qa-stall", rationale: null, result: "ok", written: true,
+  };
+
+  test("claim-opened, cap park and shadow would-park append with a hold-exit-only selector (indexing is the seam's job)", async () => {
+    const o = operatorHarness([], "enforce");
+    const selectors: unknown[] = [];
+    o.h.deps.journal.append = async (_r, _i, _e, idx) => { selectors.push(idx); return { ok: true }; };
+    await journalEntry(o.h.deps, 10, { ...base, kind: "claim-opened", to: null, reason: null });
+    await journalEntry(o.h.deps, 10, base);
+    await journalEntry(o.h.deps, 10, { ...base, kind: "refused", written: false, result: "shadow-would-park:qa-stall" });
+    assert.equal(selectors.length, 3);
+    for (const sel of selectors) assert.deepEqual(Object.keys(sel as object), ["holdExit"]);
+  });
+
+  test("sibling: the hold-exit selector is still set for an unsanctioned hold exit", async () => {
+    const o = operatorHarness([], "enforce");
+    let sel: { holdExit?: boolean } | undefined;
+    o.h.deps.journal.append = async (_r, _i, _e, idx) => { sel = idx as typeof sel; return { ok: true }; };
+    await journalEntry(o.h.deps, 10, { ...base, kind: "external", from: "ready-for-human", to: "ready-for-agent", source: "external", reason: null });
+    assert.equal(sel?.holdExit, true);
+  });
+});
+
 // Research-exit gate (ADR-0047 D4, issue #5320)
 // ---------------------------------------------------------------------------
 
@@ -507,7 +820,7 @@ describe("research-exit gate", () => {
   });
 
   test("recordsNeeded requests the comment + entry records only for research-exit", () => {
-    assert.deepEqual(recordsNeeded("research-exit"), { designConcept: false, pr: false, comment: true, stateEntry: true });
+    assert.deepEqual(recordsNeeded("research-exit"), { designConcept: false, pr: false, comment: true, stateEntry: true, qaLive: false, claim: false, blockers: false });
     for (const g of ["none", "judgment", "adr5", "dispatch", "pr-open", "close", "not-yet-implemented"] as const) {
       const n = recordsNeeded(g);
       assert.equal(n.comment || n.stateEntry, false, g);
@@ -563,5 +876,121 @@ describe("research-exit gate", () => {
     assert.equal("code" in r1 ? r1.code : null, "scope-section-missing");
     const scoped = harness(["needs-research"], "enforce", { comment: rec, entry: 1000, body: SCOPED_BODY });
     assert.equal((await advance(adv, scoped.deps)).ok, true);
+  });
+});
+
+// Reconcile-edge gates (issue #5459)
+// ---------------------------------------------------------------------------
+
+const BLOCKED_BODY = "Blocked by #100 and #101\n\n## Files in scope\n\n- `src/a.ts`\n";
+
+function ub(over: Partial<GateInput> = {}): GateInput {
+  return { issue: 10, from: "blocked", to: "ready-for-agent", flags: [], evidence: {}, body: BLOCKED_BODY, ...over };
+}
+const blk = (...states: Array<[number, "open" | "closed" | "merged" | "unknown"]>): GateRecords => ({
+  blockers: { ok: true, value: states.map(([number, state]) => ({ number, state })) },
+});
+const clm = (held: string | null): GateRecords => ({ claim: { ok: true, value: { held: held === null ? null : { dispatchId: held } } } });
+
+describe("unblocked gate (#5459 INV-4)", () => {
+  const cleared = blk([100, "closed"], [101, "merged"]);
+  test("passes when every clearance ref is closed/merged and the body is scoped", () => {
+    assert.equal(gateUnblocked(ub(), cleared).ok, true);
+  });
+  test("refusal codes in predicate order", () => {
+    assert.equal(gateUnblocked(ub({ body: undefined }), cleared).code, "fetch-failed");
+    assert.equal(gateUnblocked(ub({ body: "Blocked by #5 and o/r#6\n## Files in scope\n- `a`\n" }), cleared).code, "blocker-cross-repo");
+    assert.equal(gateUnblocked(ub({ body: "waiting for a calendar date" }), cleared).code, "blocker-refs-missing");
+    assert.equal(gateUnblocked(ub(), {}).code, "fetch-failed");
+    assert.equal(gateUnblocked(ub(), { blockers: { ok: false } }).code, "fetch-failed");
+    assert.equal(gateUnblocked(ub(), blk([100, "closed"])).code, "record-binding-mismatch");
+    assert.equal(gateUnblocked(ub(), blk([100, "closed"], [101, "unknown"])).code, "fetch-failed");
+    assert.equal(gateUnblocked(ub(), blk([100, "closed"], [101, "open"])).code, "blockers-open");
+    assert.equal(gateUnblocked(ub({ body: "Blocked by #100 and #101" }), cleared).code, "scope-section-missing");
+  });
+});
+
+describe("claim-released gate (#5459 INV-5)", () => {
+  const ip = (over: Partial<GateInput> = {}) => gi({ to: "ready-for-agent", ...over });
+  test("no held claim passes; a held claim refuses unless the caller owns it", () => {
+    assert.equal(gateClaimReleased(ip(), clm(null)).ok, true);
+    assert.equal(gateClaimReleased(ip(), clm("d-1")).code, "claim-held");
+    assert.equal(gateClaimReleased(ip({ evidence: { dispatch: "d-2" } }), clm("d-1")).code, "claim-held");
+    assert.equal(gateClaimReleased(ip({ evidence: { dispatch: "d-1" } }), clm("d-1")).ok, true);
+  });
+  test("a missing or failed claim record fails closed", () => {
+    assert.equal(gateClaimReleased(ip(), {}).code, "fetch-failed");
+    assert.equal(gateClaimReleased(ip(), { claim: { ok: false } }).code, "fetch-failed");
+  });
+});
+
+describe("reconcile caller edges are really gated (#5459 INV-9)", () => {
+  const edges: Array<[string, string, GateRecords, Partial<GateInput>]> = [
+    ["blocked", "ready-for-agent", blk([100, "closed"], [101, "closed"]), { body: BLOCKED_BODY }],
+    ["in-progress", "ready-for-agent", clm(null), {}],
+    ["in-progress", "needs-dev-resume", clm(null), {}],
+    ["in-progress", "needs-qa", { pr: { ok: true, value: { number: 7, state: "OPEN", body: "Closes #10" } } }, { evidence: { pr: "7" } }],
+  ];
+  for (const [from, to, good, over] of edges) {
+    test(`${from} -> ${to} has a real gate that passes on good records`, () => {
+      const t = findTransition(from as never, to as never);
+      assert.ok(t, "row exists");
+      assert.notEqual(t.gate, "not-yet-implemented");
+      const input = gi({ from: from as never, to: to as never, ...over });
+      assert.equal(evaluateGate(t.gate, input, good).ok, true);
+      assert.notEqual(evaluateGate(t.gate, input, {}).code, "gate-unimplemented");
+    });
+  }
+  test("the fourth reconcile row stays unimplemented", () => {
+    assert.equal(findTransition("needs-dev-resume", "ready-for-agent")?.gate, "not-yet-implemented");
+  });
+  test("recordsNeeded flags claim and blockers only for their gates", () => {
+    assert.equal(recordsNeeded("claim-released").claim, true);
+    assert.equal(recordsNeeded("claim-released").blockers, false);
+    assert.equal(recordsNeeded("unblocked").blockers, true);
+    assert.equal(recordsNeeded("unblocked").claim, false);
+  });
+});
+
+describe("seam wiring for the reconcile-edge gates (#5459 INV-6)", () => {
+  test("claim-released reads the claim through journal.readClaim", async () => {
+    const h = harness(["in-progress"], "enforce");
+    let reads = 0;
+    h.deps.journal.readClaim = async () => {
+      reads++;
+      return { ok: true, claim: { dispatchId: "d-1", class: "dev_orch", run: "r", artifactHash: null, openedAt: 1 } };
+    };
+    const held = await advance({ issue: 10, to: "ready-for-agent" }, h.deps);
+    assert.equal("code" in held ? held.code : null, "claim-held");
+    assert.equal(h.edits.length, 0);
+    const owner = await advance({ issue: 10, to: "ready-for-agent", evidence: { dispatch: "d-1" } }, h.deps);
+    assert.equal(owner.ok, true);
+    assert.equal(reads, 2);
+  });
+  test("claim-released: a failed claim read fails closed", async () => {
+    const h = harness(["in-progress"], "enforce");
+    h.deps.journal.readClaim = async () => ({ ok: false, code: "redis-failed" }) as never;
+    const res = await advance({ issue: 10, to: "needs-dev-resume" }, h.deps);
+    assert.equal("code" in res ? res.code : null, "fetch-failed");
+  });
+  test("unblocked hands fetch.blockers exactly the body's clearance refs", async () => {
+    const h = harness(["blocked"], "enforce", { body: BLOCKED_BODY });
+    let seen: number[] = [];
+    h.deps.fetch.blockers = async (refs): Promise<Fetched<BlockerRecord[]>> => {
+      seen = refs;
+      return { ok: true, value: refs.map((number) => ({ number, state: "closed" as const })) };
+    };
+    const res = await advance({ issue: 10, to: "ready-for-agent" }, h.deps);
+    assert.equal(res.ok, true);
+    assert.deepEqual(seen, [100, 101]);
+  });
+  test("unblocked without a blockers fetcher fails closed (enforce) / would-refuse (shadow)", async () => {
+    const enf = harness(["blocked"], "enforce", { body: BLOCKED_BODY });
+    const r1 = await advance({ issue: 10, to: "ready-for-agent" }, enf.deps);
+    assert.equal("code" in r1 ? r1.code : null, "fetch-failed");
+    const sh = harness(["blocked"], "shadow", { body: BLOCKED_BODY });
+    const r2 = await advance({ issue: 10, to: "ready-for-agent" }, sh.deps);
+    assert.equal(r2.ok && r2.wouldRefuse, "fetch-failed");
+    assert.equal(sh.edits.length, 1);
   });
 });

@@ -20,11 +20,15 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   extractStrictBlockerRefs,
   fetchOpenBlockerNumbers,
   openNumbersFromRows,
+  resolveBlockerRefState,
 } from "../src/github/blockers.ts";
 import type { IssueRow, IssueReadResult } from "../src/github/issues.ts";
 
@@ -325,4 +329,31 @@ describe("findClearedBlockedIssues (#4806)", () => {
     });
     assert.deepEqual(res, []);
   });
+});
+
+describe("resolveBlockerRefState (one resolver for the lifecycle gate and blockers-cleared, #5459)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "blockers-fakegh-"));
+  const bin = join(dir, "gh");
+  writeFileSync(bin, '#!/bin/sh\nif [ -n "$FAKE_GH_FAIL" ]; then echo boom >&2; exit 1; fi\nprintf %s "$FAKE_GH_JSON"\n');
+  chmodSync(bin, 0o755);
+  async function resolve(json: string, fail = false) {
+    const prevBin = process.env.HYDRA_GH_BIN;
+    process.env.HYDRA_GH_BIN = bin;
+    process.env.FAKE_GH_JSON = json;
+    if (fail) process.env.FAKE_GH_FAIL = "1"; else delete process.env.FAKE_GH_FAIL;
+    try {
+      return await resolveBlockerRefState("o/r", 7);
+    } finally {
+      if (prevBin === undefined) delete process.env.HYDRA_GH_BIN; else process.env.HYDRA_GH_BIN = prevBin;
+    }
+  }
+  test("open issue -> open", async () => assert.equal(await resolve('{"state":"open"}'), "open"));
+  test("closed issue -> closed (sibling shape keeps its verdict)", async () =>
+    assert.equal(await resolve('{"state":"closed"}'), "closed"));
+  test("closed merged PR -> merged", async () =>
+    assert.equal(await resolve('{"state":"closed","pull_request":{"merged_at":"2026-01-01T00:00:00Z"}}'), "merged"));
+  test("closed unmerged PR -> unknown (never clearance)", async () =>
+    assert.equal(await resolve('{"state":"closed","pull_request":{"merged_at":null}}'), "unknown"));
+  test("missing/odd state -> unknown, not open", async () => assert.equal(await resolve("{}"), "unknown"));
+  test("gh failure -> unknown", async () => assert.equal(await resolve("", true), "unknown"));
 });

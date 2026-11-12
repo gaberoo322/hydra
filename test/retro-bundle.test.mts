@@ -27,6 +27,8 @@ import {
   assembleRetroBundle,
   type RetroBundleDeps,
 } from "../src/autopilot/retro-bundle.ts";
+import { transcriptIdOf } from "../src/autopilot/retro-projections.ts";
+import { isHarnessAgentId } from "../src/transcript-store.ts";
 import {
   collectProvisionalCycleIds,
   confirmDrillableCycleIds,
@@ -58,6 +60,7 @@ import {
   fetchTurnsWithJoins,
   type ProjectionDeps,
 } from "../src/autopilot/run-projections.ts";
+import { joinedTurnFromWire } from "../src/autopilot/turn-row.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -72,6 +75,7 @@ function dispatch(over: Partial<RetroDispatch> = {}): RetroDispatch {
     prNumber: null,
     slot: null,
     occupancyId: null,
+    transcriptId: null,
     status: "merged",
     bucket: "merged",
     abandonReason: null,
@@ -219,7 +223,60 @@ describe("flagDispatchesForDrill", () => {
 // projectDispatches (pure)
 // ---------------------------------------------------------------------------
 
+/** Rebuild typed joined turns from wire-shaped fixtures (outcomes inline on the actions). */
+const pd = (turns: Array<Record<string, unknown>>) =>
+  projectDispatches(turns.flatMap((t) => joinedTurnFromWire(t) ?? []));
+
 describe("projectDispatches", () => {
+  const BRANCH = "worktree-agent-ab2331d4-t6-dev_orch";
+  const dispatchAction = {
+    type: "dispatch",
+    skill: "hydra-dev",
+    slot: "dev_orch",
+    worktreeBranch: BRANCH,
+    outcome: { cycleId: BRANCH, status: "completed" },
+  };
+  const slotAt = (taskId: string, dispatchId: string) => ({
+    dev_orch: { skill: "hydra-dev", anchor: "issue-1", task_id: taskId, dispatch_id: dispatchId },
+  });
+
+  test("slot dispatch_id joins an earlier action with a null snapshot -> one row (#5369)", () => {
+    const out = pd([
+      { turn_n: 6, actions: [dispatchAction], slots_snapshot: { dev_orch: null } },
+      { turn_n: 7, actions: [], slots_snapshot: slotAt("a8e26dad6183e4a7b", BRANCH) },
+    ]);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].turn_n, 6);
+    assert.equal(out[0].cycleId, BRANCH);
+    assert.equal(out[0].status, "completed");
+    assert.equal(out[0].occupancyId, "id:a8e26dad6183e4a7b");
+  });
+
+  test("outcome-less action registered by worktreeBranch still joins (#5369)", () => {
+    const out = pd([
+      { turn_n: 6, actions: [{ ...dispatchAction, outcome: null }], slots_snapshot: {} },
+      { turn_n: 7, actions: [], slots_snapshot: slotAt("t1", BRANCH) },
+    ]);
+    assert.equal(out.length, 1);
+  });
+
+  test("same dispatch_id with a second distinct task_id emits a second row (#3834 preserved)", () => {
+    const out = pd([
+      { turn_n: 6, actions: [dispatchAction], slots_snapshot: { dev_orch: null } },
+      { turn_n: 7, actions: [], slots_snapshot: slotAt("taskA", BRANCH) },
+      { turn_n: 8, actions: [], slots_snapshot: slotAt("taskB", BRANCH) },
+    ]);
+    assert.equal(out.length, 2);
+  });
+
+  test("a different dispatch_id does not join (#5369)", () => {
+    const out = pd([
+      { turn_n: 6, actions: [dispatchAction], slots_snapshot: { dev_orch: null } },
+      { turn_n: 7, actions: [], slots_snapshot: slotAt("taskA", "other") },
+    ]);
+    assert.equal(out.length, 2);
+  });
+
   test("projects dispatch actions and joins outcome status/PR", () => {
     const turns = [
       {
@@ -235,7 +292,7 @@ describe("projectDispatches", () => {
         ],
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1);
     assert.equal(out[0].cycleId, "c1");
     assert.equal(out[0].skill, "hydra-dev");
@@ -250,7 +307,7 @@ describe("projectDispatches", () => {
     const turns = [
       { turn_n: 3, actions: [{ type: "dispatch", cycleId: "c9", outcome: null }] },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out[0].cycleId, "c9");
     assert.equal(out[0].status, null);
     assert.equal(out[0].bucket, null);
@@ -277,7 +334,7 @@ describe("projectDispatches", () => {
         ],
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1);
     assert.equal(out[0].anchorReference, "#961");
     assert.equal(out[0].skill, "hydra-dev");
@@ -298,7 +355,7 @@ describe("projectDispatches", () => {
         },
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 2, "two occupied slots → two dispatches (null slot skipped)");
 
     const qa = out.find((d) => d.skill === "hydra-qa");
@@ -335,7 +392,7 @@ describe("projectDispatches", () => {
         },
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1, "merged by slot — exactly one dispatch, no double-count");
     assert.equal(out[0].skill, "hydra-dev", "action skill wins");
     assert.equal(out[0].anchorReference, "issue-918", "action anchor wins");
@@ -357,7 +414,7 @@ describe("projectDispatches", () => {
         },
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1);
     assert.equal(out[0].skill, "hydra-qa");
     assert.equal(out[0].anchorReference, "PR#970");
@@ -375,7 +432,7 @@ describe("projectDispatches", () => {
         slots_snapshot: { dev_orch: "not-an-object", qa_orch: 42, research_orch: ["x"] },
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     // The action dispatch survives; non-object slot members are skipped.
     assert.equal(out.length, 1);
     assert.equal(out[0].skill, "hydra-dev");
@@ -404,7 +461,7 @@ describe("projectDispatches", () => {
       { turn_n: 6, actions: [], slots_snapshot: { design_concept_orch: slotEntry } },
       { turn_n: 7, actions: [], slots_snapshot: { design_concept_orch: slotEntry } },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1, "one real dispatch → exactly one RetroDispatch");
     assert.equal(out[0].cycleId, "a4ddfcd1b57226e5a");
     assert.equal(out[0].turn_n, 5, "the earliest-turn row is canonical");
@@ -439,7 +496,7 @@ describe("projectDispatches", () => {
       },
       { turn_n: 6, actions: [], slots_snapshot: { qa_orch: slotEntry } },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1, "action + later snapshots merge by task_id — no duplicate row");
     assert.equal(out[0].turn_n, 5, "dispatching turn stays canonical");
     assert.equal(out[0].status, "merged", "action/outcome values win");
@@ -464,7 +521,7 @@ describe("projectDispatches", () => {
         },
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1, "same task_id across turns — one row");
     assert.equal(out[0].turn_n, 1, "earliest-turn row is canonical");
     assert.equal(out[0].anchorReference, "PR#1767", "later snapshot fills the null anchor");
@@ -488,7 +545,7 @@ describe("projectDispatches", () => {
         },
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 2, "different identities in the same slot are different dispatches");
     assert.deepEqual(out.map((d) => d.cycleId), ["tid-first", "tid-second"]);
     assert.deepEqual(out.map((d) => d.anchorReference), ["#100", "#200"]);
@@ -509,7 +566,7 @@ describe("projectDispatches", () => {
         slots_snapshot: { dev_orch: { skill: "hydra-dev", anchor: "#300", started_epoch: 1781210700 } },
       },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 1, "same slot@started_epoch — one row despite no task_id");
     assert.equal(out[0].turn_n, 3);
   });
@@ -522,7 +579,7 @@ describe("projectDispatches", () => {
       { turn_n: 1, actions: [], slots_snapshot: { dev_orch: { skill: "hydra-dev", anchor: "#400" } } },
       { turn_n: 2, actions: [], slots_snapshot: { dev_orch: { skill: "hydra-dev", anchor: "#400" } } },
     ];
-    const out = projectDispatches(turns);
+    const out = pd(turns);
     assert.equal(out.length, 2, "no durable identity — no cross-turn merge");
   });
 });
@@ -1438,6 +1495,122 @@ describe("assembleRetroBundle — composition", () => {
     assert.equal(flagDispatchesForDrill(bundle.dispatches).length, 0, "no duplicate drill flags");
   });
 
+  test("transcriptId is the bare 17-hex hash derived from occupancyId, else null (#5392)", async () => {
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-5392", status: "ended", term_reason: "interrupted" },
+          turns: [
+            {
+              turn_n: 1,
+              actions: [],
+              slots_snapshot: {
+                dev_orch: { skill: "hydra-dev", anchor: "issue-1", task_id: "a0482322bbb9143db" },
+                qa_orch: { skill: "hydra-qa", anchor: "issue-2", started_epoch: 1781210559 },
+              },
+            },
+          ],
+        }) as any,
+      readCycleMetrics: async () => ({}),
+      readCycleHash: async () => ({}),
+    });
+    const bundle = await assembleRetroBundle("run-5392", deps);
+    const dev = bundle.dispatches.find((d) => d.slot === "dev_orch")!;
+    const qa = bundle.dispatches.find((d) => d.slot === "qa_orch")!;
+    assert.equal(dev.occupancyId, "id:a0482322bbb9143db");
+    assert.equal(dev.transcriptId, "a0482322bbb9143db");
+    assert.equal(isHarnessAgentId(dev.transcriptId!), true);
+    assert.match(qa.occupancyId ?? "", /^epoch:/);
+    assert.equal(qa.transcriptId, null, "epoch-only identity has no transcript handle");
+  });
+
+  test("action-joined dispatch with a worktree-branch cycleId gets transcriptId; cycleId and occupancyId unchanged (#5392)", async () => {
+    const TASK_ID = "a0482322bbb9143db";
+    const BRANCH = "worktree-agent-a0482322-t1-dev_orch";
+    const slotEntry = { skill: "hydra-dev", anchor: "issue-5392", task_id: TASK_ID };
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-5392c", status: "ended", term_reason: "budget" },
+          turns: [
+            {
+              turn_n: 1,
+              actions: [
+                {
+                  type: "dispatch",
+                  slot: "dev_orch",
+                  skill: "hydra-dev",
+                  anchorReference: "issue-5392",
+                  cycleId: BRANCH,
+                },
+              ],
+              slots_snapshot: { dev_orch: slotEntry },
+            },
+          ],
+        }) as any,
+      readCycleMetrics: async (id: string) =>
+        id === BRANCH ? { anchorReference: "issue-5392" } : {},
+      readCycleHash: async (id: string) => (id === BRANCH ? { status: "merged" } : {}),
+    });
+    const bundle = await assembleRetroBundle("run-5392c", deps);
+    assert.equal(bundle.dispatches.length, 1);
+    const d = bundle.dispatches[0];
+    assert.equal(d.cycleId, BRANCH, "cycleId stays the cycle-record key (INV-4)");
+    assert.equal(d.occupancyId, `id:${TASK_ID}`, "occupancyId unchanged (INV-4)");
+    assert.equal(d.transcriptId, TASK_ID, "transcriptId is the bare hash, not the branch");
+  });
+
+  test("dedup: transcriptId survives when only the dropped duplicate carried occupancyId (#5392)", async () => {
+    const TASK_ID = "a0482322bbb9143db";
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-5392d", status: "ended", term_reason: "budget" },
+          turns: [
+            {
+              turn_n: 2,
+              actions: [],
+              slots_snapshot: {
+                dev_orch: { skill: "hydra-dev", anchor: "issue-5392", task_id: TASK_ID },
+              },
+            },
+            {
+              turn_n: 1,
+              actions: [
+                {
+                  type: "dispatch",
+                  slot: "dev_orch",
+                  skill: "hydra-dev",
+                  anchorReference: "issue-5392",
+                  cycleId: TASK_ID,
+                },
+              ],
+            },
+          ],
+        }) as any,
+      readCycleMetrics: async (id: string) =>
+        id === TASK_ID ? { anchorReference: "issue-5392" } : {},
+      readCycleHash: async (id: string) => (id === TASK_ID ? { status: "merged" } : {}),
+    });
+    const bundle = await assembleRetroBundle("run-5392d", deps);
+    const rows = bundle.dispatches.filter((x) => x.cycleId === TASK_ID);
+    assert.equal(rows.length, 1, "one real cycle, one row");
+    assert.equal(rows[0].transcriptId, TASK_ID, "transcriptId derived after dedup");
+    assert.equal(rows[0].occupancyId, `id:${TASK_ID}`);
+  });
+
+  test("transcriptIdOf rejects null, epoch, and non-17-hex remainders (#5392)", () => {
+    assert.equal(transcriptIdOf(null), null);
+    assert.equal(transcriptIdOf("epoch:dev_orch@123"), null);
+    assert.equal(transcriptIdOf("id:taskA"), null);
+    assert.equal(transcriptIdOf("id:"), null);
+    assert.equal(transcriptIdOf("id:A0482322BBB9143DB"), null);
+    assert.equal(transcriptIdOf("id:a0482322bbb9143db"), "a0482322bbb9143db");
+  });
+
   test("clean stop does NOT fabricate a failure status for a pending dispatch", async () => {
     // A status-less dispatch on a clean (budget) stop is genuinely pending —
     // it must stay unflagged (no run-<reason> abandonReason fabricated).
@@ -1971,7 +2144,7 @@ function readRunViaRealJoin(
     return {
       ok: true as const,
       run: { run_id: runId, status: "ended", term_reason: "budget" },
-      turns,
+      turns: turns.map((t) => t.raw),
     };
   };
 }

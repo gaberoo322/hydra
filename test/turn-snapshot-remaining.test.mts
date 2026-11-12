@@ -58,6 +58,8 @@ import {
 import {
   collectWayfinderFrontier,
   foldRetroBundle,
+  foldRetroBundleReason,
+  collectRetro,
   foldRetroRuns,
   foldWayfinderFrontier,
   foldWayfinderMapLine,
@@ -1057,5 +1059,57 @@ describe("Turn Snapshot slice 5B — a malformed payload degrades, never throws 
     assert.deepEqual(runs({ status: "ended", run_id: [] }), { ok: true, value: { available: true, candidate: null } });
     assert.deepEqual(runs({ status: null, run_id: "r1" }), { ok: true, value: { available: true, candidate: "r1" } }, "a non-string status is finished");
     assert.deepEqual(runs({ run_id: "r1" }), { ok: true, value: { available: false, candidate: null } }, "a missing status is unfinished");
+  });
+});
+
+describe("retro drillable provenance (#5406)", () => {
+  const retroWith = (retroBody: { status: number; body: string } | "network") =>
+    collectRetro({
+      hydra: createTurnSnapshotHydra({
+        baseUrl: BASE,
+        transport: async (url) => {
+          const path = url.slice(`${BASE}/api`.length);
+          if (path.startsWith("/autopilot/runs?")) return { status: 200, body: JSON.stringify({ runs: [{ run_id: "r1", status: "ended" }] }) };
+          if (path === "/qa/review-retro") return { status: 200, body: JSON.stringify({ due: false }) };
+          if (retroBody === "network") throw new Error("socket hang up");
+          return retroBody;
+        },
+      }),
+    } as any);
+
+  test("fail-open arms carry a reason and exactly one retroBundle marker", async () => {
+    const cases: [{ status: number; body: string }, string][] = [
+      [{ status: 200, body: "nope" }, "fail-open-unparseable"],
+      [{ status: 200, body: "[]" }, "fail-open-not-object"],
+      [{ status: 200, body: JSON.stringify({ runFound: false }) }, "fail-open-run-not-found"],
+    ];
+    for (const [resp, reason] of cases) {
+      const o = await retroWith(resp);
+      assert.equal(o.value.drillable, true);
+      assert.equal(o.value.drillableReason, reason);
+      assert.deepEqual(o.degraded, [{ field: "retroBundle", reason: `retro-bundle-fail-open: ${reason}` }]);
+    }
+  });
+
+  test("an HTTP-failed bundle keeps its single pre-existing marker", async () => {
+    const o = await retroWith({ status: 500, body: "" });
+    assert.equal(o.value.drillableReason, "fail-open-bundle-read-failed");
+    assert.equal(o.degraded.length, 1);
+    assert.equal(o.degraded[0]!.field, "retroBundle");
+    assert.ok(!String(o.degraded[0]!.reason).startsWith("retro-bundle-fail-open"));
+  });
+
+  test("clean and genuine-true arms add no marker; reason is none only when clean", async () => {
+    const clean = await retroWith({ status: 200, body: JSON.stringify(emptyBundle()) });
+    assert.deepEqual([clean.value.drillable, clean.value.drillableReason, clean.degraded], [false, "none", []]);
+    const flagged = await retroWith({ status: 200, body: JSON.stringify(emptyBundle({ runFlagged: true })) });
+    assert.deepEqual([flagged.value.drillable, flagged.value.drillableReason, flagged.degraded], [true, "run-flagged", []]);
+  });
+
+  test("foldRetroBundle is exactly foldRetroBundleReason !== none", () => {
+    for (const b of [emptyBundle(), emptyBundle({ reflections: ["x"] }), emptyBundle({ recommendations: ["x"] }), emptyBundle({ stuckSignals: ["x"] })]) {
+      const body = JSON.stringify(b);
+      assert.equal(foldRetroBundle(body), foldRetroBundleReason(body) !== "none");
+    }
   });
 });

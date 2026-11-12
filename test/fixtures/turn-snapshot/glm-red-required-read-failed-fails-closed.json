@@ -84,50 +84,44 @@
         "100",
         "--json",
         "number,labels,updatedAt"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--label",
+        "parked",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels,updatedAt"
       ]
     ],
     "sleeps": [],
     "values": {
-      "pr-gate": {
-        "inflight": {
-          "union": [
-            4240
-          ],
-          "branch": [],
-          "body": [
-            4240
-          ]
-        },
-        "dirty": [],
-        "unchecked": [],
-        "behind": [],
-        "ciTriggerStale": {
-          "ok": false,
-          "reason": "runs-read-failed"
-        },
-        "redResume": {
-          "ok": false,
-          "reason": "dev-resume-input-unavailable"
-        },
-        "devResumePick": {
-          "ok": false,
-          "reason": "dev-resume-input-unavailable"
-        },
-        "devResumeNoprPick": {
-          "ok": true,
-          "value": null
-        },
-        "dirtyFix": {
-          "ok": true,
-          "value": {
-            "pick": null,
-            "surface": []
-          }
-        },
-        "qaVerdictRecheck": {
-          "ok": false,
-          "reason": "required-contexts-unreadable"
-        }
+      "inflight": {
+        "union": [
+          4240
+        ],
+        "branch": [],
+        "body": [
+          4240
+        ]
+      },
+      "redResume": {
+        "ok": false,
+        "reason": "dev-resume-input-unavailable"
+      },
+      "devResumePick": {
+        "ok": false,
+        "reason": "dev-resume-input-unavailable"
+      },
+      "qaVerdictRecheck": {
+        "ok": false,
+        "reason": "required-contexts-unreadable"
       }
     }
   }

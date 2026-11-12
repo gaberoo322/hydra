@@ -129,6 +129,15 @@ export function isFailVerdict(verdict: FinalVerdict): boolean {
 }
 
 /**
+ * True for the two PASS literals. `PASS-pending-CI` is a PASS for lifecycle
+ * routing (the review passed; CI is the merge gate), matching
+ * `scripts/ci/qa-merge-guard.ts`'s `verdict-at-head` semantics (#5317).
+ */
+export function isPassVerdict(verdict: FinalVerdict): boolean {
+  return verdict === "PASS" || verdict === "PASS-pending-CI";
+}
+
+/**
  * The round the NEXT verdict on `pr` gets: prior trailers naming `pr` across
  * the PR's own comment + review bodies, plus one. Trailers naming a different
  * PR are ignored.
@@ -282,6 +291,8 @@ export function buildQaVerdictTrailer(input: {
   blockers: number;
   maxSeverity: QaSeverity;
   priorBodies: ReadonlyArray<string | null | undefined>;
+  /** Reviewer-commit shas (issue #5267); rendered as the optional `qa-fixes=` field. */
+  qaFixes?: readonly string[];
 }): string {
   return renderQaVerdictTrailer({
     verdict: input.verdict,
@@ -290,6 +301,7 @@ export function buildQaVerdictTrailer(input: {
     sha: input.headSha,
     blockers: input.blockers,
     maxSeverity: input.maxSeverity,
+    qaFixes: input.qaFixes,
   });
 }
 

@@ -27,6 +27,7 @@
  * src/autopilot/runs.ts and passes a fabricated `AutopilotRunsDeps`.
  */
 
+import { parseTurnRows } from "../src/autopilot/turn-row.ts";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -72,6 +73,8 @@ interface MemStore {
   runs: Map<string, Record<string, string>>;
   runIndex: Map<string, number>;
   runTurns: Map<string, Set<number>>;
+  /** Raw turn-row JSON by `runId:turnN` (issue #5324). */
+  turnMembers: Map<string, string>;
   cycles: Map<string, Record<string, string>>;
   cycleIndex: Map<string, number>;
   metrics: Map<string, Record<string, string>>;
@@ -93,6 +96,7 @@ function newStore(): MemStore {
     runs: new Map(),
     runIndex: new Map(),
     runTurns: new Map(),
+    turnMembers: new Map(),
     cycles: new Map(),
     cycleIndex: new Map(),
     metrics: new Map(),
@@ -145,7 +149,8 @@ function makeDeps(store: MemStore, opts: FixtureOpts = {}): AutopilotRunsDeps & 
       async addAutopilotRunToIndex(runId, scoreEpochSeconds) {
         store.runIndex.set(runId, scoreEpochSeconds);
       },
-      async addAutopilotRunTurn(runId, turnN) {
+      async addAutopilotRunTurn(runId, turnN, member) {
+        store.turnMembers.set(`${runId}:${turnN}`, member);
         const set = store.runTurns.get(runId) ?? new Set<number>();
         set.add(turnN);
         store.runTurns.set(runId, set);
@@ -785,6 +790,23 @@ describe("recordTurn — injected deps (#2158)", () => {
     assert.ok(store.runTurns.get("run-t")!.has(3));
   });
 
+  test("persists well-formed parent_exceptions rows on the turn member, drops malformed ones, omits when none (#5324)", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await startRun({ run_id: "run-pe", limits: {} } as any, deps);
+    const good = { cause: "script-error", turn: 2, source: "turn.sh", detail: "d", ts_epoch: 5 };
+    await recordTurn({ run_id: "run-pe", turn_n: 2, parent_exceptions: [good, { cause: 7 }, "junk"] } as any, deps);
+    await recordTurn({ run_id: "run-pe", turn_n: 3, parent_exceptions: "nope" } as any, deps);
+    const t2 = JSON.parse(store.turnMembers.get("run-pe:2")!);
+    const t3 = JSON.parse(store.turnMembers.get("run-pe:3")!);
+    assert.deepEqual(t2.parent_exceptions, [good]);
+    assert.equal("parent_exceptions" in t3, false);
+    await recordTurn({ run_id: "run-pe", turn_n: 4, parent_exceptions: [] } as any, deps);
+    assert.deepEqual(JSON.parse(store.turnMembers.get("run-pe:4")!).parent_exceptions, [], "empty list kept as the mirror marker");
+    await recordTurn({ run_id: "run-pe", turn_n: 5, parent_exceptions: ["junk"] } as any, deps);
+    assert.equal("parent_exceptions" in JSON.parse(store.turnMembers.get("run-pe:5")!), false, "all-malformed list is dropped, not a marker");
+  });
+
   test("is idempotent on (runId, turn_n) — a duplicate turn is a no-op", async () => {
     const store = newStore();
     const deps = makeDeps(store);
@@ -871,15 +893,15 @@ describe("sweepRunIfDead — injected liveness, no real PID (#2158)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// getRunDispatchClasses — injected listTurnsDesc, no Redis (#2640)
+// getRunDispatchClasses — injected readTurns, no Redis (#2640)
 //
 // The dispatch-class projection moved out of behavior-gallery.ts's dynamic-
 // import `defaultFetchClasses` into this domain Module. Its narrow
-// `{ listTurnsDesc }` deps bag (mirroring ProjectionDeps) makes the turn-scan /
+// `{ readTurns }` deps bag (mirroring ProjectionDeps) makes the turn-scan /
 // dedup / sort / tolerant-parse logic exercisable without a live Redis.
 // ---------------------------------------------------------------------------
 
-describe("getRunDispatchClasses — injected listTurnsDesc, no Redis (#2640)", () => {
+describe("getRunDispatchClasses — injected readTurns, no Redis (#2640)", () => {
   const turn = (actions: unknown[]) => JSON.stringify({ turn_n: 1, actions });
 
   test("harvests dispatch classes deduped + alphabetically sorted", async () => {
@@ -892,14 +914,14 @@ describe("getRunDispatchClasses — injected listTurnsDesc, no Redis (#2640)", (
       turn([{ type: "reason", class: "ignored" }]), // non-dispatch action skipped
     ];
     const classes = await getRunDispatchClasses("r1", {
-      listTurnsDesc: async () => members,
+      readTurns: async () => parseTurnRows(members),
     });
     assert.deepEqual(classes, ["dev_orch", "qa"]);
   });
 
   test("returns [] for a run with no turns", async () => {
     const classes = await getRunDispatchClasses("empty", {
-      listTurnsDesc: async () => [],
+      readTurns: async () => [],
     });
     assert.deepEqual(classes, []);
   });
@@ -912,7 +934,7 @@ describe("getRunDispatchClasses — injected listTurnsDesc, no Redis (#2640)", (
       turn([{ type: "dispatch", class: "cleanup_orch" }]), // the one good row
     ];
     const classes = await getRunDispatchClasses("mixed", {
-      listTurnsDesc: async () => members,
+      readTurns: async () => parseTurnRows(members),
     });
     assert.deepEqual(classes, ["cleanup_orch"]);
   });
@@ -927,15 +949,15 @@ describe("getRunDispatchClasses — injected listTurnsDesc, no Redis (#2640)", (
       turn([{ type: "dispatch", class: "qa_orch", slot: "ignored-when-class-present" }]),
     ];
     const classes = await getRunDispatchClasses("r-slot", {
-      listTurnsDesc: async () => members,
+      readTurns: async () => parseTurnRows(members),
     });
     assert.deepEqual(classes, ["dev_orch", "qa_orch", "sweep_orch"]);
   });
 
-  test("passes the 200-turn scan cap through to listTurnsDesc", async () => {
+  test("passes the 200-turn scan cap through to readTurns", async () => {
     let seenLimit = -1;
     await getRunDispatchClasses("r-cap", {
-      listTurnsDesc: async (_runId, limit) => {
+      readTurns: async (_runId, limit) => {
         seenLimit = limit;
         return [];
       },

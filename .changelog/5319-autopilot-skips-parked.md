@@ -1,0 +1,1 @@
+- feat: autopilot skips PRs whose closing issue is parked, and /hydra-review lists parked work as its own queue (#5319)

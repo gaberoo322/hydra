@@ -30,7 +30,8 @@ reported here. `/hydra-hitl-grill` is the standalone drain for that lane.
 1. **Stalled PRs** (§0.9) — green-but-conflicted and green-but-unshepherded PRs across `gaberoo322/hydra` and every Target repo. A PR is not an issue (so no bucket above walks it), its passing checks alarm nothing, and a merge conflict raises no signal — finished work that is not landing sits invisible until somebody looks.
 2. **`ready-for-human`** (Orchestrator) — `gaberoo322/hydra` issues requiring operator decisions, including a `hydra-grill` gate-fail handoff (a `## hydra-grill handoff` comment on the anchor issue, ADR-0034 §8.1).
 3. **Stale-blocked** (Orchestrator) — `blocked` issues where no linked open issue justifies the block
-4. **Per-Target operator-attention items** (§1.5) — for each configured Target board (`target-config.ts`), the Target's `ready-for-human`, `reframe` (a build that failed 2+ times, stamped by `hydra-target-qa`), and stale-`blocked` issues. Deliberately **not** `needs-triage` — that is `hydra-target-sweep`'s autonomous lane (mirroring how the Orchestrator buckets leave triage to `hydra-sweep`).
+4. **Parked (cap-exhausted work)** (Orchestrator) — open `gaberoo322/hydra` issues carrying the `parked` human-hold label (ADR-0047 Decision 6): the lifecycle writer seam parked them in the same call that found a cap exceeded, and the autopilot now skips every PR whose closing issue is parked (resume, QA, forward-fix, update-branch, conflict-fix, auto-merge). Only the operator un-parks. These are not stalled PRs — the PR is deliberately left open.
+5. **Per-Target operator-attention items** (§1.5) — for each configured Target board (`target-config.ts`), the Target's `ready-for-human`, `reframe` (a build that failed 2+ times, stamped by `hydra-target-qa`), and stale-`blocked` issues. Deliberately **not** `needs-triage` — that is `hydra-target-sweep`'s autonomous lane (mirroring how the Orchestrator buckets leave triage to `hydra-sweep`).
 
 Stalled PRs drain first: a green-but-stuck PR is finished work that is not landing, and it is the cheapest thing on the board to unstick — usually one command — so clearing it first converts effort into merged work before the session spends judgment on undecided issues. `ready-for-human` and stale-blocked follow: these need real operator thought, and a stale-blocked row in particular is only worth walking after its blocker has been verified against the tracker rather than trusted from the label. Per-Target items drain after the Orchestrator buckets: the Orchestrator-self board is primary (it builds the machine that builds the Targets), and a Target `reframe`/`ready-for-human` blocks only that one Target build loop, not the whole AFK frontier. `hitl-grill` is deliberately absent: parked ideas are not attention items, and `/hydra-hitl-grill` drains that lane on its own schedule.
 
@@ -99,6 +100,16 @@ end-of-session phase) and surfaces the two failure modes:
 - **`unshepherded`** — `mergeable == "MERGEABLE"` **AND** every *required* check
   passes **AND** `autoMergeRequest == null`. Mergeable and green, but no
   mechanism will ever merge it.
+- **`no-closing-issue`** (Orchestrator repo only, #5400) — open, non-draft PR
+  whose body carries no `Closes|Fixes|Resolves #N`. Every PR lane keys on a
+  closing issue, so a `Refs #N`-only partial delivery is unreachable and strands
+  unreviewed. The autopilot Turn Snapshot surfaces these automatically
+  (`orch_prs_no_closing_issue` -> `surface-pr {cause: no-closing-issue}`,
+  `ready-for-human`); list the rest by hand with
+  `gh pr list --repo gaberoo322/hydra --state open --json number,isDraft,body | jq '[.[] | select(.isDraft|not) | select(.body // "" | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?):?[ ]+#[0-9]+") | not) | .number]'`.
+  Recommended action: file the child issue for the slice, edit the body to
+  `Closes #<child>` (then ONE more push so synchronize-time gates re-read the
+  body), or merge by hand for a docs companion.
 
 > **`mergeable == "UNKNOWN"` is "no verdict", never conflicted.** GitHub computes
 > mergeability asynchronously; a freshly-pushed PR reports `UNKNOWN` for a few
@@ -173,7 +184,7 @@ oldest-first, one PR at a time, and offer the canonical four (§4):
   follow-up `AskUserQuestion` (header `QA override`). This is the only
   sanctioned second question on a row, because an override must be an explicit
   choice:
-  1. **Route to QA (Recommended)** — add `needs-qa` to the linked issue; no merge.
+  1. **Route to QA (Recommended)** — relabel the linked issue `needs-qa` via `POST /api/autopilot/board/relabel`; no merge.
   2. **Override: accept the FAIL** / 3. **Override: QA not needed** — the label
      is the reason ("Other" text replaces it). Run the QA-Override recipe below.
   4. **Skip**.
@@ -216,7 +227,8 @@ LANE=needs-dev-resume   # or needs-qa — the lane the operator's resolution nam
 # The subshell scopes every `exit 1` below: a failure aborts the recipe loudly
 # without closing the operator's shell.
 (
-# 1. Clear the PR's stranding labels. Name in the URL path — the `-f name=` form
+# 1. Clear the PR's stranding labels (PR FLAGS, not issue lifecycle state: ready-for-human
+#    on a PR is the pr-gate "surfaced" flag - ADR-0047 D2 scopes state to issues). Name in the URL path — the `-f name=` form
 #    wipes ALL labels. ONLY an HTTP 404 / "Label does not exist" means the label
 #    is already absent and is tolerated. Any other failure (auth, rate limit,
 #    network) prints the error and aborts BEFORE the issue is relabelled.
@@ -239,8 +251,14 @@ if [ -n "$LEFT" ]; then
   echo "ERROR: PR #$PR still carries $LEFT; issue #$ISSUE NOT relabelled" >&2
   exit 1
 fi
-# 3. Route the linked issue to the chosen lane.
-gh issue edit "$ISSUE" --repo "$RREPO" --remove-label ready-for-human --add-label "$LANE"
+# 3. Route the linked issue to the chosen lane through the board route (ADR-0047:
+#    the sanctioned operator-route exit; never a direct gh label write).
+RESP=$(curl -s -X POST http://localhost:4000/api/autopilot/board/relabel \
+  -H 'content-type: application/json' \
+  -d "{\"issue\":$ISSUE,\"label\":\"$LANE\"}") \
+  && echo "$RESP" | jq -e '.ok == true' >/dev/null \
+  || { echo "ERROR: relabel of #$ISSUE refused: $RESP" >&2; exit 1; }
+echo "issue #$ISSUE relabelled to $LANE"
 )
 ```
 
@@ -293,6 +311,14 @@ gh issue list --repo gaberoo322/hydra --label "blocked" --state open --json numb
 
 For each blocked issue, check body/comments for "blocked by #N", "depends on #N", or links. Referenced issue closed or no blocker referenced → stale-blocked.
 
+Parked (cap-exhausted work) is gathered separately (issue #5319):
+
+```bash
+gh issue list --repo gaberoo322/hydra --label "parked" --state open --json number,title,labels,createdAt,updatedAt,comments
+```
+
+For each parked issue, read the LATEST `Hydra-Cap-Park:` machine line in its comments (`Hydra-Cap-Park: arm=… count=… limit=… unit=… [pr=N] source=… ts=…`, posted under the `## Hydra cap park` comment). Its `arm`, `count`/`limit` and `pr` fields fill the §2 table; no machine line (a hand-applied `parked` label) → show `?` for those cells and say so.
+
 ### 1.5. Gather (per Target board)
 
 Enumerate the configured Target repos and gather each board's operator-attention
@@ -337,6 +363,10 @@ its prior-attempt history so the operator decides informed.
 ### Stale-blocked (K) — Orchestrator
 | # | Title | Age | Blocker status |
 |---|-------|-----|----------------|
+
+### Parked (P) — Orchestrator, cap-exhausted work
+| # | Arm | Count/Limit | PR | Age | Title |
+|---|-----|-------------|----|-----|-------|
 
 ### Target: <repo> — ready-for-human / reframe / stale-blocked (T) — §1.5
 (one block per configured Target board; omit a Target with nothing needing attention)
@@ -387,10 +417,11 @@ Per row:
 4. Call `AskUserQuestion` with **exactly one question** for this row, using that
    bucket's canonical options from §4. One row = one question = one call; never
    batch two rows into one call, and never pre-stage the next row's question.
-5. Execute the pick via `gh` — **always pass the row's own repo**
-   (`--repo gaberoo322/hydra` for Orchestrator rows, `--repo <TREPO>` for Target
-   rows); explore that repo's checkout (`~/hydra` vs `$TARGET_APP_DIR`)
-   before asking obvious questions.
+5. Execute the pick — Orchestrator rows' state moves ride the board routes
+   (`POST /api/autopilot/board/{promote|relabel|close|reopen}`, ADR-0047); Target
+   rows and flag labels use `gh` with **the row's own repo** (`--repo <TREPO>`). Orchestrator verbs: "Make it agent-ready" = promote,
+   "Needs more info" = relabel `needs-info`, "Won't do" = close. Explore that
+   repo's checkout (`~/hydra` vs `$TARGET_APP_DIR`) before asking obvious questions.
 6. Move on.
 
 **Prompt shape.** `header` is the bucket (≤12 chars: `Stalled PR`, `Blocked`,
@@ -404,6 +435,30 @@ Never present a neutral menu — commit to a position and put it first.
 
 **Slot 4 is always Skip.** "Other" is appended automatically by the tool for free
 text, so it is never an option you write.
+
+**Parked rows (issue #5319).** Read the issue, the `Hydra-Cap-Park:` line and the
+open PR (if `pr=N`), then ask whether the cap that tripped was a real signal (a
+runaway loop: leave it parked, or close) or a limit that was set too low (un-park).
+There is NO §4 option-table row for this bucket yet: a row needs a
+`waiting-on-you:parked` admission line in ADR-0034 §8.1's closed vocabulary. The
+walk is a plain `AskUserQuestion` whose slot 1 is the recommendation and slot 4 is
+Skip. A judgment park (journal reason `off-list-escalation` / `deferred` /
+`duplicate-candidate`, no `Hydra-Cap-Park:` machine line) is walked and un-parked
+exactly like a cap park. The un-park route, when the operator chooses to resume:
+
+1. **The state exit.** The confirm-first board route `POST /api/autopilot/board/promote`
+   for "resume as `ready-for-agent`", or `POST /api/autopilot/board/relabel` for any
+   other lane - the sanctioned `operator-route` exit from a human-hold state (the
+   seam strips `parked` as it strips `hitl-grill`). Never write a lifecycle state
+   label with `gh issue edit` from this playbook.
+2. **The reset marker.** The board route posts `Hydra-Cap-Reset: by=<actor> ts=<ISO-8601>`
+   on the ISSUE when it removes `parked` (not when it closes) and stamps the journal
+   entry `capReset=posted` or `capReset=failed:<code>`. Post it by hand on the ISSUE
+   only, never on the PR, and only in these cases:
+   - `capReset=posted`: do nothing.
+   - `capReset=failed:<code>`: `gh issue comment <N> --repo gaberoo322/hydra --body
+     "Hydra-Cap-Reset: by=operator:<name> ts=<ISO-8601>"`.
+   - `parked` removed by hand and the reconciler has not yet run: the same comment.
 
 **Evidence `preview` — two buckets only.** `preview` renders monospace markdown
 beside the options and is single-select-only, which is exactly this walk. Use it
@@ -514,7 +569,7 @@ carries on its next tick. That is the point of the cockpit — count it.
 
 ## Rules
 
-- **Drain order: stalled PRs (§0.9) → Orchestrator ready-for-human → Orchestrator stale-blocked → per-Target items (§1.5).** Stalled PRs come first because they are the cheapest conversion of effort into merged work on the board — don't reorder anything ahead of them. **Per-Target items drain after the Orchestrator buckets** (the Orchestrator-self board is primary); within the Target phase, finish one Target board fully before starting the next.
+- **Drain order: stalled PRs (§0.9) → Orchestrator ready-for-human → Orchestrator stale-blocked → Orchestrator parked → per-Target items (§1.5).** Stalled PRs come first because they are the cheapest conversion of effort into merged work on the board — don't reorder anything ahead of them. **Per-Target items drain after the Orchestrator buckets** (the Orchestrator-self board is primary); within the Target phase, finish one Target board fully before starting the next.
 - **Target rows resolve against the Target repo, never `gaberoo322/hydra`.** Every `gh` command for a Target row carries `--repo <TREPO>` (the row's own repo from the §1.5 enumeration), and codebase exploration uses that Target's workspace (`$TARGET_APP_DIR`, not `~/hydra`). Never gather or resolve a Target `needs-triage` item here — that is `hydra-target-sweep`'s autonomous lane.
 - **`hitl-grill` is out of scope for this session — never gather, report, promote, close, relabel, or comment on a parked idea here.** The lane has exactly two write paths, the Work page's HITL grill inbox and `/hydra-hitl-grill`, and both go through the board routes (`POST /api/autopilot/board/promote` / `close`) so a promote strips the park label in the same verified write that adds `ready-for-agent`, and a dismiss retains it as the producers' dedup baseline. A third path from here would risk the half-written states that design exists to prevent. If the operator asks about parked ideas, point them at `/hydra-hitl-grill`.
 - **One issue at a time. No batching.** This survives `AskUserQuestion` intact:

@@ -303,8 +303,8 @@ describe("decide.py — orch_pending_grill_anchor signal path (issue #628)", () 
     const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
     assert.ok(grill, "orch_pending_grill_anchor signal must trigger a grill dispatch");
     assert.equal(grill.skill, "hydra-grill");
-    assert.equal(grill.prompt_args.scope, "orch");
-    assert.equal(grill.prompt_args.anchor, "issue-628");
+    assert.equal(grill.intent.kind, "Grill");
+    assert.equal(grill.intent.anchor, "issue-628");
   });
 
   test("dev_orch yields the same turn the grill fires (sequencing rule)", () => {
@@ -429,13 +429,13 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
     const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
 
     assert.ok(grill, "the un-grilled anchor must STILL be grilled — the gate is not a no-op");
-    assert.equal(grill.prompt_args.anchor, "issue-3730",
+    assert.equal(grill.intent.anchor, "issue-3730",
       "the grill must still target the anchor that lacks a design concept");
 
     assert.ok(dev,
       "dev_orch must NOT yield globally when a different grill-clear anchor is available (#3711)");
     assert.equal(dev.skill, "hydra-dev");
-    assert.equal(dev.prompt_args.anchor, "issue-3707",
+    assert.equal(dev.intent.anchor, "issue-3707",
       "dev_orch must be PINNED to the grill-clear anchor — an unpinned dispatch lets " +
       "hydra-dev self-select via its own `gh issue list | .[0]` and land on the grilled anchor");
     assert.match(dev.reason, /3711/,
@@ -512,7 +512,7 @@ describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #37
     const plan = runDecide(state, { candidates: [] });
     const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
     assert.ok(dev, "dev_orch dispatches when no grill is pending");
-    assert.equal(dev.prompt_args?.anchor, undefined,
+    assert.equal(dev.intent.anchor, undefined,
       "no grill pending → no pin; hydra-dev selects its own anchor per #458");
   });
 
@@ -614,7 +614,7 @@ describe("decide.py — design_concept_orch never grills a target candidate unde
       (a) =>
         a.type === "dispatch" &&
         a.slot === "design_concept_orch" &&
-        a.prompt_args?.anchor ===
+        a.intent?.anchor ===
           "Add distributed execution-pair-lock via pg_advisory_lock or Redis SETNX",
     );
     assert.equal(anyTargetAnchorGrill, undefined,

@@ -12,7 +12,14 @@ import turn_snapshot as ts
 
 from decide_base import (
     QA_STALL_MAX_ATTEMPTS,
+    _needs_qa_target_pr_head,
     _needs_qa_target_pr_ref,
+    _parked_issues,
+    _parked_read_degraded,
+    ReviewLane,
+    ReviewSelfSelect,
+    TargetReviewPr,
+    TargetReviewSelfSelect,
     _signal_present,
     make_dispatch,
 )
@@ -42,17 +49,29 @@ def _select_slot_qa_orch(
     #
     # UNLIKE the #3729 sweep_target per-item guard (which tracks EVERY
     # current item), this tracks ONLY the HEAD of the needs-qa set —
-    # `needs_qa_numbers[0]` — because hydra-qa self-selects via its own
-    # unsorted-default `gh issue list --label needs-qa --jq '.[0]'` query,
-    # so the head is deterministically the ONLY issue any given qa_orch
-    # dispatch will actually review (invariant 4). Bumping every item in
+    # `needs_qa_numbers[0]` — because the dispatch's ReviewLane intent names
+    # exactly that parked-filtered head (#5382), so the head is
+    # deterministically the ONLY issue any given qa_orch dispatch will
+    # actually review (invariant 4). Bumping every item in
     # the set (as a naive #3729-style port would) was considered and
     # rejected at design time: it would falsely accumulate attempts
     # against issues sitting further back in the queue that were never
     # actually reviewed, risking a false "stalled" verdict on a
     # healthy-but-queued issue the moment it becomes the new head.
     numbers = _qa_orch_needs_qa_numbers(state, events)
+    intent = ReviewSelfSelect()
+    # #5319 INV-4: a degraded parked read fails CLOSED on every path, including
+    # the absent/empty-numbers boolean fallback below (QA r2).
+    if _parked_read_degraded(state, events):
+        return None
     if numbers:
+        # #5319 (ADR-0047 Decision 6): a parked needs-qa issue is the operator's
+        # (human hold) - never reviewed. Drop parked numbers; if nothing is left
+        # there is nothing to dispatch on.
+        parked = _parked_issues(state, events)
+        numbers = [n for n in numbers if n not in parked]
+        if not numbers:
+            return None
         head = numbers[0]
         attempts = _qa_orch_item_attempts(state)
         if not _qa_orch_item_eligible(attempts.get(head, 0)):
@@ -74,11 +93,16 @@ def _select_slot_qa_orch(
         # turn (verdict reached, or superseded by a new head) is dropped,
         # so a later re-open under the same number starts fresh at 0.
         _bump_qa_orch_stall_tracker(state, head)
+        # #5382: always name the head the selector chose plus the parked-filtered
+        # remainder, so the renderer never re-reads the lane (the #5319 bug class).
+        # A duplicated number in the snapshot (fixture or double-read) collapses to its first occurrence.
+        rest = tuple(f"issue-{n}" for n in dict.fromkeys(numbers[1:]) if n != head)
+        intent = ReviewLane(anchor=f"issue-{head}", rest=rest)
     # `numbers` absent/empty (no per-item fact this turn — a degraded
-    # board read or a pre-#3829 playbook) -> fail OPEN on the coarse
-    # boolean alone, preserving pre-#3829 behaviour so a transient wiring
+    # board read or a pre-#3829 playbook) -> ReviewSelfSelect: fail OPEN on the
+    # coarse boolean alone, preserving pre-#3829 behaviour so a transient wiring
     # gap never dead-arms qa_orch (the #3709 defect class).
-    return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "orch"}, reason="needs-qa")
+    return make_dispatch(cls, "hydra-qa", intent=intent, reason="needs-qa")
 
 
 def _select_slot_qa_target(
@@ -102,21 +126,24 @@ def _select_slot_qa_target(
     # Post-#4576 the dispatch skill is `hydra-target-qa`, the purpose-built
     # Target QA skill (classes.json's qa_target row has always named it —
     # this selector was the drift). The previously-dispatched `hydra-qa` has
-    # NO target-scope path: nothing in it reads `prompt_args.scope`, it
-    # self-selects from the ORCHESTRATOR repo's needs-qa lane, so a literal
-    # dispatch either duplicated qa_orch's review or no-op'd (issue #4576's
-    # finding). `prompt_args.scope` stays "target" (INV-4 — the trigger's
-    # board provenance, same shape as qa_orch's "orch"), and a pre-resolved
-    # `pr_ref` is attached ONLY when `target_needs_qa_pr_ref` is a non-empty
-    # string — never "" or null — so hydra-target-qa always receives either
-    # a real PR URL or no key at all (its own step 1 resolves the PR the
-    # current Target build opened when the key is absent).
+    # NO target-scope path: it self-selects from the ORCHESTRATOR repo's
+    # needs-qa lane, so a literal dispatch either duplicated qa_orch's review
+    # or no-op'd (issue #4576's finding). Since #5383 the dispatch carries a
+    # typed intent (qa_target is target-scope by its class row): a
+    # TargetReviewPr is built ONLY when `target_needs_qa_pr_ref` is a
+    # non-empty string — never "" or null — otherwise TargetReviewSelfSelect,
+    # so hydra-target-qa always receives either a real PR URL or none (its own
+    # step 1 resolves the PR the current Target build opened).
     if _signal_present(state, events, "needs_qa_target"):
-        prompt_args: dict = {"scope": "target"}
+        # Issue #5383: the action carries a typed intent (no prompt_args). A
+        # non-empty ref -> TargetReviewPr(pr_ref, head); absent/empty ->
+        # TargetReviewSelfSelect (the #4576 INV-5 fail-open arm).
         pr_ref = _needs_qa_target_pr_ref(state, events)
         if pr_ref:
-            prompt_args["pr_ref"] = pr_ref
-        return make_dispatch(cls, "hydra-target-qa", prompt_args=prompt_args, reason="needs-qa target")
+            intent = TargetReviewPr(pr_ref=pr_ref, head=_needs_qa_target_pr_head(state, events) or None)
+        else:
+            intent = TargetReviewSelfSelect()
+        return make_dispatch(cls, "hydra-target-qa", intent=intent, reason="needs-qa target")
     return None
 
 

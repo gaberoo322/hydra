@@ -60,7 +60,12 @@ export function lifecycleJournalKey(repo: string, issue: number): string {
 }
 
 export function lifecycleClaimKey(repo: string, issue: number): string {
-  return `hydra:lifecycle:claim:${repo}#${issue}`;
+  return `${claimKeyPrefix(repo)}${issue}`;
+}
+
+/** SCAN prefix shared by every claim key of `repo`; `lifecycleClaimKey` is `prefix + issue`. */
+export function claimKeyPrefix(repo: string): string {
+  return `hydra:lifecycle:claim:${repo}#`;
 }
 
 export type JournalWriteResult = { ok: true } | { ok: false; error: string };
@@ -70,21 +75,205 @@ function fail(op: string, err: unknown): { ok: false; error: string } {
   return { ok: false, error: `[lifecycle-journal] ${op} failed: ${message}` };
 }
 
-/** Append one entry: `RPUSH` then `LTRIM -500 -1`. Nothing else. */
+/**
+ * Which OPT-IN write-time index joins an append's one `MULTI`: `holdExit`
+ * (#5313) is decided by the caller. The cap-events index (#5324) is NOT
+ * selectable — every append indexes whenever `capEventRecord` classifies the
+ * entry as a cap event, so no producer (park, reconcile, seam) can miss it.
+ */
+export interface LifecycleIndexSelector {
+  holdExit?: boolean;
+}
+
+/**
+ * Append one entry: `RPUSH` then `LTRIM -500 -1`. A selected hold-exit index
+ * and any cap-event index write (`ZADD` + trim) join the SAME `MULTI`, so an
+ * entry can never be journaled without being indexed (#5313, #5324).
+ */
 export async function appendLifecycleEntry(
+  repo: string,
+  issue: number,
+  entry: LifecycleJournalEntry,
+  index: LifecycleIndexSelector = {},
+): Promise<JournalWriteResult> {
+  try {
+    const r = getRedisConnection();
+    const key = lifecycleJournalKey(repo, issue);
+    const holdExit = index.holdExit === true;
+    const capRecord = capEventRecord(issue, entry);
+    if (!holdExit && capRecord === null) {
+      await r.rpush(key, JSON.stringify(entry));
+      await r.ltrim(key, -LIFECYCLE_JOURNAL_MAX_ENTRIES, -1);
+      return { ok: true };
+    }
+    const multi = r.multi().rpush(key, JSON.stringify(entry)).ltrim(key, -LIFECYCLE_JOURNAL_MAX_ENTRIES, -1);
+    if (holdExit) {
+      const idxKey = holdExitIndexKey(repo);
+      multi
+        .zadd(idxKey, entry.ts, JSON.stringify(holdExitRecord(issue, entry)))
+        .zremrangebyscore(idxKey, "-inf", entry.ts - HOLD_EXIT_RETENTION_MS);
+    }
+    if (capRecord !== null) {
+      const capKey = capEventsIndexKey(repo);
+      multi
+        .zadd(capKey, entry.ts, JSON.stringify(capRecord))
+        .zremrangebyscore(capKey, "-inf", entry.ts - CAP_EVENTS_RETENTION_MS);
+    }
+    const results = await multi.exec();
+    const failed = results?.find(([err]) => err !== null);
+    if (results === null || failed) {
+      return fail("appendLifecycleEntry", failed?.[0] ?? new Error("MULTI aborted"));
+    }
+    return { ok: true };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] appendLifecycleEntry failed");
+    return fail("appendLifecycleEntry", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cap-events index (ADR-0047 Decision 9, issue #5324)
+// ---------------------------------------------------------------------------
+
+export const CAP_EVENTS_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function capEventsIndexKey(repo: string): string {
+  return `hydra:lifecycle:cap-events:${repo}`;
+}
+
+export type CapEventKind = "park" | "would-park" | "claim";
+
+export interface CapEventRecord {
+  kind: CapEventKind;
+  issue: number;
+  ts: number;
+  arm?: string;
+  pr?: number;
+  actor: string;
+}
+
+/**
+ * Pure: classify one journal entry as a cap event, or `null` when it is not
+ * one. A cap park (`to=parked`, reason `cap:<arm>`) is a `park`; a shadow
+ * refusal (`result` `shadow-would-park:<arm>`) is a `would-park`; a
+ * `claim-opened` entry is a `claim` (the park-rate denominator).
+ */
+export function capEventRecord(issue: number, entry: LifecycleJournalEntry): CapEventRecord | null {
+  const pr = Number(entry.evidence?.pr);
+  const prPart = Number.isInteger(pr) && pr > 0 ? { pr } : {};
+  if (entry.kind === "claim-opened") {
+    return { kind: "claim", issue, ts: entry.ts, actor: entry.actor };
+  }
+  if (typeof entry.result === "string" && entry.result.startsWith("shadow-would-park:")) {
+    return {
+      kind: "would-park",
+      issue,
+      ts: entry.ts,
+      arm: entry.result.slice("shadow-would-park:".length),
+      ...prPart,
+      actor: entry.actor,
+    };
+  }
+  if (entry.to === "parked" && entry.written === true && typeof entry.reason === "string" && entry.reason.startsWith("cap:")) {
+    return { kind: "park", issue, ts: entry.ts, arm: entry.reason.slice("cap:".length), ...prPart, actor: entry.actor };
+  }
+  return null;
+}
+
+export type ListCapEventsResult =
+  | { ok: true; events: CapEventRecord[] }
+  | { ok: false; error: string };
+
+/** Cap events with `ts >= sinceMs`, oldest first; malformed members are skipped (logged). */
+export async function listCapEvents(repo: string, sinceMs: number): Promise<ListCapEventsResult> {
+  try {
+    const raw: string[] = await getRedisConnection().zrangebyscore(capEventsIndexKey(repo), sinceMs, "+inf");
+    const events: CapEventRecord[] = [];
+    for (const row of raw) {
+      try {
+        events.push(JSON.parse(row) as CapEventRecord);
+      } catch (parseErr) {
+        logger.error({ err: parseErr }, "[lifecycle-journal] skipping malformed cap-event member");
+      }
+    }
+    return { ok: true, events };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] listCapEvents failed");
+    return fail("listCapEvents", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hold-exit index (ADR-0047 Decision 3, issue #5313)
+// ---------------------------------------------------------------------------
+
+export const HOLD_EXIT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function holdExitIndexKey(repo: string): string {
+  return `hydra:lifecycle:hold-exits:${repo}`;
+}
+
+export interface HoldExitRecord {
+  issue: number;
+  ts: number;
+  from: string | null;
+  to: string | null;
+  source: JournalSource;
+  actor: string;
+}
+
+function holdExitRecord(issue: number, entry: LifecycleJournalEntry): HoldExitRecord {
+  return {
+    issue,
+    ts: entry.ts,
+    from: entry.from,
+    to: entry.to,
+    source: entry.source,
+    actor: entry.actor,
+  };
+}
+
+/**
+ * Index one unsanctioned human-hold exit: `ZADD` (score = entry ts) and drop
+ * members older than 30d. The journal LIST itself stays RPUSH+LTRIM only.
+ */
+export async function recordHoldExit(
   repo: string,
   issue: number,
   entry: LifecycleJournalEntry,
 ): Promise<JournalWriteResult> {
   try {
     const r = getRedisConnection();
-    const key = lifecycleJournalKey(repo, issue);
-    await r.rpush(key, JSON.stringify(entry));
-    await r.ltrim(key, -LIFECYCLE_JOURNAL_MAX_ENTRIES, -1);
+    const key = holdExitIndexKey(repo);
+    await r.zadd(key, entry.ts, JSON.stringify(holdExitRecord(issue, entry)));
+    await r.zremrangebyscore(key, "-inf", entry.ts - HOLD_EXIT_RETENTION_MS);
     return { ok: true };
   } catch (err) {
-    logger.error({ err }, "[lifecycle-journal] appendLifecycleEntry failed");
-    return fail("appendLifecycleEntry", err);
+    logger.error({ err }, "[lifecycle-journal] recordHoldExit failed");
+    return fail("recordHoldExit", err);
+  }
+}
+
+export type ListHoldExitsResult =
+  | { ok: true; exits: HoldExitRecord[] }
+  | { ok: false; error: string };
+
+/** Hold exits with `ts >= sinceMs`, oldest first; malformed members are skipped (logged). */
+export async function listHoldExits(repo: string, sinceMs: number): Promise<ListHoldExitsResult> {
+  try {
+    const raw: string[] = await getRedisConnection().zrangebyscore(holdExitIndexKey(repo), sinceMs, "+inf");
+    const exits: HoldExitRecord[] = [];
+    for (const row of raw) {
+      try {
+        exits.push(JSON.parse(row) as HoldExitRecord);
+      } catch (parseErr) {
+        logger.error({ err: parseErr }, "[lifecycle-journal] skipping malformed hold-exit member");
+      }
+    }
+    return { ok: true, exits };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] listHoldExits failed");
+    return fail("listHoldExits", err);
   }
 }
 
@@ -205,6 +394,59 @@ export async function closeDispatchClaim(
   }
 }
 
+export type ReadClaimResult =
+  | { ok: true; claim: DispatchClaim | null }
+  | { ok: false; error: string };
+
+/** Read (never modify) the held dispatch claim, or `claim: null` when none. */
+export async function readDispatchClaim(repo: string, issue: number): Promise<ReadClaimResult> {
+  try {
+    const raw = await getRedisConnection().get(lifecycleClaimKey(repo, issue));
+    return { ok: true, claim: parseClaim(raw) };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] readDispatchClaim failed");
+    return fail("readDispatchClaim", err);
+  }
+}
+
+export type ListClaimsResult =
+  | { ok: true; claims: Array<{ issue: number; claim: DispatchClaim }> }
+  | { ok: false; error: string };
+
+/**
+ * SCAN `hydra:lifecycle:claim:<repo>#*` + GET each key. Read-only: never
+ * modifies a claim, writes no reverse index. Malformed values and keys whose
+ * suffix is not an issue number are skipped (logged).
+ */
+export async function listDispatchClaims(repo: string): Promise<ListClaimsResult> {
+  try {
+    const r = getRedisConnection();
+    const prefix = claimKeyPrefix(repo);
+    const keys = new Set<string>();
+    let cursor = "0";
+    do {
+      const [next, batch] = await r.scan(cursor, "MATCH", `${prefix}*`, "COUNT", 200);
+      cursor = next;
+      for (const k of batch) keys.add(k);
+    } while (cursor !== "0");
+    const claims: Array<{ issue: number; claim: DispatchClaim }> = [];
+    for (const key of keys) {
+      const suffix = key.slice(prefix.length);
+      if (!/^\d+$/.test(suffix)) {
+        logger.warn({ key }, "[lifecycle-journal] skipping claim key with non-numeric issue");
+        continue;
+      }
+      const claim = parseClaim(await r.get(key));
+      if (claim !== null) claims.push({ issue: Number(suffix), claim });
+    }
+    claims.sort((a, b) => a.issue - b.issue);
+    return { ok: true, claims };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] listDispatchClaims failed");
+    return fail("listDispatchClaims", err);
+  }
+}
+
 function parseClaim(raw: string | null): DispatchClaim | null {
   if (raw === null) return null;
   try {
@@ -212,5 +454,49 @@ function parseClaim(raw: string | null): DispatchClaim | null {
   } catch (err) {
     logger.error({ err }, "[lifecycle-journal] malformed claim value");
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile report (ADR-0047 D5, issue #5316)
+// ---------------------------------------------------------------------------
+
+export function lifecycleReconcileKey(repo: string): string {
+  return `hydra:lifecycle:reconcile:${repo}`;
+}
+
+/** Persist the latest reconcile report: a hash holding the JSON and its epoch-ms `ts`. */
+export async function writeReconcileReport(
+  repo: string,
+  report: object,
+  ts: number,
+): Promise<JournalWriteResult> {
+  try {
+    await getRedisConnection().hset(lifecycleReconcileKey(repo), "json", JSON.stringify(report), "ts", String(ts));
+    return { ok: true };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] writeReconcileReport failed");
+    return fail("writeReconcileReport", err);
+  }
+}
+
+export type ReadReconcileReportResult =
+  | { ok: true; report: Record<string, unknown> | null; ts: number | null }
+  | { ok: false; error: string };
+
+/** Read the latest persisted reconcile report; `report: null` when none was ever written. */
+export async function readReconcileReport(repo: string): Promise<ReadReconcileReportResult> {
+  try {
+    const hash = await getRedisConnection().hgetall(lifecycleReconcileKey(repo));
+    if (!hash || typeof hash.json !== "string") return { ok: true, report: null, ts: null };
+    const ts = Number(hash.ts);
+    const parsed: unknown = JSON.parse(hash.json);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { ok: true, report: null, ts: null };
+    }
+    return { ok: true, report: parsed as Record<string, unknown>, ts: Number.isFinite(ts) ? ts : null };
+  } catch (err) {
+    logger.error({ err }, "[lifecycle-journal] readReconcileReport failed");
+    return fail("readReconcileReport", err);
   }
 }

@@ -1,0 +1,1 @@
+- refactor: lifecycle caps are transition data enforced by one guardCaps step; live arms park in shadow (#5421)

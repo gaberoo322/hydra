@@ -8,7 +8,7 @@
  *
  * The eight functions here (`deriveWorkLane`, `toWorkQueueRow`,
  * `compareWorkQueueRows`, `evaluatePromoteEligibility`,
- * `computeRelabelTransitions`, `parseParkReason`, `toHitlGrillRow`,
+ * `parseParkReason`, `toHitlGrillRow`,
  * `compareHitlGrillRows`) plus the `PromoteEligibility` type are the
  * side-effect-free projections behind the /work page's three reads and four
  * board actions (issues #4010, #4028): operator-lane resolution, queue row
@@ -34,12 +34,10 @@
 
 import {
   WORK_QUEUE_LANES,
-  RELABEL_TARGETS,
   HITL_GRILL_LABEL,
   type WorkQueueLane,
   type WorkQueueRow,
   type BoardActionReason,
-  type RelabelTarget,
   type HitlGrillRow,
 } from "../schemas/autopilot-board.ts";
 import type { IssueRow, IssueQueryOptions, IssueReadResult } from "../github/issues.ts";
@@ -109,12 +107,7 @@ export function toWorkQueueRow(
 ): WorkQueueRow | null {
   const lane = deriveWorkLane(row.labels);
   if (lane === null) return null;
-  const rowBlockers =
-    openBlockers.size > 0
-      ? extractStrictBlockerRefs(row.body).filter(
-          (n) => n !== row.number && openBlockers.has(n),
-        )
-      : [];
+  const rowBlockers = openStrictBlockerRefs(row, openBlockers);
   return {
     number: row.number,
     title: row.title,
@@ -124,6 +117,9 @@ export function toWorkQueueRow(
     updatedAt: row.updatedAt ?? "",
     openBlockers: rowBlockers,
     hasScopeSection: hasScopeSection(row.body),
+    // The ONE evaluator the promote write gate refuses with (#5451): the page
+    // reads these verdicts and never re-derives them.
+    promoteChecks: evaluatePromoteChecks(row, openBlockers),
     glmEligible: glmLane(row.labels, opts.glmPartitionActive).lane === "glm",
   };
 }
@@ -195,22 +191,87 @@ export function compareWorkQueueRows(a: WorkQueueRow, b: WorkQueueRow): number {
   return na - nb;
 }
 
+/**
+ * The row's OPEN strict-blocker refs: the strict refs in its body that are in
+ * the endpoint-resolved `openBlockers` set, self-references excluded. Shared
+ * by the work-queue row (`openBlockers`), the `no-open-blocker` verdict and the
+ * `blocked` refusal detail so the three can never disagree.
+ */
+function openStrictBlockerRefs(
+  row: IssueRow,
+  openBlockers: ReadonlySet<number>,
+): number[] {
+  if (openBlockers.size === 0) return [];
+  return extractStrictBlockerRefs(row.body).filter(
+    (n) => n !== row.number && openBlockers.has(n),
+  );
+}
+
+/**
+ * The four promote checks, in refusal-precedence order (issue #5451,
+ * ADR-0034 §8.3): each is a CONTROL_CHECKS id of the `control:work/promote`
+ * registry entry. The check-id to refusal-reason mapping below is the ONE copy
+ * (the registry test used to hand-write it).
+ */
+export const PROMOTE_CHECK_REFUSALS = [
+  { check: "issue-open", reason: "closed" },
+  { check: "not-already-ready", reason: "already-ready" },
+  { check: "has-scope-section", reason: "missing-scope-section" },
+  { check: "no-open-blocker", reason: "blocked" },
+] as const satisfies ReadonlyArray<{ check: string; reason: BoardActionReason }>;
+
+export type PromoteCheckId = (typeof PROMOTE_CHECK_REFUSALS)[number]["check"];
+
+/**
+ * ONE evaluator for the promote checks, by check id (true = the check passes).
+ * Both the promote write gate ({@link evaluatePromoteEligibility}) and the
+ * `GET /autopilot/work-queue` row projection ({@link toWorkQueueRow}) call it,
+ * so the /work checklist and the server refusal cannot drift. Pure:
+ * `openBlockers` is pre-resolved by the caller.
+ */
+export function evaluatePromoteChecks(
+  row: IssueRow,
+  openBlockers: ReadonlySet<number>,
+): Record<PromoteCheckId, boolean> {
+  return {
+    "issue-open": row.state !== "CLOSED",
+    "not-already-ready": !row.labels.includes("ready-for-agent"),
+    "has-scope-section": hasScopeSection(row.body),
+    "no-open-blocker": openStrictBlockerRefs(row, openBlockers).length === 0,
+  };
+}
+
 /** Refusal outcome of {@link evaluatePromoteEligibility}. */
 export type PromoteEligibility =
   | { eligible: true }
   | { eligible: false; reason: BoardActionReason; detail: string };
 
+/** Operator-facing detail for each failing promote check. */
+function promoteRefusalDetail(
+  check: PromoteCheckId,
+  row: IssueRow,
+  openBlockers: ReadonlySet<number>,
+): string {
+  switch (check) {
+    case "issue-open":
+      return "issue is closed — reopen it before promoting";
+    case "not-already-ready":
+      return "issue already carries ready-for-agent";
+    case "has-scope-section":
+      return "issue body has no ## Files in scope section — issue-label-validation would revert ready-for-agent (#396)";
+    case "no-open-blocker": {
+      const openRefs = openStrictBlockerRefs(row, openBlockers);
+      return `blocked by open issue${openRefs.length > 1 ? "s" : ""} #${openRefs.join(", #")}`;
+    }
+  }
+}
+
 /**
  * The promote-to-ready-for-agent gate (ADR-0034 §7's traps, issue #4010):
- *
- *   1. the issue is CLOSED                → refuse (`closed`);
- *   2. it already carries ready-for-agent → refuse (`already-ready`);
- *   3. its body lacks a `## Files in scope` section
- *      (via the ONE shared parser, `hasScopeSection`/`extractScopeFromBody`)
- *                                         → refuse (`missing-scope-section` —
- *                                           applying the label anyway is what
- *                                           issue-label-validation reverts);
- *   4. it cites an OPEN strict blocker     → refuse (`blocked`).
+ * refuses with the reason of the FIRST failing check of
+ * {@link evaluatePromoteChecks}, in {@link PROMOTE_CHECK_REFUSALS} order
+ * (`closed`, `already-ready`, `missing-scope-section` — applying the label
+ * anyway is what issue-label-validation reverts — then `blocked`).
  *
  * Pure: `openBlockers` is pre-resolved by the caller so this stays
  * decision-table testable.
@@ -219,50 +280,17 @@ export function evaluatePromoteEligibility(
   row: IssueRow,
   openBlockers: ReadonlySet<number>,
 ): PromoteEligibility {
-  if (row.state === "CLOSED") {
-    return {
-      eligible: false,
-      reason: "closed",
-      detail: "issue is closed — reopen it before promoting",
-    };
-  }
-  if (row.labels.includes("ready-for-agent")) {
-    return {
-      eligible: false,
-      reason: "already-ready",
-      detail: "issue already carries ready-for-agent",
-    };
-  }
-  if (!hasScopeSection(row.body)) {
-    return {
-      eligible: false,
-      reason: "missing-scope-section",
-      detail:
-        "issue body has no ## Files in scope section — issue-label-validation would revert ready-for-agent (#396)",
-    };
-  }
-  const openRefs = extractStrictBlockerRefs(row.body).filter(
-    (n) => n !== row.number && openBlockers.has(n),
-  );
-  if (openRefs.length > 0) {
-    return {
-      eligible: false,
-      reason: "blocked",
-      detail: `blocked by open issue${openRefs.length > 1 ? "s" : ""} #${openRefs.join(", #")}`,
-    };
+  const checks = evaluatePromoteChecks(row, openBlockers);
+  for (const { check, reason } of PROMOTE_CHECK_REFUSALS) {
+    if (!checks[check]) {
+      return {
+        eligible: false,
+        reason,
+        detail: promoteRefusalDetail(check, row, openBlockers),
+      };
+    }
   }
   return { eligible: true };
-}
-
-/** The label transitions a relabel performs: lanes to drop + whether to add. */
-export function computeRelabelTransitions(
-  currentLabels: readonly string[],
-  target: RelabelTarget,
-): { remove: string[]; add: boolean } {
-  const remove = RELABEL_TARGETS.filter(
-    (lane) => lane !== target && currentLabels.includes(lane),
-  );
-  return { remove, add: !currentLabels.includes(target) };
 }
 
 // ---------------------------------------------------------------------------

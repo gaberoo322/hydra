@@ -84,13 +84,13 @@ Implementation notes
 - The script is pure (one read + one write); failures only ever degrade
   observability, never autopilot correctness. We catch and log every
   runtime failure path; we never propagate those back to the model. The ONE
-  deliberate exception is the import of decide.py's taxonomy tuples: it has
-  no fallback (issue #4637) — if decide.py cannot load classes.json there
+  deliberate exception is the load of the taxonomy rows: it has
+  no fallback (issue #4637) — if taxonomy.py cannot load classes.json there
   was no decision turn to report, and a fallback alphabet would be exactly
   the hardcoded class list the taxonomy exists to kill.
 - `HYDRA_AUTOPILOT_STATE` and `HYDRA_AUTOPILOT_HEARTBEAT` env vars
   override the default paths (used by the regression test).
-- Cooldown lookup IS `decide.py:SIGNAL_COOLDOWNS` (imported, not copied),
+- Cooldown lookup IS `taxonomy.signal_cooldowns` (derived, not copied),
   so it cannot drift from the taxonomy.
 """
 
@@ -104,16 +104,21 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# Import the taxonomy-derived alphabet from decide.py (which loads
-# scripts/autopilot/classes.json fail-loud at import) so the denominators,
-# the counted keys and the cooldowns all come from the one table. Path
-# manipulation is intentional — decide.py is a sibling. NO try/except
-# fallback (issue #4637): an import failure propagates (fail loud) rather
-# than substituting a hardcoded class list that silently drifts.
+# Derive the taxonomy alphabet from taxonomy.py (the one loader; it reads
+# scripts/autopilot/classes.json fail-loud) so the denominators, the counted
+# keys and the cooldowns all come from the one table. Path manipulation is
+# intentional — taxonomy.py is a sibling. NO try/except fallback (issue
+# #4637): a load failure propagates (fail loud) rather than substituting a
+# hardcoded class list that silently drifts.
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
-from decide import PIPELINE_SLOTS, SIGNAL_CLASSES, SIGNAL_COOLDOWNS  # type: ignore[import-not-found]  # noqa: E402
+import taxonomy  # noqa: E402  (the ONE classes.json loader, #5472)
 import run_ledger  # noqa: E402  (the ONE state-document parser, #5075)
+
+_TAXONOMY_ROWS = taxonomy.load_taxonomy()  # fail-loud, no fallback alphabet (#4637)
+PIPELINE_SLOTS = taxonomy.pipeline_slots(_TAXONOMY_ROWS)
+SIGNAL_CLASSES = taxonomy.signal_classes(_TAXONOMY_ROWS)
+SIGNAL_COOLDOWNS = taxonomy.signal_cooldowns(_TAXONOMY_ROWS)
 
 # Heartbeat-line denominators, derived from the taxonomy (never literals).
 PIPELINE_DENOMINATOR = len(PIPELINE_SLOTS)
@@ -292,6 +297,18 @@ def _fold_decisions(events: list) -> dict:
     return decisions
 
 
+def _mirrored_parent_exceptions(state: dict, turn_n: int) -> list:
+    """Ledger parent_exceptions entries whose `turn` is turn_n or turn_n-1."""
+    entries = state.get("parent_exceptions")
+    if not isinstance(entries, list):
+        return []
+    return [
+        e for e in entries
+        if isinstance(e, dict) and isinstance(e.get("turn"), int)
+        and e["turn"] in (turn_n, turn_n - 1)
+    ]
+
+
 def post_turn(state: dict, plan: dict, now: int) -> None:
     """Issue #498 — POST one immutable turn record to /api/autopilot/turn.
 
@@ -363,6 +380,15 @@ def post_turn(state: dict, plan: dict, now: int) -> None:
         shed = debug.get("usage_shed")
         body["usage_shed"] = shed if isinstance(shed, list) else []
         body["usage_allow"] = "usage_dispatch_blocked" not in debug
+    # Issue #5324 (ADR-0047 Decision 9): mirror the Run Ledger's parent-exception
+    # rows for this turn and the previous one (turn.sh can journal a script-error
+    # on a turn that aborts before this heartbeat). Read straight from state --
+    # the ledger stays the single writer; omitted when there are none, and the
+    # server dedupes on (run_id, turn, cause, ts_epoch).
+    mirrored = _mirrored_parent_exceptions(state, int(turn_n))
+    # Always forward the list (`[]` when clean): its presence marks a run as
+    # mirror-era so the rate fold can tell a clean run from a pre-mirror one.
+    body["parent_exceptions"] = mirrored
     try:
         payload = json.dumps(body).encode("utf-8")
     except (TypeError, ValueError) as exc:

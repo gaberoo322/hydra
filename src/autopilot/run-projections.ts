@@ -42,6 +42,14 @@ import {
 import {
   listAutopilotRunTurnsDesc,
 } from "../redis/autopilot-runs.ts";
+import {
+  attachOutcomes,
+  readRunTurns,
+  type JoinedTurn,
+  type TurnDispatch,
+  type TurnRow,
+  resolveCycleId,
+} from "./turn-row.ts";
 import { osHeartbeatAgeS, isOsHeartbeatStale } from "./os-heartbeat.ts";
 import { bucketCycleStatus } from "./cycle-status.ts";
 import { isLivePid } from "../process-probe.ts";
@@ -150,6 +158,10 @@ const defaultProjectionDeps: ProjectionDeps = {
  * and attach cycle-record outcomes onto `action.type === "dispatch"`
  * actions.
  *
+ * Returns typed {@link JoinedTurn}s read through the Turn Row module (a member
+ * with no integer `turn_n` is skipped, not kept as turn 0); a joined turn's
+ * `raw` is the wire object the run view serves.
+ *
  * Each dispatch action may carry `cycleId` or `autopilotTurnId`. When
  * neither is present, we prefer the action's `worktreeBranch` — the
  * deterministic, run-scoped, `parseDispatchCycleId`-clean id `decide.py`
@@ -172,65 +184,33 @@ export async function fetchTurnsWithJoins(
   runId: string,
   limit: number,
   deps: ProjectionDeps = defaultProjectionDeps,
-): Promise<Array<Record<string, unknown>>> {
-  const raw = await deps.listTurnsDesc(runId, limit);
-  if (!raw || raw.length === 0) return [];
+): Promise<JoinedTurn[]> {
+  const rows = await readRunTurns(runId, limit, deps.listTurnsDesc);
+  if (rows.length === 0) return [];
 
-  const turns: Array<Record<string, unknown>> = [];
+  const cycleIdOf = (row: TurnRow, d: TurnDispatch): string => resolveCycleId(runId, row.turn_n, d.index, d.cycleIdCandidate);
+
   const cycleIdsToFetch: string[] = [];
-
-  for (const member of raw) {
-    let parsed: any;
-    try {
-      parsed = JSON.parse(member);
-    } catch (err) {
-      logger.error({ err }, "[autopilot] failed to parse turn member");
-      continue;
-    }
-    if (!parsed || typeof parsed !== "object") continue;
-
-    const turnN = Number(parsed.turn_n || 0);
-    const actions: any[] = Array.isArray(parsed.actions) ? parsed.actions : [];
-    actions.forEach((a, idx) => {
-      if (a && a.type === "dispatch") {
-        const cid =
-          (typeof a.cycleId === "string" && a.cycleId) ||
-          (typeof a.autopilotTurnId === "string" && a.autopilotTurnId) ||
-          (typeof a.worktreeBranch === "string" && a.worktreeBranch) ||
-          `${runId}:${turnN}:${idx}`;
-        a._cycleId = cid;
-        cycleIdsToFetch.push(cid);
-      }
-    });
-    turns.push(parsed);
+  for (const row of rows) {
+    for (const d of row.dispatches) cycleIdsToFetch.push(cycleIdOf(row, d));
   }
-
   const cycleMap = await deps.getCycleHashesBatch(cycleIdsToFetch);
 
-  for (const turn of turns) {
-    const actions: any[] = Array.isArray(turn.actions) ? (turn.actions as any[]) : [];
-    for (const a of actions) {
-      if (a && a.type === "dispatch") {
-        const cid = a._cycleId;
-        delete a._cycleId;
-        const hash = cycleMap[cid];
-        if (hash) {
-          a.outcome = {
-            cycleId: cid,
-            status: hash.status || "unknown",
-            prNumber: hash.prNumber || hash.pr_number || null,
-            filesChanged: hash.filesChanged || null,
-            startedAt: hash.startedAt || null,
-            completedAt: hash.completedAt || null,
-          };
-        } else {
-          a.outcome = null;
-        }
-      }
-    }
-  }
-
-  return turns;
+  return rows.map((row) =>
+    attachOutcomes(row, (d) => {
+      const cid = cycleIdOf(row, d);
+      const hash = cycleMap[cid];
+      if (!hash) return null;
+      return {
+        cycleId: cid,
+        status: hash.status || "unknown",
+        prNumber: hash.prNumber || hash.pr_number || null,
+        filesChanged: hash.filesChanged || null,
+        startedAt: hash.startedAt || null,
+        completedAt: hash.completedAt || null,
+      };
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -372,17 +352,19 @@ export async function projectRunDigest(
   const mergedPrNumbers = new Set<string>();
   let failed = 0;
   for (const turn of turns) {
-    const actions: any[] = Array.isArray(turn.actions) ? (turn.actions as any[]) : [];
-    for (const a of actions) {
-      if (!a || typeof a !== "object") continue;
-      if (a.type === "dispatch" && a.outcome && typeof a.outcome === "object") {
-        const bucket = bucketCycleStatus(String((a.outcome as any).status || ""));
+    for (const d of turn.dispatches) {
+      if (d.outcome) {
+        const bucket = bucketCycleStatus(String(d.outcome.status || ""));
         if (bucket === "failed") failed += 1;
-      } else if (a.type === "auto-merge") {
-        const prNumber = (a as any).pr_number;
-        if (prNumber !== null && prNumber !== undefined && prNumber !== "") {
-          mergedPrNumbers.add(String(prNumber));
-        }
+      }
+    }
+    for (const a of turn.actions ?? []) {
+      if (!a || typeof a !== "object") continue;
+      const action = a as { type?: unknown; pr_number?: unknown };
+      if (action.type !== "auto-merge") continue;
+      const prNumber = action.pr_number;
+      if (prNumber !== null && prNumber !== undefined && prNumber !== "") {
+        mergedPrNumbers.add(String(prNumber));
       }
     }
   }

@@ -87,9 +87,10 @@ describe("docs classes + skills families and surface (#4592)", () => {
     ok(PLAYBOOK.includes('jq -r --arg c "$SLOT"'), "model jq read present");
     ok(PLAYBOOK.includes(".model // empty"), "model jq read selects the model column");
     ok(PLAYBOOK.includes("scripts/autopilot/classes.json"), "jq read targets classes.json");
-    // The wayfinder lookup: skill_by_ticket_type keyed by the ticket type
-    ok(PLAYBOOK.includes('jq -r --arg t "$TICKET_TYPE"'), "wayfinder jq read present");
-    ok(PLAYBOOK.includes(".skill_by_ticket_type[$t] // empty"), "wayfinder jq read selects the sbtt column");
+    // The wayfinder skill is resolved by decide.py step 7 from the Dispatch Intent (#5384/#5385):
+    // the dispatcher-side jq override is gone from the playbook.
+    ok(!PLAYBOOK.includes('jq -r --arg t "$TICKET_TYPE"'), "wayfinder jq override block removed");
+    ok(!PLAYBOOK.includes(".skill_by_ticket_type[$t] // empty"), "no dispatcher-side sbtt lookup");
     // No literal ticket-type -> skill pairs anywhere in the playbook
     for (const re of [
       /`research`\s*(?:→|->)\s*\*{0,2}hydra-issue-research/,

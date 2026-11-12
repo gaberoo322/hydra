@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   GRADUATION_MIN_SHADOW_PRS,
-  TRIP_MIN_PAIR_PRS,
   FLIP_ITEM_TITLE,
   FLIP_ITEM_MARKER,
   assessPairGraduation,
@@ -18,7 +17,8 @@ import {
   pairCohortOf,
   type GraduationInputs,
 } from "../scripts/qa/pair-graduation.ts";
-import { MIN_MATURED_PAIR } from "../scripts/qa/cohort-baseline.ts";
+import * as pg from "../scripts/qa/pair-graduation.ts";
+import * as cb from "../scripts/qa/cohort-baseline.ts";
 import type { ParsedQaShadowLine } from "../src/qa/shadow-fold.ts";
 import type { QaVerdictTrailer } from "../src/qa/verdict-trailer.ts";
 
@@ -207,9 +207,10 @@ describe("pairCohortOf", () => {
 });
 
 describe("trip constant", () => {
-  test("TRIP_MIN_PAIR_PRS equals cohort-baseline MIN_MATURED_PAIR", () => {
-    assert.equal(TRIP_MIN_PAIR_PRS, MIN_MATURED_PAIR);
-    assert.equal(TRIP_MIN_PAIR_PRS, 30);
+  test("MIN_MATURED_PAIR is declared once in pair-graduation and re-exported by cohort-baseline", () => {
+    assert.equal(pg.MIN_MATURED_PAIR, 30);
+    assert.equal(pg.MIN_MATURED_PAIR, cb.MIN_MATURED_PAIR);
+    assert.equal((pg as Record<string, unknown>).TRIP_MIN_PAIR_PRS, undefined);
   });
 });
 

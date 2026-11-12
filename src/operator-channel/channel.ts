@@ -2,10 +2,12 @@
  * The Operator Channel (ADR-0045, issue #5045) — the single outbound
  * Hydra→operator Telegram path.
  *
- * - {@link OperatorChannel.page}: edge-triggered per dedupKey (send once on bad,
- *   one reminder after 6h while still bad, suppressed repeats counted).
+ * - {@link OperatorChannel.report}: the producer entry point — the per-kind
+ *   table decides page vs brief and the dashboard alert; never throws.
+ * - page (private): edge-triggered per dedupKey (send once on bad, one reminder
+ *   after 6h while still bad, suppressed repeats counted); reached via report().
  * - {@link OperatorChannel.resolve}: one "recovered" message, then clears state.
- * - {@link OperatorChannel.brief}: appends a Morning Brief item (Redis list).
+ * - brief (private): appends a Morning Brief item (Redis list); reached via report().
  * - {@link OperatorChannel.briefOnce}: a brief item once per episode (dedup-keyed).
  * - {@link OperatorChannel.isOpen} / {@link OperatorChannel.reminderDue}: read-only episode probes.
  * - {@link OperatorChannel.clear}: silently close a key (no "recovered" message).
@@ -14,13 +16,14 @@
  * and a failure is logged and treated as "no state" so the page is still sent.
  * A per-process map bounds repeats while Redis is down. Nothing here throws to
  * a producer for transport or Redis failure — only for a caller bug (a
- * non-page kind passed to `page`, a page kind passed to `brief`).
+ * page kind passed to `briefOnce`).
  */
 
 import { InvalidArgumentError } from "../errors.ts";
 import { logger } from "../logger.ts";
 import { sendHtmlToTelegram, type TelegramTransportFn } from "./transport.ts";
-import { ALERT_TYPES, formatAlertMessage } from "../notification/alert-grammar.ts";
+import { formatAlertMessage } from "../notification/alert-grammar.ts";
+import { pushDashboardAlert, type DashboardAlert } from "../redis/alerts.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../event-bus-vocabulary.ts";
 import { REGISTRY } from "../operator-actions/registry.ts";
 import {
@@ -30,7 +33,14 @@ import {
 } from "../redis/operator-channel.ts";
 import type { OperatorFact, OperatorMessage } from "./message.ts";
 import { loadTelegramCredentials } from "./credentials.ts";
-import { isPageKind, isPageEvent } from "./page-list.ts";
+import {
+  ALERT_TYPES,
+  dedupKeyOf,
+  isPageEvent,
+  resolveAlert,
+  resolveDisposition,
+  rowOf,
+} from "./page-list.ts";
 import { renderMessage, type RenderVariant } from "./render.ts";
 
 export const REMINDER_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -99,19 +109,21 @@ export function nextDedupState(
 /** A bus event as the in-process producers hold it. */
 export interface ChannelEventInput {
   type?: string;
+  id?: string;
+  timestamp?: string;
   payload?: Record<string, unknown>;
 }
 
 /**
- * Map a bus event to an {@link OperatorMessage}. Severity is decided by the
- * closed page list, never by the event. `dedupKey` is the event type for the
- * single-instance infra/launch signals, `consumer:dead:<name>` for consumer
- * death and `dlq:<originalStream>:<eventType>` for dead-letter items.
+ * Map a bus event to an {@link OperatorMessage}. Severity and `dedupKey` come
+ * from the kind's row in the per-kind table (`./page-list.ts`), never from the
+ * event; the default dedupKey is the event type.
  */
 export function messageFromEvent(event: ChannelEventInput): OperatorMessage {
   const kind = event.type || "unknown";
   const payload = event.payload || {};
-  let title = ALERT_TYPES.has(kind) ? formatAlertMessage({ type: kind, payload }) : kind;
+  let title =
+    rowOf(kind)?.title?.(payload) ?? (ALERT_TYPES.has(kind) ? formatAlertMessage({ type: kind, payload }) : kind);
   const facts: OperatorFact[] = [];
   for (const [label, value] of Object.entries(payload)) {
     if (facts.length >= 8) break;
@@ -121,11 +133,8 @@ export function messageFromEvent(event: ChannelEventInput): OperatorMessage {
   }
   const links: OperatorMessage["links"] = [];
   let action: OperatorMessage["action"];
-  let dedupKey = kind;
-  if (kind === E.CONSUMER_DEAD) dedupKey = `consumer:dead:${String(payload.consumer ?? "unknown")}`;
-  else if (kind === E.DLQ_ALERT) {
-    dedupKey = `dlq:${String(payload.originalStream ?? "unknown")}:${String(payload.eventType ?? "unknown")}`;
-  } else if (kind === E.REVIEW_PICKUP_READY) {
+  const dedupKey = dedupKeyOf(kind, payload);
+  if (kind === E.REVIEW_PICKUP_READY) {
     // Issue #5047: the /hydra-review pickup page carries the ADR-0034 §8
     // recommended action for the `waiting-on-you:ready-for-human` line and a
     // link to the first pickup item, so the phone message is actionable.
@@ -173,6 +182,20 @@ export interface OperatorChannelDeps {
   now?: () => number;
   /** Redis call timeout; tests shrink it. */
   timeoutMs?: number;
+  /** Dashboard-alert writer; default is the Redis alerts accessor. */
+  alerts?: (alert: DashboardAlert) => Promise<boolean>;
+}
+
+/** What {@link OperatorChannel.report} did with one event. */
+export interface ReportResult {
+  disposition: "page" | "brief";
+  /** A page was actually sent, or a brief item was appended. */
+  delivered: boolean;
+  /** The dashboard alert was stored. */
+  alertWritten: boolean;
+  /** The kind has no row in the per-kind table (briefed with the generic line). */
+  unknownKind: boolean;
+  outcome: ChannelResult | { appended: boolean };
 }
 
 export type ChannelResult =
@@ -189,6 +212,7 @@ export class OperatorChannel {
   private readonly transport: TelegramTransportFn;
   private readonly now: () => number;
   private readonly timeoutMs: number;
+  private readonly alerts: (alert: DashboardAlert) => Promise<boolean>;
   /** Last send per dedupKey in THIS process — bounds repeats while Redis is down. */
   private readonly localSent = new Map<string, number>();
   /** Per-dedupKey serialization tail (see {@link serialize}). */
@@ -199,6 +223,83 @@ export class OperatorChannel {
     this.transport = deps.transport ?? sendHtmlToTelegram;
     this.now = deps.now ?? (() => Date.now());
     this.timeoutMs = deps.timeoutMs ?? OPERATOR_CHANNEL_REDIS_TIMEOUT_MS;
+    this.alerts = deps.alerts ?? ((alert) => pushDashboardAlert(alert));
+  }
+
+  /**
+   * The producer entry point (ADR-0045 Decision 3, issue #5389): the per-kind
+   * table decides page vs brief and whether a dashboard alert is also written.
+   * Never throws; an unknown kind is briefed with the generic line and flagged.
+   * Routes through the private page()/brief() under the per-dedupKey
+   * {@link serialize}.
+   */
+  async report(
+    kind: string,
+    payload: Record<string, unknown> = {},
+    meta?: { id?: string; timestamp?: string; alert?: boolean },
+  ): Promise<ReportResult> {
+    let disposition: "page" | "brief" = "brief";
+    let unknownKind = false;
+    try {
+      const row = rowOf(kind);
+      unknownKind = !row;
+      disposition = row ? resolveDisposition(row, payload) : "brief";
+      if (unknownKind) logger.warn({ kind }, "[OperatorChannel] report() for a kind with no table row — briefing it");
+      const msg = messageFromEvent({ type: kind, payload });
+
+      // The dashboard alert is independent of delivery: start it FIRST so a
+      // throwing or slow page/brief transport can neither drop nor delay it.
+      let alertPromise: Promise<boolean> = Promise.resolve(false);
+      if (row && meta?.alert !== false && resolveAlert(row, payload)) {
+        const severity = row.alertSeverity ?? (disposition === "page" ? "error" : "info");
+        alertPromise = this.writeAlert({
+          id: meta?.id || `alert-${this.now()}`,
+          type: kind,
+          timestamp: meta?.timestamp || new Date(this.now()).toISOString(),
+          message: formatAlertMessage({ type: kind, payload }),
+          severity,
+          dismissed: false,
+          payload,
+        });
+      }
+
+      let outcome: ReportResult["outcome"];
+      let delivered: boolean;
+      try {
+        if (disposition === "page") {
+          const res = await this.serialize(msg.dedupKey, () => this.page(msg));
+          outcome = res;
+          delivered = res.sent;
+        } else {
+          const res = await this.serialize(msg.dedupKey, () => this.brief(msg));
+          outcome = res;
+          delivered = res.appended;
+        }
+      } catch (err) {
+        logger.error({ err, kind }, "[OperatorChannel] report() delivery failed (non-fatal)");
+        delivered = false;
+        outcome = disposition === "page" ? { sent: false, reason: "transport-failed" } : { appended: false };
+      }
+      const alertWritten = await alertPromise;
+      return { disposition, delivered, alertWritten, unknownKind, outcome };
+    } catch (err) {
+      logger.error({ err, kind }, "[OperatorChannel] report() failed (non-fatal)");
+      return {
+        disposition,
+        delivered: false,
+        alertWritten: false,
+        unknownKind,
+        outcome: disposition === "page" ? { sent: false, reason: "transport-failed" } : { appended: false },
+      };
+    }
+  }
+
+  /** Store one dashboard alert; a store failure is logged and reported as not written. */
+  private async writeAlert(alert: DashboardAlert): Promise<boolean> {
+    // bounded() fails open on a hang or throw (logged), so report() never waits
+    // longer than the channel timeout for the alert write.
+    const out = await this.bounded("pushAlert", () => this.alerts(alert));
+    return out === UNAVAILABLE ? false : out;
   }
 
   /** Run a store call under the timeout; log and return UNAVAILABLE on failure. */
@@ -267,15 +368,8 @@ export class OperatorChannel {
     return next;
   }
 
-  /** Send (or suppress) a Page. Throws only for a non-page kind. */
-  async page(msg: OperatorMessage): Promise<ChannelResult> {
-    if (!isPageKind(msg.kind)) {
-      throw new InvalidArgumentError(`"${msg.kind}" is not on the closed page list (ADR-0045 Decision 3)`);
-    }
-    return this.serialize(msg.dedupKey, () => this.pageUnlocked(msg));
-  }
-
-  private async pageUnlocked(msg: OperatorMessage): Promise<ChannelResult> {
+  /** Send (or suppress) a Page: edge-triggered per dedupKey. Private: producers call {@link report}. */
+  private async page(msg: OperatorMessage): Promise<ChannelResult> {
     const now = this.now();
     const prev = await this.bounded("readDedup", () => this.store.readDedup(msg.dedupKey));
 
@@ -362,6 +456,10 @@ export class OperatorChannel {
    * process. Throws only when handed a page kind.
    */
   async briefOnce(item: OperatorMessage): Promise<{ appended: boolean }> {
+    const factPayload = Object.fromEntries((item.facts ?? []).map((f) => [f.label, f.value]));
+    if (isPageEvent(item.kind, factPayload)) {
+      throw new InvalidArgumentError(`"${item.kind}" is a page kind — use report(), not briefOnce()`);
+    }
     return this.serialize(item.dedupKey, async () => {
       const prev = await this.bounded("readDedup", () => this.store.readDedup(item.dedupKey));
       if (prev === UNAVAILABLE ? this.localSent.has(item.dedupKey) : prev !== null) return { appended: false };
@@ -377,12 +475,8 @@ export class OperatorChannel {
     });
   }
 
-  /** Append a Morning Brief item. Throws only when handed a page kind. */
-  async brief(item: OperatorMessage): Promise<{ appended: boolean }> {
-    const factPayload = Object.fromEntries((item.facts ?? []).map((f) => [f.label, f.value]));
-    if (isPageEvent(item.kind, factPayload)) {
-      throw new InvalidArgumentError(`"${item.kind}" is a page kind — use page(), not brief()`);
-    }
+  /** Append a Morning Brief item. Private: producers call {@link report} or {@link briefOnce}. */
+  private async brief(item: OperatorMessage): Promise<{ appended: boolean }> {
     const out = await this.bounded("appendBrief", () =>
       this.store.appendBrief({ ...item, severity: "brief", at: this.now() }),
     );

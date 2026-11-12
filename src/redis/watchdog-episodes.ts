@@ -55,3 +55,26 @@ export const REDIS_BACKUP_KEY_PREFIX = "hydra:autopilot:redis-backup-freshness";
 export function redisBackupEpisodeKeys(): EpisodeKeyPair {
   return { since: `${REDIS_BACKUP_KEY_PREFIX}:since`, fired: `${REDIS_BACKUP_KEY_PREFIX}:fired` };
 }
+
+/** Key-template prefix of the Morning-Brief-missing episode (issue #5048; unchanged by the #5099 port so a deploy mid-episode neither re-pages nor loses the cold-start anchor). */
+export const BRIEF_MISSING_KEY_PREFIX = "hydra:autopilot:brief-missing";
+
+/** The pair for the brief-missing block: `since` is the cold-start `absent-since` anchor. */
+export function briefMissingEpisodeKeys(): EpisodeKeyPair {
+  return { since: `${BRIEF_MISSING_KEY_PREFIX}:absent-since`, fired: `${BRIEF_MISSING_KEY_PREFIX}:fired` };
+}
+
+/** Whether the `since` anchor key exists (brief-missing gates its DEL on this so a healthy tick writes nothing). */
+export async function episodeSinceExists(keys: EpisodeKeyPair): Promise<boolean> {
+  return (await getRedisConnection().exists(keys.since)) === 1;
+}
+
+/** DEL only the `since` anchor. */
+export async function clearEpisodeSince(keys: EpisodeKeyPair): Promise<void> {
+  await getRedisConnection().del(keys.since);
+}
+
+/** DEL only the fired marker. */
+export async function clearEpisodeFired(keys: EpisodeKeyPair): Promise<void> {
+  await getRedisConnection().del(keys.fired);
+}

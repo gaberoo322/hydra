@@ -4,8 +4,8 @@
  * #5049).
  *
  * `routeNotificationEvent` is the thin router the notification consumer
- * imports: page-kind events go to `channel.page()`, everything else is
- * appended as a Morning Brief item via `channel.brief()`. The 4h digest
+ * imports: a thin wrapper that hands every event to `channel.report()`, where
+ * the per-kind table decides page vs Morning Brief item (#5389). The 4h digest
  * accumulator, its quiet-hours gate, both timers and the daily heartbeat are
  * gone (the Morning Brief replaced them — see
  * test/operator-channel-brief.test.mts); issue #5049 retired the `digest`
@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 import * as routeEvent from "../src/operator-channel/route-event.ts";
 import { routeNotificationEvent } from "../src/operator-channel/route-event.ts";
 import { PAGE_KINDS, isPageKind } from "../src/operator-channel/page-list.ts";
-import type { OperatorMessage } from "../src/operator-channel/message.ts";
+import type { ReportResult } from "../src/operator-channel/channel.ts";
 
 // ---------------------------------------------------------------------------
 // PAGE_KINDS — the closed page list (ADR-0045 Decision 3)
@@ -41,6 +41,7 @@ describe("PAGE_KINDS closed page list", () => {
       "infra:redis_backup_stale",
       // The watchdog's /tmp + /dev/shm inode/space alarm (#5327).
       "infra:tmpfs_exhausted",
+      "infra:watchdog_cli_failed",
       "launch:fail_safe",
       "launch:latency_breach",
       "launch:meter_dark",
@@ -70,50 +71,37 @@ describe("PAGE_KINDS closed page list", () => {
 // ---------------------------------------------------------------------------
 
 function fakeChannel(opts: { reject?: boolean } = {}) {
-  const pages: OperatorMessage[] = [];
-  const briefs: OperatorMessage[] = [];
+  const reports: Array<{ kind: string; payload: Record<string, unknown>; meta?: { id?: string; timestamp?: string } }> = [];
   const channel = {
-    page: async (m: OperatorMessage) => {
+    report: async (kind: string, payload: Record<string, unknown> = {}, meta?: { id?: string; timestamp?: string }) => {
       if (opts.reject) throw new Error("channel down");
-      pages.push(m);
-      return { sent: true as const, kind: "page" as const };
-    },
-    brief: async (m: OperatorMessage) => {
-      if (opts.reject) throw new Error("channel down");
-      briefs.push(m);
-      return { appended: true };
+      reports.push({ kind, payload, meta });
+      return { disposition: "page", delivered: true, alertWritten: false, unknownKind: false, outcome: { appended: true } } as ReportResult;
     },
   };
-  return { channel, pages, briefs };
+  return { channel, reports };
 }
 
-describe("routeNotificationEvent — routing to the Operator Channel", () => {
-  test("a page-kind event goes to channel.page once and is not buffered", async () => {
-    const { channel, pages, briefs } = fakeChannel();
-    routeNotificationEvent({ type: "launch:quota_stretch", payload: { reason: "5h cap" } }, channel);
+describe("routeNotificationEvent — a thin wrapper over channel.report()", () => {
+  test("every bus event is handed to channel.report with its payload and id/timestamp", async () => {
+    const { channel, reports } = fakeChannel();
+    routeNotificationEvent(
+      { type: "launch:quota_stretch", id: "e1", timestamp: "2026-11-05T00:00:00.000Z", payload: { reason: "5h cap" } },
+      channel,
+    );
     await Promise.resolve();
-    assert.equal(pages.length, 1);
-    assert.equal(pages[0].kind, "launch:quota_stretch");
-    assert.equal(pages[0].severity, "page");
-    assert.equal(briefs.length, 0);
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0].kind, "launch:quota_stretch");
+    assert.deepEqual(reports[0].payload, { reason: "5h cap" });
+    assert.deepEqual(reports[0].meta, { id: "e1", timestamp: "2026-11-05T00:00:00.000Z" });
   });
 
-  test("a non-page event is appended as a brief item, never paged", async () => {
-    const { channel, pages, briefs } = fakeChannel();
+  test("page vs brief is no longer decided here: a brief kind and a missing type also go to report()", async () => {
+    const { channel, reports } = fakeChannel();
     routeNotificationEvent({ type: "cycle:completed", payload: { title: "t" } }, channel);
+    routeNotificationEvent({ payload: {} }, channel);
     await Promise.resolve();
-    assert.equal(pages.length, 0);
-    assert.equal(briefs.length, 1);
-    assert.equal(briefs[0].kind, "cycle:completed");
-    assert.equal(briefs[0].severity, "brief");
-  });
-
-  test("a self-healed origin identity (repair=repaired) is a brief item, not a page", async () => {
-    const { channel, pages, briefs } = fakeChannel();
-    routeNotificationEvent({ type: "infra:origin_identity_wrong", payload: { repair: "repaired" } }, channel);
-    await Promise.resolve();
-    assert.equal(pages.length, 0);
-    assert.equal(briefs.length, 1);
+    assert.deepEqual(reports.map((r) => r.kind), ["cycle:completed", "unknown"]);
   });
 
   test("a rejecting channel is logged and never thrown to the consumer", async () => {

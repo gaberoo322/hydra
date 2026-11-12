@@ -11,6 +11,8 @@ from __future__ import annotations
 import turn_snapshot as ts
 
 from decide_base import (
+    WayfinderResearch,
+    WayfinderTask,
     make_dispatch,
 )
 
@@ -104,7 +106,7 @@ def _select_signal_wayfinder_orch(
     return make_dispatch(
         sig,
         "hydra-issue-research",
-        prompt_args={"ticket": frontier, "ticket_type": ticket_type},
+        intent=WayfinderTask(ticket=frontier) if ticket_type == "task" else WayfinderResearch(ticket=frontier),
         reason=(
             f"wayfinder map frontier ticket {frontier} ({ticket_type}) "
             "unblocked and unclaimed — work it"

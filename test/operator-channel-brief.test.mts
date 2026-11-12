@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 
 import {
   BRIEF_KINDS,
-  BRIEF_LINE_RENDERERS,
+  KIND_TABLE,
   BriefScheduler,
   OperatorChannel,
   REVIEW_PICKUP_ACTION,
@@ -35,6 +35,7 @@ import {
   type BriefStore,
   type OperatorChannelStore,
 } from "../src/operator-channel/index.ts";
+import { priv } from "./_helpers/operator-channel-priv.mts";
 import { PAGE_KINDS } from "../src/operator-channel/page-list.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
 import { createOperatorChannelRouter } from "../src/api/operator-channel.ts";
@@ -281,25 +282,30 @@ describe("BriefScheduler — timing state lives in the store, not the instance",
 // ---------------------------------------------------------------------------
 
 describe("BRIEF_KINDS and BRIEF_LINE_RENDERERS", () => {
-  test("BRIEF_KINDS is every NOTIFICATION_EVENT_TYPES value not on PAGE_KINDS", () => {
+  test("BRIEF_KINDS is every NOTIFICATION_EVENT_TYPES value not on PAGE_KINDS (the 9 literal-brief rows)", () => {
     const pages = new Set<string>(PAGE_KINDS);
     const expected = Object.values(E).filter((v) => !pages.has(v)).sort();
     assert.deepEqual([...BRIEF_KINDS].sort(), expected);
+    assert.equal(BRIEF_KINDS.length, 9);
     assert.ok(BRIEF_KINDS.includes(E.CYCLE_COMPLETED as never));
     assert.ok(!(BRIEF_KINDS as readonly string[]).includes(E.HOLDBACK_REVERT_FAILED), "a page kind is not a brief kind");
   });
 
-  test("every brief kind has a renderer arm (the map's keys equal BRIEF_KINDS)", () => {
-    assert.deepEqual(Object.keys(BRIEF_LINE_RENDERERS).sort(), [...BRIEF_KINDS].sort());
+  test("every row whose disposition is the literal brief or a function carries a briefLine", () => {
+    for (const [kind, row] of Object.entries(KIND_TABLE)) {
+      if (row.disposition !== "page") assert.equal(typeof row.briefLine, "function", `${kind} needs a briefLine`);
+    }
   });
 
   for (const kind of BRIEF_KINDS) {
-    test(`renders a non-empty, title-bearing line for ${kind}`, () => {
-      const line = BRIEF_LINE_RENDERERS[kind](item(kind, 1, {}, `${kind} title`));
+    test(`every BRIEF_KINDS row has a briefLine and renders a non-empty, title-bearing line for ${kind}`, () => {
+      const renderer = KIND_TABLE[kind].briefLine;
+      assert.equal(typeof renderer, "function", `${kind} has no briefLine`);
+      const line = renderer!(item(kind, 1, {}, `${kind} title`));
       assert.equal(typeof line, "string");
       assert.ok(line.trim().length > 0, `${kind} rendered an empty line`);
       assert.match(line, /[A-Za-z]{3,}/, `${kind} line carries no words`);
-      assert.equal(renderBriefLine(item(kind, 1, {}, `${kind} title`)), line, "renderBriefLine uses the typed arm");
+      assert.equal(renderBriefLine(item(kind, 1, {}, `${kind} title`)), line, "renderBriefLine uses the row's renderer");
     });
   }
 
@@ -654,7 +660,7 @@ describe("review:pickup_ready reaches the operator as an actionable Page", () =>
     const { store } = memoryStore();
     const { transport, sent } = fakeTransport();
     const ch = new OperatorChannel({ store, transport, now: () => TUE(8, 0) });
-    const res = await ch.page(messageFromEvent({ type: E.REVIEW_PICKUP_READY, payload }));
+    const res = await priv(ch).page(messageFromEvent({ type: E.REVIEW_PICKUP_READY, payload }));
     assert.deepEqual(res, { sent: true, kind: "page" });
     assert.ok(sent[0].includes("Action: <code>/hydra-review</code>"), sent[0]);
     assert.ok(sent[0].includes('<a href="https://x/710">Decide tier for PR #710</a>'), sent[0]);
@@ -669,7 +675,7 @@ describe("review:pickup_ready reaches the operator as an actionable Page", () =>
     const bus = {
       async publish(_stream: string, ev: any) {
         // Stand in for the notification consumer's recordEvent routing.
-        await ch.page(messageFromEvent(ev));
+        await priv(ch).page(messageFromEvent(ev));
         return "id";
       },
     };

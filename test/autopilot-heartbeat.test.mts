@@ -752,6 +752,20 @@ describe("scripts/autopilot/heartbeat.py — stale-plan freshness check (issue #
     assert.deepEqual(body.burned_classes, ["sweep_orch"], "burned_classes is state-sourced, sent every turn");
   });
 
+  test("parent_exceptions mirror: forwards ledger rows for turn_n and turn_n-1 only; empty list (mirror marker) when none (issue #5324)", async () => {
+    const row = (turn: number, cause: string, ts: number) => ({ cause, turn, source: "parent", detail: "", ts_epoch: ts });
+    const { requests } = await runWithPlan(
+      { actions: [], reasons: [], run_id: RUN_ID, turn: 3, events: [] },
+      { parent_exceptions: [row(1, "script-error", 10), row(2, "notes-steer", 20), row(3, "defect-filed", 30), row(4, "script-error", 40)] },
+    );
+    assert.deepEqual(
+      (requests[0].body.parent_exceptions as Array<{ turn: number }>).map((e) => e.turn),
+      [2, 3],
+    );
+    const none = await runWithPlan({ actions: [], reasons: [], run_id: RUN_ID, turn: 3, events: [] });
+    assert.deepEqual(none.requests[0].body.parent_exceptions, [], "a clean turn still marks the run mirror-era");
+  });
+
   test("missing plan file → observability fields omitted, burned_classes defaults to [] (issue #4635)", async () => {
     const { requests } = await runWithPlan(null);
     const body = requests[0].body;
@@ -1149,14 +1163,14 @@ describe("scripts/autopilot/heartbeat.py — taxonomy-derived denominators (issu
     }
   });
 
-  test("an import failure of decide.py propagates (fail loud) — no fallback alphabet", () => {
+  test("an import failure of taxonomy.py propagates (fail loud) — no fallback alphabet", () => {
     const tmp = makeTmp();
     try {
-      // A sibling decide.py whose import raises, next to a copy of heartbeat.py.
+      // A sibling taxonomy.py whose import raises, next to a copy of heartbeat.py.
       const hb = join(tmp.dir, "heartbeat.py");
       writeFileSync(hb, readFileSync(HEARTBEAT_PY, "utf-8"));
       writeFileSync(
-        join(tmp.dir, "decide.py"),
+        join(tmp.dir, "taxonomy.py"),
         'raise RuntimeError("fictional taxonomy load failure")\n',
       );
       writeState(tmp.state);
@@ -1169,7 +1183,7 @@ describe("scripts/autopilot/heartbeat.py — taxonomy-derived denominators (issu
         },
         encoding: "utf-8",
       });
-      assert.notEqual(r.status, 0, "a broken decide.py must not be masked");
+      assert.notEqual(r.status, 0, "a broken taxonomy.py must not be masked");
       assert.match(r.stderr ?? "", /fictional taxonomy load failure/);
       assert.equal(existsSync(tmp.heartbeat), false, "no line fabricated from a fallback alphabet");
     } finally {
@@ -1186,10 +1200,10 @@ describe("scripts/autopilot/heartbeat.py — taxonomy-derived denominators (issu
     }
     assert.match(
       src,
-      /^from decide import PIPELINE_SLOTS, SIGNAL_CLASSES, SIGNAL_COOLDOWNS\b/m,
-      "top-level (unguarded) import of the three taxonomy tuples",
+      /^import taxonomy\b/m,
+      "top-level (unguarded) import of the one taxonomy loader",
     );
-    assert.equal(/try:\s*\n\s+from decide import/.test(src), false, "the import is not wrapped in try/except");
+    assert.equal(/try:\s*\n\s+import taxonomy/.test(src), false, "the import is not wrapped in try/except");
     assert.match(src, /len\(PIPELINE_SLOTS\)/);
     assert.match(src, /len\(SIGNAL_CLASSES\)/);
   });

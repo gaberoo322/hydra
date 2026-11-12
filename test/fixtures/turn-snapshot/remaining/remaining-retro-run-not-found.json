@@ -39,6 +39,7 @@
           }
         },
         "drillable": true,
+        "drillableReason": "fail-open-run-not-found",
         "reviewDue": false
       }
     }

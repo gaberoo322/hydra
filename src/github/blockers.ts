@@ -29,6 +29,7 @@
  * golden-fixture testable without a live `gh`.
  */
 
+import { ghJson } from "./gh.ts";
 import {
   listIssuesBySearch,
   isIssueReadFailure,
@@ -325,6 +326,25 @@ export function extractClearanceBlockerRefs(
 /** How a single referenced number resolved. Only `closed` / `merged` clear. */
 export type BlockerRefState = "closed" | "merged" | "open" | "unknown";
 
+/**
+ * The ONE ref-state resolver (issue #5459 QA): open -> open; closed issue ->
+ * closed; closed+merged PR -> merged; closed-unmerged PR, any gh failure, or an
+ * unreadable/odd state -> unknown (never clearance). Never throws.
+ */
+export async function resolveBlockerRefState(repo: string, n: number): Promise<BlockerRefState> {
+  const res = await ghJson<{ state?: unknown; pull_request?: { merged_at?: unknown } | null }>([
+    "api", `repos/${repo}/issues/${n}`,
+  ]);
+  if (!res.ok || !res.data || typeof res.data !== "object") return "unknown";
+  const state = typeof res.data.state === "string" ? res.data.state.toLowerCase() : "";
+  if (state === "open") return "open";
+  if (state !== "closed") return "unknown";
+  if (res.data.pull_request) {
+    return typeof res.data.pull_request.merged_at === "string" && res.data.pull_request.merged_at ? "merged" : "unknown";
+  }
+  return "closed";
+}
+
 export interface BlockedIssueVerdict {
   issue: number;
   /** Blocker numbers confirmed closed-issue / merged-PR (non-empty when promotable). */
@@ -366,7 +386,7 @@ export async function findClearedBlockedIssues(
 }
 
 /** True when a blocker-bearing body line carries a cross-repo `owner/repo#N` ref. */
-function hasCrossRepoBlockerRef(body: string): boolean {
+export function hasCrossRepoBlockerRef(body: string): boolean {
   const stripped = body.replace(/`[^`]*`/g, "");
   return stripped.split("\n").some(
     (line) =>

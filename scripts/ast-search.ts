@@ -50,7 +50,7 @@ import { spawnSync } from "node:child_process";
 import { parseCliArgs } from "../src/cli-args.ts";
 
 /** Pinned ast-grep CLI version — keep in lockstep with the CI workflow. */
-const AST_GREP_SPEC = "@ast-grep/cli@0.43.0";
+export const AST_GREP_SPEC = "@ast-grep/cli@0.43.0";
 
 interface RawMatch {
   text?: string;

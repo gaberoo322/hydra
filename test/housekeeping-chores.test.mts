@@ -224,6 +224,19 @@ describe("choreGuard — cadence windowing as pure arithmetic (issue #3091)", ()
   });
 });
 
+// Issue #5199 (lever 2): stub the chores that make live gh/network calls so
+// these composition tests do not pay ~15 s of real I/O per runHousekeeping call.
+// Guard windowing and ran/skipped classification stay the real code path.
+const noopWork = async () => {};
+const SLOW_CHORE_STUBS = {
+  "review-pickup-notify": noopWork,
+  "usage-weekly-snapshot": noopWork,
+  "holdback-merge-event-enrol": noopWork,
+  "pattern-cue-demotion": noopWork,
+  // ~2.2 s of live gh/git reconcile per runHousekeeping call (6 calls in this file).
+  "cycle-merge-reconcile": noopWork,
+};
+
 describe("runHousekeeping — cadence guards injectable without Redis (issue #3091)", () => {
   const now = 1_700_000_000_000;
 
@@ -244,8 +257,9 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     // Issue #3756: stub the GLM eligibility sweep so this composition test never
     // performs a live GitHub write (the sweep mutates an external service with
     // no Redis substrate to fail-soft on, unlike the gh-reading chores).
-    runGlmEligibilitySweep: async () => 0,
+    runGlmEligibilitySweep: async () => 0, runLifecycleReconcile: async () => null,
     publishTargetOutcomes: async () => {},
+    workOverrides: SLOW_CHORE_STUBS,
   };
   const guardedChores = [
     "usage-weekly-snapshot",
@@ -280,8 +294,9 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
       getMemoryLastConsolidation: nullTs,
       getCleanupLastDaily: nullTs,
       now: () => now,
-      runGlmEligibilitySweep: async () => 0,
+      runGlmEligibilitySweep: async () => 0, runLifecycleReconcile: async () => null,
       publishTargetOutcomes: async () => {},
+      workOverrides: SLOW_CHORE_STUBS,
     });
     const classified = new Set([...summary.ran, ...summary.skipped]);
     for (const name of guardedChores) {
@@ -298,11 +313,62 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     // `runChore` fail-softs any I/O error. Reaching a well-formed summary proves
     // the default binding is intact (zero-diff for callers that pass nothing).
     const summary = await runHousekeeping(makeBus() as any, {
-      runGlmEligibilitySweep: async () => 0,
+      runGlmEligibilitySweep: async () => 0, runLifecycleReconcile: async () => null,
       publishTargetOutcomes: async () => {},
+      workOverrides: SLOW_CHORE_STUBS,
     });
     assert.ok(Array.isArray(summary.ran), "ran is an array");
     assert.ok(Array.isArray(summary.skipped), "skipped is an array");
+  });
+
+  describe("runHousekeeping — workOverrides contract (issue #5199)", () => {
+    function makeBus() {
+      return { async publish() { return "fake-id"; } };
+    }
+    const baseDeps = {
+      runGlmEligibilitySweep: async () => 0,
+      runLifecycleReconcile: async () => null,
+      publishTargetOutcomes: async () => {},
+    };
+
+    test("an override key naming no registered chore is rejected (no vacuous stub)", async () => {
+      await assert.rejects(
+        runHousekeeping(makeBus() as any, {
+          ...baseDeps,
+          workOverrides: { ...SLOW_CHORE_STUBS, "review-pikcup-notify": noopWork },
+        }),
+        (err: any) => err.code === "invalid-argument" && /review-pikcup-notify/.test(err.message),
+      );
+    });
+
+    test("an inherited Object.prototype key is not treated as an override", async () => {
+      await assert.rejects(
+        runHousekeeping(makeBus() as any, {
+          ...baseDeps,
+          workOverrides: { constructor: noopWork } as any,
+        }),
+        (err: any) => err.code === "invalid-argument",
+      );
+    });
+
+    test("every stubbed chore's override is actually invoked in place of the real work", async () => {
+      const called: string[] = [];
+      const recording = Object.fromEntries(
+        Object.keys(SLOW_CHORE_STUBS).map((name) => [name, async () => { called.push(name); }]),
+      );
+      // Null only the usage-weekly-snapshot cadence reader so its time-windowed guard passes and
+      // its stub is exercised; the other cadence readers are left at their defaults.
+      const nullTs = async () => null;
+      const summary = await runHousekeeping(makeBus() as any, {
+        ...baseDeps,
+        getUsageSnapshotLastWeekly: nullTs,
+        workOverrides: recording,
+      });
+      assert.deepEqual([...called].sort(), Object.keys(SLOW_CHORE_STUBS).sort());
+      for (const name of Object.keys(SLOW_CHORE_STUBS)) {
+        assert.ok(summary.ran.includes(name), `${name} must be classified ran via its override`);
+      }
+    });
   });
 });
 
@@ -314,7 +380,7 @@ describe("runHousekeeping — target-outcomes-publish registration (issue #4477)
   test("target-outcomes-publish runs via the injected publisher, before wiring-liveness", async () => {
     let calls = 0;
     const summary = await runHousekeeping(makeBus() as any, {
-      runGlmEligibilitySweep: async () => 0,
+      runGlmEligibilitySweep: async () => 0, runLifecycleReconcile: async () => null,
       publishTargetOutcomes: async () => {
         calls += 1;
       },
@@ -356,8 +422,9 @@ describe("runHousekeeping — attribution-record runs before holdback-merge-watc
   // live Redis makes them run or a Redis fault makes them skip.
   test("recorder is sequenced ahead of the registry-draining watch", async () => {
     const summary = await runHousekeeping(makeBus() as any, {
-      runGlmEligibilitySweep: async () => 0,
+      runGlmEligibilitySweep: async () => 0, runLifecycleReconcile: async () => null,
       publishTargetOutcomes: async () => {},
+      workOverrides: SLOW_CHORE_STUBS,
     });
 
     const bothInRan =

@@ -31,16 +31,22 @@ import {
   readUnitEnabledState,
   restartService,
   runDeployScript,
+  runInstallerList,
   runSyncSkillsScript,
 } from "../host-probe/probe.ts";
 import { OperatorChannel, operatorChannel } from "../operator-channel/channel.ts";
 import { EventBus } from "../event-bus.ts";
 import { getGlmDrainerLiveness, readGlmDrainerLastPick } from "../redis/autopilot.ts";
 import { getPaceGateLastTick } from "../redis/launch-flow.ts";
+import { getBriefLastSent } from "../redis/operator-channel.ts";
 import { readRecentSlotEvents } from "../redis/slot-events.ts";
 import {
   anchorEpisodeSince,
+  briefMissingEpisodeKeys,
+  clearEpisodeFired,
   clearEpisodeKeys,
+  clearEpisodeSince,
+  episodeSinceExists,
   episodeFiredExists,
   markEpisodeFired,
   readEpisodeSince,
@@ -57,6 +63,8 @@ import type { SkillMirrorDeps, SyncRun } from "./skill-mirror.ts";
 import type { NewestBackup, RedisBackupDeps } from "./redis-backup.ts";
 import { ORIGIN_FETCH_REFSPEC, type OriginIdentityDeps } from "./origin-identity.ts";
 import type { EpisodeStore } from "./episode.ts";
+import type { BriefMissingDeps } from "./brief-missing.ts";
+import type { ClaudeHooksDeps } from "./claude-hooks.ts";
 import type { DiskDeps, StatfsReading } from "./disk.ts";
 import { isLivePid, signalPid } from "../process-probe.ts";
 import { countOpenBoard } from "../autopilot/turn-snapshot/board-saturation.ts";
@@ -497,14 +505,15 @@ export function readStatfs(path: string): StatfsReading | null {
 }
 
 export function createProductionDiskDeps(log: (line: string) => void): DiskDeps {
-  const channel = new OperatorChannel();
+  // One channel per process (ADR-0045 Decision 2): the shared singleton.
+  const channel = operatorChannel;
   return {
     statfs: readStatfs,
     async topInodeConsumers(path, limit) {
       const r = await readTopInodeConsumers(path, limit);
       return r.ok ? r.data.map((c) => `${c.path} ${c.inodes}`) : null;
     },
-    page: (msg) => channel.page(msg),
+    report: (kind, payload) => channel.report(kind, payload),
     briefOnce: (msg) => channel.briefOnce(msg),
     reminderDue: (key) => channel.reminderDue(key),
     resolve: (key, title) => channel.resolve(key, title),
@@ -575,9 +584,8 @@ export function createProductionWatchdogGithub(): WatchdogGithub {
   };
 }
 
-/** Production wiring of the launch-flow ports. The EventBus is constructed on the first fire only. */
+/** Production wiring of the launch-flow ports. */
 export function createProductionLaunchFlowDeps(log: (line: string) => void): LaunchFlowDeps {
-  let bus: EventBus | null = null;
   return {
     lastTick: getPaceGateLastTick,
     store: {
@@ -594,12 +602,6 @@ export function createProductionLaunchFlowDeps(log: (line: string) => void): Lau
     },
     github: createProductionWatchdogGithub(),
     channel: operatorChannel,
-    bus: {
-      publish: (stream, event) => {
-        bus ??= new EventBus();
-        return bus.publish(stream, event);
-      },
-    },
     clock: { nowMs: () => Date.now() },
     log,
   };
@@ -779,7 +781,6 @@ export function createProductionRedisBackupDeps(log: (line: string) => void): Re
     },
     store: createProductionEpisodeStore(),
     channel: operatorChannel,
-    bus: lazyBus(),
     clock: { nowMs: () => Date.now() },
     log,
   };
@@ -864,7 +865,81 @@ export function createProductionOriginIdentityDeps(
       },
       fetchOrigin: (root, timeoutMs) => fetchOrigin(root, timeoutMs),
     },
-    bus: lazyBus(),
+    channel: operatorChannel,
+    clock: { nowMs: () => Date.now() },
+    log,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Slice 5 ports (issue #5099): claude hooks, brief missing.
+// ---------------------------------------------------------------------------
+
+export function createProductionClaudeHooksDeps(log: (line: string) => void): ClaudeHooksDeps {
+  const bus = lazyBus();
+  return {
+    files: {
+      exists: (path) => existsSync(path),
+      ensureStateDir(dir) {
+        try {
+          mkdirSync(dir, { recursive: true });
+          return true;
+        } catch {
+          /* intentional: the run logs the WARN for an unusable state dir */
+          return false;
+        }
+      },
+      readSettings(path) {
+        try {
+          return readFileSync(path, "utf8");
+        } catch {
+          /* intentional: absent/unreadable settings.json is the settings-unreadable reason */
+          return null;
+        }
+      },
+      hasSinceMarker: (path) => existsSync(path),
+      writeSinceMarker(path, epochS) {
+        try {
+          writeFileSync(path, `${epochS}\n`);
+        } catch (err) {
+          log(`WARN could not write ${path}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      },
+      clearSinceMarker(path) {
+        try {
+          unlinkSync(path);
+        } catch {
+          /* intentional: rm -f semantics */
+        }
+      },
+    },
+    host: {
+      async listInstaller(setupPath) {
+        const r = await runInstallerList(setupPath);
+        return r.ok ? { ok: true, exitCode: r.data.exitCode, stdout: r.data.stdout } : { ok: false, exitCode: -1, stdout: "" };
+      },
+    },
+    bus: {
+      publish: (stream, event) => bus.publish(stream as never, event),
+    },
+    clock: { nowMs: () => Date.now() },
+    log,
+  };
+}
+
+export function createProductionBriefMissingDeps(log: (line: string) => void): BriefMissingDeps {
+  const keys = briefMissingEpisodeKeys();
+  return {
+    store: {
+      readLastSent: () => getBriefLastSent(),
+      anchorExists: () => episodeSinceExists(keys),
+      anchor: (nowMs) => anchorEpisodeSince(keys, nowMs),
+      readAnchor: () => readEpisodeSince(keys),
+      deleteAnchor: () => clearEpisodeSince(keys),
+      firedExists: () => episodeFiredExists(keys),
+      markFired: () => markEpisodeFired(keys),
+      deleteFired: () => clearEpisodeFired(keys),
+    },
     channel: operatorChannel,
     clock: { nowMs: () => Date.now() },
     log,

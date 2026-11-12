@@ -119,21 +119,34 @@ The bundle also carries the **run-level drill flag** (issue #4584):
 `undrillable`, per #1184). A `runFlagged` run with zero flagged dispatches is
 still drill-worthy: its drill material is run-level, not transcripts (step 3).
 
+**Clean bundle (issue #5406).** When the fetched bundle folds clean (no flagged
+dispatch, empty `reflections` / `novelStuckSignals` / `recommendations`,
+`runFlagged` not true) yet you were dispatched, read `observability.retro` from
+`/tmp/hydra-autopilot-snapshot.json` and record its `candidate` and
+`drillableReason` in the artifact (or "weekly override" if that was the arm), so
+a wasted dispatch names its own cause. A `fail-open-*` reason means the
+snapshot's collector could not prove the bundle clean (a `retroBundle` degraded
+marker is persisted alongside).
+
 ## 3. Deep-read ONLY the flagged transcripts
 
 For each flagged dispatch (the ones the bundle flagged for drill), and ONLY
-those, read the full transcript:
+those, read the full transcript. The ONLY handle is `dispatches[].transcriptId`
+(the bare agent hash, same value as `slot.task_id`); `cycleId` is the
+cycle-record key, NOT a transcript handle — never pass it to the route:
 
 ```bash
-curl -sf "http://localhost:4000/api/dispatches/<id>/transcript"
+TRANSCRIPT_ID=<dispatches[].transcriptId>
+curl -sf "http://localhost:4000/api/dispatches/${TRANSCRIPT_ID}/transcript"
 ```
 
 If the route 404s (`dispatch-not-found` — the registry row expired or was never
 written), fall back to the on-disk JSONL:
-`<projects-root>/<encoded-parent-cwd>/<parent-session>/subagents/agent-<hash>.jsonl`
-(`~/.claude/projects/-home-gabe-hydra/<parent-session>/subagents/agent-<hash>.jsonl`;
-the `<hash>` is the bare agent id, the same value as `slot.task_id`). Do not let
-a 404 block the retro.
+`<projects-root>/<encoded-parent-cwd>/<parent-session>/subagents/agent-${TRANSCRIPT_ID}.jsonl`
+(`~/.claude/projects/-home-gabe-hydra/<parent-session>/subagents/agent-${TRANSCRIPT_ID}.jsonl`).
+A flagged row with `transcriptId: null` is transcript-less: record it as such
+and drill from bundle signals only (not a 404 fallback). Do not let a 404
+block the retro.
 
 This is the cost bound: a clean run flags nothing and reads no transcripts. A
 happy-path (merged, regression-free) dispatch is never drilled.

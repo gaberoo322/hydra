@@ -6,7 +6,9 @@
  * this file; the fetchers live in `seam.ts` behind an injectable `deps.fetch`.
  * A failed fetch is a refusal (`fetch-failed`), never a pass.
  */
+import { extractClearanceBlockerRefs, hasCrossRepoBlockerRef, type BlockerRefState } from "../github/blockers.ts";
 import { hasScopeSection } from "../scope-section.ts";
+import { isFailVerdict, isPassVerdict, parseQaVerdictTrailers, qaVerdictShaMatches, type FinalVerdict } from "../qa/verdict-trailer.ts";
 import { isAdr5Reason, isAllowedReason } from "./reasons.ts";
 import type { GateId, LifecycleState } from "./transitions.ts";
 
@@ -20,6 +22,8 @@ export interface DesignConceptRecord {
   exists: boolean;
   /** `draft | approved | stale` as stored on the artifact. */
   status: string;
+  /** The artifact's content hash; null when absent. Copied onto a claim, never supplied by a caller. */
+  artifactHash?: string | null;
 }
 
 export interface PrRecord {
@@ -45,7 +49,113 @@ export interface StateEntryRecord {
   enteredAtMs: number | null;
 }
 
+/**
+ * A PR read live at head for the `qa-passed` exit decision (ADR-0047 D4). The
+ * fetcher folds the required-check rollup to `checks`; `bodies` are the PR's
+ * comment then review bodies (they carry the `QA-Verdict:` trailers).
+ */
+export interface QaLivePr {
+  number: number;
+  /** Upper-cased `OPEN | MERGED | CLOSED`. */
+  state: string;
+  isDraft: boolean;
+  /** Upper-cased GitHub `mergeStateStatus` (`DIRTY`, `CLEAN`, `UNKNOWN`, ...). */
+  mergeStateStatus: string;
+  headSha: string;
+  /** Required checks folded: `unknown` when they could not be read. */
+  checks: "red" | "green" | "pending" | "unknown";
+  bodies: readonly string[];
+  /**
+   * The same comment + review bodies with their post time (epoch ms; null when
+   * unreadable). Absent = no timed record, so the `qa-verdict` gate refuses.
+   */
+  timedBodies?: readonly { body: string; createdAtMs: number | null }[];
+}
+
+export type QaExitTarget = "closed" | "ready-for-agent" | "needs-dev-resume" | "needs-qa";
+
+/**
+ * The ONE pure predicate for a `qa-passed` exit (ADR-0047 D4, #5316 INV-3):
+ * the reconcile uses it to CHOOSE the target and the `qa-exit` gate uses it to
+ * VERIFY the requested one. Decision order is fixed: MERGED -> closed; CLOSED
+ * unmerged -> ready-for-agent; draft -> none; DIRTY -> needs-dev-resume;
+ * settled-red required checks -> needs-dev-resume; settled-green with no PASS
+ * trailer matching the head sha -> needs-qa; otherwise none.
+ */
+export function classifyQaPassedExit(live: QaLivePr): QaExitTarget | "none" {
+  if (live.state === "MERGED") return "closed";
+  if (live.state === "CLOSED") return "ready-for-agent";
+  if (live.state !== "OPEN" || live.isDraft) return "none";
+  if (live.mergeStateStatus === "DIRTY") return "needs-dev-resume";
+  if (live.checks === "red") return "needs-dev-resume";
+  if (live.checks === "green") {
+    const passAtHead = live.bodies.some((b) =>
+      parseQaVerdictTrailers(b).some(
+        (t) => isPassVerdict(t.verdict) && t.pr === live.number && qaVerdictShaMatches(t, live.headSha),
+      ),
+    );
+    return passAtHead ? "none" : "needs-qa";
+  }
+  return "none";
+}
+
+export type QaVerdictTarget = "qa-passed" | "needs-dev-resume" | "ready-for-agent";
+
+/**
+ * The ONE pure predicate for a `needs-qa` verdict exit (ADR-0047 D4, #5317
+ * INV-3). The verdict record is the LATEST `QA-Verdict:` trailer naming this
+ * PR whose `sha=` matches the live head. Returns the routing target, or a
+ * refusal code: `qa-verdict-missing` (no trailer at head), `qa-verdict-stale`
+ * (the trailer predates `enteredAtMs`), `pr-merged` (reconcile owns it).
+ */
+export function classifyQaVerdictTarget(
+  live: QaLivePr,
+  enteredAtMs: number,
+): { ok: true; target: QaVerdictTarget } | { ok: false; code: string } {
+  // INV-3: the LATEST trailer is the one with the max post time (NOT array
+  // order: comments are listed before reviews, so a stale review-body trailer
+  // would otherwise override a newer comment trailer). Ties keep the later
+  // array position; an unreadable time sorts oldest.
+  let latest: { verdict: FinalVerdict; createdAtMs: number | null } | undefined;
+  const rank = (ms: number | null): number => (ms === null ? Number.NEGATIVE_INFINITY : ms);
+  for (const tb of live.timedBodies ?? []) {
+    for (const t of parseQaVerdictTrailers(tb.body)) {
+      if (t.pr === live.number && qaVerdictShaMatches(t, live.headSha)) {
+        if (latest === undefined || rank(tb.createdAtMs) >= rank(latest.createdAtMs)) {
+          latest = { verdict: t.verdict, createdAtMs: tb.createdAtMs };
+        }
+      }
+    }
+  }
+  if (latest === undefined) return { ok: false, code: "qa-verdict-missing" };
+  if (latest.createdAtMs === null || !(latest.createdAtMs > enteredAtMs)) {
+    return { ok: false, code: "qa-verdict-stale" };
+  }
+  if (live.state === "MERGED") return { ok: false, code: "pr-merged" };
+  if (isPassVerdict(latest.verdict)) {
+    return live.state === "OPEN" ? { ok: true, target: "qa-passed" } : { ok: false, code: "pr-not-open" };
+  }
+  if (!isFailVerdict(latest.verdict)) return { ok: false, code: "qa-verdict-missing" };
+  if (live.state === "OPEN") return { ok: true, target: "needs-dev-resume" };
+  if (live.state === "CLOSED") return { ok: true, target: "ready-for-agent" };
+  return { ok: false, code: "pr-not-open" };
+}
+
+/** The held dispatch claim for an issue; `held: null` = no claim is open. */
+export interface ClaimRecord {
+  held: { dispatchId: string } | null;
+}
+
+/** One clearance blocker ref resolved by the seam. */
+export interface BlockerRecord {
+  number: number;
+  state: BlockerRefState;
+}
+
 export interface GateRecords {
+  claim?: Fetched<ClaimRecord>;
+  blockers?: Fetched<BlockerRecord[]>;
+  qaLive?: Fetched<QaLivePr>;
   designConcept?: Fetched<DesignConceptRecord>;
   pr?: Fetched<PrRecord>;
   comment?: Fetched<CommentRecord>;
@@ -67,6 +177,8 @@ export interface GateInput {
   repo?: string;
   /** Issue body as re-read by the seam (spine step 1). */
   body?: string;
+  /** Who is advancing (`--actor`); gates restricting a path to one actor read it. */
+  actor?: string;
 }
 
 const pass = (code = "ok"): GateResult => ({ ok: true, code });
@@ -154,6 +266,54 @@ export function gateClose(input: GateInput, records: GateRecords): GateResult {
   return pass();
 }
 
+/**
+ * `qa-passed -> needs-dev-resume | needs-qa | ready-for-agent`: evidence `pr=N`
+ * must be re-read live at head and {@link classifyQaPassedExit} must name the
+ * requested target. Fails closed on a fetch miss.
+ */
+export function gateQaExit(input: GateInput, records: GateRecords): GateResult {
+  const prNumber = parsePrEvidence(input.evidence);
+  if (prNumber === null) return fail("evidence-required:pr");
+  const live = records.qaLive;
+  if (live === undefined || live.ok === false) return fail("fetch-failed");
+  if (live.value.number !== prNumber) return fail("record-binding-mismatch");
+  return classifyQaPassedExit(live.value) === input.to ? pass() : fail("qa-exit-cause-mismatch");
+}
+
+/**
+ * `needs-qa -> qa-passed | needs-dev-resume | ready-for-agent`: evidence `pr=N`
+ * is a locator; the verdict record is the live trailer at head posted after the
+ * issue entered `needs-qa`, and its classified target must equal `to`.
+ */
+/** The only actor allowed to use the trailer-less `defer=1` evidence. */
+export const QA_DEFER_ACTOR = "hydra-qa";
+
+export function gateQaVerdict(input: GateInput, records: GateRecords): GateResult {
+  const prNumber = parsePrEvidence(input.evidence);
+  if (prNumber === null) return fail("evidence-required:pr");
+  const live = records.qaLive;
+  const entry = records.stateEntry;
+  if (live === undefined || live.ok === false) return fail("fetch-failed");
+  if (entry === undefined || entry.ok === false) return fail("fetch-failed");
+  if (live.value.number !== prNumber) return fail("record-binding-mismatch");
+  // Defer arm (hydra-qa step 6.6): no verdict was emitted, so there is no
+  // trailer to gate on. `defer=1` evidence admits ONLY the live-state bounce
+  // (OPEN -> needs-dev-resume, CLOSED -> ready-for-agent); never qa-passed.
+  // Restricted to actor `hydra-qa`: the trailer-less bounce skips the trailer,
+  // freshness and cap checks, so no other caller may use it.
+  if (input.evidence.defer === "1") {
+    if (input.actor !== QA_DEFER_ACTOR) return fail("defer-actor-not-allowed");
+    const deferTarget =
+      live.value.state === "OPEN" ? "needs-dev-resume" : live.value.state === "CLOSED" ? "ready-for-agent" : null;
+    if (deferTarget === null) return fail("pr-merged");
+    return deferTarget === input.to ? pass() : fail("qa-verdict-mismatch");
+  }
+  if (entry.value.enteredAtMs === null) return fail("state-entry-unknown");
+  const c = classifyQaVerdictTarget(live.value, entry.value.enteredAtMs);
+  if (c.ok === false) return fail(c.code);
+  return c.target === input.to ? pass() : fail("qa-verdict-mismatch");
+}
+
 export const RESEARCH_TRAILER_PREFIX = "Hydra-Research:";
 
 export type ResearchTrailer =
@@ -212,18 +372,64 @@ export function gateResearchExit(input: GateInput, records: GateRecords): GateRe
   return pass();
 }
 
+/**
+ * `blocked -> ready-for-agent` (recover-stale unblock, ADR-0047 D4). The same
+ * decision `findClearedBlockedIssues` makes: every clearance blocker ref is
+ * closed/merged and the body carries a scope section. Pure, fails closed.
+ */
+export function gateUnblocked(input: GateInput, records: GateRecords): GateResult {
+  const body = input.body;
+  if (body === undefined) return fail("fetch-failed");
+  if (hasCrossRepoBlockerRef(body)) return fail("blocker-cross-repo");
+  const refs = extractClearanceBlockerRefs(body, input.issue);
+  if (refs.length === 0) return fail("blocker-refs-missing");
+  const rec = records.blockers;
+  if (rec === undefined || rec.ok === false) return fail("fetch-failed");
+  const byNumber = new Map(rec.value.map((b) => [b.number, b.state] as const));
+  const states: BlockerRefState[] = [];
+  for (const n of refs) {
+    const st = byNumber.get(n);
+    if (st === undefined) return fail("record-binding-mismatch");
+    states.push(st);
+  }
+  if (states.some((s) => s === "unknown")) return fail("fetch-failed");
+  if (states.some((s) => s === "open")) return fail("blockers-open");
+  if (!hasScopeSection(body)) return fail("scope-section-missing");
+  return pass();
+}
+
+/**
+ * `in-progress -> ready-for-agent | needs-dev-resume` (reconcile exits). The
+ * dispatch is over: no claim is held, or the held claim belongs to the caller
+ * (`evidence.dispatch`, the owner-release arm). Pure, fails closed.
+ */
+export function gateClaimReleased(input: GateInput, records: GateRecords): GateResult {
+  const rec = records.claim;
+  if (rec === undefined || rec.ok === false) return fail("fetch-failed");
+  const held = rec.value.held;
+  if (held === null) return pass();
+  if (input.evidence.dispatch === held.dispatchId) return pass();
+  return fail("claim-held");
+}
+
 /** Which fetches a gate needs; the seam runs exactly these. */
 export function recordsNeeded(gate: GateId): {
   designConcept: boolean;
   pr: boolean;
   comment: boolean;
   stateEntry: boolean;
+  qaLive: boolean;
+  claim: boolean;
+  blockers: boolean;
 } {
   return {
+    claim: gate === "claim-released",
+    blockers: gate === "unblocked",
+    qaLive: gate === "qa-exit" || gate === "qa-verdict",
     designConcept: gate === "dispatch",
     pr: gate === "pr-open" || gate === "close",
     comment: gate === "research-exit",
-    stateEntry: gate === "research-exit",
+    stateEntry: gate === "research-exit" || gate === "qa-verdict",
   };
 }
 
@@ -244,6 +450,14 @@ export function evaluateGate(gate: GateId, input: GateInput, records: GateRecord
       return gateClose(input, records);
     case "research-exit":
       return gateResearchExit(input, records);
+    case "qa-exit":
+      return gateQaExit(input, records);
+    case "qa-verdict":
+      return gateQaVerdict(input, records);
+    case "unblocked":
+      return gateUnblocked(input, records);
+    case "claim-released":
+      return gateClaimReleased(input, records);
     case "not-yet-implemented":
       return fail("gate-unimplemented");
   }

@@ -63,7 +63,7 @@
     },
     {
       "order": 7,
-      "name": "target-outcomes-publish",
+      "name": "lifecycle-reconcile",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts"
@@ -71,7 +71,7 @@
     },
     {
       "order": 8,
-      "name": "wiring-liveness",
+      "name": "target-outcomes-publish",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts"
@@ -79,7 +79,7 @@
     },
     {
       "order": 9,
-      "name": "attribution-record",
+      "name": "wiring-liveness",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts"
@@ -87,7 +87,7 @@
     },
     {
       "order": 10,
-      "name": "holdback-merge-watch",
+      "name": "attribution-record",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts"
@@ -95,7 +95,7 @@
     },
     {
       "order": 11,
-      "name": "cycle-merge-reconcile",
+      "name": "holdback-merge-watch",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts"
@@ -103,7 +103,7 @@
     },
     {
       "order": 12,
-      "name": "holdback-merge-event-enrol",
+      "name": "cycle-merge-reconcile",
       "cadence": "every-run",
       "source": {
         "path": "src/scheduler/housekeeping.ts"
@@ -111,6 +111,14 @@
     },
     {
       "order": 13,
+      "name": "holdback-merge-event-enrol",
+      "cadence": "every-run",
+      "source": {
+        "path": "src/scheduler/housekeeping.ts"
+      }
+    },
+    {
+      "order": 14,
       "name": "pattern-cue-demotion",
       "cadence": "every-run",
       "source": {

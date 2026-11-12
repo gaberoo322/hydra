@@ -72,6 +72,18 @@
       }
     },
     {
+      "name": "DESIGN_CONCEPT_MODE",
+      "readSites": [
+        {
+          "path": "scripts/qa/preflight.ts"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/qa/preflight.ts"
+      }
+    },
+    {
       "name": "GITHUB_STEP_SUMMARY",
       "readSites": [
         {
@@ -222,6 +234,15 @@
         },
         {
           "path": "scripts/hooks/session-start-capture.sh"
+        },
+        {
+          "path": "scripts/qa/packet.ts"
+        },
+        {
+          "path": "scripts/qa/preflight.ts"
+        },
+        {
+          "path": "scripts/qa/route.ts"
         }
       ],
       "inEnvExample": false,
@@ -2104,6 +2125,18 @@
       }
     },
     {
+      "name": "HYDRA_RECOVER_STALE_DEBUG",
+      "readSites": [
+        {
+          "path": "scripts/autopilot/recover-stale.sh"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/autopilot/recover-stale.sh"
+      }
+    },
+    {
       "name": "HYDRA_RECS_DAILY_CAP_USD",
       "readSites": [
         {
@@ -2188,6 +2221,21 @@
       "inEnvExample": false,
       "source": {
         "path": "scripts/claude-hooks/git-remote-fence.sh"
+      }
+    },
+    {
+      "name": "HYDRA_REPO_ROOT",
+      "readSites": [
+        {
+          "path": "scripts/docs/generate-inventories.ts"
+        },
+        {
+          "path": "scripts/test/suite-count-check.mjs"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/docs/generate-inventories.ts"
       }
     },
     {
@@ -2692,24 +2740,24 @@
       "name": "HYDRA_WATCHDOG_BRIEF_NOW_MS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_BRIEF_STALE_HOURS",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
@@ -2728,52 +2776,64 @@
       "name": "HYDRA_WATCHDOG_CLAUDE_HOOKS_DIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_CLAUDE_HOOKS_NOTIFY_STREAM",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_CLAUDE_HOOKS_SETUP",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_CLAUDE_HOOKS_STATE_DIR",
       "readSites": [
         {
-          "path": "scripts/hydra-watchdog.sh"
+          "path": "scripts/hydra-watchdog.ts"
         }
       ],
       "inEnvExample": false,
       "source": {
-        "path": "scripts/hydra-watchdog.sh"
+        "path": "scripts/hydra-watchdog.ts"
       }
     },
     {
       "name": "HYDRA_WATCHDOG_CLAUDE_SETTINGS",
+      "readSites": [
+        {
+          "path": "scripts/hydra-watchdog.ts"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/hydra-watchdog.ts"
+      }
+    },
+    {
+      "name": "HYDRA_WATCHDOG_CLI_ALARM_STATE_DIR",
       "readSites": [
         {
           "path": "scripts/hydra-watchdog.sh"
@@ -3495,6 +3555,9 @@
         },
         {
           "path": "scripts/sync-skills.sh"
+        },
+        {
+          "path": "scripts/zizmor-scan.sh"
         },
         {
           "path": "src/watchdog/ports.ts"

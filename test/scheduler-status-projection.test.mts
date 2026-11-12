@@ -286,3 +286,39 @@ describe("buildSchedulerStatus — projection without controller (issue #2935 AC
     assert.equal(status.consecutiveErrors, 3);
   });
 });
+
+describe("buildSchedulerStatus — server-evaluated no-fresh-deliberate-stop (issue #5452)", () => {
+  const NOW = Date.UTC(2026, 10, 10, 12, 0, 0);
+  const TTL_MS = 24 * 60 * 60 * 1000;
+  const deps = {
+    getAutopilotPaused: async () => ({ paused: false }),
+    getReconcilerHealth: async () => null,
+    now: () => NOW,
+  };
+  const checksFor = async (state: Parameters<typeof makeState>[0]) =>
+    (await buildSchedulerStatus(makeState(state), makeRates(), deps)).checks;
+  const stoppedAgo = (ageMs: number) => ({
+    stopReason: "deliberate" as const,
+    deliberateStoppedAt: new Date(NOW - ageMs).toISOString(),
+  });
+
+  test("a deliberate stop younger than the TTL fails the check; at or past the TTL it passes", async () => {
+    assert.equal((await checksFor(stoppedAgo(60_000)))["no-fresh-deliberate-stop"], false);
+    assert.equal((await checksFor(stoppedAgo(TTL_MS - 1)))["no-fresh-deliberate-stop"], false);
+    assert.equal((await checksFor(stoppedAgo(TTL_MS)))["no-fresh-deliberate-stop"], true);
+    assert.equal((await checksFor(stoppedAgo(TTL_MS + 60_000)))["no-fresh-deliberate-stop"], true);
+  });
+
+  test("a non-deliberate stop (or a running scheduler) always passes the check", async () => {
+    for (const stopReason of [null, "circuit-breaker", "error-cap"] as const) {
+      assert.equal((await checksFor({ stopReason }))["no-fresh-deliberate-stop"], true, String(stopReason));
+    }
+  });
+
+  test("a deliberate stop with a missing or unparseable timestamp carries NO verdict", async () => {
+    for (const deliberateStoppedAt of [null, "not-a-date"]) {
+      const checks = await checksFor({ stopReason: "deliberate", deliberateStoppedAt });
+      assert.ok(!("no-fresh-deliberate-stop" in checks), String(deliberateStoppedAt));
+    }
+  });
+});

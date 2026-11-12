@@ -131,6 +131,7 @@
           }
         },
         "drillable": false,
+        "drillableReason": "none",
         "reviewDue": false
       },
       "wayfinder-frontier": {

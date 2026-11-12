@@ -71,7 +71,8 @@
         "0024",
         "0033",
         "0034",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -420,6 +421,7 @@
           "BuilderHealthQuerySchema",
           "CONTROL_CHECKS",
           "CONTROL_KEYS",
+          "CheckListSchema",
           "ContextTraceQuerySchema",
           "ControlCheckSchema",
           "CostBurnResponseSchema",
@@ -452,7 +454,11 @@
           "OtlpTraceExportBodySchema",
           "OvernightSummaryQuerySchema",
           "OvernightSummaryResponseSchema",
+          "PREFLIGHT_STAGES",
+          "PacketResultSchema",
           "PatternBodySchema",
+          "PollResultSchema",
+          "PreflightResultSchema",
           "PublishEventBodySchema",
           "QA_VERDICT_PHASES",
           "QaVerdictCliSchemas",
@@ -463,6 +469,9 @@
           "ReflectionsQuerySchema",
           "RetroArtifactSchema",
           "RetroBundleParamsSchema",
+          "RouteEffectSchema",
+          "RouteResultSchema",
+          "SERVER_EVALUATED_CHECKS",
           "SchedulerStartBodySchema",
           "ScopeViolationBodySchema",
           "ScoutDispatchesQuerySchema",
@@ -475,6 +484,7 @@
           "SubagentFrictionBodySchema",
           "SubagentLessonBodySchema",
           "SubagentTokensBodySchema",
+          "SummariesSchema",
           "TURN_SNAPSHOT_SCHEMA_VERSION",
           "TargetManifestSchema",
           "TaxonomyClassesQuerySchema",
@@ -640,7 +650,8 @@
         "0024",
         "0033",
         "0034",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -820,8 +831,9 @@
         "0012"
       ],
       "adrsCited": [
-        "0001",
-        "0006"
+        "0006",
+        "0015",
+        "0045"
       ],
       "referenceDocs": [
         {
@@ -849,13 +861,14 @@
           "4 stale-key-prune",
           "5 worktree-orphan-prune",
           "6 glm-eligibility-sweep",
-          "7 target-outcomes-publish",
-          "8 wiring-liveness",
-          "9 attribution-record",
-          "10 holdback-merge-watch",
-          "11 cycle-merge-reconcile",
-          "12 holdback-merge-event-enrol",
-          "13 pattern-cue-demotion"
+          "7 lifecycle-reconcile",
+          "8 target-outcomes-publish",
+          "9 wiring-liveness",
+          "10 attribution-record",
+          "11 holdback-merge-watch",
+          "12 cycle-merge-reconcile",
+          "13 holdback-merge-event-enrol",
+          "14 pattern-cue-demotion"
         ],
         "env-vars": [
           "HYDRA_AUTO_CYCLE_INTERVAL_MS",
@@ -947,7 +960,8 @@
         "0024",
         "0033",
         "0034",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -1137,7 +1151,8 @@
         "0020",
         "0033",
         "0034",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -1294,7 +1309,8 @@
         "0024",
         "0033",
         "0034",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -1544,7 +1560,8 @@
         "0024",
         "0033",
         "0034",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -1825,6 +1842,7 @@
           "HYDRA_PACE_GATE_FORCE_SERVICE_INACTIVE",
           "HYDRA_PACE_GATE_NUDGE_CMD",
           "HYDRA_PACE_GATE_NUDGE_STAMP",
+          "HYDRA_RECOVER_STALE_DEBUG",
           "HYDRA_REDIS_DB",
           "HYDRA_REDIS_HOST",
           "HYDRA_REDIS_PORT",
@@ -1890,7 +1908,8 @@
         "0020",
         "0024",
         "0033",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -1951,7 +1970,8 @@
         "0024",
         "0033",
         "0034",
-        "0045"
+        "0045",
+        "0047"
       ],
       "referenceDocs": [
         {
@@ -1972,6 +1992,7 @@
           "file config/direction/proposal-policy.md",
           "file config/direction/tech-preferences.md",
           "file config/direction/vision.md",
+          "file config/orchestrator/builder-health-baselines.json",
           "file config/orchestrator/lifecycle-rollout.json",
           "file config/orchestrator/qa-rollout.json",
           "file config/orchestrator/vision.md"

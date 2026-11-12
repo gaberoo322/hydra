@@ -473,3 +473,19 @@ export function runSyncSkillsScript(
   const env = opts.skillsDir ? { CLAUDE_SKILLS_DIR: opts.skillsDir } : undefined;
   return runRepoScript(`${root}/scripts/sync-skills.sh`, root, opts.timeout ?? SYNC_SKILLS_TIMEOUT_MS, env, "sync-skills.sh");
 }
+
+/** Outcome of `bash <script> --list`: exit code plus raw stdout (the installer's HOOKS listing). */
+export interface ListRun {
+  exitCode: number;
+  stdout: string;
+}
+
+/** Timeout for the installer's `--list` (a pure echo of its array; the wrapper allows 60s). */
+export const INSTALLER_LIST_TIMEOUT_MS = 20_000;
+
+/** `bash <script> --list` — the watchdog's claude-hooks check reads the installer's own HOOKS array. */
+export async function runInstallerList(script: string): Promise<ProbeResult<ListRun>> {
+  const raw = await runProbe(bashBin(), [script, "--list"], { timeout: INSTALLER_LIST_TIMEOUT_MS });
+  if (raw.spawnErrorCode || raw.timedOut) return { ok: false, code: classifyProbeFailure(raw) };
+  return { ok: true, data: { exitCode: raw.exitCode, stdout: raw.stdout } };
+}

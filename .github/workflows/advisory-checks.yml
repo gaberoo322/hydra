@@ -65,6 +65,10 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
+        with:
+          # fetch-depth 0: the test-can-fail step needs `git merge-base` and a
+          # detached worktree at the merge-base (issue #5447).
+          fetch-depth: 0
 
       # One shared install so every `npx tsx` step below resolves tsx
       # deterministically (replaces the per-workflow npm ci / ambient-resolve mix).
@@ -282,3 +286,48 @@ jobs:
       - name: Skill-size ratchet (issue #2946 shrink-only word-count baseline)
         if: always()
         run: npx tsx scripts/ci/skill-size-ratchet.ts
+
+      # ── zizmor workflow static analysis (issue #5368) ──────────────────────
+      # Advisory scan of .github/workflows via the pinned, SHA256-verified zizmor
+      # binary (scripts/zizmor-scan.sh; offline, scan-only). Never a required
+      # check: the script's non-zero exit on findings is swallowed here.
+      - name: zizmor workflow scan (advisory; scripts/zizmor-scan.sh)
+        if: always()
+        run: |
+          bash scripts/zizmor-scan.sh > zizmor-results.json || true
+          if [ -s zizmor-results.json ] && jq -e 'type == "array"' zizmor-results.json >/dev/null 2>&1; then
+            total=$(jq '[.[] | select(.determinations.severity == "High")] | length' zizmor-results.json)
+            echo "::warning title=zizmor::${total} High-severity workflow finding(s) (advisory baseline — see zizmor-results.json artifact)"
+            {
+              echo "### zizmor findings by ident and severity"
+              echo
+              echo "| ident | severity | count |"
+              echo "|---|---|---|"
+              jq -r 'group_by([.ident, .determinations.severity])[] | "| \(.[0].ident) | \(.[0].determinations.severity) | \(length) |"' zizmor-results.json
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=zizmor::scan produced no JSON (advisory — see job log)"
+          fi
+
+      # ── test-can-fail proof on changed tests (issue #5447) ─────────────────
+      # STD-TEST-CAN-FAIL: annotate test files this PR adds/extends whose every
+      # case already passes at the merge-base. Advisory by contract: the CLI exits
+      # 0 on findings and on infrastructure failure (`::warning::`); PR-only because
+      # a push to master has no PR base. Same CLI as hydra-dev child-step 7b.
+      - name: test-can-fail proof on changed tests (advisory; scripts/ci/qa-fix-proof.ts)
+        if: always() && github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          node --experimental-strip-types scripts/ci/qa-fix-proof.ts --mode changed-tests \
+            --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA"
+
+      - name: Upload zizmor results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zizmor-results
+          path: zizmor-results.json
+          if-no-files-found: ignore
+          retention-days: 14

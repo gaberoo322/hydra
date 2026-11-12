@@ -14,7 +14,8 @@
  *      paragraph-scoped admit rule (cite the retiring ADR/PR, or link
  *      docs/historical/);
  *   3. count claims — "N routers/routes/ADRs/…" prose must equal the
- *      docs/generated/counts.json row for that family;
+ *      count the counts fold (inventories/counts.ts) derives from the family
+ *      files for that family;
  *   4. links — relative markdown links in living docs must resolve to a
  *      tracked file (or a directory prefix of one).
  *
@@ -44,9 +45,10 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildCounts } from "./inventories/counts.ts";
 import { byString, lineOf, resolveRelative, trackedFiles } from "./inventories/scan.ts";
 
 /** One denylist row: the retired term and the ADR-NNNN / #NNNN that retired it. */
@@ -80,7 +82,7 @@ export interface CorpusScopeRow {
   tier: string;
 }
 
-/** One counts.json row. */
+/** One counts-fold row (inventories/counts.ts). */
 export interface CountRow {
   family: string;
   metric: string;
@@ -445,7 +447,7 @@ const NUMBER_WORDS: Record<string, number> = {
 const COUNT_CLAIM_RE =
   /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)[ \t]+(dispatch classes|redis keys|ci jobs|routers|routes|ADRs|pages|classes|skills|playbooks|streams|chores)\b/gi;
 
-/** Fixed noun → counts.json row map (lowercased noun → family/metric). */
+/** Fixed noun → counts-fold row map (lowercased noun → family/metric). */
 const COUNT_NOUN_ROWS: Record<string, { family: string; metric: string }> = {
   routers: { family: "routes", metric: "routers" },
   routes: { family: "routes", metric: "routes" },
@@ -511,6 +513,23 @@ function readJson(repoRoot: string, rel: string): unknown {
   }
 }
 
+/** Every committed family file under docs/generated/, keyed by family (file stem). */
+function readFamilyInventories(repoRoot: string): Map<string, { rows: unknown[] }> {
+  const dir = "docs/generated";
+  let names: string[];
+  try {
+    names = readdirSync(join(repoRoot, dir)).filter((n) => n.endsWith(".json")).sort();
+  } catch (err) {
+    throw new ProseDriftInputError(`[prose-drift] could not read ${dir}: ${(err as Error).message}`);
+  }
+  const out = new Map<string, { rows: unknown[] }>();
+  for (const name of names) {
+    const inv = readJson(repoRoot, `${dir}/${name}`) as { rows?: unknown };
+    out.set(name.slice(0, -".json".length), { rows: Array.isArray(inv?.rows) ? inv.rows : [] });
+  }
+  return out;
+}
+
 const FIXES: Record<OffenderKind, string> = {
   path: "path not tracked; fix the path or say retired/removed/deleted in the same paragraph",
   route: "not in docs/generated/routes.json",
@@ -518,7 +537,7 @@ const FIXES: Record<OffenderKind, string> = {
   skill: "not in docs/generated/skills.json",
   "env-var": "not in docs/generated/env-vars.json nor a whole word in tracked source",
   "retired-term": "cite the retiring ADR/PR in the same paragraph or drop the term",
-  count: "counts.json disagrees",
+  count: "count disagrees with the family file row count",
   link: "relative link target not tracked",
   "unreadable-input": "a generated inventory, baseline, or git listing could not be read; regenerate (npm run docs:inventories) or fix the file",
 };
@@ -565,7 +584,7 @@ function scanProseDriftUnguarded(repoRoot: string, opts: ProseScanOptions): Offe
     opts.skillNames ?? (readJson(repoRoot, "docs/generated/skills.json") as { rows: { name: string }[] }).rows.map((r) => r.name);
   const envVarNames =
     opts.envVarNames ?? (readJson(repoRoot, "docs/generated/env-vars.json") as { rows: { name: string }[] }).rows.map((r) => r.name);
-  const counts = opts.counts ?? (readJson(repoRoot, "docs/generated/counts.json") as { rows: CountRow[] }).rows;
+  const counts = opts.counts ?? buildCounts(readFamilyInventories(repoRoot));
   const sourceBlob = opts.sourceBlob ?? buildSourceBlob(repoRoot, tracked);
 
   const livingPaths = corpusRows.filter((r) => r.tier === "living").map((r) => r.path);
@@ -660,8 +679,8 @@ function scanProseDriftUnguarded(repoRoot: string, opts: ProseScanOptions): Offe
           file,
           line: lineOf(blanked, c.index),
           kind: "count",
-          token: `${c.phrase} (counts.json lacks ${c.row.family}/${c.row.metric})`,
-          fix: "regenerate docs/generated/counts.json (npm run docs:inventories)",
+          token: `${c.phrase} (no ${c.row.family}/${c.row.metric} count: docs/generated/${c.row.family}.json missing)`,
+          fix: "regenerate the family file (npm run docs:inventories)",
         });
         continue;
       }
@@ -671,7 +690,7 @@ function scanProseDriftUnguarded(repoRoot: string, opts: ProseScanOptions): Offe
         line: lineOf(blanked, c.index),
         kind: "count",
         token: c.phrase,
-        fix: `counts.json says ${actual}`,
+        fix: `docs/generated/${c.row.family}.json says ${actual}`,
       });
     }
 

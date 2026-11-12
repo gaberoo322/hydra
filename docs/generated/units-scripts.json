@@ -138,7 +138,7 @@
         "path": "scripts/hydra-watchdog.sh"
       },
       "kind": "sh",
-      "description": "hydra-watchdog.sh — consolidated Hydra watchdog (issue #705)"
+      "description": "hydra-watchdog.sh — the watchdog TIMER ENTRY (issue #705; collapsed by #5099, epic #5094)"
     },
     {
       "path": "scripts/hydra-watchdog.ts",
@@ -151,6 +151,30 @@
       },
       "kind": "ts",
       "description": "hydra-watchdog.ts — one-shot watchdog CLI (issue #5095, epic #5094)."
+    },
+    {
+      "path": "scripts/lifecycle-legacy-backfill.ts",
+      "name": "lifecycle-legacy-backfill.ts",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/lifecycle-legacy-backfill.ts"
+      },
+      "kind": "ts",
+      "description": "scripts/lifecycle-legacy-backfill.ts — one-time cutover helper"
+    },
+    {
+      "path": "scripts/lifecycle-parent-exception-baseline.ts",
+      "name": "lifecycle-parent-exception-baseline.ts",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/lifecycle-parent-exception-baseline.ts"
+      },
+      "kind": "ts",
+      "description": "scripts/lifecycle-parent-exception-baseline.ts — idempotent replay of the"
     },
     {
       "path": "scripts/lifecycle.ts",
@@ -547,6 +571,18 @@
       },
       "kind": "ts",
       "description": "Tool-currency check — pure logic (issue #480)."
+    },
+    {
+      "path": "scripts/zizmor-scan.sh",
+      "name": "zizmor-scan.sh",
+      "execStart": null,
+      "triggers": null,
+      "schedule": null,
+      "source": {
+        "path": "scripts/zizmor-scan.sh"
+      },
+      "kind": "sh",
+      "description": null
     }
   ]
 }

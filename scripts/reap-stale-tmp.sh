@@ -80,12 +80,16 @@ fi
 # (`csb-outcomes-route-1d5vgA`, `pmh-e2e-Ab12Cd`). Matching the SHAPE instead
 # of a list of known prefixes is the point: a safety net has to catch the next
 # leaker nobody has found yet, not only the ones already filed. The 6-char
-# suffix must also LOOK random (is_random_suffix below): it must mix letters AND
-# digits, and must not lead with a year (19xx/20xx). So words (`build-output`,
+# suffix must also LOOK random (is_random_suffix below): it must contain an
+# uppercase letter, a lowercase letter AND a digit (mkdtemp's shape), must not be
+# all-hex (hash-style names like `checkout-3fa9c1`), and must not lead with a
+# year (19xx/20xx). Version/tag names (`images-v2beta`, `debian-12slim`) lack an
+# uppercase letter and are spared. So words (`build-output`,
 # `my-backup`, `old-Backup`), numbers and dates (`backup-202610`, `logs-202611`,
 # `export-123456`) and year-led labels (`report-2026Q4`) fit the bare shape but
-# are spared. The cost is misses: a genuinely random suffix with no digit
-# ((52/62)^6, ~35%) is spared too. The safety net accepts that miss rather than
+# are spared. The cost is misses: a genuinely random suffix missing a digit, an
+# uppercase or a lowercase letter (roughly half of all mkdtemp suffixes) is
+# spared too. The safety net accepts that miss rather than
 # delete a named dir; the per-leaker fixes remain the primary defense.
 #
 # Vitest's root tmp dir is a 21-char nanoid whose ONLY entry is `ssr/`; any
@@ -102,7 +106,8 @@ DENY_RE='^(claude-|tsx-|systemd-|tmux-|ssh-|snap-|node-compile-cache|com\.google
 
 # is_random_suffix <6 chars> -> true when the suffix looks like mkdtemp output.
 is_random_suffix() {
-  [[ "$1" =~ [0-9] ]] && [[ "$1" =~ [A-Za-z] ]] && ! [[ "$1" =~ ^(19|20)[0-9]{2} ]]
+  [[ "$1" =~ [0-9] ]] && [[ "$1" =~ [A-Z] ]] && [[ "$1" =~ [a-z] ]] \
+    && ! [[ "$1" =~ ^[0-9a-fA-F]{6}$ ]] && ! [[ "$1" =~ ^(19|20)[0-9]{2} ]]
 }
 
 # classify <basename> <path> -> prints the class name, or nothing if no match.

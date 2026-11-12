@@ -103,12 +103,14 @@ import {
   projectDispatches,
   flagDispatchesForDrill,
   drillReasonOf,
+  transcriptIdOf,
   flagRunForDrill,
   novelStuckSignals as foldNovelStuckSignals,
   stuckSignalKey as foldStuckSignalKey,
 } from "./retro-projections.ts";
 import { listRecentRetroArtifacts } from "../redis/retro-artifacts.ts";
 import type { RetroDispatch } from "./retro-projections.ts";
+import { joinedTurnFromWire } from "./turn-row.ts";
 // Issue #3055: the per-cycle dispatch enrichment join — the three-source
 // terminal-record chain (durable outcome record → cycle-metrics sidecar →
 // cycle-hash), the provisional-cycleId confirm-or-drop, the post-enrichment
@@ -341,7 +343,9 @@ export async function assembleRetroBundle(
   //    returning the enriched + deduplicated dispatch array. It reads Redis
   //    only through the never-throw `safeSource` (bound to `errors[]` here), so
   //    a failing cycle read still yields a partial bundle, never a throw.
-  const projected = projectDispatches(turns);
+  const projected = projectDispatches(
+    turns.flatMap((t) => joinedTurnFromWire(t) ?? []),
+  );
   const termReason =
     runView && typeof (runView as any).term_reason === "string"
       ? ((runView as any).term_reason as string)
@@ -375,6 +379,7 @@ export async function assembleRetroBundle(
   // disagree.
   const flaggedSet = new Set(flagged);
   for (const d of dispatches) {
+    d.transcriptId = transcriptIdOf(d.occupancyId);
     d.flagged = flaggedSet.has(d);
     d.drillReason = d.flagged ? drillReasonOf(d) : null;
   }

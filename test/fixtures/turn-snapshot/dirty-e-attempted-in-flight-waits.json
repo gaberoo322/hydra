@@ -82,53 +82,36 @@
         "100",
         "--json",
         "number,labels,updatedAt"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--label",
+        "parked",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels,updatedAt"
       ]
     ],
     "sleeps": [],
     "values": {
-      "pr-gate": {
-        "inflight": {
-          "union": [
-            4758
-          ],
-          "branch": [],
-          "body": [
-            4758
-          ]
-        },
-        "dirty": [
-          4775
+      "inflight": {
+        "union": [
+          4758
         ],
-        "unchecked": [],
-        "behind": [],
-        "ciTriggerStale": {
-          "ok": false,
-          "reason": "runs-read-failed"
-        },
-        "redResume": {
-          "ok": true,
-          "value": []
-        },
-        "devResumePick": {
-          "ok": true,
-          "value": null
-        },
-        "devResumeNoprPick": {
-          "ok": true,
-          "value": null
-        },
-        "dirtyFix": {
-          "ok": true,
-          "value": {
-            "pick": null,
-            "surface": []
-          }
-        },
-        "qaVerdictRecheck": {
-          "ok": true,
-          "value": []
-        }
-      }
+        "branch": [],
+        "body": [
+          4758
+        ]
+      },
+      "dirty": [
+        4775
+      ]
     }
   }
 }

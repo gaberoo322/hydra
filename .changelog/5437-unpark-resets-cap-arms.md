@@ -1,0 +1,1 @@
+- fix: un-parking an issue now resets the qa-fail-rounds cap (the lifecycle seam posts the reset marker and counts from timestamps) (#5437)

@@ -91,6 +91,7 @@ LISTS = (
     "orch_prs_dirty",
     "orch_prs_unchecked",
     "orch_prs_behind",
+    "orch_prs_no_closing_issue",
     "orch_prs_red_resume",
 )
 # The schema's scalar keys (src/schemas/turn-snapshot.ts) — converted to their typed shape too.
@@ -257,6 +258,10 @@ def to_json_form(state: dict) -> dict:
             # it is converted to ABSENT, which is also how decide.py reads it.
             if _emittable_blob(field, value):
                 blobs[field] = value
+    if signals:
+        # Legacy captures predate #5319: their (absent) parked set was a healthy
+        # empty read, not a degraded one - otherwise the belt fails every pick closed.
+        signals.setdefault("orch_parked_unreadable", False)
     snap = {
         "schema_version": ts.SCHEMA_VERSION,
         "generated_at": "plan-parity",

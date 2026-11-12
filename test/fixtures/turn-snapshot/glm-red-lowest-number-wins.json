@@ -82,58 +82,48 @@
         "100",
         "--json",
         "number,labels,updatedAt"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--label",
+        "parked",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels,updatedAt"
       ]
     ],
     "sleeps": [],
     "values": {
-      "pr-gate": {
-        "inflight": {
-          "union": [
-            4266,
-            4300
-          ],
-          "branch": [],
-          "body": [
-            4266,
-            4300
-          ]
-        },
-        "dirty": [],
-        "unchecked": [],
-        "behind": [],
-        "ciTriggerStale": {
-          "ok": false,
-          "reason": "runs-read-failed"
-        },
-        "redResume": {
-          "ok": true,
-          "value": [
-            4465,
-            4470
-          ]
-        },
-        "devResumePick": {
-          "ok": true,
-          "value": {
-            "issue": 4300,
-            "pr": 4465,
-            "headRefName": "worktree-agent-glm-4300-1"
-          }
-        },
-        "devResumeNoprPick": {
-          "ok": true,
-          "value": null
-        },
-        "dirtyFix": {
-          "ok": true,
-          "value": {
-            "pick": null,
-            "surface": []
-          }
-        },
-        "qaVerdictRecheck": {
-          "ok": true,
-          "value": []
+      "inflight": {
+        "union": [
+          4266,
+          4300
+        ],
+        "branch": [],
+        "body": [
+          4266,
+          4300
+        ]
+      },
+      "redResume": {
+        "ok": true,
+        "value": [
+          4465,
+          4470
+        ]
+      },
+      "devResumePick": {
+        "ok": true,
+        "value": {
+          "issue": 4300,
+          "pr": 4465,
+          "headRefName": "worktree-agent-glm-4300-1"
         }
       }
     }

@@ -29,6 +29,10 @@
  *   orch_prs_behind  BEHIND, not draft, no `no-rebase`, quiet > 5400s.
  *   orch_prs_unchecked  empty rollup, state not DIRTY/UNKNOWN/BEHIND, not
  *                    draft/surfaced, older than the grace window.
+ *   orch_prs_no_closing_issue  open, non-draft, not ready-for-human / parked /
+ *                    DIRTY, older than the unchecked grace window, and its body
+ *                    carries no Closes/Fixes/Resolves #N - no lane can ever
+ *                    reach it (#5400).
  *   orch_ci_trigger_stale  an unchecked PR is newer than the newest push AND
  *                    pull_request run (only when both timestamps parse).
  *   dev-resume pick  ANY provenance (#5058), not draft / ready-for-human /
@@ -58,6 +62,7 @@ import {
 } from "./dev-resume.ts";
 import { ghTimestampSeconds, type GhJsonRead, type TurnSnapshotGithub } from "./github-port.ts";
 import type { QaVerdictRunner } from "./host-port.ts";
+import { isFailVerdict, type FinalVerdict } from "../../qa/verdict-trailer.ts";
 
 export const PR_GATE_COLLECTOR = "pr-gate";
 
@@ -102,6 +107,12 @@ export interface PrGateSnapshot {
   readonly dirty: readonly number[];
   readonly unchecked: readonly number[];
   readonly behind: readonly number[];
+  /**
+   * #5400: open PRs with no closing issue (`Refs #N` / `Part of #N` only) - every
+   * PR lane keys on a closing issue, so these strand unreviewed. Fail-open:
+   * degraded (pr-refs unavailable) -> `[]` (noted once at the collector).
+   */
+  readonly noClosingIssue: readonly number[];
   /** Fail-open: degraded → rendered `false`. */
   readonly ciTriggerStale: Classified<boolean>;
   /**
@@ -130,6 +141,20 @@ export interface PrGateSnapshot {
    * `[]`; no path synthesises a PASS.
    */
   readonly qaVerdictRecheck: Classified<readonly QaRecheckEntry[]>;
+  /**
+   * #5253: the dirty pick's PR number iff qa-merge-guard reports a FAIL-family
+   * verdict AT the PR's current (pre-merge) head, else `null`. Fail-closed to
+   * `null` (the conflict-only arm) on every unreadable / unknown shape.
+   */
+  readonly dirtyFixFailPr: number | null;
+  /**
+   * #5319 (ADR-0047 Decision 6): the open issues carrying the `parked` human-hold
+   * label. A PR whose CLOSING issue is in this set is excluded from every arm
+   * below. Degraded -> the dispatch-shaped outputs fail closed.
+   */
+  readonly parkedIssues: Classified<ReadonlySet<number>>;
+  /** #5319 QA r1: open PRs whose closing issue is parked - the PR-keyed hold for the qa-verdict event. */
+  readonly parkedPrs: ReadonlySet<number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +363,10 @@ interface PrGateInputs {
   readonly requiredContexts: Classified<ReadonlySet<string>>;
   readonly devResumeIssues: Classified<ReadonlySet<number>>;
   readonly prRefs: PrRefsAvailability;
+  /** #5319: open issues labelled `parked`; `{ok:false}` on an unreadable read. */
+  readonly parkedIssues: Classified<ReadonlySet<number>>;
+  /** #5319: open PRs whose closing issue is parked ({@link parkedPrNumbers}). */
+  readonly parkedPrs: ReadonlySet<number>;
   /**
    * #4808 (INV-4): `false` when the open-PR read was empty/unparseable — an
    * empty in-flight set from a failed read would make EVERY resume issue look
@@ -402,11 +431,13 @@ export function parseTierLine(body: unknown): number | null {
 export function qaRecheckCandidates(
   prs: readonly unknown[],
   required: ReadonlySet<string>,
+  parkedPrs: ReadonlySet<number> = new Set(),
 ): { readonly pr: number; readonly tier: number }[] {
   const out: { pr: number; tier: number }[] = [];
   for (const pr of rowsOf(prs)) {
     const number = pr.number;
     if (typeof number !== "number" || !Number.isInteger(number) || number <= 0) continue;
+    if (parkedPrs.has(number)) continue; // #5319: the auto-merge sweep never arms a parked PR
     if (isSet(pr.isDraft) || labelsOf(pr).has("ready-for-human")) continue;
     if (pr.autoMergeRequest !== null) continue;
     const state = orEmpty(pr.mergeStateStatus);
@@ -431,6 +462,75 @@ export function parseQaRecheckEntry(raw: unknown, pr: number, tier: number): QaR
   return { pr, tier, verdict: e.verdict, verdictSha: e.verdict_sha, headSha: e.head_sha, verdictAtHead: e.verdict_at_head };
 }
 
+/**
+ * #5319 INV-2: the open PRs whose CLOSING issue (`refs.predicates.closing`,
+ * body `Closes/Fixes/Resolves #N` only) is parked. Empty when either input is
+ * unavailable (the dispatch outputs fail closed on that separately). A PR whose
+ * closing parse throws is never parked-skipped (it keeps today's handling).
+ */
+export function parkedPrNumbers(
+  prs: readonly unknown[],
+  prRefs: PrRefsAvailability,
+  parkedIssues: Classified<ReadonlySet<number>>,
+  notes: string[],
+): ReadonlySet<number> {
+  const out = new Set<number>();
+  if (!prRefs.ok || !parkedIssues.ok || parkedIssues.value.size === 0) return out;
+  for (const pr of rowsOf(prs)) {
+    const number = pr.number;
+    if (typeof number !== "number") continue;
+    try {
+      for (const n of prRefs.predicates.closing([refRow(pr)])) {
+        if (parkedIssues.value.has(n)) out.add(number);
+      }
+    } catch (err) {
+      /* intentional: surfaced as a stderr note; a PR with an unparseable body keeps today's handling */
+      const msg = err instanceof Error ? err.message : String(err);
+      notes.push(`orch parked-skip closing_issues() failed for PR ${number} (${msg}) - not parked-skipped (issue #5319)`);
+    }
+  }
+  return out;
+}
+
+/**
+ * #5400 INV-4/5: the open PRs no PR lane can reach because their body carries no
+ * closing reference. Flagged iff open (the payload), non-draft, not
+ * `ready-for-human` (the surfacing idempotency key), not parked, not DIRTY (the
+ * dirty arm already surfaces those), older than the unchecked grace window, and
+ * `closing(refRow(pr))` is empty. CI state is irrelevant. Pure over the ONE
+ * open-PR read (zero extra gh reads); never throws - an unparseable body is a
+ * note, never a flag; pr-refs unavailable -> empty.
+ */
+export function noClosingIssuePrs(
+  prs: readonly unknown[],
+  prRefs: PrRefsAvailability,
+  parkedPrs: ReadonlySet<number>,
+  nowSeconds: number,
+  graceSeconds: number,
+  notes: string[],
+): number[] {
+  const out: number[] = [];
+  // pr-refs unavailable is noted ONCE at the collector (dev-resume "import FAILED" note); no per-arm duplicate.
+  if (!prRefs.ok) return out;
+  for (const pr of rowsOf(prs)) {
+    const number = pr.number;
+    if (typeof number !== "number" || !Number.isInteger(number) || number <= 0) continue;
+    if (parkedPrs.has(number)) continue;
+    if (isSet(pr.isDraft) || labelsOf(pr).has("ready-for-human")) continue;
+    if (orEmpty(pr.mergeStateStatus) === "DIRTY") continue;
+    const created = ghTimestampSeconds(pr.createdAt);
+    if (created === null || nowSeconds - created <= graceSeconds) continue;
+    try {
+      if (prRefs.predicates.closing([refRow(pr)]).size === 0) out.push(number);
+    } catch (err) {
+      /* intentional: surfaced as a stderr note; an unparseable body is never flagged */
+      const msg = err instanceof Error ? err.message : String(err);
+      notes.push(`orch no-closing-issue closing_issues() failed for PR ${number} (${msg}) - not flagged (issue #5400)`);
+    }
+  }
+  return out.sort(ascending);
+}
+
 /** Classify every open PR. Returns the snapshot fields (minus in-flight) plus the classifier's stderr notes. */
 function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "inflight">; notes: string[] } {
   const notes: string[] = [];
@@ -444,6 +544,7 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
   for (const pr of prs) {
     const number = pr.number;
     if (typeof number !== "number") continue;
+    if (inputs.parkedPrs.has(number)) continue; // #5319: parked work is never surfaced, rebased or CI-nudged
     const state = orEmpty(pr.mergeStateStatus);
     const names = labelsOf(pr);
     const created = ghTimestampSeconds(pr.createdAt);
@@ -504,8 +605,12 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
   const refs = inputs.prRefs;
   let redResume: PrGateSnapshot["redResume"];
   let devResumePick: PrGateSnapshot["devResumePick"];
-  if (!req.ok || !resume.ok || !refs.ok) {
-    const reason = DEGRADE.DEV_RESUME_INPUT_UNAVAILABLE;
+  const parked = inputs.parkedIssues;
+  if ("reason" in parked) {
+    notes.push(`orch parked-issues read unusable (${parked.reason}) - dispatch outputs fail closed (issue #5319, INV-4)`);
+  }
+  if (!req.ok || !resume.ok || !refs.ok || !parked.ok) {
+    const reason = parked.ok ? DEGRADE.DEV_RESUME_INPUT_UNAVAILABLE : DEGRADE.PARKED_UNREADABLE;
     notes.push(`orch dev-resume classifier fail-closed (${reason}) — issue #4460 INV-5`);
     redResume = { ok: false, reason };
     devResumePick = { ok: false, reason };
@@ -524,6 +629,7 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
       const names = labelsOf(pr);
       const head = orEmpty(pr.headRefName);
       if (isSet(pr.isDraft) || names.has("ready-for-human")) continue;
+      if (inputs.parkedPrs.has(number)) continue; // #5319 INV-3
       const state = orEmpty(pr.mergeStateStatus);
       if (state === "DIRTY" || state === "UNKNOWN") continue;
       const updated = ghTimestampSeconds(pr.updatedAt);
@@ -615,6 +721,7 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
           continue;
         }
         if (age === null || age < quiet) continue;
+        if (!parked.ok) continue; // #5319 INV-4: the pin is dispatch-shaped - fail closed (surface stays open)
         if (pick === null) pick = { issue: single, pr: number, headRefName: String(head) };
       } else if (age === null || age >= DIRTY_ATTEMPTED_SURFACE_SECONDS) {
         surface.push({ pr: number, closingIssue: single });
@@ -642,13 +749,15 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
     devResumeNoprPick = noprFail(DEGRADE.PR_REFS_UNAVAILABLE);
   } else if ("reason" in noprRows) {
     devResumeNoprPick = noprFail(degradeDetail(`needs-dev-resume read ${noprRows.reason}`));
+  } else if (!parked.ok) {
+    devResumeNoprPick = noprFail(DEGRADE.PARKED_UNREADABLE);
   } else if (inputs.ghListLimit !== undefined && inputs.prs.length >= inputs.ghListLimit) {
     devResumeNoprPick = noprFail(DEGRADE.PR_PAGE_SATURATED);
   } else {
     devResumeNoprPick = {
       ok: true,
       value: pickNoPrResume({
-        rows: noprRows.value,
+        rows: noprRows.value.filter((r) => !parked.value.has(r.number)), // #5319: the issue itself is parked
         inflightUnion: new Set(inflightRefs(inputs.prs, inputs.prRefs).union),
         nowSeconds: now,
         quiescenceSeconds: inputs.noprQuiescenceSeconds,
@@ -661,6 +770,7 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
       dirty: dirty.sort(ascending),
       unchecked: unchecked.sort(ascending),
       behind: behind.sort(ascending),
+      noClosingIssue: noClosingIssuePrs(inputs.prs, inputs.prRefs, inputs.parkedPrs, now, inputs.uncheckedGraceSeconds, notes),
       ciTriggerStale,
       redResume,
       devResumePick,
@@ -668,6 +778,9 @@ function classifyPrGate(inputs: PrGateInputs): { value: Omit<PrGateSnapshot, "in
       dirtyFix,
       // Filled by collectPrGate (it needs the host port); fail-closed until then.
       qaVerdictRecheck: { ok: false, reason: DEGRADE.NOT_EVALUATED },
+      dirtyFixFailPr: null,
+      parkedIssues: inputs.parkedIssues,
+      parkedPrs: inputs.parkedPrs,
     },
     notes,
   };
@@ -872,6 +985,11 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
     );
   }
 
+  // 3b. #5319 (ADR-0047 Decision 6): the ONE parked-issues read - dispatch outputs fail CLOSED on it.
+  const parkedRead = await deps.github.listOpenIssueRowsByLabel("parked", limit);
+  const parkedIssues = parseDevResumeIssues(parkedRead);
+  if ("reason" in parkedIssues) degraded.push({ field: "parkedIssues", reason: parkedIssues.reason });
+
   // 4. Classification inputs (the old heredoc's own preamble notes).
   if (payload.kind !== "ok") {
     const reason = payload.kind === "empty" ? DEGRADE.EMPTY_PAYLOAD : DEGRADE.UNPARSEABLE;
@@ -907,8 +1025,11 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
   if ("reason" in requiredContexts) degraded.push({ field: "requiredContexts", reason: requiredContexts.reason });
   if ("reason" in devResumeIssues) degraded.push({ field: "devResumeIssues", reason: devResumeIssues.reason });
 
+  const parkedPrs = parkedPrNumbers(prs, prRefs, parkedIssues, notes);
   const classified = classifyPrGate({
     prs,
+    parkedIssues,
+    parkedPrs,
     nowSeconds: deps.now() / 1000,
     uncheckedGraceSeconds: grace.value,
     glmRedQuiescenceSeconds: quiet.value,
@@ -931,12 +1052,15 @@ export async function collectPrGate(deps: PrGateDeps): Promise<CollectorOutcome<
   }
 
   // 5. #5052: the durable QA-verdict recheck - fail CLOSED, never a synthesised PASS.
-  const qaVerdictRecheck = await collectQaRecheck(prs, payload.kind === "ok", requiredContexts, deps.host, notes, deps.now());
+  const qaVerdictRecheck = await collectQaRecheck(prs, payload.kind === "ok", requiredContexts, deps.host, notes, deps.now(), parkedIssues, parkedPrs);
   if ("reason" in qaVerdictRecheck) degraded.push({ field: "qaVerdictRecheck", reason: qaVerdictRecheck.reason });
+
+  // 6. #5253: the two-phase dirty arm's predicate - AT MOST one guard run, for the single dirty pick.
+  const dirtyFixFailPr = await collectDirtyFixFailPr(classified.value.dirtyFix, deps.host, notes);
 
   return {
     collector: PR_GATE_COLLECTOR,
-    value: { inflight, ...classified.value, qaVerdictRecheck },
+    value: { inflight, ...classified.value, qaVerdictRecheck, dirtyFixFailPr },
     degraded,
     notes,
   };
@@ -971,10 +1095,13 @@ async function collectQaRecheck(
   host: PrGateDeps["host"],
   notes: string[],
   nowMs: number,
+  parkedIssues: Classified<ReadonlySet<number>>,
+  parkedPrs: ReadonlySet<number>,
 ): Promise<Classified<readonly QaRecheckEntry[]>> {
   if (!prListReadOk) return { ok: false, reason: DEGRADE.PR_LIST_UNREADABLE };
   if (!requiredContexts.ok) return { ok: false, reason: DEGRADE.REQUIRED_CONTEXTS_UNREADABLE };
-  const candidates = qaRecheckCandidates(prs, requiredContexts.value);
+  if (!parkedIssues.ok) return { ok: false, reason: DEGRADE.PARKED_UNREADABLE }; // #5319 INV-4
+  const candidates = qaRecheckCandidates(prs, requiredContexts.value, parkedPrs);
   if (candidates.length === 0) return { ok: true, value: [] };
   if (host === undefined) return { ok: false, reason: DEGRADE.HOST_UNAVAILABLE };
   // Bounded: at most QA_RECHECK_MAX_PER_TURN scripts per turn in a ROTATING window
@@ -1015,6 +1142,39 @@ async function collectQaRecheck(
   return { ok: true, value: entries };
 }
 
+/**
+ * #5253 INV-1/2/5: is a QA FAIL pending AT the dirty pick's current head?
+ * Runs qa-merge-guard once, for the pick only (never when there is no pick).
+ * `isFailVerdict && verdictAtHead` - a FAIL at an older sha keeps conflict-only.
+ * Every unreadable shape fails closed to `null` with one note naming the PR.
+ */
+async function collectDirtyFixFailPr(
+  dirtyFix: PrGateSnapshot["dirtyFix"],
+  host: PrGateDeps["host"],
+  notes: string[],
+): Promise<number | null> {
+  if (!dirtyFix.ok || dirtyFix.value.pick === null) return null;
+  const pr = dirtyFix.value.pick.pr;
+  const closedNote = (why: string): null => {
+    notes.push(`orch dirty-fix QA-FAIL-at-head read ${why} for PR ${pr} - conflict-only arm (issue #5253, INV-2)`);
+    return null;
+  };
+  if (host === undefined || host.runQaMergeGuard === undefined) return closedNote("unavailable (no host port)");
+  let raw: unknown;
+  try {
+    raw = await host.runQaMergeGuard(pr);
+  } catch (err) {
+    /* intentional: surfaced as a stderr note; unknown verdict fails closed to the conflict-only arm */
+    return closedNote(`threw (${err instanceof Error ? err.message : String(err)})`);
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return closedNote("unreadable");
+  const r = raw as Record<string, unknown>;
+  const verdict = r.verdict;
+  if (verdict === null) return null; // no verdict recorded: conflict-only, not an error
+  if (typeof verdict !== "string" || typeof r.verdictAtHead !== "boolean") return closedNote("malformed");
+  return isFailVerdict(verdict as FinalVerdict) && r.verdictAtHead ? pr : null;
+}
+
 /** The snapshot the CLI renders when the collector itself could not run (every field degraded). */
 export function prGateFallbackSnapshot(reason: DegradeReason): PrGateSnapshot {
   return {
@@ -1022,11 +1182,15 @@ export function prGateFallbackSnapshot(reason: DegradeReason): PrGateSnapshot {
     dirty: [],
     unchecked: [],
     behind: [],
+    noClosingIssue: [],
     ciTriggerStale: { ok: false, reason },
     redResume: { ok: false, reason },
     devResumePick: { ok: false, reason },
     devResumeNoprPick: { ok: false, reason },
     dirtyFix: { ok: false, reason },
     qaVerdictRecheck: { ok: false, reason },
+    dirtyFixFailPr: null,
+    parkedIssues: { ok: false, reason },
+    parkedPrs: new Set(),
   };
 }

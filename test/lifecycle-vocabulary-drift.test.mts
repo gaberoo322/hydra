@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ORCH_BOARD_LABELS } from "../src/board-labels.ts";
 import {
@@ -105,4 +105,28 @@ test("retired labels appear nowhere in the vocabulary surfaces", () => {
     assert.ok(!mentions(doc, d), `${DOC} mentions retired label ${d}`);
     assert.ok(!mentions(board, d), `src/board-labels.ts mentions retired label ${d}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Operator-route boundary (ADR-0047 D3, issue #5313): the operator entry points
+// are importable only by the board route; the journal LIST has one writer.
+// ---------------------------------------------------------------------------
+
+function srcFiles(): string[] {
+  return (readdirSync(fileURLToPath(new URL("../src/", import.meta.url)), { recursive: true }) as string[])
+    .filter((f) => f.endsWith(".ts"));
+}
+
+test("only src/api/autopilot-board.ts imports operatorAdvance / operatorReopen outside src/lifecycle (#5313 INV-2)", () => {
+  const hits = srcFiles()
+    .filter((f) => !f.startsWith("lifecycle/"))
+    .filter((f) => /\boperator(Advance|Reopen)\b/.test(read(`src/${f}`)));
+  assert.deepEqual(hits, ["api/autopilot-board.ts"]);
+});
+
+test("appendLifecycleEntry is referenced only inside src/lifecycle and its Redis seam (#5313 INV-10)", () => {
+  const hits = srcFiles()
+    .filter((f) => !f.startsWith("lifecycle/") && f !== "redis/lifecycle-journal.ts")
+    .filter((f) => read(`src/${f}`).includes("appendLifecycleEntry"));
+  assert.deepEqual(hits, []);
 });

@@ -136,13 +136,11 @@ quiet across a multi-minute nap). This is not a truncation — it is an honest
 baton-pass: the in-flight subagents live in the durable dispatch ledger
 (`hydra:dispatches:subagent:*`) that the next pace-gate-launched run re-seeds
 (#1352). It is recorded with the clean `term_reason=handoff` (in
-`CLEAN_TERM_REASONS`, `src/autopilot/runs.ts`), via two layers: (1) the model
-POSTs `run-end(cause=handoff)` before its final message when it ends a turn with
-slots > 0 and no further dispatchable work (the `wait` action row above), and
-(2) the ExecStopPost reap backstop (`bootstrap.sh __reap_derive_cause`) derives
-`handoff` whenever a CLEAN exit (code 0/143/130) shows `state.json` slots
-occupied > 0 — so a missed in-loop POST still classifies the baton-pass
-honestly. `interrupted` is now reserved for a clean ZERO-slot exit that bypassed
+`CLEAN_TERM_REASONS`, `src/autopilot/runs.ts`), by ONE scripted writer (#5323):
+the ExecStopPost reap backstop (`bootstrap.sh __reap_derive_cause`, wired in
+`hydra-autopilot.service`) derives `handoff` whenever a CLEAN exit (code
+0/143/130) shows `state.json` slots occupied > 0. The parent session posts
+nothing for a baton-pass. `interrupted` is now reserved for a clean ZERO-slot exit that bypassed
 decide.py's terminate (a genuine print-mode end with nothing pending).
 
 The clean-termination rate over recent runs is surfaced as
@@ -226,8 +224,9 @@ falls back to a wall-clock timer. When an active slot's `started_epoch`
 is older than `subagent_max_wall_seconds` (default `3600`, env override
 `HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS`) AND no matching
 `subagent_stop` event has been observed for the slot's `task_id`,
-`decide.py` emits a `wait_or_reap` action. The harness translates that
-into `reap.py completion ...` — the existing fallback CLI.
+`decide.py` emits a `wait_or_reap` action. The brain runs
+`reap.py wait-or-reap <slot> <task_id>` from the playbook's `wait_or_reap`
+action-table row (liveness by transcript mtime, then the forced reap). A transcript `stat()` failure stays `verdict=unknown` (no reap) only until the slot has been occupied past `subagent_max_wall_seconds`; after that it is treated as dead and reaped.
 
 `reap.py` survives in the tree but is now the **fallback path**, not
 the primary; see its module docstring.

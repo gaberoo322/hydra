@@ -21,7 +21,7 @@ Every Hydra→operator Telegram message goes through the **Operator Channel** mo
 ### Decision 3 — Severity is a closed page list in code
 
 The channel, not the producer, decides severity. A **Page** is an event on one closed list:
-- infra alarms (node_modules wiped, origin identity, redis-backup stale, `/tmp` or `/dev/shm` inode/space exhaustion, launch-flow failure, GLM-sterile);
+- infra alarms (node_modules wiped, origin identity, redis-backup stale, `/tmp` or `/dev/shm` inode/space exhaustion, the watchdog CLI failing to start (`infra:watchdog_cli_failed`), launch-flow failure, GLM-sterile);
 - the notification consumer is dead;
 - an Outcome Holdback revert failed;
 - orchestrator, autopilot, tunnel or backup service failures;
@@ -65,3 +65,11 @@ The bot token and chat id are read by exactly one loader. There is no hard-coded
 - **MarkdownV2 or plain text.** Rejected: MarkdownV2 has 18 reserved characters, the classic 400 source; plain text loses links.
 - **Keeping the 4h digest, adding an evening brief or a per-merge feed.** Rejected: pages plus one daily brief is the lowest-noise shape.
 - **A dedicated delivery-log dashboard page.** Rejected: would need an ADR-0034 amendment.
+
+## Amendment — producers call report(); one per-kind table (2026-11-05, issue #5389, epic #5388)
+
+Decision 3 holds for every producer through `report(kind, payload)` and one per-kind table in `src/operator-channel/page-list.ts`. The table records each kind's disposition (page or brief, optionally a function of the payload), whether it also raises a dashboard alert, its `dedupKey` derivation and its brief-line renderer; the page-kind set and the dashboard alert-type set are derived from it. The table also decides the dashboard alert's severity: a page is `error`, a brief is `info`, overridable per kind. An unknown kind is briefed with the generic line and flagged, never dropped and never thrown. A self-healed origin identity is brief-only, with its own brief line and no dashboard alert.
+
+`report()` starts the dashboard alert write before the page/brief step, so a slow or failing transport can neither drop nor delay the alert. Alert-write failure is non-fatal: `report()` logs it loudly and the notification consumer acks the bus event, instead of the pre-#5389 behaviour where a failed `pushAlert` threw and the stream retried or dead-lettered the event. The alert write is therefore at-most-once: a failed write is not retried. This is deliberate: a dashboard-alert store outage must not stall the notifications stream, and the page or Morning Brief item still carries the signal.
+
+2026-11-07 (issue #5391): `page()` and `brief()` are private to the channel and `operator-notify` gains `report --kind <kind> [--fact l=v]...` in place of its `page` and `brief` subcommands (`resolve` and `service-failed` keep their flags, and `service-failed` now delivers through `report()`). The five service rows carry a per-unit `dedupKey` and `title` in the table. A seam test fails if code outside `src/operator-channel/` calls `.page(` or `.brief(`. `report` also takes `--alert false`, which sets `meta.alert=false` and skips the dashboard alert write; the bash watchdog uses it for `infra:node_modules_wiped` because its own bus publish already reaches the alert-writing consumer, so a second write would double-alert (an operator-accepted departure from the INV-7 default of writing the alert).

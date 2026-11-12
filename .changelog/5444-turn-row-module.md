@@ -1,0 +1,1 @@
+- refactor: one Turn Row module owns the stored autopilot turn shape; readers share one tolerant parser (#5444)

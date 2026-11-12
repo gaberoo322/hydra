@@ -135,8 +135,8 @@ Today's feed told the operator **that** something needed them. It did not say **
 |---|---|---|---|
 | 0 | Machine stopped | one aggregate | `paused` (`reasons.paused`); `session-blocked` (`sessionBlockedUntil` in the future); `scheduler-deliberate` (scheduler `stopReason="deliberate"`); `sha-drift` (deployed SHA ≠ `origin/master` for ≥ 600 s) |
 | 1 | PRs not landing | per PR | `conflicted`; `failed-required` (a **required** check failed; advisory reds never admit); `unshepherded` (mergeable, required checks green, auto-merge unset). `UNKNOWN` mergeability never admits |
-| 2 | Issues waiting on you | per issue | `ready-for-human`; `stale-blocked`; `needs-info` ≥ `needsInfoDays` (1); `blocked-live` ≥ `blockedDays` (2) |
-| 3 | Target items | per issue | the rank-2 lines plus `reframe`, read against the one configured Target; plus `archived` (one aggregate row when the configured Target is archived or unset) |
+| 2 | Issues waiting on you | per issue | `ready-for-human`; `stale-blocked`; `needs-info` ≥ `needsInfoDays` (1); `blocked-live` ≥ `blockedDays` (2); `hold-exit` (a human-hold exit journaled outside `operator-route`, ADR-0047 D3; amended by #5313); `invalid-state` (2+ lifecycle state labels, from the reconcile report under 3 h old, ADR-0047) |
+| 3 | Target items | per issue | the rank-2 lines (except `hold-exit`, which is orch-board only) plus `reframe`, read against the one configured Target; plus `archived` (one aggregate row when the configured Target is archived or unset) |
 | 4 | Repetition | per pattern | `hits` ≥ `PROMOTION_THRESHOLD` (3) |
 | 5 | Parked ideas over cap | one aggregate | `cap`: hitl-grill lane ≥ `HITL_GRILL_CAP` (10). The row shows the three oldest titles and hands off to `/hydra-hitl-grill` |
 
@@ -176,6 +176,7 @@ Today's feed told the operator **that** something needed them. It did not say **
   - The three ADR-0005 kinds: link plus instruction.
 - **Action-bearing controls on `/work`, `/health` and `/runs`** use the same grammar. A **live ✓/✗ precondition checklist** sits beside the button, the consequence sits under it, and the button is **disabled while any line is ✗**. §7's "render the verified result" applies unchanged.
 - **There is no `/runbook` page.** Instruction sits at the moment of need.
+- **Who evaluates a check (amended #5451).** A page evaluates a check only when the verdict is a direct reading of one field it already reads, or of operator input; anything needing a rule, a constant or arithmetic is computed by the server and delivered by check id. The closed list is `SERVER_EVALUATED_CHECKS` beside `CONTROL_CHECKS` (`src/schemas/operator-actions.ts`): the four promote checks (one evaluator, `evaluatePromoteChecks`, shared by the write gate and carried on each `GET /autopilot/work-queue` row as `promoteChecks`) and the three `dc-*` approve checks. `test/operator-actions-registry.test.mts` pins that each has a server evaluator and that no verdict table in `dashboard/src/lib/` derives one.
 
 **8.4 Calibration is per admission line (#4444; this amends §4's last paragraph).**
 - **Counters key on the registry key `<bucket>:<line>`.** Bucket totals are derived sums, not stored.

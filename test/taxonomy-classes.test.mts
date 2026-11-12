@@ -29,6 +29,7 @@ import {
   copyFileSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -70,6 +71,7 @@ const CLASSES_JSON = join(REPO_ROOT, "scripts", "autopilot", "classes.json");
 const DECIDE_PY = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
 const TURN_SNAPSHOT_PY = join(REPO_ROOT, "scripts", "autopilot", "turn_snapshot.py");
 const RUN_LEDGER_PY = join(REPO_ROOT, "scripts", "autopilot", "run_ledger.py");
+const TAXONOMY_PY = join(REPO_ROOT, "scripts", "autopilot", "taxonomy.py");
 const REAP_PY = join(REPO_ROOT, "scripts", "autopilot", "reap.py");
 
 // The exact alphabet decide.py embedded before slice #1670 — order matters
@@ -352,8 +354,10 @@ describe("taxonomy: decide.py derives identical tuples from the same file", () =
     // source corpus so a selector module can never become an ordering source.
     const brain = readBrainSource();
     const src = brain.files.find((f) => f.path === BRAIN_ENTRY)?.text ?? "";
-    const tuple = /\n    pipeline_priority = \(([\s\S]*?)\n    \)\n/.exec(src);
-    assert.ok(tuple, "could not locate the pipeline_priority tuple in _rule_pipeline_dispatch");
+    // #5472 hoisted the tuple to module level so an import-time check can compare it
+    // with the rows (taxonomy.check_order_tuple); it still lives in decide.py.
+    const tuple = /\nPIPELINE_PRIORITY = \(([\s\S]*?)\n\)\n/.exec(src);
+    assert.ok(tuple, "could not locate the PIPELINE_PRIORITY tuple in decide.py");
     const order = [...tuple[1].matchAll(/^\s*"([a-z_]+)",/gm)].map((m) => m[1]);
     assert.deepEqual(order, [
       "qa_orch", "qa_target", "design_concept_orch", "dev_orch",
@@ -362,7 +366,9 @@ describe("taxonomy: decide.py derives identical tuples from the same file", () =
     assert.notDeepEqual(order, [...PIPELINE_SLOT_NAMES],
       "pipeline_priority must not collapse onto the taxonomy's row order");
     assert.match(src, /\n    for cls in pipeline_priority:\n/);
-    assert.match(src, /\n    for sig in \(\n        "health",\n/);
+    assert.match(src, /\n    pipeline_priority = PIPELINE_PRIORITY\n/);
+    assert.match(src, /\nSIGNAL_LOOP_ORDER = \(\n    "health",\n/);
+    assert.match(src, /\n    for sig in SIGNAL_LOOP_ORDER:\n/);
     for (const forbidden of [
       /for \w+ in _SLOT_SELECTORS/,
       /for \w+ in _SIGNAL_SELECTORS/,
@@ -512,6 +518,8 @@ function copyBrainInto(dir: string) {
   // decide.py's sibling Turn Snapshot accessor (ADR-0043 slice 6, #4934).
   copyFileSync(TURN_SNAPSHOT_PY, join(dir, "turn_snapshot.py"));
   copyFileSync(RUN_LEDGER_PY, join(dir, "run_ledger.py"));
+  // The one classes.json loader (#5472) — decide.py, run_ledger.py import it.
+  copyFileSync(TAXONOMY_PY, join(dir, "taxonomy.py"));
 }
 
 /** Import decide.py from `dir` (a tempdir copy) and return the spawn result. */
@@ -797,17 +805,17 @@ describe("taxonomy: stage / model / skill_by_ticket_type columns (#4592)", () =>
   });
 
   test("the two parsers' stage / model enums cannot drift (text-scan parity)", () => {
-    const decideSrc = readBrainSource().joined;
+    const decideSrc = readFileSync(TAXONOMY_PY, "utf-8");
     const tupleValues = (name: string): string[] => {
       const m = new RegExp(`${name} = \\(([^)]*)\\)`, "s").exec(decideSrc);
-      assert.ok(m, `could not locate ${name} in decide.py`);
+      assert.ok(m, `could not locate ${name} in taxonomy.py`);
       return [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
     };
     assert.deepEqual(tupleValues("_TAXONOMY_STAGES"), [...CLASS_STAGES]);
     assert.deepEqual(tupleValues("_TAXONOMY_MODELS"), [...DISPATCH_CLASS_MODELS]);
   });
 
-  test("decide.py derives no dispatch projection from model or skill_by_ticket_type (#4592 INV-6)", () => {
+  test("decide.py derives no dispatch projection from the model column (#4592 INV-6; skill routing moved to the brain by #5384)", () => {
     // Whole brain corpus (decide.py + decide_base.py + decide_selectors/*.py):
     // a selector module adding a model projection must not pass undetected.
     const src = readBrainSource().joined;
@@ -816,10 +824,17 @@ describe("taxonomy: stage / model / skill_by_ticket_type columns (#4592)", () =>
     // reader is the pre-existing ESCALATION_POLICY path (policy["model"] /
     // ESCALATION_POLICY[class]["model"]) — that table predates #4592 and is
     // keyed by escalation pattern, not by the taxonomy row.
-    const loader = src.split("def _load_class_taxonomy")[1].split("CLASS_TAXONOMY =")[0];
-    assert.ok(loader.includes("_TAXONOMY_MODELS"), "loader extraction failed — split anchors drifted");
+    // Issue #5384 (INV-4) lifted the old ban on `skill_by_ticket_type`: the brain
+    // (decide.py step 7) now owns wayfinder's ticket-typed skill routing via
+    // CLASS_SKILL_BY_TICKET_TYPE (the renderer's own copy was deleted). The ban on
+    // a `model` projection onto dispatch actions is unchanged.
+    // The loader (taxonomy.py since #5472) is outside the brain corpus, so the
+    // brain source needs no loader carve-out.
+    assert.ok(
+      readFileSync(TAXONOMY_PY, "utf-8").includes("_TAXONOMY_MODELS"),
+      "the loader lives in taxonomy.py and validates the model column",
+    );
     const outside = src
-      .replace(loader, "")
       // sanctioned: the ESCALATION_POLICY table itself — pre-#4592, keyed by
       // escalation pattern; its rows carry a model HINT (issue #1093 purity),
       // they are not the taxonomy's model column and not a dispatch action.
@@ -830,10 +845,8 @@ describe("taxonomy: stage / model / skill_by_ticket_type columns (#4592)", () =>
       .replace(/\bpolicy\s*\[\s*["']model["']\s*\]/g, "");
     for (const forbidden of [
       /\bCLASS_MODEL\b/,
-      /\bCLASS_SKILL_BY_TICKET_TYPE\b/,
       /\[\s*["']model["']\s*\]/,
       /^\s*["']model["']\s*:/m,
-      /skill_by_ticket_type/,
     ]) {
       assert.doesNotMatch(
         outside,
@@ -1220,5 +1233,183 @@ describe("taxonomy: cycle-record coverage mirror (issue #4392)", () => {
         `${cls} appears in BOTH partition halves`,
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #5472 — ONE Python loader (taxonomy.py); scope exclusion DERIVED from the
+// `scope` column; order tuples checked against the rows at import.
+// ---------------------------------------------------------------------------
+
+const AUTOPILOT_DIR = join(REPO_ROOT, "scripts", "autopilot");
+
+/** Run a python probe from scripts/autopilot (so sibling modules import); returns parsed stdout JSON. */
+function probeAutopilot(body: string, env: Record<string, string> = {}): any {
+  const r = spawnSync("python3", ["-c", `import sys, json\nsys.path.insert(0, ${JSON.stringify(AUTOPILOT_DIR)})\n${body}`], {
+    encoding: "utf-8",
+    env: { ...process.env, ...env },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout.trim());
+}
+
+describe("taxonomy.py: the one loader (#5472)", () => {
+  // The hand-kept tuples this ticket deleted (decide.py SCOPE_*_EXCLUDE), pinned
+  // here as the expected answer the `scope` column must keep producing.
+  const ORCH_ONLY_EXCLUDED = [
+    "dev_target", "research_target", "qa_target", "sweep_target", "discover_target",
+    "cleanup_target", "wire_or_retire_target", "design_qa_target",
+  ];
+  const TARGET_ONLY_EXCLUDED = [
+    "dev_orch", "research_orch", "qa_orch", "sweep_orch", "discover_orch",
+    "design_concept_orch", "scout_orch", "architecture_orch", "retro_orch", "cleanup_orch",
+    "skill_prune", "wayfinder_orch", "tickets_orch",
+  ];
+
+  test("derived scope exclusion equals the retired hand-kept lists for every class and scope", () => {
+    const got = probeAutopilot(`
+import decide, taxonomy
+names = [r["name"] for r in decide.CLASS_TAXONOMY]
+out = {}
+for sc in ("all", "orch-only", "target-only"):
+    d = [n for n in names if decide.scope_excluded(sc, n)]
+    t = [n for n in names if taxonomy.scope_excluded(sc, n)]
+    assert d == t, (sc, d, t)
+    out[sc] = d
+print(json.dumps(out))
+`);
+    assert.deepEqual(got["all"], []);
+    assert.deepEqual([...got["orch-only"]].sort(), [...ORCH_ONLY_EXCLUDED].sort());
+    assert.deepEqual([...got["target-only"]].sort(), [...TARGET_ONLY_EXCLUDED].sort());
+  });
+
+  test("scope `both` rows (health) are never excluded; an unknown class is never excluded", () => {
+    const got = probeAutopilot(`
+import taxonomy
+print(json.dumps([taxonomy.scope_excluded(s, c) for s in ("orch-only", "target-only", "all") for c in ("health", "no_such_class")]))
+`);
+    assert.deepEqual(got, [false, false, false, false, false, false]);
+  });
+
+  test("INV-008 flags a wrong-scope dispatch of every non-both class, including cleanup_target and wayfinder_orch", () => {
+    const flagged = probeAutopilot(`
+import taxonomy, assert_invariants as a
+out = {}
+for r in taxonomy.load_taxonomy():
+    for scope, bad in (("orch-only", "target"), ("target-only", "orch")):
+        if r["scope"] != bad:
+            continue
+        try:
+            a.check_inv008([{"type": "dispatch", "slot": r["name"]}], {"limits": {"scope": scope}})
+            out[r["name"]] = False
+        except a.InvariantError as e:
+            out[r["name"]] = e.code == "INV-008"
+print(json.dumps(out))
+`);
+    assert.equal(flagged["cleanup_target"], true);
+    assert.equal(flagged["wayfinder_orch"], true);
+    for (const [name, ok] of Object.entries(flagged)) assert.equal(ok, true, `${name} must trip INV-008 under the wrong scope`);
+    assert.equal(Object.keys(flagged).length, ORCH_ONLY_EXCLUDED.length + TARGET_ONLY_EXCLUDED.length);
+  });
+
+  test("no Python file but taxonomy.py parses classes.json; taxonomy.py imports neither decide nor decide_base", () => {
+    const offenders: string[] = [];
+    for (const f of readdirSync(AUTOPILOT_DIR).filter((n) => n.endsWith(".py") && n !== "taxonomy.py")) {
+      const src = readFileSync(join(AUTOPILOT_DIR, f), "utf-8");
+      if (/open\([^)]*classes\.json|CLASSES_PATH\b|os\.path\.join\([^)]*"classes\.json"/.test(src)) offenders.push(f);
+    }
+    assert.deepEqual(offenders, [], "a reader opens classes.json itself instead of calling taxonomy.load_taxonomy");
+    const own = readFileSync(TAXONOMY_PY, "utf-8");
+    assert.doesNotMatch(own, /^\s*(import|from)\s+(decide|decide_base)\b/m);
+    assert.doesNotMatch(own, /^\s*(import|from)\s+(?!__future__|json|os|typing)\w+/m, "stdlib only");
+  });
+
+  test("run_ledger.load_classes honours HYDRA_CLASSES_JSON and a missing override raises naming the path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "taxonomy-ledger-"));
+    try {
+      const doc = JSON.parse(readFileSync(CLASSES_JSON, "utf-8"));
+      doc.classes = doc.classes.slice(0, 3);
+      const fixture = join(dir, "fixture.json");
+      writeFileSync(fixture, JSON.stringify(doc));
+      const n = probeAutopilot("import run_ledger\nprint(json.dumps(len(run_ledger.load_classes())))", { HYDRA_CLASSES_JSON: fixture });
+      assert.equal(n, 3);
+      const missing = join(dir, "nope.json");
+      const r = spawnSync("python3", ["-c", `import sys\nsys.path.insert(0, ${JSON.stringify(AUTOPILOT_DIR)})\nimport run_ledger\nrun_ledger.load_classes()`], {
+        encoding: "utf-8",
+        env: { ...process.env, HYDRA_CLASSES_JSON: missing },
+      });
+      assert.notEqual(r.status, 0);
+      assert.match(r.stderr, /TaxonomyError/);
+      assert.ok(r.stderr.includes(missing), "stderr names the override path");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a missing HYDRA_CLASSES_JSON fails carry-classes cleanly (exit 1, no traceback) and INV-008 as InvariantError; the default file still works", () => {
+    const dir = mkdtempSync(join(tmpdir(), "taxonomy-carry-"));
+    try {
+      const missing = join(dir, "nope.json");
+      const ledger = join(AUTOPILOT_DIR, "run_ledger.py");
+      const bad = spawnSync("python3", [ledger, "carry-classes"], { encoding: "utf-8", env: { ...process.env, HYDRA_CLASSES_JSON: missing } });
+      assert.equal(bad.status, 1, bad.stderr);
+      assert.match(bad.stderr, /carry-classes failed/);
+      assert.doesNotMatch(bad.stderr, /Traceback/);
+      const inv = probeAutopilot(`
+import assert_invariants as a
+try:
+    a.check_inv008([{"type": "dispatch", "slot": "dev_target"}], {"limits": {"scope": "orch-only"}})
+    print(json.dumps("no-raise"))
+except a.InvariantError as e:
+    print(json.dumps(e.code))
+`, { HYDRA_CLASSES_JSON: missing });
+      assert.equal(inv, "INV-008");
+      // Sibling shape: the default taxonomy keeps its old verdict.
+      const ok = spawnSync("python3", [ledger, "carry-classes"], { encoding: "utf-8", env: { ...process.env, HYDRA_CLASSES_JSON: "" } });
+      assert.equal(ok.status, 0, ok.stderr);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an order tuple that is not exactly the rows of its kind fails at import with TaxonomyError naming tuple and class", () => {
+    const cases: Array<[string, (rows: Array<Record<string, unknown>>) => void, RegExp]> = [
+      ["extra pipeline row", (rows) => rows.push({ ...rows.find((r) => r.kind === "pipeline" && r.scope === "orch")!, name: "extra_pipeline" }), /PIPELINE_PRIORITY.*missing pipeline class 'extra_pipeline'/],
+      ["extra signal row", (rows) => rows.push({ ...rows.find((r) => r.kind === "signal" && r.scope === "orch")!, name: "extra_signal" }), /SIGNAL_LOOP_ORDER.*missing signal class 'extra_signal'/],
+    ];
+    for (const [label, mutate, re] of cases) {
+      const dir = mkdtempSync(join(tmpdir(), "taxonomy-order-"));
+      try {
+        copyBrainInto(dir);
+        const doc = JSON.parse(readFileSync(CLASSES_JSON, "utf-8"));
+        mutate(doc.classes);
+        writeFileSync(join(dir, "classes.json"), JSON.stringify(doc));
+        const res = importDecideFrom(dir);
+        assert.notEqual(res.status, 0, label);
+        assert.match(res.stderr, /TaxonomyError/, label);
+        assert.match(res.stderr, re, label);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("check_order_tuple rejects an unknown class, a duplicate and a missing class, naming the tuple and the class", () => {
+    const got = probeAutopilot(`
+import taxonomy
+rows = list(taxonomy.load_taxonomy())
+pipes = list(taxonomy.pipeline_slots(rows))
+def msg(order):
+    try:
+        taxonomy.check_order_tuple("T", order, rows, "pipeline")
+        return None
+    except taxonomy.TaxonomyError as e:
+        return str(e)
+print(json.dumps([msg(pipes), msg(pipes + ["ghost"]), msg(pipes + [pipes[0]]), msg(pipes[1:]), pipes[0]]))
+`);
+    assert.equal(got[0], null);
+    assert.match(got[1], /order tuple T: unknown class 'ghost'/);
+    assert.match(got[2], new RegExp(`order tuple T: duplicate class '${got[4]}'`));
+    assert.match(got[3], new RegExp(`order tuple T: missing pipeline class '${got[4]}'`));
   });
 });

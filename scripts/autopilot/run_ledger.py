@@ -41,6 +41,7 @@ CLI (bash callers never touch the file directly):
   run_ledger.py get <path> <dotted.key> [--prior] [--default <v>]
   run_ledger.py project <path> [--prior] <key>...
   run_ledger.py slot-fields
+  run_ledger.py parent-exception <path> <cause> [--source turn.sh|parent] [--detail TEXT]
 
 `get --default <v>` prints <v> (exit 0) when the key is absent or null, the
 `jq -r '.key // <v>'` shape bash callers used to open-code.
@@ -56,6 +57,10 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import taxonomy  # noqa: E402  (the ONE classes.json loader, #5472; a leaf, never decide)
 
 SCHEMA_VERSION = 2  # the one home of the integer (ADR-0007 handshake)
 DEFAULT_STATE_PATH = "/tmp/hydra-autopilot-state.json"
@@ -76,8 +81,14 @@ PACE_GATE_RELAUNCH_SEC = 900
 DEV_RESUME_PENDING_CAP = 20  # the ONE home (#5075); queue_dev_resume enforces it, reap_stall.py calls that
 REDIS_SIGNAL_LAST_FIRED_KEY = "hydra:autopilot:signal-last-fired"
 REDIS_RESEARCH_FORCE_KEY = "hydra:autopilot:research-force-counter"
+# The typed parent-exception vocabulary (#5323, ADR-0047 Decision 8): every
+# turn the PARENT session (or turn.sh on its behalf) had to do something other
+# than execute the plan. ONE tuple; the CLI, turn.sh and the playbook name these.
+PARENT_EXCEPTION_CAUSES = ("invariant-reject", "script-error", "unrouted-refusal", "notes-steer", "defect-filed")
+PARENT_EXCEPTION_SOURCES = ("turn.sh", "parent")
+PARENT_EXCEPTION_CAP = 200  # FIFO cap on state.parent_exceptions
+PARENT_EXCEPTION_DETAIL_MAX = 200
 DEFAULT_REDIS_ARGV = ["docker", "exec", "hydra-redis-1", "redis-cli"]
-CLASSES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "classes.json")
 
 # JSON type names. "number" accepts int or float (but never bool).
 _TYPES = {
@@ -288,6 +299,10 @@ FIELDS = [
     _row("target_blocked_item_stamps", "object", {}, RESET, seeded=False, decide_owned=True),
     _row("qa_orch_item_attempts", "object", {}, RESET, seeded=False, decide_owned=True),
     _row("red_forward_fix_attempts", "object", {}, RESET, seeded=False, decide_owned=True),
+    # Last emitted dispatch per class (#5323): the instant-death replay's source.
+    _row("last_dispatch_by_class", "object", {}, RESET, seeded=False, decide_owned=True),
+    # Typed parent-exception journal (#5323): {cause, turn, source, detail, ts_epoch}.
+    _row("parent_exceptions", "array", [], RESET, seeded=False),
     _row("dev_target_spend_usd_cycle", "number", 0, RESET, seeded=False),
     # turn_snapshot BLOB_FIELDS (type "any": decide() fails safe on malformed blobs)
     _row("usage_eligibility", "any", {}, RESET, seeded=False),
@@ -525,8 +540,7 @@ def seed_initial(identity, limits, carry, now):
 
 def load_classes(path=None):
     """The classes.json rows (the Dispatch-Class Taxonomy alphabet)."""
-    with open(path or CLASSES_PATH, encoding="utf-8") as fh:
-        return json.load(fh)["classes"]
+    return list(taxonomy.load_taxonomy(path))
 
 
 def _carry_ctx(classes, now):
@@ -770,6 +784,60 @@ def _seed_cmd(rest):
     return 0
 
 
+def append_parent_exception(doc, cause, source="parent", detail="", now=None):
+    """Append one typed entry to doc["parent_exceptions"] (FIFO-capped).
+    Raises ValueError on an unknown cause or source -- nothing is mutated."""
+    if cause not in PARENT_EXCEPTION_CAUSES:
+        raise ValueError("unknown parent-exception cause %r" % (cause,))
+    if source not in PARENT_EXCEPTION_SOURCES:
+        raise ValueError("unknown parent-exception source %r" % (source,))
+    one_line = " ".join(str(detail).split())[:PARENT_EXCEPTION_DETAIL_MAX]
+    turn = doc.get("turn")
+    entry = {
+        "cause": cause,
+        "turn": turn if _TYPES["int"](turn) else 0,
+        "source": source,
+        "detail": one_line,
+        "ts_epoch": int(now if now is not None else time.time()),
+    }
+    entries = doc.get("parent_exceptions")
+    entries = list(entries) if isinstance(entries, list) else []
+    entries.append(entry)
+    doc["parent_exceptions"] = entries[-PARENT_EXCEPTION_CAP:]
+    return entry
+
+
+def _parent_exception_cmd(rest):
+    usage = "usage: run_ledger.py parent-exception <path> <cause> [--source turn.sh|parent] [--detail TEXT]\n"
+    if len(rest) < 2:
+        sys.stderr.write(usage)
+        return 2
+    path, cause = rest[0], rest[1]
+    source, detail = "parent", ""
+    i = 2
+    while i < len(rest):
+        if rest[i] in ("--source", "--detail") and i + 1 < len(rest):
+            if rest[i] == "--source":
+                source = rest[i + 1]
+            else:
+                detail = rest[i + 1]
+            i += 2
+        else:
+            sys.stderr.write(usage)
+            return 2
+    if cause not in PARENT_EXCEPTION_CAUSES or source not in PARENT_EXCEPTION_SOURCES:
+        sys.stderr.write("[run-ledger] unknown parent-exception cause/source: %s/%s\n" % (cause, source))
+        return 2
+    try:
+        doc = load(path, fill_defaults=False)
+        append_parent_exception(doc, cause, source, detail)
+        persist(doc, path)
+    except (OSError, ValueError, LedgerTypeError) as e:
+        sys.stderr.write("[run-ledger] parent-exception failed: %s\n" % e)
+        return 1
+    return 0
+
+
 _MISSING = object()
 
 
@@ -796,13 +864,15 @@ def _main(argv):
     if cmd == "carry-classes":
         try:
             names = carry_classes(load_classes())
-        except (OSError, ValueError, KeyError) as e:
+        except (OSError, RuntimeError, ValueError, KeyError) as e:
             sys.stderr.write("[run-ledger] carry-classes failed: %s\n" % e)
             return 1
         print("\n".join(names))
         return 0
     if cmd == "seed":
         return _seed_cmd(rest)
+    if cmd == "parent-exception":
+        return _parent_exception_cmd(rest)
     if cmd == "slot-fields":
         print(json.dumps(SLOT_FIELDS))
         return 0

@@ -86,8 +86,8 @@ REPLAY_ENV = "HYDRA_AUTOPILOT_SNAPSHOT_REPLAY"
 BLOB_FIELDS = ("usage_eligibility", "emergency_brake", "target_risk_surface", "class_stats", "candidate_exclusions")
 # Every blob name a reader may ask for (slot_events feeds state.slot_events).
 _KNOWN_BLOBS = BLOB_FIELDS + ("slot_events",)
-# A document without signals raises the flags named by the all-degraded convention: faults and caps.
-_RAISED_WHEN_UNREAD = ("_fail", "_degraded", "_saturated")
+# A document without signals raises the flags named by the all-degraded convention: faults, caps and unreadable-read flags (#5319 INV-4).
+_RAISED_WHEN_UNREAD = ("_fail", "_degraded", "_saturated", "_unreadable")
 
 
 class UnknownSignalError(LookupError):
@@ -281,6 +281,14 @@ def pin(state: dict, events: list[dict], name: str) -> tuple[int, int, str] | No
     """A pre-resolved dev pin (#4460, #4518, #4739, #4807) as `(issue, pr, branch)`.
     Events take precedence over state. Absent / none / malformed → None; never raises."""
     return _parse_pin(_raw_signal(state, events, name))
+
+
+def pr_number(state: dict, events: list[dict], name: str) -> int | None:
+    """A single-PR-number signal (`orch_dirty_forward_fix_fail_pr`, #5253): the
+    one positive int token, else None. Events take precedence over state.
+    Absent / null / malformed -> None (the fail-closed arm); never raises."""
+    nums = pr_numbers(state, events, name)
+    return nums[0] if len(nums) == 1 else None
 
 
 def dirty_surface_pairs(state: dict, events: list[dict], name: str) -> list[tuple[int, int | None]]:

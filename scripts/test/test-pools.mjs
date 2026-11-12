@@ -41,7 +41,7 @@ const HAZARDS = [
   [/\/dev\/shm\//, "uses /dev/shm (shared between concurrent pools)"],
   [/\b(pkill|pgrep|killall)\b/, "kills or matches processes by name (could reap the sibling pool)"],
   [/\.listen\(\s*\d{2,5}\b|--port[= ]\d{2,5}\b|localhost:\d{4,5}|127\.0\.0\.1:\d{4,5}/, "binds or dials a fixed port"],
-  [/tmpdir\(\)\s*,\s*["'`][A-Za-z0-9_.-]+["'`]\s*\)/, "uses a constant-name path under tmpdir() (clobbers under concurrency)"],
+  [/(?<!mkdtemp(?:Sync)?\(\s*(?:path\.)?join\(\s*)tmpdir\(\)\s*,\s*["'`][A-Za-z0-9_.-]+["'`]\s*\)/, "uses a constant-name path under tmpdir() (clobbers under concurrency)"],
 ];
 
 const SOURCE_EXTS = [".ts", ".mts", ".js", ".mjs", ".sh", ".py", ".json"];

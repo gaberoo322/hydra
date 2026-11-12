@@ -1,0 +1,1 @@
+- refactor: /work promote checklist reads server-evaluated check verdicts from the work queue (#5451)

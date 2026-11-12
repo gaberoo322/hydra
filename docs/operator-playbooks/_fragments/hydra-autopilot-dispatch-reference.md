@@ -58,6 +58,14 @@ was never measured. Frontier is retained where the evidence does not reach.
 | `discover_orch` / `discover_target` | Patrol/diagnostics, designed small/fast/cheap |
 | `wayfinder_orch` | Works a wayfinder-map frontier ticket (research enrichment or a `wayfinder:task` build) — real authoring/judgment on a foggy initiative, not a deterministic check. Omit `model` so it inherits the parent (Fable 5), per #1093, avoiding the Haiku-premature-exit failure mode. |
 
+## Dispatch Intent vs prompt_args
+
+A bespoke pipeline slot's dispatch is described by its **Dispatch Intent**
+(`action.intent`, closed kinds in `decide_base.py`); `render-dispatch.py` renders
+it and refuses a bespoke action that carries no intent. `prompt_args` is the
+**signal classes'** argument bag only; the escalation keys below (`escalate_model`,
+`attempt`, `prior_attempt_status`) ride `prompt_args` on every class.
+
 ## Cascade-routing escalation
 
 SKILL.md § Per-class model routing carries the three mandatory steps and the
@@ -150,7 +158,7 @@ cache, so the resume path no longer depends on it surviving. Four mechanisms:
    closed to `none`). The `dev_orch` selector pins it AFTER the in-state drain
    above, regardless of `orch_work_available`, of whether
    `dev_resume_pending` holds a record, or of which run queued it. The action
-   carries `prompt_args.forward_fix_pr`, so the forward-fix dispatch contract
+   carries a `ForwardFixRed` intent (anchor, PR, branch), so the forward-fix dispatch contract
    below applies verbatim (continue the PR's head, push to the SAME branch,
    NEVER `gh pr create`). Only the red-CI arm (`orch_prs_red_resume`) is
    capped (`RED_FORWARD_FIX_CAP`). Reap's needs-qa promotion clears the label.
@@ -166,8 +174,8 @@ cache, so the resume path no longer depends on it surviving. Four mechanisms:
    (widened to `--json number,labels,updatedAt` — zero added reads) and
    fail-closed to `none` on any unusable input. The `dev_orch` selector pins it
    immediately AFTER the in-state drain (mechanism 2) and BEFORE the
-   #4807/#4518 PR-keyed pins, with `prompt_args` exactly
-   `{"anchor": "issue-<N>", "resume": true}` — no branch to continue, so the
+   #4807/#4518 PR-keyed pins, with a `ResumeSalvage`
+   intent for `issue-<N>` — no branch to continue, so the
    dispatch prompt reads the issue's own comments for the last reap stall's
    `**Branch:**` line instead. There is NO state key: the durable cap is
    enforced at reap time — `_handle_dev_orch_stall` counts the issue's prior
@@ -254,8 +262,9 @@ alias is not entitled in every environment — a background
 the selected model (claude-fable-5) … it may not exist or you may not have
 access to it"* (0 tokens, 0 tool uses). When a `fable`-routed dispatch
 terminates immediately this way (no tool uses + a model-access error),
-**re-dispatch the identical action with `model: "opus"` (Opus 4.8) — do not
-leave the class unrun.** This still applies to the `inherit-parent` classes
+`decide.py` re-dispatches the identical action with `escalate_model: opus`
+(Opus 4.8) in the same plan (#5323) — the class is never left unrun, and the
+parent does not detect it. This still applies to the `inherit-parent` classes
 (`wire_or_retire_target`, `design_qa_target`, `wayfinder_orch`) when the
 parent session's saved default is Fable, and to `dev_orch`'s `escalate_model`
 hint (still `fable`). If this fallback becomes the steady state rather than an
@@ -274,8 +283,9 @@ model, …"* — a quota 429, NOT a model-access error, and the CLI's own
 When a `fable`-routed dispatch — or the parent session itself — dies with that
 notice:
 
-1. **Arm the flag** so the next launch and every same-turn pre-resolution sees
-   it:
+1. **The flag is armed for you** for an in-run subagent death: the instant-death
+   `reap` action carries the notice and `reap.py` POSTs it (#5323). The manual
+   command, for a death no reap saw:
 
    ```bash
    curl -sf --max-time 5 -X POST -H 'content-type: application/json' \
@@ -289,8 +299,8 @@ notice:
    On a parent-session death the ExecStopPost reap posts this automatically
    (bootstrap.sh greps the journal); post it yourself only for an in-run
    subagent death.
-2. **Re-dispatch the identical action on `opus` the SAME turn** — do not leave
-   the class unrun and do not wait out the flag for work that is ready now.
+2. **The opus replay** is emitted by `decide.py` the SAME turn (at most once per
+   original dispatch) — do not leave the class unrun.
 3. Apply the pre-resolution rule (Per-class model routing above) for the rest
    of the turn — the next Turn Snapshot reads the armed flag either way.
 

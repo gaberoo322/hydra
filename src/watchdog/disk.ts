@@ -22,7 +22,7 @@
  * Paging is EDGE-ONLY: `runDisk` pages a critical key only when
  * `isOpen(key) !== true` (the episode opens). DOCUMENTED EXCEPTION: while the
  * episode stays open, the 6h reminder (ADR-0045 Decision 4) still fires —
- * `runDisk` re-calls `page` only when `reminderDue(key)` says 6h elapsed.
+ * `runDisk` re-calls `report` only when `reminderDue(key)` says 6h elapsed.
  *
  * Severity: a `critical` mount pages its critical key and HOLDS its warn key;
  * dropping back into the warn band neither resolves critical nor briefs warn
@@ -36,6 +36,7 @@
  */
 
 import type { OperatorFact, OperatorMessage } from "../operator-channel/message.ts";
+import { dedupKeyOf } from "../operator-channel/page-list.ts";
 
 export const DISK_LOG_PREFIX = "hydra-disk-watchdog:";
 export const DISK_PAGE_KIND = "infra:tmpfs_exhausted";
@@ -176,48 +177,68 @@ export function decideDisk(path: string, reading: StatfsReading | null, t: DiskT
   };
 }
 
-/** The Operator Channel dedupKey for one (mount, level): critical pages, warn briefs. */
+/**
+ * The Operator Channel dedupKey for one (mount, level): critical pages, warn
+ * briefs. Derived from the per-kind table (`dedupKeyOf`), the only derivation, so
+ * isOpen / reminderDue / resolve agree with the page key byte-for-byte.
+ */
 export function diskDedupKey(path: string, level: "warn" | "critical"): string {
-  return `${level === "critical" ? DISK_PAGE_KIND : DISK_BRIEF_KIND}:${path}:${level}`;
+  return dedupKeyOf(level === "critical" ? DISK_PAGE_KIND : DISK_BRIEF_KIND, { path });
 }
 
-/** The message for one (mount, level): a page at critical, a Morning Brief item at warn. */
-export function diskPageMessage(
-  v: DiskVerdict,
-  level: "warn" | "critical",
-  t: DiskThresholds,
-  topConsumers: string[] | null | undefined,
-): OperatorMessage {
+function overThreshold(v: DiskVerdict, level: "warn" | "critical", t: DiskThresholds): { thr: number; dims: string[] } {
   const dims: string[] = [];
   const thr = level === "critical" ? t.criticalPct : t.warnPct;
   if (v.inodePct !== null && v.inodePct >= thr) dims.push(`inodes ${v.inodePct}%`);
   if (v.blockPct !== null && v.blockPct >= thr) dims.push(`space ${v.blockPct}%`);
+  return { thr, dims };
+}
+
+/**
+ * The `report()` payload for a CRITICAL mount (7 scalar entries, under the
+ * 8-fact cap). The per-kind table's title renderer builds the page title from
+ * `path` + `over`.
+ */
+export function diskReportPayload(
+  v: DiskVerdict,
+  t: DiskThresholds,
+  topConsumers: string[] | null | undefined,
+): Record<string, string> {
+  const { thr, dims } = overThreshold(v, "critical", t);
+  return {
+    path: v.path,
+    over: dims.join(", ") || "over threshold",
+    inodes: v.inodePct === null ? "n/a" : `${v.inodePct}%`,
+    space: v.blockPct === null ? "n/a" : `${v.blockPct}%`,
+    free: v.freeBytes === null ? "n/a" : formatBytes(v.freeBytes),
+    threshold: `critical >= ${thr}%`,
+    topInodeUsers:
+      topConsumers === undefined
+        ? "not scanned (reminder for an open episode)"
+        : topConsumers === null
+          ? "unavailable (du failed or timed out)"
+          : topConsumers.length
+            ? topConsumers.join(", ")
+            : "none",
+  };
+}
+
+/** The Morning Brief item for a WARN mount (kept on `briefOnce`: once per episode). */
+export function diskBriefMessage(v: DiskVerdict, t: DiskThresholds): OperatorMessage {
+  const { thr, dims } = overThreshold(v, "warn", t);
   const facts: OperatorFact[] = [
     { label: "inodes", value: v.inodePct === null ? "n/a" : `${v.inodePct}%` },
     { label: "space", value: v.blockPct === null ? "n/a" : `${v.blockPct}%` },
     { label: "free", value: v.freeBytes === null ? "n/a" : formatBytes(v.freeBytes) },
-    { label: "threshold", value: `${level} >= ${thr}%` },
+    { label: "threshold", value: `warn >= ${thr}%` },
   ];
-  if (level === "critical") {
-    facts.push({
-      label: "top inode users",
-      value:
-        topConsumers === undefined
-          ? "not scanned (reminder for an open episode)"
-          : topConsumers === null
-            ? "unavailable (du failed or timed out)"
-            : topConsumers.length
-              ? topConsumers.join(", ")
-              : "none",
-    });
-  }
   return {
-    severity: level === "critical" ? "page" : "brief",
-    kind: level === "critical" ? DISK_PAGE_KIND : DISK_BRIEF_KIND,
-    title: `${v.path} ${level}: ${dims.join(", ") || "over threshold"}${level === "critical" ? " — temp-file writes fail with ENOSPC at 100%" : ""}`,
+    severity: "brief",
+    kind: DISK_BRIEF_KIND,
+    title: `${v.path} warn: ${dims.join(", ") || "over threshold"}`,
     facts,
     links: [],
-    dedupKey: diskDedupKey(v.path, level),
+    dedupKey: diskDedupKey(v.path, "warn"),
   };
 }
 
@@ -230,7 +251,8 @@ export interface DiskDeps {
   isOpen(dedupKey: string): Promise<boolean | null>;
   /** Whether the 6h reminder is due for an open key (the documented edge-only exception). */
   reminderDue(dedupKey: string): Promise<boolean>;
-  page(msg: OperatorMessage): Promise<unknown>;
+  /** Raise the critical page through the channel's per-kind table (`OperatorChannel.report`). */
+  report(kind: string, payload: Record<string, unknown>): Promise<unknown>;
   /** Append a Morning Brief item once per episode (the warn level). */
   briefOnce(msg: OperatorMessage): Promise<unknown>;
   resolve(dedupKey: string, title: string): Promise<unknown>;
@@ -267,17 +289,17 @@ export async function runDisk(deps: DiskDeps, config: DiskConfig): Promise<DiskV
           // Edge-only: page when the episode opens (isOpen !== true; an unreadable store fails open).
           if ((await criticalOpen()) !== true) {
             const consumers = await deps.topInodeConsumers(path, DISK_TOP_CONSUMERS);
-            await deps.page(diskPageMessage(v, level, config.thresholds, consumers));
+            await deps.report(DISK_PAGE_KIND, diskReportPayload(v, config.thresholds, consumers));
             say(`${level} page submitted for ${path} (dedupKey=${key})`);
           } else if (await deps.reminderDue(key)) {
             // DOCUMENTED EXCEPTION to edge-only: the 6h reminder of an open episode (ADR-0045 Decision 4).
-            await deps.page(diskPageMessage(v, level, config.thresholds, undefined));
+            await deps.report(DISK_PAGE_KIND, diskReportPayload(v, config.thresholds, undefined));
             say(`${level} 6h reminder submitted for ${path} (dedupKey=${key})`);
           }
         } else if (action === "brief") {
           // critical->warn is the same episode: no pressure brief while critical is open.
           if ((await criticalOpen()) === true) continue;
-          await deps.briefOnce(diskPageMessage(v, level, config.thresholds, undefined));
+          await deps.briefOnce(diskBriefMessage(v, config.thresholds));
         } else if (action === "resolve") {
           if (level === "warn") {
             // Warn never paged, so it never "recovers" out loud: close the marker silently.

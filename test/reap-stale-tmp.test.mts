@@ -139,6 +139,11 @@ describe("reap-stale-tmp.sh", () => {
       makeDir(root, "report-2026Q4"),
       makeDir(root, "old-Backup"),
       makeDir(root, "notes-ABCDEF"),
+      // Version / hash-style names (#5329 operator ruling): no uppercase, or all-hex.
+      makeDir(root, "images-v2beta"),
+      makeDir(root, "debian-12slim"),
+      makeDir(root, "checkout-3fa9c1"),
+      makeDir(root, "checkout-3Fa9C1"), // mixed-case hex still a hash
       makeDir(root, "tmp.AbCdEfGhIj"), // mktemp(1) default: 10-char suffix
       makeDir(root, "claude-1000Ab12Cd"), // deny-listed runtime prefix
       makeDir(root, "tsx-1000-Ab12Cd"),
@@ -151,7 +156,7 @@ describe("reap-stale-tmp.sh", () => {
     const r = run(root, "--apply");
 
     for (const dir of spared) assert.equal(existsSync(dir), true, `${dir} must survive`);
-    assert.match(r.summary, /matched=0 removed=0 failed=0 spared=18 enum=ok/);
+    assert.match(r.summary, /matched=0 removed=0 failed=0 spared=22 enum=ok/);
     assert.equal(r.status, 0);
   });
 

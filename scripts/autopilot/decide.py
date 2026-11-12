@@ -316,6 +316,7 @@ from typing import Any, Callable, Iterable, Sequence
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import turn_snapshot as ts  # noqa: E402
 import run_ledger  # noqa: E402  (leaf module; main() is its only caller)
+import taxonomy  # noqa: E402  (the ONE classes.json loader, #5472)
 
 # ---------------------------------------------------------------------------
 # Sibling brain modules (issue #4511) — imports point DOWN only
@@ -336,10 +337,17 @@ if _SCRIPT_DIR not in sys.path:
 from decide_base import (
     BACKFILL_STARVATION_FLOOR_SEC,
     ESCALATION_POLICY,
+    INTENT_KINDS_BY_SLOT,
+    _INTENT_REGISTRY,
     RED_FORWARD_FIX_CAP,
     QA_STALL_MAX_ATTEMPTS,
     ZERO_YIELD_BACKOFF_LADDER,
+    _anchor_issue_number,
     _dev_resume_pick_signal,
+    _is_parked_anchor,
+    _parked_prs,
+    _parked_read_degraded,
+    _needs_qa_target_pr_head,
     _needs_qa_target_pr_ref,
     _normalize_target_risk_surface,
     _orch_board_read_degraded,
@@ -348,6 +356,12 @@ from decide_base import (
     _signal_present,
     _target_dev_resume_pick_signal,
     _zero_yield_entry,
+    dispatch_anchor,
+    dispatch_intent,
+    dispatch_pr,
+    dispatch_resume_branch,
+    escalation_intent,
+    intent_from_dict,
     make_dispatch,
 )
 from decide_selectors.architecture import _select_signal_architecture_orch
@@ -399,13 +413,13 @@ from decide_selectors.wire_or_retire import _select_signal_wire_or_retire_target
 # DELIBERATELY no fallback to embedded tuples — a silent fallback would
 # resurrect the four-file taxonomy drift this table exists to kill.
 #
-# TaxonomyError subclasses RuntimeError (NOT SystemExit). heartbeat.py imports
-# this module fail-loud (issue #4637: no try/except fallback), so a bad
-# classes.json surfaces there as an uncaught TaxonomyError traceback at import, and any CLI
+# TaxonomyError (taxonomy.py) subclasses RuntimeError (NOT SystemExit). A bad
+# classes.json surfaces as an uncaught TaxonomyError traceback at import, and any CLI
 # invocation of decide.py still exits non-zero with the message.
 #
-# The brain keeps all POLICY — selectors, cooldown enforcement, scope masks
-# (SCOPE_*_EXCLUDE), the BACKFILL_SIGNAL_CLASSES stagger set.
+# The brain keeps all POLICY — selectors, cooldown enforcement, the dispatch
+# ORDER tuples, the BACKFILL_SIGNAL_CLASSES stagger set. The scope masks are
+# derived from the `scope` column (taxonomy.scope_excluded).
 # The table is only the ALPHABET (ADR-0012). Row order is the file/declaration
 # order of the derived tuples and of the TS views (pinned by the parity tests)
 # — it is NOT dispatch priority: _rule_pipeline_dispatch iterates the hardcoded
@@ -414,191 +428,54 @@ from decide_selectors.wire_or_retire import _select_signal_wire_or_retire_target
 # merely coincides with row order — nothing couples them (issue #4468).
 # Dispatch priority is POLICY and stays here in the brain.
 #
-# HYDRA_CLASSES_JSON (issue #5202) is a TEST SEAM shared with render-dispatch.py:
-# when set (non-empty) it names the taxonomy file and decide.py loads ONLY that
-# file — a missing/invalid override raises TaxonomyError naming the override
-# path, never a fallback to the shipped classes.json. No production entrypoint
-# sets it; unset keeps the sibling classes.json.
+# Loading, validation, the HYDRA_CLASSES_JSON test seam (issue #5202) and the
+# scope-exclusion derivation all live in taxonomy.py (issue #5472), the one
+# loader every Python reader shares; decide.py only consumes the validated rows.
 
-_TAXONOMY_PATH = os.environ.get("HYDRA_CLASSES_JSON") or os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "classes.json"
-)
+_TAXONOMY_PATH = taxonomy.taxonomy_path()
 
-# Every column must be PRESENT on every row (nullable columns carry an
-# explicit null, never an absent key) so a projection miss is loud.
-_TAXONOMY_REQUIRED_COLUMNS = (
-    "name",
-    "kind",
-    "skill",
-    "costClass",
-    "learningAgent",
-    "cooldownSeconds",
-    "scope",
-    "provenanceLabel",
-    "stage",
-    "model",
-)
-
-_TAXONOMY_KINDS = ("pipeline", "signal")
-_TAXONOMY_SCOPES = ("orch", "target", "both")
-_TAXONOMY_LEARNING_AGENTS = ("planner", "executor")
-# The eight stage values a CLASS row may carry (#4592). The two skill-only
-# values ("operator-interactive", "brain") are deliberately NOT members: they
-# exist only on docs/generated/skills.json rows, and rejecting them here is
-# what makes "exactly one brain" enforceable. Kept textually identical to
-# CLASS_STAGES in src/taxonomy/classes.ts — pinned by the parity test.
-_TAXONOMY_STAGES = (
-    "plan",
-    "spec",
-    "tickets",
-    "implement",
-    "review",
-    "pre-plan-producer",
-    "ops",
-    "target",
-)
-# The five closed model values (#4592). DOCUMENTATION-ONLY on a class row:
-# decide.py validates the column and otherwise ignores it — the model lever
-# lives in the playbook (issue #1093), which reads the column at dispatch
-# time. Kept textually identical to DISPATCH_CLASS_MODELS in
-# src/taxonomy/classes.ts — pinned by the parity test.
-_TAXONOMY_MODELS = ("fable", "sonnet", "haiku", "opus", "inherit")
-
-
-class TaxonomyError(RuntimeError):
-    """classes.json is missing, malformed, or violates the row contract.
-
-    Raised at import time (issue #1670) — decide.py refuses to start
-    without a valid Dispatch-Class Taxonomy. NEVER caught internally to
-    fall back to embedded tuples.
-    """
+TaxonomyError = taxonomy.TaxonomyError  # re-exported: heartbeat/tests catch it as decide.TaxonomyError
 
 
 def _taxonomy_fail(reason: str) -> "TaxonomyError":
-    return TaxonomyError(
-        f"decide.py: dispatch-class taxonomy {_TAXONOMY_PATH}: {reason} "
-        "— refusing to start (no fallback tuples; epic #1669 / issue #1670)"
-    )
-
-
-def _load_class_taxonomy(path: str) -> tuple[dict, ...]:
-    """Load + validate classes.json. Hard-fails on any contract violation."""
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            raw = json.load(fh)
-    except FileNotFoundError:
-        raise _taxonomy_fail("file is missing") from None
-    except json.JSONDecodeError as exc:
-        raise _taxonomy_fail(f"malformed JSON ({exc})") from None
-
-    if not isinstance(raw, dict) or not isinstance(raw.get("classes"), list):
-        raise _taxonomy_fail('top level must be an object with a "classes" list')
-    rows = raw["classes"]
-    if not rows:
-        raise _taxonomy_fail('"classes" list is empty')
-
-    seen_names: set[str] = set()
-    for i, row in enumerate(rows):
-        if not isinstance(row, dict):
-            raise _taxonomy_fail(f"row {i} is not an object")
-        missing = [c for c in _TAXONOMY_REQUIRED_COLUMNS if c not in row]
-        if missing:
-            raise _taxonomy_fail(
-                f"row {i} ({row.get('name', '?')}) lacks required column(s): "
-                + ", ".join(missing)
-            )
-        name = row["name"]
-        if not isinstance(name, str) or not name:
-            raise _taxonomy_fail(f"row {i}: name must be a non-empty string")
-        if name in seen_names:
-            raise _taxonomy_fail(f"duplicate class name: {name}")
-        seen_names.add(name)
-        if row["kind"] not in _TAXONOMY_KINDS:
-            raise _taxonomy_fail(
-                f"{name}: kind must be one of {_TAXONOMY_KINDS}, got {row['kind']!r}"
-            )
-        if not isinstance(row["skill"], str) or not row["skill"]:
-            raise _taxonomy_fail(f"{name}: skill must be a non-empty string")
-        if row["stage"] not in _TAXONOMY_STAGES:
-            raise _taxonomy_fail(
-                f"{name}: stage must be one of {_TAXONOMY_STAGES} — the skill-only "
-                "values (operator-interactive, brain) are rejected on class rows "
-                f"(#4592), got {row['stage']!r}"
-            )
-        if row["model"] not in _TAXONOMY_MODELS:
-            raise _taxonomy_fail(
-                f"{name}: model must be one of {_TAXONOMY_MODELS} (non-nullable; "
-                "inherit means the dispatch omits the model kwarg), got "
-                f"{row['model']!r}"
-            )
-        if "skill_by_ticket_type" in row and row["skill_by_ticket_type"] is not None:
-            mapping = row["skill_by_ticket_type"]
-            if (
-                not isinstance(mapping, dict)
-                or not mapping
-                or any(
-                    not isinstance(k, str) or not k or not isinstance(v, str) or not v
-                    for k, v in mapping.items()
-                )
-            ):
-                raise _taxonomy_fail(
-                    f"{name}: skill_by_ticket_type must be a non-empty object "
-                    "mapping non-empty ticket-type strings to non-empty skill names"
-                )
-            if row["skill"] not in mapping.values():
-                raise _taxonomy_fail(
-                    f"{name}: one skill_by_ticket_type value must equal the row's "
-                    f"skill {row['skill']!r} (the default stays reachable)"
-                )
-        if not isinstance(row["costClass"], str) or not row["costClass"]:
-            raise _taxonomy_fail(f"{name}: costClass must be a non-empty string")
-        if row["learningAgent"] is not None and (
-            row["learningAgent"] not in _TAXONOMY_LEARNING_AGENTS
-        ):
-            raise _taxonomy_fail(
-                f"{name}: learningAgent must be null or one of "
-                f"{_TAXONOMY_LEARNING_AGENTS}, got {row['learningAgent']!r}"
-            )
-        if row["scope"] not in _TAXONOMY_SCOPES:
-            raise _taxonomy_fail(
-                f"{name}: scope must be one of {_TAXONOMY_SCOPES}, got {row['scope']!r}"
-            )
-        if row["provenanceLabel"] is not None and (
-            not isinstance(row["provenanceLabel"], str) or not row["provenanceLabel"]
-        ):
-            raise _taxonomy_fail(
-                f"{name}: provenanceLabel must be null or a non-empty string"
-            )
-        cooldown = row["cooldownSeconds"]
-        if row["kind"] == "signal":
-            # bool is an int subclass in Python — exclude it explicitly.
-            if isinstance(cooldown, bool) or not isinstance(cooldown, int) or cooldown < 0:
-                raise _taxonomy_fail(
-                    f"{name}: signal rows need a non-negative integer "
-                    f"cooldownSeconds, got {cooldown!r}"
-                )
-        elif cooldown is not None:
-            raise _taxonomy_fail(
-                f"{name}: pipeline rows must carry cooldownSeconds: null "
-                f"(slots have no class cooldown), got {cooldown!r}"
-            )
-
-    return tuple(rows)
+    return taxonomy.taxonomy_fail(reason, _TAXONOMY_PATH)
 
 
 # The validated row tuple, exposed for future slices (#1671 folds the TS
 # projections; decide.py itself only consumes the three derivations below).
-CLASS_TAXONOMY = _load_class_taxonomy(_TAXONOMY_PATH)
+CLASS_TAXONOMY = taxonomy.load_taxonomy(_TAXONOMY_PATH)
 
-PIPELINE_SLOTS = tuple(r["name"] for r in CLASS_TAXONOMY if r["kind"] == "pipeline")
+PIPELINE_SLOTS = taxonomy.pipeline_slots(CLASS_TAXONOMY)
 
-SIGNAL_CLASSES = tuple(r["name"] for r in CLASS_TAXONOMY if r["kind"] == "signal")
+SIGNAL_CLASSES = taxonomy.signal_classes(CLASS_TAXONOMY)
 
 # Class -> skill projection (issue #3274). The cascade-routing escalation
 # re-dispatch (`_rule_escalation`) needs the skill for the class it is
 # re-dispatching; derive it from the taxonomy alphabet so the escalation path
 # can never name a skill that drifts from the class's real dispatch skill.
 CLASS_SKILL = {r["name"]: r["skill"] for r in CLASS_TAXONOMY}
+
+# Class -> ticket-type -> skill routing (issue #5384, INV-4). The brain resolves
+# a ticket-typed dispatch's effective skill in step 7 from the intent kind's
+# `ticket_type`; the renderer no longer reads classes.json for routing.
+CLASS_SKILL_BY_TICKET_TYPE = {
+    r["name"]: r["skill_by_ticket_type"] for r in CLASS_TAXONOMY if r.get("skill_by_ticket_type")
+}
+
+
+def _validate_ticket_type_routing() -> None:
+    """Fail loud at import unless every ticket_type an intent kind declares is routable."""
+    for slot, kind_names in INTENT_KINDS_BY_SLOT.items():
+        for kind_name in kind_names:
+            tt = getattr(_INTENT_REGISTRY[kind_name], "ticket_type", None)
+            if tt is not None and tt not in CLASS_SKILL_BY_TICKET_TYPE.get(slot, {}):
+                raise _taxonomy_fail(
+                    f"{slot}: intent kind {kind_name!r} declares ticket_type {tt!r} "
+                    "with no skill_by_ticket_type route in classes.json"
+                )
+
+
+_validate_ticket_type_routing()
 
 # Class -> taxonomy scope projection (issue #4161). The orch-realm share
 # guard suppresses ORCH-scope dispatch only: classes whose taxonomy row
@@ -689,9 +566,124 @@ def class_isolation(slot: str) -> str:
 # Cooldowns for signal-driven classes (seconds). Mirrors the legacy
 # /tmp/hydra-last-*.txt files but lives inside state.json now. Per-class
 # cadence rationale lives in the row's `notes` field in classes.json.
-SIGNAL_COOLDOWNS = {
-    r["name"]: r["cooldownSeconds"] for r in CLASS_TAXONOMY if r["kind"] == "signal"
-}
+SIGNAL_COOLDOWNS = taxonomy.signal_cooldowns(CLASS_TAXONOMY)
+
+# Dispatch ORDER is POLICY and stays in the brain (issue #5472, INV-6): the two
+# tuples below are not taxonomy columns, but each MUST be exactly the set of rows
+# of its kind -- checked at import, so a class added to classes.json without a
+# place in the order (or a stale name left here) fails loud with a TaxonomyError.
+
+# Step 4 — pipeline slots, in priority order (qa_orch first; deliberately NOT row order, #466/#4468).
+PIPELINE_PRIORITY = (
+    "qa_orch",
+    "qa_target",
+    # design_concept_orch precedes dev_orch in priority order (issue
+    # #466 sequencing rule): when an orch anchor needs a fresh
+    # artifact, we grill before coding. The selector below returns
+    # None for dev_orch on the same turn so they don't double-fire,
+    # and in warn-only mode the artifact's presence (even draft) lets
+    # dev_orch proceed next turn.
+    "design_concept_orch",
+    "dev_orch",
+    "dev_target",
+    "research_orch",
+    "research_target",
+)
+
+# Step 5 — signal classes, in dispatch priority order.
+SIGNAL_LOOP_ORDER = (
+    "health",
+    "sweep_orch",
+    "sweep_target",
+    "discover_orch",
+    "discover_target",
+    # scout_orch (issue #485, Phase B) — calendar-driven, 7d cooldown.
+    # The Turn Snapshot emits `scout_walk_due` when the per-class
+    # cooldown has elapsed; this loop honors the SIGNAL_COOLDOWNS
+    # back-stop in parallel.
+    "scout_orch",
+    # architecture_orch (issue #790) — idle-time fallback. Registered in
+    # the dispatch iteration tuple so a real dispatch sets
+    # dispatched_any=True, which yields idle=0 for the turn and stops
+    # the wait-only idle drain from firing while a fallback is eligible (the AC
+    # is met by being a real dispatch, NOT by editing the terminate path).
+    "architecture_orch",
+    # retro_orch (issue #920, parent #917) — daily per-run retrospective.
+    # Registered LAST in the signal iteration so it is the lowest-priority
+    # signal class: pipeline slots dispatch first (step 4), then the other
+    # signal classes, and only then is spare capacity spent on a retro.
+    # The 24h class cooldown (SIGNAL_COOLDOWNS) is honored by the shared
+    # signal_is_cooled guard inside _select_for_signal.
+    "retro_orch",
+    # cleanup_orch (issue #960, parent #958) — board-idle backfill that runs
+    # the deterministic dead-code / simplification detector. Keyed off the
+    # same `orch_backfill_idle` signal as the backfill set but deliberately
+    # NOT in BACKFILL_SIGNAL_CLASSES (no one-per-turn stagger): the
+    # high-confidence mechanical workhorse runs hot, gated only by its own
+    # `cleanup_board_saturated` cap + the 1h class cooldown.
+    "cleanup_orch",
+    # cleanup_target — the Target mirror: demote-only dead-export sweep
+    # over ~/hydra-betting, filing target-backlog items. Keyed off
+    # `target_backfill_idle`, capped by `target_cleanup_board_saturated`
+    # (checked FIRST in the selector) + the 1h class cooldown.
+    "cleanup_target",
+    # wire_or_retire_target (issue #2722, epic #2720) — the JUDGMENT
+    # counterpart to cleanup_target: resolves open `wire-or-retire`-labelled
+    # Target backlog items sitting in the triage lane into a WIRE / RETIRE /
+    # UNCLEAR verdict. Keyed off `wire_or_retire_target_available`; the 24h
+    # class cooldown (seeded in bootstrap.sh, #2575 class) enforces the
+    # once-per-day cadence. NOT in BACKFILL_SIGNAL_CLASSES.
+    "wire_or_retire_target",
+    # design_qa_target (issue #2739, parent #2732) — periodic VISUAL QA of
+    # the Target UI: captures the nav-registry screenshot set and judges each
+    # page against the Target design-language ADR, filing at most 3 deduped
+    # needs-triage Target-backlog items per run. Calendar cadence like
+    # scout_orch: the 7d class cooldown (seeded in bootstrap.sh, #2575 class)
+    # owns cadence; `design_qa_target_saturated` is the anti-flood cap checked
+    # FIRST in the selector, `design_qa_target_due` the presence signal. NOT
+    # in BACKFILL_SIGNAL_CLASSES. Registered last as the lowest-priority
+    # signal class — spare capacity only.
+    "design_qa_target",
+    # skill_prune (issue #2949, epic #2944) — the eval-gated PROMPT
+    # counterpart to cleanup_orch's mechanical dead-CODE sweep: prunes the
+    # Orchestrator's playbook-generated skills one at a time along the Pocock
+    # taxonomy. Keyed off the same `orch_backfill_idle` spare-capacity signal
+    # as architecture_orch/cleanup_orch, but the 7d class cooldown
+    # (scout_orch's calendar discipline) is the primary cadence and
+    # `skill_prune_board_saturated` is the anti-flood cap checked FIRST in the
+    # selector. NOT in BACKFILL_SIGNAL_CLASSES (rate-limits on its own 7d
+    # cooldown, not the one-per-turn stagger — like cleanup_orch). Registered
+    # last as a lowest-priority signal class — spare capacity only.
+    "skill_prune",
+    # wayfinder_orch (issue #3351, epic #3350, ADR-0029) — the single AFK
+    # working class for wayfinder maps. Fires on the pre-resolved
+    # `wayfinder_orch_frontier` signal (the Turn Snapshot owns the native
+    # GraphQL frontier enumeration; decide.py reads the resolved ticket ref
+    # verbatim — the signal-seam discipline). 1h class cooldown, one frontier
+    # ticket per fire. NOT in BACKFILL_SIGNAL_CLASSES (map-anchored, not
+    # idle-backfill). Registered last as a lowest-priority signal class —
+    # spare capacity only, never preempting a pipeline dispatch.
+    "wayfinder_orch",
+    # tickets_orch (issue #3423, epic #3419, ADR-0030 Decision 2/5 — one
+    # autonomous Pocock skill lineage; the delta/contract slice). The
+    # tickets-STAGE producer: turns a resolved plan/finding into one parent
+    # epic + N tracer-bullet child issues by dispatching the vendored upstream
+    # `to-tickets` skill + the thin Hydra AFK overlay (Option C compose,
+    # alpha #3420; hydra-prd is demoted to the called PrdInput->issue renderer
+    # library invoked BY that overlay). Structural sibling of wayfinder_orch
+    # (the plan-stage producer, also signal, also 1h) — NOT a pipeline slot.
+    # Fires on the precomputed `tickets_available` board signal (signal-seam
+    # discipline: the Turn Snapshot owns the enumeration and emits the signal;
+    # that emission is a follow-on, not this slice's Files-in-scope). 1h class
+    # cooldown (SIGNAL_COOLDOWNS["tickets_orch"]) is the back-stop; board state
+    # is the primary suppressor. NOT in BACKFILL_SIGNAL_CLASSES. Registered
+    # last as a lowest-priority signal class — spare capacity only, never
+    # preempting a pipeline dispatch.
+    "tickets_orch",
+)
+
+taxonomy.check_order_tuple("PIPELINE_PRIORITY", PIPELINE_PRIORITY, CLASS_TAXONOMY, "pipeline", _TAXONOMY_PATH)
+taxonomy.check_order_tuple("SIGNAL_LOOP_ORDER", SIGNAL_LOOP_ORDER, CLASS_TAXONOMY, "signal", _TAXONOMY_PATH)
 
 # Board-idle backfill set (issue #959, epic #958). Both classes key off the
 # single unified `orch_backfill_idle` signal and share a 1h cadence, so on a
@@ -749,8 +741,9 @@ WALL_CLOCK_HEARTBEAT_SEC = 900
 
 # Silent-wedge fallback timer (issue #509). When an active slot has been
 # in flight for longer than this without a corresponding subagent_stop
-# hook event, decide.py emits a `wait_or_reap` action so the operator
-# loop falls back to reap.py. The slot_events stream is the primary
+# hook event, decide.py emits a `wait_or_reap` action; the autopilot brain
+# handles it through the playbook's `wait_or_reap` row, which runs
+# `reap.py wait-or-reap <slot> <task_id>` (issue #5282). The slot_events stream is the primary
 # accounting path; this fallback only fires when the hook itself silently
 # failed (e.g. the subagent process crashed before reaching the harness's
 # SubagentStop dispatch).
@@ -1081,83 +1074,6 @@ def _quota_delta_exceeded(state: dict) -> tuple[str, str] | None:
     return None
 
 
-# Slots that are scope-disallowed exclusion mask. Scope filter is an
-# exclusion mask (grilled decision 3); `health` and `qa_*` are always
-# allowed regardless of scope (qa reviews any PR, health is whole-system).
-SCOPE_ORCH_ONLY_EXCLUDE = (
-    "dev_target", "research_target", "qa_target", "sweep_target", "discover_target",
-    # cleanup_target scans the TARGET (~/hydra-betting) and files target-
-    # backlog items — target-scope by definition, so orch-only excludes it
-    # (the mirror of cleanup_orch's place in SCOPE_TARGET_ONLY_EXCLUDE).
-    "cleanup_target",
-    # wire_or_retire_target (issue #2722, epic #2720) resolves Target
-    # wire-or-retire backlog items (the judgment counterpart to
-    # cleanup_target's mechanical sweep) — target-scope by definition, so
-    # orch-only excludes it, mirroring cleanup_target above.
-    "wire_or_retire_target",
-    # design_qa_target (issue #2739, parent #2732) captures the Target's
-    # nav-registry screenshot set and judges each page against the Target
-    # design-language ADR, filing Target-backlog items — target-scope by
-    # definition, so orch-only excludes it, mirroring cleanup_target /
-    # wire_or_retire_target above.
-    "design_qa_target",
-)
-SCOPE_TARGET_ONLY_EXCLUDE = (
-    "dev_orch", "research_orch", "qa_orch", "sweep_orch", "discover_orch",
-    # design_concept_orch is orch-scope by definition (issue #466) —
-    # excluded under target-only just like dev_orch / qa_orch / etc.
-    "design_concept_orch",
-    # scout_orch (issue #485) walks the orchestrator's AI-leverage
-    # taxonomy + the orchestrator+dashboard runtime deps — purely orch-
-    # scope work. Under `target-only` the autopilot is told to stay out
-    # of orch issues; scout_orch belongs in that exclusion.
-    "scout_orch",
-    # architecture_orch (issue #790) scans the orchestrator's own codebase
-    # architecture and emits orch-scope issues — orch-scope by definition.
-    # Under `target-only` the autopilot stays out of orch work, so
-    # architecture_orch is excluded (no architecture_target mirror yet; the
-    # Target has a PR merge backlog, #718).
-    "architecture_orch",
-    # retro_orch (issue #920) analyses the orchestrator's OWN autopilot runs
-    # and emits orch-scope improvement proposals (prompt/doc/code fixes to the
-    # orchestrator + its subagents) — orch-scope by definition. Under
-    # `target-only` the autopilot stays out of orch work, so retro_orch is
-    # excluded, mirroring scout_orch / architecture_orch.
-    "retro_orch",
-    # cleanup_orch (issue #960) runs a deterministic dead-code / simplification
-    # scan over the ORCHESTRATOR's own codebase and files orch-scope issues —
-    # orch-scope by definition. Under `target-only` the autopilot stays out of
-    # orch work, so cleanup_orch is excluded, mirroring scout_orch /
-    # architecture_orch / retro_orch. Its Target mirror (`cleanup_target`,
-    # operator-approved 2026-06-10 once the Target merge queue proved healthy —
-    # the #718 PR-backlog blocker that deferred it is resolved) is target-scope
-    # and so lives in SCOPE_ORCH_ONLY_EXCLUDE instead.
-    "cleanup_orch",
-    # skill_prune (issue #2949, epic #2944) prunes the ORCHESTRATOR's own
-    # playbook-generated skills (docs/operator-playbooks/*.md) — orch-scope by
-    # definition, the eval-gated prompt counterpart to cleanup_orch's mechanical
-    # code sweep. Under `target-only` the autopilot stays out of orch work, so
-    # skill_prune is excluded, mirroring scout_orch / architecture_orch /
-    # retro_orch / cleanup_orch above.
-    "skill_prune",
-    # wayfinder_orch (issue #3351, epic #3350, ADR-0029) works the next unblocked
-    # frontier ticket on an open approved orchestrator `wayfinder:map` — orch-scope
-    # by definition (the maps live on the orchestrator GH board). Under
-    # `target-only` the autopilot stays out of orch work, so wayfinder_orch is
-    # excluded, mirroring scout_orch / architecture_orch / retro_orch / cleanup_orch
-    # / skill_prune above.
-    "wayfinder_orch",
-    # tickets_orch (issue #3423, epic #3419, ADR-0030 Decision 2/5) turns a
-    # resolved orchestrator plan/finding into one parent epic + N tracer-bullet
-    # child issues on the ORCHESTRATOR GH board (via the vendored upstream
-    # to-tickets skill + Hydra AFK overlay) — orch-scope by definition (ADR-0030
-    # charted the orchestrator taxonomy only; Target mirrors were ruled out at
-    # charting). Under `target-only` the autopilot stays out of orch work, so
-    # tickets_orch is excluded, mirroring wayfinder_orch / scout_orch /
-    # architecture_orch / retro_orch / cleanup_orch / skill_prune above.
-    "tickets_orch",
-)
-
 # 5-retry escalation per pattern (issue #426 AC; failure modes section).
 MAX_FAILURE_RETRIES = 5
 
@@ -1262,7 +1178,7 @@ def make_auto_merge(pr_number: int | str, tier: int | str, reason: str) -> dict:
     return {"type": "auto-merge", "pr_number": pr_number, "tier": tier, "reason": reason}
 
 
-def make_route_prs_to_review(reason: str) -> dict:
+def make_route_prs_to_review(reason: str, pr_numbers: list[int] | None = None) -> dict:
     """Emergency-brake action (issue #744).
 
     Emitted exactly once per turn when the operator-only emergency brake is
@@ -1273,8 +1189,16 @@ def make_route_prs_to_review(reason: str) -> dict:
     reviewPickupArmed seam (src/redis/review.ts, #745). There is intentionally
     NO `make_engage_brake` / `make_disengage_brake` counterpart — the brake is
     operator-only and the autopilot has no write path to the flag.
+
+    `pr_numbers` (#5323) is the sorted, de-duplicated PR set the brake
+    displaces (the auto-merge sweep set); it may be empty. The playbook binding
+    labels exactly this list and never enumerates PRs itself.
     """
-    return {"type": "route-prs-to-review", "reason": reason}
+    return {
+        "type": "route-prs-to-review",
+        "reason": reason,
+        "pr_numbers": sorted({int(n) for n in (pr_numbers or [])}),
+    }
 
 
 def make_apply_operator_approved(pr_number: int | str, tier: int | str, reason: str, mechanical: bool) -> dict:
@@ -1583,11 +1507,12 @@ def make_wait_or_reap(slot: str, task_id: str, age_seconds: int, reason: str = "
     """Silent-wedge fallback (issue #509). Hooks are the primary slot
     accounting path; this action fires when an active slot has aged past
     `subagent_max_wall_seconds` with no matching `subagent_stop` event in
-    `state.slot_events`. The autopilot turn handles it by invoking
-    `reap.py completion` as a forced reap — the existing fallback CLI.
+    `state.slot_events`. The autopilot brain handles it through the
+    playbook's `wait_or_reap` row, which runs `reap.py wait-or-reap <slot>
+    <task_id>` (issue #5282).
 
-    The action carries enough metadata that the harness can dispatch the
-    reap deterministically: `{slot, task_id, age_seconds, reason}`.
+    The action carries enough metadata for that command:
+    `{slot, task_id, age_seconds, reason}`.
     """
     return {
         "type": "wait_or_reap",
@@ -1827,15 +1752,9 @@ def scope_excluded(scope: str, cls: str) -> bool:
     `orch-only` mode would mean dispatching against a class the scope
     explicitly disallows (INV-008).
     """
-    if scope == "all":
-        return False
-    if cls == "health":
-        return False
-    if scope == "orch-only":
-        return cls in SCOPE_ORCH_ONLY_EXCLUDE
-    if scope == "target-only":
-        return cls in SCOPE_TARGET_ONLY_EXCLUDE
-    return False
+    # Derived from the taxonomy `scope` column (issue #5472): no hand-kept
+    # per-scope class lists. `health` is scope `both`, so never excluded.
+    return taxonomy.scope_excluded(scope, cls, CLASS_TAXONOMY)
 
 
 # ---------------------------------------------------------------------------
@@ -2498,15 +2417,63 @@ def _rule_slot_events(state: dict, now: int) -> tuple[_RuleOutput, list[dict]]:
     return out, synthesised_completions
 
 
-def _rule_completion_reaps(events: list[dict]) -> _RuleOutput:
-    """Step 2 — completion reaps first (INV-006 — reap before dispatch).
+# Fable instant-death replay (#5323, ADR-0047 Decision 8). A Fable dispatch
+# that dies with ZERO tokens and ZERO tool uses inside this many ms never
+# started (the observed shape is <1s; the margin absorbs harness jitter).
+INSTANT_DEATH_MAX_MS = 5000
 
-    This rule is the ONLY producer of `reap` actions, and it MUST fire for
-    every subagent completion — pipeline OR signal class. We intentionally do
-    NOT filter by PIPELINE_SLOTS / SIGNAL_CLASSES membership: a reap for an
-    unknown class is still safer than a missed reap (reap.py is idempotent and
-    the unknown-class path is a no-op on slot bookkeeping). The `class` key is
-    accepted as a synonym of `slot`.
+
+def _event_int(ev: dict, key: str) -> int | None:
+    """Strict integer read of a completion-event usage field (bool/None/str -> None)."""
+    v = ev.get(key)
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _dispatch_model_alias(state: dict, slot: str) -> str | None:
+    """The model alias the dead dispatch resolved to: the recorded
+    `prompt_args.escalate_model` hint wins, else the classes.json `model` column."""
+    rec = (state.get("last_dispatch_by_class") or {}).get(slot)
+    pa = rec.get("prompt_args") if isinstance(rec, dict) else None
+    hint = pa.get("escalate_model") if isinstance(pa, dict) else None
+    if isinstance(hint, str) and hint:
+        return hint
+    for row in CLASS_TAXONOMY:
+        if row["name"] == slot:
+            model = row.get("model")
+            return model if isinstance(model, str) and model else None
+    return None
+
+
+def is_fable_instant_death(ev: dict, state: dict) -> bool:
+    """True iff a `completion` event is a Fable instant death: total_tokens == 0
+    AND tool_uses == 0 AND 0 <= duration_ms < INSTANT_DEATH_MAX_MS AND the dead
+    dispatch resolved to Fable (`fable`, or `inherit` which may be Fable). Any
+    usage field missing or non-integer -> False (a normal completion)."""
+    if ev.get("type") != "completion":
+        return False
+    tokens, tools, dur = (_event_int(ev, k) for k in ("total_tokens", "tool_uses", "duration_ms"))
+    if tokens != 0 or tools != 0 or dur is None or not (0 <= dur < INSTANT_DEATH_MAX_MS):
+        return False
+    slot = ev.get("slot") or ev.get("class")
+    if not slot:
+        return False
+    return _dispatch_model_alias(state, slot) in ("fable", "inherit")
+
+
+def _rule_completion_reaps(events: list[dict], state: dict | None = None) -> _RuleOutput:
+    """Step 2 - emit a `reap` action for every `completion` event (INV-006).
+
+    The playbook turns a harness task-completion notification into a typed
+    `completion` event with `slot`, `task_id` and `total_tokens` (and, for the
+    #5323 instant-death arm, the verbatim `tool_uses`, `duration_ms` and
+    `notice` first line). Reaping an unknown class is still safer than a missed
+    reap (reap.py is idempotent and the unknown-class path is a no-op on slot
+    bookkeeping). The `class` key is accepted as a synonym of `slot`.
+
+    A Fable instant death (`is_fable_instant_death`) reaps with
+    `instant_death: true`, the transcribed `notice` and the resolved
+    `dispatch_model` (omitted for `inherit`) so reap.py can report the
+    out-of-credits line to the usage tracker (#5323 INV-7).
     """
     out = _RuleOutput()
     for ev in events:
@@ -2517,8 +2484,124 @@ def _rule_completion_reaps(events: list[dict]) -> _RuleOutput:
         tokens = int(ev.get("total_tokens") or 0)
         skill = ev.get("skill")
         if slot and task_id:
-            out.emit(make_reap(slot, task_id, tokens, skill), reason=f"reap:{slot}")
+            action = make_reap(slot, task_id, tokens, skill)
+            if isinstance(state, dict) and is_fable_instant_death(ev, state):
+                action["instant_death"] = True
+                notice = ev.get("notice")
+                action["notice"] = notice.strip().splitlines()[0] if isinstance(notice, str) and notice.strip() else ""
+                alias = _dispatch_model_alias(state, slot)
+                if alias and alias != "inherit":
+                    action["dispatch_model"] = alias
+            out.emit(action, reason=f"reap:{slot}")
     return out
+
+
+def _rule_instant_death_replay(
+    state: dict,
+    events: list[dict],
+    *,
+    dispatch_blocked: bool = False,
+    shed_classes: set[str] = frozenset(),
+) -> tuple[_RuleOutput, set[str]]:
+    """Step 2.45 - replay a Fable instant death ONCE on opus (#5323).
+
+    The replay is the identical recorded dispatch (`last_dispatch_by_class`)
+    with `escalate_model: opus`, `attempt + 1` and
+    `prior_attempt_status: instant-death`. Bounded (a recorded
+    `instant-death` dispatch is never replayed again), join-checked (a slot's
+    `dispatch_id` must equal the recorded `worktreeBranch`), and suppressed -
+    with a named reason - under the usage hard stop / shed. Returns the replayed
+    class set so the escalation, signal and pipeline rules never double-dispatch.
+    """
+    out = _RuleOutput()
+    replayed: set[str] = set()
+    slots = state.get("slots") or {}
+    recorded = state.get("last_dispatch_by_class") or {}
+    for ev in events:
+        if not is_fable_instant_death(ev, state):
+            continue
+        cls = ev.get("slot") or ev.get("class")
+        if cls in replayed:
+            continue
+        rec = recorded.get(cls) if isinstance(recorded, dict) else None
+        if not isinstance(rec, dict) or not rec.get("skill") or not rec.get("worktreeBranch"):
+            out.reasons.append(f"instant-death-unjoinable:{cls}")
+            continue
+        # INV-3 (#5323): the dispatch_id join applies only to a pipeline class (one
+        # with a `state.slots` entry). A signal class has no slot record
+        # (stamp-slot.py writes only `signal_last_fired`), so the recorded
+        # `last_dispatch_by_class` alone joins it.
+        if cls in slots:
+            slot_obj = slots.get(cls)
+            slot_dispatch = slot_obj.get("dispatch_id") if isinstance(slot_obj, dict) else None
+            if not slot_dispatch or slot_dispatch != rec.get("worktreeBranch"):
+                out.reasons.append(f"instant-death-unjoinable:{cls}")
+                continue
+        prior_args = rec.get("prompt_args") if isinstance(rec.get("prompt_args"), dict) else {}
+        if prior_args.get("prior_attempt_status") == "instant-death":
+            out.reasons.append(f"instant-death-replay-exhausted:{cls}")
+            continue
+        if dispatch_blocked:
+            out.reasons.append(f"instant-death-replay-suppressed:{cls}:usage_dispatch_blocked")
+            continue
+        if cls in shed_classes:
+            out.reasons.append(f"instant-death-replay-suppressed:{cls}:usage_shed")
+            continue
+        try:
+            prior_attempt = int(prior_args.get("attempt") or 1)
+        except (TypeError, ValueError):  # intentional: a non-numeric recorded attempt restarts the count at 1
+            prior_attempt = 1
+        args = dict(prior_args)
+        args.update({
+            "escalate_model": "opus",
+            "attempt": prior_attempt + 1,
+            "prior_attempt_status": "instant-death",
+        })
+        # Issue #5381 QA round 1: a typed-intent dispatch (dev_orch) is recorded
+        # with its intent and replayed through it; escalation keys ride prompt_args.
+        rec_intent = None
+        if rec.get("intent") is None and cls in INTENT_KINDS_BY_SLOT:
+            # A pre-intent record of an intent-bearing slot has no typed intent; render-dispatch
+            # would exit 2 on the replay, so it is unjoinable, not replayed blind.
+            out.reasons.append(f"instant-death-unjoinable:{cls}")
+            continue
+        if rec.get("intent") is not None:
+            try:
+                rec_intent = intent_from_dict(rec["intent"])
+            except ValueError:  # intentional: an unparseable recorded intent is unjoinable, never replayed blind
+                out.reasons.append(f"instant-death-unjoinable:{cls}")
+                continue
+        out.emit(
+            make_dispatch(
+                cls, rec["skill"], prompt_args=args, intent=rec_intent,
+                reason=f"instant-death-replay:{cls}",
+            ),
+            reason=f"instant-death-replay:{cls}",
+        )
+        out.dispatched += 1
+        replayed.add(cls)
+    return out, replayed
+
+
+def _record_last_dispatches(actions: list[dict], state: dict) -> None:
+    """Record every emitted dispatch in `state.last_dispatch_by_class` (the
+    decide-owned ledger row the next turn's instant-death replay reads)."""
+    last = state.get("last_dispatch_by_class")
+    last = dict(last) if isinstance(last, dict) else {}
+    changed = False
+    for a in actions:
+        if isinstance(a, dict) and a.get("type") == "dispatch" and a.get("slot"):
+            last[a["slot"]] = {
+                "turn": int(state.get("turn", 0) or 0),
+                "skill": a.get("skill"),
+                "prompt_args": a.get("prompt_args") or {},
+                "worktreeBranch": a.get("worktreeBranch"),
+            }
+            if a.get("intent") is not None:
+                last[a["slot"]]["intent"] = a["intent"]
+            changed = True
+    if changed:
+        state["last_dispatch_by_class"] = last
 
 
 # Per-class board-saturation signal name for the escalation saturation guard
@@ -2538,6 +2621,7 @@ def _rule_escalation(
     *,
     dispatch_blocked: bool = False,
     shed_classes: set[str] = frozenset(),
+    skip_slots: set[str] = frozenset(),
 ) -> tuple[_RuleOutput, set[str]]:
     """Cascade-routing escalation re-dispatch (issue #3274, design-concept issue-3274).
 
@@ -2620,12 +2704,14 @@ def _rule_escalation(
         slot = fields.get("slot") or "unknown"
         if slot not in ESCALATION_POLICY:
             continue
+        if slot in skip_slots:  # #5323: the instant-death replay already re-dispatched this class
+            continue
         status = fields.get("status") or "unknown"
         # Attempt number of the dispatch that JUST stopped (1 = original).
         slot_obj = slots.get(slot)
         try:
             prior_attempt = int(slot_obj.get("attempt")) if isinstance(slot_obj, dict) and slot_obj.get("attempt") is not None else 1
-        except (TypeError, ValueError):
+        except (TypeError, ValueError):  # intentional: a non-numeric recorded attempt restarts the count at 1
             prior_attempt = 1
         sat_signal = ESCALATION_SATURATION_SIGNAL.get(slot)
         board_saturated = bool(sat_signal and _signal_present(state, events, sat_signal))
@@ -2726,6 +2812,7 @@ def _rule_escalation(
                 slot,
                 skill,
                 prompt_args=escalation_prompt_args,
+                intent=escalation_intent(slot),
                 reason=decision["reason"],
             ),
             reason=decision["reason"],
@@ -2839,8 +2926,19 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
     emergency_brake = _normalize_emergency_brake(ts.blob(state, "emergency_brake"))
     if emergency_brake["engaged"]:
         out.debug["emergency_brake_engaged"] = True
+        displaced: list[int] = []
+        for ev in [e for e in events if e.get("type") == "qa-verdict"] + ts.qa_verdict_recheck(
+            state, events, "orch_qa_verdict_recheck"
+        ):
+            try:
+                displaced.append(int(ev.get("pr_number")))
+            except (TypeError, ValueError):  # intentional: an event without an integer PR number names no PR
+                continue
         out.emit(
-            make_route_prs_to_review("emergency brake engaged — all auto-merge paused, routing open PRs to /hydra-review"),
+            make_route_prs_to_review(
+                "emergency brake engaged — all auto-merge paused, routing open PRs to /hydra-review",
+                displaced,
+            ),
             reason="emergency-brake:route-prs-to-review",
         )
         # Skip the per-PR auto-merge sweep entirely — the brake overrides the
@@ -2852,6 +2950,8 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
     # already named - same downstream holds, stale-verdict check, depth policy.
     sweep = [ev for ev in events if ev.get("type") == "qa-verdict"]
     sweep += ts.qa_verdict_recheck(state, events, "orch_qa_verdict_recheck")
+    parked_prs = sorted(_parked_prs(state, events))  # #5319: read once, whether or not a verdict is queued
+    parked_degraded = _parked_read_degraded(state, events)
     for ev in sweep:
         if ev.get("recheck"):
             out.reasons.append(f"qa-recheck:#{ev.get('pr_number')}")
@@ -2861,6 +2961,22 @@ def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
         mechanical = ev.get("mechanical")
         has_scope_justif = bool(ev.get("has_scope_justification"))
         if pr_number is None or tier is None:
+            continue
+        # ISSUE #5319 (INV-6): a PR whose closing issue / anchor is parked is
+        # never armed - covers the in-session `qa-verdict` events that bypass
+        # the pr-gate collector (a park landing mid-run).
+        # The real event carries only `pr_number`, so the PR-keyed
+        # `orch_parked_prs` set is the primary key; `closing_issue` / `anchor`
+        # stay as a secondary key. A degraded parked read holds every PR.
+        if parked_degraded:
+            out.reasons.append(f"parked:#{pr_number}:read-degraded")
+            continue
+        parked_ref = next(
+            (r for r in (ev.get("closing_issue"), ev.get("anchor")) if _is_parked_anchor(state, events, r)),
+            None,
+        )
+        if parked_ref is not None or _pr_gate_number_in(pr_number, parked_prs):
+            out.reasons.append(f"parked:#{_anchor_issue_number(parked_ref) if parked_ref is not None else pr_number}")
             continue
         if _pr_gate_number_in(pr_number, buckets["dirty"]):
             out.reasons.append(f"hold:#{pr_number}:dirty")
@@ -2971,6 +3087,25 @@ def _rule_pr_gate(state: dict, events: list[dict]) -> _RuleOutput:
                 ),
                 reason=f"surface-pr:#{pr}:unchecked",
             )
+    # ISSUE #5400: an open PR whose body carries no Closes/Fixes/Resolves #N is
+    # unreachable by every PR lane (QA and dev-resume key on a closing issue).
+    # Surface it once; the applied `ready-for-human` label is the terminal
+    # exclusion, so the emission self-extinguishes. Never gates a dispatch.
+    # One surface-pr per PR per turn: skip a PR the unchecked arm above already
+    # surfaced (it is in both buckets when a Refs-only PR has an empty rollup).
+    already_surfaced = set() if buckets["ci_trigger_stale"] else set(buckets["unchecked"])
+    for pr in _pr_gate_numbers(state, events, "orch_prs_no_closing_issue"):
+        if pr in already_surfaced:
+            continue
+        out.emit(
+            make_surface_pr(
+                pr,
+                "no-closing-issue",
+                "open PR carries no Closes/Fixes/Resolves #N, so no QA or dev-resume lane can reach it "
+                "(a Refs-only partial delivery should close a dedicated child issue) — operator review required (issue #5400)",
+            ),
+            reason=f"surface-pr:#{pr}:no-closing-issue",
+        )
     for pr in buckets["behind"][:PR_GATE_UPDATE_BRANCH_CAP]:
         out.emit(
             make_update_branch(
@@ -3038,6 +3173,7 @@ def _rule_pipeline_dispatch(
     *,
     dispatch_blocked: bool,
     shed_classes: set[str],
+    skip_slots: set[str] = frozenset(),
 ) -> _RuleOutput:
     """Step 4 — pipeline dispatch over the fixed slots, in priority order.
 
@@ -3052,23 +3188,11 @@ def _rule_pipeline_dispatch(
     best = best_candidate(candidates)
     best_score = float(best.get("score", 0.0)) if best else 0.0
 
-    pipeline_priority = (
-        "qa_orch",
-        "qa_target",
-        # design_concept_orch precedes dev_orch in priority order (issue
-        # #466 sequencing rule): when an orch anchor needs a fresh
-        # artifact, we grill before coding. The selector below returns
-        # None for dev_orch on the same turn so they don't double-fire,
-        # and in warn-only mode the artifact's presence (even draft) lets
-        # dev_orch proceed next turn.
-        "design_concept_orch",
-        "dev_orch",
-        "dev_target",
-        "research_orch",
-        "research_target",
-    )
+    pipeline_priority = PIPELINE_PRIORITY
 
     for cls in pipeline_priority:
+        if cls in skip_slots:  # #5323: already replayed this turn (instant-death)
+            continue
         if dispatch_blocked:
             # Budget-style suppression: usage tracker said "allow=False".
             out.events.append(
@@ -3366,96 +3490,7 @@ def _rule_signal_classes(
     # via the same snapshot-before/compare-after writeback as the increment.
     _reset_zero_yield_streaks(state, events)
     backfill_dispatched = False
-    for sig in (
-        "health",
-        "sweep_orch",
-        "sweep_target",
-        "discover_orch",
-        "discover_target",
-        # scout_orch (issue #485, Phase B) — calendar-driven, 7d cooldown.
-        # The Turn Snapshot emits `scout_walk_due` when the per-class
-        # cooldown has elapsed; this loop honors the SIGNAL_COOLDOWNS
-        # back-stop in parallel.
-        "scout_orch",
-        # architecture_orch (issue #790) — idle-time fallback. Registered in
-        # the dispatch iteration tuple so a real dispatch sets
-        # dispatched_any=True, which yields idle=0 for the turn and stops
-        # the wait-only idle drain from firing while a fallback is eligible (the AC
-        # is met by being a real dispatch, NOT by editing the terminate path).
-        "architecture_orch",
-        # retro_orch (issue #920, parent #917) — daily per-run retrospective.
-        # Registered LAST in the signal iteration so it is the lowest-priority
-        # signal class: pipeline slots dispatch first (step 4), then the other
-        # signal classes, and only then is spare capacity spent on a retro.
-        # The 24h class cooldown (SIGNAL_COOLDOWNS) is honored by the shared
-        # signal_is_cooled guard inside _select_for_signal.
-        "retro_orch",
-        # cleanup_orch (issue #960, parent #958) — board-idle backfill that runs
-        # the deterministic dead-code / simplification detector. Keyed off the
-        # same `orch_backfill_idle` signal as the backfill set but deliberately
-        # NOT in BACKFILL_SIGNAL_CLASSES (no one-per-turn stagger): the
-        # high-confidence mechanical workhorse runs hot, gated only by its own
-        # `cleanup_board_saturated` cap + the 1h class cooldown.
-        "cleanup_orch",
-        # cleanup_target — the Target mirror: demote-only dead-export sweep
-        # over ~/hydra-betting, filing target-backlog items. Keyed off
-        # `target_backfill_idle`, capped by `target_cleanup_board_saturated`
-        # (checked FIRST in the selector) + the 1h class cooldown.
-        "cleanup_target",
-        # wire_or_retire_target (issue #2722, epic #2720) — the JUDGMENT
-        # counterpart to cleanup_target: resolves open `wire-or-retire`-labelled
-        # Target backlog items sitting in the triage lane into a WIRE / RETIRE /
-        # UNCLEAR verdict. Keyed off `wire_or_retire_target_available`; the 24h
-        # class cooldown (seeded in bootstrap.sh, #2575 class) enforces the
-        # once-per-day cadence. NOT in BACKFILL_SIGNAL_CLASSES.
-        "wire_or_retire_target",
-        # design_qa_target (issue #2739, parent #2732) — periodic VISUAL QA of
-        # the Target UI: captures the nav-registry screenshot set and judges each
-        # page against the Target design-language ADR, filing at most 3 deduped
-        # needs-triage Target-backlog items per run. Calendar cadence like
-        # scout_orch: the 7d class cooldown (seeded in bootstrap.sh, #2575 class)
-        # owns cadence; `design_qa_target_saturated` is the anti-flood cap checked
-        # FIRST in the selector, `design_qa_target_due` the presence signal. NOT
-        # in BACKFILL_SIGNAL_CLASSES. Registered last as the lowest-priority
-        # signal class — spare capacity only.
-        "design_qa_target",
-        # skill_prune (issue #2949, epic #2944) — the eval-gated PROMPT
-        # counterpart to cleanup_orch's mechanical dead-CODE sweep: prunes the
-        # Orchestrator's playbook-generated skills one at a time along the Pocock
-        # taxonomy. Keyed off the same `orch_backfill_idle` spare-capacity signal
-        # as architecture_orch/cleanup_orch, but the 7d class cooldown
-        # (scout_orch's calendar discipline) is the primary cadence and
-        # `skill_prune_board_saturated` is the anti-flood cap checked FIRST in the
-        # selector. NOT in BACKFILL_SIGNAL_CLASSES (rate-limits on its own 7d
-        # cooldown, not the one-per-turn stagger — like cleanup_orch). Registered
-        # last as a lowest-priority signal class — spare capacity only.
-        "skill_prune",
-        # wayfinder_orch (issue #3351, epic #3350, ADR-0029) — the single AFK
-        # working class for wayfinder maps. Fires on the pre-resolved
-        # `wayfinder_orch_frontier` signal (the Turn Snapshot owns the native
-        # GraphQL frontier enumeration; decide.py reads the resolved ticket ref
-        # verbatim — the signal-seam discipline). 1h class cooldown, one frontier
-        # ticket per fire. NOT in BACKFILL_SIGNAL_CLASSES (map-anchored, not
-        # idle-backfill). Registered last as a lowest-priority signal class —
-        # spare capacity only, never preempting a pipeline dispatch.
-        "wayfinder_orch",
-        # tickets_orch (issue #3423, epic #3419, ADR-0030 Decision 2/5 — one
-        # autonomous Pocock skill lineage; the delta/contract slice). The
-        # tickets-STAGE producer: turns a resolved plan/finding into one parent
-        # epic + N tracer-bullet child issues by dispatching the vendored upstream
-        # `to-tickets` skill + the thin Hydra AFK overlay (Option C compose,
-        # alpha #3420; hydra-prd is demoted to the called PrdInput->issue renderer
-        # library invoked BY that overlay). Structural sibling of wayfinder_orch
-        # (the plan-stage producer, also signal, also 1h) — NOT a pipeline slot.
-        # Fires on the precomputed `tickets_available` board signal (signal-seam
-        # discipline: the Turn Snapshot owns the enumeration and emits the signal;
-        # that emission is a follow-on, not this slice's Files-in-scope). 1h class
-        # cooldown (SIGNAL_COOLDOWNS["tickets_orch"]) is the back-stop; board state
-        # is the primary suppressor. NOT in BACKFILL_SIGNAL_CLASSES. Registered
-        # last as a lowest-priority signal class — spare capacity only, never
-        # preempting a pipeline dispatch.
-        "tickets_orch",
-    ):
+    for sig in SIGNAL_LOOP_ORDER:
         if dispatch_blocked:
             out.events.append(
                 make_dispatch_decision_event(
@@ -3661,7 +3696,7 @@ def _rule_silent_wedge(state: dict, events: list[dict], now: int) -> _RuleOutput
 
     If an active slot has aged past `subagent_max_wall_seconds` AND no
     `subagent_stop` event arrived for its task_id, emit a `wait_or_reap` so the
-    harness invokes reap.py as a forced fallback. Hooks are the primary path;
+    brain runs `reap.py wait-or-reap` via the playbook's `wait_or_reap` row. Hooks are the primary path;
     this only fires when the hook itself silently failed.
 
     Checked AFTER dispatch decisions because a wait_or_reap is a slot-clear
@@ -3841,10 +3876,19 @@ def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
         # Issue #4476 INV-3: the playbook passes isolation="worktree" iff this
         # is "worktree", omits it iff "self". Data only — no model/prompt text.
         action["isolation"] = class_isolation(slot)
+        # Issue #5384 INV-3: forward the Cost module's admission verdict verbatim
+        # (absent when the usage blob has none) so the renderer stays pure.
+        adm = ts.usage_eligibility(state).get("admission")
+        if isinstance(adm, dict):
+            action["admission"] = adm
+        # Issue #5384 INV-4: a ticket-typed intent resolves its effective skill here.
+        intent = dispatch_intent(action)
+        tt = getattr(intent, "ticket_type", None)
+        if tt is not None:
+            action["skill"] = CLASS_SKILL_BY_TICKET_TYPE[slot][tt]
         skill = action.get("skill")
         if isinstance(skill, str) and skill:
-            pa = action.get("prompt_args")
-            pinned_anchor = pa.get("anchor") if isinstance(pa, dict) else None
+            pinned_anchor = dispatch_anchor(action)
             action["dispatchSentinel"] = make_dispatch_sentinel(
                 skill,
                 action["worktreeBranch"],
@@ -4043,7 +4087,7 @@ def decide(
         events = synthesised_completions + events
 
     # 2. Completion reaps first (INV-006 — reap before dispatch).
-    fold(_rule_completion_reaps(events))
+    fold(_rule_completion_reaps(events, state))
 
     # 2.4. Subscription Usage Tracker eligibility gate (PR B1). Read AHEAD of the
     #      escalation rule (step 2.5) — `_rule_usage_eligibility` is pure over
@@ -4064,10 +4108,19 @@ def decide(
     #      hard-suppresses the re-dispatch under the usage gate so a cheap-tier
     #      no_op cannot trigger a MORE expensive Sonnet escalation near budget
     #      exhaustion (issue #3274 QA blocker) — mirroring the pipeline/signal rules.
+    #      2.45 (#5323): a Fable instant death is replayed once on opus BEFORE
+    #      the escalation rule; the replayed class joins escalated_slots so no
+    #      later rule double-dispatches it.
+    replay_out, replayed_slots = _rule_instant_death_replay(
+        state, events, dispatch_blocked=dispatch_blocked, shed_classes=shed_classes
+    )
+    fold(replay_out)
     escalation_out, escalated_slots = _rule_escalation(
-        state, events, now, dispatch_blocked=dispatch_blocked, shed_classes=shed_classes
+        state, events, now, dispatch_blocked=dispatch_blocked, shed_classes=shed_classes,
+        skip_slots=replayed_slots,
     )
     fold(escalation_out)
+    escalated_slots = escalated_slots | replayed_slots
 
     # 3. Auto-merge sweep — before dispatch so freed PRs don't compete with
     #    new work; emergency brake (issue #744) overrides the depth verdict.
@@ -4084,6 +4137,7 @@ def decide(
     pipeline_out = _rule_pipeline_dispatch(
         state, candidates, events, scope, now,
         dispatch_blocked=dispatch_blocked, shed_classes=shed_classes,
+        skip_slots=replayed_slots,
     )
     fold(pipeline_out)
 
@@ -4097,6 +4151,7 @@ def decide(
 
     dispatched_any = (
         pipeline_out.dispatched + signal_out.dispatched + escalation_out.dispatched
+        + replay_out.dispatched
     ) > 0
     skipped_count = pipeline_out.skipped + signal_out.skipped
 
@@ -4123,6 +4178,7 @@ def decide(
     #    (issue #527 / issue #692) — once per plan, after dispatch decisions
     #    are finalised, so every dispatch carries a stable identifier.
     _stamp_dispatch_metadata(plan.actions, state)
+    _record_last_dispatches(plan.actions, state)
 
     # Slice A observability close-out (issue #668). Emit `turn_end` last
     # so the dashboard knows the turn finished decision-making cleanly
@@ -4219,22 +4275,6 @@ def _select_for_slot(
     return handler(cls, state, candidates, events, best, best_score, now)
 
 
-def _needs_qa_target_pr_head(state: dict, events: list[dict]) -> str | None:
-    """Read the current turn's pre-resolved Target QA PR head ref (issue #4653).
-
-    Same string signal, and the SAME event-preferred-over-snapshot lookup
-    order, as `_needs_qa_target_pr_ref` immediately
-    above. The Turn Snapshot emits `target_needs_qa_pr_head` as the `head.ref`
-    of the SAME PR whose `html_url` is `target_needs_qa_pr_ref`, projected
-    from the already-fetched PR payload inside the #4576 resolver — no new
-    network call (issue #4653). Returns `None` when the signal is ABSENT or
-    EMPTY.
-
-    Pure: no side effects.
-    """
-    return ts.text(state, events, "target_needs_qa_pr_head")
-
-
 # Bare `<run8>-t<N>-dev_target` dispatch token, with an optional
 # `worktree-agent-` prefix stripped (issue #4653). `run8` is the 8-hex-char
 # run id `bootstrap.sh` mints; `N` is the pipeline slot's 1-based turn index.
@@ -4277,8 +4317,8 @@ def _dev_target_resume_record(action: dict, state: dict) -> dict | None:
     for `cls == "dev_target"` — the same post-gate position as the #4611
     `stamp_signal` call, so one stamp corresponds 1:1 to one emitted dispatch.
     Returns `{token, branch, pr}` iff the action is a #4739 resume pin
-    (`prompt_args.resume` True + non-empty string `resume_branch` + int
-    `resume_pr`); anything else returns None and nothing is stamped.
+    (a TargetResume intent, #5383: non-empty branch + int pr); anything else
+    returns None and nothing is stamped.
 
     `token` is the bare token of the SAME worktreeBranch the action carries —
     `action.worktreeBranch` if pre-set, else `_synthesize_worktree_branch`
@@ -4289,14 +4329,11 @@ def _dev_target_resume_record(action: dict, state: dict) -> dict | None:
 
     Pure: reads the passed-in dicts only, no I/O (ADR-0007).
     """
-    prompt_args = action.get("prompt_args")
-    if not isinstance(prompt_args, dict) or prompt_args.get("resume") is not True:
-        return None
-    branch = prompt_args.get("resume_branch")
+    branch = dispatch_resume_branch(action)
     if not isinstance(branch, str) or not branch:
         return None
-    pr = prompt_args.get("resume_pr")
-    if isinstance(pr, bool) or not isinstance(pr, int):
+    pr = dispatch_pr(action)
+    if pr is None:
         return None
     worktree_branch = action.get("worktreeBranch")
     if not (isinstance(worktree_branch, str) and worktree_branch):

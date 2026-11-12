@@ -7,6 +7,7 @@
  * survives the cut-over deploy.
  */
 
+import { WATCHDOG_CHECKS } from "../src/watchdog/checks.ts";
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
@@ -40,12 +41,13 @@ describe("watchdog deploy-drift check (issue #734, #5098)", () => {
     assert.doesNotMatch(cli, /AUTODEPLOY_GRACE_SECONDS",\s*600/);
   });
 
-  test("the bash entry point calls the deploy-drift CLI wrapper with the 1200s bound, in tick order", () => {
-    const sh = readFileSync(join(import.meta.dirname, "..", "scripts", "hydra-watchdog.sh"), "utf8");
-    assert.match(sh, /run_deploy_drift_cli\(\) \{ run_watchdog_cli deploy-drift "hydra-deploy-drift-watchdog:" 1200; \}/);
-    const entry = sh.slice(sh.indexOf('if [[ "${BASH_SOURCE[0]}" == "${0}" ]]'));
-    assert.match(entry, /run_disk_cli\n\s*run_deploy_drift_cli\n\s*run_redis_backup_cli/);
-    assert.doesNotMatch(sh, /run_deploy_drift\(\)/);
+  test("WATCHDOG_CHECKS runs deploy-drift with a >= 1200s bound, in tick order", () => {
+    const subs = WATCHDOG_CHECKS.map((c) => c.subcommand);
+    const row = WATCHDOG_CHECKS.find((c) => c.subcommand === "deploy-drift");
+    assert.ok(row);
+    assert.equal(row.logPrefix, DEPLOY_DRIFT_LOG_PREFIX);
+    assert.ok(row.timeoutS >= 1200, "the opt-in auto-deploy path runs scripts/deploy.sh");
+    assert.deepEqual(subs.slice(subs.indexOf("disk"), subs.indexOf("disk") + 3), ["disk", "deploy-drift", "redis-backup"]);
   });
 
   test("in sync (deployed == remote): logs 'in sync', no drift warning", async () => {

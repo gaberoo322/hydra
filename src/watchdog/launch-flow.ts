@@ -19,10 +19,10 @@
  *
  * Surface routing at the fire edge (#3848 taxonomy): fail-safe / meter-dark go
  * out-of-band (Operator Channel page only; the Orchestrator is unproven);
- * quota / latency / pause / glm-sterile publish the enveloped event onto the
- * notifications stream through `EventBus.publish()` PLUS one page with
- * dedupKey == kind. Pages go through the Operator Channel module in-process
- * (ADR-0045 D2). Everything is best-effort and never throws.
+ * quota / latency / pause / glm-sterile are the same single report() call; the
+ * per-kind table (not this module) decides which also write a dashboard alert.
+ * Delivery goes through the Operator Channel module in-process (ADR-0045 D2/D3).
+ * Everything is best-effort and never throws.
  */
 
 import {
@@ -37,10 +37,7 @@ import {
   type PaceGateLastTick,
 } from "../redis/launch-flow.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../event-bus-vocabulary.ts";
-import { STREAMS } from "../event-bus-stream-keys.ts";
-import type { EventBus } from "../event-bus.ts";
 import type { ChannelResult, OperatorChannel } from "../operator-channel/channel.ts";
-import type { OperatorMessage } from "../operator-channel/message.ts";
 import { runEpisode, type EpisodeStore } from "./episode.ts";
 import type { WatchdogGithub } from "./ports.ts";
 
@@ -114,7 +111,7 @@ export function decideLaunchFlow(input: {
 }
 
 /**
- * The bus event input per in-band signal. Written as `type: E.<MEMBER>` on
+ * The report() kind per table-routed signal. Written as `type: E.<MEMBER>` on
  * purpose: that is the producer shape test/event-bus-vocabulary.test.mts's
  * live-producer audit recognises, and a typo is a compile error.
  */
@@ -153,9 +150,7 @@ export interface LaunchFlowDeps {
     lastPick(): Promise<GlmDrainerLastPick | null | "unreadable">;
   };
   github: WatchdogGithub;
-  channel: Pick<OperatorChannel, "page" | "resolve">;
-  /** Constructed lazily by the production adapter (idle ticks open no bus connections). */
-  bus: Pick<EventBus, "publish">;
+  channel: Pick<OperatorChannel, "report" | "resolve">;
   clock: { nowMs(): number };
   log: (line: string) => void;
 }
@@ -208,30 +203,9 @@ function sanitizeReason(reason: string): string {
   return reason.replace(/[^a-zA-Z0-9_.:-]/g, "");
 }
 
-function outcomeOf(res: ChannelResult): string {
+function outcomeOf(res: ChannelResult | { appended: boolean }): string {
+  if ("appended" in res) return res.appended ? "briefed" : "not briefed";
   return res.sent ? "sent" : `not sent: ${(res as { reason?: string }).reason ?? "unknown"}`;
-}
-
-function pageMessage(kind: string, title: string, facts: Array<[string, string]>): OperatorMessage {
-  return {
-    severity: "page",
-    kind,
-    title,
-    facts: facts.map(([label, value]) => ({ label, value })),
-    links: [],
-    dedupKey: kind,
-  };
-}
-
-/** One best-effort channel page. Never throws. */
-async function deliverPage(deps: LaunchFlowDeps, m: OperatorMessage): Promise<void> {
-  const say = (line: string): void => deps.log(`${LAUNCH_FLOW_LOG_PREFIX} ${line}`);
-  try {
-    const res = await deps.channel.page(m);
-    say(`operator-channel page ok for '${m.kind}' (${outcomeOf(res)})`);
-  } catch (err) {
-    say(`WARN operator-channel page FAILED for '${m.kind}' (best-effort — detection state is unchanged): ${msg(err)}`);
-  }
 }
 
 async function deliverResolve(deps: LaunchFlowDeps, kind: string, title: string): Promise<void> {
@@ -245,10 +219,12 @@ async function deliverResolve(deps: LaunchFlowDeps, kind: string, title: string)
 }
 
 /**
- * Surface routing at the fire edge (#3848 taxonomy). fail-safe / meter-dark:
- * one out-of-band page, no bus publish. Everything else: the enveloped event
- * via `EventBus.publish()` (source `watchdog-launch-flow`, correlationId
- * `launch-flow-<signal>`) plus one page with dedupKey == kind.
+ * The fire edge (ADR-0045 Decision 3, issue #5390): exactly ONE
+ * `channel.report(kind, payload)` per signal. The per-kind table decides page vs
+ * brief, whether a dashboard alert is also written (quota / latency / glm-sterile
+ * yes; fail-safe / meter-dark / pause no, #3848), the dedupKey and the page title.
+ * The payload keeps the former bus-envelope keys so `formatAlertMessage` renders
+ * the same alert text. Best-effort and never throws.
  */
 async function deliverSignal(
   deps: LaunchFlowDeps,
@@ -257,42 +233,19 @@ async function deliverSignal(
   durMs: number,
   thrMs: number,
 ): Promise<void> {
+  const say = (line: string): void => deps.log(`${LAUNCH_FLOW_LOG_PREFIX} ${line}`);
   const kind = LAUNCH_FLOW_PAGE_KIND[sig];
-  if (sig === "fail-safe" || sig === "meter-dark") {
-    await deliverPage(
-      deps,
-      pageMessage(kind, `Launch flow '${sig}' sustained ${durMs}ms (>= ${thrMs}ms) — Orchestrator may be down`, [
-        ["signal", sig],
-        ["reason", reason || "n/a"],
-        ["sustained_ms", String(durMs)],
-        ["threshold_ms", String(thrMs)],
-      ]),
-    );
-    return;
-  }
-  const reasonClean = sanitizeReason(reason);
   try {
-    await deps.bus.publish(STREAMS.NOTIFICATIONS, {
-      type: IN_BAND_EVENT[sig].type,
-      source: "watchdog-launch-flow",
-      correlationId: `launch-flow-${sig}`,
-      payload: { signal: sig, reason: reasonClean, durationMs: durMs, thresholdMs: thrMs },
+    const res = await deps.channel.report(kind, {
+      signal: sig,
+      reason: sanitizeReason(reason),
+      durationMs: durMs,
+      thresholdMs: thrMs,
     });
-    deps.log(`${LAUNCH_FLOW_LOG_PREFIX} in-band delivery published (best-effort) for '${sig}' (type=${kind} -> ${STREAMS.NOTIFICATIONS})`);
+    say(`operator-channel report ok for '${kind}' (${outcomeOf(res.outcome)})`);
   } catch (err) {
-    deps.log(`${LAUNCH_FLOW_LOG_PREFIX} WARN in-band delivery FAILED for '${sig}' (best-effort — detection state is unchanged): ${msg(err)}`);
+    say(`WARN operator-channel report FAILED for '${kind}' (best-effort — detection state is unchanged): ${msg(err)}`);
   }
-  // ADR-0045 D2: the page goes through the Operator Channel with dedupKey ==
-  // kind, so the consumer's own page for the event above dedups against it.
-  await deliverPage(
-    deps,
-    pageMessage(kind, `Launch flow '${sig}' sustained ${durMs}ms (>= ${thrMs}ms)`, [
-      ["signal", sig],
-      ["reason", reasonClean || "n/a"],
-      ["sustained_ms", String(durMs)],
-      ["threshold_ms", String(thrMs)],
-    ]),
-  );
 }
 
 /** One watchdog tick of the launch-flow check. Never throws. */

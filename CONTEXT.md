@@ -107,7 +107,7 @@ The closed list of categories where Hydra escalates to the operator instead of a
 _Avoid_: blocker (overloaded), needs-human (informal), "Tier 0 changes" (retired escalation trigger)
 
 **Operator Channel**:
-The single outbound Hydra→operator Telegram delivery Module ([[ADR-0045]]). TypeScript callers use it in-process; bash and systemd callers use its CLI. Outbound only — nothing reads Telegram updates — and the only code allowed to talk to `api.telegram.org`. Carries two message kinds: a **Page** and the **Morning Brief**. Not an escalation category: it never widens ADR-0005's list.
+The single outbound Hydra→operator Telegram delivery Module ([[ADR-0045]]). TypeScript callers use it in-process; bash and systemd callers use its CLI. Outbound only — nothing reads Telegram updates — and the only code allowed to talk to `api.telegram.org`. Carries two message kinds: a **Page** and the **Morning Brief**; a producer calls `report(kind, payload)` and one per-kind table decides which, and whether a dashboard alert is also written. Not an escalation category: it never widens ADR-0005's list.
 _Avoid_: notifier (the retired per-producer senders), alert channel, bot (the credential is an implementation detail)
 
 **Page**:
@@ -150,9 +150,17 @@ _Avoid_: "autopilot session" (informal), "autopilot job" (overloaded with the di
 One iteration of the decision loop inside an **Autopilot Run** — `decide.py` reads the **Run Ledger**, picks actions, the playbook executes them, `heartbeat.py` posts `POST /api/autopilot/turn`. Persisted as an immutable JSON member in `hydra:autopilot:run:<runId>:turns` ZSET, scored by `turn_n`. Idempotent on `(runId, turn_n)` — a re-post at the same turn number is a no-op. Each turn carries the dispatch actions it triggered; the **Autopilot Run** view joins those actions onto cycle-record outcomes so the dashboard can show "this turn dispatched X, which produced Y."
 _Avoid_: "tick" (overloaded with the **Orchestrator Scheduler** loop), "iteration" (informal)
 
+**Turn Row**:
+The stored record of one **Autopilot Turn**: the JSON member `recordTurn` writes to the run's turns ZSET. One module under `src/autopilot/` owns its shape (type, parser, per-field guards) and every reader receives typed Turn Rows, never the raw string (being introduced by epic #5443). A field that is missing or malformed reads as absent, never as a default. The **Run Ledger** is a second source of Turn Rows for the live run.
+_Avoid_: turn member (a Redis detail), turn record (collides with the `recordTurn` verb).
+
 **Run Ledger**:
 The **Autopilot Run**'s per-run document of brain-side state — the per-run cache of [[ADR-0012]] D2. One Module, `scripts/autopilot/run_ledger.py`, declares every top-level field with its type, default and carry policy (reset-per-run, carry-across-relaunch, mirrored-to-Redis, seeded-from-orchestrator) and is the only parser and writer of the document (Python callers use `load` / `read_prior` / `persist`; bash callers use `run_ledger.py get|project`). A **Pace Gate** relaunch carries forward only what the field table declares; slots are seeded from `GET /api/autopilot/inflight-slots`; the orchestrator never writes it.
 _Avoid_: state.json as a surface callers read or write directly, the state file
+
+**Dispatch Intent**:
+The typed description of one dispatch that the autopilot brain puts on a Plan dispatch action for a bespoke pipeline slot (`dev_orch`, `qa_orch`, `design_concept_orch`, `dev_target`, `qa_target`, `wayfinder_orch`, `research_orch`, `research_target`). It is one of a closed set of kinds per slot (for `dev_orch`: fresh, resume a branch, resume by salvage, red forward-fix, conflict fix-forward, conflict fix-forward with a pending QA FAIL), and each kind carries only its own fields. The class selector chooses the kind; `scripts/autopilot/render-dispatch.py` is a pure function of the intent and the playbook text, never reads the **Turn Snapshot**, and refuses a kind it has no renderer for. Contrast `prompt_args`: the untyped argument bag that only the signal classes still carry, which the renderer prints verbatim. Introduced by the dispatch-intent epic (#5380), which applies [[ADR-0007]]'s typed Plan to the dispatch action.
+_Avoid_: "prompt args" for a bespoke slot's dispatch description, "dispatch params"
 
 **Orchestrator Scheduler** (a.k.a. **Observability Heartbeat**):
 The in-process heartbeat in `src/scheduler/heartbeat.ts` (renamed from the former `loop.ts` in #725, scheduler fold PR-4/4) that ticks every 5 minutes while `hydra-orchestrator.service` is running. Continuously alive — distinct from the **Autopilot Run**, which is a discrete timer-fired session. Per the architecture decision recorded in [[ADR-0012]] ("scheduler is bookkeeping; autopilot is decisions"), it is **strictly observability-and-counters only**: it stamps `lastTickAt` (watchdog liveness), computes rolling merge-rate windows, holds the deliberate-stop marker, and rehydrates lifetime cycle counters. It does NOT make policy decisions, dispatch work, or mutate kanban/work-queue state based on rules. The historical research-floor and stale-claim-reaper logic moved into `decide.py` (the **Autopilot Run** owns all decisions about *what to do*; the Heartbeat only records *what happened*). The module-rename to **Observability Heartbeat** (anticipated here) landed in #725, completing PP-1.
@@ -173,6 +181,18 @@ _Avoid_: using this term for anything live, "research throttle" (informal), "res
 **Epic**:
 A GitHub issue carrying a `## Sub-issues` section that links N child issues; satisfaction is "every child CLOSED." The **unit of work**. Auto-closes via the `hydra-epic-close` skill when satisfaction holds. The orchestrator-side analogue of a "deliverable" — multi-PR work that hangs together and finishes together. Examples: #437 (design-concept gate, three sub-phases), #642 (now-pixel dashboard slices). Distinct from **Focus Label** (theme tag on individual issues); the retired **Roadmap Milestone** (timeline grouping of epics) is no longer an axis.
 _Avoid_: "parent issue" (ambiguous — could also mean a tracking issue without satisfaction semantics), "story" (Jira-flavored), "feature" (overloaded)
+
+**Cap Arm**:
+One counted retry path on a work item, with the limit at which it stops looping: QA FAIL rounds, dev no-PR resumes, QA stalls, red-CI forward-fixes, stale re-queues, `needs-dev-resume` claims, and the total dispatch-claim budget. Each arm is one row of `CAP_TABLE` in `src/lifecycle/caps.ts`. It counts from the lifecycle journal (QA FAIL rounds count from `QA-Verdict:` trailers), starting at the latest `Hydra-Cap-Reset:` marker. An arm over its limit **Parks** the work item. Defined by [[ADR-0047]] Decision 6.
+_Avoid_: "retry limit" or "round cap" for the general concept (each is one arm), a per-run counter in `state.json` (caps are durable per issue or PR, not per run)
+
+**Park**:
+The move of a work item into the operator-only `parked` state when a **Cap Arm** is over its limit. The lifecycle writer seam (`src/lifecycle/seam.ts`, `parkForCap`) parks in the same call that hit the cap: it closes the dispatch claim, writes `parked` with `reason=cap:<arm>`, posts one unified escalation comment, and leaves any open PR open. Every autopilot arm then skips the item until the operator un-parks it with a `Hydra-Cap-Reset:` marker. A Park is an off-list escalation, so it never writes `ready-for-human`, which keeps its [[ADR-0005]] meaning. Defined by [[ADR-0047]] Decisions 2 and 6.
+_Avoid_: "escalate to ready-for-human" for a cap exhaustion, "block" (`blocked` is a dependency wait, not a cap)
+
+**Live Cap**:
+A **Cap Arm** that **Parks** even while the lifecycle seam runs in shadow mode (`config/orchestrator/lifecycle-rollout.json`). Set by the `liveInShadow` column of `CAP_TABLE`, and true for the arms Hydra enforced before the seam existed: QA FAIL rounds (#4735), dev no-PR resumes (#4808), red-CI forward-fixes and QA stalls. Arms the seam introduced only journal `would-park` until the flip to enforce. A live park in shadow returns the same `parked:<arm>` result as in enforce, and its journal entry is tagged `live=1` so the would-park triage for the enforce flip leaves it out. Introduced by the cap-guard slice (#5421), which amends [[ADR-0047]] Decision 7.
+_Avoid_: a caller-side park (a script that writes `parked` itself after a shadow `wouldPark`), "enforced cap" (enforce is the seam-wide mode, not a property of an arm)
 
 **Roadmap Milestone** — **RETIRED** (#4479):
 A timeline grouping once kept in config/direction/roadmap.md, naming the **Epics** intended to ship in the same window. The roadmap file was deleted with the claw-street-bets target swap (#4479) and nothing replaced it. Retained here only so the term resolves when it appears in older issues and prose.

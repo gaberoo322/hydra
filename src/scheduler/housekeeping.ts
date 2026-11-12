@@ -29,6 +29,7 @@
  *   - stale-key-prune (the stale-Redis-key sweep + stale-inProgress return, #1876),
  *   - worktree-orphan-prune,
  *   - glm-eligibility-sweep,
+ *   - lifecycle-reconcile (the ADR-0047 label reconcile pass, #5316),
  *   - target-outcomes-publish,
  *   - wiring-liveness,
  *   - attribution-record,
@@ -50,6 +51,7 @@
 
 import * as Sentry from "@sentry/node";
 import { logger } from "../logger.ts";
+import { InvalidArgumentError } from "../errors.ts";
 import {
   getMemoryLastConsolidation,
   getCleanupLastDaily,
@@ -63,6 +65,7 @@ import { runDesignConceptSnapshot } from "./chores/design-concept-snapshot.ts";
 import { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
 import { runWorktreeOrphanPrune } from "./chores/worktree-orphan-prune.ts";
 import { runGlmEligibilitySweep } from "./chores/glm-eligibility-sweep.ts";
+import { runLifecycleReconcile } from "./chores/lifecycle-reconcile.ts";
 import { runWiringLiveness } from "./chores/wiring-liveness.ts";
 import { runTargetOutcomesPublish } from "./chores/target-outcomes-publish.ts";
 import { runUsageWeeklySnapshot } from "./chores/usage-weekly-snapshot.ts";
@@ -233,8 +236,12 @@ async function runChore(
  *
  * Returns a `{ ran, skipped }` summary so callers (the endpoint, tests) can
  * see which chores did work this invocation vs. which were skipped by their
- * time-guard. Never throws — each chore is independently run through
- * `runChore`, which try/catches so one failure doesn't abort the rest.
+ * time-guard. A failing chore never throws out of here — each chore is
+ * independently run through `runChore`, which try/catches so one failure
+ * doesn't abort the rest. The one throw is up-front argument validation: a
+ * `deps.workOverrides` key naming no registered chore throws
+ * `InvalidArgumentError` (`code: invalid-argument`, issue #5199) before any
+ * chore runs.
  */
 async function runHousekeeping(
   eventBus: PublishableBus,
@@ -275,6 +282,20 @@ async function runHousekeeping(
      * so `runHousekeeping` makes no network call to the Target.
      */
     publishTargetOutcomes?: () => Promise<unknown>;
+    /**
+     * Per-chore `work` overrides keyed by chore name (issue #5199, lever 2).
+     * A composition test stubs the chores that make live `gh`/network calls
+     * (the dominant wall time of the housekeeping endpoint suite) while the
+     * guard and ran/skipped bookkeeping stay the real code path. Production
+     * passes nothing, so every chore binds its real runner.
+     */
+    workOverrides?: Record<string, () => Promise<boolean | void>>;
+    /**
+     * Injectable lifecycle reconcile pass (issue #5316). Defaults to the real
+     * {@link runLifecycleReconcile} chore, which reads and WRITES GitHub labels;
+     * composition tests inject a no-op so `runHousekeeping` touches no board.
+     */
+    runLifecycleReconcile?: () => Promise<unknown>;
   } = {},
 ): Promise<{ ran: string[]; skipped: string[] }> {
   const ran: string[] = [];
@@ -287,6 +308,7 @@ async function runHousekeeping(
   const runSweep = deps.runGlmEligibilitySweep ?? runGlmEligibilitySweep;
   // Issue #4477: injectable so composition tests make no Target HTTP call.
   const publishTargetOutcomes = deps.publishTargetOutcomes ?? (() => runTargetOutcomesPublish());
+  const reconcileLifecycle = deps.runLifecycleReconcile ?? (() => runLifecycleReconcile());
 
   // The chores as declarations. Each carries an optional `guard` (the cadence
   // window, read at the composition level) and a `work` thunk that delegates to
@@ -388,6 +410,20 @@ async function runHousekeeping(
       name: "glm-eligibility-sweep",
       work: async () => {
         await runSweep();
+      },
+    },
+
+    {
+      // Issue #5316 (ADR-0047): lifecycle reconcile pass. Journals out-of-seam
+      // label edits as `external` (never reverting them), fires record-checked
+      // qa-passed exits and the zero-state backstop through the seam, flags
+      // issues with 2+ state labels, and persists the enforce-readiness report
+      // the attention feed reads. No Redis time-guard — every write is
+      // diff-first and idempotent, so an hourly tick over a settled board is a
+      // no-op. Never throws — faults fold to a logged null.
+      name: "lifecycle-reconcile",
+      work: async () => {
+        await reconcileLifecycle();
       },
     },
 
@@ -522,8 +558,22 @@ async function runHousekeeping(
     },
   ];
 
+  // Issue #5199: an override key that names no registered chore would leave
+  // the real (slow, live-gh) chore running and the test passing vacuously, so
+  // reject it loudly. Own-property lookup only: a key like `constructor` must
+  // never resolve to an inherited Object.prototype member.
+  const overrides = deps.workOverrides ?? {};
+  const choreNames = new Set(chores.map((c) => c.name));
+  const unknownKeys = Object.keys(overrides).filter((k) => !choreNames.has(k));
+  if (unknownKeys.length > 0) {
+    throw new InvalidArgumentError(
+      `runHousekeeping: workOverrides names unregistered chore(s): ${unknownKeys.join(", ")}`,
+    );
+  }
+
   for (const chore of chores) {
-    await runChore(chore, ran, skipped);
+    const override = Object.hasOwn(overrides, chore.name) ? overrides[chore.name] : undefined;
+    await runChore(override ? { ...chore, work: override } : chore, ran, skipped);
   }
 
   return { ran, skipped };

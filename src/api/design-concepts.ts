@@ -124,6 +124,12 @@ export type DesignConceptsRouterDeps = {
   getConcept?: (anchorRef: string) => Promise<DesignConcept | null>;
   /** Clock (default: `Date.now`). */
   now?: () => number;
+  /**
+   * The registry's approve preconditions (default: the `control:` approve
+   * registry entry's). Injected so a test can reorder them or add a check with
+   * no evaluator and prove verdicts pair by check id (#5450).
+   */
+  approvePreconditions?: () => ReadonlyArray<string | { text: string; check: string }>;
 };
 
 /** The registry slot whose `alternatives[1]` IS the in-dashboard approve. */
@@ -193,6 +199,11 @@ export function createDesignConceptsRouter(deps: DesignConceptsRouterDeps = {}) 
   const pruneIndex = deps.pruneIndex ?? pruneDesignConceptIndex;
   const getConcept = deps.getConcept ?? getDesignConcept;
   const now = deps.now ?? Date.now;
+  const approvePreconditions =
+    deps.approvePreconditions ??
+    (() =>
+      REGISTRY.find((e) => e.key === APPROVE_CONTROL_KEY && e.variant === undefined)?.recommended
+        .preconditions ?? []);
   // In-process, per-router memo of SUCCESSFUL comment reads (a failure is
   // retried on the next poll rather than pinned for a minute).
   const commentsMemo = new Map<string, { at: number; comments: IssueComment[] }>();
@@ -402,9 +413,7 @@ export function createDesignConceptsRouter(deps: DesignConceptsRouterDeps = {}) 
     }
 
     const repo = dc?.scope === "target" ? getTargetGithubRepo() : resolveGithubRepo();
-    const controlPreconditions =
-      REGISTRY.find((e) => e.key === APPROVE_CONTROL_KEY && e.variant === undefined)?.recommended
-        .preconditions ?? [];
+    const controlPreconditions = approvePreconditions();
     const resolved =
       number === null
         ? null
@@ -472,8 +481,11 @@ export function createDesignConceptsRouter(deps: DesignConceptsRouterDeps = {}) 
       }
     }
 
-    const lines: Array<{ ok: boolean; detail: string }> = [
-      dc
+    // Evaluated verdicts keyed by CONTROL_CHECKS id (#5450): the registry's
+    // precondition order is incidental, so each verdict is looked up by the
+    // precondition's `check`, never by array position.
+    const lines: Record<string, { ok: boolean; detail: string }> = {
+      "dc-artifact-stored": dc
         ? { ok: true, detail: `artifact ${dc.anchorRef} is in Redis` }
         : {
             ok: false,
@@ -482,22 +494,28 @@ export function createDesignConceptsRouter(deps: DesignConceptsRouterDeps = {}) 
                 ? `artifact read failed: ${readError}`
                 : `no artifact for ${anchorRef} — expired (7-day TTL) or never produced; re-run /hydra-grill`,
           },
-      dc
+      "dc-status-draft": dc
         ? dc.status === "draft"
           ? { ok: true, detail: "status is 'draft'" }
           : { ok: false, detail: `status is '${dc.status}'` }
         : { ok: false, detail: "no artifact to read a status from" },
-      hashLine,
-    ];
-    const preconditions = controlPreconditions.map((p, i) => ({
-      label: typeof p === "string" ? p : p.text,
-      check: typeof p === "string" ? null : p.check,
-      ok: lines[i]?.ok ?? false,
-      detail: lines[i]?.detail ?? "no evaluator for this precondition",
-    }));
+      "dc-handoff-hash-matches": hashLine,
+    };
+    const preconditions = controlPreconditions.map((p) => {
+      const check = typeof p === "string" ? null : p.check;
+      const line = check !== null && Object.hasOwn(lines, check) ? lines[check] : undefined;
+      return {
+        label: typeof p === "string" ? p : p.text,
+        check,
+        ok: line?.ok ?? false,
+        detail: line?.detail ?? "no evaluator for this precondition",
+      };
+    });
+    const evaluatedIds = Object.keys(lines);
     const allOk =
       action !== null &&
-      preconditions.length === lines.length &&
+      preconditions.length === evaluatedIds.length &&
+      evaluatedIds.every((id) => preconditions.some((p) => p.check === id)) &&
       preconditions.every((p) => p.ok);
 
     res.json({

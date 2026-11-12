@@ -93,7 +93,11 @@ import { resolve, dirname, relative, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+// HYDRA_REPO_ROOT: run this (trusted) script against another checkout, e.g. the
+// QA reviewer-commit step regenerating a PR worktree's baseline (#5267).
+const REPO_ROOT = process.env.HYDRA_REPO_ROOT
+  ? resolve(process.env.HYDRA_REPO_ROOT)
+  : resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const TEST_DIR = resolve(REPO_ROOT, "test");
 const BASELINE_PATH = resolve(REPO_ROOT, "test/fixtures/suite-count-baseline.json");
 

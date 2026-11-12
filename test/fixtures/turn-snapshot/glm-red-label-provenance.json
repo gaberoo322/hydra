@@ -82,57 +82,47 @@
         "100",
         "--json",
         "number,labels,updatedAt"
+      ],
+      [
+        "issue",
+        "list",
+        "--repo",
+        "gaberoo322/hydra",
+        "--label",
+        "parked",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,labels,updatedAt"
       ]
     ],
     "sleeps": [],
     "values": {
-      "pr-gate": {
-        "inflight": {
-          "union": [
-            4450
-          ],
-          "branch": [
-            4450
-          ],
-          "body": [
-            4450
-          ]
-        },
-        "dirty": [],
-        "unchecked": [],
-        "behind": [],
-        "ciTriggerStale": {
-          "ok": false,
-          "reason": "runs-read-failed"
-        },
-        "redResume": {
-          "ok": true,
-          "value": [
-            4450
-          ]
-        },
-        "devResumePick": {
-          "ok": true,
-          "value": {
-            "issue": 4450,
-            "pr": 4450,
-            "headRefName": "issue-4450-not-a-worktree-branch"
-          }
-        },
-        "devResumeNoprPick": {
-          "ok": true,
-          "value": null
-        },
-        "dirtyFix": {
-          "ok": true,
-          "value": {
-            "pick": null,
-            "surface": []
-          }
-        },
-        "qaVerdictRecheck": {
-          "ok": true,
-          "value": []
+      "inflight": {
+        "union": [
+          4450
+        ],
+        "branch": [
+          4450
+        ],
+        "body": [
+          4450
+        ]
+      },
+      "redResume": {
+        "ok": true,
+        "value": [
+          4450
+        ]
+      },
+      "devResumePick": {
+        "ok": true,
+        "value": {
+          "issue": 4450,
+          "pr": 4450,
+          "headRefName": "issue-4450-not-a-worktree-branch"
         }
       }
     }

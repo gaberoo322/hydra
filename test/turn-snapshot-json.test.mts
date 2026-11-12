@@ -45,6 +45,7 @@
  * the reference commit's scripts/autopilot (see plan_parity.py --write-golden).
  */
 
+import type { RetroDrillableReason } from "../src/autopilot/turn-snapshot/afk-frontier.ts";
 import { DEGRADE, degradeDetail } from "../src/autopilot/turn-snapshot/collector.ts";
 import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
@@ -122,7 +123,11 @@ function healthyValues(): TurnSnapshotValues {
       dirty: [4938, 4814, 4814],
       unchecked: [4950],
       behind: [4952, 4951, 4953],
+      noClosingIssue: [],
       qaVerdictRecheck: ok([]),
+      dirtyFixFailPr: null,
+      parkedIssues: ok(new Set([4905, 4902])), // #5319: emitted sorted ascending as orch_parked_issues
+      parkedPrs: new Set([4910, 4907]), // QA r1: emitted sorted ascending as orch_parked_prs
       ciTriggerStale: ok(false),
       redResume: ok([4890]),
       devResumePick: ok({ issue: 4718, pr: 4890, headRefName: "worktree-agent-a1b2" }),
@@ -134,6 +139,7 @@ function healthyValues(): TurnSnapshotValues {
       devReadyPick: 4934,
       candidateExclusions: [{ anchor: "issue-4900", member: "in-flight-dev-exclusion", verdict: "excluded", evidence: "open PR #4901" }],
       activeDevOrch: 1,
+      readyInflightExcluded: [],
       boardDegraded: false,
     },
     redisQueues: { "work-queue": ok(2), "reframe-queue": ok(0), "prior-failures": ok(0) },
@@ -151,7 +157,7 @@ function healthyValues(): TurnSnapshotValues {
       adrPresent: true,
     },
     targetRiskSurface: { manifest: ok({ ok: true, riskSurface: ["src/execution/", "src/risk/"], weight: 1.5 }) },
-    retro: { runs: ok({ available: true, candidate: "9ede5aef" }), drillable: true, reviewDue: false },
+    retro: { runs: ok({ available: true, candidate: "9ede5aef" }), drillable: true, drillableReason: "flagged-dispatch", reviewDue: false },
     wayfinder: { frontier: "4880", ticketType: "task", inflightGlobal: 1 },
     tickets: ok("4890"),
     realmShare: ok(0.123456),
@@ -181,7 +187,7 @@ function fallbackValues(): TurnSnapshotValues {
     hitlGrill: FAILED,
     targetScan: targetScanFallbackSnapshot("collector-crashed"),
     targetRiskSurface: { manifest: { ok: false, reason: DEGRADE.COLLECTOR_CRASHED } },
-    retro: { runs: FAILED, drillable: null, reviewDue: false },
+    retro: { runs: FAILED, drillable: null, drillableReason: "no-candidate", reviewDue: false },
     wayfinder: { frontier: null, ticketType: "", inflightGlobal: 0 },
     tickets: FAILED,
     realmShare: FAILED,
@@ -218,12 +224,14 @@ function edgeValues(): TurnSnapshotValues {
       redResume: ok([4881, 4882]),
       devResumePick: FAILED,
       devResumeNoprPick: FAILED,
+      parkedIssues: FAILED, // degraded -> orch_parked_unreadable true
+      parkedPrs: new Set(),
       dirtyFix: ok({ pick: null, surface: [] }),
     },
     picks: { ...h.picks, grillPick: null, devReadyPick: null, candidateExclusions: [], boardDegraded: true },
     scout: { lastWalkIso: ok("2020-01-01T00:00:00"), openEnhancements: ok("3"), tokensToday: "0", mirrored: FAILED },
     targetScan: { ...h.targetScan, adrPresent: false },
-    retro: { runs: ok({ available: true, candidate: "abc" }), drillable: null, reviewDue: false },
+    retro: { runs: ok({ available: true, candidate: "abc" }), drillable: null, drillableReason: "no-candidate", reviewDue: false },
     wayfinder: { frontier: null, ticketType: "", inflightGlobal: 2 },
     tickets: ok(null),
     realmShare: ok(0.99995),
@@ -276,8 +284,18 @@ function python(script: string, input?: string, args: string[] = [], env: NodeJS
   return JSON.parse(res.stdout);
 }
 
+/**
+ * The stored golden layout (#5441): pretty-printed, one key per line, in the
+ * serialiser's key order, so two PRs adding a signal diff (and merge) line-wise.
+ * Goldens are compared as parsed content, never as text; the serialiser's exact
+ * wire text is pinned once, below.
+ */
+function prettyGolden(text: string): string {
+  return `${JSON.stringify(JSON.parse(text), null, 2)}\n`;
+}
+
 // Golden regeneration happens before any suite collects (the suites below read the files at collection time).
-if (UPDATE_GOLDEN) for (const name of Object.keys(SCENARIOS)) writeFileSync(join(PARITY_DIR, `golden-${name}.json`), emit(name));
+if (UPDATE_GOLDEN) for (const name of Object.keys(SCENARIOS)) writeFileSync(join(PARITY_DIR, `golden-${name}.json`), prettyGolden(emit(name)));
 
 // ---------------------------------------------------------------------------
 
@@ -331,15 +349,26 @@ describe("turn snapshot JSON: plan parity over every captured decide() input (#4
 
 describe("turn snapshot JSON: contract — golden documents through zod and the Python accessor (#4934)", () => {
   for (const name of Object.keys(SCENARIOS)) {
-    test(`${name}: the emitted document matches its golden file byte for byte and validates`, () => {
+    test(`${name}: the emitted document matches its golden file as parsed content and validates`, () => {
       const text = emit(name);
       const path = join(PARITY_DIR, `golden-${name}.json`);
-      assert.equal(text, readFileSync(path, "utf-8"));
+      assert.deepEqual(JSON.parse(text), JSON.parse(readFileSync(path, "utf-8")));
       const parsed = TurnSnapshotSchema.safeParse(JSON.parse(text));
       assert.ok(parsed.success, parsed.success ? "" : JSON.stringify(parsed.error.issues));
       assert.deepEqual(JSON.parse(text).validation, { ok: true });
     });
   }
+
+  test("the serialiser's wire text is the single-line form decide.py reads (the one exact-text pin, #5441)", () => {
+    const text = emit("healthy");
+    assert.ok(text.endsWith("\n") && !text.slice(0, -1).includes("\n"), "the wire text is a single line plus one trailing newline");
+    assert.ok(
+      text.startsWith('{"schema_version":1,"generated_at":"2026-10-07T12:00:00.000Z","signals":{"orch_work_available":true,'),
+      `unexpected wire prefix: ${text.slice(0, 120)}`,
+    );
+    assert.ok(text.includes('"blobs":{"usage_eligibility":{"allow": true, "shed": ["scout_orch"]'), "blobs are spliced in as the service's exact JSON text");
+    assert.ok(text.endsWith('"retro":{"candidate":"9ede5aef","drillable":true,"drillableReason":"flagged-dispatch"}}}\n'), "the document closes compact with one trailing newline");
+  });
 
   const goldens = Object.keys(SCENARIOS).map((name) => ({ name, snapshot: readFileSync(join(PARITY_DIR, `golden-${name}.json`), "utf-8") }));
   const readings: any[] = python("accessor_check.py", JSON.stringify(goldens), [], productionEnv()).cases;
@@ -409,9 +438,35 @@ describe("turn snapshot JSON: contract — golden documents through zod and the 
 
   test("the observability section carries the collector values no decide.py rule reads", () => {
     const doc = JSON.parse(readFileSync(join(PARITY_DIR, "golden-healthy.json"), "utf-8"));
-    assert.deepEqual(Object.keys(doc.observability).sort(), ["active_dev_orch", "capacity", "direction_drift", "health", "recommendations", "redis_queues", "scheduler"]);
+    assert.deepEqual(Object.keys(doc.observability).sort(), ["active_dev_orch", "capacity", "direction_drift", "health", "orch_ready_inflight_excluded", "recommendations", "redis_queues", "retro", "scheduler"]);
     assert.equal(doc.observability.scheduler.stall, "ok");
     assert.equal(typeof doc.observability.active_dev_orch, "number");
+    assert.deepEqual(Object.keys(doc.observability.retro).sort(), ["candidate", "drillable", "drillableReason"]);
+    assert.equal("retro" in doc.blobs, false, "retro provenance never rides under blobs");
+  });
+
+  test("observability.retro carries the exact candidate / drillable / drillableReason values (#5406)", () => {
+    const read = (name: string) => JSON.parse(readFileSync(join(PARITY_DIR, `golden-${name}.json`), "utf-8")).observability.retro;
+    assert.deepEqual(read("healthy"), { candidate: "9ede5aef", drillable: true, drillableReason: "flagged-dispatch" });
+    assert.deepEqual(read("edge"), { candidate: "abc", drillable: null, drillableReason: "no-candidate" });
+    const fallback = buildTurnSnapshot({ ...healthyValues(), retro: { runs: FAILED, drillable: null, drillableReason: "no-candidate", reviewDue: false } }, { nowMs: NOW_MS });
+    assert.deepEqual((fallback.doc.observability as { retro: unknown }).retro, { candidate: null, drillable: null, drillableReason: "no-candidate" });
+  });
+
+  test("signals.retro_run_drillable === (reason not in {none, no-candidate}) for every RetroDrillableReason (#5406 INV-1)", () => {
+    const reasons: RetroDrillableReason[] = [
+      "fail-open-unparseable", "fail-open-not-object", "fail-open-run-not-found", "flagged-dispatch", "reflections",
+      "novel-stuck-signal", "recommendations", "run-flagged", "none", "fail-open-bundle-read-failed", "no-candidate",
+    ];
+    assert.equal(reasons.length, 11);
+    for (const reason of reasons) {
+      const expected = reason !== "none" && reason !== "no-candidate";
+      // The collector's own pairing: no-candidate carries drillable=null, every other reason a boolean.
+      const drillable = reason === "no-candidate" ? null : reason !== "none";
+      const built = buildTurnSnapshot({ ...healthyValues(), retro: { runs: ok({ available: true, candidate: "abc" }), drillable, drillableReason: reason, reviewDue: false } }, { nowMs: NOW_MS });
+      assert.equal(built.doc.signals.retro_run_drillable, expected, reason);
+      assert.equal((built.doc.observability as { retro: { drillableReason: string } }).retro.drillableReason, reason);
+    }
   });
 });
 
@@ -482,6 +537,20 @@ describe("turn snapshot JSON: builder details (#4934)", () => {
     };
     assert.equal(work(3), true);
     for (const notInt of ["3", 2.5, [3], { n: 3 }, true]) assert.equal(work(notInt), false, `${JSON.stringify(notInt)} is not a count`);
+  });
+
+  test("orch_work_available subtracts PR-covered ready rows: max(0, base - excluded) > 0 (#5423)", () => {
+    const at = (excluded: number[], base = 2) => {
+      const h = healthyValues();
+      const counts = { source: "service" as const, values: { ...(h.orchBoard.counts as { values: Record<string, unknown> }).values, ready_for_agent: base } };
+      const out = buildTurnSnapshot({ ...h, orchBoard: { ...h.orchBoard, counts: counts as never }, picks: { ...h.picks, readyInflightExcluded: excluded } }, { nowMs: NOW_MS }).doc;
+      return { work: out.signals.orch_work_available, obs: (out.observability as Record<string, unknown>).orch_ready_inflight_excluded };
+    };
+    assert.deepEqual(at([5315, 5406]), { work: false, obs: [5315, 5406] }, "all ready rows PR-covered");
+    assert.equal(at([5315]).work, true, "partially covered");
+    assert.equal(at([]).work, true, "fallback / nothing excluded: base unchanged");
+    assert.equal(at([1, 2, 3], 2).work, false, "floor at 0 when the reads disagree");
+    assert.equal(at([], 0).work, false);
   });
 
   test("scout_board_saturated is pinned at > 20 open enhancements (a strict cap)", () => {
@@ -635,6 +704,9 @@ describe("turn snapshot JSON: validation degrades PER FIELD on emit (#4934)", ()
     assert.match(out.note ?? "", /structurally invalid.*all-degraded/);
     assert.ok(TurnSnapshotSchema.safeParse(doc).success, "the replacement is itself a valid document");
     assert.deepEqual(doc.signals, ALL_DEGRADED_SIGNALS);
+    // #5319 QA r2: a wholly degraded marker has no healthy parked read - the belt fails closed.
+    assert.equal(doc.signals.orch_parked_unreadable, true);
+    assert.deepEqual(doc.signals.orch_parked_issues, []);
     assert.deepEqual(doc.blobs, {});
     assert.equal(doc.degraded.length, 1);
     assert.match(doc.degraded[0].reason, /^schema-invalid: schema_version/);
@@ -794,13 +866,13 @@ describe("turn snapshot JSON: the all-degraded snapshot (#4934)", () => {
   test("it is conservative by construction: nothing available or due, every producer cap saturated, the doctor raised", () => {
     // The naming convention the accessor's marker reading relies on (#5083): a
     // flag is raised in the all-degraded document IFF its name ends `_fail`,
-    // `_degraded` or `_saturated` — a new fault / cap flag must follow it. Every
+    // `_degraded`, `_saturated` or `_unreadable` — a new fault / cap flag must follow it. Every
     // NON-boolean value must read exactly as an absent key does on a marker
     // turn (the accessor returns None there), so it is null, 0, "" or [].
     const s = ALL_DEGRADED_SIGNALS as Record<string, unknown>;
     assert.ok(s.health_fail === true && s.orch_board_signals_degraded === true && s.arch_board_saturated === true);
     for (const [k, v] of Object.entries(s)) {
-      if (typeof v === "boolean") assert.equal(v, /_(fail|degraded|saturated)$/.test(k), k);
+      if (typeof v === "boolean") assert.equal(v, /_(fail|degraded|saturated|unreadable)$/.test(k), k);
       else assert.ok(v === null || v === 0 || v === "" || (Array.isArray(v) && v.length === 0), `${k}=${JSON.stringify(v)} must be null, 0, "" or [] (what an absent key reads as)`);
     }
   });

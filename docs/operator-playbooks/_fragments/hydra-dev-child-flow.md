@@ -11,24 +11,22 @@ Run these numbered steps.
 
 1. **Verify isolation** — `pwd` + `git rev-parse --git-dir` under `.git/worktrees/`.
    Abort loudly if cwd is `/home/gabe/hydra` (never fall back to the main tree).
-1a. **Claim your anchor** (issue #4271, INV-2) — immediately after the issue
-   number is fixed (pinned by the dispatcher, or self-selected right here),
-   swap the lifecycle label idempotently: `ready-for-agent` -> `in-progress`.
-   This is the SAME claim the GLM drainer's `claim_issue` performs before
-   spawning a worker, applied here to the paid Claude lane so the anchor
-   stops being a live `glm-eligible` sweep candidate (`isGlmEligibleCandidate`,
-   `src/scheduler/chores/glm-eligibility-sweep.ts`) for the whole duration of
-   this dispatch — previously every dev_orch anchor stayed `ready-for-agent`
-   end to end, so a slower dispatch could race the hourly sweep and get
-   coin-flipped into the drainer's pool mid-build. No-op if `ready-for-agent`
-   is already absent or `in-progress` is already present (the drainer may
-   have pre-claimed the same issue first). Best-effort — log and continue on
-   a `gh` failure, never abort the dispatch over a label write:
+1a. **Claim your anchor via the seam** (issue #4271, ADR-0047 D4) — workers
+   never write `in-progress` themselves. Parse `dispatchId=` / `runId=` /
+   `anchor=` from the `<!-- hydra-dispatch v1 … -->` sentinel on the first line
+   of the task prompt. If the issue was pinned (sentinel `anchor=` present, or
+   the prompt names the issue) do nothing: the dispatcher already holds the
+   claim. Otherwise (self-selected) open it now, which also takes the anchor
+   off the `glm-eligible` sweep for the dispatch's duration; the seam performs
+   the `ready-for-agent` -> `in-progress` advance:
    ```bash
-   gh issue edit "$ISSUE_NUMBER" --repo gaberoo322/hydra \
-     --remove-label ready-for-agent --add-label in-progress \
-     || echo "[hydra-dev] WARN: anchor claim relabel failed (non-fatal)" >&2
+   npx tsx scripts/lifecycle.ts dispatch "$ISSUE_NUMBER" --dispatch "$DISPATCH_ID" --class dev_orch --run "$RUN_ID" --purpose fresh
    ```
+   `$DISPATCH_ID` / `$RUN_ID` come from the sentinel; without a sentinel use
+   `interactive-dev-$ISSUE_NUMBER-<epoch>` and `interactive`. `claim-held` ->
+   exclude that issue and re-run selection (at most 3 picks, then stop with a
+   report); `parked:*` or an enforce `advance-refused` -> stop and report, no
+   label write.
 2. Read CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs.
 3. Extract the `## Files in scope` + `## Files out of scope` lists from the issue body.
 4. **Fetch per-anchor Reflections via the live API** (see "Reflection injection"
@@ -61,14 +59,36 @@ Run these numbered steps.
    `src/github/pr-refs.ts`) AND GitHub's own auto-close both key on the verb,
    and GitHub's auto-close IGNORES negation, so a companion carrying any
    closing verb would close the anchor early and re-wedge the QA lane.
+   **Partial delivery of the anchor itself (issue #5400).** When a FRESH
+   dispatch ships only a slice of the anchor, never open a `Refs`-only PR: every
+   PR lane (QA, dev-resume) finds a PR through the issue it CLOSES, so a
+   `Refs #N`-only PR strands green and unreviewed (#5375, #5386). Instead:
+   (a) before `gh pr create`, file a child issue for exactly that slice, link it
+   as a native sub-issue (`gh api repos/gaberoo322/hydra/issues/<parent>/sub_issues -F sub_issue_id=<child-id>`),
+   with `## Files in scope` (the slice's files) and a `Parent design concept: issue-<parent>`
+   line; (b) the PR body says `Closes #<child>` plus `Part of #<parent>` and
+   never a closing verb next to the parent; (c) right after the PR exists,
+   label the child `needs-qa` (reap's needs-qa promotion is anchor-keyed and does
+   not fire for a child); (d) release the parent (`in-progress` -> `ready-for-agent`)
+   and post one comment naming the shipped slice, the child/PR and the remaining
+   slices. A `ubiquitous-language` companion stays `Refs`-only (above); the Turn
+   Snapshot's `orch_prs_no_closing_issue` signal now surfaces any open PR with no
+   closing issue to the operator as `surface-pr {cause: no-closing-issue}`.
 7. Run the full `npm test` per the canonical "Full `npm test` recipe" in
    `hydra-dev.md` (background launch into `npm-test.log` with a sentinel,
    foreground poll; the `*.log` ignore keeps it out of commits), then read the
    `# tests` / `# pass` / `# fail` footer, `NPM_TEST_EXIT=` and the VERDICT line
    from it. Also run `npm run typecheck` and `npm run build`.
-7a. **Fail-loud lint on changed files** (issue #4732) — run the ast-grep
-   `fail-loud-catch` rule over the PR's changed `.ts`/`.mts` files and fix every
-   hit before `gh pr create`. Recipe: "Fail-loud lint — changed files" below.
+7a. **Fail-loud lint on changed files** (issue #4732, widened #5424) — run the
+   ast-grep `fail-loud-catch` rule over the PR's changed `.ts`/`.mts` files,
+   `fail-loud-except-py` over changed `.py` files, `fail-loud-devnull-sh` over
+   changed `.sh` files and `typed-error-throw` over changed `src/`/`scripts/` `.ts`
+   files (bare `throw new Error`, STD-ERROR-TYPED-CODE), and fix every hit before `gh pr create` (the shrink-only
+   `test/fail-loud-ratchet.test.mts` in `npm test` blocks any new or edited hit). Recipe: "Fail-loud lint — changed files" below.
+7b. **Test-can-fail proof on changed tests** (issue #5447, STD-TEST-CAN-FAIL) —
+   run the same advisory judge CI runs over the test files you added or
+   extended; for each `passes-at-merge-base` file make a case red-then-green, or
+   justify it in the PR body. Recipe: "Test-can-fail proof — changed tests" below.
 8a. **MANDATORY — deposit the grounding test-count telemetry file** (issue
    #2754). Immediately after `npm test` passes, run the grounding-deposit recipe
    in "Reflection injection" below. Best-effort on I/O error but mandatory.
@@ -427,6 +447,26 @@ Rules: `cue` MUST be kebab-case and stable across runs (NOT free text);
 `workaround` and `context` are exactly one line each. No friction worth noting →
 emit `## Friction Report` with the literal body `- (none)`.
 
+## Test-can-fail proof — changed tests (issue #5447)
+
+STD-TEST-CAN-FAIL was the most-cited review rule in the 2026-11 retro (17 PRs):
+a new test that already passes at the merge-base cannot be pinning your change.
+`scripts/ci/qa-fix-proof.ts` in `--mode changed-tests` overlays your changed `test/**`
+files onto a throwaway merge-base worktree and runs the candidates (added test
+files, plus modified ones that add a `test(`/`it(` call). It is the same CLI the
+advisory CI step runs and it ALWAYS exits 0:
+
+```bash
+git fetch origin --quiet
+node --experimental-strip-types scripts/ci/qa-fix-proof.ts --mode changed-tests --base origin/master --head HEAD
+```
+
+Per file: `proven` (at least one assertion failure at the merge-base) is clean;
+`inconclusive` (crashes at the merge-base, e.g. imports a module your PR adds) is
+not a finding; `passes-at-merge-base` prints a `::warning file=...::` line. That
+finding is per FILE and may be legitimate (a drift guard for an already-true
+invariant): fix the case so it fails without your change, or say why in the PR body.
+
 ## Fail-loud lint — changed files (issue #4732)
 
 CLAUDE.md "Fail loud": every `catch` either logs with context or is annotated
@@ -441,20 +481,35 @@ yours to fix:
 
 ```bash
 git fetch origin --quiet
-LINT_ARGS=()
+for spec in "fail-loud-catch:*.ts *.mts" "fail-loud-except-py:*.py" "fail-loud-devnull-sh:*.sh" "test-restates-module-literal:*.test.mts"; do
+  rule="${spec%%:*}"
+  read -ra pats <<<"${spec#*:}"   # quoted below: the git pathspecs must not glob in the shell
+  LINT_ARGS=()
+  while IFS= read -r f; do
+    [ -f "$f" ] && LINT_ARGS+=(--path "$f")
+  done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- "${pats[@]}")
+  if [ "${#LINT_ARGS[@]}" -gt 0 ]; then
+    npx tsx scripts/ast-search.ts --rule "$rule" --text "${LINT_ARGS[@]}"
+  fi
+done
+# STD-ERROR-TYPED-CODE (#5434): bare `throw new Error(...)` in changed src/ + scripts/ .ts files.
+TE_ARGS=()
 while IFS= read -r f; do
-  [ -f "$f" ] && LINT_ARGS+=(--path "$f")
-done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- '*.ts' '*.mts')
-if [ "${#LINT_ARGS[@]}" -gt 0 ]; then
-  npx tsx scripts/ast-search.ts --rule fail-loud-catch --text "${LINT_ARGS[@]}"
+  [ -f "$f" ] && TE_ARGS+=(--path "$f")
+done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- '*.ts')
+if [ "${#TE_ARGS[@]}" -gt 0 ]; then
+  npx tsx scripts/ast-search.ts --rule typed-error-throw --text "${TE_ARGS[@]}"
 fi
 # Prints `file:line:col: <catch text>` per hit (0-based line/col); no output = clean.
+# Python/shell use `# intentional: <reason>` as the annotation.
 ```
 
 For every hit in a catch you **added or edited**: log with context
 (`console.error("[module] what failed:", err)` or `logger.warn({ err }, "…")`),
 rethrow, or — only when swallowing is genuinely correct — annotate it
-`/* intentional: <reason> */`. A hit in untouched pre-existing code in a changed
+`/* intentional: <reason> */`. A `typed-error-throw` hit means replace the bare
+`Error` with the `src/errors.ts` subclass that fits the failure kind (the rule
+message lists them; `InvariantViolationError` is never for I/O). A hit in untouched pre-existing code in a changed
 file is optional to fix; do not widen the diff for it. The rule is advisory
 (no CI job runs it), so this step is the enforcement. Rule fixtures:
 `src/ast-grep-rule-tests/fail-loud-catch-test.yml`, run with

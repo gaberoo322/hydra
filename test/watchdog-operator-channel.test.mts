@@ -1,538 +1,454 @@
 /**
- * Regression test for issue #5048 (ADR-0045 Decision 8) — the
- * `## MORNING BRIEF MISSING` block in scripts/hydra-watchdog.sh
- * (`run_brief_missing`): page ONCE when no Morning Brief has been delivered
- * for 26h, resolve on recovery, and do it INDEPENDENTLY of the scheduler's
- * running state (the brief rides the scheduler heartbeat tick, so a
- * deliberate `POST /scheduler/stop` silences it — the alarm must not share
- * that blind spot).
+ * Regression test for issue #5048 (ADR-0045 Decision 8), ported in #5099 — the
+ * MORNING BRIEF MISSING check (`src/watchdog/brief-missing.ts`): page ONCE when
+ * no Morning Brief has been delivered for 26h, resolve on recovery, and do it
+ * INDEPENDENTLY of the scheduler's running state (the brief rides the scheduler
+ * heartbeat tick, so a deliberate `POST /scheduler/stop` silences it — the
+ * alarm must not share that blind spot).
  *
  * Pinned here:
- *   1. Structure: the block is wired into the entry point, reads the
- *      TS-owned last-sent key name verbatim (drift guard against
- *      src/redis/operator-channel.ts), pages with the `brief:missing` kind
- *      that is on the closed page list (and in the ADR's Decision 3 list),
- *      and talks to NO orchestrator HTTP endpoint — redis-cli + the Operator
- *      Channel CLI only.
- *   2. Behaviour: cold-start grace (absent key → anchor, no page until the
- *      anchor is 26h old), stale key → one page per episode, a second stale
- *      tick re-pages nothing, a fresh key after a fired episode → one
- *      resolve + re-arm, the threshold hook, and the Redis-unreachable
- *      fail-safe (exit 0, no CLI call, no state).
- *
- * Isolation, mirroring test/watchdog-redis-backup-freshness.test.mts and
- * test/launch-flow-delivery.test.mts:
- *   - the extracted block COPY is rebound onto a per-run Redis key namespace
- *     (BOTH the last-sent key and the block's own anchor/fired prefix), so a
- *     live production tick can neither rewrite our fixtures nor be disturbed;
- *   - the Operator Channel CLI is intercepted through the block's
- *     HYDRA_WATCHDOG_OPERATOR_NOTIFY hook with an argv-recording stub — no
- *     network, no token, and no test ever boots the production CLI;
- *   - the clock is pinned through HYDRA_WATCHDOG_BRIEF_NOW_MS so no case sleeps.
+ *   1. Contract: the Redis key names are unchanged (a deploy mid-episode neither
+ *      re-pages nor loses the cold-start anchor), the `brief:missing` kind is on
+ *      the closed page list (and in the ADR's Decision 3 list).
+ *   2. Behaviour, IN-PROCESS over a fake store + recording channel (no bash, no
+ *      Docker, no PATH shim): cold-start grace, stale key -> one page per
+ *      episode, dedup, fresh key after a fired episode -> one resolve + re-arm,
+ *      the threshold hook, the unparseable-stamp rule, and the Redis-unreachable
+ *      fail-safe (no page, no mutation).
+ *   3. The pure `decideBriefMissing` verdict table.
+ *   4. The check table (`WATCHDOG_CHECKS`) that `hydra-watchdog.ts plan` prints.
+ *   5. Port-boundary lints over src/watchdog modules and the service unit.
  */
 
-import test, { describe, before, beforeEach, after } from "node:test";
+import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { BRIEF_LAST_SENT_KEY } from "../src/redis/operator-channel.ts";
-import { PAGE_KINDS, isPageKind } from "../src/operator-channel/page-list.ts";
+import { BRIEF_MISSING_KEY_PREFIX, briefMissingEpisodeKeys } from "../src/redis/watchdog-episodes.ts";
+import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
+import { formatAlertMessage } from "../src/notification/alert-grammar.ts";
+import { OperatorChannel, messageFromEvent } from "../src/operator-channel/channel.ts";
+import { KIND_TABLE, PAGE_KINDS, dedupKeyOf, isPageKind } from "../src/operator-channel/page-list.ts";
+import { diskDedupKey } from "../src/watchdog/disk.ts";
+import type { OperatorMessage } from "../src/operator-channel/message.ts";
+import {
+  BRIEF_LAST_SENT_KEY_LABEL,
+  BRIEF_MISSING_KIND,
+  BRIEF_MISSING_LOG_PREFIX,
+  decideBriefMissing,
+  parseBriefStaleHours,
+  runBriefMissing,
+  type BriefMissingDeps,
+  type BriefMissingStore,
+} from "../src/watchdog/brief-missing.ts";
+import { WATCHDOG_CHECKS, formatWatchdogPlan } from "../src/watchdog/checks.ts";
 import { DEPLOY_DRIFT_LOG_PREFIX } from "../src/watchdog/deploy-drift.ts";
 import { ORIGIN_IDENTITY_LOG_PREFIX, ORIGIN_IDENTITY_PAGE_KIND } from "../src/watchdog/origin-identity.ts";
 import { REDIS_BACKUP_LOG_PREFIX, REDIS_BACKUP_STALE_KIND } from "../src/watchdog/redis-backup.ts";
 import { SKILL_MIRROR_LOG_PREFIX } from "../src/watchdog/skill-mirror.ts";
-import {
-  WATCHDOG_SPAWN_TIMEOUT_MS,
-  WATCHDOG_REDIS_TIMEOUT_MS,
-  throwIfTimedOut,
-} from "./_helpers/watchdog-timeouts.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
-const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
 const ADR = join(REPO_ROOT, "docs", "adr", "0045-operator-channel.md");
 
-const BM_KEY_PREFIX_LITERAL = "hydra:autopilot:brief-missing";
-const KIND = "brief:missing";
 const HOUR_MS = 3600 * 1000;
 const T0 = 1_760_000_000_000; // a fixed epoch ms; every case ages relative to it
 
-// Per-run key namespace: nothing here may touch the production keys.
-const RUN_NS = `hydra:test:brief-missing-${process.pid}-${randomUUID().slice(0, 8)}`;
-const TEST_LAST_SENT_KEY = `${RUN_NS}:last-sent`;
-const TEST_BM_PREFIX = `${RUN_NS}:bm`;
-const ABSENT_KEY = `${TEST_BM_PREFIX}:absent-since`;
-const FIRED_KEY = `${TEST_BM_PREFIX}:fired`;
-
-function dockerRedisAvailable(): boolean {
-  const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "PING"], {
-    encoding: "utf-8",
-    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
-  });
-  return (r.stdout ?? "").trim() === "PONG";
+interface Harness {
+  deps: BriefMissingDeps;
+  state: { lastSent: number | null; anchor: number | null; fired: boolean; unreachable: boolean };
+  ops: string[];
+  pages: OperatorMessage[];
+  resolves: { dedupKey: string; title?: string }[];
+  logs: string[];
+  text: () => string;
 }
 
-const DOCKER = dockerRedisAvailable();
-
-function drc(args: string[]): string {
-  const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
-    encoding: "utf-8",
-    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
-  });
-  return (r.stdout ?? "").trim();
-}
-
-// ---------------------------------------------------------------------------
-// The block, extracted and rebound; the argv-recording CLI stub.
-// ---------------------------------------------------------------------------
-
-const SCRATCH = join(tmpdir(), `hydra-brief-missing-${process.pid}`);
-const BLOCK = join(SCRATCH, "block.sh");
-const NOTIFY_LOG = join(SCRATCH, "operator-notify-calls.log");
-const NOTIFY_SHIM = join(SCRATCH, "operator-notify-stub");
-
-function extractBlock(): string {
-  const src = readFileSync(WATCHDOG, "utf-8");
-  const start = src.indexOf("run_brief_missing()");
-  assert.ok(start >= 0, "run_brief_missing() not found in hydra-watchdog.sh");
-  const rest = src.slice(start);
-  const end = rest.search(/^}/m);
-  assert.ok(end >= 0, "run_brief_missing() closing brace not found");
-  return rest.slice(0, end + 1);
-}
-
-before(() => {
-  mkdirSync(SCRATCH, { recursive: true });
-  const body = extractBlock();
-  assert.ok(body.includes("deliver_page"), "extracted block missing deliver_page");
-  assert.ok(body.includes("rc_write"), "extracted block missing rc_write");
-  const rebound = body
-    .split(`"${BRIEF_LAST_SENT_KEY}"`).join(`"${TEST_LAST_SENT_KEY}"`)
-    .split(`"${BM_KEY_PREFIX_LITERAL}"`).join(`"${TEST_BM_PREFIX}"`);
-  assert.ok(rebound.includes(`"${TEST_LAST_SENT_KEY}"`), "failed to rebind the last-sent key onto the test namespace");
-  assert.ok(rebound.includes(`"${TEST_BM_PREFIX}"`), "failed to rebind the block's key prefix onto the test namespace");
-  writeFileSync(BLOCK, rebound);
-  // One invocation = one log line of the raw argv (newlines folded).
-  writeFileSync(NOTIFY_SHIM, [
-    "#!/usr/bin/env bash",
-    `printf '%s' "$*" | tr '\\n' ' ' >> '${NOTIFY_LOG}'`,
-    `printf '\\n' >> '${NOTIFY_LOG}'`,
-    `printf '{"subcommand":"%s","kind":"${KIND}","dedupKey":"${KIND}","result":{"sent":true}}\\n' "$1"`,
-    "exit 0",
-    "",
-  ].join("\n"));
-  chmodSync(NOTIFY_SHIM, 0o755);
-});
-
-after(() => {
-  try {
-    unlinkSync(BLOCK);
-  } catch {
-    /* best-effort cleanup */
-  }
-  rmSync(SCRATCH, { recursive: true, force: true });
-});
-
-function notifyCalls(): string[] {
-  if (!existsSync(NOTIFY_LOG)) return [];
-  return readFileSync(NOTIFY_LOG, "utf-8").split("\n").filter((l) => l.trim() !== "");
-}
-
-function clearNotifyLog(): void {
-  rmSync(NOTIFY_LOG, { force: true });
-}
-
-/** Source the extracted block and call it once. `extra` wins (last spread). */
-function runBlock(extra: Record<string, string>): { status: number; stdout: string; stderr: string } {
-  const r = spawnSync("bash", ["-c", `set -euo pipefail; source '${BLOCK}'; run_brief_missing`], {
-    env: {
-      ...process.env,
-      HYDRA_REDIS_HOST: "docker",
-      // Pinned to "0": this suite's own drc seed/read helper is hardcoded to
-      // db 0 with no `-n` selector (same reasoning as the sibling suites —
-      // redis-db-launch.mjs exports HYDRA_REDIS_DB into the test env).
-      HYDRA_REDIS_DB: "0",
-      HYDRA_WATCHDOG_OPERATOR_NOTIFY: NOTIFY_SHIM,
-      HYDRA_WATCHDOG_BRIEF_NOW_MS: String(T0),
-      ...extra,
+function makeHarness(init: Partial<Harness["state"]> = {}): Harness {
+  const state = { lastSent: null as number | null, anchor: null as number | null, fired: false, unreachable: false, ...init };
+  const ops: string[] = [];
+  const pages: OperatorMessage[] = [];
+  const resolves: { dedupKey: string; title?: string }[] = [];
+  const logs: string[] = [];
+  const store: BriefMissingStore = {
+    async readLastSent() {
+      if (state.unreachable) throw new Error("ECONNREFUSED");
+      return state.lastSent;
     },
-    encoding: "utf-8",
-    timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
-  });
-  throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_brief_missing block");
-  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+    async anchorExists() {
+      return state.anchor !== null;
+    },
+    async anchor(nowMs) {
+      ops.push("anchor");
+      if (state.anchor === null) state.anchor = nowMs;
+    },
+    async readAnchor() {
+      return state.anchor;
+    },
+    async deleteAnchor() {
+      ops.push("deleteAnchor");
+      state.anchor = null;
+    },
+    async firedExists() {
+      return state.fired;
+    },
+    async markFired() {
+      ops.push("markFired");
+      state.fired = true;
+    },
+    async deleteFired() {
+      ops.push("deleteFired");
+      state.fired = false;
+    },
+  };
+  const deps: BriefMissingDeps = {
+    store,
+    channel: {
+      async report(kind: string, payload: Record<string, unknown> = {}) {
+        // The REAL per-kind table renders the message (title, dedupKey, severity).
+        const msg = messageFromEvent({ type: kind, payload });
+        if (msg.severity === "page") pages.push(msg);
+        return { disposition: "page", delivered: true, alertWritten: false, unknownKind: false, outcome: { sent: true, kind: "page" } } as never;
+      },
+      async resolve(dedupKey: string, title?: string) {
+        resolves.push({ dedupKey, title });
+        return { sent: true } as never;
+      },
+    },
+    clock: { nowMs: () => T0 },
+    log: (l) => logs.push(l),
+  };
+  return { deps, state, ops, pages, resolves, logs, text: () => logs.join("\n") };
 }
 
-function bmLines(stdout: string): string {
-  return stdout
-    .split("\n")
-    .filter((l) => l.includes("hydra-brief-missing-watchdog:"))
-    .join("\n");
-}
+const cfg = (over: { staleHours?: number; nowMs?: number | null } = {}) => ({ staleHours: 26, nowMs: null, ...over });
 
-// =============================================================================
-// Structural cases — no Redis needed.
-// =============================================================================
-
-describe("run_brief_missing — structure (issue #5048, ADR-0045 Decision 8)", () => {
-  const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), "utf-8");
-
-  test("hydra-watchdog.sh parses under bash -n", () => {
-    const syntax = spawnSync("bash", ["-n", WATCHDOG], { encoding: "utf-8" });
-    assert.equal(syntax.status, 0, `bash -n failed: ${syntax.stderr}`);
-  });
-
-  test("the block is wired into the entry point, just before run_origin_identity_cli", () => {
-    const src = read("scripts/hydra-watchdog.sh");
-    const defIdx = src.indexOf("run_brief_missing()");
-    const originIdx = src.indexOf("run_origin_identity_cli() {");
-    assert.ok(defIdx >= 0, "run_brief_missing() definition not found");
-    // `run_origin_identity_cli` (#5098) is the last call before `exit 0`, so this
-    // block is defined before it and dispatched before it.
-    assert.ok(originIdx > defIdx, "the block definition must precede the origin-identity wrapper's");
-    const guard = 'if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then';
-    const guardIdx = src.lastIndexOf(guard);
-    assert.ok(guardIdx > defIdx, "the sourcing-guarded entry point must follow the block definition");
-    const entry = src.slice(guardIdx);
-    assert.match(entry, /^\s*run_brief_missing$/m, "block must run on every real tick");
-    assert.match(entry, /run_brief_missing\n\s*run_origin_identity_cli\n\s*exit 0/, "block sits just before run_origin_identity_cli in the main sequence");
-  });
-
-  test("reads the TS-owned last-sent key name verbatim (drift guard) and never writes it", () => {
-    const block = extractBlock();
-    assert.ok(block.includes(`LAST_SENT_KEY="${BRIEF_LAST_SENT_KEY}"`), `block must read ${BRIEF_LAST_SENT_KEY}`);
-    // Only EXISTS / GET touch the key: the scheduler alone stamps it.
-    const writes = block.match(/rc_write [A-Z]+ "\$LAST_SENT_KEY"/g) ?? [];
-    assert.deepEqual(writes, [], "the watchdog must never write the last-sent key");
-    assert.match(block, /rc_read EXISTS "\$LAST_SENT_KEY"/, "reachability probe is an EXISTS on the key");
-    assert.match(block, /rc_read GET "\$LAST_SENT_KEY"/, "the stamp is read with GET");
-  });
-
-  test("pages with kind brief:missing, dedupKey == kind, and the kind is on the closed page list + the ADR", () => {
-    const block = extractBlock();
-    assert.ok(block.includes(`KIND="${KIND}"`), "the kind literal is pinned in the block");
-    assert.match(block, /deliver_page page --kind "\$KIND" --dedup-key "\$KIND"/, "page call with dedupKey == kind");
-    assert.match(block, /deliver_page resolve --dedup-key "\$KIND"/, "resolve call on the same dedupKey");
-    assert.ok(isPageKind(KIND), `${KIND} must be on PAGE_KINDS (ADR-0045 Decision 3)`);
-    assert.equal(PAGE_KINDS[PAGE_KINDS.length - 1], KIND, "appended at the END of the closed list (shared-file etiquette)");
-    const adr = readFileSync(ADR, "utf-8");
-    assert.match(adr, /no Morning Brief delivered for 26h/, "the ADR's Decision 3 list names the new page type");
-  });
-
-  test("is independent of the orchestrator: no HTTP call, no /api/ path, no scheduler read", () => {
-    const block = extractBlock();
-    assert.doesNotMatch(block, /\bcurl\b/, "the block must not call the orchestrator over HTTP");
-    assert.doesNotMatch(block, /\/api\//, "the block must not reference an API route");
-    assert.doesNotMatch(block, /scheduler\/status/, "the alarm must not depend on the scheduler's running state");
-  });
-
-  test("default threshold is 26h, overridable through HYDRA_WATCHDOG_BRIEF_STALE_HOURS; clock through HYDRA_WATCHDOG_BRIEF_NOW_MS", () => {
-    const block = extractBlock();
-    assert.ok(block.includes('STALE_HOURS="${HYDRA_WATCHDOG_BRIEF_STALE_HOURS:-26}"'), "26h default");
-    assert.ok(block.includes("HYDRA_WATCHDOG_BRIEF_NOW_MS"), "deterministic clock hook");
-  });
-
-  test("deliver_page is the #5046 helper shape: CLI via HYDRA_WATCHDOG_OPERATOR_NOTIFY, strip-types, timeout 25, WARN on failure", () => {
-    const block = extractBlock();
-    const helperStart = block.indexOf("deliver_page() {");
-    assert.ok(helperStart >= 0, "deliver_page helper present");
-    const helper = block.slice(helperStart, block.indexOf("return 0", helperStart));
-    assert.ok(helper.includes("HYDRA_WATCHDOG_OPERATOR_NOTIFY"), "binary resolves through the hook");
-    assert.ok(helper.includes("scripts/operator-notify.ts"), "default binary is the repo CLI");
-    assert.ok(helper.includes("--experimental-strip-types"), "default runtime is node --experimental-strip-types");
-    assert.ok(!helper.includes("npx"), "never npx (a unit's PATH cannot see the global tsx)");
-    assert.match(helper, /timeout 25/, "wrapped in timeout 25");
-    assert.match(helper, /\|\| log "WARN/, "a failed CLI call degrades to a logged WARN");
-  });
-
-  test("resolve is gated on the fired marker having existed, and the marker is DELeted on the fresh path", () => {
-    const block = extractBlock();
-    const fresh = block.slice(block.indexOf("else\n    if [[ \"$reason\" == \"stale\" ]]"));
-    assert.match(fresh, /EXISTS "\$fired_key"[^\n]*== "1" \]\]; then[\s\S]*deliver_page resolve/, "resolve only when fired existed");
-    assert.match(fresh, /rc_write DEL "\$fired_key"/, "fresh path re-arms by deleting the marker");
-  });
-});
-
-// =============================================================================
-// Behavioural cases — gated on the docker hydra-redis-1 container.
-// =============================================================================
-
-describe("run_brief_missing — detection + delivery (issue #5048)", { skip: !DOCKER }, () => {
-  beforeEach(() => {
-    drc(["DEL", TEST_LAST_SENT_KEY, ABSENT_KEY, FIRED_KEY]);
-    clearNotifyLog();
-  });
-
-  after(() => {
-    drc(["DEL", TEST_LAST_SENT_KEY, ABSENT_KEY, FIRED_KEY]);
-    clearNotifyLog();
-  });
-
-  test("cold start: an absent key anchors absent-since at the first tick and pages nothing", () => {
-    const r = runBlock({});
-    assert.equal(r.status, 0, `block must never exit non-zero: ${r.stderr}`);
-    assert.match(bmLines(r.stdout), /never delivered yet: cold-start grace 0h of 26h/);
-    assert.equal(drc(["GET", ABSENT_KEY]), String(T0), "absent-since anchored at the observing tick");
-    assert.equal(drc(["EXISTS", FIRED_KEY]), "0", "no fired marker inside the grace window");
-    assert.equal(notifyCalls().length, 0, "no CLI call inside the grace window");
-  });
-
-  test("cold start: the anchor older than 26h pages ONCE with reason never-delivered", () => {
-    drc(["SET", ABSENT_KEY, String(T0)]);
-    const r = runBlock({ HYDRA_WATCHDOG_BRIEF_NOW_MS: String(T0 + 27 * HOUR_MS) });
-    assert.equal(r.status, 0);
-    assert.match(bmLines(r.stdout), /WARNING MORNING BRIEF MISSING — never-delivered: no brief delivered for 27h/);
-    assert.equal(drc(["EXISTS", FIRED_KEY]), "1", "fired marker set");
-    const calls = notifyCalls();
-    assert.equal(calls.length, 1, `exactly one CLI call, got ${JSON.stringify(calls)}`);
-    assert.match(calls[0], /^page --kind brief:missing --dedup-key brief:missing --title No Morning Brief delivered for 27h/);
-    assert.match(calls[0], /--fact reason=never-delivered/);
-    assert.match(calls[0], /--fact threshold_h=26/);
-    // The anchor is NOT re-stamped by the SET NX on a later tick.
-    assert.equal(drc(["GET", ABSENT_KEY]), String(T0));
-  });
-
-  test("stale key: a last-sent stamp older than 26h pages ONCE with reason stale", () => {
-    drc(["SET", TEST_LAST_SENT_KEY, String(T0 - 30 * HOUR_MS)]);
-    const r = runBlock({});
-    assert.equal(r.status, 0);
-    assert.match(bmLines(r.stdout), /WARNING MORNING BRIEF MISSING — stale: no brief delivered for 30h/);
-    assert.equal(drc(["EXISTS", FIRED_KEY]), "1");
-    assert.equal(drc(["EXISTS", ABSENT_KEY]), "0", "a present key clears any cold-start anchor");
-    const calls = notifyCalls();
-    assert.equal(calls.length, 1);
-    assert.match(calls[0], /^page --kind brief:missing --dedup-key brief:missing --title No Morning Brief delivered for 30h/);
-    assert.match(calls[0], /--fact reason=stale/);
-  });
-
-  test("dedup: a second consecutive stale tick does not call the CLI again", () => {
-    drc(["SET", TEST_LAST_SENT_KEY, String(T0 - 30 * HOUR_MS)]);
-    runBlock({});
-    assert.equal(notifyCalls().length, 1);
-    const r2 = runBlock({ HYDRA_WATCHDOG_BRIEF_NOW_MS: String(T0 + 2 * 60 * 1000) });
-    assert.equal(r2.status, 0);
-    assert.match(bmLines(r2.stdout), /still missing — already paged this episode/);
-    assert.equal(notifyCalls().length, 1, "the fired marker must hold the dedup");
-  });
-
-  test("recovery: a fresh stamp after a fired episode resolves ONCE and re-arms", () => {
-    drc(["SET", TEST_LAST_SENT_KEY, String(T0 - 30 * HOUR_MS)]);
-    runBlock({});
-    assert.equal(drc(["EXISTS", FIRED_KEY]), "1");
-    clearNotifyLog();
-
-    // The brief lands (the scheduler stamps last-sent 1h ago).
-    drc(["SET", TEST_LAST_SENT_KEY, String(T0 - 1 * HOUR_MS)]);
-    const r2 = runBlock({});
-    assert.equal(r2.status, 0);
-    assert.match(bmLines(r2.stdout), /morning brief delivered again — clearing the episode/);
-    assert.match(bmLines(r2.stdout), /morning brief fresh: last delivered 1h ago/);
-    assert.equal(drc(["EXISTS", FIRED_KEY]), "0", "recovery must DEL the fired marker");
-    const calls = notifyCalls();
-    assert.equal(calls.length, 1);
-    assert.match(calls[0], /^resolve --dedup-key brief:missing --title Morning Brief delivered again$/);
-
-    // A quiet fresh tick afterwards neither pages nor resolves.
-    clearNotifyLog();
-    const r3 = runBlock({ HYDRA_WATCHDOG_BRIEF_NOW_MS: String(T0 + 2 * 60 * 1000) });
-    assert.equal(r3.status, 0);
-    assert.equal(notifyCalls().length, 0, "no CLI call on a quiet fresh tick");
-
-    // A recurrence (the stamp ages out again) is a fresh episode and re-pages.
-    const r4 = runBlock({ HYDRA_WATCHDOG_BRIEF_NOW_MS: String(T0 + 26 * HOUR_MS) });
-    assert.equal(r4.status, 0);
-    assert.match(bmLines(r4.stdout), /WARNING MORNING BRIEF MISSING — stale/);
-    assert.equal(notifyCalls().length, 1, "the fresh episode delivers a second page");
-    assert.match(notifyCalls()[0], /^page --kind brief:missing/);
-  });
-
-  test("a fresh stamp with no prior episode stays quiet", () => {
-    drc(["SET", TEST_LAST_SENT_KEY, String(T0 - 2 * HOUR_MS)]);
-    const r = runBlock({});
-    assert.equal(r.status, 0);
-    assert.doesNotMatch(bmLines(r.stdout), /WARNING/);
-    assert.equal(notifyCalls().length, 0);
-    assert.equal(drc(["EXISTS", FIRED_KEY]), "0");
-  });
-
-  test("honours the stale-hours hook", () => {
-    drc(["SET", TEST_LAST_SENT_KEY, String(T0 - 30 * HOUR_MS)]);
-    const r = runBlock({ HYDRA_WATCHDOG_BRIEF_STALE_HOURS: "48" });
-    assert.equal(r.status, 0);
-    assert.doesNotMatch(bmLines(r.stdout), /WARNING/, "30h is fresh against a 48h threshold");
-    assert.equal(notifyCalls().length, 0);
-    const r2 = runBlock({ HYDRA_WATCHDOG_BRIEF_STALE_HOURS: "24" });
-    assert.match(bmLines(r2.stdout), /WARNING MORNING BRIEF MISSING — stale/, "30h is stale against a 24h threshold");
-    assert.equal(notifyCalls().length, 1);
-  });
-
-  test("an unparseable stamp is treated as absent (cold-start path), never as fresh", () => {
-    drc(["SET", TEST_LAST_SENT_KEY, "not-a-number"]);
-    const r = runBlock({});
-    assert.equal(r.status, 0);
-    assert.match(bmLines(r.stdout), /never delivered yet/);
-    assert.equal(drc(["GET", ABSENT_KEY]), String(T0), "the anchor is laid down for the garbage value");
-    assert.equal(notifyCalls().length, 0);
-  });
-});
-
-// =============================================================================
-// Fail-safe without Redis — an unreachable store is NOT a missing brief.
-// No docker dependency: rc_* calls point at a dead local port and fail closed
-// instantly; nothing lands anywhere.
-// =============================================================================
-
-describe("run_brief_missing — fail-safe without Redis (issue #5048)", () => {
-  const DEAD_REDIS = { HYDRA_REDIS_HOST: "127.0.0.1", HYDRA_REDIS_PORT: "9" };
-
-  beforeEach(() => clearNotifyLog());
-
-  test("never exits non-zero, pages nothing and leaves every state untouched when Redis is unreachable", () => {
-    const r = runBlock({ ...DEAD_REDIS, HYDRA_WATCHDOG_BRIEF_NOW_MS: String(T0 + 100 * HOUR_MS) });
-    assert.equal(r.status, 0, `Redis being down must not break the block: ${r.stderr}`);
-    const lines = bmLines(r.stdout);
-    assert.match(lines, /WARN Redis unreachable/, "the WARN names the cause");
-    assert.doesNotMatch(lines, /WARNING MORNING BRIEF MISSING/, "an unreachable store must not masquerade as a missing brief");
-    assert.doesNotMatch(lines, /tick processed/, "the block returns before the state machine runs");
-    assert.equal(notifyCalls().length, 0, "no CLI call — nothing was measured");
-  });
-});
-
-describe("run_brief_missing — redis timeout + DEL gating (issue #5115)", () => {
-  const STUB_DIR = join(SCRATCH, "redis-stub-bin");
-  const CALLS = join(SCRATCH, "redis-stub-calls.log");
-
-  function installStub(body: string): void {
-    mkdirSync(STUB_DIR, { recursive: true });
-    const stub = join(STUB_DIR, "redis-cli");
-    writeFileSync(stub, ["#!/usr/bin/env bash", body, ""].join("\n"));
-    chmodSync(stub, 0o755);
-    rmSync(CALLS, { force: true });
-  }
-
-  function healthyStub(): string {
-    return [
-      `echo "$*" >> '${CALLS}'`,
-      'case "$*" in',
-      `  *"EXISTS ${TEST_LAST_SENT_KEY}"*) echo 1 ;;`,
-      `  *"GET ${TEST_LAST_SENT_KEY}"*) echo ${T0} ;;`,
-      "  *EXISTS*) echo 0 ;;",
-      "esac",
-    ].join("\n");
-  }
-
-  function runWithStub(extra: Record<string, string>) {
-    return runBlock({
-      PATH: `${STUB_DIR}:${process.env.PATH ?? ""}`,
-      HYDRA_REDIS_HOST: "127.0.0.1",
-      HYDRA_REDIS_PORT: "6379",
-      ...extra,
+describe("brief-missing — contract (issue #5048, ADR-0045 Decision 8)", () => {
+  test("the Redis key names are unchanged by the #5099 port (drift guard)", () => {
+    assert.equal(BRIEF_LAST_SENT_KEY_LABEL, BRIEF_LAST_SENT_KEY, "reads the TS-owned last-sent key verbatim");
+    assert.equal(BRIEF_MISSING_KEY_PREFIX, "hydra:autopilot:brief-missing");
+    assert.deepEqual(briefMissingEpisodeKeys(), {
+      since: "hydra:autopilot:brief-missing:absent-since",
+      fired: "hydra:autopilot:brief-missing:fired",
     });
-  }
-
-  after(() => rmSync(STUB_DIR, { recursive: true, force: true }));
-
-  test("a hung redis-cli is bounded by timeout 5 and logs the unreachable WARN", () => {
-    installStub("exec sleep 60");
-    const started = Date.now();
-    const r = runWithStub({});
-    const elapsedMs = Date.now() - started;
-    assert.equal(r.status, 0, `a hung Redis must not break the block: ${r.stderr}`);
-    assert.match(bmLines(r.stdout), /WARN Redis unreachable/);
-    assert.ok(elapsedMs < 20_000, `block must return near the 5s timeout, took ${elapsedMs}ms`);
   });
 
-  test("a healthy tick issues no DEL when the absent-since key does not exist", () => {
-    installStub(healthyStub());
-    const r = runWithStub({});
-    assert.equal(r.status, 0, r.stderr);
-    const calls = existsSync(CALLS) ? readFileSync(CALLS, "utf-8") : "";
-    assert.match(calls, /EXISTS/, "the stub was exercised");
-    assert.doesNotMatch(calls, /DEL [^\n]*absent-since/, "no DEL of absent-since when nothing to delete");
+  test("pages with kind brief:missing, dedupKey == kind, and the kind is on the closed page list + the ADR", async () => {
+    assert.equal(BRIEF_MISSING_KIND, "brief:missing");
+    assert.ok(isPageKind(BRIEF_MISSING_KIND), "brief:missing must be on PAGE_KINDS (ADR-0045 Decision 3)");
+    assert.equal(PAGE_KINDS[PAGE_KINDS.length - 1], BRIEF_MISSING_KIND, "appended at the END of the closed list");
+    assert.match(readFileSync(ADR, "utf-8"), /no Morning Brief delivered for 26h/, "the ADR's Decision 3 list names the page type");
+    const h = makeHarness({ lastSent: T0 - 30 * HOUR_MS });
+    await runBriefMissing(h.deps, cfg());
+    assert.equal(h.pages.length, 1);
+    assert.equal(h.pages[0].kind, BRIEF_MISSING_KIND);
+    assert.equal(h.pages[0].dedupKey, BRIEF_MISSING_KIND);
   });
 
-  test("a zero-padded stale-hours hook is read base-10, not octal", () => {
-    installStub(healthyStub());
-    const r = runWithStub({ HYDRA_WATCHDOG_BRIEF_STALE_HOURS: "08" });
-    assert.equal(r.status, 0, `"08" must not abort under set -e: ${r.stderr}`);
+  test("the block is independent of the orchestrator: module imports no HTTP client and no scheduler read", () => {
+    const src = readFileSync(join(REPO_ROOT, "src", "watchdog", "brief-missing.ts"), "utf-8").replace(/\/\*[\s\S]*?\*\//g, "");
+    assert.doesNotMatch(src, /\bfetch\(|\/api\/|scheduler\/status|node:child_process/);
+  });
+
+  test("parseBriefStaleHours: default 26, base-10 (zero-padded '08' is 8), garbage falls back", () => {
+    assert.equal(parseBriefStaleHours(undefined), 26);
+    assert.equal(parseBriefStaleHours("48"), 48);
+    assert.equal(parseBriefStaleHours("08"), 8);
+    assert.equal(parseBriefStaleHours("abc"), 26);
+    assert.equal(parseBriefStaleHours(""), 26);
   });
 });
 
-// =============================================================================
-// Operator Channel CLI delivery across the remaining bash blocks (ADR-0045 D2,
-// issue #5046), plus the launch-flow port boundary (issue #5097). Moved here
-// from test/watchdog-launch-flow.test.mts when `run_launch_flow` left bash, so
-// the launch-flow suites carry no bash source reads at all.
-// =============================================================================
+describe("decideBriefMissing — pure verdict table", () => {
+  const thr = 26 * HOUR_MS;
+  const base = { absentSinceMs: null, fired: false, nowMs: T0, thresholdMs: thr };
 
-describe("scripts/hydra-watchdog.sh — Operator Channel CLI delivery (ADR-0045 D2, issue #5046)", () => {
-  /** Code-only view of the whole script (comment lines stripped). */
-  function scriptCode(): string {
-    return readFileSync(WATCHDOG, "utf-8")
-      .split("\n")
-      .filter((l) => !/^\s*#/.test(l))
-      .join("\n");
-  }
-
-  test("no block names the Telegram Bot API host or curls it — the CLI is the only sender", () => {
-    const code = scriptCode();
-    assert.ok(!code.includes("api.telegram.org"), "scripts/hydra-watchdog.sh must not carry the Bot API host on a code line");
-    assert.equal((code.match(/\bcurl\s[^\n]*TELEGRAM/g) ?? []).length, 0, "no curl reads a Telegram credential");
-    assert.ok(!code.includes("TELEGRAM_BOT_TOKEN") && !code.includes("TELEGRAM_CHAT_ID"), "the watchdog never reads Telegram credentials itself (one loader, in the CLI)");
+  test("stale stamp: page once, still-missing once fired", () => {
+    assert.equal(decideBriefMissing({ ...base, lastSentMs: T0 - 27 * HOUR_MS }).kind, "page");
+    assert.equal(decideBriefMissing({ ...base, lastSentMs: T0 - 27 * HOUR_MS, fired: true }).kind, "still-missing");
   });
 
-  test("every remaining page-list bash block owns a deliver_page helper that resolves the CLI through HYDRA_WATCHDOG_OPERATOR_NOTIFY", () => {
-    const code = scriptCode();
-    const helpers = code.match(/^\s*deliver_page\(\) \{/gm) ?? [];
-    assert.equal(helpers.length, 2, "node-modules-integrity and brief-missing (#5048) each keep their own helper (the rc_write duplication precedent); launch-flow left bash in #5097, redis-backup and origin-identity in #5098");
-    for (const block of ["run_node_modules_integrity()", "run_brief_missing()"]) {
-      const start = code.indexOf(block);
-      assert.ok(start >= 0, `${block} not found`);
-      const body = code.slice(start, start + code.slice(start).search(/^}/m) + 1);
-      const hStart = body.indexOf("deliver_page() {");
-      assert.ok(hStart >= 0, `${block} must define deliver_page`);
-      const helper = body.slice(hStart, hStart + body.slice(hStart).indexOf("\n  }\n") + 4);
-      assert.ok(helper.includes("HYDRA_WATCHDOG_OPERATOR_NOTIFY"), `${block}'s helper must honour the test override`);
-      assert.ok(helper.includes("scripts/operator-notify.ts"), `${block}'s helper must default to the repo CLI`);
-      assert.ok(helper.includes("--experimental-strip-types"), `${block}'s helper must run node --experimental-strip-types`);
-      assert.ok(!helper.includes("npx"), `${block}'s helper must never shell npx (a unit's PATH cannot see the global tsx)`);
-      assert.match(helper, /timeout 25/, `${block}'s helper is wrapped in timeout 25`);
-      assert.match(helper, /\|\| log "WARN/, `${block}'s helper degrades to a logged WARN`);
-      assert.match(body, /deliver_page page --kind/, `${block} must page at its fired transition`);
-      assert.match(body, /deliver_page resolve --dedup-key/, `${block} must resolve at its recovery edge`);
-    }
+  test("fresh stamp: fresh, or resolve when the fired marker existed", () => {
+    assert.equal(decideBriefMissing({ ...base, lastSentMs: T0 - HOUR_MS }).kind, "fresh");
+    assert.equal(decideBriefMissing({ ...base, lastSentMs: T0 - HOUR_MS, fired: true }).kind, "resolve");
   });
 
-  test("every remaining watchdog page kind is on the closed page list, with dedupKey == kind", () => {
-    const code = scriptCode();
-    const kinds = new Set<string>();
-    for (const m of code.matchAll(/deliver_page page --kind "?([a-z_:]+)"? --dedup-key "?([a-z_:$]+)"?/g)) {
-      if (m[1].startsWith("$")) continue;
-      kinds.add(m[1]);
-      assert.equal(m[2], m[1], `page call for ${m[1]} must use dedupKey == kind (${m[2]})`);
+  test("no stamp: measures from the anchor (never-delivered); no anchor yet means grace from now", () => {
+    assert.deepEqual(decideBriefMissing({ ...base, lastSentMs: null, absentSinceMs: T0 - 27 * HOUR_MS }), {
+      kind: "page",
+      reason: "never-delivered",
+      referenceMs: T0 - 27 * HOUR_MS,
+      ageMs: 27 * HOUR_MS,
+    });
+    assert.equal(decideBriefMissing({ ...base, lastSentMs: null }).kind, "grace");
+    assert.equal(decideBriefMissing({ ...base, lastSentMs: null, absentSinceMs: T0 - HOUR_MS }).kind, "grace");
+  });
+
+  test("the threshold is inclusive and a future reference clamps age to 0", () => {
+    assert.equal(decideBriefMissing({ ...base, lastSentMs: T0 - thr }).kind, "page");
+    assert.equal(decideBriefMissing({ ...base, lastSentMs: T0 - thr + 1 }).kind, "fresh");
+    assert.equal(decideBriefMissing({ ...base, lastSentMs: T0 + HOUR_MS }).ageMs, 0);
+  });
+});
+
+describe("brief-missing — detection + delivery over fake ports (issue #5048)", () => {
+  test("cold start: an absent key anchors absent-since at the first tick and pages nothing", async () => {
+    const h = makeHarness();
+    await runBriefMissing(h.deps, cfg());
+    assert.match(h.text(), /never delivered yet: cold-start grace 0h of 26h/);
+    assert.equal(h.state.anchor, T0, "absent-since anchored at the observing tick");
+    assert.equal(h.state.fired, false, "no fired marker inside the grace window");
+    assert.equal(h.pages.length, 0);
+    assert.ok(h.logs.every((l) => l.startsWith(BRIEF_MISSING_LOG_PREFIX)));
+  });
+
+  test("cold start: the anchor older than 26h pages ONCE with reason never-delivered", async () => {
+    const h = makeHarness({ anchor: T0 });
+    await runBriefMissing(h.deps, cfg({ nowMs: T0 + 27 * HOUR_MS }));
+    assert.match(h.text(), /WARNING MORNING BRIEF MISSING — never-delivered: no brief delivered for 27h/);
+    assert.equal(h.state.fired, true, "fired marker set");
+    assert.equal(h.pages.length, 1);
+    assert.equal(h.pages[0].title, "No Morning Brief delivered for 27h");
+    assert.deepEqual(h.pages[0].facts, [
+      { label: "reason", value: "never-delivered" },
+      { label: "ageH", value: "27" },
+      { label: "thresholdH", value: "26" },
+      { label: "lastSentKey", value: BRIEF_LAST_SENT_KEY },
+    ]);
+    assert.equal(h.state.anchor, T0, "the anchor is NOT re-stamped by the SET NX on a later tick");
+  });
+
+  test("the fired marker is SET before the page (dedup holds when delivery fails)", async () => {
+    const h = makeHarness({ lastSent: T0 - 30 * HOUR_MS });
+    h.deps.channel.report = async () => {
+      assert.equal(h.state.fired, true, "marker set before delivery");
+      throw new Error("telegram down");
+    };
+    await runBriefMissing(h.deps, cfg());
+    assert.match(h.text(), /WARN operator-channel report FAILED/);
+    assert.equal(h.state.fired, true);
+  });
+
+  test("stale key: a last-sent stamp older than 26h pages ONCE with reason stale and clears any anchor", async () => {
+    const h = makeHarness({ lastSent: T0 - 30 * HOUR_MS, anchor: T0 - 5 * HOUR_MS });
+    await runBriefMissing(h.deps, cfg());
+    assert.match(h.text(), /WARNING MORNING BRIEF MISSING — stale: no brief delivered for 30h/);
+    assert.equal(h.state.fired, true);
+    assert.equal(h.state.anchor, null, "a present key clears any cold-start anchor");
+    assert.equal(h.pages.length, 1);
+    assert.equal(h.pages[0].facts[0].value, "stale");
+  });
+
+  test("dedup: a second consecutive stale tick does not page again", async () => {
+    const h = makeHarness({ lastSent: T0 - 30 * HOUR_MS });
+    await runBriefMissing(h.deps, cfg());
+    await runBriefMissing(h.deps, cfg({ nowMs: T0 + 2 * 60 * 1000 }));
+    assert.match(h.text(), /still missing — already paged this episode/);
+    assert.equal(h.pages.length, 1, "the fired marker must hold the dedup");
+  });
+
+  test("recovery: a fresh stamp after a fired episode resolves ONCE and re-arms", async () => {
+    const h = makeHarness({ lastSent: T0 - 30 * HOUR_MS });
+    await runBriefMissing(h.deps, cfg());
+    assert.equal(h.state.fired, true);
+
+    h.state.lastSent = T0 - HOUR_MS; // the brief lands
+    await runBriefMissing(h.deps, cfg());
+    assert.match(h.text(), /morning brief delivered again — clearing the episode/);
+    assert.match(h.text(), /morning brief fresh: last delivered 1h ago/);
+    assert.equal(h.state.fired, false, "recovery must DEL the fired marker");
+    assert.deepEqual(h.resolves, [{ dedupKey: "brief:missing", title: "Morning Brief delivered again" }]);
+
+    await runBriefMissing(h.deps, cfg({ nowMs: T0 + 2 * 60 * 1000 }));
+    assert.equal(h.resolves.length, 1, "no resolve on a quiet fresh tick");
+    assert.equal(h.pages.length, 1);
+
+    await runBriefMissing(h.deps, cfg({ nowMs: T0 + 26 * HOUR_MS }));
+    assert.match(h.text(), /WARNING MORNING BRIEF MISSING — stale/);
+    assert.equal(h.pages.length, 2, "a recurrence is a fresh episode and re-pages");
+  });
+
+  test("a fresh stamp with no prior episode stays quiet", async () => {
+    const h = makeHarness({ lastSent: T0 - 2 * HOUR_MS });
+    await runBriefMissing(h.deps, cfg());
+    assert.doesNotMatch(h.text(), /WARNING/);
+    assert.equal(h.pages.length, 0);
+    assert.equal(h.resolves.length, 0);
+    assert.equal(h.state.fired, false);
+  });
+
+  test("a healthy tick issues no DEL of absent-since when the anchor does not exist", async () => {
+    const h = makeHarness({ lastSent: T0 - HOUR_MS });
+    await runBriefMissing(h.deps, cfg());
+    assert.ok(!h.ops.includes("deleteAnchor"), `ops were ${h.ops.join(",")}`);
+  });
+
+  test("honours the stale-hours hook", async () => {
+    const h = makeHarness({ lastSent: T0 - 30 * HOUR_MS });
+    await runBriefMissing(h.deps, cfg({ staleHours: 48 }));
+    assert.doesNotMatch(h.text(), /WARNING/, "30h is fresh against a 48h threshold");
+    assert.equal(h.pages.length, 0);
+    await runBriefMissing(h.deps, cfg({ staleHours: 24 }));
+    assert.match(h.text(), /WARNING MORNING BRIEF MISSING — stale/, "30h is stale against a 24h threshold");
+    assert.equal(h.pages.length, 1);
+  });
+
+  test("an unparseable stamp (store reports null) is treated as absent: cold-start path, never fresh", async () => {
+    const h = makeHarness({ lastSent: null });
+    await runBriefMissing(h.deps, cfg());
+    assert.match(h.text(), /never delivered yet/);
+    assert.equal(h.state.anchor, T0);
+    assert.equal(h.pages.length, 0);
+  });
+
+  test("fail-safe: an unreachable Redis pages nothing and leaves every state untouched", async () => {
+    const h = makeHarness({ unreachable: true, anchor: T0 - 100 * HOUR_MS, fired: true });
+    await runBriefMissing(h.deps, cfg({ nowMs: T0 + 100 * HOUR_MS }));
+    assert.match(h.text(), /WARN Redis unreachable/, "the WARN names the cause");
+    assert.doesNotMatch(h.text(), /WARNING MORNING BRIEF MISSING/, "an unreachable store must not masquerade as a missing brief");
+    assert.doesNotMatch(h.text(), /tick processed/);
+    assert.deepEqual(h.ops, [], "no state mutation");
+    assert.equal(h.pages.length + h.resolves.length, 0);
+    assert.equal(h.state.fired, true);
+  });
+});
+
+describe("WATCHDOG_CHECKS — the one check table (issue #5099)", () => {
+  test("order and bounds are today's tick order", () => {
+    assert.deepEqual(
+      WATCHDOG_CHECKS.map((c) => [c.subcommand, c.timeoutS]),
+      [
+        ["liveness", 300],
+        ["wedge", 90],
+        ["disk", 90],
+        ["deploy-drift", 1200],
+        ["redis-backup", 90],
+        ["skill-mirror", 300],
+        ["claude-hooks", 60],
+        ["launch-flow", 90],
+        ["brief-missing", 90],
+        ["origin-identity", 120],
+      ],
+    );
+  });
+
+  test("log prefixes are unchanged so journal greps keep working", () => {
+    assert.equal(DEPLOY_DRIFT_LOG_PREFIX, "hydra-deploy-drift-watchdog:");
+    assert.equal(REDIS_BACKUP_LOG_PREFIX, "hydra-redis-backup-freshness-watchdog:");
+    assert.equal(SKILL_MIRROR_LOG_PREFIX, "hydra-skill-mirror-drift-watchdog:");
+    assert.equal(ORIGIN_IDENTITY_LOG_PREFIX, "hydra-origin-identity-watchdog:");
+    assert.equal(BRIEF_MISSING_LOG_PREFIX, "hydra-brief-missing-watchdog:");
+    assert.ok(WATCHDOG_CHECKS.every((c) => c.logPrefix.startsWith("hydra-") && c.logPrefix.endsWith("-watchdog:")));
+  });
+
+  test("the plan is one tab-separated 'subcommand prefix timeout' line per check", () => {
+    const lines = formatWatchdogPlan().split("\n");
+    assert.equal(lines.length, WATCHDOG_CHECKS.length);
+    for (const [i, line] of lines.entries()) {
+      const [sub, prefix, timeout] = line.split("\t");
+      assert.equal(sub, WATCHDOG_CHECKS[i].subcommand);
+      assert.equal(prefix, WATCHDOG_CHECKS[i].logPrefix);
+      assert.equal(Number(timeout), WATCHDOG_CHECKS[i].timeoutS);
     }
-    for (const k of ["infra:node_modules_wiped"]) {
-      assert.ok(kinds.has(k), `expected a literal page call for ${k}`);
+  });
+});
+
+describe("watchdog page kinds and the service unit (ADR-0045 D2, issue #5046)", () => {
+  test("every watchdog page kind is on the closed page list", () => {
+    for (const k of [REDIS_BACKUP_STALE_KIND, ORIGIN_IDENTITY_PAGE_KIND, "infra:node_modules_wiped", "infra:watchdog_cli_failed", BRIEF_MISSING_KIND]) {
       assert.ok(isPageKind(k), `${k} must be on the closed page list`);
     }
-    // The ported blocks (#5098) are re-asserted against the TS module constants:
-    // each is a page kind and pages with dedupKey == kind.
-    for (const k of [REDIS_BACKUP_STALE_KIND, ORIGIN_IDENTITY_PAGE_KIND]) {
-      assert.ok(isPageKind(k), `${k} must be on the closed page list`);
+    assert.match(readFileSync(ADR, "utf-8"), /infra:watchdog_cli_failed/, "ADR-0045 Decision 3 lists the CLI-start alarm");
+  });
+
+  test("ported modules page with dedupKey == kind (derived by the table, not hand-built)", () => {
+    for (const k of [REDIS_BACKUP_STALE_KIND, ORIGIN_IDENTITY_PAGE_KIND, BRIEF_MISSING_KIND, "launch:fail_safe", E.LAUNCH_QUOTA_STRETCH]) {
+      assert.equal(dedupKeyOf(k), k, `${k}: dedupKeyOf(kind) === kind`);
     }
-    for (const f of ["redis-backup.ts", "origin-identity.ts"]) {
-      const src = readFileSync(join(REPO_ROOT, "src", "watchdog", f), "utf-8");
-      assert.match(src, /dedupKey: (REDIS_BACKUP_STALE_KIND|ORIGIN_IDENTITY_PAGE_KIND)/, `${f} pages with dedupKey == kind`);
+    for (const f of ["redis-backup.ts", "origin-identity.ts", "launch-flow.ts", "brief-missing.ts"]) {
+      const src = readFileSync(join(REPO_ROOT, "src", "watchdog", f), "utf-8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+      assert.doesNotMatch(src, /dedupKey:\s*[A-Za-z_]/, `${f} builds no dedupKey by hand`);
     }
   });
 
-  test("hydra-watchdog.service loads %h/hydra/.env dash-prefixed (the other blocks must run without it)", () => {
+  test("INV-1: the five converted modules never publish to the notifications bus", () => {
+    for (const f of ["origin-identity.ts", "redis-backup.ts", "launch-flow.ts", "disk.ts", "brief-missing.ts"]) {
+      const src = readFileSync(join(REPO_ROOT, "src", "watchdog", f), "utf-8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+      assert.doesNotMatch(src, /bus\.publish|STREAMS\.NOTIFICATIONS|event-bus-stream-keys|from "\.\.\/event-bus\.ts"/, `${f} must not touch the bus`);
+    }
+  });
+
+  test("INV-7: the tmpfs page key comes from the table and keeps today's byte-for-byte string", () => {
+    assert.equal(dedupKeyOf("infra:tmpfs_exhausted", { path: "/tmp" }), "infra:tmpfs_exhausted:/tmp:critical");
+    assert.equal(dedupKeyOf("infra:tmpfs_pressure", { path: "/dev/shm" }), "infra:tmpfs_pressure:/dev/shm:warn");
+    assert.equal(diskDedupKey("/tmp", "critical"), "infra:tmpfs_exhausted:/tmp:critical");
+    assert.equal(diskDedupKey("/dev/shm", "warn"), "infra:tmpfs_pressure:/dev/shm:warn");
+  });
+
+  test("INV-8: title renderers reproduce the old hand-built titles and never throw on an empty payload", () => {
+    assert.equal(
+      messageFromEvent({ type: "infra:redis_backup_stale", payload: { reason: "missing", thresholdMs: 36 * HOUR_MS } }).title,
+      "Redis backup missing (threshold 36h)",
+    );
+    assert.equal(
+      messageFromEvent({ type: "launch:meter_dark", payload: { signal: "meter-dark", durationMs: 5, thresholdMs: 3 } }).title,
+      "Launch flow 'meter-dark' sustained 5ms (>= 3ms) — Orchestrator may be down",
+    );
+    assert.equal(messageFromEvent({ type: "brief:missing", payload: { ageH: 27 } }).title, "No Morning Brief delivered for 27h");
+    assert.match(
+      messageFromEvent({ type: "infra:tmpfs_exhausted", payload: { path: "/tmp", over: "inodes 100%" } }).title,
+      /^\/tmp critical: inodes 100% — temp-file writes fail with ENOSPC at 100%$/,
+    );
+    for (const [kind, row] of Object.entries(KIND_TABLE)) {
+      assert.doesNotThrow(() => row.title?.({}), `${kind} title renderer on an empty payload`);
+      assert.doesNotThrow(() => messageFromEvent({ type: kind, payload: {} }), `${kind} messageFromEvent on an empty payload`);
+    }
+  });
+
+  test("INV-4: a real channel writes ONE dashboard alert for an origin-identity alarm and a launch quota fire, none for redis_backup_stale", async () => {
+    const alerts: Array<{ type: string; message: string; severity: string }> = [];
+    const channel = new OperatorChannel({
+      store: {
+        readDedup: async () => null,
+        writeDedup: async () => {},
+        incrSuppressed: async () => {},
+        delDedup: async () => {},
+        appendBrief: async () => {},
+        appendLog: async () => {},
+      },
+      transport: async () => ({ ok: true, mode: "HTML" }),
+      alerts: async (a) => {
+        alerts.push(a);
+        return true;
+      },
+    });
+    const origin = { signal: "origin-identity", reason: "wrong-origin-url", url: "x/y", repair: "not-attempted", newUrl: "x/y", fetch: "skipped", note: "n" };
+    const quota = { signal: "quota", reason: "session-blocked", durationMs: 5, thresholdMs: 3 };
+    await channel.report(ORIGIN_IDENTITY_PAGE_KIND, origin);
+    await channel.report(E.LAUNCH_QUOTA_STRETCH, quota);
+    await channel.report(REDIS_BACKUP_STALE_KIND, { signal: "redis-backup", reason: "stale", durationMs: 1, thresholdMs: 2 });
+    assert.equal(alerts.length, 2);
+    assert.equal(alerts[0].type, ORIGIN_IDENTITY_PAGE_KIND);
+    assert.equal(alerts[0].message, formatAlertMessage({ type: ORIGIN_IDENTITY_PAGE_KIND, payload: origin }));
+    assert.equal(alerts[0].severity, "error");
+    assert.equal(alerts[1].message, formatAlertMessage({ type: E.LAUNCH_QUOTA_STRETCH, payload: quota }));
+  });
+
+  test("INV-10: the disk warn level stays on briefOnce and has a real brief line", () => {
+    const row = KIND_TABLE["infra:tmpfs_pressure"];
+    assert.equal(row.disposition, "brief");
+    assert.ok(row.briefLine);
+    assert.match(
+      row.briefLine({ ...messageFromEvent({ type: "infra:tmpfs_pressure", payload: {} }), title: "/tmp warn: inodes 85%", at: 0 }),
+      /^Tmpfs pressure: \/tmp warn: inodes 85%/,
+    );
+  });
+
+  test("hydra-watchdog.service loads %h/hydra/.env dash-prefixed (the other checks must run without it)", () => {
     const unit = readFileSync(join(REPO_ROOT, "scripts", "systemd", "hydra-watchdog.service"), "utf-8");
     assert.match(unit, /^EnvironmentFile=-%h\/hydra\/\.env$/m, "expected EnvironmentFile=-%h/hydra/.env under [Service]");
-    assert.doesNotMatch(unit, /^EnvironmentFile=%h/m, "must stay optional (dash-prefixed): a missing .env never silences the other blocks");
+    assert.doesNotMatch(unit, /^EnvironmentFile=%h/m, "must stay optional (dash-prefixed): a missing .env never silences the other checks");
     assert.doesNotMatch(unit, /^Environment=TELEGRAM_/m, "never an inline credential");
   });
 
@@ -548,25 +464,10 @@ describe("scripts/hydra-watchdog.sh — Operator Channel CLI delivery (ADR-0045 
   });
 });
 
-describe("launch flow left bash (issue #5097, INV-1/2/6/7/14)", () => {
-  const sh = (): string => readFileSync(WATCHDOG, "utf-8");
+describe("watchdog port boundaries (issues #5097, #5098, #5099)", () => {
   const cli = (): string => readFileSync(join(REPO_ROOT, "scripts", "hydra-watchdog.ts"), "utf-8");
-  const launchModules = (): string[] =>
-    ["launch-flow.ts", "episode.ts", "ports.ts"].map((f) => readFileSync(join(REPO_ROOT, "src", "watchdog", f), "utf-8"));
-
-  test("run_launch_flow() and its HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM rebind hook are gone; the entry list calls the CLI wrapper", () => {
-    assert.ok(!sh().includes("run_launch_flow()"));
-    assert.ok(!sh().includes("HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM"));
-    assert.match(sh(), /^run_launch_flow_cli\(\) \{ run_watchdog_cli launch-flow "hydra-launch-flow-watchdog:" \d+; \}$/m);
-    assert.match(sh(), /^  run_launch_flow_cli$/m);
-  });
-
-  test("the launch-flow track_signal is deleted: only the node-modules-integrity copy remains in bash", () => {
-    const defs = sh().match(/^\s*track_signal\(\) \{/gm) ?? [];
-    assert.equal(defs.length, 1, "exactly one bash track_signal definition survives");
-    const start = sh().indexOf("run_node_modules_integrity()");
-    assert.ok(sh().indexOf("track_signal() {") > start, "and it is inside run_node_modules_integrity");
-  });
+  const read = (f: string): string => readFileSync(join(REPO_ROOT, "src", "watchdog", f), "utf-8");
+  const launchModules = (): string[] => ["launch-flow.ts", "episode.ts", "ports.ts"].map(read);
 
   test("the predicates are imported, never re-typed: no 45-min / 90-min literals in the CLI or src/watchdog (INV-1)", () => {
     for (const src of [cli(), ...launchModules()]) {
@@ -574,56 +475,13 @@ describe("launch flow left bash (issue #5097, INV-1/2/6/7/14)", () => {
     }
   });
 
-  test("pages go through the Operator Channel module in-process: no operator-notify spawn, no Bot API host (INV-6)", () => {
+  test("pages go through the Operator Channel module in-process: no operator-notify spawn, no Bot API host, no hand-built XADD", () => {
     for (const src of [cli(), ...launchModules()]) {
       assert.ok(!src.includes("operator-notify"));
       assert.ok(!src.includes("api.telegram.org"));
-    }
-  });
-
-  test("the only launch-flow XADD is EventBus.publish(): no hand-built XADD in the CLI or src/watchdog (INV-7)", () => {
-    for (const src of [cli(), ...launchModules()]) {
       assert.doesNotMatch(src, /xadd/i);
     }
-  });
-});
-
-describe("slice 4 left bash (issue #5098, INV-2/3/14)", () => {
-  const sh = (): string => readFileSync(WATCHDOG, "utf-8");
-  const mods = ["deploy-drift.ts", "skill-mirror.ts", "redis-backup.ts", "origin-identity.ts", "drift-gate.ts"];
-  const read = (f: string): string => readFileSync(join(REPO_ROOT, "src", "watchdog", f), "utf-8");
-
-  test("the four bash blocks and their per-block helper copies are deleted; the entry list calls the CLI wrappers in the same order", () => {
-    for (const fn of ["run_deploy_drift()", "run_redis_backup_freshness()", "run_skill_mirror_drift()", "run_origin_identity()"]) {
-      assert.ok(!sh().includes(fn), `${fn} must be gone`);
-    }
-    const entry = sh().slice(sh().lastIndexOf('if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then'));
-    assert.match(
-      entry,
-      /run_liveness_cli\n\s*run_wedge_cli\n\s*run_disk_cli\n\s*run_deploy_drift_cli\n\s*run_redis_backup_cli\n\s*run_skill_mirror_cli\n\s*run_claude_hooks\n\s*run_launch_flow_cli\n\s*run_node_modules_integrity\n\s*run_brief_missing\n\s*run_origin_identity_cli\n\s*exit 0/,
-    );
-    for (const hook of ["DRIFT_DEPLOYED_SHA", "DRIFT_REMOTE_SHA", "AUTODEPLOY_DRY_RUN", "SKILL_MIRROR_AUTOFIX_DRY_RUN", "HYDRA_WATCHDOG_ORIGIN_URL", "ORIGIN_MASTER_PRESENT", "BACKUP_TIMER_STATE", "BACKUP_NOTIFY_STREAM", "ORIGIN_NOTIFY_STREAM"]) {
-      assert.ok(!sh().includes(hook), `the bash-only injection hook ${hook} is retired`);
-    }
-  });
-
-  test("each wrapper is sized for the opt-in actions it must not kill (deploy >= 1200s, mirror >= 300s, origin >= 120s, backup 90s)", () => {
-    const bound = (name: string): number => Number(sh().match(new RegExp(`${name}\\(\\) \\{ run_watchdog_cli \\S+ "[^"]+" (\\d+);`))?.[1]);
-    assert.ok(bound("run_deploy_drift_cli") >= 1200);
-    assert.ok(bound("run_skill_mirror_cli") >= 300);
-    assert.ok(bound("run_origin_identity_cli") >= 120);
-    assert.equal(bound("run_redis_backup_cli"), 90);
-  });
-
-  test("log prefixes are unchanged so journal greps keep working", () => {
-    assert.equal(DEPLOY_DRIFT_LOG_PREFIX, "hydra-deploy-drift-watchdog:");
-    assert.equal(REDIS_BACKUP_LOG_PREFIX, "hydra-redis-backup-freshness-watchdog:");
-    assert.equal(SKILL_MIRROR_LOG_PREFIX, "hydra-skill-mirror-drift-watchdog:");
-    assert.equal(ORIGIN_IDENTITY_LOG_PREFIX, "hydra-origin-identity-watchdog:");
-  });
-
-  test("pages go through the Operator Channel module in-process: no operator-notify spawn, no Bot API host, no hand-built XADD (INV-3)", () => {
-    for (const f of mods) {
+    for (const f of ["deploy-drift.ts", "skill-mirror.ts", "redis-backup.ts", "origin-identity.ts", "drift-gate.ts", "brief-missing.ts", "claude-hooks.ts", "checks.ts"]) {
       const src = read(f);
       assert.ok(!src.includes("operator-notify"), f);
       assert.ok(!src.includes("api.telegram.org"), f);

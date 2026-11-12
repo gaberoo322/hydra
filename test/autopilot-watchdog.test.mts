@@ -15,6 +15,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { WATCHDOG_CHECKS } from "../src/watchdog/checks.ts";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -731,12 +732,12 @@ describe("scripts/hydra-watchdog.sh — entry-point guard and CLI wiring (issue 
     assert.doesNotMatch(r.stdout, /hydra-(orchestrator|autopilot|deploy-drift)-watchdog:/);
   });
 
-  test("the bash liveness block is deleted; the entry point runs the liveness CLI before the wedge CLI", () => {
-    const src = readFileSync(WATCHDOG, "utf-8");
-    assert.ok(!/run_service_liveness|read_pending_work/.test(src.replace(/^\s*#.*$/gm, "")), "no bash liveness code remains");
-    assert.ok(src.indexOf("  run_liveness_cli\n  run_wedge_cli") > 0, "liveness runs first, then wedge");
-    assert.match(src, /run_watchdog_cli liveness "hydra-orchestrator-watchdog:" 300/);
-    assert.match(src, /run_watchdog_cli wedge "hydra-autopilot-watchdog:" 90/);
+  test("WATCHDOG_CHECKS runs the liveness CLI before the wedge CLI, with the pinned prefixes and bounds", () => {
+    assert.deepEqual(WATCHDOG_CHECKS.slice(0, 2).map((c) => c.subcommand), ["liveness", "wedge"]);
+    assert.equal(WATCHDOG_CHECKS[0].logPrefix, "hydra-orchestrator-watchdog:");
+    assert.equal(WATCHDOG_CHECKS[0].timeoutS, 300);
+    assert.equal(WATCHDOG_CHECKS[1].logPrefix, "hydra-autopilot-watchdog:");
+    assert.equal(WATCHDOG_CHECKS[1].timeoutS, 90);
   });
 
   test("a failing CLI is ONE WARN line and rc 0 (never an aborted tick)", () => {
@@ -745,12 +746,12 @@ describe("scripts/hydra-watchdog.sh — entry-point guard and CLI wiring (issue 
       const failing = join(root, "node");
       writeFileSync(failing, "#!/bin/sh\nexit 7\n");
       chmodSync(failing, 0o755);
-      const r = spawnSync("bash", ["-c", 'set -euo pipefail; source "$1"; run_liveness_cli', "x", WATCHDOG], {
+      const r = spawnSync("bash", ["-c", 'set -euo pipefail; source "$1"; run_watchdog_cli liveness "hydra-orchestrator-watchdog:" 300', "x", WATCHDOG], {
         env: { ...process.env, HYDRA_WATCHDOG_NODE: failing, HYDRA_ROOT: REPO_ROOT },
         encoding: "utf-8",
         timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
       });
-      throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_liveness_cli");
+      throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_watchdog_cli liveness");
       assert.equal(r.status, 0);
       assert.equal(
         r.stdout.trim(),
@@ -775,7 +776,7 @@ describe("scripts/hydra-watchdog.sh — run_wedge_cli resolves node without the 
   }
 
   function runWedgeCli(env: Record<string, string>, path: string): { status: number; stdout: string } {
-    const r = spawnSync("bash", ["-c", 'set -euo pipefail; source "$1"; run_wedge_cli', "wedge-cli", WATCHDOG], {
+    const r = spawnSync("bash", ["-c", 'set -euo pipefail; source "$1"; run_watchdog_cli wedge "hydra-autopilot-watchdog:" 90', "wedge-cli", WATCHDOG], {
       env: { ...env, PATH: path },
       encoding: "utf-8",
       timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
@@ -892,11 +893,10 @@ describe("watchdog liveness production adapters (issue #5096 QA round 1)", () =>
 });
 
 describe("liveness CLI wrapper budget nests the restart cap (#5096 QA round 2)", () => {
-  const sh = readFileSync(resolve(import.meta.dirname, "../scripts/hydra-watchdog.sh"), "utf8");
   const wrapperS = (name: string): number => {
-    const m = sh.match(new RegExp(`run_${name}_cli\\(\\) \\{ run_watchdog_cli ${name} "[^"]+" (\\d+);`));
-    assert.ok(m, `run_${name}_cli not found`);
-    return Number(m[1]);
+    const row = WATCHDOG_CHECKS.find((c) => c.subcommand === name);
+    assert.ok(row, `${name} not found in WATCHDOG_CHECKS`);
+    return row.timeoutS;
   };
 
   test("liveness wrapper exceeds two restarts + 5s settle (redis-down worst case)", () => {

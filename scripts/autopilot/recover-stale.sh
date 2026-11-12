@@ -157,8 +157,48 @@ if [ "${#STALE_IN_PROGRESS[@]}" -gt 0 ] || [ "${#STALE_BLOCKED[@]}" -gt 0 ]; the
   fi
 fi
 
+# Live-state guard (issue #5317, ADR-0047 D2). The stale lists come from a Turn
+# Snapshot STORED at turn start and read one turn later, so an issue listed as
+# stale `in-progress` may since have moved on — notably QA PASS lands it in
+# `qa-passed`. An unconditional relabel would then write a second state label
+# (`needs-qa` next to `qa-passed`) and restart the PASS -> in-progress -> needs-qa
+# bounce. So re-read the issue's labels immediately before each write and act
+# only when its state-label set is EXACTLY the one the snapshot listed. An
+# unreadable read skips (never writes). The state names mirror OPEN_STATES in
+# src/lifecycle/transitions.ts.
+LIFECYCLE_STATE_LABELS="needs-triage needs-info needs-research hitl-grill needs-tickets ready-for-agent blocked in-progress needs-dev-resume needs-qa qa-passed ready-for-human parked"
+live_state_labels() {
+  local raw s out=""
+  raw=$(gh issue view "$1" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null) || return 1
+  for s in $LIFECYCLE_STATE_LABELS; do
+    if grep -Fxq -- "$s" <<<"$raw"; then out="${out:+$out,}$s"; fi
+  done
+  printf '%s' "$out"
+}
+# live_state_is ISSUE STATE → 0 only when the live state-label set is exactly STATE.
+live_state_is() {
+  local live
+  live=$(live_state_labels "$1") || { echo "[autopilot] recover-stale: skip issue=$1 (live label read failed)"; return 1; }
+  # Skip only when the listed state is absent from the live set, or a state
+  # DOWNSTREAM of it is present. Double-labelled drift that still carries the
+  # listed state is reported loudly as state-ambiguous but still acted on.
+  case ",$live," in
+    *",$2,"*) ;;
+    *) echo "[autopilot] recover-stale: skip issue=$1 (live state '${live:-none}' != listed '$2')"; return 1 ;;
+  esac
+  if [ "$live" != "$2" ]; then
+    case "$live" in
+      *needs-qa*|*qa-passed*|*needs-dev-resume*|*ready-for-human*|*parked*)
+        echo "[autopilot] recover-stale: skip issue=$1 (live state '$live' != listed '$2': downstream state present)"; return 1 ;;
+    esac
+    echo "[autopilot] recover-stale: WARN state-ambiguous issue=$1 live='$live' listed='$2' (acting on listed state)"
+  fi
+  return 0
+}
+
 for ISSUE in "${STALE_IN_PROGRESS[@]:-}"; do
   [ -z "$ISSUE" ] && continue
+  live_state_is "$ISSUE" in-progress || continue
   if inflight_contains "$INFLIGHT_PR_ISSUES" "$ISSUE"; then
     # An open PR already references this issue → awaiting review, not stalled.
     if gh issue edit "$ISSUE" --repo "$REPO" --remove-label in-progress --add-label needs-qa 2>/dev/null; then
@@ -214,6 +254,15 @@ if [ "${#CANDIDATES[@]}" -gt 0 ]; then
     if [ "$CLEARED_RC" -ne 0 ]; then
       echo "[autopilot] recover-stale: skip stale_blocked (blockers-cleared exited $CLEARED_RC; promoting nothing): $(head -n 3 "$CLEARED_ERR_FILE" | tr '\n' ' ')"
       CLEARED_LINES=""
+    elif [ -z "$CLEARED_LINES" ]; then
+      # Previously silent arm (issue #5393): rc 0 but nothing cleared. Name it so a
+      # flaky "not unblocked" outcome is attributable from the captured stdout.
+      echo "[autopilot] recover-stale: skip stale_blocked (blockers-cleared cleared nothing for ${#CANDIDATES[@]} candidate(s)): $(head -n 3 "$CLEARED_ERR_FILE" | tr '\n' ' ')"
+    fi
+    if [ "${HYDRA_RECOVER_STALE_DEBUG:-}" = 1 ]; then
+      # Full child stderr (e.g. ghJson failure codes), read BEFORE the rm below.
+      echo "[autopilot] recover-stale: DEBUG blockers-cleared rc=$CLEARED_RC stderr:"
+      sed 's/^/[autopilot] recover-stale: DEBUG | /' "$CLEARED_ERR_FILE"
     fi
     rm -f "$CLEARED_ERR_FILE"
     while read -r ISSUE CLEARED; do
@@ -222,6 +271,7 @@ if [ "${#CANDIDATES[@]}" -gt 0 ]; then
         echo "[autopilot] recover-stale: skip malformed blockers-cleared line (issue='$ISSUE')"
         continue
       fi
+      live_state_is "$ISSUE" blocked || continue
       if inflight_contains "$INFLIGHT_PR_ISSUES" "$ISSUE"; then
         # An open PR already references it: awaiting review, never ready-for-agent.
         if gh issue edit "$ISSUE" --repo "$REPO" --remove-label blocked --add-label needs-qa 2>/dev/null; then

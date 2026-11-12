@@ -260,7 +260,8 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
   const lastWalk = v.scout.lastWalkIso.ok ? (v.scout.lastWalkIso.value ?? "").replaceAll('"', "") : "";
 
   const signals: TurnSnapshotSignals = {
-    orch_work_available: orchBoardCount(v.orchBoard, "ready_for_agent") > 0,
+    // #5423: the base count minus ready rows an open PR already covers (same shape as the Target's adjustedReadyForAgent).
+    orch_work_available: Math.max(0, orchBoardCount(v.orchBoard, "ready_for_agent") - v.picks.readyInflightExcluded.length) > 0,
     needs_qa_orch: orchBoardCount(v.orchBoard, "needs_qa") > 0,
     needs_research: orchBoardCount(v.orchBoard, "needs_research") > 0,
     needs_triage_orch: orchBoardCount(v.orchBoard, "needs_triage") > 0,
@@ -303,15 +304,23 @@ export function buildTurnSnapshot(v: TurnSnapshotValues, opts: { nowMs: number; 
     retro_run_drillable: v.retro.drillable === true,
     review_retro_due: v.retro.reviewDue === true,
 
+    // #5319: the parked issue set (sorted); [] on degrade (the collector marks `parkedIssues`).
+    orch_parked_issues: v.prGate.parkedIssues.ok ? [...v.prGate.parkedIssues.value].sort((a, b) => a - b) : [],
+    orch_parked_prs: [...v.prGate.parkedPrs].sort((a, b) => a - b),
+    orch_parked_unreadable: !v.prGate.parkedIssues.ok,
     orch_prs_dirty: [...v.prGate.dirty],
     orch_prs_unchecked: [...v.prGate.unchecked],
     orch_prs_behind: [...v.prGate.behind],
+    // #5400: open PRs with no closing issue (unreachable by every PR lane)
+    orch_prs_no_closing_issue: [...v.prGate.noClosingIssue],
     orch_ci_trigger_stale: v.prGate.ciTriggerStale.ok && v.prGate.ciTriggerStale.value,
     orch_prs_red_resume: v.prGate.redResume.ok ? [...v.prGate.redResume.value] : [],
     orch_dev_resume_pick: pin(v.prGate.devResumePick.ok ? v.prGate.devResumePick.value : null),
     // #4808: a bare anchor, not a pin — there is no PR, branch or head to name.
     orch_dev_resume_nopr_anchor: v.prGate.devResumeNoprPick.ok ? v.prGate.devResumeNoprPick.value : null,
     orch_dirty_forward_fix: pin(dirtyFix.pick),
+    // #5253: the pick's PR number iff a QA FAIL is pending at its head (two-phase arm), else null.
+    orch_dirty_forward_fix_fail_pr: v.prGate.dirtyFixFailPr,
     orch_prs_dirty_surface: dirtyFix.surface.map((e) => ({ pr: e.pr, closing_issue: e.closingIssue })),
     // #5052: fail closed - a degraded recheck renders [] (the collector already marked it).
     orch_qa_verdict_recheck: v.prGate.qaVerdictRecheck.ok
@@ -389,6 +398,15 @@ function observability(v: TurnSnapshotValues): Record<string, unknown> {
     // #412's live-PR count — the kv wire printed it for the session to read;
     // no decide.py rule gates on it (dev_orch gates on its slot + pick).
     active_dev_orch: v.picks.activeDevOrch,
+    // #5423: ready-for-agent issues held out of orch_work_available by an open PR.
+    orch_ready_inflight_excluded: [...v.picks.readyInflightExcluded],
+    // #5406: provenance for retro_run_drillable — which candidate and which
+    // clause. Never under `blobs` (closed decide.py-normalised set).
+    retro: {
+      candidate: v.retro.runs.ok ? v.retro.runs.value.candidate : null,
+      drillable: v.retro.drillable,
+      drillableReason: v.retro.drillableReason,
+    },
   };
 }
 

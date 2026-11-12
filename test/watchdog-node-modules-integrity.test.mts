@@ -1,69 +1,54 @@
 /**
- * Regression test for issue #4175 — the `## NODE MODULES INTEGRITY` block in
- * scripts/hydra-watchdog.sh (`run_node_modules_integrity`), plus its TS
- * vocabulary wiring.
+ * Regression test for scripts/hydra-watchdog.sh — the part of the watchdog that
+ * stays in bash after the #5099 collapse: the `## NODE MODULES INTEGRITY` check
+ * (issue #4175), the check-table iteration (`plan`), and the CLI-start alarm.
  *
- * Context: on 2026-08-19 a `/dev/shm` hydra-betting worktree's `web/node_modules`
- * symlink reached back through the main checkout, and a destructive install
- * step inside the worktree wiped `/home/gabe/hydra-betting/web/node_modules` —
- * taking down six money-critical Target services for ~70 minutes with no
- * signal to anything watching the main checkout. This block detects the
- * structural invariant the incident violated (a watched install root exists,
- * has `.bin/`, holds enough entries, and the referenced binary is present and
- * executable) and delivers via the SAME #3848 taxonomy `run_launch_flow`
- * established: an enveloped XADD onto `hydra:notifications`, reusing the
- * SET-NX-since/fired dedup design (own key prefix, own block).
+ * Context for the nm block: on 2026-08-19 a `/dev/shm` hydra-betting worktree's
+ * `web/node_modules` symlink reached back through the main checkout and a
+ * destructive install step wiped `/home/gabe/hydra-betting/web/node_modules`,
+ * taking down six money-critical Target services for ~70 minutes with no signal.
+ * The block asserts the structural invariant the incident violated (a watched
+ * root exists, has `.bin/`, holds enough entries, the referenced binary is
+ * executable) and delivers an enveloped in-band XADD plus an Operator Channel
+ * page, with the SET-NX-since / fired dedup, threshold 0.
  *
- * Two isolation mechanisms, mirroring test/launch-flow-delivery.test.mts:
- *   - the extracted block COPY is rebound onto a per-run Redis key namespace,
- *     so a live production watchdog tick can neither rewrite our fixtures nor
- *     be disturbed by them;
- *   - in-band delivery is pointed at a per-run NOTIFY STREAM via the block's
- *     own HYDRA_WATCHDOG_NM_NOTIFY_STREAM hook, so a behavioural case can
- *     NEVER write a real event onto the PRODUCTION hydra:notifications stream.
- * Watched roots are synthetic temp directories via HYDRA_WATCHDOG_NM_ROOTS —
- * no case ever points the check at a real, live install root.
+ * Harness (env seams, never PATH shims, never source reads):
+ *   - the WHOLE script is spawned (`bash scripts/hydra-watchdog.sh`);
+ *   - HYDRA_WATCHDOG_NODE points at an argv-recording stub `node` that answers
+ *     `plan` and records every subcommand it is asked to run;
+ *   - HYDRA_WATCHDOG_OPERATOR_NOTIFY points at an argv-recording stub;
+ *   - watched roots are synthetic temp dirs via HYDRA_WATCHDOG_NM_ROOTS (their
+ *     path-derived signal names are unique per run, so no key can collide);
+ *   - Redis cases use the launcher's run-OWNED DB and a per-run notify stream;
+ *   - the one resolver case builds a PATH of symlinks to REAL coreutils with no
+ *     node — it reproduces the systemd-unit PATH, it impersonates nothing.
  */
 
-import test, { describe, before, beforeEach, after } from "node:test";
+import test, { describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import {
-  readFileSync,
-  writeFileSync,
-  unlinkSync,
-  mkdirSync,
-  rmSync,
-  chmodSync,
-} from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 
-import { STREAMS } from "../src/event-bus-stream-keys.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
-import { ALERT_TYPES } from "../src/notification/alert-grammar.ts";
-import { isPageKind } from "../src/operator-channel/page-list.ts";
-import {
-  WATCHDOG_SPAWN_TIMEOUT_MS,
-  WATCHDOG_REDIS_TIMEOUT_MS,
-  throwIfTimedOut,
-} from "./_helpers/watchdog-timeouts.mts";
+import { ALERT_TYPES, isPageKind } from "../src/operator-channel/page-list.ts";
+import { WATCHDOG_CHECKS } from "../src/watchdog/checks.ts";
+import { WATCHDOG_SPAWN_TIMEOUT_MS, WATCHDOG_REDIS_TIMEOUT_MS, throwIfTimedOut } from "./_helpers/watchdog-timeouts.mts";
 import { ownedDbContext } from "./_helpers/owned-redis-db.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
 
-const NM_KEY_PREFIX_LITERAL = "hydra:autopilot:node-modules-integrity";
+/** The Redis key prefix the nm block uses (a persisted contract: a deploy mid-episode must not re-page). */
+const NM_KEY_PREFIX = "hydra:autopilot:node-modules-integrity";
+const NM_LOG = "hydra-node-modules-integrity-watchdog:";
 
-// Per-run key/stream namespace (see file header + test/launch-flow-delivery
-// .test.mts for why nothing here may touch shared production keys/streams).
 const RUN_NS = `hydra:test:nm-integrity-${process.pid}-${randomUUID().slice(0, 8)}`;
-const TEST_NM_PREFIX = `${RUN_NS}:nm-integrity`;
 const TEST_NOTIFY_STREAM = `${RUN_NS}:notifications`;
 
-const SINCE = (sig: string) => `${TEST_NM_PREFIX}:since:${sig}`;
-const FIRED = (sig: string) => `${TEST_NM_PREFIX}:fired:${sig}`;
+const { db: OWNED_DB, skip: OWNED_DB_SKIP } = ownedDbContext();
 
 function dockerRedisAvailable(): boolean {
   const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "PING"], {
@@ -72,33 +57,23 @@ function dockerRedisAvailable(): boolean {
   });
   return (r.stdout ?? "").trim() === "PONG";
 }
-
 const DOCKER = dockerRedisAvailable();
 
 function drc(args: string[]): string {
-  const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
+  const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", "-n", OWNED_DB ?? "0", ...args], {
     encoding: "utf-8",
     timeout: WATCHDOG_REDIS_TIMEOUT_MS,
   });
   return (r.stdout ?? "").trim();
 }
 
-function sigForRoot(root: string): string {
-  return root.replace(/[^a-zA-Z0-9]+/g, "_").replace(/_+/g, "_");
-}
+const sigForRoot = (root: string): string => root.replace(/[^a-zA-Z0-9]+/g, "_").replace(/_+/g, "_");
+const SINCE = (root: string): string => `${NM_KEY_PREFIX}:since:${sigForRoot(root)}`;
+const FIRED = (root: string): string => `${NM_KEY_PREFIX}:fired:${sigForRoot(root)}`;
+const getFired = (root: string): boolean => drc(["EXISTS", FIRED(root)]) === "1";
 
-function cleanState(root: string): void {
-  const sig = sigForRoot(root);
-  drc(["DEL", SINCE(sig), FIRED(sig)]);
-}
-
-function getFired(root: string): boolean {
-  return drc(["EXISTS", FIRED(sigForRoot(root))]) === "1";
-}
-
-/** One XADD'd in-band entry off the namespaced notify stream, fields folded
- * (mirrors test/launch-flow-delivery.test.mts's notifyEntriesSimple). */
-function notifyEntriesSimple(): { fields: Record<string, string> }[] {
+/** In-band entries off the per-run notify stream, envelope fields folded. */
+function notifyEntries(): { fields: Record<string, string> }[] {
   const out = drc(["XRANGE", TEST_NOTIFY_STREAM, "-", "+"]);
   if (out === "") return [];
   const lines = out.split("\n");
@@ -119,83 +94,98 @@ function notifyEntriesSimple(): { fields: Record<string, string> }[] {
 }
 
 // ---------------------------------------------------------------------------
-// Extract run_node_modules_integrity() into a temp file, rebound onto this
-// run's Redis key namespace (mirrors test/launch-flow-delivery.test.mts).
+// Harness: stub node + stub operator-notify, both recording argv.
 // ---------------------------------------------------------------------------
 
-const BLOCK = join(tmpdir(), `hydra-nm-integrity-block-${process.pid}.sh`);
+const SCRATCH = mkdtempSync(join(tmpdir(), "hydra-watchdog-entry-"));
+const NODE_STUB = join(SCRATCH, "node-stub");
+const NODE_LOG = join(SCRATCH, "node-calls.log");
+const NOTIFY_STUB = join(SCRATCH, "operator-notify-stub");
+const NOTIFY_LOG = join(SCRATCH, "notify-calls.log");
+const ALARM_DIR = join(SCRATCH, "alarm-state");
+const ALARM_MARKER = join(ALARM_DIR, "hydra-watchdog-cli-failed.since");
 
-before(() => {
-  const src = readFileSync(WATCHDOG, "utf-8");
-  const start = src.indexOf("run_node_modules_integrity()");
-  assert.ok(start >= 0, "run_node_modules_integrity() not found in hydra-watchdog.sh");
-  const after = src.slice(start);
-  const end = after.search(/^}/m);
-  assert.ok(end >= 0, "run_node_modules_integrity() closing brace not found");
-  const body = after.slice(0, end + 1);
-  assert.ok(body.includes("track_signal"), "extracted block missing track_signal");
-  assert.ok(body.includes("deliver_signal"), "extracted block missing deliver_signal");
-
-  const namespaced = body.split(`"${NM_KEY_PREFIX_LITERAL}"`).join(`"${TEST_NM_PREFIX}"`);
-  assert.ok(
-    namespaced.includes(`"${TEST_NM_PREFIX}"`),
-    "failed to rebind NM_KEY_PREFIX onto the test namespace",
-  );
-  writeFileSync(BLOCK, namespaced);
-});
+writeFileSync(
+  NODE_STUB,
+  [
+    "#!/bin/sh",
+    '# argv: --experimental-strip-types <script> <subcommand>',
+    'sub="$3"',
+    'echo "$*" >> "$NODE_LOG"',
+    'if [ "$sub" = plan ]; then',
+    '  [ -n "$STUB_PLAN_RC" ] && exit "$STUB_PLAN_RC"',
+    "  printf 'alpha\\thydra-alpha-watchdog:\\t11\\nbeta\\thydra-beta-watchdog:\\t22\\n'",
+    "  exit 0",
+    "fi",
+    '[ "$sub" = beta ] && [ -n "$STUB_BETA_RC" ] && exit "$STUB_BETA_RC"',
+    'echo "STUB-RAN $sub"',
+    "",
+  ].join("\n"),
+);
+writeFileSync(NOTIFY_STUB, ['#!/bin/sh', 'echo "$*" >> "$NOTIFY_LOG"', 'exit "${STUB_NOTIFY_RC:-0}"', ""].join("\n"));
+chmodSync(NODE_STUB, 0o755);
+chmodSync(NOTIFY_STUB, 0o755);
 
 after(() => {
-  try {
-    unlinkSync(BLOCK);
-  } catch {
-    /* best-effort cleanup */
-  }
+  rmSync(SCRATCH, { recursive: true, force: true });
 });
 
-function runBlock(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
-  // HYDRA_REDIS_DB is pinned to "0" for the same reason as
-  // test/watchdog-launch-flow.test.mts's runBlock() (issue #4183): this
-  // suite's own seed/read helpers (drc, cleanState, getFired) are hardcoded
-  // to db 0 with no `-n` selector — that IS db 0, this block's default
-  // target. scripts/test/redis-db-launch.mjs now exports HYDRA_REDIS_DB into
-  // this whole node:test process's env (so a bash-shelled test inherits the
-  // run's isolation automatically), so an unpinned `...process.env` here
-  // would silently redirect rc_write/rc_read to the launcher's derived
-  // per-run DB while every seed/assertion in this suite kept reading/writing
-  // db 0 — rc_read would find nothing, every case would degrade to the
-  // "no signal" branch. The dedicated #4183 describe below exercises
-  // DB-selection itself; this suite deliberately keeps testing against db 0.
-  // A caller may still override via its own `env` (last-spread wins),
-  // mirroring runBlock()'s HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM precedent.
-  const r = spawnSync("bash", ["-c", `set -euo pipefail; source '${BLOCK}'; run_node_modules_integrity`], {
+function lines(path: string): string[] {
+  return existsSync(path) ? readFileSync(path, "utf-8").trim().split("\n").filter(Boolean) : [];
+}
+const nodeCalls = (): string[] => lines(NODE_LOG);
+const notifyCalls = (): string[] => lines(NOTIFY_LOG);
+
+function resetLogs(): void {
+  rmSync(NODE_LOG, { force: true });
+  rmSync(NOTIFY_LOG, { force: true });
+  rmSync(ALARM_DIR, { recursive: true, force: true });
+  mkdirSync(ALARM_DIR, { recursive: true });
+}
+
+/** A healthy node_modules root (so the nm block is quiet on ticks that test something else). */
+function makeHealthy(root: string, entries = 25): void {
+  mkdirSync(join(root, ".bin"), { recursive: true });
+  writeFileSync(join(root, ".bin", "tsx"), "#!/usr/bin/env bash\nexit 0\n");
+  chmodSync(join(root, ".bin", "tsx"), 0o755);
+  for (let i = 0; i < entries; i++) mkdirSync(join(root, `pkg${i}`), { recursive: true });
+}
+
+const HEALTHY_ROOT = join(SCRATCH, "healthy-default");
+makeHealthy(HEALTHY_ROOT);
+
+function runScript(env: Record<string, string | undefined>, opts: { path?: string } = {}): { status: number; stdout: string; stderr: string } {
+  const base: Record<string, string | undefined> = { ...process.env };
+  const r = spawnSync("bash", [WATCHDOG], {
     env: {
-      ...process.env,
-      HYDRA_REDIS_HOST: "docker",
-      HYDRA_REDIS_DB: "0",
-      // ADR-0045 D2 (#5046): the block now calls the Operator Channel CLI at its
-      // fired/recovery edges through HYDRA_WATCHDOG_OPERATOR_NOTIFY; this suite
-      // asserts nothing about that delivery (test/launch-flow-delivery does), so
-      // a no-op stub keeps it from booting the PRODUCTION checkout's CLI.
-      HYDRA_WATCHDOG_OPERATOR_NOTIFY: "/bin/true",
+      ...base,
+      ...(opts.path !== undefined ? { PATH: opts.path } : {}),
+      HYDRA_ROOT: REPO_ROOT,
+      HYDRA_WATCHDOG_NODE: NODE_STUB,
+      HYDRA_WATCHDOG_OPERATOR_NOTIFY: NOTIFY_STUB,
+      HYDRA_WATCHDOG_CLI_ALARM_STATE_DIR: ALARM_DIR,
+      HYDRA_WATCHDOG_NM_ROOTS: HEALTHY_ROOT,
       HYDRA_WATCHDOG_NM_NOTIFY_STREAM: TEST_NOTIFY_STREAM,
+      HYDRA_REDIS_DB: OWNED_DB ?? "0",
+      NODE_LOG,
+      NOTIFY_LOG,
       ...env,
     },
     encoding: "utf-8",
     timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
   });
-  throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_node_modules_integrity block");
+  throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "hydra-watchdog.sh tick");
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-function nmLines(stdout: string): string {
-  return stdout
+const nmLines = (stdout: string): string =>
+  stdout
     .split("\n")
-    .filter((l) => l.includes("hydra-node-modules-integrity-watchdog:"))
+    .filter((l) => l.includes(NM_LOG))
     .join("\n");
-}
 
 // =============================================================================
-// Structural / drift-guard cases — run unconditionally (no Redis needed).
+// Vocabulary wiring (no Redis, no bash).
 // =============================================================================
 
 describe("issue #4175 — TypeScript vocabulary wiring", () => {
@@ -204,363 +194,309 @@ describe("issue #4175 — TypeScript vocabulary wiring", () => {
   });
 
   test("is in BOTH ALERT_TYPES and the page list", () => {
-    assert.ok(
-      ALERT_TYPES.has(E.INFRA_NODE_MODULES_WIPED),
-      "a wiped node_modules must raise a dashboard alert",
-    );
-    assert.ok(
-      isPageKind(E.INFRA_NODE_MODULES_WIPED),
-      "a wiped node_modules must be a Page",
-    );
+    assert.ok(ALERT_TYPES.has(E.INFRA_NODE_MODULES_WIPED), "a wiped node_modules must raise a dashboard alert");
+    assert.ok(isPageKind(E.INFRA_NODE_MODULES_WIPED), "a wiped node_modules must be a Page");
   });
 });
 
-describe("scripts/hydra-watchdog.sh — node-modules-integrity structure (issue #4175)", () => {
-  function blockSource(): string {
-    const src = readFileSync(WATCHDOG, "utf-8");
-    const start = src.indexOf("run_node_modules_integrity()");
-    return src.slice(start, src.indexOf("# Entry point"));
-  }
+// =============================================================================
+// Entry point: the check-table iteration (no Redis).
+// =============================================================================
 
-  test("bash script parses under set -euo pipefail", () => {
-    const syntax = spawnSync("bash", ["-n", WATCHDOG], { encoding: "utf-8" });
-    assert.equal(syntax.status, 0, `watchdog bash -n failed: ${syntax.stderr}`);
+describe("scripts/hydra-watchdog.sh — entry point iterates the `plan` table (issue #5099)", () => {
+  beforeEach(resetLogs);
+
+  test("sourcing the script runs nothing (entry-point guard) and exposes resolve_watchdog_node", () => {
+    const r = spawnSync("bash", ["-c", `source ${JSON.stringify(WATCHDOG)}; resolve_watchdog_node`], {
+      env: { ...process.env, HYDRA_WATCHDOG_NODE: NODE_STUB },
+      encoding: "utf-8",
+      timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim(), NODE_STUB, "only the resolver's path is printed; no tick ran");
   });
 
-  test("is wired into the entry point", () => {
-    const src = readFileSync(WATCHDOG, "utf-8");
-    const entry = src.slice(src.indexOf("if [[ \"${BASH_SOURCE[0]}\""));
-    assert.ok(entry.includes("run_node_modules_integrity"), "must run on every real tick");
-  });
-
-  test("in-band event-type literal drift-guards the TS vocabulary", () => {
-    const block = blockSource();
-    assert.ok(
-      block.includes(E.INFRA_NODE_MODULES_WIPED),
-      `bash deliver_signal must publish '${E.INFRA_NODE_MODULES_WIPED}'`,
-    );
-  });
-
-  test("NOTIFY_STREAM default drift-guards STREAMS.NOTIFICATIONS", () => {
-    const block = blockSource();
-    assert.ok(
-      block.includes(`:-${STREAMS.NOTIFICATIONS}}`),
-      `the in-band delivery default must be the TS-owned stream key '${STREAMS.NOTIFICATIONS}'`,
-    );
-  });
-
-  test("watched roots are a list variable, not a literal buried in a condition", () => {
-    const block = blockSource();
-    assert.match(block, /WATCHED_ROOTS=\(/, "roots must be declared as an array");
-    assert.match(block, /for root in "\$\{WATCHED_ROOTS\[@\]\}"/, "the check must iterate the array");
-  });
-
-  test("delivery is an enveloped XADD and carries every envelope field", () => {
-    const block = blockSource();
-    assert.match(block, /rc_write XADD "\$NOTIFY_STREAM" '\*'/, "enveloped XADD onto the notify stream");
-    for (const field of ["id", "type", "source", "timestamp", "correlationId", "payload"]) {
-      assert.ok(new RegExp(`\\b${field}\\b `).test(block), `envelope must carry the '${field}' field`);
+  test("asks the CLI for `plan`, then runs every row as its own subcommand process, in plan order", () => {
+    const r = runScript({});
+    assert.equal(r.status, 0, r.stderr);
+    const calls = nodeCalls().map((c) => c.split(" "));
+    for (const c of calls) {
+      assert.equal(c[0], "--experimental-strip-types");
+      assert.equal(c[1], join(REPO_ROOT, "scripts", "hydra-watchdog.ts"));
     }
+    assert.deepEqual(calls.map((c) => c[2]), ["plan", "alpha", "beta"]);
+    assert.match(r.stdout, /STUB-RAN alpha/);
+    assert.match(r.stdout, /STUB-RAN beta/);
+    assert.equal(notifyCalls().length, 0, "a clean tick pages nothing");
+  });
+
+  test("a single check's non-zero rc is ONE WARN line, never aborts the tick, and does NOT raise the CLI-start alarm", () => {
+    const r = runScript({ STUB_BETA_RC: "7" });
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /hydra-beta-watchdog: WARN beta CLI FAILED \(rc=7\) — beta check skipped this tick/);
+    assert.equal(r.stdout.match(/CLI FAILED/g)?.length, 1, "exactly one WARN");
+    assert.equal(notifyCalls().length, 0, "no page for a single check failing");
+    assert.equal(existsSync(ALARM_MARKER), false);
+    assert.match(nmLines(r.stdout), /tick processed/, "the nm block still ran");
+  });
+
+  test("the real plan names every WATCHDOG_CHECKS row (the CLI prints the table bash iterates)", () => {
+    const r = spawnSync(process.execPath, ["--no-warnings", "--experimental-strip-types", join(REPO_ROOT, "scripts", "hydra-watchdog.ts"), "plan"], {
+      encoding: "utf-8",
+      timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
+    });
+    throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "hydra-watchdog.ts plan");
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(
+      r.stdout.trim().split("\n").map((l) => l.split("\t")[0]),
+      WATCHDOG_CHECKS.map((c) => c.subcommand),
+    );
   });
 });
 
 // =============================================================================
-// Behavioural cases — gated on the docker hydra-redis-1 container.
+// The CLI-start alarm (no Redis).
 // =============================================================================
 
-describe("run_node_modules_integrity — detection + delivery (issue #4175)", { skip: !DOCKER }, () => {
-  const SCRATCH = join(tmpdir(), `hydra-nm-integrity-scratch-${process.pid}`);
+describe("scripts/hydra-watchdog.sh — CLI-start alarm (issue #5099)", () => {
+  beforeEach(resetLogs);
+
+  test("a failing `plan` pages infra:watchdog_cli_failed ONCE, skips every check, still runs the nm block", () => {
+    const r = runScript({ STUB_PLAN_RC: "7" });
+    assert.equal(r.status, 0, "the script always exits 0");
+    assert.match(r.stdout, /hydra-watchdog-cli: WARN watchdog CLI failed to start \(reason=plan-failed, rc=7\)/);
+    assert.deepEqual(nodeCalls().map((c) => c.split(" ")[2]), ["plan"], "no check ran");
+    const calls = notifyCalls();
+    assert.equal(calls.length, 1);
+    assert.match(
+      calls[0],
+      /^report --kind infra:watchdog_cli_failed --fact reason=plan-failed --fact rc=7$/,
+    );
+    assert.equal(existsSync(ALARM_MARKER), true, "marker written after the CLI exited 0");
+    assert.match(nmLines(r.stdout), /tick processed/, "the nm block must not depend on the CLI");
+
+    const again = runScript({ STUB_PLAN_RC: "7" });
+    assert.equal(again.status, 0);
+    assert.equal(notifyCalls().length, 1, "the marker holds the dedup: no second page");
+  });
+
+  test("an operator-notify failure leaves NO marker, so the next tick retries", () => {
+    runScript({ STUB_PLAN_RC: "7", STUB_NOTIFY_RC: "1" });
+    assert.equal(notifyCalls().length, 1);
+    assert.equal(existsSync(ALARM_MARKER), false, "marker only written when the CLI exited 0");
+    runScript({ STUB_PLAN_RC: "7" });
+    assert.equal(notifyCalls().length, 2, "retried");
+    assert.equal(existsSync(ALARM_MARKER), true);
+  });
+
+  test("the next tick whose plan succeeds resolves the page, then clears the marker", () => {
+    runScript({ STUB_PLAN_RC: "7" });
+    assert.equal(existsSync(ALARM_MARKER), true);
+    const ok = runScript({});
+    assert.equal(ok.status, 0);
+    const calls = notifyCalls();
+    assert.equal(calls.length, 2);
+    assert.match(calls[1], /^resolve --dedup-key infra:watchdog_cli_failed --title Watchdog CLI starts again$/);
+    assert.equal(existsSync(ALARM_MARKER), false);
+    assert.deepEqual(nodeCalls().slice(-2).map((c) => c.split(" ")[2]), ["alpha", "beta"], "checks resume");
+
+    runScript({});
+    assert.equal(notifyCalls().length, 2, "a quiet healthy tick neither pages nor resolves");
+  });
+
+  test("a failed resolve keeps the marker (retry-until-delivered)", () => {
+    runScript({ STUB_PLAN_RC: "7" });
+    runScript({ STUB_NOTIFY_RC: "1" });
+    assert.equal(existsSync(ALARM_MARKER), true);
+  });
+
+  test("nvm-only node, NO notify override: the page is delivered through the resolved node (not bare `node`)", () => {
+    const bin = join(SCRATCH, "nvmonly-bin");
+    mkdirSync(bin, { recursive: true });
+    for (const tool of ["bash", "timeout", "ls", "sort", "tail", "dirname", "env", "date", "find", "wc", "tr", "mktemp", "rm", "grep", "cut", "cat", "head", "sh"]) {
+      const found = spawnSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf-8" }).stdout.trim();
+      if (found && !existsSync(join(bin, tool))) symlinkSync(found, join(bin, tool));
+    }
+    const home = join(SCRATCH, "nvmonly-home");
+    const nvmBin = join(home, ".nvm", "versions", "node", "v99.0.0", "bin");
+    mkdirSync(nvmBin, { recursive: true });
+    symlinkSync(NODE_STUB, join(nvmBin, "node"));
+    const r = runScript(
+      { HYDRA_WATCHDOG_NODE: "", HYDRA_WATCHDOG_OPERATOR_NOTIFY: "", HOME: home, STUB_PLAN_RC: "7", HYDRA_REDIS_HOST: "127.0.0.1", HYDRA_REDIS_PORT: "9" },
+      { path: bin },
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const calls = nodeCalls();
+    const page = calls.find((c) => c.includes("operator-notify.ts"));
+    assert.ok(page, `the page must run via the nvm node stub; node calls: ${calls.join(" | ")}`);
+    assert.match(page, /operator-notify\.ts report --kind infra:watchdog_cli_failed /);
+    assert.equal(existsSync(ALARM_MARKER), true, "page delivered => marker written");
+  });
+
+  test("no node anywhere (the unit's minimal PATH, no nvm) raises the alarm with reason node-missing", () => {
+    const bin = join(SCRATCH, "nodeless-bin");
+    mkdirSync(bin, { recursive: true });
+    for (const tool of ["bash", "timeout", "ls", "sort", "tail", "dirname", "env", "date", "find", "wc", "tr", "mktemp", "rm", "grep", "cut", "cat", "head"]) {
+      const found = spawnSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf-8" }).stdout.trim();
+      if (found && !existsSync(join(bin, tool))) symlinkSync(found, join(bin, tool));
+    }
+    const home = join(SCRATCH, "nodeless-home");
+    mkdirSync(home, { recursive: true });
+    const r = runScript(
+      { HYDRA_WATCHDOG_NODE: "", HOME: home, HYDRA_REDIS_HOST: "127.0.0.1", HYDRA_REDIS_PORT: "9" },
+      { path: bin },
+    );
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /watchdog CLI failed to start \(reason=node-missing, rc=127\)/);
+    assert.match(notifyCalls()[0] ?? "", /^report --kind infra:watchdog_cli_failed --fact reason=node-missing --fact rc=127$/);
+    assert.match(nmLines(r.stdout), /tick processed/, "the nm block still ran without node");
+  });
+});
+
+// =============================================================================
+// Behavioural cases for the nm block — gated on the docker Redis + an owned DB.
+// =============================================================================
+
+describe("node-modules-integrity — detection + delivery (issue #4175)", { skip: !DOCKER ? "docker hydra-redis-1 unavailable" : OWNED_DB_SKIP }, () => {
   let wiped: string;
   let missingBin: string;
   let healthy: string;
   let absent: string;
 
-  function makeHealthy(root: string, entries = 25): void {
-    mkdirSync(join(root, ".bin"), { recursive: true });
-    writeFileSync(join(root, ".bin", "tsx"), "#!/usr/bin/env bash\nexit 0\n");
-    chmodSync(join(root, ".bin", "tsx"), 0o755);
-    for (let i = 0; i < entries; i++) mkdirSync(join(root, `pkg${i}`), { recursive: true });
+  function cleanState(): void {
+    for (const root of [wiped, missingBin, healthy, absent]) if (root) drc(["DEL", SINCE(root), FIRED(root)]);
+    drc(["DEL", TEST_NOTIFY_STREAM]);
   }
 
   beforeEach(() => {
-    rmSync(SCRATCH, { recursive: true, force: true });
+    resetLogs();
     wiped = join(SCRATCH, "wiped");
     missingBin = join(SCRATCH, "missing-bin");
     healthy = join(SCRATCH, "healthy");
-    // "absent": never created; the unreadable-root case writes since/fired state for it (#5137).
     absent = join(SCRATCH, "does-not-exist");
+    for (const d of [wiped, missingBin, healthy]) rmSync(d, { recursive: true, force: true });
     // "wiped": measured incident state — 24K, no .bin/, no packages.
     mkdirSync(wiped, { recursive: true });
     writeFileSync(join(wiped, "some-leftover-file"), "x");
-    // "missing-bin": .bin/ exists and floor is met, but the referenced
-    // binary itself is absent — the 203/EXEC symptom, asserted separately.
+    // "missing-bin": .bin/ exists and the floor is met, but the referenced binary is absent (203/EXEC).
     mkdirSync(join(missingBin, ".bin"), { recursive: true });
     for (let i = 0; i < 25; i++) mkdirSync(join(missingBin, `pkg${i}`), { recursive: true });
     makeHealthy(healthy);
-    cleanState(wiped);
-    cleanState(missingBin);
-    cleanState(healthy);
-    cleanState(absent);
-    drc(["DEL", TEST_NOTIFY_STREAM]);
+    cleanState();
   });
 
   after(() => {
-    rmSync(SCRATCH, { recursive: true, force: true });
-    cleanState(wiped);
-    cleanState(missingBin);
-    cleanState(healthy);
-    cleanState(absent);
-    drc(["DEL", TEST_NOTIFY_STREAM]);
+    cleanState();
   });
 
-  test("fires on a synthetic wiped tree (no .bin/, below entry floor)", () => {
-    const r = runBlock({ HYDRA_WATCHDOG_NM_ROOTS: wiped, HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20" });
-    assert.equal(r.status, 0, `block must never exit non-zero: ${r.stderr}`);
-    assert.match(nmLines(r.stdout), /WARNING NODE_MODULES INTEGRITY/, "must warn on a wiped tree");
+  const tick = (roots: string, extra: Record<string, string> = {}) =>
+    runScript({ HYDRA_WATCHDOG_NM_ROOTS: roots, HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20", ...extra });
+
+  test("fires on a synthetic wiped tree (no .bin/, below entry floor): XADD envelope + page", () => {
+    const r = tick(wiped);
+    assert.equal(r.status, 0, `the script must never exit non-zero: ${r.stderr}`);
+    assert.match(nmLines(r.stdout), /WARNING NODE_MODULES INTEGRITY/);
     assert.match(nmLines(r.stdout), /no-bin-dir/, "reason must name the missing .bin/ dir");
     assert.ok(getFired(wiped), "fired marker must be set");
-    const entries = notifyEntriesSimple();
-    assert.equal(entries.length, 1, "exactly one delivery for the wiped root");
+    assert.equal(drc(["EXISTS", SINCE(wiped)]), "1", "since anchor set");
+    const entries = notifyEntries();
+    assert.equal(entries.length, 1, "exactly one in-band delivery for the wiped root");
     assert.equal(entries[0].fields.type, E.INFRA_NODE_MODULES_WIPED);
+    assert.equal(entries[0].fields.source, "watchdog-node-modules-integrity");
+    assert.match(entries[0].fields.correlationId, /^node-modules-integrity-/);
+    const payload = JSON.parse(entries[0].fields.payload);
+    assert.equal(payload.reason, "no-bin-dir");
+    assert.equal(payload.thresholdMs, 0);
+    const pages = notifyCalls().filter((c) => c.startsWith("report "));
+    assert.equal(pages.length, 1);
+    assert.match(pages[0], /^report --kind infra:node_modules_wiped --alert false --fact signal=/); // XADD already carries the alert
+    assert.match(pages[0], /--fact reason=no-bin-dir/);
   });
 
   test("fires separately when .bin/ exists but the referenced binary is missing (203/EXEC case)", () => {
-    const r = runBlock({
-      HYDRA_WATCHDOG_NM_ROOTS: missingBin,
-      HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20",
-      HYDRA_WATCHDOG_NM_REQUIRED_BIN: "tsx",
-    });
-    assert.equal(r.status, 0, `block must never exit non-zero: ${r.stderr}`);
-    assert.match(nmLines(r.stdout), /WARNING NODE_MODULES INTEGRITY/, "must warn when the binary is missing");
+    const r = tick(missingBin, { HYDRA_WATCHDOG_NM_REQUIRED_BIN: "tsx" });
+    assert.equal(r.status, 0);
     assert.match(nmLines(r.stdout), /missing-binary:tsx/, "reason must name the missing binary");
     assert.ok(getFired(missingBin));
   });
 
+  test("reports below-entry-floor with the measured count", () => {
+    const r = tick(healthy, { HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "999" });
+    assert.match(nmLines(r.stdout), /below-entry-floor:\d+<999/);
+  });
+
   test("stays quiet against a healthy install", () => {
-    const r = runBlock({ HYDRA_WATCHDOG_NM_ROOTS: healthy, HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20" });
+    const r = tick(healthy);
     assert.equal(r.status, 0);
     assert.doesNotMatch(nmLines(r.stdout), /WARNING/, "a healthy install must never warn");
     assert.ok(!getFired(healthy));
-    assert.equal(notifyEntriesSimple().length, 0, "no delivery for a healthy root");
+    assert.equal(notifyEntries().length, 0);
+    assert.equal(notifyCalls().filter((c) => c.startsWith("report ")).length, 0);
   });
 
   test("checks multiple watched roots independently (colon-separated list)", () => {
-    const r = runBlock({
-      HYDRA_WATCHDOG_NM_ROOTS: `${wiped}:${healthy}`,
-      HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20",
-    });
-    assert.equal(r.status, 0);
-    assert.match(nmLines(r.stdout), /2 root\(s\) watched/, "both roots must be processed");
+    const r = tick(`${wiped}:${healthy}`);
+    assert.match(nmLines(r.stdout), /2 root\(s\) watched/);
     assert.ok(getFired(wiped), "the broken root must fire");
     assert.ok(!getFired(healthy), "the healthy root must not fire");
-    assert.equal(notifyEntriesSimple().length, 1, "only the broken root delivers");
+    assert.equal(notifyEntries().length, 1, "only the broken root delivers");
   });
 
   test("dedup: a second consecutive broken tick does not re-deliver", () => {
-    runBlock({ HYDRA_WATCHDOG_NM_ROOTS: wiped, HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20" });
-    assert.equal(notifyEntriesSimple().length, 1);
-    const r2 = runBlock({ HYDRA_WATCHDOG_NM_ROOTS: wiped, HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20" });
+    tick(wiped);
+    assert.equal(notifyEntries().length, 1);
+    const r2 = tick(wiped);
     assert.equal(r2.status, 0);
     assert.doesNotMatch(nmLines(r2.stdout), /WARNING/, "the fired marker must suppress a re-warn");
-    assert.equal(notifyEntriesSimple().length, 1, "still exactly one delivery after the second tick");
+    assert.equal(notifyEntries().length, 1);
+    assert.equal(notifyCalls().filter((c) => c.startsWith("report ")).length, 1);
   });
 
-  test("recovery clears the fired marker, and a fresh streak re-delivers", () => {
-    runBlock({ HYDRA_WATCHDOG_NM_ROOTS: wiped, HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20" });
+  test("recovery resolves once, clears both markers, and a fresh streak re-delivers", () => {
+    tick(wiped);
     assert.ok(getFired(wiped));
 
-    // Recover the same path in place, then tick again onto that path.
-    makeHealthy(wiped);
-    runBlock({ HYDRA_WATCHDOG_NM_ROOTS: wiped, HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20" });
+    makeHealthy(wiped); // recover the same path in place
+    tick(wiped);
     assert.ok(!getFired(wiped), "recovery must DEL the fired marker");
+    assert.equal(drc(["EXISTS", SINCE(wiped)]), "0", "recovery must DEL the since anchor");
+    const resolves = notifyCalls().filter((c) => c.startsWith("resolve "));
+    assert.equal(resolves.length, 1);
+    assert.match(resolves[0], /^resolve --dedup-key infra:node_modules_wiped --title node_modules integrity recovered: /);
 
-    // Break it again — a fresh streak must re-fire (recurrence, never
-    // acknowledgement, mirroring run_launch_flow's contract).
+    tick(wiped);
+    assert.equal(notifyCalls().filter((c) => c.startsWith("resolve ")).length, 1, "no second resolve on a quiet healthy tick");
+
     rmSync(join(wiped, ".bin"), { recursive: true, force: true });
-    const r3 = runBlock({ HYDRA_WATCHDOG_NM_ROOTS: wiped, HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20" });
+    const r3 = tick(wiped);
     assert.match(nmLines(r3.stdout), /WARNING NODE_MODULES INTEGRITY/, "a fresh streak must re-fire");
-    assert.equal(notifyEntriesSimple().length, 2, "the fresh streak delivers a second event");
+    assert.equal(notifyEntries().length, 2);
   });
 
-  test("never exits non-zero even against an unreadable root", () => {
-    const r = runBlock({ HYDRA_WATCHDOG_NM_ROOTS: absent, HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20" });
-    assert.equal(r.status, 0, `block must be fail-safe: ${r.stderr}`);
-    assert.match(nmLines(r.stdout), /root-absent/, "an absent root must be reported distinguishably");
-  });
-});
-
-// =============================================================================
-// HYDRA_REDIS_DB threads through rc_write/rc_read (issue #4183). Its own
-// top-level describe with its own before/beforeEach/after, per this repo's
-// shared-Redis-state authoring rule. It sources a SEPARATE extracted-block
-// copy rebound onto its OWN key namespace (OWN_NS below) rather than reusing
-// TEST_NM_PREFIX/SINCE/FIRED from the "detection + delivery" describe above:
-// those keys are also written on db 0 by this test's own "falls back to db 0"
-// cases, and node's test runner does not guarantee top-level describes in one
-// file never overlap in time, so sharing a key namespace with another
-// describe's db-0 traffic is a real collision risk, not just a style
-// preference. Mirrors the identical #4183 describe added to
-// test/watchdog-launch-flow.test.mts for run_launch_flow's copy.
-// =============================================================================
-
-describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through run_node_modules_integrity's rc_write/rc_read (issue #4183)", { skip: !DOCKER }, () => {
-  // The run-OWNED Redis DB + its skip verdict, captured at definition time. The
-  // canonical rule (never a pool literal; null => skip or fail loud; owned-DB
-  // cleanup skipped, never redirected to db 0) is ownedDbContext's doc comment
-  // in test/_helpers/owned-redis-db.mts.
-  const { db: OWNED_DB, skip: OWNED_DB_SKIP } = ownedDbContext();
-
-  // Fully separate key namespace from TEST_NM_PREFIX/SINCE/FIRED above — this
-  // describe never touches those keys, on any DB.
-  const OWN_NS = `${RUN_NS}-4183`;
-  const OWN_NM_PREFIX = `${OWN_NS}:nm-integrity`;
-  const OWN_SINCE = (sig: string) => `${OWN_NM_PREFIX}:since:${sig}`;
-  const OWN_FIRED = (sig: string) => `${OWN_NM_PREFIX}:fired:${sig}`;
-  const OWN_NOTIFY_STREAM = `${OWN_NS}:notifications`;
-
-  const OWN_BLOCK = join(tmpdir(), `hydra-nm-integrity-block-4183-${process.pid}.sh`);
-  const OWN_SCRATCH = join(tmpdir(), `hydra-nm-integrity-scratch-4183-${process.pid}`);
-  let wipedRoot: string;
-
-  before(() => {
-    // Mirrors the file-level before()'s extraction + rebind, but onto this
-    // describe's OWN literal instead of NM_KEY_PREFIX_LITERAL — see the block
-    // comment above for why a separate namespace is required.
-    const src = readFileSync(WATCHDOG, "utf-8");
-    const start = src.indexOf("run_node_modules_integrity()");
-    assert.ok(start >= 0, "run_node_modules_integrity() not found in hydra-watchdog.sh");
-    const rest = src.slice(start);
-    const end = rest.search(/^}/m);
-    assert.ok(end >= 0, "run_node_modules_integrity() closing brace not found");
-    const body = rest.slice(0, end + 1);
-    const namespaced = body.split(`"${NM_KEY_PREFIX_LITERAL}"`).join(`"${OWN_NM_PREFIX}"`);
-    assert.ok(
-      namespaced.includes(`"${OWN_NM_PREFIX}"`),
-      "failed to rebind this describe's own key literal",
-    );
-    writeFileSync(OWN_BLOCK, namespaced);
+  test("never exits non-zero even against an absent root", () => {
+    const r = tick(absent);
+    assert.equal(r.status, 0, `the script must be fail-safe: ${r.stderr}`);
+    assert.match(nmLines(r.stdout), /root-absent/);
   });
 
-  after(() => {
-    try {
-      unlinkSync(OWN_BLOCK);
-    } catch {
-      /* best-effort cleanup */
-    }
-    rmSync(OWN_SCRATCH, { recursive: true, force: true });
-    cleanOwnBothDbs();
-  });
-
-  /** One `docker exec … redis-cli -n <db> …` round-trip against an explicit DB. */
-  function drcAt(db: string, args: string[]): string {
-    const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", "-n", db, ...args], {
+  test("HYDRA_REDIS_DB threads through: writes land in the selected DB, never db 0 (issue #4183)", () => {
+    assert.ok(OWNED_DB !== null, "full-suite launcher run must export an owned HYDRA_REDIS_DB (#5062)");
+    tick(wiped);
+    assert.equal(drc(["EXISTS", FIRED(wiped)]), "1", "fired marker lands in the selected DB");
+    const atZero = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", "-n", "0", "EXISTS", FIRED(wiped)], {
       encoding: "utf-8",
       timeout: WATCHDOG_REDIS_TIMEOUT_MS,
     });
-    return (r.stdout ?? "").trim();
-  }
-
-  function existsAt(db: string, key: string): boolean {
-    return drcAt(db, ["EXISTS", key]) === "1";
-  }
-
-  function cleanOwnBothDbs(): void {
-    const sig = sigForRoot(wipedRoot ?? "");
-    const keys = sig ? [OWN_SINCE(sig), OWN_FIRED(sig)] : [];
-    if (keys.length > 0) {
-      drcAt("0", ["DEL", ...keys]);
-      if (OWNED_DB !== null) drcAt(OWNED_DB, ["DEL", ...keys]);
-    }
-    drcAt("0", ["DEL", OWN_NOTIFY_STREAM]);
-    if (OWNED_DB !== null) drcAt(OWNED_DB, ["DEL", OWN_NOTIFY_STREAM]);
-  }
-
-  beforeEach(() => {
-    rmSync(OWN_SCRATCH, { recursive: true, force: true });
-    wipedRoot = join(OWN_SCRATCH, "wiped");
-    mkdirSync(wipedRoot, { recursive: true });
-    writeFileSync(join(wipedRoot, "some-leftover-file"), "x");
-    cleanOwnBothDbs();
+    assert.equal((atZero.stdout ?? "").trim(), "0", "a write with HYDRA_REDIS_DB set must never land in db 0");
   });
 
-  /**
-   * Source THIS describe's own rebound block and call it once.
-   *
-   * Unlike runBlock() above, this deliberately does NOT pin HYDRA_REDIS_DB —
-   * that is exactly the variable under test here. But scripts/test/
-   * redis-db-launch.mjs exports HYDRA_REDIS_DB into the ambient env of this
-   * whole node:test process (issue #4183), so a bare `...process.env` would
-   * make the "unset HYDRA_REDIS_DB" case not actually be unset — it would
-   * inherit the launcher's derived per-run value. Strip it from the base env
-   * first so each call site's own `env` (or its absence) is what the child
-   * actually observes.
-   */
-  function runOwnBlock(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
-    const baseEnv: Record<string, string | undefined> = { ...process.env };
-    delete baseEnv.HYDRA_REDIS_DB;
-    const r = spawnSync("bash", ["-c", `set -euo pipefail; source '${OWN_BLOCK}'; run_node_modules_integrity`], {
-      env: {
-        ...baseEnv,
-        HYDRA_REDIS_HOST: "docker",
-        HYDRA_WATCHDOG_OPERATOR_NOTIFY: "/bin/true", // no-op CLI stub (#5046), see runBlock()
-        HYDRA_WATCHDOG_NM_NOTIFY_STREAM: OWN_NOTIFY_STREAM,
-        HYDRA_WATCHDOG_NM_ROOTS: wipedRoot,
-        HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20",
-        ...env,
-      },
+  test("a non-numeric HYDRA_REDIS_DB falls back to db 0 (the documented default)", () => {
+    tick(wiped, { HYDRA_REDIS_DB: "not-a-number" });
+    const atZero = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", "-n", "0", "EXISTS", FIRED(wiped)], {
       encoding: "utf-8",
-      timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
+      timeout: WATCHDOG_REDIS_TIMEOUT_MS,
     });
-    throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_node_modules_integrity block (#4183 own-namespace)");
-    return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-  }
-
-  test("a bash-side write with HYDRA_REDIS_DB set lands in that DB, never in db 0", { skip: OWNED_DB_SKIP }, () => {
-    assert.ok(OWNED_DB !== null, "full-suite launcher run must export an owned HYDRA_REDIS_DB (#5062)");
-    const sig = sigForRoot(wipedRoot);
-    const r = runOwnBlock({ HYDRA_REDIS_DB: OWNED_DB });
-    assert.equal(r.status, 0, `block must never exit non-zero: ${r.stderr}`);
-    assert.match(nmLines(r.stdout), /WARNING NODE_MODULES INTEGRITY/, "must warn on the wiped tree");
-
-    // The since-anchor + fired marker THIS tick just wrote via rc_write must
-    // exist in the selected DB...
-    assert.equal(
-      existsAt(OWNED_DB, OWN_FIRED(sig)),
-      true,
-      "fired marker must land in the HYDRA_REDIS_DB-selected DB",
-    );
-    assert.equal(
-      existsAt(OWNED_DB, OWN_SINCE(sig)),
-      true,
-      "since anchor must land in the HYDRA_REDIS_DB-selected DB",
-    );
-    // ...and must NEVER have leaked into production db 0 — the exact seam
-    // #4183 closes (rc_write/rc_read previously hardcoded db 0 with no `-n`).
-    assert.equal(
-      existsAt("0", OWN_FIRED(sig)),
-      false,
-      "a bash-side write with HYDRA_REDIS_DB set must never land in db 0",
-    );
-    assert.equal(
-      existsAt("0", OWN_SINCE(sig)),
-      false,
-      "a bash-side write with HYDRA_REDIS_DB set must never land in db 0",
-    );
-  });
-
-  test("non-numeric HYDRA_REDIS_DB falls back to db 0 (byte-identical to pre-#4183 behaviour)", () => {
-    const sig = sigForRoot(wipedRoot);
-    const r = runOwnBlock({ HYDRA_REDIS_DB: "not-a-number" });
-    assert.equal(r.status, 0, `block must never exit non-zero: ${r.stderr}`);
-    assert.match(nmLines(r.stdout), /WARNING NODE_MODULES INTEGRITY/, "must warn on the wiped tree");
-    assert.equal(existsAt("0", OWN_FIRED(sig)), true, "fallback DB must be 0 (the documented default)");
-  });
-
-  test("unset HYDRA_REDIS_DB defaults to db 0 (production, unchanged from before #4183)", () => {
-    const sig = sigForRoot(wipedRoot);
-    const r = runOwnBlock({});
-    assert.equal(r.status, 0, `block must never exit non-zero: ${r.stderr}`);
-    assert.match(nmLines(r.stdout), /WARNING NODE_MODULES INTEGRITY/, "must warn on the wiped tree");
-    assert.equal(existsAt("0", OWN_FIRED(sig)), true, "unset must default to db 0 (the documented default)");
+    assert.equal((atZero.stdout ?? "").trim(), "1", "fallback DB must be 0");
+    spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "-n", "0", "DEL", FIRED(wiped), SINCE(wiped)], { timeout: WATCHDOG_REDIS_TIMEOUT_MS });
   });
 });

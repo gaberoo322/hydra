@@ -138,13 +138,13 @@ describe("decide.py — Target dev resume pick (issue #4739)", () => {
     const d = devTargetDispatches(plan);
     assert.equal(d.length, 1, `expected exactly one pinned dispatch: ${JSON.stringify(d)}`);
     assert.equal(d[0].skill, "hydra-target-build");
-    assert.deepEqual(d[0].prompt_args, {
+    assert.deepEqual(d[0].intent, {
+      kind: "TargetResume",
       anchor: "issue-176",
-      resume: true,
-      resume_issue: 176,
-      resume_pr: 57,
-      resume_branch: "feature/resume-176",
+      pr: 57,
+      branch: "feature/resume-176",
     });
+    assert.equal("prompt_args" in d[0], false, "an intent action carries no prompt_args bag");
     assert.match(d[0].reason, /#4739/);
   });
 
@@ -164,16 +164,16 @@ describe("decide.py — Target dev resume pick (issue #4739)", () => {
     );
     const d = devTargetDispatches(plan);
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.resume, true, "the resume pin outranks the board pick");
-    assert.equal(d[0].prompt_args.anchor, "issue-176");
-    assert.equal(d[0].prompt_args.resume_branch, "feature/resume-176");
+    assert.equal(d[0].intent.kind, "TargetResume", "the resume pin outranks the board pick");
+    assert.equal(d[0].intent.anchor, "issue-176");
+    assert.equal(d[0].intent.branch, "feature/resume-176");
   });
 
   test("the pin fires with BOTH board signals absent — the resume issue carries needs-dev-resume, not ready-for-agent (#4739 premise)", () => {
     const plan = runDecide(baseState({ signals: { target_dev_resume_pick: RESUME_PICK } }), null);
     const d = devTargetDispatches(plan);
     assert.equal(d.length, 1);
-    assert.equal(d[0].prompt_args.resume, true);
+    assert.equal(d[0].intent.kind, "TargetResume");
   });
 
   test("a resume pick is exempt from the #4475 WIP-saturation guard; a board pick is still suppressed by it", () => {
@@ -183,7 +183,7 @@ describe("decide.py — Target dev resume pick (issue #4739)", () => {
     );
     const d = devTargetDispatches(pinned);
     assert.equal(d.length, 1, "resume is not new WIP — the saturation guard must not preempt it");
-    assert.equal(d[0].prompt_args.resume, true);
+    assert.equal(d[0].intent.kind, "TargetResume");
     const board = runDecide(
       baseState({ signals: { target_wip_saturated: true, target_board_work_available: true } }),
       null,
@@ -204,8 +204,7 @@ describe("decide.py — Target dev resume pick (issue #4739)", () => {
       );
       const d = devTargetDispatches(plan);
       assert.equal(d.length, 1, `signal "${bad}" must fall through to the board path, not suppress it`);
-      assert.equal(d[0].prompt_args.resume, undefined, `signal "${bad}" must never pin a resume`);
-      assert.equal(d[0].prompt_args.anchor, undefined, "the ordinary board path carries no anchor from the pick");
+      assert.deepEqual(d[0].intent, { kind: "TargetFresh" }, `signal "${bad}" must never pin a resume nor an anchor`);
     }
     // Absent entirely + no board signal ⇒ no dispatch at all.
     assert.equal(devTargetDispatches(runDecide(baseState(), null)).length, 0);
@@ -219,7 +218,7 @@ describe("decide.py — Target dev resume pick (issue #4739)", () => {
     );
     const d = devTargetDispatches(plan);
     assert.equal(d.length, 1, "the event-borne signal wins");
-    assert.equal(d[0].prompt_args.resume_pr, 57);
+    assert.equal(d[0].intent.pr, 57);
   });
 
   test("a busy dev_target slot means no resume pin (the pick rides the normal slot-free pipeline)", () => {
