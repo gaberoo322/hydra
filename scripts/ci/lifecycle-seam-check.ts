@@ -153,10 +153,48 @@ function bracketDepth(s: string): number {
   return depth;
 }
 
-/** A heredoc (`<<`) keeps the command open only when it appears before the first unquoted command boundary. */
-function heredocReaches(tail: string, before: string, depth: number): boolean {
-  const at = tail.indexOf("<<");
-  return at >= 0 && !hasUnquotedBoundary(tail.slice(0, at), before, depth);
+/** Index of the first unquoted `<<` heredoc marker (not `<<<`, not an arithmetic shift) in `tail`, or -1. */
+function findHeredocMarker(tail: string, before: string): number {
+  let quote = before === '"' || before === "'" ? before : "";
+  for (let i = 0; i < tail.length; i++) {
+    const ch = tail[i]!;
+    if (quote) {
+      if (ch === "\\" && quote === '"') i++;
+      else if (ch === quote) quote = "";
+    } else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === "<" && tail[i + 1] === "<") {
+      if (tail[i + 2] === "<") {
+        i += 2; // `<<<` here-string, not a heredoc
+        continue;
+      }
+      if (/^-?\s*(["']?)[A-Za-z_]\w*\1/.test(tail.slice(i + 2))) return i;
+      i++; // `1<<2` arithmetic shift
+    }
+  }
+  return -1;
+}
+
+/**
+ * A heredoc (`<<WORD`) keeps the command open only when its marker sits before the first unquoted
+ * command boundary. With `endsAtTerminator` (the PR exemption, which must fail closed) it also
+ * requires that nothing after the terminator line can start another command: the rest of the marker
+ * line has no boundary, and a flag reached after the terminator belongs to a new command. A flag
+ * still inside the heredoc body (terminator not yet seen) is body text of this command.
+ */
+function heredocReaches(tail: string, before: string, depth: number, endsAtTerminator = false): boolean {
+  const at = findHeredocMarker(tail, before);
+  if (at < 0 || hasUnquotedBoundary(tail.slice(0, at), before, depth)) return false;
+  const m = /^<<-?\s*(["']?)([A-Za-z_]\w*)\1/.exec(tail.slice(at));
+  if (!m) return false;
+  if (!endsAtTerminator) return true;
+  const afterMarker = tail.slice(at + m[0].length);
+  const eol = afterMarker.indexOf("\n");
+  const markerRest = eol < 0 ? afterMarker : afterMarker.slice(0, eol);
+  if (hasUnquotedBoundary(markerRest, "", depth)) return false;
+  if (eol < 0) return true;
+  const body = afterMarker.slice(eol + 1);
+  const term = new RegExp(`(?:^|\\n)[ \\t]*${m[2]}[ \\t]*(?:\\n|$)`).exec(body);
+  return !term || depth > 0; // terminator seen: whatever follows is a new command (unless inside brackets)
 }
 
 /** A bare `--label` is a create-time write when `create` appears within 300 chars before it (same or earlier line). */
@@ -207,7 +245,8 @@ function inPrContext(text: string, idx: number): boolean {
   if (issue >= 0 && !hasUnquotedBoundary(win.slice(issue, pr), win[issue - 1] ?? "")) return false;
   const tail = win.slice(pr).replace(/\\\r?\n/g, " ").replace(/\r/g, "");
   const depth = bracketDepth(win.slice(Math.max(0, pr - 80), pr));
-  return heredocReaches(tail, win[pr - 1] ?? "", depth) || !hasUnquotedBoundary(tail, win[pr - 1] ?? "", depth);
+  const lead = win[pr - 1] ?? "";
+  return heredocReaches(tail, lead, depth, true) || (findHeredocMarker(tail, lead) < 0 && !hasUnquotedBoundary(tail, lead, depth));
 }
 
 /** Join backslash-continued physical lines; each logical line keeps its first physical line number. */

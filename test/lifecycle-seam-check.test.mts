@@ -267,6 +267,22 @@ describe("lifecycle-seam-check: evasion forms (#5367)", () => {
     assert.deepEqual(md("gh issue create --title t && ls -l $f"), []);
   });
 
+  test("gh pr: a heredoc exempts only its own command; a quoted << is not a heredoc (INV-3, #5428)", () => {
+    // flag on a later command after the heredoc terminator is NOT in the gh pr command
+    assert.deepEqual(md("gh pr edit 5 --body-file - <<EOF\nbody\nEOF\nx --add-label needs-qa"), [4]);
+    // a quoted `<<` (and a `<<<` here-string) is not a heredoc marker
+    assert.deepEqual(md('gh pr edit 5 --body "a<<b"; x --add-label needs-qa'), [1]);
+    assert.deepEqual(md("gh pr edit 5 --body-file - <<< x; y --add-label needs-qa"), [1]);
+    // boundary on the marker line itself ends the command
+    assert.deepEqual(md("gh pr edit 5 <<EOF; x --add-label needs-qa\nbody\nEOF"), [1]);
+    // sibling shapes keep their exemption: flag inside the heredoc body, and a plain gh pr flag
+    assert.deepEqual(md("gh pr edit 5 --body-file - <<EOF\n--add-label needs-qa\nEOF"), []);
+    assert.deepEqual(md("gh pr edit 5 --add-label needs-qa"), []);
+    // create side: a quoted << is not a heredoc, so the later `-l` is outside the create command
+    assert.deepEqual(md('gh issue create --title "a<<b"; x -l needs-triage'), []);
+    assert.deepEqual(md("gh issue create --title t -l needs-triage"), [1]);
+  });
+
   test("short -l: a `;` / `&&` / `|` inside a quoted title or body is not a command boundary", () => {
     assert.deepEqual(md('gh issue create --title "fix; x" -l needs-triage'), [1]);
     assert.deepEqual(md('gh issue create --body "a | b" -l needs-triage'), [1]);
