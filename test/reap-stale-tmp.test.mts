@@ -71,7 +71,7 @@ describe("reap-stale-tmp.sh", () => {
   test("--apply removes stale mkdtemp-shaped dirs and stale Vitest ssr dirs", () => {
     const root = fixtureRoot();
     const leaked = makeDir(root, "csb-outcomes-route-1d5vgA", ["config/graduation-gate.yaml"]);
-    const leakedDot = makeDir(root, "hydra-skill-mirror-drift.Ab12Cd");
+    const leakedDot = makeDir(root, "hydra-skill-mirror-drift.Qb12Cd");
     const vitest = makeDir(root, "zzeT1rfXrYVeQGQL3POIl", ["ssr/03e0d0c2679a1aefbf4406548e93c0180c89a6d0"]);
 
     const r = run(root, "--apply");
@@ -87,7 +87,7 @@ describe("reap-stale-tmp.sh", () => {
 
   test("the default is a dry run that removes nothing", () => {
     const root = fixtureRoot();
-    const leaked = makeDir(root, "pmh-e2e-Ab12Cd");
+    const leaked = makeDir(root, "pmh-e2e-Qb12Cd");
 
     const r = run(root);
 
@@ -99,7 +99,7 @@ describe("reap-stale-tmp.sh", () => {
 
   test("a dir whose subtree was touched inside the window is spared, however old the dir is", () => {
     const root = fixtureRoot();
-    const dir = makeDir(root, "refl-dep-Ab12Cd", ["old", "nested/live.log"]);
+    const dir = makeDir(root, "refl-dep-Qb12Cd", ["old", "nested/live.log"]);
     // A live writer touched one nested file just now; the dir's own mtime stays old.
     const now = new Date();
     utimesSync(join(dir, "nested/live.log"), now, now);
@@ -112,7 +112,7 @@ describe("reap-stale-tmp.sh", () => {
 
   test("a dir younger than --max-age is not even considered", () => {
     const root = fixtureRoot();
-    const young = makeDir(root, "glm-recover-Ab12Cd", ["f"], 30);
+    const young = makeDir(root, "glm-recover-Qb12Cd", ["f"], 30);
 
     const r = run(root, "--apply", "--max-age", "60");
 
@@ -145,9 +145,9 @@ describe("reap-stale-tmp.sh", () => {
       makeDir(root, "checkout-3fa9c1"),
       makeDir(root, "checkout-3Fa9C1"), // mixed-case hex still a hash
       makeDir(root, "tmp.AbCdEfGhIj"), // mktemp(1) default: 10-char suffix
-      makeDir(root, "claude-1000Ab12Cd"), // deny-listed runtime prefix
-      makeDir(root, "tsx-1000-Ab12Cd"),
-      makeDir(root, "com.google.Chrome.Ab12Cd"),
+      makeDir(root, "claude-1000Qb12Cd"), // deny-listed runtime prefix
+      makeDir(root, "tsx-1000-Qb12Cd"),
+      makeDir(root, "com.google.Chrome.Qb12Cd"),
       makeDir(root, "node-compile-cache"),
       makeDir(root, "qzFskhPEL4yh9SrdKnFA3", ["sync-skills-plan.w2KoyJ"]), // nanoid, not ssr-only
       makeDir(root, "zBg5wlZRiCDPgWQ5FdNcd", ["ssr/a", "other"]), // ssr plus something else
@@ -165,7 +165,7 @@ describe("reap-stale-tmp.sh", () => {
     // The target lives OUTSIDE the scanned root but is itself reapable (leaked
     // shape, stale subtree), so following the link would delete it.
     const target = makeDir(fixtureRoot(), "pmh-e2e-Xy12Zw");
-    const link = join(root, "csb-outcomes-route-Ab12Cd");
+    const link = join(root, "csb-outcomes-route-Qb12Cd");
     symlinkSync(target, link);
     // Back-date the link itself too, so only "never follow symlinks" protects it.
     const stamp = new Date(Date.now() - 2000 * 60_000);
@@ -221,7 +221,7 @@ describe("reap-stale-tmp.sh", () => {
 
   test("a failed removal is logged with rm's error and still exits 0", () => {
     const root = fixtureRoot();
-    const leaked = makeDir(root, "pace-nudge-Fa11Ed");
+    const leaked = makeDir(root, "pace-nudge-Fa11Zd");
     const bin = fixtureRoot();
     writeFileSync(join(bin, "rm"), "#!/usr/bin/env bash\necho \"rm: cannot remove: Device or resource busy\" >&2\nexit 1\n");
     chmodSync(join(bin, "rm"), 0o755);
@@ -269,7 +269,7 @@ describe("reap-stale-tmp.sh", () => {
 
   test("--max-age below 60 minutes is refused", () => {
     const root = fixtureRoot();
-    const leaked = makeDir(root, "pace-nudge-Ab12Cd");
+    const leaked = makeDir(root, "pace-nudge-Qb12Cd");
 
     const r = run(root, "--apply", "--max-age", "5");
 

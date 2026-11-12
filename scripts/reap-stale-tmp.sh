@@ -77,7 +77,7 @@ fi
 
 # Shapes. mkdtemp(prefix) appends exactly 6 characters from [A-Za-z0-9], so a
 # leaked fixture dir is `<prefix><6 chars>` with a prefix ending in `-` or `.`
-# (`csb-outcomes-route-1d5vgA`, `pmh-e2e-Ab12Cd`). Matching the SHAPE instead
+# (`csb-outcomes-route-1d5vgA`, `pmh-e2e-Qb12Cd`). Matching the SHAPE instead
 # of a list of known prefixes is the point: a safety net has to catch the next
 # leaker nobody has found yet, not only the ones already filed. The 6-char
 # suffix must also LOOK random (is_random_suffix below): it must contain an
