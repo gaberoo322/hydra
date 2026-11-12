@@ -18,6 +18,7 @@ import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import { getReconcilerHealth } from "../redis/reconciler.ts";
 import type { ReconcilerHealthRecord } from "../redis/reconciler.ts";
 import { logger } from "../logger.ts";
+import { deliberateStopFreshness } from "./stop-marker.ts";
 
 // ---------------------------------------------------------------------------
 // Duration formatter — used by buildSchedulerStatus (below) and by the
@@ -90,6 +91,15 @@ export interface SchedulerStatus {
   lastError: string | null;
   startedAt: string | null;
   consecutiveErrors: number;
+
+  // --- Server-evaluated /health checks (issue #5452, ADR-0034 §8.3) ---
+  /**
+   * CONTROL_CHECKS verdicts the server evaluates, keyed by id (true = passes).
+   * `no-fresh-deliberate-stop` is true when the stop is not deliberate or a
+   * deliberate stop is older than the marker TTL; ABSENT when the stop is
+   * deliberate but its timestamp is missing/unparseable (the page fails closed).
+   */
+  checks: { "no-fresh-deliberate-stop"?: boolean };
 }
 
 /**
@@ -106,6 +116,8 @@ export interface SchedulerStatus {
 export interface StatusProjectionDeps {
   getAutopilotPaused?: () => Promise<{ paused: boolean; since?: number }>;
   getReconcilerHealth?: () => Promise<ReconcilerHealthRecord | null>;
+  /** Clock for the deliberate-stop freshness verdict. Defaults to Date.now. */
+  now?: () => number;
 }
 
 /**
@@ -185,7 +197,13 @@ export async function buildSchedulerStatus(
   } catch (err: any) {
     logger.error({ err }, "getStatus reconciler-health read failed");
   }
-
+  const checks: SchedulerStatus["checks"] = {};
+  if (state.stopReason !== "deliberate") {
+    checks["no-fresh-deliberate-stop"] = true;
+  } else {
+    const { fresh } = deliberateStopFreshness(state.deliberateStoppedAt, (deps.now ?? Date.now)());
+    if (fresh !== null) checks["no-fresh-deliberate-stop"] = !fresh;
+  }
 
   return {
     reconciler,
@@ -210,5 +228,6 @@ export async function buildSchedulerStatus(
     lastError: state.lastError,
     startedAt: state.startedAt,
     consecutiveErrors: state.consecutiveErrors,
+    checks,
   };
 }

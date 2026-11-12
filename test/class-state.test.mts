@@ -27,6 +27,7 @@
  * DISPATCH_CLASSES ordering. No Redis: every source is injected.
  */
 
+import { parseTurnRows } from "../src/autopilot/turn-row.ts";
 import test, { beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -587,7 +588,7 @@ describe("class-state readClassState degradation (INV-13)", () => {
       getSignalLastFired: async () => ({ ok: true, lastFired: {} }),
       getCurrentLifecycle: okLifecycle,
       getRunRow: async () => ({ ok: false, code: "not-found", detail: "" }) as never,
-      listTurnsDesc: async () => [],
+      readTurns: async () => [],
       now: () => NOW_MS,
       ...over,
     };
@@ -625,7 +626,7 @@ describe("class-state readClassState degradation (INV-13)", () => {
     const res = await readClassState(
       fakeDeps({
         getRunRow: async () => ({ ok: false, code: "redis-error" } as never),
-        listTurnsDesc: async () => {
+        readTurns: async () => {
           throw new Error("zrevrange failed");
         },
       }),
@@ -638,7 +639,7 @@ describe("class-state readClassState degradation (INV-13)", () => {
   test("unparseable turn members are skipped; parseable ones feed the composition", async () => {
     const res = await readClassState(
       fakeDeps({
-        listTurnsDesc: async () => [
+        readTurns: async () => parseTurnRows([
           JSON.stringify({
             turn_n: 9,
             epoch: NOW_S - 60,
@@ -647,7 +648,7 @@ describe("class-state readClassState degradation (INV-13)", () => {
           "not-json-at-all",
           JSON.stringify(["an", "array"]),
           JSON.stringify({ epoch: NOW_S }), // missing turn_n
-        ],
+        ]),
       }),
     );
     const sweep = res.classes.find((r) => r.name === "sweep_orch");

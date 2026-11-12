@@ -84,13 +84,13 @@ Implementation notes
 - The script is pure (one read + one write); failures only ever degrade
   observability, never autopilot correctness. We catch and log every
   runtime failure path; we never propagate those back to the model. The ONE
-  deliberate exception is the import of decide.py's taxonomy tuples: it has
-  no fallback (issue #4637) — if decide.py cannot load classes.json there
+  deliberate exception is the load of the taxonomy rows: it has
+  no fallback (issue #4637) — if taxonomy.py cannot load classes.json there
   was no decision turn to report, and a fallback alphabet would be exactly
   the hardcoded class list the taxonomy exists to kill.
 - `HYDRA_AUTOPILOT_STATE` and `HYDRA_AUTOPILOT_HEARTBEAT` env vars
   override the default paths (used by the regression test).
-- Cooldown lookup IS `decide.py:SIGNAL_COOLDOWNS` (imported, not copied),
+- Cooldown lookup IS `taxonomy.signal_cooldowns` (derived, not copied),
   so it cannot drift from the taxonomy.
 """
 
@@ -104,16 +104,21 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# Import the taxonomy-derived alphabet from decide.py (which loads
-# scripts/autopilot/classes.json fail-loud at import) so the denominators,
-# the counted keys and the cooldowns all come from the one table. Path
-# manipulation is intentional — decide.py is a sibling. NO try/except
-# fallback (issue #4637): an import failure propagates (fail loud) rather
-# than substituting a hardcoded class list that silently drifts.
+# Derive the taxonomy alphabet from taxonomy.py (the one loader; it reads
+# scripts/autopilot/classes.json fail-loud) so the denominators, the counted
+# keys and the cooldowns all come from the one table. Path manipulation is
+# intentional — taxonomy.py is a sibling. NO try/except fallback (issue
+# #4637): a load failure propagates (fail loud) rather than substituting a
+# hardcoded class list that silently drifts.
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
-from decide import PIPELINE_SLOTS, SIGNAL_CLASSES, SIGNAL_COOLDOWNS  # type: ignore[import-not-found]  # noqa: E402
+import taxonomy  # noqa: E402  (the ONE classes.json loader, #5472)
 import run_ledger  # noqa: E402  (the ONE state-document parser, #5075)
+
+_TAXONOMY_ROWS = taxonomy.load_taxonomy()  # fail-loud, no fallback alphabet (#4637)
+PIPELINE_SLOTS = taxonomy.pipeline_slots(_TAXONOMY_ROWS)
+SIGNAL_CLASSES = taxonomy.signal_classes(_TAXONOMY_ROWS)
+SIGNAL_COOLDOWNS = taxonomy.signal_cooldowns(_TAXONOMY_ROWS)
 
 # Heartbeat-line denominators, derived from the taxonomy (never literals).
 PIPELINE_DENOMINATOR = len(PIPELINE_SLOTS)

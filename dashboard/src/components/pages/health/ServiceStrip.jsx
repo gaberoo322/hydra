@@ -88,7 +88,7 @@ export default function ServiceStrip({ entries = NO_ENTRIES }) {
 
   // The scheduler controls' onFired: a CHECKED re-read of /scheduler/status.
   const refreshScheduler = useCheckedRefresh(sched);
-  const schedVerdicts = schedulerVerdicts(schedUnknown ? null : sched.data, Date.now());
+  const schedVerdicts = schedulerVerdicts(schedUnknown ? null : sched.data);
 
   return (
     <section data-testid="service-strip" className="space-y-1">

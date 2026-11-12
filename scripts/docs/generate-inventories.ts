@@ -3,8 +3,7 @@
  * Generated-inventories runner (issue #4589 — the inventory-pipeline tracer
  * bullet per the #4542 resolution, ADR-0034 §10; family registry #4594).
  *
- *   npm run docs:inventories            write every family file + counts.json,
- *                                       and regenerate the ADR roster table in
+ *   npm run docs:inventories            write every family file, and regenerate the ADR roster table in
  *                                       place (docs/adr/README.md, #4593)
  *   npm run docs:inventories -- --check write nothing; exit 1 with a per-family
  *                                       added/removed listing when a committed
@@ -13,8 +12,8 @@
  * Each extractor (scripts/docs/inventories/<family>.ts) is its family's one
  * extraction truth — this runner only iterates the FAMILIES registry, builds
  * the families, serializes them through the shared envelope, and writes or
- * compares. counts.json is computed from the in-memory inventories this run
- * just built, never hand-typed.
+ * compares. The counts fold (inventories/counts.ts) is NOT committed (#5454):
+ * each reader computes it from the family files.
  *
  * Stdlib-only (ADR-0005): no dependency is added; `npx tsx` is the same
  * pinned-runner lane every other scripts/*.ts npm script uses.
@@ -29,8 +28,6 @@ import type {
   AdrsInventory,
   CorpusInventory,
   CorpusRow,
-  CountRow,
-  CountsInventory,
   Inventory,
   RouteRow,
   RoutesInventory,
@@ -57,7 +54,11 @@ import { extractUnitsScripts, unitScriptRowLabel } from "./inventories/units-scr
 // because the drift test imports corpusRowLabel from here.
 export { corpusRowLabel, routeRowLabel };
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+// HYDRA_REPO_ROOT lets a trusted copy of this script regenerate ANOTHER checkout
+// (the QA reviewer-commit step runs master-based scripts against a PR worktree, #5267).
+const REPO_ROOT = process.env.HYDRA_REPO_ROOT
+  ? resolve(process.env.HYDRA_REPO_ROOT)
+  : resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 /**
  * What a family extractor may depend on, built once per run. The adrs family
@@ -80,7 +81,7 @@ export interface FamilyContext {
 
 /**
  * One registry entry per family (#4594). The runner's write mode, `--check`
- * (including its added/removed label diff), buildCounts and the drift test all
+ * (including its added/removed label diff) and the drift test all
  * iterate THIS list — adding a family is one entry here, so the runner and the
  * test can never disagree about which families exist.
  */
@@ -106,11 +107,6 @@ function entry<Row>(
   };
 }
 
-/** The `METHOD path` listing shape for a routes row. */
-export function countRowLabel(row: CountRow): string {
-  return `${row.family}/${row.metric} = ${row.value}`;
-}
-
 /** The single family registry. `routes` is first: later families join through its rows. */
 export const FAMILIES: readonly FamilyEntry[] = Object.freeze([
   entry("routes", (_root, ctx) => ctx.routes, routeRowLabel),
@@ -133,9 +129,6 @@ export const FAMILIES: readonly FamilyEntry[] = Object.freeze([
   entry("areas", (root, ctx) => extractAreasFamily(root, ctx), areaRowLabel),
 ]);
 
-/** counts.json is derived FROM the families, so it follows the registry rather than sitting in it. */
-export const COUNTS_FILE = "docs/generated/counts.json";
-
 /** Build every registered family's inventory, in registry order. */
 export function buildAllInventories(repoRoot: string): Map<string, Inventory<unknown>> {
   const ctx: FamilyContext = {
@@ -151,58 +144,6 @@ export function buildAllInventories(repoRoot: string): Map<string, Inventory<unk
     ctx.built.set(fam.family, inventory);
   }
   return out;
-}
-
-/**
- * Per-family derived metrics beyond `<family>/rows` (#4595): each is a row
- * predicate, so every value is COUNTED from the inventory, never typed.
- */
-const FAMILY_METRICS: Record<string, Array<[string, (row: unknown) => boolean]>> = {
-  pages: [["in-nav", (r) => (r as { inNav?: boolean }).inNav === true]],
-  config: [
-    ["unread", (r) => (r as { unread?: boolean }).unread === true],
-    ["missing-sections", (r) => (r as { kind?: string; exists?: boolean }).kind === "section" && (r as { exists?: boolean }).exists === false],
-  ],
-  "ci-gates": [["required", (r) => (r as { required?: boolean }).required === true]],
-  corpus: (["adr", "historical", "living", "module-map", "playbook"] as const).map(
-    (tier): [string, (row: unknown) => boolean] => [tier, (r) => (r as CorpusRow).tier === tier],
-  ),
-  areas: [
-    ["live", (r) => (r as { retired?: boolean }).retired !== true],
-    ["retired", (r) => (r as { retired?: boolean }).retired === true],
-  ],
-};
-
-/**
- * Deterministic counts: rows sorted by family then metric; derived, never
- * typed. routes/routers + routes/routes are unchanged; every family adds
- * `<family>/rows`, redis-keys adds `redis-keys/retired`, and FAMILY_METRICS
- * adds pages/in-nav, config/unread, config/missing-sections, ci-gates/required,
- * one row per corpus tier (`corpus/adr|historical|living|module-map|playbook`),
- * and areas/live + areas/retired (#4596). generatedFrom lists every
- * docs/generated/<family>.json it derives from.
- */
-export function buildCounts(inventories: Map<string, Inventory<unknown>>): CountsInventory {
-  const rows: CountRow[] = [];
-  const routes = inventories.get("routes") as RoutesInventory | undefined;
-  if (routes) {
-    const routers = new Set(routes.rows.map((r) => r.source.path));
-    rows.push({ family: "routes", metric: "routers", value: routers.size });
-    rows.push({ family: "routes", metric: "routes", value: routes.rows.length });
-  }
-  for (const [family, inv] of inventories) {
-    rows.push({ family, metric: "rows", value: inv.rows.length });
-    if (family === "redis-keys") {
-      const retired = (inv.rows as Array<{ retired?: boolean }>).filter((r) => r.retired === true).length;
-      rows.push({ family, metric: "retired", value: retired });
-    }
-    for (const [metric, count] of FAMILY_METRICS[family] ?? []) {
-      rows.push({ family, metric, value: (inv.rows as unknown[]).filter(count).length });
-    }
-  }
-  rows.sort((a, b) => (a.family === b.family ? (a.metric < b.metric ? -1 : 1) : a.family < b.family ? -1 : 1));
-  const generatedFrom = [...inventories.keys()].map((f) => `docs/generated/${f}.json`).sort();
-  return { family: "counts", schemaVersion: 2, generatedFrom, rows };
 }
 
 /** Multiset added/removed diff between committed and fresh row labels (sorted). */
@@ -232,7 +173,6 @@ function main(): void {
   const check = process.argv.includes("--check");
 
   const inventories = buildAllInventories(REPO_ROOT);
-  const counts = buildCounts(inventories);
   const outputs: FamilyOutput[] = FAMILIES.map((fam) => {
     const inv = inventories.get(fam.family) as Inventory<unknown>;
     return {
@@ -242,13 +182,6 @@ function main(): void {
       label: fam.label,
     };
   });
-  outputs.push({
-    file: COUNTS_FILE,
-    serialize: () => serializeInventory(counts),
-    labels: () => counts.rows.map(countRowLabel),
-    label: (row) => countRowLabel(row as CountRow),
-  });
-
   // The ADR roster is generated IN PLACE (#4593): docs/adr/README.md's bytes
   // outside the two adr-roster markers are preserved verbatim and only the
   // table between them is regenerated. This is one dedicated pair of functions

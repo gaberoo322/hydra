@@ -12,43 +12,48 @@
  * a sibling function here.
  */
 
-/** The relabel targets the server schema accepts (RELABEL_TARGETS' mirror,
- * src/schemas/autopilot-board.ts). */
-export const RELABEL_TARGETS: readonly string[] = Object.freeze([
-  "needs-triage",
-  "needs-info",
-  "ready-for-human",
-  "blocked",
-  "needs-dev-resume",
-  "needs-qa",
-]);
-
 export type Verdicts = Record<string, boolean>;
+
+/** The server-evaluated promote verdicts a work-queue row carries
+ * (WorkQueueRow.promoteChecks, src/schemas/autopilot-board.ts). */
+export type PromoteChecks = Partial<
+  Record<"issue-open" | "not-already-ready" | "has-scope-section" | "no-open-blocker", boolean>
+>;
 
 /** The row facts GET /autopilot/work-queue projects (WorkQueueRow subset). */
 export interface WorkRowFacts {
-  lane?: string;
-  hasScopeSection?: boolean;
-  openBlockers?: readonly number[];
+  promoteChecks?: PromoteChecks | null;
 }
 
+/** The four promote check ids the server delivers on each row. */
+const PROMOTE_CHECK_IDS = ["issue-open", "not-already-ready", "has-scope-section", "no-open-blocker"] as const;
+
 /**
- * /work — one queue row's checks. Reads only the server-computed row facts
- * (never a client-side body parse): `hasScopeSection` is the shared parser's
- * verdict and `openBlockers` the resolved open strict refs.
+ * /work — one queue row's checks (ADR-0034 §8.3, issue #5451). The four
+ * promote verdicts are a COPY of the server-delivered `row.promoteChecks` —
+ * never derived here (they need the lane rule, the scope parser and the
+ * resolved blocker set). A row without the map yields no promote verdict, which
+ * lib/preconditions.ts renders as a failed check. Only `relabel-target-chosen`
+ * is evaluated here: it is a direct reading of operator input, checked against the
+ * server-DELIVERED `relabelTargets` list (issue #5453); with no list it fails.
  */
-export function rowVerdicts(row: WorkRowFacts, relabelTarget: string | undefined): Verdicts {
-  return {
-    // Every queue row comes from the open-issues scan (GET /autopilot/work-queue
-    // reads open issues only) — closed issues never reach this table, and the
-    // server gate re-checks CLOSED on write.
-    "issue-open": true,
-    "not-already-ready": row.lane !== "ready-for-agent",
-    "has-scope-section": row.hasScopeSection === true,
-    "no-open-blocker": Array.isArray(row.openBlockers) && row.openBlockers.length === 0,
-    "relabel-target-chosen":
-      typeof relabelTarget === "string" && RELABEL_TARGETS.includes(relabelTarget),
-  };
+export function rowVerdicts(
+  row: WorkRowFacts,
+  relabelTarget: string | undefined,
+  relabelTargets?: readonly string[] | null,
+): Verdicts {
+  const out: Verdicts = {};
+  const server = row.promoteChecks;
+  if (server != null) {
+    for (const id of PROMOTE_CHECK_IDS) {
+      if (typeof server[id] === "boolean") out[id] = server[id] as boolean;
+    }
+  }
+  out["relabel-target-chosen"] =
+    typeof relabelTarget === "string" &&
+    Array.isArray(relabelTargets) &&
+    relabelTargets.includes(relabelTarget);
+  return out;
 }
 
 /** /work — the reopen-by-number input is the only fact. */

@@ -29,6 +29,7 @@ import {
 } from "../../src/qa/verdict-trailer.ts";
 import { parseQaShadowLines } from "../../src/qa/shadow-fold.ts";
 import {
+  MIN_MATURED_PAIR,
   findOnWindow,
   pairCohortOf,
   readConfigHistory,
@@ -41,7 +42,7 @@ export const SCHEMA_VERSION = 1;
 /** The #4917 merge — after it every verdict carries a canonical trailer. */
 export const DEFAULT_SINCE = "2026-10-06T21:25:53Z";
 export const MATURITY_DAYS = 14;
-export const MIN_MATURED_PAIR = 30;
+export { MIN_MATURED_PAIR } from "./pair-graduation.ts";
 export const BASELINE_FIXTURE_PATH = "test/fixtures/qa-cohort-baseline.json";
 export const TOKENS_SOURCE = "api/usage/by-issue";
 

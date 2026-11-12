@@ -13,6 +13,7 @@ import {
   buildSeedEvidence,
   capEnvName,
   classRole,
+  countReviewedFailRoundsAfterReset,
   countReviewedFailRoundsSinceReset,
   evaluateCaps,
   latestResetMs,
@@ -20,6 +21,7 @@ import {
   resolveCapLimits,
   timelineArmCounts,
   type CapJournalEntry,
+  type TimedBody,
 } from "../src/lifecycle/caps.ts";
 import { advance, openClaim, releaseClaim, type SeamDeps, type LifecycleMode } from "../src/lifecycle/seam.ts";
 import { postCapReset } from "../src/lifecycle/park.ts";
@@ -44,6 +46,10 @@ function evalArms(entries: CapJournalEntry[], attempt: any, extra: Record<string
   return evaluateCaps({ attempt, entries, resetMs: 0, timeline: [], trailerRounds: null, limits: LIMITS, ...extra });
 }
 const countOf = (ev: ReturnType<typeof evaluateCaps>, arm: string) => ev.counts.find((c) => c.arm === arm)!.count;
+
+/** Untimed strings count as newer than any reset (the fail-toward-counting rule). */
+const timedBodies = (bs: Array<string | TimedBody>): TimedBody[] =>
+  bs.map((b) => (typeof b === "string" ? { body: b, tsMs: null } : b));
 
 const failBody = (pr: number, round: number) =>
   `### Findings\n| x |\n\n## Standards\nQA-Verdict: FAIL pr=${pr} round=${round} sha=abcdef123456 blockers=1 max_severity=high`;
@@ -106,6 +112,55 @@ describe("reset marker (INV-4, INV-5)", () => {
     for (const bad of ["Hydra-Cap-Reset: garbage", "Hydra-Cap-Reset: by=op", "Hydra-Cap-Reset: by=op ts=notadate"]) {
       assert.equal(countReviewedFailRoundsSinceReset([failBody(7, 1), failBody(7, 2), bad, failBody(7, 3)], 7), 3, bad);
     }
+  });
+});
+
+describe("timestamped qa-fail-rounds count (#5437)", () => {
+  const T = Date.parse("2026-11-04T10:00:00Z");
+  const at = (min: number) => T + min * 60_000;
+  const timed = (round: number, min: number): TimedBody => ({ body: failBody(7, round), tsMs: at(min) });
+  const rounds3 = [timed(1, 1), timed(2, 2), timed(3, 3)];
+
+  test("three FAIL rounds then a newer issue-side reset counts 0; one more FAIL counts 1", () => {
+    assert.equal(countReviewedFailRoundsAfterReset(rounds3, 7, 0), 3);
+    assert.equal(countReviewedFailRoundsAfterReset(rounds3, 7, at(4)), 0);
+    assert.equal(countReviewedFailRoundsAfterReset([...rounds3, timed(4, 5)], 7, at(4)), 1);
+  });
+
+  test("a reset marker posted only on the PR (legacy) resets the count the same way", () => {
+    const marker: TimedBody = { body: `Hydra-Cap-Reset: by=op ts=${new Date(at(4)).toISOString()}`, tsMs: at(4) };
+    assert.equal(countReviewedFailRoundsAfterReset([...rounds3, marker], 7, 0), 0);
+    assert.equal(countReviewedFailRoundsAfterReset([...rounds3, marker, timed(4, 5)], 7, 0), 1);
+  });
+
+  test("a reset older than the FAIL rounds does not hide them", () => {
+    assert.equal(countReviewedFailRoundsAfterReset(rounds3, 7, at(0)), 3);
+  });
+
+  test("a body with a missing time counts as newer than any reset", () => {
+    const untimed: TimedBody = { body: failBody(7, 4), tsMs: null };
+    assert.equal(countReviewedFailRoundsAfterReset([...rounds3, untimed], 7, at(4)), 1);
+  });
+
+  test("a CI-only round (no findings table) never counts", () => {
+    const ciOnly: TimedBody = {
+      body: "QA-Verdict: FAIL pr=7 round=1 sha=abcdef123456 blockers=0 max_severity=none",
+      tsMs: at(1),
+    };
+    assert.equal(countReviewedFailRoundsAfterReset([ciOnly], 7, 0), 0);
+  });
+
+  test("seam: an issue-side reset newer than 3 FAIL rounds lets the QA claim proceed; a 4th round parks", async () => {
+    const w = world("enforce", ["needs-qa"]);
+    w.prBodies = rounds3;
+    w.commentBodies = [`Hydra-Cap-Reset: by=op ts=${new Date(at(4)).toISOString()}`];
+    const ok = await openClaim(claimInput({ class: "qa_orch", pr: 7 }), w.deps);
+    assert.equal(ok.ok, true);
+    const w2 = world("enforce", ["needs-qa"]);
+    w2.prBodies = [...rounds3, timed(4, 5), timed(5, 6), timed(6, 7)];
+    w2.commentBodies = w.commentBodies;
+    const parked = await openClaim(claimInput({ class: "qa_orch", pr: 7 }), w2.deps);
+    assert.deepEqual(parked, { ok: false, code: "parked:qa-fail-rounds", written: true });
   });
 });
 
@@ -239,7 +294,7 @@ interface World {
   fetchFail: Set<string>;
   commentBodies: string[];
   timelineEvents: Array<{ event: "labeled" | "unlabeled"; label: string; tsMs: number }>;
-  prBodies: string[];
+  prBodies: Array<string | TimedBody>;
 }
 
 function world(mode: LifecycleMode, labels: string[], env: Record<string, string> = {}): World {
@@ -272,7 +327,7 @@ function world(mode: LifecycleMode, labels: string[], env: Record<string, string
       stateEntry: async () => ({ ok: true, value: { enteredAtMs: null } }),
       issueComments: async () => (w.fetchFail.has("comments") ? { ok: false } : { ok: true, value: w.commentBodies }),
       timeline: async () => (w.fetchFail.has("timeline") ? { ok: false } : { ok: true, value: w.timelineEvents }),
-      prBodies: async () => (w.fetchFail.has("prBodies") ? { ok: false } : { ok: true, value: w.prBodies }),
+      prBodies: async () => (w.fetchFail.has("prBodies") ? { ok: false } : { ok: true, value: timedBodies(w.prBodies) }),
     },
     journal: {
       append: async (_r, _i, e) => (w.journal.push(e), { ok: true }),
@@ -522,7 +577,7 @@ describe("advance in-progress -> ready-for-agent is the stale re-queue (INV-3, I
 });
 
 describe("postCapReset (INV-14)", () => {
-  test("posts the marker on the issue and, when the latest cap park names pr=, on that PR", async () => {
+  test("posts the marker on the issue ONLY, even when the latest cap park names pr=", async () => {
     const w = world("enforce", ["ready-for-agent"]);
     w.journal.push({
       v: 1, ts: NOW - 10, kind: "transition", from: "needs-qa", to: "parked", source: "cli", actor: "t",
@@ -530,9 +585,9 @@ describe("postCapReset (INV-14)", () => {
     });
     const ts = new Date(NOW).toISOString();
     const res = await postCapReset(42, { by: "operator", ts }, w.deps);
-    assert.deepEqual(res, { ok: true, prPosted: true });
+    assert.deepEqual(res, { ok: true });
     const line = `Hydra-Cap-Reset: by=operator ts=${ts}`;
-    assert.deepEqual(w.comments, [{ number: 42, body: line }, { number: 77, body: line }]);
+    assert.deepEqual(w.comments, [{ number: 42, body: line }]);
     assert.equal(latestResetMs([line]), NOW);
   });
 

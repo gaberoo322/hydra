@@ -38,6 +38,7 @@
  * seam (per the CLAUDE.md shared-teardown authoring rule).
  */
 
+import { RELABEL_TARGETS } from "../src/schemas/autopilot-board.ts";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -64,7 +65,6 @@ import {
   resolvePreconditions,
 } from "../dashboard/src/lib/preconditions.ts";
 import {
-  RELABEL_TARGETS,
   designConceptVerdicts,
   healthVerdicts,
   reopenVerdicts,
@@ -1054,14 +1054,15 @@ describe("pages read the registry once and host their own undo windows (issue #4
     assert.ok(select.includes("setRelabelTargets("), "choosing only records the target");
     assert.ok(!select.includes("/autopilot/board/relabel"), "no write fires from the select");
     assert.ok(src.includes("context={{ number: row.number, label: relabelTargets[row.number] }}"));
-    assert.ok(src.includes("verdicts={rowVerdicts(row, relabelTargets[row.number])}"));
+    assert.ok(src.includes("verdicts={rowVerdicts(row, relabelTargets[row.number], relabelOptions)}"));
     assert.ok(src.includes('controlKey="control:work/reopen"'));
     assert.ok(src.includes("verdicts={reopenVerdicts(reopenNumber)}"), "the reopen input feeds issue-number-entered");
     // relabel-target-chosen is ✗ until a closed target is picked (behaviour
     // pinned on the leaf below).
     assert.equal(rowVerdicts({}, undefined)["relabel-target-chosen"], false);
     assert.equal(rowVerdicts({}, "")["relabel-target-chosen"], false);
-    assert.equal(rowVerdicts({}, "needs-info")["relabel-target-chosen"], true);
+    assert.equal(rowVerdicts({}, "needs-info", RELABEL_TARGETS)["relabel-target-chosen"], true);
+    assert.equal(rowVerdicts({}, "needs-info")["relabel-target-chosen"], false, "no delivered list fails closed (#5453)");
   });
 
   test("the promote verdicts read the server-computed row facts, never a client-side body parse", async () => {
@@ -1210,35 +1211,51 @@ describe("re-read waiters — a checked refresh resolves a real verdict (PR #515
 });
 
 describe("page verdict tables — lib/control-verdicts.ts (PR #5155 review)", () => {
-  const row = (over: any = {}) => ({ lane: "needs-triage", hasScopeSection: true, openBlockers: [], ...over });
+  const PASS = {
+    "issue-open": true,
+    "not-already-ready": true,
+    "has-scope-section": true,
+    "no-open-blocker": true,
+  };
+  const row = (over: any = {}) => ({ promoteChecks: { ...PASS, ...over } });
 
-  test("a clean non-ready row passes every promote check", () => {
-    assert.deepEqual(rowVerdicts(row(), "blocked"), {
-      "issue-open": true,
-      "not-already-ready": true,
-      "has-scope-section": true,
-      "no-open-blocker": true,
-      "relabel-target-chosen": true,
-    });
+  test("a row delivering four passing promote verdicts passes every promote check", () => {
+    assert.deepEqual(rowVerdicts(row(), "blocked", RELABEL_TARGETS), { ...PASS, "relabel-target-chosen": true });
   });
 
-  test("a ready-for-agent row fails not-already-ready", () => {
-    assert.equal(rowVerdicts(row({ lane: "ready-for-agent" }), undefined)["not-already-ready"], false);
+  test("each promote verdict is a straight copy of the server-delivered map (#5451 INV-5)", () => {
+    for (const id of Object.keys(PASS)) {
+      assert.equal(rowVerdicts(row({ [id]: false }), undefined)[id], false, id);
+      assert.equal(rowVerdicts(row({ [id]: true }), undefined)[id], true, id);
+    }
   });
 
-  test("an unscoped row fails has-scope-section; a missing fact fails closed too", () => {
-    assert.equal(rowVerdicts(row({ hasScopeSection: false }), undefined)["has-scope-section"], false);
-    assert.equal(rowVerdicts(row({ hasScopeSection: undefined }), undefined)["has-scope-section"], false);
+  test("the page derives nothing from lane, hasScopeSection or openBlockers any more (#5451 INV-5)", () => {
+    const legacy: any = { lane: "ready-for-agent", hasScopeSection: false, openBlockers: [9] };
+    const v = rowVerdicts(legacy, undefined);
+    for (const id of Object.keys(PASS)) assert.equal(id in v, false, `${id} must not be derived page-side`);
   });
 
-  test("an open blocker fails no-open-blocker; a missing blocker list fails closed", () => {
-    assert.equal(rowVerdicts(row({ openBlockers: [9] }), undefined)["no-open-blocker"], false);
-    assert.equal(rowVerdicts(row({ openBlockers: undefined }), undefined)["no-open-blocker"], false);
+  test("a row without the promote map yields no promote verdict (preconditions.ts renders it failed)", () => {
+    for (const r of [{}, { promoteChecks: null }, { promoteChecks: undefined }]) {
+      const v = rowVerdicts(r as any, undefined);
+      for (const id of Object.keys(PASS)) assert.equal(id in v, false, id);
+    }
   });
 
-  test("relabel-target-chosen accepts only the closed RELABEL_TARGETS", () => {
-    for (const t of RELABEL_TARGETS) assert.equal(rowVerdicts(row(), t)["relabel-target-chosen"], true, t);
-    assert.equal(rowVerdicts(row(), "ready-for-agent")["relabel-target-chosen"], false);
+  test("relabel-target-chosen accepts only a target in the server-delivered list; no list fails closed (#5453)", () => {
+    for (const t of RELABEL_TARGETS) assert.equal(rowVerdicts(row(), t, RELABEL_TARGETS)["relabel-target-chosen"], true, t);
+    assert.equal(rowVerdicts(row(), "ready-for-agent", RELABEL_TARGETS)["relabel-target-chosen"], false);
+    for (const none of [undefined, null, []] as const) {
+      assert.equal(rowVerdicts(row(), "needs-qa", none as any)["relabel-target-chosen"], false);
+    }
+  });
+
+  test("RELABEL_TARGETS is the six-lane picker list in master's literal order (#5453 INV-3)", () => {
+    assert.deepEqual(
+      [...RELABEL_TARGETS],
+      ["needs-triage", "needs-info", "ready-for-human", "blocked", "needs-dev-resume", "needs-qa"],
+    );
   });
 
   test("reopenVerdicts: only a positive integer counts as entered", () => {
@@ -1410,7 +1427,7 @@ describe("the /health panels render controls from the page's ONE registry read (
     );
     // An UNKNOWN scheduler read renders no control at all (INV-13).
     assert.ok(src.includes("{!schedUnknown && (\n        <div data-testid=\"scheduler-controls\">"));
-    assert.ok(src.includes("schedulerVerdicts(schedUnknown ? null : sched.data, Date.now())"), "an untrusted read yields no verdict");
+    assert.ok(src.includes("schedulerVerdicts(schedUnknown ? null : sched.data)"), "an untrusted read yields no verdict");
   });
 
   test("every undismissed alert row carries its own Dismiss; Dismiss all sits beside the count", async () => {

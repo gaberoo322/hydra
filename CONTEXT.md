@@ -150,6 +150,10 @@ _Avoid_: "autopilot session" (informal), "autopilot job" (overloaded with the di
 One iteration of the decision loop inside an **Autopilot Run** — `decide.py` reads the **Run Ledger**, picks actions, the playbook executes them, `heartbeat.py` posts `POST /api/autopilot/turn`. Persisted as an immutable JSON member in `hydra:autopilot:run:<runId>:turns` ZSET, scored by `turn_n`. Idempotent on `(runId, turn_n)` — a re-post at the same turn number is a no-op. Each turn carries the dispatch actions it triggered; the **Autopilot Run** view joins those actions onto cycle-record outcomes so the dashboard can show "this turn dispatched X, which produced Y."
 _Avoid_: "tick" (overloaded with the **Orchestrator Scheduler** loop), "iteration" (informal)
 
+**Turn Row**:
+The stored record of one **Autopilot Turn**: the JSON member `recordTurn` writes to the run's turns ZSET. One module under `src/autopilot/` owns its shape (type, parser, per-field guards) and every reader receives typed Turn Rows, never the raw string (being introduced by epic #5443). A field that is missing or malformed reads as absent, never as a default. The **Run Ledger** is a second source of Turn Rows for the live run.
+_Avoid_: turn member (a Redis detail), turn record (collides with the `recordTurn` verb).
+
 **Run Ledger**:
 The **Autopilot Run**'s per-run document of brain-side state — the per-run cache of [[ADR-0012]] D2. One Module, `scripts/autopilot/run_ledger.py`, declares every top-level field with its type, default and carry policy (reset-per-run, carry-across-relaunch, mirrored-to-Redis, seeded-from-orchestrator) and is the only parser and writer of the document (Python callers use `load` / `read_prior` / `persist`; bash callers use `run_ledger.py get|project`). A **Pace Gate** relaunch carries forward only what the field table declares; slots are seeded from `GET /api/autopilot/inflight-slots`; the orchestrator never writes it.
 _Avoid_: state.json as a surface callers read or write directly, the state file

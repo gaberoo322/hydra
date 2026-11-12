@@ -82,9 +82,16 @@ Run these numbered steps.
    foreground poll; the `*.log` ignore keeps it out of commits), then read the
    `# tests` / `# pass` / `# fail` footer, `NPM_TEST_EXIT=` and the VERDICT line
    from it. Also run `npm run typecheck` and `npm run build`.
-7a. **Fail-loud lint on changed files** (issue #4732) — run the ast-grep
-   `fail-loud-catch` rule over the PR's changed `.ts`/`.mts` files and fix every
-   hit before `gh pr create`. Recipe: "Fail-loud lint — changed files" below.
+7a. **Fail-loud lint on changed files** (issue #4732, widened #5424) — run the
+   ast-grep `fail-loud-catch` rule over the PR's changed `.ts`/`.mts` files,
+   `fail-loud-except-py` over changed `.py` files, `fail-loud-devnull-sh` over
+   changed `.sh` files and `typed-error-throw` over changed `src/`/`scripts/` `.ts`
+   files (bare `throw new Error`, STD-ERROR-TYPED-CODE), and fix every hit before `gh pr create` (the shrink-only
+   `test/fail-loud-ratchet.test.mts` in `npm test` blocks any new or edited hit). Recipe: "Fail-loud lint — changed files" below.
+7b. **Test-can-fail proof on changed tests** (issue #5447, STD-TEST-CAN-FAIL) —
+   run the same advisory judge CI runs over the test files you added or
+   extended; for each `passes-at-merge-base` file make a case red-then-green, or
+   justify it in the PR body. Recipe: "Test-can-fail proof — changed tests" below.
 8a. **MANDATORY — deposit the grounding test-count telemetry file** (issue
    #2754). Immediately after `npm test` passes, run the grounding-deposit recipe
    in "Reflection injection" below. Best-effort on I/O error but mandatory.
@@ -443,6 +450,26 @@ Rules: `cue` MUST be kebab-case and stable across runs (NOT free text);
 `workaround` and `context` are exactly one line each. No friction worth noting →
 emit `## Friction Report` with the literal body `- (none)`.
 
+## Test-can-fail proof — changed tests (issue #5447)
+
+STD-TEST-CAN-FAIL was the most-cited review rule in the 2026-11 retro (17 PRs):
+a new test that already passes at the merge-base cannot be pinning your change.
+`scripts/ci/qa-fix-proof.ts` in `--mode changed-tests` overlays your changed `test/**`
+files onto a throwaway merge-base worktree and runs the candidates (added test
+files, plus modified ones that add a `test(`/`it(` call). It is the same CLI the
+advisory CI step runs and it ALWAYS exits 0:
+
+```bash
+git fetch origin --quiet
+node --experimental-strip-types scripts/ci/qa-fix-proof.ts --mode changed-tests --base origin/master --head HEAD
+```
+
+Per file: `proven` (at least one assertion failure at the merge-base) is clean;
+`inconclusive` (crashes at the merge-base, e.g. imports a module your PR adds) is
+not a finding; `passes-at-merge-base` prints a `::warning file=...::` line. That
+finding is per FILE and may be legitimate (a drift guard for an already-true
+invariant): fix the case so it fails without your change, or say why in the PR body.
+
 ## Fail-loud lint — changed files (issue #4732)
 
 CLAUDE.md "Fail loud": every `catch` either logs with context or is annotated
@@ -457,20 +484,35 @@ yours to fix:
 
 ```bash
 git fetch origin --quiet
-LINT_ARGS=()
+for spec in "fail-loud-catch:*.ts *.mts" "fail-loud-except-py:*.py" "fail-loud-devnull-sh:*.sh" "test-restates-module-literal:*.test.mts"; do
+  rule="${spec%%:*}"
+  read -ra pats <<<"${spec#*:}"   # quoted below: the git pathspecs must not glob in the shell
+  LINT_ARGS=()
+  while IFS= read -r f; do
+    [ -f "$f" ] && LINT_ARGS+=(--path "$f")
+  done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- "${pats[@]}")
+  if [ "${#LINT_ARGS[@]}" -gt 0 ]; then
+    npx tsx scripts/ast-search.ts --rule "$rule" --text "${LINT_ARGS[@]}"
+  fi
+done
+# STD-ERROR-TYPED-CODE (#5434): bare `throw new Error(...)` in changed src/ + scripts/ .ts files.
+TE_ARGS=()
 while IFS= read -r f; do
-  [ -f "$f" ] && LINT_ARGS+=(--path "$f")
-done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- '*.ts' '*.mts')
-if [ "${#LINT_ARGS[@]}" -gt 0 ]; then
-  npx tsx scripts/ast-search.ts --rule fail-loud-catch --text "${LINT_ARGS[@]}"
+  [ -f "$f" ] && TE_ARGS+=(--path "$f")
+done < <(git diff --name-only --diff-filter=AM origin/master...HEAD -- '*.ts')
+if [ "${#TE_ARGS[@]}" -gt 0 ]; then
+  npx tsx scripts/ast-search.ts --rule typed-error-throw --text "${TE_ARGS[@]}"
 fi
 # Prints `file:line:col: <catch text>` per hit (0-based line/col); no output = clean.
+# Python/shell use `# intentional: <reason>` as the annotation.
 ```
 
 For every hit in a catch you **added or edited**: log with context
 (`console.error("[module] what failed:", err)` or `logger.warn({ err }, "…")`),
 rethrow, or — only when swallowing is genuinely correct — annotate it
-`/* intentional: <reason> */`. A hit in untouched pre-existing code in a changed
+`/* intentional: <reason> */`. A `typed-error-throw` hit means replace the bare
+`Error` with the `src/errors.ts` subclass that fits the failure kind (the rule
+message lists them; `InvariantViolationError` is never for I/O). A hit in untouched pre-existing code in a changed
 file is optional to fix; do not widen the diff for it. The rule is advisory
 (no CI job runs it), so this step is the enforcement. Rule fixtures:
 `src/ast-grep-rule-tests/fail-loud-catch-test.yml`, run with

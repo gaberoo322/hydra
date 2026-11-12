@@ -68,6 +68,7 @@ export {
   CAP_TABLE,
   capEnvName,
   classRole,
+  countReviewedFailRoundsAfterReset,
   countReviewedFailRoundsSinceReset,
   evaluateCaps,
   latestResetMs,
@@ -77,6 +78,7 @@ export {
   type CapEvaluation,
   type CapSource,
   type CapUnit,
+  type TimedBody,
 } from "./caps.ts";
 export {
   classifyQaPassedExit,

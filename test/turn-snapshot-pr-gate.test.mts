@@ -59,6 +59,7 @@ import {
   type TurnSnapshotGithub,
 } from "../src/autopilot/turn-snapshot/github-port.ts";
 import { pickNoPrResume } from "../src/autopilot/turn-snapshot/dev-resume.ts";
+import { diffFromBaseline, mergeBaseline, type Struct } from "./_helpers/golden-baseline.mts";
 import { DEFAULT_GITHUB_REPO } from "../src/github/issues.ts";
 
 const GOLDEN_DIR = resolve(import.meta.dirname, "fixtures", "turn-snapshot");
@@ -85,8 +86,8 @@ interface Golden {
   prRefsUnavailable: boolean;
   gh: Partial<Record<"first" | "repoll" | "runsPush" | "runsPullRequest" | "required" | "resume" | "parked", GoldenRead>>;
   expected: {
-    /** `--format values` output: `{ "pr-gate": <typed PrGateSnapshot> }`. */
-    values: Record<string, unknown>;
+    /** Only the top-level `pr-gate` struct fields that differ from pr-gate-baseline.json (#5440). */
+    values: Struct;
     stderrNotes: string[];
     ghCalls: string[][];
     sleeps: string[];
@@ -116,7 +117,7 @@ function goldenEnv(env: Record<string, string>): PrGateEnv {
 }
 
 // Other slices' goldens share the directory under their own prefix (slice 2: `orch-board-`).
-const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".json") && !f.startsWith("orch-board-")).sort();
+const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".json") && !f.startsWith("orch-board-") && f !== "pr-gate-baseline.json").sort();
 
 /**
  * Re-record the goldens' `expected` blocks — ONLY for an intentional
@@ -133,59 +134,134 @@ const goldenFiles = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".json") &&
  */
 const UPDATE_GOLDEN = process.env.UPDATE_TURN_SNAPSHOT_PR_GATE_GOLDEN === "1";
 
+/** The committed healthy baseline (#5440). Not a fixture: excluded from `goldenFiles`. */
+const BASELINE_FILE = join(GOLDEN_DIR, "pr-gate-baseline.json");
+const readBaseline = (): Struct => JSON.parse(readFileSync(BASELINE_FILE, "utf-8")) as Struct;
+
+/** The collector's whole output for one scenario, over a recording transport. */
+async function replayScenario(g: Pick<Golden, "nowMs" | "env" | "prRefsUnavailable" | "gh">) {
+  const calls: string[][] = [];
+  const transport: GhTransport = async (args) => {
+    calls.push([...args]);
+    const key = goldenKey(args);
+    // #5319: the corpus predates the parked read; an unscripted one is a healthy empty set.
+    const r = key === null ? undefined : (g.gh[key] ?? (key === "parked" ? { stdout: "[]", stderr: "", exitCode: 0 } : undefined));
+    if (r === undefined) return { ok: false, stderr: `unscripted call: ${args.join(" ")}` };
+    return r.exitCode === 0 ? { ok: true, stdout: r.stdout, stderr: r.stderr } : { ok: false, stderr: r.stderr };
+  };
+  const sleeps: string[] = [];
+  let stdout = "";
+  let stderr = "";
+  const code = await main(
+    ["--collectors", "pr-gate", "--format", "values", "--gh-list-limit", "100"],
+    {
+      github: createTurnSnapshotGithub({ transport, repo: DEFAULT_GITHUB_REPO }),
+      now: () => g.nowMs,
+      sleep: async (s) => {
+        sleeps.push(String(s));
+      },
+      env: goldenEnv(g.env),
+      ...(g.prRefsUnavailable ? { prRefs: PR_REFS_UNAVAILABLE } : {}),
+    },
+    {
+      stdout: (t) => (stdout += t),
+      stderr: (t) => (stderr += t),
+    },
+  );
+  const notes = stderr.split("\n").filter((l) => l.startsWith("orch "));
+  const values = JSON.parse(stdout) as { "pr-gate": Struct };
+  return { code, notes, calls, sleeps, struct: values["pr-gate"] };
+}
+
+/**
+ * The healthy-baseline scenario (#5440): no open PRs, every other read healthy.
+ * The re-record mode replays it to write BASELINE_FILE; nobody hand-edits that
+ * file. It is not a fixture itself (it carries no `expected` block).
+ */
+const BASELINE_SCENARIO: Pick<Golden, "nowMs" | "env" | "prRefsUnavailable" | "gh"> = {
+  nowMs: 1791344407000,
+  env: { HYDRA_ORCH_UNKNOWN_REPOLL_DELAY_SECONDS: "0" },
+  prRefsUnavailable: false,
+  gh: {
+    first: { stdout: "[]", stderr: "", exitCode: 0 },
+    runsPush: { stdout: "", stderr: "", exitCode: 0 },
+    runsPullRequest: { stdout: "", stderr: "", exitCode: 0 },
+    required: {
+      stdout: '["test","dashboard-build","tier-gate","mutation-test","scope-check","secret-scan","deep-qa-gate","design-concept-reconcile"]',
+      stderr: "",
+      exitCode: 0,
+    },
+    resume: { stdout: "[]", stderr: "", exitCode: 0 },
+  },
+};
+
 describe("Turn Snapshot pr-gate — golden files from the bash collectors (ADR-0043 D4)", () => {
   test("the golden corpus is present (guards a vacuous pass)", () => {
     assert.ok(goldenFiles.length >= 90, `expected the captured corpus, found ${goldenFiles.length} files`);
   });
 
+  test("the committed baseline is the collector's output for the healthy no-open-PRs scenario", async () => {
+    const r = await replayScenario(BASELINE_SCENARIO);
+    assert.equal(r.code, 0);
+    if (UPDATE_GOLDEN) {
+      writeFileSync(BASELINE_FILE, JSON.stringify(r.struct, null, 2) + "\n");
+      return;
+    }
+    assert.deepEqual(readBaseline(), r.struct, "regenerate with UPDATE_TURN_SNAPSHOT_PR_GATE_GOLDEN=1 (never by hand)");
+  });
+
   for (const file of goldenFiles) {
     const g = JSON.parse(readFileSync(join(GOLDEN_DIR, file), "utf-8")) as Golden;
     test(`golden: ${g.name}`, async () => {
-      const calls: string[][] = [];
-      const transport: GhTransport = async (args) => {
-        calls.push([...args]);
-        const key = goldenKey(args);
-        // #5319: the corpus predates the parked read; an unscripted one is a healthy empty set.
-        const r = key === null ? undefined : (g.gh[key] ?? (key === "parked" ? { stdout: "[]", stderr: "", exitCode: 0 } : undefined));
-        if (r === undefined) return { ok: false, stderr: `unscripted call: ${args.join(" ")}` };
-        return r.exitCode === 0 ? { ok: true, stdout: r.stdout, stderr: r.stderr } : { ok: false, stderr: r.stderr };
-      };
-      const sleeps: string[] = [];
-      let stdout = "";
-      let stderr = "";
-      const code = await main(
-        ["--collectors", "pr-gate", "--format", "values", "--gh-list-limit", "100"],
-        {
-          github: createTurnSnapshotGithub({ transport, repo: DEFAULT_GITHUB_REPO }),
-          now: () => g.nowMs,
-          sleep: async (s) => {
-            sleeps.push(String(s));
-          },
-          env: goldenEnv(g.env),
-          ...(g.prRefsUnavailable ? { prRefs: PR_REFS_UNAVAILABLE } : {}),
-        },
-        {
-          stdout: (t) => (stdout += t),
-          stderr: (t) => (stderr += t),
-        },
-      );
-      assert.equal(code, 0);
-      const notes = stderr.split("\n").filter((l) => l.startsWith("orch "));
+      const r = await replayScenario(g);
+      assert.equal(r.code, 0);
       if (UPDATE_GOLDEN) {
         // The corpus's own key order (stderrNotes, ghCalls, sleeps, values) —
         // a no-op run of this mode must round-trip every file byte-identically.
+        // `values` is only the top-level fields that differ from the baseline.
         writeFileSync(
           join(GOLDEN_DIR, file),
-          JSON.stringify({ ...g, expected: { stderrNotes: notes, ghCalls: calls, sleeps, values: JSON.parse(stdout) } }, null, 2) + "\n",
+          JSON.stringify(
+            { ...g, expected: { stderrNotes: r.notes, ghCalls: r.calls, sleeps: r.sleeps, values: diffFromBaseline(readBaseline(), r.struct) } },
+            null,
+            2,
+          ) + "\n",
         );
         return;
       }
-      assert.deepEqual(JSON.parse(stdout), g.expected.values, "the typed value (in-flight sets included) must match the golden");
-      assert.deepEqual([...notes].sort(), [...g.expected.stderrNotes].sort(), "the stderr-note set must match");
-      assert.deepEqual(calls, g.expected.ghCalls, "the same gh calls, in the same order");
-      assert.deepEqual(sleeps, g.expected.sleeps, "the re-poll delay must match");
+      assert.deepEqual(r.struct, mergeBaseline(readBaseline(), g.expected.values), "the typed value (in-flight sets included) must match the golden");
+      assert.deepEqual([...r.notes].sort(), [...g.expected.stderrNotes].sort(), "the stderr-note set must match");
+      assert.deepEqual(r.calls, g.expected.ghCalls, "the same gh calls, in the same order");
+      assert.deepEqual(r.sleeps, g.expected.sleeps, "the re-poll delay must match");
     });
   }
+});
+
+describe("golden-baseline helper (#5440)", () => {
+  test("merge is shallow: a restated nested field replaces the baseline's whole field", () => {
+    const merged = mergeBaseline({ a: [1, 2], b: { x: 1, y: 2 }, c: 0 }, { b: { x: 9 } });
+    assert.deepEqual(merged, { a: [1, 2], b: { x: 9 }, c: 0 });
+  });
+
+  test("diff keeps only differing top-level fields and round-trips through merge", () => {
+    const baseline = { a: [1, 2], b: { x: 1 }, c: 0 };
+    const full = { a: [1, 2], b: { x: 2 }, c: 0, d: "new" };
+    const diff = diffFromBaseline(baseline, full);
+    assert.deepEqual(diff, { b: { x: 2 }, d: "new" });
+    assert.deepEqual(mergeBaseline(baseline, diff), full);
+  });
+
+  test("diff refuses a field the baseline has but the output lacks", () => {
+    assert.throws(() => diffFromBaseline({ a: 1, b: 2 }, { a: 1 }), /cannot express removal/);
+  });
+
+  test("a new field with the same value in every scenario changes only the baseline", () => {
+    const old = { a: 1 };
+    const fixtures = [{ a: 1 }, { a: 2 }];
+    const withField = (s: Struct) => ({ ...s, added: [] });
+    const diffs = fixtures.map((f) => diffFromBaseline(withField(old), withField(f)));
+    assert.deepEqual(diffs, fixtures.map((f) => diffFromBaseline(old, f)));
+  });
 });
 
 // ---------------------------------------------------------------------------
