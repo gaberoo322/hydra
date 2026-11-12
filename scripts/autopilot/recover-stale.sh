@@ -139,8 +139,11 @@ INFLIGHT_PR_ISSUES=""
 PR_LIST_OK=0
 INFLIGHT_PR_PAIRS=""
 if [ "${#STALE_IN_PROGRESS[@]}" -gt 0 ] || [ "${#STALE_BLOCKED[@]}" -gt 0 ]; then
-  PR_JSON=$(gh pr list --repo "$REPO" --state open --limit "${GH_ISSUE_LIST_LIMIT:-100}" \
-    --json number,headRefName,body 2>/dev/null || true)
+  # intentional: empty PR_JSON fails the array validation below, so PR_LIST_OK stays 0 and the run fails closed
+  if ! PR_JSON=$(gh pr list --repo "$REPO" --state open --limit "${GH_ISSUE_LIST_LIMIT:-100}" \
+    --json number,headRefName,body 2>/dev/null); then
+    PR_JSON=""
+  fi
   # PR_LIST_OK=1 only once the payload is a JSON array AND pr-refs.py exited 0
   # (QA #4869 finding 1): pr-refs.py swallows parse errors into an empty set, so
   # an unvalidated payload would read as "no open PR" and mis-route a
@@ -152,7 +155,10 @@ if [ "${#STALE_IN_PROGRESS[@]}" -gt 0 ] || [ "${#STALE_BLOCKED[@]}" -gt 0 ]; the
       INFLIGHT_PR_ISSUES="$PR_REFS_OUT"
       # `<issue> <pr>` lines (same predicate, first PR wins) for the seam's
       # `--evidence pr=<N>` on the needs-qa promotions (issue #5318 INV-10).
-      INFLIGHT_PR_PAIRS=$(printf '%s' "$PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --pairs 2>/dev/null || true)
+      INFLIGHT_PR_PAIRS=$(printf '%s' "$PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --pairs 2>/dev/null) || {
+        echo "[autopilot] recover-stale: WARN pr-refs.py --pairs failed; needs-qa routes will carry no pr= evidence"
+        INFLIGHT_PR_PAIRS=""
+      }
       PR_COUNT=$(printf '%s' "$PR_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
       if [ "$PR_COUNT" -ge "${GH_ISSUE_LIST_LIMIT:-100}" ]; then
         echo "[autopilot] recover-stale: WARN open-PR list hit the ${GH_ISSUE_LIST_LIMIT:-100} cap; PR-referenced issues beyond it may be missed"

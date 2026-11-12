@@ -1619,9 +1619,9 @@ def _qa_anchor_still_needs_qa(anchor_ref: str | None) -> bool | None:
         return None
     try:
         labels = {
-            e.get("name") for e in json.loads(proc.stdout).get("labels", []) if isinstance(e, dict)
+            e.get("name") for e in (json.loads(proc.stdout).get("labels") or []) if isinstance(e, dict)
         }
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):  # intentional: unparseable labels payload reads as unknown (None), caller treats it as not-confirmed
         return None
     return "needs-qa" in labels
 
