@@ -248,7 +248,7 @@ would swallow these backticked paths as scope entries):
 
 Artifact: `<first 12+ chars of .artifactHash>`
 
-- INV-1: "<verbatim prefix of invariants[0], >=16 chars>" — verified by: `file-contains: src/x.ts :: doThing(`
+- INV-1: "<verbatim prefix of invariants[0], >=16 chars>" — verified by: `file-contains: src/foo.ts :: doThing(`
 - INV-2: "<verbatim prefix of invariants[1], a MUST NOT>" — verified by: `test: test/api.test.mts :: "pruneIndex is never called on a closed lane"`
 ```
 

@@ -194,7 +194,7 @@ gh issue create --repo gaberoo322/hydra --title "Post-mortem (Target): <summary>
 - [ ] Append a prevention rule to the Target planner/executor feedback files
 
 ## Evidence
-<metrics, /api/health/full delta, logs, diffs>
+<metrics, health-endpoint delta, logs, diffs>
 
 ---
 Source: hydra-target-incident | $(date -u +%Y-%m-%dT%H:%M:%SZ)

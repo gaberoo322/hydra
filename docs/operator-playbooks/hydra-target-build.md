@@ -429,12 +429,14 @@ EOF
 
 If executing requires touching a file outside the planned scope (shared fixture, adjacent import), record a justification rationale at the same time:
 
+<!-- ref-check: example-start -->
 ```bash
 SCOPE_JUSTIFICATIONS=$(cat <<'EOF'
 scope-justification: `src/test-helpers.ts` — shared fixture required by the new test
 EOF
 )
 ```
+<!-- ref-check: example-end -->
 
 CI's `scope-check` gate (`.github/workflows/ci.yml` in the orchestrator repo, mirrored in the target repo if present) reads these sections from the PR body. Skipping this step doesn't block the build today (no hard requirement on PR body shape for target-repo PRs), but it's how the orchestrator learns the subagent's intended blast radius — and it's the contract reviewers + `hydra-qa` use to spot scope creep.
 
