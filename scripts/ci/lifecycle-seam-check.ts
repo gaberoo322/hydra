@@ -36,7 +36,11 @@
  *    the wrapper definition line is counted, its calls are not;
  *  - two-hop aliases and `export { F as x }` re-exports from another module;
  *  - flags assembled from a separately-bound string (`const FLAG = "--add-label"`);
- *  - `.github/workflows/**` (ADR-0047 D1).
+ *  - `.github/workflows/**` (ADR-0047 D1);
+ *  - PR labels are flags, not state (ADR-0047 D2, #5428): a label flag inside a
+ *    `gh pr <subcmd>` command (shell or argv form) and a `gh api` write on an
+ *    `issues/<PR identifier>/labels` path (one of 8 exact identifiers, e.g. `$PR`, `${PR_NUMBER}`, `{pr_id}`) are not sites. The latter is identifier-based, so the
+ *    aliasing evasion `PR=$ISSUE; gh api -X DELETE repos/o/r/issues/$PR/labels/x` is not counted.
  */
 
 import { readdir, readFile, writeFile } from "node:fs/promises";
@@ -139,6 +143,60 @@ function hasUnquotedBoundary(tail: string, before: string, startDepth = 0): bool
   return false;
 }
 
+/** Net open-bracket count of `s`. */
+function bracketDepth(s: string): number {
+  let depth = 0;
+  for (const ch of s) {
+    if (ch === "[" || ch === "(" || ch === "{") depth++;
+    else if (ch === "]" || ch === ")" || ch === "}") depth--;
+  }
+  return depth;
+}
+
+/** Index of the first unquoted `<<` heredoc marker (not `<<<`, not an arithmetic shift) in `tail`, or -1. */
+function findHeredocMarker(tail: string, before: string): number {
+  let quote = before === '"' || before === "'" ? before : "";
+  for (let i = 0; i < tail.length; i++) {
+    const ch = tail[i]!;
+    if (quote) {
+      if (ch === "\\" && quote === '"') i++;
+      else if (ch === quote) quote = "";
+    } else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === "<" && tail[i + 1] === "<") {
+      if (tail[i + 2] === "<") {
+        i += 2; // `<<<` here-string, not a heredoc
+        continue;
+      }
+      if (/^-?\s*(["']?)[A-Za-z_]\w*\1/.test(tail.slice(i + 2))) return i;
+      i++; // `1<<2` arithmetic shift
+    }
+  }
+  return -1;
+}
+
+/**
+ * A heredoc (`<<WORD`) keeps the command open only when its marker sits before the first unquoted
+ * command boundary. With `endsAtTerminator` (the PR exemption, which must fail closed) it also
+ * requires that nothing after the terminator line can start another command: the rest of the marker
+ * line has no boundary, and a flag reached after the terminator belongs to a new command. A flag
+ * still inside the heredoc body (terminator not yet seen) is body text of this command.
+ */
+function heredocReaches(tail: string, before: string, depth: number, endsAtTerminator = false): boolean {
+  const at = findHeredocMarker(tail, before);
+  if (at < 0 || hasUnquotedBoundary(tail.slice(0, at), before, depth)) return false;
+  const m = /^<<-?\s*(["']?)([A-Za-z_]\w*)\1/.exec(tail.slice(at));
+  if (!m) return false;
+  if (!endsAtTerminator) return true;
+  const afterMarker = tail.slice(at + m[0].length);
+  const eol = afterMarker.indexOf("\n");
+  const markerRest = eol < 0 ? afterMarker : afterMarker.slice(0, eol);
+  if (hasUnquotedBoundary(markerRest, "", depth)) return false;
+  if (eol < 0) return true;
+  const body = afterMarker.slice(eol + 1);
+  const term = new RegExp(`(?:^|\\n)[ \\t]*${m[2]}[ \\t]*(?:\\n|$)`).exec(body);
+  return !term || depth > 0; // terminator seen: whatever follows is a new command (unless inside brackets)
+}
+
 /** A bare `--label` is a create-time write when `create` appears within 300 chars before it (same or earlier line). */
 function inCreateContext(text: string, idx: number, matched = ""): boolean {
   const win = text.slice(Math.max(0, idx - 300), idx);
@@ -152,16 +210,43 @@ function inCreateContext(text: string, idx: number, matched = ""): boolean {
     for (const m of win.matchAll(/\b(?:issue|pr)["',\s[]+create\b/g)) create = m.index ?? -1;
     if (create < 0) return false;
     const tail = win.slice(create).replace(/\\\r?\n/g, " ").replace(/\r/g, "");
-    if (tail.includes("<<")) return true;
     // Brackets opened just before `issue` (`run("gh", [` then newline-separated items) still count.
-    let depth = 0;
-    for (const ch of win.slice(Math.max(0, create - 80), create)) {
-      if (ch === "[" || ch === "(" || ch === "{") depth++;
-      else if (ch === "]" || ch === ")" || ch === "}") depth--;
-    }
-    return !hasUnquotedBoundary(tail, win[create - 1] ?? "", depth);
+    const depth = bracketDepth(win.slice(Math.max(0, create - 80), create));
+    return heredocReaches(tail, win[create - 1] ?? "", depth) || !hasUnquotedBoundary(tail, win[create - 1] ?? "", depth);
   }
   return CREATE_CMD_RE.test(win);
+}
+
+/** `issues/$PR/labels`, `issues/${PR_NUMBER}/labels`, `issues/{pr_number}/labels`: PR-identifier label path (#5428). */
+const PR_LABEL_PATH_RE = /issues\/(?:\$\{?|\{)(?:PR|PR_NUMBER|PR_NUM|PR_ID|pr|pr_number|pr_num|pr_id)\}?\/labels/;
+
+/**
+ * Is the flag at `idx` inside a `gh pr <subcmd>` command (shell or argv form)? PR labels are flags
+ * (ADR-0047 D2). Same command bound as `-l`: the nearest `gh pr|issue` start before the flag must be
+ * `pr`, with no unquoted `;` / `&&` / `||` / `|` / unbracketed newline between (#5428).
+ */
+function inPrContext(text: string, idx: number): boolean {
+  // Unbounded walk-back (operator ruling, PR #5431 rounds 2-3): no fixed lookback constant to outgrow.
+  const win = text.slice(0, idx);
+  let pr = -1;
+  let issue = -1;
+  for (const m of win.matchAll(/\bgh["',\s[]+(?:(?:-R|--repo)["',\s=]+[\w./-]+["',\s[]+)*(pr|issue)\b/g)) {
+    const at = (m.index ?? 0) + m[0].length - m[1]!.length;
+    if (m[1] === "pr") pr = at;
+    else issue = at;
+  }
+  for (const m of win.matchAll(/(["'])(pr|issue)\1\s*,\s*["']\w+["']/g)) {
+    const at = (m.index ?? 0) + 1;
+    if (m[2] === "pr") pr = Math.max(pr, at);
+    else issue = Math.max(issue, at);
+  }
+  if (pr < 0 || issue > pr) return false;
+  // `gh issue edit $(gh pr view ...) --add-label x`: the `gh pr` is nested in the issue command's args (INV-3).
+  if (issue >= 0 && !hasUnquotedBoundary(win.slice(issue, pr), win[issue - 1] ?? "")) return false;
+  const tail = win.slice(pr).replace(/\\\r?\n/g, " ").replace(/\r/g, "");
+  const depth = bracketDepth(win.slice(Math.max(0, pr - 80), pr));
+  const lead = win[pr - 1] ?? "";
+  return heredocReaches(tail, lead, depth, true) || (findHeredocMarker(tail, lead) < 0 && !hasUnquotedBoundary(tail, lead, depth));
 }
 
 /** Join backslash-continued physical lines; each logical line keeps its first physical line number. */
@@ -191,6 +276,7 @@ export function scanTextSites(text: string): number[] {
   for (const { line: lineNo, text: line, offset } of logicalLines(text)) {
     let hit = false;
     for (const m of line.matchAll(FLAG_RE)) {
+      if (inPrContext(text, offset + (m.index ?? 0))) continue;
       if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, offset + (m.index ?? 0), m[0])) continue;
       const argList = m[1] !== undefined; // `"--add-label", x` list form
       const quoted = m[2] ?? m[3];
@@ -206,21 +292,25 @@ export function scanTextSites(text: string): number[] {
     }
     for (const re of [CONCAT_RE, TRAILING_EQ_RE]) {
       for (const m of line.matchAll(re)) {
+        if (inPrContext(text, offset + (m.index ?? 0))) continue;
         if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, offset + (m.index ?? 0), m[0])) continue;
         hit = true; // operand not inside the literal: unresolvable, fail closed
       }
     }
-    if (!hit && GH_API_RE.test(line) && (/\/labels\b/.test(line) || /labels\[\]=/.test(line))) {
+    // Per `gh api` invocation: a PR-path write must not hide a chained issue-path write on the same line.
+    for (const chunk of line.split(/(?=\bgh["'\s,[]*\bapi\b)/)) {
+      if (hit) break;
+      if (!(GH_API_RE.test(chunk) && !PR_LABEL_PATH_RE.test(chunk) && (/\/labels\b/.test(chunk) || /labels\[\]=/.test(chunk)))) continue;
       const isWrite =
-        /(?:-X|--method)["',= ]+(?:POST|PUT|PATCH|DELETE)\b/i.test(line) ||
-        /(?:-[fF]|--field|--raw-field)["',= ]*["']?labels\[\]=/.test(line) ||
-        /--input\b/.test(line);
+        /(?:-X|--method)["',= ]+(?:POST|PUT|PATCH|DELETE)\b/i.test(chunk) ||
+        /(?:-[fF]|--field|--raw-field)["',= ]*["']?labels\[\]=/.test(chunk) ||
+        /--input\b/.test(chunk);
       if (isWrite) {
         const operands: string[] = [];
-        const tail = /\/labels\/?([^\s"',]*)/.exec(line);
+        const tail = /\/labels\/?([^\s"',]*)/.exec(chunk);
         if (tail && tail[1]) operands.push(tail[1]);
-        for (const f of line.matchAll(/labels\[\]=([^\s"',]+)/g)) operands.push(f[1]!);
-        if (/--input\b/.test(line) || operands.some((o) => operandIsSite(o, false))) hit = true;
+        for (const f of chunk.matchAll(/labels\[\]=([^\s"',]+)/g)) operands.push(f[1]!);
+        if (/--input\b/.test(chunk) || operands.some((o) => operandIsSite(o, false))) hit = true;
       }
     }
     if (hit) sites.push(lineNo);
@@ -229,6 +319,7 @@ export function scanTextSites(text: string): number[] {
   const seen = new Set(sites);
   for (const m of text.matchAll(FLAG_RE)) {
     if (m[1] === undefined || !m[0].includes("\n")) continue; // single-line matches handled above
+    if (inPrContext(text, m.index!)) continue;
     if (isCreateOnlyFlag(m[0]) && !inCreateContext(text, m.index!, m[0])) continue;
     const quoted = m[2] ?? m[3];
     const operand = quoted ?? m[4] ?? "";
