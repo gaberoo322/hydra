@@ -1,6 +1,6 @@
 ---
 name: hydra-target-incident
-description: Automated incident response for the Target project — post-merge regressions, web-service crashes, and deploy failures. Single-realm to the target's app directory; investigates root cause, attempts fix or revert, files a post-mortem. Target sibling of hydra-incident (which is Orchestrator-only).
+description: Automated incident response for the Target project — post-merge regressions, web-service crashes, and deploy failures. Single-realm to the target's app directory; investigates root cause, attempts fix or revert, files a post-mortem.
 when_to_use: "When hydra-target-build's Step 8.6 post-merge health watcher alarms on a Target regression, the target's web service crashes, a Target deploy fails, or the user says 'target incident', 'what broke on the target', 'investigate the target failure'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 arguments: [context]
@@ -19,10 +19,10 @@ post-mortem.
 
 ## Realm scope — single-realm to the Target (ADR-0025, issue #2553)
 
-This skill operates **only** on `$TARGET_WS` (the Target). It is the Target
-sibling of the Orchestrator-only `hydra-incident`. The two are deliberately
-single-realm: `hydra-incident` never touches `$TARGET_WS`, and
-`hydra-target-incident` never touches `~/hydra` source. The shared issue tracker
+This skill operates **only** on `$TARGET_WS` (the Target). It is the sole
+Operate-layer incident skill and is single-realm: it never touches `~/hydra`
+source (the Orchestrator realm has no incident skill; the watchdog, deploy-drift
+check, emergency brake and pause controls cover it). The shared issue tracker
 (`gaberoo322/hydra`) is realm-agnostic — only the investigated *tree* is
 realm-scoped — so Target post-mortems file there with the `target-backlog`
 label. Phase-5 prevention rules route to the **Target** planner/executor

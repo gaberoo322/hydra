@@ -2,7 +2,7 @@
 # footer.sh — the canonical `Source: <skill> | <ISO ts>` gh-issue provenance
 # footer, extracted once (issue #2556).
 #
-# The same footer block was hand-copied into hydra-incident, hydra-research,
+# The same footer block was hand-copied into hydra-target-incident, hydra-research,
 # hydra-discover (x3), and hydra-target-discover. Downstream parsers key on the
 # exact string shape — classes.json provenance labels and the retro/reconciler
 # footer matching both split on `Source: <skill> |` — so this helper emits a
@@ -32,12 +32,12 @@
 # The output is exactly one line, no trailing leading whitespace beyond the
 # single space delimiters, matching the historical hand-written footer
 # byte-for-byte:
-#   - `hydra_issue_footer hydra-incident`        -> `Source: hydra-incident | 2026-...Z`
+#   - `hydra_issue_footer hydra-target-incident`        -> `Source: hydra-target-incident | 2026-...Z`
 #   - `hydra_issue_footer hydra-discover 'tier N'` -> `Source: hydra-discover (tier N) | 2026-...Z`
 
 # hydra_issue_footer <skill-label> [suffix]
 #
-# <skill-label> : the producing skill name, e.g. hydra-incident.
+# <skill-label> : the producing skill name, e.g. hydra-target-incident.
 # [suffix]      : optional parenthetical that the discover-family footers carry
 #                 verbatim, e.g. `tier N` -> rendered as ` (tier N)`. Omit for
 #                 the plain `Source: <skill> | <ts>` form.
