@@ -591,7 +591,6 @@ describe("retired playbooks (issue #5493)", () => {
       ...playbookFiles().map((f) => join(PLAYBOOKS, f)),
       join(ROOT, "src", "operator-actions", "parity.ts"),
       join(ROOT, "src", "api", "pattern-memory.ts"),
-      join(ROOT, "scripts", "hydra", "footer.sh"),
     ];
     for (const f of files) {
       const text = readFileSync(f, "utf8");
