@@ -57,9 +57,10 @@ a DO-NOT-EDIT banner and will be overwritten on the next sync.
 
 Every playbook and fragment is scanned by `test/playbook-reference-check.test.mts`,
 part of the required `npm test` suite. A cited repo path, HTTP API route,
-`npm run` script, ADR number, or code symbol attributed to a file (a
-code-span identifier next to a code-span file path) must resolve against the
-tree, or the suite fails naming the file, line and reference.
+`npm run` script, ADR number, or code symbol attributed to a file must resolve
+against the tree, and a cited ADR must not be superseded, or the suite fails
+naming the file, line and reference. The exact rules live in the header of
+`scripts/ci/playbook-reference-check.ts`.
 
 When a cite is an illustration and not a real reference, mark it:
 
@@ -68,9 +69,9 @@ When a cite is an illustration and not a real reference, mark it:
 - several lines — wrap them in `<!-- ref-check: example-start -->` and
   `<!-- ref-check: example-end -->`.
 
-Placeholders (`<name>`, `NNNN`, `*`), paths under another root (`$TARGET_WS/...`),
-Target-side `npm run` scripts and routes behind `$TARGET_WEB_URL` are skipped
-without a marker. This `README.md` is not scanned.
+Placeholders (`<name>`, `NNNN`, `*`), metasyntactic names (`foo`, `bar`, `x`),
+paths under another root (`$TARGET_WS/...`), Target-side `npm run` scripts and
+routes behind `$TARGET_WEB_URL` are skipped without a marker. This `README.md` is not scanned.
 
 Dead references that predate the check sit in
 `scripts/ci/playbook-reference-baseline.json`. The baseline only shrinks: fix a

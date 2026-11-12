@@ -25,6 +25,7 @@ const {
   loadBaseline,
   listPlaybooks,
   WRITE_BASELINE_CMD,
+  EXAMPLE_MARKER,
 } = await import("../scripts/ci/playbook-reference-check.ts");
 
 const PB = "docs/operator-playbooks/hydra-example.md";
@@ -40,7 +41,8 @@ const world = {
   fileText: (p: string) => FILES[p] ?? null,
   routes: ["/api/health", "/api/tier", "/api/design-concepts/:slug", "/api/autopilot/board/promote"],
   npmScripts: new Set(["test", "test:file"]),
-  adrNumbers: new Set(["0005", "0047"]),
+  adrNumbers: new Set(["0004", "0005", "0047"]),
+  supersededAdrs: new Set(["0004"]),
 };
 
 function unresolved(text: string, file = PB): string[] {
@@ -90,6 +92,10 @@ describe("playbook-reference-check: dead references are caught", () => {
     );
   });
 
+  test("a cite of a superseded ADR fails; an accepted one passes", () => {
+    assert.deepEqual(unresolved("Per ADR-0004 and ADR-0005."), ["superseded-adr 0004"]);
+  });
+
   test("a symbol must match as a whole identifier, not a substring", () => {
     assert.deepEqual(unresolved("`LIVE_CONST` in `src/live.ts`"), ["symbol src/live.ts#LIVE_CONST"]);
   });
@@ -102,14 +108,14 @@ describe("playbook-reference-check: dead references are caught", () => {
 
 describe("playbook-reference-check: what is deliberately not a reference", () => {
   test("an opt-out-marked example line passes", () => {
-    assert.deepEqual(unresolved("Bad: `src/foo.ts` <!-- ref-check: example -->"), []);
-    assert.deepEqual(unresolved("touch src/foo.ts  # ref-check: example"), []);
+    assert.deepEqual(unresolved("Bad: `src/gone.ts` <!-- ref-check: example -->"), []);
+    assert.deepEqual(unresolved("touch src/gone.ts  # ref-check: example"), []);
   });
 
   test("an opt-out block passes, and checking resumes after it", () => {
     assert.deepEqual(
       unresolved(
-        "<!-- ref-check: example-start -->\n`src/foo.ts`\nnpm run nope\n" +
+        "<!-- ref-check: example-start -->\n`src/gone.ts`\nnpm run nope\n" +
           "<!-- ref-check: example-end -->\n`src/after.ts`\n",
       ),
       ["path src/after.ts"],
@@ -159,6 +165,30 @@ describe("playbook-reference-check: what is deliberately not a reference", () =>
     assert.deepEqual(unresolved("the `model` column of `src/live.ts`"), []);
   });
 
+  test("a symbol merely listed beside a file is not attributed to it", () => {
+    assert.deepEqual(
+      unresolved(
+        "`GONE_CONSTANT`, `src/live.ts` and `OTHER_GONE` and `src/live.ts`.\n" +
+          "`src/live.ts`, `GONE_CONSTANT`; `src/live.ts` and `OTHER_GONE`.",
+      ),
+      [],
+    );
+  });
+
+  test("a metasyntactic placeholder name is not a reference", () => {
+    assert.deepEqual(
+      unresolved("`src/foo.ts`, `src/foo/bar.ts`, `test/foo.test.mts`, `src/x.ts`, GET /api/foo"),
+      [],
+    );
+    assert.deepEqual(unresolved("`src/foobar.ts`"), ["path src/foobar.ts"]);
+  });
+
+  test("an unterminated example block exempts nothing", () => {
+    assert.deepEqual(unresolved("<!-- ref-check: example-start -->\n`src/gone.ts`\n"), [
+      "path src/gone.ts",
+    ]);
+  });
+
   test("a symbol attributed to a missing file is reported once, as the path", () => {
     assert.deepEqual(unresolved("`GONE_CONSTANT` in `src/gone.ts`"), ["path src/gone.ts"]);
   });
@@ -182,7 +212,7 @@ describe("playbook-reference-check: shrink-only baseline", () => {
     assert.deepEqual(cmp.violations, [{ file: PB, line: 7, kind: "path", ref: "src/gone.ts" }]);
     const report = formatReport(cmp);
     assert.match(report, new RegExp(`${PB}:7  path src/gone\\.ts`));
-    assert.match(report, /ref-check: example/);
+    assert.ok(report.includes(EXAMPLE_MARKER));
     assert.ok(report.includes(WRITE_BASELINE_CMD));
   });
 
@@ -204,10 +234,9 @@ describe("playbook-reference-check: shrink-only baseline", () => {
         ],
         "a.md": [],
       },
-      new Date("2026-01-01T00:00:00Z"),
     );
     assert.deepEqual(baseline.files, { "b.md": ["path src/z.ts", "route /api/x"] });
-    assert.match(baseline.note, /2026-01-01/);
+    assert.doesNotMatch(baseline.note, /\d{4}-\d{2}-\d{2}/);
   });
 });
 

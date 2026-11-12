@@ -252,7 +252,11 @@ The linked issue contains a `## Files in scope` section (mandatory) and may cont
 3. Treat `Files out of scope` as the HARD boundary — touching anything matching these entries will fail CI's scope-check gate. Do not touch them unless absolutely required.
 4. If you DO have to touch an out-of-scope file (e.g. a shared test fixture, an adjacent import), include a `scope-justification:` block in the PR body listing each affected file with a one-line rationale. Example:
 
+   <!-- ref-check: example-start -->
+
        scope-justification: `test/helpers/fixtures.ts` — fixture used by the new test added in scope
+
+   <!-- ref-check: example-end -->
 
 5. Mirror the issue's `## Files in scope` section into the PR body so the gate can match against either source.
 6. CODE-SPAN TRAP: the scope-check parser treats EVERY backticked code-span inside the `Files in scope` / `Files out of scope` sections as a scope entry, not just the bullet paths. When you write those sections (or any prose under those headings), keep non-path filenames PLAIN-TEXT. A stray backticked filename in prose becomes a phantom entry that can hard-block one of your real in-scope files.

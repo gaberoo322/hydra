@@ -24,21 +24,29 @@
  *   route   an `/api/...` cite                              → docs/generated/routes.json
  *   npm     an `npm run <script>` cite                      → package.json scripts
  *   adr     an `ADR-NNNN` cite                              → docs/generated/adrs.json
+ *   superseded-adr  the same cite, when the inventory marks that ADR `superseded`
  *   symbol  a code identifier attributed to a cited file    → that file's text
+ *
+ * A symbol is attributed only by an attribution phrase ("`sym` in `file`",
+ * "`file`'s `sym`"); two code spans joined by a comma or "and" are a list.
  *
  * Target-side references are NOT checked, because the Target repo is not in
  * this checkout: an `npm run` cite in a Target playbook (basename starting
- * `hydra-target-` / `target-`) or on a line that names the Target, and a route
- * on the Target's own base URL (`$TARGET_WEB_URL/api/...`).
+ * `hydra-target-` / `target-`) or on a line that says `Target-side` or reads a
+ * `TARGET_` variable, and a route on the Target's own base URL
+ * (`$TARGET_WEB_URL/api/...`).
  *
  * # Illustrative examples
  *
- * A placeholder path in a good/bad sample is not a claim about the repo. Mark
- * it instead of baselining it:
+ * A placeholder path in a good/bad sample is not a claim about the repo. A path
+ * or route with a metasyntactic segment (`foo`, `bar`, `baz`, `qux`, `x`, `y`)
+ * is skipped automatically. Mark any other illustration instead of baselining
+ * it:
  *
  *   one line:  put `ref-check: example` anywhere on the line (an HTML comment
  *              in prose, a `#` comment in a shell block)
  *   a block:   `<!-- ref-check: example-start -->` … `<!-- ref-check: example-end -->`
+ *              (a start with no end exempts nothing)
  *
  * # Why a test, not a workflow
  *
@@ -69,7 +77,7 @@ export const WRITE_BASELINE_CMD =
 // Types
 // ---------------------------------------------------------------------------
 
-export type ReferenceKind = "path" | "route" | "npm" | "adr" | "symbol";
+export type ReferenceKind = "path" | "route" | "npm" | "adr" | "superseded-adr" | "symbol";
 
 /** One thing a playbook cites. */
 export interface Reference {
@@ -92,6 +100,8 @@ export interface World {
   npmScripts: ReadonlySet<string>;
   /** ADR numbers (`"0005"`) from the generated ADR inventory. */
   adrNumbers: ReadonlySet<string>;
+  /** Numbers of the ADRs whose inventory status is `superseded`. */
+  supersededAdrs: ReadonlySet<string>;
 }
 
 export interface Baseline {
@@ -123,9 +133,39 @@ export interface Comparison {
 // Extraction (pure)
 // ---------------------------------------------------------------------------
 
-const EXAMPLE_LINE = /ref-check:\s*example(?!-)/;
-const EXAMPLE_START = /ref-check:\s*example-start/;
-const EXAMPLE_END = /ref-check:\s*example-end/;
+/** The opt-out marker. `-start` / `-end` suffixes open and close a block. */
+export const EXAMPLE_MARKER = "ref-check: example";
+const MARKER_SRC = EXAMPLE_MARKER.replace(": ", ":\\s*");
+const EXAMPLE_LINE = new RegExp(`${MARKER_SRC}(?!-)`);
+const EXAMPLE_START = new RegExp(`${MARKER_SRC}-start`);
+const EXAMPLE_END = new RegExp(`${MARKER_SRC}-end`);
+
+/**
+ * Metasyntactic names (`src/foo.ts`, `src/foo/bar.ts`, `/api/foo`) are
+ * illustrations by construction and are never references.
+ */
+const METASYNTACTIC = /^(?:foo|bar|baz|qux|x|y)$/i;
+function hasPlaceholderSegment(pathOrRoute: string): boolean {
+  return pathOrRoute.split("/").some((seg) => METASYNTACTIC.test(seg.split(".")[0]));
+}
+
+/**
+ * 0-based indexes of the lines inside a closed example block, markers included.
+ * A start marker with no end marker opens nothing, so a forgotten end cannot
+ * switch the check off for the rest of the file.
+ */
+function exampleBlockLines(lines: readonly string[]): Set<number> {
+  const inside = new Set<number>();
+  let start = -1;
+  lines.forEach((line, i) => {
+    if (start === -1 && EXAMPLE_START.test(line)) start = i;
+    else if (start !== -1 && EXAMPLE_END.test(line)) {
+      for (let j = start; j <= i; j++) inside.add(j);
+      start = -1;
+    }
+  });
+  return inside;
+}
 
 const ROOTS = "src|scripts|test|docs|config|\\.github|dashboard|evals";
 const FILE_EXT = "ts|mts|tsx|jsx|js|mjs|py|sh|md|json|ya?ml|toml";
@@ -145,13 +185,21 @@ const ADR_RE = /ADR-(\d{4})(?!\d)/g;
 const SYMBOL_EXT = /\.(?:ts|mts|tsx|js|mjs|py|sh)$/;
 const IDENT = "[A-Za-z_][A-Za-z0-9_]*(?:\\(\\))?";
 const CODE_PATH = `(?:${ROOTS})/[\\w./-]+`;
-const GAP = "[^`.;\\n]{1,30}";
-const SYMBOL_THEN_PATH = new RegExp(`\`(${IDENT})\`${GAP}\`(${CODE_PATH})\``, "g");
-const PATH_THEN_SYMBOL = new RegExp(`\`(${CODE_PATH})\`${GAP}\`(${IDENT})\``, "g");
+/**
+ * Only an attribution phrase ties a symbol to a file: "`sym` in `file`",
+ * "`sym` (in `file`)", "`sym` entry in `file`", "`file`'s `sym`",
+ * "`file` — the `sym`". A comma or "and" between the two code spans is a list,
+ * not an attribution, and is never matched.
+ */
+const SYMBOL_GAP = " (?:\\((?:in |from )?|(?:[a-z]+ ){0,2}(?:in|from|of|inside) )";
+const PATH_GAP = "(?:'s | (?:\\(|— |: )?(?:the |its |exports |imports |defines )?)";
+const SYMBOL_THEN_PATH = new RegExp(`\`(${IDENT})\`${SYMBOL_GAP}\`(${CODE_PATH})\``, "g");
+const PATH_THEN_SYMBOL = new RegExp(`\`(${CODE_PATH})\`${PATH_GAP}\`(${IDENT})\``, "g");
 
 /** Paths that are templates or placeholders, not cites. */
 function isTemplatePath(path: string, next: string): boolean {
   return (
+    hasPlaceholderSegment(path) ||
     path.includes("NNNN") ||
     path.includes("..") ||
     next === "*" ||
@@ -200,20 +248,12 @@ export function extractReferences(file: string, text: string): Reference[] {
   };
 
   const targetPlaybook = isTargetPlaybook(file);
-  let inExample = false;
   const lines = text.split("\n");
+  const inExampleBlock = exampleBlockLines(lines);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const lineNo = i + 1;
-    if (EXAMPLE_START.test(line)) {
-      inExample = true;
-      continue;
-    }
-    if (EXAMPLE_END.test(line)) {
-      inExample = false;
-      continue;
-    }
-    if (inExample || EXAMPLE_LINE.test(line)) continue;
+    if (inExampleBlock.has(i) || EXAMPLE_LINE.test(line)) continue;
 
     for (const m of line.matchAll(PATH_RE)) {
       const next = line[m.index + m[0].length] ?? "";
@@ -227,15 +267,18 @@ export function extractReferences(file: string, text: string): Reference[] {
       const before = line.slice(0, m.index);
       if (/TARGET_WEB_URL[}"']*$/.test(before)) continue;
       const route = cleanRoute(m[0]);
-      if (route.length > "/api".length) add("route", route, lineNo);
+      if (route.length > "/api".length && !hasPlaceholderSegment(route)) add("route", route, lineNo);
     }
 
-    const targetLine = targetPlaybook || /\bTarget\b|TARGET_/.test(line);
+    const targetLine = targetPlaybook || /\bTarget-side\b|TARGET_/.test(line);
     if (!targetLine) {
       for (const m of line.matchAll(NPM_RE)) add("npm", m[1].replace(/[.:-]+$/, ""), lineNo);
     }
 
-    for (const m of line.matchAll(ADR_RE)) add("adr", m[1], lineNo);
+    for (const m of line.matchAll(ADR_RE)) {
+      add("adr", m[1], lineNo);
+      add("superseded-adr", m[1], lineNo);
+    }
 
     for (const m of line.matchAll(SYMBOL_THEN_PATH)) {
       if (looksLikeSymbol(m[1]) && SYMBOL_EXT.test(m[2])) {
@@ -288,6 +331,8 @@ export function resolves(ref: Reference, world: World): boolean {
       return world.npmScripts.has(ref.ref);
     case "adr":
       return world.adrNumbers.has(ref.ref);
+    case "superseded-adr":
+      return !world.supersededAdrs.has(ref.ref);
     case "symbol": {
       const hash = ref.ref.lastIndexOf("#");
       const path = ref.ref.slice(0, hash);
@@ -342,7 +387,7 @@ export function compareAgainstBaseline(
 }
 
 /** Build the baseline payload for the current unresolved set. */
-export function buildBaseline(unresolved: Record<string, Reference[]>, now: Date): Baseline {
+export function buildBaseline(unresolved: Record<string, Reference[]>): Baseline {
   const files: Record<string, string[]> = {};
   for (const file of Object.keys(unresolved).sort()) {
     const entries = [...new Set(unresolved[file].map(entryOf))].sort();
@@ -350,7 +395,7 @@ export function buildBaseline(unresolved: Record<string, Reference[]>, now: Date
   }
   return {
     note:
-      `Auto-generated by ${WRITE_BASELINE_CMD} on ${now.toISOString()}. ` +
+      `Auto-generated by ${WRITE_BASELINE_CMD}. ` +
       "Shrink-only: each entry is a playbook reference that does not resolve. " +
       "Fix the playbook and remove the entry; never add one by hand.",
     files,
@@ -362,6 +407,7 @@ const KIND_HINT: Record<ReferenceKind, string> = {
   route: "no such route in docs/generated/routes.json",
   npm: "no such script in package.json",
   adr: "no such ADR in docs/generated/adrs.json",
+  "superseded-adr": "this ADR is superseded; cite the ADR that replaced it",
   symbol: "the named file does not contain this identifier",
 };
 
@@ -376,7 +422,7 @@ export function formatReport(cmp: Comparison): string {
     out.push(
       "Fix: update the playbook to cite what exists now (or delete the cite).",
       "If the reference is an illustrative placeholder, mark the line with",
-      "`ref-check: example` (see the header of scripts/ci/playbook-reference-check.ts).",
+      `\`${EXAMPLE_MARKER}\` (see the header of scripts/ci/playbook-reference-check.ts).`,
       `Only as a last resort, baseline it: ${WRITE_BASELINE_CMD}`,
     );
   }
@@ -415,7 +461,7 @@ export function repoWorld(root: string = REPO_ROOT): World {
   const readJson = <T>(rel: string): T =>
     JSON.parse(readFileSync(join(root, rel), "utf8")) as T;
   const routes = readJson<InventoryRows<{ path: string }>>("docs/generated/routes.json");
-  const adrs = readJson<InventoryRows<{ number: string }>>("docs/generated/adrs.json");
+  const adrs = readJson<InventoryRows<{ number: string; status: string }>>("docs/generated/adrs.json");
   const pkg = readJson<{ scripts?: Record<string, string> }>("package.json");
   const texts = new Map<string, string | null>();
   return {
@@ -435,6 +481,7 @@ export function repoWorld(root: string = REPO_ROOT): World {
     routes: routes.rows.map((r) => r.path),
     npmScripts: new Set(Object.keys(pkg.scripts ?? {})),
     adrNumbers: new Set(adrs.rows.map((r) => r.number)),
+    supersededAdrs: new Set(adrs.rows.filter((r) => r.status === "superseded").map((r) => r.number)),
   };
 }
 
@@ -460,7 +507,7 @@ export async function loadBaseline(root: string = REPO_ROOT): Promise<Baseline> 
 async function main(): Promise<void> {
   const unresolved = scanRepo();
   if (process.argv.includes("--write-baseline")) {
-    const baseline = buildBaseline(unresolved, new Date());
+    const baseline = buildBaseline(unresolved);
     await writeJsonBaseline(join(REPO_ROOT, BASELINE_REL), baseline);
     const count = Object.values(baseline.files).reduce((n, e) => n + e.length, 0);
     console.log(`[playbook-reference-check] wrote ${BASELINE_REL}: ${count} entries`);

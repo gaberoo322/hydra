@@ -132,6 +132,7 @@ The runner (`planWireOrRetireEmit()`, pure + tested) keeps only ledger rows with
 
 ### 4. Report
 
+<!-- ref-check: example-start -->
 ```
 hydra-target-cleanup-emit — Target ($TARGET_APP_DIR) — <ISO> — apply
 knip raw findings:   441
@@ -142,6 +143,7 @@ Dropped findings:    433
 dropped 210: delete-class (no in-file reference) — deferred to wire-or-retire
 dropped 180: within the 45-day wiring grace period (...)
 ```
+<!-- ref-check: example-end -->
 
 ## Rules
 
