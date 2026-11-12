@@ -408,6 +408,15 @@ describe("lifecycle-state-label-guard: -R ordering and documented gaps (PR #5426
   test("global -R this repo then subcommand --repo other stays allowed (sibling pin)", () => {
     assertAllow(`gh -R gaberoo322/hydra issue edit 5 ${ADD} needs-qa --repo other/x`);
   });
+  test("gh -R this repo api graphql naming a state is denied (round-6 regression)", () => {
+    assertDeny(`gh -R gaberoo322/hydra api graphql -f query='mutation { addLabelsToLabelable(input:{labelIds:["x"]}) } needs-qa'`);
+  });
+  test("gh api graphql without -R naming a state stays denied (sibling pin)", () => {
+    assertDeny(`${GH_API} graphql -f query='mutation { addLabelsToLabelable(input:{labelIds:["x"]}) } needs-qa'`);
+  });
+  test("gh -R this repo api graphql with no state word stays allowed (sibling pin)", () => {
+    assertAllow(`gh -R gaberoo322/hydra api graphql -f query='mutation { addLabelsToLabelable(input:{labelIds:["x"]}) } bug'`);
+  });
   test("known gaps are pinned as currently allowed", () => {
     assertAllow(`${GH_EDIT} 5 ${ADD} $'needs-qa'`);
     assertAllow(`${GH_EDIT} 5 ${ADD} $(echo needs-qa)`);

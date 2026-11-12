@@ -539,10 +539,11 @@ def _label_fields(args, payload):
     return out
 
 
-def _api_label_state(args):
+def _api_label_state(args, npre=0):
     # `gh api`: mutating call that writes labels on an issue: either
     # issues/<n>/labels[/<name>] or a PATCH/POST of issues/<n> carrying labels.
-    if args and args[0] == "graphql":
+    # npre: leading global-flag tokens (-R <repo>) prepended by the caller.
+    if len(args) > npre and args[npre] == "graphql":
         # A label mutation through GraphQL (addLabelsToLabelable /
         # removeLabelsFromLabelable / updateIssue labelIds) carries opaque
         # ids, but deny it when the same command names a lifecycle state.
@@ -755,7 +756,7 @@ def _scan_segment(seg, depth):
     if toks[0] == "issue" and toks[1] in ("edit", "create"):
         return _issue_label_state(pre + toks[2:])
     if toks[0] == "api":
-        return _api_label_state(pre + toks[1:])
+        return _api_label_state(pre + toks[1:], len(pre))
     return None
 
 
