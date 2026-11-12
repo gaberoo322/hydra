@@ -128,7 +128,7 @@ export async function getCurrentRun(): Promise<GetCurrentRunResult> {
     }
     const view = projectRunView(await sweepLoadedRow(runId, row));
     const turns = await fetchTurnsWithJoins(runId, 50);
-    (view as any).turns = turns;
+    (view as any).turns = turns.map((t) => t.raw);
     return { ok: true, view };
   } catch (err: any) {
     return errRedis(err);
@@ -148,7 +148,7 @@ export async function getRun(runId: string): Promise<GetRunResult> {
     }
     const view = projectRunView(await sweepLoadedRow(runId, row));
     const turns = await fetchTurnsWithJoins(runId, RUN_TURNS_MAX_FETCH);
-    return { ok: true, run: view, turns };
+    return { ok: true, run: view, turns: turns.map((t) => t.raw) };
   } catch (err: any) {
     return errRedis(err);
   }
