@@ -65,7 +65,7 @@ describe("hydra-dev playbook — live tier classifier (issue #406)", () => {
     );
   });
 
-  test("instructs the subagent to put a `Tier: <0|1|2|3>` line in the PR body", () => {
+  test("instructs the subagent to put a `Tier: <1|2|3|4>` line in the PR body", () => {
     // Must mention a Tier line in the PR body and the four valid integer
     // values so a future edit can't silently soften the contract.
     assert.ok(
@@ -73,8 +73,8 @@ describe("hydra-dev playbook — live tier classifier (issue #406)", () => {
       "Playbook must reference a `Tier:` PR-body line",
     );
     assert.ok(
-      /0\|1\|2\|3|0, ?1, ?2, ?3|Tier 0[\s\S]*Tier 3/.test(playbook),
-      "Playbook must enumerate the valid tier values (0|1|2|3) so the contract is unambiguous",
+      /1\|2\|3\|4|1, ?2, ?3, ?4|Tier 1[\s\S]*Tier 4/.test(playbook),
+      "Playbook must enumerate the valid tier values (1|2|3|4) so the contract is unambiguous",
     );
   });
 

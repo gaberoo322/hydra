@@ -10,7 +10,6 @@
     ],
     "docs/operator-playbooks/_fragments/hydra-qa-reference.md": [
       "path .github/workflows/deploy.yml",
-      "path src/digest.ts",
       "superseded-adr 0004",
       "symbol src/redis/holdback.ts#windowCyclesForTier"
     ],
@@ -33,9 +32,6 @@
     "docs/operator-playbooks/hydra-doctor.md": [
       "path docs/agents/wiring-status.md",
       "route /api/backlog"
-    ],
-    "docs/operator-playbooks/hydra-grill.md": [
-      "route /api/reports/research/$ANCHOR"
     ],
     "docs/operator-playbooks/hydra-qa.md": [
       "path config/feedback/to-planner.md"
