@@ -58,7 +58,8 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { collectTargetFacts } from "../target/print-target-facts.ts";
+import { collectTargetFacts, toRepoRelative } from "../target/print-target-facts.ts";
+import { probeTargetCapabilities, type TargetCapabilities } from "../target/target-capabilities.ts";
 import {
   runEmitShell,
   tallyDropReasons,
@@ -91,7 +92,7 @@ export const LEDGER_GENERATOR_SCRIPT = "deadcode:ledger";
 
 /** One parsed ledger row. */
 export interface LedgerRow {
-  /** Repo-relative module path as the ledger renders it (e.g. "web/src/lib/foo.ts"). */
+  /** Repo-relative module path as the ledger renders it (e.g. "src/lib/foo.ts"). */
   path: string;
   status: string;
   importedBy: string;
@@ -135,10 +136,48 @@ export function identityFromOpenItemTitle(title: string): string | null {
 }
 
 /**
+ * Target layout the rendered body needs (issue #5498). Every repo-relative path
+ * in the body is joined through {@link toRepoRelative} so an empty `appSubdir`
+ * (the successor Target shape) yields no subdirectory prefix.
+ */
+export interface WireOrRetireBodyLayout {
+  /** Manifest `verify.appSubdir`; "" when the Target is not nested. */
+  appSubdir: string;
+  /** App-relative dead-code baseline file, or "" when the Target declares none. */
+  deadcodeBaseline: string;
+  /** Target's baseline-update npm script name, or "" when absent. */
+  deadcodeUpdateScript: string;
+  /** Target's dead-code check npm script name, or "" when absent. */
+  deadcodeCheckScript: string;
+}
+
+/** Layout used when the caller supplies none: un-nested, no dead-code tooling named. */
+export const DEFAULT_BODY_LAYOUT: WireOrRetireBodyLayout = {
+  appSubdir: "",
+  deadcodeBaseline: "",
+  deadcodeUpdateScript: "",
+  deadcodeCheckScript: "",
+};
+
+/**
  * Render the decision-item body. Title and body come from the same row in one
  * pass (the #1449/#1005 drift guard).
  */
-function renderWireOrRetireBody(row: LedgerRow, isoDate: string): string {
+function renderWireOrRetireBody(
+  row: LedgerRow,
+  isoDate: string,
+  layout: WireOrRetireBodyLayout = DEFAULT_BODY_LAYOUT,
+): string {
+  const srcRoot = toRepoRelative(layout.appSubdir, "src");
+  const baselineLine = layout.deadcodeBaseline
+    ? `- \`${toRepoRelative(layout.appSubdir, layout.deadcodeBaseline)}\` + \`${LEDGER_RELATIVE_PATH}\` (regenerated, retire path only)`
+    : `- \`${LEDGER_RELATIVE_PATH}\` (regenerated, retire path only; the Target declares no dead-code baseline file)`;
+  const updateStep = layout.deadcodeUpdateScript
+    ? `run \`npm run ${layout.deadcodeUpdateScript}\` (refreshes baseline + ledger)`
+    : "refresh the Target's dead-code baseline and ledger by whatever means it declares (it exposes no baseline-update script)";
+  const checkCriterion = layout.deadcodeCheckScript
+    ? ` + \`npm run ${layout.deadcodeCheckScript}\``
+    : "";
   const lines: string[] = [];
   lines.push(`# cleanup(target): wire-or-retire \`${row.path}\``);
   lines.push("");
@@ -153,22 +192,22 @@ function renderWireOrRetireBody(row: LedgerRow, isoDate: string): string {
   lines.push("");
   lines.push("## Decision protocol (for the sweep agent or operator)");
   lines.push("");
-  lines.push("1. **Verify first** (the ledger may be a regeneration behind): check the module still appears in the committed `docs/agents/wiring-status.md` on current `main` AND still has no production importer (`rg` its import path under `web/src`). Do not regenerate the ledger for this. If the module was wired or removed since the scan, close this item as stale.");
+  lines.push("1. **Verify first** (the ledger may be a regeneration behind): check the module still appears in the committed `docs/agents/wiring-status.md` on current `main` AND still has no production importer (`rg` its import path under `" + srcRoot + "`). Do not regenerate the ledger for this. If the module was wired or removed since the scan, close this item as stale.");
   lines.push("2. **Recover the intent**: `git log --follow` the module (who created it, in which cycle, alongside what); search `~/hydra` config/direction (vision, priorities, roadmap) and the backlog (open AND done lanes) for the feature it belongs to.");
   lines.push("3. **Decide** — exactly one of:");
   lines.push("   - **(a) WIRE** — the intent is live (matches a current priority or an obvious runtime seam exists): rewrite this item into a concrete wiring task (name the entry point / route / runner to wire into), label `ready-for-agent`, move to `queued`.");
-  lines.push(`   - **(b) RETIRE** — the intent is gone (superseded, venue dropped, experiment concluded): rewrite this item into a retirement task — delete the module AND its test file, run \`npm run deadcode:update-baseline\` (refreshes baseline + ledger), commit citing this scan (module path, scan date ${isoDate}, Target CLAUDE.md rule 3) — label \`ready-for-agent\`, move to \`queued\`.`);
-  lines.push("   - **(c) UNCLEAR** — intent cannot be established either way: label `ready-for-human`, move to `backlog`, and STOP. Ambiguity never resolves to deletion (CLAUDE.md rule 6, fail closed).");
+  lines.push(`   - **(b) RETIRE** — the intent is gone (superseded, venue dropped, experiment concluded): rewrite this item into a retirement task — delete the module AND its test file, ${updateStep}, commit citing this scan (module path, scan date ${isoDate}, the Target's cleanup policy) — label \`ready-for-agent\`, move to \`queued\`.`);
+  lines.push("   - **(c) UNCLEAR** — intent cannot be established either way: label `ready-for-human`, move to `backlog`, and STOP. Ambiguity never resolves to deletion (fail closed).");
   lines.push("");
   lines.push("## Files in scope");
   lines.push("");
   lines.push(`- \`${row.path}\``);
-  lines.push("- `web/deadcode-baseline.json` + `docs/agents/wiring-status.md` (regenerated, retire path only)");
+  lines.push(baselineLine);
   lines.push("");
   lines.push("## Acceptance criteria (for the FOLLOW-UP task this item becomes)");
   lines.push("");
   lines.push("- [ ] Wire path: the module is imported from a runtime entry point; `npm test` + `npm run typecheck` pass; the ledger no longer lists it.");
-  lines.push("- [ ] Retire path: module + its tests deleted with the scan citation; `npm test` + `npm run typecheck` + `npm run deadcode:check` pass with a tightened, committed baseline + regenerated ledger.");
+  lines.push(`- [ ] Retire path: module + its tests deleted with the scan citation; \`npm test\` + \`npm run typecheck\`${checkCriterion} pass with a tightened, committed baseline + regenerated ledger.`);
   lines.push("- [ ] Either way: no other module is touched.");
   lines.push("");
   lines.push("---");
@@ -198,6 +237,7 @@ export function planWireOrRetireEmit(
   openItemTitles: string[],
   isoDate: string,
   cap: number = WIRE_OR_RETIRE_EMIT_CAP,
+  layout: WireOrRetireBodyLayout = DEFAULT_BODY_LAYOUT,
 ): WireOrRetireEmitPlan {
   const rows = parseLedger(ledgerMarkdown).filter((r) => r.status === "wire-or-retire");
   const dropped: Array<{ row: LedgerRow; reason: string }> = [];
@@ -235,7 +275,7 @@ export function planWireOrRetireEmit(
   const items: PlannedWireOrRetireItem[] = toEmit.map((row) => ({
     row,
     title: renderWireOrRetireTitle(row.path),
-    body: renderWireOrRetireBody(row, isoDate),
+    body: renderWireOrRetireBody(row, isoDate, layout),
   }));
 
   return { items, dropped, eligibleCount: rows.length };
@@ -341,6 +381,30 @@ export interface WireOrRetireTargetInputs {
   ledgerPath: string;
   /** `owner/name` of the Target's GitHub repo — used by BOTH gh calls. */
   targetRepo: string;
+  /** Target layout for the rendered body (issue #5498); defaults to un-nested. */
+  layout?: WireOrRetireBodyLayout;
+}
+
+/** Value of a probed capability, or "" when absent. */
+function capValue(caps: TargetCapabilities, key: string): string {
+  const c = caps[key];
+  return c && c.ok ? c.value : "";
+}
+
+/**
+ * Build the body layout from the probed capabilities. The baseline capability
+ * is workspace-relative; strip the appSubdir prefix so the renderer's single
+ * `toRepoRelative(appSubdir, ...)` join (INV-6) is the only place it is added.
+ */
+export function layoutFromCapabilities(appSubdir: string, caps: TargetCapabilities): WireOrRetireBodyLayout {
+  const prefix = appSubdir ? `${appSubdir.replace(/\/+$/, "")}/` : "";
+  const baseline = capValue(caps, "deadcodeBaseline");
+  return {
+    appSubdir,
+    deadcodeBaseline: prefix && baseline.startsWith(prefix) ? baseline.slice(prefix.length) : baseline,
+    deadcodeUpdateScript: capValue(caps, "deadcodeUpdate"),
+    deadcodeCheckScript: capValue(caps, "deadcodeCheck"),
+  };
 }
 
 /** Join the Target workspace onto the fixed ledger convention path. */
@@ -360,10 +424,13 @@ export function resolveWireOrRetireTargetInputs(): WireOrRetireTargetInputs & { 
   // Manifest failure (appSubdir unknown) → probe only <workspace>/package.json
   // (positive-evidence-only, same as the preflight guard).
   const appSubdir = facts.manifest.ok ? facts.manifest.appSubdir.replace(/\/+$/, "") : "";
+  const appDir = appSubdir ? `${ws}/${appSubdir}` : ws;
+  const caps = probeTargetCapabilities({ workspace: ws, appDir });
   return {
     ledgerPath: ledgerPathForWorkspace(ws),
     targetRepo: facts.githubRepo,
-    appPackageJsonPath: appSubdir ? `${ws}/${appSubdir}/package.json` : `${ws}/package.json`,
+    appPackageJsonPath: `${appDir}/package.json`,
+    layout: layoutFromCapabilities(appSubdir, caps),
   };
 }
 
@@ -425,6 +492,7 @@ export function buildWireOrRetireShellSpec(
   inputs: WireOrRetireTargetInputs,
 ): EmitShellSpec<string, string, PlannedWireOrRetireItem> {
   const { ledgerPath, targetRepo } = inputs;
+  const layout = inputs.layout ?? DEFAULT_BODY_LAYOUT;
   return {
     name: "hydra-target-wire-or-retire-emit",
     banner: "Target ledger",
@@ -436,7 +504,7 @@ export function buildWireOrRetireShellSpec(
     loadSource: loadLedger,
     readOpenItems: () => readOpenWireOrRetireItemTitles(targetRepo),
     buildPlan: (ledgerMarkdown, openTitles, isoDate) => {
-      const plan = planWireOrRetireEmit(ledgerMarkdown, openTitles, isoDate);
+      const plan = planWireOrRetireEmit(ledgerMarkdown, openTitles, isoDate, WIRE_OR_RETIRE_EMIT_CAP, layout);
       return {
         items: plan.items,
         summaryLines: [

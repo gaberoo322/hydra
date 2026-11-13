@@ -43,7 +43,8 @@ journalctl --user -u "$TARGET_SERVICE" --since "30 min ago" --no-pager 2>&1 \
 
 # Database / execution / data-freshness health — TARGET-SPECIFIC (issue #4411,
 # INV-8). This playbook carries no target-specific schema knowledge by design:
-# read $TARGET_WS/CONTEXT.md and $TARGET_WS/docs/agents/domain.md for the
+# read the Target's own context docs ($TARGET_CAP_CONTEXT_DOC / $TARGET_CAP_DOMAIN_DOCS,
+# each relative to $TARGET_WS; skip explicitly when empty) for the
 # concrete tables/queries that matter for THIS target (ingestion tables,
 # execution/run tables, connection-pool limits, staleness windows) and run the
 # equivalent of the checks below against them:
@@ -52,9 +53,14 @@ journalctl --user -u "$TARGET_SERVICE" --since "30 min ago" --no-pager 2>&1 \
 #   - active DB connection count vs max
 #   - stale-data count (rows older than the target's own freshness window)
 # If the target exposes these via its own health endpoint instead of direct DB
-# queries, prefer that — $TARGET_WEB_URL/api/health/full is the generic seam.
+# queries, prefer that — the health route in $TARGET_CAP_HEALTH_ROUTE, when the Target serves one.
+if [ -n "$TARGET_CAP_HEALTH_ROUTE" ]; then
+  curl -s --max-time 10 "$TARGET_WEB_URL$TARGET_CAP_HEALTH_ROUTE" || echo "health route UNREACHABLE"
+else
+  echo "health-route probe: skipped (Target serves no discoverable health route)"
+fi
 
-# Timer health — read $TARGET_WS/CONTEXT.md for which systemd timers this
+# Timer health — read the Target's context doc ($TARGET_CAP_CONTEXT_DOC) for which systemd timers this
 # target declares (ingestion/scan/refresh cadence); the loop below is a
 # template, not a literal list:
 # for timer in <target-declared-timer-names>; do
@@ -63,7 +69,7 @@ journalctl --user -u "$TARGET_SERVICE" --since "30 min ago" --no-pager 2>&1 \
 #   echo "${timer}: active=${active} last=${last}"
 # done
 
-# External API reachability — read $TARGET_WS/CONTEXT.md for which external
+# External API reachability — read the Target's context doc ($TARGET_CAP_CONTEXT_DOC) for which external
 # vendors/providers this target depends on; probe each one's status endpoint.
 # This playbook names none by design (a hardcoded vendor list here was the
 # swap-readiness defect issue #4411 fixes).

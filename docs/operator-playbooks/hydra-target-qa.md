@@ -77,7 +77,7 @@ panel — instead of throwing. This is the Target sibling of the Orchestrator's
 
 - **Recurrence class this catches** — new categories, providers, and other
   enum values **WILL** appear in production data before the UI knows them (the
-  concrete enum space is the target's own domain — read `$TARGET_WS/CONTEXT.md`).
+  concrete enum space is the target's own domain — read `$TARGET_CAP_CONTEXT_DOC` under `$TARGET_WS`; when empty, record `context-doc: skipped (Target carries no CONTEXT.md)`).
   A loader that trusts the data shape (unchecked enum switch, `.find(...)!`,
   non-null assertion on an optional row) is a latent `500` the first time an
   unexpected value lands. Treat any un-guarded assumption about data
@@ -93,9 +93,12 @@ panel — instead of throwing. This is the Target sibling of the Orchestrator's
   visible degraded state, not an exception. A UI PR that adds or edits a render
   path without this tolerance is a hard finding (FAIL → bounce-to-reframe).
 
-The authoritative statement of this rule lives in the Target repo's
-`CLAUDE.md` / `${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}AGENTS.md`; this checklist is how QA enforces it on every
-UI-touching PR.
+The authoritative statement of this rule lives in the Target's own
+agent-instruction file (`$TARGET_CAP_AGENT_INSTRUCTIONS`, relative to
+`$TARGET_WS`; when empty the Target carries none — record
+`agent-instructions: skipped (Target carries no agent-instruction file)` and
+apply this checklist on its own authority); this checklist is how QA enforces it
+on every UI-touching PR.
 
 ## Per-PR visual QA — screenshot the affected routes on UI-touching PRs
 
@@ -103,10 +106,32 @@ A UI-touching PR gets a **visual QA pass** on the **Standards** axis, over and
 above the render-robustness check above: QA renders the affected routes in the
 PR's own worktree, captures **before/after** screenshots, and reviews the
 after-state against the Target design ADR
-(`$TARGET_WS/docs/adr/0005-design-language.md`, epic #2732) — the ADR's
+(`$TARGET_CAP_DESIGN_LANGUAGE_ADR`, relative to `$TARGET_WS`; epic #2732) — the ADR's
 **[mechanical]** rules hard-verified, its **[judgment]** rules flagged in the
 verdict comment for the operator's design read. **Non-UI PRs skip this step
 entirely** — zero added cost on the common ~90% path (issue #2740).
+
+### The capability gate — decide `unavailable` from the seam, not from a failed run
+
+Visual QA needs three Target capabilities from the seam preamble: an end-to-end
+smoke script (`$TARGET_CAP_E2E_SMOKE`), a route-smoke spec
+(`$TARGET_CAP_ROUTE_SMOKE_SPEC`) and a design-language ADR
+(`$TARGET_CAP_DESIGN_LANGUAGE_ADR`). Check them FIRST, before the UI-touching
+trigger, so an absent capability is an explicit logged skip rather than a
+failed screenshot run:
+
+```bash
+if [ -z "$TARGET_CAP_E2E_SMOKE" ] || [ -z "$TARGET_CAP_ROUTE_SMOKE_SPEC" ] || [ -z "$TARGET_CAP_DESIGN_LANGUAGE_ADR" ]; then
+  echo "visual-qa: skipped (Target lacks an e2e smoke script, a route-smoke spec, or a design-language ADR — see TARGET_CAPABILITIES_JSON)"
+  VISUAL_QA=off
+else
+  VISUAL_QA=on
+fi
+```
+
+When `VISUAL_QA=off`, record `visual-qa: unavailable (<the line above>)` in the
+verdict, fall back to the render-robustness static review, and skip the rest of
+this section. The remaining text applies only when `VISUAL_QA=on`.
 
 ### The UI-touching trigger
 
@@ -137,8 +162,8 @@ routes they render:
 ### The screenshot procedure
 
 Reuse the **slice-1 route-smoke Playwright helper** (issue #2733:
-`${TARGET_APP_SUBDIR:+$TARGET_APP_SUBDIR/}e2e/route-smoke.spec.ts`'s per-route PNG capture, driven by
-`npm run e2e:smoke` against a **seeded-empty** DB) — do NOT hand-roll a second
+the spec at `$TARGET_CAP_ROUTE_SMOKE_SPEC`'s per-route PNG capture, driven by
+`npm run "$TARGET_CAP_E2E_SMOKE"` against a **seeded-empty** DB) — do NOT hand-roll a second
 screenshot path. Capture **before** (base = `origin/main`) and **after**
 (PR `HEAD`) for each affected route:
 
@@ -148,15 +173,15 @@ AFFECTED=$(...)   # routes from the mapping above (or the full nav set for a cro
 
 # BEFORE — base state
 git stash --include-untracked >/dev/null 2>&1 || true   # or check out origin/main in a scratch worktree
-ROUTES="$AFFECTED" SHOT_DIR=.qa-shots/before npm run e2e:smoke
+ROUTES="$AFFECTED" SHOT_DIR=.qa-shots/before npm run "$TARGET_CAP_E2E_SMOKE"
 
 # AFTER — PR HEAD state
 git stash pop >/dev/null 2>&1 || true
-ROUTES="$AFFECTED" SHOT_DIR=.qa-shots/after  npm run e2e:smoke
+ROUTES="$AFFECTED" SHOT_DIR=.qa-shots/after  npm run "$TARGET_CAP_E2E_SMOKE"
 ```
 
 If the smoke helper is unavailable in the worktree (missing Playwright browser,
-`e2e:smoke` script absent), record `visual-qa: unavailable (<reason>)` in the
+smoke script failing at runtime), record `visual-qa: unavailable (<reason>)` in the
 verdict and fall back to the render-robustness static review — **never** silently
 skip and report a clean visual pass. A UI PR whose affected route **`500`s or
 logs a console error** in the after-capture is a hard finding (that is exactly
@@ -164,7 +189,7 @@ the four-live-`500` failure mode from epic #2732) → FAIL → bounce-to-reframe
 
 ### Reviewing against the design ADR
 
-Grade each after-screenshot against ADR-0005's decisions, respecting the ADR's
+Grade each after-screenshot against the design-language ADR's decisions, respecting the ADR's
 own **[mechanical]** vs **[judgment]** tags:
 
 - **[mechanical] rules — hard-verify (a violation is a FAIL, bounce-to-reframe):**
@@ -369,7 +394,7 @@ multi-check rollup).
   knows them; the page must degrade, never throw.
 - **Per-PR visual QA runs only on UI-touching PRs, and only its [mechanical]
   ADR rules block.** A UI PR is screenshotted (before/after, via the slice-1
-  route-smoke helper) and graded against ADR-0005; a **[mechanical]** violation
+  route-smoke helper) and graded against the design-language ADR; a **[mechanical]** violation
   (nav spine, label↔h1, section/weight ceilings, blank-instead-of-empty-state) is
   a hard finding, while **[judgment]** findings are flagged for the operator and
   never change the verdict. Non-UI PRs skip the pass entirely (auditable
@@ -397,11 +422,11 @@ multi-check rollup).
   item-737 (missing reconciliation checkpoint) and item-738 (unknown enum key)
   on a prior Target.
 - Issue #2740 / epic #2732 — the per-PR visual QA pass this section defines.
-- `$TARGET_WS/docs/adr/0005-design-language.md` — the Target design-language
+- `$TARGET_CAP_DESIGN_LANGUAGE_ADR` (under `$TARGET_WS`) — the Target design-language
   rubric (operator-grilled, #2736) whose **[mechanical]** rules this pass
   hard-verifies and whose **[judgment]** rules it flags.
 - Issue #2733 — the slice-1 route-smoke Playwright suite + per-route screenshot
-  helper (`npm run e2e:smoke`) this pass reuses; #2737 (nav + label checks) and
+  helper (the `$TARGET_CAP_E2E_SMOKE` script) this pass reuses; #2737 (nav + label checks) and
   #2738 (color-literal lint ratchet) are the CI arms of the same rubric.
 - Issue #2739 — the low-cadence `design_qa_target` dispatch that owns the
   **[judgment]** ADR review across all routes (the periodic sibling of this

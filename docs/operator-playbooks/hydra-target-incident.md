@@ -72,7 +72,11 @@ git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" diff H
 git -C "${TARGET_WS:?unset - re-run the seam preamble in this Bash call}" log --oneline -20 | grep -i "revert"
 
 # Per-service post-merge health — the same signal that fired the watcher.
-curl -s "$TARGET_WEB_URL/api/health/full" 2>/dev/null | python3 -m json.tool | head -40
+if [ -n "$TARGET_CAP_HEALTH_ROUTE" ]; then
+  curl -s --max-time 10 "$TARGET_WEB_URL$TARGET_CAP_HEALTH_ROUTE" | python3 -m json.tool | head -40
+else
+  echo "health probe: skipped (Target serves no discoverable health route)"
+fi
 
 hydra metrics --count 5 | python3 -c "
 import json,sys
@@ -98,7 +102,7 @@ for m in d.get('trend',[]):
 For the target-specific incident families beyond this generic taxonomy (which
 external dependencies it has, what "domain-data drift" means for this
 particular target, what to `grep` the logs for), read the target's own
-`$TARGET_WS/CONTEXT.md` and `$TARGET_WS/docs/agents/domain.md` — this playbook
+`$TARGET_CAP_CONTEXT_DOC` and `$TARGET_CAP_DOMAIN_DOCS` (relative to `$TARGET_WS`; each optional — when empty print `<doc>: skipped (Target carries no such doc)` and never invent its content) — this playbook
 intentionally does not restate target-specific vocabulary (INV-8, issue #4411).
 
 ### Phase 2: Root cause
@@ -129,15 +133,19 @@ gh run view <run_id> --repo "$TARGET_GH_REPO" --log-failed 2>&1 | grep -iE "erro
 #### External-dependency / domain-data drift
 ```bash
 # Target-specific root-cause families (external API contract drift, domain-data
-# inconsistency, ingestion freshness-window races) — read $TARGET_WS/CONTEXT.md
+# inconsistency, ingestion freshness-window races) — read the Target's context doc ($TARGET_CAP_CONTEXT_DOC, skip explicitly when empty)
 # for what these mean concretely on this target before grepping for them.
-curl -s "$TARGET_WEB_URL/api/health/full" 2>/dev/null | python3 -c "
+if [ -n "$TARGET_CAP_HEALTH_ROUTE" ]; then
+  curl -s --max-time 10 "$TARGET_WEB_URL$TARGET_CAP_HEALTH_ROUTE" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 for name,svc in (d.get('services') or {}).items():
     st=svc.get('status','?')
     if st!='ok': print(f'{name}: {st} — {svc.get(\"detail\",\"\")[:80]}')
 "
+else
+  echo "service-health drilldown: skipped (Target serves no discoverable health route)"
+fi
 journalctl --user -u "$TARGET_SERVICE" --no-pager -n 80 2>&1 | grep -iE "error|stale|freshness|timeout" | tail -15
 ```
 

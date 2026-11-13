@@ -38,6 +38,21 @@ This exports:
 - `$TARGET_APP_DIR` — `$TARGET_WS` joined with `$TARGET_APP_SUBDIR` (empty subdir is the identity) — the directory the build/test/typecheck commands run from; never assume a hardcoded subdirectory nesting
 - `$TARGET_RISK_SURFACE_JSON` — the manifest's `riskCritical.surface`, repo-relative-joined against `$TARGET_APP_SUBDIR`, JSON-encoded — the machine-readable carve-out `hydra-wire-or-retire` matches module paths against
 
+It also exports the Target's **capabilities** (issue #5498) — what the Target
+actually offers, probed from its own files by `scripts/target/target-capabilities.ts`
+(the only place convention names are spelled). Each `TARGET_CAP_*` is the
+convention value when present and the **empty string when absent**; the reasons
+live in `$TARGET_CAPABILITIES_JSON`. Branch with `[ -n "$TARGET_CAP_X" ]` and
+on the absent arm print `<step>: skipped (<reason>)` — an absent capability is
+an explicit, logged skip, never a silent `2>/dev/null || true`:
+
+- `$TARGET_CAP_E2E_SMOKE` / `$TARGET_CAP_ROUTE_SMOKE_SPEC` / `$TARGET_CAP_DESIGN_LANGUAGE_ADR` — end-to-end smoke script name, route-smoke spec path, design-language ADR path (visual QA needs all three)
+- `$TARGET_CAP_DEADCODE_CHECK` / `$TARGET_CAP_DEADCODE_UPDATE` — the Target's dead-code check / baseline-update npm script names; `$TARGET_CAP_DEADCODE_BASELINE` — the baseline file path, relative to `$TARGET_WS`
+- `$TARGET_CAP_WIRING_LEDGER` / `$TARGET_CAP_WIRING_LEDGER_GENERATOR` — wiring-status ledger path (relative to `$TARGET_WS`) and its generator script name
+- `$TARGET_CAP_HEALTH_ROUTE` — the health route the Target serves (probe `$TARGET_WEB_URL$TARGET_CAP_HEALTH_ROUTE`)
+- `$TARGET_CAP_AGENT_INSTRUCTIONS` / `$TARGET_CAP_DOMAIN_DOCS` / `$TARGET_CAP_CONTEXT_DOC` — the Target's own agent-instruction file, domain doc, and glossary (relative to `$TARGET_WS`)
+- `$TARGET_CAPABILITIES_JSON` — the single machine-readable form (`{key: {ok, value|reason}}`)
+
 For domain knowledge this playbook needs (research angles, incident families,
 series/venue vocabulary, design-language rules) — read the target's own docs,
 never restate them here: `$TARGET_WS/CONTEXT.md`, `$TARGET_WS/direction/vision.md`,
