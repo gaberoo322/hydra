@@ -657,4 +657,19 @@ describe("prose-drift: dangling glossary terms (#5491)", () => {
       },
     );
   });
+
+  test("renderReport prints a dangling-term row with its kind-specific fix and the docblock count prose stays true", () => {
+    const o: Offender = {
+      file: "CONTEXT.md",
+      line: 7,
+      kind: "dangling-term",
+      token: "Ghost Term",
+      fix: "define the term in CONTEXT.md (separate ubiquitous-language PR) or de-bold the phrase if it is emphasis",
+    };
+    const { rows, byRow } = offenderRowsAndIndex([o]);
+    ok(renderReport("new", rows, byRow).includes(`CONTEXT.md:7 — dangling-term — Ghost Term — ${o.fix}`));
+    const src = readFileSync(join(REPO_ROOT, "scripts/docs/prose-drift.ts"), "utf8");
+    ok(src.includes("The ten offender kinds") && src.includes("Five checks"), "docblock counts must match the ten kinds / five checks");
+    ok(!src.includes("The nine offender kinds") && !src.includes("Four checks"), "stale count prose must be gone");
+  });
 });
