@@ -1082,7 +1082,7 @@ describe("decide.py — escalation honours the whole admission verdict (#5479)",
 
   test("an occupied slot is not escalated into; block_reason=slot_busy", () => {
     const state = baseState({
-      slotEvents: [stopEvent("dev_orch", "failure", "tBUSY", "npm test failed")],
+      slotEvents: [stopEvent("dev_orch", "failure", "", "npm test failed")],
       slots: {
         dev_orch: { skill: "hydra-dev", task_id: "other", started: "t0", started_epoch: 1, attempt: 1 },
         qa_orch: null, research_orch: null, dev_target: null, qa_target: null,

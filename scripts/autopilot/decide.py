@@ -2637,6 +2637,7 @@ def _rule_escalation(
     dispatch_blocked: bool = False,
     shed_classes: set[str] = frozenset(),
     skip_slots: set[str] = frozenset(),
+    freed_slots: Collection[str] = frozenset(),
     scope: str = "all",
 ) -> tuple[_RuleOutput, set[str]]:
     """Cascade-routing escalation re-dispatch (issue #3274, design-concept issue-3274).
@@ -2698,7 +2699,8 @@ def _rule_escalation(
     event with `block_reason="usage_shed"` and dispatches nothing — same
     suppress-but-record contract as the `dispatch_blocked` / orch-realm-share
     branches below. Gate precedence is the single order owned by
-    `scripts/autopilot/admission.py` (#5479): `usage_dispatch_blocked`,
+    `scripts/autopilot/admission.py` (#5479; `freed_slots` are the slots the
+    plan already reaps, so the just-stopped slot is not busy): `usage_dispatch_blocked`,
     `usage_shed`, `slot_busy`, `scope_excluded`, `burned`, then
     `orch_realm_share_exceeded`; `block_reason` carries the refusing gate code.
 
@@ -2760,7 +2762,7 @@ def _rule_escalation(
             dispatch_blocked=dispatch_blocked,
             shed_classes=shed_classes,
             slots=slots,
-            freed_slots=frozenset(),
+            freed_slots=freed_slots,
             scope=scope,
             burned_classes=burned,
             orch_share_exceeded=lambda: orch_realm_share_exceeded(state),
@@ -4052,15 +4054,18 @@ def decide(
     #      2.45 (#5323): a Fable instant death is replayed once on opus BEFORE
     #      the escalation rule; the replayed class joins escalated_slots so no
     #      later rule double-dispatches it.
+    # Slots this plan already reaps are free for a same-class re-dispatch (INV-006);
+    # `state.slots` is not mutated by `fold`, so the occupant would otherwise read busy.
+    reaped_slots = {a["slot"] for a in plan.actions if a.get("type") == "reap" and a.get("slot")}
     replay_out, replayed_slots = _rule_instant_death_replay(
         state, events, dispatch_blocked=dispatch_blocked, shed_classes=shed_classes,
         scope=scope,
-        freed_slots={a["slot"] for a in plan.actions if a.get("type") == "reap" and a.get("slot")},
+        freed_slots=reaped_slots,
     )
     fold(replay_out)
     escalation_out, escalated_slots = _rule_escalation(
         state, events, now, dispatch_blocked=dispatch_blocked, shed_classes=shed_classes,
-        skip_slots=replayed_slots, scope=scope,
+        skip_slots=replayed_slots, scope=scope, freed_slots=reaped_slots,
     )
     fold(escalation_out)
     escalated_slots = escalated_slots | replayed_slots
