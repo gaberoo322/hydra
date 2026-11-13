@@ -196,7 +196,8 @@ export function planFlipItem(report: CommitGraduationReport, openIssues: OpenIss
 // CLI helpers (gh) — the pure folds above are the tested surface
 // ---------------------------------------------------------------------------
 
-async function harvest(repo: string, repoRoot: string): Promise<{ inputs: CommitGraduationInputs; cohortUntil: string }> {
+/** Null (after logging) when any gh read fails: the caller exits 1, never grades a partial harvest. */
+async function harvest(repo: string, repoRoot: string): Promise<{ inputs: CommitGraduationInputs } | null> {
   const { ghJson } = await import("../../src/github/gh.ts");
   const fixture = JSON.parse(readFileSync(`${repoRoot}/${COHORT_FIXTURE_PATH}`, "utf8")) as any;
   const until = new Date().toISOString();
@@ -214,12 +215,14 @@ async function harvest(repo: string, repoRoot: string): Promise<{ inputs: Commit
       ["api", `repos/${repo}/pulls/${c.number}/commits?per_page=100`, "--paginate", "--slurp"],
       { timeout: 120_000 },
     );
-    if (res.ok === false) throw new Error(`gh api pulls/${c.number}/commits failed: ${res.code}`);
+    if (res.ok === false) {
+      console.error(`[commit-graduation] gh api pulls/${c.number}/commits failed: ${res.code}`);
+      return null;
+    }
     prs.push({ ...c, commitMessages: res.data.flat().map((x) => x.commit.message) });
   }
   const sw = await loadRolloutSwitches(repoRoot);
   return {
-    cohortUntil: until,
     inputs: {
       prs,
       until,
@@ -260,7 +263,9 @@ if (isMain) {
     openIssues = doc.openIssues ?? [];
   } else {
     try {
-      inputs = (await harvest(repo, process.cwd())).inputs;
+      const harvested = await harvest(repo, process.cwd());
+      if (harvested === null) process.exit(1);
+      inputs = harvested.inputs;
       const { ghJson } = await import("../../src/github/gh.ts");
       const res = await ghJson<OpenIssue[]>(
         [
@@ -269,7 +274,10 @@ if (isMain) {
         ],
         { timeout: 60_000 },
       );
-      if (res.ok === false) throw new Error(`gh issue list failed: ${res.code}`);
+      if (res.ok === false) {
+        console.error(`[commit-graduation] gh issue list failed: ${res.code}`);
+        process.exit(1);
+      }
       openIssues = res.data;
     } catch (err) {
       console.error("[commit-graduation] harvest failed:", err);
@@ -286,14 +294,14 @@ if (isMain) {
     flipItem = { filed: false, wouldFile: { title: plan.title, labels: plan.labels, body: plan.body } };
   } else {
     try {
-      const url = execFileSync(
-        "gh",
-        ["issue", "create", "--repo", repo, "--title", plan.title, "--body", plan.body, "--label", FLIP_ITEM_LABEL],
-        { encoding: "utf8" },
-      ).trim();
-      flipItem = { filed: true, url };
+      // REST create with a JSON body on stdin: a flip item is filed, never state-transitioned.
+      const created = execFileSync("gh", ["api", `repos/${repo}/issues`, "--method", "POST", "--input", "-"], {
+        encoding: "utf8",
+        input: JSON.stringify({ title: plan.title, body: plan.body, labels: plan.labels }),
+      });
+      flipItem = { filed: true, url: (JSON.parse(created) as { html_url?: string }).html_url ?? null };
     } catch (err) {
-      console.error("[commit-graduation] gh issue create failed:", err);
+      console.error("[commit-graduation] filing the flip item failed:", err);
       process.exit(1);
     }
   }
