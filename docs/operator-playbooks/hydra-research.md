@@ -17,7 +17,7 @@ Research improvement opportunities for the Hydra orchestrator (`~/hydra`). Produ
 1. `~/hydra/CLAUDE.md` — architecture, conventions
 2. `~/hydra/config/direction/architecture-review.md` — known issues, scores
 3. `~/hydra/config/direction/priorities.md` — target project needs
-4. Recurring problems: the open `needs-triage` / `blocked` issues on `gaberoo322/hydra` and the retro seen-list (`config/feedback/` was removed with the codex cut-over, ADR-0006)
+4. Recurring problems: the open `needs-triage` / `blocked` issues on `gaberoo322/hydra` and the retro seen-list
 
 Then live state (parallel):
 ```bash

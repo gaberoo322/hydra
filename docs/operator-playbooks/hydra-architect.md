@@ -116,7 +116,7 @@ echo "=== Target ==="
 unset TARGET_WS TARGET_APP_DIR
 eval "$(cd ~/hydra && npx tsx scripts/target/print-target-facts.ts --sh)"
 [ -n "${TARGET_WS:-}" ] || echo "Target unresolved -- skipping Target collectors"
-if [ -n "${TARGET_APP_DIR:-}" ]; then (cd "$TARGET_APP_DIR" && find src -name '*.ts' -o -name '*.tsx' | wc -l; npx vitest run 2>&1 | tail -3); fi
+if [ -n "${TARGET_APP_DIR:-}" ]; then (cd "${TARGET_APP_DIR:?}" && find src -name '*.ts' -o -name '*.tsx' | wc -l; npx vitest run 2>&1 | tail -3); fi
 echo "=== Config ==="; find ~/hydra/config -name '*.md' | wc -l
 ```
 
@@ -137,8 +137,8 @@ unset TARGET_WS TARGET_APP_DIR
 eval "$(cd ~/hydra && npx tsx scripts/target/print-target-facts.ts --sh)"
 [ -n "${TARGET_WS:-}" ] || echo "Target unresolved -- skipping Target collectors"
 if [ -n "${TARGET_WS:-}" ]; then
-  git -C "$TARGET_WS" log --oneline --since="7 days ago" --author="$(git config user.name)" 2>/dev/null | wc -l
-  echo "operator commits/7d"; git -C "$TARGET_WS" log --oneline --since="7 days ago" | wc -l; echo "total commits/7d"
+  git -C "${TARGET_WS:?}" log --oneline --since="7 days ago" --author="$(git config user.name)" 2>/dev/null | wc -l
+  echo "operator commits/7d"; git -C "${TARGET_WS:?}" log --oneline --since="7 days ago" | wc -l; echo "total commits/7d"
 fi
 ```
 
