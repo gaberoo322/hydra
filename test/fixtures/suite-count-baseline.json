@@ -410,6 +410,7 @@
   "test/quality-gate-metrics.test.mts": 1,
   "test/query-seam-check.test.mts": 4,
   "test/reap-stale-test-procs.test.mts": 7,
+  "test/reap-stale-tmp.test.mts": 1,
   "test/recommendation-cap.test.mts": 10,
   "test/recommendation-consumer.test.mts": 4,
   "test/recommendation-engine.test.mts": 18,

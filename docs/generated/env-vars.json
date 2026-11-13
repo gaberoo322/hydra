@@ -2441,6 +2441,18 @@
       }
     },
     {
+      "name": "HYDRA_TMP_REAP_ROOT",
+      "readSites": [
+        {
+          "path": "scripts/reap-stale-tmp.sh"
+        }
+      ],
+      "inEnvExample": false,
+      "source": {
+        "path": "scripts/reap-stale-tmp.sh"
+      }
+    },
+    {
       "name": "HYDRA_TUNNEL_URL",
       "readSites": [
         {
