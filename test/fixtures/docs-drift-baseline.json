@@ -1,1 +1,21 @@
-[]
+[
+  "CONTEXT.md:dangling-term:Builder-Health Scorecard",
+  "CONTEXT.md:dangling-term:Candidate Feed",
+  "CONTEXT.md:dangling-term:Empty Cycle",
+  "CONTEXT.md:dangling-term:Escalation",
+  "CONTEXT.md:dangling-term:Feedback File",
+  "CONTEXT.md:dangling-term:Heartbeat",
+  "CONTEXT.md:dangling-term:Knowledge Base",
+  "CONTEXT.md:dangling-term:Learning Context Blocks",
+  "CONTEXT.md:dangling-term:OAuth Usage Adapter",
+  "CONTEXT.md:dangling-term:Observability Heartbeat",
+  "CONTEXT.md:dangling-term:OpenViking Request Adapter",
+  "CONTEXT.md:dangling-term:Orchestrator Scheduler",
+  "CONTEXT.md:dangling-term:Research Floor",
+  "CONTEXT.md:dangling-term:Retired",
+  "CONTEXT.md:dangling-term:Roadmap Milestone",
+  "CONTEXT.md:dangling-term:Unaccounted Cycle",
+  "src/autopilot/CONTEXT.md:dangling-term:Read",
+  "src/autopilot/CONTEXT.md:dangling-term:Retro",
+  "src/autopilot/CONTEXT.md:dangling-term:Write"
+]

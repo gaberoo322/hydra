@@ -617,6 +617,7 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
           message: "create_worktree failed — no worktree to salvage",
         }),
         authorExitCode: 0,
+        dispatchId: worktreeName,
       });
       return finish;
     }
@@ -636,6 +637,7 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
       branch: null,
       authorRaw: "",
       authorExitCode: 1,
+      dispatchId: worktreeName,
     });
     return finish;
   }
@@ -668,6 +670,7 @@ async function runTick(deps: DriverDeps): Promise<TickResult> {
     authorRaw,
     authorExitCode,
     provider,
+    dispatchId: worktreeName,
   });
   }
 }

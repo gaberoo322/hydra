@@ -228,7 +228,7 @@ Auto-triage:
    Auto-triaged: structured description and acceptance criteria. Routed to `<state>`.
    ```
 
-Unstructured: leave for operator (`/triage`). Do NOT auto-triage.
+Unstructured: leave in `needs-triage` for the operator (`/hydra-review`). Do NOT auto-triage.
 
 #### `ready-for-human` — report only
 

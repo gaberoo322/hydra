@@ -54,7 +54,9 @@
 
 import { ghExec, ghJson } from "../github/gh.ts";
 import { isGhFailure } from "../github/exec.ts";
-import { addIssueLabel, isIssueLabelWriteFailure } from "../github/issues.ts";
+import { advance, defaultSeamDeps } from "../lifecycle/index.ts";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { logger } from "../logger.ts";
 // Issue #3850 / #4073 — the rate-vs-baseline gate for steady-rate cues is
 // composed of a pure parser/decision pair in the zero-IO cue-policy leaf
@@ -357,30 +359,44 @@ async function reopenIssue(issueNumber: number): Promise<void> {
   if (isGhFailure(result)) throw new GhInvocationError(result.code, result.stderr);
 }
 
-/** Issue #4073 — the label a reopened escalation issue is routed to by default. */
-const DEFAULT_REOPEN_LABEL = "ready-for-human";
-
 /**
- * Issue #4073 — re-apply a lifecycle label after a reopen. The closing paths
- * (operator review, automated sweep) strip whatever lifecycle label was
- * present, and `reopenIssue()` itself restores nothing, so every reopened
- * escalation issue previously arrived as a label-less untriaged orphan —
- * forcing the sweep to re-route it and consuming an operator-review slot on
- * every single cycle (issue #2528's own timeline shows `unlabeled
- * ready-for-human` / `unlabeled needs-triage` on each of its four reopens).
- * Defaults to `ready-for-human`: the escalation itself IS the operator-facing
- * signal, so routing a freshly-reopened issue straight to the human-review
- * lane is the correct default absent a recorded "label present at close" to
- * restore verbatim. Best-effort — a label-add failure must not fail the
- * reopen it follows (which has already succeeded); logged for visibility via
- * the same seam `addIssueLabel` already uses.
+ * Issue #4073 / #5318 — re-establish a lifecycle state after a reopen. The
+ * closing paths (operator review, automated sweep) strip whatever lifecycle
+ * label was present, and `reopenIssue()` itself restores nothing, so every
+ * reopened escalation issue previously arrived as a label-less untriaged
+ * orphan (issue #2528's timeline shows `unlabeled ...` on each of its four
+ * reopens). The reopened issue is routed to `needs-triage` THROUGH the
+ * lifecycle seam (ADR-0047 D3): a state-less open issue may enter
+ * `needs-triage` unconditionally, and triage then decides where it goes,
+ * instead of this module writing `ready-for-human` straight onto the board.
+ * Deliberate lane change (QA #5433 round 1): the reopen used to land on
+ * `ready-for-human`; the seam has no state-less -> `ready-for-human` edge
+ * for an automated actor (ADR-0047 D3), and a recurring friction cue is
+ * triage-shaped work, not an operator-only hold.
+ * Best-effort: a refusal must not fail the reopen it follows (which has
+ * already succeeded); it is logged, and there is NO fallback to a direct
+ * label write.
  */
-async function restoreLifecycleLabel(issueNumber: number): Promise<void> {
-  const result = await addIssueLabel(issueNumber, DEFAULT_REOPEN_LABEL, { repo: REPO });
-  if (isIssueLabelWriteFailure(result)) {
+export async function restoreLifecycleLabel(
+  issueNumber: number,
+  advanceFn: typeof advance = advance,
+): Promise<void> {
+  try {
+    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+    const result = await advanceFn(
+      { issue: issueNumber, to: "needs-triage", actor: "escalation" },
+      defaultSeamDeps(repoRoot),
+    );
+    if (result.ok === false) {
+      logger.warn(
+        { issueNumber, code: result.code },
+        "restoreLifecycleLabel: lifecycle advance to needs-triage refused, issue may remain label-less",
+      );
+    }
+  } catch (err) {
     logger.warn(
-      { issueNumber, code: result.code, stderr: result.stderr.slice(0, 200) },
-      "restoreLifecycleLabel: gh issue edit --add-label failed — issue may remain label-less",
+      { issueNumber, err },
+      "restoreLifecycleLabel: lifecycle advance threw, issue may remain label-less",
     );
   }
 }

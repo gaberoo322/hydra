@@ -45,7 +45,11 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import {
+  writeFakeLifecycleCli,
+  type FakeLifecycleCli,
+} from "./_helpers/fake-lifecycle-cli.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
@@ -54,7 +58,7 @@ interface FakeIssue {
   number: number;
   state: "OPEN" | "CLOSED";
   body: string;
-  /** Live labels served to the #5317 live-state guard; unset = still in the listed state. */
+  /** Live labels the fake lifecycle CLI compare-and-sets against; unset = still in the listed state. */
   labels?: string[];
   /** Model the number as a pull request: merged vs closed-unmerged vs open. */
   pr?: "merged" | "closed-unmerged";
@@ -87,6 +91,7 @@ function makeGhStub(
   binDir: string;
   editsFile: string;
   readEdits(): string[][];
+  lifecycle: FakeLifecycleCli;
 } {
   const binDir = join(dir, "bin");
   const issuesFile = join(dir, "issues.json");
@@ -253,9 +258,12 @@ if __name__ == "__main__":
   writeFileSync(join(dir, "gh-stub.py"), helper);
   chmodSync(join(dir, "gh-stub.py"), 0o755);
 
+  const lifecycle = writeFakeLifecycleCli(dir, issuesFile, editsFile);
+
   return {
     binDir,
     editsFile,
+    lifecycle,
     readEdits() {
       return readFileSync(editsFile, "utf-8")
         .split("\n")
@@ -275,6 +283,8 @@ function runRecoverStale(
     PATH: `${binDir}:${process.env.PATH ?? ""}`,
     HYDRA_AUTOPILOT_REPO: "gaberoo322/hydra",
     HYDRA_RECOVER_STALE_DEBUG: "1",
+    // State writes go through the lifecycle seam CLI (#5318): inject the fake.
+    HYDRA_LIFECYCLE_BIN: join(dirname(binDir), "fake-lifecycle"),
   };
   if (debug === "unset") delete env.HYDRA_RECOVER_STALE_DEBUG;
   const r = spawnSync(join(SCRIPTS, "recover-stale.sh"), args, {
