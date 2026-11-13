@@ -1,6 +1,6 @@
 ---
 name: hydra-target-retro
-description: Per-run (or daily) Target retrospective — deep-reads failed and reframed Target builds plus subagent friction reports, extracts recurring failure patterns, and routes them — capped ≤2/run, deduped — into the Target planner/executor feedback surface (prompt-shaped) and Redis Target-backlog (code-shaped). NO gated PR, NO tier machinery.
+description: Per-run (or daily) Target retrospective — deep-reads failed and reframed Target builds plus subagent friction reports, extracts recurring failure patterns, and files them — capped ≤2/run, deduped — as needs-triage issues on the Target board. NO gated PR, NO tier machinery.
 when_to_use: "When the user says 'target retro', 'retro the target', 'analyze target builds', or hydra-autopilot wants to turn completed Target builds into conservative cross-build learning. Invoked as /hydra-target-retro [run_id] (default: latest completed run)."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 ---
@@ -16,28 +16,33 @@ the Target analogue of the Orchestrator's `/hydra-retro`. It deep-reads the
 **failed and reframed** Target builds plus the Target executor's **subagent
 friction reports**, synthesises recurring failure patterns, runs an
 **adversarial self-check** to drop speculative/duplicate findings, then routes
-what survives — **capped at ≤2 proposals/run, deduped** — into two lanes:
-
-- **`feedback`** (prompt-shaped) → an instruction appended directly to the
-  Target planner/executor feedback files the build loop already reads
-  (`config/feedback/to-planner.md`, `config/feedback/to-executor.md`; both retired by ADR-0006).
-- **`backlog`** (code-needing) → a Redis Target-backlog item filed via the
-  backlog module.
+what survives — **capped at ≤2 proposals/run, deduped** — as `needs-triage`
+issues on the Target board (`$TARGET_GH_REPO`, ADR-0031 Decision 4). Every
+observation is `lane: "backlog"`: the former prompt-shaped `feedback` lane (an
+append to Target feedback files) is **retired** — that loop was write-only
+(#2962) and the Target has no such files. The pure core's `feedback` lane stays
+as unused-but-tested code in `scripts/target/target-retro.ts`; this playbook
+never produces it.
 
 The pure caps/dedup/routing logic lives in `scripts/target/target-retro.ts`
 (unit-tested in `test/target-retro.test.mts`) — this playbook orchestrates the
-deep-read, the synthesis, and the feedback-file edit / backlog-item writes.
+deep-read, the synthesis, and the issue filing.
 
 > **What this deliberately does NOT mirror from `/hydra-retro`:** there is **NO
 > gated PR lane** and **NO Modification-Tier / Verifier-Core / deep-QA
 > remediation / operator-escalation** machinery. The Orchestrator retro's single
 > prompt-fix PR rides the tier ladder; the Target does not mirror that ladder
-> (epic #1052), so a Target retro writes prompt-shaped findings DIRECTLY into the
-> feedback files and never opens a PR. A Target retro only ever PROPOSES — it
-> never gates a merge.
+> (epic #1052), so a Target retro files issues and never opens a PR. A Target
+> retro only ever PROPOSES — it never gates a merge.
 
 > **Safety:** `--audit` (dry-run) is the DEFAULT. Without `--apply` the skill
-> prints the emit plan and stops — no feedback-file edits, no backlog items.
+> prints the emit plan and stops — no issues filed.
+
+> **Liveness (2026-11):** no autopilot class, cadence or admission line invokes
+> this skill today — it runs only when the operator asks. Retiring it (playbook,
+> skill, pure core, tests, `src/operator-actions/parity.ts` DOCS_ONLY entry) is
+> the cleaner long-run outcome but touches files outside this repair's scope;
+> tracked as a follow-up.
 
 ## 1. Resolve the run id
 
@@ -61,12 +66,14 @@ RUN_ID=$(curl -sf http://localhost:4000/api/autopilot/runs/current | jq -r '.run
 Unlike the Orchestrator retro, the Target has no Modification-Tier retro bundle.
 Gather the Target's own lifecycle signals directly:
 
-- **Failed / reframed builds** — the reframe queue is the Target's failure
-  ledger (where `hydra-target-qa` bounces hard findings, and where the build
-  loop parks reframes):
+- **Failed / reframed builds** — the `reframe` label on the Target board is the
+  failure ledger (`hydra-target-qa` bounces hard findings to it, and the build
+  loop's scope-gate reframe writes it). Read it over REST, never GraphQL:
 
   ```bash
-  docker exec hydra-redis-1 redis-cli LRANGE hydra:anchors:reframe-queue 0 -1
+  SINCE=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)   # or the run's start time
+  gh api -X GET "repos/$TARGET_GH_REPO/issues" -f labels=reframe -f state=all -f since="$SINCE" \
+    --jq '.[] | "#\(.number) \(.state) \(.title)"'
   ```
 
 - **Subagent friction reports** — a FIRST-CLASS input, not a parallel
@@ -105,14 +112,12 @@ drilled.
 ## 4. Synthesise observations
 
 From the failed/reframed transcripts + the friction patterns, synthesise
-candidate observations. Each is one of two lanes (see
+candidate observations, each `lane: "backlog"` (see
 `scripts/target/target-retro.ts` for the exact `RetroObservation` shape):
 
-- **`feedback`** — a recurring prompt-shaped gotcha the planner/executor keep
-  tripping on (e.g. "executor keeps skipping the staking-bounds check"). Written
-  as an instruction into a (retired, #2975) feedback file.
-- **`backlog`** — a code-needing finding (a real bug or brittle seam). Filed as
-  a Redis Target-backlog item.
+- **`backlog`** — the only lane. A code-needing finding (a real bug or brittle
+  seam), or a recurring planner/executor gotcha worth a tracked fix. Filed as a
+  `needs-triage` issue on `$TARGET_GH_REPO`. (The `feedback` lane is retired.)
 
 Every observation MUST carry a stable, kebab-case **`cue`** matching the
 friction-store grammar (so a friction-pattern twin and a transcript gotcha line
@@ -126,17 +131,17 @@ Before ANY emit, adversarially challenge each observation and DROP it if:
 - **Speculative** — not grounded in a transcript line or a friction-pattern
   count. "Might be flaky" is not a finding.
 - **Duplicate** — already covered by another surviving observation, OR already
-  an open Target-backlog issue / an existing feedback-file instruction, OR
+  an open issue on the Target board, OR
   already in the persisted seen-list (snapshotted in step 6).
 
-Live duplicate scan for the backlog lane:
+Live duplicate scan (REST, never `gh --json` / GraphQL):
 
 ```bash
-gh issue list --repo gaberoo322/hydra --label target-backlog --state open \
-  --json number,title --jq '.[] | "\(.number): \(.title)"'
+gh api -X GET search/issues -f q="repo:$TARGET_GH_REPO is:issue is:open" \
+  --jq '.items[] | "\(.number): \(.title)"'
 ```
 
-Word-overlap > 50% with an existing item/instruction → drop.
+Word-overlap > 50% with an existing issue → drop.
 
 ## 6. Snapshot the seen-list
 
@@ -156,9 +161,8 @@ SEEN=$(npx tsx -e '
 ## 7. Plan the emit (pure, capped)
 
 Hand the surviving observations + the seen-list snapshot to the pure planner. It
-caps proposals at **≤2 total across BOTH lanes** (a single shared budget, not
-≤2-per-lane), dedups against the seen-list, and routes each survivor to its
-declared lane:
+caps proposals at **≤2 total** (a single shared budget), dedups against the
+seen-list, and routes each survivor to its declared lane (always `backlog`):
 
 ```bash
 # validateObservations(observations) → []  (hard-stop on any error)
@@ -166,64 +170,39 @@ declared lane:
 #   → { feedback[], backlog[], artifactOnly[], skipped[] }
 ```
 
-`plan.feedback` are the feedback-file instructions; `plan.backlog` are the
-Redis Target-backlog items; `plan.artifactOnly` (over the shared cap) +
+`plan.backlog` are the issues to file (`plan.feedback` is always empty here);
+`plan.artifactOnly` (over the shared cap) +
 `plan.skipped` (deduped) are recorded in the artifact, never emitted.
 
 ## 8. Emit (ONLY under --apply)
 
 If `apply === false` (the default), PRINT the plan and STOP — no edits, no items.
 
-Under `--apply`:
+Under `--apply`, for each `plan.backlog[]` file one issue on the Target board
+(dedup was done in step 5):
 
-- For each `plan.feedback[]`: append a one-line dated instruction to the
-  appropriate (retired, #2975) Target feedback file (`config/feedback/to-planner.md` or
-  `config/feedback/to-executor.md`). Keep it terse and actionable — this is the
-  surface the build loop reads next run. Then record the cue in the shared
-  seen-list. The seam's `decision` field is the Orchestrator-retro
-  `RetroEmitKind` (`"issue" | "pr" | "artifact"`) — a prompt-shaped feedback
-  edit maps onto `"artifact"` (the Target has no PR lane), so the existing
-  `src/redis/retro-seen.ts` seam is reused unchanged (out of this issue's scope):
+    gh issue create --repo "$TARGET_GH_REPO" --label needs-triage \
+      --title "$TITLE" --body "$DESC"
 
-      npx tsx -e 'import {recordRetroSeen} from "./src/redis/retro-seen.ts"; await recordRetroSeen({cue: process.env.CUE, decision: "artifact", runId: process.env.RUN_ID, ref: null, at: new Date().toISOString()}); process.exit(0);'
+Then record the cue in the shared seen-list with `decision: "issue"` (the
+Target's issue-shaped lane), `ref` set to the created issue number:
 
-- For each `plan.backlog[]`: file a Redis Target-backlog item through the backlog
-  module (it dedups by title automatically):
+    npx tsx -e 'import {recordRetroSeen} from "./src/redis/retro-seen.ts"; await recordRetroSeen({cue: process.env.CUE, decision: "issue", runId: process.env.RUN_ID, ref: process.env.REF, at: new Date().toISOString()}); process.exit(0);'
 
-      npx tsx -e '
-        import { addToBacklog } from "./src/backlog/items.ts";
-        const r = await addToBacklog({
-          title: process.env.TITLE,
-          description: process.env.DESC,
-          category: "target-retro",
-          source: "target-retro",
-          lane: "triage",
-        });
-        process.stdout.write(JSON.stringify(r));
-        process.exit(0);
-      '
-
-  Then record the cue in the shared seen-list with `decision: "issue"` (a
-  code-needing backlog item is the Target's issue-shaped lane), `ref` set to the
-  returned backlog item id:
-
-      npx tsx -e 'import {recordRetroSeen} from "./src/redis/retro-seen.ts"; await recordRetroSeen({cue: process.env.CUE, decision: "issue", runId: process.env.RUN_ID, ref: process.env.REF, at: new Date().toISOString()}); process.exit(0);'
-
-The shared cap means at most 2 proposals (in any feedback/backlog mix) ever
-leave a single Target retro run.
+The shared cap means at most 2 issues ever leave a single Target retro run.
 
 ## 9. Artifact (always)
 
-Write the persisted retro artifact (feedback instructions appended, backlog
-items filed, artifact-only notes, dropped findings + reasons). Under `--audit`
+Write the persisted retro artifact (issues filed, artifact-only notes, dropped
+findings + reasons). Under `--audit`
 this is the sole output.
 
 ## Summary output
 
 ```
 [hydra-target-retro] run <RUN_ID> (apply=<bool>). Reframed/failed <N> builds, drilled <N> transcripts, folded <F> friction patterns.
-  Observations: <C> feedback, <B> backlog (after adversarial drop of <D>).
-  Emitted: <FE> feedback instructions + <BE> backlog items (shared cap 2).
+  Observations: <B> backlog (after adversarial drop of <D>).
+  Emitted: <BE> Target-board issues (shared cap 2).
   Artifact-only (over cap): <A>. Deduped (seen-list/live): <S>.
 ```
 
@@ -234,7 +213,7 @@ this is the sole output.
 - `scripts/ci/hydra-retro-emit.ts` — the Orchestrator retro this one is the Target analogue of
 - `src/redis/retro-seen.ts` — the seen-list seam (shared with the Orchestrator retro)
 - `src/redis/agent-memory.ts` — the friction-store read seam (`namespace="friction"`)
-- the Redis Target-backlog item writer (removed; Target work is GitHub Issues, ADR-0031)
+- Target work is GitHub Issues on `$TARGET_GH_REPO` (ADR-0031); the Redis backlog subsystem is deleted
 - `docs/operator-playbooks/hydra-target-build.md` — the build loop whose failures this retro learns from
 
 ## Slot lifecycle events — PostToolUse hook (issue #671)

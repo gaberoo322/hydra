@@ -1,0 +1,1 @@
+- feat: Target facts seam reports Target capabilities and the Target playbooks branch on them (#5498)

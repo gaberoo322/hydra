@@ -95,6 +95,10 @@ export interface ClassRow {
   cooldownSeconds: number | null;
   scope: string;
   provenanceLabel: string | null;
+  /** Completion obligations of the row's default skill (#5473). */
+  cycleRecord: boolean;
+  worktreeGc: boolean;
+  reflectionDeposit: boolean;
   notes: string | null;
   /** The cockpit page every class's live state lives on — one constant rule (INV-13). */
   home: string;

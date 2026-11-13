@@ -44,7 +44,8 @@
  */
 import test, { describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -142,6 +143,9 @@ function sandbox(state: Record<string, unknown> | null = baseState()): Sandbox {
     HYDRA_AUTOPILOT_SNAPSHOT: sb.snapshot,
     HYDRA_AUTOPILOT_SNAPSHOT_REPLAY: FIXTURE,
     HYDRA_AUTOPILOT_LOG: sb.log,
+    // INV-9 (#5488): turn.sh's prior-turn back-fill must never POST fake run_ids
+    // at the live :4000 orchestrator. Port 1 on loopback refuses instantly.
+    HYDRA_API_BASE: "http://127.0.0.1:1",
   } as Record<string, string>;
   if (state) writeFileSync(sb.state, JSON.stringify(state, null, 1) + "\n");
   return sb;
@@ -824,5 +828,63 @@ describe("turn.sh — Phase 1.5 stale-recovery pass (issue #5344)", () => {
     const r = spawnSync("python3", [TURN_SNAPSHOT, "stale-recovery", sb.state], { cwd: sb.dir, env: sb.env, encoding: "utf-8" });
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(JSON.parse(r.stdout), { stale_in_progress: [], stale_blocked: [], skipped_inflight: [] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #5488 — Phase 0.5: prior-turn back-fill
+// ---------------------------------------------------------------------------
+describe("turn.sh — prior-turn back-fill (issue #5488)", () => {
+  async function runWithCapture(sb: Sandbox): Promise<{ code: number | null; posts: any[] }> {
+    const posts: any[] = [];
+    const server = createServer((req, res) => {
+      let buf = "";
+      req.on("data", (c) => (buf += c));
+      req.on("end", () => {
+        posts.push({ url: req.url, body: buf ? JSON.parse(buf) : {} });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("{}");
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const code = await new Promise<number | null>((done) => {
+        const child = spawn("bash", [TURN], {
+          cwd: sb.dir,
+          env: { ...sb.env, HYDRA_API_BASE: `http://127.0.0.1:${port}` },
+        });
+        child.on("close", (c) => done(c));
+      });
+      return { code, posts };
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  }
+
+  test("a turn-0 state posts nothing; the next run back-fills the prior turn with the marker", async () => {
+    const st = { ...baseState(), turn: 0 };
+    const sb = sandbox(st);
+    sandboxes.push(sb);
+    const first = await runWithCapture(sb);
+    assert.equal(first.code, 0);
+    assert.equal(first.posts.length, 0, "turn 0 is bootstrap, never a row");
+    assert.equal(readJson(sb.state).turn, 1, "decide.py bumped exactly once");
+    const second = await runWithCapture(sb);
+    assert.equal(second.code, 0);
+    assert.equal(second.posts.length, 1);
+    assert.equal(second.posts[0].url, "/api/autopilot/turn");
+    assert.equal(second.posts[0].body.turn_n, 1);
+    const reasons = second.posts[0].body.reasons as string[];
+    assert.equal(reasons[reasons.length - 1], "heartbeat-backfilled-by-turn.sh");
+    assert.equal(readJson(sb.state).turn, 2);
+  });
+
+  test("an unreachable orchestrator leaves exit 0 and still writes the plan", () => {
+    const sb = sandbox();
+    sandboxes.push(sb);
+    const r = runTurn(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(existsSync(sb.plan));
   });
 });

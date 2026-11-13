@@ -1306,3 +1306,130 @@ describe("scripts/autopilot/heartbeat.py — denominators against a fixture taxo
     }
   });
 });
+
+/**
+ * Issue #5488 — prior-turn back-fill (`--backfill-prior-turn`) and the quiet
+ * bootstrap heartbeat (`--no-turn-post`). POST-only; never writes the
+ * heartbeat file or state.json; never posts turn 0.
+ */
+describe("scripts/autopilot/heartbeat.py — prior-turn back-fill (issue #5488)", () => {
+  const RUN_ID = "test-run-5488";
+  const MARKER = "heartbeat-backfilled-by-turn.sh";
+  interface Cap { url: string; body: Record<string, any> }
+
+  async function withServer(fn: (base: string, reqs: Cap[]) => Promise<void>): Promise<void> {
+    const reqs: Cap[] = [];
+    const server: Server = createServer((req, res) => {
+      let buf = "";
+      req.on("data", (c) => (buf += c));
+      req.on("end", () => {
+        reqs.push({ url: req.url ?? "", body: buf ? JSON.parse(buf) : {} });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("{}");
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      await fn(`http://127.0.0.1:${(server.address() as { port: number }).port}`, reqs);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  }
+
+  function run(env: Record<string, string>, args: string[]): Promise<{ code: number | null; stderr: string }> {
+    return new Promise((res) => {
+      const child = spawn("python3", [HEARTBEAT_PY, ...args], {
+        env: { ...process.env, ...env, PATH: process.env.PATH ?? "" },
+      });
+      let stderr = "";
+      child.stderr.on("data", (d) => (stderr += d));
+      child.on("close", (code) => res({ code, stderr }));
+    });
+  }
+
+  async function scenario(
+    args: string[],
+    stateOverrides: Record<string, unknown>,
+    plan: unknown | null,
+  ): Promise<{ reqs: Cap[]; code: number | null; heartbeatExists: boolean }> {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, { run_id: RUN_ID, ...stateOverrides });
+      const planPath = join(tmp.dir, "plan.json");
+      if (plan !== null) writeFileSync(planPath, JSON.stringify(plan));
+      let out: Cap[] = [];
+      let code: number | null = null;
+      await withServer(async (base, reqs) => {
+        const r = await run(
+          {
+            HYDRA_AUTOPILOT_STATE: tmp.state,
+            HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+            HYDRA_AUTOPILOT_PLAN: planPath,
+            HYDRA_API_BASE: base,
+          },
+          args,
+        );
+        code = r.code;
+        out = reqs;
+      });
+      return { reqs: out, code, heartbeatExists: existsSync(tmp.heartbeat) };
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  }
+
+  test("back-fill posts the prior turn with the marker and does not write the heartbeat file", async () => {
+    const r = await scenario(
+      ["--backfill-prior-turn"],
+      { turn: 3 },
+      { actions: [{ type: "reap" }], reasons: ["r1"], run_id: RUN_ID, turn: 3 },
+    );
+    assert.equal(r.code, 0);
+    assert.equal(r.reqs.length, 1);
+    assert.equal(r.reqs[0].url, "/api/autopilot/turn");
+    assert.equal(r.reqs[0].body.turn_n, 3);
+    assert.deepEqual(r.reqs[0].body.actions, [{ type: "reap" }]);
+    assert.deepEqual(r.reqs[0].body.reasons, ["r1", MARKER]);
+    assert.equal(r.heartbeatExists, false, "back-fill must not touch the heartbeat file");
+  });
+
+  test("back-fill is a silent no-op at turn 0 (bootstrap is not a turn)", async () => {
+    const r = await scenario(["--backfill-prior-turn"], { turn: 0 }, null);
+    assert.equal(r.code, 0);
+    assert.equal(r.reqs.length, 0);
+  });
+
+  test("back-fill with a stale plan still posts a diagnosed row plus the marker", async () => {
+    const r = await scenario(
+      ["--backfill-prior-turn"],
+      { turn: 3 },
+      { actions: [{ type: "dispatch" }], reasons: [], run_id: "other-run", turn: 3 },
+    );
+    assert.equal(r.reqs.length, 1);
+    assert.deepEqual(r.reqs[0].body.actions, []);
+    const reasons = r.reqs[0].body.reasons as string[];
+    assert.match(reasons[0], /^plan-stale-skipped: /);
+    assert.equal(reasons[reasons.length - 1], MARKER);
+  });
+
+  test("--no-turn-post writes the heartbeat line and makes zero HTTP calls", async () => {
+    const r = await scenario(["--last-action=bootstrap", "--no-turn-post"], { turn: 2 }, null);
+    assert.equal(r.code, 0);
+    assert.equal(r.heartbeatExists, true);
+    assert.equal(r.reqs.length, 0);
+  });
+
+  test("a normal heartbeat never carries the back-fill marker", async () => {
+    const r = await scenario(
+      ["--last-action=reap"],
+      { turn: 3 },
+      { actions: [], reasons: ["x"], run_id: RUN_ID, turn: 3 },
+    );
+    assert.deepEqual(r.reqs[0].body.reasons, ["x"]);
+  });
+
+  test("bootstrap.sh's Phase 0 heartbeat call carries --no-turn-post", () => {
+    const src = readFileSync(BOOTSTRAP_SH, "utf-8");
+    assert.match(src, /heartbeat\.py" --last-action=bootstrap --no-turn-post/);
+  });
+});

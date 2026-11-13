@@ -11,22 +11,25 @@ Run these numbered steps.
 
 1. **Verify isolation** — `pwd` + `git rev-parse --git-dir` under `.git/worktrees/`.
    Abort loudly if cwd is `/home/gabe/hydra` (never fall back to the main tree).
-1a. **Claim your anchor via the seam** (issue #4271, ADR-0047 D4) — workers
-   never write `in-progress` themselves. Parse `dispatchId=` / `runId=` /
-   `anchor=` from the `<!-- hydra-dispatch v1 … -->` sentinel on the first line
-   of the task prompt. If the issue was pinned (sentinel `anchor=` present, or
-   the prompt names the issue) do nothing: the dispatcher already holds the
-   claim. Otherwise (self-selected) open it now, which also takes the anchor
-   off the `glm-eligible` sweep for the dispatch's duration; the seam performs
-   the `ready-for-agent` -> `in-progress` advance:
-   ```bash
-   npx tsx scripts/lifecycle.ts dispatch "$ISSUE_NUMBER" --dispatch "$DISPATCH_ID" --class dev_orch --run "$RUN_ID" --purpose fresh
-   ```
-   `$DISPATCH_ID` / `$RUN_ID` come from the sentinel; without a sentinel use
-   `interactive-dev-$ISSUE_NUMBER-<epoch>` and `interactive`. `claim-held` ->
-   exclude that issue and re-run selection (at most 3 picks, then stop with a
-   report); `parked:*` or an enforce `advance-refused` -> stop and report, no
-   label write.
+1a. **Anchor claim — workers never write `in-progress` by hand** (issue #4271
+   INV-2, ADR-0047 D4, issue #5322). The `in-progress` claim keeps the anchor
+   out of the `glm-eligible` sweep for the whole dispatch (`isGlmEligibleCandidate`,
+   `src/scheduler/chores/glm-eligibility-sweep.ts`); it is the DISPATCHER's
+   write, not yours. Run from the repo root of the worktree:
+   - **Pinned anchor** (the issue number is in the `hydra-dispatch v1` sentinel
+     / dispatch prompt): only READ the claim —
+     `npx tsx scripts/lifecycle.ts claim-show "$ISSUE_NUMBER"`. If it reports no
+     open claim, log `[hydra-dev] WARN: no dispatch claim (pre-#5418 dispatcher)`
+     to stderr and continue. No write.
+   - **Unpinned, self-selected anchor**: fire the composite verb with the ids
+     from the sentinel —
+     `npx tsx scripts/lifecycle.ts dispatch "$ISSUE_NUMBER" --dispatch "$DISPATCH_ID" --class dev_orch --run "$RUN_ID" --purpose fresh`.
+     A `claim-held` refusal means another dispatch owns that issue: pick a
+     different issue.
+   Any other non-zero exit from the CLI is final for this step: log the JSON
+   line and continue (reap/reconcile own the hand-back); never fall back to a
+   direct label write (the deny hook refuses it). `claim-held` is the exception:
+   it is NOT log-and-continue — stop work on that issue and pick another.
 2. Read CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs.
 3. Extract the `## Files in scope` + `## Files out of scope` lists from the issue body.
 4. **Fetch per-anchor Reflections via the live API** (see "Reflection injection"
@@ -47,7 +50,7 @@ Run these numbered steps.
    where practical — **red before green, one slice at a time** (the `tdd` skill
    is reference-only in v1.1: refactoring is NOT part of the loop, it belongs in
    review) — and run `npm run typecheck` plus **single test files**
-   (`node --test --test-force-exit test/<name>.test.mts`) **regularly as you go**,
+   (`npm run test:file -- test/<name>.test.mts`) **regularly as you go**,
    reserving the full `npm test` sweep for step 8.
 6. **Declare glossary/ADR impact** — per `docs/agents/domain.md`, add a
    `Glossary impact:` / `ADR impact:` line to the PR body for any term resolved
@@ -124,7 +127,7 @@ Run these numbered steps.
    NOT open the PR — emit a `## Friction Report` naming the unmet invariant
    and stop.
 9b. **MANDATORY — run the pre-PR mechanical gate BEFORE `gh pr create`**
-   (issue #4731). Write the PR body to a file first, then run all three checks
+   (issue #4731). Write the PR body to a file first, then run all four checks
    under "Pre-PR mechanical gate" below — reconcile dry-run against that body
    file, baseline regeneration, foreground `npm test` + `npm run typecheck:test`,
    and the `Merge danger:` field check (Gate 4).
@@ -132,7 +135,7 @@ Run these numbered steps.
    `gh pr create --body-file <that same file>` so the checked body is the
    submitted body.
 9. Open a PR with `closes #$issue_number`, a `## Files in scope` mirror of the
-    issue's section, a `Tier: <0|1|2|3>` line from the API, and a
+    issue's section, a `Tier: <1|2|3|4>` line from the API, and a
     `Merge danger: <one-way|two-way> — <reason>` line (issue #5258, ADR-0046
     D5) as its own top-level line beside `Tier:` — never inside
     `## Files in scope`. It declares whether `git revert` plus the automatic
@@ -197,7 +200,7 @@ npm run deposit:reflect -- hydra-dev <ANCHOR_REF> --file .hydra-refl.json
 
 **Grounding test-count deposit (issue #2754 — MANDATORY, child-step 8a, right
 after `npm test` passes).** The helper parses the node:test footer of the log
-you just captured (it never re-runs the 15-25 minute suite with `--from-log`) and
+you just captured (it never re-runs the full suite with `--from-log`) and
 deposits `hydra-grounding-tests-<task_id>` (`testsAfter` / `testsPassingAfter`)
 keyed on the SAME harness `task_id`. Best-effort:
 ```bash
@@ -336,8 +339,10 @@ npx tsx scripts/ci/design-concept-reconcile-run.ts \
   FILE-SET verdict hard-fails the required `test` job until the baseline
   matches:
   ```bash
-  node scripts/test/suite-count-check.mjs --update-baseline
+  node scripts/test/suite-count-check.mjs --update-baseline --only <your test files>
   ```
+  (`--only` scopes the rewrite to your files; without it the whole baseline is
+  rewritten — CLAUDE.md "SUITE-COUNT GATE".)
 - Added a test file that resolves to a new or already-baselined **subject**
   (`test/test-file-sprawl-guard.test.mts` fails)? First prefer extending the
   subject's existing test file — sprawl is what the ratchet exists to stop.
@@ -403,7 +408,7 @@ The service exposes a deterministic classifier at
 `GET http://localhost:4000/api/tier?files=<comma-separated repo-relative paths>`.
 Call it with the exact files you changed and use the returned `tier` verbatim.
 Never infer tier from path patterns. Response (200):
-`{ "tier": 0|1|2|3, "reason": "<string>", "perFile": [...] }`; (400) missing-files.
+`{ "tier": 1|2|3|4, "reason": "<string>", "perFile": [...] }`; (400) missing-files.
 ```bash
 # After committing on the feature branch, before opening the PR. Diff against
 # origin/master, never local master (the shared gitdir's local master goes stale
@@ -512,19 +517,20 @@ rethrow, or — only when swallowing is genuinely correct — annotate it
 `/* intentional: <reason> */`. A `typed-error-throw` hit means replace the bare
 `Error` with the `src/errors.ts` subclass that fits the failure kind (the rule
 message lists them; `InvariantViolationError` is never for I/O). A hit in untouched pre-existing code in a changed
-file is optional to fix; do not widen the diff for it. The rule is advisory
-(no CI job runs it), so this step is the enforcement. Rule fixtures:
+file is optional to fix; do not widen the diff for it. The shrink-only
+`test/fail-loud-ratchet.test.mts` runs in the required suite and blocks new hits;
+this step catches them before the PR. Rule fixtures:
 `src/ast-grep-rule-tests/fail-loud-catch-test.yml`, run with
 `npx --yes -p @ast-grep/cli@0.43.0 ast-grep test --skip-snapshot-tests`.
 
 ## Critical test/verification rules
 
-- **Run tests via `npm test`, or `--test-force-exit` for a single file. NEVER a
-  bare `node --test <file>`** — orchestrator modules keep a long-lived ioredis
+- **Run tests via `npm test`, or `npm run test:file -- test/<name>.test.mts` for a
+  single file. NEVER a bare `node --test <file>`** — orchestrator modules keep a long-lived ioredis
   connection + scheduler timeout alive, so `node:test` hangs forever after the
   assertions pass (froze an 11h autopilot session, 2026-05-28). `npm test`
-  already includes `--test-force-exit`; for a subset use
-  `node --test --test-force-exit <file>`.
+  and `test:file` carry `--test-force-exit`; `test:file` also adds per-run Redis
+  DB isolation (CLAUDE.md "Single-file test run").
 - **To identify WHICH test failed in one run, use `npm run test:debug`, never
   re-run + grep** (issue #1076). The default reporter buffers stdout and
   force-exit tears down before the per-test `not ok` lines flush. `test:debug`

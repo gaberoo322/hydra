@@ -45,6 +45,9 @@ const DEV_ROW: DispatchClassRow = {
   cooldownSeconds: null,
   scope: "orch",
   provenanceLabel: null,
+  cycleRecord: true,
+  worktreeGc: true,
+  reflectionDeposit: true,
   notes: "the engineer",
 };
 
@@ -59,6 +62,9 @@ const SWEEP_ROW: DispatchClassRow = {
   cooldownSeconds: 900,
   scope: "orch",
   provenanceLabel: null,
+  cycleRecord: false,
+  worktreeGc: false,
+  reflectionDeposit: false,
 };
 
 const FIXTURE_VIEWS: TaxonomyViews = {

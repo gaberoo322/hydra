@@ -43,7 +43,7 @@ supersedes:
 
 Automated QA verification for PRs against the Hydra orchestrator. This skill is a **thin wrapper over the upstream `code-review` skill** (mattpocock/skills; renamed from `review` in v1.1) — it runs two **parallel sub-agents** (Standards + Spec), aggregates their reports verbatim, classifies the verdict in one pass, and exits.
 
-The Spec axis reads the **design-concept artifact** for the issue (Phase A of #437) — produced by `hydra-grill` and persisted at `GET /api/design-concepts/:anchorRef`. The Standards axis reads `CLAUDE.md`, `CONTEXT.md`, `docs/adr/`, and lint configs. The two axes deliberately do not share context.
+The Spec axis reads the **design-concept artifact** for the issue (epic #437) — produced by `hydra-grill` and persisted at `GET /api/design-concepts/:anchorRef`. The Standards axis reads `CLAUDE.md`, `CONTEXT.md`, `docs/adr/`, and lint configs. The two axes deliberately do not share context.
 
 > **NEVER end your session waiting on CI, a monitor, or a background process
 > (issue #3866).** The full rule lives ONCE, canonically, in
@@ -72,8 +72,8 @@ The Spec axis reads the **design-concept artifact** for the issue (Phase A of #4
 > | `scripts/qa/poll.ts` | the bounded CI-poll fence | nothing |
 >
 > **Background that no step reads** — tier-aware depth, the severity-gated fold,
-> convergent review, the `deep-qa-gate` StatusContext vs CheckRun, Phase A shadow
-> mode, the verdict tiers, the INV-A..INV-G definitions, the Post-merge Regression
+> convergent review, the `deep-qa-gate` StatusContext vs CheckRun, the
+> `DESIGN_CONCEPT_MODE` missing-artifact behaviour, the verdict tiers, the INV-A..INV-G definitions, the Post-merge Regression
 > Check and the slot-lifecycle hook — lives in `hydra-qa-reference.md` (sibling of
 > this SKILL.md). Read it only when you need that background.
 
@@ -88,7 +88,7 @@ A T4 PR edits the **Verifier Core** — the 6 self-referential paths whose chang
 1. **Live-Gate Invariant (#738 / ADR-0015).** A Verifier-Core change is verified by the **currently-deployed** gate against the diff, **never** by the *proposed* gate. Concretely: the classifier **file LIST** = the PR diff (head-vs-base merge-base), the classifier **LOGIC** = the **BASE ref** (the import-closed `scripts/tier-classify.ts` / `src/tier-classifier.ts` / `src/untouchable.ts` as they exist on the merge base). "Is this a Verifier-Core PR?" is decided with the **BASE-ref** `isVerifierCore` so a PR cannot strip its own path on head to escape classification. A diff that re-routes Verifier-Core PRs back through the **head-tree** classifier is a hard blocker.
 2. **No self-admitting gate.** No path in the diff lets the *proposed* gate verify its own admission: e.g. a `ci.yml` job that always exits 0 / is `continue-on-error` for the verification it claims to perform, a tier-classify edit that downgrades the PR's own files, or an `isVerifierCore` change that removes a path the diff itself touches. If the proposed gate would have admitted this very diff *only because of this diff's own change*, FAIL.
 3. **`untouchable.ts` path set integrity.** Any edit to `VERIFIER_CORE_PATHS` is justified in the artifact and does not silently shrink the protected set.
-4. **Operator-approval intact.** T4 still merges operator-only (`operator-approved` label); the diff must not weaken that requirement (branch protection, auto-merge enablement on T4).
+4. **Deep-QA merge requirement intact.** T4 merges only after the SHA-bound Deep-QA PASS marker satisfies the required `deep-qa-gate` check (ADR-0015, ADR-0020); the diff must not weaken that requirement (branch protection, the `deep-qa-gate` required check, auto-merge enablement on T4).
 
 The fired checklist items become the **findings** in the FAIL comment.
 
@@ -158,14 +158,14 @@ npx tsx scripts/lifecycle.ts dispatch $issue_number --dispatch <dispatchId> --cl
 
 Preflight is **read-only** and fails closed exactly as the old bash did: no tier → `tier.num: null, adversarial: true` (deeper review); a failed admission call → `admit`; a failed fan-out sizing → the tier fan-out; unreadable required contexts → the all-optional mapping tagged in `.degraded`. It prints ONE JSON object. Branch on it:
 
-- **`.ok == false`** (`no-issue` | `no-pr` | `spec-missing-enforce`) — run `route` (below) with the same `--preflight "$PF"` and nothing else: it posts the one stop comment (`.stop`, if any) and ends. Then **stop**; no review runs. In Phase B/C (`DESIGN_CONCEPT_MODE=enforce`) a missing artifact is `spec-missing-enforce`; in Phase A (`warn`, the default) it is a logged skip, not a stop.
+- **`.ok == false`** (`no-issue` | `no-pr` | `spec-missing-enforce`) — run `route` (below) with the same `--preflight "$PF"` and nothing else: it posts the one stop comment (`.stop`, if any) and ends. Then **stop**; no review runs. With `DESIGN_CONCEPT_MODE=enforce` a missing artifact is `spec-missing-enforce`; with `warn` (the default) it is a logged skip, not a stop.
 - **`.gate.action == "defer"`** — a non-reviewable blocker makes the verdict moot this pass (`mergeStateStatus == DIRTY`, or a T4 PR with a required check already failed). Run `route --preflight "$PF" --defer`: it posts the deferral comment, bounces the issue (not leaving `needs-qa`, issue #974) and emits **no verdict**. Then **stop**.
 - **`.gate.action == "skip-required-failed"`** (T1/T2/T3 only) — a required check already failed, so no reviewer can change the FAIL. Run `route --preflight "$PF"` with **no** `--findings`/`--summaries` and spawn **zero** reviewers; it posts the FAIL and routes the bounce.
 - **`.gate.action == "admit"`** — the common path: continue at step 7 with `.fanout`.
 
 What the preflight fields mean for the reviewers:
 
-- `.spec.input` is the flat design-concept artifact for the Spec sub-agent; `.spec.skippedReason` is the audit reason when the Spec axis is skipped (`design-concept-exempt` on the PR, `cleanup-scan`/`design-concept-exempt` on the parent issue, the Tier-1 prompt-only bypass, or the Phase A shadow-mode miss). A skip MUST be recorded as an audit line in `specSummary` (step 8).
+- `.spec.input` is the flat design-concept artifact for the Spec sub-agent; `.spec.skippedReason` is the audit reason when the Spec axis is skipped (`design-concept-exempt` on the PR, `cleanup-scan`/`design-concept-exempt` on the parent issue, the Tier-1 prompt-only bypass, or the `warn`-mode missing-artifact skip). A skip MUST be recorded as an audit line in `specSummary` (step 8).
 - `.fanout.mode` sizes the review: `single` → step 7c (one reviewer, both axes; only T1–T3 PRs whose changed-file shape is not `code`); `standard` → step 7a; `adversarial` → step 7b. A T4 PR or a `code` PR always gets the full fan-out for its tier, and so does an unknown tier. `.fanout.reviewers` is the exact list of reviewer names to spawn and to check in step 7.5.
 - `.tier.num` is the tier (`null` = classifier unreachable); `.tier.adversarial` is false in `single` mode so the fold reads one reviewer's verdict.
 

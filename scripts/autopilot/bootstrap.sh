@@ -1340,7 +1340,7 @@ echo "[autopilot] state schema_version=${SCHEMA_VERSION} (playbook must match HY
 # 0 onwards. Best-effort: a heartbeat-write failure must NOT abort
 # bootstrap (we already wrote the legacy `start ...` line above which is
 # enough for operators to see something).
-python3 "$(dirname "$0")/heartbeat.py" --last-action=bootstrap || \
+python3 "$(dirname "$0")/heartbeat.py" --last-action=bootstrap --no-turn-post || \
   echo "[autopilot] heartbeat.py initial write failed; continuing"
 
 # Issue #497 — register this run with the orchestrator's autopilot-runs

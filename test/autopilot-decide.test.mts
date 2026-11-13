@@ -5930,8 +5930,9 @@ describe("decide.py — design_concept / wayfinder / research intents (issue #53
   test("the wayfinder skill is READ from classes.json skill_by_ticket_type, not hardcoded (#4592 AC3, moved here by #5384)", () => {
     const rows = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8"));
     const row = rows.classes.find((c: { name: string }) => c.name === "wayfinder_orch");
-    row.skill_by_ticket_type = { research: "mutated-research-skill", task: "mutated-task-skill" };
-    row.skill = "mutated-research-skill";
+    // #5473: every routed skill must be some row's default skill, so mutate to real ones.
+    row.skill_by_ticket_type = { research: "hydra-sweep", task: "hydra-doctor" };
+    row.skill = "hydra-sweep";
     const t = makeTmp();
     const mutated = join(t.dir, "classes.json");
     writeFileSync(mutated, JSON.stringify(rows));
@@ -5946,7 +5947,7 @@ describe("decide.py — design_concept / wayfinder / research intents (issue #53
     const a = findAction(JSON.parse(r.stdout), (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
     rmSync(t.dir, { recursive: true, force: true });
     assert.ok(a, "wayfinder_orch dispatches");
-    assert.equal(a.skill, "mutated-task-skill");
+    assert.equal(a.skill, "hydra-doctor");
   });
 
   test("step 7 stamps action.admission verbatim from the usage blob on every dispatch, and omits it when the blob has none", () => {

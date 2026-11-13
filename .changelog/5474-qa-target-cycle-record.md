@@ -1,0 +1,1 @@
+- fix: Target QA completions now write a cycle record and trigger the worktree sweep (#5474)

@@ -228,7 +228,7 @@ print(json.dumps({
     # anchor vocabulary which the autopilot can fill in if needed.
     #
     # Issue #2689: every cycle-record MUST carry an EXPLICIT, mapped anchorType.
-    # `hydra-grill` is the third skill reap.py's CYCLE_RECORD_SKILLS forwards, so
+    # `hydra-grill` is the third skill reap.py's `cycleRecord` taxonomy column forwards, so
     # it gets a first-class `grill` mapping here rather than falling through. The
     # `*)` fallback no longer emits the bare `$skill` (or, worse, an empty string
     # when $skill is somehow blank) — an empty/whitespace anchorType is what the
@@ -239,10 +239,10 @@ print(json.dumps({
     # back to the exact skill that needs a first-class mapping added above.
     #
     # Issue #3187: the map now covers EVERY autopilot skill, not just the three
-    # in reap.py's CYCLE_RECORD_SKILLS. Reap only fires cycle-record for
+    # in the classes.json `cycleRecord` column. Reap only fires cycle-record for
     # {hydra-dev, hydra-target-build, hydra-grill, hydra-qa} today (hydra-qa
     # joined in #4730 → `qa-review`), so the extra cases are
-    # defensive: if CYCLE_RECORD_SKILLS expands (or a direct caller invokes
+    # defensive: if the cycleRecord column expands (or a direct caller invokes
     # `dispatch.sh cycle-record` with another skill), the anchorType is a real
     # lane instead of an `unmapped:*` sentinel the metrics READ path rejects
     # (isMalformedAnchorType, src/autopilot/anchor-type.ts) → `unclassified`.
