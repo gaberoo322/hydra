@@ -18,7 +18,6 @@
       "path src/backlog/work-queue-hygiene.ts"
     ],
     "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md": [
-      "path config/feedback/to-executor.md",
       "route /api/backlog/${ITEM_ID}/move"
     ],
     "docs/operator-playbooks/hydra-architect.md": [
@@ -38,24 +37,6 @@
       "route /api/reports/research/$ANCHOR"
     ],
     "docs/operator-playbooks/hydra-qa.md": [
-      "path config/feedback/to-planner.md"
-    ],
-    "docs/operator-playbooks/hydra-target-build.md": [
-      "path config/direction/roadmap.md",
-      "path config/feedback/to-executor.md",
-      "path config/feedback/to-planner.md"
-    ],
-    "docs/operator-playbooks/hydra-target-incident.md": [
-      "path config/feedback/to-executor.md",
-      "path config/feedback/to-planner.md"
-    ],
-    "docs/operator-playbooks/hydra-target-research.md": [
-      "path config/direction/goals.md",
-      "path config/direction/roadmap.md",
-      "path config/feedback/to-planner.md"
-    ],
-    "docs/operator-playbooks/hydra-target-retro.md": [
-      "path config/feedback/to-executor.md",
       "path config/feedback/to-planner.md"
     ]
   }
